@@ -443,9 +443,9 @@ func TestDiscoveryProvider_NotYetValid_FailsClosed(t *testing.T) {
 	})
 }
 
-// TestDiscoveryProvider_Downgrade_FailsClosed proves the monotonic-version floor: once
-// an under-floor manifest is rejected up front as a downgrade. A MinVersion floor
-// above the manifest's version isolates the version guard from the pin (the bytes
+// TestDiscoveryProvider_Downgrade_FailsClosed proves the monotonic-version floor: an
+// under-floor manifest is rejected up front as a downgrade. A MinVersion floor above
+// the manifest's version isolates the version guard from the pin (the bytes
 // authenticate; only the version is wrong).
 func TestDiscoveryProvider_Downgrade_FailsClosed(t *testing.T) {
 	m := validManifest(t)
