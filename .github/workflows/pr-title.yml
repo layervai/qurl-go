@@ -34,7 +34,13 @@ jobs:
             ci
             deps
           requireScope: false
-          subjectPattern: ^[a-z].*$
+          # Allow a leading capital so Dependabot's auto-generated
+          # "Bump <dep> from X to Y" subjects pass. Dependabot capitalizes
+          # "Bump" and offers no config to lowercase it, so a strict
+          # `^[a-z]` permanently blocks the required check on every
+          # dependabot PR. "Start with a letter" keeps titles tidy without
+          # fighting the bot.
+          subjectPattern: ^[A-Za-z].*$
           subjectPatternError: |
-            Subject must start with a lowercase letter.
+            Subject must start with a letter.
             Example: "feat(qurl): add batch resolve helper"
