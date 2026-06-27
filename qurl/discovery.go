@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 	"sync"
 	"time"
@@ -161,6 +162,11 @@ type DiscoveryConfig struct {
 // not_after and the monotonic version floor).
 const manifestClockSkewLeeway = 2 * time.Minute
 
+// manifestClockSkewLeewaySec is manifestClockSkewLeeway in whole seconds, the unit the
+// manifest's issued_at/not_after use (Unix seconds). Derived once here rather than
+// recomputed per Resolve.
+const manifestClockSkewLeewaySec = int64(manifestClockSkewLeeway / time.Second)
+
 // Discovery-path sentinel errors. Each failure mode has its OWN sentinel so a caller
 // (and a test) can assert the specific cause with errors.Is, and so removing any one
 // guard makes exactly that test go red. All are fail-closed outcomes.
@@ -246,18 +252,13 @@ func NewDiscoveryProvider(cfg DiscoveryConfig) (*DiscoveryProvider, error) {
 	// backing array/map AFTER construction cannot silently change the trust anchor
 	// authenticate/verifyManifestSig read on every Resolve. cfg is otherwise stored by
 	// value; PinSHA256 (slice) and ManifestKeys (map) are the reference fields that would
-	// otherwise alias the caller's data. The map values are *ecdsa.PublicKey for keys that
-	// are never mutated in place (qv2.NewTrustStore copies the map it builds too), so a
-	// shallow map copy is the right depth — it matches qv2.NewTrustStore's own posture and
-	// makes the provider's documented immutability real rather than conventional.
+	// otherwise alias the caller's data. The map copy is shallow — the values are
+	// *ecdsa.PublicKey for keys never mutated in place (qv2.NewTrustStore copies its map
+	// the same way), so copying the map structure is the right depth and makes the
+	// provider's documented immutability real rather than conventional. Both helpers map
+	// nil to nil, preserving "no pin"/"no signing keys".
 	cfg.PinSHA256 = bytes.Clone(cfg.PinSHA256)
-	if cfg.ManifestKeys != nil {
-		keys := make(map[string]*ecdsa.PublicKey, len(cfg.ManifestKeys))
-		for kid, pub := range cfg.ManifestKeys {
-			keys[kid] = pub
-		}
-		cfg.ManifestKeys = keys
-	}
+	cfg.ManifestKeys = maps.Clone(cfg.ManifestKeys)
 	return &DiscoveryProvider{cfg: cfg, floor: cfg.MinVersion}, nil
 }
 
@@ -310,9 +311,8 @@ func (p *DiscoveryProvider) Resolve(ctx context.Context) (*qv2.TrustStore, *qv2.
 	// boundary, immaterial against the manifest's lifetime and matching "valid through
 	// not_after").
 	now := p.now().Unix()
-	leeway := int64(manifestClockSkewLeeway / time.Second)
-	if now+leeway < manifest.IssuedAt {
-		return nil, nil, fmt.Errorf("%w: issued_at=%d, now=%d, leeway=%ds", ErrManifestNotYetValid, manifest.IssuedAt, now, leeway)
+	if now+manifestClockSkewLeewaySec < manifest.IssuedAt {
+		return nil, nil, fmt.Errorf("%w: issued_at=%d, now=%d, leeway=%ds", ErrManifestNotYetValid, manifest.IssuedAt, now, manifestClockSkewLeewaySec)
 	}
 	if now > manifest.NotAfter {
 		return nil, nil, fmt.Errorf("%w: not_after=%d, now=%d", ErrManifestExpired, manifest.NotAfter, now)

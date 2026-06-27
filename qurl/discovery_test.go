@@ -409,7 +409,7 @@ func TestDiscoveryProvider_Expired_FailsClosed(t *testing.T) {
 // the bytes so only the freshness bound bites.
 func TestDiscoveryProvider_NotYetValid_FailsClosed(t *testing.T) {
 	const nowUnix = 10000
-	leewaySec := int64(manifestClockSkewLeeway / time.Second)
+	leewaySec := manifestClockSkewLeewaySec
 
 	t.Run("beyond leeway rejected", func(t *testing.T) {
 		m := validManifest(t)
