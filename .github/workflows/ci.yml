@@ -204,21 +204,16 @@ jobs:
 
           # Determine per-gate emoji so the Slack message shows which
           # gate failed when the aggregate is red.
-          case "$TEST_RESULT" in
-            success) TEST_EMOJI=":white_check_mark:" ;;
-            failure) TEST_EMOJI=":x:" ;;
-            *) TEST_EMOJI=":warning:" ;;
-          esac
-          case "$LINT_RESULT" in
-            success) LINT_EMOJI=":white_check_mark:" ;;
-            failure) LINT_EMOJI=":x:" ;;
-            *) LINT_EMOJI=":warning:" ;;
-          esac
-          case "$VULN_RESULT" in
-            success) VULN_EMOJI=":white_check_mark:" ;;
-            failure) VULN_EMOJI=":x:" ;;
-            *) VULN_EMOJI=":warning:" ;;
-          esac
+          gate_emoji() {
+            case "$1" in
+              success) echo ":white_check_mark:" ;;
+              failure) echo ":x:" ;;
+              *) echo ":warning:" ;;
+            esac
+          }
+          TEST_EMOJI=$(gate_emoji "$TEST_RESULT")
+          LINT_EMOJI=$(gate_emoji "$LINT_RESULT")
+          VULN_EMOJI=$(gate_emoji "$VULN_RESULT")
 
           # Truncate the first line to 100 chars for the card. head_commit is
           # absent on workflow_dispatch (this repo allows manual runs), leaving
