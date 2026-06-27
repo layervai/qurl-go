@@ -26,13 +26,13 @@ import (
 
 // Provider resolves the trust anchors and relay allowlist for EnterPortal.
 //
-// Resolve is called once per EnterPortal. An implementation MAY cache and refresh
-// (the discovery provider does) so a per-open call is cheap; it MAY also return a
-// freshly rotated trust store (qv2 rotation is overlap-publish via the published
-// map, so a provider re-publishes a superset map on rotation and outstanding links
-// signed under either kid keep verifying). Resolve MUST fail closed: on any doubt
-// about freshness/authenticity it returns an error rather than a partial or stale
-// result, so EnterPortal refuses rather than trusting unverifiable anchors.
+// Resolve is called once per EnterPortal. An implementation MAY cache and refresh so a
+// per-open call is cheap; it MAY also return a freshly rotated trust store (qv2 rotation
+// is overlap-publish via the published map, so a provider re-publishes a superset map on
+// rotation and outstanding links signed under either kid keep verifying). Resolve MUST
+// fail closed: on any doubt about freshness/authenticity it returns an error rather than
+// a partial or stale result, so EnterPortal refuses rather than trusting unverifiable
+// anchors.
 //
 // Both returned values must be non-nil on success; a nil trust store or allowlist
 // makes EnterPortalWith return ErrNotConfigured.
@@ -55,10 +55,6 @@ type StaticProvider struct {
 	allowlist  *qv2.RelayAllowlist
 }
 
-// ErrNilProvider is returned by EnterPortal when the resolved default provider, or
-// a provider passed to a constructor that requires one, is nil.
-var ErrNilProvider = errors.New("qurl: nil credential provider")
-
 // NewStaticProvider builds a StaticProvider from an already-constructed trust store
 // and relay allowlist. Both are REQUIRED and must be non-nil — a static provider
 // with a missing half would resolve to a config that fails closed downstream, so it
@@ -73,8 +69,13 @@ func NewStaticProvider(ts *qv2.TrustStore, allow *qv2.RelayAllowlist) (*StaticPr
 	return &StaticProvider{trustStore: ts, allowlist: allow}, nil
 }
 
-// Resolve returns the fixed trust store and allowlist.
+// Resolve returns the fixed trust store and allowlist. A nil receiver (a caller that
+// ignored NewStaticProvider's construction error and installed the nil *StaticProvider)
+// fails closed with ErrNotConfigured rather than panicking on the field read.
 func (p *StaticProvider) Resolve(context.Context) (*qv2.TrustStore, *qv2.RelayAllowlist, error) {
+	if p == nil {
+		return nil, nil, ErrNotConfigured
+	}
 	return p.trustStore, p.allowlist, nil
 }
 

@@ -68,6 +68,17 @@ func TestNewStaticProvider_NilHalvesRejected(t *testing.T) {
 	}
 }
 
+// TestStaticProvider_NilReceiver_FailsClosed proves a caller that ignored
+// NewStaticProvider's construction error and installed the nil *StaticProvider fails
+// closed with ErrNotConfigured rather than panicking on the field read.
+func TestStaticProvider_NilReceiver_FailsClosed(t *testing.T) {
+	var sp *StaticProvider // typed nil, e.g. from `sp, _ := NewStaticProvider(nil, allow)`
+	_, _, err := sp.Resolve(context.Background())
+	if !errors.Is(err, ErrNotConfigured) {
+		t.Fatalf("nil StaticProvider receiver: want ErrNotConfigured, got %v", err)
+	}
+}
+
 // --- One-arg EnterPortal lit up via a provider -----------------------------
 
 // TestEnterPortal_StaticProvider_VerifiesAndRoutes is the headline "lit up" proof:

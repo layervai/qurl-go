@@ -113,11 +113,15 @@ type DiscoveryConfig struct {
 	// to disable the signed mode.
 	ManifestKeys map[string]*ecdsa.PublicKey
 
-	// RequireSignature, when true, makes a valid issuer signature MANDATORY even if a
-	// pin also matches — the signed path is the stronger anchor (it survives a benign
-	// republish, supports rotation, and binds to a kid). Default false: either a
-	// matching pin OR a valid signature authenticates the manifest, so a deployment can
-	// start pin-only. #13 may flip this default for production.
+	// RequireSignature, when true, makes a valid issuer signature MANDATORY — the signed
+	// path is the stronger anchor (it survives a benign republish, supports rotation, and
+	// binds to a kid). Default false: a manifest authenticates as long as at least one
+	// configured anchor validates it, so a deployment can start pin-only (no signing keys)
+	// and add signing keys later. Note the per-anchor rule is still strict in either case:
+	// authenticate requires EVERY configured anchor that is present to validate (a pin,
+	// once configured, must match; a signature, once present and keyed, must verify), so
+	// "default false" relaxes which anchor is REQUIRED, never whether a present anchor may
+	// fail. #13 may flip this default for production.
 	RequireSignature bool
 
 	// MinVersion is the initial downgrade floor: a manifest with Version < MinVersion is
@@ -165,22 +169,18 @@ var (
 )
 
 // DiscoveryProvider is a Provider that resolves trust anchors and the relay
-// allowlist from an authenticated discovery manifest. It caches the last successfully
-// resolved manifest and re-fetches on each Resolve; a fetch/verify failure returns the
-// error (fail closed) rather than serving stale anchors past expiry. Concurrent
+// allowlist from an authenticated discovery manifest. It re-fetches and re-verifies on
+// every Resolve and returns the freshly built trust material; a fetch/verify failure
+// returns the error (fail closed) rather than ever serving stale anchors. Concurrent
 // Resolve calls are safe.
 type DiscoveryProvider struct {
 	cfg DiscoveryConfig
 
 	mu sync.Mutex
 	// floor is the downgrade floor: max(cfg.MinVersion, highest accepted Version). A
-	// manifest with Version < floor is rejected. Guarded by mu.
+	// manifest with Version < floor is rejected, so an accepted revision can never be
+	// rolled back. Guarded by mu.
 	floor int64
-	// cachedTS / cachedAllow hold the last successfully resolved trust material, so a
-	// no-op refresh (same manifest) is cheap. Guarded by mu. Never served when the
-	// fresh fetch/verify fails.
-	cachedTS    *qv2.TrustStore
-	cachedAllow *qv2.RelayAllowlist
 }
 
 // b64urlManifest is the single pinned wire encoding for the manifest envelope's
@@ -209,7 +209,8 @@ func NewDiscoveryProvider(cfg DiscoveryConfig) (*DiscoveryProvider, error) {
 
 // Resolve fetches, authenticates, and decodes the discovery manifest into a trust
 // store and relay allowlist. It fails closed on any verification, freshness, or schema
-// fault. On success it advances the downgrade floor and caches the result.
+// fault. On success it advances the monotonic downgrade floor and returns the freshly
+// built trust material.
 func (p *DiscoveryProvider) Resolve(ctx context.Context) (*qv2.TrustStore, *qv2.RelayAllowlist, error) {
 	raw, err := p.cfg.Fetcher.Fetch(ctx)
 	if err != nil {
@@ -235,8 +236,10 @@ func (p *DiscoveryProvider) Resolve(ctx context.Context) (*qv2.TrustStore, *qv2.
 	}
 
 	// Freshness: expiry (clock) then downgrade (monotonic version). Both fail closed.
-	if p.now().Unix() > manifest.NotAfter {
-		return nil, nil, fmt.Errorf("%w: not_after=%d, now=%d", ErrManifestExpired, manifest.NotAfter, p.now().Unix())
+	// Read the clock once so the compared and reported values agree.
+	now := p.now().Unix()
+	if now > manifest.NotAfter {
+		return nil, nil, fmt.Errorf("%w: not_after=%d, now=%d", ErrManifestExpired, manifest.NotAfter, now)
 	}
 
 	ts, allow, err := buildTrustMaterial(manifest)
@@ -244,25 +247,35 @@ func (p *DiscoveryProvider) Resolve(ctx context.Context) (*qv2.TrustStore, *qv2.
 		return nil, nil, err
 	}
 
-	// Advance the downgrade floor and cache under the lock so concurrent resolves see a
-	// monotonic floor and never roll back.
+	// Advance the downgrade floor under the lock so concurrent resolves see a monotonic
+	// floor and never roll back.
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if manifest.Version < p.floor {
 		return nil, nil, fmt.Errorf("%w: version=%d < floor=%d", ErrManifestDowngrade, manifest.Version, p.floor)
 	}
 	p.floor = manifest.Version
-	p.cachedTS = ts
-	p.cachedAllow = allow
 	return ts, allow, nil
 }
 
 // authenticate enforces the configured trust mode(s) over the exact manifest bytes.
-// Order: a configured pin is checked first (cheap, exact-identity); then, if signing
-// keys are configured and the manifest carries a signature, the signature is verified.
-// The manifest is accepted iff it satisfies the REQUIRED mode(s): with
-// RequireSignature, a valid signature is mandatory; otherwise a matching pin OR a valid
-// signature suffices. A manifest that satisfies nothing fails closed.
+// It is STRICTLY fail-closed: the manifest is accepted iff ALL of these hold —
+//   - if a pin is configured, the bytes' digest MATCHES it (a mismatch fails closed);
+//   - if signing keys are configured AND the envelope carries a signature, that
+//     signature VERIFIES under the named kid (a present-but-bad signature fails closed,
+//     even when a pin also matched — every configured, present anchor must validate);
+//   - at least ONE anchor authenticated the bytes (pinned or signed);
+//   - additionally, with RequireSignature, a valid signature is MANDATORY.
+//
+// So a manifest that is unpinned-or-pin-mismatched, or that carries a signature that
+// does not verify, or that satisfies no anchor at all, is rejected. This is the
+// safe-default MECHANISM; whether the production policy is pin-only, signed-only, or
+// pin-AND-signed (and the exact precedence between them) is Open Decision #13, which
+// selects/clamps these knobs — it must not loosen this posture without a threat-model
+// decision recorded there. SigB64/Kid ride OUTSIDE the pinned/signed preimage, so an
+// attacker who cannot alter the manifest bytes also cannot forge acceptance; corrupting
+// a present signature only makes an otherwise-good manifest fail closed (deny), never
+// admits a bad one.
 func (p *DiscoveryProvider) authenticate(env *ManifestEnvelope, manifestBytes []byte) error {
 	pinned := false
 	if len(p.cfg.PinSHA256) != 0 {
@@ -355,8 +368,16 @@ func parseManifest(manifestBytes []byte) (*Manifest, error) {
 	if m.Version <= 0 {
 		return nil, fmt.Errorf("%w: version must be a positive integer", ErrManifestSchema)
 	}
+	if m.IssuedAt <= 0 {
+		return nil, fmt.Errorf("%w: issued_at must be a positive Unix timestamp", ErrManifestSchema)
+	}
 	if m.NotAfter <= 0 {
 		return nil, fmt.Errorf("%w: not_after must be a positive Unix timestamp", ErrManifestSchema)
+	}
+	// A validity window that ends before it starts is internally contradictory; reject
+	// it as a schema fault rather than letting the absolute expiry clock be the only gate.
+	if m.NotAfter <= m.IssuedAt {
+		return nil, fmt.Errorf("%w: not_after (%d) must be after issued_at (%d)", ErrManifestSchema, m.NotAfter, m.IssuedAt)
 	}
 	if len(m.Issuers) == 0 {
 		return nil, fmt.Errorf("%w: manifest has no issuer trust anchors", ErrManifestSchema)

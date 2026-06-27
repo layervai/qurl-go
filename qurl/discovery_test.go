@@ -22,6 +22,17 @@ import (
 // manifest signer is needed for the freshness/schema/pin cases; the signed-path
 // unknown-kid case is reachable with arbitrary signature bytes because the kid
 // lookup precedes signature verification.
+//
+// KNOWN COVERAGE LIMIT: the signed-manifest ACCEPT path through Resolve (a valid
+// signature under a known kid) is not exercised here. Producing a valid manifest
+// signature needs qv2's manifestSigningDigest + derToRawLowS, which are unexported in
+// the verify-only qv2 package; reimplementing the low-S/DER wire form in this test to
+// fake one would duplicate exactly the domain-separated signing scaffolding that
+// qv2/manifest.go's separation guard exists to protect, so it is deliberately avoided.
+// qv2/manifest_test.go covers qv2.VerifyManifestSignature's accept path directly; only
+// the provider's signed-accept WIRING (authenticate -> verifyManifestSig success) is
+// uncovered. Open Decision #13 (signed vs pinned as the production default) will pin
+// down the signed path; add a qv2 test-only signer then if signed becomes the default.
 
 // fixedNow returns a clock function pinned to t, for deterministic expiry checks.
 func fixedNow(t time.Time) func() time.Time { return func() time.Time { return t } }
@@ -146,7 +157,11 @@ func TestDiscoveryProvider_PinnedManifest_Resolves(t *testing.T) {
 // ErrManifestExpired, never served.
 func TestDiscoveryProvider_Expired_FailsClosed(t *testing.T) {
 	m := validManifest(t)
-	m.NotAfter = 1000 // long past
+	// A coherent but past validity window (issued_at < not_after), so the manifest is
+	// schema-valid and the EXPIRY guard — not the not_after>issued_at ordering check —
+	// is what rejects it once the clock is past not_after.
+	m.IssuedAt = 500
+	m.NotAfter = 1000
 	raw, pin := envelopeBytes(t, m)
 	p := pinnedProvider(t, raw, pin, fixedNow(time.Unix(2000, 0)))
 
@@ -270,7 +285,9 @@ func TestDiscoveryProvider_SchemaFaults_FailClosed(t *testing.T) {
 		{"empty issuer set", func(m *Manifest) { m.Issuers = nil }},
 		{"empty relay allowlist", func(m *Manifest) { m.RelayAllowlist = nil }},
 		{"non-positive version", func(m *Manifest) { m.Version = 0 }},
+		{"non-positive issued_at", func(m *Manifest) { m.IssuedAt = 0 }},
 		{"non-positive not_after", func(m *Manifest) { m.NotAfter = 0 }},
+		{"not_after before issued_at", func(m *Manifest) { m.IssuedAt = 2000; m.NotAfter = 1000 }},
 		{"issuer missing kid", func(m *Manifest) { m.Issuers[0].Kid = "" }},
 		{"issuer bad DER", func(m *Manifest) { m.Issuers[0].SPKIDERB64 = b64url.EncodeToString([]byte("not-a-key")) }},
 	} {
