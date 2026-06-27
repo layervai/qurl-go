@@ -57,7 +57,7 @@ func RelayPost(ctx context.Context, httpClient HTTPDoer, relayBaseURL, serverID 
 	if err != nil {
 		return nil, &RelayError{Status: 0, Msg: fmt.Sprintf("relay POST %s failed: %v", url, err)}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }() // read path; Close error is not actionable (over-limit body not drained — see #21)
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, packetBufferSize))
 	if err != nil {

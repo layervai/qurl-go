@@ -2,4 +2,8 @@
 *.test
 *.out
 coverage.txt
+coverage.html
 /dist/
+
+# Project-local pinned dev tools (see Makefile)
+/.tools/

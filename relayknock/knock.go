@@ -249,6 +249,6 @@ func inflateZlib(compressed []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer r.Close()
+	defer func() { _ = r.Close() }() // read-only zlib reader; Close cannot surface data loss
 	return io.ReadAll(io.LimitReader(r, packetBufferSize))
 }
