@@ -150,7 +150,7 @@ func interpretReply(reply *relayknock.Reply) (*ResourceHandle, error) {
 		return nil, ErrServerOverloaded
 	}
 	if !reply.IsACK() {
-		return nil, fmt.Errorf("qurl: unexpected NHP reply type %d (want ACK or cookie-challenge)", reply.Type)
+		return nil, fmt.Errorf("%w: unexpected NHP reply type %d (want ACK or cookie-challenge)", ErrMalformedReply, reply.Type)
 	}
 
 	ack, err := parseAck(reply.Body)
@@ -159,6 +159,12 @@ func interpretReply(reply *relayknock.Reply) (*ResourceHandle, error) {
 	}
 	if !ack.isSuccess() {
 		return nil, &ServerDenyError{ErrCode: ack.ErrCode}
+	}
+	// A success ACK that carries no redirectUrl is not actionable — the caller has
+	// nothing to reach. Fail closed rather than hand back an empty handle (matching
+	// the seed smoke client's "success ACK carried no redirectUrl" rejection).
+	if ack.RedirectURL == "" {
+		return nil, fmt.Errorf("%w: success ACK carried no redirectUrl (errCode=%q)", ErrMalformedReply, ack.ErrCode)
 	}
 	return &ResourceHandle{RedirectURL: ack.RedirectURL, OpenSeconds: ack.OpenTime}, nil
 }

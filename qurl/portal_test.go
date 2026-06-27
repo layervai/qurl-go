@@ -241,23 +241,24 @@ func TestInterpretReply_CookieChallenge(t *testing.T) {
 }
 
 func TestInterpretReply_SuccessButNoRedirect(t *testing.T) {
-	// An empty body is a zero-value ACK: success errCode, but no redirect. Pin the
-	// behavior — a handle with an empty RedirectURL, no error (the server vouched
-	// for admission; the missing redirect is the caller's to handle).
+	// A success ACK with no redirectUrl (here an empty body → zero-value success
+	// ACK) is not actionable: the caller has nothing to reach. It must fail closed
+	// with ErrMalformedReply, NOT hand back an empty handle (matching the seed smoke
+	// client's "success ACK carried no redirectUrl" rejection).
 	reply := &relayknock.Reply{Type: relayknock.TypeACK, Body: nil}
-	h, err := interpretReply(reply)
-	if err != nil {
-		t.Fatalf("empty-body ACK: unexpected error %v", err)
-	}
-	if h.RedirectURL != "" {
-		t.Fatalf("empty-body ACK: RedirectURL = %q, want empty", h.RedirectURL)
+	_, err := interpretReply(reply)
+	if !errors.Is(err, ErrMalformedReply) {
+		t.Fatalf("success ACK with no redirectUrl: want ErrMalformedReply, got %v", err)
 	}
 }
 
 func TestInterpretReply_UnexpectedType(t *testing.T) {
 	reply := &relayknock.Reply{Type: 99}
 	_, err := interpretReply(reply)
-	if err == nil || !strings.Contains(err.Error(), "unexpected NHP reply type") {
-		t.Fatalf("unexpected type: want a clear error, got %v", err)
+	if !errors.Is(err, ErrMalformedReply) {
+		t.Fatalf("unexpected type: want ErrMalformedReply, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "unexpected NHP reply type") {
+		t.Fatalf("unexpected type: error should name the cause, got %v", err)
 	}
 }

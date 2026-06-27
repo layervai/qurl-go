@@ -15,6 +15,12 @@ import (
 // is out of scope for a one-shot EnterPortal, so the caller should retry later.
 var ErrServerOverloaded = errors.New("qurl: NHP server overloaded (cookie-challenge); retry later")
 
+// ErrMalformedReply is returned when an authenticated reply is structurally
+// unusable — an unexpected NHP type, or a success ACK that carries no reachable
+// resource (empty redirectUrl). It is distinct from a ServerDenyError (an
+// authenticated deny) and a relayknock.RelayError (a transport fault).
+var ErrMalformedReply = errors.New("qurl: malformed server reply")
+
 // ServerDenyError is an authenticated server DENY: the knock decrypted and the
 // server vouched for it, but admission was refused (expired/revoked/consumed
 // qURL, policy mismatch). It is distinct from a relayknock.RelayError, which is a
