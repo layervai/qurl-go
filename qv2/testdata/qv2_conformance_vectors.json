@@ -14,7 +14,13 @@
   "signature_class": {
     "entry_point": "verifyRawSignature / ParseAndVerify",
     "composes": "issuer_signature_vectors.json",
-    "comment": "Run the composed file's vectors through the issuer-signature verifier. accept => verifies; reject => fails with the declared reject_class (high_s | wrong_length). The composed file pins the P-256 raw r||s low-S wire encoding and the 0x00 domain separator across KMS sign output, Go verify, and WebCrypto verify."
+    "comment": "Run the composed file's vectors through the issuer-signature verifier. accept => verifies; reject => fails with the declared reject_class (high_s | wrong_length). The composed file pins the P-256 raw r||s low-S wire encoding and the 0x00 domain separator across KMS sign output, Go verify, and WebCrypto verify.",
+    "tamper_derivation": {
+      "reject_class": "tamper",
+      "comment": "Language-agnostic payload-tamper reject DERIVED from the composed file's accept vector -- so every consumer (Go, js-agent, qurl-go) synthesizes the SAME negative without a third copy of signature bytes. Procedure: take the accept vector's valid 64-byte low-S signature UNCHANGED, and verify it against a claims input formed by flipping the FIRST character of the accept vector's claims_b64 between base64url 'A' and 'B' (i.e. 'A' -> 'B', any other char -> 'A'). The FIRST symbol encodes the top 6 bits of decoded byte 0 -- always fully significant, never a don't-care tail bit -- so the transformed claims_b64 stays CANONICAL base64url AND decodes to DIFFERENT bytes. That portability matters: a consumer may hash the base64 string (qURL v2's Go verifier does), decode-then-hash, or strict-decode before verifying; only a change that is both canonical and decoded-differing yields the SAME tamper rejection for all three. (A last-char flip would only touch a don't-care padding bit when len(claims_b64) mod 4 != 0, decoding to identical bytes and producing a non-canonical string -- not portable.) The signature stays structurally well-formed, so it passes the length/range/low-S gates and fails ONLY at the curve check: a verifier MUST reject it with its signature-invalid sentinel (Go: bare ErrSignature, NOT ErrSignatureHighS/ErrSignatureLength). This is the most basic signature negative -- a valid signature over the wrong message -- and is intentionally specified here as a derivation rather than stored bytes.",
+      "derive_from": "accept_vector",
+      "claims_transform": "flip_first_base64url_char_A_B"
+    }
   },
   "classes": {
     "claims_parse": {
@@ -147,8 +153,8 @@
           "name": "reject_duplicate_key",
           "expect": "reject",
           "reject_class": "parse",
-          "reason": "the private-key field appears twice",
-          "secret_json": "{\"qurl_user_private_key_b64\":\"AAAA\",\"qurl_user_private_key_b64\":\"BBBB\"}"
+          "reason": "the private-key field appears twice; the DUPLICATE is the sole fault -- both values are the valid 32-byte key, so a length-check alone cannot reject this. A verifier that does not detect duplicate JSON keys (lenient last-wins) MUST still reject it, which is the signature-bypass hazard this isolates for cross-language consumers.",
+          "secret_json": "{\"qurl_user_private_key_b64\":\"CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk\",\"qurl_user_private_key_b64\":\"CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk\"}"
         },
         {
           "name": "reject_short_private_key",
@@ -162,7 +168,7 @@
     "strict_base64": {
       "entry_point": "decodeB64(string)",
       "input": "value_b64",
-      "comment": "These are the encoding-layer rejections a browser's lenient atob would silently accept. The non-canonical case is the load-bearing one: it decodes (leniently) to the SAME bytes as a canonical string, so the strict decoder must reject it to keep exactly one string per byte slice (a signature-bypass guard and the Go<->JS agreement point on which STRINGS are well-formed).",
+      "comment": "Encoding-layer rejections a browser's lenient atob would silently accept. Two cases are load-bearing because they decode leniently to the SAME bytes as a canonical string, so the strict decoder must reject them to keep one string per byte slice (a signature-bypass guard and the cross-language agreement point on which STRINGS are well-formed): non-canonical trailing bits, and embedded CR/LF, which Go's base64 decoder skips in every mode (including Strict). A verifier that only strict-decodes, without a re-encode/round-trip canonicality check, will WRONGLY accept the embedded-whitespace vectors.",
       "vectors": [
         {
           "name": "accept_canonical_32_byte_key",
@@ -197,6 +203,27 @@
           "reject_class": "encoding",
           "reason": "a single base64url char cannot encode a byte (length 1 mod 4)",
           "value_b64": "A"
+        },
+        {
+          "name": "reject_embedded_lf",
+          "expect": "reject",
+          "reject_class": "encoding",
+          "reason": "an embedded LF inside an otherwise-canonical 43-char key; a browser's lenient atob silently skips '\\n' and recovers the same 32 bytes, so the strict decoder must reject it to keep one string per byte slice",
+          "value_b64": "AAAAAAAAAAAAAAAAAAAAA\nAAAAAAAAAAAAAAAAAAAAAA"
+        },
+        {
+          "name": "reject_embedded_cr",
+          "expect": "reject",
+          "reject_class": "encoding",
+          "reason": "an embedded CR inside an otherwise-canonical 43-char key; lenient atob silently skips '\\r' and recovers the same 32 bytes, so strict must reject it",
+          "value_b64": "AAAAAAAAAAAAAAAAAAAAA\rAAAAAAAAAAAAAAAAAAAAAA"
+        },
+        {
+          "name": "reject_embedded_crlf",
+          "expect": "reject",
+          "reject_class": "encoding",
+          "reason": "an embedded CRLF pair inside an otherwise-canonical 43-char key; lenient atob silently skips '\\r\\n' and recovers the same 32 bytes, so strict must reject it",
+          "value_b64": "AAAAAAAAAAAAAAAAAAAAA\r\nAAAAAAAAAAAAAAAAAAAAAA"
         }
       ]
     },
@@ -242,7 +269,7 @@
         {
           "name": "accept_bare_host_default_port",
           "expect": "accept",
-          "reason": "a bare-host entry matches a default-port URL via the hostname fallback",
+          "reason": "a bare-host entry matches a no-explicit-port URL: with no port, host == hostname, so the exact host[:port] lookup already hits (the bare-host-any-port fallback path is exercised separately by accept_bare_host_any_port)",
           "entries": ["relay.example.com", "relay2.example.com:8443"],
           "url": "https://relay.example.com"
         },
