@@ -31,10 +31,15 @@ import (
 const LinkBaseURL = "https://qurl.link/"
 
 // b64url is the single pinned qURL wire encoding (unpadded base64url). The secret
-// part (Part 2) is assembled here with the stdlib encoder rather than widening
-// the qv2 public surface; it matches qv2's internal decoder byte-for-byte, and
-// BuildFragment re-decodes the part with the same strict profile, so a drift would
-// fail closed rather than emit an unparseable link.
+// part (Part 2) is assembled here with the stdlib encoder rather than widening the
+// qv2 public surface; RawURLEncoding's output is byte-identical to qv2's internal
+// encoder. BuildFragment validates only the OUTER Part-2 envelope (it decodes the
+// base64url blob; it does not re-run the secret schema), so the inner
+// qurl_user_private_key_b64 field is kept symmetric with the verify side by the
+// shared qv2.Secret struct (the field name cannot drift without a compile break)
+// and by the create→verify round-trip test, not by a BuildFragment re-check.
+// Owning the Part-2 codec in one qv2 place (mirroring parseSecret) is deferred —
+// see qurl-go#6.
 var b64url = base64.RawURLEncoding
 
 // CreateParams are the issuer-supplied inputs to a mint. The verb owns everything
