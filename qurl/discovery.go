@@ -331,6 +331,16 @@ func (p *DiscoveryProvider) authenticate(env *ManifestEnvelope, manifestBytes []
 
 // verifyManifestSig resolves the manifest signing key for env.Kid and verifies the
 // detached signature over the exact manifest bytes in the manifest signing domain.
+//
+// MANIFEST-SIGNING-KEY ROTATION (distinct from issuer-anchor rotation): the kid here
+// names a MANIFEST-signing key in DiscoveryConfig.ManifestKeys, NOT an issuer trust
+// anchor inside the manifest. An unknown kid fails closed (ErrManifestUnverified), so
+// rotating the manifest signing key requires OVERLAP-PUBLISHING the new kid into every
+// client's ManifestKeys BEFORE cutting the published manifest over to sign under it —
+// otherwise a pin-valid, freshly-signed manifest under a not-yet-distributed kid is
+// rejected here. This is a separate rotation from issuer-anchor (claims-signing) kid
+// rotation, which lives inside the manifest's issuer set and is covered by
+// qv2/rotation_test.go.
 func (p *DiscoveryProvider) verifyManifestSig(env *ManifestEnvelope, manifestBytes []byte) error {
 	if env.Kid == "" {
 		return fmt.Errorf("%w: signed manifest is missing its kid", ErrManifestSchema)
