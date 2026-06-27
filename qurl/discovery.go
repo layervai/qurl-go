@@ -233,7 +233,15 @@ func NewDiscoveryProvider(cfg DiscoveryConfig) (*DiscoveryProvider, error) {
 // store and relay allowlist. It fails closed on any verification, freshness, or schema
 // fault. On success it advances the monotonic downgrade floor and returns the freshly
 // built trust material.
+//
+// A nil receiver (a caller that ignored NewDiscoveryProvider's construction error and
+// installed the nil *DiscoveryProvider) fails closed with ErrNotConfigured rather than
+// panicking on the p.cfg field read — the same fail-closed footgun guard StaticProvider
+// has.
 func (p *DiscoveryProvider) Resolve(ctx context.Context) (*qv2.TrustStore, *qv2.RelayAllowlist, error) {
+	if p == nil {
+		return nil, nil, ErrNotConfigured
+	}
 	raw, err := p.cfg.Fetcher.Fetch(ctx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("qurl: fetch discovery manifest: %w", err)

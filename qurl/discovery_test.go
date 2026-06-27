@@ -150,6 +150,18 @@ func TestNewDiscoveryProvider_AuthenticatesNothing_Rejected(t *testing.T) {
 	}
 }
 
+// TestDiscoveryProvider_NilReceiver_FailsClosed proves a caller that ignored
+// NewDiscoveryProvider's construction error and installed the nil *DiscoveryProvider
+// fails closed with ErrNotConfigured rather than panicking on the p.cfg field read —
+// matching StaticProvider's nil-receiver guard.
+func TestDiscoveryProvider_NilReceiver_FailsClosed(t *testing.T) {
+	var dp *DiscoveryProvider // typed nil, e.g. from `dp, _ := NewDiscoveryProvider(badCfg)`
+	_, _, err := dp.Resolve(context.Background())
+	if !errors.Is(err, ErrNotConfigured) {
+		t.Fatalf("nil DiscoveryProvider receiver: want ErrNotConfigured, got %v", err)
+	}
+}
+
 // --- Happy path ------------------------------------------------------------
 
 // TestDiscoveryProvider_PinnedManifest_Resolves proves the success path: a pinned,
