@@ -1,7 +1,13 @@
 package qv2
 
 import (
+	"bytes"
+	"crypto/ecdsa"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"fmt"
+	"os"
 	"testing"
 
 	"github.com/layervai/qurl-go/relayknock"
@@ -16,6 +22,34 @@ const conformanceFilePath = "testdata/qv2_conformance_vectors.json"
 // artifact references by name (the single copy of the signature bytes).
 const signatureVectorPath = "testdata/issuer_signature_vectors.json"
 
+// conformanceArtifactSHA256 pins the exact bytes of the vendored conformance
+// artifact. The artifact is vendored VERBATIM from the nhp-owned upstream, so this
+// hash turns any later hand-edit (content drift the loader's DisallowUnknownFields
+// cannot catch) into a CI failure. A legitimate re-vendor swaps the file AND
+// updates this constant in the same change, keeping a contract change intentional
+// and reviewable.
+const conformanceArtifactSHA256 = "a90fec027d0199967b5541f3adef2c5145dd686fbf672622fa611511a728f52b"
+
+// TestConformanceArtifactVerbatim guards that the vendored artifact has not been
+// hand-edited since it was vendored: its bytes must match the pinned hash. This is
+// the content-drift counterpart to DisallowUnknownFields, which only catches schema
+// drift. (An automated equality check against the upstream source is not wired in
+// because the upstream lives in a separate repository; the re-vendor procedure plus
+// this pin are the guard.)
+func TestConformanceArtifactVerbatim(t *testing.T) {
+	raw, err := os.ReadFile(conformanceFilePath)
+	if err != nil {
+		t.Fatalf("read conformance artifact: %v", err)
+	}
+	sum := sha256.Sum256(raw)
+	if got := hex.EncodeToString(sum[:]); got != conformanceArtifactSHA256 {
+		t.Fatalf("vendored conformance artifact changed (sha256 %s, want %s).\n"+
+			"If this is an intentional re-vendor, update conformanceArtifactSHA256 to the new hash.\n"+
+			"Otherwise the file was hand-edited — vendored artifacts must stay byte-verbatim from upstream.",
+			got, conformanceArtifactSHA256)
+	}
+}
+
 // TestConformanceVectors is the always-run, every-class contract test. It loads
 // the vendored artifact and drives EVERY class — including every negative —
 // through this package's REAL entry points, asserting the declared accept/reject
@@ -23,9 +57,9 @@ const signatureVectorPath = "testdata/issuer_signature_vectors.json"
 // if the artifact is missing/unparseable, so the contract can never silently drop
 // out of the suite.
 //
-// PROVISIONAL VECTORS: the vendored artifact is from the in-flight nhp branch
-// feat/qv2-conformance-vectors. Re-vendoring the merged full-class artifact is a
-// verbatim file swap; this test needs no change.
+// PROVISIONAL VECTORS: the vendored artifact tracks the in-flight nhp qURL v2
+// integration branch. Re-vendoring a newer revision is a verbatim file swap (plus
+// updating conformanceArtifactSHA256); this test needs no change.
 //
 // A flipped negative (an "expect":"reject" vector edited to "accept", or vice
 // versa) makes this test RED, because every accept/reject class switches on the
@@ -89,7 +123,11 @@ func runSignatureClass(t *testing.T, cf *ConformanceFile) {
 	if err != nil {
 		t.Fatalf("parse issuer spki: %v", err)
 	}
-	sawAccept, sawReject := false, false
+	// Count accept vectors and capture the FIRST one's claims/sig for the tamper
+	// derivation. tamper_derivation says "the accept vector" (singular); if the
+	// composed fixture ever carries more than one accept vector the baseline is
+	// ambiguous, so fail rather than silently deriving from whichever is last.
+	acceptCount, sawReject := 0, false
 	var acceptClaimsB64 string
 	var acceptRawSig []byte
 	for _, v := range vf.Vectors {
@@ -101,8 +139,10 @@ func runSignatureClass(t *testing.T, cf *ConformanceFile) {
 			verr := verifyRawSignature(pub, v.ClaimsB64, rawSig)
 			switch v.Expect {
 			case ExpectAccept:
-				sawAccept = true
-				acceptClaimsB64, acceptRawSig = v.ClaimsB64, rawSig
+				acceptCount++
+				if acceptCount == 1 {
+					acceptClaimsB64, acceptRawSig = v.ClaimsB64, rawSig
+				}
 				if verr != nil {
 					t.Fatalf("accept signature vector failed to verify: %v", verr)
 				}
@@ -117,52 +157,109 @@ func runSignatureClass(t *testing.T, cf *ConformanceFile) {
 			}
 		})
 	}
-	if !sawAccept || !sawReject {
-		t.Fatalf("signature class must exercise both accept and reject (accept=%v reject=%v)", sawAccept, sawReject)
+	if acceptCount == 0 || !sawReject {
+		t.Fatalf("signature class must exercise both accept and reject (accept=%d reject=%v)", acceptCount, sawReject)
+	}
+	if acceptCount > 1 {
+		t.Fatalf("tamper_derivation assumes a single accept vector; composed fixture has %d -- update the derivation if this is intentional", acceptCount)
 	}
 
-	// Payload-tamper reject: reuse the accept vector's own valid 64-byte low-S
-	// signature but flip the claims it is checked against. The signature stays
-	// well-formed (so it passes the length/range/low-S gates) and fails ONLY at the
-	// ECDSA curve check, which must surface the bare ErrSignature sentinel (NOT
-	// ErrSignatureHighS / ErrSignatureLength). This keeps the signature bytes
-	// single-sourced while still exercising the tamper class behaviorally.
+	// Payload-tamper reject, driven by the artifact's tamper_derivation rather than
+	// a transform hardcoded here: read the named transform from the artifact and
+	// apply it, so this package synthesizes the SAME negative the nhp Go verifier
+	// and the js-agent do (a vendoring consumer cannot see a hardcoded recipe).
+	runSignatureTamper(t, cf.SignatureClass.TamperDerivation, pub, acceptClaimsB64, acceptRawSig)
+}
+
+// runSignatureTamper executes the artifact-specified payload-tamper derivation: it
+// validates the derivation is present and uses identifiers this verifier supports,
+// applies the named claims transform to the accept vector's claims, asserts the
+// transformed claims stay canonical base64url AND decode to different bytes (so the
+// derived negative is portable across consumers that hash the string, decode-then-
+// hash, or strict-decode first), and asserts the accept vector's UNCHANGED signature
+// now fails at the curve check with the bare ErrSignature sentinel.
+func runSignatureTamper(t *testing.T, d *ConformanceTamperDerivation, pub *ecdsa.PublicKey, acceptClaimsB64 string, acceptRawSig []byte) {
 	t.Run("payload_tamper", func(t *testing.T) {
+		if d == nil {
+			t.Fatal("signature_class.tamper_derivation missing: the artifact must specify the language-agnostic tamper derivation")
+		}
+		if d.RejectClass != rejectClassTamper {
+			t.Fatalf("tamper_derivation.reject_class = %q, want %q", d.RejectClass, rejectClassTamper)
+		}
+		if d.DeriveFrom != tamperDeriveFromAccept {
+			t.Fatalf("tamper_derivation.derive_from = %q, this verifier only supports %q", d.DeriveFrom, tamperDeriveFromAccept)
+		}
 		if acceptRawSig == nil {
-			t.Fatal("no accept vector captured to build the tamper case from")
+			t.Fatal("no accept vector captured to derive the tamper case from")
 		}
-		tampered := tamperClaimsB64(acceptClaimsB64)
+		tampered, err := applyClaimsTransform(d.ClaimsTransform, acceptClaimsB64)
+		if err != nil {
+			t.Fatalf("apply tamper transform: %v", err)
+		}
 		if tampered == acceptClaimsB64 {
-			t.Fatal("tamper produced identical claims; cannot prove tamper rejection")
+			t.Fatal("tamper transform produced identical claims; cannot prove tamper rejection")
 		}
+		// Cross-language portability invariant. This verifier hashes the claims_b64
+		// STRING, so a string-only change suffices HERE -- but a vendoring consumer
+		// may decode-then-hash or strict-decode before verifying. For the derived
+		// tamper to be the SAME negative everywhere, the transformed claims must (a)
+		// stay canonical base64url (else a strict-decode-first consumer rejects for
+		// ENCODING, not tamper) and (b) decode to DIFFERENT bytes (else a decoded-
+		// bytes-hash consumer's signature still verifies). Assert both.
+		origDecoded, err := decodeB64(acceptClaimsB64)
+		if err != nil {
+			t.Fatalf("accept claims_b64 must strict-decode: %v", err)
+		}
+		tamperedDecoded, err := decodeB64(tampered)
+		if err != nil {
+			t.Fatalf("tampered claims_b64 must stay canonical base64url (else a strict-decode-first consumer rejects for encoding, not tamper): %v", err)
+		}
+		if bytes.Equal(origDecoded, tamperedDecoded) {
+			t.Fatal("tampered claims decode to the SAME bytes as the original: a decode-then-hash consumer would still verify -- the transform must change decoded bytes, not just don't-care base64 tail bits")
+		}
+		// Sanity: the unmodified pair verifies, so the rejection is attributable to
+		// the tamper, not a broken fixture.
 		if err := verifyRawSignature(pub, acceptClaimsB64, acceptRawSig); err != nil {
 			t.Fatalf("precondition: accept pair must verify before tamper: %v", err)
 		}
-		err := verifyRawSignature(pub, tampered, acceptRawSig)
-		if err == nil {
+		verr := verifyRawSignature(pub, tampered, acceptRawSig)
+		if verr == nil {
 			t.Fatal("tampered claims unexpectedly verified under the accept vector's signature")
 		}
-		if !errors.Is(err, ErrSignature) {
-			t.Fatalf("payload-tamper must return ErrSignature, got %v", err)
+		if !errors.Is(verr, ErrSignature) {
+			t.Fatalf("payload-tamper must return ErrSignature, got %v", verr)
 		}
-		if errors.Is(err, ErrSignatureHighS) || errors.Is(err, ErrSignatureLength) {
-			t.Fatalf("payload-tamper must fail at the curve check, not the encoding gate, got %v", err)
+		if errors.Is(verr, ErrSignatureHighS) || errors.Is(verr, ErrSignatureLength) {
+			t.Fatalf("payload-tamper must fail at the curve check, not the encoding gate, got %v", verr)
 		}
 	})
 }
 
-// tamperClaimsB64 returns a base64url claims string that differs from in by a
-// single character, so the decoded claims (and thus the signing digest) change
-// while the value stays well-formed base64url.
-func tamperClaimsB64(in string) string {
+// applyClaimsTransform applies the artifact-named claims transform. Only the
+// transforms this verifier understands are accepted; an unknown name is a hard
+// error so a future artifact transform cannot be silently skipped.
+func applyClaimsTransform(name, claimsB64 string) (string, error) {
+	switch name {
+	case tamperTransformFlipFirstB64:
+		return flipFirstBase64urlChar(claimsB64), nil
+	default:
+		return "", fmt.Errorf("unsupported claims_transform %q", name)
+	}
+}
+
+// flipFirstBase64urlChar flips the FIRST base64url character between 'A' and 'B'
+// ('A'->'B', any other char->'A'). The first symbol encodes the top 6 bits of
+// decoded byte 0 -- always fully significant -- so the result stays canonical
+// base64url AND decodes to different bytes.
+func flipFirstBase64urlChar(in string) string {
 	if in == "" {
 		return in
 	}
 	repl := byte('A')
-	if in[len(in)-1] == 'A' {
+	if in[0] == 'A' {
 		repl = 'B'
 	}
-	return in[:len(in)-1] + string(repl)
+	return string(repl) + in[1:]
 }
 
 // assertConformanceSignatureReject maps a composed signature vector's reason to

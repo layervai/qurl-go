@@ -46,6 +46,26 @@ const (
 	rejectClassFragment = "fragment"
 	// rejectClassRelayURL is a relay_url HTTPS/allowlist rejection.
 	rejectClassRelayURL = "relay_url"
+	// rejectClassTamper is the signature-class payload-tamper rejection: a valid
+	// signature verified against a flipped claims input (derived, not stored).
+	rejectClassTamper = "tamper"
+)
+
+// Signature-class tamper derivation identifiers. These pin the artifact's
+// language-agnostic derivation so this verifier applies exactly what the JSON
+// specifies (rather than a hardcoded rule a vendoring consumer could not see).
+const (
+	// tamperDeriveFromAccept is the only supported derive_from: start from the
+	// composed file's accept vector.
+	tamperDeriveFromAccept = "accept_vector"
+	// tamperTransformFlipFirstB64 flips the FIRST base64url character of the accept
+	// vector's claims_b64 between 'A' and 'B' ('A'->'B', any other char->'A'). The
+	// first symbol encodes the top 6 bits of decoded byte 0, so this changes the
+	// DECODED claims (not just don't-care tail bits) AND keeps the string canonical
+	// base64url. That makes the derived tamper identical for every consumer
+	// regardless of whether it hashes the base64 string, decodes-then-hashes, or
+	// strict-decodes before verifying.
+	tamperTransformFlipFirstB64 = "flip_first_base64url_char_A_B"
 )
 
 // ConformanceFile is the top-level conformance artifact document.
@@ -60,11 +80,31 @@ type ConformanceFile struct {
 }
 
 // ConformanceSignatureClass records that the signature class is composed from a
-// separate file rather than carrying its own bytes.
+// separate file rather than carrying its own bytes, plus the language-agnostic
+// payload-tamper derivation every consumer synthesizes from the composed file's
+// accept vector (so the tamper negative is vendorable without a third copy of
+// signature bytes).
 type ConformanceSignatureClass struct {
 	EntryPoint string `json:"entry_point"`
 	Composes   string `json:"composes"`
 	Comment    string `json:"comment"`
+	// TamperDerivation specifies the derived payload-tamper reject. It is optional
+	// in the schema's struct but the test asserts it is present and well-formed.
+	TamperDerivation *ConformanceTamperDerivation `json:"tamper_derivation,omitempty"`
+}
+
+// ConformanceTamperDerivation specifies how a consumer derives the payload-tamper
+// reject from the composed signature file's accept vector. It is a derivation, not
+// stored bytes, so the nhp Go verifier, the js-agent, and this qurl-go package all
+// synthesize the SAME negative: take the accept vector's UNCHANGED signature and
+// verify it against a claims input formed by applying the transform named in
+// ClaimsTransform, which must keep the string canonical base64url yet decode to
+// different bytes, so the case fails only at the curve check.
+type ConformanceTamperDerivation struct {
+	RejectClass     string `json:"reject_class"`
+	Comment         string `json:"comment"`
+	DeriveFrom      string `json:"derive_from"`
+	ClaimsTransform string `json:"claims_transform"`
 }
 
 // ConformanceClass is one named class: an entry-point label, the input field
