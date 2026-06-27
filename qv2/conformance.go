@@ -27,17 +27,14 @@ import (
 // full-class artifact is a verbatim FILE SWAP — this loader and the test are
 // structured so no Go changes are needed when the artifact is re-vendored.
 
-// Expect / reject_class vocabulary. The accept/reject values reuse the exported
-// signature-vector vocabulary (ExpectAccept / ExpectReject); only the reject_class
-// values that have no existing constant are defined here. reject_class is pinned
-// precisely ONLY where the class is about the distinction (encoding; key_length;
-// the signature high_s / wrong_length live in the composed file); JSON-schema
-// faults use the coarse "parse" because a conformant verifier may surface any of
-// several internal sentinels for them.
+// reject_class vocabulary. The accept/reject expect values reuse the exported
+// signature-vector vocabulary directly (ExpectAccept / ExpectReject); only the
+// reject_class values that have no existing constant are defined here.
+// reject_class is pinned precisely ONLY where the class is about the distinction
+// (encoding; key_length; the signature high_s / wrong_length live in the composed
+// file); JSON-schema faults use the coarse "parse" because a conformant verifier
+// may surface any of several internal sentinels for them.
 const (
-	conformanceAccept = ExpectAccept
-	conformanceReject = ExpectReject
-
 	// rejectClassParse is the coarse class for a JSON-schema violation (duplicate
 	// key, unknown field, null, wrong type, missing required, out-of-range/ordering).
 	rejectClassParse = "parse"

@@ -207,11 +207,11 @@ func runSecretParseClass(t *testing.T, class ConformanceClass) {
 		t.Run(v.Name, func(t *testing.T) {
 			_, err := parseSecret([]byte(v.SecretJSON))
 			switch v.Expect {
-			case conformanceAccept:
+			case ExpectAccept:
 				if err != nil {
 					t.Fatalf("accept secret vector failed to parse: %v", err)
 				}
-			case conformanceReject:
+			case ExpectReject:
 				if err == nil {
 					t.Fatal("reject secret vector unexpectedly parsed")
 				}
@@ -233,11 +233,11 @@ func runStrictBase64Class(t *testing.T, class ConformanceClass) {
 		t.Run(v.Name, func(t *testing.T) {
 			_, err := decodeB64(v.ValueB64)
 			switch v.Expect {
-			case conformanceAccept:
+			case ExpectAccept:
 				if err != nil {
 					t.Fatalf("accept base64 vector failed to decode: %v", err)
 				}
-			case conformanceReject:
+			case ExpectReject:
 				if !errors.Is(err, ErrEncoding) {
 					t.Fatalf("reject base64 vector must return ErrEncoding, got %v", err)
 				}
@@ -256,11 +256,11 @@ func runFragmentClass(t *testing.T, class ConformanceClass) {
 		t.Run(v.Name, func(t *testing.T) {
 			_, err := ParseFragment(v.Fragment)
 			switch v.Expect {
-			case conformanceAccept:
+			case ExpectAccept:
 				if err != nil {
 					t.Fatalf("accept fragment vector failed to parse: %v", err)
 				}
-			case conformanceReject:
+			case ExpectReject:
 				if err == nil {
 					t.Fatal("reject fragment vector unexpectedly parsed")
 				}
@@ -283,11 +283,11 @@ func runRelayAllowlistClass(t *testing.T, class ConformanceClass) {
 			allow := NewRelayAllowlist(v.Entries)
 			err := ValidateRelayURL(v.URL, allow)
 			switch v.Expect {
-			case conformanceAccept:
+			case ExpectAccept:
 				if err != nil {
 					t.Fatalf("accept relay vector failed: %v", err)
 				}
-			case conformanceReject:
+			case ExpectReject:
 				if !errors.Is(err, ErrRelayURL) {
 					t.Fatalf("reject relay vector must return ErrRelayURL, got %v", err)
 				}
@@ -314,7 +314,7 @@ func runServerIDClass(t *testing.T, class ConformanceClass) {
 	requireNonEmpty(t, "server_id", class)
 	for _, v := range class.Vectors {
 		t.Run(v.Name, func(t *testing.T) {
-			if v.Expect != conformanceAccept {
+			if v.Expect != ExpectAccept {
 				t.Fatalf("server_id is a recompute-equality class; only expect=accept is defined, got %q", v.Expect)
 			}
 			raw, err := decodeB64(v.CellPublicKeyB64)
@@ -341,11 +341,11 @@ func runServerIDClass(t *testing.T, class ConformanceClass) {
 func assertParseOutcome(t *testing.T, v ConformanceVector, err error) {
 	t.Helper()
 	switch v.Expect {
-	case conformanceAccept:
+	case ExpectAccept:
 		if err != nil {
 			t.Fatalf("accept claims vector failed to parse: %v", err)
 		}
-	case conformanceReject:
+	case ExpectReject:
 		if err == nil {
 			t.Fatal("reject claims vector unexpectedly parsed")
 		}
@@ -381,11 +381,11 @@ func assertRejectClassVocabulary(t *testing.T, cf *ConformanceFile) {
 		}
 		for _, v := range class.Vectors {
 			switch v.Expect {
-			case conformanceAccept:
+			case ExpectAccept:
 				if v.RejectClass != "" {
 					t.Fatalf("%s/%s: accept vector must not carry a reject_class (got %q)", name, v.Name, v.RejectClass)
 				}
-			case conformanceReject:
+			case ExpectReject:
 				if _, in := allowed[v.RejectClass]; !in {
 					t.Fatalf("%s/%s: reject_class %q is not in this class's vocabulary", name, v.Name, v.RejectClass)
 				}
