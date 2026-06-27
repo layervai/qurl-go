@@ -1,0 +1,54 @@
+name: Dependabot Go Tidy
+
+# Dependabot bumps go.mod but does not run `go mod tidy`, so go.sum can
+# drift out of sync with the new requirement graph. This re-tidies on
+# dependabot PRs and pushes the result back onto the PR branch.
+on:
+  pull_request:
+    paths:
+      - "go.mod"
+      - "go.sum"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  go-tidy:
+    if: github.actor == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # head_ref is the dependabot-owned PR branch name; checkout
+          # passes it to git as a literal ref (no shell interpolation),
+          # so this is the standard safe pattern for tidy-on-PR.
+          ref: ${{ github.head_ref }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: Run go mod tidy
+        run: go mod tidy
+
+      - name: Check for changes
+        id: diff
+        run: |
+          if git diff --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Commit changes
+        if: steps.diff.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add go.mod go.sum
+          git commit -m "chore(deps): go mod tidy"
+          git push

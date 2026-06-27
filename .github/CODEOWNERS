@@ -1,0 +1,19 @@
+# CODEOWNERS — automatic review requests + branch-protection
+# code-owner gating.
+# https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# Default owners for everything
+* @layervai/platform
+
+# CI/CD
+/.github/workflows/ @layervai/platform
+
+# Config files and issue forms
+/.github/ @layervai/platform
+/go.mod @layervai/platform
+/go.sum @layervai/platform
+
+# Source packages
+/qurl/ @layervai/platform
+/qv2/ @layervai/platform
+/relayknock/ @layervai/platform
