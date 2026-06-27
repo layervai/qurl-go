@@ -127,8 +127,14 @@ type DiscoveryConfig struct {
 	// MinVersion is the initial downgrade floor: a manifest with Version < MinVersion is
 	// rejected as a downgrade before it is ever accepted. After the provider accepts a
 	// manifest, the floor advances to that manifest's Version, so a later fetch can never
-	// roll back to an older revision. Zero means "no initial floor" (the first accepted
-	// manifest sets it).
+	// roll back to an older revision FOR THE LIFETIME OF THIS PROVIDER. Zero means "no
+	// initial floor" (the first accepted manifest sets it).
+	//
+	// The advanced floor is IN-MEMORY only: a process restart resets it to MinVersion, so
+	// rollback protection across restarts is bounded by MinVersion and the manifest's
+	// not_after, not by the highest version a previous process accepted. Durable
+	// rollback state is Open Decision #13 (tracked in qurl-go issue #24); pin a high
+	// MinVersion if cross-restart anti-rollback matters before #13 lands.
 	MinVersion int64
 
 	// ExpectedProfile, when non-empty, requires the manifest's Profile to equal it. A
@@ -188,7 +194,8 @@ type DiscoveryProvider struct {
 	mu sync.Mutex
 	// floor is the downgrade floor: max(cfg.MinVersion, highest accepted Version). A
 	// manifest with Version < floor is rejected, so an accepted revision can never be
-	// rolled back. Guarded by mu.
+	// rolled back while this provider lives. It is in-memory only and resets to
+	// cfg.MinVersion on restart — see MinVersion for the cross-restart caveat (#13). Guarded by mu.
 	floor int64
 }
 
