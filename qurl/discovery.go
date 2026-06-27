@@ -373,6 +373,25 @@ func (p *DiscoveryProvider) now() time.Time {
 	return time.Now()
 }
 
+// strictDecodeJSON decodes raw into v rejecting unknown fields AND trailing data after
+// the top-level JSON object (a second concatenated value a lenient parser would ignore).
+// It is the same strictness qv2's typed-unmarshal pass applies (qv2/parse.go
+// strictUnmarshal): DisallowUnknownFields + a dec.More() trailing-data check. It does
+// NOT do qv2's full token-walk (duplicate-key / null rejection) — that heavier guard
+// stays in qv2 because the manifest bytes here are already authenticated by the
+// pin/signature, so only the legitimate signer can produce the bytes being parsed.
+func strictDecodeJSON(raw []byte, v any) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		return err
+	}
+	if dec.More() {
+		return fmt.Errorf("trailing data after JSON object")
+	}
+	return nil
+}
+
 // decodeEnvelope parses the fetched bytes into a ManifestEnvelope and decodes the
 // inner manifest bytes (the pin/signature preimage), returning both.
 func decodeEnvelope(raw []byte) (*ManifestEnvelope, []byte, error) {
@@ -380,9 +399,7 @@ func decodeEnvelope(raw []byte) (*ManifestEnvelope, []byte, error) {
 		return nil, nil, fmt.Errorf("%w: empty discovery response", ErrManifestSchema)
 	}
 	var env ManifestEnvelope
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&env); err != nil {
+	if err := strictDecodeJSON(raw, &env); err != nil {
 		return nil, nil, fmt.Errorf("%w: parse envelope: %w", ErrManifestSchema, err)
 	}
 	if env.ManifestB64 == "" {
@@ -398,14 +415,13 @@ func decodeEnvelope(raw []byte) (*ManifestEnvelope, []byte, error) {
 	return &env, manifestBytes, nil
 }
 
-// parseManifest strict-parses the decoded manifest bytes. Unknown fields are rejected
-// (a strict schema, mirroring the qv2 parser's posture), so a manifest carrying an
-// unexpected key fails closed rather than being silently ignored.
+// parseManifest strict-parses the decoded manifest bytes via strictDecodeJSON: an
+// unknown field or trailing data after the object fails closed rather than being
+// silently ignored. (Duplicate-key/null rejection — qv2's heavier token-walk — is left
+// to qv2 since these bytes are already pin/signature-authenticated; see strictDecodeJSON.)
 func parseManifest(manifestBytes []byte) (*Manifest, error) {
 	var m Manifest
-	dec := json.NewDecoder(bytes.NewReader(manifestBytes))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&m); err != nil {
+	if err := strictDecodeJSON(manifestBytes, &m); err != nil {
 		return nil, fmt.Errorf("%w: parse manifest: %w", ErrManifestSchema, err)
 	}
 	if m.Version <= 0 {

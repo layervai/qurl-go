@@ -551,6 +551,54 @@ func TestDiscoveryProvider_SchemaFaults_FailClosed(t *testing.T) {
 	}
 }
 
+// TestDiscoveryProvider_TrailingData_FailsClosed proves strictDecodeJSON rejects a
+// second concatenated JSON value after the top-level object — at both the inner
+// manifest and the outer envelope — rather than silently ignoring it the way a bare
+// json.Decode would. The pin is computed over the EXACT (trailing-data) manifest bytes
+// so authentication passes and the schema guard is what bites; json.Marshal cannot
+// emit trailing bytes, so these cases build the JSON by hand. The bytes here are
+// authenticated, so this is a strict-schema/cross-parser-consistency guard, not an
+// attack surface.
+func TestDiscoveryProvider_TrailingData_FailsClosed(t *testing.T) {
+	t.Run("manifest trailing data", func(t *testing.T) {
+		good, err := json.Marshal(validManifest(t))
+		if err != nil {
+			t.Fatalf("marshal manifest: %v", err)
+		}
+		manifestJSON := append(append([]byte{}, good...), []byte("{}")...) // a second object appended
+		env := ManifestEnvelope{ManifestB64: b64url.EncodeToString(manifestJSON)}
+		raw, err := json.Marshal(env)
+		if err != nil {
+			t.Fatalf("marshal envelope: %v", err)
+		}
+		digest := qv2.ManifestDigest(manifestJSON)
+		p := pinnedProvider(t, raw, digest[:], nil)
+		if _, _, err := p.Resolve(context.Background()); !errors.Is(err, ErrManifestSchema) {
+			t.Fatalf("manifest trailing data: want ErrManifestSchema, got %v", err)
+		}
+	})
+
+	t.Run("envelope trailing data", func(t *testing.T) {
+		manifestJSON, err := json.Marshal(validManifest(t))
+		if err != nil {
+			t.Fatalf("marshal manifest: %v", err)
+		}
+		env := ManifestEnvelope{ManifestB64: b64url.EncodeToString(manifestJSON)}
+		envJSON, err := json.Marshal(env)
+		if err != nil {
+			t.Fatalf("marshal envelope: %v", err)
+		}
+		raw := append(append([]byte{}, envJSON...), []byte("{}")...) // trailing object after the envelope
+		// The envelope decoder rejects the trailing data before authentication, so a pin
+		// is configured only to build a valid provider; the schema guard fires first.
+		digest := qv2.ManifestDigest(manifestJSON)
+		p := pinnedProvider(t, raw, digest[:], nil)
+		if _, _, err := p.Resolve(context.Background()); !errors.Is(err, ErrManifestSchema) {
+			t.Fatalf("envelope trailing data: want ErrManifestSchema, got %v", err)
+		}
+	})
+}
+
 // TestDiscoveryProvider_ProfileMismatch_FailsClosed proves an ExpectedProfile guard:
 // a manifest minted for a different profile/class is rejected as a schema fault.
 func TestDiscoveryProvider_ProfileMismatch_FailsClosed(t *testing.T) {
