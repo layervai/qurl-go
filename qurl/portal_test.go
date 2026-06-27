@@ -6,7 +6,6 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
-	"encoding/base64"
 	"errors"
 	"net/http"
 	"strings"
@@ -16,10 +15,9 @@ import (
 	"github.com/layervai/qurl-go/relayknock"
 )
 
-// b64url is the single pinned qURL wire encoding (unpadded base64url), used here
-// to assemble fixture parts. It matches qv2's internal decoder/encoder; using the
-// stdlib form directly keeps the qv2 public surface from widening just for tests.
-var b64url = base64.RawURLEncoding
+// b64url (the single pinned unpadded-base64url wire encoding) is declared in
+// create.go and shared package-wide; these tests reuse it to assemble fixture
+// parts so the test and mint paths encode identically.
 
 // EnterPortal is tested at its SEAMS, not end to end: a self-built mock NHP
 // responder would be the SDK's own crypto on both ends (weaker evidence than the

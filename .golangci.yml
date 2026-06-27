@@ -1,0 +1,85 @@
+# golangci-lint v2 configuration.
+#
+# This is a dependency-light security SDK (crypto core + strict parser), so the
+# linter set leans toward correctness, error-handling, and security checks. The
+# bar is "passes clean": real findings get fixed in code; the rare unavoidable
+# false positive gets a targeted `//nolint:<linter> // reason` with a written
+# justification, never a global disable.
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  # Start from the curated default set (errcheck, govet, ineffassign,
+  # staticcheck, unused) and add to it; do not enable "all" — noise is worse
+  # than a tight, green set.
+  default: standard
+  enable:
+    # --- error handling & nil correctness ---
+    - errorlint        # correct %w wrapping, errors.Is/As over == comparisons
+    - nilerr           # returning nil after a non-nil error check
+    - nilnil           # returning (nil, nil) — ambiguous for callers
+    - bodyclose        # HTTP response bodies are always closed
+    - noctx            # no HTTP requests without a context
+    - contextcheck     # functions that should accept/propagate context
+    # --- security ---
+    - gosec            # security-focused static analysis
+    - bidichk          # dangerous Unicode bidi control runes in source
+    - forcetypeassert  # unchecked x.(T) type assertions can panic
+    # --- correctness / footguns ---
+    - asasalint        # passing []any to variadic any (slice-as-any-slice)
+    - durationcheck    # multiplying two durations (almost always a bug)
+    - makezero         # append to a make([]T, n) with a nonzero length
+    - reassign         # reassigning exported package variables from other pkgs
+    - wastedassign     # assignments whose values are never used
+    - gocheckcompilerdirectives # malformed //go: directives
+    # --- clarity / dead code ---
+    - unconvert        # unnecessary type conversions
+    - unparam          # unused function parameters / always-same args
+    - predeclared      # shadowing predeclared identifiers (len, error, ...)
+    - usestdlibvars    # use stdlib consts (http.MethodGet) over string literals
+    - misspell         # common English misspellings in comments/strings
+    - revive           # golint successor; runs at its default ruleset (see settings note)
+
+  settings:
+    errcheck:
+      # Catch unchecked `x.(T)` assertions, which can panic. `_ = f()` stays
+      # the sanctioned, greppable marker for a deliberately ignored error, so
+      # check-blank is intentionally left off.
+      check-type-assertions: true
+    govet:
+      enable-all: true
+      disable:
+        # fieldalignment is a memory micro-optimization that forces structs to
+        # be ordered by field size, hurting readability for no meaningful win
+        # in a config/claims SDK. shadow flags idiomatic `if err := ...; err != nil`
+        # scoped shadowing, which is correct Go and not a bug here.
+        - fieldalignment
+        - shadow
+    # revive is intentionally left unconfigured: in golangci-lint, supplying a
+    # `revive.rules` list REPLACES revive's built-in default ruleset, which would
+    # silently drop strong defaults like var-naming, package-comments, and errorf.
+    # Running it at defaults keeps the broader, stronger check.
+
+  exclusions:
+    generated: lax
+    rules:
+      # Test files exercise edge cases and hostile inputs; relax the checks
+      # that are noisy and low-value there without hiding real bugs.
+      - path: _test\.go
+        linters:
+          - gosec           # test vectors / hardcoded "credentials" are fixtures
+          - errcheck        # setup helpers
+          - forcetypeassert # tests legitimately assert concrete types
+          - unparam
+
+formatters:
+  enable:
+    - gofmt
+    - gofumpt    # stricter superset of gofmt
+    - goimports  # group + order imports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/layervai/qurl-go

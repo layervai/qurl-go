@@ -16,6 +16,9 @@ permissions:
 
 jobs:
   test:
+    # Name must stay exactly "vet + test -race" — it is a required status check
+    # in main's branch protection. Renaming it would orphan the required context
+    # and block every merge.
     name: vet + test -race
     runs-on: ubuntu-latest
     steps:
@@ -30,8 +33,84 @@ jobs:
           go-version-file: go.mod
           check-latest: true
 
+      # Gate go.mod/go.sum tidiness inside this required check rather than
+      # auto-pushing a fix from a separate workflow. A push made with the
+      # default GITHUB_TOKEN does not re-trigger required checks (GitHub's
+      # recursion guard), so an auto-tidy commit could merge unvalidated.
+      # Failing here forces the drift onto a commit CI actually runs.
+      - name: Verify go.mod/go.sum are tidy
+        run: |
+          go mod tidy
+          # --exit-code prints the drift AND returns non-zero in one shot.
+          if ! git diff --exit-code -- go.mod go.sum; then
+            echo "::error::go.mod/go.sum are not tidy. Run 'go mod tidy' locally and commit the result."
+            exit 1
+          fi
+
       - name: go vet
         run: go vet ./...
 
-      - name: go test -race
-        run: go test -race ./...
+      - name: go test -race + coverage
+        run: go test -race -covermode=atomic -coverprofile=coverage.txt ./...
+
+      - name: Coverage summary
+        run: go tool cover -func=coverage.txt | tail -1
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage
+          path: coverage.txt
+          if-no-files-found: error
+
+  lint:
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      # Pinned action + pinned linter version, matching the Makefile's
+      # GOLANGCI_LINT_VERSION, so local `make lint` and CI run the same analyzers.
+      # `golangci-lint run` also enforces formatting (gofmt/gofumpt/goimports).
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@82606bf257cbaff209d206a39f5134f0cfbfd2ee # v9.2.1
+        with:
+          version: v2.12.2
+
+  vuln:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      # Fails the job on a known vuln in called code — the right default for a
+      # security SDK. NOTE: this only gates merges once added to main's branch
+      # protection required checks (tracked in #22); until then it is advisory.
+      # Trade-off: a newly published stdlib/dep advisory can turn this red with no
+      # code change — when that happens, bump the go.mod toolchain directive or the
+      # affected dependency.
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.5.0
+
+      - name: govulncheck
+        run: govulncheck ./...
+
+  # Note: live fuzzing is intentionally NOT a PR gate — a fuzzer can surface a
+  # new, possibly unrelated crasher and red an otherwise-good PR nondeterministically.
+  # The committed seed corpus (including regression crashers) is replayed
+  # deterministically by the `test` job's plain `go test`, which IS the blocking
+  # regression gate. Live fuzzing runs as a nightly soak in fuzz.yml.
