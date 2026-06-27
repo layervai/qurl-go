@@ -129,9 +129,8 @@ jobs:
     # in-flight run. `always()` would still fire notify on that cancelled run
     # and post a yellow "cancelled" card for every superseded push — chatter
     # the fleet's other CIs (no cancel-in-progress) never produce. We still
-    # notify on success and failure, and on a single gate that hits its own
-    # timeout (run not cancelled → AGGREGATE=cancelled card), but stay quiet
-    # when the whole run is cancelled out from under us.
+    # notify on success and failure; we only stay quiet when the whole run is
+    # cancelled out from under us.
     if: ${{ !cancelled() && github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
