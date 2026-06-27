@@ -1,0 +1,58 @@
+name: Fuzz (nightly)
+
+# Live fuzzing as a scheduled soak rather than a PR gate: a fuzzer can discover a
+# new, possibly unrelated crasher at any time, so blocking PRs on it would red
+# good PRs nondeterministically. Deterministic regression coverage lives in the
+# committed seed corpus, which the normal `go test` (CI `test` job) always replays.
+# A found crasher here surfaces as a failed scheduled run, and the seed corpus it
+# writes is uploaded so it can be committed as a permanent regression.
+
+on:
+  schedule:
+    - cron: "0 7 * * *" # daily at 07:00 UTC
+  workflow_dispatch:
+    inputs:
+      fuzztime:
+        description: "Fuzz duration per target (Go duration, e.g. 5m)"
+        required: false
+        default: "5m"
+
+concurrency:
+  group: "fuzz-${{ github.ref }}"
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: fuzz soak
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      # Targets are auto-discovered by `make fuzz` (go test -list), so a new
+      # FuzzXxx is picked up without editing this workflow. The dispatch input is
+      # passed through an env var rather than interpolated into the run script, to
+      # avoid shell injection from the workflow_dispatch field.
+      - name: Fuzz qv2 (soak)
+        env:
+          FUZZTIME: ${{ inputs.fuzztime || '5m' }}
+        run: make fuzz FUZZTIME="$FUZZTIME"
+
+      # On a crash, Go writes the offending input under testdata/fuzz/<target>/.
+      # Upload it so the maintainer can commit it as a regression seed.
+      - name: Upload new crashers
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-crashers
+          path: qv2/testdata/fuzz/
+          if-no-files-found: ignore
