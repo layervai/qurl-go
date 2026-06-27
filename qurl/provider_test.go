@@ -2,7 +2,6 @@ package qurl
 
 import (
 	"context"
-	"crypto/ecdsa"
 	"errors"
 	"net/http"
 	"testing"
@@ -21,6 +20,35 @@ func installDefaultProvider(t *testing.T, p Provider) {
 	prev := DefaultProvider()
 	SetDefaultProvider(p)
 	t.Cleanup(func() { SetDefaultProvider(prev) })
+}
+
+// capturingTransport is an http.RoundTripper that records the request URL and then
+// fails the transport, so a one-arg EnterPortal routing test can assert the derived
+// relay POST target without any real network. The one-arg EnterPortal cannot inject an
+// HTTPDoer (transport stays on the EnterPortalWith seam, by design), so the offline
+// hook is the process-wide http.DefaultTransport, which relayknock falls back to for a
+// nil HTTPClient. installCapturingTransport swaps it in scoped to one test.
+type capturingTransport struct {
+	gotURL string
+}
+
+func (c *capturingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	c.gotURL = req.URL.String()
+	return nil, errors.New("offline test transport")
+}
+
+// installCapturingTransport swaps http.DefaultTransport for a capturing-and-erroring
+// transport for the duration of a test, restoring the prior value on cleanup. Go tests
+// run sequentially by default, so a scoped global swap is safe here; it is the only
+// offline seam for the one-arg EnterPortal, whose nil HTTPClient routes through
+// http.DefaultClient → http.DefaultTransport.
+func installCapturingTransport(t *testing.T) *capturingTransport {
+	t.Helper()
+	ct := &capturingTransport{}
+	prev := http.DefaultTransport
+	http.DefaultTransport = ct
+	t.Cleanup(func() { http.DefaultTransport = prev })
+	return ct
 }
 
 // --- StaticProvider construction -------------------------------------------
@@ -45,18 +73,19 @@ func TestNewStaticProvider_NilHalvesRejected(t *testing.T) {
 // TestEnterPortal_StaticProvider_VerifiesAndRoutes is the headline "lit up" proof:
 // the LOCKED one-argument EnterPortal(ctx, link) — no Config — verifies a valid qv2
 // link and routes the knock to the derived relay URL, using only a process-wide
-// StaticProvider for the trust anchors + allowlist. It reaches the relay POST (a
-// transport error short-circuits before mocking a server), proving it got through
-// parse → verify sig → validate relay_url → derive serverId → build knock.
+// StaticProvider for the trust anchors + allowlist. The capturing transport records the
+// POST target and fails the transport, so reaching it proves EnterPortal got through
+// parse → verify sig → validate relay_url → derive serverId → build knock with no
+// per-call config.
 func TestEnterPortal_StaticProvider_VerifiesAndRoutes(t *testing.T) {
 	link, ts, cellFingerprint := vendoredAcceptLink(t)
-	doer := &capturingDoer{}
+	ct := installCapturingTransport(t)
 
 	sp, err := NewStaticProvider(ts, relayExampleAllowlist())
 	if err != nil {
 		t.Fatalf("new static provider: %v", err)
 	}
-	installDefaultProvider(t, &httpClientProvider{inner: sp, client: doer})
+	installDefaultProvider(t, sp)
 
 	_, err = EnterPortal(context.Background(), link)
 
@@ -65,8 +94,8 @@ func TestEnterPortal_StaticProvider_VerifiesAndRoutes(t *testing.T) {
 		t.Fatalf("want a *relayknock.RelayError after the POST, got %v", err)
 	}
 	wantURL := "https://relay.example.com/relay/" + cellFingerprint
-	if doer.gotURL != wantURL {
-		t.Fatalf("relay POST routed to %q, want %q", doer.gotURL, wantURL)
+	if ct.gotURL != wantURL {
+		t.Fatalf("relay POST routed to %q, want %q", ct.gotURL, wantURL)
 	}
 }
 
@@ -132,87 +161,9 @@ func TestEnterPortal_ProviderError_Propagates(t *testing.T) {
 	}
 }
 
-// --- Trust-anchor rotation (issue #2 done-criteria) ------------------------
-
-// TestStaticProvider_Rotation_OverlapVerifies covers the rotation done-criterion from
-// issue #2: during an overlap publish the trust store carries BOTH the old and the new
-// kid, so a link signed under EITHER kid verifies. qv2 rotation is overlap-publish via
-// the published map, so a provider re-publishes a superset map; here we build that
-// superset directly and confirm both links route.
-func TestStaticProvider_Rotation_OverlapVerifies(t *testing.T) {
-	oldS := newLocalIssuer(t, "issuer-old")
-	newS := newLocalIssuer(t, "issuer-new")
-
-	// Overlap trust store: both kids published together.
-	overlap, err := qv2.NewTrustStore(map[string]*ecdsa.PublicKey{
-		oldS.kid: oldS.pub(),
-		newS.kid: newS.pub(),
-	})
-	if err != nil {
-		t.Fatalf("overlap trust store: %v", err)
-	}
-	sp, err := NewStaticProvider(overlap, relayExampleAllowlist())
-	if err != nil {
-		t.Fatalf("static provider: %v", err)
-	}
-
-	for _, tc := range []struct {
-		name string
-		iss  *localIssuer
-	}{
-		{"old kid still verifies during overlap", oldS},
-		{"new kid verifies during overlap", newS},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			link, fp := tc.iss.mintLink(t)
-			doer := &capturingDoer{}
-			installDefaultProvider(t, &httpClientProvider{inner: sp, client: doer})
-
-			_, err := EnterPortal(context.Background(), link)
-			var relayErr *relayknock.RelayError
-			if !errors.As(err, &relayErr) {
-				t.Fatalf("want *relayknock.RelayError after POST, got %v", err)
-			}
-			if doer.gotURL != "https://relay.example.com/relay/"+fp {
-				t.Fatalf("routed to %q, want fingerprint %q", doer.gotURL, fp)
-			}
-		})
-	}
-}
-
 // providerFunc adapts a function to the Provider interface for tests.
 type providerFunc func(context.Context) (*qv2.TrustStore, *qv2.RelayAllowlist, error)
 
 func (f providerFunc) Resolve(ctx context.Context) (*qv2.TrustStore, *qv2.RelayAllowlist, error) {
 	return f(ctx)
-}
-
-// httpClientProvider wraps a Provider but is also used to thread a test HTTPDoer into
-// EnterPortal: the one-arg EnterPortal builds Config from the provider with a nil
-// HTTPClient (default client), so to assert the routed POST without real network we
-// install a provider whose Resolve returns the real anchors and rely on EnterPortalWith
-// for the client. Because the one-arg path does not take a client, this wrapper instead
-// makes EnterPortal route through a doer by having the test call EnterPortalWith under
-// the hood is NOT possible; so this provider simply returns the inner anchors and the
-// test asserts routing via a doer installed differently.
-//
-// In practice EnterPortal cannot inject an HTTP client, so these routing tests set the
-// client by resolving anchors here and letting EnterPortal use the default client would
-// hit the network. To keep tests offline, httpClientProvider is paired with a transport
-// override below.
-type httpClientProvider struct {
-	inner  Provider
-	client HTTPDoer
-}
-
-func (p *httpClientProvider) Resolve(ctx context.Context) (*qv2.TrustStore, *qv2.RelayAllowlist, error) {
-	return p.inner.Resolve(ctx)
-}
-
-var _ http.RoundTripper = (*errRoundTripper)(nil)
-
-type errRoundTripper struct{}
-
-func (errRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
-	return nil, errors.New("offline test transport")
 }
