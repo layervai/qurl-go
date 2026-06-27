@@ -2,12 +2,14 @@
 // issuer-signature crypto per the nhp design (QURL_V2_KEYED_IDENTITY.md, sections
 // "qURL v2 Artifact" and "Key Lifecycle → Issuer signing key").
 //
-// This is the verifier-side security core for a qURL link
-// (#qv2.<claims>.<secret>.<sig>): a strict allowlist parser, the issuer signing
-// input + raw r||s low-S signature verification, a published-key trust store, and
-// post-verify relay_url validation. It is a dependency-light, clean-room Go port
-// of the authoritative nhp Go verifier (endpoints/server/internal/qurlv2) and
-// qurl-service internal/qurlv2; it imports only the standard library.
+// This is the security core for a qURL link (#qv2.<claims>.<secret>.<sig>): a
+// strict allowlist parser, the issuer signing input + raw r||s low-S signature
+// verification, a published-key trust store, post-verify relay_url validation, and
+// the matching mint side (sign.go: the Signer seam + SignClaims) that signs the
+// EXACT bytes the verifier checks. It is a dependency-light, clean-room Go port of
+// the authoritative nhp Go verifier (endpoints/server/internal/qurlv2) and
+// qurl-service internal/qurlv2; it imports only the standard library — the issuer
+// signing key is reached through the Signer interface, never a baked-in KMS client.
 //
 // Design invariants enforced here:
 //   - The issuer signature is computed/verified over the EXACT base64url bytes of
