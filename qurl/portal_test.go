@@ -98,10 +98,11 @@ func mustDecode(t *testing.T, b64 string) []byte {
 	return b
 }
 
-// freshTrustStore mints an unrelated issuer key under a kid that is NOT the
-// vendored vector's kid, so a vector-signed link resolves to ErrUnknownKID against
-// it.
-func freshTrustStore(t *testing.T) *qv2.TrustStore {
+// freshP256SPKIDER mints a fresh P-256 key and returns its public key in DER SPKI
+// form — the trust-store load shape NewTrustStoreFromDER consumes and the issuer-key
+// shape a discovery manifest carries (base64url-encoded). Shared by freshTrustStore
+// and the discovery test's issuer fixtures so the keygen+marshal prologue lives once.
+func freshP256SPKIDER(t *testing.T) []byte {
 	t.Helper()
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -111,7 +112,15 @@ func freshTrustStore(t *testing.T) *qv2.TrustStore {
 	if err != nil {
 		t.Fatalf("marshal SPKI: %v", err)
 	}
-	ts, err := qv2.NewTrustStoreFromDER(map[string][]byte{"unrelated-kid": der})
+	return der
+}
+
+// freshTrustStore mints an unrelated issuer key under a kid that is NOT the
+// vendored vector's kid, so a vector-signed link resolves to ErrUnknownKID against
+// it.
+func freshTrustStore(t *testing.T) *qv2.TrustStore {
+	t.Helper()
+	ts, err := qv2.NewTrustStoreFromDER(map[string][]byte{"unrelated-kid": freshP256SPKIDER(t)})
 	if err != nil {
 		t.Fatalf("new trust store: %v", err)
 	}

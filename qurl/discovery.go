@@ -281,7 +281,7 @@ func (p *DiscoveryProvider) authenticate(env *ManifestEnvelope, manifestBytes []
 	if len(p.cfg.PinSHA256) != 0 {
 		got := qv2.ManifestDigest(manifestBytes)
 		if subtle.ConstantTimeCompare(got[:], p.cfg.PinSHA256) != 1 {
-			return fmt.Errorf("%w", ErrManifestPinMismatch)
+			return ErrManifestPinMismatch
 		}
 		pinned = true
 	}
@@ -389,9 +389,11 @@ func parseManifest(manifestBytes []byte) (*Manifest, error) {
 }
 
 // buildTrustMaterial turns an authenticated, in-window manifest into the qv2 trust
-// store and relay allowlist. It defers the actual key parsing / non-empty checks to
-// qv2.NewTrustStoreFromDER and qv2.NewRelayAllowlist, reusing their fail-closed
-// construction rather than re-validating here.
+// store and relay allowlist. It defers issuer-key parsing (and the empty-anchor-set
+// rejection) to qv2.NewTrustStoreFromDER, reusing its fail-closed construction rather
+// than re-validating here. The relay allowlist's emptiness is already gated upstream in
+// parseManifest (an empty relay_allowlist is a schema fault), so qv2.NewRelayAllowlist
+// only needs to index the entries.
 func buildTrustMaterial(m *Manifest) (*qv2.TrustStore, *qv2.RelayAllowlist, error) {
 	derByKID := make(map[string][]byte, len(m.Issuers))
 	for _, iss := range m.Issuers {

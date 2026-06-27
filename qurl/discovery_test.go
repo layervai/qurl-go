@@ -5,7 +5,6 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"testing"
@@ -41,15 +40,7 @@ func fixedNow(t time.Time) func() time.Time { return func() time.Time { return t
 // the shape a manifest issuer entry carries.
 func issuerDERB64(t *testing.T, kid string) (string, string) {
 	t.Helper()
-	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatalf("generate issuer key: %v", err)
-	}
-	der, err := x509.MarshalPKIXPublicKey(&priv.PublicKey)
-	if err != nil {
-		t.Fatalf("marshal SPKI: %v", err)
-	}
-	return kid, b64url.EncodeToString(der)
+	return kid, b64url.EncodeToString(freshP256SPKIDER(t))
 }
 
 // validManifest is an in-window, well-formed manifest with one issuer and one relay

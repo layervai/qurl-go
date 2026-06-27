@@ -33,11 +33,7 @@ type testSigner struct {
 // newTestSigner generates a fresh local P-256 issuer key under testIssuerKID.
 func newTestSigner(t *testing.T) *testSigner {
 	t.Helper()
-	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatalf("generate issuer key: %v", err)
-	}
-	return &testSigner{priv: priv, kid: testIssuerKID}
+	return newTestSignerWithKID(t, testIssuerKID)
 }
 
 // signClaims stamps the issuer kid, marshals claims to canonical base64url, signs
