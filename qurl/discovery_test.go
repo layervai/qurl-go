@@ -337,6 +337,48 @@ func TestDiscoveryProvider_Expired_FailsClosed(t *testing.T) {
 	}
 }
 
+// TestDiscoveryProvider_NotYetValid_FailsClosed proves the lower-bound freshness guard
+// with clock-skew tolerance: a manifest whose issued_at is in the future by MORE than
+// manifestClockSkewLeeway is rejected as ErrManifestNotYetValid, while one within the
+// leeway is accepted (so benign skew between issuer and client doesn't strand a viewer).
+// A fixed clock makes the future-relative window deterministic; the pin authenticates
+// the bytes so only the freshness bound bites.
+func TestDiscoveryProvider_NotYetValid_FailsClosed(t *testing.T) {
+	const nowUnix = 10000
+	leewaySec := int64(manifestClockSkewLeeway / time.Second)
+
+	t.Run("beyond leeway rejected", func(t *testing.T) {
+		m := validManifest(t)
+		// issued_at sits one minute PAST the leeway window, so now+leeway < issued_at.
+		m.IssuedAt = nowUnix + leewaySec + 60
+		m.NotAfter = m.IssuedAt + 3600 // coherent window (not_after > issued_at)
+		raw, pin := envelopeBytes(t, m)
+		p := pinnedProvider(t, raw, pin, fixedNow(time.Unix(nowUnix, 0)))
+
+		if _, _, err := p.Resolve(context.Background()); !errors.Is(err, ErrManifestNotYetValid) {
+			t.Fatalf("future-dated beyond leeway: want ErrManifestNotYetValid, got %v", err)
+		}
+	})
+
+	t.Run("within leeway accepted", func(t *testing.T) {
+		m := validManifest(t)
+		// issued_at is in the future but INSIDE the leeway window (now+leeway >= issued_at),
+		// modeling a slightly-early publish or a lagging client clock — must be accepted.
+		m.IssuedAt = nowUnix + (leewaySec / 2)
+		m.NotAfter = m.IssuedAt + 3600
+		raw, pin := envelopeBytes(t, m)
+		p := pinnedProvider(t, raw, pin, fixedNow(time.Unix(nowUnix, 0)))
+
+		ts, allow, err := p.Resolve(context.Background())
+		if err != nil {
+			t.Fatalf("future-dated within leeway should be accepted: %v", err)
+		}
+		if ts == nil || allow == nil {
+			t.Fatal("within-leeway manifest resolved to a nil trust store or allowlist")
+		}
+	})
+}
+
 // TestDiscoveryProvider_Downgrade_FailsClosed proves the monotonic-version floor: once
 // an under-floor manifest is rejected up front as a downgrade. A MinVersion floor
 // above the manifest's version isolates the version guard from the pin (the bytes

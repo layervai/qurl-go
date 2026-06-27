@@ -149,6 +149,18 @@ type DiscoveryConfig struct {
 	Now func() time.Time
 }
 
+// manifestClockSkewLeeway is the tolerance applied to the manifest's lower validity
+// bound (issued_at). A manifest whose issued_at is in the FUTURE relative to the local
+// clock is rejected as not-yet-valid — but only once it is more than this leeway ahead,
+// so a manifest published a few seconds early or a client whose clock lags slightly is
+// still accepted. Without the leeway a bare now < issued_at check would strand
+// legitimate viewers on benign clock skew between the issuer and the client. The value
+// mirrors a conservative NTP-grade skew budget; it is intentionally small relative to a
+// manifest's lifetime, so it tightens the freshness window without being a real attack
+// lever (the manifest is still pin/signature-authenticated and upper-bounded by
+// not_after and the monotonic version floor).
+const manifestClockSkewLeeway = 2 * time.Minute
+
 // Discovery-path sentinel errors. Each failure mode has its OWN sentinel so a caller
 // (and a test) can assert the specific cause with errors.Is, and so removing any one
 // guard makes exactly that test go red. All are fail-closed outcomes.
@@ -162,6 +174,10 @@ var (
 	ErrManifestPinMismatch = errors.New("qurl: discovery manifest pin mismatch")
 	// ErrManifestExpired is returned when now > manifest.not_after.
 	ErrManifestExpired = errors.New("qurl: discovery manifest expired")
+	// ErrManifestNotYetValid is returned when manifest.issued_at is in the future by more
+	// than manifestClockSkewLeeway — the lower-bound freshness guard, symmetric with
+	// ErrManifestExpired. A manifest within the leeway is accepted (benign clock skew).
+	ErrManifestNotYetValid = errors.New("qurl: discovery manifest not yet valid")
 	// ErrManifestDowngrade is returned when manifest.version is below the provider's
 	// downgrade floor (an attempted rollback to an older revision).
 	ErrManifestDowngrade = errors.New("qurl: discovery manifest version downgrade")
@@ -265,12 +281,23 @@ func (p *DiscoveryProvider) Resolve(ctx context.Context) (*qv2.TrustStore, *qv2.
 		return nil, nil, fmt.Errorf("%w: profile %q, want %q", ErrManifestSchema, manifest.Profile, p.cfg.ExpectedProfile)
 	}
 
-	// Freshness: expiry (clock) then downgrade (monotonic version). Both fail closed.
-	// Read the clock once so the compared and reported values agree. The boundary is
-	// inclusive — now == not_after is still valid; the manifest expires the second AFTER
-	// not_after (a one-second grace at the exact boundary, immaterial against the
-	// manifest's lifetime and matching "valid through not_after").
+	// Freshness: not-yet-valid then expiry (clock), then downgrade (monotonic version).
+	// All fail closed. Read the clock once so the compared and reported values agree.
+	//
+	// Lower bound (not-yet-valid): a manifest whose issued_at is in the future is rejected
+	// once it is more than manifestClockSkewLeeway ahead of now, so a benignly skewed clock
+	// or a slightly-early publish is still accepted while a clearly future-dated manifest
+	// fails closed. This makes "in window" mean BOTH ends, symmetric with the expiry check.
+	//
+	// Upper bound (expiry): the boundary is inclusive — now == not_after is still valid;
+	// the manifest expires the second AFTER not_after (a one-second grace at the exact
+	// boundary, immaterial against the manifest's lifetime and matching "valid through
+	// not_after").
 	now := p.now().Unix()
+	leeway := int64(manifestClockSkewLeeway / time.Second)
+	if now+leeway < manifest.IssuedAt {
+		return nil, nil, fmt.Errorf("%w: issued_at=%d, now=%d, leeway=%ds", ErrManifestNotYetValid, manifest.IssuedAt, now, leeway)
+	}
 	if now > manifest.NotAfter {
 		return nil, nil, fmt.Errorf("%w: not_after=%d, now=%d", ErrManifestExpired, manifest.NotAfter, now)
 	}
