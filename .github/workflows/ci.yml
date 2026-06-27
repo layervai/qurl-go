@@ -30,6 +30,20 @@ jobs:
           go-version-file: go.mod
           check-latest: true
 
+      # Gate go.mod/go.sum tidiness inside this required check rather than
+      # auto-pushing a fix from a separate workflow. A push made with the
+      # default GITHUB_TOKEN does not re-trigger required checks (GitHub's
+      # recursion guard), so an auto-tidy commit could merge unvalidated.
+      # Failing here forces the drift onto a commit CI actually runs.
+      - name: Verify go.mod/go.sum are tidy
+        run: |
+          go mod tidy
+          # --exit-code prints the drift AND returns non-zero in one shot.
+          if ! git diff --exit-code -- go.mod go.sum; then
+            echo "::error::go.mod/go.sum are not tidy. Run 'go mod tidy' locally and commit the result."
+            exit 1
+          fi
+
       - name: go vet
         run: go vet ./...
 
