@@ -60,12 +60,23 @@ import "github.com/layervai/qurl-go/qurl"
 // One-shot: parse the qURL link, verify the issuer signature, derive the relay
 // route from the verified cell key, and knock using the per-qURL key carried in
 // the link. No external key is needed — the credential rides in the fragment.
-handle, err := qurl.EnterPortal(ctx, "https://qurl.link/#qv2.<claims>.<secret>.<sig>")
+//
+// NOTE: until the qv2 issuer trust anchors ship (see "Provisional" below), the
+// one-argument form fails closed with ErrNotConfigured. Today you supply the
+// trust anchors + relay allowlist explicitly via EnterPortalWith:
+cfg := qurl.Config{TrustStore: trustStore, RelayAllowlist: allowlist}
+handle, err := qurl.EnterPortalWith(ctx, "https://qurl.link/#qv2.<claims>.<secret>.<sig>", cfg)
 if err != nil {
-    // signature/parse failure, relay_url rejected, relay transport error, or an
-    // authenticated server deny.
+    // errors.Is(err, qurl.ErrNotConfigured) — no trust anchors / allowlist;
+    // qv2.ErrSignature / qv2.ErrUnknownKID — bad/unknown issuer signature;
+    // qv2.ErrRelayURL — relay_url not HTTPS or off the allowlist;
+    // *relayknock.RelayError — relay transport fault;
+    // *qurl.ServerDenyError — authenticated server deny (carries ErrCode);
+    // qurl.ErrServerOverloaded / qurl.ErrMalformedReply — retry / unusable reply.
 }
-// handle carries the reachable resource (e.g. the redirect URL) the server returned.
+// handle carries the reachable resource (the redirect URL) the server returned.
+
+// Once the anchors ship, qurl.EnterPortal(ctx, link) works with no config.
 ```
 
 ### Same-egress-IP invariant
