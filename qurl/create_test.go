@@ -298,6 +298,11 @@ func TestCreatePortal_ParamValidation(t *testing.T) {
 		"missing relay url":    func(p *CreateParams) { p.RelayURL = "" },
 		"missing resource key": func(p *CreateParams) { p.ResourcePublicKey = nil },
 		"missing jti":          func(p *CreateParams) { p.JTI = "" },
+		// Zero-value time fields are missing-required-input faults too, so they
+		// share the ErrInvalidCreateParams class rather than leaking ErrStrictParse.
+		"missing issued_at":  func(p *CreateParams) { p.IssuedAt = 0 },
+		"missing not_before": func(p *CreateParams) { p.NotBefore = 0 },
+		"missing expiry":     func(p *CreateParams) { p.Expiry = 0 },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {

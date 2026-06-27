@@ -128,6 +128,11 @@ func CreatePortal(ctx context.Context, signer qv2.Signer, p CreateParams) (strin
 	// Sign the EXACT marshaled claims bytes through the seam. SignClaims stamps the
 	// signer kid, strict-validates the bytes, and returns the canonical Part-1
 	// string alongside the raw 64-byte low-S signature.
+	//
+	// qv2 errors from SignClaims and BuildFragment below are returned VERBATIM (no
+	// qurl: wrap) so callers keep matching the qv2 sentinels directly —
+	// errors.Is(err, qv2.ErrStrictParse) for an invalid claim window/shape, etc. The
+	// keygen/secret errors above carry no such sentinel, so those are qurl:-wrapped.
 	claimsB64, rawSig, err := qv2.SignClaims(ctx, signer, claims)
 	if err != nil {
 		return "", err
@@ -148,10 +153,14 @@ func CreatePortal(ctx context.Context, signer qv2.Signer, p CreateParams) (strin
 	return LinkBaseURL + "#" + body, nil
 }
 
-// validate checks the issuer-supplied bindings are present before any keygen or
-// signing. The deep claim-value rules (key lengths, time ordering, version) are
-// enforced once, centrally, by qv2.SignClaims's strict-parse-before-sign; this
-// only catches the required-input omissions with a CreatePortal-shaped error.
+// validate checks the issuer-supplied bindings are PRESENT before any keygen or
+// signing, so every missing-required-input fault is one error class
+// (ErrInvalidCreateParams) a caller can match with a single errors.Is. The
+// presence checks cover all required inputs, including the three time fields
+// (a zero Unix second is treated as "omitted"). The DEEP value rules — key
+// lengths, version pin, the iat<=exp / nbf<=exp ordering bounds — are left to
+// qv2.SignClaims's strict-parse-before-sign, which surfaces them as
+// qv2.ErrStrictParse; validate deliberately does not duplicate them.
 func (p CreateParams) validate() error {
 	if len(p.CellPublicKey) == 0 {
 		return fmt.Errorf("%w: CellPublicKey is required", ErrInvalidCreateParams)
@@ -164,6 +173,19 @@ func (p CreateParams) validate() error {
 	}
 	if p.JTI == "" {
 		return fmt.Errorf("%w: JTI is required", ErrInvalidCreateParams)
+	}
+	// Time fields: a zero value means the caller omitted them (Unix second 0 is not
+	// a usable qURL window). Catch them here as a missing-input fault rather than
+	// letting the strict parser's required-and-non-zero rule surface them as a
+	// different error class. Ordering (iat<=exp, nbf<=exp) stays in the parser.
+	if p.IssuedAt == 0 {
+		return fmt.Errorf("%w: IssuedAt is required", ErrInvalidCreateParams)
+	}
+	if p.NotBefore == 0 {
+		return fmt.Errorf("%w: NotBefore is required", ErrInvalidCreateParams)
+	}
+	if p.Expiry == 0 {
+		return fmt.Errorf("%w: Expiry is required", ErrInvalidCreateParams)
 	}
 	return nil
 }

@@ -179,3 +179,90 @@ func TestSignClaims_SurfacesSignerError(t *testing.T) {
 		t.Fatalf("want wrapped signer error, got %v", err)
 	}
 }
+
+// wrongKeySigner signs with one key but reports a DIFFERENT key's public DER. It
+// models a custody misconfiguration (wrong/rotated/region-mismatched KMS key): the
+// produced DER is structurally valid (passes derToRawLowS) but does not verify
+// under the reported public key. This is the ONLY shape that exercises the
+// self-verify branch — a signer returning garbage bytes would fail earlier at
+// derToRawLowS, which is the existing error-path coverage, not self-verify.
+type wrongKeySigner struct {
+	signing  *LocalSigner // signs with key A
+	reported *LocalSigner // PublicKeyDER reports key B (a different key)
+}
+
+func (s wrongKeySigner) KID() string { return s.signing.KID() }
+func (s wrongKeySigner) SignDigest(ctx context.Context, digest []byte) ([]byte, error) {
+	return s.signing.SignDigest(ctx, digest)
+}
+func (s wrongKeySigner) PublicKeyDER() ([]byte, error) { return s.reported.PublicKeyDER() }
+
+// TestSignClaims_SelfVerifyRejectsWrongKey proves the best-effort self-verify fails
+// closed at MINT time when the signing key disagrees with the signer's reported
+// public key — so a custody misconfiguration cannot mint a structurally valid but
+// unverifiable link. Without the self-verify step this case would return nil error
+// (the DER is well-formed); the assertion is precisely what makes it a real guard.
+func TestSignClaims_SelfVerifyRejectsWrongKey(t *testing.T) {
+	signer := wrongKeySigner{signing: newLocalSigner(t), reported: newLocalSigner(t)}
+
+	_, _, err := SignClaims(context.Background(), signer, baselineClaims(t))
+	if !errors.Is(err, ErrSignature) {
+		t.Fatalf("wrong-key signer: want ErrSignature from self-verify, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "self-verify") {
+		t.Fatalf("error should name the self-verify cause, got %v", err)
+	}
+}
+
+// TestSignClaims_SelfVerifyAcceptsMatchingKey proves the self-verify does NOT
+// false-positive a correct signer: a wrongKeySigner that reports its OWN signing
+// key (reported == signing) mints and self-verifies cleanly, and the result still
+// verifies through the public ParseAndVerify path.
+func TestSignClaims_SelfVerifyAcceptsMatchingKey(t *testing.T) {
+	ls := newLocalSigner(t)
+	signer := wrongKeySigner{signing: ls, reported: ls} // reports the real signing key
+
+	claimsB64, rawSig, err := SignClaims(context.Background(), signer, baselineClaims(t))
+	if err != nil {
+		t.Fatalf("matching-key self-verify should pass: %v", err)
+	}
+	body, err := BuildFragment(claimsB64, mintSecretB64(t), rawSig)
+	if err != nil {
+		t.Fatalf("BuildFragment: %v", err)
+	}
+	if _, err := ParseAndVerify(body, signerTrustStore(t, ls)); err != nil {
+		t.Fatalf("self-verified mint must also pass ParseAndVerify: %v", err)
+	}
+}
+
+// noPubKeySigner is a Signer that does NOT implement publicKeyDERer, so SignClaims
+// skips self-verify (documented best-effort). It signs correctly with a local key.
+type noPubKeySigner struct{ inner *LocalSigner }
+
+func (s noPubKeySigner) KID() string { return s.inner.KID() }
+func (s noPubKeySigner) SignDigest(ctx context.Context, digest []byte) ([]byte, error) {
+	return s.inner.SignDigest(ctx, digest)
+}
+
+// TestSignClaims_SelfVerifySkippedWithoutPubKey proves a signer that cannot surface
+// a public key skips the self-verify step and still mints a valid, verifiable link
+// — the seam stays minimal (a KMS signer is not forced to expose its public half).
+func TestSignClaims_SelfVerifySkippedWithoutPubKey(t *testing.T) {
+	ls := newLocalSigner(t)
+	signer := noPubKeySigner{inner: ls}
+	if _, ok := any(signer).(interface{ PublicKeyDER() ([]byte, error) }); ok {
+		t.Fatal("fixture: noPubKeySigner must NOT implement publicKeyDERer")
+	}
+
+	claimsB64, rawSig, err := SignClaims(context.Background(), signer, baselineClaims(t))
+	if err != nil {
+		t.Fatalf("signer without pubkey should mint (self-verify skipped): %v", err)
+	}
+	body, err := BuildFragment(claimsB64, mintSecretB64(t), rawSig)
+	if err != nil {
+		t.Fatalf("BuildFragment: %v", err)
+	}
+	if _, err := ParseAndVerify(body, signerTrustStore(t, ls)); err != nil {
+		t.Fatalf("ParseAndVerify of skipped-self-verify mint: %v", err)
+	}
+}

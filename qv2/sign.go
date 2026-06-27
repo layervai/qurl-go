@@ -42,6 +42,20 @@ type Signer interface {
 	SignDigest(ctx context.Context, digest []byte) (derSig []byte, err error)
 }
 
+// publicKeyDERer is the OPTIONAL extension a Signer may implement to let
+// SignClaims self-verify the produced signature before returning. PublicKeyDER
+// returns the signer's issuer public key in DER SPKI form (the same shape AWS KMS
+// GetPublicKey returns). It is intentionally NOT part of the Signer interface: a
+// KMS signer should not be forced to expose its public half on the mint path. When
+// a signer DOES implement it, SignClaims verifies the raw signature against the
+// digest under this key, so a custody misconfiguration (wrong/rotated/region-
+// mismatched key) fails closed at mint time instead of producing a link that only
+// fails downstream. LocalSigner satisfies this; a production KMS signer should
+// cache the DER so self-verify does not cost a GetPublicKey per mint.
+type publicKeyDERer interface {
+	PublicKeyDER() ([]byte, error)
+}
+
 // SignClaims is the issuance entry point: it serializes claims to the canonical
 // qURL v2 wire encoding, signs the exact bytes that will appear as fragment Part
 // 1, and returns both the encoded claims part and the pinned 64-byte raw r||s
@@ -103,7 +117,45 @@ func SignClaims(ctx context.Context, signer Signer, claims *Claims) (claimsB64 s
 	if err != nil {
 		return "", nil, fmt.Errorf("qv2: convert signature to wire format: %w", err)
 	}
+	// Best-effort self-verify: if the signer can surface its public key, verify the
+	// raw signature against the digest through the SAME path a real verifier uses
+	// (verifyRawSignature re-derives signingDigest and re-runs the length/range/
+	// low-S checks). This catches a custody misconfiguration — a signer whose
+	// SignDigest key disagrees with its reported public key (wrong/rotated/region-
+	// mismatched KMS key) — at mint time, fail-closed, rather than minting a link
+	// that silently fails downstream verification. A signer that does not expose a
+	// public key skips this step (documented best-effort), keeping the Signer seam
+	// minimal.
+	if err := selfVerify(signer, claimsB64, rawSig); err != nil {
+		return "", nil, err
+	}
 	return claimsB64, rawSig, nil
+}
+
+// selfVerify checks the freshly minted signature against the signer's own public
+// key when the signer implements publicKeyDERer. It returns nil (skips) when the
+// signer cannot surface a public key. It fails closed if the key cannot be
+// obtained/parsed or the signature does not verify, so a custody misconfiguration
+// cannot mint a structurally valid but unverifiable link. It reuses
+// verifyRawSignature (the verifier's own primitive) rather than a parallel check.
+func selfVerify(signer Signer, claimsB64 string, rawSig []byte) error {
+	pkProvider, ok := signer.(publicKeyDERer)
+	if !ok {
+		return nil // best-effort: signer does not expose a public key
+	}
+	der, err := pkProvider.PublicKeyDER()
+	if err != nil {
+		return fmt.Errorf("qv2: self-verify could not obtain signer public key: %w", err)
+	}
+	pub, err := ParseP256PublicKeyDER(der)
+	if err != nil {
+		return fmt.Errorf("qv2: self-verify could not parse signer public key: %w", err)
+	}
+	if err := verifyRawSignature(pub, claimsB64, rawSig); err != nil {
+		return fmt.Errorf("qv2: minted signature failed self-verify against the signer public key "+
+			"(custody misconfiguration?): %w", err)
+	}
+	return nil
 }
 
 // LocalSigner is an in-process Signer backed by a software-resident P-256 private
