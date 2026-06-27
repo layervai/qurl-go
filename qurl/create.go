@@ -1,16 +1,3 @@
-// CreatePortal is the issuer-side mint verb: the inverse of EnterPortal. Where
-// EnterPortal opens an existing qURL link, CreatePortal produces one — it
-// assembles and signs the qURL v2 claims, generates the fresh per-qURL keypair
-// whose secret rides in the fragment, and returns the
-// https://qurl.link/#qv2.<claims>.<secret>.<sig> link.
-//
-// The issuer signing key is never held here directly: signing goes through the
-// qv2.Signer seam (KMS in production, qv2.LocalSigner for tests / self-custody
-// integrations), so this verb has no AWS dependency and the credential-provider
-// follow-up can supply a real KMS signer without touching this code. The signed
-// claims bytes are handed verbatim to qv2.BuildFragment, so the bytes the issuer
-// signs are exactly the bytes a verifier (qv2.ParseAndVerify / EnterPortal)
-// checks — mint and enter are symmetric by construction.
 package qurl
 
 import (
@@ -24,6 +11,21 @@ import (
 
 	"github.com/layervai/qurl-go/qv2"
 )
+
+// CreatePortal is the issuer-side mint verb: the inverse of EnterPortal. Where
+// EnterPortal opens an existing qURL link, CreatePortal produces one — it
+// assembles and signs the qURL v2 claims, generates the fresh per-qURL keypair
+// whose secret rides in the fragment, and returns the
+// https://qurl.link/#qv2.<claims>.<secret>.<sig> link. (The package doc lives in
+// portal.go; this is the mint half of the same qurl entry surface.)
+//
+// The issuer signing key is never held here directly: signing goes through the
+// qv2.Signer seam (KMS in production, qv2.LocalSigner for tests / self-custody
+// integrations), so this verb has no AWS dependency and the credential-provider
+// follow-up can supply a real KMS signer without touching this code. The signed
+// claims bytes are handed verbatim to qv2.BuildFragment, so the bytes the issuer
+// signs are exactly the bytes a verifier (qv2.ParseAndVerify / EnterPortal)
+// checks — mint and enter are symmetric by construction.
 
 // LinkBaseURL is the canonical qURL link origin CreatePortal prepends to the
 // fragment. The credential, claims, and signature all live in the fragment after
@@ -151,14 +153,16 @@ func CreatePortal(ctx context.Context, signer qv2.Signer, p CreateParams) (strin
 // enforced once, centrally, by qv2.SignClaims's strict-parse-before-sign; this
 // only catches the required-input omissions with a CreatePortal-shaped error.
 func (p CreateParams) validate() error {
-	switch {
-	case len(p.CellPublicKey) == 0:
+	if len(p.CellPublicKey) == 0 {
 		return fmt.Errorf("%w: CellPublicKey is required", ErrInvalidCreateParams)
-	case p.RelayURL == "":
+	}
+	if p.RelayURL == "" {
 		return fmt.Errorf("%w: RelayURL is required", ErrInvalidCreateParams)
-	case len(p.ResourcePublicKey) == 0:
+	}
+	if len(p.ResourcePublicKey) == 0 {
 		return fmt.Errorf("%w: ResourcePublicKey is required", ErrInvalidCreateParams)
-	case p.JTI == "":
+	}
+	if p.JTI == "" {
 		return fmt.Errorf("%w: JTI is required", ErrInvalidCreateParams)
 	}
 	return nil
