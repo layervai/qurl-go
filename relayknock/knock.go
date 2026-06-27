@@ -118,12 +118,24 @@ func BuildKnock(inp *KnockInputs) ([]byte, error) {
 	return packet, nil
 }
 
+// Exported NHP reply header-type values, so a consumer can construct or assert a
+// Reply.Type (e.g. in tests) without importing the internal wire constants. These
+// are the only two reply types a single resolve can see.
+const (
+	// TypeACK is NHP_ACK: an authorized-admission reply carrying the application
+	// payload in Body.
+	TypeACK = nhpACK
+	// TypeCookieChallenge is NHP_COK: an overload cookie-challenge.
+	TypeCookieChallenge = nhpCOK
+)
+
 // Reply is a decrypted, authenticated NHP server reply (NHP_ACK / NHP_COK). Body
 // is the decrypted application body; the caller interprets it (relayknock is
 // body-shape agnostic).
 type Reply struct {
-	// Type is the NHP header type. Use IsACK / IsCookieChallenge rather than
-	// comparing the raw value, which keeps the wire constants unexported.
+	// Type is the NHP header type (TypeACK / TypeCookieChallenge). Prefer IsACK /
+	// IsCookieChallenge for intent; the exported constants exist so a consumer can
+	// also construct a Reply with a specific type.
 	Type           int
 	Counter        uint64
 	TimestampNanos uint64
