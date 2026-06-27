@@ -204,6 +204,16 @@ func NewDiscoveryProvider(cfg DiscoveryConfig) (*DiscoveryProvider, error) {
 	if cfg.RequireSignature && len(cfg.ManifestKeys) == 0 {
 		return nil, fmt.Errorf("%w: RequireSignature set but no ManifestKeys configured", ErrDiscoveryConfig)
 	}
+	// Validate the manifest-signing keys at construction so a nil or non-P-256 entry
+	// surfaces here, not on the first signed-manifest fetch. NewTrustStore is the same
+	// validator the trust-anchor path uses (non-empty kid, non-nil P-256 point). It is
+	// guarded on a non-empty map because pin-only mode (no ManifestKeys) is legal and
+	// NewTrustStore rejects an empty map; the throwaway store is only used to validate.
+	if len(cfg.ManifestKeys) != 0 {
+		if _, err := qv2.NewTrustStore(cfg.ManifestKeys); err != nil {
+			return nil, fmt.Errorf("%w: invalid ManifestKeys: %w", ErrDiscoveryConfig, err)
+		}
+	}
 	return &DiscoveryProvider{cfg: cfg, floor: cfg.MinVersion}, nil
 }
 
@@ -242,17 +252,21 @@ func (p *DiscoveryProvider) Resolve(ctx context.Context) (*qv2.TrustStore, *qv2.
 		return nil, nil, fmt.Errorf("%w: not_after=%d, now=%d", ErrManifestExpired, manifest.NotAfter, now)
 	}
 
-	ts, allow, err := buildTrustMaterial(manifest)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	// Advance the downgrade floor under the lock so concurrent resolves see a monotonic
-	// floor and never roll back.
+	// Downgrade check + floor advance are one atomic step under the lock so concurrent
+	// resolves see a monotonic floor and never roll back. The check stays BELT-AND-LOCK:
+	// reading the floor and writing it must not straddle two acquisitions, or a racing
+	// resolve could move the floor backward (a monotonicity TOCTOU). buildTrustMaterial
+	// runs only after the floor check passes — so a downgrade/replay fails before the
+	// issuer-DER parsing is spent, and it touches no provider state, so holding the lock
+	// across it adds no contention (the expensive fetch already happened outside it).
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if manifest.Version < p.floor {
 		return nil, nil, fmt.Errorf("%w: version=%d < floor=%d", ErrManifestDowngrade, manifest.Version, p.floor)
+	}
+	ts, allow, err := buildTrustMaterial(manifest)
+	if err != nil {
+		return nil, nil, err
 	}
 	p.floor = manifest.Version
 	return ts, allow, nil

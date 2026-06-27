@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"time"
 )
 
 // HTTP-backed manifest fetcher. Kept in the qurl layer (not qv2) so the qv2 crypto
@@ -17,6 +19,18 @@ import (
 // authentication has a chance to reject it.
 const maxManifestBytes = 1 << 20 // 1 MiB
 
+// defaultFetchTimeout bounds a manifest fetch on the nil-client path so a
+// slow-trickle endpoint cannot hang Resolve when the caller passes a deadline-free
+// context (e.g. context.Background()). A caller that wants a different bound injects
+// its own Client; the cap is a floor of safety, not a tuned value.
+const defaultFetchTimeout = 30 * time.Second
+
+// defaultFetchClient is the nil-Client fallback: http.DefaultClient has NO timeout,
+// so falling back to it would leave Fetch bounded only by ctx and the read cap. A
+// shared package-level client (instead of one per Fetch) keeps the connection pool
+// warm and covers both the constructor-nil and struct-literal-nil paths.
+var defaultFetchClient = &http.Client{Timeout: defaultFetchTimeout}
+
 // HTTPFetcher fetches the discovery envelope over HTTPS. The URL should be the
 // published manifest location. Authentication of the fetched bytes is the
 // DiscoveryProvider's job (pin or signature) — the fetcher is transport only and the
@@ -27,13 +41,23 @@ type HTTPFetcher struct {
 	Client HTTPDoer
 }
 
-// NewHTTPFetcher builds an HTTPFetcher for url. A nil client uses http.DefaultClient.
-// The url is required.
-func NewHTTPFetcher(url string, client HTTPDoer) (*HTTPFetcher, error) {
-	if url == "" {
+// NewHTTPFetcher builds an HTTPFetcher for rawURL. A nil client uses a shared client
+// with defaultFetchTimeout. rawURL is required and MUST be https — the transport is
+// not a trust boundary (the manifest is pinned/signed), but rejecting a plaintext
+// http:// manifest URL at construction catches a misconfig early and matches the
+// "over HTTPS" contract, rather than shipping discovery bytes in the clear.
+func NewHTTPFetcher(rawURL string, client HTTPDoer) (*HTTPFetcher, error) {
+	if rawURL == "" {
 		return nil, fmt.Errorf("%w: manifest URL is required", ErrDiscoveryConfig)
 	}
-	return &HTTPFetcher{URL: url, Client: client}, nil
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return nil, fmt.Errorf("%w: manifest URL is not a valid URL: %w", ErrDiscoveryConfig, err)
+	}
+	if u.Scheme != "https" {
+		return nil, fmt.Errorf("%w: manifest URL must be https (got %q)", ErrDiscoveryConfig, u.Scheme)
+	}
+	return &HTTPFetcher{URL: rawURL, Client: client}, nil
 }
 
 // Fetch GETs the manifest URL and returns the response body (capped at
@@ -46,7 +70,7 @@ func (f *HTTPFetcher) Fetch(ctx context.Context) ([]byte, error) {
 	}
 	client := f.Client
 	if client == nil {
-		client = http.DefaultClient
+		client = defaultFetchClient
 	}
 	resp, err := client.Do(req)
 	if err != nil {

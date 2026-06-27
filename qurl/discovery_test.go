@@ -113,6 +113,40 @@ func TestNewDiscoveryProvider_AuthenticatesNothing_Rejected(t *testing.T) {
 	if _, err := NewDiscoveryProvider(DiscoveryConfig{Fetcher: fetch, PinSHA256: make([]byte, 32), RequireSignature: true}); !errors.Is(err, ErrDiscoveryConfig) {
 		t.Fatalf("require-sig without keys: want ErrDiscoveryConfig, got %v", err)
 	}
+	// A nil ManifestKeys value is rejected at construction (would otherwise fail closed
+	// only on the first signed fetch). Pin is also set so the config is otherwise valid
+	// and the ManifestKeys validation is what bites.
+	if _, err := NewDiscoveryProvider(DiscoveryConfig{
+		Fetcher:      fetch,
+		PinSHA256:    make([]byte, 32),
+		ManifestKeys: map[string]*ecdsa.PublicKey{"k1": nil},
+	}); !errors.Is(err, ErrDiscoveryConfig) {
+		t.Fatalf("nil ManifestKeys value: want ErrDiscoveryConfig, got %v", err)
+	}
+	// A non-P-256 ManifestKeys value is rejected at construction.
+	p384, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	if err != nil {
+		t.Fatalf("gen P-384 key: %v", err)
+	}
+	if _, err := NewDiscoveryProvider(DiscoveryConfig{
+		Fetcher:      fetch,
+		PinSHA256:    make([]byte, 32),
+		ManifestKeys: map[string]*ecdsa.PublicKey{"k1": &p384.PublicKey},
+	}); !errors.Is(err, ErrDiscoveryConfig) {
+		t.Fatalf("non-P-256 ManifestKeys value: want ErrDiscoveryConfig, got %v", err)
+	}
+	// An empty kid in ManifestKeys is rejected at construction.
+	good, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("gen P-256 key: %v", err)
+	}
+	if _, err := NewDiscoveryProvider(DiscoveryConfig{
+		Fetcher:      fetch,
+		PinSHA256:    make([]byte, 32),
+		ManifestKeys: map[string]*ecdsa.PublicKey{"": &good.PublicKey},
+	}); !errors.Is(err, ErrDiscoveryConfig) {
+		t.Fatalf("empty kid in ManifestKeys: want ErrDiscoveryConfig, got %v", err)
+	}
 }
 
 // --- Happy path ------------------------------------------------------------
