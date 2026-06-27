@@ -1,6 +1,7 @@
 package qv2
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/rand"
 	"errors"
@@ -8,19 +9,19 @@ import (
 )
 
 // manifestSign is a local test helper: sign manifest bytes in the MANIFEST domain
-// and return the pinned 64-byte raw r||s low-S wire signature. It reuses the
-// package's own manifestSigningDigest + derToRawLowS so a test signature is produced
-// exactly as a conformant manifest signer would.
+// and return the pinned 64-byte raw r||s low-S wire signature. It drives the exported
+// SignManifest through a LocalSigner so a test signature is produced by the SAME mint
+// path a conformant manifest signer would run (no parallel signing implementation to
+// drift from the verifier), and so every existing manifest test exercises SignManifest.
 func manifestSign(t *testing.T, priv *ecdsa.PrivateKey, manifest []byte) []byte {
 	t.Helper()
-	digest := manifestSigningDigest(manifest)
-	der, err := ecdsa.SignASN1(rand.Reader, priv, digest[:])
+	signer, err := NewLocalSigner(priv, "manifest-test-kid")
 	if err != nil {
-		t.Fatalf("sign manifest: %v", err)
+		t.Fatalf("new local signer: %v", err)
 	}
-	raw, err := derToRawLowS(der)
+	raw, err := SignManifest(context.Background(), signer, manifest)
 	if err != nil {
-		t.Fatalf("derToRawLowS: %v", err)
+		t.Fatalf("SignManifest: %v", err)
 	}
 	return raw
 }
@@ -75,6 +76,68 @@ func TestManifestSignature_DomainSeparation(t *testing.T) {
 	// signature (verifyRawSignature is the claims-domain verifier).
 	manifestRaw := manifestSign(t, priv, payload)
 	if err := verifyRawSignature(&priv.PublicKey, string(payload), manifestRaw); !errors.Is(err, ErrSignature) {
+		t.Fatalf("manifest-domain signature accepted as claims signature (domain separation broken): %v", err)
+	}
+}
+
+// TestSignManifest_RoundTrip proves the exported mint path: a signature SignManifest
+// produces over manifest bytes verifies under the signer's public key, and tampering
+// the bytes after signing breaks verification. This pins the mint<->verify symmetry of
+// the manifest signing domain end to end through the public API.
+func TestSignManifest_RoundTrip(t *testing.T) {
+	signer, err := GenerateLocalSigner("manifest-kid-1")
+	if err != nil {
+		t.Fatalf("generate local signer: %v", err)
+	}
+	manifest := []byte(`{"profile":"qurl-v2","version":7,"not_after":9999999999}`)
+
+	sig, err := SignManifest(context.Background(), signer, manifest)
+	if err != nil {
+		t.Fatalf("SignManifest: %v", err)
+	}
+	if err := VerifyManifestSignature(&signer.priv.PublicKey, manifest, sig); err != nil {
+		t.Fatalf("SignManifest output failed verification: %v", err)
+	}
+	// Tampering the signed bytes must break verification (the signature is over the
+	// exact bytes, no re-serialization slack).
+	tampered := []byte(`{"profile":"qurl-v2","version":8,"not_after":9999999999}`)
+	if err := VerifyManifestSignature(&signer.priv.PublicKey, tampered, sig); !errors.Is(err, ErrSignature) {
+		t.Fatalf("tampered manifest: want ErrSignature, got %v", err)
+	}
+}
+
+// TestSignManifest_NilAndEmpty proves SignManifest mirrors VerifyManifestSignature's
+// fail-closed guards: a nil signer and empty manifest bytes are rejected rather than
+// producing a signature over nothing.
+func TestSignManifest_NilAndEmpty(t *testing.T) {
+	signer, err := GenerateLocalSigner("manifest-kid-1")
+	if err != nil {
+		t.Fatalf("generate local signer: %v", err)
+	}
+	if _, err := SignManifest(context.Background(), nil, []byte(`{"version":1}`)); err == nil {
+		t.Fatal("nil signer: want error, got nil")
+	}
+	if _, err := SignManifest(context.Background(), signer, nil); err == nil {
+		t.Fatal("empty manifest: want error, got nil")
+	}
+}
+
+// TestSignManifest_DomainSeparatedFromClaims proves SignManifest signs in the MANIFEST
+// domain only: its output does NOT verify as a qURL claims signature over the same
+// bytes. This is the mint-side complement to TestManifestSignature_DomainSeparation
+// and guards against SignManifest ever being routed through the claims digest.
+func TestSignManifest_DomainSeparatedFromClaims(t *testing.T) {
+	signer, err := GenerateLocalSigner("manifest-kid-1")
+	if err != nil {
+		t.Fatalf("generate local signer: %v", err)
+	}
+	payload := []byte(`{"v":2,"iss":"qurl-service"}`)
+
+	manifestSig, err := SignManifest(context.Background(), signer, payload)
+	if err != nil {
+		t.Fatalf("SignManifest: %v", err)
+	}
+	if err := verifyRawSignature(&signer.priv.PublicKey, string(payload), manifestSig); !errors.Is(err, ErrSignature) {
 		t.Fatalf("manifest-domain signature accepted as claims signature (domain separation broken): %v", err)
 	}
 }

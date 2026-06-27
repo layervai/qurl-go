@@ -1,8 +1,10 @@
 package qv2
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 )
 
@@ -73,6 +75,48 @@ func VerifyManifestSignature(pub *ecdsa.PublicKey, manifest, rawSig []byte) erro
 		return ErrSignature
 	}
 	return nil
+}
+
+// SignManifest is the manifest-domain counterpart to SignClaims: it signs the EXACT
+// manifest bytes through the Signer seam and returns the pinned 64-byte raw r||s low-S
+// wire signature that VerifyManifestSignature accepts. It is the supported way to
+// produce a manifest signature, so a signer (KMS / local / file) cannot drift on the
+// domain tag or the wire form — this function owns the manifest signing domain
+// (manifestSigningDigest) and the DER->raw low-S normalization (derToRawLowS), exactly
+// as SignClaims owns them for the claims domain.
+//
+// CRITICAL — separate domain. SignManifest signs manifestSigningDigest, NEVER
+// signingDigest, so a signature it produces can only ever verify as a MANIFEST
+// signature (VerifyManifestSignature) and never as a qURL claims signature, even under
+// the same key. That separation is the load-bearing guard tested in both directions by
+// TestManifestSignature_DomainSeparation; routing a manifest through SignClaims (or a
+// claim through SignManifest) would break it.
+//
+// The manifestBytes MUST be the verbatim bytes that will be published/pinned, never a
+// re-serialization — the verifier checks the received bytes without re-encoding, so a
+// signature over canonicalized JSON would not verify against the transmitted bytes.
+func SignManifest(ctx context.Context, signer Signer, manifestBytes []byte) ([]byte, error) {
+	if signer == nil {
+		return nil, errors.New("qv2: manifest signer must not be nil")
+	}
+	if len(manifestBytes) == 0 {
+		return nil, errors.New("qv2: manifest bytes must not be empty")
+	}
+	digest := manifestSigningDigest(manifestBytes)
+	der, err := signer.SignDigest(ctx, digest[:])
+	if err != nil {
+		return nil, fmt.Errorf("qv2: manifest signer SignDigest: %w", err)
+	}
+	if len(der) == 0 {
+		return nil, errors.New("qv2: manifest signer returned an empty signature")
+	}
+	// KMS (and ecdsa.SignASN1) return ASN.1 DER and do not low-S normalize; convert to
+	// the pinned fixed-width raw r||s low-S wire form here, in one place.
+	rawSig, err := derToRawLowS(der)
+	if err != nil {
+		return nil, fmt.Errorf("qv2: convert manifest signature to wire format: %w", err)
+	}
+	return rawSig, nil
 }
 
 // ManifestDigest returns the sha256 of the EXACT manifest bytes — the value the
