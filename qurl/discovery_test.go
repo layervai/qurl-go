@@ -22,20 +22,16 @@ import (
 // unknown-kid case is reachable with arbitrary signature bytes because the kid
 // lookup precedes signature verification.
 //
-// KNOWN COVERAGE LIMIT: the signed-manifest ACCEPT path through Resolve (a valid
-// signature under a known kid) is not exercised here. qv2 exports a CLAIMS-domain
-// signer (SignClaims / NewLocalSigner), but the MANIFEST-domain signing primitives
-// (manifestSigningDigest + derToRawLowS) are deliberately unexported — only an
-// in-package test helper (qv2's manifestSign) produces a manifest-domain signature,
-// and it is not visible to this package. Reimplementing the low-S/DER wire form in
-// this test to fake one would duplicate exactly the domain-separated signing
-// scaffolding that qv2/manifest.go's separation guard exists to protect, so it is
-// deliberately avoided. qv2/manifest_test.go covers qv2.VerifyManifestSignature's
-// accept path directly; only the provider's signed-accept WIRING (authenticate ->
-// verifyManifestSig success) is uncovered. Closing it cleanly needs a qv2 manifest
-// signer reachable from this package (a test-only export or a production signer) —
-// that API decision is Open Decision #13 (signed vs pinned as the production default),
-// tracked in qurl-go issue #24.
+// The signed-manifest ACCEPT path through Resolve (a valid signature under a known kid
+// -> authenticate -> verifyManifestSig success -> trust material built) is covered by
+// TestDiscoveryProvider_SignedManifest_Resolves below, which builds a real
+// manifest-domain signature with qv2.SignManifest + a LocalSigner. Its companion
+// TestDiscoveryProvider_SignedManifest_TamperedRejected serves the same signature over
+// MUTATED manifest bytes and asserts the provider rejects it as ErrManifestUnverified,
+// so the signed wiring goes red if a regression hands the wrong bytes to
+// verifyManifestSig. These providers configure ONLY ManifestKeys (no pin) so the
+// signature — not a pin compare — is what authenticates, which is exactly the wiring
+// under test.
 
 // fixedNow returns a clock function pinned to t, for deterministic expiry checks.
 func fixedNow(t time.Time) func() time.Time { return func() time.Time { return t } }
@@ -176,6 +172,125 @@ func TestDiscoveryProvider_PinnedManifest_Resolves(t *testing.T) {
 	}
 	if err := qv2.ValidateRelayURL("https://not-the-relay.example.org", allow); !errors.Is(err, qv2.ErrRelayURL) {
 		t.Fatalf("off-allowlist host should be rejected: %v", err)
+	}
+}
+
+// signedEnvelopeBytes signs manifestJSON in the MANIFEST domain with signer and wraps
+// the EXACT bytes into a signed ManifestEnvelope (manifest_b64 + sig_b64 + kid). The
+// signature is over the same bytes that are embedded, so the signed path authenticates
+// by verifying the transmitted bytes with zero re-serialization. embedJSON is the
+// manifest body actually placed in manifest_b64 — passing a DIFFERENT value than the
+// signed bytes is how the tamper case drives a signature that no longer matches.
+func signedEnvelopeBytes(t *testing.T, signer *qv2.LocalSigner, signedJSON, embedJSON []byte) []byte {
+	t.Helper()
+	sig, err := qv2.SignManifest(context.Background(), signer, signedJSON)
+	if err != nil {
+		t.Fatalf("sign manifest: %v", err)
+	}
+	env := ManifestEnvelope{
+		ManifestB64: b64url.EncodeToString(embedJSON),
+		SigB64:      b64url.EncodeToString(sig),
+		Kid:         signer.KID(),
+	}
+	raw, err := json.Marshal(env)
+	if err != nil {
+		t.Fatalf("marshal signed envelope: %v", err)
+	}
+	return raw
+}
+
+// signedProvider builds a DiscoveryProvider whose ONLY trust mode is the signed mode:
+// it trusts signer.KID() and requires a valid signature. No pin is configured, so the
+// signature — not a pin compare — is what authenticates, isolating the signed-accept
+// wiring (a pin would short-circuit verification before verifyManifestSig ran).
+func signedProvider(t *testing.T, raw []byte, signer *qv2.LocalSigner) *DiscoveryProvider {
+	t.Helper()
+	der, err := signer.PublicKeyDER()
+	if err != nil {
+		t.Fatalf("signer public key DER: %v", err)
+	}
+	pub, err := qv2.ParseP256PublicKeyDER(der)
+	if err != nil {
+		t.Fatalf("parse signer public key: %v", err)
+	}
+	p, err := NewDiscoveryProvider(DiscoveryConfig{
+		Fetcher:          FetcherFunc(func(context.Context) ([]byte, error) { return raw, nil }),
+		ManifestKeys:     map[string]*ecdsa.PublicKey{signer.KID(): pub},
+		RequireSignature: true,
+	})
+	if err != nil {
+		t.Fatalf("new signed discovery provider: %v", err)
+	}
+	return p
+}
+
+// TestDiscoveryProvider_SignedManifest_Resolves closes the signed-accept coverage gap:
+// a manifest signed in the manifest domain under a known kid (no pin configured)
+// authenticates through verifyManifestSig and resolves to a usable trust store +
+// allowlist. This exercises the provider's STRONGEST trust mode's happy-path wiring —
+// authenticate -> verifyManifestSig success -> buildTrustMaterial — end to end.
+func TestDiscoveryProvider_SignedManifest_Resolves(t *testing.T) {
+	signer, err := qv2.GenerateLocalSigner("manifest-signer-1")
+	if err != nil {
+		t.Fatalf("generate manifest signer: %v", err)
+	}
+	manifestJSON, err := json.Marshal(validManifest(t))
+	if err != nil {
+		t.Fatalf("marshal manifest: %v", err)
+	}
+	raw := signedEnvelopeBytes(t, signer, manifestJSON, manifestJSON)
+	p := signedProvider(t, raw, signer)
+
+	ts, allow, err := p.Resolve(context.Background())
+	if err != nil {
+		t.Fatalf("resolve valid signed manifest: %v", err)
+	}
+	if ts == nil || allow == nil {
+		t.Fatal("resolve returned a nil trust store or allowlist on success")
+	}
+	if err := qv2.ValidateRelayURL("https://relay.example.com", allow); err != nil {
+		t.Fatalf("manifest relay host should be allowlisted: %v", err)
+	}
+	if err := qv2.ValidateRelayURL("https://not-the-relay.example.org", allow); !errors.Is(err, qv2.ErrRelayURL) {
+		t.Fatalf("off-allowlist host should be rejected: %v", err)
+	}
+}
+
+// TestDiscoveryProvider_SignedManifest_TamperedRejected is the RED companion to the
+// accept test: the SAME signature is served over MUTATED manifest bytes (a bumped
+// version), so the detached signature no longer matches the embedded bytes. With no pin
+// configured, the only thing that can reject this is the signed-path wiring — so this
+// asserts the signature is verified over the EXACT embedded bytes (not some other
+// copy). It fails closed as ErrManifestUnverified, wrapping qv2.ErrSignature. If a
+// regression handed verifyManifestSig the signed-over bytes instead of the embedded
+// bytes, this manifest would wrongly ACCEPT and this test would catch it.
+func TestDiscoveryProvider_SignedManifest_TamperedRejected(t *testing.T) {
+	signer, err := qv2.GenerateLocalSigner("manifest-signer-1")
+	if err != nil {
+		t.Fatalf("generate manifest signer: %v", err)
+	}
+	signed := validManifest(t)
+	signedJSON, err := json.Marshal(signed)
+	if err != nil {
+		t.Fatalf("marshal signed manifest: %v", err)
+	}
+	tampered := signed
+	tampered.Version = signed.Version + 1 // a different in-window manifest
+	tamperedJSON, err := json.Marshal(tampered)
+	if err != nil {
+		t.Fatalf("marshal tampered manifest: %v", err)
+	}
+	// Sign the original bytes but embed the tampered bytes: the signature does not
+	// cover what is in manifest_b64.
+	raw := signedEnvelopeBytes(t, signer, signedJSON, tamperedJSON)
+	p := signedProvider(t, raw, signer)
+
+	_, _, err = p.Resolve(context.Background())
+	if !errors.Is(err, ErrManifestUnverified) {
+		t.Fatalf("tampered signed manifest: want ErrManifestUnverified, got %v", err)
+	}
+	if !errors.Is(err, qv2.ErrSignature) {
+		t.Fatalf("tampered signed manifest: error should wrap qv2.ErrSignature, got %v", err)
 	}
 }
 
