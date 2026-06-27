@@ -15,6 +15,11 @@ import (
 // across tests (and never leaves a non-empty default that would break
 // TestEnterPortal_EmptyConfig_FailsClosed). All provider-swapping tests MUST go
 // through this helper.
+//
+// CONCURRENCY: this mutates a package-level global, so a test using it (or any test in
+// the same package while it runs) MUST NOT call t.Parallel() — doing so turns the
+// swap+restore into a data race that -race would correctly flag. The whole package
+// relies on Go's default sequential execution within a package; keep it that way.
 func installDefaultProvider(t *testing.T, p Provider) {
 	t.Helper()
 	prev := DefaultProvider()
@@ -38,10 +43,15 @@ func (c *capturingTransport) RoundTrip(req *http.Request) (*http.Response, error
 }
 
 // installCapturingTransport swaps http.DefaultTransport for a capturing-and-erroring
-// transport for the duration of a test, restoring the prior value on cleanup. Go tests
-// run sequentially by default, so a scoped global swap is safe here; it is the only
-// offline seam for the one-arg EnterPortal, whose nil HTTPClient routes through
+// transport for the duration of a test, restoring the prior value on cleanup. It is the
+// only offline seam for the one-arg EnterPortal, whose nil HTTPClient routes through
 // http.DefaultClient → http.DefaultTransport.
+//
+// CONCURRENCY: like installDefaultProvider, this mutates a process-wide global, so a
+// test using it MUST NOT call t.Parallel() (nor may any concurrently-running test in
+// the package). The scoped swap is only safe under Go's default sequential execution;
+// adding t.Parallel() anywhere in this package would make this a -race-flagged data
+// race on http.DefaultTransport.
 func installCapturingTransport(t *testing.T) *capturingTransport {
 	t.Helper()
 	ct := &capturingTransport{}
@@ -49,6 +59,19 @@ func installCapturingTransport(t *testing.T) *capturingTransport {
 	http.DefaultTransport = ct
 	t.Cleanup(func() { http.DefaultTransport = prev })
 	return ct
+}
+
+// installStaticProvider builds a StaticProvider from ts+allow (failing the test on a
+// construction error) and installs it as the process-wide default for the test. It
+// folds the construct → error-check → install prologue the one-arg EnterPortal tests
+// share, leaving each test's distinct ts/allow pairing visible at the call site.
+func installStaticProvider(t *testing.T, ts *qv2.TrustStore, allow *qv2.RelayAllowlist) {
+	t.Helper()
+	sp, err := NewStaticProvider(ts, allow)
+	if err != nil {
+		t.Fatalf("new static provider: %v", err)
+	}
+	installDefaultProvider(t, sp)
 }
 
 // --- StaticProvider construction -------------------------------------------
@@ -92,13 +115,9 @@ func TestEnterPortal_StaticProvider_VerifiesAndRoutes(t *testing.T) {
 	link, ts, cellFingerprint := vendoredAcceptLink(t)
 	ct := installCapturingTransport(t)
 
-	sp, err := NewStaticProvider(ts, relayExampleAllowlist())
-	if err != nil {
-		t.Fatalf("new static provider: %v", err)
-	}
-	installDefaultProvider(t, sp)
+	installStaticProvider(t, ts, relayExampleAllowlist())
 
-	_, err = EnterPortal(context.Background(), link)
+	_, err := EnterPortal(context.Background(), link)
 
 	var relayErr *relayknock.RelayError
 	if !errors.As(err, &relayErr) {
@@ -127,13 +146,9 @@ func TestEnterPortal_NoProvider_FailsClosed(t *testing.T) {
 func TestEnterPortal_StaticProvider_UnknownKID_Rejected(t *testing.T) {
 	link, _, _ := vendoredAcceptLink(t)
 	// A provider whose trust store does NOT contain the vector's kid.
-	sp, err := NewStaticProvider(freshTrustStore(t), relayExampleAllowlist())
-	if err != nil {
-		t.Fatalf("new static provider: %v", err)
-	}
-	installDefaultProvider(t, sp)
+	installStaticProvider(t, freshTrustStore(t), relayExampleAllowlist())
 
-	_, err = EnterPortal(context.Background(), link)
+	_, err := EnterPortal(context.Background(), link)
 	if !errors.Is(err, qv2.ErrUnknownKID) {
 		t.Fatalf("unknown kid via one-arg EnterPortal: want ErrUnknownKID, got %v", err)
 	}
@@ -145,13 +160,9 @@ func TestEnterPortal_StaticProvider_UnknownKID_Rejected(t *testing.T) {
 // relay_url, proving the allowlist is enforced AFTER signature verification.
 func TestEnterPortal_StaticProvider_RelayOffAllowlist_Rejected(t *testing.T) {
 	link, ts, _ := vendoredAcceptLink(t)
-	sp, err := NewStaticProvider(ts, qv2.NewRelayAllowlist([]string{"not-the-relay.example.org"}))
-	if err != nil {
-		t.Fatalf("new static provider: %v", err)
-	}
-	installDefaultProvider(t, sp)
+	installStaticProvider(t, ts, qv2.NewRelayAllowlist([]string{"not-the-relay.example.org"}))
 
-	_, err = EnterPortal(context.Background(), link)
+	_, err := EnterPortal(context.Background(), link)
 	if !errors.Is(err, qv2.ErrRelayURL) {
 		t.Fatalf("relay off allowlist via one-arg EnterPortal: want ErrRelayURL, got %v", err)
 	}

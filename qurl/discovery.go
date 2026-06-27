@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"crypto/subtle"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,14 +26,14 @@ import (
 // downgraded (older version than last accepted), missing a trust mode, or carrying an
 // empty/invalid anchor set or allowlist all return an error, never a partial result.
 //
-// OPEN DECISION #13: the FINAL discovery trust policy (signed vs pinned as the
-// production default, kid-rotation procedure, downgrade-window specifics) is Open
-// Decision #13 in the qURL v2 plan and is not yet frozen. This file implements the
-// MECHANISM with safe fail-closed defaults and makes the policy configurable
-// (DiscoveryConfig). When #13 lands, it selects/clamps these knobs; it must not
-// loosen the fail-closed posture without an explicit threat-model decision recorded
-// there. The manifest JSON schema here is a documented assumption (no published
-// schema exists in the org yet) and may change to match #13.
+// OPEN DECISION #13 (tracked in qurl-go issue #24): the FINAL discovery trust policy
+// (signed vs pinned as the production default, kid-rotation procedure, downgrade-window
+// specifics) is Open Decision #13 in the qURL v2 plan and is not yet frozen. This file
+// implements the MECHANISM with safe fail-closed defaults and makes the policy
+// configurable (DiscoveryConfig). When #13 lands, it selects/clamps these knobs; it must
+// not loosen the fail-closed posture without an explicit threat-model decision recorded
+// there. The manifest JSON schema here is a documented assumption (no published schema
+// exists in the org yet) and may change to match #13.
 
 // ManifestEnvelope is the fetched discovery document. The signed/pinned MANIFEST
 // itself is carried as opaque base64url (ManifestB64) — exactly like a qv2 fragment
@@ -173,6 +172,15 @@ var (
 // every Resolve and returns the freshly built trust material; a fetch/verify failure
 // returns the error (fail closed) rather than ever serving stale anchors. Concurrent
 // Resolve calls are safe.
+//
+// NO CACHING — operational cost. Because every Resolve does a fresh HTTPS GET +
+// authenticate, EnterPortal pays a network round-trip to the manifest endpoint on
+// EVERY link open, and a down/slow manifest endpoint fails every open even while a
+// recently-authenticated, still-in-window manifest exists. This is a deliberate
+// fail-closed-over-availability stance for the mechanism. A deployment expecting high
+// open volume should wrap this in a TTL cache that itself fails closed once not_after
+// (or the TTL) elapses; whether prod ships such a cache (and its window) is Open
+// Decision #13, tracked in qurl-go issue #24.
 type DiscoveryProvider struct {
 	cfg DiscoveryConfig
 
@@ -182,10 +190,6 @@ type DiscoveryProvider struct {
 	// rolled back. Guarded by mu.
 	floor int64
 }
-
-// b64urlManifest is the single pinned wire encoding for the manifest envelope's
-// base64url fields (unpadded base64url), matching the qv2 wire encoding.
-var b64urlManifest = base64.RawURLEncoding
 
 // NewDiscoveryProvider builds a DiscoveryProvider. It rejects a config that
 // authenticates nothing — no fetcher, or NEITHER a pin NOR any manifest signing key —
@@ -246,7 +250,10 @@ func (p *DiscoveryProvider) Resolve(ctx context.Context) (*qv2.TrustStore, *qv2.
 	}
 
 	// Freshness: expiry (clock) then downgrade (monotonic version). Both fail closed.
-	// Read the clock once so the compared and reported values agree.
+	// Read the clock once so the compared and reported values agree. The boundary is
+	// inclusive — now == not_after is still valid; the manifest expires the second AFTER
+	// not_after (a one-second grace at the exact boundary, immaterial against the
+	// manifest's lifetime and matching "valid through not_after").
 	now := p.now().Unix()
 	if now > manifest.NotAfter {
 		return nil, nil, fmt.Errorf("%w: not_after=%d, now=%d", ErrManifestExpired, manifest.NotAfter, now)
@@ -294,6 +301,10 @@ func (p *DiscoveryProvider) authenticate(env *ManifestEnvelope, manifestBytes []
 	pinned := false
 	if len(p.cfg.PinSHA256) != 0 {
 		got := qv2.ManifestDigest(manifestBytes)
+		// Both operands are non-secret public values (a content hash vs a configured
+		// pin), so there is no timing oracle to defend here; the constant-time compare
+		// is used purely for uniformity with the secret-comparison style elsewhere, not
+		// because this comparison is sensitive.
 		if subtle.ConstantTimeCompare(got[:], p.cfg.PinSHA256) != 1 {
 			return ErrManifestPinMismatch
 		}
@@ -327,7 +338,7 @@ func (p *DiscoveryProvider) verifyManifestSig(env *ManifestEnvelope, manifestByt
 	if !ok {
 		return fmt.Errorf("%w: %w for manifest kid %q", ErrManifestUnverified, qv2.ErrUnknownKID, env.Kid)
 	}
-	sig, err := b64urlManifest.DecodeString(env.SigB64)
+	sig, err := b64url.DecodeString(env.SigB64)
 	if err != nil {
 		return fmt.Errorf("%w: manifest sig is not valid base64url: %w", ErrManifestSchema, err)
 	}
@@ -359,7 +370,7 @@ func decodeEnvelope(raw []byte) (*ManifestEnvelope, []byte, error) {
 	if env.ManifestB64 == "" {
 		return nil, nil, fmt.Errorf("%w: envelope is missing manifest_b64", ErrManifestSchema)
 	}
-	manifestBytes, err := b64urlManifest.DecodeString(env.ManifestB64)
+	manifestBytes, err := b64url.DecodeString(env.ManifestB64)
 	if err != nil {
 		return nil, nil, fmt.Errorf("%w: manifest_b64 is not valid base64url: %w", ErrManifestSchema, err)
 	}
@@ -417,7 +428,7 @@ func buildTrustMaterial(m *Manifest) (*qv2.TrustStore, *qv2.RelayAllowlist, erro
 		if _, dup := derByKID[iss.Kid]; dup {
 			return nil, nil, fmt.Errorf("%w: duplicate issuer kid %q", ErrManifestSchema, iss.Kid)
 		}
-		der, err := b64urlManifest.DecodeString(iss.SPKIDERB64)
+		der, err := b64url.DecodeString(iss.SPKIDERB64)
 		if err != nil {
 			return nil, nil, fmt.Errorf("%w: issuer %q spki_der_b64 is not valid base64url: %w", ErrManifestSchema, iss.Kid, err)
 		}

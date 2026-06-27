@@ -29,7 +29,20 @@ const defaultFetchTimeout = 30 * time.Second
 // so falling back to it would leave Fetch bounded only by ctx and the read cap. A
 // shared package-level client (instead of one per Fetch) keeps the connection pool
 // warm and covers both the constructor-nil and struct-literal-nil paths.
-var defaultFetchClient = &http.Client{Timeout: defaultFetchTimeout}
+//
+// CheckRedirect refuses redirects outright. The construction-time https guard only
+// covers the FIRST hop, so a 3xx from the (deployment-configured) manifest URL to
+// http:// or an internal host would otherwise be followed and silently defeat that
+// guard. Trust is anchored on the pin/signature, so following a redirect can never
+// admit a bad manifest — but refusing one keeps the transport posture honest and
+// avoids surprising cross-origin fetches. A deployment that genuinely needs a CDN
+// hop injects its own Client with a redirect policy it controls.
+var defaultFetchClient = &http.Client{
+	Timeout: defaultFetchTimeout,
+	CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	},
+}
 
 // HTTPFetcher fetches the discovery envelope over HTTPS. The URL should be the
 // published manifest location. Authentication of the fetched bytes is the
@@ -60,9 +73,15 @@ func NewHTTPFetcher(rawURL string, client HTTPDoer) (*HTTPFetcher, error) {
 	return &HTTPFetcher{URL: rawURL, Client: client}, nil
 }
 
-// Fetch GETs the manifest URL and returns the response body (capped at
-// maxManifestBytes). A non-2xx status is an error. It does NOT authenticate the bytes;
-// the provider does.
+// Fetch GETs the manifest URL and returns the response body. A non-2xx status is an
+// error, and a body larger than maxManifestBytes is rejected (not silently truncated)
+// so an oversized response surfaces as a precise "too large" error rather than a
+// downstream pin/parse mismatch. On the default (nil-Client) path a redirect is not
+// followed: the client returns the 3xx response as-is, which is then rejected here as
+// a non-2xx status. Fetch does NOT authenticate the bytes; the provider does.
+//
+// An injected non-nil Client owns its own timeout AND redirect policy — Fetch cannot
+// re-impose either on it, so a caller supplying a Client is responsible for both.
 func (f *HTTPFetcher) Fetch(ctx context.Context) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, f.URL, nil)
 	if err != nil {
@@ -80,9 +99,16 @@ func (f *HTTPFetcher) Fetch(ctx context.Context) ([]byte, error) {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("qurl: manifest endpoint returned HTTP %d", resp.StatusCode)
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxManifestBytes))
+	// Read one byte past the cap so an over-limit body is detectable: if the reader
+	// yields maxManifestBytes+1 bytes, the real body was larger than the cap. This
+	// gives a precise error instead of handing a truncated body downstream to fail as
+	// a confusing pin/parse mismatch.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxManifestBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("qurl: read manifest body: %w", err)
+	}
+	if len(body) > maxManifestBytes {
+		return nil, fmt.Errorf("qurl: manifest body exceeds %d-byte cap", maxManifestBytes)
 	}
 	return body, nil
 }

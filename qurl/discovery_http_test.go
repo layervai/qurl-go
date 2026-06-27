@@ -47,7 +47,7 @@ func TestNewHTTPFetcher_RequiresHTTPS(t *testing.T) {
 // needed and no real network is touched.
 func TestHTTPFetcher_Fetch_Success(t *testing.T) {
 	const want = `{"manifest_b64":"abc"}`
-	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(want))
 	}))
 	defer srv.Close()
@@ -67,7 +67,7 @@ func TestHTTPFetcher_Fetch_Success(t *testing.T) {
 
 // TestHTTPFetcher_Fetch_Non2xx proves a non-2xx status is an error, not a body.
 func TestHTTPFetcher_Fetch_Non2xx(t *testing.T) {
-	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "nope", http.StatusInternalServerError)
 	}))
 	defer srv.Close()
@@ -81,26 +81,61 @@ func TestHTTPFetcher_Fetch_Non2xx(t *testing.T) {
 	}
 }
 
-// TestHTTPFetcher_Fetch_CapsBody proves the read is capped at maxManifestBytes: a body
-// larger than the cap is truncated to exactly the cap rather than read unbounded into
-// memory before authentication can reject it.
-func TestHTTPFetcher_Fetch_CapsBody(t *testing.T) {
-	oversized := bytes.Repeat([]byte("a"), maxManifestBytes+4096)
-	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write(oversized)
-	}))
-	defer srv.Close()
+// TestHTTPFetcher_Fetch_RejectsOversized proves a body larger than maxManifestBytes is
+// rejected with a precise "too large" error rather than silently truncated (which would
+// later fail downstream as a confusing pin/parse mismatch), while a body AT the cap is
+// still accepted in full — the boundary is inclusive.
+func TestHTTPFetcher_Fetch_RejectsOversized(t *testing.T) {
+	t.Run("over cap rejected", func(t *testing.T) {
+		oversized := bytes.Repeat([]byte("a"), maxManifestBytes+4096)
+		srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write(oversized)
+		}))
+		defer srv.Close()
 
-	f, err := NewHTTPFetcher(srv.URL, srv.Client())
-	if err != nil {
-		t.Fatalf("new fetcher: %v", err)
+		f, err := NewHTTPFetcher(srv.URL, srv.Client())
+		if err != nil {
+			t.Fatalf("new fetcher: %v", err)
+		}
+		if _, err := f.Fetch(context.Background()); err == nil {
+			t.Fatal("oversized body: want error, got nil")
+		} else if !strings.Contains(err.Error(), "cap") {
+			t.Fatalf("oversized body: want a cap error, got %v", err)
+		}
+	})
+
+	t.Run("at cap accepted", func(t *testing.T) {
+		atCap := bytes.Repeat([]byte("a"), maxManifestBytes)
+		srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write(atCap)
+		}))
+		defer srv.Close()
+
+		f, err := NewHTTPFetcher(srv.URL, srv.Client())
+		if err != nil {
+			t.Fatalf("new fetcher: %v", err)
+		}
+		got, err := f.Fetch(context.Background())
+		if err != nil {
+			t.Fatalf("at-cap body: unexpected error %v", err)
+		}
+		if len(got) != maxManifestBytes {
+			t.Fatalf("at-cap body = %d bytes, want %d", len(got), maxManifestBytes)
+		}
+	})
+}
+
+// TestDefaultFetchClient_RefusesRedirects proves the default (nil-Client) path does not
+// follow redirects: its CheckRedirect returns http.ErrUseLastResponse, so a 3xx from the
+// manifest URL is surfaced as-is and then rejected by Fetch as a non-2xx status. That
+// keeps a redirect to http:// or an internal host from silently defeating the
+// construction-time https guard, which only covers the first hop.
+func TestDefaultFetchClient_RefusesRedirects(t *testing.T) {
+	if defaultFetchClient.CheckRedirect == nil {
+		t.Fatal("defaultFetchClient must set CheckRedirect to refuse redirects")
 	}
-	got, err := f.Fetch(context.Background())
-	if err != nil {
-		t.Fatalf("fetch: %v", err)
-	}
-	if len(got) != maxManifestBytes {
-		t.Fatalf("capped body = %d bytes, want %d", len(got), maxManifestBytes)
+	if err := defaultFetchClient.CheckRedirect(nil, nil); !errors.Is(err, http.ErrUseLastResponse) {
+		t.Fatalf("CheckRedirect = %v, want http.ErrUseLastResponse", err)
 	}
 }
 

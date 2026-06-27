@@ -23,15 +23,19 @@ import (
 // lookup precedes signature verification.
 //
 // KNOWN COVERAGE LIMIT: the signed-manifest ACCEPT path through Resolve (a valid
-// signature under a known kid) is not exercised here. Producing a valid manifest
-// signature needs qv2's manifestSigningDigest + derToRawLowS, which are unexported in
-// the verify-only qv2 package; reimplementing the low-S/DER wire form in this test to
-// fake one would duplicate exactly the domain-separated signing scaffolding that
-// qv2/manifest.go's separation guard exists to protect, so it is deliberately avoided.
-// qv2/manifest_test.go covers qv2.VerifyManifestSignature's accept path directly; only
-// the provider's signed-accept WIRING (authenticate -> verifyManifestSig success) is
-// uncovered. Open Decision #13 (signed vs pinned as the production default) will pin
-// down the signed path; add a qv2 test-only signer then if signed becomes the default.
+// signature under a known kid) is not exercised here. qv2 exports a CLAIMS-domain
+// signer (SignClaims / NewLocalSigner), but the MANIFEST-domain signing primitives
+// (manifestSigningDigest + derToRawLowS) are deliberately unexported — only an
+// in-package test helper (qv2's manifestSign) produces a manifest-domain signature,
+// and it is not visible to this package. Reimplementing the low-S/DER wire form in
+// this test to fake one would duplicate exactly the domain-separated signing
+// scaffolding that qv2/manifest.go's separation guard exists to protect, so it is
+// deliberately avoided. qv2/manifest_test.go covers qv2.VerifyManifestSignature's
+// accept path directly; only the provider's signed-accept WIRING (authenticate ->
+// verifyManifestSig success) is uncovered. Closing it cleanly needs a qv2 manifest
+// signer reachable from this package (a test-only export or a production signer) —
+// that API decision is Open Decision #13 (signed vs pinned as the production default),
+// tracked in qurl-go issue #24.
 
 // fixedNow returns a clock function pinned to t, for deterministic expiry checks.
 func fixedNow(t time.Time) func() time.Time { return func() time.Time { return t } }
