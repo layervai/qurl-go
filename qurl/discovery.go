@@ -117,8 +117,10 @@ type DiscoveryConfig struct {
 	// RequireSignature, when true, makes a valid issuer signature MANDATORY — the signed
 	// path is the stronger anchor (it survives a benign republish, supports rotation, and
 	// binds to a kid). Default false: a manifest authenticates as long as at least one
-	// configured anchor validates it, so a deployment can start pin-only (no signing keys)
-	// and add signing keys later. Note the per-anchor rule is still strict in either case:
+	// configured anchor validates it. To migrate pin-only -> signed you must DROP the pin
+	// when adding signing keys: a still-configured pin authenticates one exact byte string,
+	// so a pin+keys combo is "pin-pinned" — the keys cannot admit a different/newer manifest
+	// until the pin is removed. Note the per-anchor rule is still strict in either case:
 	// authenticate requires EVERY configured anchor that is present to validate (a pin,
 	// once configured, must match; a signature, once present and keyed, must verify), so
 	// "default false" relaxes which anchor is REQUIRED, never whether a present anchor may
