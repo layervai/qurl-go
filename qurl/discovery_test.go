@@ -313,6 +313,10 @@ func TestDiscoveryProvider_SchemaFaults_FailClosed(t *testing.T) {
 	}{
 		{"empty issuer set", func(m *Manifest) { m.Issuers = nil }},
 		{"empty relay allowlist", func(m *Manifest) { m.RelayAllowlist = nil }},
+		// Blank-only allowlist: length-non-empty but every entry trims to "", so
+		// NewRelayAllowlist would drop them all and reject every relay. parseManifest
+		// must catch this as a schema fault, not pass the bare length check.
+		{"blank-only relay allowlist", func(m *Manifest) { m.RelayAllowlist = []string{" ", "\t"} }},
 		{"non-positive version", func(m *Manifest) { m.Version = 0 }},
 		{"non-positive issued_at", func(m *Manifest) { m.IssuedAt = 0 }},
 		{"non-positive not_after", func(m *Manifest) { m.NotAfter = 0 }},

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -407,8 +408,21 @@ func parseManifest(manifestBytes []byte) (*Manifest, error) {
 	if len(m.Issuers) == 0 {
 		return nil, fmt.Errorf("%w: manifest has no issuer trust anchors", ErrManifestSchema)
 	}
-	if len(m.RelayAllowlist) == 0 {
-		return nil, fmt.Errorf("%w: manifest has an empty relay allowlist", ErrManifestSchema)
+	// Require at least one USABLE relay entry, not merely a non-empty slice.
+	// NewRelayAllowlist trims and drops blank/whitespace entries, so a slice of only
+	// blanks (e.g. ["", "  "]) is length-non-empty yet builds an allowlist that rejects
+	// every relay — a schema-valid-but-unusable manifest. Reject it here so "schema
+	// valid" implies "has a usable relay anchor". A real host alongside a stray blank is
+	// still accepted (the blank is dropped downstream); only an all-blank list fails.
+	hasUsableRelay := false
+	for _, e := range m.RelayAllowlist {
+		if strings.TrimSpace(e) != "" {
+			hasUsableRelay = true
+			break
+		}
+	}
+	if !hasUsableRelay {
+		return nil, fmt.Errorf("%w: manifest has no usable relay allowlist entries", ErrManifestSchema)
 	}
 	return &m, nil
 }
