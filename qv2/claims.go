@@ -191,38 +191,48 @@ var (
 // encodeB64 encodes raw bytes as unpadded base64url — the single pinned wire
 // encoding for every qURL v2 part and key field. Using one encoding everywhere
 // removes the "base64 vs base64url" and "padded vs unpadded" canonicalization
-// hazards the design calls out.
+// hazards the design calls out. Strict() is a decode-only concern, so encoding
+// uses plain RawURLEncoding; decodeB64's canonical check re-encodes through this
+// same function's encoding for an apples-to-apples comparison.
 func encodeB64(b []byte) string {
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 
-// decodeB64 decodes an unpadded-base64url string under the single pinned wire
-// encoding. It uses RawURLEncoding.Strict(), which rejects three classes of
-// malformed input:
-//   - padded encodings (a trailing "=" is not in the unpadded alphabet);
-//   - non-base64url-alphabet characters (including ".", so a stray dot fails);
-//   - non-canonical trailing bits — when the byte length is not a multiple of 3
-//     the final base64 character has "don't care" low bits, and the non-strict
-//     decoder accepts ANY value for them (decoding multiple distinct strings to
-//     the same bytes). Strict() requires those bits be zero, so exactly ONE
-//     base64url string maps to a given byte slice.
+// decodeB64 decodes an unpadded-base64url string and accepts it ONLY if the input
+// is the unique canonical encoding of the bytes it decodes to — the guarantee that
+// keeps this decoder in lockstep with the WebCrypto/JS port (both sides must agree
+// on which STRINGS are well-formed, not merely on which bytes a lenient decoder
+// recovers, so a non-canonical variant of a signed part is rejected here rather
+// than silently normalized).
 //
-// The canonical-trailing-bits rule is what keeps this decoder in lockstep with
-// the WebCrypto/JS port: both sides must agree on which STRINGS are well-formed,
-// not merely on which bytes a lenient decoder would recover, so a non-canonical
-// variant of a signed part is rejected here rather than silently normalized.
+// Canonicality rests on the re-encode-and-compare below: it is what makes
+// acceptance equivalent to "input == EncodeToString(decoded)", which covers BOTH
+// non-canonical trailing bits AND embedded '\r'/'\n' (Go's base64 decoder silently
+// skips those in every mode, including Strict). Strict() on the decode is kept as
+// a first-line filter that fails fast with a precise decoder error for the
+// trailing-bits and bad-alphabet cases (padding, non-base64url characters); the
+// re-encode check is the authoritative backstop for everything else.
 func decodeB64(s string) ([]byte, error) {
 	b, err := strictRawURLEncoding.DecodeString(s)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrEncoding, err)
 	}
+	// Authoritative canonicality check: a genuinely canonical input round-trips
+	// byte-for-byte, so any string the lenient parts of the decoder would have
+	// accepted (notably embedded '\r'/'\n', which make signed parts malleable by
+	// decoding distinct strings to the same sig/secret bytes) is rejected here.
+	if encodeB64(b) != s {
+		return nil, fmt.Errorf("%w: non-canonical base64url encoding", ErrEncoding)
+	}
 	return b, nil
 }
 
 // strictRawURLEncoding is RawURLEncoding with strict canonical-trailing-bit
-// enforcement, built once at init. base64.Encoding.Strict() allocates a fresh
-// *Encoding on every call, and decodeB64 is on the parse hot path (~7 decodes per
-// fragment), so the strict encoding is hoisted here rather than rebuilt per call.
+// enforcement, built once at init (base64.Encoding.Strict() allocates a fresh
+// *Encoding on every call, so it is hoisted rather than rebuilt per decode). It is
+// used only for DECODING; encoding goes through encodeB64's plain RawURLEncoding.
+// Strict() is now a fast first-line filter only — the authoritative canonicality
+// guarantee is decodeB64's re-encode-and-compare.
 var strictRawURLEncoding = base64.RawURLEncoding.Strict()
 
 // decodeX25519PublicKey decodes a base64url X25519 public key and enforces the
