@@ -215,8 +215,12 @@ jobs:
             *) VULN_EMOJI=":warning:" ;;
           esac
 
-          # Extract first line of commit message (safe for any content)
+          # Extract first line of commit message (safe for any content).
+          # head_commit is absent on workflow_dispatch (this repo allows manual
+          # runs), leaving COMMIT_MESSAGE empty — fall back so the card never
+          # renders an empty `*Commit:* ` field with bare backticks.
           FIRST_LINE=$(echo "$COMMIT_MESSAGE" | head -n1 | cut -c1-100)
+          FIRST_LINE="${FIRST_LINE:-(no commit message)}"
 
           # Build payload with jq — handles all JSON escaping automatically.
           # Shell string concatenation broke on commit messages with special chars.
