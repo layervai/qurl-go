@@ -8,11 +8,12 @@ import (
 	"testing"
 )
 
-// TestVerifyRawIssuerSignature pins the exported signature-class entry point
-// against the same sentinels the unexported verifyRawSignature returns, across
-// the conformance signature class's cases (accept / high-S / wrong-length /
-// tamper) plus the nil-key guard. This is the public surface cross-language
-// conformance tooling calls, so its error taxonomy must not drift.
+// TestVerifyRawIssuerSignature pins the exported signature-class entry point's
+// error taxonomy across the conformance signature class's cases (accept / high-S /
+// wrong-length / scalar-range / tamper) plus the nil-key guard. This is the public
+// surface cross-language conformance tooling calls, so the sentinel each fault maps
+// to must not drift. It is white-box: the high-S, wrong-length, and scalar-range
+// cases construct their malformed inputs with the unexported wire-format helpers.
 func TestVerifyRawIssuerSignature(t *testing.T) {
 	signer := newTestSigner(t)
 	pub := &signer.priv.PublicKey
@@ -21,10 +22,6 @@ func TestVerifyRawIssuerSignature(t *testing.T) {
 	t.Run("accept", func(t *testing.T) {
 		if err := VerifyRawIssuerSignature(pub, claimsB64, rawSig); err != nil {
 			t.Fatalf("valid signature must verify, got %v", err)
-		}
-		// The exported wrapper delegates to the unexported primitive: both accept.
-		if err := verifyRawSignature(pub, claimsB64, rawSig); err != nil {
-			t.Fatalf("unexported primitive must agree (accept), got %v", err)
 		}
 	})
 

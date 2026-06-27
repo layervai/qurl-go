@@ -157,6 +157,12 @@ func verifyRawSignature(pub *ecdsa.PublicKey, claimsB64 string, rawSig []byte) e
 // would fail at JSON parsing (ErrStrictParse) before any signature check and never
 // surface the required bare ErrSignature. This entry point lets an external
 // verifier exercise the signature class directly.
+//
+// API stability: as the conformance entry point, this function's signature and its
+// sentinel set (ErrSignature plus the ErrSignatureLength / ErrSignatureHighS /
+// ErrSignatureScalarRange wire-format faults, matchable via errors.Is) are a
+// compatibility contract for the downstream conformance package and must not
+// change without a coordinated revision bump.
 func VerifyRawIssuerSignature(pub *ecdsa.PublicKey, claimsB64 string, rawSig []byte) error {
 	return verifyRawSignature(pub, claimsB64, rawSig)
 }
