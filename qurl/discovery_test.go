@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -199,11 +200,13 @@ func signedEnvelopeBytes(t *testing.T, signer *qv2.LocalSigner, signedJSON, embe
 	return raw
 }
 
-// signedProvider builds a DiscoveryProvider whose ONLY trust mode is the signed mode:
-// it trusts signer.KID() and requires a valid signature. No pin is configured, so the
-// signature — not a pin compare — is what authenticates, isolating the signed-accept
-// wiring (a pin would short-circuit verification before verifyManifestSig ran).
-func signedProvider(t *testing.T, raw []byte, signer *qv2.LocalSigner) *DiscoveryProvider {
+// signedProviderFromFetcher builds a DiscoveryProvider whose ONLY trust mode is the
+// signed mode: it trusts signer.KID() and requires a valid signature. No pin is
+// configured, so the signature — not a pin compare — is what authenticates, isolating
+// the signed-accept wiring (a pin would short-circuit verification before
+// verifyManifestSig ran). The fetcher is injected so a test can drive a static body or
+// a stateful sequence (e.g. the downgrade-after-accept case).
+func signedProviderFromFetcher(t *testing.T, fetcher ManifestFetcher, signer *qv2.LocalSigner) *DiscoveryProvider {
 	t.Helper()
 	der, err := signer.PublicKeyDER()
 	if err != nil {
@@ -214,7 +217,7 @@ func signedProvider(t *testing.T, raw []byte, signer *qv2.LocalSigner) *Discover
 		t.Fatalf("parse signer public key: %v", err)
 	}
 	p, err := NewDiscoveryProvider(DiscoveryConfig{
-		Fetcher:          FetcherFunc(func(context.Context) ([]byte, error) { return raw, nil }),
+		Fetcher:          fetcher,
 		ManifestKeys:     map[string]*ecdsa.PublicKey{signer.KID(): pub},
 		RequireSignature: true,
 	})
@@ -222,6 +225,13 @@ func signedProvider(t *testing.T, raw []byte, signer *qv2.LocalSigner) *Discover
 		t.Fatalf("new signed discovery provider: %v", err)
 	}
 	return p
+}
+
+// signedProvider is the static-body convenience: a signed provider whose fetcher always
+// returns raw.
+func signedProvider(t *testing.T, raw []byte, signer *qv2.LocalSigner) *DiscoveryProvider {
+	t.Helper()
+	return signedProviderFromFetcher(t, FetcherFunc(func(context.Context) ([]byte, error) { return raw, nil }), signer)
 }
 
 // TestDiscoveryProvider_SignedManifest_Resolves closes the signed-accept coverage gap:
@@ -333,6 +343,96 @@ func TestDiscoveryProvider_Downgrade_FailsClosed(t *testing.T) {
 	}
 	if _, _, err := p.Resolve(context.Background()); !errors.Is(err, ErrManifestDowngrade) {
 		t.Fatalf("under-floor manifest: want ErrManifestDowngrade, got %v", err)
+	}
+}
+
+// TestDiscoveryProvider_FloorAdvances_RejectsRollback proves the DYNAMIC anti-rollback
+// mechanism (distinct from the static MinVersion floor): after a provider ACCEPTS a
+// manifest, p.floor advances to that version, so a later fetch of an OLDER — but still
+// validly authenticated and in-window — manifest is rejected as a downgrade. This is
+// the property a rollback attacker actually probes (replay a previously-valid older
+// manifest), and the floor-advance line that enforces it had no direct coverage.
+//
+// Signed mode (not pin) is required: a pin authenticates one exact byte string, so it
+// could not authenticate both the v8 and the v7 manifest. One signer signs both; a
+// stateful fetcher returns v8 first, then v7, against the SAME provider instance.
+func TestDiscoveryProvider_FloorAdvances_RejectsRollback(t *testing.T) {
+	signer, err := qv2.GenerateLocalSigner("manifest-signer-1")
+	if err != nil {
+		t.Fatalf("generate manifest signer: %v", err)
+	}
+
+	newer := validManifest(t)
+	newer.Version = 8
+	newerJSON, err := json.Marshal(newer)
+	if err != nil {
+		t.Fatalf("marshal newer manifest: %v", err)
+	}
+	older := validManifest(t)
+	older.Version = 7 // a LOWER version than the accepted one, but otherwise valid
+	olderJSON, err := json.Marshal(older)
+	if err != nil {
+		t.Fatalf("marshal older manifest: %v", err)
+	}
+
+	// A stateful fetcher: first Resolve sees v8, second sees v7.
+	bodies := [][]byte{
+		signedEnvelopeBytes(t, signer, newerJSON, newerJSON),
+		signedEnvelopeBytes(t, signer, olderJSON, olderJSON),
+	}
+	var calls int
+	fetcher := FetcherFunc(func(context.Context) ([]byte, error) {
+		body := bodies[calls]
+		calls++
+		return body, nil
+	})
+	p := signedProviderFromFetcher(t, fetcher, signer)
+
+	// First Resolve accepts v8 and advances the floor to 8.
+	if _, _, err := p.Resolve(context.Background()); err != nil {
+		t.Fatalf("first resolve (v8) should accept: %v", err)
+	}
+	// Second Resolve fetches the older, still-valid v7 — it must be rejected as a
+	// downgrade because the floor advanced past it.
+	if _, _, err := p.Resolve(context.Background()); !errors.Is(err, ErrManifestDowngrade) {
+		t.Fatalf("rollback to v7 after accepting v8: want ErrManifestDowngrade, got %v", err)
+	}
+}
+
+// TestDiscoveryProvider_ConcurrentResolve_RaceClean locks the mutex contract on the
+// downgrade floor: many goroutines Resolve the SAME valid manifest on one provider
+// instance concurrently. All must succeed (the floor check + advance are atomic under
+// the lock, so no resolve sees a torn floor), and the test must be clean under -race.
+// Every goroutine uses the SAME version deliberately — varying versions would make
+// some resolves legitimately lose the downgrade race nondeterministically and flake;
+// the sequential rollback test above covers rejection. This is the concurrency check
+// the race-sensitive floor path needs.
+func TestDiscoveryProvider_ConcurrentResolve_RaceClean(t *testing.T) {
+	raw, pin := envelopeBytes(t, validManifest(t))
+	p := pinnedProvider(t, raw, pin, nil)
+
+	const goroutines = 16
+	var wg sync.WaitGroup
+	errs := make([]error, goroutines)
+	for i := range goroutines {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			ts, allow, err := p.Resolve(context.Background())
+			if err != nil {
+				errs[idx] = err
+				return
+			}
+			if ts == nil || allow == nil {
+				errs[idx] = errors.New("nil trust store or allowlist on success")
+			}
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent resolve goroutine %d: %v", i, err)
+		}
 	}
 }
 
