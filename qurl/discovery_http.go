@@ -59,6 +59,14 @@ type HTTPFetcher struct {
 // not a trust boundary (the manifest is pinned/signed), but rejecting a plaintext
 // http:// manifest URL at construction catches a misconfig early and matches the
 // "over HTTPS" contract, rather than shipping discovery bytes in the clear.
+//
+// This is the ONLY supported way to build an HTTPFetcher. The struct's URL/Client
+// fields are exported (kept so tests can inject a Client without an https URL via a
+// literal), so a struct literal — HTTPFetcher{URL: "http://..."} — SKIPS this scheme
+// check entirely and Fetch will GET that plaintext URL. Always go through this
+// constructor in production; a literal is a test-only escape hatch. The pin/signature
+// is still the trust anchor, so a plaintext fetch cannot admit a bad manifest, but it
+// would leak the (non-secret) discovery bytes in the clear, which this guard prevents.
 func NewHTTPFetcher(rawURL string, client HTTPDoer) (*HTTPFetcher, error) {
 	if rawURL == "" {
 		return nil, fmt.Errorf("%w: manifest URL is required", ErrDiscoveryConfig)
