@@ -162,6 +162,70 @@ func TestDiscoveryProvider_NilReceiver_FailsClosed(t *testing.T) {
 	}
 }
 
+// TestDiscoveryProvider_ConfigDefensivelyCopied proves NewDiscoveryProvider copies the
+// trust-critical reference fields (PinSHA256 slice, ManifestKeys map) so a caller that
+// mutates its own config AFTER construction cannot change the provider's trust anchor.
+// Each sub-case mutates the caller-held value post-construction and asserts Resolve still
+// behaves as configured at construction.
+func TestDiscoveryProvider_ConfigDefensivelyCopied(t *testing.T) {
+	t.Run("pin slice mutation ignored", func(t *testing.T) {
+		raw, pin := envelopeBytes(t, validManifest(t))
+		callerPin := append([]byte(nil), pin...) // the caller's own backing array
+		p, err := NewDiscoveryProvider(DiscoveryConfig{
+			Fetcher:   FetcherFunc(func(context.Context) ([]byte, error) { return raw, nil }),
+			PinSHA256: callerPin,
+		})
+		if err != nil {
+			t.Fatalf("new provider: %v", err)
+		}
+		// Corrupt the caller's pin AFTER construction. If the provider aliased it, the pin
+		// compare would now mismatch; with a defensive copy it still matches.
+		for i := range callerPin {
+			callerPin[i] = 0
+		}
+		if _, _, err := p.Resolve(context.Background()); err != nil {
+			t.Fatalf("post-construction pin mutation changed trust behavior: %v", err)
+		}
+	})
+
+	t.Run("keys map mutation ignored", func(t *testing.T) {
+		signer, err := qv2.GenerateLocalSigner("manifest-signer-1")
+		if err != nil {
+			t.Fatalf("generate manifest signer: %v", err)
+		}
+		der, err := signer.PublicKeyDER()
+		if err != nil {
+			t.Fatalf("signer public key DER: %v", err)
+		}
+		pub, err := qv2.ParseP256PublicKeyDER(der)
+		if err != nil {
+			t.Fatalf("parse signer public key: %v", err)
+		}
+		manifestJSON, err := json.Marshal(validManifest(t))
+		if err != nil {
+			t.Fatalf("marshal manifest: %v", err)
+		}
+		raw := signedEnvelopeBytes(t, signer, manifestJSON, manifestJSON)
+
+		callerKeys := map[string]*ecdsa.PublicKey{signer.KID(): pub}
+		p, err := NewDiscoveryProvider(DiscoveryConfig{
+			Fetcher:          FetcherFunc(func(context.Context) ([]byte, error) { return raw, nil }),
+			ManifestKeys:     callerKeys,
+			RequireSignature: true,
+		})
+		if err != nil {
+			t.Fatalf("new provider: %v", err)
+		}
+		// Remove the signing key from the caller's map AFTER construction. If the provider
+		// aliased it, the kid lookup would now fail (ErrUnknownKID); with a defensive copy
+		// the manifest still verifies.
+		delete(callerKeys, signer.KID())
+		if _, _, err := p.Resolve(context.Background()); err != nil {
+			t.Fatalf("post-construction keys mutation changed trust behavior: %v", err)
+		}
+	})
+}
+
 // --- Happy path ------------------------------------------------------------
 
 // TestDiscoveryProvider_PinnedManifest_Resolves proves the success path: a pinned,

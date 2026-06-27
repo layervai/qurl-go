@@ -242,6 +242,22 @@ func NewDiscoveryProvider(cfg DiscoveryConfig) (*DiscoveryProvider, error) {
 			return nil, fmt.Errorf("%w: invalid ManifestKeys: %w", ErrDiscoveryConfig, err)
 		}
 	}
+	// Defensively copy the trust-critical reference types so a caller mutating the
+	// backing array/map AFTER construction cannot silently change the trust anchor
+	// authenticate/verifyManifestSig read on every Resolve. cfg is otherwise stored by
+	// value; PinSHA256 (slice) and ManifestKeys (map) are the reference fields that would
+	// otherwise alias the caller's data. The map values are *ecdsa.PublicKey for keys that
+	// are never mutated in place (qv2.NewTrustStore copies the map it builds too), so a
+	// shallow map copy is the right depth — it matches qv2.NewTrustStore's own posture and
+	// makes the provider's documented immutability real rather than conventional.
+	cfg.PinSHA256 = bytes.Clone(cfg.PinSHA256)
+	if cfg.ManifestKeys != nil {
+		keys := make(map[string]*ecdsa.PublicKey, len(cfg.ManifestKeys))
+		for kid, pub := range cfg.ManifestKeys {
+			keys[kid] = pub
+		}
+		cfg.ManifestKeys = keys
+	}
 	return &DiscoveryProvider{cfg: cfg, floor: cfg.MinVersion}, nil
 }
 
