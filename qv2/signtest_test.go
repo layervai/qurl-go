@@ -1,6 +1,7 @@
 package qv2
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -9,17 +10,17 @@ import (
 	"testing"
 )
 
-// Local (KMS-free) test signer for the verify-side port.
+// Local (KMS-free) test signer that implements the production Signer seam.
 //
-// qurl-go carries only the VERIFY side; it never mints production qURLs. The
-// committed golden vectors (testdata/issuer_signature_vectors.json) are the
-// cross-language CONTRACT proving this package's verification agrees byte-for-byte
-// with the KMS sign output. These helpers exist only so the fragment/round-trip
-// tests can mint fresh signed fragments to exercise the verify path against
-// arbitrary claims (tamper, unknown-kid, round-trip). They reuse the package's
-// OWN signing input (signingDigest) and DER->raw-low-S conversion (derToRawLowS),
-// so a test signature is produced exactly as a conformant signer would — the only
-// difference from production is a local ecdsa key rather than a KMS handle.
+// testSigner is a thin wrapper over the real mint path: it provides KID +
+// SignDigest (a local ecdsa key in place of a KMS handle) and lets SignClaims own
+// the domain-separated digest and the DER->raw low-S conversion. Test signatures
+// are therefore produced by the SAME code a conformant production signer runs —
+// the only difference is the key custody — so the fragment/round-trip/tamper tests
+// exercise mint↔verify symmetry rather than a parallel signing implementation. The
+// committed golden vectors (testdata/issuer_signature_vectors.json) remain the
+// cross-language CONTRACT that this package's verification agrees byte-for-byte
+// with external KMS sign output.
 
 // testIssuerKID is the kid every locally-signed test fragment is signed under.
 const testIssuerKID = "qurl-issuer-key-test"
@@ -40,27 +41,26 @@ func newTestSigner(t *testing.T) *testSigner {
 	return &testSigner{priv: priv, kid: testIssuerKID}
 }
 
-// signClaims stamps the issuer kid, marshals claims to canonical base64url, signs
-// the package signing digest, and converts to the pinned 64-byte raw r||s low-S
-// wire form. It returns the exact claims bytes that were signed (Part 1) and the
-// raw signature.
+// testSigner implements the production Signer seam so the test mint path and the
+// real one are the SAME code: KID + SignDigest (sign the digest, return DER) feed
+// SignClaims, which owns the domain-separated digest and the DER->raw low-S
+// conversion. There is no parallel signing implementation to drift from the
+// verifier.
+func (s *testSigner) KID() string { return s.kid }
+
+func (s *testSigner) SignDigest(_ context.Context, digest []byte) ([]byte, error) {
+	return ecdsa.SignASN1(rand.Reader, s.priv, digest)
+}
+
+// signClaims mints via the production SignClaims seam and returns the exact signed
+// claims bytes (Part 1) and the raw 64-byte low-S signature. It is a thin test
+// convenience over SignClaims (which stamps the kid, strict-validates, and
+// normalizes low-S) so the fragment/round-trip tests exercise the real mint path.
 func (s *testSigner) signClaims(t *testing.T, c *Claims) (claimsB64 string, rawSig []byte) {
 	t.Helper()
-	signed := *c
-	signed.Kid = s.kid
-	raw, err := json.Marshal(&signed)
+	claimsB64, rawSig, err := SignClaims(context.Background(), s, c)
 	if err != nil {
-		t.Fatalf("marshal claims: %v", err)
-	}
-	claimsB64 = encodeB64(raw)
-	digest := signingDigest(claimsB64)
-	der, err := ecdsa.SignASN1(rand.Reader, s.priv, digest[:])
-	if err != nil {
-		t.Fatalf("sign: %v", err)
-	}
-	rawSig, err = derToRawLowS(der)
-	if err != nil {
-		t.Fatalf("derToRawLowS: %v", err)
+		t.Fatalf("SignClaims: %v", err)
 	}
 	return claimsB64, rawSig
 }
