@@ -72,19 +72,29 @@ type ResourceHandle struct {
 // store or relay allowlist (the fail-closed default).
 var ErrNotConfigured = errors.New("qurl: EnterPortal requires a trust store and relay allowlist")
 
-// EnterPortal opens a qURL link end to end with the embedded default deployment
-// config. It is the locked, single-argument entry verb.
+// EnterPortal opens a qURL link end to end using the process-wide default
+// credential provider (SetDefaultProvider). It is the locked, single-argument entry
+// verb: a deployment installs its trust anchors / relay allowlist once at startup
+// and then opens any link with no per-call config.
+//
+// It resolves the provider for the trust anchors and relay allowlist, then delegates
+// to EnterPortalWith — so the provider only SUPPLIES the trust material; the real
+// verify + post-verify relay-allowlist enforcement is EnterPortalWith's, unchanged.
 //
 // PROVISIONAL: the qURL v2 server-side admission contract is Proposed in the nhp
 // design and not yet deployed, and the production issuer trust anchors / relay
-// allowlist for the qv2 path are not yet published. Until they are, this default
-// config is empty and EnterPortal fails closed with ErrNotConfigured — the verb,
-// the wire construction, and every pure step (parse → verify → derive serverId →
-// assemble packet) are ready and tested, so turning the live path on is a config
-// turn-up via EnterPortalWith, not an SDK change. Tests and early integrators use
-// EnterPortalWith to inject the vector issuer kid and a test relay.
+// allowlist for the qv2 path are not yet published. Until a deployment installs a
+// provider (SetDefaultProvider), EnterPortal fails closed with ErrNotConfigured —
+// the verb, the wire construction, and every pure step (parse → verify → derive
+// serverId → assemble packet) are ready and tested, so turning the live path on is a
+// provider turn-up, not an SDK change. Tests and early integrators inject anchors via
+// a StaticProvider / DiscoveryProvider, or call EnterPortalWith directly.
 func EnterPortal(ctx context.Context, qurlLink string) (*ResourceHandle, error) {
-	return EnterPortalWith(ctx, qurlLink, defaultConfig())
+	cfg, err := resolveDefaultConfig(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return EnterPortalWith(ctx, qurlLink, cfg)
 }
 
 // EnterPortalWith opens a qURL link using the supplied Config. It is the injectable
@@ -169,10 +179,25 @@ func interpretReply(reply *relayknock.Reply) (*ResourceHandle, error) {
 	return &ResourceHandle{RedirectURL: ack.RedirectURL, OpenSeconds: ack.OpenTime}, nil
 }
 
-// defaultConfig is the embedded production deployment config. It is intentionally
-// EMPTY until the qURL v2 issuer trust anchors and relay allowlist are published
-// (the qv2 admission contract is Proposed, not deployed), so EnterPortal fails
-// closed with ErrNotConfigured rather than trusting an unverifiable signature or
-// posting to an unvetted relay. When the anchors ship, they are wired here and the
-// one-argument EnterPortal lights up with no API change.
-func defaultConfig() Config { return Config{} }
+// resolveDefaultConfig builds the EnterPortal Config from the process-wide default
+// provider. With no provider installed it fails closed with ErrNotConfigured (the
+// production qv2 issuer trust anchors / relay allowlist are not yet published, so an
+// un-configured process must refuse rather than trust anything). With a provider
+// installed it resolves the trust anchors + relay allowlist; a provider that itself
+// fails closed (stale/unverifiable discovery manifest, missing anchors) propagates
+// that error unchanged so EnterPortal refuses for the provider's stated reason.
+//
+// The HTTPClient is intentionally left nil here (default client). A caller that needs
+// a pinned egress for the same-egress-IP invariant uses EnterPortalWith with an
+// explicit Config.HTTPClient — the provider supplies trust material, not transport.
+func resolveDefaultConfig(ctx context.Context) (Config, error) {
+	p := DefaultProvider()
+	if p == nil {
+		return Config{}, ErrNotConfigured
+	}
+	ts, allow, err := p.Resolve(ctx)
+	if err != nil {
+		return Config{}, err
+	}
+	return Config{TrustStore: ts, RelayAllowlist: allow}, nil
+}

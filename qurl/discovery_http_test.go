@@ -1,0 +1,204 @@
+package qurl
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
+
+// HTTPFetcher transport tests. The fetcher is transport-only (auth is the provider's
+// job), so these assert the HTTPS-scheme construction guard, the GET/non-2xx/read-cap
+// behavior, and that the nil-Client fallback carries a timeout — not any trust logic.
+
+// TestNewHTTPFetcher_RequiresHTTPS proves the construction guard: an empty, malformed,
+// or non-https URL is rejected with ErrDiscoveryConfig, while a well-formed https URL
+// is accepted. The transport is not a trust boundary (the manifest is pinned/signed),
+// but a plaintext http:// manifest URL is a misconfig caught here rather than shipping
+// discovery bytes in the clear.
+func TestNewHTTPFetcher_RequiresHTTPS(t *testing.T) {
+	rejected := []struct {
+		name string
+		url  string
+	}{
+		{"empty", ""},
+		{"http", "http://manifest.example.com/m.json"},
+		{"no scheme", "manifest.example.com/m.json"},
+		{"ftp", "ftp://manifest.example.com/m.json"},
+		{"control chars", "https://exa\x7fmple.com"},
+	}
+	for _, tc := range rejected {
+		t.Run("reject_"+tc.name, func(t *testing.T) {
+			if _, err := NewHTTPFetcher(tc.url, nil); !errors.Is(err, ErrDiscoveryConfig) {
+				t.Fatalf("url %q: want ErrDiscoveryConfig, got %v", tc.url, err)
+			}
+		})
+	}
+	if _, err := NewHTTPFetcher("https://manifest.example.com/m.json", nil); err != nil {
+		t.Fatalf("valid https URL: unexpected error %v", err)
+	}
+}
+
+// TestHTTPFetcher_Fetch_RejectsNonHTTPSLiteral proves the Fetch-time scheme re-check
+// (defense in depth): a struct literal bypasses NewHTTPFetcher's construction guard,
+// so a literal carrying an http:// URL would otherwise GET the (non-secret) discovery
+// bytes in the clear. Fetch must refuse it before any request is made, with
+// ErrDiscoveryConfig — the same sentinel the constructor uses. No server is started:
+// the scheme check fires before client.Do, so a fired request would itself be the bug.
+func TestHTTPFetcher_Fetch_RejectsNonHTTPSLiteral(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		url  string
+	}{
+		{"http", "http://manifest.example.com/m.json"},
+		{"no scheme", "manifest.example.com/m.json"},
+		{"ftp", "ftp://manifest.example.com/m.json"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// A struct literal that never saw NewHTTPFetcher's https guard. A client is
+			// injected that FAILS the test if it is ever invoked, proving the scheme check
+			// short-circuits before any network call.
+			f := &HTTPFetcher{
+				URL: tc.url,
+				Client: doerFunc(func(*http.Request) (*http.Response, error) {
+					t.Fatalf("Fetch must reject %q before issuing a request", tc.url)
+					return nil, errors.New("unreachable: request must not be issued")
+				}),
+			}
+			if _, err := f.Fetch(context.Background()); !errors.Is(err, ErrDiscoveryConfig) {
+				t.Fatalf("non-https literal %q: want ErrDiscoveryConfig, got %v", tc.url, err)
+			}
+		})
+	}
+}
+
+// doerFunc adapts a plain function to HTTPDoer so a test can inject a client that must
+// never be called.
+type doerFunc func(*http.Request) (*http.Response, error)
+
+func (f doerFunc) Do(req *http.Request) (*http.Response, error) { return f(req) }
+
+// TestHTTPFetcher_Fetch_Success proves the happy path: a 200 response body is returned
+// verbatim. The test TLS server's own client is injected so no trust-store wiring is
+// needed and no real network is touched.
+func TestHTTPFetcher_Fetch_Success(t *testing.T) {
+	const want = `{"manifest_b64":"abc"}`
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(want))
+	}))
+	defer srv.Close()
+
+	f, err := NewHTTPFetcher(srv.URL, srv.Client())
+	if err != nil {
+		t.Fatalf("new fetcher: %v", err)
+	}
+	got, err := f.Fetch(context.Background())
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	if string(got) != want {
+		t.Fatalf("body = %q, want %q", got, want)
+	}
+}
+
+// TestHTTPFetcher_Fetch_Non2xx proves a non-2xx status is an error, not a body.
+func TestHTTPFetcher_Fetch_Non2xx(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "nope", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	f, err := NewHTTPFetcher(srv.URL, srv.Client())
+	if err != nil {
+		t.Fatalf("new fetcher: %v", err)
+	}
+	if _, err := f.Fetch(context.Background()); err == nil {
+		t.Fatal("non-2xx: want error, got nil")
+	}
+}
+
+// TestHTTPFetcher_Fetch_RejectsOversized proves a body larger than maxManifestBytes is
+// rejected with a precise "too large" error rather than silently truncated (which would
+// later fail downstream as a confusing pin/parse mismatch), while a body AT the cap is
+// still accepted in full — the boundary is inclusive.
+func TestHTTPFetcher_Fetch_RejectsOversized(t *testing.T) {
+	t.Run("over cap rejected", func(t *testing.T) {
+		oversized := bytes.Repeat([]byte("a"), maxManifestBytes+4096)
+		srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write(oversized)
+		}))
+		defer srv.Close()
+
+		f, err := NewHTTPFetcher(srv.URL, srv.Client())
+		if err != nil {
+			t.Fatalf("new fetcher: %v", err)
+		}
+		if _, err := f.Fetch(context.Background()); err == nil {
+			t.Fatal("oversized body: want error, got nil")
+		} else if !strings.Contains(err.Error(), "cap") {
+			t.Fatalf("oversized body: want a cap error, got %v", err)
+		}
+	})
+
+	t.Run("at cap accepted", func(t *testing.T) {
+		atCap := bytes.Repeat([]byte("a"), maxManifestBytes)
+		srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write(atCap)
+		}))
+		defer srv.Close()
+
+		f, err := NewHTTPFetcher(srv.URL, srv.Client())
+		if err != nil {
+			t.Fatalf("new fetcher: %v", err)
+		}
+		got, err := f.Fetch(context.Background())
+		if err != nil {
+			t.Fatalf("at-cap body: unexpected error %v", err)
+		}
+		if len(got) != maxManifestBytes {
+			t.Fatalf("at-cap body = %d bytes, want %d", len(got), maxManifestBytes)
+		}
+	})
+}
+
+// TestDefaultFetchClient_RefusesRedirects proves the default (nil-Client) path does not
+// follow redirects: its CheckRedirect returns http.ErrUseLastResponse, so a 3xx from the
+// manifest URL is surfaced as-is and then rejected by Fetch as a non-2xx status. That
+// keeps a redirect to http:// or an internal host from silently defeating the
+// construction-time https guard, which only covers the first hop.
+func TestDefaultFetchClient_RefusesRedirects(t *testing.T) {
+	if defaultFetchClient.CheckRedirect == nil {
+		t.Fatal("defaultFetchClient must set CheckRedirect to refuse redirects")
+	}
+	if err := defaultFetchClient.CheckRedirect(nil, nil); !errors.Is(err, http.ErrUseLastResponse) {
+		t.Fatalf("CheckRedirect = %v, want http.ErrUseLastResponse", err)
+	}
+}
+
+// TestHTTPFetcher_Fetch_ContextCancel proves the fetch honors the caller's context so a
+// caller can bound a slow endpoint even on the nil-client path (where the package
+// default client's own timeout is the backstop).
+func TestHTTPFetcher_Fetch_ContextCancel(t *testing.T) {
+	f := &HTTPFetcher{URL: "https://manifest.example.com/m.json"}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already canceled
+	_, err := f.Fetch(ctx)
+	if err == nil {
+		t.Fatal("canceled context: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "manifest") {
+		t.Fatalf("error should be wrapped with manifest context, got %v", err)
+	}
+}
+
+// TestDefaultFetchClient_HasTimeout proves the nil-Client fallback carries a timeout
+// (http.DefaultClient does not), so a deadline-free context cannot hang Fetch on a
+// slow-trickle endpoint.
+func TestDefaultFetchClient_HasTimeout(t *testing.T) {
+	if defaultFetchClient.Timeout <= 0 {
+		t.Fatalf("defaultFetchClient.Timeout = %v, want a positive bound", defaultFetchClient.Timeout)
+	}
+}
