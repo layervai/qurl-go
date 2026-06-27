@@ -124,7 +124,15 @@ jobs:
   notify:
     name: Notify
     needs: [test, lint, vuln]
-    if: always() && github.event_name != 'pull_request'
+    # `!cancelled()` rather than `always()`: this repo sets
+    # concurrency.cancel-in-progress, so a newer push to main cancels the
+    # in-flight run. `always()` would still fire notify on that cancelled run
+    # and post a yellow "cancelled" card for every superseded push — chatter
+    # the fleet's other CIs (no cancel-in-progress) never produce. We still
+    # notify on success and failure, and on a single gate that hits its own
+    # timeout (run not cancelled → AGGREGATE=cancelled card), but stay quiet
+    # when the whole run is cancelled out from under us.
+    if: ${{ !cancelled() && github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     continue-on-error: true
@@ -193,13 +201,13 @@ jobs:
           # color/emoji/text change with the aggregate result.
           HEADER="qURL Go SDK Build"
           if [[ "$AGGREGATE" == "success" ]]; then
-            COLOR="#36a64f"; EMOJI="white_check_mark"; STATUS_TEXT="successful"
+            COLOR="#36a64f"; EMOJI=":white_check_mark:"; STATUS_TEXT="successful"
           elif [[ "$AGGREGATE" == "failure" ]]; then
-            COLOR="#dc3545"; EMOJI="x"; STATUS_TEXT="failed"
+            COLOR="#dc3545"; EMOJI=":x:"; STATUS_TEXT="failed"
           else
             # cancelled or incomplete — both warn-yellow, and the status text
             # is just the aggregate token itself.
-            COLOR="#ffc107"; EMOJI="warning"; STATUS_TEXT="$AGGREGATE"
+            COLOR="#ffc107"; EMOJI=":warning:"; STATUS_TEXT="$AGGREGATE"
           fi
 
           # Determine per-gate emoji so the Slack message shows which
@@ -240,7 +248,7 @@ jobs:
             --arg commit_url "$COMMIT_URL" \
             --arg workflow_url "$WORKFLOW_URL" \
             '{attachments: [{color: $color, blocks: [
-              {type: "section", text: {type: "mrkdwn", text: (":\($emoji): *\($header)* \($status)")}},
+              {type: "section", text: {type: "mrkdwn", text: ("\($emoji) *\($header)* \($status)")}},
               {type: "section", fields: [
                 {type: "mrkdwn", text: ("*Branch:*\n`\($branch)` (\($sha))")},
                 {type: "mrkdwn", text: ("*Trigger:*\n\($trigger) by \($actor)")},
