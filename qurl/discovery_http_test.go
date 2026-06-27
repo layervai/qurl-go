@@ -42,6 +42,45 @@ func TestNewHTTPFetcher_RequiresHTTPS(t *testing.T) {
 	}
 }
 
+// TestHTTPFetcher_Fetch_RejectsNonHTTPSLiteral proves the Fetch-time scheme re-check
+// (defense in depth): a struct literal bypasses NewHTTPFetcher's construction guard,
+// so a literal carrying an http:// URL would otherwise GET the (non-secret) discovery
+// bytes in the clear. Fetch must refuse it before any request is made, with
+// ErrDiscoveryConfig — the same sentinel the constructor uses. No server is started:
+// the scheme check fires before client.Do, so a fired request would itself be the bug.
+func TestHTTPFetcher_Fetch_RejectsNonHTTPSLiteral(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		url  string
+	}{
+		{"http", "http://manifest.example.com/m.json"},
+		{"no scheme", "manifest.example.com/m.json"},
+		{"ftp", "ftp://manifest.example.com/m.json"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// A struct literal that never saw NewHTTPFetcher's https guard. A client is
+			// injected that FAILS the test if it is ever invoked, proving the scheme check
+			// short-circuits before any network call.
+			f := &HTTPFetcher{
+				URL: tc.url,
+				Client: doerFunc(func(*http.Request) (*http.Response, error) {
+					t.Fatalf("Fetch must reject %q before issuing a request", tc.url)
+					return nil, errors.New("unreachable: request must not be issued")
+				}),
+			}
+			if _, err := f.Fetch(context.Background()); !errors.Is(err, ErrDiscoveryConfig) {
+				t.Fatalf("non-https literal %q: want ErrDiscoveryConfig, got %v", tc.url, err)
+			}
+		})
+	}
+}
+
+// doerFunc adapts a plain function to HTTPDoer so a test can inject a client that must
+// never be called.
+type doerFunc func(*http.Request) (*http.Response, error)
+
+func (f doerFunc) Do(req *http.Request) (*http.Response, error) { return f(req) }
+
 // TestHTTPFetcher_Fetch_Success proves the happy path: a 200 response body is returned
 // verbatim. The test TLS server's own client is injected so no trust-store wiring is
 // needed and no real network is touched.

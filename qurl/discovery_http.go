@@ -60,13 +60,14 @@ type HTTPFetcher struct {
 // http:// manifest URL at construction catches a misconfig early and matches the
 // "over HTTPS" contract, rather than shipping discovery bytes in the clear.
 //
-// This is the ONLY supported way to build an HTTPFetcher. The struct's URL/Client
-// fields are exported (kept so tests can inject a Client without an https URL via a
-// literal), so a struct literal — HTTPFetcher{URL: "http://..."} — SKIPS this scheme
-// check entirely and Fetch will GET that plaintext URL. Always go through this
-// constructor in production; a literal is a test-only escape hatch. The pin/signature
-// is still the trust anchor, so a plaintext fetch cannot admit a bad manifest, but it
-// would leak the (non-secret) discovery bytes in the clear, which this guard prevents.
+// This is the preferred way to build an HTTPFetcher: it validates the URL up front so
+// a misconfig surfaces at construction. The struct's URL/Client fields are exported
+// (kept so tests can inject a Client via a literal), so a struct literal —
+// HTTPFetcher{URL: "http://..."} — skips THIS construction-time check; but Fetch
+// re-checks the scheme at request time and refuses a non-https URL, so a plaintext
+// literal still cannot GET discovery bytes in the clear. The pin/signature is the
+// trust anchor either way; both guards are defense in depth against shipping the
+// (non-secret) manifest over plaintext, not the trust boundary.
 func NewHTTPFetcher(rawURL string, client HTTPDoer) (*HTTPFetcher, error) {
 	if rawURL == "" {
 		return nil, fmt.Errorf("%w: manifest URL is required", ErrDiscoveryConfig)
@@ -90,10 +91,21 @@ func NewHTTPFetcher(rawURL string, client HTTPDoer) (*HTTPFetcher, error) {
 //
 // An injected non-nil Client owns its own timeout AND redirect policy — Fetch cannot
 // re-impose either on it, so a caller supplying a Client is responsible for both.
+//
+// Defense in depth: Fetch re-checks the URL scheme at request time and refuses a
+// non-https f.URL. NewHTTPFetcher already enforces https at construction, but the
+// exported URL field means a struct literal (HTTPFetcher{URL: "http://..."}) can carry
+// a plaintext URL that never saw the constructor guard; this re-check closes that
+// escape so Fetch never GETs the (non-secret) discovery bytes in the clear regardless
+// of how the fetcher was built. Trust still rests on the pin/signature, so this is
+// hardening, not the trust boundary.
 func (f *HTTPFetcher) Fetch(ctx context.Context) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, f.URL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("qurl: build manifest request: %w", err)
+	}
+	if req.URL.Scheme != "https" {
+		return nil, fmt.Errorf("%w: manifest URL must be https (got %q)", ErrDiscoveryConfig, req.URL.Scheme)
 	}
 	client := f.Client
 	if client == nil {
