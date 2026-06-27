@@ -19,6 +19,14 @@ import (
 // (RelayError), distinct from an authenticated server *deny* (which comes back
 // inside a decryptable NHP_ACK).
 
+// HTTPDoer is the subset of *http.Client the relay transport needs. Narrowing to
+// an interface lets a caller inject a fixed-egress client (to honor the
+// same-egress-IP invariant), an instrumented client, or a test double. The zero
+// value of a KnockOptions / RelayPost call (nil) falls back to http.DefaultClient.
+type HTTPDoer interface {
+	Do(req *http.Request) (*http.Response, error)
+}
+
 // RelayError is a relay reply that was not a 200 application/octet-stream — a
 // transport fault (unknown server, malformed/oversize packet, forward failure,
 // shutdown, timeout). Status is the HTTP status, or 0 for a transport-level
@@ -32,7 +40,7 @@ func (e *RelayError) Error() string { return e.Msg }
 
 // RelayPost delivers a knock packet to the relay and returns the server's reply
 // packet bytes. 200 → reply bytes; any other status → *RelayError.
-func RelayPost(ctx context.Context, httpClient *http.Client, relayBaseURL, serverID string, packet []byte) ([]byte, error) {
+func RelayPost(ctx context.Context, httpClient HTTPDoer, relayBaseURL, serverID string, packet []byte) ([]byte, error) {
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
@@ -77,7 +85,7 @@ func RelayPost(ctx context.Context, httpClient *http.Client, relayBaseURL, serve
 // zero (random) there.
 type KnockOptions struct {
 	// HTTPClient is the client used for the relay POST. nil ⇒ http.DefaultClient.
-	HTTPClient *http.Client
+	HTTPClient HTTPDoer
 
 	// DeviceStaticPriv is the agent static private key (the Noise initiator
 	// identity). nil/empty ⇒ a fresh random 32-byte key is minted for this knock.

@@ -119,6 +119,37 @@ func (f *Fragment) Verify(ts *TrustStore) error {
 	return verifyRawSignature(pub, f.ClaimsB64, f.sig)
 }
 
+// FragmentFromLinkAndVerify extracts the fragment from a full qURL link and
+// verifies the issuer signature in one call — the convenience path for the SDK
+// entry verb. relay_url validation remains a separate post-verify step
+// (ValidateRelayURL), matching the design ordering.
+func FragmentFromLinkAndVerify(qurlLink string, ts *TrustStore) (*Fragment, error) {
+	frag, err := FragmentFromLink(qurlLink)
+	if err != nil {
+		return nil, err
+	}
+	if err := frag.Verify(ts); err != nil {
+		return nil, err
+	}
+	return frag, nil
+}
+
+// DecodeCellPublicKey returns the raw 32-byte X25519 cell public key from VERIFIED
+// claims, for deriving the relay serverId and as the Noise server static key. Call
+// only on claims from a Fragment that has been verified.
+func DecodeCellPublicKey(c *Claims) ([]byte, error) {
+	return decodeX25519PublicKey(fieldCellPublicKeyB64, c.CellPublicKeyB64)
+}
+
+// DecodeQurlUserPrivateKey returns the raw 32-byte X25519 per-qURL private key
+// from the secret block, used as the Noise agent static identity for the knock.
+func DecodeQurlUserPrivateKey(s *Secret) ([]byte, error) {
+	if s == nil {
+		return nil, fmt.Errorf("%w: nil secret", ErrStrictParse)
+	}
+	return decodeX25519PrivateKey(fieldQurlUserPrivateKeyB64, s.QurlUserPrivateKeyB64)
+}
+
 // ParseAndVerify is the convenience path: parse the fragment then verify the
 // issuer signature. relay_url validation still remains a separate post-verify
 // step the caller performs with ValidateRelayURL.
