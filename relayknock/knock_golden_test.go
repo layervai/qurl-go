@@ -9,6 +9,12 @@ import (
 	conformance "github.com/layervai/qurl-conformance"
 )
 
+// strictRawURLEncoding is RawURLEncoding with strict canonical-trailing-bit
+// enforcement, matching qv2/claims.go's decode of cell_public_key_b64 so the
+// relayknock fingerprint fence and the qv2 verify path agree on what counts as a
+// valid key. Hoisted once because base64.Encoding.Strict() allocates per call.
+var strictRawURLEncoding = base64.RawURLEncoding.Strict()
+
 // These golden vectors are consumed byte-for-byte from the public qurl-conformance
 // package (github.com/layervai/qurl-conformance): the relay-knock golden packets
 // (RelayKnockGolden) and the cross-language fingerprint vectors carried in the qv2
@@ -186,7 +192,7 @@ func TestPubKeyFingerprint_GoldenVectors(t *testing.T) {
 			t.Fatalf("server_id class missing golden vector %q", name)
 		}
 		t.Run(name, func(t *testing.T) {
-			key, err := base64.RawURLEncoding.DecodeString(v.CellPublicKeyB64)
+			key, err := strictRawURLEncoding.DecodeString(v.CellPublicKeyB64)
 			if err != nil {
 				t.Fatalf("decode cell_public_key_b64 %q: %v", v.CellPublicKeyB64, err)
 			}
