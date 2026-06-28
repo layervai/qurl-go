@@ -19,10 +19,13 @@ URLs or creates portals.
 
 Agents and services increasingly need to reach private MCP servers, APIs, and
 internal tools. The old choices are painful: open an inbound port, run a VPN,
-ship a bastion, or pass around a long-lived key.
+ship a bastion, expose a tunnel endpoint with Cloudflare Tunnel or ngrok, or
+pass around a long-lived key.
 
-qURL flips that model. A private service stays private. Access is granted with
-an expiring qURL link, and LayerV handles the access path.
+Tunnels are convenient, but they still publish an external endpoint an adversary
+can scan and probe. qURL flips that model. A private service stays private.
+Access is granted with an intentional, expiring qURL link, and LayerV handles
+the access path.
 
 ## Install
 
@@ -94,24 +97,24 @@ portal, err := resource.CreatePortal(ctx, qurl.ValidFor(time.Hour))
 For one-off scripts, `client.CreatePortalForURL` combines the two API calls and
 returns both the portal and the reusable resource handle.
 
-## Credentials
+## Connect to LayerV
 
-Only portal issuers need credentials. A user or agent that only receives and
-opens a qURL link does not bootstrap anything.
+Only software that protects URLs or creates portals needs LayerV credentials. A
+user or agent that only receives and opens a qURL link does not set up anything.
 
-For software that protects URLs or creates portals, the LayerV install/bootstrap
-flow creates issuer state once. Application code reads that state:
+First, connect that service to your LayerV account. This happens outside the Go
+code during setup or deploy. After that, application code starts with:
 
 ```go
 client, err := qurl.OpenClient()
 ```
 
-`OpenClient` reads `/var/lib/layerv/qurl/issuer-state.json`
-(`qurl.DefaultIssuerStatePath`). Do not keep the install-time bootstrap key as
-the application's credential, and do not pass it to `NewClient`.
+That is the normal application code. You do not paste keys into your app;
+LayerV setup handles the connection.
 
-If your app keeps issuer state in KMS, a secret manager, or a platform-specific
-store, implement `qurl.CredentialProvider` and pass it to `qurl.NewClient`.
+If your runtime stores LayerV credentials in KMS, a secret manager, or another
+custom store, implement `qurl.CredentialProvider` and pass it to
+`qurl.NewClient`. Otherwise use `OpenClient`.
 
 ## Opening Links
 

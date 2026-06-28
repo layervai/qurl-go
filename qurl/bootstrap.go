@@ -189,12 +189,12 @@ func WithVersion(version string) BootstrapOption {
 	})
 }
 
-// BootstrapAgent consumes a temporary LayerV bootstrap key, registers a local
-// X25519 identity, and saves that identity in store. The bootstrap key is used
-// for this call only; future restarts load the saved AgentState.
-func BootstrapAgent(ctx context.Context, bootstrapKey string, store AgentStateStore, opts ...BootstrapOption) (*AgentState, error) {
-	if strings.TrimSpace(bootstrapKey) == "" {
-		return nil, fmt.Errorf("%w: bootstrap key must not be empty", ErrInvalidBootstrapConfig)
+// BootstrapAgent consumes a temporary LayerV setup key, registers a local
+// X25519 identity, and saves that identity in store. The setup key is used for
+// this call only; future restarts load the saved AgentState.
+func BootstrapAgent(ctx context.Context, setupKey string, store AgentStateStore, opts ...BootstrapOption) (*AgentState, error) {
+	if strings.TrimSpace(setupKey) == "" {
+		return nil, fmt.Errorf("%w: setup key must not be empty", ErrInvalidBootstrapConfig)
 	}
 	if store == nil {
 		return nil, fmt.Errorf("%w: state store must not be nil", ErrInvalidBootstrapConfig)
@@ -220,7 +220,9 @@ func BootstrapAgent(ctx context.Context, bootstrapKey string, store AgentStateSt
 		state.AgentID = cfg.agentID
 	}
 	// Persist the generated keypair before the network call so a failed or
-	// interrupted bootstrap retry uses the same local identity.
+	// interrupted bootstrap retry uses the same local identity. Until the API
+	// response is saved, nil RegisteredAt/NHPPeer means registration is not yet
+	// complete and BootstrapAgent should be retried.
 	if err := store.SaveAgentState(ctx, state); err != nil {
 		return nil, err
 	}
@@ -232,7 +234,7 @@ func BootstrapAgent(ctx context.Context, bootstrapKey string, store AgentStateSt
 		Version:   cfg.version,
 	}
 	var env apiEnvelope[agentBootstrapResponse]
-	if err := doAuthorizedJSON(ctx, cfg.httpClient, cfg.baseURL, BearerToken(bootstrapKey).Authorize, http.MethodPost, "/v1/agent/bootstrap", reqBody, &env); err != nil {
+	if err := doAuthorizedJSON(ctx, cfg.httpClient, cfg.baseURL, BearerToken(setupKey).Authorize, http.MethodPost, "/v1/agent/bootstrap", reqBody, &env); err != nil {
 		return nil, err
 	}
 

@@ -108,20 +108,22 @@ That asks LayerV to protect the URL and mint the portal in one API call. Use the
 explicit `ProtectURL` then `resource.CreatePortal` flow when the resource
 identity matters to your application.
 
-## Credentials
+## Connect to LayerV
 
 Credentials are for software that protects URLs or creates portals. If your code
 only opens received portal links, skip this section.
 
-LayerV bootstrap creates issuer state once. Application code reads that state:
+First, connect the service that creates portals to your LayerV account. This
+happens outside the Go code during setup or deploy. After that, application code
+starts with:
 
 ```go
 client, err := qurl.OpenClient()
 ```
 
-`OpenClient` reads `/var/lib/layerv/qurl/issuer-state.json`
-(`qurl.DefaultIssuerStatePath`). Do not keep the temporary bootstrap key as
-the application's credential, and do not pass it to `NewClient`.
+That is the normal application code. You do not paste keys into your app;
+LayerV setup handles the connection.
 
-If your app keeps issuer state in KMS, a secret manager, or a platform-specific
-store, implement `qurl.CredentialProvider` and pass it to `qurl.NewClient`.
+If your runtime stores LayerV credentials in KMS, a secret manager, or another
+custom store, implement `qurl.CredentialProvider` and pass it to
+`qurl.NewClient`. Otherwise use `OpenClient`.

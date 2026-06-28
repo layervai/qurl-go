@@ -5,10 +5,11 @@ short-lived qURL links. The app that protects URLs and creates portals has Layer
 credentials; the person or agent opening a portal link does not. LayerV handles
 the platform work.
 
-## 1. Create a Client
+## 1. Connect to LayerV
 
-Create a client in the issuer application, where URLs are protected and portals
-are created:
+First, connect the service that creates portals to your LayerV account. This
+happens outside the Go code during setup or deploy. After that, application code
+starts with:
 
 ```go
 client, err := qurl.OpenClient()
@@ -17,10 +18,8 @@ if err != nil {
 }
 ```
 
-`OpenClient` reads LayerV issuer state from
-`/var/lib/layerv/qurl/issuer-state.json` (`qurl.DefaultIssuerStatePath`).
-That file is created by the install/bootstrap flow. Application code does not
-read the temporary bootstrap key.
+That is the normal application code. You do not paste keys into your app;
+LayerV setup handles the connection.
 
 ## 2. Protect the URL
 

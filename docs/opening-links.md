@@ -2,8 +2,7 @@
 
 Most recipients do not need this SDK. They open the qURL link directly.
 
-Opening a portal does not require a LayerV credential, bootstrap key, local
-keypair, or resource state.
+Opening a portal does not require LayerV credentials or local setup.
 
 ## Programmatic Opening
 

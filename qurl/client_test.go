@@ -21,6 +21,9 @@ func TestClient_ProtectURLThenPortal(t *testing.T) {
 		if got, want := r.Header.Get("Authorization"), "Bearer lv_test_123"; got != want {
 			t.Fatalf("Authorization = %q, want %q", got, want)
 		}
+		if got := r.Header.Get("User-Agent"); !strings.HasPrefix(got, "qurl-go-sdk") {
+			t.Fatalf("User-Agent = %q, want qurl-go-sdk prefix", got)
+		}
 		w.Header().Set("Content-Type", "application/json")
 
 		switch requestCount.Add(1) {
@@ -152,6 +155,30 @@ func TestClient_ResourceByIDCreatePortal(t *testing.T) {
 	}
 	if portal.Link != "https://qurl.link/at_stored" {
 		t.Fatalf("portal link = %q", portal.Link)
+	}
+}
+
+func TestClient_CreatePortalSendsExplicitZeroMaxSessions(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/resources/r_demo1234567/qurls" {
+			t.Fatalf("request = %s %s, want POST /v1/resources/r_demo1234567/qurls", r.Method, r.URL.Path)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode create portal body: %v", err)
+		}
+		assertJSONField(t, body, "max_sessions", float64(0))
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"data":{"resource_id":"r_demo1234567","qurl_link":"https://qurl.link/at_zero"}}`)
+	}))
+	defer api.Close()
+
+	client, err := NewClient(BearerToken("lv_test_123"), WithBaseURL(api.URL))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	if _, err := client.CreatePortal(context.Background(), &Resource{ID: "r_demo1234567"}, MaxSessions(0)); err != nil {
+		t.Fatalf("CreatePortal: %v", err)
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"runtime/debug"
 	"strings"
 	"time"
 )
@@ -21,8 +22,9 @@ const (
 	maxAPIResponseDrainBytes = 512 << 10
 )
 
-// DefaultIssuerStatePath is the issuer-state file written by the LayerV
-// install/bootstrap flow and read by OpenClient.
+// DefaultIssuerStatePath is the default local LayerV credential path used by
+// OpenClient. Most applications should call OpenClient rather than reading this
+// file directly.
 const DefaultIssuerStatePath = "/var/lib/layerv/qurl/issuer-state.json"
 
 // ErrInvalidClientConfig is returned when a Client cannot be configured.
@@ -37,7 +39,7 @@ var ErrInvalidResourceRequest = errors.New("qurl: invalid resource request")
 var ErrInvalidPortalRequest = errors.New("qurl: invalid portal request")
 
 // ErrCredentialStateNotFound is returned when FileCredentials cannot find the
-// LayerV issuer state file.
+// LayerV credential file.
 var ErrCredentialStateNotFound = errors.New("qurl: credential state not found")
 
 // ErrInsecureCredentialStatePermissions is returned when file-backed issuer
@@ -55,8 +57,7 @@ var ErrAmbiguousResource = errors.New("qurl: ambiguous resource")
 // CredentialProvider authorizes Client requests.
 //
 // Implement this interface with credentials loaded from protected local state,
-// KMS, a secret manager, or a bootstrap flow that keeps key material out of
-// application config.
+// KMS, or a secret manager.
 type CredentialProvider interface {
 	Authorize(context.Context, *http.Request) error
 }
@@ -86,8 +87,7 @@ func (c bearerTokenCredential) Authorize(_ context.Context, req *http.Request) e
 // BearerToken returns a CredentialProvider backed by one bearer token.
 //
 // It is useful for tests and controlled tooling that already received a LayerV
-// bearer credential from a protected credential path. Do not pass an install-time
-// bootstrap key here.
+// bearer credential from a protected credential path.
 func BearerToken(token string) CredentialProvider {
 	return bearerTokenCredential(token)
 }
@@ -96,9 +96,9 @@ type fileCredentialProvider struct {
 	path string
 }
 
-// FileCredentials reads LayerV issuer state from path. The state file is written
-// by the LayerV install/bootstrap flow; applications should read it, not create
-// it by hand.
+// FileCredentials reads LayerV issuer credentials from path. Most applications
+// should use OpenClient; use FileCredentials only when wiring a custom runtime
+// path.
 func FileCredentials(path string) CredentialProvider {
 	return fileCredentialProvider{path: path}
 }
@@ -207,7 +207,7 @@ func NewClient(provider CredentialProvider, opts ...ClientOption) (*Client, erro
 	}, nil
 }
 
-// OpenClient returns a qURL API client using the default LayerV issuer state.
+// OpenClient returns a qURL API client using the default LayerV credential.
 // It eagerly checks that the local credential source can authorize a request;
 // it does not call the LayerV API until the returned client is used.
 func OpenClient(opts ...ClientOption) (*Client, error) {
@@ -460,8 +460,9 @@ func OneTimeUse() PortalOption {
 	})
 }
 
-// MaxSessions limits concurrent sessions for this qURL link. Use 0 for
-// unlimited sessions.
+// MaxSessions limits concurrent sessions for this qURL link. Use 0 for unlimited
+// sessions; the SDK sends an explicit max_sessions:0, while omitting this option
+// leaves the LayerV server default in effect.
 func MaxSessions(n int) PortalOption {
 	return portalOptionFunc(func(o *portalOptions) error {
 		if n < 0 || n > 1000 {
@@ -666,34 +667,36 @@ func validateTargetURL(targetURL string, errKind error) error {
 }
 
 func validateHTTPURL(rawURL, label string, errKind error) error {
-	if strings.TrimSpace(rawURL) == "" {
-		return fmt.Errorf("%w: %s must not be empty", errKind, label)
-	}
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return fmt.Errorf("%w: %s: %w", errKind, label, err)
-	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return fmt.Errorf("%w: %s must use http or https", errKind, label)
-	}
-	if u.Host == "" {
-		return fmt.Errorf("%w: %s must include a host", errKind, label)
-	}
-	return nil
+	_, err := parseHTTPURL(rawURL, label, errKind)
+	return err
 }
 
 func validateHTTPSOrLoopbackURL(rawURL, label string, errKind error) error {
-	if err := validateHTTPURL(rawURL, label, errKind); err != nil {
-		return err
-	}
-	u, err := url.Parse(rawURL)
+	u, err := parseHTTPURL(rawURL, label, errKind)
 	if err != nil {
-		return fmt.Errorf("%w: %s: %w", errKind, label, err)
+		return err
 	}
 	if u.Scheme == "http" && !isLoopbackHost(u.Hostname()) {
 		return fmt.Errorf("%w: %s must use https unless it targets localhost", errKind, label)
 	}
 	return nil
+}
+
+func parseHTTPURL(rawURL, label string, errKind error) (*url.URL, error) {
+	if strings.TrimSpace(rawURL) == "" {
+		return nil, fmt.Errorf("%w: %s must not be empty", errKind, label)
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %s: %w", errKind, label, err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return nil, fmt.Errorf("%w: %s must use http or https", errKind, label)
+	}
+	if u.Host == "" {
+		return nil, fmt.Errorf("%w: %s must include a host", errKind, label)
+	}
+	return u, nil
 }
 
 func isLoopbackHost(host string) bool {
@@ -746,7 +749,7 @@ func doAuthorizedJSON(ctx context.Context, httpClient HTTPDoer, baseURL string, 
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	req.Header.Set("User-Agent", "qurl-go-sdk")
+	req.Header.Set("User-Agent", sdkUserAgent())
 	if err := authorize(ctx, req); err != nil {
 		return fmt.Errorf("qurl: authorize API request: %w", err)
 	}
@@ -774,6 +777,27 @@ func doAuthorizedJSON(ctx context.Context, httpClient HTTPDoer, baseURL string, 
 		return fmt.Errorf("qurl: decode API response: %w", err)
 	}
 	return nil
+}
+
+func sdkUserAgent() string {
+	const name = "qurl-go-sdk"
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return name
+	}
+	if info.Main.Path == "github.com/layervai/qurl-go" && usableBuildVersion(info.Main.Version) {
+		return name + "/" + info.Main.Version
+	}
+	for _, dep := range info.Deps {
+		if dep.Path == "github.com/layervai/qurl-go" && usableBuildVersion(dep.Version) {
+			return name + "/" + dep.Version
+		}
+	}
+	return name
+}
+
+func usableBuildVersion(version string) bool {
+	return version != "" && version != "(devel)"
 }
 
 // readCappedBody reads at most max bytes from r, returning an error if the source
