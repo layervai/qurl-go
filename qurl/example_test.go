@@ -118,9 +118,12 @@ func ExampleNewStaticProvider() {
 		panic(err)
 	}
 
-	// Install once at startup. Now qurl.EnterPortal(ctx, link) resolves through it.
+	// Install once at startup. SetDefaultProvider sets process-global state, so this
+	// example restores it on return (hygiene for other tests); a real deployment
+	// installs it once and leaves it set. Now qurl.EnterPortal(ctx, link) resolves
+	// through it.
 	qurl.SetDefaultProvider(provider)
-	defer qurl.SetDefaultProvider(nil) // example hygiene; real deployments leave it installed
+	defer qurl.SetDefaultProvider(nil)
 
 	fmt.Println(qurl.DefaultProvider() != nil)
 	// Output: true
