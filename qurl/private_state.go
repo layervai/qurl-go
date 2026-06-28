@@ -3,11 +3,12 @@ package qurl
 import (
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
 )
+
+const maxPrivateStateBytes = 64 << 10
 
 func readPrivateStateFile(path, label string, notFound, invalidConfig, insecurePermissions error) ([]byte, error) {
 	if strings.TrimSpace(path) == "" {
@@ -42,9 +43,9 @@ func readPrivateStateFile(path, label string, notFound, invalidConfig, insecureP
 		return nil, fmt.Errorf("%w: %s changed while opening", invalidConfig, label)
 	}
 
-	raw, err := io.ReadAll(file)
+	raw, err := readCappedBody(file, maxPrivateStateBytes, label)
 	if err != nil {
-		return nil, fmt.Errorf("qurl: read %s: %w", label, err)
+		return nil, fmt.Errorf("qurl: %w", err)
 	}
 	return raw, nil
 }

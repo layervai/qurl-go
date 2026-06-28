@@ -38,10 +38,8 @@ const defaultFetchTimeout = 30 * time.Second
 // application that genuinely needs a CDN hop injects its own Client with a
 // redirect policy it controls.
 var defaultFetchClient = &http.Client{
-	Timeout: defaultFetchTimeout,
-	CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
-		return http.ErrUseLastResponse
-	},
+	Timeout:       defaultFetchTimeout,
+	CheckRedirect: refuseRedirects,
 }
 
 // HTTPFetcher fetches the discovery envelope over HTTPS. The URL should be the

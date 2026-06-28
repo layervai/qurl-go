@@ -334,6 +334,9 @@ func TestNewClientUsesDefaultHTTPTimeout(t *testing.T) {
 	if httpClient.Timeout != defaultAPIHTTPTimeout {
 		t.Fatalf("default HTTP timeout = %s, want %s", httpClient.Timeout, defaultAPIHTTPTimeout)
 	}
+	if err := httpClient.CheckRedirect(nil, nil); !errors.Is(err, http.ErrUseLastResponse) {
+		t.Fatalf("default redirect policy = %v, want http.ErrUseLastResponse", err)
+	}
 }
 
 func TestClient_FileCredentials(t *testing.T) {

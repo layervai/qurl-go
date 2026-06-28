@@ -26,7 +26,14 @@ const (
 	maxAPIErrorSnippetBytes  = 512
 )
 
-var defaultAPIHTTPClient = &http.Client{Timeout: defaultAPIHTTPTimeout}
+var defaultAPIHTTPClient = &http.Client{
+	Timeout:       defaultAPIHTTPTimeout,
+	CheckRedirect: refuseRedirects,
+}
+
+func refuseRedirects(_ *http.Request, _ []*http.Request) error {
+	return http.ErrUseLastResponse
+}
 
 // DefaultIssuerStatePath is the default local LayerV credential path used by
 // OpenClient. Most applications should call OpenClient rather than reading this
@@ -109,7 +116,8 @@ type fileCredentialProvider struct {
 // rotated local credentials are picked up without rebuilding the client. Most
 // applications should use OpenClient; use FileCredentials only when wiring a
 // custom runtime path. The context passed to Authorize cannot interrupt local
-// filesystem I/O after it has started.
+// filesystem I/O after it has started. If the state file contains an
+// "authorization" field, its value is trusted as the raw Authorization header.
 func FileCredentials(path string) CredentialProvider {
 	return fileCredentialProvider{path: path}
 }

@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 )
@@ -198,6 +199,18 @@ func TestFileAgentState_RejectsGroupReadableState(t *testing.T) {
 
 	if _, err := FileAgentState(path).LoadAgentState(context.Background()); !errors.Is(err, ErrInsecureAgentStatePermissions) {
 		t.Fatalf("LoadAgentState: want ErrInsecureAgentStatePermissions, got %v", err)
+	}
+}
+
+func TestFileAgentState_RejectsOversizedState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agent-state.json")
+	if err := os.WriteFile(path, []byte(strings.Repeat("x", maxPrivateStateBytes+1)), 0o600); err != nil {
+		t.Fatalf("write oversized state: %v", err)
+	}
+
+	_, err := FileAgentState(path).LoadAgentState(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "agent state exceeds") {
+		t.Fatalf("LoadAgentState oversized: want cap error, got %v", err)
 	}
 }
 
