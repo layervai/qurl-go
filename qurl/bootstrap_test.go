@@ -154,6 +154,28 @@ func TestFileAgentState_RejectsGroupReadableState(t *testing.T) {
 	}
 }
 
+func TestFileAgentState_RejectsGroupWritableStateDir(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "state")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatalf("mkdir state dir: %v", err)
+	}
+	if err := os.Chmod(dir, 0o777); err != nil {
+		t.Fatalf("chmod state dir: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(dir, 0o700)
+	})
+	path := filepath.Join(dir, "agent-state.json")
+	raw := []byte(`{"private_key_b64":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=","public_key_b64":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb="}`)
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatalf("write state: %v", err)
+	}
+
+	if _, err := FileAgentState(path).LoadAgentState(context.Background()); !errors.Is(err, ErrInsecureAgentStatePermissions) {
+		t.Fatalf("LoadAgentState loose dir: want ErrInsecureAgentStatePermissions, got %v", err)
+	}
+}
+
 func TestFileAgentState_RejectsSymlinkState(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "agent-state.json")

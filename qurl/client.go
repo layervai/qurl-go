@@ -22,6 +22,7 @@ const (
 	defaultAPIBaseURL        = "https://api.layerv.ai"
 	maxAPIResponseBodyBytes  = 1 << 20
 	maxAPIResponseDrainBytes = 512 << 10
+	maxAPIErrorSnippetBytes  = 512
 )
 
 // DefaultIssuerStatePath is the default local LayerV credential path used by
@@ -210,14 +211,24 @@ func NewClient(provider CredentialProvider, opts ...ClientOption) (*Client, erro
 
 // OpenClient returns a qURL API client using the default LayerV credential.
 // It eagerly checks that the local credential source can authorize a request;
-// it does not call the LayerV API until the returned client is used.
+// it does not call the LayerV API until the returned client is used. Use
+// OpenClientContext when startup code needs to bound that eager check.
 func OpenClient(opts ...ClientOption) (*Client, error) {
+	return OpenClientContext(context.Background(), opts...)
+}
+
+// OpenClientContext is OpenClient with a context for the eager credential
+// authorization check.
+func OpenClientContext(ctx context.Context, opts ...ClientOption) (*Client, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("%w: context must not be nil", ErrInvalidClientConfig)
+	}
 	provider := FileCredentials(DefaultIssuerStatePath)
 	client, err := NewClient(provider, opts...)
 	if err != nil {
 		return nil, err
 	}
-	if err := validateCredentials(provider, client.baseURL); err != nil {
+	if err := validateCredentials(ctx, provider, client.baseURL); err != nil {
 		return nil, err
 	}
 	return client, nil
@@ -480,7 +491,8 @@ func MaxSessions(n int) PortalOption {
 
 // WithSessionDuration sets how long access lasts after someone opens the link.
 // The SDK caps this at 24 hours as a client-side guardrail; the LayerV API
-// remains authoritative for policy.
+// remains authoritative for policy. Omit this option to use the server default;
+// zero is rejected rather than treated as default.
 func WithSessionDuration(d time.Duration) PortalOption {
 	return portalOptionFunc(func(o *portalOptions) error {
 		if d > 24*time.Hour {
@@ -670,6 +682,8 @@ func applyPortalOptions(opts []PortalOption) (portalOptions, error) {
 }
 
 func validateTargetURL(targetURL string, errKind error) error {
+	// Protected targets may be private http:// services. Credential-bearing API
+	// and bootstrap origins layer validateHTTPSOrLoopbackURL on top instead.
 	_, err := parseHTTPURL(targetURL, "target URL", errKind)
 	return err
 }
@@ -714,15 +728,18 @@ func (c *Client) doJSON(ctx context.Context, method, path string, body, out any)
 	return doAuthorizedJSON(ctx, c.httpClient, c.baseURL, c.credentials.Authorize, method, path, body, out)
 }
 
-func validateCredentials(provider CredentialProvider, baseURL string) error {
+func validateCredentials(ctx context.Context, provider CredentialProvider, baseURL string) error {
 	if provider == nil {
 		return fmt.Errorf("%w: credential provider must not be nil", ErrInvalidClientConfig)
 	}
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, baseURL, http.NoBody)
+	if ctx == nil {
+		return fmt.Errorf("%w: context must not be nil", ErrInvalidClientConfig)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL, http.NoBody)
 	if err != nil {
 		return fmt.Errorf("qurl: build credential validation request: %w", err)
 	}
-	return provider.Authorize(context.Background(), req)
+	return provider.Authorize(ctx, req)
 }
 
 type requestAuthorizer func(context.Context, *http.Request) error
@@ -867,13 +884,36 @@ func apiErrorFromResponse(status int, body []byte) error {
 		Message string `json:"message"`
 	}
 	_ = json.Unmarshal(body, &parsed)
+	code := cmp.Or(parsed.Error.Code, parsed.Code)
+	apiType := cmp.Or(parsed.Error.Type, parsed.Type)
+	title := cmp.Or(parsed.Error.Title, parsed.Title)
+	detail := cmp.Or(parsed.Error.Detail, parsed.Detail, parsed.Error.Message, parsed.Message)
+	if code == "" && apiType == "" && title == "" && detail == "" {
+		detail = apiErrorBodySnippet(body)
+	}
 	return &APIError{
 		StatusCode: status,
-		Code:       cmp.Or(parsed.Error.Code, parsed.Code),
-		Type:       cmp.Or(parsed.Error.Type, parsed.Type),
-		Title:      cmp.Or(parsed.Error.Title, parsed.Title),
-		Detail:     cmp.Or(parsed.Error.Detail, parsed.Detail, parsed.Error.Message, parsed.Message),
+		Code:       code,
+		Type:       apiType,
+		Title:      title,
+		Detail:     detail,
 	}
+}
+
+func apiErrorBodySnippet(body []byte) string {
+	body = bytes.TrimSpace(body)
+	if len(body) == 0 {
+		return ""
+	}
+	truncated := len(body) > maxAPIErrorSnippetBytes
+	if truncated {
+		body = body[:maxAPIErrorSnippetBytes]
+	}
+	snippet := strings.Join(strings.Fields(string(body)), " ")
+	if truncated {
+		snippet += "..."
+	}
+	return snippet
 }
 
 func formatAPIDuration(d time.Duration, minDuration time.Duration) (string, error) {

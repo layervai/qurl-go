@@ -420,7 +420,15 @@ func TestClient_Validation(t *testing.T) {
 
 func TestValidateCredentialsUsesBaseURL(t *testing.T) {
 	const wantURL = "https://api.example.test"
-	provider := CredentialProviderFunc(func(_ context.Context, req *http.Request) error {
+	type contextKey struct{}
+	ctx := context.WithValue(context.Background(), contextKey{}, "validation")
+	provider := CredentialProviderFunc(func(ctx context.Context, req *http.Request) error {
+		if got := ctx.Value(contextKey{}); got != "validation" {
+			t.Fatalf("credential validation context value = %v, want validation", got)
+		}
+		if got := req.Context().Value(contextKey{}); got != "validation" {
+			t.Fatalf("request context value = %v, want validation", got)
+		}
 		if got := req.URL.String(); got != wantURL {
 			t.Fatalf("credential validation URL = %q, want %q", got, wantURL)
 		}
@@ -428,7 +436,7 @@ func TestValidateCredentialsUsesBaseURL(t *testing.T) {
 		return nil
 	})
 
-	if err := validateCredentials(provider, wantURL); err != nil {
+	if err := validateCredentials(ctx, provider, wantURL); err != nil {
 		t.Fatalf("validateCredentials: %v", err)
 	}
 }
@@ -451,6 +459,28 @@ func TestClient_APIError(t *testing.T) {
 		t.Fatalf("want *APIError, got %T: %v", err, err)
 	}
 	if apiErr.StatusCode != http.StatusForbidden || apiErr.Code != "access_denied" || !strings.Contains(apiErr.Error(), "API key cannot create resources") {
+		t.Fatalf("api error = %#v", apiErr)
+	}
+}
+
+func TestClient_APIErrorPlainTextBody(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusBadGateway)
+		fmt.Fprint(w, "upstream unavailable\ntry again later")
+	}))
+	defer api.Close()
+
+	client, err := NewClient(BearerToken("lv_test"), WithBaseURL(api.URL))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	_, err = client.ProtectURL(context.Background(), "https://example.com")
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("want *APIError, got %T: %v", err, err)
+	}
+	if apiErr.StatusCode != http.StatusBadGateway || !strings.Contains(apiErr.Error(), "upstream unavailable try again later") {
 		t.Fatalf("api error = %#v", apiErr)
 	}
 }
