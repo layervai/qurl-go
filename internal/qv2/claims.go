@@ -1,11 +1,11 @@
-// Package qv2 is the cryptographic core of the qURL Go SDK: it verifies incoming
-// qURL v2 links and mints new ones. Most users reach it through the higher-level
-// qurl package and import qv2 directly only for its primitives — the strict parser,
-// issuer-signature sign/verify, the published-key trust store, the Signer seam, and
-// post-verify relay_url validation.
+// Package qv2 is the internal cryptographic core of the qURL Go SDK: it verifies
+// incoming qURL links and mints new ones. It is an internal package — integrations
+// never import it directly; they use the public qurl package, which re-exports the
+// surface callers need (the strict parser, issuer-signature sign/verify, the
+// published-key trust store, the Signer seam, and post-verify relay validation).
 //
-// It implements the qURL v2 keyed-identity wire format and issuer-signature crypto
-// per the public qURL v2 keyed-identity design.
+// It implements the qURL keyed-identity wire format and issuer-signature crypto per
+// the public qURL keyed-identity design.
 //
 // This is the security core for a qURL link (#qv2.<claims>.<secret>.<sig>): a
 // strict allowlist parser, the issuer signing input + raw r||s low-S signature

@@ -41,7 +41,9 @@ type RelayAllowlist = core.RelayAllowlist
 // window, id). Read it from the Fragment returned by VerifyLink.
 type Claims = core.Claims
 
-// Secret is the one-time per-link credential carried by a qURL link.
+// Secret is the one-time per-link credential carried by a qURL link. It is the type of
+// Fragment.Secret; most callers never construct it (CreatePortal mints it and
+// EnterPortal consumes it), but it is re-exported so Fragment.Secret has a nameable type.
 type Secret = core.Secret
 
 // Fragment is a parsed, verified qURL link: its Claims and Secret plus the exact
