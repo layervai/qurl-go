@@ -322,6 +322,20 @@ func TestClient_CredentialProvider(t *testing.T) {
 	}
 }
 
+func TestNewClientUsesDefaultHTTPTimeout(t *testing.T) {
+	client, err := NewClient(BearerToken("lv_test"))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	httpClient, ok := client.httpClient.(*http.Client)
+	if !ok {
+		t.Fatalf("default HTTP client type = %T, want *http.Client", client.httpClient)
+	}
+	if httpClient.Timeout != defaultAPIHTTPTimeout {
+		t.Fatalf("default HTTP timeout = %s, want %s", httpClient.Timeout, defaultAPIHTTPTimeout)
+	}
+}
+
 func TestClient_FileCredentials(t *testing.T) {
 	statePath := filepath.Join(t.TempDir(), "issuer-state.json")
 	if err := os.WriteFile(statePath, []byte(`{"authorization":"Bearer lv_state_123"}`), 0o600); err != nil {

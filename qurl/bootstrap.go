@@ -153,6 +153,8 @@ func WithBootstrapBaseURL(rawURL string) BootstrapOption {
 }
 
 // WithBootstrapHTTPClient injects the HTTP client used for bootstrap requests.
+// Without this option, BootstrapAgent uses a shared client with a 30-second
+// timeout; callers can still set shorter deadlines on ctx.
 func WithBootstrapHTTPClient(client HTTPDoer) BootstrapOption {
 	return bootstrapOptionFunc(func(o *bootstrapOptions) error {
 		if client == nil {
@@ -219,7 +221,7 @@ func BootstrapAgent(ctx context.Context, setupKey string, store AgentStateStore,
 	}
 	cfg := bootstrapOptions{
 		baseURL:    defaultBootstrapBaseURL,
-		httpClient: http.DefaultClient,
+		httpClient: defaultAPIHTTPClient,
 	}
 	for _, opt := range opts {
 		if opt == nil {

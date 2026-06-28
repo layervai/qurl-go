@@ -20,10 +20,13 @@ import (
 
 const (
 	defaultAPIBaseURL        = "https://api.layerv.ai"
+	defaultAPIHTTPTimeout    = 30 * time.Second
 	maxAPIResponseBodyBytes  = 1 << 20
 	maxAPIResponseDrainBytes = 512 << 10
 	maxAPIErrorSnippetBytes  = 512
 )
+
+var defaultAPIHTTPClient = &http.Client{Timeout: defaultAPIHTTPTimeout}
 
 // DefaultIssuerStatePath is the default local LayerV credential path used by
 // OpenClient. Most applications should call OpenClient rather than reading this
@@ -60,7 +63,10 @@ var ErrAmbiguousResource = errors.New("qurl: ambiguous resource")
 // CredentialProvider authorizes Client requests.
 //
 // Implement this interface with credentials loaded from protected local state,
-// KMS, or a secret manager.
+// KMS, or a secret manager. Authorize may be called for a local validation
+// request that is never sent, such as OpenClientContext's startup check, so
+// providers should avoid spending one-time credentials merely because Authorize
+// was invoked.
 type CredentialProvider interface {
 	Authorize(context.Context, *http.Request) error
 }
@@ -176,7 +182,9 @@ func WithBaseURL(rawURL string) ClientOption {
 	})
 }
 
-// WithHTTPClient injects the HTTP client used for API requests.
+// WithHTTPClient injects the HTTP client used for API requests. Without this
+// option, the SDK uses a shared client with a 30-second timeout; callers can
+// still set shorter per-call deadlines on ctx.
 func WithHTTPClient(client HTTPDoer) ClientOption {
 	return clientOptionFunc(func(o *clientOptions) error {
 		if client == nil {
@@ -194,7 +202,7 @@ func NewClient(provider CredentialProvider, opts ...ClientOption) (*Client, erro
 	}
 	cfg := clientOptions{
 		baseURL:    defaultAPIBaseURL,
-		httpClient: http.DefaultClient,
+		httpClient: defaultAPIHTTPClient,
 	}
 	for _, opt := range opts {
 		if opt == nil {

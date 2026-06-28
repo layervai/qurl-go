@@ -212,7 +212,7 @@ func TestNormalizeRelayErrorPreservesWrappedContext(t *testing.T) {
 	coreErr := &relayknock.RelayError{Status: http.StatusBadGateway, Msg: "relay unavailable"}
 	err := normalizeRelayError(fmt.Errorf("knock context: %w", coreErr))
 
-	if !strings.Contains(err.Error(), "knock context") {
+	if !strings.Contains(err.Error(), "qurl: knock context") {
 		t.Fatalf("normalized error lost wrapper context: %v", err)
 	}
 	var relayErr *RelayError
@@ -225,6 +225,11 @@ func TestNormalizeRelayErrorPreservesWrappedContext(t *testing.T) {
 	var unwrapped *relayknock.RelayError
 	if !errors.As(err, &unwrapped) {
 		t.Fatalf("normalized error should preserve original relayknock error chain")
+	}
+
+	direct := normalizeRelayError(coreErr)
+	if got, want := direct.Error(), "qurl: relay unavailable"; got != want {
+		t.Fatalf("direct relay error = %q, want %q", got, want)
 	}
 }
 
