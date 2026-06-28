@@ -81,14 +81,15 @@ var ErrNotConfigured = errors.New("qurl: EnterPortal requires a trust store and 
 // to EnterPortalWith — so the provider only SUPPLIES the trust material; the real
 // verify + post-verify relay-allowlist enforcement is EnterPortalWith's, unchanged.
 //
-// PROVISIONAL: the qURL v2 server-side admission contract is Proposed in the qURL
-// v2 keyed-identity design and not yet deployed, and the production issuer trust anchors / relay
-// allowlist for the qv2 path are not yet published. Until a deployment installs a
-// provider (SetDefaultProvider), EnterPortal fails closed with ErrNotConfigured —
-// the verb, the wire construction, and every pure step (parse → verify → derive
-// serverId → assemble packet) are ready and tested, so turning the live path on is a
-// provider turn-up, not an SDK change. Tests and early integrators inject anchors via
-// a StaticProvider / DiscoveryProvider, or call EnterPortalWith directly.
+// PROVISIONAL: the qURL v2 server-side admission contract is Proposed in the
+// qURL v2 keyed-identity design and not yet deployed, and the production issuer
+// trust anchors / relay allowlist for the qv2 path are not yet published. Until a
+// deployment installs a provider (SetDefaultProvider), EnterPortal fails closed
+// with ErrNotConfigured — the verb, the wire construction, and every pure step
+// (parse → verify → derive serverId → assemble packet) are ready and tested, so
+// turning the live path on is a provider turn-up, not an SDK change. Tests and
+// early integrators inject anchors via a StaticProvider / DiscoveryProvider, or
+// call EnterPortalWith directly.
 func EnterPortal(ctx context.Context, qurlLink string) (*ResourceHandle, error) {
 	cfg, err := resolveDefaultConfig(ctx)
 	if err != nil {

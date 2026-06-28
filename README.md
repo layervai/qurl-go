@@ -128,8 +128,8 @@ the request will arrive at a firewall opened for a different address.
 
 ### Provisional: live qv2 admission
 
-The qURL v2 server-side admission contract is
-**Proposed** in the qURL v2 keyed-identity design and not yet deployed. `EnterPortal` therefore builds
+The qURL v2 server-side admission contract is **Proposed** in the qURL v2
+keyed-identity design and not yet deployed. `EnterPortal` therefore builds
 and posts a structurally correct qv2 knock, and the pure steps (parse → verify →
 derive serverId → assemble packet) are unit-tested offline against the vectors, but
 a **live** end-to-end qv2 resolve cannot round-trip until the qv2 NHP server
