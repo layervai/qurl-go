@@ -2,15 +2,11 @@ package qurl_test
 
 import (
 	"context"
-	"crypto/ecdh"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
-	"crypto/x509"
 	"errors"
 	"fmt"
 	"strings"
 
+	"github.com/layervai/qurl-go/internal/testkeys"
 	"github.com/layervai/qurl-go/qurl"
 )
 
@@ -35,9 +31,9 @@ func Example() {
 	//    come from your deployment. Here we generate throwaway keys so the example is
 	//    self-contained. CreatePortal generates the per-link keypair for you.
 	link, err := qurl.CreatePortal(ctx, signer, qurl.CreateParams{
-		CellPublicKey:     newX25519PublicKey(),
+		CellPublicKey:     testkeys.X25519Public(),
 		RelayURL:          "https://relay.example.com",
-		ResourcePublicKey: newP256SPKI(),
+		ResourcePublicKey: testkeys.P256SPKI(),
 		JTI:               "qurl_demo_0001",
 		IssuedAt:          1_700_000_000,
 		NotBefore:         1_700_000_000,
@@ -84,9 +80,9 @@ func ExampleCreatePortal() {
 	}
 
 	link, err := qurl.CreatePortal(context.Background(), signer, qurl.CreateParams{
-		CellPublicKey:     newX25519PublicKey(),
+		CellPublicKey:     testkeys.X25519Public(),
 		RelayURL:          "https://relay.example.com",
-		ResourcePublicKey: newP256SPKI(),
+		ResourcePublicKey: testkeys.P256SPKI(),
 		JTI:               "qurl_demo_0002",
 		IssuedAt:          1_700_000_000,
 		NotBefore:         1_700_000_000,
@@ -148,9 +144,9 @@ func Example_rejectsForgedLink() {
 		panic(err)
 	}
 	forged, err := qurl.CreatePortal(context.Background(), attacker, qurl.CreateParams{
-		CellPublicKey:     newX25519PublicKey(),
+		CellPublicKey:     testkeys.X25519Public(),
 		RelayURL:          "https://relay.example.com",
-		ResourcePublicKey: newP256SPKI(),
+		ResourcePublicKey: testkeys.P256SPKI(),
 		JTI:               "qurl_demo_0003",
 		IssuedAt:          1_700_000_000,
 		NotBefore:         1_700_000_000,
@@ -165,8 +161,6 @@ func Example_rejectsForgedLink() {
 	// Output: rejected: true
 }
 
-// --- example helpers (throwaway keys so the examples are self-contained) ---
-
 // trustStoreFor builds a single-key trust store from a local signer's published public
 // key, keyed by the kid the signer stamps into links.
 func trustStoreFor(signer *qurl.LocalSigner) *qurl.TrustStore {
@@ -179,28 +173,4 @@ func trustStoreFor(signer *qurl.LocalSigner) *qurl.TrustStore {
 		panic(err)
 	}
 	return trust
-}
-
-// newX25519PublicKey returns a fresh raw 32-byte X25519 public key, the shape
-// CreateParams.CellPublicKey expects.
-func newX25519PublicKey() []byte {
-	k, err := ecdh.X25519().GenerateKey(rand.Reader)
-	if err != nil {
-		panic(err)
-	}
-	return k.PublicKey().Bytes()
-}
-
-// newP256SPKI returns a fresh P-256 public key in DER SPKI form, the shape
-// CreateParams.ResourcePublicKey expects (and what AWS KMS GetPublicKey returns).
-func newP256SPKI() []byte {
-	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		panic(err)
-	}
-	der, err := x509.MarshalPKIXPublicKey(&priv.PublicKey)
-	if err != nil {
-		panic(err)
-	}
-	return der
 }

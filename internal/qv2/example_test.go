@@ -3,16 +3,14 @@ package qv2_test
 import (
 	"context"
 	"crypto/ecdh"
-	"crypto/ecdsa"
-	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 
 	"github.com/layervai/qurl-go/internal/qv2"
+	"github.com/layervai/qurl-go/internal/testkeys"
 )
 
 // ExampleParseAndVerify verifies a qURL v2 fragment's issuer signature against a
@@ -102,9 +100,9 @@ func mintFragment(signer *qv2.LocalSigner) string {
 		Nbf:                  1_700_000_000,
 		Exp:                  1_700_003_600,
 		Jti:                  "qurl_demo_0003",
-		CellPublicKeyB64:     b64.EncodeToString(newX25519PublicKeyBytes()),
+		CellPublicKeyB64:     b64.EncodeToString(testkeys.X25519Public()),
 		RelayURL:             "https://relay.example.com",
-		ResourcePublicKeyB64: b64.EncodeToString(newP256SPKIBytes()),
+		ResourcePublicKeyB64: b64.EncodeToString(testkeys.P256SPKI()),
 		QurlUserPublicKeyB64: b64.EncodeToString(userKey.PublicKey().Bytes()),
 	}
 
@@ -129,27 +127,4 @@ func mintFragment(signer *qv2.LocalSigner) string {
 		panic(err)
 	}
 	return fragment
-}
-
-// newX25519PublicKeyBytes returns a fresh raw 32-byte X25519 public key.
-func newX25519PublicKeyBytes() []byte {
-	k, err := ecdh.X25519().GenerateKey(rand.Reader)
-	if err != nil {
-		panic(err)
-	}
-	return k.PublicKey().Bytes()
-}
-
-// newP256SPKIBytes returns a fresh P-256 public key in DER SPKI form (the resource
-// public key shape).
-func newP256SPKIBytes() []byte {
-	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		panic(err)
-	}
-	der, err := x509.MarshalPKIXPublicKey(&priv.PublicKey)
-	if err != nil {
-		panic(err)
-	}
-	return der
 }
