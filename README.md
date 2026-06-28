@@ -1,209 +1,306 @@
 # qurl-go
 
-The canonical **Go SDK for qURL** — short-lived, policy-bound, cryptographically
-protected links into NHP-protected resources.
+The official Go SDK for **qURL** — short-lived, cryptographically signed links that
+open a path to resources that are otherwise invisible on the network.
+
+[![Go Reference](https://pkg.go.dev/badge/github.com/layervai/qurl-go.svg)](https://pkg.go.dev/github.com/layervai/qurl-go)
+[![CI](https://github.com/layervai/qurl-go/actions/workflows/ci.yml/badge.svg)](https://github.com/layervai/qurl-go/actions/workflows/ci.yml)
+[![Go 1.26+](https://img.shields.io/badge/go-1.26%2B-00ADD8)](go.mod)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 > **Quantum URL (qURL)** · The internet has a hidden layer. This is how you enter.
 
-A qURL resource is invisible by default and becomes reachable only after an
-authorized NHP knock opens the access-control firewall for your egress IP. This
-SDK performs that knock and the qURL v2 parse/verify in dependency-light,
-clean-room Go.
+---
 
-## Status
+## What is this?
 
-**PR-1: foundation.** This package proves the core knock + qv2 parse path:
+Some resources shouldn't be reachable by just anyone who finds the address — they
+should be **invisible until you prove you're allowed in**. qURL makes that possible.
+A protected resource sits behind an [NHP](#glossary) firewall that drops every packet
+by default. A **qURL link** is a signed, expiring ticket that opens a path to it.
 
-- `relayknock` — the generic NHP relay-knock wire profile.
-- `qv2` — the strict qURL v2 keyed-identity fragment parser + issuer-signature verify/sign.
-- `EnterPortal` — the one-shot "open this qURL link" verb.
-- `CreatePortal` — the issuer-side mint verb (the inverse of `EnterPortal`), behind
-  a KMS/local/file signer seam.
+This SDK gives you the two verbs you need, plus the cryptographic core underneath:
 
-The credential provider and the REST client are **stacked follow-up PRs**, tracked
-as issues — see [Roadmap](#roadmap). They are deliberately out of the foundation so
-the cryptographic core lands reviewable on its own.
+| You want to…                                  | Use            |
+| --------------------------------------------- | -------------- |
+| **Open** a qURL link and reach the resource   | `EnterPortal`  |
+| **Issue** (mint) a qURL link for someone else | `CreatePortal` |
 
-## Layered design
+A qURL link looks like an ordinary URL:
 
 ```
-EnterPortal(qurlLink)                         ← the locked entry verb
+https://qurl.link/#qv2.<claims>.<secret>.<sig>
+```
+
+Everything sensitive rides in the fragment after `#`, which browsers never send to a
+server. The link carries its own one-time credential, an issuer signature, and an
+expiry — so it's safe to put in an email, a QR code, or a chat message.
+
+## Install
+
+```sh
+go get github.com/layervai/qurl-go@latest
+```
+
+Requires Go 1.26 or newer. The verification core depends only on the standard
+library and `golang.org/x/crypto` — no AWS SDK, no KMS client baked in.
+
+## Quickstart
+
+The fastest way to see the SDK work end to end **today**: mint a signed link with a
+local key, then verify it. Both steps run completely offline.
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"github.com/layervai/qurl-go/qurl"
+	"github.com/layervai/qurl-go/qv2"
+)
+
+func main() {
+	ctx := context.Background()
+	now := time.Now().Unix()
+
+	// 1. An issuer signing key. In production this is a KMS-resident key reached
+	//    through the qv2.Signer seam; locally, a software key needs no AWS.
+	signer, _ := qv2.GenerateLocalSigner("issuer-key-2026")
+
+	// 2. Mint a link. cellPub / resourceDER come from your deployment (the NHP cell
+	//    key and the resource's DER key); the per-link credential is generated for
+	//    you and tucked into the fragment.
+	link, err := qurl.CreatePortal(ctx, signer, qurl.CreateParams{
+		CellPublicKey:     cellPub,     // raw 32-byte X25519 NHP cell key
+		RelayURL:          "https://relay.example.com",
+		ResourcePublicKey: resourceDER, // DER SPKI P-256 resource key
+		JTI:               "qurl_demo_0001",
+		IssuedAt:          now,
+		NotBefore:         now,
+		Expiry:            now + 300, // a 5-minute link
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	// 3. Build a trust store from the issuer's public key and verify the link.
+	pubDER, _ := signer.PublicKeyDER()
+	trust, _ := qv2.NewTrustStoreFromDER(map[string][]byte{signer.KID(): pubDER})
+
+	frag, err := qv2.FragmentFromLinkAndVerify(link, trust)
+	if err != nil {
+		panic(err) // tampered or untrusted links fail closed here
+	}
+	fmt.Println("verified qURL for relay:", frag.Claims.RelayURL)
+}
+```
+
+> This exact flow is a compile-checked, runnable example —
+> see [`qurl/example_test.go`](qurl/example_test.go) (`go test ./qurl/`). Runnable
+> versions of every flow live in the packages' `example_test.go` files; the shorter
+> snippets elsewhere in these docs are abbreviated for readability, with
+> deployment-specific values (keys, times) shown as placeholders.
+
+## Issue a link
+
+`CreatePortal` is the issuer side. It generates the fresh per-link keypair, assembles
+and signs the claims, and returns the full `https://qurl.link/#qv2.…` link. The
+issuer key never lives in your process directly — signing goes through the
+`qv2.Signer` seam, so you can drop in KMS, an HSM, or a file-backed key without
+changing this call.
+
+```go
+signer, _ := qv2.GenerateLocalSigner("issuer-key-2026") // dev; use KMS in prod
+
+link, _ := qurl.CreatePortal(ctx, signer, qurl.CreateParams{
+	CellPublicKey:     cellPub,
+	RelayURL:          "https://relay.example.com",
+	ResourcePublicKey: resourceDER,
+	JTI:               "qurl_01J…",
+	IssuedAt:          iat, NotBefore: nbf, Expiry: exp,
+})
+```
+
+→ **[Issuing links guide](docs/issuing-links.md)** — production signing custody (KMS),
+validity windows, key rotation, and the full `CreateParams` reference.
+
+## Open a link
+
+`EnterPortal` is the opener side and the headline verb. It does everything in one
+call: parse the fragment, verify the issuer signature, validate the relay, and knock
+to open the firewall — returning a `ResourceHandle` with the now-reachable URL.
+
+```go
+// One-argument form. A deployment installs its trust anchors once at startup…
+qurl.SetDefaultProvider(provider) // e.g. qurl.NewStaticProvider(trust, allowlist)
+
+// …then opens any link with no per-call config:
+handle, err := qurl.EnterPortal(ctx, link)
+if err != nil {
+	// see "Error handling" for the failure taxonomy
+}
+fmt.Println("reachable at:", handle.RedirectURL)
+```
+
+Prefer to pass config explicitly (e.g. in tests, or to pin a fixed egress)? Use
+`EnterPortalWith(ctx, link, qurl.Config{…})`.
+
+> **Status:** opening a link performs a live network knock to the relay. The qURL v2
+> server-side admission contract is still being deployed, so a *live* open cannot
+> complete end to end yet — but parsing, signature verification, relay validation,
+> and knock construction are all implemented and tested offline. Until your
+> deployment installs a provider, the one-argument `EnterPortal` fails closed with
+> `ErrNotConfigured`. See [Status & limitations](#status--limitations).
+
+→ **[Opening links guide](docs/opening-links.md)** — providers (static & discovery),
+the relay allowlist, the same-egress-IP rule, error handling, and retries.
+
+## How it works
+
+`EnterPortal` stitches two lower layers together in the exact order the protocol
+requires — signature first, then (and only then) act on anything the link claims:
+
+```
+EnterPortal(link)                                ← open the locked link
   │
-  ├─ qv2.ParseAndVerify(fragment, trustStore) ← strict parse + issuer-sig verify
-  │     → Claims{cell_public_key, relay_url, resource_public_key, qurl_user_public_key, exp, …}
-  │     → Secret{qurl_user_private_key}
+  ├─ qv2.ParseAndVerify(fragment, trustStore)    ← strict parse + verify issuer signature
+  │     → Claims{relay_url, cell_public_key, resource_public_key, exp, …}
+  │     → Secret{per-link private key}
   │
   ├─ qv2.ValidateRelayURL(relay_url, allowlist)  ← ONLY after the signature verifies
   │
-  └─ relayknock.Knock(ctx, relay_url, cell_public_key, knockBody, opts)
-        serverId = PubKeyFingerprint(cell_public_key)
-        device identity = qurl_user_private_key (from the link's secret)
-        POST {relay_url}/relay/{serverId}  →  decrypt + authenticate the NHP_ACK
+  └─ relayknock.Knock(relay_url, cell_key, body) ← open the firewall for your egress IP
+        → ResourceHandle{RedirectURL, OpenSeconds}
 ```
 
-Each layer is independently usable and independently tested:
+Three packages, each independently usable and tested:
 
-- **`relayknock`** knows packet framing and the NHP Noise handshake (X25519 /
-  AES-256-GCM / BLAKE2s) and nothing about qURL body shapes. Its wire format is
-  fenced **byte-for-byte** by golden vectors copied from the nhp js-agent's
-  cross-language fixtures. Only dependency: `golang.org/x/crypto`. It never imports
-  `nhp/core`.
-- **`qv2`** is a pure security core: a strict allowlist parser (rejects duplicate
-  keys, unknown fields, nulls, wrong types, non-canonical base64url, out-of-range
-  times) and a P-256 raw-`r‖s` low-S issuer-signature verifier over the **exact
-  received claims bytes** (never a re-serialization). The matching mint side
-  (`SignClaims` + the `Signer` seam) signs those same exact bytes, so sign and
-  verify share one preimage by construction. Still standard-library only — no KMS,
-  no AWS: the signer is an interface, not a baked-in client. It is exercised against
-  nhp-owned **conformance vectors** vendored verbatim into `qv2/testdata`.
+| Package                                    | Role                                                                 |
+| ------------------------------------------ | -------------------------------------------------------------------- |
+| [`qurl`](https://pkg.go.dev/github.com/layervai/qurl-go/qurl)             | Top-level verbs: `EnterPortal`, `CreatePortal`, trust providers.       |
+| [`qv2`](https://pkg.go.dev/github.com/layervai/qurl-go/qv2)               | The security core: strict parser, issuer sign/verify, trust store.    |
+| [`relayknock`](https://pkg.go.dev/github.com/layervai/qurl-go/relayknock) | The low-level NHP relay-knock wire profile (Noise handshake).         |
 
-## `EnterPortal` usage
+### Anatomy of a qURL link
+
+```
+https://qurl.link/#qv2.<claims>.<secret>.<sig>
+                   │    │        │        └─ issuer signature over the claims bytes
+                   │    │        └────────── per-link private key (the one-time credential)
+                   │    └─────────────────── signed claims: relay, keys, expiry, id
+                   └──────────────────────── version tag (always "qv2")
+```
+
+The signature covers the **exact claims bytes on the wire**, so the claims can't be
+altered without breaking it. The secret needs no signature: swapping it for an
+attacker's key makes the proof-of-possession step fail, because the signed public key
+no longer matches.
+
+### Glossary
+
+| Term       | Meaning                                                                       |
+| ---------- | ----------------------------------------------------------------------------- |
+| **NHP**    | Network Hiding Protocol — the firewall that drops all traffic until a knock.   |
+| **Knock**  | An authenticated packet that asks the NHP server to open its firewall for you. |
+| **Relay**  | The public endpoint that forwards your knock to the (private) NHP server.      |
+| **Cell**   | The NHP server instance guarding a resource; identified by its X25519 key.     |
+| **Issuer** | The party that mints and signs qURL links (e.g. your qurl-service).            |
+
+## Error handling
+
+Every failure mode is a typed error you can match with `errors.Is` / `errors.As`.
+Match on these, not on message text:
+
+| Error                         | Meaning                                          | What to do                          |
+| ----------------------------- | ------------------------------------------------ | ----------------------------------- |
+| `qurl.ErrNotConfigured`       | No trust anchors / relay allowlist installed     | Install a provider; check config    |
+| `qv2.ErrSignature`            | Issuer signature didn't verify (forged/tampered) | Reject — do not retry               |
+| `qv2.ErrUnknownKID`           | Link signed by an issuer key you don't trust     | Reject — do not retry               |
+| `qv2.ErrRelayURL`             | `relay_url` isn't HTTPS or not on the allowlist  | Reject — do not retry               |
+| `qurl.ErrServerOverloaded`    | Relay returned an overload cookie-challenge      | Retry later (backoff)               |
+| `*qurl.ServerDenyError`       | Authenticated server refused (expired/revoked)   | Inspect `.ErrCode`; usually give up |
+| `*relayknock.RelayError`      | Transport fault talking to the relay             | Retry depending on cause            |
+| `qurl.ErrMalformedReply`      | Reply was unusable (e.g. no resource URL)        | Treat as a server-side fault        |
 
 ```go
-import "github.com/layervai/qurl-go/qurl"
-
-// One-shot: parse the qURL link, verify the issuer signature, derive the relay
-// route from the verified cell key, and knock using the per-qURL key carried in
-// the link. No external key is needed — the credential rides in the fragment.
-//
-// NOTE: until the qv2 issuer trust anchors ship (see "Provisional" below), the
-// one-argument form fails closed with ErrNotConfigured. Today you supply the
-// trust anchors + relay allowlist explicitly via EnterPortalWith:
-cfg := qurl.Config{TrustStore: trustStore, RelayAllowlist: allowlist}
-handle, err := qurl.EnterPortalWith(ctx, "https://qurl.link/#qv2.<claims>.<secret>.<sig>", cfg)
-if err != nil {
-    // errors.Is(err, qurl.ErrNotConfigured) — no trust anchors / allowlist;
-    // qv2.ErrSignature / qv2.ErrUnknownKID — bad/unknown issuer signature;
-    // qv2.ErrRelayURL — relay_url not HTTPS or off the allowlist;
-    // *relayknock.RelayError — relay transport fault;
-    // *qurl.ServerDenyError — authenticated server deny (carries ErrCode);
-    // qurl.ErrServerOverloaded / qurl.ErrMalformedReply — retry / unusable reply.
+handle, err := qurl.EnterPortal(ctx, link)
+switch {
+case errors.Is(err, qv2.ErrSignature), errors.Is(err, qv2.ErrUnknownKID):
+	// untrusted or tampered link — reject
+case errors.Is(err, qurl.ErrServerOverloaded):
+	// retry with backoff
+case err != nil:
+	// other failure
+default:
+	use(handle.RedirectURL)
 }
-// handle carries the reachable resource (the redirect URL) the server returned.
-
-// Once the anchors ship, qurl.EnterPortal(ctx, link) works with no config.
 ```
 
-## `CreatePortal` usage (issuer side)
+See the [opening links guide](docs/opening-links.md#error-handling) for the complete
+taxonomy and retry guidance.
 
-`CreatePortal` is the inverse of `EnterPortal`: it mints the qURL link. It
-generates the fresh per-qURL X25519 keypair (the secret rides in the fragment),
-assembles and signs the claims, and returns the
-`https://qurl.link/#qv2.<claims>.<secret>.<sig>` link. The issuer signing key never
-lives in this process directly — signing goes through the `qv2.Signer` seam.
+## Status & limitations
 
-```go
-import (
-    "github.com/layervai/qurl-go/qurl"
-    "github.com/layervai/qurl-go/qv2"
-)
+This is the **foundation** release: the cryptographic core and both verbs are
+complete and tested. A few things are intentionally provisional:
 
-// The signer seam: KMS in production (credential-provider follow-up), or a
-// software-resident local key for tests / self-custody. Production custody belongs
-// in KMS — a leaked process must not yield the issuer key.
-signer, _ := qv2.GenerateLocalSigner("qurl-issuer-key-2026-06") // or qv2.NewLocalSigner(priv, kid)
+- **Live opens need a deployed relay.** The qURL v2 server-side admission contract is
+  being rolled out. Parsing, verification, relay validation, and knock construction
+  are implemented and unit-tested offline against conformance vectors; the live
+  end-to-end open lights up when the server contract is deployed — no SDK change
+  needed.
+- **Production trust anchors aren't published yet.** Until your deployment installs a
+  provider via `SetDefaultProvider`, the one-argument `EnterPortal` fails closed with
+  `ErrNotConfigured`. Inject anchors today with `NewStaticProvider` /
+  `NewDiscoveryProvider`, or call `EnterPortalWith`.
+- **Conformance vectors are provisional.** `qv2/testdata` vendors the language-agnostic
+  qURL v2 conformance artifact; the current copy tracks an in-flight upstream branch
+  and is re-vendored verbatim on merge.
 
-link, err := qurl.CreatePortal(ctx, signer, qurl.CreateParams{
-    CellPublicKey:     cellPub,      // raw 32-byte X25519 NHP cell key
-    RelayURL:          "https://relay.example.com",
-    ResourcePublicKey: resourceDER,  // DER SPKI protected-resource key
-    JTI:               "qurl_01J...",
-    IssuedAt:          iat, NotBefore: nbf, Expiry: exp, // Unix seconds
-})
-// link verifies under qurl.EnterPortalWith / qv2.FragmentFromLinkAndVerify against
-// a trust store holding the signer's public key (signer.PublicKeyDER()).
-```
+## Security model
 
-The signer interface is just two methods — `KID()` and
-`SignDigest(ctx, digest) (derSig, err)` — so a KMS, file, or HSM signer drops in
-without touching `qurl`/`qv2`. `qv2` owns the domain-separated digest and the
-DER → raw r||s low-S conversion, so no signer can drift on those.
+The `qv2` package is a deliberately small, standard-library-only security core. Its
+guarantees:
 
-### Same-egress-IP invariant
+- **Verify before you act.** The issuer signature is checked first; `relay_url` and
+  everything else are attacker-controlled until it verifies, so they're only used
+  afterward.
+- **Sign exactly what's transmitted.** Signatures cover the exact base64url claims
+  bytes on the wire, never a re-serialization — closing a classic signature-bypass
+  hole. Mint and verify share one preimage by construction.
+- **Fail closed.** An empty trust store rejects every signature; an empty relay
+  allowlist rejects every link; an unconfigured opener refuses rather than trusting
+  anything.
+- **Strict parsing.** Duplicate keys, unknown fields, nulls, wrong types,
+  non-canonical base64url, and out-of-range times are all rejected. This surface is
+  continuously fuzzed.
+- **Conformance-tested.** Verification is exercised against language-agnostic vectors
+  so the Go SDK agrees byte-for-byte with other qURL implementations.
 
-The NHP server opens its firewall for the **source IP of the relay POST**. The
-knock and any subsequent request to the resource MUST share an egress IP. Behind a
-rotating-egress NAT/proxy pool, pin the knock and the request to the same exit, or
-the request will arrive at a firewall opened for a different address.
-
-### Provisional: live qv2 admission
-
-The qURL v2 server-side admission contract (`/internal/v2/qurl/admissions/*`) is
-**Proposed** in the nhp design and not yet deployed. `EnterPortal` therefore builds
-and posts a structurally correct qv2 knock, and the pure steps (parse → verify →
-derive serverId → assemble packet) are unit-tested offline against the vectors, but
-a **live** end-to-end qv2 resolve cannot round-trip until the qv2 NHP server
-contract ships. This is called out in the `EnterPortal` godoc and tracked in the
-roadmap; the verb and wire construction are ready so the live path is a server-side
-turn-up, not an SDK change.
-
-## Conformance vectors
-
-`qv2/testdata` vendors the nhp-owned, language-agnostic qURL v2 conformance
-artifact (`qv2_conformance_vectors.json`) plus the composed issuer-signature golden
-file (`issuer_signature_vectors.json`). The loader is structured so adopting an
-updated artifact is a **file swap**. The current copies are vendored from an
-in-flight nhp branch and are marked **provisional** pending the merged full-class
-artifact; re-vendor verbatim on merge.
-
-## Development
-
-`make check` is the single quality gate; a green local run means a green CI,
-because both run the same pinned tools at the same versions.
-
-```sh
-make check   # tidy + format + lint + race tests + vuln scan
-make help    # list all targets
-```
-
-Individual targets:
-
-| Target          | What it runs                                                        |
-| --------------- | ------------------------------------------------------------------- |
-| `make test`     | `go test -race ./...`                                               |
-| `make cover`    | race tests with a coverage profile + HTML report                    |
-| `make lint`     | `golangci-lint run` (lint **and** gofumpt/goimports formatting)     |
-| `make fmt`      | apply gofumpt + goimports formatting                                |
-| `make vuln`     | `govulncheck ./...` — known-vuln scan of called code                |
-| `make fuzz`     | run the `qv2` parser fuzz targets (auto-discovered)                 |
-
-Dev tools (`golangci-lint`, `govulncheck`) are version-pinned in the
-[`Makefile`](Makefile) and installed on demand into a git-ignored `./.tools`.
-
-### Static analysis
-
-The linter set ([`.golangci.yml`](.golangci.yml)) is curated for a security
-core, not maximal: error-handling and nil correctness (`errcheck`, `errorlint`,
-`nilerr`, `nilnil`, `bodyclose`), security (`gosec`, `bidichk`,
-`forcetypeassert`), and correctness footguns (`durationcheck`, `makezero`,
-`wastedassign`, …) on top of `go vet` with nearly all analyzers enabled. The bar
-is **zero issues with no blanket suppressions** — the crypto core passes `gosec`
-clean.
-
-### Fuzzing
-
-The `qv2` strict parser is the package's hostile-input surface, so it carries Go
-native fuzz targets ([`qv2/fuzz_test.go`](qv2/fuzz_test.go)) for the fragment
-parser, the claims walker, and the canonical-base64url decoder. The committed
-seed corpus under `qv2/testdata/fuzz` includes regression crashers (e.g. the
-embedded-newline base64 malleability case), which the normal `go test` run
-replays even without `-fuzz` — this corpus replay is the deterministic regression
-gate. Live fuzzing runs as a nightly soak
-([`.github/workflows/fuzz.yml`](.github/workflows/fuzz.yml)) rather than a PR gate,
-so a newly-discovered (possibly unrelated) crasher never reds an otherwise-good PR.
-
-CI (`.github/workflows/ci.yml`) runs lint, race tests + coverage (with corpus
-replay), and a blocking `govulncheck` on every PR and on `main`. Because
-`govulncheck` is blocking, a newly published stdlib or dependency advisory can
-turn CI red with no code change — resolve it by bumping the `go` directive in
-[`go.mod`](go.mod) (the single source of the toolchain version) or the affected
-dependency.
+⚠️ **Same-egress-IP rule.** The NHP server opens its firewall for the **source IP of
+your knock**. Any request you then make to the resource must leave from that same IP.
+Behind a rotating-egress NAT or proxy pool, pin the knock and the resource request to
+the same exit — see the [opening links guide](docs/opening-links.md#the-same-egress-ip-rule).
 
 ## Roadmap
 
-The foundation lands the verify/knock core; `CreatePortal` (issuer-side mint) lands
-on top of it. The following are the remaining stacked follow-ups, filed as issues:
+The foundation lands the verify/knock core and both verbs, plus the trust/relay
+credential provider (`StaticProvider`, `DiscoveryProvider`). Remaining follow-ups,
+tracked as issues:
 
-- **Credential provider** — pluggable trust-anchor / relay-allowlist resolution,
-  including the production KMS-backed `qv2.Signer` for `CreatePortal`.
-- **REST client** — typed client for the qurl-service control-plane API.
+- **Production KMS signer** — a KMS-backed `qv2.Signer` for `CreatePortal`.
+- **REST client** — a typed client for the qurl-service control-plane API.
+
+## Documentation
+
+- 📘 [Issuing links](docs/issuing-links.md) — mint links, signing custody, rotation
+- 📗 [Opening links](docs/opening-links.md) — providers, trust, errors, egress IP
+- 📚 [API reference on pkg.go.dev](https://pkg.go.dev/github.com/layervai/qurl-go)
+- 🛠️ [Contributing](CONTRIBUTING.md) — dev workflow, the `make check` gate, fuzzing
+
+## License
+
+[MIT](LICENSE) © LayerV AI

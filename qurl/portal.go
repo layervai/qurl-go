@@ -1,5 +1,9 @@
-// Package qurl is the top-level entry point of the qURL Go SDK: the locked
-// EnterPortal verb that opens a qURL link.
+// Package qurl is the top-level entry point of the qURL Go SDK. It provides the two
+// verbs most integrations need: EnterPortal opens a qURL link — parse, verify the
+// issuer signature, and knock to reach the protected resource — and CreatePortal
+// mints one on the issuer side. Deployment trust anchors and the relay allowlist are
+// supplied once through a Provider (see provider.go), so opening a link is a single
+// call. For a guided introduction see the package README and docs/.
 //
 // EnterPortal stitches the two lower layers together in the exact order the nhp
 // design (QURL_V2_KEYED_IDENTITY.md, "Browser and Headless Flow") mandates:

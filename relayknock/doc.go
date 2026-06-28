@@ -1,5 +1,10 @@
-// Package relayknock is a dependency-light, clean-room Go implementation of the
-// generic NHP relay-knock wire profile: an NHP Noise knock (X25519 /
+// Package relayknock is the low-level NHP relay-knock layer of the qURL Go SDK.
+// Most users do not import it directly — the qurl package drives it as part of
+// EnterPortal; reach for relayknock only to perform a raw NHP knock outside the
+// qURL flow.
+//
+// It is a dependency-light, clean-room Go implementation of the generic NHP
+// relay-knock wire profile: an NHP Noise knock (X25519 /
 // AES-256-GCM / BLAKE2s) carried as a binary POST {relayBaseURL}/relay/{serverId}
 // to an internet-facing NHP relay, which forwards it to a now-private NHP server.
 // The server authorizes, opens its access-control firewall for the caller IP, and
