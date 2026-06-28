@@ -8,13 +8,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/layervai/qurl-go/internal/qv2"
 )
 
-// CreatePortal is the issuer-side mint verb. It signs a short-lived qURL link
-// for a private service configured in LayerV and returns the
+// CreatePortalWithParams is the low-level issuer-side mint verb. It signs a
+// short-lived qURL fragment and returns the
 // https://qurl.link/#<version>.<claims>.<secret>.<sig> link.
 //
 // The issuer signing key is never held here directly: signing goes through the
@@ -23,9 +22,10 @@ import (
 // handed verbatim to the fragment builder, so the bytes the issuer signs are
 // exactly the bytes a verifier (qurl.VerifyLink / EnterPortal) checks.
 
-// LinkBaseURL is the canonical qURL link origin CreatePortal prepends to the
-// fragment. The credential, claims, and signature all live in the fragment after
-// '#', which browser semantics keep out of the HTTP request to this origin.
+// LinkBaseURL is the canonical qURL link origin CreatePortalWithParams prepends
+// to the fragment. The credential, claims, and signature all live in the
+// fragment after '#', which browser semantics keep out of the HTTP request to
+// this origin.
 const LinkBaseURL = "https://qurl.link/"
 
 // b64url is the single pinned qURL wire encoding (unpadded base64url). The secret
@@ -40,132 +40,21 @@ const LinkBaseURL = "https://qurl.link/"
 // see qurl-go#6.
 var b64url = base64.RawURLEncoding
 
-// Resource is the LayerV-provided config for a private service protected by
-// qURL. Treat it as opaque application config: pass it to CreatePortal when you
-// issue a link.
-type Resource struct {
-	// AccessPublicKey is the qURL platform access key for this private service.
-	// LayerV provides it as part of resource config.
-	AccessPublicKey []byte
-	// AccessURL is the qURL platform access URL for this private service. LayerV
-	// provides it as part of resource config.
-	AccessURL string
-	// ResourceIdentity is the private service identity key in DER SPKI form.
-	// LayerV provides it as part of resource config.
-	ResourceIdentity []byte
-	// Label is an optional LayerV resource label. Empty omits the label from the
-	// signed link.
-	Label string
-}
-
-// CreateOption customizes CreatePortal. Most callers only need ValidFor; the
-// other options are for stable audit ids, tests, or schedulers that need a
-// precise validity window.
-type CreateOption interface {
-	applyCreateOption(*createOptions) error
-}
-
-type createOptionFunc func(*createOptions) error
-
-func (f createOptionFunc) applyCreateOption(o *createOptions) error {
-	return f(o)
-}
-
-type createOptions struct {
-	jti string
-
-	issuedAt    time.Time
-	hasIssuedAt bool
-
-	notBefore    time.Time
-	hasNotBefore bool
-
-	validFor    time.Duration
-	hasValidFor bool
-
-	expiresAt    time.Time
-	hasExpiresAt bool
-}
-
-// ValidFor makes the link expire after d, measured from the issued-at time. This
-// is the usual way to set link lifetime.
-func ValidFor(d time.Duration) CreateOption {
-	return createOptionFunc(func(o *createOptions) error {
-		if d <= 0 {
-			return fmt.Errorf("%w: ValidFor duration must be positive", ErrInvalidCreateParams)
-		}
-		o.validFor = d
-		o.hasValidFor = true
-		return nil
-	})
-}
-
-// ExpiresAt sets the absolute expiration time for the link. Use either
-// ExpiresAt or ValidFor, not both.
-func ExpiresAt(t time.Time) CreateOption {
-	return createOptionFunc(func(o *createOptions) error {
-		if t.IsZero() {
-			return fmt.Errorf("%w: ExpiresAt time must not be zero", ErrInvalidCreateParams)
-		}
-		o.expiresAt = t
-		o.hasExpiresAt = true
-		return nil
-	})
-}
-
-// NotBefore sets the earliest time the link should be accepted. By default, the
-// link is valid immediately at its issued-at time.
-func NotBefore(t time.Time) CreateOption {
-	return createOptionFunc(func(o *createOptions) error {
-		if t.IsZero() {
-			return fmt.Errorf("%w: NotBefore time must not be zero", ErrInvalidCreateParams)
-		}
-		o.notBefore = t
-		o.hasNotBefore = true
-		return nil
-	})
-}
-
-// WithIssuedAt sets the signed issued-at time. It is mainly useful for tests and
-// deterministic issuers; normal callers use the current time.
-func WithIssuedAt(t time.Time) CreateOption {
-	return createOptionFunc(func(o *createOptions) error {
-		if t.IsZero() {
-			return fmt.Errorf("%w: issued-at time must not be zero", ErrInvalidCreateParams)
-		}
-		o.issuedAt = t
-		o.hasIssuedAt = true
-		return nil
-	})
-}
-
-// WithLinkID sets the signed per-link id. By default CreatePortal generates a
-// random id.
-func WithLinkID(id string) CreateOption {
-	return createOptionFunc(func(o *createOptions) error {
-		if id == "" {
-			return fmt.Errorf("%w: link id must not be empty", ErrInvalidCreateParams)
-		}
-		o.jti = id
-		return nil
-	})
-}
-
-// CreateParams are the low-level inputs to a mint. Most callers should use
-// CreatePortal with a Resource and options instead; CreateParams exists for tests,
-// conformance, and integrations that need to set every signed claim explicitly.
+// CreateParams are the low-level protocol inputs to a signed-fragment mint.
+// Most callers should use Client.ProtectURL and Resource.CreatePortal instead;
+// CreateParams exists for tests, conformance, and integrations that need to set
+// every signed claim explicitly.
 type CreateParams struct {
-	// CellPublicKey is the access public key from LayerV resource config. The name
-	// matches the qURL wire format. REQUIRED.
+	// CellPublicKey is the qURL access public key. The name matches the qURL wire
+	// format. REQUIRED.
 	CellPublicKey []byte
-	// RelayURL is the qURL platform access URL from LayerV resource config. The
-	// name matches the qURL wire format. REQUIRED.
+	// RelayURL is the qURL access URL. The name matches the qURL wire format.
+	// REQUIRED.
 	RelayURL string
-	// ResourcePublicKey is the resource identity key from LayerV resource config,
-	// in DER SPKI form. REQUIRED.
+	// ResourcePublicKey is the protected resource identity key in DER SPKI form.
+	// REQUIRED.
 	ResourcePublicKey []byte
-	// CellID is an optional LayerV resource label. Empty omits it from the signed
-	// claims.
+	// CellID is an optional resource label. Empty omits it from the signed claims.
 	CellID string
 	// JTI is the unique qURL id stamped into the claims (the jti claim). REQUIRED:
 	// it is part of the signed anti-tamper envelope and the per-link identifier.
@@ -180,39 +69,17 @@ type CreateParams struct {
 	Expiry    int64
 }
 
-// ErrInvalidCreateParams is returned when CreatePortal inputs are missing or
-// internally inconsistent before any signing is attempted. Claim-shape faults
-// (key length, time ordering, ...) surface from the signer as wrapped
-// qurl.ErrStrictParse, so a caller can match the strict-parse contract directly.
+// ErrInvalidCreateParams is returned when CreatePortalWithParams inputs are
+// missing or internally inconsistent before any signing is attempted.
+// Claim-shape faults (key length, time ordering, ...) surface from the signer
+// as wrapped qurl.ErrStrictParse, so a caller can match the strict-parse
+// contract directly.
 var ErrInvalidCreateParams = errors.New("qurl: invalid CreatePortal params")
 
-// CreatePortal mints a qURL link for a LayerV resource. It generates the
-// per-link credential and link id, assembles the signed claims, signs them
-// through the issuer Signer seam, and returns the full
-// https://qurl.link/#<version>.<claims>.<secret>.<sig> link.
-//
-// A typical issuer passes the LayerV-provided Resource and a lifetime:
-//
-//	resource := qurl.Resource{
-//		AccessPublicKey:  accessPublicKey,
-//		AccessURL:        accessURL,
-//		ResourceIdentity: resourceIdentity,
-//	}
-//	link, err := qurl.CreatePortal(ctx, signer, resource, qurl.ValidFor(5*time.Minute))
-//
-// Use CreatePortalWithParams when tests or conformance code need to set every
-// signed claim explicitly.
-func CreatePortal(ctx context.Context, signer Signer, resource Resource, opts ...CreateOption) (string, error) {
-	params, err := createParamsFromResource(resource, opts)
-	if err != nil {
-		return "", err
-	}
-	return CreatePortalWithParams(ctx, signer, params)
-}
-
 // CreatePortalWithParams mints a qURL link from explicit signed-claim inputs. It
-// is the advanced seam behind CreatePortal; most integrations should pass a
-// Resource to CreatePortal instead of constructing CreateParams.
+// is the advanced offline seam for conformance and protocol integrations; most
+// applications should call Client.ProtectURL and Resource.CreatePortal, which use
+// the LayerV qURL API.
 //
 // Symmetry guarantee: the returned link parses and verifies under
 // qurl.VerifyLink / EnterPortalWith against a trust store holding the signer's
@@ -275,73 +142,6 @@ func CreatePortalWithParams(ctx context.Context, signer Signer, p CreateParams) 
 		return "", err
 	}
 	return LinkBaseURL + "#" + body, nil
-}
-
-func createParamsFromResource(resource Resource, opts []CreateOption) (CreateParams, error) {
-	create, err := resolveCreateOptions(opts)
-	if err != nil {
-		return CreateParams{}, err
-	}
-	jti := create.jti
-	if jti == "" {
-		jti, err = randomJTI()
-		if err != nil {
-			return CreateParams{}, err
-		}
-	}
-
-	return CreateParams{
-		CellPublicKey:     resource.AccessPublicKey,
-		RelayURL:          resource.AccessURL,
-		ResourcePublicKey: resource.ResourceIdentity,
-		CellID:            resource.Label,
-		JTI:               jti,
-		IssuedAt:          create.issuedAt.Unix(),
-		NotBefore:         create.notBefore.Unix(),
-		Expiry:            create.expiresAt.Unix(),
-	}, nil
-}
-
-func resolveCreateOptions(opts []CreateOption) (createOptions, error) {
-	var out createOptions
-	for _, opt := range opts {
-		if opt == nil {
-			return out, fmt.Errorf("%w: nil CreateOption", ErrInvalidCreateParams)
-		}
-		if err := opt.applyCreateOption(&out); err != nil {
-			return out, err
-		}
-	}
-	if out.hasValidFor && out.hasExpiresAt {
-		return out, fmt.Errorf("%w: use either ValidFor or ExpiresAt, not both", ErrInvalidCreateParams)
-	}
-	if !out.hasValidFor && !out.hasExpiresAt {
-		return out, fmt.Errorf("%w: link lifetime is required; use ValidFor or ExpiresAt", ErrInvalidCreateParams)
-	}
-
-	now := time.Now().UTC()
-	if !out.hasIssuedAt {
-		out.issuedAt = now
-	}
-	if !out.hasNotBefore {
-		out.notBefore = out.issuedAt
-	}
-	if out.hasValidFor {
-		out.expiresAt = out.issuedAt.Add(out.validFor)
-	} else {
-		out.expiresAt = out.expiresAt.UTC()
-	}
-	out.issuedAt = out.issuedAt.UTC()
-	out.notBefore = out.notBefore.UTC()
-	return out, nil
-}
-
-func randomJTI() (string, error) {
-	var raw [16]byte
-	if _, err := rand.Read(raw[:]); err != nil {
-		return "", fmt.Errorf("qurl: generate link id: %w", err)
-	}
-	return "qurl_" + b64url.EncodeToString(raw[:]), nil
 }
 
 // validate checks the issuer-supplied bindings are PRESENT before any keygen or

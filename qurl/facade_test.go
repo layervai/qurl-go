@@ -2,6 +2,11 @@ package qurl_test
 
 import (
 	"context"
+	"crypto/ecdh"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
 	"reflect"
 	"slices"
 	"testing"
@@ -75,6 +80,41 @@ func exportedFieldNames(t reflect.Type) []string {
 	return names
 }
 
+func trustStoreFor(t *testing.T, signer *qurl.LocalSigner) *qurl.TrustStore {
+	t.Helper()
+	pubDER, err := signer.PublicKeyDER()
+	if err != nil {
+		t.Fatalf("PublicKeyDER: %v", err)
+	}
+	trust, err := qurl.NewTrustStoreFromDER(map[string][]byte{signer.KID(): pubDER})
+	if err != nil {
+		t.Fatalf("NewTrustStoreFromDER: %v", err)
+	}
+	return trust
+}
+
+func exampleX25519Public(t *testing.T) []byte {
+	t.Helper()
+	k, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate X25519 key: %v", err)
+	}
+	return k.PublicKey().Bytes()
+}
+
+func exampleP256SPKI(t *testing.T) []byte {
+	t.Helper()
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate P-256 key: %v", err)
+	}
+	der, err := x509.MarshalPKIXPublicKey(&priv.PublicKey)
+	if err != nil {
+		t.Fatalf("marshal P-256 SPKI: %v", err)
+	}
+	return der
+}
+
 // TestVerifyLinkSurfacesAllClaimFields mints a link with every CreateParams field set,
 // verifies it, and asserts every public Claims field (plus Secret and the verbatim
 // Fragment parts) survived the wrap copy. With the compile-time field-parity guards in
@@ -93,9 +133,9 @@ func TestVerifyLinkSurfacesAllClaimFields(t *testing.T) {
 	var iat, nbf, exp int64 = 1_700_000_000, 1_700_000_001, 1_700_003_600
 
 	link, err := qurl.CreatePortalWithParams(context.Background(), signer, qurl.CreateParams{
-		CellPublicKey:     exampleX25519Public(),
+		CellPublicKey:     exampleX25519Public(t),
 		RelayURL:          relay,
-		ResourcePublicKey: exampleP256SPKI(),
+		ResourcePublicKey: exampleP256SPKI(t),
 		CellID:            cell,
 		JTI:               jti,
 		IssuedAt:          iat,
@@ -106,7 +146,7 @@ func TestVerifyLinkSurfacesAllClaimFields(t *testing.T) {
 		t.Fatalf("CreatePortal: %v", err)
 	}
 
-	frag, err := qurl.VerifyLink(link, trustStoreFor(signer))
+	frag, err := qurl.VerifyLink(link, trustStoreFor(t, signer))
 	if err != nil {
 		t.Fatalf("VerifyLink: %v", err)
 	}

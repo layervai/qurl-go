@@ -8,15 +8,14 @@ import (
 
 // Opener config provider for the one-argument EnterPortal.
 //
-// EnterPortal needs issuer keys and qURL platform access endpoints before it can
-// open links. Neither is a per-link secret: the per-qURL credential rides inside
-// the link itself. A Provider resolves that opener config so callers get the
-// locked one-arg verb without hand-wiring Config, while EnterPortalWith stays the
-// explicit-config seam.
+// EnterPortal needs opener policy before it can open links. The policy is not an
+// issuer credential: the per-qURL credential rides inside the link itself. A
+// Provider resolves that policy so callers get the locked one-arg verb without
+// hand-wiring Config, while EnterPortalWith stays the explicit-config seam.
 //
 // The Provider supplies config; it never bypasses verification. EnterPortal feeds
-// the resolved *TrustStore / *RelayAllowlist into EnterPortalWith, which still
-// verifies the link before using any platform access URL from it.
+// the resolved trust policy into EnterPortalWith, which still verifies the link
+// before using any platform access URL from it.
 
 // Provider resolves opener config for EnterPortal.
 //
@@ -26,8 +25,8 @@ import (
 // returns an error rather than a partial or stale result, so EnterPortal refuses
 // rather than trusting unverifiable config.
 //
-// Both returned values must be non-nil on success; a nil trust store or endpoint
-// allowlist makes EnterPortalWith return ErrNotConfigured.
+// Both returned values must be non-nil on success; incomplete opener policy makes
+// EnterPortalWith return ErrNotConfigured.
 type Provider interface {
 	Resolve(ctx context.Context) (*TrustStore, *RelayAllowlist, error)
 }
@@ -46,8 +45,8 @@ type StaticProvider struct {
 	allowlist  *RelayAllowlist
 }
 
-// NewStaticProvider builds a StaticProvider from an already-constructed trust store
-// and qURL platform endpoint allowlist. Both are REQUIRED and must be non-nil.
+// NewStaticProvider builds a StaticProvider from already-constructed opener
+// policy. Both values are REQUIRED and must be non-nil.
 func NewStaticProvider(ts *TrustStore, allow *RelayAllowlist) (*StaticProvider, error) {
 	if ts == nil {
 		return nil, errors.New("qurl: static provider requires a non-nil trust store")

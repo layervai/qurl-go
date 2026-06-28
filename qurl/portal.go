@@ -1,14 +1,15 @@
-// Package qurl is the Go SDK for the LayerV qURL Platform. It provides the two
-// verbs most integrations need: CreatePortal mints a signed, expiring qURL link,
-// and EnterPortal opens a received link.
+// Package qurl is the Go SDK for the LayerV qURL Platform. Most integrations
+// protect a private URL with Client.ProtectURL, mint short-lived links with
+// Resource.CreatePortal, and share those links with callers.
 //
-// LayerV hosts the qURL platform. Applications use the resource config and
-// opener config LayerV provides, plus the SDK calls in this package.
+// LayerV hosts qURL. Applications provide LayerV credentials and the target URL
+// they want to protect; the platform creates or reuses the backing resource.
 //
-// CreatePortal works fully offline: it signs a short-lived link for a private
-// service configured in LayerV. EnterPortal verifies a link locally before asking
-// the qURL platform for access, then returns a ResourceHandle with the reachable
-// URL. No per-link secret is configured outside the link itself.
+// EnterPortal is for services and agents that open received qURL links
+// programmatically. It verifies a link locally before asking qURL for access,
+// then returns a ResourceHandle with the reachable URL. Low-level offline
+// signed-fragment helpers exist for conformance and protocol integrations, but
+// the platform client is the default application surface.
 package qurl
 
 import (

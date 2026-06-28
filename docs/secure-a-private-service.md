@@ -1,49 +1,67 @@
 # Protect a Private Service with qURL
 
-Use LayerV qURL Platform to make a private service reachable only through signed,
-expiring qURL links. LayerV hosts the platform; your application uses this SDK to
-issue and open links with LayerV-provided config.
+Use the LayerV qURL Platform to make a private service reachable only through
+short-lived qURL links. The app that protects URLs and creates portals has LayerV
+credentials; the person or agent opening a portal link does not. LayerV handles
+the platform work.
 
-## 1. Enable the Service in LayerV
+## 1. Create a Client
 
-In LayerV, register the private service you want agents or clients to reach.
-LayerV returns two sets of Go-facing config:
-
-- **Issuer config**: values the resource owner uses with `CreatePortal`.
-- **Opener config**: issuer keys and allowed qURL platform access endpoints for
-  clients that call `EnterPortal`.
-
-LayerV provides issuer config as a `qurl.Resource` value for this SDK.
-
-## 2. Issue a Link
-
-The resource owner signs a short-lived link with `CreatePortal`:
+Create a client in the issuer application, where URLs are protected and portals
+are created:
 
 ```go
-resource := qurl.Resource{
-	AccessPublicKey:  accessPublicKey,  // from LayerV resource config
-	AccessURL:        accessURL,        // from LayerV resource config
-	ResourceIdentity: resourceIdentity, // from LayerV resource config
-}
-
-link, err := qurl.CreatePortal(ctx, signer, resource, qurl.ValidFor(5*time.Minute))
+client, err := qurl.OpenClient()
 if err != nil {
 	return err
 }
 ```
 
-Use a KMS-backed `qurl.Signer` for production issuer keys. `CreatePortal`
-generates the per-link credential and id for you. `LocalSigner` is handy for
-demos and tests.
+`OpenClient` reads LayerV issuer state from
+`/var/lib/layerv/qurl/issuer-state.json` (`qurl.DefaultIssuerStatePath`).
+That file is created by the install/bootstrap flow. Application code does not
+read the temporary bootstrap key.
 
-## 3. Open a Link
+## 2. Protect the URL
 
-The client installs opener config once, then opens any qURL link with one call:
+A resource is the private URL LayerV protects:
+
+```go
+resource, err := client.ProtectURL(ctx, "https://internal.example.com/dashboard")
+if err != nil {
+	return err
+}
+```
+
+`ProtectURL` returns the existing resource when the same target URL is
+already registered for your account.
+
+## 3. Create a Portal
+
+A portal is the short-lived link you share:
+
+```go
+portal, err := resource.CreatePortal(ctx, qurl.ValidFor(5*time.Minute))
+if err != nil {
+	return err
+}
+
+fmt.Println(portal.Link)
+```
+
+You can create many portals for one resource, each with its own lifetime, label,
+and session policy.
+
+## 4. Open a Link Programmatically
+
+Most users can open the qURL link directly and need no keypair state. If you are
+building an agent or service that opens received qURL links in code, install
+opener config once and call `EnterPortal`:
 
 ```go
 qurl.SetDefaultProvider(provider)
 
-handle, err := qurl.EnterPortal(ctx, link)
+handle, err := qurl.EnterPortal(ctx, portal.Link)
 if err != nil {
 	return err
 }
@@ -51,24 +69,27 @@ if err != nil {
 resp, err := http.Get(handle.RedirectURL)
 ```
 
-`EnterPortal` verifies the link before asking the qURL platform for access. If
-the opener has no provider, it fails closed with `qurl.ErrNotConfigured`.
+`EnterPortal` verifies the link before asking qURL for access. If no opener
+provider is installed, it fails closed with `qurl.ErrNotConfigured`.
 
-## 4. Handle Errors
+## Errors
 
 Use `errors.Is` and `errors.As`:
 
 ```go
-handle, err := qurl.EnterPortal(ctx, link)
+portal, err := resource.CreatePortal(ctx, qurl.ValidFor(5*time.Minute))
 switch {
 case err == nil:
-	use(handle.RedirectURL)
-case errors.Is(err, qurl.ErrSignature), errors.Is(err, qurl.ErrUnknownKID):
-	reject()
-case errors.Is(err, qurl.ErrNotConfigured):
-	fixConfig()
+	share(portal.Link)
+case errors.Is(err, qurl.ErrInvalidPortalRequest):
+	fixInput()
 default:
-	retryOrReport(err)
+	var apiErr *qurl.APIError
+	if errors.As(err, &apiErr) {
+		reportAPIError(apiErr)
+		return
+	}
+	return err
 }
 ```
 

@@ -1,11 +1,10 @@
 package qurl
 
-// Single public front door. Everything a qURL integration needs is reachable from
-// this one package: minting links (CreatePortal), opening them (EnterPortal), the
-// issuer signing seam, opener config, link verification, and
-// the typed errors to match on. The cryptographic core lives in an internal package;
-// these wrappers expose exactly the surface callers need, so you never
-// import anything but qurl.
+// Single public front door. Everything a qURL integration needs is reachable
+// from this one package: platform resource and portal creation, programmatic
+// opening, advanced signed-fragment helpers, and the typed errors to match on.
+// The cryptographic core lives in an internal package; these wrappers expose
+// exactly the surface callers need, so you never import anything but qurl.
 
 import (
 	"context"
@@ -17,10 +16,10 @@ import (
 
 // --- core types ---
 
-// Signer is the issuer signing seam used by CreatePortal. Production binds it to a
-// KMS- or HSM-resident P-256 key; LocalSigner is the software-key implementation for
-// tests and self-custody. Implementations sign the digest they are handed and must
-// not recompute it.
+// Signer is the issuer signing seam used by CreatePortalWithParams. Production
+// protocol integrations bind it to a KMS- or HSM-resident P-256 key;
+// LocalSigner is the software-key implementation for tests and self-custody.
+// Implementations sign the digest they are handed and must not recompute it.
 type Signer interface {
 	// KID returns the published trust-store key id this signer stamps into claims.
 	KID() string
@@ -93,9 +92,9 @@ type Claims struct {
 	QurlUserPublicKeyB64 string `json:"qurl_user_public_key_b64"`
 }
 
-// Secret is the one-time per-link credential carried by a qURL link. It is the type of
-// Fragment.Secret; most callers never construct it (CreatePortal mints it and
-// EnterPortal consumes it), but it is exported so Fragment.Secret has a nameable type.
+// Secret is the one-time per-link credential carried by a signed qURL fragment.
+// It is the type of Fragment.Secret; most callers never construct it, but it is
+// exported so Fragment.Secret has a nameable type.
 type Secret struct {
 	QurlUserPrivateKeyB64 string `json:"qurl_user_private_key_b64"`
 }
