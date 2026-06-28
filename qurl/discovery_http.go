@@ -9,9 +9,9 @@ import (
 	"time"
 )
 
-// HTTP-backed manifest fetcher. Kept in the qurl layer (not the core) so the the core crypto
-// core stays standard-library-only and network-free; the discovery provider is the
-// layer that does I/O.
+// HTTP-backed manifest fetcher. Kept in the qurl layer so the crypto core stays
+// standard-library-only and network-free; the discovery provider is the layer that
+// does I/O.
 
 // maxManifestBytes caps the discovery response read. A non-secret trust manifest is
 // small (a handful of issuer keys + relay hosts); the cap bounds a hostile or

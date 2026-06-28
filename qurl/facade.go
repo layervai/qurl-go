@@ -8,6 +8,7 @@ package qurl
 // import anything but qurl.
 
 import (
+	"context"
 	"crypto/ecdsa"
 
 	"github.com/layervai/qurl-go/internal/qv2"
@@ -120,6 +121,31 @@ func ValidateRelayURL(relayURL string, allow *RelayAllowlist) error {
 // VerifyLink instead.
 func VerifyRawIssuerSignature(pub *ecdsa.PublicKey, claimsB64 string, rawSig []byte) error {
 	return qv2.VerifyRawIssuerSignature(pub, claimsB64, rawSig)
+}
+
+// --- discovery manifests (publishing side) ---
+
+// ManifestDigest returns the SHA-256 of the exact manifest bytes — the value to set as
+// DiscoveryConfig.PinSHA256 when pinning a published trust manifest. Hash the decoded
+// manifest the publisher signs and serves, not the envelope.
+func ManifestDigest(manifest []byte) [32]byte {
+	return qv2.ManifestDigest(manifest)
+}
+
+// SignManifest signs a discovery trust manifest with an issuer Signer, returning the
+// detached raw r||s signature to place in the envelope's sig_b64. It is the
+// publishing-side counterpart to the signed-manifest path NewDiscoveryProvider
+// verifies; manifest signing uses a separate signing domain from qURL link claims.
+func SignManifest(ctx context.Context, signer Signer, manifestBytes []byte) ([]byte, error) {
+	return qv2.SignManifest(ctx, signer, manifestBytes)
+}
+
+// VerifyManifestSignature verifies a detached manifest signature (the envelope's
+// sig_b64) over the exact manifest bytes under pub, in the manifest signing domain.
+// NewDiscoveryProvider does this for you when consuming a signed manifest; it's
+// exposed so a publisher can self-check a manifest it just signed.
+func VerifyManifestSignature(pub *ecdsa.PublicKey, manifest, rawSig []byte) error {
+	return qv2.VerifyManifestSignature(pub, manifest, rawSig)
 }
 
 // --- error sentinels (match with errors.Is) ---

@@ -163,8 +163,9 @@ func newP256SPKI() []byte {
 }
 ```
 
-This exact flow is compile-checked in [`qurl/example_test.go`](qurl/example_test.go)
-(`go test ./qurl/`).
+This flow is compile-checked in [`qurl/example_test.go`](qurl/example_test.go)
+(`go test ./qurl/`) — the example there uses fixed timestamps and asserts its output,
+so it's representative rather than a byte-for-byte copy of the snippet above.
 
 ## Secure a private service, end to end
 

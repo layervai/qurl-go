@@ -11,7 +11,7 @@ import (
 //
 // PROVISIONAL WIRE SHAPE. The qURL server admission contract (the qURL v2
 // keyed-identity design's "NHP Server Contract" section) is Proposed, not deployed,
-// and the encrypted knock-body field layout for the path is not yet frozen.
+// and the encrypted knock-body field layout is not yet frozen.
 // This builder encodes what the design specifies for the CLIENT side of the knock
 // (section "Browser and Headless Flow", steps 5–6):
 //

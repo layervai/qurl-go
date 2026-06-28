@@ -111,16 +111,7 @@ func ExampleNewStaticProvider() {
 	if err != nil {
 		panic(err)
 	}
-	pubDER, err := signer.PublicKeyDER()
-	if err != nil {
-		panic(err)
-	}
-	trust, err := qurl.NewTrustStoreFromDER(map[string][]byte{
-		signer.KID(): pubDER,
-	})
-	if err != nil {
-		panic(err)
-	}
+	trust := trustStoreFor(signer)
 
 	// The relays your deployment permits. An empty allowlist rejects every link
 	// (fail closed), so enumerate your relays explicitly.
@@ -149,14 +140,7 @@ func Example_rejectsForgedLink() {
 	if err != nil {
 		panic(err)
 	}
-	pubDER, err := trusted.PublicKeyDER()
-	if err != nil {
-		panic(err)
-	}
-	trust, err := qurl.NewTrustStoreFromDER(map[string][]byte{trusted.KID(): pubDER})
-	if err != nil {
-		panic(err)
-	}
+	trust := trustStoreFor(trusted)
 
 	// An attacker mints a link with their OWN key but stamps the same kid.
 	attacker, err := qurl.GenerateLocalSigner("issuer-key-2026")
@@ -182,6 +166,20 @@ func Example_rejectsForgedLink() {
 }
 
 // --- example helpers (throwaway keys so the examples are self-contained) ---
+
+// trustStoreFor builds a single-key trust store from a local signer's published public
+// key, keyed by the kid the signer stamps into links.
+func trustStoreFor(signer *qurl.LocalSigner) *qurl.TrustStore {
+	pubDER, err := signer.PublicKeyDER()
+	if err != nil {
+		panic(err)
+	}
+	trust, err := qurl.NewTrustStoreFromDER(map[string][]byte{signer.KID(): pubDER})
+	if err != nil {
+		panic(err)
+	}
+	return trust
+}
 
 // newX25519PublicKey returns a fresh raw 32-byte X25519 public key, the shape
 // CreateParams.CellPublicKey expects.

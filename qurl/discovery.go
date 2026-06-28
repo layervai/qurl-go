@@ -400,7 +400,7 @@ func (p *DiscoveryProvider) authenticate(env *ManifestEnvelope, manifestBytes []
 // otherwise a pin-valid, freshly-signed manifest under a not-yet-distributed kid is
 // rejected here. This is a separate rotation from issuer-anchor (claims-signing) kid
 // rotation, which lives inside the manifest's issuer set and is covered by
-// the core/rotation_test.go.
+// internal/qv2/rotation_test.go.
 func (p *DiscoveryProvider) verifyManifestSig(env *ManifestEnvelope, manifestBytes []byte) error {
 	if env.Kid == "" {
 		return fmt.Errorf("%w: signed manifest is missing its kid", ErrManifestSchema)
@@ -513,13 +513,13 @@ func parseManifest(manifestBytes []byte) (*Manifest, error) {
 	return &m, nil
 }
 
-// buildTrustMaterial turns an authenticated, in-window manifest into the the trust
+// buildTrustMaterial turns an authenticated, in-window manifest into the trust
 // store and relay allowlist. It defers issuer-key parsing (and the empty-anchor-set
-// rejection) to qurl.NewTrustStoreFromDER, reusing its fail-closed construction rather
+// rejection) to NewTrustStoreFromDER, reusing its fail-closed construction rather
 // than re-validating here. The relay allowlist's emptiness is already gated upstream in
-// parseManifest (an empty relay_allowlist is a schema fault), so qurl.NewRelayAllowlist
+// parseManifest (an empty relay_allowlist is a schema fault), so NewRelayAllowlist
 // only needs to index the entries.
-func buildTrustMaterial(m *Manifest) (*qv2.TrustStore, *qv2.RelayAllowlist, error) {
+func buildTrustMaterial(m *Manifest) (*TrustStore, *RelayAllowlist, error) {
 	derByKID := make(map[string][]byte, len(m.Issuers))
 	for _, iss := range m.Issuers {
 		if iss.Kid == "" {
