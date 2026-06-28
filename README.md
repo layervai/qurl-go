@@ -18,14 +18,15 @@ URLs or creates portals.
 ## Why qURL
 
 Agents and services increasingly need to reach private MCP servers, APIs, and
-internal tools. The old choices are painful: open an inbound port, run a VPN,
-ship a bastion, expose a tunnel endpoint with Cloudflare Tunnel or ngrok, or
-pass around a long-lived key.
+internal tools. The issue is visibility: every standing public endpoint becomes
+inventory for scanners, fingerprinting, credential attacks, and AI-assisted
+probing before a legitimate user or agent ever arrives.
 
-Tunnels are convenient, but they still publish an external endpoint an adversary
-can scan and probe. qURL flips that model. A private service stays private.
-Access is granted with an intentional, expiring qURL link, and LayerV handles
-the access path.
+Opening an inbound port, running a VPN, shipping a bastion, publishing a
+Cloudflare Tunnel or ngrok URL, or passing around a long-lived key all leave
+something durable to find, scan, or steal. qURL flips that model. A private
+service stays private by default. You open a portal only when LayerV verifies
+the actor, policy, and time limit for that specific access path.
 
 ## Install
 
@@ -95,7 +96,9 @@ portal, err := resource.CreatePortal(ctx, qurl.ValidFor(time.Hour))
 ```
 
 For one-off scripts, `client.CreatePortalForURL` combines the two API calls and
-returns both the portal and the reusable resource handle.
+returns both the portal and a resource handle you can reuse. That handle contains
+the resource id and target URL; use `ProtectURL` when you need the full resource
+metadata from LayerV.
 
 ## Connect to LayerV
 

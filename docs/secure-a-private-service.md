@@ -1,9 +1,9 @@
 # Protect a Private Service with qURL
 
-Use the LayerV qURL Platform to make a private service reachable only through
-short-lived qURL links. The app that protects URLs and creates portals has LayerV
-credentials; the person or agent opening a portal link does not. LayerV handles
-the platform work.
+Use the LayerV qURL Platform to keep a private service off public inventory and
+make it reachable only through short-lived portal links. The app that protects
+URLs and creates portals has LayerV credentials; the person or agent opening a
+portal link does not. LayerV handles the platform work.
 
 ## 1. Connect to LayerV
 
