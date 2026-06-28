@@ -3,6 +3,7 @@
 This guide covers the **issuer side**: minting qURL links with `CreatePortal`,
 managing signing keys safely, and rotating them. Everything uses the single `qurl`
 package. If you want to *open* links instead, see [Opening links](opening-links.md).
+New here? Start with the [golden-path guide](secure-a-private-service.md).
 
 - [The one call](#the-one-call)
 - [`CreateParams` reference](#createparams-reference)

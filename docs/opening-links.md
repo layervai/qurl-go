@@ -3,7 +3,8 @@
 This guide covers the **opener side**: verifying a qURL link, wiring up trust,
 performing the NHP knock with `EnterPortal`, handling errors, and the one operational
 rule that trips people up (egress IP). To *mint* links instead, see
-[Issuing links](issuing-links.md).
+[Issuing links](issuing-links.md). New here? Start with the
+[golden-path guide](secure-a-private-service.md).
 
 - [`EnterPortal` vs `EnterPortalWith`](#enterportal-vs-enterportalwith)
 - [Trust providers](#trust-providers)
@@ -34,7 +35,7 @@ handle, err := qurl.EnterPortal(ctx, link)
 ```
 
 With no provider installed, `EnterPortal` fails closed with `qurl.ErrNotConfigured`.
-A live open also requires your deployment's qURL v2 admission service to accept the
+A live open also requires your deployment's qURL admission service to accept the
 knock; without that server-side rollout, the SDK-side parse, verify, relay validation,
 and knock construction still run, but the end-to-end open cannot complete.
 
@@ -243,7 +244,7 @@ text.
 | `qurl.ErrRelayURL`              | `relay_url` not HTTPS or not on the allowlist    | No — reject           |
 | `qurl.ErrStrictParse` / `ErrFragment` / `ErrEncoding` / `ErrKeyLength` | Malformed link | No — reject |
 | `qurl.ErrServerOverloaded`     | Relay returned an overload cookie-challenge      | **Yes** — backoff     |
-| `*relayknock.RelayError`       | Transport fault talking to the relay             | Maybe — depends on cause |
+| `*qurl.RelayError`             | Transport fault talking to the relay             | Maybe — depends on cause |
 | `*qurl.ServerDenyError`        | Authenticated deny (expired/revoked/consumed)    | No — inspect `.ErrCode` |
 | `qurl.ErrMalformedReply`       | Reply unusable (e.g. success ACK with no URL)    | No — server-side fault |
 
@@ -282,5 +283,5 @@ was rejected: `ErrManifestUnverified`, `ErrManifestPinMismatch`, `ErrManifestExp
 
 Opening a link performs a **live network knock** to the relay. The SDK implements
 parse, verify, relay validation, and qURL knock construction; completing a live
-end-to-end open also requires your deployment's qURL v2 admission service and trust
-provider to be online. See [Status & limitations](../README.md#status--limitations).
+end-to-end open also requires your deployment's qURL admission service and trust
+provider to be online. See [Status — what runs today](../README.md#status--what-runs-today).
