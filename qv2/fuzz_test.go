@@ -3,6 +3,8 @@ package qv2
 import (
 	"errors"
 	"testing"
+
+	conformance "github.com/layervai/qurl-conformance"
 )
 
 // The qv2 package is a strict parser for attacker-controlled input: the fragment
@@ -17,12 +19,12 @@ import (
 //
 // Run locally with e.g. `go test -run=^$ -fuzz=FuzzDecodeB64Canonical -fuzztime=30s ./qv2`.
 
-// fragmentSeeds pulls every fragment-class vector out of the vendored conformance
-// artifact so the corpus starts from real accept/reject wire shapes rather than
-// only hand-written guesses.
+// fragmentSeeds pulls every fragment-class vector out of the conformance artifact
+// so the corpus starts from real accept/reject wire shapes rather than only
+// hand-written guesses.
 func fragmentSeeds(tb testing.TB) []string {
 	tb.Helper()
-	cf, err := LoadConformanceFile(conformanceFilePath)
+	cf, err := LoadConformanceBytes(conformance.QV2Vectors())
 	if err != nil {
 		tb.Fatalf("load conformance seeds: %v", err)
 	}

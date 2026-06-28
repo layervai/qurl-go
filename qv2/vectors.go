@@ -3,8 +3,8 @@ package qv2
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"os"
 )
 
 // Golden-vector fixture schema for qURL v2 issuer signatures.
@@ -14,11 +14,11 @@ import (
 // raw r||s low-S wire encoding — plus a high-S rejection and a wrong-length
 // rejection vector. They are VERIFY fixtures, not sign-determinism fixtures:
 // ECDSA's nonce is random, so a signature cannot be reproduced. The fixture is
-// generated once and committed; consumers re-verify the committed bytes.
+// generated once and consumers re-verify the committed bytes.
 //
-// This is a verbatim vendored copy of the nhp-owned fixture
-// (endpoints/server/internal/qurlv2/testdata/issuer_signature_vectors.json). Do
-// not reformat or edit it; re-vendor on change.
+// The fixture bytes are consumed from the public qurl-conformance package
+// (github.com/layervai/qurl-conformance), whose go:embed accessor returns the
+// canonical issuer-signature vectors; the dependency version pins the bytes.
 
 // VectorFile is the top-level committed fixture document.
 type VectorFile struct {
@@ -87,14 +87,10 @@ const (
 	RejectClassWrongLength = "wrong_length"
 )
 
-// LoadVectorFile reads and parses a committed vector file. It returns an error
-// (never an empty/zero document) if the file is missing or malformed, so a
+// LoadVectorBytes parses a committed vector file's bytes. It returns an error
+// (never an empty/zero document) if the bytes are empty or malformed, so a
 // consumer test FAILS rather than silently skipping the contract.
-func LoadVectorFile(path string) (*VectorFile, error) {
-	data, err := os.ReadFile(path) //nolint:gosec // fixed test fixture path, not user input
-	if err != nil {
-		return nil, fmt.Errorf("qv2: read vector file: %w", err)
-	}
+func LoadVectorBytes(data []byte) (*VectorFile, error) {
 	var vf VectorFile
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
@@ -102,7 +98,7 @@ func LoadVectorFile(path string) (*VectorFile, error) {
 		return nil, fmt.Errorf("qv2: parse vector file: %w", err)
 	}
 	if len(vf.Vectors) == 0 {
-		return nil, fmt.Errorf("qv2: vector file %s has no vectors", path)
+		return nil, errors.New("qv2: vector file has no vectors")
 	}
 	return &vf, nil
 }

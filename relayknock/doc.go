@@ -5,19 +5,20 @@
 // The server authorizes, opens its access-control firewall for the caller IP, and
 // replies with an NHP_ACK whose body the caller decrypts.
 //
-// It is a port of the browser JS NHP agent (nhp endpoints/js-agent/src/crypto/* +
-// agent/*) and the clean-room smoke client (qurl-service tests/smoke). The wire
-// format is fenced byte-for-byte by the golden vectors in knock_golden_test.go,
-// which are copied from the js-agent's cross-language fixtures (themselves pinned
-// to the Go nhp/core server output). If this port reproduces those bytes, it is
-// wire-compatible with the deployed server by construction.
+// It is a port of the browser JS NHP agent's crypto/handshake code and a
+// clean-room smoke client. The wire format is fenced byte-for-byte by the golden
+// vectors in knock_golden_test.go, which come from the browser agent's
+// cross-language fixtures (themselves pinned to the reference NHP relay server
+// output). If this port reproduces those bytes, it is wire-compatible with the
+// deployed server by construction.
 //
 // # Dependency policy
 //
 // The only non-stdlib dependency is golang.org/x/crypto (curve25519, blake2s).
-// This package MUST NOT import nhp/core, which would drag gin/grpc/quic/etcd/mongo
-// /wazero into the module graph. Every constant and offset is pinned to the Go
-// server wire format via the js-agent and fenced by the golden vectors.
+// This package MUST NOT import the full NHP core module, which would drag
+// gin/grpc/quic/etcd/mongo/wazero into the module graph. Every constant and
+// offset is pinned to the reference server wire format via the browser agent and
+// fenced by the golden vectors.
 //
 // # Scope
 //

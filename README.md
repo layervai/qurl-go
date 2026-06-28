@@ -55,7 +55,7 @@ Each layer is independently usable and independently tested:
   (`SignClaims` + the `Signer` seam) signs those same exact bytes, so sign and
   verify share one preimage by construction. Still standard-library only — no KMS,
   no AWS: the signer is an interface, not a baked-in client. It is exercised against
-  nhp-owned **conformance vectors** vendored verbatim into `qv2/testdata`.
+  the public **conformance vectors** from the `qurl-conformance` package.
 
 ## `EnterPortal` usage
 
@@ -128,8 +128,8 @@ the request will arrive at a firewall opened for a different address.
 
 ### Provisional: live qv2 admission
 
-The qURL v2 server-side admission contract (`/internal/v2/qurl/admissions/*`) is
-**Proposed** in the nhp design and not yet deployed. `EnterPortal` therefore builds
+The qURL v2 server-side admission contract is **Proposed** in the qURL v2
+keyed-identity design and not yet deployed. `EnterPortal` therefore builds
 and posts a structurally correct qv2 knock, and the pure steps (parse → verify →
 derive serverId → assemble packet) are unit-tested offline against the vectors, but
 a **live** end-to-end qv2 resolve cannot round-trip until the qv2 NHP server
@@ -139,12 +139,12 @@ turn-up, not an SDK change.
 
 ## Conformance vectors
 
-`qv2/testdata` vendors the nhp-owned, language-agnostic qURL v2 conformance
-artifact (`qv2_conformance_vectors.json`) plus the composed issuer-signature golden
-file (`issuer_signature_vectors.json`). The loader is structured so adopting an
-updated artifact is a **file swap**. The current copies are vendored from an
-in-flight nhp branch and are marked **provisional** pending the merged full-class
-artifact; re-vendor verbatim on merge.
+The language-agnostic qURL v2 conformance artifact (`qv2_conformance_vectors.json`)
+plus the composed issuer-signature golden file (`issuer_signature_vectors.json`) are
+consumed from the public [`qurl-conformance`](https://github.com/layervai/qurl-conformance)
+package via its `go:embed` accessors (`LoadConformanceBytes` / `LoadVectorBytes`).
+The bytes are pinned by the dependency version in `go.sum`, so adopting an updated
+artifact is a **dependency bump**.
 
 ## Development
 

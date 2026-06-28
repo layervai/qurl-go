@@ -9,11 +9,11 @@ import (
 	"io"
 )
 
-// NHP knock construction and reply decryption (initiator/responder transcripts:
-// nhp/core initiator.go + responder.go, ports of js-agent crypto/handshake.ts +
-// crypto/ack.ts). The seal/open ordering folds material into the chain hash/key
-// in the exact order the Go server expects, so every AEAD opens; it is fenced
-// byte-for-byte by the golden vectors.
+// NHP knock construction and reply decryption (initiator/responder transcripts
+// from the reference NHP relay implementation, ports of the browser agent's
+// handshake and ack crypto). The seal/open ordering folds material into the chain
+// hash/key in the exact order the reference server expects, so every AEAD opens;
+// it is fenced byte-for-byte by the golden vectors.
 
 // KnockInputs are the per-knock values. They are injectable (rather than minted
 // internally) so a caller can drive a deterministic golden vector and so the
@@ -31,7 +31,7 @@ type KnockInputs struct {
 }
 
 // BuildKnock builds a complete NHP_KNK packet (240-byte header ‖ sealed body)
-// that the Go nhp/core responder decrypts. Folds material into the chain
+// that the reference NHP relay responder decrypts. Folds material into the chain
 // hash/key in the exact order the responder expects, so every AEAD opens.
 func BuildKnock(inp *KnockInputs) ([]byte, error) {
 	if len(inp.ServerStaticPub) != publicKeySize {
