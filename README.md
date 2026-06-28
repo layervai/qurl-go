@@ -6,9 +6,8 @@ protected links into NHP-protected resources.
 > **Quantum URL (qURL)** · The internet has a hidden layer. This is how you enter.
 
 A qURL resource is invisible by default and becomes reachable only after an
-authorized NHP knock opens the access-control firewall for your egress IP. This
-SDK performs that knock and the qURL v2 parse/verify in dependency-light,
-clean-room Go.
+authorized NHP knock opens access for your egress IP. This SDK performs that knock
+and the qURL v2 parse/verify in dependency-light, clean-room Go.
 
 ## Status
 
@@ -121,10 +120,11 @@ DER → raw r||s low-S conversion, so no signer can drift on those.
 
 ### Same-egress-IP invariant
 
-The NHP server opens its firewall for the **source IP of the relay POST**. The
+The NHP server opens access for the **source IP of the relay POST**. The
 knock and any subsequent request to the resource MUST share an egress IP. Behind a
 rotating-egress NAT/proxy pool, pin the knock and the request to the same exit, or
-the request will arrive at a firewall opened for a different address.
+the request will be dropped, because access was opened for a different source
+address.
 
 ### Provisional: live qv2 admission
 
