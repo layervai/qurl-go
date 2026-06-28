@@ -238,8 +238,8 @@ func BootstrapAgent(ctx context.Context, setupKey string, store AgentStateStore,
 		return nil, err
 	}
 	if state.RegisteredAt != nil {
-		if state.NHPPeer == nil {
-			return nil, fmt.Errorf("%w: registered agent state is missing NHP peer", ErrInvalidBootstrapConfig)
+		if err := validateRegisteredAgentState(state, time.Now()); err != nil {
+			return nil, err
 		}
 		if cfg.agentID != "" && state.AgentID != "" && cfg.agentID != state.AgentID {
 			return nil, fmt.Errorf("%w: saved agent id %q does not match requested agent id %q", ErrInvalidBootstrapConfig, state.AgentID, cfg.agentID)
@@ -300,27 +300,47 @@ func (r agentBootstrapResponse) validate(now time.Time) error {
 	if r.RegisteredAt == nil {
 		return fmt.Errorf("%w: bootstrap response missing registration time", ErrInvalidBootstrapConfig)
 	}
-	if strings.TrimSpace(r.NHPPeer.PublicKeyB64) == "" {
-		return fmt.Errorf("%w: bootstrap response missing NHP peer public key", ErrInvalidBootstrapConfig)
+	return validateNHPServerPeerInfo(r.NHPPeer, now, "bootstrap response")
+}
+
+func validateRegisteredAgentState(state *AgentState, now time.Time) error {
+	if state == nil {
+		return fmt.Errorf("%w: registered agent state is nil", ErrInvalidBootstrapConfig)
 	}
-	peerKey, err := base64.StdEncoding.Strict().DecodeString(r.NHPPeer.PublicKeyB64)
+	if strings.TrimSpace(state.AgentID) == "" {
+		return fmt.Errorf("%w: registered agent state missing agent id", ErrInvalidBootstrapConfig)
+	}
+	if state.RegisteredAt == nil {
+		return fmt.Errorf("%w: registered agent state missing registration time", ErrInvalidBootstrapConfig)
+	}
+	if state.NHPPeer == nil {
+		return fmt.Errorf("%w: registered agent state missing NHP peer", ErrInvalidBootstrapConfig)
+	}
+	return validateNHPServerPeerInfo(*state.NHPPeer, now, "registered agent state")
+}
+
+func validateNHPServerPeerInfo(peer NHPServerPeerInfo, now time.Time, label string) error {
+	if strings.TrimSpace(peer.PublicKeyB64) == "" {
+		return fmt.Errorf("%w: %s missing NHP peer public key", ErrInvalidBootstrapConfig, label)
+	}
+	peerKey, err := base64.StdEncoding.Strict().DecodeString(peer.PublicKeyB64)
 	if err != nil {
-		return fmt.Errorf("%w: bootstrap response NHP peer public key is not standard base64: %w", ErrInvalidBootstrapConfig, err)
+		return fmt.Errorf("%w: %s NHP peer public key is not standard base64: %w", ErrInvalidBootstrapConfig, label, err)
 	}
 	if _, err := ecdh.X25519().NewPublicKey(peerKey); err != nil {
-		return fmt.Errorf("%w: bootstrap response NHP peer public key is not X25519: %w", ErrInvalidBootstrapConfig, err)
+		return fmt.Errorf("%w: %s NHP peer public key is not X25519: %w", ErrInvalidBootstrapConfig, label, err)
 	}
-	if strings.TrimSpace(r.NHPPeer.Host) == "" {
-		return fmt.Errorf("%w: bootstrap response missing NHP peer host", ErrInvalidBootstrapConfig)
+	if strings.TrimSpace(peer.Host) == "" {
+		return fmt.Errorf("%w: %s missing NHP peer host", ErrInvalidBootstrapConfig, label)
 	}
-	if r.NHPPeer.Port <= 0 {
-		return fmt.Errorf("%w: bootstrap response missing NHP peer port", ErrInvalidBootstrapConfig)
+	if peer.Port <= 0 {
+		return fmt.Errorf("%w: %s missing NHP peer port", ErrInvalidBootstrapConfig, label)
 	}
-	if r.NHPPeer.Port > 65535 {
-		return fmt.Errorf("%w: bootstrap response NHP peer port out of range", ErrInvalidBootstrapConfig)
+	if peer.Port > 65535 {
+		return fmt.Errorf("%w: %s NHP peer port out of range", ErrInvalidBootstrapConfig, label)
 	}
-	if r.NHPPeer.ExpireTime != 0 && r.NHPPeer.ExpireTime <= now.Unix() {
-		return fmt.Errorf("%w: bootstrap response NHP peer is expired", ErrInvalidBootstrapConfig)
+	if peer.ExpireTime != 0 && peer.ExpireTime <= now.Unix() {
+		return fmt.Errorf("%w: %s NHP peer is expired", ErrInvalidBootstrapConfig, label)
 	}
 	return nil
 }

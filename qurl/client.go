@@ -119,9 +119,11 @@ type fileCredentialProvider struct {
 // FileCredentials reads LayerV issuer credentials from path on every request so
 // rotated local credentials are picked up without rebuilding the client. Most
 // applications should use OpenClient; use FileCredentials only when wiring a
-// custom runtime path. The context passed to Authorize cannot interrupt local
-// filesystem I/O after it has started. If the state file contains an
-// "authorization" field, its value is trusted as the raw Authorization header.
+// custom runtime path. High-throughput callers that rarely rotate credentials
+// can wrap their own caching CredentialProvider. The context passed to Authorize
+// cannot interrupt local filesystem I/O after it has started. If the state file
+// contains an "authorization" field, its value is trusted as the raw
+// Authorization header.
 func FileCredentials(path string) CredentialProvider {
 	return fileCredentialProvider{path: path}
 }
@@ -167,6 +169,8 @@ func (s credentialState) authorize(req *http.Request) error {
 
 func validateHeaderValue(value, label string) error {
 	for _, r := range value {
+		// Authorization credentials do not need HTAB or obs-text, so keep this
+		// intentionally stricter than the generic HTTP header grammar.
 		if r < 0x20 || r > 0x7e {
 			return fmt.Errorf("%w: %s contains invalid header characters", ErrInvalidClientConfig, label)
 		}

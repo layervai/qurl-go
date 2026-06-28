@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestBootstrapAgent_GeneratesRegistersAndSavesState(t *testing.T) {
@@ -140,6 +141,73 @@ func TestBootstrapAgent_ReturnsRegisteredStateWithoutNetwork(t *testing.T) {
 	}
 	if second.AgentID != first.AgentID || second.PublicKeyB64 != first.PublicKeyB64 || second.NHPPeer == nil {
 		t.Fatalf("second state = %#v, first = %#v", second, first)
+	}
+}
+
+func TestBootstrapAgent_RejectsInvalidRegisteredStateWithoutNetwork(t *testing.T) {
+	registeredAt := time.Now().UTC()
+	validState, err := newAgentState()
+	if err != nil {
+		t.Fatalf("newAgentState: %v", err)
+	}
+	validState.AgentID = "agent-1"
+	validState.RegisteredAt = &registeredAt
+	validState.NHPPeer = &NHPServerPeerInfo{
+		PublicKeyB64: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+		Host:         "nhp.layerv.ai",
+		Port:         62206,
+		ExpireTime:   0,
+	}
+
+	tests := []struct {
+		name string
+		edit func(*AgentState)
+		want string
+	}{
+		{
+			name: "missing agent id",
+			edit: func(state *AgentState) {
+				state.AgentID = ""
+			},
+			want: "missing agent id",
+		},
+		{
+			name: "bad peer key",
+			edit: func(state *AgentState) {
+				state.NHPPeer.PublicKeyB64 = "not-base64"
+			},
+			want: "not standard base64",
+		},
+		{
+			name: "expired peer",
+			edit: func(state *AgentState) {
+				state.NHPPeer.ExpireTime = 1
+			},
+			want: "peer is expired",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			state := *validState
+			peer := *validState.NHPPeer
+			state.NHPPeer = &peer
+			tt.edit(&state)
+
+			api := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+				t.Fatal("BootstrapAgent made an unexpected network call")
+			}))
+			defer api.Close()
+
+			_, err := BootstrapAgent(context.Background(),
+				"lv_consumed_setup_key",
+				memoryAgentStateStore{state: &state},
+				WithBootstrapBaseURL(api.URL),
+			)
+			if !errors.Is(err, ErrInvalidBootstrapConfig) || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("BootstrapAgent: want ErrInvalidBootstrapConfig containing %q, got %v", tt.want, err)
+			}
+		})
 	}
 }
 
