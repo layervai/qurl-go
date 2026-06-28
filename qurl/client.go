@@ -96,7 +96,11 @@ func (c bearerTokenCredential) Authorize(_ context.Context, req *http.Request) e
 	if token == "" {
 		return fmt.Errorf("%w: bearer token must not be empty", ErrInvalidClientConfig)
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
+	authorization := "Bearer " + token
+	if err := validateHeaderValue(authorization, "bearer token"); err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", authorization)
 	return nil
 }
 
@@ -144,14 +148,30 @@ func (s credentialState) authorize(req *http.Request) error {
 	bearer := strings.TrimSpace(s.BearerToken)
 	switch {
 	case authorization != "":
+		if err := validateHeaderValue(authorization, "authorization header"); err != nil {
+			return err
+		}
 		req.Header.Set("Authorization", authorization)
 		return nil
 	case bearer != "":
-		req.Header.Set("Authorization", "Bearer "+bearer)
+		authorization := "Bearer " + bearer
+		if err := validateHeaderValue(authorization, "bearer token"); err != nil {
+			return err
+		}
+		req.Header.Set("Authorization", authorization)
 		return nil
 	default:
 		return fmt.Errorf("%w: credential state cannot authorize requests", ErrInvalidClientConfig)
 	}
+}
+
+func validateHeaderValue(value, label string) error {
+	for _, r := range value {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("%w: %s contains invalid header characters", ErrInvalidClientConfig, label)
+		}
+	}
+	return nil
 }
 
 // Client calls the LayerV qURL API. Protect a URL once with ProtectURL, then
@@ -174,8 +194,25 @@ func (f clientOptionFunc) applyClientOption(o *clientOptions) error {
 }
 
 type clientOptions struct {
-	baseURL    string
-	httpClient HTTPDoer
+	baseURL         string
+	httpClient      HTTPDoer
+	issuerStatePath string
+}
+
+func applyClientOptions(opts []ClientOption) (clientOptions, error) {
+	cfg := clientOptions{
+		baseURL:    defaultAPIBaseURL,
+		httpClient: defaultAPIHTTPClient,
+	}
+	for _, opt := range opts {
+		if opt == nil {
+			return clientOptions{}, fmt.Errorf("%w: nil ClientOption", ErrInvalidClientConfig)
+		}
+		if err := opt.applyClientOption(&cfg); err != nil {
+			return clientOptions{}, err
+		}
+	}
+	return cfg, nil
 }
 
 // WithBaseURL points the client at a non-default LayerV API origin. Most
@@ -204,22 +241,30 @@ func WithHTTPClient(client HTTPDoer) ClientOption {
 	})
 }
 
+// WithIssuerStatePath makes OpenClient/OpenClientContext read LayerV issuer
+// credentials from path while preserving their eager startup validation. Most
+// applications should use the default state path created by LayerV setup.
+func WithIssuerStatePath(path string) ClientOption {
+	return clientOptionFunc(func(o *clientOptions) error {
+		if strings.TrimSpace(path) == "" {
+			return fmt.Errorf("%w: issuer state path must not be empty", ErrInvalidClientConfig)
+		}
+		o.issuerStatePath = path
+		return nil
+	})
+}
+
 // NewClient returns a qURL API client backed by a credential provider.
 func NewClient(provider CredentialProvider, opts ...ClientOption) (*Client, error) {
 	if provider == nil {
 		return nil, fmt.Errorf("%w: credential provider must not be nil", ErrInvalidClientConfig)
 	}
-	cfg := clientOptions{
-		baseURL:    defaultAPIBaseURL,
-		httpClient: defaultAPIHTTPClient,
+	cfg, err := applyClientOptions(opts)
+	if err != nil {
+		return nil, err
 	}
-	for _, opt := range opts {
-		if opt == nil {
-			return nil, fmt.Errorf("%w: nil ClientOption", ErrInvalidClientConfig)
-		}
-		if err := opt.applyClientOption(&cfg); err != nil {
-			return nil, err
-		}
+	if cfg.issuerStatePath != "" {
+		return nil, fmt.Errorf("%w: WithIssuerStatePath is only valid with OpenClient", ErrInvalidClientConfig)
 	}
 	return &Client{
 		credentials: provider,
@@ -231,14 +276,12 @@ func NewClient(provider CredentialProvider, opts ...ClientOption) (*Client, erro
 // OpenClient returns a qURL API client using the default LayerV credential.
 // It eagerly checks that the local credential source can authorize a request;
 // it does not call the LayerV API until the returned client is used. Use
-// OpenClientContext when startup code needs to bound that eager check.
+// OpenClientContext when startup code needs to bound that eager check. Use
+// WithIssuerStatePath only when LayerV setup wrote issuer state to a non-default
+// path.
 func OpenClient(opts ...ClientOption) (*Client, error) {
 	return OpenClientContext(context.Background(), opts...)
 }
-
-// defaultCredentialProvider is an OpenClientContext test seam. Production code
-// must not swap it, and tests must not mutate it concurrently with OpenClient.
-var defaultCredentialProvider = FileCredentials
 
 // OpenClientContext is OpenClient with a context for the eager credential
 // authorization check. For file-backed credentials, the context can cancel
@@ -248,10 +291,19 @@ func OpenClientContext(ctx context.Context, opts ...ClientOption) (*Client, erro
 	if ctx == nil {
 		return nil, fmt.Errorf("%w: context must not be nil", ErrInvalidClientConfig)
 	}
-	provider := defaultCredentialProvider(DefaultIssuerStatePath)
-	client, err := NewClient(provider, opts...)
+	cfg, err := applyClientOptions(opts)
 	if err != nil {
 		return nil, err
+	}
+	statePath := DefaultIssuerStatePath
+	if cfg.issuerStatePath != "" {
+		statePath = cfg.issuerStatePath
+	}
+	provider := FileCredentials(statePath)
+	client := &Client{
+		credentials: provider,
+		baseURL:     cfg.baseURL,
+		httpClient:  cfg.httpClient,
 	}
 	if err := validateCredentials(ctx, provider, client.baseURL); err != nil {
 		return nil, err

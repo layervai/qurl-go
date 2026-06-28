@@ -267,7 +267,7 @@ func BootstrapAgent(ctx context.Context, setupKey string, store AgentStateStore,
 	if err := doAuthorizedJSON(ctx, cfg.httpClient, cfg.baseURL, BearerToken(setupKey).Authorize, http.MethodPost, "/v1/agent/bootstrap", reqBody, &env); err != nil {
 		return nil, err
 	}
-	if err := env.Data.validate(); err != nil {
+	if err := env.Data.validate(time.Now()); err != nil {
 		return nil, err
 	}
 
@@ -293,7 +293,7 @@ type agentBootstrapResponse struct {
 	NHPPeer      NHPServerPeerInfo `json:"nhp_server_peer"`
 }
 
-func (r agentBootstrapResponse) validate() error {
+func (r agentBootstrapResponse) validate(now time.Time) error {
 	if strings.TrimSpace(r.AgentID) == "" {
 		return fmt.Errorf("%w: bootstrap response missing agent id", ErrInvalidBootstrapConfig)
 	}
@@ -319,7 +319,7 @@ func (r agentBootstrapResponse) validate() error {
 	if r.NHPPeer.Port > 65535 {
 		return fmt.Errorf("%w: bootstrap response NHP peer port out of range", ErrInvalidBootstrapConfig)
 	}
-	if r.NHPPeer.ExpireTime != 0 && r.NHPPeer.ExpireTime <= time.Now().Unix() {
+	if r.NHPPeer.ExpireTime != 0 && r.NHPPeer.ExpireTime <= now.Unix() {
 		return fmt.Errorf("%w: bootstrap response NHP peer is expired", ErrInvalidBootstrapConfig)
 	}
 	return nil

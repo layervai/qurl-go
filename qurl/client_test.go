@@ -395,6 +395,18 @@ func TestClient_FileCredentialsErrors(t *testing.T) {
 	if _, err := client.ProtectURL(context.Background(), "https://example.com"); !errors.Is(err, ErrInsecureCredentialStatePermissions) {
 		t.Fatalf("insecure state: want ErrInsecureCredentialStatePermissions, got %v", err)
 	}
+
+	badHeaderPath := filepath.Join(t.TempDir(), "issuer-state.json")
+	if err := os.WriteFile(badHeaderPath, []byte(`{"authorization":"Bearer lv_state_123\r\nX-Bad: yes"}`), 0o600); err != nil {
+		t.Fatalf("write bad header state: %v", err)
+	}
+	client, err = NewClient(FileCredentials(badHeaderPath), WithBaseURL("https://api.example.com"))
+	if err != nil {
+		t.Fatalf("NewClient bad header state: %v", err)
+	}
+	if _, err := client.ProtectURL(context.Background(), "https://example.com"); !errors.Is(err, ErrInvalidClientConfig) {
+		t.Fatalf("bad authorization header: want ErrInvalidClientConfig, got %v", err)
+	}
 }
 
 func TestClient_Validation(t *testing.T) {
@@ -410,6 +422,12 @@ func TestClient_Validation(t *testing.T) {
 	if _, err := NewClient(BearerToken("lv_test"), WithBaseURL("https://user:pass@api.example.com")); !errors.Is(err, ErrInvalidClientConfig) {
 		t.Fatalf("base URL with userinfo: want ErrInvalidClientConfig, got %v", err)
 	}
+	if _, err := NewClient(BearerToken("lv_test"), WithIssuerStatePath(filepath.Join(t.TempDir(), "issuer-state.json"))); !errors.Is(err, ErrInvalidClientConfig) {
+		t.Fatalf("issuer state path on NewClient: want ErrInvalidClientConfig, got %v", err)
+	}
+	if _, err := OpenClientContext(context.Background(), WithIssuerStatePath(" ")); !errors.Is(err, ErrInvalidClientConfig) {
+		t.Fatalf("blank issuer state path: want ErrInvalidClientConfig, got %v", err)
+	}
 	if _, err := NewClient(BearerToken("lv_test"), WithBaseURL("http://localhost:8080")); err != nil {
 		t.Fatalf("loopback base URL: %v", err)
 	}
@@ -424,6 +442,13 @@ func TestClient_Validation(t *testing.T) {
 	}
 	if _, err := blankClient.ProtectURL(context.Background(), "https://example.com"); !errors.Is(err, ErrInvalidClientConfig) {
 		t.Fatalf("blank bearer: want ErrInvalidClientConfig, got %v", err)
+	}
+	badHeaderClient, err := NewClient(BearerToken("lv_test\nbad"), WithBaseURL("https://api.example.com"))
+	if err != nil {
+		t.Fatalf("NewClient bad bearer: %v", err)
+	}
+	if _, err := badHeaderClient.ProtectURL(context.Background(), "https://example.com"); !errors.Is(err, ErrInvalidClientConfig) {
+		t.Fatalf("bad bearer header: want ErrInvalidClientConfig, got %v", err)
 	}
 	if _, err := client.ProtectURL(context.Background(), "ftp://example.com"); !errors.Is(err, ErrInvalidResourceRequest) {
 		t.Fatalf("bad target URL: want ErrInvalidResourceRequest, got %v", err)
@@ -480,43 +505,27 @@ func TestValidateCredentialsUsesBaseURL(t *testing.T) {
 	}
 }
 
-func TestOpenClientContextValidatesDefaultCredentials(t *testing.T) {
-	const wantURL = "https://api.example.test"
-	type contextKey struct{}
-
-	oldProvider := defaultCredentialProvider
-	t.Cleanup(func() {
-		defaultCredentialProvider = oldProvider
-	})
-
-	var validated bool
-	defaultCredentialProvider = func(path string) CredentialProvider {
-		if path != DefaultIssuerStatePath {
-			t.Fatalf("credential path = %q, want %q", path, DefaultIssuerStatePath)
-		}
-		return CredentialProviderFunc(func(ctx context.Context, req *http.Request) error {
-			validated = true
-			if got := ctx.Value(contextKey{}); got != "open-client" {
-				t.Fatalf("OpenClientContext context value = %v, want open-client", got)
-			}
-			if got := req.Context().Value(contextKey{}); got != "open-client" {
-				t.Fatalf("validation request context value = %v, want open-client", got)
-			}
-			if got := req.URL.String(); got != wantURL {
-				t.Fatalf("validation URL = %q, want %q", got, wantURL)
-			}
-			req.Header.Set("Authorization", "Bearer lv_test")
-			return nil
-		})
+func TestOpenClientContextValidatesIssuerStatePath(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "issuer-state.json")
+	if err := os.WriteFile(statePath, []byte(`{"authorization":"Bearer lv_state_123"}`), 0o600); err != nil {
+		t.Fatalf("write credential state: %v", err)
 	}
 
-	ctx := context.WithValue(context.Background(), contextKey{}, "open-client")
-	client, err := OpenClientContext(ctx, WithBaseURL(wantURL))
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got, want := r.Header.Get("Authorization"), "Bearer lv_state_123"; got != want {
+			t.Fatalf("Authorization = %q, want %q", got, want)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"data":{"resource_id":"r_state12345","target_url":"https://example.com","status":"active"}}`)
+	}))
+	defer api.Close()
+
+	client, err := OpenClientContext(context.Background(), WithIssuerStatePath(statePath), WithBaseURL(api.URL))
 	if err != nil {
 		t.Fatalf("OpenClientContext: %v", err)
 	}
-	if client == nil || !validated {
-		t.Fatalf("OpenClientContext did not validate default credentials")
+	if _, err := client.ProtectURL(context.Background(), "https://example.com"); err != nil {
+		t.Fatalf("ProtectURL: %v", err)
 	}
 }
 
