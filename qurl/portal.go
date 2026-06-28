@@ -157,6 +157,12 @@ func EnterPortalWith(ctx context.Context, qurlLink string, cfg Config) (*Resourc
 	return interpretReply(reply)
 }
 
+// Compile-time guard: normalizeRelayError hand-copies relayknock.RelayError into the
+// public RelayError, so the two must stay field-identical (a struct conversion only
+// compiles when fields match) — drift becomes a build break here, like the Claims/Secret
+// guards in facade.go.
+var _ = RelayError(relayknock.RelayError{})
+
 func normalizeRelayError(err error) error {
 	var relayErr *relayknock.RelayError
 	if errors.As(err, &relayErr) {
