@@ -35,6 +35,10 @@ var ErrInvalidPortalRequest = errors.New("qurl: invalid portal request")
 // LayerV issuer state file.
 var ErrCredentialStateNotFound = errors.New("qurl: credential state not found")
 
+// ErrResourceNotFound is returned when a requested LayerV resource does not
+// exist for the current issuer.
+var ErrResourceNotFound = errors.New("qurl: resource not found")
+
 // CredentialProvider authorizes Client requests.
 //
 // Implement this interface with credentials loaded from protected local state,
@@ -239,6 +243,32 @@ type Resource struct {
 // stored a LayerV resource id and want to mint more portals for it.
 func (c *Client) ResourceByID(id string) *Resource {
 	return &Resource{client: c, ID: id}
+}
+
+// ConnectorResource returns the resource created for connectorID by qURL
+// Connector. Use this when qURL Connector already protects the service; do not
+// call ProtectURL again for the same service.
+func (c *Client) ConnectorResource(ctx context.Context, connectorID string) (*Resource, error) {
+	if c == nil {
+		return nil, fmt.Errorf("%w: nil client", ErrInvalidClientConfig)
+	}
+	connectorID = strings.TrimSpace(connectorID)
+	if connectorID == "" {
+		return nil, fmt.Errorf("%w: connector id must not be empty", ErrInvalidResourceRequest)
+	}
+
+	query := url.Values{}
+	query.Set("slug", connectorID)
+	var env apiEnvelope[[]createResourceResponse]
+	if err := c.doJSON(ctx, http.MethodGet, "/v1/resources?"+query.Encode(), nil, &env); err != nil {
+		return nil, err
+	}
+	if len(env.Data) == 0 {
+		return nil, fmt.Errorf("%w: connector %q", ErrResourceNotFound, connectorID)
+	}
+	resource := env.Data[0].resource()
+	resource.client = c
+	return resource, nil
 }
 
 // ResourceOption customizes ProtectURL and CreateResource.
@@ -665,17 +695,23 @@ func doAuthorizedJSON(ctx context.Context, httpClient HTTPDoer, baseURL string, 
 		return fmt.Errorf("%w: credential provider must not be nil", ErrInvalidClientConfig)
 	}
 
-	raw, err := json.Marshal(body)
-	if err != nil {
-		return fmt.Errorf("qurl: encode API request: %w", err)
+	reqBody := io.Reader(http.NoBody)
+	if body != nil {
+		raw, err := json.Marshal(body)
+		if err != nil {
+			return fmt.Errorf("qurl: encode API request: %w", err)
+		}
+		reqBody = bytes.NewReader(raw)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, method, baseURL+path, bytes.NewReader(raw))
+	req, err := http.NewRequestWithContext(ctx, method, baseURL+path, reqBody)
 	if err != nil {
 		return fmt.Errorf("qurl: build API request: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Content-Type", "application/json")
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	req.Header.Set("User-Agent", "qurl-go-sdk")
 	if err := authorize(ctx, req); err != nil {
 		return fmt.Errorf("qurl: authorize API request: %w", err)

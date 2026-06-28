@@ -61,6 +61,26 @@ portal, err := resource.CreatePortal(ctx,
 )
 ```
 
+## Connector-Protected Services
+
+If qURL Connector already protects the service, skip `ProtectURL`. Use the
+connector id for that service:
+
+```go
+resource, err := client.ConnectorResource(ctx, "prod-dashboard")
+if err != nil {
+	return err
+}
+
+portal, err := resource.CreatePortal(ctx, qurl.ValidFor(5*time.Minute))
+if err != nil {
+	return err
+}
+```
+
+The connector install/startup flow creates or finds the LayerV resource for that
+id. Your app only resolves it and mints portals.
+
 ## Reuse a Stored Resource ID
 
 Most production apps protect the URL once, store the resource id, and mint

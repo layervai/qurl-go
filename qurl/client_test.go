@@ -155,6 +155,83 @@ func TestClient_ResourceByIDCreatePortal(t *testing.T) {
 	}
 }
 
+func TestClient_ConnectorResourceCreatePortal(t *testing.T) {
+	var requestCount atomic.Int32
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got, want := r.Header.Get("Authorization"), "Bearer lv_test_123"; got != want {
+			t.Fatalf("Authorization = %q, want %q", got, want)
+		}
+		w.Header().Set("Content-Type", "application/json")
+
+		switch requestCount.Add(1) {
+		case 1:
+			if r.Method != http.MethodGet || r.URL.Path != "/v1/resources" {
+				t.Fatalf("first request = %s %s, want GET /v1/resources", r.Method, r.URL.Path)
+			}
+			if got, want := r.URL.Query().Get("slug"), "prod-dashboard"; got != want {
+				t.Fatalf("slug query = %q, want %q", got, want)
+			}
+			if got := r.Header.Get("Content-Type"); got != "" {
+				t.Fatalf("GET Content-Type = %q, want empty", got)
+			}
+			fmt.Fprint(w, `{"data":[{"resource_id":"r_connector12","type":"tunnel","status":"active"}]}`)
+		case 2:
+			if r.Method != http.MethodPost || r.URL.Path != "/v1/resources/r_connector12/qurls" {
+				t.Fatalf("second request = %s %s, want POST /v1/resources/r_connector12/qurls", r.Method, r.URL.Path)
+			}
+			fmt.Fprint(w, `{"data":{"resource_id":"r_connector12","qurl_link":"https://qurl.link/at_connector"}}`)
+		default:
+			t.Fatalf("unexpected request %d: %s %s", requestCount.Load(), r.Method, r.URL.Path)
+		}
+	}))
+	defer api.Close()
+
+	client, err := NewClient(BearerToken("lv_test_123"), WithBaseURL(api.URL))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	resource, err := client.ConnectorResource(context.Background(), "prod-dashboard")
+	if err != nil {
+		t.Fatalf("ConnectorResource: %v", err)
+	}
+	if resource.ID != "r_connector12" || resource.Status != "active" {
+		t.Fatalf("resource = %#v", resource)
+	}
+
+	portal, err := resource.CreatePortal(context.Background(), ValidFor(5*time.Minute))
+	if err != nil {
+		t.Fatalf("CreatePortal: %v", err)
+	}
+	if portal.Link != "https://qurl.link/at_connector" {
+		t.Fatalf("portal link = %q", portal.Link)
+	}
+	if requestCount.Load() != 2 {
+		t.Fatalf("request count = %d, want 2", requestCount.Load())
+	}
+}
+
+func TestClient_ConnectorResourceNotFound(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/resources" || r.URL.Query().Get("slug") != "missing-dashboard" {
+			t.Fatalf("request = %s %s?%s, want GET /v1/resources?slug=missing-dashboard", r.Method, r.URL.Path, r.URL.RawQuery)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"data":[]}`)
+	}))
+	defer api.Close()
+
+	client, err := NewClient(BearerToken("lv_test_123"), WithBaseURL(api.URL))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	_, err = client.ConnectorResource(context.Background(), "missing-dashboard")
+	if !errors.Is(err, ErrResourceNotFound) {
+		t.Fatalf("ConnectorResource missing: want ErrResourceNotFound, got %v", err)
+	}
+}
+
 func TestClient_CredentialProvider(t *testing.T) {
 	var calls atomic.Int32
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -248,6 +325,9 @@ func TestClient_Validation(t *testing.T) {
 	}
 	if _, err := client.ProtectURL(context.Background(), "ftp://example.com"); !errors.Is(err, ErrInvalidResourceRequest) {
 		t.Fatalf("bad target URL: want ErrInvalidResourceRequest, got %v", err)
+	}
+	if _, err := client.ConnectorResource(context.Background(), " "); !errors.Is(err, ErrInvalidResourceRequest) {
+		t.Fatalf("empty connector id: want ErrInvalidResourceRequest, got %v", err)
 	}
 	if _, err := client.CreatePortal(context.Background(), nil); !errors.Is(err, ErrInvalidPortalRequest) {
 		t.Fatalf("nil resource: want ErrInvalidPortalRequest, got %v", err)

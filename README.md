@@ -72,6 +72,18 @@ That is the core flow:
 | Protect a private URL | `client.ProtectURL` | The target URL you already know |
 | Mint a short-lived access link | `resource.CreatePortal` | The returned resource handle |
 
+If qURL Connector already protects the service, use the connector id instead of
+calling `ProtectURL`:
+
+```go
+resource, err := client.ConnectorResource(ctx, "prod-dashboard")
+if err != nil {
+	return err
+}
+
+portal, err := resource.CreatePortal(ctx, qurl.ValidFor(5*time.Minute))
+```
+
 If you persist the resource id, future calls do not need to recreate the handle:
 
 ```go
