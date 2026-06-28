@@ -3,6 +3,7 @@ package qv2
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 )
 
@@ -97,7 +98,7 @@ func LoadVectorBytes(data []byte) (*VectorFile, error) {
 		return nil, fmt.Errorf("qv2: parse vector file: %w", err)
 	}
 	if len(vf.Vectors) == 0 {
-		return nil, fmt.Errorf("qv2: vector file has no vectors")
+		return nil, errors.New("qv2: vector file has no vectors")
 	}
 	return &vf, nil
 }
