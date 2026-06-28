@@ -74,3 +74,86 @@ func exportedFieldNames(t reflect.Type) []string {
 	}
 	return names
 }
+
+// TestVerifyLinkSurfacesAllClaimFields mints a link with every CreateParams field set,
+// verifies it, and asserts every public Claims field (plus Secret and the verbatim
+// Fragment parts) survived the wrap copy. With the compile-time field-parity guards in
+// facade.go this closes the hand-copy boundary: a wrap that forgets to populate a field
+// fails here instead of silently returning a zero value.
+func TestVerifyLinkSurfacesAllClaimFields(t *testing.T) {
+	signer, err := qurl.GenerateLocalSigner("issuer-key-2026")
+	if err != nil {
+		t.Fatalf("signer: %v", err)
+	}
+	const (
+		relay = "https://relay.example.com"
+		jti   = "qurl_facade_fields"
+		cell  = "edge-cell-7"
+	)
+	var iat, nbf, exp int64 = 1_700_000_000, 1_700_000_001, 1_700_003_600
+
+	link, err := qurl.CreatePortal(context.Background(), signer, qurl.CreateParams{
+		CellPublicKey:     exampleX25519Public(),
+		RelayURL:          relay,
+		ResourcePublicKey: exampleP256SPKI(),
+		CellID:            cell,
+		JTI:               jti,
+		IssuedAt:          iat,
+		NotBefore:         nbf,
+		Expiry:            exp,
+	})
+	if err != nil {
+		t.Fatalf("CreatePortal: %v", err)
+	}
+
+	frag, err := qurl.VerifyLink(link, trustStoreFor(signer))
+	if err != nil {
+		t.Fatalf("VerifyLink: %v", err)
+	}
+	c := frag.Claims
+	if c == nil {
+		t.Fatal("Fragment.Claims is nil")
+	}
+	if c.V == 0 {
+		t.Error("Claims.V not surfaced")
+	}
+	if c.Iss == "" {
+		t.Error("Claims.Iss not surfaced")
+	}
+	if c.Kid != signer.KID() {
+		t.Errorf("Claims.Kid = %q, want %q", c.Kid, signer.KID())
+	}
+	if c.Iat != iat {
+		t.Errorf("Claims.Iat = %d, want %d", c.Iat, iat)
+	}
+	if c.Nbf != nbf {
+		t.Errorf("Claims.Nbf = %d, want %d", c.Nbf, nbf)
+	}
+	if c.Exp != exp {
+		t.Errorf("Claims.Exp = %d, want %d", c.Exp, exp)
+	}
+	if c.Jti != jti {
+		t.Errorf("Claims.Jti = %q, want %q", c.Jti, jti)
+	}
+	if c.CellPublicKeyB64 == "" {
+		t.Error("Claims.CellPublicKeyB64 not surfaced")
+	}
+	if c.CellID != cell {
+		t.Errorf("Claims.CellID = %q, want %q", c.CellID, cell)
+	}
+	if c.RelayURL != relay {
+		t.Errorf("Claims.RelayURL = %q, want %q", c.RelayURL, relay)
+	}
+	if c.ResourcePublicKeyB64 == "" {
+		t.Error("Claims.ResourcePublicKeyB64 not surfaced")
+	}
+	if c.QurlUserPublicKeyB64 == "" {
+		t.Error("Claims.QurlUserPublicKeyB64 not surfaced")
+	}
+	if frag.Secret == nil || frag.Secret.QurlUserPrivateKeyB64 == "" {
+		t.Error("Fragment.Secret.QurlUserPrivateKeyB64 not surfaced")
+	}
+	if frag.ClaimsB64 == "" || frag.SecretB64 == "" || frag.SigB64 == "" {
+		t.Error("Fragment verbatim base64url parts not surfaced")
+	}
+}

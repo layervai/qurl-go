@@ -317,9 +317,10 @@ func wrapSecret(secret *qv2.Secret) *Secret {
 
 // Compile-time guards: the public Claims/Secret structs must stay field-identical to
 // the internal core structs (a struct conversion only compiles when fields match —
-// names, types, order; tags aside), so a field added to the core can't be silently
-// dropped by wrapClaims/wrapSecret — it becomes a build break here instead. Fragment,
-// which has pointer fields, is guarded by a parity test in facade_test.go.
+// names, types, order; tags aside), so a core field change forces a matching change
+// here rather than a silent shape mismatch. That wrapClaims/wrapSecret/wrapFragment
+// actually populate every field is covered by TestVerifyLinkSurfacesAllClaimFields;
+// Fragment's exported-field shape is guarded by TestFragmentExportedFieldsMirrorCore.
 var (
 	_ = qv2.Claims(Claims{})
 	_ = qv2.Secret(Secret{})
