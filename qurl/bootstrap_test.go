@@ -114,6 +114,23 @@ func TestFileAgentState_RejectsGroupReadableState(t *testing.T) {
 	}
 }
 
+func TestFileAgentState_RejectsSymlinkState(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "agent-state.json")
+	link := filepath.Join(dir, "agent-state-link.json")
+	raw := []byte(`{"private_key_b64":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=","public_key_b64":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb="}`)
+	if err := os.WriteFile(target, raw, 0o600); err != nil {
+		t.Fatalf("write state: %v", err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	if _, err := FileAgentState(link).LoadAgentState(context.Background()); !errors.Is(err, ErrInvalidBootstrapConfig) {
+		t.Fatalf("LoadAgentState symlink: want ErrInvalidBootstrapConfig, got %v", err)
+	}
+}
+
 func TestBootstrapAgent_Validation(t *testing.T) {
 	if _, err := BootstrapAgent(context.Background(), "", memoryAgentStateStore{}); !errors.Is(err, ErrInvalidBootstrapConfig) {
 		t.Fatalf("empty key: want ErrInvalidBootstrapConfig, got %v", err)

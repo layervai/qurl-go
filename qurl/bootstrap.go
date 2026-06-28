@@ -44,14 +44,16 @@ type AgentState struct {
 	NHPPeer       *NHPServerPeerInfo `json:"nhp_server_peer,omitempty"`
 }
 
-// AgentStateStore loads and saves the bootstrapped local identity. Implement
-// this with KMS or a secret manager when file-backed state is not appropriate.
+// AgentStateStore loads and saves the bootstrapped local identity. The
+// file-backed store writes plaintext JSON protected by filesystem permissions;
+// implement this with KMS or a secret manager when that is not appropriate.
 type AgentStateStore interface {
 	LoadAgentState(context.Context) (*AgentState, error)
 	SaveAgentState(context.Context, *AgentState) error
 }
 
-// FileAgentState stores bootstrap state in a local JSON file written 0600.
+// FileAgentState stores bootstrap state in a local plaintext JSON file written
+// 0600.
 func FileAgentState(path string) AgentStateStore {
 	return fileAgentStateStore{path: path}
 }

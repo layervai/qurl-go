@@ -2,6 +2,7 @@ package qurl
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,7 @@ import (
 	"os"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -255,7 +257,8 @@ func (c *Client) ResourceByID(id string) *Resource {
 }
 
 // ConnectorResource returns the resource created for connectorID by qURL
-// Connector. Use this when qURL Connector already protects the service; do not
+// Connector. The connector id is the resource slug LayerV stores for that
+// connector. Use this when qURL Connector already protects the service; do not
 // call ProtectURL again for the same service.
 func (c *Client) ConnectorResource(ctx context.Context, connectorID string) (*Resource, error) {
 	if c == nil {
@@ -427,8 +430,9 @@ type portalOptions struct {
 	sessionDuration string
 }
 
-// ValidFor sets how long the qURL link should be valid. If omitted, the LayerV
-// API applies its default lifetime.
+// ValidFor sets how long the qURL link should be valid. The SDK requires at
+// least one minute as a client-side guardrail; the LayerV API remains
+// authoritative for policy. If omitted, the API applies its default lifetime.
 func ValidFor(d time.Duration) PortalOption {
 	return portalOptionFunc(func(o *portalOptions) error {
 		expiresIn, err := formatAPIDuration(d, time.Minute)
@@ -460,9 +464,11 @@ func OneTimeUse() PortalOption {
 	})
 }
 
-// MaxSessions limits concurrent sessions for this qURL link. Use 0 for unlimited
-// sessions; the SDK sends an explicit max_sessions:0, while omitting this option
-// leaves the LayerV server default in effect.
+// MaxSessions limits concurrent sessions for this qURL link. The SDK caps this
+// at 1000 as a client-side guardrail; the LayerV API remains authoritative for
+// policy. Use 0 for unlimited sessions; the SDK sends an explicit
+// max_sessions:0, while omitting this option leaves the server default in
+// effect.
 func MaxSessions(n int) PortalOption {
 	return portalOptionFunc(func(o *portalOptions) error {
 		if n < 0 || n > 1000 {
@@ -474,6 +480,8 @@ func MaxSessions(n int) PortalOption {
 }
 
 // WithSessionDuration sets how long access lasts after someone opens the link.
+// The SDK caps this at 24 hours as a client-side guardrail; the LayerV API
+// remains authoritative for policy.
 func WithSessionDuration(d time.Duration) PortalOption {
 	return portalOptionFunc(func(o *portalOptions) error {
 		if d > 24*time.Hour {
@@ -663,11 +671,7 @@ func applyPortalOptions(opts []PortalOption) (portalOptions, error) {
 }
 
 func validateTargetURL(targetURL string, errKind error) error {
-	return validateHTTPURL(targetURL, "target URL", errKind)
-}
-
-func validateHTTPURL(rawURL, label string, errKind error) error {
-	_, err := parseHTTPURL(rawURL, label, errKind)
+	_, err := parseHTTPURL(targetURL, "target URL", errKind)
 	return err
 }
 
@@ -779,7 +783,12 @@ func doAuthorizedJSON(ctx context.Context, httpClient HTTPDoer, baseURL string, 
 	return nil
 }
 
-func sdkUserAgent() string {
+// sdkUserAgent returns the cached SDK User-Agent header. The value is derived
+// from build info, which is fixed for the process lifetime, so it is computed
+// once rather than on every request.
+var sdkUserAgent = sync.OnceValue(computeSDKUserAgent)
+
+func computeSDKUserAgent() string {
 	const name = "qurl-go-sdk"
 	info, ok := debug.ReadBuildInfo()
 	if !ok {
@@ -859,20 +868,11 @@ func apiErrorFromResponse(status int, body []byte) error {
 	_ = json.Unmarshal(body, &parsed)
 	return &APIError{
 		StatusCode: status,
-		Code:       firstNonEmpty(parsed.Error.Code, parsed.Code),
-		Type:       firstNonEmpty(parsed.Error.Type, parsed.Type),
-		Title:      firstNonEmpty(parsed.Error.Title, parsed.Title),
-		Detail:     firstNonEmpty(parsed.Error.Detail, parsed.Detail, parsed.Error.Message, parsed.Message),
+		Code:       cmp.Or(parsed.Error.Code, parsed.Code),
+		Type:       cmp.Or(parsed.Error.Type, parsed.Type),
+		Title:      cmp.Or(parsed.Error.Title, parsed.Title),
+		Detail:     cmp.Or(parsed.Error.Detail, parsed.Detail, parsed.Error.Message, parsed.Message),
 	}
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, v := range values {
-		if v != "" {
-			return v
-		}
-	}
-	return ""
 }
 
 func formatAPIDuration(d time.Duration, minDuration time.Duration) (string, error) {
