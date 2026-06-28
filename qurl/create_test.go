@@ -14,7 +14,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/layervai/qurl-go/qv2"
+	"github.com/layervai/qurl-go/internal/qv2"
 	"github.com/layervai/qurl-go/relayknock"
 )
 

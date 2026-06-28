@@ -9,22 +9,22 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/layervai/qurl-go/qv2"
+	"github.com/layervai/qurl-go/internal/qv2"
 )
 
 // CreatePortal is the issuer-side mint verb: the inverse of EnterPortal. Where
 // EnterPortal opens an existing qURL link, CreatePortal produces one — it
-// assembles and signs the qURL v2 claims, generates the fresh per-qURL keypair
+// assembles and signs the qURL claims, generates the fresh per-qURL keypair
 // whose secret rides in the fragment, and returns the
-// https://qurl.link/#qv2.<claims>.<secret>.<sig> link. (The package doc lives in
+// https://qurl.link/#<claims>.<secret>.<sig> link. (The package doc lives in
 // portal.go; this is the mint half of the same qurl entry surface.)
 //
 // The issuer signing key is never held here directly: signing goes through the
-// qv2.Signer seam (KMS in production, qv2.LocalSigner for tests / self-custody
+// qurl.Signer seam (KMS in production, qurl.LocalSigner for tests / self-custody
 // integrations), so this verb has no AWS dependency and the credential-provider
 // follow-up can supply a real KMS signer without touching this code. The signed
-// claims bytes are handed verbatim to qv2.BuildFragment, so the bytes the issuer
-// signs are exactly the bytes a verifier (qv2.ParseAndVerify / EnterPortal)
+// claims bytes are handed verbatim to the fragment builder, so the bytes the issuer
+// signs are exactly the bytes a verifier (qurl.VerifyLink / EnterPortal)
 // checks — mint and enter are symmetric by construction.
 
 // LinkBaseURL is the canonical qURL link origin CreatePortal prepends to the
@@ -34,18 +34,18 @@ const LinkBaseURL = "https://qurl.link/"
 
 // b64url is the single pinned qURL wire encoding (unpadded base64url). The secret
 // part (Part 2) is assembled here with the stdlib encoder rather than widening the
-// qv2 public surface; RawURLEncoding's output is byte-identical to qv2's internal
+// public surface; RawURLEncoding's output is byte-identical to the core's internal
 // encoder. BuildFragment validates only the OUTER Part-2 envelope (it decodes the
 // base64url blob; it does not re-run the secret schema), so the inner
 // qurl_user_private_key_b64 field is kept symmetric with the verify side by the
-// shared qv2.Secret struct (the field name cannot drift without a compile break)
+// shared Secret struct (the field name cannot drift without a compile break)
 // and by the create→verify round-trip test, not by a BuildFragment re-check.
-// Owning the Part-2 codec in one qv2 place (mirroring parseSecret) is deferred —
+// Owning the Part-2 codec in one core place (mirroring parseSecret) is deferred —
 // see qurl-go#6.
 var b64url = base64.RawURLEncoding
 
 // CreateParams are the issuer-supplied inputs to a mint. The verb owns everything
-// a caller must NOT choose: the version and issuer (pinned by qv2), the kid
+// a caller must NOT choose: the version and issuer (pinned by the core), the kid
 // (stamped from the signer), the issuer signature, and the per-qURL keypair
 // (freshly generated each call). A caller supplies only the bindings and the
 // signed validity window.
@@ -81,21 +81,21 @@ type CreateParams struct {
 
 // ErrInvalidCreateParams is returned when CreateParams is missing a required
 // binding before any signing is attempted. Claim-shape faults (key length, time
-// ordering, ...) surface from qv2.SignClaims as wrapped qv2.ErrStrictParse, so a
+// ordering, ...) surface from the signer as wrapped qurl.ErrStrictParse, so a
 // caller can match the strict-parse contract directly.
 var ErrInvalidCreateParams = errors.New("qurl: invalid CreatePortal params")
 
-// CreatePortal mints a qURL v2 link. It generates a fresh per-qURL X25519 keypair
+// CreatePortal mints a qURL link. It generates a fresh per-qURL X25519 keypair
 // (the private half becomes the fragment secret, the public half is bound into
 // the signed claims), assembles the claims, signs them through the issuer Signer
-// seam, and returns the full https://qurl.link/#qv2.<claims>.<secret>.<sig> link.
+// seam, and returns the full https://qurl.link/#<claims>.<secret>.<sig> link.
 //
 // Symmetry guarantee: the returned link parses and verifies under
-// qv2.ParseAndVerify / qv2.FragmentFromLinkAndVerify / EnterPortalWith against a
+// qurl.VerifyLink / EnterPortalWith against a
 // trust store holding the signer's public key. CreatePortal validates the claims
 // through the same strict parser those verifiers use BEFORE signing, so a mint
 // that would not verify fails here instead of emitting a bad link.
-func CreatePortal(ctx context.Context, signer qv2.Signer, p CreateParams) (string, error) {
+func CreatePortal(ctx context.Context, signer Signer, p CreateParams) (string, error) {
 	if signer == nil {
 		return "", fmt.Errorf("%w: signer must not be nil", ErrInvalidCreateParams)
 	}
@@ -129,9 +129,9 @@ func CreatePortal(ctx context.Context, signer qv2.Signer, p CreateParams) (strin
 	// signer kid, strict-validates the bytes, and returns the canonical Part-1
 	// string alongside the raw 64-byte low-S signature.
 	//
-	// qv2 errors from SignClaims and BuildFragment below are returned VERBATIM (no
-	// qurl: wrap) so callers keep matching the qv2 sentinels directly —
-	// errors.Is(err, qv2.ErrStrictParse) for an invalid claim window/shape, etc. The
+	// core errors from SignClaims and BuildFragment below are returned VERBATIM (no
+	// qurl: wrap) so callers keep matching the error sentinels directly —
+	// errors.Is(err, qurl.ErrStrictParse) for an invalid claim window/shape, etc. The
 	// keygen/secret errors above carry no such sentinel, so those are qurl:-wrapped.
 	claimsB64, rawSig, err := qv2.SignClaims(ctx, signer, claims)
 	if err != nil {
@@ -159,8 +159,8 @@ func CreatePortal(ctx context.Context, signer qv2.Signer, p CreateParams) (strin
 // presence checks cover all required inputs, including the three time fields
 // (a zero Unix second is treated as "omitted"). The DEEP value rules — key
 // lengths, version pin, the iat<=exp / nbf<=exp ordering bounds — are left to
-// qv2.SignClaims's strict-parse-before-sign, which surfaces them as
-// qv2.ErrStrictParse; validate deliberately does not duplicate them.
+// the signer's strict-parse-before-sign, which surfaces them as
+// qurl.ErrStrictParse; validate deliberately does not duplicate them.
 func (p CreateParams) validate() error {
 	if len(p.CellPublicKey) == 0 {
 		return fmt.Errorf("%w: CellPublicKey is required", ErrInvalidCreateParams)
@@ -193,7 +193,7 @@ func (p CreateParams) validate() error {
 // buildSecretB64 assembles fragment Part 2: base64url of the JSON
 // {"qurl_user_private_key_b64":"<32-byte key>"}. Part 2 is base64url-encoded JSON,
 // not the raw key bytes, mirroring exactly what the verify path's secret parser
-// (qv2 parseSecret) consumes.
+// (the secret parser) consumes.
 func buildSecretB64(privateKey []byte) (string, error) {
 	raw, err := json.Marshal(qv2.Secret{QurlUserPrivateKeyB64: b64url.EncodeToString(privateKey)})
 	if err != nil {

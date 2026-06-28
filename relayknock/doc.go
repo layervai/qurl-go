@@ -1,24 +1,25 @@
-// Package relayknock is a dependency-light, clean-room Go implementation of the
-// generic NHP relay-knock wire profile: an NHP Noise knock (X25519 /
+// Package relayknock is the low-level NHP relay-knock layer of the qURL Go SDK.
+// Most users do not import it directly — the qurl package drives it as part of
+// EnterPortal; reach for relayknock only to perform a raw NHP knock outside the
+// qURL flow.
+//
+// It is a dependency-light, clean-room Go implementation of the generic NHP
+// relay-knock wire profile: an NHP Noise knock (X25519 /
 // AES-256-GCM / BLAKE2s) carried as a binary POST {relayBaseURL}/relay/{serverId}
 // to an internet-facing NHP relay, which forwards it to a now-private NHP server.
-// The server authorizes, opens access to the protected resource for the caller IP,
-// and replies with an NHP_ACK whose body the caller decrypts.
+// The server authorizes, opens access for the caller IP, and replies with an
+// NHP_ACK whose body the caller decrypts.
 //
-// It is a port of the browser JS NHP agent's crypto/handshake code and a
-// clean-room smoke client. The wire format is fenced byte-for-byte by the golden
-// vectors in knock_golden_test.go, which come from the browser agent's
-// cross-language fixtures (themselves pinned to the reference NHP relay server
-// output). If this port reproduces those bytes, it is wire-compatible with the
-// deployed server by construction.
+// The wire format is fenced byte-for-byte by the golden vectors in
+// knock_golden_test.go, which are shared with the other NHP implementations. If this
+// package reproduces those bytes, it is wire-compatible with the deployed relay by
+// construction.
 //
 // # Dependency policy
 //
 // The only non-stdlib dependency is golang.org/x/crypto (curve25519, blake2s).
-// This package MUST NOT import the full NHP core module, which would drag
-// gin/grpc/quic/etcd/mongo/wazero into the module graph. Every constant and
-// offset is pinned to the reference server wire format via the browser agent and
-// fenced by the golden vectors.
+// Keeping the full server stack out of this package keeps the SDK small; every
+// constant and offset is pinned by the golden vectors instead.
 //
 // # Scope
 //
@@ -32,6 +33,5 @@
 //
 // The NHP server opens access for the source IP of the relay POST. The knock
 // and the subsequent resource request MUST therefore share an egress IP, or the
-// resource request will be dropped, because access was opened for a different
-// source address.
+// resource request will hit a server that opened access for a different address.
 package relayknock

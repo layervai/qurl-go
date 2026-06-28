@@ -13,17 +13,17 @@ import (
 	"sync"
 	"time"
 
-	"github.com/layervai/qurl-go/qv2"
+	"github.com/layervai/qurl-go/internal/qv2"
 )
 
 // Discovery-manifest credential provider.
 //
 // A DiscoveryProvider fetches a NON-SECRET published trust manifest carrying the
 // issuer trust anchors (kid -> P-256 public key), the relay allowlist, an expiry,
-// and a monotonic version, then turns it into the *qv2.TrustStore / *qv2.RelayAllowlist
+// and a monotonic version, then turns it into the *qurl.TrustStore / *qurl.RelayAllowlist
 // EnterPortal needs. "Non-secret" does NOT mean "blindly trusted": a manifest is
 // authenticated before use by a configured PIN (sha256 of the exact bytes) or a
-// detached ISSUER SIGNATURE (qv2.VerifyManifestSignature, a SEPARATE signing domain
+// detached ISSUER SIGNATURE (the manifest-signature verifier, a SEPARATE signing domain
 // from qURL claims). It FAILS CLOSED on every doubt — unverifiable, expired,
 // downgraded (older version than last accepted), missing a trust mode, or carrying an
 // empty/invalid anchor set or allowlist all return an error, never a partial result.
@@ -38,7 +38,7 @@ import (
 // exists in the org yet) and may change to match #13.
 
 // ManifestEnvelope is the fetched discovery document. The signed/pinned MANIFEST
-// itself is carried as opaque base64url (ManifestB64) — exactly like a qv2 fragment
+// itself is carried as opaque base64url (ManifestB64) — exactly like a qURL link fragment
 // keeps ClaimsB64 verbatim — so the bytes that are pinned/verified are the bytes that
 // are parsed, with zero re-serialization in between. SigB64 / Kid are present only on
 // the SIGNED path and are NOT covered by the signature (a detached signature over the
@@ -110,7 +110,7 @@ type DiscoveryConfig struct {
 
 	// ManifestKeys are the manifest-signing public keys (kid -> P-256 public key) for
 	// the SIGNED trust mode. When non-empty, a manifest carrying a SigB64/Kid is
-	// verified with qv2.VerifyManifestSignature against the key for that kid. Leave nil
+	// verified with the manifest-signature verifier against the key for that kid. Leave nil
 	// to disable the signed mode.
 	ManifestKeys map[string]*ecdsa.PublicKey
 
@@ -146,9 +146,9 @@ type DiscoveryConfig struct {
 	ExpectedProfile string
 
 	// Now overrides the clock for expiry checks. Tests inject a fixed clock for
-	// determinism; production leaves it nil (time.Now). The qv2 crypto core is
+	// determinism; production leaves it nil (time.Now). The crypto core is
 	// deliberately clock-free, but staleness/expiry is THIS layer's job, so the clock
-	// lives here, not in qv2.
+	// lives here, not in the core.
 	Now func() time.Time
 }
 
@@ -255,7 +255,7 @@ func NewDiscoveryProvider(cfg DiscoveryConfig) (*DiscoveryProvider, error) {
 	// authenticate/verifyManifestSig read on every Resolve. cfg is otherwise stored by
 	// value; PinSHA256 (slice) and ManifestKeys (map) are the reference fields that would
 	// otherwise alias the caller's data. The map copy is shallow — the values are
-	// *ecdsa.PublicKey for keys never mutated in place (qv2.NewTrustStore copies its map
+	// *ecdsa.PublicKey for keys never mutated in place (qurl.NewTrustStore copies its map
 	// the same way), so copying the map structure is the right depth and makes the
 	// provider's documented immutability real rather than conventional. Both helpers map
 	// nil to nil, preserving "no pin"/"no signing keys".
@@ -273,7 +273,7 @@ func NewDiscoveryProvider(cfg DiscoveryConfig) (*DiscoveryProvider, error) {
 // installed the nil *DiscoveryProvider) fails closed with ErrNotConfigured rather than
 // panicking on the p.cfg field read — the same fail-closed footgun guard StaticProvider
 // has.
-func (p *DiscoveryProvider) Resolve(ctx context.Context) (*qv2.TrustStore, *qv2.RelayAllowlist, error) {
+func (p *DiscoveryProvider) Resolve(ctx context.Context) (*TrustStore, *RelayAllowlist, error) {
 	if p == nil {
 		return nil, nil, ErrNotConfigured
 	}
@@ -400,7 +400,7 @@ func (p *DiscoveryProvider) authenticate(env *ManifestEnvelope, manifestBytes []
 // otherwise a pin-valid, freshly-signed manifest under a not-yet-distributed kid is
 // rejected here. This is a separate rotation from issuer-anchor (claims-signing) kid
 // rotation, which lives inside the manifest's issuer set and is covered by
-// qv2/rotation_test.go.
+// the core/rotation_test.go.
 func (p *DiscoveryProvider) verifyManifestSig(env *ManifestEnvelope, manifestBytes []byte) error {
 	if env.Kid == "" {
 		return fmt.Errorf("%w: signed manifest is missing its kid", ErrManifestSchema)
@@ -428,10 +428,10 @@ func (p *DiscoveryProvider) now() time.Time {
 
 // strictDecodeJSON decodes raw into v rejecting unknown fields AND trailing data after
 // the top-level JSON object (a second concatenated value a lenient parser would ignore).
-// It is the same strictness qv2's typed-unmarshal pass applies (qv2/parse.go
+// It is the same strictness the core's typed-unmarshal pass applies (the parser
 // strictUnmarshal): DisallowUnknownFields + a dec.More() trailing-data check. It does
-// NOT do qv2's full token-walk (duplicate-key / null rejection) — that heavier guard
-// stays in qv2 because the manifest bytes here are already authenticated by the
+// NOT do the core's full token-walk (duplicate-key / null rejection) — that heavier guard
+// stays in the core because the manifest bytes here are already authenticated by the
 // pin/signature, so only the legitimate signer can produce the bytes being parsed.
 func strictDecodeJSON(raw []byte, v any) error {
 	dec := json.NewDecoder(bytes.NewReader(raw))
@@ -470,8 +470,8 @@ func decodeEnvelope(raw []byte) (*ManifestEnvelope, []byte, error) {
 
 // parseManifest strict-parses the decoded manifest bytes via strictDecodeJSON: an
 // unknown field or trailing data after the object fails closed rather than being
-// silently ignored. (Duplicate-key/null rejection — qv2's heavier token-walk — is left
-// to qv2 since these bytes are already pin/signature-authenticated; see strictDecodeJSON.)
+// silently ignored. (Duplicate-key/null rejection — the core's heavier token-walk — is left
+// to the core since these bytes are already pin/signature-authenticated; see strictDecodeJSON.)
 func parseManifest(manifestBytes []byte) (*Manifest, error) {
 	var m Manifest
 	if err := strictDecodeJSON(manifestBytes, &m); err != nil {
@@ -513,11 +513,11 @@ func parseManifest(manifestBytes []byte) (*Manifest, error) {
 	return &m, nil
 }
 
-// buildTrustMaterial turns an authenticated, in-window manifest into the qv2 trust
+// buildTrustMaterial turns an authenticated, in-window manifest into the the trust
 // store and relay allowlist. It defers issuer-key parsing (and the empty-anchor-set
-// rejection) to qv2.NewTrustStoreFromDER, reusing its fail-closed construction rather
+// rejection) to qurl.NewTrustStoreFromDER, reusing its fail-closed construction rather
 // than re-validating here. The relay allowlist's emptiness is already gated upstream in
-// parseManifest (an empty relay_allowlist is a schema fault), so qv2.NewRelayAllowlist
+// parseManifest (an empty relay_allowlist is a schema fault), so qurl.NewRelayAllowlist
 // only needs to index the entries.
 func buildTrustMaterial(m *Manifest) (*qv2.TrustStore, *qv2.RelayAllowlist, error) {
 	derByKID := make(map[string][]byte, len(m.Issuers))

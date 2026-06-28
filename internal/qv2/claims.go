@@ -1,6 +1,11 @@
-// Package qv2 implements the qURL v2 keyed-identity wire format and
-// issuer-signature crypto per the qURL v2 keyed-identity design (the "qURL v2
-// Artifact" and "Key Lifecycle → Issuer signing key" sections).
+// Package qv2 is the cryptographic core of the qURL Go SDK: it verifies incoming
+// qURL v2 links and mints new ones. Most users reach it through the higher-level
+// qurl package and import qv2 directly only for its primitives — the strict parser,
+// issuer-signature sign/verify, the published-key trust store, the Signer seam, and
+// post-verify relay_url validation.
+//
+// It implements the qURL v2 keyed-identity wire format and issuer-signature crypto
+// per the public qURL v2 keyed-identity design.
 //
 // This is the security core for a qURL link (#qv2.<claims>.<secret>.<sig>): a
 // strict allowlist parser, the issuer signing input + raw r||s low-S signature
@@ -172,22 +177,22 @@ var (
 // on message text.
 var (
 	// ErrEncoding is returned when a part is not valid unpadded base64url.
-	ErrEncoding = errors.New("qv2: value is not valid unpadded base64url")
+	ErrEncoding = errors.New("qurl: value is not valid unpadded base64url")
 	// ErrStrictParse is returned for any strict-schema violation (duplicate key,
 	// unknown field, missing required field, null, wrong type, array-for-scalar,
 	// non-integer or out-of-range time, etc.).
-	ErrStrictParse = errors.New("qv2: strict parse failed")
+	ErrStrictParse = errors.New("qurl: strict parse failed")
 	// ErrKeyLength is returned when a decoded key field is not its expected size.
-	ErrKeyLength = errors.New("qv2: key field has unexpected length")
+	ErrKeyLength = errors.New("qurl: key field has unexpected length")
 	// ErrFragment is returned when the fragment shape is invalid (wrong prefix,
 	// wrong part count, empty part).
-	ErrFragment = errors.New("qv2: invalid fragment")
+	ErrFragment = errors.New("qurl: invalid fragment")
 	// ErrSignature is returned when issuer-signature verification fails.
-	ErrSignature = errors.New("qv2: issuer signature verification failed")
+	ErrSignature = errors.New("qurl: issuer signature verification failed")
 	// ErrRelayURL is returned when relay_url is not HTTPS or not on the allowlist.
-	ErrRelayURL = errors.New("qv2: relay_url rejected")
+	ErrRelayURL = errors.New("qurl: relay_url rejected")
 	// ErrUnknownKID is returned when a claim's kid is not in the trust store.
-	ErrUnknownKID = errors.New("qv2: unknown issuer kid")
+	ErrUnknownKID = errors.New("qurl: unknown issuer kid")
 )
 
 // encodeB64 encodes raw bytes as unpadded base64url — the single pinned wire

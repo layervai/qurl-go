@@ -1,10 +1,15 @@
-// Package qurl is the top-level entry point of the qURL Go SDK: the locked
-// EnterPortal verb that opens a qURL link.
+// Package qurl is the top-level entry point of the qURL Go SDK. It provides the two
+// verbs most integrations need: CreatePortal mints a signed, expiring qURL link on
+// the issuer side, and EnterPortal performs the opener flow for a received link.
 //
-// EnterPortal stitches the two lower layers together in the exact order the qURL
-// v2 keyed-identity design ("Browser and Headless Flow") mandates:
+// Applications normally install deployment trust anchors and the relay allowlist once
+// through a Provider, then call EnterPortal with no per-call trust config. Minting and
+// local verification work offline; a live open also requires the deployment's qURL v2
+// admission service to accept the knock.
 //
-//  1. Parse the #qv2.<claims>.<secret>.<sig> fragment.
+// EnterPortal stitches the two lower layers together in the protocol order:
+//
+//  1. Parse the #<claims>.<secret>.<sig> fragment.
 //  2. Verify the issuer signature locally (REQUIRED — not optional for a
 //     first-party client) against the issuer trust store.
 //  3. Validate relay_url (HTTPS + allowlist) — ONLY after the signature verifies,
@@ -27,7 +32,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/layervai/qurl-go/qv2"
+	"github.com/layervai/qurl-go/internal/qv2"
 	"github.com/layervai/qurl-go/relayknock"
 )
 
@@ -37,10 +42,10 @@ import (
 // allowlist rejects every relay_url), so a misconfigured caller cannot resolve.
 type Config struct {
 	// TrustStore resolves a claim's kid to the issuer public key. REQUIRED.
-	TrustStore *qv2.TrustStore
+	TrustStore *TrustStore
 	// RelayAllowlist is the set of relay host[:port] origins a verified relay_url
 	// may target. REQUIRED.
-	RelayAllowlist *qv2.RelayAllowlist
+	RelayAllowlist *RelayAllowlist
 	// HTTPClient is the client used for the relay POST. Optional; nil uses the
 	// default client. Pin this to a fixed egress when the knock and the subsequent
 	// resource request must share a source IP (see ResourceHandle).
@@ -51,20 +56,20 @@ type Config struct {
 // can inject a fixed-egress or test client.
 type HTTPDoer = relayknock.HTTPDoer
 
-// ResourceHandle is the result of a successful EnterPortal: the now-reachable
-// resource plus the facts a caller needs to actually use it.
+// ResourceHandle is the result of a successful EnterPortal: the resource URL returned
+// after admission plus the facts a caller needs to actually use it.
 //
 // Same-egress-IP invariant: the NHP server opened access for the SOURCE IP of the
 // relay POST. Any request the caller now makes to RedirectURL MUST egress from that
-// same IP, or it will be dropped, because access was opened for a different source
-// address. Behind a rotating-egress NAT/proxy pool, pin the EnterPortal HTTPClient
-// and the resource request to the same exit.
+// same IP, or it will arrive at a server that opened access for a different
+// address. Behind a rotating-egress NAT/proxy pool, pin the
+// EnterPortal HTTPClient and the resource request to the same exit.
 type ResourceHandle struct {
 	// RedirectURL is the reachable resource location the server returned in the
 	// authorized NHP_ACK (the qurl.site URL). Empty only if the server omitted it.
 	RedirectURL string
-	// OpenSeconds is how long access stays open for this admission, as reported by
-	// the server (0 when not provided).
+	// OpenSeconds is how long access stays open for this admission,
+	// as reported by the server (0 when not provided).
 	OpenSeconds uint32
 }
 
@@ -72,24 +77,20 @@ type ResourceHandle struct {
 // store or relay allowlist (the fail-closed default).
 var ErrNotConfigured = errors.New("qurl: EnterPortal requires a trust store and relay allowlist")
 
-// EnterPortal opens a qURL link end to end using the process-wide default
-// credential provider (SetDefaultProvider). It is the locked, single-argument entry
-// verb: a deployment installs its trust anchors / relay allowlist once at startup
-// and then opens any link with no per-call config.
+// EnterPortal opens a qURL link using the process-wide default credential provider
+// (SetDefaultProvider). It is the locked, single-argument entry verb: a deployment
+// installs its trust anchors / relay allowlist once at startup and then opens links
+// with no per-call trust config.
 //
 // It resolves the provider for the trust anchors and relay allowlist, then delegates
 // to EnterPortalWith — so the provider only SUPPLIES the trust material; the real
 // verify + post-verify relay-allowlist enforcement is EnterPortalWith's, unchanged.
 //
-// PROVISIONAL: the qURL v2 server-side admission contract is Proposed in the
-// qURL v2 keyed-identity design and not yet deployed, and the production issuer
-// trust anchors / relay allowlist for the qv2 path are not yet published. Until a
-// deployment installs a provider (SetDefaultProvider), EnterPortal fails closed
-// with ErrNotConfigured — the verb, the wire construction, and every pure step
-// (parse → verify → derive serverId → assemble packet) are ready and tested, so
-// turning the live path on is a provider turn-up, not an SDK change. Tests and
-// early integrators inject anchors via a StaticProvider / DiscoveryProvider, or
-// call EnterPortalWith directly.
+// Without an installed provider, EnterPortal fails closed with ErrNotConfigured.
+// The SDK implements the local security checks and the core knock construction; completing
+// a live open also requires the deployment's qURL v2 admission service to be online.
+// Tests and controlled integrations can inject anchors via a StaticProvider /
+// DiscoveryProvider, or call EnterPortalWith directly.
 func EnterPortal(ctx context.Context, qurlLink string) (*ResourceHandle, error) {
 	cfg, err := resolveDefaultConfig(ctx)
 	if err != nil {
@@ -141,7 +142,7 @@ func EnterPortalWith(ctx context.Context, qurlLink string, cfg Config) (*Resourc
 	}
 
 	// 6. One-shot relay knock using the in-link per-qURL key. The caller's egress
-	// IP is the one the server admits (see ResourceHandle).
+	// IP is the one the server opens access for (see ResourceHandle).
 	reply, err := relayknock.Knock(ctx, claims.RelayURL, cellPub, body, relayknock.KnockOptions{
 		HTTPClient:       cfg.HTTPClient,
 		DeviceStaticPriv: devicePriv,
@@ -182,7 +183,7 @@ func interpretReply(reply *relayknock.Reply) (*ResourceHandle, error) {
 
 // resolveDefaultConfig builds the EnterPortal Config from the process-wide default
 // provider. With no provider installed it fails closed with ErrNotConfigured (the
-// production qv2 issuer trust anchors / relay allowlist are not yet published, so an
+// production issuer trust anchors / relay allowlist are not yet published, so an
 // un-configured process must refuse rather than trust anything). With a provider
 // installed it resolves the trust anchors + relay allowlist; a provider that itself
 // fails closed (stale/unverifiable discovery manifest, missing anchors) propagates
