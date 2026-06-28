@@ -89,6 +89,9 @@ func (s fileAgentStateStore) SaveAgentState(_ context.Context, state *AgentState
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("qurl: create agent state dir: %w", err)
 	}
+	if err := validatePrivateStateDir(dir, "agent state", ErrInvalidBootstrapConfig, ErrInsecureAgentStatePermissions); err != nil {
+		return err
+	}
 	tmp, err := os.CreateTemp(dir, ".qurl-agent-state-*")
 	if err != nil {
 		return fmt.Errorf("qurl: create temp agent state: %w", err)
@@ -104,6 +107,10 @@ func (s fileAgentStateStore) SaveAgentState(_ context.Context, state *AgentState
 	if err := tmp.Chmod(0o600); err != nil {
 		_ = tmp.Close()
 		return fmt.Errorf("qurl: chmod temp agent state: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("qurl: sync temp agent state: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("qurl: close temp agent state: %w", err)

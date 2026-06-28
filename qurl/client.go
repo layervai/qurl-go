@@ -291,7 +291,10 @@ func (c *Client) ConnectorResource(ctx context.Context, connectorID string) (*Re
 	if len(env.Data) > 1 {
 		return nil, fmt.Errorf("%w: connector %q returned %d resources", ErrAmbiguousResource, connectorID, len(env.Data))
 	}
-	resource := env.Data[0].resource()
+	resource, err := env.Data[0].resource()
+	if err != nil {
+		return nil, err
+	}
 	resource.client = c
 	return resource, nil
 }
@@ -395,7 +398,10 @@ func (c *Client) ProtectURL(ctx context.Context, targetURL string, opts ...Resou
 	if err := c.doJSON(ctx, http.MethodPost, "/v1/resources", reqBody, &env); err != nil {
 		return nil, err
 	}
-	resource := env.Data.resource()
+	resource, err := env.Data.resource()
+	if err != nil {
+		return nil, err
+	}
 	resource.client = c
 	return resource, nil
 }
@@ -515,6 +521,9 @@ func (c *Client) CreatePortal(ctx context.Context, resource *Resource, opts ...P
 	if resource == nil {
 		return nil, fmt.Errorf("%w: resource must not be nil", ErrInvalidPortalRequest)
 	}
+	if resource.client != nil && resource.client != c {
+		return nil, fmt.Errorf("%w: resource is bound to a different client", ErrInvalidPortalRequest)
+	}
 	if strings.TrimSpace(resource.ID) == "" {
 		return nil, fmt.Errorf("%w: resource id must not be empty", ErrInvalidPortalRequest)
 	}
@@ -528,7 +537,7 @@ func (c *Client) CreatePortal(ctx context.Context, resource *Resource, opts ...P
 	if err := c.doJSON(ctx, http.MethodPost, path, reqBody, &env); err != nil {
 		return nil, err
 	}
-	return env.Data.portal(), nil
+	return env.Data.portal()
 }
 
 // CreatePortal asks LayerV to mint a qURL link for this resource.
@@ -563,7 +572,10 @@ func (c *Client) CreatePortalForURL(ctx context.Context, targetURL string, opts 
 	if err := c.doJSON(ctx, http.MethodPost, "/v1/qurls", reqBody, &env); err != nil {
 		return nil, nil, err
 	}
-	portal := env.Data.portal()
+	portal, err := env.Data.portal()
+	if err != nil {
+		return nil, nil, err
+	}
 	resource := &Resource{
 		client:    c,
 		ID:        portal.ResourceID,
@@ -593,7 +605,10 @@ type createResourceResponse struct {
 	ExpiresAt    *time.Time `json:"expires_at"`
 }
 
-func (r createResourceResponse) resource() *Resource {
+func (r createResourceResponse) resource() (*Resource, error) {
+	if strings.TrimSpace(r.ID) == "" {
+		return nil, fmt.Errorf("qurl: invalid API response: missing resource_id")
+	}
 	return &Resource{
 		ID:           r.ID,
 		TargetURL:    r.TargetURL,
@@ -605,7 +620,7 @@ func (r createResourceResponse) resource() *Resource {
 		QURLCount:    r.QURLCount,
 		CreatedAt:    r.CreatedAt,
 		ExpiresAt:    r.ExpiresAt,
-	}
+	}, nil
 }
 
 type createPortalRequest struct {
@@ -630,7 +645,13 @@ type createPortalResponse struct {
 	Label      string     `json:"label"`
 }
 
-func (r createPortalResponse) portal() *Portal {
+func (r createPortalResponse) portal() (*Portal, error) {
+	if strings.TrimSpace(r.ResourceID) == "" {
+		return nil, fmt.Errorf("qurl: invalid API response: missing resource_id")
+	}
+	if strings.TrimSpace(r.QURLLink) == "" {
+		return nil, fmt.Errorf("qurl: invalid API response: missing qurl_link")
+	}
 	return &Portal{
 		ResourceID: r.ResourceID,
 		Link:       r.QURLLink,
@@ -638,7 +659,7 @@ func (r createPortalResponse) portal() *Portal {
 		ExpiresAt:  r.ExpiresAt,
 		QURLID:     r.QURLID,
 		Label:      r.Label,
-	}
+	}, nil
 }
 
 type apiEnvelope[T any] struct {

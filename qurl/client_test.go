@@ -158,6 +158,22 @@ func TestClient_ResourceByIDCreatePortal(t *testing.T) {
 	}
 }
 
+func TestClient_CreatePortalRejectsResourceFromDifferentClient(t *testing.T) {
+	clientA, err := NewClient(BearerToken("lv_test_a"), WithBaseURL("https://api-a.example.com"))
+	if err != nil {
+		t.Fatalf("NewClient A: %v", err)
+	}
+	clientB, err := NewClient(BearerToken("lv_test_b"), WithBaseURL("https://api-b.example.com"))
+	if err != nil {
+		t.Fatalf("NewClient B: %v", err)
+	}
+
+	_, err = clientA.CreatePortal(context.Background(), clientB.ResourceByID("r_demo12345"))
+	if !errors.Is(err, ErrInvalidPortalRequest) {
+		t.Fatalf("CreatePortal with foreign resource: want ErrInvalidPortalRequest, got %v", err)
+	}
+}
+
 func TestClient_CreatePortalSendsExplicitZeroMaxSessions(t *testing.T) {
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/v1/resources/r_demo1234567/qurls" {
@@ -498,6 +514,69 @@ func TestClient_EmptySuccessBodyFailsClosed(t *testing.T) {
 	_, err = client.ProtectURL(context.Background(), "https://example.com")
 	if err == nil || !strings.Contains(err.Error(), "empty API response body") {
 		t.Fatalf("ProtectURL empty response: want empty body error, got %v", err)
+	}
+}
+
+func TestClient_IncompleteResourceSuccessFailsClosed(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"data":{"target_url":"https://example.com","status":"active"}}`)
+	}))
+	defer api.Close()
+
+	client, err := NewClient(BearerToken("lv_test"), WithBaseURL(api.URL))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	_, err = client.ProtectURL(context.Background(), "https://example.com")
+	if err == nil || !strings.Contains(err.Error(), "missing resource_id") {
+		t.Fatalf("ProtectURL incomplete response: want missing resource_id error, got %v", err)
+	}
+}
+
+func TestClient_IncompletePortalSuccessFailsClosed(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		run  func(context.Context, *Client) error
+		want string
+	}{
+		{
+			name: "missing portal link",
+			body: `{"data":{"resource_id":"r_demo12345"}}`,
+			run: func(ctx context.Context, client *Client) error {
+				_, err := client.CreatePortal(ctx, &Resource{ID: "r_demo12345"}, ValidFor(5*time.Minute))
+				return err
+			},
+			want: "missing qurl_link",
+		},
+		{
+			name: "missing resource id",
+			body: `{"data":{"qurl_link":"https://qurl.link/at_demo"}}`,
+			run: func(ctx context.Context, client *Client) error {
+				_, _, err := client.CreatePortalForURL(ctx, "https://example.com", ValidFor(5*time.Minute))
+				return err
+			},
+			want: "missing resource_id",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprint(w, tt.body)
+			}))
+			defer api.Close()
+
+			client, err := NewClient(BearerToken("lv_test"), WithBaseURL(api.URL))
+			if err != nil {
+				t.Fatalf("NewClient: %v", err)
+			}
+			err = tt.run(context.Background(), client)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("incomplete portal response: want %q error, got %v", tt.want, err)
+			}
+		})
 	}
 }
 

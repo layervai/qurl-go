@@ -29,13 +29,14 @@ const defaultFetchTimeout = 30 * time.Second
 // shared package-level client (instead of one per Fetch) keeps the connection pool
 // warm and covers both the constructor-nil and struct-literal-nil paths.
 //
-// CheckRedirect refuses redirects outright. The construction-time https guard only
-// covers the FIRST hop, so a 3xx from the configured manifest URL to
-// http:// or an internal host would otherwise be followed and silently defeat that
-// guard. Trust is anchored on the pin/signature, so following a redirect can never
-// admit a bad manifest — but refusing one keeps the transport posture honest and
-// avoids surprising cross-origin fetches. An application that genuinely needs a CDN
-// hop injects its own Client with a redirect policy it controls.
+// CheckRedirect returns the redirect response instead of following it. The
+// construction-time https guard only covers the FIRST hop, so a 3xx from the
+// configured manifest URL to http:// or an internal host would otherwise be
+// followed and silently defeat that guard. Trust is anchored on the pin/signature,
+// so following a redirect can never admit a bad manifest — but refusing one keeps
+// the transport posture honest and avoids surprising cross-origin fetches. An
+// application that genuinely needs a CDN hop injects its own Client with a
+// redirect policy it controls.
 var defaultFetchClient = &http.Client{
 	Timeout: defaultFetchTimeout,
 	CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
@@ -112,6 +113,7 @@ func (f *HTTPFetcher) Fetch(ctx context.Context) ([]byte, error) {
 		return nil, fmt.Errorf("qurl: GET manifest: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	defer drainResponseBody(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("qurl: manifest endpoint returned HTTP %d", resp.StatusCode)
 	}
