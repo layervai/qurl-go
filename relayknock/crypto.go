@@ -13,10 +13,11 @@ import (
 	"golang.org/x/crypto/curve25519"
 )
 
-// Crypto primitives for the NHP Noise wire profile (nhp/core: scheme/curve and
-// kdf). Every helper here is fenced by the golden vectors via the handshake it
-// feeds; do not "modernize" one (e.g. swap HMAC for keyed-BLAKE2s) without
-// re-deriving the vectors from nhp — a silent divergence breaks server interop.
+// Crypto primitives for the NHP Noise wire profile (the reference NHP relay
+// implementation's scheme/curve and kdf). Every helper here is fenced by the
+// golden vectors via the handshake it feeds; do not "modernize" one (e.g. swap
+// HMAC for keyed-BLAKE2s) without re-deriving the vectors from the reference
+// implementation — a silent divergence breaks server interop.
 
 const (
 	publicKeySize = 32
@@ -26,13 +27,13 @@ const (
 	hashSize      = 32 // BLAKE2s-256 / SHA-256 digest
 )
 
-// Noise init constants (nhp/core/constants.go) — the literal UTF-8 bytes the
-// chain hash / chain key seed from.
+// Noise init constants (from the reference NHP relay implementation) — the
+// literal UTF-8 bytes the chain hash / chain key seed from.
 var (
 	initialHash     = []byte("NHP hashgen v.20230421@deepcloudsdp.com")
 	initialChainKey = []byte("NHP keygen v.20230421@clouddeep.cn")
 
-	// KDF domain-separation tags (nhp/core/kdf.go kdfTag1/2).
+	// KDF domain-separation tags (reference NHP relay implementation kdfTag1/2).
 	kdfTag1 = []byte{0x01}
 	kdfTag2 = []byte{0x02}
 )
@@ -128,8 +129,9 @@ func newGCM(key []byte) (cipher.AEAD, error) {
 
 // PubKeyFingerprint is the {serverId} in POST /relay/{serverId}:
 // base64url(SHA-256(rawPubKey)[0:8]) with no padding. Byte-identical to the Go
-// utils.PubKeyFingerprint and the js-agent crypto/fingerprint.ts, so it is the
-// single source of the relay routing id every NHP caller derives.
+// reference utils.PubKeyFingerprint and the browser NHP agent's fingerprint
+// derivation, so it is the single source of the relay routing id every NHP
+// caller derives.
 func PubKeyFingerprint(rawPubKey []byte) string {
 	digest := sha256.Sum256(rawPubKey)
 	return base64.RawURLEncoding.EncodeToString(digest[:8])

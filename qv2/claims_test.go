@@ -10,7 +10,7 @@ import (
 
 // TestPublicKeyHashFromB64 proves the canonical revocation-index hash is the
 // lowercase-hex SHA-256 of the DECODED key bytes (not of the base64url string),
-// computed independently here. This format must match the nhp/qurl-service
+// computed independently here. This format must match the server-side
 // revocation indexes, so it is pinned against a hand-computed digest.
 func TestPublicKeyHashFromB64(t *testing.T) {
 	raw := make([]byte, x25519PublicKeyBytes)

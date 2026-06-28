@@ -69,12 +69,11 @@ make fuzz FUZZTIME=2m
 
 ## Conformance vectors
 
-`qv2/testdata` vendors the language-agnostic qURL v2 conformance artifact
-(`qv2_conformance_vectors.json`) plus the composed issuer-signature golden file
-(`issuer_signature_vectors.json`). The loader is structured so adopting an updated
-artifact is a **file swap**. The current copies track an in-flight upstream branch and
-are marked provisional pending the merged full-class artifact; re-vendor verbatim on
-merge.
+The language-agnostic qURL v2 conformance artifact (`qv2_conformance_vectors.json`)
+plus the composed issuer-signature golden file (`issuer_signature_vectors.json`) come
+from the public [`qurl-conformance`](https://github.com/layervai/qurl-conformance)
+module via `go:embed` accessors. The bytes are pinned by the dependency version in
+`go.sum`, so adopting an updated artifact is a dependency bump.
 
 ## Continuous integration
 

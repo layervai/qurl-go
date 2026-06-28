@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 
+	conformance "github.com/layervai/qurl-conformance"
+
 	"github.com/layervai/qurl-go/qv2"
 	"github.com/layervai/qurl-go/relayknock"
 )
@@ -40,7 +42,7 @@ import (
 // 32-byte key is sufficient to satisfy the strict secret parser.
 func vendoredAcceptLink(t *testing.T) (link string, ts *qv2.TrustStore, cellFingerprint string) {
 	t.Helper()
-	vf, err := qv2.LoadVectorFile("../qv2/testdata/issuer_signature_vectors.json")
+	vf, err := qv2.LoadVectorBytes(conformance.IssuerSignatureVectors())
 	if err != nil {
 		t.Fatalf("load signature vectors: %v", err)
 	}

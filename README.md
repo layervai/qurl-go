@@ -17,14 +17,18 @@ open a path to resources that are otherwise invisible on the network.
 Some resources shouldn't be reachable by just anyone who finds the address — they
 should be **invisible until you prove you're allowed in**. qURL makes that possible.
 A protected resource sits behind [NHP](#glossary): it is invisible on the network,
-ignoring every packet by default. A **qURL link** is a signed, expiring ticket that opens a path to it.
+ignoring every packet by default. A **qURL link** is a signed, expiring ticket that
+opens a path to it.
 
-This SDK gives you the two verbs you need, plus the cryptographic core underneath:
+This SDK gives you the issuer path that works completely offline today, plus the
+opener path that lights up when your deployment has the qURL v2 admission service
+and trust provider configured:
 
-| You want to…                                  | Use            |
-| --------------------------------------------- | -------------- |
-| **Open** a qURL link and reach the resource   | `EnterPortal`  |
-| **Issue** (mint) a qURL link for someone else | `CreatePortal` |
+| You want to...                                | Use                                  | Status |
+| --------------------------------------------- | ------------------------------------ | ------ |
+| **Issue** (mint) a qURL link for someone else | `CreatePortal`                       | Works today |
+| **Verify** a link before acting on it         | `qv2.FragmentFromLinkAndVerify`      | Works today |
+| **Open** a link and reach the resource        | `EnterPortal` / `EnterPortalWith`    | SDK-ready; requires deployed qURL v2 admission and configured trust |
 
 A qURL link looks like an ordinary URL:
 
@@ -32,9 +36,9 @@ A qURL link looks like an ordinary URL:
 https://qurl.link/#qv2.<claims>.<secret>.<sig>
 ```
 
-Everything sensitive rides in the fragment after `#`, which browsers never send to a
-server. The link carries its own one-time credential, an issuer signature, and an
-expiry — so it's safe to put in an email, a QR code, or a chat message.
+Everything sensitive rides in the fragment after `#`, which browsers never send to
+`qurl.link`. The full link still carries a short-lived credential, so treat it like
+an expiring bearer link and share it only with the intended opener.
 
 ## Install
 
@@ -55,6 +59,11 @@ package main
 
 import (
 	"context"
+	"crypto/ecdh"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
 	"fmt"
 	"time"
 
@@ -68,15 +77,21 @@ func main() {
 
 	// 1. An issuer signing key. In production this is a KMS-resident key reached
 	//    through the qv2.Signer seam; locally, a software key needs no AWS.
-	signer, _ := qv2.GenerateLocalSigner("issuer-key-2026")
+	signer, err := qv2.GenerateLocalSigner("issuer-key-2026")
+	if err != nil {
+		panic(err)
+	}
 
-	// 2. Mint a link. cellPub / resourceDER come from your deployment (the NHP cell
-	//    key and the resource's DER key); the per-link credential is generated for
-	//    you and tucked into the fragment.
+	// 2. Mint a link. In production these keys come from your NHP cell and
+	//    protected resource; here we generate throwaway keys so the example runs
+	//    exactly as pasted.
+	cellPub := newX25519PublicKey() // raw 32-byte X25519 NHP cell key
+	resourceDER := newP256SPKI()    // DER SPKI P-256 resource key
+
 	link, err := qurl.CreatePortal(ctx, signer, qurl.CreateParams{
-		CellPublicKey:     cellPub,     // raw 32-byte X25519 NHP cell key
+		CellPublicKey:     cellPub,
 		RelayURL:          "https://relay.example.com",
-		ResourcePublicKey: resourceDER, // DER SPKI P-256 resource key
+		ResourcePublicKey: resourceDER,
 		JTI:               "qurl_demo_0001",
 		IssuedAt:          now,
 		NotBefore:         now,
@@ -87,8 +102,14 @@ func main() {
 	}
 
 	// 3. Build a trust store from the issuer's public key and verify the link.
-	pubDER, _ := signer.PublicKeyDER()
-	trust, _ := qv2.NewTrustStoreFromDER(map[string][]byte{signer.KID(): pubDER})
+	pubDER, err := signer.PublicKeyDER()
+	if err != nil {
+		panic(err)
+	}
+	trust, err := qv2.NewTrustStoreFromDER(map[string][]byte{signer.KID(): pubDER})
+	if err != nil {
+		panic(err)
+	}
 
 	frag, err := qv2.FragmentFromLinkAndVerify(link, trust)
 	if err != nil {
@@ -96,13 +117,31 @@ func main() {
 	}
 	fmt.Println("verified qURL for relay:", frag.Claims.RelayURL)
 }
+
+func newX25519PublicKey() []byte {
+	k, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		panic(err)
+	}
+	return k.PublicKey().Bytes()
+}
+
+func newP256SPKI() []byte {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		panic(err)
+	}
+	der, err := x509.MarshalPKIXPublicKey(&priv.PublicKey)
+	if err != nil {
+		panic(err)
+	}
+	return der
+}
 ```
 
-> This exact flow is a compile-checked, runnable example —
-> see [`qurl/example_test.go`](qurl/example_test.go) (`go test ./qurl/`). Runnable
-> versions of every flow live in the packages' `example_test.go` files; the shorter
-> snippets elsewhere in these docs are abbreviated for readability, with
-> deployment-specific values (keys, times) shown as placeholders.
+This exact flow is compile-checked in [`qurl/example_test.go`](qurl/example_test.go)
+and runs with `go test ./qurl/`. Shorter snippets later in the docs focus on the
+API shape and use deployment-specific placeholders.
 
 ## Issue a link
 
@@ -129,31 +168,30 @@ validity windows, key rotation, and the full `CreateParams` reference.
 
 ## Open a link
 
-`EnterPortal` is the opener side and the headline verb. It does everything in one
-call: parse the fragment, verify the issuer signature, validate the relay, and knock
-to open access — returning a `ResourceHandle` with the now-reachable URL.
+`EnterPortal` is the opener side. It parses the fragment, verifies the issuer
+signature, validates the relay, and performs the NHP knock. A live open succeeds only
+when your deployment has qURL v2 admission deployed and a trust provider installed;
+without that provider it fails closed with `ErrNotConfigured`.
 
 ```go
 // One-argument form. A deployment installs its trust anchors once at startup…
 qurl.SetDefaultProvider(provider) // e.g. qurl.NewStaticProvider(trust, allowlist)
 
-// …then opens any link with no per-call config:
+// ...then opens links with no per-call trust config:
 handle, err := qurl.EnterPortal(ctx, link)
 if err != nil {
 	// see "Error handling" for the failure taxonomy
 }
-fmt.Println("reachable at:", handle.RedirectURL)
+fmt.Println("resource URL:", handle.RedirectURL)
 ```
 
 Prefer to pass config explicitly (e.g. in tests, or to pin a fixed egress)? Use
 `EnterPortalWith(ctx, link, qurl.Config{…})`.
 
-> **Status:** opening a link performs a live network knock to the relay. The qURL v2
-> server-side admission contract is still being deployed, so a *live* open cannot
-> complete end to end yet — but parsing, signature verification, relay validation,
-> and knock construction are all implemented and tested offline. Until your
-> deployment installs a provider, the one-argument `EnterPortal` fails closed with
-> `ErrNotConfigured`. See [Status & limitations](#status--limitations).
+> **Status:** `EnterPortal` is implemented and tested through parse, signature
+> verification, relay validation, and knock construction. The final live round trip
+> depends on your deployment's qURL v2 admission rollout and trust-provider
+> configuration. See [Status & limitations](#status--limitations).
 
 → **[Opening links guide](docs/opening-links.md)** — providers (static & discovery),
 the relay allowlist, the same-egress-IP rule, error handling, and retries.
@@ -244,21 +282,21 @@ taxonomy and retry guidance.
 
 ## Status & limitations
 
-This is the **foundation** release: the cryptographic core and both verbs are
-complete and tested. A few things are intentionally provisional:
+This is the **foundation** release: minting, strict parsing, issuer verification,
+relay validation, and knock construction are implemented and tested. The external
+rollout pieces are explicit:
 
-- **Live opens need a deployed relay.** The qURL v2 server-side admission contract is
-  being rolled out. Parsing, verification, relay validation, and knock construction
-  are implemented and unit-tested offline against conformance vectors; the live
-  end-to-end open lights up when the server contract is deployed — no SDK change
-  needed.
-- **Production trust anchors aren't published yet.** Until your deployment installs a
-  provider via `SetDefaultProvider`, the one-argument `EnterPortal` fails closed with
-  `ErrNotConfigured`. Inject anchors today with `NewStaticProvider` /
-  `NewDiscoveryProvider`, or call `EnterPortalWith`.
-- **Conformance vectors are provisional.** `qv2/testdata` vendors the language-agnostic
-  qURL v2 conformance artifact; the current copy tracks an in-flight upstream branch
-  and is re-vendored verbatim on merge.
+- **Live opens need deployed qURL v2 admission.** `EnterPortal` builds and posts the
+  qv2 knock, but the server-side admission path must be deployed before a live
+  end-to-end open can complete.
+- **One-argument open needs trust config.** Until your process installs a provider via
+  `SetDefaultProvider`, `EnterPortal(ctx, link)` fails closed with
+  `ErrNotConfigured`. Use `NewStaticProvider` for fixed anchors, or call
+  `EnterPortalWith` when you want to pass trust and relay config per call.
+- **Discovery is advanced configuration.** `NewDiscoveryProvider` is available for
+  deployments that already publish signed or pinned manifests. Its manifest policy is
+  still being finalized, so start with static trust unless you own that publishing
+  pipeline.
 
 ## Security model
 
@@ -284,6 +322,15 @@ guarantees:
 your knock**. Any request you then make to the resource must leave from that same IP.
 Behind a rotating-egress NAT or proxy pool, pin the knock and the resource request to
 the same exit — see the [opening links guide](docs/opening-links.md#the-same-egress-ip-rule).
+
+## Conformance vectors
+
+The language-agnostic qURL v2 conformance artifact (`qv2_conformance_vectors.json`)
+plus the composed issuer-signature golden file (`issuer_signature_vectors.json`) are
+consumed from the public [`qurl-conformance`](https://github.com/layervai/qurl-conformance)
+package via its `go:embed` accessors (`LoadConformanceBytes` / `LoadVectorBytes`).
+The bytes are pinned by the dependency version in `go.sum`, so adopting an updated
+artifact is a **dependency bump**.
 
 ## Roadmap
 

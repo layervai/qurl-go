@@ -1,14 +1,14 @@
 # Opening links
 
-This guide covers the **opener side**: turning a qURL link into a reachable resource
-with `EnterPortal`, wiring up trust, handling errors, and the one operational rule
-that trips people up (egress IP). To *mint* links instead, see
+This guide covers the **opener side**: verifying a qURL link, wiring up trust,
+performing the NHP knock with `EnterPortal`, handling errors, and the one operational
+rule that trips people up (egress IP). To *mint* links instead, see
 [Issuing links](issuing-links.md).
 
 - [`EnterPortal` vs `EnterPortalWith`](#enterportal-vs-enterportalwith)
 - [Trust providers](#trust-providers)
   - [Static provider](#static-provider)
-  - [Discovery provider](#discovery-provider)
+  - [Advanced discovery provider](#advanced-discovery-provider)
   - [The discovery manifest](#the-discovery-manifest)
 - [The relay allowlist](#the-relay-allowlist)
 - [The result: `ResourceHandle`](#the-result-resourcehandle)
@@ -34,6 +34,9 @@ handle, err := qurl.EnterPortal(ctx, link)
 ```
 
 With no provider installed, `EnterPortal` fails closed with `qurl.ErrNotConfigured`.
+A live open also requires your deployment's qURL v2 admission service to accept the
+knock; without that server-side rollout, the SDK-side parse, verify, relay validation,
+and knock construction still run, but the end-to-end open cannot complete.
 
 **`EnterPortalWith(ctx, link, cfg)`** — the explicit-config seam. Pass the trust
 store and allowlist directly. Use it in tests, in code that builds config per call, or
@@ -90,13 +93,14 @@ This is a runnable example — see
 To rotate keys with a static provider, build a new one whose trust store carries the
 overlap set (old + new kid) and swap it in with `SetDefaultProvider`.
 
-### Discovery provider
+### Advanced discovery provider
 
-For deployments that publish trust anchors centrally, a `DiscoveryProvider` fetches an
-**authenticated** manifest and turns it into the trust store and allowlist. The
-manifest is non-secret but never blindly trusted: it's authenticated by a **pin**
-(sha256 of the exact bytes) and/or a **detached issuer signature**, and it fails
-closed on every doubt — unverifiable, expired, downgraded, or malformed.
+Start with `StaticProvider` unless you already operate a trust-manifest publishing
+pipeline. For deployments that do, `DiscoveryProvider` fetches an **authenticated**
+manifest and turns it into the trust store and allowlist. The manifest is non-secret
+but never blindly trusted: it's authenticated by a **pin** (sha256 of the exact bytes)
+and/or a **detached issuer signature**, and it fails closed on every doubt —
+unverifiable, expired, downgraded, or malformed.
 
 ```go
 fetcher, _ := qurl.NewHTTPFetcher("https://trust.example.com/qurl/manifest.json", nil)
@@ -127,11 +131,11 @@ qurl.SetDefaultProvider(provider)
 You must configure a pin and/or signing keys — a provider that authenticates nothing
 is rejected at construction.
 
-> **No caching.** A `DiscoveryProvider` re-fetches and re-verifies on **every** open,
-> so a slow or down manifest endpoint fails every open. This is a deliberate
-> fail-closed-over-availability stance for the mechanism. High-volume deployments
-> should wrap it in a TTL cache that itself fails closed once the manifest's
-> `not_after` (or the TTL) elapses.
+> **Caching policy.** `DiscoveryProvider` re-fetches and re-verifies on every open,
+> then fails closed instead of serving stale trust material. High-volume deployments
+> should hide that behind a deployment-owned provider/cache only when the cache enforces
+> the manifest's `not_after` and its own TTL. If you do not need central publishing,
+> use `StaticProvider`.
 
 ### The discovery manifest
 
@@ -193,7 +197,7 @@ A successful open returns a `ResourceHandle`:
 
 ```go
 type ResourceHandle struct {
-	RedirectURL string // the now-reachable resource URL the server returned
+	RedirectURL string // the resource URL returned after admission
 	OpenSeconds uint32 // how long access stays open, if reported
 }
 ```
@@ -276,9 +280,7 @@ was rejected: `ErrManifestUnverified`, `ErrManifestPinMismatch`, `ErrManifestExp
 
 ## Current status
 
-Opening a link performs a **live network knock** to the relay. The qURL v2
-server-side admission contract is still being deployed, so a live end-to-end open
-can't complete yet — the parse, verify, relay-validation, and knock-construction steps
-are implemented and tested offline against conformance vectors, and the live path
-lights up when the server contract ships (no SDK change needed). See
-[Status & limitations](../README.md#status--limitations).
+Opening a link performs a **live network knock** to the relay. The SDK implements
+parse, verify, relay validation, and qv2 knock construction; completing a live
+end-to-end open also requires your deployment's qURL v2 admission service and trust
+provider to be online. See [Status & limitations](../README.md#status--limitations).

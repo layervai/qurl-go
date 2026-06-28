@@ -2,7 +2,7 @@ package relayknock
 
 import "encoding/binary"
 
-// NHP packet header framing (nhp/core: header.go, packet.go, constants.go). The
+// NHP packet header framing (from the reference NHP relay implementation). The
 // HeaderCurve is a fixed 240-byte big-endian structure; each sealed field is
 // plaintext + a 16-byte GCM tag.
 
@@ -21,12 +21,12 @@ const (
 	packetBufferSize  = 4096 // server reads into a fixed [PacketBufferSize]byte
 	maxSealedBodySize = packetBufferSize - headerSize
 
-	// Header types (nhp/core/packet.go iota: KPL=0, KNK=1, ACK=2, …, COK=7, RKN=8).
+	// Header types (reference NHP relay iota: KPL=0, KNK=1, ACK=2, …, COK=7, RKN=8).
 	nhpKNK = 1
 	nhpACK = 2
 	nhpCOK = 7
 
-	// Header flags (nhp/common/packet.go): COMPRESS = 1<<1. The agent never sets
+	// Header flags (reference NHP relay common): COMPRESS = 1<<1. The agent never sets
 	// it (bodies sent uncompressed); kept to decode a compressed reply.
 	nhpFlagCompress = 1 << 1
 

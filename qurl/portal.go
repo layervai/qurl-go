@@ -1,12 +1,13 @@
 // Package qurl is the top-level entry point of the qURL Go SDK. It provides the two
-// verbs most integrations need: EnterPortal opens a qURL link — parse, verify the
-// issuer signature, and knock to reach the protected resource — and CreatePortal
-// mints one on the issuer side. Deployment trust anchors and the relay allowlist are
-// supplied once through a Provider (see provider.go), so opening a link is a single
-// call. For a guided introduction see the package README and docs/.
+// verbs most integrations need: CreatePortal mints a signed, expiring qURL link on
+// the issuer side, and EnterPortal performs the opener flow for a received link.
 //
-// EnterPortal stitches the two lower layers together in the exact order the nhp
-// design (QURL_V2_KEYED_IDENTITY.md, "Browser and Headless Flow") mandates:
+// Applications normally install deployment trust anchors and the relay allowlist once
+// through a Provider, then call EnterPortal with no per-call trust config. Minting and
+// local verification work offline; a live open also requires the deployment's qURL v2
+// admission service to accept the knock.
+//
+// EnterPortal stitches the two lower layers together in the protocol order:
 //
 //  1. Parse the #qv2.<claims>.<secret>.<sig> fragment.
 //  2. Verify the issuer signature locally (REQUIRED — not optional for a
@@ -55,8 +56,8 @@ type Config struct {
 // can inject a fixed-egress or test client.
 type HTTPDoer = relayknock.HTTPDoer
 
-// ResourceHandle is the result of a successful EnterPortal: the now-reachable
-// resource plus the facts a caller needs to actually use it.
+// ResourceHandle is the result of a successful EnterPortal: the resource URL returned
+// after admission plus the facts a caller needs to actually use it.
 //
 // Same-egress-IP invariant: the NHP server opened access for the SOURCE IP of the
 // relay POST. Any request the caller now makes to RedirectURL MUST egress from that
@@ -76,23 +77,20 @@ type ResourceHandle struct {
 // store or relay allowlist (the fail-closed default).
 var ErrNotConfigured = errors.New("qurl: EnterPortal requires a trust store and relay allowlist")
 
-// EnterPortal opens a qURL link end to end using the process-wide default
-// credential provider (SetDefaultProvider). It is the locked, single-argument entry
-// verb: a deployment installs its trust anchors / relay allowlist once at startup
-// and then opens any link with no per-call config.
+// EnterPortal opens a qURL link using the process-wide default credential provider
+// (SetDefaultProvider). It is the locked, single-argument entry verb: a deployment
+// installs its trust anchors / relay allowlist once at startup and then opens links
+// with no per-call trust config.
 //
 // It resolves the provider for the trust anchors and relay allowlist, then delegates
 // to EnterPortalWith — so the provider only SUPPLIES the trust material; the real
 // verify + post-verify relay-allowlist enforcement is EnterPortalWith's, unchanged.
 //
-// PROVISIONAL: the qURL v2 server-side admission contract is Proposed in the nhp
-// design and not yet deployed, and the production issuer trust anchors / relay
-// allowlist for the qv2 path are not yet published. Until a deployment installs a
-// provider (SetDefaultProvider), EnterPortal fails closed with ErrNotConfigured —
-// the verb, the wire construction, and every pure step (parse → verify → derive
-// serverId → assemble packet) are ready and tested, so turning the live path on is a
-// provider turn-up, not an SDK change. Tests and early integrators inject anchors via
-// a StaticProvider / DiscoveryProvider, or call EnterPortalWith directly.
+// Without an installed provider, EnterPortal fails closed with ErrNotConfigured.
+// The SDK implements the local security checks and qv2 knock construction; completing
+// a live open also requires the deployment's qURL v2 admission service to be online.
+// Tests and controlled integrations can inject anchors via a StaticProvider /
+// DiscoveryProvider, or call EnterPortalWith directly.
 func EnterPortal(ctx context.Context, qurlLink string) (*ResourceHandle, error) {
 	cfg, err := resolveDefaultConfig(ctx)
 	if err != nil {
