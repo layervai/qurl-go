@@ -73,6 +73,8 @@ func statPrivateStateFile(path, label string, notFound, invalidConfig, insecureP
 }
 
 func validatePrivateStateDir(dir, label string, invalidConfig, insecurePermissions error) error {
+	// This validates the immediate state directory; deployment/bootstrap is
+	// responsible for placing it under trusted ancestors such as /var/lib/layerv.
 	info, err := os.Lstat(dir)
 	if err != nil {
 		return fmt.Errorf("qurl: stat %s dir: %w", label, err)

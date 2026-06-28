@@ -134,9 +134,33 @@ func normalizeRelayError(err error) error {
 	var relayErr *relayknock.RelayError
 	if errors.As(err, &relayErr) {
 		re := RelayError(*relayErr)
-		return &re
+		return &relayErrorView{err: err, relay: &re}
 	}
 	return err
+}
+
+type relayErrorView struct {
+	err   error
+	relay *RelayError
+}
+
+func (e *relayErrorView) Error() string {
+	if e.err.Error() == e.relay.Msg {
+		return e.relay.Error()
+	}
+	return e.err.Error()
+}
+
+func (e *relayErrorView) Unwrap() error {
+	return e.err
+}
+
+func (e *relayErrorView) As(target any) bool {
+	if relay, ok := target.(**RelayError); ok {
+		*relay = e.relay
+		return true
+	}
+	return false
 }
 
 // interpretReply maps a decrypted, authenticated qURL platform reply to a ResourceHandle or

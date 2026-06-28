@@ -544,6 +544,28 @@ func TestClient_APIErrorPlainTextBody(t *testing.T) {
 	}
 }
 
+func TestClient_OversizedAPIErrorPreservesStatus(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(strings.Repeat("x", maxAPIResponseBodyBytes+1)))
+	}))
+	defer api.Close()
+
+	client, err := NewClient(BearerToken("lv_test"), WithBaseURL(api.URL))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	_, err = client.ProtectURL(context.Background(), "https://example.com")
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("oversized API error: want *APIError, got %T: %v", err, err)
+	}
+	if apiErr.StatusCode != http.StatusBadGateway || !strings.Contains(apiErr.Error(), "API response body exceeds") {
+		t.Fatalf("oversized API error = %#v", apiErr)
+	}
+}
+
 func TestClient_EmptySuccessBodyFailsClosed(t *testing.T) {
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)

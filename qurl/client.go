@@ -244,7 +244,8 @@ func OpenClientContext(ctx context.Context, opts ...ClientOption) (*Client, erro
 
 // Resource is a protected target registered in the LayerV qURL Platform. Fields
 // are exported for inspection and serialization; CreatePortal reads ID at call
-// time, so use ResourceByID for a new handle instead of mutating a bound one.
+// time, and JSON cannot preserve the unexported client binding. Use ResourceByID
+// for a new handle instead of mutating or round-tripping a bound one.
 type Resource struct {
 	client *Client
 
@@ -821,6 +822,12 @@ func doAuthorizedJSON(ctx context.Context, httpClient HTTPDoer, baseURL string, 
 
 	respBody, err := readCappedBody(resp.Body, maxAPIResponseBodyBytes, "API response body")
 	if err != nil {
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return &APIError{
+				StatusCode: resp.StatusCode,
+				Detail:     fmt.Sprintf("read API response: %v", err),
+			}
+		}
 		return fmt.Errorf("qurl: read API response: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {

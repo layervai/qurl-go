@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -204,6 +205,26 @@ func TestEnterPortalWith_RoutesToDerivedRelayURL(t *testing.T) {
 	wantURL := "https://relay.example.com/relay/" + cellFingerprint
 	if doer.gotURL != wantURL {
 		t.Fatalf("relay POST routed to %q, want %q", doer.gotURL, wantURL)
+	}
+}
+
+func TestNormalizeRelayErrorPreservesWrappedContext(t *testing.T) {
+	coreErr := &relayknock.RelayError{Status: http.StatusBadGateway, Msg: "relay unavailable"}
+	err := normalizeRelayError(fmt.Errorf("knock context: %w", coreErr))
+
+	if !strings.Contains(err.Error(), "knock context") {
+		t.Fatalf("normalized error lost wrapper context: %v", err)
+	}
+	var relayErr *RelayError
+	if !errors.As(err, &relayErr) {
+		t.Fatalf("normalized error: want *qurl.RelayError, got %T: %v", err, err)
+	}
+	if relayErr.Status != http.StatusBadGateway || relayErr.Msg != "relay unavailable" {
+		t.Fatalf("RelayError = %#v", relayErr)
+	}
+	var unwrapped *relayknock.RelayError
+	if !errors.As(err, &unwrapped) {
+		t.Fatalf("normalized error should preserve original relayknock error chain")
 	}
 }
 
