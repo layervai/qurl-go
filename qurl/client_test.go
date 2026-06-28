@@ -133,6 +133,36 @@ func TestClient_CreatePortalForURL(t *testing.T) {
 	}
 }
 
+func TestResourceJSONUsesAPINames(t *testing.T) {
+	alias := "dev-dashboard"
+	resource := &Resource{
+		ID:        "r_demo1234567",
+		TargetURL: "https://internal.example.com/dashboard",
+		Status:    "active",
+		Tags:      []string{"prod"},
+		Alias:     &alias,
+		QURLCount: 2,
+	}
+
+	raw, err := json.Marshal(resource)
+	if err != nil {
+		t.Fatalf("Marshal Resource: %v", err)
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(raw, &body); err != nil {
+		t.Fatalf("Unmarshal Resource JSON: %v", err)
+	}
+	assertJSONField(t, body, "resource_id", "r_demo1234567")
+	assertJSONField(t, body, "target_url", "https://internal.example.com/dashboard")
+	assertJSONField(t, body, "status", "active")
+	assertJSONField(t, body, "alias", "dev-dashboard")
+	assertJSONField(t, body, "qurl_count", float64(2))
+	if _, ok := body["ID"]; ok {
+		t.Fatalf("Resource JSON used Go field name ID: %s", raw)
+	}
+}
+
 func TestClient_ResourceByIDCreatePortal(t *testing.T) {
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/v1/resources/r_stored12345/qurls" {

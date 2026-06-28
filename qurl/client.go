@@ -312,32 +312,33 @@ func OpenClientContext(ctx context.Context, opts ...ClientOption) (*Client, erro
 }
 
 // Resource is a protected target registered in the LayerV qURL Platform. Fields
-// are exported for inspection and serialization; CreatePortal reads ID at call
-// time, and JSON cannot preserve the unexported client binding. Use ResourceByID
-// for a new handle instead of mutating or round-tripping a bound one.
+// are exported for inspection and JSON persistence; CreatePortal reads ID at
+// call time, and JSON cannot preserve the unexported client binding. Use
+// ResourceByID for a new handle instead of mutating or round-tripping a bound
+// one.
 type Resource struct {
 	client *Client
 
 	// ID is the LayerV resource id, for example r_abc123...
-	ID string
+	ID string `json:"resource_id"`
 	// TargetURL is the private URL protected by this resource.
-	TargetURL string
+	TargetURL string `json:"target_url"`
 	// Status is the resource lifecycle status returned by LayerV.
-	Status string
+	Status string `json:"status,omitempty"`
 	// Description is optional resource-level metadata.
-	Description string
+	Description string `json:"description,omitempty"`
 	// Tags are optional resource-level metadata.
-	Tags []string
+	Tags []string `json:"tags,omitempty"`
 	// CustomDomain is set when this resource is bound to a verified domain.
-	CustomDomain *string
+	CustomDomain *string `json:"custom_domain,omitempty"`
 	// Alias is an optional owner-scoped handle for the resource.
-	Alias *string
+	Alias *string `json:"alias,omitempty"`
 	// QURLCount is the number of active qURL links LayerV reports for the resource.
-	QURLCount int
+	QURLCount int `json:"qurl_count,omitempty"`
 	// CreatedAt is the server creation time, when returned by the API.
-	CreatedAt *time.Time
+	CreatedAt *time.Time `json:"created_at,omitempty"`
 	// ExpiresAt is the server expiration time, when returned by the API.
-	ExpiresAt *time.Time
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
 }
 
 // ResourceByID returns a resource handle bound to this client. Use it when you
@@ -633,9 +634,9 @@ func (r *Resource) CreatePortal(ctx context.Context, opts ...PortalOption) (*Por
 
 // CreatePortalForURL creates or reuses the resource for targetURL and returns a
 // portal in one API call. The returned resource is bound to this client and can
-// be stored or reused to mint more portals; only its ID and TargetURL are
-// populated. Use ProtectURL when you need the full server-populated resource
-// metadata.
+// be stored or reused to mint more portals; only its ID and caller-supplied
+// TargetURL are populated. Use ProtectURL when you need the full
+// server-populated resource metadata.
 func (c *Client) CreatePortalForURL(ctx context.Context, targetURL string, opts ...PortalOption) (*Portal, *Resource, error) {
 	if c == nil {
 		return nil, nil, fmt.Errorf("%w: nil client", ErrInvalidClientConfig)
@@ -1013,6 +1014,8 @@ func apiErrorFromResponse(status int, body []byte) error {
 		Detail  string `json:"detail"`
 		Message string `json:"message"`
 	}
+	// Some upstream failures are plain text, HTML, or invalid JSON. Treat that
+	// as an unstructured API error and fall back to a capped body snippet below.
 	_ = json.Unmarshal(body, &parsed)
 	code := cmp.Or(parsed.Error.Code, parsed.Code)
 	apiType := cmp.Or(parsed.Error.Type, parsed.Type)
