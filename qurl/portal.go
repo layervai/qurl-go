@@ -110,7 +110,7 @@ func EnterPortalWith(ctx context.Context, qurlLink string, cfg Config) (*Resourc
 		return nil, ErrNotConfigured
 	}
 
-	// 1+2. Parse the fragment and verify the issuer signature. ParseAndVerify
+	// 1+2. Parse the fragment and verify the issuer signature. FragmentFromLinkAndVerify
 	// strict-parses then checks the signature over the exact received claims bytes;
 	// nothing downstream runs until the signature is good.
 	frag, err := qv2.FragmentFromLinkAndVerify(qurlLink, cfg.TrustStore.core())

@@ -316,6 +316,16 @@ func wrapSecret(secret *qv2.Secret) *Secret {
 	return &Secret{QurlUserPrivateKeyB64: secret.QurlUserPrivateKeyB64}
 }
 
+// Compile-time guards: the public Claims/Secret structs must stay field-identical to
+// the internal core structs (a struct conversion only compiles when fields match —
+// names, types, order; tags aside), so a field added to the core can't be silently
+// dropped by wrapClaims/wrapSecret — it becomes a build break here instead. Fragment,
+// which has pointer fields, is guarded by a parity test in facade_test.go.
+var (
+	_ = qv2.Claims(Claims{})
+	_ = qv2.Secret(Secret{})
+)
+
 // --- error sentinels (match with errors.Is) ---
 
 var (
