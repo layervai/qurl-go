@@ -16,7 +16,7 @@ import (
 // EnterPortal opens an existing qURL link, CreatePortal produces one — it
 // assembles and signs the qURL claims, generates the fresh per-qURL keypair
 // whose secret rides in the fragment, and returns the
-// https://qurl.link/#<claims>.<secret>.<sig> link. (The package doc lives in
+// https://qurl.link/#<version>.<claims>.<secret>.<sig> link. (The package doc lives in
 // portal.go; this is the mint half of the same qurl entry surface.)
 //
 // The issuer signing key is never held here directly: signing goes through the
@@ -88,7 +88,7 @@ var ErrInvalidCreateParams = errors.New("qurl: invalid CreatePortal params")
 // CreatePortal mints a qURL link. It generates a fresh per-qURL X25519 keypair
 // (the private half becomes the fragment secret, the public half is bound into
 // the signed claims), assembles the claims, signs them through the issuer Signer
-// seam, and returns the full https://qurl.link/#<claims>.<secret>.<sig> link.
+// seam, and returns the full https://qurl.link/#<version>.<claims>.<secret>.<sig> link.
 //
 // Symmetry guarantee: the returned link parses and verifies under
 // qurl.VerifyLink / EnterPortalWith against a

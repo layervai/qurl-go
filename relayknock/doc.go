@@ -24,7 +24,7 @@
 // # Scope
 //
 // Generic wire profile only: this package knows packet framing and the Noise
-// handshake, NOT any application body shape (qURL access tokens, qv2 claims). A
+// handshake, NOT any application body shape (e.g. qURL claims). A
 // caller supplies an already-serialized body and interprets the decrypted reply
 // body itself. Initial knock (NHP_KNK) only — no re-knock/cookie-challenge answer
 // (NHP_RKN), matching what a single resolve needs.

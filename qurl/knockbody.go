@@ -7,9 +7,9 @@ import (
 	"github.com/layervai/qurl-go/internal/qv2"
 )
 
-// qURL v2 knock-body construction.
+// qURL knock-body construction.
 //
-// PROVISIONAL WIRE SHAPE. The qURL server admission contract (the qURL v2
+// PROVISIONAL WIRE SHAPE. The qURL server admission contract (the qURL
 // keyed-identity design's "NHP Server Contract" section) is Proposed, not deployed,
 // and the encrypted knock-body field layout is not yet frozen.
 // This builder encodes what the design specifies for the CLIENT side of the knock
@@ -31,8 +31,8 @@ import (
 // surfaces as a server deny, not a silent wrong-resource open, because admission
 // re-verifies the signature and the cell/resource/key bindings.
 
-// qv2AspID is the NHP authorization-service-provider id for the qURL path.
-const qv2AspID = "qurl"
+// qurlAspID is the NHP authorization-service-provider id for the qURL path.
+const qurlAspID = "qurl"
 
 // agentKnockMsg is the uncompressed knock body envelope (Go common.AgentKnockMsg).
 // usrData map keys sort alphabetically in encoding/json.
@@ -43,22 +43,21 @@ type agentKnockMsg struct {
 	UsrData    map[string]string `json:"usrData,omitempty"`
 }
 
-// User-data keys carrying the signed qURL v2 claim envelope (mirroring the NHP
-// Server Contract blob names).
+// User-data keys carrying the signed qURL claim envelope (mirroring the NHP Server
+// Contract blob names).
 const (
-	qv2ClaimsUserDataKey = "qurl_claims_b64"
-	qv2SigUserDataKey    = "qurl_issuer_sig_b64"
+	claimsUserDataKey = "qurl_claims_b64"
+	sigUserDataKey    = "qurl_issuer_sig_b64"
 )
 
 // nhpKNKHeaderType is the NHP_KNK header-type value echoed in the body envelope
 // (the KNK packet header-type, value 1).
 const nhpKNKHeaderType = 1
 
-// buildQv2KnockBody serializes the provisional qURL v2 knock body for a verified
-// fragment: resId = resource_public_key_b64, usrData = the signed claims + issuer
-// signature, taken verbatim from the wire so the server verifies the exact signed
-// bytes.
-func buildQv2KnockBody(frag *qv2.Fragment) ([]byte, error) {
+// buildKnockBody serializes the provisional qURL knock body for a verified fragment:
+// resId = resource_public_key_b64, usrData = the signed claims + issuer signature,
+// taken verbatim from the wire so the server verifies the exact signed bytes.
+func buildKnockBody(frag *qv2.Fragment) ([]byte, error) {
 	if frag == nil || frag.Claims == nil {
 		return nil, fmt.Errorf("qurl: build knock body: fragment not parsed")
 	}
@@ -67,11 +66,11 @@ func buildQv2KnockBody(frag *qv2.Fragment) ([]byte, error) {
 	}
 	return json.Marshal(agentKnockMsg{
 		HeaderType: nhpKNKHeaderType,
-		AspID:      qv2AspID,
+		AspID:      qurlAspID,
 		ResID:      frag.Claims.ResourcePublicKeyB64,
 		UsrData: map[string]string{
-			qv2ClaimsUserDataKey: frag.ClaimsB64,
-			qv2SigUserDataKey:    frag.SigB64,
+			claimsUserDataKey: frag.ClaimsB64,
+			sigUserDataKey:    frag.SigB64,
 		},
 	})
 }

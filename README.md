@@ -238,10 +238,11 @@ for non-qURL NHP use; qURL integrations don't need it.)
 ### Anatomy of a qURL link
 
 ```
-https://qurl.link/#<claims>.<secret>.<signature>
-                    │        │        └─ issuer signature over the claims bytes
-                    │        └────────── per-link private key (the one-time credential)
-                    └─────────────────── signed claims: relay, keys, expiry, id
+https://qurl.link/#<version>.<claims>.<secret>.<signature>
+                    │         │        │         └─ issuer signature over the claims bytes
+                    │         │        └─────────── per-link private key (the one-time credential)
+                    │         └──────────────────── signed claims: relay, keys, expiry, id
+                    └────────────────────────────── protocol version tag (no secrets here)
 ```
 
 Everything sensitive rides in the fragment after `#`, which browsers never send to

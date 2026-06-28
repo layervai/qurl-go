@@ -9,7 +9,7 @@
 //
 // EnterPortal stitches the two lower layers together in the protocol order:
 //
-//  1. Parse the #<claims>.<secret>.<sig> fragment.
+//  1. Parse the #<version>.<claims>.<secret>.<sig> fragment.
 //  2. Verify the issuer signature locally (REQUIRED — not optional for a
 //     first-party client) against the issuer trust store.
 //  3. Validate relay_url (HTTPS + allowlist) — ONLY after the signature verifies,
@@ -136,7 +136,7 @@ func EnterPortalWith(ctx context.Context, qurlLink string, cfg Config) (*Resourc
 	if err != nil {
 		return nil, fmt.Errorf("qurl: decode per-qURL private key: %w", err)
 	}
-	body, err := buildQv2KnockBody(frag)
+	body, err := buildKnockBody(frag)
 	if err != nil {
 		return nil, err
 	}

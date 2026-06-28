@@ -132,9 +132,10 @@ qurl.SetDefaultProvider(provider)
 You must configure a pin and/or signing keys — a provider that authenticates nothing
 is rejected at construction.
 
-On the publishing side, `qurl.ManifestDigest(manifestBytes)` computes the value to put
-in `PinSHA256`, and `qurl.SignManifest(ctx, signer, manifestBytes)` produces the
-envelope's `sig_b64` — so a Go publisher stays on the `qurl` front door too.
+On the publishing side, `qurl.ManifestDigest(manifestBytes)` returns the 32-byte digest
+for `PinSHA256` (slice it: `d := qurl.ManifestDigest(b); cfg.PinSHA256 = d[:]`), and
+`qurl.SignManifest(ctx, signer, manifestBytes)` produces the envelope's `sig_b64` — so a
+Go publisher stays on the `qurl` front door too.
 
 > **Caching policy.** `DiscoveryProvider` re-fetches and re-verifies on every open,
 > then fails closed instead of serving stale trust material. High-volume deployments
