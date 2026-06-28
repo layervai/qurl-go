@@ -142,6 +142,45 @@ func TestBootstrapAgent_ReturnsRegisteredStateWithoutNetwork(t *testing.T) {
 	}
 }
 
+func TestBootstrapAgent_RejectsIncompleteRegistrationResponse(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "missing registration time",
+			body: `{"data":{"agent_id":"agent-1","registered_at":null,"nhp_server_peer":{"public_key_b64":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=","host":"nhp.layerv.ai","port":62206,"expire_time":0}}}`,
+		},
+		{
+			name: "missing peer",
+			body: `{"data":{"agent_id":"agent-1","registered_at":"2026-06-28T20:00:00Z"}}`,
+		},
+		{
+			name: "missing peer host",
+			body: `{"data":{"agent_id":"agent-1","registered_at":"2026-06-28T20:00:00Z","nhp_server_peer":{"public_key_b64":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=","host":"","port":62206,"expire_time":0}}}`,
+		},
+		{
+			name: "missing peer port",
+			body: `{"data":{"agent_id":"agent-1","registered_at":"2026-06-28T20:00:00Z","nhp_server_peer":{"public_key_b64":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=","host":"nhp.layerv.ai","port":0,"expire_time":0}}}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprint(w, tt.body)
+			}))
+			defer api.Close()
+
+			path := filepath.Join(t.TempDir(), "agent-state.json")
+			_, err := BootstrapAgent(context.Background(), "lv_setup_once", FileAgentState(path), WithBootstrapBaseURL(api.URL))
+			if !errors.Is(err, ErrInvalidBootstrapConfig) {
+				t.Fatalf("BootstrapAgent: want ErrInvalidBootstrapConfig, got %v", err)
+			}
+		})
+	}
+}
+
 func TestFileAgentState_RejectsGroupReadableState(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "agent-state.json")
 	raw := []byte(`{"private_key_b64":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=","public_key_b64":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb="}`)

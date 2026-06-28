@@ -544,7 +544,9 @@ func (r *Resource) CreatePortal(ctx context.Context, opts ...PortalOption) (*Por
 
 // CreatePortalForURL creates or reuses the resource for targetURL and returns a
 // portal in one API call. The returned resource is bound to this client and can
-// be stored or reused to mint more portals.
+// be stored or reused to mint more portals; only its ID and TargetURL are
+// populated. Use ProtectURL when you need the full server-populated resource
+// metadata.
 func (c *Client) CreatePortalForURL(ctx context.Context, targetURL string, opts ...PortalOption) (*Portal, *Resource, error) {
 	if c == nil {
 		return nil, nil, fmt.Errorf("%w: nil client", ErrInvalidClientConfig)
@@ -790,8 +792,11 @@ func doAuthorizedJSON(ctx context.Context, httpClient HTTPDoer, baseURL string, 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return apiErrorFromResponse(resp.StatusCode, respBody)
 	}
-	if len(respBody) == 0 || out == nil {
+	if out == nil {
 		return nil
+	}
+	if len(bytes.TrimSpace(respBody)) == 0 {
+		return fmt.Errorf("qurl: empty API response body")
 	}
 	if err := json.Unmarshal(respBody, out); err != nil {
 		return fmt.Errorf("qurl: decode API response: %w", err)

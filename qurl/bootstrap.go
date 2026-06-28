@@ -252,6 +252,9 @@ func BootstrapAgent(ctx context.Context, setupKey string, store AgentStateStore,
 	if err := doAuthorizedJSON(ctx, cfg.httpClient, cfg.baseURL, BearerToken(setupKey).Authorize, http.MethodPost, "/v1/agent/bootstrap", reqBody, &env); err != nil {
 		return nil, err
 	}
+	if err := env.Data.validate(); err != nil {
+		return nil, err
+	}
 
 	state.AgentID = env.Data.AgentID
 	state.RegisteredAt = env.Data.RegisteredAt
@@ -273,6 +276,25 @@ type agentBootstrapResponse struct {
 	AgentID      string            `json:"agent_id"`
 	RegisteredAt *time.Time        `json:"registered_at"`
 	NHPPeer      NHPServerPeerInfo `json:"nhp_server_peer"`
+}
+
+func (r agentBootstrapResponse) validate() error {
+	if strings.TrimSpace(r.AgentID) == "" {
+		return fmt.Errorf("%w: bootstrap response missing agent id", ErrInvalidBootstrapConfig)
+	}
+	if r.RegisteredAt == nil {
+		return fmt.Errorf("%w: bootstrap response missing registration time", ErrInvalidBootstrapConfig)
+	}
+	if strings.TrimSpace(r.NHPPeer.PublicKeyB64) == "" {
+		return fmt.Errorf("%w: bootstrap response missing NHP peer public key", ErrInvalidBootstrapConfig)
+	}
+	if strings.TrimSpace(r.NHPPeer.Host) == "" {
+		return fmt.Errorf("%w: bootstrap response missing NHP peer host", ErrInvalidBootstrapConfig)
+	}
+	if r.NHPPeer.Port <= 0 {
+		return fmt.Errorf("%w: bootstrap response missing NHP peer port", ErrInvalidBootstrapConfig)
+	}
+	return nil
 }
 
 func loadOrCreateAgentState(ctx context.Context, store AgentStateStore) (*AgentState, error) {

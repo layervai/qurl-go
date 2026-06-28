@@ -485,6 +485,22 @@ func TestClient_APIErrorPlainTextBody(t *testing.T) {
 	}
 }
 
+func TestClient_EmptySuccessBodyFailsClosed(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer api.Close()
+
+	client, err := NewClient(BearerToken("lv_test"), WithBaseURL(api.URL))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	_, err = client.ProtectURL(context.Background(), "https://example.com")
+	if err == nil || !strings.Contains(err.Error(), "empty API response body") {
+		t.Fatalf("ProtectURL empty response: want empty body error, got %v", err)
+	}
+}
+
 func TestClient_APIResponseTooLarge(t *testing.T) {
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
