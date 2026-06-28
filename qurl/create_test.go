@@ -36,7 +36,7 @@ var mintSignerSeq atomic.Uint64
 // mintSigner returns a fresh local issuer signer plus a trust store holding its
 // public key under its kid — the same DER load path production uses for KMS
 // GetPublicKey output.
-func mintSigner(t *testing.T) (*qv2.LocalSigner, *qv2.TrustStore) {
+func mintSigner(t *testing.T) (*qv2.LocalSigner, *TrustStore) {
 	t.Helper()
 	kid := fmt.Sprintf("qurl-issuer-key-create-test-%d", mintSignerSeq.Add(1))
 	signer, err := qv2.GenerateLocalSigner(kid)
@@ -47,7 +47,7 @@ func mintSigner(t *testing.T) (*qv2.LocalSigner, *qv2.TrustStore) {
 	if err != nil {
 		t.Fatalf("PublicKeyDER: %v", err)
 	}
-	ts, err := qv2.NewTrustStoreFromDER(map[string][]byte{signer.KID(): der})
+	ts, err := NewTrustStoreFromDER(map[string][]byte{signer.KID(): der})
 	if err != nil {
 		t.Fatalf("NewTrustStoreFromDER: %v", err)
 	}
@@ -95,7 +95,7 @@ func mustResourceKeyDER(t *testing.T) []byte {
 // is accepted by the locked EnterPortal verb. EnterPortalWith runs parse → verify
 // issuer sig → validate relay_url → derive serverId → build + POST the knock; a
 // capturing HTTP client short-circuits the transport, so reaching a
-// relayknock.RelayError proves every pre-POST step passed on the minted link, and
+// qurl.RelayError proves every pre-POST step passed on the minted link, and
 // the captured URL proves the route derived from the minted cell key.
 func TestCreatePortal_EnterPortalSymmetry(t *testing.T) {
 	signer, ts := mintSigner(t)
@@ -113,9 +113,9 @@ func TestCreatePortal_EnterPortalSymmetry(t *testing.T) {
 	cfg := Config{TrustStore: ts, RelayAllowlist: relayExampleAllowlist(), HTTPClient: doer}
 	_, err = EnterPortalWith(context.Background(), link, cfg)
 
-	var relayErr *relayknock.RelayError
+	var relayErr *RelayError
 	if !errors.As(err, &relayErr) {
-		t.Fatalf("minted link through EnterPortalWith: want a *relayknock.RelayError after the POST, got %v", err)
+		t.Fatalf("minted link through EnterPortalWith: want a *qurl.RelayError after the POST, got %v", err)
 	}
 
 	// Route is derived from the cell key the mint bound into the claims.
@@ -139,7 +139,7 @@ func TestCreatePortal_VerifierRoundTrip(t *testing.T) {
 		t.Fatalf("CreatePortal: %v", err)
 	}
 
-	frag, err := qv2.FragmentFromLinkAndVerify(link, ts)
+	frag, err := qv2.FragmentFromLinkAndVerify(link, ts.core())
 	if err != nil {
 		t.Fatalf("FragmentFromLinkAndVerify of minted link: %v", err)
 	}
@@ -188,11 +188,11 @@ func TestCreatePortal_FreshKeyPerCall(t *testing.T) {
 		t.Fatal("two mints with identical params produced identical links (key not fresh)")
 	}
 
-	fragA, err := qv2.FragmentFromLinkAndVerify(linkA, ts)
+	fragA, err := qv2.FragmentFromLinkAndVerify(linkA, ts.core())
 	if err != nil {
 		t.Fatalf("verify A: %v", err)
 	}
-	fragB, err := qv2.FragmentFromLinkAndVerify(linkB, ts)
+	fragB, err := qv2.FragmentFromLinkAndVerify(linkB, ts.core())
 	if err != nil {
 		t.Fatalf("verify B: %v", err)
 	}
@@ -222,7 +222,7 @@ func TestCreatePortal_TamperRejected(t *testing.T) {
 	}
 
 	// Through the verifier core.
-	if _, err := qv2.FragmentFromLinkAndVerify(tampered, ts); !errors.Is(err, qv2.ErrSignature) {
+	if _, err := qv2.FragmentFromLinkAndVerify(tampered, ts.core()); !errors.Is(err, qv2.ErrSignature) {
 		t.Fatalf("tampered claims via verifier: want ErrSignature, got %v", err)
 	}
 	// And through the locked enter verb — same fail-closed result.
@@ -277,7 +277,7 @@ func TestCreatePortal_UnknownIssuerRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreatePortal: %v", err)
 	}
-	if _, err := qv2.FragmentFromLinkAndVerify(link, otherTS); !errors.Is(err, qv2.ErrUnknownKID) {
+	if _, err := qv2.FragmentFromLinkAndVerify(link, otherTS.core()); !errors.Is(err, qv2.ErrUnknownKID) {
 		t.Fatalf("foreign trust store: want ErrUnknownKID, got %v", err)
 	}
 }

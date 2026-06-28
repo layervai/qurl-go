@@ -244,10 +244,10 @@ func TestDiscoveryProvider_PinnedManifest_Resolves(t *testing.T) {
 	}
 	// The manifest's relay host must be on the resolved allowlist; an off-list host
 	// must be rejected.
-	if err := qv2.ValidateRelayURL("https://relay.example.com", allow); err != nil {
+	if err := ValidateRelayURL("https://relay.example.com", allow); err != nil {
 		t.Fatalf("manifest relay host should be allowlisted: %v", err)
 	}
-	if err := qv2.ValidateRelayURL("https://not-the-relay.example.org", allow); !errors.Is(err, qv2.ErrRelayURL) {
+	if err := ValidateRelayURL("https://not-the-relay.example.org", allow); !errors.Is(err, ErrRelayURL) {
 		t.Fatalf("off-allowlist host should be rejected: %v", err)
 	}
 }
@@ -334,10 +334,10 @@ func TestDiscoveryProvider_SignedManifest_Resolves(t *testing.T) {
 	if ts == nil || allow == nil {
 		t.Fatal("resolve returned a nil trust store or allowlist on success")
 	}
-	if err := qv2.ValidateRelayURL("https://relay.example.com", allow); err != nil {
+	if err := ValidateRelayURL("https://relay.example.com", allow); err != nil {
 		t.Fatalf("manifest relay host should be allowlisted: %v", err)
 	}
-	if err := qv2.ValidateRelayURL("https://not-the-relay.example.org", allow); !errors.Is(err, qv2.ErrRelayURL) {
+	if err := ValidateRelayURL("https://not-the-relay.example.org", allow); !errors.Is(err, ErrRelayURL) {
 		t.Fatalf("off-allowlist host should be rejected: %v", err)
 	}
 }
@@ -752,13 +752,13 @@ func TestEnterPortal_DiscoveryProvider_RelayOffAllowlist_Rejected(t *testing.T) 
 	// signature verifies) and an allowlist missing the link's relay host. Using a
 	// providerFunc keeps the focus on the post-verify ordering; the manifest
 	// authentication itself is covered by the pin/sig tests above.
-	offList := qv2.NewRelayAllowlist([]string{"not-the-relay.example.org"})
-	installDefaultProvider(t, providerFunc(func(context.Context) (*qv2.TrustStore, *qv2.RelayAllowlist, error) {
+	offList := NewRelayAllowlist([]string{"not-the-relay.example.org"})
+	installDefaultProvider(t, providerFunc(func(context.Context) (*TrustStore, *RelayAllowlist, error) {
 		return ts, offList, nil
 	}))
 
 	_, err := EnterPortal(context.Background(), link)
-	if !errors.Is(err, qv2.ErrRelayURL) {
+	if !errors.Is(err, ErrRelayURL) {
 		t.Fatalf("off-allowlist relay after sig verify: want ErrRelayURL, got %v", err)
 	}
 }

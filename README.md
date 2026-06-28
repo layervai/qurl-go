@@ -3,7 +3,8 @@
 **Give an AI agent — or any client — authenticated, time-bound access to a private
 MCP server, API, or service, without opening a port, running a VPN, or sharing a
 key.** The service stays invisible to the internet; only a caller holding a signed,
-expiring **qURL link** can reach it, and only after it proves who it is.
+expiring **qURL link** can reach it, and only by proving possession of that link's
+one-time credential.
 
 qURL is the access layer for the agentic internet — *authenticate-before-connect*,
 built on the open **OpenNHP** standard. This is the Go SDK.
@@ -38,7 +39,7 @@ and ignores every packet until a caller proves it's authorized. Access is handed
 as a **qURL link** — a short-lived, cryptographically signed ticket.
 
 - **No inbound port.** The caller makes an *outbound* knock; nothing is ever exposed.
-- **No shared secret.** Each link carries its own one-time credential and an expiry.
+- **No long-lived shared secret.** Each link carries its own one-time credential and an expiry.
 - **Authenticated and governed.** The issuer signature, the relay, and the validity
   window are all verified before any connection is attempted.
 

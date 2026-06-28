@@ -4,17 +4,15 @@ package qurl
 // this one package: minting links (CreatePortal), opening them (EnterPortal), the
 // issuer signing seam, the trust store and relay allowlist, link verification, and
 // the typed errors to match on. The cryptographic core lives in an internal package;
-// these aliases and wrappers re-export exactly the surface callers need, so you never
+// these wrappers expose exactly the surface callers need, so you never
 // import anything but qurl.
 
 import (
 	"context"
 	"crypto/ecdsa"
+	"errors"
 
-	// Aliased to `core` so the re-exported type aliases and error vars below render
-	// as `= core.X` on pkg.go.dev rather than surfacing the internal package name.
-	core "github.com/layervai/qurl-go/internal/qv2"
-	"github.com/layervai/qurl-go/relayknock"
+	"github.com/layervai/qurl-go/internal/qv2"
 )
 
 // --- core types ---
@@ -23,37 +21,115 @@ import (
 // KMS- or HSM-resident P-256 key; LocalSigner is the software-key implementation for
 // tests and self-custody. Implementations sign the digest they are handed and must
 // not recompute it.
-type Signer = core.Signer
+type Signer interface {
+	// KID returns the published trust-store key id this signer stamps into claims.
+	KID() string
+	// SignDigest signs the 32-byte SHA-256 signing digest and returns an ASN.1 DER
+	// ECDSA signature over P-256.
+	SignDigest(ctx context.Context, digest []byte) (derSig []byte, err error)
+}
 
 // LocalSigner is an in-process Signer backed by a software-resident P-256 key. Use it
 // for local development and tests; production custody belongs in a KMS/HSM Signer.
-type LocalSigner = core.LocalSigner
+type LocalSigner struct {
+	inner *qv2.LocalSigner
+}
+
+// KID returns the issuer key id this signer stamps into claims.
+func (s *LocalSigner) KID() string {
+	if s == nil || s.inner == nil {
+		return ""
+	}
+	return s.inner.KID()
+}
+
+// SignDigest signs the digest with the local key and returns ASN.1 DER.
+func (s *LocalSigner) SignDigest(ctx context.Context, digest []byte) ([]byte, error) {
+	if s == nil || s.inner == nil {
+		return nil, errors.New("qurl: nil local signer")
+	}
+	return s.inner.SignDigest(ctx, digest)
+}
+
+// PublicKeyDER returns the signer's issuer public key in DER SPKI form, the shape
+// accepted by NewTrustStoreFromDER.
+func (s *LocalSigner) PublicKeyDER() ([]byte, error) {
+	if s == nil || s.inner == nil {
+		return nil, errors.New("qurl: nil local signer")
+	}
+	return s.inner.PublicKeyDER()
+}
 
 // TrustStore resolves a link's key id (kid) to the issuer public key used to verify
 // its signature. Build one with NewTrustStore or NewTrustStoreFromDER.
-type TrustStore = core.TrustStore
+type TrustStore struct {
+	inner *qv2.TrustStore
+}
 
 // RelayAllowlist is the set of relay host[:port] origins a verified link may target.
 // Build one with NewRelayAllowlist. An empty allowlist rejects every link.
-type RelayAllowlist = core.RelayAllowlist
+type RelayAllowlist struct {
+	inner *qv2.RelayAllowlist
+}
 
 // Claims is the verified claim set carried by a qURL link (relay, keys, validity
 // window, id). Read it from the Fragment returned by VerifyLink.
-type Claims = core.Claims
+type Claims struct {
+	V   int    `json:"v"`
+	Iss string `json:"iss"`
+	Kid string `json:"kid"`
+	Iat int64  `json:"iat"`
+	Nbf int64  `json:"nbf"`
+	Exp int64  `json:"exp"`
+	Jti string `json:"jti"`
+
+	CellPublicKeyB64 string `json:"cell_public_key_b64"`
+	CellID           string `json:"cell_id,omitempty"`
+	RelayURL         string `json:"relay_url"`
+
+	ResourcePublicKeyB64 string `json:"resource_public_key_b64"`
+	QurlUserPublicKeyB64 string `json:"qurl_user_public_key_b64"`
+}
 
 // Secret is the one-time per-link credential carried by a qURL link. It is the type of
 // Fragment.Secret; most callers never construct it (CreatePortal mints it and
-// EnterPortal consumes it), but it is re-exported so Fragment.Secret has a nameable type.
-type Secret = core.Secret
+// EnterPortal consumes it), but it is exported so Fragment.Secret has a nameable type.
+type Secret struct {
+	QurlUserPrivateKeyB64 string `json:"qurl_user_private_key_b64"`
+}
 
 // Fragment is a parsed, verified qURL link: its Claims and Secret plus the exact
 // signed bytes. VerifyLink returns one.
-type Fragment = core.Fragment
+type Fragment struct {
+	// ClaimsB64 is the exact unpadded-base64url claims string as it appeared in the
+	// fragment. Signature verification uses this, not a re-serialization of Claims.
+	ClaimsB64 string
+	// SecretB64 is the exact unpadded-base64url secret string as it appeared in the
+	// fragment.
+	SecretB64 string
+	// SigB64 is the exact unpadded-base64url issuer signature as it appeared in the
+	// fragment.
+	SigB64 string
+	// Claims is the strict-parsed, verified claim set.
+	Claims *Claims
+	// Secret is the strict-parsed per-link credential.
+	Secret *Secret
+}
 
 // RelayError is a transport fault talking to the relay (before any authenticated
 // server decision). Match it with errors.As to distinguish transport faults from an
 // authenticated ServerDenyError.
-type RelayError = relayknock.RelayError
+type RelayError struct {
+	Status int
+	Msg    string
+}
+
+func (e *RelayError) Error() string {
+	if e == nil {
+		return "qurl: relay error"
+	}
+	return e.Msg
+}
 
 // --- signing (issuer side) ---
 
@@ -61,14 +137,22 @@ type RelayError = relayknock.RelayError
 // convenience for tests and local development; a generated key is ephemeral and is
 // not a production custody model.
 func GenerateLocalSigner(kid string) (*LocalSigner, error) {
-	return core.GenerateLocalSigner(kid)
+	signer, err := qv2.GenerateLocalSigner(kid)
+	if err != nil {
+		return nil, err
+	}
+	return &LocalSigner{inner: signer}, nil
 }
 
 // NewLocalSigner builds a LocalSigner from an existing P-256 private key and the kid
 // verifiers resolve to its public half. It rejects a nil key, a non-P-256 curve, and
 // an empty kid.
 func NewLocalSigner(priv *ecdsa.PrivateKey, kid string) (*LocalSigner, error) {
-	return core.NewLocalSigner(priv, kid)
+	signer, err := qv2.NewLocalSigner(priv, kid)
+	if err != nil {
+		return nil, err
+	}
+	return &LocalSigner{inner: signer}, nil
 }
 
 // --- trust anchors (opener side) ---
@@ -76,28 +160,36 @@ func NewLocalSigner(priv *ecdsa.PrivateKey, kid string) (*LocalSigner, error) {
 // NewTrustStore builds a trust store from a kid -> P-256 public key map. The map is
 // copied; every key must be a non-nil P-256 public key.
 func NewTrustStore(keys map[string]*ecdsa.PublicKey) (*TrustStore, error) {
-	return core.NewTrustStore(keys)
+	trust, err := qv2.NewTrustStore(keys)
+	if err != nil {
+		return nil, err
+	}
+	return wrapTrustStore(trust), nil
 }
 
 // NewTrustStoreFromDER builds a trust store from kid -> DER SPKI public-key bytes —
 // the form AWS KMS GetPublicKey returns and the form persisted in config. This is the
 // usual way to load issuer anchors.
 func NewTrustStoreFromDER(derByKID map[string][]byte) (*TrustStore, error) {
-	return core.NewTrustStoreFromDER(derByKID)
+	trust, err := qv2.NewTrustStoreFromDER(derByKID)
+	if err != nil {
+		return nil, err
+	}
+	return wrapTrustStore(trust), nil
 }
 
 // ParseP256PublicKeyDER parses a DER SPKI public key and asserts it is on the P-256
 // curve. Handy for turning a single issuer key blob into a *ecdsa.PublicKey for
 // NewTrustStore.
 func ParseP256PublicKeyDER(der []byte) (*ecdsa.PublicKey, error) {
-	return core.ParseP256PublicKeyDER(der)
+	return qv2.ParseP256PublicKeyDER(der)
 }
 
 // NewRelayAllowlist builds a relay allowlist from host or host:port entries. A bare
 // host matches any port; a host:port entry matches only that exact pair. An empty
 // allowlist rejects every link (fail closed).
 func NewRelayAllowlist(entries []string) *RelayAllowlist {
-	return core.NewRelayAllowlist(entries)
+	return wrapRelayAllowlist(qv2.NewRelayAllowlist(entries))
 }
 
 // --- verification ---
@@ -109,14 +201,18 @@ func NewRelayAllowlist(entries []string) *RelayAllowlist {
 // ErrUnknownKID). Validate the relay separately with ValidateRelayURL before acting
 // on it.
 func VerifyLink(link string, trust *TrustStore) (*Fragment, error) {
-	return core.FragmentFromLinkAndVerify(link, trust)
+	fragment, err := qv2.FragmentFromLinkAndVerify(link, trust.core())
+	if err != nil {
+		return nil, err
+	}
+	return wrapFragment(fragment), nil
 }
 
 // ValidateRelayURL checks a verified link's relay against the HTTPS requirement and
 // the allowlist. Call it only after VerifyLink succeeds (the relay is
 // attacker-controlled until the signature verifies).
 func ValidateRelayURL(relayURL string, allow *RelayAllowlist) error {
-	return core.ValidateRelayURL(relayURL, allow)
+	return qv2.ValidateRelayURL(relayURL, allow.core())
 }
 
 // VerifyRawIssuerSignature verifies a raw 64-byte r||s low-S issuer signature over the
@@ -124,7 +220,7 @@ func ValidateRelayURL(relayURL string, allow *RelayAllowlist) error {
 // behind VerifyLink, exposed for cross-language conformance tooling. Most callers want
 // VerifyLink instead.
 func VerifyRawIssuerSignature(pub *ecdsa.PublicKey, claimsB64 string, rawSig []byte) error {
-	return core.VerifyRawIssuerSignature(pub, claimsB64, rawSig)
+	return qv2.VerifyRawIssuerSignature(pub, claimsB64, rawSig)
 }
 
 // --- discovery manifests (publishing side) ---
@@ -133,7 +229,7 @@ func VerifyRawIssuerSignature(pub *ecdsa.PublicKey, claimsB64 string, rawSig []b
 // DiscoveryConfig.PinSHA256 when pinning a published trust manifest. Hash the decoded
 // manifest the publisher signs and serves, not the envelope.
 func ManifestDigest(manifest []byte) [32]byte {
-	return core.ManifestDigest(manifest)
+	return qv2.ManifestDigest(manifest)
 }
 
 // SignManifest signs a discovery trust manifest with an issuer Signer, returning the
@@ -141,7 +237,7 @@ func ManifestDigest(manifest []byte) [32]byte {
 // publishing-side counterpart to the signed-manifest path NewDiscoveryProvider
 // verifies; manifest signing uses a separate signing domain from qURL link claims.
 func SignManifest(ctx context.Context, signer Signer, manifestBytes []byte) ([]byte, error) {
-	return core.SignManifest(ctx, signer, manifestBytes)
+	return qv2.SignManifest(ctx, signer, manifestBytes)
 }
 
 // VerifyManifestSignature verifies a detached manifest signature (the envelope's
@@ -149,7 +245,75 @@ func SignManifest(ctx context.Context, signer Signer, manifestBytes []byte) ([]b
 // NewDiscoveryProvider does this for you when consuming a signed manifest; it's
 // exposed so a publisher can self-check a manifest it just signed.
 func VerifyManifestSignature(pub *ecdsa.PublicKey, manifest, rawSig []byte) error {
-	return core.VerifyManifestSignature(pub, manifest, rawSig)
+	return qv2.VerifyManifestSignature(pub, manifest, rawSig)
+}
+
+func wrapTrustStore(trust *qv2.TrustStore) *TrustStore {
+	if trust == nil {
+		return nil
+	}
+	return &TrustStore{inner: trust}
+}
+
+func (ts *TrustStore) core() *qv2.TrustStore {
+	if ts == nil {
+		return nil
+	}
+	return ts.inner
+}
+
+func wrapRelayAllowlist(allow *qv2.RelayAllowlist) *RelayAllowlist {
+	if allow == nil {
+		return nil
+	}
+	return &RelayAllowlist{inner: allow}
+}
+
+func (allow *RelayAllowlist) core() *qv2.RelayAllowlist {
+	if allow == nil {
+		return nil
+	}
+	return allow.inner
+}
+
+func wrapFragment(fragment *qv2.Fragment) *Fragment {
+	if fragment == nil {
+		return nil
+	}
+	return &Fragment{
+		ClaimsB64: fragment.ClaimsB64,
+		SecretB64: fragment.SecretB64,
+		SigB64:    fragment.SigB64,
+		Claims:    wrapClaims(fragment.Claims),
+		Secret:    wrapSecret(fragment.Secret),
+	}
+}
+
+func wrapClaims(claims *qv2.Claims) *Claims {
+	if claims == nil {
+		return nil
+	}
+	return &Claims{
+		V:                    claims.V,
+		Iss:                  claims.Iss,
+		Kid:                  claims.Kid,
+		Iat:                  claims.Iat,
+		Nbf:                  claims.Nbf,
+		Exp:                  claims.Exp,
+		Jti:                  claims.Jti,
+		CellPublicKeyB64:     claims.CellPublicKeyB64,
+		CellID:               claims.CellID,
+		RelayURL:             claims.RelayURL,
+		ResourcePublicKeyB64: claims.ResourcePublicKeyB64,
+		QurlUserPublicKeyB64: claims.QurlUserPublicKeyB64,
+	}
+}
+
+func wrapSecret(secret *qv2.Secret) *Secret {
+	if secret == nil {
+		return nil
+	}
+	return &Secret{QurlUserPrivateKeyB64: secret.QurlUserPrivateKeyB64}
 }
 
 // --- error sentinels (match with errors.Is) ---
@@ -158,20 +322,30 @@ var (
 	// ErrSignature is returned when a link's issuer signature does not verify
 	// (forged or tampered, or signed by a key not in your trust store's value for
 	// that kid).
-	ErrSignature = core.ErrSignature
+	ErrSignature error
 	// ErrUnknownKID is returned when a link's kid is not in the trust store.
-	ErrUnknownKID = core.ErrUnknownKID
+	ErrUnknownKID error
 	// ErrRelayURL is returned when a link's relay is not HTTPS or not on the allowlist.
-	ErrRelayURL = core.ErrRelayURL
+	ErrRelayURL error
 	// ErrStrictParse is returned for any strict-schema violation in a link's claims
 	// (duplicate key, unknown field, null, wrong type, out-of-range time, ...).
-	ErrStrictParse = core.ErrStrictParse
+	ErrStrictParse error
 	// ErrFragment is returned when a link's shape is invalid (wrong prefix, wrong part
 	// count, empty part).
-	ErrFragment = core.ErrFragment
+	ErrFragment error
 	// ErrEncoding is returned when a part of a link is not valid unpadded base64url.
-	ErrEncoding = core.ErrEncoding
+	ErrEncoding error
 	// ErrKeyLength is returned when a decoded key field in a link is not its expected
 	// size.
-	ErrKeyLength = core.ErrKeyLength
+	ErrKeyLength error
 )
+
+func init() {
+	ErrSignature = qv2.ErrSignature
+	ErrUnknownKID = qv2.ErrUnknownKID
+	ErrRelayURL = qv2.ErrRelayURL
+	ErrStrictParse = qv2.ErrStrictParse
+	ErrFragment = qv2.ErrFragment
+	ErrEncoding = qv2.ErrEncoding
+	ErrKeyLength = qv2.ErrKeyLength
+}

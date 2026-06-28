@@ -4,7 +4,7 @@
 //
 // Applications normally install deployment trust anchors and the relay allowlist once
 // through a Provider, then call EnterPortal with no per-call trust config. Minting and
-// local verification work offline; a live open also requires the deployment's qURL v2
+// local verification work offline; a live open also requires the deployment's qURL
 // admission service to accept the knock.
 //
 // EnterPortal stitches the two lower layers together in the protocol order:
@@ -31,6 +31,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 
 	"github.com/layervai/qurl-go/internal/qv2"
 	"github.com/layervai/qurl-go/relayknock"
@@ -54,7 +55,9 @@ type Config struct {
 
 // HTTPDoer is the subset of *http.Client EnterPortal needs, narrowed so a caller
 // can inject a fixed-egress or test client.
-type HTTPDoer = relayknock.HTTPDoer
+type HTTPDoer interface {
+	Do(req *http.Request) (*http.Response, error)
+}
 
 // ResourceHandle is the result of a successful EnterPortal: the resource URL returned
 // after admission plus the facts a caller needs to actually use it.
@@ -88,7 +91,7 @@ var ErrNotConfigured = errors.New("qurl: EnterPortal requires a trust store and 
 //
 // Without an installed provider, EnterPortal fails closed with ErrNotConfigured.
 // The SDK implements the local security checks and the core knock construction; completing
-// a live open also requires the deployment's qURL v2 admission service to be online.
+// a live open also requires the deployment's qURL admission service to be online.
 // Tests and controlled integrations can inject anchors via a StaticProvider /
 // DiscoveryProvider, or call EnterPortalWith directly.
 func EnterPortal(ctx context.Context, qurlLink string) (*ResourceHandle, error) {
@@ -110,14 +113,14 @@ func EnterPortalWith(ctx context.Context, qurlLink string, cfg Config) (*Resourc
 	// 1+2. Parse the fragment and verify the issuer signature. ParseAndVerify
 	// strict-parses then checks the signature over the exact received claims bytes;
 	// nothing downstream runs until the signature is good.
-	frag, err := qv2.FragmentFromLinkAndVerify(qurlLink, cfg.TrustStore)
+	frag, err := qv2.FragmentFromLinkAndVerify(qurlLink, cfg.TrustStore.core())
 	if err != nil {
 		return nil, err
 	}
 	claims := frag.Claims
 
 	// 3. relay_url is now trusted to act on — validate HTTPS + allowlist.
-	if err := qv2.ValidateRelayURL(claims.RelayURL, cfg.RelayAllowlist); err != nil {
+	if err := qv2.ValidateRelayURL(claims.RelayURL, cfg.RelayAllowlist.core()); err != nil {
 		return nil, err
 	}
 
@@ -148,10 +151,18 @@ func EnterPortalWith(ctx context.Context, qurlLink string, cfg Config) (*Resourc
 		DeviceStaticPriv: devicePriv,
 	})
 	if err != nil {
-		return nil, err
+		return nil, normalizeRelayError(err)
 	}
 
 	return interpretReply(reply)
+}
+
+func normalizeRelayError(err error) error {
+	var relayErr *relayknock.RelayError
+	if errors.As(err, &relayErr) {
+		return &RelayError{Status: relayErr.Status, Msg: relayErr.Msg}
+	}
+	return err
 }
 
 // interpretReply maps a decrypted, authenticated NHP reply to a ResourceHandle or

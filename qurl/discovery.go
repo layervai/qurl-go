@@ -28,14 +28,10 @@ import (
 // downgraded (older version than last accepted), missing a trust mode, or carrying an
 // empty/invalid anchor set or allowlist all return an error, never a partial result.
 //
-// OPEN DECISION #13 (tracked in qurl-go issue #24): the FINAL discovery trust policy
-// (signed vs pinned as the production default, kid-rotation procedure, downgrade-window
-// specifics) is Open Decision #13 in the qURL v2 plan and is not yet frozen. This file
-// implements the MECHANISM with safe fail-closed defaults and makes the policy
-// configurable (DiscoveryConfig). When #13 lands, it selects/clamps these knobs; it must
-// not loosen the fail-closed posture without an explicit threat-model decision recorded
-// there. The manifest JSON schema here is a documented assumption (no published schema
-// exists in the org yet) and may change to match #13.
+// Discovery trust policy is intentionally configurable while production defaults settle:
+// signed vs pinned manifests, kid rotation, and durable downgrade state are deployment
+// choices. This implementation provides the fail-closed mechanism behind those choices;
+// a later policy decision can select or clamp the knobs without loosening verification.
 
 // ManifestEnvelope is the fetched discovery document. The signed/pinned MANIFEST
 // itself is carried as opaque base64url (ManifestB64) — exactly like a qURL link fragment
@@ -124,7 +120,7 @@ type DiscoveryConfig struct {
 	// authenticate requires EVERY configured anchor that is present to validate (a pin,
 	// once configured, must match; a signature, once present and keyed, must verify), so
 	// "default false" relaxes which anchor is REQUIRED, never whether a present anchor may
-	// fail. #13 may flip this default for production.
+	// fail. Production deployments can require signatures when policy demands it.
 	RequireSignature bool
 
 	// MinVersion is the initial downgrade floor: a manifest with Version < MinVersion is
@@ -136,8 +132,8 @@ type DiscoveryConfig struct {
 	// The advanced floor is IN-MEMORY only: a process restart resets it to MinVersion, so
 	// rollback protection across restarts is bounded by MinVersion and the manifest's
 	// not_after, not by the highest version a previous process accepted. Durable
-	// rollback state is Open Decision #13 (tracked in qurl-go issue #24); pin a high
-	// MinVersion if cross-restart anti-rollback matters before #13 lands.
+	// rollback state is a deployment policy choice; pin a high MinVersion when
+	// cross-restart anti-rollback matters.
 	MinVersion int64
 
 	// ExpectedProfile, when non-empty, requires the manifest's Profile to equal it. A
@@ -146,9 +142,9 @@ type DiscoveryConfig struct {
 	ExpectedProfile string
 
 	// Now overrides the clock for expiry checks. Tests inject a fixed clock for
-	// determinism; production leaves it nil (time.Now). The crypto core is
+	// determinism; production leaves it nil (time.Now). Signature verification is
 	// deliberately clock-free, but staleness/expiry is THIS layer's job, so the clock
-	// lives here, not in the core.
+	// lives here.
 	Now func() time.Time
 }
 
@@ -210,8 +206,7 @@ var (
 // recently-authenticated, still-in-window manifest exists. This is a deliberate
 // fail-closed-over-availability stance for the mechanism. A deployment expecting high
 // open volume should wrap this in a TTL cache that itself fails closed once not_after
-// (or the TTL) elapses; whether prod ships such a cache (and its window) is Open
-// Decision #13, tracked in qurl-go issue #24.
+// (or the TTL) elapses; cache windows are a deployment policy choice.
 type DiscoveryProvider struct {
 	cfg DiscoveryConfig
 
@@ -219,7 +214,7 @@ type DiscoveryProvider struct {
 	// floor is the downgrade floor: max(cfg.MinVersion, highest accepted Version). A
 	// manifest with Version < floor is rejected, so an accepted revision can never be
 	// rolled back while this provider lives. It is in-memory only and resets to
-	// cfg.MinVersion on restart — see MinVersion for the cross-restart caveat (#13). Guarded by mu.
+	// cfg.MinVersion on restart — see MinVersion for the cross-restart caveat. Guarded by mu.
 	floor int64
 }
 
@@ -352,9 +347,8 @@ func (p *DiscoveryProvider) Resolve(ctx context.Context) (*TrustStore, *RelayAll
 // So a manifest that is unpinned-or-pin-mismatched, or that carries a signature that
 // does not verify, or that satisfies no anchor at all, is rejected. This is the
 // safe-default MECHANISM; whether the production policy is pin-only, signed-only, or
-// pin-AND-signed (and the exact precedence between them) is Open Decision #13, which
-// selects/clamps these knobs — it must not loosen this posture without a threat-model
-// decision recorded there. SigB64/Kid ride OUTSIDE the pinned/signed preimage, so an
+// pin-AND-signed (and the exact precedence between them) is a deployment policy choice.
+// SigB64/Kid ride OUTSIDE the pinned/signed preimage, so an
 // attacker who cannot alter the manifest bytes also cannot forge acceptance; corrupting
 // a present signature only makes an otherwise-good manifest fail closed (deny), never
 // admits a bad one.
@@ -534,12 +528,12 @@ func buildTrustMaterial(m *Manifest) (*TrustStore, *RelayAllowlist, error) {
 		}
 		derByKID[iss.Kid] = der
 	}
-	ts, err := qv2.NewTrustStoreFromDER(derByKID)
+	ts, err := NewTrustStoreFromDER(derByKID)
 	if err != nil {
 		// A bad key blob (wrong curve, unparseable DER) is a schema fault from the
 		// provider's view: the manifest carried an unusable anchor.
 		return nil, nil, fmt.Errorf("%w: %w", ErrManifestSchema, err)
 	}
-	allow := qv2.NewRelayAllowlist(m.RelayAllowlist)
+	allow := NewRelayAllowlist(m.RelayAllowlist)
 	return ts, allow, nil
 }

@@ -2,11 +2,15 @@ package qurl_test
 
 import (
 	"context"
+	"crypto/ecdh"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"strings"
 
-	"github.com/layervai/qurl-go/internal/testkeys"
 	"github.com/layervai/qurl-go/qurl"
 )
 
@@ -31,9 +35,9 @@ func Example() {
 	//    come from your deployment. Here we generate throwaway keys so the example is
 	//    self-contained. CreatePortal generates the per-link keypair for you.
 	link, err := qurl.CreatePortal(ctx, signer, qurl.CreateParams{
-		CellPublicKey:     testkeys.X25519Public(),
+		CellPublicKey:     exampleX25519Public(),
 		RelayURL:          "https://relay.example.com",
-		ResourcePublicKey: testkeys.P256SPKI(),
+		ResourcePublicKey: exampleP256SPKI(),
 		JTI:               "qurl_demo_0001",
 		IssuedAt:          1_700_000_000,
 		NotBefore:         1_700_000_000,
@@ -80,9 +84,9 @@ func ExampleCreatePortal() {
 	}
 
 	link, err := qurl.CreatePortal(context.Background(), signer, qurl.CreateParams{
-		CellPublicKey:     testkeys.X25519Public(),
+		CellPublicKey:     exampleX25519Public(),
 		RelayURL:          "https://relay.example.com",
-		ResourcePublicKey: testkeys.P256SPKI(),
+		ResourcePublicKey: exampleP256SPKI(),
 		JTI:               "qurl_demo_0002",
 		IssuedAt:          1_700_000_000,
 		NotBefore:         1_700_000_000,
@@ -147,9 +151,9 @@ func Example_rejectsForgedLink() {
 		panic(err)
 	}
 	forged, err := qurl.CreatePortal(context.Background(), attacker, qurl.CreateParams{
-		CellPublicKey:     testkeys.X25519Public(),
+		CellPublicKey:     exampleX25519Public(),
 		RelayURL:          "https://relay.example.com",
-		ResourcePublicKey: testkeys.P256SPKI(),
+		ResourcePublicKey: exampleP256SPKI(),
 		JTI:               "qurl_demo_0003",
 		IssuedAt:          1_700_000_000,
 		NotBefore:         1_700_000_000,
@@ -176,4 +180,24 @@ func trustStoreFor(signer *qurl.LocalSigner) *qurl.TrustStore {
 		panic(err)
 	}
 	return trust
+}
+
+func exampleX25519Public() []byte {
+	k, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		panic(err)
+	}
+	return k.PublicKey().Bytes()
+}
+
+func exampleP256SPKI() []byte {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		panic(err)
+	}
+	der, err := x509.MarshalPKIXPublicKey(&priv.PublicKey)
+	if err != nil {
+		panic(err)
+	}
+	return der
 }

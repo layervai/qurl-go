@@ -5,9 +5,6 @@ import (
 	"errors"
 	"net/http"
 	"testing"
-
-	"github.com/layervai/qurl-go/internal/qv2"
-	"github.com/layervai/qurl-go/relayknock"
 )
 
 // installDefaultProvider sets the process-wide default provider for the duration of a
@@ -65,7 +62,7 @@ func installCapturingTransport(t *testing.T) *capturingTransport {
 // construction error) and installs it as the process-wide default for the test. It
 // folds the construct → error-check → install prologue the one-arg EnterPortal tests
 // share, leaving each test's distinct ts/allow pairing visible at the call site.
-func installStaticProvider(t *testing.T, ts *qv2.TrustStore, allow *qv2.RelayAllowlist) {
+func installStaticProvider(t *testing.T, ts *TrustStore, allow *RelayAllowlist) {
 	t.Helper()
 	sp, err := NewStaticProvider(ts, allow)
 	if err != nil {
@@ -119,9 +116,9 @@ func TestEnterPortal_StaticProvider_VerifiesAndRoutes(t *testing.T) {
 
 	_, err := EnterPortal(context.Background(), link)
 
-	var relayErr *relayknock.RelayError
+	var relayErr *RelayError
 	if !errors.As(err, &relayErr) {
-		t.Fatalf("want a *relayknock.RelayError after the POST, got %v", err)
+		t.Fatalf("want a *qurl.RelayError after the POST, got %v", err)
 	}
 	wantURL := "https://relay.example.com/relay/" + cellFingerprint
 	if ct.gotURL != wantURL {
@@ -149,7 +146,7 @@ func TestEnterPortal_StaticProvider_UnknownKID_Rejected(t *testing.T) {
 	installStaticProvider(t, freshTrustStore(t), relayExampleAllowlist())
 
 	_, err := EnterPortal(context.Background(), link)
-	if !errors.Is(err, qv2.ErrUnknownKID) {
+	if !errors.Is(err, ErrUnknownKID) {
 		t.Fatalf("unknown kid via one-arg EnterPortal: want ErrUnknownKID, got %v", err)
 	}
 }
@@ -160,10 +157,10 @@ func TestEnterPortal_StaticProvider_UnknownKID_Rejected(t *testing.T) {
 // relay_url, proving the allowlist is enforced AFTER signature verification.
 func TestEnterPortal_StaticProvider_RelayOffAllowlist_Rejected(t *testing.T) {
 	link, ts, _ := vendoredAcceptLink(t)
-	installStaticProvider(t, ts, qv2.NewRelayAllowlist([]string{"not-the-relay.example.org"}))
+	installStaticProvider(t, ts, NewRelayAllowlist([]string{"not-the-relay.example.org"}))
 
 	_, err := EnterPortal(context.Background(), link)
-	if !errors.Is(err, qv2.ErrRelayURL) {
+	if !errors.Is(err, ErrRelayURL) {
 		t.Fatalf("relay off allowlist via one-arg EnterPortal: want ErrRelayURL, got %v", err)
 	}
 }
@@ -173,7 +170,7 @@ func TestEnterPortal_StaticProvider_RelayOffAllowlist_Rejected(t *testing.T) {
 // rather than being swallowed into a generic ErrNotConfigured.
 func TestEnterPortal_ProviderError_Propagates(t *testing.T) {
 	sentinel := errors.New("provider refused: stale")
-	installDefaultProvider(t, providerFunc(func(context.Context) (*qv2.TrustStore, *qv2.RelayAllowlist, error) {
+	installDefaultProvider(t, providerFunc(func(context.Context) (*TrustStore, *RelayAllowlist, error) {
 		return nil, nil, sentinel
 	}))
 
@@ -184,8 +181,8 @@ func TestEnterPortal_ProviderError_Propagates(t *testing.T) {
 }
 
 // providerFunc adapts a function to the Provider interface for tests.
-type providerFunc func(context.Context) (*qv2.TrustStore, *qv2.RelayAllowlist, error)
+type providerFunc func(context.Context) (*TrustStore, *RelayAllowlist, error)
 
-func (f providerFunc) Resolve(ctx context.Context) (*qv2.TrustStore, *qv2.RelayAllowlist, error) {
+func (f providerFunc) Resolve(ctx context.Context) (*TrustStore, *RelayAllowlist, error) {
 	return f(ctx)
 }

@@ -40,7 +40,7 @@ import (
 // real without this test minting anything. The secret part is synthesized — PoP
 // matching is a server-side check EnterPortal does not perform — so a placeholder
 // 32-byte key is sufficient to satisfy the strict secret parser.
-func vendoredAcceptLink(t *testing.T) (link string, ts *qv2.TrustStore, cellFingerprint string) {
+func vendoredAcceptLink(t *testing.T) (link string, ts *TrustStore, cellFingerprint string) {
 	t.Helper()
 	vf, err := qv2.LoadVectorBytes(conformance.IssuerSignatureVectors())
 	if err != nil {
@@ -61,7 +61,7 @@ func vendoredAcceptLink(t *testing.T) (link string, ts *qv2.TrustStore, cellFing
 	if err != nil {
 		t.Fatalf("decode issuer spki: %v", err)
 	}
-	ts, err = qv2.NewTrustStoreFromDER(map[string][]byte{vf.Issuer.KID: der})
+	ts, err = NewTrustStoreFromDER(map[string][]byte{vf.Issuer.KID: der})
 	if err != nil {
 		t.Fatalf("new trust store: %v", err)
 	}
@@ -118,9 +118,9 @@ func freshP256SPKIDER(t *testing.T) []byte {
 // freshTrustStore mints an unrelated issuer key under a kid that is NOT the
 // vendored vector's kid, so a vector-signed link resolves to ErrUnknownKID against
 // it.
-func freshTrustStore(t *testing.T) *qv2.TrustStore {
+func freshTrustStore(t *testing.T) *TrustStore {
 	t.Helper()
-	ts, err := qv2.NewTrustStoreFromDER(map[string][]byte{"unrelated-kid": freshP256SPKIDER(t)})
+	ts, err := NewTrustStoreFromDER(map[string][]byte{"unrelated-kid": freshP256SPKIDER(t)})
 	if err != nil {
 		t.Fatalf("new trust store: %v", err)
 	}
@@ -129,8 +129,8 @@ func freshTrustStore(t *testing.T) *qv2.TrustStore {
 
 // allowAll is the relay allowlist for the vendored vector's relay_url
 // (https://relay.example.com).
-func relayExampleAllowlist() *qv2.RelayAllowlist {
-	return qv2.NewRelayAllowlist([]string{"relay.example.com"})
+func relayExampleAllowlist() *RelayAllowlist {
+	return NewRelayAllowlist([]string{"relay.example.com"})
 }
 
 // --- Bucket A: gates -------------------------------------------------------
@@ -154,7 +154,7 @@ func TestEnterPortalWith_RelayOffAllowlist_Rejected(t *testing.T) {
 	link, ts, _ := vendoredAcceptLink(t)
 	// Allowlist a DIFFERENT host than the verified relay_url, so validation fails
 	// AFTER the signature verifies (proving the post-verify ordering).
-	cfg := Config{TrustStore: ts, RelayAllowlist: qv2.NewRelayAllowlist([]string{"not-the-relay.example.org"})}
+	cfg := Config{TrustStore: ts, RelayAllowlist: NewRelayAllowlist([]string{"not-the-relay.example.org"})}
 	_, err := EnterPortalWith(context.Background(), link, cfg)
 	if !errors.Is(err, qv2.ErrRelayURL) {
 		t.Fatalf("relay off allowlist: want ErrRelayURL, got %v", err)
@@ -195,11 +195,11 @@ func TestEnterPortalWith_RoutesToDerivedRelayURL(t *testing.T) {
 	_, err := EnterPortalWith(context.Background(), link, cfg)
 
 	// The knock is built and POSTed; the capturing client fails the transport, so
-	// EnterPortal surfaces a relayknock.RelayError — proving it got past parse,
+	// EnterPortal surfaces a qurl.RelayError — proving it got past parse,
 	// verify, relay validation, serverId derivation, and knock construction.
-	var relayErr *relayknock.RelayError
+	var relayErr *RelayError
 	if !errors.As(err, &relayErr) {
-		t.Fatalf("want a *relayknock.RelayError after the POST, got %v", err)
+		t.Fatalf("want a *qurl.RelayError after the POST, got %v", err)
 	}
 	wantURL := "https://relay.example.com/relay/" + cellFingerprint
 	if doer.gotURL != wantURL {
