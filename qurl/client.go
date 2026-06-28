@@ -167,7 +167,7 @@ func (s credentialState) authorize(req *http.Request) error {
 
 func validateHeaderValue(value, label string) error {
 	for _, r := range value {
-		if r < 0x20 || r == 0x7f {
+		if r < 0x20 || r > 0x7e {
 			return fmt.Errorf("%w: %s contains invalid header characters", ErrInvalidClientConfig, label)
 		}
 	}
@@ -901,6 +901,7 @@ func doAuthorizedJSON(ctx context.Context, httpClient HTTPDoer, baseURL string, 
 			return &APIError{
 				StatusCode: resp.StatusCode,
 				Detail:     fmt.Sprintf("read API response: %v", err),
+				err:        err,
 			}
 		}
 		return fmt.Errorf("qurl: read API response: %w", err)
@@ -974,6 +975,7 @@ type APIError struct {
 	Type       string
 	Title      string
 	Detail     string
+	err        error
 }
 
 func (e *APIError) Error() string {
@@ -987,6 +989,13 @@ func (e *APIError) Error() string {
 		return fmt.Sprintf("qurl: API error %d: %s", e.StatusCode, e.Title)
 	}
 	return fmt.Sprintf("qurl: API error %d", e.StatusCode)
+}
+
+func (e *APIError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.err
 }
 
 func apiErrorFromResponse(status int, body []byte) error {

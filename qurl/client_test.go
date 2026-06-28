@@ -450,6 +450,13 @@ func TestClient_Validation(t *testing.T) {
 	if _, err := badHeaderClient.ProtectURL(context.Background(), "https://example.com"); !errors.Is(err, ErrInvalidClientConfig) {
 		t.Fatalf("bad bearer header: want ErrInvalidClientConfig, got %v", err)
 	}
+	highByteHeaderClient, err := NewClient(BearerToken("lv_test\xff"), WithBaseURL("https://api.example.com"))
+	if err != nil {
+		t.Fatalf("NewClient high-byte bearer: %v", err)
+	}
+	if _, err := highByteHeaderClient.ProtectURL(context.Background(), "https://example.com"); !errors.Is(err, ErrInvalidClientConfig) {
+		t.Fatalf("high-byte bearer header: want ErrInvalidClientConfig, got %v", err)
+	}
 	if _, err := client.ProtectURL(context.Background(), "ftp://example.com"); !errors.Is(err, ErrInvalidResourceRequest) {
 		t.Fatalf("bad target URL: want ErrInvalidResourceRequest, got %v", err)
 	}
@@ -592,6 +599,46 @@ func TestClient_OversizedAPIErrorPreservesStatus(t *testing.T) {
 	}
 	if apiErr.StatusCode != http.StatusBadGateway || !strings.Contains(apiErr.Error(), "API response body exceeds") {
 		t.Fatalf("oversized API error = %#v", apiErr)
+	}
+}
+
+type readErrorCloser struct {
+	err error
+}
+
+func (r readErrorCloser) Read([]byte) (int, error) {
+	return 0, r.err
+}
+
+func (r readErrorCloser) Close() error {
+	return nil
+}
+
+func TestClient_APIErrorReadFailureUnwrapsCause(t *testing.T) {
+	client, err := NewClient(
+		BearerToken("lv_test"),
+		WithBaseURL("https://api.example.com"),
+		WithHTTPClient(doerFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusBadGateway,
+				Body:       readErrorCloser{err: context.Canceled},
+			}, nil
+		})),
+	)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	_, err = client.ProtectURL(context.Background(), "https://example.com")
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("read failure API error: want *APIError, got %T: %v", err, err)
+	}
+	if apiErr.StatusCode != http.StatusBadGateway {
+		t.Fatalf("APIError status = %d, want %d", apiErr.StatusCode, http.StatusBadGateway)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("APIError should unwrap context.Canceled, got %v", err)
 	}
 }
 

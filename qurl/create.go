@@ -28,8 +28,10 @@ import (
 // this origin.
 const LinkBaseURL = "https://qurl.link/"
 
-// b64url is the single pinned qURL wire encoding (unpadded base64url). The secret
-// part (Part 2) is assembled here with the stdlib encoder rather than widening the
+// b64url is the single pinned qURL wire encoding (unpadded base64url). Bootstrap
+// API key material uses strict standard base64 because that API speaks JSON, but
+// qURL link fragments use base64url because they live in URLs. The secret part
+// (Part 2) is assembled here with the stdlib encoder rather than widening the
 // public surface; RawURLEncoding's output is byte-identical to the core's internal
 // encoder. BuildFragment validates only the OUTER Part-2 envelope (it decodes the
 // base64url blob; it does not re-run the secret schema), so the inner
