@@ -136,3 +136,33 @@ func verifyRawSignature(pub *ecdsa.PublicKey, claimsB64 string, rawSig []byte) e
 	}
 	return nil
 }
+
+// VerifyRawIssuerSignature verifies a raw r||s issuer signature over the exact
+// claimsB64 wire string under pub, returning nil on success or a wrapped
+// ErrSignature (ErrSignatureLength / ErrSignatureHighS / ErrSignatureScalarRange
+// for the precise wire-format faults) otherwise.
+//
+// This is the SIGNATURE-ONLY primitive, NOT the full qURL verification path. It
+// does not resolve the issuer kid, consult a trust store, parse the
+// fragment/secret, validate relay_url, or enforce liveness (exp/nbf). Normal
+// callers MUST use FragmentFromLinkAndVerify / ParseAndVerify instead; reaching
+// for this to "just check the signature" while skipping those steps is a
+// security footgun.
+//
+// It is exported for one purpose: cross-language conformance tooling. The qURL v2
+// conformance artifact's signature class is defined at the raw-signature entry
+// point, and its negative cases cannot be reproduced through the full fragment
+// path — the tamper case flips the first base64url character of claimsB64, which
+// changes decoded byte 0 (the leading '{' of the claims JSON), so ParseAndVerify
+// would fail at JSON parsing (ErrStrictParse) before any signature check and never
+// surface the required bare ErrSignature. This entry point lets an external
+// verifier exercise the signature class directly.
+//
+// API stability: as the conformance entry point, this function's signature and its
+// sentinel set (ErrSignature plus the ErrSignatureLength / ErrSignatureHighS /
+// ErrSignatureScalarRange wire-format faults, matchable via errors.Is) are a
+// compatibility contract for the downstream conformance package and must not
+// change without a coordinated revision bump.
+func VerifyRawIssuerSignature(pub *ecdsa.PublicKey, claimsB64 string, rawSig []byte) error {
+	return verifyRawSignature(pub, claimsB64, rawSig)
+}
