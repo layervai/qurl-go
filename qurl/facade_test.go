@@ -58,6 +58,26 @@ func TestManifestFacadeRoundTrip(t *testing.T) {
 	}
 }
 
+func TestRelayErrorString(t *testing.T) {
+	tests := []struct {
+		name string
+		err  *qurl.RelayError
+		want string
+	}{
+		{name: "nil", err: nil, want: "qurl: platform access error"},
+		{name: "empty message", err: &qurl.RelayError{}, want: "qurl: platform access error"},
+		{name: "adds prefix", err: &qurl.RelayError{Msg: "relay POST failed"}, want: "qurl: relay POST failed"},
+		{name: "keeps prefix", err: &qurl.RelayError{Msg: "qurl: relay POST failed"}, want: "qurl: relay POST failed"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.err.Error(); got != tt.want {
+				t.Fatalf("RelayError.Error() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 // TestFragmentExportedFieldsMirrorCore guards wrapFragment, which hand-copies the
 // exported fields of the internal fragment. If the core fragment gains an exported
 // field, this parity check fails loudly rather than the public Fragment silently

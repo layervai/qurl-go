@@ -10,6 +10,7 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"errors"
+	"strings"
 
 	"github.com/layervai/qurl-go/internal/qv2"
 )
@@ -127,10 +128,13 @@ type RelayError struct {
 }
 
 func (e *RelayError) Error() string {
-	if e == nil {
+	if e == nil || strings.TrimSpace(e.Msg) == "" {
 		return "qurl: platform access error"
 	}
-	return e.Msg
+	if strings.HasPrefix(e.Msg, "qurl: ") {
+		return e.Msg
+	}
+	return "qurl: " + e.Msg
 }
 
 // --- signing (issuer side) ---
@@ -331,31 +335,21 @@ var (
 	// ErrSignature is returned when a link's issuer signature does not verify
 	// (forged or tampered, or signed by a key not in your trust store's value for
 	// that kid).
-	ErrSignature error
+	ErrSignature = qv2.ErrSignature
 	// ErrUnknownKID is returned when a link's kid is not in the trust store.
-	ErrUnknownKID error
+	ErrUnknownKID = qv2.ErrUnknownKID
 	// ErrRelayURL is returned when a link's qURL platform access URL is not HTTPS or
 	// not on the allowlist.
-	ErrRelayURL error
+	ErrRelayURL = qv2.ErrRelayURL
 	// ErrStrictParse is returned for any strict-schema violation in a link's claims
 	// (duplicate key, unknown field, null, wrong type, out-of-range time, ...).
-	ErrStrictParse error
+	ErrStrictParse = qv2.ErrStrictParse
 	// ErrFragment is returned when a link's shape is invalid (wrong prefix, wrong part
 	// count, empty part).
-	ErrFragment error
+	ErrFragment = qv2.ErrFragment
 	// ErrEncoding is returned when a part of a link is not valid unpadded base64url.
-	ErrEncoding error
+	ErrEncoding = qv2.ErrEncoding
 	// ErrKeyLength is returned when a decoded key field in a link is not its expected
 	// size.
-	ErrKeyLength error
-)
-
-func init() {
-	ErrSignature = qv2.ErrSignature
-	ErrUnknownKID = qv2.ErrUnknownKID
-	ErrRelayURL = qv2.ErrRelayURL
-	ErrStrictParse = qv2.ErrStrictParse
-	ErrFragment = qv2.ErrFragment
-	ErrEncoding = qv2.ErrEncoding
 	ErrKeyLength = qv2.ErrKeyLength
-}
+)

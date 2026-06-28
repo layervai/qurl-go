@@ -326,6 +326,9 @@ func TestClient_Validation(t *testing.T) {
 	if _, err := client.ProtectURL(context.Background(), "ftp://example.com"); !errors.Is(err, ErrInvalidResourceRequest) {
 		t.Fatalf("bad target URL: want ErrInvalidResourceRequest, got %v", err)
 	}
+	if _, err := client.ProtectURL(context.Background(), "https://"); !errors.Is(err, ErrInvalidResourceRequest) {
+		t.Fatalf("empty target host: want ErrInvalidResourceRequest, got %v", err)
+	}
 	if _, err := client.ConnectorResource(context.Background(), " "); !errors.Is(err, ErrInvalidResourceRequest) {
 		t.Fatalf("empty connector id: want ErrInvalidResourceRequest, got %v", err)
 	}
@@ -349,6 +352,21 @@ func TestClient_Validation(t *testing.T) {
 	}
 }
 
+func TestValidateCredentialsUsesBaseURL(t *testing.T) {
+	const wantURL = "https://api.example.test"
+	provider := CredentialProviderFunc(func(_ context.Context, req *http.Request) error {
+		if got := req.URL.String(); got != wantURL {
+			t.Fatalf("credential validation URL = %q, want %q", got, wantURL)
+		}
+		req.Header.Set("Authorization", "Bearer lv_test")
+		return nil
+	})
+
+	if err := validateCredentials(provider, wantURL); err != nil {
+		t.Fatalf("validateCredentials: %v", err)
+	}
+}
+
 func TestClient_APIError(t *testing.T) {
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/problem+json")
@@ -368,6 +386,24 @@ func TestClient_APIError(t *testing.T) {
 	}
 	if apiErr.StatusCode != http.StatusForbidden || apiErr.Code != "access_denied" || !strings.Contains(apiErr.Error(), "API key cannot create resources") {
 		t.Fatalf("api error = %#v", apiErr)
+	}
+}
+
+func TestClient_APIResponseTooLarge(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(strings.Repeat("x", maxAPIResponseBodyBytes+1)))
+	}))
+	defer api.Close()
+
+	client, err := NewClient(BearerToken("lv_test"), WithBaseURL(api.URL))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	_, err = client.ProtectURL(context.Background(), "https://example.com")
+	if err == nil || !strings.Contains(err.Error(), "API response body exceeds") {
+		t.Fatalf("too-large response: want precise cap error, got %v", err)
 	}
 }
 

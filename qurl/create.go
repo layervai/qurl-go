@@ -184,7 +184,7 @@ func (p CreateParams) validate() error {
 // buildSecretB64 assembles fragment Part 2: base64url of the JSON
 // {"qurl_user_private_key_b64":"<32-byte key>"}. Part 2 is base64url-encoded JSON,
 // not the raw key bytes, mirroring exactly what the verify path's secret parser
-// (the secret parser) consumes.
+// consumes.
 func buildSecretB64(privateKey []byte) (string, error) {
 	raw, err := json.Marshal(qv2.Secret{QurlUserPrivateKeyB64: b64url.EncodeToString(privateKey)})
 	if err != nil {

@@ -14,7 +14,11 @@ import (
 	"time"
 )
 
-const defaultAPIBaseURL = "https://api.layerv.ai"
+const (
+	defaultAPIBaseURL        = "https://api.layerv.ai"
+	maxAPIResponseBodyBytes  = 1 << 20
+	maxAPIResponseDrainBytes = 512 << 10
+)
 
 // DefaultIssuerStatePath is the issuer-state file written by the LayerV
 // install/bootstrap flow and read by OpenClient.
@@ -207,10 +211,14 @@ func NewClient(provider CredentialProvider, opts ...ClientOption) (*Client, erro
 // OpenClient returns a qURL API client using the default LayerV issuer state.
 func OpenClient(opts ...ClientOption) (*Client, error) {
 	provider := FileCredentials(DefaultIssuerStatePath)
-	if err := validateCredentials(provider); err != nil {
+	client, err := NewClient(provider, opts...)
+	if err != nil {
 		return nil, err
 	}
-	return NewClient(provider, opts...)
+	if err := validateCredentials(provider, client.baseURL); err != nil {
+		return nil, err
+	}
+	return client, nil
 }
 
 // Resource is a protected target registered in the LayerV qURL Platform.
@@ -653,8 +661,15 @@ func validateTargetURL(targetURL string, errKind error) error {
 	if targetURL == "" {
 		return fmt.Errorf("%w: target URL must not be empty", errKind)
 	}
-	if !strings.HasPrefix(targetURL, "http://") && !strings.HasPrefix(targetURL, "https://") {
-		return fmt.Errorf("%w: target URL must start with http:// or https://", errKind)
+	u, err := url.Parse(targetURL)
+	if err != nil {
+		return fmt.Errorf("%w: target URL: %w", errKind, err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("%w: target URL must use http or https", errKind)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("%w: target URL must include a host", errKind)
 	}
 	return nil
 }
@@ -674,11 +689,11 @@ func doBearerJSON(ctx context.Context, httpClient HTTPDoer, baseURL, token, meth
 	}, method, path, body, out)
 }
 
-func validateCredentials(provider CredentialProvider) error {
+func validateCredentials(provider CredentialProvider, baseURL string) error {
 	if provider == nil {
 		return fmt.Errorf("%w: credential provider must not be nil", ErrInvalidClientConfig)
 	}
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, defaultAPIBaseURL, http.NoBody)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, baseURL, http.NoBody)
 	if err != nil {
 		return fmt.Errorf("qurl: build credential validation request: %w", err)
 	}
@@ -724,8 +739,9 @@ func doAuthorizedJSON(ctx context.Context, httpClient HTTPDoer, baseURL string, 
 	defer func() {
 		_ = resp.Body.Close()
 	}()
+	defer drainResponseBody(resp.Body)
 
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	respBody, err := readAPIResponseBody(resp.Body)
 	if err != nil {
 		return fmt.Errorf("qurl: read API response: %w", err)
 	}
@@ -739,6 +755,21 @@ func doAuthorizedJSON(ctx context.Context, httpClient HTTPDoer, baseURL string, 
 		return fmt.Errorf("qurl: decode API response: %w", err)
 	}
 	return nil
+}
+
+func readAPIResponseBody(body io.Reader) ([]byte, error) {
+	raw, err := io.ReadAll(io.LimitReader(body, maxAPIResponseBodyBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) > maxAPIResponseBodyBytes {
+		return nil, fmt.Errorf("API response body exceeds %d bytes", maxAPIResponseBodyBytes)
+	}
+	return raw, nil
+}
+
+func drainResponseBody(body io.Reader) {
+	_, _ = io.Copy(io.Discard, io.LimitReader(body, maxAPIResponseDrainBytes))
 }
 
 // APIError is returned when the LayerV API responds with a non-2xx status.
