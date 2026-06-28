@@ -4,15 +4,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"os"
 )
 
 // qURL v2 conformance-vector artifact loader.
 //
-// qv2_conformance_vectors.json is the nhp-OWNED, language-agnostic wire-truth for
-// the qURL v2 verify path. Every qURL v2 verifier (the nhp Go package, the
-// TypeScript js-agent, and this qurl-go package) re-runs the SAME bytes against
-// its OWN implementation: a consumer feeds each class's input through its real
+// The conformance vectors are the language-agnostic wire-truth for the qURL v2
+// verify path. Every qURL v2 verifier re-runs the SAME bytes against its OWN
+// implementation: a consumer feeds each class's input through its real
 // parser/validator and asserts the declared accept/reject outcome (and, where the
 // class is about the distinction, the reject_class). The vectors are BEHAVIORAL —
 // a consumer recomputes/re-verifies rather than trusting a stored boolean — so a
@@ -20,12 +18,9 @@ import (
 //
 // This file is the schema + loader. conformance_test.go is the always-run test
 // that drives every class (including negatives) through this package's real entry
-// points.
-//
-// PROVISIONAL: the vendored qv2/testdata/qv2_conformance_vectors.json is copied
-// from the in-flight nhp branch feat/qv2-conformance-vectors. Adopting the merged
-// full-class artifact is a verbatim FILE SWAP — this loader and the test are
-// structured so no Go changes are needed when the artifact is re-vendored.
+// points. The bytes themselves are consumed from the public qurl-conformance
+// package (github.com/layervai/qurl-conformance), whose go:embed accessors return
+// the canonical artifact; the dependency version pins the bytes via go.sum.
 
 // reject_class vocabulary. The accept/reject expect values reuse the exported
 // signature-vector vocabulary directly (ExpectAccept / ExpectReject); only the
@@ -144,15 +139,11 @@ type ConformanceVector struct {
 	ServerID         string `json:"server_id"`
 }
 
-// LoadConformanceFile reads and strictly parses the conformance artifact. It
-// returns an error (never an empty/zero document) when the file is missing or
-// malformed, so a consumer test FAILS rather than silently skipping the contract.
+// LoadConformanceBytes strictly parses the conformance artifact bytes. It returns
+// an error (never an empty/zero document) when the bytes are empty or malformed,
+// so a consumer test FAILS rather than silently skipping the contract.
 // DisallowUnknownFields keeps a typo'd or stale schema field from being ignored.
-func LoadConformanceFile(path string) (*ConformanceFile, error) {
-	data, err := os.ReadFile(path) //nolint:gosec // fixed test fixture path, not user input
-	if err != nil {
-		return nil, fmt.Errorf("qv2: read conformance file: %w", err)
-	}
+func LoadConformanceBytes(data []byte) (*ConformanceFile, error) {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
 	var cf ConformanceFile
@@ -160,10 +151,10 @@ func LoadConformanceFile(path string) (*ConformanceFile, error) {
 		return nil, fmt.Errorf("qv2: parse conformance file: %w", err)
 	}
 	if cf.SchemaVersion == 0 {
-		return nil, fmt.Errorf("qv2: conformance file %s missing schema_version", path)
+		return nil, fmt.Errorf("qv2: conformance file missing schema_version")
 	}
 	if len(cf.Classes) == 0 {
-		return nil, fmt.Errorf("qv2: conformance file %s has no classes", path)
+		return nil, fmt.Errorf("qv2: conformance file has no classes")
 	}
 	return &cf, nil
 }

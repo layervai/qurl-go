@@ -3,63 +3,25 @@ package qv2
 import (
 	"bytes"
 	"crypto/ecdsa"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
-	"os"
 	"testing"
+
+	conformance "github.com/layervai/qurl-conformance"
 
 	"github.com/layervai/qurl-go/relayknock"
 )
 
-// conformanceFilePath is the vendored nhp-owned conformance artifact. It is a
-// standalone JSON document copied verbatim so this package runs the EXACT same
-// bytes the nhp Go verifier and the js-agent run against their implementations.
-const conformanceFilePath = "testdata/qv2_conformance_vectors.json"
-
-// signatureVectorPath is the composed signature golden file the conformance
-// artifact references by name (the single copy of the signature bytes).
-const signatureVectorPath = "testdata/issuer_signature_vectors.json"
-
-// conformanceArtifactSHA256 pins the exact bytes of the vendored conformance
-// artifact. The artifact is vendored VERBATIM from the nhp-owned upstream, so this
-// hash turns any later hand-edit (content drift the loader's DisallowUnknownFields
-// cannot catch) into a CI failure. A legitimate re-vendor swaps the file AND
-// updates this constant in the same change, keeping a contract change intentional
-// and reviewable.
-const conformanceArtifactSHA256 = "a90fec027d0199967b5541f3adef2c5145dd686fbf672622fa611511a728f52b"
-
-// TestConformanceArtifactVerbatim guards that the vendored artifact has not been
-// hand-edited since it was vendored: its bytes must match the pinned hash. This is
-// the content-drift counterpart to DisallowUnknownFields, which only catches schema
-// drift. (An automated equality check against the upstream source is not wired in
-// because the upstream lives in a separate repository; the re-vendor procedure plus
-// this pin are the guard.)
-func TestConformanceArtifactVerbatim(t *testing.T) {
-	raw, err := os.ReadFile(conformanceFilePath)
-	if err != nil {
-		t.Fatalf("read conformance artifact: %v", err)
-	}
-	sum := sha256.Sum256(raw)
-	if got := hex.EncodeToString(sum[:]); got != conformanceArtifactSHA256 {
-		t.Fatalf("vendored conformance artifact changed (sha256 %s, want %s).\n"+
-			"If this is an intentional re-vendor, update conformanceArtifactSHA256 to the new hash.\n"+
-			"Otherwise the file was hand-edited — vendored artifacts must stay byte-verbatim from upstream.",
-			got, conformanceArtifactSHA256)
-	}
-}
-
 // TestConformanceVectors is the always-run, every-class contract test. It loads
-// the vendored artifact and drives EVERY class — including every negative —
+// the conformance artifact and drives EVERY class — including every negative —
 // through this package's REAL entry points, asserting the declared accept/reject
 // outcome and (where the class pins it) the reject_class. It FAILS (never skips)
 // if the artifact is missing/unparseable, so the contract can never silently drop
 // out of the suite.
 //
-// PROVISIONAL VECTORS: the vendored artifact tracks the in-flight nhp qURL v2
-// integration branch. Re-vendoring a newer revision is a verbatim file swap (plus
-// updating conformanceArtifactSHA256); this test needs no change.
+// The artifact bytes come from the public qurl-conformance package and are pinned
+// by the dependency version (go.sum); adopting a newer revision is a dependency
+// bump, and this test needs no change.
 //
 // A flipped negative (an "expect":"reject" vector edited to "accept", or vice
 // versa) makes this test RED, because every accept/reject class switches on the
@@ -68,7 +30,7 @@ func TestConformanceArtifactVerbatim(t *testing.T) {
 // derivation with no reject branch, so its runner fails loudly on any non-accept
 // expect rather than honoring a flip.
 func TestConformanceVectors(t *testing.T) {
-	cf, err := LoadConformanceFile(conformanceFilePath)
+	cf, err := LoadConformanceBytes(conformance.QV2Vectors())
 	if err != nil {
 		t.Fatalf("conformance artifact must load: %v", err)
 	}
@@ -111,7 +73,7 @@ func runSignatureClass(t *testing.T, cf *ConformanceFile) {
 	if cf.SignatureClass.Composes != "issuer_signature_vectors.json" {
 		t.Fatalf("signature class must compose issuer_signature_vectors.json, got %q", cf.SignatureClass.Composes)
 	}
-	vf, err := LoadVectorFile(signatureVectorPath)
+	vf, err := LoadVectorBytes(conformance.IssuerSignatureVectors())
 	if err != nil {
 		t.Fatalf("composed signature fixture must load: %v", err)
 	}
