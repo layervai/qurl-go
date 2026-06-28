@@ -63,12 +63,9 @@ type fileAgentStateStore struct {
 }
 
 func (s fileAgentStateStore) LoadAgentState(context.Context) (*AgentState, error) {
-	if err := validatePrivateStateFile(s.path, "agent state", ErrAgentStateNotFound, ErrInvalidBootstrapConfig, ErrInsecureAgentStatePermissions); err != nil {
-		return nil, err
-	}
-	raw, err := os.ReadFile(s.path)
+	raw, err := readPrivateStateFile(s.path, "agent state", ErrAgentStateNotFound, ErrInvalidBootstrapConfig, ErrInsecureAgentStatePermissions)
 	if err != nil {
-		return nil, fmt.Errorf("qurl: read agent state: %w", err)
+		return nil, err
 	}
 	var state AgentState
 	if err := json.Unmarshal(raw, &state); err != nil {
@@ -194,6 +191,13 @@ func WithVersion(version string) BootstrapOption {
 // BootstrapAgent consumes a temporary LayerV setup key, registers a local
 // X25519 identity, and saves that identity in store. The setup key is used for
 // this call only; future restarts load the saved AgentState.
+//
+// If store already contains a registered AgentState, BootstrapAgent returns it
+// without sending the setup key again. If a prior attempt saved only the local
+// keypair before receiving the API response, RegisteredAt is nil and calling
+// BootstrapAgent again retries registration with the same public key. That
+// lost-response retry depends on LayerV treating repeated registration for the
+// same public key as idempotent.
 func BootstrapAgent(ctx context.Context, setupKey string, store AgentStateStore, opts ...BootstrapOption) (*AgentState, error) {
 	if strings.TrimSpace(setupKey) == "" {
 		return nil, fmt.Errorf("%w: setup key must not be empty", ErrInvalidBootstrapConfig)
@@ -217,6 +221,15 @@ func BootstrapAgent(ctx context.Context, setupKey string, store AgentStateStore,
 	state, err := loadOrCreateAgentState(ctx, store)
 	if err != nil {
 		return nil, err
+	}
+	if state.RegisteredAt != nil {
+		if state.NHPPeer == nil {
+			return nil, fmt.Errorf("%w: registered agent state is missing NHP peer", ErrInvalidBootstrapConfig)
+		}
+		if cfg.agentID != "" && state.AgentID != "" && cfg.agentID != state.AgentID {
+			return nil, fmt.Errorf("%w: saved agent id %q does not match requested agent id %q", ErrInvalidBootstrapConfig, state.AgentID, cfg.agentID)
+		}
+		return state, nil
 	}
 	if cfg.agentID != "" {
 		state.AgentID = cfg.agentID

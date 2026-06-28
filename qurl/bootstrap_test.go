@@ -72,33 +72,73 @@ func TestBootstrapAgent_GeneratesRegistersAndSavesState(t *testing.T) {
 	}
 }
 
-func TestBootstrapAgent_ReusesSavedKeypair(t *testing.T) {
+func TestBootstrapAgent_RetriesIncompleteBootstrapWithSavedKeypair(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "agent-state.json")
 	store := FileAgentState(path)
 
 	var publicKeys []string
 	var calls atomic.Int32
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		call := calls.Add(1)
 		var body map[string]string
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatalf("decode body: %v", err)
 		}
 		publicKeys = append(publicKeys, body["public_key"])
+		if call == 1 {
+			http.Error(w, "temporary bootstrap failure", http.StatusBadGateway)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"data":{"agent_id":"agent-%d","registered_at":"2026-06-28T20:00:00Z","nhp_server_peer":{"public_key_b64":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=","host":"nhp.layerv.ai","port":62206,"expire_time":0}}}`, calls.Add(1))
+		fmt.Fprint(w, `{"data":{"agent_id":"agent-2","registered_at":"2026-06-28T20:00:00Z","nhp_server_peer":{"public_key_b64":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=","host":"nhp.layerv.ai","port":62206,"expire_time":0}}}`)
 	}))
 	defer api.Close()
 
-	for i := 0; i < 2; i++ {
-		if _, err := BootstrapAgent(context.Background(), "lv_bootstrap_once", store, WithBootstrapBaseURL(api.URL)); err != nil {
-			t.Fatalf("BootstrapAgent %d: %v", i+1, err)
-		}
+	if _, err := BootstrapAgent(context.Background(), "lv_setup_once", store, WithBootstrapBaseURL(api.URL)); err == nil {
+		t.Fatal("first BootstrapAgent succeeded, want temporary failure")
+	}
+	state, err := BootstrapAgent(context.Background(), "lv_setup_once", store, WithBootstrapBaseURL(api.URL))
+	if err != nil {
+		t.Fatalf("second BootstrapAgent: %v", err)
+	}
+	if state.AgentID != "agent-2" || state.RegisteredAt == nil {
+		t.Fatalf("state = %#v", state)
 	}
 	if len(publicKeys) != 2 {
 		t.Fatalf("public key count = %d, want 2", len(publicKeys))
 	}
 	if publicKeys[0] == "" || publicKeys[0] != publicKeys[1] {
 		t.Fatalf("bootstrap should reuse saved public key, got %q then %q", publicKeys[0], publicKeys[1])
+	}
+}
+
+func TestBootstrapAgent_ReturnsRegisteredStateWithoutNetwork(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agent-state.json")
+	store := FileAgentState(path)
+
+	var calls atomic.Int32
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if calls.Add(1) > 1 {
+			t.Fatalf("BootstrapAgent made an unexpected second network call")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"data":{"agent_id":"agent-1","registered_at":"2026-06-28T20:00:00Z","nhp_server_peer":{"public_key_b64":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=","host":"nhp.layerv.ai","port":62206,"expire_time":0}}}`)
+	}))
+	defer api.Close()
+
+	first, err := BootstrapAgent(context.Background(), "lv_setup_once", store, WithBootstrapBaseURL(api.URL))
+	if err != nil {
+		t.Fatalf("first BootstrapAgent: %v", err)
+	}
+	second, err := BootstrapAgent(context.Background(), "lv_consumed_setup_key", store, WithBootstrapBaseURL(api.URL))
+	if err != nil {
+		t.Fatalf("second BootstrapAgent: %v", err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("network calls = %d, want 1", calls.Load())
+	}
+	if second.AgentID != first.AgentID || second.PublicKeyB64 != first.PublicKeyB64 || second.NHPPeer == nil {
+		t.Fatalf("second state = %#v, first = %#v", second, first)
 	}
 }
 

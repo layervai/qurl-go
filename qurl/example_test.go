@@ -120,9 +120,9 @@ func ExampleNewClient() {
 }
 
 func ExampleBootstrapAgent() {
-	bootstrapKey := "lv_temporary_bootstrap_key_from_install_flow"
+	setupKey := "lv_temporary_setup_key_from_install_flow"
 	_, err := qurl.BootstrapAgent(context.Background(),
-		bootstrapKey,
+		setupKey,
 		qurl.FileAgentState("/var/lib/layerv/qurl/agent-state.json"),
 		qurl.WithAgentID("prod-us-east-1"),
 	)

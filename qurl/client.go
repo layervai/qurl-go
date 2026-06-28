@@ -11,7 +11,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"runtime/debug"
 	"strings"
 	"sync"
@@ -106,12 +105,9 @@ func FileCredentials(path string) CredentialProvider {
 }
 
 func (p fileCredentialProvider) Authorize(_ context.Context, req *http.Request) error {
-	if err := validatePrivateStateFile(p.path, "credential state", ErrCredentialStateNotFound, ErrInvalidClientConfig, ErrInsecureCredentialStatePermissions); err != nil {
-		return err
-	}
-	raw, err := os.ReadFile(p.path)
+	raw, err := readPrivateStateFile(p.path, "credential state", ErrCredentialStateNotFound, ErrInvalidClientConfig, ErrInsecureCredentialStatePermissions)
 	if err != nil {
-		return fmt.Errorf("qurl: read credential state: %w", err)
+		return err
 	}
 	var state credentialState
 	if err := json.Unmarshal(raw, &state); err != nil {
@@ -825,6 +821,8 @@ func readCappedBody(r io.Reader, limit int, what string) ([]byte, error) {
 }
 
 func drainResponseBody(body io.Reader) {
+	// The drain cap is best-effort connection reuse, not a second body-size
+	// policy. Larger error bodies are simply closed instead of fully drained.
 	_, _ = io.Copy(io.Discard, io.LimitReader(body, maxAPIResponseDrainBytes))
 }
 
