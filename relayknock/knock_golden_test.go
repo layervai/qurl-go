@@ -6,15 +6,15 @@ import (
 	"testing"
 )
 
-// These golden vectors are copied byte-for-byte from the nhp js-agent's
-// cross-language fixtures (endpoints/js-agent/test/testdata/*.json and
-// fingerprint.test.ts), which are themselves pinned to the Go nhp/core server
-// output, and were carried verbatim through the qurl-service #1021 clean-room
-// smoke client. If this relayknock port matches them, it is wire-compatible with
-// the deployed server BY CONSTRUCTION — so a live failure is auth/network, not
-// crypto. Do NOT edit a constant to make a test pass: a mismatch means the port
-// drifted from the server wire format (or the fixture was regenerated and must be
-// re-synced from nhp).
+// These golden vectors are copied byte-for-byte from the browser NHP agent's
+// cross-language fixtures (the shared knock/ack JSON vectors and fingerprint
+// vectors), which are themselves pinned to the reference NHP relay server output,
+// and were carried verbatim through a clean-room smoke client. If this relayknock
+// port matches them, it is wire-compatible with the deployed server BY
+// CONSTRUCTION — so a live failure is auth/network, not crypto. Do NOT edit a
+// constant to make a test pass: a mismatch means the port drifted from the server
+// wire format (or the fixture was regenerated and must be re-synced from the
+// reference implementation).
 
 func mustHex(t *testing.T, s string) []byte {
 	t.Helper()
@@ -26,7 +26,7 @@ func mustHex(t *testing.T, s string) []byte {
 }
 
 // fillBytes returns n bytes where b[i] = start+i (mod 256) — the fixed key
-// material the js-agent fixtures use (SERVER_PRIV=1.., DEVICE_PRIV=0x41..,
+// material the browser agent fixtures use (SERVER_PRIV=1.., DEVICE_PRIV=0x41..,
 // EPHEMERAL_PRIV=0x81..).
 func fillBytes(n, start int) []byte {
 	b := make([]byte, n)
@@ -36,9 +36,9 @@ func fillBytes(n, start int) []byte {
 	return b
 }
 
-// TestBuildKnock_GoldenVector reproduces the js-agent knock.json packet
+// TestBuildKnock_GoldenVector reproduces the browser agent's knock packet vector
 // byte-for-byte from the same fixed inputs, proving the handshake seal chain,
-// header framing, and digest match the Go server.
+// header framing, and digest match the reference server.
 func TestBuildKnock_GoldenVector(t *testing.T) {
 	const (
 		wantServerPubHex = "07a37cbc142093c8b755dc1b10e86cb426374ad16aa853ed0bdfc0b2b86d1c7c"
@@ -86,9 +86,9 @@ func TestBuildKnock_GoldenVector(t *testing.T) {
 	}
 }
 
-// TestDecryptReply_GoldenVector decrypts the js-agent ack.json reply packet
-// (server-built) and checks the recovered fields, proving the responder-side
-// transcript + AEAD opens match the Go server.
+// TestDecryptReply_GoldenVector decrypts the browser agent's ack reply packet
+// vector (server-built) and checks the recovered fields, proving the
+// responder-side transcript + AEAD opens match the reference server.
 func TestDecryptReply_GoldenVector(t *testing.T) {
 	const (
 		serverPubHex   = "07a37cbc142093c8b755dc1b10e86cb426374ad16aa853ed0bdfc0b2b86d1c7c"
@@ -118,8 +118,8 @@ func TestDecryptReply_GoldenVector(t *testing.T) {
 }
 
 // TestPubKeyFingerprint_GoldenVectors pins {serverId} derivation against the
-// shared Go/js-agent fingerprint vectors. These are the SAME inputs/outputs the
-// qv2 conformance server_id class reuses, so this fence and the qv2 routing
+// shared cross-language fingerprint vectors. These are the SAME inputs/outputs
+// the qv2 conformance server_id class reuses, so this fence and the qv2 routing
 // contract cannot fork.
 func TestPubKeyFingerprint_GoldenVectors(t *testing.T) {
 	cases := []struct {

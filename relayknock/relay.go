@@ -13,8 +13,8 @@ import (
 
 // Relay transport + the generic Knock orchestrator.
 //
-// The relay HTTP contract (nhp endpoints/relay/relay.go::handleRelay): POST the
-// raw knock packet as application/octet-stream to {relayBaseURL}/relay/{serverId};
+// The relay HTTP contract (the reference NHP relay's handleRelay endpoint): POST
+// the raw knock packet as application/octet-stream to {relayBaseURL}/relay/{serverId};
 // 200 → the server's reply packet bytes; any other status → a transport fault
 // (RelayError), distinct from an authenticated server *deny* (which comes back
 // inside a decryptable NHP_ACK).

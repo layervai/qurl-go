@@ -3,6 +3,7 @@ package qv2
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 )
 
@@ -151,10 +152,10 @@ func LoadConformanceBytes(data []byte) (*ConformanceFile, error) {
 		return nil, fmt.Errorf("qv2: parse conformance file: %w", err)
 	}
 	if cf.SchemaVersion == 0 {
-		return nil, fmt.Errorf("qv2: conformance file missing schema_version")
+		return nil, errors.New("qv2: conformance file missing schema_version")
 	}
 	if len(cf.Classes) == 0 {
-		return nil, fmt.Errorf("qv2: conformance file has no classes")
+		return nil, errors.New("qv2: conformance file has no classes")
 	}
 	return &cf, nil
 }
