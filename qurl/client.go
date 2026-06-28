@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -39,9 +40,17 @@ var ErrInvalidPortalRequest = errors.New("qurl: invalid portal request")
 // LayerV issuer state file.
 var ErrCredentialStateNotFound = errors.New("qurl: credential state not found")
 
+// ErrInsecureCredentialStatePermissions is returned when file-backed issuer
+// credentials are readable by group or other users.
+var ErrInsecureCredentialStatePermissions = errors.New("qurl: insecure credential state permissions")
+
 // ErrResourceNotFound is returned when a requested LayerV resource does not
 // exist for the current issuer.
 var ErrResourceNotFound = errors.New("qurl: resource not found")
+
+// ErrAmbiguousResource is returned when LayerV returns multiple resources for a
+// lookup that must resolve to exactly one.
+var ErrAmbiguousResource = errors.New("qurl: ambiguous resource")
 
 // CredentialProvider authorizes Client requests.
 //
@@ -95,14 +104,11 @@ func FileCredentials(path string) CredentialProvider {
 }
 
 func (p fileCredentialProvider) Authorize(_ context.Context, req *http.Request) error {
-	if strings.TrimSpace(p.path) == "" {
-		return fmt.Errorf("%w: credential state path must not be empty", ErrInvalidClientConfig)
+	if err := validatePrivateStateFile(p.path, "credential state", ErrCredentialStateNotFound, ErrInvalidClientConfig, ErrInsecureCredentialStatePermissions); err != nil {
+		return err
 	}
 	raw, err := os.ReadFile(p.path)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return ErrCredentialStateNotFound
-		}
 		return fmt.Errorf("qurl: read credential state: %w", err)
 	}
 	var state credentialState
@@ -158,7 +164,7 @@ type clientOptions struct {
 // applications do not need this.
 func WithBaseURL(rawURL string) ClientOption {
 	return clientOptionFunc(func(o *clientOptions) error {
-		if err := validateHTTPURL(rawURL, "base URL", ErrInvalidClientConfig); err != nil {
+		if err := validateHTTPSOrLoopbackURL(rawURL, "base URL", ErrInvalidClientConfig); err != nil {
 			return err
 		}
 		o.baseURL = strings.TrimRight(rawURL, "/")
@@ -268,6 +274,9 @@ func (c *Client) ConnectorResource(ctx context.Context, connectorID string) (*Re
 	}
 	if len(env.Data) == 0 {
 		return nil, fmt.Errorf("%w: connector %q", ErrResourceNotFound, connectorID)
+	}
+	if len(env.Data) > 1 {
+		return nil, fmt.Errorf("%w: connector %q returned %d resources", ErrAmbiguousResource, connectorID, len(env.Data))
 	}
 	resource := env.Data[0].resource()
 	resource.client = c
@@ -673,6 +682,28 @@ func validateHTTPURL(rawURL, label string, errKind error) error {
 	return nil
 }
 
+func validateHTTPSOrLoopbackURL(rawURL, label string, errKind error) error {
+	if err := validateHTTPURL(rawURL, label, errKind); err != nil {
+		return err
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("%w: %s: %w", errKind, label, err)
+	}
+	if u.Scheme == "http" && !isLoopbackHost(u.Hostname()) {
+		return fmt.Errorf("%w: %s must use https unless it targets localhost", errKind, label)
+	}
+	return nil
+}
+
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 func (c *Client) doJSON(ctx context.Context, method, path string, body, out any) error {
 	return doAuthorizedJSON(ctx, c.httpClient, c.baseURL, c.credentials.Authorize, method, path, body, out)
 }
@@ -729,7 +760,7 @@ func doAuthorizedJSON(ctx context.Context, httpClient HTTPDoer, baseURL string, 
 	}()
 	defer drainResponseBody(resp.Body)
 
-	respBody, err := readAPIResponseBody(resp.Body)
+	respBody, err := readCappedBody(resp.Body, maxAPIResponseBodyBytes, "API response body")
 	if err != nil {
 		return fmt.Errorf("qurl: read API response: %w", err)
 	}
@@ -745,13 +776,17 @@ func doAuthorizedJSON(ctx context.Context, httpClient HTTPDoer, baseURL string, 
 	return nil
 }
 
-func readAPIResponseBody(body io.Reader) ([]byte, error) {
-	raw, err := io.ReadAll(io.LimitReader(body, maxAPIResponseBodyBytes+1))
+// readCappedBody reads at most max bytes from r, returning an error if the source
+// held more rather than silently truncating it. It reads one byte past max so an
+// over-limit body is detectable; otherwise oversized input can fail later as a
+// confusing decode, parse, or pin mismatch. what names the body in errors.
+func readCappedBody(r io.Reader, limit int, what string) ([]byte, error) {
+	raw, err := io.ReadAll(io.LimitReader(r, int64(limit)+1))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read %s: %w", what, err)
 	}
-	if len(raw) > maxAPIResponseBodyBytes {
-		return nil, fmt.Errorf("API response body exceeds %d bytes", maxAPIResponseBodyBytes)
+	if len(raw) > limit {
+		return nil, fmt.Errorf("%s exceeds %d-byte cap", what, limit)
 	}
 	return raw, nil
 }

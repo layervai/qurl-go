@@ -61,21 +61,8 @@ type fileAgentStateStore struct {
 }
 
 func (s fileAgentStateStore) LoadAgentState(context.Context) (*AgentState, error) {
-	if strings.TrimSpace(s.path) == "" {
-		return nil, fmt.Errorf("%w: state path must not be empty", ErrInvalidBootstrapConfig)
-	}
-	info, err := os.Stat(s.path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, ErrAgentStateNotFound
-		}
-		return nil, fmt.Errorf("qurl: stat agent state: %w", err)
-	}
-	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("%w: state file must be regular", ErrInvalidBootstrapConfig)
-	}
-	if info.Mode().Perm()&0o077 != 0 {
-		return nil, fmt.Errorf("%w: %s has mode %o, want 0600 or stricter", ErrInsecureAgentStatePermissions, s.path, info.Mode().Perm())
+	if err := validatePrivateStateFile(s.path, "agent state", ErrAgentStateNotFound, ErrInvalidBootstrapConfig, ErrInsecureAgentStatePermissions); err != nil {
+		return nil, err
 	}
 	raw, err := os.ReadFile(s.path)
 	if err != nil {
@@ -150,7 +137,7 @@ type bootstrapOptions struct {
 // WithBootstrapBaseURL points BootstrapAgent at a non-default bootstrap origin.
 func WithBootstrapBaseURL(rawURL string) BootstrapOption {
 	return bootstrapOptionFunc(func(o *bootstrapOptions) error {
-		if err := validateHTTPURL(rawURL, "bootstrap URL", ErrInvalidBootstrapConfig); err != nil {
+		if err := validateHTTPSOrLoopbackURL(rawURL, "bootstrap URL", ErrInvalidBootstrapConfig); err != nil {
 			return err
 		}
 		o.baseURL = strings.TrimRight(rawURL, "/")
@@ -232,6 +219,8 @@ func BootstrapAgent(ctx context.Context, bootstrapKey string, store AgentStateSt
 	if cfg.agentID != "" {
 		state.AgentID = cfg.agentID
 	}
+	// Persist the generated keypair before the network call so a failed or
+	// interrupted bootstrap retry uses the same local identity.
 	if err := store.SaveAgentState(ctx, state); err != nil {
 		return nil, err
 	}

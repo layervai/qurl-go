@@ -3,7 +3,6 @@ package qurl
 import (
 	"context"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"time"
@@ -116,16 +115,12 @@ func (f *HTTPFetcher) Fetch(ctx context.Context) ([]byte, error) {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("qurl: manifest endpoint returned HTTP %d", resp.StatusCode)
 	}
-	// Read one byte past the cap so an over-limit body is detectable: if the reader
-	// yields maxManifestBytes+1 bytes, the real body was larger than the cap. This
-	// gives a precise error instead of handing a truncated body downstream to fail as
-	// a confusing pin/parse mismatch.
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxManifestBytes+1))
+	// readCappedBody reads one byte past the cap so an over-limit body is rejected
+	// with a precise error instead of being silently truncated and handed downstream
+	// to fail as a confusing pin/parse mismatch.
+	body, err := readCappedBody(resp.Body, maxManifestBytes, "manifest body")
 	if err != nil {
-		return nil, fmt.Errorf("qurl: read manifest body: %w", err)
-	}
-	if len(body) > maxManifestBytes {
-		return nil, fmt.Errorf("qurl: manifest body exceeds %d-byte cap", maxManifestBytes)
+		return nil, fmt.Errorf("qurl: %w", err)
 	}
 	return body, nil
 }

@@ -232,6 +232,27 @@ func TestClient_ConnectorResourceNotFound(t *testing.T) {
 	}
 }
 
+func TestClient_ConnectorResourceAmbiguous(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/resources" || r.URL.Query().Get("slug") != "prod-dashboard" {
+			t.Fatalf("request = %s %s?%s, want GET /v1/resources?slug=prod-dashboard", r.Method, r.URL.Path, r.URL.RawQuery)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"data":[{"resource_id":"r_first12345","status":"active"},{"resource_id":"r_second1234","status":"active"}]}`)
+	}))
+	defer api.Close()
+
+	client, err := NewClient(BearerToken("lv_test_123"), WithBaseURL(api.URL))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	_, err = client.ConnectorResource(context.Background(), "prod-dashboard")
+	if !errors.Is(err, ErrAmbiguousResource) {
+		t.Fatalf("ConnectorResource ambiguous: want ErrAmbiguousResource, got %v", err)
+	}
+}
+
 func TestClient_CredentialProvider(t *testing.T) {
 	var calls atomic.Int32
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -302,6 +323,18 @@ func TestClient_FileCredentialsErrors(t *testing.T) {
 	if _, err := client.ProtectURL(context.Background(), "https://example.com"); !errors.Is(err, ErrInvalidClientConfig) {
 		t.Fatalf("empty state: want ErrInvalidClientConfig, got %v", err)
 	}
+
+	insecurePath := filepath.Join(t.TempDir(), "issuer-state.json")
+	if err := os.WriteFile(insecurePath, []byte(`{"authorization":"Bearer lv_state_123"}`), 0o644); err != nil {
+		t.Fatalf("write insecure state: %v", err)
+	}
+	client, err = NewClient(FileCredentials(insecurePath), WithBaseURL("https://api.example.com"))
+	if err != nil {
+		t.Fatalf("NewClient insecure state: %v", err)
+	}
+	if _, err := client.ProtectURL(context.Background(), "https://example.com"); !errors.Is(err, ErrInsecureCredentialStatePermissions) {
+		t.Fatalf("insecure state: want ErrInsecureCredentialStatePermissions, got %v", err)
+	}
 }
 
 func TestClient_Validation(t *testing.T) {
@@ -310,6 +343,12 @@ func TestClient_Validation(t *testing.T) {
 	}
 	if _, err := NewClient(BearerToken("lv_test"), WithBaseURL("ftp://api.example.com")); !errors.Is(err, ErrInvalidClientConfig) {
 		t.Fatalf("bad base URL: want ErrInvalidClientConfig, got %v", err)
+	}
+	if _, err := NewClient(BearerToken("lv_test"), WithBaseURL("http://api.example.com")); !errors.Is(err, ErrInvalidClientConfig) {
+		t.Fatalf("plaintext non-loopback base URL: want ErrInvalidClientConfig, got %v", err)
+	}
+	if _, err := NewClient(BearerToken("lv_test"), WithBaseURL("http://localhost:8080")); err != nil {
+		t.Fatalf("loopback base URL: %v", err)
 	}
 
 	client, err := NewClient(BearerToken("lv_test"), WithBaseURL("https://api.example.com"))

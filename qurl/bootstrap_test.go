@@ -124,6 +124,9 @@ func TestBootstrapAgent_Validation(t *testing.T) {
 	if _, err := BootstrapAgent(context.Background(), "lv_bootstrap_once", memoryAgentStateStore{}, WithBootstrapBaseURL("ftp://bootstrap.example.com")); !errors.Is(err, ErrInvalidBootstrapConfig) {
 		t.Fatalf("bad URL: want ErrInvalidBootstrapConfig, got %v", err)
 	}
+	if _, err := BootstrapAgent(context.Background(), "lv_bootstrap_once", memoryAgentStateStore{}, WithBootstrapBaseURL("http://bootstrap.example.com")); !errors.Is(err, ErrInvalidBootstrapConfig) {
+		t.Fatalf("plaintext non-loopback URL: want ErrInvalidBootstrapConfig, got %v", err)
+	}
 
 	store := memoryAgentStateStore{state: &AgentState{PrivateKeyB64: "not-base64", PublicKeyB64: "also-bad"}}
 	if _, err := BootstrapAgent(context.Background(), "lv_bootstrap_once", store); !errors.Is(err, ErrInvalidBootstrapConfig) {

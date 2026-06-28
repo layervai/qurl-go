@@ -295,39 +295,24 @@ func wrapClaims(claims *qv2.Claims) *Claims {
 	if claims == nil {
 		return nil
 	}
-	return &Claims{
-		V:                    claims.V,
-		Iss:                  claims.Iss,
-		Kid:                  claims.Kid,
-		Iat:                  claims.Iat,
-		Nbf:                  claims.Nbf,
-		Exp:                  claims.Exp,
-		Jti:                  claims.Jti,
-		CellPublicKeyB64:     claims.CellPublicKeyB64,
-		CellID:               claims.CellID,
-		RelayURL:             claims.RelayURL,
-		ResourcePublicKeyB64: claims.ResourcePublicKeyB64,
-		QurlUserPublicKeyB64: claims.QurlUserPublicKeyB64,
-	}
+	c := Claims(*claims)
+	return &c
 }
 
 func wrapSecret(secret *qv2.Secret) *Secret {
 	if secret == nil {
 		return nil
 	}
-	return &Secret{QurlUserPrivateKeyB64: secret.QurlUserPrivateKeyB64}
+	s := Secret(*secret)
+	return &s
 }
 
-// Compile-time guards: the public Claims/Secret structs must stay field-identical to
-// the internal core structs (a struct conversion only compiles when fields match —
-// names, types, order; tags aside), so a core field change forces a matching change
-// here rather than a silent shape mismatch. That wrapClaims/wrapSecret/wrapFragment
-// actually populate every field is covered by TestVerifyLinkSurfacesAllClaimFields;
-// Fragment's exported-field shape is guarded by TestFragmentExportedFieldsMirrorCore.
-var (
-	_ = qv2.Claims(Claims{})
-	_ = qv2.Secret(Secret{})
-)
+// The public Claims/Secret structs must stay field-identical to the internal
+// core structs. wrapClaims/wrapSecret convert the whole struct, which only
+// compiles when fields match — names, types, order; tags aside — so a core field
+// change forces a matching change here and is carried through automatically.
+// Fragment mixes copied scalars with nested wraps, so its exported-field shape is
+// guarded separately by TestFragmentExportedFieldsMirrorCore.
 
 // --- error sentinels (match with errors.Is) ---
 
