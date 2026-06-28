@@ -133,7 +133,8 @@ var _ = RelayError(relayknock.RelayError{})
 func normalizeRelayError(err error) error {
 	var relayErr *relayknock.RelayError
 	if errors.As(err, &relayErr) {
-		return &RelayError{Status: relayErr.Status, Msg: relayErr.Msg}
+		re := RelayError(*relayErr)
+		return &re
 	}
 	return err
 }

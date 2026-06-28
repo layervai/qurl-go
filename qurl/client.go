@@ -158,15 +158,8 @@ type clientOptions struct {
 // applications do not need this.
 func WithBaseURL(rawURL string) ClientOption {
 	return clientOptionFunc(func(o *clientOptions) error {
-		u, err := url.Parse(rawURL)
-		if err != nil {
-			return fmt.Errorf("%w: base URL: %w", ErrInvalidClientConfig, err)
-		}
-		if u.Scheme != "http" && u.Scheme != "https" {
-			return fmt.Errorf("%w: base URL must use http or https", ErrInvalidClientConfig)
-		}
-		if u.Host == "" {
-			return fmt.Errorf("%w: base URL must include a host", ErrInvalidClientConfig)
+		if err := validateHTTPURL(rawURL, "base URL", ErrInvalidClientConfig); err != nil {
+			return err
 		}
 		o.baseURL = strings.TrimRight(rawURL, "/")
 		return nil
@@ -209,6 +202,8 @@ func NewClient(provider CredentialProvider, opts ...ClientOption) (*Client, erro
 }
 
 // OpenClient returns a qURL API client using the default LayerV issuer state.
+// It eagerly checks that the local credential source can authorize a request;
+// it does not call the LayerV API until the returned client is used.
 func OpenClient(opts ...ClientOption) (*Client, error) {
 	provider := FileCredentials(DefaultIssuerStatePath)
 	client, err := NewClient(provider, opts...)
@@ -658,35 +653,28 @@ func applyPortalOptions(opts []PortalOption) (portalOptions, error) {
 }
 
 func validateTargetURL(targetURL string, errKind error) error {
-	if targetURL == "" {
-		return fmt.Errorf("%w: target URL must not be empty", errKind)
+	return validateHTTPURL(targetURL, "target URL", errKind)
+}
+
+func validateHTTPURL(rawURL, label string, errKind error) error {
+	if strings.TrimSpace(rawURL) == "" {
+		return fmt.Errorf("%w: %s must not be empty", errKind, label)
 	}
-	u, err := url.Parse(targetURL)
+	u, err := url.Parse(rawURL)
 	if err != nil {
-		return fmt.Errorf("%w: target URL: %w", errKind, err)
+		return fmt.Errorf("%w: %s: %w", errKind, label, err)
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
-		return fmt.Errorf("%w: target URL must use http or https", errKind)
+		return fmt.Errorf("%w: %s must use http or https", errKind, label)
 	}
 	if u.Host == "" {
-		return fmt.Errorf("%w: target URL must include a host", errKind)
+		return fmt.Errorf("%w: %s must include a host", errKind, label)
 	}
 	return nil
 }
 
 func (c *Client) doJSON(ctx context.Context, method, path string, body, out any) error {
 	return doAuthorizedJSON(ctx, c.httpClient, c.baseURL, c.credentials.Authorize, method, path, body, out)
-}
-
-func doBearerJSON(ctx context.Context, httpClient HTTPDoer, baseURL, token, method, path string, body, out any) error {
-	return doAuthorizedJSON(ctx, httpClient, baseURL, func(_ context.Context, req *http.Request) error {
-		token = strings.TrimSpace(token)
-		if token == "" {
-			return fmt.Errorf("%w: bearer token must not be empty", ErrInvalidClientConfig)
-		}
-		req.Header.Set("Authorization", "Bearer "+token)
-		return nil
-	}, method, path, body, out)
 }
 
 func validateCredentials(provider CredentialProvider, baseURL string) error {

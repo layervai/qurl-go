@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,6 +22,10 @@ var ErrInvalidBootstrapConfig = errors.New("qurl: invalid bootstrap config")
 
 // ErrAgentStateNotFound is returned when an AgentStateStore has no saved state.
 var ErrAgentStateNotFound = errors.New("qurl: agent state not found")
+
+// ErrInsecureAgentStatePermissions is returned when file-backed agent state is
+// readable by group or other users.
+var ErrInsecureAgentStatePermissions = errors.New("qurl: insecure agent state permissions")
 
 // NHPServerPeerInfo is the LayerV peer returned by the bootstrap service.
 type NHPServerPeerInfo struct {
@@ -61,11 +64,21 @@ func (s fileAgentStateStore) LoadAgentState(context.Context) (*AgentState, error
 	if strings.TrimSpace(s.path) == "" {
 		return nil, fmt.Errorf("%w: state path must not be empty", ErrInvalidBootstrapConfig)
 	}
-	raw, err := os.ReadFile(s.path)
+	info, err := os.Stat(s.path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, ErrAgentStateNotFound
 		}
+		return nil, fmt.Errorf("qurl: stat agent state: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%w: state file must be regular", ErrInvalidBootstrapConfig)
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		return nil, fmt.Errorf("%w: %s has mode %o, want 0600 or stricter", ErrInsecureAgentStatePermissions, s.path, info.Mode().Perm())
+	}
+	raw, err := os.ReadFile(s.path)
+	if err != nil {
 		return nil, fmt.Errorf("qurl: read agent state: %w", err)
 	}
 	var state AgentState
@@ -137,15 +150,8 @@ type bootstrapOptions struct {
 // WithBootstrapBaseURL points BootstrapAgent at a non-default bootstrap origin.
 func WithBootstrapBaseURL(rawURL string) BootstrapOption {
 	return bootstrapOptionFunc(func(o *bootstrapOptions) error {
-		u, err := url.Parse(rawURL)
-		if err != nil {
-			return fmt.Errorf("%w: bootstrap URL: %w", ErrInvalidBootstrapConfig, err)
-		}
-		if u.Scheme != "http" && u.Scheme != "https" {
-			return fmt.Errorf("%w: bootstrap URL must use http or https", ErrInvalidBootstrapConfig)
-		}
-		if u.Host == "" {
-			return fmt.Errorf("%w: bootstrap URL must include a host", ErrInvalidBootstrapConfig)
+		if err := validateHTTPURL(rawURL, "bootstrap URL", ErrInvalidBootstrapConfig); err != nil {
+			return err
 		}
 		o.baseURL = strings.TrimRight(rawURL, "/")
 		return nil
@@ -237,7 +243,7 @@ func BootstrapAgent(ctx context.Context, bootstrapKey string, store AgentStateSt
 		Version:   cfg.version,
 	}
 	var env apiEnvelope[agentBootstrapResponse]
-	if err := doBearerJSON(ctx, cfg.httpClient, cfg.baseURL, bootstrapKey, http.MethodPost, "/v1/agent/bootstrap", reqBody, &env); err != nil {
+	if err := doAuthorizedJSON(ctx, cfg.httpClient, cfg.baseURL, BearerToken(bootstrapKey).Authorize, http.MethodPost, "/v1/agent/bootstrap", reqBody, &env); err != nil {
 		return nil, err
 	}
 

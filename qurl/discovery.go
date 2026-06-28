@@ -314,21 +314,22 @@ func (p *DiscoveryProvider) Resolve(ctx context.Context) (*TrustStore, *RelayAll
 		return nil, nil, fmt.Errorf("%w: not_after=%d, now=%d", ErrManifestExpired, manifest.NotAfter, now)
 	}
 
+	ts, allow, err := buildTrustMaterial(manifest)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	// Downgrade check + floor advance are one atomic step under the lock so concurrent
 	// resolves see a monotonic floor and never roll back. The check stays BELT-AND-LOCK:
 	// reading the floor and writing it must not straddle two acquisitions, or a racing
-	// resolve could move the floor backward (a monotonicity TOCTOU). buildTrustMaterial
-	// runs only after the floor check passes — so a downgrade/replay fails before the
-	// issuer-DER parsing is spent, and it touches no provider state, so holding the lock
-	// across it adds no contention (the expensive fetch already happened outside it).
+	// resolve could move the floor backward (a monotonicity TOCTOU). Trust-material
+	// parsing runs before the lock because it touches no provider state; if another
+	// resolve advances the floor while parsing is in progress, this resolve is rejected
+	// below instead of moving the floor backward.
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if manifest.Version < p.floor {
 		return nil, nil, fmt.Errorf("%w: version=%d < floor=%d", ErrManifestDowngrade, manifest.Version, p.floor)
-	}
-	ts, allow, err := buildTrustMaterial(manifest)
-	if err != nil {
-		return nil, nil, err
 	}
 	p.floor = manifest.Version
 	return ts, allow, nil

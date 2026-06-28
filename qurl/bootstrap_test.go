@@ -102,6 +102,18 @@ func TestBootstrapAgent_ReusesSavedKeypair(t *testing.T) {
 	}
 }
 
+func TestFileAgentState_RejectsGroupReadableState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agent-state.json")
+	raw := []byte(`{"private_key_b64":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=","public_key_b64":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb="}`)
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		t.Fatalf("write state: %v", err)
+	}
+
+	if _, err := FileAgentState(path).LoadAgentState(context.Background()); !errors.Is(err, ErrInsecureAgentStatePermissions) {
+		t.Fatalf("LoadAgentState: want ErrInsecureAgentStatePermissions, got %v", err)
+	}
+}
+
 func TestBootstrapAgent_Validation(t *testing.T) {
 	if _, err := BootstrapAgent(context.Background(), "", memoryAgentStateStore{}); !errors.Is(err, ErrInvalidBootstrapConfig) {
 		t.Fatalf("empty key: want ErrInvalidBootstrapConfig, got %v", err)
