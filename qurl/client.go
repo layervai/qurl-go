@@ -219,6 +219,8 @@ func OpenClient(opts ...ClientOption) (*Client, error) {
 	return OpenClientContext(context.Background(), opts...)
 }
 
+// defaultCredentialProvider is an OpenClientContext test seam. Production code
+// must not swap it, and tests must not mutate it concurrently with OpenClient.
 var defaultCredentialProvider = FileCredentials
 
 // OpenClientContext is OpenClient with a context for the eager credential
@@ -240,7 +242,9 @@ func OpenClientContext(ctx context.Context, opts ...ClientOption) (*Client, erro
 	return client, nil
 }
 
-// Resource is a protected target registered in the LayerV qURL Platform.
+// Resource is a protected target registered in the LayerV qURL Platform. Fields
+// are exported for inspection and serialization; CreatePortal reads ID at call
+// time, so use ResourceByID for a new handle instead of mutating a bound one.
 type Resource struct {
 	client *Client
 
@@ -721,6 +725,9 @@ func validateHTTPSOrLoopbackURL(rawURL, label string, errKind error) error {
 	u, err := parseHTTPURL(rawURL, label, errKind)
 	if err != nil {
 		return err
+	}
+	if u.User != nil {
+		return fmt.Errorf("%w: %s must not include userinfo", errKind, label)
 	}
 	if u.Scheme == "http" && !isLoopbackHost(u.Hostname()) {
 		return fmt.Errorf("%w: %s must use https unless it targets localhost", errKind, label)

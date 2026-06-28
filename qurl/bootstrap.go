@@ -300,6 +300,13 @@ func (r agentBootstrapResponse) validate() error {
 	if strings.TrimSpace(r.NHPPeer.PublicKeyB64) == "" {
 		return fmt.Errorf("%w: bootstrap response missing NHP peer public key", ErrInvalidBootstrapConfig)
 	}
+	peerKey, err := base64.StdEncoding.Strict().DecodeString(r.NHPPeer.PublicKeyB64)
+	if err != nil {
+		return fmt.Errorf("%w: bootstrap response NHP peer public key is not standard base64: %w", ErrInvalidBootstrapConfig, err)
+	}
+	if _, err := ecdh.X25519().NewPublicKey(peerKey); err != nil {
+		return fmt.Errorf("%w: bootstrap response NHP peer public key is not X25519: %w", ErrInvalidBootstrapConfig, err)
+	}
 	if strings.TrimSpace(r.NHPPeer.Host) == "" {
 		return fmt.Errorf("%w: bootstrap response missing NHP peer host", ErrInvalidBootstrapConfig)
 	}

@@ -35,7 +35,7 @@ func TestBootstrapAgent_GeneratesRegistersAndSavesState(t *testing.T) {
 			t.Fatalf("agent_id = %q, want prod-us-east-1", body["agent_id"])
 		}
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"data":{"agent_id":"prod-us-east-1","registered_at":"2026-06-28T20:00:00Z","nhp_server_peer":{"public_key_b64":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=","host":"nhp.layerv.ai","port":62206,"expire_time":0}}}`)
+		fmt.Fprint(w, `{"data":{"agent_id":"prod-us-east-1","registered_at":"2026-06-28T20:00:00Z","nhp_server_peer":{"public_key_b64":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","host":"nhp.layerv.ai","port":62206,"expire_time":0}}}`)
 	}))
 	defer api.Close()
 
@@ -90,7 +90,7 @@ func TestBootstrapAgent_RetriesIncompleteBootstrapWithSavedKeypair(t *testing.T)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"data":{"agent_id":"agent-2","registered_at":"2026-06-28T20:00:00Z","nhp_server_peer":{"public_key_b64":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=","host":"nhp.layerv.ai","port":62206,"expire_time":0}}}`)
+		fmt.Fprint(w, `{"data":{"agent_id":"agent-2","registered_at":"2026-06-28T20:00:00Z","nhp_server_peer":{"public_key_b64":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","host":"nhp.layerv.ai","port":62206,"expire_time":0}}}`)
 	}))
 	defer api.Close()
 
@@ -122,7 +122,7 @@ func TestBootstrapAgent_ReturnsRegisteredStateWithoutNetwork(t *testing.T) {
 			t.Fatalf("BootstrapAgent made an unexpected second network call")
 		}
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"data":{"agent_id":"agent-1","registered_at":"2026-06-28T20:00:00Z","nhp_server_peer":{"public_key_b64":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=","host":"nhp.layerv.ai","port":62206,"expire_time":0}}}`)
+		fmt.Fprint(w, `{"data":{"agent_id":"agent-1","registered_at":"2026-06-28T20:00:00Z","nhp_server_peer":{"public_key_b64":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","host":"nhp.layerv.ai","port":62206,"expire_time":0}}}`)
 	}))
 	defer api.Close()
 
@@ -149,19 +149,27 @@ func TestBootstrapAgent_RejectsIncompleteRegistrationResponse(t *testing.T) {
 	}{
 		{
 			name: "missing registration time",
-			body: `{"data":{"agent_id":"agent-1","registered_at":null,"nhp_server_peer":{"public_key_b64":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=","host":"nhp.layerv.ai","port":62206,"expire_time":0}}}`,
+			body: `{"data":{"agent_id":"agent-1","registered_at":null,"nhp_server_peer":{"public_key_b64":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","host":"nhp.layerv.ai","port":62206,"expire_time":0}}}`,
 		},
 		{
 			name: "missing peer",
 			body: `{"data":{"agent_id":"agent-1","registered_at":"2026-06-28T20:00:00Z"}}`,
 		},
 		{
+			name: "malformed peer key",
+			body: `{"data":{"agent_id":"agent-1","registered_at":"2026-06-28T20:00:00Z","nhp_server_peer":{"public_key_b64":"not-base64","host":"nhp.layerv.ai","port":62206,"expire_time":0}}}`,
+		},
+		{
+			name: "short peer key",
+			body: `{"data":{"agent_id":"agent-1","registered_at":"2026-06-28T20:00:00Z","nhp_server_peer":{"public_key_b64":"AAAA","host":"nhp.layerv.ai","port":62206,"expire_time":0}}}`,
+		},
+		{
 			name: "missing peer host",
-			body: `{"data":{"agent_id":"agent-1","registered_at":"2026-06-28T20:00:00Z","nhp_server_peer":{"public_key_b64":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=","host":"","port":62206,"expire_time":0}}}`,
+			body: `{"data":{"agent_id":"agent-1","registered_at":"2026-06-28T20:00:00Z","nhp_server_peer":{"public_key_b64":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","host":"","port":62206,"expire_time":0}}}`,
 		},
 		{
 			name: "missing peer port",
-			body: `{"data":{"agent_id":"agent-1","registered_at":"2026-06-28T20:00:00Z","nhp_server_peer":{"public_key_b64":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=","host":"nhp.layerv.ai","port":0,"expire_time":0}}}`,
+			body: `{"data":{"agent_id":"agent-1","registered_at":"2026-06-28T20:00:00Z","nhp_server_peer":{"public_key_b64":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","host":"nhp.layerv.ai","port":0,"expire_time":0}}}`,
 		},
 	}
 	for _, tt := range tests {
@@ -183,7 +191,7 @@ func TestBootstrapAgent_RejectsIncompleteRegistrationResponse(t *testing.T) {
 
 func TestFileAgentState_RejectsGroupReadableState(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "agent-state.json")
-	raw := []byte(`{"private_key_b64":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=","public_key_b64":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb="}`)
+	raw := []byte(`{"private_key_b64":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","public_key_b64":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb="}`)
 	if err := os.WriteFile(path, raw, 0o644); err != nil {
 		t.Fatalf("write state: %v", err)
 	}
@@ -205,7 +213,7 @@ func TestFileAgentState_RejectsGroupWritableStateDir(t *testing.T) {
 		_ = os.Chmod(dir, 0o700)
 	})
 	path := filepath.Join(dir, "agent-state.json")
-	raw := []byte(`{"private_key_b64":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=","public_key_b64":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb="}`)
+	raw := []byte(`{"private_key_b64":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","public_key_b64":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb="}`)
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		t.Fatalf("write state: %v", err)
 	}
@@ -228,7 +236,7 @@ func TestFileAgentState_SaveRejectsGroupWritableStateDir(t *testing.T) {
 	})
 
 	state := &AgentState{
-		PrivateKeyB64: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=",
+		PrivateKeyB64: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
 		PublicKeyB64:  "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb=",
 	}
 	path := filepath.Join(dir, "agent-state.json")
@@ -245,7 +253,7 @@ func TestFileAgentState_RejectsSymlinkState(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "agent-state.json")
 	link := filepath.Join(dir, "agent-state-link.json")
-	raw := []byte(`{"private_key_b64":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=","public_key_b64":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb="}`)
+	raw := []byte(`{"private_key_b64":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","public_key_b64":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb="}`)
 	if err := os.WriteFile(target, raw, 0o600); err != nil {
 		t.Fatalf("write state: %v", err)
 	}
@@ -270,6 +278,9 @@ func TestBootstrapAgent_Validation(t *testing.T) {
 	}
 	if _, err := BootstrapAgent(context.Background(), "lv_bootstrap_once", memoryAgentStateStore{}, WithBootstrapBaseURL("http://bootstrap.example.com")); !errors.Is(err, ErrInvalidBootstrapConfig) {
 		t.Fatalf("plaintext non-loopback URL: want ErrInvalidBootstrapConfig, got %v", err)
+	}
+	if _, err := BootstrapAgent(context.Background(), "lv_bootstrap_once", memoryAgentStateStore{}, WithBootstrapBaseURL("https://user:pass@bootstrap.example.com")); !errors.Is(err, ErrInvalidBootstrapConfig) {
+		t.Fatalf("bootstrap URL with userinfo: want ErrInvalidBootstrapConfig, got %v", err)
 	}
 
 	store := memoryAgentStateStore{state: &AgentState{PrivateKeyB64: "not-base64", PublicKeyB64: "also-bad"}}

@@ -390,6 +390,9 @@ func TestClient_Validation(t *testing.T) {
 	if _, err := NewClient(BearerToken("lv_test"), WithBaseURL("http://api.example.com")); !errors.Is(err, ErrInvalidClientConfig) {
 		t.Fatalf("plaintext non-loopback base URL: want ErrInvalidClientConfig, got %v", err)
 	}
+	if _, err := NewClient(BearerToken("lv_test"), WithBaseURL("https://user:pass@api.example.com")); !errors.Is(err, ErrInvalidClientConfig) {
+		t.Fatalf("base URL with userinfo: want ErrInvalidClientConfig, got %v", err)
+	}
 	if _, err := NewClient(BearerToken("lv_test"), WithBaseURL("http://localhost:8080")); err != nil {
 		t.Fatalf("loopback base URL: %v", err)
 	}
