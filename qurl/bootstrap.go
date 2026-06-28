@@ -154,7 +154,8 @@ func WithBootstrapBaseURL(rawURL string) BootstrapOption {
 
 // WithBootstrapHTTPClient injects the HTTP client used for bootstrap requests.
 // Without this option, BootstrapAgent uses a shared client with a 30-second
-// timeout; callers can still set shorter deadlines on ctx.
+// timeout and no redirect following; injected clients own their own timeout and
+// redirect policy. Callers can still set shorter deadlines on ctx.
 func WithBootstrapHTTPClient(client HTTPDoer) BootstrapOption {
 	return bootstrapOptionFunc(func(o *bootstrapOptions) error {
 		if client == nil {
@@ -314,6 +315,12 @@ func (r agentBootstrapResponse) validate() error {
 	}
 	if r.NHPPeer.Port <= 0 {
 		return fmt.Errorf("%w: bootstrap response missing NHP peer port", ErrInvalidBootstrapConfig)
+	}
+	if r.NHPPeer.Port > 65535 {
+		return fmt.Errorf("%w: bootstrap response NHP peer port out of range", ErrInvalidBootstrapConfig)
+	}
+	if r.NHPPeer.ExpireTime != 0 && r.NHPPeer.ExpireTime <= time.Now().Unix() {
+		return fmt.Errorf("%w: bootstrap response NHP peer is expired", ErrInvalidBootstrapConfig)
 	}
 	return nil
 }

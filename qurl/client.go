@@ -191,8 +191,9 @@ func WithBaseURL(rawURL string) ClientOption {
 }
 
 // WithHTTPClient injects the HTTP client used for API requests. Without this
-// option, the SDK uses a shared client with a 30-second timeout; callers can
-// still set shorter per-call deadlines on ctx.
+// option, the SDK uses a shared client with a 30-second timeout and no redirect
+// following; injected clients own their own timeout and redirect policy. Callers
+// can still set shorter per-call deadlines on ctx.
 func WithHTTPClient(client HTTPDoer) ClientOption {
 	return clientOptionFunc(func(o *clientOptions) error {
 		if client == nil {
@@ -734,8 +735,14 @@ func applyPortalOptions(opts []PortalOption) (portalOptions, error) {
 func validateTargetURL(targetURL string, errKind error) error {
 	// Protected targets may be private http:// services. Credential-bearing API
 	// and bootstrap origins layer validateHTTPSOrLoopbackURL on top instead.
-	_, err := parseHTTPURL(targetURL, "target URL", errKind)
-	return err
+	u, err := parseHTTPURL(targetURL, "target URL", errKind)
+	if err != nil {
+		return err
+	}
+	if u.User != nil {
+		return fmt.Errorf("%w: target URL must not include userinfo", errKind)
+	}
+	return nil
 }
 
 func validateHTTPSOrLoopbackURL(rawURL, label string, errKind error) error {

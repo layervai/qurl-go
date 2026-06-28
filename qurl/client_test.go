@@ -431,6 +431,9 @@ func TestClient_Validation(t *testing.T) {
 	if _, err := client.ProtectURL(context.Background(), "https://"); !errors.Is(err, ErrInvalidResourceRequest) {
 		t.Fatalf("empty target host: want ErrInvalidResourceRequest, got %v", err)
 	}
+	if _, err := client.ProtectURL(context.Background(), "https://user:pass@example.com"); !errors.Is(err, ErrInvalidResourceRequest) {
+		t.Fatalf("target URL with userinfo: want ErrInvalidResourceRequest, got %v", err)
+	}
 	if _, err := client.ConnectorResource(context.Background(), " "); !errors.Is(err, ErrInvalidResourceRequest) {
 		t.Fatalf("empty connector id: want ErrInvalidResourceRequest, got %v", err)
 	}
