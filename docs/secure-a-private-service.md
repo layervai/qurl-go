@@ -20,6 +20,12 @@ LayerV provides issuer config as a `qurl.Resource` value for this SDK.
 The resource owner signs a short-lived link with `CreatePortal`:
 
 ```go
+resource := qurl.Resource{
+	AccessPublicKey:  accessPublicKey,  // from LayerV resource config
+	AccessURL:        accessURL,        // from LayerV resource config
+	ResourceIdentity: resourceIdentity, // from LayerV resource config
+}
+
 link, err := qurl.CreatePortal(ctx, signer, resource, qurl.ValidFor(5*time.Minute))
 if err != nil {
 	return err

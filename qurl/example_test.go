@@ -31,10 +31,19 @@ func Example() {
 		panic(err)
 	}
 
-	// 2. Mint the link. In production, LayerV provides the resource config. The SDK
-	//    generates the per-link credential and link id for you; this example pins the
-	//    id/time only so the output is stable.
-	link, err := qurl.CreatePortal(ctx, signer, exampleResource(),
+	// 2. Create the resource config. In production, LayerV provides these values
+	//    when you protect the private service. The demo generates throwaway values so
+	//    it runs offline.
+	resource := qurl.Resource{
+		AccessPublicKey:  exampleX25519Public(),
+		AccessURL:        "https://access.qurl.link",
+		ResourceIdentity: exampleP256SPKI(),
+		Label:            "demo-resource",
+	}
+
+	// 3. Mint the link. The SDK generates the per-link credential and link id for
+	//    you; this example pins the id/time only so the output is stable.
+	link, err := qurl.CreatePortal(ctx, signer, resource,
 		qurl.WithLinkID("qurl_demo_0001"),
 		qurl.WithIssuedAt(time.Unix(1_700_000_000, 0)),
 		qurl.ValidFor(time.Hour),
@@ -43,7 +52,7 @@ func Example() {
 		panic(err)
 	}
 
-	// 3. Build the verifier's trust store from the issuer's published public key,
+	// 4. Build the verifier's trust store from the issuer's published public key,
 	//    keyed by the same kid the signer stamps into the link.
 	pubDER, err := signer.PublicKeyDER()
 	if err != nil {
@@ -56,7 +65,7 @@ func Example() {
 		panic(err)
 	}
 
-	// 4. Verify the issuer signature over the exact claim bytes. A tampered or
+	// 5. Verify the issuer signature over the exact claim bytes. A tampered or
 	//    untrusted link fails here, before anything acts on it.
 	frag, err := qurl.VerifyLink(link, trust)
 	if err != nil {
@@ -77,7 +86,13 @@ func ExampleCreatePortal() {
 		panic(err)
 	}
 
-	link, err := qurl.CreatePortal(context.Background(), signer, exampleResource(), qurl.ValidFor(time.Hour))
+	resource := qurl.Resource{
+		AccessPublicKey:  exampleX25519Public(),
+		AccessURL:        "https://access.qurl.link",
+		ResourceIdentity: exampleP256SPKI(),
+	}
+
+	link, err := qurl.CreatePortal(context.Background(), signer, resource, qurl.ValidFor(time.Hour))
 	if err != nil {
 		panic(err)
 	}
@@ -134,7 +149,12 @@ func Example_rejectsForgedLink() {
 	if err != nil {
 		panic(err)
 	}
-	forged, err := qurl.CreatePortal(context.Background(), attacker, exampleResource(), qurl.ValidFor(time.Hour))
+	resource := qurl.Resource{
+		AccessPublicKey:  exampleX25519Public(),
+		AccessURL:        "https://access.qurl.link",
+		ResourceIdentity: exampleP256SPKI(),
+	}
+	forged, err := qurl.CreatePortal(context.Background(), attacker, resource, qurl.ValidFor(time.Hour))
 	if err != nil {
 		panic(err)
 	}
@@ -156,15 +176,6 @@ func trustStoreFor(signer *qurl.LocalSigner) *qurl.TrustStore {
 		panic(err)
 	}
 	return trust
-}
-
-func exampleResource() qurl.Resource {
-	return qurl.Resource{
-		AccessPublicKey:  exampleX25519Public(),
-		AccessURL:        "https://access.qurl.link",
-		ResourceIdentity: exampleP256SPKI(),
-		Label:            "demo-resource",
-	}
 }
 
 func exampleX25519Public() []byte {

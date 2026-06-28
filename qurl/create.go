@@ -193,6 +193,11 @@ var ErrInvalidCreateParams = errors.New("qurl: invalid CreatePortal params")
 //
 // A typical issuer passes the LayerV-provided Resource and a lifetime:
 //
+//	resource := qurl.Resource{
+//		AccessPublicKey:  accessPublicKey,
+//		AccessURL:        accessURL,
+//		ResourceIdentity: resourceIdentity,
+//	}
 //	link, err := qurl.CreatePortal(ctx, signer, resource, qurl.ValidFor(5*time.Minute))
 //
 // Use CreatePortalWithParams when tests or conformance code need to set every

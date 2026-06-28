@@ -11,11 +11,18 @@ Most values come from two places:
 - Your issuer signing key.
 
 ```go
+resource := qurl.Resource{
+	AccessPublicKey:  accessPublicKey,  // from LayerV resource config
+	AccessURL:        accessURL,        // from LayerV resource config
+	ResourceIdentity: resourceIdentity, // from LayerV resource config
+}
+
 link, err := qurl.CreatePortal(ctx, signer, resource, qurl.ValidFor(5*time.Minute))
 ```
 
-`CreatePortal` generates the per-link credential and link id. Your application
-chooses the lifetime.
+LayerV gives you the resource values when you enable the private service for
+qURL. `CreatePortal` generates the per-link credential and link id. Your
+application chooses the lifetime.
 
 | Field | Source | Required |
 | --- | --- | --- |
