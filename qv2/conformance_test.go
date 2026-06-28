@@ -128,8 +128,8 @@ func runSignatureClass(t *testing.T, cf *ConformanceFile) {
 
 	// Payload-tamper reject, driven by the artifact's tamper_derivation rather than
 	// a transform hardcoded here: read the named transform from the artifact and
-	// apply it, so this package synthesizes the SAME negative the nhp Go verifier
-	// and the js-agent do (a vendoring consumer cannot see a hardcoded recipe).
+	// apply it, so this package synthesizes the SAME negative every other qURL v2
+	// verifier does (a consuming verifier cannot see a hardcoded recipe).
 	runSignatureTamper(t, cf.SignatureClass.TamperDerivation, pub, acceptClaimsB64, acceptRawSig)
 }
 
@@ -359,8 +359,8 @@ func runRelayAllowlistClass(t *testing.T, class ConformanceClass) {
 
 // runServerIDClass RECOMPUTES the relay routing id from cell_public_key_b64 using
 // relayknock.PubKeyFingerprint (this SDK's single canonical implementation, fenced
-// byte-for-byte against the same fingerprint golden vectors the nhp server and the
-// js-agent use) and asserts it equals the vector's stored server_id. This is a
+// byte-for-byte against the same cross-language fingerprint golden vectors the
+// other implementations use) and asserts it equals the vector's stored server_id. This is a
 // recompute-vs-canonical check, not a trusted stored value: it cannot fork the
 // POST /relay/{serverId} contract because it calls the same function EnterPortal's
 // routing uses.

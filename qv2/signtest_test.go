@@ -18,8 +18,8 @@ import (
 // are therefore produced by the SAME code a conformant production signer runs —
 // the only difference is the key custody — so the fragment/round-trip/tamper tests
 // exercise mint↔verify symmetry rather than a parallel signing implementation. The
-// committed golden vectors (testdata/issuer_signature_vectors.json) remain the
-// cross-language CONTRACT that this package's verification agrees byte-for-byte
+// public issuer-signature golden vectors (from the qurl-conformance package) remain
+// the cross-language CONTRACT that this package's verification agrees byte-for-byte
 // with external KMS sign output.
 
 // testIssuerKID is the kid every locally-signed test fragment is signed under.

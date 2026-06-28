@@ -9,8 +9,8 @@ import (
 
 // qURL v2 knock-body construction.
 //
-// PROVISIONAL WIRE SHAPE. The nhp qURL v2 server admission contract
-// (QURL_V2_KEYED_IDENTITY.md → "NHP Server Contract") is Proposed, not deployed,
+// PROVISIONAL WIRE SHAPE. The qURL v2 server admission contract (the qURL v2
+// keyed-identity design's "NHP Server Contract" section) is Proposed, not deployed,
 // and the encrypted knock-body field layout for the v2 path is not yet frozen.
 // This builder encodes what the design specifies for the CLIENT side of the knock
 // (section "Browser and Headless Flow", steps 5–6):
@@ -52,7 +52,7 @@ const (
 )
 
 // nhpKNKHeaderType is the NHP_KNK header-type value echoed in the body envelope
-// (nhp/core/packet.go iota: KNK=1).
+// (the KNK packet header-type, value 1).
 const nhpKNKHeaderType = 1
 
 // buildQv2KnockBody serializes the provisional qURL v2 knock body for a verified

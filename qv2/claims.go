@@ -1,15 +1,15 @@
 // Package qv2 implements the qURL v2 keyed-identity wire format and
-// issuer-signature crypto per the nhp design (QURL_V2_KEYED_IDENTITY.md, sections
-// "qURL v2 Artifact" and "Key Lifecycle → Issuer signing key").
+// issuer-signature crypto per the qURL v2 keyed-identity design (the "qURL v2
+// Artifact" and "Key Lifecycle → Issuer signing key" sections).
 //
 // This is the security core for a qURL link (#qv2.<claims>.<secret>.<sig>): a
 // strict allowlist parser, the issuer signing input + raw r||s low-S signature
 // verification, a published-key trust store, post-verify relay_url validation, and
 // the matching mint side (sign.go: the Signer seam + SignClaims) that signs the
-// EXACT bytes the verifier checks. It is a dependency-light, clean-room Go port of
-// the authoritative nhp Go verifier (endpoints/server/internal/qurlv2) and
-// qurl-service internal/qurlv2; it imports only the standard library — the issuer
-// signing key is reached through the Signer interface, never a baked-in KMS client.
+// EXACT bytes the verifier checks. It is a dependency-light Go implementation that
+// agrees byte-for-byte with the published qURL v2 conformance vectors; it imports
+// only the standard library — the issuer signing key is reached through the Signer
+// interface, never a baked-in KMS client.
 //
 // Design invariants enforced here:
 //   - The issuer signature is computed/verified over the EXACT base64url bytes of
@@ -296,7 +296,7 @@ func decodeResourcePublicKey(b64 string) ([]byte, error) {
 // unpadded base64url form carried in the signed claims (qurl_user_public_key_b64
 // and resource_public_key_b64), decoded with the same strict base64url decoder
 // the parser uses, so the hash preimage is exactly the bytes the issuer signed.
-// It mirrors the format the nhp/qurl-service revocation indexes key off, so a
+// It mirrors the format the server-side revocation indexes key off, so a
 // second hasher must never compute a different digest.
 func PublicKeyHashFromB64(b64 string) (string, error) {
 	raw, err := decodeB64(b64)

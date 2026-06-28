@@ -90,8 +90,8 @@ type ConformanceSignatureClass struct {
 
 // ConformanceTamperDerivation specifies how a consumer derives the payload-tamper
 // reject from the composed signature file's accept vector. It is a derivation, not
-// stored bytes, so the nhp Go verifier, the js-agent, and this qurl-go package all
-// synthesize the SAME negative: take the accept vector's UNCHANGED signature and
+// stored bytes, so every qURL v2 verifier across languages
+// synthesizes the SAME negative: take the accept vector's UNCHANGED signature and
 // verify it against a claims input formed by applying the transform named in
 // ClaimsTransform, which must keep the string canonical base64url yet decode to
 // different bytes, so the case fails only at the curve check.

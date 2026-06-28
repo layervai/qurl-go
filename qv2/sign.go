@@ -21,9 +21,9 @@ import (
 // native output of both AWS KMS Sign (MessageType=DIGEST) and ecdsa.SignASN1.
 // SignClaims, not the signer, computes the digest and normalizes to low-S, so a
 // KMS, local, or file signer physically cannot drift on the domain tag or emit a
-// non-low-S wire signature. This mirrors the qurl-service reference
-// (internal/qurlv2/issuer.go) with the KMS client swapped for the interface, and
-// keeps AWS out of qv2 — the SDK core stays standard-library only.
+// non-low-S wire signature. This mirrors the issuer reference implementation with
+// the KMS client swapped for the interface, and keeps AWS out of qv2 — the SDK
+// core stays standard-library only.
 
 // Signer signs the qURL v2 issuer-signature digest. It is the credential seam:
 // production binds it to a KMS-resident ECC_NIST_P256 key (filled in by the
