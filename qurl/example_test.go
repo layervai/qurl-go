@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/layervai/qurl-go/qurl"
 )
@@ -30,18 +31,14 @@ func Example() {
 		panic(err)
 	}
 
-	// 2. Mint the link. The platform resource config comes from LayerV in
-	//    production; here we generate throwaway values so the example is
-	//    self-contained. CreatePortal generates the per-link credential for you.
-	link, err := qurl.CreatePortal(ctx, signer, qurl.CreateParams{
-		CellPublicKey:     exampleX25519Public(),
-		RelayURL:          "https://access.qurl.link",
-		ResourcePublicKey: exampleP256SPKI(),
-		JTI:               "qurl_demo_0001",
-		IssuedAt:          1_700_000_000,
-		NotBefore:         1_700_000_000,
-		Expiry:            1_700_003_600,
-	})
+	// 2. Mint the link. In production, LayerV provides the resource config. The SDK
+	//    generates the per-link credential and link id for you; this example pins the
+	//    id/time only so the output is stable.
+	link, err := qurl.CreatePortal(ctx, signer, exampleResource(),
+		qurl.WithLinkID("qurl_demo_0001"),
+		qurl.WithIssuedAt(time.Unix(1_700_000_000, 0)),
+		qurl.ValidFor(time.Hour),
+	)
 	if err != nil {
 		panic(err)
 	}
@@ -80,15 +77,7 @@ func ExampleCreatePortal() {
 		panic(err)
 	}
 
-	link, err := qurl.CreatePortal(context.Background(), signer, qurl.CreateParams{
-		CellPublicKey:     exampleX25519Public(),
-		RelayURL:          "https://access.qurl.link",
-		ResourcePublicKey: exampleP256SPKI(),
-		JTI:               "qurl_demo_0002",
-		IssuedAt:          1_700_000_000,
-		NotBefore:         1_700_000_000,
-		Expiry:            1_700_003_600,
-	})
+	link, err := qurl.CreatePortal(context.Background(), signer, exampleResource(), qurl.ValidFor(time.Hour))
 	if err != nil {
 		panic(err)
 	}
@@ -145,15 +134,7 @@ func Example_rejectsForgedLink() {
 	if err != nil {
 		panic(err)
 	}
-	forged, err := qurl.CreatePortal(context.Background(), attacker, qurl.CreateParams{
-		CellPublicKey:     exampleX25519Public(),
-		RelayURL:          "https://access.qurl.link",
-		ResourcePublicKey: exampleP256SPKI(),
-		JTI:               "qurl_demo_0003",
-		IssuedAt:          1_700_000_000,
-		NotBefore:         1_700_000_000,
-		Expiry:            1_700_003_600,
-	})
+	forged, err := qurl.CreatePortal(context.Background(), attacker, exampleResource(), qurl.ValidFor(time.Hour))
 	if err != nil {
 		panic(err)
 	}
@@ -175,6 +156,15 @@ func trustStoreFor(signer *qurl.LocalSigner) *qurl.TrustStore {
 		panic(err)
 	}
 	return trust
+}
+
+func exampleResource() qurl.Resource {
+	return qurl.Resource{
+		AccessPublicKey:  exampleX25519Public(),
+		AccessURL:        "https://access.qurl.link",
+		ResourceIdentity: exampleP256SPKI(),
+		Label:            "demo-resource",
+	}
 }
 
 func exampleX25519Public() []byte {

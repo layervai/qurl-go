@@ -13,31 +13,22 @@ LayerV returns two sets of Go-facing config:
 - **Opener config**: issuer keys and allowed qURL platform access endpoints for
   clients that call `EnterPortal`.
 
-Some SDK field names are compatibility names. Treat values such as
-`CellPublicKey` and `RelayURL` as opaque LayerV config values that your app
-passes to the SDK.
+LayerV provides issuer config as a `qurl.Resource` value for this SDK.
 
 ## 2. Issue a Link
 
 The resource owner signs a short-lived link with `CreatePortal`:
 
 ```go
-link, err := qurl.CreatePortal(ctx, signer, qurl.CreateParams{
-	CellPublicKey:     resource.AccessPublicKey,
-	RelayURL:          resource.AccessURL,
-	ResourcePublicKey: resource.ResourceIdentity,
-	JTI:               "ticket_01",
-	IssuedAt:          now,
-	NotBefore:         now,
-	Expiry:            now + 300,
-})
+link, err := qurl.CreatePortal(ctx, signer, resource, qurl.ValidFor(5*time.Minute))
 if err != nil {
 	return err
 }
 ```
 
-Use a KMS-backed `qurl.Signer` for production issuer keys. `LocalSigner` is
-handy for demos and tests.
+Use a KMS-backed `qurl.Signer` for production issuer keys. `CreatePortal`
+generates the per-link credential and id for you. `LocalSigner` is handy for
+demos and tests.
 
 ## 3. Open a Link
 

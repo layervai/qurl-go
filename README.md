@@ -69,7 +69,6 @@ import (
 
 func main() {
 	ctx := context.Background()
-	now := time.Now().Unix()
 
 	// Local-only signer for the demo. Production issuers usually implement
 	// qurl.Signer with KMS or another managed key.
@@ -78,27 +77,15 @@ func main() {
 		panic(err)
 	}
 
-	// These three values are the qURL platform resource config. Field names match
-	// the wire format; callers should treat them as values supplied by LayerV.
-	resource := struct {
-		AccessPublicKey  []byte
-		AccessURL        string
-		ResourceIdentity []byte
-	}{
+	// In production, LayerV provides this resource config when you protect a
+	// private service. The demo generates throwaway values so it runs as pasted.
+	resource := qurl.Resource{
 		AccessPublicKey:  newX25519PublicKey(),
 		AccessURL:        "https://access.qurl.link",
 		ResourceIdentity: newP256SPKI(),
 	}
 
-	link, err := qurl.CreatePortal(ctx, signer, qurl.CreateParams{
-		CellPublicKey:     resource.AccessPublicKey,
-		RelayURL:          resource.AccessURL,
-		ResourcePublicKey: resource.ResourceIdentity,
-		JTI:               "qurl_demo_0001",
-		IssuedAt:          now,
-		NotBefore:         now,
-		Expiry:            now + 300,
-	})
+	link, err := qurl.CreatePortal(ctx, signer, resource, qurl.ValidFor(5*time.Minute))
 	if err != nil {
 		panic(err)
 	}

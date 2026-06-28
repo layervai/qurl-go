@@ -7,34 +7,33 @@ the LayerV qURL Platform.
 
 Most values come from two places:
 
-- The LayerV qURL Platform resource config for the private service.
+- The `qurl.Resource` config LayerV provides for the private service.
 - Your issuer signing key.
 
 ```go
-link, err := qurl.CreatePortal(ctx, signer, qurl.CreateParams{
-	CellPublicKey:     resource.AccessPublicKey,
-	RelayURL:          resource.AccessURL,
-	ResourcePublicKey: resource.ResourceIdentity,
-	CellID:            resource.Label,
-	JTI:               "ticket_01",
-	IssuedAt:          now,
-	NotBefore:         now,
-	Expiry:            now + 300,
-})
+link, err := qurl.CreatePortal(ctx, signer, resource, qurl.ValidFor(5*time.Minute))
 ```
 
-`CellPublicKey`, `RelayURL`, and `ResourcePublicKey` are wire-format field names.
-In normal integrations, copy the corresponding values from LayerV's resource
-config; you do not need to understand the lower-level pieces behind them.
+`CreatePortal` generates the per-link credential and link id. Your application
+chooses the lifetime.
 
 | Field | Source | Required |
 | --- | --- | --- |
-| `CellPublicKey` | LayerV resource config: access public key | Yes |
-| `RelayURL` | LayerV resource config: qURL access URL | Yes |
-| `ResourcePublicKey` | LayerV resource config: resource identity | Yes |
-| `CellID` | Optional LayerV resource label | No |
-| `JTI` | Unique link id chosen by your issuer | Yes |
-| `IssuedAt`, `NotBefore`, `Expiry` | Link validity window, Unix seconds | Yes |
+| `resource` | LayerV resource config | Yes |
+| `signer` | Your issuer signing key | Yes |
+| `qurl.ValidFor(...)` | Link lifetime | Yes |
+
+Use options only when you need them:
+
+```go
+link, err := qurl.CreatePortal(ctx, signer, resource,
+	qurl.ValidFor(5*time.Minute),
+	qurl.WithLinkID("ticket_01"),
+)
+```
+
+For conformance tests or advanced issuers that need to set every signed claim
+explicitly, use `CreatePortalWithParams`.
 
 ## Signer
 

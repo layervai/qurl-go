@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/layervai/qurl-go/internal/qv2"
 	"github.com/layervai/qurl-go/relayknock"
@@ -75,6 +76,15 @@ func validCreateParams(t *testing.T) CreateParams {
 	}
 }
 
+func resourceFromParams(p CreateParams) Resource {
+	return Resource{
+		AccessPublicKey:  p.CellPublicKey,
+		AccessURL:        p.RelayURL,
+		ResourceIdentity: p.ResourcePublicKey,
+		Label:            p.CellID,
+	}
+}
+
 // mustResourceKeyDER returns a real P-256 public key in DER SPKI form (the shape a
 // KMS resource key takes), so the resource-key length-window check in the strict
 // parser passes with realistic bytes.
@@ -91,17 +101,18 @@ func mustResourceKeyDER(t *testing.T) []byte {
 	return der
 }
 
-// TestCreatePortal_EnterPortalSymmetry is the headline proof: a CreatePortal link
-// is accepted by the locked EnterPortal verb. EnterPortalWith runs parse → verify
-// issuer sig → validate relay_url → derive serverId → build + POST the knock; a
-// capturing HTTP client short-circuits the transport, so reaching a
-// qurl.RelayError proves every pre-POST step passed on the minted link, and
-// the captured URL proves the route derived from the minted cell key.
+// TestCreatePortalWithParams_EnterPortalSymmetry is the headline low-level proof:
+// a link minted from explicit params is accepted by the locked EnterPortal verb.
+// EnterPortalWith runs parse → verify issuer sig → validate relay_url → derive
+// serverId → build + POST the knock; a capturing HTTP client short-circuits the
+// transport, so reaching a qurl.RelayError proves every pre-POST step passed on
+// the minted link, and the captured URL proves the route derived from the minted
+// access key.
 func TestCreatePortal_EnterPortalSymmetry(t *testing.T) {
 	signer, ts := mintSigner(t)
 	params := validCreateParams(t)
 
-	link, err := CreatePortal(context.Background(), signer, params)
+	link, err := CreatePortalWithParams(context.Background(), signer, params)
 	if err != nil {
 		t.Fatalf("CreatePortal: %v", err)
 	}
@@ -125,16 +136,16 @@ func TestCreatePortal_EnterPortalSymmetry(t *testing.T) {
 	}
 }
 
-// TestCreatePortal_VerifierRoundTrip drives the minted link through the verifier
-// core directly and asserts the bound claims and the per-qURL keypair survive the
-// round-trip: the recovered claim fields equal the mint inputs, and the secret's
-// private key derives the public key bound in the claims (an internally consistent
-// fresh keypair).
+// TestCreatePortalWithParams_VerifierRoundTrip drives the minted link through
+// the verifier core directly and asserts the bound claims and the per-qURL
+// keypair survive the round-trip: the recovered claim fields equal the mint
+// inputs, and the secret's private key derives the public key bound in the
+// claims (an internally consistent fresh keypair).
 func TestCreatePortal_VerifierRoundTrip(t *testing.T) {
 	signer, ts := mintSigner(t)
 	params := validCreateParams(t)
 
-	link, err := CreatePortal(context.Background(), signer, params)
+	link, err := CreatePortalWithParams(context.Background(), signer, params)
 	if err != nil {
 		t.Fatalf("CreatePortal: %v", err)
 	}
@@ -169,18 +180,18 @@ func TestCreatePortal_VerifierRoundTrip(t *testing.T) {
 	}
 }
 
-// TestCreatePortal_FreshKeyPerCall proves each mint generates a distinct per-qURL
-// keypair (and distinct fragments) even with identical params — the per-qURL key
-// is ephemeral by design.
+// TestCreatePortalWithParams_FreshKeyPerCall proves each low-level mint
+// generates a distinct per-qURL keypair (and distinct fragments) even with
+// identical params — the per-qURL key is ephemeral by design.
 func TestCreatePortal_FreshKeyPerCall(t *testing.T) {
 	signer, ts := mintSigner(t)
 	params := validCreateParams(t)
 
-	linkA, err := CreatePortal(context.Background(), signer, params)
+	linkA, err := CreatePortalWithParams(context.Background(), signer, params)
 	if err != nil {
 		t.Fatalf("CreatePortal A: %v", err)
 	}
-	linkB, err := CreatePortal(context.Background(), signer, params)
+	linkB, err := CreatePortalWithParams(context.Background(), signer, params)
 	if err != nil {
 		t.Fatalf("CreatePortal B: %v", err)
 	}
@@ -209,7 +220,7 @@ func TestCreatePortal_FreshKeyPerCall(t *testing.T) {
 func TestCreatePortal_TamperRejected(t *testing.T) {
 	signer, ts := mintSigner(t)
 
-	link, err := CreatePortal(context.Background(), signer, validCreateParams(t))
+	link, err := CreatePortalWithParams(context.Background(), signer, validCreateParams(t))
 	if err != nil {
 		t.Fatalf("CreatePortal: %v", err)
 	}
@@ -273,12 +284,108 @@ func TestCreatePortal_UnknownIssuerRejected(t *testing.T) {
 	signer, _ := mintSigner(t)
 	_, otherTS := mintSigner(t) // a DIFFERENT signer's key under a different kid
 
-	link, err := CreatePortal(context.Background(), signer, validCreateParams(t))
+	link, err := CreatePortalWithParams(context.Background(), signer, validCreateParams(t))
 	if err != nil {
 		t.Fatalf("CreatePortal: %v", err)
 	}
 	if _, err := qv2.FragmentFromLinkAndVerify(link, otherTS.core()); !errors.Is(err, qv2.ErrUnknownKID) {
 		t.Fatalf("foreign trust store: want ErrUnknownKID, got %v", err)
+	}
+}
+
+// TestCreatePortal_EasyAPIMapsResource proves the customer-facing API hides the
+// wire-shaped params without weakening the signed artifact: a Resource plus
+// options maps to the exact claims the verifier sees.
+func TestCreatePortal_EasyAPIMapsResource(t *testing.T) {
+	signer, ts := mintSigner(t)
+	params := validCreateParams(t)
+	issuedAt := time.Unix(params.IssuedAt, 0).UTC()
+
+	link, err := CreatePortal(
+		context.Background(),
+		signer,
+		resourceFromParams(params),
+		WithIssuedAt(issuedAt),
+		ValidFor(5*time.Minute),
+		WithLinkID("qurl_easy_01"),
+	)
+	if err != nil {
+		t.Fatalf("CreatePortal: %v", err)
+	}
+
+	frag, err := qv2.FragmentFromLinkAndVerify(link, ts.core())
+	if err != nil {
+		t.Fatalf("verify easy-api link: %v", err)
+	}
+	c := frag.Claims
+	if c.RelayURL != params.RelayURL || c.CellID != params.CellID {
+		t.Fatalf("resource config not bound: relay=%q cell_id=%q", c.RelayURL, c.CellID)
+	}
+	if c.Jti != "qurl_easy_01" {
+		t.Fatalf("jti = %q, want qurl_easy_01", c.Jti)
+	}
+	if c.Iat != params.IssuedAt || c.Nbf != params.IssuedAt || c.Exp != params.IssuedAt+300 {
+		t.Fatalf("window wrong: iat=%d nbf=%d exp=%d", c.Iat, c.Nbf, c.Exp)
+	}
+}
+
+func TestCreatePortal_EasyAPIGeneratesJTI(t *testing.T) {
+	signer, ts := mintSigner(t)
+	params := validCreateParams(t)
+
+	link, err := CreatePortal(
+		context.Background(),
+		signer,
+		resourceFromParams(params),
+		WithIssuedAt(time.Unix(params.IssuedAt, 0)),
+		ValidFor(time.Minute),
+	)
+	if err != nil {
+		t.Fatalf("CreatePortal: %v", err)
+	}
+
+	frag, err := qv2.FragmentFromLinkAndVerify(link, ts.core())
+	if err != nil {
+		t.Fatalf("verify easy-api link: %v", err)
+	}
+	if !strings.HasPrefix(frag.Claims.Jti, "qurl_") {
+		t.Fatalf("generated jti = %q, want qurl_ prefix", frag.Claims.Jti)
+	}
+}
+
+func TestCreatePortal_EasyAPIValidation(t *testing.T) {
+	signer, _ := mintSigner(t)
+	params := validCreateParams(t)
+	resource := resourceFromParams(params)
+
+	cases := map[string]func() error{
+		"missing lifetime": func() error {
+			_, err := CreatePortal(context.Background(), signer, resource)
+			return err
+		},
+		"both lifetime styles": func() error {
+			_, err := CreatePortal(context.Background(), signer, resource, ValidFor(time.Minute), ExpiresAt(time.Unix(params.Expiry, 0)))
+			return err
+		},
+		"empty link id override": func() error {
+			_, err := CreatePortal(context.Background(), signer, resource, ValidFor(time.Minute), WithLinkID(""))
+			return err
+		},
+		"missing resource config": func() error {
+			_, err := CreatePortal(context.Background(), signer, Resource{}, ValidFor(time.Minute))
+			return err
+		},
+		"nil signer": func() error {
+			_, err := CreatePortal(context.Background(), nil, resource, ValidFor(time.Minute))
+			return err
+		},
+	}
+	for name, run := range cases {
+		t.Run(name, func(t *testing.T) {
+			if err := run(); !errors.Is(err, ErrInvalidCreateParams) {
+				t.Fatalf("%s: want ErrInvalidCreateParams, got %v", name, err)
+			}
+		})
 	}
 }
 
@@ -289,7 +396,7 @@ func TestCreatePortal_ParamValidation(t *testing.T) {
 	signer, _ := mintSigner(t)
 	base := validCreateParams(t)
 
-	if _, err := CreatePortal(context.Background(), nil, base); !errors.Is(err, ErrInvalidCreateParams) {
+	if _, err := CreatePortalWithParams(context.Background(), nil, base); !errors.Is(err, ErrInvalidCreateParams) {
 		t.Fatalf("nil signer: want ErrInvalidCreateParams, got %v", err)
 	}
 
@@ -308,7 +415,7 @@ func TestCreatePortal_ParamValidation(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			p := validCreateParams(t)
 			mutate(&p)
-			if _, err := CreatePortal(context.Background(), signer, p); !errors.Is(err, ErrInvalidCreateParams) {
+			if _, err := CreatePortalWithParams(context.Background(), signer, p); !errors.Is(err, ErrInvalidCreateParams) {
 				t.Fatalf("%s: want ErrInvalidCreateParams, got %v", name, err)
 			}
 		})
@@ -317,7 +424,7 @@ func TestCreatePortal_ParamValidation(t *testing.T) {
 	t.Run("invalid window nbf>exp", func(t *testing.T) {
 		p := validCreateParams(t)
 		p.NotBefore = p.Expiry + 1
-		_, err := CreatePortal(context.Background(), signer, p)
+		_, err := CreatePortalWithParams(context.Background(), signer, p)
 		if !errors.Is(err, qv2.ErrStrictParse) {
 			t.Fatalf("nbf>exp: want wrapped qv2.ErrStrictParse, got %v", err)
 		}

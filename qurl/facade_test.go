@@ -92,7 +92,7 @@ func TestVerifyLinkSurfacesAllClaimFields(t *testing.T) {
 	)
 	var iat, nbf, exp int64 = 1_700_000_000, 1_700_000_001, 1_700_003_600
 
-	link, err := qurl.CreatePortal(context.Background(), signer, qurl.CreateParams{
+	link, err := qurl.CreatePortalWithParams(context.Background(), signer, qurl.CreateParams{
 		CellPublicKey:     exampleX25519Public(),
 		RelayURL:          relay,
 		ResourcePublicKey: exampleP256SPKI(),
