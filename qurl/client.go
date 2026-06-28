@@ -99,9 +99,11 @@ type fileCredentialProvider struct {
 	path string
 }
 
-// FileCredentials reads LayerV issuer credentials from path. Most applications
-// should use OpenClient; use FileCredentials only when wiring a custom runtime
-// path.
+// FileCredentials reads LayerV issuer credentials from path on every request so
+// rotated local credentials are picked up without rebuilding the client. Most
+// applications should use OpenClient; use FileCredentials only when wiring a
+// custom runtime path. The context passed to Authorize cannot interrupt local
+// filesystem I/O after it has started.
 func FileCredentials(path string) CredentialProvider {
 	return fileCredentialProvider{path: path}
 }
@@ -217,13 +219,17 @@ func OpenClient(opts ...ClientOption) (*Client, error) {
 	return OpenClientContext(context.Background(), opts...)
 }
 
+var defaultCredentialProvider = FileCredentials
+
 // OpenClientContext is OpenClient with a context for the eager credential
-// authorization check.
+// authorization check. For file-backed credentials, the context can cancel
+// before the request is built or while custom credential code runs, but it
+// cannot interrupt a local filesystem read once it has started.
 func OpenClientContext(ctx context.Context, opts ...ClientOption) (*Client, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("%w: context must not be nil", ErrInvalidClientConfig)
 	}
-	provider := FileCredentials(DefaultIssuerStatePath)
+	provider := defaultCredentialProvider(DefaultIssuerStatePath)
 	client, err := NewClient(provider, opts...)
 	if err != nil {
 		return nil, err

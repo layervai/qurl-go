@@ -457,6 +457,46 @@ func TestValidateCredentialsUsesBaseURL(t *testing.T) {
 	}
 }
 
+func TestOpenClientContextValidatesDefaultCredentials(t *testing.T) {
+	const wantURL = "https://api.example.test"
+	type contextKey struct{}
+
+	oldProvider := defaultCredentialProvider
+	t.Cleanup(func() {
+		defaultCredentialProvider = oldProvider
+	})
+
+	var validated bool
+	defaultCredentialProvider = func(path string) CredentialProvider {
+		if path != DefaultIssuerStatePath {
+			t.Fatalf("credential path = %q, want %q", path, DefaultIssuerStatePath)
+		}
+		return CredentialProviderFunc(func(ctx context.Context, req *http.Request) error {
+			validated = true
+			if got := ctx.Value(contextKey{}); got != "open-client" {
+				t.Fatalf("OpenClientContext context value = %v, want open-client", got)
+			}
+			if got := req.Context().Value(contextKey{}); got != "open-client" {
+				t.Fatalf("validation request context value = %v, want open-client", got)
+			}
+			if got := req.URL.String(); got != wantURL {
+				t.Fatalf("validation URL = %q, want %q", got, wantURL)
+			}
+			req.Header.Set("Authorization", "Bearer lv_test")
+			return nil
+		})
+	}
+
+	ctx := context.WithValue(context.Background(), contextKey{}, "open-client")
+	client, err := OpenClientContext(ctx, WithBaseURL(wantURL))
+	if err != nil {
+		t.Fatalf("OpenClientContext: %v", err)
+	}
+	if client == nil || !validated {
+		t.Fatalf("OpenClientContext did not validate default credentials")
+	}
+}
+
 func TestClient_APIError(t *testing.T) {
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/problem+json")

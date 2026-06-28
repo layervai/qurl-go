@@ -53,7 +53,8 @@ type AgentStateStore interface {
 }
 
 // FileAgentState stores bootstrap state in a local plaintext JSON file written
-// 0600.
+// 0600. Local filesystem I/O is synchronous; the context passed to LoadAgentState
+// or SaveAgentState cannot interrupt a read or write once it has started.
 func FileAgentState(path string) AgentStateStore {
 	return fileAgentStateStore{path: path}
 }
@@ -205,6 +206,10 @@ func WithVersion(version string) BootstrapOption {
 // BootstrapAgent again retries registration with the same public key. That
 // lost-response retry depends on LayerV treating repeated registration for the
 // same public key as idempotent.
+//
+// Call BootstrapAgent from one setup path at a time for a given store. The SDK
+// makes each file write atomic, but it does not lock across concurrent callers or
+// processes that share the same state file.
 func BootstrapAgent(ctx context.Context, setupKey string, store AgentStateStore, opts ...BootstrapOption) (*AgentState, error) {
 	if strings.TrimSpace(setupKey) == "" {
 		return nil, fmt.Errorf("%w: setup key must not be empty", ErrInvalidBootstrapConfig)
