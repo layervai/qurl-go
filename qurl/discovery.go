@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -494,13 +495,9 @@ func parseManifest(manifestBytes []byte) (*Manifest, error) {
 	// every endpoint. Reject it here so "schema valid" implies "has a usable qURL
 	// platform access host". A real host alongside a stray blank is still accepted
 	// (the blank is dropped downstream); only an all-blank list fails.
-	hasUsableRelay := false
-	for _, e := range m.RelayAllowlist {
-		if strings.TrimSpace(e) != "" {
-			hasUsableRelay = true
-			break
-		}
-	}
+	hasUsableRelay := slices.ContainsFunc(m.RelayAllowlist, func(e string) bool {
+		return strings.TrimSpace(e) != ""
+	})
 	if !hasUsableRelay {
 		return nil, fmt.Errorf("%w: manifest has no usable platform access entries", ErrManifestSchema)
 	}

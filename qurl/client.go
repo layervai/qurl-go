@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -122,12 +123,14 @@ type credentialState struct {
 }
 
 func (s credentialState) authorize(req *http.Request) error {
+	authorization := strings.TrimSpace(s.Authorization)
+	bearer := strings.TrimSpace(s.BearerToken)
 	switch {
-	case strings.TrimSpace(s.Authorization) != "":
-		req.Header.Set("Authorization", strings.TrimSpace(s.Authorization))
+	case authorization != "":
+		req.Header.Set("Authorization", authorization)
 		return nil
-	case strings.TrimSpace(s.BearerToken) != "":
-		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(s.BearerToken))
+	case bearer != "":
+		req.Header.Set("Authorization", "Bearer "+bearer)
 		return nil
 	default:
 		return fmt.Errorf("%w: credential state cannot authorize requests", ErrInvalidClientConfig)
@@ -322,7 +325,7 @@ func WithTags(tags ...string) ResourceOption {
 				return fmt.Errorf("%w: tag %d must not be empty", ErrInvalidResourceRequest, i)
 			}
 		}
-		o.tags = append([]string(nil), tags...)
+		o.tags = slices.Clone(tags)
 		return nil
 	})
 }
@@ -582,7 +585,7 @@ func (r createResourceResponse) resource() *Resource {
 		TargetURL:    r.TargetURL,
 		Status:       r.Status,
 		Description:  r.Description,
-		Tags:         append([]string(nil), r.Tags...),
+		Tags:         slices.Clone(r.Tags),
 		CustomDomain: r.CustomDomain,
 		Alias:        r.Alias,
 		QURLCount:    r.QURLCount,
