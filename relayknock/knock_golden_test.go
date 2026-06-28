@@ -1,58 +1,96 @@
 package relayknock
 
 import (
-	"bytes"
+	"encoding/base64"
 	"encoding/hex"
+	"strconv"
 	"testing"
+
+	conformance "github.com/layervai/qurl-conformance"
 )
 
-// These golden vectors are copied byte-for-byte from the browser NHP agent's
-// cross-language fixtures (the shared knock/ack JSON vectors and fingerprint
-// vectors), which are themselves pinned to the reference NHP relay server output,
-// and were carried verbatim through a clean-room smoke client. If this relayknock
-// port matches them, it is wire-compatible with the deployed server BY
-// CONSTRUCTION — so a live failure is auth/network, not crypto. Do NOT edit a
-// constant to make a test pass: a mismatch means the port drifted from the server
-// wire format (or the fixture was regenerated and must be re-synced from the
-// reference implementation).
+// These golden vectors are consumed byte-for-byte from the public qurl-conformance
+// package (github.com/layervai/qurl-conformance): the relay-knock golden packets
+// (RelayKnockGolden) and the cross-language fingerprint vectors carried in the qv2
+// conformance server_id class. They are themselves pinned to the reference NHP
+// relay server output. If this relayknock port matches them, it is wire-compatible
+// with the deployed server BY CONSTRUCTION — so a live failure is auth/network, not
+// crypto. The dependency version pins the bytes via go.sum; this is a test-only
+// import (no production relayknock file pulls the conformance module). Do NOT edit
+// an assertion to make a test pass: a mismatch means the port drifted from the
+// server wire format (or the pinned vectors were bumped and must be re-synced from
+// the reference implementation).
 
 func mustHex(t *testing.T, s string) []byte {
 	t.Helper()
 	b, err := hex.DecodeString(s)
 	if err != nil {
-		t.Fatalf("decode hex: %v", err)
+		t.Fatalf("decode hex %q: %v", s, err)
 	}
 	return b
 }
 
-// fillBytes returns n bytes where b[i] = start+i (mod 256) — the fixed key
-// material the browser agent fixtures use (SERVER_PRIV=1.., DEVICE_PRIV=0x41..,
-// EPHEMERAL_PRIV=0x81..).
-func fillBytes(n, start int) []byte {
-	b := make([]byte, n)
-	for i := range b {
-		b[i] = byte(start + i)
+// mustDecimalU64 parses a base-10 uint64 field (timestamp_nanos, knock counter),
+// which the conformance artifact carries as a decimal string because the values
+// exceed 2^53.
+func mustDecimalU64(t *testing.T, s string) uint64 {
+	t.Helper()
+	v, err := strconv.ParseUint(s, 10, 64)
+	if err != nil {
+		t.Fatalf("parse decimal uint64 %q: %v", s, err)
 	}
-	return b
+	return v
 }
 
-// TestBuildKnock_GoldenVector reproduces the browser agent's knock packet vector
-// byte-for-byte from the same fixed inputs, proving the handshake seal chain,
-// header framing, and digest match the reference server.
+// mustHexU64 parses a hex uint64 field (the ack counter_hex: no 0x prefix, no
+// padding).
+func mustHexU64(t *testing.T, s string) uint64 {
+	t.Helper()
+	v, err := strconv.ParseUint(s, 16, 64)
+	if err != nil {
+		t.Fatalf("parse hex uint64 %q: %v", s, err)
+	}
+	return v
+}
+
+// mustHexU32 parses a hex uint32 field (the knock preamble_hex).
+func mustHexU32(t *testing.T, s string) uint32 {
+	t.Helper()
+	v, err := strconv.ParseUint(s, 16, 32)
+	if err != nil {
+		t.Fatalf("parse hex uint32 %q: %v", s, err)
+	}
+	return uint32(v)
+}
+
+// loadRelayKnockGolden loads the pinned relay-knock golden artifact (knock + ack
+// cases) from the conformance package, failing the test rather than skipping if the
+// bytes are absent or malformed.
+func loadRelayKnockGolden(t *testing.T) *conformance.RelayKnockFile {
+	t.Helper()
+	f, err := conformance.RelayKnockGolden()
+	if err != nil {
+		t.Fatalf("load relay-knock golden: %v", err)
+	}
+	return f
+}
+
+// TestBuildKnock_GoldenVector reproduces the relay-knock packet vector
+// byte-for-byte from the conformance golden inputs, proving the handshake seal
+// chain, header framing, and digest match the reference server.
 func TestBuildKnock_GoldenVector(t *testing.T) {
-	const (
-		wantServerPubHex = "07a37cbc142093c8b755dc1b10e86cb426374ad16aa853ed0bdfc0b2b86d1c7c"
-		wantDevicePubHex = "64b101b1d0be5a8704bd078f9895001fc03e8e9f9522f188dd128d9846d48466"
-		bodyHex          = "7b2274657374223a226a732d6167656e74206b6e6f636b227d" // {"test":"js-agent knock"}
-		timestampNanos   = uint64(1700000000000000000)
-		counter          = uint64(1)
-		preamble         = uint32(0x11223344)
-		wantPacketHex    = "112233441123336d01000000000000000000000000000001883186b800b41d5cf0429695da9b3cc4f328ebcd184a6e482fa578c103f06c770000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000e033f9d754b03a03eac48c26963c36f336bd3f1cd4ebf20c39cb3179646bf3b8ac43e2e886508ebded4a9d25e693f13d6f8bbd76bde5ac81b3cf11ca8bfc60dac9f5d290dfb7e979e019974fa54fbf0f501cae15125de39e22f6fd6d4be21f53724f2edb234b305275e5958b30dbee3212980ea4ca98b63f436c12da56e6587097ba12762e2f4d61dcb8023603f82f1d6d"
-	)
+	knock := loadRelayKnockGolden(t).Knock
 
-	serverPriv := fillBytes(32, 1)
-	devicePriv := fillBytes(32, 0x41)
-	ephemeralPriv := fillBytes(32, 0x81)
+	wantServerPubHex := knock.ServerStaticPubHex
+	wantDevicePubHex := knock.DeviceStaticPubHex
+	wantPacketHex := knock.PacketHex
+
+	serverPriv := mustHex(t, knock.ServerStaticPrivHex)
+	devicePriv := mustHex(t, knock.DeviceStaticPrivHex)
+	ephemeralPriv := mustHex(t, knock.EphemeralPrivHex)
+	timestampNanos := mustDecimalU64(t, knock.TimestampNanos)
+	counter := mustDecimalU64(t, knock.Counter)
+	preamble := mustHexU32(t, knock.PreambleHex)
 
 	serverPub, err := x25519Public(serverPriv)
 	if err != nil {
@@ -76,7 +114,7 @@ func TestBuildKnock_GoldenVector(t *testing.T) {
 		TimestampNanos:   timestampNanos,
 		Counter:          counter,
 		Preamble:         preamble,
-		Body:             mustHex(t, bodyHex),
+		Body:             mustHex(t, knock.BodyHex),
 	})
 	if err != nil {
 		t.Fatalf("BuildKnock: %v", err)
@@ -86,18 +124,18 @@ func TestBuildKnock_GoldenVector(t *testing.T) {
 	}
 }
 
-// TestDecryptReply_GoldenVector decrypts the browser agent's ack reply packet
-// vector (server-built) and checks the recovered fields, proving the
-// responder-side transcript + AEAD opens match the reference server.
+// TestDecryptReply_GoldenVector decrypts the relay-knock ack reply packet vector
+// (server-built) and checks the recovered fields, proving the responder-side
+// transcript + AEAD opens match the reference server.
 func TestDecryptReply_GoldenVector(t *testing.T) {
-	const (
-		serverPubHex   = "07a37cbc142093c8b755dc1b10e86cb426374ad16aa853ed0bdfc0b2b86d1c7c"
-		agentPrivHex   = "4142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f60"
-		timestampNanos = uint64(1781494443173070000)
-		wantCounter    = uint64(0x1122334455667788)
-		bodyHex        = "7b22657272436f6465223a2230222c22726573486f7374223a7b22725f6a736167656e74223a2231302e302e302e37227d2c226f706e54696d65223a3930302c226167656e7441646472223a223230332e302e3131332e39222c226163546f6b656e73223a7b22725f6a736167656e74223a22746f6b2d616263313233227d7d"
-		ackPacketHex   = "455e3ec8455c3e4b01000002000000001122334455667788345bdbe28c304e7dae8ca4e672fbca9b48d9ec7d673566ce09c9b7ef662707670000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000a332e8cfa2e4eff64b7636eed1d047c275f7b0aced2debd8138daecf49e29bd92e89bc40a2cd98f2bf9f29d0c451b186b825b5d2d55a6668c06eed5f504087255b267fac40a7eac3f612fd2d62f6740740c53495dfbd7fc12d42acea3eab519b3015e532128a9bd3d75a3e46313f2b4ce17d50551f9eb1fbbbb331f2ccb5aa8ad1d04a191feabdebc03b0984b9098823085259197e4ba00cffc238599766960438fd6225d945f8af6edece5d9feffb9bda0ec3ec5d3f65b0e0eb9d35c36c500809edbb2854a4cf25ea206f96f33383ae71919ac3ad64e7178936e09906169d2197e42e52ad8e1676ccb5c5"
-	)
+	ack := loadRelayKnockGolden(t).Ack
+
+	serverPubHex := ack.ServerStaticPubHex
+	agentPrivHex := ack.AgentStaticPrivHex
+	timestampNanos := mustDecimalU64(t, ack.TimestampNanos)
+	wantCounter := mustHexU64(t, ack.CounterHex)
+	bodyHex := ack.BodyHex
+	ackPacketHex := ack.PacketHex
 
 	reply, err := DecryptReply(mustHex(t, agentPrivHex), mustHex(t, serverPubHex), mustHex(t, ackPacketHex))
 	if err != nil {
@@ -118,23 +156,43 @@ func TestDecryptReply_GoldenVector(t *testing.T) {
 }
 
 // TestPubKeyFingerprint_GoldenVectors pins {serverId} derivation against the
-// shared cross-language fingerprint vectors. These are the SAME inputs/outputs
-// the qv2 conformance server_id class reuses, so this fence and the qv2 routing
+// shared cross-language fingerprint vectors, sourced from the qv2 conformance
+// server_id class (cell_fill_0x42_golden -> "Ql7U5KNrMOo",
+// cell_seq_1to32_golden -> "riFsLvUkejc"). These are the SAME inputs/outputs the
+// qv2 conformance server_id class reuses (its runServerIDClass recomputes
+// PubKeyFingerprint over the full class), so this fence and the qv2 routing
 // contract cannot fork.
 func TestPubKeyFingerprint_GoldenVectors(t *testing.T) {
-	cases := []struct {
-		name string
-		key  []byte
-		want string
-	}{
-		{"fill-0x42", bytes.Repeat([]byte{0x42}, 32), "Ql7U5KNrMOo"},
-		{"seq-1to32", fillBytes(32, 1), "riFsLvUkejc"},
+	cf, err := conformance.ConformanceVectors()
+	if err != nil {
+		t.Fatalf("load conformance vectors: %v", err)
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := PubKeyFingerprint(tc.key)
-			if got != tc.want {
-				t.Errorf("PubKeyFingerprint = %q, want %q", got, tc.want)
+	serverID, ok := cf.Classes["server_id"]
+	if !ok {
+		t.Fatal("conformance vectors missing server_id class")
+	}
+	byName := make(map[string]conformance.ConformanceVector, len(serverID.Vectors))
+	for _, v := range serverID.Vectors {
+		byName[v.Name] = v
+	}
+
+	// The two fingerprint golden cases the relayknock fence pins. The full
+	// server_id class (these plus the non-golden cells) is exercised by qv2's
+	// TestConformanceVectors/server_id; here we assert the two named golden cases
+	// directly so the relayknock derivation is fenced in-package too.
+	for _, name := range []string{"cell_fill_0x42_golden", "cell_seq_1to32_golden"} {
+		v, ok := byName[name]
+		if !ok {
+			t.Fatalf("server_id class missing golden vector %q", name)
+		}
+		t.Run(name, func(t *testing.T) {
+			key, err := base64.RawURLEncoding.DecodeString(v.CellPublicKeyB64)
+			if err != nil {
+				t.Fatalf("decode cell_public_key_b64 %q: %v", v.CellPublicKeyB64, err)
+			}
+			got := PubKeyFingerprint(key)
+			if got != v.ServerID {
+				t.Errorf("PubKeyFingerprint = %q, want %q", got, v.ServerID)
 			}
 			if len(got) != PubKeyFingerprintLen {
 				t.Errorf("fingerprint length = %d, want %d", len(got), PubKeyFingerprintLen)
