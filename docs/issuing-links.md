@@ -1,212 +1,70 @@
-# Issuing links
+# Issue qURL Links
 
-This guide covers the **issuer side**: minting qURL links with `CreatePortal`,
-managing signing keys safely, and rotating them. Everything uses the single `qurl`
-package. If you want to *open* links instead, see [Opening links](opening-links.md).
-New here? Start with the [golden-path guide](secure-a-private-service.md).
+`CreatePortal` signs a short-lived qURL link for a private service configured in
+the LayerV qURL Platform.
 
-- [The one call](#the-one-call)
-- [`CreateParams` reference](#createparams-reference)
-- [Validity windows](#validity-windows)
-- [Signing keys: the `Signer` seam](#signing-keys-the-signer-seam)
-- [Self-verification at mint time](#self-verification-at-mint-time)
-- [Key rotation](#key-rotation)
-- [Verifying your own links](#verifying-your-own-links)
-- [Error handling](#error-handling)
+## Inputs
 
-## The one call
+Most values come from two places:
 
-`CreatePortal` does everything needed to produce a link:
-
-1. generates a fresh per-link X25519 keypair (the private half becomes the fragment
-   secret, the public half is bound into the signed claims),
-2. assembles the claims,
-3. signs them through your `Signer`,
-4. returns the full `https://qurl.link/#…` link.
+- The LayerV qURL Platform resource config for the private service.
+- Your issuer signing key.
 
 ```go
-signer, _ := qurl.GenerateLocalSigner("issuer-key-2026") // dev key; see "Signing keys"
-
 link, err := qurl.CreatePortal(ctx, signer, qurl.CreateParams{
-	CellPublicKey:     cellPub,     // raw 32-byte X25519 NHP cell key
-	RelayURL:          "https://relay.example.com",
-	ResourcePublicKey: resourceDER, // DER SPKI P-256 resource key
-	JTI:               "qurl_01J…", // unique per link
-	IssuedAt:          iat,
-	NotBefore:         nbf,
-	Expiry:            exp,
+	CellPublicKey:     resource.AccessPublicKey,
+	RelayURL:          resource.AccessURL,
+	ResourcePublicKey: resource.ResourceIdentity,
+	CellID:            resource.Label,
+	JTI:               "ticket_01",
+	IssuedAt:          now,
+	NotBefore:         now,
+	Expiry:            now + 300,
 })
 ```
 
-You never choose the version, issuer, `kid`, signature, or per-link keypair —
-`CreatePortal` and the signer own those. You supply only the bindings and the
-validity window.
+`CellPublicKey`, `RelayURL`, and `ResourcePublicKey` are wire-format field names.
+In normal integrations, copy the corresponding values from LayerV's resource
+config; you do not need to understand the lower-level pieces behind them.
 
-## `CreateParams` reference
+| Field | Source | Required |
+| --- | --- | --- |
+| `CellPublicKey` | LayerV resource config: access public key | Yes |
+| `RelayURL` | LayerV resource config: qURL access URL | Yes |
+| `ResourcePublicKey` | LayerV resource config: resource identity | Yes |
+| `CellID` | Optional LayerV resource label | No |
+| `JTI` | Unique link id chosen by your issuer | Yes |
+| `IssuedAt`, `NotBefore`, `Expiry` | Link validity window, Unix seconds | Yes |
 
-| Field               | Type     | Required | Description                                                              |
-| ------------------- | -------- | :------: | ------------------------------------------------------------------------ |
-| `CellPublicKey`     | `[]byte` |    ✅    | Raw 32-byte X25519 NHP cell (server) public key. Defines the relay route. |
-| `RelayURL`          | `string` |    ✅    | HTTPS relay origin the opener knocks. Signed, but acted on only after verify. |
-| `ResourcePublicKey` | `[]byte` |    ✅    | Protected-resource public key, DER SPKI form (e.g. a P-256 KMS key, ~91 bytes). |
-| `JTI`               | `string` |    ✅    | Unique qURL id — the per-link identifier and part of the anti-tamper envelope. |
-| `IssuedAt`          | `int64`  |    ✅    | `iat` claim, Unix seconds.                                                |
-| `NotBefore`         | `int64`  |    ✅    | `nbf` claim, Unix seconds.                                                |
-| `Expiry`            | `int64`  |    ✅    | `exp` claim, Unix seconds.                                                |
-| `CellID`            | `string` |    —     | Optional human/config label for the cell. Empty omits it from the claims. |
+## Signer
 
-`CellPublicKey` and `ResourcePublicKey` are raw bytes, not base64 — `CreatePortal`
-encodes them for the wire. To turn a P-256 public key into the DER SPKI bytes
-`ResourcePublicKey` wants:
-
-```go
-resourceDER, _ := x509.MarshalPKIXPublicKey(&resourcePriv.PublicKey)
-```
-
-## Validity windows
-
-The three time fields are **Unix seconds** and must satisfy the clock-free ordering
-bounds the verifier enforces:
-
-- `IssuedAt <= Expiry`
-- `NotBefore <= Expiry`
-
-A window that violates these fails the mint (as `qurl.ErrStrictParse`) rather than
-producing a link no verifier would accept.
-
-```go
-now := time.Now().Unix()
-params := qurl.CreateParams{
-	// …bindings…
-	IssuedAt:  now,
-	NotBefore: now,
-	Expiry:    now + 300, // a 5-minute link
-}
-```
-
-> **Liveness is the admission layer's job, not the mint's.** `CreatePortal` has no
-> trusted clock; it only checks the ordering bounds above. Whether a link is
-> *currently* live (vs. expired or not-yet-valid against the wall clock) is enforced
-> when the resource admits traffic. Keep windows short.
-
-## Signing keys: the `Signer` seam
-
-The issuer signing key is never held by `CreatePortal` directly. Signing goes through
-a tiny interface, so where the key lives is your choice:
+`CreatePortal` uses the `qurl.Signer` interface. Production issuers usually back
+that interface with KMS or another managed key service:
 
 ```go
 type Signer interface {
-	KID() string                                              // published key id
-	SignDigest(ctx context.Context, digest []byte) ([]byte, error) // returns ASN.1 DER
+	KID() string
+	SignDigest(ctx context.Context, digest []byte) ([]byte, error)
 }
 ```
 
-The SDK owns the domain-separated digest and the DER → raw `r‖s` low-S normalization,
-so **no signer can drift** on those details — it just signs the 32 digest bytes it's
-handed.
+`qurl.GenerateLocalSigner` is useful for tests and demos.
 
-| Where the key lives        | How                                                                 |
-| -------------------------- | ------------------------------------------------------------------- |
-| **Production** (KMS / HSM) | Implement `qurl.Signer` over your KMS client (`MessageType=DIGEST`). Recommended — a leaked process must not yield the issuer key. |
-| **Self-custody / files**   | Implement `qurl.Signer` over a file- or HSM-resident key.           |
-| **Tests & local dev**      | `qurl.NewLocalSigner(priv, kid)` or `qurl.GenerateLocalSigner(kid)`. |
+## Verify Before Sending
 
-A minimal KMS signer looks like this (sketch — wire it to your SDK):
+You can verify a freshly minted link offline:
 
 ```go
-type kmsSigner struct {
-	kid    string
-	client *kms.Client
-	keyID  string
-	pubDER []byte // cache GetPublicKey output so self-verify is free
+pubDER, err := signer.PublicKeyDER()
+if err != nil {
+	return err
 }
-
-func (s *kmsSigner) KID() string { return s.kid }
-
-func (s *kmsSigner) SignDigest(ctx context.Context, digest []byte) ([]byte, error) {
-	out, err := s.client.Sign(ctx, &kms.SignInput{
-		KeyId:            &s.keyID,
-		Message:          digest,
-		MessageType:      types.MessageTypeDigest,
-		SigningAlgorithm: types.SigningAlgorithmSpecEcdsaSha256,
-	})
-	if err != nil {
-		return nil, err
-	}
-	return out.Signature, nil // ASN.1 DER; the SDK normalizes to low-S
+trust, err := qurl.NewTrustStoreFromDER(map[string][]byte{signer.KID(): pubDER})
+if err != nil {
+	return err
 }
-
-// Optional but recommended — enables mint-time self-verify (see below).
-func (s *kmsSigner) PublicKeyDER() ([]byte, error) { return s.pubDER, nil }
+_, err = qurl.VerifyLink(link, trust)
 ```
 
-> The `Signer` interface keeps AWS (or any HSM SDK) out of this module's dependency
-> graph — the SDK stays standard-library-only. A KMS-backed signer ships with the
-> credential-provider follow-up; until then, implement the two methods yourself.
-
-## Self-verification at mint time
-
-If your `Signer` also implements `PublicKeyDER() ([]byte, error)`, `CreatePortal`
-verifies the freshly minted signature against that public key *before returning*. This
-catches a custody misconfiguration — a signer whose signing key disagrees with its
-reported public key (wrong, rotated, or region-mismatched) — at mint time, instead of
-producing a link that only fails downstream.
-
-`LocalSigner` implements it. A production KMS signer should cache its `GetPublicKey`
-output (as in the sketch above) so self-verify doesn't cost an API call per mint.
-
-## Key rotation
-
-Rotation is **overlap-publish**, expressed entirely through the contents of the
-verifiers' trust store — there is no per-key TTL or "retired" flag in the library.
-
-1. **Add** the new key. Start signing new links with the new `kid`, and publish the
-   new public key into every verifier's trust store *alongside* the old one. Links
-   signed under either kid now verify.
-2. **Overlap.** Outstanding links signed under the old kid keep working for as long as
-   the old key remains in the published trust store. Size this window to your longest
-   link lifetime.
-3. **Retire** the old key by removing it from the published trust store. From then on,
-   verifiers return `qurl.ErrUnknownKID` for links signed under it.
-
-On the verifier side this is just publishing an updated trust store (or manifest) — see
-[Opening links → Trust providers](opening-links.md#trust-providers).
-
-## Verifying your own links
-
-A link from `CreatePortal` is guaranteed to parse and verify against a trust store
-holding the signer's public key — `CreatePortal` runs the same strict checks the
-verifier uses *before* signing, so a mint that wouldn't verify fails at mint instead.
-The round trip is the basis of the [Quickstart](../README.md#quickstart):
-
-```go
-pubDER, _ := signer.PublicKeyDER()
-trust, _ := qurl.NewTrustStoreFromDER(map[string][]byte{signer.KID(): pubDER})
-
-frag, err := qurl.VerifyLink(link, trust)
-// err == nil; frag.Claims holds the verified claim set
-```
-
-This exact flow is a runnable example — see [`qurl/example_test.go`](../qurl/example_test.go).
-
-## Error handling
-
-| Error                         | Cause                                                             |
-| ----------------------------- | ---------------------------------------------------------------- |
-| `qurl.ErrInvalidCreateParams` | A required binding is missing (nil key, empty `JTI`, zero time). |
-| `qurl.ErrStrictParse`         | A deep value rule failed (bad key length, time ordering, …).     |
-| `qurl.ErrKeyLength`           | A key field decoded to the wrong size.                           |
-
-Match the exact cause with `errors.Is`:
-
-```go
-link, err := qurl.CreatePortal(ctx, signer, params)
-switch {
-case errors.Is(err, qurl.ErrInvalidCreateParams):
-	// a required field was missing
-case errors.Is(err, qurl.ErrStrictParse):
-	// a value was present but invalid (e.g. nbf > exp)
-case err != nil:
-	// signer error, keygen failure, etc.
-}
-```
+Verification catches malformed or unverifiable links before they leave your
+issuer path.

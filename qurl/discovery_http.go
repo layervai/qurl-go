@@ -14,7 +14,7 @@ import (
 // does I/O.
 
 // maxManifestBytes caps the discovery response read. A non-secret trust manifest is
-// small (a handful of issuer keys + relay hosts); the cap bounds a hostile or
+// small (a handful of issuer keys + platform access hosts); the cap bounds a hostile or
 // misconfigured endpoint from streaming an unbounded body into memory before
 // authentication has a chance to reject it.
 const maxManifestBytes = 1 << 20 // 1 MiB
@@ -31,11 +31,11 @@ const defaultFetchTimeout = 30 * time.Second
 // warm and covers both the constructor-nil and struct-literal-nil paths.
 //
 // CheckRedirect refuses redirects outright. The construction-time https guard only
-// covers the FIRST hop, so a 3xx from the (deployment-configured) manifest URL to
+// covers the FIRST hop, so a 3xx from the configured manifest URL to
 // http:// or an internal host would otherwise be followed and silently defeat that
 // guard. Trust is anchored on the pin/signature, so following a redirect can never
 // admit a bad manifest — but refusing one keeps the transport posture honest and
-// avoids surprising cross-origin fetches. A deployment that genuinely needs a CDN
+// avoids surprising cross-origin fetches. An application that genuinely needs a CDN
 // hop injects its own Client with a redirect policy it controls.
 var defaultFetchClient = &http.Client{
 	Timeout: defaultFetchTimeout,

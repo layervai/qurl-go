@@ -18,20 +18,19 @@ import (
 
 // Discovery-manifest credential provider.
 //
-// A DiscoveryProvider fetches a NON-SECRET published trust manifest carrying the
-// issuer trust anchors (kid -> P-256 public key), the relay allowlist, an expiry,
-// and a monotonic version, then turns it into the *qurl.TrustStore / *qurl.RelayAllowlist
+// A DiscoveryProvider fetches a NON-SECRET published opener-config manifest
+// carrying issuer keys, qURL platform access hosts, an expiry, and a monotonic
+// version, then turns it into the *qurl.TrustStore / *qurl.RelayAllowlist
 // EnterPortal needs. "Non-secret" does NOT mean "blindly trusted": a manifest is
 // authenticated before use by a configured PIN (sha256 of the exact bytes) or a
-// detached ISSUER SIGNATURE (the manifest-signature verifier, a SEPARATE signing domain
-// from qURL claims). It FAILS CLOSED on every doubt — unverifiable, expired,
-// downgraded (older version than last accepted), missing a trust mode, or carrying an
-// empty/invalid anchor set or allowlist all return an error, never a partial result.
+// detached issuer signature. It FAILS CLOSED on every doubt: unverifiable,
+// expired, downgraded, missing a trust mode, or carrying empty/invalid config all
+// return an error, never a partial result.
 //
-// Discovery trust policy is intentionally configurable while production defaults settle:
-// signed vs pinned manifests, kid rotation, and durable downgrade state are deployment
-// choices. This implementation provides the fail-closed mechanism behind those choices;
-// a later policy decision can select or clamp the knobs without loosening verification.
+// Discovery trust policy is intentionally configurable: signed vs pinned
+// manifests, key rotation, and durable downgrade state are platform policy
+// choices. This implementation provides the fail-closed mechanism behind those
+// choices.
 
 // ManifestEnvelope is the fetched discovery document. The signed/pinned MANIFEST
 // itself is carried as opaque base64url (ManifestB64) — exactly like a qURL link fragment
@@ -58,7 +57,7 @@ type ManifestEnvelope struct {
 //     Version below the provider's last-accepted floor is a DOWNGRADE and is rejected.
 //   - NotAfter is the manifest expiry as Unix seconds; now > NotAfter fails closed.
 //   - Issuers becomes the trust store (kid -> DER SPKI P-256 key).
-//   - RelayAllowlist becomes the relay allowlist (host or host:port entries).
+//   - RelayAllowlist becomes the qURL platform access host allowlist.
 type Manifest struct {
 	Profile        string           `json:"profile"`
 	Version        int64            `json:"version"`
@@ -68,8 +67,8 @@ type Manifest struct {
 	RelayAllowlist []string         `json:"relay_allowlist"`
 }
 
-// ManifestIssuer is one issuer trust anchor: a kid and its P-256 public key in DER
-// SPKI form (the AWS KMS GetPublicKey shape, base64url-encoded for JSON transport).
+// ManifestIssuer is one trusted issuer key: a kid and its P-256 public key in DER
+// SPKI form, base64url-encoded for JSON transport.
 type ManifestIssuer struct {
 	Kid        string `json:"kid"`
 	SPKIDERB64 string `json:"spki_der_b64"`
@@ -120,7 +119,7 @@ type DiscoveryConfig struct {
 	// authenticate requires EVERY configured anchor that is present to validate (a pin,
 	// once configured, must match; a signature, once present and keyed, must verify), so
 	// "default false" relaxes which anchor is REQUIRED, never whether a present anchor may
-	// fail. Production deployments can require signatures when policy demands it.
+	// fail. Platforms can require signatures when policy demands it.
 	RequireSignature bool
 
 	// MinVersion is the initial downgrade floor: a manifest with Version < MinVersion is
@@ -132,7 +131,7 @@ type DiscoveryConfig struct {
 	// The advanced floor is IN-MEMORY only: a process restart resets it to MinVersion, so
 	// rollback protection across restarts is bounded by MinVersion and the manifest's
 	// not_after, not by the highest version a previous process accepted. Durable
-	// rollback state is a deployment policy choice; pin a high MinVersion when
+	// rollback state is a platform policy choice; pin a high MinVersion when
 	// cross-restart anti-rollback matters.
 	MinVersion int64
 
@@ -194,19 +193,19 @@ var (
 	ErrDiscoveryConfig = errors.New("qurl: discovery provider misconfigured")
 )
 
-// DiscoveryProvider is a Provider that resolves trust anchors and the relay
-// allowlist from an authenticated discovery manifest. It re-fetches and re-verifies on
-// every Resolve and returns the freshly built trust material; a fetch/verify failure
-// returns the error (fail closed) rather than ever serving stale anchors. Concurrent
-// Resolve calls are safe.
+// DiscoveryProvider is a Provider that resolves opener config from an
+// authenticated discovery manifest. It re-fetches and re-verifies on every
+// Resolve and returns freshly built config; a fetch/verify failure returns the
+// error (fail closed) rather than serving stale config. Concurrent Resolve calls
+// are safe.
 //
 // NO CACHING — operational cost. Because every Resolve does a fresh HTTPS GET +
 // authenticate, EnterPortal pays a network round-trip to the manifest endpoint on
 // EVERY link open, and a down/slow manifest endpoint fails every open even while a
 // recently-authenticated, still-in-window manifest exists. This is a deliberate
-// fail-closed-over-availability stance for the mechanism. A deployment expecting high
+// fail-closed-over-availability stance for the mechanism. An application expecting high
 // open volume should wrap this in a TTL cache that itself fails closed once not_after
-// (or the TTL) elapses; cache windows are a deployment policy choice.
+// (or the TTL) elapses; cache windows are a platform policy choice.
 type DiscoveryProvider struct {
 	cfg DiscoveryConfig
 
@@ -259,10 +258,10 @@ func NewDiscoveryProvider(cfg DiscoveryConfig) (*DiscoveryProvider, error) {
 	return &DiscoveryProvider{cfg: cfg, floor: cfg.MinVersion}, nil
 }
 
-// Resolve fetches, authenticates, and decodes the discovery manifest into a trust
-// store and relay allowlist. It fails closed on any verification, freshness, or schema
-// fault. On success it advances the monotonic downgrade floor and returns the freshly
-// built trust material.
+// Resolve fetches, authenticates, and decodes the discovery manifest into opener
+// config. It fails closed on any verification, freshness, or schema fault. On
+// success it advances the monotonic downgrade floor and returns freshly built
+// config.
 //
 // A nil receiver (a caller that ignored NewDiscoveryProvider's construction error and
 // installed the nil *DiscoveryProvider) fails closed with ErrNotConfigured rather than
@@ -347,7 +346,7 @@ func (p *DiscoveryProvider) Resolve(ctx context.Context) (*TrustStore, *RelayAll
 // So a manifest that is unpinned-or-pin-mismatched, or that carries a signature that
 // does not verify, or that satisfies no anchor at all, is rejected. This is the
 // safe-default MECHANISM; whether the production policy is pin-only, signed-only, or
-// pin-AND-signed (and the exact precedence between them) is a deployment policy choice.
+// pin-AND-signed (and the exact precedence between them) is a platform policy choice.
 // SigB64/Kid ride OUTSIDE the pinned/signed preimage, so an
 // attacker who cannot alter the manifest bytes also cannot forge acceptance; corrupting
 // a present signature only makes an otherwise-good manifest fail closed (deny), never
@@ -486,14 +485,14 @@ func parseManifest(manifestBytes []byte) (*Manifest, error) {
 		return nil, fmt.Errorf("%w: not_after (%d) must be after issued_at (%d)", ErrManifestSchema, m.NotAfter, m.IssuedAt)
 	}
 	if len(m.Issuers) == 0 {
-		return nil, fmt.Errorf("%w: manifest has no issuer trust anchors", ErrManifestSchema)
+		return nil, fmt.Errorf("%w: manifest has no trusted issuer keys", ErrManifestSchema)
 	}
-	// Require at least one USABLE relay entry, not merely a non-empty slice.
+	// Require at least one USABLE platform access entry, not merely a non-empty slice.
 	// NewRelayAllowlist trims and drops blank/whitespace entries, so a slice of only
 	// blanks (e.g. ["", "  "]) is length-non-empty yet builds an allowlist that rejects
-	// every relay — a schema-valid-but-unusable manifest. Reject it here so "schema
-	// valid" implies "has a usable relay anchor". A real host alongside a stray blank is
-	// still accepted (the blank is dropped downstream); only an all-blank list fails.
+	// every endpoint. Reject it here so "schema valid" implies "has a usable qURL
+	// platform access host". A real host alongside a stray blank is still accepted
+	// (the blank is dropped downstream); only an all-blank list fails.
 	hasUsableRelay := false
 	for _, e := range m.RelayAllowlist {
 		if strings.TrimSpace(e) != "" {
@@ -502,17 +501,15 @@ func parseManifest(manifestBytes []byte) (*Manifest, error) {
 		}
 	}
 	if !hasUsableRelay {
-		return nil, fmt.Errorf("%w: manifest has no usable relay allowlist entries", ErrManifestSchema)
+		return nil, fmt.Errorf("%w: manifest has no usable platform access entries", ErrManifestSchema)
 	}
 	return &m, nil
 }
 
-// buildTrustMaterial turns an authenticated, in-window manifest into the trust
-// store and relay allowlist. It defers issuer-key parsing (and the empty-anchor-set
-// rejection) to NewTrustStoreFromDER, reusing its fail-closed construction rather
-// than re-validating here. The relay allowlist's emptiness is already gated upstream in
-// parseManifest (an empty relay_allowlist is a schema fault), so NewRelayAllowlist
-// only needs to index the entries.
+// buildTrustMaterial turns an authenticated, in-window manifest into opener
+// config. It defers issuer-key parsing to NewTrustStoreFromDER, reusing its
+// fail-closed construction rather than re-validating here. The access-host list's
+// emptiness is already gated upstream in parseManifest.
 func buildTrustMaterial(m *Manifest) (*TrustStore, *RelayAllowlist, error) {
 	derByKID := make(map[string][]byte, len(m.Issuers))
 	for _, iss := range m.Issuers {

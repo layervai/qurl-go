@@ -6,44 +6,41 @@ import (
 	"fmt"
 )
 
-// qURL knock-reply interpretation. relayknock decrypts and authenticates the NHP
-// packet but is body-shape agnostic; the qURL ACK body shape and its success/deny
-// semantics live here.
+// qURL platform reply interpretation. The lower transport authenticates the reply
+// packet but is body-shape agnostic; the qURL success/deny semantics live here.
 
-// ErrServerOverloaded is returned when the relay knock got an NHP_COK overload
-// cookie-challenge instead of an admission reply. The NHP_RKN cookie-answer path
-// is out of scope for a one-shot EnterPortal, so the caller should retry later.
-var ErrServerOverloaded = errors.New("qurl: NHP server overloaded (cookie-challenge); retry later")
+// ErrServerOverloaded is returned when the qURL platform asks the client to retry
+// later instead of opening access immediately.
+var ErrServerOverloaded = errors.New("qurl: platform busy; retry later")
 
 // ErrMalformedReply is returned when an authenticated reply is structurally
-// unusable — an unexpected NHP type, or a success ACK that carries no reachable
-// resource (empty redirectUrl). It is distinct from a ServerDenyError (an
-// authenticated deny) and a RelayError (a transport fault).
-var ErrMalformedReply = errors.New("qurl: malformed server reply")
+// unusable: an unexpected platform reply, or a success reply that carries no
+// reachable resource (empty redirectUrl). It is distinct from a ServerDenyError
+// (an authenticated deny) and a RelayError (a transport fault).
+var ErrMalformedReply = errors.New("qurl: malformed platform reply")
 
-// ServerDenyError is an authenticated server DENY: the knock decrypted and the
-// server vouched for it, but admission was refused (expired/revoked/consumed
-// qURL, policy mismatch). It is distinct from a RelayError, which is a
-// transport fault before any authenticated server decision.
+// ServerDenyError is an authenticated qURL platform deny: the platform vouched
+// for the reply, but access was refused (expired/revoked/consumed qURL, policy
+// mismatch). It is distinct from a RelayError, which is a transport fault before
+// any authenticated platform decision.
 type ServerDenyError struct {
-	// ErrCode is the server's NHP error code string (e.g. "52024" for a qURL
-	// session-expired deny). "" / "0" are success and never produce this error.
+	// ErrCode is the qURL platform error code string. "" / "0" are success and
+	// never produce this error.
 	ErrCode string
 }
 
 func (e *ServerDenyError) Error() string {
-	return fmt.Sprintf("qurl: server denied admission (errCode=%q)", e.ErrCode)
+	return fmt.Sprintf("qurl: platform denied access (errCode=%q)", e.ErrCode)
 }
 
-// serverKnockAckMsg is the subset of the NHP server's ServerKnockAckMsg the
-// resolve path reads.
+// serverKnockAckMsg is the subset of the qURL platform reply the resolve path reads.
 type serverKnockAckMsg struct {
 	ErrCode     string `json:"errCode"`
 	OpenTime    uint32 `json:"opnTime"`
 	RedirectURL string `json:"redirectUrl"`
 }
 
-// NHP success error codes. errCode is a string field; "" and "0" both mean
+// qURL success error codes. errCode is a string field; "" and "0" both mean
 // success (common.IsSuccessErrCode).
 const errSuccess = "0"
 

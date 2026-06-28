@@ -12,20 +12,15 @@ import (
 	"github.com/layervai/qurl-go/internal/qv2"
 )
 
-// CreatePortal is the issuer-side mint verb: the inverse of EnterPortal. Where
-// EnterPortal opens an existing qURL link, CreatePortal produces one — it
-// assembles and signs the qURL claims, generates the fresh per-qURL keypair
-// whose secret rides in the fragment, and returns the
-// https://qurl.link/#<version>.<claims>.<secret>.<sig> link. (The package doc lives in
-// portal.go; this is the mint half of the same qurl entry surface.)
+// CreatePortal is the issuer-side mint verb. It signs a short-lived qURL link
+// for a private service configured in LayerV and returns the
+// https://qurl.link/#<version>.<claims>.<secret>.<sig> link.
 //
 // The issuer signing key is never held here directly: signing goes through the
 // qurl.Signer seam (KMS in production, qurl.LocalSigner for tests / self-custody
-// integrations), so this verb has no AWS dependency and the credential-provider
-// follow-up can supply a real KMS signer without touching this code. The signed
-// claims bytes are handed verbatim to the fragment builder, so the bytes the issuer
-// signs are exactly the bytes a verifier (qurl.VerifyLink / EnterPortal)
-// checks — mint and enter are symmetric by construction.
+// integrations), so this verb has no AWS dependency. The signed claims bytes are
+// handed verbatim to the fragment builder, so the bytes the issuer signs are
+// exactly the bytes a verifier (qurl.VerifyLink / EnterPortal) checks.
 
 // LinkBaseURL is the canonical qURL link origin CreatePortal prepends to the
 // fragment. The credential, claims, and signature all live in the fragment after
@@ -44,25 +39,21 @@ const LinkBaseURL = "https://qurl.link/"
 // see qurl-go#6.
 var b64url = base64.RawURLEncoding
 
-// CreateParams are the issuer-supplied inputs to a mint. The verb owns everything
-// a caller must NOT choose: the version and issuer (pinned by the core), the kid
-// (stamped from the signer), the issuer signature, and the per-qURL keypair
-// (freshly generated each call). A caller supplies only the bindings and the
-// signed validity window.
+// CreateParams are the inputs to a mint. The platform resource fields come from
+// LayerV qURL Platform config; the issuer supplies the link id and validity
+// window.
 type CreateParams struct {
-	// CellPublicKey is the raw 32-byte X25519 NHP cell (server static) public key.
-	// It defines the relay routing target and the Noise server identity. REQUIRED.
+	// CellPublicKey is the access public key from LayerV resource config. The name
+	// matches the qURL wire format. REQUIRED.
 	CellPublicKey []byte
-	// RelayURL is the HTTPS relay origin the viewer knocks. It is part of the
-	// signed envelope but is acted on by a verifier only after the signature
-	// verifies. REQUIRED.
+	// RelayURL is the qURL platform access URL from LayerV resource config. The
+	// name matches the qURL wire format. REQUIRED.
 	RelayURL string
-	// ResourcePublicKey is the protected-resource public key in DER SPKI form (the
-	// NHP knock resource identity / AC routing key, e.g. a P-256 KMS key).
-	// REQUIRED.
+	// ResourcePublicKey is the resource identity key from LayerV resource config,
+	// in DER SPKI form. REQUIRED.
 	ResourcePublicKey []byte
-	// CellID is the one optional claim: a human/config label for the cell. Empty
-	// omits it from the signed claims (absent, not "").
+	// CellID is an optional LayerV resource label. Empty omits it from the signed
+	// claims.
 	CellID string
 	// JTI is the unique qURL id stamped into the claims (the jti claim). REQUIRED:
 	// it is part of the signed anti-tamper envelope and the per-link identifier.
@@ -70,10 +61,8 @@ type CreateParams struct {
 
 	// IssuedAt, NotBefore, Expiry are the signed validity window as Unix seconds
 	// (the iat / nbf / exp claims). All three are REQUIRED and must satisfy the
-	// clock-free ordering bounds iat<=exp and nbf<=exp (the strict parser enforces
-	// them at sign time, so a nonsensical window fails the mint rather than
-	// producing an artifact no verifier accepts). Liveness vs the wall clock is the
-	// admission layer's concern, not the mint's.
+	// clock-free ordering bounds iat<=exp and nbf<=exp. A nonsensical window fails
+	// the mint rather than producing an artifact no verifier accepts.
 	IssuedAt  int64
 	NotBefore int64
 	Expiry    int64
@@ -85,10 +74,9 @@ type CreateParams struct {
 // caller can match the strict-parse contract directly.
 var ErrInvalidCreateParams = errors.New("qurl: invalid CreatePortal params")
 
-// CreatePortal mints a qURL link. It generates a fresh per-qURL X25519 keypair
-// (the private half becomes the fragment secret, the public half is bound into
-// the signed claims), assembles the claims, signs them through the issuer Signer
-// seam, and returns the full https://qurl.link/#<version>.<claims>.<secret>.<sig> link.
+// CreatePortal mints a qURL link. It generates the per-link credential, assembles
+// the claims, signs them through the issuer Signer seam, and returns the full
+// https://qurl.link/#<version>.<claims>.<secret>.<sig> link.
 //
 // Symmetry guarantee: the returned link parses and verifies under
 // qurl.VerifyLink / EnterPortalWith against a

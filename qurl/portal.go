@@ -1,30 +1,14 @@
-// Package qurl is the top-level entry point of the qURL Go SDK. It provides the two
-// verbs most integrations need: CreatePortal mints a signed, expiring qURL link on
-// the issuer side, and EnterPortal performs the opener flow for a received link.
+// Package qurl is the Go SDK for the LayerV qURL Platform. It provides the two
+// verbs most integrations need: CreatePortal mints a signed, expiring qURL link,
+// and EnterPortal opens a received link.
 //
-// Applications normally install deployment trust anchors and the relay allowlist once
-// through a Provider, then call EnterPortal with no per-call trust config. Minting and
-// local verification work offline; a live open also requires the deployment's qURL
-// admission service to accept the knock.
+// LayerV hosts the qURL platform. Applications use the resource config and
+// opener config LayerV provides, plus the SDK calls in this package.
 //
-// EnterPortal stitches the two lower layers together in the protocol order:
-//
-//  1. Parse the #<version>.<claims>.<secret>.<sig> fragment.
-//  2. Verify the issuer signature locally (REQUIRED — not optional for a
-//     first-party client) against the issuer trust store.
-//  3. Validate relay_url (HTTPS + allowlist) — ONLY after the signature verifies,
-//     because relay_url is attacker-controlled until then.
-//  4. Derive serverId = PubKeyFingerprint(cell_public_key).
-//  5. Build an NHP knock using the per-qURL private key (from the link's secret
-//     block) as the agent static identity and the cell public key as the server
-//     static key, carrying the resource public key as the knock resource identity
-//     and the signed claims as encrypted user data.
-//  6. POST the opaque packet to relay_url + "/relay/" + serverId and decrypt the
-//     authenticated reply.
-//
-// No external key is needed: the per-qURL credential rides inside the link. The
-// caller supplies only trust anchors (which issuer keys to trust) and the relay
-// allowlist — both deployment config, not per-link secrets.
+// CreatePortal works fully offline: it signs a short-lived link for a private
+// service configured in LayerV. EnterPortal verifies a link locally before asking
+// the qURL platform for access, then returns a ResourceHandle with the reachable
+// URL. No per-link secret is configured outside the link itself.
 package qurl
 
 import (
@@ -37,19 +21,17 @@ import (
 	"github.com/layervai/qurl-go/relayknock"
 )
 
-// Config carries the deployment trust anchors EnterPortal needs. Neither is a
-// per-link secret: the per-qURL credential is in the link itself. Both fail
-// closed when empty (an empty trust store rejects every signature; an empty
-// allowlist rejects every relay_url), so a misconfigured caller cannot resolve.
+// Config carries opener configuration for EnterPortalWith. Most applications
+// install a Provider once and call EnterPortal; Config is the explicit seam for
+// tests and advanced clients.
 type Config struct {
-	// TrustStore resolves a claim's kid to the issuer public key. REQUIRED.
+	// TrustStore resolves trusted issuer keys. REQUIRED.
 	TrustStore *TrustStore
-	// RelayAllowlist is the set of relay host[:port] origins a verified relay_url
-	// may target. REQUIRED.
+	// RelayAllowlist is the qURL platform access endpoint allowlist. REQUIRED.
 	RelayAllowlist *RelayAllowlist
-	// HTTPClient is the client used for the relay POST. Optional; nil uses the
-	// default client. Pin this to a fixed egress when the knock and the subsequent
-	// resource request must share a source IP (see ResourceHandle).
+	// HTTPClient is the client used for the qURL platform request. Optional; nil
+	// uses the default client. Advanced callers with fixed-egress requirements can
+	// supply their own client.
 	HTTPClient HTTPDoer
 }
 
@@ -59,41 +41,26 @@ type HTTPDoer interface {
 	Do(req *http.Request) (*http.Response, error)
 }
 
-// ResourceHandle is the result of a successful EnterPortal: the resource URL returned
-// after admission plus the facts a caller needs to actually use it.
-//
-// Same-egress-IP invariant: the NHP server opened access for the SOURCE IP of the
-// relay POST. Any request the caller now makes to RedirectURL MUST egress from that
-// same IP, or it will arrive at a server that opened access for a different
-// address. Behind a rotating-egress NAT/proxy pool, pin the
-// EnterPortal HTTPClient and the resource request to the same exit.
+// ResourceHandle is the result of a successful EnterPortal: the reachable resource
+// URL and the access lifetime reported by qURL.
 type ResourceHandle struct {
-	// RedirectURL is the reachable resource location the server returned in the
-	// authorized NHP_ACK (the qurl.site URL). Empty only if the server omitted it.
+	// RedirectURL is the reachable resource location.
 	RedirectURL string
-	// OpenSeconds is how long access stays open for this admission,
-	// as reported by the server (0 when not provided).
+	// OpenSeconds is how long access stays open, as reported by qURL (0 when not
+	// provided).
 	OpenSeconds uint32
 }
 
-// ErrNotConfigured is returned by EnterPortal when Config is missing a trust
-// store or relay allowlist (the fail-closed default).
-var ErrNotConfigured = errors.New("qurl: EnterPortal requires a trust store and relay allowlist")
+// ErrNotConfigured is returned by EnterPortal when opener config is missing.
+var ErrNotConfigured = errors.New("qurl: EnterPortal requires qURL opener config")
 
-// EnterPortal opens a qURL link using the process-wide default credential provider
-// (SetDefaultProvider). It is the locked, single-argument entry verb: a deployment
-// installs its trust anchors / relay allowlist once at startup and then opens links
-// with no per-call trust config.
-//
-// It resolves the provider for the trust anchors and relay allowlist, then delegates
-// to EnterPortalWith — so the provider only SUPPLIES the trust material; the real
-// verify + post-verify relay-allowlist enforcement is EnterPortalWith's, unchanged.
+// EnterPortal opens a qURL link using the process-wide default Provider
+// (SetDefaultProvider). Applications install opener config once at startup, then
+// open links with no per-call config.
 //
 // Without an installed provider, EnterPortal fails closed with ErrNotConfigured.
-// The SDK implements the local security checks and the core knock construction; completing
-// a live open also requires the deployment's qURL admission service to be online.
-// Tests and controlled integrations can inject anchors via a StaticProvider /
-// DiscoveryProvider, or call EnterPortalWith directly.
+// Tests and advanced integrations can inject config with StaticProvider,
+// DiscoveryProvider, or EnterPortalWith.
 func EnterPortal(ctx context.Context, qurlLink string) (*ResourceHandle, error) {
 	cfg, err := resolveDefaultConfig(ctx)
 	if err != nil {
@@ -102,9 +69,8 @@ func EnterPortal(ctx context.Context, qurlLink string) (*ResourceHandle, error) 
 	return EnterPortalWith(ctx, qurlLink, cfg)
 }
 
-// EnterPortalWith opens a qURL link using the supplied Config. It is the injectable
-// seam behind EnterPortal: callers with their own trust anchors / relay allowlist
-// (and tests using the vector issuer kid) use it directly.
+// EnterPortalWith opens a qURL link using the supplied Config. It is the
+// injectable seam behind EnterPortal for tests and advanced callers.
 func EnterPortalWith(ctx context.Context, qurlLink string, cfg Config) (*ResourceHandle, error) {
 	if cfg.TrustStore == nil || cfg.RelayAllowlist == nil {
 		return nil, ErrNotConfigured
@@ -119,22 +85,22 @@ func EnterPortalWith(ctx context.Context, qurlLink string, cfg Config) (*Resourc
 	}
 	claims := frag.Claims
 
-	// 3. relay_url is now trusted to act on — validate HTTPS + allowlist.
+	// 3. The platform access URL is now trusted to act on; validate HTTPS and
+	// the configured allowlist before making a request.
 	if err := qv2.ValidateRelayURL(claims.RelayURL, cfg.RelayAllowlist.core()); err != nil {
 		return nil, err
 	}
 
-	// 4. Derive the relay routing id from the VERIFIED cell key.
+	// 4. Decode the verified platform access key used by the wire request.
 	cellPub, err := qv2.DecodeCellPublicKey(claims)
 	if err != nil {
 		// Unreachable in practice: a verified claim already passed the parser's
-		// 32-byte cell-key length check. Kept as defense in depth.
-		return nil, fmt.Errorf("qurl: decode verified cell public key: %w", err)
+		// 32-byte platform access key length check. Kept as defense in depth.
+		return nil, fmt.Errorf("qurl: decode verified platform access key: %w", err)
 	}
 
-	// 5. Build the knock: device identity = the per-qURL private key from the
-	// link's secret, server static key = the cell public key, resource identity =
-	// the resource public key, user data = the signed claims.
+	// 5. Build the platform access request from the link's per-qURL key, the
+	// LayerV-provided access key, the resource identity, and the signed claims.
 	devicePriv, err := qv2.DecodeQurlUserPrivateKey(frag.Secret)
 	if err != nil {
 		return nil, fmt.Errorf("qurl: decode per-qURL private key: %w", err)
@@ -144,8 +110,9 @@ func EnterPortalWith(ctx context.Context, qurlLink string, cfg Config) (*Resourc
 		return nil, err
 	}
 
-	// 6. One-shot relay knock using the in-link per-qURL key. The caller's egress
-	// IP is the one the server opens access for (see ResourceHandle).
+	// 6. Ask the qURL platform for one-shot access using the in-link key. The
+	// caller's egress IP is the one the platform opens access for (see
+	// ResourceHandle).
 	reply, err := relayknock.Knock(ctx, claims.RelayURL, cellPub, body, relayknock.KnockOptions{
 		HTTPClient:       cfg.HTTPClient,
 		DeviceStaticPriv: devicePriv,
@@ -157,10 +124,9 @@ func EnterPortalWith(ctx context.Context, qurlLink string, cfg Config) (*Resourc
 	return interpretReply(reply)
 }
 
-// Compile-time guard: normalizeRelayError hand-copies relayknock.RelayError into the
-// public RelayError, so the two must stay field-identical (a struct conversion only
-// compiles when fields match) — drift becomes a build break here, like the Claims/Secret
-// guards in facade.go.
+// Compile-time guard: the public platform error wrapper must stay
+// field-identical with the internal transport error shape. The struct
+// conversion fails to compile if either side drifts.
 var _ = RelayError(relayknock.RelayError{})
 
 func normalizeRelayError(err error) error {
@@ -171,7 +137,7 @@ func normalizeRelayError(err error) error {
 	return err
 }
 
-// interpretReply maps a decrypted, authenticated NHP reply to a ResourceHandle or
+// interpretReply maps a decrypted, authenticated qURL platform reply to a ResourceHandle or
 // an error. A cookie-challenge (server overload) is surfaced as a typed retryable
 // error; a non-ACK is unexpected; an ACK with a server deny carries the errCode.
 func interpretReply(reply *relayknock.Reply) (*ResourceHandle, error) {
@@ -179,7 +145,7 @@ func interpretReply(reply *relayknock.Reply) (*ResourceHandle, error) {
 		return nil, ErrServerOverloaded
 	}
 	if !reply.IsACK() {
-		return nil, fmt.Errorf("%w: unexpected NHP reply type %d (want ACK or cookie-challenge)", ErrMalformedReply, reply.Type)
+		return nil, fmt.Errorf("%w: unexpected qURL platform reply type %d", ErrMalformedReply, reply.Type)
 	}
 
 	ack, err := parseAck(reply.Body)
@@ -199,16 +165,13 @@ func interpretReply(reply *relayknock.Reply) (*ResourceHandle, error) {
 }
 
 // resolveDefaultConfig builds the EnterPortal Config from the process-wide default
-// provider. With no provider installed it fails closed with ErrNotConfigured (the
-// production issuer trust anchors / relay allowlist are not yet published, so an
-// un-configured process must refuse rather than trust anything). With a provider
-// installed it resolves the trust anchors + relay allowlist; a provider that itself
-// fails closed (stale/unverifiable discovery manifest, missing anchors) propagates
-// that error unchanged so EnterPortal refuses for the provider's stated reason.
+// provider. With no provider installed it fails closed with ErrNotConfigured. With
+// a provider installed it resolves opener config; a provider that itself fails
+// closed propagates that error unchanged so EnterPortal refuses for the provider's
+// stated reason.
 //
-// The HTTPClient is intentionally left nil here (default client). A caller that needs
-// a pinned egress for the same-egress-IP invariant uses EnterPortalWith with an
-// explicit Config.HTTPClient — the provider supplies trust material, not transport.
+// The HTTPClient is intentionally left nil here (default client). A caller that
+// needs custom transport uses EnterPortalWith with an explicit Config.HTTPClient.
 func resolveDefaultConfig(ctx context.Context) (Config, error) {
 	p := DefaultProvider()
 	if p == nil {

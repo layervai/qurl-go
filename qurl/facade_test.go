@@ -24,7 +24,7 @@ func TestManifestFacadeRoundTrip(t *testing.T) {
 	}
 	manifest := []byte(`{"profile":"qurl-trust","version":1}`)
 
-	// ManifestDigest produces the value a deployment pins (a real, non-zero digest).
+	// ManifestDigest produces the value an application pins (a real, non-zero digest).
 	if qurl.ManifestDigest(manifest) == ([32]byte{}) {
 		t.Fatal("ManifestDigest returned the zero digest")
 	}

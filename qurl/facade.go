@@ -2,7 +2,7 @@ package qurl
 
 // Single public front door. Everything a qURL integration needs is reachable from
 // this one package: minting links (CreatePortal), opening them (EnterPortal), the
-// issuer signing seam, the trust store and relay allowlist, link verification, and
+// issuer signing seam, opener config, link verification, and
 // the typed errors to match on. The cryptographic core lives in an internal package;
 // these wrappers expose exactly the surface callers need, so you never
 // import anything but qurl.
@@ -61,19 +61,21 @@ func (s *LocalSigner) PublicKeyDER() ([]byte, error) {
 }
 
 // TrustStore resolves a link's key id (kid) to the issuer public key used to verify
-// its signature. Build one with NewTrustStore or NewTrustStoreFromDER.
+// its signature. LayerV opener config provides these keys; build one manually with
+// NewTrustStore or NewTrustStoreFromDER for tests and pinned applications.
 type TrustStore struct {
 	inner *qv2.TrustStore
 }
 
-// RelayAllowlist is the set of relay host[:port] origins a verified link may target.
-// Build one with NewRelayAllowlist. An empty allowlist rejects every link.
+// RelayAllowlist is the set of qURL platform access hosts a verified link may
+// target. The name matches the qURL wire format. Build one with NewRelayAllowlist.
+// An empty allowlist rejects every link.
 type RelayAllowlist struct {
 	inner *qv2.RelayAllowlist
 }
 
-// Claims is the verified claim set carried by a qURL link (relay, keys, validity
-// window, id). Read it from the Fragment returned by VerifyLink.
+// Claims is the verified claim set carried by a qURL link. Read it from the
+// Fragment returned by VerifyLink.
 type Claims struct {
 	V   int    `json:"v"`
 	Iss string `json:"iss"`
@@ -116,9 +118,10 @@ type Fragment struct {
 	Secret *Secret
 }
 
-// RelayError is a transport fault talking to the relay (before any authenticated
-// server decision). Match it with errors.As to distinguish transport faults from an
-// authenticated ServerDenyError.
+// RelayError is a network fault reaching the qURL platform before any
+// authenticated platform decision. Match it with errors.As to distinguish network
+// faults from an authenticated ServerDenyError. The name matches the qURL wire
+// format.
 type RelayError struct {
 	Status int
 	Msg    string
@@ -126,7 +129,7 @@ type RelayError struct {
 
 func (e *RelayError) Error() string {
 	if e == nil {
-		return "qurl: relay error"
+		return "qurl: platform access error"
 	}
 	return e.Msg
 }
@@ -155,10 +158,10 @@ func NewLocalSigner(priv *ecdsa.PrivateKey, kid string) (*LocalSigner, error) {
 	return &LocalSigner{inner: signer}, nil
 }
 
-// --- trust anchors (opener side) ---
+// --- opener config ---
 
-// NewTrustStore builds a trust store from a kid -> P-256 public key map. The map is
-// copied; every key must be a non-nil P-256 public key.
+// NewTrustStore builds a trust store from a kid -> P-256 public key map. The map
+// is copied; every key must be a non-nil P-256 public key.
 func NewTrustStore(keys map[string]*ecdsa.PublicKey) (*TrustStore, error) {
 	trust, err := qv2.NewTrustStore(keys)
 	if err != nil {
@@ -167,9 +170,8 @@ func NewTrustStore(keys map[string]*ecdsa.PublicKey) (*TrustStore, error) {
 	return wrapTrustStore(trust), nil
 }
 
-// NewTrustStoreFromDER builds a trust store from kid -> DER SPKI public-key bytes —
-// the form AWS KMS GetPublicKey returns and the form persisted in config. This is the
-// usual way to load issuer anchors.
+// NewTrustStoreFromDER builds a trust store from kid -> DER SPKI public-key
+// bytes, the usual form for persisted opener config.
 func NewTrustStoreFromDER(derByKID map[string][]byte) (*TrustStore, error) {
 	trust, err := qv2.NewTrustStoreFromDER(derByKID)
 	if err != nil {
@@ -185,9 +187,9 @@ func ParseP256PublicKeyDER(der []byte) (*ecdsa.PublicKey, error) {
 	return qv2.ParseP256PublicKeyDER(der)
 }
 
-// NewRelayAllowlist builds a relay allowlist from host or host:port entries. A bare
-// host matches any port; a host:port entry matches only that exact pair. An empty
-// allowlist rejects every link (fail closed).
+// NewRelayAllowlist builds a qURL platform endpoint allowlist from host or
+// host:port entries. A bare host matches any port; a host:port entry matches only
+// that exact pair. An empty allowlist rejects every link (fail closed).
 func NewRelayAllowlist(entries []string) *RelayAllowlist {
 	return wrapRelayAllowlist(qv2.NewRelayAllowlist(entries))
 }
@@ -198,8 +200,7 @@ func NewRelayAllowlist(entries []string) *RelayAllowlist {
 // store, returning the verified Fragment. It is the one-call way to validate a link
 // without opening it; EnterPortal performs this same check as its first step. A
 // tampered, forged, or untrusted link fails closed here (see ErrSignature /
-// ErrUnknownKID). Validate the relay separately with ValidateRelayURL before acting
-// on it.
+// ErrUnknownKID).
 func VerifyLink(link string, trust *TrustStore) (*Fragment, error) {
 	fragment, err := qv2.FragmentFromLinkAndVerify(link, trust.core())
 	if err != nil {
@@ -208,9 +209,8 @@ func VerifyLink(link string, trust *TrustStore) (*Fragment, error) {
 	return wrapFragment(fragment), nil
 }
 
-// ValidateRelayURL checks a verified link's relay against the HTTPS requirement and
-// the allowlist. Call it only after VerifyLink succeeds (the relay is
-// attacker-controlled until the signature verifies).
+// ValidateRelayURL checks a verified link's qURL platform access URL against the
+// HTTPS requirement and the allowlist. Call it only after VerifyLink succeeds.
 func ValidateRelayURL(relayURL string, allow *RelayAllowlist) error {
 	return qv2.ValidateRelayURL(relayURL, allow.core())
 }
@@ -225,9 +225,8 @@ func VerifyRawIssuerSignature(pub *ecdsa.PublicKey, claimsB64 string, rawSig []b
 
 // --- discovery manifests (publishing side) ---
 
-// ManifestDigest returns the SHA-256 of the exact manifest bytes — the value to set as
-// DiscoveryConfig.PinSHA256 when pinning a published trust manifest. Hash the decoded
-// manifest the publisher signs and serves, not the envelope.
+// ManifestDigest returns the SHA-256 of the exact manifest bytes, the value to set
+// as DiscoveryConfig.PinSHA256 when pinning a published opener-config manifest.
 func ManifestDigest(manifest []byte) [32]byte {
 	return qv2.ManifestDigest(manifest)
 }
@@ -335,7 +334,8 @@ var (
 	ErrSignature error
 	// ErrUnknownKID is returned when a link's kid is not in the trust store.
 	ErrUnknownKID error
-	// ErrRelayURL is returned when a link's relay is not HTTPS or not on the allowlist.
+	// ErrRelayURL is returned when a link's qURL platform access URL is not HTTPS or
+	// not on the allowlist.
 	ErrRelayURL error
 	// ErrStrictParse is returned for any strict-schema violation in a link's claims
 	// (duplicate key, unknown field, null, wrong type, out-of-range time, ...).

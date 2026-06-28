@@ -14,11 +14,11 @@ import (
 	"github.com/layervai/qurl-go/qurl"
 )
 
-// Example is the fastest end-to-end tour that runs offline today: mint a signed qURL
-// link with a local issuer key, then verify it with a trust store built from that
-// issuer's public key. Minting and verifying are fully self-contained; only the final
-// live open (qurl.EnterPortal) needs a deployed relay. Everything here uses the single
-// qurl package.
+// Example is the fastest offline tour: mint a signed qURL link with a local issuer
+// key, then verify it with a trust store built from that issuer's public key.
+// LayerV provides the resource config for production; this example generates
+// throwaway values so it runs without platform access. Everything here uses the
+// single qurl package.
 func Example() {
 	ctx := context.Background()
 
@@ -30,13 +30,12 @@ func Example() {
 		panic(err)
 	}
 
-	// 2. Mint the link. CellPublicKey is the NHP cell's raw X25519 key and
-	//    ResourcePublicKey is the protected resource's P-256 key in DER form — both
-	//    come from your deployment. Here we generate throwaway keys so the example is
-	//    self-contained. CreatePortal generates the per-link keypair for you.
+	// 2. Mint the link. The platform resource config comes from LayerV in
+	//    production; here we generate throwaway values so the example is
+	//    self-contained. CreatePortal generates the per-link credential for you.
 	link, err := qurl.CreatePortal(ctx, signer, qurl.CreateParams{
 		CellPublicKey:     exampleX25519Public(),
-		RelayURL:          "https://relay.example.com",
+		RelayURL:          "https://access.qurl.link",
 		ResourcePublicKey: exampleP256SPKI(),
 		JTI:               "qurl_demo_0001",
 		IssuedAt:          1_700_000_000,
@@ -67,11 +66,9 @@ func Example() {
 		panic(err)
 	}
 
-	fmt.Println("relay:", frag.Claims.RelayURL)
-	fmt.Println("jti:  ", frag.Claims.Jti)
+	fmt.Println("verified:", frag.Claims.Jti)
 	// Output:
-	// relay: https://relay.example.com
-	// jti:   qurl_demo_0001
+	// verified: qurl_demo_0001
 }
 
 // ExampleCreatePortal mints a qURL link on the issuer side. The returned link is a
@@ -85,7 +82,7 @@ func ExampleCreatePortal() {
 
 	link, err := qurl.CreatePortal(context.Background(), signer, qurl.CreateParams{
 		CellPublicKey:     exampleX25519Public(),
-		RelayURL:          "https://relay.example.com",
+		RelayURL:          "https://access.qurl.link",
 		ResourcePublicKey: exampleP256SPKI(),
 		JTI:               "qurl_demo_0002",
 		IssuedAt:          1_700_000_000,
@@ -100,22 +97,20 @@ func ExampleCreatePortal() {
 	// Output: true
 }
 
-// ExampleNewStaticProvider wires the trust anchors an opener needs so the
-// one-argument EnterPortal can resolve them at startup. A StaticProvider holds a fixed
-// set of issuer keys and a relay allowlist; install it once with SetDefaultProvider
-// and then call EnterPortal(ctx, link) with no per-call config.
+// ExampleNewStaticProvider wires opener config once so the one-argument
+// EnterPortal can resolve it at startup. StaticProvider is useful for tests and
+// manually pinned LayerV config.
 func ExampleNewStaticProvider() {
-	// The issuer public key you trust, keyed by its kid (published out of band, or
-	// resolved from a discovery manifest — see NewDiscoveryProvider).
+	// The issuer public key you trust, keyed by its kid.
 	signer, err := qurl.GenerateLocalSigner("issuer-key-2026")
 	if err != nil {
 		panic(err)
 	}
 	trust := trustStoreFor(signer)
 
-	// The relays your deployment permits. An empty allowlist rejects every link
-	// (fail closed), so enumerate your relays explicitly.
-	allowlist := qurl.NewRelayAllowlist([]string{"relay.example.com"})
+	// The qURL platform access hosts from opener config. An empty allowlist rejects
+	// every link (fail closed).
+	allowlist := qurl.NewRelayAllowlist([]string{"access.qurl.link"})
 
 	provider, err := qurl.NewStaticProvider(trust, allowlist)
 	if err != nil {
@@ -123,7 +118,7 @@ func ExampleNewStaticProvider() {
 	}
 
 	// Install once at startup. SetDefaultProvider sets process-global state, so this
-	// example restores it on return (hygiene for other tests); a real deployment
+	// example restores it on return (hygiene for other tests); a real application
 	// installs it once and leaves it set. Now qurl.EnterPortal(ctx, link) resolves
 	// through it.
 	qurl.SetDefaultProvider(provider)
@@ -138,7 +133,7 @@ func ExampleNewStaticProvider() {
 // that stamps a kid you recognize — fails closed with an error matching
 // qurl.ErrSignature, so nothing downstream ever acts on it.
 func Example_rejectsForgedLink() {
-	// The real issuer your deployment trusts.
+	// The real issuer your opener config trusts.
 	trusted, err := qurl.GenerateLocalSigner("issuer-key-2026")
 	if err != nil {
 		panic(err)
@@ -152,7 +147,7 @@ func Example_rejectsForgedLink() {
 	}
 	forged, err := qurl.CreatePortal(context.Background(), attacker, qurl.CreateParams{
 		CellPublicKey:     exampleX25519Public(),
-		RelayURL:          "https://relay.example.com",
+		RelayURL:          "https://access.qurl.link",
 		ResourcePublicKey: exampleP256SPKI(),
 		JTI:               "qurl_demo_0003",
 		IssuedAt:          1_700_000_000,

@@ -267,7 +267,7 @@ func TestInterpretReply_UnexpectedType(t *testing.T) {
 	if !errors.Is(err, ErrMalformedReply) {
 		t.Fatalf("unexpected type: want ErrMalformedReply, got %v", err)
 	}
-	if !strings.Contains(err.Error(), "unexpected NHP reply type") {
+	if !strings.Contains(err.Error(), "unexpected qURL platform reply type") {
 		t.Fatalf("unexpected type: error should name the cause, got %v", err)
 	}
 }

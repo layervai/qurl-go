@@ -6,42 +6,35 @@ import (
 	"sync"
 )
 
-// Trust/relay credential provider for the one-argument EnterPortal.
+// Opener config provider for the one-argument EnterPortal.
 //
-// EnterPortal needs two pieces of DEPLOYMENT config to open a link: the issuer
-// trust anchors (kid -> P-256 public key) that verify the issuer signature, and
-// the relay allowlist enforced AFTER the signature verifies. Neither is a per-link
-// secret — the per-qURL credential rides inside the link itself. A Provider resolves
-// exactly those two pieces, so callers get the locked one-arg verb without
-// hand-wiring Config, while EnterPortalWith stays the explicit-config seam.
+// EnterPortal needs issuer keys and qURL platform access endpoints before it can
+// open links. Neither is a per-link secret: the per-qURL credential rides inside
+// the link itself. A Provider resolves that opener config so callers get the
+// locked one-arg verb without hand-wiring Config, while EnterPortalWith stays the
+// explicit-config seam.
 //
-// The Provider SUPPLIES the trust material; it never enforces it. EnterPortal feeds
-// the resolved *TrustStore / *RelayAllowlist straight into EnterPortalWith,
-// which runs the real verify + post-verify relay-allowlist ordering. A provider
-// cannot weaken or bypass that gate — at worst it supplies an empty store/allowlist,
-// which fails closed (an empty trust store rejects every signature; an empty
-// allowlist rejects every relay_url).
+// The Provider supplies config; it never bypasses verification. EnterPortal feeds
+// the resolved *TrustStore / *RelayAllowlist into EnterPortalWith, which still
+// verifies the link before using any platform access URL from it.
 
-// Provider resolves the trust anchors and relay allowlist for EnterPortal.
+// Provider resolves opener config for EnterPortal.
 //
-// Resolve is called once per EnterPortal. An implementation MAY cache and refresh so a
-// per-open call is cheap; it MAY also return a freshly rotated trust store (the core rotation
-// is overlap-publish via the published map, so a provider re-publishes a superset map on
-// rotation and outstanding links signed under either kid keep verifying). Resolve MUST
-// fail closed: on any doubt about freshness/authenticity it returns an error rather than
-// a partial or stale result, so EnterPortal refuses rather than trusting unverifiable
-// anchors.
+// Resolve is called once per EnterPortal. An implementation MAY cache and
+// refresh so a per-open call is cheap; it MAY also return freshly rotated opener
+// config. Resolve MUST fail closed: on any doubt about freshness/authenticity it
+// returns an error rather than a partial or stale result, so EnterPortal refuses
+// rather than trusting unverifiable config.
 //
-// Both returned values must be non-nil on success; a nil trust store or allowlist
-// makes EnterPortalWith return ErrNotConfigured.
+// Both returned values must be non-nil on success; a nil trust store or endpoint
+// allowlist makes EnterPortalWith return ErrNotConfigured.
 type Provider interface {
 	Resolve(ctx context.Context) (*TrustStore, *RelayAllowlist, error)
 }
 
-// StaticProvider is a Provider backed by fixed, in-process trust anchors and relay
-// allowlist. It is the simplest concrete provider: tests, pinned deployments, and
-// the embedded production defaults (once the prod anchors are published) use it. It
-// performs no I/O and never changes after construction, so it is safe for concurrent
+// StaticProvider is a Provider backed by fixed, in-process opener config. It is
+// the simplest concrete provider for tests and manually pinned config. It performs
+// no I/O and never changes after construction, so it is safe for concurrent
 // Resolve calls.
 //
 // Rotation with a StaticProvider is a process-level operation: build a new
@@ -54,20 +47,18 @@ type StaticProvider struct {
 }
 
 // NewStaticProvider builds a StaticProvider from an already-constructed trust store
-// and relay allowlist. Both are REQUIRED and must be non-nil — a static provider
-// with a missing half would resolve to a config that fails closed downstream, so it
-// is rejected at construction instead to surface the misconfiguration early.
+// and qURL platform endpoint allowlist. Both are REQUIRED and must be non-nil.
 func NewStaticProvider(ts *TrustStore, allow *RelayAllowlist) (*StaticProvider, error) {
 	if ts == nil {
 		return nil, errors.New("qurl: static provider requires a non-nil trust store")
 	}
 	if allow == nil {
-		return nil, errors.New("qurl: static provider requires a non-nil relay allowlist")
+		return nil, errors.New("qurl: static provider requires a non-nil platform endpoint allowlist")
 	}
 	return &StaticProvider{trustStore: ts, allowlist: allow}, nil
 }
 
-// Resolve returns the fixed trust store and allowlist. A nil receiver (a caller that
+// Resolve returns the fixed opener config. A nil receiver (a caller that
 // ignored NewStaticProvider's construction error and installed the nil *StaticProvider)
 // fails closed with ErrNotConfigured rather than panicking on the field read.
 func (p *StaticProvider) Resolve(context.Context) (*TrustStore, *RelayAllowlist, error) {
@@ -78,16 +69,14 @@ func (p *StaticProvider) Resolve(context.Context) (*TrustStore, *RelayAllowlist,
 }
 
 // defaultProvider is the process-wide provider the one-argument EnterPortal resolves
-// through. It is settable (SetDefaultProvider) so a deployment can install its
-// embedded defaults or a discovery provider ONCE at startup and then call the locked
-// EnterPortal(ctx, link) everywhere with no per-call config.
+// through. It is settable (SetDefaultProvider) so an application can install qURL
+// opener config once at startup and then call EnterPortal(ctx, link) everywhere
+// with no per-call config.
 //
-// It is nil by default: the production issuer trust anchors and relay allowlist
-// are not yet published (the qURL admission contract is Proposed, not deployed), so an
-// un-configured process MUST fail closed with ErrNotConfigured rather than trust
-// anything. Installing a provider is what "lights up" the one-arg verb — no
-// EnterPortal API change. Guarded by defaultProviderMu for race-free concurrent
-// get/set (EnterPortal reads it under RLock).
+// It is nil by default, so an unconfigured process MUST fail closed with
+// ErrNotConfigured rather than trust anything. Installing a provider is what
+// lights up the one-arg verb. Guarded by defaultProviderMu for race-free
+// concurrent get/set.
 var (
 	defaultProviderMu sync.RWMutex
 	defaultProvider   Provider
