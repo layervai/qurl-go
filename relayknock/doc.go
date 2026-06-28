@@ -7,8 +7,8 @@
 // relay-knock wire profile: an NHP Noise knock (X25519 /
 // AES-256-GCM / BLAKE2s) carried as a binary POST {relayBaseURL}/relay/{serverId}
 // to an internet-facing NHP relay, which forwards it to a now-private NHP server.
-// The server authorizes, opens its access-control firewall for the caller IP, and
-// replies with an NHP_ACK whose body the caller decrypts.
+// The server authorizes, opens access for the caller IP, and replies with an
+// NHP_ACK whose body the caller decrypts.
 //
 // It is a port of the browser JS NHP agent (nhp endpoints/js-agent/src/crypto/* +
 // agent/*) and the clean-room smoke client (qurl-service tests/smoke). The wire
@@ -34,7 +34,7 @@
 //
 // # Egress-IP invariant
 //
-// The NHP server opens its firewall for the source IP of the relay POST. The knock
+// The NHP server opens access for the source IP of the relay POST. The knock
 // and the subsequent resource request MUST therefore share an egress IP, or the
-// resource request will hit a firewall that was opened for a different address.
+// resource request will hit a server that opened access for a different address.
 package relayknock

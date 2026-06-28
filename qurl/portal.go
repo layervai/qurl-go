@@ -58,16 +58,16 @@ type HTTPDoer = relayknock.HTTPDoer
 // ResourceHandle is the result of a successful EnterPortal: the now-reachable
 // resource plus the facts a caller needs to actually use it.
 //
-// Same-egress-IP invariant: the NHP server opened its access-control firewall for
-// the SOURCE IP of the relay POST. Any request the caller now makes to
-// RedirectURL MUST egress from that same IP, or it will arrive at a firewall
-// opened for a different address. Behind a rotating-egress NAT/proxy pool, pin the
+// Same-egress-IP invariant: the NHP server opened access for the SOURCE IP of the
+// relay POST. Any request the caller now makes to RedirectURL MUST egress from that
+// same IP, or it will arrive at a server that opened access for a different
+// address. Behind a rotating-egress NAT/proxy pool, pin the
 // EnterPortal HTTPClient and the resource request to the same exit.
 type ResourceHandle struct {
 	// RedirectURL is the reachable resource location the server returned in the
 	// authorized NHP_ACK (the qurl.site URL). Empty only if the server omitted it.
 	RedirectURL string
-	// OpenSeconds is how long the AC firewall hole stays open for this admission,
+	// OpenSeconds is how long access stays open for this admission,
 	// as reported by the server (0 when not provided).
 	OpenSeconds uint32
 }
@@ -144,7 +144,7 @@ func EnterPortalWith(ctx context.Context, qurlLink string, cfg Config) (*Resourc
 	}
 
 	// 6. One-shot relay knock using the in-link per-qURL key. The caller's egress
-	// IP is the one the server opens the firewall for (see ResourceHandle).
+	// IP is the one the server opens access for (see ResourceHandle).
 	reply, err := relayknock.Knock(ctx, claims.RelayURL, cellPub, body, relayknock.KnockOptions{
 		HTTPClient:       cfg.HTTPClient,
 		DeviceStaticPriv: devicePriv,

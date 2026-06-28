@@ -194,7 +194,7 @@ A successful open returns a `ResourceHandle`:
 ```go
 type ResourceHandle struct {
 	RedirectURL string // the now-reachable resource URL the server returned
-	OpenSeconds uint32 // how long the firewall hole stays open, if reported
+	OpenSeconds uint32 // how long access stays open, if reported
 }
 ```
 
@@ -204,9 +204,9 @@ Make your request to `RedirectURL` promptly — and from the right IP (next sect
 
 This is the one operational rule that catches people:
 
-> The NHP server opens its firewall for the **source IP of your relay knock**. Any
+> The NHP server opens access for the **source IP of your relay knock**. Any
 > request you then make to `RedirectURL` **must leave from that same IP**, or it will
-> arrive at a firewall opened for a different address — and be dropped.
+> arrive at a server that opened access for a different address — and be dropped.
 
 On a single host with one network interface this is automatic. It breaks when your
 knock and your resource request can take **different** egress paths — a rotating-egress

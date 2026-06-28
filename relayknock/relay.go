@@ -99,7 +99,7 @@ type KnockOptions struct {
 // (relayknock does not know any body shape). The returned Reply.Body is the
 // decrypted application reply for the caller to interpret.
 //
-// The caller's egress IP is the address the NHP server opens its firewall for, so
+// The caller's egress IP is the address the NHP server opens access for, so
 // a subsequent resource request must share that egress IP (see the package doc).
 func Knock(ctx context.Context, relayBaseURL string, serverStaticPub, body []byte, opts KnockOptions) (*Reply, error) {
 	if len(serverStaticPub) != publicKeySize {

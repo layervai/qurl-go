@@ -16,8 +16,8 @@ open a path to resources that are otherwise invisible on the network.
 
 Some resources shouldn't be reachable by just anyone who finds the address — they
 should be **invisible until you prove you're allowed in**. qURL makes that possible.
-A protected resource sits behind an [NHP](#glossary) firewall that drops every packet
-by default. A **qURL link** is a signed, expiring ticket that opens a path to it.
+A protected resource sits behind [NHP](#glossary): it is invisible on the network,
+ignoring every packet by default. A **qURL link** is a signed, expiring ticket that opens a path to it.
 
 This SDK gives you the two verbs you need, plus the cryptographic core underneath:
 
@@ -131,7 +131,7 @@ validity windows, key rotation, and the full `CreateParams` reference.
 
 `EnterPortal` is the opener side and the headline verb. It does everything in one
 call: parse the fragment, verify the issuer signature, validate the relay, and knock
-to open the firewall — returning a `ResourceHandle` with the now-reachable URL.
+to open access — returning a `ResourceHandle` with the now-reachable URL.
 
 ```go
 // One-argument form. A deployment installs its trust anchors once at startup…
@@ -172,7 +172,7 @@ EnterPortal(link)                                ← open the locked link
   │
   ├─ qv2.ValidateRelayURL(relay_url, allowlist)  ← ONLY after the signature verifies
   │
-  └─ relayknock.Knock(relay_url, cell_key, body) ← open the firewall for your egress IP
+  └─ relayknock.Knock(relay_url, cell_key, body) ← open access for your egress IP
         → ResourceHandle{RedirectURL, OpenSeconds}
 ```
 
@@ -203,8 +203,8 @@ no longer matches.
 
 | Term       | Meaning                                                                       |
 | ---------- | ----------------------------------------------------------------------------- |
-| **NHP**    | Network Hiding Protocol — the firewall that drops all traffic until a knock.   |
-| **Knock**  | An authenticated packet that asks the NHP server to open its firewall for you. |
+| **NHP**    | Network Hiding Protocol — keeps a resource invisible; ignores all traffic until a knock. |
+| **Knock**  | An authenticated packet that asks the NHP server to open access for you.       |
 | **Relay**  | The public endpoint that forwards your knock to the (private) NHP server.      |
 | **Cell**   | The NHP server instance guarding a resource; identified by its X25519 key.     |
 | **Issuer** | The party that mints and signs qURL links (e.g. your qurl-service).            |
@@ -280,7 +280,7 @@ guarantees:
 - **Conformance-tested.** Verification is exercised against language-agnostic vectors
   so the Go SDK agrees byte-for-byte with other qURL implementations.
 
-⚠️ **Same-egress-IP rule.** The NHP server opens its firewall for the **source IP of
+⚠️ **Same-egress-IP rule.** The NHP server opens access for the **source IP of
 your knock**. Any request you then make to the resource must leave from that same IP.
 Behind a rotating-egress NAT or proxy pool, pin the knock and the resource request to
 the same exit — see the [opening links guide](docs/opening-links.md#the-same-egress-ip-rule).
