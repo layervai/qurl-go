@@ -27,13 +27,13 @@ and trust provider configured:
 | You want to...                                | Use                                  | Status |
 | --------------------------------------------- | ------------------------------------ | ------ |
 | **Issue** (mint) a qURL link for someone else | `CreatePortal`                       | Works today |
-| **Verify** a link before acting on it         | `qv2.FragmentFromLinkAndVerify`      | Works today |
+| **Verify** a link before acting on it         | `qurl.VerifyLink`      | Works today |
 | **Open** a link and reach the resource        | `EnterPortal` / `EnterPortalWith`    | SDK-ready; requires deployed qURL v2 admission and configured trust |
 
 A qURL link looks like an ordinary URL:
 
 ```
-https://qurl.link/#qv2.<claims>.<secret>.<sig>
+https://qurl.link/#<claims>.<secret>.<sig>
 ```
 
 Everything sensitive rides in the fragment after `#`, which browsers never send to
@@ -68,7 +68,6 @@ import (
 	"time"
 
 	"github.com/layervai/qurl-go/qurl"
-	"github.com/layervai/qurl-go/qv2"
 )
 
 func main() {
@@ -76,8 +75,8 @@ func main() {
 	now := time.Now().Unix()
 
 	// 1. An issuer signing key. In production this is a KMS-resident key reached
-	//    through the qv2.Signer seam; locally, a software key needs no AWS.
-	signer, err := qv2.GenerateLocalSigner("issuer-key-2026")
+	//    through the qurl.Signer seam; locally, a software key needs no AWS.
+	signer, err := qurl.GenerateLocalSigner("issuer-key-2026")
 	if err != nil {
 		panic(err)
 	}
@@ -106,12 +105,12 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	trust, err := qv2.NewTrustStoreFromDER(map[string][]byte{signer.KID(): pubDER})
+	trust, err := qurl.NewTrustStoreFromDER(map[string][]byte{signer.KID(): pubDER})
 	if err != nil {
 		panic(err)
 	}
 
-	frag, err := qv2.FragmentFromLinkAndVerify(link, trust)
+	frag, err := qurl.VerifyLink(link, trust)
 	if err != nil {
 		panic(err) // tampered or untrusted links fail closed here
 	}
@@ -146,13 +145,13 @@ API shape and use deployment-specific placeholders.
 ## Issue a link
 
 `CreatePortal` is the issuer side. It generates the fresh per-link keypair, assembles
-and signs the claims, and returns the full `https://qurl.link/#qv2.…` link. The
+and signs the claims, and returns the full `https://qurl.link/#…` link. The
 issuer key never lives in your process directly — signing goes through the
-`qv2.Signer` seam, so you can drop in KMS, an HSM, or a file-backed key without
+`qurl.Signer` seam, so you can drop in KMS, an HSM, or a file-backed key without
 changing this call.
 
 ```go
-signer, _ := qv2.GenerateLocalSigner("issuer-key-2026") // dev; use KMS in prod
+signer, _ := qurl.GenerateLocalSigner("issuer-key-2026") // dev; use KMS in prod
 
 link, _ := qurl.CreatePortal(ctx, signer, qurl.CreateParams{
 	CellPublicKey:     cellPub,
@@ -204,32 +203,33 @@ requires — signature first, then (and only then) act on anything the link clai
 ```
 EnterPortal(link)                                ← open the locked link
   │
-  ├─ qv2.ParseAndVerify(fragment, trustStore)    ← strict parse + verify issuer signature
+  ├─ qurl.VerifyLink(fragment, trustStore)    ← strict parse + verify issuer signature
   │     → Claims{relay_url, cell_public_key, resource_public_key, exp, …}
   │     → Secret{per-link private key}
   │
-  ├─ qv2.ValidateRelayURL(relay_url, allowlist)  ← ONLY after the signature verifies
+  ├─ qurl.ValidateRelayURL(relay_url, allowlist)  ← ONLY after the signature verifies
   │
   └─ relayknock.Knock(relay_url, cell_key, body) ← open access for your egress IP
         → ResourceHandle{RedirectURL, OpenSeconds}
 ```
 
-Three packages, each independently usable and tested:
+You import **one package** — everything else is internal:
 
-| Package                                    | Role                                                                 |
-| ------------------------------------------ | -------------------------------------------------------------------- |
-| [`qurl`](https://pkg.go.dev/github.com/layervai/qurl-go/qurl)             | Top-level verbs: `EnterPortal`, `CreatePortal`, trust providers.       |
-| [`qv2`](https://pkg.go.dev/github.com/layervai/qurl-go/qv2)               | The security core: strict parser, issuer sign/verify, trust store.    |
-| [`relayknock`](https://pkg.go.dev/github.com/layervai/qurl-go/relayknock) | The low-level NHP relay-knock wire profile (Noise handshake).         |
+| Package                                                      | Role                                                                          |
+| ----------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| [`qurl`](https://pkg.go.dev/github.com/layervai/qurl-go/qurl) | Everything: open/issue links, trust providers, the `Signer` seam, and the typed errors to match on. |
+
+The cryptographic core and the NHP knock transport are internal. (The generic
+relay-knock layer is separately importable as `github.com/layervai/qurl-go/relayknock`
+for non-qURL NHP use; qURL integrations don't need it.)
 
 ### Anatomy of a qURL link
 
 ```
-https://qurl.link/#qv2.<claims>.<secret>.<sig>
-                   │    │        │        └─ issuer signature over the claims bytes
-                   │    │        └────────── per-link private key (the one-time credential)
-                   │    └─────────────────── signed claims: relay, keys, expiry, id
-                   └──────────────────────── version tag (always "qv2")
+https://qurl.link/#<claims>.<secret>.<signature>
+                    │        │        └─ issuer signature over the claims bytes
+                    │        └────────── per-link private key (the one-time credential)
+                    └─────────────────── signed claims: relay, keys, expiry, id
 ```
 
 The signature covers the **exact claims bytes on the wire**, so the claims can't be
@@ -255,9 +255,9 @@ Match on these, not on message text:
 | Error                         | Meaning                                          | What to do                          |
 | ----------------------------- | ------------------------------------------------ | ----------------------------------- |
 | `qurl.ErrNotConfigured`       | No trust anchors / relay allowlist installed     | Install a provider; check config    |
-| `qv2.ErrSignature`            | Issuer signature didn't verify (forged/tampered) | Reject — do not retry               |
-| `qv2.ErrUnknownKID`           | Link signed by an issuer key you don't trust     | Reject — do not retry               |
-| `qv2.ErrRelayURL`             | `relay_url` isn't HTTPS or not on the allowlist  | Reject — do not retry               |
+| `qurl.ErrSignature`            | Issuer signature didn't verify (forged/tampered) | Reject — do not retry               |
+| `qurl.ErrUnknownKID`           | Link signed by an issuer key you don't trust     | Reject — do not retry               |
+| `qurl.ErrRelayURL`             | `relay_url` isn't HTTPS or not on the allowlist  | Reject — do not retry               |
 | `qurl.ErrServerOverloaded`    | Relay returned an overload cookie-challenge      | Retry later (backoff)               |
 | `*qurl.ServerDenyError`       | Authenticated server refused (expired/revoked)   | Inspect `.ErrCode`; usually give up |
 | `*relayknock.RelayError`      | Transport fault talking to the relay             | Retry depending on cause            |
@@ -266,7 +266,7 @@ Match on these, not on message text:
 ```go
 handle, err := qurl.EnterPortal(ctx, link)
 switch {
-case errors.Is(err, qv2.ErrSignature), errors.Is(err, qv2.ErrUnknownKID):
+case errors.Is(err, qurl.ErrSignature), errors.Is(err, qurl.ErrUnknownKID):
 	// untrusted or tampered link — reject
 case errors.Is(err, qurl.ErrServerOverloaded):
 	// retry with backoff
@@ -287,7 +287,7 @@ relay validation, and knock construction are implemented and tested. The externa
 rollout pieces are explicit:
 
 - **Live opens need deployed qURL v2 admission.** `EnterPortal` builds and posts the
-  qv2 knock, but the server-side admission path must be deployed before a live
+  qURL knock, but the server-side admission path must be deployed before a live
   end-to-end open can complete.
 - **One-argument open needs trust config.** Until your process installs a provider via
   `SetDefaultProvider`, `EnterPortal(ctx, link)` fails closed with
@@ -300,8 +300,8 @@ rollout pieces are explicit:
 
 ## Security model
 
-The `qv2` package is a deliberately small, standard-library-only security core. Its
-guarantees:
+The SDK is built around a deliberately small, standard-library-only cryptographic
+core. Its guarantees:
 
 - **Verify before you act.** The issuer signature is checked first; `relay_url` and
   everything else are attacker-controlled until it verifies, so they're only used
@@ -325,10 +325,11 @@ the same exit — see the [opening links guide](docs/opening-links.md#the-same-e
 
 ## Conformance vectors
 
-The language-agnostic qURL v2 conformance artifact (`qv2_conformance_vectors.json`)
-plus the composed issuer-signature golden file (`issuer_signature_vectors.json`) are
-consumed from the public [`qurl-conformance`](https://github.com/layervai/qurl-conformance)
-package via its `go:embed` accessors (`LoadConformanceBytes` / `LoadVectorBytes`).
+The language-agnostic qURL conformance vectors and the composed issuer-signature
+golden file are consumed from the public
+[`qurl-conformance`](https://github.com/layervai/qurl-conformance) package via its
+`go:embed` accessors, so the Go SDK is verified against the same fixtures as other
+qURL implementations.
 The bytes are pinned by the dependency version in `go.sum`, so adopting an updated
 artifact is a **dependency bump**.
 
@@ -338,7 +339,7 @@ The foundation lands the verify/knock core and both verbs, plus the trust/relay
 credential provider (`StaticProvider`, `DiscoveryProvider`). Remaining follow-ups,
 tracked as issues:
 
-- **Production KMS signer** — a KMS-backed `qv2.Signer` for `CreatePortal`.
+- **Production KMS signer** — a KMS-backed `qurl.Signer` for `CreatePortal`.
 - **REST client** — a typed client for the qurl-service control-plane API.
 
 ## Documentation

@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// HTTP-backed manifest fetcher. Kept in the qurl layer (not qv2) so the qv2 crypto
+// HTTP-backed manifest fetcher. Kept in the qurl layer (not the core) so the the core crypto
 // core stays standard-library-only and network-free; the discovery provider is the
 // layer that does I/O.
 

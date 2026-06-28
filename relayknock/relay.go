@@ -75,14 +75,12 @@ func RelayPost(ctx context.Context, httpClient HTTPDoer, relayBaseURL, serverID 
 }
 
 // KnockOptions tunes a Knock. The zero value is the production default: a fresh
-// random throwaway device identity and random handshake nonces, suitable for an
-// access-token knock where the server authenticates by the body, not a
-// pre-registered device key.
+// random throwaway device identity and random handshake nonces, suitable for a knock
+// where the server authenticates by the body rather than a pre-registered device key.
 //
-// The enterPortal/qv2 path sets DeviceStaticPriv to the per-qURL private key from
-// the link's secret block, so the server can match the authenticated Noise
-// initiator key to the signed qurl_user_public_key. The remaining fields stay
-// zero (random) there.
+// The qURL path sets DeviceStaticPriv to the per-link private key from the link's
+// secret block, so the server can match the authenticated Noise initiator key to the
+// signed public key. The remaining fields stay zero (random) there.
 type KnockOptions struct {
 	// HTTPClient is the client used for the relay POST. nil ⇒ http.DefaultClient.
 	HTTPClient HTTPDoer

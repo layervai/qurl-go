@@ -95,10 +95,10 @@ func LoadVectorBytes(data []byte) (*VectorFile, error) {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&vf); err != nil {
-		return nil, fmt.Errorf("qv2: parse vector file: %w", err)
+		return nil, fmt.Errorf("qurl: parse vector file: %w", err)
 	}
 	if len(vf.Vectors) == 0 {
-		return nil, errors.New("qv2: vector file has no vectors")
+		return nil, errors.New("qurl: vector file has no vectors")
 	}
 	return &vf, nil
 }

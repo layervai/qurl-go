@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/layervai/qurl-go/qv2"
+	"github.com/layervai/qurl-go/internal/qv2"
 )
 
 // Discovery-provider fail-closed matrix.

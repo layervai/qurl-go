@@ -149,13 +149,13 @@ func LoadConformanceBytes(data []byte) (*ConformanceFile, error) {
 	dec.DisallowUnknownFields()
 	var cf ConformanceFile
 	if err := dec.Decode(&cf); err != nil {
-		return nil, fmt.Errorf("qv2: parse conformance file: %w", err)
+		return nil, fmt.Errorf("qurl: parse conformance file: %w", err)
 	}
 	if cf.SchemaVersion == 0 {
-		return nil, errors.New("qv2: conformance file missing schema_version")
+		return nil, errors.New("qurl: conformance file missing schema_version")
 	}
 	if len(cf.Classes) == 0 {
-		return nil, errors.New("qv2: conformance file has no classes")
+		return nil, errors.New("qurl: conformance file has no classes")
 	}
 	return &cf, nil
 }

@@ -44,8 +44,8 @@ when you need to pin a custom HTTP client (see [egress IP](#the-same-egress-ip-r
 
 ```go
 handle, err := qurl.EnterPortalWith(ctx, link, qurl.Config{
-	TrustStore:     trust,      // *qv2.TrustStore — REQUIRED
-	RelayAllowlist: allowlist,  // *qv2.RelayAllowlist — REQUIRED
+	TrustStore:     trust,      // *qurl.TrustStore — REQUIRED
+	RelayAllowlist: allowlist,  // *qurl.RelayAllowlist — REQUIRED
 	HTTPClient:     myClient,   // optional; nil uses the default client
 })
 ```
@@ -61,7 +61,7 @@ Neither is a per-link secret; the per-link credential rides inside the link itse
 
 ```go
 type Provider interface {
-	Resolve(ctx context.Context) (*qv2.TrustStore, *qv2.RelayAllowlist, error)
+	Resolve(ctx context.Context) (*qurl.TrustStore, *qurl.RelayAllowlist, error)
 }
 ```
 
@@ -76,12 +76,12 @@ and embedded defaults.
 
 ```go
 // Trust store: kid -> issuer public key (DER SPKI, e.g. from KMS GetPublicKey).
-trust, _ := qv2.NewTrustStoreFromDER(map[string][]byte{
+trust, _ := qurl.NewTrustStoreFromDER(map[string][]byte{
 	"issuer-key-2026": issuerPubDER,
 })
 
 // Relay allowlist: the relays your deployment permits.
-allowlist := qv2.NewRelayAllowlist([]string{"relay.example.com"})
+allowlist := qurl.NewRelayAllowlist([]string{"relay.example.com"})
 
 provider, _ := qurl.NewStaticProvider(trust, allowlist)
 qurl.SetDefaultProvider(provider)
@@ -178,7 +178,7 @@ the bytes that are pinned/signed are exactly the bytes that are parsed):
 deployment config:
 
 ```go
-allow := qv2.NewRelayAllowlist([]string{
+allow := qurl.NewRelayAllowlist([]string{
 	"relay.example.com",       // matches any port on this host
 	"relay-eu.example.com:8443", // matches only this exact host:port
 })
@@ -189,7 +189,7 @@ allow := qv2.NewRelayAllowlist([]string{
 - An empty allowlist rejects every link (fail closed) — enumerate your relays.
 
 A `relay_url` that isn't HTTPS, or whose host isn't on the list, fails with
-`qv2.ErrRelayURL`.
+`qurl.ErrRelayURL`.
 
 ## The result: `ResourceHandle`
 
@@ -238,10 +238,10 @@ text.
 | Error                          | Meaning                                          | Retryable?            |
 | ------------------------------ | ------------------------------------------------ | --------------------- |
 | `qurl.ErrNotConfigured`        | No provider / missing trust store or allowlist   | No — fix config       |
-| `qv2.ErrSignature`             | Issuer signature didn't verify (forged/tampered) | No — reject           |
-| `qv2.ErrUnknownKID`            | Signed by an issuer key you don't trust          | No — reject           |
-| `qv2.ErrRelayURL`              | `relay_url` not HTTPS or not on the allowlist    | No — reject           |
-| `qv2.ErrStrictParse` / `ErrFragment` / `ErrEncoding` / `ErrKeyLength` | Malformed link | No — reject |
+| `qurl.ErrSignature`             | Issuer signature didn't verify (forged/tampered) | No — reject           |
+| `qurl.ErrUnknownKID`            | Signed by an issuer key you don't trust          | No — reject           |
+| `qurl.ErrRelayURL`              | `relay_url` not HTTPS or not on the allowlist    | No — reject           |
+| `qurl.ErrStrictParse` / `ErrFragment` / `ErrEncoding` / `ErrKeyLength` | Malformed link | No — reject |
 | `qurl.ErrServerOverloaded`     | Relay returned an overload cookie-challenge      | **Yes** — backoff     |
 | `*relayknock.RelayError`       | Transport fault talking to the relay             | Maybe — depends on cause |
 | `*qurl.ServerDenyError`        | Authenticated deny (expired/revoked/consumed)    | No — inspect `.ErrCode` |
@@ -253,9 +253,9 @@ switch {
 case err == nil:
 	resp, _ := http.Get(handle.RedirectURL) // mind the egress IP
 
-case errors.Is(err, qv2.ErrSignature),
-	errors.Is(err, qv2.ErrUnknownKID),
-	errors.Is(err, qv2.ErrRelayURL):
+case errors.Is(err, qurl.ErrSignature),
+	errors.Is(err, qurl.ErrUnknownKID),
+	errors.Is(err, qurl.ErrRelayURL):
 	// untrusted, forged, or malformed — reject, do not retry
 
 case errors.Is(err, qurl.ErrServerOverloaded):
@@ -281,6 +281,6 @@ was rejected: `ErrManifestUnverified`, `ErrManifestPinMismatch`, `ErrManifestExp
 ## Current status
 
 Opening a link performs a **live network knock** to the relay. The SDK implements
-parse, verify, relay validation, and qv2 knock construction; completing a live
+parse, verify, relay validation, and qURL knock construction; completing a live
 end-to-end open also requires your deployment's qURL v2 admission service and trust
 provider to be online. See [Status & limitations](../README.md#status--limitations).

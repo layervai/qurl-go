@@ -13,7 +13,7 @@ import (
 
 	conformance "github.com/layervai/qurl-conformance"
 
-	"github.com/layervai/qurl-go/qv2"
+	"github.com/layervai/qurl-go/internal/qv2"
 	"github.com/layervai/qurl-go/relayknock"
 )
 

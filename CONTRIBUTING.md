@@ -3,6 +3,11 @@
 Thanks for helping improve the qURL Go SDK. This SDK is a security core, so the bar
 is high — but the workflow is simple: one command runs everything CI runs.
 
+> **Public surface vs. internals.** Integrators import the single public package,
+> `qurl`. The cryptographic core lives in `internal/qv2` and the NHP transport in
+> `relayknock`; `qurl` re-exports exactly the surface callers need (see
+> [`qurl/facade.go`](qurl/facade.go)). New customer-facing API belongs on `qurl`.
+
 ## The one quality gate
 
 ```sh
@@ -26,19 +31,19 @@ the same pinned tools at the same versions. Run it before opening a PR.
 | `make lint`  | `golangci-lint run` (lint **and** gofumpt/goimports formatting) |
 | `make fmt`   | apply gofumpt + goimports formatting                           |
 | `make vuln`  | `govulncheck ./...` — known-vuln scan of called code           |
-| `make fuzz`  | run the `qv2` parser fuzz targets (auto-discovered)            |
+| `make fuzz`  | run the parser fuzz targets (auto-discovered)                  |
 
 Dev tools (`golangci-lint`, `govulncheck`) are version-pinned in the
 [`Makefile`](Makefile) and installed on demand into a git-ignored `./.tools`.
 
 ## Runnable examples
 
-Documentation examples live as compile-checked `Example` functions in
-[`qurl/example_test.go`](qurl/example_test.go) and
-[`qv2/example_test.go`](qv2/example_test.go). They run under `go test` and appear on
-[pkg.go.dev](https://pkg.go.dev/github.com/layervai/qurl-go), so they can never drift
-out of sync with the API. When you change public behavior, update (or add) an example
-and keep its `// Output:` accurate.
+The customer-facing documentation examples live as compile-checked `Example` functions
+in [`qurl/example_test.go`](qurl/example_test.go); the cryptographic core has its own
+tests under [`internal/qv2`](internal/qv2). The `qurl` examples run under `go test` and
+appear on [pkg.go.dev](https://pkg.go.dev/github.com/layervai/qurl-go/qurl), so they
+can never drift out of sync with the API. When you change public behavior, update (or
+add) an example and keep its `// Output:` accurate.
 
 ## Static analysis
 
@@ -51,10 +56,11 @@ suppressions** — the crypto core passes `gosec` clean.
 
 ## Fuzzing
 
-The `qv2` strict parser is the package's hostile-input surface, so it carries Go
-native fuzz targets ([`qv2/fuzz_test.go`](qv2/fuzz_test.go)) for the fragment parser,
+The internal strict link parser ([`internal/qv2`](internal/qv2)) is the SDK's
+hostile-input surface, so it carries Go native fuzz targets
+([`internal/qv2/fuzz_test.go`](internal/qv2/fuzz_test.go)) for the fragment parser,
 the claims walker, and the canonical-base64url decoder. The committed seed corpus
-under `qv2/testdata/fuzz` includes regression crashers (e.g. the embedded-newline
+under `internal/qv2/testdata/fuzz` includes regression crashers (e.g. the embedded-newline
 base64 malleability case), which the normal `go test` run replays even without
 `-fuzz` — this corpus replay is the deterministic regression gate. Live fuzzing runs
 as a nightly soak ([`.github/workflows/fuzz.yml`](.github/workflows/fuzz.yml)) rather
@@ -69,11 +75,11 @@ make fuzz FUZZTIME=2m
 
 ## Conformance vectors
 
-The language-agnostic qURL v2 conformance artifact (`qv2_conformance_vectors.json`)
-plus the composed issuer-signature golden file (`issuer_signature_vectors.json`) come
-from the public [`qurl-conformance`](https://github.com/layervai/qurl-conformance)
-module via `go:embed` accessors. The bytes are pinned by the dependency version in
-`go.sum`, so adopting an updated artifact is a dependency bump.
+The language-agnostic qURL conformance vectors plus the composed issuer-signature
+golden file come from the public
+[`qurl-conformance`](https://github.com/layervai/qurl-conformance) module via
+`go:embed` accessors. The bytes are pinned by the dependency version in `go.sum`, so
+adopting an updated artifact is a dependency bump.
 
 ## Continuous integration
 
@@ -87,10 +93,11 @@ dependency.
 
 ## Dependency policy
 
-The verification core is deliberately dependency-light: `qv2` is standard-library
-only, and `relayknock` adds only `golang.org/x/crypto`. Keep it that way — the issuer
-signing key is reached through the `qv2.Signer` interface, never a baked-in KMS client,
-so a KMS/HSM integration lives in your code, not in this module's dependency graph.
+The verification core is deliberately dependency-light: the internal crypto core is
+standard-library only, and `relayknock` adds only `golang.org/x/crypto`. Keep it that
+way — the issuer signing key is reached through the `qurl.Signer` interface, never a
+baked-in KMS client, so a KMS/HSM integration lives in your code, not in this module's
+dependency graph.
 
 ## Pull requests
 

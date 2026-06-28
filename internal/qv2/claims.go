@@ -177,22 +177,22 @@ var (
 // on message text.
 var (
 	// ErrEncoding is returned when a part is not valid unpadded base64url.
-	ErrEncoding = errors.New("qv2: value is not valid unpadded base64url")
+	ErrEncoding = errors.New("qurl: value is not valid unpadded base64url")
 	// ErrStrictParse is returned for any strict-schema violation (duplicate key,
 	// unknown field, missing required field, null, wrong type, array-for-scalar,
 	// non-integer or out-of-range time, etc.).
-	ErrStrictParse = errors.New("qv2: strict parse failed")
+	ErrStrictParse = errors.New("qurl: strict parse failed")
 	// ErrKeyLength is returned when a decoded key field is not its expected size.
-	ErrKeyLength = errors.New("qv2: key field has unexpected length")
+	ErrKeyLength = errors.New("qurl: key field has unexpected length")
 	// ErrFragment is returned when the fragment shape is invalid (wrong prefix,
 	// wrong part count, empty part).
-	ErrFragment = errors.New("qv2: invalid fragment")
+	ErrFragment = errors.New("qurl: invalid fragment")
 	// ErrSignature is returned when issuer-signature verification fails.
-	ErrSignature = errors.New("qv2: issuer signature verification failed")
+	ErrSignature = errors.New("qurl: issuer signature verification failed")
 	// ErrRelayURL is returned when relay_url is not HTTPS or not on the allowlist.
-	ErrRelayURL = errors.New("qv2: relay_url rejected")
+	ErrRelayURL = errors.New("qurl: relay_url rejected")
 	// ErrUnknownKID is returned when a claim's kid is not in the trust store.
-	ErrUnknownKID = errors.New("qv2: unknown issuer kid")
+	ErrUnknownKID = errors.New("qurl: unknown issuer kid")
 )
 
 // encodeB64 encodes raw bytes as unpadded base64url — the single pinned wire

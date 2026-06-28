@@ -4,20 +4,19 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/layervai/qurl-go/qv2"
+	"github.com/layervai/qurl-go/internal/qv2"
 )
 
 // qURL v2 knock-body construction.
 //
-// PROVISIONAL WIRE SHAPE. The qURL v2 server admission contract (the qURL v2
+// PROVISIONAL WIRE SHAPE. The qURL server admission contract (the qURL v2
 // keyed-identity design's "NHP Server Contract" section) is Proposed, not deployed,
-// and the encrypted knock-body field layout for the v2 path is not yet frozen.
+// and the encrypted knock-body field layout for the path is not yet frozen.
 // This builder encodes what the design specifies for the CLIENT side of the knock
 // (section "Browser and Headless Flow", steps 5–6):
 //
 //   - the NHP knock resource identity (resId) is the protected-resource public key
-//     (resource_public_key_b64), NOT the legacy "qurl-bootstrap" sentinel the
-//     at_-token flow used;
+//     (resource_public_key_b64);
 //   - the signed qURL claims travel in encrypted knock user data; the field names
 //     mirror the server contract's separate blobs qurl_claims_b64 /
 //     qurl_issuer_sig_b64 so a verifier reads exactly the signed bytes.

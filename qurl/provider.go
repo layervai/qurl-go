@@ -4,21 +4,19 @@ import (
 	"context"
 	"errors"
 	"sync"
-
-	"github.com/layervai/qurl-go/qv2"
 )
 
 // Trust/relay credential provider for the one-argument EnterPortal.
 //
 // EnterPortal needs two pieces of DEPLOYMENT config to open a link: the issuer
-// trust anchors (kid -> P-256 public key) that verify the qv2 issuer signature, and
+// trust anchors (kid -> P-256 public key) that verify the issuer signature, and
 // the relay allowlist enforced AFTER the signature verifies. Neither is a per-link
 // secret — the per-qURL credential rides inside the link itself. A Provider resolves
 // exactly those two pieces, so callers get the locked one-arg verb without
 // hand-wiring Config, while EnterPortalWith stays the explicit-config seam.
 //
 // The Provider SUPPLIES the trust material; it never enforces it. EnterPortal feeds
-// the resolved *qv2.TrustStore / *qv2.RelayAllowlist straight into EnterPortalWith,
+// the resolved *TrustStore / *RelayAllowlist straight into EnterPortalWith,
 // which runs the real verify + post-verify relay-allowlist ordering. A provider
 // cannot weaken or bypass that gate — at worst it supplies an empty store/allowlist,
 // which fails closed (an empty trust store rejects every signature; an empty
@@ -27,7 +25,7 @@ import (
 // Provider resolves the trust anchors and relay allowlist for EnterPortal.
 //
 // Resolve is called once per EnterPortal. An implementation MAY cache and refresh so a
-// per-open call is cheap; it MAY also return a freshly rotated trust store (qv2 rotation
+// per-open call is cheap; it MAY also return a freshly rotated trust store (the core rotation
 // is overlap-publish via the published map, so a provider re-publishes a superset map on
 // rotation and outstanding links signed under either kid keep verifying). Resolve MUST
 // fail closed: on any doubt about freshness/authenticity it returns an error rather than
@@ -37,7 +35,7 @@ import (
 // Both returned values must be non-nil on success; a nil trust store or allowlist
 // makes EnterPortalWith return ErrNotConfigured.
 type Provider interface {
-	Resolve(ctx context.Context) (*qv2.TrustStore, *qv2.RelayAllowlist, error)
+	Resolve(ctx context.Context) (*TrustStore, *RelayAllowlist, error)
 }
 
 // StaticProvider is a Provider backed by fixed, in-process trust anchors and relay
@@ -51,15 +49,15 @@ type Provider interface {
 // it in via SetDefaultProvider (or hand it to EnterPortalWith). The store itself is
 // immutable.
 type StaticProvider struct {
-	trustStore *qv2.TrustStore
-	allowlist  *qv2.RelayAllowlist
+	trustStore *TrustStore
+	allowlist  *RelayAllowlist
 }
 
 // NewStaticProvider builds a StaticProvider from an already-constructed trust store
 // and relay allowlist. Both are REQUIRED and must be non-nil — a static provider
 // with a missing half would resolve to a config that fails closed downstream, so it
 // is rejected at construction instead to surface the misconfiguration early.
-func NewStaticProvider(ts *qv2.TrustStore, allow *qv2.RelayAllowlist) (*StaticProvider, error) {
+func NewStaticProvider(ts *TrustStore, allow *RelayAllowlist) (*StaticProvider, error) {
 	if ts == nil {
 		return nil, errors.New("qurl: static provider requires a non-nil trust store")
 	}
@@ -72,7 +70,7 @@ func NewStaticProvider(ts *qv2.TrustStore, allow *qv2.RelayAllowlist) (*StaticPr
 // Resolve returns the fixed trust store and allowlist. A nil receiver (a caller that
 // ignored NewStaticProvider's construction error and installed the nil *StaticProvider)
 // fails closed with ErrNotConfigured rather than panicking on the field read.
-func (p *StaticProvider) Resolve(context.Context) (*qv2.TrustStore, *qv2.RelayAllowlist, error) {
+func (p *StaticProvider) Resolve(context.Context) (*TrustStore, *RelayAllowlist, error) {
 	if p == nil {
 		return nil, nil, ErrNotConfigured
 	}
@@ -84,8 +82,8 @@ func (p *StaticProvider) Resolve(context.Context) (*qv2.TrustStore, *qv2.RelayAl
 // embedded defaults or a discovery provider ONCE at startup and then call the locked
 // EnterPortal(ctx, link) everywhere with no per-call config.
 //
-// It is nil by default: the production qv2 issuer trust anchors and relay allowlist
-// are not yet published (the qv2 admission contract is Proposed, not deployed), so an
+// It is nil by default: the production issuer trust anchors and relay allowlist
+// are not yet published (the qURL admission contract is Proposed, not deployed), so an
 // un-configured process MUST fail closed with ErrNotConfigured rather than trust
 // anything. Installing a provider is what "lights up" the one-arg verb — no
 // EnterPortal API change. Guarded by defaultProviderMu for race-free concurrent

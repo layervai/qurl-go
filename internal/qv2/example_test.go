@@ -12,7 +12,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/layervai/qurl-go/qv2"
+	"github.com/layervai/qurl-go/internal/qv2"
 )
 
 // ExampleParseAndVerify verifies a qURL v2 fragment's issuer signature against a

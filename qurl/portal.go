@@ -9,7 +9,7 @@
 //
 // EnterPortal stitches the two lower layers together in the protocol order:
 //
-//  1. Parse the #qv2.<claims>.<secret>.<sig> fragment.
+//  1. Parse the #<claims>.<secret>.<sig> fragment.
 //  2. Verify the issuer signature locally (REQUIRED — not optional for a
 //     first-party client) against the issuer trust store.
 //  3. Validate relay_url (HTTPS + allowlist) — ONLY after the signature verifies,
@@ -32,7 +32,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/layervai/qurl-go/qv2"
+	"github.com/layervai/qurl-go/internal/qv2"
 	"github.com/layervai/qurl-go/relayknock"
 )
 
@@ -42,10 +42,10 @@ import (
 // allowlist rejects every relay_url), so a misconfigured caller cannot resolve.
 type Config struct {
 	// TrustStore resolves a claim's kid to the issuer public key. REQUIRED.
-	TrustStore *qv2.TrustStore
+	TrustStore *TrustStore
 	// RelayAllowlist is the set of relay host[:port] origins a verified relay_url
 	// may target. REQUIRED.
-	RelayAllowlist *qv2.RelayAllowlist
+	RelayAllowlist *RelayAllowlist
 	// HTTPClient is the client used for the relay POST. Optional; nil uses the
 	// default client. Pin this to a fixed egress when the knock and the subsequent
 	// resource request must share a source IP (see ResourceHandle).
@@ -87,7 +87,7 @@ var ErrNotConfigured = errors.New("qurl: EnterPortal requires a trust store and 
 // verify + post-verify relay-allowlist enforcement is EnterPortalWith's, unchanged.
 //
 // Without an installed provider, EnterPortal fails closed with ErrNotConfigured.
-// The SDK implements the local security checks and qv2 knock construction; completing
+// The SDK implements the local security checks and the core knock construction; completing
 // a live open also requires the deployment's qURL v2 admission service to be online.
 // Tests and controlled integrations can inject anchors via a StaticProvider /
 // DiscoveryProvider, or call EnterPortalWith directly.
@@ -183,7 +183,7 @@ func interpretReply(reply *relayknock.Reply) (*ResourceHandle, error) {
 
 // resolveDefaultConfig builds the EnterPortal Config from the process-wide default
 // provider. With no provider installed it fails closed with ErrNotConfigured (the
-// production qv2 issuer trust anchors / relay allowlist are not yet published, so an
+// production issuer trust anchors / relay allowlist are not yet published, so an
 // un-configured process must refuse rather than trust anything). With a provider
 // installed it resolves the trust anchors + relay allowlist; a provider that itself
 // fails closed (stale/unverifiable discovery manifest, missing anchors) propagates

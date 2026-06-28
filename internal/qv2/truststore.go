@@ -28,15 +28,15 @@ type TrustStore struct {
 // must be a non-nil P-256 public key.
 func NewTrustStore(keys map[string]*ecdsa.PublicKey) (*TrustStore, error) {
 	if len(keys) == 0 {
-		return nil, errors.New("qv2: trust store must contain at least one issuer key")
+		return nil, errors.New("qurl: trust store must contain at least one issuer key")
 	}
 	copied := make(map[string]*ecdsa.PublicKey, len(keys))
 	for kid, pub := range keys {
 		if kid == "" {
-			return nil, errors.New("qv2: trust store kid must not be empty")
+			return nil, errors.New("qurl: trust store kid must not be empty")
 		}
 		if err := validateP256PublicKey(pub); err != nil {
-			return nil, fmt.Errorf("qv2: trust store key %q: %w", kid, err)
+			return nil, fmt.Errorf("qurl: trust store key %q: %w", kid, err)
 		}
 		copied[kid] = pub
 	}
@@ -51,7 +51,7 @@ func NewTrustStoreFromDER(derByKID map[string][]byte) (*TrustStore, error) {
 	for kid, der := range derByKID {
 		pub, err := ParseP256PublicKeyDER(der)
 		if err != nil {
-			return nil, fmt.Errorf("qv2: trust store key %q: %w", kid, err)
+			return nil, fmt.Errorf("qurl: trust store key %q: %w", kid, err)
 		}
 		keys[kid] = pub
 	}
@@ -71,15 +71,15 @@ func (ts *TrustStore) publicKeyForKID(kid string) (*ecdsa.PublicKey, error) {
 // P-256 curve. Used to load issuer keys from KMS GetPublicKey output or config.
 func ParseP256PublicKeyDER(der []byte) (*ecdsa.PublicKey, error) {
 	if len(der) == 0 {
-		return nil, errors.New("qv2: empty public-key DER")
+		return nil, errors.New("qurl: empty public-key DER")
 	}
 	parsed, err := x509.ParsePKIXPublicKey(der)
 	if err != nil {
-		return nil, fmt.Errorf("qv2: parse SPKI public key: %w", err)
+		return nil, fmt.Errorf("qurl: parse SPKI public key: %w", err)
 	}
 	pub, ok := parsed.(*ecdsa.PublicKey)
 	if !ok {
-		return nil, fmt.Errorf("qv2: issuer key is %T, want *ecdsa.PublicKey", parsed)
+		return nil, fmt.Errorf("qurl: issuer key is %T, want *ecdsa.PublicKey", parsed)
 	}
 	if err := validateP256PublicKey(pub); err != nil {
 		return nil, err
@@ -93,15 +93,15 @@ func ParseP256PublicKeyDER(der []byte) (*ecdsa.PublicKey, error) {
 // ecdsa.PublicKey coordinate fields.
 func validateP256PublicKey(pub *ecdsa.PublicKey) error {
 	if pub == nil {
-		return errors.New("qv2: nil public key")
+		return errors.New("qurl: nil public key")
 	}
 	if pub.Curve != curve {
-		return errors.New("qv2: issuer key is not on the P-256 curve")
+		return errors.New("qurl: issuer key is not on the P-256 curve")
 	}
 	// ECDH() returns an error for a nil/zero/off-curve point and never touches
 	// the deprecated coordinate accessors.
 	if _, err := pub.ECDH(); err != nil {
-		return fmt.Errorf("qv2: issuer public key is not a valid P-256 point: %w", err)
+		return fmt.Errorf("qurl: issuer public key is not a valid P-256 point: %w", err)
 	}
 	return nil
 }

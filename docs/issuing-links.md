@@ -1,8 +1,8 @@
 # Issuing links
 
 This guide covers the **issuer side**: minting qURL links with `CreatePortal`,
-managing signing keys safely, and rotating them. If you want to *open* links instead,
-see [Opening links](opening-links.md).
+managing signing keys safely, and rotating them. Everything uses the single `qurl`
+package. If you want to *open* links instead, see [Opening links](opening-links.md).
 
 - [The one call](#the-one-call)
 - [`CreateParams` reference](#createparams-reference)
@@ -21,10 +21,10 @@ see [Opening links](opening-links.md).
    secret, the public half is bound into the signed claims),
 2. assembles the claims,
 3. signs them through your `Signer`,
-4. returns the full `https://qurl.link/#qv2.<claims>.<secret>.<sig>` link.
+4. returns the full `https://qurl.link/#…` link.
 
 ```go
-signer, _ := qv2.GenerateLocalSigner("issuer-key-2026") // dev key; see "Signing keys"
+signer, _ := qurl.GenerateLocalSigner("issuer-key-2026") // dev key; see "Signing keys"
 
 link, err := qurl.CreatePortal(ctx, signer, qurl.CreateParams{
 	CellPublicKey:     cellPub,     // raw 32-byte X25519 NHP cell key
@@ -65,12 +65,12 @@ resourceDER, _ := x509.MarshalPKIXPublicKey(&resourcePriv.PublicKey)
 ## Validity windows
 
 The three time fields are **Unix seconds** and must satisfy the clock-free ordering
-bounds the verifier's strict parser enforces:
+bounds the verifier enforces:
 
 - `IssuedAt <= Expiry`
 - `NotBefore <= Expiry`
 
-A window that violates these fails the mint (as `qv2.ErrStrictParse`) rather than
+A window that violates these fails the mint (as `qurl.ErrStrictParse`) rather than
 producing a link no verifier would accept.
 
 ```go
@@ -83,10 +83,10 @@ params := qurl.CreateParams{
 }
 ```
 
-> **Liveness is the admission layer's job, not the mint's.** `CreatePortal` and the
-> `qv2` core have no trusted clock; they only check the ordering bounds above. Whether
-> a link is *currently* live (vs. expired or not-yet-valid against the wall clock) is
-> enforced when the resource admits traffic. Keep windows short.
+> **Liveness is the admission layer's job, not the mint's.** `CreatePortal` has no
+> trusted clock; it only checks the ordering bounds above. Whether a link is
+> *currently* live (vs. expired or not-yet-valid against the wall clock) is enforced
+> when the resource admits traffic. Keep windows short.
 
 ## Signing keys: the `Signer` seam
 
@@ -100,15 +100,15 @@ type Signer interface {
 }
 ```
 
-`qv2` owns the domain-separated digest and the DER → raw `r‖s` low-S normalization, so
-**no signer can drift** on those details — it just signs the 32 digest bytes it's
+The SDK owns the domain-separated digest and the DER → raw `r‖s` low-S normalization,
+so **no signer can drift** on those details — it just signs the 32 digest bytes it's
 handed.
 
 | Where the key lives        | How                                                                 |
 | -------------------------- | ------------------------------------------------------------------- |
-| **Production** (KMS / HSM) | Implement `Signer` over your KMS client (`MessageType=DIGEST`). Recommended — a leaked process must not yield the issuer key. |
-| **Self-custody / files**   | Implement `Signer` over a file- or HSM-resident key.                |
-| **Tests & local dev**      | `qv2.NewLocalSigner(priv, kid)` or `qv2.GenerateLocalSigner(kid)`.  |
+| **Production** (KMS / HSM) | Implement `qurl.Signer` over your KMS client (`MessageType=DIGEST`). Recommended — a leaked process must not yield the issuer key. |
+| **Self-custody / files**   | Implement `qurl.Signer` over a file- or HSM-resident key.           |
+| **Tests & local dev**      | `qurl.NewLocalSigner(priv, kid)` or `qurl.GenerateLocalSigner(kid)`. |
 
 A minimal KMS signer looks like this (sketch — wire it to your SDK):
 
@@ -132,7 +132,7 @@ func (s *kmsSigner) SignDigest(ctx context.Context, digest []byte) ([]byte, erro
 	if err != nil {
 		return nil, err
 	}
-	return out.Signature, nil // ASN.1 DER; qv2 normalizes to low-S
+	return out.Signature, nil // ASN.1 DER; the SDK normalizes to low-S
 }
 
 // Optional but recommended — enables mint-time self-verify (see below).
@@ -140,7 +140,7 @@ func (s *kmsSigner) PublicKeyDER() ([]byte, error) { return s.pubDER, nil }
 ```
 
 > The `Signer` interface keeps AWS (or any HSM SDK) out of this module's dependency
-> graph — `qv2` stays standard-library-only. A KMS-backed signer ships with the
+> graph — the SDK stays standard-library-only. A KMS-backed signer ships with the
 > credential-provider follow-up; until then, implement the two methods yourself.
 
 ## Self-verification at mint time
@@ -166,7 +166,7 @@ verifiers' trust store — there is no per-key TTL or "retired" flag in the libr
    the old key remains in the published trust store. Size this window to your longest
    link lifetime.
 3. **Retire** the old key by removing it from the published trust store. From then on,
-   verifiers return `qv2.ErrUnknownKID` for links signed under it.
+   verifiers return `qurl.ErrUnknownKID` for links signed under it.
 
 On the verifier side this is just publishing an updated trust store (or manifest) — see
 [Opening links → Trust providers](opening-links.md#trust-providers).
@@ -174,15 +174,15 @@ On the verifier side this is just publishing an updated trust store (or manifest
 ## Verifying your own links
 
 A link from `CreatePortal` is guaranteed to parse and verify against a trust store
-holding the signer's public key — `CreatePortal` runs the same strict parser the
+holding the signer's public key — `CreatePortal` runs the same strict checks the
 verifier uses *before* signing, so a mint that wouldn't verify fails at mint instead.
 The round trip is the basis of the [Quickstart](../README.md#quickstart):
 
 ```go
 pubDER, _ := signer.PublicKeyDER()
-trust, _ := qv2.NewTrustStoreFromDER(map[string][]byte{signer.KID(): pubDER})
+trust, _ := qurl.NewTrustStoreFromDER(map[string][]byte{signer.KID(): pubDER})
 
-frag, err := qv2.FragmentFromLinkAndVerify(link, trust)
+frag, err := qurl.VerifyLink(link, trust)
 // err == nil; frag.Claims holds the verified claim set
 ```
 
@@ -190,20 +190,20 @@ This exact flow is a runnable example — see [`qurl/example_test.go`](../qurl/e
 
 ## Error handling
 
-| Error                        | Cause                                                             |
-| ---------------------------- | ---------------------------------------------------------------- |
+| Error                         | Cause                                                             |
+| ----------------------------- | ---------------------------------------------------------------- |
 | `qurl.ErrInvalidCreateParams` | A required binding is missing (nil key, empty `JTI`, zero time). |
-| `qv2.ErrStrictParse`          | A deep value rule failed (bad key length, time ordering, …).     |
-| `qv2.ErrKeyLength`            | A key field decoded to the wrong size.                           |
+| `qurl.ErrStrictParse`         | A deep value rule failed (bad key length, time ordering, …).     |
+| `qurl.ErrKeyLength`           | A key field decoded to the wrong size.                           |
 
-`CreatePortal` returns `qv2` sentinels verbatim, so you can match the exact cause:
+Match the exact cause with `errors.Is`:
 
 ```go
 link, err := qurl.CreatePortal(ctx, signer, params)
 switch {
 case errors.Is(err, qurl.ErrInvalidCreateParams):
 	// a required field was missing
-case errors.Is(err, qv2.ErrStrictParse):
+case errors.Is(err, qurl.ErrStrictParse):
 	// a value was present but invalid (e.g. nbf > exp)
 case err != nil:
 	// signer error, keygen failure, etc.
