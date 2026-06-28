@@ -9,10 +9,13 @@ import (
 	conformance "github.com/layervai/qurl-conformance"
 )
 
-// strictRawURLEncoding is RawURLEncoding with strict canonical-trailing-bit
-// enforcement, matching qv2/claims.go's decode of cell_public_key_b64 so the
-// relayknock fingerprint fence and the qv2 verify path agree on what counts as a
-// valid key. Hoisted once because base64.Encoding.Strict() allocates per call.
+// strictRawURLEncoding decodes the golden cell_public_key_b64 with strict
+// canonical-trailing-bit checking, rejecting non-canonical encodings — a step
+// toward qv2/claims.go's stricter decode of the same field. (qv2's decodeB64 is
+// stricter still: it adds a re-encode-and-compare backstop that also rejects
+// embedded CR/LF, which base64.Strict() silently tolerates; for the canonical
+// pinned golden vectors here that distinction is immaterial.)
+// Hoisted once because base64.Encoding.Strict() allocates per call.
 var strictRawURLEncoding = base64.RawURLEncoding.Strict()
 
 // These golden vectors are consumed byte-for-byte from the public qurl-conformance
