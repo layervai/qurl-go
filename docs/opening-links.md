@@ -2,36 +2,63 @@
 
 Most recipients do not need this SDK. They open the qURL link directly.
 
-Opening a portal does not require LayerV credentials or local setup.
+Opening a portal does not require LayerV credentials or issuer setup.
 
 ## Programmatic Opening
 
 Use this SDK only when your Go service or agent needs to open received qURL links
-in code. Install the opener provider once at startup, then call `EnterPortal`:
+in code. Install opener policy once at startup, then call `EnterPortal` anywhere
+you receive a link:
 
 ```go
-qurl.SetDefaultProvider(provider)
-
-handle, err := qurl.EnterPortal(ctx, link)
+portal, err := qurl.EnterPortal(ctx, link)
 if err != nil {
 	return err
 }
 
-fmt.Println(handle.RedirectURL)
+fmt.Println(portal.ResourceURL)
 ```
 
-The provider is opener policy, not an issuer credential. It cannot protect URLs
-or create portals.
+The opener policy is not an issuer credential. It cannot protect URLs or create
+portals; it only tells the SDK which LayerV-issued qURL links and platform
+access endpoints this process should trust.
+
+For pinned opener policy, install a `StaticProvider` during startup:
+
+```go
+func installPinnedOpener(issuerKID string, issuerPublicKeyDER []byte, platformHosts []string) error {
+	trustStore, err := qurl.NewTrustStoreFromDER(map[string][]byte{
+		issuerKID: issuerPublicKeyDER,
+	})
+	if err != nil {
+		return err
+	}
+
+	provider, err := qurl.NewStaticProvider(
+		trustStore,
+		qurl.NewRelayAllowlist(platformHosts),
+	)
+	if err != nil {
+		return err
+	}
+
+	qurl.SetDefaultProvider(provider)
+	return nil
+}
+```
+
+LayerV opener setup gives you the issuer key id, issuer public key, and allowed
+platform hosts for the links this process is allowed to open.
 
 ## Errors
 
 ```go
-handle, err := qurl.EnterPortal(ctx, link)
+portal, err := qurl.EnterPortal(ctx, link)
 switch {
 case err == nil:
-	use(handle.RedirectURL)
+	use(portal.ResourceURL)
 case errors.Is(err, qurl.ErrNotConfigured):
-	installProvider()
+	reportMissingOpenerPolicy()
 case errors.Is(err, qurl.ErrSignature), errors.Is(err, qurl.ErrUnknownKID):
 	reject()
 default:

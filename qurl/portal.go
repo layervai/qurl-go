@@ -7,7 +7,7 @@
 //
 // EnterPortal is for services and agents that open received qURL links
 // programmatically. It verifies a link locally before asking qURL for access,
-// then returns a ResourceHandle with the reachable URL. Low-level offline
+// then returns a ResourceHandle with the reachable resource URL. Low-level offline
 // signed-fragment helpers exist for conformance and protocol integrations, but
 // the platform client is the default application surface.
 package qurl
@@ -43,11 +43,11 @@ type HTTPDoer interface {
 	Do(req *http.Request) (*http.Response, error)
 }
 
-// ResourceHandle is the result of a successful EnterPortal: the reachable resource
-// URL and the access lifetime reported by qURL.
+// ResourceHandle is the result of a successful EnterPortal: the reachable
+// resource URL and the access lifetime reported by qURL.
 type ResourceHandle struct {
-	// RedirectURL is the reachable resource location.
-	RedirectURL string
+	// ResourceURL is the reachable resource location.
+	ResourceURL string
 	// OpenSeconds is how long access stays open, as reported by qURL (0 when not
 	// provided).
 	OpenSeconds uint32
@@ -183,13 +183,12 @@ func interpretReply(reply *relayknock.Reply) (*ResourceHandle, error) {
 	if !ack.isSuccess() {
 		return nil, &ServerDenyError{ErrCode: ack.ErrCode}
 	}
-	// A success ACK that carries no redirectUrl is not actionable — the caller has
-	// nothing to reach. Fail closed rather than hand back an empty handle (matching
-	// the seed smoke client's "success ACK carried no redirectUrl" rejection).
+	// A success ACK that carries no resource URL is not actionable — the caller has
+	// nothing to reach. Fail closed rather than hand back an empty handle.
 	if ack.RedirectURL == "" {
-		return nil, fmt.Errorf("%w: success ACK carried no redirectUrl (errCode=%q)", ErrMalformedReply, ack.ErrCode)
+		return nil, fmt.Errorf("%w: success ACK carried no resource URL (errCode=%q)", ErrMalformedReply, ack.ErrCode)
 	}
-	return &ResourceHandle{RedirectURL: ack.RedirectURL, OpenSeconds: ack.OpenTime}, nil
+	return &ResourceHandle{ResourceURL: ack.RedirectURL, OpenSeconds: ack.OpenTime}, nil
 }
 
 // resolveDefaultConfig builds the EnterPortal Config from the process-wide default

@@ -24,9 +24,11 @@ probing before a legitimate user or agent ever arrives.
 
 Opening an inbound port, running a VPN, shipping a bastion, publishing a
 Cloudflare Tunnel or ngrok URL, or passing around a long-lived key all leave
-something durable to find, scan, or steal. qURL flips that model. A private
-service stays private by default. You open a portal only when LayerV verifies
-the actor, policy, and time limit for that specific access path.
+something durable to find, scan, or steal. qURL flips that model. It is an
+invisibility primitive for authenticated access, not another externally visible
+endpoint in front of the same service. The private resource is not public
+inventory. A portal is cryptographic, just-in-time permission for one actor to
+make one private path reachable under LayerV policy.
 
 ## Install
 
@@ -105,15 +107,20 @@ metadata from LayerV.
 Only software that protects URLs or creates portals needs LayerV credentials. A
 user or agent that only receives and opens a qURL link does not set up anything.
 
-First, connect that service to your LayerV account. This happens outside the Go
-code during setup or deploy. After that, application code starts with:
+Before deploying code that calls `OpenClient`, run the LayerV setup flow once
+for that service identity. The setup flow consumes the temporary bootstrap key,
+registers the service with your LayerV account, and stores the runtime issuer
+credential in protected state for the process. After that, application code
+starts with:
 
 ```go
 client, err := qurl.OpenClient()
 ```
 
-That is the normal application code. You do not paste keys into your app;
-LayerV setup handles the connection.
+That is the normal application code. You do not paste bootstrap keys into your
+app, read `LAYERV_API_KEY`, or ask portal recipients to hold credentials. LayerV
+setup turns the one-time key into runtime issuer state; `OpenClient` uses that
+state.
 
 If your runtime stores LayerV credentials in KMS, a secret manager, or another
 custom store, implement `qurl.CredentialProvider` and pass it to
@@ -123,16 +130,14 @@ custom store, implement `qurl.CredentialProvider` and pass it to
 
 Most recipients open qURL links directly and do not use this SDK at all. If you
 are building a service or agent that opens received qURL links programmatically,
-configure the opener once and call `EnterPortal`:
+install opener policy once at startup, then enter portals with one call:
 
 ```go
-qurl.SetDefaultProvider(provider)
-
-handle, err := qurl.EnterPortal(ctx, link)
+portal, err := qurl.EnterPortal(ctx, link)
 if err != nil {
 	return err
 }
-fmt.Println("resource URL:", handle.RedirectURL)
+fmt.Println("resource URL:", portal.ResourceURL)
 ```
 
 `EnterPortal` fails closed when no provider is installed. For tests or manual

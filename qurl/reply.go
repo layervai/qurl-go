@@ -15,8 +15,8 @@ var ErrServerOverloaded = errors.New("qurl: platform busy; retry later")
 
 // ErrMalformedReply is returned when an authenticated reply is structurally
 // unusable: an unexpected platform reply, or a success reply that carries no
-// reachable resource (empty redirectUrl). It is distinct from a ServerDenyError
-// (an authenticated deny) and a RelayError (a transport fault).
+// reachable resource URL. It is distinct from a ServerDenyError (an
+// authenticated deny) and a RelayError (a transport fault).
 var ErrMalformedReply = errors.New("qurl: malformed platform reply")
 
 // ServerDenyError is an authenticated qURL platform deny: the platform vouched
@@ -47,8 +47,8 @@ const errSuccess = "0"
 func (m *serverKnockAckMsg) isSuccess() bool { return m.ErrCode == "" || m.ErrCode == errSuccess }
 
 // parseAck decodes the decrypted ACK body. An empty body is treated as a
-// zero-value ACK (no errCode, no redirect) so the caller surfaces "no redirectUrl"
-// rather than a JSON error.
+// zero-value ACK (no errCode, no resource URL) so the caller surfaces the
+// missing resource URL rather than a JSON error.
 func parseAck(body []byte) (*serverKnockAckMsg, error) {
 	var ack serverKnockAckMsg
 	if len(body) == 0 {

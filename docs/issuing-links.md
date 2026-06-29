@@ -113,16 +113,20 @@ identity matters to your application.
 Credentials are for software that protects URLs or creates portals. If your code
 only opens received portal links, skip this section.
 
-First, connect the service that creates portals to your LayerV account. This
-happens outside the Go code during setup or deploy. After that, application code
+Before deploying code that creates portals, run the LayerV setup flow once for
+that service identity. The setup flow consumes the temporary bootstrap key,
+registers the service with your LayerV account, and stores the runtime issuer
+credential in protected state for the process. After that, application code
 starts with:
 
 ```go
 client, err := qurl.OpenClient()
 ```
 
-That is the normal application code. You do not paste keys into your app;
-LayerV setup handles the connection.
+That is the normal application code. You do not paste bootstrap keys into your
+app, read `LAYERV_API_KEY`, or ask portal recipients to hold credentials. LayerV
+setup turns the one-time key into runtime issuer state; `OpenClient` uses that
+state.
 
 If your runtime stores LayerV credentials in KMS, a secret manager, or another
 custom store, implement `qurl.CredentialProvider` and pass it to

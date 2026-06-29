@@ -3,13 +3,16 @@
 Use the LayerV qURL Platform to keep a private service off public inventory and
 make it reachable only through short-lived portal links. The app that protects
 URLs and creates portals has LayerV credentials; the person or agent opening a
-portal link does not. LayerV handles the platform work.
+portal link does not. LayerV turns the private URL into an invisible,
+authenticated resource and turns each portal into just-in-time access to that
+resource.
 
 ## 1. Connect to LayerV
 
-First, connect the service that creates portals to your LayerV account. This
-happens outside the Go code during setup or deploy. After that, application code
-starts with:
+Before this service creates portals, run the LayerV setup flow once for this
+service identity. The setup flow consumes the temporary bootstrap key, registers
+the service with your LayerV account, and stores the runtime issuer credential in
+protected state for the process. After that, application code starts with:
 
 ```go
 client, err := qurl.OpenClient()
@@ -18,8 +21,10 @@ if err != nil {
 }
 ```
 
-That is the normal application code. You do not paste keys into your app;
-LayerV setup handles the connection.
+That is the normal application code. You do not paste bootstrap keys into your
+app, read `LAYERV_API_KEY`, or ask portal recipients to hold credentials. LayerV
+setup turns the one-time key into runtime issuer state; `OpenClient` uses that
+state.
 
 ## 2. Protect the URL
 
@@ -55,21 +60,20 @@ and session policy.
 
 Most users can open the qURL link directly and need no keypair state. If you are
 building an agent or service that opens received qURL links in code, install
-opener config once and call `EnterPortal`:
+opener policy once during startup, then call `EnterPortal`:
 
 ```go
-qurl.SetDefaultProvider(provider)
-
-handle, err := qurl.EnterPortal(ctx, portal.Link)
+opened, err := qurl.EnterPortal(ctx, portal.Link)
 if err != nil {
 	return err
 }
 
-resp, err := http.Get(handle.RedirectURL)
+resp, err := http.Get(opened.ResourceURL)
 ```
 
 `EnterPortal` verifies the link before asking qURL for access. If no opener
-provider is installed, it fails closed with `qurl.ErrNotConfigured`.
+provider is installed, it fails closed with `qurl.ErrNotConfigured`. See
+[Open links](opening-links.md) for a complete pinned-provider setup example.
 
 ## Errors
 

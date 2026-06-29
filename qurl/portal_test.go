@@ -244,8 +244,8 @@ func TestInterpretReply_SuccessACK(t *testing.T) {
 	if err != nil {
 		t.Fatalf("success ACK: %v", err)
 	}
-	if h.RedirectURL != "https://r_x.qurl.site/path" {
-		t.Fatalf("RedirectURL = %q", h.RedirectURL)
+	if h.ResourceURL != "https://r_x.qurl.site/path" {
+		t.Fatalf("ResourceURL = %q", h.ResourceURL)
 	}
 	if h.OpenSeconds != 900 {
 		t.Fatalf("OpenSeconds = %d, want 900", h.OpenSeconds)
@@ -275,15 +275,14 @@ func TestInterpretReply_CookieChallenge(t *testing.T) {
 	}
 }
 
-func TestInterpretReply_SuccessButNoRedirect(t *testing.T) {
-	// A success ACK with no redirectUrl (here an empty body → zero-value success
-	// ACK) is not actionable: the caller has nothing to reach. It must fail closed
-	// with ErrMalformedReply, NOT hand back an empty handle (matching the seed smoke
-	// client's "success ACK carried no redirectUrl" rejection).
+func TestInterpretReply_SuccessButNoResourceURL(t *testing.T) {
+	// A success ACK with no resource URL (here an empty body -> zero-value
+	// success ACK) is not actionable: the caller has nothing to reach. It must
+	// fail closed with ErrMalformedReply, not hand back an empty handle.
 	reply := &relayknock.Reply{Type: relayknock.TypeACK, Body: nil}
 	_, err := interpretReply(reply)
 	if !errors.Is(err, ErrMalformedReply) {
-		t.Fatalf("success ACK with no redirectUrl: want ErrMalformedReply, got %v", err)
+		t.Fatalf("success ACK with no resource URL: want ErrMalformedReply, got %v", err)
 	}
 }
 
