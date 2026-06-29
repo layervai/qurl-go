@@ -367,7 +367,9 @@ func (c *Client) ResourceByID(id string) *Resource {
 // ConnectorResource returns the resource created for connectorID by qURL
 // Connector. The connector id is the resource slug LayerV stores for that
 // connector. Use this when qURL Connector already protects the service; do not
-// call ProtectURL again for the same service.
+// call ProtectURL again for the same service. The LayerV API performs the slug
+// lookup; when the response includes an alias, the SDK confirms it matches
+// connectorID before binding the returned resource.
 func (c *Client) ConnectorResource(ctx context.Context, connectorID string) (*Resource, error) {
 	if c == nil {
 		return nil, fmt.Errorf("%w: nil client", ErrInvalidClientConfig)
@@ -392,6 +394,9 @@ func (c *Client) ConnectorResource(ctx context.Context, connectorID string) (*Re
 	resource, err := env.Data[0].resource()
 	if err != nil {
 		return nil, err
+	}
+	if resource.Alias != nil && *resource.Alias != connectorID {
+		return nil, fmt.Errorf("qurl: invalid API response: connector %q returned resource alias %q", connectorID, *resource.Alias)
 	}
 	resource.client = c
 	return resource, nil
@@ -580,15 +585,14 @@ func OneTimeUse() PortalOption {
 	})
 }
 
-// MaxSessions limits concurrent sessions for this qURL link. The SDK caps this
-// at 1000 as a client-side guardrail; the LayerV API remains the source of
-// truth for account limits. Use 0 for unlimited sessions; the SDK sends an
-// explicit max_sessions:0, while omitting this option leaves the server default
-// in effect.
+// MaxSessions limits concurrent sessions for this qURL link. Use 0 for
+// unlimited sessions; the SDK sends an explicit max_sessions:0, while omitting
+// this option leaves the server default in effect. The LayerV API remains the
+// source of truth for account limits.
 func MaxSessions(n int) PortalOption {
 	return portalOptionFunc(func(o *portalOptions) error {
-		if n < 0 || n > 1000 {
-			return fmt.Errorf("%w: max sessions must be between 0 and 1000", ErrInvalidPortalRequest)
+		if n < 0 {
+			return fmt.Errorf("%w: max sessions must not be negative", ErrInvalidPortalRequest)
 		}
 		o.maxSessions = &n
 		return nil
@@ -596,15 +600,11 @@ func MaxSessions(n int) PortalOption {
 }
 
 // WithSessionDuration sets how long access lasts after someone opens the link.
-// The SDK caps this at 24 hours as a client-side guardrail; the LayerV API
-// remains the source of truth for account limits. Durations must be at least one
-// second and whole seconds. Omit this option to use the server default; zero is
-// rejected rather than treated as default.
+// Durations must be at least one second and whole seconds. Omit this option to
+// use the server default; zero is rejected rather than treated as default. The
+// LayerV API remains the source of truth for account limits.
 func WithSessionDuration(d time.Duration) PortalOption {
 	return portalOptionFunc(func(o *portalOptions) error {
-		if d > 24*time.Hour {
-			return fmt.Errorf("%w: session duration must be at most 24 hours", ErrInvalidPortalRequest)
-		}
 		sessionDuration, err := formatAPIDurationWithMaxUnit(d, time.Second, time.Hour)
 		if err != nil {
 			return err
@@ -1067,6 +1067,8 @@ func apiErrorFromResponse(status int, body []byte) error {
 }
 
 func apiErrorTextField(value string) string {
+	// Keep APIError.Error single-line and bounded even when structured problem
+	// fields contain newlines or large prose details.
 	return apiErrorBodySnippet([]byte(value))
 }
 

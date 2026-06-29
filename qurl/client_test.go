@@ -247,7 +247,7 @@ func TestClient_ConnectorResourceCreatePortal(t *testing.T) {
 			if got := r.Header.Get("Content-Type"); got != "" {
 				t.Fatalf("GET Content-Type = %q, want empty", got)
 			}
-			fmt.Fprint(w, `{"data":[{"resource_id":"r_connector12","type":"tunnel","status":"active"}]}`)
+			fmt.Fprint(w, `{"data":[{"resource_id":"r_connector12","type":"tunnel","status":"active","alias":"prod-dashboard"}]}`)
 		case 2:
 			if r.Method != http.MethodPost || r.URL.Path != "/v1/resources/r_connector12/qurls" {
 				t.Fatalf("second request = %s %s, want POST /v1/resources/r_connector12/qurls", r.Method, r.URL.Path)
@@ -323,6 +323,27 @@ func TestClient_ConnectorResourceAmbiguous(t *testing.T) {
 	_, err = client.ConnectorResource(context.Background(), "prod-dashboard")
 	if !errors.Is(err, ErrAmbiguousResource) {
 		t.Fatalf("ConnectorResource ambiguous: want ErrAmbiguousResource, got %v", err)
+	}
+}
+
+func TestClient_ConnectorResourceRejectsMismatchedAlias(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/resources" || r.URL.Query().Get("slug") != "prod-dashboard" {
+			t.Fatalf("request = %s %s?%s, want GET /v1/resources?slug=prod-dashboard", r.Method, r.URL.Path, r.URL.RawQuery)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"data":[{"resource_id":"r_wrong12345","status":"active","alias":"other-dashboard"}]}`)
+	}))
+	defer api.Close()
+
+	client, err := NewClient(BearerToken("lv_test_123"), WithBaseURL(api.URL))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	_, err = client.ConnectorResource(context.Background(), "prod-dashboard")
+	if err == nil || !strings.Contains(err.Error(), "returned resource alias") {
+		t.Fatalf("ConnectorResource mismatched alias: want alias mismatch error, got %v", err)
 	}
 }
 
@@ -523,8 +544,21 @@ func TestClient_Validation(t *testing.T) {
 	if req.SessionDuration != "24h" {
 		t.Fatalf("WithSessionDuration 24h = %q, want 24h", req.SessionDuration)
 	}
-	if _, err := client.CreatePortal(context.Background(), &Resource{ID: "r_demo1234567"}, MaxSessions(1001)); !errors.Is(err, ErrInvalidPortalRequest) {
-		t.Fatalf("max sessions: want ErrInvalidPortalRequest, got %v", err)
+	req, err = buildCreatePortalRequest([]PortalOption{
+		MaxSessions(2000),
+		WithSessionDuration(48 * time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("large server-governed portal options: %v", err)
+	}
+	if req.MaxSessions == nil || *req.MaxSessions != 2000 {
+		t.Fatalf("MaxSessions(2000) = %v, want 2000", req.MaxSessions)
+	}
+	if req.SessionDuration != "48h" {
+		t.Fatalf("WithSessionDuration 48h = %q, want 48h", req.SessionDuration)
+	}
+	if _, err := client.CreatePortal(context.Background(), &Resource{ID: "r_demo1234567"}, MaxSessions(-1)); !errors.Is(err, ErrInvalidPortalRequest) {
+		t.Fatalf("negative max sessions: want ErrInvalidPortalRequest, got %v", err)
 	}
 	if _, err := (&Resource{ID: "r_demo1234567"}).CreatePortal(context.Background()); !errors.Is(err, ErrInvalidPortalRequest) {
 		t.Fatalf("unbound resource: want ErrInvalidPortalRequest, got %v", err)
