@@ -122,7 +122,10 @@ func FileCredentials(path string) CredentialProvider {
 	return fileCredentialProvider{path: path}
 }
 
-func (p fileCredentialProvider) Authorize(_ context.Context, req *http.Request) error {
+func (p fileCredentialProvider) Authorize(ctx context.Context, req *http.Request) error {
+	if err := validateContext(ctx, ErrInvalidClientConfig); err != nil {
+		return err
+	}
 	raw, err := readPrivateStateFile(p.path, "credential state", ErrCredentialStateNotFound, ErrInvalidClientConfig, ErrInsecureCredentialStatePermissions)
 	if err != nil {
 		return err
@@ -602,7 +605,7 @@ func WithSessionDuration(d time.Duration) PortalOption {
 		if d > 24*time.Hour {
 			return fmt.Errorf("%w: session duration must be at most 24 hours", ErrInvalidPortalRequest)
 		}
-		sessionDuration, err := formatAPIDuration(d, time.Second)
+		sessionDuration, err := formatAPIDurationWithMaxUnit(d, time.Second, time.Hour)
 		if err != nil {
 			return err
 		}
@@ -858,8 +861,8 @@ func validateCredentials(ctx context.Context, provider CredentialProvider, baseU
 	if provider == nil {
 		return fmt.Errorf("%w: credential provider must not be nil", ErrInvalidClientConfig)
 	}
-	if ctx == nil {
-		return fmt.Errorf("%w: context must not be nil", ErrInvalidClientConfig)
+	if err := validateContext(ctx, ErrInvalidClientConfig); err != nil {
+		return err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL, http.NoBody)
 	if err != nil {
@@ -1084,6 +1087,10 @@ func apiErrorBodySnippet(body []byte) string {
 }
 
 func formatAPIDuration(d time.Duration, minDuration time.Duration) (string, error) {
+	return formatAPIDurationWithMaxUnit(d, minDuration, 24*time.Hour)
+}
+
+func formatAPIDurationWithMaxUnit(d time.Duration, minDuration time.Duration, maxUnit time.Duration) (string, error) {
 	if d < minDuration {
 		return "", fmt.Errorf("%w: duration must be at least %s", ErrInvalidPortalRequest, minDuration)
 	}
@@ -1092,13 +1099,20 @@ func formatAPIDuration(d time.Duration, minDuration time.Duration) (string, erro
 	}
 	const day = 24 * time.Hour
 	switch {
-	case d%day == 0:
+	case maxUnit >= day && d%day == 0:
 		return fmt.Sprintf("%dd", d/day), nil
-	case d%time.Hour == 0:
+	case maxUnit >= time.Hour && d%time.Hour == 0:
 		return fmt.Sprintf("%dh", d/time.Hour), nil
-	case d%time.Minute == 0:
+	case maxUnit >= time.Minute && d%time.Minute == 0:
 		return fmt.Sprintf("%dm", d/time.Minute), nil
 	default:
 		return fmt.Sprintf("%ds", d/time.Second), nil
 	}
+}
+
+func validateContext(ctx context.Context, invalidConfig error) error {
+	if ctx == nil {
+		return fmt.Errorf("%w: context must not be nil", invalidConfig)
+	}
+	return ctx.Err()
 }

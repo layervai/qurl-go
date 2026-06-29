@@ -412,6 +412,23 @@ func TestFileAgentState_SaveRejectsGroupWritableStateDir(t *testing.T) {
 	}
 }
 
+func TestFileAgentState_RespectsCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	store := FileAgentState(filepath.Join(t.TempDir(), "agent-state.json"))
+	if _, err := store.LoadAgentState(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("LoadAgentState canceled context: want context.Canceled, got %v", err)
+	}
+	state, err := newAgentState()
+	if err != nil {
+		t.Fatalf("newAgentState: %v", err)
+	}
+	if err := store.SaveAgentState(ctx, state); !errors.Is(err, context.Canceled) {
+		t.Fatalf("SaveAgentState canceled context: want context.Canceled, got %v", err)
+	}
+}
+
 func TestFileAgentState_RejectsSymlinkState(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "agent-state.json")

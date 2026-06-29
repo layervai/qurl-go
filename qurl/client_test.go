@@ -439,6 +439,20 @@ func TestClient_FileCredentialsErrors(t *testing.T) {
 	}
 }
 
+func TestClient_FileCredentialsRespectsCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://api.example.com", http.NoBody)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	err = FileCredentials(filepath.Join(t.TempDir(), "missing.json")).Authorize(ctx, req)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("FileCredentials canceled context: want context.Canceled, got %v", err)
+	}
+}
+
 func TestClient_Validation(t *testing.T) {
 	if _, err := NewClient(nil); !errors.Is(err, ErrInvalidClientConfig) {
 		t.Fatalf("nil credentials: want ErrInvalidClientConfig, got %v", err)
@@ -501,6 +515,13 @@ func TestClient_Validation(t *testing.T) {
 	}
 	if _, err := client.CreatePortal(context.Background(), &Resource{ID: "r_demo1234567"}, WithSessionDuration(500*time.Millisecond)); !errors.Is(err, ErrInvalidPortalRequest) {
 		t.Fatalf("subsecond session duration: want ErrInvalidPortalRequest, got %v", err)
+	}
+	req, err := buildCreatePortalRequest([]PortalOption{WithSessionDuration(24 * time.Hour)})
+	if err != nil {
+		t.Fatalf("WithSessionDuration 24h: %v", err)
+	}
+	if req.SessionDuration != "24h" {
+		t.Fatalf("WithSessionDuration 24h = %q, want 24h", req.SessionDuration)
 	}
 	if _, err := client.CreatePortal(context.Background(), &Resource{ID: "r_demo1234567"}, MaxSessions(1001)); !errors.Is(err, ErrInvalidPortalRequest) {
 		t.Fatalf("max sessions: want ErrInvalidPortalRequest, got %v", err)

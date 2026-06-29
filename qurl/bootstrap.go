@@ -71,7 +71,10 @@ type fileAgentStateStore struct {
 	path string
 }
 
-func (s fileAgentStateStore) LoadAgentState(context.Context) (*AgentState, error) {
+func (s fileAgentStateStore) LoadAgentState(ctx context.Context) (*AgentState, error) {
+	if err := validateContext(ctx, ErrInvalidBootstrapConfig); err != nil {
+		return nil, err
+	}
 	raw, err := readPrivateStateFile(s.path, "agent state", ErrAgentStateNotFound, ErrInvalidBootstrapConfig, ErrInsecureAgentStatePermissions)
 	if err != nil {
 		return nil, err
@@ -83,12 +86,15 @@ func (s fileAgentStateStore) LoadAgentState(context.Context) (*AgentState, error
 	return &state, nil
 }
 
-func (s fileAgentStateStore) SaveAgentState(_ context.Context, state *AgentState) error {
+func (s fileAgentStateStore) SaveAgentState(ctx context.Context, state *AgentState) error {
 	if strings.TrimSpace(s.path) == "" {
 		return fmt.Errorf("%w: state path must not be empty", ErrInvalidBootstrapConfig)
 	}
 	if state == nil {
 		return fmt.Errorf("%w: state must not be nil", ErrInvalidBootstrapConfig)
+	}
+	if err := validateContext(ctx, ErrInvalidBootstrapConfig); err != nil {
+		return err
 	}
 	raw, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
