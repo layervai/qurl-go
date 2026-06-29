@@ -29,7 +29,8 @@ var ErrInsecureAgentStatePermissions = errors.New("qurl: insecure agent state pe
 
 // ErrBootstrapSetupKeyConsumed is returned when an incomplete local bootstrap
 // retry is rejected because the one-time setup key appears to have already been
-// used. Run the LayerV setup flow again or restore the completed AgentState.
+// used. Surface this to operators instead of retrying indefinitely: run the
+// LayerV setup flow again or restore the completed AgentState.
 var ErrBootstrapSetupKeyConsumed = errors.New("qurl: bootstrap setup key already consumed")
 
 // NHPServerPeerInfo is the LayerV peer returned by the bootstrap service.
@@ -343,8 +344,8 @@ func isConsumedSetupKeyError(err error) bool {
 	if code == "setup_key_consumed" || code == "bootstrap_setup_key_consumed" {
 		return true
 	}
-	// Structured codes are the contract. These phrases are a best-effort bridge
-	// for older bootstrap errors that carried only human text. Keep the bridge
+	// Structured codes are the contract. These phrases are only a best-effort
+	// bridge for older bootstrap errors that carried human text. Keep the bridge
 	// on terminal-looking statuses so transient upstream prose cannot suppress a
 	// valid retry.
 	switch apiErr.StatusCode {

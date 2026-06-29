@@ -130,8 +130,10 @@ func FileCredentials(path string) CredentialProvider {
 // Authorization value is reusable across requests. Do not wrap providers that
 // sign request-specific fields or set non-Authorization headers; those providers
 // should run on every request. Failed refreshes are not cached; if a provider
-// keeps failing, later callers retry rather than reusing a stale error. The
-// usual production shape is CachedCredentials(FileCredentials(path), ttl).
+// keeps failing, later callers retry rather than reusing a stale error, and
+// callers that were waiting on a failed refresh may each attempt the next
+// refresh until one succeeds. The usual production shape is
+// CachedCredentials(FileCredentials(path), ttl).
 func CachedCredentials(provider CredentialProvider, ttl time.Duration) CredentialProvider {
 	return newCachedCredentials(provider, ttl, time.Now)
 }
@@ -416,6 +418,8 @@ func OpenClient(opts ...ClientOption) (*Client, error) {
 // OpenClientContext is OpenClient with a context for the eager credential
 // authorization check. The check authorizes a synthetic request that is never
 // sent, so credential code should not spend one-time material during Authorize.
+// File-backed credentials are read once for this startup check and then read
+// again on each real request so local rotations are observed.
 // For file-backed credentials, the context can cancel before the request is
 // built or while custom credential code runs, but it cannot interrupt a local
 // filesystem read once it has started.
