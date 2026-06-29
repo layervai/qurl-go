@@ -126,7 +126,8 @@ func FileCredentials(path string) CredentialProvider {
 // for ttl. It is meant for FileCredentials and other providers whose
 // Authorization value is reusable across requests. Do not wrap providers that
 // sign request-specific fields or set non-Authorization headers; those providers
-// should run on every request.
+// should run on every request. Failed refreshes are not cached; if a provider
+// keeps failing, later callers retry rather than reusing a stale error.
 func CachedCredentials(provider CredentialProvider, ttl time.Duration) CredentialProvider {
 	return newCachedCredentials(provider, ttl, time.Now)
 }
@@ -472,9 +473,8 @@ func (c *Client) ResourceByID(id string) *Resource {
 // Connector. The connector id is the resource slug LayerV stores for that
 // connector. Use this when qURL Connector already protects the service; do not
 // call ProtectURL again for the same service. The LayerV API performs the slug
-// lookup; when the response includes an alias, the SDK confirms it matches
-// connectorID before binding the returned resource. If an older API response
-// omits alias, the SDK treats the server-side slug filter as authoritative.
+// lookup, and the SDK confirms the returned alias matches connectorID before
+// binding the returned resource.
 func (c *Client) ConnectorResource(ctx context.Context, connectorID string) (*Resource, error) {
 	if c == nil {
 		return nil, fmt.Errorf("%w: nil client", ErrInvalidClientConfig)
@@ -500,7 +500,10 @@ func (c *Client) ConnectorResource(ctx context.Context, connectorID string) (*Re
 	if err != nil {
 		return nil, err
 	}
-	if resource.Alias != nil && *resource.Alias != connectorID {
+	if resource.Alias == nil {
+		return nil, fmt.Errorf("qurl: invalid API response: connector %q returned resource without alias", connectorID)
+	}
+	if *resource.Alias != connectorID {
 		return nil, fmt.Errorf("qurl: invalid API response: connector %q returned resource alias %q", connectorID, *resource.Alias)
 	}
 	resource.client = c
@@ -709,7 +712,9 @@ func MaxSessions(n int) PortalOption {
 // WithSessionDuration sets how long access lasts after someone opens the link.
 // Durations must be at least one second and whole seconds. Omit this option to
 // use the server default; zero is rejected rather than treated as default. The
-// LayerV API remains the source of truth for account limits.
+// LayerV API remains the source of truth for account limits. Values are
+// serialized with hours as the largest unit, so 24*time.Hour is sent as "24h"
+// rather than "1d".
 func WithSessionDuration(d time.Duration) PortalOption {
 	return portalOptionFunc(func(o *portalOptions) error {
 		sessionDuration, err := formatAPIDurationWithMaxUnit(d, time.Second, time.Hour)

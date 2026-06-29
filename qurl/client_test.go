@@ -347,6 +347,27 @@ func TestClient_ConnectorResourceRejectsMismatchedAlias(t *testing.T) {
 	}
 }
 
+func TestClient_ConnectorResourceRejectsMissingAlias(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/resources" || r.URL.Query().Get("slug") != "prod-dashboard" {
+			t.Fatalf("request = %s %s?%s, want GET /v1/resources?slug=prod-dashboard", r.Method, r.URL.Path, r.URL.RawQuery)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"data":[{"resource_id":"r_missingalias","status":"active"}]}`)
+	}))
+	defer api.Close()
+
+	client, err := NewClient(BearerToken("lv_test_123"), WithBaseURL(api.URL))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	_, err = client.ConnectorResource(context.Background(), "prod-dashboard")
+	if err == nil || !strings.Contains(err.Error(), "without alias") {
+		t.Fatalf("ConnectorResource missing alias: want missing alias error, got %v", err)
+	}
+}
+
 func TestClient_CredentialProvider(t *testing.T) {
 	var calls atomic.Int32
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

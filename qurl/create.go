@@ -38,6 +38,10 @@ const LinkBaseURL = "https://qurl.link/"
 // qurl_user_private_key_b64 field is kept symmetric with the verify side by the
 // shared Secret struct (the field name cannot drift without a compile break)
 // and by the create→verify round-trip test, not by a BuildFragment re-check.
+// Discovery also uses this RawURLEncoding decoder for published manifests; trust
+// is anchored on the decoded manifest bytes by pin/signature, and downstream DER
+// and signature validation still fail closed. The stricter non-canonical
+// base64url rejection story remains in the core qURL link parser.
 // Owning the Part-2 codec in one core place (mirroring parseSecret) is deferred —
 // see qurl-go#6.
 var b64url = base64.RawURLEncoding
