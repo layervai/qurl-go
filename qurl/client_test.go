@@ -162,6 +162,16 @@ func TestResourceJSONUsesAPINames(t *testing.T) {
 	if _, ok := body["ID"]; ok {
 		t.Fatalf("Resource JSON used Go field name ID: %s", raw)
 	}
+
+	resource.QURLCount = 0
+	raw, err = json.Marshal(resource)
+	if err != nil {
+		t.Fatalf("Marshal zero-count Resource: %v", err)
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		t.Fatalf("Unmarshal zero-count Resource JSON: %v", err)
+	}
+	assertJSONField(t, body, "qurl_count", float64(0))
 }
 
 func TestClient_ResourceByIDCreatePortal(t *testing.T) {
@@ -412,6 +422,29 @@ func TestNewClientUsesDefaultHTTPTimeout(t *testing.T) {
 	}
 }
 
+func TestClient_DefaultHTTPClientSurfacesRedirectAsAPIError(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/resources" {
+			t.Fatalf("request = %s %s, want POST /v1/resources", r.Method, r.URL.Path)
+		}
+		http.Redirect(w, r, "https://api.example.com/v1/resources", http.StatusMovedPermanently)
+	}))
+	defer api.Close()
+
+	client, err := NewClient(BearerToken("lv_test"), WithBaseURL(api.URL))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	_, err = client.ProtectURL(context.Background(), "https://example.com")
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("redirect: want *APIError, got %T: %v", err, err)
+	}
+	if apiErr.StatusCode != http.StatusMovedPermanently {
+		t.Fatalf("redirect status = %d, want %d", apiErr.StatusCode, http.StatusMovedPermanently)
+	}
+}
+
 func TestClient_FileCredentials(t *testing.T) {
 	statePath := filepath.Join(t.TempDir(), "issuer-state.json")
 	if err := os.WriteFile(statePath, []byte(`{"authorization":"Bearer lv_state_123"}`), 0o600); err != nil {
@@ -455,6 +488,18 @@ func TestClient_FileCredentialsErrors(t *testing.T) {
 	}
 	if _, err := client.ProtectURL(context.Background(), "https://example.com"); !errors.Is(err, ErrInvalidClientConfig) {
 		t.Fatalf("empty state: want ErrInvalidClientConfig, got %v", err)
+	}
+
+	ambiguousPath := filepath.Join(t.TempDir(), "issuer-state.json")
+	if err := os.WriteFile(ambiguousPath, []byte(`{"authorization":"Bearer lv_state_123","bearer_token":"lv_state_456"}`), 0o600); err != nil {
+		t.Fatalf("write ambiguous state: %v", err)
+	}
+	client, err = NewClient(FileCredentials(ambiguousPath), WithBaseURL("https://api.example.com"))
+	if err != nil {
+		t.Fatalf("NewClient ambiguous state: %v", err)
+	}
+	if _, err := client.ProtectURL(context.Background(), "https://example.com"); !errors.Is(err, ErrInvalidClientConfig) {
+		t.Fatalf("ambiguous state: want ErrInvalidClientConfig, got %v", err)
 	}
 
 	insecurePath := filepath.Join(t.TempDir(), "issuer-state.json")

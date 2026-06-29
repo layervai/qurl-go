@@ -344,7 +344,14 @@ func isConsumedSetupKeyError(err error) bool {
 		return true
 	}
 	// Structured codes are the contract. These phrases are a best-effort bridge
-	// for older bootstrap errors that carried only human text.
+	// for older bootstrap errors that carried only human text. Keep the bridge
+	// on terminal-looking statuses so transient upstream prose cannot suppress a
+	// valid retry.
+	switch apiErr.StatusCode {
+	case http.StatusConflict, http.StatusForbidden:
+	default:
+		return false
+	}
 	text := strings.ToLower(strings.Join([]string{
 		apiErr.Code,
 		apiErr.Type,

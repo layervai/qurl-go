@@ -169,6 +169,24 @@ func TestBootstrapAgent_DoesNotTreatRefusedAsConsumedSetupKey(t *testing.T) {
 	}
 }
 
+func TestIsConsumedSetupKeyErrorTextFallbackRequiresTerminalStatus(t *testing.T) {
+	terminalErr := &APIError{
+		StatusCode: http.StatusConflict,
+		Detail:     "setup key already used",
+	}
+	if !isConsumedSetupKeyError(terminalErr) {
+		t.Fatal("409 text fallback should be treated as consumed setup key")
+	}
+
+	transientErr := &APIError{
+		StatusCode: http.StatusBadGateway,
+		Detail:     "upstream said setup key already used before timing out",
+	}
+	if isConsumedSetupKeyError(transientErr) {
+		t.Fatal("transient text fallback should not be treated as consumed setup key")
+	}
+}
+
 func TestBootstrapAgent_ReturnsRegisteredStateWithoutNetwork(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "agent-state.json")
 	store := FileAgentState(path)

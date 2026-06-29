@@ -33,6 +33,8 @@ var defaultAPIHTTPClient = &http.Client{
 }
 
 func refuseRedirects(_ *http.Request, _ []*http.Request) error {
+	// Return 3xx responses to the caller as APIError values instead of
+	// forwarding credentials to a different URL.
 	return http.ErrUseLastResponse
 }
 
@@ -252,6 +254,8 @@ func (s credentialState) authorize(req *http.Request) error {
 	authorization := strings.TrimSpace(s.Authorization)
 	bearer := strings.TrimSpace(s.BearerToken)
 	switch {
+	case authorization != "" && bearer != "":
+		return fmt.Errorf("%w: credential state has both authorization and bearer_token", ErrInvalidClientConfig)
 	case authorization != "":
 		if err := validateHeaderValue(authorization, "authorization header"); err != nil {
 			return err
@@ -458,7 +462,7 @@ type Resource struct {
 	// Alias is an optional owner-scoped handle for the resource.
 	Alias *string `json:"alias,omitempty"`
 	// QURLCount is the number of active qURL links LayerV reports for the resource.
-	QURLCount int `json:"qurl_count,omitempty"`
+	QURLCount int `json:"qurl_count"`
 	// CreatedAt is the server creation time, when returned by the API.
 	CreatedAt *time.Time `json:"created_at,omitempty"`
 	// ExpiresAt is the server expiration time, when returned by the API.
