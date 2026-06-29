@@ -92,16 +92,7 @@ func (f CredentialProviderFunc) Authorize(ctx context.Context, req *http.Request
 type bearerTokenCredential string
 
 func (c bearerTokenCredential) Authorize(_ context.Context, req *http.Request) error {
-	token := strings.TrimSpace(string(c))
-	if token == "" {
-		return fmt.Errorf("%w: bearer token must not be empty", ErrInvalidClientConfig)
-	}
-	authorization := "Bearer " + token
-	if err := validateHeaderValue(authorization, "bearer token"); err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", authorization)
-	return nil
+	return setBearer(req, string(c))
 }
 
 // BearerToken returns a CredentialProvider backed by one bearer token.
@@ -156,22 +147,31 @@ func (s credentialState) authorize(req *http.Request) error {
 		req.Header.Set("Authorization", authorization)
 		return nil
 	case bearer != "":
-		authorization := "Bearer " + bearer
-		if err := validateHeaderValue(authorization, "bearer token"); err != nil {
-			return err
-		}
-		req.Header.Set("Authorization", authorization)
-		return nil
+		return setBearer(req, bearer)
 	default:
 		return fmt.Errorf("%w: credential state cannot authorize requests", ErrInvalidClientConfig)
 	}
 }
 
+func setBearer(req *http.Request, token string) error {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return fmt.Errorf("%w: bearer token must not be empty", ErrInvalidClientConfig)
+	}
+	authorization := "Bearer " + token
+	if err := validateHeaderValue(authorization, "bearer token"); err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", authorization)
+	return nil
+}
+
 func validateHeaderValue(value, label string) error {
-	for _, r := range value {
+	for i := 0; i < len(value); i++ {
+		b := value[i]
 		// Authorization credentials do not need HTAB or obs-text, so keep this
 		// intentionally stricter than the generic HTTP header grammar.
-		if r < 0x20 || r > 0x7e {
+		if b < 0x20 || b > 0x7e {
 			return fmt.Errorf("%w: %s contains invalid header characters", ErrInvalidClientConfig, label)
 		}
 	}
@@ -288,9 +288,11 @@ func OpenClient(opts ...ClientOption) (*Client, error) {
 }
 
 // OpenClientContext is OpenClient with a context for the eager credential
-// authorization check. For file-backed credentials, the context can cancel
-// before the request is built or while custom credential code runs, but it
-// cannot interrupt a local filesystem read once it has started.
+// authorization check. The check authorizes a synthetic request that is never
+// sent, so credential code should not spend one-time material during Authorize.
+// For file-backed credentials, the context can cancel before the request is
+// built or while custom credential code runs, but it cannot interrupt a local
+// filesystem read once it has started.
 func OpenClientContext(ctx context.Context, opts ...ClientOption) (*Client, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("%w: context must not be nil", ErrInvalidClientConfig)
