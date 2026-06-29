@@ -197,20 +197,24 @@ func (p *cachedCredentialProvider) Authorize(ctx context.Context, req *http.Requ
 }
 
 func (p *cachedCredentialProvider) refresh(ctx context.Context, req *http.Request) error {
+	finished := false
+	defer func() {
+		if !finished {
+			p.finishRefresh("", false)
+		}
+	}()
 	if err := p.provider.Authorize(ctx, req); err != nil {
-		p.finishRefresh("", false)
 		return err
 	}
 	authorization := req.Header.Get("Authorization")
 	if strings.TrimSpace(authorization) == "" {
-		p.finishRefresh("", false)
 		return fmt.Errorf("%w: cached credential provider did not set Authorization", ErrInvalidClientConfig)
 	}
 	if err := validateHeaderValue(authorization, "authorization header"); err != nil {
-		p.finishRefresh("", false)
 		return err
 	}
 	p.finishRefresh(authorization, true)
+	finished = true
 	return nil
 }
 

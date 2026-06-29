@@ -629,6 +629,56 @@ func TestCachedCredentialsSingleflightsRefresh(t *testing.T) {
 	}
 }
 
+func TestCachedCredentialsPanicDuringRefreshUnblocksWaiters(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	provider := CredentialProviderFunc(func(_ context.Context, req *http.Request) error {
+		switch calls.Add(1) {
+		case 1:
+			close(started)
+			<-release
+			panic("provider panic")
+		default:
+			req.Header.Set("Authorization", "Bearer recovered")
+			return nil
+		}
+	})
+	cached := CachedCredentials(provider, time.Minute)
+
+	firstReq := newCredentialTestRequest(t)
+	panicCh := make(chan any, 1)
+	go func() {
+		defer func() {
+			panicCh <- recover()
+		}()
+		_ = cached.Authorize(context.Background(), firstReq)
+	}()
+	<-started
+
+	waitCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	req := newCredentialTestRequest(t)
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- cached.Authorize(waitCtx, req)
+	}()
+
+	close(release)
+	if got := <-panicCh; got != "provider panic" {
+		t.Fatalf("recovered panic = %#v, want provider panic", got)
+	}
+	if err := <-errCh; err != nil {
+		t.Fatalf("waiter Authorize after panic: %v", err)
+	}
+	if got := req.Header.Get("Authorization"); got != "Bearer recovered" {
+		t.Fatalf("waiter Authorization = %q, want Bearer recovered", got)
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("provider calls = %d, want 2", calls.Load())
+	}
+}
+
 func TestCachedCredentialsValidation(t *testing.T) {
 	req := newCredentialTestRequest(t)
 	if err := CachedCredentials(nil, time.Minute).Authorize(context.Background(), req); !errors.Is(err, ErrInvalidClientConfig) {
