@@ -333,15 +333,20 @@ func isConsumedSetupKeyError(err error) bool {
 	if !errors.As(err, &apiErr) {
 		return false
 	}
+	code := strings.ToLower(strings.TrimSpace(apiErr.Code))
+	if code == "setup_key_consumed" || code == "bootstrap_setup_key_consumed" {
+		return true
+	}
 	text := strings.ToLower(strings.Join([]string{
 		apiErr.Code,
 		apiErr.Type,
 		apiErr.Title,
 		apiErr.Detail,
 	}, " "))
-	return strings.Contains(text, "already") ||
-		strings.Contains(text, "consumed") ||
-		strings.Contains(text, "used")
+	return strings.Contains(text, "setup key already consumed") ||
+		strings.Contains(text, "setup key already used") ||
+		strings.Contains(text, "one-time setup key already consumed") ||
+		strings.Contains(text, "one-time setup key already used")
 }
 
 func validateRegisteredAgentState(state *AgentState, now time.Time) error {

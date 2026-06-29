@@ -170,8 +170,7 @@ func setBearer(req *http.Request, token string) error {
 }
 
 func validateHeaderValue(value, label string) error {
-	for i := 0; i < len(value); i++ {
-		b := value[i]
+	for _, b := range []byte(value) {
 		// Authorization credentials do not need HTAB or obs-text, so keep this
 		// intentionally stricter than the generic HTTP header grammar.
 		if b < 0x20 || b > 0x7e {
@@ -261,7 +260,10 @@ func WithIssuerStatePath(path string) ClientOption {
 	})
 }
 
-// NewClient returns a qURL API client backed by a credential provider.
+// NewClient returns a qURL API client backed by a credential provider. It
+// validates built-in bearer credentials immediately, but does not eagerly
+// authorize arbitrary providers; custom provider errors surface on the request
+// that uses them.
 func NewClient(provider CredentialProvider, opts ...ClientOption) (*Client, error) {
 	if provider == nil {
 		return nil, fmt.Errorf("%w: credential provider must not be nil", ErrInvalidClientConfig)
@@ -990,7 +992,8 @@ func readCappedBody(r io.Reader, limit int, what string) ([]byte, error) {
 
 func drainResponseBody(body io.Reader) {
 	// The drain cap is best-effort connection reuse, not a second body-size
-	// limit. Larger error bodies are simply closed instead of fully drained.
+	// limit. After an oversized body, unread bytes may still prevent reuse; the
+	// precise failure is more important than keeping that one connection hot.
 	_, _ = io.Copy(io.Discard, io.LimitReader(body, maxAPIResponseDrainBytes))
 }
 
@@ -1046,8 +1049,8 @@ func apiErrorFromResponse(status int, body []byte) error {
 	// {"error": {...}} bodies or flat problem fields; preserve both shapes.
 	code := cmp.Or(parsed.Error.Code, parsed.Code)
 	apiType := cmp.Or(parsed.Error.Type, parsed.Type)
-	title := cmp.Or(parsed.Error.Title, parsed.Title)
-	detail := cmp.Or(parsed.Error.Detail, parsed.Detail, parsed.Error.Message, parsed.Message)
+	title := apiErrorTextField(cmp.Or(parsed.Error.Title, parsed.Title))
+	detail := apiErrorTextField(cmp.Or(parsed.Error.Detail, parsed.Detail, parsed.Error.Message, parsed.Message))
 	if code == "" && apiType == "" && title == "" && detail == "" {
 		detail = apiErrorBodySnippet(body)
 	}
@@ -1058,6 +1061,10 @@ func apiErrorFromResponse(status int, body []byte) error {
 		Title:      title,
 		Detail:     detail,
 	}
+}
+
+func apiErrorTextField(value string) string {
+	return apiErrorBodySnippet([]byte(value))
 }
 
 func apiErrorBodySnippet(body []byte) string {

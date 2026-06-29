@@ -601,6 +601,35 @@ func TestClient_APIErrorPlainTextBody(t *testing.T) {
 	}
 }
 
+func TestClient_APIErrorStructuredDetailIsCapped(t *testing.T) {
+	longDetail := strings.Repeat("x", maxAPIErrorSnippetBytes+20)
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusBadGateway)
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"error": map[string]string{
+				"detail": longDetail,
+			},
+		}); err != nil {
+			t.Fatalf("encode response: %v", err)
+		}
+	}))
+	defer api.Close()
+
+	client, err := NewClient(BearerToken("lv_test"), WithBaseURL(api.URL))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	_, err = client.ProtectURL(context.Background(), "https://example.com")
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("want *APIError, got %T: %v", err, err)
+	}
+	if len(apiErr.Detail) != maxAPIErrorSnippetBytes+len("...") || !strings.HasSuffix(apiErr.Detail, "...") {
+		t.Fatalf("APIError detail was not capped: len=%d suffix=%q", len(apiErr.Detail), apiErr.Detail[len(apiErr.Detail)-3:])
+	}
+}
+
 func TestClient_OversizedAPIErrorPreservesStatus(t *testing.T) {
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusBadGateway)

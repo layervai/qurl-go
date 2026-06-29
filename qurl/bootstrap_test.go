@@ -147,6 +147,28 @@ func TestBootstrapAgent_ReportsConsumedSetupKeyAfterIncompleteBootstrap(t *testi
 	}
 }
 
+func TestBootstrapAgent_DoesNotTreatRefusedAsConsumedSetupKey(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		fmt.Fprint(w, `{"error":{"code":"access_refused","detail":"access refused by bootstrap service"}}`)
+	}))
+	defer api.Close()
+
+	path := filepath.Join(t.TempDir(), "agent-state.json")
+	_, err := BootstrapAgent(context.Background(), "lv_setup_once", FileAgentState(path), WithBootstrapBaseURL(api.URL))
+	if errors.Is(err, ErrBootstrapSetupKeyConsumed) {
+		t.Fatalf("BootstrapAgent: access refused should not be ErrBootstrapSetupKeyConsumed: %v", err)
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("BootstrapAgent: want wrapped *APIError, got %T: %v", err, err)
+	}
+	if apiErr.Code != "access_refused" {
+		t.Fatalf("APIError code = %q, want access_refused", apiErr.Code)
+	}
+}
+
 func TestBootstrapAgent_ReturnsRegisteredStateWithoutNetwork(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "agent-state.json")
 	store := FileAgentState(path)
