@@ -663,7 +663,8 @@ type portalOptions struct {
 // least one minute as a client-side guardrail; the LayerV API remains the
 // source of truth for account limits. There is intentionally no SDK-side maximum
 // because an account may allow longer-lived portals. If omitted, the API applies
-// its default lifetime.
+// its default lifetime. Values are serialized with hours as the largest unit so
+// all API duration fields use the same h/m/s grammar.
 func ValidFor(d time.Duration) PortalOption {
 	return portalOptionFunc(func(o *portalOptions) error {
 		expiresIn, err := formatAPIDuration(d, time.Minute)
@@ -713,8 +714,8 @@ func MaxSessions(n int) PortalOption {
 // Durations must be at least one second and whole seconds. Omit this option to
 // use the server default; zero is rejected rather than treated as default. The
 // LayerV API remains the source of truth for account limits. Values are
-// serialized with hours as the largest unit, so 24*time.Hour is sent as "24h"
-// rather than "1d".
+// serialized with hours as the largest unit, so all API duration fields use the
+// same h/m/s grammar.
 func WithSessionDuration(d time.Duration) PortalOption {
 	return portalOptionFunc(func(o *portalOptions) error {
 		sessionDuration, err := formatAPIDurationWithMaxUnit(d, time.Second, time.Hour)
@@ -993,6 +994,11 @@ func validateClientCredentialProvider(provider CredentialProvider, baseURL strin
 		if err := validateCredentials(context.Background(), p, baseURL); err != nil {
 			return err
 		}
+	case *cachedCredentialProvider:
+		if p == nil {
+			return fmt.Errorf("%w: credential provider must not be nil", ErrInvalidClientConfig)
+		}
+		return validateClientCredentialProvider(p.provider, baseURL)
 	}
 	return nil
 }
@@ -1055,6 +1061,9 @@ func doAuthorizedJSON(ctx context.Context, httpClient HTTPDoer, baseURL string, 
 	if out == nil {
 		return nil
 	}
+	// Current API endpoints that pass out expect an envelope body. Future 204
+	// success endpoints should call this helper with out == nil or split to a
+	// no-body variant instead of weakening this fail-closed decode path.
 	if len(bytes.TrimSpace(respBody)) == 0 {
 		return fmt.Errorf("qurl: empty API response body")
 	}
@@ -1201,7 +1210,7 @@ func apiErrorBodySnippet(body []byte) string {
 }
 
 func formatAPIDuration(d time.Duration, minDuration time.Duration) (string, error) {
-	return formatAPIDurationWithMaxUnit(d, minDuration, 24*time.Hour)
+	return formatAPIDurationWithMaxUnit(d, minDuration, time.Hour)
 }
 
 func formatAPIDurationWithMaxUnit(d time.Duration, minDuration time.Duration, maxUnit time.Duration) (string, error) {

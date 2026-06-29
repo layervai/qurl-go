@@ -615,6 +615,9 @@ func TestClient_Validation(t *testing.T) {
 	if _, err := NewClient(BearerToken("lv_test\xff"), WithBaseURL("https://api.example.com")); !errors.Is(err, ErrInvalidClientConfig) {
 		t.Fatalf("high-byte bearer header: want ErrInvalidClientConfig, got %v", err)
 	}
+	if _, err := NewClient(CachedCredentials(BearerToken(""), time.Minute), WithBaseURL("https://api.example.com")); !errors.Is(err, ErrInvalidClientConfig) {
+		t.Fatalf("cached blank bearer: want ErrInvalidClientConfig, got %v", err)
+	}
 	if _, err := NewClient(BearerToken("lv_test"), WithBaseURL("ftp://api.example.com")); !errors.Is(err, ErrInvalidClientConfig) {
 		t.Fatalf("bad base URL: want ErrInvalidClientConfig, got %v", err)
 	}
@@ -978,8 +981,8 @@ func TestFormatAPIDuration(t *testing.T) {
 	}{
 		{name: "seconds", in: 30 * time.Second, min: time.Second, want: "30s"},
 		{name: "minutes", in: 5 * time.Minute, min: time.Minute, want: "5m"},
-		{name: "hours", in: 24 * time.Hour, min: time.Minute, want: "1d"},
-		{name: "days", in: 7 * 24 * time.Hour, min: time.Minute, want: "7d"},
+		{name: "hours", in: 24 * time.Hour, min: time.Minute, want: "24h"},
+		{name: "long hours", in: 7 * 24 * time.Hour, min: time.Minute, want: "168h"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
