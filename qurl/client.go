@@ -113,13 +113,79 @@ type fileCredentialProvider struct {
 // rotated local credentials are picked up without rebuilding the client. Most
 // applications should use OpenClient; use FileCredentials only when wiring a
 // custom runtime path. High-throughput callers that rarely rotate credentials
-// can wrap their own caching CredentialProvider. The default favors hot-reload
+// can wrap it with CachedCredentials. The default favors hot-reload
 // correctness over syscall minimization. The context passed to Authorize cannot
 // interrupt local filesystem I/O after it has started. If the state file
 // contains an "authorization" field, its value is trusted as the raw
 // Authorization header.
 func FileCredentials(path string) CredentialProvider {
 	return fileCredentialProvider{path: path}
+}
+
+// CachedCredentials caches a reusable Authorization header produced by provider
+// for ttl. It is meant for FileCredentials and other providers whose
+// Authorization value is reusable across requests. Do not wrap providers that
+// sign request-specific fields or set non-Authorization headers; those providers
+// should run on every request.
+func CachedCredentials(provider CredentialProvider, ttl time.Duration) CredentialProvider {
+	return newCachedCredentials(provider, ttl, time.Now)
+}
+
+func newCachedCredentials(provider CredentialProvider, ttl time.Duration, now func() time.Time) CredentialProvider {
+	if now == nil {
+		now = time.Now
+	}
+	return &cachedCredentialProvider{
+		provider: provider,
+		ttl:      ttl,
+		now:      now,
+	}
+}
+
+type cachedCredentialProvider struct {
+	provider CredentialProvider
+	ttl      time.Duration
+	now      func() time.Time
+
+	mu            sync.Mutex
+	authorization string
+	expiresAt     time.Time
+}
+
+func (p *cachedCredentialProvider) Authorize(ctx context.Context, req *http.Request) error {
+	if err := validateContext(ctx, ErrInvalidClientConfig); err != nil {
+		return err
+	}
+	if req == nil {
+		return fmt.Errorf("%w: request must not be nil", ErrInvalidClientConfig)
+	}
+	if p.provider == nil {
+		return fmt.Errorf("%w: credential provider must not be nil", ErrInvalidClientConfig)
+	}
+	if p.ttl <= 0 {
+		return fmt.Errorf("%w: credential cache ttl must be positive", ErrInvalidClientConfig)
+	}
+
+	now := p.now()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.authorization != "" && now.Before(p.expiresAt) {
+		req.Header.Set("Authorization", p.authorization)
+		return nil
+	}
+	if err := p.provider.Authorize(ctx, req); err != nil {
+		return err
+	}
+	authorization := req.Header.Get("Authorization")
+	if strings.TrimSpace(authorization) == "" {
+		return fmt.Errorf("%w: cached credential provider did not set Authorization", ErrInvalidClientConfig)
+	}
+	if err := validateHeaderValue(authorization, "authorization header"); err != nil {
+		return err
+	}
+	p.authorization = authorization
+	p.expiresAt = now.Add(p.ttl)
+	return nil
 }
 
 func (p fileCredentialProvider) Authorize(ctx context.Context, req *http.Request) error {
@@ -266,7 +332,8 @@ func WithIssuerStatePath(path string) ClientOption {
 // NewClient returns a qURL API client backed by a credential provider. It
 // validates built-in bearer credentials immediately, but does not eagerly
 // authorize arbitrary providers; custom provider errors surface on the request
-// that uses them.
+// that uses them. Use OpenClientContext when startup code needs eager validation
+// for LayerV's default file-backed issuer credential.
 func NewClient(provider CredentialProvider, opts ...ClientOption) (*Client, error) {
 	if provider == nil {
 		return nil, fmt.Errorf("%w: credential provider must not be nil", ErrInvalidClientConfig)
@@ -470,7 +537,9 @@ func WithAlias(alias string) ResourceOption {
 	})
 }
 
-// ProtectURL creates or reuses a LayerV resource for targetURL.
+// ProtectURL creates or reuses a LayerV resource for targetURL. The SDK rejects
+// malformed URLs and embedded credentials; LayerV validates and registers the
+// target when the request reaches the platform.
 func (c *Client) ProtectURL(ctx context.Context, targetURL string, opts ...ResourceOption) (*Resource, error) {
 	if c == nil {
 		return nil, fmt.Errorf("%w: nil client", ErrInvalidClientConfig)

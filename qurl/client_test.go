@@ -474,6 +474,65 @@ func TestClient_FileCredentialsRespectsCanceledContext(t *testing.T) {
 	}
 }
 
+func TestCachedCredentialsCachesReusableAuthorizationHeader(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	var calls atomic.Int32
+	provider := CredentialProviderFunc(func(_ context.Context, req *http.Request) error {
+		req.Header.Set("Authorization", fmt.Sprintf("Bearer cached_%d", calls.Add(1)))
+		return nil
+	})
+	cached := newCachedCredentials(provider, time.Minute, func() time.Time {
+		return now
+	})
+
+	req1 := newCredentialTestRequest(t)
+	if err := cached.Authorize(context.Background(), req1); err != nil {
+		t.Fatalf("first Authorize: %v", err)
+	}
+	if got, want := req1.Header.Get("Authorization"), "Bearer cached_1"; got != want {
+		t.Fatalf("first Authorization = %q, want %q", got, want)
+	}
+
+	req2 := newCredentialTestRequest(t)
+	if err := cached.Authorize(context.Background(), req2); err != nil {
+		t.Fatalf("second Authorize: %v", err)
+	}
+	if got, want := req2.Header.Get("Authorization"), "Bearer cached_1"; got != want {
+		t.Fatalf("cached Authorization = %q, want %q", got, want)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("provider calls = %d, want 1 before ttl expiry", calls.Load())
+	}
+
+	now = now.Add(time.Minute + time.Second)
+	req3 := newCredentialTestRequest(t)
+	if err := cached.Authorize(context.Background(), req3); err != nil {
+		t.Fatalf("third Authorize: %v", err)
+	}
+	if got, want := req3.Header.Get("Authorization"), "Bearer cached_2"; got != want {
+		t.Fatalf("refreshed Authorization = %q, want %q", got, want)
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("provider calls = %d, want 2 after ttl expiry", calls.Load())
+	}
+}
+
+func TestCachedCredentialsValidation(t *testing.T) {
+	req := newCredentialTestRequest(t)
+	if err := CachedCredentials(nil, time.Minute).Authorize(context.Background(), req); !errors.Is(err, ErrInvalidClientConfig) {
+		t.Fatalf("nil provider: want ErrInvalidClientConfig, got %v", err)
+	}
+	if err := CachedCredentials(BearerToken("lv_test"), 0).Authorize(context.Background(), req); !errors.Is(err, ErrInvalidClientConfig) {
+		t.Fatalf("zero ttl: want ErrInvalidClientConfig, got %v", err)
+	}
+	provider := CredentialProviderFunc(func(context.Context, *http.Request) error {
+		return nil
+	})
+	if err := CachedCredentials(provider, time.Minute).Authorize(context.Background(), req); !errors.Is(err, ErrInvalidClientConfig) {
+		t.Fatalf("missing Authorization: want ErrInvalidClientConfig, got %v", err)
+	}
+}
+
 func TestClient_Validation(t *testing.T) {
 	if _, err := NewClient(nil); !errors.Is(err, ErrInvalidClientConfig) {
 		t.Fatalf("nil credentials: want ErrInvalidClientConfig, got %v", err)
@@ -885,4 +944,13 @@ func assertJSONField(t *testing.T, body map[string]any, key string, want any) {
 	if got != want {
 		t.Fatalf("body[%q] = %#v, want %#v", key, got, want)
 	}
+}
+
+func newCredentialTestRequest(t *testing.T) *http.Request {
+	t.Helper()
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://api.example.com", http.NoBody)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	return req
 }
