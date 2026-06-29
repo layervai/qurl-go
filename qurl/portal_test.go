@@ -275,6 +275,13 @@ func TestInterpretReply_CookieChallenge(t *testing.T) {
 	}
 }
 
+func TestInterpretReply_NilReply(t *testing.T) {
+	_, err := interpretReply(nil)
+	if !errors.Is(err, ErrMalformedReply) {
+		t.Fatalf("nil reply: want ErrMalformedReply, got %v", err)
+	}
+}
+
 func TestInterpretReply_SuccessButNoResourceURL(t *testing.T) {
 	// A success ACK with no resource URL (here an empty body -> zero-value
 	// success ACK) is not actionable: the caller has nothing to reach. It must

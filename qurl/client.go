@@ -150,6 +150,7 @@ type cachedCredentialProvider struct {
 	mu            sync.Mutex
 	authorization string
 	expiresAt     time.Time
+	refreshDone   chan struct{}
 }
 
 func (p *cachedCredentialProvider) Authorize(ctx context.Context, req *http.Request) error {
@@ -166,26 +167,62 @@ func (p *cachedCredentialProvider) Authorize(ctx context.Context, req *http.Requ
 		return fmt.Errorf("%w: credential cache ttl must be positive", ErrInvalidClientConfig)
 	}
 
-	now := p.now()
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.authorization != "" && now.Before(p.expiresAt) {
-		req.Header.Set("Authorization", p.authorization)
-		return nil
+	for {
+		now := p.now()
+		p.mu.Lock()
+		if p.authorization != "" && now.Before(p.expiresAt) {
+			req.Header.Set("Authorization", p.authorization)
+			p.mu.Unlock()
+			return nil
+		}
+		if p.refreshDone == nil {
+			p.refreshDone = make(chan struct{})
+			p.mu.Unlock()
+			return p.refresh(ctx, req)
+		}
+		done := p.refreshDone
+		p.mu.Unlock()
+
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
+}
+
+func (p *cachedCredentialProvider) refresh(ctx context.Context, req *http.Request) error {
 	if err := p.provider.Authorize(ctx, req); err != nil {
+		p.finishRefresh("", false)
 		return err
 	}
 	authorization := req.Header.Get("Authorization")
 	if strings.TrimSpace(authorization) == "" {
+		p.finishRefresh("", false)
 		return fmt.Errorf("%w: cached credential provider did not set Authorization", ErrInvalidClientConfig)
 	}
 	if err := validateHeaderValue(authorization, "authorization header"); err != nil {
+		p.finishRefresh("", false)
 		return err
 	}
-	p.authorization = authorization
-	p.expiresAt = now.Add(p.ttl)
+	p.finishRefresh(authorization, true)
 	return nil
+}
+
+func (p *cachedCredentialProvider) finishRefresh(authorization string, ok bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if ok {
+		// Set the expiry after the wrapped provider returns so slow refreshes do
+		// not consume the caller's full TTL while I/O is in flight.
+		p.authorization = authorization
+		p.expiresAt = p.now().Add(p.ttl)
+	}
+	done := p.refreshDone
+	p.refreshDone = nil
+	if done != nil {
+		close(done)
+	}
 }
 
 func (p fileCredentialProvider) Authorize(ctx context.Context, req *http.Request) error {
@@ -436,7 +473,8 @@ func (c *Client) ResourceByID(id string) *Resource {
 // connector. Use this when qURL Connector already protects the service; do not
 // call ProtectURL again for the same service. The LayerV API performs the slug
 // lookup; when the response includes an alias, the SDK confirms it matches
-// connectorID before binding the returned resource.
+// connectorID before binding the returned resource. If an older API response
+// omits alias, the SDK treats the server-side slug filter as authoritative.
 func (c *Client) ConnectorResource(ctx context.Context, connectorID string) (*Resource, error) {
 	if c == nil {
 		return nil, fmt.Errorf("%w: nil client", ErrInvalidClientConfig)

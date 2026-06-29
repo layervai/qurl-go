@@ -166,6 +166,9 @@ func (e *relayErrorView) As(target any) bool {
 // an error. A cookie-challenge (server overload) is surfaced as a typed retryable
 // error; a non-ACK is unexpected; an ACK with a server deny carries the errCode.
 func interpretReply(reply *relayknock.Reply) (*ResourceHandle, error) {
+	if reply == nil {
+		return nil, fmt.Errorf("%w: empty qURL platform reply", ErrMalformedReply)
+	}
 	if reply.IsCookieChallenge() {
 		return nil, ErrServerOverloaded
 	}

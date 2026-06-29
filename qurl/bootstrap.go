@@ -343,6 +343,8 @@ func isConsumedSetupKeyError(err error) bool {
 	if code == "setup_key_consumed" || code == "bootstrap_setup_key_consumed" {
 		return true
 	}
+	// Structured codes are the contract. These phrases are a best-effort bridge
+	// for older bootstrap errors that carried only human text.
 	text := strings.ToLower(strings.Join([]string{
 		apiErr.Code,
 		apiErr.Type,

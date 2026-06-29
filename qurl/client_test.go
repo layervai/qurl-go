@@ -517,6 +517,51 @@ func TestCachedCredentialsCachesReusableAuthorizationHeader(t *testing.T) {
 	}
 }
 
+func TestCachedCredentialsSingleflightsRefresh(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	provider := CredentialProviderFunc(func(_ context.Context, req *http.Request) error {
+		if calls.Add(1) == 1 {
+			close(started)
+		}
+		<-release
+		req.Header.Set("Authorization", "Bearer refreshed")
+		return nil
+	})
+	cached := CachedCredentials(provider, time.Minute)
+
+	req1 := newCredentialTestRequest(t)
+	errCh1 := make(chan error, 1)
+	go func() {
+		errCh1 <- cached.Authorize(context.Background(), req1)
+	}()
+	<-started
+
+	req2 := newCredentialTestRequest(t)
+	errCh2 := make(chan error, 1)
+	go func() {
+		errCh2 <- cached.Authorize(context.Background(), req2)
+	}()
+
+	close(release)
+	if err := <-errCh1; err != nil {
+		t.Fatalf("first Authorize: %v", err)
+	}
+	if err := <-errCh2; err != nil {
+		t.Fatalf("second Authorize: %v", err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("provider calls = %d, want 1", calls.Load())
+	}
+	if got := req1.Header.Get("Authorization"); got != "Bearer refreshed" {
+		t.Fatalf("first Authorization = %q", got)
+	}
+	if got := req2.Header.Get("Authorization"); got != "Bearer refreshed" {
+		t.Fatalf("second Authorization = %q", got)
+	}
+}
+
 func TestCachedCredentialsValidation(t *testing.T) {
 	req := newCredentialTestRequest(t)
 	if err := CachedCredentials(nil, time.Minute).Authorize(context.Background(), req); !errors.Is(err, ErrInvalidClientConfig) {
