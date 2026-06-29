@@ -100,6 +100,11 @@ type Secret struct {
 	QurlUserPrivateKeyB64 string `json:"qurl_user_private_key_b64"`
 }
 
+var (
+	_ = qv2.Claims(Claims{})
+	_ = qv2.Secret(Secret{})
+)
+
 // Fragment is a parsed, verified qURL link: its Claims and Secret plus the exact
 // signed bytes. VerifyLink returns one.
 type Fragment struct {

@@ -533,7 +533,9 @@ type portalOptions struct {
 
 // ValidFor sets how long the qURL link should be valid. The SDK requires at
 // least one minute as a client-side guardrail; the LayerV API remains
-// authoritative for policy. If omitted, the API applies its default lifetime.
+// authoritative for policy. There is intentionally no SDK-side maximum because
+// account policy may allow longer-lived portals. If omitted, the API applies its
+// default lifetime.
 func ValidFor(d time.Duration) PortalOption {
 	return portalOptionFunc(func(o *portalOptions) error {
 		expiresIn, err := formatAPIDuration(d, time.Minute)

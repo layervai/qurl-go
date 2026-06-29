@@ -32,7 +32,10 @@ type NHPServerPeerInfo struct {
 	PublicKeyB64 string `json:"public_key_b64"`
 	Host         string `json:"host"`
 	Port         int    `json:"port"`
-	ExpireTime   int64  `json:"expire_time"`
+	// ExpireTime is a Unix timestamp for finite peer leases. The current
+	// LayerV bootstrap flow returns 0 for durable peers; a nonzero expired peer
+	// is rejected so callers do not continue with stale routing state.
+	ExpireTime int64 `json:"expire_time"`
 }
 
 // AgentState is the protected local identity created during bootstrap.
@@ -209,6 +212,11 @@ func WithVersion(version string) BootstrapOption {
 // BootstrapAgent again retries registration with the same public key. That
 // lost-response retry depends on LayerV treating repeated registration for the
 // same public key as idempotent.
+//
+// Registered state is validated on load. LayerV bootstrap peers are normally
+// durable (ExpireTime is 0); if a future peer record carries a finite expiry and
+// has expired, BootstrapAgent fails closed so the caller can run the LayerV
+// setup or refresh flow instead of using stale routing state.
 //
 // Call BootstrapAgent from one setup path at a time for a given store. The SDK
 // makes each file write atomic, but it does not lock across concurrent callers or
