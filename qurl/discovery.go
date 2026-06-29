@@ -28,10 +28,9 @@ import (
 // expired, downgraded, missing a trust mode, or carrying empty/invalid config all
 // return an error, never a partial result.
 //
-// Discovery trust policy is intentionally configurable: signed vs pinned
-// manifests, key rotation, and durable downgrade state are platform policy
-// choices. This implementation provides the fail-closed mechanism behind those
-// choices.
+// Discovery trust configuration is intentionally flexible: signed vs pinned
+// manifests, key rotation, and durable downgrade state are deployment choices.
+// This implementation provides the fail-closed mechanism behind those choices.
 
 // ManifestEnvelope is the fetched discovery document. The signed/pinned MANIFEST
 // itself is carried as opaque base64url (ManifestB64) — exactly like a qURL link fragment
@@ -89,10 +88,10 @@ type FetcherFunc func(ctx context.Context) ([]byte, error)
 // Fetch calls the wrapped function.
 func (f FetcherFunc) Fetch(ctx context.Context) ([]byte, error) { return f(ctx) }
 
-// DiscoveryConfig configures a DiscoveryProvider's fetch source and TRUST POLICY.
-// The trust policy is fail-closed by construction: a provider that authenticates no
-// way (no pin, no signing keys) is rejected at construction, and a manifest that
-// satisfies no configured mode is rejected at resolve.
+// DiscoveryConfig configures a DiscoveryProvider's fetch source and trust anchors.
+// The trust configuration is fail-closed by construction: a provider that
+// authenticates no way (no pin, no signing keys) is rejected at construction, and
+// a manifest that satisfies no configured mode is rejected at resolve.
 type DiscoveryConfig struct {
 	// Fetcher fetches the raw envelope bytes. REQUIRED.
 	Fetcher ManifestFetcher
@@ -120,7 +119,7 @@ type DiscoveryConfig struct {
 	// authenticate requires EVERY configured anchor that is present to validate (a pin,
 	// once configured, must match; a signature, once present and keyed, must verify), so
 	// "default false" relaxes which anchor is REQUIRED, never whether a present anchor may
-	// fail. Platforms can require signatures when policy demands it.
+	// fail. Deployments can require signatures when they need that stricter mode.
 	RequireSignature bool
 
 	// MinVersion is the initial downgrade floor: a manifest with Version < MinVersion is
@@ -132,7 +131,7 @@ type DiscoveryConfig struct {
 	// The advanced floor is IN-MEMORY only: a process restart resets it to MinVersion, so
 	// rollback protection across restarts is bounded by MinVersion and the manifest's
 	// not_after, not by the highest version a previous process accepted. Durable
-	// rollback state is a platform policy choice; pin a high MinVersion when
+	// rollback state is a deployment choice; pin a high MinVersion when
 	// cross-restart anti-rollback matters.
 	MinVersion int64
 
@@ -206,7 +205,7 @@ var (
 // recently-authenticated, still-in-window manifest exists. This is a deliberate
 // fail-closed-over-availability stance for the mechanism. An application expecting high
 // open volume should wrap this in a TTL cache that itself fails closed once not_after
-// (or the TTL) elapses; cache windows are a platform policy choice.
+// (or the TTL) elapses; cache windows are a deployment choice.
 type DiscoveryProvider struct {
 	cfg DiscoveryConfig
 
@@ -347,8 +346,8 @@ func (p *DiscoveryProvider) Resolve(ctx context.Context) (*TrustStore, *RelayAll
 //
 // So a manifest that is unpinned-or-pin-mismatched, or that carries a signature that
 // does not verify, or that satisfies no anchor at all, is rejected. This is the
-// safe-default MECHANISM; whether the production policy is pin-only, signed-only, or
-// pin-AND-signed (and the exact precedence between them) is a platform policy choice.
+// safe-default MECHANISM; whether production uses pin-only, signed-only, or
+// pin-AND-signed (and the exact precedence between them) is a deployment choice.
 // SigB64/Kid ride OUTSIDE the pinned/signed preimage, so an
 // attacker who cannot alter the manifest bytes also cannot forge acceptance; corrupting
 // a present signature only makes an otherwise-good manifest fail closed (deny), never

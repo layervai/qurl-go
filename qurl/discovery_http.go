@@ -36,7 +36,7 @@ const defaultFetchTimeout = 30 * time.Second
 // so following a redirect can never admit a bad manifest — but refusing one keeps
 // the transport posture honest and avoids surprising cross-origin fetches. An
 // application that genuinely needs a CDN hop injects its own Client with a
-// redirect policy it controls.
+// redirect behavior it controls.
 var defaultFetchClient = &http.Client{
 	Timeout:       defaultFetchTimeout,
 	CheckRedirect: refuseRedirects,
@@ -84,7 +84,7 @@ func NewHTTPFetcher(rawURL string, client HTTPDoer) (*HTTPFetcher, error) {
 // followed: the client returns the 3xx response as-is, which is then rejected here as
 // a non-2xx status. Fetch does NOT authenticate the bytes; the provider does.
 //
-// An injected non-nil Client owns its own timeout AND redirect policy — Fetch cannot
+// An injected non-nil Client owns its own timeout AND redirect behavior — Fetch cannot
 // re-impose either on it, so a caller supplying a Client is responsible for both.
 //
 // Defense in depth: Fetch re-checks the URL scheme at request time and refuses a

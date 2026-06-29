@@ -114,6 +114,39 @@ func TestBootstrapAgent_RetriesIncompleteBootstrapWithSavedKeypair(t *testing.T)
 	}
 }
 
+func TestBootstrapAgent_ReportsConsumedSetupKeyAfterIncompleteBootstrap(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/agent/bootstrap" {
+			t.Fatalf("request = %s %s, want POST /v1/agent/bootstrap", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		fmt.Fprint(w, `{"error":{"code":"setup_key_consumed","detail":"setup key already consumed"}}`)
+	}))
+	defer api.Close()
+
+	path := filepath.Join(t.TempDir(), "agent-state.json")
+	_, err := BootstrapAgent(context.Background(), "lv_setup_once", FileAgentState(path), WithBootstrapBaseURL(api.URL))
+	if !errors.Is(err, ErrBootstrapSetupKeyConsumed) {
+		t.Fatalf("BootstrapAgent: want ErrBootstrapSetupKeyConsumed, got %v", err)
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("BootstrapAgent: want wrapped *APIError, got %T: %v", err, err)
+	}
+	if apiErr.Code != "setup_key_consumed" {
+		t.Fatalf("APIError code = %q, want setup_key_consumed", apiErr.Code)
+	}
+
+	state, loadErr := FileAgentState(path).LoadAgentState(context.Background())
+	if loadErr != nil {
+		t.Fatalf("LoadAgentState: %v", loadErr)
+	}
+	if state.PublicKeyB64 == "" || state.RegisteredAt != nil {
+		t.Fatalf("incomplete saved state = %#v", state)
+	}
+}
+
 func TestBootstrapAgent_ReturnsRegisteredStateWithoutNetwork(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "agent-state.json")
 	store := FileAgentState(path)
@@ -141,6 +174,25 @@ func TestBootstrapAgent_ReturnsRegisteredStateWithoutNetwork(t *testing.T) {
 	}
 	if second.AgentID != first.AgentID || second.PublicKeyB64 != first.PublicKeyB64 || second.NHPPeer == nil {
 		t.Fatalf("second state = %#v, first = %#v", second, first)
+	}
+}
+
+func TestBootstrapAgent_RejectsMismatchedResponseAgentID(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"data":{"agent_id":"server-agent","registered_at":"2026-06-28T20:00:00Z","nhp_server_peer":{"public_key_b64":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","host":"nhp.layerv.ai","port":62206,"expire_time":0}}}`)
+	}))
+	defer api.Close()
+
+	path := filepath.Join(t.TempDir(), "agent-state.json")
+	_, err := BootstrapAgent(context.Background(),
+		"lv_setup_once",
+		FileAgentState(path),
+		WithBootstrapBaseURL(api.URL),
+		WithAgentID("requested-agent"),
+	)
+	if !errors.Is(err, ErrInvalidBootstrapConfig) || !strings.Contains(err.Error(), "does not match requested agent id") {
+		t.Fatalf("BootstrapAgent: want agent id mismatch ErrInvalidBootstrapConfig, got %v", err)
 	}
 }
 

@@ -91,3 +91,23 @@ func validatePrivateStateDir(dir, label string, invalidConfig, insecurePermissio
 	}
 	return nil
 }
+
+func syncPrivateStateDir(dir, label string) error {
+	root := filepath.Dir(dir)
+	name := filepath.Base(dir)
+	if root == dir {
+		name = "."
+	}
+	file, err := os.OpenInRoot(root, name)
+	if err != nil {
+		return fmt.Errorf("qurl: open %s dir for sync: %w", label, err)
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("qurl: sync %s dir: %w", label, err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("qurl: close %s dir: %w", label, err)
+	}
+	return nil
+}

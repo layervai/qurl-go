@@ -27,6 +27,11 @@ var ErrAgentStateNotFound = errors.New("qurl: agent state not found")
 // readable by group or other users.
 var ErrInsecureAgentStatePermissions = errors.New("qurl: insecure agent state permissions")
 
+// ErrBootstrapSetupKeyConsumed is returned when an incomplete local bootstrap
+// retry is rejected because the one-time setup key appears to have already been
+// used. Run the LayerV setup flow again or restore the completed AgentState.
+var ErrBootstrapSetupKeyConsumed = errors.New("qurl: bootstrap setup key already consumed")
+
 // NHPServerPeerInfo is the LayerV peer returned by the bootstrap service.
 type NHPServerPeerInfo struct {
 	PublicKeyB64 string `json:"public_key_b64"`
@@ -122,6 +127,9 @@ func (s fileAgentStateStore) SaveAgentState(_ context.Context, state *AgentState
 	if err := os.Rename(tmpName, s.path); err != nil {
 		return fmt.Errorf("qurl: replace agent state: %w", err)
 	}
+	if err := syncPrivateStateDir(dir, "agent state"); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -158,7 +166,7 @@ func WithBootstrapBaseURL(rawURL string) BootstrapOption {
 // WithBootstrapHTTPClient injects the HTTP client used for bootstrap requests.
 // Without this option, BootstrapAgent uses a shared client with a 30-second
 // timeout and no redirect following; injected clients own their own timeout and
-// redirect policy. Callers can still set shorter deadlines on ctx.
+// redirect behavior. Callers can still set shorter deadlines on ctx.
 func WithBootstrapHTTPClient(client HTTPDoer) BootstrapOption {
 	return bootstrapOptionFunc(func(o *bootstrapOptions) error {
 		if client == nil {
@@ -211,7 +219,10 @@ func WithVersion(version string) BootstrapOption {
 // keypair before receiving the API response, RegisteredAt is nil and calling
 // BootstrapAgent again retries registration with the same public key. That
 // lost-response retry depends on LayerV treating repeated registration for the
-// same public key as idempotent.
+// same public key as idempotent. If LayerV instead reports that the one-time
+// setup key was already consumed before this machine saved the completed
+// AgentState, BootstrapAgent returns ErrBootstrapSetupKeyConsumed so setup code
+// can ask for a fresh setup flow instead of retrying forever.
 //
 // Registered state is validated on load. LayerV bootstrap peers are normally
 // durable (ExpireTime is 0); if a future peer record carries a finite expiry and
@@ -273,10 +284,16 @@ func BootstrapAgent(ctx context.Context, setupKey string, store AgentStateStore,
 	}
 	var env apiEnvelope[agentBootstrapResponse]
 	if err := doAuthorizedJSON(ctx, cfg.httpClient, cfg.baseURL, BearerToken(setupKey).Authorize, http.MethodPost, "/v1/agent/bootstrap", reqBody, &env); err != nil {
+		if isConsumedSetupKeyError(err) {
+			return nil, fmt.Errorf("%w: setup key was rejected after local keypair was saved; rerun LayerV setup or restore completed agent state: %w", ErrBootstrapSetupKeyConsumed, err)
+		}
 		return nil, err
 	}
 	if err := env.Data.validate(time.Now()); err != nil {
 		return nil, err
+	}
+	if cfg.agentID != "" && env.Data.AgentID != cfg.agentID {
+		return nil, fmt.Errorf("%w: bootstrap response agent id %q does not match requested agent id %q", ErrInvalidBootstrapConfig, env.Data.AgentID, cfg.agentID)
 	}
 
 	state.AgentID = env.Data.AgentID
@@ -309,6 +326,22 @@ func (r agentBootstrapResponse) validate(now time.Time) error {
 		return fmt.Errorf("%w: bootstrap response missing registration time", ErrInvalidBootstrapConfig)
 	}
 	return validateNHPServerPeerInfo(r.NHPPeer, now, "bootstrap response")
+}
+
+func isConsumedSetupKeyError(err error) bool {
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	text := strings.ToLower(strings.Join([]string{
+		apiErr.Code,
+		apiErr.Type,
+		apiErr.Title,
+		apiErr.Detail,
+	}, " "))
+	return strings.Contains(text, "already") ||
+		strings.Contains(text, "consumed") ||
+		strings.Contains(text, "used")
 }
 
 func validateRegisteredAgentState(state *AgentState, now time.Time) error {

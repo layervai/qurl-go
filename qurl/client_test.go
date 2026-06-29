@@ -365,7 +365,7 @@ func TestNewClientUsesDefaultHTTPTimeout(t *testing.T) {
 		t.Fatalf("default HTTP timeout = %s, want %s", httpClient.Timeout, defaultAPIHTTPTimeout)
 	}
 	if err := httpClient.CheckRedirect(nil, nil); !errors.Is(err, http.ErrUseLastResponse) {
-		t.Fatalf("default redirect policy = %v, want http.ErrUseLastResponse", err)
+		t.Fatalf("default redirect behavior = %v, want http.ErrUseLastResponse", err)
 	}
 }
 
@@ -443,6 +443,18 @@ func TestClient_Validation(t *testing.T) {
 	if _, err := NewClient(nil); !errors.Is(err, ErrInvalidClientConfig) {
 		t.Fatalf("nil credentials: want ErrInvalidClientConfig, got %v", err)
 	}
+	if _, err := NewClient(CredentialProviderFunc(nil)); !errors.Is(err, ErrInvalidClientConfig) {
+		t.Fatalf("nil credential func: want ErrInvalidClientConfig, got %v", err)
+	}
+	if _, err := NewClient(BearerToken(""), WithBaseURL("https://api.example.com")); !errors.Is(err, ErrInvalidClientConfig) {
+		t.Fatalf("blank bearer: want ErrInvalidClientConfig, got %v", err)
+	}
+	if _, err := NewClient(BearerToken("lv_test\nbad"), WithBaseURL("https://api.example.com")); !errors.Is(err, ErrInvalidClientConfig) {
+		t.Fatalf("bad bearer header: want ErrInvalidClientConfig, got %v", err)
+	}
+	if _, err := NewClient(BearerToken("lv_test\xff"), WithBaseURL("https://api.example.com")); !errors.Is(err, ErrInvalidClientConfig) {
+		t.Fatalf("high-byte bearer header: want ErrInvalidClientConfig, got %v", err)
+	}
 	if _, err := NewClient(BearerToken("lv_test"), WithBaseURL("ftp://api.example.com")); !errors.Is(err, ErrInvalidClientConfig) {
 		t.Fatalf("bad base URL: want ErrInvalidClientConfig, got %v", err)
 	}
@@ -465,27 +477,6 @@ func TestClient_Validation(t *testing.T) {
 	client, err := NewClient(BearerToken("lv_test"), WithBaseURL("https://api.example.com"))
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
-	}
-	blankClient, err := NewClient(BearerToken(""), WithBaseURL("https://api.example.com"))
-	if err != nil {
-		t.Fatalf("NewClient blank bearer: %v", err)
-	}
-	if _, err := blankClient.ProtectURL(context.Background(), "https://example.com"); !errors.Is(err, ErrInvalidClientConfig) {
-		t.Fatalf("blank bearer: want ErrInvalidClientConfig, got %v", err)
-	}
-	badHeaderClient, err := NewClient(BearerToken("lv_test\nbad"), WithBaseURL("https://api.example.com"))
-	if err != nil {
-		t.Fatalf("NewClient bad bearer: %v", err)
-	}
-	if _, err := badHeaderClient.ProtectURL(context.Background(), "https://example.com"); !errors.Is(err, ErrInvalidClientConfig) {
-		t.Fatalf("bad bearer header: want ErrInvalidClientConfig, got %v", err)
-	}
-	highByteHeaderClient, err := NewClient(BearerToken("lv_test\xff"), WithBaseURL("https://api.example.com"))
-	if err != nil {
-		t.Fatalf("NewClient high-byte bearer: %v", err)
-	}
-	if _, err := highByteHeaderClient.ProtectURL(context.Background(), "https://example.com"); !errors.Is(err, ErrInvalidClientConfig) {
-		t.Fatalf("high-byte bearer header: want ErrInvalidClientConfig, got %v", err)
 	}
 	if _, err := client.ProtectURL(context.Background(), "ftp://example.com"); !errors.Is(err, ErrInvalidResourceRequest) {
 		t.Fatalf("bad target URL: want ErrInvalidResourceRequest, got %v", err)

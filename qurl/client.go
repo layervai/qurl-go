@@ -233,7 +233,7 @@ func WithBaseURL(rawURL string) ClientOption {
 
 // WithHTTPClient injects the HTTP client used for API requests. Without this
 // option, the SDK uses a shared client with a 30-second timeout and no redirect
-// following; injected clients own their own timeout and redirect policy. Callers
+// following; injected clients own their own timeout and redirect behavior. Callers
 // can still set shorter per-call deadlines on ctx.
 func WithHTTPClient(client HTTPDoer) ClientOption {
 	return clientOptionFunc(func(o *clientOptions) error {
@@ -269,6 +269,9 @@ func NewClient(provider CredentialProvider, opts ...ClientOption) (*Client, erro
 	}
 	if cfg.issuerStatePath != "" {
 		return nil, fmt.Errorf("%w: WithIssuerStatePath is only valid with OpenClient", ErrInvalidClientConfig)
+	}
+	if err := validateClientCredentialProvider(provider, cfg.baseURL); err != nil {
+		return nil, err
 	}
 	return &Client{
 		credentials: provider,
@@ -534,10 +537,10 @@ type portalOptions struct {
 }
 
 // ValidFor sets how long the qURL link should be valid. The SDK requires at
-// least one minute as a client-side guardrail; the LayerV API remains
-// authoritative for policy. There is intentionally no SDK-side maximum because
-// account policy may allow longer-lived portals. If omitted, the API applies its
-// default lifetime.
+// least one minute as a client-side guardrail; the LayerV API remains the
+// source of truth for account limits. There is intentionally no SDK-side maximum
+// because an account may allow longer-lived portals. If omitted, the API applies
+// its default lifetime.
 func ValidFor(d time.Duration) PortalOption {
 	return portalOptionFunc(func(o *portalOptions) error {
 		expiresIn, err := formatAPIDuration(d, time.Minute)
@@ -570,8 +573,8 @@ func OneTimeUse() PortalOption {
 }
 
 // MaxSessions limits concurrent sessions for this qURL link. The SDK caps this
-// at 1000 as a client-side guardrail; the LayerV API remains authoritative for
-// policy. Use 0 for unlimited sessions; the SDK sends an explicit
+// at 1000 as a client-side guardrail; the LayerV API remains the source of
+// truth for account limits. Use 0 for unlimited sessions; the SDK sends an explicit
 // max_sessions:0, while omitting this option leaves the server default in
 // effect.
 func MaxSessions(n int) PortalOption {
@@ -586,8 +589,9 @@ func MaxSessions(n int) PortalOption {
 
 // WithSessionDuration sets how long access lasts after someone opens the link.
 // The SDK caps this at 24 hours as a client-side guardrail; the LayerV API
-// remains authoritative for policy. Omit this option to use the server default;
-// zero is rejected rather than treated as default.
+// remains the source of truth for account limits. Durations must be at least one
+// second and whole seconds. Omit this option to use the server default; zero is
+// rejected rather than treated as default.
 func WithSessionDuration(d time.Duration) PortalOption {
 	return portalOptionFunc(func(o *portalOptions) error {
 		if d > 24*time.Hour {
@@ -796,23 +800,14 @@ func applyPortalOptions(opts []PortalOption) (portalOptions, error) {
 func validateTargetURL(targetURL string, errKind error) error {
 	// Protected targets may be private http:// services. Credential-bearing API
 	// and bootstrap origins layer validateHTTPSOrLoopbackURL on top instead.
-	u, err := parseHTTPURL(targetURL, "target URL", errKind)
-	if err != nil {
-		return err
-	}
-	if u.User != nil {
-		return fmt.Errorf("%w: target URL must not include userinfo", errKind)
-	}
-	return nil
+	_, err := parseHTTPURL(targetURL, "target URL", errKind)
+	return err
 }
 
 func validateHTTPSOrLoopbackURL(rawURL, label string, errKind error) error {
 	u, err := parseHTTPURL(rawURL, label, errKind)
 	if err != nil {
 		return err
-	}
-	if u.User != nil {
-		return fmt.Errorf("%w: %s must not include userinfo", errKind, label)
 	}
 	if u.Scheme == "http" && !isLoopbackHost(u.Hostname()) {
 		return fmt.Errorf("%w: %s must use https unless it targets localhost", errKind, label)
@@ -833,6 +828,9 @@ func parseHTTPURL(rawURL, label string, errKind error) (*url.URL, error) {
 	}
 	if u.Host == "" {
 		return nil, fmt.Errorf("%w: %s must include a host", errKind, label)
+	}
+	if u.User != nil {
+		return nil, fmt.Errorf("%w: %s must not include userinfo", errKind, label)
 	}
 	return u, nil
 }
@@ -861,6 +859,20 @@ func validateCredentials(ctx context.Context, provider CredentialProvider, baseU
 		return fmt.Errorf("qurl: build credential validation request: %w", err)
 	}
 	return provider.Authorize(ctx, req)
+}
+
+func validateClientCredentialProvider(provider CredentialProvider, baseURL string) error {
+	switch p := provider.(type) {
+	case CredentialProviderFunc:
+		if p == nil {
+			return fmt.Errorf("%w: nil credential provider", ErrInvalidClientConfig)
+		}
+	case bearerTokenCredential:
+		if err := validateCredentials(context.Background(), p, baseURL); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 type requestAuthorizer func(context.Context, *http.Request) error
@@ -973,7 +985,7 @@ func readCappedBody(r io.Reader, limit int, what string) ([]byte, error) {
 
 func drainResponseBody(body io.Reader) {
 	// The drain cap is best-effort connection reuse, not a second body-size
-	// policy. Larger error bodies are simply closed instead of fully drained.
+	// limit. Larger error bodies are simply closed instead of fully drained.
 	_, _ = io.Copy(io.Discard, io.LimitReader(body, maxAPIResponseDrainBytes))
 }
 
@@ -1025,6 +1037,8 @@ func apiErrorFromResponse(status int, body []byte) error {
 	// Some upstream failures are plain text, HTML, or invalid JSON. Treat that
 	// as an unstructured API error and fall back to a capped body snippet below.
 	_ = json.Unmarshal(body, &parsed)
+	// LayerV and intermediate infrastructure can return either JSON:API-style
+	// {"error": {...}} bodies or flat problem fields; preserve both shapes.
 	code := cmp.Or(parsed.Error.Code, parsed.Code)
 	apiType := cmp.Or(parsed.Error.Type, parsed.Type)
 	title := cmp.Or(parsed.Error.Title, parsed.Title)

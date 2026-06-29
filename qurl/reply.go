@@ -20,9 +20,9 @@ var ErrServerOverloaded = errors.New("qurl: platform busy; retry later")
 var ErrMalformedReply = errors.New("qurl: malformed platform reply")
 
 // ServerDenyError is an authenticated qURL platform deny: the platform vouched
-// for the reply, but access was refused (expired/revoked/consumed qURL, policy
-// mismatch). It is distinct from a RelayError, which is a transport fault before
-// any authenticated platform decision.
+// for the reply, but access was refused (expired/revoked/consumed qURL or a
+// server-side access check). It is distinct from a RelayError, which is a
+// transport fault before any authenticated platform decision.
 type ServerDenyError struct {
 	// ErrCode is the qURL platform error code string. "" / "0" are success and
 	// never produce this error.
