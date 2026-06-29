@@ -17,7 +17,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strings"
 
 	"github.com/layervai/qurl-go/internal/qv2"
 	"github.com/layervai/qurl-go/relayknock"
@@ -146,11 +145,7 @@ type relayErrorView struct {
 }
 
 func (e *relayErrorView) Error() string {
-	msg := e.err.Error()
-	if strings.HasPrefix(msg, "qurl: ") {
-		return msg
-	}
-	return "qurl: " + msg
+	return ensureQurlPrefix(e.err.Error())
 }
 
 func (e *relayErrorView) Unwrap() error {

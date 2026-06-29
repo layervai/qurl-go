@@ -136,10 +136,17 @@ func (e *RelayError) Error() string {
 	if e == nil || strings.TrimSpace(e.Msg) == "" {
 		return "qurl: platform access error"
 	}
-	if strings.HasPrefix(e.Msg, "qurl: ") {
-		return e.Msg
+	return ensureQurlPrefix(e.Msg)
+}
+
+// ensureQurlPrefix returns msg with the package-standard "qurl: " prefix,
+// leaving an already-prefixed message untouched so the convention is applied
+// exactly once. Shared by the RelayError surfaces in this package.
+func ensureQurlPrefix(msg string) string {
+	if strings.HasPrefix(msg, "qurl: ") {
+		return msg
 	}
-	return "qurl: " + e.Msg
+	return "qurl: " + msg
 }
 
 // --- signing (issuer side) ---
