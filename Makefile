@@ -55,11 +55,11 @@ vuln: $(GOVULN) ## Scan for known vulnerabilities in called code
 
 .PHONY: fuzz
 fuzz: ## Run every qv2 fuzz target for $(FUZZTIME) each (targets auto-discovered)
-	@targets=$$($(GO) test -list '^Fuzz' ./qv2 | grep '^Fuzz'); \
+	@targets=$$($(GO) test -list '^Fuzz' ./internal/qv2 | grep '^Fuzz'); \
 	if [ -z "$$targets" ]; then echo "no fuzz targets found"; exit 1; fi; \
 	for t in $$targets; do \
 		echo ">> $$t"; \
-		$(GO) test -run='^$$' -fuzz="^$$t$$" -fuzztime=$(FUZZTIME) ./qv2 || exit 1; \
+		$(GO) test -run='^$$' -fuzz="^$$t$$" -fuzztime=$(FUZZTIME) ./internal/qv2 || exit 1; \
 	done
 
 .PHONY: tidy

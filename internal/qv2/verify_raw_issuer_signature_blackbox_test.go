@@ -10,11 +10,11 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/layervai/qurl-go/qv2"
+	"github.com/layervai/qurl-go/internal/qv2"
 )
 
 // This file is the EXTERNAL-caller proof for VerifyRawIssuerSignature: package
-// qv2_test imports github.com/layervai/qurl-go/qv2 and touches ONLY exported
+// qv2_test imports github.com/layervai/qurl-go/internal/qv2 and touches ONLY exported
 // symbols. The white-box test (verify_raw_issuer_signature_test.go) pins the full
 // error taxonomy via unexported helpers; this one proves the actual purpose of the
 // export — that a cross-language conformance verifier living outside the package

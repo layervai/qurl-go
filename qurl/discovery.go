@@ -9,36 +9,31 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/layervai/qurl-go/qv2"
+	"github.com/layervai/qurl-go/internal/qv2"
 )
 
 // Discovery-manifest credential provider.
 //
-// A DiscoveryProvider fetches a NON-SECRET published trust manifest carrying the
-// issuer trust anchors (kid -> P-256 public key), the relay allowlist, an expiry,
-// and a monotonic version, then turns it into the *qv2.TrustStore / *qv2.RelayAllowlist
+// A DiscoveryProvider fetches a NON-SECRET published opener-config manifest
+// carrying issuer keys, qURL platform access hosts, an expiry, and a monotonic
+// version, then turns it into the *qurl.TrustStore / *qurl.RelayAllowlist
 // EnterPortal needs. "Non-secret" does NOT mean "blindly trusted": a manifest is
 // authenticated before use by a configured PIN (sha256 of the exact bytes) or a
-// detached ISSUER SIGNATURE (qv2.VerifyManifestSignature, a SEPARATE signing domain
-// from qURL claims). It FAILS CLOSED on every doubt — unverifiable, expired,
-// downgraded (older version than last accepted), missing a trust mode, or carrying an
-// empty/invalid anchor set or allowlist all return an error, never a partial result.
+// detached issuer signature. It FAILS CLOSED on every doubt: unverifiable,
+// expired, downgraded, missing a trust mode, or carrying empty/invalid config all
+// return an error, never a partial result.
 //
-// OPEN DECISION #13 (tracked in qurl-go issue #24): the FINAL discovery trust policy
-// (signed vs pinned as the production default, kid-rotation procedure, downgrade-window
-// specifics) is Open Decision #13 in the qURL v2 plan and is not yet frozen. This file
-// implements the MECHANISM with safe fail-closed defaults and makes the policy
-// configurable (DiscoveryConfig). When #13 lands, it selects/clamps these knobs; it must
-// not loosen the fail-closed posture without an explicit threat-model decision recorded
-// there. The manifest JSON schema here is a documented assumption (no published schema
-// exists in the org yet) and may change to match #13.
+// Discovery trust configuration is intentionally flexible: signed vs pinned
+// manifests, key rotation, and durable downgrade state are deployment choices.
+// This implementation provides the fail-closed mechanism behind those choices.
 
 // ManifestEnvelope is the fetched discovery document. The signed/pinned MANIFEST
-// itself is carried as opaque base64url (ManifestB64) — exactly like a qv2 fragment
+// itself is carried as opaque base64url (ManifestB64) — exactly like a qURL link fragment
 // keeps ClaimsB64 verbatim — so the bytes that are pinned/verified are the bytes that
 // are parsed, with zero re-serialization in between. SigB64 / Kid are present only on
 // the SIGNED path and are NOT covered by the signature (a detached signature over the
@@ -62,7 +57,7 @@ type ManifestEnvelope struct {
 //     Version below the provider's last-accepted floor is a DOWNGRADE and is rejected.
 //   - NotAfter is the manifest expiry as Unix seconds; now > NotAfter fails closed.
 //   - Issuers becomes the trust store (kid -> DER SPKI P-256 key).
-//   - RelayAllowlist becomes the relay allowlist (host or host:port entries).
+//   - RelayAllowlist becomes the qURL platform access host allowlist.
 type Manifest struct {
 	Profile        string           `json:"profile"`
 	Version        int64            `json:"version"`
@@ -72,8 +67,8 @@ type Manifest struct {
 	RelayAllowlist []string         `json:"relay_allowlist"`
 }
 
-// ManifestIssuer is one issuer trust anchor: a kid and its P-256 public key in DER
-// SPKI form (the AWS KMS GetPublicKey shape, base64url-encoded for JSON transport).
+// ManifestIssuer is one trusted issuer key: a kid and its P-256 public key in DER
+// SPKI form, base64url-encoded for JSON transport.
 type ManifestIssuer struct {
 	Kid        string `json:"kid"`
 	SPKIDERB64 string `json:"spki_der_b64"`
@@ -93,10 +88,10 @@ type FetcherFunc func(ctx context.Context) ([]byte, error)
 // Fetch calls the wrapped function.
 func (f FetcherFunc) Fetch(ctx context.Context) ([]byte, error) { return f(ctx) }
 
-// DiscoveryConfig configures a DiscoveryProvider's fetch source and TRUST POLICY.
-// The trust policy is fail-closed by construction: a provider that authenticates no
-// way (no pin, no signing keys) is rejected at construction, and a manifest that
-// satisfies no configured mode is rejected at resolve.
+// DiscoveryConfig configures a DiscoveryProvider's fetch source and trust anchors.
+// The trust configuration is fail-closed by construction: a provider that
+// authenticates no way (no pin, no signing keys) is rejected at construction, and
+// a manifest that satisfies no configured mode is rejected at resolve.
 type DiscoveryConfig struct {
 	// Fetcher fetches the raw envelope bytes. REQUIRED.
 	Fetcher ManifestFetcher
@@ -110,7 +105,7 @@ type DiscoveryConfig struct {
 
 	// ManifestKeys are the manifest-signing public keys (kid -> P-256 public key) for
 	// the SIGNED trust mode. When non-empty, a manifest carrying a SigB64/Kid is
-	// verified with qv2.VerifyManifestSignature against the key for that kid. Leave nil
+	// verified with the manifest-signature verifier against the key for that kid. Leave nil
 	// to disable the signed mode.
 	ManifestKeys map[string]*ecdsa.PublicKey
 
@@ -124,7 +119,7 @@ type DiscoveryConfig struct {
 	// authenticate requires EVERY configured anchor that is present to validate (a pin,
 	// once configured, must match; a signature, once present and keyed, must verify), so
 	// "default false" relaxes which anchor is REQUIRED, never whether a present anchor may
-	// fail. #13 may flip this default for production.
+	// fail. Deployments can require signatures when they need that stricter mode.
 	RequireSignature bool
 
 	// MinVersion is the initial downgrade floor: a manifest with Version < MinVersion is
@@ -136,8 +131,8 @@ type DiscoveryConfig struct {
 	// The advanced floor is IN-MEMORY only: a process restart resets it to MinVersion, so
 	// rollback protection across restarts is bounded by MinVersion and the manifest's
 	// not_after, not by the highest version a previous process accepted. Durable
-	// rollback state is Open Decision #13 (tracked in qurl-go issue #24); pin a high
-	// MinVersion if cross-restart anti-rollback matters before #13 lands.
+	// rollback state is a deployment choice; pin a high MinVersion when
+	// cross-restart anti-rollback matters.
 	MinVersion int64
 
 	// ExpectedProfile, when non-empty, requires the manifest's Profile to equal it. A
@@ -146,9 +141,9 @@ type DiscoveryConfig struct {
 	ExpectedProfile string
 
 	// Now overrides the clock for expiry checks. Tests inject a fixed clock for
-	// determinism; production leaves it nil (time.Now). The qv2 crypto core is
+	// determinism; production leaves it nil (time.Now). Signature verification is
 	// deliberately clock-free, but staleness/expiry is THIS layer's job, so the clock
-	// lives here, not in qv2.
+	// lives here.
 	Now func() time.Time
 }
 
@@ -198,20 +193,19 @@ var (
 	ErrDiscoveryConfig = errors.New("qurl: discovery provider misconfigured")
 )
 
-// DiscoveryProvider is a Provider that resolves trust anchors and the relay
-// allowlist from an authenticated discovery manifest. It re-fetches and re-verifies on
-// every Resolve and returns the freshly built trust material; a fetch/verify failure
-// returns the error (fail closed) rather than ever serving stale anchors. Concurrent
-// Resolve calls are safe.
+// DiscoveryProvider is a Provider that resolves opener config from an
+// authenticated discovery manifest. It re-fetches and re-verifies on every
+// Resolve and returns freshly built config; a fetch/verify failure returns the
+// error (fail closed) rather than serving stale config. Concurrent Resolve calls
+// are safe.
 //
 // NO CACHING — operational cost. Because every Resolve does a fresh HTTPS GET +
 // authenticate, EnterPortal pays a network round-trip to the manifest endpoint on
 // EVERY link open, and a down/slow manifest endpoint fails every open even while a
 // recently-authenticated, still-in-window manifest exists. This is a deliberate
-// fail-closed-over-availability stance for the mechanism. A deployment expecting high
+// fail-closed-over-availability stance for the mechanism. An application expecting high
 // open volume should wrap this in a TTL cache that itself fails closed once not_after
-// (or the TTL) elapses; whether prod ships such a cache (and its window) is Open
-// Decision #13, tracked in qurl-go issue #24.
+// (or the TTL) elapses; cache windows are a deployment choice.
 type DiscoveryProvider struct {
 	cfg DiscoveryConfig
 
@@ -219,7 +213,7 @@ type DiscoveryProvider struct {
 	// floor is the downgrade floor: max(cfg.MinVersion, highest accepted Version). A
 	// manifest with Version < floor is rejected, so an accepted revision can never be
 	// rolled back while this provider lives. It is in-memory only and resets to
-	// cfg.MinVersion on restart — see MinVersion for the cross-restart caveat (#13). Guarded by mu.
+	// cfg.MinVersion on restart — see MinVersion for the cross-restart caveat. Guarded by mu.
 	floor int64
 }
 
@@ -255,7 +249,7 @@ func NewDiscoveryProvider(cfg DiscoveryConfig) (*DiscoveryProvider, error) {
 	// authenticate/verifyManifestSig read on every Resolve. cfg is otherwise stored by
 	// value; PinSHA256 (slice) and ManifestKeys (map) are the reference fields that would
 	// otherwise alias the caller's data. The map copy is shallow — the values are
-	// *ecdsa.PublicKey for keys never mutated in place (qv2.NewTrustStore copies its map
+	// *ecdsa.PublicKey for keys never mutated in place (qurl.NewTrustStore copies its map
 	// the same way), so copying the map structure is the right depth and makes the
 	// provider's documented immutability real rather than conventional. Both helpers map
 	// nil to nil, preserving "no pin"/"no signing keys".
@@ -264,16 +258,18 @@ func NewDiscoveryProvider(cfg DiscoveryConfig) (*DiscoveryProvider, error) {
 	return &DiscoveryProvider{cfg: cfg, floor: cfg.MinVersion}, nil
 }
 
-// Resolve fetches, authenticates, and decodes the discovery manifest into a trust
-// store and relay allowlist. It fails closed on any verification, freshness, or schema
-// fault. On success it advances the monotonic downgrade floor and returns the freshly
-// built trust material.
+// Resolve fetches, authenticates, and decodes the discovery manifest into opener
+// config. It fails closed on any verification, freshness, or schema fault. On
+// success it advances the monotonic downgrade floor and returns freshly built
+// config. Concurrent resolves may reject an otherwise valid older manifest with
+// ErrManifestDowngrade if another caller advances the floor first; retrying lets
+// the caller fetch the current manifest.
 //
 // A nil receiver (a caller that ignored NewDiscoveryProvider's construction error and
 // installed the nil *DiscoveryProvider) fails closed with ErrNotConfigured rather than
 // panicking on the p.cfg field read — the same fail-closed footgun guard StaticProvider
 // has.
-func (p *DiscoveryProvider) Resolve(ctx context.Context) (*qv2.TrustStore, *qv2.RelayAllowlist, error) {
+func (p *DiscoveryProvider) Resolve(ctx context.Context) (*TrustStore, *RelayAllowlist, error) {
 	if p == nil {
 		return nil, nil, ErrNotConfigured
 	}
@@ -320,21 +316,22 @@ func (p *DiscoveryProvider) Resolve(ctx context.Context) (*qv2.TrustStore, *qv2.
 		return nil, nil, fmt.Errorf("%w: not_after=%d, now=%d", ErrManifestExpired, manifest.NotAfter, now)
 	}
 
+	ts, allow, err := buildTrustMaterial(manifest)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	// Downgrade check + floor advance are one atomic step under the lock so concurrent
 	// resolves see a monotonic floor and never roll back. The check stays BELT-AND-LOCK:
 	// reading the floor and writing it must not straddle two acquisitions, or a racing
-	// resolve could move the floor backward (a monotonicity TOCTOU). buildTrustMaterial
-	// runs only after the floor check passes — so a downgrade/replay fails before the
-	// issuer-DER parsing is spent, and it touches no provider state, so holding the lock
-	// across it adds no contention (the expensive fetch already happened outside it).
+	// resolve could move the floor backward (a monotonicity TOCTOU). Trust-material
+	// parsing runs before the lock because it touches no provider state; if another
+	// resolve advances the floor while parsing is in progress, this resolve is rejected
+	// below instead of moving the floor backward.
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if manifest.Version < p.floor {
 		return nil, nil, fmt.Errorf("%w: version=%d < floor=%d", ErrManifestDowngrade, manifest.Version, p.floor)
-	}
-	ts, allow, err := buildTrustMaterial(manifest)
-	if err != nil {
-		return nil, nil, err
 	}
 	p.floor = manifest.Version
 	return ts, allow, nil
@@ -351,10 +348,9 @@ func (p *DiscoveryProvider) Resolve(ctx context.Context) (*qv2.TrustStore, *qv2.
 //
 // So a manifest that is unpinned-or-pin-mismatched, or that carries a signature that
 // does not verify, or that satisfies no anchor at all, is rejected. This is the
-// safe-default MECHANISM; whether the production policy is pin-only, signed-only, or
-// pin-AND-signed (and the exact precedence between them) is Open Decision #13, which
-// selects/clamps these knobs — it must not loosen this posture without a threat-model
-// decision recorded there. SigB64/Kid ride OUTSIDE the pinned/signed preimage, so an
+// safe-default MECHANISM; whether production uses pin-only, signed-only, or
+// pin-AND-signed (and the exact precedence between them) is a deployment choice.
+// SigB64/Kid ride OUTSIDE the pinned/signed preimage, so an
 // attacker who cannot alter the manifest bytes also cannot forge acceptance; corrupting
 // a present signature only makes an otherwise-good manifest fail closed (deny), never
 // admits a bad one.
@@ -400,7 +396,7 @@ func (p *DiscoveryProvider) authenticate(env *ManifestEnvelope, manifestBytes []
 // otherwise a pin-valid, freshly-signed manifest under a not-yet-distributed kid is
 // rejected here. This is a separate rotation from issuer-anchor (claims-signing) kid
 // rotation, which lives inside the manifest's issuer set and is covered by
-// qv2/rotation_test.go.
+// internal/qv2/rotation_test.go.
 func (p *DiscoveryProvider) verifyManifestSig(env *ManifestEnvelope, manifestBytes []byte) error {
 	if env.Kid == "" {
 		return fmt.Errorf("%w: signed manifest is missing its kid", ErrManifestSchema)
@@ -428,10 +424,10 @@ func (p *DiscoveryProvider) now() time.Time {
 
 // strictDecodeJSON decodes raw into v rejecting unknown fields AND trailing data after
 // the top-level JSON object (a second concatenated value a lenient parser would ignore).
-// It is the same strictness qv2's typed-unmarshal pass applies (qv2/parse.go
+// It is the same strictness the core's typed-unmarshal pass applies (the parser
 // strictUnmarshal): DisallowUnknownFields + a dec.More() trailing-data check. It does
-// NOT do qv2's full token-walk (duplicate-key / null rejection) — that heavier guard
-// stays in qv2 because the manifest bytes here are already authenticated by the
+// NOT do the core's full token-walk (duplicate-key / null rejection) — that heavier guard
+// stays in the core because the manifest bytes here are already authenticated by the
 // pin/signature, so only the legitimate signer can produce the bytes being parsed.
 func strictDecodeJSON(raw []byte, v any) error {
 	dec := json.NewDecoder(bytes.NewReader(raw))
@@ -470,8 +466,8 @@ func decodeEnvelope(raw []byte) (*ManifestEnvelope, []byte, error) {
 
 // parseManifest strict-parses the decoded manifest bytes via strictDecodeJSON: an
 // unknown field or trailing data after the object fails closed rather than being
-// silently ignored. (Duplicate-key/null rejection — qv2's heavier token-walk — is left
-// to qv2 since these bytes are already pin/signature-authenticated; see strictDecodeJSON.)
+// silently ignored. (Duplicate-key/null rejection — the core's heavier token-walk — is left
+// to the core since these bytes are already pin/signature-authenticated; see strictDecodeJSON.)
 func parseManifest(manifestBytes []byte) (*Manifest, error) {
 	var m Manifest
 	if err := strictDecodeJSON(manifestBytes, &m); err != nil {
@@ -492,34 +488,28 @@ func parseManifest(manifestBytes []byte) (*Manifest, error) {
 		return nil, fmt.Errorf("%w: not_after (%d) must be after issued_at (%d)", ErrManifestSchema, m.NotAfter, m.IssuedAt)
 	}
 	if len(m.Issuers) == 0 {
-		return nil, fmt.Errorf("%w: manifest has no issuer trust anchors", ErrManifestSchema)
+		return nil, fmt.Errorf("%w: manifest has no trusted issuer keys", ErrManifestSchema)
 	}
-	// Require at least one USABLE relay entry, not merely a non-empty slice.
+	// Require at least one USABLE platform access entry, not merely a non-empty slice.
 	// NewRelayAllowlist trims and drops blank/whitespace entries, so a slice of only
 	// blanks (e.g. ["", "  "]) is length-non-empty yet builds an allowlist that rejects
-	// every relay — a schema-valid-but-unusable manifest. Reject it here so "schema
-	// valid" implies "has a usable relay anchor". A real host alongside a stray blank is
-	// still accepted (the blank is dropped downstream); only an all-blank list fails.
-	hasUsableRelay := false
-	for _, e := range m.RelayAllowlist {
-		if strings.TrimSpace(e) != "" {
-			hasUsableRelay = true
-			break
-		}
-	}
+	// every endpoint. Reject it here so "schema valid" implies "has a usable qURL
+	// platform access host". A real host alongside a stray blank is still accepted
+	// (the blank is dropped downstream); only an all-blank list fails.
+	hasUsableRelay := slices.ContainsFunc(m.RelayAllowlist, func(e string) bool {
+		return strings.TrimSpace(e) != ""
+	})
 	if !hasUsableRelay {
-		return nil, fmt.Errorf("%w: manifest has no usable relay allowlist entries", ErrManifestSchema)
+		return nil, fmt.Errorf("%w: manifest has no usable platform access entries", ErrManifestSchema)
 	}
 	return &m, nil
 }
 
-// buildTrustMaterial turns an authenticated, in-window manifest into the qv2 trust
-// store and relay allowlist. It defers issuer-key parsing (and the empty-anchor-set
-// rejection) to qv2.NewTrustStoreFromDER, reusing its fail-closed construction rather
-// than re-validating here. The relay allowlist's emptiness is already gated upstream in
-// parseManifest (an empty relay_allowlist is a schema fault), so qv2.NewRelayAllowlist
-// only needs to index the entries.
-func buildTrustMaterial(m *Manifest) (*qv2.TrustStore, *qv2.RelayAllowlist, error) {
+// buildTrustMaterial turns an authenticated, in-window manifest into opener
+// config. It defers issuer-key parsing to NewTrustStoreFromDER, reusing its
+// fail-closed construction rather than re-validating here. The access-host list's
+// emptiness is already gated upstream in parseManifest.
+func buildTrustMaterial(m *Manifest) (*TrustStore, *RelayAllowlist, error) {
 	derByKID := make(map[string][]byte, len(m.Issuers))
 	for _, iss := range m.Issuers {
 		if iss.Kid == "" {
@@ -534,12 +524,12 @@ func buildTrustMaterial(m *Manifest) (*qv2.TrustStore, *qv2.RelayAllowlist, erro
 		}
 		derByKID[iss.Kid] = der
 	}
-	ts, err := qv2.NewTrustStoreFromDER(derByKID)
+	ts, err := NewTrustStoreFromDER(derByKID)
 	if err != nil {
 		// A bad key blob (wrong curve, unparseable DER) is a schema fault from the
 		// provider's view: the manifest carried an unusable anchor.
 		return nil, nil, fmt.Errorf("%w: %w", ErrManifestSchema, err)
 	}
-	allow := qv2.NewRelayAllowlist(m.RelayAllowlist)
+	allow := NewRelayAllowlist(m.RelayAllowlist)
 	return ts, allow, nil
 }

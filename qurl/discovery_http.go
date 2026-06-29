@@ -3,18 +3,17 @@ package qurl
 import (
 	"context"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"time"
 )
 
-// HTTP-backed manifest fetcher. Kept in the qurl layer (not qv2) so the qv2 crypto
-// core stays standard-library-only and network-free; the discovery provider is the
-// layer that does I/O.
+// HTTP-backed manifest fetcher. Kept in the qurl layer so the crypto core stays
+// standard-library-only and network-free; the discovery provider is the layer that
+// does I/O.
 
 // maxManifestBytes caps the discovery response read. A non-secret trust manifest is
-// small (a handful of issuer keys + relay hosts); the cap bounds a hostile or
+// small (a handful of issuer keys + platform access hosts); the cap bounds a hostile or
 // misconfigured endpoint from streaming an unbounded body into memory before
 // authentication has a chance to reject it.
 const maxManifestBytes = 1 << 20 // 1 MiB
@@ -30,18 +29,17 @@ const defaultFetchTimeout = 30 * time.Second
 // shared package-level client (instead of one per Fetch) keeps the connection pool
 // warm and covers both the constructor-nil and struct-literal-nil paths.
 //
-// CheckRedirect refuses redirects outright. The construction-time https guard only
-// covers the FIRST hop, so a 3xx from the (deployment-configured) manifest URL to
-// http:// or an internal host would otherwise be followed and silently defeat that
-// guard. Trust is anchored on the pin/signature, so following a redirect can never
-// admit a bad manifest — but refusing one keeps the transport posture honest and
-// avoids surprising cross-origin fetches. A deployment that genuinely needs a CDN
-// hop injects its own Client with a redirect policy it controls.
+// CheckRedirect returns the redirect response instead of following it. The
+// construction-time https guard only covers the FIRST hop, so a 3xx from the
+// configured manifest URL to http:// or an internal host would otherwise be
+// followed and silently defeat that guard. Trust is anchored on the pin/signature,
+// so following a redirect can never admit a bad manifest — but refusing one keeps
+// the transport posture honest and avoids surprising cross-origin fetches. An
+// application that genuinely needs a CDN hop injects its own Client with a
+// redirect behavior it controls.
 var defaultFetchClient = &http.Client{
-	Timeout: defaultFetchTimeout,
-	CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
-		return http.ErrUseLastResponse
-	},
+	Timeout:       defaultFetchTimeout,
+	CheckRedirect: refuseRedirects,
 }
 
 // HTTPFetcher fetches the discovery envelope over HTTPS. The URL should be the
@@ -86,7 +84,7 @@ func NewHTTPFetcher(rawURL string, client HTTPDoer) (*HTTPFetcher, error) {
 // followed: the client returns the 3xx response as-is, which is then rejected here as
 // a non-2xx status. Fetch does NOT authenticate the bytes; the provider does.
 //
-// An injected non-nil Client owns its own timeout AND redirect policy — Fetch cannot
+// An injected non-nil Client owns its own timeout AND redirect behavior — Fetch cannot
 // re-impose either on it, so a caller supplying a Client is responsible for both.
 //
 // Defense in depth: Fetch re-checks the URL scheme at request time and refuses a
@@ -113,19 +111,16 @@ func (f *HTTPFetcher) Fetch(ctx context.Context) ([]byte, error) {
 		return nil, fmt.Errorf("qurl: GET manifest: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	defer drainResponseBody(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("qurl: manifest endpoint returned HTTP %d", resp.StatusCode)
 	}
-	// Read one byte past the cap so an over-limit body is detectable: if the reader
-	// yields maxManifestBytes+1 bytes, the real body was larger than the cap. This
-	// gives a precise error instead of handing a truncated body downstream to fail as
-	// a confusing pin/parse mismatch.
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxManifestBytes+1))
+	// readCappedBody reads one byte past the cap so an over-limit body is rejected
+	// with a precise error instead of being silently truncated and handed downstream
+	// to fail as a confusing pin/parse mismatch.
+	body, err := readCappedBody(resp.Body, maxManifestBytes, "manifest body")
 	if err != nil {
-		return nil, fmt.Errorf("qurl: read manifest body: %w", err)
-	}
-	if len(body) > maxManifestBytes {
-		return nil, fmt.Errorf("qurl: manifest body exceeds %d-byte cap", maxManifestBytes)
+		return nil, fmt.Errorf("qurl: %w", err)
 	}
 	return body, nil
 }

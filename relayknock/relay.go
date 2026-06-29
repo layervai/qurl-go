@@ -36,7 +36,12 @@ type RelayError struct {
 	Msg    string
 }
 
-func (e *RelayError) Error() string { return e.Msg }
+func (e *RelayError) Error() string {
+	if e == nil || strings.TrimSpace(e.Msg) == "" {
+		return "relay error"
+	}
+	return e.Msg
+}
 
 // RelayPost delivers a knock packet to the relay and returns the server's reply
 // packet bytes. 200 → reply bytes; any other status → *RelayError.
@@ -75,14 +80,12 @@ func RelayPost(ctx context.Context, httpClient HTTPDoer, relayBaseURL, serverID 
 }
 
 // KnockOptions tunes a Knock. The zero value is the production default: a fresh
-// random throwaway device identity and random handshake nonces, suitable for an
-// access-token knock where the server authenticates by the body, not a
-// pre-registered device key.
+// random throwaway device identity and random handshake nonces, suitable for a knock
+// where the server authenticates by the body rather than a pre-registered device key.
 //
-// The enterPortal/qv2 path sets DeviceStaticPriv to the per-qURL private key from
-// the link's secret block, so the server can match the authenticated Noise
-// initiator key to the signed qurl_user_public_key. The remaining fields stay
-// zero (random) there.
+// The qURL path sets DeviceStaticPriv to the per-link private key from the link's
+// secret block, so the server can match the authenticated Noise initiator key to the
+// signed public key. The remaining fields stay zero (random) there.
 type KnockOptions struct {
 	// HTTPClient is the client used for the relay POST. nil ⇒ http.DefaultClient.
 	HTTPClient HTTPDoer
@@ -99,8 +102,8 @@ type KnockOptions struct {
 // (relayknock does not know any body shape). The returned Reply.Body is the
 // decrypted application reply for the caller to interpret.
 //
-// The caller's egress IP is the address the NHP server admits, so a subsequent
-// resource request must share that egress IP (see the package doc).
+// The caller's egress IP is the address the NHP server opens access for, so
+// a subsequent resource request must share that egress IP (see the package doc).
 func Knock(ctx context.Context, relayBaseURL string, serverStaticPub, body []byte, opts KnockOptions) (*Reply, error) {
 	if len(serverStaticPub) != publicKeySize {
 		return nil, fmt.Errorf("server static pub must be %d bytes, got %d", publicKeySize, len(serverStaticPub))

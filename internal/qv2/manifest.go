@@ -97,24 +97,24 @@ func VerifyManifestSignature(pub *ecdsa.PublicKey, manifest, rawSig []byte) erro
 // signature over canonicalized JSON would not verify against the transmitted bytes.
 func SignManifest(ctx context.Context, signer Signer, manifestBytes []byte) ([]byte, error) {
 	if signer == nil {
-		return nil, errors.New("qv2: manifest signer must not be nil")
+		return nil, errors.New("qurl: manifest signer must not be nil")
 	}
 	if len(manifestBytes) == 0 {
-		return nil, errors.New("qv2: manifest bytes must not be empty")
+		return nil, errors.New("qurl: manifest bytes must not be empty")
 	}
 	digest := manifestSigningDigest(manifestBytes)
 	der, err := signer.SignDigest(ctx, digest[:])
 	if err != nil {
-		return nil, fmt.Errorf("qv2: manifest signer SignDigest: %w", err)
+		return nil, fmt.Errorf("qurl: manifest signer SignDigest: %w", err)
 	}
 	if len(der) == 0 {
-		return nil, errors.New("qv2: manifest signer returned an empty signature")
+		return nil, errors.New("qurl: manifest signer returned an empty signature")
 	}
 	// KMS (and ecdsa.SignASN1) return ASN.1 DER and do not low-S normalize; convert to
 	// the pinned fixed-width raw r||s low-S wire form here, in one place.
 	rawSig, err := derToRawLowS(der)
 	if err != nil {
-		return nil, fmt.Errorf("qv2: convert manifest signature to wire format: %w", err)
+		return nil, fmt.Errorf("qurl: convert manifest signature to wire format: %w", err)
 	}
 	return rawSig, nil
 }

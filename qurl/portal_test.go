@@ -7,13 +7,14 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
 
 	conformance "github.com/layervai/qurl-conformance"
 
-	"github.com/layervai/qurl-go/qv2"
+	"github.com/layervai/qurl-go/internal/qv2"
 	"github.com/layervai/qurl-go/relayknock"
 )
 
@@ -40,7 +41,7 @@ import (
 // real without this test minting anything. The secret part is synthesized — PoP
 // matching is a server-side check EnterPortal does not perform — so a placeholder
 // 32-byte key is sufficient to satisfy the strict secret parser.
-func vendoredAcceptLink(t *testing.T) (link string, ts *qv2.TrustStore, cellFingerprint string) {
+func vendoredAcceptLink(t *testing.T) (link string, ts *TrustStore, cellFingerprint string) {
 	t.Helper()
 	vf, err := qv2.LoadVectorBytes(conformance.IssuerSignatureVectors())
 	if err != nil {
@@ -61,7 +62,7 @@ func vendoredAcceptLink(t *testing.T) (link string, ts *qv2.TrustStore, cellFing
 	if err != nil {
 		t.Fatalf("decode issuer spki: %v", err)
 	}
-	ts, err = qv2.NewTrustStoreFromDER(map[string][]byte{vf.Issuer.KID: der})
+	ts, err = NewTrustStoreFromDER(map[string][]byte{vf.Issuer.KID: der})
 	if err != nil {
 		t.Fatalf("new trust store: %v", err)
 	}
@@ -118,9 +119,9 @@ func freshP256SPKIDER(t *testing.T) []byte {
 // freshTrustStore mints an unrelated issuer key under a kid that is NOT the
 // vendored vector's kid, so a vector-signed link resolves to ErrUnknownKID against
 // it.
-func freshTrustStore(t *testing.T) *qv2.TrustStore {
+func freshTrustStore(t *testing.T) *TrustStore {
 	t.Helper()
-	ts, err := qv2.NewTrustStoreFromDER(map[string][]byte{"unrelated-kid": freshP256SPKIDER(t)})
+	ts, err := NewTrustStoreFromDER(map[string][]byte{"unrelated-kid": freshP256SPKIDER(t)})
 	if err != nil {
 		t.Fatalf("new trust store: %v", err)
 	}
@@ -129,8 +130,8 @@ func freshTrustStore(t *testing.T) *qv2.TrustStore {
 
 // allowAll is the relay allowlist for the vendored vector's relay_url
 // (https://relay.example.com).
-func relayExampleAllowlist() *qv2.RelayAllowlist {
-	return qv2.NewRelayAllowlist([]string{"relay.example.com"})
+func relayExampleAllowlist() *RelayAllowlist {
+	return NewRelayAllowlist([]string{"relay.example.com"})
 }
 
 // --- Bucket A: gates -------------------------------------------------------
@@ -154,7 +155,7 @@ func TestEnterPortalWith_RelayOffAllowlist_Rejected(t *testing.T) {
 	link, ts, _ := vendoredAcceptLink(t)
 	// Allowlist a DIFFERENT host than the verified relay_url, so validation fails
 	// AFTER the signature verifies (proving the post-verify ordering).
-	cfg := Config{TrustStore: ts, RelayAllowlist: qv2.NewRelayAllowlist([]string{"not-the-relay.example.org"})}
+	cfg := Config{TrustStore: ts, RelayAllowlist: NewRelayAllowlist([]string{"not-the-relay.example.org"})}
 	_, err := EnterPortalWith(context.Background(), link, cfg)
 	if !errors.Is(err, qv2.ErrRelayURL) {
 		t.Fatalf("relay off allowlist: want ErrRelayURL, got %v", err)
@@ -195,15 +196,40 @@ func TestEnterPortalWith_RoutesToDerivedRelayURL(t *testing.T) {
 	_, err := EnterPortalWith(context.Background(), link, cfg)
 
 	// The knock is built and POSTed; the capturing client fails the transport, so
-	// EnterPortal surfaces a relayknock.RelayError — proving it got past parse,
+	// EnterPortal surfaces a qurl.RelayError — proving it got past parse,
 	// verify, relay validation, serverId derivation, and knock construction.
-	var relayErr *relayknock.RelayError
+	var relayErr *RelayError
 	if !errors.As(err, &relayErr) {
-		t.Fatalf("want a *relayknock.RelayError after the POST, got %v", err)
+		t.Fatalf("want a *qurl.RelayError after the POST, got %v", err)
 	}
 	wantURL := "https://relay.example.com/relay/" + cellFingerprint
 	if doer.gotURL != wantURL {
 		t.Fatalf("relay POST routed to %q, want %q", doer.gotURL, wantURL)
+	}
+}
+
+func TestNormalizeRelayErrorPreservesWrappedContext(t *testing.T) {
+	coreErr := &relayknock.RelayError{Status: http.StatusBadGateway, Msg: "relay unavailable"}
+	err := normalizeRelayError(fmt.Errorf("knock context: %w", coreErr))
+
+	if !strings.Contains(err.Error(), "qurl: knock context") {
+		t.Fatalf("normalized error lost wrapper context: %v", err)
+	}
+	var relayErr *RelayError
+	if !errors.As(err, &relayErr) {
+		t.Fatalf("normalized error: want *qurl.RelayError, got %T: %v", err, err)
+	}
+	if relayErr.Status != http.StatusBadGateway || relayErr.Msg != "relay unavailable" {
+		t.Fatalf("RelayError = %#v", relayErr)
+	}
+	var unwrapped *relayknock.RelayError
+	if !errors.As(err, &unwrapped) {
+		t.Fatalf("normalized error should preserve original relayknock error chain")
+	}
+
+	direct := normalizeRelayError(coreErr)
+	if got, want := direct.Error(), "qurl: relay unavailable"; got != want {
+		t.Fatalf("direct relay error = %q, want %q", got, want)
 	}
 }
 
@@ -218,8 +244,8 @@ func TestInterpretReply_SuccessACK(t *testing.T) {
 	if err != nil {
 		t.Fatalf("success ACK: %v", err)
 	}
-	if h.RedirectURL != "https://r_x.qurl.site/path" {
-		t.Fatalf("RedirectURL = %q", h.RedirectURL)
+	if h.ResourceURL != "https://r_x.qurl.site/path" {
+		t.Fatalf("ResourceURL = %q", h.ResourceURL)
 	}
 	if h.OpenSeconds != 900 {
 		t.Fatalf("OpenSeconds = %d, want 900", h.OpenSeconds)
@@ -249,15 +275,21 @@ func TestInterpretReply_CookieChallenge(t *testing.T) {
 	}
 }
 
-func TestInterpretReply_SuccessButNoRedirect(t *testing.T) {
-	// A success ACK with no redirectUrl (here an empty body → zero-value success
-	// ACK) is not actionable: the caller has nothing to reach. It must fail closed
-	// with ErrMalformedReply, NOT hand back an empty handle (matching the seed smoke
-	// client's "success ACK carried no redirectUrl" rejection).
+func TestInterpretReply_NilReply(t *testing.T) {
+	_, err := interpretReply(nil)
+	if !errors.Is(err, ErrMalformedReply) {
+		t.Fatalf("nil reply: want ErrMalformedReply, got %v", err)
+	}
+}
+
+func TestInterpretReply_SuccessButNoResourceURL(t *testing.T) {
+	// A success ACK with no resource URL (here an empty body -> zero-value
+	// success ACK) is not actionable: the caller has nothing to reach. It must
+	// fail closed with ErrMalformedReply, not hand back an empty handle.
 	reply := &relayknock.Reply{Type: relayknock.TypeACK, Body: nil}
 	_, err := interpretReply(reply)
 	if !errors.Is(err, ErrMalformedReply) {
-		t.Fatalf("success ACK with no redirectUrl: want ErrMalformedReply, got %v", err)
+		t.Fatalf("success ACK with no resource URL: want ErrMalformedReply, got %v", err)
 	}
 }
 
@@ -267,7 +299,7 @@ func TestInterpretReply_UnexpectedType(t *testing.T) {
 	if !errors.Is(err, ErrMalformedReply) {
 		t.Fatalf("unexpected type: want ErrMalformedReply, got %v", err)
 	}
-	if !strings.Contains(err.Error(), "unexpected NHP reply type") {
+	if !strings.Contains(err.Error(), "unexpected qURL platform reply type") {
 		t.Fatalf("unexpected type: error should name the cause, got %v", err)
 	}
 }

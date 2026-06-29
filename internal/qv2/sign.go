@@ -80,42 +80,42 @@ type publicKeyDERer interface {
 // break — do not add one.
 func SignClaims(ctx context.Context, signer Signer, claims *Claims) (claimsB64 string, rawSig []byte, err error) {
 	if signer == nil {
-		return "", nil, errors.New("qv2: signer must not be nil")
+		return "", nil, errors.New("qurl: signer must not be nil")
 	}
 	if claims == nil {
-		return "", nil, errors.New("qv2: claims must not be nil")
+		return "", nil, errors.New("qurl: claims must not be nil")
 	}
 	kid := signer.KID()
 	if kid == "" {
-		return "", nil, errors.New("qv2: signer kid must not be empty")
+		return "", nil, errors.New("qurl: signer kid must not be empty")
 	}
 
 	stamped := *claims
 	stamped.Kid = kid
 	encoded, err := json.Marshal(stamped)
 	if err != nil {
-		return "", nil, fmt.Errorf("qv2: marshal claims: %w", err)
+		return "", nil, fmt.Errorf("qurl: marshal claims: %w", err)
 	}
 	// Validate the EXACT bytes about to be signed through the verifier's strict
 	// parser. Runs before SignDigest so invalid claims never reach the signer.
 	if _, err := parseClaims(encoded); err != nil {
-		return "", nil, fmt.Errorf("qv2: refusing to sign invalid claims: %w", err)
+		return "", nil, fmt.Errorf("qurl: refusing to sign invalid claims: %w", err)
 	}
 
 	claimsB64 = encodeB64(encoded)
 	digest := signingDigest(claimsB64)
 	der, err := signer.SignDigest(ctx, digest[:])
 	if err != nil {
-		return "", nil, fmt.Errorf("qv2: signer SignDigest: %w", err)
+		return "", nil, fmt.Errorf("qurl: signer SignDigest: %w", err)
 	}
 	if len(der) == 0 {
-		return "", nil, errors.New("qv2: signer returned an empty signature")
+		return "", nil, errors.New("qurl: signer returned an empty signature")
 	}
 	// KMS (and ecdsa.SignASN1) return ASN.1 DER and do not low-S normalize. Convert
 	// to the pinned fixed-width raw r||s low-S wire form here, in one place.
 	rawSig, err = derToRawLowS(der)
 	if err != nil {
-		return "", nil, fmt.Errorf("qv2: convert signature to wire format: %w", err)
+		return "", nil, fmt.Errorf("qurl: convert signature to wire format: %w", err)
 	}
 	// Best-effort self-verify: if the signer can surface its public key, verify the
 	// raw signature against the digest through the SAME path a real verifier uses
@@ -145,14 +145,14 @@ func selfVerify(signer Signer, claimsB64 string, rawSig []byte) error {
 	}
 	der, err := pkProvider.PublicKeyDER()
 	if err != nil {
-		return fmt.Errorf("qv2: self-verify could not obtain signer public key: %w", err)
+		return fmt.Errorf("qurl: self-verify could not obtain signer public key: %w", err)
 	}
 	pub, err := ParseP256PublicKeyDER(der)
 	if err != nil {
-		return fmt.Errorf("qv2: self-verify could not parse signer public key: %w", err)
+		return fmt.Errorf("qurl: self-verify could not parse signer public key: %w", err)
 	}
 	if err := verifyRawSignature(pub, claimsB64, rawSig); err != nil {
-		return fmt.Errorf("qv2: minted signature failed self-verify against the signer public key "+
+		return fmt.Errorf("qurl: minted signature failed self-verify against the signer public key "+
 			"(custody misconfiguration?): %w", err)
 	}
 	return nil
@@ -175,13 +175,13 @@ type LocalSigner struct {
 // than emitting unverifiable artifacts.
 func NewLocalSigner(priv *ecdsa.PrivateKey, kid string) (*LocalSigner, error) {
 	if priv == nil {
-		return nil, errors.New("qv2: local signer private key must not be nil")
+		return nil, errors.New("qurl: local signer private key must not be nil")
 	}
 	if priv.Curve != curve {
-		return nil, errors.New("qv2: local signer key is not on the P-256 curve")
+		return nil, errors.New("qurl: local signer key is not on the P-256 curve")
 	}
 	if kid == "" {
-		return nil, errors.New("qv2: local signer kid must not be empty")
+		return nil, errors.New("qurl: local signer kid must not be empty")
 	}
 	return &LocalSigner{priv: priv, kid: kid}, nil
 }
@@ -192,7 +192,7 @@ func NewLocalSigner(priv *ecdsa.PrivateKey, kid string) (*LocalSigner, error) {
 func GenerateLocalSigner(kid string) (*LocalSigner, error) {
 	priv, err := ecdsa.GenerateKey(curve, rand.Reader)
 	if err != nil {
-		return nil, fmt.Errorf("qv2: generate local signer key: %w", err)
+		return nil, fmt.Errorf("qurl: generate local signer key: %w", err)
 	}
 	return NewLocalSigner(priv, kid)
 }

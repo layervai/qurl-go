@@ -33,7 +33,7 @@ var (
 	// ErrSignatureScalarRange is returned when r or s is not in [1, N-1].
 	ErrSignatureScalarRange = fmt.Errorf("%w: signature scalar out of range [1, N-1]", ErrSignature)
 	// ErrSignatureMalformedDER is returned when a DER signature cannot be parsed.
-	ErrSignatureMalformedDER = errors.New("qv2: malformed ASN.1 DER ECDSA signature")
+	ErrSignatureMalformedDER = errors.New("qurl: malformed ASN.1 DER ECDSA signature")
 )
 
 // curve is the single pinned curve. There is no algorithm negotiation.
