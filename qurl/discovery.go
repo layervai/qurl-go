@@ -261,7 +261,9 @@ func NewDiscoveryProvider(cfg DiscoveryConfig) (*DiscoveryProvider, error) {
 // Resolve fetches, authenticates, and decodes the discovery manifest into opener
 // config. It fails closed on any verification, freshness, or schema fault. On
 // success it advances the monotonic downgrade floor and returns freshly built
-// config.
+// config. Concurrent resolves may reject an otherwise valid older manifest with
+// ErrManifestDowngrade if another caller advances the floor first; retrying lets
+// the caller fetch the current manifest.
 //
 // A nil receiver (a caller that ignored NewDiscoveryProvider's construction error and
 // installed the nil *DiscoveryProvider) fails closed with ErrNotConfigured rather than

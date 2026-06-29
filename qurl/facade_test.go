@@ -81,12 +81,34 @@ func TestRelayErrorString(t *testing.T) {
 // TestFragmentExportedFieldsMirrorCore guards wrapFragment, which hand-copies the
 // exported fields of the internal fragment. If the core fragment gains an exported
 // field, this parity check fails loudly rather than the public Fragment silently
-// dropping it. (Claims and Secret are guarded at compile time in facade.go.)
+// dropping it. (Claims and Secret fields are guarded at compile time in facade.go.)
 func TestFragmentExportedFieldsMirrorCore(t *testing.T) {
 	got := exportedFieldNames(reflect.TypeFor[qurl.Fragment]())
 	want := exportedFieldNames(reflect.TypeFor[qv2.Fragment]())
 	if !slices.Equal(got, want) {
 		t.Errorf("qurl.Fragment exported fields %v != core %v — update wrapFragment in facade.go", got, want)
+	}
+}
+
+func TestClaimsAndSecretJSONTagsMirrorCore(t *testing.T) {
+	assertJSONTagsMirror(t, reflect.TypeFor[qurl.Claims](), reflect.TypeFor[qv2.Claims]())
+	assertJSONTagsMirror(t, reflect.TypeFor[qurl.Secret](), reflect.TypeFor[qv2.Secret]())
+}
+
+func assertJSONTagsMirror(t *testing.T, got, want reflect.Type) {
+	t.Helper()
+	if got.NumField() != want.NumField() {
+		t.Fatalf("%s field count = %d, want %d", got, got.NumField(), want.NumField())
+	}
+	for i := range got.NumField() {
+		gotField := got.Field(i)
+		wantField := want.Field(i)
+		if gotField.Name != wantField.Name {
+			t.Fatalf("%s field %d = %s, want %s", got, i, gotField.Name, wantField.Name)
+		}
+		if gotTag, wantTag := gotField.Tag.Get("json"), wantField.Tag.Get("json"); gotTag != wantTag {
+			t.Fatalf("%s.%s json tag = %q, want %q", got, gotField.Name, gotTag, wantTag)
+		}
 	}
 }
 

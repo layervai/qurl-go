@@ -321,8 +321,9 @@ func wrapSecret(secret *qv2.Secret) *Secret {
 
 // The public Claims/Secret structs must stay field-identical to the internal
 // core structs. wrapClaims/wrapSecret convert the whole struct, which only
-// compiles when fields match — names, types, order; tags aside — so a core field
-// change forces a matching change here and is carried through automatically.
+// compiles when fields match — names, types, order — so a core field change
+// forces a matching change here and is carried through automatically. JSON tags
+// are guarded separately by TestClaimsAndSecretJSONTagsMirrorCore.
 // Fragment mixes copied scalars with nested wraps, so its exported-field shape is
 // guarded separately by TestFragmentExportedFieldsMirrorCore.
 

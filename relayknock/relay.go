@@ -36,7 +36,12 @@ type RelayError struct {
 	Msg    string
 }
 
-func (e *RelayError) Error() string { return e.Msg }
+func (e *RelayError) Error() string {
+	if e == nil || strings.TrimSpace(e.Msg) == "" {
+		return "relay error"
+	}
+	return e.Msg
+}
 
 // RelayPost delivers a knock packet to the relay and returns the server's reply
 // packet bytes. 200 → reply bytes; any other status → *RelayError.
