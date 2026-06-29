@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestClient_ProtectURLThenPortal(t *testing.T) {
@@ -618,6 +619,9 @@ func TestClient_Validation(t *testing.T) {
 	if _, err := NewClient(CachedCredentials(BearerToken(""), time.Minute), WithBaseURL("https://api.example.com")); !errors.Is(err, ErrInvalidClientConfig) {
 		t.Fatalf("cached blank bearer: want ErrInvalidClientConfig, got %v", err)
 	}
+	if _, err := NewClient(CachedCredentials(BearerToken("lv_test"), 0), WithBaseURL("https://api.example.com")); !errors.Is(err, ErrInvalidClientConfig) {
+		t.Fatalf("cached zero ttl: want ErrInvalidClientConfig, got %v", err)
+	}
 	if _, err := NewClient(BearerToken("lv_test"), WithBaseURL("ftp://api.example.com")); !errors.Is(err, ErrInvalidClientConfig) {
 		t.Fatalf("bad base URL: want ErrInvalidClientConfig, got %v", err)
 	}
@@ -810,6 +814,20 @@ func TestClient_APIErrorStructuredDetailIsCapped(t *testing.T) {
 	}
 	if len(apiErr.Detail) != maxAPIErrorSnippetBytes+len("...") || !strings.HasSuffix(apiErr.Detail, "...") {
 		t.Fatalf("APIError detail was not capped: len=%d suffix=%q", len(apiErr.Detail), apiErr.Detail[len(apiErr.Detail)-3:])
+	}
+}
+
+func TestClient_APIErrorSnippetDoesNotSplitUTF8(t *testing.T) {
+	longDetail := strings.Repeat("€", maxAPIErrorSnippetBytes)
+	snippet := apiErrorBodySnippet([]byte(longDetail))
+	if !utf8.ValidString(snippet) {
+		t.Fatalf("snippet is not valid UTF-8: %q", snippet)
+	}
+	if !strings.HasSuffix(snippet, "...") {
+		t.Fatalf("snippet suffix = %q, want ellipsis", snippet[len(snippet)-3:])
+	}
+	if got := strings.TrimSuffix(snippet, "..."); len(got) > maxAPIErrorSnippetBytes {
+		t.Fatalf("snippet body length = %d, want <= %d", len(got), maxAPIErrorSnippetBytes)
 	}
 }
 

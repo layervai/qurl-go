@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -127,7 +128,8 @@ func FileCredentials(path string) CredentialProvider {
 // Authorization value is reusable across requests. Do not wrap providers that
 // sign request-specific fields or set non-Authorization headers; those providers
 // should run on every request. Failed refreshes are not cached; if a provider
-// keeps failing, later callers retry rather than reusing a stale error.
+// keeps failing, later callers retry rather than reusing a stale error. The
+// usual production shape is CachedCredentials(FileCredentials(path), ttl).
 func CachedCredentials(provider CredentialProvider, ttl time.Duration) CredentialProvider {
 	return newCachedCredentials(provider, ttl, time.Now)
 }
@@ -718,7 +720,7 @@ func MaxSessions(n int) PortalOption {
 // same h/m/s grammar.
 func WithSessionDuration(d time.Duration) PortalOption {
 	return portalOptionFunc(func(o *portalOptions) error {
-		sessionDuration, err := formatAPIDurationWithMaxUnit(d, time.Second, time.Hour)
+		sessionDuration, err := formatAPIDuration(d, time.Second)
 		if err != nil {
 			return err
 		}
@@ -998,6 +1000,9 @@ func validateClientCredentialProvider(provider CredentialProvider, baseURL strin
 		if p == nil {
 			return fmt.Errorf("%w: credential provider must not be nil", ErrInvalidClientConfig)
 		}
+		if p.ttl <= 0 {
+			return fmt.Errorf("%w: credential cache ttl must be positive", ErrInvalidClientConfig)
+		}
 		return validateClientCredentialProvider(p.provider, baseURL)
 	}
 	return nil
@@ -1198,35 +1203,35 @@ func apiErrorBodySnippet(body []byte) string {
 	if len(body) == 0 {
 		return ""
 	}
-	truncated := len(body) > maxAPIErrorSnippetBytes
-	if truncated {
-		body = body[:maxAPIErrorSnippetBytes]
-	}
 	snippet := strings.Join(strings.Fields(string(body)), " ")
-	if truncated {
-		snippet += "..."
+	if len(snippet) <= maxAPIErrorSnippetBytes {
+		return snippet
 	}
-	return snippet
+	return truncateUTF8(snippet, maxAPIErrorSnippetBytes) + "..."
+}
+
+func truncateUTF8(s string, limit int) string {
+	if len(s) <= limit {
+		return s
+	}
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
 }
 
 func formatAPIDuration(d time.Duration, minDuration time.Duration) (string, error) {
-	return formatAPIDurationWithMaxUnit(d, minDuration, time.Hour)
-}
-
-func formatAPIDurationWithMaxUnit(d time.Duration, minDuration time.Duration, maxUnit time.Duration) (string, error) {
 	if d < minDuration {
 		return "", fmt.Errorf("%w: duration must be at least %s", ErrInvalidPortalRequest, minDuration)
 	}
 	if d%time.Second != 0 {
 		return "", fmt.Errorf("%w: duration must be whole seconds", ErrInvalidPortalRequest)
 	}
-	const day = 24 * time.Hour
 	switch {
-	case maxUnit >= day && d%day == 0:
-		return fmt.Sprintf("%dd", d/day), nil
-	case maxUnit >= time.Hour && d%time.Hour == 0:
+	case d%time.Hour == 0:
 		return fmt.Sprintf("%dh", d/time.Hour), nil
-	case maxUnit >= time.Minute && d%time.Minute == 0:
+	case d%time.Minute == 0:
 		return fmt.Sprintf("%dm", d/time.Minute), nil
 	default:
 		return fmt.Sprintf("%ds", d/time.Second), nil
