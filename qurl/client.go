@@ -98,7 +98,9 @@ func (c bearerTokenCredential) Authorize(_ context.Context, req *http.Request) e
 // BearerToken returns a CredentialProvider backed by one bearer token.
 //
 // It is useful for tests and controlled tooling that already received a LayerV
-// bearer credential from a protected credential path.
+// bearer credential from a protected credential path. The token is stored as a
+// Go string; production services should prefer OpenClient, FileCredentials, or
+// a custom provider that loads credentials from protected state.
 func BearerToken(token string) CredentialProvider {
 	return bearerTokenCredential(token)
 }
@@ -111,8 +113,9 @@ type fileCredentialProvider struct {
 // rotated local credentials are picked up without rebuilding the client. Most
 // applications should use OpenClient; use FileCredentials only when wiring a
 // custom runtime path. High-throughput callers that rarely rotate credentials
-// can wrap their own caching CredentialProvider. The context passed to Authorize
-// cannot interrupt local filesystem I/O after it has started. If the state file
+// can wrap their own caching CredentialProvider. The default favors hot-reload
+// correctness over syscall minimization. The context passed to Authorize cannot
+// interrupt local filesystem I/O after it has started. If the state file
 // contains an "authorization" field, its value is trusted as the raw
 // Authorization header.
 func FileCredentials(path string) CredentialProvider {
@@ -574,9 +577,9 @@ func OneTimeUse() PortalOption {
 
 // MaxSessions limits concurrent sessions for this qURL link. The SDK caps this
 // at 1000 as a client-side guardrail; the LayerV API remains the source of
-// truth for account limits. Use 0 for unlimited sessions; the SDK sends an explicit
-// max_sessions:0, while omitting this option leaves the server default in
-// effect.
+// truth for account limits. Use 0 for unlimited sessions; the SDK sends an
+// explicit max_sessions:0, while omitting this option leaves the server default
+// in effect.
 func MaxSessions(n int) PortalOption {
 	return portalOptionFunc(func(o *portalOptions) error {
 		if n < 0 || n > 1000 {
@@ -800,6 +803,8 @@ func applyPortalOptions(opts []PortalOption) (portalOptions, error) {
 func validateTargetURL(targetURL string, errKind error) error {
 	// Protected targets may be private http:// services. Credential-bearing API
 	// and bootstrap origins layer validateHTTPSOrLoopbackURL on top instead.
+	// This client only rejects malformed URLs and embedded credentials; LayerV
+	// performs the server-side resource checks when the target is registered.
 	_, err := parseHTTPURL(targetURL, "target URL", errKind)
 	return err
 }

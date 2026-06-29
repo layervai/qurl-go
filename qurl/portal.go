@@ -158,6 +158,8 @@ func (e *relayErrorView) Unwrap() error {
 }
 
 func (e *relayErrorView) As(target any) bool {
+	// Keep the public *qurl.RelayError reachable while Unwrap preserves the
+	// internal *relayknock.RelayError and any wrapped context/cancellation cause.
 	if relay, ok := target.(**RelayError); ok {
 		*relay = e.relay
 		return true
