@@ -28,7 +28,7 @@ something durable to find, scan, or steal. qURL flips that model. It is an
 invisibility primitive for authenticated access, not another externally visible
 endpoint in front of the same service. The private resource is not public
 inventory. A portal is cryptographic, just-in-time permission for one actor to
-make one private path reachable under LayerV policy.
+reach one private resource without turning that resource into public inventory.
 
 ## Install
 
@@ -130,7 +130,7 @@ custom store, implement `qurl.CredentialProvider` and pass it to
 
 Most recipients open qURL links directly and do not use this SDK at all. If you
 are building a service or agent that opens received qURL links programmatically,
-install opener policy once at startup, then enter portals with one call:
+install opener trust config once at startup, then enter portals with one call:
 
 ```go
 portal, err := qurl.EnterPortal(ctx, link)

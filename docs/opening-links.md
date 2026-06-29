@@ -7,8 +7,8 @@ Opening a portal does not require LayerV credentials or issuer setup.
 ## Programmatic Opening
 
 Use this SDK only when your Go service or agent needs to open received qURL links
-in code. Install opener policy once at startup, then call `EnterPortal` anywhere
-you receive a link:
+in code. Install opener trust config once at startup, then call `EnterPortal`
+anywhere you receive a link:
 
 ```go
 portal, err := qurl.EnterPortal(ctx, link)
@@ -19,11 +19,11 @@ if err != nil {
 fmt.Println(portal.ResourceURL)
 ```
 
-The opener policy is not an issuer credential. It cannot protect URLs or create
-portals; it only tells the SDK which LayerV-issued qURL links and platform
-access endpoints this process should trust.
+The opener trust config is not an issuer credential. It cannot protect URLs or
+create portals; it only tells the SDK which LayerV-issued qURL links and
+platform access endpoints this process should trust.
 
-For pinned opener policy, install a `StaticProvider` during startup:
+For pinned opener trust config, install a `StaticProvider` during startup:
 
 ```go
 func installPinnedOpener(issuerKID string, issuerPublicKeyDER []byte, platformHosts []string) error {
@@ -58,7 +58,7 @@ switch {
 case err == nil:
 	use(portal.ResourceURL)
 case errors.Is(err, qurl.ErrNotConfigured):
-	reportMissingOpenerPolicy()
+	reportMissingOpenerTrustConfig()
 case errors.Is(err, qurl.ErrSignature), errors.Is(err, qurl.ErrUnknownKID):
 	reject()
 default:

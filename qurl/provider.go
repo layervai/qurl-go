@@ -8,13 +8,14 @@ import (
 
 // Opener config provider for the one-argument EnterPortal.
 //
-// EnterPortal needs opener policy before it can open links. The policy is not an
-// issuer credential: the per-qURL credential rides inside the link itself. A
-// Provider resolves that policy so callers get the locked one-arg verb without
-// hand-wiring Config, while EnterPortalWith stays the explicit-config seam.
+// EnterPortal needs opener trust config before it can open links. That config is
+// not an issuer credential: the per-qURL credential rides inside the link
+// itself. A Provider resolves the trust config so callers get the locked one-arg
+// verb without hand-wiring Config, while EnterPortalWith stays the
+// explicit-config seam.
 //
 // The Provider supplies config; it never bypasses verification. EnterPortal feeds
-// the resolved trust policy into EnterPortalWith, which still verifies the link
+// the resolved trust config into EnterPortalWith, which still verifies the link
 // before using any platform access URL from it.
 
 // Provider resolves opener config for EnterPortal.
@@ -25,8 +26,8 @@ import (
 // returns an error rather than a partial or stale result, so EnterPortal refuses
 // rather than trusting unverifiable config.
 //
-// Both returned values must be non-nil on success; incomplete opener policy makes
-// EnterPortalWith return ErrNotConfigured.
+// Both returned values must be non-nil on success; incomplete opener trust config
+// makes EnterPortalWith return ErrNotConfigured.
 type Provider interface {
 	Resolve(ctx context.Context) (*TrustStore, *RelayAllowlist, error)
 }
@@ -46,7 +47,7 @@ type StaticProvider struct {
 }
 
 // NewStaticProvider builds a StaticProvider from already-constructed opener
-// policy. Both values are REQUIRED and must be non-nil.
+// config. Both values are REQUIRED and must be non-nil.
 func NewStaticProvider(ts *TrustStore, allow *RelayAllowlist) (*StaticProvider, error) {
 	if ts == nil {
 		return nil, errors.New("qurl: static provider requires a non-nil trust store")

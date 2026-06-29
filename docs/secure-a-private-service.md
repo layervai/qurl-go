@@ -54,13 +54,13 @@ fmt.Println(portal.Link)
 ```
 
 You can create many portals for one resource, each with its own lifetime, label,
-and session policy.
+and session controls.
 
 ## 4. Open a Link Programmatically
 
 Most users can open the qURL link directly and need no keypair state. If you are
-building an agent or service that opens received qURL links in code, install
-opener policy once during startup, then call `EnterPortal`:
+building an agent or service that opens received qURL links in code, install the
+opener trust config once during startup, then call `EnterPortal`:
 
 ```go
 opened, err := qurl.EnterPortal(ctx, portal.Link)
