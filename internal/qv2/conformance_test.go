@@ -94,6 +94,10 @@ func runSignatureClass(t *testing.T, cf *ConformanceFile) {
 	var acceptRawSig []byte
 	for _, v := range vf.Vectors {
 		t.Run(v.Name, func(t *testing.T) {
+			wantInput := encodeB64(signingInput(v.ClaimsB64))
+			if v.SigningInputB64 != wantInput {
+				t.Fatalf("signing_input_b64 mismatch:\n got %q\nwant %q", v.SigningInputB64, wantInput)
+			}
 			rawSig, err := decodeB64(v.SigB64Raw)
 			if err != nil {
 				t.Fatalf("decode sig: %v", err)
@@ -113,7 +117,7 @@ func runSignatureClass(t *testing.T, cf *ConformanceFile) {
 				if verr == nil {
 					t.Fatal("reject signature vector unexpectedly verified")
 				}
-				assertConformanceSignatureReject(t, v.Reason, verr)
+				assertConformanceSignatureReject(t, signatureRejectClass(t, v), verr)
 			default:
 				t.Fatalf("unknown expect %q", v.Expect)
 			}
@@ -224,23 +228,16 @@ func flipFirstBase64urlChar(in string) string {
 	return string(repl) + in[1:]
 }
 
-// assertConformanceSignatureReject maps a composed signature vector's reason to
-// the precise sentinel, mirroring the signature class's reject_class vocabulary.
-func assertConformanceSignatureReject(t *testing.T, reason string, err error) {
+// assertConformanceSignatureReject maps a composed signature vector's reject_class
+// to the precise sentinel, mirroring the signature class vocabulary.
+func assertConformanceSignatureReject(t *testing.T, rejectClass string, err error) {
 	t.Helper()
-	switch reason {
-	case RejectClassHighS:
-		if !errors.Is(err, ErrSignatureHighS) {
-			t.Fatalf("high_s vector: expected ErrSignatureHighS, got %v", err)
-		}
-	case RejectClassWrongLength:
-		if !errors.Is(err, ErrSignatureLength) {
-			t.Fatalf("wrong_length vector: expected ErrSignatureLength, got %v", err)
-		}
-	default:
-		if !errors.Is(err, ErrSignature) {
-			t.Fatalf("signature reject %q: expected ErrSignature, got %v", reason, err)
-		}
+	want, ok := signatureRejectErrors[rejectClass]
+	if !ok {
+		t.Fatalf("unexpected signature reject_class %q; LoadVectorBytes should reject unknown classes before verification", rejectClass)
+	}
+	if !errors.Is(err, want) {
+		t.Fatalf("%s vector: expected %v, got %v", rejectClass, want, err)
 	}
 }
 
@@ -419,8 +416,8 @@ func assertParseOutcome(t *testing.T, v ConformanceVector, err error) {
 // allowedRejectClasses maps each class name to the reject_class values its reject
 // vectors may declare. It is the single in-test statement of the cross-language
 // vocabulary; a reject vector outside its class's set fails
-// assertRejectClassVocabulary. The signature class is composed (its reject_class
-// lives in the signature fixture's reason field), so it is not listed here.
+// assertRejectClassVocabulary. The signature class is composed and stored in the
+// separate signature fixture, so it is not listed here.
 var allowedRejectClasses = map[string]map[string]struct{}{
 	"claims_parse":    {rejectClassParse: {}},
 	"secret_parse":    {rejectClassParse: {}, rejectClassKeyLength: {}},

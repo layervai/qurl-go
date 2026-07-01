@@ -1,5 +1,5 @@
-github.com/layervai/qurl-conformance v0.1.1 h1:zfQ9dgfU+0EVF5+Ew+RjCQDkrbwmk22oNjylAqidohY=
-github.com/layervai/qurl-conformance v0.1.1/go.mod h1:oSr+quGs6eVCB7Zs63L9/Y6+s4W0XpLQep+j+XESndY=
+github.com/layervai/qurl-conformance v0.1.2 h1:2FkbA6F2FURAnWIjXB7/Z8ErxUZ2//vYVONt6Wvkc7U=
+github.com/layervai/qurl-conformance v0.1.2/go.mod h1:oSr+quGs6eVCB7Zs63L9/Y6+s4W0XpLQep+j+XESndY=
 golang.org/x/crypto v0.53.0 h1:QZ4Muo8THX6CizN2vPPd5fBGHyogrdK9fG4wLPFUsto=
 golang.org/x/crypto v0.53.0/go.mod h1:DNLU434OwVakk9PzuwV8w62mAJpRJL3vsgcfp4Qnsio=
 golang.org/x/sys v0.46.0 h1:noSf2Fq6F8DBgS+LysIkx7rIExoNHJsxOAtPp4rthXw=
