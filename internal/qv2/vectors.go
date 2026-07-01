@@ -101,24 +101,41 @@ const (
 	RejectClassWrongLength = "wrong_length"
 )
 
-// signatureRejectErrors maps each valid signature reject_class to the sentinel
-// verifier error it must produce. The loader uses the keys as the closed
-// taxonomy, so assertion and schema validation move together.
+type signatureRejectClassSpec struct {
+	err         error
+	sigEncoding string
+}
+
+// signatureRejectClasses maps each valid signature reject_class to the sentinel
+// verifier error it must produce and the concrete fixture encoding that exercises
+// it. The loader uses the keys as the closed taxonomy, so assertion, encoding
+// shape, and schema validation move together.
 var (
-	signatureRejectErrors = map[string]error{
-		RejectClassHighS:       ErrSignatureHighS,
-		RejectClassWrongLength: ErrSignatureLength,
+	signatureRejectClasses = map[string]signatureRejectClassSpec{
+		RejectClassHighS: {
+			err:         ErrSignatureHighS,
+			sigEncoding: SignatureEncodingRawRS,
+		},
+		RejectClassWrongLength: {
+			err:         ErrSignatureLength,
+			sigEncoding: SignatureEncodingDER,
+		},
 	}
 	signatureRejectClassNames = sortedSignatureRejectClassNames()
 )
 
 func sortedSignatureRejectClassNames() string {
-	names := make([]string, 0, len(signatureRejectErrors))
-	for name := range signatureRejectErrors {
+	names := make([]string, 0, len(signatureRejectClasses))
+	for name := range signatureRejectClasses {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 	return strings.Join(names, ", ")
+}
+
+func signatureRejectClassSpecFor(rejectClass string) (signatureRejectClassSpec, bool) {
+	spec, ok := signatureRejectClasses[rejectClass]
+	return spec, ok
 }
 
 // LoadVectorBytes parses a committed vector file's bytes. It returns an error
@@ -197,15 +214,12 @@ func validateRejectSignatureVector(v *SignatureVector) error {
 	if v.RejectClass == nil {
 		return fmt.Errorf("qurl: reject signature vector %q is missing reject_class", v.Name)
 	}
-	if _, ok := signatureRejectErrors[*v.RejectClass]; !ok {
+	spec, ok := signatureRejectClassSpecFor(*v.RejectClass)
+	if !ok {
 		return fmt.Errorf("qurl: reject signature vector %q has reject_class %q, want one of %s", v.Name, *v.RejectClass, signatureRejectClassNames)
 	}
-	wantEncoding := SignatureEncodingRawRS
-	if *v.RejectClass == RejectClassWrongLength {
-		wantEncoding = SignatureEncodingDER
-	}
-	if v.SigEncoding != wantEncoding {
-		return fmt.Errorf("qurl: reject signature vector %q with reject_class %q has sig_encoding %q, want %s", v.Name, *v.RejectClass, v.SigEncoding, wantEncoding)
+	if v.SigEncoding != spec.sigEncoding {
+		return fmt.Errorf("qurl: reject signature vector %q with reject_class %q has sig_encoding %q, want %s", v.Name, *v.RejectClass, v.SigEncoding, spec.sigEncoding)
 	}
 	return nil
 }

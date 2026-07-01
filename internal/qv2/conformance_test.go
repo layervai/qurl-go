@@ -232,12 +232,12 @@ func flipFirstBase64urlChar(in string) string {
 // to the precise sentinel, mirroring the signature class vocabulary.
 func assertConformanceSignatureReject(t *testing.T, rejectClass string, err error) {
 	t.Helper()
-	want, ok := signatureRejectErrors[rejectClass]
+	spec, ok := signatureRejectClassSpecFor(rejectClass)
 	if !ok {
 		t.Fatalf("unexpected signature reject_class %q; LoadVectorBytes should reject unknown classes before verification", rejectClass)
 	}
-	if !errors.Is(err, want) {
-		t.Fatalf("%s vector: expected %v, got %v", rejectClass, want, err)
+	if !errors.Is(err, spec.err) {
+		t.Fatalf("%s vector: expected %v, got %v", rejectClass, spec.err, err)
 	}
 }
 
