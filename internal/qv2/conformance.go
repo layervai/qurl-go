@@ -116,8 +116,11 @@ type ConformanceClass struct {
 // populated; the loader does not interpret them — the test routes each class to
 // the matching entry point and reads the fields that class uses.
 type ConformanceVector struct {
-	Name        string `json:"name"`
-	Expect      string `json:"expect"`
+	Name   string `json:"name"`
+	Expect string `json:"expect"`
+	// Composed conformance classes keep reject_class as a string because their
+	// accept vectors do not need the absent-vs-empty distinction SignatureVector
+	// enforces for issuer-signature JSON.
 	RejectClass string `json:"reject_class"`
 	Reason      string `json:"reason"`
 
