@@ -172,54 +172,60 @@ func validateSignatureVector(i int, v *SignatureVector, seenNames map[string]str
 	// Reason is prose-only, but every vector must carry it so fixture diffs stay
 	// reviewable and self-explanatory.
 	if strings.TrimSpace(v.Reason) == "" {
-		return fmt.Errorf("qurl: signature vector %q has empty reason", v.Name)
+		return fmt.Errorf("qurl: signature vector %q has empty reason", name)
 	}
-	for _, field := range []struct {
-		name  string
-		value string
-	}{
-		{name: "claims_b64", value: v.ClaimsB64},
-		{name: "sig_b64", value: v.SigB64Raw},
-		{name: "sig_encoding", value: v.SigEncoding},
-		{name: "signing_input_b64", value: v.SigningInputB64},
-	} {
-		if strings.TrimSpace(field.value) == "" {
-			return fmt.Errorf("qurl: signature vector %q has empty %s", v.Name, field.name)
-		}
+	if err := validateSignaturePayloadFields(name, v); err != nil {
+		return err
 	}
 	if v.SigEncoding != SignatureEncodingRawRS && v.SigEncoding != SignatureEncodingDER {
-		return fmt.Errorf("qurl: signature vector %q has sig_encoding %q, want %s|%s", v.Name, v.SigEncoding, SignatureEncodingRawRS, SignatureEncodingDER)
+		return fmt.Errorf("qurl: signature vector %q has sig_encoding %q, want %s|%s", name, v.SigEncoding, SignatureEncodingRawRS, SignatureEncodingDER)
 	}
 	switch v.Expect {
 	case ExpectAccept:
-		return validateAcceptSignatureVector(v)
+		return validateAcceptSignatureVector(name, v)
 	case ExpectReject:
-		return validateRejectSignatureVector(v)
+		return validateRejectSignatureVector(name, v)
 	default:
-		return fmt.Errorf("qurl: signature vector %q has expect %q, want accept|reject", v.Name, v.Expect)
+		return fmt.Errorf("qurl: signature vector %q has expect %q, want accept|reject", name, v.Expect)
 	}
 }
 
-func validateAcceptSignatureVector(v *SignatureVector) error {
-	if v.SigEncoding != SignatureEncodingRawRS {
-		return fmt.Errorf("qurl: accept signature vector %q has sig_encoding %q, want %s", v.Name, v.SigEncoding, SignatureEncodingRawRS)
+func validateSignaturePayloadFields(name string, v *SignatureVector) error {
+	if strings.TrimSpace(v.ClaimsB64) == "" {
+		return fmt.Errorf("qurl: signature vector %q has empty claims_b64", name)
 	}
-	if v.RejectClass != nil {
-		return fmt.Errorf("qurl: accept signature vector %q has reject_class %q", v.Name, *v.RejectClass)
+	if strings.TrimSpace(v.SigB64Raw) == "" {
+		return fmt.Errorf("qurl: signature vector %q has empty sig_b64", name)
+	}
+	if strings.TrimSpace(v.SigEncoding) == "" {
+		return fmt.Errorf("qurl: signature vector %q has empty sig_encoding", name)
+	}
+	if strings.TrimSpace(v.SigningInputB64) == "" {
+		return fmt.Errorf("qurl: signature vector %q has empty signing_input_b64", name)
 	}
 	return nil
 }
 
-func validateRejectSignatureVector(v *SignatureVector) error {
+func validateAcceptSignatureVector(name string, v *SignatureVector) error {
+	if v.SigEncoding != SignatureEncodingRawRS {
+		return fmt.Errorf("qurl: accept signature vector %q has sig_encoding %q, want %s", name, v.SigEncoding, SignatureEncodingRawRS)
+	}
+	if v.RejectClass != nil {
+		return fmt.Errorf("qurl: accept signature vector %q has reject_class %q", name, *v.RejectClass)
+	}
+	return nil
+}
+
+func validateRejectSignatureVector(name string, v *SignatureVector) error {
 	if v.RejectClass == nil {
-		return fmt.Errorf("qurl: reject signature vector %q is missing reject_class", v.Name)
+		return fmt.Errorf("qurl: reject signature vector %q is missing reject_class", name)
 	}
 	spec, ok := signatureRejectClassSpecFor(*v.RejectClass)
 	if !ok {
-		return fmt.Errorf("qurl: reject signature vector %q has reject_class %q, want one of %s", v.Name, *v.RejectClass, signatureRejectClassNames)
+		return fmt.Errorf("qurl: reject signature vector %q has reject_class %q, want one of %s", name, *v.RejectClass, signatureRejectClassNames)
 	}
 	if v.SigEncoding != spec.sigEncoding {
-		return fmt.Errorf("qurl: reject signature vector %q with reject_class %q has sig_encoding %q, want %s", v.Name, *v.RejectClass, v.SigEncoding, spec.sigEncoding)
+		return fmt.Errorf("qurl: reject signature vector %q with reject_class %q has sig_encoding %q, want %s", name, *v.RejectClass, v.SigEncoding, spec.sigEncoding)
 	}
 	return nil
 }
