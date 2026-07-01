@@ -8,18 +8,23 @@ import (
 const (
 	validSignaturePayloadJSON    = `"claims_b64":"claims","sig_b64":"sig","sig_encoding":"raw_r_s","signing_input_b64":"input"`
 	validDERSignaturePayloadJSON = `"claims_b64":"claims","sig_b64":"sig","sig_encoding":"der","signing_input_b64":"input"`
+	validVectorFileFields        = `"description":"test fixture","algorithm":"test algorithm","domain_separation_prefix":"NHP-QURL-V2-ISSUER","issuer":{"kid":"kid","spki_der_b64":"spki","jwk":{"kty":"EC","crv":"P-256","x":"x","y":"y"}}`
 )
 
 func vectorJSON(fields string) string {
-	return `{"vectors":[{` + fields + `,` + validSignaturePayloadJSON + `}]}`
+	return vectorDocument(`[{` + fields + `,` + validSignaturePayloadJSON + `}]`)
 }
 
 func derVectorJSON(fields string) string {
-	return `{"vectors":[{` + fields + `,` + validDERSignaturePayloadJSON + `}]}`
+	return vectorDocument(`[{` + fields + `,` + validDERSignaturePayloadJSON + `}]`)
 }
 
 func vectorFileJSON(fields string) string {
-	return `{"vectors":[{` + fields + `}]}`
+	return vectorDocument(`[{` + fields + `}]`)
+}
+
+func vectorDocument(vectors string) string {
+	return `{` + validVectorFileFields + `,"vectors":` + vectors + `}`
 }
 
 func TestLoadVectorBytesValidatesSignatureRejectClass(t *testing.T) {
@@ -37,8 +42,53 @@ func TestLoadVectorBytesValidatesSignatureRejectClass(t *testing.T) {
 		},
 		{
 			name:          "empty_vectors",
-			json:          `{"vectors":[]}`,
+			json:          vectorDocument(`[]`),
 			wantErrSubstr: "vector file has no vectors",
+		},
+		{
+			name:          "vector_with_unknown_field",
+			json:          vectorJSON(`"name":"unknown_field","expect":"accept","reason":"valid signature","unexpected":true`),
+			wantErrSubstr: `unknown field "unexpected"`,
+		},
+		{
+			name:          "empty_algorithm",
+			json:          `{"description":"test fixture","algorithm":"","domain_separation_prefix":"NHP-QURL-V2-ISSUER","issuer":{"kid":"kid","spki_der_b64":"spki","jwk":{"kty":"EC","crv":"P-256","x":"x","y":"y"}},"vectors":[{"name":"accept_valid_low_s","expect":"accept","reason":"valid signature",` + validSignaturePayloadJSON + `}]}`,
+			wantErrSubstr: "vector file has empty algorithm",
+		},
+		{
+			name:          "wrong_domain_separator",
+			json:          `{"description":"test fixture","algorithm":"test algorithm","domain_separation_prefix":"WRONG","issuer":{"kid":"kid","spki_der_b64":"spki","jwk":{"kty":"EC","crv":"P-256","x":"x","y":"y"}},"vectors":[{"name":"accept_valid_low_s","expect":"accept","reason":"valid signature",` + validSignaturePayloadJSON + `}]}`,
+			wantErrSubstr: `vector file has domain_separation_prefix "WRONG"`,
+		},
+		{
+			name:          "missing_issuer_spki",
+			json:          `{"description":"test fixture","algorithm":"test algorithm","domain_separation_prefix":"NHP-QURL-V2-ISSUER","issuer":{"kid":"kid","jwk":{"kty":"EC","crv":"P-256","x":"x","y":"y"}},"vectors":[{"name":"accept_valid_low_s","expect":"accept","reason":"valid signature",` + validSignaturePayloadJSON + `}]}`,
+			wantErrSubstr: "vector file issuer has empty spki_der_b64",
+		},
+		{
+			name:          "empty_issuer_kid",
+			json:          `{"description":"test fixture","algorithm":"test algorithm","domain_separation_prefix":"NHP-QURL-V2-ISSUER","issuer":{"kid":"","spki_der_b64":"spki","jwk":{"kty":"EC","crv":"P-256","x":"x","y":"y"}},"vectors":[{"name":"accept_valid_low_s","expect":"accept","reason":"valid signature",` + validSignaturePayloadJSON + `}]}`,
+			wantErrSubstr: "vector file issuer has empty kid",
+		},
+		{
+			name:          "wrong_issuer_jwk_kty",
+			json:          `{"description":"test fixture","algorithm":"test algorithm","domain_separation_prefix":"NHP-QURL-V2-ISSUER","issuer":{"kid":"kid","spki_der_b64":"spki","jwk":{"kty":"RSA","crv":"P-256","x":"x","y":"y"}},"vectors":[{"name":"accept_valid_low_s","expect":"accept","reason":"valid signature",` + validSignaturePayloadJSON + `}]}`,
+			wantErrSubstr: `vector file issuer jwk has kty "RSA", want EC`,
+		},
+		{
+			name:          "wrong_issuer_jwk_crv",
+			json:          `{"description":"test fixture","algorithm":"test algorithm","domain_separation_prefix":"NHP-QURL-V2-ISSUER","issuer":{"kid":"kid","spki_der_b64":"spki","jwk":{"kty":"EC","crv":"P-384","x":"x","y":"y"}},"vectors":[{"name":"accept_valid_low_s","expect":"accept","reason":"valid signature",` + validSignaturePayloadJSON + `}]}`,
+			wantErrSubstr: `vector file issuer jwk has crv "P-384", want P-256`,
+		},
+		{
+			name:          "empty_issuer_jwk_x",
+			json:          `{"description":"test fixture","algorithm":"test algorithm","domain_separation_prefix":"NHP-QURL-V2-ISSUER","issuer":{"kid":"kid","spki_der_b64":"spki","jwk":{"kty":"EC","crv":"P-256","x":"","y":"y"}},"vectors":[{"name":"accept_valid_low_s","expect":"accept","reason":"valid signature",` + validSignaturePayloadJSON + `}]}`,
+			wantErrSubstr: "vector file issuer jwk has empty x",
+		},
+		{
+			name:          "empty_issuer_jwk_y",
+			json:          `{"description":"test fixture","algorithm":"test algorithm","domain_separation_prefix":"NHP-QURL-V2-ISSUER","issuer":{"kid":"kid","spki_der_b64":"spki","jwk":{"kty":"EC","crv":"P-256","x":"x","y":""}},"vectors":[{"name":"accept_valid_low_s","expect":"accept","reason":"valid signature",` + validSignaturePayloadJSON + `}]}`,
+			wantErrSubstr: "vector file issuer jwk has empty y",
 		},
 		{
 			name:       "accept_without_reject_class",
@@ -64,7 +114,7 @@ func TestLoadVectorBytesValidatesSignatureRejectClass(t *testing.T) {
 		},
 		{
 			name:          "duplicate_name",
-			json:          `{"vectors":[{` + `"name":"dupe","expect":"accept","reason":"valid signature",` + validSignaturePayloadJSON + `},{` + `"name":"dupe","expect":"accept","reason":"another valid signature",` + validSignaturePayloadJSON + `}]}`,
+			json:          vectorDocument(`[{` + `"name":"dupe","expect":"accept","reason":"valid signature",` + validSignaturePayloadJSON + `},{` + `"name":"dupe","expect":"accept","reason":"another valid signature",` + validSignaturePayloadJSON + `}]`),
 			wantErrSubstr: `duplicate signature vector name "dupe"`,
 		},
 		{
@@ -78,9 +128,29 @@ func TestLoadVectorBytesValidatesSignatureRejectClass(t *testing.T) {
 			wantErrSubstr: `accept signature vector "bad_accept_empty" has reject_class ""`,
 		},
 		{
+			name:          "accept_with_null_reject_class",
+			json:          vectorJSON(`"name":"bad_accept_null","expect":"accept","reason":"valid signature","reject_class":null`),
+			wantErrSubstr: `accept signature vector "bad_accept_null" has reject_class null`,
+		},
+		{
+			name:          "accept_with_non_string_reject_class",
+			json:          vectorJSON(`"name":"bad_accept_non_string","expect":"accept","reason":"valid signature","reject_class":123`),
+			wantErrSubstr: `reject_class: json: cannot unmarshal number`,
+		},
+		{
 			name:          "reject_with_empty_reject_class",
 			json:          vectorJSON(`"name":"bad_reject_empty","expect":"reject","reason":"unknown class","reject_class":""`),
 			wantErrSubstr: `reject signature vector "bad_reject_empty" has reject_class ""`,
+		},
+		{
+			name:          "reject_with_null_reject_class",
+			json:          vectorJSON(`"name":"bad_reject_null","expect":"reject","reason":"unknown class","reject_class":null`),
+			wantErrSubstr: `reject signature vector "bad_reject_null" has reject_class null`,
+		},
+		{
+			name:          "reject_with_non_string_reject_class",
+			json:          vectorJSON(`"name":"bad_reject_non_string","expect":"reject","reason":"unknown class","reject_class":123`),
+			wantErrSubstr: `reject_class: json: cannot unmarshal number`,
 		},
 		{
 			name:          "reject_with_unknown_reject_class",
