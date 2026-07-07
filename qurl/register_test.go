@@ -482,6 +482,31 @@ func (h *registerHarness) armDevicePubOnInfo() {
 	})
 }
 
+// failingSaveStore wraps an AgentStateStore and fails SaveAgentState the first
+// time the predicate matches the state being saved, then delegates normally. It
+// is used to inject a persist failure at a specific state transition (the OTP
+// request save) without failing the other saves in the flow.
+type failingSaveStore struct {
+	inner     AgentStateStore
+	failWhen  func(*AgentState) bool
+	failErr   error
+	failsLeft int
+	saveCalls atomic.Int32
+}
+
+func (s *failingSaveStore) LoadAgentState(ctx context.Context) (*AgentState, error) {
+	return s.inner.LoadAgentState(ctx)
+}
+
+func (s *failingSaveStore) SaveAgentState(ctx context.Context, state *AgentState) error {
+	s.saveCalls.Add(1)
+	if s.failsLeft > 0 && s.failWhen(state) {
+		s.failsLeft--
+		return s.failErr
+	}
+	return s.inner.SaveAgentState(ctx, state)
+}
+
 func decodeB64(t *testing.T, s string) []byte {
 	t.Helper()
 	b, err := base64.StdEncoding.DecodeString(s)
@@ -652,6 +677,53 @@ func TestRegisterAgent_AccountPath_OTPResendCooldown(t *testing.T) {
 	}
 	if h.nhp.otpCount() != 1 {
 		t.Fatalf("OTP sends within cooldown = %d, want 1 (no resend)", h.nhp.otpCount())
+	}
+}
+
+func TestRegisterAgent_AccountPath_OTPSavePersistsBeforeSend(t *testing.T) {
+	// Anti-spam fence: requestOTP persists OTPRequestedAt BEFORE sending the code.
+	// If the persist fails, NO email is dispatched (the caller retries as a
+	// still-fresh request), and across the failed attempt + retry exactly ONE code
+	// is ultimately sent — no duplicate from a persist that lost the otp_pending
+	// marker.
+	h := newRegisterHarness(t)
+	h.svc.keyKind = keyKindAccount
+	h.svc.maskedEmail = "j***@x.com"
+	h.armDevicePubOnInfo()
+
+	// Fail the save that records otp_pending (the first save whose state carries
+	// OTPRequestedAt) exactly once, then behave normally.
+	saveErr := errors.New("injected transient store write failure")
+	failing := &failingSaveStore{
+		inner:     h.store,
+		failWhen:  func(st *AgentState) bool { return st.OTPRequestedAt != nil },
+		failErr:   saveErr,
+		failsLeft: 1,
+	}
+	h.store = failing
+
+	// First attempt: the otp_pending persist fails, so no email is sent and the
+	// store error surfaces (not *OTPPendingError).
+	_, err := RegisterAgent(context.Background(), "lv_account_key", h.store, h.registerOpts()...)
+	if !errors.Is(err, saveErr) {
+		t.Fatalf("first attempt: want the injected store error, got %v", err)
+	}
+	if h.nhp.otpCount() != 0 {
+		t.Fatalf("first attempt sent %d codes despite the persist failing, want 0", h.nhp.otpCount())
+	}
+	// The failed persist must not have left otp_pending on disk.
+	state := h.loadState(t)
+	if state.OTPRequestedAt != nil {
+		t.Fatalf("failed OTP persist leaked otp_pending: %#v", state.OTPRequestedAt)
+	}
+
+	// Retry: the save now succeeds, exactly one code is dispatched, and it pauses.
+	_, err = RegisterAgent(context.Background(), "lv_account_key", h.store, h.registerOpts()...)
+	if !errors.Is(err, ErrOTPPending) {
+		t.Fatalf("retry: want ErrOTPPending, got %v", err)
+	}
+	if h.nhp.otpCount() != 1 {
+		t.Fatalf("total codes dispatched across failure+retry = %d, want exactly 1 (no duplicate)", h.nhp.otpCount())
 	}
 }
 

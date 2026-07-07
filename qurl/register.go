@@ -301,14 +301,24 @@ func (cfg *registerConfig) registerAndComplete(ctx context.Context, key string, 
 	return cfg.completeAndPersist(ctx, key, store, state)
 }
 
-// requestOTP dispatches the OTP email and records OTPRequestedAt (otp_pending).
+// requestOTP records OTPRequestedAt (otp_pending) and THEN dispatches the OTP
+// email. The order is deliberate and anti-spam: persisting before sending means
+// a persist failure emits no email (the caller retries as a still-fresh request,
+// no code wasted), while a send failure after a successful persist leaves the
+// state otp_pending — so the retry resumes under the 60s resend cooldown instead
+// of re-emailing immediately. (Send-then-persist would, on a store with
+// intermittent write failures, dispatch a code, fail the save, and re-send on
+// the next run as a fresh request with no backoff.) On a persist failure the
+// in-memory OTPRequestedAt mutation is rolled back so it matches what was stored.
 func (cfg *registerConfig) requestOTP(ctx context.Context, store AgentStateStore, state *AgentState, peer *NHPServerPeerInfo, relayURL, key string) error {
-	if err := cfg.sendOTP(ctx, state, peer, relayURL, key); err != nil {
+	now := cfg.clock()
+	prev := state.OTPRequestedAt
+	state.OTPRequestedAt = &now
+	if err := store.SaveAgentState(ctx, state); err != nil {
+		state.OTPRequestedAt = prev // roll back the in-memory mutation
 		return err
 	}
-	now := cfg.clock()
-	state.OTPRequestedAt = &now
-	return store.SaveAgentState(ctx, state)
+	return cfg.sendOTP(ctx, state, peer, relayURL, key)
 }
 
 // tryCompletionProbe attempts a completion fetch to self-heal a crash that
@@ -323,6 +333,13 @@ func (cfg *registerConfig) tryCompletionProbe(ctx context.Context, key string, s
 		if isCompletionNotYetRegistered(err) || isTransientCompletionError(err) {
 			// Not yet registered, or a transient blip on the optimization probe:
 			// fall through to REG rather than aborting the whole registration.
+			// Falling through on a transient (5xx) fault relies on the server
+			// treating a repeat REG for the same device key as idempotent — the
+			// same lost-response-retry assumption BootstrapAgent documents. A
+			// non-idempotent server would instead answer 52103 (identity conflict)
+			// and misleadingly suggest WithTakeover for what was really a transient
+			// blip; that trade-off is accepted because the device is not yet
+			// confirmed enrolled here, so REG (the real path) is the safe action.
 			return false, nil, nil
 		}
 		// Any other completion error is terminal — most notably a structured
@@ -626,7 +643,7 @@ func (cfg *registerConfig) resolveOTP(ctx context.Context) (string, error) {
 		}
 		code = strings.TrimSpace(code)
 		if code == "" {
-			return "", fmt.Errorf("%w: one-time code provider returned an empty code", ErrInvalidRegisterConfig)
+			return "", fmt.Errorf("%w: one-time code provider returned an empty code — on a fresh store the provider is called right after the code is dispatched, so it must await email delivery", ErrInvalidRegisterConfig)
 		}
 		return code, nil
 	}
