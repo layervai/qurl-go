@@ -917,6 +917,12 @@ func WithRelayURL(rawURL string) RegisterOption {
 // reported, and this override replaces it afterward. So the "we only knock a
 // server whose key matches the routing id" guarantee does not apply here — pin
 // only a peer you trust.
+//
+// The pre-flight still asserts its OWN internal consistency (the reported
+// server_id must match the reported peer key) before the override is applied, so
+// a self-inconsistent registration-info response is rejected even when you
+// override. If you override because the reported peer is unreachable, the response
+// must still be internally consistent for registration to proceed.
 func WithNHPPeer(peer NHPServerPeerInfo) RegisterOption {
 	return registerOptionFunc(func(o *registerConfig) error {
 		// o.clock is initialized to time.Now before options apply; using it keeps

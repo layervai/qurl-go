@@ -71,9 +71,14 @@ const rakSuccess = "0"
 
 func (b registerAckBody) isSuccess() bool { return b.ErrCode == "" || b.ErrCode == rakSuccess }
 
-// parseRegisterAck decodes the decrypted NHP_RAK body. An empty body is treated
-// as a zero-value ack (no errCode) so a malformed empty reply surfaces as a
-// missing-success failure rather than a JSON error, mirroring parseAck.
+// parseRegisterAck decodes the decrypted NHP_RAK body. An empty body decodes to a
+// zero-value ack whose empty errCode reads as success (isSuccess), so the run
+// proceeds to the completion fetch. That is safe not because the body is empty but
+// because the RAK was already authenticated by the Noise handshake and the
+// completion endpoint re-verifies server-side enrollment — a spurious empty RAK
+// simply fails there. The integrity guard is that authenticated-then-completion-
+// verified tail, not the emptiness. A non-empty body that is not valid JSON is a
+// hard error.
 func parseRegisterAck(body []byte) (*registerAckBody, error) {
 	var ack registerAckBody
 	if len(body) == 0 {

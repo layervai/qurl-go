@@ -95,10 +95,13 @@ type AgentState struct {
 	// completion. Its presence alongside RegisteredAt marks a state ready to back
 	// a Client with zero network. SENSITIVE — see the type doc.
 	DeviceAPIKey string `json:"device_api_key,omitempty"`
-	// RelayURL is the NHP relay base URL learned from registration-info, persisted
-	// so a resumed registration reuses the same relay.
+	// RelayURL records the NHP relay base URL from the most recent
+	// registration-info pre-flight. A resume re-fetches registration-info (the
+	// authoritative, side-effect-free source) rather than reading this back, so it
+	// is a record of the last-known relay, not the source of truth on resume.
 	RelayURL string `json:"relay_url,omitempty"`
-	// KeyID is the enrollment key id (key_...) learned from registration-info.
+	// KeyID is the enrollment key id (key_...) from registration-info, carried as
+	// the NHP usrId; like RelayURL it is refreshed from a fresh pre-flight on resume.
 	KeyID string `json:"key_id,omitempty"`
 	// OTPRequestedAt marks the account-key otp_pending state: an email one-time
 	// code has been requested and RegisterAgent is waiting for WithOTP. Cleared
