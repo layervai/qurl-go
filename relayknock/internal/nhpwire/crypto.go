@@ -6,9 +6,11 @@
 // lives in the wrapping packages.
 //
 // This package is under internal/ so nothing outside the relayknock module tree
-// can import it: a client SDK's public surface never ships these responder-role
-// wire ops. The wire format is fenced byte-for-byte by the golden vectors that
-// exercise it through relayknock.BuildKnock / relayknock.DecryptReply.
+// can import it, which keeps the responder-role wire ops off the *client* package
+// (relayknock) surface — they are re-exposed only through the separate
+// relayknocktest test-support package (the net/http/httptest pattern), not the
+// initiator API a normal agent imports. The wire format is fenced byte-for-byte by
+// the golden vectors that exercise it through relayknock.BuildKnock / DecryptReply.
 package nhpwire
 
 import (

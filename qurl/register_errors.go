@@ -97,7 +97,7 @@ func (e *OTPPendingError) Error() string {
 		dest = e.MaskedEmail
 	}
 	return fmt.Sprintf(
-		"qurl: LayerV emailed a one-time code to %s; re-run qurl.RegisterAgent with qurl.WithOTP(\"<code>\") to finish enrollment. Codes expire after a short window; re-running without WithOTP re-sends a fresh code after a short cooldown.",
+		"qurl: a one-time code was requested for %s — check that inbox and re-run qurl.RegisterAgent with qurl.WithOTP(\"<code>\") to finish enrollment. Codes expire after a short window; if none arrives, re-running without WithOTP re-sends a fresh code after a short cooldown.",
 		dest,
 	)
 }
