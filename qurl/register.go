@@ -46,7 +46,10 @@ import (
 //
 // Call RegisterAgent from one setup path at a time for a given store. Each state
 // write is atomic, but the SDK does not lock across concurrent callers sharing a
-// state file.
+// state file. In particular, on the account (email-OTP) path each concurrent
+// fresh run generates its own device identity and dispatches its own one-time
+// code, so concurrent setup multiplies OTP emails (last write to the state file
+// wins) — serialize enrollment per store.
 func RegisterAgent(ctx context.Context, key string, store AgentStateStore, opts ...RegisterOption) (*Client, error) {
 	cfg, err := newRegisterConfig(opts)
 	if err != nil {
@@ -890,7 +893,8 @@ func WithRegisterHTTPClient(client HTTPDoer) RegisterOption {
 
 // WithRelayURL overrides the NHP relay base URL that registration-info would
 // otherwise supply. Advanced: use it only when routing NHP through a specific
-// relay, for example in tests.
+// relay, for example in tests. Like WithNHPPeer, an overridden relay bypasses the
+// registration-info integrity check, so route only through a relay you trust.
 func WithRelayURL(rawURL string) RegisterOption {
 	return registerOptionFunc(func(o *registerConfig) error {
 		if err := validateHTTPSOrLoopbackURL(rawURL, "relay URL", ErrInvalidRegisterConfig); err != nil {
@@ -904,6 +908,12 @@ func WithRelayURL(rawURL string) RegisterOption {
 // WithNHPPeer overrides the NHP server peer that registration-info would
 // otherwise supply. Advanced: pairs with WithRelayURL for a pinned or test NHP
 // endpoint.
+//
+// An overridden peer is NOT covered by the registration-info server_id ⇄
+// peer-key fingerprint check: that check validates only the peer the service
+// reported, and this override replaces it afterward. So the "we only knock a
+// server whose key matches the routing id" guarantee does not apply here — pin
+// only a peer you trust.
 func WithNHPPeer(peer NHPServerPeerInfo) RegisterOption {
 	return registerOptionFunc(func(o *registerConfig) error {
 		// o.clock is initialized to time.Now before options apply; using it keeps
