@@ -3,6 +3,7 @@ package qurl
 import (
 	"encoding/json"
 	"errors"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -263,5 +264,93 @@ func TestSentinelForRAKCode(t *testing.T) {
 	}
 	if sentinelForRAKCode("00000") != nil {
 		t.Error("unknown code should map to nil")
+	}
+}
+
+// TestMapRegistrationHTTPError covers the registration-info HTTP-error mapping
+// directly (it is otherwise only reached transitively): structured key/disabled
+// codes and a bare 401/403 map to the typed sentinels; anything else passes
+// through unchanged. The underlying *APIError stays matchable via the wrap.
+func TestMapRegistrationHTTPError(t *testing.T) {
+	cfg := &registerConfig{}
+
+	tests := []struct {
+		name    string
+		apiErr  *APIError
+		want    error
+		wantRaw bool // true => expect the input returned unchanged (no sentinel)
+	}{
+		{name: "registration_disabled code", apiErr: &APIError{StatusCode: http.StatusForbidden, Code: "registration_disabled"}, want: ErrRegistrationDisabled},
+		{name: "invalid_api_key code", apiErr: &APIError{StatusCode: http.StatusUnauthorized, Code: "invalid_api_key"}, want: ErrKeyRejected},
+		{name: "key_rejected code", apiErr: &APIError{StatusCode: http.StatusForbidden, Code: "key_rejected"}, want: ErrKeyRejected},
+		{name: "unauthorized code", apiErr: &APIError{StatusCode: http.StatusBadRequest, Code: "unauthorized"}, want: ErrKeyRejected},
+		{name: "bare 401 no code", apiErr: &APIError{StatusCode: http.StatusUnauthorized}, want: ErrKeyRejected},
+		{name: "bare 403 no code", apiErr: &APIError{StatusCode: http.StatusForbidden}, want: ErrKeyRejected},
+		{name: "unrelated 500 passes through", apiErr: &APIError{StatusCode: http.StatusInternalServerError, Code: "boom"}, wantRaw: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := cfg.mapRegistrationHTTPError(tt.apiErr)
+			if tt.wantRaw {
+				// An unrelated error is not mapped to any registration sentinel; it
+				// still carries the original *APIError.
+				if errors.Is(got, ErrKeyRejected) || errors.Is(got, ErrRegistrationDisabled) {
+					t.Fatalf("unrelated error was mapped to a sentinel: %v", got)
+				}
+				if !errors.Is(got, tt.apiErr) {
+					t.Fatalf("unrelated error lost the original *APIError: %v", got)
+				}
+				return
+			}
+			if !errors.Is(got, tt.want) {
+				t.Fatalf("want %v, got %v", tt.want, got)
+			}
+			// The underlying *APIError must stay matchable through the wrap.
+			var apiErr *APIError
+			if !errors.As(got, &apiErr) || apiErr.StatusCode != tt.apiErr.StatusCode {
+				t.Fatalf("wrapped error lost the *APIError: %v", got)
+			}
+		})
+	}
+
+	// A non-APIError is not mapped to any sentinel and still matches the original.
+	plain := errors.New("not an api error")
+	got := cfg.mapRegistrationHTTPError(plain)
+	if errors.Is(got, ErrKeyRejected) || errors.Is(got, ErrRegistrationDisabled) {
+		t.Fatalf("non-APIError was mapped to a sentinel: %v", got)
+	}
+	if !errors.Is(got, plain) {
+		t.Fatalf("non-APIError should pass through unchanged, got %v", got)
+	}
+}
+
+// TestIsTransientCompletionError covers the 5xx predicate directly.
+func TestIsTransientCompletionError(t *testing.T) {
+	for _, status := range []int{500, 502, 503, 504, 599} {
+		if !isTransientCompletionError(&APIError{StatusCode: status}) {
+			t.Errorf("status %d should be transient", status)
+		}
+	}
+	for _, status := range []int{400, 401, 404, 409, 200} {
+		if isTransientCompletionError(&APIError{StatusCode: status}) {
+			t.Errorf("status %d should not be transient", status)
+		}
+	}
+	if isTransientCompletionError(errors.New("not an api error")) {
+		t.Error("a non-APIError should not be transient")
+	}
+}
+
+// TestIsBootstrapConsumedCompletion covers both the primary code and its alias.
+func TestIsBootstrapConsumedCompletion(t *testing.T) {
+	for _, code := range []string{"setup_key_consumed", "bootstrap_setup_key_consumed", "SETUP_KEY_CONSUMED"} {
+		if !isBootstrapConsumedCompletion(&APIError{Code: code}) {
+			t.Errorf("code %q should be a consumed-setup-key completion", code)
+		}
+	}
+	for _, code := range []string{"", "device_key_already_issued", "setup_key"} {
+		if isBootstrapConsumedCompletion(&APIError{Code: code}) {
+			t.Errorf("code %q should not be a consumed-setup-key completion", code)
+		}
 	}
 }

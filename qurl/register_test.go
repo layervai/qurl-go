@@ -408,6 +408,12 @@ func writeEnvelope[T any](t *testing.T, w http.ResponseWriter, data T) {
 
 // registerHarness wires a fakeService + fakeNHPServer to two httptest servers
 // and returns everything a test needs to drive RegisterAgent.
+//
+// The API server is created with ONE stable dispatcher handler that loads the
+// current handler from a mutex-guarded field on every request. Tests swap the
+// active handler with setHandler (never by reassigning apiSrv.Config.Handler on
+// a live server, which net/http reads unsynchronized from each connection
+// goroutine — a write-after-serve race).
 type registerHarness struct {
 	svc       *fakeService
 	nhp       *fakeNHPServer
@@ -415,6 +421,9 @@ type registerHarness struct {
 	relaySrv  *httptest.Server
 	statePath string
 	store     AgentStateStore
+
+	handlerMu sync.Mutex
+	handler   http.Handler
 }
 
 func newRegisterHarness(t *testing.T) *registerHarness {
@@ -424,18 +433,33 @@ func newRegisterHarness(t *testing.T) *registerHarness {
 	t.Cleanup(relaySrv.Close)
 
 	svc := newFakeService(t, nhp)
-	apiSrv := httptest.NewServer(svc.handler(relaySrv.URL))
-	t.Cleanup(apiSrv.Close)
-
 	statePath := filepath.Join(t.TempDir(), "agent-state.json")
-	return &registerHarness{
+	h := &registerHarness{
 		svc:       svc,
 		nhp:       nhp,
-		apiSrv:    apiSrv,
 		relaySrv:  relaySrv,
 		statePath: statePath,
 		store:     FileAgentState(statePath),
 	}
+	h.handler = svc.handler(relaySrv.URL)
+	// One stable dispatcher installed at NewServer time; the swappable handler
+	// lives behind handlerMu, so a per-test override is race-free under -race.
+	h.apiSrv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h.handlerMu.Lock()
+		handler := h.handler
+		h.handlerMu.Unlock()
+		handler.ServeHTTP(w, r)
+	}))
+	t.Cleanup(h.apiSrv.Close)
+	return h
+}
+
+// setHandler swaps the active API handler race-free (the dispatcher installed at
+// NewServer time reads it under handlerMu on each request).
+func (h *registerHarness) setHandler(handler http.Handler) {
+	h.handlerMu.Lock()
+	h.handler = handler
+	h.handlerMu.Unlock()
 }
 
 // registerOpts returns the options that point RegisterAgent at the harness's
@@ -480,7 +504,7 @@ func (h *registerHarness) armDevicePubOnInfo() {
 	// Wrap the API handler so the first registration-info call syncs the device
 	// pub from the persisted state before the relay ever sees a packet.
 	inner := h.svc.handler(h.relaySrv.URL)
-	h.apiSrv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h.setHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet && r.URL.Path == "/v1/agent/registration-info" {
 			if state, err := h.store.LoadAgentState(r.Context()); err == nil {
 				if pub, decErr := base64.StdEncoding.DecodeString(state.PublicKeyB64); decErr == nil {
@@ -489,7 +513,7 @@ func (h *registerHarness) armDevicePubOnInfo() {
 			}
 		}
 		inner(w, r)
-	})
+	}))
 }
 
 // failingSaveStore wraps an AgentStateStore and fails SaveAgentState the first
@@ -593,6 +617,57 @@ func TestRegisterAgent_FastPath_NoNetworkOnceRegistered(t *testing.T) {
 	}
 	if got := req.Header.Get("Authorization"); got != "Bearer lv_device_secret" {
 		t.Fatalf("Authorization = %q, want Bearer lv_device_secret", got)
+	}
+}
+
+func TestRegisterAgent_StoreBackedCredentialConcurrentAuthorize(t *testing.T) {
+	// The store-backed Client authorizes through CachedCredentials, whose
+	// Authorize has a real singleflight (refreshDone channel + mutex). Exercise it
+	// concurrently so -race has something meaningful to inspect on the one
+	// production path that has cross-goroutine coordination: N goroutines each
+	// authorize a fresh request through the SAME provider, and all must succeed
+	// with the bearer set.
+	h := newRegisterHarness(t)
+	h.svc.expectedBearer = "lv_bootstrap_key"
+	h.armDevicePubOnInfo()
+
+	client, err := RegisterAgent(context.Background(), "lv_bootstrap_key", h.store, h.registerOpts()...)
+	if err != nil {
+		t.Fatalf("RegisterAgent: %v", err)
+	}
+
+	const goroutines = 32
+	var wg sync.WaitGroup
+	errs := make([]error, goroutines)
+	auths := make([]string, goroutines)
+	start := make(chan struct{})
+	for i := range goroutines {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			req, reqErr := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://api.example.test/", http.NoBody)
+			if reqErr != nil {
+				errs[idx] = reqErr
+				return
+			}
+			<-start // release all goroutines together to maximize contention
+			if authErr := client.credentials.Authorize(context.Background(), req); authErr != nil {
+				errs[idx] = authErr
+				return
+			}
+			auths[idx] = req.Header.Get("Authorization")
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	for i := range goroutines {
+		if errs[i] != nil {
+			t.Fatalf("goroutine %d Authorize: %v", i, errs[i])
+		}
+		if auths[i] != "Bearer lv_device_secret" {
+			t.Fatalf("goroutine %d Authorization = %q, want Bearer lv_device_secret", i, auths[i])
+		}
 	}
 }
 
@@ -724,14 +799,14 @@ func TestRegisterAgent_AccountPath_OTPResendAfterCooldown(t *testing.T) {
 	// Past the cooldown, the resume's crash-recovery probe runs BEFORE the resend,
 	// so report the device not-yet-registered (else the fake self-heals to
 	// registered and no resend happens). Then the no-code branch re-sends.
-	h.apiSrv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h.setHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && r.URL.Path == "/v1/agent/registration/complete" {
 			w.WriteHeader(http.StatusNotFound)
 			_, _ = fmt.Fprint(w, `{"error":{"code":"device_not_registered","detail":"not yet"}}`)
 			return
 		}
 		h.svc.handler(h.relaySrv.URL)(w, r)
-	})
+	}))
 
 	advance(otpResendCooldown + time.Second)
 
@@ -1000,7 +1075,7 @@ func TestRegisterAgent_CompletionConsumedSetupKeyIsPathGated(t *testing.T) {
 		// not-yet-registered so the flow falls through to REG; the REAL completion
 		// (#2, post-REG) then returns 409 setup_key_consumed with pathAccount.
 		var completionHits atomic.Int32
-		h.apiSrv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h.setHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.Method == http.MethodPost && r.URL.Path == "/v1/agent/registration/complete" {
 				switch completionHits.Add(1) {
 				case 1: // probe: not yet registered → fall through to REG
@@ -1014,7 +1089,7 @@ func TestRegisterAgent_CompletionConsumedSetupKeyIsPathGated(t *testing.T) {
 				}
 			}
 			h.svc.handler(h.relaySrv.URL)(w, r)
-		})
+		}))
 
 		_, err := RegisterAgent(context.Background(), "lv_account_key", h.store, h.registerOpts(WithOTP("123456"))...)
 		if errors.Is(err, ErrBootstrapSetupKeyConsumed) {
@@ -1167,7 +1242,7 @@ func TestRegisterAgent_RejectsServerIDPeerMismatch(t *testing.T) {
 
 	// Override the handler so registration-info returns a server_id that does NOT
 	// match the peer key fingerprint.
-	h.apiSrv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h.setHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet && r.URL.Path == "/v1/agent/registration-info" {
 			resp := registrationInfoResponse{
 				KeyKind: keyKindBootstrap,
@@ -1186,7 +1261,7 @@ func TestRegisterAgent_RejectsServerIDPeerMismatch(t *testing.T) {
 			return
 		}
 		http.Error(w, "unexpected", http.StatusInternalServerError)
-	})
+	}))
 
 	_, err := RegisterAgent(context.Background(), "lv_key", h.store, h.registerOpts()...)
 	if !errors.Is(err, ErrInvalidRegisterConfig) {
@@ -1239,7 +1314,7 @@ func TestRegisterAgent_AccountPath_ProbeToleratesTransientCompletionFault(t *tes
 	// call, then succeed once the device is enrolled by REG. A transient probe
 	// fault must NOT abort registration — the flow proceeds to REG.
 	var completionHits atomic.Int32
-	h.apiSrv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h.setHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && r.URL.Path == "/v1/agent/registration/complete" {
 			if completionHits.Add(1) == 1 {
 				// The probe call: transient fault.
@@ -1250,7 +1325,7 @@ func TestRegisterAgent_AccountPath_ProbeToleratesTransientCompletionFault(t *tes
 		}
 		// registration-info and the real (post-REG) completion go to the fake.
 		h.svc.handler(h.relaySrv.URL)(w, r)
-	})
+	}))
 
 	client, err := RegisterAgent(context.Background(), "lv_account_key", h.store, h.registerOpts(WithOTP("424242"))...)
 	if err != nil {
@@ -1304,7 +1379,7 @@ func TestRegisterAgent_Validation(t *testing.T) {
 
 func TestRegisterAgent_RegistrationInfoUnauthorizedMapsToKeyRejected(t *testing.T) {
 	h := newRegisterHarness(t)
-	h.apiSrv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h.setHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet && r.URL.Path == "/v1/agent/registration-info" {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
@@ -1312,7 +1387,7 @@ func TestRegisterAgent_RegistrationInfoUnauthorizedMapsToKeyRejected(t *testing.
 			return
 		}
 		http.Error(w, "unexpected", http.StatusInternalServerError)
-	})
+	}))
 
 	_, err := RegisterAgent(context.Background(), "lv_bad_key", h.store, h.registerOpts()...)
 	if !errors.Is(err, ErrKeyRejected) {
