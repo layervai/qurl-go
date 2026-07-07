@@ -166,6 +166,13 @@ func Exchange(ctx context.Context, relayBaseURL string, serverStaticPub []byte, 
 	if err != nil {
 		return nil, fmt.Errorf("decrypt reply: %w", err)
 	}
+	// The counter echo is the relay profile's own correlation contract, not an
+	// assumption: the relay routes a reply back to the waiting HTTP POST by the
+	// reply's cleartext header counter, so a reply that did not echo the
+	// request counter could never have reached us at all — and the reference
+	// server stamps every reply header with the request's transaction id by
+	// construction. Enforcing it here just refuses a reply a misbehaving relay
+	// swapped in from a different exchange.
 	if dr.Counter != counter {
 		return nil, fmt.Errorf("reply counter %d does not echo request counter %d", dr.Counter, counter)
 	}
@@ -222,6 +229,9 @@ func Send(ctx context.Context, relayBaseURL string, serverStaticPub, body []byte
 				"relay POST %s -> 200 with a %d-byte reply to a one-way NHP_OTP (a conforming relay acknowledges dispatch with 202 Accepted); the server likely processed the dispatch, so a retry may deliver a duplicate — one-way NHP_OTP delivery is at-least-once",
 				url, len(respBody))}
 		}
+		// Quoting the body is safe here, unlike the 200/202 branches: a non-2xx
+		// body is relay-authored plaintext error detail (the same contract
+		// RelayPost quotes), never packet bytes.
 		m := fmt.Sprintf("relay POST %s -> %d, want 202 Accepted for a one-way NHP_OTP dispatch", url, status)
 		if detail := strings.TrimSpace(string(respBody)); detail != "" {
 			m += ": " + detail
