@@ -789,6 +789,13 @@ func WithOTP(code string) RegisterOption {
 // callers that fetch the code programmatically (for example from a mailbox API)
 // rather than passing a literal. It is called only on the account-key path when a
 // code is needed. Set at most one of WithOTP or WithOTPProvider.
+//
+// On a fresh store the code is dispatched and then the provider is invoked in the
+// same RegisterAgent call, so the provider must tolerate or await email delivery
+// (poll/block until the code arrives). A provider that returns before the code is
+// deliverable hands back a stale or empty value and registration fails with
+// ErrOTPIncorrect; on a resume (the code was requested on an earlier call) the
+// provider runs only if a crash-recovery completion probe did not already finish.
 func WithOTPProvider(provider func(ctx context.Context) (string, error)) RegisterOption {
 	return registerOptionFunc(func(o *registerConfig) error {
 		if provider == nil {

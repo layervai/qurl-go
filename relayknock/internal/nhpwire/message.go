@@ -234,12 +234,24 @@ func DecryptMessage(devicePriv, expectedServerStaticPub, packet []byte) (*Messag
 
 // inflateZlib inflates a Go compress/zlib (RFC 1950) stream. Input is bounded by
 // the PacketBufferSize check in DecryptMessage and is post-AEAD (in-TCB), so no
-// decompression-bomb exposure beyond one buffer.
+// decompression-bomb exposure beyond one buffer. The compress flag rides on the
+// server's reply and is outside the agent's control, so this fails closed on an
+// over-large inflated body rather than returning a silently truncated one.
 func inflateZlib(compressed []byte) ([]byte, error) {
 	r, err := zlib.NewReader(bytes.NewReader(compressed))
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = r.Close() }() // read-only zlib reader; Close cannot surface data loss
-	return io.ReadAll(io.LimitReader(r, PacketBufferSize))
+	// Read one byte past the cap so a body that inflates to exactly the limit is
+	// distinguishable from one truncated at it: return an explicit error instead
+	// of a corrupt, silently-cut body for a downstream JSON parse to trip on.
+	body, err := io.ReadAll(io.LimitReader(r, PacketBufferSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > PacketBufferSize {
+		return nil, fmt.Errorf("inflated body exceeds %d-byte limit", PacketBufferSize)
+	}
+	return body, nil
 }
