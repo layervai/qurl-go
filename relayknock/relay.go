@@ -175,6 +175,9 @@ func Exchange(ctx context.Context, relayBaseURL string, serverStaticPub []byte, 
 	// all — and the reference server stamps every reply header (ACK, COK, RAK)
 	// with the request's transaction id by construction. Enforcing it here just
 	// refuses a reply a misbehaving relay swapped in from a different exchange.
+	// A matched-counter golden vector generated from the reference server will
+	// fence this by reference bytes (the existing knock/ack goldens are not a
+	// matched pair): layervai/qurl-conformance#19.
 	//
 	// These two post-decrypt checks return a plain error, not *RelayError, on
 	// purpose: they are semantic/correlation failures of an already-authenticated
