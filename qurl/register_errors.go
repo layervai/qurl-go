@@ -57,8 +57,12 @@ var ErrNoAccountEmail = errors.New("qurl: account has no email for one-time code
 
 // ErrDeviceCredentialMissing is returned when the saved AgentState shows the
 // device is registered but does not hold its device API credential — the
-// credential was issued once and this state cannot reproduce it. Re-register
-// under a new device id (WithDeviceID) or re-bind with WithTakeover.
+// credential is issued once and this state cannot reproduce it. Recovery depends
+// on how it arose: if a completion reported the key was already issued, register
+// under a new device id (WithDeviceID) or re-bind with WithTakeover; if a
+// locally-registered state simply lacks the credential (for example a legacy
+// bootstrap-era state file), clear or replace the persisted state to mint a fresh
+// credential.
 var ErrDeviceCredentialMissing = errors.New("qurl: device credential missing from agent state")
 
 // ErrRegistrationInvalidInput is returned when the enrollment service rejected a
@@ -93,7 +97,7 @@ func (e *OTPPendingError) Error() string {
 		dest = e.MaskedEmail
 	}
 	return fmt.Sprintf(
-		"qurl: LayerV emailed a one-time code to %s; re-run qurl.RegisterAgent with qurl.WithOTP(\"<code>\") to finish enrollment. Codes expire in about 10 minutes; re-running without WithOTP re-sends a fresh code after a short cooldown.",
+		"qurl: LayerV emailed a one-time code to %s; re-run qurl.RegisterAgent with qurl.WithOTP(\"<code>\") to finish enrollment. Codes expire after a short window; re-running without WithOTP re-sends a fresh code after a short cooldown.",
 		dest,
 	)
 }

@@ -20,6 +20,12 @@ import (
 // device credential into store; later calls load that credential and return a
 // Client with no network I/O.
 //
+// The key argument is used only during first enrollment. Once store holds a
+// completed registration the fast path serves the Client entirely from it and
+// does not re-validate key, so rotating or mistyping the key against an
+// already-registered store is not detected — the persisted device credential is
+// authoritative from then on.
+//
 //	client, err := qurl.RegisterAgent(ctx, apiKey, store)
 //	resource, err := client.ProtectURL(ctx, "https://dashboard.internal.acme.com")
 //	portal, err := resource.CreatePortal(ctx, qurl.ValidFor(time.Hour))
@@ -319,6 +325,12 @@ func (cfg *registerConfig) tryCompletionProbe(ctx context.Context, key string, s
 			// fall through to REG rather than aborting the whole registration.
 			return false, nil, nil
 		}
+		// Any other completion error is terminal — most notably a structured
+		// device_key_already_issued 409 (the device is registered but its key was
+		// already issued and cannot be re-fetched). That is a real answer the
+		// caller must act on, so surface it rather than treating the probe as a
+		// no-op and proceeding to REG; the "optimization only" framing applies to
+		// the not-yet-registered and transient cases above, not to a terminal denial.
 		return true, nil, err
 	}
 	doneState, err = cfg.persistCompletion(ctx, store, state, comp)
