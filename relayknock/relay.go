@@ -136,10 +136,12 @@ func Knock(ctx context.Context, relayBaseURL string, serverStaticPub, body []byt
 // application body (relayknock does not know any body shape). The returned
 // Reply.Body is the decrypted application reply for the caller to interpret.
 //
-// Exchange authenticates the reply but does not pair its type to the request
-// type: the one-shot HTTP round trip and the per-message device key already
-// bind the decrypted reply to this request, and the caller asserts intent with
-// IsACK / IsCookieChallenge / IsRegisterAck on the result.
+// The reply header's type and counter ride outside the AEAD (the transcript
+// authenticates the server, not those fields), so Exchange enforces what the
+// crypto cannot: the reply must echo this request's counter and carry a type
+// the request can elicit — TypeKnock → NHP_ACK/NHP_COK, TypeRegister →
+// NHP_RAK. Anything else fails closed. The caller still branches a knock's
+// two outcomes with IsACK / IsCookieChallenge.
 func Exchange(ctx context.Context, relayBaseURL string, serverStaticPub []byte, headerType int, body []byte, opts KnockOptions) (*Reply, error) {
 	switch headerType {
 	case TypeKnock, TypeRegister:
@@ -149,7 +151,7 @@ func Exchange(ctx context.Context, relayBaseURL string, serverStaticPub []byte, 
 		return nil, fmt.Errorf("unsupported round-trip header type %d (want TypeKnock or TypeRegister)", headerType)
 	}
 
-	packet, devicePriv, err := buildOutbound(headerType, serverStaticPub, body, opts)
+	packet, devicePriv, counter, err := buildOutbound(headerType, serverStaticPub, body, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -164,7 +166,28 @@ func Exchange(ctx context.Context, relayBaseURL string, serverStaticPub []byte, 
 	if err != nil {
 		return nil, fmt.Errorf("decrypt reply: %w", err)
 	}
+	if dr.Counter != counter {
+		return nil, fmt.Errorf("reply counter %d does not echo request counter %d", dr.Counter, counter)
+	}
+	if !replyTypeAllowed(headerType, dr.Type) {
+		return nil, fmt.Errorf("reply type %d is not a valid reply to a type-%d request", dr.Type, headerType)
+	}
 	return dr, nil
+}
+
+// replyTypeAllowed reports whether an authenticated reply's header type is one
+// the given request type can legitimately elicit. The type field itself is not
+// AEAD-covered, so this pairing — not the decrypt — is what stops a
+// misbehaving relay from presenting one reply kind as another.
+func replyTypeAllowed(requestType, replyType int) bool {
+	switch requestType {
+	case TypeKnock:
+		return replyType == nhpACK || replyType == nhpCOK
+	case TypeRegister:
+		return replyType == nhpRAK
+	default:
+		return false
+	}
 }
 
 // Send performs one one-way NHP dispatch: it builds an NHP_OTP packet for body,
@@ -179,7 +202,7 @@ func Exchange(ctx context.Context, relayBaseURL string, serverStaticPub []byte, 
 // (ephemeral key, counter, preamble), so a retried Send is a new, independent
 // dispatch — at-least-once delivery, never a wire-level replay.
 func Send(ctx context.Context, relayBaseURL string, serverStaticPub, body []byte, opts KnockOptions) error {
-	packet, _, err := buildOutbound(nhpOTP, serverStaticPub, body, opts)
+	packet, _, _, err := buildOutbound(nhpOTP, serverStaticPub, body, opts)
 	if err != nil {
 		return err
 	}
@@ -191,10 +214,13 @@ func Send(ctx context.Context, relayBaseURL string, serverStaticPub, body []byte
 	}
 	if status != http.StatusAccepted {
 		if status == http.StatusOK && len(respBody) > 0 {
-			// Reply packet bytes to a one-way message: don't quote the binary body.
-			return sendError(status, fmt.Sprintf(
-				"relay POST %s -> 200 with a %d-byte reply to a one-way NHP_OTP (the server never replies to OTP; a conforming relay acknowledges dispatch with 202 Accepted)",
-				url, len(respBody)))
+			// Reply packet bytes to a one-way message: something evidently
+			// received and processed the dispatch (a reply exists), the relay
+			// just broke the one-way contract — duplicate-possible framing,
+			// like the 202-with-body branch below. Don't quote the binary body.
+			return &RelayError{Status: status, Msg: fmt.Sprintf(
+				"relay POST %s -> 200 with a %d-byte reply to a one-way NHP_OTP (a conforming relay acknowledges dispatch with 202 Accepted); the server likely processed the dispatch, so a retry may deliver a duplicate — one-way NHP_OTP delivery is at-least-once",
+				url, len(respBody))}
 		}
 		m := fmt.Sprintf("relay POST %s -> %d, want 202 Accepted for a one-way NHP_OTP dispatch", url, status)
 		if detail := strings.TrimSpace(string(respBody)); detail != "" {
@@ -222,34 +248,35 @@ func sendError(status int, msg string) *RelayError {
 
 // buildOutbound resolves the device identity from opts, mints the per-message
 // random values (ephemeral key, counter, preamble), and builds a headerType
-// packet for body. It returns the packet plus the device static private key
-// actually used, which a round-trip caller needs to decrypt the reply.
-func buildOutbound(headerType int, serverStaticPub, body []byte, opts KnockOptions) (packet, devicePriv []byte, err error) {
+// packet for body. It returns the packet, the device static private key
+// actually used (a round-trip caller decrypts the reply with it), and the
+// minted counter (which a round-trip caller requires the reply to echo).
+func buildOutbound(headerType int, serverStaticPub, body []byte, opts KnockOptions) (packet, devicePriv []byte, counter uint64, err error) {
 	if len(serverStaticPub) != publicKeySize {
-		return nil, nil, fmt.Errorf("server static pub must be %d bytes, got %d", publicKeySize, len(serverStaticPub))
+		return nil, nil, 0, fmt.Errorf("server static pub must be %d bytes, got %d", publicKeySize, len(serverStaticPub))
 	}
 
 	devicePriv = opts.DeviceStaticPriv
 	if len(devicePriv) == 0 {
 		devicePriv = make([]byte, 32)
 		if _, err := rand.Read(devicePriv); err != nil {
-			return nil, nil, fmt.Errorf("device key: %w", err)
+			return nil, nil, 0, fmt.Errorf("device key: %w", err)
 		}
 	} else if len(devicePriv) != 32 {
-		return nil, nil, fmt.Errorf("device static priv must be 32 bytes, got %d", len(devicePriv))
+		return nil, nil, 0, fmt.Errorf("device static priv must be 32 bytes, got %d", len(devicePriv))
 	}
 
 	ephemeralPriv := make([]byte, 32)
 	if _, err := rand.Read(ephemeralPriv); err != nil {
-		return nil, nil, fmt.Errorf("ephemeral key: %w", err)
+		return nil, nil, 0, fmt.Errorf("ephemeral key: %w", err)
 	}
-	counter, err := randUint64()
+	counter, err = randUint64()
 	if err != nil {
-		return nil, nil, fmt.Errorf("counter: %w", err)
+		return nil, nil, 0, fmt.Errorf("counter: %w", err)
 	}
 	preamble, err := randUint32()
 	if err != nil {
-		return nil, nil, fmt.Errorf("preamble: %w", err)
+		return nil, nil, 0, fmt.Errorf("preamble: %w", err)
 	}
 
 	packet, err = buildMessage(headerType, &KnockInputs{
@@ -262,9 +289,9 @@ func buildOutbound(headerType int, serverStaticPub, body []byte, opts KnockOptio
 		Body:             body,
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("build message: %w", err)
+		return nil, nil, 0, fmt.Errorf("build message: %w", err)
 	}
-	return packet, devicePriv, nil
+	return packet, devicePriv, counter, nil
 }
 
 func randUint64() (uint64, error) {

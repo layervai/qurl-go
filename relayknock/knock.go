@@ -204,6 +204,10 @@ func (r *Reply) IsCookieChallenge() bool { return r.Type == nhpCOK }
 
 // IsRegisterAck reports whether the reply is an NHP_RAK — the server's reply to
 // an NHP_REG registration message.
+//
+// DecryptReply already rejects header types outside the set this package
+// speaks, so a decrypted Reply always matches exactly one Is* predicate (or is
+// an initiator type opened in a test/server role).
 func (r *Reply) IsRegisterAck() bool { return r.Type == nhpRAK }
 
 // DecryptReply decrypts and authenticates a server reply (NHP_ACK / NHP_COK /
@@ -289,6 +293,14 @@ func DecryptReply(devicePriv, expectedServerStaticPub, packet []byte) (*Reply, e
 	}
 
 	typ, _ := getTypeAndPayloadSize(header)
+	switch typ {
+	case nhpKNK, nhpACK, nhpCOK, nhpOTP, nhpREG, nhpRAK:
+	default:
+		// The type field rides outside the AEAD, so a garbage type decrypts
+		// fine — reject it explicitly instead of returning a Reply that no
+		// predicate matches.
+		return nil, fmt.Errorf("unknown NHP header type %d", typ)
+	}
 	return &Reply{
 		Type:           typ,
 		Counter:        counter,

@@ -380,3 +380,97 @@ func TestSend_RelayContract(t *testing.T) {
 		})
 	}
 }
+
+// TestExchange_RejectsMismatchedReply pins the defense-in-depth pairing: the
+// reply header's type and counter ride outside the AEAD, so Exchange itself —
+// not just the caller's predicates — must reject an authenticated reply whose
+// type the request cannot elicit or whose counter does not echo the request.
+func TestExchange_RejectsMismatchedReply(t *testing.T) {
+	devicePriv, devicePub := testKeyPair(t, 0x11)
+	serverPriv, serverPub := testKeyPair(t, 0x22)
+
+	tests := []struct {
+		name       string
+		reqType    int
+		replyType  int
+		counterOff uint64
+		wantSub    string
+	}{
+		{name: "RAK to a knock", reqType: TypeKnock, replyType: nhpRAK, wantSub: "not a valid reply"},
+		{name: "ACK to a register", reqType: TypeRegister, replyType: nhpACK, wantSub: "not a valid reply"},
+		{name: "COK to a register", reqType: TypeRegister, replyType: nhpCOK, wantSub: "not a valid reply"},
+		{name: "counter not echoed", reqType: TypeRegister, replyType: nhpRAK, counterOff: 1, wantSub: "does not echo"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				packet, err := io.ReadAll(r.Body)
+				if err != nil {
+					t.Errorf("read posted packet: %v", err)
+					w.WriteHeader(http.StatusInternalServerError)
+					return
+				}
+				req, err := DecryptReply(serverPriv, devicePub, packet)
+				if err != nil {
+					t.Errorf("server-side open of posted packet: %v", err)
+					w.WriteHeader(http.StatusInternalServerError)
+					return
+				}
+				reply, err := buildMessage(tt.replyType, &KnockInputs{
+					DeviceStaticPriv: serverPriv,
+					ServerStaticPub:  devicePub,
+					EphemeralPriv:    bytes.Repeat([]byte{0x45}, 32),
+					TimestampNanos:   1700000000987654321,
+					Counter:          req.Counter + tt.counterOff,
+					Preamble:         0xa1b2c3d4,
+					Body:             []byte("mismatched reply"),
+				})
+				if err != nil {
+					t.Errorf("fabricate mismatched reply: %v", err)
+					w.WriteHeader(http.StatusInternalServerError)
+					return
+				}
+				w.Header().Set("Content-Type", "application/octet-stream")
+				_, _ = w.Write(reply)
+			}))
+			defer srv.Close()
+
+			_, err := Exchange(context.Background(), srv.URL, serverPub, tt.reqType, []byte("request body"), KnockOptions{DeviceStaticPriv: devicePriv})
+			if err == nil {
+				t.Fatal("Exchange succeeded, want mismatch rejection")
+			}
+			if !strings.Contains(err.Error(), tt.wantSub) {
+				t.Errorf("error %q does not contain %q", err, tt.wantSub)
+			}
+		})
+	}
+}
+
+// TestDecryptReply_UnknownType pins the explicit rejection of header types this
+// package does not speak: the type field is not AEAD-covered, so garbage there
+// decrypts fine and must be refused by the type gate, not by a silent
+// all-predicates-false Reply.
+func TestDecryptReply_UnknownType(t *testing.T) {
+	devicePriv, devicePub := testKeyPair(t, 0x11)
+	serverPriv, serverPub := testKeyPair(t, 0x22)
+
+	pkt, err := buildMessage(99, &KnockInputs{
+		DeviceStaticPriv: serverPriv,
+		ServerStaticPub:  devicePub,
+		EphemeralPriv:    bytes.Repeat([]byte{0x46}, 32),
+		TimestampNanos:   1700000000987654321,
+		Counter:          5,
+		Preamble:         0xa1b2c3d4,
+		Body:             []byte("type 99"),
+	})
+	if err != nil {
+		t.Fatalf("fabricate type-99 packet: %v", err)
+	}
+	_, err = DecryptReply(devicePriv, serverPub, pkt)
+	if err == nil {
+		t.Fatal("DecryptReply accepted an unknown header type, want rejection")
+	}
+	if !strings.Contains(err.Error(), "unknown NHP header type 99") {
+		t.Errorf("error %q does not name the unknown type", err)
+	}
+}
