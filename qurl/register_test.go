@@ -894,14 +894,15 @@ func TestRegisterAgent_AccountPath_CrashRecoveryProbeSelfHeals(t *testing.T) {
 	}
 
 	// Model the crash: a prior run's REG succeeded server-side (device enrolled)
-	// but the process died before completion. On resume, the completion PROBE
-	// succeeds before any REG in this run.
+	// but the process died before completion. On resume the completion PROBE runs
+	// before any code is resolved, so a resume with NO code in hand still
+	// self-heals to a registered Client (previously this returned OTPPendingError).
 	h.nhp.setEnrolled(true)
 
 	regsBefore := h.nhp.regCount()
-	client, err := RegisterAgent(context.Background(), "lv_account_key", h.store, h.registerOpts(WithOTP("555000"))...)
+	client, err := RegisterAgent(context.Background(), "lv_account_key", h.store, h.registerOpts()...)
 	if err != nil {
-		t.Fatalf("resume RegisterAgent: %v", err)
+		t.Fatalf("no-code resume against an enrolled device should self-heal, got %v", err)
 	}
 	if client == nil {
 		t.Fatal("nil client")
@@ -911,6 +912,44 @@ func TestRegisterAgent_AccountPath_CrashRecoveryProbeSelfHeals(t *testing.T) {
 	}
 	if h.svc.completionCalls.Load() < 1 {
 		t.Fatalf("completion probe did not run")
+	}
+	state := h.loadState(t)
+	if state.RegisteredAt == nil || state.DeviceAPIKey == "" {
+		t.Fatalf("self-heal did not persist a registered state: %#v", state)
+	}
+}
+
+func TestRegisterAgent_AccountPath_ResumeProbeSkipsProvider(t *testing.T) {
+	// Regression fence: on a resume against an already-enrolled device, the
+	// completion probe runs BEFORE resolveOTP, so a WithOTPProvider (which may do
+	// real work — a mailbox poll) is NOT invoked when the probe can finish.
+	h := newRegisterHarness(t)
+	h.svc.keyKind = keyKindAccount
+	h.svc.maskedEmail = "j***@x.com"
+	h.armDevicePubOnInfo()
+
+	if _, err := RegisterAgent(context.Background(), "lv_account_key", h.store, h.registerOpts()...); !errors.Is(err, ErrOTPPending) {
+		t.Fatalf("prime otp_pending: want ErrOTPPending, got %v", err)
+	}
+	h.nhp.setEnrolled(true)
+
+	var providerCalls atomic.Int32
+	provider := func(context.Context) (string, error) {
+		providerCalls.Add(1)
+		return "999000", nil
+	}
+	client, err := RegisterAgent(context.Background(), "lv_account_key", h.store, h.registerOpts(WithOTPProvider(provider))...)
+	if err != nil {
+		t.Fatalf("resume with provider against an enrolled device: %v", err)
+	}
+	if client == nil {
+		t.Fatal("nil client")
+	}
+	if providerCalls.Load() != 0 {
+		t.Fatalf("provider was called %d times on a self-healing resume, want 0", providerCalls.Load())
+	}
+	if h.nhp.regCount() != 0 {
+		t.Fatalf("resume sent a REG despite the probe self-healing (regs=%d)", h.nhp.regCount())
 	}
 }
 

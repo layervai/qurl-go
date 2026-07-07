@@ -213,18 +213,18 @@ func (cfg *registerConfig) runBootstrapPath(ctx context.Context, key string, sto
 // runAccountPath is PATH B: email one-time code. It is re-entrant across process
 // runs, driven by AgentState.OTPRequestedAt:
 //
-//   - not yet otp_pending → request the code (email it), persist OTPRequestedAt.
-//     A code can only be valid after this send, so it always happens first.
-//   - a WithOTPProvider is set → resolve the code (the provider reads the freshly
-//     sent code) and REG in the same call, so the single-call provider flow works
-//     on a fresh store.
-//   - a static WithOTP is set but this call is the one that just requested the
-//     code → the supplied literal cannot match the just-sent email, so pause with
-//     *OTPPendingError (use the newly emailed code on the next run) instead of
-//     burning a doomed REG.
-//   - otherwise → completion-probe (self-heals a crash after RAK but before
-//     completion), else REG with the code, then complete; or pause when no code
-//     source is available.
+//   - Fresh request (not yet otp_pending): email the code and persist
+//     OTPRequestedAt (a code can only be valid after this send). Then a static
+//     WithOTP pauses with *OTPPendingError (its literal cannot match the
+//     just-sent email — use the emailed code next run), while a WithOTPProvider
+//     resolves the freshly sent code and REGs in the same call (single-call
+//     flow). With no code source, pause.
+//   - Resume (otp_pending already set): probe completion FIRST — a prior run may
+//     have gotten the RAK but crashed before completion, so the device is already
+//     enrolled and the probe finishes the run without a code (self-heals even
+//     with no code in hand, and avoids invoking a real-work provider). If not yet
+//     enrolled, resolve the code and REG; with no code source, re-send after the
+//     cooldown and pause.
 func (cfg *registerConfig) runAccountPath(ctx context.Context, key string, store AgentStateStore, state *AgentState, peer *NHPServerPeerInfo, relayURL, maskedEmail string) (*AgentState, error) {
 	// Ensure the code has been requested before any code can be valid. On a fresh
 	// store this emails the code; on a resume (OTPRequestedAt already set) it does
@@ -233,6 +233,19 @@ func (cfg *registerConfig) runAccountPath(ctx context.Context, key string, store
 	if freshRequest {
 		if err := cfg.requestOTP(ctx, store, state, peer, relayURL, key); err != nil {
 			return nil, err
+		}
+	}
+
+	// On a resume, probe completion BEFORE resolving any code: a prior run may
+	// have gotten the RAK but crashed before completion, so the device is already
+	// enrolled server-side and completion finishes the run without a code. Doing
+	// this first means (a) a no-code resume still self-heals, and (b) a
+	// WithOTPProvider (which may do real work — a mailbox poll) is not invoked
+	// when the probe can finish. A fresh request has nothing enrolled yet, so the
+	// probe is skipped to keep the first-call path lean (no wasted 404).
+	if !freshRequest {
+		if done, doneState, err := cfg.tryCompletionProbe(ctx, key, store, state); done {
+			return doneState, err
 		}
 	}
 
@@ -263,13 +276,6 @@ func (cfg *registerConfig) runAccountPath(ctx context.Context, key string, store
 			RequestedAt: derefTime(state.OTPRequestedAt, cfg.clock()),
 			MaskedEmail: maskedEmail,
 		}
-	}
-
-	// A code is in hand. First probe completion: if a prior run got the RAK but
-	// crashed before completion, the device is already enrolled server-side and
-	// completion succeeds without re-spending the code.
-	if done, doneState, err := cfg.tryCompletionProbe(ctx, key, store, state); done {
-		return doneState, err
 	}
 
 	return cfg.registerAndComplete(ctx, key, store, state, peer, relayURL, code, pathAccount)
