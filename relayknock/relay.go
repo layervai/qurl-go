@@ -244,8 +244,8 @@ func Send(ctx context.Context, relayBaseURL string, serverStaticPub, body []byte
 		return sendError(status, m)
 	}
 	if len(respBody) > 0 {
-		// Unlike the branches sendError covers, the relay DID accept here — it
-		// just broke the empty-body ack contract — so a retry may duplicate.
+		// 202 but with a body: the relay accepted, just broke the empty-body ack
+		// contract. sendAcceptedError carries the retry framing.
 		return sendAcceptedError(status, fmt.Sprintf(
 			"relay POST %s -> 202 Accepted with an unexpected %d-byte body (a conforming relay acknowledges a one-way dispatch with an empty body)",
 			url, len(respBody)))

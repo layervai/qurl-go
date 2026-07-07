@@ -16,8 +16,10 @@ import (
 // fenced byte-for-byte by knock_golden_test.go — the transcript is independent
 // of the header type — so these tests fence the type plumbing around it with
 // symmetric round trips: a packet built with the device key opens with the
-// server key (DecryptReply's transcript is role-symmetric), which is exactly
-// how the reference responder reads an initiator packet.
+// server key via decryptMessage (the transcript is role-symmetric), which is
+// exactly how the reference responder reads an initiator packet. Reply-type
+// opens go through the exported DecryptReply, which additionally gates out
+// initiator types.
 
 // testKeyPair derives a deterministic X25519 key pair from a repeated seed
 // byte, so failures reproduce without golden fixtures (clamping is internal to
@@ -70,9 +72,9 @@ func TestBuildMessage_SymmetricRoundTrip(t *testing.T) {
 
 			// Server-side open: the recipient's static private key plus the
 			// sender's static public key.
-			got, err := DecryptReply(serverPriv, devicePub, packet)
+			got, err := decryptMessage(serverPriv, devicePub, packet)
 			if err != nil {
-				t.Fatalf("DecryptReply: %v", err)
+				t.Fatalf("decryptMessage: %v", err)
 			}
 			if got.Type != tt.wantWire {
 				t.Errorf("Type = %d, want %d", got.Type, tt.wantWire)
@@ -192,8 +194,8 @@ func fabricateRAK(serverPriv, devicePub []byte, counter uint64, body []byte) ([]
 }
 
 // TestDecryptReply_RegisterAck opens a fabricated NHP_RAK as an agent would and
-// asserts the type predicates: DecryptReply is type-agnostic, so a RAK decrypts
-// exactly like the golden ack and only the Type differs.
+// asserts the type predicates: RAK is a reply type, so the exported DecryptReply
+// accepts it and it decrypts exactly like the golden ack, only the Type differs.
 func TestDecryptReply_RegisterAck(t *testing.T) {
 	devicePriv, devicePub := testKeyPair(t, 0x11)
 	serverPriv, serverPub := testKeyPair(t, 0x22)
@@ -243,7 +245,7 @@ func TestExchange_RegisterRoundTrip(t *testing.T) {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
-		req, err := DecryptReply(serverPriv, devicePub, packet)
+		req, err := decryptMessage(serverPriv, devicePub, packet)
 		if err != nil {
 			t.Errorf("server-side open of posted packet: %v", err)
 			w.WriteHeader(http.StatusInternalServerError)
@@ -304,7 +306,7 @@ func TestSend_PostsOTPPacket(t *testing.T) {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
-		req, err := DecryptReply(serverPriv, devicePub, packet)
+		req, err := decryptMessage(serverPriv, devicePub, packet)
 		if err != nil {
 			t.Errorf("server-side open of posted packet: %v", err)
 			w.WriteHeader(http.StatusInternalServerError)
@@ -410,7 +412,7 @@ func TestExchange_RejectsMismatchedReply(t *testing.T) {
 					w.WriteHeader(http.StatusInternalServerError)
 					return
 				}
-				req, err := DecryptReply(serverPriv, devicePub, packet)
+				req, err := decryptMessage(serverPriv, devicePub, packet)
 				if err != nil {
 					t.Errorf("server-side open of posted packet: %v", err)
 					w.WriteHeader(http.StatusInternalServerError)
@@ -515,5 +517,36 @@ func TestSend_TransportFault(t *testing.T) {
 	}
 	if re.Status != 0 {
 		t.Errorf("transport fault Status = %d, want 0 (no HTTP response)", re.Status)
+	}
+}
+
+// TestDecryptReply_RejectsInitiatorType pins the exported reply gate: an
+// authenticated packet carrying an initiator type (here NHP_REG) is refused by
+// DecryptReply, so a direct caller can never receive a Reply that matches no
+// Is* predicate. decryptMessage (unexported, responder role) still opens it.
+func TestDecryptReply_RejectsInitiatorType(t *testing.T) {
+	devicePriv, devicePub := testKeyPair(t, 0x11)
+	serverPriv, serverPub := testKeyPair(t, 0x22)
+
+	// A server-role open of an agent's REG packet: decryptMessage accepts it.
+	reg, err := BuildMessage(TypeRegister, &KnockInputs{
+		DeviceStaticPriv: devicePriv,
+		ServerStaticPub:  serverPub,
+		EphemeralPriv:    bytes.Repeat([]byte{0x55}, 32),
+		TimestampNanos:   1700000000123456789,
+		Counter:          9,
+		Preamble:         0x0a0b0c0d,
+		Body:             []byte("reg body"),
+	})
+	if err != nil {
+		t.Fatalf("BuildMessage(TypeRegister): %v", err)
+	}
+	if _, err := decryptMessage(serverPriv, devicePub, reg); err != nil {
+		t.Fatalf("decryptMessage(REG) = %v, want accept", err)
+	}
+	if _, err := DecryptReply(serverPriv, devicePub, reg); err == nil {
+		t.Fatal("DecryptReply accepted an initiator type, want reject")
+	} else if !strings.Contains(err.Error(), "initiator-only") {
+		t.Errorf("DecryptReply(REG) error %q does not name the initiator-only cause", err)
 	}
 }

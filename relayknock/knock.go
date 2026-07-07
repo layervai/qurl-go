@@ -212,9 +212,8 @@ func (r *Reply) IsCookieChallenge() bool { return r.Type == nhpCOK }
 // IsRegisterAck reports whether the reply is an NHP_RAK — the server's reply to
 // an NHP_REG registration message.
 //
-// DecryptReply already rejects header types outside the set this package
-// speaks, so a decrypted Reply always matches exactly one Is* predicate (or is
-// an initiator type opened in a test/server role).
+// DecryptReply only ever returns a reply type, so a Reply it produced matches
+// exactly one of IsACK / IsCookieChallenge / IsRegisterAck.
 func (r *Reply) IsRegisterAck() bool { return r.Type == nhpRAK }
 
 // DecryptReply decrypts and authenticates a server reply (NHP_ACK / NHP_COK /
@@ -222,7 +221,30 @@ func (r *Reply) IsRegisterAck() bool { return r.Type == nhpRAK }
 // static key of the server we messaged. The server is the initiator of this
 // fresh handshake. Authentication completes at the ss-keyed opens: only the
 // real server's static private key yields a valid tag there.
+//
+// Only reply header types are accepted: an authenticated packet carrying an
+// initiator type (KNK/OTP/REG) is rejected, so a Reply this returns always
+// matches one Is* predicate. (Opening an initiator packet in the responder
+// role — as the reference server does — is decryptMessage, unexported.)
 func DecryptReply(devicePriv, expectedServerStaticPub, packet []byte) (*Reply, error) {
+	reply, err := decryptMessage(devicePriv, expectedServerStaticPub, packet)
+	if err != nil {
+		return nil, err
+	}
+	switch reply.Type {
+	case nhpACK, nhpCOK, nhpRAK:
+		return reply, nil
+	default:
+		return nil, fmt.Errorf("not a server reply: header type %d is initiator-only", reply.Type)
+	}
+}
+
+// decryptMessage decrypts and authenticates any NHP message this package speaks
+// against the sender's static key, admitting both reply and initiator types.
+// The exported DecryptReply wraps it with a reply-type gate; the permissive
+// form exists for the responder-role open (the reference server reading an
+// initiator packet, and the in-package symmetric-transcript tests).
+func decryptMessage(devicePriv, expectedServerStaticPub, packet []byte) (*Reply, error) {
 	if len(packet) < headerSize {
 		return nil, fmt.Errorf("reply too short: %d bytes < %d-byte header", len(packet), headerSize)
 	}
