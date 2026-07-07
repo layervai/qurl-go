@@ -474,3 +474,46 @@ func TestDecryptReply_UnknownType(t *testing.T) {
 		t.Errorf("error %q does not name the unknown type", err)
 	}
 }
+
+// TestSendExchange_InputValidation locks the buildOutbound validation contract
+// as surfaced through Send and Exchange: bad key sizes error out before any
+// relay POST.
+func TestSendExchange_InputValidation(t *testing.T) {
+	devicePriv, _ := testKeyPair(t, 0x11)
+	_, serverPub := testKeyPair(t, 0x22)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("input validation must reject before any relay POST")
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	if err := Send(context.Background(), srv.URL, serverPub[:31], []byte("x"), KnockOptions{}); err == nil || !strings.Contains(err.Error(), "server static pub") {
+		t.Errorf("Send(short server pub) = %v, want server-static-pub size error", err)
+	}
+	if err := Send(context.Background(), srv.URL, serverPub, []byte("x"), KnockOptions{DeviceStaticPriv: devicePriv[:16]}); err == nil || !strings.Contains(err.Error(), "device static priv") {
+		t.Errorf("Send(short device priv) = %v, want device-static-priv size error", err)
+	}
+	if _, err := Exchange(context.Background(), srv.URL, serverPub[:31], TypeRegister, []byte("x"), KnockOptions{}); err == nil || !strings.Contains(err.Error(), "server static pub") {
+		t.Errorf("Exchange(short server pub) = %v, want server-static-pub size error", err)
+	}
+}
+
+// TestSend_TransportFault locks the Status-0 RelayError contract for a
+// transport-level failure (no HTTP response at all).
+func TestSend_TransportFault(t *testing.T) {
+	_, serverPub := testKeyPair(t, 0x22)
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {}))
+	srv.Close() // connection refused from here on
+
+	err := Send(context.Background(), srv.URL, serverPub, []byte("x"), KnockOptions{})
+	if err == nil {
+		t.Fatal("Send to a closed relay succeeded, want transport fault")
+	}
+	var re *RelayError
+	if !errors.As(err, &re) {
+		t.Fatalf("Send transport fault is %T, want *RelayError", err)
+	}
+	if re.Status != 0 {
+		t.Errorf("transport fault Status = %d, want 0 (no HTTP response)", re.Status)
+	}
+}

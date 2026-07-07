@@ -150,6 +150,13 @@ func buildMessage(headerType int, inp *KnockInputs) ([]byte, error) {
 // Exported NHP initiator header-type values — the message types an agent can
 // originate (BuildMessage, Exchange, Send). Every other type is
 // server-originated and is rejected by the exported builders.
+//
+// Adding a message type deliberately touches three sites, which encode three
+// DIFFERENT predicates and are kept inline rather than force-unified: this
+// block plus BuildMessage's initiator set (what an agent may build),
+// Exchange's round-trip set (what elicits a reply at all), and
+// replyTypeAllowed's request→reply pairing (which reply each request may
+// receive).
 const (
 	// TypeKnock is NHP_KNK: the initial knock requesting admission; the server
 	// answers with an NHP_ACK (or an NHP_COK under overload).
