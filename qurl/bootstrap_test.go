@@ -3,236 +3,165 @@ package qurl
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 )
 
-func TestBootstrapAgent_GeneratesRegistersAndSavesState(t *testing.T) {
-	var gotPublicKey string
-	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/v1/agent/bootstrap" {
-			t.Fatalf("request = %s %s, want POST /v1/agent/bootstrap", r.Method, r.URL.Path)
-		}
-		if got, want := r.Header.Get("Authorization"), "Bearer lv_bootstrap_once"; got != want {
-			t.Fatalf("Authorization = %q, want %q", got, want)
-		}
-		var body map[string]string
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			t.Fatalf("decode body: %v", err)
-		}
-		gotPublicKey = body["public_key"]
-		if _, err := base64.StdEncoding.Strict().DecodeString(gotPublicKey); err != nil {
-			t.Fatalf("public key is not standard base64: %q", gotPublicKey)
-		}
-		if body["agent_id"] != "prod-us-east-1" {
-			t.Fatalf("agent_id = %q, want prod-us-east-1", body["agent_id"])
-		}
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"data":{"agent_id":"prod-us-east-1","registered_at":"2026-06-28T20:00:00Z","nhp_server_peer":{"public_key_b64":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","host":"nhp.layerv.ai","port":62206,"expire_time":0}}}`)
-	}))
-	defer api.Close()
+// BootstrapAgent is now the pre-issued-key (PATH A) enrollment specialized to
+// return the raw AgentState. It runs the same NHP engine as RegisterAgent's
+// bootstrap path, so these tests drive it against the same fake relay+NHP server
+// and fake qurl-service (registerHarness in register_test.go), with the bootstrap
+// key kind and BootstrapOption inputs.
 
-	path := filepath.Join(t.TempDir(), "agent-state.json")
-	state, err := BootstrapAgent(context.Background(),
-		"lv_bootstrap_once",
-		FileAgentState(path),
-		WithBootstrapBaseURL(api.URL),
-		WithAgentID("prod-us-east-1"),
-	)
+// bootstrapOpts points BootstrapAgent at the harness's fake API origin. The relay
+// URL is carried by registration-info, so no relay option is needed.
+func (h *registerHarness) bootstrapOpts(extra ...BootstrapOption) []BootstrapOption {
+	return append([]BootstrapOption{WithBootstrapBaseURL(h.apiSrv.URL)}, extra...)
+}
+
+func TestBootstrapAgent_EnrollsRegistersAndSavesState(t *testing.T) {
+	h := newRegisterHarness(t)
+	h.svc.keyKind = keyKindBootstrap
+	h.svc.expectedBearer = "lv_bootstrap_once"
+	h.nhp.expectCredential = "lv_bootstrap_once"
+	h.armDevicePubOnInfo()
+
+	state, err := BootstrapAgent(context.Background(), "lv_bootstrap_once", h.store, h.bootstrapOpts(WithAgentID("prod-us-east-1"))...)
 	if err != nil {
 		t.Fatalf("BootstrapAgent: %v", err)
 	}
-	if state.AgentID != "prod-us-east-1" || state.PublicKeyB64 != gotPublicKey {
-		t.Fatalf("state = %#v, public key sent %q", state, gotPublicKey)
+	if state.AgentID != "prod-us-east-1" {
+		t.Fatalf("AgentID = %q, want prod-us-east-1", state.AgentID)
 	}
-	if state.NHPPeer == nil || state.NHPPeer.Host != "nhp.layerv.ai" || state.NHPPeer.Port != 62206 {
-		t.Fatalf("NHP peer = %#v", state.NHPPeer)
+	if state.RegisteredAt == nil || state.NHPPeer == nil {
+		t.Fatalf("state not registered: %#v", state)
 	}
-	info, err := os.Stat(path)
+	if state.DeviceAPIKey != "lv_device_secret" {
+		t.Fatalf("DeviceAPIKey = %q, want lv_device_secret", state.DeviceAPIKey)
+	}
+
+	// State file is 0600 and the persisted keypair round-trips.
+	info, err := os.Stat(h.statePath)
 	if err != nil {
 		t.Fatalf("stat state: %v", err)
 	}
 	if info.Mode().Perm() != 0o600 {
 		t.Fatalf("state mode = %o, want 0600", info.Mode().Perm())
 	}
-
-	loaded, err := FileAgentState(path).LoadAgentState(context.Background())
-	if err != nil {
-		t.Fatalf("LoadAgentState: %v", err)
-	}
-	if loaded.PrivateKeyB64 == "" || loaded.PublicKeyB64 != gotPublicKey {
+	loaded := h.loadState(t)
+	if loaded.PrivateKeyB64 == "" || loaded.PublicKeyB64 != state.PublicKeyB64 {
 		t.Fatalf("loaded state = %#v", loaded)
 	}
 }
 
 func TestBootstrapAgent_RetriesIncompleteBootstrapWithSavedKeypair(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "agent-state.json")
-	store := FileAgentState(path)
+	h := newRegisterHarness(t)
+	h.svc.keyKind = keyKindBootstrap
+	h.armDevicePubOnInfo()
 
-	var publicKeys []string
-	var calls atomic.Int32
-	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		call := calls.Add(1)
-		var body map[string]string
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			t.Fatalf("decode body: %v", err)
-		}
-		publicKeys = append(publicKeys, body["public_key"])
-		if call == 1 {
-			http.Error(w, "temporary bootstrap failure", http.StatusBadGateway)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"data":{"agent_id":"agent-2","registered_at":"2026-06-28T20:00:00Z","nhp_server_peer":{"public_key_b64":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","host":"nhp.layerv.ai","port":62206,"expire_time":0}}}`)
-	}))
-	defer api.Close()
-
-	if _, err := BootstrapAgent(context.Background(), "lv_setup_once", store, WithBootstrapBaseURL(api.URL)); err == nil {
-		t.Fatal("first BootstrapAgent succeeded, want temporary failure")
+	// First attempt: completion fails transiently (502), leaving a keypair-only
+	// state. The REG did happen, but no durable state was saved.
+	h.svc.completionStatus = http.StatusBadGateway
+	h.svc.completionCode = "upstream_unavailable"
+	if _, err := BootstrapAgent(context.Background(), "lv_setup_once", h.store, h.bootstrapOpts()...); err == nil {
+		t.Fatal("first BootstrapAgent succeeded, want transient completion failure")
 	}
-	state, err := BootstrapAgent(context.Background(), "lv_setup_once", store, WithBootstrapBaseURL(api.URL))
+	firstState := h.loadState(t)
+	if firstState.RegisteredAt != nil {
+		t.Fatalf("incomplete state marked registered: %#v", firstState)
+	}
+	if firstState.PublicKeyB64 == "" {
+		t.Fatal("incomplete state did not persist the keypair")
+	}
+
+	// Second attempt: completion succeeds. The same device key must be reused.
+	h.svc.completionStatus = 0
+	state, err := BootstrapAgent(context.Background(), "lv_setup_once", h.store, h.bootstrapOpts()...)
 	if err != nil {
 		t.Fatalf("second BootstrapAgent: %v", err)
 	}
-	if state.AgentID != "agent-2" || state.RegisteredAt == nil {
-		t.Fatalf("state = %#v", state)
+	if state.RegisteredAt == nil {
+		t.Fatalf("second attempt not registered: %#v", state)
 	}
-	if len(publicKeys) != 2 {
-		t.Fatalf("public key count = %d, want 2", len(publicKeys))
-	}
-	if publicKeys[0] == "" || publicKeys[0] != publicKeys[1] {
-		t.Fatalf("bootstrap should reuse saved public key, got %q then %q", publicKeys[0], publicKeys[1])
+	if state.PublicKeyB64 != firstState.PublicKeyB64 {
+		t.Fatalf("bootstrap did not reuse the saved keypair: %q then %q", firstState.PublicKeyB64, state.PublicKeyB64)
 	}
 }
 
-func TestBootstrapAgent_ReportsConsumedSetupKeyAfterIncompleteBootstrap(t *testing.T) {
-	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/v1/agent/bootstrap" {
-			t.Fatalf("request = %s %s, want POST /v1/agent/bootstrap", r.Method, r.URL.Path)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusConflict)
-		fmt.Fprint(w, `{"error":{"code":"setup_key_consumed","detail":"setup key already consumed"}}`)
-	}))
-	defer api.Close()
+func TestBootstrapAgent_ReportsConsumedSetupKeyFromRAK(t *testing.T) {
+	h := newRegisterHarness(t)
+	h.svc.keyKind = keyKindBootstrap
+	h.nhp.rakErrCode = rakBootstrapConsumed // 52108
+	h.nhp.rakErrMsg = "setup key already consumed"
+	h.armDevicePubOnInfo()
 
-	path := filepath.Join(t.TempDir(), "agent-state.json")
-	_, err := BootstrapAgent(context.Background(), "lv_setup_once", FileAgentState(path), WithBootstrapBaseURL(api.URL))
+	_, err := BootstrapAgent(context.Background(), "lv_setup_once", h.store, h.bootstrapOpts()...)
 	if !errors.Is(err, ErrBootstrapSetupKeyConsumed) {
 		t.Fatalf("BootstrapAgent: want ErrBootstrapSetupKeyConsumed, got %v", err)
 	}
-	var apiErr *APIError
-	if !errors.As(err, &apiErr) {
-		t.Fatalf("BootstrapAgent: want wrapped *APIError, got %T: %v", err, err)
-	}
-	if apiErr.Code != "setup_key_consumed" {
-		t.Fatalf("APIError code = %q, want setup_key_consumed", apiErr.Code)
-	}
 
-	state, loadErr := FileAgentState(path).LoadAgentState(context.Background())
-	if loadErr != nil {
-		t.Fatalf("LoadAgentState: %v", loadErr)
-	}
+	// The incomplete keypair-only state remains so an operator can inspect it.
+	state := h.loadState(t)
 	if state.PublicKeyB64 == "" || state.RegisteredAt != nil {
 		t.Fatalf("incomplete saved state = %#v", state)
 	}
 }
 
-func TestBootstrapAgent_DoesNotTreatRefusedAsConsumedSetupKey(t *testing.T) {
-	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusForbidden)
-		fmt.Fprint(w, `{"error":{"code":"access_refused","detail":"access refused by bootstrap service"}}`)
-	}))
-	defer api.Close()
+func TestBootstrapAgent_ReportsConsumedSetupKeyFromCompletion(t *testing.T) {
+	h := newRegisterHarness(t)
+	h.svc.keyKind = keyKindBootstrap
+	h.svc.completionStatus = http.StatusConflict
+	h.svc.completionCode = "setup_key_consumed"
+	h.armDevicePubOnInfo()
 
-	path := filepath.Join(t.TempDir(), "agent-state.json")
-	_, err := BootstrapAgent(context.Background(), "lv_setup_once", FileAgentState(path), WithBootstrapBaseURL(api.URL))
-	if errors.Is(err, ErrBootstrapSetupKeyConsumed) {
-		t.Fatalf("BootstrapAgent: access refused should not be ErrBootstrapSetupKeyConsumed: %v", err)
-	}
-	var apiErr *APIError
-	if !errors.As(err, &apiErr) {
-		t.Fatalf("BootstrapAgent: want wrapped *APIError, got %T: %v", err, err)
-	}
-	if apiErr.Code != "access_refused" {
-		t.Fatalf("APIError code = %q, want access_refused", apiErr.Code)
-	}
-}
-
-func TestIsConsumedSetupKeyErrorTextFallbackRequiresTerminalStatus(t *testing.T) {
-	terminalErr := &APIError{
-		StatusCode: http.StatusConflict,
-		Detail:     "setup key already used",
-	}
-	if !isConsumedSetupKeyError(terminalErr) {
-		t.Fatal("409 text fallback should be treated as consumed setup key")
-	}
-
-	transientErr := &APIError{
-		StatusCode: http.StatusBadGateway,
-		Detail:     "upstream said setup key already used before timing out",
-	}
-	if isConsumedSetupKeyError(transientErr) {
-		t.Fatal("transient text fallback should not be treated as consumed setup key")
+	_, err := BootstrapAgent(context.Background(), "lv_setup_once", h.store, h.bootstrapOpts()...)
+	if !errors.Is(err, ErrBootstrapSetupKeyConsumed) {
+		t.Fatalf("BootstrapAgent: want ErrBootstrapSetupKeyConsumed from completion, got %v", err)
 	}
 }
 
 func TestBootstrapAgent_ReturnsRegisteredStateWithoutNetwork(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "agent-state.json")
-	store := FileAgentState(path)
+	h := newRegisterHarness(t)
+	h.svc.keyKind = keyKindBootstrap
+	h.armDevicePubOnInfo()
 
-	var calls atomic.Int32
-	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		if calls.Add(1) > 1 {
-			t.Fatalf("BootstrapAgent made an unexpected second network call")
-		}
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"data":{"agent_id":"agent-1","registered_at":"2026-06-28T20:00:00Z","nhp_server_peer":{"public_key_b64":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","host":"nhp.layerv.ai","port":62206,"expire_time":0}}}`)
-	}))
-	defer api.Close()
-
-	first, err := BootstrapAgent(context.Background(), "lv_setup_once", store, WithBootstrapBaseURL(api.URL))
+	first, err := BootstrapAgent(context.Background(), "lv_setup_once", h.store, h.bootstrapOpts()...)
 	if err != nil {
 		t.Fatalf("first BootstrapAgent: %v", err)
 	}
-	second, err := BootstrapAgent(context.Background(), "lv_consumed_setup_key", store, WithBootstrapBaseURL(api.URL))
+	infoAfterFirst := h.svc.infoCalls.Load()
+
+	second, err := BootstrapAgent(context.Background(), "lv_consumed_setup_key", h.store, h.bootstrapOpts()...)
 	if err != nil {
 		t.Fatalf("second BootstrapAgent: %v", err)
 	}
-	if calls.Load() != 1 {
-		t.Fatalf("network calls = %d, want 1", calls.Load())
+	if got := h.svc.infoCalls.Load(); got != infoAfterFirst {
+		t.Fatalf("fast path made %d extra registration-info calls, want 0", got-infoAfterFirst)
 	}
 	if second.AgentID != first.AgentID || second.PublicKeyB64 != first.PublicKeyB64 || second.NHPPeer == nil {
 		t.Fatalf("second state = %#v, first = %#v", second, first)
 	}
 }
 
-func TestBootstrapAgent_RejectsMismatchedResponseAgentID(t *testing.T) {
-	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"data":{"agent_id":"server-agent","registered_at":"2026-06-28T20:00:00Z","nhp_server_peer":{"public_key_b64":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","host":"nhp.layerv.ai","port":62206,"expire_time":0}}}`)
-	}))
-	defer api.Close()
+func TestBootstrapAgent_RejectsMismatchedRequestedAgentIDOnFastPath(t *testing.T) {
+	h := newRegisterHarness(t)
+	h.svc.keyKind = keyKindBootstrap
+	h.armDevicePubOnInfo()
 
-	path := filepath.Join(t.TempDir(), "agent-state.json")
-	_, err := BootstrapAgent(context.Background(),
-		"lv_setup_once",
-		FileAgentState(path),
-		WithBootstrapBaseURL(api.URL),
-		WithAgentID("requested-agent"),
-	)
-	if !errors.Is(err, ErrInvalidBootstrapConfig) || !strings.Contains(err.Error(), "does not match requested agent id") {
-		t.Fatalf("BootstrapAgent: want agent id mismatch ErrInvalidBootstrapConfig, got %v", err)
+	if _, err := BootstrapAgent(context.Background(), "lv_setup_once", h.store, h.bootstrapOpts(WithAgentID("agent-one"))...); err != nil {
+		t.Fatalf("first BootstrapAgent: %v", err)
+	}
+	// BootstrapAgent keeps its documented ErrInvalidBootstrapConfig class even
+	// though the mismatch is detected inside the shared registration engine.
+	_, err := BootstrapAgent(context.Background(), "lv_setup_once", h.store, h.bootstrapOpts(WithAgentID("agent-two"))...)
+	if !errors.Is(err, ErrInvalidBootstrapConfig) || !strings.Contains(err.Error(), "does not match requested device id") {
+		t.Fatalf("BootstrapAgent: want ErrInvalidBootstrapConfig device id mismatch, got %v", err)
 	}
 }
 
@@ -258,23 +187,17 @@ func TestBootstrapAgent_RejectsInvalidRegisteredStateWithoutNetwork(t *testing.T
 	}{
 		{
 			name: "missing agent id",
-			edit: func(state *AgentState) {
-				state.AgentID = ""
-			},
+			edit: func(state *AgentState) { state.AgentID = "" },
 			want: "missing agent id",
 		},
 		{
 			name: "bad peer key",
-			edit: func(state *AgentState) {
-				state.NHPPeer.PublicKeyB64 = "not-base64"
-			},
+			edit: func(state *AgentState) { state.NHPPeer.PublicKeyB64 = "not-base64" },
 			want: "not standard base64",
 		},
 		{
 			name: "expired peer",
-			edit: func(state *AgentState) {
-				state.NHPPeer.ExpireTime = 1
-			},
+			edit: func(state *AgentState) { state.NHPPeer.ExpireTime = 1 },
 			want: "peer is expired",
 		},
 	}
@@ -298,61 +221,6 @@ func TestBootstrapAgent_RejectsInvalidRegisteredStateWithoutNetwork(t *testing.T
 			)
 			if !errors.Is(err, ErrInvalidBootstrapConfig) || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("BootstrapAgent: want ErrInvalidBootstrapConfig containing %q, got %v", tt.want, err)
-			}
-		})
-	}
-}
-
-func TestBootstrapAgent_RejectsIncompleteRegistrationResponse(t *testing.T) {
-	tests := []struct {
-		name string
-		body string
-	}{
-		{
-			name: "missing registration time",
-			body: `{"data":{"agent_id":"agent-1","registered_at":null,"nhp_server_peer":{"public_key_b64":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","host":"nhp.layerv.ai","port":62206,"expire_time":0}}}`,
-		},
-		{
-			name: "missing peer",
-			body: `{"data":{"agent_id":"agent-1","registered_at":"2026-06-28T20:00:00Z"}}`,
-		},
-		{
-			name: "malformed peer key",
-			body: `{"data":{"agent_id":"agent-1","registered_at":"2026-06-28T20:00:00Z","nhp_server_peer":{"public_key_b64":"not-base64","host":"nhp.layerv.ai","port":62206,"expire_time":0}}}`,
-		},
-		{
-			name: "short peer key",
-			body: `{"data":{"agent_id":"agent-1","registered_at":"2026-06-28T20:00:00Z","nhp_server_peer":{"public_key_b64":"AAAA","host":"nhp.layerv.ai","port":62206,"expire_time":0}}}`,
-		},
-		{
-			name: "missing peer host",
-			body: `{"data":{"agent_id":"agent-1","registered_at":"2026-06-28T20:00:00Z","nhp_server_peer":{"public_key_b64":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","host":"","port":62206,"expire_time":0}}}`,
-		},
-		{
-			name: "missing peer port",
-			body: `{"data":{"agent_id":"agent-1","registered_at":"2026-06-28T20:00:00Z","nhp_server_peer":{"public_key_b64":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","host":"nhp.layerv.ai","port":0,"expire_time":0}}}`,
-		},
-		{
-			name: "peer port too high",
-			body: `{"data":{"agent_id":"agent-1","registered_at":"2026-06-28T20:00:00Z","nhp_server_peer":{"public_key_b64":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","host":"nhp.layerv.ai","port":70000,"expire_time":0}}}`,
-		},
-		{
-			name: "expired peer",
-			body: `{"data":{"agent_id":"agent-1","registered_at":"2026-06-28T20:00:00Z","nhp_server_peer":{"public_key_b64":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","host":"nhp.layerv.ai","port":62206,"expire_time":1}}}`,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				w.Header().Set("Content-Type", "application/json")
-				fmt.Fprint(w, tt.body)
-			}))
-			defer api.Close()
-
-			path := filepath.Join(t.TempDir(), "agent-state.json")
-			_, err := BootstrapAgent(context.Background(), "lv_setup_once", FileAgentState(path), WithBootstrapBaseURL(api.URL))
-			if !errors.Is(err, ErrInvalidBootstrapConfig) {
-				t.Fatalf("BootstrapAgent: want ErrInvalidBootstrapConfig, got %v", err)
 			}
 		})
 	}
@@ -390,9 +258,7 @@ func TestFileAgentState_RejectsGroupWritableStateDir(t *testing.T) {
 	if err := os.Chmod(dir, 0o777); err != nil {
 		t.Fatalf("chmod state dir: %v", err)
 	}
-	t.Cleanup(func() {
-		_ = os.Chmod(dir, 0o700)
-	})
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
 	path := filepath.Join(dir, "agent-state.json")
 	raw := []byte(`{"private_key_b64":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","public_key_b64":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb="}`)
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
@@ -412,9 +278,7 @@ func TestFileAgentState_SaveRejectsGroupWritableStateDir(t *testing.T) {
 	if err := os.Chmod(dir, 0o777); err != nil {
 		t.Fatalf("chmod state dir: %v", err)
 	}
-	t.Cleanup(func() {
-		_ = os.Chmod(dir, 0o700)
-	})
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
 
 	state := &AgentState{
 		PrivateKeyB64: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
@@ -461,6 +325,60 @@ func TestFileAgentState_RejectsSymlinkState(t *testing.T) {
 
 	if _, err := FileAgentState(link).LoadAgentState(context.Background()); !errors.Is(err, ErrInvalidBootstrapConfig) {
 		t.Fatalf("LoadAgentState symlink: want ErrInvalidBootstrapConfig, got %v", err)
+	}
+}
+
+// TestFileAgentState_V2FieldsRoundTripAndLegacyLoads verifies AgentState v2's
+// additive schema: a v2 state (device key + relay + otp fields) round-trips, and
+// a legacy pre-v2 file (no v2 fields) still loads and validates.
+func TestFileAgentState_V2FieldsRoundTripAndLegacyLoads(t *testing.T) {
+	registeredAt := time.Now().UTC().Round(time.Second)
+	otpAt := registeredAt.Add(-time.Minute)
+
+	// v2 round trip.
+	v2Path := filepath.Join(t.TempDir(), "v2.json")
+	v2Store := FileAgentState(v2Path)
+	base, err := newAgentState()
+	if err != nil {
+		t.Fatalf("newAgentState: %v", err)
+	}
+	base.AgentID = "agent-v2"
+	base.RegisteredAt = &registeredAt
+	base.OTPRequestedAt = &otpAt
+	base.NHPPeer = &NHPServerPeerInfo{PublicKeyB64: base64.StdEncoding.EncodeToString(make([]byte, 32)), Host: "h", Port: 1}
+	base.SchemaVersion = agentStateSchemaVersion
+	base.DeviceAPIKey = "lv_device_secret"
+	base.RelayURL = "https://relay.example.test"
+	base.KeyID = "key_abc"
+	if err := v2Store.SaveAgentState(context.Background(), base); err != nil {
+		t.Fatalf("save v2 state: %v", err)
+	}
+	loaded, err := v2Store.LoadAgentState(context.Background())
+	if err != nil {
+		t.Fatalf("load v2 state: %v", err)
+	}
+	if loaded.DeviceAPIKey != "lv_device_secret" || loaded.RelayURL != "https://relay.example.test" || loaded.KeyID != "key_abc" || loaded.SchemaVersion != agentStateSchemaVersion {
+		t.Fatalf("v2 fields did not round trip: %#v", loaded)
+	}
+	if loaded.OTPRequestedAt == nil || !loaded.OTPRequestedAt.Equal(otpAt) {
+		t.Fatalf("OTPRequestedAt did not round trip: %#v", loaded.OTPRequestedAt)
+	}
+
+	// Legacy (pre-v2) file: only the original fields, written by hand.
+	legacyPath := filepath.Join(t.TempDir(), "legacy.json")
+	legacy := []byte(`{"agent_id":"agent-legacy","private_key_b64":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","public_key_b64":"","registered_at":"2026-01-01T00:00:00Z","nhp_server_peer":{"public_key_b64":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","host":"nhp.layerv.ai","port":62206,"expire_time":0}}`)
+	if err := os.WriteFile(legacyPath, legacy, 0o600); err != nil {
+		t.Fatalf("write legacy state: %v", err)
+	}
+	loadedLegacy, err := FileAgentState(legacyPath).LoadAgentState(context.Background())
+	if err != nil {
+		t.Fatalf("load legacy state: %v", err)
+	}
+	if loadedLegacy.SchemaVersion != 0 || loadedLegacy.DeviceAPIKey != "" {
+		t.Fatalf("legacy state should have zero v2 fields: %#v", loadedLegacy)
+	}
+	if err := validateRegisteredAgentState(loadedLegacy, time.Now(), ErrInvalidBootstrapConfig); err != nil {
+		t.Fatalf("legacy registered state should validate: %v", err)
 	}
 }
 

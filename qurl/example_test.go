@@ -2,6 +2,7 @@ package qurl_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -129,4 +130,77 @@ func ExampleBootstrapAgent() {
 	if err != nil {
 		panic(err)
 	}
+}
+
+func ExampleRegisterAgent() {
+	// RegisterAgent is idempotent: the first call enrolls and persists a device
+	// credential; later calls load it and return a Client with no network I/O.
+	store := qurl.FileAgentState("/var/lib/layerv/qurl/agent-state.json")
+	client, err := qurl.RegisterAgent(context.Background(), "lv_api_key", store)
+	if err != nil {
+		panic(err)
+	}
+
+	resource, err := client.ProtectURL(context.Background(), "https://dashboard.internal.acme.com")
+	if err != nil {
+		panic(err)
+	}
+	portal, err := resource.CreatePortal(context.Background(), qurl.ValidFor(time.Hour))
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(portal.Link)
+}
+
+func ExampleRegisterAgent_withOTP() {
+	// An account key uses email one-time codes. Registration is two-phase and
+	// re-entrant: the first call requests a code and returns *OTPPendingError; a
+	// second call with WithOTP finishes enrollment.
+	ctx := context.Background()
+	store := qurl.FileAgentState("/var/lib/layerv/qurl/agent-state.json")
+
+	_, err := qurl.RegisterAgent(ctx, "lv_account_key", store)
+	var pending *qurl.OTPPendingError
+	if errors.As(err, &pending) {
+		// LayerV emailed a code to pending.MaskedEmail. Obtain it out of band,
+		// then resume. (errors.Is(err, qurl.ErrOTPPending) matches the sentinel.)
+		code := readOneTimeCodeFromOperator(pending.MaskedEmail)
+		client, err := qurl.RegisterAgent(ctx, "lv_account_key", store, qurl.WithOTP(code))
+		if err != nil {
+			panic(err)
+		}
+		_ = client
+	} else if err != nil {
+		panic(err)
+	}
+}
+
+func ExampleRegisterAgent_otpProvider() {
+	// WithOTPProvider supplies the emailed code from a callback — for a headless
+	// agent that reads its own mailbox — so a single RegisterAgent call can both
+	// request and consume the code.
+	store := qurl.FileAgentState("/var/lib/layerv/qurl/agent-state.json")
+	client, err := qurl.RegisterAgent(context.Background(), "lv_account_key", store,
+		qurl.WithOTPProvider(func(ctx context.Context) (string, error) {
+			return fetchLatestOneTimeCode(ctx)
+		}),
+	)
+	if err != nil {
+		panic(err)
+	}
+	_ = client
+}
+
+// readOneTimeCodeFromOperator and fetchLatestOneTimeCode stand in for the
+// caller's own code-retrieval mechanism in the examples above.
+func readOneTimeCodeFromOperator(maskedEmail string) string {
+	fmt.Printf("enter the code emailed to %s: ", maskedEmail)
+	return "123456"
+}
+
+func fetchLatestOneTimeCode(ctx context.Context) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	return "123456", nil
 }

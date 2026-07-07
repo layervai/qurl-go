@@ -8,14 +8,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 )
 
-const defaultBootstrapBaseURL = "https://bootstrap.layerv.ai"
+// defaultBootstrapBaseURL is the LayerV API origin BootstrapAgent uses for the
+// NHP registration pre-flight and completion endpoints. It matches the default
+// RegisterAgent base URL; WithBootstrapBaseURL overrides it. (Before the NHP
+// reimplementation this pointed at a dedicated bootstrap origin; the enrollment
+// endpoints now live on the qurl-service API origin.)
+const defaultBootstrapBaseURL = defaultAPIBaseURL
 
 // ErrInvalidBootstrapConfig is returned when bootstrap inputs are invalid.
 var ErrInvalidBootstrapConfig = errors.New("qurl: invalid bootstrap config")
@@ -44,14 +48,54 @@ type NHPServerPeerInfo struct {
 	ExpireTime int64 `json:"expire_time"`
 }
 
-// AgentState is the protected local identity created during bootstrap.
+// AgentState is the protected local agent identity created during registration
+// or bootstrap.
+//
+// SECURITY: once registration completes, AgentState is a CREDENTIAL FILE — it
+// holds DeviceAPIKey, the bearer token the returned Client authorizes with. Treat
+// it as secret: keep it out of logs, crash dumps, and support bundles, and keep
+// the FileAgentState 0600 / 0700-dir posture. On a shared host, back it with a
+// secret manager (for example AWS Secrets Manager via a custom AgentStateStore)
+// rather than a world-readable path.
+//
+// Schema evolution (additive, backward compatible): the v2 fields SchemaVersion,
+// DeviceAPIKey, RelayURL, KeyID, and OTPRequestedAt were added for RegisterAgent.
+// They are all json:",omitempty" and the pre-v2 fields are unchanged, so a legacy
+// (bootstrap-era) state file loads and validates without migration, and a v2 file
+// written by RegisterAgent is still readable by older code that ignores the new
+// fields. SchemaVersion is informational; the runtime derives readiness from the
+// fields themselves (RegisteredAt + DeviceAPIKey), never from the version number.
 type AgentState struct {
 	AgentID       string             `json:"agent_id,omitempty"`
 	PrivateKeyB64 string             `json:"private_key_b64"`
 	PublicKeyB64  string             `json:"public_key_b64"`
 	RegisteredAt  *time.Time         `json:"registered_at,omitempty"`
 	NHPPeer       *NHPServerPeerInfo `json:"nhp_server_peer,omitempty"`
+
+	// --- v2 additive fields (RegisterAgent) ---
+
+	// SchemaVersion is the AgentState schema version. Absent/0 in legacy files;
+	// RegisterAgent writes agentStateSchemaVersion. Informational only.
+	SchemaVersion int `json:"schema_version,omitempty"`
+	// DeviceAPIKey is the device REST bearer credential minted at registration
+	// completion. Its presence alongside RegisteredAt marks a state ready to back
+	// a Client with zero network. SENSITIVE — see the type doc.
+	DeviceAPIKey string `json:"device_api_key,omitempty"`
+	// RelayURL is the NHP relay base URL learned from registration-info, persisted
+	// so a resumed registration reuses the same relay.
+	RelayURL string `json:"relay_url,omitempty"`
+	// KeyID is the enrollment key id (key_...) learned from registration-info.
+	KeyID string `json:"key_id,omitempty"`
+	// OTPRequestedAt marks the account-key otp_pending state: an email one-time
+	// code has been requested and RegisterAgent is waiting for WithOTP. Cleared
+	// implicitly once RegisteredAt is set.
+	OTPRequestedAt *time.Time `json:"otp_requested_at,omitempty"`
 }
+
+// agentStateSchemaVersion is the current AgentState schema version RegisterAgent
+// stamps into SchemaVersion. Bumped only on an additive field change that older
+// readers can still ignore.
+const agentStateSchemaVersion = 2
 
 // AgentStateStore loads and saves the bootstrapped local identity. The
 // file-backed store writes plaintext JSON protected by filesystem permissions;
@@ -217,24 +261,31 @@ func WithVersion(version string) BootstrapOption {
 	})
 }
 
-// BootstrapAgent consumes a temporary LayerV setup key, registers a local
-// X25519 identity, and saves that identity in store. The setup key is used for
+// BootstrapAgent consumes a temporary LayerV setup key, enrolls a local X25519
+// identity over NHP, and saves that identity in store. The setup key is used for
 // this call only; future restarts load the saved AgentState.
+//
+// Prefer RegisterAgent for new code: it returns a ready-to-use Client and covers
+// both the pre-issued-key and email-OTP paths. BootstrapAgent is the pre-issued
+// (bootstrap) key path specialized to return the raw AgentState, kept for callers
+// that manage the Client separately. It runs the same NHP enrollment engine as
+// RegisterAgent's bootstrap path: a registration-info pre-flight, an NHP_REG
+// carrying the setup key as the enrollment credential (proving the device key via
+// the Noise handshake), and a completion fetch that mints the durable state.
 //
 // If store already contains a registered AgentState, BootstrapAgent returns it
 // without sending the setup key again. If a prior attempt saved only the local
-// keypair before receiving the API response, RegisteredAt is nil and calling
-// BootstrapAgent again retries registration with the same public key. That
-// lost-response retry depends on LayerV treating repeated registration for the
-// same public key as idempotent. If LayerV instead reports that the one-time
-// setup key was already consumed before this machine saved the completed
-// AgentState, BootstrapAgent returns ErrBootstrapSetupKeyConsumed so setup code
-// can ask for a fresh setup flow instead of retrying forever.
+// keypair before enrollment completed, RegisteredAt is nil and calling
+// BootstrapAgent again retries with the same device key. That retry depends on
+// LayerV treating repeated enrollment for the same device key as idempotent. If
+// LayerV instead reports that the one-time setup key was already consumed,
+// BootstrapAgent returns ErrBootstrapSetupKeyConsumed so setup code can ask for a
+// fresh setup flow instead of retrying forever.
 //
 // Registered state is validated on load. LayerV bootstrap peers are normally
 // durable (ExpireTime is 0); if a future peer record carries a finite expiry and
-// has expired, BootstrapAgent fails closed so the caller can run the LayerV
-// setup or refresh flow instead of using stale routing state.
+// has expired, BootstrapAgent fails closed so the caller can run the LayerV setup
+// or refresh flow instead of using stale routing state.
 //
 // Call BootstrapAgent from one setup path at a time for a given store. The SDK
 // makes each file write atomic, but it does not lock across concurrent callers or
@@ -245,6 +296,9 @@ func BootstrapAgent(ctx context.Context, setupKey string, store AgentStateStore,
 	}
 	if store == nil {
 		return nil, fmt.Errorf("%w: state store must not be nil", ErrInvalidBootstrapConfig)
+	}
+	if err := validateContext(ctx, ErrInvalidBootstrapConfig); err != nil {
+		return nil, err
 	}
 	cfg := bootstrapOptions{
 		baseURL:    defaultBootstrapBaseURL,
@@ -259,150 +313,71 @@ func BootstrapAgent(ctx context.Context, setupKey string, store AgentStateStore,
 		}
 	}
 
-	state, err := loadOrCreateAgentState(ctx, store)
+	// BootstrapAgent is PATH A specialized: map its options onto the shared
+	// registration engine. requireDeviceKey stays false so a legacy bootstrap-era
+	// state (registered, no device key) still returns from the fast path.
+	rcfg := &registerConfig{
+		baseURL:          cfg.baseURL,
+		httpClient:       cfg.httpClient,
+		deviceID:         cfg.agentID,
+		hostname:         cfg.hostname,
+		version:          cfg.version,
+		invalidConfigErr: ErrInvalidBootstrapConfig,
+		clock:            time.Now,
+	}
+	state, err := rcfg.run(ctx, setupKey, store)
 	if err != nil {
-		return nil, err
-	}
-	if state.RegisteredAt != nil {
-		if err := validateRegisteredAgentState(state, time.Now()); err != nil {
-			return nil, err
-		}
-		if cfg.agentID != "" && state.AgentID != "" && cfg.agentID != state.AgentID {
-			return nil, fmt.Errorf("%w: saved agent id %q does not match requested agent id %q", ErrInvalidBootstrapConfig, state.AgentID, cfg.agentID)
-		}
-		return state, nil
-	}
-	if cfg.agentID != "" {
-		state.AgentID = cfg.agentID
-	}
-	// Persist the generated keypair before the network call so a failed or
-	// interrupted bootstrap retry uses the same local identity. Until the API
-	// response is saved, nil RegisteredAt/NHPPeer means registration is not yet
-	// complete and BootstrapAgent should be retried.
-	if err := store.SaveAgentState(ctx, state); err != nil {
-		return nil, err
-	}
-
-	reqBody := agentBootstrapRequest{
-		PublicKey: state.PublicKeyB64,
-		AgentID:   cfg.agentID,
-		Hostname:  cfg.hostname,
-		Version:   cfg.version,
-	}
-	var env apiEnvelope[agentBootstrapResponse]
-	if err := doAuthorizedJSON(ctx, cfg.httpClient, cfg.baseURL, BearerToken(setupKey).Authorize, http.MethodPost, "/v1/agent/bootstrap", reqBody, &env); err != nil {
-		if isConsumedSetupKeyError(err) {
-			return nil, fmt.Errorf("%w: setup key was rejected after local keypair was saved; rerun LayerV setup or restore completed agent state: %w", ErrBootstrapSetupKeyConsumed, err)
-		}
-		return nil, err
-	}
-	if err := env.Data.validate(time.Now()); err != nil {
-		return nil, err
-	}
-	if cfg.agentID != "" && env.Data.AgentID != cfg.agentID {
-		return nil, fmt.Errorf("%w: bootstrap response agent id %q does not match requested agent id %q", ErrInvalidBootstrapConfig, env.Data.AgentID, cfg.agentID)
-	}
-
-	state.AgentID = env.Data.AgentID
-	state.RegisteredAt = env.Data.RegisteredAt
-	state.NHPPeer = &env.Data.NHPPeer
-	if err := store.SaveAgentState(ctx, state); err != nil {
 		return nil, err
 	}
 	return state, nil
 }
 
-type agentBootstrapRequest struct {
-	PublicKey string `json:"public_key"`
-	AgentID   string `json:"agent_id,omitempty"`
-	Hostname  string `json:"hostname,omitempty"`
-	Version   string `json:"version,omitempty"`
-}
-
-type agentBootstrapResponse struct {
-	AgentID      string            `json:"agent_id"`
-	RegisteredAt *time.Time        `json:"registered_at"`
-	NHPPeer      NHPServerPeerInfo `json:"nhp_server_peer"`
-}
-
-func (r agentBootstrapResponse) validate(now time.Time) error {
-	if strings.TrimSpace(r.AgentID) == "" {
-		return fmt.Errorf("%w: bootstrap response missing agent id", ErrInvalidBootstrapConfig)
-	}
-	if r.RegisteredAt == nil {
-		return fmt.Errorf("%w: bootstrap response missing registration time", ErrInvalidBootstrapConfig)
-	}
-	return validateNHPServerPeerInfo(r.NHPPeer, now, "bootstrap response")
-}
-
-func isConsumedSetupKeyError(err error) bool {
-	var apiErr *APIError
-	if !errors.As(err, &apiErr) {
-		return false
-	}
-	code := strings.ToLower(strings.TrimSpace(apiErr.Code))
-	if code == "setup_key_consumed" || code == "bootstrap_setup_key_consumed" {
-		return true
-	}
-	// Structured codes are the contract. These phrases are only a best-effort
-	// bridge for older bootstrap errors that carried human text. Keep the bridge
-	// on terminal-looking statuses so transient upstream prose cannot suppress a
-	// valid retry.
-	switch apiErr.StatusCode {
-	case http.StatusConflict, http.StatusForbidden:
-	default:
-		return false
-	}
-	text := strings.ToLower(strings.Join([]string{
-		apiErr.Code,
-		apiErr.Type,
-		apiErr.Title,
-		apiErr.Detail,
-	}, " "))
-	return strings.Contains(text, "setup key already consumed") ||
-		strings.Contains(text, "setup key already used") ||
-		strings.Contains(text, "one-time setup key already consumed") ||
-		strings.Contains(text, "one-time setup key already used")
-}
-
-func validateRegisteredAgentState(state *AgentState, now time.Time) error {
+// validateRegisteredAgentState checks a loaded, already-registered state. errKind
+// is the caller-facing sentinel wrapped into failures so each front door keeps
+// its class (BootstrapAgent → ErrInvalidBootstrapConfig, RegisterAgent →
+// ErrInvalidRegisterConfig).
+func validateRegisteredAgentState(state *AgentState, now time.Time, errKind error) error {
 	if state == nil {
-		return fmt.Errorf("%w: registered agent state is nil", ErrInvalidBootstrapConfig)
+		return fmt.Errorf("%w: registered agent state is nil", errKind)
 	}
 	if strings.TrimSpace(state.AgentID) == "" {
-		return fmt.Errorf("%w: registered agent state missing agent id", ErrInvalidBootstrapConfig)
+		return fmt.Errorf("%w: registered agent state missing agent id", errKind)
 	}
 	if state.RegisteredAt == nil {
-		return fmt.Errorf("%w: registered agent state missing registration time", ErrInvalidBootstrapConfig)
+		return fmt.Errorf("%w: registered agent state missing registration time", errKind)
 	}
 	if state.NHPPeer == nil {
-		return fmt.Errorf("%w: registered agent state missing NHP peer", ErrInvalidBootstrapConfig)
+		return fmt.Errorf("%w: registered agent state missing NHP peer", errKind)
 	}
-	return validateNHPServerPeerInfo(*state.NHPPeer, now, "registered agent state")
+	return validateNHPServerPeerInfo(*state.NHPPeer, now, "registered agent state", errKind)
 }
 
-func validateNHPServerPeerInfo(peer NHPServerPeerInfo, now time.Time, label string) error {
+// validateNHPServerPeerInfo checks an NHP peer record. errKind is the sentinel
+// wrapped into every failure so the caller's error class flows through: bootstrap
+// callers pass ErrInvalidBootstrapConfig, registration callers pass
+// ErrInvalidRegisterConfig.
+func validateNHPServerPeerInfo(peer NHPServerPeerInfo, now time.Time, label string, errKind error) error {
 	if strings.TrimSpace(peer.PublicKeyB64) == "" {
-		return fmt.Errorf("%w: %s missing NHP peer public key", ErrInvalidBootstrapConfig, label)
+		return fmt.Errorf("%w: %s missing NHP peer public key", errKind, label)
 	}
 	peerKey, err := base64.StdEncoding.Strict().DecodeString(peer.PublicKeyB64)
 	if err != nil {
-		return fmt.Errorf("%w: %s NHP peer public key is not standard base64: %w", ErrInvalidBootstrapConfig, label, err)
+		return fmt.Errorf("%w: %s NHP peer public key is not standard base64: %w", errKind, label, err)
 	}
 	if _, err := ecdh.X25519().NewPublicKey(peerKey); err != nil {
-		return fmt.Errorf("%w: %s NHP peer public key is not X25519: %w", ErrInvalidBootstrapConfig, label, err)
+		return fmt.Errorf("%w: %s NHP peer public key is not X25519: %w", errKind, label, err)
 	}
 	if strings.TrimSpace(peer.Host) == "" {
-		return fmt.Errorf("%w: %s missing NHP peer host", ErrInvalidBootstrapConfig, label)
+		return fmt.Errorf("%w: %s missing NHP peer host", errKind, label)
 	}
 	if peer.Port <= 0 {
-		return fmt.Errorf("%w: %s missing NHP peer port", ErrInvalidBootstrapConfig, label)
+		return fmt.Errorf("%w: %s missing NHP peer port", errKind, label)
 	}
 	if peer.Port > 65535 {
-		return fmt.Errorf("%w: %s NHP peer port out of range", ErrInvalidBootstrapConfig, label)
+		return fmt.Errorf("%w: %s NHP peer port out of range", errKind, label)
 	}
 	if peer.ExpireTime != 0 && peer.ExpireTime <= now.Unix() {
-		return fmt.Errorf("%w: %s NHP peer is expired", ErrInvalidBootstrapConfig, label)
+		return fmt.Errorf("%w: %s NHP peer is expired", errKind, label)
 	}
 	return nil
 }

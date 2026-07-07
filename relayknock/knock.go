@@ -54,6 +54,53 @@ func BuildMessage(headerType int, inp *KnockInputs) ([]byte, error) {
 	}
 }
 
+// BuildReply builds a complete server-originated NHP reply packet (240-byte
+// header ‖ sealed body) of the given reply header type: TypeACK, TypeCookieChallenge,
+// or TypeRegisterAck. It is the responder-role mirror of BuildMessage: an agent
+// never builds these, so the exported BuildMessage rejects them; a server or a
+// conformance/test double that must answer a knock or a registration builds them
+// here. The transcript is role-symmetric (only the obfuscated type field differs),
+// so a reply built here decrypts under DecryptReply against the server's static
+// key exactly as a real server reply would.
+//
+// Set inp.DeviceStaticPriv to the SERVER static private key and inp.ServerStaticPub
+// to the AGENT (initiator) static public key — the roles are swapped relative to a
+// knock, because the reply is a fresh handshake the server initiates back to the
+// agent. inp.Counter must echo the counter of the request being answered so a
+// round-trip caller (Exchange) accepts the correlation.
+func BuildReply(headerType int, inp *KnockInputs) ([]byte, error) {
+	switch headerType {
+	case TypeACK, TypeCookieChallenge, TypeRegisterAck:
+		return buildMessage(headerType, inp)
+	default:
+		return nil, fmt.Errorf("unsupported reply header type %d (want TypeACK, TypeCookieChallenge, or TypeRegisterAck)", headerType)
+	}
+}
+
+// OpenInitiatorMessage decrypts and authenticates an initiator packet (NHP_KNK /
+// NHP_OTP / NHP_REG) in the responder role — the open a server (or a test double
+// standing in for one) performs on a packet an agent posted. It is the mirror of
+// DecryptReply, which opens server replies from the initiator side; the two split
+// the role-symmetric transcript by which header types each admits.
+//
+// serverPriv is the responder (server) static private key; expectedDevicePub is
+// the initiator (agent) static public key the caller expects. Only initiator
+// header types are accepted: a reply type is rejected, so a Reply this returns
+// always carries an initiator type. The returned Reply.Counter is the request's
+// transaction id — a responder echoes it in the reply it builds with BuildReply.
+func OpenInitiatorMessage(serverPriv, expectedDevicePub, packet []byte) (*Reply, error) {
+	reply, err := decryptMessage(serverPriv, expectedDevicePub, packet)
+	if err != nil {
+		return nil, err
+	}
+	switch reply.Type {
+	case nhpKNK, nhpOTP, nhpREG:
+		return reply, nil
+	default:
+		return nil, fmt.Errorf("not an initiator message: header type %d is reply-only", reply.Type)
+	}
+}
+
 // buildMessage builds a complete single-message NHP packet of the given header
 // type. Folds material into the chain hash/key in the exact order the responder
 // expects, so every AEAD opens. The transcript is independent of the header

@@ -705,6 +705,136 @@ func TestDecryptReply_UnknownType(t *testing.T) {
 	}
 }
 
+// TestBuildReply_RoundTripsUnderDecryptReply verifies the exported server-side
+// reply builder: a reply built with BuildReply (server static key as initiator,
+// agent static pub as responder) opens under the agent's DecryptReply exactly
+// like a real server reply, for every reply type. This is the seam a fake NHP
+// server uses to answer a knock or registration.
+func TestBuildReply_RoundTripsUnderDecryptReply(t *testing.T) {
+	devicePriv, devicePub := testKeyPair(t, 0x11)
+	serverPriv, serverPub := testKeyPair(t, 0x22)
+
+	tests := []struct {
+		name      string
+		replyType int
+		wantIsRAK bool
+		wantIsACK bool
+	}{
+		{name: "ack", replyType: TypeACK, wantIsACK: true},
+		{name: "cookie challenge", replyType: TypeCookieChallenge},
+		{name: "register ack", replyType: TypeRegisterAck, wantIsRAK: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			const counter = uint64(0x0102030405060708)
+			body := []byte("reply body: " + tt.name)
+			reply, err := BuildReply(tt.replyType, &KnockInputs{
+				DeviceStaticPriv: serverPriv,
+				ServerStaticPub:  devicePub,
+				EphemeralPriv:    bytes.Repeat([]byte{0x77}, 32),
+				TimestampNanos:   1700000000111111111,
+				Counter:          counter,
+				Preamble:         0x0badf00d,
+				Body:             body,
+			})
+			if err != nil {
+				t.Fatalf("BuildReply(%d): %v", tt.replyType, err)
+			}
+			got, err := DecryptReply(devicePriv, serverPub, reply)
+			if err != nil {
+				t.Fatalf("DecryptReply: %v", err)
+			}
+			if got.Type != tt.replyType {
+				t.Errorf("Type = %d, want %d", got.Type, tt.replyType)
+			}
+			if got.Counter != counter {
+				t.Errorf("Counter = %#x, want %#x", got.Counter, counter)
+			}
+			if got.IsRegisterAck() != tt.wantIsRAK {
+				t.Errorf("IsRegisterAck() = %v, want %v", got.IsRegisterAck(), tt.wantIsRAK)
+			}
+			if got.IsACK() != tt.wantIsACK {
+				t.Errorf("IsACK() = %v, want %v", got.IsACK(), tt.wantIsACK)
+			}
+			if !bytes.Equal(got.Body, body) {
+				t.Errorf("Body = %q, want %q", got.Body, body)
+			}
+		})
+	}
+}
+
+// TestBuildReply_RejectsInitiatorTypes verifies BuildReply fails closed for the
+// initiator types (an agent's message kinds) and unknown types — the mirror of
+// BuildMessage's reply-type rejection.
+func TestBuildReply_RejectsInitiatorTypes(t *testing.T) {
+	serverPriv, devicePub := testKeyPair(t, 0x22)
+	inp := &KnockInputs{
+		DeviceStaticPriv: serverPriv,
+		ServerStaticPub:  devicePub,
+		EphemeralPriv:    bytes.Repeat([]byte{0x33}, 32),
+		TimestampNanos:   1,
+		Counter:          1,
+		Preamble:         1,
+		Body:             []byte("x"),
+	}
+	for _, typ := range []int{TypeKnock, TypeOTP, TypeRegister, 0, 99} {
+		if pkt, err := BuildReply(typ, inp); err == nil || pkt != nil {
+			t.Errorf("BuildReply(%d) = (%v, %v), want reject", typ, pkt, err)
+		}
+	}
+}
+
+// TestOpenInitiatorMessage_RoundTrip verifies the exported responder-role open:
+// an agent's initiator packet opens under OpenInitiatorMessage (server role) and
+// carries the request counter, while a server reply is rejected as reply-only.
+func TestOpenInitiatorMessage_RoundTrip(t *testing.T) {
+	devicePriv, devicePub := testKeyPair(t, 0x11)
+	serverPriv, serverPub := testKeyPair(t, 0x22)
+
+	const counter = uint64(0xcafef00dfeed)
+	reg, err := BuildMessage(TypeRegister, &KnockInputs{
+		DeviceStaticPriv: devicePriv,
+		ServerStaticPub:  serverPub,
+		EphemeralPriv:    bytes.Repeat([]byte{0x88}, 32),
+		TimestampNanos:   1700000000222222222,
+		Counter:          counter,
+		Preamble:         0xfeedface,
+		Body:             []byte("reg body"),
+	})
+	if err != nil {
+		t.Fatalf("BuildMessage(TypeRegister): %v", err)
+	}
+	got, err := OpenInitiatorMessage(serverPriv, devicePub, reg)
+	if err != nil {
+		t.Fatalf("OpenInitiatorMessage: %v", err)
+	}
+	if got.Type != TypeRegister {
+		t.Errorf("Type = %d, want %d (TypeRegister)", got.Type, TypeRegister)
+	}
+	if got.Counter != counter {
+		t.Errorf("Counter = %#x, want %#x", got.Counter, counter)
+	}
+
+	// A server-originated reply must be rejected by the initiator-only gate.
+	rak, err := BuildReply(TypeRegisterAck, &KnockInputs{
+		DeviceStaticPriv: serverPriv,
+		ServerStaticPub:  devicePub,
+		EphemeralPriv:    bytes.Repeat([]byte{0x99}, 32),
+		TimestampNanos:   1700000000333333333,
+		Counter:          counter,
+		Preamble:         0x0,
+		Body:             []byte("rak body"),
+	})
+	if err != nil {
+		t.Fatalf("BuildReply(TypeRegisterAck): %v", err)
+	}
+	if _, err := OpenInitiatorMessage(devicePriv, serverPub, rak); err == nil {
+		t.Fatal("OpenInitiatorMessage accepted a reply type, want reject")
+	} else if !strings.Contains(err.Error(), "reply-only") {
+		t.Errorf("error %q does not name the reply-only cause", err)
+	}
+}
+
 // TestSendExchange_InputValidation locks the buildOutbound validation contract
 // as surfaced through Send and Exchange: bad key sizes error out before any
 // relay POST.
