@@ -184,23 +184,29 @@ func Send(ctx context.Context, relayBaseURL string, serverStaticPub, body []byte
 	if status != http.StatusAccepted {
 		if status == http.StatusOK && len(respBody) > 0 {
 			// Reply packet bytes to a one-way message: don't quote the binary body.
-			return &RelayError{Status: status, Msg: fmt.Sprintf(
-				"relay POST %s -> 200 with a %d-byte reply to a one-way NHP_OTP (the server never replies to OTP; a conforming relay acknowledges dispatch with 202 Accepted); dispatch unconfirmed — safe to retry the send",
-				url, len(respBody))}
+			return sendError(status, fmt.Sprintf(
+				"relay POST %s -> 200 with a %d-byte reply to a one-way NHP_OTP (the server never replies to OTP; a conforming relay acknowledges dispatch with 202 Accepted)",
+				url, len(respBody)))
 		}
-		detail := strings.TrimSpace(string(respBody))
 		m := fmt.Sprintf("relay POST %s -> %d, want 202 Accepted for a one-way NHP_OTP dispatch", url, status)
-		if detail != "" {
+		if detail := strings.TrimSpace(string(respBody)); detail != "" {
 			m += ": " + detail
 		}
-		return &RelayError{Status: status, Msg: m + "; dispatch unconfirmed — safe to retry the send"}
+		return sendError(status, m)
 	}
 	if len(respBody) > 0 {
-		return &RelayError{Status: status, Msg: fmt.Sprintf(
-			"relay POST %s -> 202 Accepted with an unexpected %d-byte body (a conforming relay acknowledges a one-way dispatch with an empty body); dispatch unconfirmed — safe to retry the send",
-			url, len(respBody))}
+		return sendError(status, fmt.Sprintf(
+			"relay POST %s -> 202 Accepted with an unexpected %d-byte body (a conforming relay acknowledges a one-way dispatch with an empty body)",
+			url, len(respBody)))
 	}
 	return nil
+}
+
+// sendError wraps a Send contract violation as a *RelayError, appending the
+// retry guidance every Send failure shares: the dispatch was not acknowledged,
+// and an NHP_OTP send is safe to repeat.
+func sendError(status int, msg string) *RelayError {
+	return &RelayError{Status: status, Msg: msg + "; dispatch unconfirmed — safe to retry the send"}
 }
 
 // buildOutbound resolves the device identity from opts, mints the per-message
