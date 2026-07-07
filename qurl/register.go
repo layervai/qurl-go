@@ -253,7 +253,7 @@ func (cfg *registerConfig) runAccountPath(ctx context.Context, key string, store
 	// when the probe can finish. A fresh request has nothing enrolled yet, so the
 	// probe is skipped to keep the first-call path lean (no wasted 404).
 	if !freshRequest {
-		if done, doneState, err := cfg.tryCompletionProbe(ctx, key, store, state); done {
+		if done, doneState, err := cfg.tryCompletionProbe(ctx, key, store, state, pathAccount); done {
 			return doneState, err
 		}
 	}
@@ -301,7 +301,7 @@ func (cfg *registerConfig) registerAndComplete(ctx context.Context, key string, 
 	if !ack.isSuccess() {
 		return nil, mapRAKError(ack, path)
 	}
-	return cfg.completeAndPersist(ctx, key, store, state)
+	return cfg.completeAndPersist(ctx, key, store, state, path)
 }
 
 // requestOTP records OTPRequestedAt (otp_pending) and THEN dispatches the OTP
@@ -330,8 +330,8 @@ func (cfg *registerConfig) requestOTP(ctx context.Context, store AgentStateStore
 // completion error); done is false when the device is not yet enrolled OR the
 // probe hit a transient fault — in both cases the caller should proceed to REG,
 // since the probe is only an optimization and REG is the real path.
-func (cfg *registerConfig) tryCompletionProbe(ctx context.Context, key string, store AgentStateStore, state *AgentState) (done bool, doneState *AgentState, err error) {
-	comp, err := cfg.postCompletion(ctx, key, state)
+func (cfg *registerConfig) tryCompletionProbe(ctx context.Context, key string, store AgentStateStore, state *AgentState, path pathKind) (done bool, doneState *AgentState, err error) {
+	comp, err := cfg.postCompletion(ctx, key, state, path)
 	if err != nil {
 		if isCompletionNotYetRegistered(err) || isTransientCompletionError(err) {
 			// Not yet registered, or a transient blip on the optimization probe:
@@ -429,8 +429,8 @@ func (cfg *registerConfig) sendOTP(ctx context.Context, state *AgentState, peer 
 
 // completeAndPersist runs the completion fetch and persists the resulting
 // registered state, returning it.
-func (cfg *registerConfig) completeAndPersist(ctx context.Context, key string, store AgentStateStore, state *AgentState) (*AgentState, error) {
-	comp, err := cfg.postCompletion(ctx, key, state)
+func (cfg *registerConfig) completeAndPersist(ctx context.Context, key string, store AgentStateStore, state *AgentState, path pathKind) (*AgentState, error) {
+	comp, err := cfg.postCompletion(ctx, key, state, path)
 	if err != nil {
 		return nil, err
 	}
@@ -473,14 +473,14 @@ func (cfg *registerConfig) fetchRegistrationInfo(ctx context.Context, key string
 
 // postCompletion runs POST /v1/agent/registration/complete, minting (or
 // returning) the device REST credential.
-func (cfg *registerConfig) postCompletion(ctx context.Context, key string, state *AgentState) (*completionResponse, error) {
+func (cfg *registerConfig) postCompletion(ctx context.Context, key string, state *AgentState, path pathKind) (*completionResponse, error) {
 	reqBody := completeRequestBody{
 		DeviceID:        state.AgentID,
 		DevicePubKeyB64: state.PublicKeyB64,
 	}
 	var env apiEnvelope[completionResponse]
 	if err := doAuthorizedJSON(ctx, cfg.httpClient, cfg.baseURL, BearerToken(key).Authorize, http.MethodPost, "/v1/agent/registration/complete", reqBody, &env); err != nil {
-		return nil, cfg.mapCompletionHTTPError(err)
+		return nil, cfg.mapCompletionHTTPError(err, path)
 	}
 	if err := env.Data.validate(cfg.clock(), cfg.invalidConfigErr); err != nil {
 		return nil, err
@@ -513,14 +513,17 @@ func (cfg *registerConfig) mapRegistrationHTTPError(err error) error {
 // already issued and this local state cannot reproduce it — a
 // ErrDeviceCredentialMissing situation the caller resolves by re-registering
 // under a new device id or with takeover.
-func (cfg *registerConfig) mapCompletionHTTPError(err error) error {
+func (cfg *registerConfig) mapCompletionHTTPError(err error, path pathKind) error {
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) {
 		return err
 	}
-	// Check the specific consumed-setup-key code before the generic
-	// already-issued mapping, since both can arrive as HTTP 409.
-	if isBootstrapConsumedCompletion(apiErr) {
+	// The consumed-setup-key code is a bootstrap-path concept (a one-shot key
+	// accepted once within the completion grace window), so gate it on
+	// pathBootstrap — an account-path completion must not surface the bootstrap
+	// sentinel (mirrors how mapRAKError keeps 52100 path-dependent). Check it
+	// before the generic already-issued mapping, since both can arrive as HTTP 409.
+	if path == pathBootstrap && isBootstrapConsumedCompletion(apiErr) {
 		return fmt.Errorf("%w: rerun LayerV setup for a fresh key or restore the completed agent state: %w", ErrBootstrapSetupKeyConsumed, err)
 	}
 	if isDeviceKeyAlreadyIssued(apiErr) {

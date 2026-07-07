@@ -447,6 +447,16 @@ func (h *registerHarness) registerOpts(extra ...RegisterOption) []RegisterOption
 	return append(base, extra...)
 }
 
+// withClock is a test-only RegisterOption that injects the engine clock, so a
+// test can advance time deterministically (e.g. across the OTP resend cooldown)
+// without sleeping. The engine reads cfg.clock everywhere it needs "now".
+func withClock(clk func() time.Time) RegisterOption {
+	return registerOptionFunc(func(o *registerConfig) error {
+		o.clock = clk
+		return nil
+	})
+}
+
 // primeDeviceKey pre-seeds the fake NHP server with the agent device public key
 // the SDK will knock with. RegisterAgent persists the keypair before the first
 // network call, so the test reads it from the state file after a first attempt,
@@ -680,6 +690,59 @@ func TestRegisterAgent_AccountPath_OTPResendCooldown(t *testing.T) {
 	}
 }
 
+func TestRegisterAgent_AccountPath_OTPResendAfterCooldown(t *testing.T) {
+	// Positive resend case: a long-idle no-code re-run (past the cooldown)
+	// dispatches a SECOND code. Uses an injected clock advanced by
+	// otpResendCooldown+1s rather than sleeping.
+	h := newRegisterHarness(t)
+	h.svc.keyKind = keyKindAccount
+	h.svc.maskedEmail = "j***@x.com"
+	h.armDevicePubOnInfo()
+
+	base := time.Now()
+	var mu sync.Mutex
+	nowVal := base
+	clk := func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return nowVal
+	}
+	advance := func(d time.Duration) {
+		mu.Lock()
+		defer mu.Unlock()
+		nowVal = nowVal.Add(d)
+	}
+
+	// First no-code call: fresh request skips the probe and emits exactly one code.
+	if _, err := RegisterAgent(context.Background(), "lv_account_key", h.store, h.registerOpts(withClock(clk))...); !errors.Is(err, ErrOTPPending) {
+		t.Fatalf("first call: want ErrOTPPending, got %v", err)
+	}
+	if h.nhp.otpCount() != 1 {
+		t.Fatalf("first call OTP sends = %d, want 1", h.nhp.otpCount())
+	}
+
+	// Past the cooldown, the resume's crash-recovery probe runs BEFORE the resend,
+	// so report the device not-yet-registered (else the fake self-heals to
+	// registered and no resend happens). Then the no-code branch re-sends.
+	h.apiSrv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/v1/agent/registration/complete" {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = fmt.Fprint(w, `{"error":{"code":"device_not_registered","detail":"not yet"}}`)
+			return
+		}
+		h.svc.handler(h.relaySrv.URL)(w, r)
+	})
+
+	advance(otpResendCooldown + time.Second)
+
+	if _, err := RegisterAgent(context.Background(), "lv_account_key", h.store, h.registerOpts(withClock(clk))...); !errors.Is(err, ErrOTPPending) {
+		t.Fatalf("post-cooldown call: want ErrOTPPending, got %v", err)
+	}
+	if h.nhp.otpCount() != 2 {
+		t.Fatalf("OTP sends after cooldown elapsed = %d, want 2 (a second code was dispatched)", h.nhp.otpCount())
+	}
+}
+
 func TestRegisterAgent_AccountPath_OTPSavePersistsBeforeSend(t *testing.T) {
 	// Anti-spam fence: requestOTP persists OTPRequestedAt BEFORE sending the code.
 	// If the persist fails, NO email is dispatched (the caller retries as a
@@ -900,6 +963,74 @@ func TestRegisterAgent_BootstrapPath_ConsumedSetupKey(t *testing.T) {
 	if !errors.Is(err, ErrBootstrapSetupKeyConsumed) {
 		t.Fatalf("want ErrBootstrapSetupKeyConsumed on 52108, got %v", err)
 	}
+}
+
+// TestRegisterAgent_CompletionConsumedSetupKeyIsPathGated fences the path-gated
+// completion class: a completion 409 carrying setup_key_consumed maps to
+// ErrBootstrapSetupKeyConsumed ONLY on the bootstrap path. The account path
+// cannot legitimately consume a one-shot setup key, so the same completion error
+// must fall through to the raw wrapped *APIError, never the bootstrap sentinel
+// (mirrors how mapRAKError keeps 52100 path-dependent).
+func TestRegisterAgent_CompletionConsumedSetupKeyIsPathGated(t *testing.T) {
+	t.Run("bootstrap path surfaces the sentinel", func(t *testing.T) {
+		h := newRegisterHarness(t)
+		h.svc.keyKind = keyKindBootstrap
+		h.svc.completionStatus = http.StatusConflict
+		h.svc.completionCode = "setup_key_consumed"
+		h.armDevicePubOnInfo()
+
+		_, err := RegisterAgent(context.Background(), "lv_setup_once", h.store, h.registerOpts()...)
+		if !errors.Is(err, ErrBootstrapSetupKeyConsumed) {
+			t.Fatalf("bootstrap completion setup_key_consumed: want ErrBootstrapSetupKeyConsumed, got %v", err)
+		}
+	})
+
+	t.Run("account path does not surface the sentinel", func(t *testing.T) {
+		h := newRegisterHarness(t)
+		h.svc.keyKind = keyKindAccount
+		h.svc.maskedEmail = "j***@x.com"
+		h.armDevicePubOnInfo()
+
+		// Prime otp_pending (this also arms the device pub for the responder open).
+		if _, err := RegisterAgent(context.Background(), "lv_account_key", h.store, h.registerOpts()...); !errors.Is(err, ErrOTPPending) {
+			t.Fatalf("prime otp_pending: want ErrOTPPending, got %v", err)
+		}
+
+		// On resume, the crash-recovery PROBE (completion #1) reports the device
+		// not-yet-registered so the flow falls through to REG; the REAL completion
+		// (#2, post-REG) then returns 409 setup_key_consumed with pathAccount.
+		var completionHits atomic.Int32
+		h.apiSrv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodPost && r.URL.Path == "/v1/agent/registration/complete" {
+				switch completionHits.Add(1) {
+				case 1: // probe: not yet registered → fall through to REG
+					w.WriteHeader(http.StatusNotFound)
+					_, _ = fmt.Fprint(w, `{"error":{"code":"device_not_registered","detail":"not yet"}}`)
+					return
+				default: // real completion: consumed-setup-key on the account path
+					w.WriteHeader(http.StatusConflict)
+					_, _ = fmt.Fprint(w, `{"error":{"code":"setup_key_consumed","detail":"already consumed"}}`)
+					return
+				}
+			}
+			h.svc.handler(h.relaySrv.URL)(w, r)
+		})
+
+		_, err := RegisterAgent(context.Background(), "lv_account_key", h.store, h.registerOpts(WithOTP("123456"))...)
+		if errors.Is(err, ErrBootstrapSetupKeyConsumed) {
+			t.Fatalf("account completion setup_key_consumed must NOT map to ErrBootstrapSetupKeyConsumed, got %v", err)
+		}
+		var apiErr *APIError
+		if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusConflict {
+			t.Fatalf("account path: want the raw wrapped *APIError (409), got %v", err)
+		}
+		if apiErr.Code != "setup_key_consumed" {
+			t.Fatalf("account path APIError code = %q, want setup_key_consumed", apiErr.Code)
+		}
+		if completionHits.Load() < 2 {
+			t.Fatalf("completion hits = %d, want >=2 (probe not-registered, then real completion)", completionHits.Load())
+		}
+	})
 }
 
 func TestRegisterAgent_UnknownRAKCodeIsRegistrationDeny(t *testing.T) {
