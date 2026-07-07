@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/layervai/qurl-go/relayknock"
+	"github.com/layervai/qurl-go/relayknock/relayknocktest"
 )
 
 // RegisterAgent is tested end to end against two fakes wired together:
@@ -26,8 +27,9 @@ import (
 //   - a fake qurl-service (httptest) answering GET /v1/agent/registration-info
 //     and POST /v1/agent/registration/complete; and
 //   - a fake relay+NHP server (httptest) that opens the posted NHP OTP/REG
-//     packets with relayknock's responder-role primitives (OpenInitiatorMessage)
-//     and answers a REG with a scripted NHP_RAK built via relayknock.BuildReply.
+//     packets with relayknocktest's responder-role primitives
+//     (OpenInitiatorMessage) and answers a REG with a scripted NHP_RAK built via
+//     relayknocktest.BuildReply.
 //
 // The relay fake uses the SAME relayknock crypto the SDK uses on the other end;
 // the wire bytes themselves are fenced by relayknock's golden vectors, so this
@@ -62,6 +64,9 @@ type fakeNHPServer struct {
 	// rakErrCode is the errCode the next REG is answered with ("0"/"" = success).
 	rakErrCode string
 	rakErrMsg  string
+	// replyREGWithCOK, when true, answers a REG with an overload cookie-challenge
+	// (NHP_COK) instead of an NHP_RAK, modeling a relay under load.
+	replyREGWithCOK bool
 	// expectCredential, when non-empty, asserts the REG body carried it.
 	expectCredential string
 }
@@ -175,7 +180,8 @@ func (s *fakeNHPServer) handler() http.HandlerFunc {
 			s.regs = append(s.regs, body)
 			errCode, errMsg := s.rakErrCode, s.rakErrMsg
 			expect := s.expectCredential
-			if errCode == "" || errCode == rakSuccess {
+			cok := s.replyREGWithCOK
+			if !cok && (errCode == "" || errCode == rakSuccess) {
 				// A successful REG enrolls the device server-side, so a later
 				// completion (or probe) succeeds.
 				s.enrolled = true
@@ -184,11 +190,31 @@ func (s *fakeNHPServer) handler() http.HandlerFunc {
 			if expect != "" && body.OTP != expect {
 				s.t.Errorf("REG credential = %q, want %q", body.OTP, expect)
 			}
+			if cok {
+				// Overload cookie-challenge instead of a registration reply.
+				cokPkt, err := relayknocktest.BuildReply(relayknock.TypeCookieChallenge, &relayknock.KnockInputs{
+					DeviceStaticPriv: s.serverPriv,
+					ServerStaticPub:  devicePub,
+					EphemeralPriv:    scriptedEphemeral(0x6b),
+					TimestampNanos:   uint64(time.Now().UnixNano()),
+					Counter:          reply.Counter,
+					Preamble:         0x2b3c4d5e,
+					Body:             nil,
+				})
+				if err != nil {
+					s.t.Errorf("build COK: %v", err)
+					http.Error(w, "cok error", http.StatusInternalServerError)
+					return
+				}
+				w.Header().Set("Content-Type", "application/octet-stream")
+				_, _ = w.Write(cokPkt)
+				return
+			}
 			ackBody, err := json.Marshal(registerAckBody{ErrCode: errCode, ErrMsg: errMsg, AspID: agentAspID})
 			if err != nil {
 				s.t.Errorf("marshal RAK body: %v", err)
 			}
-			rak, err := relayknock.BuildReply(relayknock.TypeRegisterAck, &relayknock.KnockInputs{
+			rak, err := relayknocktest.BuildReply(relayknock.TypeRegisterAck, &relayknock.KnockInputs{
 				DeviceStaticPriv: s.serverPriv,
 				ServerStaticPub:  devicePub,
 				EphemeralPriv:    scriptedEphemeral(0x5a),
@@ -220,7 +246,7 @@ func (s *fakeNHPServer) openAny(packet []byte) (*relayknock.Reply, []byte, error
 	if devicePub == nil {
 		return nil, nil, errors.New("fake server: expectDevicePub not set")
 	}
-	reply, err := relayknock.OpenInitiatorMessage(s.serverPriv, devicePub, packet)
+	reply, err := relayknocktest.OpenInitiatorMessage(s.serverPriv, devicePub, packet)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -627,6 +653,56 @@ func TestRegisterAgent_AccountPath_OTPResendCooldown(t *testing.T) {
 	}
 }
 
+func TestRegisterAgent_AccountPath_FreshStoreWithOTPPausesInsteadOfDoomedREG(t *testing.T) {
+	// A static WithOTP literal supplied on a FRESH store cannot match the code the
+	// same call is about to email, so RegisterAgent must email the code and pause
+	// (*OTPPendingError) rather than burn a doomed REG that would fail 52100.
+	h := newRegisterHarness(t)
+	h.svc.keyKind = keyKindAccount
+	h.svc.maskedEmail = "j***@x.com"
+	h.armDevicePubOnInfo()
+
+	_, err := RegisterAgent(context.Background(), "lv_account_key", h.store, h.registerOpts(WithOTP("staleCode"))...)
+	if !errors.Is(err, ErrOTPPending) {
+		t.Fatalf("fresh-store WithOTP: want ErrOTPPending, got %v", err)
+	}
+	if h.nhp.otpCount() != 1 {
+		t.Fatalf("OTP sends = %d, want 1 (code emailed for the next run)", h.nhp.otpCount())
+	}
+	if h.nhp.regCount() != 0 {
+		t.Fatalf("REG count = %d, want 0 (no doomed REG on a fresh-store WithOTP)", h.nhp.regCount())
+	}
+	// The resume with the (now-valid) code proceeds to REG and completes.
+	h.nhp.expectCredential = "realCode"
+	client, err := RegisterAgent(context.Background(), "lv_account_key", h.store, h.registerOpts(WithOTP("realCode"))...)
+	if err != nil {
+		t.Fatalf("resume with real code: %v", err)
+	}
+	if client == nil {
+		t.Fatal("nil client on resume")
+	}
+	if h.nhp.regCount() != 1 {
+		t.Fatalf("REG count after resume = %d, want 1", h.nhp.regCount())
+	}
+}
+
+func TestRegisterAgent_CookieChallengeMapsToRetryLater(t *testing.T) {
+	// A REG answered with an overload cookie-challenge (NHP_COK) must surface as
+	// ErrRegistrationRetryLater, not a generic config error.
+	h := newRegisterHarness(t)
+	h.svc.keyKind = keyKindBootstrap
+	h.nhp.replyREGWithCOK = true
+	h.armDevicePubOnInfo()
+
+	_, err := RegisterAgent(context.Background(), "lv_key", h.store, h.registerOpts()...)
+	if !errors.Is(err, ErrRegistrationRetryLater) {
+		t.Fatalf("want ErrRegistrationRetryLater on a COK reply, got %v", err)
+	}
+	if errors.Is(err, ErrInvalidRegisterConfig) {
+		t.Fatalf("COK must not map to ErrInvalidRegisterConfig: %v", err)
+	}
+}
+
 func TestRegisterAgent_AccountPath_OTPProvider(t *testing.T) {
 	h := newRegisterHarness(t)
 	h.svc.keyKind = keyKindAccount
@@ -702,6 +778,13 @@ func TestRegisterAgent_AccountPath_RAKErrorsMapToSentinels(t *testing.T) {
 			h.nhp.rakErrCode = tt.errCode
 			h.nhp.rakErrMsg = "scripted denial"
 			h.armDevicePubOnInfo()
+
+			// Phase 1: reach otp_pending so the WithOTP resume actually sends REG
+			// (a fresh-store WithOTP would pause rather than REG — see the
+			// fresh-store guard test).
+			if _, err := RegisterAgent(context.Background(), "lv_account_key", h.store, h.registerOpts()...); !errors.Is(err, ErrOTPPending) {
+				t.Fatalf("prime otp_pending: want ErrOTPPending, got %v", err)
+			}
 
 			_, err := RegisterAgent(context.Background(), "lv_account_key", h.store, h.registerOpts(WithOTP("000000"))...)
 			if !errors.Is(err, tt.want) {

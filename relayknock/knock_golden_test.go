@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	conformance "github.com/layervai/qurl-conformance"
+
+	"github.com/layervai/qurl-go/relayknock/internal/nhpwire"
 )
 
 // strictRawURLEncoding decodes the golden cell_public_key_b64 with strict
@@ -101,14 +103,14 @@ func TestBuildKnock_GoldenVector(t *testing.T) {
 	counter := mustDecimalU64(t, knock.Counter)
 	preamble := mustHexU32(t, knock.PreambleHex)
 
-	serverPub, err := x25519Public(serverPriv)
+	serverPub, err := nhpwire.X25519Public(serverPriv)
 	if err != nil {
 		t.Fatalf("derive server pub: %v", err)
 	}
 	if got := hex.EncodeToString(serverPub); got != wantServerPubHex {
 		t.Fatalf("server pub = %s, want %s", got, wantServerPubHex)
 	}
-	devicePub, err := x25519Public(devicePriv)
+	devicePub, err := nhpwire.X25519Public(devicePriv)
 	if err != nil {
 		t.Fatalf("derive device pub: %v", err)
 	}
@@ -151,7 +153,7 @@ func TestDecryptReply_GoldenVector(t *testing.T) {
 		t.Fatalf("DecryptReply: %v", err)
 	}
 	if !reply.IsACK() {
-		t.Errorf("reply.Type = %d, want %d (NHP_ACK)", reply.Type, nhpACK)
+		t.Errorf("reply.Type = %d, want %d (NHP_ACK)", reply.Type, TypeACK)
 	}
 	if reply.Counter != wantCounter {
 		t.Errorf("counter = %#x, want %#x", reply.Counter, wantCounter)

@@ -146,7 +146,6 @@ func sentinelForRAKCode(code string) error {
 func mapRAKError(ack *registerAckBody, path pathKind) error {
 	code := strings.TrimSpace(ack.ErrCode)
 	msg := strings.TrimSpace(ack.ErrMsg)
-	deny := &RegistrationDenyError{ErrCode: ack.ErrCode, ErrMsg: ack.ErrMsg}
 
 	switch code {
 	case rakCredentialInvalid:
@@ -173,7 +172,9 @@ func mapRAKError(ack *registerAckBody, path pathKind) error {
 	case rakInvalidInput:
 		return fmt.Errorf("%w: the device id or registration input was malformed; use a valid identifier with qurl.WithDeviceID%s", ErrRegistrationInvalidInput, detailSuffix(msg))
 	default:
-		return deny
+		// Only the unknown-code path returns the raw deny, so build it here rather
+		// than on every call.
+		return &RegistrationDenyError{ErrCode: ack.ErrCode, ErrMsg: ack.ErrMsg}
 	}
 }
 

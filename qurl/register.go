@@ -139,7 +139,13 @@ func (cfg *registerConfig) run(ctx context.Context, key string, store AgentState
 			return nil, err
 		}
 		if cfg.requireDeviceKey && strings.TrimSpace(state.DeviceAPIKey) == "" {
-			return nil, fmt.Errorf("%w: agent %q is registered but its device credential is absent; re-register under a new device id (qurl.WithDeviceID) or re-bind with qurl.WithTakeover", ErrDeviceCredentialMissing, state.AgentID)
+			// The device credential is issued once and cannot be recovered from this
+			// state. Re-running against the SAME store short-circuits here again
+			// (WithDeviceID reloads this same state; WithTakeover only affects the
+			// REG body, which the fast path never sends). The only recovery is to
+			// clear or replace the persisted AgentState (or point at a fresh
+			// AgentStateStore) and register again from scratch.
+			return nil, fmt.Errorf("%w: agent %q is registered but its device credential is absent from this state; clear or replace the persisted AgentState (or use a fresh AgentStateStore) and register again", ErrDeviceCredentialMissing, state.AgentID)
 		}
 		if err := cfg.reconcileDeviceID(state); err != nil {
 			return nil, err
@@ -201,14 +207,7 @@ func (cfg *registerConfig) run(ctx context.Context, key string, store AgentState
 // runBootstrapPath is PATH A: the pre-issued key is the enrollment credential.
 // REG directly with the key secret as the credential, then completion-fetch.
 func (cfg *registerConfig) runBootstrapPath(ctx context.Context, key string, store AgentStateStore, state *AgentState, peer *NHPServerPeerInfo, relayURL string) (*AgentState, error) {
-	ack, err := cfg.registerExchange(ctx, state, peer, relayURL, key)
-	if err != nil {
-		return nil, err
-	}
-	if !ack.isSuccess() {
-		return nil, mapRAKError(ack, pathBootstrap)
-	}
-	return cfg.completeAndPersist(ctx, key, store, state)
+	return cfg.registerAndComplete(ctx, key, store, state, peer, relayURL, key, pathBootstrap)
 }
 
 // runAccountPath is PATH B: email one-time code. It is re-entrant across process
@@ -216,18 +215,34 @@ func (cfg *registerConfig) runBootstrapPath(ctx context.Context, key string, sto
 //
 //   - not yet otp_pending → request the code (email it), persist OTPRequestedAt.
 //     A code can only be valid after this send, so it always happens first.
-//   - a code source available (WithOTP / WithOTPProvider) → resolve the code,
-//     completion-probe (self-heals a crash after RAK but before completion), else
-//     REG with the code, then complete. A provider may run in the same call that
-//     requested the code, so the single-call provider flow works on a fresh store.
-//   - otherwise → return *OTPPendingError so the caller re-runs with the code.
+//   - a WithOTPProvider is set → resolve the code (the provider reads the freshly
+//     sent code) and REG in the same call, so the single-call provider flow works
+//     on a fresh store.
+//   - a static WithOTP is set but this call is the one that just requested the
+//     code → the supplied literal cannot match the just-sent email, so pause with
+//     *OTPPendingError (use the newly emailed code on the next run) instead of
+//     burning a doomed REG.
+//   - otherwise → completion-probe (self-heals a crash after RAK but before
+//     completion), else REG with the code, then complete; or pause when no code
+//     source is available.
 func (cfg *registerConfig) runAccountPath(ctx context.Context, key string, store AgentStateStore, state *AgentState, peer *NHPServerPeerInfo, relayURL, maskedEmail string) (*AgentState, error) {
 	// Ensure the code has been requested before any code can be valid. On a fresh
 	// store this emails the code; on a resume (OTPRequestedAt already set) it does
 	// nothing unless a code source is absent and the cooldown has elapsed (below).
-	if state.OTPRequestedAt == nil {
+	freshRequest := state.OTPRequestedAt == nil
+	if freshRequest {
 		if err := cfg.requestOTP(ctx, store, state, peer, relayURL, key); err != nil {
 			return nil, err
+		}
+	}
+
+	// A static WithOTP literal supplied on the SAME call that just emailed a code
+	// cannot match that fresh email — pause and let the caller re-run with the
+	// newly emailed code. A WithOTPProvider is exempt: it reads the just-sent code.
+	if freshRequest && cfg.otp != "" {
+		return nil, &OTPPendingError{
+			RequestedAt: derefTime(state.OTPRequestedAt, cfg.clock()),
+			MaskedEmail: maskedEmail,
 		}
 	}
 
@@ -257,12 +272,19 @@ func (cfg *registerConfig) runAccountPath(ctx context.Context, key string, store
 		return doneState, err
 	}
 
-	ack, err := cfg.registerExchange(ctx, state, peer, relayURL, code)
+	return cfg.registerAndComplete(ctx, key, store, state, peer, relayURL, code, pathAccount)
+}
+
+// registerAndComplete runs the shared REG → success-check → completion tail both
+// enrollment paths end with. credential is the key secret (bootstrap) or the
+// one-time code (account); path selects the RAK error mapping.
+func (cfg *registerConfig) registerAndComplete(ctx context.Context, key string, store AgentStateStore, state *AgentState, peer *NHPServerPeerInfo, relayURL, credential string, path pathKind) (*AgentState, error) {
+	ack, err := cfg.registerExchange(ctx, state, peer, relayURL, credential)
 	if err != nil {
 		return nil, err
 	}
 	if !ack.isSuccess() {
-		return nil, mapRAKError(ack, pathAccount)
+		return nil, mapRAKError(ack, path)
 	}
 	return cfg.completeAndPersist(ctx, key, store, state)
 }
@@ -325,6 +347,12 @@ func (cfg *registerConfig) registerExchange(ctx context.Context, state *AgentSta
 	})
 	if err != nil {
 		return nil, normalizeRelayError(err)
+	}
+	if reply.IsCookieChallenge() {
+		// The relay is under load and returned an overload cookie-challenge instead
+		// of a registration reply. This is a "retry later" signal, distinct from a
+		// protocol violation — surface it as such so the caller can back off.
+		return nil, fmt.Errorf("%w: the registration relay returned an overload cookie-challenge; back off briefly and re-run", ErrRegistrationRetryLater)
 	}
 	if !reply.IsRegisterAck() {
 		return nil, fmt.Errorf("%w: unexpected NHP reply type %d to a registration", cfg.invalidConfigErr, reply.Type)
@@ -516,7 +544,7 @@ func isBootstrapConsumedCompletion(apiErr *APIError) bool {
 func (cfg *registerConfig) ensureDeviceID(state *AgentState) error {
 	if cfg.deviceID != "" {
 		if state.AgentID != "" && state.AgentID != cfg.deviceID {
-			return fmt.Errorf("%w: saved device id %q does not match requested device id %q", cfg.invalidConfigErr, state.AgentID, cfg.deviceID)
+			return cfg.errDeviceIDMismatch(state.AgentID, cfg.deviceID)
 		}
 		state.AgentID = cfg.deviceID
 		return nil
@@ -535,9 +563,16 @@ func (cfg *registerConfig) ensureDeviceID(state *AgentState) error {
 // state on the fast path.
 func (cfg *registerConfig) reconcileDeviceID(state *AgentState) error {
 	if cfg.deviceID != "" && state.AgentID != "" && cfg.deviceID != state.AgentID {
-		return fmt.Errorf("%w: saved device id %q does not match requested device id %q", cfg.invalidConfigErr, state.AgentID, cfg.deviceID)
+		return cfg.errDeviceIDMismatch(state.AgentID, cfg.deviceID)
 	}
 	return nil
+}
+
+// errDeviceIDMismatch is the shared "saved id does not match requested id" error
+// both device-id guards raise (they cover different transitions but report the
+// same conflict).
+func (cfg *registerConfig) errDeviceIDMismatch(saved, requested string) error {
+	return fmt.Errorf("%w: saved device id %q does not match requested device id %q", cfg.invalidConfigErr, saved, requested)
 }
 
 // reconcileCompletionDeviceID guards against a completion response that reports a
@@ -824,7 +859,9 @@ func WithRelayURL(rawURL string) RegisterOption {
 // endpoint.
 func WithNHPPeer(peer NHPServerPeerInfo) RegisterOption {
 	return registerOptionFunc(func(o *registerConfig) error {
-		if err := validateNHPServerPeerInfo(peer, time.Now(), "WithNHPPeer", ErrInvalidRegisterConfig); err != nil {
+		// o.clock is initialized to time.Now before options apply; using it keeps
+		// the direct wall-clock call out of the engine for a consistent seam.
+		if err := validateNHPServerPeerInfo(peer, o.clock(), "WithNHPPeer", ErrInvalidRegisterConfig); err != nil {
 			return err
 		}
 		p := peer

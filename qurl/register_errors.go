@@ -70,6 +70,11 @@ var ErrRegistrationInvalidInput = errors.New("qurl: registration input invalid")
 // the account. Contact the account owner to enable it.
 var ErrRegistrationDisabled = errors.New("qurl: agent registration disabled")
 
+// ErrRegistrationRetryLater is returned when the registration relay answered with
+// an overload cookie-challenge (NHP_COK) instead of a registration reply: the
+// enrollment path is under load. Back off briefly and re-run RegisterAgent.
+var ErrRegistrationRetryLater = errors.New("qurl: registration relay busy; retry shortly")
+
 // OTPPendingError is the typed error the account-key path returns after it has
 // asked LayerV to email a one-time code and is waiting for the caller to supply
 // it. It unwraps to ErrOTPPending, so callers can match either the sentinel
