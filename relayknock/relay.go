@@ -209,6 +209,8 @@ func replyTypeAllowed(requestType, replyType int) bool {
 // (ephemeral key, counter, preamble), so a retried Send is a new, independent
 // dispatch — at-least-once delivery, never a wire-level replay.
 func Send(ctx context.Context, relayBaseURL string, serverStaticPub, body []byte, opts KnockOptions) error {
+	// Send drops buildOutbound's devicePriv and counter: NHP_OTP is one-way, so
+	// there is no reply to decrypt or counter to correlate.
 	packet, _, _, err := buildOutbound(nhpOTP, serverStaticPub, body, opts)
 	if err != nil {
 		return err
@@ -223,11 +225,10 @@ func Send(ctx context.Context, relayBaseURL string, serverStaticPub, body []byte
 		if status == http.StatusOK && len(respBody) > 0 {
 			// Reply packet bytes to a one-way message: something evidently
 			// received and processed the dispatch (a reply exists), the relay
-			// just broke the one-way contract — duplicate-possible framing,
-			// like the 202-with-body branch below. Don't quote the binary body.
-			return &RelayError{Status: status, Msg: fmt.Sprintf(
-				"relay POST %s -> 200 with a %d-byte reply to a one-way NHP_OTP (a conforming relay acknowledges dispatch with 202 Accepted); the server likely processed the dispatch, so a retry may deliver a duplicate — one-way NHP_OTP delivery is at-least-once",
-				url, len(respBody))}
+			// just broke the one-way contract. Don't quote the binary body.
+			return sendAcceptedError(status, fmt.Sprintf(
+				"relay POST %s -> 200 with a %d-byte reply to a one-way NHP_OTP (a conforming relay acknowledges dispatch with 202 Accepted); the server likely processed the dispatch",
+				url, len(respBody)))
 		}
 		// Quoting the body is safe here, unlike the 200/202 branches: a non-2xx
 		// body is relay-authored plaintext error detail (the same contract
@@ -239,21 +240,28 @@ func Send(ctx context.Context, relayBaseURL string, serverStaticPub, body []byte
 		return sendError(status, m)
 	}
 	if len(respBody) > 0 {
-		// Unlike the branches above, the relay DID accept here — it just broke
-		// the empty-body ack contract — so a retry may deliver a duplicate.
-		// State that honestly instead of claiming the dispatch never happened.
-		return &RelayError{Status: status, Msg: fmt.Sprintf(
-			"relay POST %s -> 202 Accepted with an unexpected %d-byte body (a conforming relay acknowledges a one-way dispatch with an empty body); the relay did accept the dispatch, so a retry may deliver a duplicate — one-way NHP_OTP delivery is at-least-once",
-			url, len(respBody))}
+		// Unlike the branches sendError covers, the relay DID accept here — it
+		// just broke the empty-body ack contract — so a retry may duplicate.
+		return sendAcceptedError(status, fmt.Sprintf(
+			"relay POST %s -> 202 Accepted with an unexpected %d-byte body (a conforming relay acknowledges a one-way dispatch with an empty body)",
+			url, len(respBody)))
 	}
 	return nil
 }
 
-// sendError wraps a Send contract violation as a *RelayError, appending the
-// retry guidance the unacknowledged-dispatch failures share: nothing confirmed
-// the dispatch, and an NHP_OTP send is safe to repeat.
+// sendError wraps a Send contract violation where nothing acknowledged the
+// dispatch, so the send is safe to repeat.
 func sendError(status int, msg string) *RelayError {
 	return &RelayError{Status: status, Msg: msg + "; dispatch unconfirmed — safe to retry the send"}
+}
+
+// sendAcceptedError wraps a Send contract violation where the relay evidently
+// DID take the dispatch (a 200 reply, or a 202 with a body) — so a retry may
+// deliver a duplicate. One-way NHP_OTP delivery is at-least-once by design, so
+// a retry is still safe; the framing just doesn't overclaim that nothing
+// happened.
+func sendAcceptedError(status int, msg string) *RelayError {
+	return &RelayError{Status: status, Msg: msg + "; a retry may deliver a duplicate — one-way NHP_OTP delivery is at-least-once"}
 }
 
 // buildOutbound resolves the device identity from opts, mints the per-message
