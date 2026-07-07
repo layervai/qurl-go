@@ -26,8 +26,12 @@
 // Generic wire profile only: this package knows packet framing and the Noise
 // handshake, NOT any application body shape (e.g. qURL claims). A
 // caller supplies an already-serialized body and interprets the decrypted reply
-// body itself. Initial knock (NHP_KNK) only — no re-knock/cookie-challenge answer
-// (NHP_RKN), matching what a single resolve needs.
+// body itself. Single messages only: it builds the initiator types NHP_KNK
+// (knock), NHP_REG (register), and the one-way NHP_OTP — which the server never
+// replies to; a conforming relay acknowledges dispatch at the HTTP layer — and
+// decrypts the reply types NHP_ACK, NHP_COK, and NHP_RAK. No multi-packet
+// flows: the re-knock/cookie-challenge answer (NHP_RKN) stays out of scope, so
+// a caller treats NHP_COK as "retry later".
 //
 // # Egress-IP invariant
 //
