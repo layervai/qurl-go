@@ -842,6 +842,11 @@ func WithRegisterVersion(version string) RegisterOption {
 // WithRegisterBaseURL points RegisterAgent at a non-default LayerV API origin for
 // the registration-info and completion HTTPS endpoints. Most applications do not
 // need this.
+//
+// This origin also becomes the base URL of the returned Client, so the agent's
+// later resource calls (ProtectURL, portals) go to the same host — enrollment and
+// resource APIs both live on qurl-service. There is no way to point only the
+// enrollment endpoints elsewhere while leaving the Client on the default origin.
 func WithRegisterBaseURL(rawURL string) RegisterOption {
 	return registerOptionFunc(func(o *registerConfig) error {
 		if err := validateHTTPSOrLoopbackURL(rawURL, "register base URL", ErrInvalidRegisterConfig); err != nil {
