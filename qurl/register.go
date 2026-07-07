@@ -462,7 +462,7 @@ func (cfg *registerConfig) fetchRegistrationInfo(ctx context.Context, key string
 	if err := doAuthorizedJSON(ctx, cfg.httpClient, cfg.baseURL, BearerToken(key).Authorize, http.MethodGet, "/v1/agent/registration-info", nil, &env); err != nil {
 		return nil, cfg.mapRegistrationHTTPError(err)
 	}
-	if err := env.Data.validate(cfg.clock()); err != nil {
+	if err := env.Data.validate(cfg.clock(), cfg.invalidConfigErr); err != nil {
 		return nil, err
 	}
 	return &env.Data, nil
@@ -479,7 +479,7 @@ func (cfg *registerConfig) postCompletion(ctx context.Context, key string, state
 	if err := doAuthorizedJSON(ctx, cfg.httpClient, cfg.baseURL, BearerToken(key).Authorize, http.MethodPost, "/v1/agent/registration/complete", reqBody, &env); err != nil {
 		return nil, cfg.mapCompletionHTTPError(err)
 	}
-	if err := env.Data.validate(cfg.clock()); err != nil {
+	if err := env.Data.validate(cfg.clock(), cfg.invalidConfigErr); err != nil {
 		return nil, err
 	}
 	return &env.Data, nil

@@ -1358,3 +1358,41 @@ func TestLoadPath_BadPermsFileMatchesFrontDoorAndPermSentinel(t *testing.T) {
 		t.Fatalf("BootstrapAgent bad perms: should still match ErrInsecureAgentStatePermissions, got %v", berr)
 	}
 }
+
+// TestResponseValidators_UseFrontDoorErrorClass fences the wire-validator class
+// split: registrationInfoResponse.validate and completionResponse.validate wrap a
+// malformed response in the front-door class they are handed (fetchRegistrationInfo
+// and postCompletion pass cfg.invalidConfigErr), so a BootstrapAgent call against a
+// malformed registration-info/completion response surfaces ErrInvalidBootstrapConfig
+// rather than leaking the register class — and vice versa.
+func TestResponseValidators_UseFrontDoorErrorClass(t *testing.T) {
+	now := time.Now()
+	classes := []struct {
+		name  string
+		kind  error
+		other error
+	}{
+		{name: "register", kind: ErrInvalidRegisterConfig, other: ErrInvalidBootstrapConfig},
+		{name: "bootstrap", kind: ErrInvalidBootstrapConfig, other: ErrInvalidRegisterConfig},
+	}
+	for _, c := range classes {
+		t.Run(c.name, func(t *testing.T) {
+			// Malformed registration-info (unknown key_kind).
+			infoErr := registrationInfoResponse{KeyKind: "bogus"}.validate(now, c.kind)
+			if !errors.Is(infoErr, c.kind) {
+				t.Fatalf("registration-info validate: want %v, got %v", c.kind, infoErr)
+			}
+			if errors.Is(infoErr, c.other) {
+				t.Fatalf("registration-info validate leaked %v: %v", c.other, infoErr)
+			}
+			// Malformed completion (missing agent_id).
+			compErr := completionResponse{}.validate(now, c.kind)
+			if !errors.Is(compErr, c.kind) {
+				t.Fatalf("completion validate: want %v, got %v", c.kind, compErr)
+			}
+			if errors.Is(compErr, c.other) {
+				t.Fatalf("completion validate leaked %v: %v", c.other, compErr)
+			}
+		})
+	}
+}

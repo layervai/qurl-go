@@ -129,7 +129,7 @@ func TestRegistrationInfoResponse_Validate(t *testing.T) {
 		NHPServerPeer: goodPeer,
 		Relay:         registrationRelay{BaseURL: "https://relay.example.test", ServerID: "abcdefghijk"},
 	}
-	if err := base.validate(time.Now()); err != nil {
+	if err := base.validate(time.Now(), ErrInvalidRegisterConfig); err != nil {
 		t.Fatalf("valid response rejected: %v", err)
 	}
 
@@ -149,7 +149,7 @@ func TestRegistrationInfoResponse_Validate(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			r := base
 			tt.edit(&r)
-			err := r.validate(time.Now())
+			err := r.validate(time.Now(), ErrInvalidRegisterConfig)
 			if !errors.Is(err, ErrInvalidRegisterConfig) || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("want ErrInvalidRegisterConfig containing %q, got %v", tt.want, err)
 			}
@@ -166,7 +166,7 @@ func TestRegistrationInfoResponse_AllowsLoopbackRelay(t *testing.T) {
 		NHPServerPeer: NHPServerPeerInfo{PublicKeyB64: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", Host: "h", Port: 1},
 		Relay:         registrationRelay{BaseURL: "http://127.0.0.1:8080", ServerID: "abcdefghijk"},
 	}
-	if err := r.validate(time.Now()); err != nil {
+	if err := r.validate(time.Now(), ErrInvalidRegisterConfig); err != nil {
 		t.Fatalf("loopback relay rejected: %v", err)
 	}
 }
@@ -180,7 +180,7 @@ func TestCompletionResponse_Validate(t *testing.T) {
 		NHPServerPeer: goodPeer,
 		DeviceAPIKey:  "lv_device_secret",
 	}
-	if err := base.validate(time.Now()); err != nil {
+	if err := base.validate(time.Now(), ErrInvalidRegisterConfig); err != nil {
 		t.Fatalf("valid completion rejected: %v", err)
 	}
 
@@ -198,7 +198,7 @@ func TestCompletionResponse_Validate(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			r := base
 			tt.edit(&r)
-			err := r.validate(time.Now())
+			err := r.validate(time.Now(), ErrInvalidRegisterConfig)
 			if !errors.Is(err, ErrInvalidRegisterConfig) || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("want ErrInvalidRegisterConfig containing %q, got %v", tt.want, err)
 			}

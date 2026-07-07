@@ -213,25 +213,29 @@ const (
 	keyKindAccount   = "account"
 )
 
-func (r registrationInfoResponse) validate(now time.Time) error {
+// validate checks the pre-flight response. errKind is the caller's front-door
+// config-error class (ErrInvalidRegisterConfig / ErrInvalidBootstrapConfig),
+// threaded so a malformed response surfaces the class of the front door that was
+// called — the same invariant the load-path validators preserve.
+func (r registrationInfoResponse) validate(now time.Time, errKind error) error {
 	switch strings.TrimSpace(r.KeyKind) {
 	case keyKindBootstrap, keyKindAccount:
 	default:
-		return fmt.Errorf("%w: registration-info returned unknown key_kind %q", ErrInvalidRegisterConfig, r.KeyKind)
+		return fmt.Errorf("%w: registration-info returned unknown key_kind %q", errKind, r.KeyKind)
 	}
 	if strings.TrimSpace(r.KeyID) == "" {
-		return fmt.Errorf("%w: registration-info missing key_id", ErrInvalidRegisterConfig)
+		return fmt.Errorf("%w: registration-info missing key_id", errKind)
 	}
 	if strings.TrimSpace(r.Relay.BaseURL) == "" {
-		return fmt.Errorf("%w: registration-info missing relay base_url", ErrInvalidRegisterConfig)
+		return fmt.Errorf("%w: registration-info missing relay base_url", errKind)
 	}
-	if err := validateHTTPSOrLoopbackURL(r.Relay.BaseURL, "relay base_url", ErrInvalidRegisterConfig); err != nil {
+	if err := validateHTTPSOrLoopbackURL(r.Relay.BaseURL, "relay base_url", errKind); err != nil {
 		return err
 	}
 	if strings.TrimSpace(r.Relay.ServerID) == "" {
-		return fmt.Errorf("%w: registration-info missing relay server_id", ErrInvalidRegisterConfig)
+		return fmt.Errorf("%w: registration-info missing relay server_id", errKind)
 	}
-	return validateNHPServerPeerInfo(r.NHPServerPeer, now, "registration-info", ErrInvalidRegisterConfig)
+	return validateNHPServerPeerInfo(r.NHPServerPeer, now, "registration-info", errKind)
 }
 
 // completionResponse is the data payload of POST /v1/agent/registration/complete.
@@ -244,17 +248,20 @@ type completionResponse struct {
 	DeviceAPIKey  string            `json:"device_api_key"`
 }
 
-func (r completionResponse) validate(now time.Time) error {
+// validate checks the completion response. errKind is the caller's front-door
+// config-error class, threaded like registrationInfoResponse.validate so a
+// malformed completion surfaces the calling front door's class.
+func (r completionResponse) validate(now time.Time, errKind error) error {
 	if strings.TrimSpace(r.AgentID) == "" {
-		return fmt.Errorf("%w: completion response missing agent_id", ErrInvalidRegisterConfig)
+		return fmt.Errorf("%w: completion response missing agent_id", errKind)
 	}
 	if r.RegisteredAt == nil {
-		return fmt.Errorf("%w: completion response missing registered_at", ErrInvalidRegisterConfig)
+		return fmt.Errorf("%w: completion response missing registered_at", errKind)
 	}
 	if strings.TrimSpace(r.DeviceAPIKey) == "" {
-		return fmt.Errorf("%w: completion response missing device_api_key", ErrInvalidRegisterConfig)
+		return fmt.Errorf("%w: completion response missing device_api_key", errKind)
 	}
-	return validateNHPServerPeerInfo(r.NHPServerPeer, now, "completion response", ErrInvalidRegisterConfig)
+	return validateNHPServerPeerInfo(r.NHPServerPeer, now, "completion response", errKind)
 }
 
 // completeRequestBody is the POST /v1/agent/registration/complete request.
