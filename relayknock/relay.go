@@ -135,6 +135,11 @@ func Knock(ctx context.Context, relayBaseURL string, serverStaticPub, body []byt
 // there is no reply to exchange (use Send). body is an already-serialized
 // application body (relayknock does not know any body shape). The returned
 // Reply.Body is the decrypted application reply for the caller to interpret.
+//
+// Exchange authenticates the reply but does not pair its type to the request
+// type: the one-shot HTTP round trip and the per-message device key already
+// bind the decrypted reply to this request, and the caller asserts intent with
+// IsACK / IsCookieChallenge / IsRegisterAck on the result.
 func Exchange(ctx context.Context, relayBaseURL string, serverStaticPub []byte, headerType int, body []byte, opts KnockOptions) (*Reply, error) {
 	switch headerType {
 	case TypeKnock, TypeRegister:
@@ -167,9 +172,12 @@ func Exchange(ctx context.Context, relayBaseURL string, serverStaticPub []byte, 
 // relayBaseURL + "/relay/" + serverId. The server does not reply to OTP
 // messages, so there are no reply bytes to decrypt; a conforming relay
 // acknowledges the dispatch at the HTTP layer with 202 Accepted and an empty
-// body, and that acknowledgement is exactly what Send verifies. Anything else —
-// a non-202 status, or a 202 carrying a body — leaves the dispatch unconfirmed
-// and comes back as a *RelayError; an NHP_OTP send is safe to retry.
+// body, and that acknowledgement is exactly what Send verifies — for a one-way
+// message the relay's HTTP acknowledgement, not the server, is the trust
+// anchor for dispatch. Anything else — a non-202 status, or a 202 carrying a
+// body — comes back as a *RelayError. Every Send mints fresh randomness
+// (ephemeral key, counter, preamble), so a retried Send is a new, independent
+// dispatch — at-least-once delivery, never a wire-level replay.
 func Send(ctx context.Context, relayBaseURL string, serverStaticPub, body []byte, opts KnockOptions) error {
 	packet, _, err := buildOutbound(nhpOTP, serverStaticPub, body, opts)
 	if err != nil {
@@ -195,16 +203,19 @@ func Send(ctx context.Context, relayBaseURL string, serverStaticPub, body []byte
 		return sendError(status, m)
 	}
 	if len(respBody) > 0 {
-		return sendError(status, fmt.Sprintf(
-			"relay POST %s -> 202 Accepted with an unexpected %d-byte body (a conforming relay acknowledges a one-way dispatch with an empty body)",
-			url, len(respBody)))
+		// Unlike the branches above, the relay DID accept here — it just broke
+		// the empty-body ack contract — so a retry may deliver a duplicate.
+		// State that honestly instead of claiming the dispatch never happened.
+		return &RelayError{Status: status, Msg: fmt.Sprintf(
+			"relay POST %s -> 202 Accepted with an unexpected %d-byte body (a conforming relay acknowledges a one-way dispatch with an empty body); the relay did accept the dispatch, so a retry may deliver a duplicate — one-way NHP_OTP delivery is at-least-once",
+			url, len(respBody))}
 	}
 	return nil
 }
 
 // sendError wraps a Send contract violation as a *RelayError, appending the
-// retry guidance every Send failure shares: the dispatch was not acknowledged,
-// and an NHP_OTP send is safe to repeat.
+// retry guidance the unacknowledged-dispatch failures share: nothing confirmed
+// the dispatch, and an NHP_OTP send is safe to repeat.
 func sendError(status int, msg string) *RelayError {
 	return &RelayError{Status: status, Msg: msg + "; dispatch unconfirmed — safe to retry the send"}
 }

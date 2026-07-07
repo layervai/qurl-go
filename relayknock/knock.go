@@ -40,6 +40,11 @@ func BuildKnock(inp *KnockInputs) ([]byte, error) { return buildMessage(nhpKNK, 
 // other type — in particular the server-originated reply types — fails closed:
 // an agent never builds those, so rejecting them here keeps a type mix-up from
 // reaching the wire.
+//
+// BuildMessage is for callers that carry the packet themselves — deterministic
+// construction (golden vectors, conformance tooling) or a custom transport.
+// Typical agents use Knock, Exchange, or Send, which mint the per-message
+// randomness and speak the relay HTTP contract.
 func BuildMessage(headerType int, inp *KnockInputs) ([]byte, error) {
 	switch headerType {
 	case TypeKnock, TypeOTP, TypeRegister:

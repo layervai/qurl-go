@@ -176,9 +176,11 @@ func TestExchange_RejectsNonRoundTripTypes(t *testing.T) {
 // with the roles swapped: the server's static key is the initiator of the fresh
 // reply handshake and the agent's static public key is the responder — the same
 // direction as the golden ack vector.
-func fabricateRAK(t *testing.T, serverPriv, devicePub []byte, counter uint64, body []byte) []byte {
-	t.Helper()
-	rak, err := buildMessage(nhpRAK, &KnockInputs{
+// It returns an error instead of failing the test itself: httptest handlers
+// run on their own goroutines, where t.Fatalf would only Goexit the handler —
+// each caller reports the error on whichever goroutine it owns.
+func fabricateRAK(serverPriv, devicePub []byte, counter uint64, body []byte) ([]byte, error) {
+	return buildMessage(nhpRAK, &KnockInputs{
 		DeviceStaticPriv: serverPriv,
 		ServerStaticPub:  devicePub,
 		EphemeralPriv:    bytes.Repeat([]byte{0x44}, 32),
@@ -187,10 +189,6 @@ func fabricateRAK(t *testing.T, serverPriv, devicePub []byte, counter uint64, bo
 		Preamble:         0xa1b2c3d4,
 		Body:             body,
 	})
-	if err != nil {
-		t.Fatalf("fabricate NHP_RAK: %v", err)
-	}
-	return rak
 }
 
 // TestDecryptReply_RegisterAck opens a fabricated NHP_RAK as an agent would and
@@ -201,7 +199,10 @@ func TestDecryptReply_RegisterAck(t *testing.T) {
 	serverPriv, serverPub := testKeyPair(t, 0x22)
 	body := []byte("registration acknowledged")
 
-	rak := fabricateRAK(t, serverPriv, devicePub, 7, body)
+	rak, err := fabricateRAK(serverPriv, devicePub, 7, body)
+	if err != nil {
+		t.Fatalf("fabricate NHP_RAK: %v", err)
+	}
 	reply, err := DecryptReply(devicePriv, serverPub, rak)
 	if err != nil {
 		t.Fatalf("DecryptReply: %v", err)
@@ -256,8 +257,14 @@ func TestExchange_RegisterRoundTrip(t *testing.T) {
 		}
 		counterCh <- req.Counter
 
+		rak, err := fabricateRAK(serverPriv, devicePub, req.Counter, rakBody)
+		if err != nil {
+			t.Errorf("fabricate NHP_RAK: %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 		w.Header().Set("Content-Type", "application/octet-stream")
-		_, _ = w.Write(fabricateRAK(t, serverPriv, devicePub, req.Counter, rakBody))
+		_, _ = w.Write(rak)
 	}))
 	defer srv.Close()
 
