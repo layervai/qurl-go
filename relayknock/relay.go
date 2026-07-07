@@ -168,12 +168,18 @@ func Exchange(ctx context.Context, relayBaseURL string, serverStaticPub []byte, 
 		return nil, fmt.Errorf("decrypt reply: %w", err)
 	}
 	// The counter echo is the relay profile's own correlation contract, not an
-	// assumption: the relay routes a reply back to the waiting HTTP POST by the
-	// reply's cleartext header counter, so a reply that did not echo the
-	// request counter could never have reached us at all — and the reference
-	// server stamps every reply header with the request's transaction id by
-	// construction. Enforcing it here just refuses a reply a misbehaving relay
-	// swapped in from a different exchange.
+	// assumption: the relay (an async HTTP↔UDP bridge, not a same-connection
+	// proxy) routes a reply back to the waiting HTTP POST by the reply's
+	// cleartext header counter over a single shared UDP socket, so a reply that
+	// did not echo the request counter could never have been routed to us at
+	// all — and the reference server stamps every reply header (ACK, COK, RAK)
+	// with the request's transaction id by construction. Enforcing it here just
+	// refuses a reply a misbehaving relay swapped in from a different exchange.
+	//
+	// These two post-decrypt checks return a plain error, not *RelayError, on
+	// purpose: they are semantic/correlation failures of an already-authenticated
+	// reply, in the same class as the "decrypt reply" failure just above — only
+	// HTTP-transport faults surface as *RelayError (see RelayPost).
 	if dr.Counter != counter {
 		return nil, fmt.Errorf("reply counter %d does not echo request counter %d", dr.Counter, counter)
 	}
