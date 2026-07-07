@@ -48,8 +48,9 @@ func (e *RelayError) Error() string {
 	return e.Msg
 }
 
-// RelayPost delivers a knock packet to the relay and returns the server's reply
-// packet bytes. 200 → reply bytes; any other status → *RelayError.
+// RelayPost delivers a round-trip NHP packet (knock or register) to the relay
+// and returns the server's reply packet bytes. 200 → reply bytes; any other
+// status → *RelayError.
 func RelayPost(ctx context.Context, httpClient HTTPDoer, relayBaseURL, serverID string, packet []byte) ([]byte, error) {
 	status, body, url, err := relayDo(ctx, httpClient, relayBaseURL, serverID, packet)
 	if err != nil {
@@ -207,7 +208,10 @@ func replyTypeAllowed(requestType, replyType int) bool {
 // anchor for dispatch. Anything else — a non-202 status, or a 202 carrying a
 // body — comes back as a *RelayError. Every Send mints fresh randomness
 // (ephemeral key, counter, preamble), so a retried Send is a new, independent
-// dispatch — at-least-once delivery, never a wire-level replay.
+// dispatch — at-least-once delivery, never a wire-level replay. It also mints a
+// fresh random Noise initiator identity unless opts.DeviceStaticPriv is set, so
+// a caller that needs a stable device identity across retries (e.g. to present
+// the same key on each attempt of a registration bootstrap) must set it.
 func Send(ctx context.Context, relayBaseURL string, serverStaticPub, body []byte, opts KnockOptions) error {
 	// Send drops buildOutbound's devicePriv and counter: NHP_OTP is one-way, so
 	// there is no reply to decrypt or counter to correlate.
