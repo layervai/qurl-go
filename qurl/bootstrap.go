@@ -25,7 +25,21 @@ const defaultBootstrapBaseURL = defaultAPIBaseURL
 var ErrInvalidBootstrapConfig = errors.New("qurl: invalid bootstrap config")
 
 // ErrAgentStateNotFound is returned when an AgentStateStore has no saved state.
+// It is part of the AgentStateStore implementor contract: LoadAgentState returns
+// it (and RegisterAgent/BootstrapAgent treat it as "not registered yet", starting
+// a fresh enrollment) when no state has been persisted.
 var ErrAgentStateNotFound = errors.New("qurl: agent state not found")
+
+// ErrInvalidAgentState is the implementor-contract sibling of ErrAgentStateNotFound:
+// an AgentStateStore returns it (or wraps it) from LoadAgentState when persisted
+// state EXISTS but cannot be read back — a corrupt or undecodable blob, distinct
+// from the not-yet-persisted ErrAgentStateNotFound. The file-backed store returns
+// it for a corrupt or malformed state file; a custom store (for example a
+// Secrets Manager-backed one) should return it for the same condition. It is a
+// store-neutral sentinel: RegisterAgent/BootstrapAgent re-wrap a load failure in
+// their own front-door config-error class, so a caller can match either this or
+// the front-door sentinel.
+var ErrInvalidAgentState = errors.New("qurl: agent state is present but unreadable or corrupt")
 
 // ErrInsecureAgentStatePermissions is returned when file-backed agent state is
 // readable by group or other users.
@@ -120,13 +134,17 @@ func (s fileAgentStateStore) LoadAgentState(ctx context.Context) (*AgentState, e
 	if err := validateContext(ctx, ErrInvalidBootstrapConfig); err != nil {
 		return nil, err
 	}
-	raw, err := readPrivateStateFile(s.path, "agent state", ErrAgentStateNotFound, ErrInvalidBootstrapConfig, ErrInsecureAgentStatePermissions)
+	// Corrupt-content faults use the store-neutral ErrInvalidAgentState class (not
+	// a front-door bootstrap/register class): RegisterAgent and BootstrapAgent
+	// re-wrap a load failure in their own class, so the front-door match comes
+	// from the wrap while this sentinel stays matchable through the chain.
+	raw, err := readPrivateStateFile(s.path, "agent state", ErrAgentStateNotFound, ErrInvalidAgentState, ErrInsecureAgentStatePermissions)
 	if err != nil {
 		return nil, err
 	}
 	var state AgentState
 	if err := json.Unmarshal(raw, &state); err != nil {
-		return nil, fmt.Errorf("qurl: decode agent state: %w", err)
+		return nil, fmt.Errorf("%w: decode agent state: %w", ErrInvalidAgentState, err)
 	}
 	return &state, nil
 }
@@ -382,18 +400,25 @@ func validateNHPServerPeerInfo(peer NHPServerPeerInfo, now time.Time, label stri
 	return nil
 }
 
-func loadOrCreateAgentState(ctx context.Context, store AgentStateStore) (*AgentState, error) {
+// loadOrCreateAgentState loads the persisted state (creating a fresh keypair when
+// none exists), validating a loaded keypair. invalidConfigErr is the caller's
+// front-door config-error class wrapped into a load or keypair failure, so each
+// entry point keeps its documented class (RegisterAgent → ErrInvalidRegisterConfig,
+// BootstrapAgent → ErrInvalidBootstrapConfig) while the underlying store sentinel
+// (ErrInvalidAgentState / ErrInsecureAgentStatePermissions / …) stays matchable
+// through the double-wrap.
+func loadOrCreateAgentState(ctx context.Context, store AgentStateStore, invalidConfigErr error) (*AgentState, error) {
 	state, err := store.LoadAgentState(ctx)
 	switch {
 	case err == nil:
-		if err := state.ensureKeypair(); err != nil {
+		if err := state.ensureKeypair(invalidConfigErr); err != nil {
 			return nil, err
 		}
 		return state, nil
 	case errors.Is(err, ErrAgentStateNotFound):
 		return newAgentState()
 	default:
-		return nil, err
+		return nil, fmt.Errorf("%w: load agent state: %w", invalidConfigErr, err)
 	}
 }
 
@@ -408,24 +433,27 @@ func newAgentState() (*AgentState, error) {
 	}, nil
 }
 
-func (s *AgentState) ensureKeypair() error {
+// ensureKeypair validates the loaded keypair, deriving the public key when
+// absent. invalidConfigErr is the caller's front-door config-error class wrapped
+// into every failure so the entry point keeps its documented class.
+func (s *AgentState) ensureKeypair(invalidConfigErr error) error {
 	if s == nil {
-		return fmt.Errorf("%w: state must not be nil", ErrInvalidBootstrapConfig)
+		return fmt.Errorf("%w: state must not be nil", invalidConfigErr)
 	}
 	raw, err := base64.StdEncoding.Strict().DecodeString(s.PrivateKeyB64)
 	if err != nil {
-		return fmt.Errorf("%w: decode agent private key: %w", ErrInvalidBootstrapConfig, err)
+		return fmt.Errorf("%w: decode agent private key: %w", invalidConfigErr, err)
 	}
 	key, err := ecdh.X25519().NewPrivateKey(raw)
 	if err != nil {
-		return fmt.Errorf("%w: agent private key must be X25519", ErrInvalidBootstrapConfig)
+		return fmt.Errorf("%w: agent private key must be X25519", invalidConfigErr)
 	}
 	publicKey := base64.StdEncoding.EncodeToString(key.PublicKey().Bytes())
 	if s.PublicKeyB64 == "" {
 		s.PublicKeyB64 = publicKey
 	}
 	if s.PublicKeyB64 != publicKey {
-		return fmt.Errorf("%w: agent public key does not match private key", ErrInvalidBootstrapConfig)
+		return fmt.Errorf("%w: agent public key does not match private key", invalidConfigErr)
 	}
 	return nil
 }

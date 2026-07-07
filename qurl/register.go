@@ -136,7 +136,7 @@ func (cfg *registerConfig) run(ctx context.Context, key string, store AgentState
 	//    credential is a non-recoverable local state — the credential is issued
 	//    once. BootstrapAgent leaves requireDeviceKey false, so a legacy
 	//    bootstrap-era state without a device key still returns.
-	state, err := loadOrCreateAgentState(ctx, store)
+	state, err := loadOrCreateAgentState(ctx, store, cfg.invalidConfigErr)
 	if err != nil {
 		return nil, err
 	}

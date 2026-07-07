@@ -1,6 +1,7 @@
 package qurl
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdh"
 	"crypto/rand"
@@ -11,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -1179,5 +1181,108 @@ func TestRegisterAgent_DeviceIDMismatchOnFastPath(t *testing.T) {
 	_, err = RegisterAgent(context.Background(), "lv_key", store, WithDeviceID("agent-different"))
 	if !errors.Is(err, ErrInvalidRegisterConfig) {
 		t.Fatalf("want ErrInvalidRegisterConfig on device id mismatch, got %v", err)
+	}
+}
+
+// --- load-path front-door error-class split ---
+
+// TestLoadPath_CorruptKeypairMatchesFrontDoorClass fences the load-path class
+// split: a persisted state with a corrupt private key surfaces as the front
+// door's own config class — ErrInvalidRegisterConfig for RegisterAgent,
+// ErrInvalidBootstrapConfig for BootstrapAgent — not the other verb's class.
+func TestLoadPath_CorruptKeypairMatchesFrontDoorClass(t *testing.T) {
+	badStates := []struct {
+		name string
+		priv string
+		pub  string
+	}{
+		{name: "bad base64 priv", priv: "not-base64", pub: "also-bad"},
+		{name: "non-x25519 priv", priv: base64.StdEncoding.EncodeToString([]byte("too short")), pub: ""},
+		{name: "pub does not match priv", priv: base64.StdEncoding.EncodeToString(make([]byte, 32)), pub: base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x01}, 32))},
+	}
+	for _, bs := range badStates {
+		t.Run(bs.name, func(t *testing.T) {
+			mkStore := func() memoryAgentStateStore {
+				return memoryAgentStateStore{state: &AgentState{PrivateKeyB64: bs.priv, PublicKeyB64: bs.pub}}
+			}
+
+			_, rerr := RegisterAgent(context.Background(), "lv_key", mkStore())
+			if !errors.Is(rerr, ErrInvalidRegisterConfig) {
+				t.Fatalf("RegisterAgent: want ErrInvalidRegisterConfig, got %v", rerr)
+			}
+			if errors.Is(rerr, ErrInvalidBootstrapConfig) {
+				t.Fatalf("RegisterAgent leaked ErrInvalidBootstrapConfig: %v", rerr)
+			}
+
+			_, berr := BootstrapAgent(context.Background(), "lv_key", mkStore())
+			if !errors.Is(berr, ErrInvalidBootstrapConfig) {
+				t.Fatalf("BootstrapAgent: want ErrInvalidBootstrapConfig, got %v", berr)
+			}
+			if errors.Is(berr, ErrInvalidRegisterConfig) {
+				t.Fatalf("BootstrapAgent leaked ErrInvalidRegisterConfig: %v", berr)
+			}
+		})
+	}
+}
+
+// TestLoadPath_CorruptStateFileMatchesBothClasses fences the corrupt-file path:
+// the store returns the neutral ErrInvalidAgentState, and each front door
+// re-wraps it in its own class — so a corrupt file matches BOTH the front-door
+// class AND the neutral store sentinel through the wrapped chain.
+func TestLoadPath_CorruptStateFileMatchesBothClasses(t *testing.T) {
+	newCorruptFileStore := func(t *testing.T) AgentStateStore {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "agent-state.json")
+		if err := os.WriteFile(path, []byte("{ this is not valid json"), 0o600); err != nil {
+			t.Fatalf("write corrupt state: %v", err)
+		}
+		return FileAgentState(path)
+	}
+
+	_, rerr := RegisterAgent(context.Background(), "lv_key", newCorruptFileStore(t))
+	if !errors.Is(rerr, ErrInvalidRegisterConfig) {
+		t.Fatalf("RegisterAgent corrupt file: want ErrInvalidRegisterConfig, got %v", rerr)
+	}
+	if !errors.Is(rerr, ErrInvalidAgentState) {
+		t.Fatalf("RegisterAgent corrupt file: should still match ErrInvalidAgentState, got %v", rerr)
+	}
+
+	_, berr := BootstrapAgent(context.Background(), "lv_key", newCorruptFileStore(t))
+	if !errors.Is(berr, ErrInvalidBootstrapConfig) {
+		t.Fatalf("BootstrapAgent corrupt file: want ErrInvalidBootstrapConfig, got %v", berr)
+	}
+	if !errors.Is(berr, ErrInvalidAgentState) {
+		t.Fatalf("BootstrapAgent corrupt file: should still match ErrInvalidAgentState, got %v", berr)
+	}
+}
+
+// TestLoadPath_BadPermsFileMatchesFrontDoorAndPermSentinel fences the insecure
+// permissions path: a group-readable state file surfaces the front-door class
+// AND still matches ErrInsecureAgentStatePermissions through the wrapped chain.
+func TestLoadPath_BadPermsFileMatchesFrontDoorAndPermSentinel(t *testing.T) {
+	newBadPermsStore := func(t *testing.T) AgentStateStore {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "agent-state.json")
+		raw := []byte(`{"private_key_b64":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","public_key_b64":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb="}`)
+		if err := os.WriteFile(path, raw, 0o644); err != nil {
+			t.Fatalf("write state: %v", err)
+		}
+		return FileAgentState(path)
+	}
+
+	_, rerr := RegisterAgent(context.Background(), "lv_key", newBadPermsStore(t))
+	if !errors.Is(rerr, ErrInvalidRegisterConfig) {
+		t.Fatalf("RegisterAgent bad perms: want ErrInvalidRegisterConfig, got %v", rerr)
+	}
+	if !errors.Is(rerr, ErrInsecureAgentStatePermissions) {
+		t.Fatalf("RegisterAgent bad perms: should still match ErrInsecureAgentStatePermissions, got %v", rerr)
+	}
+
+	_, berr := BootstrapAgent(context.Background(), "lv_key", newBadPermsStore(t))
+	if !errors.Is(berr, ErrInvalidBootstrapConfig) {
+		t.Fatalf("BootstrapAgent bad perms: want ErrInvalidBootstrapConfig, got %v", berr)
+	}
+	if !errors.Is(berr, ErrInsecureAgentStatePermissions) {
+		t.Fatalf("BootstrapAgent bad perms: should still match ErrInsecureAgentStatePermissions, got %v", berr)
 	}
 }

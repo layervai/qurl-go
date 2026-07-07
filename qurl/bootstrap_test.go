@@ -323,8 +323,11 @@ func TestFileAgentState_RejectsSymlinkState(t *testing.T) {
 		t.Skipf("symlink unavailable: %v", err)
 	}
 
-	if _, err := FileAgentState(link).LoadAgentState(context.Background()); !errors.Is(err, ErrInvalidBootstrapConfig) {
-		t.Fatalf("LoadAgentState symlink: want ErrInvalidBootstrapConfig, got %v", err)
+	// A malformed state file (here a symlink) is a corrupt-content fault, so the
+	// store returns the store-neutral ErrInvalidAgentState (not a front-door
+	// class). RegisterAgent/BootstrapAgent re-wrap it in their own class.
+	if _, err := FileAgentState(link).LoadAgentState(context.Background()); !errors.Is(err, ErrInvalidAgentState) {
+		t.Fatalf("LoadAgentState symlink: want ErrInvalidAgentState, got %v", err)
 	}
 }
 
