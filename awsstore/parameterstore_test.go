@@ -126,6 +126,41 @@ func TestParameterStore_NoValue(t *testing.T) {
 	}
 }
 
+func TestParameterStore_LoadGenericErrorFailsClosed(t *testing.T) {
+	// errBackend (declared in secretsmanager_test.go) is a generic, non-sentinel
+	// backend failure. A transient GetParameter error must fail closed: surfaced
+	// wrapped, never misclassified as not-found or invalid-state.
+	fake := &fakeSSM{getErr: errBackend}
+	store := awsstore.NewParameterStore(fake, "/qurl/agent-state")
+
+	_, err := store.LoadAgentState(context.Background())
+	if err == nil {
+		t.Fatal("expected a generic GetParameter error to be surfaced, got nil")
+	}
+	if errors.Is(err, qurl.ErrAgentStateNotFound) {
+		t.Fatalf("generic error must NOT be classified as ErrAgentStateNotFound: %v", err)
+	}
+	if errors.Is(err, qurl.ErrInvalidAgentState) {
+		t.Fatalf("generic error must NOT be classified as ErrInvalidAgentState: %v", err)
+	}
+	if !errors.Is(err, errBackend) {
+		t.Fatalf("underlying backend error not surfaced/wrapped: %v", err)
+	}
+}
+
+func TestParameterStore_SaveGenericErrorSurfaced(t *testing.T) {
+	fake := &fakeSSM{putErr: errBackend}
+	store := awsstore.NewParameterStore(fake, "/qurl/agent-state")
+
+	err := store.SaveAgentState(context.Background(), sampleState())
+	if err == nil {
+		t.Fatal("expected a generic PutParameter error to be surfaced, got nil")
+	}
+	if !errors.Is(err, errBackend) {
+		t.Fatalf("underlying put error not surfaced/wrapped: %v", err)
+	}
+}
+
 func TestParameterStore_WithKMSKeyID(t *testing.T) {
 	fake := &fakeSSM{}
 	const keyID = "alias/qurl-agent"
@@ -176,5 +211,21 @@ func TestParameterStore_ContextCancel(t *testing.T) {
 	}
 	if fake.getCalls != 0 || fake.putCalls != 0 {
 		t.Fatalf("cancelled context should not reach the API (get=%d put=%d)", fake.getCalls, fake.putCalls)
+	}
+}
+
+func TestParameterStore_NilContextGuard(t *testing.T) {
+	fake := &fakeSSM{}
+	store := awsstore.NewParameterStore(fake, "/qurl/agent-state")
+	//nolint:staticcheck // deliberately passing a nil context to exercise the guard.
+	if _, err := store.LoadAgentState(nil); !errors.Is(err, qurl.ErrInvalidBootstrapConfig) {
+		t.Fatalf("load: want ErrInvalidBootstrapConfig for nil ctx, got %v", err)
+	}
+	//nolint:staticcheck // deliberately passing a nil context to exercise the guard.
+	if err := store.SaveAgentState(nil, sampleState()); !errors.Is(err, qurl.ErrInvalidBootstrapConfig) {
+		t.Fatalf("save: want ErrInvalidBootstrapConfig for nil ctx, got %v", err)
+	}
+	if fake.getCalls != 0 || fake.putCalls != 0 {
+		t.Fatalf("nil context should not reach the API (get=%d put=%d)", fake.getCalls, fake.putCalls)
 	}
 }

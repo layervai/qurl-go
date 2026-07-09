@@ -56,7 +56,7 @@ func NewParameterStore(client ParameterStoreAPI, name string, opts ...Option) *P
 // an AgentState. A missing parameter maps to [qurl.ErrAgentStateNotFound]; a
 // present but undecodable Value maps to [qurl.ErrInvalidAgentState].
 func (s *ParameterStore) LoadAgentState(ctx context.Context) (*qurl.AgentState, error) {
-	if err := validateLoadContext(ctx); err != nil {
+	if err := validateContext(ctx); err != nil {
 		return nil, err
 	}
 	if s.client == nil {
@@ -88,11 +88,12 @@ func (s *ParameterStore) LoadAgentState(ctx context.Context) (*qurl.AgentState, 
 // parameter, overwriting any existing value. The configured KMS key (if any) is
 // applied on every write.
 func (s *ParameterStore) SaveAgentState(ctx context.Context, state *qurl.AgentState) error {
-	raw, err := marshalAgentState(state, s.name, "parameter name")
-	if err != nil {
+	// Context first so a cancelled ctx short-circuits uniformly with Load.
+	if err := validateContext(ctx); err != nil {
 		return err
 	}
-	if err := validateLoadContext(ctx); err != nil {
+	raw, err := marshalAgentState(state, s.name, "parameter name")
+	if err != nil {
 		return err
 	}
 	if s.client == nil {

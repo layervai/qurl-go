@@ -178,6 +178,52 @@ func TestSecretsManagerStore_NoStringValue(t *testing.T) {
 	}
 }
 
+// errBackend is a generic, NON-sentinel backend failure (e.g. AccessDenied or a
+// throttle) used to prove that a transient API error fails closed: it must be
+// surfaced wrapped, never misclassified as not-found or invalid-state.
+var errBackend = errors.New("AccessDeniedException: denied")
+
+func TestSecretsManagerStore_LoadGenericErrorFailsClosed(t *testing.T) {
+	fake := &fakeSecretsManager{getErr: errBackend}
+	store := awsstore.NewSecretsManagerStore(fake, "qurl/agent-state")
+
+	_, err := store.LoadAgentState(context.Background())
+	if err == nil {
+		t.Fatal("expected a generic GetSecretValue error to be surfaced, got nil")
+	}
+	// The safety property: a transient failure is NOT a fresh-enrollment signal
+	// and NOT a corrupt-state signal.
+	if errors.Is(err, qurl.ErrAgentStateNotFound) {
+		t.Fatalf("generic error must NOT be classified as ErrAgentStateNotFound: %v", err)
+	}
+	if errors.Is(err, qurl.ErrInvalidAgentState) {
+		t.Fatalf("generic error must NOT be classified as ErrInvalidAgentState: %v", err)
+	}
+	// The underlying cause stays reachable (wrapped with %w).
+	if !errors.Is(err, errBackend) {
+		t.Fatalf("underlying backend error not surfaced/wrapped: %v", err)
+	}
+}
+
+func TestSecretsManagerStore_SaveGenericErrorSurfaced(t *testing.T) {
+	// PutSecretValue fails with a generic error on an existing secret: it must be
+	// surfaced (not swallowed, not treated as not-found -> create).
+	fake := &fakeSecretsManager{exists: true, value: aws.String("{}"), putErr: errBackend}
+	store := awsstore.NewSecretsManagerStore(fake, "qurl/agent-state")
+
+	err := store.SaveAgentState(context.Background(), sampleState())
+	if err == nil {
+		t.Fatal("expected a generic PutSecretValue error to be surfaced, got nil")
+	}
+	if !errors.Is(err, errBackend) {
+		t.Fatalf("underlying put error not surfaced/wrapped: %v", err)
+	}
+	// A generic (non not-found) put error must not trigger the create path.
+	if fake.createCalls != 0 {
+		t.Fatalf("generic put error must not fall through to CreateSecret, got %d create calls", fake.createCalls)
+	}
+}
+
 func TestSecretsManagerStore_WithKMSKeyID(t *testing.T) {
 	fake := &fakeSecretsManager{}
 	const keyID = "arn:aws:kms:us-east-1:111122223333:key/abcd"

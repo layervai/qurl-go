@@ -80,9 +80,11 @@ func unmarshalAgentState(raw []byte) (*qurl.AgentState, error) {
 	return &state, nil
 }
 
-// validateLoadContext validates the context for a load call, mirroring the
-// file-backed store which rejects a nil or already-cancelled context up front.
-func validateLoadContext(ctx context.Context) error {
+// validateContext rejects a nil or already-cancelled context up front, mirroring
+// the root package's helper of the same name and the file-backed store. Both
+// LoadAgentState and SaveAgentState call it first so a cancelled context
+// short-circuits uniformly before any argument validation or API call.
+func validateContext(ctx context.Context) error {
 	if ctx == nil {
 		return fmt.Errorf("%w: context must not be nil", qurl.ErrInvalidBootstrapConfig)
 	}

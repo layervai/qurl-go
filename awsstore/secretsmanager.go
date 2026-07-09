@@ -61,7 +61,7 @@ func NewSecretsManagerStore(client SecretsManagerAPI, secretID string, opts ...O
 // AgentState. A missing secret maps to [qurl.ErrAgentStateNotFound]; a present
 // but undecodable SecretString maps to [qurl.ErrInvalidAgentState].
 func (s *SecretsManagerStore) LoadAgentState(ctx context.Context) (*qurl.AgentState, error) {
-	if err := validateLoadContext(ctx); err != nil {
+	if err := validateContext(ctx); err != nil {
 		return nil, err
 	}
 	if s.client == nil {
@@ -94,11 +94,12 @@ func (s *SecretsManagerStore) LoadAgentState(ctx context.Context) (*qurl.AgentSt
 // PutSecretValue first, and on ResourceNotFoundException creates the secret
 // (CreateSecret) with the configured KMS key, then is idempotent thereafter.
 func (s *SecretsManagerStore) SaveAgentState(ctx context.Context, state *qurl.AgentState) error {
-	raw, err := marshalAgentState(state, s.secretID, "secret id")
-	if err != nil {
+	// Context first so a cancelled ctx short-circuits uniformly with Load.
+	if err := validateContext(ctx); err != nil {
 		return err
 	}
-	if err := validateLoadContext(ctx); err != nil {
+	raw, err := marshalAgentState(state, s.secretID, "secret id")
+	if err != nil {
 		return err
 	}
 	if s.client == nil {
@@ -130,6 +131,12 @@ func (s *SecretsManagerStore) SaveAgentState(ctx context.Context, state *qurl.Ag
 	if _, err := s.client.CreateSecret(ctx, in); err != nil {
 		// Lost a create race with a concurrent writer: fall back to a put so the
 		// value still lands. Any other create failure surfaces.
+		//
+		// KMS caveat: PutSecretValue cannot set KmsKeyId, so on this path the value
+		// persists under whatever key the winning CreateSecret chose. If that writer
+		// used a different or the AWS-managed default key, the credential is NOT
+		// encrypted under our configured CMK here — inherent to the API (the key is
+		// a property of the secret, bound at create; see WithKMSKeyID's doc).
 		var exists *smtypes.ResourceExistsException
 		if errors.As(err, &exists) {
 			if _, perr := s.client.PutSecretValue(ctx, &secretsmanager.PutSecretValueInput{
