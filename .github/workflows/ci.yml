@@ -109,6 +109,63 @@ jobs:
       - name: govulncheck
         run: govulncheck ./...
 
+  # awsstore is a SEPARATE Go module (github.com/layervai/qurl-go/awsstore) that
+  # isolates the AWS SDK v2 dependency so the root module stays AWS-SDK-free. The
+  # root `test`/`lint`/`vuln` jobs run at the repo root and never enter it, so it
+  # gets its own job that mirrors the root gates (tidy, vet, test -race, lint,
+  # vuln) inside ./awsstore. It builds against the in-tree parent via the
+  # repo-root go.work; go.work is committed, so `go test ./...` here resolves the
+  # local parent with no tag. This is a gate for the submodule, not the root — do
+  # NOT fold it into the required "vet + test -race" context.
+  awsstore:
+    name: awsstore module
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: awsstore
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+
+      # Toolchain from the submodule's own go.mod (it matches the root's).
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: awsstore/go.mod
+          check-latest: true
+
+      # Same tidiness gate as the root, scoped to the submodule's go.mod/go.sum.
+      - name: Verify go.mod/go.sum are tidy
+        run: |
+          go mod tidy
+          if ! git diff --exit-code -- go.mod go.sum; then
+            echo "::error::awsstore go.mod/go.sum are not tidy. Run 'go mod tidy' in ./awsstore and commit."
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test -race + coverage
+        run: go test -race -covermode=atomic -coverprofile=coverage.txt ./...
+
+      - name: Coverage summary
+        run: go tool cover -func=coverage.txt | tail -1
+
+      # Pinned action + pinned linter version, matching the root job and the
+      # Makefile's GOLANGCI_LINT_VERSION. working-directory scopes it to awsstore.
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@82606bf257cbaff209d206a39f5134f0cfbfd2ee # v9.2.1
+        with:
+          version: v2.12.2
+          working-directory: awsstore
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.5.0
+
+      - name: govulncheck
+        run: govulncheck ./...
+
   # Note: live fuzzing is intentionally NOT a PR gate — a fuzzer can surface a
   # new, possibly unrelated crasher and red an otherwise-good PR nondeterministically.
   # The committed seed corpus (including regression crashers) is replayed
@@ -122,7 +179,7 @@ jobs:
   # one-line edit to `needs:` + `gates:` here — no aggregation if-chain.
   notify:
     name: Notify
-    needs: [test, lint, vuln]
+    needs: [test, lint, vuln, awsstore]
     # `!cancelled()` rather than `always()`: this repo sets
     # concurrency.cancel-in-progress, so a newer push to main cancels the
     # in-flight run. `always()` would still post a yellow "cancelled" card
@@ -134,6 +191,6 @@ jobs:
     uses: layervai/ops-routines-workflows/.github/workflows/notify.yml@1536c698add5777aa08c781bc674d1eba469b32d # v0.9.0
     with:
       header: "qURL Go SDK Build"
-      gates: '{"Tests": "${{ needs.test.result }}", "Lint": "${{ needs.lint.result }}", "Vuln": "${{ needs.vuln.result }}"}'
+      gates: '{"Tests": "${{ needs.test.result }}", "Lint": "${{ needs.lint.result }}", "Vuln": "${{ needs.vuln.result }}", "awsstore": "${{ needs.awsstore.result }}"}'
     secrets:
       SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
