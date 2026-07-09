@@ -1,6 +1,6 @@
 module github.com/layervai/qurl-go/awsstore
 
-go 1.26.4
+go 1.26.5
 
 // Keeping awsstore a SEPARATE module is deliberate: it isolates the AWS SDK v2
 // dependency here so the root qurl module stays AWS-SDK-free.

@@ -4,7 +4,7 @@
 // workspace only affects builds run from this tree, never what `go mod tidy`
 // records in ./go.mod. Delete or ignore this file to build each module against
 // its published dependencies.
-go 1.26.4
+go 1.26.5
 
 use (
 	.
