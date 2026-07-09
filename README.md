@@ -126,6 +126,32 @@ If your runtime stores LayerV credentials in KMS, a secret manager, or another
 custom store, implement `qurl.CredentialProvider` and pass it to
 `qurl.NewClient`. Otherwise use `OpenClient`.
 
+## Register an Agent
+
+For agents that enroll themselves at startup, `qurl.RegisterAgent` is a one-call
+front door: hand it an API key and a place to persist state, and it returns a
+ready-to-use `Client`.
+
+```go
+store := qurl.FileAgentState("/var/lib/layerv/qurl/agent-state.json")
+
+client, err := qurl.RegisterAgent(ctx, apiKey, store)
+resource, err := client.ProtectURL(ctx, "https://dashboard.internal.acme.com")
+portal, err := resource.CreatePortal(ctx, qurl.ValidFor(time.Hour))
+```
+
+`RegisterAgent` is idempotent: the first call enrolls the agent and persists a
+device credential; later calls load it and return a `Client` with no network
+I/O. It picks the enrollment path from the key — a pre-issued key completes in
+one headless call, while an account key uses an email one-time code (a first
+call emails the code and returns `*qurl.OTPPendingError`; re-run with
+`qurl.WithOTP`). Persist the state in a local file, AWS Secrets Manager or SSM
+Parameter Store (`github.com/layervai/qurl-go/awsstore`), or any custom
+`qurl.AgentStateStore`.
+
+See [Register an agent](docs/register-an-agent.md) for both paths, credential
+storage, the error table, and migrating from `BootstrapAgent`.
+
 ## Opening Links
 
 Most recipients open qURL links directly and do not use this SDK at all. If you
@@ -146,6 +172,7 @@ configuration, see the opener guide.
 ## Guides
 
 - [Protect a private service](docs/secure-a-private-service.md)
+- [Register an agent](docs/register-an-agent.md)
 - [Issue links](docs/issuing-links.md)
 - [Open links](docs/opening-links.md)
 
@@ -172,6 +199,30 @@ Match errors by type, not message text:
 - Do not ask portal recipients to handle issuer credentials. Recipients only
   need the link.
 - Programmatic openers fail closed when trust or access configuration is absent.
+
+## Changes
+
+### Unreleased
+
+- **Added: `qurl.RegisterAgent`** — a one-call, NHP-native front door that
+  enrolls an agent and returns a ready-to-use `Client`. It covers both the
+  pre-issued-key and email one-time-code paths and is idempotent. See
+  [Register an agent](docs/register-an-agent.md).
+
+#### Breaking changes
+
+- **Agent enrollment moved to `api.layerv.ai`.** Enrollment is now NHP-native
+  and its endpoints live on the main API origin. The default `BootstrapAgent`
+  origin changed from the dedicated bootstrap host to `api.layerv.ai`; callers
+  pinning `WithBootstrapBaseURL("https://bootstrap.layerv.ai")` must migrate
+  (drop the override or point it at the current API origin).
+- **The legacy `POST /v1/agent/bootstrap` HTTP path is removed.** Enrollment now
+  runs over NHP, so the backend NHP endpoints must be deployed before this
+  version of the SDK can register or bootstrap an agent. `BootstrapAgent` still
+  works (now over NHP), but prefer `RegisterAgent` for new code.
+
+  `AgentState` on disk is unaffected — the schema change is additive and
+  backward compatible, so existing state files load without migration.
 
 ## License
 

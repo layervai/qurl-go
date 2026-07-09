@@ -191,6 +191,40 @@ func ExampleRegisterAgent_otpProvider() {
 	_ = client
 }
 
+func ExampleRegisterAgent_takeover() {
+	// A device id that is already enrolled to a different key or agent fails with
+	// ErrAgentIdentityConflict. WithTakeover re-binds it — deliberately, since it
+	// replaces the prior binding.
+	ctx := context.Background()
+	store := qurl.FileAgentState("/var/lib/layerv/qurl/agent-state.json")
+
+	client, err := qurl.RegisterAgent(ctx, "lv_api_key", store, qurl.WithDeviceID("prod-us-east-1"))
+	if errors.Is(err, qurl.ErrAgentIdentityConflict) {
+		client, err = qurl.RegisterAgent(ctx, "lv_api_key", store,
+			qurl.WithDeviceID("prod-us-east-1"),
+			qurl.WithTakeover(),
+		)
+	}
+	if err != nil {
+		panic(err)
+	}
+	_ = client
+}
+
+func ExampleRegisterAgent_fromBootstrapAgent() {
+	// Migrating from BootstrapAgent: RegisterAgent covers the same pre-issued-key
+	// path and additionally returns a ready-to-use Client. WithDeviceID is the
+	// RegisterAgent spelling of BootstrapAgent's WithAgentID.
+	store := qurl.FileAgentState("/var/lib/layerv/qurl/agent-state.json")
+	client, err := qurl.RegisterAgent(context.Background(), "lv_temporary_setup_key_from_install_flow", store,
+		qurl.WithDeviceID("prod-us-east-1"),
+	)
+	if err != nil {
+		panic(err)
+	}
+	_ = client
+}
+
 // readOneTimeCodeFromOperator and fetchLatestOneTimeCode stand in for the
 // caller's own code-retrieval mechanism in the examples above.
 func readOneTimeCodeFromOperator(maskedEmail string) string {
