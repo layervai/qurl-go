@@ -135,6 +135,7 @@ ready-to-use `Client`.
 ```go
 store := qurl.FileAgentState("/var/lib/layerv/qurl/agent-state.json")
 
+// error checks elided for brevity — see the guide below for the full pattern
 client, err := qurl.RegisterAgent(ctx, apiKey, store)
 resource, err := client.ProtectURL(ctx, "https://dashboard.internal.acme.com")
 portal, err := resource.CreatePortal(ctx, qurl.ValidFor(time.Hour))
