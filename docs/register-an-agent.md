@@ -121,9 +121,11 @@ client, err := qurl.RegisterAgent(ctx, accountKey, store,
 **Caveat (from the `WithOTPProvider` godoc):** on a fresh store the code is
 dispatched and *then* the provider is invoked within the same call, so the
 provider must **await delivery** — poll or block until the code is actually in
-the mailbox. A provider that returns early hands back a stale or empty value and
-registration fails with `ErrOTPIncorrect`. Set at most one of `WithOTP` or
-`WithOTPProvider`.
+the mailbox. A provider that returns early hands back a stale or empty value: an
+empty (whitespace-only) return fails fast with `ErrInvalidRegisterConfig` before
+any registration round trip, while a non-empty but wrong code reaches the
+enrollment service and fails with `ErrOTPIncorrect`. Set at most one of `WithOTP`
+or `WithOTPProvider`.
 
 ## Credential storage
 
