@@ -44,12 +44,19 @@ import (
 // completes (see AgentState). Registration proves the agent's X25519 device key
 // through the NHP Noise handshake, so the same keypair is reused across resumes.
 //
-// Call RegisterAgent from one setup path at a time for a given store. Each state
-// write is atomic, but the SDK does not lock across concurrent callers sharing a
-// state file. In particular, on the account (email-OTP) path each concurrent
-// fresh run generates its own device identity and dispatches its own one-time
-// code, so concurrent setup multiplies OTP emails (last write to the state file
-// wins) — serialize enrollment per store.
+// Each state write is atomic. For a FileAgentState the SDK also serializes
+// concurrent first-registration setup across processes with a best-effort
+// advisory lock (flock on a sidecar beside the state file): the racer that loses
+// blocks until the winner enrolls, then loads the now-registered state via the
+// fast path and returns a Client without re-sending a one-time code. The lock is
+// best-effort — on any failure (unsupported platform, unopenable lockfile,
+// canceled ctx) setup proceeds unserialized rather than failing.
+//
+// A custom or networked AgentStateStore cannot be locked for you, so concurrent
+// callers sharing one are not serialized. On the account (email-OTP) path each
+// concurrent fresh run generates its own device identity and dispatches its own
+// one-time code, so concurrent setup multiplies OTP emails (last write to the
+// state file wins) — serialize enrollment per store yourself.
 func RegisterAgent(ctx context.Context, key string, store AgentStateStore, opts ...RegisterOption) (*Client, error) {
 	cfg, err := newRegisterConfig(opts)
 	if err != nil {
