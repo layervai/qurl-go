@@ -53,11 +53,17 @@ func (e *RelayError) Error() string {
 // crypto: the reply header's counter did not echo the request, or its type is
 // not one the request could elicit (see replyTypeAllowed). It is distinct from a
 // *RelayError (an HTTP-transport fault, before any authenticated reply) and from
-// the decrypt/authentication failures DecryptReply returns. Only a misbehaving
-// or byzantine relay produces it — a conforming relay routes a reply back by its
-// cleartext counter, so a mis-correlated reply could never have reached this
-// caller. Exposed as a sentinel so a consumer (qurl) can map it into its own
-// error taxonomy with errors.Is rather than matching the message string.
+// the decrypt/authentication failures DecryptReply returns. Note an overload
+// NHP_COK is handled BEFORE these checks (see Exchange), so a "server busy"
+// reply never lands here. Only a misbehaving or byzantine relay produces it — a
+// conforming relay routes a reply back by its cleartext counter, so a
+// mis-correlated reply could never have reached this caller.
+//
+// Exposed as a sentinel so a consumer can map it into its own error taxonomy
+// with errors.Is rather than matching the message string. The qurl SDK's
+// consumer-side mapping (qurl/portal.go normalizeRelayError, translating this to
+// the portal ErrMalformedReply / enrollment ErrRegisterReplyMalformed taxonomy)
+// lands with the stacked RegisterAgent PR, not this one.
 var ErrMalformedReply = errors.New("relayknock: malformed reply")
 
 // RelayPost delivers a round-trip NHP packet (knock or register) to the relay
@@ -179,17 +185,34 @@ func Exchange(ctx context.Context, relayBaseURL string, serverStaticPub []byte, 
 	if err != nil {
 		return nil, fmt.Errorf("decrypt reply: %w", err)
 	}
+
+	// Overload cookie-challenge FIRST, before the counter-echo check. An NHP_COK
+	// is a valid reply to a knock (and, where admitted, a register): it is the
+	// authenticated "server busy, retry later" signal a caller branches with
+	// IsCookieChallenge. Unlike an ACK/RAK, a COK is NOT a protocol transaction —
+	// the reference server documents it as "not handled as a transaction" and only
+	// stamps it with the request counter as a relay-routing concession so the HTTP
+	// bridge can deliver it. Gating the retryable overload outcome behind the
+	// counter-echo check would let any COK whose counter does not correlate (an
+	// older/clustered server, a window boundary, a non-conforming relay) be
+	// misclassified as ErrMalformedReply — turning a retryable "busy" into a hard
+	// failure on the hot path. So a COK the request can legitimately elicit returns
+	// straight to the caller; the caller reads it as overload.
+	if dr.IsCookieChallenge() && replyTypeAllowed(headerType, dr.Type) {
+		return dr, nil
+	}
+
 	// The counter echo is the relay profile's own correlation contract, not an
 	// assumption: the relay (an async HTTP↔UDP bridge, not a same-connection
 	// proxy) routes a reply back to the waiting HTTP POST by the reply's
-	// cleartext header counter over a single shared UDP socket, so a reply that
-	// did not echo the request counter could never have been routed to us at
-	// all — and the reference server stamps every reply header (ACK, COK, RAK)
-	// with the request's transaction id by construction. Enforcing it here just
-	// refuses a reply a misbehaving relay swapped in from a different exchange.
-	// A matched-counter golden vector generated from the reference server will
-	// fence this by reference bytes (the existing knock/ack goldens are not a
-	// matched pair): layervai/qurl-conformance#19.
+	// cleartext header counter over a single shared UDP socket, so a non-COK reply
+	// that did not echo the request counter could never have been routed to us at
+	// all — and the reference server stamps every transaction reply header (ACK,
+	// RAK) with the request's transaction id by construction. Enforcing it here
+	// just refuses a reply a misbehaving relay swapped in from a different
+	// exchange. A matched-counter golden vector generated from the reference
+	// server will fence this by reference bytes (the existing knock/ack goldens
+	// are not a matched pair): layervai/qurl-conformance#19.
 	//
 	// These two post-decrypt checks wrap ErrMalformedReply, not *RelayError, on
 	// purpose: they are semantic/correlation failures of an already-authenticated
