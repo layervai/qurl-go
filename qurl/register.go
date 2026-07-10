@@ -395,7 +395,10 @@ func (cfg *registerConfig) registerExchange(ctx context.Context, state *AgentSta
 		DeviceStaticPriv: devicePriv,
 	})
 	if err != nil {
-		return nil, normalizeRelayError(err)
+		// A counter/type-mismatch reply from Exchange (relayknock.ErrMalformedReply)
+		// is mapped into the enrollment taxonomy as ErrRegisterReplyMalformed rather
+		// than surfacing as a raw string; transport faults become *RelayError.
+		return nil, normalizeRelayError(err, ErrRegisterReplyMalformed)
 	}
 	if reply.IsCookieChallenge() {
 		// The relay is under load and returned an overload cookie-challenge instead
@@ -433,7 +436,10 @@ func (cfg *registerConfig) sendOTP(ctx context.Context, state *AgentState, peer 
 		HTTPClient:       relayHTTPClient(cfg.httpClient),
 		DeviceStaticPriv: devicePriv,
 	}); err != nil {
-		return normalizeRelayError(err)
+		// Send is one-way (no reply to correlate), so it only yields transport
+		// faults (*RelayError); the malformed-reply class is passed for symmetry
+		// with the REG path and never triggers here.
+		return normalizeRelayError(err, ErrRegisterReplyMalformed)
 	}
 	return nil
 }

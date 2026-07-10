@@ -119,7 +119,7 @@ func EnterPortalWith(ctx context.Context, qurlLink string, cfg Config) (*Resourc
 		DeviceStaticPriv: devicePriv,
 	})
 	if err != nil {
-		return nil, normalizeRelayError(err)
+		return nil, normalizeRelayError(err, ErrMalformedReply)
 	}
 
 	return interpretReply(reply)
@@ -130,11 +130,22 @@ func EnterPortalWith(ctx context.Context, qurlLink string, cfg Config) (*Resourc
 // conversion fails to compile if either side drifts.
 var _ = RelayError(relayknock.RelayError{})
 
-func normalizeRelayError(err error) error {
+// normalizeRelayError maps a relayknock transport/reply error into the qURL
+// taxonomy. An HTTP-transport fault (*relayknock.RelayError) becomes the public
+// *RelayError view. A malformed-reply fault (relayknock.ErrMalformedReply — a
+// counter/type-mismatch reply Exchange refused above the crypto) is re-wrapped
+// under malformedClass, the caller's front-door malformed-reply sentinel
+// (ErrMalformedReply for the portal, ErrRegisterReplyMalformed for enrollment),
+// so a byzantine-relay reply surfaces as a taxonomy error rather than a raw
+// string. Anything else passes through unchanged.
+func normalizeRelayError(err error, malformedClass error) error {
 	var relayErr *relayknock.RelayError
 	if errors.As(err, &relayErr) {
 		re := RelayError(*relayErr)
 		return &relayErrorView{err: err, relay: &re}
+	}
+	if errors.Is(err, relayknock.ErrMalformedReply) {
+		return fmt.Errorf("%w: %w", malformedClass, err)
 	}
 	return err
 }

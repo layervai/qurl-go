@@ -70,6 +70,10 @@ type fakeNHPServer struct {
 	// replyREGWithCOK, when true, answers a REG with an overload cookie-challenge
 	// (NHP_COK) instead of an NHP_RAK, modeling a relay under load.
 	replyREGWithCOK bool
+	// regReplyCounterOffset, when non-zero, stamps the RAK header counter with
+	// req.Counter+offset instead of echoing it, modeling a byzantine relay that
+	// swaps in a mis-correlated reply. relayknock.Exchange must refuse it.
+	regReplyCounterOffset uint64
 	// expectCredential, when non-empty, asserts the REG body carried it.
 	expectCredential string
 }
@@ -184,6 +188,7 @@ func (s *fakeNHPServer) handler() http.HandlerFunc {
 			errCode, errMsg := s.rakErrCode, s.rakErrMsg
 			expect := s.expectCredential
 			cok := s.replyREGWithCOK
+			counterOffset := s.regReplyCounterOffset
 			if !cok && (errCode == "" || errCode == rakSuccess) {
 				// A successful REG enrolls the device server-side, so a later
 				// completion (or probe) succeeds.
@@ -222,7 +227,7 @@ func (s *fakeNHPServer) handler() http.HandlerFunc {
 				ServerStaticPub:  devicePub,
 				EphemeralPriv:    scriptedEphemeral(0x5a),
 				TimestampNanos:   uint64(time.Now().UnixNano()),
-				Counter:          reply.Counter,
+				Counter:          reply.Counter + counterOffset,
 				Preamble:         0x1a2b3c4d,
 				Body:             ackBody,
 			})
@@ -589,6 +594,35 @@ func TestRegisterAgent_BootstrapPath_EnrollsAndReturnsClient(t *testing.T) {
 	}
 	if h.nhp.otpCount() != 0 {
 		t.Fatalf("OTP sends = %d, want 0 on bootstrap path", h.nhp.otpCount())
+	}
+}
+
+// TestRegisterAgent_MalformedRegisterReplyMapsToTaxonomy is the enrollment-side
+// half of the #54 coverage: a byzantine relay answers the NHP_REG with a RAK
+// whose header counter does not echo the request. relayknock.Exchange refuses it
+// with relayknock.ErrMalformedReply, and RegisterAgent must surface that as the
+// ErrRegisterReplyMalformed taxonomy sentinel — not a raw string — while keeping
+// the underlying relayknock sentinel matchable. The portal-side half is
+// TestNormalizeRelayError_MalformedReplyMapsToClass (unit) in portal_test.go.
+func TestRegisterAgent_MalformedRegisterReplyMapsToTaxonomy(t *testing.T) {
+	h := newRegisterHarness(t)
+	h.svc.keyKind = keyKindBootstrap
+	h.nhp.regReplyCounterOffset = 1 // RAK counter won't echo the REG → mis-correlated
+	h.armDevicePubOnInfo()
+
+	_, err := RegisterAgent(context.Background(), "lv_bootstrap_key", h.store, h.registerOpts()...)
+	if err == nil {
+		t.Fatal("RegisterAgent accepted a mis-correlated registration reply, want rejection")
+	}
+	if !errors.Is(err, ErrRegisterReplyMalformed) {
+		t.Errorf("error %v does not match ErrRegisterReplyMalformed; the byzantine-relay reply bypassed the enrollment taxonomy", err)
+	}
+	if !errors.Is(err, relayknock.ErrMalformedReply) {
+		t.Errorf("error %v lost the underlying relayknock.ErrMalformedReply cause", err)
+	}
+	// The device must not be recorded as registered off a reply Exchange refused.
+	if state := h.loadState(t); state.RegisteredAt != nil {
+		t.Error("state marked registered despite a refused registration reply")
 	}
 }
 

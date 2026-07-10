@@ -79,6 +79,16 @@ var ErrRegistrationDisabled = errors.New("qurl: agent registration disabled")
 // enrollment path is under load. Back off briefly and re-run RegisterAgent.
 var ErrRegistrationRetryLater = errors.New("qurl: registration relay busy; retry shortly")
 
+// ErrRegisterReplyMalformed is returned when the registration relay returned a
+// reply that failed the request→reply correlation contract before the SDK could
+// interpret it: the NHP_RAK did not echo the request counter, or its header type
+// was not a valid answer to an NHP_REG. It is the enrollment-path peer of the
+// portal's ErrMalformedReply, mapping relayknock.ErrMalformedReply into the
+// registration taxonomy. Only a misbehaving/byzantine relay produces it — a
+// conforming relay routes a reply back by its cleartext counter — so it is a
+// defense-in-depth signal, not an expected failure on a healthy relay.
+var ErrRegisterReplyMalformed = errors.New("qurl: registration reply malformed")
+
 // OTPPendingError is the typed error the account-key path returns after it has
 // asked LayerV to email a one-time code and is waiting for the caller to supply
 // it. It unwraps to ErrOTPPending, so callers can match either the sentinel

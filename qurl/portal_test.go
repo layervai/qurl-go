@@ -210,7 +210,7 @@ func TestEnterPortalWith_RoutesToDerivedRelayURL(t *testing.T) {
 
 func TestNormalizeRelayErrorPreservesWrappedContext(t *testing.T) {
 	coreErr := &relayknock.RelayError{Status: http.StatusBadGateway, Msg: "relay unavailable"}
-	err := normalizeRelayError(fmt.Errorf("knock context: %w", coreErr))
+	err := normalizeRelayError(fmt.Errorf("knock context: %w", coreErr), ErrMalformedReply)
 
 	if !strings.Contains(err.Error(), "qurl: knock context") {
 		t.Fatalf("normalized error lost wrapper context: %v", err)
@@ -227,9 +227,33 @@ func TestNormalizeRelayErrorPreservesWrappedContext(t *testing.T) {
 		t.Fatalf("normalized error should preserve original relayknock error chain")
 	}
 
-	direct := normalizeRelayError(coreErr)
+	direct := normalizeRelayError(coreErr, ErrMalformedReply)
 	if got, want := direct.Error(), "qurl: relay unavailable"; got != want {
 		t.Fatalf("direct relay error = %q, want %q", got, want)
+	}
+}
+
+// TestNormalizeRelayError_MalformedReplyMapsToClass pins the #54 fix at the
+// mapping seam both front doors share: a relayknock.ErrMalformedReply (the
+// counter/type-mismatch Exchange refuses on a byzantine relay) is re-wrapped
+// under the caller's front-door malformed-reply sentinel — ErrMalformedReply for
+// the portal, ErrRegisterReplyMalformed for enrollment — rather than passing
+// through as a raw string. The original relayknock sentinel stays matchable
+// through the wrap so a caller can still detect the underlying cause.
+func TestNormalizeRelayError_MalformedReplyMapsToClass(t *testing.T) {
+	core := fmt.Errorf("%w: reply counter 7 does not echo request counter 6", relayknock.ErrMalformedReply)
+	for _, class := range []error{ErrMalformedReply, ErrRegisterReplyMalformed} {
+		got := normalizeRelayError(core, class)
+		if !errors.Is(got, class) {
+			t.Errorf("normalizeRelayError(malformed, %v): result %v does not match the class sentinel", class, got)
+		}
+		if !errors.Is(got, relayknock.ErrMalformedReply) {
+			t.Errorf("normalizeRelayError(malformed, %v): lost the underlying relayknock.ErrMalformedReply", class)
+		}
+		var relayErr *RelayError
+		if errors.As(got, &relayErr) {
+			t.Errorf("normalizeRelayError(malformed, %v): a malformed-reply fault must not present as *RelayError", class)
+		}
 	}
 }
 
