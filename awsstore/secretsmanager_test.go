@@ -268,6 +268,36 @@ func TestSecretsManagerStore_CreateRaceFallsBackToPut(t *testing.T) {
 	}
 }
 
+func TestSecretsManagerStore_CreateGenericErrorFailsClosed(t *testing.T) {
+	// First write on a missing secret: put#1 returns not-found (via the fake's own
+	// logic, exists=false), so the store attempts CreateSecret, which fails with a
+	// generic backend error (not ResourceExistsException). That error must surface
+	// wrapped, never as not-found or invalid-state, and never silently swallowed.
+	fake := &fakeSecretsManager{createErr: errBackend}
+	store := awsstore.NewSecretsManagerStore(fake, "qurl/agent-state")
+
+	err := store.SaveAgentState(context.Background(), sampleState())
+	if err == nil {
+		t.Fatal("expected a generic CreateSecret error to be surfaced, got nil")
+	}
+	// The safety property: a generic create failure is a real backend error, not a
+	// fresh-enrollment signal and not a corrupt-state signal.
+	if errors.Is(err, qurl.ErrAgentStateNotFound) {
+		t.Fatalf("generic create error must NOT be classified as ErrAgentStateNotFound: %v", err)
+	}
+	if errors.Is(err, qurl.ErrInvalidAgentState) {
+		t.Fatalf("generic create error must NOT be classified as ErrInvalidAgentState: %v", err)
+	}
+	// The underlying cause stays reachable (wrapped with %w).
+	if !errors.Is(err, errBackend) {
+		t.Fatalf("underlying create error not surfaced/wrapped: %v", err)
+	}
+	// The create was actually attempted after the initial not-found put.
+	if fake.createCalls != 1 {
+		t.Fatalf("expected exactly 1 CreateSecret attempt, got %d", fake.createCalls)
+	}
+}
+
 func TestSecretsManagerStore_NilStateGuard(t *testing.T) {
 	fake := &fakeSecretsManager{}
 	store := awsstore.NewSecretsManagerStore(fake, "qurl/agent-state")

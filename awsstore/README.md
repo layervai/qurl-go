@@ -127,6 +127,11 @@ store := awsstore.NewParameterStore(
   configured KMS key (`KeyId`) is applied on **every** write, so switching keys
   takes effect on the next save.
 
+> **Size ceiling:** standard-tier SSM parameters cap the value at **4 KB**
+> (advanced tier raises it to 8 KB). The current `AgentState` is well under 4 KB,
+> and a `PutParameter` failure surfaces wrapped (fails safe), but a much larger
+> state would need the advanced tier.
+
 ### IAM (least privilege)
 
 ```json
