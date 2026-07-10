@@ -149,8 +149,9 @@ func Knock(ctx context.Context, relayBaseURL string, serverStaticPub, body []byt
 // serverId = PubKeyFingerprint(serverStaticPub), POSTs it to
 // relayBaseURL + "/relay/" + serverId, then decrypts and authenticates the reply
 // against serverStaticPub. headerType must be a round-trip type — TypeKnock
-// (answered with NHP_ACK / NHP_COK) or TypeRegister (answered with NHP_RAK);
-// TypeOTP is rejected because the server never replies to an OTP message, so
+// (answered with NHP_ACK, or NHP_COK under overload) or TypeRegister (answered
+// with NHP_RAK, or NHP_COK under overload); TypeOTP is rejected because the
+// server never replies to an OTP message, so
 // there is no reply to exchange (use Send). body is an already-serialized
 // application body (relayknock does not know any body shape). The returned
 // Reply.Body is the decrypted application reply for the caller to interpret.
@@ -159,8 +160,8 @@ func Knock(ctx context.Context, relayBaseURL string, serverStaticPub, body []byt
 // authenticates the server, not those fields), so Exchange enforces what the
 // crypto cannot: the reply must echo this request's counter and carry a type
 // the request can elicit — TypeKnock → NHP_ACK/NHP_COK, TypeRegister →
-// NHP_RAK. Anything else fails closed. The caller still branches a knock's
-// two outcomes with IsACK / IsCookieChallenge.
+// NHP_RAK/NHP_COK. Anything else fails closed. The caller branches the success
+// and overload outcomes with IsACK / IsRegisterAck versus IsCookieChallenge.
 func Exchange(ctx context.Context, relayBaseURL string, serverStaticPub []byte, headerType int, body []byte, opts KnockOptions) (*Reply, error) {
 	switch headerType {
 	case TypeKnock, TypeRegister:
@@ -187,32 +188,38 @@ func Exchange(ctx context.Context, relayBaseURL string, serverStaticPub []byte, 
 	}
 
 	// Overload cookie-challenge FIRST, before the counter-echo check. An NHP_COK
-	// is a valid reply to a knock (and, where admitted, a register): it is the
-	// authenticated "server busy, retry later" signal a caller branches with
-	// IsCookieChallenge. Unlike an ACK/RAK, a COK is NOT a protocol transaction —
-	// the reference server documents it as "not handled as a transaction" and only
-	// stamps it with the request counter as a relay-routing concession so the HTTP
-	// bridge can deliver it. Gating the retryable overload outcome behind the
-	// counter-echo check would let any COK whose counter does not correlate (an
-	// older/clustered server, a window boundary, a non-conforming relay) be
-	// misclassified as ErrMalformedReply — turning a retryable "busy" into a hard
-	// failure on the hot path. So a COK the request can legitimately elicit returns
-	// straight to the caller; the caller reads it as overload.
+	// is a valid overload reply to BOTH a knock and a register: both are
+	// Noise-handshake initiations the server can cookie-challenge under load, so
+	// either request can come back as the authenticated "server busy, retry later"
+	// signal a caller branches with IsCookieChallenge. It is returned straight to
+	// the caller as that retryable overload signal. Unlike an ACK/RAK, a COK is NOT
+	// a protocol transaction — the reference server documents it as "not handled as
+	// a transaction" and only stamps it with the request counter as a relay-routing
+	// concession so the HTTP bridge can deliver it. Gating the retryable overload
+	// outcome behind the counter-echo check would let a COK whose counter does not
+	// correlate (an older/clustered server, a window boundary, a non-conforming
+	// relay) be misclassified as ErrMalformedReply — turning a retryable "busy"
+	// into a hard failure on the hot path. So a COK the request can legitimately
+	// elicit returns straight to the caller; the caller reads it as overload.
 	if dr.IsCookieChallenge() && replyTypeAllowed(headerType, dr.Type) {
 		return dr, nil
 	}
 
-	// The counter echo is the relay profile's own correlation contract, not an
-	// assumption: the relay (an async HTTP↔UDP bridge, not a same-connection
-	// proxy) routes a reply back to the waiting HTTP POST by the reply's
-	// cleartext header counter over a single shared UDP socket, so a non-COK reply
-	// that did not echo the request counter could never have been routed to us at
-	// all — and the reference server stamps every transaction reply header (ACK,
-	// RAK) with the request's transaction id by construction. Enforcing it here
-	// just refuses a reply a misbehaving relay swapped in from a different
-	// exchange. A matched-counter golden vector generated from the reference
-	// server will fence this by reference bytes (the existing knock/ack goldens
-	// are not a matched pair): layervai/qurl-conformance#19.
+	// The counter echo enforces the relay profile's OWN correlation contract, not
+	// a new assumption this package invents: the relay (an async HTTP↔UDP bridge,
+	// not a same-connection proxy) correlates replies to requests by the inner
+	// cleartext header counter, routing each reply back to the waiting HTTP POST
+	// over a single shared UDP socket. So any non-COK reply delivered to this
+	// caller echoes the request counter BY CONSTRUCTION — a reply that did not echo
+	// it could not have been routed here at all — and the reference server stamps
+	// every transaction reply header (ACK, RAK) with the request's transaction id
+	// precisely so that routing works. Enforcing the echo here just refuses a
+	// reply a misbehaving relay swapped in from a different exchange; it restates
+	// the relay's routing invariant, it is not an unproven premise. The matched
+	// REG↔RAK pair is independently pinned by the qurl-conformance
+	// agent-registration golden (counter 0xb, conformance#19); this in-package
+	// fence consumes it once that vector lands (the current knock/ack goldens are
+	// not a matched pair).
 	//
 	// These two post-decrypt checks wrap ErrMalformedReply, not *RelayError, on
 	// purpose: they are semantic/correlation failures of an already-authenticated
@@ -237,7 +244,7 @@ func replyTypeAllowed(requestType, replyType int) bool {
 	case TypeKnock:
 		return replyType == nhpACK || replyType == nhpCOK
 	case TypeRegister:
-		return replyType == nhpRAK
+		return replyType == nhpRAK || replyType == nhpCOK
 	default:
 		return false
 	}
@@ -271,6 +278,10 @@ func Send(ctx context.Context, relayBaseURL string, serverStaticPub, body []byte
 		return err // *RelayError transport fault
 	}
 	if status != http.StatusAccepted {
+		// The len>0 guard is deliberate: a bare 200 (empty body) is no evidence the
+		// one-way OTP was processed, so it falls through to sendError ("safe to
+		// retry"); sendAcceptedError ("may deliver a duplicate") is reserved for a
+		// 200 that returned bytes (evidence something may have been delivered).
 		if status == http.StatusOK && len(respBody) > 0 {
 			// Reply packet bytes to a one-way message: something evidently
 			// received and processed the dispatch (a reply exists), the relay

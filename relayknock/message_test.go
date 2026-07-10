@@ -400,7 +400,6 @@ func TestExchange_RejectsMismatchedReply(t *testing.T) {
 	}{
 		{name: "RAK to a knock", reqType: TypeKnock, replyType: nhpRAK, wantSub: "not a valid reply"},
 		{name: "ACK to a register", reqType: TypeRegister, replyType: nhpACK, wantSub: "not a valid reply"},
-		{name: "COK to a register", reqType: TypeRegister, replyType: nhpCOK, wantSub: "not a valid reply"},
 		{name: "counter not echoed", reqType: TypeRegister, replyType: nhpRAK, counterOff: 1, wantSub: "does not echo"},
 	}
 	for _, tt := range tests {
@@ -508,6 +507,66 @@ func TestExchange_CookieChallengeBeforeCounterCheck(t *testing.T) {
 	}
 	if reply.IsACK() {
 		t.Error("IsACK() = true for an NHP_COK, want false")
+	}
+}
+
+// TestExchange_CookieChallengeForRegister is the register-side parallel of
+// TestExchange_CookieChallengeBeforeCounterCheck: a register is a Noise-handshake
+// initiation the server can cookie-challenge under load, so an authenticated
+// NHP_COK is a valid overload reply to an NHP_REG too, and Exchange must return it
+// as a cookie-challenge (the retryable "server busy" signal a caller branches with
+// IsCookieChallenge) — NOT ErrMalformedReply. Before this fix replyTypeAllowed
+// excluded nhpCOK for TypeRegister, so a register under overload fell through to
+// the hard ErrMalformedReply failure. Like the knock case, the fabricated COK
+// carries a non-matching counter to prove the overload short-circuit runs before
+// the counter-echo check.
+func TestExchange_CookieChallengeForRegister(t *testing.T) {
+	devicePriv, devicePub := testKeyPair(t, 0x11)
+	serverPriv, serverPub := testKeyPair(t, 0x22)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		packet, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read posted packet: %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		req, err := decryptMessage(serverPriv, devicePub, packet)
+		if err != nil {
+			t.Errorf("server-side open of posted packet: %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		// NHP_COK answering the register, but with a counter that does NOT echo the
+		// request — the case the reorder must tolerate as overload, not reject.
+		cok, err := buildMessage(nhpCOK, &KnockInputs{
+			DeviceStaticPriv: serverPriv,
+			ServerStaticPub:  devicePub,
+			EphemeralPriv:    bytes.Repeat([]byte{0x46}, 32),
+			TimestampNanos:   1700000000987654321,
+			Counter:          req.Counter + 1,
+			Preamble:         0xa1b2c3d4,
+			Body:             nil,
+		})
+		if err != nil {
+			t.Errorf("fabricate COK: %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		_, _ = w.Write(cok)
+	}))
+	defer srv.Close()
+
+	reply, err := Exchange(context.Background(), srv.URL, serverPub, TypeRegister, []byte("request body"), KnockOptions{DeviceStaticPriv: devicePriv})
+	if err != nil {
+		t.Fatalf("Exchange returned an error for an overload NHP_COK to a register; the retryable signal was lost: %v", err)
+	}
+	if !reply.IsCookieChallenge() {
+		t.Fatalf("reply Type = %d, want NHP_COK (IsCookieChallenge); the caller cannot detect overload", reply.Type)
+	}
+	if reply.IsRegisterAck() {
+		t.Error("IsRegisterAck() = true for an NHP_COK, want false")
 	}
 }
 
