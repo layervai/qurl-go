@@ -504,6 +504,66 @@ func TestExchange_AdmitsCookieChallengeToRegister(t *testing.T) {
 	}
 }
 
+// TestExchange_CookieChallengeBeforeCounterCheck pins the overload-signal
+// ordering: an authenticated NHP_COK is a valid reply to a knock, and Exchange
+// must return it as a cookie-challenge (the "server busy, retry later" signal a
+// caller branches with IsCookieChallenge) BEFORE applying the counter-echo
+// check. A COK is not a protocol transaction — the reference server documents it
+// as "not handled as a transaction" and only stamps it with the request counter
+// as a relay-routing concession — so a COK whose counter does not correlate (an
+// older/clustered server, a window boundary, a non-conforming relay) must not be
+// downgraded to ErrMalformedReply and lose the retryable overload outcome on the
+// hot path. Here the fabricated COK deliberately carries a non-matching counter.
+func TestExchange_CookieChallengeBeforeCounterCheck(t *testing.T) {
+	devicePriv, devicePub := testKeyPair(t, 0x11)
+	serverPriv, serverPub := testKeyPair(t, 0x22)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		packet, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read posted packet: %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		req, err := relayknocktest.OpenInitiatorMessage(serverPriv, devicePub, packet)
+		if err != nil {
+			t.Errorf("server-side open: %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		// NHP_COK answering the knock, but with a counter that does NOT echo the
+		// request — the case the reorder must tolerate as overload, not reject.
+		cok, err := relayknocktest.BuildReply(relayknock.TypeCookieChallenge, &relayknock.KnockInputs{
+			DeviceStaticPriv: serverPriv,
+			ServerStaticPub:  devicePub,
+			EphemeralPriv:    bytes.Repeat([]byte{0x48}, 32),
+			TimestampNanos:   1700000000987654321,
+			Counter:          req.Counter + 1,
+			Preamble:         0xa1b2c3d4,
+			Body:             nil,
+		})
+		if err != nil {
+			t.Errorf("fabricate COK: %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		_, _ = w.Write(cok)
+	}))
+	defer srv.Close()
+
+	reply, err := relayknock.Exchange(context.Background(), srv.URL, serverPub, relayknock.TypeKnock, []byte("request body"), relayknock.KnockOptions{DeviceStaticPriv: devicePriv})
+	if err != nil {
+		t.Fatalf("Exchange returned an error for an overload NHP_COK; the retryable signal was lost: %v", err)
+	}
+	if !reply.IsCookieChallenge() {
+		t.Fatalf("reply Type = %d, want NHP_COK (IsCookieChallenge); the caller cannot detect overload", reply.Type)
+	}
+	if reply.IsACK() {
+		t.Error("IsACK() = true for an NHP_COK, want false")
+	}
+}
+
 // TestDecryptReply_UnknownType pins the explicit rejection of header types this
 // package does not speak: the type field is not AEAD-covered, so garbage there
 // decrypts fine and must be refused by the type gate, not by a silent

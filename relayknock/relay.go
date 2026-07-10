@@ -65,7 +65,7 @@ func (e *RelayError) Error() string {
 // with errors.Is rather than matching the message string. The qurl SDK's
 // consumer-side mapping (qurl/portal.go normalizeRelayError, translating this to
 // the portal ErrMalformedReply / enrollment ErrRegisterReplyMalformed taxonomy)
-// lands with the stacked RegisterAgent PR, not this one.
+// lives in this module's qurl package (portal.go / register.go).
 var ErrMalformedReply = errors.New("relayknock: malformed reply")
 
 // RelayPost delivers a round-trip NHP packet (knock or register) to the relay
