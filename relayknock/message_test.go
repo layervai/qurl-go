@@ -446,8 +446,8 @@ func TestExchange_RejectsMismatchedReply(t *testing.T) {
 			if err == nil {
 				t.Fatal("Exchange succeeded, want mismatch rejection")
 			}
-			if !errors.Is(err, ErrMalformedReply) {
-				t.Errorf("error %q is not ErrMalformedReply; a consumer taxonomy cannot map it", err)
+			if !errors.Is(err, relayknock.ErrMalformedReply) {
+				t.Errorf("error %q is not relayknock.ErrMalformedReply; a consumer taxonomy cannot map it", err)
 			}
 			if !strings.Contains(err.Error(), tt.wantSub) {
 				t.Errorf("error %q does not contain %q", err, tt.wantSub)
