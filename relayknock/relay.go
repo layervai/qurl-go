@@ -48,6 +48,18 @@ func (e *RelayError) Error() string {
 	return e.Msg
 }
 
+// ErrMalformedReply marks an authenticated reply that opened correctly but
+// violates the request→reply correlation contract Exchange enforces above the
+// crypto: the reply header's counter did not echo the request, or its type is
+// not one the request could elicit (see replyTypeAllowed). It is distinct from a
+// *RelayError (an HTTP-transport fault, before any authenticated reply) and from
+// the decrypt/authentication failures DecryptReply returns. Only a misbehaving
+// or byzantine relay produces it — a conforming relay routes a reply back by its
+// cleartext counter, so a mis-correlated reply could never have reached this
+// caller. Exposed as a sentinel so a consumer (qurl) can map it into its own
+// error taxonomy with errors.Is rather than matching the message string.
+var ErrMalformedReply = errors.New("relayknock: malformed reply")
+
 // RelayPost delivers a round-trip NHP packet (knock or register) to the relay
 // and returns the server's reply packet bytes. 200 → reply bytes; any other
 // status → *RelayError.
@@ -179,15 +191,16 @@ func Exchange(ctx context.Context, relayBaseURL string, serverStaticPub []byte, 
 	// fence this by reference bytes (the existing knock/ack goldens are not a
 	// matched pair): layervai/qurl-conformance#19.
 	//
-	// These two post-decrypt checks return a plain error, not *RelayError, on
+	// These two post-decrypt checks wrap ErrMalformedReply, not *RelayError, on
 	// purpose: they are semantic/correlation failures of an already-authenticated
 	// reply, in the same class as the "decrypt reply" failure just above — only
-	// HTTP-transport faults surface as *RelayError (see RelayPost).
+	// HTTP-transport faults surface as *RelayError (see RelayPost). The sentinel
+	// lets a consumer map both into its own taxonomy without a string match.
 	if dr.Counter != counter {
-		return nil, fmt.Errorf("reply counter %d does not echo request counter %d", dr.Counter, counter)
+		return nil, fmt.Errorf("%w: reply counter %d does not echo request counter %d", ErrMalformedReply, dr.Counter, counter)
 	}
 	if !replyTypeAllowed(headerType, dr.Type) {
-		return nil, fmt.Errorf("reply type %d is not a valid reply to a type-%d request", dr.Type, headerType)
+		return nil, fmt.Errorf("%w: reply type %d is not a valid reply to a type-%d request", ErrMalformedReply, dr.Type, headerType)
 	}
 	return dr, nil
 }
