@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -617,6 +618,64 @@ func TestRegisterAgent_FastPath_NoNetworkOnceRegistered(t *testing.T) {
 	}
 	if got := req.Header.Get("Authorization"); got != "Bearer lv_device_secret" {
 		t.Fatalf("Authorization = %q, want Bearer lv_device_secret", got)
+	}
+}
+
+// TestRegisterAgent_ConcurrentFreshStoreSetupSerializes exercises the #48
+// advisory flock end to end: two RegisterAgent calls race a FRESH shared
+// FileAgentState. Without the lock each would generate its own device identity
+// and race the atomic save, ending with two enrolled identities where one
+// silently wins. With the advisory lock the two setups serialize — the second
+// blocks until the first enrolls, then loads the registered state via the fast
+// path — so both callers converge on ONE identity. Run under -race, the two
+// goroutines share the store, the file, and the fake servers.
+func TestRegisterAgent_ConcurrentFreshStoreSetupSerializes(t *testing.T) {
+	if runtime.GOOS == "windows" || runtime.GOOS == "plan9" || runtime.GOOS == "js" {
+		t.Skipf("advisory flock is a no-op on %s; concurrent fresh-store setup is not serialized there", runtime.GOOS)
+	}
+	h := newRegisterHarness(t)
+	h.svc.keyKind = keyKindBootstrap
+	h.armDevicePubOnInfo()
+
+	const goroutines = 2
+	var wg sync.WaitGroup
+	clients := make([]*Client, goroutines)
+	errs := make([]error, goroutines)
+	start := make(chan struct{})
+	for i := range goroutines {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			<-start // release together so both hit the fresh store at once
+			c, err := RegisterAgent(context.Background(), "lv_bootstrap_key", h.store, h.registerOpts()...)
+			clients[idx] = c
+			errs[idx] = err
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	for i := range goroutines {
+		if errs[i] != nil {
+			t.Fatalf("goroutine %d RegisterAgent: %v", i, errs[i])
+		}
+		if clients[i] == nil {
+			t.Fatalf("goroutine %d returned a nil client", i)
+		}
+	}
+
+	// One identity, not two: the persisted state is registered and both callers
+	// agree on the same agent id. The serialized second run short-circuits on the
+	// fast path, so the server sees exactly one REG.
+	state := h.loadState(t)
+	if state.RegisteredAt == nil {
+		t.Fatal("state not marked registered after concurrent setup")
+	}
+	if got := h.nhp.regCount(); got != 1 {
+		t.Fatalf("REG count = %d, want 1 (the advisory lock should serialize the two setups to a single enrollment)", got)
+	}
+	if h.svc.completionCalls.Load() != 1 {
+		t.Fatalf("completion calls = %d, want 1", h.svc.completionCalls.Load())
 	}
 }
 

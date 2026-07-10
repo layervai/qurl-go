@@ -134,6 +134,17 @@ const otpResendCooldown = 60 * time.Second
 // run drives the registration state machine to a *Client. State is derived from
 // AgentState fields (no enum): absent → keypair-persisted → otp_pending → registered.
 func (cfg *registerConfig) run(ctx context.Context, key string, store AgentStateStore) (*AgentState, error) {
+	// Advisory, best-effort serialization of concurrent first-registration setup
+	// against a shared single-host FileAgentState (issue #48): two fresh-store runs
+	// would otherwise each mint a device identity and race the atomic save, leaving
+	// two enrolled identities where one silently wins. Holding this across the whole
+	// run means a second racer blocks until the first enrolls, then loads the
+	// now-registered state via the fast path below. It is a no-op for non-file
+	// stores and on any lock failure — never a hard dependency (see
+	// acquireAgentSetupLock).
+	releaseSetupLock := acquireAgentSetupLock(ctx, store)
+	defer releaseSetupLock()
+
 	// 1. Fast path: a registered state short-circuits with no network. For
 	//    RegisterAgent (requireDeviceKey) a registered state missing the device
 	//    credential is a non-recoverable local state — the credential is issued
