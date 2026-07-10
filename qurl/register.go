@@ -280,10 +280,7 @@ func (cfg *registerConfig) runAccountPath(ctx context.Context, key string, store
 	// cannot match that fresh email — pause and let the caller re-run with the
 	// newly emailed code. A WithOTPProvider is exempt: it reads the just-sent code.
 	if freshRequest && cfg.otp != "" {
-		return nil, &OTPPendingError{
-			RequestedAt: derefTime(state.OTPRequestedAt, cfg.clock()),
-			MaskedEmail: maskedEmail,
-		}
+		return nil, cfg.otpPending(state, maskedEmail)
 	}
 
 	code, err := cfg.resolveOTP(ctx)
@@ -299,13 +296,21 @@ func (cfg *registerConfig) runAccountPath(ctx context.Context, key string, store
 				return nil, err
 			}
 		}
-		return nil, &OTPPendingError{
-			RequestedAt: derefTime(state.OTPRequestedAt, cfg.clock()),
-			MaskedEmail: maskedEmail,
-		}
+		return nil, cfg.otpPending(state, maskedEmail)
 	}
 
 	return cfg.registerAndComplete(ctx, key, store, state, peer, relayURL, code, pathAccount)
+}
+
+// otpPending builds the account-path pause point returned when the emailed code
+// has been requested and RegisterAgent is waiting for the caller to supply it.
+// Both pause sites — a fresh WithOTP literal that cannot match the just-sent
+// code, and a no-code resume — return this same shape.
+func (cfg *registerConfig) otpPending(state *AgentState, maskedEmail string) *OTPPendingError {
+	return &OTPPendingError{
+		RequestedAt: derefTime(state.OTPRequestedAt, cfg.clock()),
+		MaskedEmail: maskedEmail,
+	}
 }
 
 // registerAndComplete runs the shared REG → success-check → completion tail both
