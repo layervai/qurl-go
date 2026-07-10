@@ -345,6 +345,13 @@ func TestSecretsManagerStore_NilContextGuard(t *testing.T) {
 	store := awsstore.NewSecretsManagerStore(fake, "qurl/agent-state")
 	//nolint:staticcheck // deliberately passing a nil context to exercise the guard.
 	if _, err := store.LoadAgentState(nil); !errors.Is(err, qurl.ErrInvalidBootstrapConfig) {
-		t.Fatalf("want ErrInvalidBootstrapConfig for nil ctx, got %v", err)
+		t.Fatalf("load: want ErrInvalidBootstrapConfig for nil ctx, got %v", err)
+	}
+	//nolint:staticcheck // deliberately passing a nil context to exercise the guard.
+	if err := store.SaveAgentState(nil, sampleState()); !errors.Is(err, qurl.ErrInvalidBootstrapConfig) {
+		t.Fatalf("save: want ErrInvalidBootstrapConfig for nil ctx, got %v", err)
+	}
+	if fake.getCalls != 0 || fake.putCalls != 0 || fake.createCalls != 0 {
+		t.Fatalf("nil context should not reach the API (get=%d put=%d create=%d)", fake.getCalls, fake.putCalls, fake.createCalls)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
@@ -67,7 +68,7 @@ func (s *SecretsManagerStore) LoadAgentState(ctx context.Context) (*qurl.AgentSt
 	if s.client == nil {
 		return nil, fmt.Errorf("%w: secrets manager client must not be nil", qurl.ErrInvalidBootstrapConfig)
 	}
-	if s.secretID == "" {
+	if strings.TrimSpace(s.secretID) == "" {
 		return nil, fmt.Errorf("%w: secret id must not be empty", qurl.ErrInvalidBootstrapConfig)
 	}
 

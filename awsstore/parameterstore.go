@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
@@ -62,7 +63,7 @@ func (s *ParameterStore) LoadAgentState(ctx context.Context) (*qurl.AgentState, 
 	if s.client == nil {
 		return nil, fmt.Errorf("%w: ssm client must not be nil", qurl.ErrInvalidBootstrapConfig)
 	}
-	if s.name == "" {
+	if strings.TrimSpace(s.name) == "" {
 		return nil, fmt.Errorf("%w: parameter name must not be empty", qurl.ErrInvalidBootstrapConfig)
 	}
 
