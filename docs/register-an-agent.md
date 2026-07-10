@@ -39,6 +39,29 @@ never re-validates the key. Rotating or mistyping the key against an
 already-registered `store` is therefore not detected; the persisted device
 credential is authoritative from then on.
 
+## Which key do I use?
+
+You pass one key at enrollment. After that the agent runs entirely off the
+device credential in its `store` and never uses the key again — the key is
+**enrollment-only material**, so mount it as a secret or env var for the first
+run. Pick it by how the agent is deployed:
+
+| Deployment | Key | Lifetime & blast radius |
+| --- | --- | --- |
+| **A fleet** of headless agents (containers, CI, autoscalers) | one **durable `qurl:agent`-scoped** key, shared by all | long-lived until revoked; revoking it cuts off the whole fleet at once |
+| **One** headless agent, provisioned on its own | a **one-shot** enrollment key, minted per agent | single-use, ≤24 h — consumed on first enrollment, so a leaked key can't enroll a second device |
+| An agent acting **as a person's account** | that account's existing **API key** | long-lived; enrollment needs an emailed one-time code (see below) |
+
+Create the key from your LayerV account's key management, scoping it to
+`qurl:agent` for the durable/fleet case.
+
+**Fleets — one key, many agents.** Mint a single durable `qurl:agent` key, give
+every agent the same secret, and give each agent its **own** `store` (its own
+file path or secret id). Each agent generates its own device keypair and id and
+enrolls idempotently; the durable key is hash-matched and **never consumed**, so
+it survives any number of enrollments. Don't point two agents at one `store` —
+that is a single shared identity, not a fleet.
+
 ## Two enrollment paths
 
 `RegisterAgent` picks the enrollment path automatically from the kind of key you
@@ -136,6 +159,18 @@ persisted state — the API key you passed at enrollment is not needed again.
 
 Treat the state as secret. Keep it out of logs, crash dumps, and support
 bundles.
+
+Pick a store by runtime. They all satisfy the same two-method
+`AgentStateStore` interface (`LoadAgentState` / `SaveAgentState`), so the rest of
+your code is identical whichever you choose:
+
+| Runtime | Store |
+| --- | --- |
+| Single host / VM / container with a durable disk | `qurl.FileAgentState(path)` |
+| Shared POSIX / EFS across tasks | `qurl.FileAgentState(mountPath)` — **not** the AWS stores |
+| Ephemeral / autoscaling / Lambda / Fargate (no durable disk) | `awsstore.NewSecretsManagerStore(...)` |
+| Cost-sensitive AWS fleets | `awsstore.NewParameterStore(...)` (KMS SecureString) |
+| Custom backend / tests | implement `AgentStateStore`; return `qurl.ErrAgentStateNotFound` when empty |
 
 ### File storage (`FileAgentState`)
 

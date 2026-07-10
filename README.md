@@ -150,8 +150,9 @@ call emails the code and returns `*qurl.OTPPendingError`; re-run with
 Parameter Store (`github.com/layervai/qurl-go/awsstore`), or any custom
 `qurl.AgentStateStore`.
 
-See [Register an agent](docs/register-an-agent.md) for both paths, credential
-storage, the error table, and migrating from `BootstrapAgent`.
+See [Register an agent](docs/register-an-agent.md) for **which key to use** (one
+durable `qurl:agent` key fans out across a whole fleet), both enrollment paths, a
+store-by-runtime table, the error table, and migrating from `BootstrapAgent`.
 
 ## Opening Links
 
