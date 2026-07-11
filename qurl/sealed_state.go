@@ -358,11 +358,12 @@ func (e sealedAgentStateEnvelope) binding() AgentStateKeyBinding {
 func (e sealedAgentStateEnvelope) aad() ([]byte, error) {
 	// Keep the persisted v1 AAD independent of future additions to the public
 	// AgentStateKeyBinding type. JSON encoding of this fixed-field internal struct
-	// is deterministic and unambiguous. compactJSON returns a fresh slice, so the
-	// ciphertext is marshaled read-only rather than cloned.
-	metadata, err := compactJSON(e.WrappedKey.Metadata)
+	// is deterministic and unambiguous. canonicalizeRawJSON uses encoding/json's
+	// default HTML escaping, matching envelope persistence, and returns a fresh
+	// slice so the ciphertext can be marshaled read-only rather than cloned.
+	metadata, err := canonicalizeRawJSON(e.WrappedKey.Metadata)
 	if err != nil {
-		return nil, fmt.Errorf("compact wrapped key metadata: %w", err)
+		return nil, fmt.Errorf("canonicalize wrapped key metadata: %w", err)
 	}
 	raw, err := json.Marshal(sealedAgentStateAAD{
 		Purpose:         e.Purpose,
@@ -516,15 +517,19 @@ func openSealedAgentState(dek, nonce, ciphertext, aad []byte) ([]byte, error) {
 	return gcm.Open(nil, nonce, ciphertext, aad)
 }
 
-func compactJSON(raw json.RawMessage) (json.RawMessage, error) {
+// canonicalizeRawJSON uses the same encoding/json policy as MarshalIndent does
+// for the persisted envelope: insignificant whitespace is removed while <, >,
+// &, U+2028, and U+2029 are escaped. This keeps save- and load-time AAD stable
+// without normalizing number lexemes through an interface{} round trip.
+func canonicalizeRawJSON(raw json.RawMessage) (json.RawMessage, error) {
 	if len(raw) == 0 {
 		return nil, nil
 	}
-	var compact bytes.Buffer
-	if err := json.Compact(&compact, raw); err != nil {
+	canonical, err := json.Marshal(raw)
+	if err != nil {
 		return nil, err
 	}
-	return compact.Bytes(), nil
+	return canonical, nil
 }
 
 func requireJSONEOF(decoder *json.Decoder) error {

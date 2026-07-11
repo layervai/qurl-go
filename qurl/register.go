@@ -186,8 +186,8 @@ func (cfg *registerConfig) run(ctx context.Context, key string, store AgentState
 	}
 
 	// Persist the device identity (keypair + stable device id) BEFORE any
-	//    network call so an interrupted registration resumes with the same
-	//    identity the server will bind.
+	// network call so an interrupted registration resumes with the same
+	// identity the server will bind.
 	if err := cfg.ensureDeviceID(state); err != nil {
 		return nil, err
 	}
@@ -199,7 +199,7 @@ func (cfg *registerConfig) run(ctx context.Context, key string, store AgentState
 	}
 
 	// Pre-flight: registration-info tells us the path (key_kind), the key id,
-	//    the NHP peer, and the relay coordinates. Side-effect-free.
+	// the NHP peer, and the relay coordinates. Side-effect-free.
 	info, err := cfg.fetchRegistrationInfo(ctx, key)
 	if err != nil {
 		return nil, err

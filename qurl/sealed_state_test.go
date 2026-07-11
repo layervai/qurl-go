@@ -34,6 +34,7 @@ type testAgentStateKeyWrapper struct {
 	unwrapBindings      []AgentStateKeyBinding
 	unwrapRecords       []WrappedAgentStateKey
 	wrappedVersion      int
+	wrappedMetadata     json.RawMessage
 	wrappedMetadataSize int
 }
 
@@ -54,6 +55,9 @@ func (w *testAgentStateKeyWrapper) WrapKey(_ context.Context, plaintextKey []byt
 		version = 7
 	}
 	metadata := testWrapperMetadata(binding)
+	if w.wrappedMetadata != nil {
+		metadata = bytes.Clone(w.wrappedMetadata)
+	}
 	if w.wrappedMetadataSize > 0 {
 		metadata = json.RawMessage(`"` + strings.Repeat("m", w.wrappedMetadataSize) + `"`)
 	}
@@ -244,9 +248,65 @@ func TestSealedAgentStateAAD_V1Golden(t *testing.T) {
 	}
 }
 
-func TestCompactJSON_RejectsInvalidInput(t *testing.T) {
-	if _, err := compactJSON(json.RawMessage(`{"key_id":`)); err == nil {
-		t.Fatal("compactJSON invalid metadata: want error")
+func TestSealedFileAgentState_MetadataHTMLEscapingRoundTrips(t *testing.T) {
+	metadata := json.RawMessage("{\"characters\":\"<>&\u2028\u2029\"}")
+	canonical, err := canonicalizeRawJSON(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `{"characters":"\u003c\u003e\u0026\u2028\u2029"}`; string(canonical) != want {
+		t.Fatalf("canonical metadata = %s, want %s", canonical, want)
+	}
+	envelope := sealedAgentStateEnvelope{
+		Version:    sealedAgentStateVersion,
+		Purpose:    sealedAgentStatePurpose,
+		ProviderID: "test-wrapper",
+		AgentID:    "agent-html-test",
+		WrappedKey: WrappedAgentStateKey{Version: 7, Ciphertext: []byte{1, 2}, Metadata: metadata},
+	}
+	beforePersistence, err := envelope.aad()
+	if err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := json.MarshalIndent(envelope, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reopened sealedAgentStateEnvelope
+	if err := json.Unmarshal(persisted, &reopened); err != nil {
+		t.Fatal(err)
+	}
+	afterPersistence, err := reopened.aad()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(beforePersistence, afterPersistence) {
+		t.Fatalf("AAD changed across persistence:\nbefore: %s\nafter:  %s", beforePersistence, afterPersistence)
+	}
+
+	wrapper := &testAgentStateKeyWrapper{wrappedMetadata: metadata, ignoreMetadata: true}
+	store := testSealedStore(t, wrapper)
+	state := testAgentState(t)
+	if err := store.SaveAgentState(context.Background(), state); err != nil {
+		t.Fatalf("SaveAgentState: %v", err)
+	}
+	loaded, err := store.LoadAgentState(context.Background())
+	if err != nil {
+		t.Fatalf("LoadAgentState with HTML-sensitive metadata: %v", err)
+	}
+	if !reflect.DeepEqual(loaded, state) {
+		t.Fatalf("round trip = %#v, want %#v", loaded, state)
+	}
+	assertInvalidSealedMutation(t, store, func(raw []byte) []byte {
+		return mutateEnvelopeJSON(t, raw, func(value map[string]any) {
+			value["wrapped_key"].(map[string]any)["metadata"] = map[string]any{"characters": "changed<&"}
+		})
+	})
+}
+
+func TestCanonicalizeRawJSON_RejectsInvalidInput(t *testing.T) {
+	if _, err := canonicalizeRawJSON(json.RawMessage(`{"key_id":`)); err == nil {
+		t.Fatal("canonicalizeRawJSON invalid metadata: want error")
 	}
 }
 
