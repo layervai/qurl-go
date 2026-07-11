@@ -258,6 +258,22 @@ func TestSecretsManagerStore_CreateRaceFallbackPutFails(t *testing.T) {
 	}
 }
 
+func TestSecretsManagerStore_ArnAutoCreateRejected(t *testing.T) {
+	// A store built from an ARN for a secret that does not exist yet must not
+	// self-create a mis-named secret (CreateSecret{Name: <arn>}). The first Save
+	// fails closed with ErrInvalidBootstrapConfig rather than minting a secret whose
+	// friendly name is the full ARN string.
+	fake := &fakeSecretsManager{exists: false}
+	store := awsstore.NewSecretsManagerStore(fake, "arn:aws:secretsmanager:us-east-1:123456789012:secret:qurl/agent-abc123")
+	err := store.SaveAgentState(context.Background(), sampleState())
+	if !errors.Is(err, qurl.ErrInvalidBootstrapConfig) {
+		t.Fatalf("Save with an ARN for a missing secret: err = %v, want ErrInvalidBootstrapConfig", err)
+	}
+	if fake.exists {
+		t.Fatal("must not CreateSecret from an ARN (the secret should not have been created)")
+	}
+}
+
 func TestSecretsManagerStore_NilClientFailsClosed(t *testing.T) {
 	// A store constructed with a nil client must fail closed on both methods with
 	// ErrInvalidBootstrapConfig rather than panic on the first API call.

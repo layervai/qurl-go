@@ -134,6 +134,13 @@ func (s *SecretsManagerStore) SaveAgentState(ctx context.Context, state *qurl.Ag
 	if !errors.As(err, &notFound) {
 		return fmt.Errorf("qurl: put secret value: %w", err)
 	}
+	// Auto-create needs a friendly name: CreateSecret{Name: <arn>} would mint a
+	// secret whose name is the full ARN string. If the store was built from an ARN
+	// for a secret that does not exist yet, fail legibly instead of self-inflicting
+	// a mis-named secret.
+	if strings.HasPrefix(s.secretID, "arn:") {
+		return fmt.Errorf("%w: cannot auto-create Secrets Manager secret %q from an ARN; precreate it or construct the store with a name", qurl.ErrInvalidBootstrapConfig, s.secretID)
+	}
 	in := &secretsmanager.CreateSecretInput{
 		Name:         aws.String(s.secretID),
 		SecretString: aws.String(secretString),
