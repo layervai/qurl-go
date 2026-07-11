@@ -527,7 +527,7 @@ func TestClient_FileCredentialsErrors(t *testing.T) {
 	}
 
 	oversizedPath := filepath.Join(t.TempDir(), "issuer-state.json")
-	if err := os.WriteFile(oversizedPath, []byte(strings.Repeat("x", maxPrivateStateBytes+1)), 0o600); err != nil {
+	if err := os.WriteFile(oversizedPath, []byte(strings.Repeat("x", maxCredentialStateBytes+1)), 0o600); err != nil {
 		t.Fatalf("write oversized state: %v", err)
 	}
 	client, err = NewClient(FileCredentials(oversizedPath), WithBaseURL("https://api.example.com"))

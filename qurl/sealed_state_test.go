@@ -603,23 +603,59 @@ func TestLocalAgentStateStoreContract(t *testing.T) {
 	}
 }
 
-func TestSealedFileAgentState_ArbitraryStateLengthWithinBound(t *testing.T) {
-	store := testSealedStore(t, &testAgentStateKeyWrapper{})
-	state := testAgentState(t)
-	state.DeviceAPIKey = strings.Repeat("k", 512<<10)
-	if err := store.SaveAgentState(context.Background(), state); err != nil {
-		t.Fatal(err)
+func TestAgentStateFileStores_LargeStateParityAndOverCapNoCommit(t *testing.T) {
+	tests := []struct {
+		name string
+		new  func(*testing.T) (AgentStateStore, string)
+	}{
+		{"plaintext", func(t *testing.T) (AgentStateStore, string) {
+			path := filepath.Join(secureAgentStateTestDir(t), "agent_state.json")
+			return FileAgentState(path), path
+		}},
+		{"sealed", func(t *testing.T) (AgentStateStore, string) {
+			store := testSealedStore(t, &testAgentStateKeyWrapper{})
+			return store, store.path
+		}},
 	}
-	loaded, err := store.LoadAgentState(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if loaded.DeviceAPIKey != state.DeviceAPIKey {
-		t.Fatal("large AgentState credential did not round trip")
-	}
-	state.DeviceAPIKey = strings.Repeat("k", maxSealedAgentStateBytes)
-	if err := store.SaveAgentState(context.Background(), state); !errors.Is(err, ErrInvalidBootstrapConfig) {
-		t.Fatalf("oversized save = %v, want ErrInvalidBootstrapConfig", err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store, path := tt.new(t)
+			state := testAgentState(t)
+			state.DeviceAPIKey = strings.Repeat("k", 512<<10)
+			if err := store.SaveAgentState(context.Background(), state); err != nil {
+				t.Fatal(err)
+			}
+			loaded, err := store.LoadAgentState(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if loaded.DeviceAPIKey != state.DeviceAPIKey {
+				t.Fatal("large AgentState credential did not round trip")
+			}
+			before, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			state.DeviceAPIKey = strings.Repeat("k", maxAgentStateBytes)
+			if err := store.SaveAgentState(context.Background(), state); !errors.Is(err, ErrInvalidBootstrapConfig) {
+				t.Fatalf("oversized save = %v, want ErrInvalidBootstrapConfig", err)
+			}
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(after, before) {
+				t.Fatal("oversized save replaced previously committed state")
+			}
+			reloaded, err := store.LoadAgentState(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if reloaded.DeviceAPIKey != loaded.DeviceAPIKey {
+				t.Fatal("oversized save changed the loadable committed state")
+			}
+		})
 	}
 }
 
@@ -896,7 +932,7 @@ func TestSealedFileAgentState_TamperAndStrictDecode(t *testing.T) {
 		}},
 		{"oversized ciphertext", func(t *testing.T, raw []byte) []byte {
 			return mutateEnvelopeJSON(t, raw, func(v map[string]any) {
-				v["ciphertext"] = base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{1}, maxSealedAgentStateBytes+17))
+				v["ciphertext"] = base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{1}, maxAgentStateBytes+17))
 			})
 		}},
 		{"unknown field", func(t *testing.T, raw []byte) []byte {

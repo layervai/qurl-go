@@ -24,7 +24,6 @@ const (
 	sealedAgentStateDEKBytes      = 32
 	sealedAgentStateNonceBytes    = 12
 	sealedAgentStateTagBytes      = 16
-	maxSealedAgentStateBytes      = 1 << 20
 	maxSealedAgentStateEnvelope   = 2 << 20
 	maxWrappedAgentStateKeyBytes  = 64 << 10
 	maxWrappedAgentStateMetadata  = 16 << 10
@@ -274,8 +273,8 @@ func (s *SealedFileAgentStateStore) SaveAgentState(ctx context.Context, state *A
 		return fmt.Errorf("qurl: encode agent state: %w", err)
 	}
 	defer wipeBytes(plaintext)
-	if len(plaintext) > maxSealedAgentStateBytes {
-		return fmt.Errorf("%w: encoded agent state exceeds %d bytes", ErrInvalidBootstrapConfig, maxSealedAgentStateBytes)
+	if len(plaintext) > maxAgentStateBytes {
+		return fmt.Errorf("%w: encoded agent state exceeds %d bytes", ErrInvalidBootstrapConfig, maxAgentStateBytes)
 	}
 
 	dek := make([]byte, sealedAgentStateDEKBytes)
@@ -444,7 +443,7 @@ func decodeSealedAgentStateEnvelope(raw []byte, envelope *sealedAgentStateEnvelo
 	if len(envelope.Nonce) != sealedAgentStateNonceBytes {
 		return invalidSealedState("invalid AES-GCM nonce length")
 	}
-	if len(envelope.Ciphertext) < sealedAgentStateTagBytes || len(envelope.Ciphertext) > maxSealedAgentStateBytes+sealedAgentStateTagBytes {
+	if len(envelope.Ciphertext) < sealedAgentStateTagBytes || len(envelope.Ciphertext) > maxAgentStateBytes+sealedAgentStateTagBytes {
 		return invalidSealedState("invalid ciphertext length")
 	}
 	return nil

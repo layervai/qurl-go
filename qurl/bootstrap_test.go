@@ -283,7 +283,7 @@ func TestFileAgentState_RejectsGroupReadableState(t *testing.T) {
 
 func TestFileAgentState_RejectsOversizedState(t *testing.T) {
 	path := filepath.Join(secureAgentStateTestDir(t), "agent-state.json")
-	if err := os.WriteFile(path, []byte(strings.Repeat("x", maxPrivateStateBytes+1)), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(strings.Repeat("x", maxAgentStateBytes+1)), 0o600); err != nil {
 		t.Fatalf("write oversized state: %v", err)
 	}
 

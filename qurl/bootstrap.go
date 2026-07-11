@@ -154,7 +154,7 @@ func (s fileAgentStateStore) LoadAgentState(ctx context.Context) (*AgentState, e
 	// a front-door bootstrap/register class): RegisterAgent and BootstrapAgent
 	// re-wrap a load failure in their own class, so the front-door match comes
 	// from the wrap while this sentinel stays matchable through the chain.
-	raw, err := readPrivateStateFileBounded(s.path, "agent state", maxPrivateStateBytes, privateStateDirExact0700, ErrAgentStateNotFound, ErrInvalidAgentState, ErrInsecureAgentStatePermissions)
+	raw, err := readPrivateStateFileBounded(s.path, "agent state", maxAgentStateBytes, privateStateDirExact0700, ErrAgentStateNotFound, ErrInvalidAgentState, ErrInsecureAgentStatePermissions)
 	if err != nil {
 		return nil, err
 	}
@@ -180,6 +180,9 @@ func (s fileAgentStateStore) SaveAgentState(ctx context.Context, state *AgentSta
 		return fmt.Errorf("qurl: encode agent state: %w", err)
 	}
 	defer wipeBytes(raw)
+	if len(raw) > maxAgentStateBytes {
+		return fmt.Errorf("%w: encoded agent state exceeds %d bytes", ErrInvalidBootstrapConfig, maxAgentStateBytes)
+	}
 	return writePrivateStateFileAtomic(ctx, s.path, "agent state", ".qurl-agent-state-*", raw, defaultPrivateStateFileOps)
 }
 

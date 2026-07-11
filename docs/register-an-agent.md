@@ -200,6 +200,10 @@ device API credential and X25519 private key—under an SDK-owned AES-256-GCM
 envelope. Every save generates a fresh 32-byte data-encryption key (DEK) and
 nonce. Your `AgentStateKeyWrapper` integrates the chosen KMS, HSM, or attested
 key-release provider and sees only that exact 32-byte DEK, never AgentState JSON.
+Both full-AgentState file stores cap encoded state at 1 MiB so plaintext and
+sealed deployments have the same schema-growth budget. `FileCredentials` keeps
+its historical 64 KiB issuer-credential cap; the sealed envelope, wrapped key,
+and provider metadata are independently bounded.
 
 ```go
 store, err := qurl.NewSealedFileAgentState(

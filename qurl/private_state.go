@@ -11,7 +11,11 @@ import (
 	"strings"
 )
 
-const maxPrivateStateBytes = 64 << 10
+const (
+	maxCredentialStateBytes = 64 << 10
+	// Both full AgentState file stores share this bounded schema-growth budget.
+	maxAgentStateBytes = 1 << 20
+)
 
 type privateStateDirMode uint8
 
@@ -21,7 +25,7 @@ const (
 )
 
 func readPrivateStateFile(path, label string, notFound, invalidConfig, insecurePermissions error) ([]byte, error) {
-	return readPrivateStateFileBounded(path, label, maxPrivateStateBytes, privateStateDirCompatible, notFound, invalidConfig, insecurePermissions)
+	return readPrivateStateFileBounded(path, label, maxCredentialStateBytes, privateStateDirCompatible, notFound, invalidConfig, insecurePermissions)
 }
 
 func readPrivateStateFileBounded(path, label string, maxBytes int, dirMode privateStateDirMode, notFound, invalidConfig, insecurePermissions error) ([]byte, error) {
