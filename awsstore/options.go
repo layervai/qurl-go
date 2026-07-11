@@ -78,7 +78,7 @@ func WithParameterTier(tier ssmtypes.ParameterTier) Option {
 // returns an ErrInvalidBootstrapConfig-wrapped error for a nil state or empty
 // resource id so both stores share the same guard behavior.
 func marshalAgentState(state *qurl.AgentState, resourceID, resourceLabel string) ([]byte, error) {
-	if strings.TrimSpace(resourceID) == "" {
+	if resourceID == "" {
 		return nil, fmt.Errorf("%w: %s must not be empty", qurl.ErrInvalidBootstrapConfig, resourceLabel)
 	}
 	if state == nil {
