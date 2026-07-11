@@ -656,16 +656,25 @@ func (cfg *registerConfig) mapRegistrationHTTPError(err error) error {
 	case "registration_rate_limited", "rate_limited", "too_many_requests":
 		return fmt.Errorf("%w: %w", ErrRegistrationRateLimited, err)
 	}
-	if apiErr.StatusCode == http.StatusTooManyRequests {
-		return fmt.Errorf("%w: %w", ErrRegistrationRateLimited, err)
-	}
-	if apiErr.StatusCode == http.StatusServiceUnavailable && strings.EqualFold(strings.TrimSpace(apiErr.Code), "service_unavailable") {
-		return fmt.Errorf("%w: registration preflight is temporarily unavailable: %w", ErrRegistrationRetryLater, err)
-	}
-	if apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden {
-		return fmt.Errorf("%w: the API key was rejected by the registration service: %w", ErrKeyRejected, err)
+	if mapped := mapCommonRegistrationHTTPError(apiErr, err, "the API key was rejected by the registration service", "registration preflight is temporarily unavailable"); mapped != nil {
+		return mapped
 	}
 	return err
+}
+
+// mapCommonRegistrationHTTPError maps statuses shared by registration preflight
+// and completion admission. Callers supply path-specific message context and
+// retain their distinct mappings when this returns nil.
+func mapCommonRegistrationHTTPError(apiErr *APIError, err error, rejectedMsg, unavailableMsg string) error {
+	switch {
+	case apiErr.StatusCode == http.StatusTooManyRequests:
+		return fmt.Errorf("%w: %w", ErrRegistrationRateLimited, err)
+	case apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden:
+		return fmt.Errorf("%w: %s: %w", ErrKeyRejected, rejectedMsg, err)
+	case apiErr.StatusCode == http.StatusServiceUnavailable && strings.EqualFold(strings.TrimSpace(apiErr.Code), "service_unavailable"):
+		return fmt.Errorf("%w: %s: %w", ErrRegistrationRetryLater, unavailableMsg, err)
+	}
+	return nil
 }
 
 func isAuthoritativePreMintCompletionError(err error, allowBareNotEnrolled bool) bool {
@@ -702,14 +711,8 @@ func (cfg *registerConfig) mapCompletionHTTPError(err error, path pathKind, devi
 	if path == pathBootstrap && isBootstrapConsumedCompletion(apiErr) {
 		return fmt.Errorf("%w: %s: %w", ErrBootstrapSetupKeyConsumed, bootstrapConsumedGuidance, err)
 	}
-	if apiErr.StatusCode == http.StatusTooManyRequests {
-		return fmt.Errorf("%w: %w", ErrRegistrationRateLimited, err)
-	}
-	if apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden {
-		return fmt.Errorf("%w: the API key was rejected before completion: %w", ErrKeyRejected, err)
-	}
-	if apiErr.StatusCode == http.StatusServiceUnavailable && strings.EqualFold(strings.TrimSpace(apiErr.Code), "service_unavailable") {
-		return fmt.Errorf("%w: completion admission failed before credential minting: %w", ErrRegistrationRetryLater, err)
+	if mapped := mapCommonRegistrationHTTPError(apiErr, err, "the API key was rejected before completion", "completion admission failed before credential minting"); mapped != nil {
+		return mapped
 	}
 	if isDeviceKeyAlreadyIssued(apiErr) {
 		return &CredentialRecoveryRequiredError{DeviceID: deviceID, Cause: err}
