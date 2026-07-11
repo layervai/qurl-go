@@ -41,6 +41,36 @@ var ErrOTPExpired = errors.New("qurl: one-time code expired")
 // later.
 var ErrRegistrationRateLimited = errors.New("qurl: registration rate limited")
 
+// ErrDeviceKeyQuotaExceeded is returned when the account has no free active
+// device-key slot. Revoke an existing unused device key to free a slot, then
+// retry the same registration or recovery operation.
+var ErrDeviceKeyQuotaExceeded = errors.New("qurl: device key quota exceeded")
+
+// DeviceKeyQuotaExceededError carries the device id whose credential could not
+// be issued and preserves the completion API error. The service reports this
+// only when the atomic mint transaction rejected the request without writing,
+// so freeing a slot and retrying is safe.
+type DeviceKeyQuotaExceededError struct {
+	DeviceID string
+	Cause    error
+}
+
+func (e *DeviceKeyQuotaExceededError) Error() string {
+	message := fmt.Sprintf("qurl: cannot issue a device key for %q because the account has reached its active device-key limit; revoke an existing unused device key to free a slot, then retry completion; if replacing an existing device, revoke that device key and retry with qurl.WithTakeover", e.DeviceID)
+	if e.Cause != nil {
+		return fmt.Sprintf("%s: %v", message, e.Cause)
+	}
+	return message
+}
+
+func (e *DeviceKeyQuotaExceededError) Unwrap() []error {
+	errs := []error{ErrDeviceKeyQuotaExceeded}
+	if e.Cause != nil {
+		errs = append(errs, e.Cause)
+	}
+	return errs
+}
+
 // ErrKeyRejected is returned when the supplied API key was rejected as invalid.
 // Check the key and re-run registration.
 var ErrKeyRejected = errors.New("qurl: registration key rejected")

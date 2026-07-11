@@ -850,6 +850,8 @@ func TestRegisterAgent_Completion4xxRequiresExplicitPreMintClassification(t *tes
 		{name: "payload admission", status: http.StatusRequestEntityTooLarge, code: "request_too_large"},
 		{name: "bare not found after REG", status: http.StatusNotFound, code: "", wantAmbiguous: true},
 		{name: "unclassified conflict", status: http.StatusConflict, code: "conflict", wantAmbiguous: true},
+		{name: "device key quota", status: http.StatusConflict, code: "device_key_quota_exceeded", wantMapped: ErrDeviceKeyQuotaExceeded},
+		{name: "quota code wrong status", status: http.StatusBadRequest, code: "device_key_quota_exceeded", wantAmbiguous: true},
 		{name: "unclassified newer status", status: http.StatusUnprocessableEntity, code: "new_completion_error", wantAmbiguous: true},
 		{name: "unclassified gateway timeout", status: http.StatusGatewayTimeout, code: "gateway_timeout", wantAmbiguous: true},
 		{name: "pre-mint rate limit", status: http.StatusTooManyRequests, code: "rate_limited", wantMapped: ErrRegistrationRateLimited},
@@ -893,6 +895,81 @@ func TestRegisterAgent_Completion4xxRequiresExplicitPreMintClassification(t *tes
 			state := h.loadState(t)
 			if state.RegisteredAt != nil || state.DeviceAPIKey != "" {
 				t.Fatalf("completion 4xx persisted a credential: %#v", state)
+			}
+		})
+	}
+}
+
+func TestRegisterAgent_DeviceKeyQuotaExceededIsAuthoritativeNoWriteForBothPaths(t *testing.T) {
+	tests := []struct {
+		name    string
+		account bool
+		key     string
+	}{
+		{name: "bootstrap", key: "lv_enroll"},
+		{name: "account", key: "lv_account", account: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newRegisterHarness(t)
+			var opts []RegisterOption
+			if tc.account {
+				h.svc.keyKind = keyKindAccount
+				h.svc.maskedEmail = "j***@x.com"
+				h.nhp.expectCredential = "424242"
+			}
+			h.armDevicePubOnInfo()
+			if tc.account {
+				if _, err := RegisterAgent(context.Background(), tc.key, h.store, h.registerOpts()...); !errors.Is(err, ErrOTPPending) {
+					t.Fatalf("account phase 1 = %v, want OTP pending", err)
+				}
+				opts = []RegisterOption{WithOTP("424242")}
+			}
+
+			h.handlerMu.Lock()
+			inner := h.handler
+			h.handlerMu.Unlock()
+			var completionAttempts atomic.Int32
+			h.setHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPost && r.URL.Path == "/v1/agent/registration/complete" {
+					attempt := completionAttempts.Add(1)
+					if tc.account && attempt == 1 {
+						w.WriteHeader(http.StatusNotFound)
+						_, _ = fmt.Fprint(w, `{"error":{"code":"device_not_registered","detail":"device is not yet registered"}}`)
+						return
+					}
+					w.WriteHeader(http.StatusConflict)
+					_, _ = fmt.Fprint(w, `{"error":{"code":"device_key_quota_exceeded","title":"Device Key Quota Exceeded","detail":"the account has reached its active device key limit. Revoke an existing device key to free a slot, then retry completion. If replacing an existing device, revoke that device key and use takeover re-enrollment."}}`)
+					return
+				}
+				inner.ServeHTTP(w, r)
+			}))
+
+			_, err := RegisterAgent(context.Background(), tc.key, h.store, h.registerOpts(opts...)...)
+			var quotaErr *DeviceKeyQuotaExceededError
+			if !errors.Is(err, ErrDeviceKeyQuotaExceeded) || !errors.As(err, &quotaErr) {
+				t.Fatalf("quota completion error = %v, want typed quota error", err)
+			}
+			if quotaErr.DeviceID == "" || !strings.Contains(err.Error(), "revoke an existing unused device key") {
+				t.Fatalf("quota error lacks device id/guidance: %#v / %v", quotaErr, err)
+			}
+			var apiErr *APIError
+			if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusConflict || apiErr.Code != "device_key_quota_exceeded" || apiErr.Title != "Device Key Quota Exceeded" {
+				t.Fatalf("quota error lost API cause: %v", err)
+			}
+			if errors.Is(err, ErrCredentialRecoveryRequired) {
+				t.Fatalf("authoritative no-write quota rejection was classified as recovery-required: %v", err)
+			}
+			wantCompletionAttempts := int32(1)
+			if tc.account {
+				wantCompletionAttempts = 2 // pre-REG not-enrolled probe, then quota rejection
+			}
+			if completionAttempts.Load() != wantCompletionAttempts || h.nhp.regCount() != 1 {
+				t.Fatalf("completion/REG attempts = %d/%d, want %d/1", completionAttempts.Load(), h.nhp.regCount(), wantCompletionAttempts)
+			}
+			state := h.loadState(t)
+			if state.RegisteredAt != nil || state.DeviceAPIKey != "" {
+				t.Fatalf("quota response persisted a credential: %#v", state)
 			}
 		})
 	}

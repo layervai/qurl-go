@@ -616,9 +616,9 @@ func (cfg *registerConfig) postCompletion(ctx context.Context, key string, state
 		if errors.Is(mapped, ErrCredentialRecoveryRequired) {
 			return nil, mapped
 		}
-		if isAuthoritativePreMintCompletionError(mapped, allowBareNotEnrolled) {
+		if isAuthoritativeNoWriteCompletionError(mapped, allowBareNotEnrolled) {
 			// Only explicitly modeled qurl-service responses may bypass ambiguity:
-			// each is guaranteed to arise before the atomic device-key mint.
+			// each proves the atomic mint transaction made no device-key write.
 			return nil, mapped
 		}
 		var outcomeUnknown *apiRequestOutcomeUnknownError
@@ -626,7 +626,7 @@ func (cfg *registerConfig) postCompletion(ctx context.Context, key string, state
 		if errors.As(mapped, &outcomeUnknown) || errors.As(mapped, &apiErr) {
 			// Once completion was dispatched, every unclassified HTTP response is
 			// ambiguous regardless of status. A new service-side 4xx must be added
-			// to the authoritative pre-mint taxonomy before the SDK may trust it.
+			// to the authoritative no-write taxonomy before the SDK may trust it.
 			return nil, credentialPersistenceFailure(state.AgentID, mapped)
 		}
 		return nil, mapped
@@ -701,8 +701,9 @@ func mapCommonRegistrationHTTPError(apiErr *APIError, err error, rejectedMsg, un
 	return nil
 }
 
-func isAuthoritativePreMintCompletionError(err error, allowBareNotEnrolled bool) bool {
+func isAuthoritativeNoWriteCompletionError(err error, allowBareNotEnrolled bool) bool {
 	if errors.Is(err, ErrRegistrationRateLimited) ||
+		errors.Is(err, ErrDeviceKeyQuotaExceeded) ||
 		errors.Is(err, ErrRegistrationRetryLater) ||
 		errors.Is(err, ErrKeyRejected) ||
 		errors.Is(err, ErrBootstrapSetupKeyConsumed) ||
@@ -711,8 +712,8 @@ func isAuthoritativePreMintCompletionError(err error, allowBareNotEnrolled bool)
 	}
 	var apiErr *APIError
 	if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusRequestEntityTooLarge {
-		// qurl-service's request-size admission rejects before the completion
-		// handler and its atomic mint transaction run.
+		// qurl-service's request-size admission proves the completion handler's
+		// atomic mint transaction made no device-key write.
 		return true
 	}
 	return allowBareNotEnrolled && isCompletionNotYetRegistered(err)
@@ -726,6 +727,9 @@ func (cfg *registerConfig) mapCompletionHTTPError(err error, path pathKind, devi
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) {
 		return err
+	}
+	if isDeviceKeyQuotaExceeded(apiErr) {
+		return &DeviceKeyQuotaExceededError{DeviceID: deviceID, Cause: err}
 	}
 	// The consumed-setup-key code is a bootstrap-path concept (a one-shot key
 	// accepted once within the completion grace window), so gate it on
@@ -742,6 +746,12 @@ func (cfg *registerConfig) mapCompletionHTTPError(err error, path pathKind, devi
 		return &CredentialRecoveryRequiredError{DeviceID: deviceID, Cause: err}
 	}
 	return err
+}
+
+func isDeviceKeyQuotaExceeded(apiErr *APIError) bool {
+	return apiErr != nil &&
+		apiErr.StatusCode == http.StatusConflict &&
+		strings.EqualFold(strings.TrimSpace(apiErr.Code), "device_key_quota_exceeded")
 }
 
 // isCompletionNotYetRegistered reports whether a completion error means the

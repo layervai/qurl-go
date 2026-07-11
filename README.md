@@ -246,8 +246,15 @@ Match errors by type, not message text:
   expose one routable peer deployment: the SDK persists that full host, port,
   and lease and uses completion only to corroborate its decoded public key;
   completion coordinates are ignored. Completion 401/403 responses must be
-  emitted before the atomic mint handler because the SDK classifies them as
-  authoritative pre-mint authentication failures.
+  emitted only when qurl-service can prove the atomic mint transaction made no
+  device-key write, because the SDK classifies them as authoritative no-write
+  authentication failures.
+
+  qurl-service's persistent per-owner device cap must return structured HTTP 409
+  `device_key_quota_exceeded` only when the atomic mint transaction rejects
+  without writing. The SDK maps that exact response to
+  `ErrDeviceKeyQuotaExceeded`; operators revoke an existing unused agent device
+  key to free a slot, then safely retry.
 
   Completion must be excluded from qurl-service's global POST idempotency cache:
   its response reveals a one-time plaintext device secret and must never be

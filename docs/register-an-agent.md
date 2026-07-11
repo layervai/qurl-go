@@ -485,17 +485,18 @@ pre-dispatch. It therefore preserves `context.Canceled`/`context.DeadlineExceede
 as a matchable cause inside `CredentialPersistenceError` while requiring the
 same owner-revoke and explicit-recovery procedure.
 
-Only explicitly recognized qurl-service pre-mint responses bypass ambiguity:
+Only explicitly recognized qurl-service no-write outcomes bypass ambiguity:
 authentication rejection, rate-limit admission, structured
 `service_unavailable`, structured not-enrolled, and consumed bootstrap-key
-outcomes, plus request-size admission (413). A bare 404 is trusted only by the
-pre-REG account crash probe; after a REG, the same unstructured status is
-mint-ambiguous.
+outcomes, the atomic mint transaction's no-write device-key quota rejection
+(`409 device_key_quota_exceeded`), plus request-size admission (413). A bare 404
+is trusted only by the pre-REG account crash probe; after a REG, the same
+unstructured status is mint-ambiguous.
 
-qurl-service must produce completion 401/403 authentication failures before
-entering the atomic mint handler. The SDK treats those statuses as authoritative
-pre-mint rejections; emitting either after a credential was minted would make a
-retry look safe when it is not.
+qurl-service must produce completion 401/403 authentication failures only when
+it can prove the atomic mint transaction made no device-key write. The SDK
+treats those statuses as authoritative no-write rejections; emitting either
+after a credential was minted would make a retry look safe when it is not.
 
 Completion must also be excluded from qurl-service's global POST idempotency
 cache. Its response carries a one-time plaintext device secret: persisting or
@@ -507,7 +508,7 @@ exclusion and its body-binding regressions before enabling this SDK lifecycle.
 prior first issue. Every unclassified completion HTTP response, including a new
 4xx or unrelated 409, is recovery-required by default; the SDK never assumes a
 new server error happened before the atomic mint. A new retryable/terminal 4xx
-must be added to the authoritative pre-mint taxonomy before it ships.
+must be added to the authoritative no-write taxonomy before it ships.
 
 The registration-info/RAK peer remains authoritative for all durable
 coordinates and lease state. Completion corroborates the decoded public key
@@ -530,6 +531,7 @@ Every message names the next concrete step.
 | `qurl.ErrOTPIncorrect` | Supplied one-time code was wrong. | Re-run with the correct `WithOTP` code. |
 | `qurl.ErrOTPExpired` | Code was valid but expired. | Re-run with **no** code to request a fresh one, then supply it. |
 | `qurl.ErrRegistrationRateLimited` | Too many attempts, or the service is rate limiting. | Back off and retry later. |
+| `*qurl.DeviceKeyQuotaExceededError` (unwraps `ErrDeviceKeyQuotaExceeded` and `*APIError`) | Completion's atomic mint transaction rejected without writing because the account has reached its active device-key limit. | Revoke an existing unused agent device key to free a slot, then retry. If replacing an existing device, revoke that device key and retry with `WithTakeover`. |
 | `qurl.ErrRegistrationRetryLater` | The relay returned an overload cookie, or completion's pre-auth admission layer returned structured `service_unavailable` before minting. | Back off briefly and re-run. |
 | `qurl.ErrKeyRejected` | The API key (or a pre-issued key used as the credential) was rejected. | Check the key and re-run. |
 | `qurl.ErrBootstrapSetupKeyConsumed` | A pre-issued **one-shot** setup key was already consumed by an earlier enrollment (RAK code 52108, or reported by the completion call). | Mint a fresh setup key, or restore the completed agent state from the run that consumed it. |
@@ -561,6 +563,9 @@ case errors.Is(err, qurl.ErrAgentIdentityConflict):
 	// deliberate re-bind, replaces the prior binding
 	client, err = qurl.RegisterAgent(ctx, apiKey, store, qurl.WithTakeover())
 	// ...
+case errors.Is(err, qurl.ErrDeviceKeyQuotaExceeded):
+	// Owner action: revoke an existing unused agent device key, then retry safely.
+	return err
 case errors.Is(err, qurl.ErrRegistrationRetryLater),
 	errors.Is(err, qurl.ErrRegistrationRateLimited):
 	backOffAndRetry()
@@ -597,6 +602,15 @@ knowingly — or choose a different id with `WithDeviceID`.
 `ErrRegistrationRetryLater` (relay overload or a pre-mint admission outage) are
 both back-off signals. Wait and re-run; `RegisterAgent` resumes the same
 enrollment.
+
+**Device-key quota.** `ErrDeviceKeyQuotaExceeded` is an authoritative no-write
+result from the atomic mint transaction, not credential ambiguity. An owner must
+revoke an existing unused agent device key to free a slot; then retry the same
+registration or recovery operation. `DeviceKeyQuotaExceededError` carries the
+attempted `DeviceID`, and the underlying `*APIError` remains available with
+`errors.As`.
+If replacing an existing device, revoke that device key and retry with
+`WithTakeover`.
 
 ## Migrating from BootstrapAgent
 
