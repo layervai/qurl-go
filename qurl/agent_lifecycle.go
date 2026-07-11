@@ -99,13 +99,15 @@ func (b *AgentRuntimeBinding) Destroy() {
 // An account key may pause with OTPPendingError. Its durable OTPRequestedAt
 // marker intentionally remains on the completed state across a paused or
 // abandoned attempt to throttle repeat dispatches; OpenRegisteredAgent ignores
-// it, and a successful resumed RAK clears it. Fleet connectors should normally
-// allow only RegistrationKeyKindBootstrap so refresh cannot fan out OTP email.
+// it, and a successful resumed RAK clears it. Refresh defaults to bootstrap
+// keys so routine fleet repair cannot fan out OTP email; an interactive account
+// flow requires an explicit WithAllowedRegistrationKeyKinds opt-in.
 func RefreshAgentRegistration(ctx context.Context, key string, store AgentStateStore, opts ...RegisterOption) (*AgentRuntimeBinding, error) {
 	cfg, err := validateRegisterInputs(ctx, key, store, opts)
 	if err != nil {
 		return nil, err
 	}
+	cfg.applyLifecycleDefaultKeyPolicy()
 	state, err := withAgentSetupLock(ctx, store, func() (*AgentState, error) {
 		state, err := loadCompletedRegisteredState(ctx, store, cfg.invalidConfigErr)
 		if err != nil {
@@ -169,9 +171,9 @@ func loadCompletedRegisteredState(ctx context.Context, store AgentStateStore, er
 // authorization is available, it sends REG and calls completion exactly once.
 // An account key may first dispatch email OTP and return OTPPendingError; resume
 // with the received code via WithOTP, or use a WithOTPProvider that awaits the
-// newly dispatched code. Fleet connectors should normally enforce
-// RegistrationKeyKindBootstrap with WithAllowedRegistrationKeyKinds so recovery
-// cannot fan out operator OTP emails. Recovery is never invoked implicitly after
+// newly dispatched code. Recovery defaults to bootstrap keys; an interactive
+// account flow requires explicit WithAllowedRegistrationKeyKinds opt-in, so
+// routine repair cannot fan out operator OTP emails. Recovery is never invoked implicitly after
 // a 401. The owner must first revoke agent:<device_id>, which clears qurl-service's
 // first-issue sentinel; otherwise completion returns ErrCredentialRecoveryRequired.
 // Recovery still proceeds when local state contains DeviceAPIKey: owner-side
@@ -191,6 +193,7 @@ func RecoverAgentCredential(ctx context.Context, key string, store AgentStateSto
 	if err != nil {
 		return nil, err
 	}
+	cfg.applyLifecycleDefaultKeyPolicy()
 	_, err = withAgentSetupLock(ctx, store, func() (*AgentState, error) {
 		state, err := loadExistingAgentState(ctx, store, cfg.invalidConfigErr)
 		if err != nil {

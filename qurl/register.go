@@ -1042,6 +1042,18 @@ const (
 	RegistrationKeyKindAccount RegistrationKeyKind = keyKindAccount
 )
 
+// applyLifecycleDefaultKeyPolicy gives the new repair-oriented lifecycle APIs a
+// fail-safe fleet default without changing RegisterAgent's account-enrollment
+// compatibility. Interactive account-key refresh/recovery remains available by
+// explicitly opting in with WithAllowedRegistrationKeyKinds.
+func (cfg *registerConfig) applyLifecycleDefaultKeyPolicy() {
+	if cfg.allowedKeyKinds == nil {
+		cfg.allowedKeyKinds = map[RegistrationKeyKind]struct{}{
+			RegistrationKeyKindBootstrap: {},
+		}
+	}
+}
+
 func (cfg *registerConfig) requireAllowedKeyKind(raw string) error {
 	if cfg.allowedKeyKinds == nil {
 		return nil
@@ -1219,6 +1231,9 @@ func (o agentClientBaseURLOption) applyClientOption(cfg *clientOptions) error {
 	if err := validateHTTPSOrLoopbackURL(rawURL, "agent client base URL", ErrInvalidClientConfig); err != nil {
 		return err
 	}
+	if err := claimClientOptionSource(&cfg.baseURLSource, clientOptionSourceAgent, "WithBaseURL", "WithAgentClientBaseURL"); err != nil {
+		return err
+	}
 	cfg.baseURL = strings.TrimRight(rawURL, "/")
 	return nil
 }
@@ -1262,6 +1277,9 @@ func (o agentClientHTTPClientOption) applyRegisterOption(cfg *registerConfig) er
 func (o agentClientHTTPClientOption) applyClientOption(cfg *clientOptions) error {
 	if o.client == nil {
 		return fmt.Errorf("%w: agent Client HTTP client must not be nil", ErrInvalidClientConfig)
+	}
+	if err := claimClientOptionSource(&cfg.httpClientSource, clientOptionSourceAgent, "WithHTTPClient", "WithAgentClientHTTPClient"); err != nil {
+		return err
 	}
 	cfg.httpClient = o.client
 	return nil

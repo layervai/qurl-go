@@ -340,9 +340,27 @@ func (f clientOptionFunc) applyClientOption(o *clientOptions) error {
 }
 
 type clientOptions struct {
-	baseURL         string
-	httpClient      HTTPDoer
-	issuerStatePath string
+	baseURL          string
+	httpClient       HTTPDoer
+	issuerStatePath  string
+	baseURLSource    clientOptionSource
+	httpClientSource clientOptionSource
+}
+
+type clientOptionSource uint8
+
+const (
+	clientOptionSourceUnset clientOptionSource = iota
+	clientOptionSourceGeneric
+	clientOptionSourceAgent
+)
+
+func claimClientOptionSource(current *clientOptionSource, next clientOptionSource, genericName, agentName string) error {
+	if *current != clientOptionSourceUnset && *current != next {
+		return fmt.Errorf("%w: set only one of %s or %s", ErrInvalidClientConfig, genericName, agentName)
+	}
+	*current = next
+	return nil
 }
 
 func applyClientOptions(opts []ClientOption) (clientOptions, error) {
@@ -368,6 +386,9 @@ func WithBaseURL(rawURL string) ClientOption {
 		if err := validateHTTPSOrLoopbackURL(rawURL, "base URL", ErrInvalidClientConfig); err != nil {
 			return err
 		}
+		if err := claimClientOptionSource(&o.baseURLSource, clientOptionSourceGeneric, "WithBaseURL", "WithAgentClientBaseURL"); err != nil {
+			return err
+		}
 		o.baseURL = strings.TrimRight(rawURL, "/")
 		return nil
 	})
@@ -381,6 +402,9 @@ func WithHTTPClient(client HTTPDoer) ClientOption {
 	return clientOptionFunc(func(o *clientOptions) error {
 		if client == nil {
 			return fmt.Errorf("%w: HTTP client must not be nil", ErrInvalidClientConfig)
+		}
+		if err := claimClientOptionSource(&o.httpClientSource, clientOptionSourceGeneric, "WithHTTPClient", "WithAgentClientHTTPClient"); err != nil {
+			return err
 		}
 		o.httpClient = client
 		return nil

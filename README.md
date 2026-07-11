@@ -238,12 +238,13 @@ Match errors by type, not message text:
   5xx, and response failures never auto-retry, and completion cannot replace the
   peer that authenticated the successful RAK.
 
-  **Fleet email-fan-out warning:** account-key OTP remains allowed by default so
-  the generic `RegisterAgent` API preserves account enrollment compatibility.
-  Fleet callers using `RefreshAgentRegistration` or `RecoverAgentCredential`
-  should explicitly set
-  `WithAllowedRegistrationKeyKinds(RegistrationKeyKindBootstrap)`; otherwise an
-  account key can dispatch operator OTP email during routine lifecycle work.
+  **Fleet email-fan-out policy:** account-key OTP remains allowed by default for
+  generic `RegisterAgent` compatibility. The repair-oriented
+  `RefreshAgentRegistration` and `RecoverAgentCredential` default to
+  bootstrap-only; interactive account repair requires explicit
+  `WithAllowedRegistrationKeyKinds(RegistrationKeyKindAccount)`. Fleet callers
+  should still set the bootstrap-only policy explicitly so routine lifecycle
+  code documents and pins its intended trust model.
 
   This release requires qurl-service registration-info/completion support,
   idempotent same-key REG, device-key revoke that atomically clears the

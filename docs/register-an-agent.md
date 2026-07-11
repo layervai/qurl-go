@@ -445,10 +445,13 @@ These are deliberately separate operations:
   successful resumed RAK clears it. This durable marker prevents repeated calls
   from fanning out email, while refreshed binding metadata remains uncommitted
   until RAK succeeds.
-  Account keys remain allowed by default for generic `RegisterAgent`
-  compatibility; fleet connectors should set
-  `WithAllowedRegistrationKeyKinds(RegistrationKeyKindBootstrap)` so routine
-  binding repair cannot fan out operator OTP emails.
+  `RegisterAgent` keeps account keys enabled by default for interactive
+  enrollment compatibility. The repair-oriented `RefreshAgentRegistration` and
+  `RecoverAgentCredential` default to bootstrap-only; interactive account-key
+  repair must opt in with
+  `WithAllowedRegistrationKeyKinds(RegistrationKeyKindAccount)`. Fleet
+  connectors should still set the bootstrap-only policy explicitly so their
+  security posture is visible at the call site.
 - `RecoverAgentCredential` is the operator-controlled path for a revoked or
   locally lost device credential. It preserves the persisted device id and
   X25519 keypair and, once enrollment authorization is available, sends REG,

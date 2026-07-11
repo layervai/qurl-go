@@ -17,6 +17,10 @@ import (
 	"time"
 )
 
+func allowAccountLifecycle() RegisterOption {
+	return WithAllowedRegistrationKeyKinds(RegistrationKeyKindAccount)
+}
+
 func TestOpenRegisteredAgent_ZeroNetworkIgnoresKnockPeer(t *testing.T) {
 	cases := []struct {
 		name string
@@ -191,6 +195,47 @@ func TestAgentLifecycle_RejectsNonExactEnrollmentKeysAndAppendBreakingOrigins(t 
 	}
 	if networkCalls.Load() != 0 {
 		t.Fatalf("invalid lifecycle input network calls = %d, want 0", networkCalls.Load())
+	}
+}
+
+func TestOpenRegisteredAgent_RejectsMixedResourceOptionFamilies(t *testing.T) {
+	h := registeredHarness(t)
+	transport := doerFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("unexpected network call")
+	})
+	tests := []struct {
+		name string
+		opts []ClientOption
+		want string
+	}{
+		{
+			name: "generic URL then agent URL",
+			opts: []ClientOption{WithBaseURL("https://resources.example.test"), WithAgentClientBaseURL("https://resources.example.test")},
+			want: "WithBaseURL or WithAgentClientBaseURL",
+		},
+		{
+			name: "agent URL then generic URL",
+			opts: []ClientOption{WithAgentClientBaseURL("https://resources.example.test"), WithBaseURL("https://resources.example.test")},
+			want: "WithBaseURL or WithAgentClientBaseURL",
+		},
+		{
+			name: "generic transport then agent transport",
+			opts: []ClientOption{WithHTTPClient(transport), WithAgentClientHTTPClient(transport)},
+			want: "WithHTTPClient or WithAgentClientHTTPClient",
+		},
+		{
+			name: "agent transport then generic transport",
+			opts: []ClientOption{WithAgentClientHTTPClient(transport), WithHTTPClient(transport)},
+			want: "WithHTTPClient or WithAgentClientHTTPClient",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			client, err := OpenRegisteredAgent(context.Background(), h.store, tc.opts...)
+			if client != nil || !errors.Is(err, ErrInvalidClientConfig) || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("mixed resource options = client %v, error %v; want invalid config naming %q", client, err, tc.want)
+			}
+		})
 	}
 }
 
@@ -410,6 +455,45 @@ func TestRegisterAgent_KeyKindPolicyRejectsBeforeOTPOrREG(t *testing.T) {
 	}
 }
 
+func TestAgentLifecycle_DefaultKeyPolicyRejectsAccountBeforeOTPOrREG(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(*registerHarness) error
+	}{
+		{name: "refresh", run: func(h *registerHarness) error {
+			_, err := RefreshAgentRegistration(context.Background(), "lv_account", h.store, h.registerOpts()...)
+			return err
+		}},
+		{name: "recovery", run: func(h *registerHarness) error {
+			_, err := RecoverAgentCredential(context.Background(), "lv_account", h.store, h.registerOpts()...)
+			return err
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := registeredHarness(t)
+			h.svc.mu.Lock()
+			h.svc.keyKind = keyKindAccount
+			h.svc.maskedEmail = "j***@example.test"
+			h.svc.mu.Unlock()
+			otpBefore := h.nhp.otpCount()
+			regsBefore := h.nhp.regCount()
+
+			err := tc.run(h)
+			var disallowed *RegistrationKeyKindDisallowedError
+			if !errors.As(err, &disallowed) || !errors.Is(err, ErrRegistrationKeyKindDisallowed) {
+				t.Fatalf("default account lifecycle error = %v, want typed disallowed kind", err)
+			}
+			if disallowed.Kind != RegistrationKeyKindAccount || !reflect.DeepEqual(disallowed.Allowed, []RegistrationKeyKind{RegistrationKeyKindBootstrap}) {
+				t.Fatalf("default account lifecycle policy = %#v", disallowed)
+			}
+			if h.nhp.otpCount() != otpBefore || h.nhp.regCount() != regsBefore {
+				t.Fatalf("default policy rejection side effects: OTP %d->%d, REG %d->%d", otpBefore, h.nhp.otpCount(), regsBefore, h.nhp.regCount())
+			}
+		})
+	}
+}
+
 func TestRefreshAgentRegistration_AccountOTPResumeDoesNotComplete(t *testing.T) {
 	h := registeredHarness(t)
 	h.svc.mu.Lock()
@@ -418,7 +502,7 @@ func TestRefreshAgentRegistration_AccountOTPResumeDoesNotComplete(t *testing.T) 
 	h.svc.mu.Unlock()
 	completeBefore := h.svc.completionCalls.Load()
 
-	_, err := RefreshAgentRegistration(context.Background(), "lv_account", h.store, h.registerOpts()...)
+	_, err := RefreshAgentRegistration(context.Background(), "lv_account", h.store, h.registerOpts(allowAccountLifecycle())...)
 	var pending *OTPPendingError
 	if !errors.As(err, &pending) {
 		t.Fatalf("first account refresh: want OTPPendingError, got %v", err)
@@ -430,7 +514,7 @@ func TestRefreshAgentRegistration_AccountOTPResumeDoesNotComplete(t *testing.T) 
 	h.nhp.mu.Lock()
 	h.nhp.expectCredential = "424242"
 	h.nhp.mu.Unlock()
-	binding, err := RefreshAgentRegistration(context.Background(), "lv_account", h.store, h.registerOpts(WithOTP("424242"))...)
+	binding, err := RefreshAgentRegistration(context.Background(), "lv_account", h.store, h.registerOpts(allowAccountLifecycle(), WithOTP("424242"))...)
 	if err != nil {
 		t.Fatalf("account refresh resume: %v", err)
 	}
@@ -449,11 +533,11 @@ func TestAgentLifecycle_FreshAccountLiteralOTPDispatchesThenPauses(t *testing.T)
 		run  func(*registerHarness) error
 	}{
 		{name: "refresh", run: func(h *registerHarness) error {
-			_, err := RefreshAgentRegistration(context.Background(), "lv_account", h.store, h.registerOpts(WithOTP("stale-literal"))...)
+			_, err := RefreshAgentRegistration(context.Background(), "lv_account", h.store, h.registerOpts(allowAccountLifecycle(), WithOTP("stale-literal"))...)
 			return err
 		}},
 		{name: "recovery", run: func(h *registerHarness) error {
-			_, err := RecoverAgentCredential(context.Background(), "lv_account", h.store, h.registerOpts(WithOTP("stale-literal"))...)
+			_, err := RecoverAgentCredential(context.Background(), "lv_account", h.store, h.registerOpts(allowAccountLifecycle(), WithOTP("stale-literal"))...)
 			return err
 		}},
 	}
@@ -496,7 +580,7 @@ func TestRecoverAgentCredential_AccountLiteralResumesAfterPending(t *testing.T) 
 	h.svc.maskedEmail = "j***@example.test"
 	h.svc.deviceAPIKey = "lv_device_recovered"
 	h.svc.mu.Unlock()
-	if _, err := RecoverAgentCredential(context.Background(), "lv_account", h.store, h.registerOpts(WithOTP("stale-literal"))...); !errors.Is(err, ErrOTPPending) {
+	if _, err := RecoverAgentCredential(context.Background(), "lv_account", h.store, h.registerOpts(allowAccountLifecycle(), WithOTP("stale-literal"))...); !errors.Is(err, ErrOTPPending) {
 		t.Fatalf("fresh recovery literal = %v, want OTP pending", err)
 	}
 	h.nhp.mu.Lock()
@@ -505,7 +589,7 @@ func TestRecoverAgentCredential_AccountLiteralResumesAfterPending(t *testing.T) 
 	regsBefore := h.nhp.regCount()
 	completionBefore := h.svc.completionCalls.Load()
 
-	client, err := RecoverAgentCredential(context.Background(), "lv_account", h.store, h.registerOpts(WithOTP("424242"))...)
+	client, err := RecoverAgentCredential(context.Background(), "lv_account", h.store, h.registerOpts(allowAccountLifecycle(), WithOTP("424242"))...)
 	if err != nil || client == nil {
 		t.Fatalf("account recovery resume = client %v, error %v", client, err)
 	}
@@ -525,11 +609,11 @@ func TestAgentLifecycle_FreshAccountOTPProviderCompletesInOneCall(t *testing.T) 
 		run                 func(*registerHarness, RegisterOption) error
 	}{
 		{name: "refresh", run: func(h *registerHarness, provider RegisterOption) error {
-			_, err := RefreshAgentRegistration(context.Background(), "lv_account", h.store, h.registerOpts(provider)...)
+			_, err := RefreshAgentRegistration(context.Background(), "lv_account", h.store, h.registerOpts(allowAccountLifecycle(), provider)...)
 			return err
 		}},
 		{name: "recovery", wantCompletionDelta: 1, run: func(h *registerHarness, provider RegisterOption) error {
-			_, err := RecoverAgentCredential(context.Background(), "lv_account", h.store, h.registerOpts(provider)...)
+			_, err := RecoverAgentCredential(context.Background(), "lv_account", h.store, h.registerOpts(allowAccountLifecycle(), provider)...)
 			return err
 		}},
 	}
@@ -613,7 +697,7 @@ func TestAgentLifecycle_AccountOTPProviderResumeAfterCooldownDoesNotRedispatch(t
 				return "provider-code", nil
 			})
 
-			if err := tc.run(h, withClock(func() time.Time { return now }), provider); err != nil {
+			if err := tc.run(h, allowAccountLifecycle(), withClock(func() time.Time { return now }), provider); err != nil {
 				t.Fatalf("provider resume after cooldown: %v", err)
 			}
 			if providerCalls.Load() != 1 || h.nhp.otpCount() != 0 || h.nhp.regCount() != regsBefore+1 {
@@ -644,7 +728,7 @@ func TestRefreshAgentRegistration_OTPErrorsUseLifecycleSafeGuidance(t *testing.T
 			h.svc.keyKind = keyKindAccount
 			h.svc.maskedEmail = "j***@example.test"
 			h.svc.mu.Unlock()
-			if _, err := RefreshAgentRegistration(context.Background(), "lv_account", h.store, h.registerOpts()...); !errors.Is(err, ErrOTPPending) {
+			if _, err := RefreshAgentRegistration(context.Background(), "lv_account", h.store, h.registerOpts(allowAccountLifecycle())...); !errors.Is(err, ErrOTPPending) {
 				t.Fatalf("prime OTP marker: %v", err)
 			}
 			h.nhp.mu.Lock()
@@ -652,7 +736,7 @@ func TestRefreshAgentRegistration_OTPErrorsUseLifecycleSafeGuidance(t *testing.T
 			h.nhp.rakErrMsg = "scripted OTP denial"
 			h.nhp.mu.Unlock()
 
-			_, err := RefreshAgentRegistration(context.Background(), "lv_account", h.store, h.registerOpts(WithOTP("bad-code"))...)
+			_, err := RefreshAgentRegistration(context.Background(), "lv_account", h.store, h.registerOpts(allowAccountLifecycle(), WithOTP("bad-code"))...)
 			if !errors.Is(err, tc.want) || !strings.Contains(err.Error(), "same operation") || strings.Contains(err.Error(), "qurl.RegisterAgent") {
 				t.Fatalf("lifecycle OTP guidance = %v, want %v and same-operation guidance", err, tc.want)
 			}
