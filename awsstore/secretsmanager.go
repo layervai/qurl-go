@@ -91,9 +91,11 @@ func (s *SecretsManagerStore) LoadAgentState(ctx context.Context) (*qurl.AgentSt
 		}
 		return nil, fmt.Errorf("qurl: get secret value: %w", err)
 	}
-	if out.SecretString == nil {
-		// The secret exists but has no string value (e.g. binary-only). Treat a
-		// present-but-unreadable value as corrupt, not as "not found".
+	if out == nil || out.SecretString == nil {
+		// The secret exists but has no string value (e.g. binary-only), or the SDK
+		// returned a nil output on a nil error (it guarantees non-nil, so this is
+		// pure defense). Fail closed as corrupt rather than "not found" — mapping an
+		// anomaly to not-found would trigger destructive re-enrollment.
 		return nil, fmt.Errorf("%w: secret has no string value", qurl.ErrInvalidAgentState)
 	}
 	return unmarshalAgentState([]byte(*out.SecretString))
