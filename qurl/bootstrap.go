@@ -388,16 +388,15 @@ func validateRegisteredAgentState(state *AgentState, now time.Time, requirePeerL
 	return validateNHPServerPeerInfo(*state.NHPPeer, now, requirePeerLive, "registered agent state", errKind)
 }
 
-// validateNHPServerPeerInfo checks an NHP peer record. errKind is the sentinel
-// wrapped into every failure so the caller's error class flows through: bootstrap
-// callers pass ErrInvalidBootstrapConfig, registration callers pass
-// ErrInvalidRegisterConfig.
 // validateNHPServerPeerInfo checks an NHP peer's shape (X25519 key, host, port).
 // requireLive additionally rejects an expired peer — set it only when the peer
 // will actually be knocked (a fresh registration/completion peer, a WithNHPPeer
 // override, or the knock-only BootstrapAgent fast path). A REST-only RegisterAgent
 // Client never knocks the persisted peer, so its fast path passes requireLive=false
 // (an expired-but-unused peer must not lock out a still-valid device credential).
+// errKind is the sentinel wrapped into every failure so the caller's error class
+// flows through (ErrInvalidBootstrapConfig for bootstrap, ErrInvalidRegisterConfig
+// for registration).
 func validateNHPServerPeerInfo(peer NHPServerPeerInfo, now time.Time, requireLive bool, label string, errKind error) error {
 	if strings.TrimSpace(peer.PublicKeyB64) == "" {
 		return fmt.Errorf("%w: %s missing NHP peer public key", errKind, label)
