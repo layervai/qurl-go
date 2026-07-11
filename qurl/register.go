@@ -141,13 +141,21 @@ const otpResendCooldown = 60 * time.Second
 // run drives the registration state machine to a *Client. State is derived from
 // AgentState fields (no enum): absent → keypair-persisted → otp_pending → registered.
 func (cfg *registerConfig) run(ctx context.Context, key string, store AgentStateStore) (result *AgentState, resultErr error) {
-	// Mandatory serialization of concurrent first-registration setup
-	// against a shared single-host FileAgentState (issue #48): two fresh-store runs
-	// would otherwise each mint a device identity and race the atomic save, leaving
-	// two enrolled identities where one silently wins. Holding this across the whole
-	// run means a second racer blocks until the first enrolls, then loads the
-	// now-registered state via the fast path below. A lock failure on an SDK local
-	// file store fails closed; custom/network stores remain caller-serialized.
+	// Preserve the documented zero-network, read-only fast path: a completed state
+	// no longer needs setup serialization and must remain usable when the state
+	// directory is mounted read-only or local locking is unsupported.
+	state, found, err := loadAgentStateIfPresent(ctx, store, cfg.invalidConfigErr)
+	if err != nil {
+		return nil, err
+	}
+	if found && state.RegisteredAt != nil {
+		return cfg.finishRegisteredAgentState(state)
+	}
+
+	// Mandatory serialization starts only for incomplete/fresh setup. Two racers
+	// would otherwise mint competing identities and race the atomic save. After
+	// acquiring, reload: another process may have completed enrollment while this
+	// caller waited, in which case the second fast-path check returns its state.
 	releaseSetupLock, err := acquireAgentSetupLock(ctx, store)
 	if err != nil {
 		return nil, err
@@ -164,39 +172,15 @@ func (cfg *registerConfig) run(ctx context.Context, key string, store AgentState
 		}
 	}()
 
-	// 1. Fast path: a registered state short-circuits with no network. For
-	//    RegisterAgent (requireDeviceKey) a registered state missing the device
-	//    credential is a non-recoverable local state — the credential is issued
-	//    once. BootstrapAgent leaves requireDeviceKey false, so a legacy
-	//    bootstrap-era state without a device key still returns.
-	state, err := loadOrCreateAgentState(ctx, store, cfg.invalidConfigErr)
+	state, err = loadOrCreateAgentState(ctx, store, cfg.invalidConfigErr)
 	if err != nil {
 		return nil, err
 	}
 	if state.RegisteredAt != nil {
-		// requirePeerLive = !requireDeviceKey: a RegisterAgent Client authorizes with
-		// the REST device key and never knocks the persisted NHP peer, so an expired
-		// peer must not block the zero-network fast path; the knock-only BootstrapAgent
-		// (requireDeviceKey=false) still requires a live peer.
-		if err := validateRegisteredAgentState(state, cfg.clock(), !cfg.requireDeviceKey, cfg.invalidConfigErr); err != nil {
-			return nil, err
-		}
-		if cfg.requireDeviceKey && strings.TrimSpace(state.DeviceAPIKey) == "" {
-			// The device credential is issued once and cannot be recovered from this
-			// state. Re-running against the SAME store short-circuits here again
-			// (WithDeviceID reloads this same state; WithTakeover only affects the
-			// REG body, which the fast path never sends). The only recovery is to
-			// clear or replace the persisted AgentState (or point at a fresh
-			// AgentStateStore) and register again from scratch.
-			return nil, fmt.Errorf("%w: agent %q is registered but its device credential is absent from this state; clear or replace the persisted AgentState (or use a fresh AgentStateStore) and register again", ErrDeviceCredentialMissing, state.AgentID)
-		}
-		if err := cfg.reconcileDeviceID(state); err != nil {
-			return nil, err
-		}
-		return state, nil
+		return cfg.finishRegisteredAgentState(state)
 	}
 
-	// 2. Persist the device identity (keypair + stable device id) BEFORE any
+	// Persist the device identity (keypair + stable device id) BEFORE any
 	//    network call so an interrupted registration resumes with the same
 	//    identity the server will bind.
 	if err := cfg.ensureDeviceID(state); err != nil {
@@ -209,7 +193,7 @@ func (cfg *registerConfig) run(ctx context.Context, key string, store AgentState
 		return nil, err
 	}
 
-	// 3. Pre-flight: registration-info tells us the path (key_kind), the key id,
+	// Pre-flight: registration-info tells us the path (key_kind), the key id,
 	//    the NHP peer, and the relay coordinates. Side-effect-free.
 	info, err := cfg.fetchRegistrationInfo(ctx, key)
 	if err != nil {
@@ -245,6 +229,37 @@ func (cfg *registerConfig) run(ctx context.Context, key string, store AgentState
 		// validate() already rejected unknown kinds; defensive.
 		return nil, fmt.Errorf("%w: registration-info returned unknown key_kind %q", cfg.invalidConfigErr, info.KeyKind)
 	}
+}
+
+func loadAgentStateIfPresent(ctx context.Context, store AgentStateStore, invalidConfigErr error) (*AgentState, bool, error) {
+	state, err := store.LoadAgentState(ctx)
+	switch {
+	case err == nil:
+		if err := state.ensureKeypair(invalidConfigErr); err != nil {
+			return nil, false, err
+		}
+		return state, true, nil
+	case errors.Is(err, ErrAgentStateNotFound):
+		return nil, false, nil
+	default:
+		return nil, false, fmt.Errorf("%w: load agent state: %w", invalidConfigErr, err)
+	}
+}
+
+func (cfg *registerConfig) finishRegisteredAgentState(state *AgentState) (*AgentState, error) {
+	// A RegisterAgent Client authorizes with the REST device key and never knocks
+	// the persisted NHP peer, so an expired peer does not block its fast path. The
+	// knock-only BootstrapAgent path still requires a live peer.
+	if err := validateRegisteredAgentState(state, cfg.clock(), !cfg.requireDeviceKey, cfg.invalidConfigErr); err != nil {
+		return nil, err
+	}
+	if cfg.requireDeviceKey && strings.TrimSpace(state.DeviceAPIKey) == "" {
+		return nil, fmt.Errorf("%w: agent %q is registered but its device credential is absent from this state; clear or replace the persisted AgentState (or use a fresh AgentStateStore) and register again", ErrDeviceCredentialMissing, state.AgentID)
+	}
+	if err := cfg.reconcileDeviceID(state); err != nil {
+		return nil, err
+	}
+	return state, nil
 }
 
 // runBootstrapPath is PATH A: the pre-issued key is the enrollment credential.

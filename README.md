@@ -230,11 +230,12 @@ Match errors by type, not message text:
   cross-process sidecar lock to acquire and release successfully; unsupported
   platforms or insecure lock paths return `ErrAgentSetupLock` instead of
   continuing without serialization. On Windows, Plan 9, and js/wasm the SDK has
-  no local-file lock implementation, so `RegisterAgent` and `BootstrapAgent`
-  with `FileAgentState` or `NewSealedFileAgentState` now stop with that error;
-  use a custom/network `AgentStateStore` (including `awsstore` where applicable)
-  and serialize setup at the store boundary. Direct local-store load/save after
-  enrollment is unaffected.
+  no local-file lock implementation, so fresh or incomplete `RegisterAgent` and
+  `BootstrapAgent` setup with `FileAgentState` or `NewSealedFileAgentState` stops
+  with that error; use a custom/network `AgentStateStore` (including `awsstore`
+  where applicable) and serialize setup at the store boundary. A completed
+  registration takes the lock-free read-only fast path, and direct local-store
+  load/save is unaffected.
 - **Agent enrollment moved to `api.layerv.ai`.** Enrollment is now NHP-native
   and its endpoints live on the main API origin. The default `BootstrapAgent`
   origin changed from the dedicated bootstrap host to `api.layerv.ai`; callers

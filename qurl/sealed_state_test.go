@@ -72,7 +72,7 @@ func (w *testAgentStateKeyWrapper) UnwrapKey(_ context.Context, record WrappedAg
 		return nil, ErrInvalidWrappedAgentStateKey
 	}
 	if w.unwrapOverride != nil {
-		out := cloneBytes(w.unwrapOverride)
+		out := bytes.Clone(w.unwrapOverride)
 		w.unwrapOutputs = append(w.unwrapOutputs, out)
 		return out, nil
 	}
@@ -685,15 +685,26 @@ func TestSealedFileAgentState_SetupLockFailuresFailClosed(t *testing.T) {
 	store.lockFile = func(context.Context, string) (setupLock, error) {
 		return nil, errors.New("lock unavailable")
 	}
-	if _, err := RegisterAgent(context.Background(), "unused-on-fast-path", store); !errors.Is(err, ErrAgentSetupLock) {
+	if _, err := RegisterAgent(context.Background(), "unused-on-fast-path", store); err != nil {
+		t.Fatalf("completed fast path must not acquire setup lock: %v", err)
+	}
+
+	state.RegisteredAt = nil
+	state.DeviceAPIKey = ""
+	if err := store.SaveAgentState(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RegisterAgent(context.Background(), "enrollment-key", store); !errors.Is(err, ErrAgentSetupLock) {
 		t.Fatalf("acquire failure = %v, want ErrAgentSetupLock", err)
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
 	store.lockFile = func(context.Context, string) (setupLock, error) {
+		cancel() // force the post-acquire reload to fail before any network call
 		return testSetupLock{closeErr: errors.New("unlock failed")}, nil
 	}
-	if _, err := RegisterAgent(context.Background(), "unused-on-fast-path", store); !errors.Is(err, ErrAgentSetupLock) {
-		t.Fatalf("release failure = %v, want ErrAgentSetupLock", err)
+	if _, err := RegisterAgent(ctx, "enrollment-key", store); !errors.Is(err, ErrAgentSetupLock) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("release failure = %v, want joined ErrAgentSetupLock + context.Canceled", err)
 	}
 }
 

@@ -154,7 +154,7 @@ func (s fileAgentStateStore) LoadAgentState(ctx context.Context) (*AgentState, e
 	// a front-door bootstrap/register class): RegisterAgent and BootstrapAgent
 	// re-wrap a load failure in their own class, so the front-door match comes
 	// from the wrap while this sentinel stays matchable through the chain.
-	raw, err := readPrivateAgentStateFile(s.path, "agent state", maxPrivateStateBytes, ErrAgentStateNotFound, ErrInvalidAgentState, ErrInsecureAgentStatePermissions)
+	raw, err := readPrivateStateFileBounded(s.path, "agent state", maxPrivateStateBytes, true, ErrAgentStateNotFound, ErrInvalidAgentState, ErrInsecureAgentStatePermissions)
 	if err != nil {
 		return nil, err
 	}
@@ -398,18 +398,14 @@ func validateNHPServerPeerInfo(peer NHPServerPeerInfo, now time.Time, requireLiv
 // (ErrInvalidAgentState / ErrInsecureAgentStatePermissions / …) stays matchable
 // through the double-wrap.
 func loadOrCreateAgentState(ctx context.Context, store AgentStateStore, invalidConfigErr error) (*AgentState, error) {
-	state, err := store.LoadAgentState(ctx)
-	switch {
-	case err == nil:
-		if err := state.ensureKeypair(invalidConfigErr); err != nil {
-			return nil, err
-		}
-		return state, nil
-	case errors.Is(err, ErrAgentStateNotFound):
-		return newAgentState()
-	default:
-		return nil, fmt.Errorf("%w: load agent state: %w", invalidConfigErr, err)
+	state, found, err := loadAgentStateIfPresent(ctx, store, invalidConfigErr)
+	if err != nil {
+		return nil, err
 	}
+	if found {
+		return state, nil
+	}
+	return newAgentState()
 }
 
 func newAgentState() (*AgentState, error) {

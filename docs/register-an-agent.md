@@ -234,10 +234,11 @@ Both SDK local-file stores require an immediate `0700` state directory, write a
 `0600` state file atomically, and take the same mandatory setup lock. Lock
 failures stop registration; custom/network stores remain caller-serialized.
 Windows, Plan 9, and js/wasm do not currently have an SDK local-file lock
-implementation, so local-file enrollment fails closed with `ErrAgentSetupLock`
-there. Use a custom/network store (including `awsstore` where applicable) that
-serializes setup itself. Direct `LoadAgentState` and `SaveAgentState` calls are
-unaffected; the lock guards the registration/bootstrap state machine.
+implementation, so fresh or incomplete local-file enrollment fails closed with
+`ErrAgentSetupLock` there. Use a custom/network store (including `awsstore` where
+applicable) that serializes setup itself. A completed registration reopens on a
+lock-free read-only fast path; direct `LoadAgentState` and `SaveAgentState` calls
+are also unaffected.
 
 ### AWS storage (`awsstore`)
 

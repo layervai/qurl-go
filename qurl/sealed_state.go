@@ -157,7 +157,7 @@ func (s *SealedFileAgentStateStore) LoadAgentState(ctx context.Context) (*AgentS
 	if err := validateContext(ctx, ErrInvalidBootstrapConfig); err != nil {
 		return nil, err
 	}
-	raw, err := readPrivateAgentStateFile(s.path, "sealed agent state", maxSealedAgentStateEnvelope, ErrAgentStateNotFound, ErrInvalidAgentState, ErrInsecureAgentStatePermissions)
+	raw, err := readPrivateStateFileBounded(s.path, "sealed agent state", maxSealedAgentStateEnvelope, true, ErrAgentStateNotFound, ErrInvalidAgentState, ErrInsecureAgentStatePermissions)
 	if err != nil {
 		var tooLarge *inputExceedsCapError
 		if errors.As(err, &tooLarge) {
@@ -237,7 +237,7 @@ func (s *SealedFileAgentStateStore) SaveAgentState(ctx context.Context, state *A
 		ProviderID:      s.providerID,
 		AgentID:         agentID,
 	}
-	wrapInput := cloneBytes(dek)
+	wrapInput := bytes.Clone(dek)
 	wrapped, err := s.wrapper.WrapKey(ctx, wrapInput, binding)
 	wipeBytes(wrapInput)
 	if err != nil {
@@ -456,7 +456,7 @@ func compactJSON(raw json.RawMessage) json.RawMessage {
 	}
 	var compact bytes.Buffer
 	if err := json.Compact(&compact, raw); err != nil {
-		return cloneBytes(raw) // validation reports malformed metadata before this helper
+		return bytes.Clone(raw) // validation reports malformed metadata before this helper
 	}
 	return compact.Bytes()
 }
@@ -474,16 +474,7 @@ func invalidSealedState(reason string) error {
 }
 
 func cloneWrappedAgentStateKey(in WrappedAgentStateKey) WrappedAgentStateKey {
-	return WrappedAgentStateKey{Version: in.Version, Ciphertext: cloneBytes(in.Ciphertext), Metadata: cloneBytes(in.Metadata)}
-}
-
-func cloneBytes(in []byte) []byte {
-	if in == nil {
-		return nil
-	}
-	out := make([]byte, len(in))
-	copy(out, in)
-	return out
+	return WrappedAgentStateKey{Version: in.Version, Ciphertext: bytes.Clone(in.Ciphertext), Metadata: bytes.Clone(in.Metadata)}
 }
 
 func wipeBytes(b []byte) {

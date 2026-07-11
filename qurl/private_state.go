@@ -16,10 +16,6 @@ func readPrivateStateFile(path, label string, notFound, invalidConfig, insecureP
 	return readPrivateStateFileBounded(path, label, maxPrivateStateBytes, false, notFound, invalidConfig, insecurePermissions)
 }
 
-func readPrivateAgentStateFile(path, label string, maxBytes int, notFound, invalidConfig, insecurePermissions error) ([]byte, error) {
-	return readPrivateStateFileBounded(path, label, maxBytes, true, notFound, invalidConfig, insecurePermissions)
-}
-
 func readPrivateStateFileBounded(path, label string, maxBytes int, exactDirMode bool, notFound, invalidConfig, insecurePermissions error) ([]byte, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, fmt.Errorf("%w: %s path must not be empty", invalidConfig, label)
