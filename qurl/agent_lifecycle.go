@@ -101,9 +101,13 @@ func validateCompletedAgentIdentity(state *AgentState, errKind error) error {
 }
 
 // RecoverAgentCredential explicitly replaces a revoked/lost device credential
-// while preserving the persisted device id and X25519 keypair. It always sends
-// REG and calls completion exactly once. It is never invoked implicitly after a
-// 401. The owner must first revoke agent:<device_id>, which clears qurl-service's
+// while preserving the persisted device id and X25519 keypair. Once enrollment
+// authorization is available, it sends REG and calls completion exactly once.
+// An account key may first dispatch email OTP and return OTPPendingError; resume
+// with WithOTP or WithOTPProvider. Fleet connectors should normally enforce
+// RegistrationKeyKindBootstrap with WithAllowedRegistrationKeyKinds so recovery
+// cannot fan out operator OTP emails. Recovery is never invoked implicitly after
+// a 401. The owner must first revoke agent:<device_id>, which clears qurl-service's
 // first-issue sentinel; otherwise completion returns ErrCredentialRecoveryRequired.
 // If this returns ErrAgentSetupLock after lock release, load the durable state or
 // call OpenRegisteredAgent before retrying: completion and persistence may have
