@@ -469,6 +469,12 @@ completion returns `device_key_already_issued`, mapped to
 account enrollment key for recovery; a consumed one-shot bootstrap key cannot
 perform a later registration-info refresh.
 
+`WithTakeover` does not clear the issuance sentinel and is never a substitute
+for revocation. Revoke the active device key first; add `WithTakeover` during
+re-enrollment only when the replacement host/keypair must re-bind the same
+device id. The only no-revoke alternative is to enroll a distinct new device id
+in a separate state store, which creates a separate identity.
+
 Completion and local persistence are a distributed transaction. If completion
 returns a plaintext key but the final `SaveAgentState` fails, the SDK returns
 `*CredentialPersistenceError` carrying the device id. It never retries
@@ -485,6 +491,13 @@ authoritative no-write admission result; that maps to
 `ErrRegistrationRetryLater`. The SDK preserves the RAK-authenticated peer and
 requires qurl-service's completion response to report the same key; the response
 cannot silently rotate binding state after the handshake.
+
+`RecoverAgentCredential` intentionally has no crash-recovery completion probe:
+the probe would itself call the first-issue endpoint and cannot re-fetch an
+already-issued plaintext key. If recovery crashes after replacement mint but
+before durable persistence, the next attempt returns already-issued. Revoke the
+active device key again, then start another explicit recovery cycle; never
+blindly probe or retry.
 
 Context cancellation or deadline expiry while the completion transport is in
 flight is also outcome-unknown: the SDK cannot prove the request stayed

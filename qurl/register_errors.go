@@ -120,6 +120,8 @@ func (e *RegistrationKeyKindDisallowedError) Unwrap() error {
 // CredentialRecoveryRequiredError identifies an already-issued device
 // credential that cannot be fetched again. Revoke agent:<device_id> through an
 // owner credential, then call RecoverAgentCredential with the same state store.
+// WithTakeover alone does not clear the issuance record; add it after revocation
+// only when re-binding a changed keypair/host.
 type CredentialRecoveryRequiredError struct {
 	DeviceID string
 	Cause    error
@@ -127,7 +129,7 @@ type CredentialRecoveryRequiredError struct {
 
 func (e *CredentialRecoveryRequiredError) Error() string {
 	keyID := "agent:" + e.DeviceID
-	message := fmt.Sprintf("qurl: device credential for %q was already issued and cannot be fetched again; revoke %q, then call qurl.RecoverAgentCredential with this state store", e.DeviceID, keyID)
+	message := fmt.Sprintf("qurl: device credential for %q was already issued and cannot be fetched again; revoke the active %q key first, then call qurl.RecoverAgentCredential with this state store; qurl.WithTakeover alone does not clear the issuance record—add it after revocation only when re-binding a changed keypair or host; the only no-revoke alternative is enrolling a distinct new device id in a separate state store", e.DeviceID, keyID)
 	return messageWithCause(message, e.Cause)
 }
 

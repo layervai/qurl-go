@@ -263,6 +263,12 @@ Match errors by type, not message text:
   `ErrDeviceKeyQuotaExceeded`; operators revoke an existing unused agent device
   key to free a slot, then safely retry.
 
+  For `device_key_already_issued`, revoke the active `agent:<device_id>` key
+  before `RecoverAgentCredential`. `WithTakeover` alone never clears the issuance
+  sentinel; add it after revocation only for a changed-keypair/host rebind. A
+  distinct new device id in a separate state store is the only no-revoke
+  alternative and represents a separate identity.
+
   Completion must be excluded from qurl-service's global POST idempotency cache:
   its response reveals a one-time plaintext device secret and must never be
   persisted/replayed or reused across different request bodies. Deploy the

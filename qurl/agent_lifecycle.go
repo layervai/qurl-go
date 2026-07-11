@@ -103,6 +103,10 @@ func loadCompletedRegisteredState(ctx context.Context, store AgentStateStore, er
 // cannot fan out operator OTP emails. Recovery is never invoked implicitly after
 // a 401. The owner must first revoke agent:<device_id>, which clears qurl-service's
 // first-issue sentinel; otherwise completion returns ErrCredentialRecoveryRequired.
+// Recovery deliberately does not run a completion probe: completion is the
+// first-issue operation itself. If the process dies after replacement mint but
+// before durable persistence, the next recovery fails already-issued; the owner
+// must revoke the active device key again before another explicit recovery cycle.
 // If this returns ErrAgentSetupLock after lock release, load the durable state or
 // call OpenRegisteredAgent before retrying: completion and persistence may have
 // succeeded even though the lock could not be released cleanly.
@@ -188,7 +192,9 @@ func (cfg *registerConfig) forceRegistration(ctx context.Context, key string, st
 
 	// Isolate the candidate's retained pointer fields from the loaded state. The
 	// peer is replaced immediately below, but registration time and an existing
-	// OTP marker survive until the transition decides what to persist.
+	// OTP marker survive until the transition decides what to persist. Cloning the
+	// marker is defensive even though success later clears it: paused/error paths
+	// return earlier, and no future candidate mutation may alias the loaded state.
 	candidate := *state
 	candidate.RegisteredAt = cloneLifecycleTime(state.RegisteredAt)
 	candidate.OTPRequestedAt = cloneLifecycleTime(state.OTPRequestedAt)

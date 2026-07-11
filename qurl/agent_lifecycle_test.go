@@ -641,6 +641,53 @@ func TestCredentialPersistenceFailureAndExplicitSameIDRecovery(t *testing.T) {
 	}
 }
 
+func TestRecoverAgentCredential_NoProbeAfterAmbiguousReplacementMint(t *testing.T) {
+	h := registeredHarness(t)
+	before := h.loadState(t)
+	regsBefore := h.nhp.regCount()
+	h.handlerMu.Lock()
+	inner := h.handler
+	h.handlerMu.Unlock()
+	var completionAttempts atomic.Int32
+	h.setHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/v1/agent/registration/complete" {
+			switch completionAttempts.Add(1) {
+			case 1:
+				w.WriteHeader(http.StatusInternalServerError)
+			case 2:
+				w.WriteHeader(http.StatusConflict)
+				_, _ = fmt.Fprint(w, `{"error":{"code":"device_key_already_issued","detail":"device key already issued"}}`)
+			default:
+				t.Fatalf("unexpected completion retry")
+			}
+			return
+		}
+		inner.ServeHTTP(w, r)
+	}))
+
+	_, err := RecoverAgentCredential(context.Background(), "lv_enroll", h.store, h.registerOpts()...)
+	var persistenceErr *CredentialPersistenceError
+	if !errors.As(err, &persistenceErr) || !errors.Is(err, ErrCredentialRecoveryRequired) {
+		t.Fatalf("ambiguous replacement mint = %v, want persistence recovery", err)
+	}
+	_, err = RecoverAgentCredential(context.Background(), "lv_enroll", h.store, h.registerOpts()...)
+	var recoveryErr *CredentialRecoveryRequiredError
+	if !errors.As(err, &recoveryErr) || !errors.Is(err, ErrCredentialRecoveryRequired) {
+		t.Fatalf("retry after ambiguous replacement mint = %v, want already-issued recovery", err)
+	}
+	if !strings.Contains(err.Error(), "revoke the active") ||
+		!strings.Contains(err.Error(), "WithTakeover alone does not clear") ||
+		!strings.Contains(err.Error(), "only no-revoke alternative") {
+		t.Fatalf("already-issued guidance is incomplete: %v", err)
+	}
+	if completionAttempts.Load() != 2 || h.nhp.regCount() != regsBefore+2 {
+		t.Fatalf("recovery completion/REG attempts = %d/%d, want 2/%d (one REG+completion per call, no probe)", completionAttempts.Load(), h.nhp.regCount(), regsBefore+2)
+	}
+	if after := h.loadState(t); !reflect.DeepEqual(after, before) {
+		t.Fatalf("ambiguous replacement/retry changed prior state: before=%#v after=%#v", before, after)
+	}
+}
+
 func TestRegisterAgent_PostCompletionContractFailuresRequireRecoveryWithoutRetry(t *testing.T) {
 	rotated := newFakeNHPServer(t)
 	cases := []struct {
@@ -1041,6 +1088,7 @@ func TestRegisterAgent_Completion4xxRequiresExplicitNoWriteClassification(t *tes
 		{name: "unclassified conflict", status: http.StatusConflict, code: "conflict", wantAmbiguous: true},
 		{name: "device key quota", status: http.StatusConflict, code: "device_key_quota_exceeded", wantMapped: ErrDeviceKeyQuotaExceeded},
 		{name: "quota code wrong status", status: http.StatusBadRequest, code: "device_key_quota_exceeded", wantAmbiguous: true},
+		{name: "already-issued code wrong status", status: http.StatusBadRequest, code: "device_key_already_issued", wantAmbiguous: true},
 		{name: "unclassified newer status", status: http.StatusUnprocessableEntity, code: "new_completion_error", wantAmbiguous: true},
 		{name: "unclassified gateway timeout", status: http.StatusGatewayTimeout, code: "gateway_timeout", wantAmbiguous: true},
 		{name: "no-write rate limit", status: http.StatusTooManyRequests, code: "rate_limited", wantMapped: ErrRegistrationRateLimited},

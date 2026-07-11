@@ -494,6 +494,10 @@ func (cfg *registerConfig) registerExchange(ctx context.Context, state *AgentSta
 	if err != nil {
 		return nil, fmt.Errorf("qurl: encode registration body: %w", err)
 	}
+	// relayknock.Exchange synchronously seals body into a separate packet before
+	// starting RelayPost; the HTTP transport never references this plaintext.
+	// Wiping after Exchange returns is therefore safe, unlike doAuthorizedJSON's
+	// raw request buffer, which net/http may still be consuming after Do returns.
 	defer wipeBytes(body)
 	reply, err := relayknock.Exchange(ctx, relayURL, serverPub, relayknock.TypeRegister, body, relayknock.KnockOptions{
 		HTTPClient:       relayHTTPClient(cfg.httpClient),
@@ -538,6 +542,8 @@ func (cfg *registerConfig) sendOTP(ctx context.Context, state *AgentState, peer 
 	if err != nil {
 		return fmt.Errorf("qurl: encode otp request body: %w", err)
 	}
+	// relayknock.Send synchronously seals body into a separate packet before its
+	// HTTP POST, so no transport reader can race this plaintext wipe after return.
 	defer wipeBytes(body)
 	if err := relayknock.Send(ctx, relayURL, serverPub, body, relayknock.KnockOptions{
 		HTTPClient:       relayHTTPClient(cfg.httpClient),
@@ -790,13 +796,14 @@ func isStructuredCompletionNotYetRegistered(err error) bool {
 	return false
 }
 
-// isDeviceKeyAlreadyIssued matches ONLY the structured device_key_already_issued
-// code, not a bare 409. The mapped error tells the operator to revoke the prior
-// agent key and run explicit same-id recovery. That action must not fire for an
-// unrelated 409 with no structured code; those become persistence ambiguity
-// while preserving the underlying *APIError for errors.As.
+// isDeviceKeyAlreadyIssued matches ONLY structured HTTP 409
+// device_key_already_issued, not a bare 409 or the same code on another status.
+// The mapped error tells the operator to revoke the prior agent key and run
+// explicit same-id recovery. Every non-exact response remains persistence
+// ambiguity while preserving the underlying *APIError for errors.As.
 func isDeviceKeyAlreadyIssued(apiErr *APIError) bool {
-	return strings.EqualFold(strings.TrimSpace(apiErr.Code), "device_key_already_issued")
+	return apiErr.StatusCode == http.StatusConflict &&
+		strings.EqualFold(strings.TrimSpace(apiErr.Code), "device_key_already_issued")
 }
 
 func isBootstrapConsumedCompletion(apiErr *APIError) bool {
