@@ -107,7 +107,7 @@ case errors.As(err, &pending):
 	// Obtain it out of band, then resume.
 	code := readOneTimeCode(pending.MaskedEmail)
 
-	client, err := qurl.RegisterAgent(ctx, accountKey, store, qurl.WithOTP(code))
+	client, err = qurl.RegisterAgent(ctx, accountKey, store, qurl.WithOTP(code))
 	if err != nil {
 		return err
 	}

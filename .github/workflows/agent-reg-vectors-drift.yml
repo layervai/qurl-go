@@ -33,6 +33,12 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+  schedule:
+    # Nightly, so upstream drift is caught on its own cadence rather than only
+    # when an unrelated PR happens to run CI. (Dormant until REQUIRE_UPSTREAM is
+    # flipped and CANONICAL_REF points at the released vectors; issue #50 tracks
+    # the migration to the published conformance accessor.)
+    - cron: "17 7 * * *"
 
 permissions:
   contents: read
