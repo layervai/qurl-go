@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 
+	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
+
 	"github.com/layervai/qurl-go/qurl"
 )
 
@@ -20,6 +22,10 @@ type storeConfig struct {
 	// kmsKeyID is the customer-managed KMS key id/ARN/alias used to encrypt the
 	// stored credential. Empty means the service default (AWS-managed) key.
 	kmsKeyID string
+	// tier is the SSM parameter tier applied by [ParameterStore] on every
+	// PutParameter. The zero value leaves Tier unset (the account's default tier
+	// configuration). Ignored by [SecretsManagerStore].
+	tier ssmtypes.ParameterTier
 }
 
 func newStoreConfig(opts ...Option) storeConfig {
@@ -50,6 +56,21 @@ func newStoreConfig(opts ...Option) storeConfig {
 func WithKMSKeyID(keyID string) Option {
 	return func(c *storeConfig) {
 		c.kmsKeyID = strings.TrimSpace(keyID)
+	}
+}
+
+// WithParameterTier sets the SSM parameter tier [ParameterStore] applies on every
+// PutParameter. The default (unset) uses the account's default tier
+// configuration, whose standard tier caps a SecureString value at 4 KB. Because a
+// registered AgentState carries a DeviceAPIKey, an unusually large token could
+// push the JSON past 4 KB; pass [ssmtypes.ParameterTierAdvanced] to raise the
+// ceiling to 8 KB.
+//
+// This option applies only to [ParameterStore]; [SecretsManagerStore] ignores it.
+// The zero-value tier leaves the field unset, preserving the prior behavior.
+func WithParameterTier(tier ssmtypes.ParameterTier) Option {
+	return func(c *storeConfig) {
+		c.tier = tier
 	}
 }
 

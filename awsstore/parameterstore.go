@@ -36,6 +36,7 @@ type ParameterStore struct {
 	client   ParameterStoreAPI
 	name     string
 	kmsKeyID string
+	tier     ssmtypes.ParameterTier
 }
 
 var _ qurl.AgentStateStore = (*ParameterStore)(nil)
@@ -43,13 +44,15 @@ var _ qurl.AgentStateStore = (*ParameterStore)(nil)
 // NewParameterStore returns a [qurl.AgentStateStore] that persists the agent
 // state in the SSM parameter named name, using client for API calls. Pass
 // [WithKMSKeyID] to encrypt the SecureString with a customer-managed key on every
-// write.
+// write, and [WithParameterTier] to select the advanced tier when the state could
+// exceed the standard tier's 4 KB value ceiling.
 func NewParameterStore(client ParameterStoreAPI, name string, opts ...Option) *ParameterStore {
 	cfg := newStoreConfig(opts...)
 	return &ParameterStore{
 		client:   client,
 		name:     strings.TrimSpace(name),
 		kmsKeyID: cfg.kmsKeyID,
+		tier:     cfg.tier,
 	}
 }
 
@@ -118,6 +121,10 @@ func (s *ParameterStore) SaveAgentState(ctx context.Context, state *qurl.AgentSt
 	}
 	if s.kmsKeyID != "" {
 		in.KeyId = aws.String(s.kmsKeyID)
+	}
+	if s.tier != "" {
+		// Zero value leaves Tier unset (account default tier configuration).
+		in.Tier = s.tier
 	}
 	if _, err := s.client.PutParameter(ctx, in); err != nil {
 		return fmt.Errorf("qurl: put parameter: %w", err)

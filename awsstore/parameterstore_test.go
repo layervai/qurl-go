@@ -23,6 +23,7 @@ type fakeSSM struct {
 	lastPutType      ssmtypes.ParameterType
 	lastPutOverwrite *bool
 	lastPutKeyID     string
+	lastPutTier      ssmtypes.ParameterTier
 	lastGetDecrypt   *bool
 
 	getErr error
@@ -65,6 +66,7 @@ func (f *fakeSSM) PutParameter(_ context.Context, in *ssm.PutParameterInput, _ .
 	f.lastPutType = in.Type
 	f.lastPutOverwrite = in.Overwrite
 	f.lastPutKeyID = aws.ToString(in.KeyId)
+	f.lastPutTier = in.Tier
 	return &ssm.PutParameterOutput{}, nil
 }
 
@@ -171,6 +173,32 @@ func TestParameterStore_WithKMSKeyID(t *testing.T) {
 	}
 	if fake.lastPutKeyID != keyID {
 		t.Fatalf("KMS key not plumbed to PutParameter: got %q want %q", fake.lastPutKeyID, keyID)
+	}
+}
+
+func TestParameterStore_WithParameterTier(t *testing.T) {
+	fake := &fakeSSM{}
+	store := awsstore.NewParameterStore(fake, "/qurl/agent-state", awsstore.WithParameterTier(ssmtypes.ParameterTierAdvanced))
+
+	if err := store.SaveAgentState(context.Background(), sampleState()); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if fake.lastPutTier != ssmtypes.ParameterTierAdvanced {
+		t.Fatalf("tier not plumbed to PutParameter: got %q want %q", fake.lastPutTier, ssmtypes.ParameterTierAdvanced)
+	}
+}
+
+func TestParameterStore_DefaultTierUnset(t *testing.T) {
+	// Without WithParameterTier the Tier field stays the zero value, so AWS uses
+	// the account's default tier configuration (prior behavior).
+	fake := &fakeSSM{}
+	store := awsstore.NewParameterStore(fake, "/qurl/agent-state")
+
+	if err := store.SaveAgentState(context.Background(), sampleState()); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if fake.lastPutTier != "" {
+		t.Fatalf("default tier must be unset, got %q", fake.lastPutTier)
 	}
 }
 
