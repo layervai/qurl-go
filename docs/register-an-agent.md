@@ -462,6 +462,9 @@ binding, err := qurl.RefreshAgentRegistration(ctx, enrollmentKey, store,
 	qurl.WithAllowedRegistrationKeyKinds(qurl.RegistrationKeyKindBootstrap),
 	qurl.WithRegisterBaseURL(registrationURL),
 )
+if err != nil {
+	return err
+}
 defer binding.Destroy()
 devicePrivateKey := binding.DeviceStaticPrivateKey()
 defer func() { clear(devicePrivateKey) }()

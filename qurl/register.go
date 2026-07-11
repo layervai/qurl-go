@@ -310,16 +310,7 @@ func (cfg *registerConfig) runBootstrapPath(ctx context.Context, key string, sto
 //     enrolled, resolve the code and REG; with no code source, re-send after the
 //     cooldown and pause.
 func (cfg *registerConfig) runAccountPath(ctx context.Context, key string, store AgentStateStore, state *AgentState, peer *NHPServerPeerInfo, relayURL, maskedEmail string) (*AgentState, error) {
-	// Ensure the code has been requested before any code can be valid. On a fresh
-	// store this emails the code; on a resume (OTPRequestedAt already set) it does
-	// nothing unless a code source is absent and the cooldown has elapsed (below).
 	freshRequest := state.OTPRequestedAt == nil
-	if freshRequest {
-		if err := cfg.requestOTP(ctx, store, state, key); err != nil {
-			return nil, err
-		}
-	}
-
 	// On a resume, probe completion BEFORE resolving any code: a prior run may
 	// have gotten the RAK but crashed before completion, so the device is already
 	// enrolled server-side and completion finishes the run without a code. Doing
@@ -333,34 +324,51 @@ func (cfg *registerConfig) runAccountPath(ctx context.Context, key string, store
 		}
 	}
 
-	// A static WithOTP literal supplied on the SAME call that just emailed a code
-	// cannot match that fresh email — pause and let the caller re-run with the
-	// newly emailed code. A WithOTPProvider is exempt: it reads the just-sent code.
-	if freshRequest && cfg.otp != "" {
-		return nil, cfg.otpPending(state, maskedEmail)
+	code, err := cfg.accountCredentialOrPause(ctx, key, store, state, state, maskedEmail)
+	if err != nil {
+		return nil, err
+	}
+	return cfg.registerAndComplete(ctx, key, store, state, peer, relayURL, code, pathAccount)
+}
+
+// accountCredentialOrPause shares the account OTP dispatch/resume ordering
+// across enrollment, refresh, and recovery. A fresh operation persists and
+// dispatches before consulting a provider that may await that email. A resume
+// resolves an available literal/provider code first and redispatches after the
+// cooldown only when no code source exists, avoiding unnecessary email fan-out.
+// persisted owns the durable cooldown marker; requestState supplies the current
+// peer/relay coordinates used for dispatch.
+func (cfg *registerConfig) accountCredentialOrPause(ctx context.Context, key string, store AgentStateStore, persisted, requestState *AgentState, maskedEmail string) (string, error) {
+	now := cfg.clock()
+	freshRequest := persisted.OTPRequestedAt == nil
+	if freshRequest {
+		if err := cfg.requestOTPAt(ctx, store, persisted, requestState, key, now); err != nil {
+			return "", err
+		}
+		// A literal supplied on the call that just dispatched a fresh code cannot
+		// match that email. Providers are exempt because they may await delivery.
+		if cfg.otp != "" {
+			return "", cfg.otpPending(persisted, maskedEmail)
+		}
 	}
 
 	code, err := cfg.resolveOTP(ctx)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-	if code == "" {
-		// No code source: re-send once the cooldown elapses (so a long-idle
-		// re-run refreshes an expired code), then pause for the caller to supply
-		// the code on the next run.
-		if cfg.clock().Sub(derefTime(state.OTPRequestedAt, cfg.clock())) >= otpResendCooldown {
-			if err := cfg.requestOTP(ctx, store, state, key); err != nil {
-				return nil, err
-			}
+	if code != "" {
+		return code, nil
+	}
+	if !freshRequest && now.Sub(derefTime(persisted.OTPRequestedAt, now)) >= otpResendCooldown {
+		if err := cfg.requestOTPAt(ctx, store, persisted, requestState, key, now); err != nil {
+			return "", err
 		}
-		return nil, cfg.otpPending(state, maskedEmail)
 	}
-
-	return cfg.registerAndComplete(ctx, key, store, state, peer, relayURL, code, pathAccount)
+	return "", cfg.otpPending(persisted, maskedEmail)
 }
 
 // otpPending builds the account-path pause point returned when the emailed code
-// has been requested and RegisterAgent is waiting for the caller to supply it.
+// has been requested and the current lifecycle operation awaits the caller.
 // Both pause sites — a fresh WithOTP literal that cannot match the just-sent
 // code, and a no-code resume — return this same shape.
 func (cfg *registerConfig) otpPending(state *AgentState, maskedEmail string) *OTPPendingError {
@@ -392,19 +400,6 @@ func (cfg *registerConfig) registerExchangeChecked(ctx context.Context, state *A
 		return mapRAKError(ack, path)
 	}
 	return nil
-}
-
-// requestOTP records OTPRequestedAt (otp_pending) and THEN dispatches the OTP
-// email. The order is deliberate and anti-spam: persisting before sending means
-// a persist failure emits no email (the caller retries as a still-fresh request,
-// no code wasted), while a send failure after a successful persist leaves the
-// state otp_pending — so the retry resumes under the 60s resend cooldown instead
-// of re-emailing immediately. (Send-then-persist would, on a store with
-// intermittent write failures, dispatch a code, fail the save, and re-send on
-// the next run as a fresh request with no backoff.) On a persist failure the
-// in-memory OTPRequestedAt mutation is rolled back so it matches what was stored.
-func (cfg *registerConfig) requestOTP(ctx context.Context, store AgentStateStore, state *AgentState, key string) error {
-	return cfg.requestOTPAt(ctx, store, state, state, key, cfg.clock())
 }
 
 // requestOTPAt centralizes the anti-spam save-before-send ordering. persisted is

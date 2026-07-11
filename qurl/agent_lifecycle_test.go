@@ -568,6 +568,67 @@ func TestAgentLifecycle_FreshAccountOTPProviderCompletesInOneCall(t *testing.T) 
 	}
 }
 
+func TestAgentLifecycle_AccountOTPProviderResumeAfterCooldownDoesNotRedispatch(t *testing.T) {
+	now := time.Date(2026, time.July, 11, 20, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name                string
+		wantCompletionDelta int32
+		run                 func(*registerHarness, ...RegisterOption) error
+	}{
+		{name: "refresh", run: func(h *registerHarness, opts ...RegisterOption) error {
+			binding, err := RefreshAgentRegistration(context.Background(), "lv_account", h.store, h.registerOpts(opts...)...)
+			if binding != nil {
+				binding.Destroy()
+			}
+			return err
+		}},
+		{name: "recovery", wantCompletionDelta: 1, run: func(h *registerHarness, opts ...RegisterOption) error {
+			_, err := RecoverAgentCredential(context.Background(), "lv_account", h.store, h.registerOpts(opts...)...)
+			return err
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := registeredHarness(t)
+			h.svc.mu.Lock()
+			h.svc.keyKind = keyKindAccount
+			h.svc.maskedEmail = "j***@example.test"
+			h.svc.deviceAPIKey = "lv_device_provider_resume"
+			h.svc.mu.Unlock()
+			h.nhp.mu.Lock()
+			h.nhp.expectCredential = "provider-code"
+			h.nhp.mu.Unlock()
+
+			state := h.loadState(t)
+			requestedAt := now.Add(-otpResendCooldown)
+			state.OTPRequestedAt = &requestedAt
+			if err := h.store.SaveAgentState(context.Background(), state); err != nil {
+				t.Fatalf("save elapsed OTP marker: %v", err)
+			}
+			regsBefore := h.nhp.regCount()
+			completionBefore := h.svc.completionCalls.Load()
+			var providerCalls atomic.Int32
+			provider := WithOTPProvider(func(context.Context) (string, error) {
+				providerCalls.Add(1)
+				return "provider-code", nil
+			})
+
+			if err := tc.run(h, withClock(func() time.Time { return now }), provider); err != nil {
+				t.Fatalf("provider resume after cooldown: %v", err)
+			}
+			if providerCalls.Load() != 1 || h.nhp.otpCount() != 0 || h.nhp.regCount() != regsBefore+1 {
+				t.Fatalf("provider/OTP/REG = %d/%d/%d, want 1/0/%d", providerCalls.Load(), h.nhp.otpCount(), h.nhp.regCount(), regsBefore+1)
+			}
+			if h.svc.completionCalls.Load() != completionBefore+tc.wantCompletionDelta {
+				t.Fatalf("completion calls = %d, want %d", h.svc.completionCalls.Load(), completionBefore+tc.wantCompletionDelta)
+			}
+			if state := h.loadState(t); state.OTPRequestedAt != nil {
+				t.Fatalf("provider resume left OTP marker: %#v", state)
+			}
+		})
+	}
+}
+
 func TestRefreshAgentRegistration_OTPErrorsUseLifecycleSafeGuidance(t *testing.T) {
 	for _, tc := range []struct {
 		name    string

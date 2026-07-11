@@ -128,6 +128,7 @@ func newAgentRuntimeBinding(state *AgentState) (*AgentRuntimeBinding, error) {
 	}
 	privateKey, err := base64.StdEncoding.Strict().DecodeString(state.PrivateKeyB64)
 	if err != nil {
+		wipeBytes(privateKey)
 		return nil, fmt.Errorf("%w: decode refreshed agent private key: %w", ErrInvalidRegisterConfig, err)
 	}
 	if len(privateKey) != 32 {
@@ -307,30 +308,8 @@ func (cfg *registerConfig) forcedRegistrationCredential(ctx context.Context, key
 		if err := requireAccountKeyEmail(info); err != nil {
 			return "", pathAccount, err
 		}
-		now := cfg.clock()
-		freshRequest := persisted.OTPRequestedAt == nil
-		dispatchDue := persisted.OTPRequestedAt == nil || now.Sub(*persisted.OTPRequestedAt) >= otpResendCooldown
-		// A provider may await the email from this call, so dispatch first. A
-		// literal on a fresh lifecycle call cannot match the newly dispatched code:
-		// persist/send, then pause so the caller can resume with the received code.
-		if dispatchDue && (cfg.otp == "" || freshRequest) {
-			// candidate carries the refreshed coordinates; requestOTPAt sends over
-			// them rather than the persisted (possibly stale) binding.
-			if err := cfg.requestOTPAt(ctx, store, persisted, candidate, key, now); err != nil {
-				return "", pathAccount, err
-			}
-		}
-		if freshRequest && cfg.otp != "" {
-			return "", pathAccount, cfg.otpPending(persisted, info.MaskedEmail)
-		}
-		code, err := cfg.resolveOTP(ctx)
-		if err != nil {
-			return "", pathAccount, err
-		}
-		if code != "" {
-			return code, pathAccount, nil
-		}
-		return "", pathAccount, cfg.otpPending(persisted, info.MaskedEmail)
+		code, err := cfg.accountCredentialOrPause(ctx, key, store, persisted, candidate, info.MaskedEmail)
+		return code, pathAccount, err
 	default:
 		return "", pathBootstrap, cfg.errUnknownKeyKind(info.KeyKind)
 	}
