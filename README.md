@@ -258,6 +258,13 @@ Match errors by type, not message text:
 
 #### Breaking changes
 
+- **`ErrDeviceCredentialMissing` now also matches recovery ambiguity.** Both
+  `CredentialPersistenceError` and `CredentialRecoveryRequiredError` preserve
+  compatibility by matching that sentinel as well as
+  `ErrCredentialRecoveryRequired`. Downstream code must replace any old
+  clear/delete-state remediation with owner revoke plus explicit
+  `RecoverAgentCredential`; deleting the durable identity is no longer safe.
+
 - **Registration and resource-client overrides are now independent.**
   `WithRegisterBaseURL` and `WithRegisterHTTPClient` affect only
   registration-info, completion, and relay traffic. Callers that previously

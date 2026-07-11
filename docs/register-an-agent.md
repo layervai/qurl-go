@@ -424,7 +424,9 @@ These are deliberately separate operations:
   requires a successful `NHP_RAK`. It then saves the authoritative relay/peer
   metadata while preserving `DeviceAPIKey` and `RegisteredAt`. It never calls
   completion, even when the old peer is expired or missing. `WithTakeover()` is
-  honored only when explicitly supplied.
+  honored only when explicitly supplied. Its returned `AgentState` contains the
+  live plaintext `DeviceAPIKey`; treat the whole value as sensitive credential
+  material and do not log or serialize it outside the configured state store.
 - `RecoverAgentCredential` is the operator-controlled path for a revoked or
   locally lost device credential. It preserves the persisted device id and
   X25519 keypair, sends REG, calls completion exactly once, and persists the
@@ -469,6 +471,12 @@ pre-auth admission layer before the mint handler runs; that maps to
 `ErrRegistrationRetryLater`. The SDK preserves the RAK-authenticated peer and
 requires qurl-service's completion response to report the same key; the response
 cannot silently rotate binding state after the handshake.
+
+Context cancellation or deadline expiry while the completion transport is in
+flight is also outcome-unknown: the SDK cannot prove the request stayed
+pre-dispatch. It therefore preserves `context.Canceled`/`context.DeadlineExceeded`
+as a matchable cause inside `CredentialPersistenceError` while requiring the
+same owner-revoke and explicit-recovery procedure.
 
 ## Errors
 

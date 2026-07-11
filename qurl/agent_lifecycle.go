@@ -48,6 +48,8 @@ func OpenRegisteredAgent(ctx context.Context, store AgentStateStore, opts ...Cli
 // exchange for an existing completed agent. It never calls registration
 // completion and therefore never mints or replaces DeviceAPIKey. Relay, peer,
 // and key metadata are committed only after an authenticated successful RAK.
+// The returned AgentState includes the live plaintext DeviceAPIKey and must be
+// handled as sensitive credential material.
 func RefreshAgentRegistration(ctx context.Context, key string, store AgentStateStore, opts ...RegisterOption) (*AgentState, error) {
 	cfg, err := validateLifecycleInputs(ctx, key, store, opts)
 	if err != nil {
@@ -152,8 +154,9 @@ func loadExistingAgentState(ctx context.Context, store AgentStateStore, errKind 
 }
 
 // withAgentSetupLock holds the SDK local-file setup lock across an entire state
-// transition and makes release failure override a nominal success. Custom and
-// network stores retain the documented caller-serialization requirement.
+// transition and makes release failure override a nominal success. It is shared
+// by initial registration, refresh, and recovery. Custom and network stores
+// retain the documented caller-serialization requirement.
 func withAgentSetupLock(ctx context.Context, store AgentStateStore, fn func() (*AgentState, error)) (result *AgentState, resultErr error) {
 	release, err := acquireAgentSetupLock(ctx, store)
 	if err != nil {
@@ -196,10 +199,18 @@ func (cfg *registerConfig) forceRegistration(ctx context.Context, key string, st
 	candidate.KeyID = info.KeyID
 	candidate.SchemaVersion = agentStateSchemaVersion
 
-	credential, path, err := cfg.forcedRegistrationCredential(ctx, key, store, state, &candidate, peer, relayURL, info)
+	credential, path, err := cfg.forcedRegistrationCredential(ctx, key, store, state, &candidate, info)
 	if err != nil {
 		return nil, err
 	}
+	if recovery {
+		// Recovery REGs and then mints the replacement credential exactly once,
+		// through the same REG -> success-check -> completion tail enrollment uses.
+		return cfg.registerAndComplete(ctx, key, store, &candidate, peer, relayURL, credential, path)
+	}
+	// Refresh commits the refreshed binding metadata after an authenticated RAK
+	// and stops: DeviceAPIKey and RegisteredAt are copied from the prior state and
+	// never touched.
 	ack, err := cfg.registerExchange(ctx, &candidate, peer, relayURL, credential)
 	if err != nil {
 		return nil, err
@@ -209,18 +220,13 @@ func (cfg *registerConfig) forceRegistration(ctx context.Context, key string, st
 	}
 	candidate.OTPRequestedAt = nil
 
-	if !recovery {
-		// DeviceAPIKey and RegisteredAt are copied from the prior state and never
-		// touched by a binding refresh.
-		if err := store.SaveAgentState(ctx, &candidate); err != nil {
-			return nil, err
-		}
-		return &candidate, nil
+	if err := store.SaveAgentState(ctx, &candidate); err != nil {
+		return nil, err
 	}
-	return cfg.completeAndPersist(ctx, key, store, &candidate, path)
+	return &candidate, nil
 }
 
-func (cfg *registerConfig) forcedRegistrationCredential(ctx context.Context, key string, store AgentStateStore, persisted, candidate *AgentState, peer *NHPServerPeerInfo, relayURL string, info *registrationInfoResponse) (string, pathKind, error) {
+func (cfg *registerConfig) forcedRegistrationCredential(ctx context.Context, key string, store AgentStateStore, persisted, candidate *AgentState, info *registrationInfoResponse) (string, pathKind, error) {
 	switch strings.TrimSpace(info.KeyKind) {
 	case keyKindBootstrap:
 		return key, pathBootstrap, nil
@@ -233,13 +239,9 @@ func (cfg *registerConfig) forcedRegistrationCredential(ctx context.Context, key
 		// A literal OTP is necessarily from a prior dispatch, so use it directly.
 		// A provider may be waiting for the email from this call, so dispatch first.
 		if cfg.otp == "" && dispatchDue {
-			previous := persisted.OTPRequestedAt
-			persisted.OTPRequestedAt = &now
-			if err := store.SaveAgentState(ctx, persisted); err != nil {
-				persisted.OTPRequestedAt = previous
-				return "", pathAccount, err
-			}
-			if err := cfg.sendOTP(ctx, candidate, peer, relayURL, key); err != nil {
+			// candidate carries the refreshed coordinates; send over them rather
+			// than the persisted (possibly stale) binding.
+			if err := cfg.requestOTPAt(ctx, store, persisted, candidate, candidate.NHPPeer, candidate.RelayURL, key, now); err != nil {
 				return "", pathAccount, err
 			}
 		}

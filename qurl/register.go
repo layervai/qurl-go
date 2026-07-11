@@ -1,6 +1,7 @@
 package qurl
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
@@ -147,7 +148,7 @@ const otpResendCooldown = 60 * time.Second
 
 // run drives the registration state machine to a *Client. State is derived from
 // AgentState fields (no enum): absent → keypair-persisted → otp_pending → registered.
-func (cfg *registerConfig) run(ctx context.Context, key string, store AgentStateStore) (result *AgentState, resultErr error) {
+func (cfg *registerConfig) run(ctx context.Context, key string, store AgentStateStore) (*AgentState, error) {
 	// Preserve the documented zero-qURL-API, read-only fast path: a completed
 	// state no longer needs setup serialization and must remain usable when the
 	// state directory is mounted read-only or local locking is unsupported. The
@@ -164,29 +165,16 @@ func (cfg *registerConfig) run(ctx context.Context, key string, store AgentState
 	// would otherwise mint competing identities and race the atomic save. After
 	// acquiring, reload: another process may have completed enrollment while this
 	// caller waited, in which case the second fast-path check returns its state.
-	releaseSetupLock, err := acquireAgentSetupLock(ctx, store)
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		if err := releaseSetupLock(); err != nil {
-			// Even if enrollment and its atomic state write succeeded, fail this call
-			// because lock ownership is now ambiguous. A retry recovers without a
-			// second enrollment by reading the completed state on the pre-lock path.
-			lockErr := fmt.Errorf("%w: release setup lock: %w", ErrAgentSetupLock, err)
-			result = nil
-			if resultErr == nil {
-				resultErr = lockErr
-			} else {
-				resultErr = errors.Join(resultErr, lockErr)
-			}
-		}
-	}()
+	return withAgentSetupLock(ctx, store, func() (*AgentState, error) {
+		return cfg.runLocked(ctx, key, store)
+	})
+}
 
+func (cfg *registerConfig) runLocked(ctx context.Context, key string, store AgentStateStore) (*AgentState, error) {
 	// Reload under the lock even when the pre-lock load found incomplete state.
 	// A sealed store intentionally unwraps again here: only the locked snapshot
 	// may drive mutation after another process had a chance to finish setup.
-	state, err = loadOrCreateAgentState(ctx, store, cfg.invalidConfigErr)
+	state, err := loadOrCreateAgentState(ctx, store, cfg.invalidConfigErr)
 	if err != nil {
 		return nil, err
 	}
@@ -393,14 +381,20 @@ func (cfg *registerConfig) registerAndComplete(ctx context.Context, key string, 
 // the next run as a fresh request with no backoff.) On a persist failure the
 // in-memory OTPRequestedAt mutation is rolled back so it matches what was stored.
 func (cfg *registerConfig) requestOTP(ctx context.Context, store AgentStateStore, state *AgentState, peer *NHPServerPeerInfo, relayURL, key string) error {
-	now := cfg.clock()
-	prev := state.OTPRequestedAt
-	state.OTPRequestedAt = &now
-	if err := store.SaveAgentState(ctx, state); err != nil {
-		state.OTPRequestedAt = prev // roll back the in-memory mutation
+	return cfg.requestOTPAt(ctx, store, state, state, peer, relayURL, key, cfg.clock())
+}
+
+// requestOTPAt centralizes the anti-spam save-before-send ordering. persisted is
+// the durable state whose cooldown marker changes; requestState may be a
+// refreshed candidate whose current peer/relay coordinates must carry the OTP.
+func (cfg *registerConfig) requestOTPAt(ctx context.Context, store AgentStateStore, persisted, requestState *AgentState, peer *NHPServerPeerInfo, relayURL, key string, now time.Time) error {
+	previous := persisted.OTPRequestedAt
+	persisted.OTPRequestedAt = &now
+	if err := store.SaveAgentState(ctx, persisted); err != nil {
+		persisted.OTPRequestedAt = previous // restore the unsaved in-memory value
 		return err
 	}
-	return cfg.sendOTP(ctx, state, peer, relayURL, key)
+	return cfg.sendOTP(ctx, requestState, peer, relayURL, key)
 }
 
 // tryCompletionProbe attempts a completion fetch to self-heal a crash that
@@ -609,7 +603,18 @@ func (cfg *registerConfig) assertCompletionPeerMatchesRegistration(state *AgentS
 	if state == nil || state.NHPPeer == nil {
 		return fmt.Errorf("%w: authenticated registration state is missing its NHP peer", cfg.invalidConfigErr)
 	}
-	if comp == nil || comp.NHPServerPeer.PublicKeyB64 != state.NHPPeer.PublicKeyB64 {
+	if comp == nil {
+		return fmt.Errorf("%w: completion response NHP peer does not match the peer that authenticated the registration acknowledgement", cfg.invalidConfigErr)
+	}
+	registeredKey, err := decodeNHPServerPublicKey(state.NHPPeer.PublicKeyB64)
+	if err != nil {
+		return fmt.Errorf("%w: decode authenticated registration NHP peer public key: %w", cfg.invalidConfigErr, err)
+	}
+	completionKey, err := decodeNHPServerPublicKey(comp.NHPServerPeer.PublicKeyB64)
+	if err != nil {
+		return fmt.Errorf("%w: decode completion NHP peer public key: %w", cfg.invalidConfigErr, err)
+	}
+	if !bytes.Equal(completionKey, registeredKey) {
 		return fmt.Errorf("%w: completion response NHP peer does not match the peer that authenticated the registration acknowledgement", cfg.invalidConfigErr)
 	}
 	return nil
@@ -809,7 +814,7 @@ func (cfg *registerConfig) resolveRelayURL(info *registrationInfoResponse) strin
 // pre-flight's routing id and peer key disagree, so fail closed rather than knock
 // a server the key does not match.
 func (cfg *registerConfig) assertServerIDMatches(serverID string, peer *NHPServerPeerInfo) error {
-	peerKey, err := base64.StdEncoding.Strict().DecodeString(peer.PublicKeyB64)
+	peerKey, err := decodeNHPServerPublicKey(peer.PublicKeyB64)
 	if err != nil {
 		// validateNHPServerPeerInfo already accepted this key; defensive.
 		return fmt.Errorf("%w: NHP peer public key is not standard base64: %w", cfg.invalidConfigErr, err)
@@ -828,7 +833,7 @@ func (cfg *registerConfig) decodeNHPKeys(state *AgentState, peer *NHPServerPeerI
 	if err != nil {
 		return nil, nil, fmt.Errorf("%w: decode device private key: %w", cfg.invalidConfigErr, err)
 	}
-	serverPub, err = base64.StdEncoding.Strict().DecodeString(peer.PublicKeyB64)
+	serverPub, err = decodeNHPServerPublicKey(peer.PublicKeyB64)
 	if err != nil {
 		return nil, nil, fmt.Errorf("%w: decode NHP peer public key: %w", cfg.invalidConfigErr, err)
 	}
@@ -1063,7 +1068,9 @@ func WithRegisterVersion(version string) RegisterOption {
 // need this.
 //
 // This option affects only registration-info and completion. The returned
-// Client remains on the default API origin unless WithAgentClientBaseURL is set.
+// Client remains on the default production API origin unless
+// WithAgentClientBaseURL is set. Staging, loopback, and custom deployments must
+// set both options deliberately to prevent resource calls reaching production.
 func WithRegisterBaseURL(rawURL string) RegisterOption {
 	return registerOptionFunc(func(o *registerConfig) error {
 		if err := validateHTTPSOrLoopbackURL(rawURL, "register base URL", ErrInvalidRegisterConfig); err != nil {

@@ -58,6 +58,52 @@ func TestOpenRegisteredAgent_ZeroNetworkIgnoresKnockPeer(t *testing.T) {
 	}
 }
 
+func TestAgentLifecycle_MissingCredentialRequiresExplicitRecoveryWithoutNetwork(t *testing.T) {
+	h := registeredHarness(t)
+	state := h.loadState(t)
+	state.DeviceAPIKey = ""
+	if err := h.store.SaveAgentState(context.Background(), state); err != nil {
+		t.Fatalf("save state without credential: %v", err)
+	}
+
+	var networkCalls atomic.Int32
+	refusing := doerFunc(func(*http.Request) (*http.Response, error) {
+		networkCalls.Add(1)
+		return nil, errors.New("unexpected network call")
+	})
+	assertRecoveryRequired := func(t *testing.T, err error) {
+		t.Helper()
+		var recoveryErr *CredentialRecoveryRequiredError
+		if !errors.As(err, &recoveryErr) || !errors.Is(err, ErrCredentialRecoveryRequired) || !errors.Is(err, ErrDeviceCredentialMissing) {
+			t.Fatalf("want typed credential recovery error, got %v", err)
+		}
+		if recoveryErr.DeviceID != state.AgentID {
+			t.Fatalf("recovery device id = %q, want %q", recoveryErr.DeviceID, state.AgentID)
+		}
+	}
+
+	client, err := OpenRegisteredAgent(context.Background(), h.store,
+		WithBaseURL("https://resources.example.test"),
+		WithHTTPClient(refusing),
+	)
+	if client != nil {
+		t.Fatal("OpenRegisteredAgent returned a Client without a credential")
+	}
+	assertRecoveryRequired(t, err)
+
+	refreshed, err := RefreshAgentRegistration(context.Background(), "lv_enroll", h.store,
+		WithRegisterBaseURL(h.apiSrv.URL),
+		WithRegisterHTTPClient(refusing),
+	)
+	if refreshed != nil {
+		t.Fatal("RefreshAgentRegistration returned state without a credential")
+	}
+	assertRecoveryRequired(t, err)
+	if networkCalls.Load() != 0 {
+		t.Fatalf("missing-credential lifecycle network calls = %d, want 0", networkCalls.Load())
+	}
+}
+
 func TestRefreshAgentRegistration_RotatesBindingPreservesCredentialAndSkipsCompletion(t *testing.T) {
 	h := newRegisterHarness(t)
 	h.armDevicePubOnInfo()
@@ -471,10 +517,53 @@ func TestPersistCompletion_PeerMismatchDropsPlaintextReference(t *testing.T) {
 	}
 }
 
+func TestCompletionPeerComparisonUsesDecodedKeyBytes(t *testing.T) {
+	peer := newFakeNHPServer(t)
+	otherPeer := newFakeNHPServer(t)
+	padded := peer.serverPubB64()
+	raw := strings.TrimRight(padded, "=")
+	cfg, err := newRegisterConfig(nil)
+	if err != nil {
+		t.Fatalf("newRegisterConfig: %v", err)
+	}
+	cases := []struct {
+		name       string
+		registered string
+		completed  string
+		wantErr    bool
+	}{
+		{name: "padded equality", registered: padded, completed: padded},
+		{name: "padded to raw equality", registered: padded, completed: raw},
+		{name: "raw to padded equality", registered: raw, completed: padded},
+		{name: "different decoded key", registered: padded, completed: otherPeer.serverPubB64(), wantErr: true},
+		{name: "invalid registered encoding", registered: "not-base64", completed: padded, wantErr: true},
+		{name: "invalid completion encoding", registered: padded, completed: "not-base64", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			state := &AgentState{NHPPeer: &NHPServerPeerInfo{PublicKeyB64: tc.registered}}
+			comp := &completionResponse{NHPServerPeer: NHPServerPeerInfo{PublicKeyB64: tc.completed}}
+			err := cfg.assertCompletionPeerMatchesRegistration(state, comp)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("peer comparison error = %v, wantErr %v", err, tc.wantErr)
+			}
+			if err != nil && !errors.Is(err, ErrInvalidRegisterConfig) {
+				t.Fatalf("peer comparison error = %v, want ErrInvalidRegisterConfig", err)
+			}
+		})
+	}
+
+	rawPeer := NHPServerPeerInfo{PublicKeyB64: raw, Host: "nhp.example.test", Port: 62206}
+	if err := validateNHPServerPeerInfo(rawPeer, time.Now(), true, "test peer", ErrInvalidRegisterConfig); err != nil {
+		t.Fatalf("raw standard-base64 peer validation: %v", err)
+	}
+}
+
 func TestRegisterAgent_CompletionOutcomeUnknownRequiresRecoveryWithoutRetry(t *testing.T) {
 	cases := []struct {
 		name      string
 		configure func(*registerHarness, *atomic.Int32) RegisterOption
+		wantCause error
 	}{
 		{name: "malformed successful response", configure: func(h *registerHarness, attempts *atomic.Int32) RegisterOption {
 			h.handlerMu.Lock()
@@ -516,6 +605,16 @@ func TestRegisterAgent_CompletionOutcomeUnknownRequiresRecoveryWithoutRetry(t *t
 			})
 			return WithRegisterHTTPClient(client)
 		}},
+		{name: "context cancellation after completion dispatch", wantCause: context.Canceled, configure: func(_ *registerHarness, attempts *atomic.Int32) RegisterOption {
+			client := doerFunc(func(req *http.Request) (*http.Response, error) {
+				if req.Method == http.MethodPost && req.URL.Path == "/v1/agent/registration/complete" {
+					attempts.Add(1)
+					return nil, context.Canceled
+				}
+				return http.DefaultClient.Do(req)
+			})
+			return WithRegisterHTTPClient(client)
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -532,6 +631,9 @@ func TestRegisterAgent_CompletionOutcomeUnknownRequiresRecoveryWithoutRetry(t *t
 			var persistErr *CredentialPersistenceError
 			if !errors.As(err, &persistErr) || !errors.Is(err, ErrCredentialRecoveryRequired) {
 				t.Fatalf("want ambiguous completion persistence error, got %v", err)
+			}
+			if tc.wantCause != nil && !errors.Is(err, tc.wantCause) {
+				t.Fatalf("ambiguous completion error = %v, want cause %v", err, tc.wantCause)
 			}
 			if attempts.Load() != 1 {
 				t.Fatalf("completion attempts = %d, want exactly 1", attempts.Load())

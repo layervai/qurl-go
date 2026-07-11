@@ -373,7 +373,7 @@ func validateNHPServerPeerInfo(peer NHPServerPeerInfo, now time.Time, requireLiv
 	if strings.TrimSpace(peer.PublicKeyB64) == "" {
 		return fmt.Errorf("%w: %s missing NHP peer public key", errKind, label)
 	}
-	peerKey, err := base64.StdEncoding.Strict().DecodeString(peer.PublicKeyB64)
+	peerKey, err := decodeNHPServerPublicKey(peer.PublicKeyB64)
 	if err != nil {
 		return fmt.Errorf("%w: %s NHP peer public key is not standard base64: %w", errKind, label, err)
 	}
@@ -393,6 +393,21 @@ func validateNHPServerPeerInfo(peer NHPServerPeerInfo, now time.Time, requireLiv
 		return fmt.Errorf("%w: %s NHP peer is expired", errKind, label)
 	}
 	return nil
+}
+
+// decodeNHPServerPublicKey accepts the two canonical standard-base64 spellings
+// of an X25519 key: padded and raw (unpadded). Callers still validate the decoded
+// bytes as X25519; malformed or non-canonical encodings fail closed.
+func decodeNHPServerPublicKey(encoded string) ([]byte, error) {
+	decoded, paddedErr := base64.StdEncoding.Strict().DecodeString(encoded)
+	if paddedErr == nil {
+		return decoded, nil
+	}
+	decoded, rawErr := base64.RawStdEncoding.Strict().DecodeString(encoded)
+	if rawErr == nil {
+		return decoded, nil
+	}
+	return nil, fmt.Errorf("not canonical padded or raw standard base64: %w", paddedErr)
 }
 
 // loadOrCreateAgentState loads the persisted state (creating a fresh keypair when
