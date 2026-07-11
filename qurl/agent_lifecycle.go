@@ -31,14 +31,7 @@ func OpenRegisteredAgent(ctx context.Context, store AgentStateStore, opts ...Cli
 	if cfg.issuerStatePath != "" {
 		return nil, fmt.Errorf("%w: WithIssuerStatePath is not valid with OpenRegisteredAgent", ErrInvalidClientConfig)
 	}
-	state, err := loadExistingAgentState(ctx, store, ErrInvalidClientConfig)
-	if err != nil {
-		return nil, err
-	}
-	if err := validateCompletedAgentIdentity(state, ErrInvalidClientConfig); err != nil {
-		return nil, err
-	}
-	if err := validatePersistedDeviceCredential(state, ErrInvalidClientConfig); err != nil {
+	if _, err := loadCompletedRegisteredState(ctx, store, ErrInvalidClientConfig); err != nil {
 		return nil, err
 	}
 	return newStoreBackedClient(store, cfg.baseURL, cfg.httpClient), nil
@@ -60,14 +53,8 @@ func RefreshAgentRegistration(ctx context.Context, key string, store AgentStateS
 		return nil, err
 	}
 	return withAgentSetupLock(ctx, store, func() (*AgentState, error) {
-		state, err := loadExistingAgentState(ctx, store, cfg.invalidConfigErr)
+		state, err := loadCompletedRegisteredState(ctx, store, cfg.invalidConfigErr)
 		if err != nil {
-			return nil, err
-		}
-		if err := validateCompletedAgentIdentity(state, cfg.invalidConfigErr); err != nil {
-			return nil, err
-		}
-		if err := validatePersistedDeviceCredential(state, cfg.invalidConfigErr); err != nil {
 			return nil, err
 		}
 		if err := cfg.reconcileDeviceID(state); err != nil {
@@ -75,6 +62,24 @@ func RefreshAgentRegistration(ctx context.Context, key string, store AgentStateS
 		}
 		return cfg.forceRegistration(ctx, key, store, state, false)
 	})
+}
+
+// loadCompletedRegisteredState enforces the completed identity and intact
+// credential precondition shared by OpenRegisteredAgent and binding refresh.
+// Recovery intentionally does not use it: it repairs the missing-credential
+// state and requires only the persisted device identity/keypair.
+func loadCompletedRegisteredState(ctx context.Context, store AgentStateStore, errKind error) (*AgentState, error) {
+	state, err := loadExistingAgentState(ctx, store, errKind)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateCompletedAgentIdentity(state, errKind); err != nil {
+		return nil, err
+	}
+	if err := validatePersistedDeviceCredential(state, errKind); err != nil {
+		return nil, err
+	}
+	return state, nil
 }
 
 // validateCompletedAgentIdentity checks only the durable identity/credential
