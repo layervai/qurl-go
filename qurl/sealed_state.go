@@ -196,6 +196,10 @@ func validateProviderID(providerID string) error {
 	return nil
 }
 
+// normalizeSealedAgentID relies on the current registration contract: agent_id
+// is SDK-generated or caller-supplied and completion echoes that same id. If the
+// service ever mints an independent id, revise the plaintext and sealed
+// AgentState identity-validation contracts together before accepting it here.
 func normalizeSealedAgentID(agentID string) (string, error) {
 	normalized := strings.TrimSpace(agentID)
 	if normalized == "" || normalized != agentID || !utf8.ValidString(normalized) || strings.IndexFunc(normalized, unicode.IsControl) >= 0 || len(normalized) > maxSealedAgentStateAgentID {
