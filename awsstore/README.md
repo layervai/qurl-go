@@ -106,8 +106,12 @@ client, err := qurl.RegisterAgent(ctx, setupKey, store)
 ```
 
 Drop `secretsmanager:CreateSecret` if you precreate the secret out of band (e.g.
-via Terraform) and only ever read/update it at runtime. The Secrets Manager ARN
-carries a random 6-character suffix, hence the trailing `-*`.
+via Terraform) and only ever read/update it at runtime — but the secret must then
+already exist before the first Save. Without `CreateSecret`, a first Save against a
+missing secret fails closed (put → `ResourceNotFoundException` → create →
+`AccessDenied`) rather than self-provisioning, so precreate it to avoid a confusing
+first-boot failure. The Secrets Manager ARN carries a random 6-character suffix,
+hence the trailing `-*`.
 
 ## SSM Parameter Store
 
