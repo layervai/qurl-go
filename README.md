@@ -157,7 +157,8 @@ AES-256-GCM DEK on every save; your provider adapter wraps exactly that 32-byte
 DEK and must support both wrap and unwrap for every state-mutating workflow.
 Scope provider decrypt permission to one installation when cross-agent envelope
 substitution must be prevented; the store authenticates its persisted agent id
-but does not take a separately configured expected id.
+and supports an optional `qurl.WithExpectedSealedAgentID` pin for a separately
+configured expected id.
 
 See [Register an agent](docs/register-an-agent.md) for **which key to use** (one
 durable `qurl:agent` key fans out across a whole fleet), both enrollment paths, a
@@ -218,8 +219,9 @@ Match errors by type, not message text:
 - **Added: sealed full-AgentState file storage** —
   `qurl.NewSealedFileAgentState` provides an SDK-owned AES-256-GCM envelope with
   pluggable exact-32-byte DEK wrapping, authenticated agent/provider binding,
-  strict bounded decoding, atomic `0600` persistence under a `0700` directory,
-  and mandatory cross-process setup locking shared with `FileAgentState`.
+  an optional expected-agent-id pin, strict bounded decoding, atomic `0600`
+  persistence under a `0700` directory, and mandatory cross-process setup
+  locking shared with `FileAgentState`.
 
 - **Added: `qurl.RegisterAgent`** — a one-call, NHP-native front door that
   enrolls an agent and returns a ready-to-use `Client`. It covers both the

@@ -90,22 +90,54 @@ type AgentStateKeyWrapper interface {
 // the AgentStateKeyWrapper boundary; AgentState JSON never does.
 type SealedFileAgentStateStore struct {
 	fileSetupLock
-	providerID string
-	wrapper    AgentStateKeyWrapper
-	random     io.Reader
-	fileOps    privateStateFileOps
+	providerID      string
+	expectedAgentID string
+	wrapper         AgentStateKeyWrapper
+	random          io.Reader
+	fileOps         privateStateFileOps
+}
+
+// SealedFileAgentStateOption customizes a SealedFileAgentStateStore.
+type SealedFileAgentStateOption interface {
+	applySealedFileAgentStateOption(*sealedFileAgentStateOptions) error
+}
+
+type sealedFileAgentStateOptionFunc func(*sealedFileAgentStateOptions) error
+
+func (f sealedFileAgentStateOptionFunc) applySealedFileAgentStateOption(o *sealedFileAgentStateOptions) error {
+	return f(o)
+}
+
+type sealedFileAgentStateOptions struct {
+	expectedAgentID string
+}
+
+// WithExpectedSealedAgentID pins a sealed store to one agent id. Load rejects a
+// valid envelope for any other agent before calling the key wrapper, and Save
+// rejects mismatched state. On first enrollment, pass the same id through
+// WithDeviceID (RegisterAgent) or WithAgentID (BootstrapAgent).
+func WithExpectedSealedAgentID(agentID string) SealedFileAgentStateOption {
+	return sealedFileAgentStateOptionFunc(func(o *sealedFileAgentStateOptions) error {
+		normalized, err := normalizeSealedAgentID(agentID)
+		if err != nil {
+			return fmt.Errorf("%w: expected sealed agent id: %w", ErrInvalidBootstrapConfig, err)
+		}
+		o.expectedAgentID = normalized
+		return nil
+	})
 }
 
 // NewSealedFileAgentState constructs a sealed local AgentStateStore. providerID
 // is a stable, lowercase identifier for the selected wrapper (for example
 // "aws-kms" or "gcp-confidential-space") and is authenticated by both AES-GCM
-// and the wrapper's own binding.
+// and the wrapper's own binding. Use WithExpectedSealedAgentID when deployment
+// configuration knows the identity this file must contain.
 //
 // A successful SaveAgentState performs both WrapKey and UnwrapKey before the
 // atomic commit: two provider operations per save. Consequently every identity
 // that can mutate AgentState needs both wrap/encrypt and unwrap/decrypt
 // permission.
-func NewSealedFileAgentState(path, providerID string, wrapper AgentStateKeyWrapper) (*SealedFileAgentStateStore, error) {
+func NewSealedFileAgentState(path, providerID string, wrapper AgentStateKeyWrapper, opts ...SealedFileAgentStateOption) (*SealedFileAgentStateStore, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, fmt.Errorf("%w: sealed agent state path must not be empty", ErrInvalidBootstrapConfig)
 	}
@@ -115,12 +147,22 @@ func NewSealedFileAgentState(path, providerID string, wrapper AgentStateKeyWrapp
 	if isNilAgentStateKeyWrapper(wrapper) {
 		return nil, fmt.Errorf("%w: agent state key wrapper must not be nil", ErrInvalidBootstrapConfig)
 	}
+	var cfg sealedFileAgentStateOptions
+	for _, opt := range opts {
+		if opt == nil {
+			return nil, fmt.Errorf("%w: nil SealedFileAgentStateOption", ErrInvalidBootstrapConfig)
+		}
+		if err := opt.applySealedFileAgentStateOption(&cfg); err != nil {
+			return nil, err
+		}
+	}
 	return &SealedFileAgentStateStore{
-		fileSetupLock: fileSetupLock{path: path, lockFile: lockFileExclusive},
-		providerID:    providerID,
-		wrapper:       wrapper,
-		random:        rand.Reader,
-		fileOps:       defaultPrivateStateFileOps,
+		fileSetupLock:   fileSetupLock{path: path, lockFile: lockFileExclusive},
+		providerID:      providerID,
+		expectedAgentID: cfg.expectedAgentID,
+		wrapper:         wrapper,
+		random:          rand.Reader,
+		fileOps:         defaultPrivateStateFileOps,
 	}, nil
 }
 
@@ -170,6 +212,9 @@ func (s *SealedFileAgentStateStore) LoadAgentState(ctx context.Context) (*AgentS
 	if envelope.ProviderID != s.providerID {
 		return nil, invalidSealedState("provider id does not match configured wrapper")
 	}
+	if s.expectedAgentID != "" && envelope.AgentID != s.expectedAgentID {
+		return nil, invalidSealedState("agent id does not match configured expectation")
+	}
 	binding := envelope.binding()
 	dek, err := s.wrapper.UnwrapKey(ctx, cloneWrappedAgentStateKey(envelope.WrappedKey), binding)
 	if err != nil {
@@ -214,6 +259,9 @@ func (s *SealedFileAgentStateStore) SaveAgentState(ctx context.Context, state *A
 	agentID, err := normalizeSealedAgentID(state.AgentID)
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalidBootstrapConfig, err)
+	}
+	if s.expectedAgentID != "" && agentID != s.expectedAgentID {
+		return fmt.Errorf("%w: agent id does not match configured sealed-state expectation", ErrInvalidBootstrapConfig)
 	}
 	plaintext, err := json.Marshal(state)
 	if err != nil {
@@ -306,6 +354,10 @@ func (e sealedAgentStateEnvelope) aad() ([]byte, error) {
 	// AgentStateKeyBinding type. JSON encoding of this fixed-field internal struct
 	// is deterministic and unambiguous. compactJSON returns a fresh slice, so the
 	// ciphertext is marshaled read-only rather than cloned.
+	metadata, err := compactJSON(e.WrappedKey.Metadata)
+	if err != nil {
+		return nil, fmt.Errorf("compact wrapped key metadata: %w", err)
+	}
 	raw, err := json.Marshal(sealedAgentStateAAD{
 		Purpose:         e.Purpose,
 		EnvelopeVersion: e.Version,
@@ -314,7 +366,7 @@ func (e sealedAgentStateEnvelope) aad() ([]byte, error) {
 		WrappedKey: WrappedAgentStateKey{
 			Version:    e.WrappedKey.Version,
 			Ciphertext: e.WrappedKey.Ciphertext,
-			Metadata:   compactJSON(e.WrappedKey.Metadata),
+			Metadata:   metadata,
 		},
 	})
 	if err != nil {
@@ -451,15 +503,15 @@ func openSealedAgentState(dek, nonce, ciphertext, aad []byte) ([]byte, error) {
 	return gcm.Open(nil, nonce, ciphertext, aad)
 }
 
-func compactJSON(raw json.RawMessage) json.RawMessage {
+func compactJSON(raw json.RawMessage) (json.RawMessage, error) {
 	if len(raw) == 0 {
-		return nil
+		return nil, nil
 	}
 	var compact bytes.Buffer
 	if err := json.Compact(&compact, raw); err != nil {
-		return bytes.Clone(raw) // validation reports malformed metadata before this helper
+		return nil, err
 	}
-	return compact.Bytes()
+	return compact.Bytes(), nil
 }
 
 func requireJSONEOF(decoder *json.Decoder) error {
@@ -479,8 +531,6 @@ func cloneWrappedAgentStateKey(in WrappedAgentStateKey) WrappedAgentStateKey {
 }
 
 func wipeBytes(b []byte) {
-	for i := range b {
-		b[i] = 0
-	}
+	clear(b)
 	runtime.KeepAlive(b)
 }

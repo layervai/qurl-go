@@ -237,7 +237,10 @@ that can unwrap state for multiple agents could therefore substitute another
 valid envelope within that principal's decrypt scope. Scope each runtime's KMS
 key or decrypt policy to one installation when cross-agent substitution must be
 prevented, and authenticate every binding field in the provider encryption
-context.
+context. When the agent id is known in configuration, also pass
+`qurl.WithExpectedSealedAgentID(id)` to the store and the same id through
+`qurl.WithDeviceID(id)` (or `qurl.WithAgentID(id)` for `BootstrapAgent`); the
+store then rejects a different envelope before it calls the key wrapper.
 
 The SDK wipes its temporary plaintext and DEK byte buffers after use. Go's JSON
 decoder copies credential fields into `AgentState` strings, which are immutable
@@ -250,6 +253,10 @@ failures stop registration; custom/network stores remain caller-serialized.
 The exact directory mode is enforced on load as well as save, including a
 completed registration's read-only fast path; correct a pre-existing `0750` or
 `0755` directory to `0700` before upgrading.
+If lock release fails after enrollment was atomically persisted, the call still
+returns `ErrAgentSetupLock` and no client because ownership is ambiguous. Retry
+normally: the completed state then recovers through the pre-lock fast path
+without enrolling a second identity.
 Windows, Plan 9, and js/wasm do not currently have an SDK local-file lock
 implementation, so fresh or incomplete local-file enrollment fails closed with
 `ErrAgentSetupLock` there. Use a custom/network store (including `awsstore` where

@@ -30,15 +30,14 @@ type openatFunc func(int, string, int, uint32) (int, error)
 // lockFileExclusive takes an exclusive flock on lockPath (a sidecar
 // file beside the agent-state file, created 0600), creating it if absent. It
 // polls with LOCK_NB so a wait honors ctx cancellation rather than blocking in
-// the syscall forever. It returns the held *os.File — closing it releases the
-// lock and is the unlock — or an error if the lockfile cannot be opened or ctx
-// is done before the lock is acquired.
+// the syscall forever. It returns a held setupLock — Close releases it — or an
+// error if the lockfile cannot be opened or ctx is done before acquisition.
 func lockFileExclusive(ctx context.Context, lockPath string) (setupLock, error) {
 	// Create the state directory before opening the sidecar,
 	// mirroring SaveAgentState's os.MkdirAll. On the very first registration the
-	// state dir does not exist yet, and the acquire runs BEFORE any SaveAgentState
-	// creates it; without this the OpenFile below would fail ENOENT and the lock
-	// would fail ENOENT. Failure is fatal because setup must not proceed unlocked.
+	// state dir does not exist yet, and acquisition runs before SaveAgentState can
+	// create it; without this the relative open below would fail with ENOENT.
+	// Failure is fatal because setup must not proceed unlocked.
 	dir := filepath.Dir(lockPath)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err

@@ -244,6 +244,12 @@ func TestSealedAgentStateAAD_V1Golden(t *testing.T) {
 	}
 }
 
+func TestCompactJSON_RejectsInvalidInput(t *testing.T) {
+	if _, err := compactJSON(json.RawMessage(`{"key_id":`)); err == nil {
+		t.Fatal("compactJSON invalid metadata: want error")
+	}
+}
+
 func TestNewSealedFileAgentState_ValidatesConfiguration(t *testing.T) {
 	var nilWrapper *testAgentStateKeyWrapper
 	tests := []struct {
@@ -273,6 +279,65 @@ func TestNewSealedFileAgentState_ValidatesConfiguration(t *testing.T) {
 func TestNewSealedFileAgentState_AcceptsCanonicalProviderID(t *testing.T) {
 	if _, err := NewSealedFileAgentState("state", "aws.kms-v2", &testAgentStateKeyWrapper{}); err != nil {
 		t.Fatalf("NewSealedFileAgentState: %v", err)
+	}
+}
+
+func TestSealedFileAgentState_ExpectedAgentID(t *testing.T) {
+	const (
+		expectedID = "agent-expected"
+		otherID    = "agent-other"
+	)
+	if _, err := NewSealedFileAgentState("state", "test", &testAgentStateKeyWrapper{}, nil); !errors.Is(err, ErrInvalidBootstrapConfig) {
+		t.Fatalf("nil option = %v, want ErrInvalidBootstrapConfig", err)
+	}
+	if _, err := NewSealedFileAgentState("state", "test", &testAgentStateKeyWrapper{}, WithExpectedSealedAgentID(" ")); !errors.Is(err, ErrInvalidBootstrapConfig) {
+		t.Fatalf("invalid expected id = %v, want ErrInvalidBootstrapConfig", err)
+	}
+
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "agent_state.sealed.json")
+	wrapper := &testAgentStateKeyWrapper{}
+	pinned, err := NewSealedFileAgentState(path, "test", wrapper, WithExpectedSealedAgentID(expectedID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := testAgentState(t)
+	state.AgentID = expectedID
+	if err := pinned.SaveAgentState(context.Background(), state); err != nil {
+		t.Fatalf("save expected agent: %v", err)
+	}
+	if _, err := pinned.LoadAgentState(context.Background()); err != nil {
+		t.Fatalf("load expected agent: %v", err)
+	}
+
+	state.AgentID = otherID
+	if err := pinned.SaveAgentState(context.Background(), state); !errors.Is(err, ErrInvalidBootstrapConfig) || strings.Contains(err.Error(), otherID) {
+		t.Fatalf("save mismatched agent = %v, want non-leaking ErrInvalidBootstrapConfig", err)
+	}
+
+	// Persist a valid envelope for another agent through an unpinned store, then
+	// prove the pin rejects it before invoking the wrapper at all.
+	unpinned, err := NewSealedFileAgentState(path, "test", wrapper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unpinned.SaveAgentState(context.Background(), state); err != nil {
+		t.Fatalf("save other agent through unpinned store: %v", err)
+	}
+	wrapper.mu.Lock()
+	unwrapCalls := len(wrapper.unwrapBindings)
+	wrapper.mu.Unlock()
+	_, err = pinned.LoadAgentState(context.Background())
+	if !errors.Is(err, ErrInvalidAgentState) || strings.Contains(err.Error(), expectedID) || strings.Contains(err.Error(), otherID) {
+		t.Fatalf("load mismatched envelope = %v, want non-leaking ErrInvalidAgentState", err)
+	}
+	wrapper.mu.Lock()
+	defer wrapper.mu.Unlock()
+	if got := len(wrapper.unwrapBindings); got != unwrapCalls {
+		t.Fatalf("mismatched pinned load called UnwrapKey %d additional times", got-unwrapCalls)
 	}
 }
 
