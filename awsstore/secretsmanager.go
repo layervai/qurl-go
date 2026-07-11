@@ -76,7 +76,7 @@ func (s *SecretsManagerStore) LoadAgentState(ctx context.Context) (*qurl.AgentSt
 	if s.client == nil {
 		return nil, fmt.Errorf("%w: secrets manager client must not be nil", qurl.ErrInvalidBootstrapConfig)
 	}
-	if strings.TrimSpace(s.secretID) == "" {
+	if s.secretID == "" {
 		return nil, fmt.Errorf("%w: secret id must not be empty", qurl.ErrInvalidBootstrapConfig)
 	}
 

@@ -66,7 +66,7 @@ func (s *ParameterStore) LoadAgentState(ctx context.Context) (*qurl.AgentState, 
 	if s.client == nil {
 		return nil, fmt.Errorf("%w: ssm client must not be nil", qurl.ErrInvalidBootstrapConfig)
 	}
-	if strings.TrimSpace(s.name) == "" {
+	if s.name == "" {
 		return nil, fmt.Errorf("%w: parameter name must not be empty", qurl.ErrInvalidBootstrapConfig)
 	}
 
