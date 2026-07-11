@@ -57,10 +57,7 @@ type DeviceKeyQuotaExceededError struct {
 
 func (e *DeviceKeyQuotaExceededError) Error() string {
 	message := fmt.Sprintf("qurl: cannot issue a device key for %q because the account has reached its active device-key limit; revoke an existing unused device key to free a slot, then retry completion; if replacing an existing device, revoke that device key and retry with qurl.WithTakeover", e.DeviceID)
-	if e.Cause != nil {
-		return fmt.Sprintf("%s: %v", message, e.Cause)
-	}
-	return message
+	return messageWithCause(message, e.Cause)
 }
 
 func (e *DeviceKeyQuotaExceededError) Unwrap() []error {
@@ -131,10 +128,7 @@ type CredentialRecoveryRequiredError struct {
 func (e *CredentialRecoveryRequiredError) Error() string {
 	keyID := "agent:" + e.DeviceID
 	message := fmt.Sprintf("qurl: device credential for %q was already issued and cannot be fetched again; revoke %q, then call qurl.RecoverAgentCredential with this state store", e.DeviceID, keyID)
-	if e.Cause != nil {
-		return fmt.Sprintf("%s: %v", message, e.Cause)
-	}
-	return message
+	return messageWithCause(message, e.Cause)
 }
 
 func (e *CredentialRecoveryRequiredError) Unwrap() []error {
@@ -159,6 +153,16 @@ func recoveryClassUnwrap(cause error) []error {
 	return errs
 }
 
+// messageWithCause appends a wrapped cause to a typed error's operator-facing
+// message when one is present. Each credential issuance/recovery type builds a
+// distinct message and then surfaces its underlying cause identically.
+func messageWithCause(message string, cause error) string {
+	if cause != nil {
+		return fmt.Sprintf("%s: %v", message, cause)
+	}
+	return message
+}
+
 // CredentialPersistenceError means completion may have minted its one-time
 // plaintext device credential, but the SDK could not prove a valid durable
 // commit. This includes transport/5xx/response ambiguity as well as a final
@@ -172,10 +176,7 @@ type CredentialPersistenceError struct {
 func (e *CredentialPersistenceError) Error() string {
 	keyID := "agent:" + e.DeviceID
 	message := fmt.Sprintf("qurl: device credential for %q may have been minted but was not safely persisted; revoke %q, then call qurl.RecoverAgentCredential with this state store", e.DeviceID, keyID)
-	if e.Cause != nil {
-		return fmt.Sprintf("%s: %v", message, e.Cause)
-	}
-	return message
+	return messageWithCause(message, e.Cause)
 }
 
 func (e *CredentialPersistenceError) Unwrap() []error {

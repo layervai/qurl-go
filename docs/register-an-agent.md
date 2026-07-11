@@ -431,14 +431,18 @@ These are deliberately separate operations:
   live plaintext `DeviceAPIKey`; treat the whole value as sensitive credential
   material and do not log or serialize it outside the configured state store.
   Refresh with an account key uses the same email-OTP dispatch/two-call resume
-  as enrollment. Fleet connectors should set
+  as enrollment: a static `WithOTP` on a first call cannot match the code that
+  call dispatches, so it returns `OTPPendingError`; resume with the received
+  code. Fleet connectors should set
   `WithAllowedRegistrationKeyKinds(RegistrationKeyKindBootstrap)` so routine
   binding repair cannot fan out operator OTP emails.
 - `RecoverAgentCredential` is the operator-controlled path for a revoked or
   locally lost device credential. It preserves the persisted device id and
-  X25519 keypair, sends REG, calls completion exactly once, and persists the
-  replacement before returning a `Client`. It is never triggered automatically
-  by a 401 or by ordinary binding refresh.
+  X25519 keypair and, once enrollment authorization is available, sends REG,
+  calls completion exactly once, and persists the replacement before returning
+  a `Client`. An account key may first pause for the same OTP flow described
+  above. It is never triggered automatically by a 401 or by ordinary binding
+  refresh.
 
 ```go
 state, err := qurl.RefreshAgentRegistration(ctx, enrollmentKey, store,

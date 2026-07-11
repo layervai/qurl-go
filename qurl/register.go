@@ -749,8 +749,7 @@ func (cfg *registerConfig) mapCompletionHTTPError(err error, path pathKind, devi
 }
 
 func isDeviceKeyQuotaExceeded(apiErr *APIError) bool {
-	return apiErr != nil &&
-		apiErr.StatusCode == http.StatusConflict &&
+	return apiErr.StatusCode == http.StatusConflict &&
 		strings.EqualFold(strings.TrimSpace(apiErr.Code), "device_key_quota_exceeded")
 }
 

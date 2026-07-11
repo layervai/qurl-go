@@ -17,7 +17,8 @@ import (
 // that need the replacement immediately should use the Client returned by
 // RecoverAgentCredential. NHP peer absence, corruption, or expiry does not
 // invalidate this REST client; callers that will knock must validate the peer or
-// run RefreshAgentRegistration separately.
+// run RefreshAgentRegistration separately. The persisted agent id and X25519
+// keypair are still required and validated as the durable device identity.
 //
 // OpenRegisteredAgent takes ordinary ClientOption values: use WithBaseURL and
 // WithHTTPClient for its resource client. RegisterAgent and
@@ -50,7 +51,9 @@ func OpenRegisteredAgent(ctx context.Context, store AgentStateStore, opts ...Cli
 // The returned AgentState includes the live plaintext DeviceAPIKey and must be
 // handled as sensitive credential material.
 // An account key follows the email-OTP flow and may require a dispatch plus a
-// second call with WithOTP/WithOTPProvider. Fleet connectors should normally
+// second call with WithOTP/WithOTPProvider. A static WithOTP on the first call
+// dispatches a fresh code and returns OTPPendingError; supply the received code
+// on the resume call. Fleet connectors should normally
 // enforce RegistrationKeyKindBootstrap with WithAllowedRegistrationKeyKinds so
 // a binding refresh cannot fan out operator OTP emails.
 func RefreshAgentRegistration(ctx context.Context, key string, store AgentStateStore, opts ...RegisterOption) (*AgentState, error) {
@@ -92,7 +95,8 @@ func loadCompletedRegisteredState(ctx context.Context, store AgentStateStore, er
 // while preserving the persisted device id and X25519 keypair. Once enrollment
 // authorization is available, it sends REG and calls completion exactly once.
 // An account key may first dispatch email OTP and return OTPPendingError; resume
-// with WithOTP or WithOTPProvider. Fleet connectors should normally enforce
+// with the received code via WithOTP, or use a WithOTPProvider that awaits the
+// newly dispatched code. Fleet connectors should normally enforce
 // RegistrationKeyKindBootstrap with WithAllowedRegistrationKeyKinds so recovery
 // cannot fan out operator OTP emails. Recovery is never invoked implicitly after
 // a 401. The owner must first revoke agent:<device_id>, which clears qurl-service's
@@ -231,15 +235,20 @@ func (cfg *registerConfig) forcedRegistrationCredential(ctx context.Context, key
 			return "", pathAccount, errAccountKeyMissingEmail()
 		}
 		now := cfg.clock()
+		freshRequest := persisted.OTPRequestedAt == nil
 		dispatchDue := persisted.OTPRequestedAt == nil || now.Sub(*persisted.OTPRequestedAt) >= otpResendCooldown
-		// A literal OTP is necessarily from a prior dispatch, so use it directly.
-		// A provider may be waiting for the email from this call, so dispatch first.
-		if cfg.otp == "" && dispatchDue {
+		// A provider may await the email from this call, so dispatch first. A
+		// literal on a fresh lifecycle call cannot match the newly dispatched code:
+		// persist/send, then pause so the caller can resume with the received code.
+		if dispatchDue && (cfg.otp == "" || freshRequest) {
 			// candidate carries the refreshed coordinates; send over them rather
 			// than the persisted (possibly stale) binding.
 			if err := cfg.requestOTPAt(ctx, store, persisted, candidate, candidate.NHPPeer, candidate.RelayURL, key, now); err != nil {
 				return "", pathAccount, err
 			}
+		}
+		if freshRequest && cfg.otp != "" {
+			return "", pathAccount, cfg.otpPending(persisted, info.MaskedEmail)
 		}
 		code, err := cfg.resolveOTP(ctx)
 		if err != nil {

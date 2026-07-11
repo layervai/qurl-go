@@ -404,6 +404,49 @@ func TestRefreshAgentRegistration_AccountOTPResumeDoesNotComplete(t *testing.T) 
 	}
 }
 
+func TestAgentLifecycle_FreshAccountLiteralOTPDispatchesThenPauses(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(*registerHarness) error
+	}{
+		{name: "refresh", run: func(h *registerHarness) error {
+			_, err := RefreshAgentRegistration(context.Background(), "lv_account", h.store, h.registerOpts(WithOTP("stale-literal"))...)
+			return err
+		}},
+		{name: "recovery", run: func(h *registerHarness) error {
+			_, err := RecoverAgentCredential(context.Background(), "lv_account", h.store, h.registerOpts(WithOTP("stale-literal"))...)
+			return err
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := registeredHarness(t)
+			h.svc.mu.Lock()
+			h.svc.keyKind = keyKindAccount
+			h.svc.maskedEmail = "j***@example.test"
+			h.svc.mu.Unlock()
+			regsBefore := h.nhp.regCount()
+			completionBefore := h.svc.completionCalls.Load()
+
+			err := tc.run(h)
+			var pending *OTPPendingError
+			if !errors.As(err, &pending) || !errors.Is(err, ErrOTPPending) {
+				t.Fatalf("fresh account literal = %v, want OTP pending", err)
+			}
+			if h.nhp.otpCount() != 1 || h.nhp.regCount() != regsBefore {
+				t.Fatalf("fresh literal side effects: otp=%d regs=%d, want 1/%d", h.nhp.otpCount(), h.nhp.regCount(), regsBefore)
+			}
+			if h.svc.completionCalls.Load() != completionBefore {
+				t.Fatal("fresh literal called completion before OTP resume")
+			}
+			state := h.loadState(t)
+			if state.OTPRequestedAt == nil || state.RegisteredAt == nil || state.DeviceAPIKey != "lv_device_secret" {
+				t.Fatalf("fresh literal persisted more than the OTP marker: %#v", state)
+			}
+		})
+	}
+}
+
 func TestCredentialPersistenceFailureAndExplicitSameIDRecovery(t *testing.T) {
 	h := newRegisterHarness(t)
 	persistFailure := errors.New("injected final save failure")
