@@ -17,8 +17,9 @@ import (
 // tests can assert Type/Overwrite/KeyId plumbing, and honors an injected error
 // or per-call hook.
 type fakeSSM struct {
-	exists bool
-	value  *string
+	exists       bool
+	value        *string
+	nilParameter bool // if set, GetParameter returns a success with a nil Parameter
 
 	lastPutType      ssmtypes.ParameterType
 	lastPutOverwrite *bool
@@ -47,6 +48,10 @@ func (f *fakeSSM) GetParameter(_ context.Context, in *ssm.GetParameterInput, _ .
 	}
 	if !f.exists {
 		return nil, &ssmtypes.ParameterNotFound{Message: aws.String("no such parameter")}
+	}
+	if f.nilParameter {
+		// A success response that carries no Parameter object at all.
+		return &ssm.GetParameterOutput{Parameter: nil}, nil
 	}
 	return &ssm.GetParameterOutput{Parameter: &ssmtypes.Parameter{Value: f.value}}, nil
 }
@@ -98,55 +103,34 @@ func TestParameterStore_RoundTrip(t *testing.T) {
 	}
 }
 
-func TestParameterStore_NotFound(t *testing.T) {
-	fake := &fakeSSM{}
+// Load-path mapping cases (not-found, corrupt value, no value, generic-error
+// fails closed) are consolidated in TestStoreContract (contract_test.go), which
+// runs the identical table against both stores. The tests below cover the SSM
+// parameter-specific plumbing (SecureString/Overwrite/decryption, tier, KMS key)
+// and the nil-Parameter sub-branch that has no Secrets Manager analogue.
+
+func TestParameterStore_NilParameterIsNotFound(t *testing.T) {
+	// A GetParameter success carrying a nil Parameter object has nothing stored;
+	// the store maps it to ErrAgentStateNotFound (same as ParameterNotFound),
+	// distinct from the Value-nil corrupt case exercised by TestStoreContract.
+	fake := &fakeSSM{exists: true, nilParameter: true}
 	store := awsstore.NewParameterStore(fake, "/qurl/agent-state")
 
 	_, err := store.LoadAgentState(context.Background())
 	if !errors.Is(err, qurl.ErrAgentStateNotFound) {
-		t.Fatalf("want ErrAgentStateNotFound, got %v", err)
+		t.Fatalf("want ErrAgentStateNotFound for a nil Parameter, got %v", err)
 	}
 }
 
-func TestParameterStore_CorruptValue(t *testing.T) {
-	fake := &fakeSSM{exists: true, value: aws.String("<<not json>>")}
-	store := awsstore.NewParameterStore(fake, "/qurl/agent-state")
-
-	_, err := store.LoadAgentState(context.Background())
-	if !errors.Is(err, qurl.ErrInvalidAgentState) {
-		t.Fatalf("want ErrInvalidAgentState, got %v", err)
+func TestParameterStore_NilClientFailsClosed(t *testing.T) {
+	// A store constructed with a nil client must fail closed on both methods with
+	// ErrInvalidBootstrapConfig rather than panic on the first API call.
+	store := awsstore.NewParameterStore(nil, "/qurl/agent-state")
+	if _, err := store.LoadAgentState(context.Background()); !errors.Is(err, qurl.ErrInvalidBootstrapConfig) {
+		t.Fatalf("load: want ErrInvalidBootstrapConfig for nil client, got %v", err)
 	}
-}
-
-func TestParameterStore_NoValue(t *testing.T) {
-	fake := &fakeSSM{exists: true, value: nil}
-	store := awsstore.NewParameterStore(fake, "/qurl/agent-state")
-
-	_, err := store.LoadAgentState(context.Background())
-	if !errors.Is(err, qurl.ErrInvalidAgentState) {
-		t.Fatalf("want ErrInvalidAgentState, got %v", err)
-	}
-}
-
-func TestParameterStore_LoadGenericErrorFailsClosed(t *testing.T) {
-	// errBackend (declared in secretsmanager_test.go) is a generic, non-sentinel
-	// backend failure. A transient GetParameter error must fail closed: surfaced
-	// wrapped, never misclassified as not-found or invalid-state.
-	fake := &fakeSSM{getErr: errBackend}
-	store := awsstore.NewParameterStore(fake, "/qurl/agent-state")
-
-	_, err := store.LoadAgentState(context.Background())
-	if err == nil {
-		t.Fatal("expected a generic GetParameter error to be surfaced, got nil")
-	}
-	if errors.Is(err, qurl.ErrAgentStateNotFound) {
-		t.Fatalf("generic error must NOT be classified as ErrAgentStateNotFound: %v", err)
-	}
-	if errors.Is(err, qurl.ErrInvalidAgentState) {
-		t.Fatalf("generic error must NOT be classified as ErrInvalidAgentState: %v", err)
-	}
-	if !errors.Is(err, errBackend) {
-		t.Fatalf("underlying backend error not surfaced/wrapped: %v", err)
+	if err := store.SaveAgentState(context.Background(), sampleState()); !errors.Is(err, qurl.ErrInvalidBootstrapConfig) {
+		t.Fatalf("save: want ErrInvalidBootstrapConfig for nil client, got %v", err)
 	}
 }
 

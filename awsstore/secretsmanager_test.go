@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,6 +28,7 @@ type fakeSecretsManager struct {
 	// Injected failures / hooks.
 	getErr    error
 	putErr    error
+	putErrOn2 error // if set, only the 2nd PutSecretValue (create-race fallback) fails
 	createErr error
 	onCall    func() error // consulted at the top of every method (e.g. ctx check)
 
@@ -60,6 +62,11 @@ func (f *fakeSecretsManager) PutSecretValue(_ context.Context, in *secretsmanage
 	}
 	if f.putErr != nil {
 		return nil, f.putErr
+	}
+	// putErrOn2 fails only the second Put (the create-race fallback), leaving the
+	// initial not-found Put#1 to drive the store down the create path.
+	if f.putErrOn2 != nil && f.putCalls == 2 {
+		return nil, f.putErrOn2
 	}
 	if !f.exists {
 		return nil, &smtypes.ResourceNotFoundException{Message: aws.String("no such secret")}
@@ -147,63 +154,17 @@ func TestSecretsManagerStore_RoundTrip(t *testing.T) {
 	assertStateEqual(t, want, got)
 }
 
-func TestSecretsManagerStore_NotFound(t *testing.T) {
-	fake := &fakeSecretsManager{} // no secret stored
-	store := awsstore.NewSecretsManagerStore(fake, "qurl/agent-state")
-
-	_, err := store.LoadAgentState(context.Background())
-	if !errors.Is(err, qurl.ErrAgentStateNotFound) {
-		t.Fatalf("want ErrAgentStateNotFound, got %v", err)
-	}
-}
-
-func TestSecretsManagerStore_CorruptValue(t *testing.T) {
-	fake := &fakeSecretsManager{exists: true, value: aws.String("{not valid json")}
-	store := awsstore.NewSecretsManagerStore(fake, "qurl/agent-state")
-
-	_, err := store.LoadAgentState(context.Background())
-	if !errors.Is(err, qurl.ErrInvalidAgentState) {
-		t.Fatalf("want ErrInvalidAgentState, got %v", err)
-	}
-}
-
-func TestSecretsManagerStore_NoStringValue(t *testing.T) {
-	// Secret exists but SecretString is nil (binary-only) -> treated as corrupt.
-	fake := &fakeSecretsManager{exists: true, value: nil}
-	store := awsstore.NewSecretsManagerStore(fake, "qurl/agent-state")
-
-	_, err := store.LoadAgentState(context.Background())
-	if !errors.Is(err, qurl.ErrInvalidAgentState) {
-		t.Fatalf("want ErrInvalidAgentState, got %v", err)
-	}
-}
-
 // errBackend is a generic, NON-sentinel backend failure (e.g. AccessDenied or a
 // throttle) used to prove that a transient API error fails closed: it must be
-// surfaced wrapped, never misclassified as not-found or invalid-state.
+// surfaced wrapped, never misclassified as not-found or invalid-state. The
+// load-path fail-closed behavior is exercised for both stores by TestStoreContract
+// (contract_test.go); errBackend is also reused by the save-path tests below.
 var errBackend = errors.New("AccessDeniedException: denied")
 
-func TestSecretsManagerStore_LoadGenericErrorFailsClosed(t *testing.T) {
-	fake := &fakeSecretsManager{getErr: errBackend}
-	store := awsstore.NewSecretsManagerStore(fake, "qurl/agent-state")
-
-	_, err := store.LoadAgentState(context.Background())
-	if err == nil {
-		t.Fatal("expected a generic GetSecretValue error to be surfaced, got nil")
-	}
-	// The safety property: a transient failure is NOT a fresh-enrollment signal
-	// and NOT a corrupt-state signal.
-	if errors.Is(err, qurl.ErrAgentStateNotFound) {
-		t.Fatalf("generic error must NOT be classified as ErrAgentStateNotFound: %v", err)
-	}
-	if errors.Is(err, qurl.ErrInvalidAgentState) {
-		t.Fatalf("generic error must NOT be classified as ErrInvalidAgentState: %v", err)
-	}
-	// The underlying cause stays reachable (wrapped with %w).
-	if !errors.Is(err, errBackend) {
-		t.Fatalf("underlying backend error not surfaced/wrapped: %v", err)
-	}
-}
+// Load-path mapping cases (not-found, corrupt value, no value, generic-error
+// fails closed) are consolidated in TestStoreContract (contract_test.go), which
+// runs the identical table against both stores. The tests below cover the
+// Secrets Manager-specific save/create plumbing.
 
 func TestSecretsManagerStore_SaveGenericErrorSurfaced(t *testing.T) {
 	// PutSecretValue fails with a generic error on an existing secret: it must be
@@ -265,6 +226,47 @@ func TestSecretsManagerStore_CreateRaceFallsBackToPut(t *testing.T) {
 	}
 	if fake.createCalls != 1 {
 		t.Fatalf("expected exactly 1 CreateSecret attempt, got %d", fake.createCalls)
+	}
+}
+
+func TestSecretsManagerStore_CreateRaceFallbackPutFails(t *testing.T) {
+	// Same create race as above, but the fallback Put itself fails: put#1 -> not
+	// found, create#1 -> exists (lost the race), put#2 -> a backend error. The
+	// wrapped "put secret value after create race" error must surface, never be
+	// swallowed.
+	fake := &fakeSecretsManager{
+		createErr: &smtypes.ResourceExistsException{Message: aws.String("raced")},
+		putErrOn2: errBackend,
+	}
+	store := awsstore.NewSecretsManagerStore(fake, "qurl/agent-state")
+
+	err := store.SaveAgentState(context.Background(), sampleState())
+	if err == nil {
+		t.Fatal("expected the fallback PutSecretValue error to surface, got nil")
+	}
+	if !errors.Is(err, errBackend) {
+		t.Fatalf("underlying fallback put error not surfaced/wrapped: %v", err)
+	}
+	if !strings.Contains(err.Error(), "put secret value after create race") {
+		t.Fatalf("want create-race fallback context in error, got %v", err)
+	}
+	if fake.putCalls != 2 {
+		t.Fatalf("expected 2 puts (initial not-found + failed fallback), got %d", fake.putCalls)
+	}
+	if fake.createCalls != 1 {
+		t.Fatalf("expected exactly 1 CreateSecret attempt, got %d", fake.createCalls)
+	}
+}
+
+func TestSecretsManagerStore_NilClientFailsClosed(t *testing.T) {
+	// A store constructed with a nil client must fail closed on both methods with
+	// ErrInvalidBootstrapConfig rather than panic on the first API call.
+	store := awsstore.NewSecretsManagerStore(nil, "qurl/agent-state")
+	if _, err := store.LoadAgentState(context.Background()); !errors.Is(err, qurl.ErrInvalidBootstrapConfig) {
+		t.Fatalf("load: want ErrInvalidBootstrapConfig for nil client, got %v", err)
+	}
+	if err := store.SaveAgentState(context.Background(), sampleState()); !errors.Is(err, qurl.ErrInvalidBootstrapConfig) {
+		t.Fatalf("save: want ErrInvalidBootstrapConfig for nil client, got %v", err)
 	}
 }
 
