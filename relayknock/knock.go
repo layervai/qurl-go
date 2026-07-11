@@ -9,11 +9,11 @@ import (
 	"io"
 )
 
-// NHP knock construction and reply decryption (initiator/responder transcripts
-// from the reference NHP relay implementation, ports of the browser agent's
-// handshake and ack crypto). The seal/open ordering folds material into the chain
-// hash/key in the exact order the reference server expects, so every AEAD opens;
-// it is fenced byte-for-byte by the golden vectors.
+// NHP message construction (knock/OTP/register) and reply decryption
+// (initiator/responder transcripts from the reference NHP relay implementation,
+// ports of the browser agent's handshake and ack crypto). The seal/open ordering
+// folds material into the chain hash/key in the exact order the reference server
+// expects, so every AEAD opens; it is fenced byte-for-byte by the golden vectors.
 
 // KnockInputs are the per-knock values. They are injectable (rather than minted
 // internally) so a caller can drive a deterministic golden vector and so the
@@ -31,9 +31,38 @@ type KnockInputs struct {
 }
 
 // BuildKnock builds a complete NHP_KNK packet (240-byte header ‖ sealed body)
-// that the reference NHP relay responder decrypts. Folds material into the chain
-// hash/key in the exact order the responder expects, so every AEAD opens.
-func BuildKnock(inp *KnockInputs) ([]byte, error) {
+// that the reference NHP relay responder decrypts. It is BuildMessage fixed to
+// TypeKnock.
+func BuildKnock(inp *KnockInputs) ([]byte, error) { return buildMessage(nhpKNK, inp) }
+
+// BuildMessage builds a complete NHP packet (240-byte header ‖ sealed body) of
+// the given initiator header type: TypeKnock, TypeOTP, or TypeRegister. Any
+// other type — in particular the server-originated reply types — fails closed:
+// an agent never builds those, so rejecting them here keeps a type mix-up from
+// reaching the wire.
+//
+// BuildMessage is for callers that carry the packet themselves — deterministic
+// construction (golden vectors, conformance tooling) or a custom transport.
+// Typical agents use Knock, Exchange, or Send, which mint the per-message
+// randomness and speak the relay HTTP contract.
+func BuildMessage(headerType int, inp *KnockInputs) ([]byte, error) {
+	switch headerType {
+	case TypeKnock, TypeOTP, TypeRegister:
+		return buildMessage(headerType, inp)
+	default:
+		return nil, fmt.Errorf("unsupported initiator header type %d (want TypeKnock, TypeOTP, or TypeRegister)", headerType)
+	}
+}
+
+// buildMessage builds a complete single-message NHP packet of the given header
+// type. Folds material into the chain hash/key in the exact order the responder
+// expects, so every AEAD opens. The transcript is independent of the header
+// type — only the obfuscated type field in HeaderCommon[0:8] differs — so the
+// NHP_KNK golden vector fences every type built here. Unexported (with no type
+// restriction) so in-package tests can fabricate server-originated replies such
+// as an NHP_RAK by swapping roles; external callers go through BuildKnock /
+// BuildMessage.
+func buildMessage(headerType int, inp *KnockInputs) ([]byte, error) {
 	if len(inp.ServerStaticPub) != publicKeySize {
 		return nil, fmt.Errorf("server static pub must be %d bytes, got %d", publicKeySize, len(inp.ServerStaticPub))
 	}
@@ -109,7 +138,7 @@ func BuildKnock(inp *KnockInputs) ([]byte, error) {
 	setVersion(header, protocolVersionMajor, protocolVersionMinor)
 	setCounter(header, inp.Counter)
 	setFlag(header, 0)
-	setTypeAndPayloadSize(header, nhpKNK, len(sealedBody), inp.Preamble)
+	setTypeAndPayloadSize(header, headerType, len(sealedBody), inp.Preamble)
 	copy(header[offDigest:offDigest+hashSize], headerDigest(inp.ServerStaticPub, header))
 
 	packet := make([]byte, headerSize+len(sealedBody))
@@ -118,24 +147,53 @@ func BuildKnock(inp *KnockInputs) ([]byte, error) {
 	return packet, nil
 }
 
+// Exported NHP initiator header-type values — the message types an agent can
+// originate (BuildMessage, Exchange, Send). Every other type is
+// server-originated and is rejected by the exported builders.
+//
+// Adding a message type deliberately touches three sites, which encode three
+// DIFFERENT predicates and are kept inline rather than force-unified: this
+// block plus BuildMessage's initiator set (what an agent may build),
+// Exchange's round-trip set (what elicits a reply at all), and
+// replyTypeAllowed's request→reply pairing (which reply each request may
+// receive).
+const (
+	// TypeKnock is NHP_KNK: the initial knock requesting admission; the server
+	// answers with an NHP_ACK (or an NHP_COK under overload).
+	TypeKnock = nhpKNK
+	// TypeOTP is NHP_OTP: the one-way registration-bootstrap message (the NHP
+	// spec's agent one-time-password request). The server does not reply to OTP
+	// messages; a conforming relay acknowledges dispatch at the HTTP layer
+	// instead (see Send).
+	TypeOTP = nhpOTP
+	// TypeRegister is NHP_REG: the agent registration message; the server
+	// answers with an NHP_RAK.
+	TypeRegister = nhpREG
+)
+
 // Exported NHP reply header-type values, so a consumer can construct or assert a
 // Reply.Type (e.g. in tests) without importing the internal wire constants. These
-// are the only two reply types a single resolve can see.
+// are the only reply types the initiator messages above can elicit: a knock is
+// answered with an NHP_ACK or NHP_COK, a registration with an NHP_RAK, and an
+// OTP message is never answered at all.
 const (
 	// TypeACK is NHP_ACK: an authorized-admission reply carrying the application
 	// payload in Body.
 	TypeACK = nhpACK
 	// TypeCookieChallenge is NHP_COK: an overload cookie-challenge.
 	TypeCookieChallenge = nhpCOK
+	// TypeRegisterAck is NHP_RAK: the reply to an NHP_REG registration message.
+	TypeRegisterAck = nhpRAK
 )
 
-// Reply is a decrypted, authenticated NHP server reply (NHP_ACK / NHP_COK). Body
-// is the decrypted application body; the caller interprets it (relayknock is
-// body-shape agnostic).
+// Reply is a decrypted, authenticated NHP server reply (NHP_ACK / NHP_COK /
+// NHP_RAK). Body is the decrypted application body; the caller interprets it
+// (relayknock is body-shape agnostic).
 type Reply struct {
-	// Type is the NHP header type (TypeACK / TypeCookieChallenge). Prefer IsACK /
-	// IsCookieChallenge for intent; the exported constants exist so a consumer can
-	// also construct a Reply with a specific type.
+	// Type is the NHP header type (TypeACK / TypeCookieChallenge /
+	// TypeRegisterAck). Prefer IsACK / IsCookieChallenge / IsRegisterAck for
+	// intent; the exported constants exist so a consumer can also construct a
+	// Reply with a specific type.
 	Type           int
 	Counter        uint64
 	TimestampNanos uint64
@@ -151,11 +209,49 @@ func (r *Reply) IsACK() bool { return r.Type == nhpACK }
 // resolve, so a caller treats this as "retry later".
 func (r *Reply) IsCookieChallenge() bool { return r.Type == nhpCOK }
 
-// DecryptReply decrypts and authenticates a server reply (NHP_ACK / NHP_COK)
-// against the static key of the server we knocked. The server is the initiator
-// of this fresh handshake. Authentication completes at the ss-keyed opens: only
-// the real server's static private key yields a valid tag there.
+// IsRegisterAck reports whether the reply is an NHP_RAK — the server's reply to
+// an NHP_REG registration message.
+//
+// DecryptReply only ever returns a reply type, so a Reply it produced matches
+// exactly one of IsACK / IsCookieChallenge / IsRegisterAck.
+func (r *Reply) IsRegisterAck() bool { return r.Type == nhpRAK }
+
+// DecryptReply decrypts and authenticates a server reply (NHP_ACK / NHP_COK /
+// NHP_RAK — the transcript does not depend on the header type) against the
+// static key of the server we messaged. The server is the initiator of this
+// fresh handshake. Authentication completes at the ss-keyed opens: only the
+// real server's static private key yields a valid tag there.
+//
+// Only reply header types are accepted: an authenticated packet carrying an
+// initiator type (KNK/OTP/REG) is rejected, so a Reply this returns always
+// matches one Is* predicate. (Opening an initiator packet in the responder
+// role — as the reference server does — is decryptMessage, unexported.)
 func DecryptReply(devicePriv, expectedServerStaticPub, packet []byte) (*Reply, error) {
+	reply, err := decryptMessage(devicePriv, expectedServerStaticPub, packet)
+	if err != nil {
+		return nil, err
+	}
+	switch reply.Type {
+	case nhpACK, nhpCOK, nhpRAK:
+		return reply, nil
+	default:
+		// This is the single reply-type-policy site (decryptMessage no longer
+		// gates the type). Anything that is not a reply type — a known initiator
+		// type (KNK/OTP/REG) or a garbage type that rode in outside the AEAD — is a
+		// reply this request cannot accept, wrapped in ErrMalformedReply so a
+		// consumer's errors.Is catches the whole class uniformly (the same sentinel
+		// Exchange's replyTypeAllowed mismatch uses). A conforming server never
+		// produces either; only a byzantine one reaches here.
+		return nil, fmt.Errorf("%w: header type %d is not a server reply", ErrMalformedReply, reply.Type)
+	}
+}
+
+// decryptMessage decrypts and authenticates any NHP message this package speaks
+// against the sender's static key, admitting both reply and initiator types.
+// The exported DecryptReply wraps it with a reply-type gate; the permissive
+// form exists for the responder-role open (the reference server reading an
+// initiator packet, and the in-package symmetric-transcript tests).
+func decryptMessage(devicePriv, expectedServerStaticPub, packet []byte) (*Reply, error) {
 	if len(packet) < headerSize {
 		return nil, fmt.Errorf("reply too short: %d bytes < %d-byte header", len(packet), headerSize)
 	}
@@ -232,6 +328,15 @@ func DecryptReply(devicePriv, expectedServerStaticPub, packet []byte) (*Reply, e
 		}
 	}
 
+	// The decoded payload size is intentionally ignored (not cross-checked against
+	// len(sealedBody)): the body AEAD fences the actual body bytes, so a tampered
+	// size field cannot smuggle in a different body — the open would fail first.
+	// This codec does NOT gate the header type — the type rides outside the AEAD,
+	// so a garbage type decrypts fine, and the single type-policy site lives in the
+	// wrapping front doors instead: DecryptReply admits only reply types and turns
+	// any other type (a known initiator type, or garbage) into ErrMalformedReply.
+	// One policy site means a consumer's errors.Is(ErrMalformedReply) catches the
+	// whole "reply this caller can't accept" class uniformly.
 	typ, _ := getTypeAndPayloadSize(header)
 	return &Reply{
 		Type:           typ,
@@ -242,7 +347,7 @@ func DecryptReply(devicePriv, expectedServerStaticPub, packet []byte) (*Reply, e
 }
 
 // inflateZlib inflates a Go compress/zlib (RFC 1950) stream. Input is bounded by
-// the packetBufferSize check in DecryptReply and is post-AEAD (in-TCB), so no
+// the packetBufferSize check in decryptMessage and is post-AEAD (in-TCB), so no
 // decompression-bomb exposure beyond one buffer.
 func inflateZlib(compressed []byte) ([]byte, error) {
 	r, err := zlib.NewReader(bytes.NewReader(compressed))

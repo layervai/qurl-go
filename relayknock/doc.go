@@ -4,11 +4,16 @@
 // qURL flow.
 //
 // It is a dependency-light, clean-room Go implementation of the generic NHP
-// relay-knock wire profile: an NHP Noise knock (X25519 /
-// AES-256-GCM / BLAKE2s) carried as a binary POST {relayBaseURL}/relay/{serverId}
-// to an internet-facing NHP relay, which forwards it to a now-private NHP server.
-// The server authorizes, opens access for the caller IP, and replies with an
-// NHP_ACK whose body the caller decrypts.
+// relay-knock wire profile: NHP Noise messages (X25519 / AES-256-GCM / BLAKE2s)
+// each carried as a binary POST {relayBaseURL}/relay/{serverId} to an
+// internet-facing NHP relay, which forwards them to a now-private NHP server. The
+// package speaks three initiator messages over that one transport: a knock
+// (NHP_KNK) the server answers with an NHP_ACK — authorizing, opening access for
+// the caller IP, and returning a reply body the caller decrypts; a one-way OTP
+// (NHP_OTP) fire-and-forget dispatch the server never replies to (a conforming
+// relay acknowledges it at the HTTP layer); and a registration (NHP_REG) round
+// trip the server answers with an NHP_RAK. A round trip under overload comes back
+// as an NHP_COK cookie-challenge ("retry later") instead.
 //
 // The wire format is fenced byte-for-byte by the golden vectors in
 // knock_golden_test.go, which are shared with the other NHP implementations. If this
@@ -26,8 +31,12 @@
 // Generic wire profile only: this package knows packet framing and the Noise
 // handshake, NOT any application body shape (e.g. qURL claims). A
 // caller supplies an already-serialized body and interprets the decrypted reply
-// body itself. Initial knock (NHP_KNK) only — no re-knock/cookie-challenge answer
-// (NHP_RKN), matching what a single resolve needs.
+// body itself. Single messages only: it builds the initiator types NHP_KNK
+// (knock), NHP_REG (register), and the one-way NHP_OTP — which the server never
+// replies to; a conforming relay acknowledges dispatch at the HTTP layer — and
+// decrypts the reply types NHP_ACK, NHP_COK, and NHP_RAK. No multi-packet
+// flows: the re-knock/cookie-challenge answer (NHP_RKN) stays out of scope, so
+// a caller treats NHP_COK as "retry later".
 //
 // # Egress-IP invariant
 //

@@ -21,10 +21,14 @@ const (
 	packetBufferSize  = 4096 // server reads into a fixed [PacketBufferSize]byte
 	maxSealedBodySize = packetBufferSize - headerSize
 
-	// Header types (reference NHP relay iota: KPL=0, KNK=1, ACK=2, …, COK=7, RKN=8).
+	// Header types (reference NHP relay iota: KPL=0, KNK=1, ACK=2, …, COK=7,
+	// RKN=8, …, OTP=12, REG=13, RAK=14).
 	nhpKNK = 1
 	nhpACK = 2
 	nhpCOK = 7
+	nhpOTP = 12
+	nhpREG = 13
+	nhpRAK = 14
 
 	// Header flags (reference NHP relay common): COMPRESS = 1<<1. The agent never sets
 	// it (bodies sent uncompressed); kept to decode a compressed reply.
