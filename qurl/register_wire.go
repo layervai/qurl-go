@@ -70,7 +70,13 @@ type registerAckBody struct {
 // success literal has one source across the resolve and enrollment reply paths.
 const rakSuccess = errSuccess
 
-func (b registerAckBody) isSuccess() bool { return b.ErrCode == "" || b.ErrCode == rakSuccess }
+func (b registerAckBody) isSuccess() bool {
+	// Trim to match mapRAKError, which trims before matching: a whitespace-padded
+	// code (e.g. " 0 ") must not slip past success here only to miss every mapping
+	// after mapRAKError trims it and surface as a spurious RegistrationDenyError.
+	code := strings.TrimSpace(b.ErrCode)
+	return code == "" || code == rakSuccess
+}
 
 // parseRegisterAck decodes the decrypted NHP_RAK body. An empty body decodes to a
 // zero-value ack whose empty errCode reads as success (isSuccess), so the run
