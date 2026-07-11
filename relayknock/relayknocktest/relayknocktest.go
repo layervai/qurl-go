@@ -72,6 +72,6 @@ func OpenInitiatorMessage(serverPriv, expectedDevicePub, packet []byte) (*relayk
 			Body:           msg.Body,
 		}, nil
 	default:
-		return nil, fmt.Errorf("not an initiator message: header type %d is reply-only", msg.Type)
+		return nil, fmt.Errorf("not an initiator message: header type %d is not an initiator type", msg.Type)
 	}
 }

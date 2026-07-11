@@ -658,10 +658,10 @@ func TestDecryptReply_UnknownType(t *testing.T) {
 		t.Fatalf("fabricate type-99 packet: %v", err)
 	}
 	_, err = relayknock.DecryptReply(devicePriv, serverPub, pkt)
-	if err == nil {
-		t.Fatal("DecryptReply accepted an unknown header type, want rejection")
+	if !errors.Is(err, relayknock.ErrMalformedReply) {
+		t.Fatalf("DecryptReply on an unknown header type: err = %v, want ErrMalformedReply", err)
 	}
-	if !strings.Contains(err.Error(), "unknown NHP header type 99") {
+	if !strings.Contains(err.Error(), "99") {
 		t.Errorf("error %q does not name the unknown type", err)
 	}
 }
@@ -757,8 +757,8 @@ func TestDecryptReply_RejectsInitiatorType(t *testing.T) {
 	}
 	if _, err := relayknock.DecryptReply(serverPriv, devicePub, reg); err == nil {
 		t.Fatal("DecryptReply accepted an initiator type, want reject")
-	} else if !strings.Contains(err.Error(), "initiator-only") {
-		t.Errorf("DecryptReply(REG) error %q does not name the initiator-only cause", err)
+	} else if !errors.Is(err, relayknock.ErrMalformedReply) {
+		t.Errorf("DecryptReply(REG) error %q, want ErrMalformedReply", err)
 	}
 }
 

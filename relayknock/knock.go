@@ -163,10 +163,13 @@ func DecryptReply(devicePriv, expectedServerStaticPub, packet []byte) (*Reply, e
 	case nhpwire.TypeACK, nhpwire.TypeCOK, nhpwire.TypeRAK:
 		return &Reply{Type: msg.Type, Counter: msg.Counter, TimestampNanos: msg.TimestampNanos, Body: msg.Body}, nil
 	default:
-		// Wrap ErrMalformedReply so a consumer's errors.Is catches the whole
-		// "reply this request cannot accept" class uniformly — the same sentinel
-		// Exchange's replyTypeAllowed mismatch uses. A conforming server never
-		// produces an initiator-typed reply; only a byzantine one reaches here.
-		return nil, fmt.Errorf("%w: not a server reply: header type %d is initiator-only", ErrMalformedReply, msg.Type)
+		// This is the single reply-type-policy site (nhpwire's codec no longer
+		// gates the type). Anything that is not a reply type — a known initiator
+		// type (KNK/OTP/REG) or a garbage type that rode in outside the AEAD — is a
+		// reply this request cannot accept, wrapped in ErrMalformedReply so a
+		// consumer's errors.Is catches the whole class uniformly (the same sentinel
+		// Exchange's replyTypeAllowed mismatch uses). A conforming server never
+		// produces either; only a byzantine one reaches here.
+		return nil, fmt.Errorf("%w: header type %d is not a server reply", ErrMalformedReply, msg.Type)
 	}
 }

@@ -219,15 +219,13 @@ func DecryptMessage(devicePriv, expectedServerStaticPub, packet []byte) (*Messag
 	// ignored: the body AEAD opened above already fences the actual sealedBody
 	// bytes, so the header's self-described size is not load-bearing for integrity
 	// and needs no cross-check against len(sealedBody).
+	// This codec does NOT gate the header type — the type rides outside the AEAD,
+	// so a garbage type decrypts fine, and the single type-policy site lives in the
+	// wrapping packages instead: relayknock.DecryptReply admits only reply types and
+	// relayknocktest.OpenInitiatorMessage only initiator types, so any other type
+	// (a wrong-direction known type, or garbage) becomes that package's rejection.
+	// One policy site per direction keeps the error class uniform for consumers.
 	typ, _ := getTypeAndPayloadSize(header)
-	switch typ {
-	case TypeKNK, TypeACK, TypeCOK, TypeOTP, TypeREG, TypeRAK:
-	default:
-		// The type field rides outside the AEAD, so a garbage type decrypts
-		// fine — reject it explicitly instead of returning a Message that no
-		// predicate matches.
-		return nil, fmt.Errorf("unknown NHP header type %d", typ)
-	}
 	return &Message{
 		Type:           typ,
 		Counter:        counter,
