@@ -643,7 +643,7 @@ func (cfg *registerConfig) assertCompletionPeerMatchesRegistration(state *AgentS
 		return fmt.Errorf("%w: authenticated registration state is missing its NHP peer", cfg.invalidConfigErr)
 	}
 	if comp == nil {
-		return fmt.Errorf("%w: completion response NHP peer does not match the peer that authenticated the registration acknowledgement", cfg.invalidConfigErr)
+		return fmt.Errorf("%w: completion response is missing its NHP peer, so it cannot corroborate the peer that authenticated the registration acknowledgement", cfg.invalidConfigErr)
 	}
 	registeredKey, err := decodeNHPServerPublicKey(state.NHPPeer.PublicKeyB64)
 	if err != nil {
