@@ -92,7 +92,7 @@ func parseRegisterAck(body []byte) (*registerAckBody, error) {
 		return &ack, nil
 	}
 	if err := json.Unmarshal(body, &ack); err != nil {
-		return nil, fmt.Errorf("%w: parse registration reply body: %v", ErrRegisterReplyMalformed, err)
+		return nil, fmt.Errorf("%w: parse registration reply body: %w", ErrRegisterReplyMalformed, err)
 	}
 	// Defense-in-depth on the echoed aspId: the RAK is Noise-authenticated, but
 	// every other wire field gets a consistency check, so a reply carrying a
