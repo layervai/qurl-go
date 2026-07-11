@@ -876,6 +876,11 @@ func WithOTP(code string) RegisterOption {
 // deliverable hands back a stale or empty value and registration fails with
 // ErrOTPIncorrect; on a resume (the code was requested on an earlier call) the
 // provider runs only if a crash-recovery completion probe did not already finish.
+//
+// For a FileAgentState the enclosing RegisterAgent call holds the best-effort
+// cross-process setup lock for the whole provider call, so a provider that blocks
+// for seconds/minutes keeps a second process sharing the same store blocked for
+// that window (the loser then fast-paths once this call enrolls).
 func WithOTPProvider(provider func(ctx context.Context) (string, error)) RegisterOption {
 	return registerOptionFunc(func(o *registerConfig) error {
 		if provider == nil {
