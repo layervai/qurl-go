@@ -49,18 +49,21 @@ run. Pick it by how the agent is deployed:
 | Deployment | Key | Lifetime & blast radius |
 | --- | --- | --- |
 | **A fleet** of headless agents (containers, CI, autoscalers) | one **durable `qurl:agent`-scoped** key, shared by all | long-lived until revoked; revoking it cuts off the whole fleet at once |
-| **One** headless agent, provisioned on its own | a **one-shot** enrollment key, minted per agent | single-use, ≤24 h — consumed on first enrollment, so a leaked key can't enroll a second device |
+| **One** headless agent, provisioned on its own | a **one-shot** enrollment key, minted per agent | single-use and short-lived under LayerV key policy — LayerV consumes it on first enrollment, so a leaked key can't enroll a second device |
 | An agent acting **as a person's account** | that account's existing **API key** | long-lived; enrollment needs an emailed one-time code (see below) |
 
 Create the key from your LayerV account's key management, scoping it to
-`qurl:agent` for the durable/fleet case.
+`qurl:agent` for the durable/fleet case. Lifetime and single-use-vs-reusable are
+**LayerV key policy**, set when you mint the key — the SDK treats every
+pre-issued (bootstrap-kind) key identically and does not itself expire or consume
+keys.
 
 **Fleets — one key, many agents.** Mint a single durable `qurl:agent` key, give
 every agent the same secret, and give each agent its **own** `store` (its own
 file path or secret id). Each agent generates its own device keypair and id and
-enrolls idempotently; the durable key is hash-matched and **never consumed**, so
-it survives any number of enrollments. Don't point two agents at one `store` —
-that is a single shared identity, not a fleet.
+enrolls idempotently; under LayerV key policy the durable key is hash-matched
+and **not consumed**, so it survives any number of enrollments. Don't point two
+agents at one `store` — that is a single shared identity, not a fleet.
 
 ## Two enrollment paths
 
@@ -95,7 +98,7 @@ This is a pause point, not a failure. Match `*OTPPendingError` with
 check, obtain the code, and re-run with `WithOTP`:
 
 ```go
-_, err := qurl.RegisterAgent(ctx, accountKey, store)
+client, err := qurl.RegisterAgent(ctx, accountKey, store)
 
 var pending *qurl.OTPPendingError
 switch {
@@ -113,6 +116,7 @@ case err != nil:
 	return err
 default:
 	// Already registered on a prior run — client returned with no code needed.
+	use(client)
 }
 ```
 
@@ -276,13 +280,14 @@ Every message names the next concrete step.
 | `qurl.ErrRegistrationRateLimited` | Too many attempts, or the service is rate limiting. | Back off and retry later. |
 | `qurl.ErrRegistrationRetryLater` | The registration relay returned an overload cookie-challenge (it is under load). | Back off briefly and re-run. |
 | `qurl.ErrKeyRejected` | The API key (or a pre-issued key used as the credential) was rejected. | Check the key and re-run. |
+| `qurl.ErrBootstrapSetupKeyConsumed` | A pre-issued **one-shot** setup key was already consumed by an earlier enrollment (RAK code 52108, or reported by the completion call). | Mint a fresh setup key, or restore the completed agent state from the run that consumed it. |
 | `qurl.ErrAgentIdentityConflict` | This device id is already enrolled to a different key or agent. | Re-run with `WithTakeover()` to re-bind, or pick a different `WithDeviceID`. |
 | `qurl.ErrNoAccountEmail` | Account key has no email on file for the code. | Add an email to the account, or use a pre-issued key. |
 | `qurl.ErrDeviceCredentialMissing` | Saved state shows the agent is registered but holds no device credential (issued once, unreproducible). | Register under a new `WithDeviceID` or re-bind with `WithTakeover`; for a legacy state file missing the credential, clear or replace the persisted state. |
 | `qurl.ErrRegistrationInvalidInput` | The service rejected a registration input as malformed (e.g. a bad device id). | Fix the input (use a valid `WithDeviceID`) and re-run. |
 | `qurl.ErrRegistrationDisabled` | Agent registration is disabled for the account. | Contact the account owner to enable it. |
 | `qurl.ErrInvalidRegisterConfig` | Inputs or options were invalid before any network call (empty key, nil store, conflicting options). | Fix the call. |
-| `qurl.ErrAgentStateNotFound` / `qurl.ErrInvalidAgentState` | Store had no state (→ fresh enrollment), or state exists but is corrupt/unreadable. | Not-found is normal; for corrupt state, clear or replace it. |
+| `qurl.ErrInvalidAgentState` | Persisted state exists but is corrupt/unreadable — surfaced wrapped in the front-door config error. (`ErrAgentStateNotFound` is **not** caller-facing: it is the store-contract sentinel a custom `AgentStateStore` returns when empty, which the engine converts into a fresh enrollment.) | Clear or replace the corrupt state. |
 | `*qurl.RegistrationDenyError` | An authenticated enrollment denial carrying a wire code newer than this SDK. | Read `ErrCode` / `ErrMsg`; `errors.Is` still matches the typed sentinel for known codes. |
 
 A worked pattern:
@@ -323,6 +328,11 @@ completion reported the key was already issued, register under a new
 `WithDeviceID` or re-bind with `WithTakeover`. If a locally-registered state
 simply lacks the credential (for example a legacy bootstrap-era state file),
 clear or replace the persisted state to mint a fresh credential.
+
+**Setup key already consumed.** `ErrBootstrapSetupKeyConsumed` means a pre-issued
+one-shot setup key was accepted by an earlier enrollment and cannot enroll again.
+Mint a fresh setup key from LayerV, or restore the completed `AgentState` from the
+run that consumed the key.
 
 **Identity conflict / takeover.** `ErrAgentIdentityConflict` means the device id
 is already enrolled to a different key or agent. Re-run with `WithTakeover()` to
@@ -374,14 +384,20 @@ readable by older code that ignores the new fields.
 ## How enrollment works
 
 Enrollment is agent-initiated and travels over a relay, in the shape described
-by the Cloud Security Alliance "Stealth Mode SDP" whitepaper: the agent knocks
-to request an OTP, then completes a registration (REG) and receives its access
-key (RAK), all as encrypted packets to a relay rather than to a standing public
-endpoint. `RegisterAgent` proves the agent's X25519 device key through the
-handshake, so the same keypair is reused across resumes, and the enrollment
-service never becomes public inventory. You do not configure any of this: a
-side-effect-free pre-flight tells the SDK which path the key takes and where to
-knock.
+by the Cloud Security Alliance's Software-Defined Perimeter (SDP) / NHP
+specification: the agent knocks to request an OTP, then sends a registration
+(REG) and receives the server's registration acknowledgement (RAK). Those
+OTP/REG/RAK messages ride the relay as encrypted NHP packets rather than hitting
+a standing public endpoint — but the RAK is only an acknowledgement (an
+`errCode`/`errMsg` status, **not** a credential). The device credential is minted
+separately, by the authenticated HTTPS completion call
+(`POST /v1/agent/registration/complete`), and the path-selecting discovery
+pre-flight (`GET /v1/agent/registration-info`) is likewise a standing,
+authenticated HTTPS call to the LayerV API. `RegisterAgent` proves the agent's
+X25519 device key through the handshake, so the same keypair is reused across
+resumes, and the enrollment service never becomes public inventory. You do not
+configure any of this: the side-effect-free pre-flight tells the SDK which path
+the key takes and where to knock.
 
 The `WithRelayURL` and `WithNHPPeer` options exist for advanced routing (pinned
 or test endpoints) and are not needed in normal use; an overridden peer bypasses
