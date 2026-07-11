@@ -218,10 +218,15 @@ agent id. It owns the version and optional JSON metadata in
 `WrappedAgentStateKey`. Return `qurl.ErrInvalidWrappedAgentStateKey` when a
 persisted wrapper record fails authentication; ordinary KMS/network failures
 remain operational `qurl.ErrAgentStateKeyWrapper` errors rather than being
-misreported as corrupt state.
+misreported as corrupt state. If the provider cannot distinguish authentication
+failure from another decrypt failure, return the invalid-record sentinel and
+fail closed. The SDK includes wrapper metadata in its AES-GCM AAD; wrappers that
+use metadata to choose or configure unwrap must authenticate it themselves too,
+because unwrap necessarily runs before the SDK can verify that AAD.
 
 Every successful state mutation performs `WrapKey` and a verification
-`UnwrapKey` before the atomic commit. The runtime identity therefore needs both
+`UnwrapKey` before the atomic commit—two provider operations per save. This is a
+deliberate fail-before-commit check. The runtime identity therefore needs both
 wrap/encrypt and unwrap/decrypt permission during initial enrollment and any
 later workflow that mutates state. Decrypt-only permission is insufficient.
 

@@ -58,7 +58,9 @@ type AgentStateKeyBinding struct {
 // WrappedAgentStateKey is the opaque wrapped DEK record persisted in a sealed
 // AgentState envelope. Version is owned by the wrapper implementation.
 // Ciphertext is the provider-wrapped DEK. Metadata is optional provider-owned
-// JSON; the SDK validates and bounds it but does not interpret it.
+// JSON; the SDK validates, bounds, and authenticates it as envelope AAD but does
+// not interpret it. A wrapper that uses metadata before AES-GCM verification
+// must also authenticate it as part of its own wrapped-key record.
 type WrappedAgentStateKey struct {
 	Version    int             `json:"version"`
 	Ciphertext []byte          `json:"ciphertext"`
@@ -69,7 +71,10 @@ type WrappedAgentStateKey struct {
 // Implementations must authenticate every field in binding and return
 // ErrInvalidWrappedAgentStateKey for a record that fails provider
 // authentication. Other provider/network failures should be returned normally
-// so callers can distinguish an outage from corrupt state.
+// so callers can distinguish an outage from corrupt state. If a provider cannot
+// distinguish authentication failure from other decrypt failures, it must fail
+// closed by returning ErrInvalidWrappedAgentStateKey rather than classifying
+// possible tampering as a retryable outage.
 //
 // Implementations must not retain, log, or otherwise expose plaintextKey or a
 // key returned by UnwrapKey. The SDK wipes the byte slices it owns after use.
@@ -96,8 +101,9 @@ type SealedFileAgentStateStore struct {
 // and the wrapper's own binding.
 //
 // A successful SaveAgentState performs both WrapKey and UnwrapKey before the
-// atomic commit. Consequently every identity that can mutate AgentState needs
-// both wrap/encrypt and unwrap/decrypt permission.
+// atomic commit: two provider operations per save. Consequently every identity
+// that can mutate AgentState needs both wrap/encrypt and unwrap/decrypt
+// permission.
 func NewSealedFileAgentState(path, providerID string, wrapper AgentStateKeyWrapper) (*SealedFileAgentStateStore, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, fmt.Errorf("%w: sealed agent state path must not be empty", ErrInvalidBootstrapConfig)
@@ -125,9 +131,7 @@ func isNilAgentStateKeyWrapper(wrapper AgentStateKeyWrapper) bool {
 	v := reflect.ValueOf(wrapper)
 	kind := v.Kind()
 	switch kind {
-	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Slice:
-		return v.IsNil()
-	case reflect.Pointer:
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
 		return v.IsNil()
 	default:
 		return false
@@ -197,9 +201,6 @@ func (s *SealedFileAgentStateStore) LoadAgentState(ctx context.Context) (*AgentS
 		return nil, invalidSealedState("envelope authentication failed")
 	}
 	defer wipeBytes(plaintext)
-	if len(plaintext) > maxSealedAgentStateBytes {
-		return nil, invalidSealedState("decrypted agent state exceeds size limit")
-	}
 	var state AgentState
 	if err := json.Unmarshal(plaintext, &state); err != nil {
 		return nil, invalidSealedState("decrypted agent state is not valid JSON")
@@ -264,11 +265,7 @@ func (s *SealedFileAgentStateStore) SaveAgentState(ctx context.Context, state *A
 		return fmt.Errorf("%w: wrapped-key verification did not reproduce the 32-byte DEK", ErrAgentStateKeyWrapper)
 	}
 
-	block, err := aes.NewCipher(dek)
-	if err != nil {
-		return fmt.Errorf("qurl: initialize agent state cipher: %w", err)
-	}
-	gcm, err := cipher.NewGCM(block)
+	gcm, err := newSealedAgentStateGCM(dek)
 	if err != nil {
 		return fmt.Errorf("qurl: initialize agent state AEAD: %w", err)
 	}
@@ -314,33 +311,32 @@ func (e sealedAgentStateEnvelope) aad() []byte {
 	// Keep the persisted v1 AAD independent of future additions to the public
 	// AgentStateKeyBinding type. JSON encoding of this fixed-field internal struct
 	// is deterministic and unambiguous.
+	wrapped := cloneWrappedAgentStateKey(e.WrappedKey)
+	wrapped.Metadata = compactJSON(wrapped.Metadata)
 	raw, _ := json.Marshal(sealedAgentStateAAD{
 		Purpose:         e.Purpose,
 		EnvelopeVersion: e.Version,
 		ProviderID:      e.ProviderID,
 		AgentID:         e.AgentID,
+		WrappedKey:      wrapped,
 	})
 	return raw
 }
 
 type sealedAgentStateAAD struct {
-	Purpose         string `json:"purpose"`
-	EnvelopeVersion int    `json:"envelope_version"`
-	ProviderID      string `json:"provider_id"`
-	AgentID         string `json:"agent_id"`
+	Purpose         string               `json:"purpose"`
+	EnvelopeVersion int                  `json:"envelope_version"`
+	ProviderID      string               `json:"provider_id"`
+	AgentID         string               `json:"agent_id"`
+	WrappedKey      WrappedAgentStateKey `json:"wrapped_key"`
 }
 
 func decodeSealedAgentStateEnvelope(raw []byte, envelope *sealedAgentStateEnvelope) error {
 	if err := rejectDuplicateJSONFields(raw); err != nil {
 		return invalidSealedState("envelope contains duplicate object fields")
 	}
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(envelope); err != nil {
+	if err := strictDecodeJSON(raw, envelope); err != nil {
 		return invalidSealedState("decode envelope")
-	}
-	if err := requireJSONEOF(decoder); err != nil {
-		return invalidSealedState("envelope has trailing data")
 	}
 	if envelope.Version != sealedAgentStateVersion || envelope.Purpose != sealedAgentStatePurpose {
 		return invalidSealedState("unsupported envelope purpose or version")
@@ -439,16 +435,31 @@ func validateWrappedAgentStateKey(wrapped WrappedAgentStateKey) error {
 	return nil
 }
 
-func openSealedAgentState(dek, nonce, ciphertext, aad []byte) ([]byte, error) {
+func newSealedAgentStateGCM(dek []byte) (cipher.AEAD, error) {
 	block, err := aes.NewCipher(dek)
 	if err != nil {
 		return nil, err
 	}
-	gcm, err := cipher.NewGCM(block)
+	return cipher.NewGCM(block)
+}
+
+func openSealedAgentState(dek, nonce, ciphertext, aad []byte) ([]byte, error) {
+	gcm, err := newSealedAgentStateGCM(dek)
 	if err != nil {
 		return nil, err
 	}
 	return gcm.Open(nil, nonce, ciphertext, aad)
+}
+
+func compactJSON(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return nil
+	}
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, raw); err != nil {
+		return cloneBytes(raw) // validation reports malformed metadata before this helper
+	}
+	return compact.Bytes()
 }
 
 func requireJSONEOF(decoder *json.Decoder) error {

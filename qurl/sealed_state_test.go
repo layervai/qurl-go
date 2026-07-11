@@ -27,6 +27,7 @@ type testAgentStateKeyWrapper struct {
 	unwrapErr           error
 	unwrapOverride      []byte
 	corruptMetadata     bool
+	ignoreMetadata      bool
 	wrapInputs          [][]byte
 	unwrapOutputs       [][]byte
 	wrapBindings        []AgentStateKeyBinding
@@ -67,7 +68,7 @@ func (w *testAgentStateKeyWrapper) UnwrapKey(_ context.Context, record WrappedAg
 	if w.unwrapErr != nil {
 		return nil, w.unwrapErr
 	}
-	if record.Version != 7 || w.corruptMetadata || !sameJSON(record.Metadata, testWrapperMetadata(binding)) {
+	if record.Version != 7 || w.corruptMetadata || (!w.ignoreMetadata && !sameJSON(record.Metadata, testWrapperMetadata(binding))) {
 		return nil, ErrInvalidWrappedAgentStateKey
 	}
 	if w.unwrapOverride != nil {
@@ -231,8 +232,9 @@ func TestSealedAgentStateAAD_V1Golden(t *testing.T) {
 		Purpose:    sealedAgentStatePurpose,
 		ProviderID: "aws-kms",
 		AgentID:    "agent-123",
+		WrappedKey: WrappedAgentStateKey{Version: 7, Ciphertext: []byte{1, 2}, Metadata: json.RawMessage(`{"key_id":"k"}`)},
 	}
-	want := `{"purpose":"qurl-go/agent-state","envelope_version":1,"provider_id":"aws-kms","agent_id":"agent-123"}`
+	want := `{"purpose":"qurl-go/agent-state","envelope_version":1,"provider_id":"aws-kms","agent_id":"agent-123","wrapped_key":{"version":7,"ciphertext":"AQI=","metadata":{"key_id":"k"}}}`
 	if got := string(envelope.aad()); got != want {
 		t.Fatalf("v1 AAD = %s, want %s", got, want)
 	}
@@ -642,6 +644,22 @@ func TestSealedFileAgentState_TamperAndStrictDecode(t *testing.T) {
 			assertInvalidSealedMutation(t, store, func(raw []byte) []byte { return tt.mutate(t, raw) })
 		})
 	}
+}
+
+func TestSealedFileAgentState_MetadataIsEnvelopeAuthenticated(t *testing.T) {
+	wrapper := &testAgentStateKeyWrapper{}
+	store := testSealedStore(t, wrapper)
+	if err := store.SaveAgentState(context.Background(), testAgentState(t)); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a wrapper that does not consume metadata at all. The SDK's own
+	// AES-GCM AAD must still reject a metadata-only edit.
+	wrapper.ignoreMetadata = true
+	assertInvalidSealedMutation(t, store, func(raw []byte) []byte {
+		return mutateEnvelopeJSON(t, raw, func(value map[string]any) {
+			value["wrapped_key"].(map[string]any)["metadata"] = map[string]any{"key_id": "tampered"}
+		})
+	})
 }
 
 type testSetupLock struct{ closeErr error }

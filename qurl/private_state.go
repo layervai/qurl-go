@@ -159,32 +159,37 @@ func statPrivateStateFile(path, label string, exactDirMode bool, notFound, inval
 	return info, nil
 }
 
-func validatePrivateStateDir(dir, label string, invalidConfig, insecurePermissions error) error {
+// statPrivateStateDir validates the immediate state directory and returns the
+// same FileInfo so callers that enforce a stricter mode do not need a second
+// Lstat.
+func statPrivateStateDir(dir, label string, invalidConfig, insecurePermissions error) (os.FileInfo, error) {
 	// This validates the immediate state directory; deployment/bootstrap is
 	// responsible for placing it under trusted ancestors such as /var/lib/layerv.
 	info, err := os.Lstat(dir) //nolint:gosec // caller-selected state directory is intentionally Lstat'd to reject symlinks
 	if err != nil {
-		return fmt.Errorf("qurl: stat %s dir: %w", label, err)
+		return nil, fmt.Errorf("qurl: stat %s dir: %w", label, err)
 	}
 	if info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("%w: %s dir must not be a symlink", invalidConfig, label)
+		return nil, fmt.Errorf("%w: %s dir must not be a symlink", invalidConfig, label)
 	}
 	if !info.IsDir() {
-		return fmt.Errorf("%w: %s dir must be a directory", invalidConfig, label)
+		return nil, fmt.Errorf("%w: %s dir must be a directory", invalidConfig, label)
 	}
 	if info.Mode().Perm()&0o022 != 0 {
-		return fmt.Errorf("%w: %s dir has mode %o, want no group/other write", insecurePermissions, dir, info.Mode().Perm())
+		return nil, fmt.Errorf("%w: %s dir has mode %o, want no group/other write", insecurePermissions, dir, info.Mode().Perm())
 	}
-	return nil
+	return info, nil
+}
+
+func validatePrivateStateDir(dir, label string, invalidConfig, insecurePermissions error) error {
+	_, err := statPrivateStateDir(dir, label, invalidConfig, insecurePermissions)
+	return err
 }
 
 func validateAgentStateDir(dir, label string, invalidConfig, insecurePermissions error) error {
-	if err := validatePrivateStateDir(dir, label, invalidConfig, insecurePermissions); err != nil {
-		return err
-	}
-	info, err := os.Lstat(dir) //nolint:gosec // re-stat verifies the caller-selected directory's exact security mode
+	info, err := statPrivateStateDir(dir, label, invalidConfig, insecurePermissions)
 	if err != nil {
-		return fmt.Errorf("qurl: stat %s dir: %w", label, err)
+		return err
 	}
 	if info.Mode().Perm() != 0o700 {
 		return fmt.Errorf("%w: %s dir has mode %o, want 0700", insecurePermissions, dir, info.Mode().Perm())
