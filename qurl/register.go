@@ -979,10 +979,10 @@ func (p *storeCredentialProvider) Authorize(ctx context.Context, req *http.Reque
 	if state == nil {
 		return fmt.Errorf("%w: agent state store returned no state", ErrDeviceCredentialMissing)
 	}
-	token := state.DeviceAPIKey
 	if err := validatePersistedDeviceCredential(state, ErrInvalidClientConfig); err != nil {
 		return err
 	}
+	token := state.DeviceAPIKey
 	return setBearer(req, token)
 }
 
