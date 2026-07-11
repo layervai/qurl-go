@@ -1,0 +1,129 @@
+name: awsstore release guard
+
+# Release footgun guard for the awsstore submodule (issue #53).
+#
+# awsstore/go.mod pins the parent module at a placeholder and resolves it locally:
+#
+#     require github.com/layervai/qurl-go v0.0.0
+#     replace github.com/layervai/qurl-go => ../
+#
+# That is CORRECT for in-repo builds (standalone and under the root go.work) and is
+# what day-to-day PR CI relies on. It is WRONG to ship: an external consumer running
+#
+#     go get github.com/layervai/qurl-go/awsstore@<tag>
+#
+# fails, because v0.0.0 does not resolve to a published version and `replace => ../`
+# points outside the repo tree. The in-repo go.work build stays green, so this
+# breaks only downstream users at `go get` time — easy to ship unnoticed.
+#
+# This job FAILS a submodule release if awsstore/go.mod still contains the
+# placeholder require or a local-path parent `replace`. It parses go.mod
+# STRUCTURALLY (`go mod edit -json`) rather than grepping, so a reformat into Go's
+# block `replace ( ... )` form — or an absolute-path replace — cannot slip past it.
+# It runs ONLY for awsstore release tags (awsstore/v*), so it does not touch PR CI,
+# which legitimately depends on the placeholder + replace. workflow_dispatch is
+# provided for a manual dry run without cutting a tag (which, on a non-release ref,
+# is EXPECTED to fail — that is the guard demonstrating it fires).
+#
+# Release order (README "Releasing"): root v0.1.0 first, then awsstore/v0.1.0. A
+# ROOT tag (v*) intentionally does NOT trigger this guard — awsstore's go.mod is
+# only rewritten for the awsstore tag, so gating a root tag on it would be wrong.
+
+on:
+  push:
+    tags:
+      # awsstore submodule release tags, e.g. awsstore/v0.1.0. The parent module's
+      # own tags (v0.1.0) are intentionally excluded — see header.
+      - "awsstore/v*"
+  workflow_dispatch:
+    inputs:
+      note:
+        description: "Manual dry run of the awsstore release-readiness guard"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  release-ready:
+    name: awsstore go.mod is release-ready
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+
+      # setup-go first: the guard parses go.mod STRUCTURALLY with `go mod edit
+      # -json` (below), which needs the go toolchain on PATH.
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: awsstore/go.mod
+          check-latest: true
+
+      - name: Reject placeholder parent version and local-path parent replace
+        run: |
+          set -euo pipefail
+          gomod="awsstore/go.mod"
+          if [ ! -f "$gomod" ]; then
+            echo "::error::$gomod not found; cannot verify awsstore release readiness."
+            exit 1
+          fi
+
+          # Parse go.mod structurally rather than grepping raw text. `go mod edit
+          # -json` normalizes every surface form — single-line vs parenthesized
+          # BLOCK `replace ( ... )`, tabs vs spaces, an explicit require version on
+          # the replaced module — into one shape, so the guard cannot be bypassed by
+          # a reformat (gofmt / `go mod edit` freely rewrite directives into block
+          # form). jq is preinstalled on ubuntu-latest.
+          j="$(cd awsstore && go mod edit -json)"
+
+          failed=0
+          parent='github.com/layervai/qurl-go'
+
+          # 1) Placeholder parent require. A require of the parent at the literal
+          #    placeholder v0.0.0 does not resolve to a published version, so an
+          #    external `go get .../awsstore@<tag>` fails.
+          if printf '%s' "$j" | jq -e --arg p "$parent" \
+            '(.Require // []) | any(.Path == $p and .Version == "v0.0.0")' >/dev/null; then
+            echo "::error file=$gomod::awsstore/go.mod still pins the parent ($parent) at placeholder v0.0.0; bump it to the published root tag before releasing."
+            failed=1
+          fi
+
+          # 2) Local-path parent replace. In `go mod edit -json`, a replacement
+          #    TARGET with an empty .New.Version is a FILESYSTEM PATH replace (e.g.
+          #    `=> ../`, `=> ./x`, or an absolute path); a target WITH a version is a
+          #    module replace (`=> example.com/fork v1.2.3`), which resolves fine
+          #    downstream and is intentionally allowed. Only the path form points
+          #    outside the published module tree and breaks `go get`.
+          if printf '%s' "$j" | jq -e --arg p "$parent" \
+            '(.Replace // []) | any(.Old.Path == $p and ((.New.Version // "") == ""))' >/dev/null; then
+            path="$(printf '%s' "$j" | jq -r --arg p "$parent" \
+              'first((.Replace // [])[] | select(.Old.Path == $p and ((.New.Version // "") == "")) | .New.Path) // ""')"
+            echo "::error file=$gomod::awsstore/go.mod still has a local-path replace of the parent module ($parent => $path); drop it before releasing."
+            failed=1
+          fi
+
+          if [ "$failed" -ne 0 ]; then
+            echo "::error::awsstore/go.mod is NOT release-ready. See the errors above and the workflow header."
+            echo "--- parent-module require/replace directives (parsed) ---"
+            printf '%s' "$j" | jq --arg p "$parent" \
+              '{require: [(.Require // [])[] | select(.Path == $p)], replace: [(.Replace // [])[] | select(.Old.Path == $p)]}'
+            exit 1
+          fi
+
+          echo "awsstore/go.mod is release-ready: no placeholder v0.0.0 require, no local-path parent replace."
+
+      # Positive backstop: the structural gate above has already guaranteed there is
+      # no local-path parent replace, so `go mod download` for the parent genuinely
+      # exercises PROXY resolution (a surviving replace would otherwise resolve it
+      # from the filesystem and mask a bad version). This catches a bump that is
+      # syntactically fine but points at a version that was never published/tagged.
+      # It runs only if the gate above passed (sequential steps; no continue-on-error).
+      - name: Verify the parent module resolves from the proxy
+        working-directory: awsstore
+        run: |
+          set -euo pipefail
+          echo "Resolving parent module github.com/layervai/qurl-go from the module proxy..."
+          go mod download -x github.com/layervai/qurl-go
+          echo "Parent module resolved successfully."

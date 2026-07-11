@@ -1,0 +1,12 @@
+// go.work ties the root qurl module and the awsstore submodule together for
+// local development so awsstore builds against the in-tree parent instead of a
+// published tag. The root qurl module's go.mod stays free of the AWS SDK: the
+// workspace only affects builds run from this tree, never what `go mod tidy`
+// records in ./go.mod. Delete or ignore this file to build each module against
+// its published dependencies.
+go 1.26.5
+
+use (
+	.
+	./awsstore
+)

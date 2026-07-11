@@ -20,7 +20,7 @@ FUZZTIME ?= 20s
 .DEFAULT_GOAL := check
 
 .PHONY: check
-check: tidy-check fmt-check lint test vuln ## Run the full CI gate locally
+check: tidy-check fmt-check lint test vuln awsstore ## Run the full CI gate locally (root + awsstore submodule)
 
 .PHONY: test
 test: ## Run all tests with the race detector
@@ -61,6 +61,20 @@ fuzz: ## Run every qv2 fuzz target for $(FUZZTIME) each (targets auto-discovered
 		echo ">> $$t"; \
 		$(GO) test -run='^$$' -fuzz="^$$t$$" -fuzztime=$(FUZZTIME) ./internal/qv2 || exit 1; \
 	done
+
+# awsstore is a SEPARATE module (github.com/layervai/qurl-go/awsstore) that
+# isolates the AWS SDK v2 dependency, so the root `./...` targets above never
+# reach it. This target mirrors the root gate (tidy, fmt, vet, lint, test -race,
+# vuln) inside ./awsstore, reusing the same pinned tools. It builds against the
+# in-tree parent via the committed go.work, so no parent tag is needed.
+.PHONY: awsstore
+awsstore: $(GOLANGCI) $(GOVULN) ## Run the full gate for the awsstore submodule
+	cd awsstore && $(GO) mod tidy -diff
+	cd awsstore && $(GOLANGCI) fmt --diff ./...
+	cd awsstore && $(GO) vet ./...
+	cd awsstore && $(GOLANGCI) run ./...
+	cd awsstore && $(GO) test -race ./...
+	cd awsstore && $(GOVULN) ./...
 
 .PHONY: tidy
 tidy: ## Tidy go.mod/go.sum
