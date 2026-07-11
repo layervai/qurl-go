@@ -1004,6 +1004,11 @@ func WithRelayURL(rawURL string) RegisterOption {
 // a self-inconsistent registration-info response is rejected even when you
 // override. If you override because the reported peer is unreachable, the response
 // must still be internally consistent for registration to proceed.
+//
+// The override governs the peer used for the REG round trip. After a successful
+// registration the persisted AgentState.NHPPeer is replaced by the completion
+// response's authoritative peer, so a knock-only agent's later knocks (and any
+// re-registration) use that server-reported peer, not this override.
 func WithNHPPeer(peer NHPServerPeerInfo) RegisterOption {
 	return registerOptionFunc(func(o *registerConfig) error {
 		// o.clock is initialized to time.Now before options apply; using it keeps
