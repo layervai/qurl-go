@@ -5,14 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 )
 
 // OpenRegisteredAgent opens a zero-network Client from a completed AgentState.
-// The device credential is read from store on demand, so a later explicit
-// credential recovery is observed without rebuilding the client. NHP peer
-// expiry does not invalidate this REST client; callers that will knock must
-// separately require a live peer or run RefreshAgentRegistration.
+// The device credential is read from store behind a one-minute cache. A later
+// explicit credential recovery is observed after that cache expires; callers
+// that need the replacement immediately should use the Client returned by
+// RecoverAgentCredential. NHP peer absence, corruption, or expiry does not
+// invalidate this REST client; callers that will knock must validate the peer or
+// run RefreshAgentRegistration separately.
 func OpenRegisteredAgent(ctx context.Context, store AgentStateStore, opts ...ClientOption) (*Client, error) {
 	if store == nil {
 		return nil, fmt.Errorf("%w: agent state store must not be nil", ErrInvalidClientConfig)
@@ -31,7 +32,7 @@ func OpenRegisteredAgent(ctx context.Context, store AgentStateStore, opts ...Cli
 	if err != nil {
 		return nil, err
 	}
-	if err := validateRegisteredAgentState(state, time.Now(), false, ErrInvalidClientConfig); err != nil {
+	if err := validateCompletedAgentIdentity(state, ErrInvalidClientConfig); err != nil {
 		return nil, err
 	}
 	if strings.TrimSpace(state.DeviceAPIKey) == "" {

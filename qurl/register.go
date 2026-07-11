@@ -271,7 +271,7 @@ func (cfg *registerConfig) finishRegisteredAgentState(state *AgentState) (*Agent
 		return nil, err
 	}
 	if cfg.requireDeviceKey && strings.TrimSpace(state.DeviceAPIKey) == "" {
-		return nil, fmt.Errorf("%w: agent %q is registered but its device credential is absent from this state; clear or replace the persisted AgentState (or use a fresh AgentStateStore) and register again", ErrDeviceCredentialMissing, state.AgentID)
+		return nil, &CredentialRecoveryRequiredError{DeviceID: state.AgentID, Cause: ErrDeviceCredentialMissing}
 	}
 	if err := cfg.reconcileDeviceID(state); err != nil {
 		return nil, err
@@ -406,44 +406,30 @@ func (cfg *registerConfig) requestOTP(ctx context.Context, store AgentStateStore
 // tryCompletionProbe attempts a completion fetch to self-heal a crash that
 // happened after the registration RAK but before completion. done is true when
 // the probe resolved the run (success → registered state, or a terminal
-// completion error); done is false when the device is not yet enrolled OR the
-// probe hit a transient fault — in both cases the caller should proceed to REG,
-// since the probe is only an optimization and REG is the real path.
+// completion error); done is false only when the service authoritatively says
+// the device is not enrolled, in which case the caller proceeds to REG.
 //
-// The self-heal relies on the qurl-service completion endpoint being idempotent
-// for an already-enrolled device: a probe for a device a prior crashed run
-// already enrolled must return that device's credential again (rather than a
-// conflict), which is the completion grace-window contract implemented in
-// qurl-service #1182. Without it a probe on the happy resume path would surface a
-// spurious already-issued denial instead of finishing the run.
+// Completion is first-issue-only. A 5xx, transport failure, malformed 2xx, or
+// invalid response is therefore terminal recovery-required ambiguity: the
+// service may have minted the key even though this process could not persist it.
+// Falling through after such an error would risk a second completion attempt.
 func (cfg *registerConfig) tryCompletionProbe(ctx context.Context, key string, store AgentStateStore, state *AgentState, path pathKind) (done bool, doneState *AgentState, err error) {
 	comp, err := cfg.postCompletion(ctx, key, state, path)
 	if err != nil {
-		if isCompletionNotYetRegistered(err) || isTransientCompletionError(err) {
-			// Not yet registered, or a transient blip on the optimization probe:
-			// fall through to REG rather than aborting the whole registration.
-			// Falling through on a transient (5xx) fault relies on the server
-			// treating a repeat REG for the same device key as idempotent — the
-			// same lost-response-retry assumption BootstrapAgent documents. A
-			// non-idempotent server would instead answer 52103 (identity conflict)
-			// and misleadingly suggest WithTakeover for what was really a transient
-			// blip; that trade-off is accepted because the device is not yet
-			// confirmed enrolled here, so REG (the real path) is the safe action.
+		if errors.Is(err, ErrCredentialRecoveryRequired) {
+			// Completion was dispatched and may have minted the one-time plaintext
+			// credential. Never fall through to REG + a second completion attempt.
+			return true, nil, err
+		}
+		if isCompletionNotYetRegistered(err) {
+			// This structured absence is the sole safe fall-through: no credential
+			// was minted, so REG followed by one completion is still first issue.
 			return false, nil, nil
 		}
 		// Any other completion error is terminal — most notably a structured
 		// device_key_already_issued 409 (the device is registered but its key was
 		// already issued and cannot be re-fetched). That is a real answer the
-		// caller must act on, so surface it rather than treating the probe as a
-		// no-op and proceeding to REG; the "optimization only" framing applies to
-		// the not-yet-registered and transient cases above, not to a terminal denial.
-		//
-		// A bare transport fault (connection reset/timeout, no *APIError) also lands
-		// here rather than falling through — deliberately: the post-REG completion
-		// fetch hits the SAME endpoint, so a genuinely-down completion path would
-		// fail identically after a wasted REG. Aborting fast at the probe (which the
-		// account resume simply re-runs) is preferable, and context cancellation
-		// (surfaced by postCompletion) is likewise correctly terminal.
+		// caller must act on, so surface it rather than proceeding to REG.
 		return true, nil, err
 	}
 	doneState, err = cfg.persistCompletion(ctx, store, state, comp)
@@ -539,27 +525,31 @@ func (cfg *registerConfig) completeAndPersist(ctx context.Context, key string, s
 // persistCompletion writes the completed registration into store and returns the
 // registered state.
 func (cfg *registerConfig) persistCompletion(ctx context.Context, store AgentStateStore, state *AgentState, comp *completionResponse) (*AgentState, error) {
-	if err := cfg.reconcileCompletionDeviceID(state, comp); err != nil {
-		return nil, err
+	if comp == nil {
+		return nil, credentialPersistenceFailure(state.AgentID, fmt.Errorf("%w: completion response is nil", cfg.invalidConfigErr))
 	}
+	// A successful completion response contains the only plaintext copy the
+	// service will reveal. Keep exactly one durable reference on success and drop
+	// the response object's reference on every path.
+	defer func() { comp.DeviceAPIKey = "" }()
+	if err := cfg.reconcileCompletionDeviceID(state, comp); err != nil {
+		return nil, credentialPersistenceFailure(state.AgentID, err)
+	}
+	if err := cfg.assertCompletionPeerMatchesRegistration(state, comp); err != nil {
+		return nil, credentialPersistenceFailure(state.AgentID, err)
+	}
+	previous := *state
 	state.AgentID = comp.AgentID
 	state.RegisteredAt = comp.RegisteredAt
-	// Replace the persisted NHP peer with the completion response's peer WITHOUT
-	// re-running assertServerIDMatches (the registration-info integrity check).
-	// That is safe here: the completion peer arrived over the authenticated qurl-
-	// service TLS connection and already passed validateNHPServerPeerInfo, and the
-	// RegisterAgent Client authorizes with the REST device bearer — it never
-	// NHP-knocks this peer — so there is no live server_id⇄fingerprint gap to close.
-	// A knock-only BootstrapAgent DOES later knock this peer; there it is trusted on
-	// the same authenticated-TLS origin, and completionResponse carries no server_id
-	// to assert against, so the TLS-authenticated origin is the trust anchor.
-	peer := comp.NHPServerPeer
-	state.NHPPeer = &peer
+	// Preserve the peer that authenticated the successful RAK. Completion is a
+	// credential-mint response, not authority to rotate the Noise peer after the
+	// handshake; assert it agrees above and never replace the RAK peer here.
 	state.DeviceAPIKey = comp.DeviceAPIKey
 	state.OTPRequestedAt = nil
 	state.SchemaVersion = agentStateSchemaVersion
 	if err := store.SaveAgentState(ctx, state); err != nil {
-		return nil, &CredentialPersistenceError{DeviceID: state.AgentID, Cause: err}
+		*state = previous
+		return nil, credentialPersistenceFailure(previous.AgentID, err)
 	}
 	return state, nil
 }
@@ -579,8 +569,8 @@ func (cfg *registerConfig) fetchRegistrationInfo(ctx context.Context, key string
 	return &env.Data, nil
 }
 
-// postCompletion runs POST /v1/agent/registration/complete, minting (or
-// returning) the device REST credential.
+// postCompletion runs POST /v1/agent/registration/complete, which mints the
+// first-issue-only device REST credential.
 func (cfg *registerConfig) postCompletion(ctx context.Context, key string, state *AgentState, path pathKind) (*completionResponse, error) {
 	reqBody := completeRequestBody{
 		DeviceID:        state.AgentID,
@@ -588,12 +578,41 @@ func (cfg *registerConfig) postCompletion(ctx context.Context, key string, state
 	}
 	var env apiEnvelope[completionResponse]
 	if err := doAuthorizedJSON(ctx, cfg.httpClient, cfg.baseURL, BearerToken(key).Authorize, http.MethodPost, "/v1/agent/registration/complete", reqBody, &env); err != nil {
-		return nil, cfg.mapCompletionHTTPError(err, path, state.AgentID)
+		mapped := cfg.mapCompletionHTTPError(err, path, state.AgentID)
+		if errors.Is(mapped, ErrCredentialRecoveryRequired) {
+			return nil, mapped
+		}
+		if errors.Is(mapped, ErrRegistrationRetryLater) {
+			// qurl-service's structured 503 service_unavailable is emitted by the
+			// pre-auth completion admission layer before the mint handler runs.
+			return nil, mapped
+		}
+		var outcomeUnknown *apiRequestOutcomeUnknownError
+		var apiErr *APIError
+		if errors.As(mapped, &outcomeUnknown) || (errors.As(mapped, &apiErr) && apiErr.StatusCode >= 500) {
+			return nil, credentialPersistenceFailure(state.AgentID, mapped)
+		}
+		return nil, mapped
 	}
 	if err := env.Data.validate(cfg.clock(), cfg.invalidConfigErr); err != nil {
-		return nil, err
+		env.Data.DeviceAPIKey = ""
+		return nil, credentialPersistenceFailure(state.AgentID, err)
 	}
 	return &env.Data, nil
+}
+
+func credentialPersistenceFailure(deviceID string, cause error) *CredentialPersistenceError {
+	return &CredentialPersistenceError{DeviceID: deviceID, Cause: cause}
+}
+
+func (cfg *registerConfig) assertCompletionPeerMatchesRegistration(state *AgentState, comp *completionResponse) error {
+	if state == nil || state.NHPPeer == nil {
+		return fmt.Errorf("%w: authenticated registration state is missing its NHP peer", cfg.invalidConfigErr)
+	}
+	if comp == nil || comp.NHPServerPeer.PublicKeyB64 != state.NHPPeer.PublicKeyB64 {
+		return fmt.Errorf("%w: completion response NHP peer does not match the peer that authenticated the registration acknowledgement", cfg.invalidConfigErr)
+	}
+	return nil
 }
 
 // mapRegistrationHTTPError maps the registration-info HTTP failure to a typed
@@ -614,6 +633,9 @@ func (cfg *registerConfig) mapRegistrationHTTPError(err error) error {
 	}
 	if apiErr.StatusCode == http.StatusTooManyRequests {
 		return fmt.Errorf("%w: %w", ErrRegistrationRateLimited, err)
+	}
+	if apiErr.StatusCode == http.StatusServiceUnavailable && strings.EqualFold(strings.TrimSpace(apiErr.Code), "service_unavailable") {
+		return fmt.Errorf("%w: registration preflight is temporarily unavailable: %w", ErrRegistrationRetryLater, err)
 	}
 	if apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden {
 		return fmt.Errorf("%w: the API key was rejected by the registration service: %w", ErrKeyRejected, err)
@@ -641,6 +663,9 @@ func (cfg *registerConfig) mapCompletionHTTPError(err error, path pathKind, devi
 	if apiErr.StatusCode == http.StatusTooManyRequests {
 		return fmt.Errorf("%w: %w", ErrRegistrationRateLimited, err)
 	}
+	if apiErr.StatusCode == http.StatusServiceUnavailable && strings.EqualFold(strings.TrimSpace(apiErr.Code), "service_unavailable") {
+		return fmt.Errorf("%w: completion admission failed before credential minting: %w", ErrRegistrationRetryLater, err)
+	}
 	if isDeviceKeyAlreadyIssued(apiErr) {
 		return &CredentialRecoveryRequiredError{DeviceID: deviceID, Cause: err}
 	}
@@ -664,17 +689,6 @@ func isCompletionNotYetRegistered(err error) bool {
 		return true
 	}
 	return apiErr.StatusCode == http.StatusNotFound
-}
-
-// isTransientCompletionError reports whether a completion error is a retryable
-// server-side fault (5xx). On the crash-recovery probe this means "proceed to
-// REG" rather than abort, since the probe is only an optimization.
-func isTransientCompletionError(err error) bool {
-	var apiErr *APIError
-	if !errors.As(err, &apiErr) {
-		return false
-	}
-	return apiErr.StatusCode >= 500 && apiErr.StatusCode <= 599
 }
 
 // isDeviceKeyAlreadyIssued matches ONLY the structured device_key_already_issued
@@ -841,9 +855,11 @@ func derefTime(t *time.Time, fallback time.Time) time.Time {
 // --- store-backed credential provider ---
 
 // newStoreBackedClient builds a Client whose credentials come from the device
-// API key persisted in store, wrapped in CachedCredentials so a rotated key is
-// picked up within the TTL without rebuilding the client. Construction makes
-// no qURL API calls; loading a network-backed store can still perform I/O.
+// API key persisted in store, wrapped in CachedCredentials. An existing Client
+// can retain its prior key for up to storeCredentialCacheTTL; recovery callers
+// should use the newly returned Client when they need the replacement at once.
+// Construction makes no qURL API calls; loading a network-backed store can
+// still perform I/O.
 func newStoreBackedClient(store AgentStateStore, baseURL string, httpClient HTTPDoer) *Client {
 	provider := CachedCredentials(&storeCredentialProvider{store: store}, storeCredentialCacheTTL)
 	return &Client{
@@ -858,8 +874,8 @@ func newStoreBackedClient(store AgentStateStore, baseURL string, httpClient HTTP
 const storeCredentialCacheTTL = time.Minute
 
 // storeCredentialProvider authorizes Client requests with the DeviceAPIKey read
-// from the AgentStateStore. Reading on demand (behind a short cache) means a
-// rotated credential in the store is observed without rebuilding the client.
+// from AgentStateStore. CachedCredentials bounds store reads and observes a
+// replacement after the one-minute cache expires.
 type storeCredentialProvider struct {
 	store AgentStateStore
 }
@@ -1129,10 +1145,13 @@ func WithRelayURL(rawURL string) RegisterOption {
 // override. If you override because the reported peer is unreachable, the response
 // must still be internally consistent for registration to proceed.
 //
-// The override governs the peer used for the REG round trip. After a successful
-// registration the persisted AgentState.NHPPeer is replaced by the completion
-// response's authoritative peer, so a knock-only agent's later knocks (and any
-// re-registration) use that server-reported peer, not this override.
+// The override governs and becomes the peer authenticated by the REG/RAK round
+// trip. Completion must report the same public key; it cannot replace the peer
+// after the handshake. An override whose key differs from qurl-service's
+// completion peer therefore fails recovery-required after completion may have
+// minted a credential. Use a differing override only with a custom/test service
+// whose completion contract is configured to agree with it. On success the SDK
+// preserves this peer (including its host/port) in AgentState.
 func WithNHPPeer(peer NHPServerPeerInfo) RegisterOption {
 	return registerOptionFunc(func(o *registerConfig) error {
 		// o.clock is initialized to time.Now before options apply; using it keeps

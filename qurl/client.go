@@ -1054,7 +1054,7 @@ func doAuthorizedJSON(ctx context.Context, httpClient HTTPDoer, baseURL string, 
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("qurl: API request failed: %w", err)
+		return &apiRequestOutcomeUnknownError{err: fmt.Errorf("qurl: API request failed: %w", err)}
 	}
 	defer func() {
 		_ = resp.Body.Close()
@@ -1070,8 +1070,9 @@ func doAuthorizedJSON(ctx context.Context, httpClient HTTPDoer, baseURL string, 
 				err:        err,
 			}
 		}
-		return fmt.Errorf("qurl: read API response: %w", err)
+		return &apiRequestOutcomeUnknownError{err: fmt.Errorf("qurl: read API response after successful status: %w", err)}
 	}
+	defer wipeBytes(respBody)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return apiErrorFromResponse(resp.StatusCode, respBody)
 	}
@@ -1082,13 +1083,24 @@ func doAuthorizedJSON(ctx context.Context, httpClient HTTPDoer, baseURL string, 
 	// success endpoints should call this helper with out == nil or split to a
 	// no-body variant instead of weakening this fail-closed decode path.
 	if len(bytes.TrimSpace(respBody)) == 0 {
-		return fmt.Errorf("qurl: empty API response body")
+		return &apiRequestOutcomeUnknownError{err: errors.New("qurl: empty API response body after successful status")}
 	}
 	if err := json.Unmarshal(respBody, out); err != nil {
-		return fmt.Errorf("qurl: decode API response: %w", err)
+		return &apiRequestOutcomeUnknownError{err: fmt.Errorf("qurl: decode API response after successful status: %w", err)}
 	}
 	return nil
 }
+
+// apiRequestOutcomeUnknownError marks failures after an HTTP request was handed
+// to the transport, or after a 2xx response arrived but could not be consumed.
+// Mutation callers use this to avoid replaying an operation whose side effect
+// may already have committed. The underlying error remains matchable.
+type apiRequestOutcomeUnknownError struct {
+	err error
+}
+
+func (e *apiRequestOutcomeUnknownError) Error() string { return e.err.Error() }
+func (e *apiRequestOutcomeUnknownError) Unwrap() error { return e.err }
 
 // sdkUserAgent returns the cached SDK User-Agent header. The value is derived
 // from build info, which is fixed for the process lifetime, so it is computed
@@ -1123,9 +1135,11 @@ func usableBuildVersion(version string) bool {
 func readCappedBody(r io.Reader, limit int, what string) ([]byte, error) {
 	raw, err := io.ReadAll(io.LimitReader(r, int64(limit)+1))
 	if err != nil {
+		wipeBytes(raw)
 		return nil, fmt.Errorf("read %s: %w", what, err)
 	}
 	if len(raw) > limit {
+		wipeBytes(raw)
 		return nil, &inputExceedsCapError{what: what, limit: limit}
 	}
 	return raw, nil

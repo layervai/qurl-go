@@ -262,8 +262,9 @@ func (r registrationInfoResponse) validate(now time.Time, errKind error) error {
 }
 
 // completionResponse is the data payload of POST /v1/agent/registration/complete.
-// It mints (or returns) the device REST credential and confirms the durable
-// agent identity + NHP peer.
+// It mints the device REST credential and corroborates the durable agent
+// identity + NHP peer. The response cannot replace the peer that authenticated
+// the RAK; registration orchestration asserts the public keys agree.
 type completionResponse struct {
 	AgentID       string            `json:"agent_id"`
 	RegisteredAt  *time.Time        `json:"registered_at"`

@@ -14,29 +14,47 @@ import (
 	"time"
 )
 
-func TestOpenRegisteredAgent_ZeroNetworkAndExpiredPeerAllowed(t *testing.T) {
-	h := newRegisterHarness(t)
-	h.armDevicePubOnInfo()
-	if _, err := RegisterAgent(context.Background(), "lv_enroll", h.store, h.registerOpts()...); err != nil {
-		t.Fatalf("RegisterAgent: %v", err)
+func TestOpenRegisteredAgent_ZeroNetworkIgnoresKnockPeer(t *testing.T) {
+	cases := []struct {
+		name string
+		edit func(*AgentState)
+	}{
+		{name: "missing", edit: func(state *AgentState) { state.NHPPeer = nil }},
+		{name: "malformed", edit: func(state *AgentState) {
+			state.NHPPeer = &NHPServerPeerInfo{PublicKeyB64: "not-base64", Host: "", Port: -1}
+		}},
+		{name: "expired", edit: func(state *AgentState) {
+			state.NHPPeer.ExpireTime = time.Now().Add(-time.Hour).Unix()
+		}},
 	}
-	state := h.loadState(t)
-	state.NHPPeer.ExpireTime = time.Now().Add(-time.Hour).Unix()
-	if err := h.store.SaveAgentState(context.Background(), state); err != nil {
-		t.Fatalf("save expired peer: %v", err)
-	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := registeredHarness(t)
+			state := h.loadState(t)
+			tc.edit(state)
+			if err := h.store.SaveAgentState(context.Background(), state); err != nil {
+				t.Fatalf("save peer variant: %v", err)
+			}
 
-	infoBefore := h.svc.infoCalls.Load()
-	completeBefore := h.svc.completionCalls.Load()
-	client, err := OpenRegisteredAgent(context.Background(), h.store, WithBaseURL("https://resources.example.test"))
-	if err != nil {
-		t.Fatalf("OpenRegisteredAgent: %v", err)
-	}
-	if client == nil {
-		t.Fatal("OpenRegisteredAgent returned nil Client")
-	}
-	if h.svc.infoCalls.Load() != infoBefore || h.svc.completionCalls.Load() != completeBefore {
-		t.Fatal("OpenRegisteredAgent performed registration network I/O")
+			var networkCalls atomic.Int32
+			refusing := doerFunc(func(*http.Request) (*http.Response, error) {
+				networkCalls.Add(1)
+				return nil, errors.New("unexpected network call")
+			})
+			client, err := OpenRegisteredAgent(context.Background(), h.store,
+				WithBaseURL("https://resources.example.test"),
+				WithHTTPClient(refusing),
+			)
+			if err != nil {
+				t.Fatalf("OpenRegisteredAgent: %v", err)
+			}
+			if client == nil {
+				t.Fatal("OpenRegisteredAgent returned nil Client")
+			}
+			if networkCalls.Load() != 0 {
+				t.Fatalf("OpenRegisteredAgent network calls = %d, want 0", networkCalls.Load())
+			}
+		})
 	}
 }
 
@@ -333,6 +351,231 @@ func TestCredentialPersistenceFailureAndExplicitSameIDRecovery(t *testing.T) {
 	}
 }
 
+func TestRegisterAgent_PostCompletionContractFailuresRequireRecoveryWithoutRetry(t *testing.T) {
+	rotated := newFakeNHPServer(t)
+	cases := []struct {
+		name string
+		edit func(*fakeService)
+	}{
+		{name: "rotated peer", edit: func(service *fakeService) {
+			service.completionPeer = &NHPServerPeerInfo{
+				PublicKeyB64: rotated.serverPubB64(),
+				Host:         "rotated.example.test",
+				Port:         62206,
+			}
+		}},
+		{name: "invalid peer", edit: func(service *fakeService) {
+			service.completionPeer = &NHPServerPeerInfo{
+				PublicKeyB64: service.nhp.serverPubB64(),
+				Host:         "nhp.example.test",
+				Port:         0,
+			}
+		}},
+		{name: "agent id mismatch", edit: func(service *fakeService) {
+			service.agentID = "agent-different"
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newRegisterHarness(t)
+			tc.edit(h.svc)
+			h.armDevicePubOnInfo()
+
+			_, err := RegisterAgent(context.Background(), "lv_enroll", h.store, h.registerOpts()...)
+			var persistErr *CredentialPersistenceError
+			if !errors.As(err, &persistErr) || !errors.Is(err, ErrCredentialRecoveryRequired) {
+				t.Fatalf("want post-completion CredentialPersistenceError, got %v", err)
+			}
+			if strings.Contains(err.Error(), "lv_device_secret") {
+				t.Fatalf("error exposed completion credential: %v", err)
+			}
+			if h.svc.completionCalls.Load() != 1 {
+				t.Fatalf("completion calls = %d, want exactly 1", h.svc.completionCalls.Load())
+			}
+			state := h.loadState(t)
+			if state.RegisteredAt != nil || state.DeviceAPIKey != "" {
+				t.Fatalf("invalid completion response was persisted: %#v", state)
+			}
+			if state.NHPPeer == nil || state.NHPPeer.PublicKeyB64 != h.nhp.serverPubB64() {
+				t.Fatalf("authenticated RAK peer was not preserved: %#v", state.NHPPeer)
+			}
+		})
+	}
+}
+
+func TestRecoverAgentCredential_CompletionPeerRotationFailsClosed(t *testing.T) {
+	h := registeredHarness(t)
+	before := h.loadState(t)
+	rotated := newFakeNHPServer(t)
+	h.svc.mu.Lock()
+	h.svc.deviceAPIKey = "lv_device_rotated"
+	h.svc.completionPeer = &NHPServerPeerInfo{
+		PublicKeyB64: rotated.serverPubB64(),
+		Host:         "rotated.example.test",
+		Port:         62206,
+	}
+	h.svc.mu.Unlock()
+
+	completeBefore := h.svc.completionCalls.Load()
+	_, err := RecoverAgentCredential(context.Background(), "lv_enroll", h.store, h.registerOpts()...)
+	var persistErr *CredentialPersistenceError
+	if !errors.As(err, &persistErr) || !errors.Is(err, ErrCredentialRecoveryRequired) {
+		t.Fatalf("want recovery-required peer mismatch, got %v", err)
+	}
+	if h.svc.completionCalls.Load() != completeBefore+1 {
+		t.Fatalf("recovery completion calls = %d, want exactly 1", h.svc.completionCalls.Load()-completeBefore)
+	}
+	after := h.loadState(t)
+	if after.DeviceAPIKey != before.DeviceAPIKey || after.NHPPeer.PublicKeyB64 != before.NHPPeer.PublicKeyB64 {
+		t.Fatalf("failed recovery replaced durable credential/peer: before=%#v after=%#v", before, after)
+	}
+}
+
+func TestPersistCompletion_PeerMismatchDropsPlaintextReference(t *testing.T) {
+	state, err := newAgentState()
+	if err != nil {
+		t.Fatalf("newAgentState: %v", err)
+	}
+	state.AgentID = "agent-original"
+	peerA := newFakeNHPServer(t)
+	peerB := newFakeNHPServer(t)
+	state.NHPPeer = &NHPServerPeerInfo{
+		PublicKeyB64: peerA.serverPubB64(),
+		Host:         "peer-a.example.test",
+		Port:         62206,
+	}
+	now := time.Now().UTC()
+	comp := &completionResponse{
+		AgentID:      state.AgentID,
+		RegisteredAt: &now,
+		NHPServerPeer: NHPServerPeerInfo{
+			PublicKeyB64: peerB.serverPubB64(),
+			Host:         "peer-b.example.test",
+			Port:         62206,
+		},
+		DeviceAPIKey: "lv_plaintext_must_drop",
+	}
+	cfg, err := newRegisterConfig(nil)
+	if err != nil {
+		t.Fatalf("newRegisterConfig: %v", err)
+	}
+	_, err = cfg.persistCompletion(context.Background(), memoryAgentStateStore{}, state, comp)
+	if !errors.Is(err, ErrCredentialRecoveryRequired) {
+		t.Fatalf("persistCompletion: want recovery-required, got %v", err)
+	}
+	if comp.DeviceAPIKey != "" {
+		t.Fatal("completion response retained plaintext credential after rejection")
+	}
+	if state.DeviceAPIKey != "" || state.NHPPeer.PublicKeyB64 != peerA.serverPubB64() {
+		t.Fatalf("rejected completion mutated state: %#v", state)
+	}
+}
+
+func TestRegisterAgent_CompletionOutcomeUnknownRequiresRecoveryWithoutRetry(t *testing.T) {
+	cases := []struct {
+		name      string
+		configure func(*registerHarness, *atomic.Int32) RegisterOption
+	}{
+		{name: "malformed successful response", configure: func(h *registerHarness, attempts *atomic.Int32) RegisterOption {
+			h.handlerMu.Lock()
+			inner := h.handler
+			h.handlerMu.Unlock()
+			h.setHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPost && r.URL.Path == "/v1/agent/registration/complete" {
+					attempts.Add(1)
+					w.WriteHeader(http.StatusOK)
+					_, _ = fmt.Fprint(w, `{"data":`)
+					return
+				}
+				inner.ServeHTTP(w, r)
+			}))
+			return nil
+		}},
+		{name: "server error", configure: func(h *registerHarness, attempts *atomic.Int32) RegisterOption {
+			h.handlerMu.Lock()
+			inner := h.handler
+			h.handlerMu.Unlock()
+			h.setHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPost && r.URL.Path == "/v1/agent/registration/complete" {
+					attempts.Add(1)
+					w.WriteHeader(http.StatusServiceUnavailable)
+					_, _ = fmt.Fprint(w, `{"error":{"code":"upstream_unavailable","detail":"unknown outcome"}}`)
+					return
+				}
+				inner.ServeHTTP(w, r)
+			}))
+			return nil
+		}},
+		{name: "transport failure", configure: func(_ *registerHarness, attempts *atomic.Int32) RegisterOption {
+			client := doerFunc(func(req *http.Request) (*http.Response, error) {
+				if req.Method == http.MethodPost && req.URL.Path == "/v1/agent/registration/complete" {
+					attempts.Add(1)
+					return nil, errors.New("injected completion transport loss")
+				}
+				return http.DefaultClient.Do(req)
+			})
+			return WithRegisterHTTPClient(client)
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newRegisterHarness(t)
+			h.armDevicePubOnInfo()
+			var attempts atomic.Int32
+			opt := tc.configure(h, &attempts)
+			opts := h.registerOpts()
+			if opt != nil {
+				opts = append(opts, opt)
+			}
+
+			_, err := RegisterAgent(context.Background(), "lv_enroll", h.store, opts...)
+			var persistErr *CredentialPersistenceError
+			if !errors.As(err, &persistErr) || !errors.Is(err, ErrCredentialRecoveryRequired) {
+				t.Fatalf("want ambiguous completion persistence error, got %v", err)
+			}
+			if attempts.Load() != 1 {
+				t.Fatalf("completion attempts = %d, want exactly 1", attempts.Load())
+			}
+			if h.nhp.regCount() != 1 {
+				t.Fatalf("REG count = %d, want 1", h.nhp.regCount())
+			}
+			state := h.loadState(t)
+			if state.RegisteredAt != nil || state.DeviceAPIKey != "" {
+				t.Fatalf("ambiguous completion persisted credential: %#v", state)
+			}
+		})
+	}
+}
+
+func TestRegisterAgent_CompletionPreAuthUnavailableRemainsRetryable(t *testing.T) {
+	h := newRegisterHarness(t)
+	h.armDevicePubOnInfo()
+	h.handlerMu.Lock()
+	inner := h.handler
+	h.handlerMu.Unlock()
+	var attempts atomic.Int32
+	h.setHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/v1/agent/registration/complete" {
+			attempts.Add(1)
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = fmt.Fprint(w, `{"error":{"code":"service_unavailable","detail":"pre-auth limiter unavailable"}}`)
+			return
+		}
+		inner.ServeHTTP(w, r)
+	}))
+
+	_, err := RegisterAgent(context.Background(), "lv_enroll", h.store, h.registerOpts()...)
+	if !errors.Is(err, ErrRegistrationRetryLater) {
+		t.Fatalf("want retry-later pre-auth failure, got %v", err)
+	}
+	if errors.Is(err, ErrCredentialRecoveryRequired) {
+		t.Fatalf("pre-auth service_unavailable must not be ambiguous mint: %v", err)
+	}
+	if attempts.Load() != 1 {
+		t.Fatalf("completion attempts = %d, want 1", attempts.Load())
+	}
+}
+
 func TestAgentLifecycle_RegistrationAndResourceOriginsRemainIndependent(t *testing.T) {
 	h := newRegisterHarness(t)
 	h.svc.expectedBearer = "lv_enroll"
@@ -398,6 +641,178 @@ func TestAgentLifecycle_RegistrationAndResourceOriginsRemainIndependent(t *testi
 	if h.svc.infoCalls.Load() != 3 {
 		t.Fatalf("registration-info calls = %d, want 3 (initial, refresh, recovery)", h.svc.infoCalls.Load())
 	}
+}
+
+func TestAgentLifecycle_RegistrationAndResourceTransportsRemainIndependent(t *testing.T) {
+	h := newRegisterHarness(t)
+	h.armDevicePubOnInfo()
+
+	var resourceCredentialMu sync.Mutex
+	resourceCredential := "lv_device_secret"
+	resourceServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resourceCredentialMu.Lock()
+		want := resourceCredential
+		resourceCredentialMu.Unlock()
+		if got := r.Header.Get("Authorization"); got != "Bearer "+want {
+			t.Errorf("resource Authorization = %q, want Bearer %q", got, want)
+		}
+		_, _ = fmt.Fprint(w, `{"data":{"resource_id":"r_transport123","target_url":"https://internal.example.test","status":"active"}}`)
+	}))
+	t.Cleanup(resourceServer.Close)
+
+	apiHost := strings.TrimPrefix(h.apiSrv.URL, "http://")
+	relayHost := strings.TrimPrefix(h.relaySrv.URL, "http://")
+	resourceHost := strings.TrimPrefix(resourceServer.URL, "http://")
+	var registrationCalls, registrationRefusals atomic.Int32
+	registrationTransport := doerFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Host != apiHost && req.URL.Host != relayHost {
+			registrationRefusals.Add(1)
+			return nil, fmt.Errorf("registration transport refused host %q", req.URL.Host)
+		}
+		registrationCalls.Add(1)
+		return http.DefaultClient.Do(req)
+	})
+	var resourceCalls, resourceRefusals atomic.Int32
+	resourceTransport := doerFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Host != resourceHost {
+			resourceRefusals.Add(1)
+			return nil, fmt.Errorf("resource transport refused host %q", req.URL.Host)
+		}
+		resourceCalls.Add(1)
+		return http.DefaultClient.Do(req)
+	})
+
+	opts := h.registerOpts(
+		WithRegisterHTTPClient(registrationTransport),
+		WithAgentClientBaseURL(resourceServer.URL),
+		WithAgentClientHTTPClient(resourceTransport),
+	)
+	client, err := RegisterAgent(context.Background(), "lv_enroll", h.store, opts...)
+	if err != nil {
+		t.Fatalf("RegisterAgent: %v", err)
+	}
+	protectOnce(t, client)
+
+	h.svc.mu.Lock()
+	h.svc.deviceAPIKey = "lv_device_recovered"
+	h.svc.mu.Unlock()
+	resourceCredentialMu.Lock()
+	resourceCredential = "lv_device_recovered"
+	resourceCredentialMu.Unlock()
+	recovered, err := RecoverAgentCredential(context.Background(), "lv_enroll", h.store, opts...)
+	if err != nil {
+		t.Fatalf("RecoverAgentCredential: %v", err)
+	}
+	protectOnce(t, recovered)
+
+	opened, err := OpenRegisteredAgent(context.Background(), h.store,
+		WithBaseURL(resourceServer.URL),
+		WithHTTPClient(resourceTransport),
+	)
+	if err != nil {
+		t.Fatalf("OpenRegisteredAgent: %v", err)
+	}
+	protectOnce(t, opened)
+
+	if registrationCalls.Load() < 6 { // two each: info, relay REG, completion
+		t.Fatalf("registration transport calls = %d, want at least 6", registrationCalls.Load())
+	}
+	if resourceCalls.Load() != 3 {
+		t.Fatalf("resource transport calls = %d, want 3", resourceCalls.Load())
+	}
+	if registrationRefusals.Load() != 0 || resourceRefusals.Load() != 0 {
+		t.Fatalf("transport crossed origins: registration refusals=%d resource refusals=%d", registrationRefusals.Load(), resourceRefusals.Load())
+	}
+}
+
+func TestAgentLifecycleMutationsParticipateInSharedSetupLock(t *testing.T) {
+	t.Run("refresh", func(t *testing.T) {
+		h := registeredHarness(t)
+		var acquired, released atomic.Int32
+		h.store = instrumentFileStoreLock(t, h.store, &acquired, &released)
+		if _, err := RefreshAgentRegistration(context.Background(), "lv_enroll", h.store, h.registerOpts()...); err != nil {
+			t.Fatalf("RefreshAgentRegistration: %v", err)
+		}
+		if acquired.Load() != 1 || released.Load() != 1 {
+			t.Fatalf("refresh setup lock acquire/release = %d/%d, want 1/1", acquired.Load(), released.Load())
+		}
+	})
+
+	t.Run("recover", func(t *testing.T) {
+		h := registeredHarness(t)
+		h.svc.mu.Lock()
+		h.svc.deviceAPIKey = "lv_device_recovered"
+		h.svc.mu.Unlock()
+		var acquired, released atomic.Int32
+		h.store = instrumentFileStoreLock(t, h.store, &acquired, &released)
+		if _, err := RecoverAgentCredential(context.Background(), "lv_enroll", h.store, h.registerOpts()...); err != nil {
+			t.Fatalf("RecoverAgentCredential: %v", err)
+		}
+		if acquired.Load() != 1 || released.Load() != 1 {
+			t.Fatalf("recovery setup lock acquire/release = %d/%d, want 1/1", acquired.Load(), released.Load())
+		}
+	})
+
+	for _, tc := range []struct {
+		name string
+		run  func(*registerHarness) error
+	}{
+		{name: "refresh acquisition failure", run: func(h *registerHarness) error {
+			_, err := RefreshAgentRegistration(context.Background(), "lv_enroll", h.store, h.registerOpts()...)
+			return err
+		}},
+		{name: "recovery acquisition failure", run: func(h *registerHarness) error {
+			_, err := RecoverAgentCredential(context.Background(), "lv_enroll", h.store, h.registerOpts()...)
+			return err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := registeredHarness(t)
+			fileStore, ok := h.store.(fileAgentStateStore)
+			if !ok {
+				t.Fatalf("store type = %T, want fileAgentStateStore", h.store)
+			}
+			lockFailure := errors.New("injected lifecycle lock failure")
+			fileStore.lockFile = func(context.Context, string) (setupLock, error) {
+				return nil, lockFailure
+			}
+			h.store = fileStore
+			infoBefore := h.svc.infoCalls.Load()
+			err := tc.run(h)
+			if !errors.Is(err, ErrAgentSetupLock) || !errors.Is(err, lockFailure) {
+				t.Fatalf("lock failure = %v, want ErrAgentSetupLock and injected cause", err)
+			}
+			if h.svc.infoCalls.Load() != infoBefore {
+				t.Fatal("lifecycle mutation performed network I/O after setup-lock failure")
+			}
+		})
+	}
+}
+
+type trackingSetupLock struct {
+	released *atomic.Int32
+}
+
+func (l *trackingSetupLock) Close() error {
+	l.released.Add(1)
+	return nil
+}
+
+func instrumentFileStoreLock(t *testing.T, store AgentStateStore, acquired, released *atomic.Int32) AgentStateStore {
+	t.Helper()
+	fileStore, ok := store.(fileAgentStateStore)
+	if !ok {
+		t.Fatalf("store type = %T, want fileAgentStateStore", store)
+	}
+	wantPath := fileStore.setupLockPath()
+	fileStore.lockFile = func(_ context.Context, path string) (setupLock, error) {
+		if path != wantPath {
+			t.Errorf("setup lock path = %q, want %q", path, wantPath)
+		}
+		acquired.Add(1)
+		return &trackingSetupLock{released: released}, nil
+	}
+	return fileStore
 }
 
 func registeredHarness(t *testing.T) *registerHarness {

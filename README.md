@@ -230,12 +230,17 @@ Match errors by type, not message text:
   performs explicit same-id replacement after owner revoke. Registration key
   kinds can be restricted before OTP/REG side effects, registration and resource
   origins are independent, and post-mint persistence/already-issued failures now
-  carry typed recovery guidance.
+  carry typed recovery guidance. Ambiguous completion transport, unclassified
+  5xx, and response failures never auto-retry, and completion cannot replace the
+  peer that authenticated the successful RAK.
 
   This release requires qurl-service registration-info/completion support,
   idempotent same-key REG, device-key revoke that atomically clears the
   first-issue sentinel, and relay REG/RAK routing to be deployed before these
-  lifecycle operations are enabled.
+  lifecycle operations are enabled. During peer rotation, every qurl-service pod
+  serving registration-info and completion must report the same peer key; a
+  deployment-skew mismatch after mint fails recovery-required rather than
+  silently replacing the RAK-authenticated peer.
 
 - **Added: sealed full-AgentState file storage** —
   `qurl.NewSealedFileAgentState` provides an SDK-owned AES-256-GCM envelope with

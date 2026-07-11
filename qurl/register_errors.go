@@ -115,10 +115,11 @@ func (e *CredentialRecoveryRequiredError) Unwrap() []error {
 	return errs
 }
 
-// CredentialPersistenceError means completion minted and returned a plaintext
-// device credential, but the final AgentState save failed. Retrying ordinary
-// registration must not be treated as a fresh mint. Revoke agent:<device_id>,
-// then explicitly recover the same identity.
+// CredentialPersistenceError means completion may have minted its one-time
+// plaintext device credential, but the SDK could not prove a valid durable
+// commit. This includes transport/5xx/response ambiguity as well as a final
+// AgentState save failure. Retrying ordinary registration is unsafe. Revoke
+// agent:<device_id>, then explicitly recover the same identity.
 type CredentialPersistenceError struct {
 	DeviceID string
 	Cause    error
@@ -126,7 +127,7 @@ type CredentialPersistenceError struct {
 
 func (e *CredentialPersistenceError) Error() string {
 	keyID := "agent:" + e.DeviceID
-	message := fmt.Sprintf("qurl: device credential for %q was minted but could not be persisted; revoke %q, then call qurl.RecoverAgentCredential with this state store", e.DeviceID, keyID)
+	message := fmt.Sprintf("qurl: device credential for %q may have been minted but was not safely persisted; revoke %q, then call qurl.RecoverAgentCredential with this state store", e.DeviceID, keyID)
 	if e.Cause != nil {
 		return fmt.Sprintf("%s: %v", message, e.Cause)
 	}
@@ -150,10 +151,11 @@ var ErrRegistrationInvalidInput = errors.New("qurl: registration input invalid")
 // the account. Contact the account owner to enable it.
 var ErrRegistrationDisabled = errors.New("qurl: agent registration disabled")
 
-// ErrRegistrationRetryLater is returned when the registration relay answered with
-// an overload cookie-challenge (NHP_COK) instead of a registration reply: the
-// enrollment path is under load. Back off briefly and re-run RegisterAgent.
-var ErrRegistrationRetryLater = errors.New("qurl: registration relay busy; retry shortly")
+// ErrRegistrationRetryLater is returned when the registration relay answers
+// with an overload cookie-challenge or the completion route's pre-auth admission
+// layer reports structured service_unavailable before the mint handler ran.
+// Back off briefly and re-run the same operation.
+var ErrRegistrationRetryLater = errors.New("qurl: registration temporarily unavailable; retry shortly")
 
 // ErrRegisterReplyMalformed is returned when the registration relay returned a
 // reply that failed the request→reply correlation contract before the SDK could

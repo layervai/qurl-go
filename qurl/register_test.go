@@ -300,6 +300,7 @@ type fakeService struct {
 	deviceAPIKey     string
 	agentID          string // agent id echoed by completion; "" => echo the request device_id
 	registeredAt     *time.Time
+	completionPeer   *NHPServerPeerInfo
 
 	// counters
 	infoCalls       atomic.Int32
@@ -390,16 +391,20 @@ func (f *fakeService) serveCompletion(w http.ResponseWriter, r *http.Request) {
 	if agentID == "" {
 		agentID = req.DeviceID
 	}
+	peer := NHPServerPeerInfo{
+		PublicKeyB64: f.nhp.serverPubB64(),
+		Host:         "nhp.example.test",
+		Port:         62206,
+		ExpireTime:   0,
+	}
+	if f.completionPeer != nil {
+		peer = *f.completionPeer
+	}
 	resp := completionResponse{
-		AgentID:      agentID,
-		RegisteredAt: f.registeredAt,
-		NHPServerPeer: NHPServerPeerInfo{
-			PublicKeyB64: f.nhp.serverPubB64(),
-			Host:         "nhp.example.test",
-			Port:         62206,
-			ExpireTime:   0,
-		},
-		DeviceAPIKey: f.deviceAPIKey,
+		AgentID:       agentID,
+		RegisteredAt:  f.registeredAt,
+		NHPServerPeer: peer,
+		DeviceAPIKey:  f.deviceAPIKey,
 	}
 	writeEnvelope(f.t, w, resp)
 }
@@ -1478,9 +1483,13 @@ func TestRegisterAgent_WithNHPPeerAndRelayURLOverrideWorks(t *testing.T) {
 	if h.nhp.regCount() != 1 {
 		t.Fatalf("REG count = %d, want 1 (override relay was used)", h.nhp.regCount())
 	}
+	state := h.loadState(t)
+	if state.NHPPeer == nil || state.NHPPeer.Host != overridePeer.Host || state.NHPPeer.Port != overridePeer.Port {
+		t.Fatalf("persisted peer = %#v, want authenticated override %#v", state.NHPPeer, overridePeer)
+	}
 }
 
-func TestRegisterAgent_AccountPath_ProbeToleratesTransientCompletionFault(t *testing.T) {
+func TestRegisterAgent_AccountPath_ProbeTreatsTransientCompletionAsUnknownOutcome(t *testing.T) {
 	h := newRegisterHarness(t)
 	h.svc.keyKind = keyKindAccount
 	h.svc.maskedEmail = "j***@x.com"
@@ -1491,35 +1500,32 @@ func TestRegisterAgent_AccountPath_ProbeToleratesTransientCompletionFault(t *tes
 		t.Fatalf("prime otp_pending: want ErrOTPPending, got %v", err)
 	}
 
-	// On resume, make the completion PROBE fault transiently (503) on its first
-	// call, then succeed once the device is enrolled by REG. A transient probe
-	// fault must NOT abort registration — the flow proceeds to REG.
+	// On resume, make the completion probe return 503. Completion is a
+	// first-issue-only mutation, so the SDK cannot prove the service did not mint
+	// before returning the error. It must stop recovery-required without REG or a
+	// second completion attempt.
 	var completionHits atomic.Int32
 	h.setHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && r.URL.Path == "/v1/agent/registration/complete" {
-			if completionHits.Add(1) == 1 {
-				// The probe call: transient fault.
-				w.WriteHeader(http.StatusServiceUnavailable)
-				_, _ = fmt.Fprint(w, `{"error":{"code":"upstream_unavailable","detail":"try again"}}`)
-				return
-			}
+			completionHits.Add(1)
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = fmt.Fprint(w, `{"error":{"code":"upstream_unavailable","detail":"unknown outcome"}}`)
+			return
 		}
 		// registration-info and the real (post-REG) completion go to the fake.
 		h.svc.handler(h.relaySrv.URL)(w, r)
 	}))
 
-	client, err := RegisterAgent(context.Background(), "lv_account_key", h.store, h.registerOpts(WithOTP("424242"))...)
-	if err != nil {
-		t.Fatalf("resume despite transient probe fault: %v", err)
+	_, err := RegisterAgent(context.Background(), "lv_account_key", h.store, h.registerOpts(WithOTP("424242"))...)
+	var persistErr *CredentialPersistenceError
+	if !errors.As(err, &persistErr) || !errors.Is(err, ErrCredentialRecoveryRequired) {
+		t.Fatalf("resume 503: want recovery-required unknown outcome, got %v", err)
 	}
-	if client == nil {
-		t.Fatal("nil client")
+	if h.nhp.regCount() != 0 {
+		t.Fatalf("REG count = %d, want 0 after ambiguous completion", h.nhp.regCount())
 	}
-	if h.nhp.regCount() != 1 {
-		t.Fatalf("REG count = %d, want 1 (flow proceeded to REG after transient probe fault)", h.nhp.regCount())
-	}
-	if completionHits.Load() < 2 {
-		t.Fatalf("completion hits = %d, want >=2 (probe faulted, then real completion)", completionHits.Load())
+	if completionHits.Load() != 1 {
+		t.Fatalf("completion hits = %d, want exactly 1", completionHits.Load())
 	}
 }
 

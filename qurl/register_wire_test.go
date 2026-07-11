@@ -343,23 +343,6 @@ func TestMapRegistrationHTTPError(t *testing.T) {
 	}
 }
 
-// TestIsTransientCompletionError covers the 5xx predicate directly.
-func TestIsTransientCompletionError(t *testing.T) {
-	for _, status := range []int{500, 502, 503, 504, 599} {
-		if !isTransientCompletionError(&APIError{StatusCode: status}) {
-			t.Errorf("status %d should be transient", status)
-		}
-	}
-	for _, status := range []int{400, 401, 404, 409, 200} {
-		if isTransientCompletionError(&APIError{StatusCode: status}) {
-			t.Errorf("status %d should not be transient", status)
-		}
-	}
-	if isTransientCompletionError(errors.New("not an api error")) {
-		t.Error("a non-APIError should not be transient")
-	}
-}
-
 // TestIsBootstrapConsumedCompletion covers both the primary code and its alias.
 func TestIsBootstrapConsumedCompletion(t *testing.T) {
 	for _, code := range []string{"setup_key_consumed", "bootstrap_setup_key_consumed", "SETUP_KEY_CONSUMED"} {
