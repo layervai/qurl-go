@@ -149,6 +149,48 @@ func TestBootstrapAgent_ReturnsRegisteredStateWithoutNetwork(t *testing.T) {
 	}
 }
 
+// TestBootstrapAgent_ReturnsKeylessLegacyStateWithoutNetwork exercises the
+// requireDeviceKey=false fast path end to end: a legacy (bootstrap-era) state can
+// be registered yet hold no DeviceAPIKey, and BootstrapAgent must return it
+// directly with ZERO network I/O — unlike RegisterAgent (requireDeviceKey=true),
+// which fails such a state closed with ErrDeviceCredentialMissing
+// (TestRegisterAgent_FastPath_MissingDeviceKeyFailsClosed). A network-refusing
+// HTTP client proves the fast path makes no call.
+func TestBootstrapAgent_ReturnsKeylessLegacyStateWithoutNetwork(t *testing.T) {
+	registeredAt := time.Now().UTC()
+	state, err := newAgentState()
+	if err != nil {
+		t.Fatalf("newAgentState: %v", err)
+	}
+	state.AgentID = "agent-legacy"
+	state.RegisteredAt = &registeredAt
+	state.NHPPeer = &NHPServerPeerInfo{
+		PublicKeyB64: base64.StdEncoding.EncodeToString(make([]byte, 32)),
+		Host:         "nhp.layerv.ai",
+		Port:         62206,
+	}
+	// No DeviceAPIKey and SchemaVersion 0: the keyless legacy shape.
+
+	refusing := doerFunc(func(req *http.Request) (*http.Response, error) {
+		t.Errorf("BootstrapAgent made an unexpected network call to %s", req.URL)
+		return nil, errors.New("network refused")
+	})
+
+	got, err := BootstrapAgent(context.Background(), "lv_setup_key",
+		memoryAgentStateStore{state: state},
+		WithBootstrapHTTPClient(refusing),
+	)
+	if err != nil {
+		t.Fatalf("BootstrapAgent on a keyless legacy state: want the fast path to return it, got %v", err)
+	}
+	if got.AgentID != "agent-legacy" || got.RegisteredAt == nil {
+		t.Fatalf("returned state = %#v, want the registered legacy state", got)
+	}
+	if got.DeviceAPIKey != "" {
+		t.Fatalf("returned DeviceAPIKey = %q, want empty (keyless legacy state returned as-is)", got.DeviceAPIKey)
+	}
+}
+
 func TestBootstrapAgent_RejectsMismatchedRequestedAgentIDOnFastPath(t *testing.T) {
 	h := newRegisterHarness(t)
 	h.svc.keyKind = keyKindBootstrap

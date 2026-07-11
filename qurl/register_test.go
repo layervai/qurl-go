@@ -713,6 +713,70 @@ func TestRegisterAgent_ConcurrentFreshStoreSetupSerializes(t *testing.T) {
 	}
 }
 
+// TestRegisterAgent_ConcurrentFreshStoreSetupSerializes_NestedMissingDir is the
+// H1 regression fence: it points the shared FileAgentState at a path under a
+// NESTED subdirectory that does NOT exist yet, so the state dir is absent when
+// the first racer acquires the setup lock — the exact case the plain concurrency
+// test above misses because t.TempDir() pre-creates its parent. The advisory
+// lock opens a sidecar beside the state file, which requires the directory; if
+// the acquire did not create it first (issue #48 H1) the OpenFile would ENOENT,
+// the lock would silently no-op, and both racers would mint an identity and REG.
+// Asserting exactly one REG proves the acquire's best-effort os.MkdirAll engages
+// the lock before the directory exists.
+func TestRegisterAgent_ConcurrentFreshStoreSetupSerializes_NestedMissingDir(t *testing.T) {
+	if runtime.GOOS == "windows" || runtime.GOOS == "plan9" || runtime.GOOS == "js" {
+		t.Skipf("advisory flock is a no-op on %s; concurrent fresh-store setup is not serialized there", runtime.GOOS)
+	}
+	h := newRegisterHarness(t)
+	// Re-point the store at a path whose parent directories do not exist yet, so
+	// the very first acquire must create the dir before it can open the sidecar.
+	h.statePath = filepath.Join(t.TempDir(), "sub", "dir", "agent-state.json")
+	h.store = FileAgentState(h.statePath)
+	h.svc.keyKind = keyKindBootstrap
+	h.armDevicePubOnInfo()
+
+	const goroutines = 2
+	var wg sync.WaitGroup
+	clients := make([]*Client, goroutines)
+	errs := make([]error, goroutines)
+	start := make(chan struct{})
+	for i := range goroutines {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			<-start // release together so both hit the missing-dir fresh store at once
+			c, err := RegisterAgent(context.Background(), "lv_bootstrap_key", h.store, h.registerOpts()...)
+			clients[idx] = c
+			errs[idx] = err
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	for i := range goroutines {
+		if errs[i] != nil {
+			t.Fatalf("goroutine %d RegisterAgent: %v", i, errs[i])
+		}
+		if clients[i] == nil {
+			t.Fatalf("goroutine %d returned a nil client", i)
+		}
+	}
+
+	state := h.loadState(t)
+	if state.RegisteredAt == nil {
+		t.Fatal("state not marked registered after concurrent setup on a missing dir")
+	}
+	// Exactly one REG: the lock engaged despite the absent dir, serializing the
+	// two setups so the second short-circuits on the fast path. Two REGs would mean
+	// the acquire ENOENT-ed and the lock silently no-oped (the H1 bug).
+	if got := h.nhp.regCount(); got != 1 {
+		t.Fatalf("REG count = %d, want 1 (the advisory lock must engage before the state dir exists)", got)
+	}
+	if h.svc.completionCalls.Load() != 1 {
+		t.Fatalf("completion calls = %d, want 1", h.svc.completionCalls.Load())
+	}
+}
+
 func TestRegisterAgent_StoreBackedCredentialConcurrentAuthorize(t *testing.T) {
 	// The store-backed Client authorizes through CachedCredentials, whose
 	// Authorize has a real singleflight (refreshDone channel + mutex). Exercise it
@@ -1467,6 +1531,69 @@ func TestRegisterAgent_Validation(t *testing.T) {
 	}
 	if _, err := RegisterAgent(context.Background(), "lv_key", store, WithDeviceID("")); !errors.Is(err, ErrInvalidRegisterConfig) {
 		t.Fatalf("empty device id: want ErrInvalidRegisterConfig, got %v", err)
+	}
+}
+
+// TestRegisterAgent_OptionValidation covers the remaining advanced options that
+// validate their input at apply time (WithRegisterBaseURL/WithDeviceID are in
+// TestRegisterAgent_Validation): each rejects a bad value as
+// ErrInvalidRegisterConfig before any network call, so a typo in a relay URL,
+// NHP peer, hostname, or version fails fast at the front door.
+func TestRegisterAgent_OptionValidation(t *testing.T) {
+	store := memoryAgentStateStore{}
+	cases := []struct {
+		name string
+		opt  RegisterOption
+	}{
+		{"relay URL non-https scheme", WithRelayURL("ftp://relay.example.test")},
+		{"relay URL with userinfo", WithRelayURL("https://user:pass@relay.example.test")},
+		{"nhp peer missing public key", WithNHPPeer(NHPServerPeerInfo{Host: "nhp.example.test", Port: 62206})},
+		{"nhp peer bad port", WithNHPPeer(NHPServerPeerInfo{PublicKeyB64: base64.StdEncoding.EncodeToString(make([]byte, 32)), Host: "h", Port: 0})},
+		{"hostname blank", WithRegisterHostname("   ")},
+		{"version blank", WithRegisterVersion("")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := RegisterAgent(context.Background(), "lv_key", store, tc.opt)
+			if !errors.Is(err, ErrInvalidRegisterConfig) {
+				t.Fatalf("%s: want ErrInvalidRegisterConfig, got %v", tc.name, err)
+			}
+		})
+	}
+}
+
+// TestRegisterAgent_AccountPath_OTPRelayTransportFailsAsRelayError proves a relay
+// transport fault while dispatching the one-way OTP (relayknock.Send) surfaces as
+// the public *qurl.RelayError view, not a config error or a raw string. The
+// injected client forwards the registration-info HTTPS pre-flight to the fake
+// service but fails the relay POST at transport, so the fault originates exactly
+// at the NHP dispatch.
+func TestRegisterAgent_AccountPath_OTPRelayTransportFailsAsRelayError(t *testing.T) {
+	h := newRegisterHarness(t)
+	h.svc.keyKind = keyKindAccount
+	h.svc.maskedEmail = "j***@x.com"
+
+	passthrough := &http.Client{}
+	inject := doerFunc(func(req *http.Request) (*http.Response, error) {
+		if strings.Contains(req.URL.Path, "/relay/") {
+			return nil, errors.New("simulated relay transport failure")
+		}
+		return passthrough.Do(req)
+	})
+
+	_, err := RegisterAgent(context.Background(), "lv_account_key", h.store,
+		h.registerOpts(WithRegisterHTTPClient(inject))...)
+	var relayErr *RelayError
+	if !errors.As(err, &relayErr) {
+		t.Fatalf("OTP relay transport failure: want *qurl.RelayError, got %v", err)
+	}
+	// A transport fault must not be miscast as a config/ malformed-reply class.
+	if errors.Is(err, ErrInvalidRegisterConfig) {
+		t.Fatalf("relay transport fault leaked ErrInvalidRegisterConfig: %v", err)
+	}
+	// The OTP dispatch failed, so nothing should be registered.
+	if state := h.loadState(t); state.RegisteredAt != nil {
+		t.Error("state marked registered despite an OTP relay transport failure")
 	}
 }
 
