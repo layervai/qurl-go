@@ -890,8 +890,10 @@ func WithOTP(code string) RegisterOption {
 // On a fresh store the code is dispatched and then the provider is invoked in the
 // same RegisterAgent call, so the provider must tolerate or await email delivery
 // (poll/block until the code arrives). A provider that returns before the code is
-// deliverable hands back a stale or empty value and registration fails with
-// ErrOTPIncorrect; on a resume (the code was requested on an earlier call) the
+// deliverable hands back a stale or empty value: an empty (whitespace-only) return
+// fails fast with ErrInvalidRegisterConfig before any registration round trip,
+// while a non-empty but wrong code reaches the enrollment service and fails with
+// ErrOTPIncorrect. On a resume (the code was requested on an earlier call) the
 // provider runs only if a crash-recovery completion probe did not already finish.
 //
 // For a FileAgentState the enclosing RegisterAgent call holds the best-effort
