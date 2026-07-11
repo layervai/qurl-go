@@ -10,6 +10,8 @@ import (
 	"io"
 	"net/http"
 	"strings"
+
+	"github.com/layervai/qurl-go/relayknock/internal/nhpwire"
 )
 
 // Relay transport + the generic message orchestrators (Knock/Exchange/Send).
@@ -63,7 +65,7 @@ func (e *RelayError) Error() string {
 // with errors.Is rather than matching the message string. The qurl SDK's
 // consumer-side mapping (qurl/portal.go normalizeRelayError, translating this to
 // the portal ErrMalformedReply / enrollment ErrRegisterReplyMalformed taxonomy)
-// lands with the stacked RegisterAgent PR, not this one.
+// lives in this module's qurl package (portal.go / register.go).
 var ErrMalformedReply = errors.New("relayknock: malformed reply")
 
 // RelayPost delivers a round-trip NHP packet (knock or register) to the relay
@@ -110,7 +112,7 @@ func relayDo(ctx context.Context, httpClient HTTPDoer, relayBaseURL, serverID st
 	}
 	defer func() { _ = resp.Body.Close() }() // read path; Close error is not actionable (over-limit body not drained — see #21)
 
-	body, err = io.ReadAll(io.LimitReader(resp.Body, packetBufferSize))
+	body, err = io.ReadAll(io.LimitReader(resp.Body, nhpwire.PacketBufferSize))
 	if err != nil {
 		return resp.StatusCode, nil, url, &RelayError{Status: resp.StatusCode, Msg: fmt.Sprintf("relay POST %s: read reply: %v", url, err)}
 	}
@@ -246,9 +248,14 @@ func Exchange(ctx context.Context, relayBaseURL string, serverStaticPub []byte, 
 func replyTypeAllowed(requestType, replyType int) bool {
 	switch requestType {
 	case TypeKnock:
-		return replyType == nhpACK || replyType == nhpCOK
+		return replyType == nhpwire.TypeACK || replyType == nhpwire.TypeCOK
 	case TypeRegister:
-		return replyType == nhpRAK || replyType == nhpCOK
+		// A registration is normally answered with NHP_RAK, but the server may
+		// also return an NHP_COK overload cookie-challenge under load — the same
+		// "retry later" signal a knock can receive. Admit it so the caller can
+		// branch it with IsCookieChallenge rather than have Exchange reject it as
+		// an invalid pairing.
+		return replyType == nhpwire.TypeRAK || replyType == nhpwire.TypeCOK
 	default:
 		return false
 	}
@@ -271,7 +278,7 @@ func replyTypeAllowed(requestType, replyType int) bool {
 func Send(ctx context.Context, relayBaseURL string, serverStaticPub, body []byte, opts KnockOptions) error {
 	// Send drops buildOutbound's devicePriv and counter: NHP_OTP is one-way, so
 	// there is no reply to decrypt or counter to correlate.
-	packet, _, _, err := buildOutbound(nhpOTP, serverStaticPub, body, opts)
+	packet, _, _, err := buildOutbound(nhpwire.TypeOTP, serverStaticPub, body, opts)
 	if err != nil {
 		return err
 	}
@@ -338,8 +345,8 @@ func sendAcceptedError(status int, msg string) *RelayError {
 // actually used (a round-trip caller decrypts the reply with it), and the
 // minted counter (which a round-trip caller requires the reply to echo).
 func buildOutbound(headerType int, serverStaticPub, body []byte, opts KnockOptions) (packet, devicePriv []byte, counter uint64, err error) {
-	if len(serverStaticPub) != publicKeySize {
-		return nil, nil, 0, fmt.Errorf("server static pub must be %d bytes, got %d", publicKeySize, len(serverStaticPub))
+	if len(serverStaticPub) != nhpwire.PublicKeySize {
+		return nil, nil, 0, fmt.Errorf("server static pub must be %d bytes, got %d", nhpwire.PublicKeySize, len(serverStaticPub))
 	}
 
 	devicePriv = opts.DeviceStaticPriv
@@ -365,7 +372,10 @@ func buildOutbound(headerType int, serverStaticPub, body []byte, opts KnockOptio
 		return nil, nil, 0, fmt.Errorf("preamble: %w", err)
 	}
 
-	packet, err = buildMessage(headerType, &KnockInputs{
+	// buildOutbound is only reached with an already-gated initiator header type
+	// (Knock/Exchange/Send validate it), so it calls the ungated nhpwire codec
+	// directly rather than the type-checking BuildMessage wrapper.
+	packet, err = nhpwire.BuildMessage(headerType, &nhpwire.Inputs{
 		DeviceStaticPriv: devicePriv,
 		ServerStaticPub:  serverStaticPub,
 		EphemeralPriv:    ephemeralPriv,

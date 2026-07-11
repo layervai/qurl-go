@@ -1,4 +1,4 @@
-package relayknock
+package nhpwire
 
 import "encoding/binary"
 
@@ -12,23 +12,19 @@ const (
 
 	// Field offsets within the 240-byte HeaderCurve.
 	offEphemeral = headerCommonSize                           // 24  (32-byte e)
-	offIdentity  = offEphemeral + publicKeySize               // 56  (64+16, left zero)
+	offIdentity  = offEphemeral + PublicKeySize               // 56  (64+16, left zero)
 	offStatic    = offIdentity + maxIdentitySize + gcmTagSize // 136 (32+16 sealed device pub)
-	offTimestamp = offStatic + publicKeySize + gcmTagSize     // 184 (8+16 sealed timestamp)
+	offTimestamp = offStatic + PublicKeySize + gcmTagSize     // 184 (8+16 sealed timestamp)
 	offDigest    = offTimestamp + timestampSize + gcmTagSize  // 208 (32 BLAKE2s header digest)
-	headerSize   = offDigest + hashSize                       // 240
 
-	packetBufferSize  = 4096 // server reads into a fixed [PacketBufferSize]byte
-	maxSealedBodySize = packetBufferSize - headerSize
+	// HeaderSize is the fixed 240-byte NHP header length. Exported because the
+	// wrapping packages length-check reply packets against it.
+	HeaderSize = offDigest + hashSize // 240
 
-	// Header types (reference NHP relay iota: KPL=0, KNK=1, ACK=2, …, COK=7,
-	// RKN=8, …, OTP=12, REG=13, RAK=14).
-	nhpKNK = 1
-	nhpACK = 2
-	nhpCOK = 7
-	nhpOTP = 12
-	nhpREG = 13
-	nhpRAK = 14
+	// PacketBufferSize is the fixed buffer the reference server reads into; the
+	// wrapping packages bound packet sizes by it.
+	PacketBufferSize  = 4096
+	maxSealedBodySize = PacketBufferSize - HeaderSize
 
 	// Header flags (reference NHP relay common): COMPRESS = 1<<1. The agent never sets
 	// it (bodies sent uncompressed); kept to decode a compressed reply.
@@ -36,6 +32,19 @@ const (
 
 	protocolVersionMajor = 1
 	protocolVersionMinor = 0
+)
+
+// NHP header types (reference NHP relay iota: KPL=0, KNK=1, ACK=2, …, COK=7,
+// RKN=8, …, OTP=12, REG=13, RAK=14). Exported so the wrapping packages map them
+// to their public Type* constants and enforce type-gating; this codec itself
+// applies no restriction.
+const (
+	TypeKNK = 1  // NHP_KNK: knock
+	TypeACK = 2  // NHP_ACK: admission reply
+	TypeCOK = 7  // NHP_COK: overload cookie-challenge
+	TypeOTP = 12 // NHP_OTP: one-way OTP request
+	TypeREG = 13 // NHP_REG: registration
+	TypeRAK = 14 // NHP_RAK: registration reply
 )
 
 // setTypeAndPayloadSize writes the obfuscated type+size into HeaderCommon[0:8]:
