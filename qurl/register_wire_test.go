@@ -230,6 +230,20 @@ func TestCompletionResponse_Validate(t *testing.T) {
 	}
 }
 
+func TestDecodeNHPServerPublicKey_InvalidReportsBothEncodingsWithoutInput(t *testing.T) {
+	const invalid = "private-looking-invalid-key!?"
+	_, err := decodeNHPServerPublicKey(invalid)
+	if err == nil {
+		t.Fatal("invalid peer key unexpectedly decoded")
+	}
+	if !strings.Contains(err.Error(), "padded or raw standard base64") {
+		t.Fatalf("decode error does not identify both accepted encodings: %v", err)
+	}
+	if strings.Contains(err.Error(), invalid) {
+		t.Fatalf("decode error leaked the rejected input: %v", err)
+	}
+}
+
 // TestNHPBodyShapes pins the JSON field names of the OTP and REG bodies (the
 // opaque bytes relayknock seals), so a rename that would break server interop is
 // caught here.

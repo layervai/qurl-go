@@ -407,7 +407,7 @@ func decodeNHPServerPublicKey(encoded string) ([]byte, error) {
 	if rawErr == nil {
 		return decoded, nil
 	}
-	return nil, fmt.Errorf("not canonical padded or raw standard base64: %w", paddedErr)
+	return nil, fmt.Errorf("not canonical padded or raw standard base64: %w", errors.Join(paddedErr, rawErr))
 }
 
 // loadOrCreateAgentState loads the persisted state (creating a fresh keypair when

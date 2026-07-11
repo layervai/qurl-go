@@ -975,8 +975,7 @@ func TestRegisterAgent_AccountPath_OTPResendAfterCooldown(t *testing.T) {
 	// registered and no resend happens). Then the no-code branch re-sends.
 	h.setHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && r.URL.Path == "/v1/agent/registration/complete" {
-			w.WriteHeader(http.StatusNotFound)
-			_, _ = fmt.Fprint(w, `{"error":{"code":"device_not_registered","detail":"not yet"}}`)
+			http.Error(w, "not yet registered", http.StatusNotFound)
 			return
 		}
 		h.svc.handler(h.relaySrv.URL)(w, r)
@@ -1326,11 +1325,10 @@ func TestRegisterAgent_Completion409MapsToDeviceCredentialMissing(t *testing.T) 
 	}
 }
 
-func TestRegisterAgent_BareCompletion409IsNotDeviceCredentialMissing(t *testing.T) {
+func TestRegisterAgent_BareCompletion409RequiresRecoveryAndPreservesAPIError(t *testing.T) {
 	// A 409 that arrives WITHOUT the structured device_key_already_issued code
-	// (e.g. an infra/proxy conflict) must NOT be mapped to the destructive
-	// ErrDeviceCredentialMissing ("re-register / takeover") guidance; it surfaces
-	// as the raw *APIError instead.
+	// (e.g. a new service/proxy conflict) is not authoritative pre-mint. Fail
+	// closed as persistence ambiguity while preserving *APIError for inspection.
 	h := newRegisterHarness(t)
 	h.svc.keyKind = keyKindBootstrap
 	h.svc.completionStatus = http.StatusConflict
@@ -1338,12 +1336,16 @@ func TestRegisterAgent_BareCompletion409IsNotDeviceCredentialMissing(t *testing.
 	h.armDevicePubOnInfo()
 
 	_, err := RegisterAgent(context.Background(), "lv_key", h.store, h.registerOpts()...)
-	if errors.Is(err, ErrDeviceCredentialMissing) {
-		t.Fatalf("bare 409 must not map to ErrDeviceCredentialMissing, got %v", err)
+	var persistenceErr *CredentialPersistenceError
+	if !errors.As(err, &persistenceErr) || !errors.Is(err, ErrCredentialRecoveryRequired) {
+		t.Fatalf("bare 409 must require credential recovery, got %v", err)
 	}
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusConflict {
-		t.Fatalf("want raw *APIError 409, got %v", err)
+		t.Fatalf("want wrapped *APIError 409, got %v", err)
+	}
+	if h.svc.completionCalls.Load() != 1 {
+		t.Fatalf("completion calls = %d, want exactly 1", h.svc.completionCalls.Load())
 	}
 }
 

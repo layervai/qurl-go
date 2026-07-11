@@ -481,6 +481,33 @@ pre-dispatch. It therefore preserves `context.Canceled`/`context.DeadlineExceede
 as a matchable cause inside `CredentialPersistenceError` while requiring the
 same owner-revoke and explicit-recovery procedure.
 
+Only explicitly recognized qurl-service pre-mint responses bypass ambiguity:
+authentication rejection, rate-limit admission, structured
+`service_unavailable`, structured not-enrolled, and consumed bootstrap-key
+outcomes, plus request-size admission (413). A bare 404 is trusted only by the
+pre-REG account crash probe; after a REG, the same unstructured status is
+mint-ambiguous.
+
+Completion must also be excluded from qurl-service's global POST idempotency
+cache. Its response carries a one-time plaintext device secret: persisting or
+replaying that body would violate first-issue-only custody, and accepting an
+idempotency-key replay across different completion bodies could bind the wrong
+request to a prior credential response. Deploy the completion idempotency
+exclusion and its body-binding regressions before enabling this SDK lifecycle.
+`device_key_already_issued` enters explicit recovery because it describes a
+prior first issue. Every unclassified completion HTTP response, including a new
+4xx or unrelated 409, is recovery-required by default; the SDK never assumes a
+new server error happened before the atomic mint. A new retryable/terminal 4xx
+must be added to the authoritative pre-mint taxonomy before it ships.
+
+The registration-info/RAK peer remains authoritative for all durable
+coordinates. Completion corroborates the decoded public key only; it cannot
+replace the RAK-authenticated host or port. qurl-service deployments must keep
+registration-info and completion on one routable peer deployment during
+rotation. A key mismatch fails recovery-required after a possible mint, while a
+same-key coordinate discrepancy preserves the registration-info/RAK host and
+port and should be treated as deployment skew to correct.
+
 ## Errors
 
 Match errors by type, not message text: use `errors.Is` against a sentinel for a

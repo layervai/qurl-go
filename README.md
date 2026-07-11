@@ -242,7 +242,16 @@ Match errors by type, not message text:
   lifecycle operations are enabled. During peer rotation, every qurl-service pod
   serving registration-info and completion must report the same peer key; a
   deployment-skew mismatch after mint fails recovery-required rather than
-  silently replacing the RAK-authenticated peer.
+  silently replacing the RAK-authenticated peer. Registration-info and
+  completion must also expose one routable peer deployment: the SDK persists
+  the full registration-info/RAK host and port and uses completion only to
+  corroborate its decoded public key.
+
+  Completion must be excluded from qurl-service's global POST idempotency cache:
+  its response reveals a one-time plaintext device secret and must never be
+  persisted/replayed or reused across different request bodies. Deploy the
+  qurl-service idempotency exclusion and regressions before enabling these SDK
+  lifecycle APIs.
 
 - **Added: sealed full-AgentState file storage** —
   `qurl.NewSealedFileAgentState` provides an SDK-owned AES-256-GCM envelope with

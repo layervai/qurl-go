@@ -420,7 +420,7 @@ func (cfg *registerConfig) requestOTPAt(ctx context.Context, store AgentStateSto
 // service may have minted the key even though this process could not persist it.
 // Falling through after such an error would risk a second completion attempt.
 func (cfg *registerConfig) tryCompletionProbe(ctx context.Context, key string, store AgentStateStore, state *AgentState, path pathKind) (done bool, doneState *AgentState, err error) {
-	comp, err := cfg.postCompletion(ctx, key, state, path)
+	comp, err := cfg.postCompletion(ctx, key, state, path, true)
 	if err != nil {
 		if errors.Is(err, ErrCredentialRecoveryRequired) {
 			// Completion was dispatched and may have minted the one-time plaintext
@@ -525,7 +525,7 @@ func (cfg *registerConfig) sendOTP(ctx context.Context, state *AgentState, peer 
 // completeAndPersist runs the completion fetch and persists the resulting
 // registered state, returning it.
 func (cfg *registerConfig) completeAndPersist(ctx context.Context, key string, store AgentStateStore, state *AgentState, path pathKind) (*AgentState, error) {
-	comp, err := cfg.postCompletion(ctx, key, state, path)
+	comp, err := cfg.postCompletion(ctx, key, state, path, false)
 	if err != nil {
 		return nil, err
 	}
@@ -580,8 +580,9 @@ func (cfg *registerConfig) fetchRegistrationInfo(ctx context.Context, key string
 }
 
 // postCompletion runs POST /v1/agent/registration/complete, which mints the
-// first-issue-only device REST credential.
-func (cfg *registerConfig) postCompletion(ctx context.Context, key string, state *AgentState, path pathKind) (*completionResponse, error) {
+// first-issue-only device REST credential. allowBareNotEnrolled is true only for
+// the pre-REG crash probe; after REG, an unstructured 404 is mint-ambiguous.
+func (cfg *registerConfig) postCompletion(ctx context.Context, key string, state *AgentState, path pathKind, allowBareNotEnrolled bool) (*completionResponse, error) {
 	reqBody := completeRequestBody{
 		DeviceID:        state.AgentID,
 		DevicePubKeyB64: state.PublicKeyB64,
@@ -592,14 +593,17 @@ func (cfg *registerConfig) postCompletion(ctx context.Context, key string, state
 		if errors.Is(mapped, ErrCredentialRecoveryRequired) {
 			return nil, mapped
 		}
-		if errors.Is(mapped, ErrRegistrationRetryLater) {
-			// qurl-service's structured 503 service_unavailable is emitted by the
-			// pre-auth completion admission layer before the mint handler runs.
+		if isAuthoritativePreMintCompletionError(mapped, allowBareNotEnrolled) {
+			// Only explicitly modeled qurl-service responses may bypass ambiguity:
+			// each is guaranteed to arise before the atomic device-key mint.
 			return nil, mapped
 		}
 		var outcomeUnknown *apiRequestOutcomeUnknownError
 		var apiErr *APIError
-		if errors.As(mapped, &outcomeUnknown) || (errors.As(mapped, &apiErr) && apiErr.StatusCode >= 500) {
+		if errors.As(mapped, &outcomeUnknown) || errors.As(mapped, &apiErr) {
+			// Once completion was dispatched, every unclassified HTTP response is
+			// ambiguous regardless of status. A new service-side 4xx must be added
+			// to the authoritative pre-mint taxonomy before the SDK may trust it.
 			return nil, credentialPersistenceFailure(state.AgentID, mapped)
 		}
 		return nil, mapped
@@ -664,6 +668,23 @@ func (cfg *registerConfig) mapRegistrationHTTPError(err error) error {
 	return err
 }
 
+func isAuthoritativePreMintCompletionError(err error, allowBareNotEnrolled bool) bool {
+	if errors.Is(err, ErrRegistrationRateLimited) ||
+		errors.Is(err, ErrRegistrationRetryLater) ||
+		errors.Is(err, ErrKeyRejected) ||
+		errors.Is(err, ErrBootstrapSetupKeyConsumed) ||
+		isStructuredCompletionNotYetRegistered(err) {
+		return true
+	}
+	var apiErr *APIError
+	if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusRequestEntityTooLarge {
+		// qurl-service's request-size admission rejects before the completion
+		// handler and its atomic mint transaction run.
+		return true
+	}
+	return allowBareNotEnrolled && isCompletionNotYetRegistered(err)
+}
+
 // mapCompletionHTTPError maps the completion HTTP failure. A 409
 // device_key_already_issued means the device was registered but its key was
 // already issued and this local state cannot reproduce it. Surface the explicit
@@ -684,6 +705,9 @@ func (cfg *registerConfig) mapCompletionHTTPError(err error, path pathKind, devi
 	if apiErr.StatusCode == http.StatusTooManyRequests {
 		return fmt.Errorf("%w: %w", ErrRegistrationRateLimited, err)
 	}
+	if apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden {
+		return fmt.Errorf("%w: the API key was rejected before completion: %w", ErrKeyRejected, err)
+	}
 	if apiErr.StatusCode == http.StatusServiceUnavailable && strings.EqualFold(strings.TrimSpace(apiErr.Code), "service_unavailable") {
 		return fmt.Errorf("%w: completion admission failed before credential minting: %w", ErrRegistrationRetryLater, err)
 	}
@@ -696,26 +720,37 @@ func (cfg *registerConfig) mapCompletionHTTPError(err error, path pathKind, devi
 // isCompletionNotYetRegistered reports whether a completion error means the
 // device is not yet enrolled (the expected outcome of the crash-recovery probe
 // before REG has run), so the account path should proceed to REG rather than
-// surface the error. A structured not-registered code is authoritative; a bare
-// 404 is also accepted because by the completion step the base URL already
-// worked for registration-info, so a 404 here means the endpoint reports the
-// device absent — and proceeding to REG (the real path) is safe either way.
+// surface the error. A structured not-registered code is authoritative. A bare
+// 404 is accepted only by the pre-REG probe caller: no REG has run in that call,
+// so proceeding to the real registration path cannot duplicate its own mint.
 func isCompletionNotYetRegistered(err error) bool {
+	if isStructuredCompletionNotYetRegistered(err) {
+		return true
+	}
+	var apiErr *APIError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound
+}
+
+func isStructuredCompletionNotYetRegistered(err error) bool {
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) {
+		return false
+	}
+	if apiErr.StatusCode != http.StatusNotFound {
 		return false
 	}
 	switch strings.ToLower(strings.TrimSpace(apiErr.Code)) {
 	case "agent_not_enrolled", "device_not_registered", "registration_incomplete", "not_registered":
 		return true
 	}
-	return apiErr.StatusCode == http.StatusNotFound
+	return false
 }
 
 // isDeviceKeyAlreadyIssued matches ONLY the structured device_key_already_issued
 // code, not a bare 409. The mapped error tells the operator to revoke the prior
 // agent key and run explicit same-id recovery. That action must not fire for an
-// unrelated infra 409 with no structured code; those surface as *APIError.
+// unrelated 409 with no structured code; those become persistence ambiguity
+// while preserving the underlying *APIError for errors.As.
 func isDeviceKeyAlreadyIssued(apiErr *APIError) bool {
 	return strings.EqualFold(strings.TrimSpace(apiErr.Code), "device_key_already_issued")
 }
@@ -851,6 +886,8 @@ func (cfg *registerConfig) decodeNHPKeys(state *AgentState, peer *NHPServerPeerI
 	}
 	serverPub, err = decodeNHPServerPublicKey(peer.PublicKeyB64)
 	if err != nil {
+		// Callers can install their defer only after both decodes succeed.
+		wipeBytes(devicePriv)
 		return nil, nil, fmt.Errorf("%w: decode NHP peer public key: %w", cfg.invalidConfigErr, err)
 	}
 	return devicePriv, serverPub, nil

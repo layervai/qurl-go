@@ -610,6 +610,48 @@ func TestPersistCompletion_PeerMismatchDropsPlaintextReference(t *testing.T) {
 	}
 }
 
+func TestPersistCompletion_SameKeyDifferentCoordinatesPreservesRAKBinding(t *testing.T) {
+	state, err := newAgentState()
+	if err != nil {
+		t.Fatalf("newAgentState: %v", err)
+	}
+	state.AgentID = "agent-original"
+	peer := newFakeNHPServer(t)
+	state.NHPPeer = &NHPServerPeerInfo{
+		PublicKeyB64: peer.serverPubB64(),
+		Host:         "rak-authoritative.example.test",
+		Port:         62206,
+	}
+	now := time.Now().UTC()
+	comp := &completionResponse{
+		AgentID:      state.AgentID,
+		RegisteredAt: &now,
+		NHPServerPeer: NHPServerPeerInfo{
+			PublicKeyB64: strings.TrimRight(peer.serverPubB64(), "="),
+			Host:         "completion-corroboration-only.example.test",
+			Port:         443,
+		},
+		DeviceAPIKey: "lv_device_secret",
+	}
+	cfg, err := newRegisterConfig(nil)
+	if err != nil {
+		t.Fatalf("newRegisterConfig: %v", err)
+	}
+	persisted, err := cfg.persistCompletion(context.Background(), memoryAgentStateStore{}, state, comp)
+	if err != nil {
+		t.Fatalf("persistCompletion: %v", err)
+	}
+	if persisted.NHPPeer.Host != "rak-authoritative.example.test" || persisted.NHPPeer.Port != 62206 {
+		t.Fatalf("completion replaced RAK-authoritative coordinates: %#v", persisted.NHPPeer)
+	}
+	if persisted.DeviceAPIKey != "lv_device_secret" {
+		t.Fatal("completion credential was not committed")
+	}
+	if comp.DeviceAPIKey != "" {
+		t.Fatal("completion response retained plaintext credential reference")
+	}
+}
+
 func TestCompletionPeerComparisonUsesDecodedKeyBytes(t *testing.T) {
 	peer := newFakeNHPServer(t)
 	otherPeer := newFakeNHPServer(t)
@@ -768,6 +810,69 @@ func TestRegisterAgent_CompletionPreAuthUnavailableRemainsRetryable(t *testing.T
 	}
 	if attempts.Load() != 1 {
 		t.Fatalf("completion attempts = %d, want 1", attempts.Load())
+	}
+}
+
+func TestRegisterAgent_Completion4xxRequiresExplicitPreMintClassification(t *testing.T) {
+	cases := []struct {
+		name          string
+		status        int
+		code          string
+		wantMapped    error
+		wantAmbiguous bool
+	}{
+		{name: "unclassified invalid input", status: http.StatusBadRequest, code: "invalid_input", wantAmbiguous: true},
+		{name: "unauthorized", status: http.StatusUnauthorized, code: "unauthorized", wantMapped: ErrKeyRejected},
+		{name: "forbidden", status: http.StatusForbidden, code: "forbidden", wantMapped: ErrKeyRejected},
+		{name: "not enrolled", status: http.StatusNotFound, code: "agent_not_enrolled"},
+		{name: "payload admission", status: http.StatusRequestEntityTooLarge, code: "request_too_large"},
+		{name: "bare not found after REG", status: http.StatusNotFound, code: "", wantAmbiguous: true},
+		{name: "unclassified conflict", status: http.StatusConflict, code: "conflict", wantAmbiguous: true},
+		{name: "unclassified newer status", status: http.StatusUnprocessableEntity, code: "new_completion_error", wantAmbiguous: true},
+		{name: "unclassified gateway timeout", status: http.StatusGatewayTimeout, code: "gateway_timeout", wantAmbiguous: true},
+		{name: "pre-mint rate limit", status: http.StatusTooManyRequests, code: "rate_limited", wantMapped: ErrRegistrationRateLimited},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newRegisterHarness(t)
+			h.armDevicePubOnInfo()
+			h.handlerMu.Lock()
+			inner := h.handler
+			h.handlerMu.Unlock()
+			var attempts atomic.Int32
+			h.setHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPost && r.URL.Path == "/v1/agent/registration/complete" {
+					attempts.Add(1)
+					w.WriteHeader(tc.status)
+					_, _ = fmt.Fprintf(w, `{"error":{"code":%q,"detail":"rejected before mint"}}`, tc.code)
+					return
+				}
+				inner.ServeHTTP(w, r)
+			}))
+
+			_, err := RegisterAgent(context.Background(), "lv_enroll", h.store, h.registerOpts()...)
+			if err == nil {
+				t.Fatal("completion 4xx unexpectedly succeeded")
+			}
+			var persistenceErr *CredentialPersistenceError
+			if tc.wantAmbiguous {
+				if !errors.As(err, &persistenceErr) || !errors.Is(err, ErrCredentialRecoveryRequired) {
+					t.Fatalf("unclassified completion 4xx = %v, want persistence ambiguity", err)
+				}
+			} else if errors.As(err, &persistenceErr) || errors.Is(err, ErrCredentialRecoveryRequired) {
+				t.Fatalf("authoritative pre-mint 4xx misclassified as mint ambiguity: %v", err)
+			}
+			if tc.wantMapped != nil && !errors.Is(err, tc.wantMapped) {
+				t.Fatalf("completion error = %v, want %v", err, tc.wantMapped)
+			}
+			if attempts.Load() != 1 || h.nhp.regCount() != 1 {
+				t.Fatalf("completion/REG attempts = %d/%d, want 1/1", attempts.Load(), h.nhp.regCount())
+			}
+			state := h.loadState(t)
+			if state.RegisteredAt != nil || state.DeviceAPIKey != "" {
+				t.Fatalf("completion 4xx persisted a credential: %#v", state)
+			}
+		})
 	}
 }
 
