@@ -393,6 +393,13 @@ func (cfg *registerConfig) tryCompletionProbe(ctx context.Context, key string, s
 		// caller must act on, so surface it rather than treating the probe as a
 		// no-op and proceeding to REG; the "optimization only" framing applies to
 		// the not-yet-registered and transient cases above, not to a terminal denial.
+		//
+		// A bare transport fault (connection reset/timeout, no *APIError) also lands
+		// here rather than falling through — deliberately: the post-REG completion
+		// fetch hits the SAME endpoint, so a genuinely-down completion path would
+		// fail identically after a wasted REG. Aborting fast at the probe (which the
+		// account resume simply re-runs) is preferable, and context cancellation
+		// (surfaced by postCompletion) is likewise correctly terminal.
 		return true, nil, err
 	}
 	doneState, err = cfg.persistCompletion(ctx, store, state, comp)
@@ -497,8 +504,11 @@ func (cfg *registerConfig) persistCompletion(ctx context.Context, store AgentSta
 	// re-running assertServerIDMatches (the registration-info integrity check).
 	// That is safe here: the completion peer arrived over the authenticated qurl-
 	// service TLS connection and already passed validateNHPServerPeerInfo, and the
-	// returned Client authorizes with the REST device bearer — it never NHP-knocks
-	// this peer — so there is no live server_id⇄fingerprint gap to close.
+	// RegisterAgent Client authorizes with the REST device bearer — it never
+	// NHP-knocks this peer — so there is no live server_id⇄fingerprint gap to close.
+	// A knock-only BootstrapAgent DOES later knock this peer; there it is trusted on
+	// the same authenticated-TLS origin, and completionResponse carries no server_id
+	// to assert against, so the TLS-authenticated origin is the trust anchor.
 	peer := comp.NHPServerPeer
 	state.NHPPeer = &peer
 	state.DeviceAPIKey = comp.DeviceAPIKey
