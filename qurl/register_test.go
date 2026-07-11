@@ -922,10 +922,19 @@ func TestRegisterAgent_AccountPath_OTPResendCooldown(t *testing.T) {
 	}
 }
 
+// TestOTPResendCooldown_IsSixtySeconds pins the constant: the boundary assertions
+// in TestRegisterAgent_AccountPath_OTPResendAfterCooldown and the WithOTP /
+// WithOTPProvider docs all assume a 60s cooldown, so a change should be conscious.
+func TestOTPResendCooldown_IsSixtySeconds(t *testing.T) {
+	if otpResendCooldown != 60*time.Second {
+		t.Fatalf("otpResendCooldown = %v, want 60s", otpResendCooldown)
+	}
+}
+
 func TestRegisterAgent_AccountPath_OTPResendAfterCooldown(t *testing.T) {
-	// Positive resend case: a long-idle no-code re-run (past the cooldown)
-	// dispatches a SECOND code. Uses an injected clock advanced by
-	// otpResendCooldown+1s rather than sleeping.
+	// A long-idle no-code re-run dispatches a SECOND code once the cooldown elapses.
+	// Uses an injected clock advanced across the resend gate's `>=` boundary (just
+	// under → no resend; exactly at → resend) rather than sleeping.
 	h := newRegisterHarness(t)
 	h.svc.keyKind = keyKindAccount
 	h.svc.maskedEmail = "j***@x.com"
@@ -965,13 +974,25 @@ func TestRegisterAgent_AccountPath_OTPResendAfterCooldown(t *testing.T) {
 		h.svc.handler(h.relaySrv.URL)(w, r)
 	}))
 
-	advance(otpResendCooldown + time.Second)
-
+	// Just under the cooldown: the gate is `elapsed >= otpResendCooldown`, so one
+	// nanosecond short must NOT re-send (pins > vs >=). A no-resend resume leaves
+	// OTPRequestedAt unchanged, so the next step measures from the original send.
+	advance(otpResendCooldown - time.Nanosecond)
 	if _, err := RegisterAgent(context.Background(), "lv_account_key", h.store, h.registerOpts(withClock(clk))...); !errors.Is(err, ErrOTPPending) {
-		t.Fatalf("post-cooldown call: want ErrOTPPending, got %v", err)
+		t.Fatalf("just-under-cooldown call: want ErrOTPPending, got %v", err)
+	}
+	if h.nhp.otpCount() != 1 {
+		t.Fatalf("OTP sends just under the cooldown = %d, want 1 (no resend at the boundary)", h.nhp.otpCount())
+	}
+
+	// Exactly at the cooldown: elapsed == otpResendCooldown satisfies >=, so the
+	// no-code branch re-sends the second code.
+	advance(time.Nanosecond)
+	if _, err := RegisterAgent(context.Background(), "lv_account_key", h.store, h.registerOpts(withClock(clk))...); !errors.Is(err, ErrOTPPending) {
+		t.Fatalf("at-cooldown call: want ErrOTPPending, got %v", err)
 	}
 	if h.nhp.otpCount() != 2 {
-		t.Fatalf("OTP sends after cooldown elapsed = %d, want 2 (a second code was dispatched)", h.nhp.otpCount())
+		t.Fatalf("OTP sends at exactly the cooldown = %d, want 2 (a second code was dispatched)", h.nhp.otpCount())
 	}
 }
 
@@ -1079,9 +1100,9 @@ func TestRegisterAgent_AccountPath_OTPProvider(t *testing.T) {
 	h.nhp.expectCredential = "778899"
 	h.armDevicePubOnInfo()
 
-	called := false
+	var called atomic.Bool
 	provider := func(context.Context) (string, error) {
-		called = true
+		called.Store(true)
 		return "778899", nil
 	}
 	// A single call with a provider completes on a FRESH store: the SDK requests
@@ -1092,7 +1113,7 @@ func TestRegisterAgent_AccountPath_OTPProvider(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RegisterAgent with provider: %v", err)
 	}
-	if !called {
+	if !called.Load() {
 		t.Fatal("OTP provider was not called")
 	}
 	if client == nil {
