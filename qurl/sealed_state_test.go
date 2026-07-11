@@ -346,6 +346,48 @@ func TestSealedFileAgentState_RejectsUnreopenableWrapperMetadataBeforeCommit(t *
 	}
 }
 
+func TestValidateSealedAgentStateForCommit_ReopensExactPersistedEnvelope(t *testing.T) {
+	dek := bytes.Repeat([]byte{0x42}, sealedAgentStateDEKBytes)
+	gcm, err := newSealedAgentStateGCM(dek)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plaintext := []byte(`{"agent_id":"agent-precommit-test"}`)
+	envelope := sealedAgentStateEnvelope{
+		Version:    sealedAgentStateVersion,
+		Purpose:    sealedAgentStatePurpose,
+		ProviderID: "test-wrapper",
+		AgentID:    "agent-precommit-test",
+		WrappedKey: WrappedAgentStateKey{
+			Version:    7,
+			Ciphertext: bytes.Repeat([]byte{0x24}, sealedAgentStateDEKBytes),
+			Metadata:   json.RawMessage(`{"key_id":"test-key"}`),
+		},
+		Nonce: bytes.Repeat([]byte{0x11}, gcm.NonceSize()),
+	}
+	aad, err := envelope.aad()
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope.Ciphertext = gcm.Seal(nil, envelope.Nonce, plaintext, aad)
+	raw, err := json.MarshalIndent(envelope, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateSealedAgentStateForCommit(raw, aad, gcm, plaintext); err != nil {
+		t.Fatalf("valid persisted envelope: %v", err)
+	}
+
+	envelope.Ciphertext[0] ^= 0x80
+	tampered, err := json.MarshalIndent(envelope, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateSealedAgentStateForCommit(tampered, aad, gcm, plaintext); err == nil {
+		t.Fatal("tampered persisted ciphertext: want reopen failure")
+	}
+}
+
 func TestSealedFileAgentState_MaximumValidMetadataDepthRoundTrips(t *testing.T) {
 	// Metadata begins two levels below the envelope root (wrapped_key.metadata),
 	// so this many array layers leaves the scalar leaf exactly at the limit.

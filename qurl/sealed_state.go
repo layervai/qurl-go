@@ -344,7 +344,7 @@ func (s *SealedFileAgentStateStore) SaveAgentState(ctx context.Context, state *A
 	if len(raw) > maxSealedAgentStateEnvelope {
 		return fmt.Errorf("%w: sealed agent state envelope exceeds %d bytes", ErrInvalidBootstrapConfig, maxSealedAgentStateEnvelope)
 	}
-	if err := validateSealedAgentStateForCommit(raw, aad); err != nil {
+	if err := validateSealedAgentStateForCommit(raw, aad, gcm, plaintext); err != nil {
 		// Keep wrapper-produced invalid metadata operationally classified. The
 		// inner decoder may use ErrInvalidAgentState, but no corrupt durable state
 		// exists yet and callers must not be told to delete anything.
@@ -403,21 +403,31 @@ type sealedAgentStateAAD struct {
 }
 
 // validateSealedAgentStateForCommit proves the exact MarshalIndent bytes pass
-// the same structural decoder used by LoadAgentState and reproduce the AAD used
-// to seal the ciphertext. This prevents provider-owned metadata that is valid
-// JSON but contains duplicate keys or excessive envelope-relative nesting from
-// committing an envelope the SDK would reject on its next load.
-func validateSealedAgentStateForCommit(raw, sealedAAD []byte) error {
+// the same structural decoder used by LoadAgentState, reproduce the AAD used to
+// seal the ciphertext, and decrypt back to the expected plaintext. This prevents
+// provider-owned metadata that is valid JSON but contains duplicate keys or
+// excessive envelope-relative nesting from committing an envelope the SDK would
+// reject on its next load. Open reuses the decoded ciphertext buffer in place;
+// the resulting second plaintext copy is wiped before returning.
+func validateSealedAgentStateForCommit(raw, sealedAAD []byte, gcm cipher.AEAD, expectedPlaintext []byte) error {
 	var persisted sealedAgentStateEnvelope
 	if err := decodeSealedAgentStateEnvelope(raw, &persisted); err != nil {
 		return err
 	}
+	defer wipeBytes(persisted.Ciphertext)
 	reopenedAAD, err := persisted.aad()
 	if err != nil {
 		return fmt.Errorf("recompute persisted AAD: %w", err)
 	}
 	if !bytes.Equal(sealedAAD, reopenedAAD) {
 		return errors.New("persisted envelope AAD does not match sealed AAD")
+	}
+	reopenedPlaintext, err := gcm.Open(persisted.Ciphertext[:0], persisted.Nonce, persisted.Ciphertext, reopenedAAD)
+	if err != nil {
+		return errors.New("persisted envelope ciphertext cannot be reopened")
+	}
+	if len(reopenedPlaintext) != len(expectedPlaintext) || subtle.ConstantTimeCompare(reopenedPlaintext, expectedPlaintext) != 1 {
+		return errors.New("persisted envelope plaintext does not match sealed plaintext")
 	}
 	return nil
 }
