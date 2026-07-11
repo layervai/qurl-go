@@ -233,6 +233,14 @@ func (cfg *registerConfig) run(ctx context.Context, key string, store AgentState
 
 // runBootstrapPath is PATH A: the pre-issued key is the enrollment credential.
 // REG directly with the key secret as the credential, then completion-fetch.
+//
+// Unlike runAccountPath, this path intentionally skips the crash-recovery
+// tryCompletionProbe and always REGs. The tradeoff is documented: a bootstrap
+// process that crashed after a prior RAK but before completion will re-REG on the
+// next run, which — like the account path's transient-fault fall-through — relies
+// on the server treating a repeat REG for the same device key as idempotent. The
+// probe is skipped here to keep the one-call bootstrap path lean; the account
+// path pays for it because its resume is already multi-call.
 func (cfg *registerConfig) runBootstrapPath(ctx context.Context, key string, store AgentStateStore, state *AgentState, peer *NHPServerPeerInfo, relayURL string) (*AgentState, error) {
 	return cfg.registerAndComplete(ctx, key, store, state, peer, relayURL, key, pathBootstrap)
 }
@@ -353,6 +361,13 @@ func (cfg *registerConfig) requestOTP(ctx context.Context, store AgentStateStore
 // completion error); done is false when the device is not yet enrolled OR the
 // probe hit a transient fault — in both cases the caller should proceed to REG,
 // since the probe is only an optimization and REG is the real path.
+//
+// The self-heal relies on the qurl-service completion endpoint being idempotent
+// for an already-enrolled device: a probe for a device a prior crashed run
+// already enrolled must return that device's credential again (rather than a
+// conflict), which is the completion grace-window contract implemented in
+// qurl-service #1182. Without it a probe on the happy resume path would surface a
+// spurious already-issued denial instead of finishing the run.
 func (cfg *registerConfig) tryCompletionProbe(ctx context.Context, key string, store AgentStateStore, state *AgentState, path pathKind) (done bool, doneState *AgentState, err error) {
 	comp, err := cfg.postCompletion(ctx, key, state, path)
 	if err != nil {
@@ -474,6 +489,12 @@ func (cfg *registerConfig) persistCompletion(ctx context.Context, store AgentSta
 	}
 	state.AgentID = comp.AgentID
 	state.RegisteredAt = comp.RegisteredAt
+	// Replace the persisted NHP peer with the completion response's peer WITHOUT
+	// re-running assertServerIDMatches (the registration-info integrity check).
+	// That is safe here: the completion peer arrived over the authenticated qurl-
+	// service TLS connection and already passed validateNHPServerPeerInfo, and the
+	// returned Client authorizes with the REST device bearer — it never NHP-knocks
+	// this peer — so there is no live server_id⇄fingerprint gap to close.
 	peer := comp.NHPServerPeer
 	state.NHPPeer = &peer
 	state.DeviceAPIKey = comp.DeviceAPIKey
@@ -553,7 +574,7 @@ func (cfg *registerConfig) mapCompletionHTTPError(err error, path pathKind) erro
 	// sentinel (mirrors how mapRAKError keeps 52100 path-dependent). Check it
 	// before the generic already-issued mapping, since both can arrive as HTTP 409.
 	if path == pathBootstrap && isBootstrapConsumedCompletion(apiErr) {
-		return fmt.Errorf("%w: rerun LayerV setup for a fresh key or restore the completed agent state: %w", ErrBootstrapSetupKeyConsumed, err)
+		return fmt.Errorf("%w: %s: %w", ErrBootstrapSetupKeyConsumed, bootstrapConsumedGuidance, err)
 	}
 	if isDeviceKeyAlreadyIssued(apiErr) {
 		return fmt.Errorf("%w: the device was registered but its API key was already issued and cannot be re-fetched; re-register under a new device id (qurl.WithDeviceID) or re-bind with qurl.WithTakeover: %w", ErrDeviceCredentialMissing, err)
@@ -688,11 +709,12 @@ func (cfg *registerConfig) resolveOTP(ctx context.Context) (string, error) {
 // --- peer / relay / server-id resolution ---
 
 func (cfg *registerConfig) resolvePeer(info *registrationInfoResponse) *NHPServerPeerInfo {
-	if cfg.nhpPeerOverride != nil {
-		peer := *cfg.nhpPeerOverride
-		return &peer
-	}
+	// Return the address of a local copy either way, so the result never aliases
+	// info.NHPServerPeer's field or the caller's override pointer.
 	peer := info.NHPServerPeer
+	if cfg.nhpPeerOverride != nil {
+		peer = *cfg.nhpPeerOverride
+	}
 	return &peer
 }
 
@@ -811,9 +833,15 @@ type registerOptionFunc func(*registerConfig) error
 func (f registerOptionFunc) applyRegisterOption(o *registerConfig) error { return f(o) }
 
 // WithDeviceID sets the stable device id (which is also the enrolled agent id and
-// the NHP device id). When omitted, RegisterAgent generates a stable id on first
-// run and persists it; WithDeviceID only overrides that generated value. The
-// server never returns a generated id.
+// the NHP device id). When omitted, RegisterAgent generates a stable id on the
+// first run and persists it.
+//
+// WithDeviceID takes effect only on that first run, before any id is persisted:
+// it names the id to enroll instead of a generated one. Once a device id has been
+// persisted (generated or supplied), a later run that passes a DIFFERING
+// WithDeviceID is REJECTED with ErrInvalidRegisterConfig rather than silently
+// re-binding — the persisted identity is authoritative. Re-running with the same
+// id (or with none) is fine. The server never returns a generated id.
 func WithDeviceID(id string) RegisterOption {
 	return registerOptionFunc(func(o *registerConfig) error {
 		if strings.TrimSpace(id) == "" {
@@ -913,6 +941,11 @@ func WithRegisterBaseURL(rawURL string) RegisterOption {
 // endpoints and the relay POSTs. Without it, RegisterAgent uses a shared client
 // with a 30-second timeout and no redirect following. Callers can still bound
 // each call with ctx.
+//
+// The injected client is also reused as the returned Client's HTTP client, so an
+// application with fixed-egress requirements (a pinned transport or outbound
+// proxy) gets the same egress for enrollment and for the agent's later resource
+// calls from this one option.
 func WithRegisterHTTPClient(client HTTPDoer) RegisterOption {
 	return registerOptionFunc(func(o *registerConfig) error {
 		if client == nil {

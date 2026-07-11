@@ -66,8 +66,9 @@ type registerAckBody struct {
 }
 
 // rakSuccess is the NHP_RAK success errCode. errCode is a string field; "" and
-// "0" both mean success, matching the qURL resolve path's isSuccess convention.
-const rakSuccess = "0"
+// "0" both mean success. It aliases reply.go's errSuccess so the single "0"
+// success literal has one source across the resolve and enrollment reply paths.
+const rakSuccess = errSuccess
 
 func (b registerAckBody) isSuccess() bool { return b.ErrCode == "" || b.ErrCode == rakSuccess }
 
@@ -117,70 +118,73 @@ const (
 	pathBootstrap
 )
 
+// bootstrapConsumedGuidance is the operator-facing next step when a one-shot
+// setup key appears already consumed. It is shared verbatim by the RAK 52108
+// mapping (rakMappings) and the completion-path mapper (mapCompletionHTTPError),
+// which can both report the consumed-setup-key condition, so the guidance has a
+// single source.
+const bootstrapConsumedGuidance = "rerun LayerV setup for a fresh key or restore the completed agent state"
+
+// rakMapping is one row of rakMappings: the typed sentinel a known RAK code maps
+// to, plus the actionable guidance detail that leads the mapped error message
+// (the service-provided errMsg is appended after it by detailSuffix).
+type rakMapping struct {
+	sentinel error
+	detail   string
+}
+
+// rakMappings is the single source for both the RAK code → sentinel resolution
+// (sentinelForRAKCode) and the RAK code → actionable error (mapRAKError), so the
+// two can no longer drift as codes are added. Every known, path-INDEPENDENT code
+// lives here; the one path-dependent code (rakCredentialInvalid / 52100) is
+// deliberately ABSENT — its meaning splits by enrollment path, so mapRAKError
+// resolves it ahead of the table and sentinelForRAKCode returns nil for it.
+var rakMappings = map[string]rakMapping{
+	rakCredentialExpired: {ErrOTPExpired, "request a fresh code by re-running qurl.RegisterAgent with no WithOTP, then supply the new code"},
+	rakAttemptsExceeded:  {ErrRegistrationRateLimited, "too many attempts; wait before retrying registration"},
+	rakRateLimited:       {ErrRegistrationRateLimited, "back off and retry registration later"},
+	rakIdentityConflict:  {ErrAgentIdentityConflict, "this device id is already enrolled; re-run with qurl.WithTakeover to re-bind it, or pick a different qurl.WithDeviceID"},
+	rakEmailUnavailable:  {ErrNoAccountEmail, "add an email to the account or register with a pre-issued key"},
+	rakInvalidAPIKey:     {ErrKeyRejected, "check the API key and re-run registration"},
+	rakRegistrationOff:   {ErrRegistrationDisabled, "agent registration is disabled for this account"},
+	rakBootstrapConsumed: {ErrBootstrapSetupKeyConsumed, bootstrapConsumedGuidance},
+	rakInvalidInput:      {ErrRegistrationInvalidInput, "the device id or registration input was malformed; use a valid identifier with qurl.WithDeviceID"},
+}
+
 // sentinelForRAKCode returns the path-independent sentinel a known RAK code maps
 // to, or nil for an unknown code (or 52100, which is path-dependent — see
 // mapRAKError). It backs RegistrationDenyError.Is so a raw deny still matches the
 // typed sentinel for its code.
 func sentinelForRAKCode(code string) error {
-	switch strings.TrimSpace(code) {
-	case rakCredentialExpired:
-		return ErrOTPExpired
-	case rakAttemptsExceeded, rakRateLimited:
-		return ErrRegistrationRateLimited
-	case rakIdentityConflict:
-		return ErrAgentIdentityConflict
-	case rakEmailUnavailable:
-		return ErrNoAccountEmail
-	case rakInvalidAPIKey:
-		return ErrKeyRejected
-	case rakRegistrationOff:
-		return ErrRegistrationDisabled
-	case rakBootstrapConsumed:
-		return ErrBootstrapSetupKeyConsumed
-	case rakInvalidInput:
-		return ErrRegistrationInvalidInput
-	default:
-		return nil
+	if m, ok := rakMappings[strings.TrimSpace(code)]; ok {
+		return m.sentinel
 	}
+	return nil
 }
 
 // mapRAKError turns a non-success NHP_RAK body into a typed error. Known codes
-// become the actionable sentinels; 52100 is resolved by path; anything else
-// becomes a RegistrationDenyError carrying the raw code and message so a caller
-// can act on a code newer than this SDK.
+// become the actionable sentinels (from rakMappings); 52100 is resolved by path;
+// anything else becomes a RegistrationDenyError carrying the raw code and message
+// so a caller can act on a code newer than this SDK.
 func mapRAKError(ack *registerAckBody, path pathKind) error {
 	code := strings.TrimSpace(ack.ErrCode)
 	msg := strings.TrimSpace(ack.ErrMsg)
 
-	switch code {
-	case rakCredentialInvalid:
+	// 52100 is path-dependent (see pathKind), so it is resolved ahead of the
+	// table, which deliberately omits it: on the bootstrap path the credential IS
+	// the key (a rejected key), on the account path it is a wrong emailed OTP.
+	if code == rakCredentialInvalid {
 		if path == pathBootstrap {
 			return fmt.Errorf("%w: pre-issued key was rejected by the enrollment service%s", ErrKeyRejected, detailSuffix(msg))
 		}
 		return fmt.Errorf("%w: the one-time code was rejected; re-run qurl.RegisterAgent with the correct qurl.WithOTP code%s", ErrOTPIncorrect, detailSuffix(msg))
-	case rakCredentialExpired:
-		return fmt.Errorf("%w: request a fresh code by re-running qurl.RegisterAgent with no WithOTP, then supply the new code%s", ErrOTPExpired, detailSuffix(msg))
-	case rakAttemptsExceeded:
-		return fmt.Errorf("%w: too many attempts; wait before retrying registration%s", ErrRegistrationRateLimited, detailSuffix(msg))
-	case rakRateLimited:
-		return fmt.Errorf("%w: back off and retry registration later%s", ErrRegistrationRateLimited, detailSuffix(msg))
-	case rakIdentityConflict:
-		return fmt.Errorf("%w: this device id is already enrolled; re-run with qurl.WithTakeover to re-bind it, or pick a different qurl.WithDeviceID%s", ErrAgentIdentityConflict, detailSuffix(msg))
-	case rakEmailUnavailable:
-		return fmt.Errorf("%w: add an email to the account or register with a pre-issued key%s", ErrNoAccountEmail, detailSuffix(msg))
-	case rakInvalidAPIKey:
-		return fmt.Errorf("%w: check the API key and re-run registration%s", ErrKeyRejected, detailSuffix(msg))
-	case rakRegistrationOff:
-		return fmt.Errorf("%w: agent registration is disabled for this account%s", ErrRegistrationDisabled, detailSuffix(msg))
-	case rakBootstrapConsumed:
-		return fmt.Errorf("%w: rerun LayerV setup for a fresh key or restore the completed agent state%s", ErrBootstrapSetupKeyConsumed, detailSuffix(msg))
-	case rakInvalidInput:
-		return fmt.Errorf("%w: the device id or registration input was malformed; use a valid identifier with qurl.WithDeviceID%s", ErrRegistrationInvalidInput, detailSuffix(msg))
-	default:
-		// Only the unknown-code path returns the raw deny, so build it here rather
-		// than on every call.
-		return &RegistrationDenyError{ErrCode: ack.ErrCode, ErrMsg: ack.ErrMsg}
 	}
+	if m, ok := rakMappings[code]; ok {
+		return fmt.Errorf("%w: %s%s", m.sentinel, m.detail, detailSuffix(msg))
+	}
+	// Unknown code: surface the raw deny so a caller can act on a code newer than
+	// this SDK.
+	return &RegistrationDenyError{ErrCode: ack.ErrCode, ErrMsg: ack.ErrMsg}
 }
 
 // detailSuffix appends the service-provided message to a mapped error when
