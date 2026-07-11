@@ -559,7 +559,9 @@ func (cfg *registerConfig) persistCompletion(ctx context.Context, store AgentSta
 	}
 	// A successful completion response contains the only plaintext copy the
 	// service will reveal. Keep exactly one durable reference on success and drop
-	// the response object's reference on every path.
+	// the response object's reference on every path. Go string backing storage
+	// cannot be zeroed, so clearing this reference is best-effort lifetime
+	// reduction rather than a guaranteed memory wipe.
 	defer func() { comp.DeviceAPIKey = "" }()
 	if err := cfg.reconcileCompletionDeviceID(state, comp); err != nil {
 		return nil, credentialPersistenceFailure(state.AgentID, err)
