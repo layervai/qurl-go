@@ -48,7 +48,7 @@ func NewParameterStore(client ParameterStoreAPI, name string, opts ...Option) *P
 	cfg := newStoreConfig(opts...)
 	return &ParameterStore{
 		client:   client,
-		name:     name,
+		name:     strings.TrimSpace(name),
 		kmsKeyID: cfg.kmsKeyID,
 	}
 }
@@ -89,16 +89,18 @@ func (s *ParameterStore) LoadAgentState(ctx context.Context) (*qurl.AgentState, 
 // parameter, overwriting any existing value. The configured KMS key (if any) is
 // applied on every write.
 func (s *ParameterStore) SaveAgentState(ctx context.Context, state *qurl.AgentState) error {
-	// Context first so a cancelled ctx short-circuits uniformly with Load.
+	// Guard order mirrors LoadAgentState exactly (context, then nil-client, then
+	// the id/state marshal guard) so a given misconfiguration yields the same
+	// human-facing message from both methods.
 	if err := validateContext(ctx); err != nil {
-		return err
-	}
-	raw, err := marshalAgentState(state, s.name, "parameter name")
-	if err != nil {
 		return err
 	}
 	if s.client == nil {
 		return fmt.Errorf("%w: ssm client must not be nil", qurl.ErrInvalidBootstrapConfig)
+	}
+	raw, err := marshalAgentState(state, s.name, "parameter name")
+	if err != nil {
+		return err
 	}
 
 	in := &ssm.PutParameterInput{

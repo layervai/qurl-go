@@ -53,7 +53,7 @@ func NewSecretsManagerStore(client SecretsManagerAPI, secretID string, opts ...O
 	cfg := newStoreConfig(opts...)
 	return &SecretsManagerStore{
 		client:   client,
-		secretID: secretID,
+		secretID: strings.TrimSpace(secretID),
 		kmsKeyID: cfg.kmsKeyID,
 	}
 }
@@ -95,16 +95,18 @@ func (s *SecretsManagerStore) LoadAgentState(ctx context.Context) (*qurl.AgentSt
 // PutSecretValue first, and on ResourceNotFoundException creates the secret
 // (CreateSecret) with the configured KMS key, then is idempotent thereafter.
 func (s *SecretsManagerStore) SaveAgentState(ctx context.Context, state *qurl.AgentState) error {
-	// Context first so a cancelled ctx short-circuits uniformly with Load.
+	// Guard order mirrors LoadAgentState exactly (context, then nil-client, then
+	// the id/state marshal guard) so a given misconfiguration yields the same
+	// human-facing message from both methods.
 	if err := validateContext(ctx); err != nil {
-		return err
-	}
-	raw, err := marshalAgentState(state, s.secretID, "secret id")
-	if err != nil {
 		return err
 	}
 	if s.client == nil {
 		return fmt.Errorf("%w: secrets manager client must not be nil", qurl.ErrInvalidBootstrapConfig)
+	}
+	raw, err := marshalAgentState(state, s.secretID, "secret id")
+	if err != nil {
+		return err
 	}
 
 	secretString := string(raw)
