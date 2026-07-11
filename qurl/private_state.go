@@ -136,6 +136,9 @@ func writePrivateStateFileAtomic(ctx context.Context, path, label, tempPattern s
 	if err := ops.rename(tmpName, path); err != nil {
 		return fmt.Errorf("qurl: replace %s: %w", label, err)
 	}
+	// Rename has already committed the new visible state. A following directory
+	// sync error reports durability uncertainty; it cannot safely roll back the
+	// replacement, and a normal retry/load recovers from the committed file.
 	if err := ops.syncDir(dir, label); err != nil {
 		return err
 	}

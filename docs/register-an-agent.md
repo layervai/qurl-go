@@ -240,7 +240,9 @@ prevented, and authenticate every binding field in the provider encryption
 context. When the agent id is known in configuration, also pass
 `qurl.WithExpectedSealedAgentID(id)` to the store and the same id through
 `qurl.WithDeviceID(id)` (or `qurl.WithAgentID(id)` for `BootstrapAgent`); the
-store then rejects a different envelope before it calls the key wrapper.
+store then rejects a different envelope before it calls the key wrapper. Sealed
+store agent ids must be valid UTF-8, at most 256 bytes, and contain neither
+surrounding whitespace nor control characters.
 
 The SDK wipes its temporary plaintext and DEK byte buffers after use. Go's JSON
 decoder copies credential fields into `AgentState` strings, which are immutable

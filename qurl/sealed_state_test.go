@@ -293,6 +293,9 @@ func TestSealedFileAgentState_ExpectedAgentID(t *testing.T) {
 	if _, err := NewSealedFileAgentState("state", "test", &testAgentStateKeyWrapper{}, WithExpectedSealedAgentID(" ")); !errors.Is(err, ErrInvalidBootstrapConfig) {
 		t.Fatalf("invalid expected id = %v, want ErrInvalidBootstrapConfig", err)
 	}
+	if _, err := NewSealedFileAgentState("state", "test", &testAgentStateKeyWrapper{}, WithExpectedSealedAgentID("agent\nexpected")); !errors.Is(err, ErrInvalidBootstrapConfig) {
+		t.Fatalf("control-character expected id = %v, want ErrInvalidBootstrapConfig", err)
+	}
 
 	dir := t.TempDir()
 	if err := os.Chmod(dir, 0o700); err != nil {
@@ -338,6 +341,73 @@ func TestSealedFileAgentState_ExpectedAgentID(t *testing.T) {
 	defer wrapper.mu.Unlock()
 	if got := len(wrapper.unwrapBindings); got != unwrapCalls {
 		t.Fatalf("mismatched pinned load called UnwrapKey %d additional times", got-unwrapCalls)
+	}
+}
+
+func TestSealedFileAgentState_ControlCharacterAgentIDNeverReachesWrapper(t *testing.T) {
+	wrapper := &testAgentStateKeyWrapper{}
+	store := testSealedStore(t, wrapper)
+	state := testAgentState(t)
+	state.AgentID = "agent\ncontrol"
+	if err := store.SaveAgentState(context.Background(), state); !errors.Is(err, ErrInvalidBootstrapConfig) {
+		t.Fatalf("save control-character id = %v, want ErrInvalidBootstrapConfig", err)
+	}
+	wrapper.mu.Lock()
+	if got := len(wrapper.wrapBindings); got != 0 {
+		wrapper.mu.Unlock()
+		t.Fatalf("control-character save reached WrapKey %d times", got)
+	}
+	wrapper.mu.Unlock()
+
+	state.AgentID = "agent-valid"
+	if err := store.SaveAgentState(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(store.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw = mutateEnvelopeJSON(t, raw, func(value map[string]any) {
+		value["agent_id"] = "agent\u0000control"
+	})
+	if err := os.WriteFile(store.path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	wrapper.mu.Lock()
+	unwrapCalls := len(wrapper.unwrapBindings)
+	wrapper.mu.Unlock()
+	if _, err := store.LoadAgentState(context.Background()); !errors.Is(err, ErrInvalidAgentState) {
+		t.Fatalf("load control-character id = %v, want ErrInvalidAgentState", err)
+	}
+	wrapper.mu.Lock()
+	defer wrapper.mu.Unlock()
+	if got := len(wrapper.unwrapBindings); got != unwrapCalls {
+		t.Fatalf("control-character load reached UnwrapKey %d additional times", got-unwrapCalls)
+	}
+}
+
+func TestSealedFileAgentState_ReportsNestingLimitAccurately(t *testing.T) {
+	store := testSealedStore(t, &testAgentStateKeyWrapper{})
+	if err := store.SaveAgentState(context.Background(), testAgentState(t)); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(store.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw = mutateEnvelopeJSON(t, raw, func(value map[string]any) {
+		var nested any = "leaf"
+		for range maxSealedEnvelopeJSONDepth + 1 {
+			nested = []any{nested}
+		}
+		value["wrapped_key"].(map[string]any)["metadata"] = nested
+	})
+	if err := os.WriteFile(store.path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.LoadAgentState(context.Background())
+	if !errors.Is(err, ErrInvalidAgentState) || !strings.Contains(err.Error(), "JSON nesting exceeds limit") || strings.Contains(err.Error(), "duplicate") {
+		t.Fatalf("deeply nested envelope = %v, want accurate ErrInvalidAgentState nesting error", err)
 	}
 }
 

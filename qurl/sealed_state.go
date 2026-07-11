@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -34,6 +35,11 @@ const (
 )
 
 var providerIDPattern = regexp.MustCompile(`^[a-z][a-z0-9]*([.-][a-z0-9]+)*$`)
+
+var (
+	errSealedJSONNesting        = errors.New("sealed envelope JSON nesting exceeds limit")
+	errDuplicateSealedJSONField = errors.New("duplicate sealed envelope JSON field")
+)
 
 // ErrAgentStateKeyWrapper reports an operational failure from an
 // AgentStateKeyWrapper. It is distinct from ErrInvalidAgentState: an unavailable
@@ -114,8 +120,9 @@ type sealedFileAgentStateOptions struct {
 
 // WithExpectedSealedAgentID pins a sealed store to one agent id. Load rejects a
 // valid envelope for any other agent before calling the key wrapper, and Save
-// rejects mismatched state. On first enrollment, pass the same id through
-// WithDeviceID (RegisterAgent) or WithAgentID (BootstrapAgent).
+// rejects mismatched state. The id must be canonical valid UTF-8 without
+// surrounding whitespace or control characters. On first enrollment, pass the
+// same id through WithDeviceID (RegisterAgent) or WithAgentID (BootstrapAgent).
 func WithExpectedSealedAgentID(agentID string) SealedFileAgentStateOption {
 	return sealedFileAgentStateOptionFunc(func(o *sealedFileAgentStateOptions) error {
 		normalized, err := normalizeSealedAgentID(agentID)
@@ -190,8 +197,8 @@ func validateProviderID(providerID string) error {
 
 func normalizeSealedAgentID(agentID string) (string, error) {
 	normalized := strings.TrimSpace(agentID)
-	if normalized == "" || normalized != agentID || !utf8.ValidString(normalized) || len(normalized) > maxSealedAgentStateAgentID {
-		return "", fmt.Errorf("agent id must be non-empty, canonical (no surrounding whitespace), and at most %d bytes", maxSealedAgentStateAgentID)
+	if normalized == "" || normalized != agentID || !utf8.ValidString(normalized) || strings.IndexFunc(normalized, unicode.IsControl) >= 0 || len(normalized) > maxSealedAgentStateAgentID {
+		return "", fmt.Errorf("agent id must be non-empty, valid UTF-8, canonical (no surrounding whitespace or control characters), and at most %d bytes", maxSealedAgentStateAgentID)
 	}
 	return normalized, nil
 }
@@ -385,7 +392,14 @@ type sealedAgentStateAAD struct {
 
 func decodeSealedAgentStateEnvelope(raw []byte, envelope *sealedAgentStateEnvelope) error {
 	if err := rejectDuplicateJSONFields(raw); err != nil {
-		return invalidSealedState("envelope contains duplicate object fields")
+		switch {
+		case errors.Is(err, errSealedJSONNesting):
+			return invalidSealedState("JSON nesting exceeds limit")
+		case errors.Is(err, errDuplicateSealedJSONField):
+			return invalidSealedState("envelope contains duplicate object fields")
+		default:
+			return invalidSealedState("envelope contains malformed JSON")
+		}
 	}
 	if err := strictDecodeJSON(raw, envelope); err != nil {
 		return invalidSealedState("decode envelope")
@@ -421,7 +435,7 @@ func rejectDuplicateJSONFields(raw []byte) error {
 
 func consumeUniqueJSONValue(decoder *json.Decoder, depth int) error {
 	if depth > maxSealedEnvelopeJSONDepth {
-		return errors.New("JSON nesting exceeds limit")
+		return errSealedJSONNesting
 	}
 	token, err := decoder.Token()
 	if err != nil {
@@ -444,7 +458,7 @@ func consumeUniqueJSONValue(decoder *json.Decoder, depth int) error {
 				return errors.New("JSON object key is not a string")
 			}
 			if _, exists := seen[key]; exists {
-				return fmt.Errorf("duplicate JSON field %q", key)
+				return fmt.Errorf("%w %q", errDuplicateSealedJSONField, key)
 			}
 			seen[key] = struct{}{}
 			if err := consumeUniqueJSONValue(decoder, depth+1); err != nil {
