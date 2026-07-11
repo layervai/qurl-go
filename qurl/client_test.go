@@ -51,6 +51,77 @@ func TestDoAuthorizedJSON_EarlyResponseDoesNotCorruptInFlightRequestBody(t *test
 	}
 }
 
+func TestDoAuthorizedJSON_NilOutputPreservesLegacyIgnoreContract(t *testing.T) {
+	t.Parallel()
+
+	for _, status := range []int{http.StatusOK, http.StatusAccepted, http.StatusNoContent} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			t.Parallel()
+			httpClient := doerFunc(func(*http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: status,
+					Body:       io.NopCloser(strings.NewReader(`not JSON and intentionally ignored`)),
+					Header:     make(http.Header),
+				}, nil
+			})
+			err := doAuthorizedJSON(context.Background(), httpClient, "https://api.example.test", func(context.Context, *http.Request) error {
+				return nil
+			}, http.MethodPost, "/v1/test", nil, nil)
+			if err != nil {
+				t.Fatalf("doAuthorizedJSON status %d with nil output: %v", status, err)
+			}
+		})
+	}
+}
+
+func TestDoAuthorizedJSON_OversizedSuccessIsDrainedAndClosed(t *testing.T) {
+	t.Parallel()
+
+	raw := strings.Repeat("x", maxAPIResponseBodyBytes+100)
+	body := &trackingReadCloser{reader: strings.NewReader(raw)}
+	httpClient := doerFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       body,
+			Header:     make(http.Header),
+		}, nil
+	})
+	var out map[string]any
+	err := doAuthorizedJSON(context.Background(), httpClient, "https://api.example.test", func(context.Context, *http.Request) error {
+		return nil
+	}, http.MethodGet, "/v1/test", nil, &out)
+	if !errors.Is(err, ErrInvalidAPIResponse) {
+		t.Fatalf("error = %v, want ErrInvalidAPIResponse", err)
+	}
+	var outcomeUnknown *apiRequestOutcomeUnknownError
+	if !errors.As(err, &outcomeUnknown) {
+		t.Fatalf("error = %v, want outcome marker", err)
+	}
+	if !body.closed {
+		t.Fatal("response body was not closed")
+	}
+	if body.bytesRead != len(raw) {
+		t.Fatalf("response bytes read = %d, want %d (capped read plus deferred drain)", body.bytesRead, len(raw))
+	}
+}
+
+type trackingReadCloser struct {
+	reader    *strings.Reader
+	bytesRead int
+	closed    bool
+}
+
+func (r *trackingReadCloser) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	r.bytesRead += n
+	return n, err
+}
+
+func (r *trackingReadCloser) Close() error {
+	r.closed = true
+	return nil
+}
+
 func TestClient_ProtectURLThenPortal(t *testing.T) {
 	var requestCount atomic.Int32
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -293,7 +364,7 @@ func TestClient_ConnectorResourceCreatePortal(t *testing.T) {
 			if got := r.Header.Get("Content-Type"); got != "" {
 				t.Fatalf("GET Content-Type = %q, want empty", got)
 			}
-			fmt.Fprint(w, `{"data":[{"resource_id":"r_connector12","type":"tunnel","status":"active","alias":"prod-dashboard"}]}`)
+			fmt.Fprint(w, `{"data":[{"resource_id":"r_connector12","knock_resource_id":"qurl-tunnel-server","type":"tunnel","status":"active","slug":"prod-dashboard","alias":"display-dashboard"}]}`)
 		case 2:
 			if r.Method != http.MethodPost || r.URL.Path != "/v1/resources/r_connector12/qurls" {
 				t.Fatalf("second request = %s %s, want POST /v1/resources/r_connector12/qurls", r.Method, r.URL.Path)
@@ -372,13 +443,13 @@ func TestClient_ConnectorResourceAmbiguous(t *testing.T) {
 	}
 }
 
-func TestClient_ConnectorResourceRejectsMismatchedAlias(t *testing.T) {
+func TestClient_ConnectorResourceKeepsSlugDistinctFromAlias(t *testing.T) {
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Path != "/v1/resources" || r.URL.Query().Get("slug") != "prod-dashboard" {
 			t.Fatalf("request = %s %s?%s, want GET /v1/resources?slug=prod-dashboard", r.Method, r.URL.Path, r.URL.RawQuery)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"data":[{"resource_id":"r_wrong12345","status":"active","alias":"other-dashboard"}]}`)
+		fmt.Fprint(w, `{"data":[{"resource_id":"r_wrong123456","knock_resource_id":"qurl-tunnel-server","type":"tunnel","status":"active","slug":"prod-dashboard","alias":"other-dashboard"}]}`)
 	}))
 	defer api.Close()
 
@@ -387,19 +458,22 @@ func TestClient_ConnectorResourceRejectsMismatchedAlias(t *testing.T) {
 		t.Fatalf("NewClient: %v", err)
 	}
 
-	_, err = client.ConnectorResource(context.Background(), "prod-dashboard")
-	if err == nil || !strings.Contains(err.Error(), "returned resource alias") {
-		t.Fatalf("ConnectorResource mismatched alias: want alias mismatch error, got %v", err)
+	resource, err := client.ConnectorResource(context.Background(), "prod-dashboard")
+	if err != nil {
+		t.Fatalf("ConnectorResource: %v", err)
+	}
+	if resource.Slug != "prod-dashboard" || resource.Alias == nil || *resource.Alias != "other-dashboard" {
+		t.Fatalf("slug/alias = %q/%v, want prod-dashboard/other-dashboard", resource.Slug, resource.Alias)
 	}
 }
 
-func TestClient_ConnectorResourceRejectsMissingAlias(t *testing.T) {
+func TestClient_ConnectorResourceAllowsMissingAlias(t *testing.T) {
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Path != "/v1/resources" || r.URL.Query().Get("slug") != "prod-dashboard" {
 			t.Fatalf("request = %s %s?%s, want GET /v1/resources?slug=prod-dashboard", r.Method, r.URL.Path, r.URL.RawQuery)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"data":[{"resource_id":"r_missingalias","status":"active"}]}`)
+		fmt.Fprint(w, `{"data":[{"resource_id":"r_missingalia","knock_resource_id":"qurl-tunnel-server","type":"tunnel","status":"active","slug":"prod-dashboard"}]}`)
 	}))
 	defer api.Close()
 
@@ -408,9 +482,12 @@ func TestClient_ConnectorResourceRejectsMissingAlias(t *testing.T) {
 		t.Fatalf("NewClient: %v", err)
 	}
 
-	_, err = client.ConnectorResource(context.Background(), "prod-dashboard")
-	if err == nil || !strings.Contains(err.Error(), "without alias") {
-		t.Fatalf("ConnectorResource missing alias: want missing alias error, got %v", err)
+	resource, err := client.ConnectorResource(context.Background(), "prod-dashboard")
+	if err != nil {
+		t.Fatalf("ConnectorResource: %v", err)
+	}
+	if resource.Alias != nil || resource.Slug != "prod-dashboard" {
+		t.Fatalf("resource = %#v, want nil alias and prod-dashboard slug", resource)
 	}
 }
 
