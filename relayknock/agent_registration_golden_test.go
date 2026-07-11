@@ -101,9 +101,10 @@ type agentRegGoldenFile struct {
 
 const agentRegArtifactID = "qurl-agent-registration-golden-vectors"
 
-// loadAgentRegistrationGolden reads and strictly parses the vendored artifact,
-// after asserting its bytes match the pinned SHA-256. It FAILS (never skips) if the
-// bytes are absent, tampered, or malformed, so the fence cannot silently no-op.
+// loadAgentRegistrationGolden reads the vendored artifact, parses it, and validates
+// key invariants (the artifact id and the non-empty load-bearing packets), after
+// asserting its bytes match the pinned SHA-256. It FAILS (never skips) if the bytes
+// are absent, tampered, or malformed, so the fence cannot silently no-op.
 //
 // This is the vendored-data stand-in for a published
 // conformance.AgentRegistrationGolden() accessor; see the file header for the
@@ -190,8 +191,8 @@ func TestAgentRegistrationVendoredVectors_Integrity(t *testing.T) {
 // TestBuildMessage_AgentRegistrationGolden reproduces the deterministic OTP and REG
 // packets byte-for-byte from the conformance golden inputs, proving the NHP
 // registration-message seal chain, header framing, and type gating match the
-// reference server for all three cases (356/425/425-byte packets: OTP, emailed REG,
-// pre-issued REG).
+// reference server for all three cases (356/404/445-byte packets: OTP, emailed REG,
+// pre-issued REG — the two REGs differ in size, 148B vs 189B bodies).
 func TestBuildMessage_AgentRegistrationGolden(t *testing.T) {
 	g := loadAgentRegistrationGolden(t)
 
