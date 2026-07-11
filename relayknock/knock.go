@@ -321,6 +321,9 @@ func decryptMessage(devicePriv, expectedServerStaticPub, packet []byte) (*Reply,
 		}
 	}
 
+	// The decoded payload size is intentionally ignored (not cross-checked against
+	// len(sealedBody)): the body AEAD fences the actual body bytes, so a tampered
+	// size field cannot smuggle in a different body — the open would fail first.
 	typ, _ := getTypeAndPayloadSize(header)
 	switch typ {
 	case nhpKNK, nhpACK, nhpCOK, nhpOTP, nhpREG, nhpRAK:
@@ -339,7 +342,7 @@ func decryptMessage(devicePriv, expectedServerStaticPub, packet []byte) (*Reply,
 }
 
 // inflateZlib inflates a Go compress/zlib (RFC 1950) stream. Input is bounded by
-// the packetBufferSize check in DecryptReply and is post-AEAD (in-TCB), so no
+// the packetBufferSize check in decryptMessage and is post-AEAD (in-TCB), so no
 // decompression-bomb exposure beyond one buffer.
 func inflateZlib(compressed []byte) ([]byte, error) {
 	r, err := zlib.NewReader(bytes.NewReader(compressed))

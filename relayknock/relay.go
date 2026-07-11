@@ -201,6 +201,10 @@ func Exchange(ctx context.Context, relayBaseURL string, serverStaticPub []byte, 
 	// relay) be misclassified as ErrMalformedReply — turning a retryable "busy"
 	// into a hard failure on the hot path. So a COK the request can legitimately
 	// elicit returns straight to the caller; the caller reads it as overload.
+	//
+	// The replyTypeAllowed conjunct is always true for today's round-trip types
+	// (both TypeKnock and TypeRegister admit NHP_COK) — intentional future-proofing,
+	// load-bearing only if a non-cookie-challengeable round-trip type is ever added.
 	if dr.IsCookieChallenge() && replyTypeAllowed(headerType, dr.Type) {
 		return dr, nil
 	}
@@ -336,16 +340,16 @@ func buildOutbound(headerType int, serverStaticPub, body []byte, opts KnockOptio
 
 	devicePriv = opts.DeviceStaticPriv
 	if len(devicePriv) == 0 {
-		devicePriv = make([]byte, 32)
-		if _, err := rand.Read(devicePriv); err != nil {
+		devicePriv, err = randBytes(32)
+		if err != nil {
 			return nil, nil, 0, fmt.Errorf("device key: %w", err)
 		}
 	} else if len(devicePriv) != 32 {
 		return nil, nil, 0, fmt.Errorf("device static priv must be 32 bytes, got %d", len(devicePriv))
 	}
 
-	ephemeralPriv := make([]byte, 32)
-	if _, err := rand.Read(ephemeralPriv); err != nil {
+	ephemeralPriv, err := randBytes(32)
+	if err != nil {
 		return nil, nil, 0, fmt.Errorf("ephemeral key: %w", err)
 	}
 	counter, err = randUint64()
@@ -370,6 +374,15 @@ func buildOutbound(headerType int, serverStaticPub, body []byte, opts KnockOptio
 		return nil, nil, 0, fmt.Errorf("build message: %w", err)
 	}
 	return packet, devicePriv, counter, nil
+}
+
+// randBytes returns n cryptographically random bytes (device/ephemeral keys).
+func randBytes(n int) ([]byte, error) {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		return nil, err
+	}
+	return b, nil
 }
 
 func randUint64() (uint64, error) {
