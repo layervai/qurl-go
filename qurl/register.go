@@ -823,7 +823,10 @@ func (p *storeCredentialProvider) Authorize(ctx context.Context, req *http.Reque
 	}
 	state, err := p.store.LoadAgentState(ctx)
 	if err != nil {
-		return err
+		// Add Client-layer context rather than surfacing the raw store error
+		// verbatim (the underlying store sentinel stays matchable via %w),
+		// consistent with how the enrollment engine re-wraps load failures.
+		return fmt.Errorf("qurl: load device credential for authorization: %w", err)
 	}
 	if state == nil {
 		return fmt.Errorf("%w: agent state store returned no state", ErrDeviceCredentialMissing)

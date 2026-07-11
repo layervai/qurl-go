@@ -92,7 +92,15 @@ func parseRegisterAck(body []byte) (*registerAckBody, error) {
 		return &ack, nil
 	}
 	if err := json.Unmarshal(body, &ack); err != nil {
-		return nil, fmt.Errorf("qurl: parse registration reply body: %w", err)
+		return nil, fmt.Errorf("%w: parse registration reply body: %v", ErrRegisterReplyMalformed, err)
+	}
+	// Defense-in-depth on the echoed aspId: the RAK is Noise-authenticated, but
+	// every other wire field gets a consistency check, so a reply carrying a
+	// mismatched aspId (a RAK for a different authorization service) is treated as
+	// malformed rather than acted on. An absent aspId is tolerated (empty body ⇒
+	// success is handled above; a server may omit it).
+	if ack.AspID != "" && ack.AspID != agentAspID {
+		return nil, fmt.Errorf("%w: registration reply aspId %q, want %q", ErrRegisterReplyMalformed, ack.AspID, agentAspID)
 	}
 	return &ack, nil
 }

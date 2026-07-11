@@ -113,8 +113,27 @@ func TestParseRegisterAck_EmptyBodyIsZeroValue(t *testing.T) {
 }
 
 func TestParseRegisterAck_MalformedBodyErrors(t *testing.T) {
-	if _, err := parseRegisterAck([]byte("{not json")); err == nil {
+	_, err := parseRegisterAck([]byte("{not json"))
+	if err == nil {
 		t.Fatal("malformed RAK body should error")
+	}
+	if !errors.Is(err, ErrRegisterReplyMalformed) {
+		t.Errorf("malformed RAK body error = %v, want ErrRegisterReplyMalformed", err)
+	}
+}
+
+func TestParseRegisterAck_MismatchedAspIdRejected(t *testing.T) {
+	// A well-formed reply whose aspId is not the agent path's is a RAK for a
+	// different authorization service — rejected as malformed (defense-in-depth on
+	// the otherwise Noise-authenticated body).
+	if _, err := parseRegisterAck([]byte(`{"errCode":"0","aspId":"qurl"}`)); !errors.Is(err, ErrRegisterReplyMalformed) {
+		t.Fatalf("mismatched aspId: err = %v, want ErrRegisterReplyMalformed", err)
+	}
+	// A matching aspId, and an absent one, are both accepted.
+	for _, b := range [][]byte{[]byte(`{"errCode":"0","aspId":"agent"}`), []byte(`{"errCode":"0"}`)} {
+		if _, err := parseRegisterAck(b); err != nil {
+			t.Errorf("aspId body %q should be accepted: %v", b, err)
+		}
 	}
 }
 
