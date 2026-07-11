@@ -87,12 +87,11 @@ type AgentStateKeyWrapper interface {
 // SDK-owned AES-256-GCM envelope. Only a freshly generated 32-byte DEK crosses
 // the AgentStateKeyWrapper boundary; AgentState JSON never does.
 type SealedFileAgentStateStore struct {
-	path       string
+	fileSetupLock
 	providerID string
 	wrapper    AgentStateKeyWrapper
 	random     io.Reader
 	fileOps    privateStateFileOps
-	lockFile   func(context.Context, string) (setupLock, error)
 }
 
 // NewSealedFileAgentState constructs a sealed local AgentStateStore. providerID
@@ -115,12 +114,11 @@ func NewSealedFileAgentState(path, providerID string, wrapper AgentStateKeyWrapp
 		return nil, fmt.Errorf("%w: agent state key wrapper must not be nil", ErrInvalidBootstrapConfig)
 	}
 	return &SealedFileAgentStateStore{
-		path:       path,
-		providerID: providerID,
-		wrapper:    wrapper,
-		random:     rand.Reader,
-		fileOps:    defaultPrivateStateFileOps,
-		lockFile:   lockFileExclusive,
+		fileSetupLock: fileSetupLock{path: path, lockFile: lockFileExclusive},
+		providerID:    providerID,
+		wrapper:       wrapper,
+		random:        rand.Reader,
+		fileOps:       defaultPrivateStateFileOps,
 	}, nil
 }
 
@@ -154,16 +152,6 @@ func normalizeSealedAgentID(agentID string) (string, error) {
 	return normalized, nil
 }
 
-func (s *SealedFileAgentStateStore) setupLockPath() string { return s.path + agentSetupLockSuffix }
-
-func (s *SealedFileAgentStateStore) acquireSetupLock(ctx context.Context) (setupLock, error) {
-	lock, err := s.lockFile(ctx, s.setupLockPath())
-	if err != nil {
-		return nil, fmt.Errorf("%w: acquire %s: %w", ErrAgentSetupLock, s.setupLockPath(), err)
-	}
-	return lock, nil
-}
-
 // LoadAgentState authenticates, unwraps, and decrypts the sealed envelope.
 func (s *SealedFileAgentStateStore) LoadAgentState(ctx context.Context) (*AgentState, error) {
 	if err := validateContext(ctx, ErrInvalidBootstrapConfig); err != nil {
@@ -194,9 +182,13 @@ func (s *SealedFileAgentStateStore) LoadAgentState(ctx context.Context) (*AgentS
 	}
 	defer wipeBytes(dek)
 	if len(dek) != sealedAgentStateDEKBytes {
-		return nil, invalidSealedState("key wrapper returned a DEK with invalid length")
+		return nil, fmt.Errorf("%w: unwrap returned a DEK with invalid length", ErrAgentStateKeyWrapper)
 	}
-	plaintext, err := openSealedAgentState(dek, envelope.Nonce, envelope.Ciphertext, envelope.aad())
+	aad, err := envelope.aad()
+	if err != nil {
+		return nil, fmt.Errorf("qurl: encode sealed agent state AAD: %w", err)
+	}
+	plaintext, err := openSealedAgentState(dek, envelope.Nonce, envelope.Ciphertext, aad)
 	if err != nil {
 		return nil, invalidSealedState("envelope authentication failed")
 	}
@@ -281,7 +273,11 @@ func (s *SealedFileAgentStateStore) SaveAgentState(ctx context.Context, state *A
 		WrappedKey: wrapped,
 		Nonce:      nonce,
 	}
-	envelope.Ciphertext = gcm.Seal(nil, nonce, plaintext, envelope.aad())
+	aad, err := envelope.aad()
+	if err != nil {
+		return fmt.Errorf("qurl: encode sealed agent state AAD: %w", err)
+	}
+	envelope.Ciphertext = gcm.Seal(nil, nonce, plaintext, aad)
 	raw, err := json.MarshalIndent(envelope, "", "  ")
 	if err != nil {
 		return fmt.Errorf("qurl: encode sealed agent state envelope: %w", err)
@@ -307,20 +303,23 @@ func (e sealedAgentStateEnvelope) binding() AgentStateKeyBinding {
 	return AgentStateKeyBinding{Purpose: e.Purpose, EnvelopeVersion: e.Version, ProviderID: e.ProviderID, AgentID: e.AgentID}
 }
 
-func (e sealedAgentStateEnvelope) aad() []byte {
+func (e sealedAgentStateEnvelope) aad() ([]byte, error) {
 	// Keep the persisted v1 AAD independent of future additions to the public
 	// AgentStateKeyBinding type. JSON encoding of this fixed-field internal struct
 	// is deterministic and unambiguous.
 	wrapped := cloneWrappedAgentStateKey(e.WrappedKey)
 	wrapped.Metadata = compactJSON(wrapped.Metadata)
-	raw, _ := json.Marshal(sealedAgentStateAAD{
+	raw, err := json.Marshal(sealedAgentStateAAD{
 		Purpose:         e.Purpose,
 		EnvelopeVersion: e.Version,
 		ProviderID:      e.ProviderID,
 		AgentID:         e.AgentID,
 		WrappedKey:      wrapped,
 	})
-	return raw
+	if err != nil {
+		return nil, err
+	}
+	return raw, nil
 }
 
 type sealedAgentStateAAD struct {

@@ -235,7 +235,11 @@ func TestSealedAgentStateAAD_V1Golden(t *testing.T) {
 		WrappedKey: WrappedAgentStateKey{Version: 7, Ciphertext: []byte{1, 2}, Metadata: json.RawMessage(`{"key_id":"k"}`)},
 	}
 	want := `{"purpose":"qurl-go/agent-state","envelope_version":1,"provider_id":"aws-kms","agent_id":"agent-123","wrapped_key":{"version":7,"ciphertext":"AQI=","metadata":{"key_id":"k"}}}`
-	if got := string(envelope.aad()); got != want {
+	aad, err := envelope.aad()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(aad); got != want {
 		t.Fatalf("v1 AAD = %s, want %s", got, want)
 	}
 }
@@ -514,6 +518,11 @@ func TestSealedFileAgentState_LoadWrapperOperationalVsInvalid(t *testing.T) {
 	if _, err := store.LoadAgentState(context.Background()); !errors.Is(err, ErrInvalidAgentState) {
 		t.Fatalf("invalid wrapped key = %v, want ErrInvalidAgentState", err)
 	}
+	wrapper.unwrapErr = nil
+	wrapper.unwrapOverride = make([]byte, 31)
+	if _, err := store.LoadAgentState(context.Background()); !errors.Is(err, ErrAgentStateKeyWrapper) || errors.Is(err, ErrInvalidAgentState) {
+		t.Fatalf("wrong-length unwrap = %v, want ErrAgentStateKeyWrapper only", err)
+	}
 }
 
 func TestSealedFileAgentState_RejectsInsecureDirectoryAndOversizeFile(t *testing.T) {
@@ -706,7 +715,11 @@ func TestSealedFileAgentState_RejectsInnerOuterAgentMismatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plaintext, err := openSealedAgentState(dek, envelope.Nonce, envelope.Ciphertext, envelope.aad())
+	aad, err := envelope.aad()
+	if err != nil {
+		t.Fatal(err)
+	}
+	plaintext, err := openSealedAgentState(dek, envelope.Nonce, envelope.Ciphertext, aad)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -718,7 +731,11 @@ func TestSealedFileAgentState_RejectsInnerOuterAgentMismatch(t *testing.T) {
 	plaintext, _ = json.Marshal(state)
 	block, _ := aes.NewCipher(dek)
 	gcm, _ := cipher.NewGCM(block)
-	envelope.Ciphertext = gcm.Seal(nil, envelope.Nonce, plaintext, envelope.aad())
+	aad, err = envelope.aad()
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope.Ciphertext = gcm.Seal(nil, envelope.Nonce, plaintext, aad)
 	tampered, _ := json.Marshal(envelope)
 	if err := os.WriteFile(store.path, tampered, 0o600); err != nil {
 		t.Fatal(err)

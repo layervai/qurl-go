@@ -139,21 +139,11 @@ type AgentStateStore interface {
 // 0600. Local filesystem I/O is synchronous; the context passed to LoadAgentState
 // or SaveAgentState cannot interrupt a read or write once it has started.
 func FileAgentState(path string) AgentStateStore {
-	return fileAgentStateStore{path: path}
+	return fileAgentStateStore{fileSetupLock: fileSetupLock{path: path, lockFile: lockFileExclusive}}
 }
 
 type fileAgentStateStore struct {
-	path string
-}
-
-func (s fileAgentStateStore) setupLockPath() string { return s.path + agentSetupLockSuffix }
-
-func (s fileAgentStateStore) acquireSetupLock(ctx context.Context) (setupLock, error) {
-	lock, err := lockFileExclusive(ctx, s.setupLockPath())
-	if err != nil {
-		return nil, fmt.Errorf("%w: acquire %s: %w", ErrAgentSetupLock, s.setupLockPath(), err)
-	}
-	return lock, nil
+	fileSetupLock
 }
 
 func (s fileAgentStateStore) LoadAgentState(ctx context.Context) (*AgentState, error) {

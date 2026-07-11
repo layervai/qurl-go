@@ -1,6 +1,9 @@
 package qurl
 
-import "context"
+import (
+	"context"
+	"fmt"
+)
 
 // agentSetupLockSuffix names the stable sidecar lockfile taken during setup.
 const agentSetupLockSuffix = ".lock"
@@ -12,6 +15,24 @@ type setupLock interface {
 type setupLockingAgentStateStore interface {
 	setupLockPath() string
 	acquireSetupLock(context.Context) (setupLock, error)
+}
+
+// fileSetupLock is the shared setup-lock behavior for SDK local-file stores.
+// Embedding it provides one source for path derivation, typed error wrapping,
+// and the injected lock seam used by failure tests.
+type fileSetupLock struct {
+	path     string
+	lockFile func(context.Context, string) (setupLock, error)
+}
+
+func (l fileSetupLock) setupLockPath() string { return l.path + agentSetupLockSuffix }
+
+func (l fileSetupLock) acquireSetupLock(ctx context.Context) (setupLock, error) {
+	lock, err := l.lockFile(ctx, l.setupLockPath())
+	if err != nil {
+		return nil, fmt.Errorf("%w: acquire %s: %w", ErrAgentSetupLock, l.setupLockPath(), err)
+	}
+	return lock, nil
 }
 
 // acquireAgentSetupLock takes the mandatory exclusive setup lock for SDK local
