@@ -117,6 +117,16 @@ const agentStateSchemaVersion = 2
 // AgentStateStore loads and saves the bootstrapped local identity. The
 // file-backed store writes plaintext JSON protected by filesystem permissions;
 // implement this with KMS or a secret manager when that is not appropriate.
+//
+// Ownership contract: the registration engine takes ownership of the *AgentState
+// that LoadAgentState returns and mutates it IN PLACE (device id, keypair, relay,
+// key id, registered-at, device credential, otp-pending) before handing that same
+// pointer back to SaveAgentState. A custom store must therefore return a fresh,
+// caller-owned *AgentState from each LoadAgentState — never a pointer it retains,
+// caches, or shares across calls — and SaveAgentState must snapshot (encode)
+// eagerly rather than hold the pointer, or the engine's in-flight mutations will
+// corrupt the store's own copy. The file-backed store decodes a fresh value per
+// load and encodes on save, so it satisfies this by construction.
 type AgentStateStore interface {
 	LoadAgentState(context.Context) (*AgentState, error)
 	SaveAgentState(context.Context, *AgentState) error
@@ -308,9 +318,14 @@ func WithVersion(version string) BootstrapOption {
 // has expired, BootstrapAgent fails closed so the caller can run the LayerV setup
 // or refresh flow instead of using stale routing state.
 //
-// Call BootstrapAgent from one setup path at a time for a given store. The SDK
-// makes each file write atomic, but it does not lock across concurrent callers or
-// processes that share the same state file.
+// Each state write is atomic. For a FileAgentState the SDK also serializes
+// concurrent first-time setup across processes with a best-effort advisory lock
+// (flock on a sidecar beside the state file): the racer that loses blocks until
+// the winner enrolls, then fast-paths to the now-registered state instead of
+// sending the setup key again. The lock is best-effort — on any failure
+// (unsupported platform, unopenable lockfile, canceled ctx) setup proceeds
+// unserialized rather than failing. A custom or networked AgentStateStore cannot
+// be locked for you, so serialize setup per store yourself.
 func BootstrapAgent(ctx context.Context, setupKey string, store AgentStateStore, opts ...BootstrapOption) (*AgentState, error) {
 	if strings.TrimSpace(setupKey) == "" {
 		return nil, fmt.Errorf("%w: setup key must not be empty", ErrInvalidBootstrapConfig)
