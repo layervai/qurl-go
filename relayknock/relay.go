@@ -294,12 +294,16 @@ func Send(ctx context.Context, relayBaseURL string, serverStaticPub, body []byte
 				"relay POST %s -> 200 with a %d-byte reply to a one-way NHP_OTP (a conforming relay acknowledges dispatch with 202 Accepted); the server likely processed the dispatch",
 				url, len(respBody)))
 		}
-		// Quoting the body is safe here, unlike the 200/202 branches: a non-2xx
-		// body is relay-authored plaintext error detail (the same contract
-		// RelayPost quotes), never packet bytes.
+		// Quoting the body is only safe for a non-2xx status: that body is
+		// relay-authored plaintext error detail (the same contract RelayPost
+		// quotes), never packet bytes. The 200-with-body case is handled above; a
+		// stray other 2xx (e.g. 201/206) could still carry packet bytes, so its
+		// body is left unquoted.
 		m := fmt.Sprintf("relay POST %s -> %d, want 202 Accepted for a one-way NHP_OTP dispatch", url, status)
-		if detail := strings.TrimSpace(string(respBody)); detail != "" {
-			m += ": " + detail
+		if status < 200 || status >= 300 {
+			if detail := strings.TrimSpace(string(respBody)); detail != "" {
+				m += ": " + detail
+			}
 		}
 		return sendError(status, m)
 	}

@@ -235,7 +235,11 @@ func DecryptReply(devicePriv, expectedServerStaticPub, packet []byte) (*Reply, e
 	case nhpACK, nhpCOK, nhpRAK:
 		return reply, nil
 	default:
-		return nil, fmt.Errorf("not a server reply: header type %d is initiator-only", reply.Type)
+		// Wrap ErrMalformedReply so a consumer's errors.Is catches the whole
+		// "reply this request cannot accept" class uniformly — the same sentinel
+		// Exchange's replyTypeAllowed mismatch uses. A conforming server never
+		// produces an initiator-typed reply; only a byzantine one reaches here.
+		return nil, fmt.Errorf("%w: not a server reply: header type %d is initiator-only", ErrMalformedReply, reply.Type)
 	}
 }
 
