@@ -28,8 +28,14 @@ type KnockInputs struct {
 	Body             []byte // serialized, uncompressed application knock body
 }
 
-// wireInputs converts the public KnockInputs into the nhpwire codec's Inputs.
-func (k *KnockInputs) wireInputs() *nhpwire.Inputs {
+// WireInputs converts the public KnockInputs into the nhpwire codec's Inputs. It
+// is the SINGLE source for this field mapping: both this package's builders and
+// the responder-role relayknocktest.BuildReply go through it, so a new KnockInputs
+// field cannot be wired into one path and missed on the other. The return type is
+// the module-internal nhpwire.Inputs, so callers outside this module's relayknock
+// subtree cannot name it — the method is effectively package-internal despite
+// being exported, which is why exporting it does not widen the usable public API.
+func (k *KnockInputs) WireInputs() *nhpwire.Inputs {
 	return &nhpwire.Inputs{
 		DeviceStaticPriv: k.DeviceStaticPriv,
 		ServerStaticPub:  k.ServerStaticPub,
@@ -45,7 +51,7 @@ func (k *KnockInputs) wireInputs() *nhpwire.Inputs {
 // that the reference NHP relay responder decrypts. It is BuildMessage fixed to
 // TypeKnock.
 func BuildKnock(inp *KnockInputs) ([]byte, error) {
-	return nhpwire.BuildMessage(nhpwire.TypeKNK, inp.wireInputs())
+	return nhpwire.BuildMessage(nhpwire.TypeKNK, inp.WireInputs())
 }
 
 // BuildMessage builds a complete NHP packet (240-byte header ‖ sealed body) of
@@ -62,7 +68,7 @@ func BuildKnock(inp *KnockInputs) ([]byte, error) {
 func BuildMessage(headerType int, inp *KnockInputs) ([]byte, error) {
 	switch headerType {
 	case TypeKnock, TypeOTP, TypeRegister:
-		return nhpwire.BuildMessage(headerType, inp.wireInputs())
+		return nhpwire.BuildMessage(headerType, inp.WireInputs())
 	default:
 		return nil, fmt.Errorf("unsupported initiator header type %d (want TypeKnock, TypeOTP, or TypeRegister)", headerType)
 	}

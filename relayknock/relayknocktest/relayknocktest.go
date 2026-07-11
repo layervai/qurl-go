@@ -38,7 +38,10 @@ import (
 func BuildReply(headerType int, inp *relayknock.KnockInputs) ([]byte, error) {
 	switch headerType {
 	case relayknock.TypeACK, relayknock.TypeCookieChallenge, relayknock.TypeRegisterAck:
-		return nhpwire.BuildMessage(headerType, wireInputs(inp))
+		// Reuse relayknock's single KnockInputs → nhpwire.Inputs converter rather
+		// than a second copy here: a missed field on this responder path was a real
+		// past risk, so both paths share the one WireInputs source of truth.
+		return nhpwire.BuildMessage(headerType, inp.WireInputs())
 	default:
 		return nil, fmt.Errorf("unsupported reply header type %d (want relayknock.TypeACK, relayknock.TypeCookieChallenge, or relayknock.TypeRegisterAck)", headerType)
 	}
@@ -70,18 +73,5 @@ func OpenInitiatorMessage(serverPriv, expectedDevicePub, packet []byte) (*relayk
 		}, nil
 	default:
 		return nil, fmt.Errorf("not an initiator message: header type %d is reply-only", msg.Type)
-	}
-}
-
-// wireInputs converts a relayknock.KnockInputs into the nhpwire codec's Inputs.
-func wireInputs(k *relayknock.KnockInputs) *nhpwire.Inputs {
-	return &nhpwire.Inputs{
-		DeviceStaticPriv: k.DeviceStaticPriv,
-		ServerStaticPub:  k.ServerStaticPub,
-		EphemeralPriv:    k.EphemeralPriv,
-		TimestampNanos:   k.TimestampNanos,
-		Counter:          k.Counter,
-		Preamble:         k.Preamble,
-		Body:             k.Body,
 	}
 }
