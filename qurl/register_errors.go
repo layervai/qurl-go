@@ -93,6 +93,12 @@ var ErrRegisterReplyMalformed = errors.New("qurl: registration reply malformed")
 // asked LayerV to email a one-time code and is waiting for the caller to supply
 // it. It unwraps to ErrOTPPending, so callers can match either the sentinel
 // (errors.Is) or read RequestedAt / MaskedEmail (errors.As).
+//
+// A pending result does not by itself guarantee a code was delivered: the SDK
+// persists the "requested" state before dispatching (anti-spam ordering), so if
+// that send fails transiently, a re-run within the resend cooldown still reports
+// pending — no code in the inbox yet — until the cooldown elapses and a fresh
+// code is sent.
 type OTPPendingError struct {
 	// RequestedAt is when the one-time code was requested (emailed).
 	RequestedAt time.Time
