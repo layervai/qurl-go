@@ -193,6 +193,23 @@ func fabricateRAK(serverPriv, devicePub []byte, counter uint64, body []byte) ([]
 	})
 }
 
+// fabricateACK builds a server-originated NHP_ACK the same way fabricateRAK
+// builds an NHP_RAK — internal buildMessage with the roles swapped (server
+// static key as the fresh handshake's initiator, agent static public key as the
+// responder), the direction of the golden ack vector. It returns an error rather
+// than failing the test so an httptest handler goroutine can surface it itself.
+func fabricateACK(serverPriv, devicePub []byte, counter uint64, body []byte) ([]byte, error) {
+	return buildMessage(nhpACK, &KnockInputs{
+		DeviceStaticPriv: serverPriv,
+		ServerStaticPub:  devicePub,
+		EphemeralPriv:    bytes.Repeat([]byte{0x47}, 32),
+		TimestampNanos:   1700000000987654321,
+		Counter:          counter,
+		Preamble:         0xa1b2c3d4,
+		Body:             body,
+	})
+}
+
 // TestDecryptReply_RegisterAck opens a fabricated NHP_RAK as an agent would and
 // asserts the type predicates: RAK is a reply type, so the exported DecryptReply
 // accepts it and it decrypts exactly like the golden ack, only the Type differs.
@@ -285,6 +302,95 @@ func TestExchange_RegisterRoundTrip(t *testing.T) {
 	if requestCounter := <-counterCh; reply.Counter != requestCounter {
 		t.Errorf("reply counter %#x does not correlate with request counter %#x", reply.Counter, requestCounter)
 	}
+}
+
+// TestKnock_RoundTrip runs the full NHP_KNK happy path through the production
+// Knock front door against an httptest relay whose handler plays the server: it
+// opens the posted packet with the server static key, asserts it is an NHP_KNK
+// carrying the caller's body, and answers with a fabricated NHP_ACK correlated by
+// the request counter. This is the matched KNK↔ACK pair TestExchange_RegisterRoundTrip
+// is for REG↔RAK: it exercises the production resolve path's counter-echo +
+// replyTypeAllowed enforcement end to end (the knock/ack goldens are not a matched
+// pair). The negative subcase pins the counter fence — an ACK whose counter does
+// not echo the request fails closed with ErrMalformedReply.
+func TestKnock_RoundTrip(t *testing.T) {
+	devicePriv, devicePub := testKeyPair(t, 0x11)
+	serverPriv, serverPub := testKeyPair(t, 0x22)
+	knockBody := []byte("serialized knock body")
+	ackBody := []byte("authorized admission body")
+
+	// newRelay plays the server, echoing the request counter shifted by
+	// counterOff into the fabricated ACK (0 = a correct echo, nonzero = a reply
+	// that must fail the counter fence).
+	newRelay := func(counterOff uint64) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if want := "/relay/" + PubKeyFingerprint(serverPub); r.URL.Path != want {
+				t.Errorf("relay path = %q, want %q", r.URL.Path, want)
+			}
+			packet, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Errorf("read posted packet: %v", err)
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			req, err := decryptMessage(serverPriv, devicePub, packet)
+			if err != nil {
+				t.Errorf("server-side open of posted packet: %v", err)
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			if req.Type != TypeKnock {
+				t.Errorf("posted packet type = %d, want %d (TypeKnock)", req.Type, TypeKnock)
+			}
+			if !bytes.Equal(req.Body, knockBody) {
+				t.Errorf("posted body = %q, want %q", req.Body, knockBody)
+			}
+			ack, err := fabricateACK(serverPriv, devicePub, req.Counter+counterOff, ackBody)
+			if err != nil {
+				t.Errorf("fabricate NHP_ACK: %v", err)
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/octet-stream")
+			_, _ = w.Write(ack)
+		}))
+	}
+
+	t.Run("counter echoed", func(t *testing.T) {
+		srv := newRelay(0)
+		defer srv.Close()
+
+		reply, err := Knock(context.Background(), srv.URL, serverPub, knockBody, KnockOptions{
+			DeviceStaticPriv: devicePriv,
+		})
+		if err != nil {
+			t.Fatalf("Knock: %v", err)
+		}
+		if !reply.IsACK() {
+			t.Errorf("reply.Type = %d, want %d (NHP_ACK / IsACK)", reply.Type, TypeACK)
+		}
+		if reply.IsCookieChallenge() {
+			t.Error("IsCookieChallenge() = true for an NHP_ACK, want false")
+		}
+		if !bytes.Equal(reply.Body, ackBody) {
+			t.Errorf("reply body = %q, want %q", reply.Body, ackBody)
+		}
+	})
+
+	t.Run("counter not echoed", func(t *testing.T) {
+		srv := newRelay(1)
+		defer srv.Close()
+
+		_, err := Knock(context.Background(), srv.URL, serverPub, knockBody, KnockOptions{
+			DeviceStaticPriv: devicePriv,
+		})
+		if err == nil {
+			t.Fatal("Knock accepted an ACK that does not echo the request counter, want reject")
+		}
+		if !errors.Is(err, ErrMalformedReply) {
+			t.Errorf("error %q is not ErrMalformedReply; a consumer taxonomy cannot map it", err)
+		}
+	})
 }
 
 // TestSend_PostsOTPPacket verifies the packet Send actually posts: the relay
@@ -670,5 +776,101 @@ func TestDecryptReply_RejectsInitiatorType(t *testing.T) {
 		t.Fatal("DecryptReply accepted an initiator type, want reject")
 	} else if !strings.Contains(err.Error(), "initiator-only") {
 		t.Errorf("DecryptReply(REG) error %q does not name the initiator-only cause", err)
+	}
+}
+
+// TestDecryptMessage_RejectsTamperedReply exercises decryptMessage's rejection
+// paths — the crypto/authentication fences the exported DecryptReply and the
+// Exchange resolve path both inherit. A valid NHP_ACK is built server→agent (the
+// golden-ack direction) and then each subcase tampers one field minimally to trip
+// exactly one guard: the two length bounds, the header digest, the static-key
+// match (opened against the wrong server key), the ss-keyed timestamp open (server
+// authentication), and the body open. The digest covers header[0:offDigest], so
+// the timestamp subcase re-stamps it after corrupting the sealed timestamp — that
+// way the digest gate passes and the authentication open is the guard that fails,
+// not the digest.
+func TestDecryptMessage_RejectsTamperedReply(t *testing.T) {
+	devicePriv, devicePub := testKeyPair(t, 0x11)
+	serverPriv, serverPub := testKeyPair(t, 0x22)
+	_, otherServerPub := testKeyPair(t, 0x33)
+
+	valid, err := fabricateACK(serverPriv, devicePub, 0x1234, []byte("authorized admission body"))
+	if err != nil {
+		t.Fatalf("fabricate valid NHP_ACK: %v", err)
+	}
+	// Sanity: the untampered packet opens, so every rejection below is the tamper
+	// and not a broken fixture.
+	if _, err := decryptMessage(devicePriv, serverPub, valid); err != nil {
+		t.Fatalf("valid NHP_ACK did not open: %v", err)
+	}
+
+	// tamperedCopy returns a fresh copy of valid with fn applied, keeping each
+	// subcase's mutation off the shared fixture.
+	tamperedCopy := func(fn func(pkt []byte)) []byte {
+		c := append([]byte(nil), valid...)
+		fn(c)
+		return c
+	}
+
+	tests := []struct {
+		name      string
+		packet    []byte
+		serverPub []byte // expected server static pub passed to decryptMessage
+		wantSub   string
+	}{
+		{
+			name:      "reply too short",
+			packet:    make([]byte, headerSize-1),
+			serverPub: serverPub,
+			wantSub:   "reply too short",
+		},
+		{
+			name:      "reply too long",
+			packet:    make([]byte, packetBufferSize+1),
+			serverPub: serverPub,
+			wantSub:   "reply too long",
+		},
+		{
+			name: "header digest mismatch",
+			packet: tamperedCopy(func(pkt []byte) {
+				pkt[offDigest] ^= 0xff // corrupt the stored header digest
+			}),
+			serverPub: serverPub,
+			wantSub:   "digest mismatch",
+		},
+		{
+			name:      "unexpected server static key",
+			packet:    valid, // untampered; opened against the wrong server key
+			serverPub: otherServerPub,
+			wantSub:   "unexpected server",
+		},
+		{
+			name: "server authentication (timestamp open) fails",
+			packet: tamperedCopy(func(pkt []byte) {
+				pkt[offTimestamp] ^= 0xff // corrupt the sealed timestamp...
+				// ...then re-stamp the digest so the digest gate passes and the
+				// ss-keyed timestamp open is the guard that trips.
+				copy(pkt[offDigest:offDigest+hashSize], headerDigest(devicePub, pkt[:headerSize]))
+			}),
+			serverPub: serverPub,
+			wantSub:   "server authentication failed",
+		},
+		{
+			name: "body open fails",
+			packet: tamperedCopy(func(pkt []byte) {
+				pkt[headerSize] ^= 0xff // corrupt the sealed body (outside the digest)
+			}),
+			serverPub: serverPub,
+			wantSub:   "open body",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := decryptMessage(devicePriv, tt.serverPub, tt.packet); err == nil {
+				t.Fatal("decryptMessage accepted a tampered/invalid reply, want reject")
+			} else if !strings.Contains(err.Error(), tt.wantSub) {
+				t.Errorf("error %q does not contain %q", err, tt.wantSub)
+			}
+		})
 	}
 }
