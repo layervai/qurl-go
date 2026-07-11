@@ -418,6 +418,8 @@ func (cfg *registerConfig) requestOTP(ctx context.Context, store AgentStateStore
 // requestOTPAt centralizes the anti-spam save-before-send ordering. persisted is
 // the durable state whose cooldown marker changes; requestState may be a
 // refreshed candidate whose current peer/relay coordinates must carry the OTP.
+// This pre-send write commits only OTPRequestedAt on persisted; candidate's new
+// binding metadata is not durable until an authenticated RAK succeeds.
 func (cfg *registerConfig) requestOTPAt(ctx context.Context, store AgentStateStore, persisted, requestState *AgentState, peer *NHPServerPeerInfo, relayURL, key string, now time.Time) error {
 	previous := persisted.OTPRequestedAt
 	persisted.OTPRequestedAt = &now
@@ -984,7 +986,10 @@ func (p *storeCredentialProvider) Authorize(ctx context.Context, req *http.Reque
 		return err
 	}
 	token := state.DeviceAPIKey
-	return setBearer(req, token)
+	// The exact bytes were validated above; do not route through setBearer,
+	// whose trimming behavior is reserved for caller-supplied Client tokens.
+	req.Header.Set("Authorization", "Bearer "+token)
+	return nil
 }
 
 // --- options ---
@@ -1159,8 +1164,10 @@ func WithRegisterBaseURL(rawURL string) RegisterOption {
 	})
 }
 
-// WithAgentClientBaseURL points the Client returned by RegisterAgent at a
-// non-default resource API origin, independently of WithRegisterBaseURL.
+// WithAgentClientBaseURL points the Client returned by RegisterAgent or
+// RecoverAgentCredential at a non-default resource API origin, independently of
+// WithRegisterBaseURL. OpenRegisteredAgent accepts ClientOption instead, so use
+// WithBaseURL when reopening an already-registered agent.
 func WithAgentClientBaseURL(rawURL string) RegisterOption {
 	return registerOptionFunc(func(o *registerConfig) error {
 		if err := validateHTTPSOrLoopbackURL(rawURL, "agent client base URL", ErrInvalidRegisterConfig); err != nil {
@@ -1189,7 +1196,9 @@ func WithRegisterHTTPClient(client HTTPDoer) RegisterOption {
 }
 
 // WithAgentClientHTTPClient injects the HTTP client used by the Client returned
-// from RegisterAgent, independently of the registration and relay transport.
+// from RegisterAgent or RecoverAgentCredential, independently of the registration
+// and relay transport. OpenRegisteredAgent accepts ClientOption instead, so use
+// WithHTTPClient when reopening an already-registered agent.
 func WithAgentClientHTTPClient(client HTTPDoer) RegisterOption {
 	return registerOptionFunc(func(o *registerConfig) error {
 		if client == nil {

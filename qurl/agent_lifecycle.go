@@ -18,6 +18,11 @@ import (
 // RecoverAgentCredential. NHP peer absence, corruption, or expiry does not
 // invalidate this REST client; callers that will knock must validate the peer or
 // run RefreshAgentRegistration separately.
+//
+// OpenRegisteredAgent takes ordinary ClientOption values: use WithBaseURL and
+// WithHTTPClient for its resource client. RegisterAgent and
+// RecoverAgentCredential instead use the RegisterOption equivalents
+// WithAgentClientBaseURL and WithAgentClientHTTPClient.
 func OpenRegisteredAgent(ctx context.Context, store AgentStateStore, opts ...ClientOption) (*Client, error) {
 	if store == nil {
 		return nil, fmt.Errorf("%w: agent state store must not be nil", ErrInvalidClientConfig)
@@ -81,23 +86,6 @@ func loadCompletedRegisteredState(ctx context.Context, store AgentStateStore, er
 		return nil, err
 	}
 	return state, nil
-}
-
-// validateCompletedAgentIdentity checks only the durable identity/credential
-// fields a forced refresh needs. It deliberately does not require the old peer
-// or relay: replacing missing, expired, or rotated binding metadata is the
-// purpose of RefreshAgentRegistration.
-func validateCompletedAgentIdentity(state *AgentState, errKind error) error {
-	if state == nil {
-		return fmt.Errorf("%w: registered agent state is nil", errKind)
-	}
-	if strings.TrimSpace(state.AgentID) == "" {
-		return fmt.Errorf("%w: registered agent state missing agent id", errKind)
-	}
-	if state.RegisteredAt == nil {
-		return fmt.Errorf("%w: registered agent state missing registration time", errKind)
-	}
-	return nil
 }
 
 // RecoverAgentCredential explicitly replaces a revoked/lost device credential

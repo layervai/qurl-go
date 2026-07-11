@@ -340,6 +340,23 @@ func BootstrapAgent(ctx context.Context, setupKey string, store AgentStateStore,
 	return state, nil
 }
 
+// validateCompletedAgentIdentity checks only the durable identity/credential
+// fields a forced refresh needs. It deliberately does not require the old peer
+// or relay: replacing missing, expired, or rotated binding metadata is the
+// purpose of RefreshAgentRegistration.
+func validateCompletedAgentIdentity(state *AgentState, errKind error) error {
+	if state == nil {
+		return fmt.Errorf("%w: registered agent state is nil", errKind)
+	}
+	if strings.TrimSpace(state.AgentID) == "" {
+		return fmt.Errorf("%w: registered agent state missing agent id", errKind)
+	}
+	if state.RegisteredAt == nil {
+		return fmt.Errorf("%w: registered agent state missing registration time", errKind)
+	}
+	return nil
+}
+
 // validateRegisteredAgentState checks a loaded, already-registered state. errKind
 // is the caller-facing sentinel wrapped into failures so each front door keeps
 // its class (BootstrapAgent → ErrInvalidBootstrapConfig, RegisterAgent →
