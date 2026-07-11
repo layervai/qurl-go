@@ -44,23 +44,18 @@ func OpenRegisteredAgent(ctx context.Context, store AgentStateStore, opts ...Cli
 	return newStoreBackedClient(store, cfg.baseURL, cfg.httpClient), nil
 }
 
-// RefreshAgentRegistration forces a real registration-info + NHP_REG/NHP_RAK
-// exchange for an existing completed agent. It never calls registration
-// completion and therefore never mints or replaces DeviceAPIKey. Relay, peer,
-// and key metadata are committed only after an authenticated successful RAK.
-// The returned AgentState lets a caller use the refreshed relay, peer, and
-// private-key material for an immediate knock without a second store/KMS load.
-// It therefore also includes the preserved live plaintext DeviceAPIKey: treat
-// the whole value as sensitive credential material, avoid copying or logging
-// it, and retain it only as long as the immediate runtime handoff requires.
-// An account key follows the email-OTP flow and may require a dispatch plus a
-// second call with WithOTP/WithOTPProvider. A static WithOTP on the first call
-// dispatches a fresh code and returns OTPPendingError; supply the received code
-// on the resume call. The anti-spam OTPRequestedAt marker is durably committed
-// before dispatch/RAK; refreshed binding metadata still commits only after RAK.
-// Fleet connectors should normally
-// enforce RegistrationKeyKindBootstrap with WithAllowedRegistrationKeyKinds so
-// a binding refresh cannot fan out operator OTP emails.
+// RefreshAgentRegistration forces registration-info plus an authenticated
+// NHP_REG/NHP_RAK exchange for an existing completed agent. It commits refreshed
+// binding metadata after RAK but never calls completion or changes DeviceAPIKey.
+// The returned state supports an immediate knock without another store/KMS load
+// and therefore contains the private key and preserved plaintext DeviceAPIKey;
+// avoid copying or logging it and retain it only for the runtime handoff.
+//
+// An account key may pause with OTPPendingError. Its durable OTPRequestedAt
+// marker intentionally remains on the completed state across a paused or
+// abandoned attempt to throttle repeat dispatches; OpenRegisteredAgent ignores
+// it, and a successful resumed RAK clears it. Fleet connectors should normally
+// allow only RegistrationKeyKindBootstrap so refresh cannot fan out OTP email.
 func RefreshAgentRegistration(ctx context.Context, key string, store AgentStateStore, opts ...RegisterOption) (*AgentState, error) {
 	cfg, err := validateRegisterInputs(ctx, key, store, opts)
 	if err != nil {
@@ -106,6 +101,9 @@ func loadCompletedRegisteredState(ctx context.Context, store AgentStateStore, er
 // cannot fan out operator OTP emails. Recovery is never invoked implicitly after
 // a 401. The owner must first revoke agent:<device_id>, which clears qurl-service's
 // first-issue sentinel; otherwise completion returns ErrCredentialRecoveryRequired.
+// Recovery still proceeds when local state contains DeviceAPIKey: owner-side
+// revocation is authoritative, and the retained local value may already be
+// revoked. A local healthy-key no-op guard would prevent valid replacement.
 // Recovery deliberately does not run a completion probe: completion is the
 // first-issue operation itself. If the process dies after replacement mint but
 // before durable persistence, the next recovery fails already-issued; the owner

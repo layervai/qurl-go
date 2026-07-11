@@ -245,16 +245,12 @@ func (cfg *registerConfig) runLocked(ctx context.Context, key string, store Agen
 	}
 }
 
-func errAccountKeyMissingEmail() error {
-	return fmt.Errorf("%w: the account key has no email on file for the one-time code; add an email or use a pre-issued key", ErrNoAccountEmail)
-}
-
 // requireAccountKeyEmail fails fast before spending an OTP round trip when an
 // account key has no masked email on file: it can never receive the code. Shared
 // by enrollment and forced refresh/recovery so the precondition cannot drift.
 func requireAccountKeyEmail(info *registrationInfoResponse) error {
 	if strings.TrimSpace(info.MaskedEmail) == "" {
-		return errAccountKeyMissingEmail()
+		return fmt.Errorf("%w: the account key has no email on file for the one-time code; add an email or use a pre-issued key", ErrNoAccountEmail)
 	}
 	return nil
 }
@@ -1251,25 +1247,13 @@ func WithRelayURL(rawURL string) RegisterOption {
 // otherwise supply. Advanced: pairs with WithRelayURL for a pinned or test NHP
 // endpoint.
 //
-// An overridden peer is NOT covered by the registration-info server_id ⇄
-// peer-key fingerprint check: that check validates only the peer the service
-// reported, and this override replaces it afterward. So the "we only knock a
-// server whose key matches the routing id" guarantee does not apply here — pin
-// only a peer you trust.
-//
-// The pre-flight still asserts its OWN internal consistency (the reported
-// server_id must match the reported peer key) before the override is applied, so
-// a self-inconsistent registration-info response is rejected even when you
-// override. If you override because the reported peer is unreachable, the response
-// must still be internally consistent for registration to proceed.
-//
-// The override governs and becomes the peer authenticated by the REG/RAK round
-// trip. Completion must report the same public key; it cannot replace the peer
-// after the handshake. An override whose key differs from qurl-service's
-// completion peer therefore fails recovery-required after completion may have
-// minted a credential. Use a differing override only with a custom/test service
-// whose completion contract is configured to agree with it. On success the SDK
-// preserves this peer (including its host/port) in AgentState.
+// The override is not covered by registration-info's server-id/peer-key check;
+// pin only a peer you trust. The preflight still rejects an internally
+// inconsistent registration-info response before applying the override. REG/RAK
+// authenticates the selected peer, and completion may only corroborate its key.
+// A different completion key fails recovery-required after completion may have
+// minted a credential, so differing overrides require a custom/test service
+// configured to agree. Success persists the selected peer in AgentState.
 func WithNHPPeer(peer NHPServerPeerInfo) RegisterOption {
 	return registerOptionFunc(func(o *registerConfig) error {
 		// o.clock is initialized to time.Now before options apply; using it keeps

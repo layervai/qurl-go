@@ -437,8 +437,12 @@ These are deliberately separate operations:
   Refresh with an account key uses the same email-OTP dispatch/two-call resume
   as enrollment: a static `WithOTP` on a first call cannot match the code that
   call dispatches, so it returns `OTPPendingError`; resume with the received
-  code. The anti-spam `OTPRequestedAt` marker is persisted before dispatch/RAK,
-  while refreshed binding metadata remains uncommitted until RAK succeeds.
+  code. The anti-spam `OTPRequestedAt` marker is persisted before dispatch/RAK
+  and intentionally remains on the otherwise-completed state when the caller
+  pauses or abandons the attempt. `OpenRegisteredAgent` ignores it; a later
+  successful resumed RAK clears it. This durable marker prevents repeated calls
+  from fanning out email, while refreshed binding metadata remains uncommitted
+  until RAK succeeds.
   Account keys remain allowed by default for generic `RegisterAgent`
   compatibility; fleet connectors should set
   `WithAllowedRegistrationKeyKinds(RegistrationKeyKindBootstrap)` so routine
@@ -467,7 +471,9 @@ client, err := qurl.RecoverAgentCredential(ctx, enrollmentKey, store,
 Credential recovery has an intentional owner step: first revoke
 `agent:<device_id>` with an owner credential. qurl-service atomically revokes
 the prior device key and clears its first-issue sentinel; only then can explicit
-same-id recovery mint one replacement. If the sentinel is still present,
+same-id recovery mint one replacement. The SDK proceeds even when local state
+still contains `DeviceAPIKey`: that value may already be revoked server-side, so
+a local no-op guard would block valid recovery. If the sentinel is still present,
 completion returns `device_key_already_issued`, mapped to
 `*CredentialRecoveryRequiredError`. Use an active durable `qurl:agent` or
 account enrollment key for recovery; a consumed one-shot bootstrap key cannot

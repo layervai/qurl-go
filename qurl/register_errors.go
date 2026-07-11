@@ -61,11 +61,7 @@ func (e *DeviceKeyQuotaExceededError) Error() string {
 }
 
 func (e *DeviceKeyQuotaExceededError) Unwrap() []error {
-	errs := []error{ErrDeviceKeyQuotaExceeded}
-	if e.Cause != nil {
-		errs = append(errs, e.Cause)
-	}
-	return errs
+	return unwrapWithCause(e.Cause, ErrDeviceKeyQuotaExceeded)
 }
 
 // ErrKeyRejected is returned when the supplied API key was rejected as invalid.
@@ -148,11 +144,18 @@ func validatePersistedDeviceCredential(state *AgentState, errKind error) error {
 }
 
 func recoveryClassUnwrap(cause error) []error {
-	errs := []error{ErrCredentialRecoveryRequired, ErrDeviceCredentialMissing}
-	if cause != nil {
-		errs = append(errs, cause)
+	return unwrapWithCause(cause, ErrCredentialRecoveryRequired, ErrDeviceCredentialMissing)
+}
+
+// unwrapWithCause builds the multi-error Unwrap chain shared by the typed
+// credential errors: the class sentinels followed by the wrapped cause when one
+// is present. Each caller passes its own sentinel set, so appending the cause
+// cannot alias shared storage.
+func unwrapWithCause(cause error, sentinels ...error) []error {
+	if cause == nil {
+		return sentinels
 	}
-	return errs
+	return append(sentinels, cause)
 }
 
 // messageWithCause appends a wrapped cause to a typed error's operator-facing
