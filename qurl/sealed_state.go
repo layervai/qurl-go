@@ -187,7 +187,7 @@ func isNilAgentStateKeyWrapper(wrapper AgentStateKeyWrapper) bool {
 }
 
 func validateProviderID(providerID string) error {
-	if providerID == "" || providerID != strings.TrimSpace(providerID) || providerID != strings.ToLower(providerID) ||
+	if providerID == "" || providerID != strings.TrimSpace(providerID) ||
 		len(providerID) > maxSealedAgentStateProviderID || !providerIDPattern.MatchString(providerID) {
 		return fmt.Errorf("%w: provider id must be 1-%d lowercase characters matching %s", ErrInvalidBootstrapConfig, maxSealedAgentStateProviderID, providerIDPattern.String())
 	}
@@ -546,7 +546,10 @@ func openSealedAgentState(dek, nonce, ciphertext, aad []byte) ([]byte, error) {
 // canonicalizeRawJSON uses the same encoding/json policy as MarshalIndent does
 // for the persisted envelope: insignificant whitespace is removed while <, >,
 // &, U+2028, and U+2029 are escaped. This keeps save- and load-time AAD stable
-// without normalizing number lexemes through an interface{} round trip.
+// without normalizing number lexemes through an interface{} round trip. Treat
+// TestSealedAgentStateAAD_V1Golden and
+// TestSealedFileAgentState_MetadataHTMLEscapingRoundTrips as compatibility
+// guardrails before changing this or the envelope persistence encoder.
 func canonicalizeRawJSON(raw json.RawMessage) (json.RawMessage, error) {
 	if len(raw) == 0 {
 		return nil, nil
