@@ -215,6 +215,10 @@ func DecryptMessage(devicePriv, expectedServerStaticPub, packet []byte) (*Messag
 		}
 	}
 
+	// The decoded payload size (the discarded second return) is intentionally
+	// ignored: the body AEAD opened above already fences the actual sealedBody
+	// bytes, so the header's self-described size is not load-bearing for integrity
+	// and needs no cross-check against len(sealedBody).
 	typ, _ := getTypeAndPayloadSize(header)
 	switch typ {
 	case TypeKNK, TypeACK, TypeCOK, TypeOTP, TypeREG, TypeRAK:

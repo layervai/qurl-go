@@ -504,6 +504,78 @@ func TestExchange_AdmitsCookieChallengeToRegister(t *testing.T) {
 	}
 }
 
+// TestKnock_RoundTrip exercises the production Knock front door end-to-end
+// against a fabricated matched NHP_ACK. The knock/ack golden vector is a
+// standalone reply that does not correlate to a request, so this is the test
+// that proves the KNK→ACK delegation through Exchange (the qURL resolve path,
+// which now enforces counter-echo + replyTypeAllowed): a reply whose counter
+// echoes the knock is accepted (IsACK, body recovered), and a reply whose
+// counter does not echo is rejected as ErrMalformedReply.
+func TestKnock_RoundTrip(t *testing.T) {
+	devicePriv, devicePub := testKeyPair(t, 0x11)
+	serverPriv, serverPub := testKeyPair(t, 0x22)
+	const admission = "authorized admission body"
+
+	// ackServer fabricates an NHP_ACK whose counter is the knock's counter plus
+	// counterOffset (0 = a conforming echo; non-zero = a mis-correlated reply).
+	ackServer := func(counterOffset uint64) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			packet, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Errorf("read posted packet: %v", err)
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			req, err := relayknocktest.OpenInitiatorMessage(serverPriv, devicePub, packet)
+			if err != nil {
+				t.Errorf("server-side open of knock: %v", err)
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			ack, err := relayknocktest.BuildReply(relayknock.TypeACK, &relayknock.KnockInputs{
+				DeviceStaticPriv: serverPriv,
+				ServerStaticPub:  devicePub,
+				EphemeralPriv:    bytes.Repeat([]byte{0x53}, 32),
+				TimestampNanos:   1700000000123456789,
+				Counter:          req.Counter + counterOffset,
+				Preamble:         0xa1b2c3d4,
+				Body:             []byte(admission),
+			})
+			if err != nil {
+				t.Errorf("fabricate ACK: %v", err)
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/octet-stream")
+			_, _ = w.Write(ack)
+		}))
+	}
+
+	t.Run("matched counter is accepted", func(t *testing.T) {
+		srv := ackServer(0)
+		defer srv.Close()
+		reply, err := relayknock.Knock(context.Background(), srv.URL, serverPub, []byte("knock body"), relayknock.KnockOptions{DeviceStaticPriv: devicePriv})
+		if err != nil {
+			t.Fatalf("Knock with a matched ACK: %v", err)
+		}
+		if !reply.IsACK() {
+			t.Errorf("reply.Type = %d, want NHP_ACK (IsACK)", reply.Type)
+		}
+		if string(reply.Body) != admission {
+			t.Errorf("reply.Body = %q, want %q", reply.Body, admission)
+		}
+	})
+
+	t.Run("non-echoed counter is rejected as ErrMalformedReply", func(t *testing.T) {
+		srv := ackServer(1)
+		defer srv.Close()
+		_, err := relayknock.Knock(context.Background(), srv.URL, serverPub, []byte("knock body"), relayknock.KnockOptions{DeviceStaticPriv: devicePriv})
+		if !errors.Is(err, relayknock.ErrMalformedReply) {
+			t.Fatalf("Knock with a mis-correlated ACK: err = %v, want ErrMalformedReply", err)
+		}
+	})
+}
+
 // TestExchange_CookieChallengeBeforeCounterCheck pins the overload-signal
 // ordering: an authenticated NHP_COK is a valid reply to a knock, and Exchange
 // must return it as a cookie-challenge (the "server busy, retry later" signal a
