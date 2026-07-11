@@ -225,7 +225,9 @@ Match errors by type, not message text:
 ### Unreleased
 
 - **Added: registered-agent lifecycle APIs** — `OpenRegisteredAgent` provides a
-  zero-network store-backed reopen; `RefreshAgentRegistration` forces a real
+  store-backed reopen without qURL enrollment or resource API calls (a sealed
+  store load may still call its key wrapper/KMS);
+  `RefreshAgentRegistration` forces a real
   REG/RAK binding refresh without completion; and `RecoverAgentCredential`
   performs explicit same-id replacement after owner revoke. Registration key
   kinds can be restricted before OTP/REG side effects, registration and resource

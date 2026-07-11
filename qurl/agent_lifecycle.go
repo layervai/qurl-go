@@ -7,7 +7,10 @@ import (
 	"strings"
 )
 
-// OpenRegisteredAgent opens a zero-network Client from a completed AgentState.
+// OpenRegisteredAgent opens a Client from a completed AgentState without making
+// enrollment or resource API calls. Loading a custom network-backed store may
+// still perform the store's own I/O, and loading a sealed store may call its key
+// wrapper or KMS.
 // The device credential is read from store behind a one-minute cache. A later
 // explicit credential recovery is observed after that cache expires; callers
 // that need the replacement immediately should use the Client returned by
@@ -90,6 +93,9 @@ func validateCompletedAgentIdentity(state *AgentState, errKind error) error {
 // REG and calls completion exactly once. It is never invoked implicitly after a
 // 401. The owner must first revoke agent:<device_id>, which clears qurl-service's
 // first-issue sentinel; otherwise completion returns ErrCredentialRecoveryRequired.
+// If this returns ErrAgentSetupLock after lock release, load the durable state or
+// call OpenRegisteredAgent before retrying: completion and persistence may have
+// succeeded even though the lock could not be released cleanly.
 func RecoverAgentCredential(ctx context.Context, key string, store AgentStateStore, opts ...RegisterOption) (*Client, error) {
 	cfg, err := validateLifecycleInputs(ctx, key, store, opts)
 	if err != nil {

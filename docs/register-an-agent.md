@@ -40,9 +40,10 @@ never re-validates the key. Rotating or mistyping the key against an
 already-registered `store` is therefore not detected; the persisted device
 credential is authoritative from then on.
 
-For an explicit zero-network reopen, use `OpenRegisteredAgent`. It takes normal
-`ClientOption` values, so the resource API origin is independent of the
-registration origin:
+For an explicit reopen without enrollment or resource API calls, use
+`OpenRegisteredAgent`. It takes normal `ClientOption` values and makes no qURL
+API call; loading a sealed store may still call its key wrapper/KMS.
+The resource API origin is independent of the registration origin:
 
 ```go
 client, err := qurl.OpenRegisteredAgent(ctx, store,
@@ -323,10 +324,14 @@ completed registration's read-only fast path; correct a pre-existing `0750` or
 `0755` directory to `0700` before upgrading. A read-only filesystem mount is
 supported when the directory metadata remains exactly `0700`; changing the mode
 to `0500`, `0555`, or another "stricter" value is rejected by policy.
-If lock release fails after enrollment was atomically persisted, the call still
-returns `ErrAgentSetupLock` and no client because ownership is ambiguous. Retry
-normally: the completed state then recovers through the pre-lock fast path
-without enrolling a second identity.
+If lock release fails after a state mutation was atomically persisted, the call
+still returns `ErrAgentSetupLock` and no client/state because ownership is
+ambiguous. Load the durable state first. After initial enrollment or credential
+recovery, call `OpenRegisteredAgent`; it recovers the persisted credential
+without enrollment or completion. After binding refresh, inspect the loaded
+binding before deciding whether another refresh is needed. Never blindly retry
+`RecoverAgentCredential`: its completion and save may already have succeeded,
+and a retry would attempt a second one-time credential mint.
 Windows, Plan 9, and js/wasm do not currently have an SDK local-file lock
 implementation, so fresh or incomplete local-file enrollment fails closed with
 `ErrAgentSetupLock` there. Use a custom/network store (including `awsstore` where
@@ -490,7 +495,7 @@ Every message names the next concrete step.
 | `qurl.ErrInvalidRegisterConfig` | Inputs or options were invalid before any network call (empty key, nil store, conflicting options). | Fix the call. |
 | `qurl.ErrInvalidAgentState` | Persisted state exists but is corrupt/unreadable — surfaced wrapped in the front-door config error. (`ErrAgentStateNotFound` is **not** caller-facing: it is the store-contract sentinel a custom `AgentStateStore` returns when empty, which the engine converts into a fresh enrollment.) | Clear or replace the corrupt state. |
 | `qurl.ErrAgentStateKeyWrapper` | A sealed store's KMS/HSM wrapper is unavailable or violated its 32-byte DEK contract. | Restore provider access/configuration; do not delete otherwise valid state for an operational outage. |
-| `qurl.ErrAgentSetupLock` | The mandatory local-file setup lock could not be acquired or released. | Fix state-directory/sidecar permissions or platform support; do not run setup unlocked. |
+| `qurl.ErrAgentSetupLock` | The mandatory local-file setup lock could not be acquired or released. A release failure may follow a successful durable mutation. | Fix state-directory/sidecar permissions or platform support; do not run setup unlocked. On release failure, load first or call `OpenRegisteredAgent`; never blindly retry credential recovery. |
 | `*qurl.RegistrationDenyError` | An authenticated enrollment denial carrying a wire code newer than this SDK. | Read `ErrCode` / `ErrMsg`; `errors.Is` still matches the typed sentinel for known codes. |
 
 A worked pattern:

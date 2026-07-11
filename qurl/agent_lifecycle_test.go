@@ -753,6 +753,82 @@ func TestAgentLifecycleMutationsParticipateInSharedSetupLock(t *testing.T) {
 		}
 	})
 
+	t.Run("refresh release failure preserves binding", func(t *testing.T) {
+		h := registeredHarness(t)
+		h.svc.mu.Lock()
+		h.svc.keyID = "key_after_release_failure"
+		h.svc.mu.Unlock()
+		completeBefore := h.svc.completionCalls.Load()
+		releaseFailure := errors.New("injected refresh lock release failure")
+		var acquired, released atomic.Int32
+		h.store = instrumentFileStoreLockError(t, h.store, &acquired, &released, releaseFailure)
+
+		state, err := RefreshAgentRegistration(context.Background(), "lv_enroll", h.store, h.registerOpts()...)
+		if state != nil {
+			t.Fatal("refresh returned state after ambiguous setup-lock release")
+		}
+		if !errors.Is(err, ErrAgentSetupLock) || !errors.Is(err, releaseFailure) {
+			t.Fatalf("refresh release failure = %v, want ErrAgentSetupLock and injected cause", err)
+		}
+		if acquired.Load() != 1 || released.Load() != 1 {
+			t.Fatalf("refresh setup lock acquire/release = %d/%d, want 1/1", acquired.Load(), released.Load())
+		}
+		persisted := h.loadState(t)
+		if persisted.KeyID != "key_after_release_failure" {
+			t.Fatalf("binding after release failure = %q, want committed replacement", persisted.KeyID)
+		}
+		if h.svc.completionCalls.Load() != completeBefore {
+			t.Fatal("refresh release-failure path called completion")
+		}
+	})
+
+	t.Run("recovery release failure reopens durable replacement without second mint", func(t *testing.T) {
+		h := registeredHarness(t)
+		h.svc.mu.Lock()
+		h.svc.deviceAPIKey = "lv_device_recovered_after_release_failure"
+		h.svc.mu.Unlock()
+		completeBefore := h.svc.completionCalls.Load()
+		releaseFailure := errors.New("injected recovery lock release failure")
+		var acquired, released atomic.Int32
+		h.store = instrumentFileStoreLockError(t, h.store, &acquired, &released, releaseFailure)
+
+		client, err := RecoverAgentCredential(context.Background(), "lv_enroll", h.store, h.registerOpts()...)
+		if client != nil {
+			t.Fatal("recovery returned client after ambiguous setup-lock release")
+		}
+		if !errors.Is(err, ErrAgentSetupLock) || !errors.Is(err, releaseFailure) {
+			t.Fatalf("recovery release failure = %v, want ErrAgentSetupLock and injected cause", err)
+		}
+		if acquired.Load() != 1 || released.Load() != 1 {
+			t.Fatalf("recovery setup lock acquire/release = %d/%d, want 1/1", acquired.Load(), released.Load())
+		}
+		persisted := h.loadState(t)
+		if persisted.DeviceAPIKey != "lv_device_recovered_after_release_failure" {
+			t.Fatal("replacement credential was not durable after setup-lock release failure")
+		}
+		if h.svc.completionCalls.Load() != completeBefore+1 {
+			t.Fatalf("recovery completion calls = %d, want exactly one", h.svc.completionCalls.Load()-completeBefore)
+		}
+
+		var qurlCalls atomic.Int32
+		opened, openErr := OpenRegisteredAgent(context.Background(), h.store,
+			WithBaseURL("https://resources.example.test"),
+			WithHTTPClient(doerFunc(func(*http.Request) (*http.Response, error) {
+				qurlCalls.Add(1)
+				return nil, errors.New("unexpected qURL API call")
+			})),
+		)
+		if openErr != nil || opened == nil {
+			t.Fatalf("OpenRegisteredAgent after release failure = client %v, error %v", opened, openErr)
+		}
+		if qurlCalls.Load() != 0 {
+			t.Fatalf("OpenRegisteredAgent qURL calls = %d, want 0", qurlCalls.Load())
+		}
+		if h.svc.completionCalls.Load() != completeBefore+1 {
+			t.Fatal("load-first recovery attempted a second credential mint")
+		}
+	})
+
 	for _, tc := range []struct {
 		name string
 		run  func(*registerHarness) error
@@ -791,14 +867,19 @@ func TestAgentLifecycleMutationsParticipateInSharedSetupLock(t *testing.T) {
 
 type trackingSetupLock struct {
 	released *atomic.Int32
+	err      error
 }
 
 func (l *trackingSetupLock) Close() error {
 	l.released.Add(1)
-	return nil
+	return l.err
 }
 
 func instrumentFileStoreLock(t *testing.T, store AgentStateStore, acquired, released *atomic.Int32) AgentStateStore {
+	return instrumentFileStoreLockError(t, store, acquired, released, nil)
+}
+
+func instrumentFileStoreLockError(t *testing.T, store AgentStateStore, acquired, released *atomic.Int32, releaseErr error) AgentStateStore {
 	t.Helper()
 	fileStore, ok := store.(fileAgentStateStore)
 	if !ok {
@@ -810,7 +891,7 @@ func instrumentFileStoreLock(t *testing.T, store AgentStateStore, acquired, rele
 			t.Errorf("setup lock path = %q, want %q", path, wantPath)
 		}
 		acquired.Add(1)
-		return &trackingSetupLock{released: released}, nil
+		return &trackingSetupLock{released: released, err: releaseErr}, nil
 	}
 	return fileStore
 }

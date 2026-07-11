@@ -45,7 +45,9 @@ var ErrInsecureAgentStatePermissions = errors.New("qurl: insecure agent state pe
 
 // ErrAgentSetupLock reports that the mandatory local-file setup lock could not
 // be acquired or released. Registration fails closed because continuing could
-// mint competing identities against the same durable state path.
+// mint competing identities against the same durable state path. A release
+// failure can occur after a successful durable save; load or open the stored
+// state before retrying any enrollment, refresh, or credential recovery.
 var ErrAgentSetupLock = errors.New("qurl: agent state setup lock failed")
 
 // ErrBootstrapSetupKeyConsumed is returned when an incomplete local bootstrap
