@@ -79,7 +79,14 @@ func (s *ParameterStore) LoadAgentState(ctx context.Context) (*qurl.AgentState, 
 		}
 		return nil, fmt.Errorf("qurl: get parameter: %w", err)
 	}
-	if out.Parameter == nil || out.Parameter.Value == nil {
+	if out.Parameter == nil {
+		// A success response that carries no Parameter object has nothing stored;
+		// treat it as "not registered yet", the same as ParameterNotFound.
+		return nil, qurl.ErrAgentStateNotFound
+	}
+	if out.Parameter.Value == nil {
+		// The parameter exists but holds no value: present-but-unreadable, so map
+		// it to invalid-state (corrupt), distinct from the not-found case above.
 		return nil, fmt.Errorf("%w: parameter has no value", qurl.ErrInvalidAgentState)
 	}
 	return unmarshalAgentState([]byte(*out.Parameter.Value))

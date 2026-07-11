@@ -75,7 +75,12 @@ func marshalAgentState(state *qurl.AgentState, resourceID, resourceLabel string)
 func unmarshalAgentState(raw []byte) (*qurl.AgentState, error) {
 	var state qurl.AgentState
 	if err := json.Unmarshal(raw, &state); err != nil {
-		return nil, fmt.Errorf("%w: decode agent state: %w", qurl.ErrInvalidAgentState, err)
+		// Deliberately do NOT %w the decoder error: encoding/json errors can embed
+		// the offending input character/offset, and raw here is a decrypted
+		// credential blob. Dropping the cause keeps stored bytes out of the error
+		// string (and any logs it reaches) while errors.Is(ErrInvalidAgentState)
+		// still matches for callers.
+		return nil, fmt.Errorf("%w: decode agent state", qurl.ErrInvalidAgentState)
 	}
 	return &state, nil
 }
