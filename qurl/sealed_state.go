@@ -62,7 +62,8 @@ type AgentStateKeyBinding struct {
 }
 
 // WrappedAgentStateKey is the opaque wrapped DEK record persisted in a sealed
-// AgentState envelope. Version is owned by the wrapper implementation.
+// AgentState envelope. Version is owned by the wrapper implementation and must
+// be at least 1; zero is invalid.
 // Ciphertext is the provider-wrapped DEK. Metadata is optional provider-owned
 // JSON; the SDK validates, bounds, and authenticates it as envelope AAD but does
 // not interpret it. A wrapper that uses metadata before AES-GCM verification

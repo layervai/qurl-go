@@ -403,6 +403,13 @@ func TestNewSealedFileAgentState_AcceptsCanonicalProviderID(t *testing.T) {
 	}
 }
 
+func TestValidateWrappedAgentStateKey_RejectsZeroVersion(t *testing.T) {
+	err := validateWrappedAgentStateKey(WrappedAgentStateKey{Version: 0, Ciphertext: []byte{1}})
+	if err == nil || !strings.Contains(err.Error(), "version must be positive") {
+		t.Fatalf("zero wrapper version = %v, want positive-version error", err)
+	}
+}
+
 func TestSealedFileAgentState_ExpectedAgentID(t *testing.T) {
 	const (
 		expectedID = "agent-expected"

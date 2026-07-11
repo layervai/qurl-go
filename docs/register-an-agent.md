@@ -237,10 +237,12 @@ later workflow that mutates state. Decrypt-only permission is insufficient. A
 fresh pre-issued-key enrollment persists three transitions (typically six
 provider operations); an account enrollment that requests and completes OTP
 persists four (typically eight). Restarts, retries, or OTP re-sends can add more,
-so size KMS/HSM quotas and latency budgets for the full workflow, not one save.
-An incomplete sealed-state resume intentionally unwraps once before and again
-after acquiring the setup lock; the second read ensures only the locked snapshot
-can drive mutation if another process completed setup between the two loads.
+and resumed incomplete setup unwraps once before and again after acquiring the
+lock. These paths compound during retry storms and OTP redispatch, so size
+KMS/HSM quotas and latency budgets for degraded workflows, not only the happy
+path's six or eight calls. The second incomplete-state read ensures only the
+locked snapshot can drive mutation if another process completed setup between
+the two loads.
 
 The wrapper binding authenticates the agent id stored in the envelope; the
 store does not accept a separately configured expected agent id. A principal
