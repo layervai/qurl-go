@@ -11,9 +11,9 @@ name: Agent-reg vectors drift
 #
 # What this job does:
 #   1. Recompute the vendored file's SHA-256 and assert it equals the digest the
-#      Go fence pins (VENDORED_SHA256 below must track agentRegVectorsSHA256 in
-#      relayknock/agent_registration_golden_test.go). This alone catches a local
-#      edit even if upstream is unreachable.
+#      Go fence pins — read directly from agentRegVectorsSHA256 in
+#      relayknock/agent_registration_golden_test.go (the single source of truth).
+#      This alone catches a local edit even if upstream is unreachable.
 #   2. Fetch the canonical copy from qurl-conformance and, if present, assert it is
 #      byte-identical to the vendored copy. A real content drift FAILS the job.
 #
@@ -46,10 +46,10 @@ permissions:
 env:
   # Path to the vendored artifact, relative to the repo root.
   VENDORED_PATH: relayknock/testdata/agent_registration_golden.json
-  # Must equal agentRegVectorsSHA256 in
-  # relayknock/agent_registration_golden_test.go. Bump both together, and only for
-  # a deliberate upstream re-vendor.
-  VENDORED_SHA256: 77dc8634eb15e8a986df1093923b70b341386ba3c15421814ffed1a668f2d2bc
+  # The Go fence that pins the canonical SHA-256 (agentRegVectorsSHA256). This
+  # workflow derives the expected digest FROM that const rather than hardcoding a
+  # second copy, so a re-vendor only has to bump one source of truth.
+  GO_FENCE: relayknock/agent_registration_golden_test.go
   # Canonical upstream source. CONFORMANCE_REF is the ref to diff against; it
   # defaults to the conformance default branch. While the vectors are still in
   # qurl-conformance PR #20, override via workflow_dispatch (or temporarily change
@@ -69,21 +69,27 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
 
-      - name: Assert vendored file matches the pinned SHA-256
+      - name: Assert vendored file matches the Go fence's pinned SHA-256
         run: |
           set -euo pipefail
           if [ ! -f "$VENDORED_PATH" ]; then
             echo "::error::vendored vectors not found at $VENDORED_PATH"
             exit 1
           fi
-          got="$(sha256sum "$VENDORED_PATH" | cut -d' ' -f1)"
-          if [ "$got" != "$VENDORED_SHA256" ]; then
-            echo "::error::vendored $VENDORED_PATH SHA-256 = $got, want $VENDORED_SHA256."
-            echo "::error::The vendored copy was edited. It must stay byte-identical to the qurl-conformance source;"
-            echo "::error::re-vendor from upstream and update VENDORED_SHA256 here AND agentRegVectorsSHA256 in the Go fence."
+          # Single source of truth: derive the expected digest from the Go fence
+          # const (agentRegVectorsSHA256) instead of hardcoding a second copy here.
+          want="$(grep -oE 'agentRegVectorsSHA256[[:space:]]*=[[:space:]]*"[0-9a-f]{64}"' "$GO_FENCE" | grep -oE '[0-9a-f]{64}')"
+          if [ -z "$want" ]; then
+            echo "::error::could not extract agentRegVectorsSHA256 from $GO_FENCE"
             exit 1
           fi
-          echo "vendored SHA-256 OK: $got"
+          got="$(sha256sum "$VENDORED_PATH" | cut -d' ' -f1)"
+          if [ "$got" != "$want" ]; then
+            echo "::error::vendored $VENDORED_PATH SHA-256 = $got, want $want (agentRegVectorsSHA256 in $GO_FENCE)."
+            echo "::error::The vendored copy and the Go fence disagree. Re-vendor from upstream and update agentRegVectorsSHA256 (the single source of truth)."
+            exit 1
+          fi
+          echo "vendored SHA-256 OK (matches the Go fence const): $got"
 
       - name: Diff vendored copy against canonical qurl-conformance
         run: |
