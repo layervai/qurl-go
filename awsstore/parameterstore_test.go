@@ -109,16 +109,21 @@ func TestParameterStore_RoundTrip(t *testing.T) {
 // parameter-specific plumbing (SecureString/Overwrite/decryption, tier, KMS key)
 // and the nil-Parameter sub-branch that has no Secrets Manager analogue.
 
-func TestParameterStore_NilParameterIsNotFound(t *testing.T) {
-	// A GetParameter success carrying a nil Parameter object has nothing stored;
-	// the store maps it to ErrAgentStateNotFound (same as ParameterNotFound),
-	// distinct from the Value-nil corrupt case exercised by TestStoreContract.
+func TestParameterStore_NilParameterFailsClosed(t *testing.T) {
+	// A GetParameter success carrying a nil Parameter object is anomalous: a
+	// genuine absence surfaces as the ParameterNotFound exception, so this store
+	// must NOT treat a nil-Parameter success as "not registered" (which would
+	// re-enroll and orphan a credential). It fails closed as ErrInvalidAgentState,
+	// same as the Value-nil case exercised by TestStoreContract.
 	fake := &fakeSSM{exists: true, nilParameter: true}
 	store := awsstore.NewParameterStore(fake, "/qurl/agent-state")
 
 	_, err := store.LoadAgentState(context.Background())
-	if !errors.Is(err, qurl.ErrAgentStateNotFound) {
-		t.Fatalf("want ErrAgentStateNotFound for a nil Parameter, got %v", err)
+	if !errors.Is(err, qurl.ErrInvalidAgentState) {
+		t.Fatalf("want ErrInvalidAgentState for a nil Parameter, got %v", err)
+	}
+	if errors.Is(err, qurl.ErrAgentStateNotFound) {
+		t.Fatalf("a nil-Parameter anomaly must not map to not-found (would trigger re-enrollment): %v", err)
 	}
 }
 

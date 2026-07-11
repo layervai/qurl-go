@@ -82,14 +82,14 @@ func (s *ParameterStore) LoadAgentState(ctx context.Context) (*qurl.AgentState, 
 		}
 		return nil, fmt.Errorf("qurl: get parameter: %w", err)
 	}
-	if out.Parameter == nil {
-		// A success response that carries no Parameter object has nothing stored;
-		// treat it as "not registered yet", the same as ParameterNotFound.
-		return nil, qurl.ErrAgentStateNotFound
-	}
-	if out.Parameter.Value == nil {
-		// The parameter exists but holds no value: present-but-unreadable, so map
-		// it to invalid-state (corrupt), distinct from the not-found case above.
+	if out.Parameter == nil || out.Parameter.Value == nil {
+		// A success response carrying no Parameter/Value is anomalous: a genuine
+		// absence surfaces as ParameterNotFound (handled above), so this is not a
+		// legitimate "not registered yet" signal. Fail closed as invalid-state
+		// rather than mapping an ambiguous response to not-found — mapping it to
+		// not-found would trigger destructive re-enrollment of this credential
+		// store on a transient/malformed read (the fail-closed contract this store
+		// shares with fileAgentStateStore).
 		return nil, fmt.Errorf("%w: parameter has no value", qurl.ErrInvalidAgentState)
 	}
 	return unmarshalAgentState([]byte(*out.Parameter.Value))
