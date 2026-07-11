@@ -64,7 +64,9 @@ func WithKMSKeyID(keyID string) Option {
 // configuration, whose standard tier caps a SecureString value at 4 KB. Because a
 // registered AgentState carries a DeviceAPIKey, an unusually large token could
 // push the JSON past 4 KB; pass [ssmtypes.ParameterTierAdvanced] to raise the
-// ceiling to 8 KB.
+// ceiling to 8 KB. Note that promoting an existing standard parameter to advanced
+// is a one-way, billable transition (advanced-tier parameters incur a per-parameter
+// charge and cannot be downgraded in place), so weigh it against the 4 KB ceiling.
 //
 // This option applies only to [ParameterStore]; [SecretsManagerStore] ignores it.
 // The zero-value tier leaves the field unset, preserving the prior behavior.
