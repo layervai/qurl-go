@@ -244,7 +244,7 @@ func (r registrationInfoResponse) validate(now time.Time, errKind error) error {
 	if strings.TrimSpace(r.Relay.ServerID) == "" {
 		return fmt.Errorf("%w: registration-info missing relay server_id", errKind)
 	}
-	return validateNHPServerPeerInfo(r.NHPServerPeer, now, "registration-info", errKind)
+	return validateNHPServerPeerInfo(r.NHPServerPeer, now, true, "registration-info", errKind)
 }
 
 // completionResponse is the data payload of POST /v1/agent/registration/complete.
@@ -270,7 +270,7 @@ func (r completionResponse) validate(now time.Time, errKind error) error {
 	if strings.TrimSpace(r.DeviceAPIKey) == "" {
 		return fmt.Errorf("%w: completion response missing device_api_key", errKind)
 	}
-	return validateNHPServerPeerInfo(r.NHPServerPeer, now, "completion response", errKind)
+	return validateNHPServerPeerInfo(r.NHPServerPeer, now, true, "completion response", errKind)
 }
 
 // completeRequestBody is the POST /v1/agent/registration/complete request.

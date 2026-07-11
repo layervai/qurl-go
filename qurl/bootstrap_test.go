@@ -422,8 +422,40 @@ func TestFileAgentState_V2FieldsRoundTripAndLegacyLoads(t *testing.T) {
 	if loadedLegacy.SchemaVersion != 0 || loadedLegacy.DeviceAPIKey != "" {
 		t.Fatalf("legacy state should have zero v2 fields: %#v", loadedLegacy)
 	}
-	if err := validateRegisteredAgentState(loadedLegacy, time.Now(), ErrInvalidBootstrapConfig); err != nil {
+	if err := validateRegisteredAgentState(loadedLegacy, time.Now(), true, ErrInvalidBootstrapConfig); err != nil {
 		t.Fatalf("legacy registered state should validate: %v", err)
+	}
+}
+
+// TestValidateRegisteredAgentState_PeerExpiryGatedOnRequirePeerLive verifies the
+// fast-path peer-expiry gate: a RegisterAgent Client (requirePeerLive=false — it
+// authorizes with the REST device key and never knocks the persisted peer) is not
+// locked out by an expired NHP peer, while the knock-only BootstrapAgent path
+// (requirePeerLive=true) still rejects it.
+func TestValidateRegisteredAgentState_PeerExpiryGatedOnRequirePeerLive(t *testing.T) {
+	now := time.Date(2026, 7, 10, 0, 0, 0, 0, time.UTC)
+	registeredAt := now.Add(-24 * time.Hour)
+	state := &AgentState{
+		AgentID:      "agent-expired-peer",
+		RegisteredAt: &registeredAt,
+		NHPPeer: &NHPServerPeerInfo{
+			PublicKeyB64: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+			Host:         "nhp.layerv.ai",
+			Port:         62206,
+			ExpireTime:   now.Add(-time.Hour).Unix(), // expired an hour ago
+		},
+	}
+
+	// REST-only RegisterAgent fast path: an expired-but-unused peer must not block it.
+	if err := validateRegisteredAgentState(state, now, false, ErrInvalidRegisterConfig); err != nil {
+		t.Errorf("requirePeerLive=false must accept an expired peer (a REST Client never knocks it): %v", err)
+	}
+	// Knock-only BootstrapAgent fast path: an expired peer it will knock is a real problem.
+	err := validateRegisteredAgentState(state, now, true, ErrInvalidRegisterConfig)
+	if err == nil {
+		t.Error("requirePeerLive=true must reject an expired peer (the knock path uses it)")
+	} else if !errors.Is(err, ErrInvalidRegisterConfig) {
+		t.Errorf("expired-peer rejection should wrap the config error: %v", err)
 	}
 }
 

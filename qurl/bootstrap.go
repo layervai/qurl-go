@@ -372,7 +372,7 @@ func BootstrapAgent(ctx context.Context, setupKey string, store AgentStateStore,
 // is the caller-facing sentinel wrapped into failures so each front door keeps
 // its class (BootstrapAgent → ErrInvalidBootstrapConfig, RegisterAgent →
 // ErrInvalidRegisterConfig).
-func validateRegisteredAgentState(state *AgentState, now time.Time, errKind error) error {
+func validateRegisteredAgentState(state *AgentState, now time.Time, requirePeerLive bool, errKind error) error {
 	if state == nil {
 		return fmt.Errorf("%w: registered agent state is nil", errKind)
 	}
@@ -385,14 +385,20 @@ func validateRegisteredAgentState(state *AgentState, now time.Time, errKind erro
 	if state.NHPPeer == nil {
 		return fmt.Errorf("%w: registered agent state missing NHP peer", errKind)
 	}
-	return validateNHPServerPeerInfo(*state.NHPPeer, now, "registered agent state", errKind)
+	return validateNHPServerPeerInfo(*state.NHPPeer, now, requirePeerLive, "registered agent state", errKind)
 }
 
 // validateNHPServerPeerInfo checks an NHP peer record. errKind is the sentinel
 // wrapped into every failure so the caller's error class flows through: bootstrap
 // callers pass ErrInvalidBootstrapConfig, registration callers pass
 // ErrInvalidRegisterConfig.
-func validateNHPServerPeerInfo(peer NHPServerPeerInfo, now time.Time, label string, errKind error) error {
+// validateNHPServerPeerInfo checks an NHP peer's shape (X25519 key, host, port).
+// requireLive additionally rejects an expired peer — set it only when the peer
+// will actually be knocked (a fresh registration/completion peer, a WithNHPPeer
+// override, or the knock-only BootstrapAgent fast path). A REST-only RegisterAgent
+// Client never knocks the persisted peer, so its fast path passes requireLive=false
+// (an expired-but-unused peer must not lock out a still-valid device credential).
+func validateNHPServerPeerInfo(peer NHPServerPeerInfo, now time.Time, requireLive bool, label string, errKind error) error {
 	if strings.TrimSpace(peer.PublicKeyB64) == "" {
 		return fmt.Errorf("%w: %s missing NHP peer public key", errKind, label)
 	}
@@ -412,7 +418,7 @@ func validateNHPServerPeerInfo(peer NHPServerPeerInfo, now time.Time, label stri
 	if peer.Port > 65535 {
 		return fmt.Errorf("%w: %s NHP peer port out of range", errKind, label)
 	}
-	if peer.ExpireTime != 0 && peer.ExpireTime <= now.Unix() {
+	if requireLive && peer.ExpireTime != 0 && peer.ExpireTime <= now.Unix() {
 		return fmt.Errorf("%w: %s NHP peer is expired", errKind, label)
 	}
 	return nil

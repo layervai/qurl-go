@@ -162,7 +162,11 @@ func (cfg *registerConfig) run(ctx context.Context, key string, store AgentState
 		return nil, err
 	}
 	if state.RegisteredAt != nil {
-		if err := validateRegisteredAgentState(state, cfg.clock(), cfg.invalidConfigErr); err != nil {
+		// requirePeerLive = !requireDeviceKey: a RegisterAgent Client authorizes with
+		// the REST device key and never knocks the persisted NHP peer, so an expired
+		// peer must not block the zero-network fast path; the knock-only BootstrapAgent
+		// (requireDeviceKey=false) still requires a live peer.
+		if err := validateRegisteredAgentState(state, cfg.clock(), !cfg.requireDeviceKey, cfg.invalidConfigErr); err != nil {
 			return nil, err
 		}
 		if cfg.requireDeviceKey && strings.TrimSpace(state.DeviceAPIKey) == "" {
@@ -994,7 +998,7 @@ func WithNHPPeer(peer NHPServerPeerInfo) RegisterOption {
 	return registerOptionFunc(func(o *registerConfig) error {
 		// o.clock is initialized to time.Now before options apply; using it keeps
 		// the direct wall-clock call out of the engine for a consistent seam.
-		if err := validateNHPServerPeerInfo(peer, o.clock(), "WithNHPPeer", ErrInvalidRegisterConfig); err != nil {
+		if err := validateNHPServerPeerInfo(peer, o.clock(), true, "WithNHPPeer", ErrInvalidRegisterConfig); err != nil {
 			return err
 		}
 		p := peer
