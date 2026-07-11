@@ -177,6 +177,9 @@ func (cfg *registerConfig) run(ctx context.Context, key string, store AgentState
 		}
 	}()
 
+	// Reload under the lock even when the pre-lock load found incomplete state.
+	// A sealed store intentionally unwraps again here: only the locked snapshot
+	// may drive mutation after another process had a chance to finish setup.
 	state, err = loadOrCreateAgentState(ctx, store, cfg.invalidConfigErr)
 	if err != nil {
 		return nil, err

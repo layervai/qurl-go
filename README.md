@@ -234,7 +234,8 @@ Match errors by type, not message text:
   `FileAgentState` requires its immediate state directory to be exactly `0700`.
   The requirement applies to load and save, so a completed registration under a
   looser directory also fails its read-only fast-path load until the mode is
-  corrected.
+  corrected. Read-only mounts remain supported only when directory metadata is
+  still exactly `0700`; modes such as `0500` or `0555` are also rejected.
   Registration through either SDK local-file store now requires the mandatory
   cross-process sidecar lock to acquire and release successfully. The underlying
   `flock` is OS-advisory; "mandatory" means cooperating SDK setup refuses to run

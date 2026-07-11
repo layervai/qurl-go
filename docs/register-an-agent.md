@@ -234,6 +234,9 @@ fresh pre-issued-key enrollment persists three transitions (typically six
 provider operations); an account enrollment that requests and completes OTP
 persists four (typically eight). Restarts, retries, or OTP re-sends can add more,
 so size KMS/HSM quotas and latency budgets for the full workflow, not one save.
+An incomplete sealed-state resume intentionally unwraps once before and again
+after acquiring the setup lock; the second read ensures only the locked snapshot
+can drive mutation if another process completed setup between the two loads.
 
 The wrapper binding authenticates the agent id stored in the envelope; the
 store does not accept a separately configured expected agent id. A principal
@@ -261,7 +264,9 @@ failures stop registration; custom/network stores remain caller-serialized.
 non-cooperating writer.
 The exact directory mode is enforced on load as well as save, including a
 completed registration's read-only fast path; correct a pre-existing `0750` or
-`0755` directory to `0700` before upgrading.
+`0755` directory to `0700` before upgrading. A read-only filesystem mount is
+supported when the directory metadata remains exactly `0700`; changing the mode
+to `0500`, `0555`, or another "stricter" value is rejected by policy.
 If lock release fails after enrollment was atomically persisted, the call still
 returns `ErrAgentSetupLock` and no client because ownership is ambiguous. Retry
 normally: the completed state then recovers through the pre-lock fast path

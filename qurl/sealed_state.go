@@ -334,7 +334,6 @@ func (s *SealedFileAgentStateStore) SaveAgentState(ctx context.Context, state *A
 	if err != nil {
 		return fmt.Errorf("qurl: encode sealed agent state envelope: %w", err)
 	}
-	defer wipeBytes(raw)
 	if len(raw) > maxSealedAgentStateEnvelope {
 		return fmt.Errorf("%w: sealed agent state envelope exceeds %d bytes", ErrInvalidBootstrapConfig, maxSealedAgentStateEnvelope)
 	}

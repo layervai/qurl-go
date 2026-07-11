@@ -362,6 +362,12 @@ func TestFileAgentState_RequiresExact0700StateDir(t *testing.T) {
 	if _, err := FileAgentState(path).LoadAgentState(context.Background()); !errors.Is(err, ErrInsecureAgentStatePermissions) {
 		t.Fatalf("load under 0750 dir = %v, want ErrInsecureAgentStatePermissions", err)
 	}
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := FileAgentState(path).LoadAgentState(context.Background()); !errors.Is(err, ErrInsecureAgentStatePermissions) {
+		t.Fatalf("load under 0500 dir = %v, want ErrInsecureAgentStatePermissions", err)
+	}
 }
 
 func TestFileAgentState_RespectsCanceledContext(t *testing.T) {
