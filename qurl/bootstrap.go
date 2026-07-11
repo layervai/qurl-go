@@ -96,7 +96,7 @@ type AgentState struct {
 	SchemaVersion int `json:"schema_version,omitempty"`
 	// DeviceAPIKey is the device REST bearer credential minted at registration
 	// completion. Its presence alongside RegisteredAt marks a state ready to back
-	// a Client with zero network. SENSITIVE — see the type doc.
+	// a Client without another qURL registration call. SENSITIVE — see the type doc.
 	DeviceAPIKey string `json:"device_api_key,omitempty"`
 	// RelayURL records the NHP relay base URL from the most recent
 	// registration-info pre-flight. A resume re-fetches registration-info (the
@@ -154,12 +154,8 @@ func (s fileAgentStateStore) LoadAgentState(ctx context.Context) (*AgentState, e
 	// a front-door bootstrap/register class): RegisterAgent and BootstrapAgent
 	// re-wrap a load failure in their own class, so the front-door match comes
 	// from the wrap while this sentinel stays matchable through the chain.
-	raw, err := readPrivateStateFileBounded(s.path, "agent state", maxPrivateStateBytes, true, ErrAgentStateNotFound, ErrInvalidAgentState, ErrInsecureAgentStatePermissions)
+	raw, err := readPrivateStateFileBounded(s.path, "agent state", maxPrivateStateBytes, privateStateDirExact0700, ErrAgentStateNotFound, ErrInvalidAgentState, ErrInsecureAgentStatePermissions)
 	if err != nil {
-		var tooLarge *inputExceedsCapError
-		if errors.As(err, &tooLarge) {
-			return nil, fmt.Errorf("%w: %w", ErrInvalidAgentState, err)
-		}
 		return nil, err
 	}
 	var state AgentState

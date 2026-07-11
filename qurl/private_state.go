@@ -12,16 +12,23 @@ import (
 
 const maxPrivateStateBytes = 64 << 10
 
+type privateStateDirMode uint8
+
+const (
+	privateStateDirCompatible privateStateDirMode = iota
+	privateStateDirExact0700
+)
+
 func readPrivateStateFile(path, label string, notFound, invalidConfig, insecurePermissions error) ([]byte, error) {
-	return readPrivateStateFileBounded(path, label, maxPrivateStateBytes, false, notFound, invalidConfig, insecurePermissions)
+	return readPrivateStateFileBounded(path, label, maxPrivateStateBytes, privateStateDirCompatible, notFound, invalidConfig, insecurePermissions)
 }
 
-func readPrivateStateFileBounded(path, label string, maxBytes int, exactDirMode bool, notFound, invalidConfig, insecurePermissions error) ([]byte, error) {
+func readPrivateStateFileBounded(path, label string, maxBytes int, dirMode privateStateDirMode, notFound, invalidConfig, insecurePermissions error) ([]byte, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, fmt.Errorf("%w: %s path must not be empty", invalidConfig, label)
 	}
 
-	initialInfo, err := statPrivateStateFile(path, label, exactDirMode, notFound, invalidConfig, insecurePermissions)
+	initialInfo, err := statPrivateStateFile(path, label, dirMode, notFound, invalidConfig, insecurePermissions)
 	if err != nil {
 		return nil, err
 	}
@@ -41,7 +48,7 @@ func readPrivateStateFileBounded(path, label string, maxBytes int, exactDirMode 
 	if err != nil {
 		return nil, fmt.Errorf("qurl: stat opened %s: %w", label, err)
 	}
-	latestInfo, err := statPrivateStateFile(path, label, exactDirMode, notFound, invalidConfig, insecurePermissions)
+	latestInfo, err := statPrivateStateFile(path, label, dirMode, notFound, invalidConfig, insecurePermissions)
 	if err != nil {
 		return nil, err
 	}
@@ -51,6 +58,13 @@ func readPrivateStateFileBounded(path, label string, maxBytes int, exactDirMode 
 
 	raw, err := readCappedBody(file, maxBytes, label)
 	if err != nil {
+		// An over-cap body is malformed input, not a transient fault. Classify it
+		// once with the caller's invalid-config sentinel so every private-state
+		// reader exposes the same errors.Is contract.
+		var tooLarge *inputExceedsCapError
+		if errors.As(err, &tooLarge) {
+			return nil, fmt.Errorf("%w: %w", invalidConfig, err)
+		}
 		return nil, fmt.Errorf("qurl: %w", err)
 	}
 	return raw, nil
@@ -128,7 +142,7 @@ func writePrivateStateFileAtomic(ctx context.Context, path, label, tempPattern s
 	return nil
 }
 
-func statPrivateStateFile(path, label string, exactDirMode bool, notFound, invalidConfig, insecurePermissions error) (os.FileInfo, error) {
+func statPrivateStateFile(path, label string, dirMode privateStateDirMode, notFound, invalidConfig, insecurePermissions error) (os.FileInfo, error) {
 	info, err := os.Lstat(path) //nolint:gosec // caller-selected state path is intentionally Lstat'd to reject symlinks before opening
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -146,7 +160,7 @@ func statPrivateStateFile(path, label string, exactDirMode bool, notFound, inval
 		return nil, fmt.Errorf("%w: %s has mode %o, want 0600 or stricter", insecurePermissions, path, info.Mode().Perm())
 	}
 	validateDir := validatePrivateStateDir
-	if exactDirMode {
+	if dirMode == privateStateDirExact0700 {
 		validateDir = validateAgentStateDir
 	}
 	if err := validateDir(filepath.Dir(path), label, invalidConfig, insecurePermissions); err != nil {

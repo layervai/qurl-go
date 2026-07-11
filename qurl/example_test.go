@@ -134,7 +134,7 @@ func ExampleBootstrapAgent() {
 
 func ExampleRegisterAgent() {
 	// RegisterAgent is idempotent: the first call enrolls and persists a device
-	// credential; later calls load it and return a Client with no network I/O.
+	// credential; later calls load it and return a Client without qURL API calls.
 	store := qurl.FileAgentState("/var/lib/layerv/qurl/agent-state.json")
 	client, err := qurl.RegisterAgent(context.Background(), "lv_api_key", store)
 	if err != nil {

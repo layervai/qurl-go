@@ -142,10 +142,11 @@ portal, err := resource.CreatePortal(ctx, qurl.ValidFor(time.Hour))
 ```
 
 `RegisterAgent` is idempotent: the first call enrolls the agent and persists a
-device credential; later calls load it and return a `Client` with no network
-I/O. It picks the enrollment path from the key — a pre-issued key completes in
-one headless call, while an account key uses an email one-time code (a first
-call emails the code and returns `*qurl.OTPPendingError`; re-run with
+device credential; later calls load it and return a `Client` without qURL API
+calls. A sealed or network-backed store may still call its key or storage
+provider while loading. It picks the enrollment path from the key — a pre-issued
+key completes in one headless call, while an account key uses an email one-time
+code. The first call emails the code and returns `*qurl.OTPPendingError`; re-run with
 `qurl.WithOTP`). Persist the state in a local file, AWS Secrets Manager or SSM
 Parameter Store (`github.com/layervai/qurl-go/awsstore`), or any custom
 `qurl.AgentStateStore`.
@@ -229,6 +230,9 @@ Match errors by type, not message text:
 
 - **Local AgentState directories and setup locks now fail closed.**
   `FileAgentState` requires its immediate state directory to be exactly `0700`.
+  The requirement applies to load and save, so a completed registration under a
+  looser directory also fails its read-only fast-path load until the mode is
+  corrected.
   Registration through either SDK local-file store now requires the mandatory
   cross-process sidecar lock to acquire and release successfully; unsupported
   platforms or insecure lock paths return `ErrAgentSetupLock` instead of

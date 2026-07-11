@@ -18,7 +18,8 @@ import (
 // RegisterAgent is the NHP-native front door for enrolling an agent and getting
 // a ready-to-use Client. It is idempotent: the first call enrolls and persists a
 // device credential into store; later calls load that credential and return a
-// Client with no network I/O.
+// Client without qURL API calls. Loading a network-backed or sealed store may
+// still call its storage or key provider.
 //
 // The key argument is used only during first enrollment. Once store holds a
 // completed registration the fast path serves the Client entirely from it and
@@ -141,9 +142,10 @@ const otpResendCooldown = 60 * time.Second
 // run drives the registration state machine to a *Client. State is derived from
 // AgentState fields (no enum): absent → keypair-persisted → otp_pending → registered.
 func (cfg *registerConfig) run(ctx context.Context, key string, store AgentStateStore) (result *AgentState, resultErr error) {
-	// Preserve the documented zero-network, read-only fast path: a completed state
-	// no longer needs setup serialization and must remain usable when the state
-	// directory is mounted read-only or local locking is unsupported.
+	// Preserve the documented zero-qURL-API, read-only fast path: a completed
+	// state no longer needs setup serialization and must remain usable when the
+	// state directory is mounted read-only or local locking is unsupported. The
+	// store load itself may call a remote storage or key provider.
 	state, found, err := loadAgentStateIfPresent(ctx, store, cfg.invalidConfigErr)
 	if err != nil {
 		return nil, err
@@ -162,6 +164,9 @@ func (cfg *registerConfig) run(ctx context.Context, key string, store AgentState
 	}
 	defer func() {
 		if err := releaseSetupLock(); err != nil {
+			// Even if enrollment and its atomic state write succeeded, fail this call
+			// because lock ownership is now ambiguous. A retry recovers without a
+			// second enrollment by reading the completed state on the pre-lock path.
 			lockErr := fmt.Errorf("%w: release setup lock: %w", ErrAgentSetupLock, err)
 			result = nil
 			if resultErr == nil {
@@ -819,8 +824,8 @@ func derefTime(t *time.Time, fallback time.Time) time.Time {
 
 // newStoreBackedClient builds a Client whose credentials come from the device
 // API key persisted in store, wrapped in CachedCredentials so a rotated key is
-// picked up within the TTL without rebuilding the client. The fast path makes
-// zero network calls.
+// picked up within the TTL without rebuilding the client. Construction makes
+// no qURL API calls; loading a network-backed store can still perform I/O.
 func newStoreBackedClient(store AgentStateStore, baseURL string, httpClient HTTPDoer) *Client {
 	provider := CachedCredentials(&storeCredentialProvider{store: store}, storeCredentialCacheTTL)
 	return &Client{

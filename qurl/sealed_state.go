@@ -22,6 +22,8 @@ const (
 	sealedAgentStatePurpose       = "qurl-go/agent-state"
 	sealedAgentStateVersion       = 1
 	sealedAgentStateDEKBytes      = 32
+	sealedAgentStateNonceBytes    = 12
+	sealedAgentStateTagBytes      = 16
 	maxSealedAgentStateBytes      = 1 << 20
 	maxSealedAgentStateEnvelope   = 2 << 20
 	maxWrappedAgentStateKeyBytes  = 64 << 10
@@ -157,12 +159,8 @@ func (s *SealedFileAgentStateStore) LoadAgentState(ctx context.Context) (*AgentS
 	if err := validateContext(ctx, ErrInvalidBootstrapConfig); err != nil {
 		return nil, err
 	}
-	raw, err := readPrivateStateFileBounded(s.path, "sealed agent state", maxSealedAgentStateEnvelope, true, ErrAgentStateNotFound, ErrInvalidAgentState, ErrInsecureAgentStatePermissions)
+	raw, err := readPrivateStateFileBounded(s.path, "sealed agent state", maxSealedAgentStateEnvelope, privateStateDirExact0700, ErrAgentStateNotFound, ErrInvalidAgentState, ErrInsecureAgentStatePermissions)
 	if err != nil {
-		var tooLarge *inputExceedsCapError
-		if errors.As(err, &tooLarge) {
-			return nil, invalidSealedState("envelope exceeds size limit")
-		}
 		return nil, err
 	}
 	var envelope sealedAgentStateEnvelope
@@ -352,10 +350,10 @@ func decodeSealedAgentStateEnvelope(raw []byte, envelope *sealedAgentStateEnvelo
 	if err := validateWrappedAgentStateKey(envelope.WrappedKey); err != nil {
 		return invalidSealedState("invalid wrapped-key record")
 	}
-	if len(envelope.Nonce) != 12 {
+	if len(envelope.Nonce) != sealedAgentStateNonceBytes {
 		return invalidSealedState("invalid AES-GCM nonce length")
 	}
-	if len(envelope.Ciphertext) < 16 || len(envelope.Ciphertext) > maxSealedAgentStateBytes+16 {
+	if len(envelope.Ciphertext) < sealedAgentStateTagBytes || len(envelope.Ciphertext) > maxSealedAgentStateBytes+sealedAgentStateTagBytes {
 		return invalidSealedState("invalid ciphertext length")
 	}
 	return nil

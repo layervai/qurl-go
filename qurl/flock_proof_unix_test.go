@@ -7,8 +7,11 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
 // TestAcquireAgentSetupLock_EngagesOSLock proves the serialization is the OS
@@ -74,5 +77,23 @@ func TestAcquireAgentSetupLock_RejectsSymlinkSidecar(t *testing.T) {
 	}
 	if _, err := acquireAgentSetupLock(context.Background(), FileAgentState(path)); !errors.Is(err, ErrAgentSetupLock) {
 		t.Fatalf("symlink sidecar = %v, want ErrAgentSetupLock", err)
+	}
+}
+
+func TestOpenSetupLockAt_BoundsCreateUnlinkRace(t *testing.T) {
+	calls := 0
+	openat := func(_ int, _ string, flags int, _ uint32) (int, error) {
+		calls++
+		if flags&unix.O_CREAT == 0 {
+			return -1, unix.ENOENT
+		}
+		return -1, unix.EEXIST
+	}
+
+	if _, err := openSetupLockAtWith(0, "agent-state.lock", openat); err == nil || !strings.Contains(err.Error(), "16 open attempts") {
+		t.Fatalf("adversarial create/unlink race error = %v, want bounded-attempt context", err)
+	}
+	if want := maxSetupLockOpenAttempts * 2; calls != want {
+		t.Fatalf("openat calls = %d, want bounded %d", calls, want)
 	}
 }

@@ -3,6 +3,7 @@ package qurl
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -350,6 +351,16 @@ func TestFileAgentState_RequiresExact0700StateDir(t *testing.T) {
 	state.AgentID = "agent-mode-test"
 	if err := FileAgentState(path).SaveAgentState(context.Background(), state); !errors.Is(err, ErrInsecureAgentStatePermissions) {
 		t.Fatalf("save under 0750 dir = %v, want ErrInsecureAgentStatePermissions", err)
+	}
+	raw, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := FileAgentState(path).LoadAgentState(context.Background()); !errors.Is(err, ErrInsecureAgentStatePermissions) {
+		t.Fatalf("load under 0750 dir = %v, want ErrInsecureAgentStatePermissions", err)
 	}
 }
 

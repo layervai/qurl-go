@@ -525,6 +525,18 @@ func TestClient_FileCredentialsErrors(t *testing.T) {
 	if _, err := client.ProtectURL(context.Background(), "https://example.com"); !errors.Is(err, ErrInvalidClientConfig) {
 		t.Fatalf("bad authorization header: want ErrInvalidClientConfig, got %v", err)
 	}
+
+	oversizedPath := filepath.Join(t.TempDir(), "issuer-state.json")
+	if err := os.WriteFile(oversizedPath, []byte(strings.Repeat("x", maxPrivateStateBytes+1)), 0o600); err != nil {
+		t.Fatalf("write oversized state: %v", err)
+	}
+	client, err = NewClient(FileCredentials(oversizedPath), WithBaseURL("https://api.example.com"))
+	if err != nil {
+		t.Fatalf("NewClient oversized state: %v", err)
+	}
+	if _, err := client.ProtectURL(context.Background(), "https://example.com"); !errors.Is(err, ErrInvalidClientConfig) {
+		t.Fatalf("oversized state: want ErrInvalidClientConfig, got %v", err)
+	}
 }
 
 func TestClient_FileCredentialsRespectsCanceledContext(t *testing.T) {

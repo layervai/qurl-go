@@ -13,7 +13,6 @@ type setupLock interface {
 }
 
 type setupLockingAgentStateStore interface {
-	setupLockPath() string
 	acquireSetupLock(context.Context) (setupLock, error)
 }
 

@@ -716,6 +716,52 @@ func TestSealedFileAgentState_SetupLockFailuresFailClosed(t *testing.T) {
 	}
 }
 
+func TestRegisterAgent_SetupLockReleaseFailureRecoversFromCompletedState(t *testing.T) {
+	h := newRegisterHarness(t)
+	h.svc.keyKind = keyKindBootstrap
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewSealedFileAgentState(filepath.Join(dir, "agent_state.sealed.json"), "test-wrapper", &testAgentStateKeyWrapper{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.store = store
+	h.armDevicePubOnInfo()
+	store.lockFile = func(context.Context, string) (setupLock, error) {
+		return testSetupLock{closeErr: errors.New("unlock failed")}, nil
+	}
+
+	client, err := RegisterAgent(context.Background(), "lv_bootstrap_key", store, h.registerOpts()...)
+	if client != nil || !errors.Is(err, ErrAgentSetupLock) {
+		t.Fatalf("first registration = (%v, %v), want nil client + ErrAgentSetupLock", client, err)
+	}
+	state, err := store.LoadAgentState(context.Background())
+	if err != nil {
+		t.Fatalf("load persisted registration: %v", err)
+	}
+	if state.RegisteredAt == nil || state.DeviceAPIKey == "" {
+		t.Fatalf("release failure must leave completed durable state: %#v", state)
+	}
+
+	// Prove recovery uses the pre-lock completed-state path: make any attempted
+	// lock acquisition fail, then retry with a deliberately unusable setup key.
+	store.lockFile = func(context.Context, string) (setupLock, error) {
+		return nil, errors.New("lock must not be acquired on recovery")
+	}
+	client, err = RegisterAgent(context.Background(), "unused-on-fast-path", store, h.registerOpts()...)
+	if err != nil || client == nil {
+		t.Fatalf("recovery registration = (%v, %v), want non-nil client + nil error", client, err)
+	}
+	if got := h.nhp.regCount(); got != 1 {
+		t.Fatalf("REG count = %d, want 1", got)
+	}
+	if got := h.svc.completionCalls.Load(); got != 1 {
+		t.Fatalf("completion calls = %d, want 1", got)
+	}
+}
+
 func TestSealedFileAgentState_RejectsInnerOuterAgentMismatch(t *testing.T) {
 	wrapper := &testAgentStateKeyWrapper{}
 	store := testSealedStore(t, wrapper)

@@ -18,7 +18,14 @@ import (
 // waiting for the mandatory lock. The lock is only contended when a second
 // concurrent setup is mid-flight against the same FileAgentState, so this is a
 // short poll, not a hot loop.
-const flockRetryInterval = 25 * time.Millisecond
+const (
+	flockRetryInterval = 25 * time.Millisecond
+	// Bound an adversarial create/unlink race so setup fails closed instead of
+	// spinning forever while the sidecar name is unstable.
+	maxSetupLockOpenAttempts = 16
+)
+
+type openatFunc func(int, string, int, uint32) (int, error)
 
 // lockFileExclusive takes an exclusive flock on lockPath (a sidecar
 // file beside the agent-state file, created 0600), creating it if absent. It
@@ -114,10 +121,14 @@ func lockFileExclusive(ctx context.Context, lockPath string) (setupLock, error) 
 }
 
 func openSetupLockAt(dirFD int, name string) (int, error) {
-	for {
+	return openSetupLockAtWith(dirFD, name, unix.Openat)
+}
+
+func openSetupLockAtWith(dirFD int, name string, openat openatFunc) (int, error) {
+	for range maxSetupLockOpenAttempts {
 		// Existing-file path: O_NOFOLLOW binds the check to the descriptor actually
 		// opened, so a symlink swap fails with ELOOP.
-		fd, err := unix.Openat(dirFD, name, unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+		fd, err := openat(dirFD, name, unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 		if err == nil {
 			return fd, nil
 		}
@@ -128,7 +139,7 @@ func openSetupLockAt(dirFD int, name string) (int, error) {
 		// Creation path: O_CREAT|O_EXCL itself refuses an existing symlink and any
 		// competing create. Darwin does not reliably support O_NOFOLLOW combined
 		// with O_CREAT, so exclusivity supplies the no-follow guarantee here.
-		fd, err = unix.Openat(dirFD, name, unix.O_CREAT|unix.O_EXCL|unix.O_RDWR|unix.O_CLOEXEC, 0o600)
+		fd, err = openat(dirFD, name, unix.O_CREAT|unix.O_EXCL|unix.O_RDWR|unix.O_CLOEXEC, 0o600)
 		if err == nil {
 			return fd, nil
 		}
@@ -137,4 +148,5 @@ func openSetupLockAt(dirFD int, name string) (int, error) {
 		}
 		return -1, err
 	}
+	return -1, fmt.Errorf("setup lock file changed during %d open attempts", maxSetupLockOpenAttempts)
 }
