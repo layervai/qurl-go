@@ -255,6 +255,12 @@ store then rejects a different envelope before it calls the key wrapper. Sealed
 store agent ids must be valid UTF-8, at most 256 bytes, and contain neither
 surrounding whitespace nor control characters.
 
+Sealing authenticates each envelope but does not provide freshness or
+anti-rollback protection. An attacker who can replace the file with an older
+valid envelope for the same provider and agent id will not be detected by this
+store alone; deployments requiring rollback detection must keep a monotonic
+version in an external trusted store and enforce it around `AgentStateStore`.
+
 The SDK wipes its temporary plaintext and DEK byte buffers after use. Go's JSON
 decoder copies credential fields into `AgentState` strings, which are immutable
 and cannot be explicitly wiped; buffer wiping is best-effort defense in depth,

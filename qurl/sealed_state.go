@@ -136,7 +136,10 @@ func WithExpectedSealedAgentID(agentID string) SealedFileAgentStateOption {
 // is a stable, lowercase identifier for the selected wrapper (for example
 // "aws-kms" or "gcp-confidential-space") and is authenticated by both AES-GCM
 // and the wrapper's own binding. Use WithExpectedSealedAgentID when deployment
-// configuration knows the identity this file must contain.
+// configuration knows the identity this file must contain. The envelope provides
+// confidentiality, integrity, and cross-identity binding, but no freshness or
+// anti-rollback guarantee: detecting replacement with an older valid envelope
+// for the same agent requires an external monotonic version or trusted store.
 //
 // A successful SaveAgentState performs both WrapKey and UnwrapKey before the
 // atomic commit: two provider operations per save. Consequently every identity
