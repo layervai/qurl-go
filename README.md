@@ -78,11 +78,11 @@ That is the core flow:
 | Protect a private URL | `client.ProtectURL` | The target URL you already know |
 | Mint a short-lived access link | `resource.CreatePortal` | The returned resource handle |
 
-If qURL Connector already protects the service, use the connector id instead of
-calling `ProtectURL`:
+If qURL Connector already protects the service, use its immutable connector
+slug instead of calling `ProtectURL`:
 
 ```go
-resource, err := client.ConnectorResource(ctx, "prod-dashboard")
+resource, err := client.GetTunnelResourceBySlug(ctx, "prod-dashboard")
 if err != nil {
 	return err
 }
@@ -232,6 +232,36 @@ Match errors by type, not message text:
 
 ### Unreleased
 
+- **Added: qURL Connector tunnel-resource lifecycle** — device-authenticated
+  clients can call `EnsureTunnelResource`, `GetTunnelResource`,
+  `GetTunnelResourceBySlug`, and `DeleteTunnelResource` without falling back to
+  an enrollment credential. The typed result keeps immutable `Slug` separate
+  from mutable `Alias`, exposes `KnockResourceID`, and reports whether an ensure
+  found an existing active resource. See [Manage connector tunnel
+  resources](docs/connector-tunnel-resources.md).
+
+  **Minimum backend/deployment contract:** this release does not claim the
+  backend is deployed or ready to flip. The qurl-service contract fenced by
+  [layervai/qurl-service#1192](https://github.com/layervai/qurl-service/pull/1192)
+  must be deployed first. Keep `QURL_AGENT_REGISTRATION_ENABLED=false` until
+  that service ledger's completion-limiter, trusted-proxy, Redis, abuse-capacity,
+  alarm, and cohort hard gates are proven; enable it only when enrollment may
+  begin. Service startup with registration enabled also requires
+  `QURL_AGENT_BOOTSTRAP_ENABLED=true` plus configured relay and NHP peer
+  dependencies. `QURL_AGENT_OTP_ENABLED` is not required for the connector's
+  bootstrap-only default; enable it only for intentional account/OTP repair.
+  Tunnel ensure/create also requires the existing
+  `TUNNEL_AUTH_ENABLED=true` service gate. The resource collection/item routes
+  have no new SDK-specific feature flag, but the tunnel type branch remains
+  fail-closed behind that existing gate.
+
+  The completion-minted device credential must retain the producer's exact
+  URL/tunnel resource allow-list (GET/POST resource collection,
+  GET/PATCH/DELETE resource item, and the two approved portal-creation writes)
+  while denying transit and unclassified routes. `POST /v1/resources`
+  find-or-create must preserve the exact `201` success envelope,
+  `409 slug_in_use`, and `410 resource_tombstoned` contracts documented here.
+
 - **Added: registered-agent lifecycle APIs** — `OpenRegisteredAgent` provides a
   store-backed reopen without qURL enrollment or resource API calls (a sealed
   store load may still call its key wrapper/KMS);
@@ -306,6 +336,14 @@ Match errors by type, not message text:
   [Register an agent](docs/register-an-agent.md).
 
 #### Breaking changes
+
+- **`Client.ConnectorResource` now validates immutable tunnel identity.** It
+  resolves and validates the response's `slug`, `type`, `status`, and
+  `knock_resource_id` instead of incorrectly requiring the mutable `alias` to
+  equal the connector slug. The method is deprecated; new connector code should
+  use `GetTunnelResourceBySlug` for the complete tunnel contract. Its deprecated
+  `Resource` projection now carries only tunnel lifecycle fields; legacy URL,
+  description, tags, custom-domain, count, and timestamp fields are zero-valued.
 
 - **`WithNHPPeer` can no longer be replaced by completion.** The override is the
   peer authenticated by REG/RAK and is preserved in durable state. Completion

@@ -50,6 +50,11 @@ var ErrInvalidClientConfig = errors.New("qurl: invalid client config")
 // input is invalid.
 var ErrInvalidResourceRequest = errors.New("qurl: invalid resource request")
 
+// ErrInvalidAPIResponse is returned when a successful LayerV API response is
+// empty or cannot be decoded. Endpoint-specific methods may wrap this with a
+// narrower response-contract sentinel.
+var ErrInvalidAPIResponse = errors.New("qurl: invalid API response")
+
 // ErrInvalidPortalRequest is returned before an API request when a portal input
 // is invalid.
 var ErrInvalidPortalRequest = errors.New("qurl: invalid portal request")
@@ -502,6 +507,13 @@ type Resource struct {
 
 	// ID is the LayerV resource id, for example r_abc123...
 	ID string `json:"resource_id"`
+	// Type is the resource kind returned by LayerV, such as "url" or "tunnel".
+	Type string `json:"type,omitempty"`
+	// KnockResourceID is the NHP placement identity for tunnel resources.
+	KnockResourceID string `json:"knock_resource_id,omitempty"`
+	// Slug is the immutable owner-scoped identity of a tunnel resource. It is
+	// distinct from Alias, which is a mutable display handle.
+	Slug string `json:"slug,omitempty"`
 	// TargetURL is the private URL protected by this resource.
 	TargetURL string `json:"target_url"`
 	// Status is the resource lifecycle status returned by LayerV.
@@ -528,45 +540,24 @@ func (c *Client) ResourceByID(id string) *Resource {
 	return &Resource{client: c, ID: id}
 }
 
-// ConnectorResource returns the resource created for connectorID by qURL
-// Connector. The connector id is the resource slug LayerV stores for that
-// connector. Use this when qURL Connector already protects the service; do not
-// call ProtectURL again for the same service. The LayerV API performs the slug
-// lookup, and the SDK confirms the returned alias matches connectorID before
-// binding the returned resource.
+// ConnectorResource returns the tunnel resource whose immutable slug is
+// connectorID. It never treats the mutable display alias as connector identity.
+// The deprecated projection intentionally contains only tunnel lifecycle fields
+// (ID, type, knock resource id, slug, status, and alias). Legacy descriptive,
+// URL, count, and timestamp fields are zero-valued and are no longer promised
+// by this deprecated method.
+//
+// Deprecated: use GetTunnelResourceBySlug. Its TunnelResource result exposes
+// the complete connector lifecycle contract and can also create portals.
 func (c *Client) ConnectorResource(ctx context.Context, connectorID string) (*Resource, error) {
-	if c == nil {
-		return nil, fmt.Errorf("%w: nil client", ErrInvalidClientConfig)
-	}
-	connectorID = strings.TrimSpace(connectorID)
-	if connectorID == "" {
-		return nil, fmt.Errorf("%w: connector id must not be empty", ErrInvalidResourceRequest)
-	}
-
-	query := url.Values{}
-	query.Set("slug", connectorID)
-	var env apiEnvelope[[]createResourceResponse]
-	if err := c.doJSON(ctx, http.MethodGet, "/v1/resources?"+query.Encode(), nil, &env); err != nil {
-		return nil, err
-	}
-	if len(env.Data) == 0 {
-		return nil, fmt.Errorf("%w: connector %q", ErrResourceNotFound, connectorID)
-	}
-	if len(env.Data) > 1 {
-		return nil, fmt.Errorf("%w: connector %q returned %d resources", ErrAmbiguousResource, connectorID, len(env.Data))
-	}
-	resource, err := env.Data[0].resource()
+	tunnel, err := c.GetTunnelResourceBySlug(ctx, connectorID)
 	if err != nil {
+		if errors.Is(err, ErrTunnelResourceNotFound) {
+			return nil, fmt.Errorf("%w: connector %q: %w", ErrResourceNotFound, connectorID, err)
+		}
 		return nil, err
 	}
-	if resource.Alias == nil {
-		return nil, fmt.Errorf("qurl: invalid API response: connector %q returned resource without alias", connectorID)
-	}
-	if *resource.Alias != connectorID {
-		return nil, fmt.Errorf("qurl: invalid API response: connector %q returned resource alias %q", connectorID, *resource.Alias)
-	}
-	resource.client = c
-	return resource, nil
+	return tunnel.resourceHandle(), nil
 }
 
 // ResourceOption customizes ProtectURL and CreateResource.
@@ -866,16 +857,19 @@ type createResourceRequest struct {
 }
 
 type createResourceResponse struct {
-	ID           string     `json:"resource_id"`
-	TargetURL    string     `json:"target_url"`
-	Status       string     `json:"status"`
-	Description  string     `json:"description"`
-	Tags         []string   `json:"tags"`
-	CustomDomain *string    `json:"custom_domain"`
-	Alias        *string    `json:"alias"`
-	QURLCount    int        `json:"qurl_count"`
-	CreatedAt    *time.Time `json:"created_at"`
-	ExpiresAt    *time.Time `json:"expires_at"`
+	ID              string     `json:"resource_id"`
+	Type            string     `json:"type"`
+	KnockResourceID string     `json:"knock_resource_id"`
+	Slug            string     `json:"slug"`
+	TargetURL       string     `json:"target_url"`
+	Status          string     `json:"status"`
+	Description     string     `json:"description"`
+	Tags            []string   `json:"tags"`
+	CustomDomain    *string    `json:"custom_domain"`
+	Alias           *string    `json:"alias"`
+	QURLCount       int        `json:"qurl_count"`
+	CreatedAt       *time.Time `json:"created_at"`
+	ExpiresAt       *time.Time `json:"expires_at"`
 }
 
 func (r createResourceResponse) resource() (*Resource, error) {
@@ -883,16 +877,19 @@ func (r createResourceResponse) resource() (*Resource, error) {
 		return nil, fmt.Errorf("qurl: invalid API response: missing resource_id")
 	}
 	return &Resource{
-		ID:           r.ID,
-		TargetURL:    r.TargetURL,
-		Status:       r.Status,
-		Description:  r.Description,
-		Tags:         slices.Clone(r.Tags),
-		CustomDomain: r.CustomDomain,
-		Alias:        r.Alias,
-		QURLCount:    r.QURLCount,
-		CreatedAt:    r.CreatedAt,
-		ExpiresAt:    r.ExpiresAt,
+		ID:              r.ID,
+		Type:            r.Type,
+		KnockResourceID: r.KnockResourceID,
+		Slug:            r.Slug,
+		TargetURL:       r.TargetURL,
+		Status:          r.Status,
+		Description:     r.Description,
+		Tags:            slices.Clone(r.Tags),
+		CustomDomain:    r.CustomDomain,
+		Alias:           r.Alias,
+		QURLCount:       r.QURLCount,
+		CreatedAt:       r.CreatedAt,
+		ExpiresAt:       r.ExpiresAt,
 	}, nil
 }
 
@@ -1040,6 +1037,24 @@ func (c *Client) doJSON(ctx context.Context, method, path string, body, out any)
 	return doAuthorizedJSON(ctx, c.httpClient, c.baseURL, c.credentials.Authorize, method, path, body, out)
 }
 
+// doJSONStatus requires one exact successful status and a non-empty JSON body.
+// It is used when an endpoint's documented status is part of its contract.
+func (c *Client) doJSONStatus(ctx context.Context, method, path string, body, out any, expectedStatus int) error {
+	return doAuthorizedRequest(ctx, c.httpClient, c.baseURL, c.credentials.Authorize, method, path, body, apiResponseContract{
+		expectedStatus: expectedStatus,
+		bodyMode:       apiResponseBodyJSON,
+		out:            out,
+	})
+}
+
+// doNoContent requires one exact successful status and a byte-empty body.
+func (c *Client) doNoContent(ctx context.Context, method, path string, expectedStatus int) error {
+	return doAuthorizedRequest(ctx, c.httpClient, c.baseURL, c.credentials.Authorize, method, path, nil, apiResponseContract{
+		expectedStatus: expectedStatus,
+		bodyMode:       apiResponseBodyEmpty,
+	})
+}
+
 func validateCredentials(ctx context.Context, provider CredentialProvider, baseURL string) error {
 	if provider == nil {
 		return fmt.Errorf("%w: credential provider must not be nil", ErrInvalidClientConfig)
@@ -1078,7 +1093,36 @@ func validateClientCredentialProvider(provider CredentialProvider, baseURL strin
 
 type requestAuthorizer func(context.Context, *http.Request) error
 
+// doAuthorizedJSON preserves the SDK's generic contract: when out is nil, any
+// 2xx status and body are accepted and ignored. Endpoint-specific callers that
+// require an exact JSON or no-content response use doAuthorizedRequest with an
+// explicit apiResponseContract instead.
 func doAuthorizedJSON(ctx context.Context, httpClient HTTPDoer, baseURL string, authorize requestAuthorizer, method, path string, body, out any) error {
+	bodyMode := apiResponseBodyIgnored
+	if out != nil {
+		bodyMode = apiResponseBodyJSON
+	}
+	return doAuthorizedRequest(ctx, httpClient, baseURL, authorize, method, path, body, apiResponseContract{
+		bodyMode: bodyMode,
+		out:      out,
+	})
+}
+
+type apiResponseBodyMode uint8
+
+const (
+	apiResponseBodyIgnored apiResponseBodyMode = iota
+	apiResponseBodyJSON
+	apiResponseBodyEmpty
+)
+
+type apiResponseContract struct {
+	expectedStatus int
+	bodyMode       apiResponseBodyMode
+	out            any
+}
+
+func doAuthorizedRequest(ctx context.Context, httpClient HTTPDoer, baseURL string, authorize requestAuthorizer, method, path string, body any, contract apiResponseContract) error {
 	if httpClient == nil {
 		return fmt.Errorf("%w: HTTP client must not be nil", ErrInvalidClientConfig)
 	}
@@ -1128,25 +1172,45 @@ func doAuthorizedJSON(ctx context.Context, httpClient HTTPDoer, baseURL string, 
 				err:        err,
 			}
 		}
-		return &apiRequestOutcomeUnknownError{err: fmt.Errorf("qurl: read API response after successful status: %w", err)}
+		return invalidAPIResponseOutcome("read API response after successful status", err)
 	}
 	defer wipeBytes(respBody)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return apiErrorFromResponse(resp.StatusCode, respBody)
 	}
-	if out == nil {
+	if contract.expectedStatus != 0 && resp.StatusCode != contract.expectedStatus {
+		return invalidAPIResponseOutcome(fmt.Sprintf("API returned HTTP %d, want %d", resp.StatusCode, contract.expectedStatus), nil)
+	}
+
+	switch contract.bodyMode {
+	case apiResponseBodyIgnored:
 		return nil
+	case apiResponseBodyJSON:
+		if contract.out == nil {
+			return invalidAPIResponseOutcome("JSON response contract has no decode target", nil)
+		}
+		if len(bytes.TrimSpace(respBody)) == 0 {
+			return invalidAPIResponseOutcome("empty API response body after successful status", nil)
+		}
+		if err := json.Unmarshal(respBody, contract.out); err != nil {
+			return invalidAPIResponseOutcome("decode API response after successful status", err)
+		}
+		return nil
+	case apiResponseBodyEmpty:
+		if len(respBody) != 0 {
+			return invalidAPIResponseOutcome(fmt.Sprintf("HTTP %d response body must be empty", resp.StatusCode), nil)
+		}
+		return nil
+	default:
+		return invalidAPIResponseOutcome("unknown API response body contract", nil)
 	}
-	// Current API endpoints that pass out expect an envelope body. Future 204
-	// success endpoints should call this helper with out == nil or split to a
-	// no-body variant instead of weakening this fail-closed decode path.
-	if len(bytes.TrimSpace(respBody)) == 0 {
-		return &apiRequestOutcomeUnknownError{err: errors.New("qurl: empty API response body after successful status")}
+}
+
+func invalidAPIResponseOutcome(detail string, cause error) error {
+	if cause != nil {
+		return &apiRequestOutcomeUnknownError{err: fmt.Errorf("%w: %s: %w", ErrInvalidAPIResponse, detail, cause)}
 	}
-	if err := json.Unmarshal(respBody, out); err != nil {
-		return &apiRequestOutcomeUnknownError{err: fmt.Errorf("qurl: decode API response after successful status: %w", err)}
-	}
-	return nil
+	return &apiRequestOutcomeUnknownError{err: fmt.Errorf("%w: %s", ErrInvalidAPIResponse, detail)}
 }
 
 // apiRequestOutcomeUnknownError marks failures after an HTTP request was handed

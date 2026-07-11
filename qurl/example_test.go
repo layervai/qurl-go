@@ -64,23 +64,18 @@ func ExampleClient_CreatePortal() {
 	fmt.Println(portal.Link)
 }
 
-func ExampleClient_ConnectorResource() {
+func ExampleClient_EnsureTunnelResource() {
 	client, err := qurl.OpenClient()
 	if err != nil {
 		panic(err)
 	}
 
-	resource, err := client.ConnectorResource(context.Background(), "prod-dashboard")
+	result, err := client.EnsureTunnelResource(context.Background(), "prod-dashboard")
 	if err != nil {
 		panic(err)
 	}
 
-	portal, err := resource.CreatePortal(context.Background(), qurl.ValidFor(5*time.Minute))
-	if err != nil {
-		panic(err)
-	}
-
-	fmt.Println(portal.Link)
+	fmt.Println(result.Resource.ResourceID, result.Resource.KnockResourceID, result.FoundExisting)
 }
 
 func ExampleOpenClient() {
