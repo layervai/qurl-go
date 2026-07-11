@@ -263,8 +263,9 @@ func (r registrationInfoResponse) validate(now time.Time, errKind error) error {
 
 // completionResponse is the data payload of POST /v1/agent/registration/complete.
 // It mints the device REST credential and corroborates the durable agent
-// identity + NHP peer. The response cannot replace the peer that authenticated
-// the RAK; registration orchestration asserts the public keys agree.
+// identity + NHP peer key. The response cannot replace the peer that
+// authenticated the RAK; registration orchestration asserts the public keys
+// agree and retains the RAK peer's coordinates and lease.
 type completionResponse struct {
 	AgentID       string            `json:"agent_id"`
 	RegisteredAt  *time.Time        `json:"registered_at"`
@@ -275,7 +276,7 @@ type completionResponse struct {
 // validate checks the completion response. errKind is the caller's front-door
 // config-error class, threaded like registrationInfoResponse.validate so a
 // malformed completion surfaces the calling front door's class.
-func (r completionResponse) validate(now time.Time, errKind error) error {
+func (r completionResponse) validate(_ time.Time, errKind error) error {
 	if strings.TrimSpace(r.AgentID) == "" {
 		return fmt.Errorf("%w: completion response missing agent_id", errKind)
 	}
@@ -288,7 +289,10 @@ func (r completionResponse) validate(now time.Time, errKind error) error {
 	if err := validateExactBearerToken(r.DeviceAPIKey, "completion response device_api_key", errKind); err != nil {
 		return err
 	}
-	return validateNHPServerPeerInfo(r.NHPServerPeer, now, true, "completion response", errKind)
+	// Completion only corroborates the RAK-authenticated public key. Its host,
+	// port, and lease are never persisted, so irrelevant coordinate defects must
+	// not turn a successfully minted credential into recovery-required ambiguity.
+	return validateNHPServerPublicKey(r.NHPServerPeer.PublicKeyB64, "completion response", errKind)
 }
 
 // completeRequestBody is the POST /v1/agent/registration/complete request.

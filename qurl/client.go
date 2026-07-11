@@ -1062,7 +1062,8 @@ func doAuthorizedJSON(ctx context.Context, httpClient HTTPDoer, baseURL string, 
 		if err != nil {
 			return fmt.Errorf("qurl: encode API request: %w", err)
 		}
-		defer wipeBytes(raw)
+		// Do not wipe raw when Do returns: net/http may return an early response
+		// while its write goroutine is still consuming the request body.
 		reqBody = bytes.NewReader(raw)
 	}
 

@@ -205,6 +205,18 @@ func TestCompletionResponse_Validate(t *testing.T) {
 	if err := base.validate(time.Now(), ErrInvalidRegisterConfig); err != nil {
 		t.Fatalf("valid completion rejected: %v", err)
 	}
+	for _, edit := range []func(*completionResponse){
+		func(r *completionResponse) { r.NHPServerPeer.Host = "" },
+		func(r *completionResponse) { r.NHPServerPeer.Port = 0 },
+		func(r *completionResponse) { r.NHPServerPeer.Port = 65536 },
+		func(r *completionResponse) { r.NHPServerPeer.ExpireTime = time.Now().Add(-time.Hour).Unix() },
+	} {
+		completionWithIrrelevantCoordinates := base
+		edit(&completionWithIrrelevantCoordinates)
+		if err := completionWithIrrelevantCoordinates.validate(time.Now(), ErrInvalidRegisterConfig); err != nil {
+			t.Fatalf("completion-only coordinates rejected: %v", err)
+		}
+	}
 
 	tests := []struct {
 		name string
@@ -216,7 +228,8 @@ func TestCompletionResponse_Validate(t *testing.T) {
 		{"missing device key", func(r *completionResponse) { r.DeviceAPIKey = "" }, "missing device_api_key"},
 		{"device key surrounding whitespace", func(r *completionResponse) { r.DeviceAPIKey = " lv_device_secret " }, "surrounding whitespace"},
 		{"device key control", func(r *completionResponse) { r.DeviceAPIKey = "lv_device\nsecret" }, "invalid header characters"},
-		{"bad peer", func(r *completionResponse) { r.NHPServerPeer.Port = 0 }, "missing NHP peer port"},
+		{"missing peer key", func(r *completionResponse) { r.NHPServerPeer.PublicKeyB64 = "" }, "missing NHP peer public key"},
+		{"malformed peer key", func(r *completionResponse) { r.NHPServerPeer.PublicKeyB64 = "not-base64" }, "not standard base64"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

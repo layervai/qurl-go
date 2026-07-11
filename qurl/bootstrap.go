@@ -345,14 +345,10 @@ func BootstrapAgent(ctx context.Context, setupKey string, store AgentStateStore,
 // its class (BootstrapAgent → ErrInvalidBootstrapConfig, RegisterAgent →
 // ErrInvalidRegisterConfig).
 func validateRegisteredAgentState(state *AgentState, now time.Time, requirePeerLive bool, errKind error) error {
-	if state == nil {
-		return fmt.Errorf("%w: registered agent state is nil", errKind)
-	}
-	if strings.TrimSpace(state.AgentID) == "" {
-		return fmt.Errorf("%w: registered agent state missing agent id", errKind)
-	}
-	if state.RegisteredAt == nil {
-		return fmt.Errorf("%w: registered agent state missing registration time", errKind)
+	// A registered state's durable identity is exactly the completed-agent
+	// identity; this validator adds the peer requirement on top of it.
+	if err := validateCompletedAgentIdentity(state, errKind); err != nil {
+		return err
 	}
 	if state.NHPPeer == nil {
 		return fmt.Errorf("%w: registered agent state missing NHP peer", errKind)
@@ -362,23 +358,16 @@ func validateRegisteredAgentState(state *AgentState, now time.Time, requirePeerL
 
 // validateNHPServerPeerInfo checks an NHP peer's shape (X25519 key, host, port).
 // requireLive additionally rejects an expired peer — set it only when the peer
-// will actually be knocked (a fresh registration/completion peer, a WithNHPPeer
-// override, or the knock-only BootstrapAgent fast path). A REST-only RegisterAgent
+// will actually be knocked (a fresh registration peer, a WithNHPPeer override,
+// or the knock-only BootstrapAgent fast path). A REST-only RegisterAgent
 // Client never knocks the persisted peer, so its fast path passes requireLive=false
 // (an expired-but-unused peer must not lock out a still-valid device credential).
 // errKind is the sentinel wrapped into every failure so the caller's error class
 // flows through (ErrInvalidBootstrapConfig for bootstrap, ErrInvalidRegisterConfig
 // for registration).
 func validateNHPServerPeerInfo(peer NHPServerPeerInfo, now time.Time, requireLive bool, label string, errKind error) error {
-	if strings.TrimSpace(peer.PublicKeyB64) == "" {
-		return fmt.Errorf("%w: %s missing NHP peer public key", errKind, label)
-	}
-	peerKey, err := decodeNHPServerPublicKey(peer.PublicKeyB64)
-	if err != nil {
-		return fmt.Errorf("%w: %s NHP peer public key is not standard base64: %w", errKind, label, err)
-	}
-	if _, err := ecdh.X25519().NewPublicKey(peerKey); err != nil {
-		return fmt.Errorf("%w: %s NHP peer public key is not X25519: %w", errKind, label, err)
+	if err := validateNHPServerPublicKey(peer.PublicKeyB64, label, errKind); err != nil {
+		return err
 	}
 	if strings.TrimSpace(peer.Host) == "" {
 		return fmt.Errorf("%w: %s missing NHP peer host", errKind, label)
@@ -391,6 +380,20 @@ func validateNHPServerPeerInfo(peer NHPServerPeerInfo, now time.Time, requireLiv
 	}
 	if requireLive && peer.ExpireTime != 0 && peer.ExpireTime <= now.Unix() {
 		return fmt.Errorf("%w: %s NHP peer is expired", errKind, label)
+	}
+	return nil
+}
+
+func validateNHPServerPublicKey(encoded, label string, errKind error) error {
+	if strings.TrimSpace(encoded) == "" {
+		return fmt.Errorf("%w: %s missing NHP peer public key", errKind, label)
+	}
+	peerKey, err := decodeNHPServerPublicKey(encoded)
+	if err != nil {
+		return fmt.Errorf("%w: %s NHP peer public key is not standard base64: %w", errKind, label, err)
+	}
+	if _, err := ecdh.X25519().NewPublicKey(peerKey); err != nil {
+		return fmt.Errorf("%w: %s NHP peer public key is not X25519: %w", errKind, label, err)
 	}
 	return nil
 }

@@ -492,6 +492,11 @@ outcomes, plus request-size admission (413). A bare 404 is trusted only by the
 pre-REG account crash probe; after a REG, the same unstructured status is
 mint-ambiguous.
 
+qurl-service must produce completion 401/403 authentication failures before
+entering the atomic mint handler. The SDK treats those statuses as authoritative
+pre-mint rejections; emitting either after a credential was minted would make a
+retry look safe when it is not.
+
 Completion must also be excluded from qurl-service's global POST idempotency
 cache. Its response carries a one-time plaintext device secret: persisting or
 replaying that body would violate first-issue-only custody, and accepting an
@@ -505,12 +510,13 @@ new server error happened before the atomic mint. A new retryable/terminal 4xx
 must be added to the authoritative pre-mint taxonomy before it ships.
 
 The registration-info/RAK peer remains authoritative for all durable
-coordinates. Completion corroborates the decoded public key only; it cannot
-replace the RAK-authenticated host or port. qurl-service deployments must keep
-registration-info and completion on one routable peer deployment during
-rotation. A key mismatch fails recovery-required after a possible mint, while a
-same-key coordinate discrepancy preserves the registration-info/RAK host and
-port and should be treated as deployment skew to correct.
+coordinates and lease state. Completion corroborates the decoded public key
+only; its host, port, and expiry are ignored and cannot replace the
+RAK-authenticated values. During rotation, qurl-service deployments must keep
+registration-info and completion on the same peer key. A key mismatch fails
+recovery-required after a possible mint, while any same-key coordinate
+discrepancy preserves the registration-info/RAK values and should be treated as
+deployment skew to correct.
 
 ## Errors
 

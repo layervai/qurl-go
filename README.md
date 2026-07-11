@@ -242,10 +242,12 @@ Match errors by type, not message text:
   lifecycle operations are enabled. During peer rotation, every qurl-service pod
   serving registration-info and completion must report the same peer key; a
   deployment-skew mismatch after mint fails recovery-required rather than
-  silently replacing the RAK-authenticated peer. Registration-info and
-  completion must also expose one routable peer deployment: the SDK persists
-  the full registration-info/RAK host and port and uses completion only to
-  corroborate its decoded public key.
+  silently replacing the RAK-authenticated peer. Registration-info/RAK must
+  expose one routable peer deployment: the SDK persists that full host, port,
+  and lease and uses completion only to corroborate its decoded public key;
+  completion coordinates are ignored. Completion 401/403 responses must be
+  emitted before the atomic mint handler because the SDK classifies them as
+  authoritative pre-mint authentication failures.
 
   Completion must be excluded from qurl-service's global POST idempotency cache:
   its response reveals a one-time plaintext device secret and must never be

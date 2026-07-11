@@ -497,13 +497,6 @@ func TestRegisterAgent_PostCompletionContractFailuresRequireRecoveryWithoutRetry
 				Port:         62206,
 			}
 		}},
-		{name: "invalid peer", edit: func(service *fakeService) {
-			service.completionPeer = &NHPServerPeerInfo{
-				PublicKeyB64: service.nhp.serverPubB64(),
-				Host:         "nhp.example.test",
-				Port:         0,
-			}
-		}},
 		{name: "agent id mismatch", edit: func(service *fakeService) {
 			service.agentID = "agent-different"
 		}},
@@ -537,6 +530,35 @@ func TestRegisterAgent_PostCompletionContractFailuresRequireRecoveryWithoutRetry
 			}
 			if state.NHPPeer == nil || state.NHPPeer.PublicKeyB64 != h.nhp.serverPubB64() {
 				t.Fatalf("authenticated RAK peer was not preserved: %#v", state.NHPPeer)
+			}
+		})
+	}
+}
+
+func TestRegisterAgent_CompletionCoordinatesDoNotReplaceRAKPeer(t *testing.T) {
+	tests := []struct {
+		name string
+		peer func(string) *NHPServerPeerInfo
+	}{
+		{name: "empty coordinates", peer: func(key string) *NHPServerPeerInfo {
+			return &NHPServerPeerInfo{PublicKeyB64: key}
+		}},
+		{name: "malformed coordinates", peer: func(key string) *NHPServerPeerInfo {
+			return &NHPServerPeerInfo{PublicKeyB64: key, Host: "stale.example.test", Port: 65536, ExpireTime: time.Now().Add(-time.Hour).Unix()}
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newRegisterHarness(t)
+			h.svc.completionPeer = tc.peer(h.nhp.serverPubB64())
+			h.armDevicePubOnInfo()
+
+			if _, err := RegisterAgent(context.Background(), "lv_enroll", h.store, h.registerOpts()...); err != nil {
+				t.Fatalf("RegisterAgent with irrelevant completion coordinates: %v", err)
+			}
+			state := h.loadState(t)
+			if state.NHPPeer == nil || state.NHPPeer.Host != "nhp.example.test" || state.NHPPeer.Port != 62206 || state.NHPPeer.ExpireTime != 0 {
+				t.Fatalf("completion coordinates or lease replaced RAK peer: %#v", state.NHPPeer)
 			}
 		})
 	}

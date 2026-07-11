@@ -644,9 +644,8 @@ func (cfg *registerConfig) assertCompletionPeerMatchesRegistration(state *AgentS
 	if state == nil || state.NHPPeer == nil {
 		return fmt.Errorf("%w: authenticated registration state is missing its NHP peer", cfg.invalidConfigErr)
 	}
-	if comp == nil {
-		return fmt.Errorf("%w: completion response is missing its NHP peer, so it cannot corroborate the peer that authenticated the registration acknowledgement", cfg.invalidConfigErr)
-	}
+	// persistCompletion, the sole production caller, rejects a nil completion
+	// response before reaching this invariant check.
 	registeredKey, err := decodeNHPServerPublicKey(state.NHPPeer.PublicKeyB64)
 	if err != nil {
 		return fmt.Errorf("%w: decode authenticated registration NHP peer public key: %w", cfg.invalidConfigErr, err)
@@ -655,6 +654,8 @@ func (cfg *registerConfig) assertCompletionPeerMatchesRegistration(state *AgentS
 	if err != nil {
 		return fmt.Errorf("%w: decode completion NHP peer public key: %w", cfg.invalidConfigErr, err)
 	}
+	// Compare only the key: the RAK-authenticated coordinates remain authoritative,
+	// and same-key host/port differences are deployment skew rather than rotation.
 	if !bytes.Equal(completionKey, registeredKey) {
 		return fmt.Errorf("%w: completion response NHP peer does not match the peer that authenticated the registration acknowledgement", cfg.invalidConfigErr)
 	}

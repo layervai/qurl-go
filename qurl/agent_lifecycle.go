@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // OpenRegisteredAgent opens a Client from a completed AgentState without making
@@ -187,9 +188,12 @@ func (cfg *registerConfig) forceRegistration(ctx context.Context, key string, st
 	peer := cfg.resolvePeer(info)
 	relayURL := cfg.resolveRelayURL(info)
 
-	// Shallow copy is intentional: pointer fields may alias the loaded state, but
-	// lifecycle code only reassigns those pointers and never mutates pointees.
+	// Isolate the candidate's retained pointer fields from the loaded state. The
+	// peer is replaced immediately below, but registration time and an existing
+	// OTP marker survive until the transition decides what to persist.
 	candidate := *state
+	candidate.RegisteredAt = cloneLifecycleTime(state.RegisteredAt)
+	candidate.OTPRequestedAt = cloneLifecycleTime(state.OTPRequestedAt)
 	candidate.NHPPeer = peer
 	candidate.RelayURL = relayURL
 	candidate.KeyID = info.KeyID
@@ -216,6 +220,14 @@ func (cfg *registerConfig) forceRegistration(ctx context.Context, key string, st
 		return nil, err
 	}
 	return &candidate, nil
+}
+
+func cloneLifecycleTime(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
 }
 
 func (cfg *registerConfig) forcedRegistrationCredential(ctx context.Context, key string, store AgentStateStore, persisted, candidate *AgentState, info *registrationInfoResponse) (string, pathKind, error) {

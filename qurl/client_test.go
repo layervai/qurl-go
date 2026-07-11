@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,6 +16,40 @@ import (
 	"time"
 	"unicode/utf8"
 )
+
+func TestDoAuthorizedJSON_EarlyResponseDoesNotCorruptInFlightRequestBody(t *testing.T) {
+	var requestBody io.ReadCloser
+	httpClient := doerFunc(func(req *http.Request) (*http.Response, error) {
+		requestBody = req.Body
+		// Model an early response: a real transport may return while its write
+		// goroutine is still consuming req.Body.
+		return &http.Response{
+			StatusCode: http.StatusNoContent,
+			Body:       io.NopCloser(strings.NewReader("")),
+			Header:     make(http.Header),
+		}, nil
+	})
+	body := struct {
+		DeviceID string `json:"device_id"`
+	}{DeviceID: "agent-early-response"}
+	err := doAuthorizedJSON(context.Background(), httpClient, "https://api.example.test", func(context.Context, *http.Request) error {
+		return nil
+	}, http.MethodPost, "/v1/test", body, nil)
+	if err != nil {
+		t.Fatalf("doAuthorizedJSON: %v", err)
+	}
+	if requestBody == nil {
+		t.Fatal("HTTP client did not capture request body")
+	}
+	defer requestBody.Close()
+	raw, err := io.ReadAll(requestBody)
+	if err != nil {
+		t.Fatalf("read request body after early response: %v", err)
+	}
+	if got, want := string(raw), `{"device_id":"agent-early-response"}`; got != want {
+		t.Fatalf("request body after early response = %q, want %q", got, want)
+	}
+}
 
 func TestClient_ProtectURLThenPortal(t *testing.T) {
 	var requestCount atomic.Int32
