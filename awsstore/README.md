@@ -79,6 +79,13 @@ client, err := qurl.RegisterAgent(ctx, setupKey, store)
 > the `CreateSecret` that materializes the secret — harmless and one-time per
 > secret (first registration only).
 
+> **Concurrent first enrollment:** the store takes no cross-process lock, so two
+> *distinct* agents racing their first registration against the **same** secret is
+> last-write-wins (the create-race loser falls back to a `PutSecretValue` that
+> overwrites the winner). Use a distinct secret per agent, or serialize first
+> enrollment — the same "one setup at a time" caveat the `FileAgentState` recipe
+> notes.
+
 ### IAM (least privilege)
 
 ```json

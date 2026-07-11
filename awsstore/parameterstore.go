@@ -99,8 +99,8 @@ func (s *ParameterStore) LoadAgentState(ctx context.Context) (*qurl.AgentState, 
 // parameter, overwriting any existing value. The configured KMS key (if any) is
 // applied on every write.
 func (s *ParameterStore) SaveAgentState(ctx context.Context, state *qurl.AgentState) error {
-	// Guard order mirrors LoadAgentState exactly (context, then nil-client, then
-	// the id/state marshal guard) so a given misconfiguration yields the same
+	// Guard order matches this store's own LoadAgentState (context, then nil-client,
+	// then the id/state marshal guard) so a given misconfiguration yields the same
 	// human-facing message from both methods.
 	if err := validateContext(ctx); err != nil {
 		return err
