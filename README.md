@@ -150,6 +150,11 @@ call emails the code and returns `*qurl.OTPPendingError`; re-run with
 Parameter Store (`github.com/layervai/qurl-go/awsstore`), or any custom
 `qurl.AgentStateStore`.
 
+For a durable local file protected by KMS, HSM, or attested key release, use
+`qurl.NewSealedFileAgentState`. The SDK encrypts the complete state with a fresh
+AES-256-GCM DEK on every save; your provider adapter wraps exactly that 32-byte
+DEK and must support both wrap and unwrap for every state-mutating workflow.
+
 See [Register an agent](docs/register-an-agent.md) for **which key to use** (one
 durable `qurl:agent` key fans out across a whole fleet), both enrollment paths, a
 store-by-runtime table, the error table, and migrating from `BootstrapAgent`.
@@ -206,6 +211,12 @@ Match errors by type, not message text:
 
 ### Unreleased
 
+- **Added: sealed full-AgentState file storage** —
+  `qurl.NewSealedFileAgentState` provides an SDK-owned AES-256-GCM envelope with
+  pluggable exact-32-byte DEK wrapping, authenticated agent/provider binding,
+  strict bounded decoding, atomic `0600` persistence under a `0700` directory,
+  and mandatory cross-process setup locking shared with `FileAgentState`.
+
 - **Added: `qurl.RegisterAgent`** — a one-call, NHP-native front door that
   enrolls an agent and returns a ready-to-use `Client`. It covers both the
   pre-issued-key and email one-time-code paths and is idempotent. See
@@ -213,6 +224,12 @@ Match errors by type, not message text:
 
 #### Breaking changes
 
+- **Local AgentState directories and setup locks now fail closed.**
+  `FileAgentState` requires its immediate state directory to be exactly `0700`.
+  Registration through either SDK local-file store now requires the mandatory
+  cross-process sidecar lock to acquire and release successfully; unsupported
+  platforms or insecure lock paths return `ErrAgentSetupLock` instead of
+  continuing without serialization.
 - **Agent enrollment moved to `api.layerv.ai`.** Enrollment is now NHP-native
   and its endpoints live on the main API origin. The default `BootstrapAgent`
   origin changed from the dedicated bootstrap host to `api.layerv.ai`; callers

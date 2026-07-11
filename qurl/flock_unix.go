@@ -5,46 +5,70 @@ package qurl
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // flockRetryInterval is how often a blocked acquire re-checks the context while
-// waiting for the advisory lock. The lock is only contended when a second
+// waiting for the mandatory lock. The lock is only contended when a second
 // concurrent setup is mid-flight against the same FileAgentState, so this is a
 // short poll, not a hot loop.
 const flockRetryInterval = 25 * time.Millisecond
 
-// lockFileExclusive takes an advisory exclusive flock on lockPath (a sidecar
+// lockFileExclusive takes an exclusive flock on lockPath (a sidecar
 // file beside the agent-state file, created 0600), creating it if absent. It
 // polls with LOCK_NB so a wait honors ctx cancellation rather than blocking in
 // the syscall forever. It returns the held *os.File — closing it releases the
 // lock and is the unlock — or an error if the lockfile cannot be opened or ctx
-// is done before the lock is acquired. All failures are advisory: the caller
-// proceeds without serialization rather than turning the best-effort lock into a
-// hard dependency.
-func lockFileExclusive(ctx context.Context, lockPath string) (*os.File, error) {
-	// Best-effort: create the state directory before opening the sidecar,
+// is done before the lock is acquired.
+func lockFileExclusive(ctx context.Context, lockPath string) (setupLock, error) {
+	// Create the state directory before opening the sidecar,
 	// mirroring SaveAgentState's os.MkdirAll. On the very first registration the
 	// state dir does not exist yet, and the acquire runs BEFORE any SaveAgentState
 	// creates it; without this the OpenFile below would fail ENOENT and the lock
-	// would silently no-op, letting two concurrent first-runs each mint an
-	// identity and race the save (issue #48). The MkdirAll error is deliberately
-	// ignored — the OpenFile result still drives lock-vs-no-op, and a genuinely
-	// unwritable dir just falls back to unserialized setup.
-	_ = os.MkdirAll(filepath.Dir(lockPath), 0o700)
-	// lockPath is the caller's own agent-state path plus a fixed ".lock" suffix,
-	// not attacker-controlled input; the sidecar is created 0600 like the state
-	// file it guards. The plain open (no O_NOFOLLOW / dir-mode hardening like the
-	// state file's SaveAgentState path) is acceptable here: the sidecar is an
-	// empty 0600 file that never holds a secret, and the lock is best-effort, so a
-	// swapped or symlinked lockfile can only weaken serialization, not expose the
-	// credential.
-	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600) //nolint:gosec // G304: lockPath derives from the caller-supplied FileAgentState path
-	if err != nil {
+	// would fail ENOENT. Failure is fatal because setup must not proceed unlocked.
+	dir := filepath.Dir(lockPath)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
+	}
+	if err := validateAgentStateDir(dir, "agent setup lock", ErrAgentSetupLock, ErrInsecureAgentStatePermissions); err != nil {
+		return nil, err
+	}
+	// Open relative to a held, non-symlink directory descriptor and apply
+	// O_NOFOLLOW to the final component. This protects the actual descriptor from
+	// an Lstat/Open pathname-swap race rather than merely checking the path before
+	// an ordinary OpenFile that would still follow a replacement symlink.
+	dirFD, err := unix.Open(dir, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, fmt.Errorf("open setup lock directory: %w", err)
+	}
+	defer func() { _ = unix.Close(dirFD) }()
+	fd, err := openSetupLockAt(dirFD, filepath.Base(lockPath))
+	if err != nil {
+		return nil, fmt.Errorf("open setup lock file: %w", err)
+	}
+	f := os.NewFile(uintptr(fd), lockPath)
+	if f == nil {
+		_ = unix.Close(fd)
+		return nil, errors.New("create agent setup lock file handle")
+	}
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+		_ = f.Close()
+		return nil, errors.New("opened agent setup lock must be a regular 0600 file")
 	}
 	// Reuse a single retry timer across poll iterations rather than allocating a
 	// fresh time.After every ~25ms: when the lock is held across a full enrollment
@@ -58,12 +82,7 @@ func lockFileExclusive(ctx context.Context, lockPath string) (*os.File, error) {
 		}
 	}()
 	for {
-		// The ctx check is best-effort at loop entry: an UNCONTENDED lock is still
-		// acquired even if ctx was already canceled, since ctx is only re-checked
-		// between retries, not ahead of the first attempt. That is acceptable — the
-		// run's subsequent network calls fail on the canceled ctx anyway, and the
-		// lock releases via the returned file's Close (deferred in
-		// acquireAgentSetupLock).
+		// Check before every attempt, including the uncontended fast path.
 		if err := ctx.Err(); err != nil {
 			_ = f.Close()
 			return nil, err
@@ -74,7 +93,7 @@ func lockFileExclusive(ctx context.Context, lockPath string) (*os.File, error) {
 		}
 		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
 			// A non-contention error (e.g. the platform refuses flock on this fd):
-			// give up advisory locking rather than spin. EWOULDBLOCK and EAGAIN are
+			// fail closed rather than spin. EWOULDBLOCK and EAGAIN are
 			// the same errno on Linux/BSD today; match both via errors.Is so a future
 			// platform split keeps the contention path intact.
 			_ = f.Close()
@@ -91,5 +110,31 @@ func lockFileExclusive(ctx context.Context, lockPath string) (*os.File, error) {
 			return nil, ctx.Err()
 		case <-retry.C:
 		}
+	}
+}
+
+func openSetupLockAt(dirFD int, name string) (int, error) {
+	for {
+		// Existing-file path: O_NOFOLLOW binds the check to the descriptor actually
+		// opened, so a symlink swap fails with ELOOP.
+		fd, err := unix.Openat(dirFD, name, unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+		if err == nil {
+			return fd, nil
+		}
+		if !errors.Is(err, unix.ENOENT) {
+			return -1, err
+		}
+
+		// Creation path: O_CREAT|O_EXCL itself refuses an existing symlink and any
+		// competing create. Darwin does not reliably support O_NOFOLLOW combined
+		// with O_CREAT, so exclusivity supplies the no-follow guarantee here.
+		fd, err = unix.Openat(dirFD, name, unix.O_CREAT|unix.O_EXCL|unix.O_RDWR|unix.O_CLOEXEC, 0o600)
+		if err == nil {
+			return fd, nil
+		}
+		if errors.Is(err, unix.EEXIST) {
+			continue // another process created it; reopen through O_NOFOLLOW
+		}
+		return -1, err
 	}
 }

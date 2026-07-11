@@ -281,7 +281,7 @@ func TestFileAgentState_RejectsGroupReadableState(t *testing.T) {
 }
 
 func TestFileAgentState_RejectsOversizedState(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "agent-state.json")
+	path := filepath.Join(secureAgentStateTestDir(t), "agent-state.json")
 	if err := os.WriteFile(path, []byte(strings.Repeat("x", maxPrivateStateBytes+1)), 0o600); err != nil {
 		t.Fatalf("write oversized state: %v", err)
 	}
@@ -336,6 +336,23 @@ func TestFileAgentState_SaveRejectsGroupWritableStateDir(t *testing.T) {
 	}
 }
 
+func TestFileAgentState_RequiresExact0700StateDir(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	path := filepath.Join(dir, "agent-state.json")
+	state, err := newAgentState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.AgentID = "agent-mode-test"
+	if err := FileAgentState(path).SaveAgentState(context.Background(), state); !errors.Is(err, ErrInsecureAgentStatePermissions) {
+		t.Fatalf("save under 0750 dir = %v, want ErrInsecureAgentStatePermissions", err)
+	}
+}
+
 func TestFileAgentState_RespectsCanceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -381,7 +398,7 @@ func TestFileAgentState_V2FieldsRoundTripAndLegacyLoads(t *testing.T) {
 	otpAt := registeredAt.Add(-time.Minute)
 
 	// v2 round trip.
-	v2Path := filepath.Join(t.TempDir(), "v2.json")
+	v2Path := filepath.Join(secureAgentStateTestDir(t), "v2.json")
 	v2Store := FileAgentState(v2Path)
 	base, err := newAgentState()
 	if err != nil {
@@ -410,7 +427,7 @@ func TestFileAgentState_V2FieldsRoundTripAndLegacyLoads(t *testing.T) {
 	}
 
 	// Legacy (pre-v2) file: only the original fields, written by hand.
-	legacyPath := filepath.Join(t.TempDir(), "legacy.json")
+	legacyPath := filepath.Join(secureAgentStateTestDir(t), "legacy.json")
 	legacy := []byte(`{"agent_id":"agent-legacy","private_key_b64":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","public_key_b64":"","registered_at":"2026-01-01T00:00:00Z","nhp_server_peer":{"public_key_b64":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","host":"nhp.layerv.ai","port":62206,"expire_time":0}}`)
 	if err := os.WriteFile(legacyPath, legacy, 0o600); err != nil {
 		t.Fatalf("write legacy state: %v", err)
@@ -425,6 +442,15 @@ func TestFileAgentState_V2FieldsRoundTripAndLegacyLoads(t *testing.T) {
 	if err := validateRegisteredAgentState(loadedLegacy, time.Now(), true, ErrInvalidBootstrapConfig); err != nil {
 		t.Fatalf("legacy registered state should validate: %v", err)
 	}
+}
+
+func secureAgentStateTestDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return dir
 }
 
 // TestValidateRegisteredAgentState_PeerExpiryGatedOnRequirePeerLive verifies the

@@ -171,6 +171,7 @@ your code is identical whichever you choose:
 | Runtime | Store |
 | --- | --- |
 | Single host / VM / container with a durable disk | `qurl.FileAgentState(path)` |
+| Local disk with a KMS/HSM/attested release boundary | `qurl.NewSealedFileAgentState(path, providerID, wrapper)` |
 | Shared POSIX / EFS across tasks | `qurl.FileAgentState(mountPath)` — **not** the AWS stores |
 | Ephemeral / autoscaling / Lambda / Fargate (no durable disk) | `awsstore.NewSecretsManagerStore(...)` |
 | Cost-sensitive AWS fleets | `awsstore.NewParameterStore(...)` (KMS SecureString) |
@@ -188,7 +189,45 @@ store := qurl.FileAgentState("/var/lib/layerv/qurl/agent-state.json")
 ```
 
 On a shared or multi-tenant host where filesystem permissions are not a
-sufficient boundary, back the state with a secret manager instead.
+sufficient boundary, use the sealed file store below or back the state with a
+secret manager.
+
+### Sealed file storage (`NewSealedFileAgentState`)
+
+`NewSealedFileAgentState` encrypts the complete `AgentState`—including the
+device API credential and X25519 private key—under an SDK-owned AES-256-GCM
+envelope. Every save generates a fresh 32-byte data-encryption key (DEK) and
+nonce. Your `AgentStateKeyWrapper` integrates the chosen KMS, HSM, or attested
+key-release provider and sees only that exact 32-byte DEK, never AgentState JSON.
+
+```go
+store, err := qurl.NewSealedFileAgentState(
+	"/var/lib/layerv/qurl/agent_state.sealed.json",
+	"aws-kms",
+	myKMSWrapper,
+)
+if err != nil {
+	return err
+}
+client, err := qurl.RegisterAgent(ctx, enrollmentKey, store)
+```
+
+The wrapper must authenticate every field in `AgentStateKeyBinding` as its KMS
+encryption context (or equivalent): purpose, envelope version, provider id, and
+agent id. It owns the version and optional JSON metadata in
+`WrappedAgentStateKey`. Return `qurl.ErrInvalidWrappedAgentStateKey` when a
+persisted wrapper record fails authentication; ordinary KMS/network failures
+remain operational `qurl.ErrAgentStateKeyWrapper` errors rather than being
+misreported as corrupt state.
+
+Every successful state mutation performs `WrapKey` and a verification
+`UnwrapKey` before the atomic commit. The runtime identity therefore needs both
+wrap/encrypt and unwrap/decrypt permission during initial enrollment and any
+later workflow that mutates state. Decrypt-only permission is insufficient.
+
+Both SDK local-file stores require an immediate `0700` state directory, write a
+`0600` state file atomically, and take the same mandatory setup lock. Lock
+failures stop registration; custom/network stores remain caller-serialized.
 
 ### AWS storage (`awsstore`)
 
@@ -261,10 +300,10 @@ the shared mount and pulls in no AWS SDK. Encrypt the file system at rest and
 restrict the access point's POSIX uid/gid to the agent. See the
 [EFS recipe](../awsstore/README.md#efs-recipe-shared-storage--no-aws-store-needed).
 
-Run enrollment from **one process at a time** for a given store, whichever
-backing you choose. Each state write is atomic, but the SDK does not lock across
-concurrent callers sharing a store — and on the account path each concurrent
-fresh run dispatches its own OTP email.
+For `FileAgentState` and `NewSealedFileAgentState`, the SDK serializes concurrent
+setup across processes with a mandatory sidecar lock. Run enrollment from **one
+process at a time** for custom/network stores; the SDK cannot derive a shared
+lock for them, and concurrent account-path setup can dispatch multiple OTPs.
 
 ## Errors
 
@@ -288,6 +327,8 @@ Every message names the next concrete step.
 | `qurl.ErrRegistrationDisabled` | Agent registration is disabled for the account. | Contact the account owner to enable it. |
 | `qurl.ErrInvalidRegisterConfig` | Inputs or options were invalid before any network call (empty key, nil store, conflicting options). | Fix the call. |
 | `qurl.ErrInvalidAgentState` | Persisted state exists but is corrupt/unreadable — surfaced wrapped in the front-door config error. (`ErrAgentStateNotFound` is **not** caller-facing: it is the store-contract sentinel a custom `AgentStateStore` returns when empty, which the engine converts into a fresh enrollment.) | Clear or replace the corrupt state. |
+| `qurl.ErrAgentStateKeyWrapper` | A sealed store's KMS/HSM wrapper is unavailable or violated its 32-byte DEK contract. | Restore provider access/configuration; do not delete otherwise valid state for an operational outage. |
+| `qurl.ErrAgentSetupLock` | The mandatory local-file setup lock could not be acquired or released. | Fix state-directory/sidecar permissions or platform support; do not run setup unlocked. |
 | `*qurl.RegistrationDenyError` | An authenticated enrollment denial carrying a wire code newer than this SDK. | Read `ErrCode` / `ErrMsg`; `errors.Is` still matches the typed sentinel for known codes. |
 
 A worked pattern:

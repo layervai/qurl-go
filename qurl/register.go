@@ -45,12 +45,12 @@ import (
 // through the NHP Noise handshake, so the same keypair is reused across resumes.
 //
 // Each state write is atomic. For a FileAgentState the SDK also serializes
-// concurrent first-registration setup across processes with a best-effort
-// advisory lock (flock on a sidecar beside the state file): the racer that loses
+// concurrent first-registration setup across processes with a mandatory file
+// lock (flock on a sidecar beside the state file): the racer that loses
 // blocks until the winner enrolls, then loads the now-registered state via the
-// fast path and returns a Client without re-sending a one-time code. The lock is
-// best-effort — on any failure (unsupported platform, unopenable lockfile,
-// canceled ctx) setup proceeds unserialized rather than failing.
+// fast path and returns a Client without re-sending a one-time code. Lock
+// acquisition/release failures fail closed rather than risking competing
+// identities. This applies to FileAgentState and SealedFileAgentStateStore.
 //
 // A custom or networked AgentStateStore cannot be locked for you, so concurrent
 // callers sharing one are not serialized. On the account (email-OTP) path each
@@ -140,17 +140,29 @@ const otpResendCooldown = 60 * time.Second
 
 // run drives the registration state machine to a *Client. State is derived from
 // AgentState fields (no enum): absent → keypair-persisted → otp_pending → registered.
-func (cfg *registerConfig) run(ctx context.Context, key string, store AgentStateStore) (*AgentState, error) {
-	// Advisory, best-effort serialization of concurrent first-registration setup
+func (cfg *registerConfig) run(ctx context.Context, key string, store AgentStateStore) (result *AgentState, resultErr error) {
+	// Mandatory serialization of concurrent first-registration setup
 	// against a shared single-host FileAgentState (issue #48): two fresh-store runs
 	// would otherwise each mint a device identity and race the atomic save, leaving
 	// two enrolled identities where one silently wins. Holding this across the whole
 	// run means a second racer blocks until the first enrolls, then loads the
-	// now-registered state via the fast path below. It is a no-op for non-file
-	// stores and on any lock failure — never a hard dependency (see
-	// acquireAgentSetupLock).
-	releaseSetupLock := acquireAgentSetupLock(ctx, store)
-	defer releaseSetupLock()
+	// now-registered state via the fast path below. A lock failure on an SDK local
+	// file store fails closed; custom/network stores remain caller-serialized.
+	releaseSetupLock, err := acquireAgentSetupLock(ctx, store)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err := releaseSetupLock(); err != nil {
+			lockErr := fmt.Errorf("%w: release setup lock: %w", ErrAgentSetupLock, err)
+			result = nil
+			if resultErr == nil {
+				resultErr = lockErr
+			} else {
+				resultErr = errors.Join(resultErr, lockErr)
+			}
+		}
+	}()
 
 	// 1. Fast path: a registered state short-circuits with no network. For
 	//    RegisterAgent (requireDeviceKey) a registered state missing the device
@@ -896,7 +908,7 @@ func WithOTP(code string) RegisterOption {
 // ErrOTPIncorrect. On a resume (the code was requested on an earlier call) the
 // provider runs only if a crash-recovery completion probe did not already finish.
 //
-// For a FileAgentState the enclosing RegisterAgent call holds the best-effort
+// For an SDK local-file store the enclosing RegisterAgent call holds the mandatory
 // cross-process setup lock for the whole provider call, so a provider that blocks
 // for seconds/minutes keeps a second process sharing the same store blocked for
 // that window (the loser then fast-paths once this call enrolls).

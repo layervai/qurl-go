@@ -440,6 +440,9 @@ func newRegisterHarness(t *testing.T) *registerHarness {
 
 	svc := newFakeService(t, nhp)
 	statePath := filepath.Join(t.TempDir(), "agent-state.json")
+	if err := os.Chmod(filepath.Dir(statePath), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	h := &registerHarness{
 		svc:       svc,
 		nhp:       nhp,
@@ -656,16 +659,16 @@ func TestRegisterAgent_FastPath_NoNetworkOnceRegistered(t *testing.T) {
 }
 
 // TestRegisterAgent_ConcurrentFreshStoreSetupSerializes exercises the #48
-// advisory flock end to end: two RegisterAgent calls race a FRESH shared
+// mandatory flock end to end: two RegisterAgent calls race a FRESH shared
 // FileAgentState. Without the lock each would generate its own device identity
 // and race the atomic save, ending with two enrolled identities where one
-// silently wins. With the advisory lock the two setups serialize — the second
+// silently wins. With the mandatory lock the two setups serialize — the second
 // blocks until the first enrolls, then loads the registered state via the fast
 // path — so both callers converge on ONE identity. Run under -race, the two
 // goroutines share the store, the file, and the fake servers.
 func TestRegisterAgent_ConcurrentFreshStoreSetupSerializes(t *testing.T) {
 	if runtime.GOOS == "windows" || runtime.GOOS == "plan9" || runtime.GOOS == "js" {
-		t.Skipf("advisory flock is a no-op on %s; concurrent fresh-store setup is not serialized there", runtime.GOOS)
+		t.Skipf("flock is unsupported on %s; local-file setup fails closed there", runtime.GOOS)
 	}
 	h := newRegisterHarness(t)
 	h.svc.keyKind = keyKindBootstrap
@@ -706,7 +709,7 @@ func TestRegisterAgent_ConcurrentFreshStoreSetupSerializes(t *testing.T) {
 		t.Fatal("state not marked registered after concurrent setup")
 	}
 	if got := h.nhp.regCount(); got != 1 {
-		t.Fatalf("REG count = %d, want 1 (the advisory lock should serialize the two setups to a single enrollment)", got)
+		t.Fatalf("REG count = %d, want 1 (the mandatory lock should serialize the two setups to a single enrollment)", got)
 	}
 	if h.svc.completionCalls.Load() != 1 {
 		t.Fatalf("completion calls = %d, want 1", h.svc.completionCalls.Load())
@@ -717,15 +720,15 @@ func TestRegisterAgent_ConcurrentFreshStoreSetupSerializes(t *testing.T) {
 // H1 regression fence: it points the shared FileAgentState at a path under a
 // NESTED subdirectory that does NOT exist yet, so the state dir is absent when
 // the first racer acquires the setup lock — the exact case the plain concurrency
-// test above misses because t.TempDir() pre-creates its parent. The advisory
+// test above misses because t.TempDir() pre-creates its parent. The mandatory
 // lock opens a sidecar beside the state file, which requires the directory; if
 // the acquire did not create it first (issue #48 H1) the OpenFile would ENOENT,
-// the lock would silently no-op, and both racers would mint an identity and REG.
-// Asserting exactly one REG proves the acquire's best-effort os.MkdirAll engages
+// setup would fail rather than minting an identity. Asserting exactly one REG
+// proves os.MkdirAll engages
 // the lock before the directory exists.
 func TestRegisterAgent_ConcurrentFreshStoreSetupSerializes_NestedMissingDir(t *testing.T) {
 	if runtime.GOOS == "windows" || runtime.GOOS == "plan9" || runtime.GOOS == "js" {
-		t.Skipf("advisory flock is a no-op on %s; concurrent fresh-store setup is not serialized there", runtime.GOOS)
+		t.Skipf("flock is unsupported on %s; local-file setup fails closed there", runtime.GOOS)
 	}
 	h := newRegisterHarness(t)
 	// Re-point the store at a path whose parent directories do not exist yet, so
@@ -768,9 +771,9 @@ func TestRegisterAgent_ConcurrentFreshStoreSetupSerializes_NestedMissingDir(t *t
 	}
 	// Exactly one REG: the lock engaged despite the absent dir, serializing the
 	// two setups so the second short-circuits on the fast path. Two REGs would mean
-	// the acquire ENOENT-ed and the lock silently no-oped (the H1 bug).
+	// the acquire failed to lock before setup.
 	if got := h.nhp.regCount(); got != 1 {
-		t.Fatalf("REG count = %d, want 1 (the advisory lock must engage before the state dir exists)", got)
+		t.Fatalf("REG count = %d, want 1 (the mandatory lock must engage before the state dir exists)", got)
 	}
 	if h.svc.completionCalls.Load() != 1 {
 		t.Fatalf("completion calls = %d, want 1", h.svc.completionCalls.Load())
@@ -1751,7 +1754,7 @@ func TestLoadPath_CorruptKeypairMatchesFrontDoorClass(t *testing.T) {
 func TestLoadPath_CorruptStateFileMatchesBothClasses(t *testing.T) {
 	newCorruptFileStore := func(t *testing.T) AgentStateStore {
 		t.Helper()
-		path := filepath.Join(t.TempDir(), "agent-state.json")
+		path := filepath.Join(secureAgentStateTestDir(t), "agent-state.json")
 		if err := os.WriteFile(path, []byte("{ this is not valid json"), 0o600); err != nil {
 			t.Fatalf("write corrupt state: %v", err)
 		}
@@ -1781,7 +1784,7 @@ func TestLoadPath_CorruptStateFileMatchesBothClasses(t *testing.T) {
 func TestLoadPath_BadPermsFileMatchesFrontDoorAndPermSentinel(t *testing.T) {
 	newBadPermsStore := func(t *testing.T) AgentStateStore {
 		t.Helper()
-		path := filepath.Join(t.TempDir(), "agent-state.json")
+		path := filepath.Join(secureAgentStateTestDir(t), "agent-state.json")
 		raw := []byte(`{"private_key_b64":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","public_key_b64":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb="}`)
 		if err := os.WriteFile(path, raw, 0o644); err != nil {
 			t.Fatalf("write state: %v", err)
