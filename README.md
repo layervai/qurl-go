@@ -236,7 +236,9 @@ Match errors by type, not message text:
   looser directory also fails its read-only fast-path load until the mode is
   corrected.
   Registration through either SDK local-file store now requires the mandatory
-  cross-process sidecar lock to acquire and release successfully; unsupported
+  cross-process sidecar lock to acquire and release successfully. The underlying
+  `flock` is OS-advisory; "mandatory" means cooperating SDK setup refuses to run
+  without it, not that the kernel blocks non-cooperating writers. Unsupported
   platforms or insecure lock paths return `ErrAgentSetupLock` instead of
   continuing without serialization. On Windows, Plan 9, and js/wasm the SDK has
   no local-file lock implementation, so fresh or incomplete `RegisterAgent` and

@@ -229,7 +229,11 @@ Every successful state mutation performs `WrapKey` and a verification
 `UnwrapKey` before the atomic commit—two provider operations per save. This is a
 deliberate fail-before-commit check. The runtime identity therefore needs both
 wrap/encrypt and unwrap/decrypt permission during initial enrollment and any
-later workflow that mutates state. Decrypt-only permission is insufficient.
+later workflow that mutates state. Decrypt-only permission is insufficient. A
+fresh pre-issued-key enrollment persists three transitions (typically six
+provider operations); an account enrollment that requests and completes OTP
+persists four (typically eight). Restarts, retries, or OTP re-sends can add more,
+so size KMS/HSM quotas and latency budgets for the full workflow, not one save.
 
 The wrapper binding authenticates the agent id stored in the envelope; the
 store does not accept a separately configured expected agent id. A principal
@@ -252,6 +256,9 @@ not a guarantee that no plaintext copies remain in process memory.
 Both SDK local-file stores require an immediate `0700` state directory, write a
 `0600` state file atomically, and take the same mandatory setup lock. Lock
 failures stop registration; custom/network stores remain caller-serialized.
+"Mandatory" means the SDK refuses to proceed unless it acquires the OS advisory
+`flock`; it does not turn advisory locking into kernel-enforced exclusion for a
+non-cooperating writer.
 The exact directory mode is enforced on load as well as save, including a
 completed registration's read-only fast path; correct a pre-existing `0750` or
 `0755` directory to `0700` before upgrading.

@@ -338,6 +338,12 @@ func (s *SealedFileAgentStateStore) SaveAgentState(ctx context.Context, state *A
 	if len(raw) > maxSealedAgentStateEnvelope {
 		return fmt.Errorf("%w: sealed agent state envelope exceeds %d bytes", ErrInvalidBootstrapConfig, maxSealedAgentStateEnvelope)
 	}
+	if err := validateSealedAgentStateForCommit(raw, aad); err != nil {
+		// Keep wrapper-produced invalid metadata operationally classified. The
+		// inner decoder may use ErrInvalidAgentState, but no corrupt durable state
+		// exists yet and callers must not be told to delete anything.
+		return fmt.Errorf("%w: wrapper produced state the SDK cannot reopen: %s", ErrAgentStateKeyWrapper, err.Error())
+	}
 	return writePrivateStateFileAtomic(ctx, s.path, "sealed agent state", ".qurl-sealed-agent-state-*", raw, s.fileOps)
 }
 
@@ -388,6 +394,26 @@ type sealedAgentStateAAD struct {
 	ProviderID      string               `json:"provider_id"`
 	AgentID         string               `json:"agent_id"`
 	WrappedKey      WrappedAgentStateKey `json:"wrapped_key"`
+}
+
+// validateSealedAgentStateForCommit proves the exact MarshalIndent bytes pass
+// the same structural decoder used by LoadAgentState and reproduce the AAD used
+// to seal the ciphertext. This prevents provider-owned metadata that is valid
+// JSON but contains duplicate keys or excessive envelope-relative nesting from
+// committing an envelope the SDK would reject on its next load.
+func validateSealedAgentStateForCommit(raw, sealedAAD []byte) error {
+	var persisted sealedAgentStateEnvelope
+	if err := decodeSealedAgentStateEnvelope(raw, &persisted); err != nil {
+		return err
+	}
+	reopenedAAD, err := persisted.aad()
+	if err != nil {
+		return fmt.Errorf("recompute persisted AAD: %w", err)
+	}
+	if !bytes.Equal(sealedAAD, reopenedAAD) {
+		return errors.New("persisted envelope AAD does not match sealed AAD")
+	}
+	return nil
 }
 
 func decodeSealedAgentStateEnvelope(raw []byte, envelope *sealedAgentStateEnvelope) error {

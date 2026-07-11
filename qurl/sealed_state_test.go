@@ -304,6 +304,67 @@ func TestSealedFileAgentState_MetadataHTMLEscapingRoundTrips(t *testing.T) {
 	})
 }
 
+func nestedMetadata(t *testing.T, layers int) json.RawMessage {
+	t.Helper()
+	var value any = "leaf"
+	for range layers {
+		value = []any{value}
+	}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+func TestSealedFileAgentState_RejectsUnreopenableWrapperMetadataBeforeCommit(t *testing.T) {
+	tests := []struct {
+		name     string
+		metadata json.RawMessage
+	}{
+		{"duplicate keys", json.RawMessage(`{"key_id":"do-not-leak-a","key_id":"do-not-leak-b"}`)},
+		{"envelope-relative depth overflow", nestedMetadata(t, maxSealedEnvelopeJSONDepth-1)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			wrapper := &testAgentStateKeyWrapper{wrappedMetadata: tt.metadata, ignoreMetadata: true}
+			store := testSealedStore(t, wrapper)
+			err := store.SaveAgentState(context.Background(), testAgentState(t))
+			if !errors.Is(err, ErrAgentStateKeyWrapper) {
+				t.Fatalf("SaveAgentState = %v, want ErrAgentStateKeyWrapper", err)
+			}
+			if errors.Is(err, ErrInvalidAgentState) {
+				t.Fatalf("SaveAgentState = %v, must not classify uncommitted wrapper output as corrupt durable state", err)
+			}
+			if strings.Contains(err.Error(), "do-not-leak") {
+				t.Fatalf("SaveAgentState leaked wrapper metadata: %v", err)
+			}
+			if _, statErr := os.Stat(store.path); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("unreopenable metadata committed state: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestSealedFileAgentState_MaximumValidMetadataDepthRoundTrips(t *testing.T) {
+	// Metadata begins two levels below the envelope root (wrapped_key.metadata),
+	// so this many array layers leaves the scalar leaf exactly at the limit.
+	metadata := nestedMetadata(t, maxSealedEnvelopeJSONDepth-2)
+	wrapper := &testAgentStateKeyWrapper{wrappedMetadata: metadata, ignoreMetadata: true}
+	store := testSealedStore(t, wrapper)
+	state := testAgentState(t)
+	if err := store.SaveAgentState(context.Background(), state); err != nil {
+		t.Fatalf("SaveAgentState at depth boundary: %v", err)
+	}
+	loaded, err := store.LoadAgentState(context.Background())
+	if err != nil {
+		t.Fatalf("LoadAgentState at depth boundary: %v", err)
+	}
+	if !reflect.DeepEqual(loaded, state) {
+		t.Fatalf("round trip = %#v, want %#v", loaded, state)
+	}
+}
+
 func TestCanonicalizeRawJSON_RejectsInvalidInput(t *testing.T) {
 	if _, err := canonicalizeRawJSON(json.RawMessage(`{"key_id":`)); err == nil {
 		t.Fatal("canonicalizeRawJSON invalid metadata: want error")
