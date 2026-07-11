@@ -738,6 +738,23 @@ func TestClient_Validation(t *testing.T) {
 	if _, err := NewClient(BearerToken("lv_test"), WithBaseURL("https://user:pass@api.example.com")); !errors.Is(err, ErrInvalidClientConfig) {
 		t.Fatalf("base URL with userinfo: want ErrInvalidClientConfig, got %v", err)
 	}
+	for _, rawURL := range []string{
+		"https://api.example.com/prefix?route=wrong",
+		"https://api.example.com/prefix?",
+		"https://api.example.com/prefix#wrong",
+		"https://api.example.com/prefix#",
+	} {
+		if _, err := NewClient(BearerToken("lv_test"), WithBaseURL(rawURL)); !errors.Is(err, ErrInvalidClientConfig) {
+			t.Fatalf("base URL %q: want ErrInvalidClientConfig, got %v", rawURL, err)
+		}
+	}
+	prefixed, err := NewClient(BearerToken("lv_test"), WithBaseURL("https://api.example.com/custom/prefix/"))
+	if err != nil {
+		t.Fatalf("base URL path prefix: %v", err)
+	}
+	if prefixed.baseURL != "https://api.example.com/custom/prefix" {
+		t.Fatalf("base URL path prefix = %q", prefixed.baseURL)
+	}
 	if _, err := NewClient(BearerToken("lv_test"), WithIssuerStatePath(filepath.Join(t.TempDir(), "issuer-state.json"))); !errors.Is(err, ErrInvalidClientConfig) {
 		t.Fatalf("issuer state path on NewClient: want ErrInvalidClientConfig, got %v", err)
 	}

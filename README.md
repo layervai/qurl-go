@@ -258,6 +258,18 @@ Match errors by type, not message text:
 
 #### Breaking changes
 
+- **`WithNHPPeer` can no longer be replaced by completion.** The override is the
+  peer authenticated by REG/RAK and is preserved in durable state. Completion
+  must report the same decoded public key; a differing key now fails
+  recovery-required after a credential may have been minted. Custom/test
+  deployments using a differing override must align their completion response
+  before upgrading.
+
+- **HTTP transport errors may carry an internal outcome wrapper.** Resource and
+  registration callers should use `errors.Is`/`errors.As` to inspect underlying
+  transport and context errors rather than direct concrete type assertions. The
+  wrapper lets mutation paths distinguish an outcome that may have committed.
+
 - **`ErrDeviceCredentialMissing` now also matches recovery ambiguity.** Both
   `CredentialPersistenceError` and `CredentialRecoveryRequiredError` preserve
   compatibility by matching that sentinel as well as

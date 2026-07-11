@@ -104,7 +104,10 @@ agents at one `store` — that is a single shared identity, not a fleet.
 ## Two enrollment paths
 
 `RegisterAgent` picks the enrollment path automatically from the kind of key you
-pass. You call the same function either way.
+pass. You call the same function either way. Pass the credential byte-exact:
+surrounding whitespace and control characters are rejected before store or
+network I/O because HTTPS authorization and the NHP REG/OTP payload must use the
+same bytes.
 
 ### Pre-issued (bootstrap) key — one call, headless
 
@@ -497,11 +500,11 @@ Every message names the next concrete step.
 | `qurl.ErrNoAccountEmail` | Account key has no email on file for the code. | Add an email to the account, or use a pre-issued key. |
 | `*qurl.RegistrationKeyKindDisallowedError` (unwraps `ErrRegistrationKeyKindDisallowed`) | Registration-info returned a valid key kind rejected by caller policy. No OTP/REG side effect occurred. | Supply an allowed enrollment key or deliberately widen `WithAllowedRegistrationKeyKinds`. |
 | `*qurl.CredentialPersistenceError` (unwraps `ErrCredentialRecoveryRequired` and `ErrDeviceCredentialMissing`) | Completion may have minted a key, but transport/5xx/response validation or the final state save left no provably durable credential. | Revoke `agent:<DeviceID>`, then call `RecoverAgentCredential` with the same store. Never loop ordinary registration. |
-| `*qurl.CredentialRecoveryRequiredError` (unwraps `ErrCredentialRecoveryRequired` and `ErrDeviceCredentialMissing`) | The device key was already issued or completed state lacks its local credential. | Revoke `agent:<DeviceID>`, then call `RecoverAgentCredential` with the same store and enrollment key. |
+| `*qurl.CredentialRecoveryRequiredError` (unwraps `ErrCredentialRecoveryRequired` and `ErrDeviceCredentialMissing`) | The device key was already issued, is absent locally, or the persisted value is malformed/unsafe for an Authorization header. | Revoke `agent:<DeviceID>`, then call `RecoverAgentCredential` with the same store and enrollment key. Do not trim or repair a minted credential in place. |
 | `qurl.ErrRegistrationInvalidInput` | The service rejected a registration input as malformed (e.g. a bad device id). | Fix the input (use a valid `WithDeviceID`) and re-run. |
 | `qurl.ErrRegistrationDisabled` | Agent registration is disabled for the account. | Contact the account owner to enable it. |
 | `qurl.ErrInvalidRegisterConfig` | Inputs or options were invalid before any network call (empty key, nil store, conflicting options). | Fix the call. |
-| `qurl.ErrInvalidAgentState` | Persisted state exists but is corrupt/unreadable — surfaced wrapped in the front-door config error. (`ErrAgentStateNotFound` is **not** caller-facing: it is the store-contract sentinel a custom `AgentStateStore` returns when empty, which the engine converts into a fresh enrollment.) | Clear or replace the corrupt state. |
+| `qurl.ErrInvalidAgentState` | Persisted state exists but is corrupt/unreadable — surfaced wrapped in the front-door config error. (`ErrAgentStateNotFound` is **not** caller-facing: it is the store-contract sentinel a custom `AgentStateStore` returns when empty, which the engine converts into a fresh enrollment.) | Restore a known-good backup. If recovery is impossible, use an owner credential to revoke `agent:<known-agent-id>` before clearing and re-enrolling. If the id is unreadable, inventory and revoke the account's affected agent keys first; never clear state and leave an orphan credential active. |
 | `qurl.ErrAgentStateKeyWrapper` | A sealed store's KMS/HSM wrapper is unavailable or violated its 32-byte DEK contract. | Restore provider access/configuration; do not delete otherwise valid state for an operational outage. |
 | `qurl.ErrAgentSetupLock` | The mandatory local-file setup lock could not be acquired or released. A release failure may follow a successful durable mutation. | Fix state-directory/sidecar permissions or platform support; do not run setup unlocked. On release failure, load first or call `OpenRegisteredAgent`; never blindly retry credential recovery. |
 | `*qurl.RegistrationDenyError` | An authenticated enrollment denial carrying a wire code newer than this SDK. | Read `ErrCode` / `ErrMsg`; `errors.Is` still matches the typed sentinel for known codes. |

@@ -147,7 +147,7 @@ func TestRegistrationInfoResponse_Validate(t *testing.T) {
 		KeyKind:       keyKindBootstrap,
 		KeyID:         "key_x",
 		NHPServerPeer: goodPeer,
-		Relay:         registrationRelay{BaseURL: "https://relay.example.test", ServerID: "abcdefghijk"},
+		Relay:         registrationRelay{BaseURL: "https://relay.example.test/custom/prefix", ServerID: "abcdefghijk"},
 	}
 	if err := base.validate(time.Now(), ErrInvalidRegisterConfig); err != nil {
 		t.Fatalf("valid response rejected: %v", err)
@@ -162,6 +162,8 @@ func TestRegistrationInfoResponse_Validate(t *testing.T) {
 		{"missing key id", func(r *registrationInfoResponse) { r.KeyID = "" }, "missing key_id"},
 		{"missing relay base", func(r *registrationInfoResponse) { r.Relay.BaseURL = "" }, "missing relay base_url"},
 		{"non-https relay base", func(r *registrationInfoResponse) { r.Relay.BaseURL = "ftp://x" }, "must use http"},
+		{"relay base query", func(r *registrationInfoResponse) { r.Relay.BaseURL = "https://relay.example.test/prefix?route=wrong" }, "must not include a query"},
+		{"relay base fragment", func(r *registrationInfoResponse) { r.Relay.BaseURL = "https://relay.example.test/prefix#wrong" }, "must not include a fragment"},
 		{"missing server id", func(r *registrationInfoResponse) { r.Relay.ServerID = "" }, "missing relay server_id"},
 		{"bad peer key", func(r *registrationInfoResponse) { r.NHPServerPeer.PublicKeyB64 = "not-base64" }, "not standard base64"},
 	}
@@ -212,6 +214,8 @@ func TestCompletionResponse_Validate(t *testing.T) {
 		{"missing agent id", func(r *completionResponse) { r.AgentID = "" }, "missing agent_id"},
 		{"missing registered_at", func(r *completionResponse) { r.RegisteredAt = nil }, "missing registered_at"},
 		{"missing device key", func(r *completionResponse) { r.DeviceAPIKey = "" }, "missing device_api_key"},
+		{"device key surrounding whitespace", func(r *completionResponse) { r.DeviceAPIKey = " lv_device_secret " }, "surrounding whitespace"},
+		{"device key control", func(r *completionResponse) { r.DeviceAPIKey = "lv_device\nsecret" }, "invalid header characters"},
 		{"bad peer", func(r *completionResponse) { r.NHPServerPeer.Port = 0 }, "missing NHP peer port"},
 	}
 	for _, tt := range tests {

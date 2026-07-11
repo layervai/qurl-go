@@ -1550,6 +1550,11 @@ func TestRegisterAgent_Validation(t *testing.T) {
 	if _, err := RegisterAgent(context.Background(), "", store); !errors.Is(err, ErrInvalidRegisterConfig) {
 		t.Fatalf("empty key: want ErrInvalidRegisterConfig, got %v", err)
 	}
+	for _, key := range []string{" lv_key", "lv_key ", "lv_key\n"} {
+		if _, err := RegisterAgent(context.Background(), key, store); !errors.Is(err, ErrInvalidRegisterConfig) {
+			t.Fatalf("non-exact key %q: want ErrInvalidRegisterConfig, got %v", key, err)
+		}
+	}
 	if _, err := RegisterAgent(context.Background(), "lv_key", nil); !errors.Is(err, ErrInvalidRegisterConfig) {
 		t.Fatalf("nil store: want ErrInvalidRegisterConfig, got %v", err)
 	}
@@ -1577,6 +1582,12 @@ func TestRegisterAgent_OptionValidation(t *testing.T) {
 	}{
 		{"relay URL non-https scheme", WithRelayURL("ftp://relay.example.test")},
 		{"relay URL with userinfo", WithRelayURL("https://user:pass@relay.example.test")},
+		{"relay URL with query", WithRelayURL("https://relay.example.test/prefix?route=wrong")},
+		{"relay URL with fragment", WithRelayURL("https://relay.example.test/prefix#wrong")},
+		{"register base URL with query", WithRegisterBaseURL("https://api.example.test/prefix?route=wrong")},
+		{"register base URL with fragment", WithRegisterBaseURL("https://api.example.test/prefix#wrong")},
+		{"agent client base URL with query", WithAgentClientBaseURL("https://api.example.test/prefix?route=wrong")},
+		{"agent client base URL with fragment", WithAgentClientBaseURL("https://api.example.test/prefix#wrong")},
 		{"nhp peer missing public key", WithNHPPeer(NHPServerPeerInfo{Host: "nhp.example.test", Port: 62206})},
 		{"nhp peer bad port", WithNHPPeer(NHPServerPeerInfo{PublicKeyB64: base64.StdEncoding.EncodeToString(make([]byte, 32)), Host: "h", Port: 0})},
 		{"hostname blank", WithRegisterHostname("   ")},
@@ -1589,6 +1600,17 @@ func TestRegisterAgent_OptionValidation(t *testing.T) {
 				t.Fatalf("%s: want ErrInvalidRegisterConfig, got %v", tc.name, err)
 			}
 		})
+	}
+	cfg, err := newRegisterConfig([]RegisterOption{
+		WithRegisterBaseURL("https://api.example.test/custom/prefix/"),
+		WithAgentClientBaseURL("https://resources.example.test/custom/prefix/"),
+		WithRelayURL("https://relay.example.test/custom/prefix/"),
+	})
+	if err != nil {
+		t.Fatalf("path-prefixed options: %v", err)
+	}
+	if cfg.baseURL != "https://api.example.test/custom/prefix" || cfg.clientBaseURL != "https://resources.example.test/custom/prefix" || cfg.relayURLOverride != "https://relay.example.test/custom/prefix" {
+		t.Fatalf("path prefixes not preserved: registration=%q resource=%q relay=%q", cfg.baseURL, cfg.clientBaseURL, cfg.relayURLOverride)
 	}
 }
 

@@ -282,8 +282,11 @@ func (r completionResponse) validate(now time.Time, errKind error) error {
 	if r.RegisteredAt == nil {
 		return fmt.Errorf("%w: completion response missing registered_at", errKind)
 	}
-	if strings.TrimSpace(r.DeviceAPIKey) == "" {
+	if r.DeviceAPIKey == "" {
 		return fmt.Errorf("%w: completion response missing device_api_key", errKind)
+	}
+	if err := validateExactBearerToken(r.DeviceAPIKey, "completion response device_api_key", errKind); err != nil {
+		return err
 	}
 	return validateNHPServerPeerInfo(r.NHPServerPeer, now, true, "completion response", errKind)
 }

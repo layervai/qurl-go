@@ -108,9 +108,23 @@ func (e *CredentialRecoveryRequiredError) Error() string {
 }
 
 func (e *CredentialRecoveryRequiredError) Unwrap() []error {
+	return recoveryClassUnwrap(e.Cause)
+}
+
+func validatePersistedDeviceCredential(state *AgentState, errKind error) error {
+	if state.DeviceAPIKey == "" {
+		return &CredentialRecoveryRequiredError{DeviceID: state.AgentID, Cause: ErrDeviceCredentialMissing}
+	}
+	if err := validateExactBearerToken(state.DeviceAPIKey, "persisted device credential", errKind); err != nil {
+		return &CredentialRecoveryRequiredError{DeviceID: state.AgentID, Cause: err}
+	}
+	return nil
+}
+
+func recoveryClassUnwrap(cause error) []error {
 	errs := []error{ErrCredentialRecoveryRequired, ErrDeviceCredentialMissing}
-	if e.Cause != nil {
-		errs = append(errs, e.Cause)
+	if cause != nil {
+		errs = append(errs, cause)
 	}
 	return errs
 }
@@ -135,11 +149,7 @@ func (e *CredentialPersistenceError) Error() string {
 }
 
 func (e *CredentialPersistenceError) Unwrap() []error {
-	errs := []error{ErrCredentialRecoveryRequired, ErrDeviceCredentialMissing}
-	if e.Cause != nil {
-		errs = append(errs, e.Cause)
-	}
-	return errs
+	return recoveryClassUnwrap(e.Cause)
 }
 
 // ErrRegistrationInvalidInput is returned when the enrollment service rejected a

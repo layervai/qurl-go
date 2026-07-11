@@ -38,8 +38,8 @@ func OpenRegisteredAgent(ctx context.Context, store AgentStateStore, opts ...Cli
 	if err := validateCompletedAgentIdentity(state, ErrInvalidClientConfig); err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(state.DeviceAPIKey) == "" {
-		return nil, &CredentialRecoveryRequiredError{DeviceID: state.AgentID, Cause: ErrDeviceCredentialMissing}
+	if err := validatePersistedDeviceCredential(state, ErrInvalidClientConfig); err != nil {
+		return nil, err
 	}
 	return newStoreBackedClient(store, cfg.baseURL, cfg.httpClient), nil
 }
@@ -63,8 +63,8 @@ func RefreshAgentRegistration(ctx context.Context, key string, store AgentStateS
 		if err := validateCompletedAgentIdentity(state, cfg.invalidConfigErr); err != nil {
 			return nil, err
 		}
-		if strings.TrimSpace(state.DeviceAPIKey) == "" {
-			return nil, &CredentialRecoveryRequiredError{DeviceID: state.AgentID, Cause: ErrDeviceCredentialMissing}
+		if err := validatePersistedDeviceCredential(state, cfg.invalidConfigErr); err != nil {
+			return nil, err
 		}
 		if err := cfg.reconcileDeviceID(state); err != nil {
 			return nil, err
@@ -98,6 +98,8 @@ func validateCompletedAgentIdentity(state *AgentState, errKind error) error {
 // If this returns ErrAgentSetupLock after lock release, load the durable state or
 // call OpenRegisteredAgent before retrying: completion and persistence may have
 // succeeded even though the lock could not be released cleanly.
+// RegisteredAt is not required: this API also repairs the post-completion state
+// where the service may have minted a credential but its local save failed.
 func RecoverAgentCredential(ctx context.Context, key string, store AgentStateStore, opts ...RegisterOption) (*Client, error) {
 	cfg, err := validateLifecycleInputs(ctx, key, store, opts)
 	if err != nil {
@@ -127,8 +129,8 @@ func validateLifecycleInputs(ctx context.Context, key string, store AgentStateSt
 	if err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(key) == "" {
-		return nil, fmt.Errorf("%w: API key must not be empty", ErrInvalidRegisterConfig)
+	if err := validateExactBearerToken(key, "API key", ErrInvalidRegisterConfig); err != nil {
+		return nil, err
 	}
 	if store == nil {
 		return nil, fmt.Errorf("%w: state store must not be nil", ErrInvalidRegisterConfig)
@@ -211,12 +213,8 @@ func (cfg *registerConfig) forceRegistration(ctx context.Context, key string, st
 	// Refresh commits the refreshed binding metadata after an authenticated RAK
 	// and stops: DeviceAPIKey and RegisteredAt are copied from the prior state and
 	// never touched.
-	ack, err := cfg.registerExchange(ctx, &candidate, peer, relayURL, credential)
-	if err != nil {
+	if err := cfg.registerExchangeChecked(ctx, &candidate, peer, relayURL, credential, path); err != nil {
 		return nil, err
-	}
-	if !ack.isSuccess() {
-		return nil, mapRAKError(ack, path)
 	}
 	candidate.OTPRequestedAt = nil
 

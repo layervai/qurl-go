@@ -65,8 +65,8 @@ func RegisterAgent(ctx context.Context, key string, store AgentStateStore, opts 
 	if err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(key) == "" {
-		return nil, fmt.Errorf("%w: API key must not be empty", ErrInvalidRegisterConfig)
+	if err := validateExactBearerToken(key, "API key", ErrInvalidRegisterConfig); err != nil {
+		return nil, err
 	}
 	if store == nil {
 		return nil, fmt.Errorf("%w: state store must not be nil", ErrInvalidRegisterConfig)
@@ -258,8 +258,10 @@ func (cfg *registerConfig) finishRegisteredAgentState(state *AgentState) (*Agent
 	if err := validateRegisteredAgentState(state, cfg.clock(), !cfg.requireDeviceKey, cfg.invalidConfigErr); err != nil {
 		return nil, err
 	}
-	if cfg.requireDeviceKey && strings.TrimSpace(state.DeviceAPIKey) == "" {
-		return nil, &CredentialRecoveryRequiredError{DeviceID: state.AgentID, Cause: ErrDeviceCredentialMissing}
+	if cfg.requireDeviceKey {
+		if err := validatePersistedDeviceCredential(state, cfg.invalidConfigErr); err != nil {
+			return nil, err
+		}
 	}
 	if err := cfg.reconcileDeviceID(state); err != nil {
 		return nil, err
@@ -361,14 +363,24 @@ func (cfg *registerConfig) otpPending(state *AgentState, maskedEmail string) *OT
 // enrollment paths end with. credential is the key secret (bootstrap) or the
 // one-time code (account); path selects the RAK error mapping.
 func (cfg *registerConfig) registerAndComplete(ctx context.Context, key string, store AgentStateStore, state *AgentState, peer *NHPServerPeerInfo, relayURL, credential string, path pathKind) (*AgentState, error) {
-	ack, err := cfg.registerExchange(ctx, state, peer, relayURL, credential)
-	if err != nil {
+	if err := cfg.registerExchangeChecked(ctx, state, peer, relayURL, credential, path); err != nil {
 		return nil, err
 	}
-	if !ack.isSuccess() {
-		return nil, mapRAKError(ack, path)
-	}
 	return cfg.completeAndPersist(ctx, key, store, state, path)
+}
+
+// registerExchangeChecked runs NHP_REG/NHP_RAK and maps an authenticated denial
+// through the enrollment taxonomy. Enrollment/recovery and completion-free
+// binding refresh share this single RAK success gate.
+func (cfg *registerConfig) registerExchangeChecked(ctx context.Context, state *AgentState, peer *NHPServerPeerInfo, relayURL, credential string, path pathKind) error {
+	ack, err := cfg.registerExchange(ctx, state, peer, relayURL, credential)
+	if err != nil {
+		return err
+	}
+	if !ack.isSuccess() {
+		return mapRAKError(ack, path)
+	}
+	return nil
 }
 
 // requestOTP records OTPRequestedAt (otp_pending) and THEN dispatches the OTP
@@ -438,6 +450,7 @@ func (cfg *registerConfig) registerExchange(ctx context.Context, state *AgentSta
 	if err != nil {
 		return nil, err
 	}
+	defer wipeBytes(devicePriv)
 	body, err := json.Marshal(registerRequestBody{
 		UsrID: state.KeyID,
 		DevID: state.AgentID,
@@ -452,6 +465,7 @@ func (cfg *registerConfig) registerExchange(ctx context.Context, state *AgentSta
 	if err != nil {
 		return nil, fmt.Errorf("qurl: encode registration body: %w", err)
 	}
+	defer wipeBytes(body)
 	reply, err := relayknock.Exchange(ctx, relayURL, serverPub, relayknock.TypeRegister, body, relayknock.KnockOptions{
 		HTTPClient:       relayHTTPClient(cfg.httpClient),
 		DeviceStaticPriv: devicePriv,
@@ -481,6 +495,7 @@ func (cfg *registerConfig) sendOTP(ctx context.Context, state *AgentState, peer 
 	if err != nil {
 		return err
 	}
+	defer wipeBytes(devicePriv)
 	// The API key secret rides in the NHP "pass" field, whose name is fixed by the
 	// enrollment wire contract. It is not logged and is sealed inside the NHP
 	// AES-256-GCM body before it leaves the process (relayknock.Send), so this is
@@ -494,6 +509,7 @@ func (cfg *registerConfig) sendOTP(ctx context.Context, state *AgentState, peer 
 	if err != nil {
 		return fmt.Errorf("qurl: encode otp request body: %w", err)
 	}
+	defer wipeBytes(body)
 	if err := relayknock.Send(ctx, relayURL, serverPub, body, relayknock.KnockOptions{
 		HTTPClient:       relayHTTPClient(cfg.httpClient),
 		DeviceStaticPriv: devicePriv,
@@ -902,9 +918,9 @@ func (p *storeCredentialProvider) Authorize(ctx context.Context, req *http.Reque
 	if state == nil {
 		return fmt.Errorf("%w: agent state store returned no state", ErrDeviceCredentialMissing)
 	}
-	token := strings.TrimSpace(state.DeviceAPIKey)
-	if token == "" {
-		return fmt.Errorf("%w: agent state holds no device credential", ErrDeviceCredentialMissing)
+	token := state.DeviceAPIKey
+	if err := validatePersistedDeviceCredential(state, ErrInvalidClientConfig); err != nil {
+		return err
 	}
 	return setBearer(req, token)
 }

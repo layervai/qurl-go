@@ -288,12 +288,30 @@ func setBearer(req *http.Request, token string) error {
 	return nil
 }
 
+// validateExactBearerToken validates a credential without normalizing it. This
+// is required for server-minted or dual-channel enrollment credentials: the
+// exact bytes persisted or sent inside NHP must be the bytes authenticated over
+// HTTPS, and an invalid value must never be silently repaired with TrimSpace.
+func validateExactBearerToken(token, label string, errKind error) error {
+	if token == "" {
+		return fmt.Errorf("%w: %s must not be empty", errKind, label)
+	}
+	if token != strings.TrimSpace(token) {
+		return fmt.Errorf("%w: %s must not contain surrounding whitespace", errKind, label)
+	}
+	return validateHeaderValueWithKind("Bearer "+token, label, errKind)
+}
+
 func validateHeaderValue(value, label string) error {
+	return validateHeaderValueWithKind(value, label, ErrInvalidClientConfig)
+}
+
+func validateHeaderValueWithKind(value, label string, errKind error) error {
 	for _, b := range []byte(value) {
 		// Authorization credentials do not need HTAB or obs-text, so keep this
 		// intentionally stricter than the generic HTTP header grammar.
 		if b < 0x20 || b > 0x7e {
-			return fmt.Errorf("%w: %s contains invalid header characters", ErrInvalidClientConfig, label)
+			return fmt.Errorf("%w: %s contains invalid header characters", errKind, label)
 		}
 	}
 	return nil
@@ -949,6 +967,14 @@ func validateHTTPSOrLoopbackURL(rawURL, label string, errKind error) error {
 	if u.Scheme == "http" && !isLoopbackHost(u.Hostname()) {
 		return fmt.Errorf("%w: %s must use https unless it targets localhost", errKind, label)
 	}
+	// Callers append fixed endpoint paths to the original string. A query or
+	// fragment would capture or hide that suffix instead of extending the path.
+	if u.RawQuery != "" || u.ForceQuery {
+		return fmt.Errorf("%w: %s must not include a query", errKind, label)
+	}
+	if u.Fragment != "" || strings.Contains(rawURL, "#") {
+		return fmt.Errorf("%w: %s must not include a fragment", errKind, label)
+	}
 	return nil
 }
 
@@ -1036,6 +1062,7 @@ func doAuthorizedJSON(ctx context.Context, httpClient HTTPDoer, baseURL string, 
 		if err != nil {
 			return fmt.Errorf("qurl: encode API request: %w", err)
 		}
+		defer wipeBytes(raw)
 		reqBody = bytes.NewReader(raw)
 	}
 

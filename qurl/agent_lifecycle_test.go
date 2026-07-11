@@ -104,6 +104,93 @@ func TestAgentLifecycle_MissingCredentialRequiresExplicitRecoveryWithoutNetwork(
 	}
 }
 
+func TestAgentLifecycle_MalformedPersistedCredentialFailsClosedWithoutNetwork(t *testing.T) {
+	for _, credential := range []string{" lv_device_secret", "lv_device_secret ", "lv_device\nsecret"} {
+		t.Run(fmt.Sprintf("%q", credential), func(t *testing.T) {
+			h := registeredHarness(t)
+			state := h.loadState(t)
+			state.DeviceAPIKey = credential
+			if err := h.store.SaveAgentState(context.Background(), state); err != nil {
+				t.Fatalf("save malformed credential: %v", err)
+			}
+
+			var networkCalls atomic.Int32
+			refusing := doerFunc(func(*http.Request) (*http.Response, error) {
+				networkCalls.Add(1)
+				return nil, errors.New("unexpected network call")
+			})
+			if client, err := OpenRegisteredAgent(context.Background(), h.store,
+				WithBaseURL("https://resources.example.test"),
+				WithHTTPClient(refusing),
+			); client != nil || !errors.Is(err, ErrInvalidClientConfig) || !errors.Is(err, ErrCredentialRecoveryRequired) {
+				t.Fatalf("OpenRegisteredAgent malformed credential = client %v, error %v", client, err)
+			}
+			if client, err := RegisterAgent(context.Background(), "lv_enroll", h.store,
+				WithRegisterBaseURL(h.apiSrv.URL),
+				WithRegisterHTTPClient(refusing),
+			); client != nil || !errors.Is(err, ErrInvalidRegisterConfig) || !errors.Is(err, ErrCredentialRecoveryRequired) {
+				t.Fatalf("RegisterAgent malformed credential = client %v, error %v", client, err)
+			}
+			if refreshed, err := RefreshAgentRegistration(context.Background(), "lv_enroll", h.store,
+				WithRegisterBaseURL(h.apiSrv.URL),
+				WithRegisterHTTPClient(refusing),
+			); refreshed != nil || !errors.Is(err, ErrInvalidRegisterConfig) || !errors.Is(err, ErrCredentialRecoveryRequired) {
+				t.Fatalf("RefreshAgentRegistration malformed credential = state %v, error %v", refreshed, err)
+			}
+
+			req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://resources.example.test/v1/resources", nil)
+			if err != nil {
+				t.Fatalf("new request: %v", err)
+			}
+			provider := &storeCredentialProvider{store: h.store}
+			if err := provider.Authorize(context.Background(), req); !errors.Is(err, ErrInvalidClientConfig) || !errors.Is(err, ErrCredentialRecoveryRequired) {
+				t.Fatalf("store credential provider error = %v, want invalid-config recovery-required", err)
+			}
+			if got := req.Header.Get("Authorization"); got != "" {
+				t.Fatalf("malformed persisted credential set Authorization = %q", got)
+			}
+			if networkCalls.Load() != 0 {
+				t.Fatalf("malformed-credential network calls = %d, want 0", networkCalls.Load())
+			}
+		})
+	}
+}
+
+func TestAgentLifecycle_RejectsNonExactEnrollmentKeysAndAppendBreakingOrigins(t *testing.T) {
+	h := registeredHarness(t)
+	var networkCalls atomic.Int32
+	refusing := doerFunc(func(*http.Request) (*http.Response, error) {
+		networkCalls.Add(1)
+		return nil, errors.New("unexpected network call")
+	})
+	for _, key := range []string{" lv_enroll", "lv_enroll ", "lv_enroll\n"} {
+		if state, err := RefreshAgentRegistration(context.Background(), key, h.store, WithRegisterHTTPClient(refusing)); state != nil || !errors.Is(err, ErrInvalidRegisterConfig) {
+			t.Fatalf("RefreshAgentRegistration key %q = state %v, error %v", key, state, err)
+		}
+		if client, err := RecoverAgentCredential(context.Background(), key, h.store, WithRegisterHTTPClient(refusing)); client != nil || !errors.Is(err, ErrInvalidRegisterConfig) {
+			t.Fatalf("RecoverAgentCredential key %q = client %v, error %v", key, client, err)
+		}
+	}
+	for _, rawURL := range []string{"https://resources.example.test/prefix?wrong=1", "https://resources.example.test/prefix#wrong"} {
+		if client, err := OpenRegisteredAgent(context.Background(), h.store, WithBaseURL(rawURL), WithHTTPClient(refusing)); client != nil || !errors.Is(err, ErrInvalidClientConfig) {
+			t.Fatalf("OpenRegisteredAgent URL %q = client %v, error %v", rawURL, client, err)
+		}
+	}
+	opened, err := OpenRegisteredAgent(context.Background(), h.store,
+		WithBaseURL("https://resources.example.test/custom/prefix/"),
+		WithHTTPClient(refusing),
+	)
+	if err != nil || opened == nil {
+		t.Fatalf("OpenRegisteredAgent path prefix = client %v, error %v", opened, err)
+	}
+	if opened.baseURL != "https://resources.example.test/custom/prefix" {
+		t.Fatalf("OpenRegisteredAgent path prefix = %q", opened.baseURL)
+	}
+	if networkCalls.Load() != 0 {
+		t.Fatalf("invalid lifecycle input network calls = %d, want 0", networkCalls.Load())
+	}
+}
+
 func TestRefreshAgentRegistration_RotatesBindingPreservesCredentialAndSkipsCompletion(t *testing.T) {
 	h := newRegisterHarness(t)
 	h.armDevicePubOnInfo()
@@ -419,6 +506,12 @@ func TestRegisterAgent_PostCompletionContractFailuresRequireRecoveryWithoutRetry
 		}},
 		{name: "agent id mismatch", edit: func(service *fakeService) {
 			service.agentID = "agent-different"
+		}},
+		{name: "device key surrounding whitespace", edit: func(service *fakeService) {
+			service.deviceAPIKey = " lv_device_secret "
+		}},
+		{name: "device key control character", edit: func(service *fakeService) {
+			service.deviceAPIKey = "lv_device\nsecret"
 		}},
 	}
 	for _, tc := range cases {

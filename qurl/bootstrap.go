@@ -299,8 +299,8 @@ func WithVersion(version string) BootstrapOption {
 // A custom or networked AgentStateStore cannot be locked for you, so serialize
 // setup per store yourself.
 func BootstrapAgent(ctx context.Context, setupKey string, store AgentStateStore, opts ...BootstrapOption) (*AgentState, error) {
-	if strings.TrimSpace(setupKey) == "" {
-		return nil, fmt.Errorf("%w: setup key must not be empty", ErrInvalidBootstrapConfig)
+	if err := validateExactBearerToken(setupKey, "setup key", ErrInvalidBootstrapConfig); err != nil {
+		return nil, err
 	}
 	if store == nil {
 		return nil, fmt.Errorf("%w: state store must not be nil", ErrInvalidBootstrapConfig)
