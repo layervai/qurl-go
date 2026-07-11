@@ -160,6 +160,14 @@ substitution must be prevented; the store authenticates its persisted agent id
 and supports an optional `qurl.WithExpectedSealedAgentID` pin for a separately
 configured expected id.
 
+Warm starts can call `qurl.OpenRegisteredAgent` without an enrollment key.
+`qurl.RefreshAgentRegistration` explicitly repairs missing/rotated NHP binding
+metadata without touching the device credential, while
+`qurl.RecoverAgentCredential` performs operator-approved same-id credential
+replacement after the owner revokes `agent:<device_id>`. Registration and
+resource API origins are independent via `WithRegisterBaseURL` and
+`WithAgentClientBaseURL`.
+
 See [Register an agent](docs/register-an-agent.md) for **which key to use** (one
 durable `qurl:agent` key fans out across a whole fleet), both enrollment paths, a
 store-by-runtime table, the error table, and migrating from `BootstrapAgent`.
@@ -216,6 +224,19 @@ Match errors by type, not message text:
 
 ### Unreleased
 
+- **Added: registered-agent lifecycle APIs** — `OpenRegisteredAgent` provides a
+  zero-network store-backed reopen; `RefreshAgentRegistration` forces a real
+  REG/RAK binding refresh without completion; and `RecoverAgentCredential`
+  performs explicit same-id replacement after owner revoke. Registration key
+  kinds can be restricted before OTP/REG side effects, registration and resource
+  origins are independent, and post-mint persistence/already-issued failures now
+  carry typed recovery guidance.
+
+  This release requires qurl-service registration-info/completion support,
+  idempotent same-key REG, device-key revoke that atomically clears the
+  first-issue sentinel, and relay REG/RAK routing to be deployed before these
+  lifecycle operations are enabled.
+
 - **Added: sealed full-AgentState file storage** —
   `qurl.NewSealedFileAgentState` provides an SDK-owned AES-256-GCM envelope with
   pluggable exact-32-byte DEK wrapping, authenticated agent/provider binding,
@@ -229,6 +250,13 @@ Match errors by type, not message text:
   [Register an agent](docs/register-an-agent.md).
 
 #### Breaking changes
+
+- **Registration and resource-client overrides are now independent.**
+  `WithRegisterBaseURL` and `WithRegisterHTTPClient` affect only
+  registration-info, completion, and relay traffic. Callers that previously
+  relied on either option to retarget the `Client` returned by `RegisterAgent`
+  must also set `WithAgentClientBaseURL` and/or
+  `WithAgentClientHTTPClient`.
 
 - **Local AgentState directories and setup locks now fail closed.**
   `FileAgentState` requires its immediate state directory to be exactly `0700`.

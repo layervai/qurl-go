@@ -55,15 +55,91 @@ var ErrAgentIdentityConflict = errors.New("qurl: agent identity conflict")
 // Add an email to the account, or register with a pre-issued key instead.
 var ErrNoAccountEmail = errors.New("qurl: account has no email for one-time code")
 
-// ErrDeviceCredentialMissing is returned when the saved AgentState shows the
-// device is registered but does not hold its device API credential — the
-// credential is issued once and this state cannot reproduce it. Recovery depends
-// on how it arose: if a completion reported the key was already issued, register
-// under a new device id (WithDeviceID) or re-bind with WithTakeover; if a
-// locally-registered state simply lacks the credential (for example a legacy
-// bootstrap-era state file), clear or replace the persisted state to mint a fresh
-// credential.
+// ErrDeviceCredentialMissing is the broad compatibility class for an AgentState
+// that cannot authorize resource calls. Credential issuance/recovery errors also
+// match ErrCredentialRecoveryRequired and carry the persisted device id; revoke
+// agent:<device_id>, then explicitly call RecoverAgentCredential.
 var ErrDeviceCredentialMissing = errors.New("qurl: device credential missing from agent state")
+
+// ErrCredentialRecoveryRequired means the service-side device credential and
+// local AgentState are no longer safely reconcilable through ordinary
+// RegisterAgent. The owner must revoke agent:<device_id>, then explicitly call
+// RecoverAgentCredential with the same persisted identity.
+var ErrCredentialRecoveryRequired = errors.New("qurl: agent credential recovery required")
+
+// ErrRegistrationKeyKindDisallowed means registration-info reported a valid key
+// kind that the caller's WithAllowedRegistrationKeyKinds policy rejects.
+var ErrRegistrationKeyKindDisallowed = errors.New("qurl: registration key kind disallowed")
+
+// RegistrationKeyKindDisallowedError carries the rejected server-reported kind
+// and the caller's accepted kinds. It is returned before OTP dispatch or NHP REG.
+type RegistrationKeyKindDisallowedError struct {
+	Kind    RegistrationKeyKind
+	Allowed []RegistrationKeyKind
+}
+
+func (e *RegistrationKeyKindDisallowedError) Error() string {
+	allowed := make([]string, len(e.Allowed))
+	for i, kind := range e.Allowed {
+		allowed[i] = string(kind)
+	}
+	return fmt.Sprintf("qurl: registration key kind %q is disallowed; accepted kinds: %s", e.Kind, strings.Join(allowed, ", "))
+}
+
+func (e *RegistrationKeyKindDisallowedError) Unwrap() error {
+	return ErrRegistrationKeyKindDisallowed
+}
+
+// CredentialRecoveryRequiredError identifies an already-issued device
+// credential that cannot be fetched again. Revoke agent:<device_id> through an
+// owner credential, then call RecoverAgentCredential with the same state store.
+type CredentialRecoveryRequiredError struct {
+	DeviceID string
+	Cause    error
+}
+
+func (e *CredentialRecoveryRequiredError) Error() string {
+	keyID := "agent:" + e.DeviceID
+	message := fmt.Sprintf("qurl: device credential for %q was already issued and cannot be fetched again; revoke %q, then call qurl.RecoverAgentCredential with this state store", e.DeviceID, keyID)
+	if e.Cause != nil {
+		return fmt.Sprintf("%s: %v", message, e.Cause)
+	}
+	return message
+}
+
+func (e *CredentialRecoveryRequiredError) Unwrap() []error {
+	errs := []error{ErrCredentialRecoveryRequired, ErrDeviceCredentialMissing}
+	if e.Cause != nil {
+		errs = append(errs, e.Cause)
+	}
+	return errs
+}
+
+// CredentialPersistenceError means completion minted and returned a plaintext
+// device credential, but the final AgentState save failed. Retrying ordinary
+// registration must not be treated as a fresh mint. Revoke agent:<device_id>,
+// then explicitly recover the same identity.
+type CredentialPersistenceError struct {
+	DeviceID string
+	Cause    error
+}
+
+func (e *CredentialPersistenceError) Error() string {
+	keyID := "agent:" + e.DeviceID
+	message := fmt.Sprintf("qurl: device credential for %q was minted but could not be persisted; revoke %q, then call qurl.RecoverAgentCredential with this state store", e.DeviceID, keyID)
+	if e.Cause != nil {
+		return fmt.Sprintf("%s: %v", message, e.Cause)
+	}
+	return message
+}
+
+func (e *CredentialPersistenceError) Unwrap() []error {
+	errs := []error{ErrCredentialRecoveryRequired, ErrDeviceCredentialMissing}
+	if e.Cause != nil {
+		errs = append(errs, e.Cause)
+	}
+	return errs
+}
 
 // ErrRegistrationInvalidInput is returned when the enrollment service rejected a
 // registration input as malformed (for example a device id that is not a valid

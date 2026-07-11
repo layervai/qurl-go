@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -76,20 +77,23 @@ func RegisterAgent(ctx context.Context, key string, store AgentStateStore, opts 
 	if _, err := cfg.run(ctx, key, store); err != nil {
 		return nil, err
 	}
-	return newStoreBackedClient(store, cfg.baseURL, cfg.httpClient), nil
+	return newStoreBackedClient(store, cfg.clientBaseURL, cfg.clientHTTPClient), nil
 }
 
 // registerConfig is the resolved option set plus the fixed dependencies a
 // registration run needs.
 type registerConfig struct {
-	baseURL     string
-	httpClient  HTTPDoer
-	deviceID    string
-	otp         string
-	otpProvider func(context.Context) (string, error)
-	takeover    bool
-	hostname    string
-	version     string
+	baseURL          string
+	httpClient       HTTPDoer
+	clientBaseURL    string
+	clientHTTPClient HTTPDoer
+	deviceID         string
+	otp              string
+	otpProvider      func(context.Context) (string, error)
+	takeover         bool
+	hostname         string
+	version          string
+	allowedKeyKinds  map[RegistrationKeyKind]struct{}
 
 	// relayURL / nhpPeer are optional overrides; when unset the values come from
 	// the registration-info pre-flight.
@@ -117,6 +121,8 @@ func newRegisterConfig(opts []RegisterOption) (*registerConfig, error) {
 	cfg := &registerConfig{
 		baseURL:          defaultAPIBaseURL,
 		httpClient:       defaultAPIHTTPClient,
+		clientBaseURL:    defaultAPIBaseURL,
+		clientHTTPClient: defaultAPIHTTPClient,
 		invalidConfigErr: ErrInvalidRegisterConfig,
 		clock:            time.Now,
 	}
@@ -205,6 +211,9 @@ func (cfg *registerConfig) run(ctx context.Context, key string, store AgentState
 	// the NHP peer, and the relay coordinates. Side-effect-free.
 	info, err := cfg.fetchRegistrationInfo(ctx, key)
 	if err != nil {
+		return nil, err
+	}
+	if err := cfg.requireAllowedKeyKind(info.KeyKind); err != nil {
 		return nil, err
 	}
 	// Assert the pre-flight's own server_id agrees with its own peer key — an
@@ -550,7 +559,7 @@ func (cfg *registerConfig) persistCompletion(ctx context.Context, store AgentSta
 	state.OTPRequestedAt = nil
 	state.SchemaVersion = agentStateSchemaVersion
 	if err := store.SaveAgentState(ctx, state); err != nil {
-		return nil, err
+		return nil, &CredentialPersistenceError{DeviceID: state.AgentID, Cause: err}
 	}
 	return state, nil
 }
@@ -579,7 +588,7 @@ func (cfg *registerConfig) postCompletion(ctx context.Context, key string, state
 	}
 	var env apiEnvelope[completionResponse]
 	if err := doAuthorizedJSON(ctx, cfg.httpClient, cfg.baseURL, BearerToken(key).Authorize, http.MethodPost, "/v1/agent/registration/complete", reqBody, &env); err != nil {
-		return nil, cfg.mapCompletionHTTPError(err, path)
+		return nil, cfg.mapCompletionHTTPError(err, path, state.AgentID)
 	}
 	if err := env.Data.validate(cfg.clock(), cfg.invalidConfigErr); err != nil {
 		return nil, err
@@ -600,6 +609,11 @@ func (cfg *registerConfig) mapRegistrationHTTPError(err error) error {
 		return fmt.Errorf("%w: the API key was rejected by the registration service: %w", ErrKeyRejected, err)
 	case "registration_disabled":
 		return fmt.Errorf("%w: %w", ErrRegistrationDisabled, err)
+	case "registration_rate_limited", "rate_limited", "too_many_requests":
+		return fmt.Errorf("%w: %w", ErrRegistrationRateLimited, err)
+	}
+	if apiErr.StatusCode == http.StatusTooManyRequests {
+		return fmt.Errorf("%w: %w", ErrRegistrationRateLimited, err)
 	}
 	if apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden {
 		return fmt.Errorf("%w: the API key was rejected by the registration service: %w", ErrKeyRejected, err)
@@ -609,10 +623,9 @@ func (cfg *registerConfig) mapRegistrationHTTPError(err error) error {
 
 // mapCompletionHTTPError maps the completion HTTP failure. A 409
 // device_key_already_issued means the device was registered but its key was
-// already issued and this local state cannot reproduce it — a
-// ErrDeviceCredentialMissing situation the caller resolves by re-registering
-// under a new device id or with takeover.
-func (cfg *registerConfig) mapCompletionHTTPError(err error, path pathKind) error {
+// already issued and this local state cannot reproduce it. Surface the explicit
+// same-id recovery class; ordinary RegisterAgent must never mint around it.
+func (cfg *registerConfig) mapCompletionHTTPError(err error, path pathKind, deviceID string) error {
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) {
 		return err
@@ -625,8 +638,11 @@ func (cfg *registerConfig) mapCompletionHTTPError(err error, path pathKind) erro
 	if path == pathBootstrap && isBootstrapConsumedCompletion(apiErr) {
 		return fmt.Errorf("%w: %s: %w", ErrBootstrapSetupKeyConsumed, bootstrapConsumedGuidance, err)
 	}
+	if apiErr.StatusCode == http.StatusTooManyRequests {
+		return fmt.Errorf("%w: %w", ErrRegistrationRateLimited, err)
+	}
 	if isDeviceKeyAlreadyIssued(apiErr) {
-		return fmt.Errorf("%w: the device was registered but its API key was already issued and cannot be re-fetched; re-register under a new device id (qurl.WithDeviceID) or re-bind with qurl.WithTakeover: %w", ErrDeviceCredentialMissing, err)
+		return &CredentialRecoveryRequiredError{DeviceID: deviceID, Cause: err}
 	}
 	return err
 }
@@ -644,7 +660,7 @@ func isCompletionNotYetRegistered(err error) bool {
 		return false
 	}
 	switch strings.ToLower(strings.TrimSpace(apiErr.Code)) {
-	case "device_not_registered", "registration_incomplete", "not_registered":
+	case "agent_not_enrolled", "device_not_registered", "registration_incomplete", "not_registered":
 		return true
 	}
 	return apiErr.StatusCode == http.StatusNotFound
@@ -662,10 +678,9 @@ func isTransientCompletionError(err error) bool {
 }
 
 // isDeviceKeyAlreadyIssued matches ONLY the structured device_key_already_issued
-// code, not a bare 409. The mapped error (ErrDeviceCredentialMissing) tells the
-// operator to re-register under a new device id or re-bind — destructive advice
-// that must not fire for an unrelated infra 409 that arrived with no structured
-// code; those surface as the raw *APIError instead.
+// code, not a bare 409. The mapped error tells the operator to revoke the prior
+// agent key and run explicit same-id recovery. That action must not fire for an
+// unrelated infra 409 with no structured code; those surface as *APIError.
 func isDeviceKeyAlreadyIssued(apiErr *APIError) bool {
 	return strings.EqualFold(strings.TrimSpace(apiErr.Code), "device_key_already_issued")
 }
@@ -880,6 +895,55 @@ type RegisterOption interface {
 	applyRegisterOption(*registerConfig) error
 }
 
+// RegistrationKeyKind is the key class reported by registration-info.
+// Callers that only accept pre-issued enrollment keys can restrict registration
+// before any OTP dispatch or NHP registration side effect.
+type RegistrationKeyKind string
+
+const (
+	// RegistrationKeyKindBootstrap is a pre-issued headless enrollment key.
+	RegistrationKeyKindBootstrap RegistrationKeyKind = keyKindBootstrap
+	// RegistrationKeyKindAccount is an account API key requiring email OTP.
+	RegistrationKeyKindAccount RegistrationKeyKind = keyKindAccount
+)
+
+func (cfg *registerConfig) requireAllowedKeyKind(raw string) error {
+	if cfg.allowedKeyKinds == nil {
+		return nil
+	}
+	kind := RegistrationKeyKind(strings.TrimSpace(raw))
+	if _, ok := cfg.allowedKeyKinds[kind]; ok {
+		return nil
+	}
+	allowed := make([]RegistrationKeyKind, 0, len(cfg.allowedKeyKinds))
+	for candidate := range cfg.allowedKeyKinds {
+		allowed = append(allowed, candidate)
+	}
+	slices.Sort(allowed)
+	return &RegistrationKeyKindDisallowedError{Kind: kind, Allowed: allowed}
+}
+
+// WithAllowedRegistrationKeyKinds restricts the registration key kinds a
+// caller accepts. The policy is evaluated immediately after the side-effect-free
+// registration-info preflight and before OTP dispatch or NHP registration.
+func WithAllowedRegistrationKeyKinds(kinds ...RegistrationKeyKind) RegisterOption {
+	return registerOptionFunc(func(o *registerConfig) error {
+		if len(kinds) == 0 {
+			return fmt.Errorf("%w: at least one registration key kind is required", ErrInvalidRegisterConfig)
+		}
+		o.allowedKeyKinds = make(map[RegistrationKeyKind]struct{}, len(kinds))
+		for _, kind := range kinds {
+			switch kind {
+			case RegistrationKeyKindBootstrap, RegistrationKeyKindAccount:
+				o.allowedKeyKinds[kind] = struct{}{}
+			default:
+				return fmt.Errorf("%w: unknown registration key kind %q", ErrInvalidRegisterConfig, kind)
+			}
+		}
+		return nil
+	})
+}
+
 type registerOptionFunc func(*registerConfig) error
 
 func (f registerOptionFunc) applyRegisterOption(o *registerConfig) error { return f(o) }
@@ -982,10 +1046,8 @@ func WithRegisterVersion(version string) RegisterOption {
 // the registration-info and completion HTTPS endpoints. Most applications do not
 // need this.
 //
-// This origin also becomes the base URL of the returned Client, so the agent's
-// later resource calls (ProtectURL, portals) go to the same host — enrollment and
-// resource APIs both live on qurl-service. There is no way to point only the
-// enrollment endpoints elsewhere while leaving the Client on the default origin.
+// This option affects only registration-info and completion. The returned
+// Client remains on the default API origin unless WithAgentClientBaseURL is set.
 func WithRegisterBaseURL(rawURL string) RegisterOption {
 	return registerOptionFunc(func(o *registerConfig) error {
 		if err := validateHTTPSOrLoopbackURL(rawURL, "register base URL", ErrInvalidRegisterConfig); err != nil {
@@ -996,21 +1058,43 @@ func WithRegisterBaseURL(rawURL string) RegisterOption {
 	})
 }
 
+// WithAgentClientBaseURL points the Client returned by RegisterAgent at a
+// non-default resource API origin, independently of WithRegisterBaseURL.
+func WithAgentClientBaseURL(rawURL string) RegisterOption {
+	return registerOptionFunc(func(o *registerConfig) error {
+		if err := validateHTTPSOrLoopbackURL(rawURL, "agent client base URL", ErrInvalidRegisterConfig); err != nil {
+			return err
+		}
+		o.clientBaseURL = strings.TrimRight(rawURL, "/")
+		return nil
+	})
+}
+
 // WithRegisterHTTPClient injects the HTTP client used for the registration HTTPS
 // endpoints and the relay POSTs. Without it, RegisterAgent uses a shared client
 // with a 30-second timeout and no redirect following. Callers can still bound
 // each call with ctx.
 //
-// The injected client is also reused as the returned Client's HTTP client, so an
-// application with fixed-egress requirements (a pinned transport or outbound
-// proxy) gets the same egress for enrollment and for the agent's later resource
-// calls from this one option.
+// This option affects only registration and relay traffic. Use
+// WithAgentClientHTTPClient independently for the returned Client.
 func WithRegisterHTTPClient(client HTTPDoer) RegisterOption {
 	return registerOptionFunc(func(o *registerConfig) error {
 		if client == nil {
 			return fmt.Errorf("%w: HTTP client must not be nil", ErrInvalidRegisterConfig)
 		}
 		o.httpClient = client
+		return nil
+	})
+}
+
+// WithAgentClientHTTPClient injects the HTTP client used by the Client returned
+// from RegisterAgent, independently of the registration and relay transport.
+func WithAgentClientHTTPClient(client HTTPDoer) RegisterOption {
+	return registerOptionFunc(func(o *registerConfig) error {
+		if client == nil {
+			return fmt.Errorf("%w: agent Client HTTP client must not be nil", ErrInvalidRegisterConfig)
+		}
+		o.clientHTTPClient = client
 		return nil
 	})
 }

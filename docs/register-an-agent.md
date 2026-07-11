@@ -40,6 +40,35 @@ never re-validates the key. Rotating or mistyping the key against an
 already-registered `store` is therefore not detected; the persisted device
 credential is authoritative from then on.
 
+For an explicit zero-network reopen, use `OpenRegisteredAgent`. It takes normal
+`ClientOption` values, so the resource API origin is independent of the
+registration origin:
+
+```go
+client, err := qurl.OpenRegisteredAgent(ctx, store,
+	qurl.WithBaseURL(resourceAPIURL),
+)
+```
+
+`WithRegisterBaseURL` targets only registration-info and completion;
+`WithAgentClientBaseURL` targets the `Client` returned by `RegisterAgent` or
+`RecoverAgentCredential`. This prevents a dedicated registration origin from
+silently retargeting later `/v1/resources` calls:
+
+```go
+client, err := qurl.RegisterAgent(ctx, enrollmentKey, store,
+	qurl.WithRegisterBaseURL(registrationURL),
+	qurl.WithAgentClientBaseURL(resourceAPIURL),
+)
+```
+
+Headless callers that refuse account-key/OTP enrollment can enforce that policy
+before any OTP email or NHP registration side effect:
+
+```go
+qurl.WithAllowedRegistrationKeyKinds(qurl.RegistrationKeyKindBootstrap)
+```
+
 ## Which key do I use?
 
 You pass one key at enrollment. After that the agent runs entirely off the
@@ -376,6 +405,50 @@ setup across processes with a mandatory sidecar lock. Run enrollment from **one
 process at a time** for custom/network stores; the SDK cannot derive a shared
 lock for them, and concurrent account-path setup can dispatch multiple OTPs.
 
+## Binding refresh and credential recovery
+
+These are deliberately separate operations:
+
+- `RefreshAgentRegistration` always fetches current registration-info, validates
+  the relay `server_id` against the NHP peer key, sends a real `NHP_REG`, and
+  requires a successful `NHP_RAK`. It then saves the authoritative relay/peer
+  metadata while preserving `DeviceAPIKey` and `RegisteredAt`. It never calls
+  completion, even when the old peer is expired or missing. `WithTakeover()` is
+  honored only when explicitly supplied.
+- `RecoverAgentCredential` is the operator-controlled path for a revoked or
+  locally lost device credential. It preserves the persisted device id and
+  X25519 keypair, sends REG, calls completion exactly once, and persists the
+  replacement before returning a `Client`. It is never triggered automatically
+  by a 401 or by ordinary binding refresh.
+
+```go
+state, err := qurl.RefreshAgentRegistration(ctx, enrollmentKey, store,
+	qurl.WithAllowedRegistrationKeyKinds(qurl.RegistrationKeyKindBootstrap),
+	qurl.WithRegisterBaseURL(registrationURL),
+)
+
+client, err := qurl.RecoverAgentCredential(ctx, enrollmentKey, store,
+	qurl.WithDeviceID(state.AgentID),
+	qurl.WithRegisterBaseURL(registrationURL),
+	qurl.WithAgentClientBaseURL(resourceAPIURL),
+)
+```
+
+Credential recovery has an intentional owner step: first revoke
+`agent:<device_id>` with an owner credential. qurl-service atomically revokes
+the prior device key and clears its first-issue sentinel; only then can explicit
+same-id recovery mint one replacement. If the sentinel is still present,
+completion returns `device_key_already_issued`, mapped to
+`*CredentialRecoveryRequiredError`. Use an active durable `qurl:agent` or
+account enrollment key for recovery; a consumed one-shot bootstrap key cannot
+perform a later registration-info refresh.
+
+Completion and local persistence are a distributed transaction. If completion
+returns a plaintext key but the final `SaveAgentState` fails, the SDK returns
+`*CredentialPersistenceError` carrying the device id. It never retries
+completion in that call. Revoke `agent:<device_id>`, then invoke
+`RecoverAgentCredential`; do not delete the state or choose a new identity.
+
 ## Errors
 
 Match errors by type, not message text: use `errors.Is` against a sentinel for a
@@ -393,7 +466,9 @@ Every message names the next concrete step.
 | `qurl.ErrBootstrapSetupKeyConsumed` | A pre-issued **one-shot** setup key was already consumed by an earlier enrollment (RAK code 52108, or reported by the completion call). | Mint a fresh setup key, or restore the completed agent state from the run that consumed it. |
 | `qurl.ErrAgentIdentityConflict` | This device id is already enrolled to a different key or agent. | Re-run with `WithTakeover()` to re-bind, or pick a different `WithDeviceID`. |
 | `qurl.ErrNoAccountEmail` | Account key has no email on file for the code. | Add an email to the account, or use a pre-issued key. |
-| `qurl.ErrDeviceCredentialMissing` | Saved state shows the agent is registered but holds no device credential (issued once, unreproducible). | Register under a new `WithDeviceID` or re-bind with `WithTakeover`; for a legacy state file missing the credential, clear or replace the persisted state. |
+| `*qurl.RegistrationKeyKindDisallowedError` (unwraps `ErrRegistrationKeyKindDisallowed`) | Registration-info returned a valid key kind rejected by caller policy. No OTP/REG side effect occurred. | Supply an allowed enrollment key or deliberately widen `WithAllowedRegistrationKeyKinds`. |
+| `*qurl.CredentialPersistenceError` (unwraps `ErrCredentialRecoveryRequired` and `ErrDeviceCredentialMissing`) | Completion minted a device key but the final state save failed. | Revoke `agent:<DeviceID>`, then call `RecoverAgentCredential` with the same store. Never loop ordinary registration. |
+| `*qurl.CredentialRecoveryRequiredError` (unwraps `ErrCredentialRecoveryRequired` and `ErrDeviceCredentialMissing`) | The device key was already issued or completed state lacks its local credential. | Revoke `agent:<DeviceID>`, then call `RecoverAgentCredential` with the same store and enrollment key. |
 | `qurl.ErrRegistrationInvalidInput` | The service rejected a registration input as malformed (e.g. a bad device id). | Fix the input (use a valid `WithDeviceID`) and re-run. |
 | `qurl.ErrRegistrationDisabled` | Agent registration is disabled for the account. | Contact the account owner to enable it. |
 | `qurl.ErrInvalidRegisterConfig` | Inputs or options were invalid before any network call (empty key, nil store, conflicting options). | Fix the call. |
@@ -433,13 +508,11 @@ never be delivered. Add an email to the account, or enroll with a pre-issued key
 (which needs no email). If a code *was* sent but has not arrived, re-running
 `RegisterAgent` with no code re-sends a fresh one after a short cooldown.
 
-**Lost device credential.** `ErrDeviceCredentialMissing` means the saved state
-says the agent is registered but the device credential is absent — and the
-credential is issued only once, so this state cannot reproduce it. If a
-completion reported the key was already issued, register under a new
-`WithDeviceID` or re-bind with `WithTakeover`. If a locally-registered state
-simply lacks the credential (for example a legacy bootstrap-era state file),
-clear or replace the persisted state to mint a fresh credential.
+**Lost device credential.** Match `ErrCredentialRecoveryRequired` and use
+`errors.As` to read `DeviceID` from `CredentialPersistenceError` or
+`CredentialRecoveryRequiredError`. Do not clear the state or rotate the device
+id: an owner first revokes `agent:<device_id>`, then the agent calls
+`RecoverAgentCredential` with the same store and enrollment key.
 
 **Setup key already consumed.** `ErrBootstrapSetupKeyConsumed` means a pre-issued
 one-shot setup key was accepted by an earlier enrollment and cannot enroll again.
