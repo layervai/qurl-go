@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// Typed errors for RegisterAgent, the NHP-native agent enrollment front door.
+// Typed errors for the NHP-native agent enrollment and lifecycle front doors.
 //
 // These mirror the sentinel + typed-view conventions the rest of the package
 // uses (facade.go's error sentinels, reply.go's ServerDenyError view): match a
@@ -16,24 +16,24 @@ import (
 // actionable when read by an operator or an LLM agent driving registration —
 // it names the next concrete step, not just the failure.
 
-// ErrInvalidRegisterConfig is returned when RegisterAgent inputs or options are
-// invalid before any network call.
+// ErrInvalidRegisterConfig is returned when registration/lifecycle inputs or
+// options are invalid before any network call.
 var ErrInvalidRegisterConfig = errors.New("qurl: invalid register config")
 
 // ErrOTPPending is returned (wrapped in *OTPPendingError) when account-key
 // registration has requested an email one-time code and is waiting for the
 // caller to supply it. It is not a failure: it is the pause point of the
-// two-phase email-OTP flow. Re-run RegisterAgent with WithOTP once the code
+// two-phase email-OTP flow. Re-run the same operation with WithOTP once the code
 // arrives.
 var ErrOTPPending = errors.New("qurl: registration awaiting one-time code")
 
 // ErrOTPIncorrect is returned when a supplied one-time code was rejected as
-// wrong. Re-run RegisterAgent with the correct code.
+// wrong. Re-run the same operation with the correct WithOTP code.
 var ErrOTPIncorrect = errors.New("qurl: one-time code incorrect")
 
 // ErrOTPExpired is returned when a supplied one-time code was valid but has
-// expired. Re-run RegisterAgent with no code to request a fresh one, then
-// supply the new code.
+// expired. Re-run the same operation with no code to request a fresh one, then
+// re-run it with the new WithOTP code.
 var ErrOTPExpired = errors.New("qurl: one-time code expired")
 
 // ErrRegistrationRateLimited is returned when the enrollment service is rate
@@ -56,7 +56,7 @@ type DeviceKeyQuotaExceededError struct {
 }
 
 func (e *DeviceKeyQuotaExceededError) Error() string {
-	message := fmt.Sprintf("qurl: cannot issue a device key for %q because the account has reached its active device-key limit; revoke an existing unused device key to free a slot, then retry completion; if replacing an existing device, revoke that device key and retry with qurl.WithTakeover", e.DeviceID)
+	message := fmt.Sprintf("qurl: cannot issue a device key for %q because the account has reached its active device-key limit; revoke an existing unused device key to free a slot, then retry the same qurl.RegisterAgent or qurl.RecoverAgentCredential operation; only when intentionally re-binding this device id from a different key, revoke that device key and retry with qurl.WithTakeover", e.DeviceID)
 	return messageWithCause(message, e.Cause)
 }
 
@@ -185,7 +185,7 @@ func (e *CredentialPersistenceError) Unwrap() []error {
 
 // ErrRegistrationInvalidInput is returned when the enrollment service rejected a
 // registration input as malformed (for example a device id that is not a valid
-// identifier). Fix the input and re-run RegisterAgent.
+// identifier). Fix the input and re-run the same operation.
 var ErrRegistrationInvalidInput = errors.New("qurl: registration input invalid")
 
 // ErrRegistrationDisabled is returned when agent registration is disabled for
@@ -193,9 +193,9 @@ var ErrRegistrationInvalidInput = errors.New("qurl: registration input invalid")
 var ErrRegistrationDisabled = errors.New("qurl: agent registration disabled")
 
 // ErrRegistrationRetryLater is returned when the registration relay answers
-// with an overload cookie-challenge or the completion route's pre-auth admission
-// layer reports structured service_unavailable before the mint handler ran.
-// Back off briefly and re-run the same operation.
+// with an overload cookie-challenge or completion reports a structured,
+// authoritative no-write service_unavailable admission result. Back off briefly
+// and re-run the same operation.
 var ErrRegistrationRetryLater = errors.New("qurl: registration temporarily unavailable; retry shortly")
 
 // ErrRegisterReplyMalformed is returned when the registration relay returned a
@@ -232,7 +232,7 @@ func (e *OTPPendingError) Error() string {
 		dest = e.MaskedEmail
 	}
 	return fmt.Sprintf(
-		"qurl: a one-time code was requested for %s — check that inbox and re-run qurl.RegisterAgent with qurl.WithOTP(\"<code>\") to finish enrollment. Codes expire after a short window; if none arrives, re-running without WithOTP re-sends a fresh code after a short cooldown.",
+		"qurl: a one-time code was requested for %s — check that inbox and re-run the same qurl operation with qurl.WithOTP(\"<code>\"). Codes expire after a short window; if none arrives, re-running the same operation without WithOTP re-sends a fresh code after a short cooldown.",
 		dest,
 	)
 }

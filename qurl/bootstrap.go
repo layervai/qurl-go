@@ -108,9 +108,11 @@ type AgentState struct {
 	// KeyID is the enrollment key id (key_...) from registration-info, carried as
 	// the NHP usrId; like RelayURL it is refreshed from a fresh pre-flight on resume.
 	KeyID string `json:"key_id,omitempty"`
-	// OTPRequestedAt marks the account-key otp_pending state: an email one-time
-	// code has been requested and RegisterAgent is waiting for WithOTP. Cleared
-	// implicitly once RegisteredAt is set.
+	// OTPRequestedAt marks the account-key otp_pending/cooldown state: an email
+	// one-time code has been requested and the current operation is waiting for
+	// WithOTP. Enrollment clears it when registration completes. A completed state
+	// can retain it while account-key refresh/recovery is paused after dispatch;
+	// the successful lifecycle resume clears it after RAK.
 	OTPRequestedAt *time.Time `json:"otp_requested_at,omitempty"`
 }
 

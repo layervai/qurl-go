@@ -433,7 +433,10 @@ These are deliberately separate operations:
   Refresh with an account key uses the same email-OTP dispatch/two-call resume
   as enrollment: a static `WithOTP` on a first call cannot match the code that
   call dispatches, so it returns `OTPPendingError`; resume with the received
-  code. Fleet connectors should set
+  code. The anti-spam `OTPRequestedAt` marker is persisted before dispatch/RAK,
+  while refreshed binding metadata remains uncommitted until RAK succeeds.
+  Account keys remain allowed by default for generic `RegisterAgent`
+  compatibility; fleet connectors should set
   `WithAllowedRegistrationKeyKinds(RegistrationKeyKindBootstrap)` so routine
   binding repair cannot fan out operator OTP emails.
 - `RecoverAgentCredential` is the operator-controlled path for a revoked or
@@ -477,8 +480,8 @@ a transport failure after dispatch, an unclassified 5xx, malformed/invalid 2xx
 response, response agent-id mismatch, or a completion peer key that differs from
 the peer that authenticated the RAK. Completion is first-issue-only, so none of
 those conditions is safe to retry automatically. The sole 5xx exception is
-qurl-service's structured `503 service_unavailable`, emitted by completion's
-pre-auth admission layer before the mint handler runs; that maps to
+qurl-service's structured `503 service_unavailable`, emitted only as an
+authoritative no-write admission result; that maps to
 `ErrRegistrationRetryLater`. The SDK preserves the RAK-authenticated peer and
 requires qurl-service's completion response to report the same key; the response
 cannot silently rotate binding state after the handshake.
@@ -531,12 +534,12 @@ Every message names the next concrete step.
 
 | Error | When it happens | Handle it by |
 | --- | --- | --- |
-| `*qurl.OTPPendingError` (unwraps `ErrOTPPending`) | Account path emailed a code and is waiting for it. Not a failure — the pause point. | `errors.As` to read `MaskedEmail`; re-run with `WithOTP(code)`. |
-| `qurl.ErrOTPIncorrect` | Supplied one-time code was wrong. | Re-run with the correct `WithOTP` code. |
-| `qurl.ErrOTPExpired` | Code was valid but expired. | Re-run with **no** code to request a fresh one, then supply it. |
+| `*qurl.OTPPendingError` (unwraps `ErrOTPPending`) | Account path emailed a code and is waiting for it. Not a failure — the pause point. | `errors.As` to read `MaskedEmail`; re-run the same operation with `WithOTP(code)`. |
+| `qurl.ErrOTPIncorrect` | Supplied one-time code was wrong. | Re-run the same operation with the correct `WithOTP` code. |
+| `qurl.ErrOTPExpired` | Code was valid but expired. | Re-run the same operation with **no** code to request a fresh one, then re-run it with the new code. |
 | `qurl.ErrRegistrationRateLimited` | Too many attempts, or the service is rate limiting. | Back off and retry later. |
-| `*qurl.DeviceKeyQuotaExceededError` (unwraps `ErrDeviceKeyQuotaExceeded` and `*APIError`) | Completion's atomic mint transaction rejected without writing because the account has reached its active device-key limit. | Revoke an existing unused agent device key to free a slot, then retry. If replacing an existing device, revoke that device key and retry with `WithTakeover`. |
-| `qurl.ErrRegistrationRetryLater` | The relay returned an overload cookie, or completion's pre-auth admission layer returned structured `service_unavailable` before minting. | Back off briefly and re-run. |
+| `*qurl.DeviceKeyQuotaExceededError` (unwraps `ErrDeviceKeyQuotaExceeded` and `*APIError`) | Completion's atomic mint transaction rejected without writing because the account has reached its active device-key limit. | Revoke an existing unused agent device key to free a slot, then retry the same `RegisterAgent` or `RecoverAgentCredential` operation. Use `WithTakeover` only for an intentional different-key rebind of that device id. |
+| `qurl.ErrRegistrationRetryLater` | The relay returned an overload cookie, or completion returned a structured, authoritative no-write `service_unavailable` admission result. | Back off briefly and re-run the same operation. |
 | `qurl.ErrKeyRejected` | The API key (or a pre-issued key used as the credential) was rejected. | Check the key and re-run. |
 | `qurl.ErrBootstrapSetupKeyConsumed` | A pre-issued **one-shot** setup key was already consumed by an earlier enrollment (RAK code 52108, or reported by the completion call). | Mint a fresh setup key, or restore the completed agent state from the run that consumed it. |
 | `qurl.ErrAgentIdentityConflict` | This device id is already enrolled to a different key or agent. | Re-run with `WithTakeover()` to re-bind, or pick a different `WithDeviceID`. |
@@ -603,9 +606,8 @@ deliberately re-bind it — this **replaces** the prior binding, so use it
 knowingly — or choose a different id with `WithDeviceID`.
 
 **Rate limiting / retry.** `ErrRegistrationRateLimited` (too many attempts) and
-`ErrRegistrationRetryLater` (relay overload or a pre-mint admission outage) are
-both back-off signals. Wait and re-run; `RegisterAgent` resumes the same
-enrollment.
+`ErrRegistrationRetryLater` (relay overload or an authoritative no-write
+admission outage) are both back-off signals. Wait and re-run the same operation.
 
 **Device-key quota.** `ErrDeviceKeyQuotaExceeded` is an authoritative no-write
 result from the atomic mint transaction, not credential ambiguity. An owner must
@@ -613,8 +615,8 @@ revoke an existing unused agent device key to free a slot; then retry the same
 registration or recovery operation. `DeviceKeyQuotaExceededError` carries the
 attempted `DeviceID`, and the underlying `*APIError` remains available with
 `errors.As`.
-If replacing an existing device, revoke that device key and retry with
-`WithTakeover`.
+Use `WithTakeover` only when intentionally re-binding that device id from a
+different key: revoke that device key, then retry with the takeover option.
 
 ## Migrating from BootstrapAgent
 

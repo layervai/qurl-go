@@ -1327,7 +1327,7 @@ func TestRegisterAgent_Completion409MapsToDeviceCredentialMissing(t *testing.T) 
 
 func TestRegisterAgent_BareCompletion409RequiresRecoveryAndPreservesAPIError(t *testing.T) {
 	// A 409 that arrives WITHOUT the structured device_key_already_issued code
-	// (e.g. a new service/proxy conflict) is not authoritative pre-mint. Fail
+	// (e.g. a new service/proxy conflict) is not authoritative no-write. Fail
 	// closed as persistence ambiguity while preserving *APIError for inspection.
 	h := newRegisterHarness(t)
 	h.svc.keyKind = keyKindBootstrap
@@ -1699,10 +1699,13 @@ func TestRegisterAgent_WithTakeoverSetsFlagInREG(t *testing.T) {
 func TestOTPPendingError_MessageIsActionable(t *testing.T) {
 	e := &OTPPendingError{RequestedAt: time.Now(), MaskedEmail: "j***@x.com"}
 	msg := e.Error()
-	for _, want := range []string{"j***@x.com", "qurl.WithOTP", "qurl.RegisterAgent", "expire"} {
+	for _, want := range []string{"j***@x.com", "qurl.WithOTP", "same qurl operation", "expire"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("OTPPendingError message %q missing %q", msg, want)
 		}
+	}
+	if strings.Contains(msg, "qurl.RegisterAgent") {
+		t.Errorf("OTPPendingError message hard-codes the wrong lifecycle operation: %q", msg)
 	}
 	if !errors.Is(e, ErrOTPPending) {
 		t.Error("OTPPendingError should match ErrOTPPending")

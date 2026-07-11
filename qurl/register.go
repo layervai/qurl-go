@@ -235,10 +235,8 @@ func (cfg *registerConfig) runLocked(ctx context.Context, key string, store Agen
 	case keyKindBootstrap:
 		return cfg.runBootstrapPath(ctx, key, store, state, peer, relayURL)
 	case keyKindAccount:
-		if strings.TrimSpace(info.MaskedEmail) == "" {
-			// Fail fast before spending an OTP round trip: an account key with no
-			// email on file can never receive the code.
-			return nil, errAccountKeyMissingEmail()
+		if err := requireAccountKeyEmail(info); err != nil {
+			return nil, err
 		}
 		return cfg.runAccountPath(ctx, key, store, state, peer, relayURL, info.MaskedEmail)
 	default:
@@ -249,6 +247,16 @@ func (cfg *registerConfig) runLocked(ctx context.Context, key string, store Agen
 
 func errAccountKeyMissingEmail() error {
 	return fmt.Errorf("%w: the account key has no email on file for the one-time code; add an email or use a pre-issued key", ErrNoAccountEmail)
+}
+
+// requireAccountKeyEmail fails fast before spending an OTP round trip when an
+// account key has no masked email on file: it can never receive the code. Shared
+// by enrollment and forced refresh/recovery so the precondition cannot drift.
+func requireAccountKeyEmail(info *registrationInfoResponse) error {
+	if strings.TrimSpace(info.MaskedEmail) == "" {
+		return errAccountKeyMissingEmail()
+	}
+	return nil
 }
 
 func (cfg *registerConfig) errUnknownKeyKind(kind string) error {
@@ -323,7 +331,7 @@ func (cfg *registerConfig) runAccountPath(ctx context.Context, key string, store
 	// nothing unless a code source is absent and the cooldown has elapsed (below).
 	freshRequest := state.OTPRequestedAt == nil
 	if freshRequest {
-		if err := cfg.requestOTP(ctx, store, state, peer, relayURL, key); err != nil {
+		if err := cfg.requestOTP(ctx, store, state, key); err != nil {
 			return nil, err
 		}
 	}
@@ -357,7 +365,7 @@ func (cfg *registerConfig) runAccountPath(ctx context.Context, key string, store
 		// re-run refreshes an expired code), then pause for the caller to supply
 		// the code on the next run.
 		if cfg.clock().Sub(derefTime(state.OTPRequestedAt, cfg.clock())) >= otpResendCooldown {
-			if err := cfg.requestOTP(ctx, store, state, peer, relayURL, key); err != nil {
+			if err := cfg.requestOTP(ctx, store, state, key); err != nil {
 				return nil, err
 			}
 		}
@@ -411,8 +419,8 @@ func (cfg *registerConfig) registerExchangeChecked(ctx context.Context, state *A
 // intermittent write failures, dispatch a code, fail the save, and re-send on
 // the next run as a fresh request with no backoff.) On a persist failure the
 // in-memory OTPRequestedAt mutation is rolled back so it matches what was stored.
-func (cfg *registerConfig) requestOTP(ctx context.Context, store AgentStateStore, state *AgentState, peer *NHPServerPeerInfo, relayURL, key string) error {
-	return cfg.requestOTPAt(ctx, store, state, state, peer, relayURL, key, cfg.clock())
+func (cfg *registerConfig) requestOTP(ctx context.Context, store AgentStateStore, state *AgentState, key string) error {
+	return cfg.requestOTPAt(ctx, store, state, state, key, cfg.clock())
 }
 
 // requestOTPAt centralizes the anti-spam save-before-send ordering. persisted is
@@ -420,14 +428,14 @@ func (cfg *registerConfig) requestOTP(ctx context.Context, store AgentStateStore
 // refreshed candidate whose current peer/relay coordinates must carry the OTP.
 // This pre-send write commits only OTPRequestedAt on persisted; candidate's new
 // binding metadata is not durable until an authenticated RAK succeeds.
-func (cfg *registerConfig) requestOTPAt(ctx context.Context, store AgentStateStore, persisted, requestState *AgentState, peer *NHPServerPeerInfo, relayURL, key string, now time.Time) error {
+func (cfg *registerConfig) requestOTPAt(ctx context.Context, store AgentStateStore, persisted, requestState *AgentState, key string, now time.Time) error {
 	previous := persisted.OTPRequestedAt
 	persisted.OTPRequestedAt = &now
 	if err := store.SaveAgentState(ctx, persisted); err != nil {
 		persisted.OTPRequestedAt = previous // restore the unsaved in-memory value
 		return err
 	}
-	return cfg.sendOTP(ctx, requestState, peer, relayURL, key)
+	return cfg.sendOTP(ctx, requestState, requestState.NHPPeer, requestState.RelayURL, key)
 }
 
 // tryCompletionProbe attempts a completion fetch to self-heal a crash that
@@ -739,7 +747,7 @@ func (cfg *registerConfig) mapCompletionHTTPError(err error, path pathKind, devi
 	if path == pathBootstrap && isBootstrapConsumedCompletion(apiErr) {
 		return fmt.Errorf("%w: %s: %w", ErrBootstrapSetupKeyConsumed, bootstrapConsumedGuidance, err)
 	}
-	if mapped := mapCommonRegistrationHTTPError(apiErr, err, "the API key was rejected before completion", "completion admission failed before credential minting"); mapped != nil {
+	if mapped := mapCommonRegistrationHTTPError(apiErr, err, "the API key was rejected with no device-key write", "completion returned an authoritative no-write admission failure"); mapped != nil {
 		return mapped
 	}
 	if isDeviceKeyAlreadyIssued(apiErr) {

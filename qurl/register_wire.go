@@ -154,7 +154,7 @@ type rakMapping struct {
 // deliberately ABSENT — its meaning splits by enrollment path, so mapRAKError
 // resolves it ahead of the table and sentinelForRAKCode returns nil for it.
 var rakMappings = map[string]rakMapping{
-	rakCredentialExpired: {ErrOTPExpired, "request a fresh code by re-running qurl.RegisterAgent with no WithOTP, then supply the new code"},
+	rakCredentialExpired: {ErrOTPExpired, "request a fresh code by re-running the same operation with no WithOTP, then re-run it with the new code"},
 	rakAttemptsExceeded:  {ErrRegistrationRateLimited, "too many attempts; wait before retrying registration"},
 	rakRateLimited:       {ErrRegistrationRateLimited, "back off and retry registration later"},
 	rakIdentityConflict:  {ErrAgentIdentityConflict, "this device id is already enrolled; re-run with qurl.WithTakeover to re-bind it, or pick a different qurl.WithDeviceID"},
@@ -191,7 +191,7 @@ func mapRAKError(ack *registerAckBody, path pathKind) error {
 		if path == pathBootstrap {
 			return fmt.Errorf("%w: pre-issued key was rejected by the enrollment service%s", ErrKeyRejected, detailSuffix(msg))
 		}
-		return fmt.Errorf("%w: the one-time code was rejected; re-run qurl.RegisterAgent with the correct qurl.WithOTP code%s", ErrOTPIncorrect, detailSuffix(msg))
+		return fmt.Errorf("%w: the one-time code was rejected; re-run the same operation with the correct qurl.WithOTP code%s", ErrOTPIncorrect, detailSuffix(msg))
 	}
 	if m, ok := rakMappings[code]; ok {
 		return fmt.Errorf("%w: %s%s", m.sentinel, m.detail, detailSuffix(msg))

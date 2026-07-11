@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -433,6 +434,9 @@ func TestAgentLifecycle_FreshAccountLiteralOTPDispatchesThenPauses(t *testing.T)
 			if !errors.As(err, &pending) || !errors.Is(err, ErrOTPPending) {
 				t.Fatalf("fresh account literal = %v, want OTP pending", err)
 			}
+			if !strings.Contains(err.Error(), "same qurl operation") || strings.Contains(err.Error(), "qurl.RegisterAgent") {
+				t.Fatalf("pending guidance is not lifecycle-safe: %v", err)
+			}
 			if h.nhp.otpCount() != 1 || h.nhp.regCount() != regsBefore {
 				t.Fatalf("fresh literal side effects: otp=%d regs=%d, want 1/%d", h.nhp.otpCount(), h.nhp.regCount(), regsBefore)
 			}
@@ -442,6 +446,116 @@ func TestAgentLifecycle_FreshAccountLiteralOTPDispatchesThenPauses(t *testing.T)
 			state := h.loadState(t)
 			if state.OTPRequestedAt == nil || state.RegisteredAt == nil || state.DeviceAPIKey != "lv_device_secret" {
 				t.Fatalf("fresh literal persisted more than the OTP marker: %#v", state)
+			}
+		})
+	}
+}
+
+func TestRecoverAgentCredential_AccountLiteralResumesAfterPending(t *testing.T) {
+	h := registeredHarness(t)
+	h.svc.mu.Lock()
+	h.svc.keyKind = keyKindAccount
+	h.svc.maskedEmail = "j***@example.test"
+	h.svc.deviceAPIKey = "lv_device_recovered"
+	h.svc.mu.Unlock()
+	if _, err := RecoverAgentCredential(context.Background(), "lv_account", h.store, h.registerOpts(WithOTP("stale-literal"))...); !errors.Is(err, ErrOTPPending) {
+		t.Fatalf("fresh recovery literal = %v, want OTP pending", err)
+	}
+	h.nhp.mu.Lock()
+	h.nhp.expectCredential = "424242"
+	h.nhp.mu.Unlock()
+	regsBefore := h.nhp.regCount()
+	completionBefore := h.svc.completionCalls.Load()
+
+	client, err := RecoverAgentCredential(context.Background(), "lv_account", h.store, h.registerOpts(WithOTP("424242"))...)
+	if err != nil || client == nil {
+		t.Fatalf("account recovery resume = client %v, error %v", client, err)
+	}
+	if h.nhp.regCount() != regsBefore+1 || h.svc.completionCalls.Load() != completionBefore+1 {
+		t.Fatalf("recovery resume REG/completion = %d/%d, want %d/%d", h.nhp.regCount(), h.svc.completionCalls.Load(), regsBefore+1, completionBefore+1)
+	}
+	state := h.loadState(t)
+	if state.OTPRequestedAt != nil || state.DeviceAPIKey != "lv_device_recovered" {
+		t.Fatalf("recovery resume did not commit replacement: %#v", state)
+	}
+}
+
+func TestAgentLifecycle_FreshAccountOTPProviderCompletesInOneCall(t *testing.T) {
+	tests := []struct {
+		name                string
+		wantCompletionDelta int32
+		run                 func(*registerHarness, RegisterOption) error
+	}{
+		{name: "refresh", run: func(h *registerHarness, provider RegisterOption) error {
+			_, err := RefreshAgentRegistration(context.Background(), "lv_account", h.store, h.registerOpts(provider)...)
+			return err
+		}},
+		{name: "recovery", wantCompletionDelta: 1, run: func(h *registerHarness, provider RegisterOption) error {
+			_, err := RecoverAgentCredential(context.Background(), "lv_account", h.store, h.registerOpts(provider)...)
+			return err
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := registeredHarness(t)
+			h.svc.mu.Lock()
+			h.svc.keyKind = keyKindAccount
+			h.svc.maskedEmail = "j***@example.test"
+			h.svc.deviceAPIKey = "lv_device_provider"
+			h.svc.mu.Unlock()
+			h.nhp.mu.Lock()
+			h.nhp.expectCredential = "provider-code"
+			h.nhp.mu.Unlock()
+			regsBefore := h.nhp.regCount()
+			completionBefore := h.svc.completionCalls.Load()
+			var providerCalls atomic.Int32
+			provider := WithOTPProvider(func(context.Context) (string, error) {
+				providerCalls.Add(1)
+				return "provider-code", nil
+			})
+
+			if err := tc.run(h, provider); err != nil {
+				t.Fatalf("fresh provider lifecycle: %v", err)
+			}
+			if providerCalls.Load() != 1 || h.nhp.otpCount() != 1 || h.nhp.regCount() != regsBefore+1 {
+				t.Fatalf("provider/OTP/REG = %d/%d/%d, want 1/1/%d", providerCalls.Load(), h.nhp.otpCount(), h.nhp.regCount(), regsBefore+1)
+			}
+			if h.svc.completionCalls.Load() != completionBefore+tc.wantCompletionDelta {
+				t.Fatalf("completion calls = %d, want %d", h.svc.completionCalls.Load(), completionBefore+tc.wantCompletionDelta)
+			}
+			if state := h.loadState(t); state.OTPRequestedAt != nil {
+				t.Fatalf("provider flow left OTP marker: %#v", state)
+			}
+		})
+	}
+}
+
+func TestRefreshAgentRegistration_OTPErrorsUseLifecycleSafeGuidance(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		rakCode string
+		want    error
+	}{
+		{name: "incorrect", rakCode: rakCredentialInvalid, want: ErrOTPIncorrect},
+		{name: "expired", rakCode: rakCredentialExpired, want: ErrOTPExpired},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := registeredHarness(t)
+			h.svc.mu.Lock()
+			h.svc.keyKind = keyKindAccount
+			h.svc.maskedEmail = "j***@example.test"
+			h.svc.mu.Unlock()
+			if _, err := RefreshAgentRegistration(context.Background(), "lv_account", h.store, h.registerOpts()...); !errors.Is(err, ErrOTPPending) {
+				t.Fatalf("prime OTP marker: %v", err)
+			}
+			h.nhp.mu.Lock()
+			h.nhp.rakErrCode = tc.rakCode
+			h.nhp.rakErrMsg = "scripted OTP denial"
+			h.nhp.mu.Unlock()
+
+			_, err := RefreshAgentRegistration(context.Background(), "lv_account", h.store, h.registerOpts(WithOTP("bad-code"))...)
+			if !errors.Is(err, tc.want) || !strings.Contains(err.Error(), "same operation") || strings.Contains(err.Error(), "qurl.RegisterAgent") {
+				t.Fatalf("lifecycle OTP guidance = %v, want %v and same-operation guidance", err, tc.want)
 			}
 		})
 	}
@@ -849,7 +963,39 @@ func TestRegisterAgent_CompletionOutcomeUnknownRequiresRecoveryWithoutRetry(t *t
 	}
 }
 
-func TestRegisterAgent_CompletionPreAuthUnavailableRemainsRetryable(t *testing.T) {
+func TestRegisterAgent_BareCompletion500RequiresRecoveryWithoutRetry(t *testing.T) {
+	h := newRegisterHarness(t)
+	h.armDevicePubOnInfo()
+	h.handlerMu.Lock()
+	inner := h.handler
+	h.handlerMu.Unlock()
+	var attempts atomic.Int32
+	h.setHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/v1/agent/registration/complete" {
+			attempts.Add(1)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		inner.ServeHTTP(w, r)
+	}))
+
+	_, err := RegisterAgent(context.Background(), "lv_enroll", h.store, h.registerOpts()...)
+	var persistErr *CredentialPersistenceError
+	var apiErr *APIError
+	if !errors.As(err, &persistErr) || !errors.Is(err, ErrCredentialRecoveryRequired) ||
+		!errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("bare completion 500 = %v, want persistence ambiguity preserving API 500", err)
+	}
+	if attempts.Load() != 1 || h.nhp.regCount() != 1 {
+		t.Fatalf("bare 500 completion/REG attempts = %d/%d, want 1/1", attempts.Load(), h.nhp.regCount())
+	}
+	state := h.loadState(t)
+	if state.RegisteredAt != nil || state.DeviceAPIKey != "" {
+		t.Fatalf("bare completion 500 persisted credential: %#v", state)
+	}
+}
+
+func TestRegisterAgent_CompletionNoWriteUnavailableRemainsRetryable(t *testing.T) {
 	h := newRegisterHarness(t)
 	h.armDevicePubOnInfo()
 	h.handlerMu.Lock()
@@ -860,7 +1006,7 @@ func TestRegisterAgent_CompletionPreAuthUnavailableRemainsRetryable(t *testing.T
 		if r.Method == http.MethodPost && r.URL.Path == "/v1/agent/registration/complete" {
 			attempts.Add(1)
 			w.WriteHeader(http.StatusServiceUnavailable)
-			_, _ = fmt.Fprint(w, `{"error":{"code":"service_unavailable","detail":"pre-auth limiter unavailable"}}`)
+			_, _ = fmt.Fprint(w, `{"error":{"code":"service_unavailable","detail":"no-write admission unavailable"}}`)
 			return
 		}
 		inner.ServeHTTP(w, r)
@@ -868,17 +1014,17 @@ func TestRegisterAgent_CompletionPreAuthUnavailableRemainsRetryable(t *testing.T
 
 	_, err := RegisterAgent(context.Background(), "lv_enroll", h.store, h.registerOpts()...)
 	if !errors.Is(err, ErrRegistrationRetryLater) {
-		t.Fatalf("want retry-later pre-auth failure, got %v", err)
+		t.Fatalf("want retry-later no-write failure, got %v", err)
 	}
 	if errors.Is(err, ErrCredentialRecoveryRequired) {
-		t.Fatalf("pre-auth service_unavailable must not be ambiguous mint: %v", err)
+		t.Fatalf("no-write service_unavailable must not be ambiguous mint: %v", err)
 	}
 	if attempts.Load() != 1 {
 		t.Fatalf("completion attempts = %d, want 1", attempts.Load())
 	}
 }
 
-func TestRegisterAgent_Completion4xxRequiresExplicitPreMintClassification(t *testing.T) {
+func TestRegisterAgent_Completion4xxRequiresExplicitNoWriteClassification(t *testing.T) {
 	cases := []struct {
 		name          string
 		status        int
@@ -897,7 +1043,7 @@ func TestRegisterAgent_Completion4xxRequiresExplicitPreMintClassification(t *tes
 		{name: "quota code wrong status", status: http.StatusBadRequest, code: "device_key_quota_exceeded", wantAmbiguous: true},
 		{name: "unclassified newer status", status: http.StatusUnprocessableEntity, code: "new_completion_error", wantAmbiguous: true},
 		{name: "unclassified gateway timeout", status: http.StatusGatewayTimeout, code: "gateway_timeout", wantAmbiguous: true},
-		{name: "pre-mint rate limit", status: http.StatusTooManyRequests, code: "rate_limited", wantMapped: ErrRegistrationRateLimited},
+		{name: "no-write rate limit", status: http.StatusTooManyRequests, code: "rate_limited", wantMapped: ErrRegistrationRateLimited},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -927,7 +1073,7 @@ func TestRegisterAgent_Completion4xxRequiresExplicitPreMintClassification(t *tes
 					t.Fatalf("unclassified completion 4xx = %v, want persistence ambiguity", err)
 				}
 			} else if errors.As(err, &persistenceErr) || errors.Is(err, ErrCredentialRecoveryRequired) {
-				t.Fatalf("authoritative pre-mint 4xx misclassified as mint ambiguity: %v", err)
+				t.Fatalf("authoritative no-write 4xx misclassified as mint ambiguity: %v", err)
 			}
 			if tc.wantMapped != nil && !errors.Is(err, tc.wantMapped) {
 				t.Fatalf("completion error = %v, want %v", err, tc.wantMapped)
@@ -996,6 +1142,13 @@ func TestRegisterAgent_DeviceKeyQuotaExceededIsAuthoritativeNoWriteForBothPaths(
 			if quotaErr.DeviceID == "" || !strings.Contains(err.Error(), "revoke an existing unused device key") {
 				t.Fatalf("quota error lacks device id/guidance: %#v / %v", quotaErr, err)
 			}
+			operatorMessage := (&DeviceKeyQuotaExceededError{DeviceID: quotaErr.DeviceID}).Error()
+			if strings.Contains(operatorMessage, "retry completion") ||
+				!strings.Contains(operatorMessage, "qurl.RegisterAgent") ||
+				!strings.Contains(operatorMessage, "qurl.RecoverAgentCredential") ||
+				!strings.Contains(operatorMessage, "different key") {
+				t.Fatalf("quota typed guidance is not public-operation-safe: %q", operatorMessage)
+			}
 			var apiErr *APIError
 			if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusConflict || apiErr.Code != "device_key_quota_exceeded" || apiErr.Title != "Device Key Quota Exceeded" {
 				t.Fatalf("quota error lost API cause: %v", err)
@@ -1015,6 +1168,41 @@ func TestRegisterAgent_DeviceKeyQuotaExceededIsAuthoritativeNoWriteForBothPaths(
 				t.Fatalf("quota response persisted a credential: %#v", state)
 			}
 		})
+	}
+}
+
+func TestRecoverAgentCredential_DeviceKeyQuotaPreservesPriorState(t *testing.T) {
+	h := registeredHarness(t)
+	before := h.loadState(t)
+	h.handlerMu.Lock()
+	inner := h.handler
+	h.handlerMu.Unlock()
+	var completionAttempts atomic.Int32
+	h.setHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/v1/agent/registration/complete" {
+			completionAttempts.Add(1)
+			w.WriteHeader(http.StatusConflict)
+			_, _ = fmt.Fprint(w, `{"error":{"code":"device_key_quota_exceeded","title":"Device Key Quota Exceeded","detail":"the account has reached its active device key limit. Revoke an existing device key to free a slot, then retry completion. If replacing an existing device, revoke that device key and use takeover re-enrollment."}}`)
+			return
+		}
+		inner.ServeHTTP(w, r)
+	}))
+
+	_, err := RecoverAgentCredential(context.Background(), "lv_enroll", h.store, h.registerOpts()...)
+	var quotaErr *DeviceKeyQuotaExceededError
+	var apiErr *APIError
+	if !errors.Is(err, ErrDeviceKeyQuotaExceeded) || !errors.As(err, &quotaErr) || !errors.As(err, &apiErr) {
+		t.Fatalf("recovery quota = %v, want typed quota + API error", err)
+	}
+	if apiErr.StatusCode != http.StatusConflict || apiErr.Code != "device_key_quota_exceeded" || errors.Is(err, ErrCredentialRecoveryRequired) {
+		t.Fatalf("recovery quota classification = %v", err)
+	}
+	if completionAttempts.Load() != 1 {
+		t.Fatalf("recovery quota completion attempts = %d, want 1", completionAttempts.Load())
+	}
+	after := h.loadState(t)
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("quota recovery changed prior durable state: before=%#v after=%#v", before, after)
 	}
 }
 

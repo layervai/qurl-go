@@ -53,7 +53,9 @@ func OpenRegisteredAgent(ctx context.Context, store AgentStateStore, opts ...Cli
 // An account key follows the email-OTP flow and may require a dispatch plus a
 // second call with WithOTP/WithOTPProvider. A static WithOTP on the first call
 // dispatches a fresh code and returns OTPPendingError; supply the received code
-// on the resume call. Fleet connectors should normally
+// on the resume call. The anti-spam OTPRequestedAt marker is durably committed
+// before dispatch/RAK; refreshed binding metadata still commits only after RAK.
+// Fleet connectors should normally
 // enforce RegistrationKeyKindBootstrap with WithAllowedRegistrationKeyKinds so
 // a binding refresh cannot fan out operator OTP emails.
 func RefreshAgentRegistration(ctx context.Context, key string, store AgentStateStore, opts ...RegisterOption) (*AgentState, error) {
@@ -231,8 +233,8 @@ func (cfg *registerConfig) forcedRegistrationCredential(ctx context.Context, key
 	case keyKindBootstrap:
 		return key, pathBootstrap, nil
 	case keyKindAccount:
-		if strings.TrimSpace(info.MaskedEmail) == "" {
-			return "", pathAccount, errAccountKeyMissingEmail()
+		if err := requireAccountKeyEmail(info); err != nil {
+			return "", pathAccount, err
 		}
 		now := cfg.clock()
 		freshRequest := persisted.OTPRequestedAt == nil
@@ -241,9 +243,9 @@ func (cfg *registerConfig) forcedRegistrationCredential(ctx context.Context, key
 		// literal on a fresh lifecycle call cannot match the newly dispatched code:
 		// persist/send, then pause so the caller can resume with the received code.
 		if dispatchDue && (cfg.otp == "" || freshRequest) {
-			// candidate carries the refreshed coordinates; send over them rather
-			// than the persisted (possibly stale) binding.
-			if err := cfg.requestOTPAt(ctx, store, persisted, candidate, candidate.NHPPeer, candidate.RelayURL, key, now); err != nil {
+			// candidate carries the refreshed coordinates; requestOTPAt sends over
+			// them rather than the persisted (possibly stale) binding.
+			if err := cfg.requestOTPAt(ctx, store, persisted, candidate, key, now); err != nil {
 				return "", pathAccount, err
 			}
 		}
