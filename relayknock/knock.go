@@ -235,11 +235,14 @@ func DecryptReply(devicePriv, expectedServerStaticPub, packet []byte) (*Reply, e
 	case nhpACK, nhpCOK, nhpRAK:
 		return reply, nil
 	default:
-		// Wrap ErrMalformedReply so a consumer's errors.Is catches the whole
-		// "reply this request cannot accept" class uniformly — the same sentinel
-		// Exchange's replyTypeAllowed mismatch uses. A conforming server never
-		// produces an initiator-typed reply; only a byzantine one reaches here.
-		return nil, fmt.Errorf("%w: not a server reply: header type %d is initiator-only", ErrMalformedReply, reply.Type)
+		// This is the single reply-type-policy site (decryptMessage no longer
+		// gates the type). Anything that is not a reply type — a known initiator
+		// type (KNK/OTP/REG) or a garbage type that rode in outside the AEAD — is a
+		// reply this request cannot accept, wrapped in ErrMalformedReply so a
+		// consumer's errors.Is catches the whole class uniformly (the same sentinel
+		// Exchange's replyTypeAllowed mismatch uses). A conforming server never
+		// produces either; only a byzantine one reaches here.
+		return nil, fmt.Errorf("%w: header type %d is not a server reply", ErrMalformedReply, reply.Type)
 	}
 }
 
@@ -328,15 +331,13 @@ func decryptMessage(devicePriv, expectedServerStaticPub, packet []byte) (*Reply,
 	// The decoded payload size is intentionally ignored (not cross-checked against
 	// len(sealedBody)): the body AEAD fences the actual body bytes, so a tampered
 	// size field cannot smuggle in a different body — the open would fail first.
+	// This codec does NOT gate the header type — the type rides outside the AEAD,
+	// so a garbage type decrypts fine, and the single type-policy site lives in the
+	// wrapping front doors instead: DecryptReply admits only reply types and turns
+	// any other type (a known initiator type, or garbage) into ErrMalformedReply.
+	// One policy site means a consumer's errors.Is(ErrMalformedReply) catches the
+	// whole "reply this caller can't accept" class uniformly.
 	typ, _ := getTypeAndPayloadSize(header)
-	switch typ {
-	case nhpKNK, nhpACK, nhpCOK, nhpOTP, nhpREG, nhpRAK:
-	default:
-		// The type field rides outside the AEAD, so a garbage type decrypts
-		// fine — reject it explicitly instead of returning a Reply that no
-		// predicate matches.
-		return nil, fmt.Errorf("unknown NHP header type %d", typ)
-	}
 	return &Reply{
 		Type:           typ,
 		Counter:        counter,
