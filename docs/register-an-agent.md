@@ -430,6 +430,10 @@ These are deliberately separate operations:
   honored only when explicitly supplied. Its returned `AgentState` contains the
   live plaintext `DeviceAPIKey`; treat the whole value as sensitive credential
   material and do not log or serialize it outside the configured state store.
+  Refresh with an account key uses the same email-OTP dispatch/two-call resume
+  as enrollment. Fleet connectors should set
+  `WithAllowedRegistrationKeyKinds(RegistrationKeyKindBootstrap)` so routine
+  binding repair cannot fan out operator OTP emails.
 - `RecoverAgentCredential` is the operator-controlled path for a revoked or
   locally lost device credential. It preserves the persisted device id and
   X25519 keypair, sends REG, calls completion exactly once, and persists the

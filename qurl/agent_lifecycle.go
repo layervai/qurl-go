@@ -50,8 +50,12 @@ func OpenRegisteredAgent(ctx context.Context, store AgentStateStore, opts ...Cli
 // and key metadata are committed only after an authenticated successful RAK.
 // The returned AgentState includes the live plaintext DeviceAPIKey and must be
 // handled as sensitive credential material.
+// An account key follows the email-OTP flow and may require a dispatch plus a
+// second call with WithOTP/WithOTPProvider. Fleet connectors should normally
+// enforce RegistrationKeyKindBootstrap with WithAllowedRegistrationKeyKinds so
+// a binding refresh cannot fan out operator OTP emails.
 func RefreshAgentRegistration(ctx context.Context, key string, store AgentStateStore, opts ...RegisterOption) (*AgentState, error) {
-	cfg, err := validateLifecycleInputs(ctx, key, store, opts)
+	cfg, err := validateRegisterInputs(ctx, key, store, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -101,7 +105,7 @@ func validateCompletedAgentIdentity(state *AgentState, errKind error) error {
 // RegisteredAt is not required: this API also repairs the post-completion state
 // where the service may have minted a credential but its local save failed.
 func RecoverAgentCredential(ctx context.Context, key string, store AgentStateStore, opts ...RegisterOption) (*Client, error) {
-	cfg, err := validateLifecycleInputs(ctx, key, store, opts)
+	cfg, err := validateRegisterInputs(ctx, key, store, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -122,23 +126,6 @@ func RecoverAgentCredential(ctx context.Context, key string, store AgentStateSto
 		return nil, err
 	}
 	return newStoreBackedClient(store, cfg.clientBaseURL, cfg.clientHTTPClient), nil
-}
-
-func validateLifecycleInputs(ctx context.Context, key string, store AgentStateStore, opts []RegisterOption) (*registerConfig, error) {
-	cfg, err := newRegisterConfig(opts)
-	if err != nil {
-		return nil, err
-	}
-	if err := validateExactBearerToken(key, "API key", ErrInvalidRegisterConfig); err != nil {
-		return nil, err
-	}
-	if store == nil {
-		return nil, fmt.Errorf("%w: state store must not be nil", ErrInvalidRegisterConfig)
-	}
-	if err := validateContext(ctx, ErrInvalidRegisterConfig); err != nil {
-		return nil, err
-	}
-	return cfg, nil
 }
 
 func loadExistingAgentState(ctx context.Context, store AgentStateStore, errKind error) (*AgentState, error) {
@@ -195,6 +182,8 @@ func (cfg *registerConfig) forceRegistration(ctx context.Context, key string, st
 	peer := cfg.resolvePeer(info)
 	relayURL := cfg.resolveRelayURL(info)
 
+	// Shallow copy is intentional: pointer fields may alias the loaded state, but
+	// lifecycle code only reassigns those pointers and never mutates pointees.
 	candidate := *state
 	candidate.NHPPeer = peer
 	candidate.RelayURL = relayURL
@@ -230,7 +219,7 @@ func (cfg *registerConfig) forcedRegistrationCredential(ctx context.Context, key
 		return key, pathBootstrap, nil
 	case keyKindAccount:
 		if strings.TrimSpace(info.MaskedEmail) == "" {
-			return "", pathAccount, fmt.Errorf("%w: the account key has no email on file for the one-time code; add an email or use a pre-issued key", ErrNoAccountEmail)
+			return "", pathAccount, errAccountKeyMissingEmail()
 		}
 		now := cfg.clock()
 		dispatchDue := persisted.OTPRequestedAt == nil || now.Sub(*persisted.OTPRequestedAt) >= otpResendCooldown
@@ -252,6 +241,6 @@ func (cfg *registerConfig) forcedRegistrationCredential(ctx context.Context, key
 		}
 		return "", pathAccount, cfg.otpPending(persisted, info.MaskedEmail)
 	default:
-		return "", pathBootstrap, fmt.Errorf("%w: registration-info returned unknown key_kind %q", cfg.invalidConfigErr, info.KeyKind)
+		return "", pathBootstrap, cfg.errUnknownKeyKind(info.KeyKind)
 	}
 }

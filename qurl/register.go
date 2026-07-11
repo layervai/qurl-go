@@ -61,17 +61,8 @@ import (
 // one-time code, so concurrent setup multiplies OTP emails (last write to the
 // state file wins) — serialize enrollment per store yourself.
 func RegisterAgent(ctx context.Context, key string, store AgentStateStore, opts ...RegisterOption) (*Client, error) {
-	cfg, err := newRegisterConfig(opts)
+	cfg, err := validateRegisterInputs(ctx, key, store, opts)
 	if err != nil {
-		return nil, err
-	}
-	if err := validateExactBearerToken(key, "API key", ErrInvalidRegisterConfig); err != nil {
-		return nil, err
-	}
-	if store == nil {
-		return nil, fmt.Errorf("%w: state store must not be nil", ErrInvalidRegisterConfig)
-	}
-	if err := validateContext(ctx, ErrInvalidRegisterConfig); err != nil {
 		return nil, err
 	}
 	cfg.requireDeviceKey = true
@@ -137,6 +128,26 @@ func newRegisterConfig(opts []RegisterOption) (*registerConfig, error) {
 	}
 	if cfg.otp != "" && cfg.otpProvider != nil {
 		return nil, fmt.Errorf("%w: set only one of WithOTP or WithOTPProvider", ErrInvalidRegisterConfig)
+	}
+	return cfg, nil
+}
+
+// validateRegisterInputs resolves options and enforces the input contract
+// shared by RegisterAgent, RefreshAgentRegistration, and
+// RecoverAgentCredential.
+func validateRegisterInputs(ctx context.Context, key string, store AgentStateStore, opts []RegisterOption) (*registerConfig, error) {
+	cfg, err := newRegisterConfig(opts)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateExactBearerToken(key, "API key", ErrInvalidRegisterConfig); err != nil {
+		return nil, err
+	}
+	if store == nil {
+		return nil, fmt.Errorf("%w: state store must not be nil", ErrInvalidRegisterConfig)
+	}
+	if err := validateContext(ctx, ErrInvalidRegisterConfig); err != nil {
+		return nil, err
 	}
 	return cfg, nil
 }
@@ -227,13 +238,21 @@ func (cfg *registerConfig) runLocked(ctx context.Context, key string, store Agen
 		if strings.TrimSpace(info.MaskedEmail) == "" {
 			// Fail fast before spending an OTP round trip: an account key with no
 			// email on file can never receive the code.
-			return nil, fmt.Errorf("%w: the account key has no email on file for the one-time code; add an email or use a pre-issued key", ErrNoAccountEmail)
+			return nil, errAccountKeyMissingEmail()
 		}
 		return cfg.runAccountPath(ctx, key, store, state, peer, relayURL, info.MaskedEmail)
 	default:
 		// validate() already rejected unknown kinds; defensive.
-		return nil, fmt.Errorf("%w: registration-info returned unknown key_kind %q", cfg.invalidConfigErr, info.KeyKind)
+		return nil, cfg.errUnknownKeyKind(info.KeyKind)
 	}
+}
+
+func errAccountKeyMissingEmail() error {
+	return fmt.Errorf("%w: the account key has no email on file for the one-time code; add an email or use a pre-issued key", ErrNoAccountEmail)
+}
+
+func (cfg *registerConfig) errUnknownKeyKind(kind string) error {
+	return fmt.Errorf("%w: registration-info returned unknown key_kind %q", cfg.invalidConfigErr, kind)
 }
 
 func loadAgentStateIfPresent(ctx context.Context, store AgentStateStore, invalidConfigErr error) (*AgentState, bool, error) {
