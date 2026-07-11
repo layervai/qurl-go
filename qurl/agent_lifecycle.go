@@ -2,6 +2,7 @@ package qurl
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"strings"
@@ -20,10 +21,10 @@ import (
 // run RefreshAgentRegistration separately. The persisted agent id and X25519
 // keypair are still required and validated as the durable device identity.
 //
-// OpenRegisteredAgent takes ordinary ClientOption values: use WithBaseURL and
-// WithHTTPClient for its resource client. RegisterAgent and
-// RecoverAgentCredential instead use the RegisterOption equivalents
-// WithAgentClientBaseURL and WithAgentClientHTTPClient.
+// WithAgentClientBaseURL and WithAgentClientHTTPClient are dual-purpose options
+// accepted here and by RegisterAgent/RecoverAgentCredential, so one resource
+// origin/transport configuration can be reused across the lifecycle. Ordinary
+// WithBaseURL and WithHTTPClient ClientOptions remain supported here too.
 func OpenRegisteredAgent(ctx context.Context, store AgentStateStore, opts ...ClientOption) (*Client, error) {
 	if store == nil {
 		return nil, fmt.Errorf("%w: agent state store must not be nil", ErrInvalidClientConfig)
@@ -44,24 +45,68 @@ func OpenRegisteredAgent(ctx context.Context, store AgentStateStore, opts ...Cli
 	return newStoreBackedClient(store, cfg.baseURL, cfg.httpClient), nil
 }
 
+// AgentRuntimeBinding is the refreshed identity and NHP endpoint needed for an
+// immediate relay knock. It deliberately excludes DeviceAPIKey, schema, and OTP
+// state. The private key remains sensitive: obtain a caller-owned copy with
+// DeviceStaticPrivateKey, wipe that copy after use, and call Destroy when the
+// binding is no longer needed. Do not copy or log the binding.
+type AgentRuntimeBinding struct {
+	AgentID      string
+	PublicKeyB64 string
+	RegisteredAt time.Time
+	NHPPeer      NHPServerPeerInfo
+	RelayURL     string
+	KeyID        string
+
+	deviceStaticPrivateKey []byte
+}
+
+// String returns a redacted runtime summary.
+func (b AgentRuntimeBinding) String() string {
+	return fmt.Sprintf("qurl.AgentRuntimeBinding{AgentID:%q, RelayURL:%q, KeyID:%q, DeviceStaticPrivateKey:[REDACTED]}", b.AgentID, b.RelayURL, b.KeyID)
+}
+
+// GoString returns a redacted runtime summary for %#v formatting.
+func (b AgentRuntimeBinding) GoString() string { return b.String() }
+
+// DeviceStaticPrivateKey returns a fresh caller-owned copy of the 32-byte
+// X25519 private key suitable for relayknock.KnockOptions. The caller must wipe
+// the returned slice after the knocker no longer needs it.
+func (b *AgentRuntimeBinding) DeviceStaticPrivateKey() []byte {
+	if b == nil {
+		return nil
+	}
+	return append([]byte(nil), b.deviceStaticPrivateKey...)
+}
+
+// Destroy best-effort wipes the private-key bytes retained by the binding. It
+// is idempotent. The binding must not be used concurrently with Destroy.
+func (b *AgentRuntimeBinding) Destroy() {
+	if b == nil {
+		return
+	}
+	wipeBytes(b.deviceStaticPrivateKey)
+	b.deviceStaticPrivateKey = nil
+}
+
 // RefreshAgentRegistration forces registration-info plus an authenticated
 // NHP_REG/NHP_RAK exchange for an existing completed agent. It commits refreshed
 // binding metadata after RAK but never calls completion or changes DeviceAPIKey.
-// The returned state supports an immediate knock without another store/KMS load
-// and therefore contains the private key and preserved plaintext DeviceAPIKey;
-// avoid copying or logging it and retain it only for the runtime handoff.
+// It returns a narrow AgentRuntimeBinding for an immediate knock without another
+// store/KMS load; the preserved DeviceAPIKey remains only in the configured
+// store.
 //
 // An account key may pause with OTPPendingError. Its durable OTPRequestedAt
 // marker intentionally remains on the completed state across a paused or
 // abandoned attempt to throttle repeat dispatches; OpenRegisteredAgent ignores
 // it, and a successful resumed RAK clears it. Fleet connectors should normally
 // allow only RegistrationKeyKindBootstrap so refresh cannot fan out OTP email.
-func RefreshAgentRegistration(ctx context.Context, key string, store AgentStateStore, opts ...RegisterOption) (*AgentState, error) {
+func RefreshAgentRegistration(ctx context.Context, key string, store AgentStateStore, opts ...RegisterOption) (*AgentRuntimeBinding, error) {
 	cfg, err := validateRegisterInputs(ctx, key, store, opts)
 	if err != nil {
 		return nil, err
 	}
-	return withAgentSetupLock(ctx, store, func() (*AgentState, error) {
+	state, err := withAgentSetupLock(ctx, store, func() (*AgentState, error) {
 		state, err := loadCompletedRegisteredState(ctx, store, cfg.invalidConfigErr)
 		if err != nil {
 			return nil, err
@@ -71,6 +116,33 @@ func RefreshAgentRegistration(ctx context.Context, key string, store AgentStateS
 		}
 		return cfg.forceRegistration(ctx, key, store, state, false)
 	})
+	if err != nil {
+		return nil, err
+	}
+	return newAgentRuntimeBinding(state)
+}
+
+func newAgentRuntimeBinding(state *AgentState) (*AgentRuntimeBinding, error) {
+	if state == nil || state.RegisteredAt == nil || state.NHPPeer == nil {
+		return nil, fmt.Errorf("%w: refreshed agent state is incomplete", ErrInvalidRegisterConfig)
+	}
+	privateKey, err := base64.StdEncoding.Strict().DecodeString(state.PrivateKeyB64)
+	if err != nil {
+		return nil, fmt.Errorf("%w: decode refreshed agent private key: %w", ErrInvalidRegisterConfig, err)
+	}
+	if len(privateKey) != 32 {
+		wipeBytes(privateKey)
+		return nil, fmt.Errorf("%w: refreshed agent private key must be 32 bytes", ErrInvalidRegisterConfig)
+	}
+	return &AgentRuntimeBinding{
+		AgentID:                state.AgentID,
+		PublicKeyB64:           state.PublicKeyB64,
+		RegisteredAt:           *state.RegisteredAt,
+		NHPPeer:                *state.NHPPeer,
+		RelayURL:               state.RelayURL,
+		KeyID:                  state.KeyID,
+		deviceStaticPrivateKey: privateKey,
+	}, nil
 }
 
 // loadCompletedRegisteredState enforces the completed identity and intact
@@ -178,18 +250,10 @@ func withAgentSetupLock(ctx context.Context, store AgentStateStore, fn func() (*
 // the sole semantic difference: refresh commits metadata after RAK and stops;
 // recovery then calls completion exactly once and persists its replacement key.
 func (cfg *registerConfig) forceRegistration(ctx context.Context, key string, store AgentStateStore, state *AgentState, recovery bool) (*AgentState, error) {
-	info, err := cfg.fetchRegistrationInfo(ctx, key)
+	info, peer, relayURL, err := cfg.preflight(ctx, key)
 	if err != nil {
 		return nil, err
 	}
-	if err := cfg.requireAllowedKeyKind(info.KeyKind); err != nil {
-		return nil, err
-	}
-	if err := cfg.assertServerIDMatches(info.Relay.ServerID, &info.NHPServerPeer); err != nil {
-		return nil, err
-	}
-	peer := cfg.resolvePeer(info)
-	relayURL := cfg.resolveRelayURL(info)
 
 	// Isolate the candidate's retained pointer fields from the loaded state. The
 	// peer is replaced immediately below, but registration time and an existing

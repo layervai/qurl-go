@@ -1,8 +1,10 @@
 package qurl
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -235,10 +237,45 @@ func TestRefreshAgentRegistration_RotatesBindingPreservesCredentialAndSkipsCompl
 	if err != nil {
 		t.Fatalf("RefreshAgentRegistration: %v", err)
 	}
-	if refreshed.DeviceAPIKey != before.DeviceAPIKey {
+	if _, exposed := reflect.TypeOf(*refreshed).FieldByName("DeviceAPIKey"); exposed {
+		t.Fatal("AgentRuntimeBinding exposes DeviceAPIKey")
+	}
+	privateKey := refreshed.DeviceStaticPrivateKey()
+	wantPrivateKey, err := base64.StdEncoding.Strict().DecodeString(before.PrivateKeyB64)
+	if err != nil {
+		t.Fatalf("decode prior private key: %v", err)
+	}
+	if !reflect.DeepEqual(privateKey, wantPrivateKey) {
+		t.Fatal("runtime binding private key differs from persisted identity")
+	}
+	encodedBinding, err := json.Marshal(refreshed)
+	if err != nil {
+		t.Fatalf("marshal runtime binding: %v", err)
+	}
+	if bytes.Contains(encodedBinding, []byte(before.DeviceAPIKey)) || bytes.Contains(encodedBinding, []byte(before.PrivateKeyB64)) {
+		t.Fatalf("serialized runtime binding contains persisted secret: %s", encodedBinding)
+	}
+	formattedBinding := fmt.Sprintf("%#v", refreshed)
+	if !strings.Contains(formattedBinding, "[REDACTED]") || strings.Contains(formattedBinding, "deviceStaticPrivateKey") {
+		t.Fatalf("formatted runtime binding is not redacted: %s", formattedBinding)
+	}
+	privateKey[0] ^= 0xff
+	secondPrivateKey := refreshed.DeviceStaticPrivateKey()
+	if !reflect.DeepEqual(secondPrivateKey, wantPrivateKey) {
+		t.Fatal("caller mutation changed binding-owned private key")
+	}
+	wipeBytes(privateKey)
+	wipeBytes(secondPrivateKey)
+	wipeBytes(wantPrivateKey)
+	refreshed.Destroy()
+	if got := refreshed.DeviceStaticPrivateKey(); got != nil {
+		t.Fatalf("private key after Destroy = %x, want nil", got)
+	}
+	persisted := h.loadState(t)
+	if persisted.DeviceAPIKey != before.DeviceAPIKey {
 		t.Fatalf("DeviceAPIKey changed during refresh")
 	}
-	if refreshed.RegisteredAt == nil || !refreshed.RegisteredAt.Equal(*before.RegisteredAt) {
+	if !refreshed.RegisteredAt.Equal(*before.RegisteredAt) {
 		t.Fatalf("RegisteredAt changed during refresh: before=%v after=%v", before.RegisteredAt, refreshed.RegisteredAt)
 	}
 	if refreshed.NHPPeer.PublicKeyB64 != rotated.serverPubB64() || refreshed.RelayURL != rotatedRelay.URL || refreshed.KeyID != "key_rotated" {
@@ -393,11 +430,12 @@ func TestRefreshAgentRegistration_AccountOTPResumeDoesNotComplete(t *testing.T) 
 	h.nhp.mu.Lock()
 	h.nhp.expectCredential = "424242"
 	h.nhp.mu.Unlock()
-	state, err := RefreshAgentRegistration(context.Background(), "lv_account", h.store, h.registerOpts(WithOTP("424242"))...)
+	binding, err := RefreshAgentRegistration(context.Background(), "lv_account", h.store, h.registerOpts(WithOTP("424242"))...)
 	if err != nil {
 		t.Fatalf("account refresh resume: %v", err)
 	}
-	if state.DeviceAPIKey != "lv_device_secret" {
+	binding.Destroy()
+	if state := h.loadState(t); state.DeviceAPIKey != "lv_device_secret" {
 		t.Fatal("account binding refresh replaced device credential")
 	}
 	if h.svc.completionCalls.Load() != completeBefore {
@@ -1287,7 +1325,7 @@ func TestAgentLifecycle_RegistrationAndResourceOriginsRemainIndependent(t *testi
 	}
 	protectOnce(t, client)
 
-	reopened, err := OpenRegisteredAgent(context.Background(), h.store, WithBaseURL(resourceServer.URL))
+	reopened, err := OpenRegisteredAgent(context.Background(), h.store, WithAgentClientBaseURL(resourceServer.URL))
 	if err != nil {
 		t.Fatalf("OpenRegisteredAgent: %v", err)
 	}
@@ -1384,8 +1422,8 @@ func TestAgentLifecycle_RegistrationAndResourceTransportsRemainIndependent(t *te
 	protectOnce(t, recovered)
 
 	opened, err := OpenRegisteredAgent(context.Background(), h.store,
-		WithBaseURL(resourceServer.URL),
-		WithHTTPClient(resourceTransport),
+		WithAgentClientBaseURL(resourceServer.URL),
+		WithAgentClientHTTPClient(resourceTransport),
 	)
 	if err != nil {
 		t.Fatalf("OpenRegisteredAgent: %v", err)

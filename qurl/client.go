@@ -299,7 +299,10 @@ func validateExactBearerToken(token, label string, errKind error) error {
 	if token != strings.TrimSpace(token) {
 		return fmt.Errorf("%w: %s must not contain surrounding whitespace", errKind, label)
 	}
-	return validateHeaderValueWithKind("Bearer "+token, label, errKind)
+	// The token is carried verbatim in the Authorization header; the fixed
+	// "Bearer " scheme prefix is all printable ASCII, so validating the raw token
+	// bytes is equivalent to validating the assembled header value.
+	return validateHeaderValueWithKind(token, label, errKind)
 }
 
 func validateHeaderValue(value, label string) error {

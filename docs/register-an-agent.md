@@ -41,13 +41,13 @@ already-registered `store` is therefore not detected; the persisted device
 credential is authoritative from then on.
 
 For an explicit reopen without enrollment or resource API calls, use
-`OpenRegisteredAgent`. It takes normal `ClientOption` values and makes no qURL
-API call; loading a sealed store may still call its key wrapper/KMS.
+`OpenRegisteredAgent`. It takes `ClientOption` values and makes no qURL API call;
+loading a sealed store may still call its key wrapper/KMS.
 The resource API origin is independent of the registration origin:
 
 ```go
 client, err := qurl.OpenRegisteredAgent(ctx, store,
-	qurl.WithBaseURL(resourceAPIURL),
+	qurl.WithAgentClientBaseURL(resourceAPIURL),
 )
 ```
 
@@ -56,10 +56,12 @@ minute. After credential recovery, use the new client returned by
 `RecoverAgentCredential` for immediate cutover; an older client observes the
 replacement only after its cache expires.
 
-`WithRegisterBaseURL` targets only registration-info and completion;
-`WithAgentClientBaseURL` targets the `Client` returned by `RegisterAgent` or
-`RecoverAgentCredential`. This prevents a dedicated registration origin from
-silently retargeting later `/v1/resources` calls:
+`WithRegisterBaseURL` targets only registration-info and completion.
+`WithAgentClientBaseURL` and `WithAgentClientHTTPClient` are dual-purpose
+options accepted by registration/recovery and `OpenRegisteredAgent`, so the
+same resource origin and transport can be reused across the lifecycle. This
+prevents a dedicated registration origin from silently retargeting later
+`/v1/resources` calls:
 
 ```go
 client, err := qurl.RegisterAgent(ctx, enrollmentKey, store,
@@ -427,13 +429,13 @@ These are deliberately separate operations:
   requires a successful `NHP_RAK`. It then saves the authoritative relay/peer
   metadata while preserving `DeviceAPIKey` and `RegisteredAt`. It never calls
   completion, even when the old peer is expired or missing. `WithTakeover()` is
-  honored only when explicitly supplied. Its returned `AgentState` exposes the
-  refreshed relay, peer, and private-key material so the caller can knock
-  immediately without a second state-store/KMS load. That value also contains
-  the preserved live plaintext `DeviceAPIKey`; treat the whole value as
-  sensitive credential material, avoid copying or logging it, and do not retain
-  or serialize it outside the configured state store after the immediate
-  runtime handoff.
+  honored only when explicitly supplied. It returns a narrow
+  `AgentRuntimeBinding` with the refreshed relay/peer identity and a wipeable
+  copy of the private-key bytes so the caller can knock immediately without a
+  second state-store/KMS load. The binding deliberately omits `DeviceAPIKey`,
+  schema, and OTP state; the preserved REST credential remains only in the
+  configured store. Do not copy or log the binding, and wipe/destroy its private
+  key after the runtime handoff.
   Refresh with an account key uses the same email-OTP dispatch/two-call resume
   as enrollment: a static `WithOTP` on a first call cannot match the code that
   call dispatches, so it returns `OTPPendingError`; resume with the received
@@ -456,13 +458,16 @@ These are deliberately separate operations:
   refresh.
 
 ```go
-state, err := qurl.RefreshAgentRegistration(ctx, enrollmentKey, store,
+binding, err := qurl.RefreshAgentRegistration(ctx, enrollmentKey, store,
 	qurl.WithAllowedRegistrationKeyKinds(qurl.RegistrationKeyKindBootstrap),
 	qurl.WithRegisterBaseURL(registrationURL),
 )
+defer binding.Destroy()
+devicePrivateKey := binding.DeviceStaticPrivateKey()
+defer func() { clear(devicePrivateKey) }()
 
 client, err := qurl.RecoverAgentCredential(ctx, enrollmentKey, store,
-	qurl.WithDeviceID(state.AgentID),
+	qurl.WithDeviceID(binding.AgentID),
 	qurl.WithRegisterBaseURL(registrationURL),
 	qurl.WithAgentClientBaseURL(resourceAPIURL),
 )

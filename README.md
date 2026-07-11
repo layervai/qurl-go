@@ -162,11 +162,13 @@ configured expected id.
 
 Warm starts can call `qurl.OpenRegisteredAgent` without an enrollment key.
 `qurl.RefreshAgentRegistration` explicitly repairs missing/rotated NHP binding
-metadata without touching the device credential, while
+metadata without touching or returning the device credential; its narrow
+runtime binding exposes only the identity/NHP data and wipeable private-key
+bytes needed for an immediate knock. Meanwhile,
 `qurl.RecoverAgentCredential` performs operator-approved same-id credential
 replacement after the owner revokes `agent:<device_id>`. Registration and
 resource API origins are independent via `WithRegisterBaseURL` and
-`WithAgentClientBaseURL`.
+the dual-purpose `WithAgentClientBaseURL`/`WithAgentClientHTTPClient` options.
 
 See [Register an agent](docs/register-an-agent.md) for **which key to use** (one
 durable `qurl:agent` key fans out across a whole fleet), both enrollment paths, a

@@ -208,22 +208,10 @@ func (cfg *registerConfig) runLocked(ctx context.Context, key string, store Agen
 
 	// Pre-flight: registration-info tells us the path (key_kind), the key id,
 	// the NHP peer, and the relay coordinates. Side-effect-free.
-	info, err := cfg.fetchRegistrationInfo(ctx, key)
+	info, peer, relayURL, err := cfg.preflight(ctx, key)
 	if err != nil {
 		return nil, err
 	}
-	if err := cfg.requireAllowedKeyKind(info.KeyKind); err != nil {
-		return nil, err
-	}
-	// Assert the pre-flight's own server_id agrees with its own peer key — an
-	// integrity check on the registration-info response, independent of any
-	// WithNHPPeer override (which selects the peer to knock, not what the service
-	// reported).
-	if err := cfg.assertServerIDMatches(info.Relay.ServerID, &info.NHPServerPeer); err != nil {
-		return nil, err
-	}
-	peer := cfg.resolvePeer(info)
-	relayURL := cfg.resolveRelayURL(info)
 	state.NHPPeer = peer
 	state.RelayURL = relayURL
 	state.KeyID = info.KeyID
@@ -610,6 +598,24 @@ func (cfg *registerConfig) fetchRegistrationInfo(ctx context.Context, key string
 		return nil, err
 	}
 	return &env.Data, nil
+}
+
+// preflight returns the validated registration description and selected NHP
+// endpoint shared by enrollment, refresh, and recovery. The service-reported
+// server id is checked against its own peer before any trusted override is
+// selected, and key-kind policy runs before OTP or NHP side effects.
+func (cfg *registerConfig) preflight(ctx context.Context, key string) (*registrationInfoResponse, *NHPServerPeerInfo, string, error) {
+	info, err := cfg.fetchRegistrationInfo(ctx, key)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	if err := cfg.requireAllowedKeyKind(info.KeyKind); err != nil {
+		return nil, nil, "", err
+	}
+	if err := cfg.assertServerIDMatches(info.Relay.ServerID, &info.NHPServerPeer); err != nil {
+		return nil, nil, "", err
+	}
+	return info, cfg.resolvePeer(info), cfg.resolveRelayURL(info), nil
 }
 
 // postCompletion runs POST /v1/agent/registration/complete, which mints the
@@ -1019,6 +1025,16 @@ type RegisterOption interface {
 	applyRegisterOption(*registerConfig) error
 }
 
+// AgentClientOption configures the store-backed resource Client consistently
+// whether it is returned by RegisterAgent/RecoverAgentCredential or opened later
+// by OpenRegisteredAgent. WithAgentClientBaseURL and
+// WithAgentClientHTTPClient implement this interface and can be passed to either
+// the RegisterOption or ClientOption entry points.
+type AgentClientOption interface {
+	RegisterOption
+	ClientOption
+}
+
 // RegistrationKeyKind is the key class reported by registration-info.
 // Callers that only accept pre-issued enrollment keys can restrict registration
 // before any OTP dispatch or NHP registration side effect.
@@ -1184,18 +1200,32 @@ func WithRegisterBaseURL(rawURL string) RegisterOption {
 	})
 }
 
-// WithAgentClientBaseURL points the Client returned by RegisterAgent or
-// RecoverAgentCredential at a non-default resource API origin, independently of
-// WithRegisterBaseURL. OpenRegisteredAgent accepts ClientOption instead, so use
-// WithBaseURL when reopening an already-registered agent.
-func WithAgentClientBaseURL(rawURL string) RegisterOption {
-	return registerOptionFunc(func(o *registerConfig) error {
-		if err := validateHTTPSOrLoopbackURL(rawURL, "agent client base URL", ErrInvalidRegisterConfig); err != nil {
-			return err
-		}
-		o.clientBaseURL = strings.TrimRight(rawURL, "/")
-		return nil
-	})
+// WithAgentClientBaseURL points the registered agent's resource Client at a
+// non-default API origin, independently of WithRegisterBaseURL. The same option
+// can be reused with RegisterAgent, RecoverAgentCredential, and
+// OpenRegisteredAgent. Generic Clients may continue to use WithBaseURL.
+func WithAgentClientBaseURL(rawURL string) AgentClientOption {
+	return agentClientBaseURLOption(rawURL)
+}
+
+type agentClientBaseURLOption string
+
+func (o agentClientBaseURLOption) applyRegisterOption(cfg *registerConfig) error {
+	rawURL := string(o)
+	if err := validateHTTPSOrLoopbackURL(rawURL, "agent client base URL", ErrInvalidRegisterConfig); err != nil {
+		return err
+	}
+	cfg.clientBaseURL = strings.TrimRight(rawURL, "/")
+	return nil
+}
+
+func (o agentClientBaseURLOption) applyClientOption(cfg *clientOptions) error {
+	rawURL := string(o)
+	if err := validateHTTPSOrLoopbackURL(rawURL, "agent client base URL", ErrInvalidClientConfig); err != nil {
+		return err
+	}
+	cfg.baseURL = strings.TrimRight(rawURL, "/")
+	return nil
 }
 
 // WithRegisterHTTPClient injects the HTTP client used for the registration HTTPS
@@ -1215,18 +1245,31 @@ func WithRegisterHTTPClient(client HTTPDoer) RegisterOption {
 	})
 }
 
-// WithAgentClientHTTPClient injects the HTTP client used by the Client returned
-// from RegisterAgent or RecoverAgentCredential, independently of the registration
-// and relay transport. OpenRegisteredAgent accepts ClientOption instead, so use
-// WithHTTPClient when reopening an already-registered agent.
-func WithAgentClientHTTPClient(client HTTPDoer) RegisterOption {
-	return registerOptionFunc(func(o *registerConfig) error {
-		if client == nil {
-			return fmt.Errorf("%w: agent Client HTTP client must not be nil", ErrInvalidRegisterConfig)
-		}
-		o.clientHTTPClient = client
-		return nil
-	})
+// WithAgentClientHTTPClient injects the resource Client transport independently
+// of registration and relay traffic. The same option can be reused with
+// RegisterAgent, RecoverAgentCredential, and OpenRegisteredAgent.
+func WithAgentClientHTTPClient(client HTTPDoer) AgentClientOption {
+	return agentClientHTTPClientOption{client: client}
+}
+
+type agentClientHTTPClientOption struct {
+	client HTTPDoer
+}
+
+func (o agentClientHTTPClientOption) applyRegisterOption(cfg *registerConfig) error {
+	if o.client == nil {
+		return fmt.Errorf("%w: agent Client HTTP client must not be nil", ErrInvalidRegisterConfig)
+	}
+	cfg.clientHTTPClient = o.client
+	return nil
+}
+
+func (o agentClientHTTPClientOption) applyClientOption(cfg *clientOptions) error {
+	if o.client == nil {
+		return fmt.Errorf("%w: agent Client HTTP client must not be nil", ErrInvalidClientConfig)
+	}
+	cfg.httpClient = o.client
+	return nil
 }
 
 // WithRelayURL overrides the NHP relay base URL that registration-info would
