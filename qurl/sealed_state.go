@@ -13,7 +13,6 @@ import (
 	"io"
 	"reflect"
 	"regexp"
-	"runtime"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -542,9 +541,4 @@ func invalidSealedState(reason string) error {
 
 func cloneWrappedAgentStateKey(in WrappedAgentStateKey) WrappedAgentStateKey {
 	return WrappedAgentStateKey{Version: in.Version, Ciphertext: bytes.Clone(in.Ciphertext), Metadata: bytes.Clone(in.Metadata)}
-}
-
-func wipeBytes(b []byte) {
-	clear(b)
-	runtime.KeepAlive(b)
 }

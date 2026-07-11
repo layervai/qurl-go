@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -228,4 +229,11 @@ func syncPrivateStateDir(dir, label string) error {
 		return fmt.Errorf("qurl: close %s dir: %w", label, err)
 	}
 	return nil
+}
+
+// wipeBytes best-effort zeroes a secret buffer. runtime.KeepAlive guards the
+// clear from being optimized away when b is otherwise dead.
+func wipeBytes(b []byte) {
+	clear(b)
+	runtime.KeepAlive(b)
 }
