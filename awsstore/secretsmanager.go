@@ -32,6 +32,14 @@ var _ SecretsManagerAPI = (*secretsmanager.Client)(nil)
 // SECURITY: the stored value is a credential. Prefer a customer-managed KMS key
 // via [WithKMSKeyID] and least-privilege IAM (GetSecretValue, PutSecretValue,
 // CreateSecret on the one secret ARN). See the package doc.
+//
+// KMS key-binding caveat: [WithKMSKeyID] takes effect only at CreateSecret (the
+// first save). Secrets Manager's PutSecretValue carries no KmsKeyId field, so a
+// secret that already exists stays encrypted under whatever key it was born with;
+// pointing the store at a different key does NOT re-key a pre-existing secret. Set
+// the key before the first save, or precreate the secret with the intended CMK. A
+// follow-up (issue #56) tracks optional live verification of the secret's actual
+// key on load (via DescribeSecret); it is deliberately not done here.
 type SecretsManagerStore struct {
 	client   SecretsManagerAPI
 	secretID string

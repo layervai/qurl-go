@@ -74,6 +74,11 @@ client, err := qurl.RegisterAgent(ctx, setupKey, store)
 > save, or precreate the secret with the desired key, to guarantee the credential
 > is CMK-encrypted.
 
+> **CloudTrail note:** the first-ever Save is *put-first*, so it emits one benign
+> `ResourceNotFoundException` on `PutSecretValue` in CloudTrail immediately before
+> the `CreateSecret` that materializes the secret — harmless and one-time per
+> secret (first registration only).
+
 ### IAM (least privilege)
 
 ```json
@@ -125,12 +130,15 @@ store := awsstore.NewParameterStore(
   present but undecodable value maps to `qurl.ErrInvalidAgentState`.
 - **Save**: `PutParameter` with `Type=SecureString`, `Overwrite=true`. The
   configured KMS key (`KeyId`) is applied on **every** write, so switching keys
-  takes effect on the next save.
+  takes effect on the next save. The parameter tier (`Tier`) is applied too when
+  set via `WithParameterTier`.
 
-> **Size ceiling:** standard-tier SSM parameters cap the value at **4 KB**
-> (advanced tier raises it to 8 KB). The current `AgentState` is well under 4 KB,
-> and a `PutParameter` failure surfaces wrapped (fails safe), but a much larger
-> state would need the advanced tier.
+> **Size ceiling & tier:** standard-tier SSM parameters cap the value at **4 KB**.
+> The current `AgentState` is well under 4 KB and a `PutParameter` failure surfaces
+> wrapped (fails safe), but a large `DeviceAPIKey` could push a future state past
+> 4 KB. Pass `WithParameterTier(ssmtypes.ParameterTierAdvanced)` to select the
+> advanced tier (8 KB ceiling). The default leaves the tier unset (your account's
+> default tier configuration).
 
 ### IAM (least privilege)
 
