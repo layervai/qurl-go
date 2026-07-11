@@ -48,8 +48,11 @@ func OpenRegisteredAgent(ctx context.Context, store AgentStateStore, opts ...Cli
 // exchange for an existing completed agent. It never calls registration
 // completion and therefore never mints or replaces DeviceAPIKey. Relay, peer,
 // and key metadata are committed only after an authenticated successful RAK.
-// The returned AgentState includes the live plaintext DeviceAPIKey and must be
-// handled as sensitive credential material.
+// The returned AgentState lets a caller use the refreshed relay, peer, and
+// private-key material for an immediate knock without a second store/KMS load.
+// It therefore also includes the preserved live plaintext DeviceAPIKey: treat
+// the whole value as sensitive credential material, avoid copying or logging
+// it, and retain it only as long as the immediate runtime handoff requires.
 // An account key follows the email-OTP flow and may require a dispatch plus a
 // second call with WithOTP/WithOTPProvider. A static WithOTP on the first call
 // dispatches a fresh code and returns OTPPendingError; supply the received code

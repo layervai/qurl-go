@@ -427,9 +427,13 @@ These are deliberately separate operations:
   requires a successful `NHP_RAK`. It then saves the authoritative relay/peer
   metadata while preserving `DeviceAPIKey` and `RegisteredAt`. It never calls
   completion, even when the old peer is expired or missing. `WithTakeover()` is
-  honored only when explicitly supplied. Its returned `AgentState` contains the
-  live plaintext `DeviceAPIKey`; treat the whole value as sensitive credential
-  material and do not log or serialize it outside the configured state store.
+  honored only when explicitly supplied. Its returned `AgentState` exposes the
+  refreshed relay, peer, and private-key material so the caller can knock
+  immediately without a second state-store/KMS load. That value also contains
+  the preserved live plaintext `DeviceAPIKey`; treat the whole value as
+  sensitive credential material, avoid copying or logging it, and do not retain
+  or serialize it outside the configured state store after the immediate
+  runtime handoff.
   Refresh with an account key uses the same email-OTP dispatch/two-call resume
   as enrollment: a static `WithOTP` on a first call cannot match the code that
   call dispatches, so it returns `OTPPendingError`; resume with the received

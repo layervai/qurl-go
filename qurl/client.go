@@ -1121,8 +1121,11 @@ func doAuthorizedJSON(ctx context.Context, httpClient HTTPDoer, baseURL string, 
 
 // apiRequestOutcomeUnknownError marks failures after an HTTP request was handed
 // to the transport, or after a 2xx response arrived but could not be consumed.
-// Mutation callers use this to avoid replaying an operation whose side effect
-// may already have committed. The underlying error remains matchable.
+// Reads intentionally share this transport/post-2xx marker so the common JSON
+// helper has one failure contract; they pass it through like any other request
+// failure. Mutation callers may additionally interpret it as possible committed
+// side-effect ambiguity and refuse to replay. The underlying error remains
+// matchable.
 type apiRequestOutcomeUnknownError struct {
 	err error
 }
