@@ -28,9 +28,10 @@ type fileSetupLock struct {
 func (l fileSetupLock) setupLockPath() string { return l.path + agentSetupLockSuffix }
 
 func (l fileSetupLock) acquireSetupLock(ctx context.Context) (setupLock, error) {
-	lock, err := l.lockFile(ctx, l.setupLockPath())
+	path := l.setupLockPath()
+	lock, err := l.lockFile(ctx, path)
 	if err != nil {
-		return nil, fmt.Errorf("%w: acquire %s: %w", ErrAgentSetupLock, l.setupLockPath(), err)
+		return nil, fmt.Errorf("%w: acquire %s: %w", ErrAgentSetupLock, path, err)
 	}
 	return lock, nil
 }

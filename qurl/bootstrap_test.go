@@ -287,8 +287,8 @@ func TestFileAgentState_RejectsOversizedState(t *testing.T) {
 	}
 
 	_, err := FileAgentState(path).LoadAgentState(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "agent state exceeds") {
-		t.Fatalf("LoadAgentState oversized: want cap error, got %v", err)
+	if !errors.Is(err, ErrInvalidAgentState) || !strings.Contains(err.Error(), "agent state exceeds") {
+		t.Fatalf("LoadAgentState oversized: want ErrInvalidAgentState cap error, got %v", err)
 	}
 }
 

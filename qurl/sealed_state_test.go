@@ -256,6 +256,8 @@ func TestNewSealedFileAgentState_ValidatesConfiguration(t *testing.T) {
 		{"empty provider", "state", "", &testAgentStateKeyWrapper{}},
 		{"noncanonical provider", "state", "AWS-KMS", &testAgentStateKeyWrapper{}},
 		{"invalid provider", "state", "aws_kms", &testAgentStateKeyWrapper{}},
+		{"trailing provider separator", "state", "aws-kms-", &testAgentStateKeyWrapper{}},
+		{"consecutive provider separators", "state", "aws..kms", &testAgentStateKeyWrapper{}},
 		{"nil wrapper", "state", "test", nil},
 		{"typed nil wrapper", "state", "test", nilWrapper},
 	}
@@ -265,6 +267,12 @@ func TestNewSealedFileAgentState_ValidatesConfiguration(t *testing.T) {
 				t.Fatalf("got %v, want ErrInvalidBootstrapConfig", err)
 			}
 		})
+	}
+}
+
+func TestNewSealedFileAgentState_AcceptsCanonicalProviderID(t *testing.T) {
+	if _, err := NewSealedFileAgentState("state", "aws.kms-v2", &testAgentStateKeyWrapper{}); err != nil {
+		t.Fatalf("NewSealedFileAgentState: %v", err)
 	}
 }
 

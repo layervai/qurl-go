@@ -230,6 +230,19 @@ deliberate fail-before-commit check. The runtime identity therefore needs both
 wrap/encrypt and unwrap/decrypt permission during initial enrollment and any
 later workflow that mutates state. Decrypt-only permission is insufficient.
 
+The wrapper binding authenticates the agent id stored in the envelope; the
+store does not accept a separately configured expected agent id. A principal
+that can unwrap state for multiple agents could therefore substitute another
+valid envelope within that principal's decrypt scope. Scope each runtime's KMS
+key or decrypt policy to one installation when cross-agent substitution must be
+prevented, and authenticate every binding field in the provider encryption
+context.
+
+The SDK wipes its temporary plaintext and DEK byte buffers after use. Go's JSON
+decoder copies credential fields into `AgentState` strings, which are immutable
+and cannot be explicitly wiped; buffer wiping is best-effort defense in depth,
+not a guarantee that no plaintext copies remain in process memory.
+
 Both SDK local-file stores require an immediate `0700` state directory, write a
 `0600` state file atomically, and take the same mandatory setup lock. Lock
 failures stop registration; custom/network stores remain caller-serialized.

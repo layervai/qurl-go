@@ -156,6 +156,10 @@ func (s fileAgentStateStore) LoadAgentState(ctx context.Context) (*AgentState, e
 	// from the wrap while this sentinel stays matchable through the chain.
 	raw, err := readPrivateStateFileBounded(s.path, "agent state", maxPrivateStateBytes, true, ErrAgentStateNotFound, ErrInvalidAgentState, ErrInsecureAgentStatePermissions)
 	if err != nil {
+		var tooLarge *inputExceedsCapError
+		if errors.As(err, &tooLarge) {
+			return nil, fmt.Errorf("%w: %w", ErrInvalidAgentState, err)
+		}
 		return nil, err
 	}
 	var state AgentState

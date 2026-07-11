@@ -31,7 +31,7 @@ const (
 	maxSealedEnvelopeJSONDepth    = 32
 )
 
-var providerIDPattern = regexp.MustCompile(`^[a-z][a-z0-9.-]*$`)
+var providerIDPattern = regexp.MustCompile(`^[a-z][a-z0-9]*([.-][a-z0-9]+)*$`)
 
 // ErrAgentStateKeyWrapper reports an operational failure from an
 // AgentStateKeyWrapper. It is distinct from ErrInvalidAgentState: an unavailable
@@ -306,15 +306,18 @@ func (e sealedAgentStateEnvelope) binding() AgentStateKeyBinding {
 func (e sealedAgentStateEnvelope) aad() ([]byte, error) {
 	// Keep the persisted v1 AAD independent of future additions to the public
 	// AgentStateKeyBinding type. JSON encoding of this fixed-field internal struct
-	// is deterministic and unambiguous.
-	wrapped := cloneWrappedAgentStateKey(e.WrappedKey)
-	wrapped.Metadata = compactJSON(wrapped.Metadata)
+	// is deterministic and unambiguous. compactJSON returns a fresh slice, so the
+	// ciphertext is marshaled read-only rather than cloned.
 	raw, err := json.Marshal(sealedAgentStateAAD{
 		Purpose:         e.Purpose,
 		EnvelopeVersion: e.Version,
 		ProviderID:      e.ProviderID,
 		AgentID:         e.AgentID,
-		WrappedKey:      wrapped,
+		WrappedKey: WrappedAgentStateKey{
+			Version:    e.WrappedKey.Version,
+			Ciphertext: e.WrappedKey.Ciphertext,
+			Metadata:   compactJSON(e.WrappedKey.Metadata),
+		},
 	})
 	if err != nil {
 		return nil, err

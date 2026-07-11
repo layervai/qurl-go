@@ -154,6 +154,9 @@ For a durable local file protected by KMS, HSM, or attested key release, use
 `qurl.NewSealedFileAgentState`. The SDK encrypts the complete state with a fresh
 AES-256-GCM DEK on every save; your provider adapter wraps exactly that 32-byte
 DEK and must support both wrap and unwrap for every state-mutating workflow.
+Scope provider decrypt permission to one installation when cross-agent envelope
+substitution must be prevented; the store authenticates its persisted agent id
+but does not take a separately configured expected id.
 
 See [Register an agent](docs/register-an-agent.md) for **which key to use** (one
 durable `qurl:agent` key fans out across a whole fleet), both enrollment paths, a
