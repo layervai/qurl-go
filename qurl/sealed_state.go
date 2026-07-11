@@ -19,11 +19,13 @@ import (
 )
 
 const (
-	sealedAgentStatePurpose       = "qurl-go/agent-state"
-	sealedAgentStateVersion       = 1
-	sealedAgentStateDEKBytes      = 32
-	sealedAgentStateNonceBytes    = 12
-	sealedAgentStateTagBytes      = 16
+	sealedAgentStatePurpose    = "qurl-go/agent-state"
+	sealedAgentStateVersion    = 1
+	sealedAgentStateDEKBytes   = 32
+	sealedAgentStateNonceBytes = 12
+	sealedAgentStateTagBytes   = 16
+	// Allow base64 expansion of the 1 MiB plaintext plus the wrapped key,
+	// metadata, and JSON framing while retaining a fixed envelope cap.
 	maxSealedAgentStateEnvelope   = 2 << 20
 	maxWrappedAgentStateKeyBytes  = 64 << 10
 	maxWrappedAgentStateMetadata  = 16 << 10
@@ -66,8 +68,12 @@ type AgentStateKeyBinding struct {
 // be at least 1; zero is invalid.
 // Ciphertext is the provider-wrapped DEK. Metadata is optional provider-owned
 // JSON; the SDK validates, bounds, and authenticates it as envelope AAD but does
-// not interpret it. A wrapper that uses metadata before AES-GCM verification
-// must also authenticate it as part of its own wrapped-key record.
+// not interpret it. The SDK may compact, indent, or otherwise reserialize
+// Metadata between WrapKey and UnwrapKey, so wrappers must not rely on
+// byte-identical whitespace or object-member ordering. A wrapper that uses
+// metadata before AES-GCM verification must cryptographically authenticate a
+// provider-defined canonical or semantic representation as part of its own
+// wrapped-key record or provider encryption context.
 type WrappedAgentStateKey struct {
 	Version    int             `json:"version"`
 	Ciphertext []byte          `json:"ciphertext"`

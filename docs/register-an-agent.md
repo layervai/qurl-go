@@ -220,14 +220,19 @@ client, err := qurl.RegisterAgent(ctx, enrollmentKey, store)
 The wrapper must authenticate every field in `AgentStateKeyBinding` as its KMS
 encryption context (or equivalent): purpose, envelope version, provider id, and
 agent id. It owns the version and optional JSON metadata in
-`WrappedAgentStateKey`. Return `qurl.ErrInvalidWrappedAgentStateKey` when a
-persisted wrapper record fails authentication; ordinary KMS/network failures
-remain operational `qurl.ErrAgentStateKeyWrapper` errors rather than being
-misreported as corrupt state. If the provider cannot distinguish authentication
-failure from another decrypt failure, return the invalid-record sentinel and
-fail closed. The SDK includes wrapper metadata in its AES-GCM AAD; wrappers that
-use metadata to choose or configure unwrap must authenticate it themselves too,
-because unwrap necessarily runs before the SDK can verify that AAD.
+`WrappedAgentStateKey`. The SDK may compact, indent, or otherwise reserialize
+that metadata between wrap and unwrap, so treat it as JSON semantics rather than
+byte-identical whitespace or object-member ordering. Return
+`qurl.ErrInvalidWrappedAgentStateKey` when a persisted wrapper record fails
+authentication; ordinary KMS/network failures remain operational
+`qurl.ErrAgentStateKeyWrapper` errors rather than being misreported as corrupt
+state. If the provider cannot distinguish authentication failure from another
+decrypt failure, return the invalid-record sentinel and fail closed. The SDK
+includes wrapper metadata in its AES-GCM AAD; wrappers that use metadata to
+choose or configure unwrap must cryptographically authenticate a
+provider-defined canonical or semantic representation in their wrapped-key
+record or provider encryption context too, because unwrap necessarily runs
+before the SDK can verify that AAD.
 
 Every successful state mutation performs `WrapKey` and a verification
 `UnwrapKey` before the atomic commit—two provider operations per save. This is a

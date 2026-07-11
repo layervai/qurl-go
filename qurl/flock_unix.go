@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"syscall"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -93,11 +92,11 @@ func lockFileExclusive(ctx context.Context, lockPath string) (setupLock, error) 
 			_ = f.Close()
 			return nil, err
 		}
-		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB)
 		if err == nil {
 			return f, nil
 		}
-		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
+		if !errors.Is(err, unix.EWOULDBLOCK) && !errors.Is(err, unix.EAGAIN) {
 			// A non-contention error (e.g. the platform refuses flock on this fd):
 			// fail closed rather than spin. EWOULDBLOCK and EAGAIN are
 			// the same errno on Linux/BSD today; match both via errors.Is so a future
