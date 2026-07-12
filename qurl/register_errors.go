@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// Typed errors for RegisterAgent, the NHP-native agent enrollment front door.
+// Typed errors for the NHP-native agent enrollment and lifecycle front doors.
 //
 // These mirror the sentinel + typed-view conventions the rest of the package
 // uses (facade.go's error sentinels, reply.go's ServerDenyError view): match a
@@ -16,30 +16,85 @@ import (
 // actionable when read by an operator or an LLM agent driving registration —
 // it names the next concrete step, not just the failure.
 
-// ErrInvalidRegisterConfig is returned when RegisterAgent inputs or options are
-// invalid before any network call.
+// ErrInvalidRegisterConfig is returned when registration/lifecycle inputs or
+// options are invalid before any network call.
 var ErrInvalidRegisterConfig = errors.New("qurl: invalid register config")
+
+// ErrAgentBindingPersistence means an authenticated NHP binding refresh
+// succeeded but its new peer/relay metadata was not durably saved. No device
+// credential was minted or changed, so correct the store failure and safely
+// retry RefreshAgentRegistration. For an account-key refresh, the durable
+// OTPRequestedAt marker may remain: retry with the still-current OTP, or wait
+// for its cooldown and retry without an OTP to request a fresh code. The
+// underlying store error remains matchable.
+var ErrAgentBindingPersistence = errors.New("qurl: agent binding persistence failed")
 
 // ErrOTPPending is returned (wrapped in *OTPPendingError) when account-key
 // registration has requested an email one-time code and is waiting for the
 // caller to supply it. It is not a failure: it is the pause point of the
-// two-phase email-OTP flow. Re-run RegisterAgent with WithOTP once the code
+// two-phase email-OTP flow. Re-run the same operation with WithOTP once the code
 // arrives.
 var ErrOTPPending = errors.New("qurl: registration awaiting one-time code")
 
 // ErrOTPIncorrect is returned when a supplied one-time code was rejected as
-// wrong. Re-run RegisterAgent with the correct code.
+// wrong. Re-run the same operation with the correct WithOTP code.
 var ErrOTPIncorrect = errors.New("qurl: one-time code incorrect")
 
 // ErrOTPExpired is returned when a supplied one-time code was valid but has
-// expired. Re-run RegisterAgent with no code to request a fresh one, then
-// supply the new code.
+// expired. Re-run the same operation with no code to request a fresh one, then
+// re-run it with the new WithOTP code.
 var ErrOTPExpired = errors.New("qurl: one-time code expired")
 
 // ErrRegistrationRateLimited is returned when the enrollment service is rate
 // limiting or has locked out further attempts for now. Back off and retry
 // later.
 var ErrRegistrationRateLimited = errors.New("qurl: registration rate limited")
+
+// ErrDeviceKeyQuotaExceeded is returned when the account has no free active
+// device-key slot. Revoke an existing unused device key to free a slot, then
+// retry the same registration or recovery operation.
+var ErrDeviceKeyQuotaExceeded = errors.New("qurl: device key quota exceeded")
+
+// DeviceKeyQuotaExceededError carries the device id whose credential could not
+// be issued and preserves the completion API error. The service reports this
+// only when the atomic mint transaction rejected the request without writing,
+// so freeing a slot and retrying is safe.
+type DeviceKeyQuotaExceededError struct {
+	DeviceID string
+	Cause    error
+}
+
+func (e *DeviceKeyQuotaExceededError) Error() string {
+	message := fmt.Sprintf("qurl: cannot issue a device key for %q because the account has reached its active device-key limit; revoke an existing unused device key to free a slot, then retry the same qurl.RegisterAgent or qurl.RecoverAgentCredential operation; only when intentionally re-binding this device id from a different key, revoke that device key and retry with qurl.WithTakeover", e.DeviceID)
+	return messageWithCause(message, e.Cause)
+}
+
+func (e *DeviceKeyQuotaExceededError) Unwrap() []error {
+	return unwrapWithCause(e.Cause, ErrDeviceKeyQuotaExceeded)
+}
+
+// ErrRegistrationRequestTooLarge is returned when registration completion is
+// authoritatively rejected before mint because its request exceeds the service
+// admission limit. Correct the request/service contract, then retry the same
+// registration or recovery operation.
+var ErrRegistrationRequestTooLarge = errors.New("qurl: registration request too large")
+
+// RegistrationRequestTooLargeError carries the device id and preserves the
+// completion API error. HTTP 413 admission occurs before the atomic mint
+// transaction, so retry is safe after correcting the size incompatibility.
+type RegistrationRequestTooLargeError struct {
+	DeviceID string
+	Cause    error
+}
+
+func (e *RegistrationRequestTooLargeError) Error() string {
+	message := fmt.Sprintf("qurl: registration completion request for %q exceeded the service admission limit; correct the SDK/service request-size contract, then retry the same qurl.RegisterAgent or qurl.RecoverAgentCredential operation", e.DeviceID)
+	return messageWithCause(message, e.Cause)
+}
+
+func (e *RegistrationRequestTooLargeError) Unwrap() []error {
+	return unwrapWithCause(e.Cause, ErrRegistrationRequestTooLarge)
+}
 
 // ErrKeyRejected is returned when the supplied API key was rejected as invalid.
 // Check the key and re-run registration.
@@ -55,29 +110,133 @@ var ErrAgentIdentityConflict = errors.New("qurl: agent identity conflict")
 // Add an email to the account, or register with a pre-issued key instead.
 var ErrNoAccountEmail = errors.New("qurl: account has no email for one-time code")
 
-// ErrDeviceCredentialMissing is returned when the saved AgentState shows the
-// device is registered but does not hold its device API credential — the
-// credential is issued once and this state cannot reproduce it. Recovery depends
-// on how it arose: if a completion reported the key was already issued, register
-// under a new device id (WithDeviceID) or re-bind with WithTakeover; if a
-// locally-registered state simply lacks the credential (for example a legacy
-// bootstrap-era state file), clear or replace the persisted state to mint a fresh
-// credential.
+// ErrDeviceCredentialMissing is the broad compatibility class for an AgentState
+// that cannot authorize resource calls. Credential issuance/recovery errors also
+// match ErrCredentialRecoveryRequired and carry the persisted device id; revoke
+// agent:<device_id>, then explicitly call RecoverAgentCredential.
 var ErrDeviceCredentialMissing = errors.New("qurl: device credential missing from agent state")
+
+// ErrCredentialRecoveryRequired means the service-side device credential and
+// local AgentState are no longer safely reconcilable through ordinary
+// RegisterAgent. The owner must revoke agent:<device_id>, then explicitly call
+// RecoverAgentCredential with the same persisted identity.
+var ErrCredentialRecoveryRequired = errors.New("qurl: agent credential recovery required")
+
+// ErrRegistrationKeyKindDisallowed means registration-info reported a valid key
+// kind that the caller's WithAllowedRegistrationKeyKinds policy rejects.
+var ErrRegistrationKeyKindDisallowed = errors.New("qurl: registration key kind disallowed")
+
+// RegistrationKeyKindDisallowedError carries the rejected server-reported kind
+// and the caller's accepted kinds. It is returned before OTP dispatch or NHP REG.
+type RegistrationKeyKindDisallowedError struct {
+	Kind    RegistrationKeyKind
+	Allowed []RegistrationKeyKind
+}
+
+func (e *RegistrationKeyKindDisallowedError) Error() string {
+	allowed := make([]string, len(e.Allowed))
+	for i, kind := range e.Allowed {
+		allowed[i] = string(kind)
+	}
+	return fmt.Sprintf("qurl: registration key kind %q is disallowed; accepted kinds: %s", e.Kind, strings.Join(allowed, ", "))
+}
+
+func (e *RegistrationKeyKindDisallowedError) Unwrap() error {
+	return ErrRegistrationKeyKindDisallowed
+}
+
+// CredentialRecoveryRequiredError identifies an already-issued device
+// credential that cannot be fetched again. Revoke agent:<device_id> through an
+// owner credential, then call RecoverAgentCredential with the same state store.
+// WithTakeover alone does not clear the issuance record; add it after revocation
+// only when re-binding a changed keypair/host.
+type CredentialRecoveryRequiredError struct {
+	DeviceID string
+	Cause    error
+}
+
+func (e *CredentialRecoveryRequiredError) Error() string {
+	keyID := "agent:" + e.DeviceID
+	message := fmt.Sprintf("qurl: device credential for %q was already issued and cannot be fetched again; revoke the active %q key first, then call qurl.RecoverAgentCredential with this state store; qurl.WithTakeover alone does not clear the issuance record—add it after revocation only when re-binding a changed keypair or host; the only no-revoke alternative is enrolling a distinct new device id in a separate state store", e.DeviceID, keyID)
+	return messageWithCause(message, e.Cause)
+}
+
+func (e *CredentialRecoveryRequiredError) Unwrap() []error {
+	return recoveryClassUnwrap(e.Cause)
+}
+
+func validatePersistedDeviceCredential(state *AgentState, errKind error) error {
+	if state.DeviceAPIKey == "" {
+		return &CredentialRecoveryRequiredError{DeviceID: state.AgentID, Cause: ErrDeviceCredentialMissing}
+	}
+	if err := validateExactBearerToken(state.DeviceAPIKey, "persisted device credential", errKind); err != nil {
+		return &CredentialRecoveryRequiredError{DeviceID: state.AgentID, Cause: err}
+	}
+	return nil
+}
+
+func recoveryClassUnwrap(cause error) []error {
+	return unwrapWithCause(cause, ErrCredentialRecoveryRequired, ErrDeviceCredentialMissing)
+}
+
+// unwrapWithCause builds the multi-error Unwrap chain shared by the typed
+// credential errors: the class sentinels followed by the wrapped cause when one
+// is present. Each caller passes its own sentinel set, so appending the cause
+// cannot alias shared storage.
+func unwrapWithCause(cause error, sentinels ...error) []error {
+	if cause == nil {
+		return sentinels
+	}
+	return append(sentinels, cause)
+}
+
+// messageWithCause appends a wrapped cause to a typed error's operator-facing
+// message when one is present. Each credential issuance/recovery type builds a
+// distinct message and then surfaces its underlying cause identically. The cause
+// intentionally appears both in this operator-readable string and structurally
+// through Unwrap: log the outer error once, while errors.Is/errors.As inspect the
+// same cause without requiring a second log entry.
+func messageWithCause(message string, cause error) string {
+	if cause != nil {
+		return fmt.Sprintf("%s: %v", message, cause)
+	}
+	return message
+}
+
+// CredentialPersistenceError means completion may have minted its one-time
+// plaintext device credential, but the SDK could not prove a valid durable
+// commit. This includes transport/5xx/response ambiguity as well as a final
+// AgentState save failure. Retrying ordinary registration is unsafe. Revoke
+// agent:<device_id>, then explicitly recover the same identity.
+type CredentialPersistenceError struct {
+	DeviceID string
+	Cause    error
+}
+
+func (e *CredentialPersistenceError) Error() string {
+	keyID := "agent:" + e.DeviceID
+	message := fmt.Sprintf("qurl: device credential for %q may have been minted but was not safely persisted; revoke %q, then call qurl.RecoverAgentCredential with this state store", e.DeviceID, keyID)
+	return messageWithCause(message, e.Cause)
+}
+
+func (e *CredentialPersistenceError) Unwrap() []error {
+	return recoveryClassUnwrap(e.Cause)
+}
 
 // ErrRegistrationInvalidInput is returned when the enrollment service rejected a
 // registration input as malformed (for example a device id that is not a valid
-// identifier). Fix the input and re-run RegisterAgent.
+// identifier). Fix the input and re-run the same operation.
 var ErrRegistrationInvalidInput = errors.New("qurl: registration input invalid")
 
 // ErrRegistrationDisabled is returned when agent registration is disabled for
 // the account. Contact the account owner to enable it.
 var ErrRegistrationDisabled = errors.New("qurl: agent registration disabled")
 
-// ErrRegistrationRetryLater is returned when the registration relay answered with
-// an overload cookie-challenge (NHP_COK) instead of a registration reply: the
-// enrollment path is under load. Back off briefly and re-run RegisterAgent.
-var ErrRegistrationRetryLater = errors.New("qurl: registration relay busy; retry shortly")
+// ErrRegistrationRetryLater is returned when the registration relay answers
+// with an overload cookie-challenge or completion reports a structured,
+// authoritative no-write service_unavailable admission result. Back off briefly
+// and re-run the same operation.
+var ErrRegistrationRetryLater = errors.New("qurl: registration temporarily unavailable; retry shortly")
 
 // ErrRegisterReplyMalformed is returned when the registration relay returned a
 // reply that failed the request→reply correlation contract before the SDK could
@@ -113,7 +272,7 @@ func (e *OTPPendingError) Error() string {
 		dest = e.MaskedEmail
 	}
 	return fmt.Sprintf(
-		"qurl: a one-time code was requested for %s — check that inbox and re-run qurl.RegisterAgent with qurl.WithOTP(\"<code>\") to finish enrollment. Codes expire after a short window; if none arrives, re-running without WithOTP re-sends a fresh code after a short cooldown.",
+		"qurl: a one-time code was requested for %s — check that inbox and re-run the same qurl operation with qurl.WithOTP(\"<code>\"). Codes expire after a short window; if none arrives, re-running the same operation without WithOTP re-sends a fresh code after a short cooldown.",
 		dest,
 	)
 }

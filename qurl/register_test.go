@@ -300,6 +300,7 @@ type fakeService struct {
 	deviceAPIKey     string
 	agentID          string // agent id echoed by completion; "" => echo the request device_id
 	registeredAt     *time.Time
+	completionPeer   *NHPServerPeerInfo
 
 	// counters
 	infoCalls       atomic.Int32
@@ -390,16 +391,20 @@ func (f *fakeService) serveCompletion(w http.ResponseWriter, r *http.Request) {
 	if agentID == "" {
 		agentID = req.DeviceID
 	}
+	peer := NHPServerPeerInfo{
+		PublicKeyB64: f.nhp.serverPubB64(),
+		Host:         "nhp.example.test",
+		Port:         62206,
+		ExpireTime:   0,
+	}
+	if f.completionPeer != nil {
+		peer = *f.completionPeer
+	}
 	resp := completionResponse{
-		AgentID:      agentID,
-		RegisteredAt: f.registeredAt,
-		NHPServerPeer: NHPServerPeerInfo{
-			PublicKeyB64: f.nhp.serverPubB64(),
-			Host:         "nhp.example.test",
-			Port:         62206,
-			ExpireTime:   0,
-		},
-		DeviceAPIKey: f.deviceAPIKey,
+		AgentID:       agentID,
+		RegisteredAt:  f.registeredAt,
+		NHPServerPeer: peer,
+		DeviceAPIKey:  f.deviceAPIKey,
 	}
 	writeEnvelope(f.t, w, resp)
 }
@@ -488,6 +493,32 @@ func withClock(clk func() time.Time) RegisterOption {
 		o.clock = clk
 		return nil
 	})
+}
+
+func TestWithNHPPeer_ExpiryUsesFinalClockRegardlessOfOptionOrder(t *testing.T) {
+	now := time.Now()
+	expiresAt := now.Add(24 * time.Hour)
+	peer := NHPServerPeerInfo{
+		PublicKeyB64: base64.StdEncoding.EncodeToString(make([]byte, 32)),
+		Host:         "nhp.example.test",
+		Port:         62206,
+		ExpireTime:   expiresAt.Unix(),
+	}
+	expiredClock := func() time.Time { return expiresAt.Add(time.Hour) }
+
+	for _, tc := range []struct {
+		name string
+		opts []RegisterOption
+	}{
+		{name: "clock before peer", opts: []RegisterOption{withClock(expiredClock), WithNHPPeer(peer)}},
+		{name: "clock after peer", opts: []RegisterOption{WithNHPPeer(peer), withClock(expiredClock)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := newRegisterConfig(tc.opts); !errors.Is(err, ErrInvalidRegisterConfig) || !strings.Contains(err.Error(), "expired") {
+				t.Fatalf("newRegisterConfig error = %v, want expired ErrInvalidRegisterConfig", err)
+			}
+		})
+	}
 }
 
 // primeDeviceKey pre-seeds the fake NHP server with the agent device public key
@@ -970,8 +1001,7 @@ func TestRegisterAgent_AccountPath_OTPResendAfterCooldown(t *testing.T) {
 	// registered and no resend happens). Then the no-code branch re-sends.
 	h.setHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && r.URL.Path == "/v1/agent/registration/complete" {
-			w.WriteHeader(http.StatusNotFound)
-			_, _ = fmt.Fprint(w, `{"error":{"code":"device_not_registered","detail":"not yet"}}`)
+			http.Error(w, "not yet registered", http.StatusNotFound)
 			return
 		}
 		h.svc.handler(h.relaySrv.URL)(w, r)
@@ -1321,11 +1351,10 @@ func TestRegisterAgent_Completion409MapsToDeviceCredentialMissing(t *testing.T) 
 	}
 }
 
-func TestRegisterAgent_BareCompletion409IsNotDeviceCredentialMissing(t *testing.T) {
+func TestRegisterAgent_BareCompletion409RequiresRecoveryAndPreservesAPIError(t *testing.T) {
 	// A 409 that arrives WITHOUT the structured device_key_already_issued code
-	// (e.g. an infra/proxy conflict) must NOT be mapped to the destructive
-	// ErrDeviceCredentialMissing ("re-register / takeover") guidance; it surfaces
-	// as the raw *APIError instead.
+	// (e.g. a new service/proxy conflict) is not authoritative no-write. Fail
+	// closed as persistence ambiguity while preserving *APIError for inspection.
 	h := newRegisterHarness(t)
 	h.svc.keyKind = keyKindBootstrap
 	h.svc.completionStatus = http.StatusConflict
@@ -1333,12 +1362,16 @@ func TestRegisterAgent_BareCompletion409IsNotDeviceCredentialMissing(t *testing.
 	h.armDevicePubOnInfo()
 
 	_, err := RegisterAgent(context.Background(), "lv_key", h.store, h.registerOpts()...)
-	if errors.Is(err, ErrDeviceCredentialMissing) {
-		t.Fatalf("bare 409 must not map to ErrDeviceCredentialMissing, got %v", err)
+	var persistenceErr *CredentialPersistenceError
+	if !errors.As(err, &persistenceErr) || !errors.Is(err, ErrCredentialRecoveryRequired) {
+		t.Fatalf("bare 409 must require credential recovery, got %v", err)
 	}
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusConflict {
-		t.Fatalf("want raw *APIError 409, got %v", err)
+		t.Fatalf("want wrapped *APIError 409, got %v", err)
+	}
+	if h.svc.completionCalls.Load() != 1 {
+		t.Fatalf("completion calls = %d, want exactly 1", h.svc.completionCalls.Load())
 	}
 }
 
@@ -1478,9 +1511,13 @@ func TestRegisterAgent_WithNHPPeerAndRelayURLOverrideWorks(t *testing.T) {
 	if h.nhp.regCount() != 1 {
 		t.Fatalf("REG count = %d, want 1 (override relay was used)", h.nhp.regCount())
 	}
+	state := h.loadState(t)
+	if state.NHPPeer == nil || state.NHPPeer.Host != overridePeer.Host || state.NHPPeer.Port != overridePeer.Port {
+		t.Fatalf("persisted peer = %#v, want authenticated override %#v", state.NHPPeer, overridePeer)
+	}
 }
 
-func TestRegisterAgent_AccountPath_ProbeToleratesTransientCompletionFault(t *testing.T) {
+func TestRegisterAgent_AccountPath_ProbeTreatsTransientCompletionAsUnknownOutcome(t *testing.T) {
 	h := newRegisterHarness(t)
 	h.svc.keyKind = keyKindAccount
 	h.svc.maskedEmail = "j***@x.com"
@@ -1491,35 +1528,32 @@ func TestRegisterAgent_AccountPath_ProbeToleratesTransientCompletionFault(t *tes
 		t.Fatalf("prime otp_pending: want ErrOTPPending, got %v", err)
 	}
 
-	// On resume, make the completion PROBE fault transiently (503) on its first
-	// call, then succeed once the device is enrolled by REG. A transient probe
-	// fault must NOT abort registration — the flow proceeds to REG.
+	// On resume, make the completion probe return 503. Completion is a
+	// first-issue-only mutation, so the SDK cannot prove the service did not mint
+	// before returning the error. It must stop recovery-required without REG or a
+	// second completion attempt.
 	var completionHits atomic.Int32
 	h.setHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && r.URL.Path == "/v1/agent/registration/complete" {
-			if completionHits.Add(1) == 1 {
-				// The probe call: transient fault.
-				w.WriteHeader(http.StatusServiceUnavailable)
-				_, _ = fmt.Fprint(w, `{"error":{"code":"upstream_unavailable","detail":"try again"}}`)
-				return
-			}
+			completionHits.Add(1)
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = fmt.Fprint(w, `{"error":{"code":"upstream_unavailable","detail":"unknown outcome"}}`)
+			return
 		}
 		// registration-info and the real (post-REG) completion go to the fake.
 		h.svc.handler(h.relaySrv.URL)(w, r)
 	}))
 
-	client, err := RegisterAgent(context.Background(), "lv_account_key", h.store, h.registerOpts(WithOTP("424242"))...)
-	if err != nil {
-		t.Fatalf("resume despite transient probe fault: %v", err)
+	_, err := RegisterAgent(context.Background(), "lv_account_key", h.store, h.registerOpts(WithOTP("424242"))...)
+	var persistErr *CredentialPersistenceError
+	if !errors.As(err, &persistErr) || !errors.Is(err, ErrCredentialRecoveryRequired) {
+		t.Fatalf("resume 503: want recovery-required unknown outcome, got %v", err)
 	}
-	if client == nil {
-		t.Fatal("nil client")
+	if h.nhp.regCount() != 0 {
+		t.Fatalf("REG count = %d, want 0 after ambiguous completion", h.nhp.regCount())
 	}
-	if h.nhp.regCount() != 1 {
-		t.Fatalf("REG count = %d, want 1 (flow proceeded to REG after transient probe fault)", h.nhp.regCount())
-	}
-	if completionHits.Load() < 2 {
-		t.Fatalf("completion hits = %d, want >=2 (probe faulted, then real completion)", completionHits.Load())
+	if completionHits.Load() != 1 {
+		t.Fatalf("completion hits = %d, want exactly 1", completionHits.Load())
 	}
 }
 
@@ -1543,6 +1577,11 @@ func TestRegisterAgent_Validation(t *testing.T) {
 	store := memoryAgentStateStore{}
 	if _, err := RegisterAgent(context.Background(), "", store); !errors.Is(err, ErrInvalidRegisterConfig) {
 		t.Fatalf("empty key: want ErrInvalidRegisterConfig, got %v", err)
+	}
+	for _, key := range []string{" lv_key", "lv_key ", "lv_key\n"} {
+		if _, err := RegisterAgent(context.Background(), key, store); !errors.Is(err, ErrInvalidRegisterConfig) {
+			t.Fatalf("non-exact key %q: want ErrInvalidRegisterConfig, got %v", key, err)
+		}
 	}
 	if _, err := RegisterAgent(context.Background(), "lv_key", nil); !errors.Is(err, ErrInvalidRegisterConfig) {
 		t.Fatalf("nil store: want ErrInvalidRegisterConfig, got %v", err)
@@ -1571,6 +1610,12 @@ func TestRegisterAgent_OptionValidation(t *testing.T) {
 	}{
 		{"relay URL non-https scheme", WithRelayURL("ftp://relay.example.test")},
 		{"relay URL with userinfo", WithRelayURL("https://user:pass@relay.example.test")},
+		{"relay URL with query", WithRelayURL("https://relay.example.test/prefix?route=wrong")},
+		{"relay URL with fragment", WithRelayURL("https://relay.example.test/prefix#wrong")},
+		{"register base URL with query", WithRegisterBaseURL("https://api.example.test/prefix?route=wrong")},
+		{"register base URL with fragment", WithRegisterBaseURL("https://api.example.test/prefix#wrong")},
+		{"agent client base URL with query", WithAgentClientBaseURL("https://api.example.test/prefix?route=wrong")},
+		{"agent client base URL with fragment", WithAgentClientBaseURL("https://api.example.test/prefix#wrong")},
 		{"nhp peer missing public key", WithNHPPeer(NHPServerPeerInfo{Host: "nhp.example.test", Port: 62206})},
 		{"nhp peer bad port", WithNHPPeer(NHPServerPeerInfo{PublicKeyB64: base64.StdEncoding.EncodeToString(make([]byte, 32)), Host: "h", Port: 0})},
 		{"hostname blank", WithRegisterHostname("   ")},
@@ -1583,6 +1628,17 @@ func TestRegisterAgent_OptionValidation(t *testing.T) {
 				t.Fatalf("%s: want ErrInvalidRegisterConfig, got %v", tc.name, err)
 			}
 		})
+	}
+	cfg, err := newRegisterConfig([]RegisterOption{
+		WithRegisterBaseURL("https://api.example.test/custom/prefix/"),
+		WithAgentClientBaseURL("https://resources.example.test/custom/prefix/"),
+		WithRelayURL("https://relay.example.test/custom/prefix/"),
+	})
+	if err != nil {
+		t.Fatalf("path-prefixed options: %v", err)
+	}
+	if cfg.baseURL != "https://api.example.test/custom/prefix" || cfg.clientBaseURL != "https://resources.example.test/custom/prefix" || cfg.relayURLOverride != "https://relay.example.test/custom/prefix" {
+		t.Fatalf("path prefixes not preserved: registration=%q resource=%q relay=%q", cfg.baseURL, cfg.clientBaseURL, cfg.relayURLOverride)
 	}
 }
 
@@ -1669,10 +1725,13 @@ func TestRegisterAgent_WithTakeoverSetsFlagInREG(t *testing.T) {
 func TestOTPPendingError_MessageIsActionable(t *testing.T) {
 	e := &OTPPendingError{RequestedAt: time.Now(), MaskedEmail: "j***@x.com"}
 	msg := e.Error()
-	for _, want := range []string{"j***@x.com", "qurl.WithOTP", "qurl.RegisterAgent", "expire"} {
+	for _, want := range []string{"j***@x.com", "qurl.WithOTP", "same qurl operation", "expire"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("OTPPendingError message %q missing %q", msg, want)
 		}
+	}
+	if strings.Contains(msg, "qurl.RegisterAgent") {
+		t.Errorf("OTPPendingError message hard-codes the wrong lifecycle operation: %q", msg)
 	}
 	if !errors.Is(e, ErrOTPPending) {
 		t.Error("OTPPendingError should match ErrOTPPending")

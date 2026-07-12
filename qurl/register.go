@@ -1,6 +1,7 @@
 package qurl
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
@@ -9,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -59,37 +61,64 @@ import (
 // one-time code, so concurrent setup multiplies OTP emails (last write to the
 // state file wins) — serialize enrollment per store yourself.
 func RegisterAgent(ctx context.Context, key string, store AgentStateStore, opts ...RegisterOption) (*Client, error) {
-	cfg, err := newRegisterConfig(opts)
+	cfg, err := validateRegisterInputs(ctx, key, store, opts)
 	if err != nil {
-		return nil, err
-	}
-	if strings.TrimSpace(key) == "" {
-		return nil, fmt.Errorf("%w: API key must not be empty", ErrInvalidRegisterConfig)
-	}
-	if store == nil {
-		return nil, fmt.Errorf("%w: state store must not be nil", ErrInvalidRegisterConfig)
-	}
-	if err := validateContext(ctx, ErrInvalidRegisterConfig); err != nil {
 		return nil, err
 	}
 	cfg.requireDeviceKey = true
 	if _, err := cfg.run(ctx, key, store); err != nil {
 		return nil, err
 	}
-	return newStoreBackedClient(store, cfg.baseURL, cfg.httpClient), nil
+	return newStoreBackedClient(store, cfg.clientBaseURL, cfg.clientHTTPClient), nil
+}
+
+// RegisterAgentRuntime registers or reopens an agent and returns both its
+// store-backed resource Client and the validated runtime binding needed for an
+// immediate relay knock. Unlike composing RegisterAgent with a later store
+// load, this captures the private key before registration network I/O and primes
+// the Client credential cache from the same in-memory AgentState. The caller
+// must immediately defer binding.Destroy, then take and eventually wipe the
+// runtime private key. The primed credential is cached for one minute; a later
+// owner-side revocation becomes visible after that TTL. Account enrollment
+// behavior matches RegisterAgent. On the completed fast path an expired peer
+// is rejected because it cannot be knocked; call RefreshAgentRegistration with
+// an enrollment key to obtain a fresh binding.
+func RegisterAgentRuntime(ctx context.Context, key string, store AgentStateStore, opts ...RegisterOption) (*Client, *AgentRuntimeBinding, error) {
+	cfg, err := validateRegisterInputs(ctx, key, store, opts)
+	if err != nil {
+		return nil, nil, err
+	}
+	cfg.requireDeviceKey = true
+	cfg.captureRuntime = true
+	defer cfg.wipeRuntimePrivateKey()
+	state, err := cfg.run(ctx, key, store)
+	if err != nil {
+		return nil, nil, err
+	}
+	privateKey := cfg.takeRuntimePrivateKey()
+	defer func() { wipeBytes(privateKey) }()
+	client := newPrimedStoreBackedClient(store, cfg.clientBaseURL, cfg.clientHTTPClient, state.DeviceAPIKey, cfg.clock)
+	binding := newAgentRuntimeBinding(state, privateKey)
+	privateKey = nil // binding owns the slice and its cleanup from this point.
+	return client, binding, nil
 }
 
 // registerConfig is the resolved option set plus the fixed dependencies a
 // registration run needs.
 type registerConfig struct {
-	baseURL     string
-	httpClient  HTTPDoer
-	deviceID    string
-	otp         string
-	otpProvider func(context.Context) (string, error)
-	takeover    bool
-	hostname    string
-	version     string
+	baseURL           string
+	httpClient        HTTPDoer
+	clientBaseURL     string
+	clientHTTPClient  HTTPDoer
+	deviceID          string
+	otp               string
+	otpProvider       func(context.Context) (string, error)
+	takeover          bool
+	hostname          string
+	version           string
+	allowedKeyKinds   map[RegistrationKeyKind]struct{}
+	captureRuntime    bool
+	runtimePrivateKey []byte
 
 	// relayURL / nhpPeer are optional overrides; when unset the values come from
 	// the registration-info pre-flight.
@@ -113,10 +142,36 @@ type registerConfig struct {
 	clock func() time.Time
 }
 
+func (cfg *registerConfig) captureRuntimeKey(state *AgentState) error {
+	if !cfg.captureRuntime {
+		return nil
+	}
+	privateKey, err := decodeRuntimePrivateKey(state, cfg.invalidConfigErr)
+	if err != nil {
+		return err
+	}
+	cfg.wipeRuntimePrivateKey()
+	cfg.runtimePrivateKey = privateKey
+	return nil
+}
+
+func (cfg *registerConfig) takeRuntimePrivateKey() []byte {
+	privateKey := cfg.runtimePrivateKey
+	cfg.runtimePrivateKey = nil
+	return privateKey
+}
+
+func (cfg *registerConfig) wipeRuntimePrivateKey() {
+	wipeBytes(cfg.runtimePrivateKey)
+	cfg.runtimePrivateKey = nil
+}
+
 func newRegisterConfig(opts []RegisterOption) (*registerConfig, error) {
 	cfg := &registerConfig{
 		baseURL:          defaultAPIBaseURL,
 		httpClient:       defaultAPIHTTPClient,
+		clientBaseURL:    defaultAPIBaseURL,
+		clientHTTPClient: defaultAPIHTTPClient,
 		invalidConfigErr: ErrInvalidRegisterConfig,
 		clock:            time.Now,
 	}
@@ -128,8 +183,36 @@ func newRegisterConfig(opts []RegisterOption) (*registerConfig, error) {
 			return nil, err
 		}
 	}
+	// Validate the peer only after every option resolves so an injected test
+	// clock has identical semantics regardless of its position relative to
+	// WithNHPPeer. Production configurations retain the default wall clock.
+	if cfg.nhpPeerOverride != nil {
+		if err := validateNHPServerPeerInfo(*cfg.nhpPeerOverride, cfg.clock(), true, "WithNHPPeer", ErrInvalidRegisterConfig); err != nil {
+			return nil, err
+		}
+	}
 	if cfg.otp != "" && cfg.otpProvider != nil {
 		return nil, fmt.Errorf("%w: set only one of WithOTP or WithOTPProvider", ErrInvalidRegisterConfig)
+	}
+	return cfg, nil
+}
+
+// validateRegisterInputs resolves options and enforces the input contract
+// shared by RegisterAgent, RefreshAgentRegistration, and
+// RecoverAgentCredential.
+func validateRegisterInputs(ctx context.Context, key string, store AgentStateStore, opts []RegisterOption) (*registerConfig, error) {
+	cfg, err := newRegisterConfig(opts)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateExactBearerToken(key, "API key", ErrInvalidRegisterConfig); err != nil {
+		return nil, err
+	}
+	if store == nil {
+		return nil, fmt.Errorf("%w: state store must not be nil", ErrInvalidRegisterConfig)
+	}
+	if err := validateContext(ctx, ErrInvalidRegisterConfig); err != nil {
+		return nil, err
 	}
 	return cfg, nil
 }
@@ -141,7 +224,7 @@ const otpResendCooldown = 60 * time.Second
 
 // run drives the registration state machine to a *Client. State is derived from
 // AgentState fields (no enum): absent → keypair-persisted → otp_pending → registered.
-func (cfg *registerConfig) run(ctx context.Context, key string, store AgentStateStore) (result *AgentState, resultErr error) {
+func (cfg *registerConfig) run(ctx context.Context, key string, store AgentStateStore) (*AgentState, error) {
 	// Preserve the documented zero-qURL-API, read-only fast path: a completed
 	// state no longer needs setup serialization and must remain usable when the
 	// state directory is mounted read-only or local locking is unsupported. The
@@ -151,6 +234,9 @@ func (cfg *registerConfig) run(ctx context.Context, key string, store AgentState
 		return nil, err
 	}
 	if found && state.RegisteredAt != nil {
+		// RegisterAgentRuntime may decode the key into its synchronized return
+		// binding here, but it does not mutate or save the completed AgentState;
+		// the same read-only, lock-free guarantee therefore still applies.
 		return cfg.finishRegisteredAgentState(state)
 	}
 
@@ -158,29 +244,16 @@ func (cfg *registerConfig) run(ctx context.Context, key string, store AgentState
 	// would otherwise mint competing identities and race the atomic save. After
 	// acquiring, reload: another process may have completed enrollment while this
 	// caller waited, in which case the second fast-path check returns its state.
-	releaseSetupLock, err := acquireAgentSetupLock(ctx, store)
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		if err := releaseSetupLock(); err != nil {
-			// Even if enrollment and its atomic state write succeeded, fail this call
-			// because lock ownership is now ambiguous. A retry recovers without a
-			// second enrollment by reading the completed state on the pre-lock path.
-			lockErr := fmt.Errorf("%w: release setup lock: %w", ErrAgentSetupLock, err)
-			result = nil
-			if resultErr == nil {
-				resultErr = lockErr
-			} else {
-				resultErr = errors.Join(resultErr, lockErr)
-			}
-		}
-	}()
+	return withAgentSetupLock(ctx, store, func() (*AgentState, error) {
+		return cfg.runLocked(ctx, key, store)
+	})
+}
 
+func (cfg *registerConfig) runLocked(ctx context.Context, key string, store AgentStateStore) (*AgentState, error) {
 	// Reload under the lock even when the pre-lock load found incomplete state.
 	// A sealed store intentionally unwraps again here: only the locked snapshot
 	// may drive mutation after another process had a chance to finish setup.
-	state, err = loadOrCreateAgentState(ctx, store, cfg.invalidConfigErr)
+	state, err := loadOrCreateAgentState(ctx, store, cfg.invalidConfigErr)
 	if err != nil {
 		return nil, err
 	}
@@ -197,25 +270,23 @@ func (cfg *registerConfig) run(ctx context.Context, key string, store AgentState
 	if state.SchemaVersion < agentStateSchemaVersion {
 		state.SchemaVersion = agentStateSchemaVersion
 	}
+	// Runtime registration validates local key custody before any external side
+	// effect. On the account path this intentionally decodes the key before an
+	// OTP email may be sent and then wipes it when the call pauses: fail fast on
+	// an unusable store instead of emailing a code for a run that cannot finish.
+	if err := cfg.captureRuntimeKey(state); err != nil {
+		return nil, err
+	}
 	if err := store.SaveAgentState(ctx, state); err != nil {
 		return nil, err
 	}
 
 	// Pre-flight: registration-info tells us the path (key_kind), the key id,
 	// the NHP peer, and the relay coordinates. Side-effect-free.
-	info, err := cfg.fetchRegistrationInfo(ctx, key)
+	info, peer, relayURL, err := cfg.preflight(ctx, key)
 	if err != nil {
 		return nil, err
 	}
-	// Assert the pre-flight's own server_id agrees with its own peer key — an
-	// integrity check on the registration-info response, independent of any
-	// WithNHPPeer override (which selects the peer to knock, not what the service
-	// reported).
-	if err := cfg.assertServerIDMatches(info.Relay.ServerID, &info.NHPServerPeer); err != nil {
-		return nil, err
-	}
-	peer := cfg.resolvePeer(info)
-	relayURL := cfg.resolveRelayURL(info)
 	state.NHPPeer = peer
 	state.RelayURL = relayURL
 	state.KeyID = info.KeyID
@@ -227,16 +298,28 @@ func (cfg *registerConfig) run(ctx context.Context, key string, store AgentState
 	case keyKindBootstrap:
 		return cfg.runBootstrapPath(ctx, key, store, state, peer, relayURL)
 	case keyKindAccount:
-		if strings.TrimSpace(info.MaskedEmail) == "" {
-			// Fail fast before spending an OTP round trip: an account key with no
-			// email on file can never receive the code.
-			return nil, fmt.Errorf("%w: the account key has no email on file for the one-time code; add an email or use a pre-issued key", ErrNoAccountEmail)
+		if err := requireAccountKeyEmail(info); err != nil {
+			return nil, err
 		}
 		return cfg.runAccountPath(ctx, key, store, state, peer, relayURL, info.MaskedEmail)
 	default:
 		// validate() already rejected unknown kinds; defensive.
-		return nil, fmt.Errorf("%w: registration-info returned unknown key_kind %q", cfg.invalidConfigErr, info.KeyKind)
+		return nil, cfg.errUnknownKeyKind(info.KeyKind)
 	}
+}
+
+// requireAccountKeyEmail fails fast before spending an OTP round trip when an
+// account key has no masked email on file: it can never receive the code. Shared
+// by enrollment and forced refresh/recovery so the precondition cannot drift.
+func requireAccountKeyEmail(info *registrationInfoResponse) error {
+	if strings.TrimSpace(info.MaskedEmail) == "" {
+		return fmt.Errorf("%w: the account key has no email on file for the one-time code; add an email or use a pre-issued key", ErrNoAccountEmail)
+	}
+	return nil
+}
+
+func (cfg *registerConfig) errUnknownKeyKind(kind string) error {
+	return fmt.Errorf("%w: registration-info returned unknown key_kind %q", cfg.invalidConfigErr, kind)
 }
 
 func loadAgentStateIfPresent(ctx context.Context, store AgentStateStore, invalidConfigErr error) (*AgentState, bool, error) {
@@ -257,17 +340,47 @@ func loadAgentStateIfPresent(ctx context.Context, store AgentStateStore, invalid
 func (cfg *registerConfig) finishRegisteredAgentState(state *AgentState) (*AgentState, error) {
 	// A RegisterAgent Client authorizes with the REST device key and never knocks
 	// the persisted NHP peer, so an expired peer does not block its fast path. The
-	// knock-only BootstrapAgent path still requires a live peer.
-	if err := validateRegisteredAgentState(state, cfg.clock(), !cfg.requireDeviceKey, cfg.invalidConfigErr); err != nil {
-		return nil, err
+	// knock-only BootstrapAgent and combined runtime paths require a live peer.
+	if cfg.captureRuntime {
+		if err := validateCompletedAgentIdentity(state, cfg.invalidConfigErr); err != nil {
+			return nil, err
+		}
+		if err := validateAgentRuntimeMetadata(state, cfg.clock(), cfg.invalidConfigErr); err != nil {
+			return nil, err
+		}
+	} else {
+		if err := validateRegisteredAgentState(state, cfg.clock(), !cfg.requireDeviceKey, cfg.invalidConfigErr); err != nil {
+			return nil, err
+		}
 	}
-	if cfg.requireDeviceKey && strings.TrimSpace(state.DeviceAPIKey) == "" {
-		return nil, fmt.Errorf("%w: agent %q is registered but its device credential is absent from this state; clear or replace the persisted AgentState (or use a fresh AgentStateStore) and register again", ErrDeviceCredentialMissing, state.AgentID)
+	if cfg.requireDeviceKey {
+		if err := validatePersistedDeviceCredential(state, cfg.invalidConfigErr); err != nil {
+			return nil, err
+		}
 	}
 	if err := cfg.reconcileDeviceID(state); err != nil {
 		return nil, err
 	}
+	if err := cfg.captureRuntimeKey(state); err != nil {
+		return nil, err
+	}
 	return state, nil
+}
+
+func validateAgentRuntimeMetadata(state *AgentState, now time.Time, errKind error) error {
+	if state == nil || state.NHPPeer == nil {
+		return fmt.Errorf("%w: agent runtime state missing NHP peer", errKind)
+	}
+	if err := validateNHPServerPeerInfo(*state.NHPPeer, now, true, "agent runtime state", errKind); err != nil {
+		return err
+	}
+	if strings.TrimSpace(state.KeyID) == "" {
+		return fmt.Errorf("%w: agent runtime state missing key id", errKind)
+	}
+	if err := validateHTTPSOrLoopbackURL(state.RelayURL, "agent runtime relay URL", errKind); err != nil {
+		return err
+	}
+	return nil
 }
 
 // runBootstrapPath is PATH A: the pre-issued key is the enrollment credential.
@@ -300,16 +413,7 @@ func (cfg *registerConfig) runBootstrapPath(ctx context.Context, key string, sto
 //     enrolled, resolve the code and REG; with no code source, re-send after the
 //     cooldown and pause.
 func (cfg *registerConfig) runAccountPath(ctx context.Context, key string, store AgentStateStore, state *AgentState, peer *NHPServerPeerInfo, relayURL, maskedEmail string) (*AgentState, error) {
-	// Ensure the code has been requested before any code can be valid. On a fresh
-	// store this emails the code; on a resume (OTPRequestedAt already set) it does
-	// nothing unless a code source is absent and the cooldown has elapsed (below).
 	freshRequest := state.OTPRequestedAt == nil
-	if freshRequest {
-		if err := cfg.requestOTP(ctx, store, state, peer, relayURL, key); err != nil {
-			return nil, err
-		}
-	}
-
 	// On a resume, probe completion BEFORE resolving any code: a prior run may
 	// have gotten the RAK but crashed before completion, so the device is already
 	// enrolled server-side and completion finishes the run without a code. Doing
@@ -323,34 +427,53 @@ func (cfg *registerConfig) runAccountPath(ctx context.Context, key string, store
 		}
 	}
 
-	// A static WithOTP literal supplied on the SAME call that just emailed a code
-	// cannot match that fresh email — pause and let the caller re-run with the
-	// newly emailed code. A WithOTPProvider is exempt: it reads the just-sent code.
-	if freshRequest && cfg.otp != "" {
-		return nil, cfg.otpPending(state, maskedEmail)
+	code, err := cfg.accountCredentialOrPause(ctx, key, store, state, state, maskedEmail)
+	if err != nil {
+		return nil, err
+	}
+	return cfg.registerAndComplete(ctx, key, store, state, peer, relayURL, code, pathAccount)
+}
+
+// accountCredentialOrPause shares the account OTP dispatch/resume ordering
+// across enrollment, refresh, and recovery. A fresh operation persists and
+// dispatches before consulting a provider that may await that email. A resume
+// resolves an available literal/provider code first and redispatches after the
+// cooldown only when no code source exists, avoiding unnecessary email fan-out.
+// persisted owns the durable cooldown marker; requestState supplies the current
+// peer/relay coordinates used for dispatch.
+func (cfg *registerConfig) accountCredentialOrPause(ctx context.Context, key string, store AgentStateStore, persisted, requestState *AgentState, maskedEmail string) (string, error) {
+	now := cfg.clock()
+	freshRequest := persisted.OTPRequestedAt == nil
+	if freshRequest {
+		if err := cfg.requestOTPAt(ctx, store, persisted, requestState, key, now); err != nil {
+			return "", err
+		}
+		// A literal supplied on the call that just dispatched a fresh code cannot
+		// match that email. Providers are exempt because they may await delivery.
+		if cfg.otp != "" {
+			return "", cfg.otpPending(persisted, maskedEmail)
+		}
 	}
 
 	code, err := cfg.resolveOTP(ctx)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-	if code == "" {
-		// No code source: re-send once the cooldown elapses (so a long-idle
-		// re-run refreshes an expired code), then pause for the caller to supply
-		// the code on the next run.
-		if cfg.clock().Sub(derefTime(state.OTPRequestedAt, cfg.clock())) >= otpResendCooldown {
-			if err := cfg.requestOTP(ctx, store, state, peer, relayURL, key); err != nil {
-				return nil, err
-			}
+	if code != "" {
+		return code, nil
+	}
+	// !freshRequest guarantees OTPRequestedAt is non-nil here, so dereference the
+	// durable cooldown marker directly rather than through a nil fallback.
+	if !freshRequest && now.Sub(*persisted.OTPRequestedAt) >= otpResendCooldown {
+		if err := cfg.requestOTPAt(ctx, store, persisted, requestState, key, now); err != nil {
+			return "", err
 		}
-		return nil, cfg.otpPending(state, maskedEmail)
 	}
-
-	return cfg.registerAndComplete(ctx, key, store, state, peer, relayURL, code, pathAccount)
+	return "", cfg.otpPending(persisted, maskedEmail)
 }
 
 // otpPending builds the account-path pause point returned when the emailed code
-// has been requested and RegisterAgent is waiting for the caller to supply it.
+// has been requested and the current lifecycle operation awaits the caller.
 // Both pause sites — a fresh WithOTP literal that cannot match the just-sent
 // code, and a no-code resume — return this same shape.
 func (cfg *registerConfig) otpPending(state *AgentState, maskedEmail string) *OTPPendingError {
@@ -364,77 +487,77 @@ func (cfg *registerConfig) otpPending(state *AgentState, maskedEmail string) *OT
 // enrollment paths end with. credential is the key secret (bootstrap) or the
 // one-time code (account); path selects the RAK error mapping.
 func (cfg *registerConfig) registerAndComplete(ctx context.Context, key string, store AgentStateStore, state *AgentState, peer *NHPServerPeerInfo, relayURL, credential string, path pathKind) (*AgentState, error) {
-	ack, err := cfg.registerExchange(ctx, state, peer, relayURL, credential)
-	if err != nil {
+	if err := cfg.registerExchangeChecked(ctx, state, peer, relayURL, credential, path); err != nil {
 		return nil, err
 	}
-	if !ack.isSuccess() {
-		return nil, mapRAKError(ack, path)
+	if cfg.captureRuntime {
+		if err := validateAgentRuntimeMetadata(state, cfg.clock(), cfg.invalidConfigErr); err != nil {
+			return nil, err
+		}
 	}
 	return cfg.completeAndPersist(ctx, key, store, state, path)
 }
 
-// requestOTP records OTPRequestedAt (otp_pending) and THEN dispatches the OTP
-// email. The order is deliberate and anti-spam: persisting before sending means
-// a persist failure emits no email (the caller retries as a still-fresh request,
-// no code wasted), while a send failure after a successful persist leaves the
-// state otp_pending — so the retry resumes under the 60s resend cooldown instead
-// of re-emailing immediately. (Send-then-persist would, on a store with
-// intermittent write failures, dispatch a code, fail the save, and re-send on
-// the next run as a fresh request with no backoff.) On a persist failure the
-// in-memory OTPRequestedAt mutation is rolled back so it matches what was stored.
-func (cfg *registerConfig) requestOTP(ctx context.Context, store AgentStateStore, state *AgentState, peer *NHPServerPeerInfo, relayURL, key string) error {
-	now := cfg.clock()
-	prev := state.OTPRequestedAt
-	state.OTPRequestedAt = &now
-	if err := store.SaveAgentState(ctx, state); err != nil {
-		state.OTPRequestedAt = prev // roll back the in-memory mutation
+// registerExchangeChecked runs NHP_REG/NHP_RAK and maps an authenticated denial
+// through the enrollment taxonomy. Enrollment/recovery and completion-free
+// binding refresh share this single RAK success gate.
+func (cfg *registerConfig) registerExchangeChecked(ctx context.Context, state *AgentState, peer *NHPServerPeerInfo, relayURL, credential string, path pathKind) error {
+	ack, err := cfg.registerExchange(ctx, state, peer, relayURL, credential)
+	if err != nil {
 		return err
 	}
-	return cfg.sendOTP(ctx, state, peer, relayURL, key)
+	if !ack.isSuccess() {
+		return mapRAKError(ack, path)
+	}
+	return nil
+}
+
+// requestOTPAt centralizes the anti-spam save-before-send ordering. persisted is
+// the durable state whose cooldown marker changes; requestState may be a
+// refreshed candidate whose current peer/relay coordinates must carry the OTP.
+// This pre-send write commits only OTPRequestedAt on persisted; candidate's new
+// binding metadata is not durable until an authenticated RAK succeeds. If the
+// relay send fails, the marker deliberately remains durable and this call
+// returns the transport error; a retry inside the cooldown may therefore return
+// OTPPendingError even though delivery is unconfirmed. ErrOTPPending denotes a
+// durable cooldown/resume state, never proof that the email was delivered.
+func (cfg *registerConfig) requestOTPAt(ctx context.Context, store AgentStateStore, persisted, requestState *AgentState, key string, now time.Time) error {
+	previous := persisted.OTPRequestedAt
+	persisted.OTPRequestedAt = &now
+	if err := store.SaveAgentState(ctx, persisted); err != nil {
+		persisted.OTPRequestedAt = previous // restore the unsaved in-memory value
+		return err
+	}
+	return cfg.sendOTP(ctx, requestState, requestState.NHPPeer, requestState.RelayURL, key)
 }
 
 // tryCompletionProbe attempts a completion fetch to self-heal a crash that
 // happened after the registration RAK but before completion. done is true when
 // the probe resolved the run (success → registered state, or a terminal
-// completion error); done is false when the device is not yet enrolled OR the
-// probe hit a transient fault — in both cases the caller should proceed to REG,
-// since the probe is only an optimization and REG is the real path.
+// completion error); done is false only when the service authoritatively says
+// the device is not enrolled, in which case the caller proceeds to REG.
 //
-// The self-heal relies on the qurl-service completion endpoint being idempotent
-// for an already-enrolled device: a probe for a device a prior crashed run
-// already enrolled must return that device's credential again (rather than a
-// conflict), which is the completion grace-window contract implemented in
-// qurl-service #1182. Without it a probe on the happy resume path would surface a
-// spurious already-issued denial instead of finishing the run.
+// Completion is first-issue-only. A 5xx, transport failure, malformed 2xx, or
+// invalid response is therefore terminal recovery-required ambiguity: the
+// service may have minted the key even though this process could not persist it.
+// Falling through after such an error would risk a second completion attempt.
 func (cfg *registerConfig) tryCompletionProbe(ctx context.Context, key string, store AgentStateStore, state *AgentState, path pathKind) (done bool, doneState *AgentState, err error) {
-	comp, err := cfg.postCompletion(ctx, key, state, path)
+	comp, err := cfg.postCompletion(ctx, key, state, path, true)
 	if err != nil {
-		if isCompletionNotYetRegistered(err) || isTransientCompletionError(err) {
-			// Not yet registered, or a transient blip on the optimization probe:
-			// fall through to REG rather than aborting the whole registration.
-			// Falling through on a transient (5xx) fault relies on the server
-			// treating a repeat REG for the same device key as idempotent — the
-			// same lost-response-retry assumption BootstrapAgent documents. A
-			// non-idempotent server would instead answer 52103 (identity conflict)
-			// and misleadingly suggest WithTakeover for what was really a transient
-			// blip; that trade-off is accepted because the device is not yet
-			// confirmed enrolled here, so REG (the real path) is the safe action.
+		if errors.Is(err, ErrCredentialRecoveryRequired) {
+			// Completion was dispatched and may have minted the one-time plaintext
+			// credential. Never fall through to REG + a second completion attempt.
+			return true, nil, err
+		}
+		if isCompletionNotYetRegistered(err) {
+			// This structured absence is the sole safe fall-through: no credential
+			// was minted, so REG followed by one completion is still first issue.
 			return false, nil, nil
 		}
 		// Any other completion error is terminal — most notably a structured
 		// device_key_already_issued 409 (the device is registered but its key was
 		// already issued and cannot be re-fetched). That is a real answer the
-		// caller must act on, so surface it rather than treating the probe as a
-		// no-op and proceeding to REG; the "optimization only" framing applies to
-		// the not-yet-registered and transient cases above, not to a terminal denial.
-		//
-		// A bare transport fault (connection reset/timeout, no *APIError) also lands
-		// here rather than falling through — deliberately: the post-REG completion
-		// fetch hits the SAME endpoint, so a genuinely-down completion path would
-		// fail identically after a wasted REG. Aborting fast at the probe (which the
-		// account resume simply re-runs) is preferable, and context cancellation
-		// (surfaced by postCompletion) is likewise correctly terminal.
+		// caller must act on, so surface it rather than proceeding to REG.
 		return true, nil, err
 	}
 	doneState, err = cfg.persistCompletion(ctx, store, state, comp)
@@ -449,6 +572,7 @@ func (cfg *registerConfig) registerExchange(ctx context.Context, state *AgentSta
 	if err != nil {
 		return nil, err
 	}
+	defer wipeBytes(devicePriv)
 	body, err := json.Marshal(registerRequestBody{
 		UsrID: state.KeyID,
 		DevID: state.AgentID,
@@ -463,6 +587,11 @@ func (cfg *registerConfig) registerExchange(ctx context.Context, state *AgentSta
 	if err != nil {
 		return nil, fmt.Errorf("qurl: encode registration body: %w", err)
 	}
+	// relayknock.Exchange synchronously seals body into a separate packet before
+	// starting RelayPost; the HTTP transport never references this plaintext.
+	// Wiping after Exchange returns is therefore safe, unlike doAuthorizedJSON's
+	// raw request buffer, which net/http may still be consuming after Do returns.
+	defer wipeBytes(body)
 	reply, err := relayknock.Exchange(ctx, relayURL, serverPub, relayknock.TypeRegister, body, relayknock.KnockOptions{
 		HTTPClient:       relayHTTPClient(cfg.httpClient),
 		DeviceStaticPriv: devicePriv,
@@ -492,6 +621,7 @@ func (cfg *registerConfig) sendOTP(ctx context.Context, state *AgentState, peer 
 	if err != nil {
 		return err
 	}
+	defer wipeBytes(devicePriv)
 	// The API key secret rides in the NHP "pass" field, whose name is fixed by the
 	// enrollment wire contract. It is not logged and is sealed inside the NHP
 	// AES-256-GCM body before it leaves the process (relayknock.Send), so this is
@@ -505,6 +635,9 @@ func (cfg *registerConfig) sendOTP(ctx context.Context, state *AgentState, peer 
 	if err != nil {
 		return fmt.Errorf("qurl: encode otp request body: %w", err)
 	}
+	// relayknock.Send synchronously seals body into a separate packet before its
+	// HTTP POST, so no transport reader can race this plaintext wipe after return.
+	defer wipeBytes(body)
 	if err := relayknock.Send(ctx, relayURL, serverPub, body, relayknock.KnockOptions{
 		HTTPClient:       relayHTTPClient(cfg.httpClient),
 		DeviceStaticPriv: devicePriv,
@@ -520,7 +653,7 @@ func (cfg *registerConfig) sendOTP(ctx context.Context, state *AgentState, peer 
 // completeAndPersist runs the completion fetch and persists the resulting
 // registered state, returning it.
 func (cfg *registerConfig) completeAndPersist(ctx context.Context, key string, store AgentStateStore, state *AgentState, path pathKind) (*AgentState, error) {
-	comp, err := cfg.postCompletion(ctx, key, state, path)
+	comp, err := cfg.postCompletion(ctx, key, state, path, false)
 	if err != nil {
 		return nil, err
 	}
@@ -530,27 +663,33 @@ func (cfg *registerConfig) completeAndPersist(ctx context.Context, key string, s
 // persistCompletion writes the completed registration into store and returns the
 // registered state.
 func (cfg *registerConfig) persistCompletion(ctx context.Context, store AgentStateStore, state *AgentState, comp *completionResponse) (*AgentState, error) {
-	if err := cfg.reconcileCompletionDeviceID(state, comp); err != nil {
-		return nil, err
+	if comp == nil {
+		return nil, credentialPersistenceFailure(state.AgentID, fmt.Errorf("%w: completion response is nil", cfg.invalidConfigErr))
 	}
+	// A successful completion response contains the only plaintext copy the
+	// service will reveal. Keep exactly one durable reference on success and drop
+	// the response object's reference on every path. Go string backing storage
+	// cannot be zeroed, so clearing this reference is best-effort lifetime
+	// reduction rather than a guaranteed memory wipe.
+	defer func() { comp.DeviceAPIKey = "" }()
+	if err := cfg.reconcileCompletionDeviceID(state, comp); err != nil {
+		return nil, credentialPersistenceFailure(state.AgentID, err)
+	}
+	if err := cfg.assertCompletionPeerMatchesRegistration(state, comp); err != nil {
+		return nil, credentialPersistenceFailure(state.AgentID, err)
+	}
+	previous := *state
 	state.AgentID = comp.AgentID
 	state.RegisteredAt = comp.RegisteredAt
-	// Replace the persisted NHP peer with the completion response's peer WITHOUT
-	// re-running assertServerIDMatches (the registration-info integrity check).
-	// That is safe here: the completion peer arrived over the authenticated qurl-
-	// service TLS connection and already passed validateNHPServerPeerInfo, and the
-	// RegisterAgent Client authorizes with the REST device bearer — it never
-	// NHP-knocks this peer — so there is no live server_id⇄fingerprint gap to close.
-	// A knock-only BootstrapAgent DOES later knock this peer; there it is trusted on
-	// the same authenticated-TLS origin, and completionResponse carries no server_id
-	// to assert against, so the TLS-authenticated origin is the trust anchor.
-	peer := comp.NHPServerPeer
-	state.NHPPeer = &peer
+	// Preserve the peer that authenticated the successful RAK. Completion is a
+	// credential-mint response, not authority to rotate the Noise peer after the
+	// handshake; assert it agrees above and never replace the RAK peer here.
 	state.DeviceAPIKey = comp.DeviceAPIKey
 	state.OTPRequestedAt = nil
 	state.SchemaVersion = agentStateSchemaVersion
 	if err := store.SaveAgentState(ctx, state); err != nil {
-		return nil, err
+		*state = previous
+		return nil, credentialPersistenceFailure(previous.AgentID, err)
 	}
 	return state, nil
 }
@@ -570,21 +709,87 @@ func (cfg *registerConfig) fetchRegistrationInfo(ctx context.Context, key string
 	return &env.Data, nil
 }
 
-// postCompletion runs POST /v1/agent/registration/complete, minting (or
-// returning) the device REST credential.
-func (cfg *registerConfig) postCompletion(ctx context.Context, key string, state *AgentState, path pathKind) (*completionResponse, error) {
+// preflight returns the validated registration description and selected NHP
+// endpoint shared by enrollment, refresh, and recovery. The service-reported
+// server id is checked against its own peer before any trusted override is
+// selected, and key-kind policy runs before OTP or NHP side effects.
+func (cfg *registerConfig) preflight(ctx context.Context, key string) (*registrationInfoResponse, *NHPServerPeerInfo, string, error) {
+	// This GET is side-effect-free: an outcome-unknown transport wrapper is a
+	// normal read failure here. Only mutation callers interpret it as possible
+	// committed-side-effect ambiguity.
+	info, err := cfg.fetchRegistrationInfo(ctx, key)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	if err := cfg.requireAllowedKeyKind(info.KeyKind); err != nil {
+		return nil, nil, "", err
+	}
+	if err := cfg.assertServerIDMatches(info.Relay.ServerID, &info.NHPServerPeer); err != nil {
+		return nil, nil, "", err
+	}
+	return info, cfg.resolvePeer(info), cfg.resolveRelayURL(info), nil
+}
+
+// postCompletion runs POST /v1/agent/registration/complete, which mints the
+// first-issue-only device REST credential. allowBareNotEnrolled is true only for
+// the pre-REG crash probe; after REG, an unstructured 404 is mint-ambiguous.
+func (cfg *registerConfig) postCompletion(ctx context.Context, key string, state *AgentState, path pathKind, allowBareNotEnrolled bool) (*completionResponse, error) {
 	reqBody := completeRequestBody{
 		DeviceID:        state.AgentID,
 		DevicePubKeyB64: state.PublicKeyB64,
 	}
 	var env apiEnvelope[completionResponse]
 	if err := doAuthorizedJSON(ctx, cfg.httpClient, cfg.baseURL, BearerToken(key).Authorize, http.MethodPost, "/v1/agent/registration/complete", reqBody, &env); err != nil {
-		return nil, cfg.mapCompletionHTTPError(err, path)
+		mapped := cfg.mapCompletionHTTPError(err, path, state.AgentID)
+		if errors.Is(mapped, ErrCredentialRecoveryRequired) {
+			return nil, mapped
+		}
+		if isAuthoritativeNoWriteCompletionError(mapped, allowBareNotEnrolled) {
+			// Only explicitly modeled qurl-service responses may bypass ambiguity:
+			// each proves the atomic mint transaction made no device-key write.
+			return nil, mapped
+		}
+		var outcomeUnknown *apiRequestOutcomeUnknownError
+		var apiErr *APIError
+		if errors.As(mapped, &outcomeUnknown) || errors.As(mapped, &apiErr) {
+			// Once completion was dispatched, every unclassified HTTP response is
+			// ambiguous regardless of status. A new service-side 4xx must be added
+			// to the authoritative no-write taxonomy before the SDK may trust it.
+			return nil, credentialPersistenceFailure(state.AgentID, mapped)
+		}
+		return nil, mapped
 	}
 	if err := env.Data.validate(cfg.clock(), cfg.invalidConfigErr); err != nil {
-		return nil, err
+		env.Data.DeviceAPIKey = ""
+		return nil, credentialPersistenceFailure(state.AgentID, err)
 	}
 	return &env.Data, nil
+}
+
+func credentialPersistenceFailure(deviceID string, cause error) *CredentialPersistenceError {
+	return &CredentialPersistenceError{DeviceID: deviceID, Cause: cause}
+}
+
+func (cfg *registerConfig) assertCompletionPeerMatchesRegistration(state *AgentState, comp *completionResponse) error {
+	if state == nil || state.NHPPeer == nil {
+		return fmt.Errorf("%w: authenticated registration state is missing its NHP peer", cfg.invalidConfigErr)
+	}
+	// persistCompletion, the sole production caller, rejects a nil completion
+	// response before reaching this invariant check.
+	registeredKey, err := decodeNHPServerPublicKey(state.NHPPeer.PublicKeyB64)
+	if err != nil {
+		return fmt.Errorf("%w: decode authenticated registration NHP peer public key: %w", cfg.invalidConfigErr, err)
+	}
+	completionKey, err := decodeNHPServerPublicKey(comp.NHPServerPeer.PublicKeyB64)
+	if err != nil {
+		return fmt.Errorf("%w: decode completion NHP peer public key: %w", cfg.invalidConfigErr, err)
+	}
+	// Compare only the key: the RAK-authenticated coordinates remain authoritative,
+	// and same-key host/port differences are deployment skew rather than rotation.
+	if !bytes.Equal(completionKey, registeredKey) {
+		return fmt.Errorf("%w: completion response NHP peer does not match the peer that authenticated the registration acknowledgement", cfg.invalidConfigErr)
+	}
+	return nil
 }
 
 // mapRegistrationHTTPError maps the registration-info HTTP failure to a typed
@@ -600,22 +805,57 @@ func (cfg *registerConfig) mapRegistrationHTTPError(err error) error {
 		return fmt.Errorf("%w: the API key was rejected by the registration service: %w", ErrKeyRejected, err)
 	case "registration_disabled":
 		return fmt.Errorf("%w: %w", ErrRegistrationDisabled, err)
+	case "registration_rate_limited", "rate_limited", "too_many_requests":
+		return fmt.Errorf("%w: %w", ErrRegistrationRateLimited, err)
 	}
-	if apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden {
-		return fmt.Errorf("%w: the API key was rejected by the registration service: %w", ErrKeyRejected, err)
+	if mapped := mapCommonRegistrationHTTPError(apiErr, err, "the API key was rejected by the registration service", "registration preflight is temporarily unavailable"); mapped != nil {
+		return mapped
 	}
 	return err
 }
 
+// mapCommonRegistrationHTTPError maps statuses shared by registration preflight
+// and completion admission. Callers supply path-specific message context and
+// retain their distinct mappings when this returns nil.
+func mapCommonRegistrationHTTPError(apiErr *APIError, err error, rejectedMsg, unavailableMsg string) error {
+	switch {
+	case apiErr.StatusCode == http.StatusTooManyRequests:
+		return fmt.Errorf("%w: %w", ErrRegistrationRateLimited, err)
+	case apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden:
+		return fmt.Errorf("%w: %s: %w", ErrKeyRejected, rejectedMsg, err)
+	case apiErr.StatusCode == http.StatusServiceUnavailable && strings.EqualFold(strings.TrimSpace(apiErr.Code), "service_unavailable"):
+		return fmt.Errorf("%w: %s: %w", ErrRegistrationRetryLater, unavailableMsg, err)
+	}
+	return nil
+}
+
+func isAuthoritativeNoWriteCompletionError(err error, allowBareNotEnrolled bool) bool {
+	if errors.Is(err, ErrRegistrationRateLimited) ||
+		errors.Is(err, ErrDeviceKeyQuotaExceeded) ||
+		errors.Is(err, ErrRegistrationRequestTooLarge) ||
+		errors.Is(err, ErrRegistrationRetryLater) ||
+		errors.Is(err, ErrKeyRejected) ||
+		errors.Is(err, ErrBootstrapSetupKeyConsumed) ||
+		isStructuredCompletionNotYetRegistered(err) {
+		return true
+	}
+	return allowBareNotEnrolled && isCompletionNotYetRegistered(err)
+}
+
 // mapCompletionHTTPError maps the completion HTTP failure. A 409
 // device_key_already_issued means the device was registered but its key was
-// already issued and this local state cannot reproduce it — a
-// ErrDeviceCredentialMissing situation the caller resolves by re-registering
-// under a new device id or with takeover.
-func (cfg *registerConfig) mapCompletionHTTPError(err error, path pathKind) error {
+// already issued and this local state cannot reproduce it. Surface the explicit
+// same-id recovery class; ordinary RegisterAgent must never mint around it.
+func (cfg *registerConfig) mapCompletionHTTPError(err error, path pathKind, deviceID string) error {
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) {
 		return err
+	}
+	if isDeviceKeyQuotaExceeded(apiErr) {
+		return &DeviceKeyQuotaExceededError{DeviceID: deviceID, Cause: err}
+	}
+	if apiErr.StatusCode == http.StatusRequestEntityTooLarge {
+		return &RegistrationRequestTooLargeError{DeviceID: deviceID, Cause: err}
 	}
 	// The consumed-setup-key code is a bootstrap-path concept (a one-shot key
 	// accepted once within the completion grace window), so gate it on
@@ -625,49 +865,62 @@ func (cfg *registerConfig) mapCompletionHTTPError(err error, path pathKind) erro
 	if path == pathBootstrap && isBootstrapConsumedCompletion(apiErr) {
 		return fmt.Errorf("%w: %s: %w", ErrBootstrapSetupKeyConsumed, bootstrapConsumedGuidance, err)
 	}
+	// qurl-service guarantees completion 401/403 responses are emitted before
+	// its atomic mint writes a device credential. That producer-owned no-write
+	// invariant is what makes the shared admission mapping safe on this mutating
+	// endpoint; if the service contract changes, these statuses must stop being
+	// authoritative in isAuthoritativeNoWriteCompletionError.
+	if mapped := mapCommonRegistrationHTTPError(apiErr, err, "the API key was rejected with no device-key write", "completion returned an authoritative no-write admission failure"); mapped != nil {
+		return mapped
+	}
 	if isDeviceKeyAlreadyIssued(apiErr) {
-		return fmt.Errorf("%w: the device was registered but its API key was already issued and cannot be re-fetched; re-register under a new device id (qurl.WithDeviceID) or re-bind with qurl.WithTakeover: %w", ErrDeviceCredentialMissing, err)
+		return &CredentialRecoveryRequiredError{DeviceID: deviceID, Cause: err}
 	}
 	return err
+}
+
+func isDeviceKeyQuotaExceeded(apiErr *APIError) bool {
+	return apiErr.StatusCode == http.StatusConflict &&
+		strings.EqualFold(strings.TrimSpace(apiErr.Code), "device_key_quota_exceeded")
 }
 
 // isCompletionNotYetRegistered reports whether a completion error means the
 // device is not yet enrolled (the expected outcome of the crash-recovery probe
 // before REG has run), so the account path should proceed to REG rather than
-// surface the error. A structured not-registered code is authoritative; a bare
-// 404 is also accepted because by the completion step the base URL already
-// worked for registration-info, so a 404 here means the endpoint reports the
-// device absent — and proceeding to REG (the real path) is safe either way.
+// surface the error. A structured not-registered code is authoritative. A bare
+// 404 is accepted only by the pre-REG probe caller: no REG has run in that call,
+// so proceeding to the real registration path cannot duplicate its own mint.
 func isCompletionNotYetRegistered(err error) bool {
+	if isStructuredCompletionNotYetRegistered(err) {
+		return true
+	}
+	var apiErr *APIError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound
+}
+
+func isStructuredCompletionNotYetRegistered(err error) bool {
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) {
+		return false
+	}
+	if apiErr.StatusCode != http.StatusNotFound {
 		return false
 	}
 	switch strings.ToLower(strings.TrimSpace(apiErr.Code)) {
-	case "device_not_registered", "registration_incomplete", "not_registered":
+	case "agent_not_enrolled", "device_not_registered", "registration_incomplete", "not_registered":
 		return true
 	}
-	return apiErr.StatusCode == http.StatusNotFound
+	return false
 }
 
-// isTransientCompletionError reports whether a completion error is a retryable
-// server-side fault (5xx). On the crash-recovery probe this means "proceed to
-// REG" rather than abort, since the probe is only an optimization.
-func isTransientCompletionError(err error) bool {
-	var apiErr *APIError
-	if !errors.As(err, &apiErr) {
-		return false
-	}
-	return apiErr.StatusCode >= 500 && apiErr.StatusCode <= 599
-}
-
-// isDeviceKeyAlreadyIssued matches ONLY the structured device_key_already_issued
-// code, not a bare 409. The mapped error (ErrDeviceCredentialMissing) tells the
-// operator to re-register under a new device id or re-bind — destructive advice
-// that must not fire for an unrelated infra 409 that arrived with no structured
-// code; those surface as the raw *APIError instead.
+// isDeviceKeyAlreadyIssued matches ONLY structured HTTP 409
+// device_key_already_issued, not a bare 409 or the same code on another status.
+// The mapped error tells the operator to revoke the prior agent key and run
+// explicit same-id recovery. Every non-exact response remains persistence
+// ambiguity while preserving the underlying *APIError for errors.As.
 func isDeviceKeyAlreadyIssued(apiErr *APIError) bool {
-	return strings.EqualFold(strings.TrimSpace(apiErr.Code), "device_key_already_issued")
+	return apiErr.StatusCode == http.StatusConflict &&
+		strings.EqualFold(strings.TrimSpace(apiErr.Code), "device_key_already_issued")
 }
 
 func isBootstrapConsumedCompletion(apiErr *APIError) bool {
@@ -780,7 +1033,7 @@ func (cfg *registerConfig) resolveRelayURL(info *registrationInfoResponse) strin
 // pre-flight's routing id and peer key disagree, so fail closed rather than knock
 // a server the key does not match.
 func (cfg *registerConfig) assertServerIDMatches(serverID string, peer *NHPServerPeerInfo) error {
-	peerKey, err := base64.StdEncoding.Strict().DecodeString(peer.PublicKeyB64)
+	peerKey, err := decodeNHPServerPublicKey(peer.PublicKeyB64)
 	if err != nil {
 		// validateNHPServerPeerInfo already accepted this key; defensive.
 		return fmt.Errorf("%w: NHP peer public key is not standard base64: %w", cfg.invalidConfigErr, err)
@@ -799,8 +1052,10 @@ func (cfg *registerConfig) decodeNHPKeys(state *AgentState, peer *NHPServerPeerI
 	if err != nil {
 		return nil, nil, fmt.Errorf("%w: decode device private key: %w", cfg.invalidConfigErr, err)
 	}
-	serverPub, err = base64.StdEncoding.Strict().DecodeString(peer.PublicKeyB64)
+	serverPub, err = decodeNHPServerPublicKey(peer.PublicKeyB64)
 	if err != nil {
+		// Callers can install their defer only after both decodes succeed.
+		wipeBytes(devicePriv)
 		return nil, nil, fmt.Errorf("%w: decode NHP peer public key: %w", cfg.invalidConfigErr, err)
 	}
 	return devicePriv, serverPub, nil
@@ -826,11 +1081,48 @@ func derefTime(t *time.Time, fallback time.Time) time.Time {
 // --- store-backed credential provider ---
 
 // newStoreBackedClient builds a Client whose credentials come from the device
-// API key persisted in store, wrapped in CachedCredentials so a rotated key is
-// picked up within the TTL without rebuilding the client. Construction makes
-// no qURL API calls; loading a network-backed store can still perform I/O.
+// API key persisted in store, wrapped in CachedCredentials. An existing Client
+// can retain its prior key for up to storeCredentialCacheTTL; recovery callers
+// should use the newly returned Client when they need the replacement at once.
+// Construction makes no qURL API calls; loading a network-backed store can
+// still perform I/O. This unprimed path uses the production wall clock; only
+// the internal primed runtime/recovery constructors accept an injected clock
+// for deterministic cache-expiry tests.
 func newStoreBackedClient(store AgentStateStore, baseURL string, httpClient HTTPDoer) *Client {
-	provider := CachedCredentials(&storeCredentialProvider{store: store}, storeCredentialCacheTTL)
+	return newStoreBackedClientWithCredential(store, baseURL, httpClient, "", time.Now)
+}
+
+// newPrimedStoreBackedClient is deliberately infallible after callers validate
+// the exact credential as part of their pre-commit state/completion contract.
+// Keeping construction infallible prevents a committed lifecycle mutation from
+// acquiring a new post-commit error tail merely while materializing its Client.
+// Do not add revalidation here: all three callers validate exact bearer bytes
+// before the commit/return boundary, and a new failure here would recreate a
+// committed-but-no-Client outcome. Keeping this helper unexported makes that
+// precondition auditable without a fallback or panic.
+func newPrimedStoreBackedClient(store AgentStateStore, baseURL string, httpClient HTTPDoer, validatedDeviceAPIKey string, now func() time.Time) *Client {
+	return newStoreBackedClientWithCredential(store, baseURL, httpClient, validatedDeviceAPIKey, now)
+}
+
+// newStoreBackedClientWithCredential optionally primes the one-minute cache from
+// an already validated AgentState so a combined runtime open does not unseal or
+// reload the same store on its first resource request. The wrapped store provider
+// remains authoritative after the cache expires.
+func newStoreBackedClientWithCredential(store AgentStateStore, baseURL string, httpClient HTTPDoer, deviceAPIKey string, now func() time.Time) *Client {
+	if now == nil {
+		now = time.Now
+	}
+	provider := &cachedCredentialProvider{
+		provider: &storeCredentialProvider{store: store},
+		ttl:      storeCredentialCacheTTL,
+		now:      now,
+	}
+	if deviceAPIKey != "" {
+		// The provider is not yet shared: construction finishes before the Client
+		// escapes, and every later cache read/write remains mutex-protected.
+		provider.authorization = "Bearer " + deviceAPIKey
+		provider.expiresAt = provider.now().Add(provider.ttl)
+	}
 	return &Client{
 		credentials: provider,
 		baseURL:     baseURL,
@@ -843,8 +1135,8 @@ func newStoreBackedClient(store AgentStateStore, baseURL string, httpClient HTTP
 const storeCredentialCacheTTL = time.Minute
 
 // storeCredentialProvider authorizes Client requests with the DeviceAPIKey read
-// from the AgentStateStore. Reading on demand (behind a short cache) means a
-// rotated credential in the store is observed without rebuilding the client.
+// from AgentStateStore. CachedCredentials bounds store reads and observes a
+// replacement after the one-minute cache expires.
 type storeCredentialProvider struct {
 	store AgentStateStore
 }
@@ -866,18 +1158,93 @@ func (p *storeCredentialProvider) Authorize(ctx context.Context, req *http.Reque
 	if state == nil {
 		return fmt.Errorf("%w: agent state store returned no state", ErrDeviceCredentialMissing)
 	}
-	token := strings.TrimSpace(state.DeviceAPIKey)
-	if token == "" {
-		return fmt.Errorf("%w: agent state holds no device credential", ErrDeviceCredentialMissing)
+	if err := validatePersistedDeviceCredential(state, ErrInvalidClientConfig); err != nil {
+		return err
 	}
-	return setBearer(req, token)
+	token := state.DeviceAPIKey
+	// The exact bytes were validated above; do not route through setBearer,
+	// whose trimming behavior is reserved for caller-supplied Client tokens.
+	req.Header.Set("Authorization", "Bearer "+token)
+	return nil
 }
 
 // --- options ---
 
-// RegisterOption customizes RegisterAgent.
+// RegisterOption customizes registered-agent enrollment and repair operations,
+// including RegisterAgentRuntime.
 type RegisterOption interface {
 	applyRegisterOption(*registerConfig) error
+}
+
+// AgentClientOption configures the store-backed resource Client consistently
+// whether it is returned by RegisterAgent, RegisterAgentRuntime, or
+// RecoverAgentCredential, or opened later by either OpenRegisteredAgent API.
+// WithAgentClientBaseURL and WithAgentClientHTTPClient implement this interface
+// and can be passed to either the RegisterOption or ClientOption entry points.
+type AgentClientOption interface {
+	RegisterOption
+	ClientOption
+}
+
+// RegistrationKeyKind is the key class reported by registration-info.
+// Callers that only accept pre-issued enrollment keys can restrict registration
+// before any OTP dispatch or NHP registration side effect.
+type RegistrationKeyKind string
+
+const (
+	// RegistrationKeyKindBootstrap is a pre-issued headless enrollment key.
+	RegistrationKeyKindBootstrap RegistrationKeyKind = keyKindBootstrap
+	// RegistrationKeyKindAccount is an account API key requiring email OTP.
+	RegistrationKeyKindAccount RegistrationKeyKind = keyKindAccount
+)
+
+// applyLifecycleDefaultKeyPolicy gives the new repair-oriented lifecycle APIs a
+// fail-safe fleet default without changing RegisterAgent's account-enrollment
+// compatibility. Interactive account-key refresh/recovery remains available by
+// explicitly opting in with WithAllowedRegistrationKeyKinds.
+func (cfg *registerConfig) applyLifecycleDefaultKeyPolicy() {
+	if cfg.allowedKeyKinds == nil {
+		cfg.allowedKeyKinds = map[RegistrationKeyKind]struct{}{
+			RegistrationKeyKindBootstrap: {},
+		}
+	}
+}
+
+func (cfg *registerConfig) requireAllowedKeyKind(raw string) error {
+	if cfg.allowedKeyKinds == nil {
+		return nil
+	}
+	kind := RegistrationKeyKind(strings.TrimSpace(raw))
+	if _, ok := cfg.allowedKeyKinds[kind]; ok {
+		return nil
+	}
+	allowed := make([]RegistrationKeyKind, 0, len(cfg.allowedKeyKinds))
+	for candidate := range cfg.allowedKeyKinds {
+		allowed = append(allowed, candidate)
+	}
+	slices.Sort(allowed)
+	return &RegistrationKeyKindDisallowedError{Kind: kind, Allowed: allowed}
+}
+
+// WithAllowedRegistrationKeyKinds restricts the registration key kinds a
+// caller accepts. The policy is evaluated immediately after the side-effect-free
+// registration-info preflight and before OTP dispatch or NHP registration.
+func WithAllowedRegistrationKeyKinds(kinds ...RegistrationKeyKind) RegisterOption {
+	return registerOptionFunc(func(o *registerConfig) error {
+		if len(kinds) == 0 {
+			return fmt.Errorf("%w: at least one registration key kind is required", ErrInvalidRegisterConfig)
+		}
+		o.allowedKeyKinds = make(map[RegistrationKeyKind]struct{}, len(kinds))
+		for _, kind := range kinds {
+			switch kind {
+			case RegistrationKeyKindBootstrap, RegistrationKeyKindAccount:
+				o.allowedKeyKinds[kind] = struct{}{}
+			default:
+				return fmt.Errorf("%w: unknown registration key kind %q", ErrInvalidRegisterConfig, kind)
+			}
+		}
+		return nil
+	})
 }
 
 type registerOptionFunc func(*registerConfig) error
@@ -982,10 +1349,10 @@ func WithRegisterVersion(version string) RegisterOption {
 // the registration-info and completion HTTPS endpoints. Most applications do not
 // need this.
 //
-// This origin also becomes the base URL of the returned Client, so the agent's
-// later resource calls (ProtectURL, portals) go to the same host — enrollment and
-// resource APIs both live on qurl-service. There is no way to point only the
-// enrollment endpoints elsewhere while leaving the Client on the default origin.
+// This option affects only registration-info and completion. The returned
+// Client remains on the default production API origin unless
+// WithAgentClientBaseURL is set. Staging, loopback, and custom deployments must
+// set both options deliberately to prevent resource calls reaching production.
 func WithRegisterBaseURL(rawURL string) RegisterOption {
 	return registerOptionFunc(func(o *registerConfig) error {
 		if err := validateHTTPSOrLoopbackURL(rawURL, "register base URL", ErrInvalidRegisterConfig); err != nil {
@@ -996,15 +1363,56 @@ func WithRegisterBaseURL(rawURL string) RegisterOption {
 	})
 }
 
+// WithAgentClientBaseURL points the registered agent's resource Client at a
+// non-default API origin, independently of WithRegisterBaseURL. The same option
+// can be reused with RegisterAgent, RegisterAgentRuntime,
+// RecoverAgentCredential, OpenRegisteredAgent, and OpenRegisteredAgentRuntime.
+// Generic Clients may continue to use WithBaseURL.
+func WithAgentClientBaseURL(rawURL string) AgentClientOption {
+	return agentClientBaseURLOption(rawURL)
+}
+
+type agentClientBaseURLOption string
+
+// validateAgentClientBaseURL validates the resource-client base URL and returns
+// its normalized (trailing-slash-trimmed) form. Shared by the RegisterOption and
+// ClientOption applications of WithAgentClientBaseURL so the validation and
+// normalization stay identical across both entry points.
+func validateAgentClientBaseURL(rawURL string, errKind error) (string, error) {
+	if err := validateHTTPSOrLoopbackURL(rawURL, "agent client base URL", errKind); err != nil {
+		return "", err
+	}
+	return strings.TrimRight(rawURL, "/"), nil
+}
+
+func (o agentClientBaseURLOption) applyRegisterOption(cfg *registerConfig) error {
+	normalized, err := validateAgentClientBaseURL(string(o), ErrInvalidRegisterConfig)
+	if err != nil {
+		return err
+	}
+	cfg.clientBaseURL = normalized
+	return nil
+}
+
+func (o agentClientBaseURLOption) applyClientOption(cfg *clientOptions) error {
+	normalized, err := validateAgentClientBaseURL(string(o), ErrInvalidClientConfig)
+	if err != nil {
+		return err
+	}
+	if err := claimClientOptionSource(&cfg.baseURLSource, clientOptionSourceAgent, "WithBaseURL", "WithAgentClientBaseURL"); err != nil {
+		return err
+	}
+	cfg.baseURL = normalized
+	return nil
+}
+
 // WithRegisterHTTPClient injects the HTTP client used for the registration HTTPS
 // endpoints and the relay POSTs. Without it, RegisterAgent uses a shared client
 // with a 30-second timeout and no redirect following. Callers can still bound
 // each call with ctx.
 //
-// The injected client is also reused as the returned Client's HTTP client, so an
-// application with fixed-egress requirements (a pinned transport or outbound
-// proxy) gets the same egress for enrollment and for the agent's later resource
-// calls from this one option.
+// This option affects only registration and relay traffic. Use
+// WithAgentClientHTTPClient independently for the returned Client.
 func WithRegisterHTTPClient(client HTTPDoer) RegisterOption {
 	return registerOptionFunc(func(o *registerConfig) error {
 		if client == nil {
@@ -1013,6 +1421,37 @@ func WithRegisterHTTPClient(client HTTPDoer) RegisterOption {
 		o.httpClient = client
 		return nil
 	})
+}
+
+// WithAgentClientHTTPClient injects the resource Client transport independently
+// of registration and relay traffic. The same option can be reused with
+// RegisterAgent, RegisterAgentRuntime, RecoverAgentCredential,
+// OpenRegisteredAgent, and OpenRegisteredAgentRuntime.
+func WithAgentClientHTTPClient(client HTTPDoer) AgentClientOption {
+	return agentClientHTTPClientOption{client: client}
+}
+
+type agentClientHTTPClientOption struct {
+	client HTTPDoer
+}
+
+func (o agentClientHTTPClientOption) applyRegisterOption(cfg *registerConfig) error {
+	if o.client == nil {
+		return fmt.Errorf("%w: agent Client HTTP client must not be nil", ErrInvalidRegisterConfig)
+	}
+	cfg.clientHTTPClient = o.client
+	return nil
+}
+
+func (o agentClientHTTPClientOption) applyClientOption(cfg *clientOptions) error {
+	if o.client == nil {
+		return fmt.Errorf("%w: agent Client HTTP client must not be nil", ErrInvalidClientConfig)
+	}
+	if err := claimClientOptionSource(&cfg.httpClientSource, clientOptionSourceAgent, "WithHTTPClient", "WithAgentClientHTTPClient"); err != nil {
+		return err
+	}
+	cfg.httpClient = o.client
+	return nil
 }
 
 // WithRelayURL overrides the NHP relay base URL that registration-info would
@@ -1033,29 +1472,15 @@ func WithRelayURL(rawURL string) RegisterOption {
 // otherwise supply. Advanced: pairs with WithRelayURL for a pinned or test NHP
 // endpoint.
 //
-// An overridden peer is NOT covered by the registration-info server_id ⇄
-// peer-key fingerprint check: that check validates only the peer the service
-// reported, and this override replaces it afterward. So the "we only knock a
-// server whose key matches the routing id" guarantee does not apply here — pin
-// only a peer you trust.
-//
-// The pre-flight still asserts its OWN internal consistency (the reported
-// server_id must match the reported peer key) before the override is applied, so
-// a self-inconsistent registration-info response is rejected even when you
-// override. If you override because the reported peer is unreachable, the response
-// must still be internally consistent for registration to proceed.
-//
-// The override governs the peer used for the REG round trip. After a successful
-// registration the persisted AgentState.NHPPeer is replaced by the completion
-// response's authoritative peer, so a knock-only agent's later knocks (and any
-// re-registration) use that server-reported peer, not this override.
+// The override is not covered by registration-info's server-id/peer-key check;
+// pin only a peer you trust. The preflight still rejects an internally
+// inconsistent registration-info response before applying the override. REG/RAK
+// authenticates the selected peer, and completion may only corroborate its key.
+// A different completion key fails recovery-required after completion may have
+// minted a credential, so differing overrides require a custom/test service
+// configured to agree. Success persists the selected peer in AgentState.
 func WithNHPPeer(peer NHPServerPeerInfo) RegisterOption {
 	return registerOptionFunc(func(o *registerConfig) error {
-		// o.clock is initialized to time.Now before options apply; using it keeps
-		// the direct wall-clock call out of the engine for a consistent seam.
-		if err := validateNHPServerPeerInfo(peer, o.clock(), true, "WithNHPPeer", ErrInvalidRegisterConfig); err != nil {
-			return err
-		}
 		p := peer
 		o.nhpPeerOverride = &p
 		return nil

@@ -160,6 +160,22 @@ substitution must be prevented; the store authenticates its persisted agent id
 and supports an optional `qurl.WithExpectedSealedAgentID` pin for a separately
 configured expected id.
 
+REST-only warm starts can call `qurl.OpenRegisteredAgent` without an enrollment
+key. Tunnel runtimes should use `qurl.OpenRegisteredAgentRuntime` to obtain the
+Client and validated knock binding from one store load; fresh installs use
+`qurl.RegisterAgentRuntime` to receive the same pair without a post-registration
+store/KMS reload.
+`qurl.RefreshAgentRegistration` explicitly repairs missing/rotated NHP binding
+metadata without touching or returning the device credential; its narrow
+runtime binding exposes only the identity/NHP data and wipeable private-key
+bytes needed for an immediate knock. Meanwhile,
+`qurl.RecoverAgentCredential` performs operator-approved same-id credential
+replacement after the owner revokes `agent:<device_id>`. Registration and
+resource API origins are independent via `WithRegisterBaseURL` and
+the dual-purpose `WithAgentClientBaseURL`/`WithAgentClientHTTPClient` options.
+After recovery, discard all older clients immediately: they may cache the revoked
+credential for one minute, while the returned client cuts over at once.
+
 See [Register an agent](docs/register-an-agent.md) for **which key to use** (one
 durable `qurl:agent` key fans out across a whole fleet), both enrollment paths, a
 store-by-runtime table, the error table, and migrating from `BootstrapAgent`.
@@ -216,6 +232,67 @@ Match errors by type, not message text:
 
 ### Unreleased
 
+- **Added: registered-agent lifecycle APIs** — `OpenRegisteredAgent` provides a
+  store-backed reopen without qURL enrollment or resource API calls (a sealed
+  store load may still call its key wrapper/KMS);
+  `RegisterAgentRuntime` and `OpenRegisteredAgentRuntime` return a primed Client
+  plus a validated one-shot runtime key binding without a duplicate store/KMS
+  load;
+  `RefreshAgentRegistration` forces a real
+  REG/RAK binding refresh without completion; and `RecoverAgentCredential`
+  performs explicit same-id replacement after owner revoke. Registration key
+  kinds can be restricted before OTP/REG side effects, registration and resource
+  origins are independent, and post-mint persistence/already-issued failures now
+  carry typed recovery guidance. Ambiguous completion transport, unclassified
+  5xx, and response failures never auto-retry, and completion cannot replace the
+  peer that authenticated the successful RAK.
+
+  **Fleet email-fan-out policy:** account-key OTP remains allowed by default for
+  generic `RegisterAgent` compatibility. The repair-oriented
+  `RefreshAgentRegistration` and `RecoverAgentCredential` default to
+  bootstrap-only; interactive account repair requires explicit
+  `WithAllowedRegistrationKeyKinds(RegistrationKeyKindAccount)`. Fleet callers
+  should still set the bootstrap-only policy explicitly so routine lifecycle
+  code documents and pins its intended trust model.
+
+  This release requires qurl-service registration-info/completion support,
+  idempotent same-key REG (including account recovery re-REG after an earlier
+  authenticated RAK stopped before completion), device-key revoke that atomically
+  clears the first-issue sentinel, and relay REG/RAK routing to be deployed with
+  repeated-REG regression coverage before these lifecycle operations are
+  enabled. During peer rotation, every qurl-service pod
+  serving registration-info and completion must report the same peer key; a
+  deployment-skew mismatch after mint fails recovery-required rather than
+  silently replacing the RAK-authenticated peer. Registration-info/RAK must
+  expose one routable peer deployment: the SDK persists that full host, port,
+  and lease and uses completion only to corroborate its decoded public key;
+  completion coordinates are ignored. Completion 401/403 responses must be
+  emitted only when qurl-service can prove the atomic mint transaction made no
+  device-key write, because the SDK classifies them as authoritative no-write
+  authentication failures.
+
+  qurl-service's persistent per-owner device cap must return structured HTTP 409
+  `device_key_quota_exceeded` only when the atomic mint transaction rejects
+  without writing. The SDK maps that exact response to
+  `ErrDeviceKeyQuotaExceeded`; operators revoke an existing unused agent device
+  key to free a slot, then safely retry.
+
+  Completion HTTP 413 is likewise an authoritative pre-mint admission result and
+  maps to `RegistrationRequestTooLargeError` /
+  `ErrRegistrationRequestTooLarge` while preserving the underlying `APIError`.
+
+  For `device_key_already_issued`, revoke the active `agent:<device_id>` key
+  before `RecoverAgentCredential`. `WithTakeover` alone never clears the issuance
+  sentinel; add it after revocation only for a changed-keypair/host rebind. A
+  distinct new device id in a separate state store is the only no-revoke
+  alternative and represents a separate identity.
+
+  Completion must be excluded from qurl-service's global POST idempotency cache:
+  its response reveals a one-time plaintext device secret and must never be
+  persisted/replayed or reused across different request bodies. Deploy the
+  qurl-service idempotency exclusion and regressions before enabling these SDK
+  lifecycle APIs.
+
 - **Added: sealed full-AgentState file storage** —
   `qurl.NewSealedFileAgentState` provides an SDK-owned AES-256-GCM envelope with
   pluggable exact-32-byte DEK wrapping, authenticated agent/provider binding,
@@ -229,6 +306,32 @@ Match errors by type, not message text:
   [Register an agent](docs/register-an-agent.md).
 
 #### Breaking changes
+
+- **`WithNHPPeer` can no longer be replaced by completion.** The override is the
+  peer authenticated by REG/RAK and is preserved in durable state. Completion
+  must report the same decoded public key; a differing key now fails
+  recovery-required after a credential may have been minted. Custom/test
+  deployments using a differing override must align their completion response
+  before upgrading.
+
+- **HTTP transport errors may carry an internal outcome wrapper.** Resource and
+  registration callers should use `errors.Is`/`errors.As` to inspect underlying
+  transport and context errors rather than direct concrete type assertions. The
+  wrapper lets mutation paths distinguish an outcome that may have committed.
+
+- **`ErrDeviceCredentialMissing` now also matches recovery ambiguity.** Both
+  `CredentialPersistenceError` and `CredentialRecoveryRequiredError` preserve
+  compatibility by matching that sentinel as well as
+  `ErrCredentialRecoveryRequired`. Downstream code must replace any old
+  clear/delete-state remediation with owner revoke plus explicit
+  `RecoverAgentCredential`; deleting the durable identity is no longer safe.
+
+- **Registration and resource-client overrides are now independent.**
+  `WithRegisterBaseURL` and `WithRegisterHTTPClient` affect only
+  registration-info, completion, and relay traffic. Callers that previously
+  relied on either option to retarget the `Client` returned by `RegisterAgent`
+  must also set `WithAgentClientBaseURL` and/or
+  `WithAgentClientHTTPClient`.
 
 - **Local AgentState directories and setup locks now fail closed.**
   `FileAgentState` requires its immediate state directory to be exactly `0700`.

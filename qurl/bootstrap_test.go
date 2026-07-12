@@ -506,6 +506,11 @@ func TestBootstrapAgent_Validation(t *testing.T) {
 	if _, err := BootstrapAgent(context.Background(), "", memoryAgentStateStore{}); !errors.Is(err, ErrInvalidBootstrapConfig) {
 		t.Fatalf("empty key: want ErrInvalidBootstrapConfig, got %v", err)
 	}
+	for _, key := range []string{" lv_bootstrap_once", "lv_bootstrap_once ", "lv_bootstrap\nonce"} {
+		if _, err := BootstrapAgent(context.Background(), key, memoryAgentStateStore{}); !errors.Is(err, ErrInvalidBootstrapConfig) {
+			t.Fatalf("non-exact setup key %q: want ErrInvalidBootstrapConfig, got %v", key, err)
+		}
+	}
 	if _, err := BootstrapAgent(context.Background(), "lv_bootstrap_once", nil); !errors.Is(err, ErrInvalidBootstrapConfig) {
 		t.Fatalf("nil store: want ErrInvalidBootstrapConfig, got %v", err)
 	}
@@ -517,6 +522,18 @@ func TestBootstrapAgent_Validation(t *testing.T) {
 	}
 	if _, err := BootstrapAgent(context.Background(), "lv_bootstrap_once", memoryAgentStateStore{}, WithBootstrapBaseURL("https://user:pass@bootstrap.example.com")); !errors.Is(err, ErrInvalidBootstrapConfig) {
 		t.Fatalf("bootstrap URL with userinfo: want ErrInvalidBootstrapConfig, got %v", err)
+	}
+	for _, rawURL := range []string{"https://bootstrap.example.com/prefix?wrong=1", "https://bootstrap.example.com/prefix#wrong"} {
+		if _, err := BootstrapAgent(context.Background(), "lv_bootstrap_once", memoryAgentStateStore{}, WithBootstrapBaseURL(rawURL)); !errors.Is(err, ErrInvalidBootstrapConfig) {
+			t.Fatalf("bootstrap URL %q: want ErrInvalidBootstrapConfig, got %v", rawURL, err)
+		}
+	}
+	var bootstrapCfg bootstrapOptions
+	if err := WithBootstrapBaseURL("https://bootstrap.example.com/custom/prefix/").applyBootstrapOption(&bootstrapCfg); err != nil {
+		t.Fatalf("path-prefixed bootstrap URL: %v", err)
+	}
+	if bootstrapCfg.baseURL != "https://bootstrap.example.com/custom/prefix" {
+		t.Fatalf("bootstrap path prefix = %q", bootstrapCfg.baseURL)
 	}
 
 	store := memoryAgentStateStore{state: &AgentState{PrivateKeyB64: "not-base64", PublicKeyB64: "also-bad"}}

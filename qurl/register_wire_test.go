@@ -65,6 +65,17 @@ func TestMapRAKError_UnknownCodeIsRegistrationDeny(t *testing.T) {
 	}
 }
 
+func TestMapRAKError_UnselectedPathDoesNotGuessCredentialMeaning(t *testing.T) {
+	err := mapRAKError(&registerAckBody{ErrCode: rakCredentialInvalid, ErrMsg: "credential rejected"}, pathUnknown)
+	var deny *RegistrationDenyError
+	if !errors.As(err, &deny) {
+		t.Fatalf("unselected path: want *RegistrationDenyError, got %v", err)
+	}
+	if errors.Is(err, ErrOTPIncorrect) || errors.Is(err, ErrKeyRejected) {
+		t.Fatalf("unselected path guessed a credential meaning: %v", err)
+	}
+}
+
 func TestRegistrationDenyError_IsBridgesKnownCode(t *testing.T) {
 	// A RegistrationDenyError carrying a KNOWN code still matches the typed
 	// sentinel via Is(), so a caller that only kept the deny path is not stranded.
@@ -147,7 +158,7 @@ func TestRegistrationInfoResponse_Validate(t *testing.T) {
 		KeyKind:       keyKindBootstrap,
 		KeyID:         "key_x",
 		NHPServerPeer: goodPeer,
-		Relay:         registrationRelay{BaseURL: "https://relay.example.test", ServerID: "abcdefghijk"},
+		Relay:         registrationRelay{BaseURL: "https://relay.example.test/custom/prefix", ServerID: "abcdefghijk"},
 	}
 	if err := base.validate(time.Now(), ErrInvalidRegisterConfig); err != nil {
 		t.Fatalf("valid response rejected: %v", err)
@@ -162,6 +173,8 @@ func TestRegistrationInfoResponse_Validate(t *testing.T) {
 		{"missing key id", func(r *registrationInfoResponse) { r.KeyID = "" }, "missing key_id"},
 		{"missing relay base", func(r *registrationInfoResponse) { r.Relay.BaseURL = "" }, "missing relay base_url"},
 		{"non-https relay base", func(r *registrationInfoResponse) { r.Relay.BaseURL = "ftp://x" }, "must use http"},
+		{"relay base query", func(r *registrationInfoResponse) { r.Relay.BaseURL = "https://relay.example.test/prefix?route=wrong" }, "must not include a query"},
+		{"relay base fragment", func(r *registrationInfoResponse) { r.Relay.BaseURL = "https://relay.example.test/prefix#wrong" }, "must not include a fragment"},
 		{"missing server id", func(r *registrationInfoResponse) { r.Relay.ServerID = "" }, "missing relay server_id"},
 		{"bad peer key", func(r *registrationInfoResponse) { r.NHPServerPeer.PublicKeyB64 = "not-base64" }, "not standard base64"},
 	}
@@ -203,6 +216,18 @@ func TestCompletionResponse_Validate(t *testing.T) {
 	if err := base.validate(time.Now(), ErrInvalidRegisterConfig); err != nil {
 		t.Fatalf("valid completion rejected: %v", err)
 	}
+	for _, edit := range []func(*completionResponse){
+		func(r *completionResponse) { r.NHPServerPeer.Host = "" },
+		func(r *completionResponse) { r.NHPServerPeer.Port = 0 },
+		func(r *completionResponse) { r.NHPServerPeer.Port = 65536 },
+		func(r *completionResponse) { r.NHPServerPeer.ExpireTime = time.Now().Add(-time.Hour).Unix() },
+	} {
+		completionWithIrrelevantCoordinates := base
+		edit(&completionWithIrrelevantCoordinates)
+		if err := completionWithIrrelevantCoordinates.validate(time.Now(), ErrInvalidRegisterConfig); err != nil {
+			t.Fatalf("completion-only coordinates rejected: %v", err)
+		}
+	}
 
 	tests := []struct {
 		name string
@@ -212,7 +237,10 @@ func TestCompletionResponse_Validate(t *testing.T) {
 		{"missing agent id", func(r *completionResponse) { r.AgentID = "" }, "missing agent_id"},
 		{"missing registered_at", func(r *completionResponse) { r.RegisteredAt = nil }, "missing registered_at"},
 		{"missing device key", func(r *completionResponse) { r.DeviceAPIKey = "" }, "missing device_api_key"},
-		{"bad peer", func(r *completionResponse) { r.NHPServerPeer.Port = 0 }, "missing NHP peer port"},
+		{"device key surrounding whitespace", func(r *completionResponse) { r.DeviceAPIKey = " lv_device_secret " }, "surrounding whitespace"},
+		{"device key control", func(r *completionResponse) { r.DeviceAPIKey = "lv_device\nsecret" }, "invalid header characters"},
+		{"missing peer key", func(r *completionResponse) { r.NHPServerPeer.PublicKeyB64 = "" }, "missing NHP peer public key"},
+		{"malformed peer key", func(r *completionResponse) { r.NHPServerPeer.PublicKeyB64 = "not-base64" }, "not standard base64"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -223,6 +251,20 @@ func TestCompletionResponse_Validate(t *testing.T) {
 				t.Fatalf("want ErrInvalidRegisterConfig containing %q, got %v", tt.want, err)
 			}
 		})
+	}
+}
+
+func TestDecodeNHPServerPublicKey_InvalidReportsBothEncodingsWithoutInput(t *testing.T) {
+	const invalid = "private-looking-invalid-key!?"
+	_, err := decodeNHPServerPublicKey(invalid)
+	if err == nil {
+		t.Fatal("invalid peer key unexpectedly decoded")
+	}
+	if !strings.Contains(err.Error(), "padded or raw standard base64") {
+		t.Fatalf("decode error does not identify both accepted encodings: %v", err)
+	}
+	if strings.Contains(err.Error(), invalid) {
+		t.Fatalf("decode error leaked the rejected input: %v", err)
 	}
 }
 
@@ -340,23 +382,6 @@ func TestMapRegistrationHTTPError(t *testing.T) {
 	}
 	if !errors.Is(got, plain) {
 		t.Fatalf("non-APIError should pass through unchanged, got %v", got)
-	}
-}
-
-// TestIsTransientCompletionError covers the 5xx predicate directly.
-func TestIsTransientCompletionError(t *testing.T) {
-	for _, status := range []int{500, 502, 503, 504, 599} {
-		if !isTransientCompletionError(&APIError{StatusCode: status}) {
-			t.Errorf("status %d should be transient", status)
-		}
-	}
-	for _, status := range []int{400, 401, 404, 409, 200} {
-		if isTransientCompletionError(&APIError{StatusCode: status}) {
-			t.Errorf("status %d should not be transient", status)
-		}
-	}
-	if isTransientCompletionError(errors.New("not an api error")) {
-		t.Error("a non-APIError should not be transient")
 	}
 }
 

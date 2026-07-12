@@ -288,12 +288,33 @@ func setBearer(req *http.Request, token string) error {
 	return nil
 }
 
+// validateExactBearerToken validates a credential without normalizing it. This
+// is required for server-minted or dual-channel enrollment credentials: the
+// exact bytes persisted or sent inside NHP must be the bytes authenticated over
+// HTTPS, and an invalid value must never be silently repaired with TrimSpace.
+func validateExactBearerToken(token, label string, errKind error) error {
+	if token == "" {
+		return fmt.Errorf("%w: %s must not be empty", errKind, label)
+	}
+	if token != strings.TrimSpace(token) {
+		return fmt.Errorf("%w: %s must not contain surrounding whitespace", errKind, label)
+	}
+	// The token is carried verbatim in the Authorization header; the fixed
+	// "Bearer " scheme prefix is all printable ASCII, so validating the raw token
+	// bytes is equivalent to validating the assembled header value.
+	return validateHeaderValueWithKind(token, label, errKind)
+}
+
 func validateHeaderValue(value, label string) error {
+	return validateHeaderValueWithKind(value, label, ErrInvalidClientConfig)
+}
+
+func validateHeaderValueWithKind(value, label string, errKind error) error {
 	for _, b := range []byte(value) {
 		// Authorization credentials do not need HTAB or obs-text, so keep this
 		// intentionally stricter than the generic HTTP header grammar.
 		if b < 0x20 || b > 0x7e {
-			return fmt.Errorf("%w: %s contains invalid header characters", ErrInvalidClientConfig, label)
+			return fmt.Errorf("%w: %s contains invalid header characters", errKind, label)
 		}
 	}
 	return nil
@@ -319,9 +340,27 @@ func (f clientOptionFunc) applyClientOption(o *clientOptions) error {
 }
 
 type clientOptions struct {
-	baseURL         string
-	httpClient      HTTPDoer
-	issuerStatePath string
+	baseURL          string
+	httpClient       HTTPDoer
+	issuerStatePath  string
+	baseURLSource    clientOptionSource
+	httpClientSource clientOptionSource
+}
+
+type clientOptionSource uint8
+
+const (
+	clientOptionSourceUnset clientOptionSource = iota
+	clientOptionSourceGeneric
+	clientOptionSourceAgent
+)
+
+func claimClientOptionSource(current *clientOptionSource, next clientOptionSource, genericName, agentName string) error {
+	if *current != clientOptionSourceUnset && *current != next {
+		return fmt.Errorf("%w: set only one of %s or %s", ErrInvalidClientConfig, genericName, agentName)
+	}
+	*current = next
+	return nil
 }
 
 func applyClientOptions(opts []ClientOption) (clientOptions, error) {
@@ -347,6 +386,9 @@ func WithBaseURL(rawURL string) ClientOption {
 		if err := validateHTTPSOrLoopbackURL(rawURL, "base URL", ErrInvalidClientConfig); err != nil {
 			return err
 		}
+		if err := claimClientOptionSource(&o.baseURLSource, clientOptionSourceGeneric, "WithBaseURL", "WithAgentClientBaseURL"); err != nil {
+			return err
+		}
 		o.baseURL = strings.TrimRight(rawURL, "/")
 		return nil
 	})
@@ -360,6 +402,9 @@ func WithHTTPClient(client HTTPDoer) ClientOption {
 	return clientOptionFunc(func(o *clientOptions) error {
 		if client == nil {
 			return fmt.Errorf("%w: HTTP client must not be nil", ErrInvalidClientConfig)
+		}
+		if err := claimClientOptionSource(&o.httpClientSource, clientOptionSourceGeneric, "WithHTTPClient", "WithAgentClientHTTPClient"); err != nil {
+			return err
 		}
 		o.httpClient = client
 		return nil
@@ -949,6 +994,17 @@ func validateHTTPSOrLoopbackURL(rawURL, label string, errKind error) error {
 	if u.Scheme == "http" && !isLoopbackHost(u.Hostname()) {
 		return fmt.Errorf("%w: %s must use https unless it targets localhost", errKind, label)
 	}
+	// Callers append fixed endpoint paths to the original string. A query or
+	// fragment would capture or hide that suffix instead of extending the path.
+	if u.RawQuery != "" || u.ForceQuery {
+		return fmt.Errorf("%w: %s must not include a query", errKind, label)
+	}
+	// url.Parse represents an explicit empty fragment ("https://host/#") with
+	// Fragment == ""; inspect the raw input as well so that suffix-capture form
+	// cannot become indistinguishable from a URL with no fragment delimiter.
+	if u.Fragment != "" || strings.Contains(rawURL, "#") {
+		return fmt.Errorf("%w: %s must not include a fragment", errKind, label)
+	}
 	return nil
 }
 
@@ -1036,6 +1092,8 @@ func doAuthorizedJSON(ctx context.Context, httpClient HTTPDoer, baseURL string, 
 		if err != nil {
 			return fmt.Errorf("qurl: encode API request: %w", err)
 		}
+		// Do not wipe raw when Do returns: net/http may return an early response
+		// while its write goroutine is still consuming the request body.
 		reqBody = bytes.NewReader(raw)
 	}
 
@@ -1054,7 +1112,7 @@ func doAuthorizedJSON(ctx context.Context, httpClient HTTPDoer, baseURL string, 
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("qurl: API request failed: %w", err)
+		return &apiRequestOutcomeUnknownError{err: fmt.Errorf("qurl: API request failed: %w", err)}
 	}
 	defer func() {
 		_ = resp.Body.Close()
@@ -1070,8 +1128,9 @@ func doAuthorizedJSON(ctx context.Context, httpClient HTTPDoer, baseURL string, 
 				err:        err,
 			}
 		}
-		return fmt.Errorf("qurl: read API response: %w", err)
+		return &apiRequestOutcomeUnknownError{err: fmt.Errorf("qurl: read API response after successful status: %w", err)}
 	}
+	defer wipeBytes(respBody)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return apiErrorFromResponse(resp.StatusCode, respBody)
 	}
@@ -1082,13 +1141,27 @@ func doAuthorizedJSON(ctx context.Context, httpClient HTTPDoer, baseURL string, 
 	// success endpoints should call this helper with out == nil or split to a
 	// no-body variant instead of weakening this fail-closed decode path.
 	if len(bytes.TrimSpace(respBody)) == 0 {
-		return fmt.Errorf("qurl: empty API response body")
+		return &apiRequestOutcomeUnknownError{err: errors.New("qurl: empty API response body after successful status")}
 	}
 	if err := json.Unmarshal(respBody, out); err != nil {
-		return fmt.Errorf("qurl: decode API response: %w", err)
+		return &apiRequestOutcomeUnknownError{err: fmt.Errorf("qurl: decode API response after successful status: %w", err)}
 	}
 	return nil
 }
+
+// apiRequestOutcomeUnknownError marks failures after an HTTP request was handed
+// to the transport, or after a 2xx response arrived but could not be consumed.
+// Reads intentionally share this transport/post-2xx marker so the common JSON
+// helper has one failure contract; they pass it through like any other request
+// failure. Mutation callers may additionally interpret it as possible committed
+// side-effect ambiguity and refuse to replay. The underlying error remains
+// matchable.
+type apiRequestOutcomeUnknownError struct {
+	err error
+}
+
+func (e *apiRequestOutcomeUnknownError) Error() string { return e.err.Error() }
+func (e *apiRequestOutcomeUnknownError) Unwrap() error { return e.err }
 
 // sdkUserAgent returns the cached SDK User-Agent header. The value is derived
 // from build info, which is fixed for the process lifetime, so it is computed
@@ -1123,9 +1196,11 @@ func usableBuildVersion(version string) bool {
 func readCappedBody(r io.Reader, limit int, what string) ([]byte, error) {
 	raw, err := io.ReadAll(io.LimitReader(r, int64(limit)+1))
 	if err != nil {
+		wipeBytes(raw)
 		return nil, fmt.Errorf("read %s: %w", what, err)
 	}
 	if len(raw) > limit {
+		wipeBytes(raw)
 		return nil, &inputExceedsCapError{what: what, limit: limit}
 	}
 	return raw, nil

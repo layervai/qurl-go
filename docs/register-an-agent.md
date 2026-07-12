@@ -40,6 +40,70 @@ never re-validates the key. Rotating or mistyping the key against an
 already-registered `store` is therefore not detected; the persisted device
 credential is authoritative from then on.
 
+For an explicit reopen without enrollment or resource API calls, use
+`OpenRegisteredAgent`. It takes `ClientOption` values and makes no qURL API call;
+loading a sealed store may still call its key wrapper/KMS.
+The resource API origin is independent of the registration origin:
+
+```go
+client, err := qurl.OpenRegisteredAgent(ctx, store,
+	qurl.WithAgentClientBaseURL(resourceAPIURL),
+)
+```
+
+The returned client caches the store-backed Authorization value for up to one
+minute. After credential recovery, use the new client returned by
+`RecoverAgentCredential` for immediate cutover; an older client observes the
+replacement only after its cache expires.
+
+Tunnel processes that also need NHP knock state should use the combined runtime
+APIs. They validate a live peer, relay URL, and key id; return a primed Client
+plus `AgentRuntimeBinding`; and avoid loading/unsealing the store again for the
+binding or first resource request. Unlike REST-only `OpenRegisteredAgent`, a
+runtime open rejects an expired peer without network I/O because it cannot be
+knocked. Call `RefreshAgentRegistration` with an enrollment key to obtain a
+fresh binding, then continue startup:
+
+```go
+client, binding, err := qurl.OpenRegisteredAgentRuntime(ctx, store,
+	qurl.WithAgentClientBaseURL(resourceAPIURL),
+)
+if err != nil {
+	return err
+}
+defer binding.Destroy()
+devicePrivateKey := binding.TakeDeviceStaticPrivateKey()
+defer func() { clear(devicePrivateKey) }()
+```
+
+Use `RegisterAgentRuntime` with the same `RegisterOption` values as
+`RegisterAgent` on a fresh install. Its registration state machine captures the
+runtime key before network I/O and returns the Client/binding pair from the
+in-memory completed state, without a post-registration store/KMS reload. The
+primed Client caches that exact credential for one minute; if the owner later
+revokes it, the Client observes that subsequent revocation after the cache TTL.
+
+`WithRegisterBaseURL` targets only registration-info and completion.
+`WithAgentClientBaseURL` and `WithAgentClientHTTPClient` are dual-purpose
+options accepted by registration/recovery and both `OpenRegisteredAgent` APIs,
+so the same resource origin and transport can be reused across the lifecycle.
+This prevents a dedicated registration origin from silently retargeting later
+`/v1/resources` calls:
+
+```go
+client, err := qurl.RegisterAgent(ctx, enrollmentKey, store,
+	qurl.WithRegisterBaseURL(registrationURL),
+	qurl.WithAgentClientBaseURL(resourceAPIURL),
+)
+```
+
+Headless callers that refuse account-key/OTP enrollment can enforce that policy
+before any OTP email or NHP registration side effect:
+
+```go
+qurl.WithAllowedRegistrationKeyKinds(qurl.RegistrationKeyKindBootstrap)
+```
+
 ## Which key do I use?
 
 You pass one key at enrollment. After that the agent runs entirely off the
@@ -69,7 +133,10 @@ agents at one `store` — that is a single shared identity, not a fleet.
 ## Two enrollment paths
 
 `RegisterAgent` picks the enrollment path automatically from the kind of key you
-pass. You call the same function either way.
+pass. You call the same function either way. Pass the credential byte-exact:
+surrounding whitespace and control characters are rejected before store or
+network I/O because HTTPS authorization and the NHP REG/OTP payload must use the
+same bytes.
 
 ### Pre-issued (bootstrap) key — one call, headless
 
@@ -289,10 +356,14 @@ completed registration's read-only fast path; correct a pre-existing `0750` or
 `0755` directory to `0700` before upgrading. A read-only filesystem mount is
 supported when the directory metadata remains exactly `0700`; changing the mode
 to `0500`, `0555`, or another "stricter" value is rejected by policy.
-If lock release fails after enrollment was atomically persisted, the call still
-returns `ErrAgentSetupLock` and no client because ownership is ambiguous. Retry
-normally: the completed state then recovers through the pre-lock fast path
-without enrolling a second identity.
+If lock release fails after a state mutation was atomically persisted, the call
+still returns `ErrAgentSetupLock` and no client/state because ownership is
+ambiguous. Load the durable state first. After initial enrollment or credential
+recovery, call `OpenRegisteredAgent`; it recovers the persisted credential
+without enrollment or completion. After binding refresh, inspect the loaded
+binding before deciding whether another refresh is needed. Never blindly retry
+`RecoverAgentCredential`: its completion and save may already have succeeded,
+and a retry would attempt a second one-time credential mint.
 Windows, Plan 9, and js/wasm do not currently have an SDK local-file lock
 implementation, so fresh or incomplete local-file enrollment fails closed with
 `ErrAgentSetupLock` there. Use a custom/network store (including `awsstore` where
@@ -376,6 +447,178 @@ setup across processes with a mandatory sidecar lock. Run enrollment from **one
 process at a time** for custom/network stores; the SDK cannot derive a shared
 lock for them, and concurrent account-path setup can dispatch multiple OTPs.
 
+## Binding refresh and credential recovery
+
+These are deliberately separate operations:
+
+- `RefreshAgentRegistration` always fetches current registration-info, validates
+  the relay `server_id` against the NHP peer key, sends a real `NHP_REG`, and
+  requires a successful `NHP_RAK`. It then saves the authoritative relay/peer
+  metadata while preserving `DeviceAPIKey` and `RegisteredAt`. It never calls
+  completion, even when the old peer is expired or missing. `WithTakeover()` is
+  honored only when explicitly supplied. It returns a narrow
+  `AgentRuntimeBinding` with the refreshed relay/peer identity and a wipeable
+  copy of the private-key bytes so the caller can knock immediately without a
+  second state-store/KMS load. The binding deliberately omits `DeviceAPIKey`,
+  schema, and OTP state; the preserved REST credential remains only in the
+  configured store. Do not copy or log the binding, and wipe/destroy its private
+  key after the runtime handoff.
+  Refresh with an account key uses the same email-OTP dispatch/two-call resume
+  as enrollment: a static `WithOTP` on a first call cannot match the code that
+  call dispatches, so it returns `OTPPendingError`; resume with the received
+  code. The anti-spam `OTPRequestedAt` marker is persisted before dispatch/RAK
+  and intentionally remains on the otherwise-completed state when the caller
+  pauses or abandons the attempt. `OpenRegisteredAgent` ignores it; a later
+  successful resumed RAK clears it. This durable marker prevents repeated calls
+  from fanning out email, while refreshed binding metadata remains uncommitted
+  until RAK succeeds.
+  `RegisterAgent` keeps account keys enabled by default for interactive
+  enrollment compatibility. The repair-oriented `RefreshAgentRegistration` and
+  `RecoverAgentCredential` default to bootstrap-only; interactive account-key
+  repair must opt in with
+  `WithAllowedRegistrationKeyKinds(RegistrationKeyKindAccount)`. Fleet
+  connectors should still set the bootstrap-only policy explicitly so their
+  security posture is visible at the call site.
+- `RecoverAgentCredential` is the operator-controlled path for a revoked or
+  locally lost device credential. It preserves the persisted device id and
+  X25519 keypair and, once enrollment authorization is available, sends REG,
+  calls completion exactly once, and persists the replacement before returning
+  a `Client`. An account key may first pause for the same OTP flow described
+  above. It is never triggered automatically by a 401 or by ordinary binding
+  refresh.
+
+```go
+binding, err := qurl.RefreshAgentRegistration(ctx, enrollmentKey, store,
+	qurl.WithAllowedRegistrationKeyKinds(qurl.RegistrationKeyKindBootstrap),
+	qurl.WithRegisterBaseURL(registrationURL),
+)
+if err != nil {
+	return err
+}
+defer binding.Destroy()
+devicePrivateKey := binding.TakeDeviceStaticPrivateKey()
+defer func() { clear(devicePrivateKey) }()
+
+client, err := qurl.RecoverAgentCredential(ctx, enrollmentKey, store,
+	qurl.WithDeviceID(binding.AgentID),
+	qurl.WithRegisterBaseURL(registrationURL),
+	qurl.WithAgentClientBaseURL(resourceAPIURL),
+)
+```
+
+Interactive account-key repair must make its wider policy explicit on every
+phase, including the resume call:
+
+```go
+accountRepair := qurl.WithAllowedRegistrationKeyKinds(qurl.RegistrationKeyKindAccount)
+_, err := qurl.RefreshAgentRegistration(ctx, accountKey, store, accountRepair)
+// After OTPPendingError and receipt of the emailed code:
+binding, err := qurl.RefreshAgentRegistration(ctx, accountKey, store,
+	accountRepair,
+	qurl.WithOTP(refreshCode),
+)
+
+// Or, after a separate recovery dispatch/pause and owner-side revoke:
+client, err := qurl.RecoverAgentCredential(ctx, accountKey, store,
+	accountRepair,
+	qurl.WithOTP(recoveryCode),
+)
+```
+
+Recovery's first call follows the same dispatch/pause pattern when no current
+code is supplied. Prefer a fresh `WithOTPProvider` option for each call when a
+mailbox integration owns code retrieval.
+
+After successful credential recovery, immediately discard every older `Client`
+for the agent and cut over to the returned `Client`. Older instances may retain
+the revoked credential in their one-minute authorization cache; only the newly
+returned client is guaranteed to use the replacement immediately.
+
+Credential recovery has an intentional owner step: first revoke
+`agent:<device_id>` with an owner credential. qurl-service atomically revokes
+the prior device key and clears its first-issue sentinel; only then can explicit
+same-id recovery mint one replacement. The SDK proceeds even when local state
+still contains `DeviceAPIKey`: that value may already be revoked server-side, so
+a local no-op guard would block valid recovery. If the sentinel is still present,
+completion returns `device_key_already_issued`, mapped to
+`*CredentialRecoveryRequiredError`. Use an active durable `qurl:agent` or
+account enrollment key for recovery; a consumed one-shot bootstrap key cannot
+perform a later registration-info refresh.
+
+`WithTakeover` does not clear the issuance sentinel and is never a substitute
+for revocation. Revoke the active device key first; add `WithTakeover` during
+re-enrollment only when the replacement host/keypair must re-bind the same
+device id. The only no-revoke alternative is to enroll a distinct new device id
+in a separate state store, which creates a separate identity.
+
+Completion and local persistence are a distributed transaction. If completion
+returns a plaintext key but the final `SaveAgentState` fails, the SDK returns
+`*CredentialPersistenceError` carrying the device id. It never retries
+completion in that call. Revoke `agent:<device_id>`, then invoke
+`RecoverAgentCredential`; do not delete the state or choose a new identity.
+
+The same recovery-required class covers every ambiguous post-completion result:
+a transport failure after dispatch, an unclassified 5xx, malformed/invalid 2xx
+response, response agent-id mismatch, or a completion peer key that differs from
+the peer that authenticated the RAK. Completion is first-issue-only, so none of
+those conditions is safe to retry automatically. The sole 5xx exception is
+qurl-service's structured `503 service_unavailable`, emitted only as an
+authoritative no-write admission result; that maps to
+`ErrRegistrationRetryLater`. The SDK preserves the RAK-authenticated peer and
+requires qurl-service's completion response to report the same key; the response
+cannot silently rotate binding state after the handshake.
+
+`RecoverAgentCredential` intentionally has no crash-recovery completion probe:
+the probe would itself call the first-issue endpoint and cannot re-fetch an
+already-issued plaintext key. If account recovery stops after an authenticated
+RAK but before completion is dispatched, the next explicit recovery re-REGs the
+same device key and then completes. qurl-service and its relay must accept that
+same-key re-REG idempotently; deploy the cross-repo repeated-REG regression
+before enabling recovery. If recovery instead crashes after replacement mint
+but before durable persistence, the next attempt returns already-issued. Revoke
+the active device key again, then start another explicit recovery cycle; never
+blindly probe or retry.
+
+Context cancellation or deadline expiry while the completion transport is in
+flight is also outcome-unknown: the SDK cannot prove the request stayed
+pre-dispatch. It therefore preserves `context.Canceled`/`context.DeadlineExceeded`
+as a matchable cause inside `CredentialPersistenceError` while requiring the
+same owner-revoke and explicit-recovery procedure.
+
+Only explicitly recognized qurl-service no-write outcomes bypass ambiguity:
+authentication rejection, rate-limit admission, structured
+`service_unavailable`, structured not-enrolled, and consumed bootstrap-key
+outcomes, the atomic mint transaction's no-write device-key quota rejection
+(`409 device_key_quota_exceeded`), plus request-size admission (413). A bare 404
+is trusted only by the pre-REG account crash probe; after a REG, the same
+unstructured status is mint-ambiguous.
+
+qurl-service must produce completion 401/403 authentication failures only when
+it can prove the atomic mint transaction made no device-key write. The SDK
+treats those statuses as authoritative no-write rejections; emitting either
+after a credential was minted would make a retry look safe when it is not.
+
+Completion must also be excluded from qurl-service's global POST idempotency
+cache. Its response carries a one-time plaintext device secret: persisting or
+replaying that body would violate first-issue-only custody, and accepting an
+idempotency-key replay across different completion bodies could bind the wrong
+request to a prior credential response. Deploy the completion idempotency
+exclusion and its body-binding regressions before enabling this SDK lifecycle.
+`device_key_already_issued` enters explicit recovery because it describes a
+prior first issue. Every unclassified completion HTTP response, including a new
+4xx or unrelated 409, is recovery-required by default; the SDK never assumes a
+new server error happened before the atomic mint. A new retryable/terminal 4xx
+must be added to the authoritative no-write taxonomy before it ships.
+
+The registration-info/RAK peer remains authoritative for all durable
+coordinates and lease state. Completion corroborates the decoded public key
+only; its host, port, and expiry are ignored and cannot replace the
+RAK-authenticated values. During rotation, qurl-service deployments must keep
+registration-info and completion on the same peer key. A key mismatch fails
+recovery-required after a possible mint, while any same-key coordinate
+discrepancy preserves the registration-info/RAK values and should be treated as
+deployment skew to correct.
+
 ## Errors
 
 Match errors by type, not message text: use `errors.Is` against a sentinel for a
@@ -384,22 +627,27 @@ Every message names the next concrete step.
 
 | Error | When it happens | Handle it by |
 | --- | --- | --- |
-| `*qurl.OTPPendingError` (unwraps `ErrOTPPending`) | Account path emailed a code and is waiting for it. Not a failure — the pause point. | `errors.As` to read `MaskedEmail`; re-run with `WithOTP(code)`. |
-| `qurl.ErrOTPIncorrect` | Supplied one-time code was wrong. | Re-run with the correct `WithOTP` code. |
-| `qurl.ErrOTPExpired` | Code was valid but expired. | Re-run with **no** code to request a fresh one, then supply it. |
+| `*qurl.OTPPendingError` (unwraps `ErrOTPPending`) | Account path emailed a code and is waiting for it. Not a failure — the pause point. | `errors.As` to read `MaskedEmail`; re-run the same operation with `WithOTP(code)`. |
+| `qurl.ErrOTPIncorrect` | Supplied one-time code was wrong. | Re-run the same operation with the correct `WithOTP` code. |
+| `qurl.ErrOTPExpired` | Code was valid but expired. | Re-run the same operation with **no** code to request a fresh one, then re-run it with the new code. |
 | `qurl.ErrRegistrationRateLimited` | Too many attempts, or the service is rate limiting. | Back off and retry later. |
-| `qurl.ErrRegistrationRetryLater` | The registration relay returned an overload cookie-challenge (it is under load). | Back off briefly and re-run. |
+| `*qurl.DeviceKeyQuotaExceededError` (unwraps `ErrDeviceKeyQuotaExceeded` and `*APIError`) | Completion's atomic mint transaction rejected without writing because the account has reached its active device-key limit. | Revoke an existing unused agent device key to free a slot, then retry the same `RegisterAgent` or `RecoverAgentCredential` operation. Use `WithTakeover` only for an intentional different-key rebind of that device id. |
+| `qurl.ErrRegistrationRetryLater` | The relay returned an overload cookie, or completion returned a structured, authoritative no-write `service_unavailable` admission result. | Back off briefly and re-run the same operation. |
 | `qurl.ErrKeyRejected` | The API key (or a pre-issued key used as the credential) was rejected. | Check the key and re-run. |
 | `qurl.ErrBootstrapSetupKeyConsumed` | A pre-issued **one-shot** setup key was already consumed by an earlier enrollment (RAK code 52108, or reported by the completion call). | Mint a fresh setup key, or restore the completed agent state from the run that consumed it. |
 | `qurl.ErrAgentIdentityConflict` | This device id is already enrolled to a different key or agent. | Re-run with `WithTakeover()` to re-bind, or pick a different `WithDeviceID`. |
 | `qurl.ErrNoAccountEmail` | Account key has no email on file for the code. | Add an email to the account, or use a pre-issued key. |
-| `qurl.ErrDeviceCredentialMissing` | Saved state shows the agent is registered but holds no device credential (issued once, unreproducible). | Register under a new `WithDeviceID` or re-bind with `WithTakeover`; for a legacy state file missing the credential, clear or replace the persisted state. |
+| `*qurl.RegistrationKeyKindDisallowedError` (unwraps `ErrRegistrationKeyKindDisallowed`) | Registration-info returned a valid key kind rejected by caller policy. No OTP/REG side effect occurred. | Supply an allowed enrollment key or deliberately widen `WithAllowedRegistrationKeyKinds`. |
+| `*qurl.RegistrationRequestTooLargeError` (unwraps `ErrRegistrationRequestTooLarge`) | Completion was authoritatively rejected with HTTP 413 before any device-key mint. | Correct the SDK/service request-size contract, then retry the same registration or recovery operation. |
+| `*qurl.CredentialPersistenceError` (unwraps `ErrCredentialRecoveryRequired` and `ErrDeviceCredentialMissing`) | Completion may have minted a key, but transport/5xx/response validation or the final state save left no provably durable credential. | Revoke `agent:<DeviceID>`, then call `RecoverAgentCredential` with the same store. Never loop ordinary registration. |
+| `*qurl.CredentialRecoveryRequiredError` (unwraps `ErrCredentialRecoveryRequired` and `ErrDeviceCredentialMissing`) | The device key was already issued, is absent locally, or the persisted value is malformed/unsafe for an Authorization header. | Revoke `agent:<DeviceID>`, then call `RecoverAgentCredential` with the same store and enrollment key. Do not trim or repair a minted credential in place. |
 | `qurl.ErrRegistrationInvalidInput` | The service rejected a registration input as malformed (e.g. a bad device id). | Fix the input (use a valid `WithDeviceID`) and re-run. |
 | `qurl.ErrRegistrationDisabled` | Agent registration is disabled for the account. | Contact the account owner to enable it. |
 | `qurl.ErrInvalidRegisterConfig` | Inputs or options were invalid before any network call (empty key, nil store, conflicting options). | Fix the call. |
-| `qurl.ErrInvalidAgentState` | Persisted state exists but is corrupt/unreadable — surfaced wrapped in the front-door config error. (`ErrAgentStateNotFound` is **not** caller-facing: it is the store-contract sentinel a custom `AgentStateStore` returns when empty, which the engine converts into a fresh enrollment.) | Clear or replace the corrupt state. |
+| `qurl.ErrAgentBindingPersistence` | Refresh authenticated a new NHP binding, but the store rejected its metadata save. The wrapped store cause remains matchable; no device credential was minted or changed. | Correct the store failure, then safely retry `RefreshAgentRegistration`. |
+| `qurl.ErrInvalidAgentState` | Persisted state exists but is corrupt/unreadable — surfaced wrapped in the front-door config error. (`ErrAgentStateNotFound` is **not** caller-facing: it is the store-contract sentinel a custom `AgentStateStore` returns when empty, which the engine converts into a fresh enrollment.) | Restore a known-good backup. If recovery is impossible, use an owner credential to revoke `agent:<known-agent-id>` before clearing and re-enrolling. If the id is unreadable, inventory and revoke the account's affected agent keys first; never clear state and leave an orphan credential active. |
 | `qurl.ErrAgentStateKeyWrapper` | A sealed store's KMS/HSM wrapper is unavailable or violated its 32-byte DEK contract. | Restore provider access/configuration; do not delete otherwise valid state for an operational outage. |
-| `qurl.ErrAgentSetupLock` | The mandatory local-file setup lock could not be acquired or released. | Fix state-directory/sidecar permissions or platform support; do not run setup unlocked. |
+| `qurl.ErrAgentSetupLock` | The mandatory local-file setup lock could not be acquired or released. A release failure may follow a successful durable mutation. | Fix state-directory/sidecar permissions or platform support; do not run setup unlocked. On release failure, load first or call `OpenRegisteredAgent`; never blindly retry credential recovery. |
 | `*qurl.RegistrationDenyError` | An authenticated enrollment denial carrying a wire code newer than this SDK. | Read `ErrCode` / `ErrMsg`; `errors.Is` still matches the typed sentinel for known codes. |
 
 A worked pattern:
@@ -417,6 +665,9 @@ case errors.Is(err, qurl.ErrAgentIdentityConflict):
 	// deliberate re-bind, replaces the prior binding
 	client, err = qurl.RegisterAgent(ctx, apiKey, store, qurl.WithTakeover())
 	// ...
+case errors.Is(err, qurl.ErrDeviceKeyQuotaExceeded):
+	// Owner action: revoke an existing unused agent device key, then retry safely.
+	return err
 case errors.Is(err, qurl.ErrRegistrationRetryLater),
 	errors.Is(err, qurl.ErrRegistrationRateLimited):
 	backOffAndRetry()
@@ -433,13 +684,11 @@ never be delivered. Add an email to the account, or enroll with a pre-issued key
 (which needs no email). If a code *was* sent but has not arrived, re-running
 `RegisterAgent` with no code re-sends a fresh one after a short cooldown.
 
-**Lost device credential.** `ErrDeviceCredentialMissing` means the saved state
-says the agent is registered but the device credential is absent — and the
-credential is issued only once, so this state cannot reproduce it. If a
-completion reported the key was already issued, register under a new
-`WithDeviceID` or re-bind with `WithTakeover`. If a locally-registered state
-simply lacks the credential (for example a legacy bootstrap-era state file),
-clear or replace the persisted state to mint a fresh credential.
+**Lost device credential.** Match `ErrCredentialRecoveryRequired` and use
+`errors.As` to read `DeviceID` from `CredentialPersistenceError` or
+`CredentialRecoveryRequiredError`. Do not clear the state or rotate the device
+id: an owner first revokes `agent:<device_id>`, then the agent calls
+`RecoverAgentCredential` with the same store and enrollment key.
 
 **Setup key already consumed.** `ErrBootstrapSetupKeyConsumed` means a pre-issued
 one-shot setup key was accepted by an earlier enrollment and cannot enroll again.
@@ -452,8 +701,17 @@ deliberately re-bind it — this **replaces** the prior binding, so use it
 knowingly — or choose a different id with `WithDeviceID`.
 
 **Rate limiting / retry.** `ErrRegistrationRateLimited` (too many attempts) and
-`ErrRegistrationRetryLater` (the relay is momentarily overloaded) are both
-back-off signals. Wait and re-run; `RegisterAgent` resumes the same enrollment.
+`ErrRegistrationRetryLater` (relay overload or an authoritative no-write
+admission outage) are both back-off signals. Wait and re-run the same operation.
+
+**Device-key quota.** `ErrDeviceKeyQuotaExceeded` is an authoritative no-write
+result from the atomic mint transaction, not credential ambiguity. An owner must
+revoke an existing unused agent device key to free a slot; then retry the same
+registration or recovery operation. `DeviceKeyQuotaExceededError` carries the
+attempted `DeviceID`, and the underlying `*APIError` remains available with
+`errors.As`.
+Use `WithTakeover` only when intentionally re-binding that device id from a
+different key: revoke that device key, then retry with the takeover option.
 
 ## Migrating from BootstrapAgent
 
@@ -513,7 +771,9 @@ the key takes and where to knock.
 
 The `WithRelayURL` and `WithNHPPeer` options exist for advanced routing (pinned
 or test endpoints) and are not needed in normal use; an overridden peer bypasses
-the pre-flight's integrity check, so pin only a peer you trust.
+the pre-flight's integrity check, so pin only a peer you trust. The completion
+response must still report that same peer key: the SDK preserves the peer that
+authenticated the RAK and rejects any post-handshake replacement.
 
 ## Next
 

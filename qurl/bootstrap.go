@@ -45,7 +45,9 @@ var ErrInsecureAgentStatePermissions = errors.New("qurl: insecure agent state pe
 
 // ErrAgentSetupLock reports that the mandatory local-file setup lock could not
 // be acquired or released. Registration fails closed because continuing could
-// mint competing identities against the same durable state path.
+// mint competing identities against the same durable state path. A release
+// failure can occur after a successful durable save; load or open the stored
+// state before retrying any enrollment, refresh, or credential recovery.
 var ErrAgentSetupLock = errors.New("qurl: agent state setup lock failed")
 
 // ErrBootstrapSetupKeyConsumed is returned when an incomplete local bootstrap
@@ -106,10 +108,36 @@ type AgentState struct {
 	// KeyID is the enrollment key id (key_...) from registration-info, carried as
 	// the NHP usrId; like RelayURL it is refreshed from a fresh pre-flight on resume.
 	KeyID string `json:"key_id,omitempty"`
-	// OTPRequestedAt marks the account-key otp_pending state: an email one-time
-	// code has been requested and RegisterAgent is waiting for WithOTP. Cleared
-	// implicitly once RegisteredAt is set.
+	// OTPRequestedAt marks the account-key otp_pending/cooldown state: an email
+	// one-time code has been requested and the current operation is waiting for
+	// WithOTP. Enrollment clears it when registration completes. A completed state
+	// can retain it while account-key refresh/recovery is paused after dispatch;
+	// the successful lifecycle resume clears it after RAK.
 	OTPRequestedAt *time.Time `json:"otp_requested_at,omitempty"`
+}
+
+// clone returns an independent mutable snapshot. Strings and scalar fields copy
+// by value; every pointer field is copied explicitly so lifecycle transitions
+// cannot mutate the loaded state through an alias. Keep this method aligned with
+// future pointer, slice, or map fields added to AgentState.
+func (s *AgentState) clone() *AgentState {
+	if s == nil {
+		return nil
+	}
+	cloned := *s
+	if s.RegisteredAt != nil {
+		registeredAt := *s.RegisteredAt
+		cloned.RegisteredAt = &registeredAt
+	}
+	if s.NHPPeer != nil {
+		peer := *s.NHPPeer
+		cloned.NHPPeer = &peer
+	}
+	if s.OTPRequestedAt != nil {
+		requestedAt := *s.OTPRequestedAt
+		cloned.OTPRequestedAt = &requestedAt
+	}
+	return &cloned
 }
 
 // agentStateSchemaVersion is the current AgentState schema version RegisterAgent
@@ -122,14 +150,15 @@ const agentStateSchemaVersion = 2
 // implement this with KMS or a secret manager when that is not appropriate.
 //
 // Ownership contract: the registration engine takes ownership of the *AgentState
-// that LoadAgentState returns and mutates it IN PLACE (device id, keypair, relay,
-// key id, registered-at, device credential, otp-pending) before handing that same
-// pointer back to SaveAgentState. A custom store must therefore return a fresh,
-// caller-owned *AgentState from each LoadAgentState — never a pointer it retains,
-// caches, or shares across calls — and SaveAgentState must snapshot (encode)
-// eagerly rather than hold the pointer, or the engine's in-flight mutations will
-// corrupt the store's own copy. The file-backed store decodes a fresh value per
-// load and encodes on save, so it satisfies this by construction.
+// that LoadAgentState returns. Initial enrollment may mutate that pointer in
+// place; refresh/recovery deliberately clone it and may pass a different
+// candidate pointer to SaveAgentState. A custom store must therefore return a
+// fresh, caller-owned *AgentState from every load — never a pointer it retains,
+// caches, or shares — and must not rely on load/save pointer identity.
+// SaveAgentState must snapshot (encode) eagerly rather than retain its argument,
+// or later engine mutation could corrupt the store's own copy. The file-backed
+// store decodes a fresh value per load and encodes on save, so it satisfies this
+// by construction.
 type AgentStateStore interface {
 	LoadAgentState(context.Context) (*AgentState, error)
 	SaveAgentState(context.Context, *AgentState) error
@@ -297,8 +326,8 @@ func WithVersion(version string) BootstrapOption {
 // A custom or networked AgentStateStore cannot be locked for you, so serialize
 // setup per store yourself.
 func BootstrapAgent(ctx context.Context, setupKey string, store AgentStateStore, opts ...BootstrapOption) (*AgentState, error) {
-	if strings.TrimSpace(setupKey) == "" {
-		return nil, fmt.Errorf("%w: setup key must not be empty", ErrInvalidBootstrapConfig)
+	if err := validateExactBearerToken(setupKey, "setup key", ErrInvalidBootstrapConfig); err != nil {
+		return nil, err
 	}
 	if store == nil {
 		return nil, fmt.Errorf("%w: state store must not be nil", ErrInvalidBootstrapConfig)
@@ -338,19 +367,39 @@ func BootstrapAgent(ctx context.Context, setupKey string, store AgentStateStore,
 	return state, nil
 }
 
-// validateRegisteredAgentState checks a loaded, already-registered state. errKind
-// is the caller-facing sentinel wrapped into failures so each front door keeps
-// its class (BootstrapAgent → ErrInvalidBootstrapConfig, RegisterAgent →
-// ErrInvalidRegisterConfig).
-func validateRegisteredAgentState(state *AgentState, now time.Time, requirePeerLive bool, errKind error) error {
+// validateCompletedAgentIdentity checks only the durable identity/credential
+// fields a forced refresh needs. It deliberately does not require the old peer
+// or relay: replacing missing, expired, or rotated binding metadata is the
+// purpose of RefreshAgentRegistration.
+func validateCompletedAgentIdentity(state *AgentState, errKind error) error {
+	if err := validatePersistedAgentID(state, errKind); err != nil {
+		return err
+	}
+	if state.RegisteredAt == nil {
+		return fmt.Errorf("%w: registered agent state missing registration time", errKind)
+	}
+	return nil
+}
+
+func validatePersistedAgentID(state *AgentState, errKind error) error {
 	if state == nil {
 		return fmt.Errorf("%w: registered agent state is nil", errKind)
 	}
 	if strings.TrimSpace(state.AgentID) == "" {
 		return fmt.Errorf("%w: registered agent state missing agent id", errKind)
 	}
-	if state.RegisteredAt == nil {
-		return fmt.Errorf("%w: registered agent state missing registration time", errKind)
+	return nil
+}
+
+// validateRegisteredAgentState checks a loaded, already-registered state. errKind
+// is the caller-facing sentinel wrapped into failures so each front door keeps
+// its class (BootstrapAgent → ErrInvalidBootstrapConfig, RegisterAgent →
+// ErrInvalidRegisterConfig).
+func validateRegisteredAgentState(state *AgentState, now time.Time, requirePeerLive bool, errKind error) error {
+	// A registered state's durable identity is exactly the completed-agent
+	// identity; this validator adds the peer requirement on top of it.
+	if err := validateCompletedAgentIdentity(state, errKind); err != nil {
+		return err
 	}
 	if state.NHPPeer == nil {
 		return fmt.Errorf("%w: registered agent state missing NHP peer", errKind)
@@ -360,23 +409,16 @@ func validateRegisteredAgentState(state *AgentState, now time.Time, requirePeerL
 
 // validateNHPServerPeerInfo checks an NHP peer's shape (X25519 key, host, port).
 // requireLive additionally rejects an expired peer — set it only when the peer
-// will actually be knocked (a fresh registration/completion peer, a WithNHPPeer
-// override, or the knock-only BootstrapAgent fast path). A REST-only RegisterAgent
+// will actually be knocked (a fresh registration peer, a WithNHPPeer override,
+// or the knock-only BootstrapAgent fast path). A REST-only RegisterAgent
 // Client never knocks the persisted peer, so its fast path passes requireLive=false
 // (an expired-but-unused peer must not lock out a still-valid device credential).
 // errKind is the sentinel wrapped into every failure so the caller's error class
 // flows through (ErrInvalidBootstrapConfig for bootstrap, ErrInvalidRegisterConfig
 // for registration).
 func validateNHPServerPeerInfo(peer NHPServerPeerInfo, now time.Time, requireLive bool, label string, errKind error) error {
-	if strings.TrimSpace(peer.PublicKeyB64) == "" {
-		return fmt.Errorf("%w: %s missing NHP peer public key", errKind, label)
-	}
-	peerKey, err := base64.StdEncoding.Strict().DecodeString(peer.PublicKeyB64)
-	if err != nil {
-		return fmt.Errorf("%w: %s NHP peer public key is not standard base64: %w", errKind, label, err)
-	}
-	if _, err := ecdh.X25519().NewPublicKey(peerKey); err != nil {
-		return fmt.Errorf("%w: %s NHP peer public key is not X25519: %w", errKind, label, err)
+	if err := validateNHPServerPublicKey(peer.PublicKeyB64, label, errKind); err != nil {
+		return err
 	}
 	if strings.TrimSpace(peer.Host) == "" {
 		return fmt.Errorf("%w: %s missing NHP peer host", errKind, label)
@@ -391,6 +433,38 @@ func validateNHPServerPeerInfo(peer NHPServerPeerInfo, now time.Time, requireLiv
 		return fmt.Errorf("%w: %s NHP peer is expired", errKind, label)
 	}
 	return nil
+}
+
+func validateNHPServerPublicKey(encoded, label string, errKind error) error {
+	if strings.TrimSpace(encoded) == "" {
+		return fmt.Errorf("%w: %s missing NHP peer public key", errKind, label)
+	}
+	peerKey, err := decodeNHPServerPublicKey(encoded)
+	if err != nil {
+		return fmt.Errorf("%w: %s NHP peer public key is not standard base64: %w", errKind, label, err)
+	}
+	if _, err := ecdh.X25519().NewPublicKey(peerKey); err != nil {
+		return fmt.Errorf("%w: %s NHP peer public key is not X25519: %w", errKind, label, err)
+	}
+	return nil
+}
+
+// decodeNHPServerPublicKey accepts the two canonical standard-base64 spellings
+// of an X25519 key: padded and raw (unpadded), because peer keys are wire input
+// and deployed producers emit both forms. Callers still validate the decoded
+// bytes as X25519 and fingerprint those bytes; malformed or non-canonical
+// encodings fail closed. This intentionally differs from the SDK-owned private
+// key state format, which has only one padded producer.
+func decodeNHPServerPublicKey(encoded string) ([]byte, error) {
+	decoded, paddedErr := base64.StdEncoding.Strict().DecodeString(encoded)
+	if paddedErr == nil {
+		return decoded, nil
+	}
+	decoded, rawErr := base64.RawStdEncoding.Strict().DecodeString(encoded)
+	if rawErr == nil {
+		return decoded, nil
+	}
+	return nil, fmt.Errorf("not canonical padded or raw standard base64: %w", errors.Join(paddedErr, rawErr))
 }
 
 // loadOrCreateAgentState loads the persisted state (creating a fresh keypair when
@@ -433,6 +507,7 @@ func (s *AgentState) ensureKeypair(invalidConfigErr error) error {
 	if err != nil {
 		return fmt.Errorf("%w: decode agent private key: %w", invalidConfigErr, err)
 	}
+	defer wipeBytes(raw)
 	key, err := ecdh.X25519().NewPrivateKey(raw)
 	if err != nil {
 		return fmt.Errorf("%w: agent private key must be X25519", invalidConfigErr)

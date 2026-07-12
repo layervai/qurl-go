@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,6 +16,40 @@ import (
 	"time"
 	"unicode/utf8"
 )
+
+func TestDoAuthorizedJSON_EarlyResponseDoesNotCorruptInFlightRequestBody(t *testing.T) {
+	var requestBody io.ReadCloser
+	httpClient := doerFunc(func(req *http.Request) (*http.Response, error) {
+		requestBody = req.Body
+		// Model an early response: a real transport may return while its write
+		// goroutine is still consuming req.Body.
+		return &http.Response{
+			StatusCode: http.StatusNoContent,
+			Body:       io.NopCloser(strings.NewReader("")),
+			Header:     make(http.Header),
+		}, nil
+	})
+	body := struct {
+		DeviceID string `json:"device_id"`
+	}{DeviceID: "agent-early-response"}
+	err := doAuthorizedJSON(context.Background(), httpClient, "https://api.example.test", func(context.Context, *http.Request) error {
+		return nil
+	}, http.MethodPost, "/v1/test", body, nil)
+	if err != nil {
+		t.Fatalf("doAuthorizedJSON: %v", err)
+	}
+	if requestBody == nil {
+		t.Fatal("HTTP client did not capture request body")
+	}
+	defer requestBody.Close()
+	raw, err := io.ReadAll(requestBody)
+	if err != nil {
+		t.Fatalf("read request body after early response: %v", err)
+	}
+	if got, want := string(raw), `{"device_id":"agent-early-response"}`; got != want {
+		t.Fatalf("request body after early response = %q, want %q", got, want)
+	}
+}
 
 func TestClient_ProtectURLThenPortal(t *testing.T) {
 	var requestCount atomic.Int32
@@ -737,6 +772,23 @@ func TestClient_Validation(t *testing.T) {
 	}
 	if _, err := NewClient(BearerToken("lv_test"), WithBaseURL("https://user:pass@api.example.com")); !errors.Is(err, ErrInvalidClientConfig) {
 		t.Fatalf("base URL with userinfo: want ErrInvalidClientConfig, got %v", err)
+	}
+	for _, rawURL := range []string{
+		"https://api.example.com/prefix?route=wrong",
+		"https://api.example.com/prefix?",
+		"https://api.example.com/prefix#wrong",
+		"https://api.example.com/prefix#",
+	} {
+		if _, err := NewClient(BearerToken("lv_test"), WithBaseURL(rawURL)); !errors.Is(err, ErrInvalidClientConfig) {
+			t.Fatalf("base URL %q: want ErrInvalidClientConfig, got %v", rawURL, err)
+		}
+	}
+	prefixed, err := NewClient(BearerToken("lv_test"), WithBaseURL("https://api.example.com/custom/prefix/"))
+	if err != nil {
+		t.Fatalf("base URL path prefix: %v", err)
+	}
+	if prefixed.baseURL != "https://api.example.com/custom/prefix" {
+		t.Fatalf("base URL path prefix = %q", prefixed.baseURL)
 	}
 	if _, err := NewClient(BearerToken("lv_test"), WithIssuerStatePath(filepath.Join(t.TempDir(), "issuer-state.json"))); !errors.Is(err, ErrInvalidClientConfig) {
 		t.Fatalf("issuer state path on NewClient: want ErrInvalidClientConfig, got %v", err)

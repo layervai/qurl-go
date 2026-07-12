@@ -128,7 +128,11 @@ const (
 type pathKind int
 
 const (
-	pathAccount pathKind = iota
+	// pathUnknown is the zero value returned when path selection itself fails.
+	// Lifecycle callers must not pass it to the RAK mapper, whose defensive
+	// fallback preserves a raw denial rather than guessing a credential meaning.
+	pathUnknown pathKind = iota
+	pathAccount
 	pathBootstrap
 )
 
@@ -154,7 +158,7 @@ type rakMapping struct {
 // deliberately ABSENT — its meaning splits by enrollment path, so mapRAKError
 // resolves it ahead of the table and sentinelForRAKCode returns nil for it.
 var rakMappings = map[string]rakMapping{
-	rakCredentialExpired: {ErrOTPExpired, "request a fresh code by re-running qurl.RegisterAgent with no WithOTP, then supply the new code"},
+	rakCredentialExpired: {ErrOTPExpired, "request a fresh code by re-running the same operation with no WithOTP, then re-run it with the new code"},
 	rakAttemptsExceeded:  {ErrRegistrationRateLimited, "too many attempts; wait before retrying registration"},
 	rakRateLimited:       {ErrRegistrationRateLimited, "back off and retry registration later"},
 	rakIdentityConflict:  {ErrAgentIdentityConflict, "this device id is already enrolled; re-run with qurl.WithTakeover to re-bind it, or pick a different qurl.WithDeviceID"},
@@ -188,10 +192,16 @@ func mapRAKError(ack *registerAckBody, path pathKind) error {
 	// table, which deliberately omits it: on the bootstrap path the credential IS
 	// the key (a rejected key), on the account path it is a wrong emailed OTP.
 	if code == rakCredentialInvalid {
-		if path == pathBootstrap {
+		switch path {
+		case pathBootstrap:
 			return fmt.Errorf("%w: pre-issued key was rejected by the enrollment service%s", ErrKeyRejected, detailSuffix(msg))
+		case pathAccount:
+			return fmt.Errorf("%w: the one-time code was rejected; re-run the same operation with the correct qurl.WithOTP code%s", ErrOTPIncorrect, detailSuffix(msg))
+		default:
+			// Do not guess the credential meaning when an internal caller has not
+			// selected a path. Preserve the raw denial for diagnosis instead.
+			return &RegistrationDenyError{ErrCode: ack.ErrCode, ErrMsg: ack.ErrMsg}
 		}
-		return fmt.Errorf("%w: the one-time code was rejected; re-run qurl.RegisterAgent with the correct qurl.WithOTP code%s", ErrOTPIncorrect, detailSuffix(msg))
 	}
 	if m, ok := rakMappings[code]; ok {
 		return fmt.Errorf("%w: %s%s", m.sentinel, m.detail, detailSuffix(msg))
@@ -262,8 +272,10 @@ func (r registrationInfoResponse) validate(now time.Time, errKind error) error {
 }
 
 // completionResponse is the data payload of POST /v1/agent/registration/complete.
-// It mints (or returns) the device REST credential and confirms the durable
-// agent identity + NHP peer.
+// It mints the device REST credential and corroborates the durable agent
+// identity + NHP peer key. The response cannot replace the peer that
+// authenticated the RAK; registration orchestration asserts the public keys
+// agree and retains the RAK peer's coordinates and lease.
 type completionResponse struct {
 	AgentID       string            `json:"agent_id"`
 	RegisteredAt  *time.Time        `json:"registered_at"`
@@ -274,17 +286,25 @@ type completionResponse struct {
 // validate checks the completion response. errKind is the caller's front-door
 // config-error class, threaded like registrationInfoResponse.validate so a
 // malformed completion surfaces the calling front door's class.
-func (r completionResponse) validate(now time.Time, errKind error) error {
+func (r completionResponse) validate(_ time.Time, errKind error) error {
 	if strings.TrimSpace(r.AgentID) == "" {
 		return fmt.Errorf("%w: completion response missing agent_id", errKind)
 	}
 	if r.RegisteredAt == nil {
 		return fmt.Errorf("%w: completion response missing registered_at", errKind)
 	}
-	if strings.TrimSpace(r.DeviceAPIKey) == "" {
+	if r.DeviceAPIKey == "" {
 		return fmt.Errorf("%w: completion response missing device_api_key", errKind)
 	}
-	return validateNHPServerPeerInfo(r.NHPServerPeer, now, true, "completion response", errKind)
+	if err := validateExactBearerToken(r.DeviceAPIKey, "completion response device_api_key", errKind); err != nil {
+		return err
+	}
+	// Completion only corroborates the RAK-authenticated public key. Its host,
+	// port, and lease are never persisted, so irrelevant coordinate defects must
+	// not turn a successfully minted credential into recovery-required ambiguity.
+	// Do not replace this with validateNHPServerPeerInfo: registration-info plus
+	// the authenticated RAK are the sole coordinate/lease authority.
+	return validateNHPServerPublicKey(r.NHPServerPeer.PublicKeyB64, "completion response", errKind)
 }
 
 // completeRequestBody is the POST /v1/agent/registration/complete request.
