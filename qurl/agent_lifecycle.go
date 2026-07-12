@@ -101,16 +101,17 @@ type AgentRuntimeBinding struct {
 	deviceStaticPrivateKey []byte
 }
 
-// String returns a redacted runtime summary without copying the binding.
-func (b *AgentRuntimeBinding) String() string {
-	if b == nil {
-		return "<nil>"
-	}
+// String returns a redacted runtime summary. The value receiver deliberately
+// protects both pointer and dereferenced-value formatting; its copy contains
+// only a non-owning slice header for the private key and does not transfer key
+// ownership. Callers must still never make their own binding copy.
+func (b AgentRuntimeBinding) String() string {
 	return fmt.Sprintf("qurl.AgentRuntimeBinding{AgentID:%q, RelayURL:%q, KeyID:%q, DeviceStaticPrivateKey:[REDACTED]}", b.AgentID, b.RelayURL, b.KeyID)
 }
 
-// GoString returns a redacted runtime summary for %#v formatting.
-func (b *AgentRuntimeBinding) GoString() string { return b.String() }
+// GoString returns a redacted runtime summary for pointer or value %#v
+// formatting.
+func (b AgentRuntimeBinding) GoString() string { return b.String() }
 
 // TakeDeviceStaticPrivateKey transfers ownership of the retained 32-byte X25519
 // private key for relayknock.KnockOptions and clears it from the binding. It

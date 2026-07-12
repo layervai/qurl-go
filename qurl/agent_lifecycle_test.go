@@ -135,6 +135,20 @@ func TestOpenRegisteredAgentRuntime_OneLoadThroughFirstAuthorization(t *testing.
 	wipeBytes(privateKey)
 }
 
+func TestAgentRuntimeBinding_NilPointerFormattingDoesNotPanic(t *testing.T) {
+	var binding *AgentRuntimeBinding
+	formatted := map[string]string{
+		"%v":  fmt.Sprintf("%v", binding),
+		"%+v": fmt.Sprintf("%+v", binding),
+		"%#v": fmt.Sprintf("%#v", binding),
+	}
+	for format, got := range formatted {
+		if strings.Contains(got, "%!") || strings.Contains(got, "deviceStaticPrivateKey") {
+			t.Fatalf("nil runtime binding %s formatting failed closed: %s", format, got)
+		}
+	}
+}
+
 func TestRegisterAgentRuntime_FreshRegistrationAddsNoStoreReload(t *testing.T) {
 	h, counting := newFreshCountingRegisterHarness(t)
 
@@ -492,15 +506,30 @@ func TestRefreshAgentRegistration_RotatesBindingPreservesCredentialAndSkipsCompl
 	if bytes.Contains(encodedBinding, []byte(before.DeviceAPIKey)) || bytes.Contains(encodedBinding, []byte(before.PrivateKeyB64)) {
 		t.Fatalf("serialized runtime binding contains persisted secret: %s", encodedBinding)
 	}
-	formattedBinding := fmt.Sprintf("%#v", refreshed)
-	if !strings.Contains(formattedBinding, "[REDACTED]") || strings.Contains(formattedBinding, "deviceStaticPrivateKey") {
-		t.Fatalf("formatted runtime binding is not redacted: %s", formattedBinding)
-	}
-	privateKey := refreshed.TakeDeviceStaticPrivateKey()
 	wantPrivateKey, err := base64.StdEncoding.Strict().DecodeString(before.PrivateKeyB64)
 	if err != nil {
 		t.Fatalf("decode prior private key: %v", err)
 	}
+	formattedBindings := map[string]string{
+		"pointer %v":  fmt.Sprintf("%v", refreshed),
+		"pointer %+v": fmt.Sprintf("%+v", refreshed),
+		"pointer %#v": fmt.Sprintf("%#v", refreshed),
+		"value %v":    fmt.Sprintf("%v", *refreshed),
+		"value %+v":   fmt.Sprintf("%+v", *refreshed),
+		"value %#v":   fmt.Sprintf("%#v", *refreshed),
+	}
+	privateKeyDecimal := fmt.Sprintf("%v", wantPrivateKey)
+	privateKeyHex := fmt.Sprintf("%x", wantPrivateKey)
+	for label, formattedBinding := range formattedBindings {
+		if !strings.Contains(formattedBinding, "[REDACTED]") ||
+			strings.Contains(formattedBinding, "deviceStaticPrivateKey") ||
+			strings.Contains(formattedBinding, before.PrivateKeyB64) ||
+			strings.Contains(formattedBinding, privateKeyDecimal) ||
+			strings.Contains(formattedBinding, privateKeyHex) {
+			t.Fatalf("%s runtime binding is not redacted: %s", label, formattedBinding)
+		}
+	}
+	privateKey := refreshed.TakeDeviceStaticPrivateKey()
 	if !reflect.DeepEqual(privateKey, wantPrivateKey) {
 		t.Fatal("runtime binding private key differs from persisted identity")
 	}
