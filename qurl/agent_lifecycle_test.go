@@ -378,8 +378,11 @@ func TestRefreshAgentRegistration_SaveFailureDoesNotCommitNewBinding(t *testing.
 	h.store = failing
 
 	_, err := RefreshAgentRegistration(context.Background(), "lv_enroll", h.store, h.registerOpts()...)
-	if !errors.Is(err, saveFailure) {
-		t.Fatalf("want refresh save failure, got %v", err)
+	if !errors.Is(err, saveFailure) || !strings.Contains(err.Error(), "persist refreshed binding") {
+		t.Fatalf("refresh save failure lost context/cause: %v", err)
+	}
+	if errors.Is(err, ErrCredentialRecoveryRequired) {
+		t.Fatalf("pre-completion refresh save failure misclassified as mint ambiguity: %v", err)
 	}
 	after, err := failing.inner.LoadAgentState(context.Background())
 	if err != nil {

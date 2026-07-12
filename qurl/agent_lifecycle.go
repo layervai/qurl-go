@@ -194,9 +194,11 @@ func loadCompletedRegisteredState(ctx context.Context, store AgentStateStore, er
 // with the received code via WithOTP, or use a WithOTPProvider that awaits the
 // newly dispatched code. Recovery defaults to bootstrap keys; an interactive
 // account flow requires explicit WithAllowedRegistrationKeyKinds opt-in, so
-// routine repair cannot fan out operator OTP emails. Recovery is never invoked implicitly after
-// a 401. The owner must first revoke agent:<device_id>, which clears qurl-service's
-// first-issue sentinel; otherwise completion returns ErrCredentialRecoveryRequired.
+// routine repair cannot fan out operator OTP emails.
+//
+// Recovery is never invoked implicitly after a 401. The owner must first revoke
+// agent:<device_id>, which clears qurl-service's first-issue sentinel; otherwise
+// completion returns ErrCredentialRecoveryRequired.
 // Recovery still proceeds when local state contains DeviceAPIKey: owner-side
 // revocation is authoritative, and the retained local value may already be
 // revoked. A local healthy-key no-op guard would prevent valid replacement.
@@ -314,7 +316,7 @@ func (cfg *registerConfig) forceRegistration(ctx context.Context, key string, st
 	candidate.OTPRequestedAt = nil
 
 	if err := store.SaveAgentState(ctx, &candidate); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("qurl: persist refreshed binding: %w", err)
 	}
 	return &candidate, nil
 }
