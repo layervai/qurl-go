@@ -64,6 +64,29 @@ func (e *DeviceKeyQuotaExceededError) Unwrap() []error {
 	return unwrapWithCause(e.Cause, ErrDeviceKeyQuotaExceeded)
 }
 
+// ErrRegistrationRequestTooLarge is returned when registration completion is
+// authoritatively rejected before mint because its request exceeds the service
+// admission limit. Correct the request/service contract, then retry the same
+// registration or recovery operation.
+var ErrRegistrationRequestTooLarge = errors.New("qurl: registration request too large")
+
+// RegistrationRequestTooLargeError carries the device id and preserves the
+// completion API error. HTTP 413 admission occurs before the atomic mint
+// transaction, so retry is safe after correcting the size incompatibility.
+type RegistrationRequestTooLargeError struct {
+	DeviceID string
+	Cause    error
+}
+
+func (e *RegistrationRequestTooLargeError) Error() string {
+	message := fmt.Sprintf("qurl: registration completion request for %q exceeded the service admission limit; correct the SDK/service request-size contract, then retry the same qurl.RegisterAgent or qurl.RecoverAgentCredential operation", e.DeviceID)
+	return messageWithCause(message, e.Cause)
+}
+
+func (e *RegistrationRequestTooLargeError) Unwrap() []error {
+	return unwrapWithCause(e.Cause, ErrRegistrationRequestTooLarge)
+}
+
 // ErrKeyRejected is returned when the supplied API key was rejected as invalid.
 // Check the key and re-run registration.
 var ErrKeyRejected = errors.New("qurl: registration key rejected")

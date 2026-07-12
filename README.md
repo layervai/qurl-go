@@ -266,6 +266,10 @@ Match errors by type, not message text:
   `ErrDeviceKeyQuotaExceeded`; operators revoke an existing unused agent device
   key to free a slot, then safely retry.
 
+  Completion HTTP 413 is likewise an authoritative pre-mint admission result and
+  maps to `RegistrationRequestTooLargeError` /
+  `ErrRegistrationRequestTooLarge` while preserving the underlying `APIError`.
+
   For `device_key_already_issued`, revoke the active `agent:<device_id>` key
   before `RecoverAgentCredential`. `WithTakeover` alone never clears the issuance
   sentinel; add it after revocation only for a changed-keypair/host rebind. A

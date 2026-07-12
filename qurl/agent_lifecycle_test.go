@@ -163,6 +163,35 @@ func TestAgentLifecycle_MalformedPersistedCredentialFailsClosedWithoutNetwork(t 
 	}
 }
 
+func TestRefreshAgentRegistration_InvalidPrivateKeyFailsBeforeNetworkOrMutation(t *testing.T) {
+	h := registeredHarness(t)
+	state := h.loadState(t)
+	state.PrivateKeyB64 = "AAAA!partial-secret"
+	if err := h.store.SaveAgentState(context.Background(), state); err != nil {
+		t.Fatalf("save invalid private key: %v", err)
+	}
+	before := h.loadState(t)
+	var networkCalls atomic.Int32
+	refusing := doerFunc(func(*http.Request) (*http.Response, error) {
+		networkCalls.Add(1)
+		return nil, errors.New("unexpected network call")
+	})
+
+	binding, err := RefreshAgentRegistration(context.Background(), "lv_enroll", h.store,
+		WithRegisterHTTPClient(refusing),
+	)
+	if binding != nil || !errors.Is(err, ErrInvalidRegisterConfig) {
+		t.Fatalf("invalid private key refresh = binding %v, error %v; want invalid config", binding, err)
+	}
+	if networkCalls.Load() != 0 {
+		t.Fatalf("invalid private key refresh network calls = %d, want 0", networkCalls.Load())
+	}
+	after := h.loadState(t)
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("invalid private key refresh mutated state: before=%#v after=%#v", before, after)
+	}
+}
+
 func TestAgentLifecycle_RejectsNonExactEnrollmentKeysAndAppendBreakingOrigins(t *testing.T) {
 	h := registeredHarness(t)
 	var networkCalls atomic.Int32
@@ -1266,7 +1295,7 @@ func TestRegisterAgent_Completion4xxRequiresExplicitNoWriteClassification(t *tes
 		{name: "unauthorized", status: http.StatusUnauthorized, code: "unauthorized", wantMapped: ErrKeyRejected},
 		{name: "forbidden", status: http.StatusForbidden, code: "forbidden", wantMapped: ErrKeyRejected},
 		{name: "not enrolled", status: http.StatusNotFound, code: "agent_not_enrolled"},
-		{name: "payload admission", status: http.StatusRequestEntityTooLarge, code: "request_too_large"},
+		{name: "payload admission", status: http.StatusRequestEntityTooLarge, code: "request_too_large", wantMapped: ErrRegistrationRequestTooLarge},
 		{name: "bare not found after REG", status: http.StatusNotFound, code: "", wantAmbiguous: true},
 		{name: "unclassified conflict", status: http.StatusConflict, code: "conflict", wantAmbiguous: true},
 		{name: "device key quota", status: http.StatusConflict, code: "device_key_quota_exceeded", wantMapped: ErrDeviceKeyQuotaExceeded},
@@ -1308,6 +1337,13 @@ func TestRegisterAgent_Completion4xxRequiresExplicitNoWriteClassification(t *tes
 			}
 			if tc.wantMapped != nil && !errors.Is(err, tc.wantMapped) {
 				t.Fatalf("completion error = %v, want %v", err, tc.wantMapped)
+			}
+			if errors.Is(err, ErrRegistrationRequestTooLarge) {
+				var tooLarge *RegistrationRequestTooLargeError
+				var apiErr *APIError
+				if !errors.As(err, &tooLarge) || !errors.As(err, &apiErr) || tooLarge.DeviceID == "" || apiErr.StatusCode != http.StatusRequestEntityTooLarge {
+					t.Fatalf("request-too-large error lost typed/API detail: %v", err)
+				}
 			}
 			if attempts.Load() != 1 || h.nhp.regCount() != 1 {
 				t.Fatalf("completion/REG attempts = %d/%d, want 1/1", attempts.Load(), h.nhp.regCount())
@@ -1402,38 +1438,61 @@ func TestRegisterAgent_DeviceKeyQuotaExceededIsAuthoritativeNoWriteForBothPaths(
 	}
 }
 
-func TestRecoverAgentCredential_DeviceKeyQuotaPreservesPriorState(t *testing.T) {
-	h := registeredHarness(t)
-	before := h.loadState(t)
-	h.handlerMu.Lock()
-	inner := h.handler
-	h.handlerMu.Unlock()
-	var completionAttempts atomic.Int32
-	h.setHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost && r.URL.Path == "/v1/agent/registration/complete" {
-			completionAttempts.Add(1)
-			w.WriteHeader(http.StatusConflict)
-			_, _ = fmt.Fprint(w, `{"error":{"code":"device_key_quota_exceeded","title":"Device Key Quota Exceeded","detail":"the account has reached its active device key limit. Revoke an existing device key to free a slot, then retry completion. If replacing an existing device, revoke that device key and use takeover re-enrollment."}}`)
-			return
-		}
-		inner.ServeHTTP(w, r)
-	}))
+func TestRecoverAgentCredential_AuthoritativeNoWritePreservesPriorState(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		code   string
+		want   error
+	}{
+		{name: "device key quota", status: http.StatusConflict, code: "device_key_quota_exceeded", want: ErrDeviceKeyQuotaExceeded},
+		{name: "request too large", status: http.StatusRequestEntityTooLarge, code: "request_too_large", want: ErrRegistrationRequestTooLarge},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := registeredHarness(t)
+			before := h.loadState(t)
+			h.handlerMu.Lock()
+			inner := h.handler
+			h.handlerMu.Unlock()
+			var completionAttempts atomic.Int32
+			h.setHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPost && r.URL.Path == "/v1/agent/registration/complete" {
+					completionAttempts.Add(1)
+					w.WriteHeader(tc.status)
+					_, _ = fmt.Fprintf(w, `{"error":{"code":%q,"detail":"authoritative rejection before mint"}}`, tc.code)
+					return
+				}
+				inner.ServeHTTP(w, r)
+			}))
 
-	_, err := RecoverAgentCredential(context.Background(), "lv_enroll", h.store, h.registerOpts()...)
-	var quotaErr *DeviceKeyQuotaExceededError
-	var apiErr *APIError
-	if !errors.Is(err, ErrDeviceKeyQuotaExceeded) || !errors.As(err, &quotaErr) || !errors.As(err, &apiErr) {
-		t.Fatalf("recovery quota = %v, want typed quota + API error", err)
-	}
-	if apiErr.StatusCode != http.StatusConflict || apiErr.Code != "device_key_quota_exceeded" || errors.Is(err, ErrCredentialRecoveryRequired) {
-		t.Fatalf("recovery quota classification = %v", err)
-	}
-	if completionAttempts.Load() != 1 {
-		t.Fatalf("recovery quota completion attempts = %d, want 1", completionAttempts.Load())
-	}
-	after := h.loadState(t)
-	if !reflect.DeepEqual(after, before) {
-		t.Fatalf("quota recovery changed prior durable state: before=%#v after=%#v", before, after)
+			_, err := RecoverAgentCredential(context.Background(), "lv_enroll", h.store, h.registerOpts()...)
+			var apiErr *APIError
+			if !errors.Is(err, tc.want) || !errors.As(err, &apiErr) {
+				t.Fatalf("authoritative recovery rejection = %v, want %v + API error", err, tc.want)
+			}
+			if apiErr.StatusCode != tc.status || apiErr.Code != tc.code || errors.Is(err, ErrCredentialRecoveryRequired) {
+				t.Fatalf("authoritative recovery classification = %v", err)
+			}
+			if errors.Is(err, ErrDeviceKeyQuotaExceeded) {
+				var typed *DeviceKeyQuotaExceededError
+				if !errors.As(err, &typed) || typed.DeviceID == "" {
+					t.Fatalf("quota recovery lost typed detail: %v", err)
+				}
+			} else if errors.Is(err, ErrRegistrationRequestTooLarge) {
+				var typed *RegistrationRequestTooLargeError
+				if !errors.As(err, &typed) || typed.DeviceID == "" {
+					t.Fatalf("request-too-large recovery lost typed detail: %v", err)
+				}
+			}
+			if completionAttempts.Load() != 1 {
+				t.Fatalf("recovery completion attempts = %d, want 1", completionAttempts.Load())
+			}
+			after := h.loadState(t)
+			if !reflect.DeepEqual(after, before) {
+				t.Fatalf("authoritative rejection changed prior state: before=%#v after=%#v", before, after)
+			}
+		})
 	}
 }
 

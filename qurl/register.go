@@ -715,16 +715,11 @@ func mapCommonRegistrationHTTPError(apiErr *APIError, err error, rejectedMsg, un
 func isAuthoritativeNoWriteCompletionError(err error, allowBareNotEnrolled bool) bool {
 	if errors.Is(err, ErrRegistrationRateLimited) ||
 		errors.Is(err, ErrDeviceKeyQuotaExceeded) ||
+		errors.Is(err, ErrRegistrationRequestTooLarge) ||
 		errors.Is(err, ErrRegistrationRetryLater) ||
 		errors.Is(err, ErrKeyRejected) ||
 		errors.Is(err, ErrBootstrapSetupKeyConsumed) ||
 		isStructuredCompletionNotYetRegistered(err) {
-		return true
-	}
-	var apiErr *APIError
-	if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusRequestEntityTooLarge {
-		// qurl-service's request-size admission proves the completion handler's
-		// atomic mint transaction made no device-key write.
 		return true
 	}
 	return allowBareNotEnrolled && isCompletionNotYetRegistered(err)
@@ -741,6 +736,9 @@ func (cfg *registerConfig) mapCompletionHTTPError(err error, path pathKind, devi
 	}
 	if isDeviceKeyQuotaExceeded(apiErr) {
 		return &DeviceKeyQuotaExceededError{DeviceID: deviceID, Cause: err}
+	}
+	if apiErr.StatusCode == http.StatusRequestEntityTooLarge {
+		return &RegistrationRequestTooLargeError{DeviceID: deviceID, Cause: err}
 	}
 	// The consumed-setup-key code is a bootstrap-path concept (a one-shot key
 	// accepted once within the completion grace window), so gate it on

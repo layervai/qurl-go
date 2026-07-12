@@ -47,9 +47,10 @@ func OpenRegisteredAgent(ctx context.Context, store AgentStateStore, opts ...Cli
 
 // AgentRuntimeBinding is the refreshed identity and NHP endpoint needed for an
 // immediate relay knock. It deliberately excludes DeviceAPIKey, schema, and OTP
-// state. The private key remains sensitive: obtain a caller-owned copy with
-// DeviceStaticPrivateKey, wipe that copy after use, and call Destroy when the
-// binding is no longer needed. Do not copy or log the binding.
+// state. The private key remains sensitive. Keep the returned pointer
+// pointer-owned: never dereference-copy or log the binding. Immediately defer
+// Destroy after a successful refresh, obtain a caller-owned key copy with
+// DeviceStaticPrivateKey, and wipe that copy after use.
 type AgentRuntimeBinding struct {
 	AgentID      string
 	PublicKeyB64 string
@@ -61,13 +62,16 @@ type AgentRuntimeBinding struct {
 	deviceStaticPrivateKey []byte
 }
 
-// String returns a redacted runtime summary.
-func (b AgentRuntimeBinding) String() string {
+// String returns a redacted runtime summary without copying the binding.
+func (b *AgentRuntimeBinding) String() string {
+	if b == nil {
+		return "<nil>"
+	}
 	return fmt.Sprintf("qurl.AgentRuntimeBinding{AgentID:%q, RelayURL:%q, KeyID:%q, DeviceStaticPrivateKey:[REDACTED]}", b.AgentID, b.RelayURL, b.KeyID)
 }
 
 // GoString returns a redacted runtime summary for %#v formatting.
-func (b AgentRuntimeBinding) GoString() string { return b.String() }
+func (b *AgentRuntimeBinding) GoString() string { return b.String() }
 
 // DeviceStaticPrivateKey returns a fresh caller-owned copy of the 32-byte
 // X25519 private key suitable for relayknock.KnockOptions. The caller must wipe
@@ -80,7 +84,8 @@ func (b *AgentRuntimeBinding) DeviceStaticPrivateKey() []byte {
 }
 
 // Destroy best-effort wipes the private-key bytes retained by the binding. It
-// is idempotent. The binding must not be used concurrently with Destroy.
+// is idempotent. Never copy the binding: a copy would share these bytes. The
+// binding must not be used concurrently with Destroy.
 func (b *AgentRuntimeBinding) Destroy() {
 	if b == nil {
 		return
@@ -108,6 +113,7 @@ func RefreshAgentRegistration(ctx context.Context, key string, store AgentStateS
 		return nil, err
 	}
 	cfg.applyLifecycleDefaultKeyPolicy()
+	var privateKey []byte
 	state, err := withAgentSetupLock(ctx, store, func() (*AgentState, error) {
 		state, err := loadCompletedRegisteredState(ctx, store, cfg.invalidConfigErr)
 		if err != nil {
@@ -116,27 +122,37 @@ func RefreshAgentRegistration(ctx context.Context, key string, store AgentStateS
 		if err := cfg.reconcileDeviceID(state); err != nil {
 			return nil, err
 		}
+		privateKey, err = decodeRuntimePrivateKey(state)
+		if err != nil {
+			return nil, err
+		}
 		return cfg.forceRegistration(ctx, key, store, state, false)
 	})
 	if err != nil {
+		wipeBytes(privateKey)
 		return nil, err
 	}
-	return newAgentRuntimeBinding(state)
+	return newAgentRuntimeBinding(state, privateKey), nil
 }
 
-func newAgentRuntimeBinding(state *AgentState) (*AgentRuntimeBinding, error) {
-	if state == nil || state.RegisteredAt == nil || state.NHPPeer == nil {
-		return nil, fmt.Errorf("%w: refreshed agent state is incomplete", ErrInvalidRegisterConfig)
-	}
+func decodeRuntimePrivateKey(state *AgentState) ([]byte, error) {
 	privateKey, err := base64.StdEncoding.Strict().DecodeString(state.PrivateKeyB64)
 	if err != nil {
 		wipeBytes(privateKey)
-		return nil, fmt.Errorf("%w: decode refreshed agent private key: %w", ErrInvalidRegisterConfig, err)
+		return nil, fmt.Errorf("%w: decode agent runtime private key: %w", ErrInvalidRegisterConfig, err)
 	}
 	if len(privateKey) != 32 {
 		wipeBytes(privateKey)
-		return nil, fmt.Errorf("%w: refreshed agent private key must be 32 bytes", ErrInvalidRegisterConfig)
+		return nil, fmt.Errorf("%w: agent runtime private key must be 32 bytes", ErrInvalidRegisterConfig)
 	}
+	return privateKey, nil
+}
+
+// newAgentRuntimeBinding is deliberately infallible: RefreshAgentRegistration
+// decodes the retained private key before network I/O, validates refreshed
+// metadata during the registration exchange, and calls this only after that
+// state is durably saved and the setup lock is released.
+func newAgentRuntimeBinding(state *AgentState, privateKey []byte) *AgentRuntimeBinding {
 	return &AgentRuntimeBinding{
 		AgentID:                state.AgentID,
 		PublicKeyB64:           state.PublicKeyB64,
@@ -145,7 +161,7 @@ func newAgentRuntimeBinding(state *AgentState) (*AgentRuntimeBinding, error) {
 		RelayURL:               state.RelayURL,
 		KeyID:                  state.KeyID,
 		deviceStaticPrivateKey: privateKey,
-	}, nil
+	}
 }
 
 // loadCompletedRegisteredState enforces the completed identity and intact
