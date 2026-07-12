@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -1031,11 +1032,28 @@ func TestSealedFileAgentState_SetupLockFailuresFailClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	lockCalls := 0
 	store.lockFile = func(context.Context, string) (setupLock, error) {
+		lockCalls++
 		return nil, errors.New("lock unavailable")
 	}
 	if _, err := RegisterAgent(context.Background(), "unused-on-fast-path", store); err != nil {
 		t.Fatalf("completed fast path must not acquire setup lock: %v", err)
+	}
+	networkCalls := 0
+	refusing := doerFunc(func(*http.Request) (*http.Response, error) {
+		networkCalls++
+		return nil, errors.New("network must not be used on completed runtime fast path")
+	})
+	client, binding, err := RegisterAgentRuntime(context.Background(), "unused-on-runtime-fast-path", store,
+		WithRegisterHTTPClient(refusing),
+	)
+	if err != nil || client == nil || binding == nil {
+		t.Fatalf("completed runtime fast path must not acquire setup lock: client %v, binding %v, error %v", client, binding, err)
+	}
+	binding.Destroy()
+	if lockCalls != 0 || networkCalls != 0 {
+		t.Fatalf("completed runtime fast path lock/network calls = %d/%d, want 0/0", lockCalls, networkCalls)
 	}
 
 	state.RegisteredAt = nil

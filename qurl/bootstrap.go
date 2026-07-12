@@ -507,6 +507,7 @@ func (s *AgentState) ensureKeypair(invalidConfigErr error) error {
 	if err != nil {
 		return fmt.Errorf("%w: decode agent private key: %w", invalidConfigErr, err)
 	}
+	defer wipeBytes(raw)
 	key, err := ecdh.X25519().NewPrivateKey(raw)
 	if err != nil {
 		return fmt.Errorf("%w: agent private key must be X25519", invalidConfigErr)

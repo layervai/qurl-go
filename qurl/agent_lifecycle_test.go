@@ -695,7 +695,7 @@ func TestRefreshAgentRegistration_SaveFailureDoesNotCommitNewBinding(t *testing.
 	h.store = failing
 
 	_, err := RefreshAgentRegistration(context.Background(), "lv_enroll", h.store, h.registerOpts()...)
-	if !errors.Is(err, saveFailure) || !strings.Contains(err.Error(), "persist refreshed binding") {
+	if !errors.Is(err, ErrAgentBindingPersistence) || !errors.Is(err, saveFailure) || !strings.Contains(err.Error(), "persist refreshed binding") {
 		t.Fatalf("refresh save failure lost context/cause: %v", err)
 	}
 	if errors.Is(err, ErrCredentialRecoveryRequired) {

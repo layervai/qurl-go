@@ -20,6 +20,12 @@ import (
 // options are invalid before any network call.
 var ErrInvalidRegisterConfig = errors.New("qurl: invalid register config")
 
+// ErrAgentBindingPersistence means an authenticated NHP binding refresh
+// succeeded but its new peer/relay metadata was not durably saved. No device
+// credential was minted or changed, so correct the store failure and safely
+// retry RefreshAgentRegistration. The underlying store error remains matchable.
+var ErrAgentBindingPersistence = errors.New("qurl: agent binding persistence failed")
+
 // ErrOTPPending is returned (wrapped in *OTPPendingError) when account-key
 // registration has requested an email one-time code and is waiting for the
 // caller to supply it. It is not a failure: it is the pause point of the

@@ -410,7 +410,7 @@ func (cfg *registerConfig) forceRegistration(ctx context.Context, key string, st
 	candidate.OTPRequestedAt = nil
 
 	if err := store.SaveAgentState(ctx, candidate); err != nil {
-		return nil, fmt.Errorf("qurl: persist refreshed binding: %w", err)
+		return nil, fmt.Errorf("%w: persist refreshed binding: %w", ErrAgentBindingPersistence, err)
 	}
 	return candidate, nil
 }

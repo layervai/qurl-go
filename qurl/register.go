@@ -219,6 +219,9 @@ func (cfg *registerConfig) run(ctx context.Context, key string, store AgentState
 		return nil, err
 	}
 	if found && state.RegisteredAt != nil {
+		// RegisterAgentRuntime may decode the key into its synchronized return
+		// binding here, but it does not mutate or save the completed AgentState;
+		// the same read-only, lock-free guarantee therefore still applies.
 		return cfg.finishRegisteredAgentState(state)
 	}
 
