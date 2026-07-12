@@ -999,6 +999,9 @@ func validateHTTPSOrLoopbackURL(rawURL, label string, errKind error) error {
 	if u.RawQuery != "" || u.ForceQuery {
 		return fmt.Errorf("%w: %s must not include a query", errKind, label)
 	}
+	// url.Parse represents an explicit empty fragment ("https://host/#") with
+	// Fragment == ""; inspect the raw input as well so that suffix-capture form
+	// cannot become indistinguishable from a URL with no fragment delimiter.
 	if u.Fragment != "" || strings.Contains(rawURL, "#") {
 		return fmt.Errorf("%w: %s must not include a fragment", errKind, label)
 	}

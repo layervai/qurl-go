@@ -22,6 +22,24 @@ func allowAccountLifecycle() RegisterOption {
 }
 
 func TestAgentStateClone_IsolatesEveryMutableField(t *testing.T) {
+	// Keep this list explicit: adding a pointer, slice, map, interface, function,
+	// or channel field to AgentState must fail here until clone and this mutation
+	// test are extended together. The mutations below prove the currently known
+	// reference fields do not alias the source.
+	stateType := reflect.TypeOf(AgentState{})
+	var referenceFields []string
+	for i := 0; i < stateType.NumField(); i++ {
+		field := stateType.Field(i)
+		switch field.Type.Kind() {
+		case reflect.Pointer, reflect.Slice, reflect.Map, reflect.Interface, reflect.Func, reflect.Chan:
+			referenceFields = append(referenceFields, field.Name)
+		}
+	}
+	wantReferenceFields := []string{"RegisteredAt", "NHPPeer", "OTPRequestedAt"}
+	if !reflect.DeepEqual(referenceFields, wantReferenceFields) {
+		t.Fatalf("AgentState reference fields = %v, want %v; update clone and its isolation test", referenceFields, wantReferenceFields)
+	}
+
 	registeredAt := time.Unix(1_700_000_000, 0).UTC()
 	requestedAt := registeredAt.Add(time.Minute)
 	original := &AgentState{

@@ -423,6 +423,9 @@ func (cfg *registerConfig) forceRegistration(ctx context.Context, key string, st
 	candidate.KeyID = info.KeyID
 	candidate.SchemaVersion = agentStateSchemaVersion
 
+	// On an account pause, requestOTPAt deliberately persists only the cooldown
+	// marker on state while sending through candidate's fresh peer/relay. The
+	// refreshed binding must not become durable until its RAK authenticates it.
 	credential, path, err := cfg.forcedRegistrationCredential(ctx, key, store, state, candidate, info)
 	if err != nil {
 		return nil, err

@@ -454,7 +454,9 @@ func (cfg *registerConfig) accountCredentialOrPause(ctx context.Context, key str
 	if code != "" {
 		return code, nil
 	}
-	if !freshRequest && now.Sub(derefTime(persisted.OTPRequestedAt, now)) >= otpResendCooldown {
+	// !freshRequest guarantees OTPRequestedAt is non-nil here, so dereference the
+	// durable cooldown marker directly rather than through a nil fallback.
+	if !freshRequest && now.Sub(*persisted.OTPRequestedAt) >= otpResendCooldown {
 		if err := cfg.requestOTPAt(ctx, store, persisted, requestState, key, now); err != nil {
 			return "", err
 		}
