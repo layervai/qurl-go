@@ -262,6 +262,10 @@ func (cfg *registerConfig) runLocked(ctx context.Context, key string, store Agen
 	if state.SchemaVersion < agentStateSchemaVersion {
 		state.SchemaVersion = agentStateSchemaVersion
 	}
+	// Runtime registration validates local key custody before any external side
+	// effect. On the account path this intentionally decodes the key before an
+	// OTP email may be sent and then wipes it when the call pauses: fail fast on
+	// an unusable store instead of emailing a code for a run that cannot finish.
 	if err := cfg.captureRuntimeKey(state); err != nil {
 		return nil, err
 	}
@@ -1062,7 +1066,9 @@ func derefTime(t *time.Time, fallback time.Time) time.Time {
 // can retain its prior key for up to storeCredentialCacheTTL; recovery callers
 // should use the newly returned Client when they need the replacement at once.
 // Construction makes no qURL API calls; loading a network-backed store can
-// still perform I/O.
+// still perform I/O. This unprimed path uses the production wall clock; only
+// the internal primed runtime/recovery constructors accept an injected clock
+// for deterministic cache-expiry tests.
 func newStoreBackedClient(store AgentStateStore, baseURL string, httpClient HTTPDoer) *Client {
 	return newStoreBackedClientWithCredential(store, baseURL, httpClient, "", time.Now)
 }

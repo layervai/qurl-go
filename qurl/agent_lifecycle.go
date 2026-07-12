@@ -185,7 +185,9 @@ func (b AgentRuntimeBinding) GoString() string { return b.String() }
 // TakeDeviceStaticPrivateKey transfers ownership of the retained 32-byte X25519
 // private key for relayknock.KnockOptions and clears it from the binding. It
 // returns nil after the first call. The caller must wipe the returned slice
-// after the knocker no longer needs it.
+// after the knocker no longer needs it. Calling this method on a nil binding is
+// safe and returns nil; unlike these pointer-receiver lifecycle methods, a
+// direct String call on a nil binding cannot reach its value receiver.
 func (b *AgentRuntimeBinding) TakeDeviceStaticPrivateKey() []byte {
 	if b == nil {
 		return nil
@@ -198,7 +200,7 @@ func (b *AgentRuntimeBinding) TakeDeviceStaticPrivateKey() []byte {
 // As with all Go memory wiping, copies outside this binding remain the caller's
 // responsibility. Destroy is synchronized with TakeDeviceStaticPrivateKey
 // across accidental value copies, though callers should still keep the
-// pointer-owned lifecycle explicit.
+// pointer-owned lifecycle explicit. Calling Destroy on a nil binding is safe.
 func (b *AgentRuntimeBinding) Destroy() {
 	if b == nil {
 		return
