@@ -56,13 +56,13 @@ minute. After credential recovery, use the new client returned by
 `RecoverAgentCredential` for immediate cutover; an older client observes the
 replacement only after its cache expires.
 
-Tunnel processes that also need NHP knock state should use the combined runtime
-APIs. They validate a live peer, relay URL, and key id; return a primed Client
-plus `AgentRuntimeBinding`; and avoid loading/unsealing the store again for the
-binding or first resource request. Unlike REST-only `OpenRegisteredAgent`, a
-runtime open rejects an expired peer without network I/O because it cannot be
-knocked. Call `RefreshAgentRegistration` with an enrollment key to obtain a
-fresh binding, then continue startup:
+qURL Connector processes that also need NHP knock state should use the combined
+runtime APIs. They validate a live peer, relay URL, and key id; return a primed
+Client plus `AgentRuntimeBinding`; and avoid loading/unsealing the store again
+for the binding or first resource request. Unlike REST-only
+`OpenRegisteredAgent`, a runtime open rejects an expired peer without network
+I/O because it cannot be knocked. Call `RefreshAgentRegistration` with an
+enrollment key to obtain a fresh binding, then continue startup:
 
 ```go
 client, binding, err := qurl.OpenRegisteredAgentRuntime(ctx, store,
@@ -476,9 +476,9 @@ These are deliberately separate operations:
   enrollment compatibility. The repair-oriented `RefreshAgentRegistration` and
   `RecoverAgentCredential` default to bootstrap-only; interactive account-key
   repair must opt in with
-  `WithAllowedRegistrationKeyKinds(RegistrationKeyKindAccount)`. Fleet
-  connectors should still set the bootstrap-only policy explicitly so their
-  security posture is visible at the call site.
+  `WithAllowedRegistrationKeyKinds(RegistrationKeyKindAccount)`. Fleet qURL
+  Connector deployments should still set the bootstrap-only policy explicitly
+  so their security posture is visible at the call site.
 - `RecoverAgentCredential` is the operator-controlled path for a revoked or
   locally lost device credential. It preserves the persisted device id and
   X25519 keypair and, once enrollment authorization is available, sends REG,

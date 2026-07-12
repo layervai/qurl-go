@@ -64,13 +64,13 @@ func ExampleClient_CreatePortal() {
 	fmt.Println(portal.Link)
 }
 
-func ExampleClient_EnsureTunnelResource() {
+func ExampleClient_EnsureConnectorResource() {
 	client, err := qurl.OpenClient()
 	if err != nil {
 		panic(err)
 	}
 
-	result, err := client.EnsureTunnelResource(context.Background(), "prod-dashboard")
+	result, err := client.EnsureConnectorResource(context.Background(), "prod-dashboard")
 	if err != nil {
 		panic(err)
 	}

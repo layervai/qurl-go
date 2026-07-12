@@ -67,14 +67,6 @@ var ErrCredentialStateNotFound = errors.New("qurl: credential state not found")
 // credentials are readable by group or other users.
 var ErrInsecureCredentialStatePermissions = errors.New("qurl: insecure credential state permissions")
 
-// ErrResourceNotFound is returned when a requested LayerV resource does not
-// exist for the current issuer.
-var ErrResourceNotFound = errors.New("qurl: resource not found")
-
-// ErrAmbiguousResource is returned when LayerV returns multiple resources for a
-// lookup that must resolve to exactly one.
-var ErrAmbiguousResource = errors.New("qurl: ambiguous resource")
-
 // CredentialProvider authorizes Client requests.
 //
 // Implement this interface with credentials loaded from protected local state,
@@ -507,13 +499,6 @@ type Resource struct {
 
 	// ID is the LayerV resource id, for example r_abc123...
 	ID string `json:"resource_id"`
-	// Type is the resource kind returned by LayerV, such as "url" or "tunnel".
-	Type string `json:"type,omitempty"`
-	// KnockResourceID is the NHP placement identity for tunnel resources.
-	KnockResourceID string `json:"knock_resource_id,omitempty"`
-	// Slug is the immutable owner-scoped identity of a tunnel resource. It is
-	// distinct from Alias, which is a mutable display handle.
-	Slug string `json:"slug,omitempty"`
 	// TargetURL is the private URL protected by this resource.
 	TargetURL string `json:"target_url"`
 	// Status is the resource lifecycle status returned by LayerV.
@@ -538,26 +523,6 @@ type Resource struct {
 // stored a LayerV resource id and want to mint more portals for it.
 func (c *Client) ResourceByID(id string) *Resource {
 	return &Resource{client: c, ID: id}
-}
-
-// ConnectorResource returns the tunnel resource whose immutable slug is
-// connectorID. It never treats the mutable display alias as connector identity.
-// The deprecated projection intentionally contains only tunnel lifecycle fields
-// (ID, type, knock resource id, slug, status, and alias). Legacy descriptive,
-// URL, count, and timestamp fields are zero-valued and are no longer promised
-// by this deprecated method.
-//
-// Deprecated: use GetTunnelResourceBySlug. Its TunnelResource result exposes
-// the complete connector lifecycle contract and can also create portals.
-func (c *Client) ConnectorResource(ctx context.Context, connectorID string) (*Resource, error) {
-	tunnel, err := c.GetTunnelResourceBySlug(ctx, connectorID)
-	if err != nil {
-		if errors.Is(err, ErrTunnelResourceNotFound) {
-			return nil, fmt.Errorf("%w: connector %q: %w", ErrResourceNotFound, connectorID, err)
-		}
-		return nil, err
-	}
-	return tunnel.resourceHandle(), nil
 }
 
 // ResourceOption customizes ProtectURL and CreateResource.
@@ -857,19 +822,16 @@ type createResourceRequest struct {
 }
 
 type createResourceResponse struct {
-	ID              string     `json:"resource_id"`
-	Type            string     `json:"type"`
-	KnockResourceID string     `json:"knock_resource_id"`
-	Slug            string     `json:"slug"`
-	TargetURL       string     `json:"target_url"`
-	Status          string     `json:"status"`
-	Description     string     `json:"description"`
-	Tags            []string   `json:"tags"`
-	CustomDomain    *string    `json:"custom_domain"`
-	Alias           *string    `json:"alias"`
-	QURLCount       int        `json:"qurl_count"`
-	CreatedAt       *time.Time `json:"created_at"`
-	ExpiresAt       *time.Time `json:"expires_at"`
+	ID           string     `json:"resource_id"`
+	TargetURL    string     `json:"target_url"`
+	Status       string     `json:"status"`
+	Description  string     `json:"description"`
+	Tags         []string   `json:"tags"`
+	CustomDomain *string    `json:"custom_domain"`
+	Alias        *string    `json:"alias"`
+	QURLCount    int        `json:"qurl_count"`
+	CreatedAt    *time.Time `json:"created_at"`
+	ExpiresAt    *time.Time `json:"expires_at"`
 }
 
 func (r createResourceResponse) resource() (*Resource, error) {
@@ -877,19 +839,16 @@ func (r createResourceResponse) resource() (*Resource, error) {
 		return nil, fmt.Errorf("qurl: invalid API response: missing resource_id")
 	}
 	return &Resource{
-		ID:              r.ID,
-		Type:            r.Type,
-		KnockResourceID: r.KnockResourceID,
-		Slug:            r.Slug,
-		TargetURL:       r.TargetURL,
-		Status:          r.Status,
-		Description:     r.Description,
-		Tags:            slices.Clone(r.Tags),
-		CustomDomain:    r.CustomDomain,
-		Alias:           r.Alias,
-		QURLCount:       r.QURLCount,
-		CreatedAt:       r.CreatedAt,
-		ExpiresAt:       r.ExpiresAt,
+		ID:           r.ID,
+		TargetURL:    r.TargetURL,
+		Status:       r.Status,
+		Description:  r.Description,
+		Tags:         slices.Clone(r.Tags),
+		CustomDomain: r.CustomDomain,
+		Alias:        r.Alias,
+		QURLCount:    r.QURLCount,
+		CreatedAt:    r.CreatedAt,
+		ExpiresAt:    r.ExpiresAt,
 	}, nil
 }
 
