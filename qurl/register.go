@@ -600,6 +600,9 @@ func (cfg *registerConfig) fetchRegistrationInfo(ctx context.Context, key string
 // server id is checked against its own peer before any trusted override is
 // selected, and key-kind policy runs before OTP or NHP side effects.
 func (cfg *registerConfig) preflight(ctx context.Context, key string) (*registrationInfoResponse, *NHPServerPeerInfo, string, error) {
+	// This GET is side-effect-free: an outcome-unknown transport wrapper is a
+	// normal read failure here. Only mutation callers interpret it as possible
+	// committed-side-effect ambiguity.
 	info, err := cfg.fetchRegistrationInfo(ctx, key)
 	if err != nil {
 		return nil, nil, "", err

@@ -49,8 +49,8 @@ func OpenRegisteredAgent(ctx context.Context, store AgentStateStore, opts ...Cli
 // immediate relay knock. It deliberately excludes DeviceAPIKey, schema, and OTP
 // state. The private key remains sensitive. Keep the returned pointer
 // pointer-owned: never dereference-copy or log the binding. Immediately defer
-// Destroy after a successful refresh, obtain a caller-owned key copy with
-// DeviceStaticPrivateKey, and wipe that copy after use.
+// Destroy after a successful refresh, transfer key ownership exactly once with
+// TakeDeviceStaticPrivateKey, and wipe those bytes after use.
 type AgentRuntimeBinding struct {
 	AgentID      string
 	PublicKeyB64 string
@@ -73,19 +73,24 @@ func (b *AgentRuntimeBinding) String() string {
 // GoString returns a redacted runtime summary for %#v formatting.
 func (b *AgentRuntimeBinding) GoString() string { return b.String() }
 
-// DeviceStaticPrivateKey returns a fresh caller-owned copy of the 32-byte
-// X25519 private key suitable for relayknock.KnockOptions. The caller must wipe
-// the returned slice after the knocker no longer needs it.
-func (b *AgentRuntimeBinding) DeviceStaticPrivateKey() []byte {
+// TakeDeviceStaticPrivateKey transfers ownership of the retained 32-byte X25519
+// private key for relayknock.KnockOptions and clears it from the binding. It
+// returns nil after the first call. The caller must wipe the returned slice
+// after the knocker no longer needs it.
+func (b *AgentRuntimeBinding) TakeDeviceStaticPrivateKey() []byte {
 	if b == nil {
 		return nil
 	}
-	return append([]byte(nil), b.deviceStaticPrivateKey...)
+	privateKey := b.deviceStaticPrivateKey
+	b.deviceStaticPrivateKey = nil
+	return privateKey
 }
 
 // Destroy best-effort wipes the private-key bytes retained by the binding. It
-// is idempotent. Never copy the binding: a copy would share these bytes. The
-// binding must not be used concurrently with Destroy.
+// is idempotent and becomes a no-op after TakeDeviceStaticPrivateKey transfers
+// ownership. Never copy the binding: a copy would share retained bytes. The
+// binding must not be used concurrently with TakeDeviceStaticPrivateKey or
+// Destroy.
 func (b *AgentRuntimeBinding) Destroy() {
 	if b == nil {
 		return
@@ -204,6 +209,9 @@ func loadCompletedRegisteredState(ctx context.Context, store AgentStateStore, er
 // succeeded even though the lock could not be released cleanly.
 // RegisteredAt is not required: this API also repairs the post-completion state
 // where the service may have minted a credential but its local save failed.
+// On success, immediately discard every pre-existing Client for this agent and
+// use the returned Client: older Clients may cache the revoked credential for up
+// to one minute, while the returned Client observes the replacement immediately.
 func RecoverAgentCredential(ctx context.Context, key string, store AgentStateStore, opts ...RegisterOption) (*Client, error) {
 	cfg, err := validateRegisterInputs(ctx, key, store, opts)
 	if err != nil {

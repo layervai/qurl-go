@@ -469,7 +469,7 @@ if err != nil {
 	return err
 }
 defer binding.Destroy()
-devicePrivateKey := binding.DeviceStaticPrivateKey()
+devicePrivateKey := binding.TakeDeviceStaticPrivateKey()
 defer func() { clear(devicePrivateKey) }()
 
 client, err := qurl.RecoverAgentCredential(ctx, enrollmentKey, store,
@@ -501,6 +501,11 @@ client, err := qurl.RecoverAgentCredential(ctx, accountKey, store,
 Recovery's first call follows the same dispatch/pause pattern when no current
 code is supplied. Prefer a fresh `WithOTPProvider` option for each call when a
 mailbox integration owns code retrieval.
+
+After successful credential recovery, immediately discard every older `Client`
+for the agent and cut over to the returned `Client`. Older instances may retain
+the revoked credential in their one-minute authorization cache; only the newly
+returned client is guaranteed to use the replacement immediately.
 
 Credential recovery has an intentional owner step: first revoke
 `agent:<device_id>` with an owner credential. qurl-service atomically revokes

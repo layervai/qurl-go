@@ -169,6 +169,8 @@ bytes needed for an immediate knock. Meanwhile,
 replacement after the owner revokes `agent:<device_id>`. Registration and
 resource API origins are independent via `WithRegisterBaseURL` and
 the dual-purpose `WithAgentClientBaseURL`/`WithAgentClientHTTPClient` options.
+After recovery, discard all older clients immediately: they may cache the revoked
+credential for one minute, while the returned client cuts over at once.
 
 See [Register an agent](docs/register-an-agent.md) for **which key to use** (one
 durable `qurl:agent` key fans out across a whole fleet), both enrollment paths, a

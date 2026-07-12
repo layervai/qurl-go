@@ -314,14 +314,6 @@ func TestRefreshAgentRegistration_RotatesBindingPreservesCredentialAndSkipsCompl
 	if _, exposed := reflect.TypeOf(*refreshed).FieldByName("DeviceAPIKey"); exposed {
 		t.Fatal("AgentRuntimeBinding exposes DeviceAPIKey")
 	}
-	privateKey := refreshed.DeviceStaticPrivateKey()
-	wantPrivateKey, err := base64.StdEncoding.Strict().DecodeString(before.PrivateKeyB64)
-	if err != nil {
-		t.Fatalf("decode prior private key: %v", err)
-	}
-	if !reflect.DeepEqual(privateKey, wantPrivateKey) {
-		t.Fatal("runtime binding private key differs from persisted identity")
-	}
 	encodedBinding, err := json.Marshal(refreshed)
 	if err != nil {
 		t.Fatalf("marshal runtime binding: %v", err)
@@ -333,16 +325,21 @@ func TestRefreshAgentRegistration_RotatesBindingPreservesCredentialAndSkipsCompl
 	if !strings.Contains(formattedBinding, "[REDACTED]") || strings.Contains(formattedBinding, "deviceStaticPrivateKey") {
 		t.Fatalf("formatted runtime binding is not redacted: %s", formattedBinding)
 	}
-	privateKey[0] ^= 0xff
-	secondPrivateKey := refreshed.DeviceStaticPrivateKey()
-	if !reflect.DeepEqual(secondPrivateKey, wantPrivateKey) {
-		t.Fatal("caller mutation changed binding-owned private key")
+	privateKey := refreshed.TakeDeviceStaticPrivateKey()
+	wantPrivateKey, err := base64.StdEncoding.Strict().DecodeString(before.PrivateKeyB64)
+	if err != nil {
+		t.Fatalf("decode prior private key: %v", err)
+	}
+	if !reflect.DeepEqual(privateKey, wantPrivateKey) {
+		t.Fatal("runtime binding private key differs from persisted identity")
+	}
+	if second := refreshed.TakeDeviceStaticPrivateKey(); second != nil {
+		t.Fatalf("second private-key transfer = %x, want nil", second)
 	}
 	wipeBytes(privateKey)
-	wipeBytes(secondPrivateKey)
 	wipeBytes(wantPrivateKey)
 	refreshed.Destroy()
-	if got := refreshed.DeviceStaticPrivateKey(); got != nil {
+	if got := refreshed.TakeDeviceStaticPrivateKey(); got != nil {
 		t.Fatalf("private key after Destroy = %x, want nil", got)
 	}
 	persisted := h.loadState(t)
@@ -548,6 +545,9 @@ func TestRefreshAgentRegistration_AccountOTPResumeDoesNotComplete(t *testing.T) 
 		t.Fatalf("account refresh resume: %v", err)
 	}
 	binding.Destroy()
+	if key := binding.TakeDeviceStaticPrivateKey(); key != nil {
+		t.Fatalf("destroyed binding retained private key: %x", key)
+	}
 	if state := h.loadState(t); state.DeviceAPIKey != "lv_device_secret" {
 		t.Fatal("account binding refresh replaced device credential")
 	}
