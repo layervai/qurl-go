@@ -251,7 +251,7 @@ Match errors by type, not message text:
   dependencies. `QURL_AGENT_OTP_ENABLED` is not required for qURL Connector's
   bootstrap-only default; enable it only for intentional account/OTP repair.
   qURL Connector resource ensure/create also requires the producer's existing
-  `TUNNEL_AUTH_ENABLED=true` service gate. The resource collection/item routes
+  `CONNECTOR_AUTH_ENABLED=true` service gate. The resource collection/item routes
   have no new SDK-specific feature flag, but the private producer wire branch
   remains fail-closed behind that existing gate.
 
