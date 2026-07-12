@@ -44,6 +44,58 @@ func TestAgentStateClone_IsolatesEveryMutableField(t *testing.T) {
 	}
 }
 
+func TestForcedRegistrationCredential_ErrorPathsReturnUnknownPath(t *testing.T) {
+	cfg := &registerConfig{invalidConfigErr: ErrInvalidRegisterConfig, clock: time.Now}
+	tests := []struct {
+		name string
+		info *registrationInfoResponse
+		want error
+	}{
+		{
+			name: "account key without email",
+			info: &registrationInfoResponse{KeyKind: keyKindAccount},
+			want: ErrNoAccountEmail,
+		},
+		{
+			name: "unknown key kind",
+			info: &registrationInfoResponse{KeyKind: "future-kind"},
+			want: ErrInvalidRegisterConfig,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			credential, path, err := cfg.forcedRegistrationCredential(context.Background(), "unused", nil, nil, nil, tt.info)
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("error = %v, want %v", err, tt.want)
+			}
+			if credential != "" || path != pathUnknown {
+				t.Fatalf("credential/path = %q/%v, want empty/pathUnknown", credential, path)
+			}
+		})
+	}
+
+	t.Run("OTP provider error", func(t *testing.T) {
+		providerErr := errors.New("provider unavailable")
+		requestedAt := time.Now()
+		cfg.otpProvider = func(context.Context) (string, error) { return "", providerErr }
+		credential, path, err := cfg.forcedRegistrationCredential(
+			context.Background(),
+			"unused",
+			nil,
+			&AgentState{OTPRequestedAt: &requestedAt},
+			&AgentState{},
+			&registrationInfoResponse{KeyKind: keyKindAccount, MaskedEmail: "j***@example.test"},
+		)
+		if !errors.Is(err, providerErr) {
+			t.Fatalf("error = %v, want provider error", err)
+		}
+		if credential != "" || path != pathUnknown {
+			t.Fatalf("credential/path = %q/%v, want empty/pathUnknown", credential, path)
+		}
+	})
+}
+
 type countingAgentStateStore struct {
 	inner  AgentStateStore
 	loads  atomic.Int32

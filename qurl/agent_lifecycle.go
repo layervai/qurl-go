@@ -193,11 +193,12 @@ func (b *AgentRuntimeBinding) TakeDeviceStaticPrivateKey() []byte {
 	return b.deviceStaticPrivateKey.take()
 }
 
-// Destroy best-effort wipes the private-key bytes retained by the binding. It
-// is idempotent and becomes a no-op after TakeDeviceStaticPrivateKey transfers
-// ownership. It is synchronized with TakeDeviceStaticPrivateKey across
-// accidental value copies, though callers should still keep the pointer-owned
-// lifecycle explicit.
+// Destroy zeros the private-key slice retained by the binding. It is idempotent
+// and becomes a no-op after TakeDeviceStaticPrivateKey transfers ownership.
+// As with all Go memory wiping, copies outside this binding remain the caller's
+// responsibility. Destroy is synchronized with TakeDeviceStaticPrivateKey
+// across accidental value copies, though callers should still keep the
+// pointer-owned lifecycle explicit.
 func (b *AgentRuntimeBinding) Destroy() {
 	if b == nil {
 		return
@@ -447,11 +448,14 @@ func (cfg *registerConfig) forcedRegistrationCredential(ctx context.Context, key
 		return key, pathBootstrap, nil
 	case keyKindAccount:
 		if err := requireAccountKeyEmail(info); err != nil {
-			return "", pathAccount, err
+			return "", pathUnknown, err
 		}
 		code, err := cfg.accountCredentialOrPause(ctx, key, store, persisted, candidate, info.MaskedEmail)
-		return code, pathAccount, err
+		if err != nil {
+			return "", pathUnknown, err
+		}
+		return code, pathAccount, nil
 	default:
-		return "", pathBootstrap, cfg.errUnknownKeyKind(info.KeyKind)
+		return "", pathUnknown, cfg.errUnknownKeyKind(info.KeyKind)
 	}
 }

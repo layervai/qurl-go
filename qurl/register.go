@@ -1349,24 +1349,35 @@ func WithAgentClientBaseURL(rawURL string) AgentClientOption {
 
 type agentClientBaseURLOption string
 
+// validateAgentClientBaseURL validates the resource-client base URL and returns
+// its normalized (trailing-slash-trimmed) form. Shared by the RegisterOption and
+// ClientOption applications of WithAgentClientBaseURL so the validation and
+// normalization stay identical across both entry points.
+func validateAgentClientBaseURL(rawURL string, errKind error) (string, error) {
+	if err := validateHTTPSOrLoopbackURL(rawURL, "agent client base URL", errKind); err != nil {
+		return "", err
+	}
+	return strings.TrimRight(rawURL, "/"), nil
+}
+
 func (o agentClientBaseURLOption) applyRegisterOption(cfg *registerConfig) error {
-	rawURL := string(o)
-	if err := validateHTTPSOrLoopbackURL(rawURL, "agent client base URL", ErrInvalidRegisterConfig); err != nil {
+	normalized, err := validateAgentClientBaseURL(string(o), ErrInvalidRegisterConfig)
+	if err != nil {
 		return err
 	}
-	cfg.clientBaseURL = strings.TrimRight(rawURL, "/")
+	cfg.clientBaseURL = normalized
 	return nil
 }
 
 func (o agentClientBaseURLOption) applyClientOption(cfg *clientOptions) error {
-	rawURL := string(o)
-	if err := validateHTTPSOrLoopbackURL(rawURL, "agent client base URL", ErrInvalidClientConfig); err != nil {
+	normalized, err := validateAgentClientBaseURL(string(o), ErrInvalidClientConfig)
+	if err != nil {
 		return err
 	}
 	if err := claimClientOptionSource(&cfg.baseURLSource, clientOptionSourceAgent, "WithBaseURL", "WithAgentClientBaseURL"); err != nil {
 		return err
 	}
-	cfg.baseURL = strings.TrimRight(rawURL, "/")
+	cfg.baseURL = normalized
 	return nil
 }
 

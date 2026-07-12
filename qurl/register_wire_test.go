@@ -65,6 +65,17 @@ func TestMapRAKError_UnknownCodeIsRegistrationDeny(t *testing.T) {
 	}
 }
 
+func TestMapRAKError_UnselectedPathDoesNotGuessCredentialMeaning(t *testing.T) {
+	err := mapRAKError(&registerAckBody{ErrCode: rakCredentialInvalid, ErrMsg: "credential rejected"}, pathUnknown)
+	var deny *RegistrationDenyError
+	if !errors.As(err, &deny) {
+		t.Fatalf("unselected path: want *RegistrationDenyError, got %v", err)
+	}
+	if errors.Is(err, ErrOTPIncorrect) || errors.Is(err, ErrKeyRejected) {
+		t.Fatalf("unselected path guessed a credential meaning: %v", err)
+	}
+}
+
 func TestRegistrationDenyError_IsBridgesKnownCode(t *testing.T) {
 	// A RegistrationDenyError carrying a KNOWN code still matches the typed
 	// sentinel via Is(), so a caller that only kept the deny path is not stranded.

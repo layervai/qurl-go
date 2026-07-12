@@ -128,7 +128,11 @@ const (
 type pathKind int
 
 const (
-	pathAccount pathKind = iota
+	// pathUnknown is the zero value returned when path selection itself fails.
+	// Lifecycle callers must not pass it to the RAK mapper, whose defensive
+	// fallback preserves a raw denial rather than guessing a credential meaning.
+	pathUnknown pathKind = iota
+	pathAccount
 	pathBootstrap
 )
 
@@ -188,10 +192,16 @@ func mapRAKError(ack *registerAckBody, path pathKind) error {
 	// table, which deliberately omits it: on the bootstrap path the credential IS
 	// the key (a rejected key), on the account path it is a wrong emailed OTP.
 	if code == rakCredentialInvalid {
-		if path == pathBootstrap {
+		switch path {
+		case pathBootstrap:
 			return fmt.Errorf("%w: pre-issued key was rejected by the enrollment service%s", ErrKeyRejected, detailSuffix(msg))
+		case pathAccount:
+			return fmt.Errorf("%w: the one-time code was rejected; re-run the same operation with the correct qurl.WithOTP code%s", ErrOTPIncorrect, detailSuffix(msg))
+		default:
+			// Do not guess the credential meaning when an internal caller has not
+			// selected a path. Preserve the raw denial for diagnosis instead.
+			return &RegistrationDenyError{ErrCode: ack.ErrCode, ErrMsg: ack.ErrMsg}
 		}
-		return fmt.Errorf("%w: the one-time code was rejected; re-run the same operation with the correct qurl.WithOTP code%s", ErrOTPIncorrect, detailSuffix(msg))
 	}
 	if m, ok := rakMappings[code]; ok {
 		return fmt.Errorf("%w: %s%s", m.sentinel, m.detail, detailSuffix(msg))
