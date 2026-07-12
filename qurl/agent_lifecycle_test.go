@@ -201,6 +201,35 @@ func TestRegisterAgent_LegacyClientRemainsLazyStoreBacked(t *testing.T) {
 	}
 }
 
+func TestRecoverAgentCredential_PrimesClientFromCommittedState(t *testing.T) {
+	h := registeredHarness(t)
+	h.svc.mu.Lock()
+	h.svc.deviceAPIKey = "lv_device_recovered"
+	h.svc.mu.Unlock()
+	counting := &countingAgentStateStore{inner: h.store}
+
+	client, err := RecoverAgentCredential(context.Background(), "lv_enroll", counting, h.registerOpts()...)
+	if err != nil {
+		t.Fatalf("RecoverAgentCredential: %v", err)
+	}
+	if counting.loads.Load() != 1 {
+		t.Fatalf("recovery state-machine loads = %d, want 1", counting.loads.Load())
+	}
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://api.layerv.ai/v1/resources", nil)
+	if err != nil {
+		t.Fatalf("new resource request: %v", err)
+	}
+	if err := client.credentials.Authorize(context.Background(), req); err != nil {
+		t.Fatalf("authorize from recovered primed client: %v", err)
+	}
+	if got := req.Header.Get("Authorization"); got != "Bearer lv_device_recovered" {
+		t.Fatalf("recovered primed Authorization = %q", got)
+	}
+	if counting.loads.Load() != 1 {
+		t.Fatalf("recovery first authorization added store load: loads = %d, want 1", counting.loads.Load())
+	}
+}
+
 func TestOpenRegisteredAgentRuntime_InvalidKnockStateFailsInOneLoadWithoutNetwork(t *testing.T) {
 	tests := []struct {
 		name string

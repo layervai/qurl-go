@@ -196,7 +196,9 @@ func decodeRuntimePrivateKey(state *AgentState, errKind error) ([]byte, error) {
 // newAgentRuntimeBinding is deliberately infallible: callers decode the
 // retained private key before any lifecycle network I/O and validate runtime
 // metadata before calling it. Mutating lifecycle paths additionally wait until
-// state is durably saved and the setup lock is released.
+// state is durably saved and the setup lock is released. Preconditions:
+// state, state.RegisteredAt, and state.NHPPeer are non-nil, and privateKey is a
+// validated 32-byte X25519 key owned by this constructor.
 func newAgentRuntimeBinding(state *AgentState, privateKey []byte) *AgentRuntimeBinding {
 	return &AgentRuntimeBinding{
 		AgentID:                state.AgentID,
@@ -260,7 +262,7 @@ func RecoverAgentCredential(ctx context.Context, key string, store AgentStateSto
 		return nil, err
 	}
 	cfg.applyLifecycleDefaultKeyPolicy()
-	_, err = withAgentSetupLock(ctx, store, func() (*AgentState, error) {
+	state, err := withAgentSetupLock(ctx, store, func() (*AgentState, error) {
 		state, err := loadExistingAgentState(ctx, store, cfg.invalidConfigErr)
 		if err != nil {
 			return nil, err
@@ -276,7 +278,11 @@ func RecoverAgentCredential(ctx context.Context, key string, store AgentStateSto
 	if err != nil {
 		return nil, err
 	}
-	return newStoreBackedClient(store, cfg.clientBaseURL, cfg.clientHTTPClient), nil
+	// Lock release has succeeded, so state is the exact replacement credential
+	// now committed to the authoritative store. Prime the new Client from it for
+	// immediate cutover without a second store/KMS load; older Clients still keep
+	// their prior cache until expiry and must be discarded by the caller.
+	return newPrimedStoreBackedClient(store, cfg.clientBaseURL, cfg.clientHTTPClient, state.DeviceAPIKey, cfg.invalidConfigErr)
 }
 
 func loadExistingAgentState(ctx context.Context, store AgentStateStore, errKind error) (*AgentState, error) {
