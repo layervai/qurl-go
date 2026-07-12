@@ -78,11 +78,11 @@ That is the core flow:
 | Protect a private URL | `client.ProtectURL` | The target URL you already know |
 | Mint a short-lived access link | `resource.CreatePortal` | The returned resource handle |
 
-If qURL Connector already protects the service, use its immutable connector
+If qURL Connector already protects the service, use its immutable qURL Connector
 slug instead of calling `ProtectURL`:
 
 ```go
-resource, err := client.GetTunnelResourceBySlug(ctx, "prod-dashboard")
+resource, err := client.GetConnectorResourceBySlug(ctx, "prod-dashboard")
 if err != nil {
 	return err
 }
@@ -161,10 +161,10 @@ and supports an optional `qurl.WithExpectedSealedAgentID` pin for a separately
 configured expected id.
 
 REST-only warm starts can call `qurl.OpenRegisteredAgent` without an enrollment
-key. Tunnel runtimes should use `qurl.OpenRegisteredAgentRuntime` to obtain the
-Client and validated knock binding from one store load; fresh installs use
-`qurl.RegisterAgentRuntime` to receive the same pair without a post-registration
-store/KMS reload.
+key. qURL Connector runtimes should use `qurl.OpenRegisteredAgentRuntime` to
+obtain the Client and validated knock binding from one store load; fresh
+installs use `qurl.RegisterAgentRuntime` to receive the same pair without a
+post-registration store/KMS reload.
 `qurl.RefreshAgentRegistration` explicitly repairs missing/rotated NHP binding
 metadata without touching or returning the device credential; its narrow
 runtime binding exposes only the identity/NHP data and wipeable private-key
@@ -232,13 +232,13 @@ Match errors by type, not message text:
 
 ### Unreleased
 
-- **Added: qURL Connector tunnel-resource lifecycle** — device-authenticated
-  clients can call `EnsureTunnelResource`, `GetTunnelResource`,
-  `GetTunnelResourceBySlug`, and `DeleteTunnelResource` without falling back to
+- **Added: qURL Connector resource lifecycle** — device-authenticated
+  clients can call `EnsureConnectorResource`, `GetConnectorResource`,
+  `GetConnectorResourceBySlug`, and `DeleteConnectorResource` without falling back to
   an enrollment credential. The typed result keeps immutable `Slug` separate
   from mutable `Alias`, exposes `KnockResourceID`, and reports whether an ensure
-  found an existing active resource. See [Manage connector tunnel
-  resources](docs/connector-tunnel-resources.md).
+  found an existing active resource. See [Manage qURL Connector
+  resources](docs/connector-resources.md).
 
   **Minimum backend/deployment contract:** this release does not claim the
   backend is deployed or ready to flip. The qurl-service contract fenced by
@@ -248,15 +248,15 @@ Match errors by type, not message text:
   alarm, and cohort hard gates are proven; enable it only when enrollment may
   begin. Service startup with registration enabled also requires
   `QURL_AGENT_BOOTSTRAP_ENABLED=true` plus configured relay and NHP peer
-  dependencies. `QURL_AGENT_OTP_ENABLED` is not required for the connector's
+  dependencies. `QURL_AGENT_OTP_ENABLED` is not required for qURL Connector's
   bootstrap-only default; enable it only for intentional account/OTP repair.
-  Tunnel ensure/create also requires the existing
+  qURL Connector resource ensure/create also requires the producer's existing
   `TUNNEL_AUTH_ENABLED=true` service gate. The resource collection/item routes
-  have no new SDK-specific feature flag, but the tunnel type branch remains
-  fail-closed behind that existing gate.
+  have no new SDK-specific feature flag, but the private producer wire branch
+  remains fail-closed behind that existing gate.
 
   The completion-minted device credential must retain the producer's exact
-  URL/tunnel resource allow-list (GET/POST resource collection,
+  URL and qURL Connector resource allow-list (GET/POST resource collection,
   GET/PATCH/DELETE resource item, and the two approved portal-creation writes)
   while denying transit and unclassified routes. `POST /v1/resources`
   find-or-create must preserve the exact `201` success envelope,
@@ -337,13 +337,11 @@ Match errors by type, not message text:
 
 #### Breaking changes
 
-- **`Client.ConnectorResource` now validates immutable tunnel identity.** It
-  resolves and validates the response's `slug`, `type`, `status`, and
-  `knock_resource_id` instead of incorrectly requiring the mutable `alias` to
-  equal the connector slug. The method is deprecated; new connector code should
-  use `GetTunnelResourceBySlug` for the complete tunnel contract. Its deprecated
-  `Resource` projection now carries only tunnel lifecycle fields; legacy URL,
-  description, tags, custom-domain, count, and timestamp fields are zero-valued.
+- **Removed the ambiguous `Client.ConnectorResource` projection.** Use
+  `GetConnectorResourceBySlug`, which returns the dedicated
+  `ConnectorResource` lifecycle type. The projection's generic
+  `ErrResourceNotFound` and `ErrAmbiguousResource` sentinels are replaced by
+  `ErrConnectorResourceNotFound` and `ErrConnectorResourceAmbiguous`.
 
 - **`WithNHPPeer` can no longer be replaced by completion.** The override is the
   peer authenticated by REG/RAK and is preserved in durable state. Completion
