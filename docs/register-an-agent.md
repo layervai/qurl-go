@@ -479,6 +479,29 @@ client, err := qurl.RecoverAgentCredential(ctx, enrollmentKey, store,
 )
 ```
 
+Interactive account-key repair must make its wider policy explicit on every
+phase, including the resume call:
+
+```go
+accountRepair := qurl.WithAllowedRegistrationKeyKinds(qurl.RegistrationKeyKindAccount)
+_, err := qurl.RefreshAgentRegistration(ctx, accountKey, store, accountRepair)
+// After OTPPendingError and receipt of the emailed code:
+binding, err := qurl.RefreshAgentRegistration(ctx, accountKey, store,
+	accountRepair,
+	qurl.WithOTP(refreshCode),
+)
+
+// Or, after a separate recovery dispatch/pause and owner-side revoke:
+client, err := qurl.RecoverAgentCredential(ctx, accountKey, store,
+	accountRepair,
+	qurl.WithOTP(recoveryCode),
+)
+```
+
+Recovery's first call follows the same dispatch/pause pattern when no current
+code is supplied. Prefer a fresh `WithOTPProvider` option for each call when a
+mailbox integration owns code retrieval.
+
 Credential recovery has an intentional owner step: first revoke
 `agent:<device_id>` with an owner credential. qurl-service atomically revokes
 the prior device key and clears its first-issue sentinel; only then can explicit
