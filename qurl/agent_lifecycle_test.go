@@ -22,22 +22,35 @@ func allowAccountLifecycle() RegisterOption {
 }
 
 func TestAgentStateClone_IsolatesEveryMutableField(t *testing.T) {
-	// Keep this list explicit: adding a pointer, slice, map, interface, function,
-	// or channel field to AgentState must fail here until clone and this mutation
-	// test are extended together. The mutations below prove the currently known
-	// reference fields do not alias the source.
+	// Keep this list explicit: adding any non-scalar field to AgentState must fail
+	// here until clone and this mutation test are extended together. The
+	// mutations below prove the currently known fields do not alias the source.
 	stateType := reflect.TypeOf(AgentState{})
-	var referenceFields []string
+	handledNames := []string{"RegisteredAt", "NHPPeer", "OTPRequestedAt"}
+	handled := make(map[string]bool, len(handledNames))
+	for _, name := range handledNames {
+		handled[name] = false
+	}
 	for i := 0; i < stateType.NumField(); i++ {
 		field := stateType.Field(i)
 		switch field.Type.Kind() {
-		case reflect.Pointer, reflect.Slice, reflect.Map, reflect.Interface, reflect.Func, reflect.Chan:
-			referenceFields = append(referenceFields, field.Name)
+		case reflect.Bool,
+			reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+			reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr,
+			reflect.Float32, reflect.Float64, reflect.Complex64, reflect.Complex128,
+			reflect.String:
+			continue
+		default:
+			if _, ok := handled[field.Name]; !ok {
+				t.Fatalf("AgentState field %s has non-scalar kind %s; update clone and its isolation test", field.Name, field.Type.Kind())
+			}
+			handled[field.Name] = true
 		}
 	}
-	wantReferenceFields := []string{"RegisteredAt", "NHPPeer", "OTPRequestedAt"}
-	if !reflect.DeepEqual(referenceFields, wantReferenceFields) {
-		t.Fatalf("AgentState reference fields = %v, want %v; update clone and its isolation test", referenceFields, wantReferenceFields)
+	for _, name := range handledNames {
+		if !handled[name] {
+			t.Fatalf("AgentState clone guard names missing field %s; update the handled set", name)
+		}
 	}
 
 	registeredAt := time.Unix(1_700_000_000, 0).UTC()
