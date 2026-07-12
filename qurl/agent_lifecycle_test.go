@@ -268,6 +268,56 @@ func TestRegisterAgentRuntime_FreshRegistrationAddsNoStoreReload(t *testing.T) {
 	wipeBytes(privateKey)
 }
 
+func TestRegisterAgentRuntime_PrimedCredentialExpiresOnInjectedClock(t *testing.T) {
+	h := registeredHarness(t)
+	counting := &countingAgentStateStore{inner: h.store}
+	now := time.Unix(1_700_000_000, 0).UTC()
+	client, binding, err := RegisterAgentRuntime(context.Background(), "unused-on-fast-path", counting,
+		withClock(func() time.Time { return now }),
+	)
+	if err != nil {
+		t.Fatalf("RegisterAgentRuntime: %v", err)
+	}
+	binding.Destroy()
+	if counting.loads.Load() != 1 {
+		t.Fatalf("runtime fast-path loads = %d, want 1", counting.loads.Load())
+	}
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://api.layerv.ai/v1/resources", nil)
+	if err != nil {
+		t.Fatalf("new first resource request: %v", err)
+	}
+	if err := client.credentials.Authorize(context.Background(), req); err != nil {
+		t.Fatalf("authorize primed credential: %v", err)
+	}
+	if got := req.Header.Get("Authorization"); got != "Bearer lv_device_secret" {
+		t.Fatalf("initial primed Authorization = %q", got)
+	}
+	if counting.loads.Load() != 1 {
+		t.Fatalf("first authorization reloaded store: loads = %d, want 1", counting.loads.Load())
+	}
+
+	state := h.loadState(t)
+	state.DeviceAPIKey = "lv_device_rotated_after_prime"
+	if err := h.store.SaveAgentState(context.Background(), state); err != nil {
+		t.Fatalf("save subsequent credential rotation: %v", err)
+	}
+	now = now.Add(storeCredentialCacheTTL + time.Second)
+	req, err = http.NewRequestWithContext(context.Background(), http.MethodGet, "https://api.layerv.ai/v1/resources", nil)
+	if err != nil {
+		t.Fatalf("new post-TTL resource request: %v", err)
+	}
+	if err := client.credentials.Authorize(context.Background(), req); err != nil {
+		t.Fatalf("authorize after primed TTL: %v", err)
+	}
+	if got := req.Header.Get("Authorization"); got != "Bearer lv_device_rotated_after_prime" {
+		t.Fatalf("post-TTL Authorization = %q", got)
+	}
+	if counting.loads.Load() != 2 {
+		t.Fatalf("post-TTL store loads = %d, want 2", counting.loads.Load())
+	}
+}
+
 func TestRegisterAgent_LegacyClientRemainsLazyStoreBacked(t *testing.T) {
 	h, counting := newFreshCountingRegisterHarness(t)
 	client, err := RegisterAgent(context.Background(), "lv_enroll", h.store, h.registerOpts()...)

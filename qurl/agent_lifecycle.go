@@ -65,7 +65,7 @@ func OpenRegisteredAgentRuntime(ctx context.Context, store AgentStateStore, opts
 		return nil, nil, err
 	}
 	defer func() { wipeBytes(privateKey) }()
-	client := newPrimedStoreBackedClient(store, cfg.baseURL, cfg.httpClient, state.DeviceAPIKey)
+	client := newPrimedStoreBackedClient(store, cfg.baseURL, cfg.httpClient, state.DeviceAPIKey, time.Now)
 	binding := newAgentRuntimeBinding(state, privateKey)
 	privateKey = nil // binding owns the slice and its cleanup from this point.
 	return client, binding, nil
@@ -210,7 +210,9 @@ func (b *AgentRuntimeBinding) Destroy() {
 // abandoned attempt to throttle repeat dispatches; OpenRegisteredAgent ignores
 // it, and a successful resumed RAK clears it. Refresh defaults to bootstrap
 // keys so routine fleet repair cannot fan out OTP email; an interactive account
-// flow requires an explicit WithAllowedRegistrationKeyKinds opt-in.
+// flow requires an explicit WithAllowedRegistrationKeyKinds opt-in. Without it,
+// the side-effect-free preflight returns
+// *RegistrationKeyKindDisallowedError before OTP dispatch or REG.
 func RefreshAgentRegistration(ctx context.Context, key string, store AgentStateStore, opts ...RegisterOption) (*AgentRuntimeBinding, error) {
 	cfg, err := validateRegisterInputs(ctx, key, store, opts)
 	if err != nil {
@@ -351,7 +353,7 @@ func RecoverAgentCredential(ctx context.Context, key string, store AgentStateSto
 	// now committed to the authoritative store. Prime the new Client from it for
 	// immediate cutover without a second store/KMS load; older Clients still keep
 	// their prior cache until expiry and must be discarded by the caller.
-	return newPrimedStoreBackedClient(store, cfg.clientBaseURL, cfg.clientHTTPClient, state.DeviceAPIKey), nil
+	return newPrimedStoreBackedClient(store, cfg.clientBaseURL, cfg.clientHTTPClient, state.DeviceAPIKey, cfg.clock), nil
 }
 
 func loadExistingAgentState(ctx context.Context, store AgentStateStore, errKind error) (*AgentState, error) {

@@ -95,7 +95,7 @@ func RegisterAgentRuntime(ctx context.Context, key string, store AgentStateStore
 	}
 	privateKey := cfg.takeRuntimePrivateKey()
 	defer func() { wipeBytes(privateKey) }()
-	client := newPrimedStoreBackedClient(store, cfg.clientBaseURL, cfg.clientHTTPClient, state.DeviceAPIKey)
+	client := newPrimedStoreBackedClient(store, cfg.clientBaseURL, cfg.clientHTTPClient, state.DeviceAPIKey, cfg.clock)
 	binding := newAgentRuntimeBinding(state, privateKey)
 	privateKey = nil // binding owns the slice and its cleanup from this point.
 	return client, binding, nil
@@ -1064,26 +1064,33 @@ func derefTime(t *time.Time, fallback time.Time) time.Time {
 // Construction makes no qURL API calls; loading a network-backed store can
 // still perform I/O.
 func newStoreBackedClient(store AgentStateStore, baseURL string, httpClient HTTPDoer) *Client {
-	return newStoreBackedClientWithCredential(store, baseURL, httpClient, "")
+	return newStoreBackedClientWithCredential(store, baseURL, httpClient, "", time.Now)
 }
 
 // newPrimedStoreBackedClient is deliberately infallible after callers validate
 // the exact credential as part of their pre-commit state/completion contract.
 // Keeping construction infallible prevents a committed lifecycle mutation from
 // acquiring a new post-commit error tail merely while materializing its Client.
-func newPrimedStoreBackedClient(store AgentStateStore, baseURL string, httpClient HTTPDoer, validatedDeviceAPIKey string) *Client {
-	return newStoreBackedClientWithCredential(store, baseURL, httpClient, validatedDeviceAPIKey)
+// Do not add revalidation here: all three callers validate exact bearer bytes
+// before the commit/return boundary, and a new failure here would recreate a
+// committed-but-no-Client outcome. Keeping this helper unexported makes that
+// precondition auditable without a fallback or panic.
+func newPrimedStoreBackedClient(store AgentStateStore, baseURL string, httpClient HTTPDoer, validatedDeviceAPIKey string, now func() time.Time) *Client {
+	return newStoreBackedClientWithCredential(store, baseURL, httpClient, validatedDeviceAPIKey, now)
 }
 
 // newStoreBackedClientWithCredential optionally primes the one-minute cache from
 // an already validated AgentState so a combined runtime open does not unseal or
 // reload the same store on its first resource request. The wrapped store provider
 // remains authoritative after the cache expires.
-func newStoreBackedClientWithCredential(store AgentStateStore, baseURL string, httpClient HTTPDoer, deviceAPIKey string) *Client {
+func newStoreBackedClientWithCredential(store AgentStateStore, baseURL string, httpClient HTTPDoer, deviceAPIKey string, now func() time.Time) *Client {
+	if now == nil {
+		now = time.Now
+	}
 	provider := &cachedCredentialProvider{
 		provider: &storeCredentialProvider{store: store},
 		ttl:      storeCredentialCacheTTL,
-		now:      time.Now,
+		now:      now,
 	}
 	if deviceAPIKey != "" {
 		// The provider is not yet shared: construction finishes before the Client
