@@ -61,8 +61,11 @@ func OpenRegisteredAgentRuntime(ctx context.Context, store AgentStateStore, opts
 	if err != nil {
 		return nil, nil, err
 	}
+	defer func() { wipeBytes(privateKey) }()
 	client := newPrimedStoreBackedClient(store, cfg.baseURL, cfg.httpClient, state.DeviceAPIKey)
-	return client, newAgentRuntimeBinding(state, privateKey), nil
+	binding := newAgentRuntimeBinding(state, privateKey)
+	privateKey = nil // binding owns the slice and its cleanup from this point.
+	return client, binding, nil
 }
 
 func validateRegisteredAgentOpenInputs(ctx context.Context, store AgentStateStore, opts []ClientOption) (clientOptions, error) {
@@ -210,6 +213,7 @@ func RefreshAgentRegistration(ctx context.Context, key string, store AgentStateS
 	}
 	cfg.applyLifecycleDefaultKeyPolicy()
 	var privateKey []byte
+	defer func() { wipeBytes(privateKey) }()
 	state, err := withAgentSetupLock(ctx, store, func() (*AgentState, error) {
 		state, err := loadCompletedRegisteredState(ctx, store, cfg.invalidConfigErr)
 		if err != nil {
@@ -218,6 +222,8 @@ func RefreshAgentRegistration(ctx context.Context, key string, store AgentStateS
 		if err := cfg.reconcileDeviceID(state); err != nil {
 			return nil, err
 		}
+		// The returned binding must retain one decoded key while registerExchange
+		// independently decodes and wipes its own short-lived Noise-handshake copy.
 		privateKey, err = decodeRuntimePrivateKey(state, cfg.invalidConfigErr)
 		if err != nil {
 			return nil, err
@@ -225,10 +231,11 @@ func RefreshAgentRegistration(ctx context.Context, key string, store AgentStateS
 		return cfg.forceRegistration(ctx, key, store, state, false)
 	})
 	if err != nil {
-		wipeBytes(privateKey)
 		return nil, err
 	}
-	return newAgentRuntimeBinding(state, privateKey), nil
+	binding := newAgentRuntimeBinding(state, privateKey)
+	privateKey = nil // binding owns the slice and its cleanup from this point.
+	return binding, nil
 }
 
 func decodeRuntimePrivateKey(state *AgentState, errKind error) ([]byte, error) {

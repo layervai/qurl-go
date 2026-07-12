@@ -86,14 +86,17 @@ func RegisterAgentRuntime(ctx context.Context, key string, store AgentStateStore
 	}
 	cfg.requireDeviceKey = true
 	cfg.captureRuntime = true
+	defer cfg.wipeRuntimePrivateKey()
 	state, err := cfg.run(ctx, key, store)
 	if err != nil {
-		cfg.wipeRuntimePrivateKey()
 		return nil, nil, err
 	}
 	privateKey := cfg.takeRuntimePrivateKey()
+	defer func() { wipeBytes(privateKey) }()
 	client := newPrimedStoreBackedClient(store, cfg.clientBaseURL, cfg.clientHTTPClient, state.DeviceAPIKey)
-	return client, newAgentRuntimeBinding(state, privateKey), nil
+	binding := newAgentRuntimeBinding(state, privateKey)
+	privateKey = nil // binding owns the slice and its cleanup from this point.
+	return client, binding, nil
 }
 
 // registerConfig is the resolved option set plus the fixed dependencies a
@@ -1081,6 +1084,8 @@ func newStoreBackedClientWithCredential(store AgentStateStore, baseURL string, h
 		now:      time.Now,
 	}
 	if deviceAPIKey != "" {
+		// The provider is not yet shared: construction finishes before the Client
+		// escapes, and every later cache read/write remains mutex-protected.
 		provider.authorization = "Bearer " + deviceAPIKey
 		provider.expiresAt = provider.now().Add(provider.ttl)
 	}
