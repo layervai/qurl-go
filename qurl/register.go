@@ -78,7 +78,9 @@ func RegisterAgent(ctx context.Context, key string, store AgentStateStore, opts 
 // load, this captures the private key before registration network I/O and primes
 // the Client credential cache from the same in-memory AgentState. The caller
 // must immediately defer binding.Destroy, then take and eventually wipe the
-// runtime private key. Account enrollment behavior matches RegisterAgent.
+// runtime private key. The primed credential is cached for one minute; a later
+// owner-side revocation becomes visible after that TTL. Account enrollment
+// behavior matches RegisterAgent.
 func RegisterAgentRuntime(ctx context.Context, key string, store AgentStateStore, opts ...RegisterOption) (*Client, *AgentRuntimeBinding, error) {
 	cfg, err := validateRegisterInputs(ctx, key, store, opts)
 	if err != nil {

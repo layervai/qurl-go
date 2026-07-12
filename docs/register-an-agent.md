@@ -79,7 +79,9 @@ defer func() { clear(devicePrivateKey) }()
 Use `RegisterAgentRuntime` with the same `RegisterOption` values as
 `RegisterAgent` on a fresh install. Its registration state machine captures the
 runtime key before network I/O and returns the Client/binding pair from the
-in-memory completed state, without a post-registration store/KMS reload.
+in-memory completed state, without a post-registration store/KMS reload. The
+primed Client caches that exact credential for one minute; if the owner later
+revokes it, the Client observes that subsequent revocation after the cache TTL.
 
 `WithRegisterBaseURL` targets only registration-info and completion.
 `WithAgentClientBaseURL` and `WithAgentClientHTTPClient` are dual-purpose

@@ -164,7 +164,9 @@ func (k *agentRuntimePrivateKey) destroy() {
 // String returns a redacted runtime summary. The value receiver deliberately
 // protects both pointer and dereferenced-value formatting; its copy contains
 // only a pointer to the synchronized key owner and does not transfer key
-// ownership. Callers must still avoid making binding copies.
+// ownership. Callers must still avoid making binding copies. fmt safely renders
+// a nil *AgentRuntimeBinding as <nil>, but a direct method call on a nil pointer
+// cannot reach this value-receiver method and panics; use fmt for nullable values.
 func (b AgentRuntimeBinding) String() string {
 	return fmt.Sprintf("qurl.AgentRuntimeBinding{AgentID:%q, RelayURL:%q, KeyID:%q, DeviceStaticPrivateKey:[REDACTED]}", b.AgentID, b.RelayURL, b.KeyID)
 }
@@ -321,6 +323,8 @@ func loadCompletedRegisteredState(ctx context.Context, store AgentStateStore, er
 // On success, immediately discard every pre-existing Client for this agent and
 // use the returned Client: older Clients may cache the revoked credential for up
 // to one minute, while the returned Client observes the replacement immediately.
+// The new Client then caches that replacement for the same one-minute TTL, so a
+// subsequent owner-side revocation becomes visible after its cache expires.
 func RecoverAgentCredential(ctx context.Context, key string, store AgentStateStore, opts ...RegisterOption) (*Client, error) {
 	cfg, err := validateRegisterInputs(ctx, key, store, opts)
 	if err != nil {
