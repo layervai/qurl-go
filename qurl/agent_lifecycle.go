@@ -43,8 +43,11 @@ func OpenRegisteredAgent(ctx context.Context, store AgentStateStore, opts ...Cli
 // AgentStateStore load, no enrollment/resource API calls, requires a live NHP
 // peer plus valid relay/key metadata, and primes the Client's one-minute
 // credential cache from that same state so its first request does not reload or
-// unseal the store. The caller must immediately defer binding.Destroy, then take
-// and eventually wipe the runtime private key.
+// unseal the store. Unlike REST-only OpenRegisteredAgent, it rejects an expired
+// peer without network I/O because that peer cannot be knocked; call
+// RefreshAgentRegistration with an enrollment key to obtain a fresh binding.
+// The caller must immediately defer binding.Destroy, then take and eventually
+// wipe the runtime private key.
 func OpenRegisteredAgentRuntime(ctx context.Context, store AgentStateStore, opts ...ClientOption) (*Client, *AgentRuntimeBinding, error) {
 	cfg, err := validateRegisteredAgentOpenInputs(ctx, store, opts)
 	if err != nil {

@@ -189,7 +189,10 @@ func unwrapWithCause(cause error, sentinels ...error) []error {
 
 // messageWithCause appends a wrapped cause to a typed error's operator-facing
 // message when one is present. Each credential issuance/recovery type builds a
-// distinct message and then surfaces its underlying cause identically.
+// distinct message and then surfaces its underlying cause identically. The cause
+// intentionally appears both in this operator-readable string and structurally
+// through Unwrap: log the outer error once, while errors.Is/errors.As inspect the
+// same cause without requiring a second log entry.
 func messageWithCause(message string, cause error) string {
 	if cause != nil {
 		return fmt.Sprintf("%s: %v", message, cause)

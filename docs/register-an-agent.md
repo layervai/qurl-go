@@ -59,7 +59,10 @@ replacement only after its cache expires.
 Tunnel processes that also need NHP knock state should use the combined runtime
 APIs. They validate a live peer, relay URL, and key id; return a primed Client
 plus `AgentRuntimeBinding`; and avoid loading/unsealing the store again for the
-binding or first resource request:
+binding or first resource request. Unlike REST-only `OpenRegisteredAgent`, a
+runtime open rejects an expired peer without network I/O because it cannot be
+knocked. Call `RefreshAgentRegistration` with an enrollment key to obtain a
+fresh binding, then continue startup:
 
 ```go
 client, binding, err := qurl.OpenRegisteredAgentRuntime(ctx, store,
