@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -88,7 +89,9 @@ func validateRegisteredAgentOpenInputs(ctx context.Context, store AgentStateStor
 // copies share one synchronized key owner, so they cannot duplicate the one-shot
 // transfer. Immediately defer Destroy after a successful lifecycle call,
 // transfer key ownership exactly once with TakeDeviceStaticPrivateKey, and wipe
-// those bytes after use.
+// those bytes after use. A runtime cleanup best-effort wipes a retained key only
+// after every accidental copy becomes unreachable; it is defense in depth, not
+// a substitute for deterministic Destroy.
 type AgentRuntimeBinding struct {
 	AgentID      string
 	PublicKeyB64 string
@@ -106,8 +109,24 @@ type AgentRuntimeBinding struct {
 // String/GoString methods required to redact explicitly dereferenced formatting.
 // Sharing this synchronized cell makes the underlying copy hazard safe instead.
 type agentRuntimePrivateKey struct {
-	mu    sync.Mutex
-	value []byte
+	mu      sync.Mutex
+	value   []byte
+	cleanup *runtime.Cleanup
+}
+
+func newAgentRuntimePrivateKey(value []byte) *agentRuntimePrivateKey {
+	key := &agentRuntimePrivateKey{value: value}
+	cleanup := runtime.AddCleanup(key, wipeBytes, value)
+	key.cleanup = &cleanup
+	return key
+}
+
+func (k *agentRuntimePrivateKey) stopCleanupLocked() {
+	if k.cleanup == nil {
+		return
+	}
+	k.cleanup.Stop()
+	k.cleanup = nil
 }
 
 func (k *agentRuntimePrivateKey) take() []byte {
@@ -116,6 +135,7 @@ func (k *agentRuntimePrivateKey) take() []byte {
 	}
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	k.stopCleanupLocked()
 	value := k.value
 	k.value = nil
 	return value
@@ -127,6 +147,7 @@ func (k *agentRuntimePrivateKey) destroy() {
 	}
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	k.stopCleanupLocked()
 	wipeBytes(k.value)
 	k.value = nil
 }
@@ -238,7 +259,7 @@ func newAgentRuntimeBinding(state *AgentState, privateKey []byte) *AgentRuntimeB
 		NHPPeer:                *state.NHPPeer,
 		RelayURL:               state.RelayURL,
 		KeyID:                  state.KeyID,
-		deviceStaticPrivateKey: &agentRuntimePrivateKey{value: privateKey},
+		deviceStaticPrivateKey: newAgentRuntimePrivateKey(privateKey),
 	}
 }
 

@@ -450,8 +450,11 @@ func validateNHPServerPublicKey(encoded, label string, errKind error) error {
 }
 
 // decodeNHPServerPublicKey accepts the two canonical standard-base64 spellings
-// of an X25519 key: padded and raw (unpadded). Callers still validate the decoded
-// bytes as X25519; malformed or non-canonical encodings fail closed.
+// of an X25519 key: padded and raw (unpadded), because peer keys are wire input
+// and deployed producers emit both forms. Callers still validate the decoded
+// bytes as X25519 and fingerprint those bytes; malformed or non-canonical
+// encodings fail closed. This intentionally differs from the SDK-owned private
+// key state format, which has only one padded producer.
 func decodeNHPServerPublicKey(encoded string) ([]byte, error) {
 	decoded, paddedErr := base64.StdEncoding.Strict().DecodeString(encoded)
 	if paddedErr == nil {

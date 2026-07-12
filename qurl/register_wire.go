@@ -292,6 +292,8 @@ func (r completionResponse) validate(_ time.Time, errKind error) error {
 	// Completion only corroborates the RAK-authenticated public key. Its host,
 	// port, and lease are never persisted, so irrelevant coordinate defects must
 	// not turn a successfully minted credential into recovery-required ambiguity.
+	// Do not replace this with validateNHPServerPeerInfo: registration-info plus
+	// the authenticated RAK are the sole coordinate/lease authority.
 	return validateNHPServerPublicKey(r.NHPServerPeer.PublicKeyB64, "completion response", errKind)
 }
 

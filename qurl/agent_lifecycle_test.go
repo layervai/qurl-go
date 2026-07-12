@@ -194,7 +194,7 @@ func TestAgentRuntimeBinding_NilPointerFormattingDoesNotPanic(t *testing.T) {
 func TestAgentRuntimeBinding_AccidentalCopySharesSynchronizedOneShotKey(t *testing.T) {
 	want := bytes.Repeat([]byte{0x5a}, 32)
 	binding := &AgentRuntimeBinding{
-		deviceStaticPrivateKey: &agentRuntimePrivateKey{value: bytes.Clone(want)},
+		deviceStaticPrivateKey: newAgentRuntimePrivateKey(bytes.Clone(want)),
 	}
 	copied := *binding
 	start := make(chan struct{})
@@ -212,6 +212,9 @@ func TestAgentRuntimeBinding_AccidentalCopySharesSynchronizedOneShotKey(t *testi
 	}
 	if !bytes.Equal(first, want) || second != nil {
 		t.Fatalf("copy one-shot results = %x / %x, want key / nil", first, second)
+	}
+	if binding.deviceStaticPrivateKey.cleanup != nil {
+		t.Fatal("one-shot transfer left the best-effort runtime cleanup armed")
 	}
 	wipeBytes(first)
 	binding.Destroy()
