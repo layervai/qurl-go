@@ -68,9 +68,6 @@ type ConnectorResource struct {
 	// KnockResourceID is the placement-neutral NHP target returned by the
 	// producer for qURL Connector admission.
 	KnockResourceID string `json:"knock_resource_id"`
-	// Status is active for handles returned by lifecycle methods. A revoked
-	// response surfaces ErrConnectorResourceRevoked instead of returning a handle.
-	Status string `json:"status"`
 	// Slug is the immutable owner-scoped qURL Connector identity.
 	Slug string `json:"slug"`
 	// Alias is optional mutable display metadata and is never used as identity.
@@ -292,7 +289,6 @@ func (r connectorResourceWire) connectorResource(client *Client, expectedSlug, e
 		client:          client,
 		ResourceID:      r.ResourceID,
 		KnockResourceID: r.KnockResourceID,
-		Status:          r.Status,
 		Slug:            r.Slug,
 		Alias:           r.Alias,
 	}, nil

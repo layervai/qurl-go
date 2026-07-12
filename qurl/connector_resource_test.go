@@ -68,7 +68,7 @@ func TestClient_EnsureConnectorResourceContract(t *testing.T) {
 				t.Fatalf("EnsureConnectorResource: %v", err)
 			}
 			resource := result.Resource
-			if resource.ResourceID != testConnectorID || resource.KnockResourceID != testKnockID || resource.Status != "active" || resource.Slug != testConnectorSlug {
+			if resource.ResourceID != testConnectorID || resource.KnockResourceID != testKnockID || resource.Slug != testConnectorSlug {
 				t.Fatalf("resource = %#v", resource)
 			}
 			if resource.Alias == nil || *resource.Alias != "dashboard-display" {
@@ -84,6 +84,9 @@ func TestClient_EnsureConnectorResourceContract(t *testing.T) {
 			}
 			if _, exposed := public["type"]; exposed {
 				t.Fatalf("ConnectorResource JSON exposes producer type: %s", encoded)
+			}
+			if _, exposed := public["status"]; exposed {
+				t.Fatalf("ConnectorResource JSON exposes producer status: %s", encoded)
 			}
 			if result.FoundExisting != foundExisting {
 				t.Fatalf("FoundExisting = %t, want %t", result.FoundExisting, foundExisting)
