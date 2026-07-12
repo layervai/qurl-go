@@ -1,12 +1,10 @@
 package relayknock
 
 import (
-	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
-	"os"
-	"path/filepath"
 	"testing"
+
+	conformance "github.com/layervai/qurl-conformance"
 )
 
 // BYTE-EXACT cross-language wire fence for the NHP agent-registration messages
@@ -22,142 +20,33 @@ import (
 // RAK replies, this port is wire-compatible with the deployed server BY
 // CONSTRUCTION — so a live failure is auth/network, not crypto.
 //
-// VENDORED VECTORS — TEMPORARY. relayknock/testdata/agent_registration_golden.json
-// is a byte-identical vendor of the qurl-conformance artifact
-// "qurl-agent-registration-golden-vectors"
-// (github.com/layervai/qurl-conformance, vectors/agent_registration_golden.json).
-// It is copied verbatim so this fence exists in-repo NOW, rather than blocking on
-// the conformance Go module publishing an accessor for these vectors. The sibling
-// knock_golden_test.go already consumes the RELEASED conformance accessors
-// (conformance.RelayKnockGolden(), conformance.ConformanceVectors()); the
-// agent-registration vectors live in a conformance revision that is not yet tagged,
-// so there is no conformance.AgentRegistrationGolden() to import here yet.
+// The vectors are consumed from the released qurl-conformance module through its
+// typed accessor. go.sum pins the embedded artifact bytes; the conformance loader
+// strictly rejects unknown fields, a wrong artifact identity, a missing schema
+// version, and blank load-bearing bodies or packets before the production-path
+// assertions validate every remaining input. The registered-agent KNK/ACK
+// application vectors added in the same release belong to qurl-connector's
+// serializer/interpreter and are intentionally consumed there rather than by this
+// packet-level SDK.
 //
-// MIGRATION: once qurl-conformance tags the release carrying these vectors, replace
-// loadAgentRegistrationGolden + the vendored testdata file with the published
-// accessor — i.e. mirror knock_golden_test.go's loadRelayKnockGolden and call
-// conformance.AgentRegistrationGolden() (bumping the go.mod require to that tag).
-// At that point this fence keeps its assertions and only swaps its data source.
-// Tracked in layervai/qurl-go#50. Do NOT hand-edit the vendored JSON: it is
-// source-of-truth data owned by qurl-conformance; the SHA-256 integrity check
-// below fails closed if it is touched, and CI diffs it against the canonical
-// upstream copy (see .github/workflows/agent-reg-vectors-drift.yml) so it cannot
-// silently diverge. Do NOT edit an assertion to make a test pass: a mismatch means
-// the port drifted from the server wire format (or the vectors were re-vendored and
-// must be re-synced from the reference implementation).
+// Do NOT edit an assertion to make a test pass: a mismatch means the port drifted
+// from the server wire format (or the pinned vectors changed and must be reconciled
+// with the reference implementation).
 
-// agentRegVectorsFile is the vendored artifact's path, relative to this package.
-const agentRegVectorsFile = "testdata/agent_registration_golden.json"
-
-// agentRegVectorsSHA256 pins the SHA-256 of the vendored artifact. Because the file
-// is a temporary hand-copied vendor (not a go.sum-pinned module import like the
-// relay-knock vectors), a silent local edit would otherwise quietly downgrade this
-// cross-language fence into a self-consistency check. If the upstream artifact
-// legitimately changes, re-vendor from qurl-conformance and update this digest
-// deliberately. This is the SAME digest the TypeScript fence pins for the same file.
-const agentRegVectorsSHA256 = "77dc8634eb15e8a986df1093923b70b341386ba3c15421814ffed1a668f2d2bc"
-
-// agentRegInitiatorVector is one deterministic initiator case (otp / reg_emailed /
-// reg_preissued): the fixed inputs a conformant BuildMessage must turn back into
-// packet_hex byte-for-byte. Only the fields this fence drives are decoded; the
-// server_static_priv / device_static_pub fields the artifact also carries (for the
-// server-side decrypt fence) are intentionally omitted here.
-type agentRegInitiatorVector struct {
-	ServerStaticPubHex  string `json:"server_static_pub_hex"`
-	DeviceStaticPrivHex string `json:"device_static_priv_hex"`
-	EphemeralPrivHex    string `json:"ephemeral_priv_hex"`
-	TimestampNanos      string `json:"timestamp_nanos"`
-	Counter             string `json:"counter"`
-	PreambleHex         string `json:"preamble_hex"`
-	BodyHex             string `json:"body_hex"`
-	PacketHex           string `json:"packet_hex"`
-}
-
-// agentRegReplyVector is one frozen server reply case (rak_success / rak_error):
-// sealed by the reference server with a RANDOM ephemeral, so it is NOT reproducible
-// by a client — only decryptable. DecryptReply must open it and recover NHP_RAK,
-// the echoed counter, the timestamp, and the body.
-type agentRegReplyVector struct {
-	ServerStaticPubHex string `json:"server_static_pub_hex"`
-	AgentStaticPrivHex string `json:"agent_static_priv_hex"`
-	TimestampNanos     string `json:"timestamp_nanos"`
-	CounterHex         string `json:"counter_hex"`
-	BodyHex            string `json:"body_hex"`
-	PacketHex          string `json:"packet_hex"`
-}
-
-// agentRegGoldenFile is the vendored artifact document. The artifact id is asserted
-// on load so a consumer that relies on "the loader rejects a malformed file" cannot
-// silently load a DIFFERENT document — mirroring conformance.ParseRelayKnockFile's
-// artifact-id gate for the relay-knock vectors.
-type agentRegGoldenFile struct {
-	Artifact     string                  `json:"artifact"`
-	OTP          agentRegInitiatorVector `json:"otp"`
-	RegEmailed   agentRegInitiatorVector `json:"reg_emailed"`
-	RegPreissued agentRegInitiatorVector `json:"reg_preissued"`
-	RAKSuccess   agentRegReplyVector     `json:"rak_success"`
-	RAKError     agentRegReplyVector     `json:"rak_error"`
-}
-
-const agentRegArtifactID = "qurl-agent-registration-golden-vectors"
-
-// loadAgentRegistrationGolden reads the vendored artifact, parses it, and validates
-// key invariants (the artifact id and the non-empty load-bearing packets), after
-// asserting its bytes match the pinned SHA-256. It FAILS (never skips) if the bytes
-// are absent, tampered, or malformed, so the fence cannot silently no-op.
-//
-// This is the vendored-data stand-in for a published
-// conformance.AgentRegistrationGolden() accessor; see the file header for the
-// migration plan.
-func loadAgentRegistrationGolden(t *testing.T) *agentRegGoldenFile {
+func loadAgentRegistrationGolden(t *testing.T) *conformance.AgentRegistrationFile {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.FromSlash(agentRegVectorsFile))
+	f, err := conformance.AgentRegistrationGolden()
 	if err != nil {
-		t.Fatalf("read vendored agent-registration vectors %s: %v", agentRegVectorsFile, err)
+		t.Fatalf("load agent-registration golden: %v", err)
 	}
-
-	// Integrity gate first: a mismatch here means the vendored copy was edited (or
-	// corrupted), which would invalidate every byte-exact assertion below.
-	if got := hex.EncodeToString(sha256Sum(raw)); got != agentRegVectorsSHA256 {
-		t.Fatalf("vendored agent-registration vectors SHA-256 = %s, want %s\n"+
-			"the vendored %s was modified; it must stay byte-identical to the qurl-conformance source. "+
-			"Re-vendor from upstream and update agentRegVectorsSHA256 only for a deliberate upstream change.",
-			got, agentRegVectorsSHA256, agentRegVectorsFile)
-	}
-
-	var f agentRegGoldenFile
-	if err := json.Unmarshal(raw, &f); err != nil {
-		t.Fatalf("parse vendored agent-registration vectors: %v", err)
-	}
-	if f.Artifact != agentRegArtifactID {
-		t.Fatalf("vendored artifact id = %q, want %q", f.Artifact, agentRegArtifactID)
-	}
-	// Fail closed on a blank load-bearing packet: a byte-exact fence must not
-	// "pass" on an empty want.
-	for name, packetHex := range map[string]string{
-		"otp":           f.OTP.PacketHex,
-		"reg_emailed":   f.RegEmailed.PacketHex,
-		"reg_preissued": f.RegPreissued.PacketHex,
-		"rak_success":   f.RAKSuccess.PacketHex,
-		"rak_error":     f.RAKError.PacketHex,
-	} {
-		if packetHex == "" {
-			t.Fatalf("vendored agent-registration vectors missing %s.packet_hex", name)
-		}
-	}
-	return &f
-}
-
-func sha256Sum(b []byte) []byte {
-	sum := sha256.Sum256(b)
-	return sum[:]
+	return f
 }
 
 // buildFromInitiatorVector drives the REAL relayknock.BuildMessage over one
 // deterministic initiator vector and returns the produced packet. serverStaticPub
 // is fed from the vector's server_static_pub_hex (KnockInputs takes the responder's
 // PUBLIC static key), matching the TypeScript fence's buildFromVector.
-func buildFromInitiatorVector(t *testing.T, v agentRegInitiatorVector, headerType int) []byte {
+func buildFromInitiatorVector(t *testing.T, v conformance.AgentRegistrationCase, headerType int) []byte {
 	t.Helper()
 	packet, err := BuildMessage(headerType, &KnockInputs{
 		DeviceStaticPriv: mustHex(t, v.DeviceStaticPrivHex),
@@ -174,20 +63,6 @@ func buildFromInitiatorVector(t *testing.T, v agentRegInitiatorVector, headerTyp
 	return packet
 }
 
-// TestAgentRegistrationVendoredVectors_Integrity fails if the vendored artifact
-// drifts from the pinned SHA-256 (a silent local edit), keeping this cross-language
-// fence from decaying into a self-consistency check. loadAgentRegistrationGolden
-// enforces the same gate, but a dedicated named case makes the failure legible.
-func TestAgentRegistrationVendoredVectors_Integrity(t *testing.T) {
-	raw, err := os.ReadFile(filepath.FromSlash(agentRegVectorsFile))
-	if err != nil {
-		t.Fatalf("read vendored agent-registration vectors: %v", err)
-	}
-	if got := hex.EncodeToString(sha256Sum(raw)); got != agentRegVectorsSHA256 {
-		t.Fatalf("vendored vectors SHA-256 = %s, want %s (the vendored copy was edited)", got, agentRegVectorsSHA256)
-	}
-}
-
 // TestBuildMessage_AgentRegistrationGolden reproduces the deterministic OTP and REG
 // packets byte-for-byte from the conformance golden inputs, proving the NHP
 // registration-message seal chain, header framing, and type gating match the
@@ -198,7 +73,7 @@ func TestBuildMessage_AgentRegistrationGolden(t *testing.T) {
 
 	cases := []struct {
 		name       string
-		vec        agentRegInitiatorVector
+		vec        conformance.AgentRegistrationCase
 		headerType int
 	}{
 		{name: "otp", vec: g.OTP, headerType: TypeOTP},
@@ -228,10 +103,10 @@ func TestDecryptReply_AgentRegistrationGolden(t *testing.T) {
 	// differs. Both must open to NHP_RAK (14) and echo the REG counter.
 	cases := []struct {
 		name string
-		vec  agentRegReplyVector
+		vec  conformance.AgentRegistrationCase
 	}{
-		{name: "rak_success", vec: g.RAKSuccess},
-		{name: "rak_error", vec: g.RAKError},
+		{name: "rak_success", vec: g.RakSuccess},
+		{name: "rak_error", vec: g.RakError},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

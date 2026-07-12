@@ -223,9 +223,9 @@ func Exchange(ctx context.Context, relayBaseURL string, serverStaticPub []byte, 
 	// reply a misbehaving relay swapped in from a different exchange; it restates
 	// the relay's routing invariant, it is not an unproven premise. The matched
 	// REG↔RAK pair is independently pinned by the qurl-conformance
-	// agent-registration golden (counter 0xb, conformance#19); this in-package
-	// fence consumes it once that vector lands (the current knock/ack goldens are
-	// not a matched pair).
+	// agent-registration golden (counter 0xb, conformance#19), which the
+	// in-package production-path fence consumes directly. The relay knock/ack
+	// goldens are intentionally not a matched pair.
 	//
 	// These two post-decrypt checks wrap ErrMalformedReply, not *RelayError, on
 	// purpose: they are semantic/correlation failures of an already-authenticated
