@@ -506,7 +506,11 @@ func (cfg *registerConfig) registerExchangeChecked(ctx context.Context, state *A
 // the durable state whose cooldown marker changes; requestState may be a
 // refreshed candidate whose current peer/relay coordinates must carry the OTP.
 // This pre-send write commits only OTPRequestedAt on persisted; candidate's new
-// binding metadata is not durable until an authenticated RAK succeeds.
+// binding metadata is not durable until an authenticated RAK succeeds. If the
+// relay send fails, the marker deliberately remains durable and this call
+// returns the transport error; a retry inside the cooldown may therefore return
+// OTPPendingError even though delivery is unconfirmed. ErrOTPPending denotes a
+// durable cooldown/resume state, never proof that the email was delivered.
 func (cfg *registerConfig) requestOTPAt(ctx context.Context, store AgentStateStore, persisted, requestState *AgentState, key string, now time.Time) error {
 	previous := persisted.OTPRequestedAt
 	persisted.OTPRequestedAt = &now
@@ -851,6 +855,11 @@ func (cfg *registerConfig) mapCompletionHTTPError(err error, path pathKind, devi
 	if path == pathBootstrap && isBootstrapConsumedCompletion(apiErr) {
 		return fmt.Errorf("%w: %s: %w", ErrBootstrapSetupKeyConsumed, bootstrapConsumedGuidance, err)
 	}
+	// qurl-service guarantees completion 401/403 responses are emitted before
+	// its atomic mint writes a device credential. That producer-owned no-write
+	// invariant is what makes the shared admission mapping safe on this mutating
+	// endpoint; if the service contract changes, these statuses must stop being
+	// authoritative in isAuthoritativeNoWriteCompletionError.
 	if mapped := mapCommonRegistrationHTTPError(apiErr, err, "the API key was rejected with no device-key write", "completion returned an authoritative no-write admission failure"); mapped != nil {
 		return mapped
 	}

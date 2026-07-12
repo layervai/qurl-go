@@ -49,10 +49,12 @@ func OpenRegisteredAgent(ctx context.Context, store AgentStateStore, opts ...Cli
 // The caller must immediately defer binding.Destroy, then take and eventually
 // wipe the runtime private key.
 func OpenRegisteredAgentRuntime(ctx context.Context, store AgentStateStore, opts ...ClientOption) (*Client, *AgentRuntimeBinding, error) {
-	return openRegisteredAgentRuntime(ctx, store, time.Now, opts...)
+	return openRegisteredAgentRuntime(ctx, store, nil, opts...)
 }
 
 func openRegisteredAgentRuntime(ctx context.Context, store AgentStateStore, now func() time.Time, opts ...ClientOption) (*Client, *AgentRuntimeBinding, error) {
+	// A nil clock selects the production wall clock; tests pass an explicit clock
+	// only when they need deterministic peer and cache-expiry boundaries.
 	if now == nil {
 		now = time.Now
 	}
