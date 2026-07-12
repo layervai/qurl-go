@@ -21,6 +21,43 @@ func allowAccountLifecycle() RegisterOption {
 	return WithAllowedRegistrationKeyKinds(RegistrationKeyKindAccount)
 }
 
+type countingAgentStateStore struct {
+	inner  AgentStateStore
+	loads  atomic.Int32
+	onSave func(*AgentState)
+}
+
+func (s *countingAgentStateStore) LoadAgentState(ctx context.Context) (*AgentState, error) {
+	s.loads.Add(1)
+	return s.inner.LoadAgentState(ctx)
+}
+
+func (s *countingAgentStateStore) SaveAgentState(ctx context.Context, state *AgentState) error {
+	if err := s.inner.SaveAgentState(ctx, state); err != nil {
+		return err
+	}
+	if s.onSave != nil {
+		s.onSave(state)
+	}
+	return nil
+}
+
+func newFreshCountingRegisterHarness(t *testing.T) (*registerHarness, *countingAgentStateStore) {
+	t.Helper()
+	h := newRegisterHarness(t)
+	counting := &countingAgentStateStore{
+		inner: h.store,
+		onSave: func(state *AgentState) {
+			publicKey, err := base64.StdEncoding.Strict().DecodeString(state.PublicKeyB64)
+			if err == nil {
+				h.nhp.setExpectDevicePub(publicKey)
+			}
+		},
+	}
+	h.store = counting
+	return h, counting
+}
+
 func TestOpenRegisteredAgent_ZeroNetworkIgnoresKnockPeer(t *testing.T) {
 	cases := []struct {
 		name string
@@ -60,6 +97,128 @@ func TestOpenRegisteredAgent_ZeroNetworkIgnoresKnockPeer(t *testing.T) {
 			}
 			if networkCalls.Load() != 0 {
 				t.Fatalf("OpenRegisteredAgent network calls = %d, want 0", networkCalls.Load())
+			}
+		})
+	}
+}
+
+func TestOpenRegisteredAgentRuntime_OneLoadThroughFirstAuthorization(t *testing.T) {
+	h := registeredHarness(t)
+	counting := &countingAgentStateStore{inner: h.store}
+	client, binding, err := OpenRegisteredAgentRuntime(context.Background(), counting,
+		WithAgentClientBaseURL("https://resources.example.test"),
+	)
+	if err != nil {
+		t.Fatalf("OpenRegisteredAgentRuntime: %v", err)
+	}
+	defer binding.Destroy()
+	if counting.loads.Load() != 1 {
+		t.Fatalf("warm runtime store loads = %d, want 1", counting.loads.Load())
+	}
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://resources.example.test/v1/resources", nil)
+	if err != nil {
+		t.Fatalf("new resource request: %v", err)
+	}
+	if err := client.credentials.Authorize(context.Background(), req); err != nil {
+		t.Fatalf("authorize from primed runtime client: %v", err)
+	}
+	if got := req.Header.Get("Authorization"); got != "Bearer lv_device_secret" {
+		t.Fatalf("primed Authorization = %q", got)
+	}
+	if counting.loads.Load() != 1 {
+		t.Fatalf("first authorization reloaded store: loads = %d, want 1", counting.loads.Load())
+	}
+	privateKey := binding.TakeDeviceStaticPrivateKey()
+	if len(privateKey) != 32 {
+		t.Fatalf("warm runtime private key length = %d, want 32", len(privateKey))
+	}
+	wipeBytes(privateKey)
+}
+
+func TestRegisterAgentRuntime_FreshRegistrationAddsNoStoreReload(t *testing.T) {
+	h, counting := newFreshCountingRegisterHarness(t)
+
+	client, binding, err := RegisterAgentRuntime(context.Background(), "lv_enroll", h.store, h.registerOpts()...)
+	if err != nil {
+		t.Fatalf("RegisterAgentRuntime: %v", err)
+	}
+	defer binding.Destroy()
+	if counting.loads.Load() != 2 {
+		t.Fatalf("fresh runtime state-machine loads = %d, want 2", counting.loads.Load())
+	}
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://api.layerv.ai/v1/resources", nil)
+	if err != nil {
+		t.Fatalf("new resource request: %v", err)
+	}
+	if err := client.credentials.Authorize(context.Background(), req); err != nil {
+		t.Fatalf("authorize from fresh primed client: %v", err)
+	}
+	if got := req.Header.Get("Authorization"); got != "Bearer lv_device_secret" {
+		t.Fatalf("fresh primed Authorization = %q", got)
+	}
+	if counting.loads.Load() != 2 {
+		t.Fatalf("fresh first authorization added store load: loads = %d, want 2", counting.loads.Load())
+	}
+	privateKey := binding.TakeDeviceStaticPrivateKey()
+	if len(privateKey) != 32 {
+		t.Fatalf("fresh runtime private key length = %d, want 32", len(privateKey))
+	}
+	wipeBytes(privateKey)
+}
+
+func TestRegisterAgent_LegacyClientRemainsLazyStoreBacked(t *testing.T) {
+	h, counting := newFreshCountingRegisterHarness(t)
+	client, err := RegisterAgent(context.Background(), "lv_enroll", h.store, h.registerOpts()...)
+	if err != nil {
+		t.Fatalf("RegisterAgent: %v", err)
+	}
+	if counting.loads.Load() != 2 {
+		t.Fatalf("legacy registration state-machine loads = %d, want 2", counting.loads.Load())
+	}
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://api.layerv.ai/v1/resources", nil)
+	if err != nil {
+		t.Fatalf("new resource request: %v", err)
+	}
+	if err := client.credentials.Authorize(context.Background(), req); err != nil {
+		t.Fatalf("authorize from legacy client: %v", err)
+	}
+	if counting.loads.Load() != 3 {
+		t.Fatalf("legacy first authorization loads = %d, want 3", counting.loads.Load())
+	}
+}
+
+func TestOpenRegisteredAgentRuntime_InvalidKnockStateFailsInOneLoadWithoutNetwork(t *testing.T) {
+	tests := []struct {
+		name string
+		edit func(*AgentState)
+	}{
+		{name: "missing peer", edit: func(state *AgentState) { state.NHPPeer = nil }},
+		{name: "malformed peer", edit: func(state *AgentState) { state.NHPPeer.PublicKeyB64 = "not-base64" }},
+		{name: "expired peer", edit: func(state *AgentState) { state.NHPPeer.ExpireTime = time.Now().Add(-time.Hour).Unix() }},
+		{name: "missing relay", edit: func(state *AgentState) { state.RelayURL = "" }},
+		{name: "missing key id", edit: func(state *AgentState) { state.KeyID = "" }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := registeredHarness(t)
+			state := h.loadState(t)
+			tc.edit(state)
+			if err := h.store.SaveAgentState(context.Background(), state); err != nil {
+				t.Fatalf("save malformed runtime state: %v", err)
+			}
+			counting := &countingAgentStateStore{inner: h.store}
+			var networkCalls atomic.Int32
+			refusing := doerFunc(func(*http.Request) (*http.Response, error) {
+				networkCalls.Add(1)
+				return nil, errors.New("unexpected network call")
+			})
+
+			client, binding, err := OpenRegisteredAgentRuntime(context.Background(), counting, WithAgentClientHTTPClient(refusing))
+			if client != nil || binding != nil || !errors.Is(err, ErrInvalidClientConfig) {
+				t.Fatalf("invalid runtime open = client %v, binding %v, error %v", client, binding, err)
+			}
+			if counting.loads.Load() != 1 || networkCalls.Load() != 0 {
+				t.Fatalf("invalid runtime loads/network = %d/%d, want 1/0", counting.loads.Load(), networkCalls.Load())
 			}
 		})
 	}
@@ -137,6 +296,18 @@ func TestAgentLifecycle_MalformedPersistedCredentialFailsClosedWithoutNetwork(t 
 				WithRegisterHTTPClient(refusing),
 			); client != nil || !errors.Is(err, ErrInvalidRegisterConfig) || !errors.Is(err, ErrCredentialRecoveryRequired) {
 				t.Fatalf("RegisterAgent malformed credential = client %v, error %v", client, err)
+			}
+			if client, binding, err := OpenRegisteredAgentRuntime(context.Background(), h.store,
+				WithAgentClientBaseURL("https://resources.example.test"),
+				WithAgentClientHTTPClient(refusing),
+			); client != nil || binding != nil || !errors.Is(err, ErrInvalidClientConfig) || !errors.Is(err, ErrCredentialRecoveryRequired) {
+				t.Fatalf("OpenRegisteredAgentRuntime malformed credential = client %v, binding %v, error %v", client, binding, err)
+			}
+			if client, binding, err := RegisterAgentRuntime(context.Background(), "lv_enroll", h.store,
+				WithRegisterBaseURL(h.apiSrv.URL),
+				WithRegisterHTTPClient(refusing),
+			); client != nil || binding != nil || !errors.Is(err, ErrInvalidRegisterConfig) || !errors.Is(err, ErrCredentialRecoveryRequired) {
+				t.Fatalf("RegisterAgentRuntime malformed credential = client %v, binding %v, error %v", client, binding, err)
 			}
 			if refreshed, err := RefreshAgentRegistration(context.Background(), "lv_enroll", h.store,
 				WithRegisterBaseURL(h.apiSrv.URL),

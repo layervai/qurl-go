@@ -160,7 +160,11 @@ substitution must be prevented; the store authenticates its persisted agent id
 and supports an optional `qurl.WithExpectedSealedAgentID` pin for a separately
 configured expected id.
 
-Warm starts can call `qurl.OpenRegisteredAgent` without an enrollment key.
+REST-only warm starts can call `qurl.OpenRegisteredAgent` without an enrollment
+key. Tunnel runtimes should use `qurl.OpenRegisteredAgentRuntime` to obtain the
+Client and validated knock binding from one store load; fresh installs use
+`qurl.RegisterAgentRuntime` to receive the same pair without a post-registration
+store/KMS reload.
 `qurl.RefreshAgentRegistration` explicitly repairs missing/rotated NHP binding
 metadata without touching or returning the device credential; its narrow
 runtime binding exposes only the identity/NHP data and wipeable private-key
@@ -231,6 +235,9 @@ Match errors by type, not message text:
 - **Added: registered-agent lifecycle APIs** — `OpenRegisteredAgent` provides a
   store-backed reopen without qURL enrollment or resource API calls (a sealed
   store load may still call its key wrapper/KMS);
+  `RegisterAgentRuntime` and `OpenRegisteredAgentRuntime` return a primed Client
+  plus a validated one-shot runtime key binding without a duplicate store/KMS
+  load;
   `RefreshAgentRegistration` forces a real
   REG/RAK binding refresh without completion; and `RecoverAgentCredential`
   performs explicit same-id replacement after owner revoke. Registration key

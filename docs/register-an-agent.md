@@ -56,11 +56,33 @@ minute. After credential recovery, use the new client returned by
 `RecoverAgentCredential` for immediate cutover; an older client observes the
 replacement only after its cache expires.
 
+Tunnel processes that also need NHP knock state should use the combined runtime
+APIs. They validate a live peer, relay URL, and key id; return a primed Client
+plus `AgentRuntimeBinding`; and avoid loading/unsealing the store again for the
+binding or first resource request:
+
+```go
+client, binding, err := qurl.OpenRegisteredAgentRuntime(ctx, store,
+	qurl.WithAgentClientBaseURL(resourceAPIURL),
+)
+if err != nil {
+	return err
+}
+defer binding.Destroy()
+devicePrivateKey := binding.TakeDeviceStaticPrivateKey()
+defer func() { clear(devicePrivateKey) }()
+```
+
+Use `RegisterAgentRuntime` with the same `RegisterOption` values as
+`RegisterAgent` on a fresh install. Its registration state machine captures the
+runtime key before network I/O and returns the Client/binding pair from the
+in-memory completed state, without a post-registration store/KMS reload.
+
 `WithRegisterBaseURL` targets only registration-info and completion.
 `WithAgentClientBaseURL` and `WithAgentClientHTTPClient` are dual-purpose
-options accepted by registration/recovery and `OpenRegisteredAgent`, so the
-same resource origin and transport can be reused across the lifecycle. This
-prevents a dedicated registration origin from silently retargeting later
+options accepted by registration/recovery and both `OpenRegisteredAgent` APIs,
+so the same resource origin and transport can be reused across the lifecycle.
+This prevents a dedicated registration origin from silently retargeting later
 `/v1/resources` calls:
 
 ```go

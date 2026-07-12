@@ -26,18 +26,9 @@ import (
 // origin/transport configuration can be reused across the lifecycle. Ordinary
 // WithBaseURL and WithHTTPClient ClientOptions remain supported here too.
 func OpenRegisteredAgent(ctx context.Context, store AgentStateStore, opts ...ClientOption) (*Client, error) {
-	if store == nil {
-		return nil, fmt.Errorf("%w: agent state store must not be nil", ErrInvalidClientConfig)
-	}
-	if err := validateContext(ctx, ErrInvalidClientConfig); err != nil {
-		return nil, err
-	}
-	cfg, err := applyClientOptions(opts)
+	cfg, err := validateRegisteredAgentOpenInputs(ctx, store, opts)
 	if err != nil {
 		return nil, err
-	}
-	if cfg.issuerStatePath != "" {
-		return nil, fmt.Errorf("%w: WithIssuerStatePath is not valid with OpenRegisteredAgent", ErrInvalidClientConfig)
 	}
 	if _, err := loadCompletedRegisteredState(ctx, store, ErrInvalidClientConfig); err != nil {
 		return nil, err
@@ -45,12 +36,60 @@ func OpenRegisteredAgent(ctx context.Context, store AgentStateStore, opts ...Cli
 	return newStoreBackedClient(store, cfg.baseURL, cfg.httpClient), nil
 }
 
-// AgentRuntimeBinding is the refreshed identity and NHP endpoint needed for an
-// immediate relay knock. It deliberately excludes DeviceAPIKey, schema, and OTP
-// state. The private key remains sensitive. Keep the returned pointer
-// pointer-owned: never dereference-copy or log the binding. Immediately defer
-// Destroy after a successful refresh, transfer key ownership exactly once with
-// TakeDeviceStaticPrivateKey, and wipe those bytes after use.
+// OpenRegisteredAgentRuntime opens both a store-backed resource Client and the
+// validated runtime binding needed for an immediate relay knock. It performs one
+// AgentStateStore load, no enrollment/resource API calls, requires a live NHP
+// peer plus valid relay/key metadata, and primes the Client's one-minute
+// credential cache from that same state so its first request does not reload or
+// unseal the store. The caller must immediately defer binding.Destroy, then take
+// and eventually wipe the runtime private key.
+func OpenRegisteredAgentRuntime(ctx context.Context, store AgentStateStore, opts ...ClientOption) (*Client, *AgentRuntimeBinding, error) {
+	cfg, err := validateRegisteredAgentOpenInputs(ctx, store, opts)
+	if err != nil {
+		return nil, nil, err
+	}
+	state, err := loadCompletedRegisteredState(ctx, store, ErrInvalidClientConfig)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := validateAgentRuntimeMetadata(state, time.Now(), ErrInvalidClientConfig); err != nil {
+		return nil, nil, err
+	}
+	privateKey, err := decodeRuntimePrivateKey(state, ErrInvalidClientConfig)
+	if err != nil {
+		return nil, nil, err
+	}
+	client, err := newPrimedStoreBackedClient(store, cfg.baseURL, cfg.httpClient, state.DeviceAPIKey, ErrInvalidClientConfig)
+	if err != nil {
+		wipeBytes(privateKey)
+		return nil, nil, err
+	}
+	return client, newAgentRuntimeBinding(state, privateKey), nil
+}
+
+func validateRegisteredAgentOpenInputs(ctx context.Context, store AgentStateStore, opts []ClientOption) (clientOptions, error) {
+	if store == nil {
+		return clientOptions{}, fmt.Errorf("%w: agent state store must not be nil", ErrInvalidClientConfig)
+	}
+	if err := validateContext(ctx, ErrInvalidClientConfig); err != nil {
+		return clientOptions{}, err
+	}
+	cfg, err := applyClientOptions(opts)
+	if err != nil {
+		return clientOptions{}, err
+	}
+	if cfg.issuerStatePath != "" {
+		return clientOptions{}, fmt.Errorf("%w: WithIssuerStatePath is not valid with registered-agent open APIs", ErrInvalidClientConfig)
+	}
+	return cfg, nil
+}
+
+// AgentRuntimeBinding is a registered or refreshed identity and NHP endpoint
+// needed for an immediate relay knock. It deliberately excludes DeviceAPIKey,
+// schema, and OTP state. The private key remains sensitive. Keep the returned
+// pointer pointer-owned: never dereference-copy or log the binding. Immediately
+// defer Destroy after a successful lifecycle call, transfer key ownership
+// exactly once with TakeDeviceStaticPrivateKey, and wipe those bytes after use.
 type AgentRuntimeBinding struct {
 	AgentID      string
 	PublicKeyB64 string
@@ -127,7 +166,7 @@ func RefreshAgentRegistration(ctx context.Context, key string, store AgentStateS
 		if err := cfg.reconcileDeviceID(state); err != nil {
 			return nil, err
 		}
-		privateKey, err = decodeRuntimePrivateKey(state)
+		privateKey, err = decodeRuntimePrivateKey(state, cfg.invalidConfigErr)
 		if err != nil {
 			return nil, err
 		}
@@ -140,22 +179,22 @@ func RefreshAgentRegistration(ctx context.Context, key string, store AgentStateS
 	return newAgentRuntimeBinding(state, privateKey), nil
 }
 
-func decodeRuntimePrivateKey(state *AgentState) ([]byte, error) {
+func decodeRuntimePrivateKey(state *AgentState, errKind error) ([]byte, error) {
 	privateKey, err := base64.StdEncoding.Strict().DecodeString(state.PrivateKeyB64)
 	if err != nil {
 		wipeBytes(privateKey)
-		return nil, fmt.Errorf("%w: decode agent runtime private key: %w", ErrInvalidRegisterConfig, err)
+		return nil, fmt.Errorf("%w: decode agent runtime private key: %w", errKind, err)
 	}
 	if len(privateKey) != 32 {
 		wipeBytes(privateKey)
-		return nil, fmt.Errorf("%w: agent runtime private key must be 32 bytes", ErrInvalidRegisterConfig)
+		return nil, fmt.Errorf("%w: agent runtime private key must be 32 bytes", errKind)
 	}
 	return privateKey, nil
 }
 
-// newAgentRuntimeBinding is deliberately infallible: RefreshAgentRegistration
-// decodes the retained private key before network I/O, validates refreshed
-// metadata during the registration exchange, and calls this only after that
+// newAgentRuntimeBinding is deliberately infallible: callers decode the
+// retained private key before any lifecycle network I/O and validate runtime
+// metadata before calling it. Mutating lifecycle paths additionally wait until
 // state is durably saved and the setup lock is released.
 func newAgentRuntimeBinding(state *AgentState, privateKey []byte) *AgentRuntimeBinding {
 	return &AgentRuntimeBinding{

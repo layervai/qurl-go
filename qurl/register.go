@@ -72,20 +72,50 @@ func RegisterAgent(ctx context.Context, key string, store AgentStateStore, opts 
 	return newStoreBackedClient(store, cfg.clientBaseURL, cfg.clientHTTPClient), nil
 }
 
+// RegisterAgentRuntime registers or reopens an agent and returns both its
+// store-backed resource Client and the validated runtime binding needed for an
+// immediate relay knock. Unlike composing RegisterAgent with a later store
+// load, this captures the private key before registration network I/O and primes
+// the Client credential cache from the same in-memory AgentState. The caller
+// must immediately defer binding.Destroy, then take and eventually wipe the
+// runtime private key. Account enrollment behavior matches RegisterAgent.
+func RegisterAgentRuntime(ctx context.Context, key string, store AgentStateStore, opts ...RegisterOption) (*Client, *AgentRuntimeBinding, error) {
+	cfg, err := validateRegisterInputs(ctx, key, store, opts)
+	if err != nil {
+		return nil, nil, err
+	}
+	cfg.requireDeviceKey = true
+	cfg.captureRuntime = true
+	state, err := cfg.run(ctx, key, store)
+	if err != nil {
+		cfg.wipeRuntimePrivateKey()
+		return nil, nil, err
+	}
+	privateKey := cfg.takeRuntimePrivateKey()
+	client, err := newPrimedStoreBackedClient(store, cfg.clientBaseURL, cfg.clientHTTPClient, state.DeviceAPIKey, cfg.invalidConfigErr)
+	if err != nil {
+		wipeBytes(privateKey)
+		return nil, nil, err
+	}
+	return client, newAgentRuntimeBinding(state, privateKey), nil
+}
+
 // registerConfig is the resolved option set plus the fixed dependencies a
 // registration run needs.
 type registerConfig struct {
-	baseURL          string
-	httpClient       HTTPDoer
-	clientBaseURL    string
-	clientHTTPClient HTTPDoer
-	deviceID         string
-	otp              string
-	otpProvider      func(context.Context) (string, error)
-	takeover         bool
-	hostname         string
-	version          string
-	allowedKeyKinds  map[RegistrationKeyKind]struct{}
+	baseURL           string
+	httpClient        HTTPDoer
+	clientBaseURL     string
+	clientHTTPClient  HTTPDoer
+	deviceID          string
+	otp               string
+	otpProvider       func(context.Context) (string, error)
+	takeover          bool
+	hostname          string
+	version           string
+	allowedKeyKinds   map[RegistrationKeyKind]struct{}
+	captureRuntime    bool
+	runtimePrivateKey []byte
 
 	// relayURL / nhpPeer are optional overrides; when unset the values come from
 	// the registration-info pre-flight.
@@ -107,6 +137,30 @@ type registerConfig struct {
 
 	// clock is injected in tests; production uses time.Now.
 	clock func() time.Time
+}
+
+func (cfg *registerConfig) captureRuntimeKey(state *AgentState) error {
+	if !cfg.captureRuntime {
+		return nil
+	}
+	privateKey, err := decodeRuntimePrivateKey(state, cfg.invalidConfigErr)
+	if err != nil {
+		return err
+	}
+	cfg.wipeRuntimePrivateKey()
+	cfg.runtimePrivateKey = privateKey
+	return nil
+}
+
+func (cfg *registerConfig) takeRuntimePrivateKey() []byte {
+	privateKey := cfg.runtimePrivateKey
+	cfg.runtimePrivateKey = nil
+	return privateKey
+}
+
+func (cfg *registerConfig) wipeRuntimePrivateKey() {
+	wipeBytes(cfg.runtimePrivateKey)
+	cfg.runtimePrivateKey = nil
 }
 
 func newRegisterConfig(opts []RegisterOption) (*registerConfig, error) {
@@ -202,6 +256,9 @@ func (cfg *registerConfig) runLocked(ctx context.Context, key string, store Agen
 	if state.SchemaVersion < agentStateSchemaVersion {
 		state.SchemaVersion = agentStateSchemaVersion
 	}
+	if err := cfg.captureRuntimeKey(state); err != nil {
+		return nil, err
+	}
 	if err := store.SaveAgentState(ctx, state); err != nil {
 		return nil, err
 	}
@@ -265,9 +322,18 @@ func loadAgentStateIfPresent(ctx context.Context, store AgentStateStore, invalid
 func (cfg *registerConfig) finishRegisteredAgentState(state *AgentState) (*AgentState, error) {
 	// A RegisterAgent Client authorizes with the REST device key and never knocks
 	// the persisted NHP peer, so an expired peer does not block its fast path. The
-	// knock-only BootstrapAgent path still requires a live peer.
-	if err := validateRegisteredAgentState(state, cfg.clock(), !cfg.requireDeviceKey, cfg.invalidConfigErr); err != nil {
-		return nil, err
+	// knock-only BootstrapAgent and combined runtime paths require a live peer.
+	if cfg.captureRuntime {
+		if err := validateCompletedAgentIdentity(state, cfg.invalidConfigErr); err != nil {
+			return nil, err
+		}
+		if err := validateAgentRuntimeMetadata(state, cfg.clock(), cfg.invalidConfigErr); err != nil {
+			return nil, err
+		}
+	} else {
+		if err := validateRegisteredAgentState(state, cfg.clock(), !cfg.requireDeviceKey, cfg.invalidConfigErr); err != nil {
+			return nil, err
+		}
 	}
 	if cfg.requireDeviceKey {
 		if err := validatePersistedDeviceCredential(state, cfg.invalidConfigErr); err != nil {
@@ -277,7 +343,28 @@ func (cfg *registerConfig) finishRegisteredAgentState(state *AgentState) (*Agent
 	if err := cfg.reconcileDeviceID(state); err != nil {
 		return nil, err
 	}
+	if cfg.captureRuntime {
+		if err := cfg.captureRuntimeKey(state); err != nil {
+			return nil, err
+		}
+	}
 	return state, nil
+}
+
+func validateAgentRuntimeMetadata(state *AgentState, now time.Time, errKind error) error {
+	if state == nil || state.NHPPeer == nil {
+		return fmt.Errorf("%w: agent runtime state missing NHP peer", errKind)
+	}
+	if err := validateNHPServerPeerInfo(*state.NHPPeer, now, true, "agent runtime state", errKind); err != nil {
+		return err
+	}
+	if strings.TrimSpace(state.KeyID) == "" {
+		return fmt.Errorf("%w: agent runtime state missing key id", errKind)
+	}
+	if err := validateHTTPSOrLoopbackURL(state.RelayURL, "agent runtime relay URL", errKind); err != nil {
+		return err
+	}
+	return nil
 }
 
 // runBootstrapPath is PATH A: the pre-issued key is the enrollment credential.
@@ -384,6 +471,11 @@ func (cfg *registerConfig) otpPending(state *AgentState, maskedEmail string) *OT
 func (cfg *registerConfig) registerAndComplete(ctx context.Context, key string, store AgentStateStore, state *AgentState, peer *NHPServerPeerInfo, relayURL, credential string, path pathKind) (*AgentState, error) {
 	if err := cfg.registerExchangeChecked(ctx, state, peer, relayURL, credential, path); err != nil {
 		return nil, err
+	}
+	if cfg.captureRuntime {
+		if err := validateAgentRuntimeMetadata(state, cfg.clock(), cfg.invalidConfigErr); err != nil {
+			return nil, err
+		}
 	}
 	return cfg.completeAndPersist(ctx, key, store, state, path)
 }
@@ -968,7 +1060,33 @@ func derefTime(t *time.Time, fallback time.Time) time.Time {
 // Construction makes no qURL API calls; loading a network-backed store can
 // still perform I/O.
 func newStoreBackedClient(store AgentStateStore, baseURL string, httpClient HTTPDoer) *Client {
-	provider := CachedCredentials(&storeCredentialProvider{store: store}, storeCredentialCacheTTL)
+	return newStoreBackedClientWithCredential(store, baseURL, httpClient, "")
+}
+
+// newPrimedStoreBackedClient validates the credential immediately before
+// seeding it. This keeps malformed persisted/completion credentials from being
+// trusted merely because a lifecycle caller's earlier validation is refactored.
+func newPrimedStoreBackedClient(store AgentStateStore, baseURL string, httpClient HTTPDoer, deviceAPIKey string, errKind error) (*Client, error) {
+	if err := validateExactBearerToken(deviceAPIKey, "primed device credential", errKind); err != nil {
+		return nil, err
+	}
+	return newStoreBackedClientWithCredential(store, baseURL, httpClient, deviceAPIKey), nil
+}
+
+// newStoreBackedClientWithCredential optionally primes the one-minute cache from
+// an already validated AgentState so a combined runtime open does not unseal or
+// reload the same store on its first resource request. The wrapped store provider
+// remains authoritative after the cache expires.
+func newStoreBackedClientWithCredential(store AgentStateStore, baseURL string, httpClient HTTPDoer, deviceAPIKey string) *Client {
+	provider := &cachedCredentialProvider{
+		provider: &storeCredentialProvider{store: store},
+		ttl:      storeCredentialCacheTTL,
+		now:      time.Now,
+	}
+	if deviceAPIKey != "" {
+		provider.authorization = "Bearer " + deviceAPIKey
+		provider.expiresAt = provider.now().Add(provider.ttl)
+	}
 	return &Client{
 		credentials: provider,
 		baseURL:     baseURL,
@@ -1016,16 +1134,17 @@ func (p *storeCredentialProvider) Authorize(ctx context.Context, req *http.Reque
 
 // --- options ---
 
-// RegisterOption customizes RegisterAgent.
+// RegisterOption customizes registered-agent enrollment and repair operations,
+// including RegisterAgentRuntime.
 type RegisterOption interface {
 	applyRegisterOption(*registerConfig) error
 }
 
 // AgentClientOption configures the store-backed resource Client consistently
-// whether it is returned by RegisterAgent/RecoverAgentCredential or opened later
-// by OpenRegisteredAgent. WithAgentClientBaseURL and
-// WithAgentClientHTTPClient implement this interface and can be passed to either
-// the RegisterOption or ClientOption entry points.
+// whether it is returned by RegisterAgent, RegisterAgentRuntime, or
+// RecoverAgentCredential, or opened later by either OpenRegisteredAgent API.
+// WithAgentClientBaseURL and WithAgentClientHTTPClient implement this interface
+// and can be passed to either the RegisterOption or ClientOption entry points.
 type AgentClientOption interface {
 	RegisterOption
 	ClientOption
@@ -1210,8 +1329,9 @@ func WithRegisterBaseURL(rawURL string) RegisterOption {
 
 // WithAgentClientBaseURL points the registered agent's resource Client at a
 // non-default API origin, independently of WithRegisterBaseURL. The same option
-// can be reused with RegisterAgent, RecoverAgentCredential, and
-// OpenRegisteredAgent. Generic Clients may continue to use WithBaseURL.
+// can be reused with RegisterAgent, RegisterAgentRuntime,
+// RecoverAgentCredential, OpenRegisteredAgent, and OpenRegisteredAgentRuntime.
+// Generic Clients may continue to use WithBaseURL.
 func WithAgentClientBaseURL(rawURL string) AgentClientOption {
 	return agentClientBaseURLOption(rawURL)
 }
@@ -1258,7 +1378,8 @@ func WithRegisterHTTPClient(client HTTPDoer) RegisterOption {
 
 // WithAgentClientHTTPClient injects the resource Client transport independently
 // of registration and relay traffic. The same option can be reused with
-// RegisterAgent, RecoverAgentCredential, and OpenRegisteredAgent.
+// RegisterAgent, RegisterAgentRuntime, RecoverAgentCredential,
+// OpenRegisteredAgent, and OpenRegisteredAgentRuntime.
 func WithAgentClientHTTPClient(client HTTPDoer) AgentClientOption {
 	return agentClientHTTPClientOption{client: client}
 }
