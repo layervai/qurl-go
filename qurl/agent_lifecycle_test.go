@@ -21,6 +21,29 @@ func allowAccountLifecycle() RegisterOption {
 	return WithAllowedRegistrationKeyKinds(RegistrationKeyKindAccount)
 }
 
+func TestAgentStateClone_IsolatesEveryMutableField(t *testing.T) {
+	registeredAt := time.Unix(1_700_000_000, 0).UTC()
+	requestedAt := registeredAt.Add(time.Minute)
+	original := &AgentState{
+		AgentID:        "agent-original",
+		RegisteredAt:   &registeredAt,
+		NHPPeer:        &NHPServerPeerInfo{Host: "peer-original.example.test"},
+		OTPRequestedAt: &requestedAt,
+	}
+	cloned := original.clone()
+	cloned.AgentID = "agent-cloned"
+	*cloned.RegisteredAt = cloned.RegisteredAt.Add(time.Hour)
+	cloned.NHPPeer.Host = "peer-cloned.example.test"
+	*cloned.OTPRequestedAt = cloned.OTPRequestedAt.Add(time.Hour)
+
+	if original.AgentID != "agent-original" ||
+		!original.RegisteredAt.Equal(registeredAt) ||
+		original.NHPPeer.Host != "peer-original.example.test" ||
+		!original.OTPRequestedAt.Equal(requestedAt) {
+		t.Fatalf("AgentState clone mutated source: %#v", original)
+	}
+}
+
 type countingAgentStateStore struct {
 	inner  AgentStateStore
 	loads  atomic.Int32

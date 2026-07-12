@@ -267,8 +267,8 @@ func RecoverAgentCredential(ctx context.Context, key string, store AgentStateSto
 		if err != nil {
 			return nil, err
 		}
-		if strings.TrimSpace(state.AgentID) == "" {
-			return nil, fmt.Errorf("%w: agent state missing persisted device id", cfg.invalidConfigErr)
+		if err := validatePersistedAgentID(state, cfg.invalidConfigErr); err != nil {
+			return nil, err
 		}
 		if err := cfg.reconcileDeviceID(state); err != nil {
 			return nil, err
@@ -331,48 +331,36 @@ func (cfg *registerConfig) forceRegistration(ctx context.Context, key string, st
 		return nil, err
 	}
 
-	// Isolate the candidate's retained pointer fields from the loaded state. The
-	// peer is replaced immediately below, but registration time and an existing
-	// OTP marker survive until the transition decides what to persist. Cloning the
-	// marker is defensive even though success later clears it: paused/error paths
-	// return earlier, and no future candidate mutation may alias the loaded state.
-	candidate := *state
-	candidate.RegisteredAt = cloneLifecycleTime(state.RegisteredAt)
-	candidate.OTPRequestedAt = cloneLifecycleTime(state.OTPRequestedAt)
+	// Isolate every mutable field from the loaded state before the transition
+	// decides what to persist. The peer is replaced immediately below, while
+	// registration time and an OTP marker may survive paused/error paths.
+	candidate := state.clone()
 	candidate.NHPPeer = peer
 	candidate.RelayURL = relayURL
 	candidate.KeyID = info.KeyID
 	candidate.SchemaVersion = agentStateSchemaVersion
 
-	credential, path, err := cfg.forcedRegistrationCredential(ctx, key, store, state, &candidate, info)
+	credential, path, err := cfg.forcedRegistrationCredential(ctx, key, store, state, candidate, info)
 	if err != nil {
 		return nil, err
 	}
 	if recovery {
 		// Recovery REGs and then mints the replacement credential exactly once,
 		// through the same REG -> success-check -> completion tail enrollment uses.
-		return cfg.registerAndComplete(ctx, key, store, &candidate, peer, relayURL, credential, path)
+		return cfg.registerAndComplete(ctx, key, store, candidate, peer, relayURL, credential, path)
 	}
 	// Refresh commits the refreshed binding metadata after an authenticated RAK
 	// and stops: DeviceAPIKey and RegisteredAt are copied from the prior state and
 	// never touched.
-	if err := cfg.registerExchangeChecked(ctx, &candidate, peer, relayURL, credential, path); err != nil {
+	if err := cfg.registerExchangeChecked(ctx, candidate, peer, relayURL, credential, path); err != nil {
 		return nil, err
 	}
 	candidate.OTPRequestedAt = nil
 
-	if err := store.SaveAgentState(ctx, &candidate); err != nil {
+	if err := store.SaveAgentState(ctx, candidate); err != nil {
 		return nil, fmt.Errorf("qurl: persist refreshed binding: %w", err)
 	}
-	return &candidate, nil
-}
-
-func cloneLifecycleTime(value *time.Time) *time.Time {
-	if value == nil {
-		return nil
-	}
-	cloned := *value
-	return &cloned
+	return candidate, nil
 }
 
 func (cfg *registerConfig) forcedRegistrationCredential(ctx context.Context, key string, store AgentStateStore, persisted, candidate *AgentState, info *registrationInfoResponse) (string, pathKind, error) {

@@ -116,6 +116,30 @@ type AgentState struct {
 	OTPRequestedAt *time.Time `json:"otp_requested_at,omitempty"`
 }
 
+// clone returns an independent mutable snapshot. Strings and scalar fields copy
+// by value; every pointer field is copied explicitly so lifecycle transitions
+// cannot mutate the loaded state through an alias. Keep this method aligned with
+// future pointer, slice, or map fields added to AgentState.
+func (s *AgentState) clone() *AgentState {
+	if s == nil {
+		return nil
+	}
+	cloned := *s
+	if s.RegisteredAt != nil {
+		registeredAt := *s.RegisteredAt
+		cloned.RegisteredAt = &registeredAt
+	}
+	if s.NHPPeer != nil {
+		peer := *s.NHPPeer
+		cloned.NHPPeer = &peer
+	}
+	if s.OTPRequestedAt != nil {
+		requestedAt := *s.OTPRequestedAt
+		cloned.OTPRequestedAt = &requestedAt
+	}
+	return &cloned
+}
+
 // agentStateSchemaVersion is the current AgentState schema version RegisterAgent
 // stamps into SchemaVersion. Bumped only on an additive field change that older
 // readers can still ignore.
@@ -347,14 +371,21 @@ func BootstrapAgent(ctx context.Context, setupKey string, store AgentStateStore,
 // or relay: replacing missing, expired, or rotated binding metadata is the
 // purpose of RefreshAgentRegistration.
 func validateCompletedAgentIdentity(state *AgentState, errKind error) error {
+	if err := validatePersistedAgentID(state, errKind); err != nil {
+		return err
+	}
+	if state.RegisteredAt == nil {
+		return fmt.Errorf("%w: registered agent state missing registration time", errKind)
+	}
+	return nil
+}
+
+func validatePersistedAgentID(state *AgentState, errKind error) error {
 	if state == nil {
 		return fmt.Errorf("%w: registered agent state is nil", errKind)
 	}
 	if strings.TrimSpace(state.AgentID) == "" {
 		return fmt.Errorf("%w: registered agent state missing agent id", errKind)
-	}
-	if state.RegisteredAt == nil {
-		return fmt.Errorf("%w: registered agent state missing registration time", errKind)
 	}
 	return nil
 }
