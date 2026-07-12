@@ -49,6 +49,13 @@ func OpenRegisteredAgent(ctx context.Context, store AgentStateStore, opts ...Cli
 // The caller must immediately defer binding.Destroy, then take and eventually
 // wipe the runtime private key.
 func OpenRegisteredAgentRuntime(ctx context.Context, store AgentStateStore, opts ...ClientOption) (*Client, *AgentRuntimeBinding, error) {
+	return openRegisteredAgentRuntime(ctx, store, time.Now, opts...)
+}
+
+func openRegisteredAgentRuntime(ctx context.Context, store AgentStateStore, now func() time.Time, opts ...ClientOption) (*Client, *AgentRuntimeBinding, error) {
+	if now == nil {
+		now = time.Now
+	}
 	cfg, err := validateRegisteredAgentOpenInputs(ctx, store, opts)
 	if err != nil {
 		return nil, nil, err
@@ -57,7 +64,7 @@ func OpenRegisteredAgentRuntime(ctx context.Context, store AgentStateStore, opts
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := validateAgentRuntimeMetadata(state, time.Now(), ErrInvalidClientConfig); err != nil {
+	if err := validateAgentRuntimeMetadata(state, now(), ErrInvalidClientConfig); err != nil {
 		return nil, nil, err
 	}
 	privateKey, err := decodeRuntimePrivateKey(state, ErrInvalidClientConfig)
@@ -65,7 +72,7 @@ func OpenRegisteredAgentRuntime(ctx context.Context, store AgentStateStore, opts
 		return nil, nil, err
 	}
 	defer func() { wipeBytes(privateKey) }()
-	client := newPrimedStoreBackedClient(store, cfg.baseURL, cfg.httpClient, state.DeviceAPIKey, time.Now)
+	client := newPrimedStoreBackedClient(store, cfg.baseURL, cfg.httpClient, state.DeviceAPIKey, now)
 	binding := newAgentRuntimeBinding(state, privateKey)
 	privateKey = nil // binding owns the slice and its cleanup from this point.
 	return client, binding, nil

@@ -80,7 +80,9 @@ func RegisterAgent(ctx context.Context, key string, store AgentStateStore, opts 
 // must immediately defer binding.Destroy, then take and eventually wipe the
 // runtime private key. The primed credential is cached for one minute; a later
 // owner-side revocation becomes visible after that TTL. Account enrollment
-// behavior matches RegisterAgent.
+// behavior matches RegisterAgent. On the completed fast path an expired peer
+// is rejected because it cannot be knocked; call RefreshAgentRegistration with
+// an enrollment key to obtain a fresh binding.
 func RegisterAgentRuntime(ctx context.Context, key string, store AgentStateStore, opts ...RegisterOption) (*Client, *AgentRuntimeBinding, error) {
 	cfg, err := validateRegisterInputs(ctx, key, store, opts)
 	if err != nil {
@@ -347,10 +349,8 @@ func (cfg *registerConfig) finishRegisteredAgentState(state *AgentState) (*Agent
 	if err := cfg.reconcileDeviceID(state); err != nil {
 		return nil, err
 	}
-	if cfg.captureRuntime {
-		if err := cfg.captureRuntimeKey(state); err != nil {
-			return nil, err
-		}
+	if err := cfg.captureRuntimeKey(state); err != nil {
+		return nil, err
 	}
 	return state, nil
 }
