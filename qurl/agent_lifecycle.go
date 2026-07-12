@@ -116,6 +116,9 @@ type agentRuntimePrivateKey struct {
 
 func newAgentRuntimePrivateKey(value []byte) *agentRuntimePrivateKey {
 	key := &agentRuntimePrivateKey{value: value}
+	// The cleanup argument references only the separate byte-slice backing array,
+	// never key itself, so it cannot keep the cleanup target reachable. Take and
+	// Destroy stop this cleanup synchronously before transferring or wiping value.
 	cleanup := runtime.AddCleanup(key, wipeBytes, value)
 	key.cleanup = &cleanup
 	return key
