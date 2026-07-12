@@ -471,6 +471,12 @@ func TestClient_ConnectorResourceRevokedSuccessRows(t *testing.T) {
 		t.Fatalf("detail revoked row = %v, want revoked", err)
 	}
 
+	incompleteDetail := strings.Replace(detail, `"knock_resource_id":"`+testKnockID+`",`, "", 1)
+	client.httpClient = staticConnectorResponseDoer(http.StatusOK, incompleteDetail)
+	if _, err := client.GetConnectorResource(context.Background(), testConnectorID); !errors.Is(err, ErrInvalidConnectorResourceResponse) || errors.Is(err, ErrConnectorResourceRevoked) {
+		t.Fatalf("incomplete revoked detail row = %v, want invalid response", err)
+	}
+
 	list := fmt.Sprintf(`{"data":[{"resource_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"revoked","slug":%q}]}`, testConnectorID, testKnockID, testConnectorSlug)
 	client.httpClient = staticConnectorResponseDoer(http.StatusOK, list)
 	if _, err := client.GetConnectorResourceBySlug(context.Background(), testConnectorSlug); !errors.Is(err, ErrInvalidConnectorResourceResponse) || errors.Is(err, ErrConnectorResourceRevoked) {

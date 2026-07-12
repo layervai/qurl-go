@@ -77,7 +77,9 @@ type ConnectorResource struct {
 // EnsureConnectorResourceResult reports the active qURL Connector resource
 // selected by EnsureConnectorResource and whether it existed before the request.
 type EnsureConnectorResourceResult struct {
-	Resource      *ConnectorResource
+	// Resource is the active qURL Connector resource selected by the ensure.
+	Resource *ConnectorResource
+	// FoundExisting reports whether the producer selected a pre-existing row.
 	FoundExisting bool
 }
 
@@ -249,6 +251,10 @@ func (c *Client) DeleteConnectorResource(ctx context.Context, resourceID string)
 }
 
 func (r connectorResourceWire) connectorResource(client *Client, expectedSlug, expectedID string, operation connectorResourceOperation) (*ConnectorResource, error) {
+	// Validate the complete qURL Connector row before classifying lifecycle
+	// status. qurl-service derives knock_resource_id for tunnel rows regardless
+	// of active/revoked status and retains the row's type and identity on revoke;
+	// accepting an incomplete revoked row would mask producer contract drift.
 	if !connectorResourceIDPattern.MatchString(r.ResourceID) {
 		return nil, invalidConnectorResourceResponse("missing or invalid resource_id")
 	}
