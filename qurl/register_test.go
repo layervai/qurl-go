@@ -495,6 +495,32 @@ func withClock(clk func() time.Time) RegisterOption {
 	})
 }
 
+func TestWithNHPPeer_ExpiryUsesFinalClockRegardlessOfOptionOrder(t *testing.T) {
+	now := time.Now()
+	expiresAt := now.Add(24 * time.Hour)
+	peer := NHPServerPeerInfo{
+		PublicKeyB64: base64.StdEncoding.EncodeToString(make([]byte, 32)),
+		Host:         "nhp.example.test",
+		Port:         62206,
+		ExpireTime:   expiresAt.Unix(),
+	}
+	expiredClock := func() time.Time { return expiresAt.Add(time.Hour) }
+
+	for _, tc := range []struct {
+		name string
+		opts []RegisterOption
+	}{
+		{name: "clock before peer", opts: []RegisterOption{withClock(expiredClock), WithNHPPeer(peer)}},
+		{name: "clock after peer", opts: []RegisterOption{WithNHPPeer(peer), withClock(expiredClock)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := newRegisterConfig(tc.opts); !errors.Is(err, ErrInvalidRegisterConfig) || !strings.Contains(err.Error(), "expired") {
+				t.Fatalf("newRegisterConfig error = %v, want expired ErrInvalidRegisterConfig", err)
+			}
+		})
+	}
+}
+
 // primeDeviceKey pre-seeds the fake NHP server with the agent device public key
 // the SDK will knock with. RegisterAgent persists the keypair before the first
 // network call, so the test reads it from the state file after a first attempt,

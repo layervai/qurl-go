@@ -183,6 +183,14 @@ func newRegisterConfig(opts []RegisterOption) (*registerConfig, error) {
 			return nil, err
 		}
 	}
+	// Validate the peer only after every option resolves so an injected test
+	// clock has identical semantics regardless of its position relative to
+	// WithNHPPeer. Production configurations retain the default wall clock.
+	if cfg.nhpPeerOverride != nil {
+		if err := validateNHPServerPeerInfo(*cfg.nhpPeerOverride, cfg.clock(), true, "WithNHPPeer", ErrInvalidRegisterConfig); err != nil {
+			return nil, err
+		}
+	}
 	if cfg.otp != "" && cfg.otpProvider != nil {
 		return nil, fmt.Errorf("%w: set only one of WithOTP or WithOTPProvider", ErrInvalidRegisterConfig)
 	}
@@ -1473,11 +1481,6 @@ func WithRelayURL(rawURL string) RegisterOption {
 // configured to agree. Success persists the selected peer in AgentState.
 func WithNHPPeer(peer NHPServerPeerInfo) RegisterOption {
 	return registerOptionFunc(func(o *registerConfig) error {
-		// o.clock is initialized to time.Now before options apply; using it keeps
-		// the direct wall-clock call out of the engine for a consistent seam.
-		if err := validateNHPServerPeerInfo(peer, o.clock(), true, "WithNHPPeer", ErrInvalidRegisterConfig); err != nil {
-			return err
-		}
 		p := peer
 		o.nhpPeerOverride = &p
 		return nil
