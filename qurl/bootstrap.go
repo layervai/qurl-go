@@ -8,8 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 )
@@ -44,6 +42,11 @@ var ErrInvalidAgentState = errors.New("qurl: agent state is present but unreadab
 // ErrInsecureAgentStatePermissions is returned when file-backed agent state is
 // readable by group or other users.
 var ErrInsecureAgentStatePermissions = errors.New("qurl: insecure agent state permissions")
+
+// ErrAgentSetupLock reports that the mandatory local-file setup lock could not
+// be acquired or released. Registration fails closed because continuing could
+// mint competing identities against the same durable state path.
+var ErrAgentSetupLock = errors.New("qurl: agent state setup lock failed")
 
 // ErrBootstrapSetupKeyConsumed is returned when an incomplete local bootstrap
 // retry is rejected because the one-time setup key appears to have already been
@@ -93,7 +96,7 @@ type AgentState struct {
 	SchemaVersion int `json:"schema_version,omitempty"`
 	// DeviceAPIKey is the device REST bearer credential minted at registration
 	// completion. Its presence alongside RegisteredAt marks a state ready to back
-	// a Client with zero network. SENSITIVE — see the type doc.
+	// a Client without another qURL registration call. SENSITIVE — see the type doc.
 	DeviceAPIKey string `json:"device_api_key,omitempty"`
 	// RelayURL records the NHP relay base URL from the most recent
 	// registration-info pre-flight. A resume re-fetches registration-info (the
@@ -136,11 +139,11 @@ type AgentStateStore interface {
 // 0600. Local filesystem I/O is synchronous; the context passed to LoadAgentState
 // or SaveAgentState cannot interrupt a read or write once it has started.
 func FileAgentState(path string) AgentStateStore {
-	return fileAgentStateStore{path: path}
+	return fileAgentStateStore{fileSetupLock: fileSetupLock{path: path, lockFile: lockFileExclusive}}
 }
 
 type fileAgentStateStore struct {
-	path string
+	fileSetupLock
 }
 
 func (s fileAgentStateStore) LoadAgentState(ctx context.Context) (*AgentState, error) {
@@ -151,7 +154,7 @@ func (s fileAgentStateStore) LoadAgentState(ctx context.Context) (*AgentState, e
 	// a front-door bootstrap/register class): RegisterAgent and BootstrapAgent
 	// re-wrap a load failure in their own class, so the front-door match comes
 	// from the wrap while this sentinel stays matchable through the chain.
-	raw, err := readPrivateStateFile(s.path, "agent state", ErrAgentStateNotFound, ErrInvalidAgentState, ErrInsecureAgentStatePermissions)
+	raw, err := readPrivateStateFileBounded(s.path, "agent state", maxAgentStateBytes, privateStateDirExact0700, ErrAgentStateNotFound, ErrInvalidAgentState, ErrInsecureAgentStatePermissions)
 	if err != nil {
 		return nil, err
 	}
@@ -176,43 +179,11 @@ func (s fileAgentStateStore) SaveAgentState(ctx context.Context, state *AgentSta
 	if err != nil {
 		return fmt.Errorf("qurl: encode agent state: %w", err)
 	}
-	dir := filepath.Dir(s.path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("qurl: create agent state dir: %w", err)
+	defer wipeBytes(raw)
+	if len(raw) > maxAgentStateBytes {
+		return fmt.Errorf("%w: encoded agent state exceeds %d bytes", ErrInvalidBootstrapConfig, maxAgentStateBytes)
 	}
-	if err := validatePrivateStateDir(dir, "agent state", ErrInvalidBootstrapConfig, ErrInsecureAgentStatePermissions); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(dir, ".qurl-agent-state-*")
-	if err != nil {
-		return fmt.Errorf("qurl: create temp agent state: %w", err)
-	}
-	tmpName := tmp.Name()
-	defer func() {
-		_ = os.Remove(tmpName)
-	}()
-	if _, err := tmp.Write(raw); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("qurl: write temp agent state: %w", err)
-	}
-	if err := tmp.Chmod(0o600); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("qurl: chmod temp agent state: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("qurl: sync temp agent state: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("qurl: close temp agent state: %w", err)
-	}
-	if err := os.Rename(tmpName, s.path); err != nil {
-		return fmt.Errorf("qurl: replace agent state: %w", err)
-	}
-	if err := syncPrivateStateDir(dir, "agent state"); err != nil {
-		return err
-	}
-	return nil
+	return writePrivateStateFileAtomic(ctx, s.path, "agent state", ".qurl-agent-state-*", raw, defaultPrivateStateFileOps)
 }
 
 // BootstrapOption customizes BootstrapAgent.
@@ -319,13 +290,12 @@ func WithVersion(version string) BootstrapOption {
 // or refresh flow instead of using stale routing state.
 //
 // Each state write is atomic. For a FileAgentState the SDK also serializes
-// concurrent first-time setup across processes with a best-effort advisory lock
+// concurrent first-time setup across processes with a mandatory file lock
 // (flock on a sidecar beside the state file): the racer that loses blocks until
 // the winner enrolls, then fast-paths to the now-registered state instead of
-// sending the setup key again. The lock is best-effort — on any failure
-// (unsupported platform, unopenable lockfile, canceled ctx) setup proceeds
-// unserialized rather than failing. A custom or networked AgentStateStore cannot
-// be locked for you, so serialize setup per store yourself.
+// sending the setup key again. Lock acquisition/release failures fail closed.
+// A custom or networked AgentStateStore cannot be locked for you, so serialize
+// setup per store yourself.
 func BootstrapAgent(ctx context.Context, setupKey string, store AgentStateStore, opts ...BootstrapOption) (*AgentState, error) {
 	if strings.TrimSpace(setupKey) == "" {
 		return nil, fmt.Errorf("%w: setup key must not be empty", ErrInvalidBootstrapConfig)
@@ -431,18 +401,14 @@ func validateNHPServerPeerInfo(peer NHPServerPeerInfo, now time.Time, requireLiv
 // (ErrInvalidAgentState / ErrInsecureAgentStatePermissions / …) stays matchable
 // through the double-wrap.
 func loadOrCreateAgentState(ctx context.Context, store AgentStateStore, invalidConfigErr error) (*AgentState, error) {
-	state, err := store.LoadAgentState(ctx)
-	switch {
-	case err == nil:
-		if err := state.ensureKeypair(invalidConfigErr); err != nil {
-			return nil, err
-		}
-		return state, nil
-	case errors.Is(err, ErrAgentStateNotFound):
-		return newAgentState()
-	default:
-		return nil, fmt.Errorf("%w: load agent state: %w", invalidConfigErr, err)
+	state, found, err := loadAgentStateIfPresent(ctx, store, invalidConfigErr)
+	if err != nil {
+		return nil, err
 	}
+	if found {
+		return state, nil
+	}
+	return newAgentState()
 }
 
 func newAgentState() (*AgentState, error) {

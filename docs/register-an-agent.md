@@ -30,8 +30,9 @@ That is the whole target flow: `RegisterAgent` → `ProtectURL` → `CreatePorta
 
 `RegisterAgent` is idempotent. The first call enrolls the agent and persists a
 device credential into `store`. Every later call loads that credential and
-returns a `Client` with **no network I/O** — so calling it unconditionally on
-startup is the intended pattern, not a thing to guard against.
+returns a `Client` with **no qURL API calls** — so calling it unconditionally on
+startup is the intended pattern, not a thing to guard against. A sealed or
+network-backed store may still call its key or storage provider while loading.
 
 The `key` argument is used only during first enrollment. Once `store` holds a
 completed registration, the fast path serves the `Client` entirely from it and
@@ -171,6 +172,7 @@ your code is identical whichever you choose:
 | Runtime | Store |
 | --- | --- |
 | Single host / VM / container with a durable disk | `qurl.FileAgentState(path)` |
+| Local disk with a KMS/HSM/attested release boundary | `qurl.NewSealedFileAgentState(path, providerID, wrapper)` |
 | Shared POSIX / EFS across tasks | `qurl.FileAgentState(mountPath)` — **not** the AWS stores |
 | Ephemeral / autoscaling / Lambda / Fargate (no durable disk) | `awsstore.NewSecretsManagerStore(...)` |
 | Cost-sensitive AWS fleets | `awsstore.NewParameterStore(...)` (KMS SecureString) |
@@ -188,7 +190,115 @@ store := qurl.FileAgentState("/var/lib/layerv/qurl/agent-state.json")
 ```
 
 On a shared or multi-tenant host where filesystem permissions are not a
-sufficient boundary, back the state with a secret manager instead.
+sufficient boundary, use the sealed file store below or back the state with a
+secret manager.
+
+### Sealed file storage (`NewSealedFileAgentState`)
+
+`NewSealedFileAgentState` encrypts the complete `AgentState`—including the
+device API credential and X25519 private key—under an SDK-owned AES-256-GCM
+envelope. Every save generates a fresh 32-byte data-encryption key (DEK) and
+nonce. Your `AgentStateKeyWrapper` integrates the chosen KMS, HSM, or attested
+key-release provider and sees only that exact 32-byte DEK, never AgentState JSON.
+Both full-AgentState file stores cap encoded state at 1 MiB so plaintext and
+sealed deployments have the same schema-growth budget. `FileCredentials` keeps
+its historical 64 KiB issuer-credential cap; the sealed envelope, wrapped key,
+and provider metadata are independently bounded.
+
+```go
+store, err := qurl.NewSealedFileAgentState(
+	"/var/lib/layerv/qurl/agent_state.sealed.json",
+	"aws-kms",
+	myKMSWrapper,
+)
+if err != nil {
+	return err
+}
+client, err := qurl.RegisterAgent(ctx, enrollmentKey, store)
+```
+
+The wrapper must authenticate every field in `AgentStateKeyBinding` as its KMS
+encryption context (or equivalent): purpose, envelope version, provider id, and
+agent id. It owns the version and optional JSON metadata in
+`WrappedAgentStateKey`. The SDK may compact, indent, or otherwise reserialize
+that metadata between wrap and unwrap, so treat it as JSON semantics rather than
+byte-identical whitespace or object-member ordering. Return
+`qurl.ErrInvalidWrappedAgentStateKey` when a persisted wrapper record fails
+authentication; ordinary KMS/network failures remain operational
+`qurl.ErrAgentStateKeyWrapper` errors rather than being misreported as corrupt
+state. If the provider cannot distinguish authentication failure from another
+decrypt failure, return the invalid-record sentinel and fail closed. The SDK
+includes wrapper metadata in its AES-GCM AAD; wrappers that use metadata to
+choose or configure unwrap must cryptographically authenticate a
+provider-defined canonical or semantic representation in their wrapped-key
+record or provider encryption context too, because unwrap necessarily runs
+before the SDK can verify that AAD.
+
+Every successful state mutation performs `WrapKey` and a verification
+`UnwrapKey` before the atomic commit—two provider operations per save. This is a
+deliberate fail-before-commit check. The runtime identity therefore needs both
+wrap/encrypt and unwrap/decrypt permission during initial enrollment and any
+later workflow that mutates state. Decrypt-only permission is insufficient. A
+fresh pre-issued-key enrollment persists three transitions (typically six
+provider operations); an account enrollment that requests and completes OTP
+persists four (typically eight). Restarts, retries, or OTP re-sends can add more,
+and resumed incomplete setup unwraps once before and again after acquiring the
+lock. These paths compound during retry storms and OTP redispatch, so size
+KMS/HSM quotas and latency budgets for degraded workflows, not only the happy
+path's six or eight calls. The second incomplete-state read ensures only the
+locked snapshot can drive mutation if another process completed setup between
+the two loads.
+
+The wrapper binding authenticates the agent id stored in the envelope; the
+store does not accept a separately configured expected agent id. A principal
+that can unwrap state for multiple agents could therefore substitute another
+valid envelope within that principal's decrypt scope. Scope each runtime's KMS
+key or decrypt policy to one installation when cross-agent substitution must be
+prevented, and authenticate every binding field in the provider encryption
+context. When the agent id is known in configuration, also pass
+`qurl.WithExpectedSealedAgentID(id)` to the store and the same id through
+`qurl.WithDeviceID(id)` (or `qurl.WithAgentID(id)` for `BootstrapAgent`); the
+store then rejects a different envelope before it calls the key wrapper. Sealed
+store agent ids must be valid UTF-8, at most 256 bytes, and contain neither
+surrounding whitespace nor control characters.
+
+This identity binding assumes `agent_id` is generated by the SDK or supplied by
+the caller and registration completion echoes it unchanged. If the service ever
+introduces an independently server-minted id, update the plaintext and sealed
+AgentState validation contracts together; do not relax only the sealed decoder.
+
+Sealing authenticates each envelope but does not provide freshness or
+anti-rollback protection. An attacker who can replace the file with an older
+valid envelope for the same provider and agent id will not be detected by this
+store alone; deployments requiring rollback detection must keep a monotonic
+version in an external trusted store and enforce it around `AgentStateStore`.
+
+The SDK wipes its temporary plaintext and DEK byte buffers after use. Go's JSON
+decoder copies credential fields into `AgentState` strings, which are immutable
+and cannot be explicitly wiped; buffer wiping is best-effort defense in depth,
+not a guarantee that no plaintext copies remain in process memory.
+
+Both SDK local-file stores require an immediate `0700` state directory, write a
+`0600` state file atomically, and take the same mandatory setup lock. Lock
+failures stop registration; custom/network stores remain caller-serialized.
+"Mandatory" means the SDK refuses to proceed unless it acquires the OS advisory
+`flock`; it does not turn advisory locking into kernel-enforced exclusion for a
+non-cooperating writer.
+The exact directory mode is enforced on load as well as save, including a
+completed registration's read-only fast path; correct a pre-existing `0750` or
+`0755` directory to `0700` before upgrading. A read-only filesystem mount is
+supported when the directory metadata remains exactly `0700`; changing the mode
+to `0500`, `0555`, or another "stricter" value is rejected by policy.
+If lock release fails after enrollment was atomically persisted, the call still
+returns `ErrAgentSetupLock` and no client because ownership is ambiguous. Retry
+normally: the completed state then recovers through the pre-lock fast path
+without enrolling a second identity.
+Windows, Plan 9, and js/wasm do not currently have an SDK local-file lock
+implementation, so fresh or incomplete local-file enrollment fails closed with
+`ErrAgentSetupLock` there. Use a custom/network store (including `awsstore` where
+applicable) that serializes setup itself. A completed registration reopens on a
+lock-free read-only fast path; direct `LoadAgentState` and `SaveAgentState` calls
+are also unaffected.
 
 ### AWS storage (`awsstore`)
 
@@ -261,10 +371,10 @@ the shared mount and pulls in no AWS SDK. Encrypt the file system at rest and
 restrict the access point's POSIX uid/gid to the agent. See the
 [EFS recipe](../awsstore/README.md#efs-recipe-shared-storage--no-aws-store-needed).
 
-Run enrollment from **one process at a time** for a given store, whichever
-backing you choose. Each state write is atomic, but the SDK does not lock across
-concurrent callers sharing a store — and on the account path each concurrent
-fresh run dispatches its own OTP email.
+For `FileAgentState` and `NewSealedFileAgentState`, the SDK serializes concurrent
+setup across processes with a mandatory sidecar lock. Run enrollment from **one
+process at a time** for custom/network stores; the SDK cannot derive a shared
+lock for them, and concurrent account-path setup can dispatch multiple OTPs.
 
 ## Errors
 
@@ -288,6 +398,8 @@ Every message names the next concrete step.
 | `qurl.ErrRegistrationDisabled` | Agent registration is disabled for the account. | Contact the account owner to enable it. |
 | `qurl.ErrInvalidRegisterConfig` | Inputs or options were invalid before any network call (empty key, nil store, conflicting options). | Fix the call. |
 | `qurl.ErrInvalidAgentState` | Persisted state exists but is corrupt/unreadable — surfaced wrapped in the front-door config error. (`ErrAgentStateNotFound` is **not** caller-facing: it is the store-contract sentinel a custom `AgentStateStore` returns when empty, which the engine converts into a fresh enrollment.) | Clear or replace the corrupt state. |
+| `qurl.ErrAgentStateKeyWrapper` | A sealed store's KMS/HSM wrapper is unavailable or violated its 32-byte DEK contract. | Restore provider access/configuration; do not delete otherwise valid state for an operational outage. |
+| `qurl.ErrAgentSetupLock` | The mandatory local-file setup lock could not be acquired or released. | Fix state-directory/sidecar permissions or platform support; do not run setup unlocked. |
 | `*qurl.RegistrationDenyError` | An authenticated enrollment denial carrying a wire code newer than this SDK. | Read `ErrCode` / `ErrMsg`; `errors.Is` still matches the typed sentinel for known codes. |
 
 A worked pattern:

@@ -1126,9 +1126,18 @@ func readCappedBody(r io.Reader, limit int, what string) ([]byte, error) {
 		return nil, fmt.Errorf("read %s: %w", what, err)
 	}
 	if len(raw) > limit {
-		return nil, fmt.Errorf("%s exceeds %d-byte cap", what, limit)
+		return nil, &inputExceedsCapError{what: what, limit: limit}
 	}
 	return raw, nil
+}
+
+type inputExceedsCapError struct {
+	what  string
+	limit int
+}
+
+func (e *inputExceedsCapError) Error() string {
+	return fmt.Sprintf("%s exceeds %d-byte cap", e.what, e.limit)
 }
 
 func drainResponseBody(body io.Reader) {

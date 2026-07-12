@@ -134,7 +134,7 @@ func ExampleBootstrapAgent() {
 
 func ExampleRegisterAgent() {
 	// RegisterAgent is idempotent: the first call enrolls and persists a device
-	// credential; later calls load it and return a Client with no network I/O.
+	// credential; later calls load it and return a Client without qURL API calls.
 	store := qurl.FileAgentState("/var/lib/layerv/qurl/agent-state.json")
 	client, err := qurl.RegisterAgent(context.Background(), "lv_api_key", store)
 	if err != nil {
@@ -223,6 +223,43 @@ func ExampleRegisterAgent_fromBootstrapAgent() {
 		panic(err)
 	}
 	_ = client
+}
+
+func ExampleNewSealedFileAgentState() {
+	// Production wrappers call a KMS/HSM/attested release API and authenticate
+	// every binding field as provider encryption context. They wrap only the
+	// exact 32-byte DEK supplied by the SDK, never AgentState JSON.
+	var wrapper qurl.AgentStateKeyWrapper = myKMSAgentStateKeyWrapper{}
+	store, err := qurl.NewSealedFileAgentState(
+		"/var/lib/layerv/qurl/agent_state.sealed.json",
+		"aws-kms",
+		wrapper,
+	)
+	if err != nil {
+		panic(err)
+	}
+	_, _ = qurl.RegisterAgent(context.Background(), "lv_enrollment_key", store)
+}
+
+type myKMSAgentStateKeyWrapper struct{}
+
+func (myKMSAgentStateKeyWrapper) WrapKey(_ context.Context, dek []byte, binding qurl.AgentStateKeyBinding) (qurl.WrappedAgentStateKey, error) {
+	if len(dek) != 32 {
+		return qurl.WrappedAgentStateKey{}, fmt.Errorf("expected a 32-byte DEK")
+	}
+	return callKMSWrap(dek, binding)
+}
+
+func (myKMSAgentStateKeyWrapper) UnwrapKey(_ context.Context, wrapped qurl.WrappedAgentStateKey, binding qurl.AgentStateKeyBinding) ([]byte, error) {
+	return callKMSUnwrap(wrapped, binding)
+}
+
+func callKMSWrap([]byte, qurl.AgentStateKeyBinding) (qurl.WrappedAgentStateKey, error) {
+	return qurl.WrappedAgentStateKey{}, errors.New("example KMS adapter")
+}
+
+func callKMSUnwrap(qurl.WrappedAgentStateKey, qurl.AgentStateKeyBinding) ([]byte, error) {
+	return nil, errors.New("example KMS adapter")
 }
 
 // readOneTimeCodeFromOperator and fetchLatestOneTimeCode stand in for the

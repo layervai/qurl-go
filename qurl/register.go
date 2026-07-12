@@ -18,7 +18,8 @@ import (
 // RegisterAgent is the NHP-native front door for enrolling an agent and getting
 // a ready-to-use Client. It is idempotent: the first call enrolls and persists a
 // device credential into store; later calls load that credential and return a
-// Client with no network I/O.
+// Client without qURL API calls. Loading a network-backed or sealed store may
+// still call its storage or key provider.
 //
 // The key argument is used only during first enrollment. Once store holds a
 // completed registration the fast path serves the Client entirely from it and
@@ -45,12 +46,12 @@ import (
 // through the NHP Noise handshake, so the same keypair is reused across resumes.
 //
 // Each state write is atomic. For a FileAgentState the SDK also serializes
-// concurrent first-registration setup across processes with a best-effort
-// advisory lock (flock on a sidecar beside the state file): the racer that loses
+// concurrent first-registration setup across processes with a mandatory file
+// lock (flock on a sidecar beside the state file): the racer that loses
 // blocks until the winner enrolls, then loads the now-registered state via the
-// fast path and returns a Client without re-sending a one-time code. The lock is
-// best-effort — on any failure (unsupported platform, unopenable lockfile,
-// canceled ctx) setup proceeds unserialized rather than failing.
+// fast path and returns a Client without re-sending a one-time code. Lock
+// acquisition/release failures fail closed rather than risking competing
+// identities. This applies to FileAgentState and SealedFileAgentStateStore.
 //
 // A custom or networked AgentStateStore cannot be locked for you, so concurrent
 // callers sharing one are not serialized. On the account (email-OTP) path each
@@ -140,53 +141,56 @@ const otpResendCooldown = 60 * time.Second
 
 // run drives the registration state machine to a *Client. State is derived from
 // AgentState fields (no enum): absent → keypair-persisted → otp_pending → registered.
-func (cfg *registerConfig) run(ctx context.Context, key string, store AgentStateStore) (*AgentState, error) {
-	// Advisory, best-effort serialization of concurrent first-registration setup
-	// against a shared single-host FileAgentState (issue #48): two fresh-store runs
-	// would otherwise each mint a device identity and race the atomic save, leaving
-	// two enrolled identities where one silently wins. Holding this across the whole
-	// run means a second racer blocks until the first enrolls, then loads the
-	// now-registered state via the fast path below. It is a no-op for non-file
-	// stores and on any lock failure — never a hard dependency (see
-	// acquireAgentSetupLock).
-	releaseSetupLock := acquireAgentSetupLock(ctx, store)
-	defer releaseSetupLock()
+func (cfg *registerConfig) run(ctx context.Context, key string, store AgentStateStore) (result *AgentState, resultErr error) {
+	// Preserve the documented zero-qURL-API, read-only fast path: a completed
+	// state no longer needs setup serialization and must remain usable when the
+	// state directory is mounted read-only or local locking is unsupported. The
+	// store load itself may call a remote storage or key provider.
+	state, found, err := loadAgentStateIfPresent(ctx, store, cfg.invalidConfigErr)
+	if err != nil {
+		return nil, err
+	}
+	if found && state.RegisteredAt != nil {
+		return cfg.finishRegisteredAgentState(state)
+	}
 
-	// 1. Fast path: a registered state short-circuits with no network. For
-	//    RegisterAgent (requireDeviceKey) a registered state missing the device
-	//    credential is a non-recoverable local state — the credential is issued
-	//    once. BootstrapAgent leaves requireDeviceKey false, so a legacy
-	//    bootstrap-era state without a device key still returns.
-	state, err := loadOrCreateAgentState(ctx, store, cfg.invalidConfigErr)
+	// Mandatory serialization starts only for incomplete/fresh setup. Two racers
+	// would otherwise mint competing identities and race the atomic save. After
+	// acquiring, reload: another process may have completed enrollment while this
+	// caller waited, in which case the second fast-path check returns its state.
+	releaseSetupLock, err := acquireAgentSetupLock(ctx, store)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err := releaseSetupLock(); err != nil {
+			// Even if enrollment and its atomic state write succeeded, fail this call
+			// because lock ownership is now ambiguous. A retry recovers without a
+			// second enrollment by reading the completed state on the pre-lock path.
+			lockErr := fmt.Errorf("%w: release setup lock: %w", ErrAgentSetupLock, err)
+			result = nil
+			if resultErr == nil {
+				resultErr = lockErr
+			} else {
+				resultErr = errors.Join(resultErr, lockErr)
+			}
+		}
+	}()
+
+	// Reload under the lock even when the pre-lock load found incomplete state.
+	// A sealed store intentionally unwraps again here: only the locked snapshot
+	// may drive mutation after another process had a chance to finish setup.
+	state, err = loadOrCreateAgentState(ctx, store, cfg.invalidConfigErr)
 	if err != nil {
 		return nil, err
 	}
 	if state.RegisteredAt != nil {
-		// requirePeerLive = !requireDeviceKey: a RegisterAgent Client authorizes with
-		// the REST device key and never knocks the persisted NHP peer, so an expired
-		// peer must not block the zero-network fast path; the knock-only BootstrapAgent
-		// (requireDeviceKey=false) still requires a live peer.
-		if err := validateRegisteredAgentState(state, cfg.clock(), !cfg.requireDeviceKey, cfg.invalidConfigErr); err != nil {
-			return nil, err
-		}
-		if cfg.requireDeviceKey && strings.TrimSpace(state.DeviceAPIKey) == "" {
-			// The device credential is issued once and cannot be recovered from this
-			// state. Re-running against the SAME store short-circuits here again
-			// (WithDeviceID reloads this same state; WithTakeover only affects the
-			// REG body, which the fast path never sends). The only recovery is to
-			// clear or replace the persisted AgentState (or point at a fresh
-			// AgentStateStore) and register again from scratch.
-			return nil, fmt.Errorf("%w: agent %q is registered but its device credential is absent from this state; clear or replace the persisted AgentState (or use a fresh AgentStateStore) and register again", ErrDeviceCredentialMissing, state.AgentID)
-		}
-		if err := cfg.reconcileDeviceID(state); err != nil {
-			return nil, err
-		}
-		return state, nil
+		return cfg.finishRegisteredAgentState(state)
 	}
 
-	// 2. Persist the device identity (keypair + stable device id) BEFORE any
-	//    network call so an interrupted registration resumes with the same
-	//    identity the server will bind.
+	// Persist the device identity (keypair + stable device id) BEFORE any
+	// network call so an interrupted registration resumes with the same
+	// identity the server will bind.
 	if err := cfg.ensureDeviceID(state); err != nil {
 		return nil, err
 	}
@@ -197,8 +201,8 @@ func (cfg *registerConfig) run(ctx context.Context, key string, store AgentState
 		return nil, err
 	}
 
-	// 3. Pre-flight: registration-info tells us the path (key_kind), the key id,
-	//    the NHP peer, and the relay coordinates. Side-effect-free.
+	// Pre-flight: registration-info tells us the path (key_kind), the key id,
+	// the NHP peer, and the relay coordinates. Side-effect-free.
 	info, err := cfg.fetchRegistrationInfo(ctx, key)
 	if err != nil {
 		return nil, err
@@ -233,6 +237,37 @@ func (cfg *registerConfig) run(ctx context.Context, key string, store AgentState
 		// validate() already rejected unknown kinds; defensive.
 		return nil, fmt.Errorf("%w: registration-info returned unknown key_kind %q", cfg.invalidConfigErr, info.KeyKind)
 	}
+}
+
+func loadAgentStateIfPresent(ctx context.Context, store AgentStateStore, invalidConfigErr error) (*AgentState, bool, error) {
+	state, err := store.LoadAgentState(ctx)
+	switch {
+	case err == nil:
+		if err := state.ensureKeypair(invalidConfigErr); err != nil {
+			return nil, false, err
+		}
+		return state, true, nil
+	case errors.Is(err, ErrAgentStateNotFound):
+		return nil, false, nil
+	default:
+		return nil, false, fmt.Errorf("%w: load agent state: %w", invalidConfigErr, err)
+	}
+}
+
+func (cfg *registerConfig) finishRegisteredAgentState(state *AgentState) (*AgentState, error) {
+	// A RegisterAgent Client authorizes with the REST device key and never knocks
+	// the persisted NHP peer, so an expired peer does not block its fast path. The
+	// knock-only BootstrapAgent path still requires a live peer.
+	if err := validateRegisteredAgentState(state, cfg.clock(), !cfg.requireDeviceKey, cfg.invalidConfigErr); err != nil {
+		return nil, err
+	}
+	if cfg.requireDeviceKey && strings.TrimSpace(state.DeviceAPIKey) == "" {
+		return nil, fmt.Errorf("%w: agent %q is registered but its device credential is absent from this state; clear or replace the persisted AgentState (or use a fresh AgentStateStore) and register again", ErrDeviceCredentialMissing, state.AgentID)
+	}
+	if err := cfg.reconcileDeviceID(state); err != nil {
+		return nil, err
+	}
+	return state, nil
 }
 
 // runBootstrapPath is PATH A: the pre-issued key is the enrollment credential.
@@ -792,8 +827,8 @@ func derefTime(t *time.Time, fallback time.Time) time.Time {
 
 // newStoreBackedClient builds a Client whose credentials come from the device
 // API key persisted in store, wrapped in CachedCredentials so a rotated key is
-// picked up within the TTL without rebuilding the client. The fast path makes
-// zero network calls.
+// picked up within the TTL without rebuilding the client. Construction makes
+// no qURL API calls; loading a network-backed store can still perform I/O.
 func newStoreBackedClient(store AgentStateStore, baseURL string, httpClient HTTPDoer) *Client {
 	provider := CachedCredentials(&storeCredentialProvider{store: store}, storeCredentialCacheTTL)
 	return &Client{
@@ -896,7 +931,7 @@ func WithOTP(code string) RegisterOption {
 // ErrOTPIncorrect. On a resume (the code was requested on an earlier call) the
 // provider runs only if a crash-recovery completion probe did not already finish.
 //
-// For a FileAgentState the enclosing RegisterAgent call holds the best-effort
+// For an SDK local-file store the enclosing RegisterAgent call holds the mandatory
 // cross-process setup lock for the whole provider call, so a provider that blocks
 // for seconds/minutes keeps a second process sharing the same store blocked for
 // that window (the loser then fast-paths once this call enrolls).
