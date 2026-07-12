@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -59,11 +60,7 @@ func OpenRegisteredAgentRuntime(ctx context.Context, store AgentStateStore, opts
 	if err != nil {
 		return nil, nil, err
 	}
-	client, err := newPrimedStoreBackedClient(store, cfg.baseURL, cfg.httpClient, state.DeviceAPIKey, ErrInvalidClientConfig)
-	if err != nil {
-		wipeBytes(privateKey)
-		return nil, nil, err
-	}
+	client := newPrimedStoreBackedClient(store, cfg.baseURL, cfg.httpClient, state.DeviceAPIKey)
 	return client, newAgentRuntimeBinding(state, privateKey), nil
 }
 
@@ -86,10 +83,12 @@ func validateRegisteredAgentOpenInputs(ctx context.Context, store AgentStateStor
 
 // AgentRuntimeBinding is a registered or refreshed identity and NHP endpoint
 // needed for an immediate relay knock. It deliberately excludes DeviceAPIKey,
-// schema, and OTP state. The private key remains sensitive. Keep the returned
-// pointer pointer-owned: never dereference-copy or log the binding. Immediately
-// defer Destroy after a successful lifecycle call, transfer key ownership
-// exactly once with TakeDeviceStaticPrivateKey, and wipe those bytes after use.
+// schema, and OTP state. The private key remains sensitive. Treat the returned
+// pointer as the owning handle: do not copy or log the binding. Accidental value
+// copies share one synchronized key owner, so they cannot duplicate the one-shot
+// transfer. Immediately defer Destroy after a successful lifecycle call,
+// transfer key ownership exactly once with TakeDeviceStaticPrivateKey, and wipe
+// those bytes after use.
 type AgentRuntimeBinding struct {
 	AgentID      string
 	PublicKeyB64 string
@@ -98,13 +97,44 @@ type AgentRuntimeBinding struct {
 	RelayURL     string
 	KeyID        string
 
-	deviceStaticPrivateKey []byte
+	deviceStaticPrivateKey *agentRuntimePrivateKey
+}
+
+// agentRuntimePrivateKey centralizes one-shot ownership across accidental
+// AgentRuntimeBinding value copies. A conventional noCopy marker on the binding
+// is intentionally unsuitable: go vet would reject the value-receiver
+// String/GoString methods required to redact explicitly dereferenced formatting.
+// Sharing this synchronized cell makes the underlying copy hazard safe instead.
+type agentRuntimePrivateKey struct {
+	mu    sync.Mutex
+	value []byte
+}
+
+func (k *agentRuntimePrivateKey) take() []byte {
+	if k == nil {
+		return nil
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	value := k.value
+	k.value = nil
+	return value
+}
+
+func (k *agentRuntimePrivateKey) destroy() {
+	if k == nil {
+		return
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	wipeBytes(k.value)
+	k.value = nil
 }
 
 // String returns a redacted runtime summary. The value receiver deliberately
 // protects both pointer and dereferenced-value formatting; its copy contains
-// only a non-owning slice header for the private key and does not transfer key
-// ownership. Callers must still never make their own binding copy.
+// only a pointer to the synchronized key owner and does not transfer key
+// ownership. Callers must still avoid making binding copies.
 func (b AgentRuntimeBinding) String() string {
 	return fmt.Sprintf("qurl.AgentRuntimeBinding{AgentID:%q, RelayURL:%q, KeyID:%q, DeviceStaticPrivateKey:[REDACTED]}", b.AgentID, b.RelayURL, b.KeyID)
 }
@@ -121,22 +151,19 @@ func (b *AgentRuntimeBinding) TakeDeviceStaticPrivateKey() []byte {
 	if b == nil {
 		return nil
 	}
-	privateKey := b.deviceStaticPrivateKey
-	b.deviceStaticPrivateKey = nil
-	return privateKey
+	return b.deviceStaticPrivateKey.take()
 }
 
 // Destroy best-effort wipes the private-key bytes retained by the binding. It
 // is idempotent and becomes a no-op after TakeDeviceStaticPrivateKey transfers
-// ownership. Never copy the binding: a copy would share retained bytes. The
-// binding must not be used concurrently with TakeDeviceStaticPrivateKey or
-// Destroy.
+// ownership. It is synchronized with TakeDeviceStaticPrivateKey across
+// accidental value copies, though callers should still keep the pointer-owned
+// lifecycle explicit.
 func (b *AgentRuntimeBinding) Destroy() {
 	if b == nil {
 		return
 	}
-	wipeBytes(b.deviceStaticPrivateKey)
-	b.deviceStaticPrivateKey = nil
+	b.deviceStaticPrivateKey.destroy()
 }
 
 // RefreshAgentRegistration forces registration-info plus an authenticated
@@ -181,6 +208,10 @@ func RefreshAgentRegistration(ctx context.Context, key string, store AgentStateS
 }
 
 func decodeRuntimePrivateKey(state *AgentState, errKind error) ([]byte, error) {
+	// Device private keys are generated and persisted only by this SDK using
+	// padded StdEncoding. Unlike server public keys received across the wire,
+	// accepting RawStdEncoding here would expand a local custody format that has
+	// no legitimate raw producer and could conceal state corruption.
 	privateKey, err := base64.StdEncoding.Strict().DecodeString(state.PrivateKeyB64)
 	if err != nil {
 		wipeBytes(privateKey)
@@ -207,7 +238,7 @@ func newAgentRuntimeBinding(state *AgentState, privateKey []byte) *AgentRuntimeB
 		NHPPeer:                *state.NHPPeer,
 		RelayURL:               state.RelayURL,
 		KeyID:                  state.KeyID,
-		deviceStaticPrivateKey: privateKey,
+		deviceStaticPrivateKey: &agentRuntimePrivateKey{value: privateKey},
 	}
 }
 
@@ -282,7 +313,7 @@ func RecoverAgentCredential(ctx context.Context, key string, store AgentStateSto
 	// now committed to the authoritative store. Prime the new Client from it for
 	// immediate cutover without a second store/KMS load; older Clients still keep
 	// their prior cache until expiry and must be discarded by the caller.
-	return newPrimedStoreBackedClient(store, cfg.clientBaseURL, cfg.clientHTTPClient, state.DeviceAPIKey, cfg.invalidConfigErr)
+	return newPrimedStoreBackedClient(store, cfg.clientBaseURL, cfg.clientHTTPClient, state.DeviceAPIKey), nil
 }
 
 func loadExistingAgentState(ctx context.Context, store AgentStateStore, errKind error) (*AgentState, error) {

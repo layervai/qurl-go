@@ -50,6 +50,25 @@ type countingAgentStateStore struct {
 	onSave func(*AgentState)
 }
 
+type pointerTrackingAgentStateStore struct {
+	inner          AgentStateStore
+	lastLoaded     *AgentState
+	savedCandidate *AgentState
+}
+
+func (s *pointerTrackingAgentStateStore) LoadAgentState(ctx context.Context) (*AgentState, error) {
+	state, err := s.inner.LoadAgentState(ctx)
+	if err == nil {
+		s.lastLoaded = state
+	}
+	return state, err
+}
+
+func (s *pointerTrackingAgentStateStore) SaveAgentState(ctx context.Context, state *AgentState) error {
+	s.savedCandidate = state
+	return s.inner.SaveAgentState(ctx, state)
+}
+
 func (s *countingAgentStateStore) LoadAgentState(ctx context.Context) (*AgentState, error) {
 	s.loads.Add(1)
 	return s.inner.LoadAgentState(ctx)
@@ -169,6 +188,49 @@ func TestAgentRuntimeBinding_NilPointerFormattingDoesNotPanic(t *testing.T) {
 		if strings.Contains(got, "%!") || strings.Contains(got, "deviceStaticPrivateKey") {
 			t.Fatalf("nil runtime binding %s formatting failed closed: %s", format, got)
 		}
+	}
+}
+
+func TestAgentRuntimeBinding_AccidentalCopySharesSynchronizedOneShotKey(t *testing.T) {
+	want := bytes.Repeat([]byte{0x5a}, 32)
+	binding := &AgentRuntimeBinding{
+		deviceStaticPrivateKey: &agentRuntimePrivateKey{value: bytes.Clone(want)},
+	}
+	copied := *binding
+	start := make(chan struct{})
+	results := make(chan []byte, 2)
+	for _, candidate := range []*AgentRuntimeBinding{binding, &copied} {
+		go func(candidate *AgentRuntimeBinding) {
+			<-start
+			results <- candidate.TakeDeviceStaticPrivateKey()
+		}(candidate)
+	}
+	close(start)
+	first, second := <-results, <-results
+	if first == nil {
+		first, second = second, first
+	}
+	if !bytes.Equal(first, want) || second != nil {
+		t.Fatalf("copy one-shot results = %x / %x, want key / nil", first, second)
+	}
+	wipeBytes(first)
+	binding.Destroy()
+	copied.Destroy()
+}
+
+func TestRefreshAgentRegistration_CustomStoreReceivesClonedCandidate(t *testing.T) {
+	h := registeredHarness(t)
+	tracking := &pointerTrackingAgentStateStore{inner: h.store}
+	binding, err := RefreshAgentRegistration(context.Background(), "lv_enroll", tracking, h.registerOpts()...)
+	if err != nil {
+		t.Fatalf("RefreshAgentRegistration: %v", err)
+	}
+	binding.Destroy()
+	if tracking.lastLoaded == nil || tracking.savedCandidate == nil {
+		t.Fatalf("custom store pointers = loaded %p, saved %p", tracking.lastLoaded, tracking.savedCandidate)
+	}
+	if tracking.lastLoaded == tracking.savedCandidate {
+		t.Fatal("lifecycle save reused the custom store's loaded pointer; want an isolated candidate snapshot")
 	}
 }
 
@@ -883,6 +945,56 @@ func TestRecoverAgentCredential_AccountLiteralResumesAfterPending(t *testing.T) 
 	state := h.loadState(t)
 	if state.OTPRequestedAt != nil || state.DeviceAPIKey != "lv_device_recovered" {
 		t.Fatalf("recovery resume did not commit replacement: %#v", state)
+	}
+}
+
+func TestRecoverAgentCredential_AccountReREGAfterAbandonedRAK(t *testing.T) {
+	ctx := context.Background()
+	h := registeredHarness(t)
+	h.svc.mu.Lock()
+	h.svc.keyKind = keyKindAccount
+	h.svc.maskedEmail = "j***@example.test"
+	h.svc.deviceAPIKey = "lv_device_recovered"
+	h.svc.mu.Unlock()
+	if _, err := RecoverAgentCredential(ctx, "lv_account", h.store, h.registerOpts(allowAccountLifecycle())...); !errors.Is(err, ErrOTPPending) {
+		t.Fatalf("account recovery phase 1 = %v, want OTP pending", err)
+	}
+	h.nhp.mu.Lock()
+	h.nhp.expectCredential = "424242"
+	h.nhp.mu.Unlock()
+
+	opts := h.registerOpts(allowAccountLifecycle(), WithOTP("424242"))
+	cfg, err := validateRegisterInputs(ctx, "lv_account", h.store, opts)
+	if err != nil {
+		t.Fatalf("validate recovery inputs: %v", err)
+	}
+	cfg.applyLifecycleDefaultKeyPolicy()
+	state := h.loadState(t)
+	info, peer, relayURL, err := cfg.preflight(ctx, "lv_account")
+	if err != nil {
+		t.Fatalf("preflight abandoned recovery: %v", err)
+	}
+	state.NHPPeer = peer
+	state.RelayURL = relayURL
+	state.KeyID = info.KeyID
+	if err := cfg.registerExchangeChecked(ctx, state, peer, relayURL, "424242", pathAccount); err != nil {
+		t.Fatalf("simulate successful RAK before abandoned completion: %v", err)
+	}
+	regsAfterAbandonedRAK := h.nhp.regCount()
+	completionsBeforeRetry := h.svc.completionCalls.Load()
+
+	client, err := RecoverAgentCredential(ctx, "lv_account", h.store, opts...)
+	if err != nil || client == nil {
+		t.Fatalf("recovery after abandoned RAK = client %v, error %v", client, err)
+	}
+	if h.nhp.regCount() != regsAfterAbandonedRAK+1 {
+		t.Fatalf("recovery did not re-REG after abandoned RAK: regs = %d, want %d", h.nhp.regCount(), regsAfterAbandonedRAK+1)
+	}
+	if h.svc.completionCalls.Load() != completionsBeforeRetry+1 {
+		t.Fatalf("recovery completion calls = %d, want %d", h.svc.completionCalls.Load(), completionsBeforeRetry+1)
+	}
+	if state := h.loadState(t); state.DeviceAPIKey != "lv_device_recovered" || state.OTPRequestedAt != nil {
+		t.Fatalf("re-REG recovery did not commit replacement: %#v", state)
 	}
 }
 

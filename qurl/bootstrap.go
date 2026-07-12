@@ -150,14 +150,15 @@ const agentStateSchemaVersion = 2
 // implement this with KMS or a secret manager when that is not appropriate.
 //
 // Ownership contract: the registration engine takes ownership of the *AgentState
-// that LoadAgentState returns and mutates it IN PLACE (device id, keypair, relay,
-// key id, registered-at, device credential, otp-pending) before handing that same
-// pointer back to SaveAgentState. A custom store must therefore return a fresh,
-// caller-owned *AgentState from each LoadAgentState — never a pointer it retains,
-// caches, or shares across calls — and SaveAgentState must snapshot (encode)
-// eagerly rather than hold the pointer, or the engine's in-flight mutations will
-// corrupt the store's own copy. The file-backed store decodes a fresh value per
-// load and encodes on save, so it satisfies this by construction.
+// that LoadAgentState returns. Initial enrollment may mutate that pointer in
+// place; refresh/recovery deliberately clone it and may pass a different
+// candidate pointer to SaveAgentState. A custom store must therefore return a
+// fresh, caller-owned *AgentState from every load — never a pointer it retains,
+// caches, or shares — and must not rely on load/save pointer identity.
+// SaveAgentState must snapshot (encode) eagerly rather than retain its argument,
+// or later engine mutation could corrupt the store's own copy. The file-backed
+// store decodes a fresh value per load and encodes on save, so it satisfies this
+// by construction.
 type AgentStateStore interface {
 	LoadAgentState(context.Context) (*AgentState, error)
 	SaveAgentState(context.Context, *AgentState) error

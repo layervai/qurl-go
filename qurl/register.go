@@ -92,11 +92,7 @@ func RegisterAgentRuntime(ctx context.Context, key string, store AgentStateStore
 		return nil, nil, err
 	}
 	privateKey := cfg.takeRuntimePrivateKey()
-	client, err := newPrimedStoreBackedClient(store, cfg.clientBaseURL, cfg.clientHTTPClient, state.DeviceAPIKey, cfg.invalidConfigErr)
-	if err != nil {
-		wipeBytes(privateKey)
-		return nil, nil, err
-	}
+	client := newPrimedStoreBackedClient(store, cfg.clientBaseURL, cfg.clientHTTPClient, state.DeviceAPIKey)
 	return client, newAgentRuntimeBinding(state, privateKey), nil
 }
 
@@ -1063,14 +1059,12 @@ func newStoreBackedClient(store AgentStateStore, baseURL string, httpClient HTTP
 	return newStoreBackedClientWithCredential(store, baseURL, httpClient, "")
 }
 
-// newPrimedStoreBackedClient validates the credential immediately before
-// seeding it. This keeps malformed persisted/completion credentials from being
-// trusted merely because a lifecycle caller's earlier validation is refactored.
-func newPrimedStoreBackedClient(store AgentStateStore, baseURL string, httpClient HTTPDoer, deviceAPIKey string, errKind error) (*Client, error) {
-	if err := validateExactBearerToken(deviceAPIKey, "primed device credential", errKind); err != nil {
-		return nil, err
-	}
-	return newStoreBackedClientWithCredential(store, baseURL, httpClient, deviceAPIKey), nil
+// newPrimedStoreBackedClient is deliberately infallible after callers validate
+// the exact credential as part of their pre-commit state/completion contract.
+// Keeping construction infallible prevents a committed lifecycle mutation from
+// acquiring a new post-commit error tail merely while materializing its Client.
+func newPrimedStoreBackedClient(store AgentStateStore, baseURL string, httpClient HTTPDoer, validatedDeviceAPIKey string) *Client {
+	return newStoreBackedClientWithCredential(store, baseURL, httpClient, validatedDeviceAPIKey)
 }
 
 // newStoreBackedClientWithCredential optionally primes the one-minute cache from

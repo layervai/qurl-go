@@ -565,9 +565,13 @@ cannot silently rotate binding state after the handshake.
 
 `RecoverAgentCredential` intentionally has no crash-recovery completion probe:
 the probe would itself call the first-issue endpoint and cannot re-fetch an
-already-issued plaintext key. If recovery crashes after replacement mint but
-before durable persistence, the next attempt returns already-issued. Revoke the
-active device key again, then start another explicit recovery cycle; never
+already-issued plaintext key. If account recovery stops after an authenticated
+RAK but before completion is dispatched, the next explicit recovery re-REGs the
+same device key and then completes. qurl-service and its relay must accept that
+same-key re-REG idempotently; deploy the cross-repo repeated-REG regression
+before enabling recovery. If recovery instead crashes after replacement mint
+but before durable persistence, the next attempt returns already-issued. Revoke
+the active device key again, then start another explicit recovery cycle; never
 blindly probe or retry.
 
 Context cancellation or deadline expiry while the completion transport is in

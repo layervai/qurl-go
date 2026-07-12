@@ -256,9 +256,11 @@ Match errors by type, not message text:
   code documents and pins its intended trust model.
 
   This release requires qurl-service registration-info/completion support,
-  idempotent same-key REG, device-key revoke that atomically clears the
-  first-issue sentinel, and relay REG/RAK routing to be deployed before these
-  lifecycle operations are enabled. During peer rotation, every qurl-service pod
+  idempotent same-key REG (including account recovery re-REG after an earlier
+  authenticated RAK stopped before completion), device-key revoke that atomically
+  clears the first-issue sentinel, and relay REG/RAK routing to be deployed with
+  repeated-REG regression coverage before these lifecycle operations are
+  enabled. During peer rotation, every qurl-service pod
   serving registration-info and completion must report the same peer key; a
   deployment-skew mismatch after mint fails recovery-required rather than
   silently replacing the RAK-authenticated peer. Registration-info/RAK must
