@@ -269,17 +269,6 @@ func (r connectorResourceWire) connectorResource(client *Client, expectedSlug, e
 	if r.Type != producerConnectorResourceType {
 		return nil, invalidConnectorResourceResponse("resource %q has type %q, want %q", r.ResourceID, r.Type, producerConnectorResourceType)
 	}
-	// The fenced qurl-service ResourceStatus schema is active/revoked only.
-	// Anything else is producer drift, not a transitional state to accept.
-	if r.Status == "revoked" {
-		if operation != connectorResourceOperationGetByID {
-			return nil, invalidConnectorResourceResponse("active-only qURL Connector operation returned revoked resource %q", r.ResourceID)
-		}
-		return nil, fmt.Errorf("%w: resource %q", ErrConnectorResourceRevoked, r.ResourceID)
-	}
-	if r.Status != "active" {
-		return nil, invalidConnectorResourceResponse("resource %q has status %q, want active", r.ResourceID, r.Status)
-	}
 	if !connectorSlugPattern.MatchString(r.Slug) {
 		return nil, invalidConnectorResourceResponse("resource %q has missing or invalid slug", r.ResourceID)
 	}
@@ -290,6 +279,17 @@ func (r connectorResourceWire) connectorResource(client *Client, expectedSlug, e
 	// field is still constrained by the same exact OpenAPI regex as slug.
 	if r.Alias != nil && !connectorSlugPattern.MatchString(*r.Alias) {
 		return nil, invalidConnectorResourceResponse("resource %q has an invalid alias", r.ResourceID)
+	}
+	// The fenced qurl-service ResourceStatus schema is active/revoked only.
+	// Anything else is producer drift, not a transitional state to accept.
+	if r.Status == "revoked" {
+		if operation != connectorResourceOperationGetByID {
+			return nil, invalidConnectorResourceResponse("active-only qURL Connector operation returned revoked resource %q", r.ResourceID)
+		}
+		return nil, fmt.Errorf("%w: resource %q", ErrConnectorResourceRevoked, r.ResourceID)
+	}
+	if r.Status != "active" {
+		return nil, invalidConnectorResourceResponse("resource %q has status %q, want active", r.ResourceID, r.Status)
 	}
 	return &ConnectorResource{
 		client:          client,

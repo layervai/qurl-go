@@ -481,10 +481,21 @@ func TestClient_ConnectorResourceRevokedSuccessRows(t *testing.T) {
 		t.Fatalf("detail revoked row = %v, want revoked", err)
 	}
 
-	incompleteDetail := strings.Replace(detail, `"knock_resource_id":"`+testKnockID+`",`, "", 1)
-	client.httpClient = staticConnectorResponseDoer(http.StatusOK, incompleteDetail)
-	if _, err := client.GetConnectorResource(context.Background(), testConnectorID); !errors.Is(err, ErrInvalidConnectorResourceResponse) || errors.Is(err, ErrConnectorResourceRevoked) {
-		t.Fatalf("incomplete revoked detail row = %v, want invalid response", err)
+	invalidDetails := []struct {
+		name string
+		body string
+	}{
+		{name: "missing knock id", body: strings.Replace(detail, `"knock_resource_id":"`+testKnockID+`",`, "", 1)},
+		{name: "invalid slug", body: strings.Replace(detail, testConnectorSlug, "Bad Slug", 1)},
+		{name: "invalid alias", body: strings.Replace(detail, `"slug":"`+testConnectorSlug+`"`, `"slug":"`+testConnectorSlug+`","alias":"Bad Alias"`, 1)},
+	}
+	for _, tt := range invalidDetails {
+		t.Run(tt.name, func(t *testing.T) {
+			client.httpClient = staticConnectorResponseDoer(http.StatusOK, tt.body)
+			if _, err := client.GetConnectorResource(context.Background(), testConnectorID); !errors.Is(err, ErrInvalidConnectorResourceResponse) || errors.Is(err, ErrConnectorResourceRevoked) {
+				t.Fatalf("malformed revoked detail row = %v, want invalid response", err)
+			}
+		})
 	}
 
 	list := fmt.Sprintf(`{"data":[{"resource_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"revoked","slug":%q}]}`, testConnectorID, testKnockID, testConnectorSlug)
