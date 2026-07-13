@@ -102,7 +102,8 @@ The producer defines slug lookup as a server-side active-only 0-or-1 result and
 forbids combining `slug` with `status` or `type`. The SDK therefore sends only
 `?slug=...`; it does not add a status filter or filter returned rows locally.
 More than one row is an invalid, ambiguous producer response even when only one
-row appears active.
+row appears active; the error matches both `ErrConnectorResourceAmbiguous` and
+the broader `ErrInvalidConnectorResourceResponse` sentinel.
 
 ## Revoke a resource
 

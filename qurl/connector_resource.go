@@ -157,6 +157,12 @@ type connectorResourceDetailResponse struct {
 	} `json:"data"`
 }
 
+type connectorResourceExpectation struct {
+	slug       string
+	resourceID string
+	operation  connectorResourceOperation
+}
+
 // EnsureConnectorResource finds or creates the active qURL Connector resource
 // for slug. The private wire request includes qurl-service's resource type.
 // FoundExisting reports whether the service returned an already-active row.
@@ -185,7 +191,10 @@ func (c *Client) EnsureConnectorResource(ctx context.Context, slug string) (*Ens
 	if response.Meta.FoundExisting == nil {
 		return nil, classifyConnectorResourceError(connectorResourceOperationEnsure, ensureConnectorResourceOutcomeUnknown(invalidConnectorResourceResponse("missing meta.found_existing")))
 	}
-	resource, err := response.Data.connectorResource(c, slug, "", connectorResourceOperationEnsure)
+	resource, err := response.Data.connectorResource(c, connectorResourceExpectation{
+		slug:      slug,
+		operation: connectorResourceOperationEnsure,
+	})
 	if err != nil {
 		return nil, classifyConnectorResourceError(connectorResourceOperationEnsure, ensureConnectorResourceOutcomeUnknown(err))
 	}
@@ -210,7 +219,10 @@ func (c *Client) GetConnectorResource(ctx context.Context, resourceID string) (*
 	if err := c.doJSONStatus(ctx, http.MethodGet, path, nil, &response, http.StatusOK); err != nil {
 		return nil, classifyConnectorResourceError(connectorResourceOperationGetByID, err)
 	}
-	return response.Data.Resource.connectorResource(c, "", resourceID, connectorResourceOperationGetByID)
+	return response.Data.Resource.connectorResource(c, connectorResourceExpectation{
+		resourceID: resourceID,
+		operation:  connectorResourceOperationGetByID,
+	})
 }
 
 // GetConnectorResourceBySlug fetches the single active qURL Connector resource
@@ -240,7 +252,10 @@ func (c *Client) GetConnectorResourceBySlug(ctx context.Context, slug string) (*
 	case 0:
 		return nil, fmt.Errorf("%w: slug %q", ErrConnectorResourceNotFound, slug)
 	case 1:
-		return (*response.Data)[0].connectorResource(c, slug, "", connectorResourceOperationGetBySlug)
+		return (*response.Data)[0].connectorResource(c, connectorResourceExpectation{
+			slug:      slug,
+			operation: connectorResourceOperationGetBySlug,
+		})
 	default:
 		// Both sentinels are intentional: callers can match the cardinality
 		// invariant breach or the broader invalid-response contract.
@@ -265,7 +280,7 @@ func (c *Client) DeleteConnectorResource(ctx context.Context, resourceID string)
 	return nil
 }
 
-func (r connectorResourceWire) connectorResource(client *Client, expectedSlug, expectedID string, operation connectorResourceOperation) (*ConnectorResource, error) {
+func (r connectorResourceWire) connectorResource(client *Client, expect connectorResourceExpectation) (*ConnectorResource, error) {
 	// Validate the complete row before lifecycle classification. qurl-service's
 	// shared create/detail/list serializer returns resource_id,
 	// connector_routing_id, knock_resource_id, type, and slug for both active and
@@ -273,8 +288,8 @@ func (r connectorResourceWire) connectorResource(client *Client, expectedSlug, e
 	if !isValidConnectorResourceID(r.ResourceID) {
 		return nil, invalidConnectorResourceResponse("missing or invalid resource_id")
 	}
-	if expectedID != "" && r.ResourceID != expectedID {
-		return nil, invalidConnectorResourceResponse("requested resource_id %q returned %q", expectedID, r.ResourceID)
+	if expect.resourceID != "" && r.ResourceID != expect.resourceID {
+		return nil, invalidConnectorResourceResponse("requested resource_id %q returned %q", expect.resourceID, r.ResourceID)
 	}
 	if !connectorRoutingIDPattern.MatchString(r.ConnectorRoutingID) {
 		return nil, invalidConnectorResourceResponse("resource %q has missing or invalid connector_routing_id", r.ResourceID)
@@ -300,8 +315,8 @@ func (r connectorResourceWire) connectorResource(client *Client, expectedSlug, e
 	if !connectorSlugPattern.MatchString(r.Slug) {
 		return nil, invalidConnectorResourceResponse("resource %q has missing or invalid slug", r.ResourceID)
 	}
-	if expectedSlug != "" && r.Slug != expectedSlug {
-		return nil, invalidConnectorResourceResponse("requested slug %q returned %q", expectedSlug, r.Slug)
+	if expect.slug != "" && r.Slug != expect.slug {
+		return nil, invalidConnectorResourceResponse("requested slug %q returned %q", expect.slug, r.Slug)
 	}
 	// Alias is display metadata, but the producer applies the same OpenAPI regex
 	// as slug. A grammar change requires a coordinated producer/SDK release.
@@ -311,7 +326,7 @@ func (r connectorResourceWire) connectorResource(client *Client, expectedSlug, e
 	// The fenced qurl-service ResourceStatus schema is active/revoked only.
 	// Anything else is producer drift, not a transitional state to accept.
 	if r.Status == "revoked" {
-		if operation != connectorResourceOperationGetByID {
+		if expect.operation != connectorResourceOperationGetByID {
 			return nil, invalidConnectorResourceResponse("active-only qURL Connector operation returned revoked resource %q", r.ResourceID)
 		}
 		return nil, fmt.Errorf("%w: resource %q", ErrConnectorResourceRevoked, r.ResourceID)
