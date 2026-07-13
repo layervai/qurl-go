@@ -13,63 +13,134 @@ on:
 jobs:
   claude:
     if: |
-      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
-      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
-      (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
-      (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
+      (
+        (github.event_name == 'issue_comment' || github.event_name == 'pull_request_review_comment') &&
+        contains(github.event.comment.body, '@claude') &&
+        (
+          github.event.comment.author_association == 'OWNER' ||
+          github.event.comment.author_association == 'MEMBER' ||
+          github.event.comment.author_association == 'COLLABORATOR'
+        )
+      ) ||
+      (
+        github.event_name == 'pull_request_review' &&
+        contains(github.event.review.body, '@claude') &&
+        (
+          github.event.review.author_association == 'OWNER' ||
+          github.event.review.author_association == 'MEMBER' ||
+          github.event.review.author_association == 'COLLABORATOR'
+        )
+      ) ||
+      (
+        github.event_name == 'issues' &&
+        (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')) &&
+        (
+          github.event.issue.author_association == 'OWNER' ||
+          github.event.issue.author_association == 'MEMBER' ||
+          github.event.issue.author_association == 'COLLABORATOR'
+        )
+      )
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
-      pull-requests: read
-      issues: read
-      id-token: write
+      pull-requests: write
+      issues: write
       actions: read
 
     steps:
-      - name: Resolve checkout ref
-        id: checkout-ref
+      - name: Validate Claude trigger actor permission
+        id: claude_actor
         env:
           GH_TOKEN: ${{ github.token }}
-          EVENT_NAME: ${{ github.event_name }}
+          TRIGGER_ACTOR: ${{ github.actor }}
         run: |
           set -euo pipefail
 
-          case "$EVENT_NAME" in
-            issue_comment)
-              if jq -e '.issue.pull_request != null' "$GITHUB_EVENT_PATH" >/dev/null; then
-                pr_number="$(jq -r '.issue.number' "$GITHUB_EVENT_PATH")"
-                sha="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$pr_number" --jq '.head.sha')"
-              else
-                sha="$GITHUB_SHA"
-              fi
-              ;;
-            pull_request_review_comment|pull_request_review)
-              sha="$(jq -r '.pull_request.head.sha' "$GITHUB_EVENT_PATH")"
-              ;;
+          if [[ -z "$TRIGGER_ACTOR" ]]; then
+            echo "::error::Unable to resolve Claude trigger actor; failing closed before checkout."
+            exit 1
+          fi
+
+          if ! actor_permission="$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$TRIGGER_ACTOR/permission" --jq '.permission // ""')"; then
+            echo "::error::Unable to resolve Claude trigger actor permission; failing closed before checkout."
+            exit 1
+          fi
+
+          case "$actor_permission" in
+            admin|maintain|write) ;;
             *)
-              sha="$GITHUB_SHA"
+              echo "::error::Claude slash-command trigger actor must have write access to this repository."
+              exit 1
               ;;
           esac
 
-          if [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "invalid checkout SHA: $sha" >&2
+          echo "authorized=true" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve Claude pull request context
+        id: claude_pr
+        if: |
+          (github.event_name == 'issue_comment' && github.event.issue.pull_request != null) ||
+          github.event_name == 'pull_request_review_comment' ||
+          github.event_name == 'pull_request_review'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.issue.number || github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "$PR_NUMBER" ]]; then
+            echo "::error::Unable to resolve pull request number for Claude command."
             exit 1
           fi
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+          if ! pr="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")"; then
+            echo "::error::Unable to resolve PR head for Claude command; failing closed before checkout."
+            exit 1
+          fi
+          head_repo="$(jq -r '.head.repo.full_name // ""' <<<"$pr")"
+          head_sha="$(jq -r '.head.sha // ""' <<<"$pr")"
+
+          if [[ "$head_repo" != "$GITHUB_REPOSITORY" ]]; then
+            echo "::error::Claude slash-command checkout is limited to same-repository PRs because this workflow holds ANTHROPIC_API_KEY."
+            exit 1
+          fi
+
+          if [[ ! "$head_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Invalid PR head SHA: $head_sha"
+            exit 1
+          fi
+
+          # Checkout uses this immutable snapshot rather than the moving branch
+          # or refs/pull ref, so a push after authorization cannot swap the code
+          # reviewed by this workflow.
+          {
+            echo "sha=$head_sha"
+            echo "checkout_allowed=true"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Checkout repository
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+        id: checkout
+        if: |
+          steps.claude_actor.outputs.authorized == 'true' &&
+          (
+            steps.claude_pr.outcome == 'skipped' ||
+            steps.claude_pr.outputs.checkout_allowed == 'true'
+          )
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: ${{ steps.checkout-ref.outputs.sha }}
-          fetch-depth: 1
+          ref: ${{ steps.claude_pr.outputs.sha != '' && steps.claude_pr.outputs.sha || github.sha }}
+          fetch-depth: ${{ steps.claude_pr.outputs.sha != '' && '0' || '1' }}
 
       - name: Run Claude Code
         id: claude
-        uses: anthropics/claude-code-action@2fee15510437d71399d9139ed60433470484a8fb # v1.0.153
+        if: steps.checkout.outcome == 'success'
+        uses: anthropics/claude-code-action@558b1d6cab4085c7753fe402c10bef0fbb92ac7a # v1.0.165
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          # Repeated full Claude reports dominate context on long-running PRs
-          # and can make the SDK exit before inference. Human requests and
-          # dispositions remain available while prior bot transcripts do not.
-          exclude_comments_by_actor: '*[bot]'
+          github_token: ${{ github.token }}
+          # The action filters GraphQL author.login values. Claude and Actions
+          # appear there as `claude` and `github-actions`, without REST's [bot]
+          # suffix; retain the wildcard for other GitHub App bots.
+          exclude_comments_by_actor: 'claude,github-actions,*[bot]'
           claude_args: '--model claude-opus-4-8'
