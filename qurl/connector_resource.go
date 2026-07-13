@@ -101,13 +101,7 @@ func (r *ConnectorResource) CreatePortal(ctx context.Context, opts ...PortalOpti
 }
 
 func (r *ConnectorResource) resourceHandle() *Resource {
-	if r == nil {
-		return nil
-	}
-	return &Resource{
-		client: r.client,
-		ID:     r.ResourceID,
-	}
+	return r.client.ResourceByID(r.ResourceID)
 }
 
 type ensureConnectorResourceRequest struct {
