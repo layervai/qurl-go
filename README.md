@@ -242,31 +242,14 @@ Match errors by type, not message text:
   public-key `ResourceID`. See [Manage qURL Connector
   resources](docs/connector-resources.md).
 
-  **Minimum backend/deployment contract:** this release does not claim the
-  backend is deployed or ready to flip. The qurl-service contract fenced by
-  [layervai/qurl-service#1192](https://github.com/layervai/qurl-service/pull/1192)
-  plus canonical public-key validation in
-  [#1223](https://github.com/layervai/qurl-service/pull/1223) and the explicit
-  Connector routing producer in
-  [#1225](https://github.com/layervai/qurl-service/pull/1225) must be deployed
-  first. Keep `QURL_AGENT_REGISTRATION_ENABLED=false` until
-  that service ledger's completion-limiter, trusted-proxy, Redis, abuse-capacity,
-  alarm, and cohort hard gates are proven; enable it only when enrollment may
-  begin. Service startup with registration enabled also requires
-  `QURL_AGENT_BOOTSTRAP_ENABLED=true` plus configured relay and NHP peer
-  dependencies. `QURL_AGENT_OTP_ENABLED` is not required for qURL Connector's
-  bootstrap-only default; enable it only for intentional account/OTP repair.
-  qURL Connector resource ensure/create also requires the producer's existing
-  `CONNECTOR_AUTH_ENABLED=true` service gate. The resource collection/item routes
-  have no new SDK-specific feature flag, but the private producer wire branch
-  remains fail-closed behind that existing gate.
-
-  The completion-minted device credential must retain the producer's exact
-  URL and qURL Connector resource allow-list (GET/POST resource collection,
-  GET/PATCH/DELETE resource item, and the two approved portal-creation writes)
-  while denying transit and unclassified routes. `POST /v1/resources`
-  find-or-create must preserve the exact `201` success envelope,
-  `409 slug_in_use`, and `410 resource_tombstoned` contracts documented here.
+  **Release gate:** do not publish this SDK surface until the qurl-service
+  producer contracts in
+  [#1211](https://github.com/layervai/qurl-service/pull/1211),
+  [#1223](https://github.com/layervai/qurl-service/pull/1223), and
+  [#1225](https://github.com/layervai/qurl-service/pull/1225) are accepted and
+  deployed. Track mutable rollout state, flags, and dependencies in
+  [qurl-connector#421](https://github.com/layervai/qurl-connector/issues/421);
+  this README documents SDK behavior rather than live environment state.
 
 - **Added: registered-agent lifecycle APIs** — `OpenRegisteredAgent` provides a
   store-backed reopen without qURL enrollment or resource API calls (a sealed

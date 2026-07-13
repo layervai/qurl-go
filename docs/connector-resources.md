@@ -152,9 +152,11 @@ If ensure matches `ErrConnectorResourceOutcomeUnknown`, reconcile with
 `GetConnectorResourceBySlug` before deciding whether another ensure is safe. If
 delete matches it, reconcile with `GetConnectorResource` before deciding whether
 to delete again. Pre-dispatch validation and authorization failures do not match
-this sentinel. A 5xx response on ensure or delete also matches it because a
-gateway or service can fail after the mutation committed; the underlying
-`*qurl.APIError` remains available through `errors.As`.
+this sentinel. A nominal `201` or `204` whose body violates the endpoint
+contract also matches it: the SDK does not treat a protocol-invalid response as
+proof that the mutation committed. A 5xx response on ensure or delete also
+matches it because a gateway or service can fail after the mutation committed;
+the underlying `*qurl.APIError` remains available through `errors.As`.
 
 ## API origin and transport
 
@@ -169,4 +171,5 @@ The wire shapes are fenced against qurl-service's `/v1/resources` and
 [`layervai/qurl-service#1225`](https://github.com/layervai/qurl-service/pull/1225),
 and the existing qURL Connector resource/bootstrap test fixtures. This SDK
 change does not claim that the backend is deployed or that a qurl-go release
-has been tagged; those are separate cross-repository handoff gates in issue 421.
+has been tagged. Mutable rollout state and cross-repository handoff gates live
+in issue 421 rather than this SDK contract reference.

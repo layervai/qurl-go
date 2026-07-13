@@ -478,8 +478,8 @@ func TestClient_ConnectorResourceSuccessfulResponseValidation(t *testing.T) {
 			if !errors.Is(err, tt.want) {
 				t.Fatalf("error = %v, want %v", err, tt.want)
 			}
-			if tt.name == "malformed JSON" && !errors.Is(err, ErrInvalidAPIResponse) {
-				t.Fatalf("malformed response lost ErrInvalidAPIResponse: %v", err)
+			if !errors.Is(err, ErrInvalidAPIResponse) {
+				t.Fatalf("invalid successful response lost ErrInvalidAPIResponse: %v", err)
 			}
 			if !errors.Is(err, ErrConnectorResourceOutcomeUnknown) {
 				t.Fatalf("successful ensure contract failure lost outcome ambiguity: %v", err)
@@ -527,14 +527,14 @@ func TestClient_ConnectorResourceRevokedSuccessRows(t *testing.T) {
 	}
 	for _, tt := range invalidDetails {
 		t.Run(tt.name, func(t *testing.T) {
-			if err := getByID(t, tt.body); !errors.Is(err, ErrInvalidConnectorResourceResponse) || errors.Is(err, ErrConnectorResourceRevoked) {
+			if err := getByID(t, tt.body); !errors.Is(err, ErrInvalidAPIResponse) || !errors.Is(err, ErrInvalidConnectorResourceResponse) || errors.Is(err, ErrConnectorResourceRevoked) {
 				t.Fatalf("malformed revoked detail row = %v, want invalid response", err)
 			}
 		})
 	}
 
 	list := fmt.Sprintf(`{"data":[{"resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"revoked","slug":%q}]}`, testConnectorID, testConnectorRoutingID, testKnockID, testConnectorSlug)
-	if err := getBySlug(t, list); !errors.Is(err, ErrInvalidConnectorResourceResponse) || errors.Is(err, ErrConnectorResourceRevoked) {
+	if err := getBySlug(t, list); !errors.Is(err, ErrInvalidAPIResponse) || !errors.Is(err, ErrInvalidConnectorResourceResponse) || errors.Is(err, ErrConnectorResourceRevoked) {
 		t.Fatalf("active-only slug revoked row = %v, want invalid response", err)
 	}
 }
@@ -543,13 +543,14 @@ func TestClient_GetConnectorResourceBySlugCardinality(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name string
-		data string
-		want error
+		name        string
+		data        string
+		want        error
+		wantInvalid bool
 	}{
 		{name: "not found", data: `[]`, want: ErrConnectorResourceNotFound},
-		{name: "null data", data: `null`, want: ErrInvalidConnectorResourceResponse},
-		{name: "ambiguous", data: fmt.Sprintf(`[{"resource_id":%q},{"resource_id":%q}]`, testConnectorID, testOtherConnectorID), want: ErrConnectorResourceAmbiguous},
+		{name: "null data", data: `null`, want: ErrInvalidConnectorResourceResponse, wantInvalid: true},
+		{name: "ambiguous", data: fmt.Sprintf(`[{"resource_id":%q},{"resource_id":%q}]`, testConnectorID, testOtherConnectorID), want: ErrConnectorResourceAmbiguous, wantInvalid: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -561,6 +562,9 @@ func TestClient_GetConnectorResourceBySlugCardinality(t *testing.T) {
 			_, err := newConnectorTestClient(t, api.URL).GetConnectorResourceBySlug(context.Background(), testConnectorSlug)
 			if !errors.Is(err, tt.want) {
 				t.Fatalf("error = %v, want %v", err, tt.want)
+			}
+			if got := errors.Is(err, ErrInvalidAPIResponse); got != tt.wantInvalid {
+				t.Fatalf("ErrInvalidAPIResponse = %t, want %t; error=%v", got, tt.wantInvalid, err)
 			}
 		})
 	}
@@ -574,7 +578,7 @@ func TestClient_GetConnectorResourceBySlugRejectsMissingData(t *testing.T) {
 	}))
 	defer api.Close()
 	_, err := newConnectorTestClient(t, api.URL).GetConnectorResourceBySlug(context.Background(), testConnectorSlug)
-	if !errors.Is(err, ErrInvalidConnectorResourceResponse) || errors.Is(err, ErrConnectorResourceNotFound) {
+	if !errors.Is(err, ErrInvalidAPIResponse) || !errors.Is(err, ErrInvalidConnectorResourceResponse) || errors.Is(err, ErrConnectorResourceNotFound) {
 		t.Fatalf("error = %v, want malformed response and not not-found", err)
 	}
 }
@@ -603,7 +607,7 @@ func TestClient_GetConnectorResourceRejectsFlatOrMismatchedDetail(t *testing.T) 
 			}))
 			defer api.Close()
 			_, err := newConnectorTestClient(t, api.URL).GetConnectorResource(context.Background(), testConnectorID)
-			if !errors.Is(err, ErrInvalidConnectorResourceResponse) {
+			if !errors.Is(err, ErrInvalidAPIResponse) || !errors.Is(err, ErrInvalidConnectorResourceResponse) {
 				t.Fatalf("error = %v, want malformed detail", err)
 			}
 		})

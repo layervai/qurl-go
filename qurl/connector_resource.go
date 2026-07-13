@@ -58,9 +58,11 @@ var (
 	ErrInvalidConnectorResourceResponse = errors.New("qurl: invalid qURL Connector resource response")
 
 	// ErrConnectorResourceOutcomeUnknown is returned when an ensure or delete was
-	// dispatched but the SDK cannot prove whether it committed. For ensure,
-	// reconcile by immutable slug before retrying. For delete, read the resource
-	// and reconcile its lifecycle before deciding whether another delete is safe.
+	// dispatched but the SDK cannot prove whether it committed. A nominal success
+	// status with a response that violates the endpoint contract is not accepted
+	// as proof of commit. For ensure, reconcile by immutable slug before retrying.
+	// For delete, read the resource and reconcile its lifecycle before deciding
+	// whether another delete is safe.
 	ErrConnectorResourceOutcomeUnknown = errors.New("qurl: qURL Connector resource mutation outcome unknown")
 )
 
@@ -257,9 +259,11 @@ func (c *Client) GetConnectorResourceBySlug(ctx context.Context, slug string) (*
 			operation: connectorResourceOperationGetBySlug,
 		})
 	default:
-		// Both sentinels are intentional: callers can match the cardinality
-		// invariant breach or the broader invalid-response contract.
-		return nil, fmt.Errorf("%w: %w: slug %q returned %d resources", ErrConnectorResourceAmbiguous, ErrInvalidConnectorResourceResponse, slug, len(*response.Data))
+		// The ambiguous and both invalid-response sentinels are intentional:
+		// callers can match the cardinality invariant breach, the Connector
+		// contract, or the generic successful-response contract.
+		return nil, fmt.Errorf("%w: %w", ErrConnectorResourceAmbiguous,
+			invalidConnectorResourceResponse("slug %q returned %d resources", slug, len(*response.Data)))
 	}
 }
 
@@ -386,6 +390,9 @@ func classifyConnectorResourceError(operation connectorResourceOperation, err er
 		}
 	}
 	if errors.Is(err, ErrInvalidAPIResponse) {
+		if errors.Is(err, ErrInvalidConnectorResourceResponse) {
+			return err
+		}
 		return fmt.Errorf("%w: %w", ErrInvalidConnectorResourceResponse, err)
 	}
 	var apiErr *APIError
@@ -436,5 +443,5 @@ func ensureConnectorResourceOutcomeUnknown(err error) error {
 }
 
 func invalidConnectorResourceResponse(format string, args ...any) error {
-	return fmt.Errorf("%w: %s", ErrInvalidConnectorResourceResponse, fmt.Sprintf(format, args...))
+	return fmt.Errorf("%w: %w: %s", ErrInvalidConnectorResourceResponse, ErrInvalidAPIResponse, fmt.Sprintf(format, args...))
 }

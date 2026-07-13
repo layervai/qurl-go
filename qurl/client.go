@@ -51,8 +51,9 @@ var ErrInvalidClientConfig = errors.New("qurl: invalid client config")
 var ErrInvalidResourceRequest = errors.New("qurl: invalid resource request")
 
 // ErrInvalidAPIResponse is returned when a successful LayerV API response is
-// empty or cannot be decoded. Endpoint-specific methods may wrap this with a
-// narrower response-contract sentinel.
+// empty, cannot be decoded, or violates an endpoint response contract.
+// Endpoint-specific methods may wrap this with a narrower response-contract
+// sentinel.
 var ErrInvalidAPIResponse = errors.New("qurl: invalid API response")
 
 // ErrInvalidPortalRequest is returned before an API request when a portal input
