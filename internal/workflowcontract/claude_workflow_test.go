@@ -106,16 +106,24 @@ func requireNotContains(t *testing.T, contents string, fragment string) {
 
 func requireBefore(t *testing.T, contents string, fragments ...string) {
 	t.Helper()
-	previous := -1
-	for _, fragment := range fragments {
+	positions := make([]int, len(fragments))
+	allUnique := true
+	for i, fragment := range fragments {
 		if count := strings.Count(contents, fragment); count != 1 {
 			t.Errorf("ordered workflow contract fragment %q must appear exactly once; got %d", fragment, count)
+			allUnique = false
 			continue
 		}
-		position := strings.Index(contents, fragment)
-		if position <= previous {
-			t.Errorf("workflow contract fragment %q appears out of order", fragment)
+		positions[i] = strings.Index(contents, fragment)
+	}
+	if !allUnique {
+		// Ordering is undefined until every anchor is unique; the cardinality
+		// diagnostics above identify the prerequisite contract failures.
+		return
+	}
+	for i := 1; i < len(fragments); i++ {
+		if positions[i] <= positions[i-1] {
+			t.Errorf("workflow contract fragment %q appears out of order", fragments[i])
 		}
-		previous = position
 	}
 }
