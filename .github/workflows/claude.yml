@@ -16,29 +16,17 @@ jobs:
       (
         (github.event_name == 'issue_comment' || github.event_name == 'pull_request_review_comment') &&
         contains(github.event.comment.body, '@claude') &&
-        (
-          github.event.comment.author_association == 'OWNER' ||
-          github.event.comment.author_association == 'MEMBER' ||
-          github.event.comment.author_association == 'COLLABORATOR'
-        )
+        contains(fromJson('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
       ) ||
       (
         github.event_name == 'pull_request_review' &&
         contains(github.event.review.body, '@claude') &&
-        (
-          github.event.review.author_association == 'OWNER' ||
-          github.event.review.author_association == 'MEMBER' ||
-          github.event.review.author_association == 'COLLABORATOR'
-        )
+        contains(fromJson('["OWNER","MEMBER","COLLABORATOR"]'), github.event.review.author_association)
       ) ||
       (
         github.event_name == 'issues' &&
         (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')) &&
-        (
-          github.event.issue.author_association == 'OWNER' ||
-          github.event.issue.author_association == 'MEMBER' ||
-          github.event.issue.author_association == 'COLLABORATOR'
-        )
+        contains(fromJson('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association)
       )
     runs-on: ubuntu-latest
     # Recent successful repository review gates complete within six minutes;
@@ -137,6 +125,8 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ steps.claude_pr.outputs.sha != '' && steps.claude_pr.outputs.sha || github.sha }}
+          # PR review commands diff against origin/main; ordinary issue commands
+          # only need the default-branch snapshot and remain shallow.
           fetch-depth: ${{ steps.claude_pr.outputs.sha != '' && '0' || '1' }}
           # The action receives github_token explicitly; the reviewed tree does
           # not need a reusable credential materialized in local Git config.
