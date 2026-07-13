@@ -32,19 +32,14 @@ func TestInteractiveClaudeWorkflowAuthorizesBeforeImmutableCheckout(t *testing.T
 		`[[ ! "$head_sha" =~ ^[0-9a-f]{40}$ ]]`,
 		"steps.claude_pr.outputs.checkout_allowed == 'true'",
 		"ref: ${{ steps.claude_pr.outputs.sha != '' && steps.claude_pr.outputs.sha || github.sha }}",
-		claudeAction,
-		"github_token: ${{ github.token }}",
-		"exclude_comments_by_actor: 'claude,github-actions,*[bot]'",
-		"pull-requests: write",
-		"issues: write",
 	)
+	requireSharedActionContract(t, workflow)
 	requireBefore(t, workflow,
 		"- name: Validate Claude trigger actor permission",
 		"- name: Resolve Claude pull request context",
 		"- name: Checkout repository",
 		"- name: Run Claude Code",
 	)
-	requireNotContains(t, workflow, "id-token: write")
 }
 
 func TestAutomaticClaudeWorkflowBoundsGraphQLCommentAuthors(t *testing.T) {
@@ -53,6 +48,11 @@ func TestAutomaticClaudeWorkflowBoundsGraphQLCommentAuthors(t *testing.T) {
 	// The action filters GraphQL author.login. On this repository, historical
 	// transcripts are authored by `claude` and `github-actions`; `*[bot]` alone
 	// only matches actors whose login literally has that suffix.
+	requireSharedActionContract(t, workflow)
+}
+
+func requireSharedActionContract(t *testing.T, workflow string) {
+	t.Helper()
 	requireContains(t, workflow,
 		claudeAction,
 		"github_token: ${{ github.token }}",
