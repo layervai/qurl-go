@@ -1,10 +1,11 @@
 package qurl
 
 // Wire-contract provenance:
-//   - layervai/qurl-service@c5ab58440835e3967820e1e7b2427167d150c4ec
+//   - layervai/qurl-service@88840cff343571288a1224313325ffac75c5f2e3
 //     api/openapi.yaml: /v1/resources, /v1/resources/{id}, ResourceId,
 //     ResourceData, Meta; internal/domain/resource_key.go: strict canonical
-//     resource-public-key decoding and DER SPKI length bounds.
+//     resource-public-key decoding, DER SPKI length bounds, and the explicit
+//     opaque connector_routing_id contract.
 //   - layervai/qurl-go@5ba76c1986bb5e33e3b795139b4ae1ffef86f8fb
 //     qurl/client.go: post-dispatch outcome-unknown request semantics.
 //   - layervai/qurl-connector@290d9ea3c67e253191b1d85edcb560eda1fa5674
@@ -37,9 +38,12 @@ const (
 	// examples keep lifecycle fixtures on the canonical public resource ID.
 	testConnectorID      = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE2cTVv5_3eeYCcLLq5ROYCqcmY50HiKZ9ATglIkPnCji1E_S63UMtXba1moR8-Q6EV7oM6zwwh9_j2CDujzXvLA"
 	testOtherConnectorID = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE7VDGkLaZfQLKvxScAKGCA1Y3p6jNG6d0f66a4Wib8NP8CRZJoEm1jRQej5f0aRzejaH5N7ChvQkiISohN2KVOQ"
-	testConnectorSlug    = "prod-dashboard"
-	testKnockID          = "qurl-tunnel-server"
-	testDeviceToken      = "lv_device_credential"
+	// Deliberately opaque rather than derived in this SDK test: the producer
+	// owns routing-label derivation and the SDK must consume the field verbatim.
+	testConnectorRoutingID = "c-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	testConnectorSlug      = "prod-dashboard"
+	testKnockID            = "qurl-tunnel-server"
+	testDeviceToken        = "lv_device_credential"
 )
 
 func TestClient_EnsureConnectorResourceContract(t *testing.T) {
@@ -65,7 +69,7 @@ func TestClient_EnsureConnectorResourceContract(t *testing.T) {
 				}
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusCreated)
-				fmt.Fprintf(w, `{"data":{"resource_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q,"alias":"dashboard-display"},"meta":{"request_id":"req-1","found_existing":%t}}`, testConnectorID, testKnockID, testConnectorSlug, foundExisting)
+				fmt.Fprintf(w, `{"data":{"resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q,"alias":"dashboard-display"},"meta":{"request_id":"req-1","found_existing":%t}}`, testConnectorID, testConnectorRoutingID, testKnockID, testConnectorSlug, foundExisting)
 			}))
 			defer api.Close()
 
@@ -75,7 +79,7 @@ func TestClient_EnsureConnectorResourceContract(t *testing.T) {
 				t.Fatalf("EnsureConnectorResource: %v", err)
 			}
 			resource := result.Resource
-			if resource.ResourceID != testConnectorID || resource.KnockResourceID != testKnockID || resource.Slug != testConnectorSlug {
+			if resource.ResourceID != testConnectorID || resource.ConnectorRoutingID != testConnectorRoutingID || resource.KnockResourceID != testKnockID || resource.Slug != testConnectorSlug {
 				t.Fatalf("resource = %#v", resource)
 			}
 			if resource.Alias == nil || *resource.Alias != "dashboard-display" {
@@ -94,6 +98,15 @@ func TestClient_EnsureConnectorResourceContract(t *testing.T) {
 			}
 			if _, exposed := public["status"]; exposed {
 				t.Fatalf("ConnectorResource JSON exposes producer status: %s", encoded)
+			}
+			if got := public["resource_id"]; got != testConnectorID {
+				t.Fatalf("ConnectorResource JSON resource_id = %v", got)
+			}
+			if got := public["connector_routing_id"]; got != testConnectorRoutingID {
+				t.Fatalf("ConnectorResource JSON connector_routing_id = %v", got)
+			}
+			if got := public["knock_resource_id"]; got != testKnockID {
+				t.Fatalf("ConnectorResource JSON knock_resource_id = %v", got)
 			}
 			if result.FoundExisting != foundExisting {
 				t.Fatalf("FoundExisting = %t, want %t", result.FoundExisting, foundExisting)
@@ -114,7 +127,7 @@ func TestClient_GetConnectorResourceDetailEnvelope(t *testing.T) {
 			t.Fatalf("GET Content-Type = %q, want empty", got)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"data":{"resource":{"resource_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q,"alias":null},"qurls":[]},"meta":{"request_id":"req-2"}}`, testConnectorID, testKnockID, testConnectorSlug)
+		fmt.Fprintf(w, `{"data":{"resource":{"resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q,"alias":null},"qurls":[]},"meta":{"request_id":"req-2"}}`, testConnectorID, testConnectorRoutingID, testKnockID, testConnectorSlug)
 	}))
 	defer api.Close()
 
@@ -122,7 +135,7 @@ func TestClient_GetConnectorResourceDetailEnvelope(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetConnectorResource: %v", err)
 	}
-	if resource.ResourceID != testConnectorID || resource.Slug != testConnectorSlug || resource.Alias != nil {
+	if resource.ResourceID != testConnectorID || resource.ConnectorRoutingID != testConnectorRoutingID || resource.KnockResourceID != testKnockID || resource.Slug != testConnectorSlug || resource.Alias != nil {
 		t.Fatalf("resource = %#v", resource)
 	}
 }
@@ -139,7 +152,7 @@ func TestClient_GetConnectorResourceBySlugDoesNotConflateAlias(t *testing.T) {
 		}
 		assertConnectorAuthorization(t, r)
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"data":[{"resource_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q,"alias":"renamed-display"}],"meta":{"request_id":"req-3"}}`, testConnectorID, testKnockID, testConnectorSlug)
+		fmt.Fprintf(w, `{"data":[{"resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q,"alias":"renamed-display"}],"meta":{"request_id":"req-3"}}`, testConnectorID, testConnectorRoutingID, testKnockID, testConnectorSlug)
 	}))
 	defer api.Close()
 
@@ -147,8 +160,8 @@ func TestClient_GetConnectorResourceBySlugDoesNotConflateAlias(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetConnectorResourceBySlug: %v", err)
 	}
-	if resource.Slug != testConnectorSlug || resource.Alias == nil || *resource.Alias != "renamed-display" {
-		t.Fatalf("resource slug/alias = %q/%v", resource.Slug, resource.Alias)
+	if resource.ResourceID != testConnectorID || resource.ConnectorRoutingID != testConnectorRoutingID || resource.KnockResourceID != testKnockID || resource.Slug != testConnectorSlug || resource.Alias == nil || *resource.Alias != "renamed-display" {
+		t.Fatalf("resource = %#v", resource)
 	}
 }
 
@@ -218,9 +231,9 @@ func TestClient_DeleteConnectorResourceRequiresExactEmpty204(t *testing.T) {
 func TestClient_ConnectorResourceRequiresExactJSONStatus(t *testing.T) {
 	t.Parallel()
 
-	ensureBody := fmt.Sprintf(`{"data":{"resource_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q},"meta":{"found_existing":false}}`, testConnectorID, testKnockID, testConnectorSlug)
-	detailBody := fmt.Sprintf(`{"data":{"resource":{"resource_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q}}}`, testConnectorID, testKnockID, testConnectorSlug)
-	listBody := fmt.Sprintf(`{"data":[{"resource_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q}]}`, testConnectorID, testKnockID, testConnectorSlug)
+	ensureBody := fmt.Sprintf(`{"data":{"resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q},"meta":{"found_existing":false}}`, testConnectorID, testConnectorRoutingID, testKnockID, testConnectorSlug)
+	detailBody := fmt.Sprintf(`{"data":{"resource":{"resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q}}}`, testConnectorID, testConnectorRoutingID, testKnockID, testConnectorSlug)
+	listBody := fmt.Sprintf(`{"data":[{"resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q}]}`, testConnectorID, testConnectorRoutingID, testKnockID, testConnectorSlug)
 	tests := []struct {
 		name        string
 		status      int
@@ -263,7 +276,7 @@ func TestClient_ConnectorResourceCreatePortal(t *testing.T) {
 		assertConnectorAuthorization(t, r)
 		switch requests.Add(1) {
 		case 1:
-			fmt.Fprintf(w, `{"data":[{"resource_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q}]}`, testConnectorID, testKnockID, testConnectorSlug)
+			fmt.Fprintf(w, `{"data":[{"resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q}]}`, testConnectorID, testConnectorRoutingID, testKnockID, testConnectorSlug)
 		case 2:
 			if r.Method != http.MethodPost || r.URL.Path != "/v1/resources/"+testConnectorID+"/qurls" {
 				t.Fatalf("portal request = %s %s", r.Method, r.URL.Path)
@@ -422,7 +435,7 @@ func TestClient_ConnectorResourceMutation5xxOutcomeUnknown(t *testing.T) {
 func TestClient_ConnectorResourceSuccessfulResponseValidation(t *testing.T) {
 	t.Parallel()
 
-	valid := fmt.Sprintf(`{"data":{"resource_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q},"meta":{"found_existing":false}}`, testConnectorID, testKnockID, testConnectorSlug)
+	valid := fmt.Sprintf(`{"data":{"resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q},"meta":{"found_existing":false}}`, testConnectorID, testConnectorRoutingID, testKnockID, testConnectorSlug)
 	tests := []struct {
 		name string
 		body string
@@ -433,6 +446,14 @@ func TestClient_ConnectorResourceSuccessfulResponseValidation(t *testing.T) {
 		{name: "legacy storage resource id", body: strings.Replace(valid, testConnectorID, "r_legacy12345", 1), want: ErrInvalidConnectorResourceResponse},
 		{name: "padded resource id", body: strings.Replace(valid, testConnectorID, testConnectorID+"=", 1), want: ErrInvalidConnectorResourceResponse},
 		{name: "non-canonical resource id", body: strings.Replace(valid, testConnectorID, testConnectorID[:len(testConnectorID)-1]+"B", 1), want: ErrInvalidConnectorResourceResponse},
+		{name: "missing connector routing id", body: strings.Replace(valid, `"connector_routing_id":"`+testConnectorRoutingID+`",`, "", 1), want: ErrInvalidConnectorResourceResponse},
+		{name: "short connector routing id", body: strings.Replace(valid, testConnectorRoutingID, testConnectorRoutingID[:len(testConnectorRoutingID)-1], 1), want: ErrInvalidConnectorResourceResponse},
+		{name: "uppercase connector routing id", body: strings.Replace(valid, testConnectorRoutingID, "c-A"+testConnectorRoutingID[3:], 1), want: ErrInvalidConnectorResourceResponse},
+		{name: "invalid connector routing alphabet", body: strings.Replace(valid, testConnectorRoutingID, "c-0"+testConnectorRoutingID[3:], 1), want: ErrInvalidConnectorResourceResponse},
+		{name: "routing id cross-wired as public resource id", body: strings.Replace(valid, testConnectorID, testConnectorRoutingID, 1), want: ErrInvalidConnectorResourceResponse},
+		{name: "public resource id cross-wired as routing id", body: strings.Replace(valid, testConnectorRoutingID, testConnectorID, 1), want: ErrInvalidConnectorResourceResponse},
+		{name: "routing id cross-wired as knock id", body: strings.Replace(valid, `"knock_resource_id":"`+testKnockID+`"`, `"knock_resource_id":"`+testConnectorRoutingID+`"`, 1), want: ErrInvalidConnectorResourceResponse},
+		{name: "public resource id cross-wired as knock id", body: strings.Replace(valid, `"knock_resource_id":"`+testKnockID+`"`, `"knock_resource_id":"`+testConnectorID+`"`, 1), want: ErrInvalidConnectorResourceResponse},
 		{name: "missing knock id", body: strings.Replace(valid, `"knock_resource_id":"`+testKnockID+`",`, "", 1), want: ErrInvalidConnectorResourceResponse},
 		{name: "whitespace knock id", body: strings.Replace(valid, `"knock_resource_id":"`+testKnockID+`"`, `"knock_resource_id":" `+testKnockID+` "`, 1), want: ErrInvalidConnectorResourceResponse},
 		{name: "wrong type", body: strings.Replace(valid, `"type":"tunnel"`, `"type":"url"`, 1), want: ErrInvalidConnectorResourceResponse},
@@ -440,7 +461,7 @@ func TestClient_ConnectorResourceSuccessfulResponseValidation(t *testing.T) {
 		{name: "wrong slug", body: strings.Replace(valid, `"slug":"`+testConnectorSlug+`"`, `"slug":"other-dashboard"`, 1), want: ErrInvalidConnectorResourceResponse},
 		{name: "invalid alias", body: strings.Replace(valid, `},"meta"`, `,"alias":"bad alias"},"meta"`, 1), want: ErrInvalidConnectorResourceResponse},
 		{name: "missing found existing", body: strings.Replace(valid, `,"meta":{"found_existing":false}`, "", 1), want: ErrInvalidConnectorResourceResponse},
-		{name: "detail envelope on create", body: fmt.Sprintf(`{"data":{"resource":{"resource_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q}},"meta":{"found_existing":false}}`, testConnectorID, testKnockID, testConnectorSlug), want: ErrInvalidConnectorResourceResponse},
+		{name: "detail envelope on create", body: fmt.Sprintf(`{"data":{"resource":{"resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q}},"meta":{"found_existing":false}}`, testConnectorID, testConnectorRoutingID, testKnockID, testConnectorSlug), want: ErrInvalidConnectorResourceResponse},
 		{name: "revoked success row", body: strings.Replace(valid, `"status":"active"`, `"status":"revoked"`, 1), want: ErrInvalidConnectorResourceResponse},
 	}
 	for _, tt := range tests {
@@ -474,7 +495,7 @@ func TestClient_ConnectorResourceSuccessfulResponseValidation(t *testing.T) {
 func TestClient_ConnectorResourceRevokedSuccessRows(t *testing.T) {
 	t.Parallel()
 
-	detail := fmt.Sprintf(`{"data":{"resource":{"resource_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"revoked","slug":%q}}}`, testConnectorID, testKnockID, testConnectorSlug)
+	detail := fmt.Sprintf(`{"data":{"resource":{"resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"revoked","slug":%q}}}`, testConnectorID, testConnectorRoutingID, testKnockID, testConnectorSlug)
 	client := newConnectorTestClient(t, "http://localhost")
 	client.httpClient = staticConnectorResponseDoer(http.StatusOK, detail)
 	if _, err := client.GetConnectorResource(context.Background(), testConnectorID); !errors.Is(err, ErrConnectorResourceRevoked) || errors.Is(err, ErrInvalidConnectorResourceResponse) {
@@ -485,7 +506,9 @@ func TestClient_ConnectorResourceRevokedSuccessRows(t *testing.T) {
 		name string
 		body string
 	}{
+		{name: "missing connector routing id", body: strings.Replace(detail, `"connector_routing_id":"`+testConnectorRoutingID+`",`, "", 1)},
 		{name: "missing knock id", body: strings.Replace(detail, `"knock_resource_id":"`+testKnockID+`",`, "", 1)},
+		{name: "routing id cross-wired as knock id", body: strings.Replace(detail, `"knock_resource_id":"`+testKnockID+`"`, `"knock_resource_id":"`+testConnectorRoutingID+`"`, 1)},
 		{name: "invalid slug", body: strings.Replace(detail, testConnectorSlug, "Bad Slug", 1)},
 		{name: "invalid alias", body: strings.Replace(detail, `"slug":"`+testConnectorSlug+`"`, `"slug":"`+testConnectorSlug+`","alias":"Bad Alias"`, 1)},
 	}
@@ -498,7 +521,7 @@ func TestClient_ConnectorResourceRevokedSuccessRows(t *testing.T) {
 		})
 	}
 
-	list := fmt.Sprintf(`{"data":[{"resource_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"revoked","slug":%q}]}`, testConnectorID, testKnockID, testConnectorSlug)
+	list := fmt.Sprintf(`{"data":[{"resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"revoked","slug":%q}]}`, testConnectorID, testConnectorRoutingID, testKnockID, testConnectorSlug)
 	client.httpClient = staticConnectorResponseDoer(http.StatusOK, list)
 	if _, err := client.GetConnectorResourceBySlug(context.Background(), testConnectorSlug); !errors.Is(err, ErrInvalidConnectorResourceResponse) || errors.Is(err, ErrConnectorResourceRevoked) {
 		t.Fatalf("active-only slug revoked row = %v, want invalid response", err)
@@ -554,11 +577,11 @@ func TestClient_GetConnectorResourceRejectsFlatOrMismatchedDetail(t *testing.T) 
 	}{
 		{
 			name: "flat data",
-			body: fmt.Sprintf(`{"data":{"resource_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q}}`, testConnectorID, testKnockID, testConnectorSlug),
+			body: fmt.Sprintf(`{"data":{"resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q}}`, testConnectorID, testConnectorRoutingID, testKnockID, testConnectorSlug),
 		},
 		{
 			name: "mismatched id",
-			body: fmt.Sprintf(`{"data":{"resource":{"resource_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q}}}`, testOtherConnectorID, testKnockID, testConnectorSlug),
+			body: fmt.Sprintf(`{"data":{"resource":{"resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q}}}`, testOtherConnectorID, testConnectorRoutingID, testKnockID, testConnectorSlug),
 		},
 	}
 	for _, tt := range tests {
@@ -647,6 +670,39 @@ func TestConnectorResourceIDContract(t *testing.T) {
 			}
 			if !tt.want && !errors.Is(err, ErrInvalidResourceRequest) {
 				t.Fatalf("validateConnectorResourceID() = %v, want ErrInvalidResourceRequest", err)
+			}
+		})
+	}
+}
+
+func TestConnectorRoutingIDContract(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		id   string
+		want bool
+	}{
+		{name: "producer opaque routing id", id: testConnectorRoutingID, want: true},
+		{name: "other valid routing id", id: "c-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbq", want: true},
+		{name: "empty", id: ""},
+		{name: "missing prefix", id: testConnectorRoutingID[2:]},
+		{name: "wrong prefix", id: "r-" + testConnectorRoutingID[2:]},
+		{name: "short", id: testConnectorRoutingID[:len(testConnectorRoutingID)-1]},
+		{name: "long", id: testConnectorRoutingID + "a"},
+		{name: "uppercase", id: "c-A" + testConnectorRoutingID[3:]},
+		{name: "digit zero", id: "c-0" + testConnectorRoutingID[3:]},
+		{name: "digit one", id: "c-1" + testConnectorRoutingID[3:]},
+		{name: "digit eight", id: "c-8" + testConnectorRoutingID[3:]},
+		{name: "hyphen in digest", id: "c--" + testConnectorRoutingID[3:]},
+		{name: "leading whitespace", id: " " + testConnectorRoutingID},
+		{name: "trailing newline", id: testConnectorRoutingID + "\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := connectorRoutingIDPattern.MatchString(tt.id); got != tt.want {
+				t.Fatalf("connector routing ID validity = %t, want %t", got, tt.want)
 			}
 		})
 	}

@@ -77,7 +77,12 @@ func ExampleClient_EnsureConnectorResource() {
 		panic(err)
 	}
 
-	fmt.Println(result.Resource.ResourceID, result.Resource.KnockResourceID, result.FoundExisting)
+	fmt.Println(
+		result.Resource.ResourceID,
+		result.Resource.ConnectorRoutingID,
+		result.Resource.KnockResourceID,
+		result.FoundExisting,
+	)
 }
 
 func ExampleOpenClient() {

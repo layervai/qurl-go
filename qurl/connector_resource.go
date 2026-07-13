@@ -28,6 +28,10 @@ var (
 	// qurl-service's OpenAPI contract intentionally gives immutable connector
 	// slugs and mutable aliases the same exact lowercase 3-64 character grammar.
 	connectorSlugPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{1,62}[a-z0-9]$`)
+	// connectorRoutingIDPattern mirrors qurl-service's opaque, server-derived
+	// reverse-connection routing label. The SDK validates and consumes this
+	// value verbatim; it must never derive the label from ResourceID.
+	connectorRoutingIDPattern = regexp.MustCompile(`^c-[a-z2-7]{52}$`)
 
 	// ErrConnectorResourceNotFound is returned when a qURL Connector resource
 	// lookup or deletion cannot find a resource owned by the current credential.
@@ -61,16 +65,23 @@ var (
 )
 
 // ConnectorResource is a resource managed by qURL Connector. ResourceID and
-// Slug are immutable identities. Alias is a separate, mutable display handle.
-// JSON persistence cannot preserve the unexported client binding used by
+// Slug are immutable identities. ConnectorRoutingID and KnockResourceID are
+// explicit control-plane values for reverse-connection routing and NHP
+// admission respectively; neither is an identity and callers must not derive
+// or substitute these values. Alias is a separate, mutable display handle. JSON
+// persistence cannot preserve the unexported client binding used by
 // CreatePortal; call GetConnectorResource or GetConnectorResourceBySlug to
 // obtain a newly bound handle.
 type ConnectorResource struct {
 	client *Client
 
 	// ResourceID is the canonical protected-resource P-256 public key encoded as
-	// unpadded base64url DER SPKI. It is distinct from KnockResourceID.
+	// unpadded base64url DER SPKI. It is distinct from ConnectorRoutingID and
+	// KnockResourceID.
 	ResourceID string `json:"resource_id"`
+	// ConnectorRoutingID is the opaque routing label returned by the producer.
+	// qURL Connector uses it verbatim and never derives it from ResourceID.
+	ConnectorRoutingID string `json:"connector_routing_id"`
 	// KnockResourceID is the placement-neutral NHP target returned by the
 	// producer for qURL Connector admission.
 	KnockResourceID string `json:"knock_resource_id"`
@@ -117,12 +128,13 @@ type connectorResourceMeta struct {
 // connectorResourceWire mirrors the producer's generic resource payload. Type
 // is validated here and intentionally omitted from the exported SDK entity.
 type connectorResourceWire struct {
-	ResourceID      string  `json:"resource_id"`
-	KnockResourceID string  `json:"knock_resource_id"`
-	Type            string  `json:"type"`
-	Status          string  `json:"status"`
-	Slug            string  `json:"slug"`
-	Alias           *string `json:"alias,omitempty"`
+	ResourceID         string  `json:"resource_id"`
+	ConnectorRoutingID string  `json:"connector_routing_id"`
+	KnockResourceID    string  `json:"knock_resource_id"`
+	Type               string  `json:"type"`
+	Status             string  `json:"status"`
+	Slug               string  `json:"slug"`
+	Alias              *string `json:"alias,omitempty"`
 }
 
 type connectorResourceResponse struct {
@@ -261,10 +273,18 @@ func (r connectorResourceWire) connectorResource(client *Client, expectedSlug, e
 	if expectedID != "" && r.ResourceID != expectedID {
 		return nil, invalidConnectorResourceResponse("requested resource_id %q returned %q", expectedID, r.ResourceID)
 	}
+	if !connectorRoutingIDPattern.MatchString(r.ConnectorRoutingID) {
+		return nil, invalidConnectorResourceResponse("resource %q has missing or invalid connector_routing_id", r.ResourceID)
+	}
 	if trimmedKnockID := strings.TrimSpace(r.KnockResourceID); trimmedKnockID == "" {
 		return nil, invalidConnectorResourceResponse("missing knock_resource_id")
 	} else if r.KnockResourceID != trimmedKnockID {
 		return nil, invalidConnectorResourceResponse("resource %q has knock_resource_id with leading or trailing whitespace", r.ResourceID)
+	}
+	if r.ResourceID == r.ConnectorRoutingID ||
+		r.ResourceID == r.KnockResourceID ||
+		r.ConnectorRoutingID == r.KnockResourceID {
+		return nil, invalidConnectorResourceResponse("resource %q has cross-wired identity, routing, or admission values", r.ResourceID)
 	}
 	if r.Type != producerConnectorResourceType {
 		return nil, invalidConnectorResourceResponse("resource %q has type %q, want %q", r.ResourceID, r.Type, producerConnectorResourceType)
@@ -292,11 +312,12 @@ func (r connectorResourceWire) connectorResource(client *Client, expectedSlug, e
 		return nil, invalidConnectorResourceResponse("resource %q has status %q, want active", r.ResourceID, r.Status)
 	}
 	return &ConnectorResource{
-		client:          client,
-		ResourceID:      r.ResourceID,
-		KnockResourceID: r.KnockResourceID,
-		Slug:            r.Slug,
-		Alias:           r.Alias,
+		client:             client,
+		ResourceID:         r.ResourceID,
+		ConnectorRoutingID: r.ConnectorRoutingID,
+		KnockResourceID:    r.KnockResourceID,
+		Slug:               r.Slug,
+		Alias:              r.Alias,
 	}, nil
 }
 
