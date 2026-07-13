@@ -75,9 +75,11 @@ var (
 type ConnectorResource struct {
 	client *Client
 
-	// ResourceID is the canonical protected-resource P-256 public key encoded as
-	// unpadded base64url DER SPKI. It is distinct from ConnectorRoutingID and
-	// KnockResourceID.
+	// ResourceID is the producer-issued protected-resource P-256 public key in
+	// canonical unpadded-base64url DER SPKI form. The SDK validates its wire
+	// encoding and structural length; qurl-service remains authoritative for
+	// DER parsing and curve validation. It is distinct from ConnectorRoutingID
+	// and KnockResourceID.
 	ResourceID string `json:"resource_id"`
 	// ConnectorRoutingID is the opaque routing label returned by the producer.
 	// qURL Connector uses it verbatim and never derives it from ResourceID.
@@ -116,9 +118,10 @@ func (r *ConnectorResource) resourceHandle() *Resource {
 }
 
 type ensureConnectorResourceRequest struct {
-	Type         string `json:"type"`
-	Slug         string `json:"slug"`
-	FindOrCreate bool   `json:"find_or_create"`
+	Type string `json:"type"`
+	Slug string `json:"slug"`
+	// FindOrCreate is fixed true by the Connector ensure wire contract.
+	FindOrCreate bool `json:"find_or_create"`
 }
 
 type connectorResourceMeta struct {
@@ -263,10 +266,10 @@ func (c *Client) DeleteConnectorResource(ctx context.Context, resourceID string)
 }
 
 func (r connectorResourceWire) connectorResource(client *Client, expectedSlug, expectedID string, operation connectorResourceOperation) (*ConnectorResource, error) {
-	// Validate the complete qURL Connector row before classifying lifecycle
-	// status. qurl-service derives knock_resource_id for tunnel rows regardless
-	// of active/revoked status and retains the row's type and identity on revoke;
-	// accepting an incomplete revoked row would mask producer contract drift.
+	// Validate the complete row before lifecycle classification. qurl-service's
+	// shared create/detail/list serializer returns resource_id,
+	// connector_routing_id, knock_resource_id, type, and slug for both active and
+	// revoked Connector rows; an incomplete revoked row is producer drift.
 	if !isValidConnectorResourceID(r.ResourceID) {
 		return nil, invalidConnectorResourceResponse("missing or invalid resource_id")
 	}
@@ -283,6 +286,9 @@ func (r connectorResourceWire) connectorResource(client *Client, expectedSlug, e
 	} else if r.KnockResourceID != trimmedKnockID {
 		return nil, invalidConnectorResourceResponse("resource %q has knock_resource_id with leading or trailing whitespace", r.ResourceID)
 	}
+	// The current public-key and routing grammars make their equality
+	// structurally impossible. Keep all three comparisons explicit so field
+	// independence remains fenced if either producer grammar evolves.
 	if r.ResourceID == r.ConnectorRoutingID ||
 		r.ResourceID == r.KnockResourceID ||
 		r.ConnectorRoutingID == r.KnockResourceID {
@@ -297,11 +303,8 @@ func (r connectorResourceWire) connectorResource(client *Client, expectedSlug, e
 	if expectedSlug != "" && r.Slug != expectedSlug {
 		return nil, invalidConnectorResourceResponse("requested slug %q returned %q", expectedSlug, r.Slug)
 	}
-	// Alias is display metadata rather than identity, but the producer's alias
-	// field is still constrained by the same exact OpenAPI regex as slug. Keep
-	// fail-closed validation coordinated with that producer fence; a future
-	// grammar relaxation requires a producer/SDK contract release, not silent
-	// acceptance of a shape this SDK version does not understand.
+	// Alias is display metadata, but the producer applies the same OpenAPI regex
+	// as slug. A grammar change requires a coordinated producer/SDK release.
 	if r.Alias != nil && !connectorSlugPattern.MatchString(*r.Alias) {
 		return nil, invalidConnectorResourceResponse("resource %q has an invalid alias", r.ResourceID)
 	}

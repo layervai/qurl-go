@@ -45,24 +45,31 @@ the exact requested slug, and the producer's private resource discriminator.
 Missing, malformed, contradictory, or cross-wired fields fail closed with
 `ErrInvalidConnectorResourceResponse`.
 
-Management API `ConnectorResource.ResourceID` is the protected resource's
-canonical P-256 public key: DER SPKI bytes encoded as unpadded base64url. It is
-distinct from both `ConnectorRoutingID`, the opaque reverse-connection routing
-label, and `KnockResourceID`, the placement-neutral NHP admission target. The
-SDK requires all three values to be present and pairwise distinct.
+Management API `ConnectorResource.ResourceID` is the producer-issued protected
+resource P-256 public key in canonical unpadded-base64url DER SPKI form. The SDK
+validates canonical wire encoding and the producer's decoded-byte structural
+window; qurl-service remains authoritative for DER parsing and curve validation.
+The value is distinct from both `ConnectorRoutingID`, the opaque
+reverse-connection routing label, and `KnockResourceID`, the placement-neutral
+NHP admission target. The SDK requires all three values to be present and
+pairwise distinct.
 
 `ConnectorRoutingID` has the exact producer-owned shape
 `^c-[a-z2-7]{52}$`. The SDK consumes that value verbatim; it never derives a
 routing label from the public key, slug, cell id, `qurl_site`, or any hostname.
 
-The SDK mirrors qurl-service's strict public-key decoding and 80-160
-decoded-byte structural window; legacy `r_` storage identifiers are not public
-REST IDs and are rejected before dispatch. Update the producer fence and SDK
-together if any identity, routing, or admission contract changes.
+The SDK mirrors qurl-service's strict base64url decoding and 80-160 decoded-byte
+structural window; legacy `r_` storage identifiers are not public REST IDs and
+are rejected before dispatch. Update the producer fence and SDK together if any
+identity, routing, or admission contract changes.
 
 The fenced qURL Connector resource status schema contains only `active` and
 `revoked`; any other status is invalid producer drift rather than a transitional
-state qURL Connector may use.
+state qURL Connector may use. qurl-service's shared resource serializer returns
+the full identity, routing, admission, type, and slug field set for active and
+revoked detail/list rows. The SDK therefore validates a complete revoked row
+before returning `ErrConnectorResourceRevoked`; missing fields are contract
+drift, not evidence that deletion completed.
 
 The SDK does not automatically retry `ErrConnectorResourceSlugConflict`. The
 service contract permits the caller to retry that error once to resolve a
