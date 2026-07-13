@@ -2,6 +2,7 @@ package qurl
 
 import (
 	"bytes"
+	"encoding/hex"
 	"errors"
 	"io"
 	"strings"
@@ -116,17 +117,15 @@ func FuzzValidateCycleRunID(f *testing.F) {
 		"",
 		"0123456789abcdeF",
 		"01234567 9abcdef",
+		"0123456789abcde\x00",
 		"0123456789abcdé",
 	} {
 		f.Add(seed)
 	}
 
 	f.Fuzz(func(t *testing.T, runID string) {
-		wantValid := len(runID) == cycleRunIDLength
-		for i := 0; wantValid && i < len(runID); i++ {
-			c := runID[i]
-			wantValid = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
-		}
+		decoded, decodeErr := hex.DecodeString(runID)
+		wantValid := len(runID) == cycleRunIDLength && decodeErr == nil && runID == hex.EncodeToString(decoded)
 
 		err := ValidateCycleRunID(runID)
 		if wantValid && err != nil {
