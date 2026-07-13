@@ -276,6 +276,8 @@ func (r connectorResourceWire) connectorResource(client *Client, expectedSlug, e
 	if !connectorRoutingIDPattern.MatchString(r.ConnectorRoutingID) {
 		return nil, invalidConnectorResourceResponse("resource %q has missing or invalid connector_routing_id", r.ResourceID)
 	}
+	// knock_resource_id is an opaque, ASP-defined NHP admission target. The
+	// producer owns its grammar; the SDK enforces only presence and exact bytes.
 	if trimmedKnockID := strings.TrimSpace(r.KnockResourceID); trimmedKnockID == "" {
 		return nil, invalidConnectorResourceResponse("missing knock_resource_id")
 	} else if r.KnockResourceID != trimmedKnockID {
@@ -296,7 +298,10 @@ func (r connectorResourceWire) connectorResource(client *Client, expectedSlug, e
 		return nil, invalidConnectorResourceResponse("requested slug %q returned %q", expectedSlug, r.Slug)
 	}
 	// Alias is display metadata rather than identity, but the producer's alias
-	// field is still constrained by the same exact OpenAPI regex as slug.
+	// field is still constrained by the same exact OpenAPI regex as slug. Keep
+	// fail-closed validation coordinated with that producer fence; a future
+	// grammar relaxation requires a producer/SDK contract release, not silent
+	// acceptance of a shape this SDK version does not understand.
 	if r.Alias != nil && !connectorSlugPattern.MatchString(*r.Alias) {
 		return nil, invalidConnectorResourceResponse("resource %q has an invalid alias", r.ResourceID)
 	}
