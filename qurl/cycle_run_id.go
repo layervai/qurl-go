@@ -46,6 +46,9 @@ func newCycleRunID(random io.Reader) (string, error) {
 // Missing values and alternate spellings fail; validation never trims or
 // normalizes caller input.
 func ValidateCycleRunID(runID string) error {
+	if runID == "" {
+		return fmt.Errorf("%w: must not be empty", ErrInvalidCycleRunID)
+	}
 	if len(runID) != cycleRunIDLength {
 		return fmt.Errorf("%w: must be exactly %d lowercase hexadecimal characters", ErrInvalidCycleRunID, cycleRunIDLength)
 	}

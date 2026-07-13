@@ -64,14 +64,15 @@ func TestNewCycleRunID_EntropyFailures(t *testing.T) {
 
 func TestValidateCycleRunID(t *testing.T) {
 	tests := []struct {
-		name  string
-		value string
-		valid bool
+		name        string
+		value       string
+		valid       bool
+		wantMessage string
 	}{
 		{name: "mixed canonical", value: "0123456789abcdef", valid: true},
 		{name: "all zero", value: "0000000000000000", valid: true},
 		{name: "all f", value: "ffffffffffffffff", valid: true},
-		{name: "missing", value: ""},
+		{name: "missing", value: "", wantMessage: "must not be empty"},
 		{name: "surrounding space", value: " 123456789abcdef"},
 		{name: "internal space", value: "01234567 9abcdef"},
 		{name: "uppercase", value: "0123456789abcdeF"},
@@ -94,6 +95,9 @@ func TestValidateCycleRunID(t *testing.T) {
 			}
 			if !errors.Is(err, ErrInvalidCycleRunID) {
 				t.Fatalf("ValidateCycleRunID(%q) = %v, want ErrInvalidCycleRunID", tt.value, err)
+			}
+			if tt.wantMessage != "" && !strings.Contains(err.Error(), tt.wantMessage) {
+				t.Fatalf("ValidateCycleRunID(%q) = %v, want message containing %q", tt.value, err, tt.wantMessage)
 			}
 			if tt.value != "" && strings.Contains(err.Error(), tt.value) {
 				t.Fatalf("ValidateCycleRunID(%q) leaked rejected input in %q", tt.value, err)
