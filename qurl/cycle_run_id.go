@@ -15,12 +15,12 @@ const (
 
 // ErrInvalidCycleRunID is returned when a connector cycle RunID is missing or
 // noncanonical. A canonical cycle RunID is exactly 16 lowercase hexadecimal
-// characters. Callers must not trim, case-fold, or otherwise normalize it.
+// ASCII bytes. Callers must not trim, case-fold, or otherwise normalize it.
 var ErrInvalidCycleRunID = errors.New("qurl: invalid cycle run id")
 
 // NewCycleRunID returns a new connector cycle RunID made from exactly eight
 // bytes of cryptographic entropy and encoded as exactly 16 lowercase
-// hexadecimal characters.
+// hexadecimal ASCII bytes.
 //
 // The fixed 64-bit shape is the authenticated per-cycle correlation contract,
 // not a long-lived globally unique identifier or a security token.
@@ -42,7 +42,7 @@ func newCycleRunID(random io.Reader) (string, error) {
 }
 
 // ValidateCycleRunID reports whether runID is the canonical connector cycle
-// identifier: exactly 16 ASCII characters drawn from 0-9 and lowercase a-f.
+// identifier: exactly 16 ASCII bytes drawn from 0-9 and lowercase a-f.
 // Missing values and alternate spellings fail; validation never trims or
 // normalizes caller input.
 func ValidateCycleRunID(runID string) error {
