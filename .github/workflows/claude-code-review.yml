@@ -12,6 +12,8 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
+      # The pinned action's documented minimum permissions include both Issues
+      # and Pull requests write access for its review/comment posting paths.
       issues: write
 
     steps:
@@ -21,10 +23,15 @@ jobs:
           fetch-depth: 1
 
       - name: Run Claude Code Review
+        # `pull_request` withholds repository secrets and downgrades GITHUB_TOKEN
+        # for fork PRs. Do not change this to `pull_request_target` without adding
+        # the interactive workflow's same-repository head gate before the action.
         uses: anthropics/claude-code-action@558b1d6cab4085c7753fe402c10bef0fbb92ac7a # v1.0.165
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ github.token }}
+          # Pinned v1.0.165 implements `*[bot]` as a literal [bot]-suffix
+          # matcher rather than passing it through standard glob semantics.
           exclude_comments_by_actor: 'claude,github-actions,*[bot]'
           prompt: |
             REPO: ${{ github.repository }}

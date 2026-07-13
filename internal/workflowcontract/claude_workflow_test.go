@@ -1,3 +1,6 @@
+// Package workflowcontract intentionally locks exact security-sensitive
+// workflow text. These tests detect configuration drift; they do not execute
+// the pinned third-party action or replace verification of its input semantics.
 package workflowcontract
 
 import (
@@ -14,6 +17,7 @@ func TestInteractiveClaudeWorkflowAuthorizesBeforeImmutableCheckout(t *testing.T
 	workflow := readWorkflow(t, "claude.yml")
 
 	requireContains(t, workflow,
+		"timeout-minutes: 20",
 		"github.event.comment.author_association == 'OWNER'",
 		"github.event.comment.author_association == 'MEMBER'",
 		"github.event.comment.author_association == 'COLLABORATOR'",
@@ -42,12 +46,17 @@ func TestInteractiveClaudeWorkflowAuthorizesBeforeImmutableCheckout(t *testing.T
 	)
 }
 
-func TestAutomaticClaudeWorkflowBoundsGraphQLCommentAuthors(t *testing.T) {
+func TestAutomaticClaudeWorkflowPinsBoundedCommentAuthorInput(t *testing.T) {
 	workflow := readWorkflow(t, "claude-code-review.yml")
 
 	// The action filters GraphQL author.login. On this repository, historical
 	// transcripts are authored by `claude` and `github-actions`; `*[bot]` alone
 	// only matches actors whose login literally has that suffix.
+	requireContains(t, workflow,
+		"documented minimum permissions include both Issues",
+		"`pull_request` withholds repository secrets",
+		"Pinned v1.0.165 implements `*[bot]` as a literal [bot]-suffix",
+	)
 	requireSharedActionContract(t, workflow)
 }
 

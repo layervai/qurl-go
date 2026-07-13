@@ -41,7 +41,9 @@ jobs:
         )
       )
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Recent successful repository review gates complete within six minutes;
+    # 20 minutes leaves more than 3x observed runway while bounding stuck jobs.
+    timeout-minutes: 20
     permissions:
       contents: read
       pull-requests: write
@@ -101,6 +103,8 @@ jobs:
           head_repo="$(jq -r '.head.repo.full_name // ""' <<<"$pr")"
           head_sha="$(jq -r '.head.sha // ""' <<<"$pr")"
 
+          # A fork rejection intentionally fails the job instead of silently
+          # skipping: a request that crosses this secret boundary must be visible.
           if [[ "$head_repo" != "$GITHUB_REPOSITORY" ]]; then
             echo "::error::Claude slash-command checkout is limited to same-repository PRs because this workflow holds ANTHROPIC_API_KEY."
             exit 1
@@ -142,6 +146,7 @@ jobs:
           github_token: ${{ github.token }}
           # The action filters GraphQL author.login values. Claude and Actions
           # appear there as `claude` and `github-actions`, without REST's [bot]
-          # suffix; retain the wildcard for other GitHub App bots.
+          # suffix. Pinned v1.0.165 treats `*[bot]` as a special literal-suffix
+          # matcher (not a general glob character class) for other App bots.
           exclude_comments_by_actor: 'claude,github-actions,*[bot]'
           claude_args: '--model claude-opus-4-8'
