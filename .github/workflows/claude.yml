@@ -138,6 +138,9 @@ jobs:
         with:
           ref: ${{ steps.claude_pr.outputs.sha != '' && steps.claude_pr.outputs.sha || github.sha }}
           fetch-depth: ${{ steps.claude_pr.outputs.sha != '' && '0' || '1' }}
+          # The action receives github_token explicitly; the reviewed tree does
+          # not need a reusable credential materialized in local Git config.
+          persist-credentials: false
 
       - name: Run Claude Code
         id: claude

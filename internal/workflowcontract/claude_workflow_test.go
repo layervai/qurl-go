@@ -38,8 +38,10 @@ func TestInteractiveClaudeWorkflowAuthorizesBeforeImmutableCheckout(t *testing.T
 		".head.sha // \"\"",
 		`if [[ "$head_repo" != "$GITHUB_REPOSITORY" ]]`,
 		`[[ ! "$head_sha" =~ ^[0-9a-f]{40}$ ]]`,
+		"steps.claude_actor.outputs.authorized == 'true'",
 		"steps.claude_pr.outputs.checkout_allowed == 'true'",
 		"ref: ${{ steps.claude_pr.outputs.sha != '' && steps.claude_pr.outputs.sha || github.sha }}",
+		"if: steps.checkout.outcome == 'success'",
 	)
 	requireSharedActionContract(t, workflow)
 	requireBefore(t, workflow,
@@ -71,6 +73,7 @@ func requireSharedActionContract(t *testing.T, workflow string) {
 	requireContains(t, workflow,
 		claudeAction,
 		"github_token: ${{ github.token }}",
+		"persist-credentials: false",
 		"exclude_comments_by_actor: 'claude,github-actions,*[bot]'",
 		"pull-requests: write",
 		"issues: write",
@@ -112,11 +115,11 @@ func requireBefore(t *testing.T, contents string, fragments ...string) {
 	t.Helper()
 	previous := -1
 	for _, fragment := range fragments {
-		position := strings.Index(contents, fragment)
-		if position < 0 {
-			t.Errorf("workflow is missing ordered contract fragment %q", fragment)
+		if count := strings.Count(contents, fragment); count != 1 {
+			t.Errorf("ordered workflow contract fragment %q must appear exactly once; got %d", fragment, count)
 			continue
 		}
+		position := strings.Index(contents, fragment)
 		if position <= previous {
 			t.Errorf("workflow contract fragment %q appears out of order", fragment)
 		}
