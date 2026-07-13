@@ -17,6 +17,7 @@ if err != nil {
 }
 
 fmt.Println(result.Resource.ResourceID)
+fmt.Println(result.Resource.ConnectorRoutingID)
 fmt.Println(result.Resource.KnockResourceID)
 fmt.Println(result.FoundExisting)
 ```
@@ -39,17 +40,25 @@ character grammar. Alias validation here is therefore producer-contract
 validation, not an attempt to use display metadata as qURL Connector identity.
 
 `EnsureConnectorResource` requires the response to contain a valid
-`resource_id`, `knock_resource_id`, `status: "active"`, the exact requested
-slug, and the producer's private resource discriminator. Missing or
-contradictory fields fail closed with `ErrInvalidConnectorResourceResponse`.
+`resource_id`, `connector_routing_id`, `knock_resource_id`, `status: "active"`,
+the exact requested slug, and the producer's private resource discriminator.
+Missing, malformed, contradictory, or cross-wired fields fail closed with
+`ErrInvalidConnectorResourceResponse`.
 
 Management API `ConnectorResource.ResourceID` is the protected resource's
 canonical P-256 public key: DER SPKI bytes encoded as unpadded base64url. It is
-distinct from `KnockResourceID`, the placement-neutral NHP admission target.
-The SDK mirrors qurl-service's strict canonical decoding and 80-160 decoded-byte
-structural window; legacy `r_` storage identifiers are not public REST IDs and
-are rejected before dispatch. Update the producer fence and SDK together if the
-public-key contract changes.
+distinct from both `ConnectorRoutingID`, the opaque reverse-connection routing
+label, and `KnockResourceID`, the placement-neutral NHP admission target. The
+SDK requires all three values to be present and pairwise distinct.
+
+`ConnectorRoutingID` has the exact producer-owned shape
+`^c-[a-z2-7]{52}$`. The SDK consumes that value verbatim; it never derives a
+routing label from the public key, slug, cell id, `qurl_site`, or any hostname.
+
+The SDK mirrors qurl-service's strict public-key decoding and 80-160
+decoded-byte structural window; legacy `r_` storage identifiers are not public
+REST IDs and are rejected before dispatch. Update the producer fence and SDK
+together if any identity, routing, or admission contract changes.
 
 The fenced qURL Connector resource status schema contains only `active` and
 `revoked`; any other status is invalid producer drift rather than a transitional
@@ -147,7 +156,9 @@ must not retarget qURL Connector resource CRUD. The default client refuses
 redirects so a bearer credential is not forwarded to a different origin.
 
 The wire shapes are fenced against qurl-service's `/v1/resources` and
-`/v1/resources/{id}` OpenAPI contracts and the existing qURL Connector
-resource/bootstrap test fixtures. This SDK change does not claim that the
-backend is deployed or that a qurl-go release has been tagged; those are
-separate cross-repository handoff gates in issue 421.
+`/v1/resources/{id}` OpenAPI contracts, including the explicit
+`connector_routing_id` producer in
+[`layervai/qurl-service#1225`](https://github.com/layervai/qurl-service/pull/1225),
+and the existing qURL Connector resource/bootstrap test fixtures. This SDK
+change does not claim that the backend is deployed or that a qurl-go release
+has been tagged; those are separate cross-repository handoff gates in issue 421.

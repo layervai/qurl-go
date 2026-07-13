@@ -236,14 +236,20 @@ Match errors by type, not message text:
   clients can call `EnsureConnectorResource`, `GetConnectorResource`,
   `GetConnectorResourceBySlug`, and `DeleteConnectorResource` without falling back to
   an enrollment credential. The typed result keeps immutable `Slug` separate
-  from mutable `Alias`, exposes `KnockResourceID`, and reports whether an ensure
-  found an existing active resource. See [Manage qURL Connector
+  from mutable `Alias`, exposes the producer's explicit `ConnectorRoutingID`
+  and placement-neutral `KnockResourceID`, and reports whether an ensure found
+  an existing active resource. The SDK never derives the routing value from the
+  public-key `ResourceID`. See [Manage qURL Connector
   resources](docs/connector-resources.md).
 
   **Minimum backend/deployment contract:** this release does not claim the
   backend is deployed or ready to flip. The qurl-service contract fenced by
   [layervai/qurl-service#1192](https://github.com/layervai/qurl-service/pull/1192)
-  must be deployed first. Keep `QURL_AGENT_REGISTRATION_ENABLED=false` until
+  plus canonical public-key validation in
+  [#1223](https://github.com/layervai/qurl-service/pull/1223) and the explicit
+  Connector routing producer in
+  [#1225](https://github.com/layervai/qurl-service/pull/1225) must be deployed
+  first. Keep `QURL_AGENT_REGISTRATION_ENABLED=false` until
   that service ledger's completion-limiter, trusted-proxy, Redis, abuse-capacity,
   alarm, and cohort hard gates are proven; enable it only when enrollment may
   begin. Service startup with registration enabled also requires
