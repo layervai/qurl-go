@@ -2,7 +2,6 @@ package qurl
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/http"
@@ -55,7 +54,8 @@ var (
 
 	// ErrInvalidConnectorResourceResponse is returned when a successful response
 	// violates the qURL Connector resource contract. It also matches
-	// ErrInvalidAPIResponse.
+	// ErrInvalidAPIResponse. Neither sentinel is retry advice; inspect the
+	// Connector-specific error before deciding whether a retry is safe.
 	ErrInvalidConnectorResourceResponse = errors.New("qurl: invalid qURL Connector resource response")
 
 	// ErrConnectorResourceOutcomeUnknown is returned when an ensure or delete was
@@ -364,13 +364,13 @@ func validateConnectorResourceID(resourceID string) error {
 }
 
 func isValidConnectorResourceID(resourceID string) bool {
-	der, err := base64.RawURLEncoding.Strict().DecodeString(resourceID)
+	der, err := b64url.Strict().DecodeString(resourceID)
 	if err != nil || len(der) < minConnectorResourcePublicKeyDERBytes || len(der) > maxConnectorResourcePublicKeyDERBytes {
 		return false
 	}
 	// Strict still ignores CR and LF. An exact round trip enforces the public
 	// OpenAPI alphabet and the single canonical encoding for these DER bytes.
-	return base64.RawURLEncoding.EncodeToString(der) == resourceID
+	return b64url.EncodeToString(der) == resourceID
 }
 
 type connectorResourceOperation uint8

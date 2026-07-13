@@ -254,7 +254,8 @@ Match errors by type, not message text:
   Successful JSON responses that are empty, undecodable, or violate an
   endpoint response contract now match the exported `ErrInvalidAPIResponse`
   sentinel. Existing JSON-returning methods remain fail-closed and retain their
-  prior error detail; this adds a stable `errors.Is` contract for callers.
+  prior error detail; this adds a stable `errors.Is` contract for callers. The
+  generic sentinel classifies a bad response and is not, by itself, retry advice.
 
 - **Added: registered-agent lifecycle APIs** — `OpenRegisteredAgent` provides a
   store-backed reopen without qURL enrollment or resource API calls (a sealed

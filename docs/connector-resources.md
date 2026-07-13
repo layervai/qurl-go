@@ -130,6 +130,12 @@ diagnostics:
 | `qurl.ErrConnectorResourceOutcomeUnknown` | An ensure or delete was dispatched, but the SDK cannot prove whether it committed |
 | `qurl.ErrInvalidConnectorResourceResponse` | A 2xx response violated the qURL Connector resource contract; also matches `qurl.ErrInvalidAPIResponse` |
 
+`ErrInvalidAPIResponse` classifies a bad successful response; it is not a retry
+signal. Check the Connector-specific errors first. In particular,
+`ErrConnectorResourceAmbiguous` also matches both invalid-response sentinels and
+must not be retried as a generic transient failure. Only the bounded slug
+conflict and outcome-reconciliation procedures below permit another mutation.
+
 The endpoint mappings are intentionally operation-specific:
 
 | Operation | Typed lifecycle mapping |
