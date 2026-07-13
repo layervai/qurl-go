@@ -76,7 +76,7 @@ func TestValidateCycleRunID(t *testing.T) {
 		{name: "surrounding space", value: " 123456789abcdef"},
 		{name: "internal space", value: "01234567 9abcdef"},
 		{name: "uppercase", value: "0123456789abcdeF"},
-		{name: "fifteen characters", value: "0123456789abcde"},
+		{name: "fifteen characters", value: "0123456789abcde", wantMessage: "must be exactly 16 lowercase hexadecimal ASCII bytes"},
 		{name: "seventeen characters", value: "0123456789abcdef0"},
 		{name: "non hex", value: "0123456789abcdeg"},
 		{name: "newline", value: "0123456789abcde\n"},

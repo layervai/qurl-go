@@ -50,7 +50,7 @@ func ValidateCycleRunID(runID string) error {
 		return fmt.Errorf("%w: must not be empty", ErrInvalidCycleRunID)
 	}
 	if len(runID) != cycleRunIDLength {
-		return fmt.Errorf("%w: must be exactly %d lowercase hexadecimal characters", ErrInvalidCycleRunID, cycleRunIDLength)
+		return fmt.Errorf("%w: must be exactly %d lowercase hexadecimal ASCII bytes", ErrInvalidCycleRunID, cycleRunIDLength)
 	}
 	for i := 0; i < len(runID); i++ {
 		c := runID[i]
