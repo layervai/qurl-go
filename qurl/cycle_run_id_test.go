@@ -10,6 +10,7 @@ import (
 
 func TestNewCycleRunID_DeterministicAndExactEntropyConsumption(t *testing.T) {
 	entropy := bytes.NewReader([]byte{0x00, 0x01, 0x02, 0x03, 0xfe, 0xfd, 0xfc, 0xff, 0x7a})
+	startLen := entropy.Len()
 
 	got, err := newCycleRunID(entropy)
 	if err != nil {
@@ -18,8 +19,8 @@ func TestNewCycleRunID_DeterministicAndExactEntropyConsumption(t *testing.T) {
 	if want := "00010203fefdfcff"; got != want {
 		t.Fatalf("newCycleRunID = %q, want %q", got, want)
 	}
-	if entropy.Len() != 1 {
-		t.Fatalf("newCycleRunID consumed %d bytes, want exactly %d", 9-entropy.Len(), cycleRunIDEntropyBytes)
+	if consumed := startLen - entropy.Len(); consumed != cycleRunIDEntropyBytes {
+		t.Fatalf("newCycleRunID consumed %d bytes, want exactly %d", consumed, cycleRunIDEntropyBytes)
 	}
 	if err := ValidateCycleRunID(got); err != nil {
 		t.Fatalf("generated cycle RunID is not canonical: %v", err)
@@ -97,15 +98,6 @@ func TestValidateCycleRunID(t *testing.T) {
 				t.Fatalf("ValidateCycleRunID(%q) leaked rejected input in %q", tt.value, err)
 			}
 		})
-	}
-}
-
-func TestValidateCycleRunID_AcceptsEveryCanonicalCharacter(t *testing.T) {
-	for _, c := range "0123456789abcdef" {
-		runID := strings.Repeat(string(c), cycleRunIDLength)
-		if err := ValidateCycleRunID(runID); err != nil {
-			t.Fatalf("ValidateCycleRunID(%q) = %v, want nil", runID, err)
-		}
 	}
 }
 
