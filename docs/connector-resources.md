@@ -43,16 +43,13 @@ validation, not an attempt to use display metadata as qURL Connector identity.
 slug, and the producer's private resource discriminator. Missing or
 contradictory fields fail closed with `ErrInvalidConnectorResourceResponse`.
 
-Management API `ConnectorResource.ResourceID` values intentionally follow the
-producer's exact current contract: `r_` plus 11 lowercase alphanumeric,
-underscore, or hyphen characters. They are distinct from the NHP public key and
-the `KnockResourceID`. This is a fail-closed OpenAPI coupling, not a
-forward-compatible length range; update the producer fence and SDK together if
-the service ever changes the id shape. Before a future producer emits a new
-shape, ship an SDK transition that safely accepts both the legacy and new
-formats so already-cached ids remain usable. This greenfield cutover has no
-prior production qURL Connector ids to migrate, but later format changes must
-not make that assumption.
+Management API `ConnectorResource.ResourceID` is the protected resource's
+canonical P-256 public key: DER SPKI bytes encoded as unpadded base64url. It is
+distinct from `KnockResourceID`, the placement-neutral NHP admission target.
+The SDK mirrors qurl-service's strict canonical decoding and 80-160 decoded-byte
+structural window; legacy `r_` storage identifiers are not public REST IDs and
+are rejected before dispatch. Update the producer fence and SDK together if the
+public-key contract changes.
 
 The fenced qURL Connector resource status schema contains only `active` and
 `revoked`; any other status is invalid producer drift rather than a transitional

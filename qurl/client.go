@@ -497,7 +497,8 @@ func OpenClientContext(ctx context.Context, opts ...ClientOption) (*Client, erro
 type Resource struct {
 	client *Client
 
-	// ID is the LayerV resource id, for example r_abc123...
+	// ID is the canonical protected-resource public key (unpadded base64url DER
+	// SPKI) returned by LayerV.
 	ID string `json:"resource_id"`
 	// TargetURL is the private URL protected by this resource.
 	TargetURL string `json:"target_url"`

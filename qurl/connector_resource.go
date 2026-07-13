@@ -2,6 +2,7 @@ package qurl
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/http"
@@ -15,13 +16,18 @@ import (
 // ConnectorResource, not the producer's generic resource taxonomy.
 const producerConnectorResourceType = "tunnel"
 
+const (
+	// qurl-service exposes the protected-resource public key as the canonical
+	// REST resource_id. These bounds mirror its strict DER SPKI structural
+	// prefilter; identity remains the exact canonical base64url string.
+	minConnectorResourcePublicKeyDERBytes = 80
+	maxConnectorResourcePublicKeyDERBytes = 160
+)
+
 var (
 	// qurl-service's OpenAPI contract intentionally gives immutable connector
 	// slugs and mutable aliases the same exact lowercase 3-64 character grammar.
 	connectorSlugPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{1,62}[a-z0-9]$`)
-	// The /v1/resources/{id} producer contract pins exactly 11 characters after
-	// the r_ prefix. Keep this coupled to the fenced OpenAPI provenance in tests.
-	connectorResourceIDPattern = regexp.MustCompile(`^r_[a-z0-9_-]{11}$`)
 
 	// ErrConnectorResourceNotFound is returned when a qURL Connector resource
 	// lookup or deletion cannot find a resource owned by the current credential.
@@ -62,8 +68,8 @@ var (
 type ConnectorResource struct {
 	client *Client
 
-	// ResourceID is the management-API lifecycle identifier (currently r_ plus
-	// 11 characters). It is not the qURL-v2 NHP public key or KnockResourceID.
+	// ResourceID is the canonical protected-resource P-256 public key encoded as
+	// unpadded base64url DER SPKI. It is distinct from KnockResourceID.
 	ResourceID string `json:"resource_id"`
 	// KnockResourceID is the placement-neutral NHP target returned by the
 	// producer for qURL Connector admission.
@@ -255,7 +261,7 @@ func (r connectorResourceWire) connectorResource(client *Client, expectedSlug, e
 	// status. qurl-service derives knock_resource_id for tunnel rows regardless
 	// of active/revoked status and retains the row's type and identity on revoke;
 	// accepting an incomplete revoked row would mask producer contract drift.
-	if !connectorResourceIDPattern.MatchString(r.ResourceID) {
+	if !isValidConnectorResourceID(r.ResourceID) {
 		return nil, invalidConnectorResourceResponse("missing or invalid resource_id")
 	}
 	if expectedID != "" && r.ResourceID != expectedID {
@@ -308,10 +314,20 @@ func validateConnectorSlug(slug string) error {
 }
 
 func validateConnectorResourceID(resourceID string) error {
-	if !connectorResourceIDPattern.MatchString(resourceID) {
-		return fmt.Errorf("%w: qURL Connector resource id must match r_ followed by 11 lowercase alphanumeric, underscore, or hyphen characters", ErrInvalidResourceRequest)
+	if !isValidConnectorResourceID(resourceID) {
+		return fmt.Errorf("%w: qURL Connector resource id must be a canonical unpadded base64url resource public key (%d-%d decoded DER SPKI bytes)", ErrInvalidResourceRequest, minConnectorResourcePublicKeyDERBytes, maxConnectorResourcePublicKeyDERBytes)
 	}
 	return nil
+}
+
+func isValidConnectorResourceID(resourceID string) bool {
+	der, err := base64.RawURLEncoding.Strict().DecodeString(resourceID)
+	if err != nil || len(der) < minConnectorResourcePublicKeyDERBytes || len(der) > maxConnectorResourcePublicKeyDERBytes {
+		return false
+	}
+	// Strict still ignores CR and LF. An exact round trip enforces the public
+	// OpenAPI alphabet and the single canonical encoding for these DER bytes.
+	return base64.RawURLEncoding.EncodeToString(der) == resourceID
 }
 
 type connectorResourceOperation uint8
