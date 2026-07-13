@@ -26,9 +26,41 @@ jobs:
       actions: read
 
     steps:
+      - name: Resolve checkout ref
+        id: checkout-ref
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+
+          case "$EVENT_NAME" in
+            issue_comment)
+              if jq -e '.issue.pull_request != null' "$GITHUB_EVENT_PATH" >/dev/null; then
+                pr_number="$(jq -r '.issue.number' "$GITHUB_EVENT_PATH")"
+                sha="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$pr_number" --jq '.head.sha')"
+              else
+                sha="$GITHUB_SHA"
+              fi
+              ;;
+            pull_request_review_comment|pull_request_review)
+              sha="$(jq -r '.pull_request.head.sha' "$GITHUB_EVENT_PATH")"
+              ;;
+            *)
+              sha="$GITHUB_SHA"
+              ;;
+          esac
+
+          if [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "invalid checkout SHA: $sha" >&2
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
       - name: Checkout repository
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
         with:
+          ref: ${{ steps.checkout-ref.outputs.sha }}
           fetch-depth: 1
 
       - name: Run Claude Code
@@ -36,4 +68,8 @@ jobs:
         uses: anthropics/claude-code-action@2fee15510437d71399d9139ed60433470484a8fb # v1.0.153
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Repeated full Claude reports dominate context on long-running PRs
+          # and can make the SDK exit before inference. Human requests and
+          # dispositions remain available while prior bot transcripts do not.
+          exclude_comments_by_actor: '*[bot]'
           claude_args: '--model claude-opus-4-8'
