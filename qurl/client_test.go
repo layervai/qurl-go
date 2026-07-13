@@ -991,8 +991,8 @@ func TestClient_EmptySuccessBodyFailsClosed(t *testing.T) {
 		t.Fatalf("NewClient: %v", err)
 	}
 	_, err = client.ProtectURL(context.Background(), "https://example.com")
-	if err == nil || !strings.Contains(err.Error(), "empty API response body") {
-		t.Fatalf("ProtectURL empty response: want empty body error, got %v", err)
+	if !errors.Is(err, ErrInvalidAPIResponse) || !strings.Contains(err.Error(), "empty API response body") {
+		t.Fatalf("ProtectURL empty response: want ErrInvalidAPIResponse and empty body detail, got %v", err)
 	}
 }
 

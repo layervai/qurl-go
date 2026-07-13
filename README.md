@@ -251,6 +251,11 @@ Match errors by type, not message text:
   [qurl-connector#421](https://github.com/layervai/qurl-connector/issues/421);
   this README documents SDK behavior rather than live environment state.
 
+  Successful JSON responses that are empty, undecodable, or violate an
+  endpoint response contract now match the exported `ErrInvalidAPIResponse`
+  sentinel. Existing JSON-returning methods remain fail-closed and retain their
+  prior error detail; this adds a stable `errors.Is` contract for callers.
+
 - **Added: registered-agent lifecycle APIs** — `OpenRegisteredAgent` provides a
   store-backed reopen without qURL enrollment or resource API calls (a sealed
   store load may still call its key wrapper/KMS);

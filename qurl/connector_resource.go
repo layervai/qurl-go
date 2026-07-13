@@ -54,7 +54,8 @@ var (
 	ErrConnectorResourceAmbiguous = errors.New("qurl: ambiguous qURL Connector resource")
 
 	// ErrInvalidConnectorResourceResponse is returned when a successful response
-	// violates the qURL Connector resource contract.
+	// violates the qURL Connector resource contract. It also matches
+	// ErrInvalidAPIResponse.
 	ErrInvalidConnectorResourceResponse = errors.New("qurl: invalid qURL Connector resource response")
 
 	// ErrConnectorResourceOutcomeUnknown is returned when an ensure or delete was

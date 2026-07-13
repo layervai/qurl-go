@@ -128,7 +128,7 @@ diagnostics:
 | `qurl.ErrConnectorResourceSlugConflict` | Find-or-create could not resolve a slug collision to an active resource |
 | `qurl.ErrConnectorResourceAmbiguous` | A slug lookup returned more than one resource |
 | `qurl.ErrConnectorResourceOutcomeUnknown` | An ensure or delete was dispatched, but the SDK cannot prove whether it committed |
-| `qurl.ErrInvalidConnectorResourceResponse` | A 2xx response violated the qURL Connector resource contract |
+| `qurl.ErrInvalidConnectorResourceResponse` | A 2xx response violated the qURL Connector resource contract; also matches `qurl.ErrInvalidAPIResponse` |
 
 The endpoint mappings are intentionally operation-specific:
 
