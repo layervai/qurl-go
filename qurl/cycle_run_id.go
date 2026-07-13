@@ -22,6 +22,9 @@ var ErrInvalidCycleRunID = errors.New("qurl: invalid cycle run id")
 // bytes of cryptographic entropy and encoded as exactly 16 lowercase
 // hexadecimal characters.
 //
+// The fixed 64-bit shape is the authenticated per-cycle correlation contract,
+// not a long-lived globally unique identifier or a security token.
+//
 // qURL Connector owns the lifecycle of this value: generate it once per outer
 // knock/service cycle and reuse the exact string for every retry and reconnect
 // in that cycle. Native knock APIs validate and carry the caller-supplied value;
@@ -46,7 +49,7 @@ func ValidateCycleRunID(runID string) error {
 	if len(runID) != cycleRunIDLength {
 		return fmt.Errorf("%w: must be exactly %d lowercase hexadecimal characters", ErrInvalidCycleRunID, cycleRunIDLength)
 	}
-	for i := range len(runID) {
+	for i := 0; i < len(runID); i++ {
 		c := runID[i]
 		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
 			return fmt.Errorf("%w: character %d must be lowercase hexadecimal", ErrInvalidCycleRunID, i)

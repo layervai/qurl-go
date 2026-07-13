@@ -101,6 +101,15 @@ func TestValidateCycleRunID(t *testing.T) {
 	}
 }
 
+func TestValidateCycleRunID_AcceptsEveryCanonicalCharacterInEveryPosition(t *testing.T) {
+	for _, c := range "0123456789abcdef" {
+		runID := strings.Repeat(string(c), cycleRunIDLength)
+		if err := ValidateCycleRunID(runID); err != nil {
+			t.Fatalf("ValidateCycleRunID(%q) = %v, want nil", runID, err)
+		}
+	}
+}
+
 func FuzzValidateCycleRunID(f *testing.F) {
 	for _, seed := range []string{
 		"0123456789abcdef",
