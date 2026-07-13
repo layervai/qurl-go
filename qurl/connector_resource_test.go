@@ -1,11 +1,14 @@
 package qurl
 
 // Wire-contract provenance:
-//   - layervai/qurl-service@88840cff343571288a1224313325ffac75c5f2e3
+//   - layervai/qurl-service@0188c5ce56b469f409edec83e96c651010fb56e2
 //     api/openapi.yaml: /v1/resources, /v1/resources/{id}, ResourceId,
-//     ResourceData, Meta; internal/domain/resource_key.go: strict canonical
-//     resource-public-key decoding, DER SPKI length bounds, and the explicit
+//     ResourceData, Meta, the exact shared slug/alias grammar, and the explicit
 //     opaque connector_routing_id contract.
+//   - layervai/qurl-service@e1cd3f57cab4a1eb515811dac0ee9ff2cf7e86f3
+//     internal/domain/resource_key.go: strict canonical resource-public-key
+//     decoding and DER SPKI length bounds; internal/domain/{slug,alias}.go:
+//     the same exact shared slug/alias grammar.
 //   - layervai/qurl-go@5ba76c1986bb5e33e3b795139b4ae1ffef86f8fb
 //     qurl/client.go: post-dispatch outcome-unknown request semantics.
 //   - layervai/qurl-connector@290d9ea3c67e253191b1d85edcb560eda1fa5674
@@ -641,6 +644,43 @@ func TestClient_ConnectorResourceRejectsInvalidInputsWithoutNetwork(t *testing.T
 	}
 	if calls.Load() != 0 {
 		t.Fatalf("network calls = %d, want 0", calls.Load())
+	}
+}
+
+func TestConnectorSlugAndAliasGrammar(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		value string
+		want  bool
+	}{
+		{name: "minimum length", value: "a-b", want: true},
+		{name: "maximum length", value: "a" + strings.Repeat("b", 62) + "c", want: true},
+		{name: "empty", value: ""},
+		{name: "below minimum", value: "ab"},
+		{name: "above maximum", value: "a" + strings.Repeat("b", 63) + "c"},
+		{name: "leading digit", value: "1bc"},
+		{name: "leading hyphen", value: "-bc"},
+		{name: "trailing hyphen", value: "ab-"},
+		{name: "uppercase", value: "Abc"},
+		{name: "underscore", value: "a_b"},
+		{name: "space", value: "a b"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := connectorSlugPattern.MatchString(tt.value); got != tt.want {
+				t.Fatalf("connectorSlugPattern.MatchString(%q) = %t, want %t", tt.value, got, tt.want)
+			}
+			err := validateConnectorSlug(tt.value)
+			if tt.want && err != nil {
+				t.Fatalf("validateConnectorSlug(%q) = %v, want nil", tt.value, err)
+			}
+			if !tt.want && !errors.Is(err, ErrInvalidResourceRequest) {
+				t.Fatalf("validateConnectorSlug(%q) = %v, want ErrInvalidResourceRequest", tt.value, err)
+			}
+		})
 	}
 }
 

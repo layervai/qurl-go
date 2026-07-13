@@ -35,9 +35,16 @@ revocation released an old slug claim. This ensure-only metadata is deliberately
 not stored on the reusable `ConnectorResource` entity.
 
 Alias and slug have different lifecycle meaning, but qurl-service's current
-OpenAPI intentionally constrains both to the exact same lowercase 3-64
-character grammar. Alias validation here is therefore producer-contract
-validation, not an attempt to use display metadata as qURL Connector identity.
+OpenAPI intentionally constrains both to the exact same
+`^[a-z][a-z0-9-]{1,62}[a-z0-9]$` grammar. Alias validation here is therefore
+producer-contract validation, not an attempt to use display metadata as qURL
+Connector identity.
+
+The current producer rejects a nonconforming alias on create and patch, so
+observing one in a successful response is contract drift or corrupt stored data;
+the SDK rejects that row rather than returning a resource with invalid metadata.
+If the producer ever loosens the alias grammar independently, update and release
+the SDK contract with it.
 
 `EnsureConnectorResource` requires the response to contain a valid
 `resource_id`, `connector_routing_id`, `knock_resource_id`, `status: "active"`,
