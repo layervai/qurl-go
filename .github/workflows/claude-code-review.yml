@@ -6,7 +6,9 @@ on:
 
 jobs:
   review:
-    if: github.actor != 'dependabot[bot]'
+    if: |
+      github.actor != 'dependabot[bot]' &&
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -23,9 +25,10 @@ jobs:
           fetch-depth: 1
 
       - name: Run Claude Code Review
-        # `pull_request` withholds repository secrets and downgrades GITHUB_TOKEN
-        # for fork PRs. Do not change this to `pull_request_target` without adding
-        # the interactive workflow's same-repository head gate before the action.
+        # The job-level gate skips fork heads before checkout or action execution.
+        # `pull_request` also withholds repository secrets and downgrades
+        # GITHUB_TOKEN for fork PRs as defense in depth. Do not change this to
+        # `pull_request_target` without preserving an equivalent head-repo gate.
         uses: anthropics/claude-code-action@558b1d6cab4085c7753fe402c10bef0fbb92ac7a # v1.0.165
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}

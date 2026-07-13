@@ -45,6 +45,8 @@ jobs:
     # 20 minutes leaves more than 3x observed runway while bounding stuck jobs.
     timeout-minutes: 20
     permissions:
+      # Review-only by design: Claude reports or proposes patches, while a
+      # write-capable maintainer applies, signs, and pushes accepted changes.
       contents: read
       pull-requests: write
       issues: write

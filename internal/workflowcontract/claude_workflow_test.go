@@ -11,6 +11,9 @@ import (
 	"testing"
 )
 
+// When bumping this pin, re-verify that upstream action.yml still declares
+// exclude_comments_by_actor and that actor-filter.ts retains the special
+// *[bot] literal-suffix semantics. GitHub ignores unknown action inputs.
 const claudeAction = "anthropics/claude-code-action@558b1d6cab4085c7753fe402c10bef0fbb92ac7a # v1.0.165"
 
 func TestInteractiveClaudeWorkflowAuthorizesBeforeImmutableCheckout(t *testing.T) {
@@ -18,6 +21,7 @@ func TestInteractiveClaudeWorkflowAuthorizesBeforeImmutableCheckout(t *testing.T
 
 	requireContains(t, workflow,
 		"timeout-minutes: 20",
+		"Review-only by design",
 		"github.event.comment.author_association == 'OWNER'",
 		"github.event.comment.author_association == 'MEMBER'",
 		"github.event.comment.author_association == 'COLLABORATOR'",
@@ -54,7 +58,9 @@ func TestAutomaticClaudeWorkflowPinsBoundedCommentAuthorInput(t *testing.T) {
 	// only matches actors whose login literally has that suffix.
 	requireContains(t, workflow,
 		"documented minimum permissions include both Issues",
-		"`pull_request` withholds repository secrets",
+		"github.event.pull_request.head.repo.full_name == github.repository",
+		"job-level gate skips fork heads before checkout",
+		"`pull_request` also withholds repository secrets",
 		"Pinned v1.0.165 implements `*[bot]` as a literal [bot]-suffix",
 	)
 	requireSharedActionContract(t, workflow)
