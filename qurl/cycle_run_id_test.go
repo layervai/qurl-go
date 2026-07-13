@@ -78,7 +78,7 @@ func TestValidateCycleRunID(t *testing.T) {
 		{name: "uppercase", value: "0123456789abcdeF"},
 		{name: "fifteen characters", value: "0123456789abcde", wantMessage: "must be exactly 16 lowercase hexadecimal ASCII bytes"},
 		{name: "seventeen characters", value: "0123456789abcdef0"},
-		{name: "non hex", value: "0123456789abcdeg"},
+		{name: "non hex", value: "0123456789abcdeg", wantMessage: "byte 15 must be lowercase hexadecimal"},
 		{name: "newline", value: "0123456789abcde\n"},
 		{name: "nul", value: "0123456789abcde\x00"},
 		{name: "unicode byte length", value: "0123456789abcdé"},

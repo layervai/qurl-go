@@ -55,7 +55,7 @@ func ValidateCycleRunID(runID string) error {
 	for i := 0; i < len(runID); i++ {
 		c := runID[i]
 		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
-			return fmt.Errorf("%w: character %d must be lowercase hexadecimal", ErrInvalidCycleRunID, i)
+			return fmt.Errorf("%w: byte %d must be lowercase hexadecimal", ErrInvalidCycleRunID, i)
 		}
 	}
 	return nil
