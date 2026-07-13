@@ -93,7 +93,7 @@ portal, err := resource.CreatePortal(ctx, qurl.ValidFor(5*time.Minute))
 If you persist the resource id, future calls do not need to recreate the handle:
 
 ```go
-resource := client.ResourceByID("r_demo1234567")
+resource := client.ResourceByID(cachedResourcePublicKey)
 portal, err := resource.CreatePortal(ctx, qurl.ValidFor(time.Hour))
 ```
 

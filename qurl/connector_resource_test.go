@@ -1,8 +1,10 @@
 package qurl
 
 // Wire-contract provenance:
-//   - layervai/qurl-service@109523a4f37c10fb09733d8823e5a085116c972a
-//     api/openapi.yaml: /v1/resources, /v1/resources/{id}, ResourceData, Meta.
+//   - layervai/qurl-service@c5ab58440835e3967820e1e7b2427167d150c4ec
+//     api/openapi.yaml: /v1/resources, /v1/resources/{id}, ResourceId,
+//     ResourceData, Meta; internal/domain/resource_key.go: strict canonical
+//     resource-public-key decoding and DER SPKI length bounds.
 //   - layervai/qurl-go@5ba76c1986bb5e33e3b795139b4ae1ffef86f8fb
 //     qurl/client.go: post-dispatch outcome-unknown request semantics.
 //   - layervai/qurl-connector@290d9ea3c67e253191b1d85edcb560eda1fa5674
@@ -15,7 +17,9 @@ package qurl
 // contract rather than carrying the legacy classifier into the SDK.
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,10 +33,13 @@ import (
 )
 
 const (
-	testConnectorID   = "r_connect1234"
-	testConnectorSlug = "prod-dashboard"
-	testKnockID       = "qurl-tunnel-server"
-	testDeviceToken   = "lv_device_credential"
+	// Real P-256 DER SPKI public keys from the fenced qurl-service OpenAPI
+	// examples keep lifecycle fixtures on the canonical public resource ID.
+	testConnectorID      = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE2cTVv5_3eeYCcLLq5ROYCqcmY50HiKZ9ATglIkPnCji1E_S63UMtXba1moR8-Q6EV7oM6zwwh9_j2CDujzXvLA"
+	testOtherConnectorID = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE7VDGkLaZfQLKvxScAKGCA1Y3p6jNG6d0f66a4Wib8NP8CRZJoEm1jRQej5f0aRzejaH5N7ChvQkiISohN2KVOQ"
+	testConnectorSlug    = "prod-dashboard"
+	testKnockID          = "qurl-tunnel-server"
+	testDeviceToken      = "lv_device_credential"
 )
 
 func TestClient_EnsureConnectorResourceContract(t *testing.T) {
@@ -423,6 +430,9 @@ func TestClient_ConnectorResourceSuccessfulResponseValidation(t *testing.T) {
 	}{
 		{name: "malformed JSON", body: `{"data":`, want: ErrInvalidConnectorResourceResponse},
 		{name: "missing resource id", body: strings.Replace(valid, `"resource_id":"`+testConnectorID+`",`, "", 1), want: ErrInvalidConnectorResourceResponse},
+		{name: "legacy storage resource id", body: strings.Replace(valid, testConnectorID, "r_legacy12345", 1), want: ErrInvalidConnectorResourceResponse},
+		{name: "padded resource id", body: strings.Replace(valid, testConnectorID, testConnectorID+"=", 1), want: ErrInvalidConnectorResourceResponse},
+		{name: "non-canonical resource id", body: strings.Replace(valid, testConnectorID, testConnectorID[:len(testConnectorID)-1]+"B", 1), want: ErrInvalidConnectorResourceResponse},
 		{name: "missing knock id", body: strings.Replace(valid, `"knock_resource_id":"`+testKnockID+`",`, "", 1), want: ErrInvalidConnectorResourceResponse},
 		{name: "whitespace knock id", body: strings.Replace(valid, `"knock_resource_id":"`+testKnockID+`"`, `"knock_resource_id":" `+testKnockID+` "`, 1), want: ErrInvalidConnectorResourceResponse},
 		{name: "wrong type", body: strings.Replace(valid, `"type":"tunnel"`, `"type":"url"`, 1), want: ErrInvalidConnectorResourceResponse},
@@ -494,7 +504,7 @@ func TestClient_GetConnectorResourceBySlugCardinality(t *testing.T) {
 	}{
 		{name: "not found", data: `[]`, want: ErrConnectorResourceNotFound},
 		{name: "null data", data: `null`, want: ErrInvalidConnectorResourceResponse},
-		{name: "ambiguous", data: fmt.Sprintf(`[{"resource_id":%q},{"resource_id":"r_second1234"}]`, testConnectorID), want: ErrConnectorResourceAmbiguous},
+		{name: "ambiguous", data: fmt.Sprintf(`[{"resource_id":%q},{"resource_id":%q}]`, testConnectorID, testOtherConnectorID), want: ErrConnectorResourceAmbiguous},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -537,7 +547,7 @@ func TestClient_GetConnectorResourceRejectsFlatOrMismatchedDetail(t *testing.T) 
 		},
 		{
 			name: "mismatched id",
-			body: fmt.Sprintf(`{"data":{"resource":{"resource_id":"r_other123456","knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q}}}`, testKnockID, testConnectorSlug),
+			body: fmt.Sprintf(`{"data":{"resource":{"resource_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q}}}`, testOtherConnectorID, testKnockID, testConnectorSlug),
 		},
 	}
 	for _, tt := range tests {
@@ -575,13 +585,59 @@ func TestClient_ConnectorResourceRejectsInvalidInputsWithoutNetwork(t *testing.T
 	if _, err := client.GetConnectorResource(context.Background(), "../resource"); !errors.Is(err, ErrInvalidResourceRequest) {
 		t.Fatalf("invalid id: %v", err)
 	}
-	if err := client.DeleteConnectorResource(context.Background(), "r_short"); !errors.Is(err, ErrInvalidResourceRequest) {
+	if err := client.DeleteConnectorResource(context.Background(), "r_legacy12345"); !errors.Is(err, ErrInvalidResourceRequest) {
 		t.Fatalf("invalid delete id: %v", err)
 	} else {
 		assertNoConnectorMutationOutcome(t, err)
 	}
 	if calls.Load() != 0 {
 		t.Fatalf("network calls = %d, want 0", calls.Load())
+	}
+}
+
+func TestConnectorResourceIDContract(t *testing.T) {
+	t.Parallel()
+
+	minID := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x01}, minConnectorResourcePublicKeyDERBytes))
+	maxID := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x02}, maxConnectorResourcePublicKeyDERBytes))
+	nonCanonical := testConnectorID[:len(testConnectorID)-1] + "B"
+	standardBase64 := strings.Replace(testConnectorID, "_", "/", 1)
+
+	tests := []struct {
+		name string
+		id   string
+		want bool
+	}{
+		{name: "real P-256 public key", id: testConnectorID, want: true},
+		{name: "minimum producer structural length", id: minID, want: true},
+		{name: "maximum producer structural length", id: maxID, want: true},
+		{name: "legacy storage id", id: "r_legacy12345"},
+		{name: "empty", id: ""},
+		{name: "padded", id: testConnectorID + "="},
+		{name: "standard base64 alphabet", id: standardBase64},
+		{name: "non-canonical trailing bits", id: nonCanonical},
+		{name: "embedded carriage return", id: testConnectorID[:50] + "\r" + testConnectorID[50:]},
+		{name: "embedded line feed", id: testConnectorID[:50] + "\n" + testConnectorID[50:]},
+		{name: "trailing carriage return", id: testConnectorID + "\r"},
+		{name: "trailing line feed", id: testConnectorID + "\n"},
+		{name: "below decoded length", id: base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x01}, minConnectorResourcePublicKeyDERBytes-1))},
+		{name: "above decoded length", id: base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x01}, maxConnectorResourcePublicKeyDERBytes+1))},
+		{name: "invalid unpadded length", id: strings.Repeat("A", 109)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isValidConnectorResourceID(tt.id); got != tt.want {
+				t.Fatalf("isValidConnectorResourceID() = %t, want %t", got, tt.want)
+			}
+			err := validateConnectorResourceID(tt.id)
+			if tt.want && err != nil {
+				t.Fatalf("validateConnectorResourceID() = %v, want nil", err)
+			}
+			if !tt.want && !errors.Is(err, ErrInvalidResourceRequest) {
+				t.Fatalf("validateConnectorResourceID() = %v, want ErrInvalidResourceRequest", err)
+			}
+		})
 	}
 }
 
