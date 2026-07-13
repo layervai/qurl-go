@@ -89,7 +89,7 @@ Most production apps protect the URL once, store the resource id, and mint
 portals as needed:
 
 ```go
-resource := client.ResourceByID(cachedResourcePublicKey)
+resource := client.ResourceByID("<stored canonical public-key resource_id>")
 
 portal, err := resource.CreatePortal(ctx, qurl.ValidFor(time.Hour))
 ```

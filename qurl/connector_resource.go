@@ -391,6 +391,9 @@ func classifyConnectorResourceError(operation connectorResourceOperation, err er
 			return fmt.Errorf("%w: %w", ErrConnectorResourceRevoked, err)
 		}
 	case connectorResourceOperationDelete:
+		// The producer's DELETE contract is 204/401/404/500 and deliberately
+		// permits revoking tombstoned resources with 204. Preserve an unexpected
+		// 410 as its raw APIError instead of inventing idempotent-delete semantics.
 		if apiErr.StatusCode == http.StatusNotFound {
 			return fmt.Errorf("%w: %w", ErrConnectorResourceNotFound, err)
 		}
