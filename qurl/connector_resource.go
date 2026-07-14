@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"unicode"
 )
 
 // producerConnectorResourceType is the qurl-service discriminator for qURL
@@ -70,10 +71,11 @@ var (
 // Slug are immutable identities. ConnectorRoutingID and KnockResourceID are
 // explicit control-plane values for reverse-connection routing and NHP
 // admission respectively; neither is an identity or derivable from another
-// field. RunID is ephemeral correlation state, not a resource field. Alias is
-// a separate, mutable display handle. JSON persistence cannot preserve the
-// unexported client binding used by CreatePortal; call GetConnectorResource or
-// GetConnectorResourceBySlug to obtain a newly bound handle.
+// field. Alias is a separate, mutable display handle. RunID is intentionally
+// absent; [NewCycleRunID] creates separate ephemeral correlation. JSON
+// persistence cannot preserve the unexported client binding used by
+// CreatePortal; call GetConnectorResource or GetConnectorResourceBySlug to
+// obtain a newly bound handle.
 type ConnectorResource struct {
 	client *Client
 
@@ -300,13 +302,16 @@ func (r connectorResourceWire) connectorResource(client *Client, expect connecto
 		return nil, invalidConnectorResourceResponse("resource %q has missing or invalid connector_routing_id", r.ResourceID)
 	}
 	// knock_resource_id is an opaque, ASP-defined NHP admission target. The
-	// producer owns its grammar; the SDK enforces only presence and exact bytes.
-	// Do not add an SDK-local length or placement parser: the capped response
-	// bounds input, while the opaque value can evolve without a client release.
+	// producer owns its grammar; the SDK enforces only transport-safe exact bytes:
+	// presence, no surrounding whitespace, and no control characters. Do not add
+	// an SDK-local length or placement parser: the capped response bounds input,
+	// while the opaque value can evolve without a client release.
 	if trimmedKnockID := strings.TrimSpace(r.KnockResourceID); trimmedKnockID == "" {
 		return nil, invalidConnectorResourceResponse("missing knock_resource_id")
 	} else if r.KnockResourceID != trimmedKnockID {
 		return nil, invalidConnectorResourceResponse("resource %q has knock_resource_id with leading or trailing whitespace", r.ResourceID)
+	} else if strings.IndexFunc(r.KnockResourceID, unicode.IsControl) >= 0 {
+		return nil, invalidConnectorResourceResponse("resource %q has knock_resource_id with a control character", r.ResourceID)
 	}
 	// ResourceID and ConnectorRoutingID are already distinct because their
 	// validated grammars are disjoint. Any coordinated change to either grammar

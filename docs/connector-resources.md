@@ -59,7 +59,9 @@ a valid non-identity point, and the byte-exact canonical SPKI re-marshalling.
 The value is distinct from both `ConnectorRoutingID`, the opaque
 reverse-connection routing label, and `KnockResourceID`, the placement-neutral
 NHP admission target. The SDK requires all three values to be present and
-pairwise distinct.
+pairwise distinct. `KnockResourceID` otherwise keeps its producer-owned opaque
+grammar, but the SDK rejects surrounding whitespace and control characters
+before forwarding the value to the NHP admission path.
 
 A cycle `RunID` is not a fourth resource identity and is intentionally absent
 from `ConnectorResource` and the resource CRUD wire contract. qURL Connector

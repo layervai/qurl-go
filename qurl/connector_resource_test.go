@@ -560,6 +560,8 @@ func TestClient_ConnectorResourceSuccessfulResponseValidation(t *testing.T) {
 		{name: "public resource id cross-wired as knock id", body: strings.Replace(valid, `"knock_resource_id":"`+testKnockID+`"`, `"knock_resource_id":"`+testConnectorID+`"`, 1), want: ErrInvalidConnectorResourceResponse},
 		{name: "missing knock id", body: strings.Replace(valid, `"knock_resource_id":"`+testKnockID+`",`, "", 1), want: ErrInvalidConnectorResourceResponse},
 		{name: "whitespace knock id", body: strings.Replace(valid, `"knock_resource_id":"`+testKnockID+`"`, `"knock_resource_id":" `+testKnockID+` "`, 1), want: ErrInvalidConnectorResourceResponse},
+		{name: "NUL in knock id", body: strings.Replace(valid, `"knock_resource_id":"`+testKnockID+`"`, `"knock_resource_id":"knock\u0000id"`, 1), want: ErrInvalidConnectorResourceResponse},
+		{name: "newline in knock id", body: strings.Replace(valid, `"knock_resource_id":"`+testKnockID+`"`, `"knock_resource_id":"knock\nid"`, 1), want: ErrInvalidConnectorResourceResponse},
 		{name: "wrong type", body: strings.Replace(valid, `"type":"tunnel"`, `"type":"url"`, 1), want: ErrInvalidConnectorResourceResponse},
 		{name: "unknown status", body: strings.Replace(valid, `"status":"active"`, `"status":"pending"`, 1), want: ErrInvalidConnectorResourceResponse},
 		{name: "wrong slug", body: strings.Replace(valid, `"slug":"`+testConnectorSlug+`"`, `"slug":"other-dashboard"`, 1), want: ErrInvalidConnectorResourceResponse},
