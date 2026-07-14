@@ -1172,8 +1172,9 @@ func doAuthorizedRequest(ctx context.Context, httpClient HTTPDoer, baseURL strin
 			return invalidAPIResponseOutcome(fmt.Sprintf("HTTP %d response body must be empty", resp.StatusCode), nil)
 		}
 		return nil
+	default:
+		return invalidAPIResponseOutcome("unknown API response body contract", nil)
 	}
-	return invalidAPIResponseOutcome("unknown API response body contract", nil)
 }
 
 func invalidAPIResponseOutcome(detail string, cause error) error {

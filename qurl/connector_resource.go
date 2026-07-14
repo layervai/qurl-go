@@ -184,7 +184,10 @@ func (c *Client) EnsureConnectorResource(ctx context.Context, slug string) (*Ens
 		return nil, classifyConnectorResourceError(connectorResourceOperationEnsure, err)
 	}
 	if response.Meta.FoundExisting == nil {
-		return nil, classifyConnectorResourceError(connectorResourceOperationEnsure, invalidConnectorResourceResponse("missing meta.found_existing"))
+		// The exact 201 row above proves which valid resource the producer
+		// committed or selected. Missing ensure-only metadata is still contract
+		// drift, but it does not make that mutation outcome itself unknown.
+		return nil, invalidConnectorResourceResponse("missing meta.found_existing")
 	}
 	return &EnsureConnectorResourceResult{
 		Resource:      resource,

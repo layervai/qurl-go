@@ -636,10 +636,11 @@ func TestClient_ConnectorResourceSuccessfulResponseValidation(t *testing.T) {
 
 	valid := fmt.Sprintf(`{"data":{"resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q},"meta":{"found_existing":false}}`, testConnectorID, testConnectorRoutingID, testKnockID, testConnectorSlug)
 	tests := []struct {
-		name       string
-		body       string
-		want       error
-		wantDetail string
+		name         string
+		body         string
+		want         error
+		wantDetail   string
+		outcomeKnown bool
 	}{
 		{name: "malformed JSON", body: `{"data":`, want: ErrInvalidConnectorResourceResponse},
 		{name: "missing resource id", body: strings.Replace(valid, `"resource_id":"`+testConnectorID+`",`, "", 1), want: ErrInvalidConnectorResourceResponse},
@@ -664,7 +665,7 @@ func TestClient_ConnectorResourceSuccessfulResponseValidation(t *testing.T) {
 		{name: "wrong slug", body: strings.Replace(valid, `"slug":"`+testConnectorSlug+`"`, `"slug":"other-dashboard"`, 1), want: ErrInvalidConnectorResourceResponse},
 		{name: "invalid alias", body: strings.Replace(valid, `},"meta"`, `,"alias":"bad alias"},"meta"`, 1), want: ErrInvalidConnectorResourceResponse},
 		{name: "empty alias", body: strings.Replace(valid, `},"meta"`, `,"alias":""},"meta"`, 1), want: ErrInvalidConnectorResourceResponse},
-		{name: "missing found existing", body: strings.Replace(valid, `,"meta":{"found_existing":false}`, "", 1), want: ErrInvalidConnectorResourceResponse},
+		{name: "missing found existing", body: strings.Replace(valid, `,"meta":{"found_existing":false}`, "", 1), want: ErrInvalidConnectorResourceResponse, outcomeKnown: true},
 		{name: "invalid resource and missing found existing reports resource first", body: strings.Replace(strings.Replace(valid, `"resource_id":"`+testConnectorID+`",`, "", 1), `,"meta":{"found_existing":false}`, "", 1), want: ErrInvalidConnectorResourceResponse, wantDetail: "missing or invalid resource_id"},
 		{name: "detail envelope on create", body: fmt.Sprintf(`{"data":{"resource":{"resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q}},"meta":{"found_existing":false}}`, testConnectorID, testConnectorRoutingID, testKnockID, testConnectorSlug), want: ErrInvalidConnectorResourceResponse},
 		{name: "revoked success row", body: strings.Replace(valid, `"status":"active"`, `"status":"revoked"`, 1), want: ErrInvalidConnectorResourceResponse},
@@ -689,12 +690,12 @@ func TestClient_ConnectorResourceSuccessfulResponseValidation(t *testing.T) {
 			if !errors.Is(err, ErrInvalidAPIResponse) {
 				t.Fatalf("invalid successful response lost ErrInvalidAPIResponse: %v", err)
 			}
-			if !errors.Is(err, ErrConnectorResourceOutcomeUnknown) {
-				t.Fatalf("successful ensure contract failure lost outcome ambiguity: %v", err)
+			if got, want := errors.Is(err, ErrConnectorResourceOutcomeUnknown), !tt.outcomeKnown; got != want {
+				t.Fatalf("ErrConnectorResourceOutcomeUnknown = %t, want %t; error=%v", got, want, err)
 			}
 			var outcomeUnknown *apiRequestOutcomeUnknownError
-			if !errors.As(err, &outcomeUnknown) {
-				t.Fatalf("successful ensure contract failure lost internal outcome marker: %v", err)
+			if got, want := errors.As(err, &outcomeUnknown), !tt.outcomeKnown; got != want {
+				t.Fatalf("internal outcome marker = %t, want %t; error=%v", got, want, err)
 			}
 		})
 	}

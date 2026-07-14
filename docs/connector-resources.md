@@ -123,7 +123,8 @@ The id lookup accepts the resource-detail envelope
 `data.resource`; the slug lookup accepts the resource-list envelope `data[]`.
 The create/ensure path accepts the flat resource envelope `data`. Keeping these
 shapes separate prevents a valid HTTP response from silently decoding to an
-empty resource.
+empty resource. Detail-envelope siblings such as `data.qurls` are intentionally
+ignored; only `data.resource` supplies the Connector entity.
 
 The producer defines slug lookup as a server-side active-only 0-or-1 result and
 forbids combining `slug` with `status` or `type`. The SDK therefore sends only
