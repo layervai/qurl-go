@@ -102,10 +102,12 @@ func requireContains(t *testing.T, contents string, fragments ...string) {
 	}
 }
 
-func requireNotContains(t *testing.T, contents string, fragment string) {
+func requireNotContains(t *testing.T, contents string, fragments ...string) {
 	t.Helper()
-	if strings.Contains(contents, fragment) {
-		t.Errorf("workflow contains forbidden contract fragment %q", fragment)
+	for _, fragment := range fragments {
+		if strings.Contains(contents, fragment) {
+			t.Errorf("workflow contains forbidden contract fragment %q", fragment)
+		}
 	}
 }
 
