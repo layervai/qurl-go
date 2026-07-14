@@ -298,7 +298,7 @@ func (r connectorResourceWire) connectorResource(client *Client, expect connecto
 	// independently validated identity or routing value.
 	if r.ResourceID == r.KnockResourceID ||
 		r.ConnectorRoutingID == r.KnockResourceID {
-		return nil, invalidConnectorResourceResponse("resource %q has cross-wired identity, routing, or admission values", r.ResourceID)
+		return nil, invalidConnectorResourceResponse("resource %q has knock_resource_id cross-wired with identity or routing", r.ResourceID)
 	}
 	if r.Type != producerConnectorResourceType {
 		return nil, invalidConnectorResourceResponse("resource %q has type %q, want %q", r.ResourceID, r.Type, producerConnectorResourceType)
