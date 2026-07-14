@@ -381,8 +381,10 @@ func classifyConnectorResourceError(operation connectorResourceOperation, err er
 	isMutation := operation == connectorResourceOperationEnsure || operation == connectorResourceOperationDelete
 	if isMutation {
 		var outcomeUnknown *apiRequestOutcomeUnknownError
-		// Preserve the SDK-wide post-dispatch marker, then add the public
-		// Connector sentinel that tells mutation callers to reconcile.
+		// Preserve the SDK-wide post-dispatch marker for errors.As and add the
+		// public Connector reconciliation sentinel for errors.Is. Invalid-response
+		// mutations also remain matchable as ErrInvalidAPIResponse and
+		// ErrInvalidConnectorResourceResponse below.
 		if errors.Is(err, ErrInvalidAPIResponse) && !errors.As(err, &outcomeUnknown) {
 			err = &apiRequestOutcomeUnknownError{err: err}
 		}
