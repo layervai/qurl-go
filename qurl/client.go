@@ -1015,6 +1015,7 @@ func (c *Client) doJSONStatus(ctx context.Context, method, path string, body, ou
 }
 
 // doNoContent requires one exact successful status and a byte-empty body.
+// Whitespace is still protocol content and deliberately fails this contract.
 func (c *Client) doNoContent(ctx context.Context, method, path string, expectedStatus int) error {
 	return c.doRequest(ctx, method, path, nil, apiResponseContract{
 		expectedStatus: expectedStatus,

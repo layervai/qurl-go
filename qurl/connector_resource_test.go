@@ -288,6 +288,7 @@ func TestClient_DeleteConnectorResourceRequiresExactEmpty204(t *testing.T) {
 		{name: "200", status: http.StatusOK},
 		{name: "202", status: http.StatusAccepted},
 		{name: "nonempty 204", status: http.StatusNoContent, body: `{}`},
+		{name: "whitespace-only 204", status: http.StatusNoContent, body: "\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
