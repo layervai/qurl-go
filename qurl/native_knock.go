@@ -7,10 +7,15 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/layervai/qurl-go/internal/nhpcontract"
 )
 
 // ErrInvalidNativeKnockOptions marks a native registered-agent knock that is
 // invalid before any DNS lookup, socket creation, or packet construction.
+// Invalid identities expose only this sentinel. An invalid RunID also preserves
+// ErrInvalidCycleRunID so callers of the existing RunID validator retain its
+// more specific error classification.
 var ErrInvalidNativeKnockOptions = errors.New("qurl: invalid native knock options")
 
 // NativeKnockOptions carries the caller-owned state for one native UDP knock.
@@ -54,7 +59,9 @@ func marshalNativeKnockApplicationBody(agentID, knockResourceID string, opts Nat
 		return nil, err
 	}
 
-	return json.Marshal(nativeAgentKnockBody{
+	// This scalar-only struct cannot currently make json.Marshal fail. Keep the
+	// error path explicit so adding a fallible field cannot silently weaken it.
+	body, err := json.Marshal(nativeAgentKnockBody{
 		HeaderType:      nhpKNKHeaderType,
 		UserID:          agentID,
 		DeviceID:        agentID,
@@ -62,9 +69,22 @@ func marshalNativeKnockApplicationBody(agentID, knockResourceID string, opts Nat
 		KnockResourceID: knockResourceID,
 		RunID:           opts.RunID,
 	})
+	if err != nil {
+		return nil, fmt.Errorf("qurl: encode native knock body: %w", err)
+	}
+	if len(body) > nhpcontract.MaxApplicationBodySize {
+		return nil, fmt.Errorf("%w: encoded body exceeds NHP maximum of %d bytes", ErrInvalidNativeKnockOptions, nhpcontract.MaxApplicationBodySize)
+	}
+	return body, nil
 }
 
 func validateNativeKnockIdentity(kind, value string) error {
+	// These are opaque protocol identities, not user-facing slugs. Preserve
+	// printable internal whitespace exactly; only ambiguous edge whitespace and
+	// control characters are noncanonical.
+	if len(value) > nhpcontract.MaxApplicationBodySize {
+		return fmt.Errorf("%w: %s exceeds the NHP application-body maximum of %d bytes", ErrInvalidNativeKnockOptions, kind, nhpcontract.MaxApplicationBodySize)
+	}
 	trimmed := strings.TrimSpace(value)
 	if trimmed == "" {
 		return fmt.Errorf("%w: %s must not be blank", ErrInvalidNativeKnockOptions, kind)

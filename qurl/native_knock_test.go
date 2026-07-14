@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	conformance "github.com/layervai/qurl-conformance"
+
+	"github.com/layervai/qurl-go/internal/nhpcontract"
 )
 
 func TestMarshalNativeKnockApplicationBody(t *testing.T) {
@@ -49,12 +51,14 @@ func TestMarshalNativeKnockApplicationBody_ValidatesIdentities(t *testing.T) {
 		{name: "trailing agent id whitespace", agentID: "agent-01\n", knockResourceID: "connector-01", wantMessage: "agent id must not have surrounding whitespace"},
 		{name: "embedded agent id control", agentID: "agent\n01", knockResourceID: "connector-01", wantMessage: "agent id must not contain control characters"},
 		{name: "invalid UTF-8 agent id", agentID: "agent-\xff", knockResourceID: "connector-01", wantMessage: "agent id must be valid UTF-8"},
+		{name: "oversized agent id", agentID: strings.Repeat("a", nhpcontract.MaxApplicationBodySize+1), knockResourceID: "connector-01", wantMessage: "agent id exceeds the NHP application-body maximum"},
 		{name: "empty knock resource id", agentID: "agent-01", wantMessage: "knock resource id must not be blank"},
 		{name: "whitespace knock resource id", agentID: "agent-01", knockResourceID: "\n", wantMessage: "knock resource id must not be blank"},
 		{name: "leading knock resource id whitespace", agentID: "agent-01", knockResourceID: " connector-01", wantMessage: "knock resource id must not have surrounding whitespace"},
 		{name: "trailing knock resource id whitespace", agentID: "agent-01", knockResourceID: "connector-01\t", wantMessage: "knock resource id must not have surrounding whitespace"},
 		{name: "embedded knock resource id control", agentID: "agent-01", knockResourceID: "connector\x0001", wantMessage: "knock resource id must not contain control characters"},
 		{name: "invalid UTF-8 knock resource id", agentID: "agent-01", knockResourceID: "connector-\xff", wantMessage: "knock resource id must be valid UTF-8"},
+		{name: "oversized knock resource id", agentID: "agent-01", knockResourceID: strings.Repeat("r", nhpcontract.MaxApplicationBodySize+1), wantMessage: "knock resource id exceeds the NHP application-body maximum"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -62,10 +66,50 @@ func TestMarshalNativeKnockApplicationBody_ValidatesIdentities(t *testing.T) {
 			if !errors.Is(err, ErrInvalidNativeKnockOptions) {
 				t.Fatalf("error = %v, want ErrInvalidNativeKnockOptions", err)
 			}
+			if errors.Is(err, ErrInvalidCycleRunID) {
+				t.Fatalf("identity error = %v, must not expose ErrInvalidCycleRunID", err)
+			}
 			if !strings.Contains(err.Error(), tt.wantMessage) {
 				t.Fatalf("error = %v, want message containing %q", err, tt.wantMessage)
 			}
 		})
+	}
+}
+
+func TestMarshalNativeKnockApplicationBody_AllowsPrintableInternalWhitespace(t *testing.T) {
+	got, err := marshalNativeKnockApplicationBody("agent 01", "connector 01", NativeKnockOptions{RunID: "0123456789abcdef"})
+	if err != nil {
+		t.Fatalf("marshalNativeKnockApplicationBody: %v", err)
+	}
+	const want = `{"headerType":1,"usrId":"agent 01","devId":"agent 01","aspId":"agent","resId":"connector 01","runId":"0123456789abcdef"}`
+	if string(got) != want {
+		t.Fatalf("native knock body = %s, want %s", got, want)
+	}
+}
+
+func TestMarshalNativeKnockApplicationBody_RejectsOversizedEncodedBody(t *testing.T) {
+	const runID = "0123456789abcdef"
+	base, err := marshalNativeKnockApplicationBody("a", "r", NativeKnockOptions{RunID: runID})
+	if err != nil {
+		t.Fatalf("marshal base body: %v", err)
+	}
+	resourceAtLimit := strings.Repeat("r", nhpcontract.MaxApplicationBodySize-len(base)+1)
+	atLimit, err := marshalNativeKnockApplicationBody("a", resourceAtLimit, NativeKnockOptions{RunID: runID})
+	if err != nil {
+		t.Fatalf("marshal body at NHP maximum: %v", err)
+	}
+	if len(atLimit) != nhpcontract.MaxApplicationBodySize {
+		t.Fatalf("body length = %d, want NHP maximum %d", len(atLimit), nhpcontract.MaxApplicationBodySize)
+	}
+
+	// The resource identity remains below its per-value cap, so this exercises
+	// the exact aggregate serialized-body boundary rather than the early cap.
+	_, err = marshalNativeKnockApplicationBody("a", resourceAtLimit+"r", NativeKnockOptions{RunID: runID})
+	if !errors.Is(err, ErrInvalidNativeKnockOptions) {
+		t.Fatalf("oversized body error = %v, want ErrInvalidNativeKnockOptions", err)
+	}
+	if !strings.Contains(err.Error(), "encoded body exceeds NHP maximum") {
+		t.Fatalf("oversized body error = %v, want encoded-body limit context", err)
 	}
 }
 
