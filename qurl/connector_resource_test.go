@@ -71,6 +71,14 @@ func TestConnectorResourcePublicShape(t *testing.T) {
 	}
 }
 
+func TestInvalidConnectorResourceResponseIncludesInvalidAPIResponse(t *testing.T) {
+	t.Parallel()
+
+	if !errors.Is(ErrInvalidConnectorResourceResponse, ErrInvalidAPIResponse) {
+		t.Fatal("ErrInvalidConnectorResourceResponse must include ErrInvalidAPIResponse")
+	}
+}
+
 func TestConnectorResourcePublicKeyFixturesAreCanonicalP256(t *testing.T) {
 	t.Parallel()
 

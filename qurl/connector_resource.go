@@ -52,10 +52,10 @@ var (
 	ErrConnectorResourceAmbiguous = errors.New("qurl: qURL Connector resource ambiguous")
 
 	// ErrInvalidConnectorResourceResponse is returned when a successful response
-	// violates the qURL Connector resource contract. It also matches
-	// ErrInvalidAPIResponse. Neither sentinel is retry advice; inspect the
+	// violates the qURL Connector resource contract. It wraps and therefore also
+	// matches ErrInvalidAPIResponse. Neither sentinel is retry advice; inspect the
 	// Connector-specific error before deciding whether a retry is safe.
-	ErrInvalidConnectorResourceResponse = errors.New("qurl: invalid qURL Connector resource response")
+	ErrInvalidConnectorResourceResponse = fmt.Errorf("qurl: invalid qURL Connector resource response: %w", ErrInvalidAPIResponse)
 
 	// ErrConnectorResourceOutcomeUnknown is returned when an ensure or delete was
 	// dispatched but the SDK cannot prove whether it committed. A nominal success
@@ -470,5 +470,5 @@ func classifyConnectorResourceError(operation connectorResourceOperation, err er
 // outcome-unknown marker for mutations; semantic read failures remain ordinary
 // invalid responses because they cannot have committed state.
 func invalidConnectorResourceResponse(format string, args ...any) error {
-	return fmt.Errorf("%w: %w: %s", ErrInvalidConnectorResourceResponse, ErrInvalidAPIResponse, fmt.Sprintf(format, args...))
+	return fmt.Errorf("%w: %s", ErrInvalidConnectorResourceResponse, fmt.Sprintf(format, args...))
 }
