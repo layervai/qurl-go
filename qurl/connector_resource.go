@@ -209,7 +209,10 @@ func (c *Client) GetConnectorResource(ctx context.Context, resourceID string) (*
 		resourceID:   resourceID,
 		allowRevoked: true,
 	})
-	return resource, classifyConnectorResourceError(connectorResourceOperationGetByID, err)
+	if err != nil {
+		return nil, classifyConnectorResourceError(connectorResourceOperationGetByID, err)
+	}
+	return resource, nil
 }
 
 // GetConnectorResourceBySlug fetches the single active qURL Connector resource
@@ -246,7 +249,10 @@ func (c *Client) GetConnectorResourceBySlug(ctx context.Context, slug string) (*
 		resource, err := (*response.Data)[0].connectorResource(c, connectorResourceExpectation{
 			slug: slug,
 		})
-		return resource, classifyConnectorResourceError(connectorResourceOperationGetBySlug, err)
+		if err != nil {
+			return nil, classifyConnectorResourceError(connectorResourceOperationGetBySlug, err)
+		}
+		return resource, nil
 	default:
 		// The ambiguous and both invalid-response sentinels are intentional:
 		// callers can match the cardinality invariant breach, the Connector
@@ -361,7 +367,7 @@ func isValidConnectorResourceID(resourceID string) bool {
 	}
 	// Strict still ignores CR and LF. An exact round trip enforces the public
 	// OpenAPI alphabet and the single canonical encoding for these DER bytes.
-	if b64url.EncodeToString(der) != resourceID {
+	if connectorResourceB64URL.EncodeToString(der) != resourceID {
 		return false
 	}
 	publicKey, err := ParseP256PublicKeyDER(der)
