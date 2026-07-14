@@ -316,14 +316,16 @@ func (r connectorResourceWire) connectorResource(client *Client, expect connecto
 	} else if strings.IndexFunc(r.KnockResourceID, unicode.IsControl) >= 0 {
 		return nil, invalidConnectorResourceResponse("resource %q has knock_resource_id with a control character", r.ResourceID)
 	}
-	// ResourceID and ConnectorRoutingID are already distinct because their
-	// validated grammars are disjoint. KnockResourceID is opaque, so explicitly
-	// enforce the producer's three-value identity/routing/admission distinction.
+	// The producer guarantees three distinct identity/routing/admission values.
+	// ResourceID and ConnectorRoutingID have disjoint validated grammars today,
+	// but keep the equality guard so a future grammar change cannot silently
+	// weaken that guarantee. KnockResourceID remains opaque.
 	// Slug is customer-chosen and is not part of that invariant; it may
 	// legitimately equal an otherwise valid routing or admission value.
-	if r.ResourceID == r.KnockResourceID ||
+	if r.ResourceID == r.ConnectorRoutingID ||
+		r.ResourceID == r.KnockResourceID ||
 		r.ConnectorRoutingID == r.KnockResourceID {
-		return nil, invalidConnectorResourceResponse("resource %q has knock_resource_id cross-wired with identity or routing", r.ResourceID)
+		return nil, invalidConnectorResourceResponse("resource %q has identity, routing, or admission values cross-wired", r.ResourceID)
 	}
 	if r.Type != producerConnectorResourceType {
 		return nil, invalidConnectorResourceResponse("resource %q has type %q, want %q", r.ResourceID, r.Type, producerConnectorResourceType)
@@ -392,6 +394,9 @@ func isValidConnectorResourceID(resourceID string) bool {
 	return err == nil && bytes.Equal(canonicalDER, der)
 }
 
+// connectorResourceOperation drives lifecycle-specific error classification.
+// Ensure and delete are mutations whose post-dispatch failures may have an
+// unknown outcome; both getters are side-effect-free reads.
 type connectorResourceOperation uint8
 
 const (
