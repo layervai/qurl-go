@@ -20,6 +20,10 @@ var ErrInvalidNativeKnockOptions = errors.New("qurl: invalid native knock option
 
 // NativeKnockOptions carries the caller-owned state for one native UDP knock.
 //
+// The type and RunID field intentionally land with this producer boundary
+// before the exported UDP transport: issue #66 freezes this caller contract so
+// qURL Connector integration does not depend on an implicit SDK-generated ID.
+//
 // RunID is mandatory. qURL Connector generates it once with NewCycleRunID for
 // each outer knock/service cycle and reuses the exact value for every retry and
 // reconnect in that cycle. The native knock runtime validates and carries the
@@ -29,7 +33,10 @@ type NativeKnockOptions struct {
 }
 
 // nativeAgentKnockBody is the AEAD-protected NHP_KNK application body for a
-// registered agent. Field order is wire-significant for the byte-exact
+// registered agent. This is deliberately separate from buildKnockBody's
+// provisional qURL keyed-identity contract: that path uses a signed resource
+// public key, while this path uses the assignment's placement-neutral
+// knock_resource_id. Field order is wire-significant for the byte-exact
 // cross-language conformance fence even though JSON object semantics do not
 // otherwise depend on it.
 type nativeAgentKnockBody struct {
@@ -87,7 +94,7 @@ func validateNativeKnockIdentity(kind, value string) error {
 	// This per-field ceiling is only a cheap pre-marshal allocation guard. The
 	// aggregate encoded-body check above is the binding NHP wire limit.
 	if len(value) > nhpcontract.MaxApplicationBodySize {
-		return fmt.Errorf("%w: %s exceeds the NHP application-body maximum of %d bytes", ErrInvalidNativeKnockOptions, kind, nhpcontract.MaxApplicationBodySize)
+		return fmt.Errorf("%w: %s exceeds the pre-marshal per-field bound of %d bytes", ErrInvalidNativeKnockOptions, kind, nhpcontract.MaxApplicationBodySize)
 	}
 	trimmed := strings.TrimSpace(value)
 	if trimmed == "" {
