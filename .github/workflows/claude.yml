@@ -6,34 +6,144 @@ on:
   pull_request_review_comment:
     types: [created]
   issues:
-    types: [opened, assigned]
+    types: [opened]
   pull_request_review:
     types: [submitted]
 
 jobs:
   claude:
     if: |
-      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
-      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
-      (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
-      (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
+      (
+        (github.event_name == 'issue_comment' || github.event_name == 'pull_request_review_comment') &&
+        contains(github.event.comment.body, '@claude') &&
+        contains(fromJson('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
+      ) ||
+      (
+        github.event_name == 'pull_request_review' &&
+        contains(github.event.review.body, '@claude') &&
+        contains(fromJson('["OWNER","MEMBER","COLLABORATOR"]'), github.event.review.author_association)
+      ) ||
+      (
+        github.event_name == 'issues' &&
+        (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')) &&
+        contains(fromJson('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association)
+      )
     runs-on: ubuntu-latest
+    # Recent successful repository review gates complete within six minutes;
+    # 20 minutes leaves more than 3x observed runway while bounding stuck jobs.
+    timeout-minutes: 20
     permissions:
+      # Review-only by design: Claude reports or proposes patches, while a
+      # write-capable maintainer applies, signs, and pushes accepted changes.
       contents: read
-      pull-requests: read
-      issues: read
-      id-token: write
+      pull-requests: write
+      issues: write
       actions: read
 
     steps:
+      - name: Validate Claude trigger actor permission
+        id: claude_actor
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TRIGGER_ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "$TRIGGER_ACTOR" ]]; then
+            echo "::error::Unable to resolve Claude trigger actor; failing closed before checkout."
+            exit 1
+          fi
+
+          if ! actor_permission="$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$TRIGGER_ACTOR/permission" --jq '.permission // ""')"; then
+            echo "::error::Unable to resolve Claude trigger actor permission; failing closed before checkout."
+            exit 1
+          fi
+
+          # GitHub's legacy `.permission` maps maintain to write and triage to
+          # read, so these are the only values that satisfy the write boundary.
+          case "$actor_permission" in
+            admin|write) ;;
+            *)
+              echo "::error::Claude slash-command trigger actor must have write access to this repository."
+              exit 1
+              ;;
+          esac
+
+          echo "authorized=true" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve Claude pull request context
+        id: claude_pr
+        if: |
+          (github.event_name == 'issue_comment' && github.event.issue.pull_request != null) ||
+          github.event_name == 'pull_request_review_comment' ||
+          github.event_name == 'pull_request_review'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.issue.number || github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "$PR_NUMBER" ]]; then
+            echo "::error::Unable to resolve pull request number for Claude command."
+            exit 1
+          fi
+
+          if ! pr="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")"; then
+            echo "::error::Unable to resolve PR head for Claude command; failing closed before checkout."
+            exit 1
+          fi
+          head_repo="$(jq -r '.head.repo.full_name // ""' <<<"$pr")"
+          head_sha="$(jq -r '.head.sha // ""' <<<"$pr")"
+
+          # A fork rejection intentionally fails the job instead of silently
+          # skipping: a request that crosses this secret boundary must be visible.
+          if [[ "$head_repo" != "$GITHUB_REPOSITORY" ]]; then
+            echo "::error::Claude slash-command checkout is limited to same-repository PRs because this workflow holds ANTHROPIC_API_KEY."
+            exit 1
+          fi
+
+          # GitHub repositories currently expose 40-character SHA-1 object IDs.
+          if [[ ! "$head_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Invalid PR head SHA: $head_sha"
+            exit 1
+          fi
+
+          # Checkout uses this immutable snapshot rather than the moving branch
+          # or refs/pull ref, so a push after authorization cannot swap the code
+          # reviewed by this workflow.
+          {
+            echo "sha=$head_sha"
+            echo "checkout_allowed=true"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Checkout repository
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+        id: checkout
+        if: |
+          steps.claude_actor.outputs.authorized == 'true' &&
+          (
+            steps.claude_pr.outcome == 'skipped' ||
+            steps.claude_pr.outputs.checkout_allowed == 'true'
+          )
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          fetch-depth: 1
+          ref: ${{ steps.claude_pr.outputs.sha != '' && steps.claude_pr.outputs.sha || github.sha }}
+          # Pinned checkout v7 fetches all branches at depth 0, materializing
+          # origin/main for PR diffs; ordinary issue commands remain shallow.
+          fetch-depth: ${{ steps.claude_pr.outputs.sha != '' && '0' || '1' }}
+          # The action receives github_token explicitly; the reviewed tree does
+          # not need a reusable credential materialized in local Git config.
+          persist-credentials: false
 
       - name: Run Claude Code
         id: claude
-        uses: anthropics/claude-code-action@2fee15510437d71399d9139ed60433470484a8fb # v1.0.153
+        if: steps.checkout.outcome == 'success'
+        uses: anthropics/claude-code-action@558b1d6cab4085c7753fe402c10bef0fbb92ac7a # v1.0.165
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ github.token }}
+          # The action filters GraphQL author.login values. Claude and Actions
+          # appear there as `claude` and `github-actions`, without REST's [bot]
+          # suffix. Pinned v1.0.165 treats `*[bot]` as a special literal-suffix
+          # matcher (not a general glob character class) for other App bots.
+          exclude_comments_by_actor: 'claude,github-actions,*[bot]'
           claude_args: '--model claude-opus-4-8'

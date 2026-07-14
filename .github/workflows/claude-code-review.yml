@@ -4,27 +4,41 @@ on:
   pull_request:
     types: [opened, synchronize]
 
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   review:
-    if: github.actor != 'dependabot[bot]'
+    if: |
+      github.actor != 'dependabot[bot]' &&
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read
-      pull-requests: write
       issues: read
-      id-token: write
+      pull-requests: write
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 1
+          persist-credentials: false
 
       - name: Run Claude Code Review
-        uses: anthropics/claude-code-action@2fee15510437d71399d9139ed60433470484a8fb # v1.0.153
+        # The job-level gate skips fork heads before checkout or action execution.
+        # `pull_request` also withholds repository secrets and downgrades
+        # GITHUB_TOKEN for fork PRs as defense in depth. Do not change this to
+        # `pull_request_target` without preserving an equivalent head-repo gate.
+        uses: anthropics/claude-code-action@558b1d6cab4085c7753fe402c10bef0fbb92ac7a # v1.0.165
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ github.token }}
+          # Pinned v1.0.165 implements `*[bot]` as a literal [bot]-suffix
+          # matcher rather than passing it through standard glob semantics.
+          exclude_comments_by_actor: 'claude,github-actions,*[bot]'
           prompt: |
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ github.event.pull_request.number }}
