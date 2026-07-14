@@ -11,12 +11,12 @@ import (
 	"github.com/layervai/qurl-go/internal/nhpcontract"
 )
 
-// ErrInvalidNativeKnockOptions marks a native registered-agent knock that is
+// ErrInvalidNativeKnockInput marks a native registered-agent knock that is
 // invalid before any DNS lookup, socket creation, or packet construction.
 // Invalid identities expose only this sentinel. An invalid RunID also preserves
 // ErrInvalidCycleRunID so callers of the existing RunID validator retain its
 // more specific error classification.
-var ErrInvalidNativeKnockOptions = errors.New("qurl: invalid native knock options")
+var ErrInvalidNativeKnockInput = errors.New("qurl: invalid native knock input")
 
 // NativeKnockOptions carries the caller-owned state for one native UDP knock.
 //
@@ -57,7 +57,7 @@ func marshalNativeKnockApplicationBody(agentID, knockResourceID string, opts Nat
 	// other native-knock work and the rejected value must never appear in an
 	// error. ValidateCycleRunID reports only the violated shape.
 	if err := ValidateCycleRunID(opts.RunID); err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrInvalidNativeKnockOptions, err)
+		return nil, fmt.Errorf("%w: %w", ErrInvalidNativeKnockInput, err)
 	}
 	if err := validateNativeKnockIdentity("agent id", agentID); err != nil {
 		return nil, err
@@ -80,7 +80,7 @@ func marshalNativeKnockApplicationBody(agentID, knockResourceID string, opts Nat
 		return nil, fmt.Errorf("qurl: encode native knock body: %w", err)
 	}
 	if len(body) > nhpcontract.MaxApplicationBodySize {
-		return nil, fmt.Errorf("%w: encoded body exceeds NHP maximum of %d bytes", ErrInvalidNativeKnockOptions, nhpcontract.MaxApplicationBodySize)
+		return nil, fmt.Errorf("%w: encoded body exceeds NHP maximum of %d bytes", ErrInvalidNativeKnockInput, nhpcontract.MaxApplicationBodySize)
 	}
 	return body, nil
 }
@@ -93,16 +93,16 @@ func validateNativeKnockIdentity(kind, value string) error {
 	// check in marshalNativeKnockApplicationBody, the binding NHP wire limit.
 	trimmed := strings.TrimSpace(value)
 	if trimmed == "" {
-		return fmt.Errorf("%w: %s must not be blank", ErrInvalidNativeKnockOptions, kind)
+		return fmt.Errorf("%w: %s must not be blank", ErrInvalidNativeKnockInput, kind)
 	}
 	if trimmed != value {
-		return fmt.Errorf("%w: %s must not have surrounding whitespace", ErrInvalidNativeKnockOptions, kind)
+		return fmt.Errorf("%w: %s must not have surrounding whitespace", ErrInvalidNativeKnockInput, kind)
 	}
 	if !utf8.ValidString(value) {
-		return fmt.Errorf("%w: %s must be valid UTF-8", ErrInvalidNativeKnockOptions, kind)
+		return fmt.Errorf("%w: %s must be valid UTF-8", ErrInvalidNativeKnockInput, kind)
 	}
-	if strings.IndexFunc(value, unicode.IsControl) >= 0 {
-		return fmt.Errorf("%w: %s must not contain control characters", ErrInvalidNativeKnockOptions, kind)
+	if strings.ContainsFunc(value, unicode.IsControl) {
+		return fmt.Errorf("%w: %s must not contain control characters", ErrInvalidNativeKnockInput, kind)
 	}
 	return nil
 }

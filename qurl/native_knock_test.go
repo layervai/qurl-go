@@ -27,8 +27,8 @@ func TestMarshalNativeKnockApplicationBody(t *testing.T) {
 func TestMarshalNativeKnockApplicationBody_RejectsRunIDBeforeOtherInputs(t *testing.T) {
 	secretShapedRunID := "SECRET-UPPERCASE"
 	_, err := marshalNativeKnockApplicationBody("", "", NativeKnockOptions{RunID: secretShapedRunID})
-	if !errors.Is(err, ErrInvalidNativeKnockOptions) || !errors.Is(err, ErrInvalidCycleRunID) {
-		t.Fatalf("invalid RunID error = %v, want ErrInvalidNativeKnockOptions + ErrInvalidCycleRunID", err)
+	if !errors.Is(err, ErrInvalidNativeKnockInput) || !errors.Is(err, ErrInvalidCycleRunID) {
+		t.Fatalf("invalid RunID error = %v, want ErrInvalidNativeKnockInput + ErrInvalidCycleRunID", err)
 	}
 	if strings.Contains(err.Error(), secretShapedRunID) {
 		t.Fatalf("invalid RunID error leaked rejected value: %v", err)
@@ -61,8 +61,8 @@ func TestMarshalNativeKnockApplicationBody_ValidatesIdentities(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			_, err := marshalNativeKnockApplicationBody(tt.agentID, tt.knockResourceID, NativeKnockOptions{RunID: "0123456789abcdef"})
-			if !errors.Is(err, ErrInvalidNativeKnockOptions) {
-				t.Fatalf("error = %v, want ErrInvalidNativeKnockOptions", err)
+			if !errors.Is(err, ErrInvalidNativeKnockInput) {
+				t.Fatalf("error = %v, want ErrInvalidNativeKnockInput", err)
 			}
 			if errors.Is(err, ErrInvalidCycleRunID) {
 				t.Fatalf("identity error = %v, must not expose ErrInvalidCycleRunID", err)
@@ -75,11 +75,14 @@ func TestMarshalNativeKnockApplicationBody_ValidatesIdentities(t *testing.T) {
 }
 
 func TestMarshalNativeKnockApplicationBody_AllowsPrintableInternalWhitespace(t *testing.T) {
-	got, err := marshalNativeKnockApplicationBody("agent 01", "connector 01", NativeKnockOptions{RunID: "0123456789abcdef"})
+	const printableUnicodeSpace = "\u00a0"
+	agentID := "agent " + printableUnicodeSpace + "01"
+	knockResourceID := "connector " + printableUnicodeSpace + "01"
+	got, err := marshalNativeKnockApplicationBody(agentID, knockResourceID, NativeKnockOptions{RunID: "0123456789abcdef"})
 	if err != nil {
 		t.Fatalf("marshalNativeKnockApplicationBody: %v", err)
 	}
-	const want = `{"headerType":1,"usrId":"agent 01","devId":"agent 01","aspId":"agent","resId":"connector 01","runId":"0123456789abcdef"}`
+	want := `{"headerType":1,"usrId":"` + agentID + `","devId":"` + agentID + `","aspId":"agent","resId":"` + knockResourceID + `","runId":"0123456789abcdef"}`
 	if string(got) != want {
 		t.Fatalf("native knock body = %s, want %s", got, want)
 	}
@@ -103,8 +106,8 @@ func TestMarshalNativeKnockApplicationBody_RejectsOversizedEncodedBody(t *testin
 	// One more valid identity byte exercises the aggregate serialized-body
 	// boundary directly.
 	_, err = marshalNativeKnockApplicationBody("a", resourceAtLimit+"r", NativeKnockOptions{RunID: runID})
-	if !errors.Is(err, ErrInvalidNativeKnockOptions) {
-		t.Fatalf("oversized body error = %v, want ErrInvalidNativeKnockOptions", err)
+	if !errors.Is(err, ErrInvalidNativeKnockInput) {
+		t.Fatalf("oversized body error = %v, want ErrInvalidNativeKnockInput", err)
 	}
 	if !strings.Contains(err.Error(), "encoded body exceeds NHP maximum") {
 		t.Fatalf("oversized body error = %v, want encoded-body limit context", err)
@@ -164,8 +167,8 @@ func assertNativeKnockRequestVector(
 		case conformance.AgentKnockRejectMissingRunID, conformance.AgentKnockRejectInvalidRunID:
 			runID := runIDFromSingleCanonicalField(t, []byte(vector.BodyJSON))
 			_, err := marshalNativeKnockApplicationBody(fields.DeviceID, fields.KnockResourceID, NativeKnockOptions{RunID: runID})
-			if !errors.Is(err, ErrInvalidNativeKnockOptions) || !errors.Is(err, ErrInvalidCycleRunID) {
-				t.Fatalf("rejected RunID error = %v, want native options + cycle RunID sentinels", err)
+			if !errors.Is(err, ErrInvalidNativeKnockInput) || !errors.Is(err, ErrInvalidCycleRunID) {
+				t.Fatalf("rejected RunID error = %v, want native input + cycle RunID sentinels", err)
 			}
 		case conformance.AgentKnockRejectBodyParse:
 			// The typed SDK accepts semantic fields, never caller-authored JSON.
