@@ -49,7 +49,7 @@ var (
 
 	// ErrConnectorResourceAmbiguous is returned when a slug lookup violates the
 	// producer's zero-or-one cardinality contract.
-	ErrConnectorResourceAmbiguous = errors.New("qurl: ambiguous qURL Connector resource")
+	ErrConnectorResourceAmbiguous = errors.New("qurl: qURL Connector resource ambiguous")
 
 	// ErrInvalidConnectorResourceResponse is returned when a successful response
 	// violates the qURL Connector resource contract. It also matches
