@@ -294,8 +294,9 @@ func (r connectorResourceWire) connectorResource(client *Client, expect connecto
 	} else if r.KnockResourceID != trimmedKnockID {
 		return nil, invalidConnectorResourceResponse("resource %q has knock_resource_id with leading or trailing whitespace", r.ResourceID)
 	}
-	// KnockResourceID is opaque, so explicitly reject cross-wiring it with either
-	// independently validated identity or routing value.
+	// ResourceID and ConnectorRoutingID are already distinct because their
+	// validated grammars are disjoint. KnockResourceID is opaque, so explicitly
+	// reject cross-wiring it with either value.
 	if r.ResourceID == r.KnockResourceID ||
 		r.ConnectorRoutingID == r.KnockResourceID {
 		return nil, invalidConnectorResourceResponse("resource %q has knock_resource_id cross-wired with identity or routing", r.ResourceID)
