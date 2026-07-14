@@ -265,7 +265,7 @@ func TestClient_DeleteConnectorResourceRequiresExactEmpty204(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			client := newConnectorTestClient(t, "http://localhost")
-			client.httpClient = roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			client.httpClient = doerFunc(func(r *http.Request) (*http.Response, error) {
 				if r.Method != http.MethodDelete || r.URL.Path != "/v1/resources/"+testConnectorID {
 					t.Fatalf("request = %s %s", r.Method, r.URL.Path)
 				}
@@ -683,7 +683,7 @@ func TestClient_ConnectorResourceRejectsInvalidInputsWithoutNetwork(t *testing.T
 
 	var calls atomic.Int32
 	client := newConnectorTestClient(t, "http://localhost:1")
-	client.httpClient = roundTripperFunc(func(*http.Request) (*http.Response, error) {
+	client.httpClient = doerFunc(func(*http.Request) (*http.Response, error) {
 		calls.Add(1)
 		return nil, errors.New("unexpected request")
 	})
@@ -850,7 +850,7 @@ func TestClient_ConnectorResourceMutationOutcomeUnknownBoundary(t *testing.T) {
 		t.Run(mutation.name+" transport", func(t *testing.T) {
 			t.Parallel()
 			client := newConnectorTestClient(t, "http://localhost")
-			client.httpClient = roundTripperFunc(func(*http.Request) (*http.Response, error) {
+			client.httpClient = doerFunc(func(*http.Request) (*http.Response, error) {
 				return nil, transportErr
 			})
 			err := mutation.call(client)
@@ -874,7 +874,7 @@ func TestClient_ConnectorResourceMutationOutcomeUnknownBoundary(t *testing.T) {
 			}
 			readErr := errors.New("response read failed")
 			client := newConnectorTestClient(t, "http://localhost")
-			client.httpClient = roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			client.httpClient = doerFunc(func(r *http.Request) (*http.Response, error) {
 				return &http.Response{
 					StatusCode: status,
 					Header:     make(http.Header),
@@ -897,7 +897,7 @@ func TestClient_ConnectorResourceMutationOutcomeUnknownBoundary(t *testing.T) {
 			client := &Client{
 				credentials: CredentialProviderFunc(func(context.Context, *http.Request) error { return authErr }),
 				baseURL:     "http://localhost",
-				httpClient: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+				httpClient: doerFunc(func(*http.Request) (*http.Response, error) {
 					calls.Add(1)
 					return nil, errors.New("unexpected dispatch")
 				}),
@@ -925,7 +925,7 @@ func TestClient_ConnectorResourceLookupRetainsOnlyFrozenInternalOutcomeMarker(t 
 
 	transportErr := errors.New("lookup transport failed")
 	client := newConnectorTestClient(t, "http://localhost")
-	client.httpClient = roundTripperFunc(func(*http.Request) (*http.Response, error) {
+	client.httpClient = doerFunc(func(*http.Request) (*http.Response, error) {
 		return nil, transportErr
 	})
 	err := getConnectorResourceError(client)
@@ -941,7 +941,7 @@ func TestClient_ConnectorResourceLookupRetainsOnlyFrozenInternalOutcomeMarker(t 
 	}
 
 	readErr := errors.New("lookup response read failed")
-	client.httpClient = roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+	client.httpClient = doerFunc(func(r *http.Request) (*http.Response, error) {
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Header:     make(http.Header),
@@ -996,7 +996,7 @@ func newConnectorTestClient(t *testing.T, baseURL string) *Client {
 }
 
 func staticConnectorResponseDoer(status int, body string) HTTPDoer {
-	return roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+	return doerFunc(func(r *http.Request) (*http.Response, error) {
 		return &http.Response{
 			StatusCode: status,
 			Header:     make(http.Header),
@@ -1011,12 +1011,6 @@ func assertConnectorAuthorization(t *testing.T, r *http.Request) {
 	if got, want := r.Header.Get("Authorization"), "Bearer "+testDeviceToken; got != want {
 		t.Fatalf("Authorization = %q, want %q", got, want)
 	}
-}
-
-type roundTripperFunc func(*http.Request) (*http.Response, error)
-
-func (f roundTripperFunc) Do(r *http.Request) (*http.Response, error) {
-	return f(r)
 }
 
 type errorReadCloser struct {
