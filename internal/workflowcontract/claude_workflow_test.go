@@ -31,7 +31,7 @@ func TestInteractiveClaudeWorkflowAuthorizesBeforeImmutableCheckout(t *testing.T
 		`contains(fromJson('["OWNER","MEMBER","COLLABORATOR"]'), github.event.review.author_association)`,
 		`contains(fromJson('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association)`,
 		"TRIGGER_ACTOR: ${{ github.actor }}",
-		"admin|maintain|write",
+		"admin|write",
 		".head.sha // \"\"",
 		`if [[ "$head_repo" != "$GITHUB_REPOSITORY" ]]`,
 		`[[ ! "$head_sha" =~ ^[0-9a-f]{40}$ ]]`,
