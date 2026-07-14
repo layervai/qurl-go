@@ -59,9 +59,11 @@ a valid non-identity point, and the byte-exact canonical SPKI re-marshalling.
 The value is distinct from both `ConnectorRoutingID`, the opaque
 reverse-connection routing label, and `KnockResourceID`, the placement-neutral
 NHP admission target. The SDK requires all three values to be present and
-pairwise distinct. `KnockResourceID` otherwise keeps its producer-owned opaque
-grammar, but the SDK rejects surrounding whitespace and control characters
-before forwarding the value to the NHP admission path.
+mutually distinct: the public-key and routing grammars cannot overlap, while
+explicit comparisons reject an opaque knock id equal to either one.
+`KnockResourceID` also cannot equal the immutable slug. It otherwise keeps its
+producer-owned opaque grammar, but the SDK rejects surrounding whitespace and
+control characters before forwarding the value to the NHP admission path.
 
 A cycle `RunID` is not a fourth resource identity and is intentionally absent
 from `ConnectorResource` and the resource CRUD wire contract. qURL Connector
@@ -181,9 +183,10 @@ delete matches it, reconcile with `GetConnectorResource` before deciding whether
 to delete again. Pre-dispatch validation and authorization failures do not match
 this sentinel. A nominal `201` or `204` whose body violates the endpoint
 contract also matches it: the SDK does not treat a protocol-invalid response as
-proof that the mutation committed. A 5xx response on ensure or delete also
-matches it because a gateway or service can fail after the mutation committed;
-the underlying `*qurl.APIError` remains available through `errors.As`.
+proof that the mutation committed. A surfaced non-4xx status on ensure or
+delete also matches it: an unexpected 1xx/3xx or a 5xx cannot prove whether the
+mutation committed. The underlying `*qurl.APIError` remains available through
+`errors.As`; an authoritative 4xx remains the producer's rejection result.
 
 ## API origin and transport
 

@@ -26,7 +26,6 @@ var (
 	// reverse-connection routing label. The SDK validates and consumes this
 	// value verbatim; it must never derive the label from ResourceID.
 	connectorRoutingIDPattern = regexp.MustCompile(`^c-[a-z2-7]{52}$`)
-	connectorResourceB64URL   = b64url.Strict()
 
 	// ErrConnectorResourceNotFound is returned when a qURL Connector resource
 	// lookup or deletion cannot find a resource owned by the current credential.
@@ -320,11 +319,12 @@ func (r connectorResourceWire) connectorResource(client *Client, expect connecto
 	// ResourceID and ConnectorRoutingID are already distinct because their
 	// validated grammars are disjoint. Any coordinated change to either grammar
 	// must re-check this invariant and add an equality guard if they can overlap.
-	// KnockResourceID is opaque, so explicitly reject cross-wiring it with either
-	// value.
+	// KnockResourceID is opaque, so explicitly reject cross-wiring it with any
+	// durable identity or routing field whose grammar could overlap.
 	if r.ResourceID == r.KnockResourceID ||
-		r.ConnectorRoutingID == r.KnockResourceID {
-		return nil, invalidConnectorResourceResponse("resource %q has knock_resource_id cross-wired with identity or routing", r.ResourceID)
+		r.ConnectorRoutingID == r.KnockResourceID ||
+		r.Slug == r.KnockResourceID {
+		return nil, invalidConnectorResourceResponse("resource %q has knock_resource_id cross-wired with identity, routing, or slug", r.ResourceID)
 	}
 	if r.Type != producerConnectorResourceType {
 		return nil, invalidConnectorResourceResponse("resource %q has type %q, want %q", r.ResourceID, r.Type, producerConnectorResourceType)
@@ -376,13 +376,13 @@ func validateConnectorResourceID(resourceID string) error {
 }
 
 func isValidConnectorResourceID(resourceID string) bool {
-	der, err := connectorResourceB64URL.DecodeString(resourceID)
+	der, err := b64url.DecodeString(resourceID)
 	if err != nil {
 		return false
 	}
-	// Strict still ignores CR and LF. An exact round trip enforces the public
-	// OpenAPI alphabet and the single canonical encoding for these DER bytes.
-	if connectorResourceB64URL.EncodeToString(der) != resourceID {
+	// An exact round trip rejects padding, alternate alphabets, embedded CR/LF,
+	// non-zero trailing bits, and every other non-canonical spelling.
+	if b64url.EncodeToString(der) != resourceID {
 		return false
 	}
 	publicKey, err := ParseP256PublicKeyDER(der)
@@ -427,7 +427,10 @@ func classifyConnectorResourceError(operation connectorResourceOperation, err er
 	if !errors.As(err, &apiErr) {
 		return err
 	}
-	if isMutation && apiErr.StatusCode >= http.StatusInternalServerError {
+	// An authoritative 4xx proves the mutation was rejected. Any surfaced 1xx,
+	// 3xx, or 5xx cannot prove whether a dispatched mutation committed; refused
+	// redirects are included because the producer may redirect after commit.
+	if isMutation && (apiErr.StatusCode < http.StatusBadRequest || apiErr.StatusCode >= http.StatusInternalServerError) {
 		return fmt.Errorf("%w: %w", ErrConnectorResourceOutcomeUnknown, err)
 	}
 	switch operation {

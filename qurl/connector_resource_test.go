@@ -118,18 +118,26 @@ func TestClient_EnsureConnectorResourceContract(t *testing.T) {
 			t.Parallel()
 			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.Method != http.MethodPost || r.URL.Path != "/proxy/v1/resources" || r.URL.RawQuery != "" {
-					t.Fatalf("request = %s %s?%s, want POST /proxy/v1/resources", r.Method, r.URL.Path, r.URL.RawQuery)
+					t.Errorf("request = %s %s?%s, want POST /proxy/v1/resources", r.Method, r.URL.Path, r.URL.RawQuery)
+					http.Error(w, "unexpected request", http.StatusBadRequest)
+					return
 				}
 				assertConnectorAuthorization(t, r)
 				if got := r.Header.Get("Content-Type"); got != "application/json" {
-					t.Fatalf("Content-Type = %q, want application/json", got)
+					t.Errorf("Content-Type = %q, want application/json", got)
+					http.Error(w, "unexpected content type", http.StatusBadRequest)
+					return
 				}
 				var body map[string]any
 				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-					t.Fatalf("decode request: %v", err)
+					t.Errorf("decode request: %v", err)
+					http.Error(w, "invalid request body", http.StatusBadRequest)
+					return
 				}
 				if len(body) != 3 || body["type"] != "tunnel" || body["slug"] != testConnectorSlug || body["find_or_create"] != true {
-					t.Fatalf("request body = %#v, want exact connector find-or-create wire body", body)
+					t.Errorf("request body = %#v, want exact connector find-or-create wire body", body)
+					http.Error(w, "unexpected request body", http.StatusBadRequest)
+					return
 				}
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusCreated)
@@ -184,11 +192,15 @@ func TestClient_GetConnectorResourceDetailEnvelope(t *testing.T) {
 
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Path != "/v1/resources/"+testConnectorID || r.URL.RawQuery != "" {
-			t.Fatalf("request = %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+			t.Errorf("request = %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+			http.Error(w, "unexpected request", http.StatusBadRequest)
+			return
 		}
 		assertConnectorAuthorization(t, r)
 		if got := r.Header.Get("Content-Type"); got != "" {
-			t.Fatalf("GET Content-Type = %q, want empty", got)
+			t.Errorf("GET Content-Type = %q, want empty", got)
+			http.Error(w, "unexpected content type", http.StatusBadRequest)
+			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"data":{"resource":{"resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q,"alias":null},"qurls":[]},"meta":{"request_id":"req-2"}}`, testConnectorID, testConnectorRoutingID, testKnockID, testConnectorSlug)
@@ -209,10 +221,14 @@ func TestClient_GetConnectorResourceBySlugDoesNotConflateAlias(t *testing.T) {
 
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Path != "/v1/resources" {
-			t.Fatalf("request = %s %s, want GET /v1/resources", r.Method, r.URL.Path)
+			t.Errorf("request = %s %s, want GET /v1/resources", r.Method, r.URL.Path)
+			http.Error(w, "unexpected request", http.StatusBadRequest)
+			return
 		}
 		if got := r.URL.Query(); len(got) != 1 || got.Get("slug") != testConnectorSlug {
-			t.Fatalf("query = %v, want only slug=%q", got, testConnectorSlug)
+			t.Errorf("query = %v, want only slug=%q", got, testConnectorSlug)
+			http.Error(w, "unexpected query", http.StatusBadRequest)
+			return
 		}
 		assertConnectorAuthorization(t, r)
 		w.Header().Set("Content-Type", "application/json")
@@ -234,11 +250,15 @@ func TestClient_DeleteConnectorResourceNoBody(t *testing.T) {
 
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodDelete || r.URL.Path != "/v1/resources/"+testConnectorID || r.URL.RawQuery != "" {
-			t.Fatalf("request = %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+			t.Errorf("request = %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+			http.Error(w, "unexpected request", http.StatusBadRequest)
+			return
 		}
 		assertConnectorAuthorization(t, r)
 		if got := r.Header.Get("Content-Type"); got != "" {
-			t.Fatalf("DELETE Content-Type = %q, want empty", got)
+			t.Errorf("DELETE Content-Type = %q, want empty", got)
+			http.Error(w, "unexpected content type", http.StatusBadRequest)
+			return
 		}
 		w.WriteHeader(http.StatusNoContent)
 	}))
@@ -343,11 +363,14 @@ func TestClient_ConnectorResourceCreatePortal(t *testing.T) {
 			fmt.Fprintf(w, `{"data":[{"resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q}]}`, testConnectorID, testConnectorRoutingID, testKnockID, testConnectorSlug)
 		case 2:
 			if r.Method != http.MethodPost || r.URL.Path != "/v1/resources/"+testConnectorID+"/qurls" {
-				t.Fatalf("portal request = %s %s", r.Method, r.URL.Path)
+				t.Errorf("portal request = %s %s", r.Method, r.URL.Path)
+				http.Error(w, "unexpected portal request", http.StatusBadRequest)
+				return
 			}
 			fmt.Fprintf(w, `{"data":{"resource_id":%q,"qurl_link":"https://qurl.link/at_connector"}}`, testConnectorID)
 		default:
-			t.Fatalf("unexpected request %d", requests.Load())
+			t.Errorf("unexpected request %d", requests.Load())
+			http.Error(w, "unexpected request", http.StatusBadRequest)
 		}
 	}))
 	defer api.Close()
@@ -493,7 +516,7 @@ func deleteConnectorResourceError(c *Client) error {
 	return c.DeleteConnectorResource(context.Background(), testConnectorID)
 }
 
-func TestClient_ConnectorResourceMutation5xxOutcomeUnknown(t *testing.T) {
+func TestClient_ConnectorResourceMutationNon4xxOutcomeUnknown(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -502,10 +525,13 @@ func TestClient_ConnectorResourceMutation5xxOutcomeUnknown(t *testing.T) {
 		call        func(*Client) error
 		wantUnknown bool
 	}{
+		{name: "ensure 303", status: http.StatusSeeOther, call: ensureConnectorResourceError, wantUnknown: true},
 		{name: "ensure 500", status: http.StatusInternalServerError, call: ensureConnectorResourceError, wantUnknown: true},
 		{name: "ensure 502", status: http.StatusBadGateway, call: ensureConnectorResourceError, wantUnknown: true},
+		{name: "delete 307", status: http.StatusTemporaryRedirect, call: deleteConnectorResourceError, wantUnknown: true},
 		{name: "delete 500", status: http.StatusInternalServerError, call: deleteConnectorResourceError, wantUnknown: true},
 		{name: "delete 502", status: http.StatusBadGateway, call: deleteConnectorResourceError, wantUnknown: true},
+		{name: "get id 303", status: http.StatusSeeOther, call: getConnectorResourceError},
 		{name: "get id 500", status: http.StatusInternalServerError, call: getConnectorResourceError},
 		{name: "get slug 502", status: http.StatusBadGateway, call: getConnectorResourceBySlugError},
 	}
@@ -523,14 +549,14 @@ func TestClient_ConnectorResourceMutation5xxOutcomeUnknown(t *testing.T) {
 				t.Fatalf("ErrConnectorResourceOutcomeUnknown = %t, want %t; error=%v", got, tt.wantUnknown, err)
 			}
 			if errors.Is(err, ErrConnectorResourceNotFound) || errors.Is(err, ErrConnectorResourceRevoked) || errors.Is(err, ErrConnectorResourceTombstoned) || errors.Is(err, ErrConnectorResourceSlugConflict) {
-				t.Fatalf("5xx was misclassified as lifecycle result: %v", err)
+				t.Fatalf("non-authoritative status was misclassified as lifecycle result: %v", err)
 			}
 			if errors.Is(err, ErrInvalidAPIResponse) || errors.Is(err, ErrInvalidConnectorResourceResponse) {
-				t.Fatalf("5xx was misclassified as an invalid response: %v", err)
+				t.Fatalf("non-authoritative status was misclassified as an invalid response: %v", err)
 			}
 			var outcomeUnknown *apiRequestOutcomeUnknownError
 			if errors.As(err, &outcomeUnknown) {
-				t.Fatalf("received 5xx unexpectedly has transport/post-success marker: %v", err)
+				t.Fatalf("received status unexpectedly has transport/post-success marker: %v", err)
 			}
 		})
 	}
@@ -558,6 +584,7 @@ func TestClient_ConnectorResourceSuccessfulResponseValidation(t *testing.T) {
 		{name: "public resource id cross-wired as routing id", body: strings.Replace(valid, testConnectorRoutingID, testConnectorID, 1), want: ErrInvalidConnectorResourceResponse},
 		{name: "routing id cross-wired as knock id", body: strings.Replace(valid, `"knock_resource_id":"`+testKnockID+`"`, `"knock_resource_id":"`+testConnectorRoutingID+`"`, 1), want: ErrInvalidConnectorResourceResponse},
 		{name: "public resource id cross-wired as knock id", body: strings.Replace(valid, `"knock_resource_id":"`+testKnockID+`"`, `"knock_resource_id":"`+testConnectorID+`"`, 1), want: ErrInvalidConnectorResourceResponse},
+		{name: "slug cross-wired as knock id", body: strings.Replace(valid, `"knock_resource_id":"`+testKnockID+`"`, `"knock_resource_id":"`+testConnectorSlug+`"`, 1), want: ErrInvalidConnectorResourceResponse},
 		{name: "missing knock id", body: strings.Replace(valid, `"knock_resource_id":"`+testKnockID+`",`, "", 1), want: ErrInvalidConnectorResourceResponse},
 		{name: "whitespace knock id", body: strings.Replace(valid, `"knock_resource_id":"`+testKnockID+`"`, `"knock_resource_id":" `+testKnockID+` "`, 1), want: ErrInvalidConnectorResourceResponse},
 		{name: "NUL in knock id", body: strings.Replace(valid, `"knock_resource_id":"`+testKnockID+`"`, `"knock_resource_id":"knock\u0000id"`, 1), want: ErrInvalidConnectorResourceResponse},
@@ -1024,6 +1051,9 @@ func TestClient_ConnectorResourceRedirectDoesNotForwardDeviceCredential(t *testi
 	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusTemporaryRedirect {
 		t.Fatalf("redirect = %v, want *APIError 307", err)
 	}
+	if !errors.Is(err, ErrConnectorResourceOutcomeUnknown) {
+		t.Fatalf("redirect = %v, want mutation outcome unknown", err)
+	}
 	if targetCalls.Load() != 0 {
 		t.Fatalf("redirect target calls = %d, want 0", targetCalls.Load())
 	}
@@ -1052,6 +1082,6 @@ func staticConnectorResponseDoer(status int, body string) HTTPDoer {
 func assertConnectorAuthorization(t *testing.T, r *http.Request) {
 	t.Helper()
 	if got, want := r.Header.Get("Authorization"), "Bearer "+testDeviceToken; got != want {
-		t.Fatalf("Authorization = %q, want %q", got, want)
+		t.Errorf("Authorization = %q, want %q", got, want)
 	}
 }
