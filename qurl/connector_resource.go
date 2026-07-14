@@ -139,6 +139,10 @@ type connectorResourceWire struct {
 	Alias              *string `json:"alias,omitempty"`
 }
 
+// connectorResourceResponse is the create envelope. The producer intentionally
+// uses three distinct shapes: create returns a flat data object, detail nests
+// data.resource, and slug lookup returns data[]. Keep them separate so one
+// endpoint cannot silently accept another endpoint's successful payload.
 type connectorResourceResponse struct {
 	Data connectorResourceWire `json:"data"`
 	Meta connectorResourceMeta `json:"meta"`
@@ -201,11 +205,15 @@ func (c *Client) GetConnectorResource(ctx context.Context, resourceID string) (*
 	}
 
 	var response apiEnvelope[struct {
-		Resource connectorResourceWire `json:"resource"`
+		Resource *connectorResourceWire `json:"resource"`
 	}]
 	path := "/v1/resources/" + url.PathEscape(resourceID)
 	if err := c.doJSONStatus(ctx, http.MethodGet, path, nil, &response, http.StatusOK); err != nil {
 		return nil, classifyConnectorResourceError(connectorResourceOperationGetByID, err)
+	}
+	if response.Data.Resource == nil {
+		return nil, classifyConnectorResourceError(connectorResourceOperationGetByID,
+			invalidConnectorResourceResponse("resource detail has missing or null resource"))
 	}
 	resource, err := response.Data.Resource.connectorResource(c, connectorResourceExpectation{
 		resourceID:   resourceID,

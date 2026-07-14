@@ -696,6 +696,8 @@ func TestClient_GetConnectorResourceRejectsFlatOrMismatchedDetail(t *testing.T) 
 		name string
 		body string
 	}{
+		{name: "missing resource", body: `{"data":{}}`},
+		{name: "null resource", body: `{"data":{"resource":null}}`},
 		{
 			name: "flat data",
 			body: fmt.Sprintf(`{"data":{"resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q}}`, testConnectorID, testConnectorRoutingID, testKnockID, testConnectorSlug),
