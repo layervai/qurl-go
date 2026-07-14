@@ -127,6 +127,17 @@ func TestConnectorResourcePublicKeyFixturesAreCanonicalP256(t *testing.T) {
 	}
 }
 
+func TestConnectorResourceIdentityAndRoutingGrammarsRemainDisjoint(t *testing.T) {
+	t.Parallel()
+
+	if connectorRoutingIDPattern.MatchString(testConnectorID) {
+		t.Fatalf("canonical public resource ID %q also matches Connector routing grammar", testConnectorID)
+	}
+	if isValidConnectorResourceID(testConnectorRoutingID) {
+		t.Fatalf("Connector routing ID %q also matches public resource-ID grammar", testConnectorRoutingID)
+	}
+}
+
 func TestClient_EnsureConnectorResourceContract(t *testing.T) {
 	t.Parallel()
 
