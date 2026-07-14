@@ -1,7 +1,9 @@
 package qurl
 
 import (
+	"bytes"
 	"context"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"net/http"
@@ -373,8 +375,12 @@ func isValidConnectorResourceID(resourceID string) bool {
 	if b64url.EncodeToString(der) != resourceID {
 		return false
 	}
-	_, err = ParseP256PublicKeyDER(der)
-	return err == nil
+	publicKey, err := ParseP256PublicKeyDER(der)
+	if err != nil {
+		return false
+	}
+	canonicalDER, err := x509.MarshalPKIXPublicKey(publicKey)
+	return err == nil && bytes.Equal(canonicalDER, der)
 }
 
 type connectorResourceOperation uint8
