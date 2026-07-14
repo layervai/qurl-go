@@ -47,10 +47,14 @@ func TestMarshalNativeKnockApplicationBody_ValidatesIdentities(t *testing.T) {
 		{name: "whitespace agent id", agentID: " \t", knockResourceID: "connector-01", wantMessage: "agent id must not be blank"},
 		{name: "leading agent id whitespace", agentID: " agent-01", knockResourceID: "connector-01", wantMessage: "agent id must not have surrounding whitespace"},
 		{name: "trailing agent id whitespace", agentID: "agent-01\n", knockResourceID: "connector-01", wantMessage: "agent id must not have surrounding whitespace"},
+		{name: "embedded agent id control", agentID: "agent\n01", knockResourceID: "connector-01", wantMessage: "agent id must not contain control characters"},
+		{name: "invalid UTF-8 agent id", agentID: "agent-\xff", knockResourceID: "connector-01", wantMessage: "agent id must be valid UTF-8"},
 		{name: "empty knock resource id", agentID: "agent-01", wantMessage: "knock resource id must not be blank"},
 		{name: "whitespace knock resource id", agentID: "agent-01", knockResourceID: "\n", wantMessage: "knock resource id must not be blank"},
 		{name: "leading knock resource id whitespace", agentID: "agent-01", knockResourceID: " connector-01", wantMessage: "knock resource id must not have surrounding whitespace"},
 		{name: "trailing knock resource id whitespace", agentID: "agent-01", knockResourceID: "connector-01\t", wantMessage: "knock resource id must not have surrounding whitespace"},
+		{name: "embedded knock resource id control", agentID: "agent-01", knockResourceID: "connector\x0001", wantMessage: "knock resource id must not contain control characters"},
+		{name: "invalid UTF-8 knock resource id", agentID: "agent-01", knockResourceID: "connector-\xff", wantMessage: "knock resource id must be valid UTF-8"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

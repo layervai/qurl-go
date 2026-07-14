@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // ErrInvalidNativeKnockOptions marks a native registered-agent knock that is
@@ -45,22 +47,14 @@ func marshalNativeKnockApplicationBody(agentID, knockResourceID string, opts Nat
 	if err := ValidateCycleRunID(opts.RunID); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrInvalidNativeKnockOptions, err)
 	}
-	agentIDTrimmed := strings.TrimSpace(agentID)
-	if agentIDTrimmed == "" {
-		return nil, fmt.Errorf("%w: agent id must not be blank", ErrInvalidNativeKnockOptions)
+	if err := validateNativeKnockIdentity("agent id", agentID); err != nil {
+		return nil, err
 	}
-	if agentIDTrimmed != agentID {
-		return nil, fmt.Errorf("%w: agent id must not have surrounding whitespace", ErrInvalidNativeKnockOptions)
-	}
-	knockResourceIDTrimmed := strings.TrimSpace(knockResourceID)
-	if knockResourceIDTrimmed == "" {
-		return nil, fmt.Errorf("%w: knock resource id must not be blank", ErrInvalidNativeKnockOptions)
-	}
-	if knockResourceIDTrimmed != knockResourceID {
-		return nil, fmt.Errorf("%w: knock resource id must not have surrounding whitespace", ErrInvalidNativeKnockOptions)
+	if err := validateNativeKnockIdentity("knock resource id", knockResourceID); err != nil {
+		return nil, err
 	}
 
-	body, err := json.Marshal(nativeAgentKnockBody{
+	return json.Marshal(nativeAgentKnockBody{
 		HeaderType:      nhpKNKHeaderType,
 		UserID:          agentID,
 		DeviceID:        agentID,
@@ -68,8 +62,21 @@ func marshalNativeKnockApplicationBody(agentID, knockResourceID string, opts Nat
 		KnockResourceID: knockResourceID,
 		RunID:           opts.RunID,
 	})
-	if err != nil {
-		return nil, fmt.Errorf("qurl: encode native knock body: %w", err)
+}
+
+func validateNativeKnockIdentity(kind, value string) error {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return fmt.Errorf("%w: %s must not be blank", ErrInvalidNativeKnockOptions, kind)
 	}
-	return body, nil
+	if trimmed != value {
+		return fmt.Errorf("%w: %s must not have surrounding whitespace", ErrInvalidNativeKnockOptions, kind)
+	}
+	if !utf8.ValidString(value) {
+		return fmt.Errorf("%w: %s must be valid UTF-8", ErrInvalidNativeKnockOptions, kind)
+	}
+	if strings.IndexFunc(value, unicode.IsControl) >= 0 {
+		return fmt.Errorf("%w: %s must not contain control characters", ErrInvalidNativeKnockOptions, kind)
+	}
+	return nil
 }
