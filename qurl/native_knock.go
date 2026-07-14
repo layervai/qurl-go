@@ -36,9 +36,10 @@ type NativeKnockOptions struct {
 // registered agent. This is deliberately separate from buildKnockBody's
 // provisional qURL keyed-identity contract: that path uses a signed resource
 // public key, while this path uses the assignment's placement-neutral
-// knock_resource_id. Field order is wire-significant for the byte-exact
-// cross-language conformance fence even though JSON object semantics do not
-// otherwise depend on it.
+// knock_resource_id. Field order is wire-significant for the released
+// byte-exact conformance vector. Outside that canonical vector, opaque identity
+// values use normal JSON semantics: encoders may escape equivalent characters
+// differently without changing the identity the server parses.
 type nativeAgentKnockBody struct {
 	HeaderType      int    `json:"headerType"`
 	UserID          string `json:"usrId"`
