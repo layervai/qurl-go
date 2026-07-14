@@ -122,10 +122,6 @@ type ensureConnectorResourceRequest struct {
 	FindOrCreate bool `json:"find_or_create"`
 }
 
-type connectorResourceMeta struct {
-	FoundExisting *bool `json:"found_existing"`
-}
-
 // connectorResourceWire mirrors the producer's generic resource payload. Type
 // is validated here and intentionally omitted from the exported SDK entity.
 type connectorResourceWire struct {
@@ -144,7 +140,9 @@ type connectorResourceWire struct {
 // endpoint cannot silently accept another endpoint's successful payload.
 type connectorResourceResponse struct {
 	Data connectorResourceWire `json:"data"`
-	Meta connectorResourceMeta `json:"meta"`
+	Meta struct {
+		FoundExisting *bool `json:"found_existing"`
+	} `json:"meta"`
 }
 
 type connectorResourceExpectation struct {

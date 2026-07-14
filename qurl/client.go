@@ -998,10 +998,14 @@ func (c *Client) doJSON(ctx context.Context, method, path string, body, out any)
 	return doAuthorizedJSON(ctx, c.httpClient, c.baseURL, c.credentials.Authorize, method, path, body, out)
 }
 
+func (c *Client) doRequest(ctx context.Context, method, path string, body any, contract apiResponseContract) error {
+	return doAuthorizedRequest(ctx, c.httpClient, c.baseURL, c.credentials.Authorize, method, path, body, contract)
+}
+
 // doJSONStatus requires one exact successful status and a non-empty JSON body.
 // It is used when an endpoint's documented status is part of its contract.
 func (c *Client) doJSONStatus(ctx context.Context, method, path string, body, out any, expectedStatus int) error {
-	return doAuthorizedRequest(ctx, c.httpClient, c.baseURL, c.credentials.Authorize, method, path, body, apiResponseContract{
+	return c.doRequest(ctx, method, path, body, apiResponseContract{
 		expectedStatus: expectedStatus,
 		bodyMode:       apiResponseBodyJSON,
 		out:            out,
@@ -1010,7 +1014,7 @@ func (c *Client) doJSONStatus(ctx context.Context, method, path string, body, ou
 
 // doNoContent requires one exact successful status and a byte-empty body.
 func (c *Client) doNoContent(ctx context.Context, method, path string, expectedStatus int) error {
-	return doAuthorizedRequest(ctx, c.httpClient, c.baseURL, c.credentials.Authorize, method, path, nil, apiResponseContract{
+	return c.doRequest(ctx, method, path, nil, apiResponseContract{
 		expectedStatus: expectedStatus,
 		bodyMode:       apiResponseBodyEmpty,
 	})
