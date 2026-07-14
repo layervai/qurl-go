@@ -365,6 +365,53 @@ func TestClient_ConnectorResourceCreatePortal(t *testing.T) {
 	}
 }
 
+func TestConnectorResourceCreatePortalRejectsNilOrUnbound(t *testing.T) {
+	t.Parallel()
+
+	var dispatches atomic.Int32
+	bound := &ConnectorResource{
+		client: &Client{httpClient: doerFunc(func(*http.Request) (*http.Response, error) {
+			dispatches.Add(1)
+			return nil, errors.New("unexpected dispatch")
+		})},
+		ResourceID:         testConnectorID,
+		ConnectorRoutingID: testConnectorRoutingID,
+		KnockResourceID:    testKnockID,
+		Slug:               testConnectorSlug,
+	}
+	encoded, err := json.Marshal(bound)
+	if err != nil {
+		t.Fatalf("marshal bound ConnectorResource: %v", err)
+	}
+	var unbound ConnectorResource
+	if err := json.Unmarshal(encoded, &unbound); err != nil {
+		t.Fatalf("unmarshal ConnectorResource: %v", err)
+	}
+	if unbound.ResourceID != bound.ResourceID || unbound.client != nil {
+		t.Fatalf("JSON round trip = {resource_id:%q client:%p}, want preserved ID and nil client", unbound.ResourceID, unbound.client)
+	}
+
+	tests := []struct {
+		name       string
+		resource   *ConnectorResource
+		wantDetail string
+	}{
+		{name: "nil", wantDetail: "must not be nil"},
+		{name: "JSON round trip loses client binding", resource: &unbound, wantDetail: "not bound to a client"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := tt.resource.CreatePortal(context.Background())
+			if !errors.Is(err, ErrInvalidPortalRequest) || !strings.Contains(err.Error(), tt.wantDetail) {
+				t.Fatalf("CreatePortal error = %v, want ErrInvalidPortalRequest containing %q", err, tt.wantDetail)
+			}
+		})
+	}
+	if dispatches.Load() != 0 {
+		t.Fatalf("HTTP dispatches = %d, want 0", dispatches.Load())
+	}
+}
+
 func TestClient_ConnectorResourceTypedAPIErrors(t *testing.T) {
 	t.Parallel()
 
