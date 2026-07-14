@@ -426,6 +426,9 @@ const (
 )
 
 func classifyConnectorResourceError(operation connectorResourceOperation, err error) error {
+	// Classification is deliberately ordered: add mutation ambiguity first,
+	// add the public Connector invalid-response wrapper second, then map only
+	// operation-specific authoritative API errors to lifecycle sentinels.
 	isMutation := operation == connectorResourceOperationEnsure || operation == connectorResourceOperationDelete
 	if isMutation {
 		var outcomeUnknown *apiRequestOutcomeUnknownError
