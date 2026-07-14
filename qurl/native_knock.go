@@ -79,9 +79,13 @@ func marshalNativeKnockApplicationBody(agentID, knockResourceID string, opts Nat
 }
 
 func validateNativeKnockIdentity(kind, value string) error {
-	// These are opaque protocol identities, not user-facing slugs. Preserve
-	// printable internal whitespace exactly; only ambiguous edge whitespace and
-	// control characters are noncanonical.
+	// Current registration/assignment contracts treat these as opaque protocol
+	// identities, not user-facing slugs. Match AgentState validation by preserving
+	// printable internal whitespace exactly while rejecting ambiguous edge
+	// whitespace and control characters.
+	//
+	// This per-field ceiling is only a cheap pre-marshal allocation guard. The
+	// aggregate encoded-body check above is the binding NHP wire limit.
 	if len(value) > nhpcontract.MaxApplicationBodySize {
 		return fmt.Errorf("%w: %s exceeds the NHP application-body maximum of %d bytes", ErrInvalidNativeKnockOptions, kind, nhpcontract.MaxApplicationBodySize)
 	}

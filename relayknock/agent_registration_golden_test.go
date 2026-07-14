@@ -29,6 +29,20 @@ func loadAgentRegistrationGolden(t *testing.T) *conformance.AgentRegistrationFil
 	if err != nil {
 		t.Fatalf("load qurl-conformance agent-registration vectors: %v", err)
 	}
+	for _, vector := range []struct {
+		name      string
+		packetHex string
+	}{
+		{name: "otp", packetHex: f.OTP.PacketHex},
+		{name: "reg_emailed", packetHex: f.RegEmailed.PacketHex},
+		{name: "reg_preissued", packetHex: f.RegPreissued.PacketHex},
+		{name: "rak_success", packetHex: f.RakSuccess.PacketHex},
+		{name: "rak_error", packetHex: f.RakError.PacketHex},
+	} {
+		if vector.packetHex == "" {
+			t.Fatalf("qurl-conformance agent-registration vectors missing %s.packet_hex", vector.name)
+		}
+	}
 	return f
 }
 
