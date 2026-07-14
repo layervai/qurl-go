@@ -162,6 +162,10 @@ type connectorResourceExpectation struct {
 // FoundExisting reports whether the service returned an already-active row.
 // The SDK does not retry a 409 slug conflict automatically; see
 // ErrConnectorResourceSlugConflict for the bounded caller retry contract.
+// A valid 201 row missing only meta.found_existing returns
+// ErrInvalidConnectorResourceResponse without ErrConnectorResourceOutcomeUnknown
+// and without a partial result: the row proves the outcome, but required
+// ensure-only metadata is unavailable.
 func (c *Client) EnsureConnectorResource(ctx context.Context, slug string) (*EnsureConnectorResourceResult, error) {
 	if c == nil {
 		return nil, fmt.Errorf("%w: nil client", ErrInvalidClientConfig)
