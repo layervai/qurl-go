@@ -316,9 +316,13 @@ func (r connectorResourceWire) connectorResource(client *Client, expect connecto
 	} else if strings.IndexFunc(r.KnockResourceID, unicode.IsControl) >= 0 {
 		return nil, invalidConnectorResourceResponse("resource %q has knock_resource_id with a control character", r.ResourceID)
 	}
-	// ResourceID and ConnectorRoutingID are already distinct because their
-	// validated grammars are disjoint. Any coordinated change to either grammar
-	// must re-check this invariant and add an equality guard if they can overlap.
+	// ResourceID is already distinct from ConnectorRoutingID and Slug because
+	// their validated grammars are disjoint. ConnectorRoutingID and Slug can
+	// overlap, so explicitly reject that cross-wire. Any coordinated grammar
+	// change must re-check these invariants.
+	if r.ConnectorRoutingID == r.Slug {
+		return nil, invalidConnectorResourceResponse("resource %q has connector_routing_id cross-wired with slug", r.ResourceID)
+	}
 	// KnockResourceID is opaque, so explicitly reject cross-wiring it with any
 	// durable identity or routing field whose grammar could overlap.
 	if r.ResourceID == r.KnockResourceID ||

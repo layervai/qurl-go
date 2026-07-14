@@ -625,6 +625,24 @@ func TestClient_ConnectorResourceSuccessfulResponseValidation(t *testing.T) {
 	}
 }
 
+func TestConnectorResourceWireRejectsRoutingIDCrossWiredAsSlug(t *testing.T) {
+	t.Parallel()
+
+	wire := connectorResourceWire{
+		ResourceID:         testConnectorID,
+		ConnectorRoutingID: testConnectorRoutingID,
+		KnockResourceID:    testKnockID,
+		Type:               producerConnectorResourceType,
+		Status:             "active",
+		Slug:               testConnectorRoutingID,
+	}
+	_, err := wire.connectorResource(nil, connectorResourceExpectation{})
+	if !errors.Is(err, ErrInvalidConnectorResourceResponse) ||
+		!strings.Contains(err.Error(), "connector_routing_id cross-wired with slug") {
+		t.Fatalf("error = %v, want routing/slug cross-wire rejection", err)
+	}
+}
+
 func TestClient_ConnectorResourceRevokedSuccessRows(t *testing.T) {
 	t.Parallel()
 
