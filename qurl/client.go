@@ -1147,9 +1147,6 @@ func doAuthorizedRequest(ctx context.Context, httpClient HTTPDoer, baseURL strin
 	case apiResponseBodyIgnored:
 		return nil
 	case apiResponseBodyJSON:
-		if contract.out == nil {
-			return invalidAPIResponseOutcome("JSON response contract has no decode target", nil)
-		}
 		if len(bytes.TrimSpace(respBody)) == 0 {
 			return invalidAPIResponseOutcome("empty API response body after successful status", nil)
 		}

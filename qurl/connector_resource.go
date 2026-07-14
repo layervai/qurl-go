@@ -25,6 +25,7 @@ var (
 	// reverse-connection routing label. The SDK validates and consumes this
 	// value verbatim; it must never derive the label from ResourceID.
 	connectorRoutingIDPattern = regexp.MustCompile(`^c-[a-z2-7]{52}$`)
+	connectorResourceB64URL   = b64url.Strict()
 
 	// ErrConnectorResourceNotFound is returned when a qURL Connector resource
 	// lookup or deletion cannot find a resource owned by the current credential.
@@ -174,16 +175,14 @@ func (c *Client) EnsureConnectorResource(ctx context.Context, slug string) (*Ens
 		return nil, classifyConnectorResourceError(connectorResourceOperationEnsure, err)
 	}
 	if response.Meta.FoundExisting == nil {
-		return nil, classifyConnectorResourceError(connectorResourceOperationEnsure, &apiRequestOutcomeUnknownError{
-			err: invalidConnectorResourceResponse("missing meta.found_existing"),
-		})
+		return nil, classifyConnectorResourceError(connectorResourceOperationEnsure, invalidConnectorResourceResponse("missing meta.found_existing"))
 	}
 	resource, err := response.Data.connectorResource(c, connectorResourceExpectation{
 		slug:      slug,
 		operation: connectorResourceOperationEnsure,
 	})
 	if err != nil {
-		return nil, classifyConnectorResourceError(connectorResourceOperationEnsure, &apiRequestOutcomeUnknownError{err: err})
+		return nil, classifyConnectorResourceError(connectorResourceOperationEnsure, err)
 	}
 	return &EnsureConnectorResourceResult{
 		Resource:      resource,
@@ -355,7 +354,7 @@ func validateConnectorResourceID(resourceID string) error {
 }
 
 func isValidConnectorResourceID(resourceID string) bool {
-	der, err := b64url.Strict().DecodeString(resourceID)
+	der, err := connectorResourceB64URL.DecodeString(resourceID)
 	if err != nil {
 		return false
 	}
@@ -385,6 +384,9 @@ func classifyConnectorResourceError(operation connectorResourceOperation, err er
 	isMutation := operation == connectorResourceOperationEnsure || operation == connectorResourceOperationDelete
 	if isMutation {
 		var outcomeUnknown *apiRequestOutcomeUnknownError
+		if errors.Is(err, ErrInvalidAPIResponse) && !errors.As(err, &outcomeUnknown) {
+			err = &apiRequestOutcomeUnknownError{err: err}
+		}
 		if errors.As(err, &outcomeUnknown) {
 			err = fmt.Errorf("%w: %w", ErrConnectorResourceOutcomeUnknown, err)
 		}
