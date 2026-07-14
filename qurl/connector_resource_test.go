@@ -593,7 +593,6 @@ func TestClient_ConnectorResourceSuccessfulResponseValidation(t *testing.T) {
 		{name: "public resource id cross-wired as routing id", body: strings.Replace(valid, testConnectorRoutingID, testConnectorID, 1), want: ErrInvalidConnectorResourceResponse},
 		{name: "routing id cross-wired as knock id", body: strings.Replace(valid, `"knock_resource_id":"`+testKnockID+`"`, `"knock_resource_id":"`+testConnectorRoutingID+`"`, 1), want: ErrInvalidConnectorResourceResponse},
 		{name: "public resource id cross-wired as knock id", body: strings.Replace(valid, `"knock_resource_id":"`+testKnockID+`"`, `"knock_resource_id":"`+testConnectorID+`"`, 1), want: ErrInvalidConnectorResourceResponse},
-		{name: "slug cross-wired as knock id", body: strings.Replace(valid, `"knock_resource_id":"`+testKnockID+`"`, `"knock_resource_id":"`+testConnectorSlug+`"`, 1), want: ErrInvalidConnectorResourceResponse},
 		{name: "missing knock id", body: strings.Replace(valid, `"knock_resource_id":"`+testKnockID+`",`, "", 1), want: ErrInvalidConnectorResourceResponse},
 		{name: "whitespace knock id", body: strings.Replace(valid, `"knock_resource_id":"`+testKnockID+`"`, `"knock_resource_id":" `+testKnockID+` "`, 1), want: ErrInvalidConnectorResourceResponse},
 		{name: "NUL in knock id", body: strings.Replace(valid, `"knock_resource_id":"`+testKnockID+`"`, `"knock_resource_id":"knock\u0000id"`, 1), want: ErrInvalidConnectorResourceResponse},
@@ -638,21 +637,35 @@ func TestClient_ConnectorResourceSuccessfulResponseValidation(t *testing.T) {
 	}
 }
 
-func TestConnectorResourceWireRejectsRoutingIDCrossWiredAsSlug(t *testing.T) {
+func TestConnectorResourceWireAllowsControlPlaneValueEqualToSlug(t *testing.T) {
 	t.Parallel()
 
-	wire := connectorResourceWire{
-		ResourceID:         testConnectorID,
-		ConnectorRoutingID: testConnectorRoutingID,
-		KnockResourceID:    testKnockID,
-		Type:               producerConnectorResourceType,
-		Status:             "active",
-		Slug:               testConnectorRoutingID,
+	tests := []struct {
+		name string
+		slug string
+	}{
+		{name: "routing id", slug: testConnectorRoutingID},
+		{name: "knock id", slug: testKnockID},
 	}
-	_, err := wire.connectorResource(nil, connectorResourceExpectation{})
-	if !errors.Is(err, ErrInvalidConnectorResourceResponse) ||
-		!strings.Contains(err.Error(), "connector_routing_id cross-wired with slug") {
-		t.Fatalf("error = %v, want routing/slug cross-wire rejection", err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			wire := connectorResourceWire{
+				ResourceID:         testConnectorID,
+				ConnectorRoutingID: testConnectorRoutingID,
+				KnockResourceID:    testKnockID,
+				Type:               producerConnectorResourceType,
+				Status:             "active",
+				Slug:               tt.slug,
+			}
+			resource, err := wire.connectorResource(nil, connectorResourceExpectation{})
+			if err != nil {
+				t.Fatalf("connectorResource() = %v, want valid customer slug equal to %s", err, tt.name)
+			}
+			if resource.Slug != tt.slug {
+				t.Fatalf("Slug = %q, want %q", resource.Slug, tt.slug)
+			}
+		})
 	}
 }
 

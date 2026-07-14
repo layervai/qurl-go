@@ -61,11 +61,11 @@ reverse-connection routing label, and `KnockResourceID`, the placement-neutral
 NHP admission target. The SDK requires all three values to be present and
 mutually distinct: the public-key and routing grammars cannot overlap, while
 explicit comparisons reject an opaque knock id equal to either one.
-The immutable slug's grammar can overlap the routing grammar, so the SDK also
-explicitly rejects `Slug == ConnectorRoutingID`; `KnockResourceID` cannot equal
-the slug either. The knock id otherwise keeps its producer-owned opaque grammar,
-but the SDK rejects surrounding whitespace and control characters before
-forwarding the value to the NHP admission path.
+The immutable, customer-chosen slug is not one of those three control-plane
+values and may legitimately equal a syntactically valid routing or admission
+value. The knock id otherwise keeps its producer-owned opaque grammar, but the
+SDK rejects surrounding whitespace and control characters before forwarding
+the value to the NHP admission path.
 
 A cycle `RunID` is not a fourth resource identity and is intentionally absent
 from `ConnectorResource` and the resource CRUD wire contract. qURL Connector

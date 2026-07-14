@@ -1081,8 +1081,8 @@ func TestClient_IncompletePortalSuccessFailsClosed(t *testing.T) {
 				t.Fatalf("NewClient: %v", err)
 			}
 			err = tt.run(context.Background(), client)
-			if err == nil || !strings.Contains(err.Error(), tt.want) {
-				t.Fatalf("incomplete portal response: want %q error, got %v", tt.want, err)
+			if !errors.Is(err, ErrInvalidAPIResponse) || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("incomplete portal response: want ErrInvalidAPIResponse with %q detail, got %v", tt.want, err)
 			}
 		})
 	}

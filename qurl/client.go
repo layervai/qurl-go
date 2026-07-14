@@ -878,10 +878,10 @@ type createPortalResponse struct {
 
 func (r createPortalResponse) portal() (*Portal, error) {
 	if strings.TrimSpace(r.ResourceID) == "" {
-		return nil, fmt.Errorf("qurl: invalid API response: missing resource_id")
+		return nil, fmt.Errorf("%w: missing resource_id", ErrInvalidAPIResponse)
 	}
 	if strings.TrimSpace(r.QURLLink) == "" {
-		return nil, fmt.Errorf("qurl: invalid API response: missing qurl_link")
+		return nil, fmt.Errorf("%w: missing qurl_link", ErrInvalidAPIResponse)
 	}
 	return &Portal{
 		ResourceID: r.ResourceID,

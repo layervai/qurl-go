@@ -316,19 +316,14 @@ func (r connectorResourceWire) connectorResource(client *Client, expect connecto
 	} else if strings.IndexFunc(r.KnockResourceID, unicode.IsControl) >= 0 {
 		return nil, invalidConnectorResourceResponse("resource %q has knock_resource_id with a control character", r.ResourceID)
 	}
-	// ResourceID is already distinct from ConnectorRoutingID and Slug because
-	// their validated grammars are disjoint. ConnectorRoutingID and Slug can
-	// overlap, so explicitly reject that cross-wire. Any coordinated grammar
-	// change must re-check these invariants.
-	if r.ConnectorRoutingID == r.Slug {
-		return nil, invalidConnectorResourceResponse("resource %q has connector_routing_id cross-wired with slug", r.ResourceID)
-	}
-	// KnockResourceID is opaque, so explicitly reject cross-wiring it with any
-	// durable identity or routing field whose grammar could overlap.
+	// ResourceID and ConnectorRoutingID are already distinct because their
+	// validated grammars are disjoint. KnockResourceID is opaque, so explicitly
+	// enforce the producer's three-value identity/routing/admission distinction.
+	// Slug is customer-chosen and is not part of that invariant; it may
+	// legitimately equal an otherwise valid routing or admission value.
 	if r.ResourceID == r.KnockResourceID ||
-		r.ConnectorRoutingID == r.KnockResourceID ||
-		r.Slug == r.KnockResourceID {
-		return nil, invalidConnectorResourceResponse("resource %q has knock_resource_id cross-wired with identity, routing, or slug", r.ResourceID)
+		r.ConnectorRoutingID == r.KnockResourceID {
+		return nil, invalidConnectorResourceResponse("resource %q has knock_resource_id cross-wired with identity or routing", r.ResourceID)
 	}
 	if r.Type != producerConnectorResourceType {
 		return nil, invalidConnectorResourceResponse("resource %q has type %q, want %q", r.ResourceID, r.Type, producerConnectorResourceType)
