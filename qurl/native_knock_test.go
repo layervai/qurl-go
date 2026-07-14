@@ -41,17 +41,25 @@ func TestMarshalNativeKnockApplicationBody_ValidatesIdentities(t *testing.T) {
 		name            string
 		agentID         string
 		knockResourceID string
+		wantMessage     string
 	}{
-		{name: "empty agent id", knockResourceID: "connector-01"},
-		{name: "whitespace agent id", agentID: " \t", knockResourceID: "connector-01"},
-		{name: "empty knock resource id", agentID: "agent-01"},
-		{name: "whitespace knock resource id", agentID: "agent-01", knockResourceID: "\n"},
+		{name: "empty agent id", knockResourceID: "connector-01", wantMessage: "agent id must not be blank"},
+		{name: "whitespace agent id", agentID: " \t", knockResourceID: "connector-01", wantMessage: "agent id must not be blank"},
+		{name: "leading agent id whitespace", agentID: " agent-01", knockResourceID: "connector-01", wantMessage: "agent id must not have surrounding whitespace"},
+		{name: "trailing agent id whitespace", agentID: "agent-01\n", knockResourceID: "connector-01", wantMessage: "agent id must not have surrounding whitespace"},
+		{name: "empty knock resource id", agentID: "agent-01", wantMessage: "knock resource id must not be blank"},
+		{name: "whitespace knock resource id", agentID: "agent-01", knockResourceID: "\n", wantMessage: "knock resource id must not be blank"},
+		{name: "leading knock resource id whitespace", agentID: "agent-01", knockResourceID: " connector-01", wantMessage: "knock resource id must not have surrounding whitespace"},
+		{name: "trailing knock resource id whitespace", agentID: "agent-01", knockResourceID: "connector-01\t", wantMessage: "knock resource id must not have surrounding whitespace"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			_, err := marshalNativeKnockApplicationBody(tt.agentID, tt.knockResourceID, NativeKnockOptions{RunID: "0123456789abcdef"})
 			if !errors.Is(err, ErrInvalidNativeKnockOptions) {
 				t.Fatalf("error = %v, want ErrInvalidNativeKnockOptions", err)
+			}
+			if !strings.Contains(err.Error(), tt.wantMessage) {
+				t.Fatalf("error = %v, want message containing %q", err, tt.wantMessage)
 			}
 		})
 	}

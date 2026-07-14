@@ -45,11 +45,19 @@ func marshalNativeKnockApplicationBody(agentID, knockResourceID string, opts Nat
 	if err := ValidateCycleRunID(opts.RunID); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrInvalidNativeKnockOptions, err)
 	}
-	if strings.TrimSpace(agentID) == "" {
-		return nil, fmt.Errorf("%w: agent id must not be empty", ErrInvalidNativeKnockOptions)
+	agentIDTrimmed := strings.TrimSpace(agentID)
+	if agentIDTrimmed == "" {
+		return nil, fmt.Errorf("%w: agent id must not be blank", ErrInvalidNativeKnockOptions)
 	}
-	if strings.TrimSpace(knockResourceID) == "" {
-		return nil, fmt.Errorf("%w: knock resource id must not be empty", ErrInvalidNativeKnockOptions)
+	if agentIDTrimmed != agentID {
+		return nil, fmt.Errorf("%w: agent id must not have surrounding whitespace", ErrInvalidNativeKnockOptions)
+	}
+	knockResourceIDTrimmed := strings.TrimSpace(knockResourceID)
+	if knockResourceIDTrimmed == "" {
+		return nil, fmt.Errorf("%w: knock resource id must not be blank", ErrInvalidNativeKnockOptions)
+	}
+	if knockResourceIDTrimmed != knockResourceID {
+		return nil, fmt.Errorf("%w: knock resource id must not have surrounding whitespace", ErrInvalidNativeKnockOptions)
 	}
 
 	body, err := json.Marshal(nativeAgentKnockBody{
