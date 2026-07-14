@@ -59,7 +59,7 @@ func TestConnectorResourcePublicShape(t *testing.T) {
 
 	typ := reflect.TypeFor[ConnectorResource]()
 	var got []string
-	for i := 0; i < typ.NumField(); i++ {
+	for i := range typ.NumField() {
 		field := typ.Field(i)
 		if field.IsExported() {
 			got = append(got, field.Name)
@@ -567,9 +567,10 @@ func TestClient_ConnectorResourceSuccessfulResponseValidation(t *testing.T) {
 
 	valid := fmt.Sprintf(`{"data":{"resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q},"meta":{"found_existing":false}}`, testConnectorID, testConnectorRoutingID, testKnockID, testConnectorSlug)
 	tests := []struct {
-		name string
-		body string
-		want error
+		name       string
+		body       string
+		want       error
+		wantDetail string
 	}{
 		{name: "malformed JSON", body: `{"data":`, want: ErrInvalidConnectorResourceResponse},
 		{name: "missing resource id", body: strings.Replace(valid, `"resource_id":"`+testConnectorID+`",`, "", 1), want: ErrInvalidConnectorResourceResponse},
@@ -594,6 +595,7 @@ func TestClient_ConnectorResourceSuccessfulResponseValidation(t *testing.T) {
 		{name: "wrong slug", body: strings.Replace(valid, `"slug":"`+testConnectorSlug+`"`, `"slug":"other-dashboard"`, 1), want: ErrInvalidConnectorResourceResponse},
 		{name: "invalid alias", body: strings.Replace(valid, `},"meta"`, `,"alias":"bad alias"},"meta"`, 1), want: ErrInvalidConnectorResourceResponse},
 		{name: "missing found existing", body: strings.Replace(valid, `,"meta":{"found_existing":false}`, "", 1), want: ErrInvalidConnectorResourceResponse},
+		{name: "invalid resource and missing found existing reports resource first", body: strings.Replace(strings.Replace(valid, `"resource_id":"`+testConnectorID+`",`, "", 1), `,"meta":{"found_existing":false}`, "", 1), want: ErrInvalidConnectorResourceResponse, wantDetail: "missing or invalid resource_id"},
 		{name: "detail envelope on create", body: fmt.Sprintf(`{"data":{"resource":{"resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q}},"meta":{"found_existing":false}}`, testConnectorID, testConnectorRoutingID, testKnockID, testConnectorSlug), want: ErrInvalidConnectorResourceResponse},
 		{name: "revoked success row", body: strings.Replace(valid, `"status":"active"`, `"status":"revoked"`, 1), want: ErrInvalidConnectorResourceResponse},
 	}
@@ -610,6 +612,9 @@ func TestClient_ConnectorResourceSuccessfulResponseValidation(t *testing.T) {
 			_, err := newConnectorTestClient(t, api.URL).EnsureConnectorResource(context.Background(), testConnectorSlug)
 			if !errors.Is(err, tt.want) {
 				t.Fatalf("error = %v, want %v", err, tt.want)
+			}
+			if tt.wantDetail != "" && !strings.Contains(err.Error(), tt.wantDetail) {
+				t.Fatalf("error = %v, want detail %q", err, tt.wantDetail)
 			}
 			if !errors.Is(err, ErrInvalidAPIResponse) {
 				t.Fatalf("invalid successful response lost ErrInvalidAPIResponse: %v", err)

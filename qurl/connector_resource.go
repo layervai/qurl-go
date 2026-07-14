@@ -178,14 +178,14 @@ func (c *Client) EnsureConnectorResource(ctx context.Context, slug string) (*Ens
 	if err := c.doJSONStatus(ctx, http.MethodPost, "/v1/resources", req, &response, http.StatusCreated); err != nil {
 		return nil, classifyConnectorResourceError(connectorResourceOperationEnsure, err)
 	}
-	if response.Meta.FoundExisting == nil {
-		return nil, classifyConnectorResourceError(connectorResourceOperationEnsure, invalidConnectorResourceResponse("missing meta.found_existing"))
-	}
 	resource, err := response.Data.connectorResource(c, connectorResourceExpectation{
 		slug: slug,
 	})
 	if err != nil {
 		return nil, classifyConnectorResourceError(connectorResourceOperationEnsure, err)
+	}
+	if response.Meta.FoundExisting == nil {
+		return nil, classifyConnectorResourceError(connectorResourceOperationEnsure, invalidConnectorResourceResponse("missing meta.found_existing"))
 	}
 	return &EnsureConnectorResourceResult{
 		Resource:      resource,
