@@ -113,11 +113,7 @@ func (r *ConnectorResource) CreatePortal(ctx context.Context, opts ...PortalOpti
 	if r.client == nil {
 		return nil, fmt.Errorf("%w: qURL Connector resource is not bound to a client", ErrInvalidPortalRequest)
 	}
-	return r.client.CreatePortal(ctx, r.resourceHandle(), opts...)
-}
-
-func (r *ConnectorResource) resourceHandle() *Resource {
-	return r.client.ResourceByID(r.ResourceID)
+	return r.client.CreatePortal(ctx, r.client.ResourceByID(r.ResourceID), opts...)
 }
 
 type ensureConnectorResourceRequest struct {
@@ -406,11 +402,11 @@ func classifyConnectorResourceError(operation connectorResourceOperation, err er
 		// public Connector reconciliation sentinel for errors.Is. Invalid-response
 		// mutations also remain matchable as ErrInvalidAPIResponse and
 		// ErrInvalidConnectorResourceResponse below.
-		if errors.Is(err, ErrInvalidAPIResponse) && !errors.As(err, &outcomeUnknown) {
-			err = &apiRequestOutcomeUnknownError{err: err}
-		}
-		if errors.As(err, &outcomeUnknown) {
+		switch {
+		case errors.As(err, &outcomeUnknown):
 			err = fmt.Errorf("%w: %w", ErrConnectorResourceOutcomeUnknown, err)
+		case errors.Is(err, ErrInvalidAPIResponse):
+			err = fmt.Errorf("%w: %w", ErrConnectorResourceOutcomeUnknown, &apiRequestOutcomeUnknownError{err: err})
 		}
 	}
 	if errors.Is(err, ErrInvalidAPIResponse) {
