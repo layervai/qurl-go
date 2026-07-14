@@ -49,9 +49,6 @@ func TestInteractiveClaudeWorkflowAuthorizesBeforeImmutableCheckout(t *testing.T
 func TestAutomaticClaudeWorkflowPinsBoundedCommentAuthorInput(t *testing.T) {
 	workflow := readWorkflow(t, "claude-code-review.yml")
 
-	// The action filters GraphQL author.login. On this repository, historical
-	// transcripts are authored by `claude` and `github-actions`; `*[bot]` alone
-	// only matches actors whose login literally has that suffix.
 	requireContains(t, workflow,
 		"github.actor != 'dependabot[bot]'",
 		"github.event.pull_request.head.repo.full_name == github.repository",
@@ -59,6 +56,10 @@ func TestAutomaticClaudeWorkflowPinsBoundedCommentAuthorInput(t *testing.T) {
 	requireSharedActionContract(t, workflow)
 }
 
+// requireSharedActionContract verifies the action and permissions shared by
+// both workflows. The action filters GraphQL author.login: historical
+// transcripts use `claude` and `github-actions`, while `*[bot]` only matches
+// actors whose login literally has that suffix.
 func requireSharedActionContract(t *testing.T, workflow string) {
 	t.Helper()
 	requireContains(t, workflow,
