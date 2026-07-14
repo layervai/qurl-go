@@ -54,9 +54,9 @@ Missing, malformed, contradictory, or cross-wired fields fail closed with
 
 Management API `ConnectorResource.ResourceID` is the producer-issued protected
 resource P-256 public key in canonical unpadded-base64url DER SPKI form. The SDK
-validates canonical wire encoding and the producer's decoded-byte structural
-window; qurl-service remains authoritative for DER parsing and curve validation.
-The value is distinct from both `ConnectorRoutingID`, the opaque
+validates canonical wire encoding, the producer's decoded-byte structural
+window, DER structure, ECDSA key type, P-256 curve, and a valid non-identity
+point. The value is distinct from both `ConnectorRoutingID`, the opaque
 reverse-connection routing label, and `KnockResourceID`, the placement-neutral
 NHP admission target. The SDK requires all three values to be present and
 pairwise distinct.
@@ -73,9 +73,10 @@ never derive any of those durable control-plane values from `RunID`.
 routing label from the public key, slug, cell id, `qurl_site`, or any hostname.
 
 The SDK mirrors qurl-service's strict base64url decoding and 80-160 decoded-byte
-structural window; legacy `r_` storage identifiers are not public REST IDs and
-are rejected before dispatch. Update the producer fence and SDK together if any
-identity, routing, or admission contract changes.
+structural prefilter, then parses the value as a valid P-256 DER SPKI public key;
+legacy `r_` storage identifiers and well-sized non-key blobs are not public REST
+IDs and are rejected before dispatch. Update the producer fence and SDK together
+if any identity, routing, or admission contract changes.
 
 The fenced qURL Connector resource status schema contains only `active` and
 `revoked`; any other status is invalid producer drift rather than a transitional

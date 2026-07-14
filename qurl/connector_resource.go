@@ -18,7 +18,7 @@ const producerConnectorResourceType = "tunnel"
 const (
 	// qurl-service exposes the protected-resource public key as the canonical
 	// REST resource_id. These bounds mirror its strict DER SPKI structural
-	// prefilter; identity remains the exact canonical base64url string.
+	// prefilter before the SDK parses and validates the P-256 public key.
 	minConnectorResourcePublicKeyDERBytes = 80
 	maxConnectorResourcePublicKeyDERBytes = 160
 )
@@ -81,9 +81,8 @@ type ConnectorResource struct {
 
 	// ResourceID is the producer-issued protected-resource P-256 public key in
 	// canonical unpadded-base64url DER SPKI form. The SDK validates its wire
-	// encoding and structural length; qurl-service remains authoritative for
-	// DER parsing and curve validation. It is distinct from ConnectorRoutingID
-	// and KnockResourceID.
+	// encoding, DER structure, key type, curve, and point. It is distinct from
+	// ConnectorRoutingID and KnockResourceID.
 	ResourceID string `json:"resource_id"`
 	// ConnectorRoutingID is the opaque routing label returned by the producer.
 	// qURL Connector uses it verbatim and never derives it from ResourceID.
@@ -359,7 +358,7 @@ func validateConnectorSlug(slug string) error {
 
 func validateConnectorResourceID(resourceID string) error {
 	if !isValidConnectorResourceID(resourceID) {
-		return fmt.Errorf("%w: qURL Connector resource id must be a canonical unpadded base64url resource public key (%d-%d decoded DER SPKI bytes)", ErrInvalidResourceRequest, minConnectorResourcePublicKeyDERBytes, maxConnectorResourcePublicKeyDERBytes)
+		return fmt.Errorf("%w: qURL Connector resource id must be a canonical unpadded base64url P-256 public key (%d-%d decoded DER SPKI bytes)", ErrInvalidResourceRequest, minConnectorResourcePublicKeyDERBytes, maxConnectorResourcePublicKeyDERBytes)
 	}
 	return nil
 }
@@ -371,7 +370,11 @@ func isValidConnectorResourceID(resourceID string) bool {
 	}
 	// Strict still ignores CR and LF. An exact round trip enforces the public
 	// OpenAPI alphabet and the single canonical encoding for these DER bytes.
-	return b64url.EncodeToString(der) == resourceID
+	if b64url.EncodeToString(der) != resourceID {
+		return false
+	}
+	_, err = ParseP256PublicKeyDER(der)
+	return err == nil
 }
 
 type connectorResourceOperation uint8

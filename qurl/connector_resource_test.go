@@ -748,8 +748,8 @@ func TestConnectorSlugAndAliasGrammar(t *testing.T) {
 func TestConnectorResourceIDContract(t *testing.T) {
 	t.Parallel()
 
-	minID := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x01}, minConnectorResourcePublicKeyDERBytes))
-	maxID := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x02}, maxConnectorResourcePublicKeyDERBytes))
+	wellSizedNonDER := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x01}, 91))
+	offCurveP256DER := "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE7VDGkLaZfQLKvxScAKGCA1Y3p6jNG6d0f66a4Wib8NP8CRZJoEm1jRQej5f0aRzejaH5N7ChvQkiISohN2KVOQ"
 	nonCanonical := testConnectorID[:len(testConnectorID)-1] + "B"
 	standardBase64 := strings.Replace(testConnectorID, "_", "/", 1)
 
@@ -759,8 +759,9 @@ func TestConnectorResourceIDContract(t *testing.T) {
 		want bool
 	}{
 		{name: "real P-256 public key", id: testConnectorID, want: true},
-		{name: "minimum producer structural length", id: minID, want: true},
-		{name: "maximum producer structural length", id: maxID, want: true},
+		{name: "other real P-256 public key", id: testOtherConnectorID, want: true},
+		{name: "well-sized non-DER bytes", id: wellSizedNonDER},
+		{name: "off-curve P-256 DER", id: offCurveP256DER},
 		{name: "legacy storage id", id: "r_legacy12345"},
 		{name: "empty", id: ""},
 		{name: "padded", id: testConnectorID + "="},
