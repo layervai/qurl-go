@@ -139,7 +139,8 @@ diagnostics:
 | Error | Meaning |
 | --- | --- |
 | `qurl.ErrConnectorResourceNotFound` | Resource id or owner-scoped slug was not found |
-| `qurl.ErrConnectorResourceRevoked` | Resource is revoked or tombstoned |
+| `qurl.ErrConnectorResourceRevoked` | A resource detail row has status revoked; its slug may be reusable after ordinary delete |
+| `qurl.ErrConnectorResourceTombstoned` | An exact `410 resource_tombstoned` closed the resource lifecycle; do not retry the slug as ordinary reuse |
 | `qurl.ErrConnectorResourceSlugConflict` | Find-or-create could not resolve a slug collision to an active resource |
 | `qurl.ErrConnectorResourceAmbiguous` | A slug lookup returned more than one resource |
 | `qurl.ErrConnectorResourceOutcomeUnknown` | An ensure or delete was dispatched, but the SDK cannot prove whether it committed |
@@ -155,8 +156,8 @@ The endpoint mappings are intentionally operation-specific:
 
 | Operation | Typed lifecycle mapping |
 | --- | --- |
-| Ensure | Only `409 slug_in_use` maps to `ErrConnectorResourceSlugConflict`; only `410 resource_tombstoned` maps to `ErrConnectorResourceRevoked` |
-| Get by resource id | `404` maps to `ErrConnectorResourceNotFound`; `410 resource_tombstoned` and a valid `200` detail row with `status: "revoked"` map to `ErrConnectorResourceRevoked` |
+| Ensure | Only `409 slug_in_use` maps to `ErrConnectorResourceSlugConflict`; only `410 resource_tombstoned` maps to `ErrConnectorResourceTombstoned` |
+| Get by resource id | `404` maps to `ErrConnectorResourceNotFound`; `410 resource_tombstoned` maps to `ErrConnectorResourceTombstoned`; a valid `200` detail row with `status: "revoked"` maps to `ErrConnectorResourceRevoked` |
 | Get by slug | Only an empty `200 data: []` maps to `ErrConnectorResourceNotFound`; route-level 404/409/410 remain raw `*APIError` values |
 | Delete | Only `404` maps to `ErrConnectorResourceNotFound` |
 

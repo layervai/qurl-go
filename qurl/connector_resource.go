@@ -31,10 +31,14 @@ var (
 	// lookup or deletion cannot find a resource owned by the current credential.
 	ErrConnectorResourceNotFound = errors.New("qurl: qURL Connector resource not found")
 
-	// ErrConnectorResourceRevoked is returned when an operation observes a
-	// revoked row or a 410 tombstone. An ordinary DELETE-revoked slug may be
-	// reusable; the 410 case is the distinct lifecycle-closed state.
+	// ErrConnectorResourceRevoked is returned when a resource detail row has
+	// status revoked. Its slug may be reusable after an ordinary delete.
 	ErrConnectorResourceRevoked = errors.New("qurl: qURL Connector resource revoked")
+
+	// ErrConnectorResourceTombstoned is returned for an exact 410
+	// resource_tombstoned response. The resource lifecycle is closed and its
+	// slug must not be retried as an ordinary revoked-resource reuse.
+	ErrConnectorResourceTombstoned = errors.New("qurl: qURL Connector resource tombstoned")
 
 	// ErrConnectorResourceSlugConflict is returned when an idempotent qURL
 	// Connector ensure cannot resolve a slug collision to one active resource.
@@ -421,7 +425,7 @@ func classifyConnectorResourceError(operation connectorResourceOperation, err er
 		case apiErr.StatusCode == http.StatusConflict && apiErr.Code == "slug_in_use":
 			return fmt.Errorf("%w: %w", ErrConnectorResourceSlugConflict, err)
 		case apiErr.StatusCode == http.StatusGone && apiErr.Code == "resource_tombstoned":
-			return fmt.Errorf("%w: %w", ErrConnectorResourceRevoked, err)
+			return fmt.Errorf("%w: %w", ErrConnectorResourceTombstoned, err)
 		}
 	case connectorResourceOperationGetByID:
 		switch apiErr.StatusCode {
@@ -429,7 +433,7 @@ func classifyConnectorResourceError(operation connectorResourceOperation, err er
 			return fmt.Errorf("%w: %w", ErrConnectorResourceNotFound, err)
 		case http.StatusGone:
 			if apiErr.Code == "resource_tombstoned" {
-				return fmt.Errorf("%w: %w", ErrConnectorResourceRevoked, err)
+				return fmt.Errorf("%w: %w", ErrConnectorResourceTombstoned, err)
 			}
 		}
 	case connectorResourceOperationDelete:

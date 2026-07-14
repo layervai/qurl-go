@@ -93,7 +93,8 @@ portal, err := resource.CreatePortal(ctx, qurl.ValidFor(5*time.Minute))
 If you persist the resource id, future calls do not need to recreate the handle:
 
 ```go
-resource := client.ResourceByID("<stored canonical public-key resource_id>")
+resourceID := "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE2cTVv5_3eeYCcLLq5ROYCqcmY50HiKZ9ATglIkPnCji1E_S63UMtXba1moR8-Q6EV7oM6zwwh9_j2CDujzXvLA"
+resource := client.ResourceByID(resourceID)
 portal, err := resource.CreatePortal(ctx, qurl.ValidFor(time.Hour))
 ```
 
@@ -241,7 +242,9 @@ Match errors by type, not message text:
   an existing active resource. The SDK never derives the routing value from the
   public-key `ResourceID`. The per-cycle `RunID` primitive is separate ephemeral
   knock/service correlation and is not stored on the resource or sent through
-  resource CRUD. See [Manage qURL Connector
+  resource CRUD. Revoked detail rows and lifecycle-closed tombstones have
+  distinct matchable errors so callers do not accidentally reuse a tombstoned
+  slug. See [Manage qURL Connector
   resources](docs/connector-resources.md).
 
   **Release gate:** do not publish this SDK surface until the qurl-service

@@ -996,6 +996,35 @@ func TestClient_EmptySuccessBodyFailsClosed(t *testing.T) {
 	}
 }
 
+func TestDoAuthorizedRequestUnknownBodyModeFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	err := doAuthorizedRequest(
+		context.Background(),
+		doerFunc(func(r *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{}`)),
+				Request:    r,
+			}, nil
+		}),
+		"https://api.example.com",
+		func(context.Context, *http.Request) error { return nil },
+		http.MethodGet,
+		"/v1/test",
+		nil,
+		apiResponseContract{bodyMode: apiResponseBodyMode(255)},
+	)
+	if !errors.Is(err, ErrInvalidAPIResponse) || !strings.Contains(err.Error(), "unknown API response body contract") {
+		t.Fatalf("unknown body mode error = %v, want ErrInvalidAPIResponse and contract detail", err)
+	}
+	var outcomeUnknown *apiRequestOutcomeUnknownError
+	if !errors.As(err, &outcomeUnknown) {
+		t.Fatalf("unknown body mode error lost post-dispatch outcome marker: %v", err)
+	}
+}
+
 func TestClient_IncompleteResourceSuccessFailsClosed(t *testing.T) {
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

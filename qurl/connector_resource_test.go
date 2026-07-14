@@ -422,12 +422,12 @@ func TestClient_ConnectorResourceTypedAPIErrors(t *testing.T) {
 		{name: "ensure tombstone", status: http.StatusGone, code: "resource_tombstoned", call: func(c *Client) error {
 			_, err := c.EnsureConnectorResource(context.Background(), testConnectorSlug)
 			return err
-		}, want: ErrConnectorResourceRevoked},
+		}, want: ErrConnectorResourceTombstoned},
 		{name: "ensure 410 wrong code remains raw", status: http.StatusGone, code: "resource_revoked", call: ensureConnectorResourceError},
 		{name: "ensure code on wrong status remains raw", status: http.StatusConflict, code: "resource_tombstoned", call: ensureConnectorResourceError},
 		{name: "ensure 404 remains raw", status: http.StatusNotFound, code: "resource_not_found", call: ensureConnectorResourceError},
 		{name: "get id not found", status: http.StatusNotFound, code: "resource_not_found", call: getConnectorResourceError, want: ErrConnectorResourceNotFound},
-		{name: "get id tombstone", status: http.StatusGone, code: "resource_tombstoned", call: getConnectorResourceError, want: ErrConnectorResourceRevoked},
+		{name: "get id tombstone", status: http.StatusGone, code: "resource_tombstoned", call: getConnectorResourceError, want: ErrConnectorResourceTombstoned},
 		{name: "get id 410 wrong code remains raw", status: http.StatusGone, code: "resource_revoked", call: getConnectorResourceError},
 		{name: "get id 409 remains raw", status: http.StatusConflict, code: "slug_in_use", call: getConnectorResourceError},
 		{name: "slug lookup 404 remains raw", status: http.StatusNotFound, code: "resource_not_found", call: getConnectorResourceBySlugError},
@@ -438,7 +438,7 @@ func TestClient_ConnectorResourceTypedAPIErrors(t *testing.T) {
 		{name: "delete 409 remains raw", status: http.StatusConflict, code: "slug_in_use", call: deleteConnectorResourceError},
 		{name: "device credential unauthorized remains raw", status: http.StatusUnauthorized, code: "invalid_api_key", call: ensureConnectorResourceError},
 	}
-	typedErrors := []error{ErrConnectorResourceNotFound, ErrConnectorResourceRevoked, ErrConnectorResourceSlugConflict}
+	typedErrors := []error{ErrConnectorResourceNotFound, ErrConnectorResourceRevoked, ErrConnectorResourceTombstoned, ErrConnectorResourceSlugConflict}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
@@ -522,7 +522,7 @@ func TestClient_ConnectorResourceMutation5xxOutcomeUnknown(t *testing.T) {
 			if got := errors.Is(err, ErrConnectorResourceOutcomeUnknown); got != tt.wantUnknown {
 				t.Fatalf("ErrConnectorResourceOutcomeUnknown = %t, want %t; error=%v", got, tt.wantUnknown, err)
 			}
-			if errors.Is(err, ErrConnectorResourceNotFound) || errors.Is(err, ErrConnectorResourceRevoked) || errors.Is(err, ErrConnectorResourceSlugConflict) {
+			if errors.Is(err, ErrConnectorResourceNotFound) || errors.Is(err, ErrConnectorResourceRevoked) || errors.Is(err, ErrConnectorResourceTombstoned) || errors.Is(err, ErrConnectorResourceSlugConflict) {
 				t.Fatalf("5xx was misclassified as lifecycle result: %v", err)
 			}
 			if errors.Is(err, ErrInvalidAPIResponse) || errors.Is(err, ErrInvalidConnectorResourceResponse) {
@@ -615,7 +615,7 @@ func TestClient_ConnectorResourceRevokedSuccessRows(t *testing.T) {
 	}
 
 	detail := fmt.Sprintf(`{"data":{"resource":{"resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"revoked","slug":%q}}}`, testConnectorID, testConnectorRoutingID, testKnockID, testConnectorSlug)
-	if err := getByID(t, detail); !errors.Is(err, ErrConnectorResourceRevoked) || errors.Is(err, ErrInvalidConnectorResourceResponse) {
+	if err := getByID(t, detail); !errors.Is(err, ErrConnectorResourceRevoked) || errors.Is(err, ErrConnectorResourceTombstoned) || errors.Is(err, ErrInvalidConnectorResourceResponse) {
 		t.Fatalf("detail revoked row = %v, want revoked", err)
 	}
 
@@ -631,14 +631,14 @@ func TestClient_ConnectorResourceRevokedSuccessRows(t *testing.T) {
 	}
 	for _, tt := range invalidDetails {
 		t.Run(tt.name, func(t *testing.T) {
-			if err := getByID(t, tt.body); !errors.Is(err, ErrInvalidAPIResponse) || !errors.Is(err, ErrInvalidConnectorResourceResponse) || errors.Is(err, ErrConnectorResourceRevoked) {
+			if err := getByID(t, tt.body); !errors.Is(err, ErrInvalidAPIResponse) || !errors.Is(err, ErrInvalidConnectorResourceResponse) || errors.Is(err, ErrConnectorResourceRevoked) || errors.Is(err, ErrConnectorResourceTombstoned) {
 				t.Fatalf("malformed revoked detail row = %v, want invalid response", err)
 			}
 		})
 	}
 
 	list := fmt.Sprintf(`{"data":[{"resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"revoked","slug":%q}]}`, testConnectorID, testConnectorRoutingID, testKnockID, testConnectorSlug)
-	if err := getBySlug(t, list); !errors.Is(err, ErrInvalidAPIResponse) || !errors.Is(err, ErrInvalidConnectorResourceResponse) || errors.Is(err, ErrConnectorResourceRevoked) {
+	if err := getBySlug(t, list); !errors.Is(err, ErrInvalidAPIResponse) || !errors.Is(err, ErrInvalidConnectorResourceResponse) || errors.Is(err, ErrConnectorResourceRevoked) || errors.Is(err, ErrConnectorResourceTombstoned) {
 		t.Fatalf("active-only slug revoked row = %v, want invalid response", err)
 	}
 }
