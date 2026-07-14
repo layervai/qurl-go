@@ -498,8 +498,10 @@ func OpenClientContext(ctx context.Context, opts ...ClientOption) (*Client, erro
 type Resource struct {
 	client *Client
 
-	// ID is the canonical protected-resource public key (unpadded base64url DER
-	// SPKI) returned by LayerV.
+	// ID is the protected-resource identifier returned by LayerV. Current
+	// producers use a canonical unpadded-base64url DER SPKI public key; the
+	// legacy Resource surface treats the value as opaque and does not validate
+	// that format. ConnectorResource provides the strictly validated identity.
 	ID string `json:"resource_id"`
 	// TargetURL is the private URL protected by this resource.
 	TargetURL string `json:"target_url"`
