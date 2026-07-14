@@ -100,8 +100,8 @@ func TestMarshalNativeKnockApplicationBody_RejectsOversizedEncodedBody(t *testin
 		t.Fatalf("body length = %d, want NHP maximum %d", len(atLimit), nhpcontract.MaxApplicationBodySize)
 	}
 
-	// The resource identity remains below its per-value cap, so this exercises
-	// the exact aggregate serialized-body boundary rather than the early cap.
+	// One more valid identity byte exercises the aggregate serialized-body
+	// boundary directly.
 	_, err = marshalNativeKnockApplicationBody("a", resourceAtLimit+"r", NativeKnockOptions{RunID: runID})
 	if !errors.Is(err, ErrInvalidNativeKnockOptions) {
 		t.Fatalf("oversized body error = %v, want ErrInvalidNativeKnockOptions", err)

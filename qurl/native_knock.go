@@ -89,9 +89,8 @@ func validateNativeKnockIdentity(kind, value string) error {
 	// Current registration/assignment contracts treat these as opaque protocol
 	// identities, not user-facing slugs. Match AgentState validation by preserving
 	// printable internal whitespace exactly while rejecting ambiguous edge
-	// whitespace and control characters. Size is not checked here: any field long
-	// enough to matter is caught by the aggregate encoded-body check in
-	// marshalNativeKnockApplicationBody, which is the binding NHP wire limit.
+	// whitespace and control characters. Size belongs to the aggregate encoded-body
+	// check in marshalNativeKnockApplicationBody, the binding NHP wire limit.
 	trimmed := strings.TrimSpace(value)
 	if trimmed == "" {
 		return fmt.Errorf("%w: %s must not be blank", ErrInvalidNativeKnockOptions, kind)
