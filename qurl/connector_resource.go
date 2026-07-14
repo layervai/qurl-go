@@ -266,7 +266,7 @@ func (c *Client) GetConnectorResourceBySlug(ctx context.Context, slug string) (*
 		// contract, or the generic successful-response contract.
 		return nil, classifyConnectorResourceError(connectorResourceOperationGetBySlug,
 			fmt.Errorf("%w: %w", ErrConnectorResourceAmbiguous,
-				invalidConnectorResourceResponse("slug %q returned %d resources", slug, len(*response.Data))))
+				invalidConnectorResourceResponsef("slug %q returned %d resources", slug, len(*response.Data))))
 	}
 }
 
@@ -294,13 +294,13 @@ func (r connectorResourceWire) connectorResource(client *Client, expect connecto
 	// revoked Connector rows; an incomplete revoked row is producer drift.
 	if expect.resourceID != "" {
 		if r.ResourceID != expect.resourceID {
-			return nil, invalidConnectorResourceResponse("requested resource_id %q returned %q", expect.resourceID, r.ResourceID)
+			return nil, invalidConnectorResourceResponsef("requested resource_id %q returned %q", expect.resourceID, r.ResourceID)
 		}
 	} else if !isValidConnectorResourceID(r.ResourceID) {
 		return nil, invalidConnectorResourceResponse("missing or invalid resource_id")
 	}
 	if !connectorRoutingIDPattern.MatchString(r.ConnectorRoutingID) {
-		return nil, invalidConnectorResourceResponse("resource %q has missing or invalid connector_routing_id", r.ResourceID)
+		return nil, invalidConnectorResourceResponsef("resource %q has missing or invalid connector_routing_id", r.ResourceID)
 	}
 	// knock_resource_id is an opaque, ASP-defined NHP admission target. The
 	// producer owns its grammar; the SDK enforces only transport-safe exact bytes:
@@ -310,45 +310,44 @@ func (r connectorResourceWire) connectorResource(client *Client, expect connecto
 	if trimmedKnockID := strings.TrimSpace(r.KnockResourceID); trimmedKnockID == "" {
 		return nil, invalidConnectorResourceResponse("missing knock_resource_id")
 	} else if r.KnockResourceID != trimmedKnockID {
-		return nil, invalidConnectorResourceResponse("resource %q has knock_resource_id with leading or trailing whitespace", r.ResourceID)
+		return nil, invalidConnectorResourceResponsef("resource %q has knock_resource_id with leading or trailing whitespace", r.ResourceID)
 	} else if strings.IndexFunc(r.KnockResourceID, unicode.IsControl) >= 0 {
-		return nil, invalidConnectorResourceResponse("resource %q has knock_resource_id with a control character", r.ResourceID)
+		return nil, invalidConnectorResourceResponsef("resource %q has knock_resource_id with a control character", r.ResourceID)
 	}
 	// The producer guarantees three distinct identity/routing/admission values.
-	// ResourceID and ConnectorRoutingID have disjoint validated grammars today,
-	// but keep the equality guard so a future grammar change cannot silently
-	// weaken that guarantee. KnockResourceID remains opaque.
+	// ResourceID and ConnectorRoutingID are already distinct by their disjoint
+	// validated grammars. The explicit checks below cover the opaque admission
+	// value, whose producer-owned grammar provides no equivalent guarantee.
 	// Slug is customer-chosen and is not part of that invariant; it may
 	// legitimately equal an otherwise valid routing or admission value.
-	if r.ResourceID == r.ConnectorRoutingID ||
-		r.ResourceID == r.KnockResourceID ||
+	if r.ResourceID == r.KnockResourceID ||
 		r.ConnectorRoutingID == r.KnockResourceID {
-		return nil, invalidConnectorResourceResponse("resource %q has identity, routing, or admission values cross-wired", r.ResourceID)
+		return nil, invalidConnectorResourceResponsef("resource %q has identity, routing, or admission values cross-wired", r.ResourceID)
 	}
 	if r.Type != producerConnectorResourceType {
-		return nil, invalidConnectorResourceResponse("resource %q has type %q, want %q", r.ResourceID, r.Type, producerConnectorResourceType)
+		return nil, invalidConnectorResourceResponsef("resource %q has type %q, want %q", r.ResourceID, r.Type, producerConnectorResourceType)
 	}
 	if !connectorSlugPattern.MatchString(r.Slug) {
-		return nil, invalidConnectorResourceResponse("resource %q has missing or invalid slug", r.ResourceID)
+		return nil, invalidConnectorResourceResponsef("resource %q has missing or invalid slug", r.ResourceID)
 	}
 	if expect.slug != "" && r.Slug != expect.slug {
-		return nil, invalidConnectorResourceResponse("requested slug %q returned %q", expect.slug, r.Slug)
+		return nil, invalidConnectorResourceResponsef("requested slug %q returned %q", expect.slug, r.Slug)
 	}
 	// Alias is display metadata, but the producer applies the same OpenAPI regex
 	// as slug. A grammar change requires a coordinated producer/SDK release.
 	if r.Alias != nil && !connectorSlugPattern.MatchString(*r.Alias) {
-		return nil, invalidConnectorResourceResponse("resource %q has an invalid alias", r.ResourceID)
+		return nil, invalidConnectorResourceResponsef("resource %q has an invalid alias", r.ResourceID)
 	}
 	// The fenced qurl-service ResourceStatus schema is active/revoked only.
 	// Anything else is producer drift, not a transitional state to accept.
 	if r.Status == "revoked" {
 		if !expect.allowRevoked {
-			return nil, invalidConnectorResourceResponse("active-only qURL Connector operation returned revoked resource %q", r.ResourceID)
+			return nil, invalidConnectorResourceResponsef("active-only qURL Connector operation returned revoked resource %q", r.ResourceID)
 		}
 		return nil, fmt.Errorf("%w: resource %q", ErrConnectorResourceRevoked, r.ResourceID)
 	}
 	if r.Status != "active" {
-		return nil, invalidConnectorResourceResponse("resource %q has status %q, want active", r.ResourceID, r.Status)
+		return nil, invalidConnectorResourceResponsef("resource %q has status %q, want active", r.ResourceID, r.Status)
 	}
 	return &ConnectorResource{
 		client:             client,
@@ -469,6 +468,10 @@ func classifyConnectorResourceError(operation connectorResourceOperation, err er
 // without assigning mutation semantics. classifyConnectorResourceError adds the
 // outcome-unknown marker for mutations; semantic read failures remain ordinary
 // invalid responses because they cannot have committed state.
-func invalidConnectorResourceResponse(format string, args ...any) error {
-	return fmt.Errorf("%w: %s", ErrInvalidConnectorResourceResponse, fmt.Sprintf(format, args...))
+func invalidConnectorResourceResponse(detail string) error {
+	return fmt.Errorf("%w: %s", ErrInvalidConnectorResourceResponse, detail)
+}
+
+func invalidConnectorResourceResponsef(format string, args ...any) error {
+	return invalidConnectorResourceResponse(fmt.Sprintf(format, args...))
 }

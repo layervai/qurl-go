@@ -79,6 +79,15 @@ func TestInvalidConnectorResourceResponseIncludesInvalidAPIResponse(t *testing.T
 	}
 }
 
+func TestInvalidConnectorResourceResponseTreatsDetailAsLiteral(t *testing.T) {
+	t.Parallel()
+
+	err := invalidConnectorResourceResponse("producer returned stray % bytes")
+	if got, want := err.Error(), "qurl: invalid qURL Connector resource response: qurl: invalid API response: producer returned stray % bytes"; got != want {
+		t.Fatalf("invalidConnectorResourceResponse() = %q, want %q", got, want)
+	}
+}
+
 func TestConnectorResourcePublicKeyFixturesAreCanonicalP256(t *testing.T) {
 	t.Parallel()
 
@@ -673,6 +682,10 @@ func TestConnectorResourceWireAllowsControlPlaneValueEqualToSlug(t *testing.T) {
 
 func TestClient_ConnectorResourceRevokedSuccessRows(t *testing.T) {
 	t.Parallel()
+	// This full revoked shape is the SDK-side counterpart of qurl-service
+	// TestListResources_TunnelIdentityTripleIsPresentAndPairwiseDistinct at the
+	// producer SHA fenced in this file's provenance header. That producer test
+	// exercises active and revoked rows through the real shared serializer.
 
 	getByID := func(t *testing.T, body string) error {
 		t.Helper()
@@ -715,6 +728,26 @@ func TestClient_ConnectorResourceRevokedSuccessRows(t *testing.T) {
 	list := fmt.Sprintf(`{"data":[{"resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"revoked","slug":%q}]}`, testConnectorID, testConnectorRoutingID, testKnockID, testConnectorSlug)
 	if err := getBySlug(t, list); !errors.Is(err, ErrInvalidAPIResponse) || !errors.Is(err, ErrInvalidConnectorResourceResponse) || errors.Is(err, ErrConnectorResourceRevoked) || errors.Is(err, ErrConnectorResourceTombstoned) {
 		t.Fatalf("active-only slug revoked row = %v, want invalid response", err)
+	}
+}
+
+func TestConnectorResourceOpaqueKnockIDAllowsInternalWhitespace(t *testing.T) {
+	t.Parallel()
+
+	wire := connectorResourceWire{
+		ResourceID:         testConnectorID,
+		ConnectorRoutingID: testConnectorRoutingID,
+		KnockResourceID:    "producer owned admission target",
+		Type:               producerConnectorResourceType,
+		Status:             "active",
+		Slug:               testConnectorSlug,
+	}
+	resource, err := wire.connectorResource(nil, connectorResourceExpectation{})
+	if err != nil {
+		t.Fatalf("connectorResource() = %v, want opaque internal whitespace accepted", err)
+	}
+	if got := resource.KnockResourceID; got != wire.KnockResourceID {
+		t.Fatalf("KnockResourceID = %q, want exact producer bytes %q", got, wire.KnockResourceID)
 	}
 }
 

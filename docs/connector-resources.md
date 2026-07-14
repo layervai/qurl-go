@@ -84,6 +84,12 @@ and non-key blobs are not public REST IDs and are rejected before dispatch.
 Update the producer fence and SDK together if any identity, routing, or
 admission contract changes.
 
+`KnockResourceID` is an opaque, producer-owned NHP admission target. The SDK
+requires it to be present and rejects surrounding whitespace or control
+characters, but does not impose an identifier grammar on its interior bytes;
+for example, internal spaces are preserved verbatim. This deliberately keeps
+the client from deriving or normalizing a value that NHP must match exactly.
+
 The fenced qURL Connector resource status schema contains only `active` and
 `revoked`; any other status is invalid producer drift rather than a transitional
 state qURL Connector may use. qurl-service's shared resource serializer returns
