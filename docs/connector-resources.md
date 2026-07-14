@@ -85,8 +85,8 @@ Update the producer fence and SDK together if any identity, routing, or
 admission contract changes.
 
 `KnockResourceID` is an opaque, producer-owned NHP admission target. The SDK
-requires it to be present and rejects surrounding whitespace or control
-characters, but does not impose an identifier grammar on its interior bytes;
+requires it to be present, valid UTF-8, and free of surrounding whitespace or
+control characters, but does not impose an identifier grammar on its interior;
 for example, internal spaces are preserved verbatim. This deliberately keeps
 the client from deriving or normalizing a value that NHP must match exactly.
 

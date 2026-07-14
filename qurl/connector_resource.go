@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 // producerConnectorResourceType is the qurl-service discriminator for qURL
@@ -311,6 +312,8 @@ func (r connectorResourceWire) connectorResource(client *Client, expect connecto
 		return nil, invalidConnectorResourceResponse("missing knock_resource_id")
 	} else if r.KnockResourceID != trimmedKnockID {
 		return nil, invalidConnectorResourceResponsef("resource %q has knock_resource_id with leading or trailing whitespace", r.ResourceID)
+	} else if !utf8.ValidString(r.KnockResourceID) {
+		return nil, invalidConnectorResourceResponsef("resource %q has knock_resource_id with invalid UTF-8", r.ResourceID)
 	} else if strings.IndexFunc(r.KnockResourceID, unicode.IsControl) >= 0 {
 		return nil, invalidConnectorResourceResponsef("resource %q has knock_resource_id with a control character", r.ResourceID)
 	}

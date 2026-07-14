@@ -384,36 +384,71 @@ func TestClient_ConnectorResourceRequiresExactJSONStatus(t *testing.T) {
 func TestClient_ConnectorResourceCreatePortal(t *testing.T) {
 	t.Parallel()
 
-	var requests atomic.Int32
-	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assertConnectorAuthorization(t, r)
-		switch requests.Add(1) {
-		case 1:
-			fmt.Fprintf(w, `{"data":[{"resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q}]}`, testConnectorID, testConnectorRoutingID, testKnockID, testConnectorSlug)
-		case 2:
-			if r.Method != http.MethodPost || r.URL.Path != "/v1/resources/"+testConnectorID+"/qurls" {
-				t.Errorf("portal request = %s %s", r.Method, r.URL.Path)
-				http.Error(w, "unexpected portal request", http.StatusBadRequest)
-				return
-			}
-			fmt.Fprintf(w, `{"data":{"resource_id":%q,"qurl_link":"https://qurl.link/at_connector"}}`, testConnectorID)
-		default:
-			t.Errorf("unexpected request %d", requests.Load())
-			http.Error(w, "unexpected request", http.StatusBadRequest)
-		}
-	}))
-	defer api.Close()
+	tests := []struct {
+		name           string
+		lookupPath     string
+		lookupQuery    string
+		lookupBody     string
+		lookupResource func(*Client) (*ConnectorResource, error)
+	}{
+		{
+			name:        "by slug",
+			lookupPath:  "/v1/resources",
+			lookupQuery: "slug=" + testConnectorSlug,
+			lookupBody:  fmt.Sprintf(`{"data":[{"resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q}]}`, testConnectorID, testConnectorRoutingID, testKnockID, testConnectorSlug),
+			lookupResource: func(client *Client) (*ConnectorResource, error) {
+				return client.GetConnectorResourceBySlug(context.Background(), testConnectorSlug)
+			},
+		},
+		{
+			name:       "by id",
+			lookupPath: "/v1/resources/" + testConnectorID,
+			lookupBody: fmt.Sprintf(`{"data":{"resource":{"resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q}}}`, testConnectorID, testConnectorRoutingID, testKnockID, testConnectorSlug),
+			lookupResource: func(client *Client) (*ConnectorResource, error) {
+				return client.GetConnectorResource(context.Background(), testConnectorID)
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var requests atomic.Int32
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				assertConnectorAuthorization(t, r)
+				switch requests.Add(1) {
+				case 1:
+					if r.Method != http.MethodGet || r.URL.Path != tt.lookupPath || r.URL.RawQuery != tt.lookupQuery {
+						t.Errorf("lookup request = %s %s?%s, want GET %s?%s", r.Method, r.URL.Path, r.URL.RawQuery, tt.lookupPath, tt.lookupQuery)
+						http.Error(w, "unexpected lookup request", http.StatusBadRequest)
+						return
+					}
+					fmt.Fprint(w, tt.lookupBody)
+				case 2:
+					if r.Method != http.MethodPost || r.URL.Path != "/v1/resources/"+testConnectorID+"/qurls" {
+						t.Errorf("portal request = %s %s", r.Method, r.URL.Path)
+						http.Error(w, "unexpected portal request", http.StatusBadRequest)
+						return
+					}
+					fmt.Fprintf(w, `{"data":{"resource_id":%q,"qurl_link":"https://qurl.link/at_connector"}}`, testConnectorID)
+				default:
+					t.Errorf("unexpected request %d", requests.Load())
+					http.Error(w, "unexpected request", http.StatusBadRequest)
+				}
+			}))
+			defer api.Close()
 
-	resource, err := newConnectorTestClient(t, api.URL).GetConnectorResourceBySlug(context.Background(), testConnectorSlug)
-	if err != nil {
-		t.Fatalf("GetConnectorResourceBySlug: %v", err)
-	}
-	portal, err := resource.CreatePortal(context.Background(), ValidFor(time.Minute))
-	if err != nil {
-		t.Fatalf("CreatePortal: %v", err)
-	}
-	if portal.ResourceID != testConnectorID {
-		t.Fatalf("portal resource_id = %q", portal.ResourceID)
+			resource, err := tt.lookupResource(newConnectorTestClient(t, api.URL))
+			if err != nil {
+				t.Fatalf("lookup Connector resource: %v", err)
+			}
+			portal, err := resource.CreatePortal(context.Background(), ValidFor(time.Minute))
+			if err != nil {
+				t.Fatalf("CreatePortal: %v", err)
+			}
+			if portal.ResourceID != testConnectorID {
+				t.Fatalf("portal resource_id = %q", portal.ResourceID)
+			}
+		})
 	}
 }
 
@@ -477,6 +512,9 @@ func TestClient_ConnectorResourceTypedAPIErrors(t *testing.T) {
 		}, want: ErrConnectorResourceTombstoned},
 		{name: "ensure 410 wrong code remains raw", status: http.StatusGone, code: "resource_revoked", call: ensureConnectorResourceError},
 		{name: "ensure code on wrong status remains raw", status: http.StatusConflict, code: "resource_tombstoned", call: ensureConnectorResourceError},
+		{name: "ensure legacy 409 resource revoked remains raw", status: http.StatusConflict, code: "resource_revoked", call: ensureConnectorResourceError},
+		{name: "ensure 400 is authoritative", status: http.StatusBadRequest, code: "invalid_request", call: ensureConnectorResourceError},
+		{name: "ensure 429 is authoritative", status: http.StatusTooManyRequests, code: "rate_limited", call: ensureConnectorResourceError},
 		{name: "ensure 404 remains raw", status: http.StatusNotFound, code: "resource_not_found", call: ensureConnectorResourceError},
 		{name: "get id not found", status: http.StatusNotFound, code: "resource_not_found", call: getConnectorResourceError, want: ErrConnectorResourceNotFound},
 		{name: "get id tombstone", status: http.StatusGone, code: "resource_tombstoned", call: getConnectorResourceError, want: ErrConnectorResourceTombstoned},
@@ -488,6 +526,8 @@ func TestClient_ConnectorResourceTypedAPIErrors(t *testing.T) {
 		{name: "delete not found", status: http.StatusNotFound, code: "resource_not_found", call: deleteConnectorResourceError, want: ErrConnectorResourceNotFound},
 		{name: "delete 410 remains raw", status: http.StatusGone, code: "resource_tombstoned", call: deleteConnectorResourceError},
 		{name: "delete 409 remains raw", status: http.StatusConflict, code: "slug_in_use", call: deleteConnectorResourceError},
+		{name: "delete 400 is authoritative", status: http.StatusBadRequest, code: "invalid_request", call: deleteConnectorResourceError},
+		{name: "delete 429 is authoritative", status: http.StatusTooManyRequests, code: "rate_limited", call: deleteConnectorResourceError},
 		{name: "device credential unauthorized remains raw", status: http.StatusUnauthorized, code: "invalid_api_key", call: ensureConnectorResourceError},
 	}
 	typedErrors := []error{ErrConnectorResourceNotFound, ErrConnectorResourceRevoked, ErrConnectorResourceTombstoned, ErrConnectorResourceSlugConflict}
@@ -616,6 +656,7 @@ func TestClient_ConnectorResourceSuccessfulResponseValidation(t *testing.T) {
 		{name: "public resource id cross-wired as knock id", body: strings.Replace(valid, `"knock_resource_id":"`+testKnockID+`"`, `"knock_resource_id":"`+testConnectorID+`"`, 1), want: ErrInvalidConnectorResourceResponse},
 		{name: "missing knock id", body: strings.Replace(valid, `"knock_resource_id":"`+testKnockID+`",`, "", 1), want: ErrInvalidConnectorResourceResponse},
 		{name: "whitespace knock id", body: strings.Replace(valid, `"knock_resource_id":"`+testKnockID+`"`, `"knock_resource_id":" `+testKnockID+` "`, 1), want: ErrInvalidConnectorResourceResponse},
+		{name: "invalid UTF-8 in knock id", body: strings.Replace(valid, testKnockID, "knock\x85id", 1), want: ErrInvalidConnectorResourceResponse},
 		{name: "NUL in knock id", body: strings.Replace(valid, `"knock_resource_id":"`+testKnockID+`"`, `"knock_resource_id":"knock\u0000id"`, 1), want: ErrInvalidConnectorResourceResponse},
 		{name: "newline in knock id", body: strings.Replace(valid, `"knock_resource_id":"`+testKnockID+`"`, `"knock_resource_id":"knock\nid"`, 1), want: ErrInvalidConnectorResourceResponse},
 		{name: "wrong type", body: strings.Replace(valid, `"type":"tunnel"`, `"type":"url"`, 1), want: ErrInvalidConnectorResourceResponse},
@@ -742,23 +783,42 @@ func TestClient_ConnectorResourceRevokedSuccessRows(t *testing.T) {
 	}
 }
 
-func TestConnectorResourceOpaqueKnockIDAllowsInternalWhitespace(t *testing.T) {
+func TestConnectorResourceOpaqueKnockIDContract(t *testing.T) {
 	t.Parallel()
 
-	wire := connectorResourceWire{
-		ResourceID:         testConnectorID,
-		ConnectorRoutingID: testConnectorRoutingID,
-		KnockResourceID:    "producer owned admission target",
-		Type:               producerConnectorResourceType,
-		Status:             "active",
-		Slug:               testConnectorSlug,
+	tests := []struct {
+		name    string
+		knockID string
+		wantErr bool
+	}{
+		{name: "internal whitespace is opaque", knockID: "producer owned admission target"},
+		{name: "invalid UTF-8", knockID: "producer\x85owned", wantErr: true},
 	}
-	resource, err := wire.connectorResource(nil, connectorResourceExpectation{})
-	if err != nil {
-		t.Fatalf("connectorResource() = %v, want opaque internal whitespace accepted", err)
-	}
-	if got := resource.KnockResourceID; got != wire.KnockResourceID {
-		t.Fatalf("KnockResourceID = %q, want exact producer bytes %q", got, wire.KnockResourceID)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			wire := connectorResourceWire{
+				ResourceID:         testConnectorID,
+				ConnectorRoutingID: testConnectorRoutingID,
+				KnockResourceID:    tt.knockID,
+				Type:               producerConnectorResourceType,
+				Status:             "active",
+				Slug:               testConnectorSlug,
+			}
+			resource, err := wire.connectorResource(nil, connectorResourceExpectation{})
+			if tt.wantErr {
+				if !errors.Is(err, ErrInvalidConnectorResourceResponse) {
+					t.Fatalf("connectorResource() = %v, want invalid response", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("connectorResource() = %v, want opaque value accepted", err)
+			}
+			if got := resource.KnockResourceID; got != wire.KnockResourceID {
+				t.Fatalf("KnockResourceID = %q, want exact producer bytes %q", got, wire.KnockResourceID)
+			}
+		})
 	}
 }
 
@@ -789,6 +849,9 @@ func TestClient_GetConnectorResourceBySlugCardinality(t *testing.T) {
 			if got := errors.Is(err, ErrInvalidAPIResponse); got != tt.wantInvalid {
 				t.Fatalf("ErrInvalidAPIResponse = %t, want %t; error=%v", got, tt.wantInvalid, err)
 			}
+			if got := errors.Is(err, ErrInvalidConnectorResourceResponse); got != tt.wantInvalid {
+				t.Fatalf("ErrInvalidConnectorResourceResponse = %t, want %t; error=%v", got, tt.wantInvalid, err)
+			}
 		})
 	}
 }
@@ -803,6 +866,18 @@ func TestClient_GetConnectorResourceBySlugRejectsMissingData(t *testing.T) {
 	_, err := newConnectorTestClient(t, api.URL).GetConnectorResourceBySlug(context.Background(), testConnectorSlug)
 	if !errors.Is(err, ErrInvalidAPIResponse) || !errors.Is(err, ErrInvalidConnectorResourceResponse) || errors.Is(err, ErrConnectorResourceNotFound) {
 		t.Fatalf("error = %v, want malformed response and not not-found", err)
+	}
+}
+
+func TestClient_GetConnectorResourceBySlugRejectsMismatchedSlug(t *testing.T) {
+	t.Parallel()
+
+	body := fmt.Sprintf(`{"data":[{"resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":"other-dashboard"}]}`, testConnectorID, testConnectorRoutingID, testKnockID)
+	client := newConnectorTestClient(t, "http://localhost")
+	client.httpClient = staticConnectorResponseDoer(http.StatusOK, body)
+	_, err := client.GetConnectorResourceBySlug(context.Background(), testConnectorSlug)
+	if !errors.Is(err, ErrInvalidAPIResponse) || !errors.Is(err, ErrInvalidConnectorResourceResponse) || !strings.Contains(err.Error(), `requested slug "prod-dashboard" returned "other-dashboard"`) {
+		t.Fatalf("mismatched slug error = %v, want precise invalid response", err)
 	}
 }
 
@@ -866,6 +941,40 @@ func TestClient_ConnectorResourceRejectsInvalidInputsWithoutNetwork(t *testing.T
 	}
 	if calls.Load() != 0 {
 		t.Fatalf("network calls = %d, want 0", calls.Load())
+	}
+}
+
+func TestClient_ConnectorResourceMethodsRejectNilClient(t *testing.T) {
+	t.Parallel()
+
+	var client *Client
+	tests := []struct {
+		name string
+		call func() error
+	}{
+		{name: "ensure", call: func() error {
+			_, err := client.EnsureConnectorResource(context.Background(), testConnectorSlug)
+			return err
+		}},
+		{name: "get by id", call: func() error {
+			_, err := client.GetConnectorResource(context.Background(), testConnectorID)
+			return err
+		}},
+		{name: "get by slug", call: func() error {
+			_, err := client.GetConnectorResourceBySlug(context.Background(), testConnectorSlug)
+			return err
+		}},
+		{name: "delete", call: func() error {
+			return client.DeleteConnectorResource(context.Background(), testConnectorID)
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if err := tt.call(); !errors.Is(err, ErrInvalidClientConfig) {
+				t.Fatalf("nil Client method error = %v, want ErrInvalidClientConfig", err)
+			}
+		})
 	}
 }
 

@@ -1157,6 +1157,12 @@ func doAuthorizedRequest(ctx context.Context, httpClient HTTPDoer, baseURL strin
 		if len(bytes.TrimSpace(respBody)) == 0 {
 			return invalidAPIResponseOutcome("empty API response body after successful status", nil)
 		}
+		// RFC 8259 JSON exchanged between systems must be UTF-8. encoding/json
+		// deliberately replaces malformed UTF-8 with U+FFFD, which would hide the
+		// producer's exact invalid bytes before endpoint validation can reject them.
+		if !utf8.Valid(respBody) {
+			return invalidAPIResponseOutcome("API response body is not valid UTF-8", nil)
+		}
 		if err := json.Unmarshal(respBody, contract.out); err != nil {
 			return invalidAPIResponseOutcome("decode API response after successful status", err)
 		}
