@@ -14,6 +14,9 @@ import (
 // When bumping claudeAction, re-verify that upstream action.yml still declares
 // exclude_comments_by_actor and that actor-filter.ts retains the special
 // *[bot] literal-suffix semantics. GitHub ignores unknown action inputs.
+// Sources:
+// https://github.com/anthropics/claude-code-action/blob/558b1d6cab4085c7753fe402c10bef0fbb92ac7a/action.yml#L51-L54
+// https://github.com/anthropics/claude-code-action/blob/558b1d6cab4085c7753fe402c10bef0fbb92ac7a/src/github/utils/actor-filter.ts#L17-L21
 const (
 	claudeAction   = "anthropics/claude-code-action@558b1d6cab4085c7753fe402c10bef0fbb92ac7a # v1.0.165"
 	checkoutAction = "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0"
@@ -36,6 +39,7 @@ func TestInteractiveClaudeWorkflowAuthorizesBeforeImmutableCheckout(t *testing.T
 		"steps.claude_pr.outputs.checkout_allowed == 'true'",
 		"ref: ${{ steps.claude_pr.outputs.sha != '' && steps.claude_pr.outputs.sha || github.sha }}",
 		"if: steps.checkout.outcome == 'success'",
+		"issues: write",
 	)
 	requireSharedActionContract(t, workflow)
 	requireBefore(t, workflow,
@@ -54,6 +58,7 @@ func TestAutomaticClaudeWorkflowPinsBoundedCommentAuthorInput(t *testing.T) {
 		"github.event.pull_request.head.repo.full_name == github.repository",
 	)
 	requireSharedActionContract(t, workflow)
+	requireNotContains(t, workflow, "issues: write")
 }
 
 // requireSharedActionContract verifies the action and permissions shared by
@@ -70,7 +75,6 @@ func requireSharedActionContract(t *testing.T, workflow string) {
 		"persist-credentials: false",
 		"exclude_comments_by_actor: 'claude,github-actions,*[bot]'",
 		"pull-requests: write",
-		"issues: write",
 	)
 	requireNotContains(t, workflow, "id-token: write")
 }
