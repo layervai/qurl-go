@@ -436,6 +436,10 @@ func classifyConnectorResourceError(operation connectorResourceOperation, err er
 	return err
 }
 
+// invalidConnectorResourceResponse reports a decoded Connector contract breach
+// without assigning mutation semantics. classifyConnectorResourceError adds the
+// outcome-unknown marker for mutations; semantic read failures remain ordinary
+// invalid responses because they cannot have committed state.
 func invalidConnectorResourceResponse(format string, args ...any) error {
 	return fmt.Errorf("%w: %w: %s", ErrInvalidConnectorResourceResponse, ErrInvalidAPIResponse, fmt.Sprintf(format, args...))
 }
