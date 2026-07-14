@@ -771,8 +771,6 @@ func TestConnectorResourceIDContract(t *testing.T) {
 		{name: "embedded line feed", id: testConnectorID[:50] + "\n" + testConnectorID[50:]},
 		{name: "trailing carriage return", id: testConnectorID + "\r"},
 		{name: "trailing line feed", id: testConnectorID + "\n"},
-		{name: "below decoded length", id: base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x01}, minConnectorResourcePublicKeyDERBytes-1))},
-		{name: "above decoded length", id: base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x01}, maxConnectorResourcePublicKeyDERBytes+1))},
 		{name: "invalid unpadded length", id: strings.Repeat("A", 109)},
 	}
 	for _, tt := range tests {
@@ -879,7 +877,7 @@ func TestClient_ConnectorResourceMutationOutcomeUnknownBoundary(t *testing.T) {
 				return &http.Response{
 					StatusCode: status,
 					Header:     make(http.Header),
-					Body:       &errorReadCloser{err: readErr},
+					Body:       readErrorCloser{err: readErr},
 					Request:    r,
 				}, nil
 			})
@@ -946,7 +944,7 @@ func TestClient_ConnectorResourceLookupRetainsOnlyFrozenInternalOutcomeMarker(t 
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Header:     make(http.Header),
-			Body:       &errorReadCloser{err: readErr},
+			Body:       readErrorCloser{err: readErr},
 			Request:    r,
 		}, nil
 	})
@@ -1013,10 +1011,3 @@ func assertConnectorAuthorization(t *testing.T, r *http.Request) {
 		t.Fatalf("Authorization = %q, want %q", got, want)
 	}
 }
-
-type errorReadCloser struct {
-	err error
-}
-
-func (r *errorReadCloser) Read([]byte) (int, error) { return 0, r.err }
-func (r *errorReadCloser) Close() error             { return nil }

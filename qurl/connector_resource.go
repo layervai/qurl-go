@@ -17,16 +17,6 @@ import (
 // ConnectorResource, not the producer's generic resource taxonomy.
 const producerConnectorResourceType = "tunnel"
 
-const (
-	// qurl-service exposes the protected-resource public key as the canonical
-	// REST resource_id. These bounds mirror its strict DER SPKI structural
-	// prefilter before the SDK parses and validates the P-256 public key. The
-	// producer window is intentionally wider than today's 91-byte canonical
-	// P-256 SPKI; parsing and byte-exact re-marshalling below remain authoritative.
-	minConnectorResourcePublicKeyDERBytes = 80
-	maxConnectorResourcePublicKeyDERBytes = 160
-)
-
 var (
 	// qurl-service's OpenAPI contract intentionally gives immutable connector
 	// slugs and mutable aliases the same exact lowercase 3-64 character grammar.
@@ -152,18 +142,6 @@ type connectorResourceResponse struct {
 	Meta connectorResourceMeta `json:"meta"`
 }
 
-type connectorResourceListResponse struct {
-	// Pointer distinguishes the explicit empty list (not found) from missing or
-	// null data (a malformed successful response).
-	Data *[]connectorResourceWire `json:"data"`
-}
-
-type connectorResourceDetailResponse struct {
-	Data struct {
-		Resource connectorResourceWire `json:"resource"`
-	} `json:"data"`
-}
-
 type connectorResourceExpectation struct {
 	slug       string
 	resourceID string
@@ -196,14 +174,16 @@ func (c *Client) EnsureConnectorResource(ctx context.Context, slug string) (*Ens
 		return nil, classifyConnectorResourceError(connectorResourceOperationEnsure, err)
 	}
 	if response.Meta.FoundExisting == nil {
-		return nil, classifyConnectorResourceError(connectorResourceOperationEnsure, ensureConnectorResourceOutcomeUnknown(invalidConnectorResourceResponse("missing meta.found_existing")))
+		return nil, classifyConnectorResourceError(connectorResourceOperationEnsure, &apiRequestOutcomeUnknownError{
+			err: invalidConnectorResourceResponse("missing meta.found_existing"),
+		})
 	}
 	resource, err := response.Data.connectorResource(c, connectorResourceExpectation{
 		slug:      slug,
 		operation: connectorResourceOperationEnsure,
 	})
 	if err != nil {
-		return nil, classifyConnectorResourceError(connectorResourceOperationEnsure, ensureConnectorResourceOutcomeUnknown(err))
+		return nil, classifyConnectorResourceError(connectorResourceOperationEnsure, &apiRequestOutcomeUnknownError{err: err})
 	}
 	return &EnsureConnectorResourceResult{
 		Resource:      resource,
@@ -221,7 +201,9 @@ func (c *Client) GetConnectorResource(ctx context.Context, resourceID string) (*
 		return nil, err
 	}
 
-	var response connectorResourceDetailResponse
+	var response apiEnvelope[struct {
+		Resource connectorResourceWire `json:"resource"`
+	}]
 	path := "/v1/resources/" + url.PathEscape(resourceID)
 	if err := c.doJSONStatus(ctx, http.MethodGet, path, nil, &response, http.StatusOK); err != nil {
 		return nil, classifyConnectorResourceError(connectorResourceOperationGetByID, err)
@@ -248,7 +230,9 @@ func (c *Client) GetConnectorResourceBySlug(ctx context.Context, slug string) (*
 	// must contain only slug; more than one row is true producer ambiguity.
 	query := url.Values{}
 	query.Set("slug", slug)
-	var response connectorResourceListResponse
+	// The pointer data type distinguishes an explicit empty list (not found)
+	// from missing or null data (a malformed successful response).
+	var response apiEnvelope[*[]connectorResourceWire]
 	if err := c.doJSONStatus(ctx, http.MethodGet, "/v1/resources?"+query.Encode(), nil, &response, http.StatusOK); err != nil {
 		return nil, classifyConnectorResourceError(connectorResourceOperationGetBySlug, err)
 	}
@@ -312,9 +296,10 @@ func (r connectorResourceWire) connectorResource(client *Client, expect connecto
 	} else if r.KnockResourceID != trimmedKnockID {
 		return nil, invalidConnectorResourceResponse("resource %q has knock_resource_id with leading or trailing whitespace", r.ResourceID)
 	}
-	// The current public-key and routing grammars make their equality
-	// structurally impossible. Keep all three comparisons explicit so field
-	// independence remains fenced if either producer grammar evolves.
+	// ResourceID and ConnectorRoutingID cannot match under their current
+	// grammars. The two KnockResourceID comparisons are live guards because that
+	// producer-owned value is opaque. Keep every pair explicit so the fields
+	// cannot become cross-wired as producer contracts evolve.
 	if r.ResourceID == r.ConnectorRoutingID ||
 		r.ResourceID == r.KnockResourceID ||
 		r.ConnectorRoutingID == r.KnockResourceID {
@@ -364,14 +349,14 @@ func validateConnectorSlug(slug string) error {
 
 func validateConnectorResourceID(resourceID string) error {
 	if !isValidConnectorResourceID(resourceID) {
-		return fmt.Errorf("%w: qURL Connector resource id must be a canonical unpadded base64url P-256 public key (%d-%d decoded DER SPKI bytes)", ErrInvalidResourceRequest, minConnectorResourcePublicKeyDERBytes, maxConnectorResourcePublicKeyDERBytes)
+		return fmt.Errorf("%w: qURL Connector resource id must be a canonical unpadded base64url P-256 DER SPKI public key", ErrInvalidResourceRequest)
 	}
 	return nil
 }
 
 func isValidConnectorResourceID(resourceID string) bool {
 	der, err := b64url.Strict().DecodeString(resourceID)
-	if err != nil || len(der) < minConnectorResourcePublicKeyDERBytes || len(der) > maxConnectorResourcePublicKeyDERBytes {
+	if err != nil {
 		return false
 	}
 	// Strict still ignores CR and LF. An exact round trip enforces the public
@@ -447,14 +432,6 @@ func classifyConnectorResourceError(operation connectorResourceOperation, err er
 		// empty data array; preserve every non-2xx response as its raw APIError.
 	}
 	return err
-}
-
-func ensureConnectorResourceOutcomeUnknown(err error) error {
-	var outcomeUnknown *apiRequestOutcomeUnknownError
-	if errors.As(err, &outcomeUnknown) {
-		return err
-	}
-	return &apiRequestOutcomeUnknownError{err: err}
 }
 
 func invalidConnectorResourceResponse(format string, args ...any) error {
