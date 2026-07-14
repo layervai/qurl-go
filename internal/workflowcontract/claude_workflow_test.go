@@ -27,6 +27,7 @@ func TestInteractiveClaudeWorkflowAuthorizesBeforeImmutableCheckout(t *testing.T
 
 	requireContains(t, workflow,
 		"timeout-minutes: 20",
+		"types: [opened]",
 		`contains(fromJson('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)`,
 		`contains(fromJson('["OWNER","MEMBER","COLLABORATOR"]'), github.event.review.author_association)`,
 		`contains(fromJson('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association)`,
