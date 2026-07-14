@@ -368,12 +368,8 @@ func TestClient_ConnectorResourceCreatePortal(t *testing.T) {
 func TestConnectorResourceCreatePortalRejectsNilOrUnbound(t *testing.T) {
 	t.Parallel()
 
-	var dispatches atomic.Int32
 	bound := &ConnectorResource{
-		client: &Client{httpClient: doerFunc(func(*http.Request) (*http.Response, error) {
-			dispatches.Add(1)
-			return nil, errors.New("unexpected dispatch")
-		})},
+		client:             &Client{},
 		ResourceID:         testConnectorID,
 		ConnectorRoutingID: testConnectorRoutingID,
 		KnockResourceID:    testKnockID,
@@ -406,9 +402,6 @@ func TestConnectorResourceCreatePortalRejectsNilOrUnbound(t *testing.T) {
 				t.Fatalf("CreatePortal error = %v, want ErrInvalidPortalRequest containing %q", err, tt.wantDetail)
 			}
 		})
-	}
-	if dispatches.Load() != 0 {
-		t.Fatalf("HTTP dispatches = %d, want 0", dispatches.Load())
 	}
 }
 

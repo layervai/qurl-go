@@ -1008,8 +1008,8 @@ func TestClient_IncompleteResourceSuccessFailsClosed(t *testing.T) {
 		t.Fatalf("NewClient: %v", err)
 	}
 	_, err = client.ProtectURL(context.Background(), "https://example.com")
-	if err == nil || !strings.Contains(err.Error(), "missing resource_id") {
-		t.Fatalf("ProtectURL incomplete response: want missing resource_id error, got %v", err)
+	if !errors.Is(err, ErrInvalidAPIResponse) || !strings.Contains(err.Error(), "missing resource_id") {
+		t.Fatalf("ProtectURL incomplete response: want ErrInvalidAPIResponse and missing resource_id detail, got %v", err)
 	}
 }
 

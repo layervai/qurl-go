@@ -65,10 +65,9 @@ var (
 // ConnectorResource is a resource managed by qURL Connector. ResourceID and
 // Slug are immutable identities. ConnectorRoutingID and KnockResourceID are
 // explicit control-plane values for reverse-connection routing and NHP
-// admission respectively; neither is an identity and callers must not derive
-// or substitute these values. A cycle RunID is separate, ephemeral correlation
-// state and intentionally is not a ConnectorResource field. Alias is a
-// separate, mutable display handle. JSON persistence cannot preserve the
+// admission respectively; neither is an identity or derivable from another
+// field. RunID is ephemeral correlation state, not a resource field. Alias is
+// a separate, mutable display handle. JSON persistence cannot preserve the
 // unexported client binding used by CreatePortal; call GetConnectorResource or
 // GetConnectorResourceBySlug to obtain a newly bound handle.
 type ConnectorResource struct {
@@ -295,12 +294,9 @@ func (r connectorResourceWire) connectorResource(client *Client, expect connecto
 	} else if r.KnockResourceID != trimmedKnockID {
 		return nil, invalidConnectorResourceResponse("resource %q has knock_resource_id with leading or trailing whitespace", r.ResourceID)
 	}
-	// ResourceID and ConnectorRoutingID cannot match under their current
-	// grammars. The two KnockResourceID comparisons are live guards because that
-	// producer-owned value is opaque. Keep every pair explicit so the fields
-	// cannot become cross-wired as producer contracts evolve.
-	if r.ResourceID == r.ConnectorRoutingID ||
-		r.ResourceID == r.KnockResourceID ||
+	// KnockResourceID is opaque, so explicitly reject cross-wiring it with either
+	// independently validated identity or routing value.
+	if r.ResourceID == r.KnockResourceID ||
 		r.ConnectorRoutingID == r.KnockResourceID {
 		return nil, invalidConnectorResourceResponse("resource %q has cross-wired identity, routing, or admission values", r.ResourceID)
 	}
@@ -417,10 +413,9 @@ func classifyConnectorResourceError(operation connectorResourceOperation, err er
 		case http.StatusNotFound:
 			return fmt.Errorf("%w: %w", ErrConnectorResourceNotFound, err)
 		case http.StatusGone:
-			if apiErr.Code != "resource_tombstoned" {
-				return err
+			if apiErr.Code == "resource_tombstoned" {
+				return fmt.Errorf("%w: %w", ErrConnectorResourceRevoked, err)
 			}
-			return fmt.Errorf("%w: %w", ErrConnectorResourceRevoked, err)
 		}
 	case connectorResourceOperationDelete:
 		// The producer's DELETE contract is 204/401/404/500 and deliberately
@@ -429,9 +424,6 @@ func classifyConnectorResourceError(operation connectorResourceOperation, err er
 		if apiErr.StatusCode == http.StatusNotFound {
 			return fmt.Errorf("%w: %w", ErrConnectorResourceNotFound, err)
 		}
-	case connectorResourceOperationGetBySlug:
-		// Slug lookup is a 200 list contract. Its only not-found signal is an
-		// empty data array; preserve every non-2xx response as its raw APIError.
 	}
 	return err
 }

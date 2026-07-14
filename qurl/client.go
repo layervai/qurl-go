@@ -838,7 +838,7 @@ type createResourceResponse struct {
 
 func (r createResourceResponse) resource() (*Resource, error) {
 	if strings.TrimSpace(r.ID) == "" {
-		return nil, fmt.Errorf("qurl: invalid API response: missing resource_id")
+		return nil, fmt.Errorf("%w: missing resource_id", ErrInvalidAPIResponse)
 	}
 	return &Resource{
 		ID:           r.ID,
