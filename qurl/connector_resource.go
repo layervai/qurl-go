@@ -20,7 +20,9 @@ const producerConnectorResourceType = "tunnel"
 const (
 	// qurl-service exposes the protected-resource public key as the canonical
 	// REST resource_id. These bounds mirror its strict DER SPKI structural
-	// prefilter before the SDK parses and validates the P-256 public key.
+	// prefilter before the SDK parses and validates the P-256 public key. The
+	// producer window is intentionally wider than today's 91-byte canonical
+	// P-256 SPKI; parsing and byte-exact re-marshalling below remain authoritative.
 	minConnectorResourcePublicKeyDERBytes = 80
 	maxConnectorResourcePublicKeyDERBytes = 160
 )
@@ -303,6 +305,8 @@ func (r connectorResourceWire) connectorResource(client *Client, expect connecto
 	}
 	// knock_resource_id is an opaque, ASP-defined NHP admission target. The
 	// producer owns its grammar; the SDK enforces only presence and exact bytes.
+	// Do not add an SDK-local length or placement parser: the capped response
+	// bounds input, while the opaque value can evolve without a client release.
 	if trimmedKnockID := strings.TrimSpace(r.KnockResourceID); trimmedKnockID == "" {
 		return nil, invalidConnectorResourceResponse("missing knock_resource_id")
 	} else if r.KnockResourceID != trimmedKnockID {
