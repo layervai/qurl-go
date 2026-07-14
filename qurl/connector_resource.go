@@ -418,6 +418,8 @@ func classifyConnectorResourceError(operation connectorResourceOperation, err er
 		case errors.As(err, &outcomeUnknown):
 			err = fmt.Errorf("%w: %w", ErrConnectorResourceOutcomeUnknown, err)
 		case errors.Is(err, ErrInvalidAPIResponse):
+			// Semantic validation after a decoded ensure response reaches this
+			// branch; transport/body contract failures already carry the marker.
 			err = fmt.Errorf("%w: %w", ErrConnectorResourceOutcomeUnknown, &apiRequestOutcomeUnknownError{err: err})
 		}
 	}
