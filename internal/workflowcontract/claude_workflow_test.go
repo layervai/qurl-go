@@ -72,7 +72,11 @@ func TestEveryWorkflowPinsCheckout(t *testing.T) {
 		t.Fatalf("read workflow directory: %v", err)
 	}
 	for _, entry := range entries {
-		if entry.IsDir() || (filepath.Ext(entry.Name()) != ".yml" && filepath.Ext(entry.Name()) != ".yaml") {
+		if entry.IsDir() {
+			continue
+		}
+		ext := filepath.Ext(entry.Name())
+		if ext != ".yml" && ext != ".yaml" {
 			continue
 		}
 		workflow := readWorkflow(t, entry.Name())
