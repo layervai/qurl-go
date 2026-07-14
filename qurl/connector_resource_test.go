@@ -130,11 +130,16 @@ func TestConnectorResourcePublicKeyFixturesAreCanonicalP256(t *testing.T) {
 func TestConnectorResourceIdentityAndRoutingGrammarsRemainDisjoint(t *testing.T) {
 	t.Parallel()
 
-	if connectorRoutingIDPattern.MatchString(testConnectorID) {
-		t.Fatalf("canonical public resource ID %q also matches Connector routing grammar", testConnectorID)
+	// Both production validators require these exact lengths before examining
+	// content. Unequal lengths prove that no string can satisfy both grammars.
+	if connectorResourceIDLength == connectorRoutingIDLength {
+		t.Fatalf("resource and routing ID validators share length %d", connectorResourceIDLength)
 	}
-	if isValidConnectorResourceID(testConnectorRoutingID) {
-		t.Fatalf("Connector routing ID %q also matches public resource-ID grammar", testConnectorRoutingID)
+	if got := len(testConnectorID); got != connectorResourceIDLength {
+		t.Fatalf("public resource-ID fixture length = %d, want %d", got, connectorResourceIDLength)
+	}
+	if got := len(testConnectorRoutingID); got != connectorRoutingIDLength {
+		t.Fatalf("Connector routing-ID fixture length = %d, want %d", got, connectorRoutingIDLength)
 	}
 }
 
@@ -1068,7 +1073,7 @@ func TestConnectorRoutingIDContract(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if got := connectorRoutingIDPattern.MatchString(tt.id); got != tt.want {
+			if got := isValidConnectorRoutingID(tt.id); got != tt.want {
 				t.Fatalf("connector routing ID validity = %t, want %t", got, tt.want)
 			}
 		})

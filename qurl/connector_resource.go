@@ -16,7 +16,13 @@ import (
 // producerConnectorResourceType is the qurl-service discriminator for qURL
 // Connector resources. It is deliberately private: customers interact with
 // ConnectorResource, not the producer's generic resource taxonomy.
-const producerConnectorResourceType = "tunnel"
+const (
+	producerConnectorResourceType = "tunnel"
+	// Explicit, unequal length gates make the public identity and routing
+	// namespaces disjoint before their content validators run.
+	connectorResourceIDLength = 122 // Canonical unpadded-base64url P-256 DER SPKI.
+	connectorRoutingIDLength  = 54  // "c-" plus a 52-character base32 digest.
+)
 
 var (
 	// qurl-service's OpenAPI contract intentionally gives immutable connector
@@ -302,7 +308,7 @@ func (r connectorResourceWire) connectorResource(client *Client, expect connecto
 	} else if !isValidConnectorResourceID(r.ResourceID) {
 		return nil, invalidConnectorResourceResponse("missing or invalid resource_id")
 	}
-	if !connectorRoutingIDPattern.MatchString(r.ConnectorRoutingID) {
+	if !isValidConnectorRoutingID(r.ConnectorRoutingID) {
 		return nil, invalidConnectorResourceResponsef("resource %q has missing or invalid connector_routing_id", r.ResourceID)
 	}
 	// knock_resource_id is an opaque, ASP-defined NHP admission target. The
@@ -319,10 +325,10 @@ func (r connectorResourceWire) connectorResource(client *Client, expect connecto
 		return nil, invalidConnectorResourceResponsef("resource %q has knock_resource_id with a control character", r.ResourceID)
 	}
 	// The producer guarantees three distinct identity/routing/admission values.
-	// ResourceID and ConnectorRoutingID are already distinct by their disjoint
-	// validated grammars; TestConnectorResourceIdentityAndRoutingGrammarsRemainDisjoint
-	// pins that invariant. The explicit checks below cover the opaque admission
-	// value, whose producer-owned grammar provides no equivalent guarantee.
+	// ResourceID and ConnectorRoutingID are already distinct because their
+	// validators require different exact encoded lengths. The explicit checks
+	// below cover the opaque admission value, whose producer-owned grammar
+	// provides no equivalent guarantee.
 	// Slug is customer-chosen and is not part of that invariant; it may
 	// legitimately equal an otherwise valid routing or admission value.
 	if r.ResourceID == r.KnockResourceID ||
@@ -379,6 +385,9 @@ func validateConnectorResourceID(resourceID string) error {
 }
 
 func isValidConnectorResourceID(resourceID string) bool {
+	if len(resourceID) != connectorResourceIDLength {
+		return false
+	}
 	der, err := b64url.DecodeString(resourceID)
 	if err != nil {
 		return false
@@ -394,6 +403,10 @@ func isValidConnectorResourceID(resourceID string) bool {
 	}
 	canonicalDER, err := x509.MarshalPKIXPublicKey(publicKey)
 	return err == nil && bytes.Equal(canonicalDER, der)
+}
+
+func isValidConnectorRoutingID(routingID string) bool {
+	return len(routingID) == connectorRoutingIDLength && connectorRoutingIDPattern.MatchString(routingID)
 }
 
 // connectorResourceOperation drives lifecycle-specific error classification.
