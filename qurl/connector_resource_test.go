@@ -787,39 +787,20 @@ func TestClient_ConnectorResourceRevokedSuccessRows(t *testing.T) {
 func TestConnectorResourceOpaqueKnockIDContract(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name    string
-		knockID string
-		wantErr bool
-	}{
-		{name: "internal whitespace is opaque", knockID: "producer owned admission target"},
-		{name: "invalid UTF-8", knockID: "producer\x85owned", wantErr: true},
+	wire := connectorResourceWire{
+		ResourceID:         testConnectorID,
+		ConnectorRoutingID: testConnectorRoutingID,
+		KnockResourceID:    "producer owned admission target",
+		Type:               producerConnectorResourceType,
+		Status:             "active",
+		Slug:               testConnectorSlug,
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			wire := connectorResourceWire{
-				ResourceID:         testConnectorID,
-				ConnectorRoutingID: testConnectorRoutingID,
-				KnockResourceID:    tt.knockID,
-				Type:               producerConnectorResourceType,
-				Status:             "active",
-				Slug:               testConnectorSlug,
-			}
-			resource, err := wire.connectorResource(nil, connectorResourceExpectation{})
-			if tt.wantErr {
-				if !errors.Is(err, ErrInvalidConnectorResourceResponse) {
-					t.Fatalf("connectorResource() = %v, want invalid response", err)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("connectorResource() = %v, want opaque value accepted", err)
-			}
-			if got := resource.KnockResourceID; got != wire.KnockResourceID {
-				t.Fatalf("KnockResourceID = %q, want exact producer bytes %q", got, wire.KnockResourceID)
-			}
-		})
+	resource, err := wire.connectorResource(nil, connectorResourceExpectation{})
+	if err != nil {
+		t.Fatalf("connectorResource() = %v, want opaque value accepted", err)
+	}
+	if got := resource.KnockResourceID; got != wire.KnockResourceID {
+		t.Fatalf("KnockResourceID = %q, want exact producer bytes %q", got, wire.KnockResourceID)
 	}
 }
 

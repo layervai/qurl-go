@@ -190,12 +190,16 @@ If ensure matches `ErrConnectorResourceOutcomeUnknown`, reconcile with
 `GetConnectorResourceBySlug` before deciding whether another ensure is safe. If
 delete matches it, reconcile with `GetConnectorResource` before deciding whether
 to delete again. Pre-dispatch validation and authorization failures do not match
-this sentinel. A nominal `201` or `204` whose body violates the endpoint
-contract also matches it: the SDK does not treat a protocol-invalid response as
-proof that the mutation committed. A surfaced non-4xx status on ensure or
-delete also matches it: an unexpected 1xx/3xx or a 5xx cannot prove whether the
-mutation committed. The underlying `*qurl.APIError` remains available through
-`errors.As`; an authoritative 4xx remains the producer's rejection result.
+this sentinel. A nominal `204` with body content, or a `201` whose resource row
+cannot be validated, also matches it: the SDK does not treat a protocol-invalid
+response as proof that the mutation committed. The narrow exception is a `201`
+with a complete valid row but missing ensure-only `meta.found_existing`; that
+still matches `ErrInvalidConnectorResourceResponse`, but the validated row proves
+the mutation outcome itself is known. A surfaced non-4xx status on ensure or
+delete also matches outcome-unknown: an unexpected 1xx/3xx or a 5xx cannot prove
+whether the mutation committed. The underlying `*qurl.APIError` remains
+available through `errors.As`; an authoritative 4xx remains the producer's
+rejection result.
 
 ## API origin and transport
 

@@ -11,7 +11,6 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
-	"unicode/utf8"
 )
 
 // producerConnectorResourceType is the qurl-service discriminator for qURL
@@ -308,21 +307,21 @@ func (r connectorResourceWire) connectorResource(client *Client, expect connecto
 	}
 	// knock_resource_id is an opaque, ASP-defined NHP admission target. The
 	// producer owns its grammar; the SDK enforces only transport-safe exact bytes:
-	// presence, no surrounding whitespace, and no control characters. Do not add
-	// an SDK-local length or placement parser: the capped response bounds input,
-	// while the opaque value can evolve without a client release.
+	// the JSON response gate has already required valid UTF-8, and this mapper
+	// requires presence, no surrounding whitespace, and no control characters.
+	// Do not add an SDK-local length or placement parser: the capped response
+	// bounds input, while the opaque value can evolve without a client release.
 	if trimmedKnockID := strings.TrimSpace(r.KnockResourceID); trimmedKnockID == "" {
 		return nil, invalidConnectorResourceResponse("missing knock_resource_id")
 	} else if r.KnockResourceID != trimmedKnockID {
 		return nil, invalidConnectorResourceResponsef("resource %q has knock_resource_id with leading or trailing whitespace", r.ResourceID)
-	} else if !utf8.ValidString(r.KnockResourceID) {
-		return nil, invalidConnectorResourceResponsef("resource %q has knock_resource_id with invalid UTF-8", r.ResourceID)
 	} else if strings.IndexFunc(r.KnockResourceID, unicode.IsControl) >= 0 {
 		return nil, invalidConnectorResourceResponsef("resource %q has knock_resource_id with a control character", r.ResourceID)
 	}
 	// The producer guarantees three distinct identity/routing/admission values.
 	// ResourceID and ConnectorRoutingID are already distinct by their disjoint
-	// validated grammars. The explicit checks below cover the opaque admission
+	// validated grammars; TestConnectorResourceIdentityAndRoutingGrammarsRemainDisjoint
+	// pins that invariant. The explicit checks below cover the opaque admission
 	// value, whose producer-owned grammar provides no equivalent guarantee.
 	// Slug is customer-chosen and is not part of that invariant; it may
 	// legitimately equal an otherwise valid routing or admission value.
