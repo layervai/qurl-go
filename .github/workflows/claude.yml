@@ -127,8 +127,8 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ steps.claude_pr.outputs.sha != '' && steps.claude_pr.outputs.sha || github.sha }}
-          # PR review commands diff against origin/main; ordinary issue commands
-          # only need the default-branch snapshot and remain shallow.
+          # Pinned checkout v7 fetches all branches at depth 0, materializing
+          # origin/main for PR diffs; ordinary issue commands remain shallow.
           fetch-depth: ${{ steps.claude_pr.outputs.sha != '' && '0' || '1' }}
           # The action receives github_token explicitly; the reviewed tree does
           # not need a reusable credential materialized in local Git config.

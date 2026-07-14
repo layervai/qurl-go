@@ -39,6 +39,7 @@ func TestInteractiveClaudeWorkflowAuthorizesBeforeImmutableCheckout(t *testing.T
 		"steps.claude_actor.outputs.authorized == 'true'",
 		"steps.claude_pr.outputs.checkout_allowed == 'true'",
 		"ref: ${{ steps.claude_pr.outputs.sha != '' && steps.claude_pr.outputs.sha || github.sha }}",
+		"fetch-depth: ${{ steps.claude_pr.outputs.sha != '' && '0' || '1' }}",
 		"if: steps.checkout.outcome == 'success'",
 		"issues: write",
 	)
