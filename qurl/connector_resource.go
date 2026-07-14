@@ -143,9 +143,9 @@ type connectorResourceResponse struct {
 }
 
 type connectorResourceExpectation struct {
-	slug       string
-	resourceID string
-	operation  connectorResourceOperation
+	slug         string
+	resourceID   string
+	allowRevoked bool
 }
 
 // EnsureConnectorResource finds or creates the active qURL Connector resource
@@ -177,8 +177,7 @@ func (c *Client) EnsureConnectorResource(ctx context.Context, slug string) (*Ens
 		return nil, classifyConnectorResourceError(connectorResourceOperationEnsure, invalidConnectorResourceResponse("missing meta.found_existing"))
 	}
 	resource, err := response.Data.connectorResource(c, connectorResourceExpectation{
-		slug:      slug,
-		operation: connectorResourceOperationEnsure,
+		slug: slug,
 	})
 	if err != nil {
 		return nil, classifyConnectorResourceError(connectorResourceOperationEnsure, err)
@@ -206,10 +205,11 @@ func (c *Client) GetConnectorResource(ctx context.Context, resourceID string) (*
 	if err := c.doJSONStatus(ctx, http.MethodGet, path, nil, &response, http.StatusOK); err != nil {
 		return nil, classifyConnectorResourceError(connectorResourceOperationGetByID, err)
 	}
-	return response.Data.Resource.connectorResource(c, connectorResourceExpectation{
-		resourceID: resourceID,
-		operation:  connectorResourceOperationGetByID,
+	resource, err := response.Data.Resource.connectorResource(c, connectorResourceExpectation{
+		resourceID:   resourceID,
+		allowRevoked: true,
 	})
+	return resource, classifyConnectorResourceError(connectorResourceOperationGetByID, err)
 }
 
 // GetConnectorResourceBySlug fetches the single active qURL Connector resource
@@ -235,22 +235,25 @@ func (c *Client) GetConnectorResourceBySlug(ctx context.Context, slug string) (*
 		return nil, classifyConnectorResourceError(connectorResourceOperationGetBySlug, err)
 	}
 	if response.Data == nil {
-		return nil, invalidConnectorResourceResponse("resource list has missing or null data")
+		return nil, classifyConnectorResourceError(connectorResourceOperationGetBySlug,
+			invalidConnectorResourceResponse("resource list has missing or null data"))
 	}
 	switch len(*response.Data) {
 	case 0:
-		return nil, fmt.Errorf("%w: slug %q", ErrConnectorResourceNotFound, slug)
+		return nil, classifyConnectorResourceError(connectorResourceOperationGetBySlug,
+			fmt.Errorf("%w: slug %q", ErrConnectorResourceNotFound, slug))
 	case 1:
-		return (*response.Data)[0].connectorResource(c, connectorResourceExpectation{
-			slug:      slug,
-			operation: connectorResourceOperationGetBySlug,
+		resource, err := (*response.Data)[0].connectorResource(c, connectorResourceExpectation{
+			slug: slug,
 		})
+		return resource, classifyConnectorResourceError(connectorResourceOperationGetBySlug, err)
 	default:
 		// The ambiguous and both invalid-response sentinels are intentional:
 		// callers can match the cardinality invariant breach, the Connector
 		// contract, or the generic successful-response contract.
-		return nil, fmt.Errorf("%w: %w", ErrConnectorResourceAmbiguous,
-			invalidConnectorResourceResponse("slug %q returned %d resources", slug, len(*response.Data)))
+		return nil, classifyConnectorResourceError(connectorResourceOperationGetBySlug,
+			fmt.Errorf("%w: %w", ErrConnectorResourceAmbiguous,
+				invalidConnectorResourceResponse("slug %q returned %d resources", slug, len(*response.Data))))
 	}
 }
 
@@ -276,11 +279,12 @@ func (r connectorResourceWire) connectorResource(client *Client, expect connecto
 	// shared create/detail/list serializer returns resource_id,
 	// connector_routing_id, knock_resource_id, type, and slug for both active and
 	// revoked Connector rows; an incomplete revoked row is producer drift.
-	if !isValidConnectorResourceID(r.ResourceID) {
+	if expect.resourceID != "" {
+		if r.ResourceID != expect.resourceID {
+			return nil, invalidConnectorResourceResponse("requested resource_id %q returned %q", expect.resourceID, r.ResourceID)
+		}
+	} else if !isValidConnectorResourceID(r.ResourceID) {
 		return nil, invalidConnectorResourceResponse("missing or invalid resource_id")
-	}
-	if expect.resourceID != "" && r.ResourceID != expect.resourceID {
-		return nil, invalidConnectorResourceResponse("requested resource_id %q returned %q", expect.resourceID, r.ResourceID)
 	}
 	if !connectorRoutingIDPattern.MatchString(r.ConnectorRoutingID) {
 		return nil, invalidConnectorResourceResponse("resource %q has missing or invalid connector_routing_id", r.ResourceID)
@@ -318,7 +322,7 @@ func (r connectorResourceWire) connectorResource(client *Client, expect connecto
 	// The fenced qurl-service ResourceStatus schema is active/revoked only.
 	// Anything else is producer drift, not a transitional state to accept.
 	if r.Status == "revoked" {
-		if expect.operation != connectorResourceOperationGetByID {
+		if !expect.allowRevoked {
 			return nil, invalidConnectorResourceResponse("active-only qURL Connector operation returned revoked resource %q", r.ResourceID)
 		}
 		return nil, fmt.Errorf("%w: resource %q", ErrConnectorResourceRevoked, r.ResourceID)
