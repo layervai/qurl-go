@@ -187,6 +187,15 @@ registration can use a separate origin, but changing the registration origin
 must not retarget qURL Connector resource CRUD. The default client refuses
 redirects so a bearer credential is not forwarded to a different origin.
 
+Read transport failures deliberately preserve their standard underlying cause
+instead of matching the mutation-only `ErrConnectorResourceOutcomeUnknown`.
+Use `errors.Is` for context cancellation/deadline causes and `errors.As` for
+standard transport types such as `net.Error`; reads are side-effect-free, so a
+caller may retry them under its normal bounded read policy. A response that
+arrives with a successful status but cannot be consumed or validated instead
+matches `ErrInvalidConnectorResourceResponse`. Check the more specific
+`ErrConnectorResourceAmbiguous` before a generic invalid-response branch.
+
 The wire shapes are fenced against qurl-service's `/v1/resources` and
 `/v1/resources/{id}` OpenAPI contracts, including the explicit
 `connector_routing_id` producer in
