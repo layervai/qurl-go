@@ -5,10 +5,11 @@ package qurl
 //     api/openapi.yaml: /v1/resources, /v1/resources/{id}, ResourceId,
 //     ResourceData, Meta, the exact shared slug/alias grammar, and the explicit
 //     opaque connector_routing_id contract.
-//   - layervai/qurl-service@e1cd3f57cab4a1eb515811dac0ee9ff2cf7e86f3
+//   - layervai/qurl-service@a5e278f24aa4ee0ab62788d84868d9c0e48b10e1
 //     internal/domain/resource_key.go: strict canonical resource-public-key
-//     decoding and DER SPKI length bounds; internal/domain/{slug,alias}.go:
-//     the same exact shared slug/alias grammar.
+//     decoding and DER SPKI length bounds; api/openapi.yaml: genuine canonical
+//     P-256 resource-key examples; internal/domain/{slug,alias}.go: the same
+//     exact shared slug/alias grammar.
 //   - layervai/qurl-go@5ba76c1986bb5e33e3b795139b4ae1ffef86f8fb
 //     qurl/client.go: post-dispatch outcome-unknown request semantics.
 //   - layervai/qurl-connector@290d9ea3c67e253191b1d85edcb560eda1fa5674
@@ -23,6 +24,9 @@ package qurl
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -30,6 +34,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -40,7 +45,7 @@ const (
 	// Real P-256 DER SPKI public keys from the fenced qurl-service OpenAPI
 	// examples keep lifecycle fixtures on the canonical public resource ID.
 	testConnectorID      = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE2cTVv5_3eeYCcLLq5ROYCqcmY50HiKZ9ATglIkPnCji1E_S63UMtXba1moR8-Q6EV7oM6zwwh9_j2CDujzXvLA"
-	testOtherConnectorID = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE7VDGkLaZfQLKvxScAKGCA1Y3p6jNG6d0f66a4Wib8NP8CRZJoEm1jRQej5f0aRzejaH5N7ChvQkiISohN2KVOQ"
+	testOtherConnectorID = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEoZLdT1C_J8lCh_mpQXJMoRzKi3Q_C5TnVQFYW0Cz5L5Jo83djulhze84U_rrhnUVQQRajXmUQKn-VQ8jR-qatA"
 	// Deliberately opaque rather than derived in this SDK test: the producer
 	// owns routing-label derivation and the SDK must consume the field verbatim.
 	testConnectorRoutingID = "c-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -48,6 +53,62 @@ const (
 	testKnockID            = "qurl-tunnel-server"
 	testDeviceToken        = "lv_device_credential"
 )
+
+func TestConnectorResourcePublicShape(t *testing.T) {
+	t.Parallel()
+
+	typ := reflect.TypeFor[ConnectorResource]()
+	var got []string
+	for i := 0; i < typ.NumField(); i++ {
+		field := typ.Field(i)
+		if field.IsExported() {
+			got = append(got, field.Name)
+		}
+	}
+	want := []string{"ResourceID", "ConnectorRoutingID", "KnockResourceID", "Slug", "Alias"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ConnectorResource exported fields = %v, want %v; cycle RunID and producer type/status are not resource fields", got, want)
+	}
+}
+
+func TestConnectorResourcePublicKeyFixturesAreCanonicalP256(t *testing.T) {
+	t.Parallel()
+
+	for i, fixture := range []string{testConnectorID, testOtherConnectorID} {
+		der, err := base64.RawURLEncoding.Strict().DecodeString(fixture)
+		if err != nil {
+			t.Fatalf("fixture %d strict base64url decode: %v", i, err)
+		}
+		if got := base64.RawURLEncoding.EncodeToString(der); got != fixture {
+			t.Fatalf("fixture %d is not canonical unpadded base64url", i)
+		}
+		parsed, err := x509.ParsePKIXPublicKey(der)
+		if err != nil {
+			t.Fatalf("fixture %d parse PKIX public key: %v", i, err)
+		}
+		publicKey, ok := parsed.(*ecdsa.PublicKey)
+		if !ok {
+			t.Fatalf("fixture %d public key = %T, want ECDSA P-256", i, parsed)
+		}
+		if publicKey.Curve != elliptic.P256() {
+			t.Fatalf("fixture %d curve = %v, want P-256", i, publicKey.Curve)
+		}
+		publicKeyBytes, err := publicKey.Bytes()
+		if err != nil {
+			t.Fatalf("fixture %d serialize P-256 point: %v", i, err)
+		}
+		if _, err := ecdsa.ParseUncompressedPublicKey(elliptic.P256(), publicKeyBytes); err != nil {
+			t.Fatalf("fixture %d has invalid P-256 point: %v", i, err)
+		}
+		canonicalDER, err := x509.MarshalPKIXPublicKey(publicKey)
+		if err != nil {
+			t.Fatalf("fixture %d marshal PKIX public key: %v", i, err)
+		}
+		if !bytes.Equal(canonicalDER, der) {
+			t.Fatalf("fixture %d DER is not canonical PKIX SPKI", i)
+		}
+	}
+}
 
 func TestClient_EnsureConnectorResourceContract(t *testing.T) {
 	t.Parallel()

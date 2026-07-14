@@ -61,6 +61,13 @@ reverse-connection routing label, and `KnockResourceID`, the placement-neutral
 NHP admission target. The SDK requires all three values to be present and
 pairwise distinct.
 
+A cycle `RunID` is not a fourth resource identity and is intentionally absent
+from `ConnectorResource` and the resource CRUD wire contract. qURL Connector
+generates it separately with `NewCycleRunID` once per outer knock/service cycle
+and reuses the exact value for that cycle's retries and reconnects. Never derive
+`RunID` from `ResourceID`, `ConnectorRoutingID`, `KnockResourceID`, or `Slug`, and
+never derive any of those durable control-plane values from `RunID`.
+
 `ConnectorRoutingID` has the exact producer-owned shape
 `^c-[a-z2-7]{52}$`. The SDK consumes that value verbatim; it never derives a
 routing label from the public key, slug, cell id, `qurl_site`, or any hostname.

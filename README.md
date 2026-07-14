@@ -239,7 +239,9 @@ Match errors by type, not message text:
   from mutable `Alias`, exposes the producer's explicit `ConnectorRoutingID`
   and placement-neutral `KnockResourceID`, and reports whether an ensure found
   an existing active resource. The SDK never derives the routing value from the
-  public-key `ResourceID`. See [Manage qURL Connector
+  public-key `ResourceID`. The per-cycle `RunID` primitive is separate ephemeral
+  knock/service correlation and is not stored on the resource or sent through
+  resource CRUD. See [Manage qURL Connector
   resources](docs/connector-resources.md).
 
   **Release gate:** do not publish this SDK surface until the qurl-service

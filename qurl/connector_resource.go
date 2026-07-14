@@ -71,10 +71,11 @@ var (
 // Slug are immutable identities. ConnectorRoutingID and KnockResourceID are
 // explicit control-plane values for reverse-connection routing and NHP
 // admission respectively; neither is an identity and callers must not derive
-// or substitute these values. Alias is a separate, mutable display handle. JSON
-// persistence cannot preserve the unexported client binding used by
-// CreatePortal; call GetConnectorResource or GetConnectorResourceBySlug to
-// obtain a newly bound handle.
+// or substitute these values. A cycle RunID is separate, ephemeral correlation
+// state and intentionally is not a ConnectorResource field. Alias is a
+// separate, mutable display handle. JSON persistence cannot preserve the
+// unexported client binding used by CreatePortal; call GetConnectorResource or
+// GetConnectorResourceBySlug to obtain a newly bound handle.
 type ConnectorResource struct {
 	client *Client
 
