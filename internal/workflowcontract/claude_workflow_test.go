@@ -56,11 +56,31 @@ func TestAutomaticClaudeWorkflowPinsBoundedCommentAuthorInput(t *testing.T) {
 	workflow := readWorkflow(t, "claude-code-review.yml")
 
 	requireContains(t, workflow,
+		"group: claude-review-${{ github.event.pull_request.number }}",
+		"cancel-in-progress: true",
 		"github.actor != 'dependabot[bot]'",
 		"github.event.pull_request.head.repo.full_name == github.repository",
+		"issues: read",
 	)
 	requireSharedActionContract(t, workflow)
 	requireNotContains(t, workflow, "issues: write")
+}
+
+func TestEveryWorkflowPinsCheckout(t *testing.T) {
+	entries, err := os.ReadDir(workflowDir(t))
+	if err != nil {
+		t.Fatalf("read workflow directory: %v", err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || (filepath.Ext(entry.Name()) != ".yml" && filepath.Ext(entry.Name()) != ".yaml") {
+			continue
+		}
+		workflow := readWorkflow(t, entry.Name())
+		checkoutUses := strings.Count(workflow, "actions/checkout@")
+		if pinnedUses := strings.Count(workflow, checkoutAction); pinnedUses != checkoutUses {
+			t.Errorf("%s has %d actions/checkout uses but %d match the repository pin", entry.Name(), checkoutUses, pinnedUses)
+		}
+	}
 }
 
 // requireSharedActionContract verifies the action and permissions shared by
@@ -83,16 +103,21 @@ func requireSharedActionContract(t *testing.T, workflow string) {
 
 func readWorkflow(t *testing.T, name string) string {
 	t.Helper()
-	_, testFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("resolve workflow contract test path")
-	}
-	path := filepath.Join(filepath.Dir(testFile), "..", "..", ".github", "workflows", name)
+	path := filepath.Join(workflowDir(t), name)
 	contents, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read %s: %v", path, err)
 	}
 	return string(contents)
+}
+
+func workflowDir(t *testing.T) string {
+	t.Helper()
+	_, testFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("resolve workflow contract test path")
+	}
+	return filepath.Join(filepath.Dir(testFile), "..", "..", ".github", "workflows")
 }
 
 func requireContains(t *testing.T, contents string, fragments ...string) {

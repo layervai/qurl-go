@@ -4,6 +4,10 @@ on:
   pull_request:
     types: [opened, synchronize]
 
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   review:
     if: |
@@ -13,6 +17,7 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
+      issues: read
       pull-requests: write
 
     steps:
