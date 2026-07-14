@@ -5,7 +5,7 @@ package qurl
 //     api/openapi.yaml: /v1/resources, /v1/resources/{id}, ResourceId,
 //     ResourceData, Meta, the exact shared slug/alias grammar, and the explicit
 //     opaque connector_routing_id contract.
-//   - layervai/qurl-service@a5e278f24aa4ee0ab62788d84868d9c0e48b10e1
+//   - layervai/qurl-service@5d8086c91059c3ff132f493ce6ab45c37d47e015
 //     internal/domain/resource_key.go: strict canonical resource-public-key
 //     decoding and DER SPKI length bounds; api/openapi.yaml: genuine canonical
 //     P-256 resource-key examples; internal/domain/{slug,alias}.go: the same
