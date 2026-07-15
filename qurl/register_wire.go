@@ -110,6 +110,26 @@ func parseRegisterAck(body []byte) (*registerAckBody, error) {
 	return ack, nil
 }
 
+// parseNativeRegisterAck applies the stronger steady-state native-UDP contract.
+// Legacy relay enrollment tolerates an empty success body only because the
+// immediately following first-issue completion call re-verifies enrollment.
+// Ordinary native refresh has no completion verifier, so it requires an exact,
+// structured RAK code and the expected authorization-service id before any
+// refreshed assignment can become durable.
+func parseNativeRegisterAck(body []byte) (*registerAckBody, error) {
+	ack, err := parseRegisterAck(body)
+	if err != nil {
+		return nil, err
+	}
+	if ack.ErrCode == "" || ack.ErrCode != strings.TrimSpace(ack.ErrCode) {
+		return nil, fmt.Errorf("%w: native registration reply must contain an exact non-empty errCode", ErrRegisterReplyMalformed)
+	}
+	if ack.AspID != agentAspID {
+		return nil, fmt.Errorf("%w: native registration reply aspId %q, want %q", ErrRegisterReplyMalformed, ack.AspID, agentAspID)
+	}
+	return ack, nil
+}
+
 // NHP_RAK error codes (the enrollment wire contract). These map to the typed
 // sentinels in register_errors.go; an unrecognized code falls through to
 // RegistrationDenyError so a caller still sees the raw code.

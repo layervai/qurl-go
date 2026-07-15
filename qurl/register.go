@@ -579,6 +579,13 @@ func (cfg *registerConfig) tryCompletionProbe(ctx context.Context, key string, s
 		return true, nil, err
 	}
 	doneState, err = cfg.persistCompletion(ctx, store, state, comp)
+	if err == nil && cfg.captureRuntime && cfg.deviceKeyMinted {
+		// A successful crash-recovery probe is still the first local handoff of a
+		// freshly minted device credential. Route it through the same bounded
+		// post-mint visibility confirmation as the direct REG -> completion path,
+		// without repeating either REG or completion.
+		doneState, err = cfg.runtime.confirmFreshDeviceAssignment(ctx, store, doneState)
+	}
 	return true, doneState, err
 }
 

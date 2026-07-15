@@ -8,7 +8,9 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"reflect"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -66,19 +68,25 @@ func runtimeRefreshOptions(h *registerHarness) []AgentRuntimeOption {
 }
 
 type nativeRegistrationUDPServer struct {
-	t    *testing.T
-	nhp  *fakeNHPServer
-	conn *net.UDPConn
-	done chan struct{}
+	t         *testing.T
+	nhp       *fakeNHPServer
+	conn      *net.UDPConn
+	done      chan struct{}
+	useRawRAK bool
+	rawRAK    []byte
 }
 
 func startNativeRegistrationUDPServer(t *testing.T, nhp *fakeNHPServer) *nativeRegistrationUDPServer {
+	return startNativeRegistrationUDPServerWithRAK(t, nhp, false, nil)
+}
+
+func startNativeRegistrationUDPServerWithRAK(t *testing.T, nhp *fakeNHPServer, useRawRAK bool, rawRAK []byte) *nativeRegistrationUDPServer {
 	t.Helper()
 	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
 		t.Fatalf("listen native registration UDP: %v", err)
 	}
-	server := &nativeRegistrationUDPServer{t: t, nhp: nhp, conn: conn, done: make(chan struct{})}
+	server := &nativeRegistrationUDPServer{t: t, nhp: nhp, conn: conn, done: make(chan struct{}), useRawRAK: useRawRAK, rawRAK: append([]byte(nil), rawRAK...)}
 	go server.serve()
 	t.Cleanup(func() {
 		_ = conn.Close()
@@ -124,10 +132,18 @@ func (s *nativeRegistrationUDPServer) serve() {
 			s.nhp.enrolled = true
 		}
 		s.nhp.mu.Unlock()
-		ackBody, err := json.Marshal(registerAckBody{ErrCode: errCode, ErrMsg: errMsg, AspID: agentAspID})
-		if err != nil {
-			s.t.Errorf("marshal native RAK: %v", err)
-			continue
+		var ackBody []byte
+		if s.useRawRAK {
+			ackBody = append([]byte(nil), s.rawRAK...)
+		} else {
+			if errCode == "" {
+				errCode = rakSuccess
+			}
+			ackBody, err = json.Marshal(registerAckBody{ErrCode: errCode, ErrMsg: errMsg, AspID: agentAspID})
+			if err != nil {
+				s.t.Errorf("marshal native RAK: %v", err)
+				continue
+			}
 		}
 		rak, err := relayknocktest.BuildReply(relayknock.TypeRegisterAck, &relayknock.KnockInputs{
 			DeviceStaticPriv: s.nhp.serverPriv,
@@ -348,6 +364,40 @@ func TestRefreshAgentRegistration_ValidatesPersistedAssignmentBeforeHTTP(t *test
 			}
 			if store.loads.Load() != 1 || store.saves.Load() != 0 || httpCalls.Load() != 0 {
 				t.Fatalf("loads/saves/http = %d/%d/%d, want 1/0/0", store.loads.Load(), store.saves.Load(), httpCalls.Load())
+			}
+		})
+	}
+}
+
+func TestRefreshAgentRegistration_RejectsUnstructuredNativeRAKWithoutSaving(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "empty body", body: ""},
+		{name: "empty object", body: `{}`},
+		{name: "whitespace success code", body: `{"errCode":" 0 ","aspId":"agent"}`},
+		{name: "missing asp id", body: `{"errCode":"0"}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := registeredHarness(t)
+			udpServer := startNativeRegistrationUDPServerWithRAK(t, h.nhp, true, []byte(tt.body))
+			bindPersistedNativeAssignment(t, h, udpServer.port(), time.Now().Add(time.Hour))
+			before := h.loadState(t)
+			installRuntimeAssignmentHandler(t, h, udpServer.port())
+			store := &runtimeCountingStore{inner: h.store}
+
+			client, binding, err := RefreshAgentRegistration(context.Background(), store, runtimeRefreshOptions(h)...)
+			if client != nil || binding != nil || !errors.Is(err, ErrRegisterReplyMalformed) {
+				t.Fatalf("unstructured native RAK result = client %v binding %v err %v", client, binding, err)
+			}
+			if store.loads.Load() != 1 || store.saves.Load() != 0 {
+				t.Fatalf("unstructured native RAK loads/saves = %d/%d, want 1/0", store.loads.Load(), store.saves.Load())
+			}
+			after := h.loadState(t)
+			if !reflect.DeepEqual(after, before) {
+				t.Fatalf("unstructured native RAK mutated durable state: before=%#v after=%#v", before, after)
 			}
 		})
 	}
@@ -611,6 +661,126 @@ func TestRegisterAgentRuntime_PostMint401RetryIsExactFiniteAndNeverRepeatsComple
 				}
 			}
 		})
+	}
+}
+
+func TestRegisterAgentRuntime_AccountCrashResumeConfirmsPostMintDeviceVisibility(t *testing.T) {
+	h, _ := newFreshCountingRegisterHarness(t)
+	h.svc.keyKind = keyKindAccount
+	h.svc.keyID = "key_enrollment01"
+	h.svc.maskedEmail = "j***@example.test"
+	udpServer := startNativeRegistrationUDPServer(t, h.nhp)
+	var deviceVisibilityCalls atomic.Int32
+	assignmentRequests := installRuntimeAssignmentHandlerWith(t, h, func(_ int, w http.ResponseWriter, req *http.Request, body assignmentRequestBody) {
+		if req.Header.Get("Authorization") == "Bearer lv_device_secret" && deviceVisibilityCalls.Add(1) <= 2 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = fmt.Fprint(w, `{"error":{"code":"api_key_invalid","detail":"device key is not visible yet"}}`)
+			return
+		}
+		writeEnvelope(t, w, runtimeAssignment(h, body.AgentID, udpServer.port()))
+	})
+	baseNow := time.Now().UTC()
+	var clockOffset atomic.Int64
+	var slept []time.Duration
+	runtimeOpts := runtimeUDPOptions()
+	runtimeOpts = append(runtimeOpts,
+		WithAgentClientBaseURL(h.apiSrv.URL),
+		WithAgentClientHTTPClient(h.apiSrv.Client()),
+		withAgentRuntimeClock(func() time.Time { return baseNow.Add(time.Duration(clockOffset.Load())) }),
+		withAgentRuntimeSleep(func(_ context.Context, delay time.Duration) error {
+			slept = append(slept, delay)
+			clockOffset.Add(delay.Nanoseconds())
+			return nil
+		}),
+	)
+
+	// The first account call persists the identity and assignment, dispatches the
+	// OTP, and pauses. Model another process then completing native REG/RAK but
+	// dying before it can call completion.
+	client, binding, err := RegisterAgentRuntime(context.Background(), "lv_account", h.store, h.registerOpts(runtimeOpts...)...)
+	if client != nil || binding != nil || !errors.Is(err, ErrOTPPending) {
+		t.Fatalf("prime account runtime = client %v binding %v err %v", client, binding, err)
+	}
+	h.nhp.setEnrolled(true)
+	regsBefore := h.nhp.regCount()
+
+	client, binding, err = RegisterAgentRuntime(context.Background(), "lv_account", h.store, h.registerOpts(runtimeOpts...)...)
+	if err != nil || client == nil || binding == nil {
+		t.Fatalf("account crash resume = client %v binding %v err %v", client, binding, err)
+	}
+	binding.Destroy()
+	if h.nhp.regCount() != regsBefore {
+		t.Fatalf("successful completion probe repeated native REG: %d -> %d", regsBefore, h.nhp.regCount())
+	}
+	if h.svc.completionCalls.Load() != 1 {
+		t.Fatalf("completion probe calls = %d, want exactly 1", h.svc.completionCalls.Load())
+	}
+	if got := fmt.Sprint(slept); got != fmt.Sprint([]time.Duration{100 * time.Millisecond, 200 * time.Millisecond}) {
+		t.Fatalf("post-probe visibility sleeps = %s, want [100ms 200ms]", got)
+	}
+	requests := assignmentRequests.snapshot()
+	if len(requests) != 5 {
+		t.Fatalf("assignment requests = %#v, want two enrollment + three post-mint device requests", requests)
+	}
+	for i, request := range requests {
+		wantAuthorization := "Bearer lv_account"
+		if i >= 2 {
+			wantAuthorization = "Bearer lv_device_secret"
+		}
+		if request.Authorization != wantAuthorization || request.IdempotencyKey != "" {
+			t.Fatalf("assignment request %d = %#v, want Authorization %q and no idempotency key", i, request, wantAuthorization)
+		}
+	}
+	state := h.loadState(t)
+	if state.RegisteredAt == nil || state.DeviceAPIKeyID != "key_device000001" || state.DeviceAPIKey != "lv_device_secret" {
+		t.Fatalf("completion probe did not durably persist credential pair: %#v", state)
+	}
+
+	// A normal reopen consumes the completed durable state and cannot repeat the
+	// first-issue completion after this crash-recovery path.
+	reopened, reopenedBinding, reopenErr := RegisterAgentRuntime(context.Background(), "ignored", h.store, h.registerOpts(runtimeOpts...)...)
+	if reopenErr != nil || reopened == nil || reopenedBinding == nil {
+		t.Fatalf("reopen completed crash-resume state = client %v binding %v err %v", reopened, reopenedBinding, reopenErr)
+	}
+	reopenedBinding.Destroy()
+	if h.svc.completionCalls.Load() != 1 {
+		t.Fatalf("completed-state reopen repeated completion: calls = %d", h.svc.completionCalls.Load())
+	}
+}
+
+func TestNativeKnockResult_FormattingRedactsACToken(t *testing.T) {
+	result := &NativeKnockResult{
+		ACToken:      "ac-sensitive-bearer-token",
+		ResourceHost: "connector.example.test:7000",
+		OpenTime:     900,
+		AgentAddr:    "203.0.113.9:49152",
+	}
+	formatted := map[string]string{
+		"pointer %v":  fmt.Sprintf("%v", result),
+		"pointer %+v": fmt.Sprintf("%+v", result),
+		"pointer %#v": fmt.Sprintf("%#v", result),
+		"value %v":    fmt.Sprintf("%v", *result),
+		"value %+v":   fmt.Sprintf("%+v", *result),
+		"value %#v":   fmt.Sprintf("%#v", *result),
+	}
+	for label, value := range formatted {
+		if !strings.Contains(value, "[REDACTED]") || strings.Contains(value, result.ACToken) {
+			t.Fatalf("%s leaked ACToken: %s", label, value)
+		}
+	}
+	var nilResult *NativeKnockResult
+	for _, value := range []string{fmt.Sprintf("%v", nilResult), fmt.Sprintf("%+v", nilResult), fmt.Sprintf("%#v", nilResult)} {
+		if value != "<nil>" {
+			t.Fatalf("nil NativeKnockResult formatting = %q, want <nil>", value)
+		}
+	}
+	_, err := interpretNativeAgentKnockReply(&relayknock.Reply{
+		Type: relayknock.TypeACK,
+		Body: []byte(`{"errCode":"0","acTokens":{"other":"ac-sensitive-bearer-token"},"resHost":{"other":"connector.example.test:7000"}}`),
+	}, "requested")
+	if !errors.Is(err, ErrMalformedReply) || strings.Contains(err.Error(), result.ACToken) {
+		t.Fatalf("wrong-resource ACK error leaked ACToken: %v", err)
 	}
 }
 

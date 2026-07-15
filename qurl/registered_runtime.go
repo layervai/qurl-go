@@ -376,7 +376,7 @@ func nativeRegisterAgent(ctx context.Context, state *AgentState, privateKey []by
 	if !reply.IsRegisterAck() {
 		return fmt.Errorf("%w: unexpected native registration reply type %d", ErrRegisterReplyMalformed, reply.Type)
 	}
-	ack, err := parseRegisterAck(reply.Body)
+	ack, err := parseNativeRegisterAck(reply.Body)
 	if err != nil {
 		return err
 	}
@@ -443,13 +443,24 @@ func isPostMintVisibilityMiss(err error) bool {
 
 // NativeKnockResult is the authenticated, resource-specific admission returned
 // by KnockRegisteredAgent. A result exists only when the requested resource has
-// both a non-empty AC token and a non-empty ResourceHost in the ACK.
+// both a non-empty AC token and a non-empty ResourceHost in the ACK. ACToken is
+// a bearer credential: do not log, serialize, or include this result in support
+// bundles. String and GoString redact it for ordinary fmt formatting, but callers
+// remain responsible for every explicit field read or serialization.
 type NativeKnockResult struct {
 	ACToken      string
 	ResourceHost string
 	OpenTime     uint32
 	AgentAddr    string
 }
+
+// String returns a summary that never renders the bearer admission token.
+func (r NativeKnockResult) String() string {
+	return fmt.Sprintf("qurl.NativeKnockResult{ACToken:[REDACTED], ResourceHost:%q, OpenTime:%d, AgentAddr:%q}", r.ResourceHost, r.OpenTime, r.AgentAddr)
+}
+
+// GoString provides the same token redaction for %#v formatting.
+func (r NativeKnockResult) GoString() string { return r.String() }
 
 type nativeAgentKnockACK struct {
 	ErrCode      string            `json:"errCode"`
