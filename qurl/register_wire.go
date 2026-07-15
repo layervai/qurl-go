@@ -1,6 +1,7 @@
 package qurl
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -54,6 +55,22 @@ type registerUserData struct {
 	Takeover bool   `json:"takeover,omitempty"`
 }
 
+// marshalRegisterRequestBody keeps relay and native UDP registration on one
+// wire encoder. The two transports differ only after the plaintext body exists.
+func marshalRegisterRequestBody(keyID, deviceID, credential string, userData registerUserData) ([]byte, error) {
+	body, err := json.Marshal(registerRequestBody{
+		UsrID:   keyID,
+		DevID:   deviceID,
+		AspID:   agentAspID,
+		OTP:     credential,
+		UsrData: userData,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("qurl: encode registration body: %w", err)
+	}
+	return body, nil
+}
+
 // --- NHP_RAK reply body ---
 
 // registerAckBody is the decrypted NHP_RAK body. errCode "0" (or empty) is
@@ -77,20 +94,35 @@ func (b registerAckBody) isSuccess() bool {
 	return code == "" || code == rakSuccess
 }
 
-// parseRegisterAck decodes the decrypted NHP_RAK body. An empty body decodes to a
-// zero-value ack whose empty errCode reads as success (isSuccess), so the run
-// proceeds to the completion fetch. That is safe not because the body is empty but
-// because the RAK was already authenticated by the Noise handshake and the
-// completion endpoint re-verifies server-side enrollment — a spurious empty RAK
-// simply fails there. The integrity guard is that authenticated-then-completion-
-// verified tail, not the emptiness. A non-empty body that is not valid JSON is a
-// hard error.
+// rakResult is the single success/denial gate after either transport has parsed
+// an authenticated NHP_RAK into the shared wire shape.
+func rakResult(ack *registerAckBody, path pathKind) error {
+	if ack == nil {
+		return fmt.Errorf("%w: registration reply is nil", ErrRegisterReplyMalformed)
+	}
+	if ack.isSuccess() {
+		return nil
+	}
+	return mapRAKError(ack, path)
+}
+
+// parseRegisterAck decodes the decrypted NHP_RAK body. The SDK and current
+// producer are greenfield, so every non-empty RAK uses one frozen fail-closed
+// contract across relay and native transports: unknown or duplicate fields,
+// trailing values, null, and non-object payloads are malformed. Keeping that
+// strictness transport-independent prevents the relay path from silently
+// accepting a producer drift that native refresh would reject.
+//
+// The sole legacy exception is an empty relay-enrollment body. It decodes to a
+// zero-value ack whose empty errCode reads as success, and the immediately
+// following completion endpoint re-verifies server-side enrollment. Native
+// refresh has no such verifier and rejects an empty RAK in parseNativeRegisterAck.
 func parseRegisterAck(body []byte) (*registerAckBody, error) {
 	if len(body) == 0 {
 		return &registerAckBody{}, nil
 	}
 	if err := rejectDuplicateJSONFields(body); err != nil {
-		return nil, fmt.Errorf("%w: registration reply body contains malformed or duplicate JSON fields", ErrRegisterReplyMalformed)
+		return nil, fmt.Errorf("%w: registration reply body contains malformed or duplicate JSON fields: %w", ErrRegisterReplyMalformed, err)
 	}
 	var ack *registerAckBody
 	if err := strictDecodeJSON(body, &ack); err != nil {
@@ -117,6 +149,9 @@ func parseRegisterAck(body []byte) (*registerAckBody, error) {
 // structured RAK code and the expected authorization-service id before any
 // refreshed assignment can become durable.
 func parseNativeRegisterAck(body []byte) (*registerAckBody, error) {
+	if len(body) == 0 {
+		return nil, fmt.Errorf("%w: native registration reply body must not be empty", ErrRegisterReplyMalformed)
+	}
 	ack, err := parseRegisterAck(body)
 	if err != nil {
 		return nil, err
@@ -287,6 +322,9 @@ func (r registrationInfoResponse) validate(now time.Time, errKind error) error {
 	if strings.TrimSpace(r.KeyID) == "" {
 		return fmt.Errorf("%w: registration-info missing key_id", errKind)
 	}
+	if err := validateAPIKeyID(r.KeyID, "registration-info key_id", errKind); err != nil {
+		return err
+	}
 	if strings.TrimSpace(r.Relay.BaseURL) == "" {
 		return fmt.Errorf("%w: registration-info missing relay base_url", errKind)
 	}
@@ -328,7 +366,7 @@ func (r completionResponse) validate(_ time.Time, errKind error) error {
 	if err := validateExactBearerToken(r.DeviceAPIKey, "completion response device_api_key", errKind); err != nil {
 		return err
 	}
-	if err := validateDeviceAPIKeyID(r.DeviceAPIKeyID, "completion response device_api_key_id", errKind); err != nil {
+	if err := validateAPIKeyID(r.DeviceAPIKeyID, "completion response device_api_key_id", errKind); err != nil {
 		return err
 	}
 	// Completion only corroborates the RAK-authenticated public key. Its host,

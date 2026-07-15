@@ -301,6 +301,7 @@ type fakeService struct {
 	agentID          string // agent id echoed by completion; "" => echo the request device_id
 	registeredAt     *time.Time
 	completionPeer   *NHPServerPeerInfo
+	completionNHP    *fakeNHPServer
 
 	// counters
 	infoCalls       atomic.Int32
@@ -317,7 +318,7 @@ func newFakeService(t *testing.T, nhp *fakeNHPServer) *fakeService {
 		t:            t,
 		nhp:          nhp,
 		keyKind:      keyKindBootstrap,
-		keyID:        "key_test123",
+		keyID:        "key_enrollment01",
 		deviceAPIKey: "lv_device_secret",
 		registeredAt: &now,
 	}
@@ -381,7 +382,11 @@ func (f *fakeService) serveCompletion(w http.ResponseWriter, r *http.Request) {
 	// Model server state: completion only succeeds once the device is enrolled
 	// (a REG has succeeded), or a test pre-marked it enrolled to exercise the
 	// crash-recovery probe. Otherwise the device is not yet registered.
-	if !f.nhp.isEnrolled() {
+	completionNHP := f.nhp
+	if f.completionNHP != nil {
+		completionNHP = f.completionNHP
+	}
+	if !completionNHP.isEnrolled() {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = fmt.Fprint(w, `{"error":{"code":"device_not_registered","detail":"device is not yet registered"}}`)
@@ -488,10 +493,11 @@ func (h *registerHarness) registerOpts(extra ...RegisterOption) []RegisterOption
 
 // withClock is a test-only RegisterOption that injects the engine clock, so a
 // test can advance time deterministically (e.g. across the OTP resend cooldown)
-// without sleeping. The engine reads cfg.clock everywhere it needs "now".
+// without sleeping. Registration and native runtime share runtime.clock as their
+// single source of time.
 func withClock(clk func() time.Time) RegisterOption {
 	return registerOptionFunc(func(o *registerConfig) error {
-		o.clock = clk
+		o.runtime.clock = clk
 		return nil
 	})
 }
@@ -1461,7 +1467,7 @@ func TestRegisterAgent_RejectsServerIDPeerMismatch(t *testing.T) {
 		if r.Method == http.MethodGet && r.URL.Path == "/v1/agent/registration-info" {
 			resp := registrationInfoResponse{
 				KeyKind: keyKindBootstrap,
-				KeyID:   "key_test123",
+				KeyID:   "key_enrollment01",
 				NHPServerPeer: NHPServerPeerInfo{
 					PublicKeyB64: h.nhp.serverPubB64(),
 					Host:         "nhp.example.test",
@@ -1638,8 +1644,8 @@ func TestRegisterAgent_OptionValidation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("path-prefixed options: %v", err)
 	}
-	if cfg.baseURL != "https://api.example.test/custom/prefix" || cfg.clientBaseURL != "https://resources.example.test/custom/prefix" || cfg.relayURLOverride != "https://relay.example.test/custom/prefix" {
-		t.Fatalf("path prefixes not preserved: registration=%q resource=%q relay=%q", cfg.baseURL, cfg.clientBaseURL, cfg.relayURLOverride)
+	if cfg.baseURL != "https://api.example.test/custom/prefix" || cfg.runtime.baseURL != "https://resources.example.test/custom/prefix" || cfg.relayURLOverride != "https://relay.example.test/custom/prefix" {
+		t.Fatalf("path prefixes not preserved: registration=%q resource=%q relay=%q", cfg.baseURL, cfg.runtime.baseURL, cfg.relayURLOverride)
 	}
 }
 

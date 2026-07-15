@@ -177,26 +177,33 @@ func validatePersistedNativeRegistrationCredential(state *AgentState, errKind er
 	if err := validatePersistedDeviceCredential(state, errKind); err != nil {
 		return err
 	}
-	if err := validateDeviceAPIKeyID(state.DeviceAPIKeyID, "persisted device credential id", errKind); err != nil {
+	if err := validateAPIKeyID(state.DeviceAPIKeyID, "persisted device credential id", errKind); err != nil {
 		return &CredentialRecoveryRequiredError{DeviceID: state.AgentID, Cause: err}
 	}
 	return nil
 }
 
 const (
-	deviceAPIKeyIDPrefix       = "key_"
-	deviceAPIKeyIDRandomLength = 12
-	deviceAPIKeyIDLength       = len(deviceAPIKeyIDPrefix) + deviceAPIKeyIDRandomLength
+	// qurl-service's single generateKeyID issuer is shared by account,
+	// enrollment/bootstrap, and device API keys, and freezes this public wire
+	// shape for every key_id response. Registration-info and completion boundary
+	// tests pin it here; change both repositories in lockstep. A manually seeded
+	// legacy row outside this greenfield issuer contract fails closed rather than
+	// becoming an NHP usrId the SDK cannot classify consistently.
+	apiKeyIDPrefix       = "key_"
+	apiKeyIDRandomLength = 12
+	apiKeyIDLength       = len(apiKeyIDPrefix) + apiKeyIDRandomLength
 )
 
-func validateDeviceAPIKeyID(value, label string, errKind error) error {
-	if len(value) != deviceAPIKeyIDLength || !strings.HasPrefix(value, deviceAPIKeyIDPrefix) {
-		return fmt.Errorf("%w: %s must match %s plus %d alphanumeric characters", errKind, label, deviceAPIKeyIDPrefix, deviceAPIKeyIDRandomLength)
+func validateAPIKeyID(value, label string, errKind error) error {
+	malformed := fmt.Errorf("%w: %s must match %s plus %d alphanumeric characters", errKind, label, apiKeyIDPrefix, apiKeyIDRandomLength)
+	if len(value) != apiKeyIDLength || !strings.HasPrefix(value, apiKeyIDPrefix) {
+		return malformed
 	}
-	for i := len(deviceAPIKeyIDPrefix); i < len(value); i++ {
+	for i := len(apiKeyIDPrefix); i < len(value); i++ {
 		ch := value[i]
 		if (ch < 'a' || ch > 'z') && (ch < 'A' || ch > 'Z') && (ch < '0' || ch > '9') {
-			return fmt.Errorf("%w: %s must match %s plus %d alphanumeric characters", errKind, label, deviceAPIKeyIDPrefix, deviceAPIKeyIDRandomLength)
+			return malformed
 		}
 	}
 	return nil

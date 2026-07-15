@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/layervai/qurl-go/internal/x25519key"
 )
 
 // OpenRegisteredAgent opens a Client from a completed AgentState without making
@@ -118,7 +120,12 @@ type AgentRuntimeBinding struct {
 	NHPUDPEndpoint       NHPUDPEndpoint
 	DeviceAPIKeyID       string
 
-	deviceStaticPrivateKey *agentRuntimePrivateKey
+	// authoritativeAssignment is the immutable placement the native knock path
+	// validates and uses. The exported fields above are a read-only ergonomic
+	// projection; retaining the assignment itself prevents a future field from
+	// being silently dropped by a flatten/rebuild round trip.
+	authoritativeAssignment *AgentAssignment
+	deviceStaticPrivateKey  *agentRuntimePrivateKey
 }
 
 // agentRuntimePrivateKey centralizes one-shot ownership across accidental
@@ -224,9 +231,9 @@ func decodeRuntimePrivateKey(state *AgentState, errKind error) ([]byte, error) {
 		wipeBytes(privateKey)
 		return nil, fmt.Errorf("%w: decode agent runtime private key: %w", errKind, err)
 	}
-	if len(privateKey) != 32 {
+	if len(privateKey) != x25519key.Size {
 		wipeBytes(privateKey)
-		return nil, fmt.Errorf("%w: agent runtime private key must be 32 bytes", errKind)
+		return nil, fmt.Errorf("%w: agent runtime private key must be %d bytes", errKind, x25519key.Size)
 	}
 	return privateKey, nil
 }
@@ -239,16 +246,17 @@ func decodeRuntimePrivateKey(state *AgentState, errKind error) ([]byte, error) {
 // a validated 32-byte X25519 key owned by this constructor.
 func newAgentRuntimeBinding(state *AgentState, privateKey []byte) *AgentRuntimeBinding {
 	return &AgentRuntimeBinding{
-		AgentID:                state.AgentID,
-		PublicKeyB64:           state.PublicKeyB64,
-		RegisteredAt:           *state.RegisteredAt,
-		CellID:                 state.Assignment.CellID,
-		AssignmentGeneration:   state.Assignment.AssignmentGeneration,
-		EndpointRevision:       state.Assignment.EndpointRevision,
-		LeaseExpiresAt:         state.Assignment.LeaseExpiresAt,
-		NHPUDPEndpoint:         state.Assignment.Endpoint,
-		DeviceAPIKeyID:         state.DeviceAPIKeyID,
-		deviceStaticPrivateKey: newAgentRuntimePrivateKey(privateKey),
+		AgentID:                 state.AgentID,
+		PublicKeyB64:            state.PublicKeyB64,
+		RegisteredAt:            *state.RegisteredAt,
+		CellID:                  state.Assignment.CellID,
+		AssignmentGeneration:    state.Assignment.AssignmentGeneration,
+		EndpointRevision:        state.Assignment.EndpointRevision,
+		LeaseExpiresAt:          state.Assignment.LeaseExpiresAt,
+		NHPUDPEndpoint:          state.Assignment.Endpoint,
+		DeviceAPIKeyID:          state.DeviceAPIKeyID,
+		authoritativeAssignment: state.Assignment.clone(),
+		deviceStaticPrivateKey:  newAgentRuntimePrivateKey(privateKey),
 	}
 }
 
@@ -256,14 +264,7 @@ func (b *AgentRuntimeBinding) assignment() *AgentAssignment {
 	if b == nil {
 		return nil
 	}
-	return &AgentAssignment{
-		AgentID:              b.AgentID,
-		CellID:               b.CellID,
-		AssignmentGeneration: b.AssignmentGeneration,
-		EndpointRevision:     b.EndpointRevision,
-		LeaseExpiresAt:       b.LeaseExpiresAt,
-		Endpoint:             b.NHPUDPEndpoint,
-	}
+	return b.authoritativeAssignment
 }
 
 // loadCompletedRegisteredState enforces the completed identity and intact
@@ -339,7 +340,7 @@ func RecoverAgentCredential(ctx context.Context, key string, store AgentStateSto
 	// now committed to the authoritative store. Prime the new Client from it for
 	// immediate cutover without a second store/KMS load; older Clients still keep
 	// their prior cache until expiry and must be discarded by the caller.
-	return newPrimedStoreBackedClient(store, cfg.clientBaseURL, cfg.clientHTTPClient, state.DeviceAPIKey, cfg.clock), nil
+	return newPrimedStoreBackedClient(store, cfg.runtime.baseURL, cfg.runtime.httpClient, state.DeviceAPIKey, cfg.runtime.clock), nil
 }
 
 func loadExistingAgentState(ctx context.Context, store AgentStateStore, errKind error) (*AgentState, error) {
@@ -390,7 +391,10 @@ func (cfg *registerConfig) forceRegistration(ctx context.Context, key string, st
 
 	// Isolate every mutable field from the loaded state before the transition
 	// decides what to persist. The peer is replaced immediately below, while
-	// registration time and an OTP marker may survive paused/error paths.
+	// registration time and an OTP marker may survive paused/error paths. This
+	// relay recovery path deliberately refreshes NHPPeer without rewriting a
+	// retained native Assignment: native routing consumes Assignment, and the
+	// next RefreshAgentRegistration re-adopts its matching peer.
 	candidate := state.clone()
 	candidate.NHPPeer = peer
 	candidate.RelayURL = relayURL
@@ -431,7 +435,7 @@ func (cfg *registerConfig) forcedRegistrationCredential(ctx context.Context, key
 		if err := requireAccountKeyEmail(info); err != nil {
 			return "", pathUnknown, err
 		}
-		code, err := cfg.accountCredentialOrPause(ctx, key, store, persisted, candidate, info.MaskedEmail)
+		code, err := cfg.accountCredentialOrPause(ctx, key, store, persisted, candidate, candidate.NHPPeer, candidate.RelayURL, info.MaskedEmail)
 		if err != nil {
 			return "", pathUnknown, err
 		}

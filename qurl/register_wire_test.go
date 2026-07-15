@@ -1,12 +1,15 @@
 package qurl
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
+
+	conformance "github.com/layervai/qurl-conformance"
 )
 
 // Pure wire-mapping tests: the NHP_RAK errCode → typed-error table (including the
@@ -127,7 +130,7 @@ func TestParseRegisterAck_EmptyBodyIsZeroValue(t *testing.T) {
 func TestParseRegisterAck_MalformedBodyErrors(t *testing.T) {
 	for _, body := range []string{
 		`{not json`,
-		`{"errCode":"0","errCode":"52100"}`,
+		`{"errCode":"52100","errCode":"0"}`,
 		`{"errCode":"0","future":"field"}`,
 		`{"errCode":"0"}{"errCode":"0"}`,
 		`{"errCode":0}`,
@@ -135,6 +138,79 @@ func TestParseRegisterAck_MalformedBodyErrors(t *testing.T) {
 	} {
 		if _, err := parseRegisterAck([]byte(body)); !errors.Is(err, ErrRegisterReplyMalformed) {
 			t.Errorf("malformed RAK body %q error = %v, want ErrRegisterReplyMalformed", body, err)
+		}
+	}
+}
+
+func TestParseRegisterAck_DuplicateFieldNamesTheOffendingKey(t *testing.T) {
+	_, err := parseRegisterAck([]byte(`{"errCode":"52100","errCode":"0"}`))
+	if !errors.Is(err, ErrRegisterReplyMalformed) || !strings.Contains(err.Error(), `"errCode"`) {
+		t.Fatalf("duplicate-field RAK err = %v, want malformed reply naming errCode", err)
+	}
+}
+
+func TestParseRegisterAck_AcceptsConformanceRAKShapes(t *testing.T) {
+	vectors, err := conformance.AgentRegistrationGolden()
+	if err != nil {
+		t.Fatalf("load qurl-conformance agent-registration vectors: %v", err)
+	}
+	for _, tc := range []struct {
+		name     string
+		bodyHex  string
+		wantCode string
+	}{
+		{name: "success", bodyHex: vectors.RakSuccess.BodyHex, wantCode: "0"},
+		{name: "error", bodyHex: vectors.RakError.BodyHex, wantCode: rakCredentialInvalid},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body, err := hex.DecodeString(tc.bodyHex)
+			if err != nil {
+				t.Fatalf("decode conformance RAK body: %v", err)
+			}
+			for _, parser := range []struct {
+				name string
+				fn   func([]byte) (*registerAckBody, error)
+			}{
+				{name: "relay", fn: parseRegisterAck},
+				{name: "native", fn: parseNativeRegisterAck},
+			} {
+				t.Run(parser.name, func(t *testing.T) {
+					ack, err := parser.fn(body)
+					if err != nil {
+						t.Fatalf("parse frozen producer RAK: %v", err)
+					}
+					if ack.ErrCode != tc.wantCode || ack.AspID != agentAspID {
+						t.Fatalf("parsed RAK = %#v, want errCode %q aspId %q", ack, tc.wantCode, agentAspID)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestParseNativeRegisterAck_RequiresExactStructuredRAK(t *testing.T) {
+	for _, body := range []string{
+		``,
+		`{}`,
+		`null`,
+		`{"errCode":"0","errCode":"52100","aspId":"agent"}`,
+		`{"errCode":"0","aspId":"agent","future":"field"}`,
+		`{"errCode":"0"}{"errCode":"0"}`,
+		`{"errCode":0,"aspId":"agent"}`,
+		`{"errCode":" 0 ","aspId":"agent"}`,
+		`{"errCode":"0"}`,
+		`{"errCode":"0","aspId":"qurl"}`,
+	} {
+		if _, err := parseNativeRegisterAck([]byte(body)); !errors.Is(err, ErrRegisterReplyMalformed) {
+			t.Errorf("malformed native RAK body %q error = %v, want ErrRegisterReplyMalformed", body, err)
+		}
+	}
+	for _, body := range []string{
+		`{"errCode":"0","aspId":"agent"}`,
+		`{"errCode":"52100","aspId":"agent"}`,
+	} {
+		if _, err := parseNativeRegisterAck([]byte(body)); err != nil {
+			t.Errorf("exact native RAK body %q rejected: %v", body, err)
 		}
 	}
 }
@@ -162,7 +238,7 @@ func TestRegistrationInfoResponse_Validate(t *testing.T) {
 	}
 	base := registrationInfoResponse{
 		KeyKind:       keyKindBootstrap,
-		KeyID:         "key_x",
+		KeyID:         "key_abc123def456",
 		NHPServerPeer: goodPeer,
 		Relay:         registrationRelay{BaseURL: "https://relay.example.test/custom/prefix", ServerID: "abcdefghijk"},
 	}
@@ -177,6 +253,9 @@ func TestRegistrationInfoResponse_Validate(t *testing.T) {
 	}{
 		{"unknown key kind", func(r *registrationInfoResponse) { r.KeyKind = "mystery" }, "unknown key_kind"},
 		{"missing key id", func(r *registrationInfoResponse) { r.KeyID = "" }, "missing key_id"},
+		{"short key id", func(r *registrationInfoResponse) { r.KeyID = "key_short" }, "key_ plus 12 alphanumeric"},
+		{"wrong key id prefix", func(r *registrationInfoResponse) { r.KeyID = "api_abc123def456" }, "key_ plus 12 alphanumeric"},
+		{"non-alphanumeric key id", func(r *registrationInfoResponse) { r.KeyID = "key_abc123def45_" }, "key_ plus 12 alphanumeric"},
 		{"missing relay base", func(r *registrationInfoResponse) { r.Relay.BaseURL = "" }, "missing relay base_url"},
 		{"non-https relay base", func(r *registrationInfoResponse) { r.Relay.BaseURL = "ftp://x" }, "must use http"},
 		{"relay base query", func(r *registrationInfoResponse) { r.Relay.BaseURL = "https://relay.example.test/prefix?route=wrong" }, "must not include a query"},
@@ -207,7 +286,7 @@ func TestRegistrationInfoResponse_AllowsLoopbackRelay(t *testing.T) {
 	// of the SDK's HTTPS-or-loopback rule.
 	r := registrationInfoResponse{
 		KeyKind:       keyKindAccount,
-		KeyID:         "key_x",
+		KeyID:         "key_abc123def456",
 		NHPServerPeer: NHPServerPeerInfo{PublicKeyB64: validTestNHPServerPublicKeyB64, Host: "h", Port: 1},
 		Relay:         registrationRelay{BaseURL: "http://127.0.0.1:8080", ServerID: "abcdefghijk"},
 	}

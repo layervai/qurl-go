@@ -218,7 +218,7 @@ Match errors by type, not message text:
 | `*qurl.APIError` | LayerV returned a non-2xx API response |
 | `qurl.ErrNotConfigured` | Opener config is missing |
 | `qurl.ErrSignature` / `qurl.ErrUnknownKID` | A received signed link is forged, tampered, or untrusted |
-| `*qurl.ServerDenyError` | qURL refused a programmatic open request |
+| `*qurl.ServerDenyError` | qURL refused an authenticated programmatic open or qURL Connector knock |
 
 ## Security Notes
 

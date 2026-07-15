@@ -65,6 +65,21 @@ func (a *AgentAssignment) clone() *AgentAssignment {
 	return &cloned
 }
 
+// equal reports whether two assignments describe the same authoritative
+// placement and lease instant. time.Time.Equal deliberately ignores location
+// and monotonic-clock representation differences that must not force a save.
+func (a *AgentAssignment) equal(b *AgentAssignment) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.AgentID == b.AgentID &&
+		a.CellID == b.CellID &&
+		a.AssignmentGeneration == b.AssignmentGeneration &&
+		a.EndpointRevision == b.EndpointRevision &&
+		a.LeaseExpiresAt.Equal(b.LeaseExpiresAt) &&
+		a.Endpoint == b.Endpoint
+}
+
 // DecodedServerKey returns the raw 32-byte X25519 NHP server public key from the
 // assignment's endpoint. Assignment identities have one canonical wire spelling:
 // padded standard base64 of a canonical, non-low-order X25519 public key. It
@@ -209,6 +224,7 @@ const (
 	assignmentCodeUnavailable            = "cell_assignment_unavailable"
 	assignmentCodeReassignmentInProgress = "cell_reassignment_in_progress"
 	assignmentCodeQuotaExceeded          = "agent_assignment_quota_exceeded"
+	assignmentCodeAPIKeyInvalid          = "api_key_invalid"
 
 	// Assignment endpoints are accepted only below these LayerV-owned public
 	// DNS apexes. Adding an apex is a deliberate SDK trust-boundary change that
@@ -321,11 +337,23 @@ func withAssignmentSleep(sleep func(context.Context, time.Duration) error) Assig
 // withAssignmentJitter overrides the jitter source (tests only) with a function
 // returning a fraction in [0,1).
 func withAssignmentJitter(jitter func() float64) AssignmentOption {
+	if jitter == nil {
+		return assignmentOptionFunc(func(*assignmentConfig) error {
+			return fmt.Errorf("%w: jitter must not be nil", ErrInvalidAssignmentConfig)
+		})
+	}
+	return withAssignmentJitterSource(func() (float64, error) { return jitter(), nil })
+}
+
+// withAssignmentJitterSource preserves entropy-source failures for internal
+// composed clients. Public/test callers that provide a deterministic float use
+// withAssignmentJitter above.
+func withAssignmentJitterSource(jitter func() (float64, error)) AssignmentOption {
 	return assignmentOptionFunc(func(c *assignmentConfig) error {
 		if jitter == nil {
-			return fmt.Errorf("%w: jitter must not be nil", ErrInvalidAssignmentConfig)
+			return fmt.Errorf("%w: jitter source must not be nil", ErrInvalidAssignmentConfig)
 		}
-		c.jitter = func() (float64, error) { return jitter(), nil }
+		c.jitter = jitter
 		return nil
 	})
 }
@@ -629,7 +657,9 @@ func validateAgentAssignment(a *AgentAssignment, wantAgentID string, now time.Ti
 // validateAgentAssignmentShape validates every durable assignment field except
 // liveness. Refresh uses it to authenticate and replace an expired lease without
 // ever accepting malformed persisted routing state; open/knock additionally call
-// validateAgentAssignment, which requires the lease to be live.
+// validateAgentAssignment, which requires the lease to be live. Any new caller
+// that persists or uses an assignment must enforce liveness separately; this
+// shape-only helper is insufficient on its own.
 func validateAgentAssignmentShape(a *AgentAssignment, wantAgentID string) error {
 	if a == nil {
 		return fmt.Errorf("%w: assignment is nil", ErrAssignmentInvalidResponse)

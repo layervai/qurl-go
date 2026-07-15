@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/layervai/qurl-go/internal/x25519key"
 	"github.com/layervai/qurl-go/relayknock"
 )
 
@@ -69,7 +70,7 @@ func RegisterAgent(ctx context.Context, key string, store AgentStateStore, opts 
 	if _, err := cfg.run(ctx, key, store); err != nil {
 		return nil, err
 	}
-	return newStoreBackedClient(store, cfg.clientBaseURL, cfg.clientHTTPClient), nil
+	return newStoreBackedClient(store, cfg.runtime.baseURL, cfg.runtime.httpClient), nil
 }
 
 // RegisterAgentRuntime registers or reopens an agent and returns both its
@@ -83,6 +84,18 @@ func RegisterAgent(ctx context.Context, key string, store AgentStateStore, opts 
 // behavior matches RegisterAgent. On the completed fast path an expired
 // assignment is rejected because it cannot be knocked; call
 // RefreshAgentRegistration to refresh it with the persisted device credential.
+// During first enrollment the setup lock remains held through assignment, REG,
+// completion, and the bounded post-mint assignment confirmation. The assignment
+// fetch keeps its separate bounded 503 policy. Callers must pass a finite context
+// to cap the entire lock-held transition; context.Background can otherwise hold
+// the local-file lock through the full nested network budgets during an outage.
+// For SDK local-file stores this is an OS advisory lock: process exit releases
+// it automatically, and the sidecar file is not a stale ownership marker.
+// If this returns ErrAgentRuntimeReopenRequired, completion already minted and
+// durably saved the device credential: reopen the durable state, then handle
+// the wrapped assignment outcome. Never retry completion or clear the state. The
+// underlying confirmation failure, including ErrAssignmentEndpointRefreshRequired
+// or ErrAssignmentForbidden, remains matchable with errors.Is/errors.As.
 func RegisterAgentRuntime(ctx context.Context, key string, store AgentStateStore, opts ...RegisterOption) (*Client, *AgentRuntimeBinding, error) {
 	cfg, err := validateRegisterInputs(ctx, key, store, opts)
 	if err != nil {
@@ -97,7 +110,7 @@ func RegisterAgentRuntime(ctx context.Context, key string, store AgentStateStore
 	}
 	privateKey := cfg.takeRuntimePrivateKey()
 	defer func() { wipeBytes(privateKey) }()
-	client := newPrimedStoreBackedClient(store, cfg.clientBaseURL, cfg.clientHTTPClient, state.DeviceAPIKey, cfg.clock)
+	client := newPrimedStoreBackedClient(store, cfg.runtime.baseURL, cfg.runtime.httpClient, state.DeviceAPIKey, cfg.runtime.clock)
 	binding := newAgentRuntimeBinding(state, privateKey)
 	privateKey = nil // binding owns the slice and its cleanup from this point.
 	return client, binding, nil
@@ -108,8 +121,6 @@ func RegisterAgentRuntime(ctx context.Context, key string, store AgentStateStore
 type registerConfig struct {
 	baseURL           string
 	httpClient        HTTPDoer
-	clientBaseURL     string
-	clientHTTPClient  HTTPDoer
 	deviceID          string
 	otp               string
 	otpProvider       func(context.Context) (string, error)
@@ -139,9 +150,6 @@ type registerConfig struct {
 	// class: RegisterAgent → ErrInvalidRegisterConfig, BootstrapAgent →
 	// ErrInvalidBootstrapConfig.
 	invalidConfigErr error
-
-	// clock is injected in tests; production uses time.Now.
-	clock func() time.Time
 }
 
 func (cfg *registerConfig) captureRuntimeKey(state *AgentState) error {
@@ -172,10 +180,7 @@ func newRegisterConfig(opts []RegisterOption) (*registerConfig, error) {
 	cfg := &registerConfig{
 		baseURL:          defaultAPIBaseURL,
 		httpClient:       defaultAPIHTTPClient,
-		clientBaseURL:    defaultAPIBaseURL,
-		clientHTTPClient: defaultAPIHTTPClient,
 		invalidConfigErr: ErrInvalidRegisterConfig,
-		clock:            time.Now,
 		runtime:          defaultAgentRuntimeConfig(),
 	}
 	for _, opt := range opts {
@@ -190,7 +195,7 @@ func newRegisterConfig(opts []RegisterOption) (*registerConfig, error) {
 	// clock has identical semantics regardless of its position relative to
 	// WithNHPPeer. Production configurations retain the default wall clock.
 	if cfg.nhpPeerOverride != nil {
-		if err := validateNHPServerPeerInfo(*cfg.nhpPeerOverride, cfg.clock(), true, "WithNHPPeer", ErrInvalidRegisterConfig); err != nil {
+		if err := validateNHPServerPeerInfo(*cfg.nhpPeerOverride, cfg.runtime.clock(), true, "WithNHPPeer", ErrInvalidRegisterConfig); err != nil {
 			return nil, err
 		}
 	}
@@ -290,6 +295,13 @@ func (cfg *registerConfig) runLocked(ctx context.Context, key string, store Agen
 		return nil, err
 	}
 	if cfg.captureRuntime {
+		// Placement is authorized by the already-authenticated API key itself, not
+		// by the email OTP. Initial registration reaches this branch with an active
+		// account or unconsumed enrollment key; a minted per-device key has only the
+		// narrower right to refresh its exact immutable agent_id. Fetch before OTP
+		// dispatch so the account path knows the authoritative native REG endpoint;
+		// a resume deliberately re-fetches the same sticky assignment before using
+		// the emailed code.
 		assignment, err := FetchAgentAssignment(ctx, state.AgentID, BearerToken(key), cfg.runtime.assignmentOptions()...)
 		if err != nil {
 			return nil, err
@@ -297,10 +309,13 @@ func (cfg *registerConfig) runLocked(ctx context.Context, key string, store Agen
 		if err := ensureAssignmentContinuity(state.Assignment, assignment); err != nil {
 			return nil, err
 		}
-		state.Assignment = assignment.clone()
-		peer = assignmentPeer(assignment)
+		// adoptAssignment sets NHPPeer from the authoritative assignment. Native
+		// registration reads Assignment.Endpoint, so only the relay path below may
+		// adopt the independent registration-info peer.
+		adoptAssignment(state, assignment)
+	} else {
+		state.NHPPeer = peer
 	}
-	state.NHPPeer = peer
 	state.RelayURL = relayURL
 	state.KeyID = info.KeyID
 	if err := store.SaveAgentState(ctx, state); err != nil {
@@ -359,15 +374,15 @@ func (cfg *registerConfig) finishRegisteredAgentState(state *AgentState) (*Agent
 		if err := validateCompletedAgentIdentity(state, cfg.invalidConfigErr); err != nil {
 			return nil, err
 		}
-		if err := validateAgentRuntimeMetadata(state, cfg.clock(), cfg.invalidConfigErr); err != nil {
+		if err := validateAgentRuntimeMetadata(state, cfg.runtime.clock(), cfg.invalidConfigErr); err != nil {
 			return nil, err
 		}
 	} else {
-		if err := validateRegisteredAgentState(state, cfg.clock(), !cfg.requireDeviceKey, cfg.invalidConfigErr); err != nil {
+		if err := validateRegisteredAgentState(state, cfg.runtime.clock(), !cfg.requireDeviceKey, cfg.invalidConfigErr); err != nil {
 			return nil, err
 		}
 	}
-	if cfg.requireDeviceKey {
+	if cfg.requireDeviceKey && !cfg.captureRuntime {
 		if err := validatePersistedDeviceCredential(state, cfg.invalidConfigErr); err != nil {
 			return nil, err
 		}
@@ -438,7 +453,7 @@ func (cfg *registerConfig) runAccountPath(ctx context.Context, key string, store
 		}
 	}
 
-	code, err := cfg.accountCredentialOrPause(ctx, key, store, state, state, maskedEmail)
+	code, err := cfg.accountCredentialOrPause(ctx, key, store, state, state, peer, relayURL, maskedEmail)
 	if err != nil {
 		return nil, err
 	}
@@ -450,13 +465,15 @@ func (cfg *registerConfig) runAccountPath(ctx context.Context, key string, store
 // dispatches before consulting a provider that may await that email. A resume
 // resolves an available literal/provider code first and redispatches after the
 // cooldown only when no code source exists, avoiding unnecessary email fan-out.
-// persisted owns the durable cooldown marker; requestState supplies the current
-// peer/relay coordinates used for dispatch.
-func (cfg *registerConfig) accountCredentialOrPause(ctx context.Context, key string, store AgentStateStore, persisted, requestState *AgentState, maskedEmail string) (string, error) {
-	now := cfg.clock()
+// persisted owns the durable cooldown marker; requestState supplies the device
+// identity used to build the packet. requestPeer and requestRelayURL are passed
+// separately because native enrollment stores its assigned-cell peer on state,
+// while OTP must still go through registration-info's relay peer.
+func (cfg *registerConfig) accountCredentialOrPause(ctx context.Context, key string, store AgentStateStore, persisted, requestState *AgentState, requestPeer *NHPServerPeerInfo, requestRelayURL, maskedEmail string) (string, error) {
+	now := cfg.runtime.clock()
 	freshRequest := persisted.OTPRequestedAt == nil
 	if freshRequest {
-		if err := cfg.requestOTPAt(ctx, store, persisted, requestState, key, now); err != nil {
+		if err := cfg.requestOTPAt(ctx, store, persisted, requestState, requestPeer, requestRelayURL, key, now); err != nil {
 			return "", err
 		}
 		// A literal supplied on the call that just dispatched a fresh code cannot
@@ -476,7 +493,7 @@ func (cfg *registerConfig) accountCredentialOrPause(ctx context.Context, key str
 	// !freshRequest guarantees OTPRequestedAt is non-nil here, so dereference the
 	// durable cooldown marker directly rather than through a nil fallback.
 	if !freshRequest && now.Sub(*persisted.OTPRequestedAt) >= otpResendCooldown {
-		if err := cfg.requestOTPAt(ctx, store, persisted, requestState, key, now); err != nil {
+		if err := cfg.requestOTPAt(ctx, store, persisted, requestState, requestPeer, requestRelayURL, key, now); err != nil {
 			return "", err
 		}
 	}
@@ -489,7 +506,7 @@ func (cfg *registerConfig) accountCredentialOrPause(ctx context.Context, key str
 // code, and a no-code resume — return this same shape.
 func (cfg *registerConfig) otpPending(state *AgentState, maskedEmail string) *OTPPendingError {
 	return &OTPPendingError{
-		RequestedAt: derefTime(state.OTPRequestedAt, cfg.clock()),
+		RequestedAt: derefTime(state.OTPRequestedAt, cfg.runtime.clock()),
 		MaskedEmail: maskedEmail,
 	}
 }
@@ -502,7 +519,7 @@ func (cfg *registerConfig) registerAndComplete(ctx context.Context, key string, 
 		return nil, err
 	}
 	if cfg.captureRuntime {
-		if err := validateAgentAssignment(state.Assignment, state.AgentID, cfg.clock()); err != nil {
+		if err := validateAgentAssignment(state.Assignment, state.AgentID, cfg.runtime.clock()); err != nil {
 			return nil, fmt.Errorf("%w: invalid enrollment assignment after native registration: %w", cfg.invalidConfigErr, err)
 		}
 	}
@@ -510,8 +527,21 @@ func (cfg *registerConfig) registerAndComplete(ctx context.Context, key string, 
 	if err != nil {
 		return nil, err
 	}
+	return cfg.confirmMintedRuntime(ctx, store, completed)
+}
+
+// confirmMintedRuntime runs the bounded post-mint visibility confirmation when,
+// and only when, this process just minted a device key on the native runtime
+// path. deviceKeyMinted is set only after persistCompletion durably saves that
+// key, so every completion caller shares one provenance gate without moving
+// network work into the persistence helper.
+func (cfg *registerConfig) confirmMintedRuntime(ctx context.Context, store AgentStateStore, completed *AgentState) (*AgentState, error) {
 	if cfg.captureRuntime && cfg.deviceKeyMinted {
-		return cfg.runtime.confirmFreshDeviceAssignment(ctx, store, completed)
+		confirmed, err := cfg.runtime.confirmFreshDeviceAssignment(ctx, store, completed)
+		if err != nil {
+			return nil, fmt.Errorf("%w: post-mint assignment confirmation failed: %w", ErrAgentRuntimeReopenRequired, err)
+		}
+		return confirmed, nil
 	}
 	return completed, nil
 }
@@ -520,33 +550,45 @@ func (cfg *registerConfig) registerAndComplete(ctx context.Context, key string, 
 // through the enrollment taxonomy. Enrollment/recovery and completion-free
 // binding refresh share this single RAK success gate.
 func (cfg *registerConfig) registerExchangeChecked(ctx context.Context, state *AgentState, peer *NHPServerPeerInfo, relayURL, credential string, path pathKind) error {
-	ack, err := cfg.registerExchange(ctx, state, peer, relayURL, credential, path)
+	if cfg.captureRuntime {
+		// captureRuntimeKey validated and retained this one process-owned copy
+		// before registration side effects. Reuse it for native REG instead of
+		// decoding a second plaintext private-key slice. Native registration parses
+		// and classifies its own authenticated RAK; no relay-ack sentinel is needed.
+		if len(cfg.runtimePrivateKey) != x25519key.Size {
+			return fmt.Errorf("%w: native runtime private key is unavailable", cfg.invalidConfigErr)
+		}
+		return nativeRegisterAgent(ctx, state, cfg.runtimePrivateKey, state.KeyID, credential, registerUserData{
+			Hostname: cfg.hostname,
+			Version:  cfg.version,
+			Takeover: cfg.takeover,
+		}, path, &cfg.runtime)
+	}
+	ack, err := cfg.registerExchange(ctx, state, peer, relayURL, credential)
 	if err != nil {
 		return err
 	}
-	if !ack.isSuccess() {
-		return mapRAKError(ack, path)
-	}
-	return nil
+	return rakResult(ack, path)
 }
 
 // requestOTPAt centralizes the anti-spam save-before-send ordering. persisted is
 // the durable state whose cooldown marker changes; requestState may be a
-// refreshed candidate whose current peer/relay coordinates must carry the OTP.
+// refreshed candidate whose device identity must carry the OTP. requestPeer and
+// requestRelayURL always come from the current registration-info response.
 // This pre-send write commits only OTPRequestedAt on persisted; candidate's new
 // binding metadata is not durable until an authenticated RAK succeeds. If the
 // relay send fails, the marker deliberately remains durable and this call
 // returns the transport error; a retry inside the cooldown may therefore return
 // OTPPendingError even though delivery is unconfirmed. ErrOTPPending denotes a
 // durable cooldown/resume state, never proof that the email was delivered.
-func (cfg *registerConfig) requestOTPAt(ctx context.Context, store AgentStateStore, persisted, requestState *AgentState, key string, now time.Time) error {
+func (cfg *registerConfig) requestOTPAt(ctx context.Context, store AgentStateStore, persisted, requestState *AgentState, requestPeer *NHPServerPeerInfo, requestRelayURL, key string, now time.Time) error {
 	previous := persisted.OTPRequestedAt
 	persisted.OTPRequestedAt = &now
 	if err := store.SaveAgentState(ctx, persisted); err != nil {
 		persisted.OTPRequestedAt = previous // restore the unsaved in-memory value
 		return err
 	}
-	return cfg.sendOTP(ctx, requestState, requestState.NHPPeer, requestState.RelayURL, key)
+	return cfg.sendOTP(ctx, requestState, requestPeer, requestRelayURL, key)
 }
 
 // tryCompletionProbe attempts a completion fetch to self-heal a crash that
@@ -579,12 +621,12 @@ func (cfg *registerConfig) tryCompletionProbe(ctx context.Context, key string, s
 		return true, nil, err
 	}
 	doneState, err = cfg.persistCompletion(ctx, store, state, comp)
-	if err == nil && cfg.captureRuntime && cfg.deviceKeyMinted {
+	if err == nil {
 		// A successful crash-recovery probe is still the first local handoff of a
 		// freshly minted device credential. Route it through the same bounded
 		// post-mint visibility confirmation as the direct REG -> completion path,
 		// without repeating either REG or completion.
-		doneState, err = cfg.runtime.confirmFreshDeviceAssignment(ctx, store, doneState)
+		doneState, err = cfg.confirmMintedRuntime(ctx, store, doneState)
 	}
 	return true, doneState, err
 }
@@ -592,41 +634,19 @@ func (cfg *registerConfig) tryCompletionProbe(ctx context.Context, key string, s
 // registerExchange builds and sends the NHP_REG round trip, returning the
 // decrypted NHP_RAK body. credential is the enrollment credential (key secret on
 // the bootstrap path, one-time code on the account path).
-func (cfg *registerConfig) registerExchange(ctx context.Context, state *AgentState, peer *NHPServerPeerInfo, relayURL, credential string, path pathKind) (*registerAckBody, error) {
-	if cfg.captureRuntime {
-		// captureRuntimeKey validated and retained this one process-owned copy
-		// before registration side effects. Reuse it for native REG instead of
-		// decoding a second plaintext private-key slice.
-		if len(cfg.runtimePrivateKey) != 32 {
-			return nil, fmt.Errorf("%w: native runtime private key is unavailable", cfg.invalidConfigErr)
-		}
-		if err := nativeRegisterAgent(ctx, state, cfg.runtimePrivateKey, state.KeyID, credential, registerUserData{
-			Hostname: cfg.hostname,
-			Version:  cfg.version,
-			Takeover: cfg.takeover,
-		}, path, &cfg.runtime); err != nil {
-			return nil, err
-		}
-		return &registerAckBody{}, nil
-	}
+func (cfg *registerConfig) registerExchange(ctx context.Context, state *AgentState, peer *NHPServerPeerInfo, relayURL, credential string) (*registerAckBody, error) {
 	devicePriv, serverPub, err := cfg.decodeNHPKeys(state, peer)
 	if err != nil {
 		return nil, err
 	}
 	defer wipeBytes(devicePriv)
-	body, err := json.Marshal(registerRequestBody{
-		UsrID: state.KeyID,
-		DevID: state.AgentID,
-		AspID: agentAspID,
-		OTP:   credential,
-		UsrData: registerUserData{
-			Hostname: cfg.hostname,
-			Version:  cfg.version,
-			Takeover: cfg.takeover,
-		},
+	body, err := marshalRegisterRequestBody(state.KeyID, state.AgentID, credential, registerUserData{
+		Hostname: cfg.hostname,
+		Version:  cfg.version,
+		Takeover: cfg.takeover,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("qurl: encode registration body: %w", err)
+		return nil, err
 	}
 	// relayknock.Exchange synchronously seals body into a separate packet before
 	// starting RelayPost; the HTTP transport never references this plaintext.
@@ -746,7 +766,7 @@ func (cfg *registerConfig) fetchRegistrationInfo(ctx context.Context, key string
 	if err := doAuthorizedJSON(ctx, cfg.httpClient, cfg.baseURL, BearerToken(key).Authorize, http.MethodGet, "/v1/agent/registration-info", nil, &env); err != nil {
 		return nil, cfg.mapRegistrationHTTPError(err)
 	}
-	if err := env.Data.validate(cfg.clock(), cfg.invalidConfigErr); err != nil {
+	if err := env.Data.validate(cfg.runtime.clock(), cfg.invalidConfigErr); err != nil {
 		return nil, err
 	}
 	return &env.Data, nil
@@ -802,7 +822,7 @@ func (cfg *registerConfig) postCompletion(ctx context.Context, key string, state
 		}
 		return nil, mapped
 	}
-	if err := env.Data.validate(cfg.clock(), cfg.invalidConfigErr); err != nil {
+	if err := env.Data.validate(cfg.runtime.clock(), cfg.invalidConfigErr); err != nil {
 		env.Data.DeviceAPIKey = ""
 		return nil, credentialPersistenceFailure(state.AgentID, err)
 	}
@@ -1224,6 +1244,9 @@ type RegisterOption interface {
 // RecoverAgentCredential, or opened later by either OpenRegisteredAgent API.
 // WithAgentClientBaseURL and WithAgentClientHTTPClient implement this interface
 // and can be passed to either the RegisterOption or ClientOption entry points.
+// Its embedded interfaces all contain package-private methods, so the option set
+// is deliberately closed: external packages cannot implement this interface,
+// and adding the runtime marker did not break an external implementation.
 type AgentClientOption interface {
 	RegisterOption
 	ClientOption
@@ -1430,13 +1453,7 @@ func validateAgentClientBaseURL(rawURL string, errKind error) (string, error) {
 }
 
 func (o agentClientBaseURLOption) applyRegisterOption(cfg *registerConfig) error {
-	normalized, err := validateAgentClientBaseURL(string(o), ErrInvalidRegisterConfig)
-	if err != nil {
-		return err
-	}
-	cfg.clientBaseURL = normalized
-	cfg.runtime.baseURL = normalized
-	return nil
+	return o.applyAgentRuntimeOption(&cfg.runtime)
 }
 
 func (o agentClientBaseURLOption) applyAgentRuntimeOption(cfg *agentRuntimeConfig) error {
@@ -1490,12 +1507,7 @@ type agentClientHTTPClientOption struct {
 }
 
 func (o agentClientHTTPClientOption) applyRegisterOption(cfg *registerConfig) error {
-	if o.client == nil {
-		return fmt.Errorf("%w: agent Client HTTP client must not be nil", ErrInvalidRegisterConfig)
-	}
-	cfg.clientHTTPClient = o.client
-	cfg.runtime.httpClient = o.client
-	return nil
+	return o.applyAgentRuntimeOption(&cfg.runtime)
 }
 
 func (o agentClientHTTPClientOption) applyAgentRuntimeOption(cfg *agentRuntimeConfig) error {

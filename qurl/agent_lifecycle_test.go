@@ -132,7 +132,7 @@ func TestAgentStateClone_IsolatesEveryMutableField(t *testing.T) {
 }
 
 func TestForcedRegistrationCredential_ErrorPathsReturnUnknownPath(t *testing.T) {
-	cfg := &registerConfig{invalidConfigErr: ErrInvalidRegisterConfig, clock: time.Now}
+	cfg := &registerConfig{invalidConfigErr: ErrInvalidRegisterConfig, runtime: defaultAgentRuntimeConfig()}
 	tests := []struct {
 		name string
 		info *registrationInfoResponse
@@ -358,6 +358,36 @@ func TestAgentRuntimeBinding_AccidentalCopySharesSynchronizedOneShotKey(t *testi
 	wipeBytes(first)
 	binding.Destroy()
 	copied.Destroy()
+}
+
+func TestAgentRuntimeBinding_RetainsIndependentAuthoritativeAssignment(t *testing.T) {
+	registeredAt := time.Now().UTC()
+	state := &AgentState{
+		AgentID:      "agent-binding",
+		RegisteredAt: &registeredAt,
+		Assignment: &AgentAssignment{
+			AgentID:              "agent-binding",
+			CellID:               "cell0",
+			AssignmentGeneration: 1,
+			EndpointRevision:     1,
+			LeaseExpiresAt:       registeredAt.Add(time.Hour),
+			Endpoint: NHPUDPEndpoint{
+				Host:               "cell0.nhp.layerv.ai",
+				Port:               62206,
+				ServerPublicKeyB64: validTestNHPServerPublicKeyB64,
+			},
+		},
+	}
+	want := state.Assignment.clone()
+	binding := newAgentRuntimeBinding(state, make([]byte, 32))
+	defer binding.Destroy()
+
+	state.Assignment.CellID = "mutated-source"
+	binding.CellID = "mutated-projection"
+	binding.NHPUDPEndpoint.Host = "mutated.example.test"
+	if got := binding.assignment(); !got.equal(want) {
+		t.Fatalf("authoritative assignment = %#v, want independent clone %#v", got, want)
+	}
 }
 
 func TestEnrollmentRefreshLegacy_CustomStoreReceivesClonedCandidate(t *testing.T) {
@@ -816,7 +846,7 @@ func TestEnrollmentRefreshLegacy_RotatesBindingPreservesCredentialAndSkipsComple
 	t.Cleanup(rotatedRelay.Close)
 	h.svc.mu.Lock()
 	h.svc.nhp = rotated
-	h.svc.keyID = "key_rotated"
+	h.svc.keyID = "key_rotated00001"
 	h.svc.mu.Unlock()
 	inner := h.svc.handler(rotatedRelay.URL)
 	h.setHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -897,7 +927,7 @@ func TestEnrollmentRefreshLegacy_RotatesBindingPreservesCredentialAndSkipsComple
 	if persisted.NHPPeer == nil ||
 		persisted.NHPPeer.PublicKeyB64 != rotated.serverPubB64() ||
 		persisted.RelayURL != rotatedRelay.URL ||
-		persisted.KeyID != "key_rotated" {
+		persisted.KeyID != "key_rotated00001" {
 		t.Fatalf("rotated enrollment binding = peer %#v, relay %q, key id %q", persisted.NHPPeer, persisted.RelayURL, persisted.KeyID)
 	}
 	if h.svc.completionCalls.Load() != completeBefore {
@@ -912,13 +942,13 @@ func TestEnrollmentRefreshLegacy_SaveFailureDoesNotCommitNewBinding(t *testing.T
 	h := registeredHarness(t)
 	before := h.loadState(t)
 	h.svc.mu.Lock()
-	h.svc.keyID = "key_new_binding"
+	h.svc.keyID = "key_newbind00001"
 	h.svc.mu.Unlock()
 	saveFailure := errors.New("injected refresh save failure")
 	failing := &failingSaveStore{
 		inner: h.store,
 		failWhen: func(state *AgentState) bool {
-			return state.KeyID == "key_new_binding"
+			return state.KeyID == "key_newbind00001"
 		},
 		failErr:   saveFailure,
 		failsLeft: 1,
@@ -2279,7 +2309,7 @@ func TestAgentLifecycleMutationsParticipateInSharedSetupLock(t *testing.T) {
 	t.Run("refresh release failure preserves binding", func(t *testing.T) {
 		h := registeredHarness(t)
 		h.svc.mu.Lock()
-		h.svc.keyID = "key_after_release_failure"
+		h.svc.keyID = "key_afterrel0000"
 		h.svc.mu.Unlock()
 		completeBefore := h.svc.completionCalls.Load()
 		releaseFailure := errors.New("injected refresh lock release failure")
@@ -2297,7 +2327,7 @@ func TestAgentLifecycleMutationsParticipateInSharedSetupLock(t *testing.T) {
 			t.Fatalf("refresh setup lock acquire/release = %d/%d, want 1/1", acquired.Load(), released.Load())
 		}
 		persisted := h.loadState(t)
-		if persisted.KeyID != "key_after_release_failure" {
+		if persisted.KeyID != "key_afterrel0000" {
 			t.Fatalf("binding after release failure = %q, want committed replacement", persisted.KeyID)
 		}
 		if h.svc.completionCalls.Load() != completeBefore {

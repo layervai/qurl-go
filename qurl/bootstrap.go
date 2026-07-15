@@ -87,11 +87,17 @@ type NHPServerPeerInfo struct {
 // fields. SchemaVersion is informational; the runtime derives readiness from the
 // fields themselves (RegisteredAt + DeviceAPIKey), never from the version number.
 type AgentState struct {
-	AgentID       string             `json:"agent_id,omitempty"`
-	PrivateKeyB64 string             `json:"private_key_b64"`
-	PublicKeyB64  string             `json:"public_key_b64"`
-	RegisteredAt  *time.Time         `json:"registered_at,omitempty"`
-	NHPPeer       *NHPServerPeerInfo `json:"nhp_server_peer,omitempty"`
+	AgentID       string     `json:"agent_id,omitempty"`
+	PrivateKeyB64 string     `json:"private_key_b64"`
+	PublicKeyB64  string     `json:"public_key_b64"`
+	RegisteredAt  *time.Time `json:"registered_at,omitempty"`
+	// NHPPeer is the relay-era server view. Native assignment adoption derives it
+	// from Assignment.Endpoint, but explicit relay credential recovery may refresh
+	// it independently while retaining the authoritative native Assignment. Native
+	// routing always consumes Assignment, and the next native refresh re-adopts the
+	// matching peer. NHPPeer remains persisted for relay compatibility and
+	// completion corroboration.
+	NHPPeer *NHPServerPeerInfo `json:"nhp_server_peer,omitempty"`
 
 	// --- v2 additive fields (RegisterAgent) ---
 
@@ -376,7 +382,7 @@ func BootstrapAgent(ctx context.Context, setupKey string, store AgentStateStore,
 		hostname:         cfg.hostname,
 		version:          cfg.version,
 		invalidConfigErr: ErrInvalidBootstrapConfig,
-		clock:            time.Now,
+		runtime:          defaultAgentRuntimeConfig(),
 	}
 	state, err := rcfg.run(ctx, setupKey, store)
 	if err != nil {

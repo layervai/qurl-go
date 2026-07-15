@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // qURL platform reply interpretation. The lower transport authenticates the reply
@@ -27,9 +28,15 @@ type ServerDenyError struct {
 	// ErrCode is the qURL platform error code string. "" / "0" are success and
 	// never produce this error.
 	ErrCode string
+	// ErrMsg is the authenticated human-readable platform detail, when the reply
+	// schema carries one. Callers must make decisions from ErrCode, not this text.
+	ErrMsg string
 }
 
 func (e *ServerDenyError) Error() string {
+	if msg := strings.TrimSpace(e.ErrMsg); msg != "" {
+		return fmt.Sprintf("qurl: platform denied access (errCode=%q): %s", e.ErrCode, msg)
+	}
 	return fmt.Sprintf("qurl: platform denied access (errCode=%q)", e.ErrCode)
 }
 

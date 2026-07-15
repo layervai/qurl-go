@@ -91,6 +91,24 @@ this locally proven post-mint transition does it retry the exact transient 401
 refresh, or resource request never retries a 401 and never starts implicit
 credential recovery.
 
+On the account path, native placement is intentionally fetched before the SDK
+emails or verifies the OTP. The authenticated account API key itself authorizes
+assignment creation/read; the OTP proves the later NHP agent enrollment, not
+control-plane placement authority. qurl-service allows active account and
+unconsumed enrollment keys to create or read placement on
+`/v1/agent/assignment`. A minted per-device key is narrower: it may refresh only
+the exact immutable `agent_id` already bound to that key, and it cannot create
+or change placement. An OTP resume therefore re-fetches the same sticky
+assignment with the account key before sending REG; the SDK never derives or
+probes another cell.
+
+Registration also pins qurl-service's public API-key id shape:
+`key_` plus exactly 12 ASCII alphanumeric characters. Both registration-info's
+enrollment `key_id` and completion's `device_api_key_id` are rejected if they
+drift. This is an intentional cross-repository release coupling: change the
+qurl-service OpenAPI/issuer and this SDK validation together, never by relaxing
+one side independently.
+
 `WithRegisterBaseURL` targets only registration-info and completion.
 `WithAgentClientBaseURL` and `WithAgentClientHTTPClient` are dual-purpose
 options accepted by registration/recovery and both `OpenRegisteredAgent` APIs,
@@ -362,7 +380,9 @@ Both SDK local-file stores require an immediate `0700` state directory, write a
 failures stop registration; custom/network stores remain caller-serialized.
 "Mandatory" means the SDK refuses to proceed unless it acquires the OS advisory
 `flock`; it does not turn advisory locking into kernel-enforced exclusion for a
-non-cooperating writer.
+non-cooperating writer. The kernel releases the lock when the holder exits, even
+after a crash or forced termination; the persistent `*.lock` sidecar contains no
+ownership state and cannot strand a later process as a stale marker.
 The exact directory mode is enforced on load as well as save, including a
 completed registration's read-only fast path; correct a pre-existing `0750` or
 `0755` directory to `0700` before upgrading. A read-only filesystem mount is
@@ -479,6 +499,26 @@ These are deliberately separate operations:
   `RegisteredAt`, and returns a primed Client plus narrow runtime binding without
   another store/KMS load. Do not copy or log the binding, and wipe/destroy its
   private key after the runtime handoff.
+  For an SDK local-file store, the mandatory setup lock stays held for this
+  entire refresh transition, including the assignment call and native REG, so a
+  concurrent refresh/recovery waits instead of observing or committing a partial
+  binding. The default assignment retry pacing budget is 45 seconds; individual
+  API requests use the SDK's 30-second HTTP timeout, and native REG tries at most
+  three addresses with a three-second per-address deadline. Set a shorter caller
+  context when the operator needs a lower cap on total lock occupancy; its
+  cancellation stops the transition. Keep equivalent finite bounds when
+  injecting a custom HTTP client, resolver, or dialer.
+  Native RAK and ACK application bodies are deliberately closed schemas:
+  duplicate/unknown fields, wrong types, null or non-object bodies, and trailing
+  data fail closed. ACK recognizes the complete current OpenNHP producer
+  envelope, including typed `aspToken`, `preActions`, and `redirectUrl`; the SDK
+  ignores the first and last. An absent/empty/all-null `preActions` map is the
+  current no-op producer shape. Any non-null action fails closed because it
+  requires OpenNHP's NHP_ACC phase, which this runtime does not implement. Any
+  additive wire field therefore requires a coordinated qurl-conformance vector
+  update and a lockstep producer/SDK release; assignment success JSON remains
+  separately forward-compatible. Do not roll out an additive NHP reply field
+  independently.
 - `RecoverAgentCredential` is the operator-controlled path for a revoked or
   locally lost device credential. It preserves the persisted device id and
   X25519 keypair and, once enrollment authorization is available, sends REG,
@@ -504,11 +544,24 @@ if err != nil {
 }
 admission, err := qurl.KnockRegisteredAgent(ctx, binding, devicePrivateKey,
 	knockResourceID, qurl.NativeKnockOptions{RunID: runID})
+if err != nil {
+	return err
+}
+return runConnector(client, admission, devicePrivateKey)
+```
 
+After an owner-approved revoke, credential recovery is a separate lifecycle
+operation. Cut over immediately to the returned Client:
+
+```go
 recoveredClient, err := qurl.RecoverAgentCredential(ctx, enrollmentKey, store,
 	qurl.WithRegisterBaseURL(registrationURL),
 	qurl.WithAgentClientBaseURL(resourceAPIURL),
 )
+if err != nil {
+	return err
+}
+return runConnectorWithRecoveredClient(recoveredClient)
 ```
 
 Interactive account-key credential recovery must make its wider policy explicit
@@ -643,14 +696,17 @@ Every message names the next concrete step.
 | `qurl.ErrRegistrationInvalidInput` | The service rejected a registration input as malformed (e.g. a bad device id). | Fix the input (use a valid `WithDeviceID`) and re-run. |
 | `qurl.ErrRegistrationDisabled` | Agent registration is disabled for the account. | Contact the account owner to enable it. |
 | `qurl.ErrInvalidRegisterConfig` | Inputs or options were invalid before any network call (empty key, nil store, conflicting options). | Fix the call. |
+| `qurl.ErrAssignmentInvalidResponse` | An assigned-cell response or persisted assignment is malformed, or a warm-open/knock lease has expired. Front doors also wrap this in their config sentinel. | Run `RefreshAgentRegistration` to replace an expired lease. If refresh still reports an invalid persisted shape, restore known-good state or use the explicit owner-approved recovery/re-enrollment workflow; never derive or probe a cell locally. |
 | `*qurl.AssignmentRecoveryRequiredError` (unwraps `ErrAssignmentRecoveryRequired`) | Every bounded attempt returned `503 cell_assignment_unavailable`; the wire cannot distinguish a transient authority outage from a missing durable own-assignment row. | Stop the loop and surface operator recovery; do not retry every few seconds indefinitely. |
 | `*qurl.AssignmentRateLimitedError` (unwraps `ErrAssignmentRateLimited`) | Either the fixed assignment budget or general owner budget returned 429. | Honor its `RetryAfter` / `Reset` timing in later request scheduling; the SDK does not auto-retry 429. |
-| `qurl.ErrAssignmentForbidden` | Device-key assignment refresh returned 401/403, including account freeze or revoked/unknown credential. | Stop refreshing; never fall back to the stale binding after lease expiry. Recover credentials only through the explicit owner-approved workflow. |
+| `qurl.ErrAssignmentForbidden` | Device-key assignment refresh returned 401/403, including account freeze or revoked/unknown credential. During first enrollment this can be the wrapped cause of `ErrAgentRuntimeReopenRequired` after the device key was durably minted. | Stop refreshing; never fall back to the stale binding after lease expiry. If `ErrAgentRuntimeReopenRequired` also matches, reopen and inspect the durable state instead of repeating completion. Otherwise recover credentials only through the explicit owner-approved workflow. |
 | `qurl.ErrAssignmentReassignmentRequired` / `*qurl.AgentAssignmentChangedError` | The control plane reports a move, or cell/generation differs from the persisted assignment. No UDP or local mutation occurred. | Complete the explicit reassignment workflow before refreshing again. Never probe another cell locally. |
 | `qurl.ErrAssignmentQuotaExceeded` | Assignment returned terminal `409 agent_assignment_quota_exceeded`. | Deprovision an unused assignment or raise the owner cap; do not retry or rotate credentials. |
-| `qurl.ErrAssignmentEndpointRefreshRequired` | Initial enrollment minted and saved the device credential, but endpoint revision advanced during the immediate post-mint visibility confirmation. | Reopen the durable state and run ordinary `RefreshAgentRegistration`; never repeat completion. |
+| `qurl.ErrAgentRuntimeReopenRequired` | Initial enrollment minted and durably saved the device credential, but its immediate post-mint assignment confirmation failed. The underlying assignment error remains matchable. | Reopen the durable state with `OpenRegisteredAgentRuntime`, then handle the wrapped assignment outcome. Never repeat completion or clear the state. |
+| `qurl.ErrAssignmentEndpointRefreshRequired` | Initial enrollment minted and saved the device credential, but endpoint revision advanced during the immediate post-mint visibility confirmation. It is wrapped by `ErrAgentRuntimeReopenRequired`. | Reopen the durable state and run ordinary `RefreshAgentRegistration`; never repeat completion. |
 | `qurl.ErrAgentBindingPersistence` | Native REG authenticated a refreshed assignment, but the store rejected its metadata save. The wrapped store cause remains matchable; no device credential was minted or changed. | Correct the store failure, then safely retry `RefreshAgentRegistration`. |
 | `qurl.ErrServerOverloaded` | Native knock received an authenticated overload cookie challenge. | Back off within the caller's bounded retry policy while reusing the same outer-cycle RunID. |
+| `*qurl.ServerDenyError` | Native knock received an authenticated platform denial. `ErrCode` is the decision field; `ErrMsg` carries authenticated human-readable detail when the producer supplied it. | Make control-flow decisions from `ErrCode`, not message text; surface the detail for diagnostics without treating the denial as a transport failure. |
 | `qurl.ErrMalformedReply` | Native knock got a wrong type/counter or malformed authenticated ACK, including a missing requested token/host. | Fail closed and investigate server/protocol skew; do not use partial reply data. |
 | `qurl.ErrInvalidAgentState` | Persisted state exists but is corrupt/unreadable — surfaced wrapped in the front-door config error. (`ErrAgentStateNotFound` is **not** caller-facing: it is the store-contract sentinel a custom `AgentStateStore` returns when empty, which the engine converts into a fresh enrollment.) | Restore a known-good backup. If recovery is impossible, use an owner credential to revoke `agent:<known-agent-id>` before clearing and re-enrolling. If the id is unreadable, inventory and revoke the account's affected agent keys first; never clear state and leave an orphan credential active. |
 | `qurl.ErrAgentStateKeyWrapper` | A sealed store's KMS/HSM wrapper is unavailable or violated its 32-byte DEK contract. | Restore provider access/configuration; do not delete otherwise valid state for an operational outage. |

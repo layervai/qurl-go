@@ -37,8 +37,8 @@ const (
 var providerIDPattern = regexp.MustCompile(`^[a-z][a-z0-9]*([.-][a-z0-9]+)*$`)
 
 var (
-	errSealedJSONNesting        = errors.New("sealed envelope JSON nesting exceeds limit")
-	errDuplicateSealedJSONField = errors.New("duplicate sealed envelope JSON field")
+	errSealedJSONNesting  = errors.New("sealed envelope JSON nesting exceeds limit")
+	errDuplicateJSONField = errors.New("duplicate JSON field")
 )
 
 // ErrAgentStateKeyWrapper reports an operational failure from an
@@ -443,7 +443,7 @@ func decodeSealedAgentStateEnvelope(raw []byte, envelope *sealedAgentStateEnvelo
 		switch {
 		case errors.Is(err, errSealedJSONNesting):
 			return invalidSealedState("JSON nesting exceeds limit")
-		case errors.Is(err, errDuplicateSealedJSONField):
+		case errors.Is(err, errDuplicateJSONField):
 			return invalidSealedState("envelope contains duplicate object fields")
 		default:
 			return invalidSealedState("envelope contains malformed JSON")
@@ -506,7 +506,7 @@ func consumeUniqueJSONValue(decoder *json.Decoder, depth int) error {
 				return errors.New("JSON object key is not a string")
 			}
 			if _, exists := seen[key]; exists {
-				return fmt.Errorf("%w %q", errDuplicateSealedJSONField, key)
+				return fmt.Errorf("%w %q", errDuplicateJSONField, key)
 			}
 			seen[key] = struct{}{}
 			if err := consumeUniqueJSONValue(decoder, depth+1); err != nil {

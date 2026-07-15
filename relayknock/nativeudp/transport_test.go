@@ -1,6 +1,7 @@
 package nativeudp_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdh"
 	"crypto/rand"
@@ -244,14 +245,21 @@ func TestExchange_RoundTrip(t *testing.T) {
 func TestKnockAndRegisterHelpers(t *testing.T) {
 	t.Parallel()
 	_, ep, opts := newLoopbackExchange(t, behaviorNormal)
+	wantDevicePrivateKey := bytes.Clone(opts.DeviceStaticPriv)
 
 	ack, err := nativeudp.Knock(context.Background(), ep, nil, opts)
 	if err != nil || !ack.IsACK() {
 		t.Fatalf("Knock: reply=%v err=%v", ack, err)
 	}
+	if !bytes.Equal(opts.DeviceStaticPriv, wantDevicePrivateKey) {
+		t.Fatal("Knock mutated the caller-owned device static private key")
+	}
 	rak, err := nativeudp.Register(context.Background(), ep, nil, opts)
 	if err != nil || !rak.IsRegisterAck() {
 		t.Fatalf("Register: reply=%v err=%v", rak, err)
+	}
+	if !bytes.Equal(opts.DeviceStaticPriv, wantDevicePrivateKey) {
+		t.Fatal("Register mutated the caller-owned device static private key")
 	}
 }
 
