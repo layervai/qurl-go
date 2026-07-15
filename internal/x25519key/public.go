@@ -3,7 +3,6 @@
 package x25519key
 
 import (
-	"bytes"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -13,6 +12,15 @@ import (
 
 // Size is the encoded X25519 public-key size in bytes.
 const Size = 32
+
+var canonicalUPrime = func() (prime [Size]byte) {
+	for i := range prime {
+		prime[i] = 0xff
+	}
+	prime[0] = 0xed
+	prime[Size-1] = 0x7f
+	return prime
+}()
 
 // DecodeCanonicalBase64 decodes the single padded standard-base64 spelling of
 // a usable, canonical X25519 public key. Durable public identities deliberately
@@ -54,16 +62,10 @@ func ValidatePublic(raw []byte) error {
 func isCanonicalU(raw []byte) bool {
 	// p = 2^255-19, encoded little-endian as ed ff ... ff 7f. Compare from the
 	// most-significant byte without allocating a big.Int.
-	prime := [Size]byte{0xed}
-	for i := 1; i < Size-1; i++ {
-		prime[i] = 0xff
+	for i := Size - 1; i >= 0; i-- {
+		if raw[i] != canonicalUPrime[i] {
+			return raw[i] < canonicalUPrime[i]
+		}
 	}
-	prime[Size-1] = 0x7f
-	// Reverse both little-endian operands for a lexical big-endian comparison.
-	var gotBE, primeBE [Size]byte
-	for i := range raw {
-		gotBE[i] = raw[Size-1-i]
-		primeBE[i] = prime[Size-1-i]
-	}
-	return bytes.Compare(gotBE[:], primeBE[:]) < 0
+	return false // raw == p is non-canonical.
 }

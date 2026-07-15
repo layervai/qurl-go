@@ -282,16 +282,11 @@ func sendOne(ctx context.Context, dialer Dialer, address string, packet []byte, 
 	// authenticate/reject, not a transport miss to retry against another address.
 	buf := make([]byte, nhpwire.PacketBufferSize+1)
 	n, err = conn.Read(buf)
-	if n > nhpwire.PacketBufferSize {
-		// Some datagram implementations return both the truncated prefix and an
-		// error such as WSAEMSGSIZE. Preserve the bytes-first oversize signal so
-		// the caller classifies the received datagram as unauthenticated instead
-		// of treating it as a transport miss and falling through to another IP.
-		out := make([]byte, n)
-		copy(out, buf[:n])
-		return out, nil
-	}
-	if err != nil {
+	// Some datagram implementations return both the truncated prefix and an
+	// error such as WSAEMSGSIZE. Preserve the bytes-first oversize signal so
+	// the caller classifies the received datagram as unauthenticated instead
+	// of treating it as a transport miss and falling through to another IP.
+	if n <= nhpwire.PacketBufferSize && err != nil {
 		return nil, fmt.Errorf("read from %s: %w", address, err)
 	}
 	out := make([]byte, n)
@@ -439,7 +434,6 @@ var (
 )
 
 func publicAssignmentAddress(addr netip.Addr) bool {
-	addr = addr.Unmap()
 	return addr.IsValid() && addr.IsGlobalUnicast() && !addr.IsPrivate() &&
 		!addr.IsLoopback() && !addr.IsLinkLocalUnicast() &&
 		!addr.IsLinkLocalMulticast() && !addr.IsMulticast() && !addr.IsUnspecified() &&
