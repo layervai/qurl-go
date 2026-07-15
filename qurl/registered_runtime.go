@@ -461,7 +461,7 @@ func nativeRegisterAgent(ctx context.Context, state *AgentState, privateKey []by
 	if err != nil {
 		return err
 	}
-	return rakResult(ack, path)
+	return rakResult(ack, path, state.AgentID)
 }
 
 const (
@@ -613,28 +613,11 @@ func (v *nativeJSONStringMap) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// nativeAgentPreAccessInfo mirrors the current OpenNHP producer value shape so
-// the envelope remains type-fenced. qURL Connector does not implement OpenNHP's
-// required NHP_ACC phase, so interpretNativeAgentKnockReply rejects every
-// non-null action instead of falsely reporting that the resource is ready.
-type nativeAgentPreAccessInfo struct {
-	AccessIP       nativeJSONValue[string] `json:"acIp"`
-	AccessPort     nativeJSONValue[string] `json:"acPort"`
-	ACPublicKey    nativeJSONValue[string] `json:"acPubKey"`
-	ACToken        nativeJSONValue[string] `json:"acToken"`
-	ACCipherScheme nativeJSONValue[int]    `json:"acCipherScheme"`
-}
-
-func (v nativeAgentPreAccessInfo) validateRequiredFields() error {
-	return requirePresentFields("pre-access action field",
-		presenceField{name: "acIp", present: v.AccessIP.Present},
-		presenceField{name: "acPort", present: v.AccessPort.Present},
-		presenceField{name: "acPubKey", present: v.ACPublicKey.Present},
-		presenceField{name: "acToken", present: v.ACToken.Present},
-		presenceField{name: "acCipherScheme", present: v.ACCipherScheme.Present},
-	)
-}
-
+// nativePreAccessActions records whether the current producer requested any
+// NHP_ACC action. qURL Connector does not implement that phase, so every
+// non-null action value is treated as opaque and rejected by
+// interpretNativeAgentKnockReply instead of maintaining an unused copy of the
+// producer's action-field schema.
 type nativePreAccessActions struct {
 	RequiresAction bool
 }
@@ -653,16 +636,9 @@ func (v *nativePreAccessActions) UnmarshalJSON(data []byte) error {
 	if actions == nil {
 		return errors.New("must be a JSON object")
 	}
-	for resourceID, actionJSON := range actions {
+	for _, actionJSON := range actions {
 		if isJSONNull(actionJSON) {
 			continue
-		}
-		var action nativeAgentPreAccessInfo
-		if err := strictDecodeJSON(actionJSON, &action); err != nil {
-			return fmt.Errorf("pre-access action %q: %w", resourceID, err)
-		}
-		if err := action.validateRequiredFields(); err != nil {
-			return fmt.Errorf("pre-access action %q: %w", resourceID, err)
 		}
 		v.RequiresAction = true
 	}

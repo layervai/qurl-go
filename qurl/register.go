@@ -568,7 +568,7 @@ func (cfg *registerConfig) registerExchangeChecked(ctx context.Context, state *A
 	if err != nil {
 		return err
 	}
-	return rakResult(ack, path)
+	return rakResult(ack, path, state.AgentID)
 }
 
 // requestOTPAt centralizes the anti-spam save-before-send ordering. persisted is

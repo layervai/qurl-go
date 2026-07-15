@@ -96,14 +96,14 @@ func (b registerAckBody) isSuccess() bool {
 
 // rakResult is the single success/denial gate after either transport has parsed
 // an authenticated NHP_RAK into the shared wire shape.
-func rakResult(ack *registerAckBody, path pathKind) error {
+func rakResult(ack *registerAckBody, path pathKind, deviceID string) error {
 	if ack == nil {
 		return fmt.Errorf("%w: registration reply is nil", ErrRegisterReplyMalformed)
 	}
 	if ack.isSuccess() {
 		return nil
 	}
-	return mapRAKError(ack, path)
+	return mapRAKError(ack, path, deviceID)
 }
 
 // parseRegisterAck decodes the decrypted NHP_RAK body. The SDK and current
@@ -242,12 +242,29 @@ func sentinelForRAKCode(code string) error {
 }
 
 // mapRAKError turns a non-success NHP_RAK body into a typed error. Known codes
-// become the actionable sentinels (from rakMappings); 52100 is resolved by path;
-// anything else becomes a RegistrationDenyError carrying the raw code and message
-// so a caller can act on a code newer than this SDK.
-func mapRAKError(ack *registerAckBody, path pathKind) error {
+// become actionable sentinels (from rakMappings); enrollment credential codes
+// are resolved by path. A device-refresh path has neither OTP nor takeover
+// inputs, so credential/identity denials require explicit recovery while
+// enrollment-only denials are malformed on that path. Anything else becomes a
+// RegistrationDenyError carrying the raw code and message so a caller can act
+// on a code newer than this SDK.
+func mapRAKError(ack *registerAckBody, path pathKind, deviceID string) error {
 	code := strings.TrimSpace(ack.ErrCode)
 	msg := strings.TrimSpace(ack.ErrMsg)
+
+	if path == pathDevice {
+		switch code {
+		case rakCredentialInvalid, rakCredentialExpired, rakIdentityConflict, rakInvalidAPIKey:
+			// Preserve the authenticated code and detail as text instead of wrapping a
+			// RegistrationDenyError. Its path-independent Is bridge would otherwise
+			// reintroduce enrollment-only OTP, takeover, or API-key sentinels on a
+			// device-credential refresh path that cannot act on them.
+			cause := fmt.Errorf("persisted device credential or identity was rejected by native registration (errCode=%q)%s", ack.ErrCode, detailSuffix(msg))
+			return &CredentialRecoveryRequiredError{DeviceID: deviceID, Cause: cause}
+		case rakEmailUnavailable, rakBootstrapConsumed, rakInvalidInput:
+			return fmt.Errorf("%w: native device registration returned enrollment-only errCode %q%s", ErrRegisterReplyMalformed, ack.ErrCode, detailSuffix(msg))
+		}
+	}
 
 	// 52100 is path-dependent (see pathKind), so it is resolved ahead of the
 	// table, which deliberately omits it: on the bootstrap path the credential IS
@@ -256,8 +273,6 @@ func mapRAKError(ack *registerAckBody, path pathKind) error {
 		switch path {
 		case pathBootstrap:
 			return fmt.Errorf("%w: pre-issued key was rejected by the enrollment service%s", ErrKeyRejected, detailSuffix(msg))
-		case pathDevice:
-			return fmt.Errorf("%w: the persisted device credential was rejected by native registration%s", ErrKeyRejected, detailSuffix(msg))
 		case pathAccount:
 			return fmt.Errorf("%w: the one-time code was rejected; re-run the same operation with the correct qurl.WithOTP code%s", ErrOTPIncorrect, detailSuffix(msg))
 		default:

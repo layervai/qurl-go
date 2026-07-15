@@ -513,6 +513,49 @@ func TestRefreshAgentRegistration_RejectsUnstructuredNativeRAKWithoutSaving(t *t
 	}
 }
 
+func TestRefreshAgentRegistration_DeviceRAKDenialsRequireCredentialRecovery(t *testing.T) {
+	tests := []struct {
+		name string
+		code string
+	}{
+		{name: "expired credential", code: rakCredentialExpired},
+		{name: "identity conflict", code: rakIdentityConflict},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := registeredHarness(t)
+			body := fmt.Sprintf(`{"errCode":%q,"errMsg":"scripted device denial","aspId":"agent"}`, tt.code)
+			udpServer := startNativeRegistrationUDPServerWithRAK(t, h.nhp, true, []byte(body))
+			bindPersistedNativeAssignment(t, h, udpServer.port(), time.Now().Add(time.Hour))
+			before := h.loadState(t)
+			installRuntimeAssignmentHandler(t, h, udpServer.port())
+			store := &runtimeCountingStore{inner: h.store}
+
+			client, binding, err := RefreshAgentRegistration(context.Background(), store, runtimeRefreshOptions(h)...)
+			if client != nil || binding != nil || !errors.Is(err, ErrCredentialRecoveryRequired) {
+				t.Fatalf("device RAK denial result = client %v binding %v err %v", client, binding, err)
+			}
+			if errors.Is(err, ErrOTPExpired) || errors.Is(err, ErrAgentIdentityConflict) || errors.Is(err, ErrKeyRejected) {
+				t.Fatalf("device RAK denial exposed enrollment-only sentinel: %v", err)
+			}
+			var recovery *CredentialRecoveryRequiredError
+			if !errors.As(err, &recovery) || recovery.DeviceID != before.AgentID {
+				t.Fatalf("device RAK recovery error = %#v, want device id %q", recovery, before.AgentID)
+			}
+			if !strings.Contains(err.Error(), tt.code) || !strings.Contains(err.Error(), "scripted device denial") {
+				t.Fatalf("device RAK recovery error lost authenticated detail: %v", err)
+			}
+			if store.loads.Load() != 1 || store.saves.Load() != 0 {
+				t.Fatalf("device RAK denial loads/saves = %d/%d, want 1/0", store.loads.Load(), store.saves.Load())
+			}
+			after := h.loadState(t)
+			if !reflect.DeepEqual(after, before) {
+				t.Fatalf("device RAK denial mutated durable state: before=%#v after=%#v", before, after)
+			}
+		})
+	}
+}
+
 func TestRefreshAgentRegistration_MalformedNativeTransportReplyMapsToTaxonomy(t *testing.T) {
 	h := registeredHarness(t)
 	h.nhp.regReplyCounterOffset = 1 // RAK counter won't echo REG -> mis-correlated.
@@ -1210,14 +1253,25 @@ func TestInterpretNativeAgentKnockReply_AcceptsCurrentOpenNHPProducerEnvelope(t 
 	}
 }
 
-func TestInterpretNativeAgentKnockReply_RejectsRequiredPreAccessAction(t *testing.T) {
-	body := `{"errCode":"0","resHost":{"requested":"frps.example.test:7000"},"opnTime":900,"agentAddr":"203.0.113.9:49152","acTokens":{"requested":"ac-live-token"},"preActions":{"other":{"acIp":"198.51.100.7","acPort":"443","acPubKey":"synthetic-public-key","acToken":"synthetic-pre-access-token","acCipherScheme":1},"requested":null}}`
-	result, err := interpretNativeAgentKnockReply(&relayknock.Reply{
-		Type: relayknock.TypeACK,
-		Body: []byte(body),
-	}, "requested")
-	if result != nil || !errors.Is(err, ErrMalformedReply) || !strings.Contains(err.Error(), "unsupported pre-access action") {
-		t.Fatalf("pre-access ACK result = %#v err %v, want explicit fail-closed rejection", result, err)
+func TestInterpretNativeAgentKnockReply_RejectsEveryNonNullPreAccessAction(t *testing.T) {
+	for _, action := range []string{
+		`{"acIp":"198.51.100.7","acPort":"443","acPubKey":"synthetic-public-key","acToken":"synthetic-pre-access-token","acCipherScheme":1}`,
+		`{"future":true}`,
+		`{}`,
+		`"opaque-future-action"`,
+		`7`,
+		`[]`,
+	} {
+		t.Run(action, func(t *testing.T) {
+			body := `{"errCode":"0","resHost":{"requested":"frps.example.test:7000"},"opnTime":900,"agentAddr":"203.0.113.9:49152","acTokens":{"requested":"ac-live-token"},"preActions":{"other":` + action + `,"requested":null}}`
+			result, err := interpretNativeAgentKnockReply(&relayknock.Reply{
+				Type: relayknock.TypeACK,
+				Body: []byte(body),
+			}, "requested")
+			if result != nil || !errors.Is(err, ErrMalformedReply) || !strings.Contains(err.Error(), "unsupported pre-access action") {
+				t.Fatalf("pre-access ACK result = %#v err %v, want explicit fail-closed rejection", result, err)
+			}
+		})
 	}
 }
 

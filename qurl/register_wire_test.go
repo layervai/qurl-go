@@ -27,7 +27,7 @@ func TestMapRAKError_Table(t *testing.T) {
 	}{
 		{name: "52100 account = otp incorrect", code: rakCredentialInvalid, path: pathAccount, want: ErrOTPIncorrect, wantMsg: "WithOTP"},
 		{name: "52100 bootstrap = key rejected", code: rakCredentialInvalid, path: pathBootstrap, want: ErrKeyRejected, wantMsg: "pre-issued key"},
-		{name: "52100 device = key rejected", code: rakCredentialInvalid, path: pathDevice, want: ErrKeyRejected, wantMsg: "persisted device credential"},
+		{name: "52100 device = recovery required", code: rakCredentialInvalid, path: pathDevice, want: ErrCredentialRecoveryRequired, wantMsg: "RecoverAgentCredential"},
 		{name: "52101 expired", code: rakCredentialExpired, path: pathAccount, want: ErrOTPExpired, wantMsg: "fresh"},
 		{name: "52102 attempts exceeded", code: rakAttemptsExceeded, path: pathAccount, want: ErrRegistrationRateLimited, wantMsg: "too many attempts"},
 		{name: "52103 identity conflict", code: rakIdentityConflict, path: pathAccount, want: ErrAgentIdentityConflict, wantMsg: "WithTakeover"},
@@ -40,7 +40,7 @@ func TestMapRAKError_Table(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := mapRAKError(&registerAckBody{ErrCode: tt.code, ErrMsg: "svc detail"}, tt.path)
+			err := mapRAKError(&registerAckBody{ErrCode: tt.code, ErrMsg: "svc detail"}, tt.path, "connector-01")
 			if !errors.Is(err, tt.want) {
 				t.Fatalf("code %s path %d: want %v, got %v", tt.code, tt.path, tt.want, err)
 			}
@@ -55,8 +55,58 @@ func TestMapRAKError_Table(t *testing.T) {
 	}
 }
 
+func TestMapRAKError_DevicePathUsesRecoveryWithoutEnrollmentGuidance(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		code        string
+		wrong       error
+		wrongPhrase string
+	}{
+		{name: "credential invalid", code: rakCredentialInvalid, wrong: ErrOTPIncorrect, wrongPhrase: "WithOTP"},
+		{name: "credential expired", code: rakCredentialExpired, wrong: ErrOTPExpired, wrongPhrase: "fresh code"},
+		{name: "identity conflict", code: rakIdentityConflict, wrong: ErrAgentIdentityConflict, wrongPhrase: "re-run with qurl.WithTakeover"},
+		{name: "API key invalid", code: rakInvalidAPIKey, wrong: ErrKeyRejected, wrongPhrase: "check the API key"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := mapRAKError(&registerAckBody{ErrCode: tc.code, ErrMsg: "svc detail"}, pathDevice, "connector-01")
+			var recovery *CredentialRecoveryRequiredError
+			if !errors.As(err, &recovery) || recovery.DeviceID != "connector-01" || !errors.Is(err, ErrCredentialRecoveryRequired) {
+				t.Fatalf("device denial = %v, want credential recovery for connector-01", err)
+			}
+			if errors.Is(err, tc.wrong) || strings.Contains(err.Error(), tc.wrongPhrase) {
+				t.Fatalf("device denial leaked enrollment guidance %q/%v: %v", tc.wrongPhrase, tc.wrong, err)
+			}
+			if !strings.Contains(err.Error(), tc.code) || !strings.Contains(err.Error(), "svc detail") {
+				t.Fatalf("device denial lost authenticated detail: %v", err)
+			}
+		})
+	}
+}
+
+func TestMapRAKError_DevicePathRejectsEnrollmentOnlyCodesAsMalformed(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		code  string
+		wrong error
+	}{
+		{name: "account email", code: rakEmailUnavailable, wrong: ErrNoAccountEmail},
+		{name: "bootstrap consumed", code: rakBootstrapConsumed, wrong: ErrBootstrapSetupKeyConsumed},
+		{name: "enrollment input", code: rakInvalidInput, wrong: ErrRegistrationInvalidInput},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := mapRAKError(&registerAckBody{ErrCode: tc.code, ErrMsg: "svc detail"}, pathDevice, "connector-01")
+			if !errors.Is(err, ErrRegisterReplyMalformed) || errors.Is(err, tc.wrong) {
+				t.Fatalf("device enrollment-only denial = %v, want malformed without %v", err, tc.wrong)
+			}
+			if !strings.Contains(err.Error(), tc.code) || !strings.Contains(err.Error(), "svc detail") {
+				t.Fatalf("device enrollment-only denial lost authenticated detail: %v", err)
+			}
+		})
+	}
+}
+
 func TestMapRAKError_UnknownCodeIsRegistrationDeny(t *testing.T) {
-	err := mapRAKError(&registerAckBody{ErrCode: "52199", ErrMsg: "future failure"}, pathAccount)
+	err := mapRAKError(&registerAckBody{ErrCode: "52199", ErrMsg: "future failure"}, pathAccount, "connector-01")
 	var deny *RegistrationDenyError
 	if !errors.As(err, &deny) {
 		t.Fatalf("unknown code: want *RegistrationDenyError, got %v", err)
@@ -70,7 +120,7 @@ func TestMapRAKError_UnknownCodeIsRegistrationDeny(t *testing.T) {
 }
 
 func TestMapRAKError_UnselectedPathDoesNotGuessCredentialMeaning(t *testing.T) {
-	err := mapRAKError(&registerAckBody{ErrCode: rakCredentialInvalid, ErrMsg: "credential rejected"}, pathUnknown)
+	err := mapRAKError(&registerAckBody{ErrCode: rakCredentialInvalid, ErrMsg: "credential rejected"}, pathUnknown, "connector-01")
 	var deny *RegistrationDenyError
 	if !errors.As(err, &deny) {
 		t.Fatalf("unselected path: want *RegistrationDenyError, got %v", err)
