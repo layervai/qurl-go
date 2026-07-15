@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/layervai/qurl-go/internal/cryptoutil"
+	"github.com/layervai/qurl-go/internal/x25519key"
 	"github.com/layervai/qurl-go/relayknock/internal/nhpwire"
 )
 
@@ -131,7 +132,7 @@ type KnockOptions struct {
 	HTTPClient HTTPDoer
 
 	// DeviceStaticPriv is the agent static private key (the Noise initiator
-	// identity). nil/empty ⇒ a fresh random 32-byte key is minted for this knock.
+	// identity). nil/empty ⇒ a fresh random X25519 key is minted for this knock.
 	DeviceStaticPriv []byte
 }
 
@@ -353,15 +354,15 @@ func buildOutbound(headerType int, serverStaticPub, body []byte, opts KnockOptio
 
 	devicePriv = opts.DeviceStaticPriv
 	if len(devicePriv) == 0 {
-		devicePriv, err = cryptoutil.RandomBytes(32)
+		devicePriv, err = cryptoutil.RandomBytes(x25519key.Size)
 		if err != nil {
 			return nil, nil, 0, fmt.Errorf("device key: %w", err)
 		}
-	} else if len(devicePriv) != 32 {
-		return nil, nil, 0, fmt.Errorf("device static priv must be 32 bytes, got %d", len(devicePriv))
+	} else if len(devicePriv) != x25519key.Size {
+		return nil, nil, 0, fmt.Errorf("device static priv must be %d bytes, got %d", x25519key.Size, len(devicePriv))
 	}
 
-	ephemeralPriv, err := cryptoutil.RandomBytes(32)
+	ephemeralPriv, err := cryptoutil.RandomBytes(x25519key.Size)
 	if err != nil {
 		return nil, nil, 0, fmt.Errorf("ephemeral key: %w", err)
 	}

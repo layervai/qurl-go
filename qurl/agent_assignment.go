@@ -3,8 +3,6 @@ package qurl
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +12,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/layervai/qurl-go/internal/cryptoutil"
 	"github.com/layervai/qurl-go/internal/x25519key"
 )
 
@@ -737,12 +736,12 @@ func sleepWithContext(ctx context.Context, d time.Duration) error {
 // jitter is decorrelation, not a security primitive, but crypto/rand avoids
 // pulling in a separately-seeded PRNG and any weak-RNG lint.
 func cryptoJitterFraction() float64 {
-	var b [8]byte
-	if _, err := rand.Read(b[:]); err != nil {
+	n, err := cryptoutil.RandomUint64()
+	if err != nil {
 		// Entropy failure degrades only decorrelation to zero jitter; the attempt
 		// and elapsed budgets still bound the retry loop.
 		return 0
 	}
 	// 53-bit mantissa fraction, matching the usual [0,1) float construction.
-	return float64(binary.BigEndian.Uint64(b[:])>>11) / (1 << 53)
+	return float64(n>>11) / (1 << 53)
 }

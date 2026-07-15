@@ -10,7 +10,8 @@ import (
 	"golang.org/x/crypto/curve25519"
 )
 
-// Size is the encoded X25519 public-key size in bytes.
+// Size is the encoded X25519 key size in bytes. Public and private values use
+// the same fixed-width encoding.
 const Size = 32
 
 var canonicalUPrime = func() (prime [Size]byte) {
