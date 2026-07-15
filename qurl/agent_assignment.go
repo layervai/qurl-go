@@ -412,7 +412,9 @@ func (c *assignmentConfig) resolve(ctx context.Context, agentID string, cred Cre
 }
 
 // backoff returns the delay before the next attempt: the larger of the honored
-// Retry-After minimum and a jittered exponential backoff capped at maxBackoff.
+// Retry-After minimum and full jitter across the exponentially growing window
+// capped at maxBackoff. The service-contract Retry-After remains the hard floor;
+// full jitter prevents a fleet from clustering at the top of each local window.
 func (c *assignmentConfig) backoff(attempt int, retryAfter time.Duration) time.Duration {
 	base := c.minBackoff << (attempt - 1)
 	// The fixed positive minimum can overflow negative/above the cap before an
@@ -421,10 +423,7 @@ func (c *assignmentConfig) backoff(attempt int, retryAfter time.Duration) time.D
 	if base <= 0 || base > c.maxBackoff {
 		base = c.maxBackoff
 	}
-	jittered := base + time.Duration(c.jitter()*float64(base))
-	if jittered > c.maxBackoff {
-		jittered = c.maxBackoff
-	}
+	jittered := time.Duration(c.jitter() * float64(base))
 	if retryAfter > jittered {
 		return retryAfter
 	}
@@ -565,7 +564,7 @@ func validateAssignmentAgentID(agentID string) error {
 	if l := len(agentID); l < 2 || l > 64 {
 		return fmt.Errorf("%w: agent id must be 2-64 characters", ErrInvalidAssignmentConfig)
 	}
-	for i := 0; i < len(agentID); i++ {
+	for i := range agentID {
 		ch := agentID[i]
 		isLowerAlnum := (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9')
 		if i == 0 || i == len(agentID)-1 {
@@ -658,7 +657,10 @@ func validAssignmentCellID(cellID string) bool {
 	if len(cellID) < 1 || len(cellID) > 64 || cellID[0] < 'a' || cellID[0] > 'z' {
 		return false
 	}
-	for i := 1; i < len(cellID); i++ {
+	for i := range cellID {
+		if i == 0 {
+			continue
+		}
 		ch := cellID[i]
 		if (ch < 'a' || ch > 'z') && (ch < '0' || ch > '9') && ch != '-' {
 			return false

@@ -428,14 +428,14 @@ func TestFetchAgentAssignment_HonorsRetryAfterAsMinimum(t *testing.T) {
 	}
 }
 
-func TestAssignmentBackoffCapsJitterButHonorsRetryAfter(t *testing.T) {
+func TestAssignmentBackoffUsesFullJitterAndHonorsRetryAfter(t *testing.T) {
 	cfg := &assignmentConfig{
 		minBackoff: 8 * time.Second,
 		maxBackoff: 8 * time.Second,
-		jitter:     func() float64 { return 0.999 },
+		jitter:     func() float64 { return 0.5 },
 	}
-	if got := cfg.backoff(1, 0); got != 8*time.Second {
-		t.Fatalf("jittered backoff = %s, want maxBackoff 8s", got)
+	if got := cfg.backoff(1, 0); got != 4*time.Second {
+		t.Fatalf("full-jitter backoff = %s, want 4s within the 8s window", got)
 	}
 	if got := cfg.backoff(1, 10*time.Second); got != 10*time.Second {
 		t.Fatalf("Retry-After backoff = %s, want 10s minimum even above maxBackoff", got)
