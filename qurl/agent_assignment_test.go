@@ -444,7 +444,11 @@ func TestFetchAgentAssignment_DefaultsRetryAfterWhenAbsent(t *testing.T) {
 }
 
 func TestFetchAgentAssignment_ExhaustsByAttemptBudget(t *testing.T) {
-	doer := &scriptedDoer{responses: []scriptedResponse{unavailable("1")}} // repeats
+	first := unavailable("1")
+	first.body = `{"error":{"code":"cell_assignment_unavailable","detail":"first authority failure"}}`
+	last := unavailable("1")
+	last.body = `{"error":{"code":"cell_assignment_unavailable","detail":"last authority failure"}}`
+	doer := &scriptedDoer{responses: []scriptedResponse{first, last}} // last response repeats
 	clk := &fakeClock{now: time.Now()}
 	var slept []time.Duration
 
@@ -465,7 +469,8 @@ func TestFetchAgentAssignment_ExhaustsByAttemptBudget(t *testing.T) {
 		t.Fatalf("recovery error did not surface last Retry-After: %#v / %v", rec, err)
 	}
 	var apiErr *APIError
-	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusServiceUnavailable || apiErr.Code != assignmentCodeUnavailable {
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusServiceUnavailable ||
+		apiErr.Code != assignmentCodeUnavailable || apiErr.Detail != "last authority failure" {
 		t.Fatalf("recovery error lost final API problem details: %v", err)
 	}
 	if doer.calls != 3 {
