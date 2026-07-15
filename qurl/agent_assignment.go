@@ -68,7 +68,9 @@ func (a *AgentAssignment) clone() *AgentAssignment {
 
 // DecodedServerKey returns the raw 32-byte X25519 NHP server public key from the
 // assignment's endpoint. Assignment identities have one canonical wire spelling:
-// padded standard base64 of a canonical, non-low-order X25519 public key.
+// padded standard base64 of a canonical, non-low-order X25519 public key. It
+// deliberately revalidates on every call because a persisted or caller-built
+// assignment need not have passed the current response validator.
 func (a *AgentAssignment) DecodedServerKey() ([]byte, error) {
 	if a == nil {
 		return nil, fmt.Errorf("%w: assignment is nil", ErrAssignmentInvalidResponse)

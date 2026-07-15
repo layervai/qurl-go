@@ -160,7 +160,9 @@ func Register(ctx context.Context, ep Endpoint, body []byte, opts Options) (*rel
 // timestamp. Address fallback deliberately resends the same packet: if a reply
 // is lost after the server accepts the first copy and a replay defense rejects a
 // later copy, this exchange remains unsuccessful and only that fresh outer
-// exchange can recover.
+// exchange can recover. Every fallback address came from the same LayerV-owned
+// assigned name and the packet is sealed to the pinned server key, so an extra
+// poisoned A/AAAA record cannot decrypt it.
 func Exchange(ctx context.Context, ep Endpoint, headerType int, body []byte, opts Options) (*relayknock.Reply, error) {
 	if err := ctxErr(ctx); err != nil {
 		return nil, err
