@@ -76,9 +76,10 @@ func (a *AgentAssignment) DecodedServerKey() ([]byte, error) {
 	return decodeAssignmentServerPublicKey(a.Endpoint.ServerPublicKeyB64)
 }
 
-// LeaseExpired reports whether the assignment lease has reached or passed now. A
-// lease is a refresh deadline: once expired the binding must be refreshed through
-// the control plane and must fail closed, never fall back to local cell selection.
+// LeaseExpired reports whether the assignment is absent or its lease has reached
+// or passed now. A lease is a refresh deadline: once expired the binding must be
+// refreshed through the control plane and must fail closed, never fall back to
+// local cell selection.
 func (a *AgentAssignment) LeaseExpired(now time.Time) bool {
 	return a == nil || !a.LeaseExpiresAt.After(now)
 }
@@ -348,13 +349,17 @@ func FetchAgentAssignment(ctx context.Context, agentID string, cred CredentialPr
 }
 
 func (c *assignmentConfig) resolve(ctx context.Context, agentID string, cred CredentialProvider) (*AgentAssignment, error) {
+	reqBody, err := json.Marshal(assignmentRequestBody{AgentID: agentID})
+	if err != nil {
+		return nil, fmt.Errorf("%w: encode assignment request: %w", ErrInvalidAssignmentConfig, err)
+	}
 	start := c.clock()
 	var lastRetryAfter time.Duration
 	for attempt := 1; ; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		res := c.attempt(ctx, agentID, cred)
+		res := c.attempt(ctx, agentID, cred, reqBody)
 		if res.err != nil || res.assignment != nil {
 			return res.assignment, res.err
 		}
@@ -401,11 +406,7 @@ type assignmentAttempt struct {
 	err        error
 }
 
-func (c *assignmentConfig) attempt(ctx context.Context, agentID string, cred CredentialProvider) assignmentAttempt {
-	reqBody, err := json.Marshal(assignmentRequestBody{AgentID: agentID})
-	if err != nil {
-		return assignmentAttempt{err: fmt.Errorf("%w: encode assignment request: %w", ErrInvalidAssignmentConfig, err)}
-	}
+func (c *assignmentConfig) attempt(ctx context.Context, agentID string, cred CredentialProvider, reqBody []byte) assignmentAttempt {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/agent/assignment", bytes.NewReader(reqBody))
 	if err != nil {
 		return assignmentAttempt{err: fmt.Errorf("%w: build assignment request: %w", ErrInvalidAssignmentConfig, err)}
