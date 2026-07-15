@@ -258,11 +258,6 @@ func sendOne(ctx context.Context, dialer Dialer, address string, packet []byte, 
 	}
 	defer func() { _ = conn.Close() }()
 
-	// Force an immediate deadline on cancellation so a blocked read/write unblocks
-	// promptly; the caller maps the resulting error to the context error.
-	stop := context.AfterFunc(ctx, func() { _ = conn.SetDeadline(time.Now()) })
-	defer stop()
-
 	deadline := time.Now().Add(timeout)
 	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
 		deadline = d
@@ -270,6 +265,11 @@ func sendOne(ctx context.Context, dialer Dialer, address string, packet []byte, 
 	if err := conn.SetDeadline(deadline); err != nil {
 		return nil, fmt.Errorf("set deadline for %s: %w", address, err)
 	}
+	// Arm cancellation after the ordinary deadline is installed. If ctx is
+	// already done, AfterFunc immediately pulls the deadline back to now; the
+	// future deadline above can never race afterward and overwrite that unblock.
+	stop := context.AfterFunc(ctx, func() { _ = conn.SetDeadline(time.Now()) })
+	defer stop()
 
 	n, err := conn.Write(packet)
 	if err != nil {
@@ -434,12 +434,15 @@ func resolveAddresses(ctx context.Context, host string, opts Options) ([]netip.A
 }
 
 var nonPublicAssignmentPrefixes = [...]netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),       // RFC 1122 this network
 	netip.MustParsePrefix("100.64.0.0/10"),   // RFC 6598 shared address space
+	netip.MustParsePrefix("192.0.0.0/24"),    // RFC 6890 IETF protocol assignments
 	netip.MustParsePrefix("192.0.2.0/24"),    // RFC 5737 TEST-NET-1
 	netip.MustParsePrefix("192.88.99.0/24"),  // deprecated 6to4 relay anycast
 	netip.MustParsePrefix("198.18.0.0/15"),   // RFC 2544 benchmarking
 	netip.MustParsePrefix("198.51.100.0/24"), // RFC 5737 TEST-NET-2
 	netip.MustParsePrefix("203.0.113.0/24"),  // RFC 5737 TEST-NET-3
+	netip.MustParsePrefix("240.0.0.0/4"),     // RFC 1112 reserved / Class E
 	netip.MustParsePrefix("100::/64"),        // RFC 6666 discard-only
 	netip.MustParsePrefix("64:ff9b::/96"),    // RFC 6052 well-known NAT64 prefix
 	netip.MustParsePrefix("2001::/32"),       // RFC 4380 Teredo
