@@ -462,13 +462,8 @@ func TestExchange_ResolveFailureIsTyped(t *testing.T) {
 // device static private key or the application body bytes.
 func TestExchange_ErrorsScrubSecrets(t *testing.T) {
 	t.Parallel()
-	serverPriv, serverPub := mustKeypair(t)
-	devicePriv := mustPriv(t)
-	srv := newFakeServer(t, serverPriv, pubOf(t, devicePriv), behaviorWrongKey)
-	ep := nativeudp.Endpoint{Host: "cell0.nhp.test", Port: srv.port(), ServerStaticPub: serverPub}
-
+	_, ep, opts := newLoopbackExchange(t, behaviorWrongKey)
 	secretBody := []byte("SUPER-SECRET-BODY-MARKER")
-	opts := loopbackOptions(devicePriv)
 
 	_, err := nativeudp.Knock(context.Background(), ep, secretBody, opts)
 	if err == nil {
@@ -478,7 +473,7 @@ func TestExchange_ErrorsScrubSecrets(t *testing.T) {
 	if strings.Contains(msg, string(secretBody)) {
 		t.Fatalf("error leaked the application body: %q", msg)
 	}
-	if strings.Contains(msg, hex.EncodeToString(devicePriv)) {
+	if strings.Contains(msg, hex.EncodeToString(opts.DeviceStaticPriv)) {
 		t.Fatalf("error leaked the device private key: %q", msg)
 	}
 }
