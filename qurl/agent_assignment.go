@@ -159,10 +159,7 @@ func (e *AssignmentRateLimitedError) Error() string {
 }
 
 func (e *AssignmentRateLimitedError) Unwrap() []error {
-	if e.apiErr == nil {
-		return []error{ErrAssignmentRateLimited}
-	}
-	return []error{ErrAssignmentRateLimited, e.apiErr}
+	return unwrapAssignmentError(e.apiErr, ErrAssignmentRateLimited)
 }
 
 // AssignmentRecoveryRequiredError reports an exhausted bounded refresh: the
@@ -184,10 +181,14 @@ func (e *AssignmentRecoveryRequiredError) Error() string {
 }
 
 func (e *AssignmentRecoveryRequiredError) Unwrap() []error {
-	if e.apiErr == nil {
-		return []error{ErrAssignmentRecoveryRequired, ErrAssignmentUnavailable}
+	return unwrapAssignmentError(e.apiErr, ErrAssignmentRecoveryRequired, ErrAssignmentUnavailable)
+}
+
+func unwrapAssignmentError(apiErr *APIError, sentinels ...error) []error {
+	if apiErr == nil {
+		return sentinels
 	}
-	return []error{ErrAssignmentRecoveryRequired, ErrAssignmentUnavailable, e.apiErr}
+	return append(sentinels, apiErr)
 }
 
 // --- client ---
@@ -516,8 +517,6 @@ func classifyAssignmentError(status int, body []byte, header http.Header, now ti
 		// future change cannot silently drop the code/status.
 		return assignmentAttempt{err: fmt.Errorf("%w: unexpected assignment status %d", ErrAssignmentServiceError, status)}
 	}
-	retryAfter := parseRetryAfter(header.Get("Retry-After"), now)
-
 	switch status {
 	case http.StatusBadRequest:
 		return assignmentAttempt{err: fmt.Errorf("%w: %w", ErrAssignmentRequestRejected, apiErr)}
@@ -534,12 +533,13 @@ func classifyAssignmentError(status int, body []byte, header http.Header, now ti
 		}
 	case http.StatusTooManyRequests:
 		return assignmentAttempt{err: &AssignmentRateLimitedError{
-			RetryAfter: retryAfter,
+			RetryAfter: parseRetryAfter(header.Get("Retry-After"), now),
 			Reset:      parseSecondsHeader(header.Get("RateLimit-Reset")),
 			apiErr:     apiErr,
 		}}
 	case http.StatusServiceUnavailable:
 		if apiErr.Code == assignmentCodeUnavailable {
+			retryAfter := parseRetryAfter(header.Get("Retry-After"), now)
 			if retryAfter <= 0 {
 				retryAfter = defaultAssignmentRetryAfter
 			}
@@ -658,10 +658,7 @@ func validAssignmentCellID(cellID string) bool {
 	if len(cellID) < 1 || len(cellID) > 64 || cellID[0] < 'a' || cellID[0] > 'z' {
 		return false
 	}
-	for i := range cellID {
-		if i == 0 {
-			continue
-		}
+	for i := 1; i < len(cellID); i++ {
 		if !isLDHByte(cellID[i]) {
 			return false
 		}
