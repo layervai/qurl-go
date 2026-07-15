@@ -17,6 +17,7 @@ import (
 
 	"github.com/layervai/qurl-go/internal/nhpcontract"
 	"github.com/layervai/qurl-go/relayknock"
+	"github.com/layervai/qurl-go/relayknock/internal/nhpwire"
 )
 
 // These tests exercise the native-UDP transport's pre-I/O validation and its
@@ -268,6 +269,19 @@ func TestSendOneRejectsShortDatagramWrite(t *testing.T) {
 	}
 }
 
+func TestSendOnePreservesOversizeBytesWhenReadAlsoReturnsError(t *testing.T) {
+	dialer := dialerFunc(func(context.Context, string, string) (net.Conn, error) {
+		return oversizeReadConn{}, nil
+	})
+	reply, err := sendOne(context.Background(), dialer, "192.0.2.1:62206", []byte{1}, time.Second)
+	if err != nil {
+		t.Fatalf("sendOne returned truncation error instead of oversize bytes: %v", err)
+	}
+	if len(reply) != nhpwire.PacketBufferSize+1 {
+		t.Fatalf("reply length = %d, want %d", len(reply), nhpwire.PacketBufferSize+1)
+	}
+}
+
 func TestWipeBytes(t *testing.T) {
 	b := []byte{1, 2, 3, 4, 5}
 	wipeBytes(b)
@@ -303,6 +317,15 @@ func (shortWriteConn) RemoteAddr() net.Addr             { return &net.UDPAddr{} 
 func (shortWriteConn) SetDeadline(time.Time) error      { return nil }
 func (shortWriteConn) SetReadDeadline(time.Time) error  { return nil }
 func (shortWriteConn) SetWriteDeadline(time.Time) error { return nil }
+
+type oversizeReadConn struct{ shortWriteConn }
+
+func (oversizeReadConn) Read(p []byte) (int, error) {
+	clear(p)
+	return len(p), errors.New("message too long")
+}
+
+func (oversizeReadConn) Write(p []byte) (int, error) { return len(p), nil }
 
 func freshX25519Priv(t *testing.T) []byte {
 	t.Helper()

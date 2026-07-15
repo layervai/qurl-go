@@ -157,7 +157,10 @@ func Register(ctx context.Context, ep Endpoint, body []byte, opts Options) (*rel
 // resolved IP is never persisted. A caller may later start a bounded wholly new
 // exchange after refreshing assignment/DNS; that outer retry is distinct from
 // address fallback and always uses fresh ephemeral key, counter, preamble, and
-// timestamp.
+// timestamp. Address fallback deliberately resends the same packet: if a reply
+// is lost after the server accepts the first copy and a replay defense rejects a
+// later copy, this exchange remains unsuccessful and only that fresh outer
+// exchange can recover.
 func Exchange(ctx context.Context, ep Endpoint, headerType int, body []byte, opts Options) (*relayknock.Reply, error) {
 	if err := ctxErr(ctx); err != nil {
 		return nil, err
@@ -279,6 +282,15 @@ func sendOne(ctx context.Context, dialer Dialer, address string, packet []byte, 
 	// authenticate/reject, not a transport miss to retry against another address.
 	buf := make([]byte, nhpwire.PacketBufferSize+1)
 	n, err = conn.Read(buf)
+	if n > nhpwire.PacketBufferSize {
+		// Some datagram implementations return both the truncated prefix and an
+		// error such as WSAEMSGSIZE. Preserve the bytes-first oversize signal so
+		// the caller classifies the received datagram as unauthenticated instead
+		// of treating it as a transport miss and falling through to another IP.
+		out := make([]byte, n)
+		copy(out, buf[:n])
+		return out, nil
+	}
 	if err != nil {
 		return nil, fmt.Errorf("read from %s: %w", address, err)
 	}
@@ -304,7 +316,8 @@ func decryptAndCorrelate(devicePriv, serverStaticPub []byte, requestType int, co
 		// Any datagram that does not open as an authenticated reply from the pinned
 		// key is unauthenticated. The underlying relayknock error (e.g. static-key
 		// mismatch, timestamp auth failure, malformed reply type, too short/long) is
-		// wrapped for context but never carries key or body plaintext.
+		// rendered for context but deliberately not wrapped: do not change %s to
+		// %w, because decrypt-stage failures must not also match ErrMalformedReply.
 		return nil, fmt.Errorf("%w: %s", ErrServerUnauthenticated, err.Error())
 	}
 
