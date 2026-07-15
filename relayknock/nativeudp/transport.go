@@ -88,7 +88,8 @@ type Dialer interface {
 // Endpoint is a validated native NHP UDP endpoint taken from a qurl-service cell
 // assignment. Host is opaque LayerV-owned DNS data resolved on every exchange;
 // ServerStaticPub is the raw 32-byte X25519 NHP server public key the reply is
-// authenticated against.
+// authenticated against. The caller must not mutate ServerStaticPub while an
+// Exchange using this Endpoint is in progress.
 type Endpoint struct {
 	Host            string
 	Port            int
@@ -101,6 +102,7 @@ type Endpoint struct {
 type Options struct {
 	// DeviceStaticPriv is the agent's persisted X25519 static private key (32
 	// bytes) — the Noise initiator identity the assigned server matches. Required.
+	// The caller must not mutate it until Exchange returns.
 	DeviceStaticPriv []byte
 
 	// Resolver resolves Endpoint.Host. nil ⇒ net.DefaultResolver.

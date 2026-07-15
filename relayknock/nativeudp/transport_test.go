@@ -49,6 +49,7 @@ type fakeServer struct {
 	agentPub   []byte
 	behavior   behavior
 	replyBody  []byte
+	done       chan struct{}
 
 	mu       sync.Mutex
 	received int
@@ -68,9 +69,20 @@ func newFakeServer(t *testing.T, serverPriv, agentPub []byte, b behavior) *fakeS
 		agentPub:   agentPub,
 		behavior:   b,
 		replyBody:  []byte(`{"ok":true}`),
+		done:       make(chan struct{}),
 	}
-	go s.serve()
-	t.Cleanup(func() { _ = conn.Close() })
+	go func() {
+		defer close(s.done)
+		s.serve()
+	}()
+	t.Cleanup(func() {
+		_ = conn.Close()
+		select {
+		case <-s.done:
+		case <-time.After(2 * time.Second):
+			t.Error("fake UDP server did not stop after socket close")
+		}
+	})
 	return s
 }
 

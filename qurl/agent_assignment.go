@@ -145,6 +145,8 @@ var ErrAssignmentServiceError = errors.New("qurl: assignment service error")
 // can pace the next attempt. It unwraps to ErrAssignmentRateLimited.
 type AssignmentRateLimitedError struct {
 	// RetryAfter is the Retry-After delay, or 0 when the header was absent.
+	// A literal Retry-After: 0 has the same representation; both mean that this
+	// error carries no positive minimum delay.
 	RetryAfter time.Duration
 	// Reset is the RateLimit-Reset window, or 0 when the header was absent.
 	Reset time.Duration
