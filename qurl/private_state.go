@@ -236,8 +236,7 @@ func syncPrivateStateDir(dir, label string) error {
 	return nil
 }
 
-// wipeBytes keeps the qurl package's secret-scrub call sites concise while the
-// implementation is shared with the native UDP path.
+// wipeBytes is the qurl package's concise alias for the shared scrub primitive.
 func wipeBytes(b []byte) {
 	cryptoutil.Wipe(b)
 }
