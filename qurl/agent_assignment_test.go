@@ -206,13 +206,7 @@ func TestFetchAgentAssignment_RejectsInvalidResponses(t *testing.T) {
 			a.Endpoint.ServerPublicKeyB64 = base64.StdEncoding.EncodeToString(make([]byte, 32))
 		}},
 		{"non-canonical server key", func(a *AgentAssignment) {
-			key := make([]byte, 32)
-			key[0] = 0xed
-			for i := 1; i < 31; i++ {
-				key[i] = 0xff
-			}
-			key[31] = 0x7f
-			a.Endpoint.ServerPublicKeyB64 = base64.StdEncoding.EncodeToString(key)
+			a.Endpoint.ServerPublicKeyB64 = nonCanonicalTestNHPServerPublicKeyB64()
 		}},
 	}
 	for _, tc := range cases {

@@ -138,6 +138,9 @@ var ErrAssignmentForbidden = errors.New("qurl: assignment forbidden")
 // ErrAssignmentServiceError is returned for an unexpected assignment status (a
 // non-cell_assignment_unavailable 5xx, or a transport-level failure). Terminal
 // for this bounded client; only 503 cell_assignment_unavailable is retried.
+// In particular, transport failures are not retried inside one call because an
+// ambiguous write may already have consumed the fixed assignment budget. The
+// lifecycle may deliberately schedule a later whole-operation attempt.
 var ErrAssignmentServiceError = errors.New("qurl: assignment service error")
 
 // AssignmentRateLimitedError carries the retry timing a 429 reported so a caller
@@ -635,7 +638,7 @@ func validateAgentAssignment(a *AgentAssignment, wantAgentID string, now time.Ti
 	if err := validateAssignmentEndpointHost(a.Endpoint.Host); err != nil {
 		return err
 	}
-	if a.Endpoint.Port < 1 || a.Endpoint.Port > 65535 {
+	if !validNetworkPort(a.Endpoint.Port) {
 		return fmt.Errorf("%w: endpoint port %d out of range", ErrAssignmentInvalidResponse, a.Endpoint.Port)
 	}
 	if _, err := decodeAssignmentServerPublicKey(a.Endpoint.ServerPublicKeyB64); err != nil {

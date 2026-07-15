@@ -284,7 +284,7 @@ func TestSendOneRejectsShortDatagramWrite(t *testing.T) {
 	dialer := dialerFunc(func(context.Context, string, string) (net.Conn, error) {
 		return shortWriteConn{}, nil
 	})
-	if _, err := sendOne(context.Background(), dialer, "192.0.2.1:62206", []byte{1, 2, 3}, time.Second); err == nil || !strings.Contains(err.Error(), "short datagram write") {
+	if _, err := sendOne(context.Background(), dialer, "192.0.2.1:62206", []byte{1, 2, 3}, time.Second, make([]byte, nhpwire.PacketBufferSize+1)); err == nil || !strings.Contains(err.Error(), "short datagram write") {
 		t.Fatalf("short write error = %v", err)
 	}
 }
@@ -293,7 +293,7 @@ func TestSendOnePreservesOversizeBytesWhenReadAlsoReturnsError(t *testing.T) {
 	dialer := dialerFunc(func(context.Context, string, string) (net.Conn, error) {
 		return oversizeReadConn{}, nil
 	})
-	reply, err := sendOne(context.Background(), dialer, "192.0.2.1:62206", []byte{1}, time.Second)
+	reply, err := sendOne(context.Background(), dialer, "192.0.2.1:62206", []byte{1}, time.Second, make([]byte, nhpwire.PacketBufferSize+1))
 	if err != nil {
 		t.Fatalf("sendOne returned truncation error instead of oversize bytes: %v", err)
 	}
