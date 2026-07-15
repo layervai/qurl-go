@@ -436,6 +436,11 @@ var nonPublicAssignmentPrefixes = [...]netip.Prefix{
 	netip.MustParsePrefix("198.18.0.0/15"),   // RFC 2544 benchmarking
 	netip.MustParsePrefix("198.51.100.0/24"), // RFC 5737 TEST-NET-2
 	netip.MustParsePrefix("203.0.113.0/24"),  // RFC 5737 TEST-NET-3
+	netip.MustParsePrefix("100::/64"),        // RFC 6666 discard-only
+	netip.MustParsePrefix("2001:2::/48"),     // RFC 5180 benchmarking
+	netip.MustParsePrefix("2001:db8::/32"),   // RFC 3849 documentation
+	netip.MustParsePrefix("2002::/16"),       // deprecated 6to4
+	netip.MustParsePrefix("3fff::/20"),       // RFC 9637 documentation
 }
 
 func publicAssignmentAddress(addr netip.Addr) bool {
