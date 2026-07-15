@@ -63,7 +63,10 @@ var (
 	// a failed handshake authentication, a malformed/oversize datagram, or a
 	// non-reply header type. Source-address or DNS agreement never overrides this.
 	// It is NOT retried against other addresses — a received-but-unauthenticated
-	// datagram is a definitive rejection, not a transport miss.
+	// datagram is a definitive rejection, not a transport miss. A bounded outer
+	// lifecycle may refresh assignment/DNS and start a wholly new exchange with
+	// fresh message randomness; it must not reinterpret the rejected datagram as
+	// authenticated or fall through within this exchange.
 	ErrServerUnauthenticated = errors.New("nativeudp: reply failed server authentication")
 )
 
@@ -151,7 +154,10 @@ func Register(ctx context.Context, ep Endpoint, body []byte, opts Options) (*rel
 // Transport faults (dial/write/read/timeout) against a resolved address fall
 // through to the next address up to opts.MaxAddresses; if none yields a datagram,
 // Exchange returns ErrTransport. DNS is resolved fresh here on every call and a
-// resolved IP is never persisted.
+// resolved IP is never persisted. A caller may later start a bounded wholly new
+// exchange after refreshing assignment/DNS; that outer retry is distinct from
+// address fallback and always uses fresh ephemeral key, counter, preamble, and
+// timestamp.
 func Exchange(ctx context.Context, ep Endpoint, headerType int, body []byte, opts Options) (*relayknock.Reply, error) {
 	if err := ctxErr(ctx); err != nil {
 		return nil, err
@@ -162,8 +168,8 @@ func Exchange(ctx context.Context, ep Endpoint, headerType int, body []byte, opt
 	if err := validateEndpoint(ep); err != nil {
 		return nil, err
 	}
-	if len(opts.DeviceStaticPriv) != nhpwire.PublicKeySize {
-		return nil, fmt.Errorf("%w: device static private key must be %d bytes", ErrInvalidRequest, nhpwire.PublicKeySize)
+	if len(opts.DeviceStaticPriv) != x25519key.Size {
+		return nil, fmt.Errorf("%w: device static private key must be %d bytes", ErrInvalidRequest, x25519key.Size)
 	}
 	// Explicit pre-I/O packet-size bound: the aggregate encoded body must fit the
 	// NHP plaintext ceiling. BuildMessage re-checks the sealed size, but bounding
@@ -343,7 +349,7 @@ func replyTypeAllowed(requestType, replyType int) bool {
 // ephemeral private key is wiped before returning; the device static private key
 // belongs to the caller and is not wiped here.
 func buildPacket(headerType int, serverStaticPub, devicePriv, body []byte) (packet []byte, counter uint64, err error) {
-	ephemeralPriv, err := randBytes(nhpwire.PublicKeySize)
+	ephemeralPriv, err := randBytes(x25519key.Size)
 	if err != nil {
 		return nil, 0, fmt.Errorf("%w: ephemeral key: %w", ErrInvalidRequest, err)
 	}
