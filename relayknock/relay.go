@@ -3,14 +3,13 @@ package relayknock
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 
+	"github.com/layervai/qurl-go/internal/cryptoutil"
 	"github.com/layervai/qurl-go/relayknock/internal/nhpwire"
 )
 
@@ -354,7 +353,7 @@ func buildOutbound(headerType int, serverStaticPub, body []byte, opts KnockOptio
 
 	devicePriv = opts.DeviceStaticPriv
 	if len(devicePriv) == 0 {
-		devicePriv, err = randBytes(32)
+		devicePriv, err = cryptoutil.RandomBytes(32)
 		if err != nil {
 			return nil, nil, 0, fmt.Errorf("device key: %w", err)
 		}
@@ -362,15 +361,16 @@ func buildOutbound(headerType int, serverStaticPub, body []byte, opts KnockOptio
 		return nil, nil, 0, fmt.Errorf("device static priv must be 32 bytes, got %d", len(devicePriv))
 	}
 
-	ephemeralPriv, err := randBytes(32)
+	ephemeralPriv, err := cryptoutil.RandomBytes(32)
 	if err != nil {
 		return nil, nil, 0, fmt.Errorf("ephemeral key: %w", err)
 	}
-	counter, err = randUint64()
+	defer cryptoutil.Wipe(ephemeralPriv)
+	counter, err = cryptoutil.RandomUint64()
 	if err != nil {
 		return nil, nil, 0, fmt.Errorf("counter: %w", err)
 	}
-	preamble, err := randUint32()
+	preamble, err := cryptoutil.RandomUint32()
 	if err != nil {
 		return nil, nil, 0, fmt.Errorf("preamble: %w", err)
 	}
@@ -391,29 +391,4 @@ func buildOutbound(headerType int, serverStaticPub, body []byte, opts KnockOptio
 		return nil, nil, 0, fmt.Errorf("build message: %w", err)
 	}
 	return packet, devicePriv, counter, nil
-}
-
-// randBytes returns n cryptographically random bytes (device/ephemeral keys).
-func randBytes(n int) ([]byte, error) {
-	b := make([]byte, n)
-	if _, err := rand.Read(b); err != nil {
-		return nil, err
-	}
-	return b, nil
-}
-
-func randUint64() (uint64, error) {
-	var b [8]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return 0, err
-	}
-	return binary.BigEndian.Uint64(b[:]), nil
-}
-
-func randUint32() (uint32, error) {
-	var b [4]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return 0, err
-	}
-	return binary.BigEndian.Uint32(b[:]), nil
 }

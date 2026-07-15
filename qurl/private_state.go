@@ -7,8 +7,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
+
+	"github.com/layervai/qurl-go/internal/cryptoutil"
 )
 
 const (
@@ -235,9 +236,8 @@ func syncPrivateStateDir(dir, label string) error {
 	return nil
 }
 
-// wipeBytes best-effort zeroes a secret buffer. runtime.KeepAlive guards the
-// clear from being optimized away when b is otherwise dead.
+// wipeBytes keeps the qurl package's secret-scrub call sites concise while the
+// implementation is shared with the native UDP path.
 func wipeBytes(b []byte) {
-	clear(b)
-	runtime.KeepAlive(b)
+	cryptoutil.Wipe(b)
 }

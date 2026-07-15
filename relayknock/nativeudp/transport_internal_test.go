@@ -302,17 +302,6 @@ func TestSendOnePreservesOversizeBytesWhenReadAlsoReturnsError(t *testing.T) {
 	}
 }
 
-func TestWipeBytes(t *testing.T) {
-	b := []byte{1, 2, 3, 4, 5}
-	wipeBytes(b)
-	for i, v := range b {
-		if v != 0 {
-			t.Fatalf("byte %d = %d, want 0", i, v)
-		}
-	}
-	wipeBytes(nil) // must not panic
-}
-
 // --- test helpers ---
 
 type resolverFunc func(ctx context.Context, network, host string) ([]netip.Addr, error)
