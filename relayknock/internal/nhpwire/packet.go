@@ -1,6 +1,10 @@
 package nhpwire
 
-import "encoding/binary"
+import (
+	"encoding/binary"
+
+	"github.com/layervai/qurl-go/internal/nhpcontract"
+)
 
 // NHP packet header framing (from the reference NHP relay implementation). The
 // HeaderCurve is a fixed 240-byte big-endian structure; each sealed field is
@@ -23,8 +27,11 @@ const (
 
 	// PacketBufferSize is the fixed buffer the reference server reads into; the
 	// wrapping packages bound packet sizes by it.
-	PacketBufferSize  = 4096
-	maxSealedBodySize = PacketBufferSize - HeaderSize
+	PacketBufferSize = 4096
+	// maxApplicationBodySize is the largest plaintext body that fits after the
+	// fixed header and the body's AEAD tag are added.
+	maxApplicationBodySize = nhpcontract.MaxApplicationBodySize
+	maxSealedBodySize      = maxApplicationBodySize + gcmTagSize
 
 	// Header flags (reference NHP relay common): COMPRESS = 1<<1. The agent never sets
 	// it (bodies sent uncompressed); kept to decode a compressed reply.
@@ -32,6 +39,14 @@ const (
 
 	protocolVersionMajor = 1
 	protocolVersionMinor = 0
+)
+
+// Compile-time equality fence: if the codec's framing changes, update the
+// shared contract deliberately rather than silently diverging from qurl's
+// pre-packet body validation.
+var (
+	_ [PacketBufferSize - HeaderSize - gcmTagSize - maxApplicationBodySize]struct{}
+	_ [maxApplicationBodySize - (PacketBufferSize - HeaderSize - gcmTagSize)]struct{}
 )
 
 // NHP header types (reference NHP relay iota: KPL=0, KNK=1, ACK=2, …, COK=7,

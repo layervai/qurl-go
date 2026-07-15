@@ -75,8 +75,8 @@ make fuzz FUZZTIME=2m
 
 ## Conformance vectors
 
-The language-agnostic qURL conformance vectors plus the composed issuer-signature
-golden file come from the public
+The language-agnostic qURL vectors—including the registered-agent application
+body/RunID contract—plus the packet and signature golden files come from the public
 [`qurl-conformance`](https://github.com/layervai/qurl-conformance) module via
 `go:embed` accessors. The bytes are pinned by the dependency version in `go.sum`, so
 adopting an updated artifact is a dependency bump.
