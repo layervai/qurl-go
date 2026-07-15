@@ -200,6 +200,7 @@ const (
 	// requires its own release; this is intentionally not runtime-configurable.
 	assignmentEndpointApexAI  = ".layerv.ai"
 	assignmentEndpointApexXYZ = ".layerv.xyz"
+	assignmentEndpointPath    = "/v1/agent/assignment"
 )
 
 // Bounded-refresh defaults. The 60/hour per-credential assignment budget is a
@@ -218,7 +219,7 @@ const (
 )
 
 type assignmentConfig struct {
-	baseURL     string
+	endpointURL string
 	httpClient  HTTPDoer
 	maxAttempts int
 	budget      time.Duration
@@ -245,7 +246,7 @@ func WithAssignmentBaseURL(rawURL string) AssignmentOption {
 		if err := validateHTTPSOrLoopbackURL(rawURL, "assignment base URL", ErrInvalidAssignmentConfig); err != nil {
 			return err
 		}
-		c.baseURL = strings.TrimRight(rawURL, "/")
+		c.endpointURL = strings.TrimRight(rawURL, "/") + assignmentEndpointPath
 		return nil
 	})
 }
@@ -316,7 +317,7 @@ func withAssignmentJitter(jitter func() float64) AssignmentOption {
 
 func newAssignmentConfig(opts []AssignmentOption) (*assignmentConfig, error) {
 	c := &assignmentConfig{
-		baseURL:     defaultAPIBaseURL,
+		endpointURL: defaultAPIBaseURL + assignmentEndpointPath,
 		httpClient:  defaultAPIHTTPClient,
 		maxAttempts: defaultAssignmentMaxAttempts,
 		budget:      defaultAssignmentBudget,
@@ -431,10 +432,10 @@ type assignmentAttempt struct {
 }
 
 func (c *assignmentConfig) attempt(ctx context.Context, agentID string, cred CredentialProvider, reqBody []byte) assignmentAttempt {
-	// baseURL was parsed and normalized by newAssignmentConfig, so request
-	// construction can fail only because caller-supplied configuration was
-	// invalid, not because the service returned an error response.
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/agent/assignment", bytes.NewReader(reqBody))
+	// endpointURL is either the trusted SDK default or a caller override already
+	// validated and normalized by WithAssignmentBaseURL, so request construction
+	// cannot fail because of a service response.
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpointURL, bytes.NewReader(reqBody))
 	if err != nil {
 		return assignmentAttempt{err: fmt.Errorf("%w: build assignment request: %w", ErrInvalidAssignmentConfig, err)}
 	}
@@ -663,10 +664,7 @@ func parseRetryAfter(value string, now time.Time) time.Duration {
 		return 0
 	}
 	if secs, err := strconv.ParseInt(value, 10, 64); err == nil {
-		if secs <= 0 {
-			return 0
-		}
-		if secs > maxHeaderDurationSeconds {
+		if secs <= 0 || secs > maxHeaderDurationSeconds {
 			return 0
 		}
 		return time.Duration(secs) * time.Second
