@@ -426,10 +426,7 @@ func (c *assignmentConfig) backoff(attempt int, retryAfter time.Duration) time.D
 		base = c.maxBackoff
 	}
 	jittered := time.Duration(c.jitter() * float64(base))
-	if retryAfter > jittered {
-		return retryAfter
-	}
-	return jittered
+	return max(retryAfter, jittered)
 }
 
 // assignmentAttempt is the outcome of one POST: exactly one of a validated

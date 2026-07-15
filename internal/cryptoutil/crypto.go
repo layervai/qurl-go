@@ -19,8 +19,7 @@ func RandomBytes(n int) ([]byte, error) {
 	return b, nil
 }
 
-// RandomUint64 returns a cryptographically random uint64 decoded in big-endian
-// order.
+// RandomUint64 returns a cryptographically random uint64.
 func RandomUint64() (uint64, error) {
 	var b [8]byte
 	if _, err := rand.Read(b[:]); err != nil {
@@ -29,8 +28,7 @@ func RandomUint64() (uint64, error) {
 	return binary.BigEndian.Uint64(b[:]), nil
 }
 
-// RandomUint32 returns a cryptographically random uint32 decoded in big-endian
-// order.
+// RandomUint32 returns a cryptographically random uint32.
 func RandomUint32() (uint32, error) {
 	var b [4]byte
 	if _, err := rand.Read(b[:]); err != nil {
