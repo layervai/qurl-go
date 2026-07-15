@@ -294,9 +294,7 @@ func sendOne(ctx context.Context, dialer Dialer, address string, packet []byte, 
 	if n <= nhpwire.PacketBufferSize && err != nil {
 		return nil, fmt.Errorf("read from %s: %w", address, err)
 	}
-	out := make([]byte, n)
-	copy(out, buf[:n])
-	return out, nil
+	return buf[:n], nil
 }
 
 // decryptAndCorrelate authenticates the reply against the pinned server key and
