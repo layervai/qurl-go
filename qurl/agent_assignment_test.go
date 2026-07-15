@@ -149,6 +149,22 @@ func TestFetchAgentAssignment_Success(t *testing.T) {
 	}
 }
 
+func TestFetchAgentAssignment_AcceptsLayerVXYZEndpoint(t *testing.T) {
+	want := validAssignment(t, "connector-7f3c2a")
+	want.Endpoint.Host = "cell0.nhp.layerv.xyz"
+	doer := &scriptedDoer{responses: []scriptedResponse{{status: http.StatusOK, body: assignmentEnvelope(t, want)}}}
+	clk := &fakeClock{now: time.Now()}
+	var slept []time.Duration
+	got, err := FetchAgentAssignment(context.Background(), want.AgentID, BearerToken("lv_enroll_key"),
+		deterministicFetchOpts(doer, clk, &slept)...)
+	if err != nil {
+		t.Fatalf("FetchAgentAssignment: %v", err)
+	}
+	if got.Endpoint.Host != want.Endpoint.Host {
+		t.Fatalf("endpoint host = %q, want %q", got.Endpoint.Host, want.Endpoint.Host)
+	}
+}
+
 func TestFetchAgentAssignment_RejectsInvalidResponses(t *testing.T) {
 	const agentID = "connector-7f3c2a"
 	cases := []struct {

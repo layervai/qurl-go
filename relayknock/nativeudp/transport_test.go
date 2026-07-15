@@ -283,6 +283,9 @@ func TestExchange_RejectsBadReplies(t *testing.T) {
 			if !errors.Is(err, tc.wantIs) {
 				t.Fatalf("error = %v, want errors.Is %v", err, tc.wantIs)
 			}
+			if errors.Is(tc.wantIs, nativeudp.ErrServerUnauthenticated) && errors.Is(err, relayknock.ErrMalformedReply) {
+				t.Fatalf("decrypt-stage error exposed ErrMalformedReply instead of only ErrServerUnauthenticated: %v", err)
+			}
 		})
 	}
 }
