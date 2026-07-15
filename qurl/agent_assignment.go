@@ -165,11 +165,14 @@ func (e *AssignmentRateLimitedError) Unwrap() []error {
 // service kept returning 503 through the whole attempt/deadline budget. It
 // unwraps to both ErrAssignmentRecoveryRequired and ErrAssignmentUnavailable so a
 // caller can match either the terminal-recovery class or the underlying 503
-// class.
+// class. When the server returned a structured problem, errors.As also exposes
+// the final *APIError for diagnostics.
 type AssignmentRecoveryRequiredError struct {
 	Attempts       int
 	Elapsed        time.Duration
 	LastRetryAfter time.Duration
+
+	apiErr *APIError
 }
 
 func (e *AssignmentRecoveryRequiredError) Error() string {
@@ -177,7 +180,10 @@ func (e *AssignmentRecoveryRequiredError) Error() string {
 }
 
 func (e *AssignmentRecoveryRequiredError) Unwrap() []error {
-	return []error{ErrAssignmentRecoveryRequired, ErrAssignmentUnavailable}
+	if e.apiErr == nil {
+		return []error{ErrAssignmentRecoveryRequired, ErrAssignmentUnavailable}
+	}
+	return []error{ErrAssignmentRecoveryRequired, ErrAssignmentUnavailable, e.apiErr}
 }
 
 // --- client ---
@@ -370,6 +376,7 @@ func (c *assignmentConfig) resolve(ctx context.Context, agentID string, cred Cre
 	}
 	start := c.clock()
 	var lastRetryAfter time.Duration
+	var lastAPIErr *APIError
 	for attempt := 1; ; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -380,6 +387,7 @@ func (c *assignmentConfig) resolve(ctx context.Context, agentID string, cred Cre
 		}
 		// res is the retryable 503 case.
 		lastRetryAfter = res.retryAfter
+		lastAPIErr = res.apiErr
 		elapsed := c.clock().Sub(start)
 		delay := c.backoff(attempt, res.retryAfter)
 		// Stop when the attempt budget is spent, the elapsed deadline is reached,
@@ -390,6 +398,7 @@ func (c *assignmentConfig) resolve(ctx context.Context, agentID string, cred Cre
 				Attempts:       attempt,
 				Elapsed:        elapsed,
 				LastRetryAfter: lastRetryAfter,
+				apiErr:         lastAPIErr,
 			}
 		}
 		if err := c.sleep(ctx, delay); err != nil {
@@ -417,14 +426,18 @@ func (c *assignmentConfig) backoff(attempt int, retryAfter time.Duration) time.D
 
 // assignmentAttempt is the outcome of one POST: exactly one of a validated
 // assignment, a terminal error, or a retryable 503 (assignment and err both nil,
-// retryAfter set).
+// with retryAfter and apiErr set).
 type assignmentAttempt struct {
 	assignment *AgentAssignment
 	retryAfter time.Duration
+	apiErr     *APIError
 	err        error
 }
 
 func (c *assignmentConfig) attempt(ctx context.Context, agentID string, cred CredentialProvider, reqBody []byte) assignmentAttempt {
+	// baseURL was parsed and normalized by newAssignmentConfig, so request
+	// construction can fail only because caller-supplied configuration was
+	// invalid, not because the service returned an error response.
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/agent/assignment", bytes.NewReader(reqBody))
 	if err != nil {
 		return assignmentAttempt{err: fmt.Errorf("%w: build assignment request: %w", ErrInvalidAssignmentConfig, err)}
@@ -469,7 +482,7 @@ func (c *assignmentConfig) decodeSuccess(agentID string, body []byte) assignment
 	if err := json.Unmarshal(body, &env); err != nil {
 		return assignmentAttempt{err: fmt.Errorf("%w: decode assignment response: %w", ErrAssignmentInvalidResponse, err)}
 	}
-	assignment := env.Data.clone()
+	assignment := &env.Data
 	if err := validateAgentAssignment(assignment, agentID, c.clock()); err != nil {
 		return assignmentAttempt{err: err}
 	}
@@ -512,7 +525,7 @@ func classifyAssignmentError(status int, body []byte, header http.Header, now ti
 			if retryAfter <= 0 {
 				retryAfter = defaultAssignmentRetryAfter
 			}
-			return assignmentAttempt{retryAfter: retryAfter}
+			return assignmentAttempt{retryAfter: retryAfter, apiErr: apiErr}
 		}
 		return assignmentAttempt{err: fmt.Errorf("%w: unexpected 503 assignment response: %w", ErrAssignmentServiceError, apiErr)}
 	default:
@@ -670,8 +683,9 @@ func parseRetryAfter(value string, now time.Time) time.Duration {
 	return 0
 }
 
-// parseSecondsHeader parses an integer-seconds header (RateLimit-Reset) into a
-// non-negative duration; an absent/invalid value is 0.
+// parseSecondsHeader parses the qurl-service draft-07 RateLimit-Reset contract:
+// integer delta-seconds, not a Unix timestamp. It returns a non-negative
+// duration; an absent/invalid value is 0.
 func parseSecondsHeader(value string) time.Duration {
 	value = strings.TrimSpace(value)
 	if value == "" {

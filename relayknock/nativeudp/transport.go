@@ -433,10 +433,17 @@ func resolveAddresses(ctx context.Context, host string, opts Options) ([]netip.A
 	return public, nil
 }
 
+var (
+	carrierGradeNATPrefix = netip.MustParsePrefix("100.64.0.0/10")
+	benchmarkingPrefix    = netip.MustParsePrefix("198.18.0.0/15")
+)
+
 func publicAssignmentAddress(addr netip.Addr) bool {
+	addr = addr.Unmap()
 	return addr.IsValid() && addr.IsGlobalUnicast() && !addr.IsPrivate() &&
 		!addr.IsLoopback() && !addr.IsLinkLocalUnicast() &&
-		!addr.IsLinkLocalMulticast() && !addr.IsMulticast() && !addr.IsUnspecified()
+		!addr.IsLinkLocalMulticast() && !addr.IsMulticast() && !addr.IsUnspecified() &&
+		!carrierGradeNATPrefix.Contains(addr) && !benchmarkingPrefix.Contains(addr)
 }
 
 func validateHeaderType(headerType int) error {
