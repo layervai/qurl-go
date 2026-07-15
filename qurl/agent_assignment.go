@@ -568,14 +568,14 @@ func validateAssignmentAgentID(agentID string) error {
 	}
 	for i := range agentID {
 		ch := agentID[i]
-		isLowerAlnum := (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9')
+		isLowerAlnum := isLowerAlnumByte(ch)
 		if i == 0 || i == len(agentID)-1 {
 			if !isLowerAlnum {
 				return fmt.Errorf("%w: agent id must start and end with a lowercase letter or digit", ErrInvalidAssignmentConfig)
 			}
 			continue
 		}
-		if !isLowerAlnum && ch != '-' {
+		if !isLDHByte(ch) {
 			return fmt.Errorf("%w: agent id may contain only lowercase letters, digits, and hyphens", ErrInvalidAssignmentConfig)
 		}
 	}
@@ -603,7 +603,7 @@ func validateAgentAssignment(a *AgentAssignment, wantAgentID string, now time.Ti
 	if a.EndpointRevision < 1 {
 		return fmt.Errorf("%w: endpoint revision must be >= 1", ErrAssignmentInvalidResponse)
 	}
-	if !a.LeaseExpiresAt.After(now) {
+	if a.LeaseExpired(now) {
 		return fmt.Errorf("%w: lease expiry must be in the future", ErrAssignmentInvalidResponse)
 	}
 	if err := validateAssignmentEndpointHost(a.Endpoint.Host); err != nil {
@@ -625,7 +625,7 @@ func validateAssignmentEndpointHost(host string) error {
 	if host == "" {
 		return fmt.Errorf("%w: missing endpoint host", ErrAssignmentInvalidResponse)
 	}
-	if host != strings.ToLower(host) || len(host) > 253 || strings.HasSuffix(host, ".") {
+	if len(host) > 253 {
 		return fmt.Errorf("%w: endpoint host must be a canonical lowercase DNS name", ErrAssignmentInvalidResponse)
 	}
 	labels := strings.Split(host, ".")
@@ -645,8 +645,7 @@ func validAssignmentDNSLabel(label string) bool {
 		return false
 	}
 	for i := range label {
-		ch := label[i]
-		if (ch < 'a' || ch > 'z') && (ch < '0' || ch > '9') && ch != '-' {
+		if !isLDHByte(label[i]) {
 			return false
 		}
 	}
@@ -663,13 +662,20 @@ func validAssignmentCellID(cellID string) bool {
 		if i == 0 {
 			continue
 		}
-		ch := cellID[i]
-		if (ch < 'a' || ch > 'z') && (ch < '0' || ch > '9') && ch != '-' {
+		if !isLDHByte(cellID[i]) {
 			return false
 		}
 	}
 	last := cellID[len(cellID)-1]
-	return (last >= 'a' && last <= 'z') || (last >= '0' && last <= '9')
+	return isLowerAlnumByte(last)
+}
+
+func isLDHByte(ch byte) bool {
+	return isLowerAlnumByte(ch) || ch == '-'
+}
+
+func isLowerAlnumByte(ch byte) bool {
+	return (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9')
 }
 
 func decodeAssignmentServerPublicKey(encoded string) ([]byte, error) {
@@ -689,11 +695,8 @@ func parseRetryAfter(value string, now time.Time) time.Duration {
 	if value == "" {
 		return 0
 	}
-	if secs, err := strconv.ParseInt(value, 10, 64); err == nil {
-		if secs <= 0 || secs > maxHeaderDurationSeconds {
-			return 0
-		}
-		return time.Duration(secs) * time.Second
+	if delta := parseSecondsHeader(value); delta > 0 {
+		return delta
 	}
 	if t, err := http.ParseTime(value); err == nil {
 		if d := t.Sub(now); d > 0 && d <= time.Duration(maxHeaderDurationSeconds)*time.Second {
