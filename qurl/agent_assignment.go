@@ -155,6 +155,9 @@ func (e *AssignmentRateLimitedError) Error() string {
 }
 
 func (e *AssignmentRateLimitedError) Unwrap() []error {
+	if e.apiErr == nil {
+		return []error{ErrAssignmentRateLimited}
+	}
 	return []error{ErrAssignmentRateLimited, e.apiErr}
 }
 
@@ -205,6 +208,7 @@ const (
 	// defaultAssignmentRetryAfter is the minimum 503 delay when the server omits
 	// Retry-After; it matches the service's contractual Retry-After: 5.
 	defaultAssignmentRetryAfter = 5 * time.Second
+	maxHeaderDurationSeconds    = int64((1<<63 - 1) / time.Second)
 )
 
 type assignmentConfig struct {
@@ -650,7 +654,7 @@ func parseRetryAfter(value string, now time.Time) time.Duration {
 		if secs <= 0 {
 			return 0
 		}
-		if secs > maxDurationSeconds() {
+		if secs > maxHeaderDurationSeconds {
 			return 0
 		}
 		return time.Duration(secs) * time.Second
@@ -670,14 +674,10 @@ func parseSecondsHeader(value string) time.Duration {
 	if value == "" {
 		return 0
 	}
-	if secs, err := strconv.ParseInt(value, 10, 64); err == nil && secs > 0 && secs <= maxDurationSeconds() {
+	if secs, err := strconv.ParseInt(value, 10, 64); err == nil && secs > 0 && secs <= maxHeaderDurationSeconds {
 		return time.Duration(secs) * time.Second
 	}
 	return 0
-}
-
-func maxDurationSeconds() int64 {
-	return int64(time.Duration(1<<63-1) / time.Second)
 }
 
 // sleepWithContext sleeps for d, returning early with the context error if the

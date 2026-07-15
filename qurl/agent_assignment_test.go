@@ -318,6 +318,17 @@ func TestFetchAgentAssignment_RateLimitedCarriesResetTiming(t *testing.T) {
 	}
 }
 
+func TestAssignmentRateLimitedError_NilAPIErrorStillUnwrapsSentinel(t *testing.T) {
+	err := &AssignmentRateLimitedError{}
+	if !errors.Is(err, ErrAssignmentRateLimited) {
+		t.Fatalf("error = %v, want ErrAssignmentRateLimited", err)
+	}
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		t.Fatalf("error unexpectedly unwraps a nil *APIError: %#v", apiErr)
+	}
+}
+
 func TestFetchAgentAssignment_TransportErrorIsTerminal(t *testing.T) {
 	doer := &scriptedDoer{responses: []scriptedResponse{{err: errors.New("connection reset")}}}
 	clk := &fakeClock{now: time.Now()}
