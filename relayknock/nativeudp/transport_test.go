@@ -33,6 +33,7 @@ const (
 	behaviorWrongType                    // the other reply type (KNK->RAK, REG->ACK)
 	behaviorWrongKey                     // built with a different server static key
 	behaviorGarbage                      // random non-NHP bytes
+	behaviorEmpty                        // zero-length datagram
 	behaviorTooShort                     // a sub-header-length datagram
 	behaviorOversize                     // a datagram larger than the NHP buffer
 	behaviorSilent                       // never reply
@@ -116,6 +117,8 @@ func (s *fakeServer) buildResponse(msg *relayknock.Reply) []byte {
 		return nil
 	case behaviorGarbage:
 		return mustRand(s.t, 400)
+	case behaviorEmpty:
+		return []byte{}
 	case behaviorTooShort:
 		return mustRand(s.t, 100)
 	case behaviorOversize:
@@ -163,13 +166,13 @@ func replyTypeFor(initiatorType int) int {
 	return relayknock.TypeACK
 }
 
-// loopback returns a public documentation address so the production transport's
-// private-address rejection remains active in tests. loopbackDialer then maps
-// that synthetic public destination to the local fake server.
+// loopback returns a globally routable address so the production transport's
+// non-public-address rejection remains active in tests. loopbackDialer never
+// dials it; it maps that synthetic destination to the local fake server.
 type loopback struct{}
 
 func (loopback) LookupNetIP(context.Context, string, string) ([]netip.Addr, error) {
-	return []netip.Addr{netip.MustParseAddr("192.0.2.10")}, nil
+	return []netip.Addr{netip.MustParseAddr("8.8.8.8")}, nil
 }
 
 type loopbackDialer struct{}
@@ -343,8 +346,8 @@ func TestExchange_MultiAddressFallback(t *testing.T) {
 	srv := newFakeServer(t, serverPriv, pubOf(t, devicePriv), behaviorNormal)
 	port := srv.port()
 
-	bad := netip.MustParseAddr("192.0.2.1") // TEST-NET-1, never reachable
-	good := netip.MustParseAddr("192.0.2.2")
+	bad := netip.MustParseAddr("1.1.1.1")
+	good := netip.MustParseAddr("1.0.0.1")
 	res := resolverReturning([]netip.Addr{bad, good})
 
 	badAddr := netip.AddrPortFrom(bad, uint16(port)).String()
@@ -371,35 +374,46 @@ func TestExchange_MultiAddressFallback(t *testing.T) {
 // the pinned key.
 func TestExchange_UnauthenticatedFirstAddressDoesNotFallThrough(t *testing.T) {
 	t.Parallel()
-	serverPriv, serverPub := mustKeypair(t)
-	devicePriv := mustPriv(t)
-	agentPub := pubOf(t, devicePriv)
-	badServer := newFakeServer(t, serverPriv, agentPub, behaviorWrongKey)
-	goodServer := newFakeServer(t, serverPriv, agentPub, behaviorNormal)
+	for _, tc := range []struct {
+		name     string
+		behavior behavior
+	}{
+		{"wrong server key", behaviorWrongKey},
+		{"zero-length datagram", behaviorEmpty},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			serverPriv, serverPub := mustKeypair(t)
+			devicePriv := mustPriv(t)
+			agentPub := pubOf(t, devicePriv)
+			badServer := newFakeServer(t, serverPriv, agentPub, tc.behavior)
+			goodServer := newFakeServer(t, serverPriv, agentPub, behaviorNormal)
 
-	first := netip.MustParseAddr("192.0.2.20")
-	second := netip.MustParseAddr("192.0.2.21")
-	const assignedPort = 62206
-	dialer := &addressRoutingDialer{routes: map[string]string{
-		netip.AddrPortFrom(first, assignedPort).String():  net.JoinHostPort("127.0.0.1", fmt.Sprint(badServer.port())),
-		netip.AddrPortFrom(second, assignedPort).String(): net.JoinHostPort("127.0.0.1", fmt.Sprint(goodServer.port())),
-	}}
+			first := netip.MustParseAddr("9.9.9.9")
+			second := netip.MustParseAddr("149.112.112.112")
+			const assignedPort = 62206
+			dialer := &addressRoutingDialer{routes: map[string]string{
+				netip.AddrPortFrom(first, assignedPort).String():  net.JoinHostPort("127.0.0.1", fmt.Sprint(badServer.port())),
+				netip.AddrPortFrom(second, assignedPort).String(): net.JoinHostPort("127.0.0.1", fmt.Sprint(goodServer.port())),
+			}}
 
-	ep := nativeudp.Endpoint{Host: "cell0.nhp.test", Port: assignedPort, ServerStaticPub: serverPub}
-	opts := nativeudp.Options{
-		DeviceStaticPriv: devicePriv,
-		Resolver:         resolverReturning([]netip.Addr{first, second}),
-		Dialer:           dialer,
-		Timeout:          2 * time.Second,
-	}
-	if _, err := nativeudp.Knock(context.Background(), ep, nil, opts); !errors.Is(err, nativeudp.ErrServerUnauthenticated) {
-		t.Fatalf("error = %v, want ErrServerUnauthenticated", err)
-	}
-	if badServer.receivedCount() != 1 {
-		t.Fatalf("first server received %d datagrams, want 1", badServer.receivedCount())
-	}
-	if goodServer.receivedCount() != 0 {
-		t.Fatalf("second server received %d datagrams, want 0 after authentication failure", goodServer.receivedCount())
+			ep := nativeudp.Endpoint{Host: "cell0.nhp.test", Port: assignedPort, ServerStaticPub: serverPub}
+			opts := nativeudp.Options{
+				DeviceStaticPriv: devicePriv,
+				Resolver:         resolverReturning([]netip.Addr{first, second}),
+				Dialer:           dialer,
+				Timeout:          2 * time.Second,
+			}
+			if _, err := nativeudp.Knock(context.Background(), ep, nil, opts); !errors.Is(err, nativeudp.ErrServerUnauthenticated) {
+				t.Fatalf("error = %v, want ErrServerUnauthenticated", err)
+			}
+			if badServer.receivedCount() != 1 {
+				t.Fatalf("first server received %d datagrams, want 1", badServer.receivedCount())
+			}
+			if goodServer.receivedCount() != 0 {
+				t.Fatalf("second server received %d datagrams, want 0 after authentication failure", goodServer.receivedCount())
+			}
+		})
 	}
 }
 
@@ -414,8 +428,8 @@ func TestExchange_NoFallbackBeyondAssignment(t *testing.T) {
 	// transport must not reach it.
 	srv := newFakeServer(t, serverPriv, pubOf(t, devicePriv), behaviorNormal)
 
-	a := netip.MustParseAddr("192.0.2.1")
-	b := netip.MustParseAddr("192.0.2.2")
+	a := netip.MustParseAddr("208.67.222.222")
+	b := netip.MustParseAddr("208.67.220.220")
 	res := resolverReturning([]netip.Addr{a, b})
 	dialer := &sequencedDialer{fail: map[string]bool{
 		netip.AddrPortFrom(a, uint16(srv.port())).String(): true,
