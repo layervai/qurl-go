@@ -150,7 +150,7 @@ func TestParseRegisterAck_MismatchedAspIdRejected(t *testing.T) {
 
 func TestRegistrationInfoResponse_Validate(t *testing.T) {
 	goodPeer := NHPServerPeerInfo{
-		PublicKeyB64: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+		PublicKeyB64: validTestNHPServerPublicKeyB64,
 		Host:         "nhp.example.test",
 		Port:         62206,
 	}
@@ -177,6 +177,12 @@ func TestRegistrationInfoResponse_Validate(t *testing.T) {
 		{"relay base fragment", func(r *registrationInfoResponse) { r.Relay.BaseURL = "https://relay.example.test/prefix#wrong" }, "must not include a fragment"},
 		{"missing server id", func(r *registrationInfoResponse) { r.Relay.ServerID = "" }, "missing relay server_id"},
 		{"bad peer key", func(r *registrationInfoResponse) { r.NHPServerPeer.PublicKeyB64 = "not-base64" }, "not standard base64"},
+		{"low-order peer key", func(r *registrationInfoResponse) {
+			r.NHPServerPeer.PublicKeyB64 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+		}, "low-order"},
+		{"non-canonical peer key", func(r *registrationInfoResponse) {
+			r.NHPServerPeer.PublicKeyB64 = nonCanonicalTestNHPServerPublicKeyB64()
+		}, "non-canonical"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -196,7 +202,7 @@ func TestRegistrationInfoResponse_AllowsLoopbackRelay(t *testing.T) {
 	r := registrationInfoResponse{
 		KeyKind:       keyKindAccount,
 		KeyID:         "key_x",
-		NHPServerPeer: NHPServerPeerInfo{PublicKeyB64: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", Host: "h", Port: 1},
+		NHPServerPeer: NHPServerPeerInfo{PublicKeyB64: validTestNHPServerPublicKeyB64, Host: "h", Port: 1},
 		Relay:         registrationRelay{BaseURL: "http://127.0.0.1:8080", ServerID: "abcdefghijk"},
 	}
 	if err := r.validate(time.Now(), ErrInvalidRegisterConfig); err != nil {
@@ -206,7 +212,7 @@ func TestRegistrationInfoResponse_AllowsLoopbackRelay(t *testing.T) {
 
 func TestCompletionResponse_Validate(t *testing.T) {
 	now := time.Now().UTC()
-	goodPeer := NHPServerPeerInfo{PublicKeyB64: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", Host: "h", Port: 1}
+	goodPeer := NHPServerPeerInfo{PublicKeyB64: validTestNHPServerPublicKeyB64, Host: "h", Port: 1}
 	base := completionResponse{
 		AgentID:       "agent-x",
 		RegisteredAt:  &now,

@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/layervai/qurl-go/internal/x25519key"
 )
 
 // defaultBootstrapBaseURL is the LayerV API origin BootstrapAgent uses for the
@@ -454,8 +456,8 @@ func validateNHPServerPublicKey(encoded, label string, errKind error) error {
 	if err != nil {
 		return fmt.Errorf("%w: %s NHP peer public key is not standard base64: %w", errKind, label, err)
 	}
-	if _, err := ecdh.X25519().NewPublicKey(peerKey); err != nil {
-		return fmt.Errorf("%w: %s NHP peer public key is not X25519: %w", errKind, label, err)
+	if err := x25519key.ValidatePublic(peerKey); err != nil {
+		return fmt.Errorf("%w: %s NHP peer public key is not a usable X25519 identity: %w", errKind, label, err)
 	}
 	return nil
 }

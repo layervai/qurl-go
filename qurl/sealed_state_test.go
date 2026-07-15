@@ -128,7 +128,7 @@ func testAgentState(t *testing.T) *AgentState {
 	state.RelayURL = "https://relay.example.test"
 	state.KeyID = "key_test"
 	state.NHPPeer = &NHPServerPeerInfo{
-		PublicKeyB64: base64.StdEncoding.EncodeToString(make([]byte, 32)),
+		PublicKeyB64: validTestNHPServerPublicKeyB64,
 		Host:         "nhp.example.test",
 		Port:         62206,
 	}
