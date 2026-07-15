@@ -401,6 +401,20 @@ func TestFetchAgentAssignment_HonorsRetryAfterAsMinimum(t *testing.T) {
 	}
 }
 
+func TestAssignmentBackoffCapsJitterButHonorsRetryAfter(t *testing.T) {
+	cfg := &assignmentConfig{
+		minBackoff: 8 * time.Second,
+		maxBackoff: 8 * time.Second,
+		jitter:     func() float64 { return 0.999 },
+	}
+	if got := cfg.backoff(1, 0); got != 8*time.Second {
+		t.Fatalf("jittered backoff = %s, want maxBackoff 8s", got)
+	}
+	if got := cfg.backoff(1, 10*time.Second); got != 10*time.Second {
+		t.Fatalf("Retry-After backoff = %s, want 10s minimum even above maxBackoff", got)
+	}
+}
+
 func TestFetchAgentAssignment_DefaultsRetryAfterWhenAbsent(t *testing.T) {
 	want := validAssignment(t, "connector-7f3c2a")
 	doer := &scriptedDoer{responses: []scriptedResponse{
@@ -435,6 +449,9 @@ func TestFetchAgentAssignment_ExhaustsByAttemptBudget(t *testing.T) {
 	var rec *AssignmentRecoveryRequiredError
 	if !errors.As(err, &rec) || rec.Attempts != 3 {
 		t.Fatalf("recovery error = %v (attempts=%d), want 3 attempts", err, recAttempts(rec))
+	}
+	if rec.LastRetryAfter != time.Second || !strings.Contains(err.Error(), "last-retry-after=1s") {
+		t.Fatalf("recovery error did not surface last Retry-After: %#v / %v", rec, err)
 	}
 	if doer.calls != 3 {
 		t.Fatalf("calls = %d, want exactly 3 (bounded, never an unbounded loop)", doer.calls)
@@ -603,5 +620,9 @@ func TestAssignmentDurationHeadersRejectOverflow(t *testing.T) {
 		if got := parseSecondsHeader(value); got != 0 {
 			t.Fatalf("parseSecondsHeader(%q) = %s, want 0", value, got)
 		}
+	}
+	farFuture := time.Date(9999, time.December, 31, 23, 59, 59, 0, time.UTC).Format(http.TimeFormat)
+	if got := parseRetryAfter(farFuture, time.Now()); got != 0 {
+		t.Fatalf("parseRetryAfter(far-future HTTP date) = %s, want 0", got)
 	}
 }

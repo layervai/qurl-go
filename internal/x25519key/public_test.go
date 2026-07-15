@@ -22,6 +22,13 @@ func TestDecodeCanonicalBase64(t *testing.T) {
 }
 
 func TestValidatePublicRejectsUnusableOrNonCanonicalKeys(t *testing.T) {
+	valid, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	highBitAlias := append([]byte(nil), valid.PublicKey().Bytes()...)
+	highBitAlias[Size-1] |= 0x80
+
 	nonCanonical := make([]byte, Size)
 	nonCanonical[0] = 0xed
 	for i := 1; i < Size-1; i++ {
@@ -36,6 +43,7 @@ func TestValidatePublicRejectsUnusableOrNonCanonicalKeys(t *testing.T) {
 		{name: "wrong length", key: make([]byte, Size-1)},
 		{name: "low order", key: make([]byte, Size)},
 		{name: "non canonical", key: nonCanonical},
+		{name: "high bit alias", key: highBitAlias},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := ValidatePublic(tc.key); err == nil {

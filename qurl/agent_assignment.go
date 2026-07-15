@@ -173,7 +173,7 @@ type AssignmentRecoveryRequiredError struct {
 }
 
 func (e *AssignmentRecoveryRequiredError) Error() string {
-	return fmt.Sprintf("qurl: cell assignment unavailable after %d attempts over %s; the durable assignment row may be missing — surface operator recovery instead of retrying (never an unbounded 5s loop)", e.Attempts, e.Elapsed)
+	return fmt.Sprintf("qurl: cell assignment unavailable after %d attempts over %s (last-retry-after=%s); the durable assignment row may be missing — surface operator recovery instead of retrying (never an unbounded 5s loop)", e.Attempts, e.Elapsed, e.LastRetryAfter)
 }
 
 func (e *AssignmentRecoveryRequiredError) Unwrap() []error {
@@ -406,6 +406,9 @@ func (c *assignmentConfig) backoff(attempt int, retryAfter time.Duration) time.D
 		base = c.maxBackoff
 	}
 	jittered := base + time.Duration(c.jitter()*float64(base))
+	if jittered > c.maxBackoff {
+		jittered = c.maxBackoff
+	}
 	if retryAfter > jittered {
 		return retryAfter
 	}
@@ -660,7 +663,7 @@ func parseRetryAfter(value string, now time.Time) time.Duration {
 		return time.Duration(secs) * time.Second
 	}
 	if t, err := http.ParseTime(value); err == nil {
-		if d := t.Sub(now); d > 0 {
+		if d := t.Sub(now); d > 0 && d <= time.Duration(maxHeaderDurationSeconds)*time.Second {
 			return d
 		}
 	}
