@@ -375,8 +375,6 @@ func (c *assignmentConfig) resolve(ctx context.Context, agentID string, cred Cre
 		return nil, fmt.Errorf("%w: encode assignment request: %w", ErrInvalidAssignmentConfig, err)
 	}
 	start := c.clock()
-	var lastRetryAfter time.Duration
-	var lastAPIErr *APIError
 	for attempt := 1; ; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -386,8 +384,6 @@ func (c *assignmentConfig) resolve(ctx context.Context, agentID string, cred Cre
 			return res.assignment, res.err
 		}
 		// res is the retryable 503 case.
-		lastRetryAfter = res.retryAfter
-		lastAPIErr = res.apiErr
 		elapsed := c.clock().Sub(start)
 		delay := c.backoff(attempt, res.retryAfter)
 		// Stop when the attempt budget is spent, the elapsed deadline is reached,
@@ -397,8 +393,8 @@ func (c *assignmentConfig) resolve(ctx context.Context, agentID string, cred Cre
 			return nil, &AssignmentRecoveryRequiredError{
 				Attempts:       attempt,
 				Elapsed:        elapsed,
-				LastRetryAfter: lastRetryAfter,
-				apiErr:         lastAPIErr,
+				LastRetryAfter: res.retryAfter,
+				apiErr:         res.apiErr,
 			}
 		}
 		if err := c.sleep(ctx, delay); err != nil {

@@ -225,7 +225,7 @@ func TestResolveAddresses_CapAndEmpty(t *testing.T) {
 		t.Fatalf("empty-resolution error = %v, want ErrResolve", err)
 	}
 
-	private := []netip.Addr{
+	nonPublic := []netip.Addr{
 		netip.MustParseAddr("127.0.0.1"),
 		netip.MustParseAddr("10.0.0.1"),
 		netip.MustParseAddr("169.254.1.2"),
@@ -235,7 +235,7 @@ func TestResolveAddresses_CapAndEmpty(t *testing.T) {
 		netip.MustParseAddr("fc00::1"),
 	}
 	_, err = resolveAddresses(context.Background(), "cell0.nhp.test", Options{
-		Resolver: resolverFunc(func(context.Context, string, string) ([]netip.Addr, error) { return private, nil }),
+		Resolver: resolverFunc(func(context.Context, string, string) ([]netip.Addr, error) { return nonPublic, nil }),
 	})
 	if !errors.Is(err, ErrResolve) {
 		t.Fatalf("private-only resolution error = %v, want ErrResolve", err)
