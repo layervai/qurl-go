@@ -329,6 +329,17 @@ func TestAssignmentRateLimitedError_NilAPIErrorStillUnwrapsSentinel(t *testing.T
 	}
 }
 
+func TestAssignmentRecoveryRequiredError_NilAPIErrorStillUnwrapsSentinels(t *testing.T) {
+	err := &AssignmentRecoveryRequiredError{}
+	if !errors.Is(err, ErrAssignmentRecoveryRequired) || !errors.Is(err, ErrAssignmentUnavailable) {
+		t.Fatalf("error = %v, want both recovery-required and unavailable sentinels", err)
+	}
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		t.Fatalf("error unexpectedly unwraps a nil *APIError: %#v", apiErr)
+	}
+}
+
 func TestFetchAgentAssignment_TransportErrorIsTerminal(t *testing.T) {
 	doer := &scriptedDoer{responses: []scriptedResponse{{err: errors.New("connection reset")}}}
 	clk := &fakeClock{now: time.Now()}
@@ -452,6 +463,10 @@ func TestFetchAgentAssignment_ExhaustsByAttemptBudget(t *testing.T) {
 	}
 	if rec.LastRetryAfter != time.Second || !strings.Contains(err.Error(), "last-retry-after=1s") {
 		t.Fatalf("recovery error did not surface last Retry-After: %#v / %v", rec, err)
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusServiceUnavailable || apiErr.Code != assignmentCodeUnavailable {
+		t.Fatalf("recovery error lost final API problem details: %v", err)
 	}
 	if doer.calls != 3 {
 		t.Fatalf("calls = %d, want exactly 3 (bounded, never an unbounded loop)", doer.calls)

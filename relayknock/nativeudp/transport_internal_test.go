@@ -229,6 +229,8 @@ func TestResolveAddresses_CapAndEmpty(t *testing.T) {
 		netip.MustParseAddr("127.0.0.1"),
 		netip.MustParseAddr("10.0.0.1"),
 		netip.MustParseAddr("169.254.1.2"),
+		netip.MustParseAddr("100.64.0.1"),
+		netip.MustParseAddr("198.18.0.1"),
 		netip.MustParseAddr("::1"),
 		netip.MustParseAddr("fc00::1"),
 	}
