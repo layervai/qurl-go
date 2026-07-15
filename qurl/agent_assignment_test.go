@@ -251,6 +251,21 @@ func TestFetchAgentAssignment_EmptyAndMalformedBody(t *testing.T) {
 	}
 }
 
+func TestFetchAgentAssignment_OversizedSuccessIsInvalidResponse(t *testing.T) {
+	doer := &scriptedDoer{responses: []scriptedResponse{{
+		status: http.StatusOK,
+		body:   strings.Repeat("x", maxAPIResponseBodyBytes+1),
+	}}}
+	clk := &fakeClock{now: time.Now()}
+	var slept []time.Duration
+
+	_, err := FetchAgentAssignment(context.Background(), "connector-7f3c2a", BearerToken("lv_key"),
+		deterministicFetchOpts(doer, clk, &slept)...)
+	if !errors.Is(err, ErrAssignmentInvalidResponse) || errors.Is(err, ErrAssignmentServiceError) {
+		t.Fatalf("error = %v, want only ErrAssignmentInvalidResponse", err)
+	}
+}
+
 // --- terminal status classification ---
 
 func problemBody(code string) string {
@@ -452,9 +467,12 @@ func TestFetchAgentAssignment_ExhaustsByAttemptBudget(t *testing.T) {
 	doer := &scriptedDoer{responses: []scriptedResponse{first, last}} // last response repeats
 	clk := &fakeClock{now: time.Now()}
 	var slept []time.Duration
+	jitterCalls := 0
 
 	_, err := FetchAgentAssignment(context.Background(), "connector-7f3c2a", BearerToken("lv_key"),
-		deterministicFetchOpts(doer, clk, &slept, WithAssignmentRetryBudget(3, time.Hour))...)
+		deterministicFetchOpts(doer, clk, &slept,
+			WithAssignmentRetryBudget(3, time.Hour),
+			withAssignmentJitter(func() float64 { jitterCalls++; return 0 }))...)
 	if !errors.Is(err, ErrAssignmentRecoveryRequired) {
 		t.Fatalf("error = %v, want ErrAssignmentRecoveryRequired", err)
 	}
@@ -476,6 +494,9 @@ func TestFetchAgentAssignment_ExhaustsByAttemptBudget(t *testing.T) {
 	}
 	if doer.calls != 3 {
 		t.Fatalf("calls = %d, want exactly 3 (bounded, never an unbounded loop)", doer.calls)
+	}
+	if jitterCalls != 2 {
+		t.Fatalf("jitter draws = %d, want 2 (none on terminal exhausted attempt)", jitterCalls)
 	}
 }
 
