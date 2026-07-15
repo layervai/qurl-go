@@ -183,14 +183,20 @@ func validatePersistedNativeRegistrationCredential(state *AgentState, errKind er
 	return nil
 }
 
+const (
+	deviceAPIKeyIDPrefix       = "key_"
+	deviceAPIKeyIDRandomLength = 12
+	deviceAPIKeyIDLength       = len(deviceAPIKeyIDPrefix) + deviceAPIKeyIDRandomLength
+)
+
 func validateDeviceAPIKeyID(value, label string, errKind error) error {
-	if len(value) != 16 || !strings.HasPrefix(value, "key_") {
-		return fmt.Errorf("%w: %s must match key_ plus 12 alphanumeric characters", errKind, label)
+	if len(value) != deviceAPIKeyIDLength || !strings.HasPrefix(value, deviceAPIKeyIDPrefix) {
+		return fmt.Errorf("%w: %s must match %s plus %d alphanumeric characters", errKind, label, deviceAPIKeyIDPrefix, deviceAPIKeyIDRandomLength)
 	}
-	for i := len("key_"); i < len(value); i++ {
+	for i := len(deviceAPIKeyIDPrefix); i < len(value); i++ {
 		ch := value[i]
 		if (ch < 'a' || ch > 'z') && (ch < 'A' || ch > 'Z') && (ch < '0' || ch > '9') {
-			return fmt.Errorf("%w: %s must match key_ plus 12 alphanumeric characters", errKind, label)
+			return fmt.Errorf("%w: %s must match %s plus %d alphanumeric characters", errKind, label, deviceAPIKeyIDPrefix, deviceAPIKeyIDRandomLength)
 		}
 	}
 	return nil

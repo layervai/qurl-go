@@ -252,6 +252,10 @@ func TestCompletionResponse_Validate(t *testing.T) {
 		{"missing device key", func(r *completionResponse) { r.DeviceAPIKey = "" }, "missing device_api_key"},
 		{"device key surrounding whitespace", func(r *completionResponse) { r.DeviceAPIKey = " lv_device_secret " }, "surrounding whitespace"},
 		{"device key control", func(r *completionResponse) { r.DeviceAPIKey = "lv_device\nsecret" }, "invalid header characters"},
+		{"missing device key id", func(r *completionResponse) { r.DeviceAPIKeyID = "" }, "key_ plus 12 alphanumeric"},
+		{"short device key id", func(r *completionResponse) { r.DeviceAPIKeyID = "key_short" }, "key_ plus 12 alphanumeric"},
+		{"wrong device key id prefix", func(r *completionResponse) { r.DeviceAPIKeyID = "dev_device000001" }, "key_ plus 12 alphanumeric"},
+		{"non-alphanumeric device key id", func(r *completionResponse) { r.DeviceAPIKeyID = "key_device00000_" }, "key_ plus 12 alphanumeric"},
 		{"missing peer key", func(r *completionResponse) { r.NHPServerPeer.PublicKeyB64 = "" }, "missing NHP peer public key"},
 		{"malformed peer key", func(r *completionResponse) { r.NHPServerPeer.PublicKeyB64 = "not-base64" }, "not standard base64"},
 	}

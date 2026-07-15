@@ -56,6 +56,15 @@ type AgentRuntimeRegistrationOption interface {
 	AgentRuntimeOption
 }
 
+// AgentRuntimeUDPOption is the subset of runtime registration options that
+// configures a single native UDP exchange. The closed marker prevents
+// assignment-retry options from being silently accepted by KnockRegisteredAgent,
+// which performs no control-plane retry.
+type AgentRuntimeUDPOption interface {
+	AgentRuntimeRegistrationOption
+	applyAgentRuntimeUDPOption()
+}
+
 type agentRuntimeConfig struct {
 	baseURL      string
 	httpClient   HTTPDoer
@@ -143,9 +152,11 @@ func (o agentRuntimeAssignmentBudgetOption) applyRegisterOption(c *registerConfi
 type agentRuntimeResolverOption struct{ resolver nativeudp.Resolver }
 
 // WithAgentRuntimeUDPResolver injects native assignment DNS resolution.
-func WithAgentRuntimeUDPResolver(resolver nativeudp.Resolver) AgentRuntimeRegistrationOption {
+func WithAgentRuntimeUDPResolver(resolver nativeudp.Resolver) AgentRuntimeUDPOption {
 	return agentRuntimeResolverOption{resolver: resolver}
 }
+
+func (agentRuntimeResolverOption) applyAgentRuntimeUDPOption() {}
 
 func (o agentRuntimeResolverOption) applyAgentRuntimeOption(c *agentRuntimeConfig) error {
 	if o.resolver == nil {
@@ -162,9 +173,11 @@ func (o agentRuntimeResolverOption) applyRegisterOption(c *registerConfig) error
 type agentRuntimeDialerOption struct{ dialer nativeudp.Dialer }
 
 // WithAgentRuntimeUDPDialer injects the native UDP socket dialer.
-func WithAgentRuntimeUDPDialer(dialer nativeudp.Dialer) AgentRuntimeRegistrationOption {
+func WithAgentRuntimeUDPDialer(dialer nativeudp.Dialer) AgentRuntimeUDPOption {
 	return agentRuntimeDialerOption{dialer: dialer}
 }
+
+func (agentRuntimeDialerOption) applyAgentRuntimeUDPOption() {}
 
 func (o agentRuntimeDialerOption) applyAgentRuntimeOption(c *agentRuntimeConfig) error {
 	if o.dialer == nil {
@@ -185,9 +198,11 @@ type agentRuntimeUDPBoundsOption struct {
 
 // WithAgentRuntimeUDPBounds sets the per-address socket deadline and DNS address
 // fan-out cap. Both must be positive.
-func WithAgentRuntimeUDPBounds(timeout time.Duration, maxAddresses int) AgentRuntimeRegistrationOption {
+func WithAgentRuntimeUDPBounds(timeout time.Duration, maxAddresses int) AgentRuntimeUDPOption {
 	return agentRuntimeUDPBoundsOption{timeout: timeout, maxAddresses: maxAddresses}
 }
+
+func (agentRuntimeUDPBoundsOption) applyAgentRuntimeUDPOption() {}
 
 func (o agentRuntimeUDPBoundsOption) applyAgentRuntimeOption(c *agentRuntimeConfig) error {
 	if o.timeout <= 0 || o.maxAddresses < 1 {
@@ -208,8 +223,9 @@ func (o agentRuntimeTestOption) applyAgentRuntimeOption(c *agentRuntimeConfig) e
 func (o agentRuntimeTestOption) applyRegisterOption(c *registerConfig) error {
 	return o(&c.runtime)
 }
+func (agentRuntimeTestOption) applyAgentRuntimeUDPOption() {}
 
-func withAgentRuntimeClock(clock func() time.Time) AgentRuntimeRegistrationOption {
+func withAgentRuntimeClock(clock func() time.Time) AgentRuntimeUDPOption {
 	return agentRuntimeTestOption(func(c *agentRuntimeConfig) error {
 		if clock == nil {
 			return fmt.Errorf("%w: runtime clock must not be nil", ErrInvalidRegisterConfig)
@@ -304,6 +320,9 @@ func RefreshAgentRegistration(ctx context.Context, store AgentStateStore, opts .
 }
 
 func ensureAssignmentContinuity(persisted, current *AgentAssignment) error {
+	if current == nil {
+		return fmt.Errorf("%w: current assignment is nil", ErrAssignmentInvalidResponse)
+	}
 	if persisted == nil {
 		return nil
 	}
@@ -409,6 +428,9 @@ func (c *agentRuntimeConfig) confirmFreshDeviceAssignment(ctx context.Context, s
 			if assignment.EndpointRevision != state.Assignment.EndpointRevision {
 				return nil, fmt.Errorf("%w: endpoint revision advanced from %d to %d during enrollment", ErrAssignmentEndpointRefreshRequired, state.Assignment.EndpointRevision, assignment.EndpointRevision)
 			}
+			if *assignment == *state.Assignment {
+				return state, nil
+			}
 			candidate := state.clone()
 			candidate.Assignment = assignment.clone()
 			candidate.NHPPeer = assignmentPeer(assignment)
@@ -478,11 +500,15 @@ type nativeAgentKnockACK struct {
 // on malformed/wrong-resource ACKs. deviceStaticPrivateKey is normally obtained
 // once from AgentRuntimeBinding.TakeDeviceStaticPrivateKey and retained by the
 // connector for its process lifetime; the caller owns and must wipe it.
-func KnockRegisteredAgent(ctx context.Context, binding *AgentRuntimeBinding, deviceStaticPrivateKey []byte, knockResourceID string, opts NativeKnockOptions, transportOpts ...AgentRuntimeOption) (*NativeKnockResult, error) {
+func KnockRegisteredAgent(ctx context.Context, binding *AgentRuntimeBinding, deviceStaticPrivateKey []byte, knockResourceID string, opts NativeKnockOptions, transportOpts ...AgentRuntimeUDPOption) (*NativeKnockResult, error) {
 	if binding == nil {
 		return nil, fmt.Errorf("%w: runtime binding must not be nil", ErrInvalidNativeKnockInput)
 	}
-	cfg, err := newAgentRuntimeConfig(transportOpts)
+	runtimeOpts := make([]AgentRuntimeOption, len(transportOpts))
+	for i, opt := range transportOpts {
+		runtimeOpts[i] = opt
+	}
+	cfg, err := newAgentRuntimeConfig(runtimeOpts)
 	if err != nil {
 		return nil, fmt.Errorf("%w: native UDP transport options: %w", ErrInvalidNativeKnockInput, err)
 	}
