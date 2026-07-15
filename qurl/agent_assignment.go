@@ -173,14 +173,22 @@ type AssignmentRecoveryRequiredError struct {
 	LastRetryAfter time.Duration
 
 	apiErr *APIError
+	cause  error
 }
 
 func (e *AssignmentRecoveryRequiredError) Error() string {
+	if e.cause != nil {
+		return fmt.Sprintf("qurl: cell assignment retry backoff unavailable after %d attempts over %s (last-retry-after=%s); surface operator recovery: %v", e.Attempts, e.Elapsed, e.LastRetryAfter, e.cause)
+	}
 	return fmt.Sprintf("qurl: cell assignment unavailable after %d attempts over %s (last-retry-after=%s); the durable assignment row may be missing — surface operator recovery instead of retrying (never an unbounded 5s loop)", e.Attempts, e.Elapsed, e.LastRetryAfter)
 }
 
 func (e *AssignmentRecoveryRequiredError) Unwrap() []error {
-	return unwrapAssignmentError(e.apiErr, ErrAssignmentRecoveryRequired, ErrAssignmentUnavailable)
+	sentinels := []error{ErrAssignmentRecoveryRequired, ErrAssignmentUnavailable}
+	if e.cause != nil {
+		sentinels = append(sentinels, e.cause)
+	}
+	return unwrapAssignmentError(e.apiErr, sentinels...)
 }
 
 func unwrapAssignmentError(apiErr *APIError, sentinels ...error) []error {
@@ -231,7 +239,7 @@ type assignmentConfig struct {
 	maxBackoff  time.Duration
 	clock       func() time.Time
 	sleep       func(context.Context, time.Duration) error
-	jitter      func() float64
+	jitter      func() (float64, error)
 }
 
 // AssignmentOption customizes FetchAgentAssignment.
@@ -314,7 +322,7 @@ func withAssignmentJitter(jitter func() float64) AssignmentOption {
 		if jitter == nil {
 			return fmt.Errorf("%w: jitter must not be nil", ErrInvalidAssignmentConfig)
 		}
-		c.jitter = jitter
+		c.jitter = func() (float64, error) { return jitter(), nil }
 		return nil
 	})
 }
@@ -393,7 +401,16 @@ func (c *assignmentConfig) resolve(ctx context.Context, agentID string, cred Cre
 		exhausted := attempt >= c.maxAttempts || elapsed >= c.budget
 		var delay time.Duration
 		if !exhausted {
-			delay = c.backoff(attempt, res.retryAfter)
+			delay, err = c.backoff(attempt, res.retryAfter)
+			if err != nil {
+				return nil, &AssignmentRecoveryRequiredError{
+					Attempts:       attempt,
+					Elapsed:        elapsed,
+					LastRetryAfter: res.retryAfter,
+					apiErr:         res.apiErr,
+					cause:          fmt.Errorf("draw bounded retry jitter: %w", err),
+				}
+			}
 			exhausted = delay > c.budget-elapsed
 		}
 		// Stop when the attempt budget is spent, the elapsed deadline is reached,
@@ -415,18 +432,31 @@ func (c *assignmentConfig) resolve(ctx context.Context, agentID string, cred Cre
 
 // backoff returns the delay before the next attempt: the larger of the honored
 // Retry-After minimum and full jitter across the exponentially growing window
-// capped at maxBackoff. The service-contract Retry-After remains the hard floor;
-// full jitter prevents a fleet from clustering at the top of each local window.
-func (c *assignmentConfig) backoff(attempt int, retryAfter time.Duration) time.Duration {
-	base := c.minBackoff << (attempt - 1)
-	// The fixed positive minimum can overflow negative/above the cap before an
-	// over-width shift becomes zero; this guard is load-bearing for large custom
-	// attempt budgets.
-	if base <= 0 || base > c.maxBackoff {
-		base = c.maxBackoff
+// capped at maxBackoff. The service-contract Retry-After remains the hard floor.
+// That floor intentionally dominates the early default windows; once the local
+// window grows above it, full jitter decorrelates later fleet retries.
+func (c *assignmentConfig) backoff(attempt int, retryAfter time.Duration) (time.Duration, error) {
+	if attempt < 1 {
+		return 0, errors.New("assignment backoff attempt must be positive")
 	}
-	jittered := time.Duration(c.jitter() * float64(base))
-	return max(retryAfter, jittered)
+	// Saturate before shifting. A post-shift overflow check can miss an int64
+	// wrap to a small positive duration for a very large custom attempt budget.
+	shift := attempt - 1
+	base := c.maxBackoff
+	if shift < 63 && c.minBackoff <= c.maxBackoff>>shift {
+		base = c.minBackoff << shift
+	}
+	fraction, err := c.jitter()
+	if err != nil {
+		return 0, err
+	}
+	// The negated range check also rejects NaN because both comparisons are
+	// false for it.
+	if !(fraction >= 0 && fraction < 1) {
+		return 0, errors.New("assignment jitter fraction must be in [0,1)")
+	}
+	jittered := time.Duration(fraction * float64(base))
+	return max(retryAfter, jittered), nil
 }
 
 // assignmentAttempt is the outcome of one POST: exactly one of a validated
@@ -732,13 +762,11 @@ func sleepWithContext(ctx context.Context, d time.Duration) error {
 // cryptoJitterFraction returns a fraction in [0,1) from a crypto/rand draw. The
 // jitter is decorrelation, not a security primitive, but crypto/rand avoids
 // pulling in a separately-seeded PRNG and any weak-RNG lint.
-func cryptoJitterFraction() float64 {
+func cryptoJitterFraction() (float64, error) {
 	n, err := cryptoutil.RandomUint64()
 	if err != nil {
-		// Entropy failure degrades only decorrelation to zero jitter; the attempt
-		// and elapsed budgets still bound the retry loop.
-		return 0
+		return 0, err
 	}
 	// 53-bit mantissa fraction, matching the usual [0,1) float construction.
-	return float64(n>>11) / (1 << 53)
+	return float64(n>>11) / (1 << 53), nil
 }

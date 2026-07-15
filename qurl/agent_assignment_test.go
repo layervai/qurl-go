@@ -432,13 +432,50 @@ func TestAssignmentBackoffUsesFullJitterAndHonorsRetryAfter(t *testing.T) {
 	cfg := &assignmentConfig{
 		minBackoff: 8 * time.Second,
 		maxBackoff: 8 * time.Second,
-		jitter:     func() float64 { return 0.5 },
+		jitter:     func() (float64, error) { return 0.5, nil },
 	}
-	if got := cfg.backoff(1, 0); got != 4*time.Second {
+	if got, err := cfg.backoff(1, 0); err != nil || got != 4*time.Second {
 		t.Fatalf("full-jitter backoff = %s, want 4s within the 8s window", got)
 	}
-	if got := cfg.backoff(1, 10*time.Second); got != 10*time.Second {
+	if got, err := cfg.backoff(1, 10*time.Second); err != nil || got != 10*time.Second {
 		t.Fatalf("Retry-After backoff = %s, want 10s minimum even above maxBackoff", got)
+	}
+	if got, err := cfg.backoff(80, 0); err != nil || got != 4*time.Second {
+		t.Fatalf("saturated large-attempt backoff = %s, want 4s within the capped 8s window", got)
+	}
+}
+
+func TestAssignmentBackoffDefaultFloorStillAllowsLateJitter(t *testing.T) {
+	cfg := &assignmentConfig{
+		minBackoff: defaultAssignmentMinBackoff,
+		maxBackoff: defaultAssignmentMaxBackoff,
+		jitter:     func() (float64, error) { return 0.75, nil },
+	}
+	if got, err := cfg.backoff(5, defaultAssignmentRetryAfter); err != nil || got != 6*time.Second {
+		t.Fatalf("late default backoff = %s, want 6s above the 5s Retry-After floor", got)
+	}
+}
+
+func TestFetchAgentAssignment_JitterFailureRequiresRecovery(t *testing.T) {
+	doer := &scriptedDoer{responses: []scriptedResponse{unavailable("1")}}
+	clk := &fakeClock{now: time.Now()}
+	var slept []time.Duration
+	entropyErr := errors.New("entropy unavailable")
+
+	_, err := FetchAgentAssignment(context.Background(), "connector-7f3c2a", BearerToken("lv_key"),
+		deterministicFetchOpts(doer, clk, &slept, assignmentOptionFunc(func(c *assignmentConfig) error {
+			c.jitter = func() (float64, error) { return 0, entropyErr }
+			return nil
+		}))...)
+	if !errors.Is(err, ErrAssignmentRecoveryRequired) || !errors.Is(err, ErrAssignmentUnavailable) || !errors.Is(err, entropyErr) {
+		t.Fatalf("error = %v, want recovery-required + unavailable + entropy cause", err)
+	}
+	var rec *AssignmentRecoveryRequiredError
+	if !errors.As(err, &rec) || rec.Attempts != 1 || rec.LastRetryAfter != time.Second {
+		t.Fatalf("recovery error = %#v, want first-attempt retry timing", rec)
+	}
+	if doer.calls != 1 || len(slept) != 0 {
+		t.Fatalf("calls/sleeps = %d/%v, want one call and no synchronized fallback sleep", doer.calls, slept)
 	}
 }
 
