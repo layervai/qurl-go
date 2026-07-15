@@ -64,7 +64,9 @@ var (
 	// datagram is a definitive rejection, not a transport miss. A bounded outer
 	// lifecycle may refresh assignment/DNS and start a wholly new exchange with
 	// fresh message randomness; it must not reinterpret the rejected datagram as
-	// authenticated or fall through within this exchange.
+	// authenticated or fall through within this exchange. The underlying decrypt
+	// cause is intentionally opaque (not unwrapped) so callers cannot bypass this
+	// single fail-closed authentication class.
 	ErrServerUnauthenticated = errors.New("nativeudp: reply failed server authentication")
 )
 
@@ -324,6 +326,10 @@ func decryptAndCorrelate(devicePriv, serverStaticPub []byte, requestType int, co
 	// server only stamps it with the request counter as a routing concession, so
 	// gating it behind the echo check could misclassify a retryable "busy" as a
 	// hard failure.
+	//
+	// The replyTypeAllowed conjunct is true for today's two round-trip types. Keep
+	// it symmetric with relayknock.Exchange so a future request type must opt in
+	// explicitly before its authenticated COK can bypass correlation checks.
 	if dr.IsCookieChallenge() && replyTypeAllowed(requestType, dr.Type) {
 		return dr, nil
 	}
