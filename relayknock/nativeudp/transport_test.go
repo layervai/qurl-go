@@ -202,6 +202,15 @@ func loopbackOptions(devicePriv []byte) nativeudp.Options {
 	return nativeudp.Options{DeviceStaticPriv: devicePriv, Resolver: loopback{}, Dialer: loopbackDialer{}, Timeout: 2 * time.Second}
 }
 
+func newLoopbackExchange(t *testing.T, b behavior) (*fakeServer, nativeudp.Endpoint, nativeudp.Options) {
+	t.Helper()
+	serverPriv, serverPub := mustKeypair(t)
+	devicePriv := mustPriv(t)
+	srv := newFakeServer(t, serverPriv, pubOf(t, devicePriv), b)
+	ep := nativeudp.Endpoint{Host: "cell0.nhp.test", Port: srv.port(), ServerStaticPub: serverPub}
+	return srv, ep, loopbackOptions(devicePriv)
+}
+
 func TestExchange_RoundTrip(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -213,12 +222,7 @@ func TestExchange_RoundTrip(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			serverPriv, serverPub := mustKeypair(t)
-			devicePriv := mustPriv(t)
-			srv := newFakeServer(t, serverPriv, pubOf(t, devicePriv), behaviorNormal)
-
-			ep := nativeudp.Endpoint{Host: "cell0.nhp.test", Port: srv.port(), ServerStaticPub: serverPub}
-			opts := loopbackOptions(devicePriv)
+			_, ep, opts := newLoopbackExchange(t, behaviorNormal)
 
 			reply, err := nativeudp.Exchange(context.Background(), ep, tc.reqType, []byte(`{"body":1}`), opts)
 			if err != nil {
@@ -239,11 +243,7 @@ func TestExchange_RoundTrip(t *testing.T) {
 
 func TestKnockAndRegisterHelpers(t *testing.T) {
 	t.Parallel()
-	serverPriv, serverPub := mustKeypair(t)
-	devicePriv := mustPriv(t)
-	srv := newFakeServer(t, serverPriv, pubOf(t, devicePriv), behaviorNormal)
-	ep := nativeudp.Endpoint{Host: "cell0.nhp.test", Port: srv.port(), ServerStaticPub: serverPub}
-	opts := loopbackOptions(devicePriv)
+	_, ep, opts := newLoopbackExchange(t, behaviorNormal)
 
 	ack, err := nativeudp.Knock(context.Background(), ep, nil, opts)
 	if err != nil || !ack.IsACK() {
@@ -257,11 +257,7 @@ func TestKnockAndRegisterHelpers(t *testing.T) {
 
 func TestExchange_CookieChallengeIsRetryable(t *testing.T) {
 	t.Parallel()
-	serverPriv, serverPub := mustKeypair(t)
-	devicePriv := mustPriv(t)
-	srv := newFakeServer(t, serverPriv, pubOf(t, devicePriv), behaviorCookie)
-	ep := nativeudp.Endpoint{Host: "cell0.nhp.test", Port: srv.port(), ServerStaticPub: serverPub}
-	opts := loopbackOptions(devicePriv)
+	_, ep, opts := newLoopbackExchange(t, behaviorCookie)
 
 	reply, err := nativeudp.Knock(context.Background(), ep, nil, opts)
 	if err != nil {
@@ -289,11 +285,7 @@ func TestExchange_RejectsBadReplies(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			serverPriv, serverPub := mustKeypair(t)
-			devicePriv := mustPriv(t)
-			srv := newFakeServer(t, serverPriv, pubOf(t, devicePriv), tc.beh)
-			ep := nativeudp.Endpoint{Host: "cell0.nhp.test", Port: srv.port(), ServerStaticPub: serverPub}
-			opts := loopbackOptions(devicePriv)
+			_, ep, opts := newLoopbackExchange(t, tc.beh)
 
 			_, err := nativeudp.Exchange(context.Background(), ep, tc.reqType, nil, opts)
 			if !errors.Is(err, tc.wantIs) {
@@ -308,11 +300,7 @@ func TestExchange_RejectsBadReplies(t *testing.T) {
 
 func TestExchange_TimeoutWhenSilent(t *testing.T) {
 	t.Parallel()
-	serverPriv, serverPub := mustKeypair(t)
-	devicePriv := mustPriv(t)
-	srv := newFakeServer(t, serverPriv, pubOf(t, devicePriv), behaviorSilent)
-	ep := nativeudp.Endpoint{Host: "cell0.nhp.test", Port: srv.port(), ServerStaticPub: serverPub}
-	opts := loopbackOptions(devicePriv)
+	_, ep, opts := newLoopbackExchange(t, behaviorSilent)
 	opts.Timeout = 150 * time.Millisecond
 
 	start := time.Now()
@@ -327,11 +315,7 @@ func TestExchange_TimeoutWhenSilent(t *testing.T) {
 
 func TestExchange_CancellationUnblocksRead(t *testing.T) {
 	t.Parallel()
-	serverPriv, serverPub := mustKeypair(t)
-	devicePriv := mustPriv(t)
-	srv := newFakeServer(t, serverPriv, pubOf(t, devicePriv), behaviorSilent)
-	ep := nativeudp.Endpoint{Host: "cell0.nhp.test", Port: srv.port(), ServerStaticPub: serverPub}
-	opts := loopbackOptions(devicePriv)
+	_, ep, opts := newLoopbackExchange(t, behaviorSilent)
 	opts.Timeout = 10 * time.Second
 
 	ctx, cancel := context.WithCancel(context.Background())
