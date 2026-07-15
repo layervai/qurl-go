@@ -439,7 +439,10 @@ var nonPublicAssignmentPrefixes = [...]netip.Prefix{
 	netip.MustParsePrefix("198.51.100.0/24"), // RFC 5737 TEST-NET-2
 	netip.MustParsePrefix("203.0.113.0/24"),  // RFC 5737 TEST-NET-3
 	netip.MustParsePrefix("100::/64"),        // RFC 6666 discard-only
+	netip.MustParsePrefix("64:ff9b::/96"),    // RFC 6052 well-known NAT64 prefix
+	netip.MustParsePrefix("2001::/32"),       // RFC 4380 Teredo
 	netip.MustParsePrefix("2001:2::/48"),     // RFC 5180 benchmarking
+	netip.MustParsePrefix("2001:20::/28"),    // RFC 7343 ORCHIDv2
 	netip.MustParsePrefix("2001:db8::/32"),   // RFC 3849 documentation
 	netip.MustParsePrefix("2002::/16"),       // deprecated 6to4
 	netip.MustParsePrefix("3fff::/20"),       // RFC 9637 documentation
