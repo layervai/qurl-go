@@ -390,7 +390,7 @@ func (c *assignmentConfig) resolve(ctx context.Context, agentID string, cred Cre
 		// Stop when the attempt budget is spent, the elapsed deadline is reached,
 		// or the required minimum delay would overrun the deadline — never loop
 		// past the budget honoring an ever-repeating Retry-After.
-		if attempt >= c.maxAttempts || elapsed >= c.budget || elapsed+delay > c.budget {
+		if attempt >= c.maxAttempts || elapsed >= c.budget || delay > c.budget-elapsed {
 			return nil, &AssignmentRecoveryRequiredError{
 				Attempts:       attempt,
 				Elapsed:        elapsed,
@@ -408,6 +408,9 @@ func (c *assignmentConfig) resolve(ctx context.Context, agentID string, cred Cre
 // Retry-After minimum and a jittered exponential backoff capped at maxBackoff.
 func (c *assignmentConfig) backoff(attempt int, retryAfter time.Duration) time.Duration {
 	base := c.minBackoff << (attempt - 1)
+	// The fixed positive minimum can overflow negative/above the cap before an
+	// over-width shift becomes zero; this guard is load-bearing for large custom
+	// attempt budgets.
 	if base <= 0 || base > c.maxBackoff {
 		base = c.maxBackoff
 	}
@@ -479,6 +482,9 @@ func (c *assignmentConfig) decodeSuccess(agentID string, body []byte) assignment
 		return assignmentAttempt{err: fmt.Errorf("%w: assignment response body is not valid UTF-8", ErrAssignmentInvalidResponse)}
 	}
 	var env apiEnvelope[AgentAssignment]
+	// Deliberately keep ordinary encoding/json forward compatibility: the
+	// producer may add envelope or assignment fields without forcing an SDK
+	// release, while every field this SDK acts on is validated below.
 	if err := json.Unmarshal(body, &env); err != nil {
 		return assignmentAttempt{err: fmt.Errorf("%w: decode assignment response: %w", ErrAssignmentInvalidResponse, err)}
 	}

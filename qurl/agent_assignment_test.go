@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -499,6 +500,23 @@ func TestFetchAgentAssignment_ExhaustsByDeadlineBudget(t *testing.T) {
 	}
 	if doer.calls > 100 {
 		t.Fatalf("calls = %d, unbounded", doer.calls)
+	}
+}
+
+func TestFetchAgentAssignment_HugeRetryAfterCannotOverflowDeadlineGuard(t *testing.T) {
+	first := unavailable("1")
+	second := unavailable(strconv.FormatInt(maxHeaderDurationSeconds, 10))
+	doer := &scriptedDoer{responses: []scriptedResponse{first, second}}
+	clk := &fakeClock{now: time.Now()}
+	var slept []time.Duration
+
+	_, err := FetchAgentAssignment(context.Background(), "connector-7f3c2a", BearerToken("lv_key"),
+		deterministicFetchOpts(doer, clk, &slept, WithAssignmentRetryBudget(100, time.Hour))...)
+	if !errors.Is(err, ErrAssignmentRecoveryRequired) {
+		t.Fatalf("error = %v, want ErrAssignmentRecoveryRequired", err)
+	}
+	if doer.calls != 2 || len(slept) != 1 || slept[0] != time.Second {
+		t.Fatalf("calls/sleeps = %d/%v, want two calls and only the initial 1s sleep", doer.calls, slept)
 	}
 }
 
