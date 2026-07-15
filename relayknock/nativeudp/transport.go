@@ -113,6 +113,8 @@ type Options struct {
 	Timeout time.Duration
 
 	// MaxAddresses caps addresses tried per exchange. <=0 ⇒ DefaultMaxAddresses.
+	// Without a caller context deadline, the worst-case silent-endpoint latency
+	// is MaxAddresses × Timeout because address fallback is intentionally serial.
 	MaxAddresses int
 }
 
