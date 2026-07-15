@@ -388,11 +388,16 @@ func (c *assignmentConfig) resolve(ctx context.Context, agentID string, cred Cre
 		}
 		// res is the retryable 503 case.
 		elapsed := c.clock().Sub(start)
-		delay := c.backoff(attempt, res.retryAfter)
+		exhausted := attempt >= c.maxAttempts || elapsed >= c.budget
+		var delay time.Duration
+		if !exhausted {
+			delay = c.backoff(attempt, res.retryAfter)
+			exhausted = delay > c.budget-elapsed
+		}
 		// Stop when the attempt budget is spent, the elapsed deadline is reached,
 		// or the required minimum delay would overrun the deadline — never loop
 		// past the budget honoring an ever-repeating Retry-After.
-		if attempt >= c.maxAttempts || elapsed >= c.budget || delay > c.budget-elapsed {
+		if exhausted {
 			return nil, &AssignmentRecoveryRequiredError{
 				Attempts:       attempt,
 				Elapsed:        elapsed,
@@ -463,6 +468,10 @@ func (c *assignmentConfig) attempt(ctx context.Context, agentID string, cred Cre
 
 	body, err := readCappedBody(resp.Body, maxAPIResponseBodyBytes, "assignment response body")
 	if err != nil {
+		var capErr *inputExceedsCapError
+		if resp.StatusCode == http.StatusOK && errors.As(err, &capErr) {
+			return assignmentAttempt{err: fmt.Errorf("%w: %w", ErrAssignmentInvalidResponse, err)}
+		}
 		return assignmentAttempt{err: fmt.Errorf("%w: read assignment response: %w", ErrAssignmentServiceError, err)}
 	}
 	// Assignment fields are public/durable today. Keep the same response-body
@@ -644,6 +653,8 @@ func validAssignmentDNSLabel(label string) bool {
 }
 
 func validAssignmentCellID(cellID string) bool {
+	// qurl-service's frozen cell-id regex deliberately permits one lowercase
+	// letter; agent IDs have a separate producer contract with a two-byte minimum.
 	if len(cellID) < 1 || len(cellID) > 64 || cellID[0] < 'a' || cellID[0] > 'z' {
 		return false
 	}
@@ -724,6 +735,8 @@ func sleepWithContext(ctx context.Context, d time.Duration) error {
 func cryptoJitterFraction() float64 {
 	var b [8]byte
 	if _, err := rand.Read(b[:]); err != nil {
+		// Entropy failure degrades only decorrelation to zero jitter; the attempt
+		// and elapsed budgets still bound the retry loop.
 		return 0
 	}
 	// 53-bit mantissa fraction, matching the usual [0,1) float construction.
