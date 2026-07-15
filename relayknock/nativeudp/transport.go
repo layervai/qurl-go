@@ -2,16 +2,14 @@ package nativeudp
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
 	"net/netip"
-	"runtime"
 	"strconv"
 	"time"
 
+	"github.com/layervai/qurl-go/internal/cryptoutil"
 	"github.com/layervai/qurl-go/internal/nhpcontract"
 	"github.com/layervai/qurl-go/internal/x25519key"
 	"github.com/layervai/qurl-go/relayknock"
@@ -360,17 +358,17 @@ func replyTypeAllowed(requestType, replyType int) bool {
 // ephemeral private key is wiped before returning; the device static private key
 // belongs to the caller and is not wiped here.
 func buildPacket(headerType int, serverStaticPub, devicePriv, body []byte) (packet []byte, counter uint64, err error) {
-	ephemeralPriv, err := randBytes(x25519key.Size)
+	ephemeralPriv, err := cryptoutil.RandomBytes(x25519key.Size)
 	if err != nil {
 		return nil, 0, fmt.Errorf("%w: ephemeral key: %w", ErrInvalidRequest, err)
 	}
-	defer wipeBytes(ephemeralPriv)
+	defer cryptoutil.Wipe(ephemeralPriv)
 
-	counter, err = randUint64()
+	counter, err = cryptoutil.RandomUint64()
 	if err != nil {
 		return nil, 0, fmt.Errorf("%w: counter: %w", ErrInvalidRequest, err)
 	}
-	preamble, err := randUint32()
+	preamble, err := cryptoutil.RandomUint32()
 	if err != nil {
 		return nil, 0, fmt.Errorf("%w: preamble: %w", ErrInvalidRequest, err)
 	}
@@ -497,38 +495,4 @@ func ctxErr(ctx context.Context) error {
 		return fmt.Errorf("%w: context must not be nil", ErrInvalidRequest)
 	}
 	return ctx.Err()
-}
-
-func randBytes(n int) ([]byte, error) {
-	b := make([]byte, n)
-	if _, err := rand.Read(b); err != nil {
-		return nil, err
-	}
-	return b, nil
-}
-
-func randUint64() (uint64, error) {
-	var b [8]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return 0, err
-	}
-	return binary.BigEndian.Uint64(b[:]), nil
-}
-
-func randUint32() (uint32, error) {
-	var b [4]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return 0, err
-	}
-	return binary.BigEndian.Uint32(b[:]), nil
-}
-
-// wipeBytes zeroes a sensitive buffer. runtime.KeepAlive prevents the clear from
-// being optimized away as dead before the bytes become unreachable.
-func wipeBytes(b []byte) {
-	if len(b) == 0 {
-		return
-	}
-	clear(b)
-	runtime.KeepAlive(b)
 }
