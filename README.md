@@ -78,11 +78,11 @@ That is the core flow:
 | Protect a private URL | `client.ProtectURL` | The target URL you already know |
 | Mint a short-lived access link | `resource.CreatePortal` | The returned resource handle |
 
-If qURL Connector already protects the service, use the connector id instead of
-calling `ProtectURL`:
+If qURL Connector already protects the service, use its immutable qURL Connector
+slug instead of calling `ProtectURL`:
 
 ```go
-resource, err := client.ConnectorResource(ctx, "prod-dashboard")
+resource, err := client.GetConnectorResourceBySlug(ctx, "prod-dashboard")
 if err != nil {
 	return err
 }
@@ -93,7 +93,8 @@ portal, err := resource.CreatePortal(ctx, qurl.ValidFor(5*time.Minute))
 If you persist the resource id, future calls do not need to recreate the handle:
 
 ```go
-resource := client.ResourceByID("r_demo1234567")
+resourceID := "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE2cTVv5_3eeYCcLLq5ROYCqcmY50HiKZ9ATglIkPnCji1E_S63UMtXba1moR8-Q6EV7oM6zwwh9_j2CDujzXvLA"
+resource := client.ResourceByID(resourceID)
 portal, err := resource.CreatePortal(ctx, qurl.ValidFor(time.Hour))
 ```
 
@@ -161,10 +162,10 @@ and supports an optional `qurl.WithExpectedSealedAgentID` pin for a separately
 configured expected id.
 
 REST-only warm starts can call `qurl.OpenRegisteredAgent` without an enrollment
-key. Tunnel runtimes should use `qurl.OpenRegisteredAgentRuntime` to obtain the
-Client and validated knock binding from one store load; fresh installs use
-`qurl.RegisterAgentRuntime` to receive the same pair without a post-registration
-store/KMS reload.
+key. qURL Connector runtimes should use `qurl.OpenRegisteredAgentRuntime` to
+obtain the Client and validated knock binding from one store load; fresh
+installs use `qurl.RegisterAgentRuntime` to receive the same pair without a
+post-registration store/KMS reload.
 `qurl.RefreshAgentRegistration` explicitly repairs missing/rotated NHP binding
 metadata without touching or returning the device credential; its narrow
 runtime binding exposes only the identity/NHP data and wipeable private-key
@@ -231,6 +232,35 @@ Match errors by type, not message text:
 ## Changes
 
 ### Unreleased
+
+- **Added: qURL Connector resource lifecycle** — device-authenticated
+  clients can call `EnsureConnectorResource`, `GetConnectorResource`,
+  `GetConnectorResourceBySlug`, and `DeleteConnectorResource` without falling back to
+  an enrollment credential. The typed result keeps immutable `Slug` separate
+  from mutable `Alias`, exposes the producer's explicit `ConnectorRoutingID`
+  and placement-neutral `KnockResourceID`, and reports whether an ensure found
+  an existing active resource. The SDK never derives the routing value from the
+  public-key `ResourceID`. The per-cycle `RunID` primitive is separate ephemeral
+  knock/service correlation and is not stored on the resource or sent through
+  resource CRUD. Revoked detail rows and lifecycle-closed tombstones have
+  distinct matchable errors so callers do not accidentally reuse a tombstoned
+  slug. See [Manage qURL Connector
+  resources](docs/connector-resources.md).
+
+  **Release gate:** do not publish this SDK surface until the qurl-service
+  producer contracts in
+  [#1211](https://github.com/layervai/qurl-service/pull/1211),
+  [#1223](https://github.com/layervai/qurl-service/pull/1223), and
+  [#1225](https://github.com/layervai/qurl-service/pull/1225) are accepted and
+  deployed. Track mutable rollout state, flags, and dependencies in
+  [qurl-connector#421](https://github.com/layervai/qurl-connector/issues/421);
+  this README documents SDK behavior rather than live environment state.
+
+  Successful JSON responses that are empty, undecodable, or violate an
+  endpoint response contract now match the exported `ErrInvalidAPIResponse`
+  sentinel. Existing JSON-returning methods remain fail-closed and retain their
+  prior error detail; this adds a stable `errors.Is` contract for callers. The
+  generic sentinel classifies a bad response and is not, by itself, retry advice.
 
 - **Added: registered-agent lifecycle APIs** — `OpenRegisteredAgent` provides a
   store-backed reopen without qURL enrollment or resource API calls (a sealed
@@ -306,6 +336,12 @@ Match errors by type, not message text:
   [Register an agent](docs/register-an-agent.md).
 
 #### Breaking changes
+
+- **Removed the ambiguous `Client.ConnectorResource` projection.** Use
+  `GetConnectorResourceBySlug`, which returns the dedicated
+  `ConnectorResource` lifecycle type. The projection's generic
+  `ErrResourceNotFound` and `ErrAmbiguousResource` sentinels are replaced by
+  `ErrConnectorResourceNotFound` and `ErrConnectorResourceAmbiguous`.
 
 - **`WithNHPPeer` can no longer be replaced by completion.** The override is the
   peer authenticated by REG/RAK and is preserved in durable state. Completion

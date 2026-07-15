@@ -10,6 +10,8 @@ import (
 	"github.com/layervai/qurl-go/qurl"
 )
 
+const exampleResourcePublicKey = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE2cTVv5_3eeYCcLLq5ROYCqcmY50HiKZ9ATglIkPnCji1E_S63UMtXba1moR8-Q6EV7oM6zwwh9_j2CDujzXvLA"
+
 func Example() {
 	client, err := qurl.OpenClient()
 	if err != nil {
@@ -52,7 +54,7 @@ func ExampleClient_CreatePortal() {
 		panic(err)
 	}
 
-	resource := client.ResourceByID("r_demo1234567")
+	resource := client.ResourceByID(exampleResourcePublicKey)
 	portal, err := resource.CreatePortal(context.Background(),
 		qurl.ValidFor(time.Hour),
 		qurl.WithLabel("Alice"),
@@ -64,23 +66,23 @@ func ExampleClient_CreatePortal() {
 	fmt.Println(portal.Link)
 }
 
-func ExampleClient_ConnectorResource() {
+func ExampleClient_EnsureConnectorResource() {
 	client, err := qurl.OpenClient()
 	if err != nil {
 		panic(err)
 	}
 
-	resource, err := client.ConnectorResource(context.Background(), "prod-dashboard")
+	result, err := client.EnsureConnectorResource(context.Background(), "prod-dashboard")
 	if err != nil {
 		panic(err)
 	}
 
-	portal, err := resource.CreatePortal(context.Background(), qurl.ValidFor(5*time.Minute))
-	if err != nil {
-		panic(err)
-	}
-
-	fmt.Println(portal.Link)
+	fmt.Println(
+		result.Resource.ResourceID,
+		result.Resource.ConnectorRoutingID,
+		result.Resource.KnockResourceID,
+		result.FoundExisting,
+	)
 }
 
 func ExampleOpenClient() {

@@ -61,13 +61,13 @@ portal, err := resource.CreatePortal(ctx,
 )
 ```
 
-## Connector-Protected Services
+## qURL Connector-Protected Services
 
 If qURL Connector already protects the service, skip `ProtectURL`. Use the
-connector id for that service:
+immutable qURL Connector slug for that service:
 
 ```go
-resource, err := client.ConnectorResource(ctx, "prod-dashboard")
+resource, err := client.GetConnectorResourceBySlug(ctx, "prod-dashboard")
 if err != nil {
 	return err
 }
@@ -78,8 +78,10 @@ if err != nil {
 }
 ```
 
-The connector install/startup flow creates or finds the LayerV resource for that
-id. Your app only resolves it and mints portals.
+The qURL Connector install/startup flow creates or finds the LayerV resource for
+that immutable slug. Your app only resolves it and mints portals. A resource
+alias is a separate, mutable display handle and is never used as qURL Connector
+identity.
 
 ## Reuse a Stored Resource ID
 
@@ -87,7 +89,8 @@ Most production apps protect the URL once, store the resource id, and mint
 portals as needed:
 
 ```go
-resource := client.ResourceByID("r_demo1234567")
+resourceID := "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE2cTVv5_3eeYCcLLq5ROYCqcmY50HiKZ9ATglIkPnCji1E_S63UMtXba1moR8-Q6EV7oM6zwwh9_j2CDujzXvLA"
+resource := client.ResourceByID(resourceID)
 
 portal, err := resource.CreatePortal(ctx, qurl.ValidFor(time.Hour))
 ```

@@ -51,6 +51,77 @@ func TestDoAuthorizedJSON_EarlyResponseDoesNotCorruptInFlightRequestBody(t *test
 	}
 }
 
+func TestDoAuthorizedJSON_NilOutputPreservesLegacyIgnoreContract(t *testing.T) {
+	t.Parallel()
+
+	for _, status := range []int{http.StatusOK, http.StatusAccepted, http.StatusNoContent} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			t.Parallel()
+			httpClient := doerFunc(func(*http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: status,
+					Body:       io.NopCloser(strings.NewReader(`not JSON and intentionally ignored`)),
+					Header:     make(http.Header),
+				}, nil
+			})
+			err := doAuthorizedJSON(context.Background(), httpClient, "https://api.example.test", func(context.Context, *http.Request) error {
+				return nil
+			}, http.MethodPost, "/v1/test", nil, nil)
+			if err != nil {
+				t.Fatalf("doAuthorizedJSON status %d with nil output: %v", status, err)
+			}
+		})
+	}
+}
+
+func TestDoAuthorizedJSON_OversizedSuccessIsDrainedAndClosed(t *testing.T) {
+	t.Parallel()
+
+	raw := strings.Repeat("x", maxAPIResponseBodyBytes+100)
+	body := &trackingReadCloser{reader: strings.NewReader(raw)}
+	httpClient := doerFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       body,
+			Header:     make(http.Header),
+		}, nil
+	})
+	var out map[string]any
+	err := doAuthorizedJSON(context.Background(), httpClient, "https://api.example.test", func(context.Context, *http.Request) error {
+		return nil
+	}, http.MethodGet, "/v1/test", nil, &out)
+	if !errors.Is(err, ErrInvalidAPIResponse) {
+		t.Fatalf("error = %v, want ErrInvalidAPIResponse", err)
+	}
+	var outcomeUnknown *apiRequestOutcomeUnknownError
+	if !errors.As(err, &outcomeUnknown) {
+		t.Fatalf("error = %v, want outcome marker", err)
+	}
+	if !body.closed {
+		t.Fatal("response body was not closed")
+	}
+	if body.bytesRead != len(raw) {
+		t.Fatalf("response bytes read = %d, want %d (capped read plus deferred drain)", body.bytesRead, len(raw))
+	}
+}
+
+type trackingReadCloser struct {
+	reader    *strings.Reader
+	bytesRead int
+	closed    bool
+}
+
+func (r *trackingReadCloser) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	r.bytesRead += n
+	return n, err
+}
+
+func (r *trackingReadCloser) Close() error {
+	r.closed = true
+	return nil
+}
+
 func TestClient_ProtectURLThenPortal(t *testing.T) {
 	var requestCount atomic.Int32
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -271,146 +342,6 @@ func TestClient_CreatePortalSendsExplicitZeroMaxSessions(t *testing.T) {
 	}
 	if _, err := client.CreatePortal(context.Background(), &Resource{ID: "r_demo1234567"}, MaxSessions(0)); err != nil {
 		t.Fatalf("CreatePortal: %v", err)
-	}
-}
-
-func TestClient_ConnectorResourceCreatePortal(t *testing.T) {
-	var requestCount atomic.Int32
-	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got, want := r.Header.Get("Authorization"), "Bearer lv_test_123"; got != want {
-			t.Fatalf("Authorization = %q, want %q", got, want)
-		}
-		w.Header().Set("Content-Type", "application/json")
-
-		switch requestCount.Add(1) {
-		case 1:
-			if r.Method != http.MethodGet || r.URL.Path != "/v1/resources" {
-				t.Fatalf("first request = %s %s, want GET /v1/resources", r.Method, r.URL.Path)
-			}
-			if got, want := r.URL.Query().Get("slug"), "prod-dashboard"; got != want {
-				t.Fatalf("slug query = %q, want %q", got, want)
-			}
-			if got := r.Header.Get("Content-Type"); got != "" {
-				t.Fatalf("GET Content-Type = %q, want empty", got)
-			}
-			fmt.Fprint(w, `{"data":[{"resource_id":"r_connector12","type":"tunnel","status":"active","alias":"prod-dashboard"}]}`)
-		case 2:
-			if r.Method != http.MethodPost || r.URL.Path != "/v1/resources/r_connector12/qurls" {
-				t.Fatalf("second request = %s %s, want POST /v1/resources/r_connector12/qurls", r.Method, r.URL.Path)
-			}
-			fmt.Fprint(w, `{"data":{"resource_id":"r_connector12","qurl_link":"https://qurl.link/at_connector"}}`)
-		default:
-			t.Fatalf("unexpected request %d: %s %s", requestCount.Load(), r.Method, r.URL.Path)
-		}
-	}))
-	defer api.Close()
-
-	client, err := NewClient(BearerToken("lv_test_123"), WithBaseURL(api.URL))
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
-
-	resource, err := client.ConnectorResource(context.Background(), "prod-dashboard")
-	if err != nil {
-		t.Fatalf("ConnectorResource: %v", err)
-	}
-	if resource.ID != "r_connector12" || resource.Status != "active" {
-		t.Fatalf("resource = %#v", resource)
-	}
-
-	portal, err := resource.CreatePortal(context.Background(), ValidFor(5*time.Minute))
-	if err != nil {
-		t.Fatalf("CreatePortal: %v", err)
-	}
-	if portal.Link != "https://qurl.link/at_connector" {
-		t.Fatalf("portal link = %q", portal.Link)
-	}
-	if requestCount.Load() != 2 {
-		t.Fatalf("request count = %d, want 2", requestCount.Load())
-	}
-}
-
-func TestClient_ConnectorResourceNotFound(t *testing.T) {
-	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.URL.Path != "/v1/resources" || r.URL.Query().Get("slug") != "missing-dashboard" {
-			t.Fatalf("request = %s %s?%s, want GET /v1/resources?slug=missing-dashboard", r.Method, r.URL.Path, r.URL.RawQuery)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"data":[]}`)
-	}))
-	defer api.Close()
-
-	client, err := NewClient(BearerToken("lv_test_123"), WithBaseURL(api.URL))
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
-
-	_, err = client.ConnectorResource(context.Background(), "missing-dashboard")
-	if !errors.Is(err, ErrResourceNotFound) {
-		t.Fatalf("ConnectorResource missing: want ErrResourceNotFound, got %v", err)
-	}
-}
-
-func TestClient_ConnectorResourceAmbiguous(t *testing.T) {
-	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.URL.Path != "/v1/resources" || r.URL.Query().Get("slug") != "prod-dashboard" {
-			t.Fatalf("request = %s %s?%s, want GET /v1/resources?slug=prod-dashboard", r.Method, r.URL.Path, r.URL.RawQuery)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"data":[{"resource_id":"r_first12345","status":"active"},{"resource_id":"r_second1234","status":"active"}]}`)
-	}))
-	defer api.Close()
-
-	client, err := NewClient(BearerToken("lv_test_123"), WithBaseURL(api.URL))
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
-
-	_, err = client.ConnectorResource(context.Background(), "prod-dashboard")
-	if !errors.Is(err, ErrAmbiguousResource) {
-		t.Fatalf("ConnectorResource ambiguous: want ErrAmbiguousResource, got %v", err)
-	}
-}
-
-func TestClient_ConnectorResourceRejectsMismatchedAlias(t *testing.T) {
-	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.URL.Path != "/v1/resources" || r.URL.Query().Get("slug") != "prod-dashboard" {
-			t.Fatalf("request = %s %s?%s, want GET /v1/resources?slug=prod-dashboard", r.Method, r.URL.Path, r.URL.RawQuery)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"data":[{"resource_id":"r_wrong12345","status":"active","alias":"other-dashboard"}]}`)
-	}))
-	defer api.Close()
-
-	client, err := NewClient(BearerToken("lv_test_123"), WithBaseURL(api.URL))
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
-
-	_, err = client.ConnectorResource(context.Background(), "prod-dashboard")
-	if err == nil || !strings.Contains(err.Error(), "returned resource alias") {
-		t.Fatalf("ConnectorResource mismatched alias: want alias mismatch error, got %v", err)
-	}
-}
-
-func TestClient_ConnectorResourceRejectsMissingAlias(t *testing.T) {
-	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.URL.Path != "/v1/resources" || r.URL.Query().Get("slug") != "prod-dashboard" {
-			t.Fatalf("request = %s %s?%s, want GET /v1/resources?slug=prod-dashboard", r.Method, r.URL.Path, r.URL.RawQuery)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"data":[{"resource_id":"r_missingalias","status":"active"}]}`)
-	}))
-	defer api.Close()
-
-	client, err := NewClient(BearerToken("lv_test_123"), WithBaseURL(api.URL))
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
-
-	_, err = client.ConnectorResource(context.Background(), "prod-dashboard")
-	if err == nil || !strings.Contains(err.Error(), "without alias") {
-		t.Fatalf("ConnectorResource missing alias: want missing alias error, got %v", err)
 	}
 }
 
@@ -813,9 +744,6 @@ func TestClient_Validation(t *testing.T) {
 	if _, err := client.ProtectURL(context.Background(), "https://user:pass@example.com"); !errors.Is(err, ErrInvalidResourceRequest) {
 		t.Fatalf("target URL with userinfo: want ErrInvalidResourceRequest, got %v", err)
 	}
-	if _, err := client.ConnectorResource(context.Background(), " "); !errors.Is(err, ErrInvalidResourceRequest) {
-		t.Fatalf("empty connector id: want ErrInvalidResourceRequest, got %v", err)
-	}
 	if _, err := client.CreatePortal(context.Background(), nil); !errors.Is(err, ErrInvalidPortalRequest) {
 		t.Fatalf("nil resource: want ErrInvalidPortalRequest, got %v", err)
 	}
@@ -1063,8 +991,37 @@ func TestClient_EmptySuccessBodyFailsClosed(t *testing.T) {
 		t.Fatalf("NewClient: %v", err)
 	}
 	_, err = client.ProtectURL(context.Background(), "https://example.com")
-	if err == nil || !strings.Contains(err.Error(), "empty API response body") {
-		t.Fatalf("ProtectURL empty response: want empty body error, got %v", err)
+	if !errors.Is(err, ErrInvalidAPIResponse) || !strings.Contains(err.Error(), "empty API response body") {
+		t.Fatalf("ProtectURL empty response: want ErrInvalidAPIResponse and empty body detail, got %v", err)
+	}
+}
+
+func TestDoAuthorizedRequestUnknownBodyModeFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	err := doAuthorizedRequest(
+		context.Background(),
+		doerFunc(func(r *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{}`)),
+				Request:    r,
+			}, nil
+		}),
+		"https://api.example.com",
+		func(context.Context, *http.Request) error { return nil },
+		http.MethodGet,
+		"/v1/test",
+		nil,
+		apiResponseContract{bodyMode: apiResponseBodyMode(255)},
+	)
+	if !errors.Is(err, ErrInvalidAPIResponse) || !strings.Contains(err.Error(), "unknown API response body contract") {
+		t.Fatalf("unknown body mode error = %v, want ErrInvalidAPIResponse and contract detail", err)
+	}
+	var outcomeUnknown *apiRequestOutcomeUnknownError
+	if !errors.As(err, &outcomeUnknown) {
+		t.Fatalf("unknown body mode error lost post-dispatch outcome marker: %v", err)
 	}
 }
 
@@ -1080,8 +1037,8 @@ func TestClient_IncompleteResourceSuccessFailsClosed(t *testing.T) {
 		t.Fatalf("NewClient: %v", err)
 	}
 	_, err = client.ProtectURL(context.Background(), "https://example.com")
-	if err == nil || !strings.Contains(err.Error(), "missing resource_id") {
-		t.Fatalf("ProtectURL incomplete response: want missing resource_id error, got %v", err)
+	if !errors.Is(err, ErrInvalidAPIResponse) || !strings.Contains(err.Error(), "missing resource_id") {
+		t.Fatalf("ProtectURL incomplete response: want ErrInvalidAPIResponse and missing resource_id detail, got %v", err)
 	}
 }
 
@@ -1124,8 +1081,8 @@ func TestClient_IncompletePortalSuccessFailsClosed(t *testing.T) {
 				t.Fatalf("NewClient: %v", err)
 			}
 			err = tt.run(context.Background(), client)
-			if err == nil || !strings.Contains(err.Error(), tt.want) {
-				t.Fatalf("incomplete portal response: want %q error, got %v", tt.want, err)
+			if !errors.Is(err, ErrInvalidAPIResponse) || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("incomplete portal response: want ErrInvalidAPIResponse with %q detail, got %v", tt.want, err)
 			}
 		})
 	}
