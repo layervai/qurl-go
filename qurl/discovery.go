@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"slices"
 	"strings"
@@ -425,7 +426,7 @@ func (p *DiscoveryProvider) now() time.Time {
 // strictDecodeJSON decodes raw into v rejecting unknown fields AND trailing data after
 // the top-level JSON object (a second concatenated value a lenient parser would ignore).
 // It is the same strictness the core's typed-unmarshal pass applies (the parser
-// strictUnmarshal): DisallowUnknownFields + a dec.More() trailing-data check. It does
+// strictUnmarshal): DisallowUnknownFields + an explicit EOF check. It does
 // NOT do the core's full token-walk (duplicate-key / null rejection) — that heavier guard
 // stays in the core because the manifest bytes here are already authenticated by the
 // pin/signature, so only the legitimate signer can produce the bytes being parsed.
@@ -435,8 +436,12 @@ func strictDecodeJSON(raw []byte, v any) error {
 	if err := dec.Decode(v); err != nil {
 		return err
 	}
-	if dec.More() {
-		return fmt.Errorf("trailing data after JSON object")
+	var trailing any
+	if err := dec.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return fmt.Errorf("trailing data after JSON object")
+		}
+		return fmt.Errorf("decode trailing JSON data: %w", err)
 	}
 	return nil
 }

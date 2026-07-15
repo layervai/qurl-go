@@ -617,6 +617,20 @@ func validateAssignmentAgentID(agentID string) error {
 // opacity guard, whose port is in range, and whose server key is a valid X25519
 // key.
 func validateAgentAssignment(a *AgentAssignment, wantAgentID string, now time.Time) error {
+	if err := validateAgentAssignmentShape(a, wantAgentID); err != nil {
+		return err
+	}
+	if a.LeaseExpired(now) {
+		return fmt.Errorf("%w: lease expiry must be in the future", ErrAssignmentInvalidResponse)
+	}
+	return nil
+}
+
+// validateAgentAssignmentShape validates every durable assignment field except
+// liveness. Refresh uses it to authenticate and replace an expired lease without
+// ever accepting malformed persisted routing state; open/knock additionally call
+// validateAgentAssignment, which requires the lease to be live.
+func validateAgentAssignmentShape(a *AgentAssignment, wantAgentID string) error {
 	if a == nil {
 		return fmt.Errorf("%w: assignment is nil", ErrAssignmentInvalidResponse)
 	}
@@ -632,8 +646,8 @@ func validateAgentAssignment(a *AgentAssignment, wantAgentID string, now time.Ti
 	if a.EndpointRevision < 1 {
 		return fmt.Errorf("%w: endpoint revision must be >= 1", ErrAssignmentInvalidResponse)
 	}
-	if a.LeaseExpired(now) {
-		return fmt.Errorf("%w: lease expiry must be in the future", ErrAssignmentInvalidResponse)
+	if a.LeaseExpiresAt.IsZero() {
+		return fmt.Errorf("%w: lease expiry must not be zero", ErrAssignmentInvalidResponse)
 	}
 	if err := validateAssignmentEndpointHost(a.Endpoint.Host); err != nil {
 		return err

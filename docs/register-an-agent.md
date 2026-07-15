@@ -56,13 +56,15 @@ minute. After credential recovery, use the new client returned by
 `RecoverAgentCredential` for immediate cutover; an older client observes the
 replacement only after its cache expires.
 
-Tunnel processes that also need NHP knock state should use the combined runtime
-APIs. They validate a live peer, relay URL, and key id; return a primed Client
-plus `AgentRuntimeBinding`; and avoid loading/unsealing the store again for the
+qURL Connector processes that also need NHP knock state should use the combined
+runtime APIs. They validate a live authoritative assignment (cell, generation,
+endpoint revision, lease, LayerV-owned UDP DNS endpoint, and pinned NHP server
+key) plus the persisted device-key id; return a primed Client plus
+`AgentRuntimeBinding`; and avoid loading/unsealing the store again for the
 binding or first resource request. Unlike REST-only `OpenRegisteredAgent`, a
-runtime open rejects an expired peer without network I/O because it cannot be
-knocked. Call `RefreshAgentRegistration` with an enrollment key to obtain a
-fresh binding, then continue startup:
+runtime open rejects an expired assignment without network I/O because it
+cannot be knocked. Call `RefreshAgentRegistration` without an enrollment key to
+refresh the lease using the stored device credential, then continue startup:
 
 ```go
 client, binding, err := qurl.OpenRegisteredAgentRuntime(ctx, store,
@@ -82,6 +84,12 @@ runtime key before network I/O and returns the Client/binding pair from the
 in-memory completed state, without a post-registration store/KMS reload. The
 primed Client caches that exact credential for one minute; if the owner later
 revokes it, the Client observes that subsequent revocation after the cache TTL.
+Immediately after completion durably saves a newly minted device credential,
+the runtime performs one assignment confirmation with that credential. Only in
+this locally proven post-mint transition does it retry the exact transient 401
+`api_key_invalid`, with both attempt and elapsed-time caps. A warm open, ordinary
+refresh, or resource request never retries a 401 and never starts implicit
+credential recovery.
 
 `WithRegisterBaseURL` targets only registration-info and completion.
 `WithAgentClientBaseURL` and `WithAgentClientHTTPClient` are dual-purpose
@@ -225,9 +233,13 @@ or `WithOTPProvider`.
 ## Credential storage
 
 Registration writes an `AgentState`. Once enrollment completes, that state is a
-**credential file**: it holds `DeviceAPIKey`, the bearer token the returned
-`Client` authorizes with. From then on the `Client` authenticates purely from
-persisted state — the API key you passed at enrollment is not needed again.
+**credential file**: it holds the inseparable `DeviceAPIKeyID` +
+`DeviceAPIKey` pair, the X25519 private key, and (for native runtimes) the
+authoritative assigned-cell binding. The returned `Client` authorizes with the
+device secret; later native REG uses the public id as `usrId` and the secret as
+`otp`. From then on ordinary Client and assignment-refresh operations
+authenticate purely from persisted state — the API key passed at enrollment is
+needed again only for explicit credential recovery.
 
 Treat the state as secret. Keep it out of logs, crash dumps, and support
 bundles.
@@ -451,34 +463,22 @@ lock for them, and concurrent account-path setup can dispatch multiple OTPs.
 
 These are deliberately separate operations:
 
-- `RefreshAgentRegistration` always fetches current registration-info, validates
-  the relay `server_id` against the NHP peer key, sends a real `NHP_REG`, and
-  requires a successful `NHP_RAK`. It then saves the authoritative relay/peer
-  metadata while preserving `DeviceAPIKey` and `RegisteredAt`. It never calls
-  completion, even when the old peer is expired or missing. `WithTakeover()` is
-  honored only when explicitly supplied. It returns a narrow
-  `AgentRuntimeBinding` with the refreshed relay/peer identity and a wipeable
-  copy of the private-key bytes so the caller can knock immediately without a
-  second state-store/KMS load. The binding deliberately omits `DeviceAPIKey`,
-  schema, and OTP state; the preserved REST credential remains only in the
-  configured store. Do not copy or log the binding, and wipe/destroy its private
-  key after the runtime handoff.
-  Refresh with an account key uses the same email-OTP dispatch/two-call resume
-  as enrollment: a static `WithOTP` on a first call cannot match the code that
-  call dispatches, so it returns `OTPPendingError`; resume with the received
-  code. The anti-spam `OTPRequestedAt` marker is persisted before dispatch/RAK
-  and intentionally remains on the otherwise-completed state when the caller
-  pauses or abandons the attempt. `OpenRegisteredAgent` ignores it; a later
-  successful resumed RAK clears it. This durable marker prevents repeated calls
-  from fanning out email, while refreshed binding metadata remains uncommitted
-  until RAK succeeds.
-  `RegisterAgent` keeps account keys enabled by default for interactive
-  enrollment compatibility. The repair-oriented `RefreshAgentRegistration` and
-  `RecoverAgentCredential` default to bootstrap-only; interactive account-key
-  repair must opt in with
-  `WithAllowedRegistrationKeyKinds(RegistrationKeyKindAccount)`. Fleet
-  connectors should still set the bootstrap-only policy explicitly so their
-  security posture is visible at the call site.
+- `RefreshAgentRegistration` is the only ordinary binding-refresh path. It
+  loads the completed state once, validates the complete persisted assignment
+  before network I/O, and POSTs the stored `agent_id` to the API/resource origin
+  using the persisted immutable-bound `DeviceAPIKey`. It never accepts an
+  enrollment key and never calls registration-info, OTP, or completion. Only
+  `503 cell_assignment_unavailable` is retried, within a bounded
+  attempt/deadline budget; 400, 401/403, 409, and 429 are terminal for that call.
+  A cell or assignment-generation change returns typed reassignment-required
+  state before DNS, UDP, or persistence. A valid endpoint-revision advance is
+  adopted within the same cell. The SDK then resolves the opaque LayerV-owned
+  host, sends native UDP `NHP_REG`, and requires an authenticated `NHP_RAK` using
+  exactly `usrId=DeviceAPIKeyID` and `otp=DeviceAPIKey`. It saves the refreshed
+  lease/endpoint only after RAK, preserving the device credential pair and
+  `RegisteredAt`, and returns a primed Client plus narrow runtime binding without
+  another store/KMS load. Do not copy or log the binding, and wipe/destroy its
+  private key after the runtime handoff.
 - `RecoverAgentCredential` is the operator-controlled path for a revoked or
   locally lost device credential. It preserves the persisted device id and
   X25519 keypair and, once enrollment authorization is available, sends REG,
@@ -488,9 +488,8 @@ These are deliberately separate operations:
   refresh.
 
 ```go
-binding, err := qurl.RefreshAgentRegistration(ctx, enrollmentKey, store,
-	qurl.WithAllowedRegistrationKeyKinds(qurl.RegistrationKeyKindBootstrap),
-	qurl.WithRegisterBaseURL(registrationURL),
+client, binding, err := qurl.RefreshAgentRegistration(ctx, store,
+	qurl.WithAgentClientBaseURL(resourceAPIURL),
 )
 if err != nil {
 	return err
@@ -499,27 +498,27 @@ defer binding.Destroy()
 devicePrivateKey := binding.TakeDeviceStaticPrivateKey()
 defer func() { clear(devicePrivateKey) }()
 
-client, err := qurl.RecoverAgentCredential(ctx, enrollmentKey, store,
-	qurl.WithDeviceID(binding.AgentID),
+runID, err := qurl.NewCycleRunID()
+if err != nil {
+	return err
+}
+admission, err := qurl.KnockRegisteredAgent(ctx, binding, devicePrivateKey,
+	knockResourceID, qurl.NativeKnockOptions{RunID: runID})
+
+recoveredClient, err := qurl.RecoverAgentCredential(ctx, enrollmentKey, store,
 	qurl.WithRegisterBaseURL(registrationURL),
 	qurl.WithAgentClientBaseURL(resourceAPIURL),
 )
 ```
 
-Interactive account-key repair must make its wider policy explicit on every
-phase, including the resume call:
+Interactive account-key credential recovery must make its wider policy explicit
+on every phase, including the resume call:
 
 ```go
 accountRepair := qurl.WithAllowedRegistrationKeyKinds(qurl.RegistrationKeyKindAccount)
-_, err := qurl.RefreshAgentRegistration(ctx, accountKey, store, accountRepair)
+_, err := qurl.RecoverAgentCredential(ctx, accountKey, store, accountRepair)
 // After OTPPendingError and receipt of the emailed code:
-binding, err := qurl.RefreshAgentRegistration(ctx, accountKey, store,
-	accountRepair,
-	qurl.WithOTP(refreshCode),
-)
-
-// Or, after a separate recovery dispatch/pause and owner-side revoke:
-client, err := qurl.RecoverAgentCredential(ctx, accountKey, store,
+recoveredClient, err := qurl.RecoverAgentCredential(ctx, accountKey, store,
 	accountRepair,
 	qurl.WithOTP(recoveryCode),
 )
@@ -610,14 +609,14 @@ prior first issue. Every unclassified completion HTTP response, including a new
 new server error happened before the atomic mint. A new retryable/terminal 4xx
 must be added to the authoritative no-write taxonomy before it ships.
 
-The registration-info/RAK peer remains authoritative for all durable
-coordinates and lease state. Completion corroborates the decoded public key
-only; its host, port, and expiry are ignored and cannot replace the
-RAK-authenticated values. During rotation, qurl-service deployments must keep
-registration-info and completion on the same peer key. A key mismatch fails
-recovery-required after a possible mint, while any same-key coordinate
-discrepancy preserves the registration-info/RAK values and should be treated as
-deployment skew to correct.
+For `RegisterAgentRuntime`, the control-plane assignment is authoritative for
+cell, generation, endpoint revision, lease, UDP host/port, and server key; the
+SDK never derives or probes placement. Completion corroborates the server key
+that authenticated the initial native RAK but cannot replace assignment
+coordinates. The relay/registration-info peer remains relevant to REST-only
+`RegisterAgent` and explicit credential recovery. A completion key mismatch
+fails recovery-required after a possible mint; same-key coordinate differences
+do not override the authenticated source selected by that operation.
 
 ## Errors
 
@@ -644,7 +643,15 @@ Every message names the next concrete step.
 | `qurl.ErrRegistrationInvalidInput` | The service rejected a registration input as malformed (e.g. a bad device id). | Fix the input (use a valid `WithDeviceID`) and re-run. |
 | `qurl.ErrRegistrationDisabled` | Agent registration is disabled for the account. | Contact the account owner to enable it. |
 | `qurl.ErrInvalidRegisterConfig` | Inputs or options were invalid before any network call (empty key, nil store, conflicting options). | Fix the call. |
-| `qurl.ErrAgentBindingPersistence` | Refresh authenticated a new NHP binding, but the store rejected its metadata save. The wrapped store cause remains matchable; no device credential was minted or changed. | Correct the store failure, then safely retry `RefreshAgentRegistration`. |
+| `*qurl.AssignmentRecoveryRequiredError` (unwraps `ErrAssignmentRecoveryRequired`) | Every bounded attempt returned `503 cell_assignment_unavailable`; the wire cannot distinguish a transient authority outage from a missing durable own-assignment row. | Stop the loop and surface operator recovery; do not retry every few seconds indefinitely. |
+| `*qurl.AssignmentRateLimitedError` (unwraps `ErrAssignmentRateLimited`) | Either the fixed assignment budget or general owner budget returned 429. | Honor its `RetryAfter` / `Reset` timing in later request scheduling; the SDK does not auto-retry 429. |
+| `qurl.ErrAssignmentForbidden` | Device-key assignment refresh returned 401/403, including account freeze or revoked/unknown credential. | Stop refreshing; never fall back to the stale binding after lease expiry. Recover credentials only through the explicit owner-approved workflow. |
+| `qurl.ErrAssignmentReassignmentRequired` / `*qurl.AgentAssignmentChangedError` | The control plane reports a move, or cell/generation differs from the persisted assignment. No UDP or local mutation occurred. | Complete the explicit reassignment workflow before refreshing again. Never probe another cell locally. |
+| `qurl.ErrAssignmentQuotaExceeded` | Assignment returned terminal `409 agent_assignment_quota_exceeded`. | Deprovision an unused assignment or raise the owner cap; do not retry or rotate credentials. |
+| `qurl.ErrAssignmentEndpointRefreshRequired` | Initial enrollment minted and saved the device credential, but endpoint revision advanced during the immediate post-mint visibility confirmation. | Reopen the durable state and run ordinary `RefreshAgentRegistration`; never repeat completion. |
+| `qurl.ErrAgentBindingPersistence` | Native REG authenticated a refreshed assignment, but the store rejected its metadata save. The wrapped store cause remains matchable; no device credential was minted or changed. | Correct the store failure, then safely retry `RefreshAgentRegistration`. |
+| `qurl.ErrServerOverloaded` | Native knock received an authenticated overload cookie challenge. | Back off within the caller's bounded retry policy while reusing the same outer-cycle RunID. |
+| `qurl.ErrMalformedReply` | Native knock got a wrong type/counter or malformed authenticated ACK, including a missing requested token/host. | Fail closed and investigate server/protocol skew; do not use partial reply data. |
 | `qurl.ErrInvalidAgentState` | Persisted state exists but is corrupt/unreadable — surfaced wrapped in the front-door config error. (`ErrAgentStateNotFound` is **not** caller-facing: it is the store-contract sentinel a custom `AgentStateStore` returns when empty, which the engine converts into a fresh enrollment.) | Restore a known-good backup. If recovery is impossible, use an owner credential to revoke `agent:<known-agent-id>` before clearing and re-enrolling. If the id is unreadable, inventory and revoke the account's affected agent keys first; never clear state and leave an orphan credential active. |
 | `qurl.ErrAgentStateKeyWrapper` | A sealed store's KMS/HSM wrapper is unavailable or violated its 32-byte DEK contract. | Restore provider access/configuration; do not delete otherwise valid state for an operational outage. |
 | `qurl.ErrAgentSetupLock` | The mandatory local-file setup lock could not be acquired or released. A release failure may follow a successful durable mutation. | Fix state-directory/sidecar permissions or platform support; do not run setup unlocked. On release failure, load first or call `OpenRegisteredAgent`; never blindly retry credential recovery. |
@@ -746,34 +753,40 @@ consequences:
   runs over NHP, so the backend NHP endpoints must be deployed before this
   version of the SDK can register or bootstrap an agent.
 
-Existing state files are unaffected: the `AgentState` schema is additive and
-backward compatible, so a state written by an older `BootstrapAgent` loads and
-validates without migration, and a state written by `RegisterAgent` is still
-readable by older code that ignores the new fields.
+The `AgentState` schema additions remain JSON-compatible: REST-only reopen can
+still read an older completed state, and older code ignores the new fields.
+Native runtime open/refresh intentionally fails recovery-required when
+`DeviceAPIKeyID` is absent; do not derive it from the consumed enrollment
+`KeyID`. This runtime is greenfield, so enroll it with a completion endpoint that
+returns both members of the credential pair.
 
 ## How enrollment works
 
-Enrollment is agent-initiated and travels over a relay, in the shape described
-by the Cloud Security Alliance's Software-Defined Perimeter (SDP) / NHP
-specification: the agent knocks to request an OTP, then sends a registration
-(REG) and receives the server's registration acknowledgement (RAK). Those
-OTP/REG/RAK messages ride the relay as encrypted NHP packets rather than hitting
-a standing public endpoint — but the RAK is only an acknowledgement (an
-`errCode`/`errMsg` status, **not** a credential). The device credential is minted
-separately, by the authenticated HTTPS completion call
+Enrollment is agent-initiated in the shape described by the Cloud Security
+Alliance's Software-Defined Perimeter (SDP) / NHP specification: the agent may
+knock to request an OTP, then sends a registration (REG) and receives the
+server's registration acknowledgement (RAK). Generic `RegisterAgent` and
+explicit credential recovery retain the encrypted HTTPS relay path.
+`RegisterAgentRuntime` first obtains an authoritative assignment from the
+control plane, then sends REG directly over UDP to that LayerV-owned assigned
+endpoint and authenticates RAK against its pinned server key. It never derives
+an endpoint from `cell_id` or exposes an AWS NLB hostname. The RAK is only an
+acknowledgement (an `errCode`/`errMsg` status, **not** a credential). The device
+credential pair is minted separately by the authenticated HTTPS completion call
 (`POST /v1/agent/registration/complete`), and the path-selecting discovery
 pre-flight (`GET /v1/agent/registration-info`) is likewise a standing,
 authenticated HTTPS call to the LayerV API. `RegisterAgent` proves the agent's
 X25519 device key through the handshake, so the same keypair is reused across
-resumes, and the enrollment service never becomes public inventory. You do not
-configure any of this: the side-effect-free pre-flight tells the SDK which path
-the key takes and where to knock.
+resumes, and the enrollment service never becomes public inventory. The
+side-effect-free pre-flight selects the enrollment-key path; the assignment
+response, not registration-info or local calculation, selects native placement.
 
-The `WithRelayURL` and `WithNHPPeer` options exist for advanced routing (pinned
-or test endpoints) and are not needed in normal use; an overridden peer bypasses
-the pre-flight's integrity check, so pin only a peer you trust. The completion
-response must still report that same peer key: the SDK preserves the peer that
-authenticated the RAK and rejects any post-handshake replacement.
+The `WithRelayURL` and `WithNHPPeer` options exist for advanced relay routing in
+generic registration/recovery and are not needed in normal use; they do not
+override an authoritative native runtime assignment. An overridden relay peer
+bypasses the pre-flight's integrity check, so pin only a peer you trust. The
+completion response must still report the server key that authenticated the
+RAK; the SDK rejects any post-handshake key replacement.
 
 ## Next
 

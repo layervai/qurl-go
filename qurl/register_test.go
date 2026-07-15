@@ -401,10 +401,11 @@ func (f *fakeService) serveCompletion(w http.ResponseWriter, r *http.Request) {
 		peer = *f.completionPeer
 	}
 	resp := completionResponse{
-		AgentID:       agentID,
-		RegisteredAt:  f.registeredAt,
-		NHPServerPeer: peer,
-		DeviceAPIKey:  f.deviceAPIKey,
+		AgentID:        agentID,
+		RegisteredAt:   f.registeredAt,
+		NHPServerPeer:  peer,
+		DeviceAPIKey:   f.deviceAPIKey,
+		DeviceAPIKeyID: "key_device000001",
 	}
 	writeEnvelope(f.t, w, resp)
 }

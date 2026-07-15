@@ -1,7 +1,6 @@
 package qurl
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -87,12 +86,18 @@ func (b registerAckBody) isSuccess() bool {
 // verified tail, not the emptiness. A non-empty body that is not valid JSON is a
 // hard error.
 func parseRegisterAck(body []byte) (*registerAckBody, error) {
-	var ack registerAckBody
 	if len(body) == 0 {
-		return &ack, nil
+		return &registerAckBody{}, nil
 	}
-	if err := json.Unmarshal(body, &ack); err != nil {
+	if err := rejectDuplicateJSONFields(body); err != nil {
+		return nil, fmt.Errorf("%w: registration reply body contains malformed or duplicate JSON fields", ErrRegisterReplyMalformed)
+	}
+	var ack *registerAckBody
+	if err := strictDecodeJSON(body, &ack); err != nil {
 		return nil, fmt.Errorf("%w: parse registration reply body: %w", ErrRegisterReplyMalformed, err)
+	}
+	if ack == nil {
+		return nil, fmt.Errorf("%w: registration reply body must be a JSON object", ErrRegisterReplyMalformed)
 	}
 	// Defense-in-depth on the echoed aspId: the RAK is Noise-authenticated, but
 	// every other wire field gets a consistency check, so a reply carrying a
@@ -102,7 +107,7 @@ func parseRegisterAck(body []byte) (*registerAckBody, error) {
 	if ack.AspID != "" && ack.AspID != agentAspID {
 		return nil, fmt.Errorf("%w: registration reply aspId %q, want %q", ErrRegisterReplyMalformed, ack.AspID, agentAspID)
 	}
-	return &ack, nil
+	return ack, nil
 }
 
 // NHP_RAK error codes (the enrollment wire contract). These map to the typed
@@ -134,6 +139,7 @@ const (
 	pathUnknown pathKind = iota
 	pathAccount
 	pathBootstrap
+	pathDevice
 )
 
 // bootstrapConsumedGuidance is the operator-facing next step when a one-shot
@@ -195,6 +201,8 @@ func mapRAKError(ack *registerAckBody, path pathKind) error {
 		switch path {
 		case pathBootstrap:
 			return fmt.Errorf("%w: pre-issued key was rejected by the enrollment service%s", ErrKeyRejected, detailSuffix(msg))
+		case pathDevice:
+			return fmt.Errorf("%w: the persisted device credential was rejected by native registration%s", ErrKeyRejected, detailSuffix(msg))
 		case pathAccount:
 			return fmt.Errorf("%w: the one-time code was rejected; re-run the same operation with the correct qurl.WithOTP code%s", ErrOTPIncorrect, detailSuffix(msg))
 		default:
@@ -277,10 +285,11 @@ func (r registrationInfoResponse) validate(now time.Time, errKind error) error {
 // authenticated the RAK; registration orchestration asserts the public keys
 // agree and retains the RAK peer's coordinates and lease.
 type completionResponse struct {
-	AgentID       string            `json:"agent_id"`
-	RegisteredAt  *time.Time        `json:"registered_at"`
-	NHPServerPeer NHPServerPeerInfo `json:"nhp_server_peer"`
-	DeviceAPIKey  string            `json:"device_api_key"`
+	AgentID        string            `json:"agent_id"`
+	RegisteredAt   *time.Time        `json:"registered_at"`
+	NHPServerPeer  NHPServerPeerInfo `json:"nhp_server_peer"`
+	DeviceAPIKey   string            `json:"device_api_key"`
+	DeviceAPIKeyID string            `json:"device_api_key_id"`
 }
 
 // validate checks the completion response. errKind is the caller's front-door
@@ -297,6 +306,9 @@ func (r completionResponse) validate(_ time.Time, errKind error) error {
 		return fmt.Errorf("%w: completion response missing device_api_key", errKind)
 	}
 	if err := validateExactBearerToken(r.DeviceAPIKey, "completion response device_api_key", errKind); err != nil {
+		return err
+	}
+	if err := validateDeviceAPIKeyID(r.DeviceAPIKeyID, "completion response device_api_key_id", errKind); err != nil {
 		return err
 	}
 	// Completion only corroborates the RAK-authenticated public key. Its host,

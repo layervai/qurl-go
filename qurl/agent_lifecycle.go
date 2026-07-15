@@ -19,7 +19,7 @@ import (
 // explicit credential recovery is observed after that cache expires; callers
 // that need the replacement immediately should use the Client returned by
 // RecoverAgentCredential. NHP peer absence, corruption, or expiry does not
-// invalidate this REST client; callers that will knock must validate the peer or
+// invalidate this REST client; callers that will knock must validate the assignment or
 // run RefreshAgentRegistration separately. The persisted agent id and X25519
 // keypair are still required and validated as the durable device identity.
 //
@@ -39,13 +39,13 @@ func OpenRegisteredAgent(ctx context.Context, store AgentStateStore, opts ...Cli
 }
 
 // OpenRegisteredAgentRuntime opens both a store-backed resource Client and the
-// validated runtime binding needed for an immediate relay knock. It performs one
+// validated runtime binding needed for an immediate native UDP knock. It performs one
 // AgentStateStore load, no enrollment/resource API calls, requires a live NHP
-// peer plus valid relay/key metadata, and primes the Client's one-minute
+// assignment plus a device registration key id, and primes the Client's one-minute
 // credential cache from that same state so its first request does not reload or
 // unseal the store. Unlike REST-only OpenRegisteredAgent, it rejects an expired
-// peer without network I/O because that peer cannot be knocked; call
-// RefreshAgentRegistration with an enrollment key to obtain a fresh binding.
+// assignment without network I/O because it cannot be knocked; call
+// RefreshAgentRegistration to refresh it with the persisted device credential.
 // The caller must immediately defer binding.Destroy, then take and eventually
 // wipe the runtime private key.
 func OpenRegisteredAgentRuntime(ctx context.Context, store AgentStateStore, opts ...ClientOption) (*Client, *AgentRuntimeBinding, error) {
@@ -98,7 +98,7 @@ func validateRegisteredAgentOpenInputs(ctx context.Context, store AgentStateStor
 }
 
 // AgentRuntimeBinding is a registered or refreshed identity and NHP endpoint
-// needed for an immediate relay knock. It deliberately excludes DeviceAPIKey,
+// needed for an immediate native UDP knock. It deliberately excludes DeviceAPIKey,
 // schema, and OTP state. The private key remains sensitive. Treat the returned
 // pointer as the owning handle: do not copy or log the binding. Accidental value
 // copies share one synchronized key owner, so they cannot duplicate the one-shot
@@ -108,12 +108,15 @@ func validateRegisteredAgentOpenInputs(ctx context.Context, store AgentStateStor
 // after every accidental copy becomes unreachable; it is defense in depth, not
 // a substitute for deterministic Destroy.
 type AgentRuntimeBinding struct {
-	AgentID      string
-	PublicKeyB64 string
-	RegisteredAt time.Time
-	NHPPeer      NHPServerPeerInfo
-	RelayURL     string
-	KeyID        string
+	AgentID              string
+	PublicKeyB64         string
+	RegisteredAt         time.Time
+	CellID               string
+	AssignmentGeneration int64
+	EndpointRevision     int64
+	LeaseExpiresAt       time.Time
+	NHPUDPEndpoint       NHPUDPEndpoint
+	DeviceAPIKeyID       string
 
 	deviceStaticPrivateKey *agentRuntimePrivateKey
 }
@@ -177,7 +180,8 @@ func (k *agentRuntimePrivateKey) destroy() {
 // a nil *AgentRuntimeBinding as <nil>, but a direct method call on a nil pointer
 // cannot reach this value-receiver method and panics; use fmt for nullable values.
 func (b AgentRuntimeBinding) String() string {
-	return fmt.Sprintf("qurl.AgentRuntimeBinding{AgentID:%q, RelayURL:%q, KeyID:%q, DeviceStaticPrivateKey:[REDACTED]}", b.AgentID, b.RelayURL, b.KeyID)
+	return fmt.Sprintf("qurl.AgentRuntimeBinding{AgentID:%q, CellID:%q, AssignmentGeneration:%d, EndpointRevision:%d, LeaseExpiresAt:%q, NHPUDPEndpoint:{Host:%q, Port:%d, ServerPublicKeyB64:[REDACTED]}, DeviceAPIKeyID:%q, DeviceStaticPrivateKey:[REDACTED]}",
+		b.AgentID, b.CellID, b.AssignmentGeneration, b.EndpointRevision, b.LeaseExpiresAt.Format(time.RFC3339Nano), b.NHPUDPEndpoint.Host, b.NHPUDPEndpoint.Port, b.DeviceAPIKeyID)
 }
 
 // GoString returns a redacted runtime summary for pointer or value %#v
@@ -185,7 +189,7 @@ func (b AgentRuntimeBinding) String() string {
 func (b AgentRuntimeBinding) GoString() string { return b.String() }
 
 // TakeDeviceStaticPrivateKey transfers ownership of the retained 32-byte X25519
-// private key for relayknock.KnockOptions and clears it from the binding. It
+// private key for native UDP registration/knock exchanges and clears it from the binding. It
 // returns nil after the first call. The caller must wipe the returned slice
 // after the knocker no longer needs it. Calling this method on a nil binding is
 // safe and returns nil; unlike these pointer-receiver lifecycle methods, a
@@ -210,53 +214,6 @@ func (b *AgentRuntimeBinding) Destroy() {
 	b.deviceStaticPrivateKey.destroy()
 }
 
-// RefreshAgentRegistration forces registration-info plus an authenticated
-// NHP_REG/NHP_RAK exchange for an existing completed agent. It commits refreshed
-// binding metadata after RAK but never calls completion or changes DeviceAPIKey.
-// It returns a narrow AgentRuntimeBinding for an immediate knock without another
-// store/KMS load; the preserved DeviceAPIKey remains only in the configured
-// store.
-//
-// An account key may pause with OTPPendingError. Its durable OTPRequestedAt
-// marker intentionally remains on the completed state across a paused or
-// abandoned attempt to throttle repeat dispatches; OpenRegisteredAgent ignores
-// it, and a successful resumed RAK clears it. Refresh defaults to bootstrap
-// keys so routine fleet repair cannot fan out OTP email; an interactive account
-// flow requires an explicit WithAllowedRegistrationKeyKinds opt-in. Without it,
-// the side-effect-free preflight returns
-// *RegistrationKeyKindDisallowedError before OTP dispatch or REG.
-func RefreshAgentRegistration(ctx context.Context, key string, store AgentStateStore, opts ...RegisterOption) (*AgentRuntimeBinding, error) {
-	cfg, err := validateRegisterInputs(ctx, key, store, opts)
-	if err != nil {
-		return nil, err
-	}
-	cfg.applyLifecycleDefaultKeyPolicy()
-	var privateKey []byte
-	defer func() { wipeBytes(privateKey) }()
-	state, err := withAgentSetupLock(ctx, store, func() (*AgentState, error) {
-		state, err := loadCompletedRegisteredState(ctx, store, cfg.invalidConfigErr)
-		if err != nil {
-			return nil, err
-		}
-		if err := cfg.reconcileDeviceID(state); err != nil {
-			return nil, err
-		}
-		// The returned binding must retain one decoded key while registerExchange
-		// independently decodes and wipes its own short-lived Noise-handshake copy.
-		privateKey, err = decodeRuntimePrivateKey(state, cfg.invalidConfigErr)
-		if err != nil {
-			return nil, err
-		}
-		return cfg.forceRegistration(ctx, key, store, state, false)
-	})
-	if err != nil {
-		return nil, err
-	}
-	binding := newAgentRuntimeBinding(state, privateKey)
-	privateKey = nil // binding owns the slice and its cleanup from this point.
-	return binding, nil
-}
-
 func decodeRuntimePrivateKey(state *AgentState, errKind error) ([]byte, error) {
 	// Device private keys are generated and persisted only by this SDK using
 	// padded StdEncoding. Unlike server public keys received across the wire,
@@ -278,17 +235,34 @@ func decodeRuntimePrivateKey(state *AgentState, errKind error) ([]byte, error) {
 // retained private key before any lifecycle network I/O and validate runtime
 // metadata before calling it. Mutating lifecycle paths additionally wait until
 // state is durably saved and the setup lock is released. Preconditions:
-// state, state.RegisteredAt, and state.NHPPeer are non-nil, and privateKey is a
-// validated 32-byte X25519 key owned by this constructor.
+// state, state.RegisteredAt, and state.Assignment are non-nil, and privateKey is
+// a validated 32-byte X25519 key owned by this constructor.
 func newAgentRuntimeBinding(state *AgentState, privateKey []byte) *AgentRuntimeBinding {
 	return &AgentRuntimeBinding{
 		AgentID:                state.AgentID,
 		PublicKeyB64:           state.PublicKeyB64,
 		RegisteredAt:           *state.RegisteredAt,
-		NHPPeer:                *state.NHPPeer,
-		RelayURL:               state.RelayURL,
-		KeyID:                  state.KeyID,
+		CellID:                 state.Assignment.CellID,
+		AssignmentGeneration:   state.Assignment.AssignmentGeneration,
+		EndpointRevision:       state.Assignment.EndpointRevision,
+		LeaseExpiresAt:         state.Assignment.LeaseExpiresAt,
+		NHPUDPEndpoint:         state.Assignment.Endpoint,
+		DeviceAPIKeyID:         state.DeviceAPIKeyID,
 		deviceStaticPrivateKey: newAgentRuntimePrivateKey(privateKey),
+	}
+}
+
+func (b *AgentRuntimeBinding) assignment() *AgentAssignment {
+	if b == nil {
+		return nil
+	}
+	return &AgentAssignment{
+		AgentID:              b.AgentID,
+		CellID:               b.CellID,
+		AssignmentGeneration: b.AssignmentGeneration,
+		EndpointRevision:     b.EndpointRevision,
+		LeaseExpiresAt:       b.LeaseExpiresAt,
+		Endpoint:             b.NHPUDPEndpoint,
 	}
 }
 

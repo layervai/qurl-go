@@ -161,14 +161,16 @@ and supports an optional `qurl.WithExpectedSealedAgentID` pin for a separately
 configured expected id.
 
 REST-only warm starts can call `qurl.OpenRegisteredAgent` without an enrollment
-key. Tunnel runtimes should use `qurl.OpenRegisteredAgentRuntime` to obtain the
-Client and validated knock binding from one store load; fresh installs use
+key. qURL Connector runtimes should use `qurl.OpenRegisteredAgentRuntime` to
+obtain the Client and validated assigned-cell UDP binding from one store load;
+fresh installs use
 `qurl.RegisterAgentRuntime` to receive the same pair without a post-registration
 store/KMS reload.
-`qurl.RefreshAgentRegistration` explicitly repairs missing/rotated NHP binding
-metadata without touching or returning the device credential; its narrow
-runtime binding exposes only the identity/NHP data and wipeable private-key
-bytes needed for an immediate knock. Meanwhile,
+`qurl.RefreshAgentRegistration` explicitly refreshes an existing assignment
+lease and native NHP registration using the persisted `DeviceAPIKeyID` +
+`DeviceAPIKey`; it takes no enrollment key and never calls registration-info or
+completion. Its narrow runtime binding exposes only the identity/assignment
+data and wipeable private-key bytes needed for an immediate knock. Meanwhile,
 `qurl.RecoverAgentCredential` performs operator-approved same-id credential
 replacement after the owner revokes `agent:<device_id>`. Registration and
 resource API origins are independent via `WithRegisterBaseURL` and
@@ -238,8 +240,10 @@ Match errors by type, not message text:
   `RegisterAgentRuntime` and `OpenRegisteredAgentRuntime` return a primed Client
   plus a validated one-shot runtime key binding without a duplicate store/KMS
   load;
-  `RefreshAgentRegistration` forces a real
-  REG/RAK binding refresh without completion; and `RecoverAgentCredential`
+  `RefreshAgentRegistration` authenticates assignment refresh with the stored
+  immutable device credential, sends native UDP REG/RAK, and preserves that
+  credential pair without completion; `KnockRegisteredAgent` sends a
+  caller-RunID-correlated native UDP KNK; and `RecoverAgentCredential`
   performs explicit same-id replacement after owner revoke. Registration key
   kinds can be restricted before OTP/REG side effects, registration and resource
   origins are independent, and post-mint persistence/already-issued failures now
@@ -248,25 +252,25 @@ Match errors by type, not message text:
   peer that authenticated the successful RAK.
 
   **Fleet email-fan-out policy:** account-key OTP remains allowed by default for
-  generic `RegisterAgent` compatibility. The repair-oriented
-  `RefreshAgentRegistration` and `RecoverAgentCredential` default to
-  bootstrap-only; interactive account repair requires explicit
+  generic `RegisterAgent` compatibility. Ordinary `RefreshAgentRegistration`
+  has no enrollment-key or OTP input. `RecoverAgentCredential` defaults to
+  bootstrap-only; interactive account recovery requires explicit
   `WithAllowedRegistrationKeyKinds(RegistrationKeyKindAccount)`. Fleet callers
   should still set the bootstrap-only policy explicitly so routine lifecycle
   code documents and pins its intended trust model.
 
-  This release requires qurl-service registration-info/completion support,
+  This release requires qurl-service registration-info/completion plus the
+  authoritative assignment endpoint (including `device_api_key_id` completion
+  output),
   idempotent same-key REG (including account recovery re-REG after an earlier
   authenticated RAK stopped before completion), device-key revoke that atomically
-  clears the first-issue sentinel, and relay REG/RAK routing to be deployed with
-  repeated-REG regression coverage before these lifecycle operations are
-  enabled. During peer rotation, every qurl-service pod
-  serving registration-info and completion must report the same peer key; a
-  deployment-skew mismatch after mint fails recovery-required rather than
-  silently replacing the RAK-authenticated peer. Registration-info/RAK must
-  expose one routable peer deployment: the SDK persists that full host, port,
-  and lease and uses completion only to corroborate its decoded public key;
-  completion coordinates are ignored. Completion 401/403 responses must be
+  clears the first-issue sentinel, and both relay enrollment and assigned-cell
+  native UDP REG/RAK routing to be deployed with repeated-REG regression
+  coverage before these lifecycle operations are enabled. Native runtimes trust
+  only the assignment's opaque LayerV DNS endpoint and pinned server key; they
+  never derive a cell address or use the browser relay. Completion corroborates
+  the server public key that authenticated the initial RAK but cannot replace
+  assignment coordinates. Completion 401/403 responses must be
   emitted only when qurl-service can prove the atomic mint transaction made no
   device-key write, because the SDK classifies them as authoritative no-write
   authentication failures.

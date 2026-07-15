@@ -102,6 +102,11 @@ type AgentState struct {
 	// completion. Its presence alongside RegisteredAt marks a state ready to back
 	// a Client without another qURL registration call. SENSITIVE — see the type doc.
 	DeviceAPIKey string `json:"device_api_key,omitempty"`
+	// DeviceAPIKeyID is the public key_ identifier minted independently from
+	// DeviceAPIKey. Native steady-state NHP_REG carries this value as usrId and
+	// proves possession with DeviceAPIKey in otp. It must never fall back to KeyID:
+	// KeyID names the enrollment credential, which may be one-shot and consumed.
+	DeviceAPIKeyID string `json:"device_api_key_id,omitempty"`
 	// RelayURL records the NHP relay base URL from the most recent
 	// registration-info pre-flight. A resume re-fetches registration-info (the
 	// authoritative, side-effect-free source) rather than reading this back, so it
@@ -156,7 +161,7 @@ func (s *AgentState) clone() *AgentState {
 // agentStateSchemaVersion is the current AgentState schema version RegisterAgent
 // stamps into SchemaVersion. Bumped only on an additive field change that older
 // readers can still ignore.
-const agentStateSchemaVersion = 2
+const agentStateSchemaVersion = 3
 
 // AgentStateStore loads and saves the bootstrapped local identity. The
 // file-backed store writes plaintext JSON protected by filesystem permissions;
@@ -380,10 +385,9 @@ func BootstrapAgent(ctx context.Context, setupKey string, store AgentStateStore,
 	return state, nil
 }
 
-// validateCompletedAgentIdentity checks only the durable identity/credential
-// fields a forced refresh needs. It deliberately does not require the old peer
-// or relay: replacing missing, expired, or rotated binding metadata is the
-// purpose of RefreshAgentRegistration.
+// validateCompletedAgentIdentity checks only the durable identity fields shared
+// by registered open, runtime refresh, and explicit credential recovery. Each
+// caller separately validates the credential and assignment metadata it needs.
 func validateCompletedAgentIdentity(state *AgentState, errKind error) error {
 	if err := validatePersistedAgentID(state, errKind); err != nil {
 		return err

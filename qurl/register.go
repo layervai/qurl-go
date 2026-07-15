@@ -74,15 +74,15 @@ func RegisterAgent(ctx context.Context, key string, store AgentStateStore, opts 
 
 // RegisterAgentRuntime registers or reopens an agent and returns both its
 // store-backed resource Client and the validated runtime binding needed for an
-// immediate relay knock. Unlike composing RegisterAgent with a later store
+// immediate native UDP knock. Unlike composing RegisterAgent with a later store
 // load, this captures the private key before registration network I/O and primes
 // the Client credential cache from the same in-memory AgentState. The caller
 // must immediately defer binding.Destroy, then take and eventually wipe the
 // runtime private key. The primed credential is cached for one minute; a later
 // owner-side revocation becomes visible after that TTL. Account enrollment
-// behavior matches RegisterAgent. On the completed fast path an expired peer
-// is rejected because it cannot be knocked; call RefreshAgentRegistration with
-// an enrollment key to obtain a fresh binding.
+// behavior matches RegisterAgent. On the completed fast path an expired
+// assignment is rejected because it cannot be knocked; call
+// RefreshAgentRegistration to refresh it with the persisted device credential.
 func RegisterAgentRuntime(ctx context.Context, key string, store AgentStateStore, opts ...RegisterOption) (*Client, *AgentRuntimeBinding, error) {
 	cfg, err := validateRegisterInputs(ctx, key, store, opts)
 	if err != nil {
@@ -119,6 +119,8 @@ type registerConfig struct {
 	allowedKeyKinds   map[RegistrationKeyKind]struct{}
 	captureRuntime    bool
 	runtimePrivateKey []byte
+	runtime           agentRuntimeConfig
+	deviceKeyMinted   bool
 
 	// relayURL / nhpPeer are optional overrides; when unset the values come from
 	// the registration-info pre-flight.
@@ -174,6 +176,7 @@ func newRegisterConfig(opts []RegisterOption) (*registerConfig, error) {
 		clientHTTPClient: defaultAPIHTTPClient,
 		invalidConfigErr: ErrInvalidRegisterConfig,
 		clock:            time.Now,
+		runtime:          defaultAgentRuntimeConfig(),
 	}
 	for _, opt := range opts {
 		if opt == nil {
@@ -198,8 +201,7 @@ func newRegisterConfig(opts []RegisterOption) (*registerConfig, error) {
 }
 
 // validateRegisterInputs resolves options and enforces the input contract
-// shared by RegisterAgent, RefreshAgentRegistration, and
-// RecoverAgentCredential.
+// shared by RegisterAgent and RecoverAgentCredential.
 func validateRegisterInputs(ctx context.Context, key string, store AgentStateStore, opts []RegisterOption) (*registerConfig, error) {
 	cfg, err := newRegisterConfig(opts)
 	if err != nil {
@@ -287,6 +289,17 @@ func (cfg *registerConfig) runLocked(ctx context.Context, key string, store Agen
 	if err != nil {
 		return nil, err
 	}
+	if cfg.captureRuntime {
+		assignment, err := FetchAgentAssignment(ctx, state.AgentID, BearerToken(key), cfg.runtime.assignmentOptions()...)
+		if err != nil {
+			return nil, err
+		}
+		if err := ensureAssignmentContinuity(state.Assignment, assignment); err != nil {
+			return nil, err
+		}
+		state.Assignment = assignment.clone()
+		peer = assignmentPeer(assignment)
+	}
 	state.NHPPeer = peer
 	state.RelayURL = relayURL
 	state.KeyID = info.KeyID
@@ -340,7 +353,8 @@ func loadAgentStateIfPresent(ctx context.Context, store AgentStateStore, invalid
 func (cfg *registerConfig) finishRegisteredAgentState(state *AgentState) (*AgentState, error) {
 	// A RegisterAgent Client authorizes with the REST device key and never knocks
 	// the persisted NHP peer, so an expired peer does not block its fast path. The
-	// knock-only BootstrapAgent and combined runtime paths require a live peer.
+	// knock-only BootstrapAgent requires a live peer; combined runtime paths
+	// require a live authoritative assignment instead.
 	if cfg.captureRuntime {
 		if err := validateCompletedAgentIdentity(state, cfg.invalidConfigErr); err != nil {
 			return nil, err
@@ -368,17 +382,14 @@ func (cfg *registerConfig) finishRegisteredAgentState(state *AgentState) (*Agent
 }
 
 func validateAgentRuntimeMetadata(state *AgentState, now time.Time, errKind error) error {
-	if state == nil || state.NHPPeer == nil {
-		return fmt.Errorf("%w: agent runtime state missing NHP peer", errKind)
+	if state == nil {
+		return fmt.Errorf("%w: agent runtime state is nil", errKind)
 	}
-	if err := validateNHPServerPeerInfo(*state.NHPPeer, now, true, "agent runtime state", errKind); err != nil {
+	if err := validatePersistedNativeRegistrationCredential(state, errKind); err != nil {
 		return err
 	}
-	if strings.TrimSpace(state.KeyID) == "" {
-		return fmt.Errorf("%w: agent runtime state missing key id", errKind)
-	}
-	if err := validateHTTPSOrLoopbackURL(state.RelayURL, "agent runtime relay URL", errKind); err != nil {
-		return err
+	if err := validateAgentAssignment(state.Assignment, state.AgentID, now); err != nil {
+		return fmt.Errorf("%w: invalid persisted native assignment: %w", errKind, err)
 	}
 	return nil
 }
@@ -491,18 +502,25 @@ func (cfg *registerConfig) registerAndComplete(ctx context.Context, key string, 
 		return nil, err
 	}
 	if cfg.captureRuntime {
-		if err := validateAgentRuntimeMetadata(state, cfg.clock(), cfg.invalidConfigErr); err != nil {
-			return nil, err
+		if err := validateAgentAssignment(state.Assignment, state.AgentID, cfg.clock()); err != nil {
+			return nil, fmt.Errorf("%w: invalid enrollment assignment after native registration: %w", cfg.invalidConfigErr, err)
 		}
 	}
-	return cfg.completeAndPersist(ctx, key, store, state, path)
+	completed, err := cfg.completeAndPersist(ctx, key, store, state, path)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.captureRuntime && cfg.deviceKeyMinted {
+		return cfg.runtime.confirmFreshDeviceAssignment(ctx, store, completed)
+	}
+	return completed, nil
 }
 
 // registerExchangeChecked runs NHP_REG/NHP_RAK and maps an authenticated denial
 // through the enrollment taxonomy. Enrollment/recovery and completion-free
 // binding refresh share this single RAK success gate.
 func (cfg *registerConfig) registerExchangeChecked(ctx context.Context, state *AgentState, peer *NHPServerPeerInfo, relayURL, credential string, path pathKind) error {
-	ack, err := cfg.registerExchange(ctx, state, peer, relayURL, credential)
+	ack, err := cfg.registerExchange(ctx, state, peer, relayURL, credential, path)
 	if err != nil {
 		return err
 	}
@@ -567,7 +585,23 @@ func (cfg *registerConfig) tryCompletionProbe(ctx context.Context, key string, s
 // registerExchange builds and sends the NHP_REG round trip, returning the
 // decrypted NHP_RAK body. credential is the enrollment credential (key secret on
 // the bootstrap path, one-time code on the account path).
-func (cfg *registerConfig) registerExchange(ctx context.Context, state *AgentState, peer *NHPServerPeerInfo, relayURL, credential string) (*registerAckBody, error) {
+func (cfg *registerConfig) registerExchange(ctx context.Context, state *AgentState, peer *NHPServerPeerInfo, relayURL, credential string, path pathKind) (*registerAckBody, error) {
+	if cfg.captureRuntime {
+		// captureRuntimeKey validated and retained this one process-owned copy
+		// before registration side effects. Reuse it for native REG instead of
+		// decoding a second plaintext private-key slice.
+		if len(cfg.runtimePrivateKey) != 32 {
+			return nil, fmt.Errorf("%w: native runtime private key is unavailable", cfg.invalidConfigErr)
+		}
+		if err := nativeRegisterAgent(ctx, state, cfg.runtimePrivateKey, state.KeyID, credential, registerUserData{
+			Hostname: cfg.hostname,
+			Version:  cfg.version,
+			Takeover: cfg.takeover,
+		}, path, &cfg.runtime); err != nil {
+			return nil, err
+		}
+		return &registerAckBody{}, nil
+	}
 	devicePriv, serverPub, err := cfg.decodeNHPKeys(state, peer)
 	if err != nil {
 		return nil, err
@@ -685,12 +719,14 @@ func (cfg *registerConfig) persistCompletion(ctx context.Context, store AgentSta
 	// credential-mint response, not authority to rotate the Noise peer after the
 	// handshake; assert it agrees above and never replace the RAK peer here.
 	state.DeviceAPIKey = comp.DeviceAPIKey
+	state.DeviceAPIKeyID = comp.DeviceAPIKeyID
 	state.OTPRequestedAt = nil
 	state.SchemaVersion = agentStateSchemaVersion
 	if err := store.SaveAgentState(ctx, state); err != nil {
 		*state = previous
 		return nil, credentialPersistenceFailure(previous.AgentID, err)
 	}
+	cfg.deviceKeyMinted = true
 	return state, nil
 }
 
@@ -1184,6 +1220,7 @@ type RegisterOption interface {
 type AgentClientOption interface {
 	RegisterOption
 	ClientOption
+	AgentRuntimeOption
 }
 
 // RegistrationKeyKind is the key class reported by registration-info.
@@ -1198,9 +1235,9 @@ const (
 	RegistrationKeyKindAccount RegistrationKeyKind = keyKindAccount
 )
 
-// applyLifecycleDefaultKeyPolicy gives the new repair-oriented lifecycle APIs a
-// fail-safe fleet default without changing RegisterAgent's account-enrollment
-// compatibility. Interactive account-key refresh/recovery remains available by
+// applyLifecycleDefaultKeyPolicy gives explicit credential recovery a fail-safe
+// fleet default without changing RegisterAgent's account-enrollment
+// compatibility. Interactive account-key recovery remains available by
 // explicitly opting in with WithAllowedRegistrationKeyKinds.
 func (cfg *registerConfig) applyLifecycleDefaultKeyPolicy() {
 	if cfg.allowedKeyKinds == nil {
@@ -1391,6 +1428,16 @@ func (o agentClientBaseURLOption) applyRegisterOption(cfg *registerConfig) error
 		return err
 	}
 	cfg.clientBaseURL = normalized
+	cfg.runtime.baseURL = normalized
+	return nil
+}
+
+func (o agentClientBaseURLOption) applyAgentRuntimeOption(cfg *agentRuntimeConfig) error {
+	normalized, err := validateAgentClientBaseURL(string(o), ErrInvalidRegisterConfig)
+	if err != nil {
+		return err
+	}
+	cfg.baseURL = normalized
 	return nil
 }
 
@@ -1440,6 +1487,15 @@ func (o agentClientHTTPClientOption) applyRegisterOption(cfg *registerConfig) er
 		return fmt.Errorf("%w: agent Client HTTP client must not be nil", ErrInvalidRegisterConfig)
 	}
 	cfg.clientHTTPClient = o.client
+	cfg.runtime.httpClient = o.client
+	return nil
+}
+
+func (o agentClientHTTPClientOption) applyAgentRuntimeOption(cfg *agentRuntimeConfig) error {
+	if o.client == nil {
+		return fmt.Errorf("%w: agent Client HTTP client must not be nil", ErrInvalidRegisterConfig)
+	}
+	cfg.httpClient = o.client
 	return nil
 }
 

@@ -20,13 +20,11 @@ import (
 // options are invalid before any network call.
 var ErrInvalidRegisterConfig = errors.New("qurl: invalid register config")
 
-// ErrAgentBindingPersistence means an authenticated NHP binding refresh
-// succeeded but its new peer/relay metadata was not durably saved. No device
-// credential was minted or changed, so correct the store failure and safely
-// retry RefreshAgentRegistration. For an account-key refresh, the durable
-// OTPRequestedAt marker may remain: retry with the still-current OTP, or wait
-// for its cooldown and retry without an OTP to request a fresh code. The
-// underlying store error remains matchable.
+// ErrAgentBindingPersistence means an authenticated native NHP registration
+// succeeded but its refreshed assignment metadata was not durably saved. No
+// device credential was minted or changed, so correct the store failure and
+// safely retry RefreshAgentRegistration. The underlying store error remains
+// matchable.
 var ErrAgentBindingPersistence = errors.New("qurl: agent binding persistence failed")
 
 // ErrOTPPending is returned (wrapped in *OTPPendingError) when account-key
@@ -171,6 +169,29 @@ func validatePersistedDeviceCredential(state *AgentState, errKind error) error {
 	}
 	if err := validateExactBearerToken(state.DeviceAPIKey, "persisted device credential", errKind); err != nil {
 		return &CredentialRecoveryRequiredError{DeviceID: state.AgentID, Cause: err}
+	}
+	return nil
+}
+
+func validatePersistedNativeRegistrationCredential(state *AgentState, errKind error) error {
+	if err := validatePersistedDeviceCredential(state, errKind); err != nil {
+		return err
+	}
+	if err := validateDeviceAPIKeyID(state.DeviceAPIKeyID, "persisted device credential id", errKind); err != nil {
+		return &CredentialRecoveryRequiredError{DeviceID: state.AgentID, Cause: err}
+	}
+	return nil
+}
+
+func validateDeviceAPIKeyID(value, label string, errKind error) error {
+	if len(value) != 16 || !strings.HasPrefix(value, "key_") {
+		return fmt.Errorf("%w: %s must match key_ plus 12 alphanumeric characters", errKind, label)
+	}
+	for i := len("key_"); i < len(value); i++ {
+		ch := value[i]
+		if (ch < 'a' || ch > 'z') && (ch < 'A' || ch > 'Z') && (ch < '0' || ch > '9') {
+			return fmt.Errorf("%w: %s must match key_ plus 12 alphanumeric characters", errKind, label)
+		}
 	}
 	return nil
 }

@@ -24,6 +24,7 @@ func TestMapRAKError_Table(t *testing.T) {
 	}{
 		{name: "52100 account = otp incorrect", code: rakCredentialInvalid, path: pathAccount, want: ErrOTPIncorrect, wantMsg: "WithOTP"},
 		{name: "52100 bootstrap = key rejected", code: rakCredentialInvalid, path: pathBootstrap, want: ErrKeyRejected, wantMsg: "pre-issued key"},
+		{name: "52100 device = key rejected", code: rakCredentialInvalid, path: pathDevice, want: ErrKeyRejected, wantMsg: "persisted device credential"},
 		{name: "52101 expired", code: rakCredentialExpired, path: pathAccount, want: ErrOTPExpired, wantMsg: "fresh"},
 		{name: "52102 attempts exceeded", code: rakAttemptsExceeded, path: pathAccount, want: ErrRegistrationRateLimited, wantMsg: "too many attempts"},
 		{name: "52103 identity conflict", code: rakIdentityConflict, path: pathAccount, want: ErrAgentIdentityConflict, wantMsg: "WithTakeover"},
@@ -124,12 +125,17 @@ func TestParseRegisterAck_EmptyBodyIsZeroValue(t *testing.T) {
 }
 
 func TestParseRegisterAck_MalformedBodyErrors(t *testing.T) {
-	_, err := parseRegisterAck([]byte("{not json"))
-	if err == nil {
-		t.Fatal("malformed RAK body should error")
-	}
-	if !errors.Is(err, ErrRegisterReplyMalformed) {
-		t.Errorf("malformed RAK body error = %v, want ErrRegisterReplyMalformed", err)
+	for _, body := range []string{
+		`{not json`,
+		`{"errCode":"0","errCode":"52100"}`,
+		`{"errCode":"0","future":"field"}`,
+		`{"errCode":"0"}{"errCode":"0"}`,
+		`{"errCode":0}`,
+		`null`,
+	} {
+		if _, err := parseRegisterAck([]byte(body)); !errors.Is(err, ErrRegisterReplyMalformed) {
+			t.Errorf("malformed RAK body %q error = %v, want ErrRegisterReplyMalformed", body, err)
+		}
 	}
 }
 
@@ -214,10 +220,11 @@ func TestCompletionResponse_Validate(t *testing.T) {
 	now := time.Now().UTC()
 	goodPeer := NHPServerPeerInfo{PublicKeyB64: validTestNHPServerPublicKeyB64, Host: "h", Port: 1}
 	base := completionResponse{
-		AgentID:       "agent-x",
-		RegisteredAt:  &now,
-		NHPServerPeer: goodPeer,
-		DeviceAPIKey:  "lv_device_secret",
+		AgentID:        "agent-x",
+		RegisteredAt:   &now,
+		NHPServerPeer:  goodPeer,
+		DeviceAPIKey:   "lv_device_secret",
+		DeviceAPIKeyID: "key_device000001",
 	}
 	if err := base.validate(time.Now(), ErrInvalidRegisterConfig); err != nil {
 		t.Fatalf("valid completion rejected: %v", err)

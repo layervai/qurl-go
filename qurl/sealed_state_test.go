@@ -125,6 +125,7 @@ func testAgentState(t *testing.T) *AgentState {
 	state.RegisteredAt = &now
 	state.SchemaVersion = agentStateSchemaVersion
 	state.DeviceAPIKey = "lv_device_super_secret"
+	state.DeviceAPIKeyID = "key_device000001"
 	state.RelayURL = "https://relay.example.test"
 	state.KeyID = "key_test"
 	state.NHPPeer = &NHPServerPeerInfo{
@@ -132,6 +133,8 @@ func testAgentState(t *testing.T) *AgentState {
 		Host:         "nhp.example.test",
 		Port:         62206,
 	}
+	assignment := validAssignment(t, state.AgentID)
+	state.Assignment = &assignment
 	return state
 }
 

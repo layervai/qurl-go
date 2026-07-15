@@ -21,6 +21,54 @@ func allowAccountLifecycle() RegisterOption {
 	return WithAllowedRegistrationKeyKinds(RegistrationKeyKindAccount)
 }
 
+// legacyEnrollmentRefreshForTest keeps coverage of forceRegistration, the
+// enrollment-key recovery engine that RecoverAgentCredential still uses. It is
+// intentionally test-only: the public ordinary refresh API must never accept or
+// read an enrollment key.
+func legacyEnrollmentRefreshForTest(ctx context.Context, key string, store AgentStateStore, opts ...RegisterOption) (*AgentRuntimeBinding, error) {
+	cfg, err := validateRegisterInputs(ctx, key, store, opts)
+	if err != nil {
+		return nil, err
+	}
+	cfg.applyLifecycleDefaultKeyPolicy()
+	var privateKey []byte
+	defer func() { wipeBytes(privateKey) }()
+	state, err := withAgentSetupLock(ctx, store, func() (*AgentState, error) {
+		state, err := loadCompletedRegisteredState(ctx, store, cfg.invalidConfigErr)
+		if err != nil {
+			return nil, err
+		}
+		if err := cfg.reconcileDeviceID(state); err != nil {
+			return nil, err
+		}
+		privateKey, err = decodeRuntimePrivateKey(state, cfg.invalidConfigErr)
+		if err != nil {
+			return nil, err
+		}
+		return cfg.forceRegistration(ctx, key, store, state, false)
+	})
+	if err != nil {
+		return nil, err
+	}
+	if state.Assignment == nil {
+		state.Assignment = &AgentAssignment{
+			AgentID:              state.AgentID,
+			CellID:               "legacy-test",
+			AssignmentGeneration: 1,
+			EndpointRevision:     1,
+			LeaseExpiresAt:       time.Now().Add(time.Hour),
+			Endpoint: NHPUDPEndpoint{
+				Host:               state.NHPPeer.Host,
+				Port:               state.NHPPeer.Port,
+				ServerPublicKeyB64: state.NHPPeer.PublicKeyB64,
+			},
+		}
+	}
+	binding := newAgentRuntimeBinding(state, privateKey)
+	privateKey = nil
+	return binding, nil
+}
+
 func TestAgentStateClone_IsolatesEveryMutableField(t *testing.T) {
 	// Keep this list explicit: adding any non-scalar field to AgentState must fail
 	// here until clone and this mutation test are extended together. The
@@ -312,10 +360,10 @@ func TestAgentRuntimeBinding_AccidentalCopySharesSynchronizedOneShotKey(t *testi
 	copied.Destroy()
 }
 
-func TestRefreshAgentRegistration_CustomStoreReceivesClonedCandidate(t *testing.T) {
+func TestEnrollmentRefreshLegacy_CustomStoreReceivesClonedCandidate(t *testing.T) {
 	h := registeredHarness(t)
 	tracking := &pointerTrackingAgentStateStore{inner: h.store}
-	binding, err := RefreshAgentRegistration(context.Background(), "lv_enroll", tracking, h.registerOpts()...)
+	binding, err := legacyEnrollmentRefreshForTest(context.Background(), "lv_enroll", tracking, h.registerOpts()...)
 	if err != nil {
 		t.Fatalf("RefreshAgentRegistration: %v", err)
 	}
@@ -330,8 +378,19 @@ func TestRefreshAgentRegistration_CustomStoreReceivesClonedCandidate(t *testing.
 
 func TestRegisterAgentRuntime_FreshRegistrationAddsNoStoreReload(t *testing.T) {
 	h, counting := newFreshCountingRegisterHarness(t)
+	h.svc.keyID = "key_enrollment01"
+	udpServer := startNativeRegistrationUDPServer(t, h.nhp)
+	assignmentRequests := installRuntimeAssignmentHandler(t, h, udpServer.port())
+	runtimeOpts := runtimeUDPOptions()
+	runtimeOpts = append(runtimeOpts,
+		WithAgentClientBaseURL(h.apiSrv.URL),
+		WithAgentClientHTTPClient(h.apiSrv.Client()),
+		WithRegisterHostname("connector-host"),
+		WithRegisterVersion("v0.1.0"),
+		WithTakeover(),
+	)
 
-	client, binding, err := RegisterAgentRuntime(context.Background(), "lv_enroll", h.store, h.registerOpts()...)
+	client, binding, err := RegisterAgentRuntime(context.Background(), "lv_enroll", h.store, h.registerOpts(runtimeOpts...)...)
 	if err != nil {
 		t.Fatalf("RegisterAgentRuntime: %v", err)
 	}
@@ -351,6 +410,22 @@ func TestRegisterAgentRuntime_FreshRegistrationAddsNoStoreReload(t *testing.T) {
 	}
 	if counting.loads.Load() != 2 {
 		t.Fatalf("fresh first authorization added store load: loads = %d, want 2", counting.loads.Load())
+	}
+	requests := assignmentRequests.snapshot()
+	if len(requests) != 2 {
+		t.Fatalf("assignment requests = %#v, want initial + post-mint confirmation", requests)
+	}
+	if requests[0].Authorization != "Bearer lv_enroll" || requests[1].Authorization != "Bearer lv_device_secret" {
+		t.Fatalf("assignment credentials = %q / %q, want enrollment then newly minted device key", requests[0].Authorization, requests[1].Authorization)
+	}
+	if h.nhp.regCount() != 1 {
+		t.Fatalf("native REG count = %d, want 1", h.nhp.regCount())
+	}
+	h.nhp.mu.Lock()
+	registration := h.nhp.regs[0]
+	h.nhp.mu.Unlock()
+	if registration.UsrData.Hostname != "connector-host" || registration.UsrData.Version != "v0.1.0" || !registration.UsrData.Takeover {
+		t.Fatalf("native enrollment REG user data = %#v", registration.UsrData)
 	}
 	privateKey := binding.TakeDeviceStaticPrivateKey()
 	if len(privateKey) != 32 {
@@ -477,11 +552,10 @@ func TestOpenRegisteredAgentRuntime_InvalidKnockStateFailsInOneLoadWithoutNetwor
 		name string
 		edit func(*AgentState)
 	}{
-		{name: "missing peer", edit: func(state *AgentState) { state.NHPPeer = nil }},
-		{name: "malformed peer", edit: func(state *AgentState) { state.NHPPeer.PublicKeyB64 = "not-base64" }},
-		{name: "expired peer", edit: func(state *AgentState) { state.NHPPeer.ExpireTime = time.Now().Add(-time.Hour).Unix() }},
-		{name: "missing relay", edit: func(state *AgentState) { state.RelayURL = "" }},
-		{name: "missing key id", edit: func(state *AgentState) { state.KeyID = "" }},
+		{name: "missing assignment", edit: func(state *AgentState) { state.Assignment = nil }},
+		{name: "malformed assignment server key", edit: func(state *AgentState) { state.Assignment.Endpoint.ServerPublicKeyB64 = "not-base64" }},
+		{name: "expired assignment", edit: func(state *AgentState) { state.Assignment.LeaseExpiresAt = time.Now().Add(-time.Hour) }},
+		{name: "missing device key id", edit: func(state *AgentState) { state.DeviceAPIKeyID = "" }},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -542,7 +616,7 @@ func TestAgentLifecycle_MissingCredentialRequiresExplicitRecoveryWithoutNetwork(
 	}
 	assertRecoveryRequired(t, err)
 
-	refreshed, err := RefreshAgentRegistration(context.Background(), "lv_enroll", h.store,
+	refreshed, err := legacyEnrollmentRefreshForTest(context.Background(), "lv_enroll", h.store,
 		WithRegisterBaseURL(h.apiSrv.URL),
 		WithRegisterHTTPClient(refusing),
 	)
@@ -594,7 +668,7 @@ func TestAgentLifecycle_MalformedPersistedCredentialFailsClosedWithoutNetwork(t 
 			); client != nil || binding != nil || !errors.Is(err, ErrInvalidRegisterConfig) || !errors.Is(err, ErrCredentialRecoveryRequired) {
 				t.Fatalf("RegisterAgentRuntime malformed credential = client %v, binding %v, error %v", client, binding, err)
 			}
-			if refreshed, err := RefreshAgentRegistration(context.Background(), "lv_enroll", h.store,
+			if refreshed, err := legacyEnrollmentRefreshForTest(context.Background(), "lv_enroll", h.store,
 				WithRegisterBaseURL(h.apiSrv.URL),
 				WithRegisterHTTPClient(refusing),
 			); refreshed != nil || !errors.Is(err, ErrInvalidRegisterConfig) || !errors.Is(err, ErrCredentialRecoveryRequired) {
@@ -619,7 +693,7 @@ func TestAgentLifecycle_MalformedPersistedCredentialFailsClosedWithoutNetwork(t 
 	}
 }
 
-func TestRefreshAgentRegistration_InvalidPrivateKeyFailsBeforeNetworkOrMutation(t *testing.T) {
+func TestEnrollmentRefreshLegacy_InvalidPrivateKeyFailsBeforeNetworkOrMutation(t *testing.T) {
 	h := registeredHarness(t)
 	state := h.loadState(t)
 	state.PrivateKeyB64 = "AAAA!partial-secret"
@@ -633,7 +707,7 @@ func TestRefreshAgentRegistration_InvalidPrivateKeyFailsBeforeNetworkOrMutation(
 		return nil, errors.New("unexpected network call")
 	})
 
-	binding, err := RefreshAgentRegistration(context.Background(), "lv_enroll", h.store,
+	binding, err := legacyEnrollmentRefreshForTest(context.Background(), "lv_enroll", h.store,
 		WithRegisterHTTPClient(refusing),
 	)
 	if binding != nil || !errors.Is(err, ErrInvalidRegisterConfig) {
@@ -656,7 +730,7 @@ func TestAgentLifecycle_RejectsNonExactEnrollmentKeysAndAppendBreakingOrigins(t 
 		return nil, errors.New("unexpected network call")
 	})
 	for _, key := range []string{" lv_enroll", "lv_enroll ", "lv_enroll\n"} {
-		if state, err := RefreshAgentRegistration(context.Background(), key, h.store, WithRegisterHTTPClient(refusing)); state != nil || !errors.Is(err, ErrInvalidRegisterConfig) {
+		if state, err := legacyEnrollmentRefreshForTest(context.Background(), key, h.store, WithRegisterHTTPClient(refusing)); state != nil || !errors.Is(err, ErrInvalidRegisterConfig) {
 			t.Fatalf("RefreshAgentRegistration key %q = state %v, error %v", key, state, err)
 		}
 		if client, err := RecoverAgentCredential(context.Background(), key, h.store, WithRegisterHTTPClient(refusing)); client != nil || !errors.Is(err, ErrInvalidRegisterConfig) {
@@ -724,7 +798,7 @@ func TestOpenRegisteredAgent_RejectsMixedResourceOptionFamilies(t *testing.T) {
 	}
 }
 
-func TestRefreshAgentRegistration_RotatesBindingPreservesCredentialAndSkipsCompletion(t *testing.T) {
+func TestEnrollmentRefreshLegacy_RotatesBindingPreservesCredentialAndSkipsCompletion(t *testing.T) {
 	h := newRegisterHarness(t)
 	h.armDevicePubOnInfo()
 	if _, err := RegisterAgent(context.Background(), "lv_enroll", h.store, h.registerOpts()...); err != nil {
@@ -763,7 +837,7 @@ func TestRefreshAgentRegistration_RotatesBindingPreservesCredentialAndSkipsCompl
 	}))
 
 	completeBefore := h.svc.completionCalls.Load()
-	refreshed, err := RefreshAgentRegistration(context.Background(), "lv_enroll", h.store, h.registerOpts()...)
+	refreshed, err := legacyEnrollmentRefreshForTest(context.Background(), "lv_enroll", h.store, h.registerOpts()...)
 	if err != nil {
 		t.Fatalf("RefreshAgentRegistration: %v", err)
 	}
@@ -820,8 +894,11 @@ func TestRefreshAgentRegistration_RotatesBindingPreservesCredentialAndSkipsCompl
 	if !refreshed.RegisteredAt.Equal(*before.RegisteredAt) {
 		t.Fatalf("RegisteredAt changed during refresh: before=%v after=%v", before.RegisteredAt, refreshed.RegisteredAt)
 	}
-	if refreshed.NHPPeer.PublicKeyB64 != rotated.serverPubB64() || refreshed.RelayURL != rotatedRelay.URL || refreshed.KeyID != "key_rotated" {
-		t.Fatalf("rotated binding not persisted: %#v", refreshed)
+	if persisted.NHPPeer == nil ||
+		persisted.NHPPeer.PublicKeyB64 != rotated.serverPubB64() ||
+		persisted.RelayURL != rotatedRelay.URL ||
+		persisted.KeyID != "key_rotated" {
+		t.Fatalf("rotated enrollment binding = peer %#v, relay %q, key id %q", persisted.NHPPeer, persisted.RelayURL, persisted.KeyID)
 	}
 	if h.svc.completionCalls.Load() != completeBefore {
 		t.Fatal("binding refresh called registration completion")
@@ -831,7 +908,7 @@ func TestRefreshAgentRegistration_RotatesBindingPreservesCredentialAndSkipsCompl
 	}
 }
 
-func TestRefreshAgentRegistration_SaveFailureDoesNotCommitNewBinding(t *testing.T) {
+func TestEnrollmentRefreshLegacy_SaveFailureDoesNotCommitNewBinding(t *testing.T) {
 	h := registeredHarness(t)
 	before := h.loadState(t)
 	h.svc.mu.Lock()
@@ -848,7 +925,7 @@ func TestRefreshAgentRegistration_SaveFailureDoesNotCommitNewBinding(t *testing.
 	}
 	h.store = failing
 
-	_, err := RefreshAgentRegistration(context.Background(), "lv_enroll", h.store, h.registerOpts()...)
+	_, err := legacyEnrollmentRefreshForTest(context.Background(), "lv_enroll", h.store, h.registerOpts()...)
 	if !errors.Is(err, ErrAgentBindingPersistence) || !errors.Is(err, saveFailure) || !strings.Contains(err.Error(), "persist refreshed binding") {
 		t.Fatalf("refresh save failure lost context/cause: %v", err)
 	}
@@ -876,10 +953,10 @@ func TestRegisterAgent_RegisterOriginDoesNotRetargetReturnedClient(t *testing.T)
 	}
 }
 
-func TestRefreshAgentRegistration_TakeoverCookieAndRateLimit(t *testing.T) {
+func TestEnrollmentRefreshLegacy_TakeoverCookieAndRateLimit(t *testing.T) {
 	t.Run("takeover", func(t *testing.T) {
 		h := registeredHarness(t)
-		if _, err := RefreshAgentRegistration(context.Background(), "lv_enroll", h.store, h.registerOpts(WithTakeover())...); err != nil {
+		if _, err := legacyEnrollmentRefreshForTest(context.Background(), "lv_enroll", h.store, h.registerOpts(WithTakeover())...); err != nil {
 			t.Fatalf("RefreshAgentRegistration: %v", err)
 		}
 		h.nhp.mu.Lock()
@@ -895,7 +972,7 @@ func TestRefreshAgentRegistration_TakeoverCookieAndRateLimit(t *testing.T) {
 		h.nhp.mu.Lock()
 		h.nhp.replyREGWithCOK = true
 		h.nhp.mu.Unlock()
-		_, err := RefreshAgentRegistration(context.Background(), "lv_enroll", h.store, h.registerOpts()...)
+		_, err := legacyEnrollmentRefreshForTest(context.Background(), "lv_enroll", h.store, h.registerOpts()...)
 		if !errors.Is(err, ErrRegistrationRetryLater) {
 			t.Fatalf("want ErrRegistrationRetryLater, got %v", err)
 		}
@@ -906,7 +983,7 @@ func TestRefreshAgentRegistration_TakeoverCookieAndRateLimit(t *testing.T) {
 		h.nhp.mu.Lock()
 		h.nhp.rakErrCode = rakRateLimited
 		h.nhp.mu.Unlock()
-		_, err := RefreshAgentRegistration(context.Background(), "lv_enroll", h.store, h.registerOpts()...)
+		_, err := legacyEnrollmentRefreshForTest(context.Background(), "lv_enroll", h.store, h.registerOpts()...)
 		if !errors.Is(err, ErrRegistrationRateLimited) {
 			t.Fatalf("want ErrRegistrationRateLimited, got %v", err)
 		}
@@ -920,7 +997,7 @@ func TestRefreshAgentRegistration_TakeoverCookieAndRateLimit(t *testing.T) {
 			w.WriteHeader(http.StatusTooManyRequests)
 			_, _ = fmt.Fprint(w, `{"error":{"code":"rate_limited","detail":"slow down"}}`)
 		}))
-		_, err := RefreshAgentRegistration(context.Background(), "lv_enroll", h.store, h.registerOpts()...)
+		_, err := legacyEnrollmentRefreshForTest(context.Background(), "lv_enroll", h.store, h.registerOpts()...)
 		if !errors.Is(err, ErrRegistrationRateLimited) {
 			t.Fatalf("want ErrRegistrationRateLimited, got %v", err)
 		}
@@ -961,7 +1038,7 @@ func TestAgentLifecycle_DefaultKeyPolicyRejectsAccountBeforeOTPOrREG(t *testing.
 		run  func(*registerHarness) error
 	}{
 		{name: "refresh", run: func(h *registerHarness) error {
-			_, err := RefreshAgentRegistration(context.Background(), "lv_account", h.store, h.registerOpts()...)
+			_, err := legacyEnrollmentRefreshForTest(context.Background(), "lv_account", h.store, h.registerOpts()...)
 			return err
 		}},
 		{name: "recovery", run: func(h *registerHarness) error {
@@ -994,7 +1071,7 @@ func TestAgentLifecycle_DefaultKeyPolicyRejectsAccountBeforeOTPOrREG(t *testing.
 	}
 }
 
-func TestRefreshAgentRegistration_AccountOTPResumeDoesNotComplete(t *testing.T) {
+func TestEnrollmentRefreshLegacy_AccountOTPResumeDoesNotComplete(t *testing.T) {
 	h := registeredHarness(t)
 	h.svc.mu.Lock()
 	h.svc.keyKind = keyKindAccount
@@ -1002,7 +1079,7 @@ func TestRefreshAgentRegistration_AccountOTPResumeDoesNotComplete(t *testing.T) 
 	h.svc.mu.Unlock()
 	completeBefore := h.svc.completionCalls.Load()
 
-	_, err := RefreshAgentRegistration(context.Background(), "lv_account", h.store, h.registerOpts(allowAccountLifecycle())...)
+	_, err := legacyEnrollmentRefreshForTest(context.Background(), "lv_account", h.store, h.registerOpts(allowAccountLifecycle())...)
 	var pending *OTPPendingError
 	if !errors.As(err, &pending) {
 		t.Fatalf("first account refresh: want OTPPendingError, got %v", err)
@@ -1014,7 +1091,7 @@ func TestRefreshAgentRegistration_AccountOTPResumeDoesNotComplete(t *testing.T) 
 	h.nhp.mu.Lock()
 	h.nhp.expectCredential = "424242"
 	h.nhp.mu.Unlock()
-	binding, err := RefreshAgentRegistration(context.Background(), "lv_account", h.store, h.registerOpts(allowAccountLifecycle(), WithOTP("424242"))...)
+	binding, err := legacyEnrollmentRefreshForTest(context.Background(), "lv_account", h.store, h.registerOpts(allowAccountLifecycle(), WithOTP("424242"))...)
 	if err != nil {
 		t.Fatalf("account refresh resume: %v", err)
 	}
@@ -1036,7 +1113,7 @@ func TestAgentLifecycle_FreshAccountLiteralOTPDispatchesThenPauses(t *testing.T)
 		run  func(*registerHarness) error
 	}{
 		{name: "refresh", run: func(h *registerHarness) error {
-			_, err := RefreshAgentRegistration(context.Background(), "lv_account", h.store, h.registerOpts(allowAccountLifecycle(), WithOTP("stale-literal"))...)
+			_, err := legacyEnrollmentRefreshForTest(context.Background(), "lv_account", h.store, h.registerOpts(allowAccountLifecycle(), WithOTP("stale-literal"))...)
 			return err
 		}},
 		{name: "recovery", run: func(h *registerHarness) error {
@@ -1162,7 +1239,7 @@ func TestAgentLifecycle_FreshAccountOTPProviderCompletesInOneCall(t *testing.T) 
 		run                 func(*registerHarness, RegisterOption) error
 	}{
 		{name: "refresh", run: func(h *registerHarness, provider RegisterOption) error {
-			_, err := RefreshAgentRegistration(context.Background(), "lv_account", h.store, h.registerOpts(allowAccountLifecycle(), provider)...)
+			_, err := legacyEnrollmentRefreshForTest(context.Background(), "lv_account", h.store, h.registerOpts(allowAccountLifecycle(), provider)...)
 			return err
 		}},
 		{name: "recovery", wantCompletionDelta: 1, run: func(h *registerHarness, provider RegisterOption) error {
@@ -1213,7 +1290,7 @@ func TestAgentLifecycle_AccountOTPProviderResumeAfterCooldownDoesNotRedispatch(t
 		run                 func(*registerHarness, ...RegisterOption) error
 	}{
 		{name: "refresh", run: func(h *registerHarness, opts ...RegisterOption) error {
-			binding, err := RefreshAgentRegistration(context.Background(), "lv_account", h.store, h.registerOpts(opts...)...)
+			binding, err := legacyEnrollmentRefreshForTest(context.Background(), "lv_account", h.store, h.registerOpts(opts...)...)
 			if binding != nil {
 				binding.Destroy()
 			}
@@ -1266,7 +1343,7 @@ func TestAgentLifecycle_AccountOTPProviderResumeAfterCooldownDoesNotRedispatch(t
 	}
 }
 
-func TestRefreshAgentRegistration_OTPErrorsUseLifecycleSafeGuidance(t *testing.T) {
+func TestEnrollmentRefreshLegacy_OTPErrorsUseLifecycleSafeGuidance(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		rakCode string
@@ -1281,7 +1358,7 @@ func TestRefreshAgentRegistration_OTPErrorsUseLifecycleSafeGuidance(t *testing.T
 			h.svc.keyKind = keyKindAccount
 			h.svc.maskedEmail = "j***@example.test"
 			h.svc.mu.Unlock()
-			if _, err := RefreshAgentRegistration(context.Background(), "lv_account", h.store, h.registerOpts(allowAccountLifecycle())...); !errors.Is(err, ErrOTPPending) {
+			if _, err := legacyEnrollmentRefreshForTest(context.Background(), "lv_account", h.store, h.registerOpts(allowAccountLifecycle())...); !errors.Is(err, ErrOTPPending) {
 				t.Fatalf("prime OTP marker: %v", err)
 			}
 			h.nhp.mu.Lock()
@@ -1289,7 +1366,7 @@ func TestRefreshAgentRegistration_OTPErrorsUseLifecycleSafeGuidance(t *testing.T
 			h.nhp.rakErrMsg = "scripted OTP denial"
 			h.nhp.mu.Unlock()
 
-			_, err := RefreshAgentRegistration(context.Background(), "lv_account", h.store, h.registerOpts(allowAccountLifecycle(), WithOTP("bad-code"))...)
+			_, err := legacyEnrollmentRefreshForTest(context.Background(), "lv_account", h.store, h.registerOpts(allowAccountLifecycle(), WithOTP("bad-code"))...)
 			if !errors.Is(err, tc.want) || !strings.Contains(err.Error(), "same operation") || strings.Contains(err.Error(), "qurl.RegisterAgent") {
 				t.Fatalf("lifecycle OTP guidance = %v, want %v and same-operation guidance", err, tc.want)
 			}
@@ -1554,7 +1631,8 @@ func TestPersistCompletion_PeerMismatchDropsPlaintextReference(t *testing.T) {
 			Host:         "peer-b.example.test",
 			Port:         62206,
 		},
-		DeviceAPIKey: "lv_plaintext_must_drop",
+		DeviceAPIKey:   "lv_plaintext_must_drop",
+		DeviceAPIKeyID: "key_device000001",
 	}
 	cfg, err := newRegisterConfig(nil)
 	if err != nil {
@@ -1593,7 +1671,8 @@ func TestPersistCompletion_SameKeyDifferentCoordinatesPreservesRAKBinding(t *tes
 			Host:         "completion-corroboration-only.example.test",
 			Port:         443,
 		},
-		DeviceAPIKey: "lv_device_secret",
+		DeviceAPIKey:   "lv_device_secret",
+		DeviceAPIKeyID: "key_device000001",
 	}
 	cfg, err := newRegisterConfig(nil)
 	if err != nil {
@@ -2060,7 +2139,7 @@ func TestAgentLifecycle_RegistrationAndResourceOriginsRemainIndependent(t *testi
 	protectOnce(t, reopened)
 
 	completeBeforeRefresh := h.svc.completionCalls.Load()
-	if _, err := RefreshAgentRegistration(context.Background(), "lv_enroll", h.store, registerOpts...); err != nil {
+	if _, err := legacyEnrollmentRefreshForTest(context.Background(), "lv_enroll", h.store, registerOpts...); err != nil {
 		t.Fatalf("RefreshAgentRegistration: %v", err)
 	}
 	if h.svc.completionCalls.Load() != completeBeforeRefresh {
@@ -2174,7 +2253,7 @@ func TestAgentLifecycleMutationsParticipateInSharedSetupLock(t *testing.T) {
 		h := registeredHarness(t)
 		var acquired, released atomic.Int32
 		h.store = instrumentFileStoreLock(t, h.store, &acquired, &released)
-		if _, err := RefreshAgentRegistration(context.Background(), "lv_enroll", h.store, h.registerOpts()...); err != nil {
+		if _, err := legacyEnrollmentRefreshForTest(context.Background(), "lv_enroll", h.store, h.registerOpts()...); err != nil {
 			t.Fatalf("RefreshAgentRegistration: %v", err)
 		}
 		if acquired.Load() != 1 || released.Load() != 1 {
@@ -2207,7 +2286,7 @@ func TestAgentLifecycleMutationsParticipateInSharedSetupLock(t *testing.T) {
 		var acquired, released atomic.Int32
 		h.store = instrumentFileStoreLockError(t, h.store, &acquired, &released, releaseFailure)
 
-		state, err := RefreshAgentRegistration(context.Background(), "lv_enroll", h.store, h.registerOpts()...)
+		state, err := legacyEnrollmentRefreshForTest(context.Background(), "lv_enroll", h.store, h.registerOpts()...)
 		if state != nil {
 			t.Fatal("refresh returned state after ambiguous setup-lock release")
 		}
@@ -2278,7 +2357,7 @@ func TestAgentLifecycleMutationsParticipateInSharedSetupLock(t *testing.T) {
 		run  func(*registerHarness) error
 	}{
 		{name: "refresh acquisition failure", run: func(h *registerHarness) error {
-			_, err := RefreshAgentRegistration(context.Background(), "lv_enroll", h.store, h.registerOpts()...)
+			_, err := legacyEnrollmentRefreshForTest(context.Background(), "lv_enroll", h.store, h.registerOpts()...)
 			return err
 		}},
 		{name: "recovery acquisition failure", run: func(h *registerHarness) error {
@@ -2346,6 +2425,13 @@ func registeredHarness(t *testing.T) *registerHarness {
 	h.armDevicePubOnInfo()
 	if _, err := RegisterAgent(context.Background(), "lv_enroll", h.store, h.registerOpts()...); err != nil {
 		t.Fatalf("RegisterAgent: %v", err)
+	}
+	state := h.loadState(t)
+	state.DeviceAPIKeyID = "key_device000001"
+	assignment := validAssignment(t, state.AgentID)
+	state.Assignment = &assignment
+	if err := h.store.SaveAgentState(context.Background(), state); err != nil {
+		t.Fatalf("save native runtime state: %v", err)
 	}
 	return h
 }
