@@ -114,6 +114,14 @@ type AgentState struct {
 	// can retain it while account-key refresh/recovery is paused after dispatch;
 	// the successful lifecycle resume clears it after RAK.
 	OTPRequestedAt *time.Time `json:"otp_requested_at,omitempty"`
+
+	// Assignment is the authoritative native-UDP cell assignment (generation,
+	// endpoint revision, lease expiry, and the LayerV-owned DNS endpoint) returned
+	// by qurl-service and persisted so a native registration/knock survives a
+	// restart. It is additive and json:",omitempty", so a pre-assignment state
+	// file loads unchanged. A resolved IP is never persisted here — the endpoint
+	// host is resolved fresh on every exchange.
+	Assignment *AgentAssignment `json:"assignment,omitempty"`
 }
 
 // clone returns an independent mutable snapshot. Strings and scalar fields copy
@@ -136,6 +144,9 @@ func (s *AgentState) clone() *AgentState {
 	if s.OTPRequestedAt != nil {
 		requestedAt := *s.OTPRequestedAt
 		cloned.OTPRequestedAt = &requestedAt
+	}
+	if s.Assignment != nil {
+		cloned.Assignment = s.Assignment.clone()
 	}
 	return &cloned
 }

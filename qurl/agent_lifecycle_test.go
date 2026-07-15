@@ -26,7 +26,7 @@ func TestAgentStateClone_IsolatesEveryMutableField(t *testing.T) {
 	// here until clone and this mutation test are extended together. The
 	// mutations below prove the currently known fields do not alias the source.
 	stateType := reflect.TypeOf(AgentState{})
-	handledNames := []string{"RegisteredAt", "NHPPeer", "OTPRequestedAt"}
+	handledNames := []string{"RegisteredAt", "NHPPeer", "OTPRequestedAt", "Assignment"}
 	handled := make(map[string]bool, len(handledNames))
 	for _, name := range handledNames {
 		handled[name] = false
@@ -60,17 +60,25 @@ func TestAgentStateClone_IsolatesEveryMutableField(t *testing.T) {
 		RegisteredAt:   &registeredAt,
 		NHPPeer:        &NHPServerPeerInfo{Host: "peer-original.example.test"},
 		OTPRequestedAt: &requestedAt,
+		Assignment: &AgentAssignment{
+			CellID:   "cell0",
+			Endpoint: NHPUDPEndpoint{Host: "cell0.nhp.layerv.ai"},
+		},
 	}
 	cloned := original.clone()
 	cloned.AgentID = "agent-cloned"
 	*cloned.RegisteredAt = cloned.RegisteredAt.Add(time.Hour)
 	cloned.NHPPeer.Host = "peer-cloned.example.test"
 	*cloned.OTPRequestedAt = cloned.OTPRequestedAt.Add(time.Hour)
+	cloned.Assignment.CellID = "cell9"
+	cloned.Assignment.Endpoint.Host = "cell9.nhp.layerv.ai"
 
 	if original.AgentID != "agent-original" ||
 		!original.RegisteredAt.Equal(registeredAt) ||
 		original.NHPPeer.Host != "peer-original.example.test" ||
-		!original.OTPRequestedAt.Equal(requestedAt) {
+		!original.OTPRequestedAt.Equal(requestedAt) ||
+		original.Assignment.CellID != "cell0" ||
+		original.Assignment.Endpoint.Host != "cell0.nhp.layerv.ai" {
 		t.Fatalf("AgentState clone mutated source: %#v", original)
 	}
 }
