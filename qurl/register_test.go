@@ -499,7 +499,7 @@ func TestWithNHPPeer_ExpiryUsesFinalClockRegardlessOfOptionOrder(t *testing.T) {
 	now := time.Now()
 	expiresAt := now.Add(24 * time.Hour)
 	peer := NHPServerPeerInfo{
-		PublicKeyB64: base64.StdEncoding.EncodeToString(make([]byte, 32)),
+		PublicKeyB64: validTestNHPServerPublicKeyB64,
 		Host:         "nhp.example.test",
 		Port:         62206,
 		ExpireTime:   expiresAt.Unix(),
@@ -871,7 +871,7 @@ func TestRegisterAgent_FastPath_MissingDeviceKeyFailsClosed(t *testing.T) {
 	state.AgentID = "agent-x"
 	state.RegisteredAt = &registeredAt
 	state.NHPPeer = &NHPServerPeerInfo{
-		PublicKeyB64: base64.StdEncoding.EncodeToString(make([]byte, 32)),
+		PublicKeyB64: validTestNHPServerPublicKeyB64,
 		Host:         "nhp.example.test",
 		Port:         62206,
 	}
@@ -1617,7 +1617,7 @@ func TestRegisterAgent_OptionValidation(t *testing.T) {
 		{"agent client base URL with query", WithAgentClientBaseURL("https://api.example.test/prefix?route=wrong")},
 		{"agent client base URL with fragment", WithAgentClientBaseURL("https://api.example.test/prefix#wrong")},
 		{"nhp peer missing public key", WithNHPPeer(NHPServerPeerInfo{Host: "nhp.example.test", Port: 62206})},
-		{"nhp peer bad port", WithNHPPeer(NHPServerPeerInfo{PublicKeyB64: base64.StdEncoding.EncodeToString(make([]byte, 32)), Host: "h", Port: 0})},
+		{"nhp peer bad port", WithNHPPeer(NHPServerPeerInfo{PublicKeyB64: validTestNHPServerPublicKeyB64, Host: "h", Port: 0})},
 		{"hostname blank", WithRegisterHostname("   ")},
 		{"version blank", WithRegisterVersion("")},
 	}
@@ -1753,7 +1753,7 @@ func TestRegisterAgent_DeviceIDMismatchOnFastPath(t *testing.T) {
 	state.RegisteredAt = &registeredAt
 	state.DeviceAPIKey = "lv_device_secret"
 	state.NHPPeer = &NHPServerPeerInfo{
-		PublicKeyB64: base64.StdEncoding.EncodeToString(make([]byte, 32)),
+		PublicKeyB64: validTestNHPServerPublicKeyB64,
 		Host:         "nhp.example.test",
 		Port:         62206,
 	}

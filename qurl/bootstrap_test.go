@@ -2,7 +2,6 @@ package qurl
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -166,7 +165,7 @@ func TestBootstrapAgent_ReturnsKeylessLegacyStateWithoutNetwork(t *testing.T) {
 	state.AgentID = "agent-legacy"
 	state.RegisteredAt = &registeredAt
 	state.NHPPeer = &NHPServerPeerInfo{
-		PublicKeyB64: base64.StdEncoding.EncodeToString(make([]byte, 32)),
+		PublicKeyB64: validTestNHPServerPublicKeyB64,
 		Host:         "nhp.layerv.ai",
 		Port:         62206,
 	}
@@ -217,7 +216,7 @@ func TestBootstrapAgent_RejectsInvalidRegisteredStateWithoutNetwork(t *testing.T
 	validState.AgentID = "agent-1"
 	validState.RegisteredAt = &registeredAt
 	validState.NHPPeer = &NHPServerPeerInfo{
-		PublicKeyB64: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+		PublicKeyB64: validTestNHPServerPublicKeyB64,
 		Host:         "nhp.layerv.ai",
 		Port:         62206,
 		ExpireTime:   0,
@@ -424,7 +423,7 @@ func TestFileAgentState_V2FieldsRoundTripAndLegacyLoads(t *testing.T) {
 	base.AgentID = "agent-v2"
 	base.RegisteredAt = &registeredAt
 	base.OTPRequestedAt = &otpAt
-	base.NHPPeer = &NHPServerPeerInfo{PublicKeyB64: base64.StdEncoding.EncodeToString(make([]byte, 32)), Host: "h", Port: 1}
+	base.NHPPeer = &NHPServerPeerInfo{PublicKeyB64: validTestNHPServerPublicKeyB64, Host: "h", Port: 1}
 	base.SchemaVersion = agentStateSchemaVersion
 	base.DeviceAPIKey = "lv_device_secret"
 	base.RelayURL = "https://relay.example.test"
@@ -445,7 +444,7 @@ func TestFileAgentState_V2FieldsRoundTripAndLegacyLoads(t *testing.T) {
 
 	// Legacy (pre-v2) file: only the original fields, written by hand.
 	legacyPath := filepath.Join(secureAgentStateTestDir(t), "legacy.json")
-	legacy := []byte(`{"agent_id":"agent-legacy","private_key_b64":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","public_key_b64":"","registered_at":"2026-01-01T00:00:00Z","nhp_server_peer":{"public_key_b64":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","host":"nhp.layerv.ai","port":62206,"expire_time":0}}`)
+	legacy := []byte(`{"agent_id":"agent-legacy","private_key_b64":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","public_key_b64":"","registered_at":"2026-01-01T00:00:00Z","nhp_server_peer":{"public_key_b64":"` + validTestNHPServerPublicKeyB64 + `","host":"nhp.layerv.ai","port":62206,"expire_time":0}}`)
 	if err := os.WriteFile(legacyPath, legacy, 0o600); err != nil {
 		t.Fatalf("write legacy state: %v", err)
 	}
@@ -482,7 +481,7 @@ func TestValidateRegisteredAgentState_PeerExpiryGatedOnRequirePeerLive(t *testin
 		AgentID:      "agent-expired-peer",
 		RegisteredAt: &registeredAt,
 		NHPPeer: &NHPServerPeerInfo{
-			PublicKeyB64: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+			PublicKeyB64: validTestNHPServerPublicKeyB64,
 			Host:         "nhp.layerv.ai",
 			Port:         62206,
 			ExpireTime:   now.Add(-time.Hour).Unix(), // expired an hour ago
