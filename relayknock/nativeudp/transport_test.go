@@ -163,12 +163,27 @@ func replyTypeFor(initiatorType int) int {
 	return relayknock.TypeACK
 }
 
-// loopback maps every host to 127.0.0.1 so a test endpoint's opaque DNS name
-// resolves to the fake server without touching real DNS.
+// loopback returns a public documentation address so the production transport's
+// private-address rejection remains active in tests. loopbackDialer then maps
+// that synthetic public destination to the local fake server.
 type loopback struct{}
 
 func (loopback) LookupNetIP(context.Context, string, string) ([]netip.Addr, error) {
-	return []netip.Addr{netip.MustParseAddr("127.0.0.1")}, nil
+	return []netip.Addr{netip.MustParseAddr("192.0.2.10")}, nil
+}
+
+type loopbackDialer struct{}
+
+func (loopbackDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	_, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, err
+	}
+	return (&net.Dialer{}).DialContext(ctx, network, net.JoinHostPort("127.0.0.1", port))
+}
+
+func loopbackOptions(devicePriv []byte) nativeudp.Options {
+	return nativeudp.Options{DeviceStaticPriv: devicePriv, Resolver: loopback{}, Dialer: loopbackDialer{}, Timeout: 2 * time.Second}
 }
 
 func TestExchange_RoundTrip(t *testing.T) {
@@ -187,7 +202,7 @@ func TestExchange_RoundTrip(t *testing.T) {
 			srv := newFakeServer(t, serverPriv, pubOf(t, devicePriv), behaviorNormal)
 
 			ep := nativeudp.Endpoint{Host: "cell0.nhp.test", Port: srv.port(), ServerStaticPub: serverPub}
-			opts := nativeudp.Options{DeviceStaticPriv: devicePriv, Resolver: loopback{}, Timeout: 2 * time.Second}
+			opts := loopbackOptions(devicePriv)
 
 			reply, err := nativeudp.Exchange(context.Background(), ep, tc.reqType, []byte(`{"body":1}`), opts)
 			if err != nil {
@@ -212,7 +227,7 @@ func TestKnockAndRegisterHelpers(t *testing.T) {
 	devicePriv := mustPriv(t)
 	srv := newFakeServer(t, serverPriv, pubOf(t, devicePriv), behaviorNormal)
 	ep := nativeudp.Endpoint{Host: "cell0.nhp.test", Port: srv.port(), ServerStaticPub: serverPub}
-	opts := nativeudp.Options{DeviceStaticPriv: devicePriv, Resolver: loopback{}, Timeout: 2 * time.Second}
+	opts := loopbackOptions(devicePriv)
 
 	ack, err := nativeudp.Knock(context.Background(), ep, nil, opts)
 	if err != nil || !ack.IsACK() {
@@ -230,7 +245,7 @@ func TestExchange_CookieChallengeIsRetryable(t *testing.T) {
 	devicePriv := mustPriv(t)
 	srv := newFakeServer(t, serverPriv, pubOf(t, devicePriv), behaviorCookie)
 	ep := nativeudp.Endpoint{Host: "cell0.nhp.test", Port: srv.port(), ServerStaticPub: serverPub}
-	opts := nativeudp.Options{DeviceStaticPriv: devicePriv, Resolver: loopback{}, Timeout: 2 * time.Second}
+	opts := loopbackOptions(devicePriv)
 
 	reply, err := nativeudp.Knock(context.Background(), ep, nil, opts)
 	if err != nil {
@@ -262,7 +277,7 @@ func TestExchange_RejectsBadReplies(t *testing.T) {
 			devicePriv := mustPriv(t)
 			srv := newFakeServer(t, serverPriv, pubOf(t, devicePriv), tc.beh)
 			ep := nativeudp.Endpoint{Host: "cell0.nhp.test", Port: srv.port(), ServerStaticPub: serverPub}
-			opts := nativeudp.Options{DeviceStaticPriv: devicePriv, Resolver: loopback{}, Timeout: 2 * time.Second}
+			opts := loopbackOptions(devicePriv)
 
 			_, err := nativeudp.Exchange(context.Background(), ep, tc.reqType, nil, opts)
 			if !errors.Is(err, tc.wantIs) {
@@ -278,7 +293,8 @@ func TestExchange_TimeoutWhenSilent(t *testing.T) {
 	devicePriv := mustPriv(t)
 	srv := newFakeServer(t, serverPriv, pubOf(t, devicePriv), behaviorSilent)
 	ep := nativeudp.Endpoint{Host: "cell0.nhp.test", Port: srv.port(), ServerStaticPub: serverPub}
-	opts := nativeudp.Options{DeviceStaticPriv: devicePriv, Resolver: loopback{}, Timeout: 150 * time.Millisecond}
+	opts := loopbackOptions(devicePriv)
+	opts.Timeout = 150 * time.Millisecond
 
 	start := time.Now()
 	_, err := nativeudp.Knock(context.Background(), ep, nil, opts)
@@ -296,7 +312,8 @@ func TestExchange_CancellationUnblocksRead(t *testing.T) {
 	devicePriv := mustPriv(t)
 	srv := newFakeServer(t, serverPriv, pubOf(t, devicePriv), behaviorSilent)
 	ep := nativeudp.Endpoint{Host: "cell0.nhp.test", Port: srv.port(), ServerStaticPub: serverPub}
-	opts := nativeudp.Options{DeviceStaticPriv: devicePriv, Resolver: loopback{}, Timeout: 10 * time.Second}
+	opts := loopbackOptions(devicePriv)
+	opts.Timeout = 10 * time.Second
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
@@ -324,11 +341,11 @@ func TestExchange_MultiAddressFallback(t *testing.T) {
 	port := srv.port()
 
 	bad := netip.MustParseAddr("192.0.2.1") // TEST-NET-1, never reachable
-	good := netip.MustParseAddr("127.0.0.1")
+	good := netip.MustParseAddr("192.0.2.2")
 	res := resolverReturning([]netip.Addr{bad, good})
 
 	badAddr := netip.AddrPortFrom(bad, uint16(port)).String()
-	dialer := &sequencedDialer{fail: map[string]bool{badAddr: true}, real: &net.Dialer{}}
+	dialer := &sequencedDialer{fail: map[string]bool{badAddr: true}, real: loopbackDialer{}}
 
 	ep := nativeudp.Endpoint{Host: "cell0.nhp.test", Port: port, ServerStaticPub: serverPub}
 	opts := nativeudp.Options{DeviceStaticPriv: devicePriv, Resolver: res, Dialer: dialer, Timeout: 2 * time.Second}
@@ -342,6 +359,44 @@ func TestExchange_MultiAddressFallback(t *testing.T) {
 	}
 	if !dialer.dialed(badAddr) {
 		t.Fatal("expected the bad address to be attempted first")
+	}
+}
+
+// TestExchange_UnauthenticatedFirstAddressDoesNotFallThrough proves that a
+// received datagram is a definitive authentication result. A hostile first DNS
+// address must not be masked by retrying a second address that would answer with
+// the pinned key.
+func TestExchange_UnauthenticatedFirstAddressDoesNotFallThrough(t *testing.T) {
+	t.Parallel()
+	serverPriv, serverPub := mustKeypair(t)
+	devicePriv := mustPriv(t)
+	agentPub := pubOf(t, devicePriv)
+	badServer := newFakeServer(t, serverPriv, agentPub, behaviorWrongKey)
+	goodServer := newFakeServer(t, serverPriv, agentPub, behaviorNormal)
+
+	first := netip.MustParseAddr("192.0.2.20")
+	second := netip.MustParseAddr("192.0.2.21")
+	const assignedPort = 62206
+	dialer := &addressRoutingDialer{routes: map[string]string{
+		netip.AddrPortFrom(first, assignedPort).String():  net.JoinHostPort("127.0.0.1", fmt.Sprint(badServer.port())),
+		netip.AddrPortFrom(second, assignedPort).String(): net.JoinHostPort("127.0.0.1", fmt.Sprint(goodServer.port())),
+	}}
+
+	ep := nativeudp.Endpoint{Host: "cell0.nhp.test", Port: assignedPort, ServerStaticPub: serverPub}
+	opts := nativeudp.Options{
+		DeviceStaticPriv: devicePriv,
+		Resolver:         resolverReturning([]netip.Addr{first, second}),
+		Dialer:           dialer,
+		Timeout:          2 * time.Second,
+	}
+	if _, err := nativeudp.Knock(context.Background(), ep, nil, opts); !errors.Is(err, nativeudp.ErrServerUnauthenticated) {
+		t.Fatalf("error = %v, want ErrServerUnauthenticated", err)
+	}
+	if badServer.receivedCount() != 1 {
+		t.Fatalf("first server received %d datagrams, want 1", badServer.receivedCount())
+	}
+	if goodServer.receivedCount() != 0 {
+		t.Fatalf("second server received %d datagrams, want 0 after authentication failure", goodServer.receivedCount())
 	}
 }
 
@@ -399,7 +454,7 @@ func TestExchange_ErrorsScrubSecrets(t *testing.T) {
 	ep := nativeudp.Endpoint{Host: "cell0.nhp.test", Port: srv.port(), ServerStaticPub: serverPub}
 
 	secretBody := []byte("SUPER-SECRET-BODY-MARKER")
-	opts := nativeudp.Options{DeviceStaticPriv: devicePriv, Resolver: loopback{}, Timeout: 2 * time.Second}
+	opts := loopbackOptions(devicePriv)
 
 	_, err := nativeudp.Knock(context.Background(), ep, secretBody, opts)
 	if err == nil {
@@ -430,10 +485,22 @@ func resolverReturning(addrs []netip.Addr) nativeudp.Resolver {
 
 type sequencedDialer struct {
 	fail map[string]bool
-	real *net.Dialer
+	real nativeudp.Dialer
 
 	mu     sync.Mutex
 	dialAt map[string]bool
+}
+
+type addressRoutingDialer struct {
+	routes map[string]string
+}
+
+func (d *addressRoutingDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	target, ok := d.routes[address]
+	if !ok {
+		return nil, fmt.Errorf("no test route for %s", address)
+	}
+	return (&net.Dialer{}).DialContext(ctx, network, target)
 }
 
 func (d *sequencedDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {

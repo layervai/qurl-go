@@ -1,0 +1,46 @@
+package x25519key
+
+import (
+	"crypto/ecdh"
+	"crypto/rand"
+	"encoding/base64"
+	"testing"
+)
+
+func TestDecodeCanonicalBase64(t *testing.T) {
+	key, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded := base64.StdEncoding.EncodeToString(key.PublicKey().Bytes())
+	if _, err := DecodeCanonicalBase64(encoded); err != nil {
+		t.Fatalf("valid key rejected: %v", err)
+	}
+	if _, err := DecodeCanonicalBase64(base64.RawStdEncoding.EncodeToString(key.PublicKey().Bytes())); err == nil {
+		t.Fatal("unpadded identity must be rejected")
+	}
+}
+
+func TestValidatePublicRejectsUnusableOrNonCanonicalKeys(t *testing.T) {
+	nonCanonical := make([]byte, Size)
+	nonCanonical[0] = 0xed
+	for i := 1; i < Size-1; i++ {
+		nonCanonical[i] = 0xff
+	}
+	nonCanonical[Size-1] = 0x7f // exactly p, not the representative [0,p)
+
+	for _, tc := range []struct {
+		name string
+		key  []byte
+	}{
+		{name: "wrong length", key: make([]byte, Size-1)},
+		{name: "low order", key: make([]byte, Size)},
+		{name: "non canonical", key: nonCanonical},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := ValidatePublic(tc.key); err == nil {
+				t.Fatal("invalid public key accepted")
+			}
+		})
+	}
+}
