@@ -185,6 +185,12 @@ const (
 	assignmentCodeUnavailable            = "cell_assignment_unavailable"
 	assignmentCodeReassignmentInProgress = "cell_reassignment_in_progress"
 	assignmentCodeQuotaExceeded          = "agent_assignment_quota_exceeded"
+
+	// Assignment endpoints are accepted only below these LayerV-owned public
+	// DNS apexes. Adding an apex is a deliberate SDK trust-boundary change that
+	// requires its own release; this is intentionally not runtime-configurable.
+	assignmentEndpointApexAI  = ".layerv.ai"
+	assignmentEndpointApexXYZ = ".layerv.xyz"
 )
 
 // Bounded-refresh defaults. The 60/hour per-credential assignment budget is a
@@ -328,6 +334,11 @@ func newAssignmentConfig(opts []AssignmentOption) (*assignmentConfig, error) {
 // budget honoring Retry-After as a minimum delay with jittered bounded backoff,
 // returning a typed recovery-required result on exhaustion; 400/401/403/409/429
 // are terminal with their typed errors, and 429 carries the rate-limit reset.
+// The lifecycle caller must fail closed after lease expiry, pace a later
+// invocation on ErrAssignmentRateLimited, surface operator recovery on
+// ErrAssignmentRecoveryRequired, enter the explicit move/re-registration path
+// on ErrAssignmentReassignmentRequired, and treat every other terminal class as
+// an operator- or credential-correction result rather than probing another cell.
 //
 // cred is the caller's choice: an enrollment/account credential for first
 // creation, or a DeviceAPIKey-backed credential for ordinary refresh.
@@ -585,7 +596,7 @@ func validateAssignmentEndpointHost(host string) error {
 			return fmt.Errorf("%w: endpoint host must be a canonical lowercase DNS name", ErrAssignmentInvalidResponse)
 		}
 	}
-	if !strings.HasSuffix(host, ".layerv.ai") && !strings.HasSuffix(host, ".layerv.xyz") {
+	if !strings.HasSuffix(host, assignmentEndpointApexAI) && !strings.HasSuffix(host, assignmentEndpointApexXYZ) {
 		return fmt.Errorf("%w: endpoint host must be below a LayerV-owned DNS name", ErrAssignmentInvalidResponse)
 	}
 	return nil
