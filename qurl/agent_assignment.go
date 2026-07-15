@@ -460,6 +460,9 @@ func (c *assignmentConfig) attempt(ctx context.Context, agentID string, cred Cre
 	if err != nil {
 		return assignmentAttempt{err: fmt.Errorf("%w: read assignment response: %w", ErrAssignmentServiceError, err)}
 	}
+	// Assignment fields are public/durable today. Keep the same response-body
+	// lifetime bound as credential-bearing API paths so a future problem/detail
+	// field cannot silently make this buffer long-lived.
 	defer wipeBytes(body)
 
 	if resp.StatusCode == http.StatusOK {

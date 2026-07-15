@@ -278,8 +278,9 @@ func sendOne(ctx context.Context, dialer Dialer, address string, packet []byte, 
 	// Read one byte past the NHP buffer so an oversize datagram is detectable
 	// rather than silently accepted at exactly the cap; the explicit size gate
 	// lives on the receive path in decryptAndCorrelate. A returned datagram (even
-	// an oversize one) stops the address loop — it is a received reply to
-	// authenticate/reject, not a transport miss to retry against another address.
+	// a zero-length or oversize one) stops the address loop — it is a received
+	// reply to authenticate/reject, not a transport miss to retry against another
+	// address.
 	buf := make([]byte, nhpwire.PacketBufferSize+1)
 	n, err = conn.Read(buf)
 	// Some datagram implementations return both the truncated prefix and an
@@ -428,16 +429,27 @@ func resolveAddresses(ctx context.Context, host string, opts Options) ([]netip.A
 	return public, nil
 }
 
-var (
-	carrierGradeNATPrefix = netip.MustParsePrefix("100.64.0.0/10")
-	benchmarkingPrefix    = netip.MustParsePrefix("198.18.0.0/15")
-)
+var nonPublicAssignmentPrefixes = [...]netip.Prefix{
+	netip.MustParsePrefix("100.64.0.0/10"),   // RFC 6598 shared address space
+	netip.MustParsePrefix("192.0.2.0/24"),    // RFC 5737 TEST-NET-1
+	netip.MustParsePrefix("192.88.99.0/24"),  // deprecated 6to4 relay anycast
+	netip.MustParsePrefix("198.18.0.0/15"),   // RFC 2544 benchmarking
+	netip.MustParsePrefix("198.51.100.0/24"), // RFC 5737 TEST-NET-2
+	netip.MustParsePrefix("203.0.113.0/24"),  // RFC 5737 TEST-NET-3
+}
 
 func publicAssignmentAddress(addr netip.Addr) bool {
-	return addr.IsValid() && addr.IsGlobalUnicast() && !addr.IsPrivate() &&
-		!addr.IsLoopback() && !addr.IsLinkLocalUnicast() &&
-		!addr.IsLinkLocalMulticast() && !addr.IsMulticast() && !addr.IsUnspecified() &&
-		!carrierGradeNATPrefix.Contains(addr) && !benchmarkingPrefix.Contains(addr)
+	if !addr.IsValid() || !addr.IsGlobalUnicast() || addr.IsPrivate() ||
+		addr.IsLoopback() || addr.IsLinkLocalUnicast() ||
+		addr.IsLinkLocalMulticast() || addr.IsMulticast() || addr.IsUnspecified() {
+		return false
+	}
+	for _, prefix := range nonPublicAssignmentPrefixes {
+		if prefix.Contains(addr) {
+			return false
+		}
+	}
+	return true
 }
 
 func validateHeaderType(headerType int) error {

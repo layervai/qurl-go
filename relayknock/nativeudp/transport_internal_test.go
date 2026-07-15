@@ -202,10 +202,10 @@ func TestExchange_NilOrCancelledContext(t *testing.T) {
 
 func TestResolveAddresses_CapAndEmpty(t *testing.T) {
 	many := []netip.Addr{
-		netip.MustParseAddr("192.0.2.1"),
-		netip.MustParseAddr("192.0.2.2"),
-		netip.MustParseAddr("192.0.2.3"),
-		netip.MustParseAddr("192.0.2.4"),
+		netip.MustParseAddr("8.8.8.8"),
+		netip.MustParseAddr("8.8.4.4"),
+		netip.MustParseAddr("1.1.1.1"),
+		netip.MustParseAddr("1.0.0.1"),
 	}
 	got, err := resolveAddresses(context.Background(), "cell0.nhp.test", Options{
 		Resolver:     resolverFunc(func(context.Context, string, string) ([]netip.Addr, error) { return many, nil }),
@@ -230,7 +230,11 @@ func TestResolveAddresses_CapAndEmpty(t *testing.T) {
 		netip.MustParseAddr("10.0.0.1"),
 		netip.MustParseAddr("169.254.1.2"),
 		netip.MustParseAddr("100.64.0.1"),
+		netip.MustParseAddr("192.0.2.1"),
+		netip.MustParseAddr("192.88.99.1"),
 		netip.MustParseAddr("198.18.0.1"),
+		netip.MustParseAddr("198.51.100.1"),
+		netip.MustParseAddr("203.0.113.1"),
 		netip.MustParseAddr("::1"),
 		netip.MustParseAddr("fc00::1"),
 	}
