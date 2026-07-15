@@ -8,11 +8,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
+
+	"github.com/layervai/qurl-go/internal/x25519key"
 )
 
 // Native-UDP cell-assignment client for POST /v1/agent/assignment.
@@ -65,23 +67,20 @@ func (a *AgentAssignment) clone() *AgentAssignment {
 }
 
 // DecodedServerKey returns the raw 32-byte X25519 NHP server public key from the
-// assignment's endpoint. It accepts the padded or raw standard-base64 spellings a
-// deployed producer may emit and validates the decoded bytes as an X25519 key.
+// assignment's endpoint. Assignment identities have one canonical wire spelling:
+// padded standard base64 of a canonical, non-low-order X25519 public key.
 func (a *AgentAssignment) DecodedServerKey() ([]byte, error) {
 	if a == nil {
 		return nil, fmt.Errorf("%w: assignment is nil", ErrAssignmentInvalidResponse)
 	}
-	if err := validateNHPServerPublicKey(a.Endpoint.ServerPublicKeyB64, "assignment endpoint", ErrAssignmentInvalidResponse); err != nil {
-		return nil, err
-	}
-	return decodeNHPServerPublicKey(a.Endpoint.ServerPublicKeyB64)
+	return decodeAssignmentServerPublicKey(a.Endpoint.ServerPublicKeyB64)
 }
 
 // LeaseExpired reports whether the assignment lease has reached or passed now. A
 // lease is a refresh deadline: once expired the binding must be refreshed through
 // the control plane and must fail closed, never fall back to local cell selection.
 func (a *AgentAssignment) LeaseExpired(now time.Time) bool {
-	return a != nil && !a.LeaseExpiresAt.After(now)
+	return a == nil || !a.LeaseExpiresAt.After(now)
 }
 
 // --- error sentinels and typed errors ---
@@ -146,13 +145,17 @@ type AssignmentRateLimitedError struct {
 	RetryAfter time.Duration
 	// Reset is the RateLimit-Reset window, or 0 when the header was absent.
 	Reset time.Duration
+
+	apiErr *APIError
 }
 
 func (e *AssignmentRateLimitedError) Error() string {
 	return fmt.Sprintf("qurl: assignment rate limited; honor the rate-limit reset (retry-after=%s reset=%s) and do not rotate credentials to evade it", e.RetryAfter, e.Reset)
 }
 
-func (e *AssignmentRateLimitedError) Unwrap() error { return ErrAssignmentRateLimited }
+func (e *AssignmentRateLimitedError) Unwrap() []error {
+	return []error{ErrAssignmentRateLimited, e.apiErr}
+}
 
 // AssignmentRecoveryRequiredError reports an exhausted bounded refresh: the
 // service kept returning 503 through the whole attempt/deadline budget. It
@@ -440,12 +443,15 @@ func (c *assignmentConfig) decodeSuccess(agentID string, body []byte) assignment
 	if len(bytes.TrimSpace(body)) == 0 {
 		return assignmentAttempt{err: fmt.Errorf("%w: empty assignment response body", ErrAssignmentInvalidResponse)}
 	}
+	if !utf8.Valid(body) {
+		return assignmentAttempt{err: fmt.Errorf("%w: assignment response body is not valid UTF-8", ErrAssignmentInvalidResponse)}
+	}
 	var env apiEnvelope[AgentAssignment]
 	if err := json.Unmarshal(body, &env); err != nil {
 		return assignmentAttempt{err: fmt.Errorf("%w: decode assignment response: %w", ErrAssignmentInvalidResponse, err)}
 	}
 	assignment := env.Data.clone()
-	if err := validateAgentAssignment(assignment, agentID); err != nil {
+	if err := validateAgentAssignment(assignment, agentID, c.clock()); err != nil {
 		return assignmentAttempt{err: err}
 	}
 	return assignmentAttempt{assignment: assignment}
@@ -468,25 +474,28 @@ func classifyAssignmentError(status int, body []byte, header http.Header, now ti
 	case http.StatusUnauthorized, http.StatusForbidden:
 		return assignmentAttempt{err: fmt.Errorf("%w: %w", ErrAssignmentForbidden, apiErr)}
 	case http.StatusConflict:
-		if strings.EqualFold(apiErr.Code, assignmentCodeReassignmentInProgress) {
+		switch apiErr.Code {
+		case assignmentCodeReassignmentInProgress:
 			return assignmentAttempt{err: fmt.Errorf("%w: %w", ErrAssignmentReassignmentRequired, apiErr)}
+		case assignmentCodeQuotaExceeded:
+			return assignmentAttempt{err: fmt.Errorf("%w: %w", ErrAssignmentQuotaExceeded, apiErr)}
+		default:
+			return assignmentAttempt{err: fmt.Errorf("%w: unexpected 409 assignment response: %w", ErrAssignmentServiceError, apiErr)}
 		}
-		// agent_assignment_quota_exceeded, and any other 409, are a terminal quota
-		// class for this client.
-		return assignmentAttempt{err: fmt.Errorf("%w: %w", ErrAssignmentQuotaExceeded, apiErr)}
 	case http.StatusTooManyRequests:
 		return assignmentAttempt{err: &AssignmentRateLimitedError{
 			RetryAfter: retryAfter,
 			Reset:      parseSecondsHeader(header.Get("RateLimit-Reset")),
+			apiErr:     apiErr,
 		}}
 	case http.StatusServiceUnavailable:
-		if strings.EqualFold(apiErr.Code, assignmentCodeUnavailable) {
+		if apiErr.Code == assignmentCodeUnavailable {
 			if retryAfter <= 0 {
 				retryAfter = defaultAssignmentRetryAfter
 			}
 			return assignmentAttempt{retryAfter: retryAfter}
 		}
-		return assignmentAttempt{err: fmt.Errorf("%w: 503 %s", ErrAssignmentServiceError, apiErr.Code)}
+		return assignmentAttempt{err: fmt.Errorf("%w: unexpected 503 assignment response: %w", ErrAssignmentServiceError, apiErr)}
 	default:
 		return assignmentAttempt{err: fmt.Errorf("%w: %w", ErrAssignmentServiceError, apiErr)}
 	}
@@ -528,15 +537,15 @@ func validateAssignmentAgentID(agentID string) error {
 // endpoint revision, a non-zero lease, and an endpoint whose host passes the
 // opacity guard, whose port is in range, and whose server key is a valid X25519
 // key.
-func validateAgentAssignment(a *AgentAssignment, wantAgentID string) error {
+func validateAgentAssignment(a *AgentAssignment, wantAgentID string, now time.Time) error {
 	if a == nil {
 		return fmt.Errorf("%w: assignment is nil", ErrAssignmentInvalidResponse)
 	}
 	if a.AgentID != wantAgentID {
 		return fmt.Errorf("%w: response agent id %q does not match requested %q", ErrAssignmentInvalidResponse, a.AgentID, wantAgentID)
 	}
-	if strings.TrimSpace(a.CellID) == "" {
-		return fmt.Errorf("%w: missing cell id", ErrAssignmentInvalidResponse)
+	if !validAssignmentCellID(a.CellID) {
+		return fmt.Errorf("%w: invalid cell id %q", ErrAssignmentInvalidResponse, a.CellID)
 	}
 	if a.AssignmentGeneration < 1 {
 		return fmt.Errorf("%w: assignment generation must be >= 1", ErrAssignmentInvalidResponse)
@@ -544,8 +553,8 @@ func validateAgentAssignment(a *AgentAssignment, wantAgentID string) error {
 	if a.EndpointRevision < 1 {
 		return fmt.Errorf("%w: endpoint revision must be >= 1", ErrAssignmentInvalidResponse)
 	}
-	if a.LeaseExpiresAt.IsZero() {
-		return fmt.Errorf("%w: missing lease expiry", ErrAssignmentInvalidResponse)
+	if !a.LeaseExpiresAt.After(now) {
+		return fmt.Errorf("%w: lease expiry must be in the future", ErrAssignmentInvalidResponse)
 	}
 	if err := validateAssignmentEndpointHost(a.Endpoint.Host); err != nil {
 		return err
@@ -553,54 +562,67 @@ func validateAgentAssignment(a *AgentAssignment, wantAgentID string) error {
 	if a.Endpoint.Port < 1 || a.Endpoint.Port > 65535 {
 		return fmt.Errorf("%w: endpoint port %d out of range", ErrAssignmentInvalidResponse, a.Endpoint.Port)
 	}
-	if err := validateNHPServerPublicKey(a.Endpoint.ServerPublicKeyB64, "assignment endpoint", ErrAssignmentInvalidResponse); err != nil {
+	if _, err := decodeAssignmentServerPublicKey(a.Endpoint.ServerPublicKeyB64); err != nil {
 		return err
 	}
 	return nil
 }
 
-// validateAssignmentEndpointHost enforces host opacity: the endpoint host must be
-// a LayerV-owned public DNS name, never an AWS-owned/internal hostname, a
-// private/loopback/link-local IP literal, or a malformed value the SDK could not
-// have derived. The host is treated as opaque otherwise — no structural
-// requirement beyond rejecting these categories.
+// validateAssignmentEndpointHost enforces the producer's ownership boundary:
+// one canonical lowercase DNS name below layerv.ai or layerv.xyz. The SDK still
+// treats the accepted name as opaque and never derives it from cell_id.
 func validateAssignmentEndpointHost(host string) error {
-	trimmed := strings.TrimSpace(host)
-	if trimmed == "" {
+	if host == "" {
 		return fmt.Errorf("%w: missing endpoint host", ErrAssignmentInvalidResponse)
 	}
-	if trimmed != host {
-		return fmt.Errorf("%w: endpoint host must not have surrounding whitespace", ErrAssignmentInvalidResponse)
+	if host != strings.ToLower(host) || len(host) > 253 || strings.HasSuffix(host, ".") {
+		return fmt.Errorf("%w: endpoint host must be a canonical lowercase DNS name", ErrAssignmentInvalidResponse)
 	}
-	if len(host) > 253 {
-		return fmt.Errorf("%w: endpoint host exceeds 253 characters", ErrAssignmentInvalidResponse)
-	}
-	if strings.ContainsAny(host, " \t\r\n/\\") {
-		return fmt.Errorf("%w: endpoint host is malformed", ErrAssignmentInvalidResponse)
-	}
-	lower := strings.ToLower(host)
-	// A resolved IP is never a valid assignment host; reject any IP literal and,
-	// in particular, private/loopback/link-local ranges.
-	if ip := net.ParseIP(host); ip != nil {
-		return fmt.Errorf("%w: endpoint host must be a DNS name, not an IP literal", ErrAssignmentInvalidResponse)
-	}
-	for _, banned := range []string{
-		".amazonaws.com",
-		".elb.amazonaws.com",
-		".compute.internal",
-		".compute.amazonaws.com",
-		".internal",
-		".local",
-		".localdomain",
-	} {
-		if strings.HasSuffix(lower, banned) {
-			return fmt.Errorf("%w: endpoint host %q is an AWS-owned or internal name", ErrAssignmentInvalidResponse, host)
+	labels := strings.Split(host, ".")
+	for _, label := range labels {
+		if !validAssignmentDNSLabel(label) {
+			return fmt.Errorf("%w: endpoint host must be a canonical lowercase DNS name", ErrAssignmentInvalidResponse)
 		}
 	}
-	if lower == "localhost" {
-		return fmt.Errorf("%w: endpoint host must not be localhost", ErrAssignmentInvalidResponse)
+	if !strings.HasSuffix(host, ".layerv.ai") && !strings.HasSuffix(host, ".layerv.xyz") {
+		return fmt.Errorf("%w: endpoint host must be below a LayerV-owned DNS name", ErrAssignmentInvalidResponse)
 	}
 	return nil
+}
+
+func validAssignmentDNSLabel(label string) bool {
+	if len(label) < 1 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+		return false
+	}
+	for i := range label {
+		ch := label[i]
+		if (ch < 'a' || ch > 'z') && (ch < '0' || ch > '9') && ch != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+func validAssignmentCellID(cellID string) bool {
+	if len(cellID) < 1 || len(cellID) > 64 || cellID[0] < 'a' || cellID[0] > 'z' {
+		return false
+	}
+	for i := 1; i < len(cellID); i++ {
+		ch := cellID[i]
+		if (ch < 'a' || ch > 'z') && (ch < '0' || ch > '9') && ch != '-' {
+			return false
+		}
+	}
+	last := cellID[len(cellID)-1]
+	return (last >= 'a' && last <= 'z') || (last >= '0' && last <= '9')
+}
+
+func decodeAssignmentServerPublicKey(encoded string) ([]byte, error) {
+	raw, err := x25519key.DecodeCanonicalBase64(encoded)
+	if err != nil {
+		return nil, fmt.Errorf("%w: assignment endpoint server public key must be canonical padded standard-base64 X25519: %w", ErrAssignmentInvalidResponse, err)
+	}
+	return raw, nil
 }
 
 // --- header parsing and small helpers ---
@@ -612,8 +634,11 @@ func parseRetryAfter(value string, now time.Time) time.Duration {
 	if value == "" {
 		return 0
 	}
-	if secs, err := strconv.Atoi(value); err == nil {
+	if secs, err := strconv.ParseInt(value, 10, 64); err == nil {
 		if secs <= 0 {
+			return 0
+		}
+		if secs > maxDurationSeconds() {
 			return 0
 		}
 		return time.Duration(secs) * time.Second
@@ -633,10 +658,14 @@ func parseSecondsHeader(value string) time.Duration {
 	if value == "" {
 		return 0
 	}
-	if secs, err := strconv.Atoi(value); err == nil && secs > 0 {
+	if secs, err := strconv.ParseInt(value, 10, 64); err == nil && secs > 0 && secs <= maxDurationSeconds() {
 		return time.Duration(secs) * time.Second
 	}
 	return 0
+}
+
+func maxDurationSeconds() int64 {
+	return int64(time.Duration(1<<63-1) / time.Second)
 }
 
 // sleepWithContext sleeps for d, returning early with the context error if the

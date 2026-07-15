@@ -2,7 +2,6 @@ package nativeudp
 
 import (
 	"context"
-	"crypto/ecdh"
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
@@ -14,6 +13,7 @@ import (
 	"time"
 
 	"github.com/layervai/qurl-go/internal/nhpcontract"
+	"github.com/layervai/qurl-go/internal/x25519key"
 	"github.com/layervai/qurl-go/relayknock"
 	"github.com/layervai/qurl-go/relayknock/internal/nhpwire"
 )
@@ -258,8 +258,12 @@ func sendOne(ctx context.Context, dialer Dialer, address string, packet []byte, 
 		return nil, fmt.Errorf("set deadline for %s: %w", address, err)
 	}
 
-	if _, err := conn.Write(packet); err != nil {
+	n, err := conn.Write(packet)
+	if err != nil {
 		return nil, fmt.Errorf("write to %s: %w", address, err)
+	}
+	if n != len(packet) {
+		return nil, fmt.Errorf("write to %s: short datagram write: wrote %d of %d bytes", address, n, len(packet))
 	}
 
 	// Read one byte past the NHP buffer so an oversize datagram is detectable
@@ -268,7 +272,7 @@ func sendOne(ctx context.Context, dialer Dialer, address string, packet []byte, 
 	// an oversize one) stops the address loop — it is a received reply to
 	// authenticate/reject, not a transport miss to retry against another address.
 	buf := make([]byte, nhpwire.PacketBufferSize+1)
-	n, err := conn.Read(buf)
+	n, err = conn.Read(buf)
 	if err != nil {
 		return nil, fmt.Errorf("read from %s: %w", address, err)
 	}
@@ -393,13 +397,27 @@ func resolveAddresses(ctx context.Context, host string, opts Options) ([]netip.A
 		// control-plane data, but it is not a secret, so naming it aids operators.
 		return nil, fmt.Errorf("%w: %q: %w", ErrResolve, host, err)
 	}
-	if len(addrs) == 0 {
-		return nil, fmt.Errorf("%w: %q resolved to no addresses", ErrResolve, host)
+	public := make([]netip.Addr, 0, min(len(addrs), maxAddrs))
+	for _, addr := range addrs {
+		addr = addr.Unmap()
+		if !publicAssignmentAddress(addr) {
+			continue
+		}
+		public = append(public, addr)
+		if len(public) == maxAddrs {
+			break
+		}
 	}
-	if len(addrs) > maxAddrs {
-		addrs = addrs[:maxAddrs]
+	if len(public) == 0 {
+		return nil, fmt.Errorf("%w: %q resolved to no public addresses", ErrResolve, host)
 	}
-	return addrs, nil
+	return public, nil
+}
+
+func publicAssignmentAddress(addr netip.Addr) bool {
+	return addr.IsValid() && addr.IsGlobalUnicast() && !addr.IsPrivate() &&
+		!addr.IsLoopback() && !addr.IsLinkLocalUnicast() &&
+		!addr.IsLinkLocalMulticast() && !addr.IsMulticast() && !addr.IsUnspecified()
 }
 
 func validateHeaderType(headerType int) error {
@@ -418,11 +436,8 @@ func validateEndpoint(ep Endpoint) error {
 	if ep.Port <= 0 || ep.Port > 65535 {
 		return fmt.Errorf("%w: port %d out of range", ErrInvalidEndpoint, ep.Port)
 	}
-	if len(ep.ServerStaticPub) != nhpwire.PublicKeySize {
-		return fmt.Errorf("%w: server public key must be %d bytes, got %d", ErrInvalidEndpoint, nhpwire.PublicKeySize, len(ep.ServerStaticPub))
-	}
-	if _, err := ecdh.X25519().NewPublicKey(ep.ServerStaticPub); err != nil {
-		return fmt.Errorf("%w: server public key is not a valid X25519 point", ErrInvalidEndpoint)
+	if err := x25519key.ValidatePublic(ep.ServerStaticPub); err != nil {
+		return fmt.Errorf("%w: unusable server public key: %w", ErrInvalidEndpoint, err)
 	}
 	return nil
 }

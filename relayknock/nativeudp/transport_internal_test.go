@@ -6,9 +6,12 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"net"
 	"net/netip"
 	"strconv"
+	"strings"
 	"testing"
+	"time"
 
 	conformance "github.com/layervai/qurl-conformance"
 
@@ -142,6 +145,13 @@ func TestExchange_ValidatesBeforeIO(t *testing.T) {
 			wantErr: ErrInvalidEndpoint,
 		},
 		{
+			name:    "server key low order",
+			ep:      Endpoint{Host: "cell0.nhp.test", Port: 62206, ServerStaticPub: make([]byte, 32)},
+			ht:      relayknock.TypeKnock,
+			opts:    Options{DeviceStaticPriv: goodPriv, Resolver: failResolver},
+			wantErr: ErrInvalidEndpoint,
+		},
+		{
 			name:    "non-round-trip header type (OTP)",
 			ep:      Endpoint{Host: "cell0.nhp.test", Port: 62206, ServerStaticPub: goodPub},
 			ht:      relayknock.TypeOTP,
@@ -213,6 +223,20 @@ func TestResolveAddresses_CapAndEmpty(t *testing.T) {
 	if !errors.Is(err, ErrResolve) {
 		t.Fatalf("empty-resolution error = %v, want ErrResolve", err)
 	}
+
+	private := []netip.Addr{
+		netip.MustParseAddr("127.0.0.1"),
+		netip.MustParseAddr("10.0.0.1"),
+		netip.MustParseAddr("169.254.1.2"),
+		netip.MustParseAddr("::1"),
+		netip.MustParseAddr("fc00::1"),
+	}
+	_, err = resolveAddresses(context.Background(), "cell0.nhp.test", Options{
+		Resolver: resolverFunc(func(context.Context, string, string) ([]netip.Addr, error) { return private, nil }),
+	})
+	if !errors.Is(err, ErrResolve) {
+		t.Fatalf("private-only resolution error = %v, want ErrResolve", err)
+	}
 }
 
 func TestReplyTypeAllowed(t *testing.T) {
@@ -235,6 +259,15 @@ func TestReplyTypeAllowed(t *testing.T) {
 	}
 }
 
+func TestSendOneRejectsShortDatagramWrite(t *testing.T) {
+	dialer := dialerFunc(func(context.Context, string, string) (net.Conn, error) {
+		return shortWriteConn{}, nil
+	})
+	if _, err := sendOne(context.Background(), dialer, "192.0.2.1:62206", []byte{1, 2, 3}, time.Second); err == nil || !strings.Contains(err.Error(), "short datagram write") {
+		t.Fatalf("short write error = %v", err)
+	}
+}
+
 func TestWipeBytes(t *testing.T) {
 	b := []byte{1, 2, 3, 4, 5}
 	wipeBytes(b)
@@ -253,6 +286,23 @@ type resolverFunc func(ctx context.Context, network, host string) ([]netip.Addr,
 func (f resolverFunc) LookupNetIP(ctx context.Context, network, host string) ([]netip.Addr, error) {
 	return f(ctx, network, host)
 }
+
+type dialerFunc func(ctx context.Context, network, address string) (net.Conn, error)
+
+func (f dialerFunc) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	return f(ctx, network, address)
+}
+
+type shortWriteConn struct{}
+
+func (shortWriteConn) Read([]byte) (int, error)         { return 0, errors.New("unexpected read") }
+func (shortWriteConn) Write(p []byte) (int, error)      { return len(p) - 1, nil }
+func (shortWriteConn) Close() error                     { return nil }
+func (shortWriteConn) LocalAddr() net.Addr              { return &net.UDPAddr{} }
+func (shortWriteConn) RemoteAddr() net.Addr             { return &net.UDPAddr{} }
+func (shortWriteConn) SetDeadline(time.Time) error      { return nil }
+func (shortWriteConn) SetReadDeadline(time.Time) error  { return nil }
+func (shortWriteConn) SetWriteDeadline(time.Time) error { return nil }
 
 func freshX25519Priv(t *testing.T) []byte {
 	t.Helper()

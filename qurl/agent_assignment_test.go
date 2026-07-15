@@ -79,7 +79,7 @@ func validAssignment(t *testing.T, agentID string) AgentAssignment {
 		CellID:               "cell0",
 		AssignmentGeneration: 1,
 		EndpointRevision:     1,
-		LeaseExpiresAt:       time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC),
+		LeaseExpiresAt:       time.Now().Add(24 * time.Hour).UTC(),
 		Endpoint: NHPUDPEndpoint{
 			Host:               "cell0.nhp.layerv.ai",
 			Port:               62206,
@@ -157,17 +157,45 @@ func TestFetchAgentAssignment_RejectsInvalidResponses(t *testing.T) {
 	}{
 		{"wrong agent id", func(a *AgentAssignment) { a.AgentID = "someone-else" }},
 		{"missing cell id", func(a *AgentAssignment) { a.CellID = "" }},
+		{"uppercase cell id", func(a *AgentAssignment) { a.CellID = "Cell0" }},
+		{"trailing hyphen cell id", func(a *AgentAssignment) { a.CellID = "cell0-" }},
+		{"oversize cell id", func(a *AgentAssignment) { a.CellID = "c" + strings.Repeat("0", 64) }},
 		{"zero generation", func(a *AgentAssignment) { a.AssignmentGeneration = 0 }},
 		{"zero endpoint revision", func(a *AgentAssignment) { a.EndpointRevision = 0 }},
 		{"zero lease", func(a *AgentAssignment) { a.LeaseExpiresAt = time.Time{} }},
+		{"expired lease", func(a *AgentAssignment) { a.LeaseExpiresAt = time.Now().Add(-time.Minute) }},
 		{"aws elb host", func(a *AgentAssignment) { a.Endpoint.Host = "internal-cell0-123.us-east-1.elb.amazonaws.com" }},
 		{"internal host", func(a *AgentAssignment) { a.Endpoint.Host = "cell0.compute.internal" }},
 		{"ip literal host", func(a *AgentAssignment) { a.Endpoint.Host = "10.0.0.5" }},
 		{"localhost host", func(a *AgentAssignment) { a.Endpoint.Host = "localhost" }},
+		{"non LayerV host", func(a *AgentAssignment) { a.Endpoint.Host = "cell0.nhp.example.com" }},
+		{"uppercase host", func(a *AgentAssignment) { a.Endpoint.Host = "Cell0.nhp.layerv.ai" }},
+		{"empty DNS label", func(a *AgentAssignment) { a.Endpoint.Host = "cell0..layerv.ai" }},
+		{"trailing DNS dot", func(a *AgentAssignment) { a.Endpoint.Host = "cell0.nhp.layerv.ai." }},
+		{"bad DNS label", func(a *AgentAssignment) { a.Endpoint.Host = "-cell0.nhp.layerv.ai" }},
 		{"port out of range", func(a *AgentAssignment) { a.Endpoint.Port = 70000 }},
 		{"bad server key", func(a *AgentAssignment) { a.Endpoint.ServerPublicKeyB64 = "not-base64!!" }},
 		{"short server key", func(a *AgentAssignment) {
 			a.Endpoint.ServerPublicKeyB64 = base64.StdEncoding.EncodeToString(make([]byte, 16))
+		}},
+		{"unpadded server key", func(a *AgentAssignment) {
+			key, err := base64.StdEncoding.DecodeString(a.Endpoint.ServerPublicKeyB64)
+			if err != nil {
+				t.Fatal(err)
+			}
+			a.Endpoint.ServerPublicKeyB64 = base64.RawStdEncoding.EncodeToString(key)
+		}},
+		{"low-order server key", func(a *AgentAssignment) {
+			a.Endpoint.ServerPublicKeyB64 = base64.StdEncoding.EncodeToString(make([]byte, 32))
+		}},
+		{"non-canonical server key", func(a *AgentAssignment) {
+			key := make([]byte, 32)
+			key[0] = 0xed
+			for i := 1; i < 31; i++ {
+				key[i] = 0xff
+			}
+			key[31] = 0x7f
+			a.Endpoint.ServerPublicKeyB64 = base64.StdEncoding.EncodeToString(key)
 		}},
 	}
 	for _, tc := range cases {
@@ -191,6 +219,7 @@ func TestFetchAgentAssignment_EmptyAndMalformedBody(t *testing.T) {
 		{"empty", ""},
 		{"not json", "<html>502</html>"},
 		{"missing data", `{"meta":{}}`},
+		{"invalid UTF-8", string([]byte{'{', '"', 'x', '"', ':', '"', 0xff, '"', '}'})},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			doer := &scriptedDoer{responses: []scriptedResponse{{status: 200, body: tc.body}}}
@@ -222,9 +251,12 @@ func TestFetchAgentAssignment_TerminalStatuses(t *testing.T) {
 		{"403 forbidden", scriptedResponse{status: 403, body: problemBody("account_frozen")}, ErrAssignmentForbidden},
 		{"409 reassignment", scriptedResponse{status: 409, body: problemBody("cell_reassignment_in_progress")}, ErrAssignmentReassignmentRequired},
 		{"409 quota", scriptedResponse{status: 409, body: problemBody("agent_assignment_quota_exceeded")}, ErrAssignmentQuotaExceeded},
+		{"409 unknown is not quota", scriptedResponse{status: 409, body: problemBody("conflict")}, ErrAssignmentServiceError},
+		{"409 mixed-case alias rejected", scriptedResponse{status: 409, body: problemBody("CELL_REASSIGNMENT_IN_PROGRESS")}, ErrAssignmentServiceError},
 		{"429 rate limited", scriptedResponse{status: 429, body: problemBody("rate_limited")}, ErrAssignmentRateLimited},
 		{"500 service error", scriptedResponse{status: 500, body: problemBody("internal_error")}, ErrAssignmentServiceError},
 		{"503 non-authority code terminal", scriptedResponse{status: 503, body: problemBody("service_unavailable")}, ErrAssignmentServiceError},
+		{"503 mixed-case alias terminal", scriptedResponse{status: 503, body: problemBody("CELL_ASSIGNMENT_UNAVAILABLE")}, ErrAssignmentServiceError},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -263,6 +295,10 @@ func TestFetchAgentAssignment_RateLimitedCarriesResetTiming(t *testing.T) {
 	}
 	if rl.RetryAfter != 30*time.Second || rl.Reset != 45*time.Second {
 		t.Fatalf("rate-limit timing = retry-after %s reset %s", rl.RetryAfter, rl.Reset)
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusTooManyRequests || apiErr.Code != "rate_limited" {
+		t.Fatalf("rate-limit error lost API problem details: %v", err)
 	}
 }
 
@@ -525,5 +561,20 @@ func TestAgentAssignment_LeaseExpired(t *testing.T) {
 	}
 	if a.LeaseExpired(a.LeaseExpiresAt.Add(-time.Second)) {
 		t.Fatal("lease before expiry must not be expired")
+	}
+	var absent *AgentAssignment
+	if !absent.LeaseExpired(time.Now()) {
+		t.Fatal("missing assignment must be treated as expired (fail closed)")
+	}
+}
+
+func TestAssignmentDurationHeadersRejectOverflow(t *testing.T) {
+	for _, value := range []string{"9223372036854775807", "999999999999999999999999"} {
+		if got := parseRetryAfter(value, time.Now()); got != 0 {
+			t.Fatalf("parseRetryAfter(%q) = %s, want 0", value, got)
+		}
+		if got := parseSecondsHeader(value); got != 0 {
+			t.Fatalf("parseSecondsHeader(%q) = %s, want 0", value, got)
+		}
 	}
 }
