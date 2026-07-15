@@ -224,6 +224,10 @@ func sendToAddresses(ctx context.Context, addrs []netip.Addr, port int, packet [
 	}
 
 	portStr := strconv.Itoa(port)
+	// Reuse the receive buffer across serial address fallbacks. A failed
+	// attempt never exposes its bytes, and a successful attempt returns
+	// immediately, so there is no aliasing across live replies.
+	replyBuffer := make([]byte, nhpwire.PacketBufferSize+1)
 	var lastErr error
 	for _, addr := range addrs {
 		if err := ctxErr(ctx); err != nil {
@@ -231,7 +235,7 @@ func sendToAddresses(ctx context.Context, addrs []netip.Addr, port int, packet [
 		}
 		// net.JoinHostPort brackets IPv6 and avoids a bounds-unchecked uint16(port)
 		// conversion; port is already validated to 1..65535 by validateEndpoint.
-		reply, err := sendOne(ctx, dialer, net.JoinHostPort(addr.String(), portStr), packet, timeout)
+		reply, err := sendOne(ctx, dialer, net.JoinHostPort(addr.String(), portStr), packet, timeout, replyBuffer)
 		if err == nil {
 			return reply, nil
 		}
@@ -253,7 +257,7 @@ func sendToAddresses(ctx context.Context, addrs []netip.Addr, port int, packet [
 // sendOne dials one address, writes the packet, and reads a single reply datagram
 // under a socket deadline. It reads into a buffer one byte larger than the NHP
 // buffer so an oversize datagram is detected rather than silently truncated.
-func sendOne(ctx context.Context, dialer Dialer, address string, packet []byte, timeout time.Duration) (reply []byte, err error) {
+func sendOne(ctx context.Context, dialer Dialer, address string, packet []byte, timeout time.Duration, replyBuffer []byte) (reply []byte, err error) {
 	conn, err := dialer.DialContext(ctx, "udp", address)
 	if err != nil {
 		return nil, fmt.Errorf("dial %s: %w", address, err)
@@ -287,8 +291,7 @@ func sendOne(ctx context.Context, dialer Dialer, address string, packet []byte, 
 	// a zero-length or oversize one) stops the address loop — it is a received
 	// reply to authenticate/reject, not a transport miss to retry against another
 	// address.
-	buf := make([]byte, nhpwire.PacketBufferSize+1)
-	n, err = conn.Read(buf)
+	n, err = conn.Read(replyBuffer)
 	// Some datagram implementations return both the truncated prefix and an
 	// error such as WSAEMSGSIZE. Preserve the bytes-first oversize signal so
 	// the caller classifies the received datagram as unauthenticated instead
@@ -296,7 +299,7 @@ func sendOne(ctx context.Context, dialer Dialer, address string, packet []byte, 
 	if n <= nhpwire.PacketBufferSize && err != nil {
 		return nil, fmt.Errorf("read from %s: %w", address, err)
 	}
-	return buf[:n], nil
+	return replyBuffer[:n], nil
 }
 
 // decryptAndCorrelate authenticates the reply against the pinned server key and

@@ -439,13 +439,17 @@ func validateNHPServerPeerInfo(peer NHPServerPeerInfo, now time.Time, requireLiv
 	if peer.Port <= 0 {
 		return fmt.Errorf("%w: %s missing NHP peer port", errKind, label)
 	}
-	if peer.Port > 65535 {
+	if !validNetworkPort(peer.Port) {
 		return fmt.Errorf("%w: %s NHP peer port out of range", errKind, label)
 	}
 	if requireLive && peer.ExpireTime != 0 && peer.ExpireTime <= now.Unix() {
 		return fmt.Errorf("%w: %s NHP peer is expired", errKind, label)
 	}
 	return nil
+}
+
+func validNetworkPort(port int) bool {
+	return port >= 1 && port <= 65535
 }
 
 func validateNHPServerPublicKey(encoded, label string, errKind error) error {
