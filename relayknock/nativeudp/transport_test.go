@@ -154,7 +154,8 @@ func (s *fakeServer) buildReply(replyType int, serverPriv []byte, counter uint64
 		Body:             s.replyBody,
 	})
 	if err != nil {
-		s.t.Fatalf("build reply: %v", err)
+		s.t.Errorf("build reply: %v", err)
+		return nil
 	}
 	return packet
 }
