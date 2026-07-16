@@ -350,6 +350,8 @@ func RefreshAgentAssignment(ctx context.Context, hub HubBootstrap, agentID strin
 	if err != nil {
 		return nil, fmt.Errorf("%w: encode assignment refresh request: %w", ErrInvalidAssignmentConfig, err)
 	}
+	// Refresh is intentionally credential-free, so there is no mutable secret
+	// buffer to wipe. Any future secret-bearing field must add explicit wiping.
 	return runAssignmentExchange(ctx, cfg, endpoint, body, transport, func(reply []byte, now time.Time) (*AgentAssignment, error) {
 		return parseRefreshAssignmentReply(reply, agentID, now)
 	})

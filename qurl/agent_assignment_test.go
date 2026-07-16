@@ -13,6 +13,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -545,6 +546,26 @@ func TestAgentAssignmentStatePersistsOnlyDurableBinding(t *testing.T) {
 }
 
 func TestAgentAssignmentCloneAndLease(t *testing.T) {
+	var assertValueOnly func(string, reflect.Type)
+	assertValueOnly = func(path string, valueType reflect.Type) {
+		t.Helper()
+		if valueType == reflect.TypeOf(time.Time{}) {
+			return // time.Time is an immutable value despite its internal location pointer.
+		}
+		switch valueType.Kind() {
+		case reflect.Pointer, reflect.Slice, reflect.Map, reflect.Interface, reflect.Func, reflect.Chan, reflect.UnsafePointer:
+			t.Fatalf("%s has reference kind %s; update AgentAssignment.clone and its isolation test", path, valueType.Kind())
+		case reflect.Array:
+			assertValueOnly(path+"[]", valueType.Elem())
+		case reflect.Struct:
+			for i := range valueType.NumField() {
+				field := valueType.Field(i)
+				assertValueOnly(path+"."+field.Name, field.Type)
+			}
+		}
+	}
+	assertValueOnly("AgentAssignment", reflect.TypeOf(AgentAssignment{}))
+
 	assignment := &AgentAssignment{CellID: "cell0", LeaseExpiresAt: assignmentFixtureNow.Add(time.Hour), Endpoint: NHPUDPEndpoint{Host: "cell0.nhp.layerv.ai"}}
 	clone := assignment.clone()
 	clone.CellID = "cell1"
