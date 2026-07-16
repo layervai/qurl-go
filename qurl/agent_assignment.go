@@ -378,10 +378,7 @@ func runAssignmentExchange[T any](ctx context.Context, c *assignmentConfig, endp
 		if !retryable {
 			return nil, err
 		}
-		elapsed := c.clock().Sub(start)
-		if elapsed < 0 {
-			elapsed = 0
-		}
+		elapsed := c.elapsedSince(start)
 		if attempt == c.maxAttempts || elapsed >= c.budget {
 			return nil, &AssignmentRecoveryRequiredError{Attempts: attempt, Elapsed: elapsed, Last: last}
 		}
@@ -402,10 +399,7 @@ func runAssignmentExchange[T any](ctx context.Context, c *assignmentConfig, endp
 			return nil, err
 		}
 	}
-	elapsed := c.clock().Sub(start)
-	if elapsed < 0 {
-		elapsed = 0
-	}
+	elapsed := c.elapsedSince(start)
 	return nil, &AssignmentRecoveryRequiredError{
 		Attempts: c.maxAttempts,
 		Elapsed:  elapsed,
@@ -414,13 +408,21 @@ func runAssignmentExchange[T any](ctx context.Context, c *assignmentConfig, endp
 }
 
 func (c *assignmentConfig) recoveryRequired(attempts int, start time.Time, last error) *AssignmentRecoveryRequiredError {
-	elapsed := c.clock().Sub(start)
+	elapsed := c.elapsedSince(start)
 	if elapsed < c.budget {
 		// The real transaction timer may expire while a test clock is fixed or
 		// moves backward. Report the budget that was actually exhausted.
 		elapsed = c.budget
 	}
 	return &AssignmentRecoveryRequiredError{Attempts: attempts, Elapsed: elapsed, Last: last}
+}
+
+func (c *assignmentConfig) elapsedSince(start time.Time) time.Duration {
+	elapsed := c.clock().Sub(start)
+	if elapsed < 0 {
+		return 0
+	}
+	return elapsed
 }
 
 func assignmentRetryInfo(err error) (time.Duration, bool) {
@@ -776,7 +778,7 @@ func validateAssignmentAgentID(agentID string) error {
 }
 
 func validateAssignmentEndpointHost(host, part string, errKind error) error {
-	if host == "" || len(host) > 253 || host != strings.ToLower(host) || strings.HasSuffix(host, ".") || net.ParseIP(host) != nil {
+	if host == "" || len(host) > 253 || strings.HasSuffix(host, ".") || net.ParseIP(host) != nil {
 		return fmt.Errorf("%w: %s: host must be a canonical lowercase DNS name", errKind, part)
 	}
 	labels := strings.Split(host, ".")
