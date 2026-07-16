@@ -48,7 +48,9 @@ const (
 // HubBootstrap is the out-of-band trust root for native assignment. Host, Port,
 // and ServerPublicKeyB64 are one atomic revision supplied by trusted deployment
 // configuration. The SDK never synthesizes any of them from an API URL, cell id,
-// DNS response, or unauthenticated packet.
+// DNS response, or unauthenticated packet. Port must be the standard NHP UDP
+// bootstrap port 62206; unlike this pinned bootstrap contract, an authenticated
+// assigned-cell endpoint may carry any valid network port.
 type HubBootstrap struct {
 	Host               string `json:"host"`
 	Port               int    `json:"port"`
@@ -139,6 +141,8 @@ var (
 	ErrInvalidAssignmentConfig = errors.New("qurl: invalid assignment config")
 	// ErrAssignmentInvalidResponse marks malformed authenticated LRT JSON,
 	// unknown/duplicate fields, invalid success data, or an unknown error code.
+	// It is terminal: retrying cannot repair an authenticated producer-contract
+	// violation and could conceal a hub deployment error.
 	ErrAssignmentInvalidResponse = errors.New("qurl: assignment response invalid")
 	// ErrAssignmentUnavailable is the sole retryable assignment application
 	// result (52200), bounded together with transport misses by the transaction

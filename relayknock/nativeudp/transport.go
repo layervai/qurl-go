@@ -234,7 +234,8 @@ func sendToAddresses(ctx context.Context, addrs []netip.Addr, port int, packet [
 	portStr := strconv.Itoa(port)
 	// Reuse the receive buffer across serial address fallbacks. A failed
 	// attempt never exposes its bytes, and a successful attempt returns
-	// immediately, so there is no aliasing across live replies.
+	// immediately, so there is no aliasing across live replies. Any future
+	// concurrent/pipelined fallback must instead allocate one buffer per attempt.
 	replyBuffer := make([]byte, nhpwire.PacketBufferSize+1)
 	var lastErr error
 	for _, addr := range addrs {
