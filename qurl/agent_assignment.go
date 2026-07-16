@@ -794,10 +794,9 @@ func validAssignmentDNSLabel(label string) bool {
 		return false
 	}
 	for _, b := range []byte(label) {
-		if isASCIILowerLDH(b) {
-			continue
+		if !isASCIILowerLDH(b) {
+			return false
 		}
-		return false
 	}
 	return true
 }
@@ -807,10 +806,9 @@ func validAssignmentCellID(cellID string) bool {
 		return false
 	}
 	for _, b := range []byte(cellID[1:]) {
-		if isASCIILowerLDH(b) {
-			continue
+		if !isASCIILowerLDH(b) {
+			return false
 		}
-		return false
 	}
 	return cellID[len(cellID)-1] != '-'
 }
@@ -820,10 +818,9 @@ func validAgentAPIKeyID(id string) bool {
 		return false
 	}
 	for _, b := range []byte(id[len("key_"):]) {
-		if isASCIIAlnum(b) {
-			continue
+		if !isASCIIAlnum(b) {
+			return false
 		}
-		return false
 	}
 	return true
 }

@@ -424,7 +424,7 @@ func resolveAddresses(ctx context.Context, host string, opts Options) ([]netip.A
 	public := make([]netip.Addr, 0, min(len(addrs), maxAddrs))
 	for _, addr := range addrs {
 		addr = addr.Unmap()
-		if !publicAssignmentAddress(addr) {
+		if !publicRoutableAddress(addr) {
 			continue
 		}
 		public = append(public, addr)
@@ -438,7 +438,7 @@ func resolveAddresses(ctx context.Context, host string, opts Options) ([]netip.A
 	return public, nil
 }
 
-var nonPublicAssignmentPrefixes = [...]netip.Prefix{
+var nonRoutablePrefixes = [...]netip.Prefix{
 	netip.MustParsePrefix("0.0.0.0/8"),       // RFC 1122 this network
 	netip.MustParsePrefix("100.64.0.0/10"),   // RFC 6598 shared address space
 	netip.MustParsePrefix("192.0.0.0/24"),    // RFC 6890 IETF protocol assignments
@@ -461,13 +461,13 @@ var nonPublicAssignmentPrefixes = [...]netip.Prefix{
 	netip.MustParsePrefix("fec0::/10"),       // RFC 3879 deprecated site-local
 }
 
-func publicAssignmentAddress(addr netip.Addr) bool {
+func publicRoutableAddress(addr netip.Addr) bool {
 	if !addr.IsValid() || !addr.IsGlobalUnicast() || addr.IsPrivate() ||
 		addr.IsLoopback() || addr.IsLinkLocalUnicast() ||
 		addr.IsLinkLocalMulticast() || addr.IsMulticast() || addr.IsUnspecified() {
 		return false
 	}
-	for _, prefix := range nonPublicAssignmentPrefixes {
+	for _, prefix := range nonRoutablePrefixes {
 		if prefix.Contains(addr) {
 			return false
 		}
