@@ -97,6 +97,9 @@ type InitialAgentAssignment struct {
 	AssignmentTicketExpiresAt time.Time
 }
 
+// clone returns an independent assignment snapshot. AgentAssignment is
+// currently value-only and TestAgentAssignmentCloneAndLease enforces that
+// assumption; deep-copy any future pointer, slice, or map fields here.
 func (a *AgentAssignment) clone() *AgentAssignment {
 	if a == nil {
 		return nil
