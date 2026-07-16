@@ -667,7 +667,6 @@ func TestAssignmentInitialCredentialErrorsAreInvalidDuringRefresh(t *testing.T) 
 func TestHubAssignmentRejectsInvalidInputsBeforeIO(t *testing.T) {
 	fixture := loadAssignmentFixture(t)
 	validHub, validTransport, _ := assignmentTestSetup(t, fixture.InitialAssignment.Result.BodyJSON)
-	lowOrder := base64.StdEncoding.EncodeToString(make([]byte, 32))
 	cases := []struct {
 		name       string
 		hub        HubBootstrap
@@ -679,7 +678,7 @@ func TestHubAssignmentRejectsInvalidInputsBeforeIO(t *testing.T) {
 		{name: "IP hub", hub: HubBootstrap{Host: "203.0.113.1", Port: standardNHPUDPPort, ServerPublicKeyB64: validHub.ServerPublicKeyB64}, agentID: "agent-conform", credential: "valid", transport: validTransport},
 		{name: "AWS hub", hub: HubBootstrap{Host: "internal-hub.elb.amazonaws.com", Port: standardNHPUDPPort, ServerPublicKeyB64: validHub.ServerPublicKeyB64}, agentID: "agent-conform", credential: "valid", transport: validTransport},
 		{name: "unsupported port", hub: HubBootstrap{Host: validHub.Host, Port: 443, ServerPublicKeyB64: validHub.ServerPublicKeyB64}, agentID: "agent-conform", credential: "valid", transport: validTransport},
-		{name: "low-order key", hub: HubBootstrap{Host: validHub.Host, Port: standardNHPUDPPort, ServerPublicKeyB64: lowOrder}, agentID: "agent-conform", credential: "valid", transport: validTransport},
+		{name: "low-order key", hub: HubBootstrap{Host: validHub.Host, Port: standardNHPUDPPort, ServerPublicKeyB64: lowOrderTestNHPServerPublicKeyB64}, agentID: "agent-conform", credential: "valid", transport: validTransport},
 		{name: "invalid agent id", hub: validHub, agentID: "Bad_ID", credential: "valid", transport: validTransport},
 		{name: "invalid credential", hub: validHub, agentID: "agent-conform", credential: " secret ", transport: validTransport},
 		{name: "short initiator key", hub: validHub, agentID: "agent-conform", credential: "valid", transport: nativeudp.Options{DeviceStaticPriv: make([]byte, 31)}},
@@ -807,7 +806,7 @@ func TestPersistedAgentAssignmentTrustFieldsValidatedOnLoad(t *testing.T) {
 	invalidAssignments := map[string]func(*AgentAssignment){
 		"host outside LayerV apex": func(a *AgentAssignment) { a.Endpoint.Host = "attacker.example.com" },
 		"low-order server key": func(a *AgentAssignment) {
-			a.Endpoint.ServerPublicKeyB64 = base64.StdEncoding.EncodeToString(make([]byte, 32))
+			a.Endpoint.ServerPublicKeyB64 = lowOrderTestNHPServerPublicKeyB64
 		},
 		"invalid cell":      func(a *AgentAssignment) { a.CellID = "CELL0" },
 		"zero generation":   func(a *AgentAssignment) { a.AssignmentGeneration = 0 },
@@ -863,7 +862,7 @@ func TestAgentAssignmentDecodedServerKeyRevalidatesState(t *testing.T) {
 	}
 
 	tampered := initial.Assignment
-	tampered.Endpoint.ServerPublicKeyB64 = base64.StdEncoding.EncodeToString(make([]byte, 32))
+	tampered.Endpoint.ServerPublicKeyB64 = lowOrderTestNHPServerPublicKeyB64
 	if _, err := tampered.DecodedServerKey(); !errors.Is(err, ErrAssignmentInvalidResponse) {
 		t.Fatalf("tampered persisted key error = %v, want ErrAssignmentInvalidResponse", err)
 	}

@@ -178,7 +178,7 @@ func TestRegistrationInfoResponse_Validate(t *testing.T) {
 		{"missing server id", func(r *registrationInfoResponse) { r.Relay.ServerID = "" }, "missing relay server_id"},
 		{"bad peer key", func(r *registrationInfoResponse) { r.NHPServerPeer.PublicKeyB64 = "not-base64" }, "not standard base64"},
 		{"low-order peer key", func(r *registrationInfoResponse) {
-			r.NHPServerPeer.PublicKeyB64 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+			r.NHPServerPeer.PublicKeyB64 = lowOrderTestNHPServerPublicKeyB64
 		}, "low-order"},
 		{"non-canonical peer key", func(r *registrationInfoResponse) {
 			r.NHPServerPeer.PublicKeyB64 = nonCanonicalTestNHPServerPublicKeyB64()
@@ -248,7 +248,7 @@ func TestCompletionResponse_Validate(t *testing.T) {
 		{"missing peer key", func(r *completionResponse) { r.NHPServerPeer.PublicKeyB64 = "" }, "missing NHP peer public key"},
 		{"malformed peer key", func(r *completionResponse) { r.NHPServerPeer.PublicKeyB64 = "not-base64" }, "not standard base64"},
 		{"low-order peer key", func(r *completionResponse) {
-			r.NHPServerPeer.PublicKeyB64 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+			r.NHPServerPeer.PublicKeyB64 = lowOrderTestNHPServerPublicKeyB64
 		}, "low-order"},
 		{"non-canonical peer key", func(r *completionResponse) {
 			r.NHPServerPeer.PublicKeyB64 = nonCanonicalTestNHPServerPublicKeyB64()
