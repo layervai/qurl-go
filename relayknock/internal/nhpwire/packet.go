@@ -49,13 +49,15 @@ var (
 	_ [maxApplicationBodySize - (PacketBufferSize - HeaderSize - gcmTagSize)]struct{}
 )
 
-// NHP header types (reference NHP relay iota: KPL=0, KNK=1, ACK=2, …, COK=7,
-// RKN=8, …, OTP=12, REG=13, RAK=14). Exported so the wrapping packages map them
-// to their public Type* constants and enforce type-gating; this codec itself
-// applies no restriction.
+// NHP header types (reference NHP relay iota: KPL=0, KNK=1, ACK=2, …, LST=5,
+// LRT=6, COK=7, RKN=8, …, OTP=12, REG=13, RAK=14). Exported so the wrapping
+// packages map them to their public Type* constants and enforce type-gating;
+// this codec itself applies no restriction.
 const (
 	TypeKNK = 1  // NHP_KNK: knock
 	TypeACK = 2  // NHP_ACK: admission reply
+	TypeLST = 5  // NHP_LST: list/query request
+	TypeLRT = 6  // NHP_LRT: list/query result
 	TypeCOK = 7  // NHP_COK: overload cookie-challenge
 	TypeOTP = 12 // NHP_OTP: one-way OTP request
 	TypeREG = 13 // NHP_REG: registration

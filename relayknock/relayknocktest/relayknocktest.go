@@ -22,10 +22,12 @@ import (
 
 // BuildReply builds a complete server-originated NHP reply packet (240-byte
 // header ‖ sealed body) of the given reply header type: relayknock.TypeACK,
-// relayknock.TypeCookieChallenge, or relayknock.TypeRegisterAck. It is the
+// relayknock.TypeListResult, relayknock.TypeCookieChallenge, or
+// relayknock.TypeRegisterAck. It is the
 // responder-role mirror of relayknock.BuildMessage: an agent never builds these,
 // so relayknock's public builder rejects them; a server or a conformance/test
-// double that must answer a knock or a registration builds them here. The
+// double that must answer a knock, list/query request, or registration builds
+// them here. The
 // transcript is role-symmetric (only the obfuscated type field differs), so a
 // reply built here decrypts under relayknock.DecryptReply against the server's
 // static key exactly as a real server reply would.
@@ -33,25 +35,26 @@ import (
 // Set inp.DeviceStaticPriv to the SERVER static private key and inp.ServerStaticPub
 // to the AGENT (initiator) static public key — the roles are swapped relative to a
 // knock, because the reply is a fresh handshake the server initiates back to the
-// agent. inp.Counter must echo the counter of the request being answered so a
-// round-trip caller (relayknock.Exchange) accepts the correlation.
+// agent. inp.Counter must echo the counter of the request being answered so the
+// caller can enforce request/reply correlation.
 func BuildReply(headerType int, inp *relayknock.KnockInputs) ([]byte, error) {
 	switch headerType {
-	case relayknock.TypeACK, relayknock.TypeCookieChallenge, relayknock.TypeRegisterAck:
+	case relayknock.TypeACK, relayknock.TypeListResult, relayknock.TypeCookieChallenge, relayknock.TypeRegisterAck:
 		// Reuse relayknock's single KnockInputs → nhpwire.Inputs converter rather
 		// than a second copy here: a missed field on this responder path was a real
 		// past risk, so both paths share the one WireInputs source of truth.
 		return nhpwire.BuildMessage(headerType, inp.WireInputs())
 	default:
-		return nil, fmt.Errorf("unsupported reply header type %d (want relayknock.TypeACK, relayknock.TypeCookieChallenge, or relayknock.TypeRegisterAck)", headerType)
+		return nil, fmt.Errorf("unsupported reply header type %d (want relayknock.TypeACK, relayknock.TypeListResult, relayknock.TypeCookieChallenge, or relayknock.TypeRegisterAck)", headerType)
 	}
 }
 
 // OpenInitiatorMessage decrypts and authenticates an initiator packet (NHP_KNK /
-// NHP_OTP / NHP_REG) in the responder role — the open a server (or a test double
-// standing in for one) performs on a packet an agent posted. It is the mirror of
-// relayknock.DecryptReply, which opens server replies from the initiator side;
-// the two split the role-symmetric transcript by which header types each admits.
+// NHP_LST / NHP_OTP / NHP_REG) in the responder role — the open a server (or a
+// test double standing in for one) performs on a packet an agent posted. It is
+// the mirror of relayknock.DecryptReply, which opens server replies from the
+// initiator side; the two split the role-symmetric transcript by which header
+// types each admits.
 //
 // serverPriv is the responder (server) static private key; expectedDevicePub is
 // the initiator (agent) static public key the caller expects. Only initiator
@@ -64,7 +67,7 @@ func OpenInitiatorMessage(serverPriv, expectedDevicePub, packet []byte) (*relayk
 		return nil, err
 	}
 	switch msg.Type {
-	case relayknock.TypeKnock, relayknock.TypeOTP, relayknock.TypeRegister:
+	case relayknock.TypeKnock, relayknock.TypeListRequest, relayknock.TypeOTP, relayknock.TypeRegister:
 		return &relayknock.Reply{
 			Type:           msg.Type,
 			Counter:        msg.Counter,
