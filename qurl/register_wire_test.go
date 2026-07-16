@@ -247,6 +247,12 @@ func TestCompletionResponse_Validate(t *testing.T) {
 		{"device key control", func(r *completionResponse) { r.DeviceAPIKey = "lv_device\nsecret" }, "invalid header characters"},
 		{"missing peer key", func(r *completionResponse) { r.NHPServerPeer.PublicKeyB64 = "" }, "missing NHP peer public key"},
 		{"malformed peer key", func(r *completionResponse) { r.NHPServerPeer.PublicKeyB64 = "not-base64" }, "not standard base64"},
+		{"low-order peer key", func(r *completionResponse) {
+			r.NHPServerPeer.PublicKeyB64 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+		}, "low-order"},
+		{"non-canonical peer key", func(r *completionResponse) {
+			r.NHPServerPeer.PublicKeyB64 = nonCanonicalTestNHPServerPublicKeyB64()
+		}, "non-canonical"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

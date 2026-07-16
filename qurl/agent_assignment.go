@@ -358,7 +358,8 @@ func runAssignmentExchange[T any](ctx context.Context, c *assignmentConfig, endp
 	var last error
 	for attempt := 1; attempt <= c.maxAttempts; attempt++ {
 		reply, err := nativeudp.List(transactionCtx, endpoint, body, transport)
-		if err == nil {
+		authenticatedReply := err == nil
+		if authenticatedReply {
 			result, parseErr := parse(reply.Body, c.clock())
 			if parseErr == nil {
 				return result, nil
@@ -366,13 +367,19 @@ func runAssignmentExchange[T any](ctx context.Context, c *assignmentConfig, endp
 			err = parseErr
 		}
 		last = err
+		retryAfter, retryable := assignmentRetryInfo(err)
+		if authenticatedReply && !retryable {
+			// A parsed authenticated terminal result wins over a retry-budget
+			// deadline that fires concurrently. In particular, identity rejection
+			// must remain terminal rather than being recast as recovery permission.
+			return nil, err
+		}
 		if transactionCtx.Err() != nil {
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
 			return nil, c.recoveryRequired(attempt, start, errors.Join(last, transactionCtx.Err()))
 		}
-		retryAfter, retryable := assignmentRetryInfo(err)
 		if !retryable {
 			return nil, err
 		}

@@ -260,6 +260,103 @@ func TestRunAssignmentExchangeInvalidAttemptInvariantFailsClosed(t *testing.T) {
 	}
 }
 
+func TestAssignmentBackoffWindowsAndJitterBounds(t *testing.T) {
+	var windows []time.Duration
+	cfg := &assignmentConfig{jitter: func(window time.Duration) (time.Duration, error) {
+		windows = append(windows, window)
+		return window - time.Nanosecond, nil
+	}}
+	for _, attempt := range []int{1, 2, 3, 4, 5, 6, 64} {
+		delay, err := cfg.backoff(attempt, 0)
+		if err != nil {
+			t.Fatalf("attempt %d backoff: %v", attempt, err)
+		}
+		if delay != windows[len(windows)-1]-time.Nanosecond {
+			t.Fatalf("attempt %d delay = %s, want jitter result", attempt, delay)
+		}
+	}
+	want := []time.Duration{500 * time.Millisecond, time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 8 * time.Second, 8 * time.Second}
+	if fmt.Sprint(windows) != fmt.Sprint(want) {
+		t.Fatalf("backoff windows = %v, want %v", windows, want)
+	}
+
+	for _, testCase := range []struct {
+		name   string
+		jitter func(time.Duration) (time.Duration, error)
+	}{
+		{name: "source failure", jitter: func(time.Duration) (time.Duration, error) { return 0, errors.New("entropy unavailable") }},
+		{name: "negative", jitter: func(time.Duration) (time.Duration, error) { return -1, nil }},
+		{name: "equal to window", jitter: func(window time.Duration) (time.Duration, error) { return window, nil }},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			if _, err := (&assignmentConfig{jitter: testCase.jitter}).backoff(1, 0); err == nil {
+				t.Fatal("invalid jitter result accepted")
+			}
+		})
+	}
+}
+
+func TestHubAssignmentJitterFailureRequiresRecovery(t *testing.T) {
+	hub, transport, server := assignmentTestSetup(t, `{"errCode":"52200","errMsg":"temporary"}`)
+	_, err := RefreshAgentAssignment(
+		context.Background(), hub, "agent-conform", transport,
+		WithAssignmentRetryBudget(4, time.Minute),
+		withAssignmentClock(func() time.Time { return assignmentFixtureNow }),
+		withAssignmentJitter(func(time.Duration) (time.Duration, error) { return 0, errors.New("entropy unavailable") }),
+	)
+	var recovery *AssignmentRecoveryRequiredError
+	if !errors.As(err, &recovery) || !errors.Is(err, ErrAssignmentUnavailable) || !strings.Contains(err.Error(), "entropy unavailable") {
+		t.Fatalf("jitter failure = %#v, want typed recovery with unavailable and jitter causes", err)
+	}
+	if recovery.Attempts != 1 || len(server.requestBodies()) != 1 {
+		t.Fatalf("attempts/requests = %d/%d, want 1/1", recovery.Attempts, len(server.requestBodies()))
+	}
+}
+
+func TestHubAssignmentRetryDelayCannotExceedRemainingBudget(t *testing.T) {
+	hub, transport, server := assignmentTestSetup(t, `{"errCode":"52200","errMsg":"temporary","retryAfterSeconds":5}`)
+	var slept []time.Duration
+	_, err := RefreshAgentAssignment(
+		context.Background(), hub, "agent-conform", transport,
+		WithAssignmentRetryBudget(4, time.Second),
+		withAssignmentClock(func() time.Time { return assignmentFixtureNow }),
+		withAssignmentJitter(func(time.Duration) (time.Duration, error) { return 0, nil }),
+		withAssignmentSleep(func(_ context.Context, delay time.Duration) error {
+			slept = append(slept, delay)
+			return nil
+		}),
+	)
+	var recovery *AssignmentRecoveryRequiredError
+	if !errors.As(err, &recovery) || !errors.Is(err, ErrAssignmentUnavailable) || recovery.Attempts != 1 {
+		t.Fatalf("oversized retry delay = %#v, want one-attempt recovery", err)
+	}
+	if len(slept) != 0 || len(server.requestBodies()) != 1 {
+		t.Fatalf("slept/requests = %v/%d, want none/1", slept, len(server.requestBodies()))
+	}
+}
+
+func TestHubAssignmentTerminalResultWinsConcurrentBudgetExpiry(t *testing.T) {
+	hub, transport, server := assignmentTestSetup(t, `{"errCode":"52201","errMsg":"identity rejected"}`)
+	clockCalls := 0
+	_, err := RefreshAgentAssignment(
+		context.Background(), hub, "agent-conform", transport,
+		WithAssignmentRetryBudget(4, 100*time.Millisecond),
+		withAssignmentClock(func() time.Time {
+			clockCalls++
+			if clockCalls == 2 {
+				time.Sleep(150 * time.Millisecond)
+			}
+			return assignmentFixtureNow
+		}),
+	)
+	if !errors.Is(err, ErrAssignmentIdentityRejected) || errors.Is(err, ErrAssignmentRecoveryRequired) {
+		t.Fatalf("concurrent terminal result = %#v, want terminal identity rejection only", err)
+	}
+	if len(server.requestBodies()) != 1 {
+		t.Fatalf("requests = %d, want 1", len(server.requestBodies()))
+	}
+}
+
 func TestHubAssignmentTerminalResultDoesNotRetry(t *testing.T) {
 	hub, transport, server := assignmentTestSetup(t, `{"errCode":"52204","errMsg":"slow down","retryAfterSeconds":60}`)
 	var slept []time.Duration
@@ -356,6 +453,18 @@ func TestAssignmentConformanceErrorTaxonomy(t *testing.T) {
 			_, err := parseAssignmentEnvelope([]byte(testCase.BodyJSON), testCase.Phase == "initial_assignment")
 			if !errors.Is(err, ErrAssignmentInvalidResponse) {
 				t.Fatalf("error = %v, want ErrAssignmentInvalidResponse", err)
+			}
+		})
+	}
+}
+
+func TestAssignmentInitialCredentialErrorsAreInvalidDuringRefresh(t *testing.T) {
+	for _, code := range []string{"52106", "52107", "52108", "52109"} {
+		t.Run(code, func(t *testing.T) {
+			body := []byte(fmt.Sprintf(`{"errCode":%q,"errMsg":"initial-only"}`, code))
+			_, err := parseAssignmentEnvelope(body, false)
+			if !errors.Is(err, ErrAssignmentInvalidResponse) {
+				t.Fatalf("refresh error = %v, want ErrAssignmentInvalidResponse", err)
 			}
 		})
 	}

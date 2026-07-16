@@ -1437,6 +1437,13 @@ func TestRegisterAgent_PostCompletionContractFailuresRequireRecoveryWithoutRetry
 				Port:         62206,
 			}
 		}},
+		{name: "non-canonical completion peer", edit: func(service *fakeService) {
+			service.completionPeer = &NHPServerPeerInfo{
+				PublicKeyB64: nonCanonicalTestNHPServerPublicKeyB64(),
+				Host:         "nhp.example.test",
+				Port:         62206,
+			}
+		}},
 		{name: "agent id mismatch", edit: func(service *fakeService) {
 			service.agentID = "agent-different"
 		}},
