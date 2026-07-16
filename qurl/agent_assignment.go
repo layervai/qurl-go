@@ -671,7 +671,7 @@ func parseAssignmentEnvelope(body []byte, initial bool) (json.RawMessage, error)
 		return nil, invalidAssignmentResponse("LRT envelope", err)
 	}
 	if envelope.ErrCode == "0" {
-		if len(fields) != 2 || fields["list"] == nil {
+		if _, ok := fields["list"]; len(fields) != 2 || !ok {
 			return nil, invalidAssignmentResponse("success LRT envelope", errors.New("must contain exactly errCode and list"))
 		}
 		if isJSONNull(envelope.List) {

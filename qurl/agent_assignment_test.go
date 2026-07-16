@@ -183,13 +183,21 @@ func assignmentTestSetup(t *testing.T, replies ...string) (HubBootstrap, nativeu
 func deterministicAssignmentOptions(slept *[]time.Duration, maxAttempts int) []AssignmentOption {
 	return []AssignmentOption{
 		WithAssignmentRetryBudget(maxAttempts, time.Minute),
-		withAssignmentClock(func() time.Time { return assignmentFixtureNow }),
-		withAssignmentJitter(func(time.Duration) (time.Duration, error) { return 0, nil }),
+		fixedAssignmentClock(),
+		zeroAssignmentJitter(),
 		withAssignmentSleep(func(_ context.Context, delay time.Duration) error {
 			*slept = append(*slept, delay)
 			return nil
 		}),
 	}
+}
+
+func fixedAssignmentClock() AssignmentOption {
+	return withAssignmentClock(func() time.Time { return assignmentFixtureNow })
+}
+
+func zeroAssignmentJitter() AssignmentOption {
+	return withAssignmentJitter(func(time.Duration) (time.Duration, error) { return 0, nil })
 }
 
 func TestHubAssignmentInitialAndRefreshMatchConformanceBodies(t *testing.T) {
@@ -373,7 +381,7 @@ func TestHubAssignmentJitterFailureRequiresRecovery(t *testing.T) {
 	_, err := RefreshAgentAssignment(
 		context.Background(), hub, "agent-conform", transport,
 		WithAssignmentRetryBudget(4, time.Minute),
-		withAssignmentClock(func() time.Time { return assignmentFixtureNow }),
+		fixedAssignmentClock(),
 		withAssignmentJitter(func(time.Duration) (time.Duration, error) { return 0, errors.New("entropy unavailable") }),
 	)
 	var recovery *AssignmentRecoveryRequiredError
@@ -391,8 +399,8 @@ func TestHubAssignmentRetryDelayCannotExceedRemainingBudget(t *testing.T) {
 	_, err := RefreshAgentAssignment(
 		context.Background(), hub, "agent-conform", transport,
 		WithAssignmentRetryBudget(4, time.Second),
-		withAssignmentClock(func() time.Time { return assignmentFixtureNow }),
-		withAssignmentJitter(func(time.Duration) (time.Duration, error) { return 0, nil }),
+		fixedAssignmentClock(),
+		zeroAssignmentJitter(),
 		withAssignmentSleep(func(_ context.Context, delay time.Duration) error {
 			slept = append(slept, delay)
 			return nil
@@ -505,8 +513,8 @@ func TestHubAssignmentParentCancellation(t *testing.T) {
 		_, err := RefreshAgentAssignment(
 			ctx, hub, "agent-conform", transport,
 			WithAssignmentRetryBudget(4, time.Minute),
-			withAssignmentClock(func() time.Time { return assignmentFixtureNow }),
-			withAssignmentJitter(func(time.Duration) (time.Duration, error) { return 0, nil }),
+			fixedAssignmentClock(),
+			zeroAssignmentJitter(),
 			withAssignmentSleep(func(sleepCtx context.Context, _ time.Duration) error {
 				cancel()
 				return sleepCtx.Err()
@@ -527,8 +535,8 @@ func TestHubAssignmentSleepFailures(t *testing.T) {
 		_, err := RefreshAgentAssignment(
 			context.Background(), hub, "agent-conform", transport,
 			WithAssignmentRetryBudget(4, 50*time.Millisecond),
-			withAssignmentClock(func() time.Time { return assignmentFixtureNow }),
-			withAssignmentJitter(func(time.Duration) (time.Duration, error) { return 0, nil }),
+			fixedAssignmentClock(),
+			zeroAssignmentJitter(),
 			withAssignmentSleep(func(sleepCtx context.Context, _ time.Duration) error {
 				<-sleepCtx.Done()
 				return sleepCtx.Err()
@@ -549,8 +557,8 @@ func TestHubAssignmentSleepFailures(t *testing.T) {
 		_, err := RefreshAgentAssignment(
 			context.Background(), hub, "agent-conform", transport,
 			WithAssignmentRetryBudget(4, time.Minute),
-			withAssignmentClock(func() time.Time { return assignmentFixtureNow }),
-			withAssignmentJitter(func(time.Duration) (time.Duration, error) { return 0, nil }),
+			fixedAssignmentClock(),
+			zeroAssignmentJitter(),
 			withAssignmentSleep(func(context.Context, time.Duration) error { return sentinel }),
 		)
 		if !errors.Is(err, sentinel) || errors.Is(err, ErrAssignmentRecoveryRequired) {
