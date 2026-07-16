@@ -382,6 +382,10 @@ func runAssignmentExchange[T any](ctx context.Context, c *assignmentConfig, endp
 			// must remain terminal rather than being recast as recovery permission.
 			return nil, err
 		}
+		// An unauthenticated datagram is not an authenticated terminal policy
+		// result. If the whole transaction deadline fired concurrently, bounded
+		// recovery wins; a later whole exchange uses fresh randomness and never
+		// accepts or falls through from this rejected datagram.
 		if transactionCtx.Err() != nil {
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
