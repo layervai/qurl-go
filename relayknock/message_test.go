@@ -772,11 +772,18 @@ func TestSendExchange_InputValidation(t *testing.T) {
 	if err := relayknock.Send(context.Background(), srv.URL, serverPub[:31], []byte("x"), relayknock.KnockOptions{}); err == nil || !strings.Contains(err.Error(), "server static pub") {
 		t.Errorf("Send(short server pub) = %v, want server-static-pub size error", err)
 	}
+	if err := relayknock.Send(context.Background(), srv.URL, make([]byte, 32), []byte("x"), relayknock.KnockOptions{}); err == nil || !strings.Contains(err.Error(), "server static pub") {
+		t.Errorf("Send(low-order server pub) = %v, want unusable-server-key error", err)
+	}
 	if err := relayknock.Send(context.Background(), srv.URL, serverPub, []byte("x"), relayknock.KnockOptions{DeviceStaticPriv: devicePriv[:16]}); err == nil || !strings.Contains(err.Error(), "device static priv") {
 		t.Errorf("Send(short device priv) = %v, want device-static-priv size error", err)
 	}
 	if _, err := relayknock.Exchange(context.Background(), srv.URL, serverPub[:31], relayknock.TypeRegister, []byte("x"), relayknock.KnockOptions{}); err == nil || !strings.Contains(err.Error(), "server static pub") {
 		t.Errorf("Exchange(short server pub) = %v, want server-static-pub size error", err)
+	}
+	nonCanonical := bytes.Repeat([]byte{0xff}, 32)
+	if _, err := relayknock.Exchange(context.Background(), srv.URL, nonCanonical, relayknock.TypeRegister, []byte("x"), relayknock.KnockOptions{}); err == nil || !strings.Contains(err.Error(), "server static pub") {
+		t.Errorf("Exchange(non-canonical server pub) = %v, want unusable-server-key error", err)
 	}
 }
 

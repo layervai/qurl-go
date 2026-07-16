@@ -302,6 +302,9 @@ func (r completionResponse) validate(_ time.Time, errKind error) error {
 	// Completion only corroborates the RAK-authenticated public key. Its host,
 	// port, and lease are never persisted, so irrelevant coordinate defects must
 	// not turn a successfully minted credential into recovery-required ambiguity.
+	// The public key is identity, not a coordinate: require its canonical, usable
+	// X25519 representation before comparing it with the RAK peer. A malformed or
+	// ambiguous identity correctly makes the minted response recovery-required.
 	// Do not replace this with validateNHPServerPeerInfo: registration-info plus
 	// the authenticated RAK are the sole coordinate/lease authority.
 	return validateNHPServerPublicKey(r.NHPServerPeer.PublicKeyB64, "completion response", errKind)

@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/layervai/qurl-go/internal/x25519key"
 )
 
 // defaultBootstrapBaseURL is the LayerV API origin BootstrapAgent uses for the
@@ -77,13 +79,11 @@ type NHPServerPeerInfo struct {
 // secret manager (for example AWS Secrets Manager via a custom AgentStateStore)
 // rather than a world-readable path.
 //
-// Schema evolution (additive, backward compatible): the v2 fields SchemaVersion,
-// DeviceAPIKey, RelayURL, KeyID, and OTPRequestedAt were added for RegisterAgent.
-// They are all json:",omitempty" and the pre-v2 fields are unchanged, so a legacy
-// (bootstrap-era) state file loads and validates without migration, and a v2 file
-// written by RegisterAgent is still readable by older code that ignores the new
-// fields. SchemaVersion is informational; the runtime derives readiness from the
-// fields themselves (RegisteredAt + DeviceAPIKey), never from the version number.
+// Schema evolution is additive and backward compatible. The v2 fields support
+// the legacy HTTPS registration lifecycle; v3 adds Assignment for native UDP.
+// Every added field is json:",omitempty", so legacy files load without migration
+// and older readers can ignore newer fields. SchemaVersion is informational;
+// runtime readiness comes from the fields themselves, never the version number.
 type AgentState struct {
 	AgentID       string             `json:"agent_id,omitempty"`
 	PrivateKeyB64 string             `json:"private_key_b64"`
@@ -114,6 +114,29 @@ type AgentState struct {
 	// can retain it while account-key refresh/recovery is paused after dispatch;
 	// the successful lifecycle resume clears it after RAK.
 	OTPRequestedAt *time.Time `json:"otp_requested_at,omitempty"`
+
+	// --- v3 additive field (native UDP assignment) ---
+
+	// Assignment is the authoritative native-UDP cell assignment (cell,
+	// generation, endpoint revision, lease expiry, and LayerV-owned DNS endpoint)
+	// returned by the hub and persisted so a native registration/knock survives a
+	// restart. It is additive and json:",omitempty", so a pre-assignment state
+	// file loads unchanged. A resolved IP is never persisted here — the endpoint
+	// host is resolved fresh on every exchange.
+	Assignment *AgentAssignment `json:"assignment,omitempty"`
+}
+
+// validateLoadedAgentAssignment checks persisted trust-boundary structure but
+// deliberately permits an expired lease so the caller can refresh it. Concrete
+// stores call it directly; lifecycle loaders repeat it for custom stores.
+func validateLoadedAgentAssignment(state *AgentState) error {
+	if state == nil || state.Assignment == nil {
+		return nil
+	}
+	if err := validatePersistedAgentAssignment(state.Assignment); err != nil {
+		return fmt.Errorf("%w: persisted assignment: %w", ErrInvalidAgentState, err)
+	}
+	return nil
 }
 
 // clone returns an independent mutable snapshot. Strings and scalar fields copy
@@ -137,13 +160,16 @@ func (s *AgentState) clone() *AgentState {
 		requestedAt := *s.OTPRequestedAt
 		cloned.OTPRequestedAt = &requestedAt
 	}
+	if s.Assignment != nil {
+		cloned.Assignment = s.Assignment.clone()
+	}
 	return &cloned
 }
 
 // agentStateSchemaVersion is the current AgentState schema version RegisterAgent
 // stamps into SchemaVersion. Bumped only on an additive field change that older
 // readers can still ignore.
-const agentStateSchemaVersion = 2
+const agentStateSchemaVersion = 3
 
 // AgentStateStore loads and saves the bootstrapped local identity. The
 // file-backed store writes plaintext JSON protected by filesystem permissions;
@@ -190,6 +216,9 @@ func (s fileAgentStateStore) LoadAgentState(ctx context.Context) (*AgentState, e
 	var state AgentState
 	if err := json.Unmarshal(raw, &state); err != nil {
 		return nil, fmt.Errorf("%w: decode agent state: %w", ErrInvalidAgentState, err)
+	}
+	if err := validateLoadedAgentAssignment(&state); err != nil {
+		return nil, err
 	}
 	return &state, nil
 }
@@ -426,13 +455,17 @@ func validateNHPServerPeerInfo(peer NHPServerPeerInfo, now time.Time, requireLiv
 	if peer.Port <= 0 {
 		return fmt.Errorf("%w: %s missing NHP peer port", errKind, label)
 	}
-	if peer.Port > 65535 {
+	if !validNetworkPort(peer.Port) {
 		return fmt.Errorf("%w: %s NHP peer port out of range", errKind, label)
 	}
 	if requireLive && peer.ExpireTime != 0 && peer.ExpireTime <= now.Unix() {
 		return fmt.Errorf("%w: %s NHP peer is expired", errKind, label)
 	}
 	return nil
+}
+
+func validNetworkPort(port int) bool {
+	return port >= 1 && port <= 65535
 }
 
 func validateNHPServerPublicKey(encoded, label string, errKind error) error {
@@ -443,8 +476,8 @@ func validateNHPServerPublicKey(encoded, label string, errKind error) error {
 	if err != nil {
 		return fmt.Errorf("%w: %s NHP peer public key is not standard base64: %w", errKind, label, err)
 	}
-	if _, err := ecdh.X25519().NewPublicKey(peerKey); err != nil {
-		return fmt.Errorf("%w: %s NHP peer public key is not X25519: %w", errKind, label, err)
+	if err := x25519key.ValidatePublic(peerKey); err != nil {
+		return fmt.Errorf("%w: %s NHP peer public key is not a usable X25519 identity: %w", errKind, label, err)
 	}
 	return nil
 }
