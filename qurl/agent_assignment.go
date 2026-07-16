@@ -397,7 +397,15 @@ func runAssignmentExchange[T any](ctx context.Context, c *assignmentConfig, endp
 			return nil, err
 		}
 	}
-	panic("unreachable assignment retry loop")
+	elapsed := c.clock().Sub(start)
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	return nil, &AssignmentRecoveryRequiredError{
+		Attempts: c.maxAttempts,
+		Elapsed:  elapsed,
+		Last:     errors.Join(last, errors.New("assignment retry loop exhausted without a terminal result")),
+	}
 }
 
 func (c *assignmentConfig) recoveryRequired(attempts int, start time.Time, last error) *AssignmentRecoveryRequiredError {
@@ -870,6 +878,7 @@ func fieldSet(fields ...string) map[string]struct{} {
 }
 
 func decodeExactObject(raw []byte, dst any, required []string) error {
+	// The token walk, raw-field map, and typed decode enforce distinct invariants.
 	fields, err := exactObjectFields(raw)
 	if err != nil {
 		return err
