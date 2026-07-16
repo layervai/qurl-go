@@ -371,6 +371,9 @@ func TestHubAssignmentRejectsInvalidInputsBeforeIO(t *testing.T) {
 			if !errors.Is(err, ErrInvalidAssignmentConfig) {
 				t.Fatalf("error = %v, want ErrInvalidAssignmentConfig", err)
 			}
+			if errors.Is(err, ErrAssignmentInvalidResponse) {
+				t.Fatalf("config error leaked response sentinel: %v", err)
+			}
 		})
 	}
 }

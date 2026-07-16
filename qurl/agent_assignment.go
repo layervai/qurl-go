@@ -319,17 +319,9 @@ func FetchInitialAgentAssignment(ctx context.Context, hub HubBootstrap, agentID,
 	}
 	defer wipeBytes(body)
 
-	result, err := cfg.exchange(ctx, endpoint, body, transport, func(reply []byte, now time.Time) (any, error) {
+	return runAssignmentExchange(ctx, cfg, endpoint, body, transport, func(reply []byte, now time.Time) (*InitialAgentAssignment, error) {
 		return parseInitialAssignmentReply(reply, agentID, now)
 	})
-	if err != nil {
-		return nil, err
-	}
-	initial, ok := result.(*InitialAgentAssignment)
-	if !ok {
-		return nil, errors.New("qurl: internal initial assignment result type mismatch")
-	}
-	return initial, nil
 }
 
 // RefreshAgentAssignment sends only the registered Noise identity and stable
@@ -351,22 +343,12 @@ func RefreshAgentAssignment(ctx context.Context, hub HubBootstrap, agentID strin
 	if err != nil {
 		return nil, fmt.Errorf("%w: encode assignment refresh request: %w", ErrInvalidAssignmentConfig, err)
 	}
-	result, err := cfg.exchange(ctx, endpoint, body, transport, func(reply []byte, now time.Time) (any, error) {
+	return runAssignmentExchange(ctx, cfg, endpoint, body, transport, func(reply []byte, now time.Time) (*AgentAssignment, error) {
 		return parseRefreshAssignmentReply(reply, agentID, now)
 	})
-	if err != nil {
-		return nil, err
-	}
-	assignment, ok := result.(*AgentAssignment)
-	if !ok {
-		return nil, errors.New("qurl: internal assignment refresh result type mismatch")
-	}
-	return assignment, nil
 }
 
-type assignmentReplyParser func([]byte, time.Time) (any, error)
-
-func (c *assignmentConfig) exchange(ctx context.Context, endpoint nativeudp.Endpoint, body []byte, transport nativeudp.Options, parse assignmentReplyParser) (any, error) {
+func runAssignmentExchange[T any](ctx context.Context, c *assignmentConfig, endpoint nativeudp.Endpoint, body []byte, transport nativeudp.Options, parse func([]byte, time.Time) (*T, error)) (*T, error) {
 	start := c.clock()
 	transactionCtx, cancel := context.WithTimeout(ctx, c.budget)
 	defer cancel()
@@ -442,7 +424,7 @@ func assignmentRetryInfo(err error) (time.Duration, bool) {
 func (c *assignmentConfig) backoff(attempt int, retryAfter time.Duration) (time.Duration, error) {
 	shift := attempt - 1
 	window := c.maxBackoff
-	if shift >= 0 && shift < 63 && c.minBackoff <= c.maxBackoff>>shift {
+	if shift < 63 && c.minBackoff <= c.maxBackoff>>shift {
 		window = c.minBackoff << shift
 	}
 	jittered, err := c.jitter(window)
@@ -477,8 +459,8 @@ func validateAssignmentInputs(ctx context.Context, hub HubBootstrap, agentID str
 }
 
 func (h HubBootstrap) nativeEndpoint() (nativeudp.Endpoint, error) {
-	if err := validateAssignmentEndpointHost(h.Host); err != nil {
-		return nativeudp.Endpoint{}, fmt.Errorf("%w: invalid hub host: %s", ErrInvalidAssignmentConfig, err.Error())
+	if err := validateAssignmentEndpointHost(h.Host, "hub host", ErrInvalidAssignmentConfig); err != nil {
+		return nativeudp.Endpoint{}, err
 	}
 	if h.Port != standardNHPUDPPort {
 		return nativeudp.Endpoint{}, fmt.Errorf("%w: unsupported hub UDP port %d (want %d)", ErrInvalidAssignmentConfig, h.Port, standardNHPUDPPort)
@@ -559,11 +541,8 @@ func parseInitialAssignmentReply(body []byte, wantAgentID string, now time.Time)
 		[]string{"query", "version", "mode", "agent_id", "registration", "assignment", "assignment_ticket", "assignment_ticket_expires_at"}); err != nil {
 		return nil, invalidAssignmentResponse("initial assignment list", err)
 	}
-	if wire.Query != assignmentQuery || wire.Version != assignmentVersion || wire.Mode != assignmentModeEnroll {
-		return nil, invalidAssignmentResponse("initial assignment list", errors.New("query/version/mode mismatch"))
-	}
-	if wire.AgentID != wantAgentID {
-		return nil, invalidAssignmentResponse("initial assignment list", fmt.Errorf("agent_id %q does not match %q", wire.AgentID, wantAgentID))
+	if err := validateAssignmentListHeader("initial assignment list", wire.Query, wire.Version, wire.Mode, assignmentModeEnroll, wire.AgentID, wantAgentID); err != nil {
+		return nil, err
 	}
 
 	var registration assignmentRegistrationWire
@@ -611,13 +590,20 @@ func parseRefreshAssignmentReply(body []byte, wantAgentID string, now time.Time)
 	if err := decodeExactObject(list, &wire, []string{"query", "version", "mode", "agent_id", "assignment"}); err != nil {
 		return nil, invalidAssignmentResponse("refresh assignment list", err)
 	}
-	if wire.Query != assignmentQuery || wire.Version != assignmentVersion || wire.Mode != assignmentModeRefresh {
-		return nil, invalidAssignmentResponse("refresh assignment list", errors.New("query/version/mode mismatch"))
-	}
-	if wire.AgentID != wantAgentID {
-		return nil, invalidAssignmentResponse("refresh assignment list", fmt.Errorf("agent_id %q does not match %q", wire.AgentID, wantAgentID))
+	if err := validateAssignmentListHeader("refresh assignment list", wire.Query, wire.Version, wire.Mode, assignmentModeRefresh, wire.AgentID, wantAgentID); err != nil {
+		return nil, err
 	}
 	return parseWireAssignment(wire.Assignment, now)
+}
+
+func validateAssignmentListHeader(part, query string, version int, mode, wantMode, agentID, wantAgentID string) error {
+	if query != assignmentQuery || version != assignmentVersion || mode != wantMode {
+		return invalidAssignmentResponse(part, errors.New("query/version/mode mismatch"))
+	}
+	if agentID != wantAgentID {
+		return invalidAssignmentResponse(part, fmt.Errorf("agent_id %q does not match %q", agentID, wantAgentID))
+	}
+	return nil
 }
 
 func parseAssignmentEnvelope(body []byte, initial bool) (json.RawMessage, error) {
@@ -745,7 +731,7 @@ func validateAgentAssignment(a *AgentAssignment, now time.Time) error {
 	if !a.LeaseExpiresAt.After(now) {
 		return invalidAssignmentResponse("assignment", errors.New("lease must be in the future"))
 	}
-	if err := validateAssignmentEndpointHost(a.Endpoint.Host); err != nil {
+	if err := validateAssignmentEndpointHost(a.Endpoint.Host, "assignment endpoint", ErrAssignmentInvalidResponse); err != nil {
 		return err
 	}
 	if !validNetworkPort(a.Endpoint.Port) {
@@ -776,18 +762,18 @@ func validateAssignmentAgentID(agentID string) error {
 	return nil
 }
 
-func validateAssignmentEndpointHost(host string) error {
+func validateAssignmentEndpointHost(host, part string, errKind error) error {
 	if host == "" || len(host) > 253 || host != strings.ToLower(host) || strings.HasSuffix(host, ".") || net.ParseIP(host) != nil {
-		return invalidAssignmentResponse("assignment endpoint", errors.New("host must be a canonical lowercase DNS name"))
+		return fmt.Errorf("%w: %s: host must be a canonical lowercase DNS name", errKind, part)
 	}
 	labels := strings.Split(host, ".")
 	for _, label := range labels {
 		if !validAssignmentDNSLabel(label) {
-			return invalidAssignmentResponse("assignment endpoint", errors.New("host must be a canonical lowercase DNS name"))
+			return fmt.Errorf("%w: %s: host must be a canonical lowercase DNS name", errKind, part)
 		}
 	}
 	if !strings.HasSuffix(host, ".layerv.ai") && !strings.HasSuffix(host, ".layerv.xyz") {
-		return invalidAssignmentResponse("assignment endpoint", errors.New("host must be below a LayerV-owned DNS apex"))
+		return fmt.Errorf("%w: %s: host must be below a LayerV-owned DNS apex", errKind, part)
 	}
 	return nil
 }
