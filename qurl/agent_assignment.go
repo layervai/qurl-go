@@ -32,6 +32,7 @@ const (
 	assignmentASPID          = "agent"
 	standardNHPUDPPort       = 62206
 	maxAssignmentTicketBytes = 2048
+	maxAssignmentJSONDepth   = 64
 
 	defaultAssignmentMaxAttempts = 4
 	defaultAssignmentBudget      = 30 * time.Second
@@ -298,7 +299,8 @@ func sleepAssignmentBackoff(ctx context.Context, delay time.Duration) error {
 // transport.DeviceStaticPriv is the Noise initiator identity. The returned
 // registration metadata and ticket are attempt-scoped and must not be persisted.
 func FetchInitialAgentAssignment(ctx context.Context, hub HubBootstrap, agentID, enrollmentCredential string, transport nativeudp.Options, opts ...AssignmentOption) (*InitialAgentAssignment, error) {
-	if err := validateAssignmentInputs(ctx, hub, agentID, transport); err != nil {
+	endpoint, err := validateAssignmentInputs(ctx, hub, agentID, transport)
+	if err != nil {
 		return nil, err
 	}
 	if err := validateExactBearerToken(enrollmentCredential, "assignment enrollment credential", ErrInvalidAssignmentConfig); err != nil {
@@ -317,10 +319,6 @@ func FetchInitialAgentAssignment(ctx context.Context, hub HubBootstrap, agentID,
 	}
 	defer wipeBytes(body)
 
-	endpoint, err := hub.nativeEndpoint()
-	if err != nil {
-		return nil, err
-	}
 	result, err := cfg.exchange(ctx, endpoint, body, transport, func(reply []byte, now time.Time) (any, error) {
 		return parseInitialAssignmentReply(reply, agentID, now)
 	})
@@ -338,7 +336,8 @@ func FetchInitialAgentAssignment(ctx context.Context, hub HubBootstrap, agentID,
 // final agentID to the hub. The body has empty usrId and no enrollment or device
 // credential. A successful refresh returns only durable assignment state.
 func RefreshAgentAssignment(ctx context.Context, hub HubBootstrap, agentID string, transport nativeudp.Options, opts ...AssignmentOption) (*AgentAssignment, error) {
-	if err := validateAssignmentInputs(ctx, hub, agentID, transport); err != nil {
+	endpoint, err := validateAssignmentInputs(ctx, hub, agentID, transport)
+	if err != nil {
 		return nil, err
 	}
 	cfg, err := newAssignmentConfig(opts)
@@ -351,10 +350,6 @@ func RefreshAgentAssignment(ctx context.Context, hub HubBootstrap, agentID strin
 	})
 	if err != nil {
 		return nil, fmt.Errorf("%w: encode assignment refresh request: %w", ErrInvalidAssignmentConfig, err)
-	}
-	endpoint, err := hub.nativeEndpoint()
-	if err != nil {
-		return nil, err
 	}
 	result, err := cfg.exchange(ctx, endpoint, body, transport, func(reply []byte, now time.Time) (any, error) {
 		return parseRefreshAssignmentReply(reply, agentID, now)
@@ -468,18 +463,17 @@ func cryptoAssignmentJitter(window time.Duration) (time.Duration, error) {
 	return time.Duration(random), nil
 }
 
-func validateAssignmentInputs(ctx context.Context, hub HubBootstrap, agentID string, transport nativeudp.Options) error {
+func validateAssignmentInputs(ctx context.Context, hub HubBootstrap, agentID string, transport nativeudp.Options) (nativeudp.Endpoint, error) {
 	if err := validateContext(ctx, ErrInvalidAssignmentConfig); err != nil {
-		return err
+		return nativeudp.Endpoint{}, err
 	}
 	if err := validateAssignmentAgentID(agentID); err != nil {
-		return err
+		return nativeudp.Endpoint{}, err
 	}
 	if len(transport.DeviceStaticPriv) != x25519key.Size {
-		return fmt.Errorf("%w: assignment initiator private key must be %d bytes", ErrInvalidAssignmentConfig, x25519key.Size)
+		return nativeudp.Endpoint{}, fmt.Errorf("%w: assignment initiator private key must be %d bytes", ErrInvalidAssignmentConfig, x25519key.Size)
 	}
-	_, err := hub.nativeEndpoint()
-	return err
+	return hub.nativeEndpoint()
 }
 
 func (h HubBootstrap) nativeEndpoint() (nativeudp.Endpoint, error) {
@@ -639,7 +633,7 @@ func parseAssignmentEnvelope(body []byte, initial bool) (json.RawMessage, error)
 		return nil, invalidAssignmentResponse("LRT envelope", err)
 	}
 	var envelope assignmentEnvelope
-	if err := decodeJSON(body, &envelope); err != nil {
+	if err := strictDecodeJSON(body, &envelope); err != nil {
 		return nil, invalidAssignmentResponse("LRT envelope", err)
 	}
 	if envelope.ErrCode == "0" {
@@ -662,6 +656,8 @@ func classifyAssignmentApplicationError(envelope assignmentEnvelope, fields map[
 		return invalidAssignmentResponse("error LRT envelope", errors.New("errMsg must be a string when present"))
 	}
 	var kind error
+	// These flags describe the authenticated error body's retryAfterSeconds wire
+	// grammar. Transaction retry policy is decided separately by assignmentRetryInfo.
 	retryPermitted := false
 	retryRequired := false
 	switch envelope.ErrCode {
@@ -901,7 +897,7 @@ func decodeExactObject(raw []byte, dst any, required []string) error {
 			return fmt.Errorf("missing required field %q", field)
 		}
 	}
-	return decodeJSON(raw, dst)
+	return strictDecodeJSON(raw, dst)
 }
 
 func rejectUnknownFields(fields map[string]json.RawMessage, allowed map[string]struct{}) error {
@@ -909,18 +905,6 @@ func rejectUnknownFields(fields map[string]json.RawMessage, allowed map[string]s
 		if _, ok := allowed[field]; !ok {
 			return fmt.Errorf("unknown field %q", field)
 		}
-	}
-	return nil
-}
-
-func decodeJSON(raw []byte, dst any) error {
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(dst); err != nil {
-		return err
-	}
-	if _, err := decoder.Token(); err != io.EOF {
-		return errors.New("trailing JSON value")
 	}
 	return nil
 }
@@ -938,7 +922,7 @@ func exactObjectFields(raw []byte) (map[string]json.RawMessage, error) {
 	if delim, ok := token.(json.Delim); !ok || delim != '{' {
 		return nil, errors.New("top-level value must be an object")
 	}
-	if err := walkJSONObject(decoder); err != nil {
+	if err := walkJSONObject(decoder, 1); err != nil {
 		return nil, err
 	}
 	if _, err := decoder.Token(); err != io.EOF {
@@ -954,7 +938,7 @@ func exactObjectFields(raw []byte) (map[string]json.RawMessage, error) {
 	return fields, nil
 }
 
-func walkJSONObject(decoder *json.Decoder) error {
+func walkJSONObject(decoder *json.Decoder, depth int) error {
 	seen := make(map[string]struct{})
 	for decoder.More() {
 		token, err := decoder.Token()
@@ -969,7 +953,7 @@ func walkJSONObject(decoder *json.Decoder) error {
 			return fmt.Errorf("duplicate field %q", key)
 		}
 		seen[key] = struct{}{}
-		if err := walkJSONValue(decoder); err != nil {
+		if err := walkJSONValue(decoder, depth); err != nil {
 			return err
 		}
 	}
@@ -983,7 +967,7 @@ func walkJSONObject(decoder *json.Decoder) error {
 	return nil
 }
 
-func walkJSONValue(decoder *json.Decoder) error {
+func walkJSONValue(decoder *json.Decoder, parentDepth int) error {
 	token, err := decoder.Token()
 	if err != nil {
 		return err
@@ -992,12 +976,16 @@ func walkJSONValue(decoder *json.Decoder) error {
 	if !ok {
 		return nil
 	}
+	depth := parentDepth + 1
+	if depth > maxAssignmentJSONDepth {
+		return fmt.Errorf("JSON nesting exceeds %d levels", maxAssignmentJSONDepth)
+	}
 	switch delim {
 	case '{':
-		return walkJSONObject(decoder)
+		return walkJSONObject(decoder, depth)
 	case '[':
 		for decoder.More() {
-			if err := walkJSONValue(decoder); err != nil {
+			if err := walkJSONValue(decoder, depth); err != nil {
 				return err
 			}
 		}

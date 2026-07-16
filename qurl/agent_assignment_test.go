@@ -479,6 +479,13 @@ func TestExactObjectFieldsRejectsNestedDuplicateAndTrailing(t *testing.T) {
 			t.Fatalf("strict parser accepted %s", raw)
 		}
 	}
+	deep := append([]byte(`{"value":`), bytes.Repeat([]byte("["), maxAssignmentJSONDepth)...)
+	deep = append(deep, '0')
+	deep = append(deep, bytes.Repeat([]byte("]"), maxAssignmentJSONDepth)...)
+	deep = append(deep, '}')
+	if _, err := exactObjectFields(deep); err == nil {
+		t.Fatalf("strict parser accepted %d-level nested value", maxAssignmentJSONDepth+1)
+	}
 }
 
 func TestAssignmentErrorRejectsNullDiagnostic(t *testing.T) {
