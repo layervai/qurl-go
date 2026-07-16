@@ -367,8 +367,8 @@ func runAssignmentExchange[T any](ctx context.Context, c *assignmentConfig, endp
 	defer cancel()
 	for attempt := 1; ; attempt++ {
 		reply, err := nativeudp.List(transactionCtx, endpoint, body, transport)
-		authenticatedReply := err == nil
-		if authenticatedReply {
+		replyAuthenticated := err == nil
+		if replyAuthenticated {
 			result, parseErr := parse(reply.Body, c.clock())
 			if parseErr == nil {
 				return result, nil
@@ -376,7 +376,7 @@ func runAssignmentExchange[T any](ctx context.Context, c *assignmentConfig, endp
 			err = parseErr
 		}
 		retryAfter, retryable := assignmentRetryInfo(err)
-		if authenticatedReply && !retryable {
+		if replyAuthenticated && !retryable {
 			// A parsed authenticated terminal result wins over a retry-budget
 			// deadline that fires concurrently. In particular, identity rejection
 			// must remain terminal rather than being recast as recovery permission.
@@ -883,6 +883,9 @@ func validateOpaqueAssignmentTicket(ticket string) error {
 }
 
 func parseCanonicalRFC3339(value string) (time.Time, error) {
+	// qurl-conformance v0.3.0 freezes hub response timestamps as UTC with a
+	// trailing Z and no fractional seconds; alternate RFC3339 spellings are not
+	// part of the producer contract.
 	parsed, err := time.Parse(time.RFC3339, value)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("must be RFC3339: %w", err)
