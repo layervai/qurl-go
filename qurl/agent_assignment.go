@@ -85,7 +85,9 @@ type AssignmentRegistration struct {
 // InitialAgentAssignment is the validated initial hub result. Registration,
 // AssignmentTicket, and AssignmentTicketExpiresAt are intentionally ephemeral:
 // only Assignment belongs in AgentState. A lost/expired attempt obtains a fresh
-// ticket rather than persisting and replaying this one-shot authorization.
+// ticket rather than persisting and replaying this one-shot authorization. This
+// transport slice treats the ticket as 1-2304 opaque printable non-space ASCII
+// bytes (0x21-0x7e); assigned-cell registration owns qat1 semantic validation.
 type InitialAgentAssignment struct {
 	Registration              AssignmentRegistration
 	Assignment                AgentAssignment

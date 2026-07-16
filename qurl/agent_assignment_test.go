@@ -452,6 +452,31 @@ func TestAgentAssignmentCloneAndLease(t *testing.T) {
 	}
 }
 
+func TestAgentAssignmentDecodedServerKeyRevalidatesState(t *testing.T) {
+	fixture := loadAssignmentFixture(t)
+	initial, err := parseInitialAssignmentReply([]byte(fixture.InitialAssignment.Result.BodyJSON), "agent-conform", assignmentFixtureNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := initial.Assignment.DecodedServerKey()
+	if err != nil {
+		t.Fatalf("DecodedServerKey: %v", err)
+	}
+	if want := assignmentHex(t, fixture.Keys.AssignedCell.StaticPubHex); !bytes.Equal(decoded, want) {
+		t.Fatalf("decoded server key = %x, want %x", decoded, want)
+	}
+
+	tampered := initial.Assignment
+	tampered.Endpoint.ServerPublicKeyB64 = base64.StdEncoding.EncodeToString(make([]byte, 32))
+	if _, err := tampered.DecodedServerKey(); !errors.Is(err, ErrAssignmentInvalidResponse) {
+		t.Fatalf("tampered persisted key error = %v, want ErrAssignmentInvalidResponse", err)
+	}
+	var absent *AgentAssignment
+	if _, err := absent.DecodedServerKey(); !errors.Is(err, ErrAssignmentInvalidResponse) {
+		t.Fatalf("nil assignment key error = %v, want ErrAssignmentInvalidResponse", err)
+	}
+}
+
 func TestInitialAssignmentDeadlineClocksAreIndependent(t *testing.T) {
 	fixture := loadAssignmentFixture(t)
 	packetTimeNanos, err := strconv.ParseInt(fixture.InitialAssignment.Result.TimestampNanos, 10, 64)
