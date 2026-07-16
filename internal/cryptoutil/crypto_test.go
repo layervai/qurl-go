@@ -15,6 +15,25 @@ func TestRandomValues(t *testing.T) {
 	if len(b) != 32 {
 		t.Fatalf("RandomBytes length = %d, want 32", len(b))
 	}
+	for _, upperBound := range []int64{1, 2, 7, math.MaxInt64} {
+		for range 100 {
+			value, err := RandomInt64n(upperBound)
+			if err != nil {
+				t.Fatalf("RandomInt64n(%d): %v", upperBound, err)
+			}
+			if value < 0 || value >= upperBound {
+				t.Fatalf("RandomInt64n(%d) = %d", upperBound, value)
+			}
+		}
+	}
+	for _, upperBound := range []int64{0, -1, math.MinInt64} {
+		if _, err := RandomInt64n(upperBound); err == nil {
+			t.Fatalf("RandomInt64n(%d) succeeded", upperBound)
+		}
+	}
+}
+
+func TestRandomIntegerByteOrder(t *testing.T) {
 	originalReader := rand.Reader
 	t.Cleanup(func() { rand.Reader = originalReader })
 	rand.Reader = bytes.NewReader([]byte{
@@ -34,23 +53,6 @@ func TestRandomValues(t *testing.T) {
 	}
 	if value32 != 0x090a0b0c {
 		t.Fatalf("RandomUint32 = %#x, want %#x", value32, uint32(0x090a0b0c))
-	}
-	rand.Reader = originalReader
-	for _, upperBound := range []int64{1, 2, 7, math.MaxInt64} {
-		for range 100 {
-			value, err := RandomInt64n(upperBound)
-			if err != nil {
-				t.Fatalf("RandomInt64n(%d): %v", upperBound, err)
-			}
-			if value < 0 || value >= upperBound {
-				t.Fatalf("RandomInt64n(%d) = %d", upperBound, value)
-			}
-		}
-	}
-	for _, upperBound := range []int64{0, -1, math.MinInt64} {
-		if _, err := RandomInt64n(upperBound); err == nil {
-			t.Fatalf("RandomInt64n(%d) succeeded", upperBound)
-		}
 	}
 }
 

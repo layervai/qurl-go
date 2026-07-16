@@ -931,7 +931,9 @@ func invalidAssignmentResponse(part string, cause error) error {
 }
 
 func decodeExactObject(raw []byte, dst any, required []string) error {
-	// The token walk, raw-field map, and typed decode enforce distinct invariants.
+	// These intentionally separate passes enforce distinct invariants: the token
+	// walk rejects duplicates, the map checks presence, and the typed decode pins
+	// each phase's exact allowlist and value types.
 	fields, err := exactObjectFields(raw)
 	if err != nil {
 		return err
