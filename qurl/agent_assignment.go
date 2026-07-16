@@ -82,8 +82,8 @@ type AgentAssignment struct {
 // particular, callers must not copy it into AgentState.KeyID, which belongs to
 // the separate legacy HTTPS registration lifecycle.
 type AssignmentRegistration struct {
-	KeyID   string
-	KeyKind string
+	KeyID   string `json:"key_id"`
+	KeyKind string `json:"key_kind"`
 }
 
 // InitialAgentAssignment is the validated initial hub result. Registration,
@@ -575,11 +575,6 @@ type refreshAssignmentList struct {
 	Assignment json.RawMessage `json:"assignment"`
 }
 
-type assignmentRegistrationWire struct {
-	KeyID   string `json:"key_id"`
-	KeyKind string `json:"key_kind"`
-}
-
 type assignmentWire struct {
 	CellID               string          `json:"cell_id"`
 	AssignmentGeneration int64           `json:"assignment_generation"`
@@ -602,7 +597,7 @@ func parseInitialAssignmentReply(body []byte, wantAgentID string, now time.Time)
 		return nil, err
 	}
 
-	var registration assignmentRegistrationWire
+	var registration AssignmentRegistration
 	if err := decodeExactObject(wire.Registration, &registration, []string{"key_id", "key_kind"}); err != nil {
 		return nil, invalidAssignmentResponse("initial registration metadata", err)
 	}
@@ -631,7 +626,7 @@ func parseInitialAssignmentReply(body []byte, wantAgentID string, now time.Time)
 		return nil, invalidAssignmentResponse("initial assignment deadlines", errors.New("ticket must expire before lease"))
 	}
 	return &InitialAgentAssignment{
-		Registration:              AssignmentRegistration(registration),
+		Registration:              registration,
 		Assignment:                *assignment,
 		AssignmentTicket:          wire.AssignmentTicket,
 		AssignmentTicketExpiresAt: ticketExpiry,
