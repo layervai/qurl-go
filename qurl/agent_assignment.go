@@ -204,8 +204,6 @@ func (e *AssignmentRecoveryRequiredError) Unwrap() []error {
 type assignmentConfig struct {
 	maxAttempts int
 	budget      time.Duration
-	minBackoff  time.Duration
-	maxBackoff  time.Duration
 	clock       func() time.Time
 	sleep       func(context.Context, time.Duration) error
 	jitter      func(time.Duration) (time.Duration, error)
@@ -271,8 +269,6 @@ func newAssignmentConfig(opts []AssignmentOption) (*assignmentConfig, error) {
 	c := &assignmentConfig{
 		maxAttempts: defaultAssignmentMaxAttempts,
 		budget:      defaultAssignmentBudget,
-		minBackoff:  defaultAssignmentMinBackoff,
-		maxBackoff:  defaultAssignmentMaxBackoff,
 		clock:       time.Now,
 		sleep:       sleepAssignmentBackoff,
 		jitter:      cryptoAssignmentJitter,
@@ -438,9 +434,9 @@ func assignmentRetryInfo(err error) (time.Duration, bool) {
 
 func (c *assignmentConfig) backoff(attempt int, retryAfter time.Duration) (time.Duration, error) {
 	shift := attempt - 1
-	window := c.maxBackoff
-	if shift < 63 && c.minBackoff <= c.maxBackoff>>shift {
-		window = c.minBackoff << shift
+	window := defaultAssignmentMaxBackoff
+	if shift < 63 && defaultAssignmentMinBackoff <= defaultAssignmentMaxBackoff>>shift {
+		window = defaultAssignmentMinBackoff << shift
 	}
 	jittered, err := c.jitter(window)
 	if err != nil {
