@@ -29,7 +29,6 @@ const (
 	assignmentVersion        = 1
 	assignmentModeEnroll     = "enroll"
 	assignmentModeRefresh    = "refresh"
-	assignmentASPID          = "agent"
 	standardNHPUDPPort       = 62206
 	maxAssignmentTicketBytes = 2048
 	maxAssignmentJSONDepth   = 64
@@ -318,7 +317,7 @@ func FetchInitialAgentAssignment(ctx context.Context, hub HubBootstrap, agentID,
 		return nil, err
 	}
 	body, err := json.Marshal(assignmentListRequest[assignmentEnrollData]{
-		UsrID: "", DevID: agentID, AspID: assignmentASPID,
+		UsrID: "", DevID: agentID, AspID: agentAspID,
 		UsrData: assignmentEnrollData{Query: assignmentQuery, Version: assignmentVersion, Mode: assignmentModeEnroll, Credential: enrollmentCredential},
 	})
 	if err != nil {
@@ -344,7 +343,7 @@ func RefreshAgentAssignment(ctx context.Context, hub HubBootstrap, agentID strin
 		return nil, err
 	}
 	body, err := json.Marshal(assignmentListRequest[assignmentRefreshData]{
-		UsrID: "", DevID: agentID, AspID: assignmentASPID,
+		UsrID: "", DevID: agentID, AspID: agentAspID,
 		UsrData: assignmentRefreshData{Query: assignmentQuery, Version: assignmentVersion, Mode: assignmentModeRefresh},
 	})
 	if err != nil {
