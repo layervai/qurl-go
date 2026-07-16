@@ -237,7 +237,7 @@ func TestHubAssignmentRetriesOnlyBoundedRetryableResults(t *testing.T) {
 	slept = nil
 	_, err = RefreshAgentAssignment(context.Background(), hub, "agent-conform", transport, deterministicAssignmentOptions(&slept, 2)...)
 	var recovery *AssignmentRecoveryRequiredError
-	if !errors.As(err, &recovery) || !errors.Is(err, ErrAssignmentRecoveryRequired) || !errors.Is(err, ErrAssignmentUnavailable) || recovery.Attempts != 2 {
+	if !errors.As(err, &recovery) || !errors.Is(err, ErrAssignmentRecoveryRequired) || !errors.Is(err, ErrAssignmentUnavailable) || recovery.Attempts != 2 || recovery.Elapsed != 0 {
 		t.Fatalf("exhaustion error = %#v, want typed recovery/unavailable", err)
 	}
 	if len(server.requestBodies()) != 2 {
@@ -379,7 +379,7 @@ func TestHubAssignmentRetryBudgetBoundsInFlightUDP(t *testing.T) {
 		WithAssignmentRetryBudget(4, 50*time.Millisecond),
 	)
 	var recovery *AssignmentRecoveryRequiredError
-	if !errors.As(err, &recovery) || !errors.Is(err, ErrAssignmentRecoveryRequired) || recovery.Attempts != 1 {
+	if !errors.As(err, &recovery) || !errors.Is(err, ErrAssignmentRecoveryRequired) || recovery.Attempts != 1 || recovery.Elapsed < 50*time.Millisecond {
 		t.Fatalf("error = %#v, want one-attempt recovery-required", err)
 	}
 	if elapsed := time.Since(started); elapsed >= time.Second {
