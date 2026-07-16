@@ -34,6 +34,11 @@ const (
 	maxAssignmentTicketBytes = 2048
 	maxAssignmentJSONDepth   = 64
 
+	// These suffixes are a release-gated trust allowlist, not runtime
+	// configuration. Adding an endpoint apex requires an SDK release.
+	assignmentEndpointSuffixAI  = ".layerv.ai"
+	assignmentEndpointSuffixXYZ = ".layerv.xyz"
+
 	defaultAssignmentMaxAttempts = 4
 	defaultAssignmentBudget      = 30 * time.Second
 	defaultAssignmentMinBackoff  = 500 * time.Millisecond
@@ -634,7 +639,7 @@ func parseAssignmentEnvelope(body []byte, initial bool) (json.RawMessage, error)
 		if len(fields) != 2 || fields["list"] == nil {
 			return nil, invalidAssignmentResponse("success LRT envelope", errors.New("must contain exactly errCode and list"))
 		}
-		if bytes.Equal(bytes.TrimSpace(envelope.List), []byte("null")) {
+		if isJSONNull(envelope.List) {
 			return nil, invalidAssignmentResponse("success LRT envelope", errors.New("list must be an object"))
 		}
 		return envelope.List, nil
@@ -646,7 +651,7 @@ func parseAssignmentEnvelope(body []byte, initial bool) (json.RawMessage, error)
 }
 
 func classifyAssignmentApplicationError(envelope assignmentEnvelope, fields map[string]json.RawMessage, initial bool) error {
-	if rawMessage, present := fields["errMsg"]; present && bytes.Equal(bytes.TrimSpace(rawMessage), []byte("null")) {
+	if rawMessage, present := fields["errMsg"]; present && isJSONNull(rawMessage) {
 		return invalidAssignmentResponse("error LRT envelope", errors.New("errMsg must be a string when present"))
 	}
 	var kind error
@@ -688,7 +693,7 @@ func classifyAssignmentApplicationError(envelope assignmentEnvelope, fields map[
 		return invalidAssignmentResponse("error LRT envelope", fmt.Errorf("unknown or phase-invalid errCode %q", envelope.ErrCode))
 	}
 
-	rawRetry, retryPresent := fields["retryAfterSeconds"]
+	_, retryPresent := fields["retryAfterSeconds"]
 	if retryRequired && !retryPresent {
 		return invalidAssignmentResponse("error LRT envelope", errors.New("retryAfterSeconds is required"))
 	}
@@ -697,7 +702,7 @@ func classifyAssignmentApplicationError(envelope assignmentEnvelope, fields map[
 	}
 	var retryAfter time.Duration
 	if retryPresent {
-		if envelope.RetryAfterSeconds == nil || bytes.Equal(bytes.TrimSpace(rawRetry), []byte("null")) || *envelope.RetryAfterSeconds <= 0 || *envelope.RetryAfterSeconds > math.MaxInt64/int64(time.Second) {
+		if envelope.RetryAfterSeconds == nil || *envelope.RetryAfterSeconds <= 0 || *envelope.RetryAfterSeconds > math.MaxInt64/int64(time.Second) {
 			return invalidAssignmentResponse("error LRT envelope", errors.New("retryAfterSeconds must be a positive bounded integer"))
 		}
 		retryAfter = time.Duration(*envelope.RetryAfterSeconds) * time.Second
@@ -756,7 +761,7 @@ func validateAssignmentAgentID(agentID string) error {
 		return fmt.Errorf("%w: agent id must be 2-64 characters", ErrInvalidAssignmentConfig)
 	}
 	for i, b := range []byte(agentID) {
-		alphaNumeric := b >= 'a' && b <= 'z' || b >= '0' && b <= '9'
+		alphaNumeric := isASCIILowerAlnum(b)
 		if i == 0 || i == len(agentID)-1 {
 			if !alphaNumeric {
 				return fmt.Errorf("%w: agent id must start and end with a lowercase letter or digit", ErrInvalidAssignmentConfig)
@@ -780,7 +785,7 @@ func validateAssignmentEndpointHost(host, part string, errKind error) error {
 			return fmt.Errorf("%w: %s: host must be a canonical lowercase DNS name", errKind, part)
 		}
 	}
-	if !strings.HasSuffix(host, ".layerv.ai") && !strings.HasSuffix(host, ".layerv.xyz") {
+	if !strings.HasSuffix(host, assignmentEndpointSuffixAI) && !strings.HasSuffix(host, assignmentEndpointSuffixXYZ) {
 		return fmt.Errorf("%w: %s: host must be below a LayerV-owned DNS apex", errKind, part)
 	}
 	return nil
@@ -791,7 +796,7 @@ func validAssignmentDNSLabel(label string) bool {
 		return false
 	}
 	for _, b := range []byte(label) {
-		if b >= 'a' && b <= 'z' || b >= '0' && b <= '9' || b == '-' {
+		if isASCIILowerLDH(b) {
 			continue
 		}
 		return false
@@ -804,7 +809,7 @@ func validAssignmentCellID(cellID string) bool {
 		return false
 	}
 	for _, b := range []byte(cellID[1:]) {
-		if b >= 'a' && b <= 'z' || b >= '0' && b <= '9' || b == '-' {
+		if isASCIILowerLDH(b) {
 			continue
 		}
 		return false
@@ -817,12 +822,28 @@ func validAgentAPIKeyID(id string) bool {
 		return false
 	}
 	for _, b := range []byte(id[len("key_"):]) {
-		if b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9' {
+		if isASCIIAlnum(b) {
 			continue
 		}
 		return false
 	}
 	return true
+}
+
+func isJSONNull(raw json.RawMessage) bool {
+	return bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
+}
+
+func isASCIILowerAlnum(b byte) bool {
+	return b >= 'a' && b <= 'z' || b >= '0' && b <= '9'
+}
+
+func isASCIILowerLDH(b byte) bool {
+	return isASCIILowerAlnum(b) || b == '-'
+}
+
+func isASCIIAlnum(b byte) bool {
+	return isASCIILowerAlnum(b) || b >= 'A' && b <= 'Z'
 }
 
 func validPublicRegistrationKeyKind(kind string) bool {
