@@ -353,10 +353,12 @@ func RefreshAgentAssignment(ctx context.Context, hub HubBootstrap, agentID strin
 
 func runAssignmentExchange[T any](ctx context.Context, c *assignmentConfig, endpoint nativeudp.Endpoint, body []byte, transport nativeudp.Options, parse func([]byte, time.Time) (*T, error)) (*T, error) {
 	start := c.clock()
+	if c.maxAttempts < 1 {
+		return nil, c.recoveryAt(0, 0, errors.New("assignment retry config has no attempts"))
+	}
 	transactionCtx, cancel := context.WithTimeout(ctx, c.budget)
 	defer cancel()
-	var last error
-	for attempt := 1; attempt <= c.maxAttempts; attempt++ {
+	for attempt := 1; ; attempt++ {
 		reply, err := nativeudp.List(transactionCtx, endpoint, body, transport)
 		authenticatedReply := err == nil
 		if authenticatedReply {
@@ -366,7 +368,6 @@ func runAssignmentExchange[T any](ctx context.Context, c *assignmentConfig, endp
 			}
 			err = parseErr
 		}
-		last = err
 		retryAfter, retryable := assignmentRetryInfo(err)
 		if authenticatedReply && !retryable {
 			// A parsed authenticated terminal result wins over a retry-budget
@@ -378,38 +379,36 @@ func runAssignmentExchange[T any](ctx context.Context, c *assignmentConfig, endp
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
-			return nil, c.recoveryRequired(attempt, start, errors.Join(last, transactionCtx.Err()))
+			return nil, c.recoveryRequired(attempt, start, errors.Join(err, transactionCtx.Err()))
 		}
 		if !retryable {
 			return nil, err
 		}
 		elapsed := c.elapsedSince(start)
 		if attempt == c.maxAttempts || elapsed >= c.budget {
-			return nil, &AssignmentRecoveryRequiredError{Attempts: attempt, Elapsed: elapsed, Last: last}
+			return nil, c.recoveryAt(attempt, elapsed, err)
 		}
-		delay, err := c.backoff(attempt, retryAfter)
-		if err != nil {
-			return nil, &AssignmentRecoveryRequiredError{Attempts: attempt, Elapsed: elapsed, Last: errors.Join(last, err)}
+		delay, backoffErr := c.backoff(attempt, retryAfter)
+		if backoffErr != nil {
+			return nil, c.recoveryAt(attempt, elapsed, errors.Join(err, backoffErr))
 		}
 		if delay > c.budget-elapsed {
-			return nil, &AssignmentRecoveryRequiredError{Attempts: attempt, Elapsed: elapsed, Last: last}
+			return nil, c.recoveryAt(attempt, elapsed, err)
 		}
-		if err := c.sleep(transactionCtx, delay); err != nil {
+		if sleepErr := c.sleep(transactionCtx, delay); sleepErr != nil {
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
 			if transactionCtx.Err() != nil {
-				return nil, c.recoveryRequired(attempt, start, errors.Join(last, transactionCtx.Err()))
+				return nil, c.recoveryRequired(attempt, start, errors.Join(err, transactionCtx.Err()))
 			}
-			return nil, err
+			return nil, sleepErr
 		}
 	}
-	elapsed := c.elapsedSince(start)
-	return nil, &AssignmentRecoveryRequiredError{
-		Attempts: c.maxAttempts,
-		Elapsed:  elapsed,
-		Last:     errors.Join(last, errors.New("assignment retry loop exhausted without a terminal result")),
-	}
+}
+
+func (c *assignmentConfig) recoveryAt(attempts int, elapsed time.Duration, last error) *AssignmentRecoveryRequiredError {
+	return &AssignmentRecoveryRequiredError{Attempts: attempts, Elapsed: elapsed, Last: last}
 }
 
 func (c *assignmentConfig) recoveryRequired(attempts int, start time.Time, last error) *AssignmentRecoveryRequiredError {
@@ -419,7 +418,7 @@ func (c *assignmentConfig) recoveryRequired(attempts int, start time.Time, last 
 		// moves backward. Report the budget that was actually exhausted.
 		elapsed = c.budget
 	}
-	return &AssignmentRecoveryRequiredError{Attempts: attempts, Elapsed: elapsed, Last: last}
+	return c.recoveryAt(attempts, elapsed, last)
 }
 
 func (c *assignmentConfig) elapsedSince(start time.Time) time.Duration {
