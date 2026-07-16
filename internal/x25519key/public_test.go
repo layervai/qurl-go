@@ -4,6 +4,7 @@ import (
 	"crypto/ecdh"
 	"crypto/rand"
 	"encoding/base64"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -19,6 +20,13 @@ func TestDecodeCanonicalBase64(t *testing.T) {
 	}
 	if _, err := DecodeCanonicalBase64(base64.RawStdEncoding.EncodeToString(key.PublicKey().Bytes())); err == nil {
 		t.Fatal("unpadded identity must be rejected")
+	}
+	if _, err := DecodeCanonicalBase64("not-base64!"); err == nil || !strings.Contains(err.Error(), "decode padded standard base64") {
+		t.Fatalf("invalid-alphabet error = %v, want base64 decode error", err)
+	}
+	withNewline := encoded[:4] + "\n" + encoded[4:]
+	if _, err := DecodeCanonicalBase64(withNewline); err == nil || !strings.Contains(err.Error(), "not canonical padded standard base64") {
+		t.Fatalf("alternate-spelling error = %v, want canonicalization error", err)
 	}
 }
 

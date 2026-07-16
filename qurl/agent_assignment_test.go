@@ -53,6 +53,12 @@ func (assignmentTestResolver) LookupNetIP(context.Context, string, string) ([]ne
 	return []netip.Addr{netip.MustParseAddr("8.8.8.8")}, nil
 }
 
+type assignmentTestResolverFunc func(context.Context, string, string) ([]netip.Addr, error)
+
+func (f assignmentTestResolverFunc) LookupNetIP(ctx context.Context, network, host string) ([]netip.Addr, error) {
+	return f(ctx, network, host)
+}
+
 type assignmentTestDialer struct{ target string }
 
 func (d assignmentTestDialer) DialContext(ctx context.Context, network, _ string) (net.Conn, error) {
@@ -60,12 +66,13 @@ func (d assignmentTestDialer) DialContext(ctx context.Context, network, _ string
 }
 
 type assignmentTestServer struct {
-	t          *testing.T
-	conn       *net.UDPConn
-	serverPriv []byte
-	agentPub   []byte
-	replies    [][]byte
-	done       chan struct{}
+	t           *testing.T
+	conn        *net.UDPConn
+	serverPriv  []byte
+	agentPub    []byte
+	replies     [][]byte
+	done        chan struct{}
+	requestSeen chan struct{}
 
 	mu       sync.Mutex
 	requests [][]byte
@@ -79,7 +86,7 @@ func newAssignmentTestServer(t *testing.T, serverPriv, agentPub []byte, replies 
 	}
 	server := &assignmentTestServer{
 		t: t, conn: conn, serverPriv: serverPriv, agentPub: agentPub,
-		replies: make([][]byte, len(replies)), done: make(chan struct{}),
+		replies: make([][]byte, len(replies)), done: make(chan struct{}), requestSeen: make(chan struct{}, 8),
 	}
 	for i, reply := range replies {
 		server.replies[i] = []byte(reply)
@@ -117,6 +124,10 @@ func (s *assignmentTestServer) serve() {
 		index := len(s.requests)
 		s.requests = append(s.requests, append([]byte(nil), opened.Body...))
 		s.mu.Unlock()
+		select {
+		case s.requestSeen <- struct{}{}:
+		default:
+		}
 		if index >= len(s.replies) {
 			continue
 		}
@@ -243,6 +254,30 @@ func TestHubAssignmentRetriesOnlyBoundedRetryableResults(t *testing.T) {
 	}
 	if len(server.requestBodies()) != 2 {
 		t.Fatalf("requests = %d, want 2", len(server.requestBodies()))
+	}
+}
+
+func TestHubAssignmentRetriesResolveFailure(t *testing.T) {
+	fixture := loadAssignmentFixture(t)
+	hub, transport, server := assignmentTestSetup(t, fixture.RefreshAssignment.Result.BodyJSON)
+	resolveCalls := 0
+	transport.Resolver = assignmentTestResolverFunc(func(context.Context, string, string) ([]netip.Addr, error) {
+		resolveCalls++
+		if resolveCalls == 1 {
+			return nil, errors.New("injected DNS failure")
+		}
+		return []netip.Addr{netip.MustParseAddr("8.8.8.8")}, nil
+	})
+	var slept []time.Duration
+	assignment, err := RefreshAgentAssignment(
+		context.Background(), hub, "agent-conform", transport,
+		deterministicAssignmentOptions(&slept, 2)...,
+	)
+	if err != nil || assignment.CellID != "cell0" {
+		t.Fatalf("RefreshAgentAssignment = %#v, %v", assignment, err)
+	}
+	if resolveCalls != 2 || fmt.Sprint(slept) != "[0s]" || len(server.requestBodies()) != 1 {
+		t.Fatalf("resolve/sleep/request counts = %d/%v/%d, want 2/[0s]/1", resolveCalls, slept, len(server.requestBodies()))
 	}
 }
 
@@ -431,8 +466,109 @@ func TestHubAssignmentRetryBudgetBoundsInFlightUDP(t *testing.T) {
 	}
 }
 
+func TestHubAssignmentParentCancellation(t *testing.T) {
+	t.Run("in flight", func(t *testing.T) {
+		hub, transport, server := assignmentTestSetup(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		cancelled := make(chan struct{})
+		timedOut := make(chan struct{}, 1)
+		go func() {
+			defer close(cancelled)
+			select {
+			case <-server.requestSeen:
+				cancel()
+			case <-time.After(time.Second):
+				timedOut <- struct{}{}
+				cancel()
+			}
+		}()
+
+		_, err := RefreshAgentAssignment(
+			ctx, hub, "agent-conform", transport,
+			WithAssignmentRetryBudget(4, time.Minute),
+		)
+		<-cancelled
+		select {
+		case <-timedOut:
+			t.Fatal("assignment server did not observe the in-flight request before timeout")
+		default:
+		}
+		if !errors.Is(err, context.Canceled) || errors.Is(err, ErrAssignmentRecoveryRequired) {
+			t.Fatalf("in-flight cancellation error = %#v, want parent context.Canceled only", err)
+		}
+		if len(server.requestBodies()) != 1 {
+			t.Fatalf("requests = %d, want 1", len(server.requestBodies()))
+		}
+	})
+
+	t.Run("during backoff", func(t *testing.T) {
+		hub, transport, server := assignmentTestSetup(t, `{"errCode":"52200","errMsg":"temporary"}`)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		_, err := RefreshAgentAssignment(
+			ctx, hub, "agent-conform", transport,
+			WithAssignmentRetryBudget(4, time.Minute),
+			withAssignmentClock(func() time.Time { return assignmentFixtureNow }),
+			withAssignmentJitter(func(time.Duration) (time.Duration, error) { return 0, nil }),
+			withAssignmentSleep(func(sleepCtx context.Context, _ time.Duration) error {
+				cancel()
+				return sleepCtx.Err()
+			}),
+		)
+		if !errors.Is(err, context.Canceled) || errors.Is(err, ErrAssignmentRecoveryRequired) {
+			t.Fatalf("backoff cancellation error = %#v, want parent context.Canceled only", err)
+		}
+		if len(server.requestBodies()) != 1 {
+			t.Fatalf("requests = %d, want 1", len(server.requestBodies()))
+		}
+	})
+}
+
+func TestHubAssignmentSleepFailures(t *testing.T) {
+	t.Run("transaction budget", func(t *testing.T) {
+		hub, transport, server := assignmentTestSetup(t, `{"errCode":"52200","errMsg":"temporary"}`)
+		_, err := RefreshAgentAssignment(
+			context.Background(), hub, "agent-conform", transport,
+			WithAssignmentRetryBudget(4, 50*time.Millisecond),
+			withAssignmentClock(func() time.Time { return assignmentFixtureNow }),
+			withAssignmentJitter(func(time.Duration) (time.Duration, error) { return 0, nil }),
+			withAssignmentSleep(func(sleepCtx context.Context, _ time.Duration) error {
+				<-sleepCtx.Done()
+				return sleepCtx.Err()
+			}),
+		)
+		var recovery *AssignmentRecoveryRequiredError
+		if !errors.As(err, &recovery) || !errors.Is(err, context.DeadlineExceeded) || recovery.Attempts != 1 || recovery.Elapsed < 50*time.Millisecond {
+			t.Fatalf("transaction-budget sleep error = %#v, want one-attempt recovery with deadline", err)
+		}
+		if len(server.requestBodies()) != 1 {
+			t.Fatalf("requests = %d, want 1", len(server.requestBodies()))
+		}
+	})
+
+	t.Run("sleep implementation", func(t *testing.T) {
+		hub, transport, server := assignmentTestSetup(t, `{"errCode":"52200","errMsg":"temporary"}`)
+		sentinel := errors.New("injected sleep failure")
+		_, err := RefreshAgentAssignment(
+			context.Background(), hub, "agent-conform", transport,
+			WithAssignmentRetryBudget(4, time.Minute),
+			withAssignmentClock(func() time.Time { return assignmentFixtureNow }),
+			withAssignmentJitter(func(time.Duration) (time.Duration, error) { return 0, nil }),
+			withAssignmentSleep(func(context.Context, time.Duration) error { return sentinel }),
+		)
+		if !errors.Is(err, sentinel) || errors.Is(err, ErrAssignmentRecoveryRequired) {
+			t.Fatalf("sleep implementation error = %#v, want sentinel only", err)
+		}
+		if len(server.requestBodies()) != 1 {
+			t.Fatalf("requests = %d, want 1", len(server.requestBodies()))
+		}
+	})
+}
+
 func TestAssignmentConformanceSuccessRejectCases(t *testing.T) {
 	fixture := loadAssignmentFixture(t)
+	executedByPhase := map[string]int{}
 	for _, testCase := range fixture.SuccessResultCases {
 		var parse func([]byte) error
 		switch testCase.Phase {
@@ -449,11 +585,15 @@ func TestAssignmentConformanceSuccessRejectCases(t *testing.T) {
 		default:
 			continue
 		}
+		executedByPhase[testCase.Phase]++
 		t.Run(testCase.Name, func(t *testing.T) {
 			if err := parse([]byte(testCase.BodyJSON)); !errors.Is(err, ErrAssignmentInvalidResponse) {
 				t.Fatalf("error = %v, want ErrAssignmentInvalidResponse", err)
 			}
 		})
+	}
+	if executedByPhase["initial_assignment"] == 0 || executedByPhase["refresh_assignment"] == 0 {
+		t.Fatalf("conformance success-reject cases executed by phase = %v, want initial and refresh coverage", executedByPhase)
 	}
 }
 
@@ -475,27 +615,44 @@ func TestAssignmentConformanceErrorTaxonomy(t *testing.T) {
 		fixture.ErrorContract.AssignmentCases,
 		fixture.ErrorContract.InitialCredentialCases,
 	}
-	for _, group := range groups {
+	executedErrors := 0
+	for groupIndex, group := range groups {
+		if len(group) == 0 {
+			t.Fatalf("conformance error group %d is empty", groupIndex)
+		}
 		for _, testCase := range group {
+			expected, ok := want[testCase.ErrCode]
+			if !ok {
+				t.Fatalf("conformance error case %q has unknown code %q", testCase.Name, testCase.ErrCode)
+			}
+			executedErrors++
 			t.Run(testCase.Name, func(t *testing.T) {
 				initial := testCase.Phase == "initial_assignment"
 				_, err := parseAssignmentEnvelope([]byte(testCase.BodyJSON), initial)
-				if !errors.Is(err, want[testCase.ErrCode]) || errors.Is(err, ErrAssignmentInvalidResponse) {
-					t.Fatalf("error = %v, want %v only", err, want[testCase.ErrCode])
+				if !errors.Is(err, expected) || errors.Is(err, ErrAssignmentInvalidResponse) {
+					t.Fatalf("error = %v, want %v only", err, expected)
 				}
 			})
 		}
 	}
+	if executedErrors == 0 {
+		t.Fatal("conformance error fixture executed no taxonomy cases")
+	}
+	executedMalformed := 0
 	for _, testCase := range fixture.ErrorContract.MalformedCases {
 		if testCase.Phase != "cell_assignment" && testCase.Phase != "initial_assignment" {
 			continue
 		}
+		executedMalformed++
 		t.Run(testCase.Name, func(t *testing.T) {
 			_, err := parseAssignmentEnvelope([]byte(testCase.BodyJSON), testCase.Phase == "initial_assignment")
 			if !errors.Is(err, ErrAssignmentInvalidResponse) {
 				t.Fatalf("error = %v, want ErrAssignmentInvalidResponse", err)
 			}
 		})
+	}
+	if executedMalformed == 0 {
+		t.Fatal("conformance malformed fixture executed no assignment cases")
 	}
 }
 
