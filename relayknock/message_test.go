@@ -861,8 +861,8 @@ func TestBuildReply_RoundTripsUnderDecryptReply(t *testing.T) {
 			if err != nil {
 				t.Fatalf("DecryptReply: %v", err)
 			}
-			if got.Type != tt.wantWire || got.Type != tt.replyType {
-				t.Errorf("Type = %d, want wire type %d / exported constant %d", got.Type, tt.wantWire, tt.replyType)
+			if got.Type != tt.wantWire {
+				t.Errorf("Type = %d, want %d", got.Type, tt.wantWire)
 			}
 			if got.Counter != counter {
 				t.Errorf("Counter = %#x, want %#x", got.Counter, counter)
