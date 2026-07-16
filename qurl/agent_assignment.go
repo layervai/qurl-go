@@ -625,10 +625,6 @@ func parseAssignmentEnvelope(body []byte, initial bool) (json.RawMessage, error)
 	if _, ok := fields["errCode"]; !ok {
 		return nil, invalidAssignmentResponse("LRT envelope", errors.New("missing errCode"))
 	}
-	allowed := fieldSet("errCode", "errMsg", "retryAfterSeconds", "list")
-	if err := rejectUnknownFields(fields, allowed); err != nil {
-		return nil, invalidAssignmentResponse("LRT envelope", err)
-	}
 	var envelope assignmentEnvelope
 	if err := strictDecodeJSON(body, &envelope); err != nil {
 		return nil, invalidAssignmentResponse("LRT envelope", err)
@@ -843,7 +839,7 @@ func isASCIIAlnum(b byte) bool {
 
 func validPublicRegistrationKeyKind(kind string) bool {
 	switch kind {
-	case "bootstrap", "connector_bootstrap", "account", "agent":
+	case keyKindBootstrap, "connector_bootstrap", keyKindAccount, "agent":
 		return true
 	default:
 		return false
@@ -885,22 +881,10 @@ func invalidAssignmentResponse(part string, cause error) error {
 	return fmt.Errorf("%w: %s: %w", ErrAssignmentInvalidResponse, part, cause)
 }
 
-func fieldSet(fields ...string) map[string]struct{} {
-	set := make(map[string]struct{}, len(fields))
-	for _, field := range fields {
-		set[field] = struct{}{}
-	}
-	return set
-}
-
 func decodeExactObject(raw []byte, dst any, required []string) error {
 	// The token walk, raw-field map, and typed decode enforce distinct invariants.
 	fields, err := exactObjectFields(raw)
 	if err != nil {
-		return err
-	}
-	allowed := fieldSet(required...)
-	if err := rejectUnknownFields(fields, allowed); err != nil {
 		return err
 	}
 	for _, field := range required {
@@ -911,18 +895,10 @@ func decodeExactObject(raw []byte, dst any, required []string) error {
 	return strictDecodeJSON(raw, dst)
 }
 
-func rejectUnknownFields(fields map[string]json.RawMessage, allowed map[string]struct{}) error {
-	for field := range fields {
-		if _, ok := allowed[field]; !ok {
-			return fmt.Errorf("unknown field %q", field)
-		}
-	}
-	return nil
-}
-
 // exactObjectFields rejects duplicate keys at every nesting level before
 // encoding/json can collapse them. It then returns the top-level raw fields so
-// callers can enforce phase-dependent exact allowlists and required keys.
+// callers can enforce phase-dependent presence rules; the final typed decode
+// enforces each object's exact allowlist and value types.
 func exactObjectFields(raw []byte) (map[string]json.RawMessage, error) {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.UseNumber()
