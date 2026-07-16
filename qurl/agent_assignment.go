@@ -124,7 +124,13 @@ func (a *AgentAssignment) DecodedServerKey() ([]byte, error) {
 // stores use the same structural validation without the liveness requirement so
 // an expired assignment can load and be refreshed.
 func (a *AgentAssignment) Validate(now time.Time) error {
-	return validateAgentAssignment(a, now)
+	if err := validatePersistedAgentAssignment(a); err != nil {
+		return err
+	}
+	if !a.LeaseExpiresAt.After(now) {
+		return invalidAssignmentResponse("assignment", errors.New("lease must be in the future"))
+	}
+	return nil
 }
 
 // LeaseExpired reports only whether the assignment is absent or its lease is no
@@ -337,9 +343,9 @@ func FetchInitialAgentAssignment(ctx context.Context, hub HubBootstrap, agentID,
 	if err != nil {
 		return nil, err
 	}
-	body, err := json.Marshal(assignmentListRequest[assignmentEnrollData]{
+	body, err := json.Marshal(assignmentListRequest{
 		UsrID: "", DevID: agentID, AspID: agentAspID,
-		UsrData: assignmentEnrollData{Query: assignmentQuery, Version: assignmentVersion, Mode: assignmentModeEnroll, Credential: enrollmentCredential},
+		UsrData: assignmentRequestData{Query: assignmentQuery, Version: assignmentVersion, Mode: assignmentModeEnroll, Credential: enrollmentCredential},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("%w: encode initial assignment request: %w", ErrInvalidAssignmentConfig, err)
@@ -363,9 +369,9 @@ func RefreshAgentAssignment(ctx context.Context, hub HubBootstrap, agentID strin
 	if err != nil {
 		return nil, err
 	}
-	body, err := json.Marshal(assignmentListRequest[assignmentRefreshData]{
+	body, err := json.Marshal(assignmentListRequest{
 		UsrID: "", DevID: agentID, AspID: agentAspID,
-		UsrData: assignmentRefreshData{Query: assignmentQuery, Version: assignmentVersion, Mode: assignmentModeRefresh},
+		UsrData: assignmentRequestData{Query: assignmentQuery, Version: assignmentVersion, Mode: assignmentModeRefresh},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("%w: encode assignment refresh request: %w", ErrInvalidAssignmentConfig, err)
@@ -528,24 +534,18 @@ func (h HubBootstrap) nativeEndpoint() (nativeudp.Endpoint, error) {
 	return nativeudp.Endpoint{Host: h.Host, Port: h.Port, ServerStaticPub: key}, nil
 }
 
-type assignmentListRequest[T any] struct {
-	UsrID   string `json:"usrId"`
-	DevID   string `json:"devId"`
-	AspID   string `json:"aspId"`
-	UsrData T      `json:"usrData"`
+type assignmentListRequest struct {
+	UsrID   string                `json:"usrId"`
+	DevID   string                `json:"devId"`
+	AspID   string                `json:"aspId"`
+	UsrData assignmentRequestData `json:"usrData"`
 }
 
-type assignmentEnrollData struct {
+type assignmentRequestData struct {
 	Query      string `json:"query"`
 	Version    int    `json:"version"`
 	Mode       string `json:"mode"`
-	Credential string `json:"credential"`
-}
-
-type assignmentRefreshData struct {
-	Query   string `json:"query"`
-	Version int    `json:"version"`
-	Mode    string `json:"mode"`
+	Credential string `json:"credential,omitempty"`
 }
 
 type assignmentEnvelope struct {
@@ -771,16 +771,6 @@ func parseWireAssignment(raw []byte, now time.Time) (*AgentAssignment, error) {
 		return nil, err
 	}
 	return assignment, nil
-}
-
-func validateAgentAssignment(a *AgentAssignment, now time.Time) error {
-	if err := validatePersistedAgentAssignment(a); err != nil {
-		return err
-	}
-	if !a.LeaseExpiresAt.After(now) {
-		return invalidAssignmentResponse("assignment", errors.New("lease must be in the future"))
-	}
-	return nil
 }
 
 func validatePersistedAgentAssignment(a *AgentAssignment) error {
