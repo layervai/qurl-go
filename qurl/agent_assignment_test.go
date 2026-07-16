@@ -285,21 +285,6 @@ func TestHubAssignmentRetriesResolveFailure(t *testing.T) {
 	}
 }
 
-func TestRunAssignmentExchangeInvalidAttemptInvariantFailsClosed(t *testing.T) {
-	cfg := &assignmentConfig{
-		maxAttempts: 0,
-		budget:      time.Second,
-		clock:       func() time.Time { return assignmentFixtureNow },
-	}
-	_, err := runAssignmentExchange[AgentAssignment](
-		context.Background(), cfg, nativeudp.Endpoint{}, nil, nativeudp.Options{}, nil,
-	)
-	var recovery *AssignmentRecoveryRequiredError
-	if !errors.As(err, &recovery) || !errors.Is(err, ErrAssignmentRecoveryRequired) || recovery.Attempts != 0 || recovery.Last == nil {
-		t.Fatalf("invalid retry invariant error = %#v, want typed fail-closed recovery", err)
-	}
-}
-
 func TestRunAssignmentExchangeWipesDecryptedReply(t *testing.T) {
 	for _, parseFails := range []bool{false, true} {
 		t.Run(fmt.Sprintf("parse_failure_%t", parseFails), func(t *testing.T) {

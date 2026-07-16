@@ -36,6 +36,19 @@ func mustHexBytes(t *testing.T, s string) []byte {
 	return b
 }
 
+func assertCorrelationRejections(t *testing.T, devicePriv, serverPub []byte, requestType, mismatchType int, counter uint64, packet []byte) {
+	t.Helper()
+	if _, err := decryptAndCorrelate(devicePriv, serverPub, requestType, counter+1, packet); !errors.Is(err, relayknock.ErrMalformedReply) {
+		t.Fatalf("wrong-counter error = %v, want ErrMalformedReply", err)
+	}
+	if _, err := decryptAndCorrelate(devicePriv, serverPub, mismatchType, counter, packet); !errors.Is(err, relayknock.ErrMalformedReply) {
+		t.Fatalf("wrong-request-type error = %v, want ErrMalformedReply", err)
+	}
+	if _, err := decryptAndCorrelate(devicePriv, freshX25519Pub(t), requestType, counter, packet); !errors.Is(err, ErrServerUnauthenticated) {
+		t.Fatalf("wrong-key error = %v, want ErrServerUnauthenticated", err)
+	}
+}
+
 // TestDecryptAndCorrelate_ConformanceRAK feeds the frozen reference-server NHP_RAK
 // vector (the same artifact relayknock's golden test pins) through the native
 // path's authentication + correlation. Because the native transport decrypts with
@@ -72,22 +85,7 @@ func TestDecryptAndCorrelate_ConformanceRAK(t *testing.T) {
 		t.Fatalf("RAK body mismatch:\n got=%s\nwant=%s", got, vec.BodyHex)
 	}
 
-	// A mismatched request counter is a malformed reply, not an accepted one.
-	if _, err := decryptAndCorrelate(devicePriv, serverPub, relayknock.TypeRegister, counter+1, packet); !errors.Is(err, relayknock.ErrMalformedReply) {
-		t.Fatalf("wrong-counter error = %v, want ErrMalformedReply", err)
-	}
-
-	// The RAK answers a register, not a knock: presenting it as a knock reply is a
-	// malformed pairing.
-	if _, err := decryptAndCorrelate(devicePriv, serverPub, relayknock.TypeKnock, counter, packet); !errors.Is(err, relayknock.ErrMalformedReply) {
-		t.Fatalf("wrong-request-type error = %v, want ErrMalformedReply", err)
-	}
-
-	// A wrong pinned server key fails authentication before any correlation check.
-	otherPub := freshX25519Pub(t)
-	if _, err := decryptAndCorrelate(devicePriv, otherPub, relayknock.TypeRegister, counter, packet); !errors.Is(err, ErrServerUnauthenticated) {
-		t.Fatalf("wrong-key error = %v, want ErrServerUnauthenticated", err)
-	}
+	assertCorrelationRejections(t, devicePriv, serverPub, relayknock.TypeRegister, relayknock.TypeKnock, counter, packet)
 }
 
 // TestDecryptAndCorrelate_ConformanceLRT consumes the shared assignment result
@@ -119,15 +117,7 @@ func TestDecryptAndCorrelate_ConformanceLRT(t *testing.T) {
 		t.Fatalf("LRT type/body = %d/%q, want %d/%q", reply.Type, reply.Body, conformance.AgentAssignmentResultHeaderType, vec.BodyJSON)
 	}
 
-	if _, err := decryptAndCorrelate(agentPriv, hubPub, relayknock.TypeListRequest, counter+1, packet); !errors.Is(err, relayknock.ErrMalformedReply) {
-		t.Fatalf("wrong-counter error = %v, want ErrMalformedReply", err)
-	}
-	if _, err := decryptAndCorrelate(agentPriv, hubPub, relayknock.TypeRegister, counter, packet); !errors.Is(err, relayknock.ErrMalformedReply) {
-		t.Fatalf("wrong-request-type error = %v, want ErrMalformedReply", err)
-	}
-	if _, err := decryptAndCorrelate(agentPriv, freshX25519Pub(t), relayknock.TypeListRequest, counter, packet); !errors.Is(err, ErrServerUnauthenticated) {
-		t.Fatalf("wrong-key error = %v, want ErrServerUnauthenticated", err)
-	}
+	assertCorrelationRejections(t, agentPriv, hubPub, relayknock.TypeListRequest, relayknock.TypeRegister, counter, packet)
 }
 
 func TestDecryptAndCorrelate_RejectsMalformedDatagram(t *testing.T) {

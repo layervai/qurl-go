@@ -385,9 +385,6 @@ func RefreshAgentAssignment(ctx context.Context, hub HubBootstrap, agentID strin
 
 func runAssignmentExchange[T any](ctx context.Context, c *assignmentConfig, endpoint nativeudp.Endpoint, body []byte, transport nativeudp.Options, parse func([]byte, time.Time) (*T, error)) (*T, error) {
 	start := c.clock()
-	if c.maxAttempts < 1 {
-		return nil, c.recoveryAt(0, 0, errors.New("assignment retry config has no attempts"))
-	}
 	transactionCtx, cancel := context.WithTimeout(ctx, c.budget)
 	defer cancel()
 	for attempt := 1; ; attempt++ {
