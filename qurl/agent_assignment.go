@@ -199,7 +199,10 @@ func (e *AssignmentError) Unwrap() error {
 
 // AssignmentRecoveryRequiredError carries the final failed attempt without
 // losing its typed cause. Callers surface recovery instead of starting an
-// unbounded loop.
+// unbounded loop. In particular, a Last cause matching
+// nativeudp.ErrServerUnauthenticated is operator-actionable trust/bootstrap
+// recovery and must not be silently re-driven by the outer lifecycle; that
+// lifecycle enforcement is tracked by qurl-go issue #66.
 type AssignmentRecoveryRequiredError struct {
 	Attempts int
 	Elapsed  time.Duration
@@ -913,6 +916,8 @@ func parseCanonicalRFC3339(value string) (time.Time, error) {
 	if err != nil {
 		return time.Time{}, fmt.Errorf("must be RFC3339: %w", err)
 	}
+	// Require the UTC location identity as well as the spelling round trip:
+	// numeric +00:00 denotes the same instant but is not the producer's Z form.
 	if parsed.Location() != time.UTC || parsed.Format(time.RFC3339) != value {
 		return time.Time{}, errors.New("must use canonical UTC RFC3339 spelling")
 	}
