@@ -1,6 +1,7 @@
 package nativeudp
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdh"
 	"crypto/rand"
@@ -11,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	conformance "github.com/layervai/qurl-conformance"
@@ -246,25 +248,34 @@ func TestBuildPacketClassifiesEntropyFailureAsTransport(t *testing.T) {
 	originalReader := rand.Reader
 	t.Cleanup(func() { rand.Reader = originalReader })
 
-	for _, tc := range []struct {
-		name   string
-		failAt int
-	}{
-		{name: "ephemeral key", failAt: 1},
-		{name: "counter", failAt: 2},
-		{name: "preamble", failAt: 3},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			reader := &failAtReader{failAt: tc.failAt}
-			rand.Reader = reader
-			_, _, err := buildPacket(relayknock.TypeListRequest, serverPub, devicePriv, nil)
-			if !errors.Is(err, ErrTransport) || errors.Is(err, ErrInvalidRequest) {
-				t.Fatalf("buildPacket error = %v, want only ErrTransport", err)
-			}
-			if len(reader.buffers) > 0 && !zeroed(reader.buffers[0]) {
-				t.Fatalf("ephemeral private key was not wiped: %x", reader.buffers[0])
-			}
-		})
+	rand.Reader = iotest.ErrReader(errors.New("injected entropy failure"))
+	_, _, err := buildPacket(relayknock.TypeListRequest, serverPub, devicePriv, nil)
+	if !errors.Is(err, ErrTransport) || errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("buildPacket error = %v, want only ErrTransport", err)
+	}
+}
+
+func TestBuildPacketDrawsAndWipesRandomnessOnce(t *testing.T) {
+	serverPub := freshX25519Pub(t)
+	devicePriv := freshX25519Priv(t)
+	reader := &recordingEntropyReader{}
+	originalReader := rand.Reader
+	rand.Reader = reader
+	t.Cleanup(func() { rand.Reader = originalReader })
+
+	_, counter, err := buildPacket(relayknock.TypeListRequest, serverPub, devicePriv, []byte("body"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reader.calls != 1 {
+		t.Fatalf("entropy reads = %d, want 1", reader.calls)
+	}
+	const wantCounter = 0x2122232425262728
+	if counter != wantCounter {
+		t.Fatalf("counter = %#x, want %#x", counter, wantCounter)
+	}
+	if !bytes.Equal(reader.buffer, make([]byte, len(reader.buffer))) {
+		t.Fatalf("packet randomness was not wiped: %x", reader.buffer)
 	}
 }
 
@@ -388,31 +399,18 @@ func (f dialerFunc) DialContext(ctx context.Context, network, address string) (n
 	return f(ctx, network, address)
 }
 
-type failAtReader struct {
-	calls   int
-	failAt  int
-	buffers [][]byte
+type recordingEntropyReader struct {
+	calls  int
+	buffer []byte
 }
 
-func (r *failAtReader) Read(p []byte) (int, error) {
+func (r *recordingEntropyReader) Read(p []byte) (int, error) {
 	r.calls++
-	if r.calls == r.failAt {
-		return 0, errors.New("injected entropy failure")
-	}
+	r.buffer = p
 	for i := range p {
-		p[i] = byte(i + r.calls)
+		p[i] = byte(i + 1)
 	}
-	r.buffers = append(r.buffers, p)
 	return len(p), nil
-}
-
-func zeroed(value []byte) bool {
-	for _, b := range value {
-		if b != 0 {
-			return false
-		}
-	}
-	return true
 }
 
 type shortWriteConn struct{}

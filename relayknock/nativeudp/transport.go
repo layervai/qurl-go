@@ -2,6 +2,7 @@ package nativeudp
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
@@ -368,20 +369,15 @@ func replyTypeAllowed(requestType, replyType int) bool {
 // ephemeral private key is wiped before returning; the device static private key
 // belongs to the caller and is not wiped here.
 func buildPacket(headerType int, serverStaticPub, devicePriv, body []byte) (packet []byte, counter uint64, err error) {
-	ephemeralPriv, err := cryptoutil.RandomBytes(x25519key.Size)
+	random, err := cryptoutil.RandomBytes(x25519key.Size + 8 + 4)
 	if err != nil {
-		return nil, 0, fmt.Errorf("%w: generate ephemeral key: %w", ErrTransport, err)
+		return nil, 0, fmt.Errorf("%w: generate packet randomness: %w", ErrTransport, err)
 	}
-	defer cryptoutil.Wipe(ephemeralPriv)
+	defer cryptoutil.Wipe(random)
 
-	counter, err = cryptoutil.RandomUint64()
-	if err != nil {
-		return nil, 0, fmt.Errorf("%w: generate counter: %w", ErrTransport, err)
-	}
-	preamble, err := cryptoutil.RandomUint32()
-	if err != nil {
-		return nil, 0, fmt.Errorf("%w: generate preamble: %w", ErrTransport, err)
-	}
+	ephemeralPriv := random[:x25519key.Size]
+	counter = binary.BigEndian.Uint64(random[x25519key.Size : x25519key.Size+8])
+	preamble := binary.BigEndian.Uint32(random[x25519key.Size+8:])
 
 	packet, err = relayknock.BuildMessage(headerType, &relayknock.KnockInputs{
 		DeviceStaticPriv: devicePriv,

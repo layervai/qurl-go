@@ -47,12 +47,6 @@ func assignmentHex(t *testing.T, value string) []byte {
 	return decoded
 }
 
-type assignmentTestResolver struct{}
-
-func (assignmentTestResolver) LookupNetIP(context.Context, string, string) ([]netip.Addr, error) {
-	return []netip.Addr{netip.MustParseAddr("8.8.8.8")}, nil
-}
-
 type assignmentTestResolverFunc func(context.Context, string, string) ([]netip.Addr, error)
 
 func (f assignmentTestResolverFunc) LookupNetIP(ctx context.Context, network, host string) ([]netip.Addr, error) {
@@ -177,9 +171,11 @@ func assignmentTestSetup(t *testing.T, replies ...string) (HubBootstrap, nativeu
 	}
 	transport := nativeudp.Options{
 		DeviceStaticPriv: agentPriv,
-		Resolver:         assignmentTestResolver{},
-		Dialer:           assignmentTestDialer{target: server.conn.LocalAddr().String()},
-		Timeout:          2 * time.Second,
+		Resolver: assignmentTestResolverFunc(func(context.Context, string, string) ([]netip.Addr, error) {
+			return []netip.Addr{netip.MustParseAddr("8.8.8.8")}, nil
+		}),
+		Dialer:  assignmentTestDialer{target: server.conn.LocalAddr().String()},
+		Timeout: 2 * time.Second,
 	}
 	return hub, transport, server
 }

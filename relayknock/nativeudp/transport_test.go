@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ecdh"
 	"crypto/rand"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -162,10 +163,10 @@ func (s *fakeServer) buildReply(replyType int, serverPriv []byte, counter uint64
 	packet, err := relayknocktest.BuildReply(replyType, &relayknock.KnockInputs{
 		DeviceStaticPriv: serverPriv,
 		ServerStaticPub:  s.agentPub,
-		EphemeralPriv:    mustRandGlobal(32),
+		EphemeralPriv:    mustRand(s.t, 32),
 		TimestampNanos:   uint64(time.Now().UnixNano()),
 		Counter:          counter,
-		Preamble:         mustPreamble(),
+		Preamble:         mustPreamble(s.t),
 		Body:             s.replyBody,
 	})
 	if err != nil {
@@ -596,15 +597,7 @@ func mustRand(t *testing.T, n int) []byte {
 	return b
 }
 
-func mustRandGlobal(n int) []byte {
-	b := make([]byte, n)
-	if _, err := rand.Read(b); err != nil {
-		panic(err)
-	}
-	return b
-}
-
-func mustPreamble() uint32 {
-	b := mustRandGlobal(4)
-	return uint32(b[0])<<24 | uint32(b[1])<<16 | uint32(b[2])<<8 | uint32(b[3])
+func mustPreamble(t *testing.T) uint32 {
+	t.Helper()
+	return binary.BigEndian.Uint32(mustRand(t, 4))
 }

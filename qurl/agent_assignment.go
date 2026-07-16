@@ -555,11 +555,15 @@ type assignmentEnvelope struct {
 	List              json.RawMessage `json:"list,omitempty"`
 }
 
+type assignmentListHeader struct {
+	Query   string `json:"query"`
+	Version int    `json:"version"`
+	Mode    string `json:"mode"`
+	AgentID string `json:"agent_id"`
+}
+
 type initialAssignmentList struct {
-	Query                     string          `json:"query"`
-	Version                   int             `json:"version"`
-	Mode                      string          `json:"mode"`
-	AgentID                   string          `json:"agent_id"`
+	assignmentListHeader
 	Registration              json.RawMessage `json:"registration"`
 	Assignment                json.RawMessage `json:"assignment"`
 	AssignmentTicket          string          `json:"assignment_ticket"`
@@ -567,10 +571,7 @@ type initialAssignmentList struct {
 }
 
 type refreshAssignmentList struct {
-	Query      string          `json:"query"`
-	Version    int             `json:"version"`
-	Mode       string          `json:"mode"`
-	AgentID    string          `json:"agent_id"`
+	assignmentListHeader
 	Assignment json.RawMessage `json:"assignment"`
 }
 
@@ -597,7 +598,7 @@ func parseInitialAssignmentReply(body []byte, wantAgentID string, now time.Time)
 		[]string{"query", "version", "mode", "agent_id", "registration", "assignment", "assignment_ticket", "assignment_ticket_expires_at"}); err != nil {
 		return nil, invalidAssignmentResponse("initial assignment list", err)
 	}
-	if err := validateAssignmentListHeader("initial assignment list", wire.Query, wire.Version, wire.Mode, assignmentModeEnroll, wire.AgentID, wantAgentID); err != nil {
+	if err := validateAssignmentListHeader("initial assignment list", wire.assignmentListHeader, assignmentModeEnroll, wantAgentID); err != nil {
 		return nil, err
 	}
 
@@ -646,18 +647,18 @@ func parseRefreshAssignmentReply(body []byte, wantAgentID string, now time.Time)
 	if err := decodeExactObject(list, &wire, []string{"query", "version", "mode", "agent_id", "assignment"}); err != nil {
 		return nil, invalidAssignmentResponse("refresh assignment list", err)
 	}
-	if err := validateAssignmentListHeader("refresh assignment list", wire.Query, wire.Version, wire.Mode, assignmentModeRefresh, wire.AgentID, wantAgentID); err != nil {
+	if err := validateAssignmentListHeader("refresh assignment list", wire.assignmentListHeader, assignmentModeRefresh, wantAgentID); err != nil {
 		return nil, err
 	}
 	return parseWireAssignment(wire.Assignment, now)
 }
 
-func validateAssignmentListHeader(part, query string, version int, mode, wantMode, agentID, wantAgentID string) error {
-	if query != assignmentQuery || version != assignmentVersion || mode != wantMode {
+func validateAssignmentListHeader(part string, header assignmentListHeader, wantMode, wantAgentID string) error {
+	if header.Query != assignmentQuery || header.Version != assignmentVersion || header.Mode != wantMode {
 		return invalidAssignmentResponse(part, errors.New("query/version/mode mismatch"))
 	}
-	if agentID != wantAgentID {
-		return invalidAssignmentResponse(part, fmt.Errorf("agent_id %q does not match %q", agentID, wantAgentID))
+	if header.AgentID != wantAgentID {
+		return invalidAssignmentResponse(part, fmt.Errorf("agent_id %q does not match %q", header.AgentID, wantAgentID))
 	}
 	return nil
 }
