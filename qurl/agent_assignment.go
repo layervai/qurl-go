@@ -24,13 +24,15 @@ import (
 // or asks the browser relay to route a native client.
 
 const (
-	assignmentQuery          = "cell_assignment"
-	assignmentVersion        = 1
-	assignmentModeEnroll     = "enroll"
-	assignmentModeRefresh    = "refresh"
-	standardNHPUDPPort       = 62206
-	maxAssignmentTicketBytes = 2304
-	maxAssignmentJSONDepth   = 64
+	assignmentQuery                     = "cell_assignment"
+	assignmentVersion                   = 1
+	assignmentModeEnroll                = "enroll"
+	assignmentModeRefresh               = "refresh"
+	assignmentKeyKindConnectorBootstrap = "connector_bootstrap"
+	assignmentKeyKindAgent              = "agent"
+	standardNHPUDPPort                  = 62206
+	maxAssignmentTicketBytes            = 2304
+	maxAssignmentJSONDepth              = 64
 
 	// These suffixes are a release-gated trust allowlist, not runtime
 	// configuration. Adding an endpoint apex requires an SDK release.
@@ -155,6 +157,8 @@ var (
 // diagnostic. RetryAfter is populated only for codes that permit it. In
 // particular, 52204 is terminal within the current transaction; callers must
 // wait at least RetryAfter before starting a new whole assignment transaction.
+// The outer lifecycle owns that inter-transaction gate; this helper only bounds
+// retries within one transaction.
 type AssignmentError struct {
 	Code       string
 	Message    string
@@ -408,6 +412,9 @@ func runAssignmentExchange[T any](ctx context.Context, c *assignmentConfig, endp
 }
 
 func (c *assignmentConfig) recoveryAt(attempts int, elapsed time.Duration, last error) *AssignmentRecoveryRequiredError {
+	// Preserve observed elapsed time for ordinary attempt exhaustion; a fixed
+	// test clock can therefore report zero. recoveryRequired clamps separately
+	// only when the real transaction deadline proves the budget was exhausted.
 	return &AssignmentRecoveryRequiredError{Attempts: attempts, Elapsed: elapsed, Last: last}
 }
 
@@ -847,7 +854,7 @@ func isASCIIAlnum(b byte) bool {
 
 func validPublicRegistrationKeyKind(kind string) bool {
 	switch kind {
-	case keyKindBootstrap, "connector_bootstrap", keyKindAccount, "agent":
+	case keyKindBootstrap, assignmentKeyKindConnectorBootstrap, keyKindAccount, assignmentKeyKindAgent:
 		return true
 	default:
 		return false
