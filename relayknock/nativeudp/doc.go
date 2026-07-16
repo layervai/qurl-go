@@ -3,10 +3,10 @@
 // It is the direct-to-server sibling of the relayknock HTTP relay transport: the
 // same NHP Noise messages (X25519 / AES-256-GCM / BLAKE2s), the same
 // byte-for-byte packet framing fenced by the shared qurl-conformance vectors, but
-// carried in a UDP datagram sent straight to an assigned cell's public native NHP
-// endpoint instead of POSTed to an internet-facing relay. A registered qURL
-// Connector uses this transport once qurl-service has handed it an authoritative
-// cell assignment; it never derives, probes, or lists an endpoint itself.
+// carried in a UDP datagram sent straight to a native NHP endpoint instead of
+// POSTed to an internet-facing relay. An agent uses it first for assignment
+// against a pinned bootstrap hub and then for registration and knocks against the
+// assigned cell. It never derives, probes, or selects either endpoint itself.
 //
 // # Scope
 //
@@ -21,8 +21,8 @@
 //
 // # Server authentication
 //
-// A reply is accepted only when the NHP handshake authenticates the assignment's
-// configured server public key: DecryptReply pins the recovered server static key
+// A reply is accepted only when the NHP handshake authenticates the endpoint's
+// pinned server public key: DecryptReply pins the recovered server static key
 // to the expected key and completes authentication at the ss-keyed AEAD open, so
 // only the holder of that server static private key can produce an accepted reply.
 // DNS agreement and the datagram's source address are NOT a substitute for this

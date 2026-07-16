@@ -85,11 +85,11 @@ type Dialer interface {
 	DialContext(ctx context.Context, network, address string) (net.Conn, error)
 }
 
-// Endpoint is a validated native NHP UDP endpoint taken from a qurl-service cell
-// assignment. Host is opaque LayerV-owned DNS data resolved on every exchange;
-// ServerStaticPub is the raw 32-byte X25519 NHP server public key the reply is
-// authenticated against. The caller must not mutate ServerStaticPub while an
-// Exchange using this Endpoint is in progress.
+// Endpoint is a validated native NHP UDP endpoint supplied by trusted bootstrap
+// configuration or an authenticated cell assignment. Host is opaque LayerV-owned
+// DNS data resolved on every exchange; ServerStaticPub is the raw 32-byte X25519
+// NHP server public key the reply is authenticated against. The caller must not
+// mutate ServerStaticPub while an Exchange using this Endpoint is in progress.
 type Endpoint struct {
 	Host            string
 	Port            int
