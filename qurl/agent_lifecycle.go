@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/layervai/qurl-go/internal/x25519key"
 )
 
 // OpenRegisteredAgent opens a Client from a completed AgentState without making
@@ -267,9 +269,9 @@ func decodeRuntimePrivateKey(state *AgentState, errKind error) ([]byte, error) {
 		wipeBytes(privateKey)
 		return nil, fmt.Errorf("%w: decode agent runtime private key: %w", errKind, err)
 	}
-	if len(privateKey) != 32 {
+	if len(privateKey) != x25519key.Size {
 		wipeBytes(privateKey)
-		return nil, fmt.Errorf("%w: agent runtime private key must be 32 bytes", errKind)
+		return nil, fmt.Errorf("%w: agent runtime private key must be %d bytes", errKind, x25519key.Size)
 	}
 	return privateKey, nil
 }
