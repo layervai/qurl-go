@@ -236,7 +236,15 @@ func TestExchange_RejectsNonRoundTripTypes(t *testing.T) {
 		t.Errorf("Exchange(TypeOTP) error %q does not point the caller at Send", err)
 	}
 
-	for _, typ := range []int{relayknock.TypeListRequest, relayknock.TypeACK, relayknock.TypeListResult, relayknock.TypeCookieChallenge, relayknock.TypeRegisterAck, 0, 99} {
+	_, err = relayknock.Exchange(context.Background(), srv.URL, serverPub, relayknock.TypeListRequest, []byte("x"), relayknock.KnockOptions{})
+	if err == nil {
+		t.Fatal("Exchange(TypeListRequest) succeeded, want reject")
+	}
+	if !strings.Contains(err.Error(), "native-UDP-only") {
+		t.Errorf("Exchange(TypeListRequest) error %q does not identify the native UDP boundary", err)
+	}
+
+	for _, typ := range []int{relayknock.TypeACK, relayknock.TypeListResult, relayknock.TypeCookieChallenge, relayknock.TypeRegisterAck, 0, 99} {
 		if _, err := relayknock.Exchange(context.Background(), srv.URL, serverPub, typ, []byte("x"), relayknock.KnockOptions{}); err == nil {
 			t.Errorf("Exchange(%d) succeeded, want reject", typ)
 		}

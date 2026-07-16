@@ -167,6 +167,8 @@ func Knock(ctx context.Context, relayBaseURL string, serverStaticPub, body []byt
 func Exchange(ctx context.Context, relayBaseURL string, serverStaticPub []byte, headerType int, body []byte, opts KnockOptions) (*Reply, error) {
 	switch headerType {
 	case TypeKnock, TypeRegister:
+	case TypeListRequest:
+		return nil, errors.New("NHP_LST is native-UDP-only; the relay HTTP Exchange transport does not carry it")
 	case TypeOTP:
 		return nil, errors.New("NHP_OTP is one-way (the server never replies to it); use Send, not Exchange")
 	default:
