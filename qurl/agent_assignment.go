@@ -370,6 +370,7 @@ func runAssignmentExchange[T any](ctx context.Context, c *assignmentConfig, endp
 		replyAuthenticated := err == nil
 		if replyAuthenticated {
 			result, parseErr := parse(reply.Body, c.clock())
+			wipeBytes(reply.Body)
 			if parseErr == nil {
 				return result, nil
 			}

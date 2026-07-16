@@ -261,6 +261,41 @@ func TestRunAssignmentExchangeInvalidAttemptInvariantFailsClosed(t *testing.T) {
 	}
 }
 
+func TestRunAssignmentExchangeWipesDecryptedReply(t *testing.T) {
+	for _, parseFails := range []bool{false, true} {
+		t.Run(fmt.Sprintf("parse_failure_%t", parseFails), func(t *testing.T) {
+			hub, transport, _ := assignmentTestSetup(t, `{"assignment_ticket":"one-shot-secret"}`)
+			endpoint, err := validateAssignmentInputs(context.Background(), hub, "agent-conform", transport)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var slept []time.Duration
+			cfg, err := newAssignmentConfig(deterministicAssignmentOptions(&slept, 1))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var decrypted []byte
+			parseErr := errors.New("parse failed")
+			_, err = runAssignmentExchange(
+				context.Background(), cfg, endpoint, []byte(`{}`), transport,
+				func(reply []byte, _ time.Time) (*struct{}, error) {
+					decrypted = reply
+					if parseFails {
+						return nil, parseErr
+					}
+					return &struct{}{}, nil
+				},
+			)
+			if (err != nil) != parseFails || parseFails && !errors.Is(err, parseErr) {
+				t.Fatalf("runAssignmentExchange error = %v, parseFails = %t", err, parseFails)
+			}
+			if len(decrypted) == 0 || !bytes.Equal(decrypted, make([]byte, len(decrypted))) {
+				t.Fatalf("decrypted reply was not wiped: %q", decrypted)
+			}
+		})
+	}
+}
+
 func TestAssignmentBackoffWindowsAndJitterBounds(t *testing.T) {
 	var windows []time.Duration
 	cfg := &assignmentConfig{jitter: func(window time.Duration) (time.Duration, error) {
