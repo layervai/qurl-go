@@ -794,8 +794,7 @@ func validateAssignmentEndpointHost(host, part string, errKind error) error {
 	if host == "" || len(host) > 253 || strings.HasSuffix(host, ".") || net.ParseIP(host) != nil {
 		return fmt.Errorf("%w: %s: host must be a canonical lowercase DNS name", errKind, part)
 	}
-	labels := strings.Split(host, ".")
-	for _, label := range labels {
+	for label := range strings.SplitSeq(host, ".") {
 		if !validAssignmentDNSLabel(label) {
 			return fmt.Errorf("%w: %s: host must be a canonical lowercase DNS name", errKind, part)
 		}

@@ -23,6 +23,11 @@ var canonicalUPrime = func() (prime [Size]byte) {
 	return prime
 }()
 
+// lowOrderProbeScalar is read-only input to X25519. X25519 copies and clamps
+// the scalar internally, so one shared zero-value array avoids a per-validation
+// allocation without introducing mutable operation state.
+var lowOrderProbeScalar [Size]byte
+
 // DecodeCanonicalBase64 decodes the single padded standard-base64 spelling of
 // a usable, canonical X25519 public key. Durable public identities deliberately
 // reject alternate text encodings and alternate field representatives because
@@ -54,7 +59,7 @@ func ValidatePublic(raw []byte) error {
 	}
 	// The scalar is arbitrary: X25519 clamps it to a valid nonzero scalar, and
 	// every low-order public input produces the forbidden all-zero secret.
-	if _, err := curve25519.X25519(make([]byte, Size), raw); err != nil {
+	if _, err := curve25519.X25519(lowOrderProbeScalar[:], raw); err != nil {
 		return fmt.Errorf("X25519 public key is low-order: %w", err)
 	}
 	return nil
