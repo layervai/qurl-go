@@ -11,8 +11,10 @@ import (
 	"net"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/layervai/qurl-go/internal/cryptoutil"
+	"github.com/layervai/qurl-go/internal/nhpcontract"
 	"github.com/layervai/qurl-go/internal/x25519key"
 	"github.com/layervai/qurl-go/relayknock/nativeudp"
 )
@@ -343,12 +345,12 @@ func FetchInitialAgentAssignment(ctx context.Context, hub HubBootstrap, agentID,
 	if err != nil {
 		return nil, err
 	}
-	body, err := json.Marshal(assignmentListRequest{
+	body, err := marshalAssignmentRequest(assignmentListRequest{
 		UsrID: "", DevID: agentID, AspID: agentAspID,
 		UsrData: assignmentRequestData{Query: assignmentQuery, Version: assignmentVersion, Mode: assignmentModeEnroll, Credential: enrollmentCredential},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("%w: encode initial assignment request: %w", ErrInvalidAssignmentConfig, err)
+		return nil, err
 	}
 	defer wipeBytes(body)
 
@@ -369,12 +371,12 @@ func RefreshAgentAssignment(ctx context.Context, hub HubBootstrap, agentID strin
 	if err != nil {
 		return nil, err
 	}
-	body, err := json.Marshal(assignmentListRequest{
+	body, err := marshalAssignmentRequest(assignmentListRequest{
 		UsrID: "", DevID: agentID, AspID: agentAspID,
 		UsrData: assignmentRequestData{Query: assignmentQuery, Version: assignmentVersion, Mode: assignmentModeRefresh},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("%w: encode assignment refresh request: %w", ErrInvalidAssignmentConfig, err)
+		return nil, err
 	}
 	// Refresh is intentionally credential-free, so there is no mutable secret
 	// buffer to wipe. Any future secret-bearing field must add explicit wiping.
@@ -543,6 +545,19 @@ type assignmentRequestData struct {
 	Version    int    `json:"version"`
 	Mode       string `json:"mode"`
 	Credential string `json:"credential,omitempty"`
+}
+
+func marshalAssignmentRequest(request assignmentListRequest) ([]byte, error) {
+	body, err := json.Marshal(request)
+	if err != nil {
+		return nil, fmt.Errorf("%w: encode assignment request: %w", ErrInvalidAssignmentConfig, err)
+	}
+	if len(body) > nhpcontract.MaxApplicationBodySize {
+		size := len(body)
+		wipeBytes(body)
+		return nil, fmt.Errorf("%w: encoded assignment request of %d bytes exceeds the %d-byte NHP maximum", ErrInvalidAssignmentConfig, size, nhpcontract.MaxApplicationBodySize)
+	}
+	return body, nil
 }
 
 type assignmentEnvelope struct {
@@ -944,6 +959,9 @@ func decodeExactObject(raw []byte, dst any, required []string) error {
 // callers can enforce phase-dependent presence rules; the final typed decode
 // enforces each object's exact allowlist and value types.
 func exactObjectFields(raw []byte) (map[string]json.RawMessage, error) {
+	if !utf8.Valid(raw) {
+		return nil, errors.New("JSON is not valid UTF-8")
+	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.UseNumber()
 	token, err := decoder.Token()

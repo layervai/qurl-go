@@ -307,18 +307,23 @@ func TestResolveAddresses_CapAndEmpty(t *testing.T) {
 		netip.MustParseAddr("198.51.100.1"),
 		netip.MustParseAddr("203.0.113.1"),
 		netip.MustParseAddr("240.0.0.1"),
+		netip.MustParseAddr("200::1"),
 		netip.MustParseAddr("100::1"),
+		netip.MustParseAddr("100:0:0:1::1"),
 		netip.MustParseAddr("64:ff9b::1"),
 		netip.MustParseAddr("64:ff9b:1::1"),
 		netip.MustParseAddr("2001::1"),
 		netip.MustParseAddr("2001:2::1"),
 		netip.MustParseAddr("2001:10::1"),
 		netip.MustParseAddr("2001:20::1"),
+		netip.MustParseAddr("2001:100::1"),
 		netip.MustParseAddr("2001:db8::1"),
 		netip.MustParseAddr("2002::1"),
 		netip.MustParseAddr("3fff::1"),
 		netip.MustParseAddr("5f00::1"),
 		netip.MustParseAddr("fec0::1"),
+		netip.MustParseAddr("fe00::1"),
+		netip.MustParseAddr("3000::1"),
 		netip.MustParseAddr("::1"),
 		netip.MustParseAddr("fc00::1"),
 	}
@@ -327,6 +332,14 @@ func TestResolveAddresses_CapAndEmpty(t *testing.T) {
 	})
 	if !errors.Is(err, ErrResolve) {
 		t.Fatalf("private-only resolution error = %v, want ErrResolve", err)
+	}
+}
+
+func TestPublicRoutableAddressAllowsAllocatedIPv6(t *testing.T) {
+	for _, raw := range []string{"2001:4860:4860::8888", "2606:4700:4700::1111"} {
+		if addr := netip.MustParseAddr(raw); !publicRoutableAddress(addr) {
+			t.Fatalf("allocated public IPv6 address %s was rejected", addr)
+		}
 	}
 }
 

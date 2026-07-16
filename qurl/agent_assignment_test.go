@@ -22,6 +22,7 @@ import (
 
 	conformance "github.com/layervai/qurl-conformance"
 
+	"github.com/layervai/qurl-go/internal/nhpcontract"
 	"github.com/layervai/qurl-go/relayknock"
 	"github.com/layervai/qurl-go/relayknock/nativeudp"
 	"github.com/layervai/qurl-go/relayknock/relayknocktest"
@@ -689,6 +690,26 @@ func TestHubAssignmentRejectsInvalidInputsBeforeIO(t *testing.T) {
 	}
 }
 
+func TestHubAssignmentRejectsOversizedEncodedCredentialBeforeIO(t *testing.T) {
+	fixture := loadAssignmentFixture(t)
+	hub, transport, server := assignmentTestSetup(t, fixture.InitialAssignment.Result.BodyJSON)
+	credentials := map[string]string{
+		"long printable": strings.Repeat("a", nhpcontract.MaxApplicationBodySize),
+		"JSON expanding": strings.Repeat(`"`, nhpcontract.MaxApplicationBodySize/2),
+	}
+	for name, credential := range credentials {
+		t.Run(name, func(t *testing.T) {
+			_, err := FetchInitialAgentAssignment(context.Background(), hub, "agent-conform", credential, transport)
+			if !errors.Is(err, ErrInvalidAssignmentConfig) || errors.Is(err, nativeudp.ErrInvalidRequest) {
+				t.Fatalf("error = %v, want ErrInvalidAssignmentConfig only", err)
+			}
+		})
+	}
+	if requests := server.requestBodies(); len(requests) != 0 {
+		t.Fatalf("oversized requests reached I/O: %d", len(requests))
+	}
+}
+
 func TestAgentAssignmentStatePersistsOnlyDurableBinding(t *testing.T) {
 	fixture := loadAssignmentFixture(t)
 	initial, err := parseInitialAssignmentReply([]byte(fixture.InitialAssignment.Result.BodyJSON), "agent-conform", assignmentFixtureNow)
@@ -946,6 +967,14 @@ func TestExactObjectFieldsRejectsNestedDuplicateAndTrailing(t *testing.T) {
 func TestAssignmentErrorRejectsNullDiagnostic(t *testing.T) {
 	if _, err := parseAssignmentEnvelope([]byte(`{"errCode":"52201","errMsg":null}`), false); !errors.Is(err, ErrAssignmentInvalidResponse) {
 		t.Fatalf("error = %v, want ErrAssignmentInvalidResponse", err)
+	}
+}
+
+func TestAssignmentErrorRejectsInvalidUTF8Diagnostic(t *testing.T) {
+	body := append([]byte(`{"errCode":"52201","errMsg":"`), 0xff)
+	body = append(body, []byte(`"}`)...)
+	if _, err := parseAssignmentEnvelope(body, false); !errors.Is(err, ErrAssignmentInvalidResponse) || errors.Is(err, ErrAssignmentIdentityRejected) {
+		t.Fatalf("error = %v, want ErrAssignmentInvalidResponse only", err)
 	}
 }
 

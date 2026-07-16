@@ -435,6 +435,47 @@ func resolveAddresses(ctx context.Context, host string, opts Options) ([]netip.A
 	return public, nil
 }
 
+// netip.Addr.IsGlobalUnicast follows the protocol definition and therefore
+// includes reserved space such as 200::/7 and unallocated space inside
+// 2000::/3. This release-gated allowlist mirrors the IANA IPv6 Global Unicast
+// Address Space allocations; a new allocation requires an SDK release.
+var allocatedIPv6GlobalUnicastPrefixes = [...]netip.Prefix{
+	netip.MustParsePrefix("2001:200::/23"),
+	netip.MustParsePrefix("2001:400::/23"),
+	netip.MustParsePrefix("2001:600::/23"),
+	netip.MustParsePrefix("2001:800::/22"),
+	netip.MustParsePrefix("2001:c00::/23"),
+	netip.MustParsePrefix("2001:e00::/23"),
+	netip.MustParsePrefix("2001:1200::/23"),
+	netip.MustParsePrefix("2001:1400::/22"),
+	netip.MustParsePrefix("2001:1800::/23"),
+	netip.MustParsePrefix("2001:1a00::/23"),
+	netip.MustParsePrefix("2001:1c00::/22"),
+	netip.MustParsePrefix("2001:2000::/19"),
+	netip.MustParsePrefix("2001:4000::/23"),
+	netip.MustParsePrefix("2001:4200::/23"),
+	netip.MustParsePrefix("2001:4400::/23"),
+	netip.MustParsePrefix("2001:4600::/23"),
+	netip.MustParsePrefix("2001:4800::/23"),
+	netip.MustParsePrefix("2001:4a00::/23"),
+	netip.MustParsePrefix("2001:4c00::/23"),
+	netip.MustParsePrefix("2001:5000::/20"),
+	netip.MustParsePrefix("2001:8000::/19"),
+	netip.MustParsePrefix("2001:a000::/20"),
+	netip.MustParsePrefix("2001:b000::/20"),
+	netip.MustParsePrefix("2003::/18"),
+	netip.MustParsePrefix("2400::/12"),
+	netip.MustParsePrefix("2410::/12"),
+	netip.MustParsePrefix("2600::/12"),
+	netip.MustParsePrefix("2610::/23"),
+	netip.MustParsePrefix("2620::/23"),
+	netip.MustParsePrefix("2630::/12"),
+	netip.MustParsePrefix("2800::/12"),
+	netip.MustParsePrefix("2a00::/12"),
+	netip.MustParsePrefix("2a10::/12"),
+	netip.MustParsePrefix("2c00::/12"),
+}
+
 var nonRoutablePrefixes = [...]netip.Prefix{
 	netip.MustParsePrefix("0.0.0.0/8"),       // RFC 1122 this network
 	netip.MustParsePrefix("100.64.0.0/10"),   // RFC 6598 shared address space
@@ -448,15 +489,14 @@ var nonRoutablePrefixes = [...]netip.Prefix{
 	netip.MustParsePrefix("100::/64"),        // RFC 6666 discard-only
 	netip.MustParsePrefix("64:ff9b::/96"),    // RFC 6052 well-known NAT64 prefix
 	netip.MustParsePrefix("64:ff9b:1::/48"),  // RFC 8215 local-use NAT64 prefix
-	netip.MustParsePrefix("2001::/32"),       // RFC 4380 Teredo
-	netip.MustParsePrefix("2001:2::/48"),     // RFC 5180 benchmarking
-	netip.MustParsePrefix("2001:10::/28"),    // RFC 4843 deprecated ORCHID
-	netip.MustParsePrefix("2001:20::/28"),    // RFC 7343 ORCHIDv2
-	netip.MustParsePrefix("2001:db8::/32"),   // RFC 3849 documentation
-	netip.MustParsePrefix("2002::/16"),       // deprecated 6to4
-	netip.MustParsePrefix("3fff::/20"),       // RFC 9637 documentation
-	netip.MustParsePrefix("5f00::/16"),       // RFC 9602 segment routing SIDs
-	netip.MustParsePrefix("fec0::/10"),       // RFC 3879 deprecated site-local
+	// The whole IANA protocol-assignment block is ineligible for LayerV server
+	// endpoints, including its more-specific anycast/protocol allocations.
+	netip.MustParsePrefix("2001::/23"),     // RFC 2928 IETF protocol assignments
+	netip.MustParsePrefix("2001:db8::/32"), // RFC 3849 documentation
+	netip.MustParsePrefix("2002::/16"),     // deprecated 6to4
+	netip.MustParsePrefix("3fff::/20"),     // RFC 9637 documentation
+	netip.MustParsePrefix("5f00::/16"),     // RFC 9602 segment routing SIDs
+	netip.MustParsePrefix("fec0::/10"),     // RFC 3879 deprecated site-local
 }
 
 func publicRoutableAddress(addr netip.Addr) bool {
@@ -464,6 +504,18 @@ func publicRoutableAddress(addr netip.Addr) bool {
 		addr.IsLoopback() || addr.IsLinkLocalUnicast() ||
 		addr.IsLinkLocalMulticast() || addr.IsMulticast() || addr.IsUnspecified() {
 		return false
+	}
+	if addr.Is6() {
+		allocated := false
+		for _, prefix := range allocatedIPv6GlobalUnicastPrefixes {
+			if prefix.Contains(addr) {
+				allocated = true
+				break
+			}
+		}
+		if !allocated {
+			return false
+		}
 	}
 	for _, prefix := range nonRoutablePrefixes {
 		if prefix.Contains(addr) {
