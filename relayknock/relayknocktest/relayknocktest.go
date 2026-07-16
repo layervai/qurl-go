@@ -21,16 +21,15 @@ import (
 )
 
 // BuildReply builds a complete server-originated NHP reply packet (240-byte
-// header ‖ sealed body) of the given reply header type: relayknock.TypeACK,
-// relayknock.TypeListResult, relayknock.TypeCookieChallenge, or
-// relayknock.TypeRegisterAck. It is the
-// responder-role mirror of relayknock.BuildMessage: an agent never builds these,
-// so relayknock's public builder rejects them; a server or a conformance/test
-// double that must answer a knock, list/query request, or registration builds
-// them here. The
-// transcript is role-symmetric (only the obfuscated type field differs), so a
-// reply built here decrypts under relayknock.DecryptReply against the server's
-// static key exactly as a real server reply would.
+// header ‖ sealed body) for a supported reply type. Those types are
+// relayknock.TypeACK, relayknock.TypeListResult, relayknock.TypeCookieChallenge,
+// and relayknock.TypeRegisterAck. It is the responder-role mirror of
+// relayknock.BuildMessage: an agent never builds these, so relayknock's public
+// builder rejects them. A server or conformance/test double that must answer a
+// knock, list/query request, or registration builds them here. The transcript is
+// role-symmetric (only the obfuscated type field differs), so a reply built here
+// decrypts under relayknock.DecryptReply against the server's static key exactly
+// as a real server reply would.
 //
 // Set inp.DeviceStaticPriv to the SERVER static private key and inp.ServerStaticPub
 // to the AGENT (initiator) static public key — the roles are swapped relative to a

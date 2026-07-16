@@ -150,6 +150,9 @@ func TestListRequestResult_PreservesCorrelationMetadata(t *testing.T) {
 	if !openedResult.IsListResult() {
 		t.Fatalf("result type = %d, want %d (NHP_LRT)", openedResult.Type, relayknock.TypeListResult)
 	}
+	if openedResult.Type != 6 {
+		t.Fatalf("NHP_LRT wire type = %d, want 6", openedResult.Type)
+	}
 	if openedResult.Counter != openedRequest.Counter {
 		t.Fatalf("result counter %#x does not echo request counter %#x", openedResult.Counter, openedRequest.Counter)
 	}
@@ -789,35 +792,45 @@ func TestSend_TransportFault(t *testing.T) {
 	}
 }
 
-// TestDecryptReply_RejectsInitiatorType pins the exported reply gate: an
-// authenticated packet carrying an initiator type (here NHP_REG) is refused by
-// DecryptReply, so a direct caller can never receive a Reply that matches no
-// Is* predicate. relayknocktest.OpenInitiatorMessage (responder role) still
-// opens it.
-func TestDecryptReply_RejectsInitiatorType(t *testing.T) {
+// TestDecryptReply_RejectsInitiatorTypes pins the exported reply gate: every
+// authenticated initiator type is refused by DecryptReply, so a direct caller
+// can never receive a Reply that matches no Is* predicate. The responder-role
+// OpenInitiatorMessage still opens each one.
+func TestDecryptReply_RejectsInitiatorTypes(t *testing.T) {
 	devicePriv, devicePub := testKeyPair(t, 0x11)
 	serverPriv, serverPub := testKeyPair(t, 0x22)
 
-	// A server-role open of an agent's REG packet: OpenInitiatorMessage accepts it.
-	reg, err := relayknock.BuildMessage(relayknock.TypeRegister, &relayknock.KnockInputs{
-		DeviceStaticPriv: devicePriv,
-		ServerStaticPub:  serverPub,
-		EphemeralPriv:    bytes.Repeat([]byte{0x55}, 32),
-		TimestampNanos:   1700000000123456789,
-		Counter:          9,
-		Preamble:         0x0a0b0c0d,
-		Body:             []byte("reg body"),
-	})
-	if err != nil {
-		t.Fatalf("BuildMessage(TypeRegister): %v", err)
-	}
-	if _, err := relayknocktest.OpenInitiatorMessage(serverPriv, devicePub, reg); err != nil {
-		t.Fatalf("OpenInitiatorMessage(REG) = %v, want accept", err)
-	}
-	if _, err := relayknock.DecryptReply(serverPriv, devicePub, reg); err == nil {
-		t.Fatal("DecryptReply accepted an initiator type, want reject")
-	} else if !errors.Is(err, relayknock.ErrMalformedReply) {
-		t.Errorf("DecryptReply(REG) error %q, want ErrMalformedReply", err)
+	for _, tc := range []struct {
+		name       string
+		headerType int
+	}{
+		{name: "knock", headerType: relayknock.TypeKnock},
+		{name: "list request", headerType: relayknock.TypeListRequest},
+		{name: "otp", headerType: relayknock.TypeOTP},
+		{name: "register", headerType: relayknock.TypeRegister},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			packet, err := relayknock.BuildMessage(tc.headerType, &relayknock.KnockInputs{
+				DeviceStaticPriv: devicePriv,
+				ServerStaticPub:  serverPub,
+				EphemeralPriv:    bytes.Repeat([]byte{0x55}, 32),
+				TimestampNanos:   1700000000123456789,
+				Counter:          9,
+				Preamble:         0x0a0b0c0d,
+				Body:             []byte("initiator body"),
+			})
+			if err != nil {
+				t.Fatalf("BuildMessage(%d): %v", tc.headerType, err)
+			}
+			if _, err := relayknocktest.OpenInitiatorMessage(serverPriv, devicePub, packet); err != nil {
+				t.Fatalf("OpenInitiatorMessage(%d) = %v, want accept", tc.headerType, err)
+			}
+			if _, err := relayknock.DecryptReply(serverPriv, devicePub, packet); err == nil {
+				t.Fatal("DecryptReply accepted an initiator type, want reject")
+			} else if !errors.Is(err, relayknock.ErrMalformedReply) {
+				t.Errorf("DecryptReply(%d) error %q, want ErrMalformedReply", tc.headerType, err)
+			}
+		})
 	}
 }
 
@@ -831,15 +844,14 @@ func TestBuildReply_RoundTripsUnderDecryptReply(t *testing.T) {
 	tests := []struct {
 		name      string
 		replyType int
-		wantWire  int
 		wantIsRAK bool
 		wantIsACK bool
 		wantIsLRT bool
 	}{
-		{name: "ack", replyType: relayknock.TypeACK, wantWire: 2, wantIsACK: true},
-		{name: "list result", replyType: relayknock.TypeListResult, wantWire: 6, wantIsLRT: true},
-		{name: "cookie challenge", replyType: relayknock.TypeCookieChallenge, wantWire: 7},
-		{name: "register ack", replyType: relayknock.TypeRegisterAck, wantWire: 14, wantIsRAK: true},
+		{name: "ack", replyType: relayknock.TypeACK, wantIsACK: true},
+		{name: "list result", replyType: relayknock.TypeListResult, wantIsLRT: true},
+		{name: "cookie challenge", replyType: relayknock.TypeCookieChallenge},
+		{name: "register ack", replyType: relayknock.TypeRegisterAck, wantIsRAK: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -861,8 +873,8 @@ func TestBuildReply_RoundTripsUnderDecryptReply(t *testing.T) {
 			if err != nil {
 				t.Fatalf("DecryptReply: %v", err)
 			}
-			if got.Type != tt.wantWire {
-				t.Errorf("Type = %d, want %d", got.Type, tt.wantWire)
+			if got.Type != tt.replyType {
+				t.Errorf("Type = %d, want %d", got.Type, tt.replyType)
 			}
 			if got.Counter != counter {
 				t.Errorf("Counter = %#x, want %#x", got.Counter, counter)
