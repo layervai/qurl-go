@@ -1,6 +1,9 @@
 package cryptoutil
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 func TestRandomValues(t *testing.T) {
 	b, err := RandomBytes(32)
@@ -16,13 +19,15 @@ func TestRandomValues(t *testing.T) {
 	if _, err := RandomUint32(); err != nil {
 		t.Fatalf("RandomUint32: %v", err)
 	}
-	for range 100 {
-		value, err := RandomInt64n(7)
-		if err != nil {
-			t.Fatalf("RandomInt64n: %v", err)
-		}
-		if value < 0 || value >= 7 {
-			t.Fatalf("RandomInt64n(7) = %d", value)
+	for _, upperBound := range []int64{1, 2, 7, math.MaxInt64} {
+		for range 100 {
+			value, err := RandomInt64n(upperBound)
+			if err != nil {
+				t.Fatalf("RandomInt64n(%d): %v", upperBound, err)
+			}
+			if value < 0 || value >= upperBound {
+				t.Fatalf("RandomInt64n(%d) = %d", upperBound, value)
+			}
 		}
 	}
 	if _, err := RandomInt64n(0); err == nil {

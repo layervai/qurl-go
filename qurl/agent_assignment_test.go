@@ -315,6 +315,11 @@ func TestAssignmentBackoffWindowsAndJitterBounds(t *testing.T) {
 	if fmt.Sprint(windows) != fmt.Sprint(want) {
 		t.Fatalf("backoff windows = %v, want %v", windows, want)
 	}
+	if delay, err := (&assignmentConfig{jitter: func(time.Duration) (time.Duration, error) {
+		return 400 * time.Millisecond, nil
+	}}).backoff(1, 100*time.Millisecond); err != nil || delay != 400*time.Millisecond {
+		t.Fatalf("jitter above RetryAfter = %s, %v; want 400ms", delay, err)
+	}
 
 	for _, testCase := range []struct {
 		name   string
@@ -371,7 +376,7 @@ func TestHubAssignmentRetryDelayCannotExceedRemainingBudget(t *testing.T) {
 	}
 }
 
-func TestHubAssignmentTerminalResultWinsConcurrentBudgetExpiry(t *testing.T) {
+func TestHubAssignmentTerminalResultWinsElapsedBudget(t *testing.T) {
 	hub, transport, server := assignmentTestSetup(t, `{"errCode":"52201","errMsg":"identity rejected"}`)
 	clockCalls := 0
 	_, err := RefreshAgentAssignment(
@@ -380,7 +385,7 @@ func TestHubAssignmentTerminalResultWinsConcurrentBudgetExpiry(t *testing.T) {
 		withAssignmentClock(func() time.Time {
 			clockCalls++
 			if clockCalls == 2 {
-				time.Sleep(150 * time.Millisecond)
+				return assignmentFixtureNow.Add(time.Second)
 			}
 			return assignmentFixtureNow
 		}),
@@ -677,8 +682,28 @@ func TestInitialAssignmentDeadlineClocksAreIndependent(t *testing.T) {
 	}
 }
 
+func TestParseCanonicalRFC3339PinsProducerSpelling(t *testing.T) {
+	canonical := "2026-07-15T23:30:00Z"
+	parsed, err := parseCanonicalRFC3339(canonical)
+	if err != nil || parsed.Format(time.RFC3339) != canonical {
+		t.Fatalf("canonical timestamp = %s, %v; want %s", parsed, err, canonical)
+	}
+	for name, value := range map[string]string{
+		"numeric zero offset": "2026-07-15T23:30:00+00:00",
+		"fractional seconds":  "2026-07-15T23:30:00.123Z",
+		"non-UTC offset":      "2026-07-15T17:30:00-06:00",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := parseCanonicalRFC3339(value); err == nil {
+				t.Fatalf("non-canonical timestamp %q accepted", value)
+			}
+		})
+	}
+}
+
 func TestExactObjectFieldsRejectsNestedDuplicateAndTrailing(t *testing.T) {
 	for _, raw := range []string{
+		`{"key":1,"key":2}`,
 		`{"outer":{"key":1,"key":2}}`,
 		`{"outer":1}{"trailing":2}`,
 		`null`,
@@ -694,6 +719,9 @@ func TestExactObjectFieldsRejectsNestedDuplicateAndTrailing(t *testing.T) {
 	deep = append(deep, '}')
 	if _, err := exactObjectFields(deep); err == nil {
 		t.Fatalf("strict parser accepted %d-level nested value", maxAssignmentJSONDepth+1)
+	}
+	if _, err := parseAssignmentEnvelope([]byte(`{"errCode":"0","list":{},"extra":true}`), false); !errors.Is(err, ErrAssignmentInvalidResponse) {
+		t.Fatalf("success envelope unknown-field error = %v, want ErrAssignmentInvalidResponse", err)
 	}
 }
 

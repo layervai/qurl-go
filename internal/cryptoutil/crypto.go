@@ -7,7 +7,6 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
-	"math/big"
 	"runtime"
 )
 
@@ -45,11 +44,21 @@ func RandomInt64n(upperBound int64) (int64, error) {
 	if upperBound <= 0 {
 		return 0, errors.New("cryptoutil: random bound must be positive")
 	}
-	value, err := rand.Int(rand.Reader, big.NewInt(upperBound))
-	if err != nil {
-		return 0, err
+	bound := uint64(upperBound)
+	// Reject the incomplete range below 2^64 mod bound. The remaining uint64
+	// values divide evenly into bound buckets, avoiding modulo bias without a
+	// per-draw big.Int allocation.
+	threshold := -bound % bound
+	for {
+		value, err := RandomUint64()
+		if err != nil {
+			return 0, err
+		}
+		if value >= threshold {
+			// #nosec G115 -- the remainder is < bound, which came from a positive int64.
+			return int64(value % bound), nil
+		}
 	}
-	return value.Int64(), nil
 }
 
 // Wipe zeroes a sensitive buffer. KeepAlive prevents the clear from being
