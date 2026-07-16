@@ -117,9 +117,18 @@ func (a *AgentAssignment) DecodedServerKey() ([]byte, error) {
 	return decodeAssignmentServerPublicKey(a.Endpoint.ServerPublicKeyB64)
 }
 
-// LeaseExpired reports whether this binding is absent or no longer usable. An
-// expired lease must be refreshed through the hub; it never permits local cell
-// selection or fallback.
+// Validate checks every assignment trust-boundary field and requires the lease
+// to be live at now. It wraps ErrAssignmentInvalidResponse on failure. Persisted
+// stores use the same structural validation without the liveness requirement so
+// an expired assignment can load and be refreshed.
+func (a *AgentAssignment) Validate(now time.Time) error {
+	return validateAgentAssignment(a, now)
+}
+
+// LeaseExpired reports only whether the assignment is absent or its lease is no
+// longer live. It does not validate endpoint or identity fields; caller-built
+// state must pass Validate before network use. An expired lease must be refreshed
+// through the hub and never permits local cell selection or fallback.
 func (a *AgentAssignment) LeaseExpired(now time.Time) bool {
 	return a == nil || !a.LeaseExpiresAt.After(now)
 }
@@ -751,21 +760,31 @@ func parseWireAssignment(raw []byte, now time.Time) (*AgentAssignment, error) {
 		CellID: wire.CellID, AssignmentGeneration: wire.AssignmentGeneration,
 		EndpointRevision: wire.EndpointRevision, LeaseExpiresAt: lease, Endpoint: endpoint,
 	}
-	if err := validateAgentAssignment(assignment, now); err != nil {
+	if err := assignment.Validate(now); err != nil {
 		return nil, err
 	}
 	return assignment, nil
 }
 
 func validateAgentAssignment(a *AgentAssignment, now time.Time) error {
+	if err := validatePersistedAgentAssignment(a); err != nil {
+		return err
+	}
+	if !a.LeaseExpiresAt.After(now) {
+		return invalidAssignmentResponse("assignment", errors.New("lease must be in the future"))
+	}
+	return nil
+}
+
+func validatePersistedAgentAssignment(a *AgentAssignment) error {
 	if a == nil || !validAssignmentCellID(a.CellID) {
 		return invalidAssignmentResponse("assignment", errors.New("invalid cell_id"))
 	}
 	if a.AssignmentGeneration < 1 || a.EndpointRevision < 1 {
 		return invalidAssignmentResponse("assignment", errors.New("generation and endpoint revision must be positive"))
 	}
-	if !a.LeaseExpiresAt.After(now) {
-		return invalidAssignmentResponse("assignment", errors.New("lease must be in the future"))
+	if a.LeaseExpiresAt.IsZero() {
+		return invalidAssignmentResponse("assignment", errors.New("lease must be nonzero"))
 	}
 	if err := validateAssignmentEndpointHost(a.Endpoint.Host, "assignment endpoint", ErrAssignmentInvalidResponse); err != nil {
 		return err

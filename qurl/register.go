@@ -326,6 +326,9 @@ func loadAgentStateIfPresent(ctx context.Context, store AgentStateStore, invalid
 	state, err := store.LoadAgentState(ctx)
 	switch {
 	case err == nil:
+		if err := validateLoadedAgentAssignment(state); err != nil {
+			return nil, false, fmt.Errorf("%w: %w", invalidConfigErr, err)
+		}
 		if err := state.ensureKeypair(invalidConfigErr); err != nil {
 			return nil, false, err
 		}

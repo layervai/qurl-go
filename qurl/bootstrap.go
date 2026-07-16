@@ -126,6 +126,19 @@ type AgentState struct {
 	Assignment *AgentAssignment `json:"assignment,omitempty"`
 }
 
+// validateLoadedAgentAssignment checks persisted trust-boundary structure but
+// deliberately permits an expired lease so the caller can refresh it. Concrete
+// stores call it directly; lifecycle loaders repeat it for custom stores.
+func validateLoadedAgentAssignment(state *AgentState) error {
+	if state == nil || state.Assignment == nil {
+		return nil
+	}
+	if err := validatePersistedAgentAssignment(state.Assignment); err != nil {
+		return fmt.Errorf("%w: persisted assignment: %w", ErrInvalidAgentState, err)
+	}
+	return nil
+}
+
 // clone returns an independent mutable snapshot. Strings and scalar fields copy
 // by value; every pointer field is copied explicitly so lifecycle transitions
 // cannot mutate the loaded state through an alias. Keep this method aligned with
@@ -203,6 +216,9 @@ func (s fileAgentStateStore) LoadAgentState(ctx context.Context) (*AgentState, e
 	var state AgentState
 	if err := json.Unmarshal(raw, &state); err != nil {
 		return nil, fmt.Errorf("%w: decode agent state: %w", ErrInvalidAgentState, err)
+	}
+	if err := validateLoadedAgentAssignment(&state); err != nil {
+		return nil, err
 	}
 	return &state, nil
 }

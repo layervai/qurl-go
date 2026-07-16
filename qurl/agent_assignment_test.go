@@ -622,6 +622,79 @@ func TestAgentAssignmentCloneAndLease(t *testing.T) {
 	}
 }
 
+func TestPersistedAgentAssignmentTrustFieldsValidatedOnLoad(t *testing.T) {
+	fixture := loadAssignmentFixture(t)
+	initial, err := parseInitialAssignmentReply([]byte(fixture.InitialAssignment.Result.BodyJSON), "agent-conform", assignmentFixtureNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := initial.Assignment.Validate(assignmentFixtureNow); err != nil {
+		t.Fatalf("fresh assignment Validate: %v", err)
+	}
+
+	storeFactories := map[string]func(*testing.T) AgentStateStore{
+		"plaintext": func(t *testing.T) AgentStateStore {
+			return FileAgentState(filepath.Join(secureAgentStateTestDir(t), "agent-state.json"))
+		},
+		"sealed": func(t *testing.T) AgentStateStore {
+			return testSealedStore(t, &testAgentStateKeyWrapper{})
+		},
+	}
+	newState := func(t *testing.T, assignment *AgentAssignment) *AgentState {
+		t.Helper()
+		state, err := newAgentState()
+		if err != nil {
+			t.Fatal(err)
+		}
+		state.AgentID = "agent-assignment-state"
+		state.SchemaVersion = agentStateSchemaVersion
+		state.Assignment = assignment
+		return state
+	}
+	invalidAssignments := map[string]func(*AgentAssignment){
+		"host outside LayerV apex": func(a *AgentAssignment) { a.Endpoint.Host = "attacker.example.com" },
+		"low-order server key": func(a *AgentAssignment) {
+			a.Endpoint.ServerPublicKeyB64 = base64.StdEncoding.EncodeToString(make([]byte, 32))
+		},
+		"invalid cell":      func(a *AgentAssignment) { a.CellID = "CELL0" },
+		"zero generation":   func(a *AgentAssignment) { a.AssignmentGeneration = 0 },
+		"zero endpoint rev": func(a *AgentAssignment) { a.EndpointRevision = 0 },
+		"zero port":         func(a *AgentAssignment) { a.Endpoint.Port = 0 },
+		"zero lease":        func(a *AgentAssignment) { a.LeaseExpiresAt = time.Time{} },
+	}
+	for storeName, newStore := range storeFactories {
+		for mutationName, mutate := range invalidAssignments {
+			t.Run(storeName+"/"+mutationName, func(t *testing.T) {
+				assignment := initial.Assignment.clone()
+				mutate(assignment)
+				store := newStore(t)
+				if err := store.SaveAgentState(context.Background(), newState(t, assignment)); err != nil {
+					t.Fatalf("persist malformed assignment fixture: %v", err)
+				}
+				if _, err := store.LoadAgentState(context.Background()); !errors.Is(err, ErrInvalidAgentState) {
+					t.Fatalf("LoadAgentState error = %v, want ErrInvalidAgentState", err)
+				}
+			})
+		}
+
+		t.Run(storeName+"/expired lease remains refreshable", func(t *testing.T) {
+			assignment := initial.Assignment.clone()
+			assignment.LeaseExpiresAt = assignmentFixtureNow.Add(-time.Second)
+			store := newStore(t)
+			if err := store.SaveAgentState(context.Background(), newState(t, assignment)); err != nil {
+				t.Fatal(err)
+			}
+			loaded, err := store.LoadAgentState(context.Background())
+			if err != nil || loaded.Assignment == nil || !loaded.Assignment.LeaseExpired(assignmentFixtureNow) {
+				t.Fatalf("expired assignment load = %#v, %v", loaded, err)
+			}
+			if err := loaded.Assignment.Validate(assignmentFixtureNow); !errors.Is(err, ErrAssignmentInvalidResponse) {
+				t.Fatalf("expired assignment Validate = %v, want ErrAssignmentInvalidResponse", err)
+			}
+		})
+	}
+}
+
 func TestAgentAssignmentDecodedServerKeyRevalidatesState(t *testing.T) {
 	fixture := loadAssignmentFixture(t)
 	initial, err := parseInitialAssignmentReply([]byte(fixture.InitialAssignment.Result.BodyJSON), "agent-conform", assignmentFixtureNow)

@@ -263,6 +263,9 @@ func (s *SealedFileAgentStateStore) LoadAgentState(ctx context.Context) (*AgentS
 	if err != nil || innerID != envelope.AgentID {
 		return nil, invalidSealedState("authenticated outer agent id does not match decrypted state")
 	}
+	if err := validateLoadedAgentAssignment(&state); err != nil {
+		return nil, err
+	}
 	return &state, nil
 }
 
