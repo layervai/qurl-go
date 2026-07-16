@@ -68,23 +68,23 @@ func TestValidatePublicSharedProbeScalarConcurrent(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := lowOrderProbeScalar
-	errors := make(chan error, 32)
+	errCh := make(chan error, 32)
 	var workers sync.WaitGroup
-	for range cap(errors) {
+	for range cap(errCh) {
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
 			for range 100 {
 				if err := ValidatePublic(valid.PublicKey().Bytes()); err != nil {
-					errors <- err
+					errCh <- err
 					return
 				}
 			}
 		}()
 	}
 	workers.Wait()
-	close(errors)
-	for err := range errors {
+	close(errCh)
+	for err := range errCh {
 		t.Fatalf("concurrent validation: %v", err)
 	}
 	if lowOrderProbeScalar != before {
