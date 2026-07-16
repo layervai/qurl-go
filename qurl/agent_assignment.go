@@ -158,7 +158,8 @@ var (
 // particular, 52204 is terminal within the current transaction; callers must
 // wait at least RetryAfter before starting a new whole assignment transaction.
 // The outer lifecycle owns that inter-transaction gate; this helper only bounds
-// retries within one transaction.
+// retries within one transaction. Lifecycle enforcement is tracked by
+// https://github.com/layervai/qurl-go/issues/66.
 type AssignmentError struct {
 	Code       string
 	Message    string
@@ -462,6 +463,9 @@ func (c *assignmentConfig) backoff(attempt int, retryAfter time.Duration) (time.
 	if jittered < 0 || jittered >= window {
 		return 0, errors.New("assignment retry jitter must be in [0, window)")
 	}
+	// Authenticated RetryAfter is a lower bound, not a value to clamp. If it
+	// exceeds the remaining transaction budget, the caller surfaces recovery
+	// rather than sleeping past that budget.
 	return max(retryAfter, jittered), nil
 }
 
