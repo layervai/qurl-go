@@ -152,11 +152,12 @@ func Knock(ctx context.Context, relayBaseURL string, serverStaticPub, body []byt
 // relayBaseURL + "/relay/" + serverId, then decrypts and authenticates the reply
 // against serverStaticPub. headerType must be a round-trip type — TypeKnock
 // (answered with NHP_ACK, or NHP_COK under overload) or TypeRegister (answered
-// with NHP_RAK, or NHP_COK under overload); TypeOTP is rejected because the
-// server never replies to an OTP message, so
-// there is no reply to exchange (use Send). body is an already-serialized
-// application body (relayknock does not know any body shape). The returned
-// Reply.Body is the decrypted application reply for the caller to interpret.
+// with NHP_RAK, or NHP_COK under overload). TypeListRequest is rejected because
+// NHP_LST is native-UDP-only and never uses this relay HTTP transport. TypeOTP is
+// rejected because the server never replies to an OTP message, so there is no
+// reply to exchange (use Send). body is an already-serialized application body
+// (relayknock does not know any body shape). The returned Reply.Body is the
+// decrypted application reply for the caller to interpret.
 //
 // The reply header's type and counter ride outside the AEAD (the transcript
 // authenticates the server, not those fields), so Exchange enforces what the
