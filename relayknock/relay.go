@@ -132,7 +132,8 @@ type KnockOptions struct {
 	HTTPClient HTTPDoer
 
 	// DeviceStaticPriv is the agent static private key (the Noise initiator
-	// identity). nil/empty ⇒ a fresh random X25519 key is minted for this knock.
+	// identity). nil/empty ⇒ a fresh random X25519 key is minted and wiped after
+	// the operation. A caller-provided key remains caller-owned and is never wiped.
 	DeviceStaticPriv []byte
 }
 
@@ -179,6 +180,9 @@ func Exchange(ctx context.Context, relayBaseURL string, serverStaticPub []byte, 
 	packet, devicePriv, counter, err := buildOutbound(headerType, serverStaticPub, body, opts)
 	if err != nil {
 		return nil, err
+	}
+	if len(opts.DeviceStaticPriv) == 0 {
+		defer cryptoutil.Wipe(devicePriv)
 	}
 
 	serverID := PubKeyFingerprint(serverStaticPub)
@@ -281,9 +285,14 @@ func replyTypeAllowed(requestType, replyType int) bool {
 func Send(ctx context.Context, relayBaseURL string, serverStaticPub, body []byte, opts KnockOptions) error {
 	// Send drops buildOutbound's devicePriv and counter: NHP_OTP is one-way, so
 	// there is no reply to decrypt or counter to correlate.
-	packet, _, _, err := buildOutbound(nhpwire.TypeOTP, serverStaticPub, body, opts)
+	packet, devicePriv, _, err := buildOutbound(nhpwire.TypeOTP, serverStaticPub, body, opts)
 	if err != nil {
 		return err
+	}
+	if len(opts.DeviceStaticPriv) == 0 {
+		// A one-way send no longer needs the throwaway identity after the packet is
+		// sealed, so scrub it before any HTTP I/O.
+		cryptoutil.Wipe(devicePriv)
 	}
 
 	serverID := PubKeyFingerprint(serverStaticPub)
@@ -348,16 +357,26 @@ func sendAcceptedError(status int, msg string) *RelayError {
 // actually used (a round-trip caller decrypts the reply with it), and the
 // minted counter (which a round-trip caller requires the reply to echo).
 func buildOutbound(headerType int, serverStaticPub, body []byte, opts KnockOptions) (packet, devicePriv []byte, counter uint64, err error) {
-	if len(serverStaticPub) != nhpwire.PublicKeySize {
-		return nil, nil, 0, fmt.Errorf("server static pub must be %d bytes, got %d", nhpwire.PublicKeySize, len(serverStaticPub))
+	if err := x25519key.ValidatePublic(serverStaticPub); err != nil {
+		return nil, nil, 0, fmt.Errorf("server static pub is unusable: %w", err)
 	}
 
+	var mintedDevicePriv []byte
 	devicePriv = opts.DeviceStaticPriv
 	if len(devicePriv) == 0 {
 		devicePriv, err = cryptoutil.RandomBytes(x25519key.Size)
 		if err != nil {
 			return nil, nil, 0, fmt.Errorf("device key: %w", err)
 		}
+		mintedDevicePriv = devicePriv
+		// On success the caller owns the throwaway key until Send has sealed the
+		// one-way request or Exchange has decrypted the reply. Scrub here only when
+		// a later build step fails before ownership can transfer.
+		defer func() {
+			if err != nil {
+				cryptoutil.Wipe(mintedDevicePriv)
+			}
+		}()
 	} else if len(devicePriv) != x25519key.Size {
 		return nil, nil, 0, fmt.Errorf("device static priv must be %d bytes, got %d", x25519key.Size, len(devicePriv))
 	}

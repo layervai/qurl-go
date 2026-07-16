@@ -50,10 +50,10 @@ var (
 	// persisted, so every exchange re-resolves.
 	ErrResolve = errors.New("nativeudp: endpoint DNS resolution failed")
 
-	// ErrTransport marks a datagram exchange that never produced a reply from any
-	// resolved address: dial, write, or read failure, or a socket deadline
-	// (timeout) with no reply. It is the class the caller may re-drive under a
-	// bounded retry policy, re-resolving the host first.
+	// ErrTransport marks a runtime exchange failure that is safe to re-drive with
+	// fresh randomness under a bounded retry policy: unavailable entropy while
+	// constructing the packet, dial/write/read failure, or a socket deadline with
+	// no reply. A retried exchange re-resolves the host first.
 	ErrTransport = errors.New("nativeudp: udp exchange failed")
 
 	// ErrServerUnauthenticated marks a datagram that was received but is not an
@@ -369,17 +369,17 @@ func replyTypeAllowed(requestType, replyType int) bool {
 func buildPacket(headerType int, serverStaticPub, devicePriv, body []byte) (packet []byte, counter uint64, err error) {
 	ephemeralPriv, err := cryptoutil.RandomBytes(x25519key.Size)
 	if err != nil {
-		return nil, 0, fmt.Errorf("%w: ephemeral key: %w", ErrInvalidRequest, err)
+		return nil, 0, fmt.Errorf("%w: generate ephemeral key: %w", ErrTransport, err)
 	}
 	defer cryptoutil.Wipe(ephemeralPriv)
 
 	counter, err = cryptoutil.RandomUint64()
 	if err != nil {
-		return nil, 0, fmt.Errorf("%w: counter: %w", ErrInvalidRequest, err)
+		return nil, 0, fmt.Errorf("%w: generate counter: %w", ErrTransport, err)
 	}
 	preamble, err := cryptoutil.RandomUint32()
 	if err != nil {
-		return nil, 0, fmt.Errorf("%w: preamble: %w", ErrInvalidRequest, err)
+		return nil, 0, fmt.Errorf("%w: generate preamble: %w", ErrTransport, err)
 	}
 
 	packet, err = relayknock.BuildMessage(headerType, &relayknock.KnockInputs{
@@ -450,6 +450,7 @@ var nonRoutablePrefixes = [...]netip.Prefix{
 	netip.MustParsePrefix("240.0.0.0/4"),     // RFC 1112 reserved / Class E
 	netip.MustParsePrefix("100::/64"),        // RFC 6666 discard-only
 	netip.MustParsePrefix("64:ff9b::/96"),    // RFC 6052 well-known NAT64 prefix
+	netip.MustParsePrefix("64:ff9b:1::/48"),  // RFC 8215 local-use NAT64 prefix
 	netip.MustParsePrefix("2001::/32"),       // RFC 4380 Teredo
 	netip.MustParsePrefix("2001:2::/48"),     // RFC 5180 benchmarking
 	netip.MustParsePrefix("2001:10::/28"),    // RFC 4843 deprecated ORCHID

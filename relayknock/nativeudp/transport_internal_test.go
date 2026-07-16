@@ -240,6 +240,34 @@ func TestExchange_NilOrCancelledContext(t *testing.T) {
 	}
 }
 
+func TestBuildPacketClassifiesEntropyFailureAsTransport(t *testing.T) {
+	serverPub := freshX25519Pub(t)
+	devicePriv := freshX25519Priv(t)
+	originalReader := rand.Reader
+	t.Cleanup(func() { rand.Reader = originalReader })
+
+	for _, tc := range []struct {
+		name   string
+		failAt int
+	}{
+		{name: "ephemeral key", failAt: 1},
+		{name: "counter", failAt: 2},
+		{name: "preamble", failAt: 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reader := &failAtReader{failAt: tc.failAt}
+			rand.Reader = reader
+			_, _, err := buildPacket(relayknock.TypeListRequest, serverPub, devicePriv, nil)
+			if !errors.Is(err, ErrTransport) || errors.Is(err, ErrInvalidRequest) {
+				t.Fatalf("buildPacket error = %v, want only ErrTransport", err)
+			}
+			if len(reader.buffers) > 0 && !zeroed(reader.buffers[0]) {
+				t.Fatalf("ephemeral private key was not wiped: %x", reader.buffers[0])
+			}
+		})
+	}
+}
+
 func TestResolveAddresses_CapAndEmpty(t *testing.T) {
 	many := []netip.Addr{
 		netip.MustParseAddr("8.8.8.8"),
@@ -280,6 +308,7 @@ func TestResolveAddresses_CapAndEmpty(t *testing.T) {
 		netip.MustParseAddr("240.0.0.1"),
 		netip.MustParseAddr("100::1"),
 		netip.MustParseAddr("64:ff9b::1"),
+		netip.MustParseAddr("64:ff9b:1::1"),
 		netip.MustParseAddr("2001::1"),
 		netip.MustParseAddr("2001:2::1"),
 		netip.MustParseAddr("2001:10::1"),
@@ -357,6 +386,33 @@ type dialerFunc func(ctx context.Context, network, address string) (net.Conn, er
 
 func (f dialerFunc) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
 	return f(ctx, network, address)
+}
+
+type failAtReader struct {
+	calls   int
+	failAt  int
+	buffers [][]byte
+}
+
+func (r *failAtReader) Read(p []byte) (int, error) {
+	r.calls++
+	if r.calls == r.failAt {
+		return 0, errors.New("injected entropy failure")
+	}
+	for i := range p {
+		p[i] = byte(i + r.calls)
+	}
+	r.buffers = append(r.buffers, p)
+	return len(p), nil
+}
+
+func zeroed(value []byte) bool {
+	for _, b := range value {
+		if b != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 type shortWriteConn struct{}
