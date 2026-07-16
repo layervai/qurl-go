@@ -152,7 +152,9 @@ var (
 
 // AssignmentError is a valid authenticated application error from the closed
 // qurl-conformance v1 taxonomy. Policy comes only from Code; Message is
-// diagnostic. RetryAfter is populated only for codes that permit it.
+// diagnostic. RetryAfter is populated only for codes that permit it. In
+// particular, 52204 is terminal within the current transaction; callers must
+// wait at least RetryAfter before starting a new whole assignment transaction.
 type AssignmentError struct {
 	Code       string
 	Message    string
