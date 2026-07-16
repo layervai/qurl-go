@@ -4,6 +4,7 @@ import (
 	"crypto/ecdh"
 	"crypto/rand"
 	"encoding/base64"
+	"sync"
 	"testing"
 )
 
@@ -50,5 +51,35 @@ func TestValidatePublicRejectsUnusableOrNonCanonicalKeys(t *testing.T) {
 				t.Fatal("invalid public key accepted")
 			}
 		})
+	}
+}
+
+func TestValidatePublicSharedProbeScalarConcurrent(t *testing.T) {
+	valid, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := lowOrderProbeScalar
+	errors := make(chan error, 32)
+	var workers sync.WaitGroup
+	for range cap(errors) {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for range 100 {
+				if err := ValidatePublic(valid.PublicKey().Bytes()); err != nil {
+					errors <- err
+					return
+				}
+			}
+		}()
+	}
+	workers.Wait()
+	close(errors)
+	for err := range errors {
+		t.Fatalf("concurrent validation: %v", err)
+	}
+	if lowOrderProbeScalar != before {
+		t.Fatal("X25519 mutated the shared low-order probe scalar")
 	}
 }
