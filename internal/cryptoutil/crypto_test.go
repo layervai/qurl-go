@@ -16,6 +16,18 @@ func TestRandomValues(t *testing.T) {
 	if _, err := RandomUint32(); err != nil {
 		t.Fatalf("RandomUint32: %v", err)
 	}
+	for range 100 {
+		value, err := RandomInt64n(7)
+		if err != nil {
+			t.Fatalf("RandomInt64n: %v", err)
+		}
+		if value < 0 || value >= 7 {
+			t.Fatalf("RandomInt64n(7) = %d", value)
+		}
+	}
+	if _, err := RandomInt64n(0); err == nil {
+		t.Fatal("RandomInt64n(0) succeeded")
+	}
 }
 
 func TestWipe(t *testing.T) {

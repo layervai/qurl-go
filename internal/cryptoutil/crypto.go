@@ -6,6 +6,8 @@ package cryptoutil
 import (
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
+	"math/big"
 	"runtime"
 )
 
@@ -35,6 +37,19 @@ func RandomUint32() (uint32, error) {
 		return 0, err
 	}
 	return binary.BigEndian.Uint32(b[:]), nil
+}
+
+// RandomInt64n returns a cryptographically random integer in [0, max) without
+// modulo bias. A non-positive bound is a programming error.
+func RandomInt64n(upperBound int64) (int64, error) {
+	if upperBound <= 0 {
+		return 0, errors.New("cryptoutil: random bound must be positive")
+	}
+	value, err := rand.Int(rand.Reader, big.NewInt(upperBound))
+	if err != nil {
+		return 0, err
+	}
+	return value.Int64(), nil
 }
 
 // Wipe zeroes a sensitive buffer. KeepAlive prevents the clear from being

@@ -88,6 +88,46 @@ func TestDecryptAndCorrelate_ConformanceRAK(t *testing.T) {
 	}
 }
 
+// TestDecryptAndCorrelate_ConformanceLRT consumes the shared assignment result
+// packet byte-for-byte. Besides proving the new LST path accepts the reference
+// server's authenticated LRT, the negative assertions pin the two correlation
+// fields that live outside the AEAD and the out-of-band hub identity.
+func TestDecryptAndCorrelate_ConformanceLRT(t *testing.T) {
+	f, err := conformance.AgentAssignmentGolden()
+	if err != nil {
+		t.Fatalf("load qurl-conformance agent-assignment vectors: %v", err)
+	}
+	vec := f.InitialAssignment.Result
+	if vec.HeaderType != conformance.AgentAssignmentResultHeaderType || vec.PacketHex == "" {
+		t.Fatalf("initial result header/packet = %d/%t, want NHP_LRT with packet", vec.HeaderType, vec.PacketHex != "")
+	}
+	counter, err := strconv.ParseUint(vec.Counter, 10, 64)
+	if err != nil {
+		t.Fatalf("parse counter %q: %v", vec.Counter, err)
+	}
+
+	agentPriv := mustHexBytes(t, f.Keys.Agent.StaticPrivHex)
+	hubPub := mustHexBytes(t, f.Keys.Hub.StaticPubHex)
+	packet := mustHexBytes(t, vec.PacketHex)
+	reply, err := decryptAndCorrelate(agentPriv, hubPub, relayknock.TypeListRequest, counter, packet)
+	if err != nil {
+		t.Fatalf("decryptAndCorrelate accepted LRT: %v", err)
+	}
+	if reply.Type != conformance.AgentAssignmentResultHeaderType || string(reply.Body) != vec.BodyJSON {
+		t.Fatalf("LRT type/body = %d/%q, want %d/%q", reply.Type, reply.Body, conformance.AgentAssignmentResultHeaderType, vec.BodyJSON)
+	}
+
+	if _, err := decryptAndCorrelate(agentPriv, hubPub, relayknock.TypeListRequest, counter+1, packet); !errors.Is(err, relayknock.ErrMalformedReply) {
+		t.Fatalf("wrong-counter error = %v, want ErrMalformedReply", err)
+	}
+	if _, err := decryptAndCorrelate(agentPriv, hubPub, relayknock.TypeRegister, counter, packet); !errors.Is(err, relayknock.ErrMalformedReply) {
+		t.Fatalf("wrong-request-type error = %v, want ErrMalformedReply", err)
+	}
+	if _, err := decryptAndCorrelate(agentPriv, freshX25519Pub(t), relayknock.TypeListRequest, counter, packet); !errors.Is(err, ErrServerUnauthenticated) {
+		t.Fatalf("wrong-key error = %v, want ErrServerUnauthenticated", err)
+	}
+}
+
 func TestDecryptAndCorrelate_RejectsMalformedDatagram(t *testing.T) {
 	devicePriv := freshX25519Priv(t)
 	serverPub := freshX25519Pub(t)
@@ -153,7 +193,7 @@ func TestExchange_ValidatesBeforeIO(t *testing.T) {
 			wantErr: ErrInvalidEndpoint,
 		},
 		{
-			name:    "non-round-trip header type (OTP)",
+			name:    "one-way header type (OTP)",
 			ep:      Endpoint{Host: "cell0.nhp.test", Port: 62206, ServerStaticPub: goodPub},
 			ht:      relayknock.TypeOTP,
 			opts:    Options{DeviceStaticPriv: goodPriv, Resolver: failResolver},
@@ -268,6 +308,9 @@ func TestReplyTypeAllowed(t *testing.T) {
 		{relayknock.TypeKnock, relayknock.TypeACK, true},
 		{relayknock.TypeKnock, relayknock.TypeCookieChallenge, true},
 		{relayknock.TypeKnock, relayknock.TypeRegisterAck, false},
+		{relayknock.TypeListRequest, relayknock.TypeListResult, true},
+		{relayknock.TypeListRequest, relayknock.TypeCookieChallenge, false},
+		{relayknock.TypeListRequest, relayknock.TypeACK, false},
 		{relayknock.TypeRegister, relayknock.TypeRegisterAck, true},
 		{relayknock.TypeRegister, relayknock.TypeCookieChallenge, true},
 		{relayknock.TypeRegister, relayknock.TypeACK, false},

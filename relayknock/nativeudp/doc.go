@@ -10,14 +10,14 @@
 //
 // # Scope
 //
-// Round-trip initiator messages only: an NHP_KNK (answered NHP_ACK) and an
-// NHP_REG (answered NHP_RAK). Either can come back as an NHP_COK overload
-// cookie-challenge, surfaced as a retryable Reply (IsCookieChallenge). The
-// re-knock/cookie-answer NHP_RKN and any exit message stay out of scope here
-// exactly as they do in relayknock: this transport has no multi-packet flow, so a
-// caller treats an NHP_COK as "retry later". The application body is opaque — a
-// caller supplies an already-serialized body (for a registered agent, the qurl
-// package's native knock body) and interprets the decrypted reply body itself.
+// Round-trip initiator messages only: NHP_LST (answered exactly by NHP_LRT),
+// NHP_KNK (answered by NHP_ACK/NHP_COK), and NHP_REG (answered by
+// NHP_RAK/NHP_COK). LST never accepts a cookie challenge; handler-budget or
+// pre-handler overload shedding is a timeout owned by the caller's bounded
+// transaction retry. Every reply, including COK, must echo the request counter.
+// The re-knock/cookie-answer NHP_RKN and any exit message stay out of scope here.
+// The application body is opaque — a caller supplies already-serialized bytes
+// and interprets the decrypted authenticated reply body itself.
 //
 // # Server authentication
 //

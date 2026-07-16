@@ -6,47 +6,62 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
-	"strconv"
+	"io"
+	"math"
+	"net"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/layervai/qurl-go/internal/cryptoutil"
 	"github.com/layervai/qurl-go/internal/x25519key"
+	"github.com/layervai/qurl-go/relayknock/nativeudp"
 )
 
-// Native-UDP cell-assignment client for POST /v1/agent/assignment.
-//
-// The assignment is the authoritative, durable native-UDP placement qurl-service
-// hands a registered agent. The SDK consumes it and never calculates placement,
-// lists cells, derives an AWS hostname, or uses the browser relay URL. First
-// assignment creation authenticates with an enrollment/account credential; every
-// ordinary lease/binding refresh authenticates with the persisted immutable-bound
-// DeviceAPIKey. This client is credential-agnostic: the caller supplies the
-// CredentialProvider (BearerToken(enrollmentKey) for first creation, or a
-// DeviceAPIKey-backed provider for refresh), so the one-refresh-path policy stays
-// with the lifecycle rather than being hard-coded here.
+// Native UDP cell assignment is a two-party authenticated exchange. The SDK
+// sends NHP_LST directly to a pinned bootstrap hub and accepts only the matching
+// NHP_LRT authenticated by that hub's X25519 key. It never calls an HTTP
+// assignment endpoint, derives a cell from an identifier, probes another cell,
+// or asks the browser relay to route a native client.
 
-// --- assignment types (wire `data` shape and persisted AgentState shape) ---
+const (
+	assignmentQuery          = "cell_assignment"
+	assignmentVersion        = 1
+	assignmentModeEnroll     = "enroll"
+	assignmentModeRefresh    = "refresh"
+	assignmentASPID          = "agent"
+	standardNHPUDPPort       = 62206
+	maxAssignmentTicketBytes = 2048
 
-// NHPUDPEndpoint is the assigned native NHP UDP endpoint. Host is opaque
-// LayerV-owned DNS data resolved fresh on every registration/knock exchange; a
-// resolved IP is never persisted as the assignment. It is deliberately NOT an
-// HTTPS URL, a raw AWS NLB hostname, or a value derived from cell_id.
+	defaultAssignmentMaxAttempts = 4
+	defaultAssignmentBudget      = 30 * time.Second
+	defaultAssignmentMinBackoff  = 500 * time.Millisecond
+	defaultAssignmentMaxBackoff  = 8 * time.Second
+)
+
+// HubBootstrap is the out-of-band trust root for native assignment. Host, Port,
+// and ServerPublicKeyB64 are one atomic revision supplied by trusted deployment
+// configuration. The SDK never synthesizes any of them from an API URL, cell id,
+// DNS response, or unauthenticated packet.
+type HubBootstrap struct {
+	Host               string `json:"host"`
+	Port               int    `json:"port"`
+	ServerPublicKeyB64 string `json:"server_public_key_b64"`
+}
+
+// NHPUDPEndpoint is the assigned cell's public native NHP endpoint. Host is
+// opaque LayerV-owned DNS resolved fresh for each exchange; it is not an HTTPS
+// URL or a raw cloud load-balancer name. Resolved IPs are never stored here.
 type NHPUDPEndpoint struct {
 	Host               string `json:"host"`
 	Port               int    `json:"port"`
 	ServerPublicKeyB64 string `json:"server_public_key_b64"`
 }
 
-// AgentAssignment is one authoritative native-UDP cell assignment. It is both the
-// decoded POST /v1/agent/assignment response `data` and the shape persisted in
-// AgentState.Assignment, so the binding metadata a later native exchange needs —
-// generation, endpoint revision, lease expiry, and the DNS endpoint — survives a
-// restart. A resolved IP is never part of it.
+// AgentAssignment is the durable placement returned by the hub. Agent identity
+// remains the single AgentState.AgentID; it is authenticated and checked in the
+// LRT but deliberately not duplicated in this persisted binding.
 type AgentAssignment struct {
-	AgentID              string         `json:"agent_id"`
 	CellID               string         `json:"cell_id"`
 	AssignmentGeneration int64          `json:"assignment_generation"`
 	EndpointRevision     int64          `json:"endpoint_revision"`
@@ -54,9 +69,26 @@ type AgentAssignment struct {
 	Endpoint             NHPUDPEndpoint `json:"nhp_udp_endpoint"`
 }
 
-// clone returns an independent copy. AgentAssignment holds only scalars, a
-// time.Time, and an all-scalar NHPUDPEndpoint, so a shallow struct copy fully
-// isolates it; keep this aligned if a pointer/slice/map field is ever added.
+// AssignmentRegistration is the enrollment identity the assigned-cell REG will
+// present. It is attempt-scoped output, not durable assignment state. In
+// particular, callers must not copy it into AgentState.KeyID, which belongs to
+// the separate legacy HTTPS registration lifecycle.
+type AssignmentRegistration struct {
+	KeyID   string
+	KeyKind string
+}
+
+// InitialAgentAssignment is the validated initial hub result. Registration,
+// AssignmentTicket, and AssignmentTicketExpiresAt are intentionally ephemeral:
+// only Assignment belongs in AgentState. A lost/expired attempt obtains a fresh
+// ticket rather than persisting and replaying this one-shot authorization.
+type InitialAgentAssignment struct {
+	Registration              AssignmentRegistration
+	Assignment                AgentAssignment
+	AssignmentTicket          string
+	AssignmentTicketExpiresAt time.Time
+}
+
 func (a *AgentAssignment) clone() *AgentAssignment {
 	if a == nil {
 		return nil
@@ -65,11 +97,8 @@ func (a *AgentAssignment) clone() *AgentAssignment {
 	return &cloned
 }
 
-// DecodedServerKey returns the raw 32-byte X25519 NHP server public key from the
-// assignment's endpoint. Assignment identities have one canonical wire spelling:
-// padded standard base64 of a canonical, non-low-order X25519 public key. It
-// deliberately revalidates on every call because a persisted or caller-built
-// assignment need not have passed the current response validator.
+// DecodedServerKey returns the assignment's canonical 32-byte X25519 server
+// identity. Persisted/caller-built state is revalidated on every use.
 func (a *AgentAssignment) DecodedServerKey() ([]byte, error) {
 	if a == nil {
 		return nil, fmt.Errorf("%w: assignment is nil", ErrAssignmentInvalidResponse)
@@ -77,175 +106,107 @@ func (a *AgentAssignment) DecodedServerKey() ([]byte, error) {
 	return decodeAssignmentServerPublicKey(a.Endpoint.ServerPublicKeyB64)
 }
 
-// LeaseExpired reports whether the assignment is absent or its lease has reached
-// or passed now. A lease is a refresh deadline: once expired the binding must be
-// refreshed through the control plane and must fail closed, never fall back to
-// local cell selection.
+// LeaseExpired reports whether this binding is absent or no longer usable. An
+// expired lease must be refreshed through the hub; it never permits local cell
+// selection or fallback.
 func (a *AgentAssignment) LeaseExpired(now time.Time) bool {
 	return a == nil || !a.LeaseExpiresAt.After(now)
 }
 
-// --- error sentinels and typed errors ---
+var (
+	// ErrInvalidAssignmentConfig marks invalid hub, identity, credential, key, or
+	// retry options rejected before network I/O.
+	ErrInvalidAssignmentConfig = errors.New("qurl: invalid assignment config")
+	// ErrAssignmentInvalidResponse marks malformed authenticated LRT JSON,
+	// unknown/duplicate fields, invalid success data, or an unknown error code.
+	ErrAssignmentInvalidResponse = errors.New("qurl: assignment response invalid")
+	// ErrAssignmentUnavailable is the sole retryable assignment application
+	// result (52200), bounded together with transport misses by the transaction
+	// retry budget.
+	ErrAssignmentUnavailable = errors.New("qurl: cell assignment unavailable")
+	// ErrAssignmentRecoveryRequired marks exhaustion of that bounded budget.
+	ErrAssignmentRecoveryRequired = errors.New("qurl: cell assignment recovery required")
+	// ErrAssignmentIdentityRejected marks 52201.
+	ErrAssignmentIdentityRejected = errors.New("qurl: assignment identity rejected")
+	// ErrAssignmentReassignmentRequired marks 52202.
+	ErrAssignmentReassignmentRequired = errors.New("qurl: cell reassignment in progress")
+	// ErrAssignmentQuotaExceeded marks 52203.
+	ErrAssignmentQuotaExceeded = errors.New("qurl: agent assignment quota exceeded")
+	// ErrAssignmentRateLimited marks 52204.
+	ErrAssignmentRateLimited = errors.New("qurl: assignment rate limited")
+	// ErrAssignmentRequestRejected marks 52205 or 52109.
+	ErrAssignmentRequestRejected = errors.New("qurl: assignment request rejected")
+	// ErrAssignmentKeyRejected marks initial-credential result 52106.
+	ErrAssignmentKeyRejected = errors.New("qurl: assignment enrollment key rejected")
+	// ErrAssignmentRegistrationDisabled marks initial-credential result 52107.
+	ErrAssignmentRegistrationDisabled = errors.New("qurl: agent registration disabled")
+	// ErrAssignmentBootstrapConsumed marks initial-credential result 52108.
+	ErrAssignmentBootstrapConsumed = errors.New("qurl: assignment bootstrap credential consumed")
+)
 
-// ErrInvalidAssignmentConfig is returned when assignment inputs or options are
-// invalid before any network call.
-var ErrInvalidAssignmentConfig = errors.New("qurl: invalid assignment config")
-
-// ErrAssignmentInvalidResponse is returned when a 2xx assignment response is
-// missing, malformed, echoes a different agent id, or carries an unusable
-// endpoint (bad host opacity, port, or server key).
-var ErrAssignmentInvalidResponse = errors.New("qurl: assignment response invalid")
-
-// ErrAssignmentUnavailable is the retryable authority signal: HTTP 503
-// cell_assignment_unavailable. The wire deliberately cannot distinguish a
-// transient authority failure from a device key whose durable assignment row is
-// missing, so it is retryable only within a bounded attempt/deadline budget —
-// honor Retry-After as a minimum, back off, then surface recovery, never loop
-// forever.
-var ErrAssignmentUnavailable = errors.New("qurl: cell assignment unavailable")
-
-// ErrAssignmentRecoveryRequired is returned when the bounded assignment-refresh
-// budget (attempt maximum or elapsed deadline) is exhausted while the service
-// kept returning 503. The caller must surface operator recovery rather than
-// retry, because the durable assignment row may simply be missing.
-var ErrAssignmentRecoveryRequired = errors.New("qurl: cell assignment recovery required")
-
-// ErrAssignmentReassignmentRequired is returned for HTTP 409
-// cell_reassignment_in_progress: an explicit cross-cell move is underway. It is
-// terminal for an ordinary refresh; the agent must take the SDK-2 move /
-// re-registration path rather than retry this endpoint.
-var ErrAssignmentReassignmentRequired = errors.New("qurl: cell reassignment in progress")
-
-// ErrAssignmentQuotaExceeded is returned for HTTP 409
-// agent_assignment_quota_exceeded: the account reached its durable-agent
-// assignment cap. Terminal; free an assignment slot before retrying.
-var ErrAssignmentQuotaExceeded = errors.New("qurl: agent assignment quota exceeded")
-
-// ErrAssignmentRateLimited is returned for HTTP 429: the per-credential
-// assignment budget (60/hour) or the general account budget was exceeded. It is
-// terminal for the current operation — honor the reset headers, do not treat it
-// as a 503 retry, and do not rotate credentials to evade the budget.
-var ErrAssignmentRateLimited = errors.New("qurl: assignment rate limited")
-
-// ErrAssignmentRequestRejected is returned for HTTP 400 (malformed/oversized body
-// or invalid agent id). Terminal; fix the request, do not retry.
-var ErrAssignmentRequestRejected = errors.New("qurl: assignment request rejected")
-
-// ErrAssignmentForbidden is returned for HTTP 401/403: missing/invalid auth, a
-// frozen account, or a device key presented for a different agent id. Terminal.
-var ErrAssignmentForbidden = errors.New("qurl: assignment forbidden")
-
-// ErrAssignmentServiceError is returned for an unexpected assignment status (a
-// non-cell_assignment_unavailable 5xx, or a transport-level failure). Terminal
-// for this bounded client; only 503 cell_assignment_unavailable is retried.
-// In particular, transport failures are not retried inside one call because an
-// ambiguous write may already have consumed the fixed assignment budget. The
-// lifecycle may deliberately schedule a later whole-operation attempt.
-var ErrAssignmentServiceError = errors.New("qurl: assignment service error")
-
-// AssignmentRateLimitedError carries the retry timing a 429 reported so a caller
-// can pace the next attempt. It unwraps to ErrAssignmentRateLimited.
-type AssignmentRateLimitedError struct {
-	// RetryAfter is the Retry-After delay, or 0 when the header was absent.
-	// A literal Retry-After: 0 has the same representation; both mean that this
-	// error carries no positive minimum delay.
+// AssignmentError is a valid authenticated application error from the closed
+// qurl-conformance v1 taxonomy. Policy comes only from Code; Message is
+// diagnostic. RetryAfter is populated only for codes that permit it.
+type AssignmentError struct {
+	Code       string
+	Message    string
 	RetryAfter time.Duration
-	// Reset is the RateLimit-Reset window, or 0 when the header was absent.
-	Reset time.Duration
-
-	apiErr *APIError
+	kind       error
 }
 
-func (e *AssignmentRateLimitedError) Error() string {
-	return fmt.Sprintf("qurl: assignment rate limited; honor the rate-limit reset (retry-after=%s reset=%s) and do not rotate credentials to evade it", e.RetryAfter, e.Reset)
+func (e *AssignmentError) Error() string {
+	if e == nil {
+		return "qurl: assignment error"
+	}
+	msg := "qurl: assignment error " + e.Code
+	if e.Message != "" {
+		msg += ": " + e.Message
+	}
+	return msg
 }
 
-func (e *AssignmentRateLimitedError) Unwrap() []error {
-	return unwrapAssignmentError(e.apiErr, ErrAssignmentRateLimited)
+func (e *AssignmentError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.kind
 }
 
-// AssignmentRecoveryRequiredError reports an exhausted bounded refresh: the
-// service kept returning 503 through the whole attempt/deadline budget. It
-// unwraps to both ErrAssignmentRecoveryRequired and ErrAssignmentUnavailable so a
-// caller can match either the terminal-recovery class or the underlying 503
-// class. When the server returned a structured problem, errors.As also exposes
-// the final *APIError for diagnostics.
+// AssignmentRecoveryRequiredError carries the final failed attempt without
+// losing its typed cause. Callers surface recovery instead of starting an
+// unbounded loop.
 type AssignmentRecoveryRequiredError struct {
-	Attempts       int
-	Elapsed        time.Duration
-	LastRetryAfter time.Duration
-
-	apiErr *APIError
-	cause  error
+	Attempts int
+	Elapsed  time.Duration
+	Last     error
 }
 
 func (e *AssignmentRecoveryRequiredError) Error() string {
-	if e.cause != nil {
-		return fmt.Sprintf("qurl: cell assignment retry backoff unavailable after %d attempts over %s (last-retry-after=%s); surface operator recovery: %v", e.Attempts, e.Elapsed, e.LastRetryAfter, e.cause)
+	if e == nil {
+		return ErrAssignmentRecoveryRequired.Error()
 	}
-	return fmt.Sprintf("qurl: cell assignment unavailable after %d attempts over %s (last-retry-after=%s); the durable assignment row may be missing — surface operator recovery instead of retrying (never an unbounded 5s loop)", e.Attempts, e.Elapsed, e.LastRetryAfter)
+	return fmt.Sprintf("qurl: assignment retry budget exhausted after %d attempts over %s; surface recovery: %v", e.Attempts, e.Elapsed, e.Last)
 }
 
 func (e *AssignmentRecoveryRequiredError) Unwrap() []error {
-	sentinels := []error{ErrAssignmentRecoveryRequired, ErrAssignmentUnavailable}
-	if e.cause != nil {
-		sentinels = append(sentinels, e.cause)
+	if e == nil || e.Last == nil {
+		return []error{ErrAssignmentRecoveryRequired}
 	}
-	return unwrapAssignmentError(e.apiErr, sentinels...)
+	return []error{ErrAssignmentRecoveryRequired, e.Last}
 }
-
-func unwrapAssignmentError(apiErr *APIError, sentinels ...error) []error {
-	if apiErr == nil {
-		return sentinels
-	}
-	return append(sentinels, apiErr)
-}
-
-// --- client ---
-
-// Assignment wire error codes emitted by qurl-service in the RFC 7807 `code`
-// field. These are a frozen public contract; fence them exactly.
-const (
-	assignmentCodeUnavailable            = "cell_assignment_unavailable"
-	assignmentCodeReassignmentInProgress = "cell_reassignment_in_progress"
-	assignmentCodeQuotaExceeded          = "agent_assignment_quota_exceeded"
-
-	// Assignment endpoints are accepted only below these LayerV-owned public
-	// DNS apexes. Adding an apex is a deliberate SDK trust-boundary change that
-	// requires its own release; this is intentionally not runtime-configurable.
-	assignmentEndpointApexAI  = ".layerv.ai"
-	assignmentEndpointApexXYZ = ".layerv.xyz"
-	assignmentEndpointPath    = "/v1/agent/assignment"
-)
-
-// Bounded-refresh defaults. The 60/hour per-credential assignment budget is a
-// server contract; a single FetchAgentAssignment consumes at most
-// defaultAssignmentMaxAttempts slots, and honoring Retry-After (>=5s) spaces them
-// so one call stays far under the budget. The caller paces refresh cadence.
-const (
-	defaultAssignmentMaxAttempts = 6
-	defaultAssignmentBudget      = 45 * time.Second
-	defaultAssignmentMinBackoff  = 500 * time.Millisecond
-	defaultAssignmentMaxBackoff  = 8 * time.Second
-	// defaultAssignmentRetryAfter is the minimum 503 delay when the server omits
-	// Retry-After; it matches the service's contractual Retry-After: 5.
-	defaultAssignmentRetryAfter = 5 * time.Second
-	maxHeaderDurationSeconds    = int64((1<<63 - 1) / time.Second)
-)
 
 type assignmentConfig struct {
-	endpointURL string
-	httpClient  HTTPDoer
 	maxAttempts int
 	budget      time.Duration
 	minBackoff  time.Duration
 	maxBackoff  time.Duration
 	clock       func() time.Time
 	sleep       func(context.Context, time.Duration) error
-	jitter      func() (float64, error)
+	jitter      func(time.Duration) (time.Duration, error)
 }
 
-// AssignmentOption customizes FetchAgentAssignment.
+// AssignmentOption customizes the bounded hub transaction. Transport injection
+// belongs to nativeudp.Options, passed directly to the public operation.
 type AssignmentOption interface {
 	applyAssignmentOption(*assignmentConfig) error
 }
@@ -254,33 +215,8 @@ type assignmentOptionFunc func(*assignmentConfig) error
 
 func (f assignmentOptionFunc) applyAssignmentOption(c *assignmentConfig) error { return f(c) }
 
-// WithAssignmentBaseURL points the client at a non-default control-plane origin.
-// Assignment refresh uses the resource/API origin, not the registration origin.
-func WithAssignmentBaseURL(rawURL string) AssignmentOption {
-	return assignmentOptionFunc(func(c *assignmentConfig) error {
-		if err := validateHTTPSOrLoopbackURL(rawURL, "assignment base URL", ErrInvalidAssignmentConfig); err != nil {
-			return err
-		}
-		c.endpointURL = strings.TrimRight(rawURL, "/") + assignmentEndpointPath
-		return nil
-	})
-}
-
-// WithAssignmentHTTPClient injects the HTTP client used for the assignment POST.
-func WithAssignmentHTTPClient(client HTTPDoer) AssignmentOption {
-	return assignmentOptionFunc(func(c *assignmentConfig) error {
-		if client == nil {
-			return fmt.Errorf("%w: HTTP client must not be nil", ErrInvalidAssignmentConfig)
-		}
-		c.httpClient = client
-		return nil
-	})
-}
-
-// WithAssignmentRetryBudget bounds automatic 503 retries by a maximum attempt
-// count and a maximum elapsed time. Both must be positive. When either is
-// exhausted the client returns a typed recovery-required result rather than
-// retrying further.
+// WithAssignmentRetryBudget bounds a single hub transaction by attempts and
+// elapsed time. Both must be positive.
 func WithAssignmentRetryBudget(maxAttempts int, budget time.Duration) AssignmentOption {
 	return assignmentOptionFunc(func(c *assignmentConfig) error {
 		if maxAttempts < 1 {
@@ -295,52 +231,45 @@ func WithAssignmentRetryBudget(maxAttempts int, budget time.Duration) Assignment
 	})
 }
 
-// withAssignmentClock overrides the clock (tests only).
 func withAssignmentClock(clock func() time.Time) AssignmentOption {
 	return assignmentOptionFunc(func(c *assignmentConfig) error {
 		if clock == nil {
-			return fmt.Errorf("%w: clock must not be nil", ErrInvalidAssignmentConfig)
+			return fmt.Errorf("%w: assignment clock must not be nil", ErrInvalidAssignmentConfig)
 		}
 		c.clock = clock
 		return nil
 	})
 }
 
-// withAssignmentSleep overrides the backoff sleep (tests only) so a bounded loop
-// can be driven without real time passing.
 func withAssignmentSleep(sleep func(context.Context, time.Duration) error) AssignmentOption {
 	return assignmentOptionFunc(func(c *assignmentConfig) error {
 		if sleep == nil {
-			return fmt.Errorf("%w: sleep must not be nil", ErrInvalidAssignmentConfig)
+			return fmt.Errorf("%w: assignment sleep must not be nil", ErrInvalidAssignmentConfig)
 		}
 		c.sleep = sleep
 		return nil
 	})
 }
 
-// withAssignmentJitter overrides the jitter source (tests only) with a function
-// returning a fraction in [0,1).
-func withAssignmentJitter(jitter func() float64) AssignmentOption {
+func withAssignmentJitter(jitter func(time.Duration) (time.Duration, error)) AssignmentOption {
 	return assignmentOptionFunc(func(c *assignmentConfig) error {
 		if jitter == nil {
-			return fmt.Errorf("%w: jitter must not be nil", ErrInvalidAssignmentConfig)
+			return fmt.Errorf("%w: assignment jitter must not be nil", ErrInvalidAssignmentConfig)
 		}
-		c.jitter = func() (float64, error) { return jitter(), nil }
+		c.jitter = jitter
 		return nil
 	})
 }
 
 func newAssignmentConfig(opts []AssignmentOption) (*assignmentConfig, error) {
 	c := &assignmentConfig{
-		endpointURL: defaultAPIBaseURL + assignmentEndpointPath,
-		httpClient:  defaultAPIHTTPClient,
 		maxAttempts: defaultAssignmentMaxAttempts,
 		budget:      defaultAssignmentBudget,
 		minBackoff:  defaultAssignmentMinBackoff,
 		maxBackoff:  defaultAssignmentMaxBackoff,
 		clock:       time.Now,
-		sleep:       sleepWithContext,
-		jitter:      cryptoJitterFraction,
+		sleep:       sleepAssignmentBackoff,
+		jitter:      cryptoAssignmentJitter,
 	}
 	for _, opt := range opts {
 		if opt == nil {
@@ -353,406 +282,8 @@ func newAssignmentConfig(opts []AssignmentOption) (*assignmentConfig, error) {
 	return c, nil
 }
 
-// FetchAgentAssignment resolves the agent's native-UDP cell assignment by POSTing
-// agentID to /v1/agent/assignment, authenticated by cred. It classifies the
-// response per the frozen contract: a 200 returns the validated assignment; a 503
-// cell_assignment_unavailable is retried within the bounded attempt/deadline
-// budget honoring Retry-After as a minimum delay with jittered bounded backoff,
-// returning a typed recovery-required result on exhaustion; 400/401/403/409/429
-// are terminal with their typed errors, and 429 carries the rate-limit reset.
-// The lifecycle caller must fail closed after lease expiry, pace a later
-// invocation on ErrAssignmentRateLimited, surface operator recovery on
-// ErrAssignmentRecoveryRequired, enter the explicit move/re-registration path
-// on ErrAssignmentReassignmentRequired, and treat every other terminal class as
-// an operator- or credential-correction result rather than probing another cell.
-//
-// cred is the caller's choice: an enrollment/account credential for first
-// creation, or a DeviceAPIKey-backed credential for ordinary refresh.
-func FetchAgentAssignment(ctx context.Context, agentID string, cred CredentialProvider, opts ...AssignmentOption) (*AgentAssignment, error) {
-	if err := validateContext(ctx, ErrInvalidAssignmentConfig); err != nil {
-		return nil, err
-	}
-	if err := validateAssignmentAgentID(agentID); err != nil {
-		return nil, err
-	}
-	if cred == nil {
-		return nil, fmt.Errorf("%w: credential provider must not be nil", ErrInvalidAssignmentConfig)
-	}
-	cfg, err := newAssignmentConfig(opts)
-	if err != nil {
-		return nil, err
-	}
-	return cfg.resolve(ctx, agentID, cred)
-}
-
-func (c *assignmentConfig) resolve(ctx context.Context, agentID string, cred CredentialProvider) (*AgentAssignment, error) {
-	reqBody, err := json.Marshal(assignmentRequestBody{AgentID: agentID})
-	if err != nil {
-		return nil, fmt.Errorf("%w: encode assignment request: %w", ErrInvalidAssignmentConfig, err)
-	}
-	start := c.clock()
-	for attempt := 1; ; attempt++ {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		res := c.attempt(ctx, agentID, cred, reqBody)
-		if res.err != nil || res.assignment != nil {
-			return res.assignment, res.err
-		}
-		// res is the retryable 503 case.
-		elapsed := c.clock().Sub(start)
-		exhausted := attempt >= c.maxAttempts || elapsed >= c.budget
-		var delay time.Duration
-		if !exhausted {
-			delay, err = c.backoff(attempt, res.retryAfter)
-			if err != nil {
-				return nil, &AssignmentRecoveryRequiredError{
-					Attempts:       attempt,
-					Elapsed:        elapsed,
-					LastRetryAfter: res.retryAfter,
-					apiErr:         res.apiErr,
-					cause:          fmt.Errorf("draw bounded retry jitter: %w", err),
-				}
-			}
-			exhausted = delay > c.budget-elapsed
-		}
-		// Stop when the attempt budget is spent, the elapsed deadline is reached,
-		// or the required minimum delay would overrun the deadline — never loop
-		// past the budget honoring an ever-repeating Retry-After.
-		if exhausted {
-			return nil, &AssignmentRecoveryRequiredError{
-				Attempts:       attempt,
-				Elapsed:        elapsed,
-				LastRetryAfter: res.retryAfter,
-				apiErr:         res.apiErr,
-			}
-		}
-		if err := c.sleep(ctx, delay); err != nil {
-			return nil, err
-		}
-	}
-}
-
-// backoff returns the delay before the next attempt: the larger of the honored
-// Retry-After minimum and full jitter across the exponentially growing window
-// capped at maxBackoff. The service-contract Retry-After remains the hard floor.
-// That floor intentionally dominates the early default windows; once the local
-// window grows above it, full jitter decorrelates later fleet retries.
-func (c *assignmentConfig) backoff(attempt int, retryAfter time.Duration) (time.Duration, error) {
-	if attempt < 1 {
-		return 0, errors.New("assignment backoff attempt must be positive")
-	}
-	// Saturate before shifting. A post-shift overflow check can miss an int64
-	// wrap to a small positive duration for a very large custom attempt budget.
-	shift := attempt - 1
-	base := c.maxBackoff
-	if shift < 63 && c.minBackoff <= c.maxBackoff>>shift {
-		base = c.minBackoff << shift
-	}
-	fraction, err := c.jitter()
-	if err != nil {
-		return 0, err
-	}
-	// The negated range check also rejects NaN because both comparisons are
-	// false for it.
-	if !(fraction >= 0 && fraction < 1) {
-		return 0, errors.New("assignment jitter fraction must be in [0,1)")
-	}
-	jittered := time.Duration(fraction * float64(base))
-	return max(retryAfter, jittered), nil
-}
-
-// assignmentAttempt is the outcome of one POST: exactly one of a validated
-// assignment, a terminal error, or a retryable 503 (assignment and err both nil,
-// with retryAfter and apiErr set).
-type assignmentAttempt struct {
-	assignment *AgentAssignment
-	retryAfter time.Duration
-	apiErr     *APIError
-	err        error
-}
-
-func (c *assignmentConfig) attempt(ctx context.Context, agentID string, cred CredentialProvider, reqBody []byte) assignmentAttempt {
-	// endpointURL is either the trusted SDK default or a caller override already
-	// validated and normalized by WithAssignmentBaseURL, so request construction
-	// cannot fail because of a service response.
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpointURL, bytes.NewReader(reqBody))
-	if err != nil {
-		return assignmentAttempt{err: fmt.Errorf("%w: build assignment request: %w", ErrInvalidAssignmentConfig, err)}
-	}
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", sdkUserAgent())
-	if err := cred.Authorize(ctx, req); err != nil {
-		return assignmentAttempt{err: fmt.Errorf("%w: authorize assignment request: %w", ErrInvalidAssignmentConfig, err)}
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		// A transport-level failure is terminal for this bounded client: it is not
-		// the 503 authority signal, and the request may already have consumed
-		// assignment budget, so a blind retry here is unsafe.
-		return assignmentAttempt{err: fmt.Errorf("%w: assignment request failed: %w", ErrAssignmentServiceError, err)}
-	}
-	defer func() { _ = resp.Body.Close() }()
-	defer drainResponseBody(resp.Body)
-
-	body, err := readCappedBody(resp.Body, maxAPIResponseBodyBytes, "assignment response body")
-	if err != nil {
-		var capErr *inputExceedsCapError
-		if resp.StatusCode == http.StatusOK && errors.As(err, &capErr) {
-			return assignmentAttempt{err: fmt.Errorf("%w: %w", ErrAssignmentInvalidResponse, err)}
-		}
-		return assignmentAttempt{err: fmt.Errorf("%w: read assignment response: %w", ErrAssignmentServiceError, err)}
-	}
-	// Assignment fields are public/durable today. Keep the same response-body
-	// lifetime bound as credential-bearing API paths so a future problem/detail
-	// field cannot silently make this buffer long-lived.
-	defer wipeBytes(body)
-
-	if resp.StatusCode == http.StatusOK {
-		return c.decodeSuccess(agentID, body)
-	}
-	return classifyAssignmentError(resp.StatusCode, body, resp.Header, c.clock())
-}
-
-func (c *assignmentConfig) decodeSuccess(agentID string, body []byte) assignmentAttempt {
-	if len(bytes.TrimSpace(body)) == 0 {
-		return assignmentAttempt{err: fmt.Errorf("%w: empty assignment response body", ErrAssignmentInvalidResponse)}
-	}
-	if !utf8.Valid(body) {
-		return assignmentAttempt{err: fmt.Errorf("%w: assignment response body is not valid UTF-8", ErrAssignmentInvalidResponse)}
-	}
-	var env apiEnvelope[AgentAssignment]
-	// Deliberately keep ordinary encoding/json forward compatibility: the
-	// producer may add envelope or assignment fields without forcing an SDK
-	// release, while every field this SDK acts on is validated below.
-	if err := json.Unmarshal(body, &env); err != nil {
-		return assignmentAttempt{err: fmt.Errorf("%w: decode assignment response: %w", ErrAssignmentInvalidResponse, err)}
-	}
-	assignment := &env.Data
-	if err := validateAgentAssignment(assignment, agentID, c.clock()); err != nil {
-		return assignmentAttempt{err: err}
-	}
-	return assignmentAttempt{assignment: assignment}
-}
-
-// classifyAssignmentError maps a non-2xx assignment response to the frozen typed
-// taxonomy. Only 503 cell_assignment_unavailable is retryable.
-func classifyAssignmentError(status int, body []byte, header http.Header, now time.Time) assignmentAttempt {
-	var apiErr *APIError
-	if !errors.As(apiErrorFromResponse(status, body), &apiErr) {
-		// apiErrorFromResponse always returns *APIError; keep this defensive so a
-		// future change cannot silently drop the code/status.
-		return assignmentAttempt{err: fmt.Errorf("%w: unexpected assignment status %d", ErrAssignmentServiceError, status)}
-	}
-	switch status {
-	case http.StatusBadRequest:
-		return assignmentAttempt{err: fmt.Errorf("%w: %w", ErrAssignmentRequestRejected, apiErr)}
-	case http.StatusUnauthorized, http.StatusForbidden:
-		return assignmentAttempt{err: fmt.Errorf("%w: %w", ErrAssignmentForbidden, apiErr)}
-	case http.StatusConflict:
-		switch apiErr.Code {
-		case assignmentCodeReassignmentInProgress:
-			return assignmentAttempt{err: fmt.Errorf("%w: %w", ErrAssignmentReassignmentRequired, apiErr)}
-		case assignmentCodeQuotaExceeded:
-			return assignmentAttempt{err: fmt.Errorf("%w: %w", ErrAssignmentQuotaExceeded, apiErr)}
-		default:
-			return assignmentAttempt{err: fmt.Errorf("%w: unexpected 409 assignment response: %w", ErrAssignmentServiceError, apiErr)}
-		}
-	case http.StatusTooManyRequests:
-		return assignmentAttempt{err: &AssignmentRateLimitedError{
-			RetryAfter: parseRetryAfter(header.Get("Retry-After"), now),
-			Reset:      parseSecondsHeader(header.Get("RateLimit-Reset")),
-			apiErr:     apiErr,
-		}}
-	case http.StatusServiceUnavailable:
-		if apiErr.Code == assignmentCodeUnavailable {
-			retryAfter := parseRetryAfter(header.Get("Retry-After"), now)
-			if retryAfter <= 0 {
-				retryAfter = defaultAssignmentRetryAfter
-			}
-			return assignmentAttempt{retryAfter: retryAfter, apiErr: apiErr}
-		}
-		return assignmentAttempt{err: fmt.Errorf("%w: unexpected 503 assignment response: %w", ErrAssignmentServiceError, apiErr)}
-	default:
-		return assignmentAttempt{err: fmt.Errorf("%w: %w", ErrAssignmentServiceError, apiErr)}
-	}
-}
-
-// assignmentRequestBody is the POST /v1/agent/assignment request. The SDK has
-// already generated and durably saved its keypair and agent id before this call;
-// no cell, endpoint, region, or placement hint is ever sent.
-type assignmentRequestBody struct {
-	AgentID string `json:"agent_id"`
-}
-
-// --- validation ---
-
-// validateAssignmentAgentID enforces the frozen agent-id shape client-side so a
-// malformed id fails before it can consume assignment budget on a 400.
-func validateAssignmentAgentID(agentID string) error {
-	if l := len(agentID); l < 2 || l > 64 {
-		return fmt.Errorf("%w: agent id must be 2-64 characters", ErrInvalidAssignmentConfig)
-	}
-	for i := range agentID {
-		ch := agentID[i]
-		isLowerAlnum := isLowerAlnumByte(ch)
-		if i == 0 || i == len(agentID)-1 {
-			if !isLowerAlnum {
-				return fmt.Errorf("%w: agent id must start and end with a lowercase letter or digit", ErrInvalidAssignmentConfig)
-			}
-			continue
-		}
-		if !isLDHByte(ch) {
-			return fmt.Errorf("%w: agent id may contain only lowercase letters, digits, and hyphens", ErrInvalidAssignmentConfig)
-		}
-	}
-	return nil
-}
-
-// validateAgentAssignment checks a decoded assignment before it is used or
-// persisted: it must echo the requested agent id, carry a positive generation and
-// endpoint revision, a non-zero lease, and an endpoint whose host passes the
-// opacity guard, whose port is in range, and whose server key is a valid X25519
-// key.
-func validateAgentAssignment(a *AgentAssignment, wantAgentID string, now time.Time) error {
-	if a == nil {
-		return fmt.Errorf("%w: assignment is nil", ErrAssignmentInvalidResponse)
-	}
-	if a.AgentID != wantAgentID {
-		return fmt.Errorf("%w: response agent id %q does not match requested %q", ErrAssignmentInvalidResponse, a.AgentID, wantAgentID)
-	}
-	if !validAssignmentCellID(a.CellID) {
-		return fmt.Errorf("%w: invalid cell id %q", ErrAssignmentInvalidResponse, a.CellID)
-	}
-	if a.AssignmentGeneration < 1 {
-		return fmt.Errorf("%w: assignment generation must be >= 1", ErrAssignmentInvalidResponse)
-	}
-	if a.EndpointRevision < 1 {
-		return fmt.Errorf("%w: endpoint revision must be >= 1", ErrAssignmentInvalidResponse)
-	}
-	if a.LeaseExpired(now) {
-		return fmt.Errorf("%w: lease expiry must be in the future", ErrAssignmentInvalidResponse)
-	}
-	if err := validateAssignmentEndpointHost(a.Endpoint.Host); err != nil {
-		return err
-	}
-	if !validNetworkPort(a.Endpoint.Port) {
-		return fmt.Errorf("%w: endpoint port %d out of range", ErrAssignmentInvalidResponse, a.Endpoint.Port)
-	}
-	if _, err := decodeAssignmentServerPublicKey(a.Endpoint.ServerPublicKeyB64); err != nil {
-		return err
-	}
-	return nil
-}
-
-// validateAssignmentEndpointHost enforces the producer's ownership boundary:
-// one canonical lowercase DNS name below layerv.ai or layerv.xyz. The SDK still
-// treats the accepted name as opaque and never derives it from cell_id.
-func validateAssignmentEndpointHost(host string) error {
-	if host == "" {
-		return fmt.Errorf("%w: missing endpoint host", ErrAssignmentInvalidResponse)
-	}
-	if len(host) > 253 {
-		return fmt.Errorf("%w: endpoint host must be a canonical lowercase DNS name", ErrAssignmentInvalidResponse)
-	}
-	labels := strings.Split(host, ".")
-	for _, label := range labels {
-		if !validAssignmentDNSLabel(label) {
-			return fmt.Errorf("%w: endpoint host must be a canonical lowercase DNS name", ErrAssignmentInvalidResponse)
-		}
-	}
-	if !strings.HasSuffix(host, assignmentEndpointApexAI) && !strings.HasSuffix(host, assignmentEndpointApexXYZ) {
-		return fmt.Errorf("%w: endpoint host must be below a LayerV-owned DNS name", ErrAssignmentInvalidResponse)
-	}
-	return nil
-}
-
-func validAssignmentDNSLabel(label string) bool {
-	if len(label) < 1 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
-		return false
-	}
-	for i := range label {
-		if !isLDHByte(label[i]) {
-			return false
-		}
-	}
-	return true
-}
-
-func validAssignmentCellID(cellID string) bool {
-	// qurl-service's frozen cell-id regex deliberately permits one lowercase
-	// letter; agent IDs have a separate producer contract with a two-byte minimum.
-	if len(cellID) < 1 || len(cellID) > 64 || cellID[0] < 'a' || cellID[0] > 'z' {
-		return false
-	}
-	for i := 1; i < len(cellID); i++ {
-		if !isLDHByte(cellID[i]) {
-			return false
-		}
-	}
-	last := cellID[len(cellID)-1]
-	return isLowerAlnumByte(last)
-}
-
-func isLDHByte(ch byte) bool {
-	return isLowerAlnumByte(ch) || ch == '-'
-}
-
-func isLowerAlnumByte(ch byte) bool {
-	return (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9')
-}
-
-func decodeAssignmentServerPublicKey(encoded string) ([]byte, error) {
-	raw, err := x25519key.DecodeCanonicalBase64(encoded)
-	if err != nil {
-		return nil, fmt.Errorf("%w: assignment endpoint server public key must be canonical padded standard-base64 X25519: %w", ErrAssignmentInvalidResponse, err)
-	}
-	return raw, nil
-}
-
-// --- header parsing and small helpers ---
-
-// parseRetryAfter parses a Retry-After header value: either integer seconds or an
-// HTTP-date. It clamps to a non-negative duration; an absent/invalid value is 0.
-func parseRetryAfter(value string, now time.Time) time.Duration {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return 0
-	}
-	if delta := parseSecondsHeader(value); delta > 0 {
-		return delta
-	}
-	if t, err := http.ParseTime(value); err == nil {
-		if d := t.Sub(now); d > 0 && d <= time.Duration(maxHeaderDurationSeconds)*time.Second {
-			return d
-		}
-	}
-	return 0
-}
-
-// parseSecondsHeader parses the qurl-service draft-07 RateLimit-Reset contract:
-// integer delta-seconds, not a Unix timestamp. It returns a non-negative
-// duration; an absent/invalid value is 0.
-func parseSecondsHeader(value string) time.Duration {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return 0
-	}
-	if secs, err := strconv.ParseInt(value, 10, 64); err == nil && secs > 0 && secs <= maxHeaderDurationSeconds {
-		return time.Duration(secs) * time.Second
-	}
-	return 0
-}
-
-// sleepWithContext sleeps for d, returning early with the context error if the
-// context is cancelled first.
-func sleepWithContext(ctx context.Context, d time.Duration) error {
-	if d <= 0 {
-		return ctx.Err()
-	}
-	timer := time.NewTimer(d)
+func sleepAssignmentBackoff(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
@@ -762,14 +293,723 @@ func sleepWithContext(ctx context.Context, d time.Duration) error {
 	}
 }
 
-// cryptoJitterFraction returns a fraction in [0,1) from a crypto/rand draw. The
-// jitter is decorrelation, not a security primitive, but crypto/rand avoids
-// pulling in a separately-seeded PRNG and any weak-RNG lint.
-func cryptoJitterFraction() (float64, error) {
-	n, err := cryptoutil.RandomUint64()
+// FetchInitialAgentAssignment authenticates an enrollment credential inside an
+// NHP_LST sent to the pinned hub. The stable final agentID is devId and
+// transport.DeviceStaticPriv is the Noise initiator identity. The returned
+// registration metadata and ticket are attempt-scoped and must not be persisted.
+func FetchInitialAgentAssignment(ctx context.Context, hub HubBootstrap, agentID, enrollmentCredential string, transport nativeudp.Options, opts ...AssignmentOption) (*InitialAgentAssignment, error) {
+	if err := validateAssignmentInputs(ctx, hub, agentID, transport); err != nil {
+		return nil, err
+	}
+	if err := validateExactBearerToken(enrollmentCredential, "assignment enrollment credential", ErrInvalidAssignmentConfig); err != nil {
+		return nil, err
+	}
+	cfg, err := newAssignmentConfig(opts)
+	if err != nil {
+		return nil, err
+	}
+	body, err := json.Marshal(assignmentListRequest[assignmentEnrollData]{
+		UsrID: "", DevID: agentID, AspID: assignmentASPID,
+		UsrData: assignmentEnrollData{Query: assignmentQuery, Version: assignmentVersion, Mode: assignmentModeEnroll, Credential: enrollmentCredential},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("%w: encode initial assignment request: %w", ErrInvalidAssignmentConfig, err)
+	}
+	defer wipeBytes(body)
+
+	endpoint, err := hub.nativeEndpoint()
+	if err != nil {
+		return nil, err
+	}
+	result, err := cfg.exchange(ctx, endpoint, body, transport, func(reply []byte, now time.Time) (any, error) {
+		return parseInitialAssignmentReply(reply, agentID, now)
+	})
+	if err != nil {
+		return nil, err
+	}
+	initial, ok := result.(*InitialAgentAssignment)
+	if !ok {
+		return nil, errors.New("qurl: internal initial assignment result type mismatch")
+	}
+	return initial, nil
+}
+
+// RefreshAgentAssignment sends only the registered Noise identity and stable
+// final agentID to the hub. The body has empty usrId and no enrollment or device
+// credential. A successful refresh returns only durable assignment state.
+func RefreshAgentAssignment(ctx context.Context, hub HubBootstrap, agentID string, transport nativeudp.Options, opts ...AssignmentOption) (*AgentAssignment, error) {
+	if err := validateAssignmentInputs(ctx, hub, agentID, transport); err != nil {
+		return nil, err
+	}
+	cfg, err := newAssignmentConfig(opts)
+	if err != nil {
+		return nil, err
+	}
+	body, err := json.Marshal(assignmentListRequest[assignmentRefreshData]{
+		UsrID: "", DevID: agentID, AspID: assignmentASPID,
+		UsrData: assignmentRefreshData{Query: assignmentQuery, Version: assignmentVersion, Mode: assignmentModeRefresh},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("%w: encode assignment refresh request: %w", ErrInvalidAssignmentConfig, err)
+	}
+	endpoint, err := hub.nativeEndpoint()
+	if err != nil {
+		return nil, err
+	}
+	result, err := cfg.exchange(ctx, endpoint, body, transport, func(reply []byte, now time.Time) (any, error) {
+		return parseRefreshAssignmentReply(reply, agentID, now)
+	})
+	if err != nil {
+		return nil, err
+	}
+	assignment, ok := result.(*AgentAssignment)
+	if !ok {
+		return nil, errors.New("qurl: internal assignment refresh result type mismatch")
+	}
+	return assignment, nil
+}
+
+type assignmentReplyParser func([]byte, time.Time) (any, error)
+
+func (c *assignmentConfig) exchange(ctx context.Context, endpoint nativeudp.Endpoint, body []byte, transport nativeudp.Options, parse assignmentReplyParser) (any, error) {
+	start := c.clock()
+	transactionCtx, cancel := context.WithTimeout(ctx, c.budget)
+	defer cancel()
+	var last error
+	for attempt := 1; attempt <= c.maxAttempts; attempt++ {
+		reply, err := nativeudp.List(transactionCtx, endpoint, body, transport)
+		if err == nil {
+			result, parseErr := parse(reply.Body, c.clock())
+			if parseErr == nil {
+				return result, nil
+			}
+			err = parseErr
+		}
+		last = err
+		if transactionCtx.Err() != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			return nil, c.recoveryRequired(attempt, start, errors.Join(last, transactionCtx.Err()))
+		}
+		retryAfter, retryable := assignmentRetryInfo(err)
+		if !retryable {
+			return nil, err
+		}
+		elapsed := c.clock().Sub(start)
+		if elapsed < 0 {
+			elapsed = 0
+		}
+		if attempt == c.maxAttempts || elapsed >= c.budget {
+			return nil, &AssignmentRecoveryRequiredError{Attempts: attempt, Elapsed: elapsed, Last: last}
+		}
+		delay, err := c.backoff(attempt, retryAfter)
+		if err != nil {
+			return nil, &AssignmentRecoveryRequiredError{Attempts: attempt, Elapsed: elapsed, Last: errors.Join(last, err)}
+		}
+		if delay > c.budget-elapsed {
+			return nil, &AssignmentRecoveryRequiredError{Attempts: attempt, Elapsed: elapsed, Last: last}
+		}
+		if err := c.sleep(transactionCtx, delay); err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			if transactionCtx.Err() != nil {
+				return nil, c.recoveryRequired(attempt, start, errors.Join(last, transactionCtx.Err()))
+			}
+			return nil, err
+		}
+	}
+	panic("unreachable assignment retry loop")
+}
+
+func (c *assignmentConfig) recoveryRequired(attempts int, start time.Time, last error) *AssignmentRecoveryRequiredError {
+	elapsed := c.clock().Sub(start)
+	if elapsed < c.budget {
+		// The real transaction timer may expire while a test clock is fixed or
+		// moves backward. Report the budget that was actually exhausted.
+		elapsed = c.budget
+	}
+	return &AssignmentRecoveryRequiredError{Attempts: attempts, Elapsed: elapsed, Last: last}
+}
+
+func assignmentRetryInfo(err error) (time.Duration, bool) {
+	if errors.Is(err, nativeudp.ErrTransport) || errors.Is(err, nativeudp.ErrResolve) {
+		return 0, true
+	}
+	var appErr *AssignmentError
+	if errors.As(err, &appErr) && errors.Is(appErr, ErrAssignmentUnavailable) {
+		return appErr.RetryAfter, true
+	}
+	return 0, false
+}
+
+func (c *assignmentConfig) backoff(attempt int, retryAfter time.Duration) (time.Duration, error) {
+	shift := attempt - 1
+	window := c.maxBackoff
+	if shift >= 0 && shift < 63 && c.minBackoff <= c.maxBackoff>>shift {
+		window = c.minBackoff << shift
+	}
+	jittered, err := c.jitter(window)
+	if err != nil {
+		return 0, fmt.Errorf("draw assignment retry jitter: %w", err)
+	}
+	if jittered < 0 || jittered >= window {
+		return 0, errors.New("assignment retry jitter must be in [0, window)")
+	}
+	return max(retryAfter, jittered), nil
+}
+
+func cryptoAssignmentJitter(window time.Duration) (time.Duration, error) {
+	random, err := cryptoutil.RandomInt64n(int64(window))
 	if err != nil {
 		return 0, err
 	}
-	// 53-bit mantissa fraction, matching the usual [0,1) float construction.
-	return float64(n>>11) / (1 << 53), nil
+	return time.Duration(random), nil
+}
+
+func validateAssignmentInputs(ctx context.Context, hub HubBootstrap, agentID string, transport nativeudp.Options) error {
+	if err := validateContext(ctx, ErrInvalidAssignmentConfig); err != nil {
+		return err
+	}
+	if err := validateAssignmentAgentID(agentID); err != nil {
+		return err
+	}
+	if len(transport.DeviceStaticPriv) != x25519key.Size {
+		return fmt.Errorf("%w: assignment initiator private key must be %d bytes", ErrInvalidAssignmentConfig, x25519key.Size)
+	}
+	_, err := hub.nativeEndpoint()
+	return err
+}
+
+func (h HubBootstrap) nativeEndpoint() (nativeudp.Endpoint, error) {
+	if err := validateAssignmentEndpointHost(h.Host); err != nil {
+		return nativeudp.Endpoint{}, fmt.Errorf("%w: invalid hub host: %s", ErrInvalidAssignmentConfig, err.Error())
+	}
+	if h.Port != standardNHPUDPPort {
+		return nativeudp.Endpoint{}, fmt.Errorf("%w: unsupported hub UDP port %d (want %d)", ErrInvalidAssignmentConfig, h.Port, standardNHPUDPPort)
+	}
+	key, err := x25519key.DecodeCanonicalBase64(h.ServerPublicKeyB64)
+	if err != nil {
+		return nativeudp.Endpoint{}, fmt.Errorf("%w: invalid hub server public key: %w", ErrInvalidAssignmentConfig, err)
+	}
+	return nativeudp.Endpoint{Host: h.Host, Port: h.Port, ServerStaticPub: key}, nil
+}
+
+type assignmentListRequest[T any] struct {
+	UsrID   string `json:"usrId"`
+	DevID   string `json:"devId"`
+	AspID   string `json:"aspId"`
+	UsrData T      `json:"usrData"`
+}
+
+type assignmentEnrollData struct {
+	Query      string `json:"query"`
+	Version    int    `json:"version"`
+	Mode       string `json:"mode"`
+	Credential string `json:"credential"`
+}
+
+type assignmentRefreshData struct {
+	Query   string `json:"query"`
+	Version int    `json:"version"`
+	Mode    string `json:"mode"`
+}
+
+type assignmentEnvelope struct {
+	ErrCode           string          `json:"errCode"`
+	ErrMsg            string          `json:"errMsg,omitempty"`
+	RetryAfterSeconds *int64          `json:"retryAfterSeconds,omitempty"`
+	List              json.RawMessage `json:"list,omitempty"`
+}
+
+type initialAssignmentList struct {
+	Query                     string          `json:"query"`
+	Version                   int             `json:"version"`
+	Mode                      string          `json:"mode"`
+	AgentID                   string          `json:"agent_id"`
+	Registration              json.RawMessage `json:"registration"`
+	Assignment                json.RawMessage `json:"assignment"`
+	AssignmentTicket          string          `json:"assignment_ticket"`
+	AssignmentTicketExpiresAt string          `json:"assignment_ticket_expires_at"`
+}
+
+type refreshAssignmentList struct {
+	Query      string          `json:"query"`
+	Version    int             `json:"version"`
+	Mode       string          `json:"mode"`
+	AgentID    string          `json:"agent_id"`
+	Assignment json.RawMessage `json:"assignment"`
+}
+
+type assignmentRegistrationWire struct {
+	KeyID   string `json:"key_id"`
+	KeyKind string `json:"key_kind"`
+}
+
+type assignmentWire struct {
+	CellID               string          `json:"cell_id"`
+	AssignmentGeneration int64           `json:"assignment_generation"`
+	EndpointRevision     int64           `json:"endpoint_revision"`
+	LeaseExpiresAt       string          `json:"lease_expires_at"`
+	Endpoint             json.RawMessage `json:"nhp_udp_endpoint"`
+}
+
+func parseInitialAssignmentReply(body []byte, wantAgentID string, now time.Time) (*InitialAgentAssignment, error) {
+	list, err := parseAssignmentEnvelope(body, true)
+	if err != nil {
+		return nil, err
+	}
+	var wire initialAssignmentList
+	if err := decodeExactObject(list, &wire,
+		[]string{"query", "version", "mode", "agent_id", "registration", "assignment", "assignment_ticket", "assignment_ticket_expires_at"}); err != nil {
+		return nil, invalidAssignmentResponse("initial assignment list", err)
+	}
+	if wire.Query != assignmentQuery || wire.Version != assignmentVersion || wire.Mode != assignmentModeEnroll {
+		return nil, invalidAssignmentResponse("initial assignment list", errors.New("query/version/mode mismatch"))
+	}
+	if wire.AgentID != wantAgentID {
+		return nil, invalidAssignmentResponse("initial assignment list", fmt.Errorf("agent_id %q does not match %q", wire.AgentID, wantAgentID))
+	}
+
+	var registration assignmentRegistrationWire
+	if err := decodeExactObject(wire.Registration, &registration, []string{"key_id", "key_kind"}); err != nil {
+		return nil, invalidAssignmentResponse("initial registration metadata", err)
+	}
+	if !validAgentAPIKeyID(registration.KeyID) {
+		return nil, invalidAssignmentResponse("initial registration metadata", errors.New("key_id is not canonical"))
+	}
+	if !validPublicRegistrationKeyKind(registration.KeyKind) {
+		return nil, invalidAssignmentResponse("initial registration metadata", fmt.Errorf("unsupported key_kind %q", registration.KeyKind))
+	}
+
+	assignment, err := parseWireAssignment(wire.Assignment, now)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateOpaqueAssignmentTicket(wire.AssignmentTicket); err != nil {
+		return nil, invalidAssignmentResponse("initial assignment ticket", err)
+	}
+	ticketExpiry, err := parseCanonicalRFC3339(wire.AssignmentTicketExpiresAt)
+	if err != nil {
+		return nil, invalidAssignmentResponse("assignment_ticket_expires_at", err)
+	}
+	if !ticketExpiry.After(now) {
+		return nil, invalidAssignmentResponse("assignment_ticket_expires_at", errors.New("ticket is not in the future"))
+	}
+	if !assignment.LeaseExpiresAt.After(ticketExpiry) {
+		return nil, invalidAssignmentResponse("initial assignment deadlines", errors.New("ticket must expire before lease"))
+	}
+	return &InitialAgentAssignment{
+		Registration:              AssignmentRegistration(registration),
+		Assignment:                *assignment,
+		AssignmentTicket:          wire.AssignmentTicket,
+		AssignmentTicketExpiresAt: ticketExpiry,
+	}, nil
+}
+
+func parseRefreshAssignmentReply(body []byte, wantAgentID string, now time.Time) (*AgentAssignment, error) {
+	list, err := parseAssignmentEnvelope(body, false)
+	if err != nil {
+		return nil, err
+	}
+	var wire refreshAssignmentList
+	if err := decodeExactObject(list, &wire, []string{"query", "version", "mode", "agent_id", "assignment"}); err != nil {
+		return nil, invalidAssignmentResponse("refresh assignment list", err)
+	}
+	if wire.Query != assignmentQuery || wire.Version != assignmentVersion || wire.Mode != assignmentModeRefresh {
+		return nil, invalidAssignmentResponse("refresh assignment list", errors.New("query/version/mode mismatch"))
+	}
+	if wire.AgentID != wantAgentID {
+		return nil, invalidAssignmentResponse("refresh assignment list", fmt.Errorf("agent_id %q does not match %q", wire.AgentID, wantAgentID))
+	}
+	return parseWireAssignment(wire.Assignment, now)
+}
+
+func parseAssignmentEnvelope(body []byte, initial bool) (json.RawMessage, error) {
+	fields, err := exactObjectFields(body)
+	if err != nil {
+		return nil, invalidAssignmentResponse("LRT envelope", err)
+	}
+	if _, ok := fields["errCode"]; !ok {
+		return nil, invalidAssignmentResponse("LRT envelope", errors.New("missing errCode"))
+	}
+	allowed := fieldSet("errCode", "errMsg", "retryAfterSeconds", "list")
+	if err := rejectUnknownFields(fields, allowed); err != nil {
+		return nil, invalidAssignmentResponse("LRT envelope", err)
+	}
+	var envelope assignmentEnvelope
+	if err := decodeJSON(body, &envelope); err != nil {
+		return nil, invalidAssignmentResponse("LRT envelope", err)
+	}
+	if envelope.ErrCode == "0" {
+		if len(fields) != 2 || fields["list"] == nil {
+			return nil, invalidAssignmentResponse("success LRT envelope", errors.New("must contain exactly errCode and list"))
+		}
+		if bytes.Equal(bytes.TrimSpace(envelope.List), []byte("null")) {
+			return nil, invalidAssignmentResponse("success LRT envelope", errors.New("list must be an object"))
+		}
+		return envelope.List, nil
+	}
+	if _, present := fields["list"]; present {
+		return nil, invalidAssignmentResponse("error LRT envelope", errors.New("list is forbidden on error"))
+	}
+	return nil, classifyAssignmentApplicationError(envelope, fields, initial)
+}
+
+func classifyAssignmentApplicationError(envelope assignmentEnvelope, fields map[string]json.RawMessage, initial bool) error {
+	if rawMessage, present := fields["errMsg"]; present && bytes.Equal(bytes.TrimSpace(rawMessage), []byte("null")) {
+		return invalidAssignmentResponse("error LRT envelope", errors.New("errMsg must be a string when present"))
+	}
+	var kind error
+	retryPermitted := false
+	retryRequired := false
+	switch envelope.ErrCode {
+	case "52200":
+		kind, retryPermitted = ErrAssignmentUnavailable, true
+	case "52201":
+		kind = ErrAssignmentIdentityRejected
+	case "52202":
+		kind = ErrAssignmentReassignmentRequired
+	case "52203":
+		kind = ErrAssignmentQuotaExceeded
+	case "52204":
+		kind, retryPermitted, retryRequired = ErrAssignmentRateLimited, true, true
+	case "52205":
+		kind = ErrAssignmentRequestRejected
+	case "52106":
+		if initial {
+			kind = ErrAssignmentKeyRejected
+		}
+	case "52107":
+		if initial {
+			kind = ErrAssignmentRegistrationDisabled
+		}
+	case "52108":
+		if initial {
+			kind = ErrAssignmentBootstrapConsumed
+		}
+	case "52109":
+		if initial {
+			kind = ErrAssignmentRequestRejected
+		}
+	}
+	if kind == nil {
+		return invalidAssignmentResponse("error LRT envelope", fmt.Errorf("unknown or phase-invalid errCode %q", envelope.ErrCode))
+	}
+
+	rawRetry, retryPresent := fields["retryAfterSeconds"]
+	if retryRequired && !retryPresent {
+		return invalidAssignmentResponse("error LRT envelope", errors.New("retryAfterSeconds is required"))
+	}
+	if retryPresent && !retryPermitted {
+		return invalidAssignmentResponse("error LRT envelope", errors.New("retryAfterSeconds is forbidden for this code"))
+	}
+	var retryAfter time.Duration
+	if retryPresent {
+		if envelope.RetryAfterSeconds == nil || bytes.Equal(bytes.TrimSpace(rawRetry), []byte("null")) || *envelope.RetryAfterSeconds <= 0 || *envelope.RetryAfterSeconds > math.MaxInt64/int64(time.Second) {
+			return invalidAssignmentResponse("error LRT envelope", errors.New("retryAfterSeconds must be a positive bounded integer"))
+		}
+		retryAfter = time.Duration(*envelope.RetryAfterSeconds) * time.Second
+	}
+	return &AssignmentError{Code: envelope.ErrCode, Message: envelope.ErrMsg, RetryAfter: retryAfter, kind: kind}
+}
+
+func parseWireAssignment(raw []byte, now time.Time) (*AgentAssignment, error) {
+	var wire assignmentWire
+	if err := decodeExactObject(raw, &wire,
+		[]string{"cell_id", "assignment_generation", "endpoint_revision", "lease_expires_at", "nhp_udp_endpoint"}); err != nil {
+		return nil, invalidAssignmentResponse("assignment", err)
+	}
+	var endpoint NHPUDPEndpoint
+	if err := decodeExactObject(wire.Endpoint, &endpoint, []string{"host", "port", "server_public_key_b64"}); err != nil {
+		return nil, invalidAssignmentResponse("assignment endpoint", err)
+	}
+	lease, err := parseCanonicalRFC3339(wire.LeaseExpiresAt)
+	if err != nil {
+		return nil, invalidAssignmentResponse("lease_expires_at", err)
+	}
+	assignment := &AgentAssignment{
+		CellID: wire.CellID, AssignmentGeneration: wire.AssignmentGeneration,
+		EndpointRevision: wire.EndpointRevision, LeaseExpiresAt: lease, Endpoint: endpoint,
+	}
+	if err := validateAgentAssignment(assignment, now); err != nil {
+		return nil, err
+	}
+	return assignment, nil
+}
+
+func validateAgentAssignment(a *AgentAssignment, now time.Time) error {
+	if a == nil || !validAssignmentCellID(a.CellID) {
+		return invalidAssignmentResponse("assignment", errors.New("invalid cell_id"))
+	}
+	if a.AssignmentGeneration < 1 || a.EndpointRevision < 1 {
+		return invalidAssignmentResponse("assignment", errors.New("generation and endpoint revision must be positive"))
+	}
+	if !a.LeaseExpiresAt.After(now) {
+		return invalidAssignmentResponse("assignment", errors.New("lease must be in the future"))
+	}
+	if err := validateAssignmentEndpointHost(a.Endpoint.Host); err != nil {
+		return err
+	}
+	if !validNetworkPort(a.Endpoint.Port) {
+		return invalidAssignmentResponse("assignment endpoint", fmt.Errorf("port %d is out of range", a.Endpoint.Port))
+	}
+	if _, err := decodeAssignmentServerPublicKey(a.Endpoint.ServerPublicKeyB64); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateAssignmentAgentID(agentID string) error {
+	if len(agentID) < 2 || len(agentID) > 64 {
+		return fmt.Errorf("%w: agent id must be 2-64 characters", ErrInvalidAssignmentConfig)
+	}
+	for i, b := range []byte(agentID) {
+		alphaNumeric := b >= 'a' && b <= 'z' || b >= '0' && b <= '9'
+		if i == 0 || i == len(agentID)-1 {
+			if !alphaNumeric {
+				return fmt.Errorf("%w: agent id must start and end with a lowercase letter or digit", ErrInvalidAssignmentConfig)
+			}
+			continue
+		}
+		if !alphaNumeric && b != '-' {
+			return fmt.Errorf("%w: agent id may contain only lowercase letters, digits, and hyphens", ErrInvalidAssignmentConfig)
+		}
+	}
+	return nil
+}
+
+func validateAssignmentEndpointHost(host string) error {
+	if host == "" || len(host) > 253 || host != strings.ToLower(host) || strings.HasSuffix(host, ".") || net.ParseIP(host) != nil {
+		return invalidAssignmentResponse("assignment endpoint", errors.New("host must be a canonical lowercase DNS name"))
+	}
+	labels := strings.Split(host, ".")
+	for _, label := range labels {
+		if !validAssignmentDNSLabel(label) {
+			return invalidAssignmentResponse("assignment endpoint", errors.New("host must be a canonical lowercase DNS name"))
+		}
+	}
+	if !strings.HasSuffix(host, ".layerv.ai") && !strings.HasSuffix(host, ".layerv.xyz") {
+		return invalidAssignmentResponse("assignment endpoint", errors.New("host must be below a LayerV-owned DNS apex"))
+	}
+	return nil
+}
+
+func validAssignmentDNSLabel(label string) bool {
+	if len(label) < 1 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+		return false
+	}
+	for _, b := range []byte(label) {
+		if b >= 'a' && b <= 'z' || b >= '0' && b <= '9' || b == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func validAssignmentCellID(cellID string) bool {
+	if len(cellID) < 1 || len(cellID) > 64 || cellID[0] < 'a' || cellID[0] > 'z' {
+		return false
+	}
+	for _, b := range []byte(cellID[1:]) {
+		if b >= 'a' && b <= 'z' || b >= '0' && b <= '9' || b == '-' {
+			continue
+		}
+		return false
+	}
+	return cellID[len(cellID)-1] != '-'
+}
+
+func validAgentAPIKeyID(id string) bool {
+	if len(id) != len("key_")+12 || !strings.HasPrefix(id, "key_") {
+		return false
+	}
+	for _, b := range []byte(id[len("key_"):]) {
+		if b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func validPublicRegistrationKeyKind(kind string) bool {
+	switch kind {
+	case "bootstrap", "connector_bootstrap", "account", "agent":
+		return true
+	default:
+		return false
+	}
+}
+
+func validateOpaqueAssignmentTicket(ticket string) error {
+	if ticket == "" || len(ticket) > maxAssignmentTicketBytes || ticket != strings.TrimSpace(ticket) || !utf8.ValidString(ticket) {
+		return errors.New("ticket must be non-empty canonical UTF-8 within the size bound")
+	}
+	for _, r := range ticket {
+		if r < 0x21 || r == 0x7f {
+			return errors.New("ticket contains whitespace or control characters")
+		}
+	}
+	return nil
+}
+
+func parseCanonicalRFC3339(value string) (time.Time, error) {
+	parsed, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("must be RFC3339: %w", err)
+	}
+	if parsed.Location() != time.UTC || parsed.Format(time.RFC3339) != value {
+		return time.Time{}, errors.New("must use canonical UTC RFC3339 spelling")
+	}
+	return parsed, nil
+}
+
+func decodeAssignmentServerPublicKey(encoded string) ([]byte, error) {
+	key, err := x25519key.DecodeCanonicalBase64(encoded)
+	if err != nil {
+		return nil, invalidAssignmentResponse("assignment endpoint", fmt.Errorf("server public key must be canonical padded standard-base64 X25519: %w", err))
+	}
+	return key, nil
+}
+
+func invalidAssignmentResponse(part string, cause error) error {
+	return fmt.Errorf("%w: %s: %w", ErrAssignmentInvalidResponse, part, cause)
+}
+
+func fieldSet(fields ...string) map[string]struct{} {
+	set := make(map[string]struct{}, len(fields))
+	for _, field := range fields {
+		set[field] = struct{}{}
+	}
+	return set
+}
+
+func decodeExactObject(raw []byte, dst any, required []string) error {
+	fields, err := exactObjectFields(raw)
+	if err != nil {
+		return err
+	}
+	allowed := fieldSet(required...)
+	if err := rejectUnknownFields(fields, allowed); err != nil {
+		return err
+	}
+	for _, field := range required {
+		if _, ok := fields[field]; !ok {
+			return fmt.Errorf("missing required field %q", field)
+		}
+	}
+	return decodeJSON(raw, dst)
+}
+
+func rejectUnknownFields(fields map[string]json.RawMessage, allowed map[string]struct{}) error {
+	for field := range fields {
+		if _, ok := allowed[field]; !ok {
+			return fmt.Errorf("unknown field %q", field)
+		}
+	}
+	return nil
+}
+
+func decodeJSON(raw []byte, dst any) error {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(dst); err != nil {
+		return err
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		return errors.New("trailing JSON value")
+	}
+	return nil
+}
+
+// exactObjectFields rejects duplicate keys at every nesting level before
+// encoding/json can collapse them. It then returns the top-level raw fields so
+// callers can enforce phase-dependent exact allowlists and required keys.
+func exactObjectFields(raw []byte) (map[string]json.RawMessage, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	token, err := decoder.Token()
+	if err != nil {
+		return nil, err
+	}
+	if delim, ok := token.(json.Delim); !ok || delim != '{' {
+		return nil, errors.New("top-level value must be an object")
+	}
+	if err := walkJSONObject(decoder); err != nil {
+		return nil, err
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		return nil, errors.New("trailing JSON value")
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return nil, err
+	}
+	if fields == nil {
+		return nil, errors.New("top-level value must be an object")
+	}
+	return fields, nil
+}
+
+func walkJSONObject(decoder *json.Decoder) error {
+	seen := make(map[string]struct{})
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		key, ok := token.(string)
+		if !ok {
+			return errors.New("object key is not a string")
+		}
+		if _, duplicate := seen[key]; duplicate {
+			return fmt.Errorf("duplicate field %q", key)
+		}
+		seen[key] = struct{}{}
+		if err := walkJSONValue(decoder); err != nil {
+			return err
+		}
+	}
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	if delim, ok := token.(json.Delim); !ok || delim != '}' {
+		return errors.New("unterminated JSON object")
+	}
+	return nil
+}
+
+func walkJSONValue(decoder *json.Decoder) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delim, ok := token.(json.Delim)
+	if !ok {
+		return nil
+	}
+	switch delim {
+	case '{':
+		return walkJSONObject(decoder)
+	case '[':
+		for decoder.More() {
+			if err := walkJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+		closing, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		if closeDelim, ok := closing.(json.Delim); !ok || closeDelim != ']' {
+			return errors.New("unterminated JSON array")
+		}
+		return nil
+	default:
+		return errors.New("unexpected closing JSON delimiter")
+	}
 }

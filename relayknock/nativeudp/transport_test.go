@@ -27,16 +27,17 @@ import (
 type behavior int
 
 const (
-	behaviorNormal       behavior = iota // correct reply type, echoed counter
-	behaviorCookie                       // NHP_COK overload cookie-challenge
-	behaviorWrongCounter                 // correct type, counter+1
-	behaviorWrongType                    // the other reply type (KNK->RAK, REG->ACK)
-	behaviorWrongKey                     // built with a different server static key
-	behaviorGarbage                      // random non-NHP bytes
-	behaviorEmpty                        // zero-length datagram
-	behaviorTooShort                     // a sub-header-length datagram
-	behaviorOversize                     // a datagram larger than the NHP buffer
-	behaviorSilent                       // never reply
+	behaviorNormal             behavior = iota // correct reply type, echoed counter
+	behaviorCookie                             // NHP_COK overload cookie-challenge
+	behaviorCookieWrongCounter                 // NHP_COK with counter+1
+	behaviorWrongCounter                       // correct type, counter+1
+	behaviorWrongType                          // the other reply type (KNK->RAK, REG->ACK)
+	behaviorWrongKey                           // built with a different server static key
+	behaviorGarbage                            // random non-NHP bytes
+	behaviorEmpty                              // zero-length datagram
+	behaviorTooShort                           // a sub-header-length datagram
+	behaviorOversize                           // a datagram larger than the NHP buffer
+	behaviorSilent                             // never reply
 )
 
 // fakeServer is a loopback NHP responder. It opens the agent's initiator packet
@@ -147,6 +148,8 @@ func (s *fakeServer) buildResponse(msg *relayknock.Reply) []byte {
 		return s.buildReply(other, s.serverPriv, msg.Counter)
 	case behaviorCookie:
 		return s.buildReply(relayknock.TypeCookieChallenge, s.serverPriv, msg.Counter)
+	case behaviorCookieWrongCounter:
+		return s.buildReply(relayknock.TypeCookieChallenge, s.serverPriv, msg.Counter+1)
 	default: // behaviorNormal
 		return s.buildReply(normalType, s.serverPriv, msg.Counter)
 	}
@@ -173,10 +176,14 @@ func (s *fakeServer) buildReply(replyType int, serverPriv []byte, counter uint64
 }
 
 func replyTypeFor(initiatorType int) int {
-	if initiatorType == relayknock.TypeRegister {
+	switch initiatorType {
+	case relayknock.TypeListRequest:
+		return relayknock.TypeListResult
+	case relayknock.TypeRegister:
 		return relayknock.TypeRegisterAck
+	default:
+		return relayknock.TypeACK
 	}
-	return relayknock.TypeACK
 }
 
 // loopback returns a globally routable address so the production transport's
@@ -218,6 +225,7 @@ func TestExchange_RoundTrip(t *testing.T) {
 		reqType int
 	}{
 		{"knock -> ack", relayknock.TypeKnock},
+		{"list -> list result", relayknock.TypeListRequest},
 		{"register -> rak", relayknock.TypeRegister},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -234,6 +242,9 @@ func TestExchange_RoundTrip(t *testing.T) {
 			if tc.reqType == relayknock.TypeRegister && !reply.IsRegisterAck() {
 				t.Fatalf("reply type = %d, want RAK", reply.Type)
 			}
+			if tc.reqType == relayknock.TypeListRequest && !reply.IsListResult() {
+				t.Fatalf("reply type = %d, want LRT", reply.Type)
+			}
 			if string(reply.Body) != `{"ok":true}` {
 				t.Fatalf("reply body = %q", reply.Body)
 			}
@@ -241,13 +252,17 @@ func TestExchange_RoundTrip(t *testing.T) {
 	}
 }
 
-func TestKnockAndRegisterHelpers(t *testing.T) {
+func TestRoundTripHelpers(t *testing.T) {
 	t.Parallel()
 	_, ep, opts := newLoopbackExchange(t, behaviorNormal)
 
 	ack, err := nativeudp.Knock(context.Background(), ep, nil, opts)
 	if err != nil || !ack.IsACK() {
 		t.Fatalf("Knock: reply=%v err=%v", ack, err)
+	}
+	lrt, err := nativeudp.List(context.Background(), ep, nil, opts)
+	if err != nil || !lrt.IsListResult() {
+		t.Fatalf("List: reply=%v err=%v", lrt, err)
 	}
 	rak, err := nativeudp.Register(context.Background(), ep, nil, opts)
 	if err != nil || !rak.IsRegisterAck() {
@@ -265,6 +280,22 @@ func TestExchange_CookieChallengeIsRetryable(t *testing.T) {
 	}
 	if !reply.IsCookieChallenge() {
 		t.Fatalf("reply type = %d, want NHP_COK cookie-challenge", reply.Type)
+	}
+}
+
+func TestExchange_ListRejectsCookieChallenge(t *testing.T) {
+	t.Parallel()
+	_, ep, opts := newLoopbackExchange(t, behaviorCookie)
+	if _, err := nativeudp.List(context.Background(), ep, nil, opts); !errors.Is(err, relayknock.ErrMalformedReply) {
+		t.Fatalf("List cookie-challenge error = %v, want ErrMalformedReply", err)
+	}
+}
+
+func TestExchange_CookieChallengeMustEchoCounter(t *testing.T) {
+	t.Parallel()
+	_, ep, opts := newLoopbackExchange(t, behaviorCookieWrongCounter)
+	if _, err := nativeudp.Knock(context.Background(), ep, nil, opts); !errors.Is(err, relayknock.ErrMalformedReply) {
+		t.Fatalf("uncorrelated cookie-challenge error = %v, want ErrMalformedReply", err)
 	}
 }
 

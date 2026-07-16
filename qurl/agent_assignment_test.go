@@ -1,718 +1,488 @@
 package qurl
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdh"
-	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"io"
-	"net/http"
+	"fmt"
+	"net"
+	"net/netip"
+	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	conformance "github.com/layervai/qurl-conformance"
+
+	"github.com/layervai/qurl-go/relayknock"
+	"github.com/layervai/qurl-go/relayknock/nativeudp"
+	"github.com/layervai/qurl-go/relayknock/relayknocktest"
 )
 
-// --- HTTP test double ---
+var assignmentFixtureNow = time.Date(2026, 7, 15, 23, 0, 0, 0, time.UTC)
 
-type scriptedResponse struct {
-	status int
-	header http.Header
-	body   string
-	err    error // when set, Do returns this transport error
-}
-
-type scriptedDoer struct {
-	responses []scriptedResponse
-	calls     int
-	authSeen  []string
-	bodies    []string
-}
-
-func (d *scriptedDoer) Do(req *http.Request) (*http.Response, error) {
-	idx := d.calls
-	d.calls++
-	d.authSeen = append(d.authSeen, req.Header.Get("Authorization"))
-	if req.Body != nil {
-		raw, _ := io.ReadAll(req.Body)
-		d.bodies = append(d.bodies, string(raw))
-	}
-	if idx >= len(d.responses) {
-		idx = len(d.responses) - 1 // repeat the last scripted response
-	}
-	r := d.responses[idx]
-	if r.err != nil {
-		return nil, r.err
-	}
-	h := r.header
-	if h == nil {
-		h = http.Header{}
-	}
-	return &http.Response{
-		StatusCode: r.status,
-		Header:     h,
-		Body:       io.NopCloser(strings.NewReader(r.body)),
-	}, nil
-}
-
-type fakeClock struct{ now time.Time }
-
-func (c *fakeClock) Now() time.Time { return c.now }
-
-// --- fixtures ---
-
-func freshServerKeyB64(t *testing.T) string {
+func loadAssignmentFixture(t *testing.T) *conformance.AgentAssignmentFile {
 	t.Helper()
-	key, err := ecdh.X25519().GenerateKey(rand.Reader)
+	fixture, err := conformance.AgentAssignmentGolden()
 	if err != nil {
-		t.Fatalf("generate server key: %v", err)
+		t.Fatalf("load agent-assignment conformance: %v", err)
 	}
-	return base64.StdEncoding.EncodeToString(key.PublicKey().Bytes())
+	return fixture
 }
 
-func validAssignment(t *testing.T, agentID string) AgentAssignment {
+func assignmentHex(t *testing.T, value string) []byte {
 	t.Helper()
-	return AgentAssignment{
-		AgentID:              agentID,
-		CellID:               "cell0",
-		AssignmentGeneration: 1,
-		EndpointRevision:     1,
-		LeaseExpiresAt:       time.Now().Add(24 * time.Hour).UTC(),
-		Endpoint: NHPUDPEndpoint{
-			Host:               "cell0.nhp.layerv.ai",
-			Port:               62206,
-			ServerPublicKeyB64: freshServerKeyB64(t),
-		},
+	decoded, err := hex.DecodeString(value)
+	if err != nil {
+		t.Fatalf("decode hex: %v", err)
 	}
+	return decoded
 }
 
-func assignmentEnvelope(t *testing.T, a AgentAssignment) string {
+type assignmentTestResolver struct{}
+
+func (assignmentTestResolver) LookupNetIP(context.Context, string, string) ([]netip.Addr, error) {
+	return []netip.Addr{netip.MustParseAddr("8.8.8.8")}, nil
+}
+
+type assignmentTestDialer struct{ target string }
+
+func (d assignmentTestDialer) DialContext(ctx context.Context, network, _ string) (net.Conn, error) {
+	return (&net.Dialer{}).DialContext(ctx, network, d.target)
+}
+
+type assignmentTestServer struct {
+	t          *testing.T
+	conn       *net.UDPConn
+	serverPriv []byte
+	agentPub   []byte
+	replies    [][]byte
+	done       chan struct{}
+
+	mu       sync.Mutex
+	requests [][]byte
+}
+
+func newAssignmentTestServer(t *testing.T, serverPriv, agentPub []byte, replies ...string) *assignmentTestServer {
 	t.Helper()
-	raw, err := json.Marshal(apiEnvelope[AgentAssignment]{Data: a})
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
-		t.Fatalf("marshal envelope: %v", err)
+		t.Fatalf("listen UDP: %v", err)
 	}
-	return string(raw)
+	server := &assignmentTestServer{
+		t: t, conn: conn, serverPriv: serverPriv, agentPub: agentPub,
+		replies: make([][]byte, len(replies)), done: make(chan struct{}),
+	}
+	for i, reply := range replies {
+		server.replies[i] = []byte(reply)
+	}
+	go server.serve()
+	t.Cleanup(func() {
+		_ = conn.Close()
+		select {
+		case <-server.done:
+		case <-time.After(2 * time.Second):
+			t.Error("assignment test server did not stop")
+		}
+	})
+	return server
 }
 
-// deterministicFetchOpts wires a scripted HTTP client plus deterministic
-// clock/sleep/jitter so a bounded retry loop is driven without real time. It
-// returns the recorded sleep durations via slept.
-func deterministicFetchOpts(doer *scriptedDoer, clk *fakeClock, slept *[]time.Duration, extra ...AssignmentOption) []AssignmentOption {
-	opts := []AssignmentOption{
-		WithAssignmentHTTPClient(doer),
-		WithAssignmentBaseURL("https://api.layerv.test"),
-		withAssignmentClock(clk.Now),
-		withAssignmentJitter(func() float64 { return 0 }),
-		withAssignmentSleep(func(_ context.Context, d time.Duration) error {
-			*slept = append(*slept, d)
-			clk.now = clk.now.Add(d)
-			return nil
-		}),
-	}
-	return append(opts, extra...)
-}
-
-// --- success + response validation ---
-
-func TestFetchAgentAssignment_Success(t *testing.T) {
-	want := validAssignment(t, "connector-7f3c2a")
-	doer := &scriptedDoer{responses: []scriptedResponse{{status: 200, body: assignmentEnvelope(t, want)}}}
-	clk := &fakeClock{now: time.Now()}
-	var slept []time.Duration
-
-	got, err := FetchAgentAssignment(context.Background(), "connector-7f3c2a", BearerToken("lv_enroll_key"),
-		deterministicFetchOpts(doer, clk, &slept)...)
-	if err != nil {
-		t.Fatalf("FetchAgentAssignment: %v", err)
-	}
-	if got.CellID != "cell0" || got.AssignmentGeneration != 1 || got.EndpointRevision != 1 {
-		t.Fatalf("assignment fields = %#v", got)
-	}
-	if got.Endpoint.Host != "cell0.nhp.layerv.ai" || got.Endpoint.Port != 62206 {
-		t.Fatalf("endpoint = %#v", got.Endpoint)
-	}
-	if key, err := got.DecodedServerKey(); err != nil || len(key) != 32 {
-		t.Fatalf("DecodedServerKey: key=%d err=%v", len(key), err)
-	}
-	if doer.calls != 1 {
-		t.Fatalf("calls = %d, want 1", doer.calls)
-	}
-	if doer.authSeen[0] != "Bearer lv_enroll_key" {
-		t.Fatalf("Authorization = %q, want the supplied bearer credential", doer.authSeen[0])
-	}
-	// The request must carry only the agent id — no cell/endpoint/placement hint.
-	if !strings.Contains(doer.bodies[0], `"agent_id":"connector-7f3c2a"`) || strings.Contains(doer.bodies[0], "cell") {
-		t.Fatalf("request body = %q", doer.bodies[0])
-	}
-}
-
-func TestFetchAgentAssignment_AcceptsLayerVXYZEndpoint(t *testing.T) {
-	want := validAssignment(t, "connector-7f3c2a")
-	want.Endpoint.Host = "cell0.nhp.layerv.xyz"
-	doer := &scriptedDoer{responses: []scriptedResponse{{status: http.StatusOK, body: assignmentEnvelope(t, want)}}}
-	clk := &fakeClock{now: time.Now()}
-	var slept []time.Duration
-	got, err := FetchAgentAssignment(context.Background(), want.AgentID, BearerToken("lv_enroll_key"),
-		deterministicFetchOpts(doer, clk, &slept)...)
-	if err != nil {
-		t.Fatalf("FetchAgentAssignment: %v", err)
-	}
-	if got.Endpoint.Host != want.Endpoint.Host {
-		t.Fatalf("endpoint host = %q, want %q", got.Endpoint.Host, want.Endpoint.Host)
-	}
-}
-
-func TestFetchAgentAssignment_RejectsInvalidResponses(t *testing.T) {
-	const agentID = "connector-7f3c2a"
-	cases := []struct {
-		name   string
-		mutate func(a *AgentAssignment)
-	}{
-		{"wrong agent id", func(a *AgentAssignment) { a.AgentID = "someone-else" }},
-		{"missing cell id", func(a *AgentAssignment) { a.CellID = "" }},
-		{"uppercase cell id", func(a *AgentAssignment) { a.CellID = "Cell0" }},
-		{"trailing hyphen cell id", func(a *AgentAssignment) { a.CellID = "cell0-" }},
-		{"oversize cell id", func(a *AgentAssignment) { a.CellID = "c" + strings.Repeat("0", 64) }},
-		{"zero generation", func(a *AgentAssignment) { a.AssignmentGeneration = 0 }},
-		{"zero endpoint revision", func(a *AgentAssignment) { a.EndpointRevision = 0 }},
-		{"zero lease", func(a *AgentAssignment) { a.LeaseExpiresAt = time.Time{} }},
-		{"expired lease", func(a *AgentAssignment) { a.LeaseExpiresAt = time.Now().Add(-time.Minute) }},
-		{"aws elb host", func(a *AgentAssignment) { a.Endpoint.Host = "internal-cell0-123.us-east-1.elb.amazonaws.com" }},
-		{"internal host", func(a *AgentAssignment) { a.Endpoint.Host = "cell0.compute.internal" }},
-		{"ip literal host", func(a *AgentAssignment) { a.Endpoint.Host = "10.0.0.5" }},
-		{"localhost host", func(a *AgentAssignment) { a.Endpoint.Host = "localhost" }},
-		{"non LayerV host", func(a *AgentAssignment) { a.Endpoint.Host = "cell0.nhp.example.com" }},
-		{"uppercase host", func(a *AgentAssignment) { a.Endpoint.Host = "Cell0.nhp.layerv.ai" }},
-		{"empty DNS label", func(a *AgentAssignment) { a.Endpoint.Host = "cell0..layerv.ai" }},
-		{"trailing DNS dot", func(a *AgentAssignment) { a.Endpoint.Host = "cell0.nhp.layerv.ai." }},
-		{"bad DNS label", func(a *AgentAssignment) { a.Endpoint.Host = "-cell0.nhp.layerv.ai" }},
-		{"port out of range", func(a *AgentAssignment) { a.Endpoint.Port = 70000 }},
-		{"bad server key", func(a *AgentAssignment) { a.Endpoint.ServerPublicKeyB64 = "not-base64!!" }},
-		{"short server key", func(a *AgentAssignment) {
-			a.Endpoint.ServerPublicKeyB64 = base64.StdEncoding.EncodeToString(make([]byte, 16))
-		}},
-		{"unpadded server key", func(a *AgentAssignment) {
-			key, err := base64.StdEncoding.DecodeString(a.Endpoint.ServerPublicKeyB64)
-			if err != nil {
-				t.Fatal(err)
-			}
-			a.Endpoint.ServerPublicKeyB64 = base64.RawStdEncoding.EncodeToString(key)
-		}},
-		{"low-order server key", func(a *AgentAssignment) {
-			a.Endpoint.ServerPublicKeyB64 = base64.StdEncoding.EncodeToString(make([]byte, 32))
-		}},
-		{"non-canonical server key", func(a *AgentAssignment) {
-			a.Endpoint.ServerPublicKeyB64 = nonCanonicalTestNHPServerPublicKeyB64()
-		}},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			a := validAssignment(t, agentID)
-			tc.mutate(&a)
-			doer := &scriptedDoer{responses: []scriptedResponse{{status: 200, body: assignmentEnvelope(t, a)}}}
-			clk := &fakeClock{now: time.Now()}
-			var slept []time.Duration
-			_, err := FetchAgentAssignment(context.Background(), agentID, BearerToken("lv_key"),
-				deterministicFetchOpts(doer, clk, &slept)...)
-			if !errors.Is(err, ErrAssignmentInvalidResponse) {
-				t.Fatalf("error = %v, want ErrAssignmentInvalidResponse", err)
-			}
+func (s *assignmentTestServer) serve() {
+	defer close(s.done)
+	buffer := make([]byte, 4096)
+	for {
+		n, addr, err := s.conn.ReadFromUDP(buffer)
+		if err != nil {
+			return
+		}
+		opened, err := relayknocktest.OpenInitiatorMessage(s.serverPriv, s.agentPub, append([]byte(nil), buffer[:n]...))
+		if err != nil {
+			s.t.Errorf("open assignment request: %v", err)
+			continue
+		}
+		if opened.Type != conformance.AgentAssignmentRequestHeaderType {
+			s.t.Errorf("assignment request type = %d, want NHP_LST (%d)", opened.Type, conformance.AgentAssignmentRequestHeaderType)
+			continue
+		}
+		s.mu.Lock()
+		index := len(s.requests)
+		s.requests = append(s.requests, append([]byte(nil), opened.Body...))
+		s.mu.Unlock()
+		if index >= len(s.replies) {
+			continue
+		}
+		packet, err := relayknocktest.BuildReply(relayknock.TypeListResult, &relayknock.KnockInputs{
+			DeviceStaticPriv: s.serverPriv,
+			ServerStaticPub:  s.agentPub,
+			EphemeralPriv:    bytes.Repeat([]byte{byte(0x80 + index)}, 32),
+			TimestampNanos:   uint64(assignmentFixtureNow.UnixNano()) + uint64(index),
+			Counter:          opened.Counter,
+			Preamble:         uint32(0x11223344 + index),
+			Body:             s.replies[index],
 		})
-	}
-}
-
-func TestFetchAgentAssignment_EmptyAndMalformedBody(t *testing.T) {
-	for _, tc := range []struct{ name, body string }{
-		{"empty", ""},
-		{"not json", "<html>502</html>"},
-		{"missing data", `{"meta":{}}`},
-		{"invalid UTF-8", string([]byte{'{', '"', 'x', '"', ':', '"', 0xff, '"', '}'})},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			doer := &scriptedDoer{responses: []scriptedResponse{{status: 200, body: tc.body}}}
-			clk := &fakeClock{now: time.Now()}
-			var slept []time.Duration
-			_, err := FetchAgentAssignment(context.Background(), "connector-7f3c2a", BearerToken("lv_key"),
-				deterministicFetchOpts(doer, clk, &slept)...)
-			if !errors.Is(err, ErrAssignmentInvalidResponse) {
-				t.Fatalf("error = %v, want ErrAssignmentInvalidResponse", err)
-			}
-		})
-	}
-}
-
-func TestFetchAgentAssignment_OversizedSuccessIsInvalidResponse(t *testing.T) {
-	doer := &scriptedDoer{responses: []scriptedResponse{{
-		status: http.StatusOK,
-		body:   strings.Repeat("x", maxAPIResponseBodyBytes+1),
-	}}}
-	clk := &fakeClock{now: time.Now()}
-	var slept []time.Duration
-
-	_, err := FetchAgentAssignment(context.Background(), "connector-7f3c2a", BearerToken("lv_key"),
-		deterministicFetchOpts(doer, clk, &slept)...)
-	if !errors.Is(err, ErrAssignmentInvalidResponse) || errors.Is(err, ErrAssignmentServiceError) {
-		t.Fatalf("error = %v, want only ErrAssignmentInvalidResponse", err)
-	}
-}
-
-// --- terminal status classification ---
-
-func problemBody(code string) string {
-	return `{"error":{"type":"https://api.qurl.link/problems/` + code + `","title":"x","status":0,"code":"` + code + `"}}`
-}
-
-func TestFetchAgentAssignment_TerminalStatuses(t *testing.T) {
-	cases := []struct {
-		name   string
-		resp   scriptedResponse
-		wantIs error
-	}{
-		{"400 rejected", scriptedResponse{status: 400, body: problemBody("assignment_request_invalid")}, ErrAssignmentRequestRejected},
-		{"401 forbidden", scriptedResponse{status: 401, body: problemBody("unauthorized")}, ErrAssignmentForbidden},
-		{"403 forbidden", scriptedResponse{status: 403, body: problemBody("account_frozen")}, ErrAssignmentForbidden},
-		{"409 reassignment", scriptedResponse{status: 409, body: problemBody("cell_reassignment_in_progress")}, ErrAssignmentReassignmentRequired},
-		{"409 quota", scriptedResponse{status: 409, body: problemBody("agent_assignment_quota_exceeded")}, ErrAssignmentQuotaExceeded},
-		{"409 unknown is not quota", scriptedResponse{status: 409, body: problemBody("conflict")}, ErrAssignmentServiceError},
-		{"409 mixed-case alias rejected", scriptedResponse{status: 409, body: problemBody("CELL_REASSIGNMENT_IN_PROGRESS")}, ErrAssignmentServiceError},
-		{"429 rate limited", scriptedResponse{status: 429, body: problemBody("rate_limited")}, ErrAssignmentRateLimited},
-		{"500 service error", scriptedResponse{status: 500, body: problemBody("internal_error")}, ErrAssignmentServiceError},
-		{"503 non-authority code terminal", scriptedResponse{status: 503, body: problemBody("service_unavailable")}, ErrAssignmentServiceError},
-		{"503 mixed-case alias terminal", scriptedResponse{status: 503, body: problemBody("CELL_ASSIGNMENT_UNAVAILABLE")}, ErrAssignmentServiceError},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			doer := &scriptedDoer{responses: []scriptedResponse{tc.resp}}
-			clk := &fakeClock{now: time.Now()}
-			var slept []time.Duration
-			_, err := FetchAgentAssignment(context.Background(), "connector-7f3c2a", BearerToken("lv_key"),
-				deterministicFetchOpts(doer, clk, &slept)...)
-			if !errors.Is(err, tc.wantIs) {
-				t.Fatalf("error = %v, want errors.Is %v", err, tc.wantIs)
-			}
-			// A terminal status is not retried.
-			if doer.calls != 1 {
-				t.Fatalf("calls = %d, want 1 (terminal, no retry)", doer.calls)
-			}
-			if len(slept) != 0 {
-				t.Fatalf("slept %v, want no backoff on a terminal status", slept)
-			}
-		})
-	}
-}
-
-func TestFetchAgentAssignment_RateLimitedCarriesResetTiming(t *testing.T) {
-	header := http.Header{}
-	header.Set("Retry-After", "30")
-	header.Set("RateLimit-Reset", "45")
-	doer := &scriptedDoer{responses: []scriptedResponse{{status: 429, header: header, body: problemBody("rate_limited")}}}
-	clk := &fakeClock{now: time.Now()}
-	var slept []time.Duration
-
-	_, err := FetchAgentAssignment(context.Background(), "connector-7f3c2a", BearerToken("lv_key"),
-		deterministicFetchOpts(doer, clk, &slept)...)
-	var rl *AssignmentRateLimitedError
-	if !errors.As(err, &rl) {
-		t.Fatalf("error = %v, want *AssignmentRateLimitedError", err)
-	}
-	if rl.RetryAfter != 30*time.Second || rl.Reset != 45*time.Second {
-		t.Fatalf("rate-limit timing = retry-after %s reset %s", rl.RetryAfter, rl.Reset)
-	}
-	var apiErr *APIError
-	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusTooManyRequests || apiErr.Code != "rate_limited" {
-		t.Fatalf("rate-limit error lost API problem details: %v", err)
-	}
-}
-
-func TestAssignmentRateLimitedError_NilAPIErrorStillUnwrapsSentinel(t *testing.T) {
-	err := &AssignmentRateLimitedError{}
-	if !errors.Is(err, ErrAssignmentRateLimited) {
-		t.Fatalf("error = %v, want ErrAssignmentRateLimited", err)
-	}
-	var apiErr *APIError
-	if errors.As(err, &apiErr) {
-		t.Fatalf("error unexpectedly unwraps a nil *APIError: %#v", apiErr)
-	}
-}
-
-func TestAssignmentRecoveryRequiredError_NilAPIErrorStillUnwrapsSentinels(t *testing.T) {
-	err := &AssignmentRecoveryRequiredError{}
-	if !errors.Is(err, ErrAssignmentRecoveryRequired) || !errors.Is(err, ErrAssignmentUnavailable) {
-		t.Fatalf("error = %v, want both recovery-required and unavailable sentinels", err)
-	}
-	var apiErr *APIError
-	if errors.As(err, &apiErr) {
-		t.Fatalf("error unexpectedly unwraps a nil *APIError: %#v", apiErr)
-	}
-}
-
-func TestFetchAgentAssignment_TransportErrorIsTerminal(t *testing.T) {
-	doer := &scriptedDoer{responses: []scriptedResponse{{err: errors.New("connection reset")}}}
-	clk := &fakeClock{now: time.Now()}
-	var slept []time.Duration
-	_, err := FetchAgentAssignment(context.Background(), "connector-7f3c2a", BearerToken("lv_key"),
-		deterministicFetchOpts(doer, clk, &slept)...)
-	if !errors.Is(err, ErrAssignmentServiceError) {
-		t.Fatalf("error = %v, want ErrAssignmentServiceError", err)
-	}
-	if doer.calls != 1 {
-		t.Fatalf("calls = %d, want 1 (transport failure is terminal here)", doer.calls)
-	}
-}
-
-// --- bounded 503 retry ---
-
-func unavailable(retryAfter string) scriptedResponse {
-	h := http.Header{}
-	if retryAfter != "" {
-		h.Set("Retry-After", retryAfter)
-	}
-	return scriptedResponse{status: 503, header: h, body: problemBody("cell_assignment_unavailable")}
-}
-
-func TestFetchAgentAssignment_Retries503ThenSucceeds(t *testing.T) {
-	want := validAssignment(t, "connector-7f3c2a")
-	doer := &scriptedDoer{responses: []scriptedResponse{
-		unavailable("1"),
-		unavailable("1"),
-		{status: 200, body: assignmentEnvelope(t, want)},
-	}}
-	clk := &fakeClock{now: time.Now()}
-	var slept []time.Duration
-
-	got, err := FetchAgentAssignment(context.Background(), "connector-7f3c2a", BearerToken("lv_device_key"),
-		deterministicFetchOpts(doer, clk, &slept)...)
-	if err != nil {
-		t.Fatalf("FetchAgentAssignment: %v", err)
-	}
-	if got.CellID != "cell0" {
-		t.Fatalf("assignment = %#v", got)
-	}
-	if doer.calls != 3 {
-		t.Fatalf("calls = %d, want 3", doer.calls)
-	}
-	if len(slept) != 2 {
-		t.Fatalf("slept %v, want 2 backoffs", slept)
-	}
-	for i, d := range slept {
-		if d < time.Second {
-			t.Fatalf("backoff[%d] = %s, want >= Retry-After (1s)", i, d)
+		if err != nil {
+			s.t.Errorf("build assignment reply: %v", err)
+			continue
+		}
+		if _, err := s.conn.WriteToUDP(packet, addr); err != nil {
+			s.t.Logf("write assignment reply: %v", err)
 		}
 	}
 }
 
-func TestFetchAgentAssignment_HonorsRetryAfterAsMinimum(t *testing.T) {
-	want := validAssignment(t, "connector-7f3c2a")
-	doer := &scriptedDoer{responses: []scriptedResponse{
-		unavailable("10"),
-		{status: 200, body: assignmentEnvelope(t, want)},
-	}}
-	clk := &fakeClock{now: time.Now()}
-	var slept []time.Duration
-	if _, err := FetchAgentAssignment(context.Background(), "connector-7f3c2a", BearerToken("lv_key"),
-		deterministicFetchOpts(doer, clk, &slept, WithAssignmentRetryBudget(6, time.Hour))...); err != nil {
-		t.Fatalf("FetchAgentAssignment: %v", err)
+func (s *assignmentTestServer) requestBodies() [][]byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	result := make([][]byte, len(s.requests))
+	for i := range s.requests {
+		result[i] = append([]byte(nil), s.requests[i]...)
 	}
-	if len(slept) != 1 || slept[0] != 10*time.Second {
-		t.Fatalf("slept = %v, want [10s] (Retry-After honored as the minimum)", slept)
-	}
+	return result
 }
 
-func TestAssignmentBackoffUsesFullJitterAndHonorsRetryAfter(t *testing.T) {
-	cfg := &assignmentConfig{
-		minBackoff: 8 * time.Second,
-		maxBackoff: 8 * time.Second,
-		jitter:     func() (float64, error) { return 0.5, nil },
-	}
-	if got, err := cfg.backoff(1, 0); err != nil || got != 4*time.Second {
-		t.Fatalf("full-jitter backoff = %s, want 4s within the 8s window", got)
-	}
-	if got, err := cfg.backoff(1, 10*time.Second); err != nil || got != 10*time.Second {
-		t.Fatalf("Retry-After backoff = %s, want 10s minimum even above maxBackoff", got)
-	}
-	if got, err := cfg.backoff(80, 0); err != nil || got != 4*time.Second {
-		t.Fatalf("saturated large-attempt backoff = %s, want 4s within the capped 8s window", got)
-	}
-}
-
-func TestAssignmentBackoffDefaultFloorStillAllowsLateJitter(t *testing.T) {
-	cfg := &assignmentConfig{
-		minBackoff: defaultAssignmentMinBackoff,
-		maxBackoff: defaultAssignmentMaxBackoff,
-		jitter:     func() (float64, error) { return 0.75, nil },
-	}
-	if got, err := cfg.backoff(5, defaultAssignmentRetryAfter); err != nil || got != 6*time.Second {
-		t.Fatalf("late default backoff = %s, want 6s above the 5s Retry-After floor", got)
-	}
-}
-
-func TestFetchAgentAssignment_JitterFailureRequiresRecovery(t *testing.T) {
-	doer := &scriptedDoer{responses: []scriptedResponse{unavailable("1")}}
-	clk := &fakeClock{now: time.Now()}
-	var slept []time.Duration
-	entropyErr := errors.New("entropy unavailable")
-
-	_, err := FetchAgentAssignment(context.Background(), "connector-7f3c2a", BearerToken("lv_key"),
-		deterministicFetchOpts(doer, clk, &slept, assignmentOptionFunc(func(c *assignmentConfig) error {
-			c.jitter = func() (float64, error) { return 0, entropyErr }
-			return nil
-		}))...)
-	if !errors.Is(err, ErrAssignmentRecoveryRequired) || !errors.Is(err, ErrAssignmentUnavailable) || !errors.Is(err, entropyErr) {
-		t.Fatalf("error = %v, want recovery-required + unavailable + entropy cause", err)
-	}
-	var rec *AssignmentRecoveryRequiredError
-	if !errors.As(err, &rec) || rec.Attempts != 1 || rec.LastRetryAfter != time.Second {
-		t.Fatalf("recovery error = %#v, want first-attempt retry timing", rec)
-	}
-	if doer.calls != 1 || len(slept) != 0 {
-		t.Fatalf("calls/sleeps = %d/%v, want one call and no synchronized fallback sleep", doer.calls, slept)
-	}
-}
-
-func TestFetchAgentAssignment_DefaultsRetryAfterWhenAbsent(t *testing.T) {
-	want := validAssignment(t, "connector-7f3c2a")
-	doer := &scriptedDoer{responses: []scriptedResponse{
-		unavailable(""), // no Retry-After header
-		{status: 200, body: assignmentEnvelope(t, want)},
-	}}
-	clk := &fakeClock{now: time.Now()}
-	var slept []time.Duration
-	if _, err := FetchAgentAssignment(context.Background(), "connector-7f3c2a", BearerToken("lv_key"),
-		deterministicFetchOpts(doer, clk, &slept)...); err != nil {
-		t.Fatalf("FetchAgentAssignment: %v", err)
-	}
-	if len(slept) != 1 || slept[0] != defaultAssignmentRetryAfter {
-		t.Fatalf("slept = %v, want [%s] (server-contract default)", slept, defaultAssignmentRetryAfter)
-	}
-}
-
-func TestFetchAgentAssignment_ExhaustsByAttemptBudget(t *testing.T) {
-	first := unavailable("1")
-	first.body = `{"error":{"code":"cell_assignment_unavailable","detail":"first authority failure"}}`
-	last := unavailable("1")
-	last.body = `{"error":{"code":"cell_assignment_unavailable","detail":"last authority failure"}}`
-	doer := &scriptedDoer{responses: []scriptedResponse{first, last}} // last response repeats
-	clk := &fakeClock{now: time.Now()}
-	var slept []time.Duration
-	jitterCalls := 0
-
-	_, err := FetchAgentAssignment(context.Background(), "connector-7f3c2a", BearerToken("lv_key"),
-		deterministicFetchOpts(doer, clk, &slept,
-			WithAssignmentRetryBudget(3, time.Hour),
-			withAssignmentJitter(func() float64 { jitterCalls++; return 0 }))...)
-	if !errors.Is(err, ErrAssignmentRecoveryRequired) {
-		t.Fatalf("error = %v, want ErrAssignmentRecoveryRequired", err)
-	}
-	// The recovery-required class also carries the underlying 503 class.
-	if !errors.Is(err, ErrAssignmentUnavailable) {
-		t.Fatalf("error = %v, want it to also match ErrAssignmentUnavailable", err)
-	}
-	var rec *AssignmentRecoveryRequiredError
-	if !errors.As(err, &rec) || rec.Attempts != 3 {
-		t.Fatalf("recovery error = %v (attempts=%d), want 3 attempts", err, recAttempts(rec))
-	}
-	if rec.LastRetryAfter != time.Second || !strings.Contains(err.Error(), "last-retry-after=1s") {
-		t.Fatalf("recovery error did not surface last Retry-After: %#v / %v", rec, err)
-	}
-	var apiErr *APIError
-	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusServiceUnavailable ||
-		apiErr.Code != assignmentCodeUnavailable || apiErr.Detail != "last authority failure" {
-		t.Fatalf("recovery error lost final API problem details: %v", err)
-	}
-	if doer.calls != 3 {
-		t.Fatalf("calls = %d, want exactly 3 (bounded, never an unbounded loop)", doer.calls)
-	}
-	if jitterCalls != 2 {
-		t.Fatalf("jitter draws = %d, want 2 (none on terminal exhausted attempt)", jitterCalls)
-	}
-}
-
-func TestFetchAgentAssignment_ExhaustsByDeadlineBudget(t *testing.T) {
-	doer := &scriptedDoer{responses: []scriptedResponse{unavailable("20")}} // 20s Retry-After
-	clk := &fakeClock{now: time.Now()}
-	var slept []time.Duration
-
-	_, err := FetchAgentAssignment(context.Background(), "connector-7f3c2a", BearerToken("lv_key"),
-		deterministicFetchOpts(doer, clk, &slept, WithAssignmentRetryBudget(100, 30*time.Second))...)
-	if !errors.Is(err, ErrAssignmentRecoveryRequired) {
-		t.Fatalf("error = %v, want ErrAssignmentRecoveryRequired", err)
-	}
-	// It must not have slept past the 30s budget: one 20s sleep, then stop because
-	// a second 20s delay would overrun.
-	total := time.Duration(0)
-	for _, d := range slept {
-		total += d
-	}
-	if total > 30*time.Second {
-		t.Fatalf("total backoff %s exceeded the 30s budget", total)
-	}
-	if doer.calls > 100 {
-		t.Fatalf("calls = %d, unbounded", doer.calls)
-	}
-}
-
-func TestFetchAgentAssignment_HugeRetryAfterCannotOverflowDeadlineGuard(t *testing.T) {
-	first := unavailable("1")
-	second := unavailable(strconv.FormatInt(maxHeaderDurationSeconds, 10))
-	doer := &scriptedDoer{responses: []scriptedResponse{first, second}}
-	clk := &fakeClock{now: time.Now()}
-	var slept []time.Duration
-
-	_, err := FetchAgentAssignment(context.Background(), "connector-7f3c2a", BearerToken("lv_key"),
-		deterministicFetchOpts(doer, clk, &slept, WithAssignmentRetryBudget(100, time.Hour))...)
-	if !errors.Is(err, ErrAssignmentRecoveryRequired) {
-		t.Fatalf("error = %v, want ErrAssignmentRecoveryRequired", err)
-	}
-	if doer.calls != 2 || len(slept) != 1 || slept[0] != time.Second {
-		t.Fatalf("calls/sleeps = %d/%v, want two calls and only the initial 1s sleep", doer.calls, slept)
-	}
-}
-
-func recAttempts(e *AssignmentRecoveryRequiredError) int {
-	if e == nil {
-		return -1
-	}
-	return e.Attempts
-}
-
-// --- pre-I/O validation ---
-
-func TestFetchAgentAssignment_ValidatesBeforeIO(t *testing.T) {
-	doer := &scriptedDoer{responses: []scriptedResponse{{status: 200, body: "{}"}}}
-	clk := &fakeClock{now: time.Now()}
-	var slept []time.Duration
-	opts := func() []AssignmentOption { return deterministicFetchOpts(doer, clk, &slept) }
-
-	// Invalid agent id fails before any request.
-	if _, err := FetchAgentAssignment(context.Background(), "Bad_ID", BearerToken("lv_key"), opts()...); !errors.Is(err, ErrInvalidAssignmentConfig) {
-		t.Fatalf("invalid agent id error = %v, want ErrInvalidAssignmentConfig", err)
-	}
-	// Nil credential fails before any request.
-	if _, err := FetchAgentAssignment(context.Background(), "connector-7f3c2a", nil, opts()...); !errors.Is(err, ErrInvalidAssignmentConfig) {
-		t.Fatalf("nil credential error = %v, want ErrInvalidAssignmentConfig", err)
-	}
-	// Cancelled context fails before any request.
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if _, err := FetchAgentAssignment(ctx, "connector-7f3c2a", BearerToken("lv_key"), opts()...); !errors.Is(err, context.Canceled) {
-		t.Fatalf("cancelled context error = %v, want context.Canceled", err)
-	}
-	if doer.calls != 0 {
-		t.Fatalf("calls = %d, want 0 (all failures are pre-I/O)", doer.calls)
-	}
-}
-
-func TestFetchAgentAssignment_CancelDuringBackoff(t *testing.T) {
-	doer := &scriptedDoer{responses: []scriptedResponse{unavailable("1")}}
-	clk := &fakeClock{now: time.Now()}
-	ctx, cancel := context.WithCancel(context.Background())
-	// The real sleep observes the cancelled context and returns its error.
-	_, err := FetchAgentAssignment(ctx, "connector-7f3c2a", BearerToken("lv_key"),
-		WithAssignmentHTTPClient(doer),
-		WithAssignmentBaseURL("https://api.layerv.test"),
-		withAssignmentClock(clk.Now),
-		withAssignmentJitter(func() float64 { return 0 }),
-		withAssignmentSleep(func(ctx context.Context, _ time.Duration) error {
-			cancel()
-			return ctx.Err()
-		}),
-	)
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("error = %v, want context.Canceled", err)
-	}
-}
-
-// --- AgentState persistence ---
-
-func TestAgentState_AssignmentRoundTripsThroughFileStore(t *testing.T) {
-	registeredAt := time.Date(2026, 7, 14, 0, 0, 0, 0, time.UTC)
-	path := filepath.Join(secureAgentStateTestDir(t), "state.json")
-	store := FileAgentState(path)
-
-	base, err := newAgentState()
+func assignmentTestSetup(t *testing.T, replies ...string) (HubBootstrap, nativeudp.Options, *assignmentTestServer) {
+	t.Helper()
+	fixture := loadAssignmentFixture(t)
+	agentPriv := assignmentHex(t, fixture.Keys.Agent.StaticPrivHex)
+	agentKey, err := ecdh.X25519().NewPrivateKey(agentPriv)
 	if err != nil {
-		t.Fatalf("newAgentState: %v", err)
+		t.Fatal(err)
 	}
-	base.AgentID = "connector-7f3c2a"
-	base.RegisteredAt = &registeredAt
-	base.DeviceAPIKey = "lv_device_secret"
-	assignment := validAssignment(t, "connector-7f3c2a")
-	base.Assignment = &assignment
+	hubPriv := assignmentHex(t, fixture.Keys.Hub.StaticPrivHex)
+	server := newAssignmentTestServer(t, hubPriv, agentKey.PublicKey().Bytes(), replies...)
+	hub := HubBootstrap{
+		Host:               "hub.nhp.layerv.ai",
+		Port:               standardNHPUDPPort,
+		ServerPublicKeyB64: base64.StdEncoding.EncodeToString(assignmentHex(t, fixture.Keys.Hub.StaticPubHex)),
+	}
+	transport := nativeudp.Options{
+		DeviceStaticPriv: agentPriv,
+		Resolver:         assignmentTestResolver{},
+		Dialer:           assignmentTestDialer{target: server.conn.LocalAddr().String()},
+		Timeout:          2 * time.Second,
+	}
+	return hub, transport, server
+}
 
-	if err := store.SaveAgentState(context.Background(), base); err != nil {
-		t.Fatalf("save: %v", err)
+func deterministicAssignmentOptions(slept *[]time.Duration, maxAttempts int) []AssignmentOption {
+	return []AssignmentOption{
+		WithAssignmentRetryBudget(maxAttempts, time.Minute),
+		withAssignmentClock(func() time.Time { return assignmentFixtureNow }),
+		withAssignmentJitter(func(time.Duration) (time.Duration, error) { return 0, nil }),
+		withAssignmentSleep(func(_ context.Context, delay time.Duration) error {
+			*slept = append(*slept, delay)
+			return nil
+		}),
+	}
+}
+
+func TestHubAssignmentInitialAndRefreshMatchConformanceBodies(t *testing.T) {
+	fixture := loadAssignmentFixture(t)
+	hub, transport, server := assignmentTestSetup(t,
+		fixture.InitialAssignment.Result.BodyJSON,
+		fixture.RefreshAssignment.Result.BodyJSON,
+	)
+	var slept []time.Duration
+	initial, err := FetchInitialAgentAssignment(
+		context.Background(), hub, "agent-conform", conformance.AgentAssignmentBootstrapCredentialFixture,
+		transport, deterministicAssignmentOptions(&slept, 1)...,
+	)
+	if err != nil {
+		t.Fatalf("FetchInitialAgentAssignment: %v", err)
+	}
+	if initial.Registration != (AssignmentRegistration{KeyID: "key_BsT4rP8wXn6Q", KeyKind: "bootstrap"}) ||
+		initial.Assignment.CellID != "cell0" || initial.AssignmentTicket != "conformance-assignment-ticket-0001" {
+		t.Fatalf("initial result = %#v", initial)
+	}
+	refreshed, err := RefreshAgentAssignment(
+		context.Background(), hub, "agent-conform", transport, deterministicAssignmentOptions(&slept, 1)...,
+	)
+	if err != nil {
+		t.Fatalf("RefreshAgentAssignment: %v", err)
+	}
+	if *refreshed != initial.Assignment {
+		t.Fatalf("refresh = %#v, initial assignment = %#v", refreshed, initial.Assignment)
+	}
+	requests := server.requestBodies()
+	if len(requests) != 2 || string(requests[0]) != fixture.InitialAssignment.Request.BodyJSON || string(requests[1]) != fixture.RefreshAssignment.Request.BodyJSON {
+		t.Fatalf("request bodies do not match conformance:\n got %q\nwant %q / %q", requests, fixture.InitialAssignment.Request.BodyJSON, fixture.RefreshAssignment.Request.BodyJSON)
+	}
+	if bytes.Contains(requests[1], []byte(conformance.AgentAssignmentBootstrapCredentialFixture)) || bytes.Contains(requests[1], []byte("device_api_key")) {
+		t.Fatalf("refresh leaked a credential field: %s", requests[1])
+	}
+}
+
+func TestHubAssignmentRetriesOnlyBoundedRetryableResults(t *testing.T) {
+	fixture := loadAssignmentFixture(t)
+	retryBody := `{"errCode":"52200","errMsg":"temporary","retryAfterSeconds":5}`
+	hub, transport, server := assignmentTestSetup(t, retryBody, retryBody, fixture.RefreshAssignment.Result.BodyJSON)
+	var slept []time.Duration
+	assignment, err := RefreshAgentAssignment(context.Background(), hub, "agent-conform", transport, deterministicAssignmentOptions(&slept, 3)...)
+	if err != nil || assignment.CellID != "cell0" {
+		t.Fatalf("RefreshAgentAssignment = %#v, %v", assignment, err)
+	}
+	if fmt.Sprint(slept) != "[5s 5s]" || len(server.requestBodies()) != 3 {
+		t.Fatalf("slept/requests = %v/%d, want [5s 5s]/3", slept, len(server.requestBodies()))
+	}
+
+	hub, transport, server = assignmentTestSetup(t, retryBody, retryBody)
+	slept = nil
+	_, err = RefreshAgentAssignment(context.Background(), hub, "agent-conform", transport, deterministicAssignmentOptions(&slept, 2)...)
+	var recovery *AssignmentRecoveryRequiredError
+	if !errors.As(err, &recovery) || !errors.Is(err, ErrAssignmentRecoveryRequired) || !errors.Is(err, ErrAssignmentUnavailable) || recovery.Attempts != 2 {
+		t.Fatalf("exhaustion error = %#v, want typed recovery/unavailable", err)
+	}
+	if len(server.requestBodies()) != 2 {
+		t.Fatalf("requests = %d, want 2", len(server.requestBodies()))
+	}
+}
+
+func TestHubAssignmentTerminalResultDoesNotRetry(t *testing.T) {
+	hub, transport, server := assignmentTestSetup(t, `{"errCode":"52204","errMsg":"slow down","retryAfterSeconds":60}`)
+	var slept []time.Duration
+	_, err := RefreshAgentAssignment(context.Background(), hub, "agent-conform", transport, deterministicAssignmentOptions(&slept, 4)...)
+	var appErr *AssignmentError
+	if !errors.As(err, &appErr) || !errors.Is(err, ErrAssignmentRateLimited) || appErr.RetryAfter != time.Minute {
+		t.Fatalf("rate-limit error = %#v", err)
+	}
+	if len(slept) != 0 || len(server.requestBodies()) != 1 {
+		t.Fatalf("terminal error slept/sent = %v/%d", slept, len(server.requestBodies()))
+	}
+}
+
+func TestHubAssignmentRetryBudgetBoundsInFlightUDP(t *testing.T) {
+	hub, transport, server := assignmentTestSetup(t)
+	transport.Timeout = 2 * time.Second
+	started := time.Now()
+	_, err := RefreshAgentAssignment(
+		context.Background(), hub, "agent-conform", transport,
+		WithAssignmentRetryBudget(4, 50*time.Millisecond),
+	)
+	var recovery *AssignmentRecoveryRequiredError
+	if !errors.As(err, &recovery) || !errors.Is(err, ErrAssignmentRecoveryRequired) || recovery.Attempts != 1 {
+		t.Fatalf("error = %#v, want one-attempt recovery-required", err)
+	}
+	if elapsed := time.Since(started); elapsed >= time.Second {
+		t.Fatalf("transaction took %s; retry budget did not bound the UDP receive", elapsed)
+	}
+	if len(server.requestBodies()) != 1 {
+		t.Fatalf("requests = %d, want 1", len(server.requestBodies()))
+	}
+}
+
+func TestAssignmentConformanceSuccessRejectCases(t *testing.T) {
+	fixture := loadAssignmentFixture(t)
+	for _, testCase := range fixture.SuccessResultCases {
+		var parse func([]byte) error
+		switch testCase.Phase {
+		case "initial_assignment":
+			parse = func(body []byte) error {
+				_, err := parseInitialAssignmentReply(body, "agent-conform", assignmentFixtureNow)
+				return err
+			}
+		case "refresh_assignment":
+			parse = func(body []byte) error {
+				_, err := parseRefreshAssignmentReply(body, "agent-conform", assignmentFixtureNow)
+				return err
+			}
+		default:
+			continue
+		}
+		t.Run(testCase.Name, func(t *testing.T) {
+			if err := parse([]byte(testCase.BodyJSON)); !errors.Is(err, ErrAssignmentInvalidResponse) {
+				t.Fatalf("error = %v, want ErrAssignmentInvalidResponse", err)
+			}
+		})
+	}
+}
+
+func TestAssignmentConformanceErrorTaxonomy(t *testing.T) {
+	fixture := loadAssignmentFixture(t)
+	want := map[string]error{
+		"52200": ErrAssignmentUnavailable,
+		"52201": ErrAssignmentIdentityRejected,
+		"52202": ErrAssignmentReassignmentRequired,
+		"52203": ErrAssignmentQuotaExceeded,
+		"52204": ErrAssignmentRateLimited,
+		"52205": ErrAssignmentRequestRejected,
+		"52106": ErrAssignmentKeyRejected,
+		"52107": ErrAssignmentRegistrationDisabled,
+		"52108": ErrAssignmentBootstrapConsumed,
+		"52109": ErrAssignmentRequestRejected,
+	}
+	groups := [][]conformance.AgentAssignmentErrorCase{
+		fixture.ErrorContract.AssignmentCases,
+		fixture.ErrorContract.InitialCredentialCases,
+	}
+	for _, group := range groups {
+		for _, testCase := range group {
+			t.Run(testCase.Name, func(t *testing.T) {
+				initial := testCase.Phase == "initial_assignment"
+				_, err := parseAssignmentEnvelope([]byte(testCase.BodyJSON), initial)
+				if !errors.Is(err, want[testCase.ErrCode]) || errors.Is(err, ErrAssignmentInvalidResponse) {
+					t.Fatalf("error = %v, want %v only", err, want[testCase.ErrCode])
+				}
+			})
+		}
+	}
+	for _, testCase := range fixture.ErrorContract.MalformedCases {
+		if testCase.Phase != "cell_assignment" && testCase.Phase != "initial_assignment" {
+			continue
+		}
+		t.Run(testCase.Name, func(t *testing.T) {
+			_, err := parseAssignmentEnvelope([]byte(testCase.BodyJSON), testCase.Phase == "initial_assignment")
+			if !errors.Is(err, ErrAssignmentInvalidResponse) {
+				t.Fatalf("error = %v, want ErrAssignmentInvalidResponse", err)
+			}
+		})
+	}
+}
+
+func TestHubAssignmentRejectsInvalidInputsBeforeIO(t *testing.T) {
+	fixture := loadAssignmentFixture(t)
+	validHub, validTransport, _ := assignmentTestSetup(t, fixture.InitialAssignment.Result.BodyJSON)
+	lowOrder := base64.StdEncoding.EncodeToString(make([]byte, 32))
+	cases := []struct {
+		name       string
+		hub        HubBootstrap
+		agentID    string
+		credential string
+		transport  nativeudp.Options
+	}{
+		{name: "missing hub", agentID: "agent-conform", credential: "valid", transport: validTransport},
+		{name: "IP hub", hub: HubBootstrap{Host: "203.0.113.1", Port: standardNHPUDPPort, ServerPublicKeyB64: validHub.ServerPublicKeyB64}, agentID: "agent-conform", credential: "valid", transport: validTransport},
+		{name: "AWS hub", hub: HubBootstrap{Host: "internal-hub.elb.amazonaws.com", Port: standardNHPUDPPort, ServerPublicKeyB64: validHub.ServerPublicKeyB64}, agentID: "agent-conform", credential: "valid", transport: validTransport},
+		{name: "unsupported port", hub: HubBootstrap{Host: validHub.Host, Port: 443, ServerPublicKeyB64: validHub.ServerPublicKeyB64}, agentID: "agent-conform", credential: "valid", transport: validTransport},
+		{name: "low-order key", hub: HubBootstrap{Host: validHub.Host, Port: standardNHPUDPPort, ServerPublicKeyB64: lowOrder}, agentID: "agent-conform", credential: "valid", transport: validTransport},
+		{name: "invalid agent id", hub: validHub, agentID: "Bad_ID", credential: "valid", transport: validTransport},
+		{name: "invalid credential", hub: validHub, agentID: "agent-conform", credential: " secret ", transport: validTransport},
+		{name: "short initiator key", hub: validHub, agentID: "agent-conform", credential: "valid", transport: nativeudp.Options{DeviceStaticPriv: make([]byte, 31)}},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			_, err := FetchInitialAgentAssignment(context.Background(), testCase.hub, testCase.agentID, testCase.credential, testCase.transport)
+			if !errors.Is(err, ErrInvalidAssignmentConfig) {
+				t.Fatalf("error = %v, want ErrInvalidAssignmentConfig", err)
+			}
+		})
+	}
+}
+
+func TestAgentAssignmentStatePersistsOnlyDurableBinding(t *testing.T) {
+	fixture := loadAssignmentFixture(t)
+	initial, err := parseInitialAssignmentReply([]byte(fixture.InitialAssignment.Result.BodyJSON), "agent-conform", assignmentFixtureNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := secureAgentStateTestDir(t)
+	path := filepath.Join(dir, "agent-state.json")
+	store := FileAgentState(path)
+	state := &AgentState{
+		AgentID: "agent-conform", PrivateKeyB64: base64.StdEncoding.EncodeToString(assignmentHex(t, fixture.Keys.Agent.StaticPrivHex)),
+		PublicKeyB64:  base64.StdEncoding.EncodeToString(assignmentHex(t, fixture.Keys.Agent.StaticPubHex)),
+		SchemaVersion: agentStateSchemaVersion, Assignment: initial.Assignment.clone(),
+	}
+	if err := store.SaveAgentState(context.Background(), state); err != nil {
+		t.Fatalf("SaveAgentState: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(raw, []byte(initial.AssignmentTicket)) || bytes.Contains(raw, []byte(initial.Registration.KeyID)) || bytes.Contains(raw, []byte("assignment_ticket")) || bytes.Contains(raw, []byte("registration")) {
+		t.Fatalf("state persisted ephemeral registration material: %s", raw)
+	}
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &document); err != nil {
+		t.Fatal(err)
+	}
+	var persistedAssignment map[string]json.RawMessage
+	if err := json.Unmarshal(document["assignment"], &persistedAssignment); err != nil {
+		t.Fatal(err)
+	}
+	if _, duplicated := persistedAssignment["agent_id"]; duplicated {
+		t.Fatalf("assignment duplicates AgentState.AgentID: %s", document["assignment"])
 	}
 	loaded, err := store.LoadAgentState(context.Background())
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
-	if loaded.Assignment == nil {
-		t.Fatal("assignment did not round trip")
-	}
-	got := loaded.Assignment
-	if got.CellID != "cell0" || got.AssignmentGeneration != 1 || got.EndpointRevision != 1 ||
-		!got.LeaseExpiresAt.Equal(assignment.LeaseExpiresAt) ||
-		got.Endpoint.Host != "cell0.nhp.layerv.ai" || got.Endpoint.Port != 62206 ||
-		got.Endpoint.ServerPublicKeyB64 != assignment.Endpoint.ServerPublicKeyB64 {
-		t.Fatalf("assignment did not round trip: %#v", got)
+	if err != nil || loaded.Assignment == nil || *loaded.Assignment != initial.Assignment {
+		t.Fatalf("LoadAgentState = %#v, %v", loaded, err)
 	}
 }
 
-func TestAgentState_AssignmentOmittedWhenAbsent(t *testing.T) {
-	base, err := newAgentState()
-	if err != nil {
-		t.Fatalf("newAgentState: %v", err)
+func TestAgentAssignmentCloneAndLease(t *testing.T) {
+	assignment := &AgentAssignment{CellID: "cell0", LeaseExpiresAt: assignmentFixtureNow.Add(time.Hour), Endpoint: NHPUDPEndpoint{Host: "cell0.nhp.layerv.ai"}}
+	clone := assignment.clone()
+	clone.CellID = "cell1"
+	clone.Endpoint.Host = "cell1.nhp.layerv.ai"
+	if assignment.CellID != "cell0" || assignment.Endpoint.Host != "cell0.nhp.layerv.ai" {
+		t.Fatalf("clone mutated source: %#v", assignment)
 	}
-	base.AgentID = "connector-7f3c2a"
-	raw, err := json.Marshal(base)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	if strings.Contains(string(raw), "assignment") {
-		t.Fatalf("nil assignment must be omitted, got %s", raw)
-	}
-	// A legacy state file without the field loads with a nil Assignment.
-	var loaded AgentState
-	if err := json.Unmarshal(raw, &loaded); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if loaded.Assignment != nil {
-		t.Fatalf("assignment = %#v, want nil", loaded.Assignment)
-	}
-}
-
-func TestAgentAssignment_LeaseExpired(t *testing.T) {
-	a := &AgentAssignment{LeaseExpiresAt: time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)}
-	if !a.LeaseExpired(a.LeaseExpiresAt) {
-		t.Fatal("lease at exactly the expiry instant must be treated as expired (fail closed)")
-	}
-	if !a.LeaseExpired(a.LeaseExpiresAt.Add(time.Second)) {
-		t.Fatal("lease after expiry must be expired")
-	}
-	if a.LeaseExpired(a.LeaseExpiresAt.Add(-time.Second)) {
-		t.Fatal("lease before expiry must not be expired")
+	if assignment.LeaseExpired(assignmentFixtureNow) || !assignment.LeaseExpired(assignment.LeaseExpiresAt) {
+		t.Fatal("LeaseExpired boundary is wrong")
 	}
 	var absent *AgentAssignment
-	if !absent.LeaseExpired(time.Now()) {
-		t.Fatal("missing assignment must be treated as expired (fail closed)")
+	if !absent.LeaseExpired(assignmentFixtureNow) {
+		t.Fatal("nil assignment must be expired")
 	}
 }
 
-func TestAssignmentDurationHeadersRejectOverflow(t *testing.T) {
-	for _, value := range []string{"9223372036854775807", "999999999999999999999999"} {
-		if got := parseRetryAfter(value, time.Now()); got != 0 {
-			t.Fatalf("parseRetryAfter(%q) = %s, want 0", value, got)
-		}
-		if got := parseSecondsHeader(value); got != 0 {
-			t.Fatalf("parseSecondsHeader(%q) = %s, want 0", value, got)
+func TestInitialAssignmentDeadlineClocksAreIndependent(t *testing.T) {
+	fixture := loadAssignmentFixture(t)
+	packetTimeNanos, err := strconv.ParseInt(fixture.InitialAssignment.Result.TimestampNanos, 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packetTime := time.Unix(0, packetTimeNanos).UTC()
+	initial, err := parseInitialAssignmentReply([]byte(fixture.InitialAssignment.Result.BodyJSON), "agent-conform", assignmentFixtureNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !packetTime.Before(assignmentFixtureNow) || !initial.AssignmentTicketExpiresAt.After(assignmentFixtureNow) ||
+		!initial.Assignment.LeaseExpiresAt.After(initial.AssignmentTicketExpiresAt) {
+		t.Fatalf("packet/ticket/lease clocks = %s / %s / %s", packetTime, initial.AssignmentTicketExpiresAt, initial.Assignment.LeaseExpiresAt)
+	}
+	if _, err := parseInitialAssignmentReply([]byte(fixture.InitialAssignment.Result.BodyJSON), "agent-conform", initial.AssignmentTicketExpiresAt); !errors.Is(err, ErrAssignmentInvalidResponse) {
+		t.Fatalf("ticket-expiry boundary error = %v, want ErrAssignmentInvalidResponse", err)
+	}
+
+	var envelope map[string]any
+	if err := json.Unmarshal([]byte(fixture.InitialAssignment.Result.BodyJSON), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	list := envelope["list"].(map[string]any)
+	assignment := list["assignment"].(map[string]any)
+	list["assignment_ticket_expires_at"] = assignment["lease_expires_at"]
+	notOrdered, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parseInitialAssignmentReply(notOrdered, "agent-conform", assignmentFixtureNow); !errors.Is(err, ErrAssignmentInvalidResponse) {
+		t.Fatalf("unordered ticket/lease error = %v, want ErrAssignmentInvalidResponse", err)
+	}
+}
+
+func TestExactObjectFieldsRejectsNestedDuplicateAndTrailing(t *testing.T) {
+	for _, raw := range []string{
+		`{"outer":{"key":1,"key":2}}`,
+		`{"outer":1}{"trailing":2}`,
+		`null`,
+		`[]`,
+	} {
+		if _, err := exactObjectFields([]byte(raw)); err == nil {
+			t.Fatalf("strict parser accepted %s", raw)
 		}
 	}
-	farFuture := time.Date(9999, time.December, 31, 23, 59, 59, 0, time.UTC).Format(http.TimeFormat)
-	if got := parseRetryAfter(farFuture, time.Now()); got != 0 {
-		t.Fatalf("parseRetryAfter(far-future HTTP date) = %s, want 0", got)
+}
+
+func TestAssignmentErrorRejectsNullDiagnostic(t *testing.T) {
+	if _, err := parseAssignmentEnvelope([]byte(`{"errCode":"52201","errMsg":null}`), false); !errors.Is(err, ErrAssignmentInvalidResponse) {
+		t.Fatalf("error = %v, want ErrAssignmentInvalidResponse", err)
 	}
 }

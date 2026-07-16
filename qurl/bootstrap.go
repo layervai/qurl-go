@@ -79,13 +79,11 @@ type NHPServerPeerInfo struct {
 // secret manager (for example AWS Secrets Manager via a custom AgentStateStore)
 // rather than a world-readable path.
 //
-// Schema evolution (additive, backward compatible): the v2 fields SchemaVersion,
-// DeviceAPIKey, RelayURL, KeyID, and OTPRequestedAt were added for RegisterAgent.
-// They are all json:",omitempty" and the pre-v2 fields are unchanged, so a legacy
-// (bootstrap-era) state file loads and validates without migration, and a v2 file
-// written by RegisterAgent is still readable by older code that ignores the new
-// fields. SchemaVersion is informational; the runtime derives readiness from the
-// fields themselves (RegisteredAt + DeviceAPIKey), never from the version number.
+// Schema evolution is additive and backward compatible. The v2 fields support
+// the legacy HTTPS registration lifecycle; v3 adds Assignment for native UDP.
+// Every added field is json:",omitempty", so legacy files load without migration
+// and older readers can ignore newer fields. SchemaVersion is informational;
+// runtime readiness comes from the fields themselves, never the version number.
 type AgentState struct {
 	AgentID       string             `json:"agent_id,omitempty"`
 	PrivateKeyB64 string             `json:"private_key_b64"`
@@ -117,9 +115,11 @@ type AgentState struct {
 	// the successful lifecycle resume clears it after RAK.
 	OTPRequestedAt *time.Time `json:"otp_requested_at,omitempty"`
 
-	// Assignment is the authoritative native-UDP cell assignment (generation,
-	// endpoint revision, lease expiry, and the LayerV-owned DNS endpoint) returned
-	// by qurl-service and persisted so a native registration/knock survives a
+	// --- v3 additive field (native UDP assignment) ---
+
+	// Assignment is the authoritative native-UDP cell assignment (cell,
+	// generation, endpoint revision, lease expiry, and LayerV-owned DNS endpoint)
+	// returned by the hub and persisted so a native registration/knock survives a
 	// restart. It is additive and json:",omitempty", so a pre-assignment state
 	// file loads unchanged. A resolved IP is never persisted here — the endpoint
 	// host is resolved fresh on every exchange.
@@ -156,7 +156,7 @@ func (s *AgentState) clone() *AgentState {
 // agentStateSchemaVersion is the current AgentState schema version RegisterAgent
 // stamps into SchemaVersion. Bumped only on an additive field change that older
 // readers can still ignore.
-const agentStateSchemaVersion = 2
+const agentStateSchemaVersion = 3
 
 // AgentStateStore loads and saves the bootstrapped local identity. The
 // file-backed store writes plaintext JSON protected by filesystem permissions;
