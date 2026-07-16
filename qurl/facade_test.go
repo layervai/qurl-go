@@ -195,7 +195,6 @@ func TestVerifyLinkSurfacesAllClaimFields(t *testing.T) {
 	c := frag.Claims
 	if c == nil {
 		t.Fatal("Fragment.Claims is nil")
-		return
 	}
 	if c.V == 0 {
 		t.Error("Claims.V not surfaced")

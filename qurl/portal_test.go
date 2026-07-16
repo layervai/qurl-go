@@ -56,7 +56,6 @@ func vendoredAcceptLink(t *testing.T) (link string, ts *TrustStore, cellFingerpr
 	}
 	if accept == nil {
 		t.Fatal("no accept vector in the vendored signature file")
-		return
 	}
 
 	der, err := b64url.DecodeString(vf.Issuer.SPKIDERB64)
