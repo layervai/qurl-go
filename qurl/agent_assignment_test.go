@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -509,5 +510,36 @@ func TestExactObjectFieldsRejectsNestedDuplicateAndTrailing(t *testing.T) {
 func TestAssignmentErrorRejectsNullDiagnostic(t *testing.T) {
 	if _, err := parseAssignmentEnvelope([]byte(`{"errCode":"52201","errMsg":null}`), false); !errors.Is(err, ErrAssignmentInvalidResponse) {
 		t.Fatalf("error = %v, want ErrAssignmentInvalidResponse", err)
+	}
+}
+
+func TestAssignmentTicketMatchesReleasedConformanceBoundary(t *testing.T) {
+	ticketArtifact, err := conformance.AssignmentTicket()
+	if err != nil {
+		t.Fatalf("load assignment-ticket conformance: %v", err)
+	}
+	if maxAssignmentTicketBytes != ticketArtifact.Contract.MaxTicketASCIIBytes {
+		t.Fatalf("SDK ticket limit = %d, released conformance limit = %d", maxAssignmentTicketBytes, ticketArtifact.Contract.MaxTicketASCIIBytes)
+	}
+
+	maxTicket := "!" + strings.Repeat("~", maxAssignmentTicketBytes-1)
+	if err := validateOpaqueAssignmentTicket(maxTicket); err != nil {
+		t.Fatalf("exact-max printable ticket rejected: %v", err)
+	}
+	if err := validateOpaqueAssignmentTicket(maxTicket + "!"); err == nil {
+		t.Fatal("max+1 ticket accepted")
+	}
+
+	for name, ticket := range map[string]string{
+		"space":     "qat1 bad",
+		"control":   "qat1\x1f",
+		"delete":    "qat1\x7f",
+		"non_ascii": "qat1.é",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := validateOpaqueAssignmentTicket(ticket); err == nil {
+				t.Fatalf("non-printable-ASCII ticket %q accepted", ticket)
+			}
+		})
 	}
 }

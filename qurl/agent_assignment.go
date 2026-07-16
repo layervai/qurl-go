@@ -11,7 +11,6 @@ import (
 	"net"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/layervai/qurl-go/internal/cryptoutil"
 	"github.com/layervai/qurl-go/internal/x25519key"
@@ -30,7 +29,7 @@ const (
 	assignmentModeEnroll     = "enroll"
 	assignmentModeRefresh    = "refresh"
 	standardNHPUDPPort       = 62206
-	maxAssignmentTicketBytes = 2048
+	maxAssignmentTicketBytes = 2304
 	maxAssignmentJSONDepth   = 64
 
 	// These suffixes are a release-gated trust allowlist, not runtime
@@ -859,12 +858,12 @@ func validPublicRegistrationKeyKind(kind string) bool {
 }
 
 func validateOpaqueAssignmentTicket(ticket string) error {
-	if ticket == "" || len(ticket) > maxAssignmentTicketBytes || ticket != strings.TrimSpace(ticket) || !utf8.ValidString(ticket) {
-		return errors.New("ticket must be non-empty canonical UTF-8 within the size bound")
+	if ticket == "" || len(ticket) > maxAssignmentTicketBytes {
+		return errors.New("ticket must be non-empty printable ASCII within the size bound")
 	}
-	for _, r := range ticket {
-		if r < 0x21 || r == 0x7f {
-			return errors.New("ticket contains whitespace or control characters")
+	for i := range len(ticket) {
+		if ticket[i] < 0x21 || ticket[i] > 0x7e {
+			return errors.New("ticket must contain only printable ASCII bytes")
 		}
 	}
 	return nil
