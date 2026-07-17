@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/layervai/qurl-go/internal/qv2"
+	"github.com/layervai/qurl-go/relayknock"
 )
 
 // qURL knock-body construction.
@@ -54,9 +55,9 @@ const (
 // packet types. Keeping them together makes it hard for a re-knock or clean
 // exit to accidentally reuse the ordinary KNK body envelope.
 const (
-	nhpKNKHeaderType = 1
-	nhpRKNHeaderType = 8
-	nhpEXTHeaderType = 16
+	nhpKNKHeaderType = relayknock.TypeKnock
+	nhpRKNHeaderType = relayknock.TypeReknock
+	nhpEXTHeaderType = relayknock.TypeExit
 )
 
 // buildKnockBody serializes the provisional qURL knock body for a verified fragment:

@@ -59,9 +59,10 @@ func BuildKnock(inp *KnockInputs) ([]byte, error) {
 
 // BuildMessage builds a complete NHP packet (240-byte header ‖ sealed body) of
 // the given initiator header type: TypeKnock, TypeListRequest, TypeReknock,
-// TypeOTP, TypeRegister, or TypeExit. Any other type — in particular the server-originated reply types
-// — fails closed: an agent never builds those, so rejecting them here keeps a
-// type mix-up from reaching the wire. (A server or test double answering a
+// TypeOTP, TypeRegister, or TypeExit. Any other type — in particular the
+// server-originated reply types — fails closed: an agent never builds those,
+// so rejecting them here keeps a type mix-up from reaching the wire. (A server
+// or test double answering a
 // request builds reply types with relayknock/relayknocktest.BuildReply instead.)
 //
 // BuildMessage is for callers that carry the packet themselves — deterministic

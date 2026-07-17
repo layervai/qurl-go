@@ -190,20 +190,15 @@ func TestCorrelateDecryptedReply_AgentSessionTransitions(t *testing.T) {
 
 	cok := f.OverloadReknock.CookieReply
 	cokPacket := mustHexBytes(t, cok.PacketHex)
-	for _, requestType := range []int{relayknock.TypeReknock, relayknock.TypeExit} {
-		if _, err := decryptAndCorrelate(agentPriv, cellPub, requestType, mustDecimalCounter(t, cok.Counter), cokPacket); !errors.Is(err, relayknock.ErrMalformedReply) {
-			t.Fatalf("type %d accepted COK: %v", requestType, err)
-		}
-	}
-}
-
-func mustDecimalCounter(t *testing.T, value string) uint64 {
-	t.Helper()
-	counter, err := strconv.ParseUint(value, 10, 64)
+	counter, err := strconv.ParseUint(cok.Counter, 10, 64)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return counter
+	for _, requestType := range []int{relayknock.TypeReknock, relayknock.TypeExit} {
+		if _, err := decryptAndCorrelate(agentPriv, cellPub, requestType, counter, cokPacket); !errors.Is(err, relayknock.ErrMalformedReply) {
+			t.Fatalf("type %d accepted COK: %v", requestType, err)
+		}
+	}
 }
 
 func TestDecryptAndCorrelate_RejectsMalformedDatagram(t *testing.T) {

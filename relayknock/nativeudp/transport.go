@@ -792,7 +792,7 @@ func publicRoutableAddress(addr netip.Addr) bool {
 
 func validateHeaderType(headerType int, cookie []byte) error {
 	switch headerType {
-	case relayknock.TypeKnock, relayknock.TypeListRequest, relayknock.TypeRegister:
+	case relayknock.TypeKnock, relayknock.TypeListRequest, relayknock.TypeRegister, relayknock.TypeExit:
 		if len(cookie) == 0 {
 			return nil
 		}
@@ -800,14 +800,10 @@ func validateHeaderType(headerType int, cookie []byte) error {
 		if len(cookie) == nhpwire.CookieSize {
 			return nil
 		}
-	case relayknock.TypeExit:
-		if len(cookie) == 0 {
-			return nil
-		}
 	default:
 		return fmt.Errorf("%w: header type %d is not a native-UDP round-trip type", ErrInvalidRequest, headerType)
 	}
-	return fmt.Errorf("%w: header type %d has an invalid RKN cookie", ErrInvalidRequest, headerType)
+	return fmt.Errorf("%w: header type %d has an invalid cookie", ErrInvalidRequest, headerType)
 }
 
 func validateEndpoint(ep Endpoint) error {
