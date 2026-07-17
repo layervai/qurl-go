@@ -309,7 +309,7 @@ Use `errors.Is` and `errors.As`:
 | `ErrAssignmentTicketInvalid` / `ErrAssignmentTicketExpired` | The assigned cell rejected the Hub ticket. Do not invent or retarget an endpoint. |
 | `ErrAgentIdentityConflict` | Stop and use explicit owner-controlled native reprovisioning. |
 | `ErrDeviceKeyQuotaExceeded` | Revoke an unused device credential, then resume according to authority guidance. |
-| `ErrAgentCompletionCandidatePersistence` / `*AgentCompletionCandidatePersistenceError` | Reload state before any retry; resume the exact pending activation with the same enrollment credential or the exact pending completion with an empty credential. |
+| `ErrAgentCompletionCandidatePersistence` / `*AgentCompletionCandidatePersistenceError` | Reload state before any retry; resume the exact pending activation with the same enrollment credential or the exact pending completion with an empty credential. Save ambiguity alone never authorizes replacement; only an exact pending-activation replay authenticated as `52111` or account `52101` permits the one bounded replacement. |
 | `ErrCompletionRecoveryRequired` / `*CompletionRecoveryRequiredError` | Re-run `RegisterAgentRuntime` with the same store and empty enrollment credential to resume the exact pending candidate. |
 | `ErrCompletionCredentialConflict` / `*CompletionError` | The authority already committed a different candidate. Stop and use explicit NHP-native credential recovery or reprovisioning; never delete the persisted candidate or mint a replacement locally. |
 | `*NativeCredentialRecoveryRequiredError` | Native completed credential state is absent or malformed; explicit native recovery/reprovisioning is required. |

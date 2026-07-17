@@ -1934,7 +1934,9 @@ func TestRegisterAgentRuntime_PostRAKPreCommitSaveFailureRequiresReloadBeforeRec
 	if persistence.AgentID != "agent-conform" || strings.Contains(err.Error(), conformance.AgentAssignmentBootstrapCredentialFixture) || strings.Contains(err.Error(), canonicalNativeDeviceCredential) {
 		t.Fatalf("candidate persistence error identity/redaction = %#v / %v", persistence, err)
 	}
-	if !strings.Contains(err.Error(), "reload state first") || !strings.Contains(err.Error(), "same enrollment credential") || !strings.Contains(err.Error(), "never request a replacement ticket") || strings.Contains(err.Error(), "not persisted") {
+	if !strings.Contains(err.Error(), "reload state first") || !strings.Contains(err.Error(), "same enrollment credential") ||
+		!strings.Contains(err.Error(), "save ambiguity alone never authorizes a replacement ticket") ||
+		!strings.Contains(err.Error(), "authenticated as 52111 or account 52101") || strings.Contains(err.Error(), "not persisted") {
 		t.Fatalf("candidate persistence recovery guidance is categorical or incomplete: %v", err)
 	}
 	persisted, loadErr := f.store.LoadAgentState(context.Background())

@@ -34,7 +34,7 @@ func (e *AgentCompletionCandidatePersistenceError) Error() string {
 	if e != nil {
 		agentID = e.AgentID
 	}
-	message := fmt.Sprintf("qurl: assigned-cell registration for agent %q succeeded, but its post-RAK state-transition durability is unknown; reload state first, resume an exact pending activation with the same enrollment credential or an exact pending completion with an empty enrollment credential, and never request a replacement ticket while either record exists", agentID)
+	message := fmt.Sprintf("qurl: assigned-cell registration for agent %q succeeded, but its post-RAK state-transition durability is unknown; reload state first and resume an exact pending activation with the same enrollment credential or an exact pending completion with an empty enrollment credential; save ambiguity alone never authorizes a replacement ticket, and only an exact pending-activation replay authenticated as 52111 or account 52101 permits the one bounded replacement", agentID)
 	if e == nil {
 		return message
 	}
