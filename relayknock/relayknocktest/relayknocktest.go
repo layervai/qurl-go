@@ -48,12 +48,11 @@ func BuildReply(headerType int, inp *relayknock.KnockInputs) ([]byte, error) {
 	}
 }
 
-// OpenInitiatorMessage decrypts and authenticates an initiator packet (NHP_KNK /
-// NHP_LST / NHP_OTP / NHP_REG / NHP_EXT) in the responder role — the open a server (or a
-// test double standing in for one) performs on a packet an agent posted. It is
-// the mirror of relayknock.DecryptReply, which opens server replies from the
-// initiator side; the two split the role-symmetric transcript by which header
-// types each admits.
+// OpenInitiatorMessage decrypts and authenticates an initiator packet in the
+// responder role. It accepts NHP_KNK, NHP_LST, NHP_OTP, NHP_REG, and NHP_EXT:
+// the open a server (or test double) performs on an agent packet. It mirrors
+// relayknock.DecryptReply, which opens server replies from the initiator side;
+// the two split the role-symmetric transcript by admitted header type.
 //
 // serverPriv is the responder (server) static private key; expectedDevicePub is
 // the initiator (agent) static public key the caller expects. Only initiator
