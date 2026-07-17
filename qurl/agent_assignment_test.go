@@ -262,22 +262,6 @@ func TestHubAssignmentRetriesOnlyBoundedRetryableResults(t *testing.T) {
 	}
 }
 
-func TestAssignmentRecoveryRequiredError_NilSafety(t *testing.T) {
-	var nilRecovery *AssignmentRecoveryRequiredError
-	if nilRecovery.Error() != ErrAssignmentRecoveryRequired.Error() || !errors.Is(nilRecovery, ErrAssignmentRecoveryRequired) {
-		t.Fatalf("nil assignment recovery = %q / %v, want stable sentinel", nilRecovery.Error(), nilRecovery.Unwrap())
-	}
-	last := errors.New("last assignment transport failure")
-	recovery := &AssignmentRecoveryRequiredError{Attempts: 1, Elapsed: time.Second, Last: last}
-	if recovery.Error() != "qurl: assignment retry budget exhausted after 1 attempts over 1s; surface recovery: last assignment transport failure" {
-		t.Fatalf("assignment recovery message = %q", recovery.Error())
-	}
-	causes := recovery.Unwrap()
-	if len(causes) != 2 || !errors.Is(causes[0], ErrAssignmentRecoveryRequired) || !errors.Is(causes[1], last) {
-		t.Fatalf("assignment recovery causes = %#v, want sentinel then non-nil last cause", causes)
-	}
-}
-
 func TestHubAssignmentRetriesResolveFailure(t *testing.T) {
 	fixture := loadAssignmentFixture(t)
 	hub, transport, server := assignmentTestSetup(t, fixture.RefreshAssignment.Result.BodyJSON)

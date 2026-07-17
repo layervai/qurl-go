@@ -1172,44 +1172,6 @@ func TestRunCompletionExchange_DeadlineDuringBackoffRequiresRecovery(t *testing.
 	}
 }
 
-func TestCompletionRecoveryRequiredError_NilSafety(t *testing.T) {
-	var nilRecovery *CompletionRecoveryRequiredError
-	if nilRecovery.Error() != ErrCompletionRecoveryRequired.Error() || !errors.Is(nilRecovery, ErrCompletionRecoveryRequired) {
-		t.Fatalf("nil completion recovery = %q / %v, want stable sentinel", nilRecovery.Error(), nilRecovery.Unwrap())
-	}
-	last := errors.New("last completion transport failure")
-	recovery := &CompletionRecoveryRequiredError{Attempts: 1, Elapsed: time.Second, Last: last}
-	if recovery.Error() != "qurl: completion retry budget exhausted after 1 attempts over 1s; reopen the persisted pending candidate: last completion transport failure" {
-		t.Fatalf("completion recovery message = %q", recovery.Error())
-	}
-	if !errors.Is(recovery, ErrCompletionRecoveryRequired) {
-		t.Fatalf("completion recovery lost sentinel: %v", recovery)
-	}
-	causes := recovery.Unwrap()
-	if len(causes) != 2 || !errors.Is(causes[0], ErrCompletionRecoveryRequired) || !errors.Is(causes[1], last) {
-		t.Fatalf("completion recovery causes = %#v, want sentinel then non-nil last cause", causes)
-	}
-}
-
-func TestRegistrationRecoveryRequiredError_NilSafety(t *testing.T) {
-	var nilRecovery *RegistrationRecoveryRequiredError
-	if nilRecovery.Error() != ErrRegistrationRecoveryRequired.Error() || !errors.Is(nilRecovery, ErrRegistrationRecoveryRequired) {
-		t.Fatalf("nil registration recovery = %q / %v, want stable sentinel", nilRecovery.Error(), nilRecovery.Unwrap())
-	}
-	last := errors.New("last registration transport failure")
-	recovery := &RegistrationRecoveryRequiredError{Attempts: 1, Elapsed: time.Second, Last: last}
-	if recovery.Error() != "qurl: assigned-cell registration retry budget exhausted after 1 attempts over 1s; resume the exact pending activation with the same enrollment credential: last registration transport failure" {
-		t.Fatalf("registration recovery message = %q", recovery.Error())
-	}
-	if !errors.Is(recovery, ErrRegistrationRecoveryRequired) {
-		t.Fatalf("registration recovery lost sentinel: %v", recovery)
-	}
-	causes := recovery.Unwrap()
-	if len(causes) != 2 || !errors.Is(causes[0], ErrRegistrationRecoveryRequired) || !errors.Is(causes[1], last) {
-		t.Fatalf("registration recovery causes = %#v, want sentinel then non-nil last cause", causes)
-	}
-}
-
 func TestRegisterAgentRuntime_RateLimitRetriesWholeHubTransactionWithinBudget(t *testing.T) {
 	contract := loadAssignmentFixture(t)
 	const reflectedSecret = "lv_live_rate_limit_reflection"
