@@ -179,6 +179,16 @@ func (d runtimeRouteDialer) DialContext(ctx context.Context, network, address st
 	return (&net.Dialer{}).DialContext(ctx, network, target)
 }
 
+type countingNativeDialer struct {
+	inner nativeudp.Dialer
+	calls atomic.Int32
+}
+
+func (d *countingNativeDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	d.calls.Add(1)
+	return d.inner.DialContext(ctx, network, address)
+}
+
 type noIONativeResolver struct{ calls atomic.Int32 }
 
 func (r *noIONativeResolver) LookupNetIP(context.Context, string, string) ([]netip.Addr, error) {
@@ -1661,6 +1671,87 @@ func TestRegisterAgentRuntime_ReenrollsOnceOnExpiredAssignmentTicket(t *testing.
 	}
 }
 
+func TestRegisterAgentRuntime_StopsAfterOneReplacementOnConsecutiveNonCommitVerdicts(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	t.Run("unattended 52111", func(t *testing.T) {
+		secondAssignment := strings.Replace(contract.InitialAssignment.Result.BodyJSON,
+			"conformance-assignment-ticket-0001", "conformance-assignment-ticket-0002", 1)
+		thirdAssignment := strings.Replace(contract.InitialAssignment.Result.BodyJSON,
+			"conformance-assignment-ticket-0001", "conformance-assignment-ticket-0003", 1)
+		f := newRuntimeFixture(t,
+			[]runtimeUDPStep{
+				{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: contract.InitialAssignment.Result.BodyJSON},
+				{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: secondAssignment},
+				{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: thirdAssignment},
+			},
+			[]runtimeUDPStep{
+				{requestType: relayknock.TypeRegister, replyType: relayknock.TypeRegisterAck, replyBody: `{"errCode":"52111","errMsg":"expired","aspId":"agent"}`},
+				{requestType: relayknock.TypeRegister, replyType: relayknock.TypeRegisterAck, replyBody: `{"errCode":"52111","errMsg":"expired","aspId":"agent"}`},
+				{requestType: relayknock.TypeRegister, replyType: relayknock.TypeRegisterAck, replyBody: contract.AssignedCellRegistration.Result.BodyJSON},
+				{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: contract.RegistrationCompletion.Result.BodyJSON},
+			},
+		)
+		_, _, err := RegisterAgentRuntime(context.Background(), conformance.AgentAssignmentBootstrapCredentialFixture, f.store, f.options()...)
+		if !errors.Is(err, ErrAssignmentTicketExpired) {
+			t.Fatalf("second authenticated 52111 = %v, want terminal ErrAssignmentTicketExpired", err)
+		}
+		if len(f.hubUDP.snapshot()) != 2 || len(f.cellUDP.snapshot()) != 2 {
+			t.Fatalf("double 52111 Hub/cell requests = %d/%d, want exactly 2/2", len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot()))
+		}
+		pending, loadErr := f.store.LoadAgentState(context.Background())
+		if loadErr != nil || pending.PendingActivation == nil || pending.PendingActivation.AssignmentTicket != "conformance-assignment-ticket-0002" {
+			t.Fatalf("double 52111 pending ticket = %#v, %v", pending, loadErr)
+		}
+	})
+
+	t.Run("account 52101", func(t *testing.T) {
+		firstAssignment := accountAssignmentResult(contract, "conformance-account-assignment-ticket-0001")
+		secondAssignment := accountAssignmentResult(contract, "conformance-account-assignment-ticket-0002")
+		thirdAssignment := accountAssignmentResult(contract, "conformance-account-assignment-ticket-0003")
+		f := newRuntimeFixture(t,
+			[]runtimeUDPStep{
+				{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: firstAssignment},
+				{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: secondAssignment},
+				{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: thirdAssignment},
+			},
+			[]runtimeUDPStep{
+				{requestType: relayknock.TypeOTP, noReply: true},
+				{requestType: relayknock.TypeRegister, replyType: relayknock.TypeRegisterAck, replyBody: `{"errCode":"52101","errMsg":"OTP expired","aspId":"agent"}`},
+				{requestType: relayknock.TypeOTP, noReply: true},
+				{requestType: relayknock.TypeRegister, replyType: relayknock.TypeRegisterAck, replyBody: `{"errCode":"52101","errMsg":"OTP expired","aspId":"agent"}`},
+				{requestType: relayknock.TypeOTP, noReply: true},
+				{requestType: relayknock.TypeRegister, replyType: relayknock.TypeRegisterAck, replyBody: contract.AssignedCellRegistration.Result.BodyJSON},
+				{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: contract.RegistrationCompletion.Result.BodyJSON},
+			},
+		)
+		codes := []string{"12345678", "87654321", "11223344"}
+		var callbacks atomic.Int32
+		provider := func(context.Context, AgentOTPChallenge) (string, error) {
+			index := int(callbacks.Add(1)) - 1
+			if index >= len(codes) {
+				return "", errors.New("unexpected OTP callback")
+			}
+			return codes[index], nil
+		}
+		_, _, err := RegisterAgentRuntime(context.Background(), conformance.AgentAssignmentAccountCredentialFixture, f.store,
+			f.options(
+				WithAgentRuntimeAllowedRegistrationKeyKinds(RegistrationKeyKindAccount),
+				WithAgentRuntimeOTPProvider(provider),
+			)...)
+		if !errors.Is(err, ErrOTPExpired) {
+			t.Fatalf("second authenticated account 52101 = %v, want terminal ErrOTPExpired", err)
+		}
+		if callbacks.Load() != 2 || len(f.hubUDP.snapshot()) != 2 || len(f.cellUDP.snapshot()) != 4 {
+			t.Fatalf("double 52101 callbacks/Hub/cell = %d/%d/%d, want exactly 2/2/4",
+				callbacks.Load(), len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot()))
+		}
+		pending, loadErr := f.store.LoadAgentState(context.Background())
+		if loadErr != nil || pending.PendingActivation == nil || pending.PendingActivation.AssignmentTicket != "conformance-account-assignment-ticket-0002" {
+			t.Fatalf("double 52101 pending ticket = %#v, %v", pending, loadErr)
+		}
+	})
+}
+
 func TestRegisterAgentRuntime_ReplacementPendingSaveFailurePreservesOldTicket(t *testing.T) {
 	contract := loadAssignmentFixture(t)
 	secondAssignment := strings.Replace(contract.InitialAssignment.Result.BodyJSON,
@@ -1815,6 +1906,7 @@ func TestRegisterAgentRuntime_AccountOTPProviderFailuresSendOneOTPNoREGAndPersis
 			)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
+			dialer := &countingNativeDialer{inner: f.dialer}
 			provider := func(context.Context, AgentOTPChallenge) (string, error) {
 				if test.cancel {
 					cancel()
@@ -1826,6 +1918,7 @@ func TestRegisterAgentRuntime_AccountOTPProviderFailuresSendOneOTPNoREGAndPersis
 				f.options(
 					WithAgentRuntimeAllowedRegistrationKeyKinds(RegistrationKeyKindAccount),
 					WithAgentRuntimeOTPProvider(provider),
+					WithAgentRuntimeUDPDialer(dialer),
 				)...)
 			if test.want != nil && !errors.Is(err, test.want) {
 				t.Fatalf("provider failure = %v, want %v", err, test.want)
@@ -1839,6 +1932,12 @@ func TestRegisterAgentRuntime_AccountOTPProviderFailuresSendOneOTPNoREGAndPersis
 			requests := waitRuntimeUDPRequests(t, f.cellUDP, 1)
 			if len(requests) != 1 || requests[0].typeID != relayknock.TypeOTP {
 				t.Fatalf("provider failure cell requests = %v, want exactly one OTP and zero REG", requests)
+			}
+			// Hub assignment and the one OTP each require one synchronous dial. A
+			// REG-after-OTP regression would increment this before the lifecycle
+			// returns, even if the UDP server has not recorded that datagram yet.
+			if dialer.calls.Load() != 2 {
+				t.Fatalf("provider failure UDP dials = %d, want Hub + OTP only", dialer.calls.Load())
 			}
 			persisted, loadErr := f.store.LoadAgentState(context.Background())
 			if loadErr != nil {
@@ -1862,10 +1961,12 @@ func TestRegisterAgentRuntime_AccountPendingSaveFailureSendsOneOTPNoREG(t *testi
 		[]runtimeUDPStep{{requestType: relayknock.TypeOTP, noReply: true}},
 	)
 	f.store.fail = 2 // initial identity save succeeds; pending activation save fails after OTP dispatch
+	dialer := &countingNativeDialer{inner: f.dialer}
 	_, _, err := RegisterAgentRuntime(context.Background(), conformance.AgentAssignmentAccountCredentialFixture, f.store,
 		f.options(
 			WithAgentRuntimeAllowedRegistrationKeyKinds(RegistrationKeyKindAccount),
 			WithAgentRuntimeOTPProvider(func(context.Context, AgentOTPChallenge) (string, error) { return "12345678", nil }),
+			WithAgentRuntimeUDPDialer(dialer),
 		)...)
 	if !errors.Is(err, ErrAgentBindingPersistence) {
 		t.Fatalf("account pending save failure = %v, want ErrAgentBindingPersistence", err)
@@ -1873,6 +1974,9 @@ func TestRegisterAgentRuntime_AccountPendingSaveFailureSendsOneOTPNoREG(t *testi
 	requests := waitRuntimeUDPRequests(t, f.cellUDP, 1)
 	if len(requests) != 1 || requests[0].typeID != relayknock.TypeOTP {
 		t.Fatalf("account pending save failure cell requests = %v, want one OTP and zero REG", requests)
+	}
+	if dialer.calls.Load() != 2 {
+		t.Fatalf("account pending save failure UDP dials = %d, want Hub + OTP only", dialer.calls.Load())
 	}
 	persisted, loadErr := f.store.LoadAgentState(context.Background())
 	if loadErr != nil {

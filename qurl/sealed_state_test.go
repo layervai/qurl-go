@@ -674,13 +674,15 @@ func TestLocalAgentStateStores_PendingActivationRoundTripWithoutPlainCredential(
 	}
 	for _, tt := range []struct {
 		name string
-		new  func(*testing.T) AgentStateStore
+		new  func(*testing.T) (AgentStateStore, string)
 	}{
-		{"plaintext", func(t *testing.T) AgentStateStore {
-			return FileAgentState(filepath.Join(secureAgentStateTestDir(t), "agent_state.json"))
+		{"plaintext", func(t *testing.T) (AgentStateStore, string) {
+			path := filepath.Join(secureAgentStateTestDir(t), "agent_state.json")
+			return FileAgentState(path), path
 		}},
-		{"sealed", func(t *testing.T) AgentStateStore {
-			return testSealedStore(t, &testAgentStateKeyWrapper{})
+		{"sealed", func(t *testing.T) (AgentStateStore, string) {
+			store := testSealedStore(t, &testAgentStateKeyWrapper{})
+			return store, store.path
 		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -698,8 +700,12 @@ func TestLocalAgentStateStores_PendingActivationRoundTripWithoutPlainCredential(
 			if err != nil {
 				t.Fatal(err)
 			}
-			store := tt.new(t)
+			store, path := tt.new(t)
 			if err := store.SaveAgentState(context.Background(), state); err != nil {
+				t.Fatal(err)
+			}
+			atRest, err := os.ReadFile(path)
+			if err != nil {
 				t.Fatal(err)
 			}
 			loaded, err := store.LoadAgentState(context.Background())
@@ -714,8 +720,14 @@ func TestLocalAgentStateStores_PendingActivationRoundTripWithoutPlainCredential(
 			if err != nil {
 				t.Fatal(err)
 			}
-			if bytes.Contains(raw, []byte(conformance.AgentAssignmentBootstrapCredentialFixture)) || bytes.Contains(raw, []byte("12345678")) || bytes.Contains(raw, []byte(canonicalNativeDeviceCredential)) {
-				t.Fatalf("pending activation round trip exposed a plaintext secret: %s", raw)
+			for _, secret := range []string{
+				conformance.AgentAssignmentBootstrapCredentialFixture,
+				"12345678",
+				canonicalNativeDeviceCredential,
+			} {
+				if bytes.Contains(raw, []byte(secret)) || bytes.Contains(atRest, []byte(secret)) {
+					t.Fatalf("pending activation exposed a plaintext secret in decoded or at-rest state: decoded=%s at-rest=%s", raw, atRest)
+				}
 			}
 		})
 	}
