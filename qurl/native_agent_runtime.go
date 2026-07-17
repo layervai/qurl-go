@@ -858,6 +858,9 @@ func validatePendingAgentActivation(pending *PendingAgentActivation, state *Agen
 	if !validAPIKeyID(pending.Registration.KeyID) || !validPublicRegistrationKeyKind(pending.Registration.KeyKind) {
 		return invalid("registration identity or kind is invalid")
 	}
+	if (pending.Hostname == "") != (pending.AgentVersion == "") {
+		return invalid("registration metadata must contain both hostname and version or neither")
+	}
 	if validateOptionalRuntimeMetadata("hostname", pending.Hostname) != nil || validateOptionalRuntimeMetadata("version", pending.AgentVersion) != nil {
 		return invalid("registration metadata is invalid")
 	}

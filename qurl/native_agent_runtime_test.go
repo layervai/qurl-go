@@ -1287,6 +1287,8 @@ func TestRegisterAgentRuntime_PendingActivationCorruptionAndChangedCredentialFai
 		"ticket expiry equals lease": func(state *AgentState) {
 			state.PendingActivation.AssignmentTicketExpiresAt = state.PendingActivation.Assignment.LeaseExpiresAt
 		},
+		"hostname without version": func(state *AgentState) { state.PendingActivation.AgentVersion = "" },
+		"version without hostname": func(state *AgentState) { state.PendingActivation.Hostname = "" },
 		"server identity": func(state *AgentState) {
 			state.PendingActivation.Assignment.Endpoint.ServerPublicKeyB64 = base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x24}, x25519key.Size))
 		},
@@ -1915,7 +1917,11 @@ func TestRegisterAgentRuntime_PostRAKPreCommitSaveFailureRequiresReloadBeforeRec
 	contract := loadAssignmentFixture(t)
 	f := newRuntimeFixture(t,
 		[]runtimeUDPStep{{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: contract.InitialAssignment.Result.BodyJSON}},
-		[]runtimeUDPStep{{requestType: relayknock.TypeRegister, replyType: relayknock.TypeRegisterAck, replyBody: contract.AssignedCellRegistration.Result.BodyJSON}},
+		[]runtimeUDPStep{
+			{requestType: relayknock.TypeRegister, replyType: relayknock.TypeRegisterAck, replyBody: contract.AssignedCellRegistration.Result.BodyJSON},
+			{requestType: relayknock.TypeRegister, replyType: relayknock.TypeRegisterAck, replyBody: contract.AssignedCellRegistration.Result.BodyJSON},
+			{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: contract.RegistrationCompletion.Result.BodyJSON},
+		},
 	)
 	// The initial native-identity and pending-activation saves succeed; the first
 	// save after authenticated RAK is the candidate durability boundary.
@@ -1940,6 +1946,34 @@ func TestRegisterAgentRuntime_PostRAKPreCommitSaveFailureRequiresReloadBeforeRec
 	}
 	if len(f.hubUDP.snapshot()) != 1 || len(f.cellUDP.snapshot()) != 1 {
 		t.Fatalf("post-RAK failure Hub/cell calls = %d/%d, want 1/1", len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot()))
+	}
+
+	_, binding, err := RegisterAgentRuntime(context.Background(), conformance.AgentAssignmentBootstrapCredentialFixture, f.store, f.options()...)
+	if err != nil || binding == nil {
+		t.Fatalf("resume post-RAK pre-commit state = %v, %v", binding, err)
+	}
+	binding.Destroy()
+	if len(f.hubUDP.snapshot()) != 1 {
+		t.Fatalf("post-RAK pending activation replay contacted Hub: %v", f.hubUDP.snapshot())
+	}
+	requests := f.cellUDP.snapshot()
+	if len(requests) != 3 || requests[0].typeID != relayknock.TypeRegister || requests[1].typeID != relayknock.TypeRegister ||
+		requests[2].typeID != relayknock.TypeListRequest || !bytes.Equal(requests[0].body, requests[1].body) ||
+		string(requests[1].body) != contract.AssignedCellRegistration.Request.BodyJSON {
+		t.Fatalf("post-RAK recovery did not replay exact REG before completion: %v", requests)
+	}
+	if !slices.ContainsFunc(f.store.snapshots(), func(state *AgentState) bool {
+		return state.PendingActivation == nil && state.PendingCompletion != nil
+	}) {
+		t.Fatal("post-RAK recovery never durably transitioned to pending completion")
+	}
+	completed, loadErr := f.store.LoadAgentState(context.Background())
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if completed.PendingActivation != nil || completed.PendingCompletion != nil || completed.RegisteredAt == nil ||
+		completed.DeviceAPIKey != canonicalNativeDeviceCredential {
+		t.Fatalf("post-RAK recovery did not complete atomically: %#v", completed)
 	}
 }
 

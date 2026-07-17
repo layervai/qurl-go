@@ -139,6 +139,9 @@ type PendingAgentCompletion struct {
 // Assignment deliberately duplicates AgentState.Assignment so loading can fail
 // closed if a store or caller changes the cell, generation, endpoint revision,
 // lease, host, port, or pinned server identity around an in-flight ticket.
+// AgentPublicKeyB64 likewise duplicates AgentState.PublicKeyB64 so loading can
+// reject keypair/state desynchronization before replaying the authority-bound
+// ticket.
 // EnrollmentCredentialFingerprintB64 is a domain-separated SHA-256 identity of
 // the high-entropy caller-supplied enrollment credential. It permits only that
 // same credential to resume the record without retaining the bearer value.

@@ -289,7 +289,9 @@ The lifecycle separates retryable transport from security-sensitive mutation:
 - A save error immediately after RAK may have committed. Reload first. If the
   pending activation remains, resume its exact REG with the same enrollment
   credential. If the pending completion exists, resume with an empty enrollment
-  credential. Never request a replacement ticket while either record exists.
+  credential. Never request a replacement from save ambiguity alone: only an
+  authenticated `52111` or account `52101` from the exact pending-activation
+  replay may authorize the one bounded replacement above.
 
 ## Errors
 
