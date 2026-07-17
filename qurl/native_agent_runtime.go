@@ -17,7 +17,6 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/layervai/qurl-go/internal/cryptoutil"
 	"github.com/layervai/qurl-go/internal/nhpcontract"
 	"github.com/layervai/qurl-go/internal/x25519key"
 	"github.com/layervai/qurl-go/relayknock"
@@ -36,7 +35,15 @@ const (
 	nativeAccountOTPMinimumTicketRemaining = 630 * time.Second
 	// qurl-conformance v1 freezes this as the native Connector knock deny. Other
 	// values are producer-contract violations, not open-ended diagnostic text.
-	nativeKnockResourceNotFoundCode = "52004"
+	nativeKnockResourceNotFoundCode  = "52004"
+	nativeRegisterTicketInvalidCode  = "52110"
+	nativeRegisterTicketExpiredCode  = "52111"
+	nativeRegisterQuotaExceededCode  = "52112"
+	completionUnavailableCode        = "52300"
+	completionIdentityRejectedCode   = "52301"
+	completionQuotaExceededCode      = "52302"
+	completionCredentialConflictCode = "52303"
+	completionRequestRejectedCode    = "52304"
 	// Native completion follows the authority's current production mint
 	// contract. This prefix is not inferred from the enrollment credential,
 	// hostname, cell, or environment; no such selector exists on this wire.
@@ -412,14 +419,18 @@ func finishNativeRuntime(store AgentStateStore, state *AgentState, cfg *nativeAg
 	return client, binding, nil
 }
 
+func finishNativeRuntimeResult(store AgentStateStore, state *AgentState, cfg *nativeAgentRuntimeConfig) (*nativeRuntimeResult, error) {
+	client, binding, err := finishNativeRuntime(store, state, cfg)
+	return &nativeRuntimeResult{client: client, binding: binding}, err
+}
+
 func (c *nativeAgentRuntimeConfig) registerLocked(ctx context.Context, enrollmentCredential string, store AgentStateStore) (*nativeRuntimeResult, error) {
 	state, err := loadOrCreateAgentState(ctx, store, ErrInvalidRegisterConfig)
 	if err != nil {
 		return nil, err
 	}
 	if state.RegisteredAt != nil {
-		client, binding, err := finishNativeRuntime(store, state, c)
-		return &nativeRuntimeResult{client: client, binding: binding}, err
+		return finishNativeRuntimeResult(store, state, c)
 	}
 	if err := validateIncompleteNativeState(state); err != nil {
 		return nil, err
@@ -458,8 +469,7 @@ func (c *nativeAgentRuntimeConfig) registerLocked(ctx context.Context, enrollmen
 		if err := c.completePending(ctx, store, state, privateKey); err != nil {
 			return nil, err
 		}
-		client, binding, err := finishNativeRuntime(store, state, c)
-		return &nativeRuntimeResult{client: client, binding: binding}, err
+		return finishNativeRuntimeResult(store, state, c)
 	}
 	// Enrollment credentials are attempt-scoped Hub inputs. Completed and
 	// pending-completion paths above do not need one; only a transaction that must
@@ -507,7 +517,7 @@ func (c *nativeAgentRuntimeConfig) registerLocked(ctx context.Context, enrollmen
 		// contract. A producer that violates it can only return terminal 52108 on
 		// the second REG; this loop never retries a consumed bootstrap credential
 		// again.
-		if attempt == 0 && errors.Is(err, ErrAssignmentTicketExpired) && initial.Registration.KeyKind != "account" {
+		if attempt == 0 && errors.Is(err, ErrAssignmentTicketExpired) && initial.Registration.KeyKind != keyKindAccount {
 			continue
 		}
 		return nil, err
@@ -532,8 +542,7 @@ func (c *nativeAgentRuntimeConfig) registerLocked(ctx context.Context, enrollmen
 	if err := c.completePending(ctx, store, state, privateKey); err != nil {
 		return nil, err
 	}
-	client, binding, err := finishNativeRuntime(store, state, c)
-	return &nativeRuntimeResult{client: client, binding: binding}, err
+	return finishNativeRuntimeResult(store, state, c)
 }
 
 func loadNativeAgentStateIfPresent(ctx context.Context, store AgentStateStore) (*AgentState, bool, error) {
@@ -638,6 +647,11 @@ func runAssignmentLifecycle[T any](ctx context.Context, options []AssignmentOpti
 	}
 }
 
+// The lifecycle wrappers intentionally keep transaction construction and
+// validation in the public Fetch/Refresh operations. AssignmentOption is
+// closed to this package and its constructors are pure configuration setters,
+// so their repeated parse is deterministic; runAssignmentLifecycle's parse
+// owns only the shared inter-transaction budget.
 func (c *nativeAgentRuntimeConfig) fetchInitialAssignmentLifecycle(ctx context.Context, hub HubBootstrap, agentID, enrollmentCredential string, privateKey []byte) (*InitialAgentAssignment, error) {
 	return runAssignmentLifecycle(ctx, c.assignmentOptions, func(transactionCtx context.Context) (*InitialAgentAssignment, error) {
 		return FetchInitialAgentAssignment(transactionCtx, hub, agentID, enrollmentCredential, c.udpOptions(privateKey), c.assignmentOptions...)
@@ -680,9 +694,9 @@ func validateIncompleteNativeState(state *AgentState) error {
 
 func (c *nativeAgentRuntimeConfig) registrationCredential(ctx context.Context, state *AgentState, initial *InitialAgentAssignment, enrollmentCredential string, privateKey []byte) (string, error) {
 	switch initial.Registration.KeyKind {
-	case assignmentKeyKindConnectorBootstrap, "bootstrap", assignmentKeyKindAgent:
+	case assignmentKeyKindConnectorBootstrap, keyKindBootstrap, assignmentKeyKindAgent:
 		return enrollmentCredential, nil
-	case "account":
+	case keyKindAccount:
 		if c.otpProvider == nil {
 			return "", fmt.Errorf("%w: install WithAgentRuntimeOTPProvider before account enrollment", ErrAgentOTPRequired)
 		}
@@ -841,11 +855,11 @@ func classifyNativeRegisterError(ack *registerAckBody, keyKind string) error {
 		kind = ErrBootstrapSetupKeyConsumed
 	case rakInvalidInput:
 		kind = ErrRegistrationInvalidInput
-	case "52110":
+	case nativeRegisterTicketInvalidCode:
 		kind = ErrAssignmentTicketInvalid
-	case "52111":
+	case nativeRegisterTicketExpiredCode:
 		kind = ErrAssignmentTicketExpired
-	case "52112":
+	case nativeRegisterQuotaExceededCode:
 		kind = ErrAssignmentQuotaExceeded
 	default:
 		return fmt.Errorf("%w: unknown assigned-cell registration errCode", ErrRegisterReplyMalformed)
@@ -867,7 +881,7 @@ func (c *nativeAgentRuntimeConfig) generateDeviceCredential() (string, error) {
 		return c.deviceCredential, nil
 	}
 	random := make([]byte, deviceKeyRandomLength)
-	defer cryptoutil.Wipe(random)
+	defer wipeBytes(random)
 	if _, err := io.ReadFull(c.random, random); err != nil {
 		return "", fmt.Errorf("qurl: generate device credential: %w", err)
 	}
@@ -886,7 +900,7 @@ func validateNativeDeviceCredential(value, label string, errKind error) error {
 	}
 	encoded := value[len(deviceKeyPrefix):]
 	decoded, err := base64.RawURLEncoding.DecodeString(encoded)
-	defer cryptoutil.Wipe(decoded)
+	defer wipeBytes(decoded)
 	if err != nil {
 		return malformed
 	}
@@ -1072,15 +1086,15 @@ func classifyCompletionError(envelope assignmentEnvelope, fields map[string]json
 	var kind error
 	retryPermitted := false
 	switch envelope.ErrCode {
-	case "52300":
+	case completionUnavailableCode:
 		kind, retryPermitted = ErrCompletionUnavailable, true
-	case "52301":
+	case completionIdentityRejectedCode:
 		kind = ErrCompletionIdentityRejected
-	case "52302":
+	case completionQuotaExceededCode:
 		kind = ErrDeviceKeyQuotaExceeded
-	case "52303":
+	case completionCredentialConflictCode:
 		kind = ErrCompletionCredentialConflict
-	case "52304":
+	case completionRequestRejectedCode:
 		kind = ErrCompletionRequestRejected
 	default:
 		return fmt.Errorf("%w: unknown completion errCode", ErrRegisterReplyMalformed)
@@ -1171,7 +1185,7 @@ func KnockRegisteredAgent(ctx context.Context, binding *AgentRuntimeBinding, dev
 	if err := validateRuntimeBindingIdentity(binding, deviceStaticPrivateKey); err != nil {
 		return nil, err
 	}
-	cfg := &nativeAgentRuntimeConfig{timeout: nativeudp.DefaultTimeout, maxAddresses: nativeudp.DefaultMaxAddresses, clock: time.Now}
+	cfg := defaultNativeAgentRuntimeConfig()
 	for _, opt := range transportOpts {
 		if opt == nil {
 			return nil, fmt.Errorf("%w: nil native UDP transport option", ErrInvalidNativeKnockInput)
@@ -1414,8 +1428,7 @@ func RefreshAgentRuntime(ctx context.Context, hub HubBootstrap, store AgentState
 				return nil, fmt.Errorf("%w: save refreshed assignment: %w", ErrAgentBindingPersistence, err)
 			}
 		}
-		client, binding, err := finishNativeRuntime(store, state, cfg)
-		return &nativeRuntimeResult{client: client, binding: binding}, err
+		return finishNativeRuntimeResult(store, state, cfg)
 	})
 	if err != nil {
 		return nil, nil, err

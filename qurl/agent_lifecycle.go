@@ -242,22 +242,21 @@ func decodeRuntimePrivateKey(state *AgentState, errKind error) ([]byte, error) {
 // state, state.RegisteredAt, and state.Assignment are non-nil, and privateKey is
 // a validated 32-byte X25519 key owned by this constructor.
 func newAgentRuntimeBinding(state *AgentState, privateKey []byte) *AgentRuntimeBinding {
-	binding := &AgentRuntimeBinding{
+	return &AgentRuntimeBinding{
 		AgentID:                   state.AgentID,
 		PublicKeyB64:              state.PublicKeyB64,
 		RegisteredAt:              *state.RegisteredAt,
 		DeviceAPIKeyID:            state.DeviceAPIKeyID,
+		CellID:                    state.Assignment.CellID,
+		AssignmentGeneration:      state.Assignment.AssignmentGeneration,
+		EndpointRevision:          state.Assignment.EndpointRevision,
+		LeaseExpiresAt:            state.Assignment.LeaseExpiresAt,
+		NHPUDPEndpoint:            state.Assignment.Endpoint,
 		authoritativeAgentID:      state.AgentID,
 		authoritativePublicKeyB64: state.PublicKeyB64,
+		authoritativeAssignment:   state.Assignment.clone(),
 		deviceStaticPrivateKey:    newAgentRuntimePrivateKey(privateKey),
 	}
-	binding.CellID = state.Assignment.CellID
-	binding.AssignmentGeneration = state.Assignment.AssignmentGeneration
-	binding.EndpointRevision = state.Assignment.EndpointRevision
-	binding.LeaseExpiresAt = state.Assignment.LeaseExpiresAt
-	binding.NHPUDPEndpoint = state.Assignment.Endpoint
-	binding.authoritativeAssignment = state.Assignment.clone()
-	return binding
 }
 
 func (b *AgentRuntimeBinding) assignment() *AgentAssignment {
