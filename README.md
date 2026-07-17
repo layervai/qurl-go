@@ -147,6 +147,10 @@ and `WithAgentRuntimeOTPProvider`.
 For account enrollment, the one-way OTP dispatch intentionally occurs before
 the pending-activation save. A save failure cannot have sent REG; a later
 explicit attempt may obtain a new ticket and dispatch that ticket's single OTP.
+Pending-activation recovery invokes the provider without another OTP dispatch
+and uses the `RegisterAgentRuntime` caller context because exact replay may
+outlive the ticket window. Set an outer context deadline when the provider could
+otherwise block indefinitely.
 
 Every `RegisterAgentRuntime` enrollment credential must be a server-minted
 encoded token whose total string length is at least 32 bytes, including any

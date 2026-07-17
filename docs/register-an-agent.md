@@ -142,7 +142,11 @@ ticket may dispatch its own single OTP.
 
 That authenticated-expiry path can invoke the provider twice in one call: first
 with `PendingActivationRecovery == true` for the original code, then with
-`false` for the replacement ticket's newly dispatched code.
+`false` for the replacement ticket's newly dispatched code. Separately, when a
+fresh first REG receives account `52101`, the provider can also run twice in one
+call, but both challenges have `PendingActivationRecovery == false`: each
+follows the one OTP dispatch for its own distinct fresh ticket. Every path still
+dispatches at most one OTP per ticket.
 
 The recovery branch above must return the previously issued code. It must never
 request, generate, or dispatch a new code; the SDK intentionally suppresses

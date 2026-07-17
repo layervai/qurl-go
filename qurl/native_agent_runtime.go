@@ -219,8 +219,12 @@ func WithAgentRuntimeMetadata(hostname, version string) AgentRuntimeRegistration
 	})
 }
 
-// WithAgentRuntimeOTPProvider opts into account-credential enrollment. The
-// callback runs only after one fire-and-forget assigned-cell NHP_OTP dispatch.
+// WithAgentRuntimeOTPProvider opts into account-credential enrollment. A fresh
+// callback follows one fire-and-forget assigned-cell NHP_OTP dispatch and is
+// bounded by the ticket window. Pending-activation recovery instead sets
+// AgentOTPChallenge.PendingActivationRecovery, dispatches no OTP, and passes the
+// caller context because exact replay may outlive that window; callers must set
+// an outer deadline when the provider could block.
 func WithAgentRuntimeOTPProvider(provider func(context.Context, AgentOTPChallenge) (string, error)) AgentRuntimeRegistrationOption {
 	return nativeRuntimeOptionFunc(func(c *nativeAgentRuntimeConfig) error {
 		if provider == nil {
