@@ -16,6 +16,7 @@ import (
 	"github.com/layervai/qurl-go/internal/cryptoutil"
 	"github.com/layervai/qurl-go/internal/nhpcontract"
 	"github.com/layervai/qurl-go/internal/x25519key"
+	"github.com/layervai/qurl-go/relayknock"
 	"github.com/layervai/qurl-go/relayknock/nativeudp"
 )
 
@@ -80,19 +81,20 @@ type AgentAssignment struct {
 }
 
 // AssignmentRegistration is the enrollment identity the assigned-cell REG will
-// present. It is attempt-scoped output, not durable assignment state, and must
-// not be persisted as the completed device credential id.
+// present. The lifecycle persists it only inside PendingAgentActivation; it is
+// not durable assignment state or a completed device credential id.
 type AssignmentRegistration struct {
 	KeyID   string `json:"key_id"`
 	KeyKind string `json:"key_kind"`
 }
 
 // InitialAgentAssignment is the validated initial hub result. Registration,
-// AssignmentTicket, and AssignmentTicketExpiresAt are intentionally ephemeral:
-// only Assignment belongs in AgentState. A lost/expired attempt obtains a fresh
-// ticket rather than persisting and replaying this one-shot authorization. This
-// transport slice treats the ticket as 1-2304 opaque printable non-space ASCII
-// bytes (0x21-0x7e); assigned-cell registration owns qat1 semantic validation.
+// AssignmentTicket, and AssignmentTicketExpiresAt are ephemeral at this
+// transport boundary; RegisterAgentRuntime persists their exact values into
+// PendingAgentActivation before REG so an ambiguous/lost RAK can replay the
+// same one-shot authorization. This transport slice treats the ticket as
+// 1-2304 opaque printable non-space ASCII bytes (0x21-0x7e); assigned-cell
+// registration owns qat1 semantic validation.
 type InitialAgentAssignment struct {
 	Registration              AssignmentRegistration
 	Assignment                AgentAssignment
@@ -355,7 +357,8 @@ func sleepAssignmentBackoff(ctx context.Context, delay time.Duration) error {
 // FetchInitialAgentAssignment authenticates an enrollment credential inside an
 // NHP_LST sent to the pinned hub. The stable final agentID is devId and
 // transport.DeviceStaticPriv is the Noise initiator identity. The returned
-// registration metadata and ticket are attempt-scoped and must not be persisted.
+// registration metadata and ticket are attempt-scoped until the lifecycle
+// durably binds them into PendingAgentActivation immediately before REG.
 func FetchInitialAgentAssignment(ctx context.Context, hub HubBootstrap, agentID, enrollmentCredential string, transport nativeudp.Options, opts ...AssignmentOption) (*InitialAgentAssignment, error) {
 	endpoint, err := validateAssignmentInputs(ctx, hub, agentID, transport)
 	if err != nil {
@@ -377,7 +380,7 @@ func FetchInitialAgentAssignment(ctx context.Context, hub HubBootstrap, agentID,
 	}
 	defer wipeBytes(body)
 
-	return runAssignmentExchange(ctx, cfg, endpoint, body, transport, assignmentRetryInfo, newAssignmentRecovery, func(reply []byte, now time.Time) (*InitialAgentAssignment, error) {
+	return runNativeExchange(ctx, cfg, endpoint, body, transport, nativeudp.List, assignmentRetryInfo, newAssignmentRecovery, func(reply []byte, now time.Time) (*InitialAgentAssignment, error) {
 		return parseInitialAssignmentReply(reply, agentID, now)
 	})
 }
@@ -403,7 +406,7 @@ func RefreshAgentAssignment(ctx context.Context, hub HubBootstrap, agentID strin
 	}
 	// Refresh is intentionally credential-free, so there is no mutable secret
 	// buffer to wipe. Any future secret-bearing field must add explicit wiping.
-	return runAssignmentExchange(ctx, cfg, endpoint, body, transport, assignmentRetryInfo, newAssignmentRecovery, func(reply []byte, now time.Time) (*AgentAssignment, error) {
+	return runNativeExchange(ctx, cfg, endpoint, body, transport, nativeudp.List, assignmentRetryInfo, newAssignmentRecovery, func(reply []byte, now time.Time) (*AgentAssignment, error) {
 		return parseRefreshAssignmentReply(reply, agentID, now)
 	})
 }
@@ -417,16 +420,19 @@ func newAssignmentRecovery(attempts int, elapsed time.Duration, last error) erro
 	return &AssignmentRecoveryRequiredError{Attempts: attempts, Elapsed: elapsed, Last: last}
 }
 
-// runAssignmentExchange is the single bounded, jittered retry driver for
-// authenticated NHP assignment and pending-credential completion transactions.
-// retryInfo classifies retryable failures and newRecovery preserves the phase's
-// public recovery error type.
-func runAssignmentExchange[T any](ctx context.Context, c *assignmentConfig, endpoint nativeudp.Endpoint, body []byte, transport nativeudp.Options, retryInfo func(error) (time.Duration, bool), newRecovery recoveryFunc, parse func([]byte, time.Time) (*T, error)) (*T, error) {
+type nativeExchangeFunc func(context.Context, nativeudp.Endpoint, []byte, nativeudp.Options) (*relayknock.Reply, error)
+
+// runNativeExchange is the single bounded, jittered retry driver for
+// authenticated NHP assignment, registration, and pending-credential
+// completion transactions. exchange fixes the NHP request/reply type for the
+// phase; retryInfo classifies retryable failures and newRecovery preserves the
+// phase's public recovery error type.
+func runNativeExchange[T any](ctx context.Context, c *assignmentConfig, endpoint nativeudp.Endpoint, body []byte, transport nativeudp.Options, exchange nativeExchangeFunc, retryInfo func(error) (time.Duration, bool), newRecovery recoveryFunc, parse func([]byte, time.Time) (*T, error)) (*T, error) {
 	start := c.clock()
 	transactionCtx, cancel := context.WithTimeout(ctx, c.budget)
 	defer cancel()
 	for attempt := 1; ; attempt++ {
-		reply, err := nativeudp.List(transactionCtx, endpoint, body, transport)
+		reply, err := exchange(transactionCtx, endpoint, body, transport)
 		replyAuthenticated := err == nil
 		if replyAuthenticated {
 			result, parseErr := parse(reply.Body, c.clock())

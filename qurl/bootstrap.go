@@ -41,8 +41,9 @@ var ErrInsecureAgentStatePermissions = errors.New("qurl: insecure agent state pe
 // mint competing identities against the same durable state path. A release
 // failure can occur after a successful durable save; load the stored state
 // before retrying. Open completed native state with OpenRegisteredAgentRuntime;
-// resume durable PendingCompletion through RegisterAgentRuntime without an
-// enrollment credential. OpenRegisteredAgent is the resource-client-only path.
+// resume durable PendingActivation through RegisterAgentRuntime with the same
+// enrollment credential, or PendingCompletion without one. OpenRegisteredAgent
+// is the resource-client-only path.
 var ErrAgentSetupLock = errors.New("qurl: agent state setup lock failed")
 
 // ErrBootstrapSetupKeyConsumed is returned when an incomplete local bootstrap
@@ -85,11 +86,19 @@ type AgentState struct {
 	// host is resolved fresh on every exchange.
 	Assignment *AgentAssignment `json:"assignment,omitempty"`
 
-	// --- v4 additive fields (native UDP crash-safe completion) ---
+	// --- v4+ additive fields (native UDP crash-safe activation/completion) ---
 
 	// DeviceAPIKeyID is the public identifier paired with DeviceAPIKey by native
 	// UDP completion. It is never a secret.
 	DeviceAPIKeyID string `json:"device_api_key_id,omitempty"`
+
+	// PendingActivation is durably persisted through the configured
+	// AgentStateStore before the first assigned-cell REG. It retains the exact
+	// non-secret activation proof and placement needed to recover an
+	// ambiguous/lost RAK without asking the Hub for another one-shot ticket.
+	// Enrollment credentials, OTP codes, and device credentials are never stored
+	// here.
+	PendingActivation *PendingAgentActivation `json:"pending_activation,omitempty"`
 
 	// PendingCompletion is written only after an authenticated assigned-cell RAK
 	// and before the first completion LST. It keeps the SDK-generated device
@@ -126,6 +135,28 @@ type PendingAgentCompletion struct {
 	AssignmentGeneration int64  `json:"assignment_generation"`
 }
 
+// PendingAgentActivation is the exact durable input for one assigned-cell REG.
+// Assignment deliberately duplicates AgentState.Assignment so loading can fail
+// closed if a store or caller changes the cell, generation, endpoint revision,
+// lease, host, port, or pinned server identity around an in-flight ticket.
+// EnrollmentCredentialFingerprintB64 is a domain-separated SHA-256 identity of
+// the high-entropy caller-supplied enrollment credential. It permits only that
+// same credential to resume the record without retaining the bearer value.
+// The REG credential itself is never persisted: unattended kinds re-derive it
+// from the corroborated enrollment credential, while account recovery asks the
+// explicit OTP provider for the original code and never dispatches another OTP.
+type PendingAgentActivation struct {
+	AssignmentTicket                   string                 `json:"assignment_ticket"`
+	AssignmentTicketExpiresAt          time.Time              `json:"assignment_ticket_expires_at"`
+	AgentID                            string                 `json:"agent_id"`
+	AgentPublicKeyB64                  string                 `json:"agent_public_key_b64"`
+	Assignment                         AgentAssignment        `json:"assignment"`
+	Registration                       AssignmentRegistration `json:"registration"`
+	Hostname                           string                 `json:"hostname,omitempty"`
+	AgentVersion                       string                 `json:"agent_version,omitempty"`
+	EnrollmentCredentialFingerprintB64 string                 `json:"enrollment_credential_fingerprint_b64"`
+}
+
 // validateLoadedAgentAssignment checks persisted trust-boundary structure but
 // deliberately permits an expired lease so the caller can refresh it. Concrete
 // stores call it directly; lifecycle loaders repeat it for custom stores.
@@ -133,7 +164,7 @@ func validateLoadedAgentAssignment(state *AgentState) error {
 	if state == nil {
 		return nil
 	}
-	// Assignment, pending-completion, and native credential-id fields are durable
+	// Assignment, pending activation/completion, and native credential-id fields are durable
 	// native-runtime markers. Once any marker exists, the identity that the Hub
 	// and assigned cell authenticated must already be persisted in canonical wire
 	// form. Never let a later lifecycle call manufacture or normalize a different
@@ -148,6 +179,18 @@ func validateLoadedAgentAssignment(state *AgentState) error {
 			return fmt.Errorf("%w: persisted assignment: %w", ErrInvalidAgentState, err)
 		}
 	}
+	if state.PendingActivation != nil {
+		pending := state.PendingActivation
+		if state.Assignment == nil {
+			return fmt.Errorf("%w: pending activation requires an assignment", ErrInvalidAgentState)
+		}
+		if err := validatePendingAgentActivation(pending, state); err != nil {
+			return err
+		}
+		if state.PendingCompletion != nil || state.RegisteredAt != nil || state.DeviceAPIKey != "" || state.DeviceAPIKeyID != "" {
+			return fmt.Errorf("%w: pending activation cannot coexist with completion or a completed device credential", ErrInvalidAgentState)
+		}
+	}
 	if state.PendingCompletion != nil {
 		pending := state.PendingCompletion
 		if state.Assignment == nil {
@@ -159,7 +202,7 @@ func validateLoadedAgentAssignment(state *AgentState) error {
 		if pending.CellID != state.Assignment.CellID || pending.AssignmentGeneration != state.Assignment.AssignmentGeneration {
 			return fmt.Errorf("%w: pending completion does not match the persisted assignment", ErrInvalidAgentState)
 		}
-		if state.RegisteredAt != nil || state.DeviceAPIKey != "" || state.DeviceAPIKeyID != "" {
+		if state.PendingActivation != nil || state.RegisteredAt != nil || state.DeviceAPIKey != "" || state.DeviceAPIKeyID != "" {
 			return fmt.Errorf("%w: pending completion cannot coexist with a completed device credential", ErrInvalidAgentState)
 		}
 	}
@@ -182,6 +225,11 @@ func (s *AgentState) clone() *AgentState {
 	if s.Assignment != nil {
 		cloned.Assignment = s.Assignment.clone()
 	}
+	if s.PendingActivation != nil {
+		pending := *s.PendingActivation
+		pending.Assignment = *s.PendingActivation.Assignment.clone()
+		cloned.PendingActivation = &pending
+	}
 	if s.PendingCompletion != nil {
 		pending := *s.PendingCompletion
 		cloned.PendingCompletion = &pending
@@ -190,7 +238,7 @@ func (s *AgentState) clone() *AgentState {
 }
 
 // agentStateSchemaVersion is the current native AgentState schema version.
-const agentStateSchemaVersion = 4
+const agentStateSchemaVersion = 5
 
 // AgentStateStore loads and saves the bootstrapped local identity. The
 // file-backed store writes plaintext JSON protected by filesystem permissions;

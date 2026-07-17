@@ -200,6 +200,8 @@ type runtimeRecordingStore struct {
 	calls           int
 	fail            int
 	failAfterCommit int
+	cancelOnSave    int
+	cancel          context.CancelFunc
 }
 
 func (s *runtimeRecordingStore) LoadAgentState(ctx context.Context) (*AgentState, error) {
@@ -220,6 +222,8 @@ func (s *runtimeRecordingStore) SaveAgentState(ctx context.Context, state *Agent
 	call := s.calls
 	fail := s.fail
 	failAfterCommit := s.failAfterCommit
+	cancelOnSave := s.cancelOnSave
+	cancel := s.cancel
 	s.mu.Unlock()
 	if call == fail {
 		return errors.New("injected runtime state save failure")
@@ -230,6 +234,9 @@ func (s *runtimeRecordingStore) SaveAgentState(ctx context.Context, state *Agent
 	s.mu.Lock()
 	s.saves = append(s.saves, state.clone())
 	s.mu.Unlock()
+	if call == cancelOnSave && cancel != nil {
+		cancel()
+	}
 	if call == failAfterCommit {
 		return errors.New("injected runtime state post-commit acknowledgement failure")
 	}
@@ -287,16 +294,26 @@ func newRuntimeFixture(t *testing.T, hubSteps, cellSteps []runtimeUDPStep) *runt
 }
 
 func (f *runtimeFixture) options(extra ...AgentRuntimeRegistrationOption) []AgentRuntimeRegistrationOption {
+	return f.optionsWithMetadata(true, extra...)
+}
+
+func (f *runtimeFixture) optionsWithoutMetadata(extra ...AgentRuntimeRegistrationOption) []AgentRuntimeRegistrationOption {
+	return f.optionsWithMetadata(false, extra...)
+}
+
+func (f *runtimeFixture) optionsWithMetadata(include bool, extra ...AgentRuntimeRegistrationOption) []AgentRuntimeRegistrationOption {
 	opts := []AgentRuntimeRegistrationOption{
 		WithAgentRuntimeHub(f.hub),
 		WithAgentRuntimeIdentity("agent-conform"),
-		WithAgentRuntimeMetadata("conformance-host", "0.0.0-conformance"),
 		WithAgentRuntimeUDPResolver(f.resolver),
 		WithAgentRuntimeUDPDialer(f.dialer),
 		WithAgentRuntimeUDPBounds(100*time.Millisecond, 1),
 		WithAgentRuntimeAssignmentRetryBudget(1, time.Second),
 		withAgentRuntimeClock(func() time.Time { return assignmentFixtureNow }),
 		withAgentRuntimeDeviceCredential(canonicalNativeDeviceCredential),
+	}
+	if include {
+		opts = append(opts, WithAgentRuntimeMetadata("conformance-host", "0.0.0-conformance"))
 	}
 	return append(opts, extra...)
 }
@@ -551,14 +568,21 @@ func TestRegisterAgentRuntime_UDPOnlyGoldenLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if state.DeviceAPIKey != conformance.AgentAssignmentDeviceAPIKeyFixture || state.DeviceAPIKeyID != "key_DvK9mN2pQr7S" || state.PendingCompletion != nil || state.RegisteredAt == nil {
+	if state.DeviceAPIKey != conformance.AgentAssignmentDeviceAPIKeyFixture || state.DeviceAPIKeyID != "key_DvK9mN2pQr7S" || state.PendingActivation != nil || state.PendingCompletion != nil || state.RegisteredAt == nil {
 		t.Fatalf("completed native state = %#v", state)
 	}
+	activationWasDurable := false
 	pendingWasDurable := false
 	for _, snapshot := range f.store.snapshots() {
+		if snapshot.PendingActivation != nil && snapshot.PendingActivation.AssignmentTicket == "conformance-assignment-ticket-0001" && snapshot.PendingCompletion == nil {
+			activationWasDurable = true
+		}
 		if snapshot.PendingCompletion != nil && snapshot.PendingCompletion.DeviceAPIKey == conformance.AgentAssignmentDeviceAPIKeyFixture && snapshot.RegisteredAt == nil {
 			pendingWasDurable = true
 		}
+	}
+	if !activationWasDurable {
+		t.Fatal("assignment ticket and binding were not durably saved before REG")
 	}
 	if !pendingWasDurable {
 		t.Fatal("device credential candidate was not durably saved before completion")
@@ -1086,12 +1110,368 @@ func TestRegisterAgentRuntime_ResumesPersistedCandidateAfterLostCompletionReply(
 	}
 }
 
-func TestRegisterAgentRuntime_ReenrollsOnceOnExpiredAssignmentTicket(t *testing.T) {
+func TestRegisterAgentRuntime_PreREGCancellationLeavesExactPendingActivation(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	f := newRuntimeFixture(t,
+		[]runtimeUDPStep{{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: contract.InitialAssignment.Result.BodyJSON}},
+		nil,
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	f.store.cancelOnSave = 2 // initial identity, then pending activation
+	f.store.cancel = cancel
+	_, _, err := RegisterAgentRuntime(ctx, conformance.AgentAssignmentBootstrapCredentialFixture, f.store, f.options()...)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("pre-REG cancellation = %v, want context.Canceled", err)
+	}
+	if len(f.hubUDP.snapshot()) != 1 || len(f.cellUDP.snapshot()) != 0 {
+		t.Fatalf("pre-REG cancellation Hub/cell requests = %d/%d, want 1/0", len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot()))
+	}
+	pending, loadErr := f.store.LoadAgentState(context.Background())
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if pending.PendingActivation == nil || pending.PendingActivation.AssignmentTicket != "conformance-assignment-ticket-0001" || pending.PendingCompletion != nil {
+		t.Fatalf("pre-REG cancellation lost exact pending activation: %#v", pending)
+	}
+	raw, marshalErr := json.Marshal(pending)
+	if marshalErr != nil {
+		t.Fatal(marshalErr)
+	}
+	fileStore, ok := f.store.inner.(fileAgentStateStore)
+	if !ok {
+		t.Fatal("runtime fixture is not backed by FileAgentState")
+	}
+	fileRaw, readErr := os.ReadFile(fileStore.path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	for _, secret := range []string{conformance.AgentAssignmentBootstrapCredentialFixture, canonicalNativeDeviceCredential, "12345678"} {
+		if bytes.Contains(raw, []byte(secret)) || bytes.Contains(fileRaw, []byte(secret)) {
+			t.Fatalf("pending activation persisted forbidden plaintext secret %q: decoded=%s file=%s", secret, raw, fileRaw)
+		}
+	}
+}
+
+func TestRegisterAgentRuntime_LostRAKRestartExactReplayAfterTicketExpiry(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	f := newRuntimeFixture(t,
+		[]runtimeUDPStep{{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: contract.InitialAssignment.Result.BodyJSON}},
+		[]runtimeUDPStep{
+			{requestType: relayknock.TypeRegister, noReply: true},
+			{requestType: relayknock.TypeRegister, replyType: relayknock.TypeRegisterAck, replyBody: contract.AssignedCellRegistration.Result.BodyJSON},
+			{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: contract.RegistrationCompletion.Result.BodyJSON},
+		},
+	)
+	_, _, err := RegisterAgentRuntime(context.Background(), conformance.AgentAssignmentBootstrapCredentialFixture, f.store, f.options()...)
+	var recovery *RegistrationRecoveryRequiredError
+	if !errors.As(err, &recovery) || !errors.Is(err, ErrRegistrationRecoveryRequired) || !errors.Is(err, nativeudp.ErrTransport) || recovery.Attempts != 1 {
+		t.Fatalf("lost RAK = %T: %v, want one-attempt registration recovery", err, err)
+	}
+	pending, loadErr := f.store.LoadAgentState(context.Background())
+	if loadErr != nil || pending.PendingActivation == nil {
+		t.Fatalf("lost RAK pending state = %#v, %v", pending, loadErr)
+	}
+	afterTicketExpiry := assignmentFixtureNow.Add(30 * time.Minute)
+	_, binding, err := RegisterAgentRuntime(context.Background(), conformance.AgentAssignmentBootstrapCredentialFixture, f.store,
+		f.options(withAgentRuntimeClock(func() time.Time { return afterTicketExpiry }))...)
+	if err != nil {
+		t.Fatalf("expired exact activation replay: %v", err)
+	}
+	binding.Destroy()
+	requests := f.cellUDP.snapshot()
+	if len(requests) != 3 || requests[0].typeID != relayknock.TypeRegister || requests[1].typeID != relayknock.TypeRegister ||
+		!bytes.Equal(requests[0].body, requests[1].body) || string(requests[1].body) != contract.AssignedCellRegistration.Request.BodyJSON {
+		t.Fatalf("lost RAK restart did not re-drive exact REG: %v", requests)
+	}
+	if len(f.hubUDP.snapshot()) != 1 {
+		t.Fatalf("lost RAK replay contacted Hub %d times, want only original assignment", len(f.hubUDP.snapshot()))
+	}
+}
+
+func TestRegisterAgentRuntime_AccountLostRAKReusesOriginalCodeWithoutSecondOTP(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	ticket := "conformance-account-assignment-ticket-0001"
+	f := newRuntimeFixture(t,
+		[]runtimeUDPStep{{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: accountAssignmentResult(contract, ticket)}},
+		[]runtimeUDPStep{
+			{requestType: relayknock.TypeOTP, noReply: true},
+			{requestType: relayknock.TypeRegister, noReply: true},
+			{requestType: relayknock.TypeRegister, replyType: relayknock.TypeRegisterAck, replyBody: contract.AssignedCellRegistration.Result.BodyJSON},
+			{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: contract.RegistrationCompletion.Result.BodyJSON},
+		},
+	)
+	var challenges []AgentOTPChallenge
+	provider := func(_ context.Context, challenge AgentOTPChallenge) (string, error) {
+		challenges = append(challenges, challenge)
+		return "12345678", nil
+	}
+	opts := f.options(
+		WithAgentRuntimeAllowedRegistrationKeyKinds(RegistrationKeyKindAccount),
+		WithAgentRuntimeOTPProvider(provider),
+	)
+	_, _, err := RegisterAgentRuntime(context.Background(), conformance.AgentAssignmentAccountCredentialFixture, f.store, opts...)
+	if !errors.Is(err, ErrRegistrationRecoveryRequired) {
+		t.Fatalf("account lost RAK = %v, want ErrRegistrationRecoveryRequired", err)
+	}
+	_, binding, err := RegisterAgentRuntime(context.Background(), conformance.AgentAssignmentAccountCredentialFixture, f.store, opts...)
+	if err != nil {
+		t.Fatalf("account lost RAK replay: %v", err)
+	}
+	binding.Destroy()
+	requests := f.cellUDP.snapshot()
+	if len(requests) != 4 || requests[0].typeID != relayknock.TypeOTP || requests[1].typeID != relayknock.TypeRegister || requests[2].typeID != relayknock.TypeRegister ||
+		!bytes.Equal(requests[1].body, requests[2].body) {
+		t.Fatalf("account recovery sent another OTP or changed exact REG: %v", requests)
+	}
+	if len(challenges) != 2 || challenges[0].PendingActivationRecovery || !challenges[1].PendingActivationRecovery {
+		t.Fatalf("account OTP challenge recovery markers = %#v, want false then true", challenges)
+	}
+	if len(f.hubUDP.snapshot()) != 1 {
+		t.Fatal("account ambiguous replay consulted Hub")
+	}
+}
+
+func TestRegisterAgentRuntime_ConsumedCredentialCannotReplaceExpiredUncommittedTicket(t *testing.T) {
 	contract := loadAssignmentFixture(t)
 	f := newRuntimeFixture(t,
 		[]runtimeUDPStep{
 			{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: contract.InitialAssignment.Result.BodyJSON},
+			{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: `{"errCode":"52108","errMsg":"consumed"}`},
+		},
+		[]runtimeUDPStep{{requestType: relayknock.TypeRegister, replyType: relayknock.TypeRegisterAck, replyBody: `{"errCode":"52111","errMsg":"expired","aspId":"agent"}`}},
+	)
+	_, _, err := RegisterAgentRuntime(context.Background(), conformance.AgentAssignmentBootstrapCredentialFixture, f.store, f.options()...)
+	if !errors.Is(err, ErrAssignmentBootstrapConsumed) {
+		t.Fatalf("consumed credential replacement = %v, want ErrAssignmentBootstrapConsumed", err)
+	}
+	pending, loadErr := f.store.LoadAgentState(context.Background())
+	if loadErr != nil || pending.PendingActivation == nil || pending.PendingActivation.AssignmentTicket != "conformance-assignment-ticket-0001" {
+		t.Fatalf("consumed replacement erased old pending proof: %#v, %v", pending, loadErr)
+	}
+	if len(f.hubUDP.snapshot()) != 2 || len(f.cellUDP.snapshot()) != 1 {
+		t.Fatalf("consumed replacement Hub/cell counts = %d/%d, want 2/1", len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot()))
+	}
+}
+
+func TestRegisterAgentRuntime_PendingActivationCorruptionAndChangedCredentialFailBeforeIO(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	tests := map[string]func(*AgentState){
+		"peer": func(state *AgentState) {
+			state.PendingActivation.AgentPublicKeyB64 = base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x42}, x25519key.Size))
+		},
+		"cell":       func(state *AgentState) { state.PendingActivation.Assignment.CellID = "cell1" },
+		"generation": func(state *AgentState) { state.PendingActivation.Assignment.AssignmentGeneration++ },
+		"server identity": func(state *AgentState) {
+			state.PendingActivation.Assignment.Endpoint.ServerPublicKeyB64 = base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x24}, x25519key.Size))
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			f := newRuntimeFixture(t,
+				[]runtimeUDPStep{{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: contract.InitialAssignment.Result.BodyJSON}},
+				[]runtimeUDPStep{{requestType: relayknock.TypeRegister, noReply: true}},
+			)
+			_, _, firstErr := RegisterAgentRuntime(context.Background(), conformance.AgentAssignmentBootstrapCredentialFixture, f.store, f.options()...)
+			if !errors.Is(firstErr, ErrRegistrationRecoveryRequired) {
+				t.Fatalf("seed pending activation: %v", firstErr)
+			}
+			state, loadErr := f.store.LoadAgentState(context.Background())
+			if loadErr != nil {
+				t.Fatal(loadErr)
+			}
+			mutate(state)
+			if saveErr := f.store.SaveAgentState(context.Background(), state); saveErr != nil {
+				t.Fatal(saveErr)
+			}
+			hubBefore, cellBefore := len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot())
+			_, _, err := RegisterAgentRuntime(context.Background(), conformance.AgentAssignmentBootstrapCredentialFixture, f.store, f.options()...)
+			if !errors.Is(err, ErrInvalidAgentState) || !errors.Is(err, ErrInvalidRegisterConfig) {
+				t.Fatalf("changed %s pending state = %v, want invalid durable state", name, err)
+			}
+			if len(f.hubUDP.snapshot()) != hubBefore || len(f.cellUDP.snapshot()) != cellBefore {
+				t.Fatalf("changed %s pending state performed I/O", name)
+			}
+		})
+	}
+
+	t.Run("changed opaque ticket is denied only by pinned cell", func(t *testing.T) {
+		f := newRuntimeFixture(t,
+			[]runtimeUDPStep{{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: contract.InitialAssignment.Result.BodyJSON}},
+			[]runtimeUDPStep{
+				{requestType: relayknock.TypeRegister, noReply: true},
+				{requestType: relayknock.TypeRegister, replyType: relayknock.TypeRegisterAck, replyBody: `{"errCode":"52110","errMsg":"invalid ticket","aspId":"agent"}`},
+			},
+		)
+		_, _, firstErr := RegisterAgentRuntime(context.Background(), conformance.AgentAssignmentBootstrapCredentialFixture, f.store, f.options()...)
+		if !errors.Is(firstErr, ErrRegistrationRecoveryRequired) {
+			t.Fatalf("seed pending activation: %v", firstErr)
+		}
+		state, loadErr := f.store.LoadAgentState(context.Background())
+		if loadErr != nil {
+			t.Fatal(loadErr)
+		}
+		state.PendingActivation.AssignmentTicket += "-changed"
+		if saveErr := f.store.SaveAgentState(context.Background(), state); saveErr != nil {
+			t.Fatal(saveErr)
+		}
+		hubBefore := len(f.hubUDP.snapshot())
+		_, _, err := RegisterAgentRuntime(context.Background(), conformance.AgentAssignmentBootstrapCredentialFixture, f.store, f.options()...)
+		if !errors.Is(err, ErrAssignmentTicketInvalid) {
+			t.Fatalf("changed ticket = %v, want authenticated ErrAssignmentTicketInvalid", err)
+		}
+		requests := f.cellUDP.snapshot()
+		if len(requests) != 2 || !bytes.Contains(requests[1].body, []byte("conformance-assignment-ticket-0001-changed")) {
+			t.Fatalf("changed ticket did not go only to the pinned cell: %v", requests)
+		}
+		if len(f.hubUDP.snapshot()) != hubBefore {
+			t.Fatal("changed ticket denial fell back to Hub")
+		}
+	})
+
+	f := newRuntimeFixture(t,
+		[]runtimeUDPStep{{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: contract.InitialAssignment.Result.BodyJSON}},
+		[]runtimeUDPStep{{requestType: relayknock.TypeRegister, noReply: true}},
+	)
+	_, _, firstErr := RegisterAgentRuntime(context.Background(), conformance.AgentAssignmentBootstrapCredentialFixture, f.store, f.options()...)
+	if !errors.Is(firstErr, ErrRegistrationRecoveryRequired) {
+		t.Fatal(firstErr)
+	}
+	hubBefore, cellBefore := len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot())
+	wrongCredential := "different-high-entropy-enrollment-credential"
+	_, _, err := RegisterAgentRuntime(context.Background(), wrongCredential, f.store, f.options()...)
+	if !errors.Is(err, ErrInvalidRegisterConfig) || strings.Contains(err.Error(), wrongCredential) || strings.Contains(err.Error(), conformance.AgentAssignmentBootstrapCredentialFixture) {
+		t.Fatalf("changed pending credential classification/redaction = %v", err)
+	}
+	if len(f.hubUDP.snapshot()) != hubBefore || len(f.cellUDP.snapshot()) != cellBefore {
+		t.Fatal("changed pending credential performed I/O")
+	}
+	_, _, err = RegisterAgentRuntime(context.Background(), conformance.AgentAssignmentBootstrapCredentialFixture, f.store,
+		f.options(WithAgentRuntimeMetadata("changed-host", "changed-version"))...)
+	if !errors.Is(err, ErrInvalidRegisterConfig) {
+		t.Fatalf("changed pending metadata = %v, want ErrInvalidRegisterConfig", err)
+	}
+	if len(f.hubUDP.snapshot()) != hubBefore || len(f.cellUDP.snapshot()) != cellBefore {
+		t.Fatal("changed pending metadata performed I/O")
+	}
+
+	for _, test := range []struct {
+		name       string
+		seedOpts   func(*runtimeFixture) []AgentRuntimeRegistrationOption
+		resumeOpts func(*runtimeFixture) []AgentRuntimeRegistrationOption
+	}{
+		{
+			name:       "persisted empty caller present",
+			seedOpts:   func(f *runtimeFixture) []AgentRuntimeRegistrationOption { return f.optionsWithoutMetadata() },
+			resumeOpts: func(f *runtimeFixture) []AgentRuntimeRegistrationOption { return f.options() },
+		},
+		{
+			name:       "persisted present caller empty",
+			seedOpts:   func(f *runtimeFixture) []AgentRuntimeRegistrationOption { return f.options() },
+			resumeOpts: func(f *runtimeFixture) []AgentRuntimeRegistrationOption { return f.optionsWithoutMetadata() },
+		},
+	} {
+		t.Run("metadata "+test.name, func(t *testing.T) {
+			f := newRuntimeFixture(t,
+				[]runtimeUDPStep{{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: contract.InitialAssignment.Result.BodyJSON}},
+				[]runtimeUDPStep{{requestType: relayknock.TypeRegister, noReply: true}},
+			)
+			_, _, firstErr := RegisterAgentRuntime(context.Background(), conformance.AgentAssignmentBootstrapCredentialFixture, f.store, test.seedOpts(f)...)
+			if !errors.Is(firstErr, ErrRegistrationRecoveryRequired) {
+				t.Fatalf("seed pending activation: %v", firstErr)
+			}
+			hubBefore, cellBefore := len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot())
+			_, _, err := RegisterAgentRuntime(context.Background(), conformance.AgentAssignmentBootstrapCredentialFixture, f.store, test.resumeOpts(f)...)
+			if !errors.Is(err, ErrInvalidRegisterConfig) {
+				t.Fatalf("metadata mismatch = %v, want ErrInvalidRegisterConfig", err)
+			}
+			if len(f.hubUDP.snapshot()) != hubBefore || len(f.cellUDP.snapshot()) != cellBefore {
+				t.Fatal("metadata mismatch performed I/O")
+			}
+		})
+	}
+}
+
+func TestRegisterAgentRuntime_PendingActivationSaveFailureSendsNoREG(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	f := newRuntimeFixture(t,
+		[]runtimeUDPStep{{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: contract.InitialAssignment.Result.BodyJSON}},
+		nil,
+	)
+	f.store.fail = 2 // initial identity save succeeds; pending activation save fails
+	_, _, err := RegisterAgentRuntime(context.Background(), conformance.AgentAssignmentBootstrapCredentialFixture, f.store, f.options()...)
+	if !errors.Is(err, ErrAgentBindingPersistence) {
+		t.Fatalf("pending activation save = %v, want ErrAgentBindingPersistence", err)
+	}
+	if len(f.hubUDP.snapshot()) != 1 || len(f.cellUDP.snapshot()) != 0 {
+		t.Fatalf("pending save failure Hub/cell requests = %d/%d, want 1/0", len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot()))
+	}
+	state, loadErr := f.store.LoadAgentState(context.Background())
+	if loadErr != nil || state.PendingActivation != nil || state.Assignment != nil {
+		t.Fatalf("failed pending save changed durable state: %#v, %v", state, loadErr)
+	}
+}
+
+func TestRegisterAgentRuntime_AmbiguousREGUsesBoundedExactRetries(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	f := newRuntimeFixture(t,
+		[]runtimeUDPStep{{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: contract.InitialAssignment.Result.BodyJSON}},
+		[]runtimeUDPStep{{requestType: relayknock.TypeRegister, noReply: true}, {requestType: relayknock.TypeRegister, noReply: true}},
+	)
+	_, _, err := RegisterAgentRuntime(context.Background(), conformance.AgentAssignmentBootstrapCredentialFixture, f.store,
+		f.options(
+			WithAgentRuntimeAssignmentRetryBudget(2, time.Second),
+			withTestAgentRuntimeAssignmentSleep(func(context.Context, time.Duration) error { return nil }),
+		)...)
+	var recovery *RegistrationRecoveryRequiredError
+	if !errors.As(err, &recovery) || recovery.Attempts != 2 || !errors.Is(err, nativeudp.ErrTransport) {
+		t.Fatalf("bounded REG recovery = %T: %v", err, err)
+	}
+	requests := f.cellUDP.snapshot()
+	if len(requests) != 2 || !bytes.Equal(requests[0].body, requests[1].body) {
+		t.Fatalf("bounded REG retries changed body or count: %v", requests)
+	}
+	if len(f.hubUDP.snapshot()) != 1 {
+		t.Fatal("ambiguous REG retry fell back to Hub")
+	}
+}
+
+func TestRegisterAgentRuntime_AmbiguousREGCancellationDuringBackoffPreservesPending(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	f := newRuntimeFixture(t,
+		[]runtimeUDPStep{{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: contract.InitialAssignment.Result.BodyJSON}},
+		[]runtimeUDPStep{{requestType: relayknock.TypeRegister, noReply: true}},
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_, _, err := RegisterAgentRuntime(ctx, conformance.AgentAssignmentBootstrapCredentialFixture, f.store,
+		f.options(
+			WithAgentRuntimeAssignmentRetryBudget(3, time.Second),
+			withTestAgentRuntimeAssignmentSleep(func(ctx context.Context, _ time.Duration) error {
+				cancel()
+				<-ctx.Done()
+				return ctx.Err()
+			}),
+		)...)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("REG backoff cancellation = %v, want context.Canceled", err)
+	}
+	pending, loadErr := f.store.LoadAgentState(context.Background())
+	if loadErr != nil || pending.PendingActivation == nil || pending.PendingActivation.AssignmentTicket != "conformance-assignment-ticket-0001" {
+		t.Fatalf("REG cancellation lost exact pending activation: %#v, %v", pending, loadErr)
+	}
+	if len(f.hubUDP.snapshot()) != 1 || len(f.cellUDP.snapshot()) != 1 {
+		t.Fatalf("REG cancellation Hub/cell requests = %d/%d, want 1/1", len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot()))
+	}
+}
+
+func TestRegisterAgentRuntime_ReenrollsOnceOnExpiredAssignmentTicket(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	secondAssignment := strings.Replace(contract.InitialAssignment.Result.BodyJSON,
+		"conformance-assignment-ticket-0001", "conformance-assignment-ticket-0002", 1)
+	f := newRuntimeFixture(t,
+		[]runtimeUDPStep{
 			{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: contract.InitialAssignment.Result.BodyJSON},
+			{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: secondAssignment},
 		},
 		[]runtimeUDPStep{
 			{requestType: relayknock.TypeRegister, replyType: relayknock.TypeRegisterAck, replyBody: `{"errCode":"52111","errMsg":"expired","aspId":"agent"}`},
@@ -1106,6 +1486,79 @@ func TestRegisterAgentRuntime_ReenrollsOnceOnExpiredAssignmentTicket(t *testing.
 	binding.Destroy()
 	if len(f.hubUDP.snapshot()) != 2 || len(f.cellUDP.snapshot()) != 3 {
 		t.Fatalf("Hub/cell request counts = %d/%d, want 2/3", len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot()))
+	}
+	requests := f.cellUDP.snapshot()
+	if !bytes.Contains(requests[0].body, []byte("conformance-assignment-ticket-0001")) ||
+		!bytes.Contains(requests[1].body, []byte("conformance-assignment-ticket-0002")) ||
+		bytes.Contains(requests[1].body, []byte("conformance-assignment-ticket-0001")) {
+		t.Fatalf("expired first use did not replace the exact pending ticket: %v", requests)
+	}
+}
+
+func TestRegisterAgentRuntime_ReplacementPendingSaveFailurePreservesOldTicket(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	secondAssignment := strings.Replace(contract.InitialAssignment.Result.BodyJSON,
+		"conformance-assignment-ticket-0001", "conformance-assignment-ticket-0002", 1)
+	f := newRuntimeFixture(t,
+		[]runtimeUDPStep{
+			{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: contract.InitialAssignment.Result.BodyJSON},
+			{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: secondAssignment},
+		},
+		[]runtimeUDPStep{{requestType: relayknock.TypeRegister, replyType: relayknock.TypeRegisterAck, replyBody: `{"errCode":"52111","errMsg":"expired","aspId":"agent"}`}},
+	)
+	f.store.fail = 3 // identity, first pending, then replacement pending
+	_, _, err := RegisterAgentRuntime(context.Background(), conformance.AgentAssignmentBootstrapCredentialFixture, f.store, f.options()...)
+	if !errors.Is(err, ErrAgentBindingPersistence) {
+		t.Fatalf("replacement pending save = %v, want ErrAgentBindingPersistence", err)
+	}
+	pending, loadErr := f.store.LoadAgentState(context.Background())
+	if loadErr != nil || pending.PendingActivation == nil || pending.PendingActivation.AssignmentTicket != "conformance-assignment-ticket-0001" {
+		t.Fatalf("replacement save failure erased old pending record: %#v, %v", pending, loadErr)
+	}
+	if len(f.hubUDP.snapshot()) != 2 || len(f.cellUDP.snapshot()) != 1 {
+		t.Fatalf("replacement save failure Hub/cell counts = %d/%d, want 2/1", len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot()))
+	}
+}
+
+func TestRegisterAgentRuntime_ReplacementPendingPostCommitErrorReplaysNewTicket(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	secondAssignment := strings.Replace(contract.InitialAssignment.Result.BodyJSON,
+		"conformance-assignment-ticket-0001", "conformance-assignment-ticket-0002", 1)
+	f := newRuntimeFixture(t,
+		[]runtimeUDPStep{
+			{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: contract.InitialAssignment.Result.BodyJSON},
+			{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: secondAssignment},
+		},
+		[]runtimeUDPStep{
+			{requestType: relayknock.TypeRegister, replyType: relayknock.TypeRegisterAck, replyBody: `{"errCode":"52111","errMsg":"expired","aspId":"agent"}`},
+			{requestType: relayknock.TypeRegister, replyType: relayknock.TypeRegisterAck, replyBody: contract.AssignedCellRegistration.Result.BodyJSON},
+			{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: contract.RegistrationCompletion.Result.BodyJSON},
+		},
+	)
+	f.store.failAfterCommit = 3 // initial identity, first pending, replacement pending
+	_, _, err := RegisterAgentRuntime(context.Background(), conformance.AgentAssignmentBootstrapCredentialFixture, f.store, f.options()...)
+	if !errors.Is(err, ErrAgentBindingPersistence) {
+		t.Fatalf("replacement post-commit save = %v, want ErrAgentBindingPersistence", err)
+	}
+	pending, loadErr := f.store.LoadAgentState(context.Background())
+	if loadErr != nil || pending.PendingActivation == nil || pending.PendingActivation.AssignmentTicket != "conformance-assignment-ticket-0002" {
+		t.Fatalf("replacement post-commit reload lost new ticket: %#v, %v", pending, loadErr)
+	}
+	if len(f.cellUDP.snapshot()) != 1 {
+		t.Fatalf("replacement post-commit error sent REG before reload: %v", f.cellUDP.snapshot())
+	}
+
+	_, binding, err := RegisterAgentRuntime(context.Background(), conformance.AgentAssignmentBootstrapCredentialFixture, f.store, f.options()...)
+	if err != nil || binding == nil {
+		t.Fatalf("resume committed replacement pending activation = %v, %v", binding, err)
+	}
+	binding.Destroy()
+	if len(f.hubUDP.snapshot()) != 2 {
+		t.Fatalf("replacement resume fetched a third Hub ticket: %v", f.hubUDP.snapshot())
+	}
+	requests := f.cellUDP.snapshot()
+	if len(requests) != 3 || !bytes.Contains(requests[1].body, []byte("conformance-assignment-ticket-0002")) || bytes.Contains(requests[1].body, []byte("conformance-assignment-ticket-0001")) {
+		t.Fatalf("replacement resume did not exact-replay new ticket: %v", requests)
 	}
 }
 
@@ -1312,7 +1765,7 @@ func TestNativeAccountOTPMinimumTicketLifetimeBeforeDispatch(t *testing.T) {
 	}
 }
 
-func TestRegisterAgentRuntime_AccountTicketExpiryRequiresExplicitNewAttempt(t *testing.T) {
+func TestRegisterAgentRuntime_AccountOTPExpiryPermitsOneFreshTicketAndOTP(t *testing.T) {
 	contract := loadAssignmentFixture(t)
 	firstTicket := "conformance-account-assignment-ticket-0001"
 	secondTicket := "conformance-account-assignment-ticket-0002"
@@ -1323,7 +1776,7 @@ func TestRegisterAgentRuntime_AccountTicketExpiryRequiresExplicitNewAttempt(t *t
 		},
 		[]runtimeUDPStep{
 			{requestType: relayknock.TypeOTP, noReply: true},
-			{requestType: relayknock.TypeRegister, replyType: relayknock.TypeRegisterAck, replyBody: `{"errCode":"52111","errMsg":"expired","aspId":"agent"}`},
+			{requestType: relayknock.TypeRegister, replyType: relayknock.TypeRegisterAck, replyBody: `{"errCode":"52101","errMsg":"expired","aspId":"agent"}`},
 			{requestType: relayknock.TypeOTP, noReply: true},
 			{requestType: relayknock.TypeRegister, replyType: relayknock.TypeRegisterAck, replyBody: contract.AssignedCellRegistration.Result.BodyJSON},
 			{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: contract.RegistrationCompletion.Result.BodyJSON},
@@ -1331,19 +1784,10 @@ func TestRegisterAgentRuntime_AccountTicketExpiryRequiresExplicitNewAttempt(t *t
 	)
 	var callbacks atomic.Int32
 	provider := func(context.Context, AgentOTPChallenge) (string, error) {
-		callbacks.Add(1)
-		return "12345678", nil
-	}
-	_, _, err := RegisterAgentRuntime(context.Background(), conformance.AgentAssignmentAccountCredentialFixture, f.store,
-		f.options(
-			WithAgentRuntimeAllowedRegistrationKeyKinds(RegistrationKeyKindAccount),
-			WithAgentRuntimeOTPProvider(provider),
-		)...)
-	if !errors.Is(err, ErrAssignmentTicketExpired) {
-		t.Fatalf("account ticket expiry = %v, want explicit-attempt boundary", err)
-	}
-	if callbacks.Load() != 1 || len(f.hubUDP.snapshot()) != 1 || len(f.cellUDP.snapshot()) != 2 {
-		t.Fatalf("first attempt callback/Hub/cell counts = %d/%d/%d, want 1/1/2", callbacks.Load(), len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot()))
+		if callbacks.Add(1) == 1 {
+			return "12345678", nil
+		}
+		return "87654321", nil
 	}
 	_, binding, err := RegisterAgentRuntime(context.Background(), conformance.AgentAssignmentAccountCredentialFixture, f.store,
 		f.options(
@@ -1351,7 +1795,7 @@ func TestRegisterAgentRuntime_AccountTicketExpiryRequiresExplicitNewAttempt(t *t
 			WithAgentRuntimeOTPProvider(provider),
 		)...)
 	if err != nil {
-		t.Fatalf("explicit second account attempt: %v", err)
+		t.Fatalf("fresh account attempt after authenticated OTP expiry: %v", err)
 	}
 	binding.Destroy()
 	requests := f.cellUDP.snapshot()
@@ -1360,8 +1804,9 @@ func TestRegisterAgentRuntime_AccountTicketExpiryRequiresExplicitNewAttempt(t *t
 	}
 	if requests[0].typeID != relayknock.TypeOTP || requests[2].typeID != relayknock.TypeOTP ||
 		!bytes.Contains(requests[0].body, []byte(firstTicket)) || !bytes.Contains(requests[2].body, []byte(secondTicket)) ||
-		bytes.Contains(requests[2].body, []byte(firstTicket)) {
-		t.Fatalf("explicit account attempts did not dispatch one OTP per fresh ticket: %v", requests)
+		bytes.Contains(requests[2].body, []byte(firstTicket)) || !bytes.Contains(requests[1].body, []byte("12345678")) ||
+		!bytes.Contains(requests[3].body, []byte("87654321")) || bytes.Equal(requests[1].body, requests[3].body) {
+		t.Fatalf("authenticated OTP expiry did not replace the pending ticket before one fresh OTP/REG: %v", requests)
 	}
 }
 
@@ -1414,8 +1859,8 @@ func TestRegisterAgentRuntime_PostRAKPreCommitSaveFailureRequiresReloadBeforeRec
 		[]runtimeUDPStep{{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: contract.InitialAssignment.Result.BodyJSON}},
 		[]runtimeUDPStep{{requestType: relayknock.TypeRegister, replyType: relayknock.TypeRegisterAck, replyBody: contract.AssignedCellRegistration.Result.BodyJSON}},
 	)
-	// Identity and assignment saves succeed; the first save after authenticated
-	// RAK is the candidate durability boundary.
+	// The initial native-identity and pending-activation saves succeed; the first
+	// save after authenticated RAK is the candidate durability boundary.
 	f.store.fail = 3
 	_, _, err := RegisterAgentRuntime(context.Background(), conformance.AgentAssignmentBootstrapCredentialFixture, f.store, f.options()...)
 	var persistence *AgentCompletionCandidatePersistenceError
@@ -1425,14 +1870,14 @@ func TestRegisterAgentRuntime_PostRAKPreCommitSaveFailureRequiresReloadBeforeRec
 	if persistence.AgentID != "agent-conform" || strings.Contains(err.Error(), conformance.AgentAssignmentBootstrapCredentialFixture) || strings.Contains(err.Error(), canonicalNativeDeviceCredential) {
 		t.Fatalf("candidate persistence error identity/redaction = %#v / %v", persistence, err)
 	}
-	if !strings.Contains(err.Error(), "reload state first") || !strings.Contains(err.Error(), "never replay") || strings.Contains(err.Error(), "not persisted") {
+	if !strings.Contains(err.Error(), "reload state first") || !strings.Contains(err.Error(), "same enrollment credential") || !strings.Contains(err.Error(), "never request a replacement ticket") || strings.Contains(err.Error(), "not persisted") {
 		t.Fatalf("candidate persistence recovery guidance is categorical or incomplete: %v", err)
 	}
 	persisted, loadErr := f.store.LoadAgentState(context.Background())
 	if loadErr != nil {
 		t.Fatal(loadErr)
 	}
-	if persisted.PendingCompletion != nil || persisted.RegisteredAt != nil || persisted.Assignment == nil {
+	if persisted.PendingActivation == nil || persisted.PendingCompletion != nil || persisted.RegisteredAt != nil || persisted.Assignment == nil {
 		t.Fatalf("post-RAK candidate save failure persisted unexpected resumable state: %#v", persisted)
 	}
 	if len(f.hubUDP.snapshot()) != 1 || len(f.cellUDP.snapshot()) != 1 {
@@ -1449,8 +1894,9 @@ func TestRegisterAgentRuntime_PostRAKCommitThenErrorReloadsAndResumesExactCandid
 			{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: contract.RegistrationCompletion.Result.BodyJSON},
 		},
 	)
-	// Identity and assignment saves succeed. The candidate save commits to the
-	// real file store, then the wrapper reports an acknowledgement failure.
+	// The initial native-identity and pending-activation saves succeed. The
+	// candidate save commits to the real file store, then the wrapper reports an
+	// acknowledgement failure.
 	f.store.failAfterCommit = 3
 	_, _, err := RegisterAgentRuntime(context.Background(), conformance.AgentAssignmentBootstrapCredentialFixture, f.store, f.options()...)
 	var persistence *AgentCompletionCandidatePersistenceError

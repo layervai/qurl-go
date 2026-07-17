@@ -286,7 +286,7 @@ func TestHubAssignmentRetriesResolveFailure(t *testing.T) {
 	}
 }
 
-func TestRunAssignmentExchangeWipesDecryptedReply(t *testing.T) {
+func TestRunNativeExchangeWipesDecryptedReply(t *testing.T) {
 	for _, parseFails := range []bool{false, true} {
 		t.Run(fmt.Sprintf("parse_failure_%t", parseFails), func(t *testing.T) {
 			hub, transport, _ := assignmentTestSetup(t, `{"assignment_ticket":"one-shot-secret"}`)
@@ -301,8 +301,9 @@ func TestRunAssignmentExchangeWipesDecryptedReply(t *testing.T) {
 			}
 			var decrypted []byte
 			parseErr := errors.New("parse failed")
-			_, err = runAssignmentExchange(
+			_, err = runNativeExchange(
 				context.Background(), cfg, endpoint, []byte(`{}`), transport,
+				nativeudp.List,
 				assignmentRetryInfo, newAssignmentRecovery,
 				func(reply []byte, _ time.Time) (*struct{}, error) {
 					decrypted = reply
@@ -313,7 +314,7 @@ func TestRunAssignmentExchangeWipesDecryptedReply(t *testing.T) {
 				},
 			)
 			if (err != nil) != parseFails || parseFails && !errors.Is(err, parseErr) {
-				t.Fatalf("runAssignmentExchange error = %v, parseFails = %t", err, parseFails)
+				t.Fatalf("runNativeExchange error = %v, parseFails = %t", err, parseFails)
 			}
 			if len(decrypted) == 0 || !bytes.Equal(decrypted, make([]byte, len(decrypted))) {
 				t.Fatalf("decrypted reply was not wiped: %q", decrypted)

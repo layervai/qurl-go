@@ -126,11 +126,13 @@ if err != nil {
 defer binding.Destroy()
 ```
 
-The Hub assigns the cell. The SDK persists the exact authority-provided UDP
-endpoint and server identity, registers and completes directly with that cell,
-and returns a steady-state resource `Client` plus the native runtime binding.
-The SDK never calculates a cell address and never involves the browser relay in
-native discovery.
+The Hub assigns the cell. Before REG, the SDK durably persists the exact ticket,
+registration identity/metadata, authority-provided UDP endpoint and server
+identity, and a one-way identity of the caller's enrollment credential. A lost
+RAK therefore restarts by re-driving the same REG to the same pinned cell—even
+after ticket expiry—before any new Hub assignment. Plaintext enrollment
+credentials and OTP codes are never persisted. The SDK never calculates a cell
+address or involves the browser relay in native discovery.
 
 The default policy accepts unattended `connector_bootstrap`, `bootstrap`, and
 durable `agent` credentials. Interactive account enrollment must explicitly add
@@ -217,7 +219,8 @@ Match errors by type or sentinel, not message text:
 - Treat LayerV credentials, agent state, and qURL links like credentials. Do not
   log them.
 - Pin Hub and assigned-cell identities; do not derive or infer their addresses.
-- Keep one exact pending completion candidate across ambiguous delivery.
+- Keep the exact pending activation across ambiguous RAK delivery and the exact
+  pending completion candidate across ambiguous completion delivery.
 - Wipe the private-key bytes taken from `AgentRuntimeBinding` after the knock.
 - Keep issuer credentials in protected state, KMS, a secret manager, or another
   protected store.
@@ -229,7 +232,8 @@ Match errors by type or sentinel, not message text:
 
 - Added the qURL Connector native UDP lifecycle: Hub assignment, assigned-cell
   OTP/REG/completion, direct knock, strict golden-vector conformance, crash-safe
-  completion, and explicit assignment refresh/reassignment boundaries.
+  activation/completion, and explicit assignment refresh/reassignment
+  boundaries.
 - Removed the superseded public HTTP agent assignment/registration lifecycle.
   Steady-state resource CRUD remains HTTPS, and browser relay behavior is
   unchanged.

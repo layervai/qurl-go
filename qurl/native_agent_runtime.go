@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ecdh"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
@@ -67,6 +68,10 @@ var (
 	ErrCompletionRequestRejected = errors.New("qurl: registration completion request rejected")
 	// ErrCompletionRecoveryRequired marks exhaustion that must resume from persisted pending state.
 	ErrCompletionRecoveryRequired = errors.New("qurl: registration completion recovery required")
+	// ErrRegistrationRecoveryRequired marks bounded REG transport exhaustion. The
+	// exact PendingActivation remains durable and must be resumed with the same
+	// caller-supplied enrollment credential before any new Hub assignment.
+	ErrRegistrationRecoveryRequired = errors.New("qurl: assigned-cell registration recovery required")
 	// ErrAssignmentEndpointContinuity marks unsafe same-generation endpoint revision drift.
 	ErrAssignmentEndpointContinuity = errors.New("qurl: assignment endpoint continuity violation")
 )
@@ -79,6 +84,11 @@ type AgentOTPChallenge struct {
 	CredentialKeyID           string
 	CellID                    string
 	AssignmentTicketExpiresAt time.Time
+	// PendingActivationRecovery is true only when an earlier REG had an
+	// ambiguous/lost RAK and the SDK needs the original code again. No NHP_OTP is
+	// dispatched in this mode; the provider must return the code issued for the
+	// persisted ticket. The field is bounded non-secret context.
+	PendingActivationRecovery bool
 }
 
 // agentRuntimeOption is the private base shared by the closed public option
@@ -474,9 +484,16 @@ func (c *nativeAgentRuntimeConfig) registerLocked(ctx context.Context, enrollmen
 		}
 		return finishNativeRuntimeResult(store, state, c)
 	}
+	if state.PendingActivation != nil {
+		if err := validateExactBearerToken(enrollmentCredential, "enrollment credential", ErrInvalidRegisterConfig); err != nil {
+			return nil, err
+		}
+		return c.activateAndComplete(ctx, enrollmentCredential, store, state, privateKey)
+	}
 	// Enrollment credentials are attempt-scoped Hub inputs. Completed and
-	// pending-completion paths above do not need one; only a transaction that must
-	// obtain a fresh enrollment assignment validates it.
+	// pending-completion paths above do not need one. Pending activation requires
+	// the same credential to corroborate its durable fingerprint; a transaction
+	// with no pending activation needs it to obtain a fresh Hub assignment.
 	if err := validateExactBearerToken(enrollmentCredential, "enrollment credential", ErrInvalidRegisterConfig); err != nil {
 		return nil, err
 	}
@@ -490,64 +507,141 @@ func (c *nativeAgentRuntimeConfig) registerLocked(ctx context.Context, enrollmen
 		}
 	}
 
-	registered := false
-	for attempt := 0; attempt < 2; attempt++ {
-		initial, err := c.fetchInitialAssignmentLifecycle(ctx, *c.hub, state.AgentID, enrollmentCredential, privateKey)
-		if err != nil {
-			return nil, err
-		}
-		// A 52111 recovery obtains a wholly fresh Hub assignment, whose key kind
-		// may differ from the first response; enforce caller policy per response.
-		if err := c.requireAllowedRegistrationKeyKind(initial.Registration.KeyKind); err != nil {
-			return nil, err
-		}
-		state.Assignment = initial.Assignment.clone()
-		if err := store.SaveAgentState(ctx, state); err != nil {
-			return nil, fmt.Errorf("%w: save assigned cell before registration: %w", ErrAgentBindingPersistence, err)
-		}
+	return c.activateAndComplete(ctx, enrollmentCredential, store, state, privateKey)
+}
 
-		credential, err := c.registrationCredential(ctx, state, initial, enrollmentCredential, privateKey)
+// activateAndComplete recovers an existing pending REG before asking the Hub
+// for anything new. Only an authenticated 52111, or account 52101, proves that
+// exact attempt was not committed and permits one replacement assignment. The
+// old pending record remains durable until the replacement is itself saved, so
+// a crash, Hub error, or consumed-credential denial cannot erase the only
+// replay proof.
+func (c *nativeAgentRuntimeConfig) activateAndComplete(ctx context.Context, enrollmentCredential string, store AgentStateStore, state *AgentState, privateKey []byte) (*nativeRuntimeResult, error) {
+	forceFresh := state.PendingActivation == nil
+	for attempt := 0; attempt < 2; attempt++ {
+		var credential string
+		var err error
+		if forceFresh {
+			credential, err = c.persistFreshPendingActivation(ctx, enrollmentCredential, store, state, privateKey)
+		} else {
+			credential, err = c.pendingRegistrationCredential(ctx, state, enrollmentCredential)
+		}
 		if err != nil {
 			return nil, err
 		}
-		err = c.registerAssignedCell(ctx, state, initial, credential, privateKey)
+		err = c.registerPendingActivation(ctx, state, credential, privateKey)
 		if err == nil {
-			registered = true
-			break
+			if err := c.transitionPendingActivation(ctx, store, state); err != nil {
+				return nil, err
+			}
+			if err := c.completePending(ctx, store, state, privateKey); err != nil {
+				return nil, err
+			}
+			return finishNativeRuntimeResult(store, state, c)
 		}
-		// qurl-conformance v0.5 makes one-shot ticket consumption part of the
-		// atomic registration activation. This one re-fetch therefore relies on
-		// 52111 being a pre-activation verdict with no enrollment-credential
-		// mutation — a producer-side ordering requirement release-gated with that
-		// contract. A producer that violates it can only return terminal 52108 on
-		// the second REG; this loop never retries a consumed bootstrap credential
-		// again.
-		if attempt == 0 && errors.Is(err, ErrAssignmentTicketExpired) && initial.Registration.KeyKind != keyKindAccount {
+		if attempt == 0 && (errors.Is(err, ErrAssignmentTicketExpired) || errors.Is(err, ErrOTPExpired)) {
+			// qurl-conformance v0.5 reserves 52111 for marker-absent first use.
+			// A committed activation must exact-replay even after expiry. Account
+			// 52101 likewise proves the OTP did not activate the ticket. Fetch a
+			// replacement only after either authenticated verdict, and retain the
+			// old record until persistFreshPendingActivation commits the replacement.
+			forceFresh = true
 			continue
 		}
 		return nil, err
 	}
-	if !registered {
-		// Defensive backstop if a future loop edit adds a path that neither
-		// registers nor returns its assigned-cell error.
-		return nil, ErrAssignmentTicketExpired
+	return nil, ErrAssignmentTicketExpired
+}
+
+func (c *nativeAgentRuntimeConfig) persistFreshPendingActivation(ctx context.Context, enrollmentCredential string, store AgentStateStore, state *AgentState, privateKey []byte) (string, error) {
+	initial, err := c.fetchInitialAssignmentLifecycle(ctx, *c.hub, state.AgentID, enrollmentCredential, privateKey)
+	if err != nil {
+		return "", err
+	}
+	if err := c.requireAllowedRegistrationKeyKind(initial.Registration.KeyKind); err != nil {
+		return "", err
+	}
+	candidateState := state.clone()
+	candidateState.Assignment = initial.Assignment.clone()
+	credential, err := c.registrationCredential(ctx, candidateState, initial, enrollmentCredential, privateKey)
+	if err != nil {
+		return "", err
+	}
+	pending, err := newPendingAgentActivation(initial, candidateState, c.hostname, c.version, enrollmentCredential)
+	if err != nil {
+		return "", err
+	}
+	candidateState.PendingActivation = pending
+	candidateState.SchemaVersion = agentStateSchemaVersion
+	if err := store.SaveAgentState(ctx, candidateState); err != nil {
+		return "", fmt.Errorf("%w: save pending assigned-cell activation before REG: %w", ErrAgentBindingPersistence, err)
+	}
+	*state = *candidateState
+	return credential, nil
+}
+
+func (c *nativeAgentRuntimeConfig) pendingRegistrationCredential(ctx context.Context, state *AgentState, enrollmentCredential string) (string, error) {
+	if state == nil || state.PendingActivation == nil {
+		return "", fmt.Errorf("%w: pending activation is missing", ErrInvalidAgentState)
+	}
+	pending := state.PendingActivation
+	if err := c.requireAllowedRegistrationKeyKind(pending.Registration.KeyKind); err != nil {
+		return "", err
+	}
+	if c.hostname != pending.Hostname || c.version != pending.AgentVersion {
+		return "", fmt.Errorf("%w: runtime metadata does not match pending activation", ErrInvalidRegisterConfig)
+	}
+	want := enrollmentCredentialFingerprint(enrollmentCredential)
+	if subtle.ConstantTimeCompare([]byte(want), []byte(pending.EnrollmentCredentialFingerprintB64)) != 1 {
+		return "", fmt.Errorf("%w: enrollment credential does not match pending activation", ErrInvalidRegisterConfig)
+	}
+	switch pending.Registration.KeyKind {
+	case assignmentKeyKindConnectorBootstrap, keyKindBootstrap, assignmentKeyKindAgent:
+		return enrollmentCredential, nil
+	case keyKindAccount:
+		if c.otpProvider == nil {
+			return "", fmt.Errorf("%w: pending account activation requires the original code through WithAgentRuntimeOTPProvider", ErrAgentOTPRequired)
+		}
+		code, err := c.otpProvider(ctx, AgentOTPChallenge{
+			AgentID: pending.AgentID, CredentialKeyID: pending.Registration.KeyID,
+			CellID: pending.Assignment.CellID, AssignmentTicketExpiresAt: pending.AssignmentTicketExpiresAt,
+			PendingActivationRecovery: true,
+		})
+		if err != nil {
+			if ctx.Err() != nil {
+				return "", ctx.Err()
+			}
+			return "", fmt.Errorf("qurl: pending activation OTP provider: %w", err)
+		}
+		if err := validateNativeOTPCode(code); err != nil {
+			return "", err
+		}
+		return code, nil
+	default:
+		return "", fmt.Errorf("%w: unsupported pending registration key kind", ErrInvalidAgentState)
+	}
+}
+
+func (c *nativeAgentRuntimeConfig) transitionPendingActivation(ctx context.Context, store AgentStateStore, state *AgentState) error {
+	if state == nil || state.PendingActivation == nil || state.Assignment == nil {
+		return fmt.Errorf("%w: authenticated RAK requires pending activation and assignment", ErrInvalidAgentState)
 	}
 	candidate, err := c.generateDeviceCredential()
 	if err != nil {
-		return nil, err
+		return err
 	}
-	state.PendingCompletion = &PendingAgentCompletion{
+	next := state.clone()
+	next.PendingCompletion = &PendingAgentCompletion{
 		DeviceAPIKey: candidate, CellID: state.Assignment.CellID,
 		AssignmentGeneration: state.Assignment.AssignmentGeneration,
 	}
-	if err := store.SaveAgentState(ctx, state); err != nil {
-		state.PendingCompletion = nil
-		return nil, &AgentCompletionCandidatePersistenceError{AgentID: state.AgentID, Cause: err}
+	next.PendingActivation = nil
+	next.SchemaVersion = agentStateSchemaVersion
+	if err := store.SaveAgentState(ctx, next); err != nil {
+		return &AgentCompletionCandidatePersistenceError{AgentID: state.AgentID, Cause: err}
 	}
-	if err := c.completePending(ctx, store, state, privateKey); err != nil {
-		return nil, err
-	}
-	return finishNativeRuntimeResult(store, state, c)
+	*state = *next
+	return nil
 }
 
 func loadNativeAgentStateIfPresent(ctx context.Context, store AgentStateStore) (*AgentState, bool, error) {
@@ -697,6 +791,86 @@ func validateIncompleteNativeState(state *AgentState) error {
 	return nil
 }
 
+func newPendingAgentActivation(initial *InitialAgentAssignment, state *AgentState, hostname, version, enrollmentCredential string) (*PendingAgentActivation, error) {
+	if initial == nil || state == nil || state.Assignment == nil {
+		return nil, fmt.Errorf("%w: pending activation requires initial assignment and state", ErrInvalidRegisterConfig)
+	}
+	pending := &PendingAgentActivation{
+		AssignmentTicket: initial.AssignmentTicket, AssignmentTicketExpiresAt: initial.AssignmentTicketExpiresAt,
+		AgentID: state.AgentID, AgentPublicKeyB64: state.PublicKeyB64,
+		Assignment: *initial.Assignment.clone(), Registration: initial.Registration,
+		Hostname: hostname, AgentVersion: version,
+		EnrollmentCredentialFingerprintB64: enrollmentCredentialFingerprint(enrollmentCredential),
+	}
+	if err := validatePendingAgentActivation(pending, state); err != nil {
+		return nil, fmt.Errorf("%w: construct pending activation: %w", ErrInvalidRegisterConfig, err)
+	}
+	return pending, nil
+}
+
+func validatePendingAgentActivation(pending *PendingAgentActivation, state *AgentState) error {
+	invalid := func(reason string) error {
+		return fmt.Errorf("%w: pending activation %s", ErrInvalidAgentState, reason)
+	}
+	if pending == nil || state == nil || state.Assignment == nil {
+		return invalid("requires complete state and assignment")
+	}
+	if err := validateOpaqueAssignmentTicket(pending.AssignmentTicket); err != nil {
+		return invalid("ticket is invalid")
+	}
+	if pending.AssignmentTicketExpiresAt.IsZero() {
+		return invalid("ticket expiry is missing")
+	}
+	if err := validateAssignmentAgentID(pending.AgentID); err != nil || pending.AgentID != state.AgentID {
+		return invalid("agent identity does not match state")
+	}
+	publicKey, err := x25519key.DecodeCanonicalBase64(pending.AgentPublicKeyB64)
+	wipeBytes(publicKey)
+	if err != nil || pending.AgentPublicKeyB64 != state.PublicKeyB64 {
+		return invalid("agent public key does not match state")
+	}
+	if err := validatePersistedAgentAssignment(&pending.Assignment); err != nil || !sameAgentAssignment(&pending.Assignment, state.Assignment) {
+		return invalid("assignment binding does not match state")
+	}
+	if !pending.Assignment.LeaseExpiresAt.After(pending.AssignmentTicketExpiresAt) {
+		return invalid("ticket expiry must precede the assignment lease")
+	}
+	if !validAPIKeyID(pending.Registration.KeyID) || !validPublicRegistrationKeyKind(pending.Registration.KeyKind) {
+		return invalid("registration identity or kind is invalid")
+	}
+	if validateOptionalRuntimeMetadata("hostname", pending.Hostname) != nil || validateOptionalRuntimeMetadata("version", pending.AgentVersion) != nil {
+		return invalid("registration metadata is invalid")
+	}
+	fingerprint, err := base64.RawURLEncoding.Strict().DecodeString(pending.EnrollmentCredentialFingerprintB64)
+	defer wipeBytes(fingerprint)
+	if err != nil || len(fingerprint) != sha256.Size || base64.RawURLEncoding.EncodeToString(fingerprint) != pending.EnrollmentCredentialFingerprintB64 {
+		return invalid("enrollment credential identity is invalid")
+	}
+	return nil
+}
+
+func validateOptionalRuntimeMetadata(label, value string) error {
+	if value == "" {
+		// WithAgentRuntimeMetadata is optional and the wire fields are omitempty;
+		// when present, reuse its exact canonical validator rather than maintaining
+		// a second persisted-state grammar.
+		return nil
+	}
+	return validateRuntimeMetadata(label, value)
+}
+
+func enrollmentCredentialFingerprint(value string) string {
+	const domain = "qurl-go/pending-activation-enrollment-credential-v1\x00"
+	material := make([]byte, len(domain)+len(value))
+	copy(material, domain)
+	copy(material[len(domain):], value)
+	digest := sha256.Sum256(material)
+	wipeBytes(material)
+	encoded := base64.RawURLEncoding.EncodeToString(digest[:])
+	wipeBytes(digest[:])
+	return encoded
+}
+
 func (c *nativeAgentRuntimeConfig) registrationCredential(ctx context.Context, state *AgentState, initial *InitialAgentAssignment, enrollmentCredential string, privateKey []byte) (string, error) {
 	switch initial.Registration.KeyKind {
 	case assignmentKeyKindConnectorBootstrap, keyKindBootstrap, assignmentKeyKindAgent:
@@ -802,34 +976,69 @@ func validateNativeOTPCode(code string) error {
 	return nil
 }
 
-func (c *nativeAgentRuntimeConfig) registerAssignedCell(ctx context.Context, state *AgentState, initial *InitialAgentAssignment, credential string, privateKey []byte) error {
-	if !initial.AssignmentTicketExpiresAt.After(c.clock()) {
-		return ErrAssignmentTicketExpired
+// RegistrationRecoveryRequiredError reports bounded ambiguous REG transport
+// exhaustion. PendingActivation remains the sole recovery authority; retrying
+// with the same enrollment credential re-drives its exact body and pinned cell
+// before the Hub can be consulted.
+type RegistrationRecoveryRequiredError struct {
+	Attempts int
+	Elapsed  time.Duration
+	Last     error
+}
+
+func (e *RegistrationRecoveryRequiredError) Error() string {
+	if e == nil {
+		return ErrRegistrationRecoveryRequired.Error()
 	}
-	body, err := marshalRegisterRequestBody(initial.Registration.KeyID, state.AgentID, credential, registerUserData{
-		Hostname: c.hostname, Version: c.version, AssignmentTicket: initial.AssignmentTicket,
+	return fmt.Sprintf("qurl: assigned-cell registration retry budget exhausted after %d attempts over %s; resume the exact pending activation with the same enrollment credential: %v", e.Attempts, e.Elapsed, e.Last)
+}
+
+func (e *RegistrationRecoveryRequiredError) Unwrap() []error {
+	if e == nil || e.Last == nil {
+		return []error{ErrRegistrationRecoveryRequired}
+	}
+	return []error{ErrRegistrationRecoveryRequired, e.Last}
+}
+
+func newRegistrationRecovery(attempts int, elapsed time.Duration, last error) error {
+	return &RegistrationRecoveryRequiredError{Attempts: attempts, Elapsed: elapsed, Last: last}
+}
+
+func registrationRetryInfo(err error) (time.Duration, bool) {
+	return 0, nativeTransportRetryable(err)
+}
+
+func (c *nativeAgentRuntimeConfig) registerPendingActivation(ctx context.Context, state *AgentState, credential string, privateKey []byte) error {
+	if state == nil || state.PendingActivation == nil {
+		return fmt.Errorf("%w: assigned-cell REG requires pending activation", ErrInvalidAgentState)
+	}
+	pending := state.PendingActivation
+	body, err := marshalRegisterRequestBody(pending.Registration.KeyID, pending.AgentID, credential, registerUserData{
+		Hostname: pending.Hostname, Version: pending.AgentVersion, AssignmentTicket: pending.AssignmentTicket,
 	})
 	if err != nil {
 		return err
 	}
 	defer wipeBytes(body)
-	endpoint, err := assignmentNativeEndpoint(state.Assignment)
+	endpoint, err := assignmentNativeEndpoint(&pending.Assignment)
 	if err != nil {
 		return err
 	}
-	reply, err := nativeudp.Register(ctx, endpoint, body, c.udpOptions(privateKey))
+	retry, err := newAssignmentConfig(c.assignmentOptions)
 	if err != nil {
 		return err
 	}
-	defer wipeBytes(reply.Body)
-	ack, err := parseNativeRegisterAck(reply.Body)
-	if err != nil {
-		return err
-	}
-	if ack.isSuccess() {
-		return nil
-	}
-	return classifyNativeRegisterError(ack, initial.Registration.KeyKind)
+	_, err = runNativeExchange(ctx, retry, endpoint, body, c.udpOptions(privateKey), nativeudp.Register, registrationRetryInfo, newRegistrationRecovery, func(reply []byte, _ time.Time) (*struct{}, error) {
+		ack, parseErr := parseNativeRegisterAck(reply)
+		if parseErr != nil {
+			return nil, parseErr
+		}
+		if ack.isSuccess() {
+			return &struct{}{}, nil
+		}
+		return nil, classifyNativeRegisterError(ack, pending.Registration.KeyKind)
+	})
+	return err
 }
 
 func classifyNativeRegisterError(ack *registerAckBody, keyKind string) error {
@@ -1015,7 +1224,7 @@ func (c *nativeAgentRuntimeConfig) runCompletionExchange(ctx context.Context, en
 	}
 	// Pending-credential completion shares the bounded assignment retry driver;
 	// only its retry classifier, recovery type, and reply parser differ.
-	keyID, err := runAssignmentExchange(ctx, retry, endpoint, body, transport, completionRetryInfo, newCompletionRecovery, func(reply []byte, _ time.Time) (*string, error) {
+	keyID, err := runNativeExchange(ctx, retry, endpoint, body, transport, nativeudp.List, completionRetryInfo, newCompletionRecovery, func(reply []byte, _ time.Time) (*string, error) {
 		id, parseErr := parseCompletionReply(reply)
 		if parseErr != nil {
 			return nil, parseErr

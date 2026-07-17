@@ -19,6 +19,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	conformance "github.com/layervai/qurl-conformance"
 )
 
 func secureAgentStateTestDir(t *testing.T) string {
@@ -659,6 +661,61 @@ func TestLocalAgentStateStoreContract(t *testing.T) {
 			}
 			if reloaded.DeviceAPIKey != canonicalNativeDeviceCredential {
 				t.Fatal("store shared loaded state pointer across calls")
+			}
+		})
+	}
+}
+
+func TestLocalAgentStateStores_PendingActivationRoundTripWithoutPlainCredential(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	initial, err := parseInitialAssignmentReply([]byte(contract.InitialAssignment.Result.BodyJSON), "agent-conform", assignmentFixtureNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct {
+		name string
+		new  func(*testing.T) AgentStateStore
+	}{
+		{"plaintext", func(t *testing.T) AgentStateStore {
+			return FileAgentState(filepath.Join(secureAgentStateTestDir(t), "agent_state.json"))
+		}},
+		{"sealed", func(t *testing.T) AgentStateStore {
+			return testSealedStore(t, &testAgentStateKeyWrapper{})
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			state, err := newAgentState()
+			if err != nil {
+				t.Fatal(err)
+			}
+			state.AgentID = "agent-conform"
+			state.Assignment = initial.Assignment.clone()
+			state.SchemaVersion = agentStateSchemaVersion
+			state.PendingActivation, err = newPendingAgentActivation(
+				initial, state, "connector-host", "qurl-go/test",
+				conformance.AgentAssignmentBootstrapCredentialFixture,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			store := tt.new(t)
+			if err := store.SaveAgentState(context.Background(), state); err != nil {
+				t.Fatal(err)
+			}
+			loaded, err := store.LoadAgentState(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if loaded.PendingActivation == nil || loaded.PendingActivation.AssignmentTicket != initial.AssignmentTicket ||
+				!sameAgentAssignment(&loaded.PendingActivation.Assignment, loaded.Assignment) {
+				t.Fatalf("pending activation did not round trip: %#v", loaded.PendingActivation)
+			}
+			raw, err := json.Marshal(loaded)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(raw, []byte(conformance.AgentAssignmentBootstrapCredentialFixture)) || bytes.Contains(raw, []byte("12345678")) || bytes.Contains(raw, []byte(canonicalNativeDeviceCredential)) {
+				t.Fatalf("pending activation round trip exposed a plaintext secret: %s", raw)
 			}
 		})
 	}

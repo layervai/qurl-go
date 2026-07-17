@@ -22,8 +22,8 @@ import (
 type storeContract struct {
 	name string
 	// roundTrip builds a fresh store over an empty backend that persists across a
-	// Save then Load.
-	roundTrip func() qurl.AgentStateStore
+	// Save then Load, plus a snapshot function for the exact backend value.
+	roundTrip func() (qurl.AgentStateStore, func() string)
 	// empty builds a store whose backend holds nothing (Load => not-found).
 	empty func() qurl.AgentStateStore
 	// stored builds a store whose backend holds the given raw value (present,
@@ -39,9 +39,12 @@ type storeContract struct {
 func secretsManagerContract() storeContract {
 	const id = "qurl/agent-state"
 	return storeContract{
-		name:      "SecretsManager",
-		roundTrip: func() qurl.AgentStateStore { return awsstore.NewSecretsManagerStore(&fakeSecretsManager{}, id) },
-		empty:     func() qurl.AgentStateStore { return awsstore.NewSecretsManagerStore(&fakeSecretsManager{}, id) },
+		name: "SecretsManager",
+		roundTrip: func() (qurl.AgentStateStore, func() string) {
+			backend := &fakeSecretsManager{}
+			return awsstore.NewSecretsManagerStore(backend, id), func() string { return aws.ToString(backend.value) }
+		},
+		empty: func() qurl.AgentStateStore { return awsstore.NewSecretsManagerStore(&fakeSecretsManager{}, id) },
 		stored: func(value string) qurl.AgentStateStore {
 			return awsstore.NewSecretsManagerStore(&fakeSecretsManager{exists: true, value: aws.String(value)}, id)
 		},
@@ -57,9 +60,12 @@ func secretsManagerContract() storeContract {
 func parameterStoreContract() storeContract {
 	const name = "/qurl/agent-state"
 	return storeContract{
-		name:      "ParameterStore",
-		roundTrip: func() qurl.AgentStateStore { return awsstore.NewParameterStore(&fakeSSM{}, name) },
-		empty:     func() qurl.AgentStateStore { return awsstore.NewParameterStore(&fakeSSM{}, name) },
+		name: "ParameterStore",
+		roundTrip: func() (qurl.AgentStateStore, func() string) {
+			backend := &fakeSSM{}
+			return awsstore.NewParameterStore(backend, name), func() string { return aws.ToString(backend.value) }
+		},
+		empty: func() qurl.AgentStateStore { return awsstore.NewParameterStore(&fakeSSM{}, name) },
 		stored: func(value string) qurl.AgentStateStore {
 			return awsstore.NewParameterStore(&fakeSSM{exists: true, value: aws.String(value)}, name)
 		},
@@ -77,7 +83,7 @@ func TestStoreContract(t *testing.T) {
 	for _, c := range []storeContract{secretsManagerContract(), parameterStoreContract()} {
 		t.Run(c.name, func(t *testing.T) {
 			t.Run("RoundTrip", func(t *testing.T) {
-				store := c.roundTrip()
+				store, _ := c.roundTrip()
 				want := sampleState()
 				if err := store.SaveAgentState(context.Background(), want); err != nil {
 					t.Fatalf("save: %v", err)
@@ -87,6 +93,31 @@ func TestStoreContract(t *testing.T) {
 					t.Fatalf("load: %v", err)
 				}
 				assertStateEqual(t, want, got)
+			})
+
+			t.Run("PendingActivationRoundTrip", func(t *testing.T) {
+				store, persistedValue := c.roundTrip()
+				want := samplePendingActivationState()
+				if err := store.SaveAgentState(context.Background(), want); err != nil {
+					t.Fatalf("save pending activation: %v", err)
+				}
+				for _, forbidden := range []string{
+					"forbidden-enrollment-credential",
+					"12345678",
+					"forbidden-device-secret",
+				} {
+					if strings.Contains(persistedValue(), forbidden) {
+						t.Fatalf("AWS backend persisted forbidden plaintext %q", forbidden)
+					}
+				}
+				got, err := store.LoadAgentState(context.Background())
+				if err != nil {
+					t.Fatalf("load pending activation: %v", err)
+				}
+				assertStateEqual(t, want, got)
+				if got.PendingActivation == nil || got.PendingActivation.AssignmentTicket != "assignment-ticket-pending-0001" {
+					t.Fatalf("pending activation did not round trip: %#v", got.PendingActivation)
+				}
 			})
 
 			t.Run("NotFound", func(t *testing.T) {
@@ -111,10 +142,11 @@ func TestStoreContract(t *testing.T) {
 
 			t.Run("NativeSchemaOnly", func(t *testing.T) {
 				for name, raw := range map[string]string{
-					"unknown field":           `{"private_key_b64":"x","public_key_b64":"y","retired_http_field":true}`,
-					"trailing value":          `{"private_key_b64":"x","public_key_b64":"y"} {}`,
-					"duplicate top-level key": `{"private_key_b64":"x","private_key_b64":"y","public_key_b64":"z"}`,
-					"duplicate nested key":    `{"private_key_b64":"x","public_key_b64":"y","assignment":{"cell_id":"cell0","cell_id":"cell1"}}`,
+					"unknown field":                    `{"private_key_b64":"x","public_key_b64":"y","retired_http_field":true}`,
+					"trailing value":                   `{"private_key_b64":"x","public_key_b64":"y"} {}`,
+					"duplicate top-level key":          `{"private_key_b64":"x","private_key_b64":"y","public_key_b64":"z"}`,
+					"duplicate nested key":             `{"private_key_b64":"x","public_key_b64":"y","assignment":{"cell_id":"cell0","cell_id":"cell1"}}`,
+					"duplicate pending activation key": `{"private_key_b64":"x","public_key_b64":"y","pending_activation":{"assignment_ticket":"one","assignment_ticket":"two"}}`,
 				} {
 					t.Run(name, func(t *testing.T) {
 						if _, err := c.stored(raw).LoadAgentState(context.Background()); !errors.Is(err, qurl.ErrInvalidAgentState) {

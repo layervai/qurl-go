@@ -103,7 +103,7 @@ func sampleState() *qurl.AgentState {
 		RegisteredAt:   &ts,
 		DeviceAPIKey:   "dev-secret-bearer",
 		DeviceAPIKeyID: "key_AbCdEf123456",
-		SchemaVersion:  4,
+		SchemaVersion:  5,
 		Assignment: &qurl.AgentAssignment{
 			CellID: "cell0", AssignmentGeneration: 1, EndpointRevision: 1,
 			LeaseExpiresAt: ts.Add(time.Hour),
@@ -113,6 +113,31 @@ func sampleState() *qurl.AgentState {
 			},
 		},
 	}
+}
+
+func samplePendingActivationState() *qurl.AgentState {
+	state := sampleState()
+	state.PrivateKeyB64 = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
+	state.PublicKeyB64 = "Hh8cHRobGBkWFxQVFBMSEQ4PDA0KCwgJBgcEBQIDAQA="
+	state.RegisteredAt = nil
+	state.DeviceAPIKey = ""
+	state.DeviceAPIKeyID = ""
+	ticketExpiry := state.Assignment.LeaseExpiresAt.Add(-45 * time.Minute)
+	state.PendingActivation = &qurl.PendingAgentActivation{
+		AssignmentTicket:          "assignment-ticket-pending-0001",
+		AssignmentTicketExpiresAt: ticketExpiry,
+		AgentID:                   state.AgentID,
+		AgentPublicKeyB64:         state.PublicKeyB64,
+		Assignment:                *state.Assignment,
+		Registration: qurl.AssignmentRegistration{
+			KeyID:   "key_A1b2C3d4E5f6",
+			KeyKind: string(qurl.RegistrationKeyKindConnectorBootstrap),
+		},
+		Hostname:                           "connector-host",
+		AgentVersion:                       "qurl-go/test",
+		EnrollmentCredentialFingerprintB64: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+	}
+	return state
 }
 
 func assertStateEqual(t *testing.T, want, got *qurl.AgentState) {
