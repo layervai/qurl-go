@@ -15,6 +15,7 @@ import (
 	smtypes "github.com/aws/aws-sdk-go-v2/service/secretsmanager/types"
 
 	"github.com/layervai/qurl-go/awsstore"
+	"github.com/layervai/qurl-go/internal/agentstatecontract"
 	"github.com/layervai/qurl-go/qurl"
 )
 
@@ -143,11 +144,11 @@ func samplePendingActivationState(enrollmentCredential string) *qurl.AgentState 
 }
 
 func sampleEnrollmentCredentialFingerprint(value string) string {
-	// Keep the domain and encoding aligned with
-	// qurl.enrollmentCredentialFingerprint. The awsstore module cannot call that
-	// unexported helper, and exporting a security-internal function for one
-	// cross-module contract fixture would widen the public API unnecessarily.
-	const domain = "qurl-go/pending-activation-enrollment-credential-v1\x00"
+	// Keep the algorithm independent from qurl.enrollmentCredentialFingerprint
+	// while compiling both modules against the same repo-internal domain. The
+	// production helper stays unexported rather than widening the public SDK API
+	// for one cross-module contract fixture.
+	const domain = agentstatecontract.PendingActivationEnrollmentCredentialFingerprintDomain
 	digest := sha256.Sum256([]byte(domain + value))
 	return base64.RawURLEncoding.EncodeToString(digest[:])
 }

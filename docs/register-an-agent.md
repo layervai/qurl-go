@@ -111,6 +111,9 @@ client, binding, err := qurl.RegisterAgentRuntime(ctx, accountCredential, store,
 		qurl.RegistrationKeyKindAccount,
 	),
 	qurl.WithAgentRuntimeOTPProvider(func(ctx context.Context, challenge qurl.AgentOTPChallenge) (string, error) {
+		if challenge.PendingActivationRecovery {
+			return readPreviouslyIssuedEightDigitCode(ctx, challenge)
+		}
 		return readEightDigitCode(ctx, challenge)
 	}),
 )
@@ -133,6 +136,10 @@ original code. Recovery does **not** dispatch another NHP_OTP and sends the exac
 persisted REG body. Only an authenticated OTP-expired (`52101`) or ticket-expired
 marker-absent (`52111`) result permits one fresh assignment ticket; that new
 ticket may dispatch its own single OTP.
+
+The recovery branch above must return the previously issued code. It must never
+request, generate, or dispatch a new code; the SDK intentionally suppresses
+NHP_OTP while replaying a pending activation.
 
 The SDK refuses to dispatch OTP unless the assignment ticket has at least the
 conformance contract's inclusive 630 seconds remaining.

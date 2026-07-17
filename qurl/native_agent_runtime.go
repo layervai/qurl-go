@@ -17,6 +17,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/layervai/qurl-go/internal/agentstatecontract"
 	"github.com/layervai/qurl-go/internal/nhpcontract"
 	"github.com/layervai/qurl-go/internal/x25519key"
 	"github.com/layervai/qurl-go/relayknock"
@@ -897,7 +898,7 @@ func validateRecoverableEnrollmentCredential(value string) error {
 }
 
 func enrollmentCredentialFingerprint(value string) string {
-	const domain = "qurl-go/pending-activation-enrollment-credential-v1\x00"
+	const domain = agentstatecontract.PendingActivationEnrollmentCredentialFingerprintDomain
 	material := make([]byte, len(domain)+len(value))
 	copy(material, domain)
 	copy(material[len(domain):], value)
