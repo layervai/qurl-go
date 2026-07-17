@@ -1148,6 +1148,22 @@ func TestCompletionRecoveryRequiredError_NilSafety(t *testing.T) {
 	}
 }
 
+func TestRegistrationRecoveryRequiredError_NilSafety(t *testing.T) {
+	var nilRecovery *RegistrationRecoveryRequiredError
+	if nilRecovery.Error() != ErrRegistrationRecoveryRequired.Error() || !errors.Is(nilRecovery, ErrRegistrationRecoveryRequired) {
+		t.Fatalf("nil registration recovery = %q / %v, want stable sentinel", nilRecovery.Error(), nilRecovery.Unwrap())
+	}
+	last := errors.New("last registration transport failure")
+	recovery := &RegistrationRecoveryRequiredError{Attempts: 1, Elapsed: time.Second, Last: last}
+	if !errors.Is(recovery, ErrRegistrationRecoveryRequired) {
+		t.Fatalf("registration recovery lost sentinel: %v", recovery)
+	}
+	causes := recovery.Unwrap()
+	if len(causes) != 2 || !errors.Is(causes[0], ErrRegistrationRecoveryRequired) || !errors.Is(causes[1], last) {
+		t.Fatalf("registration recovery causes = %#v, want sentinel then non-nil last cause", causes)
+	}
+}
+
 func TestRegisterAgentRuntime_RateLimitRetriesWholeHubTransactionWithinBudget(t *testing.T) {
 	contract := loadAssignmentFixture(t)
 	const reflectedSecret = "lv_live_rate_limit_reflection"
