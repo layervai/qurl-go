@@ -256,6 +256,9 @@ func (s *SealedFileAgentStateStore) LoadAgentState(ctx context.Context) (*AgentS
 	}
 	defer wipeBytes(plaintext)
 	var state AgentState
+	// AgentState.UnmarshalJSON already owns its exact-field/depth contract.
+	// Retain the package-wide strict helper as defense in depth if that custom
+	// decoder changes; it does not add a second independent strictness layer today.
 	if err := strictDecodeJSON(plaintext, &state); err != nil {
 		return nil, invalidSealedState("decrypted agent state is not valid JSON")
 	}

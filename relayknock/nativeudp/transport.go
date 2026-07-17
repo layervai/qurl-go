@@ -310,24 +310,12 @@ func sendToAddresses(ctx context.Context, addrs []netip.Addr, port int, packet [
 // under a socket deadline. It reads into a buffer one byte larger than the NHP
 // buffer so an oversize datagram is detected rather than silently truncated.
 func sendOne(ctx context.Context, dialer Dialer, address string, packet []byte, timeout time.Duration, replyBuffer []byte) (reply []byte, err error) {
-	conn, err := dialer.DialContext(ctx, "udp", address)
+	conn, stopCancellation, err := dialWithDeadline(ctx, dialer, address, timeout)
 	if err != nil {
-		return nil, fmt.Errorf("dial %s: %w", address, err)
+		return nil, err
 	}
 	defer func() { _ = conn.Close() }()
-
-	deadline := time.Now().Add(timeout)
-	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
-		deadline = d
-	}
-	if err := conn.SetDeadline(deadline); err != nil {
-		return nil, fmt.Errorf("set deadline for %s: %w", address, err)
-	}
-	// Arm cancellation after the ordinary deadline is installed. If ctx is
-	// already done, AfterFunc immediately pulls the deadline back to now; the
-	// future deadline above can never race afterward and overwrite that unblock.
-	stop := context.AfterFunc(ctx, func() { _ = conn.SetDeadline(time.Now()) })
-	defer stop()
+	defer stopCancellation()
 
 	n, err := conn.Write(packet)
 	if err != nil {
@@ -364,29 +352,15 @@ func sendDatagram(ctx context.Context, addr netip.Addr, port int, packet []byte,
 		timeout = DefaultTimeout
 	}
 	address := net.JoinHostPort(addr.String(), strconv.Itoa(port))
-	conn, err := dialer.DialContext(ctx, "udp", address)
+	conn, stopCancellation, err := dialWithDeadline(ctx, dialer, address, timeout)
 	if err != nil {
 		if cerr := ctxErr(ctx); cerr != nil {
 			return cerr
 		}
-		return fmt.Errorf("%w: dial %s: %w", ErrTransport, address, err)
+		return fmt.Errorf("%w: %w", ErrTransport, err)
 	}
 	defer func() { _ = conn.Close() }()
-	if cerr := ctxErr(ctx); cerr != nil {
-		return cerr
-	}
-	deadline := time.Now().Add(timeout)
-	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
-		deadline = d
-	}
-	if err := conn.SetDeadline(deadline); err != nil {
-		if cerr := ctxErr(ctx); cerr != nil {
-			return cerr
-		}
-		return fmt.Errorf("%w: set deadline for %s: %w", ErrTransport, address, err)
-	}
-	stop := context.AfterFunc(ctx, func() { _ = conn.SetDeadline(time.Now()) })
-	defer stop()
+	defer stopCancellation()
 	if cerr := ctxErr(ctx); cerr != nil {
 		return cerr
 	}
@@ -404,6 +378,28 @@ func sendDatagram(ctx context.Context, addr netip.Addr, port int, packet []byte,
 		return fmt.Errorf("%w: write to %s: short datagram write: wrote %d of %d bytes", ErrTransport, address, n, len(packet))
 	}
 	return nil
+}
+
+// dialWithDeadline centralizes the ordering required to make cancellation
+// unblock connected-UDP I/O safely: install the ordinary clamped deadline
+// first, then arm the context callback that can only pull it earlier.
+func dialWithDeadline(ctx context.Context, dialer Dialer, address string, timeout time.Duration) (net.Conn, func() bool, error) {
+	conn, err := dialer.DialContext(ctx, "udp", address)
+	if err != nil {
+		return nil, nil, fmt.Errorf("dial %s: %w", address, err)
+	}
+	deadline := time.Now().Add(timeout)
+	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
+		deadline = d
+	}
+	if err := conn.SetDeadline(deadline); err != nil {
+		_ = conn.Close()
+		return nil, nil, fmt.Errorf("set deadline for %s: %w", address, err)
+	}
+	// If ctx is already done, AfterFunc immediately pulls the deadline to now;
+	// the future deadline above can never race afterward and overwrite it.
+	stopCancellation := context.AfterFunc(ctx, func() { _ = conn.SetDeadline(time.Now()) })
+	return conn, stopCancellation, nil
 }
 
 // decryptAndCorrelate authenticates the reply against the pinned server key and

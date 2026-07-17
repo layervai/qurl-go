@@ -1028,7 +1028,7 @@ func newCompletionRecovery(attempts int, elapsed time.Duration, last error) erro
 }
 
 func completionRetryInfo(err error) (time.Duration, bool) {
-	if errors.Is(err, nativeudp.ErrTransport) || errors.Is(err, nativeudp.ErrResolve) {
+	if nativeTransportRetryable(err) {
 		return 0, true
 	}
 	var appErr *CompletionError

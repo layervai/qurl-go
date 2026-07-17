@@ -104,6 +104,9 @@ func marshalAgentState(state *qurl.AgentState, resourceID, resourceLabel string)
 func unmarshalAgentState(raw []byte) (*qurl.AgentState, error) {
 	var state qurl.AgentState
 	decoder := json.NewDecoder(bytes.NewReader(raw))
+	// AgentState.UnmarshalJSON currently enforces exact fields itself. Keep this
+	// as defense in depth if that custom decoder is ever removed; the trailing
+	// Decode below remains independently load-bearing today.
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&state); err != nil {
 		return nil, fmt.Errorf("%w: decode agent state", qurl.ErrInvalidAgentState)

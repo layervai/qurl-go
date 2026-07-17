@@ -501,7 +501,7 @@ func (c *assignmentConfig) elapsedSince(start time.Time) time.Duration {
 }
 
 func assignmentRetryInfo(err error) (time.Duration, bool) {
-	if errors.Is(err, nativeudp.ErrTransport) || errors.Is(err, nativeudp.ErrResolve) {
+	if nativeTransportRetryable(err) {
 		return 0, true
 	}
 	var appErr *AssignmentError
@@ -509,6 +509,10 @@ func assignmentRetryInfo(err error) (time.Duration, bool) {
 		return appErr.RetryAfter, true
 	}
 	return 0, false
+}
+
+func nativeTransportRetryable(err error) bool {
+	return errors.Is(err, nativeudp.ErrTransport) || errors.Is(err, nativeudp.ErrResolve)
 }
 
 func (c *assignmentConfig) backoff(attempt int, retryAfter time.Duration) (time.Duration, error) {
