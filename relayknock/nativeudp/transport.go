@@ -12,7 +12,6 @@ import (
 	"net"
 	"net/netip"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/layervai/qurl-go/internal/cryptoutil"
@@ -137,7 +136,11 @@ func Knock(ctx context.Context, ep Endpoint, body []byte, opts Options) (*relayk
 // decoded and correlated through body.trxId to the KNK request counter, then its
 // exact decoded 32-byte cookie is mixed into a fresh NHP_RKN whose only accepted
 // reply is an echoed-counter NHP_ACK. COK's outer wire counter is deliberately
-// unconstrained; no other transition permits COK.
+// unconstrained; no other transition permits COK. KNK and the possible RKN are
+// separate exchanges, so ep.Host is resolved again before RKN. Cell replicas
+// must share the stateless COK-signing key: DNS may route RKN to a different
+// replica, while both replies remain authenticated against ep.ServerStaticPub
+// and the decoded cookie plus body.trxId bind RKN to the initiating KNK.
 //
 // knockBody and reknockBody are already-serialized application bodies. The
 // transport does not rewrite headerType inside those authenticated bodies; the
@@ -309,7 +312,7 @@ func exchange(ctx context.Context, ep Endpoint, headerType int, body, cookie []b
 
 type cookieChallengeBody struct {
 	transactionID uint64
-	cookie        string
+	cookie        []byte
 }
 
 const (
@@ -339,13 +342,18 @@ func rejectCookieChallenge(class, detail string) error {
 // json.Unmarshal: COK is authenticated server input and the v0.6 contract
 // rejects duplicate/unknown keys, nulls, trailing values, non-canonical base64,
 // and transaction mismatch before RKN can be emitted.
-func parseCookieChallenge(body []byte, requestCounter uint64) ([]byte, error) {
+func parseCookieChallenge(body []byte, requestCounter uint64) (cookie []byte, err error) {
 	dec := json.NewDecoder(bytes.NewReader(body))
 	first, err := dec.Token()
 	if err != nil || first != json.Delim('{') {
 		return nil, rejectCookieChallenge(cookieRejectBodyParse, "body must be one JSON object")
 	}
 	var parsed cookieChallengeBody
+	defer func() {
+		if err != nil {
+			cryptoutil.Wipe(parsed.cookie)
+		}
+	}()
 	seen := make(map[string]struct{}, 2)
 	for dec.More() {
 		token, err := dec.Token()
@@ -370,8 +378,10 @@ func parseCookieChallenge(body []byte, requestCounter uint64) ([]byte, error) {
 				return nil, rejectCookieChallenge(cookieRejectBodyParse, "trxId has an invalid type")
 			}
 		case "cookie":
-			if err := json.Unmarshal(raw, &parsed.cookie); err != nil || parsed.cookie == "" {
-				return nil, rejectCookieChallenge(cookieRejectBodyParse, "cookie has an invalid type")
+			parsed.cookie, err = decodeCookieChallenge(raw)
+			cryptoutil.Wipe(raw)
+			if err != nil {
+				return nil, err
 			}
 		default:
 			return nil, rejectCookieChallenge(cookieRejectBodyParse, "unknown field")
@@ -389,17 +399,35 @@ func parseCookieChallenge(body []byte, requestCounter uint64) ([]byte, error) {
 	if parsed.transactionID != requestCounter {
 		return nil, rejectCookieChallenge(cookieRejectCounter, "transaction does not match the knock")
 	}
-	if strings.ContainsAny(parsed.cookie, " \t\r\n") {
+	return parsed.cookie, nil
+}
+
+// decodeCookieChallenge retains the authenticated cookie only in wipeable byte
+// slices. Canonical standard base64 needs no JSON escapes, so an escaped or
+// otherwise non-literal string is rejected instead of materialized as an
+// immutable Go string.
+func decodeCookieChallenge(raw []byte) ([]byte, error) {
+	if len(raw) < 3 || raw[0] != '"' || raw[len(raw)-1] != '"' {
+		return nil, rejectCookieChallenge(cookieRejectBodyParse, "cookie has an invalid type")
+	}
+	encoded := raw[1 : len(raw)-1]
+	if bytes.IndexByte(encoded, '\\') >= 0 || bytes.ContainsAny(encoded, " \t\r\n") {
 		return nil, rejectCookieChallenge(cookieRejectEncoding, "cookie is not strict base64")
 	}
-	cookie, err := base64.StdEncoding.Strict().DecodeString(parsed.cookie)
+	cookie := make([]byte, base64.StdEncoding.DecodedLen(len(encoded)))
+	n, err := base64.StdEncoding.Strict().Decode(cookie, encoded)
 	if err != nil {
-		if raw, rawErr := base64.RawStdEncoding.Strict().DecodeString(parsed.cookie); rawErr == nil && len(raw) == nhpwire.CookieSize {
-			cryptoutil.Wipe(raw)
+		cryptoutil.Wipe(cookie)
+		rawCookie := make([]byte, base64.RawStdEncoding.DecodedLen(len(encoded)))
+		rawN, rawErr := base64.RawStdEncoding.Strict().Decode(rawCookie, encoded)
+		if rawErr == nil && rawN == nhpwire.CookieSize {
+			cryptoutil.Wipe(rawCookie)
 			return nil, rejectCookieChallenge(cookieRejectCanonical, "cookie is not canonical padded base64")
 		}
+		cryptoutil.Wipe(rawCookie)
 		return nil, rejectCookieChallenge(cookieRejectEncoding, "cookie is not strict base64")
 	}
+	cookie = cookie[:n]
 	if len(cookie) != nhpwire.CookieSize {
 		cryptoutil.Wipe(cookie)
 		return nil, rejectCookieChallenge(cookieRejectLength, "cookie has the wrong decoded length")
@@ -601,10 +629,9 @@ func correlateDecryptedReply(dr *relayknock.Reply, requestType int, counter uint
 
 // replyTypeAllowed reports whether an authenticated reply's header type is one the
 // given round-trip request type can legitimately elicit. It restates
-// native request→reply pairing (a list is answered only with NHP_LRT, a knock
-// with NHP_ACK/NHP_COK, and a registration only with NHP_RAK) so the type
-// field — which rides outside the AEAD — cannot be presented as a different
-// reply kind.
+// native request→reply pairing (LST→LRT, KNK→ACK/COK, RKN/EXT→ACK, and
+// REG→RAK) so the type field — which rides outside the AEAD — cannot be
+// presented as a different reply kind.
 func replyTypeAllowed(requestType, replyType int) bool {
 	switch requestType {
 	case relayknock.TypeKnock:

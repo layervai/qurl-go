@@ -165,6 +165,12 @@ type runtimeRouteResolver struct {
 	hosts map[string]netip.Addr
 }
 
+type runtimeResolverFunc func(context.Context, string, string) ([]netip.Addr, error)
+
+func (f runtimeResolverFunc) LookupNetIP(ctx context.Context, network, host string) ([]netip.Addr, error) {
+	return f(ctx, network, host)
+}
+
 func (r runtimeRouteResolver) LookupNetIP(_ context.Context, network, host string) ([]netip.Addr, error) {
 	if network != "ip" {
 		return nil, fmt.Errorf("unexpected network %q", network)
@@ -870,14 +876,42 @@ func TestKnockRegisteredAgent_UsesAuthoritativeAssignedCell(t *testing.T) {
 	}
 }
 
-func TestKnockRegisteredAgent_CookieChallengeUsesOneReknockWithSameSessionIdentity(t *testing.T) {
+func TestKnockRegisteredAgent_CookieChallengeReResolvesForOneBoundReknock(t *testing.T) {
 	contract := loadAssignmentFixture(t)
 	cookie := bytes.Repeat([]byte{0x7a}, 32)
 	knockBody := `{"errCode":"0","resHost":{"resource-public-key":"frps.cell0.example:7000"},"opnTime":900,"agentAddr":"203.0.113.9:49152","acTokens":{"resource-public-key":"ac-secret"},"preActions":{"resource-public-key":null}}`
-	f := newRuntimeFixture(t, nil, []runtimeUDPStep{
-		{requestType: relayknock.TypeKnock, replyType: relayknock.TypeCookieChallenge, reknockCookie: cookie, replyCounterDelta: 1},
-		{requestType: relayknock.TypeReknock, replyType: relayknock.TypeACK, replyBody: knockBody, reknockCookie: cookie},
+	f := newRuntimeFixture(t, nil, []runtimeUDPStep{{
+		requestType: relayknock.TypeKnock, replyType: relayknock.TypeCookieChallenge, reknockCookie: cookie, replyCounterDelta: 1,
+	}})
+	// Model DNS/NLB routing the second exchange to another cell replica. Both
+	// replicas share the assignment's server identity and the stateless cookie
+	// material, so the RKN remains authenticated and bound to the first KNK.
+	reknockServer := newRuntimeUDPServer(
+		t,
+		assignmentHex(t, contract.Keys.AssignedCell.StaticPrivHex),
+		assignmentHex(t, contract.Keys.Agent.StaticPubHex),
+		runtimeUDPStep{requestType: relayknock.TypeReknock, replyType: relayknock.TypeACK, replyBody: knockBody, reknockCookie: cookie},
+	)
+	knockAddress := netip.MustParseAddr("9.9.9.9")
+	reknockAddress := netip.MustParseAddr("149.112.112.112")
+	var resolveCalls atomic.Int32
+	resolver := runtimeResolverFunc(func(_ context.Context, network, host string) ([]netip.Addr, error) {
+		if network != "ip" || host != "cell0.nhp.layerv.ai" {
+			return nil, fmt.Errorf("unexpected resolution %q %q", network, host)
+		}
+		switch resolveCalls.Add(1) {
+		case 1:
+			return []netip.Addr{knockAddress}, nil
+		case 2:
+			return []netip.Addr{reknockAddress}, nil
+		default:
+			return nil, errors.New("unexpected third resolution")
+		}
 	})
+	dialer := runtimeRouteDialer{targets: map[string]string{
+		knockAddress.String():   f.cellUDP.conn.LocalAddr().String(),
+		reknockAddress.String(): reknockServer.conn.LocalAddr().String(),
+	}}
 	assignment := &AgentAssignment{
 		CellID: "cell0", AssignmentGeneration: 1, EndpointRevision: 1, LeaseExpiresAt: time.Now().Add(time.Hour),
 		Endpoint: NHPUDPEndpoint{Host: "cell0.nhp.layerv.ai", Port: standardNHPUDPPort, ServerPublicKeyB64: base64.StdEncoding.EncodeToString(assignmentHex(t, contract.Keys.AssignedCell.StaticPubHex))},
@@ -891,18 +925,22 @@ func TestKnockRegisteredAgent_CookieChallengeUsesOneReknockWithSameSessionIdenti
 	privateKey := assignmentHex(t, contract.Keys.Agent.StaticPrivHex)
 	defer wipeBytes(privateKey)
 	if _, err := KnockRegisteredAgent(context.Background(), binding, privateKey, "resource-public-key", NativeKnockOptions{RunID: "0123456789abcdef"},
-		WithAgentRuntimeUDPResolver(f.resolver), WithAgentRuntimeUDPDialer(f.dialer), WithAgentRuntimeUDPBounds(time.Second, 1)); err != nil {
+		WithAgentRuntimeUDPResolver(resolver), WithAgentRuntimeUDPDialer(dialer), WithAgentRuntimeUDPBounds(time.Second, 1)); err != nil {
 		t.Fatalf("KnockRegisteredAgent COK→RKN: %v", err)
 	}
-	requests := f.cellUDP.snapshot()
-	if len(requests) != 2 || requests[0].typeID != relayknock.TypeKnock || requests[1].typeID != relayknock.TypeReknock {
-		t.Fatalf("session packet types = %#v, want KNK then exactly one RKN", requests)
+	if resolveCalls.Load() != 2 {
+		t.Fatalf("assignment-host resolution count = %d, want KNK and RKN resolved separately", resolveCalls.Load())
+	}
+	knockRequests := f.cellUDP.snapshot()
+	reknockRequests := reknockServer.snapshot()
+	if len(knockRequests) != 1 || knockRequests[0].typeID != relayknock.TypeKnock || len(reknockRequests) != 1 || reknockRequests[0].typeID != relayknock.TypeReknock {
+		t.Fatalf("cross-replica session packets = KNK %#v, RKN %#v; want exactly one of each", knockRequests, reknockRequests)
 	}
 	var knk, rkn nativeAgentKnockBody
-	if err := json.Unmarshal(requests[0].body, &knk); err != nil {
+	if err := json.Unmarshal(knockRequests[0].body, &knk); err != nil {
 		t.Fatalf("decode KNK body: %v", err)
 	}
-	if err := json.Unmarshal(requests[1].body, &rkn); err != nil {
+	if err := json.Unmarshal(reknockRequests[0].body, &rkn); err != nil {
 		t.Fatalf("decode RKN body: %v", err)
 	}
 	if knk.HeaderType != nhpKNKHeaderType || rkn.HeaderType != nhpRKNHeaderType || knk.UserID != rkn.UserID || knk.DeviceID != rkn.DeviceID || knk.AuthServiceID != rkn.AuthServiceID || knk.KnockResourceID != rkn.KnockResourceID || knk.RunID != rkn.RunID {

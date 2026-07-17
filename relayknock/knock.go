@@ -10,7 +10,7 @@ import (
 // Public initiator API over the internal NHP wire codec (nhpwire). The
 // role-symmetric seal/open transcript lives in nhpwire; this file adds the
 // public KnockInputs/Reply types, the initiator type-gating (an agent builds
-// only knock/list/OTP/register), and the reply-type gate on DecryptReply. The
+// only KNK/LST/RKN/OTP/REG/EXT), and the reply-type gate on DecryptReply. The
 // wire bytes are fenced by the golden vectors in knock_golden_test.go, which
 // reach nhpwire through BuildKnock / DecryptReply here.
 
@@ -117,9 +117,9 @@ const (
 
 // Exported NHP reply header-type values, so a consumer can construct or assert a
 // Reply.Type (e.g. in tests) without importing the internal wire constants. These
-// are the only reply types the initiator messages above can elicit: a knock is
-// answered with an NHP_ACK or NHP_COK, a list/query request with an NHP_LRT, a
-// registration with an NHP_RAK, and an OTP message is never answered at all.
+// are the only reply types the initiator messages above can elicit: KNK is
+// answered with ACK or COK, LST with LRT, RKN and EXT with ACK, REG with RAK,
+// and OTP is never answered at all.
 const (
 	// TypeACK is NHP_ACK: an authorized-admission reply carrying the application
 	// payload in Body.
@@ -173,10 +173,10 @@ func (r *Reply) IsRegisterAck() bool { return r.Type == nhpwire.TypeRAK }
 // server's static private key yields a valid tag there.
 //
 // Only reply header types are accepted: an authenticated packet carrying an
-// initiator type (KNK/LST/OTP/REG) is rejected, so a Reply this returns always
-// matches one Is* predicate. (Opening an initiator packet in the responder
-// role — as the reference server does — is relayknock/relayknocktest's
-// OpenInitiatorMessage.)
+// initiator type (KNK/LST/RKN/OTP/REG/EXT) is rejected, so a Reply this returns
+// always matches one Is* predicate. (Opening an initiator packet in the
+// responder role — as the reference server does — is
+// relayknock/relayknocktest's OpenInitiatorMessage or OpenReknockMessage.)
 //
 // DecryptReply authenticates the sender and body, but it does not know which
 // request the caller sent. A custom transport MUST additionally require the
@@ -202,11 +202,12 @@ func acceptDecryptedReply(msg *nhpwire.Message) (*Reply, error) {
 		cryptoutil.Wipe(msg.Body)
 		// This is the single reply-type-policy site (nhpwire's codec no longer
 		// gates the type). Anything that is not a reply type — a known initiator
-		// type (KNK/LST/OTP/REG) or a garbage type that rode in outside the AEAD — is a
-		// reply this request cannot accept, wrapped in ErrMalformedReply so a
-		// consumer's errors.Is catches the whole class uniformly (the same sentinel
-		// Exchange's replyTypeAllowed mismatch uses). A conforming server never
-		// produces either; only a byzantine one reaches here.
+		// type (KNK/LST/RKN/OTP/REG/EXT) or a garbage type that rode in outside
+		// the AEAD — is a reply this request cannot accept, wrapped in
+		// ErrMalformedReply so a consumer's errors.Is catches the whole class
+		// uniformly (the same sentinel Exchange's replyTypeAllowed mismatch uses).
+		// A conforming server never produces either; only a byzantine one reaches
+		// here.
 		return nil, fmt.Errorf("%w: header type %d is not a server reply", ErrMalformedReply, msg.Type)
 	}
 }

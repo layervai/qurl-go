@@ -34,7 +34,11 @@
 // reply from the pinned key is rejected (ErrServerUnauthenticated), and the source
 // address is never trusted. The endpoint host is resolved fresh on every exchange
 // and a resolved IP is never persisted, preserving DNS/NLB replacement and
-// multi-address behavior.
+// multi-address behavior. KNK and its possible RKN are separate exchanges and
+// may reach different replicas; every cell replica must therefore share the
+// stateless COK-signing key. Both legs still authenticate against the assignment's
+// pinned server public key, while the cookie and body transaction id bind RKN to
+// the original KNK.
 //
 // # Dependency policy
 //

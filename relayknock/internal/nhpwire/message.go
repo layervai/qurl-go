@@ -32,7 +32,8 @@ type Inputs struct {
 }
 
 // Message is a decrypted, authenticated NHP message. Type is the raw NHP header
-// type (nhpwire.TypeKNK…TypeRAK); the wrapping packages interpret it.
+// type (one of the declared NHP header-type constants); the wrapping packages
+// interpret it.
 type Message struct {
 	Type           int
 	Counter        uint64
@@ -43,11 +44,11 @@ type Message struct {
 // BuildMessage builds a complete single-message NHP packet (240-byte header ‖
 // sealed body) of the given header type. It folds material into the chain
 // hash/key in the exact order the responder expects, so every AEAD opens. The
-// transcript is independent of the header type — only the obfuscated type field
-// in HeaderCommon[0:8] differs — so the NHP_KNK golden vector fences every type
-// built here. It applies NO header-type restriction: the initiator/reply gating
-// lives in the wrapping packages (relayknock builds initiator types;
-// relayknocktest builds reply types).
+// For ordinary messages only the obfuscated type field in HeaderCommon[0:8]
+// differs. RKN additionally mixes its exact COK cookie into the header digest;
+// the dedicated session-control vectors fence that variant. BuildMessage applies
+// NO header-type restriction: the initiator/reply gating lives in the wrapping
+// packages (relayknock builds initiator types; relayknocktest builds reply types).
 func BuildMessage(headerType int, inp *Inputs) ([]byte, error) {
 	if inp == nil {
 		return nil, errors.New("message inputs must not be nil")

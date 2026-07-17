@@ -156,6 +156,15 @@ func TestParseCookieChallenge_ConformanceCases(t *testing.T) {
 	}
 }
 
+func TestParseCookieChallenge_RejectsEscapedCookieText(t *testing.T) {
+	body := []byte(`{"trxId":41,"cookie":"\u0041AECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="}`)
+	_, err := parseCookieChallenge(body, 41)
+	var classified *cookieChallengeError
+	if !errors.As(err, &classified) || classified.rejectClass != cookieRejectEncoding {
+		t.Fatalf("escaped cookie error = %v, want %q", err, cookieRejectEncoding)
+	}
+}
+
 func TestCorrelateDecryptedReply_AgentSessionTransitions(t *testing.T) {
 	f, err := conformance.AgentSessionControl()
 	if err != nil {

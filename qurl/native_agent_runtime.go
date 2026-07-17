@@ -1452,7 +1452,10 @@ func (r NativeKnockResult) GoString() string { return r.String() }
 // agent/resource/RunID session identity and a body headerType of RKN; there is
 // no retry loop, HTTP fallback, or cross-cell fallback. It validates the live
 // authority-provided assignment before DNS or socket I/O and authenticates the
-// reply against that assignment's server public key.
+// reply against that assignment's server public key. KNK and RKN each resolve
+// the assigned host, so cell replicas must share the stateless COK-signing key;
+// the pinned server key plus COK cookie/trxId continuity keeps a cross-replica
+// RKN bound to the initiating KNK.
 func KnockRegisteredAgent(ctx context.Context, binding *AgentRuntimeBinding, deviceStaticPrivateKey []byte, knockResourceID string, opts NativeKnockOptions, transportOpts ...AgentRuntimeUDPOption) (*NativeKnockResult, error) {
 	cfg, endpoint, err := registeredAgentSessionEndpoint(binding, deviceStaticPrivateKey, transportOpts)
 	if err != nil {

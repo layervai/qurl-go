@@ -32,14 +32,12 @@
 // handshake, NOT any application body shape (e.g. qURL claims). A
 // caller supplies an already-serialized body and interprets the decrypted reply
 // body itself. Single messages only: its transport-neutral builder emits the
-// initiator types NHP_KNK (knock), NHP_LST (list/query), NHP_REG (register), and
-// the one-way NHP_OTP. Its decoder admits the reply types NHP_ACK, NHP_LRT,
-// NHP_COK, and NHP_RAK. The HTTP helpers intentionally do not transport
-// NHP_LST/NHP_LRT; native assignment carries those packets directly over UDP.
-// The HTTP relay intentionally remains single-message: it does not perform
-// NHP_RKN or NHP_EXT. Native UDP exposes those registered-agent session-control
-// messages directly because the assigned cell, not the browser relay, owns that
-// session.
+// initiator types NHP_KNK (knock), NHP_LST (list/query), NHP_RKN (re-knock),
+// NHP_REG (register), NHP_EXT (clean exit), and the one-way NHP_OTP. Its decoder
+// admits the reply types NHP_ACK, NHP_LRT, NHP_COK, and NHP_RAK. The HTTP helpers
+// intentionally do not transport NHP_LST/NHP_LRT, NHP_RKN, or NHP_EXT; native UDP
+// carries assignment and registered-agent session control directly with the Hub
+// or assigned cell.
 //
 // # Egress-IP invariant
 //
