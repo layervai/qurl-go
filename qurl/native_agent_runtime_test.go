@@ -328,6 +328,23 @@ func (f *runtimeFixture) optionsWithMetadata(include bool, extra ...AgentRuntime
 	return append(opts, extra...)
 }
 
+func seedPendingActivation(t *testing.T, contract *conformance.AgentAssignmentFile, optionSet func(*runtimeFixture) []AgentRuntimeRegistrationOption) *runtimeFixture {
+	t.Helper()
+	f := newRuntimeFixture(t,
+		[]runtimeUDPStep{{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: contract.InitialAssignment.Result.BodyJSON}},
+		[]runtimeUDPStep{{requestType: relayknock.TypeRegister, noReply: true}},
+	)
+	opts := f.options()
+	if optionSet != nil {
+		opts = optionSet(f)
+	}
+	_, _, err := RegisterAgentRuntime(context.Background(), conformance.AgentAssignmentBootstrapCredentialFixture, f.store, opts...)
+	if !errors.Is(err, ErrRegistrationRecoveryRequired) {
+		t.Fatalf("seed pending activation: %v", err)
+	}
+	return f
+}
+
 func withTestAgentRuntimeAssignmentSleep(sleep func(context.Context, time.Duration) error) AgentRuntimeLifecycleOption {
 	return nativeRuntimeLifecycleOptionFunc(func(c *nativeAgentRuntimeConfig) error {
 		c.assignmentOptions = append(c.assignmentOptions, withAssignmentSleep(sleep))
@@ -1459,14 +1476,7 @@ func TestRegisterAgentRuntime_PendingActivationCorruptionAndChangedCredentialFai
 	}
 	for name, mutate := range tests {
 		t.Run(name, func(t *testing.T) {
-			f := newRuntimeFixture(t,
-				[]runtimeUDPStep{{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: contract.InitialAssignment.Result.BodyJSON}},
-				[]runtimeUDPStep{{requestType: relayknock.TypeRegister, noReply: true}},
-			)
-			_, _, firstErr := RegisterAgentRuntime(context.Background(), conformance.AgentAssignmentBootstrapCredentialFixture, f.store, f.options()...)
-			if !errors.Is(firstErr, ErrRegistrationRecoveryRequired) {
-				t.Fatalf("seed pending activation: %v", firstErr)
-			}
+			f := seedPendingActivation(t, contract, nil)
 			state, loadErr := f.store.LoadAgentState(context.Background())
 			if loadErr != nil {
 				t.Fatal(loadErr)
@@ -1520,14 +1530,7 @@ func TestRegisterAgentRuntime_PendingActivationCorruptionAndChangedCredentialFai
 		}
 	})
 
-	f := newRuntimeFixture(t,
-		[]runtimeUDPStep{{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: contract.InitialAssignment.Result.BodyJSON}},
-		[]runtimeUDPStep{{requestType: relayknock.TypeRegister, noReply: true}},
-	)
-	_, _, firstErr := RegisterAgentRuntime(context.Background(), conformance.AgentAssignmentBootstrapCredentialFixture, f.store, f.options()...)
-	if !errors.Is(firstErr, ErrRegistrationRecoveryRequired) {
-		t.Fatal(firstErr)
-	}
+	f := seedPendingActivation(t, contract, nil)
 	hubBefore, cellBefore := len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot())
 	wrongCredential := "different-high-entropy-enrollment-credential"
 	_, _, err := RegisterAgentRuntime(context.Background(), wrongCredential, f.store, f.options()...)
@@ -1563,14 +1566,7 @@ func TestRegisterAgentRuntime_PendingActivationCorruptionAndChangedCredentialFai
 		},
 	} {
 		t.Run("metadata "+test.name, func(t *testing.T) {
-			f := newRuntimeFixture(t,
-				[]runtimeUDPStep{{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: contract.InitialAssignment.Result.BodyJSON}},
-				[]runtimeUDPStep{{requestType: relayknock.TypeRegister, noReply: true}},
-			)
-			_, _, firstErr := RegisterAgentRuntime(context.Background(), conformance.AgentAssignmentBootstrapCredentialFixture, f.store, test.seedOpts(f)...)
-			if !errors.Is(firstErr, ErrRegistrationRecoveryRequired) {
-				t.Fatalf("seed pending activation: %v", firstErr)
-			}
+			f := seedPendingActivation(t, contract, test.seedOpts)
 			hubBefore, cellBefore := len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot())
 			_, _, err := RegisterAgentRuntime(context.Background(), conformance.AgentAssignmentBootstrapCredentialFixture, f.store, test.resumeOpts(f)...)
 			if !errors.Is(err, ErrInvalidRegisterConfig) {
@@ -1658,8 +1654,7 @@ func TestRegisterAgentRuntime_AmbiguousREGCancellationDuringBackoffPreservesPend
 
 func TestRegisterAgentRuntime_ReenrollsOnceOnExpiredAssignmentTicket(t *testing.T) {
 	contract := loadAssignmentFixture(t)
-	secondAssignment := strings.Replace(contract.InitialAssignment.Result.BodyJSON,
-		"conformance-assignment-ticket-0001", "conformance-assignment-ticket-0002", 1)
+	secondAssignment := bootstrapAssignmentResult(contract, "conformance-assignment-ticket-0002")
 	f := newRuntimeFixture(t,
 		[]runtimeUDPStep{
 			{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: contract.InitialAssignment.Result.BodyJSON},
@@ -1690,10 +1685,8 @@ func TestRegisterAgentRuntime_ReenrollsOnceOnExpiredAssignmentTicket(t *testing.
 func TestRegisterAgentRuntime_StopsAfterOneReplacementOnConsecutiveNonCommitVerdicts(t *testing.T) {
 	contract := loadAssignmentFixture(t)
 	t.Run("unattended 52111", func(t *testing.T) {
-		secondAssignment := strings.Replace(contract.InitialAssignment.Result.BodyJSON,
-			"conformance-assignment-ticket-0001", "conformance-assignment-ticket-0002", 1)
-		thirdAssignment := strings.Replace(contract.InitialAssignment.Result.BodyJSON,
-			"conformance-assignment-ticket-0001", "conformance-assignment-ticket-0003", 1)
+		secondAssignment := bootstrapAssignmentResult(contract, "conformance-assignment-ticket-0002")
+		thirdAssignment := bootstrapAssignmentResult(contract, "conformance-assignment-ticket-0003")
 		f := newRuntimeFixture(t,
 			[]runtimeUDPStep{
 				{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: contract.InitialAssignment.Result.BodyJSON},
@@ -1770,8 +1763,7 @@ func TestRegisterAgentRuntime_StopsAfterOneReplacementOnConsecutiveNonCommitVerd
 
 func TestRegisterAgentRuntime_ReplacementPendingSaveFailurePreservesOldTicket(t *testing.T) {
 	contract := loadAssignmentFixture(t)
-	secondAssignment := strings.Replace(contract.InitialAssignment.Result.BodyJSON,
-		"conformance-assignment-ticket-0001", "conformance-assignment-ticket-0002", 1)
+	secondAssignment := bootstrapAssignmentResult(contract, "conformance-assignment-ticket-0002")
 	f := newRuntimeFixture(t,
 		[]runtimeUDPStep{
 			{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: contract.InitialAssignment.Result.BodyJSON},
@@ -1795,8 +1787,7 @@ func TestRegisterAgentRuntime_ReplacementPendingSaveFailurePreservesOldTicket(t 
 
 func TestRegisterAgentRuntime_ReplacementPendingPostCommitErrorReplaysNewTicket(t *testing.T) {
 	contract := loadAssignmentFixture(t)
-	secondAssignment := strings.Replace(contract.InitialAssignment.Result.BodyJSON,
-		"conformance-assignment-ticket-0001", "conformance-assignment-ticket-0002", 1)
+	secondAssignment := bootstrapAssignmentResult(contract, "conformance-assignment-ticket-0002")
 	f := newRuntimeFixture(t,
 		[]runtimeUDPStep{
 			{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: contract.InitialAssignment.Result.BodyJSON},
@@ -2134,6 +2125,11 @@ func accountAssignmentResult(contract *conformance.AgentAssignmentFile, ticket s
 		`"key_kind":"bootstrap"`, `"key_kind":"account"`,
 		"conformance-assignment-ticket-0001", ticket,
 	).Replace(contract.InitialAssignment.Result.BodyJSON)
+}
+
+func bootstrapAssignmentResult(contract *conformance.AgentAssignmentFile, ticket string) string {
+	return strings.Replace(contract.InitialAssignment.Result.BodyJSON,
+		"conformance-assignment-ticket-0001", ticket, 1)
 }
 
 func TestRegisterAgentRuntime_FinalSaveFailureKeepsCandidateRecoverable(t *testing.T) {
