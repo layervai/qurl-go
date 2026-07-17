@@ -209,7 +209,7 @@ func validateLoadedAgentAssignment(state *AgentState) error {
 		if pending.CellID != state.Assignment.CellID || pending.AssignmentGeneration != state.Assignment.AssignmentGeneration {
 			return fmt.Errorf("%w: pending completion does not match the persisted assignment", ErrInvalidAgentState)
 		}
-		if state.PendingActivation != nil || state.RegisteredAt != nil || state.DeviceAPIKey != "" || state.DeviceAPIKeyID != "" {
+		if state.RegisteredAt != nil || state.DeviceAPIKey != "" || state.DeviceAPIKeyID != "" {
 			return fmt.Errorf("%w: pending completion cannot coexist with a completed device credential", ErrInvalidAgentState)
 		}
 	}
