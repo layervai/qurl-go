@@ -176,6 +176,17 @@ func TestOpenRegisteredAgent_RejectsRetiredLifecycleState(t *testing.T) {
 	}
 }
 
+func TestOpenRegisteredAgent_RevalidatesCustomStoreAssignment(t *testing.T) {
+	state := completedNativeTestState(t)
+	state.Assignment.Endpoint.Host = ""
+	store := &memoryAgentStateStore{state: state}
+
+	client, err := OpenRegisteredAgent(context.Background(), store)
+	if client != nil || !errors.Is(err, ErrInvalidClientConfig) || !errors.Is(err, ErrInvalidAgentState) {
+		t.Fatalf("custom-store assignment error = client %v, error %v; want ErrInvalidClientConfig and ErrInvalidAgentState", client, err)
+	}
+}
+
 func TestAgentRuntimeBinding_AccidentalCopySharesOneShotKey(t *testing.T) {
 	want := bytes.Repeat([]byte{0x5a}, 32)
 	binding := &AgentRuntimeBinding{deviceStaticPrivateKey: newAgentRuntimePrivateKey(bytes.Clone(want))}
