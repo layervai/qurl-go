@@ -272,6 +272,11 @@ before deciding whether a pending activation or completion candidate exists.
 
 The lifecycle separates retryable transport from security-sensitive mutation:
 
+A single call can consume independent bounded budgets for the initial Hub
+assignment, first REG, replacement Hub assignment, second REG, and completion.
+Callers that need a smaller aggregate ceiling must set an outer context
+deadline.
+
 - Hub assignment uses one bounded transaction budget. Authenticated rate-limit
   advice may delay and retry within that budget.
 - The exact pending activation is durable before the first REG. Resolution and
