@@ -31,10 +31,12 @@ import (
 const canonicalNativeDeviceCredential = "lv_live_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
 
 type runtimeUDPStep struct {
-	requestType int
-	replyType   int
-	replyBody   string
-	noReply     bool
+	requestType       int
+	replyType         int
+	replyBody         string
+	reknockCookie     []byte
+	replyCounterDelta uint64
+	noReply           bool
 }
 
 type runtimeUDPRequest struct {
@@ -84,13 +86,20 @@ func (s *runtimeUDPServer) serve() {
 		if err != nil {
 			return
 		}
-		opened, err := relayknocktest.OpenInitiatorMessage(s.serverPriv, s.agentPub, bytes.Clone(buffer[:n]))
+		s.mu.Lock()
+		index := len(s.requests)
+		s.mu.Unlock()
+		var opened *relayknock.Reply
+		if index < len(s.steps) && s.steps[index].requestType == relayknock.TypeReknock {
+			opened, err = relayknocktest.OpenReknockMessage(s.serverPriv, s.agentPub, s.steps[index].reknockCookie, bytes.Clone(buffer[:n]))
+		} else {
+			opened, err = relayknocktest.OpenInitiatorMessage(s.serverPriv, s.agentPub, bytes.Clone(buffer[:n]))
+		}
 		if err != nil {
 			s.t.Errorf("open runtime request: %v", err)
 			continue
 		}
 		s.mu.Lock()
-		index := len(s.requests)
 		s.requests = append(s.requests, runtimeUDPRequest{typeID: opened.Type, body: bytes.Clone(opened.Body)})
 		s.mu.Unlock()
 		if index >= len(s.steps) {
@@ -104,14 +113,18 @@ func (s *runtimeUDPServer) serve() {
 		if step.noReply {
 			continue
 		}
+		replyBody := step.replyBody
+		if step.replyType == relayknock.TypeCookieChallenge && len(step.reknockCookie) != 0 {
+			replyBody = fmt.Sprintf(`{"trxId":%d,"cookie":%q}`, opened.Counter, base64.StdEncoding.EncodeToString(step.reknockCookie))
+		}
 		packet, err := relayknocktest.BuildReply(step.replyType, &relayknock.KnockInputs{
 			DeviceStaticPriv: s.serverPriv,
 			ServerStaticPub:  s.agentPub,
 			EphemeralPriv:    bytes.Repeat([]byte{byte(0x40 + index)}, 32),
 			TimestampNanos:   uint64(assignmentFixtureNow.UnixNano()) + uint64(index),
-			Counter:          opened.Counter,
+			Counter:          opened.Counter + step.replyCounterDelta,
 			Preamble:         uint32(0x50607080 + index),
-			Body:             []byte(step.replyBody),
+			Body:             []byte(replyBody),
 		})
 		if err != nil {
 			s.t.Errorf("build runtime reply: %v", err)
@@ -854,6 +867,112 @@ func TestKnockRegisteredAgent_UsesAuthoritativeAssignedCell(t *testing.T) {
 	requests := f.cellUDP.snapshot()
 	if len(requests) != 1 || requests[0].typeID != relayknock.TypeKnock {
 		t.Fatalf("native knock requests = %v", requests)
+	}
+}
+
+func TestKnockRegisteredAgent_CookieChallengeUsesOneReknockWithSameSessionIdentity(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	cookie := bytes.Repeat([]byte{0x7a}, 32)
+	knockBody := `{"errCode":"0","resHost":{"resource-public-key":"frps.cell0.example:7000"},"opnTime":900,"agentAddr":"203.0.113.9:49152","acTokens":{"resource-public-key":"ac-secret"},"preActions":{"resource-public-key":null}}`
+	f := newRuntimeFixture(t, nil, []runtimeUDPStep{
+		{requestType: relayknock.TypeKnock, replyType: relayknock.TypeCookieChallenge, reknockCookie: cookie, replyCounterDelta: 1},
+		{requestType: relayknock.TypeReknock, replyType: relayknock.TypeACK, replyBody: knockBody, reknockCookie: cookie},
+	})
+	assignment := &AgentAssignment{
+		CellID: "cell0", AssignmentGeneration: 1, EndpointRevision: 1, LeaseExpiresAt: time.Now().Add(time.Hour),
+		Endpoint: NHPUDPEndpoint{Host: "cell0.nhp.layerv.ai", Port: standardNHPUDPPort, ServerPublicKeyB64: base64.StdEncoding.EncodeToString(assignmentHex(t, contract.Keys.AssignedCell.StaticPubHex))},
+	}
+	binding := &AgentRuntimeBinding{
+		AgentID: "agent-conform", PublicKeyB64: base64.StdEncoding.EncodeToString(assignmentHex(t, contract.Keys.Agent.StaticPubHex)), CellID: assignment.CellID, AssignmentGeneration: assignment.AssignmentGeneration,
+		EndpointRevision: assignment.EndpointRevision, LeaseExpiresAt: assignment.LeaseExpiresAt, NHPUDPEndpoint: assignment.Endpoint,
+		authoritativeAgentID: "agent-conform", authoritativePublicKeyB64: base64.StdEncoding.EncodeToString(assignmentHex(t, contract.Keys.Agent.StaticPubHex)),
+		authoritativeAssignment: assignment.clone(),
+	}
+	privateKey := assignmentHex(t, contract.Keys.Agent.StaticPrivHex)
+	defer wipeBytes(privateKey)
+	if _, err := KnockRegisteredAgent(context.Background(), binding, privateKey, "resource-public-key", NativeKnockOptions{RunID: "0123456789abcdef"},
+		WithAgentRuntimeUDPResolver(f.resolver), WithAgentRuntimeUDPDialer(f.dialer), WithAgentRuntimeUDPBounds(time.Second, 1)); err != nil {
+		t.Fatalf("KnockRegisteredAgent COK→RKN: %v", err)
+	}
+	requests := f.cellUDP.snapshot()
+	if len(requests) != 2 || requests[0].typeID != relayknock.TypeKnock || requests[1].typeID != relayknock.TypeReknock {
+		t.Fatalf("session packet types = %#v, want KNK then exactly one RKN", requests)
+	}
+	var knk, rkn nativeAgentKnockBody
+	if err := json.Unmarshal(requests[0].body, &knk); err != nil {
+		t.Fatalf("decode KNK body: %v", err)
+	}
+	if err := json.Unmarshal(requests[1].body, &rkn); err != nil {
+		t.Fatalf("decode RKN body: %v", err)
+	}
+	if knk.HeaderType != nhpKNKHeaderType || rkn.HeaderType != nhpRKNHeaderType || knk.UserID != rkn.UserID || knk.DeviceID != rkn.DeviceID || knk.AuthServiceID != rkn.AuthServiceID || knk.KnockResourceID != rkn.KnockResourceID || knk.RunID != rkn.RunID {
+		t.Fatalf("KNK/RKN session bodies drifted: knk=%#v rkn=%#v", knk, rkn)
+	}
+}
+
+func TestKnockRegisteredAgent_MalformedCookieChallengeFailsWithoutReknock(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	f := newRuntimeFixture(t, nil, []runtimeUDPStep{{
+		requestType: relayknock.TypeKnock,
+		replyType:   relayknock.TypeCookieChallenge,
+		replyBody:   `{"trxId":0,"cookie":"***"}`,
+	}})
+	assignment := &AgentAssignment{
+		CellID: "cell0", AssignmentGeneration: 1, EndpointRevision: 1, LeaseExpiresAt: time.Now().Add(time.Hour),
+		Endpoint: NHPUDPEndpoint{Host: "cell0.nhp.layerv.ai", Port: standardNHPUDPPort, ServerPublicKeyB64: base64.StdEncoding.EncodeToString(assignmentHex(t, contract.Keys.AssignedCell.StaticPubHex))},
+	}
+	binding := &AgentRuntimeBinding{
+		AgentID: "agent-conform", PublicKeyB64: base64.StdEncoding.EncodeToString(assignmentHex(t, contract.Keys.Agent.StaticPubHex)), CellID: assignment.CellID, AssignmentGeneration: assignment.AssignmentGeneration,
+		EndpointRevision: assignment.EndpointRevision, LeaseExpiresAt: assignment.LeaseExpiresAt, NHPUDPEndpoint: assignment.Endpoint,
+		authoritativeAgentID: "agent-conform", authoritativePublicKeyB64: base64.StdEncoding.EncodeToString(assignmentHex(t, contract.Keys.Agent.StaticPubHex)),
+		authoritativeAssignment: assignment.clone(),
+	}
+	privateKey := assignmentHex(t, contract.Keys.Agent.StaticPrivHex)
+	defer wipeBytes(privateKey)
+	_, err := KnockRegisteredAgent(context.Background(), binding, privateKey, "resource-public-key", NativeKnockOptions{RunID: "0123456789abcdef"},
+		WithAgentRuntimeUDPResolver(f.resolver), WithAgentRuntimeUDPDialer(f.dialer), WithAgentRuntimeUDPBounds(time.Second, 1))
+	if !errors.Is(err, ErrMalformedReply) {
+		t.Fatalf("malformed COK error = %v, want ErrMalformedReply", err)
+	}
+	requests := waitRuntimeUDPRequests(t, f.cellUDP, 1)
+	if len(requests) != 1 || requests[0].typeID != relayknock.TypeKnock {
+		t.Fatalf("malformed COK session packets = %#v, want exactly one KNK", requests)
+	}
+}
+
+func TestExitRegisteredAgentSession_UsesEXTAndDoesNotChangeBinding(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	ackBody := `{"errCode":"0","resHost":{"resource-public-key":"frps.cell0.example:7000"},"opnTime":1,"agentAddr":"203.0.113.9:49152","acTokens":{"resource-public-key":"ac-secret"},"preActions":{"resource-public-key":null}}`
+	f := newRuntimeFixture(t, nil, []runtimeUDPStep{{requestType: relayknock.TypeExit, replyType: relayknock.TypeACK, replyBody: ackBody}})
+	assignment := &AgentAssignment{
+		CellID: "cell0", AssignmentGeneration: 1, EndpointRevision: 1, LeaseExpiresAt: time.Now().Add(time.Hour),
+		Endpoint: NHPUDPEndpoint{Host: "cell0.nhp.layerv.ai", Port: standardNHPUDPPort, ServerPublicKeyB64: base64.StdEncoding.EncodeToString(assignmentHex(t, contract.Keys.AssignedCell.StaticPubHex))},
+	}
+	binding := &AgentRuntimeBinding{
+		AgentID: "agent-conform", PublicKeyB64: base64.StdEncoding.EncodeToString(assignmentHex(t, contract.Keys.Agent.StaticPubHex)), CellID: assignment.CellID, AssignmentGeneration: assignment.AssignmentGeneration,
+		EndpointRevision: assignment.EndpointRevision, LeaseExpiresAt: assignment.LeaseExpiresAt, NHPUDPEndpoint: assignment.Endpoint,
+		authoritativeAgentID: "agent-conform", authoritativePublicKeyB64: base64.StdEncoding.EncodeToString(assignmentHex(t, contract.Keys.Agent.StaticPubHex)),
+		authoritativeAssignment: assignment.clone(),
+	}
+	privateKey := assignmentHex(t, contract.Keys.Agent.StaticPrivHex)
+	defer wipeBytes(privateKey)
+	if err := ExitRegisteredAgentSession(context.Background(), binding, privateKey, "resource-public-key", NativeKnockOptions{RunID: "0123456789abcdef"},
+		WithAgentRuntimeUDPResolver(f.resolver), WithAgentRuntimeUDPDialer(f.dialer), WithAgentRuntimeUDPBounds(time.Second, 1)); err != nil {
+		t.Fatalf("ExitRegisteredAgentSession: %v", err)
+	}
+	requests := f.cellUDP.snapshot()
+	if len(requests) != 1 || requests[0].typeID != relayknock.TypeExit {
+		t.Fatalf("exit packet types = %#v, want one EXT", requests)
+	}
+	var ext nativeAgentKnockBody
+	if err := json.Unmarshal(requests[0].body, &ext); err != nil {
+		t.Fatalf("decode EXT body: %v", err)
+	}
+	if ext.HeaderType != nhpEXTHeaderType || ext.RunID != "0123456789abcdef" {
+		t.Fatalf("EXT body = %#v, want header type %d and caller RunID", ext, nhpEXTHeaderType)
+	}
+	if binding.assignment() == nil || binding.CellID != "cell0" || binding.AssignmentGeneration != 1 || binding.EndpointRevision != 1 {
+		t.Fatalf("clean exit mutated durable binding: %#v", binding)
 	}
 }
 

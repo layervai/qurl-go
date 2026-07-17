@@ -1,10 +1,14 @@
 package nativeudp
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/netip"
 	"strconv"
@@ -127,6 +131,35 @@ func Knock(ctx context.Context, ep Endpoint, body []byte, opts Options) (*relayk
 	return Exchange(ctx, ep, relayknock.TypeKnock, body, opts)
 }
 
+// KnockWithReknock performs the native registered-agent admission sequence. A
+// direct NHP_ACK completes the initial KNK. An authenticated NHP_COK is strictly
+// decoded and correlated through body.trxId to the KNK request counter, then its
+// exact decoded 32-byte cookie is mixed into a fresh NHP_RKN whose only accepted
+// reply is an echoed-counter NHP_ACK. COK's outer wire counter is deliberately
+// unconstrained; no other transition permits COK.
+//
+// knockBody and reknockBody are already-serialized application bodies. The
+// transport does not rewrite headerType inside those authenticated bodies; the
+// qurl registered-agent layer constructs the immutable identity/resource/RunID
+// pair with outer types KNK and RKN respectively.
+func KnockWithReknock(ctx context.Context, ep Endpoint, knockBody, reknockBody []byte, opts Options) (*relayknock.Reply, error) {
+	reply, knockCounter, err := exchange(ctx, ep, relayknock.TypeKnock, knockBody, nil, opts)
+	if err != nil {
+		return nil, err
+	}
+	if !reply.IsCookieChallenge() {
+		return reply, nil
+	}
+	cookie, err := parseCookieChallenge(reply.Body, knockCounter)
+	cryptoutil.Wipe(reply.Body)
+	if err != nil {
+		return nil, err
+	}
+	defer cryptoutil.Wipe(cookie)
+	reply, _, err = exchange(ctx, ep, relayknock.TypeReknock, reknockBody, cookie, opts)
+	return reply, err
+}
+
 // List sends an NHP_LST to the configured endpoint over native UDP and returns
 // the authenticated NHP_LRT. NHP_LST never accepts NHP_COK; a handler-budget or
 // pre-handler overload miss is observed as a timeout and belongs to the caller's
@@ -139,6 +172,14 @@ func List(ctx context.Context, ep Endpoint, body []byte, opts Options) (*relaykn
 // the authenticated reply. See Exchange for the full contract.
 func Register(ctx context.Context, ep Endpoint, body []byte, opts Options) (*relayknock.Reply, error) {
 	return Exchange(ctx, ep, relayknock.TypeRegister, body, opts)
+}
+
+// Exit sends one NHP_EXT clean-exit transaction to the assigned endpoint. It
+// accepts only an authenticated NHP_ACK whose counter echoes EXT; NHP_COK is not
+// valid for this transition.
+func Exit(ctx context.Context, ep Endpoint, body []byte, opts Options) (*relayknock.Reply, error) {
+	reply, _, err := exchange(ctx, ep, relayknock.TypeExit, body, nil, opts)
+	return reply, err
 }
 
 // SendOTP sends exactly one fire-and-forget NHP_OTP datagram to the first
@@ -162,7 +203,7 @@ func SendOTP(ctx context.Context, ep Endpoint, body []byte, opts Options) error 
 		return fmt.Errorf("%w: application body of %d bytes exceeds the %d-byte NHP maximum", ErrInvalidRequest, len(body), nhpcontract.MaxApplicationBodySize)
 	}
 
-	packet, _, err := buildPacket(relayknock.TypeOTP, ep.ServerStaticPub, opts.DeviceStaticPriv, body)
+	packet, _, err := buildPacket(relayknock.TypeOTP, ep.ServerStaticPub, opts.DeviceStaticPriv, body, nil)
 	if err != nil {
 		return err
 	}
@@ -219,44 +260,156 @@ func SendOTP(ctx context.Context, ep Endpoint, body []byte, opts Options) error 
 // assigned name and the packet is sealed to the pinned server key, so an extra
 // poisoned A/AAAA record cannot decrypt it.
 func Exchange(ctx context.Context, ep Endpoint, headerType int, body []byte, opts Options) (*relayknock.Reply, error) {
+	reply, _, err := exchange(ctx, ep, headerType, body, nil, opts)
+	return reply, err
+}
+
+func exchange(ctx context.Context, ep Endpoint, headerType int, body, cookie []byte, opts Options) (*relayknock.Reply, uint64, error) {
 	if err := ctxErr(ctx); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	if err := validateHeaderType(headerType); err != nil {
-		return nil, err
+	if err := validateHeaderType(headerType, cookie); err != nil {
+		return nil, 0, err
 	}
 	if err := validateEndpoint(ep); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if len(opts.DeviceStaticPriv) != x25519key.Size {
-		return nil, fmt.Errorf("%w: device static private key must be %d bytes", ErrInvalidRequest, x25519key.Size)
+		return nil, 0, fmt.Errorf("%w: device static private key must be %d bytes", ErrInvalidRequest, x25519key.Size)
 	}
 	// Explicit pre-I/O packet-size bound: the aggregate encoded body must fit the
 	// NHP plaintext ceiling. BuildMessage re-checks the sealed size, but bounding
 	// here keeps the size contract explicit before any socket work.
 	if len(body) > nhpcontract.MaxApplicationBodySize {
-		return nil, fmt.Errorf("%w: application body of %d bytes exceeds the %d-byte NHP maximum", ErrInvalidRequest, len(body), nhpcontract.MaxApplicationBodySize)
+		return nil, 0, fmt.Errorf("%w: application body of %d bytes exceeds the %d-byte NHP maximum", ErrInvalidRequest, len(body), nhpcontract.MaxApplicationBodySize)
 	}
 
-	packet, counter, err := buildPacket(headerType, ep.ServerStaticPub, opts.DeviceStaticPriv, body)
+	packet, counter, err := buildPacket(headerType, ep.ServerStaticPub, opts.DeviceStaticPriv, body, cookie)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	// The built packet must fit the fixed receive buffer of the reference server.
 	if len(packet) > nhpwire.PacketBufferSize {
-		return nil, fmt.Errorf("%w: packet of %d bytes exceeds the %d-byte NHP buffer", ErrInvalidRequest, len(packet), nhpwire.PacketBufferSize)
+		return nil, 0, fmt.Errorf("%w: packet of %d bytes exceeds the %d-byte NHP buffer", ErrInvalidRequest, len(packet), nhpwire.PacketBufferSize)
 	}
 
 	addrs, err := resolveAddresses(ctx, ep.Host, opts)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	reply, err := sendToAddresses(ctx, addrs, ep.Port, packet, opts)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	return decryptAndCorrelate(opts.DeviceStaticPriv, ep.ServerStaticPub, headerType, counter, reply)
+	opened, err := decryptAndCorrelate(opts.DeviceStaticPriv, ep.ServerStaticPub, headerType, counter, reply)
+	return opened, counter, err
+}
+
+type cookieChallengeBody struct {
+	TransactionID uint64
+	Cookie        string
+}
+
+const (
+	cookieRejectBodyParse = "body_parse"
+	cookieRejectEncoding  = "cookie_encoding"
+	cookieRejectLength    = "cookie_length"
+	cookieRejectCanonical = "cookie_canonical"
+	cookieRejectCounter   = "counter"
+)
+
+type cookieChallengeError struct {
+	rejectClass string
+	detail      string
+}
+
+func (e *cookieChallengeError) Error() string {
+	return "nativeudp: malformed cookie challenge (" + e.rejectClass + "): " + e.detail
+}
+
+func (e *cookieChallengeError) Unwrap() error { return relayknock.ErrMalformedReply }
+
+func rejectCookieChallenge(class, detail string) error {
+	return &cookieChallengeError{rejectClass: class, detail: detail}
+}
+
+// parseCookieChallenge is a dedicated closed parser rather than an ordinary
+// json.Unmarshal: COK is authenticated server input and the v0.6 contract
+// rejects duplicate/unknown keys, nulls, trailing values, non-canonical base64,
+// and transaction mismatch before RKN can be emitted.
+func parseCookieChallenge(body []byte, requestCounter uint64) ([]byte, error) {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	first, err := dec.Token()
+	if err != nil || first != json.Delim('{') {
+		return nil, rejectCookieChallenge(cookieRejectBodyParse, "body must be one JSON object")
+	}
+	var parsed cookieChallengeBody
+	seen := make(map[string]struct{}, 2)
+	for dec.More() {
+		token, err := dec.Token()
+		if err != nil {
+			return nil, rejectCookieChallenge(cookieRejectBodyParse, "invalid object key")
+		}
+		key, ok := token.(string)
+		if !ok {
+			return nil, rejectCookieChallenge(cookieRejectBodyParse, "object key is not a string")
+		}
+		if _, duplicate := seen[key]; duplicate {
+			return nil, rejectCookieChallenge(cookieRejectBodyParse, "duplicate field")
+		}
+		seen[key] = struct{}{}
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			return nil, rejectCookieChallenge(cookieRejectBodyParse, "field has an invalid value")
+		}
+		switch key {
+		case "trxId":
+			if err := json.Unmarshal(raw, &parsed.TransactionID); err != nil {
+				return nil, rejectCookieChallenge(cookieRejectBodyParse, "trxId has an invalid type")
+			}
+		case "cookie":
+			if err := json.Unmarshal(raw, &parsed.Cookie); err != nil || parsed.Cookie == "" {
+				return nil, rejectCookieChallenge(cookieRejectBodyParse, "cookie has an invalid type")
+			}
+		default:
+			return nil, rejectCookieChallenge(cookieRejectBodyParse, "unknown field")
+		}
+	}
+	if _, err := dec.Token(); err != nil {
+		return nil, rejectCookieChallenge(cookieRejectBodyParse, "object is incomplete")
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return nil, rejectCookieChallenge(cookieRejectBodyParse, "trailing JSON")
+	}
+	if len(seen) != 2 {
+		return nil, rejectCookieChallenge(cookieRejectBodyParse, "missing required field")
+	}
+	if parsed.TransactionID != requestCounter {
+		return nil, rejectCookieChallenge(cookieRejectCounter, "transaction does not match the knock")
+	}
+	if bytes.IndexFunc([]byte(parsed.Cookie), func(r rune) bool {
+		return r == ' ' || r == '\t' || r == '\r' || r == '\n'
+	}) >= 0 {
+		return nil, rejectCookieChallenge(cookieRejectEncoding, "cookie is not strict base64")
+	}
+	cookie, err := base64.StdEncoding.Strict().DecodeString(parsed.Cookie)
+	if err != nil {
+		if raw, rawErr := base64.RawStdEncoding.Strict().DecodeString(parsed.Cookie); rawErr == nil && len(raw) == nhpwire.CookieSize {
+			cryptoutil.Wipe(raw)
+			return nil, rejectCookieChallenge(cookieRejectCanonical, "cookie is not canonical padded base64")
+		}
+		return nil, rejectCookieChallenge(cookieRejectEncoding, "cookie is not strict base64")
+	}
+	if len(cookie) != nhpwire.CookieSize {
+		cryptoutil.Wipe(cookie)
+		return nil, rejectCookieChallenge(cookieRejectLength, "cookie has the wrong decoded length")
+	}
+	if base64.StdEncoding.EncodeToString(cookie) != parsed.Cookie {
+		cryptoutil.Wipe(cookie)
+		return nil, rejectCookieChallenge(cookieRejectCanonical, "cookie is not canonical base64")
+	}
+	return cookie, nil
 }
 
 // sendToAddresses tries each resolved address in turn until one yields a datagram,
@@ -461,6 +614,8 @@ func replyTypeAllowed(requestType, replyType int) bool {
 	switch requestType {
 	case relayknock.TypeKnock:
 		return replyType == relayknock.TypeACK || replyType == relayknock.TypeCookieChallenge
+	case relayknock.TypeReknock, relayknock.TypeExit:
+		return replyType == relayknock.TypeACK
 	case relayknock.TypeListRequest:
 		return replyType == relayknock.TypeListResult
 	case relayknock.TypeRegister:
@@ -475,7 +630,7 @@ func replyTypeAllowed(requestType, replyType int) bool {
 // the packet and the counter a round-trip caller requires the reply to echo. The
 // ephemeral private key is wiped before returning; the device static private key
 // belongs to the caller and is not wiped here.
-func buildPacket(headerType int, serverStaticPub, devicePriv, body []byte) (packet []byte, counter uint64, err error) {
+func buildPacket(headerType int, serverStaticPub, devicePriv, body, cookie []byte) (packet []byte, counter uint64, err error) {
 	random, err := cryptoutil.RandomBytes(x25519key.Size + 8 + 4)
 	if err != nil {
 		return nil, 0, fmt.Errorf("%w: generate packet randomness: %w", ErrTransport, err)
@@ -494,6 +649,7 @@ func buildPacket(headerType int, serverStaticPub, devicePriv, body []byte) (pack
 		Counter:          counter,
 		Preamble:         preamble,
 		Body:             body,
+		Cookie:           cookie,
 	})
 	if err != nil {
 		// BuildMessage errors never quote key or body plaintext (they report only
@@ -634,13 +790,24 @@ func publicRoutableAddress(addr netip.Addr) bool {
 	return true
 }
 
-func validateHeaderType(headerType int) error {
+func validateHeaderType(headerType int, cookie []byte) error {
 	switch headerType {
 	case relayknock.TypeKnock, relayknock.TypeListRequest, relayknock.TypeRegister:
-		return nil
+		if len(cookie) == 0 {
+			return nil
+		}
+	case relayknock.TypeReknock:
+		if len(cookie) == nhpwire.CookieSize {
+			return nil
+		}
+	case relayknock.TypeExit:
+		if len(cookie) == 0 {
+			return nil
+		}
 	default:
-		return fmt.Errorf("%w: header type %d is not a native-UDP round-trip type (want TypeKnock, TypeListRequest, or TypeRegister)", ErrInvalidRequest, headerType)
+		return fmt.Errorf("%w: header type %d is not a native-UDP round-trip type", ErrInvalidRequest, headerType)
 	}
+	return fmt.Errorf("%w: header type %d has an invalid RKN cookie", ErrInvalidRequest, headerType)
 }
 
 func validateEndpoint(ep Endpoint) error {

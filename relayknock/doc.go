@@ -36,8 +36,10 @@
 // the one-way NHP_OTP. Its decoder admits the reply types NHP_ACK, NHP_LRT,
 // NHP_COK, and NHP_RAK. The HTTP helpers intentionally do not transport
 // NHP_LST/NHP_LRT; native assignment carries those packets directly over UDP.
-// No multi-packet flows: the re-knock/cookie-challenge answer (NHP_RKN) stays out
-// of scope, so a caller treats NHP_COK as "retry later".
+// The HTTP relay intentionally remains single-message: it does not perform
+// NHP_RKN or NHP_EXT. Native UDP exposes those registered-agent session-control
+// messages directly because the assigned cell, not the browser relay, owns that
+// session.
 //
 // # Egress-IP invariant
 //

@@ -10,15 +10,16 @@
 //
 // # Scope
 //
-// Round-trip initiator messages only: NHP_LST (answered exactly by NHP_LRT),
-// NHP_KNK (answered by NHP_ACK/NHP_COK), and NHP_REG (answered exactly by
-// NHP_RAK). LST and REG never accept a cookie challenge; handler-budget or
+// Round-trip initiator messages are NHP_LST (answered exactly by NHP_LRT),
+// NHP_KNK (answered directly by NHP_ACK or, once, by NHP_COK→NHP_RKN→NHP_ACK),
+// NHP_REG (answered exactly by NHP_RAK), and NHP_EXT (answered exactly by
+// NHP_ACK). LST and REG never accept a cookie challenge; handler-budget or
 // pre-handler overload shedding is a timeout owned by the caller's bounded
-// transaction retry. Transaction replies must echo the request counter. An
-// authenticated KNK→COK overload signal is classified before that ordinary
-// counter gate because its request and reply counters are intentionally
-// unconstrained relative to one another.
-// The re-knock/cookie-answer NHP_RKN and any exit message stay out of scope here.
+// transaction retry. RKN and EXT accept only an echoed-counter ACK. An
+// authenticated KNK→COK signal is classified before the ordinary counter gate
+// because its wire counter is deliberately unconstrained; the decrypted COK
+// body must instead carry the original KNK transaction id. The exact decoded
+// cookie is mixed into only the following RKN header digest.
 // The application body is opaque — a caller supplies already-serialized bytes
 // and interprets the decrypted authenticated reply body itself.
 //
@@ -41,5 +42,6 @@
 // golang.org/x/crypto (via the internal nhpwire codec). The transport reuses the
 // public relayknock initiator/reply API for all crypto; it adds only the UDP
 // socket handling, DNS resolution, deadlines, packet-size bounds, request/reply
-// correlation, cookie-challenge surfacing, cancellation, and secret scrubbing.
+// correlation, the bounded COK→RKN transition, cancellation, and secret
+// scrubbing. NHP_EXT is the matching one-round-trip clean-exit primitive.
 package nativeudp

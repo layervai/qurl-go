@@ -1448,48 +1448,92 @@ func (r NativeKnockResult) GoString() string { return r.String() }
 
 // KnockRegisteredAgent sends one caller-correlated NHP_KNK directly to the
 // binding's assigned cell and returns only the requested resource's admission.
-// It validates the live authority-provided assignment before DNS or socket I/O
-// and authenticates the reply against that assignment's server public key.
+// An authenticated COK produces exactly one RKN using the same immutable
+// agent/resource/RunID session identity and a body headerType of RKN; there is
+// no retry loop, HTTP fallback, or cross-cell fallback. It validates the live
+// authority-provided assignment before DNS or socket I/O and authenticates the
+// reply against that assignment's server public key.
 func KnockRegisteredAgent(ctx context.Context, binding *AgentRuntimeBinding, deviceStaticPrivateKey []byte, knockResourceID string, opts NativeKnockOptions, transportOpts ...AgentRuntimeUDPOption) (*NativeKnockResult, error) {
-	if binding == nil {
-		return nil, fmt.Errorf("%w: runtime binding must not be nil", ErrInvalidNativeKnockInput)
-	}
-	if len(deviceStaticPrivateKey) != x25519key.Size {
-		return nil, fmt.Errorf("%w: device static private key must be %d bytes", ErrInvalidNativeKnockInput, x25519key.Size)
-	}
-	if err := validateRuntimeBindingIdentity(binding, deviceStaticPrivateKey); err != nil {
+	cfg, endpoint, err := registeredAgentSessionEndpoint(binding, deviceStaticPrivateKey, transportOpts)
+	if err != nil {
 		return nil, err
-	}
-	cfg := defaultNativeAgentRuntimeConfig()
-	for _, opt := range transportOpts {
-		if opt == nil {
-			return nil, fmt.Errorf("%w: nil native UDP transport option", ErrInvalidNativeKnockInput)
-		}
-		if err := opt.applyAgentRuntimeOption(cfg); err != nil {
-			return nil, fmt.Errorf("%w: native UDP transport option: %w", ErrInvalidNativeKnockInput, err)
-		}
-	}
-	assignment := binding.assignment()
-	if assignment == nil || assignment.CellID != binding.CellID || assignment.AssignmentGeneration != binding.AssignmentGeneration || assignment.EndpointRevision != binding.EndpointRevision || assignment.Endpoint != binding.NHPUDPEndpoint {
-		return nil, fmt.Errorf("%w: runtime binding does not match its authoritative assignment", ErrInvalidNativeKnockInput)
-	}
-	if err := assignment.Validate(cfg.clock()); err != nil {
-		return nil, fmt.Errorf("%w: runtime assignment: %w", ErrInvalidNativeKnockInput, err)
 	}
 	body, err := marshalNativeKnockApplicationBody(binding.AgentID, knockResourceID, opts)
 	if err != nil {
 		return nil, err
 	}
 	defer wipeBytes(body)
-	endpoint, err := assignmentNativeEndpoint(assignment)
+	reknockBody, err := marshalNativeSessionApplicationBody(binding.AgentID, knockResourceID, opts, nhpRKNHeaderType)
 	if err != nil {
 		return nil, err
 	}
-	reply, err := nativeudp.Knock(ctx, endpoint, body, cfg.udpOptions(deviceStaticPrivateKey))
+	defer wipeBytes(reknockBody)
+	reply, err := nativeudp.KnockWithReknock(ctx, endpoint, body, reknockBody, cfg.udpOptions(deviceStaticPrivateKey))
 	if err != nil {
 		return nil, normalizeRelayError(err, ErrMalformedReply)
 	}
 	return consumeNativeAgentKnockReply(reply, knockResourceID)
+}
+
+// ExitRegisteredAgentSession sends one clean NHP_EXT for the caller-owned
+// registered-agent session. It uses the same validation and pinned assigned-cell
+// endpoint as KnockRegisteredAgent, never contacts the Hub or any HTTP surface,
+// and accepts only the authenticated EXT-correlated ACK. A successful ACK is
+// validated and wiped before this function returns; clean exit never changes
+// durable enrollment or assignment state.
+func ExitRegisteredAgentSession(ctx context.Context, binding *AgentRuntimeBinding, deviceStaticPrivateKey []byte, knockResourceID string, opts NativeKnockOptions, transportOpts ...AgentRuntimeUDPOption) error {
+	cfg, endpoint, err := registeredAgentSessionEndpoint(binding, deviceStaticPrivateKey, transportOpts)
+	if err != nil {
+		return err
+	}
+	body, err := marshalNativeSessionApplicationBody(binding.AgentID, knockResourceID, opts, nhpEXTHeaderType)
+	if err != nil {
+		return err
+	}
+	defer wipeBytes(body)
+	reply, err := nativeudp.Exit(ctx, endpoint, body, cfg.udpOptions(deviceStaticPrivateKey))
+	if err != nil {
+		return normalizeRelayError(err, ErrMalformedReply)
+	}
+	_, err = consumeNativeAgentKnockReply(reply, knockResourceID)
+	return err
+}
+
+// registeredAgentSessionEndpoint is the common no-I/O admission gate for
+// native KNK/RKN and EXT. It intentionally validates the binding snapshot
+// before body construction, DNS, or socket creation so every session-control
+// operation has the same trust and placement boundary.
+func registeredAgentSessionEndpoint(binding *AgentRuntimeBinding, deviceStaticPrivateKey []byte, transportOpts []AgentRuntimeUDPOption) (*nativeAgentRuntimeConfig, nativeudp.Endpoint, error) {
+	if binding == nil {
+		return nil, nativeudp.Endpoint{}, fmt.Errorf("%w: runtime binding must not be nil", ErrInvalidNativeKnockInput)
+	}
+	if len(deviceStaticPrivateKey) != x25519key.Size {
+		return nil, nativeudp.Endpoint{}, fmt.Errorf("%w: device static private key must be %d bytes", ErrInvalidNativeKnockInput, x25519key.Size)
+	}
+	if err := validateRuntimeBindingIdentity(binding, deviceStaticPrivateKey); err != nil {
+		return nil, nativeudp.Endpoint{}, err
+	}
+	cfg := defaultNativeAgentRuntimeConfig()
+	for _, opt := range transportOpts {
+		if opt == nil {
+			return nil, nativeudp.Endpoint{}, fmt.Errorf("%w: nil native UDP transport option", ErrInvalidNativeKnockInput)
+		}
+		if err := opt.applyAgentRuntimeOption(cfg); err != nil {
+			return nil, nativeudp.Endpoint{}, fmt.Errorf("%w: native UDP transport option: %w", ErrInvalidNativeKnockInput, err)
+		}
+	}
+	assignment := binding.assignment()
+	if assignment == nil || assignment.CellID != binding.CellID || assignment.AssignmentGeneration != binding.AssignmentGeneration || assignment.EndpointRevision != binding.EndpointRevision || assignment.Endpoint != binding.NHPUDPEndpoint {
+		return nil, nativeudp.Endpoint{}, fmt.Errorf("%w: runtime binding does not match its authoritative assignment", ErrInvalidNativeKnockInput)
+	}
+	if err := assignment.Validate(cfg.clock()); err != nil {
+		return nil, nativeudp.Endpoint{}, fmt.Errorf("%w: runtime assignment: %w", ErrInvalidNativeKnockInput, err)
+	}
+	endpoint, err := assignmentNativeEndpoint(assignment)
+	if err != nil {
+		return nil, nativeudp.Endpoint{}, err
+	}
+	return cfg, endpoint, nil
 }
 
 func validateRuntimeBindingIdentity(binding *AgentRuntimeBinding, deviceStaticPrivateKey []byte) error {

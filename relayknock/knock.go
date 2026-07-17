@@ -27,6 +27,7 @@ type KnockInputs struct {
 	Counter          uint64 // transaction id
 	Preamble         uint32 // HeaderCommon obfuscation preamble
 	Body             []byte // serialized, uncompressed application knock body
+	Cookie           []byte // exact 32-byte COK cookie for NHP_RKN; empty otherwise
 }
 
 // WireInputs converts the public KnockInputs into the nhpwire codec's Inputs. It
@@ -45,6 +46,7 @@ func (k *KnockInputs) WireInputs() *nhpwire.Inputs {
 		Counter:          k.Counter,
 		Preamble:         k.Preamble,
 		Body:             k.Body,
+		Cookie:           k.Cookie,
 	}
 }
 
@@ -56,8 +58,8 @@ func BuildKnock(inp *KnockInputs) ([]byte, error) {
 }
 
 // BuildMessage builds a complete NHP packet (240-byte header ‖ sealed body) of
-// the given initiator header type: TypeKnock, TypeListRequest, TypeOTP, or
-// TypeRegister. Any other type — in particular the server-originated reply types
+// the given initiator header type: TypeKnock, TypeListRequest, TypeReknock,
+// TypeOTP, TypeRegister, or TypeExit. Any other type — in particular the server-originated reply types
 // — fails closed: an agent never builds those, so rejecting them here keeps a
 // type mix-up from reaching the wire. (A server or test double answering a
 // request builds reply types with relayknock/relayknocktest.BuildReply instead.)
@@ -70,10 +72,10 @@ func BuildKnock(inp *KnockInputs) ([]byte, error) {
 // UDP.
 func BuildMessage(headerType int, inp *KnockInputs) ([]byte, error) {
 	switch headerType {
-	case TypeKnock, TypeListRequest, TypeOTP, TypeRegister:
+	case TypeKnock, TypeListRequest, TypeReknock, TypeOTP, TypeRegister, TypeExit:
 		return nhpwire.BuildMessage(headerType, inp.WireInputs())
 	default:
-		return nil, fmt.Errorf("unsupported initiator header type %d (want TypeKnock, TypeListRequest, TypeOTP, or TypeRegister)", headerType)
+		return nil, fmt.Errorf("unsupported initiator header type %d (want TypeKnock, TypeListRequest, TypeReknock, TypeOTP, TypeRegister, or TypeExit)", headerType)
 	}
 }
 
@@ -96,6 +98,10 @@ const (
 	// application body defines the query (for example, cell assignment); the wire
 	// codec deliberately does not interpret that body.
 	TypeListRequest = nhpwire.TypeLST
+	// TypeReknock is NHP_RKN: the answer to an authenticated overload cookie
+	// challenge. It carries the original knock application identity and mixes the
+	// decoded COK cookie into its header digest.
+	TypeReknock = nhpwire.TypeRKN
 	// TypeOTP is NHP_OTP: the one-way registration-bootstrap message (the NHP
 	// spec's agent one-time-password request). The server does not reply to OTP
 	// messages; a conforming relay acknowledges dispatch at the HTTP layer
@@ -104,6 +110,9 @@ const (
 	// TypeRegister is NHP_REG: the agent registration message; the server
 	// answers with an NHP_RAK.
 	TypeRegister = nhpwire.TypeREG
+	// TypeExit is NHP_EXT: a clean exit for an admitted native UDP session. The
+	// server answers it with an NHP_ACK and never an NHP_COK.
+	TypeExit = nhpwire.TypeEXT
 )
 
 // Exported NHP reply header-type values, so a consumer can construct or assert a
@@ -146,8 +155,8 @@ func (r *Reply) IsACK() bool { return r.Type == nhpwire.TypeACK }
 func (r *Reply) IsListResult() bool { return r.Type == nhpwire.TypeLRT }
 
 // IsCookieChallenge reports whether the reply is an NHP_COK overload
-// cookie-challenge. The NHP_RKN cookie-answer path is out of scope for a single
-// resolve, so a caller treats this as "retry later".
+// cookie-challenge. Native UDP callers that use KnockWithReknock consume the
+// challenge internally; raw single-message callers can inspect it directly.
 func (r *Reply) IsCookieChallenge() bool { return r.Type == nhpwire.TypeCOK }
 
 // IsRegisterAck reports whether the reply is an NHP_RAK — the server's reply to

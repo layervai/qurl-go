@@ -59,9 +59,15 @@ const (
 	TypeLST = 5  // NHP_LST: list/query request
 	TypeLRT = 6  // NHP_LRT: list/query result
 	TypeCOK = 7  // NHP_COK: overload cookie-challenge
+	TypeRKN = 8  // NHP_RKN: cookie-authenticated re-knock
 	TypeOTP = 12 // NHP_OTP: one-way OTP request
 	TypeREG = 13 // NHP_REG: registration
 	TypeRAK = 14 // NHP_RAK: registration reply
+	TypeEXT = 16 // NHP_EXT: clean session exit
+
+	// CookieSize is the exact decoded NHP_COK cookie length mixed into an
+	// NHP_RKN header digest.
+	CookieSize = 32
 )
 
 // setTypeAndPayloadSize writes the obfuscated type+size into HeaderCommon[0:8]:
@@ -101,8 +107,9 @@ func nonceForCounter(counter uint64) []byte {
 }
 
 // headerDigest is the unkeyed BLAKE2s(INITIAL_HASH ‖ peerStaticPub ‖
-// header[0:offDigest]) (Go addHeaderDigest). Integrity, not authentication — all
-// inputs are public.
-func headerDigest(peerStaticPub, header []byte) []byte {
-	return blake2sHash(initialHash, peerStaticPub, header[0:offDigest])
+// header[0:offDigest] ‖ cookie). cookie is empty for every message except RKN,
+// where it is the exact decoded 32-byte COK cookie. Integrity, not
+// authentication — all inputs are public.
+func headerDigest(peerStaticPub, header, cookie []byte) []byte {
+	return blake2sHash(initialHash, peerStaticPub, header[0:offDigest], cookie)
 }

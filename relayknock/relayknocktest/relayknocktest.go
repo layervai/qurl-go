@@ -49,7 +49,7 @@ func BuildReply(headerType int, inp *relayknock.KnockInputs) ([]byte, error) {
 }
 
 // OpenInitiatorMessage decrypts and authenticates an initiator packet (NHP_KNK /
-// NHP_LST / NHP_OTP / NHP_REG) in the responder role — the open a server (or a
+// NHP_LST / NHP_OTP / NHP_REG / NHP_EXT) in the responder role — the open a server (or a
 // test double standing in for one) performs on a packet an agent posted. It is
 // the mirror of relayknock.DecryptReply, which opens server replies from the
 // initiator side; the two split the role-symmetric transcript by which header
@@ -66,7 +66,7 @@ func OpenInitiatorMessage(serverPriv, expectedDevicePub, packet []byte) (*relayk
 		return nil, err
 	}
 	switch msg.Type {
-	case relayknock.TypeKnock, relayknock.TypeListRequest, relayknock.TypeOTP, relayknock.TypeRegister:
+	case relayknock.TypeKnock, relayknock.TypeListRequest, relayknock.TypeOTP, relayknock.TypeRegister, relayknock.TypeExit:
 		return &relayknock.Reply{
 			Type:           msg.Type,
 			Counter:        msg.Counter,
@@ -76,4 +76,23 @@ func OpenInitiatorMessage(serverPriv, expectedDevicePub, packet []byte) (*relayk
 	default:
 		return nil, fmt.Errorf("not an initiator message: header type %d is not an initiator type", msg.Type)
 	}
+}
+
+// OpenReknockMessage decrypts and authenticates an NHP_RKN initiator packet in
+// the responder role. cookie is the exact decoded 32-byte value previously sent
+// in NHP_COK; a wrong cookie fails the header-digest gate before body opening.
+func OpenReknockMessage(serverPriv, expectedDevicePub, cookie, packet []byte) (*relayknock.Reply, error) {
+	msg, err := nhpwire.DecryptReknockMessage(serverPriv, expectedDevicePub, cookie, packet)
+	if err != nil {
+		return nil, err
+	}
+	if msg.Type != relayknock.TypeReknock {
+		return nil, fmt.Errorf("not a re-knock message: header type %d is not TypeReknock", msg.Type)
+	}
+	return &relayknock.Reply{
+		Type:           msg.Type,
+		Counter:        msg.Counter,
+		TimestampNanos: msg.TimestampNanos,
+		Body:           msg.Body,
+	}, nil
 }

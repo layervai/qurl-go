@@ -54,6 +54,21 @@ type nativeAgentKnockBody struct {
 // assignment host or constructing any packet, preserving the mandatory
 // caller-owned RunID boundary independently of transport retries.
 func marshalNativeKnockApplicationBody(agentID, knockResourceID string, opts NativeKnockOptions) ([]byte, error) {
+	return marshalNativeSessionApplicationBody(agentID, knockResourceID, opts, nhpKNKHeaderType)
+}
+
+// marshalNativeSessionApplicationBody produces the protected application body
+// for exactly one registered-agent session-control packet. Its headerType is
+// part of the peer-authentication contract, not a cosmetic duplicate of the
+// outer packet type: a server rejects an RKN or EXT whose body says KNK. The
+// narrow allowlist means an internal caller cannot accidentally emit a body for
+// an unsupported initiator message.
+func marshalNativeSessionApplicationBody(agentID, knockResourceID string, opts NativeKnockOptions, headerType int) ([]byte, error) {
+	switch headerType {
+	case nhpKNKHeaderType, nhpRKNHeaderType, nhpEXTHeaderType:
+	default:
+		return nil, fmt.Errorf("%w: unsupported native session header type", ErrInvalidNativeKnockInput)
+	}
 	// Keep this first: an invalid or missing cycle identity must fail before any
 	// other native-knock work and the rejected value must never appear in an
 	// error. ValidateCycleRunID reports only the violated shape.
@@ -70,7 +85,7 @@ func marshalNativeKnockApplicationBody(agentID, knockResourceID string, opts Nat
 	// This scalar-only struct cannot currently make json.Marshal fail. Keep the
 	// error path explicit so adding a fallible field cannot silently weaken it.
 	body, err := json.Marshal(nativeAgentKnockBody{
-		HeaderType:      nhpKNKHeaderType,
+		HeaderType:      headerType,
 		UserID:          agentID,
 		DeviceID:        agentID,
 		AuthServiceID:   agentAspID,
