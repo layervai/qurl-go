@@ -18,7 +18,9 @@ import (
 // durably persists one pending device-secret candidate before sending completion,
 // so a crash or lost LRT reuses the same candidate and cannot mint a second
 // credential. A completed warm open should normally call
-// OpenRegisteredAgentRuntime, which performs no network I/O.
+// OpenRegisteredAgentRuntime, which performs no network I/O. Both warm-open
+// paths require a live assignment lease; after expiry, call RefreshAgentRuntime
+// instead of expecting RegisterAgentRuntime to return the completed binding.
 func RegisterAgentRuntime(ctx context.Context, enrollmentCredential string, store AgentStateStore, opts ...AgentRuntimeRegistrationOption) (*Client, *AgentRuntimeBinding, error) {
 	return registerNativeAgentRuntime(ctx, enrollmentCredential, store, opts)
 }

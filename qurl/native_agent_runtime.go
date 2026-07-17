@@ -581,7 +581,11 @@ func generateDeviceID() (string, error) {
 // runAssignmentLifecycle owns inter-transaction 52204 handling. One Hub
 // transaction deliberately returns an authenticated rate limit immediately;
 // this outer gate honors RetryAfter while keeping the whole lifecycle bounded by
-// the same configured attempts, budget, context, clock, and sleep policy.
+// the same configured budget, context, clock, and sleep policy. Attempt caps are
+// per level, but the retry classes are deliberately disjoint: authenticated
+// 52204 is inner-terminal, while transport/52200 failures are outer-terminal.
+// Therefore the caps cannot multiply; the shared elapsed budget is the final
+// hard bound. Keep that separation if another retryable class is introduced.
 func runAssignmentLifecycle[T any](ctx context.Context, options []AssignmentOption, exchange func(context.Context) (*T, error)) (*T, error) {
 	cfg, err := newAssignmentConfig(options)
 	if err != nil {
@@ -1280,6 +1284,9 @@ type nativeJSONStringMap struct {
 func (v *nativeJSONStringMap) UnmarshalJSON(data []byte) error {
 	v.Present = true
 	if isJSONNull(data) {
+		// Keep null distinguishable from an omitted field, but normalize it to an
+		// empty map. The downstream exact-key lookup then rejects it as malformed;
+		// null is never accepted as resource authorization data.
 		v.Value = nil
 		return nil
 	}
