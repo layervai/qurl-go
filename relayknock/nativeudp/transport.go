@@ -398,6 +398,7 @@ func parseCookieChallenge(body []byte, requestCounter uint64) ([]byte, error) {
 		return nil, rejectCookieChallenge(cookieRejectCounter, "transaction does not match the knock")
 	}
 	cookie := parsed.cookie
+	// Ownership transfers to the caller; the deferred local wipe becomes a no-op.
 	parsed.cookie = nil
 	return cookie, nil
 }

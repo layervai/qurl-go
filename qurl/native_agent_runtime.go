@@ -1505,6 +1505,8 @@ func ExitRegisteredAgentSession(ctx context.Context, binding *AgentRuntimeBindin
 	if err != nil {
 		return normalizeRelayError(err, ErrMalformedReply)
 	}
+	// v0.6 EXT ACK is the full, non-empty resource-admission envelope. Reuse
+	// strict parsing so authenticated replies without the required token/host fail.
 	_, err = consumeNativeAgentKnockReply(reply, knockResourceID)
 	return err
 }
