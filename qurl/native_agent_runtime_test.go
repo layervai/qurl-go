@@ -808,6 +808,26 @@ func TestRegisterAgentRuntime_RejectsIncompleteCredentialStateBeforeIO(t *testin
 	}
 }
 
+func TestRegisterAgentRuntime_InitialIdentitySaveUsesBindingPersistenceTaxonomy(t *testing.T) {
+	f := newRuntimeFixture(t, nil, nil)
+	inner, ok := f.store.inner.(fileAgentStateStore)
+	if !ok {
+		t.Fatalf("fixture store = %T, want fileAgentStateStore", f.store.inner)
+	}
+	if err := os.Remove(inner.path); err != nil {
+		t.Fatal(err)
+	}
+	f.store.fail = 1
+
+	_, _, err := RegisterAgentRuntime(context.Background(), conformance.AgentAssignmentBootstrapCredentialFixture, f.store, f.options()...)
+	if !errors.Is(err, ErrAgentBindingPersistence) {
+		t.Fatalf("initial identity save error = %v, want ErrAgentBindingPersistence", err)
+	}
+	if len(f.hubUDP.snapshot()) != 0 || len(f.cellUDP.snapshot()) != 0 {
+		t.Fatalf("initial identity save failure contacted Hub/cell: %d/%d", len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot()))
+	}
+}
+
 func TestRegisterAgentRuntime_RejectsNonCanonicalPersistedNativeAgentIDBeforeMutationOrIO(t *testing.T) {
 	contract := loadAssignmentFixture(t)
 	for name, agentID := range map[string]string{

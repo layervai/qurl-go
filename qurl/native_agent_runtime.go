@@ -400,6 +400,9 @@ func finishNativeRuntime(store AgentStateStore, state *AgentState, cfg *nativeAg
 	if err := validateAgentRuntimeMetadata(state, cfg.clock(), ErrInvalidRegisterConfig); err != nil {
 		return nil, nil, err
 	}
+	// Always decode a fresh binding-owned buffer. Registration and refresh may
+	// already hold a separate working copy whose deferred wipe must not erase the
+	// private key transferred to the returned binding.
 	privateKey, err := decodeRuntimePrivateKey(state, ErrInvalidRegisterConfig)
 	if err != nil {
 		return nil, nil, err
@@ -470,7 +473,7 @@ func (c *nativeAgentRuntimeConfig) registerLocked(ctx context.Context, enrollmen
 		}
 		state.SchemaVersion = agentStateSchemaVersion
 		if err := store.SaveAgentState(ctx, state); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("%w: save initial native identity: %w", ErrAgentBindingPersistence, err)
 		}
 	}
 
