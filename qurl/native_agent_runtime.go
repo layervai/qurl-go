@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"slices"
 	"strings"
 	"time"
@@ -409,7 +408,9 @@ func finishNativeRuntime(store AgentStateStore, state *AgentState, cfg *nativeAg
 	}
 	// Always decode a fresh binding-owned buffer. Registration and refresh may
 	// already hold a separate working copy whose deferred wipe must not erase the
-	// private key transferred to the returned binding.
+	// private key transferred to the returned binding. By contrast,
+	// openRegisteredAgentRuntime transfers its only decoded slice and nils that
+	// local owner before the deferred wipe.
 	privateKey, err := decodeRuntimePrivateKey(state, ErrInvalidRegisterConfig)
 	if err != nil {
 		return nil, nil, err
@@ -461,6 +462,8 @@ func (c *nativeAgentRuntimeConfig) registerLocked(ctx context.Context, enrollmen
 			if err := ensureAssignmentContinuity(state.Assignment, fresh); err != nil {
 				return nil, err
 			}
+			// The previous lease is expired and fresh is validated as live, so the
+			// assignment necessarily changed. Persist it before resuming completion.
 			state.Assignment = fresh.clone()
 			if err := store.SaveAgentState(ctx, state); err != nil {
 				return nil, fmt.Errorf("%w: save refreshed pending assignment: %w", ErrAgentBindingPersistence, err)
@@ -493,6 +496,8 @@ func (c *nativeAgentRuntimeConfig) registerLocked(ctx context.Context, enrollmen
 		if err != nil {
 			return nil, err
 		}
+		// A 52111 recovery obtains a wholly fresh Hub assignment, whose key kind
+		// may differ from the first response; enforce caller policy per response.
 		if err := c.requireAllowedRegistrationKeyKind(initial.Registration.KeyKind); err != nil {
 			return nil, err
 		}
@@ -1099,16 +1104,9 @@ func classifyCompletionError(envelope assignmentEnvelope, fields map[string]json
 	default:
 		return fmt.Errorf("%w: unknown completion errCode", ErrRegisterReplyMalformed)
 	}
-	_, retryPresent := fields["retryAfterSeconds"]
-	if retryPresent && !retryPermitted {
-		return fmt.Errorf("%w: retryAfterSeconds is forbidden for completion code %s", ErrRegisterReplyMalformed, envelope.ErrCode)
-	}
-	var retryAfter time.Duration
-	if retryPresent {
-		if envelope.RetryAfterSeconds == nil || *envelope.RetryAfterSeconds <= 0 || *envelope.RetryAfterSeconds > math.MaxInt64/int64(time.Second) {
-			return fmt.Errorf("%w: completion retryAfterSeconds must be a positive bounded integer", ErrRegisterReplyMalformed)
-		}
-		retryAfter = time.Duration(*envelope.RetryAfterSeconds) * time.Second
+	retryAfter, err := parseEnvelopeRetryAfter(envelope, fields, retryPermitted, false)
+	if err != nil {
+		return fmt.Errorf("%w: completion %s", ErrRegisterReplyMalformed, err.Error())
 	}
 	return &CompletionError{Code: envelope.ErrCode, RetryAfter: retryAfter, kind: kind}
 }

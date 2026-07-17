@@ -776,21 +776,35 @@ func classifyAssignmentApplicationError(envelope assignmentEnvelope, fields map[
 		return invalidAssignmentResponse("error LRT envelope", errors.New("unknown or phase-invalid errCode"))
 	}
 
-	_, retryPresent := fields["retryAfterSeconds"]
-	if retryRequired && !retryPresent {
-		return invalidAssignmentResponse("error LRT envelope", errors.New("retryAfterSeconds is required"))
-	}
-	if retryPresent && !retryPermitted {
-		return invalidAssignmentResponse("error LRT envelope", errors.New("retryAfterSeconds is forbidden for this code"))
-	}
-	var retryAfter time.Duration
-	if retryPresent {
-		if envelope.RetryAfterSeconds == nil || *envelope.RetryAfterSeconds <= 0 || *envelope.RetryAfterSeconds > math.MaxInt64/int64(time.Second) {
-			return invalidAssignmentResponse("error LRT envelope", errors.New("retryAfterSeconds must be a positive bounded integer"))
-		}
-		retryAfter = time.Duration(*envelope.RetryAfterSeconds) * time.Second
+	retryAfter, err := parseEnvelopeRetryAfter(envelope, fields, retryPermitted, retryRequired)
+	if err != nil {
+		return invalidAssignmentResponse("error LRT envelope", err)
 	}
 	return &AssignmentError{Code: envelope.ErrCode, RetryAfter: retryAfter, kind: kind}
+}
+
+// parseEnvelopeRetryAfter validates the authenticated LRT error body's
+// retryAfterSeconds wire grammar shared by every phase-specific classifier and
+// returns the bounded retry delay. retryPermitted/retryRequired describe the
+// code-specific grammar; the returned error is a plain reason the caller wraps
+// in its own phase-specific class. This is the single overflow guard for the
+// seconds-to-Duration conversion so the load-bearing bound cannot drift between
+// the assignment and completion classifiers.
+func parseEnvelopeRetryAfter(envelope assignmentEnvelope, fields map[string]json.RawMessage, retryPermitted, retryRequired bool) (time.Duration, error) {
+	_, retryPresent := fields["retryAfterSeconds"]
+	if retryRequired && !retryPresent {
+		return 0, errors.New("retryAfterSeconds is required")
+	}
+	if retryPresent && !retryPermitted {
+		return 0, errors.New("retryAfterSeconds is forbidden for this code")
+	}
+	if !retryPresent {
+		return 0, nil
+	}
+	if envelope.RetryAfterSeconds == nil || *envelope.RetryAfterSeconds <= 0 || *envelope.RetryAfterSeconds > math.MaxInt64/int64(time.Second) {
+		return 0, errors.New("retryAfterSeconds must be a positive bounded integer")
+	}
+	return time.Duration(*envelope.RetryAfterSeconds) * time.Second, nil
 }
 
 func parseWireAssignment(raw []byte, now time.Time) (*AgentAssignment, error) {
