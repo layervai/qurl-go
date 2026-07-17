@@ -141,6 +141,41 @@ func Register(ctx context.Context, ep Endpoint, body []byte, opts Options) (*rel
 	return Exchange(ctx, ep, relayknock.TypeRegister, body, opts)
 }
 
+// SendOTP sends exactly one fire-and-forget NHP_OTP datagram to the first
+// public address returned for ep.Host. NHP_OTP has no application reply, so a
+// successful UDP write proves only local dispatch, not server receipt or email
+// delivery. The function deliberately does not fall through to another DNS
+// address or retry the packet: duplicating a possibly delivered OTP request can
+// invalidate the first emailed code. A caller that wants another attempt must
+// start a new enrollment transaction and obtain a fresh assignment ticket.
+func SendOTP(ctx context.Context, ep Endpoint, body []byte, opts Options) error {
+	if err := ctxErr(ctx); err != nil {
+		return err
+	}
+	if err := validateEndpoint(ep); err != nil {
+		return err
+	}
+	if len(opts.DeviceStaticPriv) != x25519key.Size {
+		return fmt.Errorf("%w: device static private key must be %d bytes", ErrInvalidRequest, x25519key.Size)
+	}
+	if len(body) > nhpcontract.MaxApplicationBodySize {
+		return fmt.Errorf("%w: application body of %d bytes exceeds the %d-byte NHP maximum", ErrInvalidRequest, len(body), nhpcontract.MaxApplicationBodySize)
+	}
+
+	packet, _, err := buildPacket(relayknock.TypeOTP, ep.ServerStaticPub, opts.DeviceStaticPriv, body)
+	if err != nil {
+		return err
+	}
+	if len(packet) > nhpwire.PacketBufferSize {
+		return fmt.Errorf("%w: packet of %d bytes exceeds the %d-byte NHP buffer", ErrInvalidRequest, len(packet), nhpwire.PacketBufferSize)
+	}
+	addrs, err := resolveAddresses(ctx, ep.Host, opts)
+	if err != nil {
+		return err
+	}
+	return sendDatagram(ctx, addrs[0], ep.Port, packet, opts)
+}
+
 // Exchange performs one native-UDP NHP request/reply round trip: it builds a
 // packet of the given round-trip initiator header type (relayknock.TypeKnock,
 // relayknock.TypeListRequest, or relayknock.TypeRegister) for body with fresh
@@ -149,15 +184,20 @@ func Register(ctx context.Context, ep Endpoint, body []byte, opts Options) (*rel
 // ep.ServerStaticPub.
 //
 // The reply is accepted only when the NHP handshake authenticates the pinned
-// server public key. On top of that authentication Exchange enforces the same
-// correlation contract — the header's type and counter ride outside the AEAD,
-// so every authenticated reply must additionally echo this request's counter
-// and carry a type the request can elicit:
+// server public key. On top of that authentication Exchange enforces the native
+// profile's type/correlation contract — the header's type and counter ride
+// outside the AEAD, so every authenticated reply must carry a type the request
+// can elicit, and every completed transaction reply must additionally echo this
+// request's counter:
 //
-//   - NHP_LST accepts exactly NHP_LRT. It never accepts NHP_COK.
-//   - NHP_REG accepts NHP_RAK or NHP_COK; NHP_KNK accepts NHP_ACK or NHP_COK.
-//   - Any reply whose counter does not echo the request, including NHP_COK, or
-//     whose type is not a valid answer fails closed with
+//   - NHP_LST accepts exactly NHP_LRT and NHP_REG accepts exactly NHP_RAK.
+//     Neither request uses NHP_COK in the native profile.
+//   - NHP_KNK accepts NHP_ACK or NHP_COK. An authenticated NHP_COK is the
+//     retry-later overload signal and is returned before the ordinary counter
+//     gate because it is not a completed transaction; its request and reply
+//     counters are intentionally unconstrained relative to one another.
+//   - Any transaction reply whose counter does not echo the request, or any
+//     reply whose type is not a valid answer, fails closed with
 //     relayknock.ErrMalformedReply.
 //   - A datagram that does not open as an authenticated reply from the pinned key
 //     (wrong key, failed authentication, malformed/oversize body, non-reply type)
@@ -312,11 +352,63 @@ func sendOne(ctx context.Context, dialer Dialer, address string, packet []byte, 
 	return replyBuffer[:n], nil
 }
 
+func sendDatagram(ctx context.Context, addr netip.Addr, port int, packet []byte, opts Options) error {
+	dialer := opts.Dialer
+	if dialer == nil {
+		dialer = &net.Dialer{}
+	}
+	timeout := opts.Timeout
+	if timeout <= 0 {
+		timeout = DefaultTimeout
+	}
+	address := net.JoinHostPort(addr.String(), strconv.Itoa(port))
+	conn, err := dialer.DialContext(ctx, "udp", address)
+	if err != nil {
+		if cerr := ctxErr(ctx); cerr != nil {
+			return cerr
+		}
+		return fmt.Errorf("%w: dial %s: %w", ErrTransport, address, err)
+	}
+	defer func() { _ = conn.Close() }()
+	if cerr := ctxErr(ctx); cerr != nil {
+		return cerr
+	}
+	deadline := time.Now().Add(timeout)
+	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
+		deadline = d
+	}
+	if err := conn.SetDeadline(deadline); err != nil {
+		if cerr := ctxErr(ctx); cerr != nil {
+			return cerr
+		}
+		return fmt.Errorf("%w: set deadline for %s: %w", ErrTransport, address, err)
+	}
+	stop := context.AfterFunc(ctx, func() { _ = conn.SetDeadline(time.Now()) })
+	defer stop()
+	if cerr := ctxErr(ctx); cerr != nil {
+		return cerr
+	}
+	n, err := conn.Write(packet)
+	if err != nil {
+		if cerr := ctxErr(ctx); cerr != nil {
+			return cerr
+		}
+		return fmt.Errorf("%w: write to %s: %w", ErrTransport, address, err)
+	}
+	if n != len(packet) {
+		if cerr := ctxErr(ctx); cerr != nil {
+			return cerr
+		}
+		return fmt.Errorf("%w: write to %s: short datagram write: wrote %d of %d bytes", ErrTransport, address, n, len(packet))
+	}
+	return nil
+}
+
 // decryptAndCorrelate authenticates the reply against the pinned server key and
-// enforces the native request→reply correlation contract: exact counter echo,
-// then exact reply-type pairing. Native UDP is a direct connected datagram
-// exchange, so unlike the browser relay profile it never accepts an uncorrelated
-// cookie challenge.
+// enforces the native request→reply correlation contract. An authenticated COK
+// that the request type may receive is classified first because it is an
+// overload signal rather than a completed transaction. All transaction replies
+// require an exact counter echo and an allowed reply type.
 func decryptAndCorrelate(devicePriv, serverStaticPub []byte, requestType int, counter uint64, reply []byte) (*relayknock.Reply, error) {
 	// Explicit receive-side packet-size bound: a conforming server never exceeds
 	// the fixed NHP buffer, so an oversize datagram is a rejection, not something
@@ -334,11 +426,28 @@ func decryptAndCorrelate(devicePriv, serverStaticPub []byte, requestType int, co
 		// %w, because decrypt-stage failures must not also match ErrMalformedReply.
 		return nil, fmt.Errorf("%w: %s", ErrServerUnauthenticated, err.Error())
 	}
+	return correlateDecryptedReply(dr, requestType, counter)
+}
 
+func correlateDecryptedReply(dr *relayknock.Reply, requestType int, counter uint64) (*relayknock.Reply, error) {
+	if dr == nil {
+		return nil, fmt.Errorf("%w: decrypted reply is nil", relayknock.ErrMalformedReply)
+	}
+	// NHP_COK is not a completed transaction. The producer and shared
+	// conformance contract require a KNK cookie challenge to surface as the
+	// authenticated retry-later signal before the ordinary counter-echo gate;
+	// its valid request/reply counters are intentionally unconstrained. Keep the
+	// request-type predicate here so LST/REG cannot acquire COK support merely
+	// because DecryptReply recognizes the generic reply header.
+	if dr.IsCookieChallenge() && replyTypeAllowed(requestType, dr.Type) {
+		return dr, nil
+	}
 	if dr.Counter != counter {
+		cryptoutil.Wipe(dr.Body)
 		return nil, fmt.Errorf("%w: reply counter %d does not echo request counter %d", relayknock.ErrMalformedReply, dr.Counter, counter)
 	}
 	if !replyTypeAllowed(requestType, dr.Type) {
+		cryptoutil.Wipe(dr.Body)
 		return nil, fmt.Errorf("%w: reply type %d is not a valid reply to a type-%d request", relayknock.ErrMalformedReply, dr.Type, requestType)
 	}
 	return dr, nil
@@ -347,7 +456,7 @@ func decryptAndCorrelate(devicePriv, serverStaticPub []byte, requestType int, co
 // replyTypeAllowed reports whether an authenticated reply's header type is one the
 // given round-trip request type can legitimately elicit. It restates
 // native request→reply pairing (a list is answered only with NHP_LRT, a knock
-// with NHP_ACK/NHP_COK, and a registration with NHP_RAK/NHP_COK) so the type
+// with NHP_ACK/NHP_COK, and a registration only with NHP_RAK) so the type
 // field — which rides outside the AEAD — cannot be presented as a different
 // reply kind.
 func replyTypeAllowed(requestType, replyType int) bool {
@@ -357,7 +466,7 @@ func replyTypeAllowed(requestType, replyType int) bool {
 	case relayknock.TypeListRequest:
 		return replyType == relayknock.TypeListResult
 	case relayknock.TypeRegister:
-		return replyType == relayknock.TypeRegisterAck || replyType == relayknock.TypeCookieChallenge
+		return replyType == relayknock.TypeRegisterAck
 	default:
 		return false
 	}

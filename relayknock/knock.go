@@ -3,6 +3,7 @@ package relayknock
 import (
 	"fmt"
 
+	"github.com/layervai/qurl-go/internal/cryptoutil"
 	"github.com/layervai/qurl-go/relayknock/internal/nhpwire"
 )
 
@@ -170,7 +171,10 @@ func (r *Reply) IsRegisterAck() bool { return r.Type == nhpwire.TypeRAK }
 //
 // DecryptReply authenticates the sender and body, but it does not know which
 // request the caller sent. A custom transport MUST additionally require the
-// expected request→reply type pair and the echoed request counter. In particular,
+// expected request→reply type pair and, for transaction replies, the echoed
+// request counter. An authenticated NHP_COK overload signal is classified before
+// that ordinary counter gate because it is not a completed transaction; whether a
+// request type may receive COK is transport/profile policy. In particular,
 // NHP_LST accepts only NHP_LRT; it does not use NHP_COK. Exchange performs the
 // corresponding checks for its HTTP KNK/REG subset.
 func DecryptReply(devicePriv, expectedServerStaticPub, packet []byte) (*Reply, error) {
@@ -178,10 +182,15 @@ func DecryptReply(devicePriv, expectedServerStaticPub, packet []byte) (*Reply, e
 	if err != nil {
 		return nil, err
 	}
+	return acceptDecryptedReply(msg)
+}
+
+func acceptDecryptedReply(msg *nhpwire.Message) (*Reply, error) {
 	switch msg.Type {
 	case nhpwire.TypeACK, nhpwire.TypeLRT, nhpwire.TypeCOK, nhpwire.TypeRAK:
 		return &Reply{Type: msg.Type, Counter: msg.Counter, TimestampNanos: msg.TimestampNanos, Body: msg.Body}, nil
 	default:
+		cryptoutil.Wipe(msg.Body)
 		// This is the single reply-type-policy site (nhpwire's codec no longer
 		// gates the type). Anything that is not a reply type — a known initiator
 		// type (KNK/LST/OTP/REG) or a garbage type that rode in outside the AEAD — is a

@@ -10,6 +10,7 @@ import (
 	conformance "github.com/layervai/qurl-conformance"
 
 	"github.com/layervai/qurl-go/internal/nhpcontract"
+	"github.com/layervai/qurl-go/relayknock"
 )
 
 func TestMarshalNativeKnockApplicationBody(t *testing.T) {
@@ -139,6 +140,43 @@ func TestNativeKnockApplicationConformance(t *testing.T) {
 		t.Run(vector.Name, func(t *testing.T) {
 			assertNativeKnockRequestVector(t, fields, canonical, vector)
 		})
+	}
+
+	applicationCases := 0
+	for _, vector := range vectors.ReplyCases {
+		if vector.RejectClass == conformance.AgentKnockRejectCounter || vector.RejectClass == conformance.AgentKnockRejectReplyType {
+			// These cases are consumed with the same corpus in nativeudp's
+			// correlation-layer test, before an application interpreter can run.
+			continue
+		}
+		applicationCases++
+		t.Run("reply/"+vector.Name, func(t *testing.T) {
+			result, err := interpretNativeAgentKnockReply(&relayknock.Reply{Type: vector.ReplyType, Body: []byte(vector.BodyJSON)}, fields.KnockResourceID)
+			switch vector.Outcome {
+			case conformance.AgentKnockOutcomeSuccess:
+				if err != nil || result == nil || result.ACToken != vector.ExpectedACToken || result.ResourceHost != vector.ExpectedResourceHost {
+					t.Fatalf("success reply = %#v, %v; want token=%q host=%q", result, err, vector.ExpectedACToken, vector.ExpectedResourceHost)
+				}
+			case conformance.AgentKnockOutcomeDeny:
+				var deny *ServerDenyError
+				if result != nil || !errors.As(err, &deny) || errors.Is(err, ErrMalformedReply) {
+					t.Fatalf("deny reply = %#v, %T: %v", result, err, err)
+				}
+			case conformance.AgentKnockOutcomeRetry:
+				if result != nil || !errors.Is(err, ErrServerOverloaded) {
+					t.Fatalf("retry reply = %#v, %v, want ErrServerOverloaded", result, err)
+				}
+			case conformance.AgentKnockOutcomeReject:
+				if result != nil || !errors.Is(err, ErrMalformedReply) {
+					t.Fatalf("rejected reply = %#v, %v, want ErrMalformedReply", result, err)
+				}
+			default:
+				t.Fatalf("unknown golden reply outcome %q", vector.Outcome)
+			}
+		})
+	}
+	if applicationCases != len(vectors.ReplyCases)-2 {
+		t.Fatalf("application golden reply cases = %d, want %d", applicationCases, len(vectors.ReplyCases)-2)
 	}
 }
 

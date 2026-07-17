@@ -1,6 +1,7 @@
 package relayknock
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/hex"
 	"strconv"
@@ -163,6 +164,17 @@ func TestDecryptReply_GoldenVector(t *testing.T) {
 	}
 	if got := hex.EncodeToString(reply.Body); got != bodyHex {
 		t.Fatalf("body mismatch:\n got=%s\nwant=%s", got, bodyHex)
+	}
+}
+
+func TestAcceptDecryptedReply_WipesBodyOnRejectedHeaderType(t *testing.T) {
+	body := []byte("lv_live_reflected_plaintext")
+	_, err := acceptDecryptedReply(&nhpwire.Message{Type: nhpwire.TypeREG, Body: body})
+	if err == nil {
+		t.Fatal("initiator header type was accepted as a reply")
+	}
+	if !bytes.Equal(body, make([]byte, len(body))) {
+		t.Fatalf("rejected authenticated reply retained plaintext body: %x", body)
 	}
 }
 

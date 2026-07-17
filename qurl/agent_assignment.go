@@ -80,9 +80,8 @@ type AgentAssignment struct {
 }
 
 // AssignmentRegistration is the enrollment identity the assigned-cell REG will
-// present. It is attempt-scoped output, not durable assignment state. In
-// particular, callers must not copy it into AgentState.KeyID, which belongs to
-// the separate legacy HTTPS registration lifecycle.
+// present. It is attempt-scoped output, not durable assignment state, and must
+// not be persisted as the completed device credential id.
 type AssignmentRegistration struct {
 	KeyID   string `json:"key_id"`
 	KeyKind string `json:"key_kind"`
@@ -130,9 +129,13 @@ func (a *AgentAssignment) Validate(now time.Time) error {
 		return err
 	}
 	if !a.LeaseExpiresAt.After(now) {
-		return invalidAssignmentResponse("assignment", errors.New("lease must be in the future"))
+		return fmt.Errorf("%w: assignment lease must be in the future: %w", ErrAssignmentInvalidResponse, ErrAssignmentLeaseExpired)
 	}
 	return nil
+}
+
+func validNetworkPort(port int) bool {
+	return port > 0 && port <= 65535
 }
 
 // LeaseExpired reports only whether the assignment is absent or its lease is no
@@ -152,6 +155,11 @@ var (
 	// It is terminal: retrying cannot repair an authenticated producer-contract
 	// violation and could conceal a hub deployment error.
 	ErrAssignmentInvalidResponse = errors.New("qurl: assignment response invalid")
+	// ErrAssignmentLeaseExpired distinguishes structurally valid persisted state
+	// whose authority lease is no longer live. Validation errors in this class
+	// also match ErrAssignmentInvalidResponse, but callers may safely select an
+	// explicit RefreshAgentRuntime only for this narrower class.
+	ErrAssignmentLeaseExpired = errors.New("qurl: assignment lease expired")
 	// ErrAssignmentUnavailable is the sole retryable assignment application
 	// result (52200), bounded together with transport misses by the transaction
 	// retry budget.
@@ -177,16 +185,17 @@ var (
 )
 
 // AssignmentError is a valid authenticated application error from the closed
-// qurl-conformance v1 taxonomy. Policy comes only from Code; Message is
-// diagnostic. RetryAfter is populated only for codes that permit it. In
+// qurl-conformance v1 taxonomy. Policy comes only from the closed Code set;
+// authenticated producer diagnostics are deliberately discarded because a
+// buggy producer could reflect a submitted credential. RetryAfter is populated
+// only for codes that permit it. In
 // particular, 52204 is terminal within the current transaction; callers must
 // wait at least RetryAfter before starting a new whole assignment transaction.
 // The outer lifecycle owns that inter-transaction gate; this helper only bounds
-// retries within one transaction. Lifecycle enforcement is tracked by
-// https://github.com/layervai/qurl-go/issues/66.
+// retries within one transaction. RegisterAgentRuntime and RefreshAgentRuntime
+// enforce the outer inter-transaction budget.
 type AssignmentError struct {
 	Code       string
-	Message    string
 	RetryAfter time.Duration
 	kind       error
 }
@@ -195,11 +204,10 @@ func (e *AssignmentError) Error() string {
 	if e == nil {
 		return "qurl: assignment error"
 	}
-	msg := "qurl: assignment error " + e.Code
-	if e.Message != "" {
-		msg += ": " + e.Message
+	if e.Code == "52109" {
+		return "qurl: native Hub assignment request rejected (52109); correct WithAgentRuntimeIdentity or the Hub request contract before retrying"
 	}
-	return msg
+	return "qurl: assignment error " + e.Code
 }
 
 func (e *AssignmentError) Unwrap() error {
@@ -213,8 +221,7 @@ func (e *AssignmentError) Unwrap() error {
 // losing its typed cause. Callers surface recovery instead of starting an
 // unbounded loop. In particular, a Last cause matching
 // nativeudp.ErrServerUnauthenticated is operator-actionable trust/bootstrap
-// recovery and must not be silently re-driven by the outer lifecycle; that
-// lifecycle enforcement is tracked by qurl-go issue #66.
+// recovery and must not be silently re-driven by the outer lifecycle.
 type AssignmentRecoveryRequiredError struct {
 	Attempts int
 	Elapsed  time.Duration
@@ -613,7 +620,7 @@ func parseInitialAssignmentReply(body []byte, wantAgentID string, now time.Time)
 	if err := decodeExactObject(wire.Registration, &registration, []string{"key_id", "key_kind"}); err != nil {
 		return nil, invalidAssignmentResponse("initial registration metadata", err)
 	}
-	if !validAgentAPIKeyID(registration.KeyID) {
+	if !validAPIKeyID(registration.KeyID) {
 		return nil, invalidAssignmentResponse("initial registration metadata", errors.New("key_id is not canonical"))
 	}
 	if !validPublicRegistrationKeyKind(registration.KeyKind) {
@@ -737,7 +744,7 @@ func classifyAssignmentApplicationError(envelope assignmentEnvelope, fields map[
 		}
 	}
 	if kind == nil {
-		return invalidAssignmentResponse("error LRT envelope", fmt.Errorf("unknown or phase-invalid errCode %q", envelope.ErrCode))
+		return invalidAssignmentResponse("error LRT envelope", errors.New("unknown or phase-invalid errCode"))
 	}
 
 	_, retryPresent := fields["retryAfterSeconds"]
@@ -754,7 +761,7 @@ func classifyAssignmentApplicationError(envelope assignmentEnvelope, fields map[
 		}
 		retryAfter = time.Duration(*envelope.RetryAfterSeconds) * time.Second
 	}
-	return &AssignmentError{Code: envelope.ErrCode, Message: envelope.ErrMsg, RetryAfter: retryAfter, kind: kind}
+	return &AssignmentError{Code: envelope.ErrCode, RetryAfter: retryAfter, kind: kind}
 }
 
 func parseWireAssignment(raw []byte, now time.Time) (*AgentAssignment, error) {
@@ -861,18 +868,6 @@ func validAssignmentCellID(cellID string) bool {
 	return cellID[len(cellID)-1] != '-'
 }
 
-func validAgentAPIKeyID(id string) bool {
-	if len(id) != len("key_")+12 || !strings.HasPrefix(id, "key_") {
-		return false
-	}
-	for _, b := range []byte(id[len("key_"):]) {
-		if !isASCIIAlnum(b) {
-			return false
-		}
-	}
-	return true
-}
-
 func isJSONNull(raw json.RawMessage) bool {
 	return bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
 }
@@ -883,10 +878,6 @@ func isASCIILowerAlnum(b byte) bool {
 
 func isASCIILowerLDH(b byte) bool {
 	return isASCIILowerAlnum(b) || b == '-'
-}
-
-func isASCIIAlnum(b byte) bool {
-	return isASCIILowerAlnum(b) || b >= 'A' && b <= 'Z'
 }
 
 func validPublicRegistrationKeyKind(kind string) bool {
@@ -934,8 +925,11 @@ func decodeAssignmentServerPublicKey(encoded string) ([]byte, error) {
 	return key, nil
 }
 
-func invalidAssignmentResponse(part string, cause error) error {
-	return fmt.Errorf("%w: %s: %w", ErrAssignmentInvalidResponse, part, cause)
+func invalidAssignmentResponse(part string, _ error) error {
+	// The cause may contain an authenticated producer's reflected enrollment
+	// credential in a value or even a JSON field name. Keep the stable class and
+	// code-owned phase, never the raw parser text.
+	return fmt.Errorf("%w: invalid %s", ErrAssignmentInvalidResponse, part)
 }
 
 func decodeExactObject(raw []byte, dst any, required []string) error {

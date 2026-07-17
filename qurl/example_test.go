@@ -122,109 +122,45 @@ func ExampleNewClient() {
 	}
 }
 
-func ExampleBootstrapAgent() {
-	setupKey := "lv_temporary_setup_key_from_install_flow"
-	_, err := qurl.BootstrapAgent(context.Background(),
-		setupKey,
-		qurl.FileAgentState("/var/lib/layerv/qurl/agent-state.json"),
-		qurl.WithAgentID("prod-us-east-1"),
-	)
-	if err != nil {
-		panic(err)
-	}
-}
-
-func ExampleRegisterAgent() {
-	// RegisterAgent is idempotent: the first call enrolls and persists a device
-	// credential; later calls load it and return a Client without qURL API calls.
-	store := qurl.FileAgentState("/var/lib/layerv/qurl/agent-state.json")
-	client, err := qurl.RegisterAgent(context.Background(), "lv_api_key", store)
-	if err != nil {
-		panic(err)
-	}
-
-	resource, err := client.ProtectURL(context.Background(), "https://dashboard.internal.acme.com")
-	if err != nil {
-		panic(err)
-	}
-	portal, err := resource.CreatePortal(context.Background(), qurl.ValidFor(time.Hour))
-	if err != nil {
-		panic(err)
-	}
-	fmt.Println(portal.Link)
-}
-
-func ExampleRegisterAgent_withOTP() {
-	// An account key uses email one-time codes. Registration is two-phase and
-	// re-entrant: the first call requests a code and returns *OTPPendingError; a
-	// second call with WithOTP finishes enrollment.
+func ExampleRegisterAgentRuntime() {
+	// The installer supplies one pinned Hub trust root. Assignment, optional OTP,
+	// REG/RAK, and completion then travel only over authenticated NHP UDP.
+	// The default policy accepts pre-issued/headless key kinds, including the
+	// durable qurl:agent kind, and rejects account enrollment.
 	ctx := context.Background()
 	store := qurl.FileAgentState("/var/lib/layerv/qurl/agent-state.json")
-
-	_, err := qurl.RegisterAgent(ctx, "lv_account_key", store)
-	var pending *qurl.OTPPendingError
-	if errors.As(err, &pending) {
-		// LayerV emailed a code to pending.MaskedEmail. Obtain it out of band,
-		// then resume. (errors.Is(err, qurl.ErrOTPPending) matches the sentinel.)
-		code := readOneTimeCodeFromOperator(pending.MaskedEmail)
-		client, err := qurl.RegisterAgent(ctx, "lv_account_key", store, qurl.WithOTP(code))
-		if err != nil {
-			panic(err)
-		}
-		_ = client
-	} else if err != nil {
-		panic(err)
+	hub := qurl.HubBootstrap{
+		Host:               "hub.nhp.layerv.ai",
+		Port:               62206,
+		ServerPublicKeyB64: configuredHubPublicKeyB64(),
 	}
-}
-
-func ExampleRegisterAgent_otpProvider() {
-	// WithOTPProvider supplies the emailed code from a callback — for a headless
-	// agent that reads its own mailbox — so a single RegisterAgent call can both
-	// request and consume the code.
-	store := qurl.FileAgentState("/var/lib/layerv/qurl/agent-state.json")
-	client, err := qurl.RegisterAgent(context.Background(), "lv_account_key", store,
-		qurl.WithOTPProvider(func(ctx context.Context) (string, error) {
-			return fetchLatestOneTimeCode(ctx)
-		}),
+	client, binding, err := qurl.RegisterAgentRuntime(ctx, enrollmentCredentialFromInstaller(), store,
+		qurl.WithAgentRuntimeHub(hub),
+		qurl.WithAgentRuntimeMetadata("connector-host", "1.0.0"),
 	)
 	if err != nil {
 		panic(err)
 	}
-	_ = client
-}
+	defer binding.Destroy()
+	devicePrivateKey := binding.TakeDeviceStaticPrivateKey()
+	defer clear(devicePrivateKey)
 
-func ExampleRegisterAgent_takeover() {
-	// A device id that is already enrolled to a different key or agent fails with
-	// ErrAgentIdentityConflict. WithTakeover re-binds it — deliberately, since it
-	// replaces the prior binding.
-	ctx := context.Background()
-	store := qurl.FileAgentState("/var/lib/layerv/qurl/agent-state.json")
-
-	client, err := qurl.RegisterAgent(ctx, "lv_api_key", store, qurl.WithDeviceID("prod-us-east-1"))
-	if errors.Is(err, qurl.ErrAgentIdentityConflict) {
-		client, err = qurl.RegisterAgent(ctx, "lv_api_key", store,
-			qurl.WithDeviceID("prod-us-east-1"),
-			qurl.WithTakeover(),
-		)
-	}
+	connector, err := client.EnsureConnectorResource(ctx, "prod-dashboard")
 	if err != nil {
 		panic(err)
 	}
-	_ = client
-}
-
-func ExampleRegisterAgent_fromBootstrapAgent() {
-	// Migrating from BootstrapAgent: RegisterAgent covers the same pre-issued-key
-	// path and additionally returns a ready-to-use Client. WithDeviceID is the
-	// RegisterAgent spelling of BootstrapAgent's WithAgentID.
-	store := qurl.FileAgentState("/var/lib/layerv/qurl/agent-state.json")
-	client, err := qurl.RegisterAgent(context.Background(), "lv_temporary_setup_key_from_install_flow", store,
-		qurl.WithDeviceID("prod-us-east-1"),
+	runID, err := qurl.NewCycleRunID()
+	if err != nil {
+		panic(err)
+	}
+	admission, err := qurl.KnockRegisteredAgent(ctx, binding, devicePrivateKey,
+		connector.Resource.KnockResourceID,
+		qurl.NativeKnockOptions{RunID: runID},
 	)
 	if err != nil {
 		panic(err)
 	}
-	_ = client
+	fmt.Println(admission.ResourceHost)
 }
 
 func ExampleNewSealedFileAgentState() {
@@ -240,7 +176,15 @@ func ExampleNewSealedFileAgentState() {
 	if err != nil {
 		panic(err)
 	}
-	_, _ = qurl.RegisterAgent(context.Background(), "lv_enrollment_key", store)
+	_, binding, _ := qurl.RegisterAgentRuntime(context.Background(), "lv_enrollment_key", store,
+		qurl.WithAgentRuntimeHub(qurl.HubBootstrap{
+			Host: "hub.nhp.layerv.ai", Port: 62206,
+			ServerPublicKeyB64: configuredHubPublicKeyB64(),
+		}),
+	)
+	if binding != nil {
+		binding.Destroy()
+	}
 }
 
 type myKMSAgentStateKeyWrapper struct{}
@@ -264,16 +208,5 @@ func callKMSUnwrap(qurl.WrappedAgentStateKey, qurl.AgentStateKeyBinding) ([]byte
 	return nil, errors.New("example KMS adapter")
 }
 
-// readOneTimeCodeFromOperator and fetchLatestOneTimeCode stand in for the
-// caller's own code-retrieval mechanism in the examples above.
-func readOneTimeCodeFromOperator(maskedEmail string) string {
-	fmt.Printf("enter the code emailed to %s: ", maskedEmail)
-	return "123456"
-}
-
-func fetchLatestOneTimeCode(ctx context.Context) (string, error) {
-	if err := ctx.Err(); err != nil {
-		return "", err
-	}
-	return "123456", nil
-}
+func configuredHubPublicKeyB64() string         { return "configured-padded-base64-x25519-key" }
+func enrollmentCredentialFromInstaller() string { return "configured-enrollment-credential" }

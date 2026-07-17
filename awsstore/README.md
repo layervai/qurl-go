@@ -53,16 +53,18 @@ func newStore(ctx context.Context) (qurl.AgentStateStore, error) {
 }
 ```
 
-Then hand the store to `qurl.RegisterAgent` (or `qurl.BootstrapAgent`) exactly as
-you would `qurl.FileAgentState`:
+Then hand the store to the native UDP runtime exactly as you would
+`qurl.FileAgentState`:
 
 ```go
 store, err := newStore(ctx)
 // ...
-client, err := qurl.RegisterAgent(ctx, setupKey, store)
+client, binding, err := qurl.RegisterAgentRuntime(ctx, setupKey, store,
+	qurl.WithAgentRuntimeHub(hub),
+)
 ```
 
-- **Load**: `GetSecretValue` → JSON-unmarshal `SecretString`. A missing secret
+- **Load**: `GetSecretValue` → strict JSON decode of `SecretString`. A missing secret
   (`ResourceNotFoundException`) maps to `qurl.ErrAgentStateNotFound`; a present
   but undecodable value maps to `qurl.ErrInvalidAgentState`.
 - **Save**: `PutSecretValue`; on first write (secret does not exist yet)
@@ -83,8 +85,8 @@ client, err := qurl.RegisterAgent(ctx, setupKey, store)
 > *distinct* agents racing their first registration against the **same** secret is
 > last-write-wins (the create-race loser falls back to a `PutSecretValue` that
 > overwrites the winner). Use a distinct secret per agent, or serialize first
-> enrollment — the same "one setup at a time" caveat the `FileAgentState` recipe
-> notes.
+> enrollment. File-backed stores use an SDK sidecar lock; AWS stores require
+> serialization at the caller or store boundary.
 
 ### IAM (least privilege)
 
@@ -136,7 +138,7 @@ store := awsstore.NewParameterStore(
 )
 ```
 
-- **Load**: `GetParameter` with `WithDecryption=true` → JSON-unmarshal `Value`. A
+- **Load**: `GetParameter` with `WithDecryption=true` → strict JSON decode of `Value`. A
   missing parameter (`ParameterNotFound`) maps to `qurl.ErrAgentStateNotFound`; a
   present but undecodable value maps to `qurl.ErrInvalidAgentState`.
 - **Save**: `PutParameter` with `Type=SecureString`, `Overwrite=true`. The
@@ -191,19 +193,22 @@ store := qurl.FileAgentState("/mnt/efs/qurl/agent-state.json")
 a `0700` directory, so an EFS mount shared across tasks gets the same
 not-found → `ErrAgentStateNotFound`, corrupt → `ErrInvalidAgentState` contract
 without pulling in the AWS SDK. Encrypt the EFS file system at rest with KMS and
-restrict the access point's POSIX uid/gid to the agent. Run enrollment from **one
-task at a time** for a given path: the write is atomic, but the SDK does not lock
-across concurrent processes sharing the file.
+restrict the access point's POSIX uid/gid to the agent. The SDK takes an advisory
+sidecar setup lock across cooperating processes for a given path. Every
+participant must use the SDK lifecycle and the shared mount must support that
+lock; non-cooperating writers are outside the contract.
 
 ## The implementor contract
 
 Both stores honor the `qurl.AgentStateStore` contract that
-`RegisterAgent`/`BootstrapAgent` rely on:
+`RegisterAgentRuntime`, `OpenRegisteredAgentRuntime`, and
+`RefreshAgentRuntime` rely on:
 
 - `LoadAgentState` returns `qurl.ErrAgentStateNotFound` (via `errors.Is`) when no
   state exists yet → the caller starts a fresh enrollment.
 - `LoadAgentState` returns a wrapped `qurl.ErrInvalidAgentState` (via `errors.Is`)
-  when a value **is** present but cannot be decoded (corrupt / non-JSON).
+  when a value **is** present but cannot be decoded, contains trailing data, or
+  contains a field outside the native AgentState schema.
 - `SaveAgentState` persists the state so a later `LoadAgentState` returns an equal
   value.
 

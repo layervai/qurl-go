@@ -772,7 +772,14 @@ func TestAgentAssignmentCloneAndLease(t *testing.T) {
 	}
 	assertValueOnly("AgentAssignment", reflect.TypeOf(AgentAssignment{}))
 
-	assignment := &AgentAssignment{CellID: "cell0", LeaseExpiresAt: assignmentFixtureNow.Add(time.Hour), Endpoint: NHPUDPEndpoint{Host: "cell0.nhp.layerv.ai"}}
+	assignment := &AgentAssignment{
+		CellID: "cell0", AssignmentGeneration: 1, EndpointRevision: 1,
+		LeaseExpiresAt: assignmentFixtureNow.Add(time.Hour),
+		Endpoint: NHPUDPEndpoint{
+			Host: "cell0.nhp.layerv.ai", Port: standardNHPUDPPort,
+			ServerPublicKeyB64: validTestNHPServerPublicKeyB64,
+		},
+	}
 	clone := assignment.clone()
 	clone.CellID = "cell1"
 	clone.Endpoint.Host = "cell1.nhp.layerv.ai"
@@ -781,6 +788,9 @@ func TestAgentAssignmentCloneAndLease(t *testing.T) {
 	}
 	if assignment.LeaseExpired(assignmentFixtureNow) || !assignment.LeaseExpired(assignment.LeaseExpiresAt) {
 		t.Fatal("LeaseExpired boundary is wrong")
+	}
+	if err := assignment.Validate(assignment.LeaseExpiresAt); !errors.Is(err, ErrAssignmentLeaseExpired) || !errors.Is(err, ErrAssignmentInvalidResponse) {
+		t.Fatalf("expired assignment Validate error = %v, want lease-expired + invalid-response classes", err)
 	}
 	var absent *AgentAssignment
 	if !absent.LeaseExpired(assignmentFixtureNow) {
@@ -975,6 +985,24 @@ func TestAssignmentErrorRejectsInvalidUTF8Diagnostic(t *testing.T) {
 	body = append(body, []byte(`"}`)...)
 	if _, err := parseAssignmentEnvelope(body, false); !errors.Is(err, ErrAssignmentInvalidResponse) || errors.Is(err, ErrAssignmentIdentityRejected) {
 		t.Fatalf("error = %v, want ErrAssignmentInvalidResponse only", err)
+	}
+}
+
+func TestAssignmentErrorsNeverRetainOrRenderProducerControlledSecrets(t *testing.T) {
+	const reflectedSecret = "lv_live_reflected_enrollment_credential"
+	_, err := parseAssignmentEnvelope([]byte(`{"errCode":"52201","errMsg":"`+reflectedSecret+`"}`), false)
+	var assignmentErr *AssignmentError
+	if !errors.As(err, &assignmentErr) || !errors.Is(err, ErrAssignmentIdentityRejected) {
+		t.Fatalf("known assignment error = %T: %v", err, err)
+	}
+	if strings.Contains(err.Error(), reflectedSecret) || strings.Contains(fmt.Sprintf("%#v", assignmentErr), reflectedSecret) {
+		t.Fatalf("known assignment error retained/reflected Hub diagnostic: %#v", assignmentErr)
+	}
+
+	const unsafeCode = "lv_live_reflected_as_error_code"
+	_, err = parseAssignmentEnvelope([]byte(`{"errCode":"`+unsafeCode+`","errMsg":"ignored"}`), false)
+	if !errors.Is(err, ErrAssignmentInvalidResponse) || strings.Contains(err.Error(), unsafeCode) {
+		t.Fatalf("unknown assignment code = %v, want redacted invalid response", err)
 	}
 }
 

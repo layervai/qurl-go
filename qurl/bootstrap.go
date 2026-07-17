@@ -10,24 +10,16 @@ import (
 	"fmt"
 	"strings"
 	"time"
-
-	"github.com/layervai/qurl-go/internal/x25519key"
 )
 
-// defaultBootstrapBaseURL is the LayerV API origin BootstrapAgent uses for the
-// NHP registration pre-flight and completion endpoints. It matches the default
-// RegisterAgent base URL; WithBootstrapBaseURL overrides it. (Before the NHP
-// reimplementation this pointed at a dedicated bootstrap origin; the enrollment
-// endpoints now live on the qurl-service API origin.)
-const defaultBootstrapBaseURL = defaultAPIBaseURL
-
-// ErrInvalidBootstrapConfig is returned when bootstrap inputs are invalid.
+// ErrInvalidBootstrapConfig is returned when durable agent-state configuration
+// or native enrollment inputs are invalid.
 var ErrInvalidBootstrapConfig = errors.New("qurl: invalid bootstrap config")
 
 // ErrAgentStateNotFound is returned when an AgentStateStore has no saved state.
 // It is part of the AgentStateStore implementor contract: LoadAgentState returns
-// it (and RegisterAgent/BootstrapAgent treat it as "not registered yet", starting
-// a fresh enrollment) when no state has been persisted.
+// it when no state has been persisted, allowing RegisterAgentRuntime to start a
+// fresh native enrollment.
 var ErrAgentStateNotFound = errors.New("qurl: agent state not found")
 
 // ErrInvalidAgentState is the implementor-contract sibling of ErrAgentStateNotFound:
@@ -36,9 +28,8 @@ var ErrAgentStateNotFound = errors.New("qurl: agent state not found")
 // from the not-yet-persisted ErrAgentStateNotFound. The file-backed store returns
 // it for a corrupt or malformed state file; a custom store (for example a
 // Secrets Manager-backed one) should return it for the same condition. It is a
-// store-neutral sentinel: RegisterAgent/BootstrapAgent re-wrap a load failure in
-// their own front-door config-error class, so a caller can match either this or
-// the front-door sentinel.
+// store-neutral sentinel: lifecycle front doors re-wrap a load failure in their
+// own config-error class, so a caller can match either sentinel.
 var ErrInvalidAgentState = errors.New("qurl: agent state is present but unreadable or corrupt")
 
 // ErrInsecureAgentStatePermissions is returned when file-backed agent state is
@@ -48,8 +39,10 @@ var ErrInsecureAgentStatePermissions = errors.New("qurl: insecure agent state pe
 // ErrAgentSetupLock reports that the mandatory local-file setup lock could not
 // be acquired or released. Registration fails closed because continuing could
 // mint competing identities against the same durable state path. A release
-// failure can occur after a successful durable save; load or open the stored
-// state before retrying any enrollment, refresh, or credential recovery.
+// failure can occur after a successful durable save; load the stored state
+// before retrying. Open completed native state with OpenRegisteredAgentRuntime;
+// resume durable PendingCompletion through RegisterAgentRuntime without an
+// enrollment credential. OpenRegisteredAgent is the resource-client-only path.
 var ErrAgentSetupLock = errors.New("qurl: agent state setup lock failed")
 
 // ErrBootstrapSetupKeyConsumed is returned when an incomplete local bootstrap
@@ -58,19 +51,8 @@ var ErrAgentSetupLock = errors.New("qurl: agent state setup lock failed")
 // LayerV setup flow again or restore the completed AgentState.
 var ErrBootstrapSetupKeyConsumed = errors.New("qurl: bootstrap setup key already consumed")
 
-// NHPServerPeerInfo is the LayerV peer returned by the bootstrap service.
-type NHPServerPeerInfo struct {
-	PublicKeyB64 string `json:"public_key_b64"`
-	Host         string `json:"host"`
-	Port         int    `json:"port"`
-	// ExpireTime is a Unix timestamp for finite peer leases. The current
-	// LayerV bootstrap flow returns 0 for durable peers; a nonzero expired peer
-	// is rejected so callers do not continue with stale routing state.
-	ExpireTime int64 `json:"expire_time"`
-}
-
-// AgentState is the protected local agent identity created during registration
-// or bootstrap.
+// AgentState is the protected local agent identity created by the native UDP
+// registered-agent lifecycle.
 //
 // SECURITY: once registration completes, AgentState is a CREDENTIAL FILE — it
 // holds DeviceAPIKey, the bearer token the returned Client authorizes with. Treat
@@ -79,44 +61,22 @@ type NHPServerPeerInfo struct {
 // secret manager (for example AWS Secrets Manager via a custom AgentStateStore)
 // rather than a world-readable path.
 //
-// Schema evolution is additive and backward compatible. The v2 fields support
-// the legacy HTTPS registration lifecycle; v3 adds Assignment for native UDP.
-// Every added field is json:",omitempty", so legacy files load without migration
-// and older readers can ignore newer fields. SchemaVersion is informational;
-// runtime readiness comes from the fields themselves, never the version number.
+// The state schema is native-only. Unknown JSON fields fail closed; no retired
+// HTTP enrollment schema is accepted or migrated. SchemaVersion is
+// informational; readiness comes from validated native fields.
 type AgentState struct {
-	AgentID       string             `json:"agent_id,omitempty"`
-	PrivateKeyB64 string             `json:"private_key_b64"`
-	PublicKeyB64  string             `json:"public_key_b64"`
-	RegisteredAt  *time.Time         `json:"registered_at,omitempty"`
-	NHPPeer       *NHPServerPeerInfo `json:"nhp_server_peer,omitempty"`
+	AgentID       string     `json:"agent_id,omitempty"`
+	PrivateKeyB64 string     `json:"private_key_b64"`
+	PublicKeyB64  string     `json:"public_key_b64"`
+	RegisteredAt  *time.Time `json:"registered_at,omitempty"`
 
-	// --- v2 additive fields (RegisterAgent) ---
-
-	// SchemaVersion is the AgentState schema version. Absent/0 in legacy files;
-	// RegisterAgent writes agentStateSchemaVersion. Informational only.
+	// SchemaVersion is the AgentState schema version. RegisterAgentRuntime writes
+	// agentStateSchemaVersion. Informational only.
 	SchemaVersion int `json:"schema_version,omitempty"`
 	// DeviceAPIKey is the device REST bearer credential minted at registration
 	// completion. Its presence alongside RegisteredAt marks a state ready to back
 	// a Client without another qURL registration call. SENSITIVE — see the type doc.
 	DeviceAPIKey string `json:"device_api_key,omitempty"`
-	// RelayURL records the NHP relay base URL from the most recent
-	// registration-info pre-flight. A resume re-fetches registration-info (the
-	// authoritative, side-effect-free source) rather than reading this back, so it
-	// is a record of the last-known relay, not the source of truth on resume.
-	RelayURL string `json:"relay_url,omitempty"`
-	// KeyID is the enrollment key id (key_...) from registration-info, carried as
-	// the NHP usrId; like RelayURL it is refreshed from a fresh pre-flight on resume.
-	KeyID string `json:"key_id,omitempty"`
-	// OTPRequestedAt marks the account-key otp_pending/cooldown state: an email
-	// one-time code has been requested and the current operation is waiting for
-	// WithOTP. Enrollment clears it when registration completes. A completed state
-	// can retain it while account-key refresh/recovery is paused after dispatch;
-	// the successful lifecycle resume clears it after RAK.
-	OTPRequestedAt *time.Time `json:"otp_requested_at,omitempty"`
-
-	// --- v3 additive field (native UDP assignment) ---
-
 	// Assignment is the authoritative native-UDP cell assignment (cell,
 	// generation, endpoint revision, lease expiry, and LayerV-owned DNS endpoint)
 	// returned by the hub and persisted so a native registration/knock survives a
@@ -124,17 +84,66 @@ type AgentState struct {
 	// file loads unchanged. A resolved IP is never persisted here — the endpoint
 	// host is resolved fresh on every exchange.
 	Assignment *AgentAssignment `json:"assignment,omitempty"`
+
+	// --- v4 additive fields (native UDP crash-safe completion) ---
+
+	// DeviceAPIKeyID is the public identifier paired with DeviceAPIKey by native
+	// UDP completion. It is never a secret.
+	DeviceAPIKeyID string `json:"device_api_key_id,omitempty"`
+
+	// PendingCompletion is written only after an authenticated assigned-cell RAK
+	// and before the first completion LST. It keeps the SDK-generated device
+	// secret crash-safe across an ambiguous/lost LRT. A retry must reuse this
+	// exact candidate; generating a replacement could mint a second credential.
+	PendingCompletion *PendingAgentCompletion `json:"pending_completion,omitempty"`
+}
+
+// PendingAgentCompletion is sensitive durable state for one in-flight native
+// registration completion. CellID and AssignmentGeneration bind the candidate
+// to the authority state that accepted REG, so a moved assignment cannot replay
+// it in another cell or generation.
+type PendingAgentCompletion struct {
+	DeviceAPIKey         string `json:"device_api_key"`
+	CellID               string `json:"cell_id"`
+	AssignmentGeneration int64  `json:"assignment_generation"`
 }
 
 // validateLoadedAgentAssignment checks persisted trust-boundary structure but
 // deliberately permits an expired lease so the caller can refresh it. Concrete
 // stores call it directly; lifecycle loaders repeat it for custom stores.
 func validateLoadedAgentAssignment(state *AgentState) error {
-	if state == nil || state.Assignment == nil {
+	if state == nil {
 		return nil
 	}
-	if err := validatePersistedAgentAssignment(state.Assignment); err != nil {
-		return fmt.Errorf("%w: persisted assignment: %w", ErrInvalidAgentState, err)
+	// Assignment, pending-completion, and native credential-id fields are durable
+	// native-runtime markers. Once any marker exists, the identity that the Hub
+	// and assigned cell authenticated must already be persisted in canonical wire
+	// form. Never let a later lifecycle call manufacture or normalize a different
+	// identity around those authority-bound fields.
+	if isNativeAgentRuntimeState(state) {
+		if err := validateAssignmentAgentID(state.AgentID); err != nil {
+			return fmt.Errorf("%w: persisted native agent id is missing or non-canonical", ErrInvalidAgentState)
+		}
+	}
+	if state.Assignment != nil {
+		if err := validatePersistedAgentAssignment(state.Assignment); err != nil {
+			return fmt.Errorf("%w: persisted assignment: %w", ErrInvalidAgentState, err)
+		}
+	}
+	if state.PendingCompletion != nil {
+		pending := state.PendingCompletion
+		if state.Assignment == nil {
+			return fmt.Errorf("%w: pending completion requires an assignment", ErrInvalidAgentState)
+		}
+		if err := validateNativeDeviceCredential(pending.DeviceAPIKey, "pending device credential", ErrInvalidAgentState); err != nil {
+			return err
+		}
+		if pending.CellID != state.Assignment.CellID || pending.AssignmentGeneration != state.Assignment.AssignmentGeneration {
+			return fmt.Errorf("%w: pending completion does not match the persisted assignment", ErrInvalidAgentState)
+		}
+		if state.RegisteredAt != nil || state.DeviceAPIKey != "" || state.DeviceAPIKeyID != "" {
+			return fmt.Errorf("%w: pending completion cannot coexist with a completed device credential", ErrInvalidAgentState)
+		}
 	}
 	return nil
 }
@@ -152,24 +161,18 @@ func (s *AgentState) clone() *AgentState {
 		registeredAt := *s.RegisteredAt
 		cloned.RegisteredAt = &registeredAt
 	}
-	if s.NHPPeer != nil {
-		peer := *s.NHPPeer
-		cloned.NHPPeer = &peer
-	}
-	if s.OTPRequestedAt != nil {
-		requestedAt := *s.OTPRequestedAt
-		cloned.OTPRequestedAt = &requestedAt
-	}
 	if s.Assignment != nil {
 		cloned.Assignment = s.Assignment.clone()
+	}
+	if s.PendingCompletion != nil {
+		pending := *s.PendingCompletion
+		cloned.PendingCompletion = &pending
 	}
 	return &cloned
 }
 
-// agentStateSchemaVersion is the current AgentState schema version RegisterAgent
-// stamps into SchemaVersion. Bumped only on an additive field change that older
-// readers can still ignore.
-const agentStateSchemaVersion = 3
+// agentStateSchemaVersion is the current native AgentState schema version.
+const agentStateSchemaVersion = 4
 
 // AgentStateStore loads and saves the bootstrapped local identity. The
 // file-backed store writes plaintext JSON protected by filesystem permissions;
@@ -205,16 +208,14 @@ func (s fileAgentStateStore) LoadAgentState(ctx context.Context) (*AgentState, e
 	if err := validateContext(ctx, ErrInvalidBootstrapConfig); err != nil {
 		return nil, err
 	}
-	// Corrupt-content faults use the store-neutral ErrInvalidAgentState class (not
-	// a front-door bootstrap/register class): RegisterAgent and BootstrapAgent
-	// re-wrap a load failure in their own class, so the front-door match comes
-	// from the wrap while this sentinel stays matchable through the chain.
+	// Corrupt-content faults use the store-neutral ErrInvalidAgentState class;
+	// lifecycle front doors re-wrap it in their own config-error class.
 	raw, err := readPrivateStateFileBounded(s.path, "agent state", maxAgentStateBytes, privateStateDirExact0700, ErrAgentStateNotFound, ErrInvalidAgentState, ErrInsecureAgentStatePermissions)
 	if err != nil {
 		return nil, err
 	}
 	var state AgentState
-	if err := json.Unmarshal(raw, &state); err != nil {
+	if err := strictDecodeJSON(raw, &state); err != nil {
 		return nil, fmt.Errorf("%w: decode agent state: %w", ErrInvalidAgentState, err)
 	}
 	if err := validateLoadedAgentAssignment(&state); err != nil {
@@ -244,162 +245,8 @@ func (s fileAgentStateStore) SaveAgentState(ctx context.Context, state *AgentSta
 	return writePrivateStateFileAtomic(ctx, s.path, "agent state", ".qurl-agent-state-*", raw, defaultPrivateStateFileOps)
 }
 
-// BootstrapOption customizes BootstrapAgent.
-type BootstrapOption interface {
-	applyBootstrapOption(*bootstrapOptions) error
-}
-
-type bootstrapOptionFunc func(*bootstrapOptions) error
-
-func (f bootstrapOptionFunc) applyBootstrapOption(o *bootstrapOptions) error {
-	return f(o)
-}
-
-type bootstrapOptions struct {
-	baseURL    string
-	httpClient HTTPDoer
-	agentID    string
-	hostname   string
-	version    string
-}
-
-// WithBootstrapBaseURL points BootstrapAgent at a non-default bootstrap origin.
-func WithBootstrapBaseURL(rawURL string) BootstrapOption {
-	return bootstrapOptionFunc(func(o *bootstrapOptions) error {
-		if err := validateHTTPSOrLoopbackURL(rawURL, "bootstrap URL", ErrInvalidBootstrapConfig); err != nil {
-			return err
-		}
-		o.baseURL = strings.TrimRight(rawURL, "/")
-		return nil
-	})
-}
-
-// WithBootstrapHTTPClient injects the HTTP client used for bootstrap requests.
-// Without this option, BootstrapAgent uses a shared client with a 30-second
-// timeout and no redirect following; injected clients own their own timeout and
-// redirect behavior. Callers can still set shorter deadlines on ctx.
-func WithBootstrapHTTPClient(client HTTPDoer) BootstrapOption {
-	return bootstrapOptionFunc(func(o *bootstrapOptions) error {
-		if client == nil {
-			return fmt.Errorf("%w: HTTP client must not be nil", ErrInvalidBootstrapConfig)
-		}
-		o.httpClient = client
-		return nil
-	})
-}
-
-// WithAgentID sets the stable local agent id sent during bootstrap.
-func WithAgentID(agentID string) BootstrapOption {
-	return bootstrapOptionFunc(func(o *bootstrapOptions) error {
-		if strings.TrimSpace(agentID) == "" {
-			return fmt.Errorf("%w: agent id must not be empty", ErrInvalidBootstrapConfig)
-		}
-		o.agentID = agentID
-		return nil
-	})
-}
-
-// WithHostname records the local hostname in bootstrap audit metadata.
-func WithHostname(hostname string) BootstrapOption {
-	return bootstrapOptionFunc(func(o *bootstrapOptions) error {
-		if strings.TrimSpace(hostname) == "" {
-			return fmt.Errorf("%w: hostname must not be empty", ErrInvalidBootstrapConfig)
-		}
-		o.hostname = hostname
-		return nil
-	})
-}
-
-// WithVersion records the local build version in bootstrap audit metadata.
-func WithVersion(version string) BootstrapOption {
-	return bootstrapOptionFunc(func(o *bootstrapOptions) error {
-		if strings.TrimSpace(version) == "" {
-			return fmt.Errorf("%w: version must not be empty", ErrInvalidBootstrapConfig)
-		}
-		o.version = version
-		return nil
-	})
-}
-
-// BootstrapAgent consumes a temporary LayerV setup key, enrolls a local X25519
-// identity over NHP, and saves that identity in store. The setup key is used for
-// this call only; future restarts load the saved AgentState.
-//
-// Prefer RegisterAgent for new code: it returns a ready-to-use Client and covers
-// both the pre-issued-key and email-OTP paths. BootstrapAgent is the pre-issued
-// (bootstrap) key path specialized to return the raw AgentState, kept for callers
-// that manage the Client separately. It runs the same NHP enrollment engine as
-// RegisterAgent's bootstrap path: a registration-info pre-flight, an NHP_REG
-// carrying the setup key as the enrollment credential (proving the device key via
-// the Noise handshake), and a completion fetch that mints the durable state.
-//
-// If store already contains a registered AgentState, BootstrapAgent returns it
-// without sending the setup key again. If a prior attempt saved only the local
-// keypair before enrollment completed, RegisteredAt is nil and calling
-// BootstrapAgent again retries with the same device key. That retry depends on
-// LayerV treating repeated enrollment for the same device key as idempotent. If
-// LayerV instead reports that the one-time setup key was already consumed,
-// BootstrapAgent returns ErrBootstrapSetupKeyConsumed so setup code can ask for a
-// fresh setup flow instead of retrying forever.
-//
-// Registered state is validated on load. LayerV bootstrap peers are normally
-// durable (ExpireTime is 0); if a future peer record carries a finite expiry and
-// has expired, BootstrapAgent fails closed so the caller can run the LayerV setup
-// or refresh flow instead of using stale routing state.
-//
-// Each state write is atomic. For a FileAgentState the SDK also serializes
-// concurrent first-time setup across processes with a mandatory file lock
-// (flock on a sidecar beside the state file): the racer that loses blocks until
-// the winner enrolls, then fast-paths to the now-registered state instead of
-// sending the setup key again. Lock acquisition/release failures fail closed.
-// A custom or networked AgentStateStore cannot be locked for you, so serialize
-// setup per store yourself.
-func BootstrapAgent(ctx context.Context, setupKey string, store AgentStateStore, opts ...BootstrapOption) (*AgentState, error) {
-	if err := validateExactBearerToken(setupKey, "setup key", ErrInvalidBootstrapConfig); err != nil {
-		return nil, err
-	}
-	if store == nil {
-		return nil, fmt.Errorf("%w: state store must not be nil", ErrInvalidBootstrapConfig)
-	}
-	if err := validateContext(ctx, ErrInvalidBootstrapConfig); err != nil {
-		return nil, err
-	}
-	cfg := bootstrapOptions{
-		baseURL:    defaultBootstrapBaseURL,
-		httpClient: defaultAPIHTTPClient,
-	}
-	for _, opt := range opts {
-		if opt == nil {
-			return nil, fmt.Errorf("%w: nil BootstrapOption", ErrInvalidBootstrapConfig)
-		}
-		if err := opt.applyBootstrapOption(&cfg); err != nil {
-			return nil, err
-		}
-	}
-
-	// BootstrapAgent is PATH A specialized: map its options onto the shared
-	// registration engine. requireDeviceKey stays false so a legacy bootstrap-era
-	// state (registered, no device key) still returns from the fast path.
-	rcfg := &registerConfig{
-		baseURL:          cfg.baseURL,
-		httpClient:       cfg.httpClient,
-		deviceID:         cfg.agentID,
-		hostname:         cfg.hostname,
-		version:          cfg.version,
-		invalidConfigErr: ErrInvalidBootstrapConfig,
-		clock:            time.Now,
-	}
-	state, err := rcfg.run(ctx, setupKey, store)
-	if err != nil {
-		return nil, err
-	}
-	return state, nil
-}
-
-// validateCompletedAgentIdentity checks only the durable identity/credential
-// fields a forced refresh needs. It deliberately does not require the old peer
-// or relay: replacing missing, expired, or rotated binding metadata is the
-// purpose of RefreshAgentRegistration.
+// validateCompletedAgentIdentity checks the durable identity fields required by
+// completed native runtime state.
 func validateCompletedAgentIdentity(state *AgentState, errKind error) error {
 	if err := validatePersistedAgentID(state, errKind); err != nil {
 		return err
@@ -420,102 +267,28 @@ func validatePersistedAgentID(state *AgentState, errKind error) error {
 	return nil
 }
 
-// validateRegisteredAgentState checks a loaded, already-registered state. errKind
-// is the caller-facing sentinel wrapped into failures so each front door keeps
-// its class (BootstrapAgent → ErrInvalidBootstrapConfig, RegisterAgent →
-// ErrInvalidRegisterConfig).
-func validateRegisteredAgentState(state *AgentState, now time.Time, requirePeerLive bool, errKind error) error {
-	// A registered state's durable identity is exactly the completed-agent
-	// identity; this validator adds the peer requirement on top of it.
-	if err := validateCompletedAgentIdentity(state, errKind); err != nil {
-		return err
-	}
-	if state.NHPPeer == nil {
-		return fmt.Errorf("%w: registered agent state missing NHP peer", errKind)
-	}
-	return validateNHPServerPeerInfo(*state.NHPPeer, now, requirePeerLive, "registered agent state", errKind)
-}
-
-// validateNHPServerPeerInfo checks an NHP peer's shape (X25519 key, host, port).
-// requireLive additionally rejects an expired peer — set it only when the peer
-// will actually be knocked (a fresh registration peer, a WithNHPPeer override,
-// or the knock-only BootstrapAgent fast path). A REST-only RegisterAgent
-// Client never knocks the persisted peer, so its fast path passes requireLive=false
-// (an expired-but-unused peer must not lock out a still-valid device credential).
-// errKind is the sentinel wrapped into every failure so the caller's error class
-// flows through (ErrInvalidBootstrapConfig for bootstrap, ErrInvalidRegisterConfig
-// for registration).
-func validateNHPServerPeerInfo(peer NHPServerPeerInfo, now time.Time, requireLive bool, label string, errKind error) error {
-	if err := validateNHPServerPublicKey(peer.PublicKeyB64, label, errKind); err != nil {
-		return err
-	}
-	if strings.TrimSpace(peer.Host) == "" {
-		return fmt.Errorf("%w: %s missing NHP peer host", errKind, label)
-	}
-	if peer.Port <= 0 {
-		return fmt.Errorf("%w: %s missing NHP peer port", errKind, label)
-	}
-	if !validNetworkPort(peer.Port) {
-		return fmt.Errorf("%w: %s NHP peer port out of range", errKind, label)
-	}
-	if requireLive && peer.ExpireTime != 0 && peer.ExpireTime <= now.Unix() {
-		return fmt.Errorf("%w: %s NHP peer is expired", errKind, label)
-	}
-	return nil
-}
-
-func validNetworkPort(port int) bool {
-	return port >= 1 && port <= 65535
-}
-
-func validateNHPServerPublicKey(encoded, label string, errKind error) error {
-	if strings.TrimSpace(encoded) == "" {
-		return fmt.Errorf("%w: %s missing NHP peer public key", errKind, label)
-	}
-	peerKey, err := decodeNHPServerPublicKey(encoded)
-	if err != nil {
-		return fmt.Errorf("%w: %s NHP peer public key is not standard base64: %w", errKind, label, err)
-	}
-	if err := x25519key.ValidatePublic(peerKey); err != nil {
-		return fmt.Errorf("%w: %s NHP peer public key is not a usable X25519 identity: %w", errKind, label, err)
-	}
-	return nil
-}
-
-// decodeNHPServerPublicKey accepts the two canonical standard-base64 spellings
-// of an X25519 key: padded and raw (unpadded), because peer keys are wire input
-// and deployed producers emit both forms. Callers still validate the decoded
-// bytes as X25519 and fingerprint those bytes; malformed or non-canonical
-// encodings fail closed. This intentionally differs from the SDK-owned private
-// key state format, which has only one padded producer.
-func decodeNHPServerPublicKey(encoded string) ([]byte, error) {
-	decoded, paddedErr := base64.StdEncoding.Strict().DecodeString(encoded)
-	if paddedErr == nil {
-		return decoded, nil
-	}
-	decoded, rawErr := base64.RawStdEncoding.Strict().DecodeString(encoded)
-	if rawErr == nil {
-		return decoded, nil
-	}
-	return nil, fmt.Errorf("not canonical padded or raw standard base64: %w", errors.Join(paddedErr, rawErr))
-}
-
 // loadOrCreateAgentState loads the persisted state (creating a fresh keypair when
-// none exists), validating a loaded keypair. invalidConfigErr is the caller's
-// front-door config-error class wrapped into a load or keypair failure, so each
-// entry point keeps its documented class (RegisterAgent → ErrInvalidRegisterConfig,
-// BootstrapAgent → ErrInvalidBootstrapConfig) while the underlying store sentinel
-// (ErrInvalidAgentState / ErrInsecureAgentStatePermissions / …) stays matchable
-// through the double-wrap.
+// none exists), validating a loaded keypair. The underlying store sentinel stays
+// matchable through the front-door error wrap.
 func loadOrCreateAgentState(ctx context.Context, store AgentStateStore, invalidConfigErr error) (*AgentState, error) {
-	state, found, err := loadAgentStateIfPresent(ctx, store, invalidConfigErr)
-	if err != nil {
-		return nil, err
-	}
-	if found {
+	state, err := store.LoadAgentState(ctx)
+	switch {
+	case err == nil:
+		if state == nil {
+			return nil, fmt.Errorf("%w: agent state store returned nil state", invalidConfigErr)
+		}
+		if err := validateLoadedAgentAssignment(state); err != nil {
+			return nil, fmt.Errorf("%w: %w", invalidConfigErr, err)
+		}
+		if err := state.ensureKeypair(invalidConfigErr); err != nil {
+			return nil, err
+		}
 		return state, nil
+	case errors.Is(err, ErrAgentStateNotFound):
+		return newAgentState()
+	default:
+		return nil, fmt.Errorf("%w: load agent state: %w", invalidConfigErr, err)
 	}
-	return newAgentState()
 }
 
 func newAgentState() (*AgentState, error) {

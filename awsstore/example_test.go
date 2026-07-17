@@ -30,8 +30,8 @@ func ExampleNewSecretsManagerStore() {
 	ctx := context.Background()
 	state, err := store.LoadAgentState(ctx)
 	if errors.Is(err, qurl.ErrAgentStateNotFound) {
-		// Nothing persisted yet: hand the store to qurl.RegisterAgent, which
-		// enrolls the agent and calls SaveAgentState for you.
+		// Nothing persisted yet: hand the store to qurl.RegisterAgentRuntime,
+		// which enrolls over authenticated NHP UDP and saves state for you.
 		return
 	}
 	if err != nil {
@@ -55,7 +55,7 @@ func ExampleNewParameterStore() {
 	ctx := context.Background()
 	state, err := store.LoadAgentState(ctx)
 	if errors.Is(err, qurl.ErrAgentStateNotFound) {
-		return // not enrolled yet; qurl.RegisterAgent enrolls and Saves for you
+		return // not enrolled yet; RegisterAgentRuntime enrolls and saves for you
 	}
 	if err != nil {
 		log.Fatal(err)
