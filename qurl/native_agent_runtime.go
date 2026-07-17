@@ -520,8 +520,9 @@ func (c *nativeAgentRuntimeConfig) activateAndComplete(ctx context.Context, enro
 	forceFresh := state.PendingActivation == nil
 	// At most one replacement attempt: the first REG either commits, fails
 	// terminally, or returns an authenticated verdict permitting exactly one
-	// replacement (attempt 0 only). Attempt 1 therefore always returns.
-	for attempt := 0; ; attempt++ {
+	// replacement (attempt 0 only). The structural bound prevents a future edit
+	// from accidentally turning replacement into an unbounded loop.
+	for attempt := 0; attempt < 2; attempt++ {
 		var credential string
 		var err error
 		if forceFresh {
@@ -551,6 +552,9 @@ func (c *nativeAgentRuntimeConfig) activateAndComplete(ctx context.Context, enro
 		}
 		return nil, err
 	}
+	// The second attempt always returns through the terminal branch above. Keep
+	// this fail-closed invariant guard in case future control flow changes.
+	return nil, fmt.Errorf("%w: activation attempts exhausted without a terminal result", ErrInvalidAgentState)
 }
 
 // registrationVerdictPermitsReplacement reports whether an authenticated

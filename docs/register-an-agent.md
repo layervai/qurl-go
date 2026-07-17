@@ -58,11 +58,14 @@ exact committed activation may replay after ticket expiry; an authenticated
 credential remains active. Transport ambiguity never triggers Hub or cross-cell
 fallback.
 
-Exact replay includes the persisted `hostname` and `version`; both are exact
-REG body fields, so recovery must use the identical
+Metadata is optional only when constructing a fresh REG. Once a
+`PendingActivation` exists, its persisted `hostname` and `version` are exact
+recovery-identity fields, so recovery must use the identical
 `WithAgentRuntimeMetadata` values. Do not change the reported version or rename
 the host until activation completes. A mismatch fails before network I/O and
-does not authorize a replacement ticket.
+does not authorize a replacement ticket; if the original values cannot be
+restored, explicitly reprovision the agent rather than substituting new
+metadata.
 
 The v0.5 Hub contract requires the assignment lease to expire strictly after
 the assignment ticket. The SDK enforces that ordering when it creates and
