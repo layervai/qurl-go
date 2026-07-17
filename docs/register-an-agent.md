@@ -305,6 +305,11 @@ deadline.
   attempt/elapsed budget. Exhaustion returns
   `*RegistrationRecoveryRequiredError`; restart with the same enrollment
   credential.
+- An authenticated assigned-cell REG rate limit is terminal for that call. The
+  SDK automatically retries only network ambiguity. RAK has no retry-after field
+  in this wire contract; after any authority- or operator-required delay, callers
+  may re-invoke the exact pinned activation, but must never seek a new Hub
+  assignment or cross-cell fallback for that verdict.
 - An authenticated `52111`, or account `52101`, proves the pending first use did
   not activate. Only then may the SDK seek one replacement ticket. The old
   record remains durable until its replacement saves successfully; a consumed

@@ -1542,8 +1542,10 @@ func TestRegisterAgentRuntime_PendingActivationCorruptionAndChangedCredentialFai
 	}
 	_, _, err = RegisterAgentRuntime(context.Background(), conformance.AgentAssignmentBootstrapCredentialFixture, f.store,
 		f.options(WithAgentRuntimeMetadata("changed-host", "changed-version"))...)
-	if !errors.Is(err, ErrInvalidRegisterConfig) {
-		t.Fatalf("changed pending metadata = %v, want ErrInvalidRegisterConfig", err)
+	if !errors.Is(err, ErrInvalidRegisterConfig) ||
+		!strings.Contains(err.Error(), "original hostname and version") ||
+		!strings.Contains(err.Error(), "no replacement or fallback") {
+		t.Fatalf("changed pending metadata remedy = %v", err)
 	}
 	if len(f.hubUDP.snapshot()) != hubBefore || len(f.cellUDP.snapshot()) != cellBefore {
 		t.Fatal("changed pending metadata performed I/O")

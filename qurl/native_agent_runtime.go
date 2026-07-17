@@ -611,7 +611,7 @@ func (c *nativeAgentRuntimeConfig) pendingRegistrationCredential(ctx context.Con
 		return "", err
 	}
 	if c.hostname != pending.Hostname || c.version != pending.AgentVersion {
-		return "", fmt.Errorf("%w: runtime metadata does not match pending activation", ErrInvalidRegisterConfig)
+		return "", fmt.Errorf("%w: runtime metadata does not match pending activation; resume with the original hostname and version because no replacement or fallback is permitted, or explicitly reprovision if those values cannot be restored", ErrInvalidRegisterConfig)
 	}
 	want := enrollmentCredentialFingerprint(enrollmentCredential)
 	// The equality tag is not itself a secret, but the negligible constant-time
@@ -1047,6 +1047,10 @@ func newRegistrationRecovery(attempts int, elapsed time.Duration, last error) er
 }
 
 func registrationRetryInfo(err error) (time.Duration, bool) {
+	// Only network ambiguity is safe to retry automatically. An authenticated
+	// REG rate limit is terminal for this call; after any authority-required wait,
+	// callers may re-invoke the exact pinned activation, never seek Hub or
+	// cross-cell fallback. RAK has no retry-after field in this wire contract.
 	return 0, nativeTransportRetryable(err)
 }
 
