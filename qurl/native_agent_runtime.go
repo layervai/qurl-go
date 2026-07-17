@@ -94,7 +94,9 @@ type AgentOTPChallenge struct {
 	// PendingActivationRecovery is true only when an earlier REG had an
 	// ambiguous/lost RAK and the SDK needs the original code again. No NHP_OTP is
 	// dispatched in this mode; the provider must return the code issued for the
-	// persisted ticket. The field is bounded non-secret context.
+	// persisted ticket. Recovery therefore skips the fresh-registration minimum
+	// ticket-lifetime gate and lets the assigned cell decide replay validity. The
+	// field is bounded non-secret context.
 	PendingActivationRecovery bool
 }
 
@@ -625,6 +627,9 @@ func (c *nativeAgentRuntimeConfig) pendingRegistrationCredential(ctx context.Con
 		if c.otpProvider == nil {
 			return "", fmt.Errorf("%w: pending account activation requires the original code through WithAgentRuntimeOTPProvider", ErrAgentOTPRequired)
 		}
+		// Exact replay may outlive the local ticket window, so the assigned cell
+		// decides validity. The raw caller context intentionally lets the outer
+		// registration deadline bound this callback without a fresh OTP window.
 		code, err := c.otpProvider(ctx, AgentOTPChallenge{
 			AgentID: pending.AgentID, CredentialKeyID: pending.Registration.KeyID,
 			CellID: pending.Assignment.CellID, AssignmentTicketExpiresAt: pending.AssignmentTicketExpiresAt,
