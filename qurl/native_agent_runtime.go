@@ -910,6 +910,9 @@ func (e *CompletionError) Error() string {
 	if e == nil {
 		return "qurl: completion error"
 	}
+	if errors.Is(e.kind, ErrCompletionCredentialConflict) {
+		return fmt.Sprintf("qurl: completion error %s; the authority already committed a different credential: stop and use explicit NHP-native credential recovery or reprovisioning; do not delete the persisted candidate or mint a replacement locally", e.Code)
+	}
 	return fmt.Sprintf("qurl: completion error %s", e.Code)
 }
 

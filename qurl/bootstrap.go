@@ -216,7 +216,9 @@ func (s fileAgentStateStore) LoadAgentState(ctx context.Context) (*AgentState, e
 	}
 	var state AgentState
 	if err := strictDecodeJSON(raw, &state); err != nil {
-		return nil, fmt.Errorf("%w: decode agent state: %w", ErrInvalidAgentState, err)
+		// The decoder's detail can contain producer-controlled field names or
+		// fragments from a credential file. Preserve only the stable sentinel.
+		return nil, fmt.Errorf("%w: decode agent state", ErrInvalidAgentState)
 	}
 	if err := validateLoadedAgentAssignment(&state); err != nil {
 		return nil, err

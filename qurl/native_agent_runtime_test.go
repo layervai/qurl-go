@@ -1860,6 +1860,11 @@ func TestNative521xxGuidanceNamesNativeRecoveryActions(t *testing.T) {
 	if !strings.Contains(assignmentErr, "WithAgentRuntimeIdentity") {
 		t.Fatalf("native Hub 52109 guidance = %q", assignmentErr)
 	}
+	completionErr := (&CompletionError{Code: "52303", kind: ErrCompletionCredentialConflict}).Error()
+	if !strings.Contains(completionErr, "NHP-native credential recovery or reprovisioning") ||
+		!strings.Contains(completionErr, "do not delete the persisted candidate") {
+		t.Fatalf("native 52303 guidance = %q", completionErr)
+	}
 }
 
 func TestEnsureAssignmentContinuity(t *testing.T) {

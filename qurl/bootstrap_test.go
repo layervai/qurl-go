@@ -29,8 +29,9 @@ func TestFileAgentState_NativeRoundTrip(t *testing.T) {
 }
 
 func TestFileAgentState_RejectsUnknownOrTrailingJSON(t *testing.T) {
+	const untrustedField = "lv_live_file_decode_secret"
 	for name, raw := range map[string]string{
-		"unknown field":  `{"private_key_b64":"x","public_key_b64":"y","retired_http_field":true}`,
+		"unknown field":  `{"private_key_b64":"x","public_key_b64":"y","` + untrustedField + `":true}`,
 		"trailing value": `{"private_key_b64":"x","public_key_b64":"y"} {}`,
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -40,6 +41,8 @@ func TestFileAgentState_RejectsUnknownOrTrailingJSON(t *testing.T) {
 			}
 			if _, err := FileAgentState(path).LoadAgentState(context.Background()); !errors.Is(err, ErrInvalidAgentState) {
 				t.Fatalf("load error = %v, want ErrInvalidAgentState", err)
+			} else if strings.Contains(err.Error(), untrustedField) {
+				t.Fatalf("load error reflected untrusted credential-file content: %v", err)
 			}
 		})
 	}

@@ -175,6 +175,10 @@ The parent directory must be exactly `0700`; the file is atomically written
 `0600`. Symlinks, oversized files, insecure permissions, corrupt JSON, unknown
 fields, and inconsistent assignments fail closed. Local stores use a sidecar
 setup lock so two processes cannot mint competing identities against one path.
+Because unknown fields fail closed, an SDK downgrade may not be able to open
+state written by a newer SDK. Treat that as an explicit state-schema migration
+or reprovisioning operation; never delete credential state merely to bypass the
+decode failure.
 
 ### Sealed local file
 
@@ -247,6 +251,7 @@ Use `errors.Is` and `errors.As`:
 | `ErrDeviceKeyQuotaExceeded` | Revoke an unused device credential, then resume according to authority guidance. |
 | `ErrAgentCompletionCandidatePersistence` / `*AgentCompletionCandidatePersistenceError` | Reload state before any retry; never replay the enrollment credential. |
 | `ErrCompletionRecoveryRequired` / `*CompletionRecoveryRequiredError` | Re-run `RegisterAgentRuntime` with the same store and empty enrollment credential to resume the exact pending candidate. |
+| `ErrCompletionCredentialConflict` / `*CompletionError` | The authority already committed a different candidate. Stop and use explicit NHP-native credential recovery or reprovisioning; never delete the persisted candidate or mint a replacement locally. |
 | `*NativeCredentialRecoveryRequiredError` | Native completed credential state is absent or malformed; explicit native recovery/reprovisioning is required. |
 | `*AgentAssignmentChangedError` | A new cell or generation requires explicit reassignment adoption. |
 | `ErrAgentSetupLock` | Repair state-path locking/permissions. Reload before retry because release can fail after a committed save. |
