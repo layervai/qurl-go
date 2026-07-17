@@ -250,6 +250,9 @@ Match errors by type or sentinel, not message text:
   OTP/REG/completion, direct knock, strict golden-vector conformance, crash-safe
   activation/completion, and explicit assignment refresh/reassignment
   boundaries.
+- Registration retry budgets are per phase, so one call can span initial Hub,
+  first REG, replacement Hub, second REG, and completion budgets. Use an outer
+  context deadline when a smaller aggregate wall-clock ceiling is required.
 - Removed the superseded public HTTP agent assignment/registration lifecycle.
   Steady-state resource CRUD remains HTTPS, and browser relay behavior is
   unchanged.

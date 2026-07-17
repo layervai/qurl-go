@@ -89,7 +89,9 @@ of at least 32 bytes and rejects shorter values before any state mutation or
 network I/O. User-chosen passwords are not enrollment credentials. This is part
 of the initial pre-1.0 native-UDP contract for every key kind, including
 interactive account enrollment. The SDK validates token syntax and byte length;
-the minting authority, not the SDK, guarantees the token's entropy.
+the minting authority, not the SDK, guarantees the token's entropy. Hub
+operators must enforce cryptographically random minting upstream; a 32-byte
+low-entropy value violates this contract even though the SDK cannot detect it.
 
 By default the runtime accepts unattended credentials of these authenticated
 Hub-reported kinds:
@@ -136,6 +138,10 @@ original code. Recovery does **not** dispatch another NHP_OTP and sends the exac
 persisted REG body. Only an authenticated OTP-expired (`52101`) or ticket-expired
 marker-absent (`52111`) result permits one fresh assignment ticket; that new
 ticket may dispatch its own single OTP.
+
+That authenticated-expiry path can invoke the provider twice in one call: first
+with `PendingActivationRecovery == true` for the original code, then with
+`false` for the replacement ticket's newly dispatched code.
 
 The recovery branch above must return the previously issued code. It must never
 request, generate, or dispatch a new code; the SDK intentionally suppresses
