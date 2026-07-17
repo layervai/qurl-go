@@ -500,6 +500,13 @@ func (c *nativeAgentRuntimeConfig) registerLocked(ctx context.Context, enrollmen
 			registered = true
 			break
 		}
+		// qurl-conformance v0.5 makes one-shot ticket consumption part of the
+		// atomic registration activation. This one re-fetch therefore relies on
+		// 52111 being a pre-activation verdict with no enrollment-credential
+		// mutation — a producer-side ordering requirement release-gated with that
+		// contract. A producer that violates it can only return terminal 52108 on
+		// the second REG; this loop never retries a consumed bootstrap credential
+		// again.
 		if attempt == 0 && errors.Is(err, ErrAssignmentTicketExpired) && initial.Registration.KeyKind != "account" {
 			continue
 		}

@@ -101,7 +101,9 @@ func validateRegisteredAgentOpenInputs(ctx context.Context, store AgentStateStor
 // remains sensitive. Treat the returned
 // pointer as the owning handle: do not copy or log the binding. Accidental value
 // copies share one synchronized key owner, so they cannot duplicate the one-shot
-// transfer. Immediately defer Destroy after a successful lifecycle call,
+// transfer. Exported identity and assignment fields are read-only observability;
+// mutating them does not retarget a knock and instead fails the authoritative
+// snapshot check. Immediately defer Destroy after a successful lifecycle call,
 // transfer key ownership exactly once with TakeDeviceStaticPrivateKey, and wipe
 // those bytes after use. A runtime cleanup best-effort wipes a retained key only
 // after every accidental copy becomes unreachable; it is defense in depth, not

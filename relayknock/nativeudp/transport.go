@@ -173,6 +173,8 @@ func SendOTP(ctx context.Context, ep Endpoint, body []byte, opts Options) error 
 	if err != nil {
 		return err
 	}
+	// resolveAddresses returns ErrResolve rather than an empty successful slice.
+	// OTP intentionally uses exactly that first public address and never fans out.
 	return sendDatagram(ctx, addrs[0], ep.Port, packet, opts)
 }
 
