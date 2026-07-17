@@ -405,10 +405,6 @@ func parseCookieChallenge(body []byte, requestCounter uint64) ([]byte, error) {
 		cryptoutil.Wipe(cookie)
 		return nil, rejectCookieChallenge(cookieRejectLength, "cookie has the wrong decoded length")
 	}
-	if base64.StdEncoding.EncodeToString(cookie) != parsed.Cookie {
-		cryptoutil.Wipe(cookie)
-		return nil, rejectCookieChallenge(cookieRejectCanonical, "cookie is not canonical base64")
-	}
 	return cookie, nil
 }
 
