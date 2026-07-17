@@ -171,9 +171,10 @@ resource client; they never affect Hub or cell UDP transport.
 Agent state may be stored in a strict `0600` file under a `0700` directory, in a
 sealed file using `NewSealedFileAgentState`, in AWS Secrets Manager or SSM via
 `awsstore`, or in a custom `AgentStateStore`. The schema is native-only and
-unknown persisted fields fail closed. An older SDK therefore cannot open state
-containing fields introduced by a newer SDK; treat a downgrade as an explicit
-state-schema migration or reprovisioning operation rather than deleting state.
+duplicate or unknown persisted fields fail closed. An older SDK therefore
+cannot open state containing fields introduced by a newer SDK; treat a downgrade
+as an explicit state-schema migration or reprovisioning operation rather than
+deleting state.
 
 See [Register an agent](docs/register-an-agent.md) for the complete lifecycle,
 storage contract, recovery boundaries, and error table.

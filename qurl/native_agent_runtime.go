@@ -503,6 +503,8 @@ func (c *nativeAgentRuntimeConfig) registerLocked(ctx context.Context, enrollmen
 		return nil, err
 	}
 	if !registered {
+		// Defensive backstop if a future loop edit adds a path that neither
+		// registers nor returns its assigned-cell error.
 		return nil, ErrAssignmentTicketExpired
 	}
 	candidate, err := c.generateDeviceCredential()

@@ -98,6 +98,24 @@ type AgentState struct {
 	PendingCompletion *PendingAgentCompletion `json:"pending_completion,omitempty"`
 }
 
+type agentStateJSON AgentState
+
+// UnmarshalJSON keeps the native-only persisted schema strict at the type
+// boundary, so file, sealed, AWS, and custom JSON stores cannot disagree about
+// duplicate, unknown, nested, or trailing input. The generic error deliberately
+// does not reflect credential-file field names or values.
+func (s *AgentState) UnmarshalJSON(raw []byte) error {
+	if _, err := exactObjectFields(raw); err != nil {
+		return errors.New("qurl: invalid agent state JSON")
+	}
+	var decoded agentStateJSON
+	if err := strictDecodeJSON(raw, &decoded); err != nil {
+		return errors.New("qurl: invalid agent state JSON")
+	}
+	*s = AgentState(decoded)
+	return nil
+}
+
 // PendingAgentCompletion is sensitive durable state for one in-flight native
 // registration completion. CellID and AssignmentGeneration bind the candidate
 // to the authority state that accepted REG, so a moved assignment cannot replay

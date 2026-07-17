@@ -111,8 +111,10 @@ func TestStoreContract(t *testing.T) {
 
 			t.Run("NativeSchemaOnly", func(t *testing.T) {
 				for name, raw := range map[string]string{
-					"unknown field":  `{"private_key_b64":"x","public_key_b64":"y","retired_http_field":true}`,
-					"trailing value": `{"private_key_b64":"x","public_key_b64":"y"} {}`,
+					"unknown field":           `{"private_key_b64":"x","public_key_b64":"y","retired_http_field":true}`,
+					"trailing value":          `{"private_key_b64":"x","public_key_b64":"y"} {}`,
+					"duplicate top-level key": `{"private_key_b64":"x","private_key_b64":"y","public_key_b64":"z"}`,
+					"duplicate nested key":    `{"private_key_b64":"x","public_key_b64":"y","assignment":{"cell_id":"cell0","cell_id":"cell1"}}`,
 				} {
 					t.Run(name, func(t *testing.T) {
 						if _, err := c.stored(raw).LoadAgentState(context.Background()); !errors.Is(err, qurl.ErrInvalidAgentState) {

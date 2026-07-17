@@ -179,9 +179,10 @@ store := qurl.FileAgentState("/var/lib/layerv/qurl/agent-state.json")
 ```
 
 The parent directory must be exactly `0700`; the file is atomically written
-`0600`. Symlinks, oversized files, insecure permissions, corrupt JSON, unknown
-fields, and inconsistent assignments fail closed. Local stores use a sidecar
-setup lock so two processes cannot mint competing identities against one path.
+`0600`. Symlinks, oversized files, insecure permissions, corrupt JSON, duplicate
+or unknown fields, and inconsistent assignments fail closed. Local stores use a
+sidecar setup lock so two processes cannot mint competing identities against one
+path.
 Because unknown fields fail closed, an SDK downgrade may not be able to open
 state written by a newer SDK. Treat that as an explicit state-schema migration
 or reprovisioning operation; never delete credential state merely to bypass the

@@ -31,8 +31,10 @@ func TestFileAgentState_NativeRoundTrip(t *testing.T) {
 func TestFileAgentState_RejectsUnknownOrTrailingJSON(t *testing.T) {
 	const untrustedField = "lv_live_file_decode_secret"
 	for name, raw := range map[string]string{
-		"unknown field":  `{"private_key_b64":"x","public_key_b64":"y","` + untrustedField + `":true}`,
-		"trailing value": `{"private_key_b64":"x","public_key_b64":"y"} {}`,
+		"unknown field":           `{"private_key_b64":"x","public_key_b64":"y","` + untrustedField + `":true}`,
+		"trailing value":          `{"private_key_b64":"x","public_key_b64":"y"} {}`,
+		"duplicate top-level key": `{"private_key_b64":"x","private_key_b64":"y","public_key_b64":"z"}`,
+		"duplicate nested key":    `{"private_key_b64":"x","public_key_b64":"y","assignment":{"cell_id":"cell0","cell_id":"cell1"}}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			path := filepath.Join(secureAgentStateTestDir(t), "agent-state.json")
