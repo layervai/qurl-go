@@ -19,6 +19,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	conformance "github.com/layervai/qurl-conformance"
 )
 
 func secureAgentStateTestDir(t *testing.T) string {
@@ -28,6 +30,24 @@ func secureAgentStateTestDir(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return dir
+}
+
+type localAgentStateStoreFactory struct {
+	name string
+	new  func(*testing.T) (AgentStateStore, string)
+}
+
+func localAgentStateStoreFactories() []localAgentStateStoreFactory {
+	return []localAgentStateStoreFactory{
+		{name: "plaintext", new: func(t *testing.T) (AgentStateStore, string) {
+			path := filepath.Join(secureAgentStateTestDir(t), "agent_state.json")
+			return FileAgentState(path), path
+		}},
+		{name: "sealed", new: func(t *testing.T) (AgentStateStore, string) {
+			store := testSealedStore(t, &testAgentStateKeyWrapper{})
+			return store, store.path
+		}},
+	}
 }
 
 type testAgentStateKeyWrapper struct {
@@ -617,26 +637,9 @@ func TestSealedFileAgentState_StoreSentinelsAndContext(t *testing.T) {
 }
 
 func TestLocalAgentStateStoreContract(t *testing.T) {
-	tests := []struct {
-		name string
-		new  func(*testing.T) AgentStateStore
-	}{
-		{
-			name: "plaintext",
-			new: func(t *testing.T) AgentStateStore {
-				return FileAgentState(filepath.Join(secureAgentStateTestDir(t), "agent_state.json"))
-			},
-		},
-		{
-			name: "sealed",
-			new: func(t *testing.T) AgentStateStore {
-				return testSealedStore(t, &testAgentStateKeyWrapper{})
-			},
-		},
-	}
-	for _, tt := range tests {
+	for _, tt := range localAgentStateStoreFactories() {
 		t.Run(tt.name, func(t *testing.T) {
-			store := tt.new(t)
+			store, _ := tt.new(t)
 			if _, err := store.LoadAgentState(context.Background()); !errors.Is(err, ErrAgentStateNotFound) {
 				t.Fatalf("empty load = %v, want ErrAgentStateNotFound", err)
 			}
@@ -664,21 +667,63 @@ func TestLocalAgentStateStoreContract(t *testing.T) {
 	}
 }
 
-func TestAgentStateFileStores_LargeStateParityAndOverCapNoCommit(t *testing.T) {
-	tests := []struct {
-		name string
-		new  func(*testing.T) (AgentStateStore, string)
-	}{
-		{"plaintext", func(t *testing.T) (AgentStateStore, string) {
-			path := filepath.Join(secureAgentStateTestDir(t), "agent_state.json")
-			return FileAgentState(path), path
-		}},
-		{"sealed", func(t *testing.T) (AgentStateStore, string) {
-			store := testSealedStore(t, &testAgentStateKeyWrapper{})
-			return store, store.path
-		}},
+func TestLocalAgentStateStores_PendingActivationRoundTripWithoutPlainCredential(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	initial, err := parseInitialAssignmentReply([]byte(contract.InitialAssignment.Result.BodyJSON), "agent-conform", assignmentFixtureNow)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, tt := range tests {
+	for _, tt := range localAgentStateStoreFactories() {
+		t.Run(tt.name, func(t *testing.T) {
+			state, err := newAgentState()
+			if err != nil {
+				t.Fatal(err)
+			}
+			state.AgentID = "agent-conform"
+			state.Assignment = initial.Assignment.clone()
+			state.SchemaVersion = agentStateSchemaVersion
+			state.PendingActivation, err = newPendingAgentActivation(
+				initial, state, "connector-host", "qurl-go/test",
+				conformance.AgentAssignmentBootstrapCredentialFixture,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			store, path := tt.new(t)
+			if err := store.SaveAgentState(context.Background(), state); err != nil {
+				t.Fatal(err)
+			}
+			atRest, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			loaded, err := store.LoadAgentState(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if loaded.PendingActivation == nil || loaded.PendingActivation.AssignmentTicket != initial.AssignmentTicket ||
+				!sameAgentAssignment(&loaded.PendingActivation.Assignment, loaded.Assignment) {
+				t.Fatalf("pending activation did not round trip: %#v", loaded.PendingActivation)
+			}
+			raw, err := json.Marshal(loaded)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, secret := range []string{
+				conformance.AgentAssignmentBootstrapCredentialFixture,
+				"12345678",
+				canonicalNativeDeviceCredential,
+			} {
+				if bytes.Contains(raw, []byte(secret)) || bytes.Contains(atRest, []byte(secret)) {
+					t.Fatalf("pending activation exposed a plaintext secret in decoded or at-rest state: decoded=%s at-rest=%s", raw, atRest)
+				}
+			}
+		})
+	}
+}
+
+func TestAgentStateFileStores_LargeStateParityAndOverCapNoCommit(t *testing.T) {
+	for _, tt := range localAgentStateStoreFactories() {
 		t.Run(tt.name, func(t *testing.T) {
 			store, path := tt.new(t)
 			state := testAgentState(t)

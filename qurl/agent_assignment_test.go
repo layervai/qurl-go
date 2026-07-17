@@ -286,7 +286,7 @@ func TestHubAssignmentRetriesResolveFailure(t *testing.T) {
 	}
 }
 
-func TestRunAssignmentExchangeWipesDecryptedReply(t *testing.T) {
+func TestRunNativeExchangeWipesDecryptedReply(t *testing.T) {
 	for _, parseFails := range []bool{false, true} {
 		t.Run(fmt.Sprintf("parse_failure_%t", parseFails), func(t *testing.T) {
 			hub, transport, _ := assignmentTestSetup(t, `{"assignment_ticket":"one-shot-secret"}`)
@@ -301,8 +301,9 @@ func TestRunAssignmentExchangeWipesDecryptedReply(t *testing.T) {
 			}
 			var decrypted []byte
 			parseErr := errors.New("parse failed")
-			_, err = runAssignmentExchange(
+			_, err = runNativeExchange(
 				context.Background(), cfg, endpoint, []byte(`{}`), transport,
+				nativeudp.List,
 				assignmentRetryInfo, newAssignmentRecovery,
 				func(reply []byte, _ time.Time) (*struct{}, error) {
 					decrypted = reply
@@ -313,7 +314,7 @@ func TestRunAssignmentExchangeWipesDecryptedReply(t *testing.T) {
 				},
 			)
 			if (err != nil) != parseFails || parseFails && !errors.Is(err, parseErr) {
-				t.Fatalf("runAssignmentExchange error = %v, parseFails = %t", err, parseFails)
+				t.Fatalf("runNativeExchange error = %v, parseFails = %t", err, parseFails)
 			}
 			if len(decrypted) == 0 || !bytes.Equal(decrypted, make([]byte, len(decrypted))) {
 				t.Fatalf("decrypted reply was not wiped: %q", decrypted)
@@ -831,14 +832,6 @@ func TestPersistedAgentAssignmentTrustFieldsValidatedOnLoad(t *testing.T) {
 		t.Fatalf("fresh assignment Validate: %v", err)
 	}
 
-	storeFactories := map[string]func(*testing.T) AgentStateStore{
-		"plaintext": func(t *testing.T) AgentStateStore {
-			return FileAgentState(filepath.Join(secureAgentStateTestDir(t), "agent-state.json"))
-		},
-		"sealed": func(t *testing.T) AgentStateStore {
-			return testSealedStore(t, &testAgentStateKeyWrapper{})
-		},
-	}
 	newState := func(t *testing.T, assignment *AgentAssignment) *AgentState {
 		t.Helper()
 		state, err := newAgentState()
@@ -861,7 +854,12 @@ func TestPersistedAgentAssignmentTrustFieldsValidatedOnLoad(t *testing.T) {
 		"zero port":         func(a *AgentAssignment) { a.Endpoint.Port = 0 },
 		"zero lease":        func(a *AgentAssignment) { a.LeaseExpiresAt = time.Time{} },
 	}
-	for storeName, newStore := range storeFactories {
+	for _, factory := range localAgentStateStoreFactories() {
+		storeName := factory.name
+		newStore := func(t *testing.T) AgentStateStore {
+			store, _ := factory.new(t)
+			return store
+		}
 		for mutationName, mutate := range invalidAssignments {
 			t.Run(storeName+"/"+mutationName, func(t *testing.T) {
 				assignment := initial.Assignment.clone()

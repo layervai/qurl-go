@@ -287,13 +287,7 @@ func loadExistingAgentState(ctx context.Context, store AgentStateStore, errKind 
 	if err != nil {
 		return nil, fmt.Errorf("%w: load agent state: %w", errKind, err)
 	}
-	if state == nil {
-		return nil, fmt.Errorf("%w: agent state store returned nil state", errKind)
-	}
-	if err := validateLoadedAgentAssignment(state); err != nil {
-		return nil, fmt.Errorf("%w: %w", errKind, err)
-	}
-	if err := state.ensureKeypair(errKind); err != nil {
+	if err := prepareLoadedAgentState(state, errKind); err != nil {
 		return nil, err
 	}
 	return state, nil

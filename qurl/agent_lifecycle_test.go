@@ -74,7 +74,7 @@ func completedNativeTestState(t *testing.T) *AgentState {
 
 func TestAgentStateClone_IsolatesEveryMutableField(t *testing.T) {
 	stateType := reflect.TypeOf(AgentState{})
-	handledNames := []string{"RegisteredAt", "Assignment", "PendingCompletion"}
+	handledNames := []string{"RegisteredAt", "Assignment", "PendingActivation", "PendingCompletion"}
 	handled := make(map[string]bool, len(handledNames))
 	for _, name := range handledNames {
 		handled[name] = false
@@ -103,12 +103,16 @@ func TestAgentStateClone_IsolatesEveryMutableField(t *testing.T) {
 
 	original := completedNativeTestState(t)
 	original.PendingCompletion = &PendingAgentCompletion{DeviceAPIKey: "candidate", CellID: "cell0", AssignmentGeneration: 1}
+	original.PendingActivation = &PendingAgentActivation{AssignmentTicket: "ticket-original", Assignment: AgentAssignment{CellID: "cell0"}}
 	cloned := original.clone()
 	*cloned.RegisteredAt = cloned.RegisteredAt.Add(time.Hour)
 	cloned.Assignment.Endpoint.Host = "changed.nhp.layerv.ai"
 	cloned.PendingCompletion.DeviceAPIKey = "changed"
+	cloned.PendingActivation.AssignmentTicket = "ticket-changed"
+	cloned.PendingActivation.Assignment.CellID = "cell1"
 
 	if original.Assignment.Endpoint.Host != "cell0.nhp.layerv.ai" ||
+		original.PendingActivation.AssignmentTicket != "ticket-original" || original.PendingActivation.Assignment.CellID != "cell0" ||
 		original.PendingCompletion.DeviceAPIKey != "candidate" ||
 		original.RegisteredAt.Equal(*cloned.RegisteredAt) {
 		t.Fatalf("AgentState clone mutated source: %#v", original)
@@ -169,6 +173,17 @@ func TestOpenRegisteredAgent_RejectsRetiredLifecycleState(t *testing.T) {
 	client, err := OpenRegisteredAgent(context.Background(), store)
 	if client != nil || !errors.Is(err, ErrInvalidAgentState) || !errors.Is(err, ErrCredentialRecoveryRequired) {
 		t.Fatalf("retired state open = client %v, error %v", client, err)
+	}
+}
+
+func TestOpenRegisteredAgent_RevalidatesCustomStoreAssignment(t *testing.T) {
+	state := completedNativeTestState(t)
+	state.Assignment.Endpoint.Host = ""
+	store := &memoryAgentStateStore{state: state}
+
+	client, err := OpenRegisteredAgent(context.Background(), store)
+	if client != nil || !errors.Is(err, ErrInvalidClientConfig) || !errors.Is(err, ErrInvalidAgentState) {
+		t.Fatalf("custom-store assignment error = client %v, error %v; want ErrInvalidClientConfig and ErrInvalidAgentState", client, err)
 	}
 }
 

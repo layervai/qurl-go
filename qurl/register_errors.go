@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // ErrInvalidRegisterConfig is returned when native registration inputs or
@@ -11,14 +12,15 @@ import (
 var ErrInvalidRegisterConfig = errors.New("qurl: invalid register config")
 
 // ErrAgentBindingPersistence means a native lifecycle transition could not
-// durably commit AgentState. When PendingCompletion is already durable, retry
-// RegisterAgentRuntime so it reuses that exact candidate.
+// durably commit AgentState. Reload first: PendingActivation resumes with the
+// same enrollment credential, while PendingCompletion resumes without one.
 var ErrAgentBindingPersistence = errors.New("qurl: agent binding persistence failed")
 
 // ErrAgentCompletionCandidatePersistence means assigned-cell registration was
-// accepted, but the SDK could not prove whether the newly generated completion
-// candidate became durable. Reload before deciding whether to resume or
-// explicitly reprovision; never replay a possibly consumed enrollment key.
+// accepted, but the SDK could not prove whether the atomic pending-activation
+// to pending-completion transition became durable. Reload before deciding
+// whether to re-drive the exact pending REG with the same enrollment credential
+// or resume the exact pending completion candidate.
 var ErrAgentCompletionCandidatePersistence = errors.New("qurl: native completion candidate durability is unknown")
 
 // AgentCompletionCandidatePersistenceError is the typed post-RAK durability
@@ -33,7 +35,7 @@ func (e *AgentCompletionCandidatePersistenceError) Error() string {
 	if e != nil {
 		agentID = e.AgentID
 	}
-	message := fmt.Sprintf("qurl: assigned-cell registration for agent %q succeeded, but its completion candidate durability is unknown; reload state first, resume an exact pending candidate with an empty enrollment credential when present, and use explicit NHP-native reprovisioning only when reload proves it absent; never replay the enrollment credential", agentID)
+	message := fmt.Sprintf("qurl: assigned-cell registration for agent %q succeeded, but its post-RAK state-transition durability is unknown; reload state first and resume an exact pending activation with the same enrollment credential or an exact pending completion with an empty enrollment credential; save ambiguity alone never authorizes a replacement ticket, and only an exact pending-activation replay authenticated as 52111 or account 52101 permits the one bounded replacement", agentID)
 	if e == nil {
 		return message
 	}
@@ -137,7 +139,7 @@ func validatePersistedCredentialForState(state *AgentState, errKind error) error
 }
 
 func isNativeAgentRuntimeState(state *AgentState) bool {
-	return state != nil && (state.Assignment != nil || state.PendingCompletion != nil || state.DeviceAPIKeyID != "")
+	return state != nil && (state.Assignment != nil || state.PendingActivation != nil || state.PendingCompletion != nil || state.DeviceAPIKeyID != "")
 }
 
 // NativeCredentialRecoveryRequiredError reports a missing or malformed native
@@ -197,6 +199,12 @@ func unwrapWithCause(cause error, sentinels ...error) []error {
 		return sentinels
 	}
 	return append(sentinels, cause)
+}
+
+// recoveryBudgetErrorString keeps the three phase-specific public recovery
+// types source-compatible while centralizing their identical message shape.
+func recoveryBudgetErrorString(scope, guidance string, attempts int, elapsed time.Duration, last error) string {
+	return fmt.Sprintf("qurl: %s retry budget exhausted after %d attempts over %s; %s: %v", scope, attempts, elapsed, guidance, last)
 }
 
 func messageWithCause(message string, cause error) string {

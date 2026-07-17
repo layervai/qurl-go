@@ -39,12 +39,37 @@ The SDK then:
 
 1. loads or creates the persistent X25519 agent identity;
 2. asks the pinned Hub for an assignment over authenticated NHP UDP;
-3. persists the Hub-provided cell id, generation, endpoint revision, lease,
-   LayerV-owned DNS host, UDP port, and assigned-cell server public key;
-4. sends optional account OTP and REG directly to that assigned cell;
-5. persists one exact completion candidate before sending completion;
+3. obtains the optional account OTP, then durably persists one exact pending
+   activation: ticket and expiry, agent id/public key, registration key id/kind,
+   metadata, complete assigned-cell binding, and a one-way identity of the
+   caller-supplied enrollment credential;
+4. sends REG directly to only that persisted assigned cell;
+5. after an authenticated RAK, atomically replaces the pending activation with
+   one exact completion candidate before sending completion;
 6. completes directly with the assigned cell; and
 7. returns the resource `Client` and a private-key-owning runtime binding.
+
+The pending activation never contains the plaintext enrollment credential, OTP
+code, or device credential. If RAK is lost after the authority commits REG, the
+next call must supply the same enrollment credential. The SDK re-drives the
+persisted REG to its pinned cell before asking the Hub for anything new. An
+exact committed activation may replay after ticket expiry; an authenticated
+`52111` marker-absent result permits one replacement Hub ticket while the
+credential remains active. Transport ambiguity never triggers Hub or cross-cell
+fallback.
+
+Metadata is optional only when constructing a fresh REG. Once a
+`PendingActivation` exists, its persisted `hostname` and `version` are exact
+recovery-identity fields, so recovery must use the identical
+`WithAgentRuntimeMetadata` values. Do not change the reported version or rename
+the host until activation completes. A mismatch fails before network I/O and
+does not authorize a replacement ticket; if the original values cannot be
+restored, explicitly reprovision the agent rather than substituting new
+metadata.
+
+The v0.5 Hub contract requires the assignment lease to expire strictly after
+the assignment ticket. The SDK enforces that ordering when it creates and
+reloads pending activation state.
 
 The SDK does not calculate a cell address. It resolves the exact host supplied
 by the authenticated Hub response and authenticates the responding cell against
@@ -58,6 +83,16 @@ requires an updated qurl-go release before the placement is enabled; older SDKs
 intentionally fail resolution closed.
 
 ## Credential policy
+
+`RegisterAgentRuntime` requires a server-minted encoded enrollment token whose
+total string length is at least 32 bytes, including any prefix, and rejects
+shorter values before any state mutation or network I/O. User-chosen passwords
+are not enrollment credentials. This is part of the initial pre-1.0 native-UDP
+contract for every key kind, including interactive account enrollment. The SDK
+validates token syntax and this total-length floor; it does not measure decoded
+random material or entropy. Hub operators must enforce cryptographically random
+minting upstream; a low-entropy value violates this contract even if it passes
+the SDK's length check.
 
 By default the runtime accepts unattended credentials of these authenticated
 Hub-reported kinds:
@@ -79,6 +114,9 @@ client, binding, err := qurl.RegisterAgentRuntime(ctx, accountCredential, store,
 		qurl.RegistrationKeyKindAccount,
 	),
 	qurl.WithAgentRuntimeOTPProvider(func(ctx context.Context, challenge qurl.AgentOTPChallenge) (string, error) {
+		if challenge.PendingActivationRecovery {
+			return readPreviouslyIssuedEightDigitCode(ctx, challenge)
+		}
 		return readEightDigitCode(ctx, challenge)
 	}),
 )
@@ -87,8 +125,36 @@ client, binding, err := qurl.RegisterAgentRuntime(ctx, accountCredential, store,
 The assigned cell receives a one-way OTP request before the callback runs. The
 callback receives only bounded, non-secret challenge metadata. It must return
 exactly eight ASCII digits. The code is never persisted or included in an
-error. One invocation never silently requests a second OTP; ticket expiry
-requires a new explicit call.
+error. Each assignment ticket dispatches at most one NHP_OTP.
+
+OTP dispatch intentionally precedes the pending-activation save: persisting a
+"dispatched" record before the one-way send could strand the ticket if the
+process exits between those operations. If the later state save fails, no REG
+was sent; a new explicit attempt may obtain a new ticket and dispatch that
+ticket's single OTP.
+
+If REG has an ambiguous/lost RAK, recovery invokes the callback again with
+`challenge.PendingActivationRecovery == true` so the caller can supply the
+original code. Recovery does **not** dispatch another NHP_OTP and sends the exact
+persisted REG body. Only an authenticated OTP-expired (`52101`) or ticket-expired
+marker-absent (`52111`) result permits one fresh assignment ticket; that new
+ticket may dispatch its own single OTP.
+
+That authenticated-expiry path can invoke the provider twice in one call: first
+with `PendingActivationRecovery == true` for the original code, then with
+`false` for the replacement ticket's newly dispatched code. Separately, when a
+fresh first REG receives account `52101`, the provider can also run twice in one
+call, but both challenges have `PendingActivationRecovery == false`: each
+follows the one OTP dispatch for its own distinct fresh ticket. Every path still
+dispatches at most one OTP per ticket.
+
+The recovery branch above must return the previously issued code. It must never
+request, generate, or dispatch a new code; the SDK intentionally suppresses
+NHP_OTP while replaying a pending activation.
+
+Pending-activation recovery calls the provider with the caller's context because
+an exact replay may occur after the ticket window has expired. Set an outer
+context deadline to bound that operator or provider wait.
 
 The SDK refuses to dispatch OTP unless the assignment ticket has at least the
 conformance contract's inclusive 630 seconds remaining.
@@ -169,8 +235,10 @@ cannot accidentally retarget both trust paths.
 ## State storage
 
 `AgentState` contains the X25519 private key, completed device credential, Hub
-assignment, and possibly a crash-recovery completion candidate. It is a
-credential file: never log it or attach it to support bundles.
+assignment, and possibly a crash-recovery activation record or completion
+candidate. It is a credential file: never log it or attach it to support
+bundles. `FileAgentState` is permission-protected plaintext; use a sealed or
+secret-manager store when the complete state must be encrypted at rest.
 
 ### Plaintext local file
 
@@ -223,24 +291,43 @@ An `AgentStateStore` must:
 - serialize setup externally if it does not implement the SDK local-file lock.
 
 Save can commit and still return an acknowledgement error. Callers must reload
-before deciding whether a completion candidate exists.
+before deciding whether a pending activation or completion candidate exists.
 
 ## Crash and retry boundaries
 
 The lifecycle separates retryable transport from security-sensitive mutation:
 
+A single call can consume independent bounded budgets for the initial Hub
+assignment, first REG, replacement Hub assignment, second REG, and completion.
+Callers that need a smaller aggregate ceiling must set an outer context
+deadline.
+
 - Hub assignment uses one bounded transaction budget. Authenticated rate-limit
   advice may delay and retry within that budget.
-- Assigned-cell REG may reassign once for an expired bootstrap ticket. Account
-  OTP never performs a hidden second assignment/OTP attempt.
+- The exact pending activation is durable before the first REG. Resolution and
+  transport faults retry only that body and pinned cell within the configured
+  attempt/elapsed budget. Exhaustion returns
+  `*RegistrationRecoveryRequiredError`; restart with the same enrollment
+  credential.
+- An authenticated assigned-cell REG rate limit is terminal for that call. The
+  SDK automatically retries only network ambiguity. RAK has no retry-after field
+  in this wire contract; after any authority- or operator-required delay, callers
+  may re-invoke the exact pinned activation, but must never seek a new Hub
+  assignment or cross-cell fallback for that verdict.
+- An authenticated `52111`, or account `52101`, proves the pending first use did
+  not activate. Only then may the SDK seek one replacement ticket. The old
+  record remains durable until its replacement saves successfully; a consumed
+  credential/new-ticket denial therefore cannot erase the recovery evidence.
 - Completion retries only resolution/transport faults and authenticated `52300`
   unavailable responses.
 - The exact candidate is durable before the first completion packet. Lost or
   ambiguous completion resumes that candidate; it never generates another.
 - A save error immediately after RAK may have committed. Reload first. If the
-  exact pending candidate exists, resume with an empty enrollment credential.
-  If it does not, use explicit native owner recovery/reprovisioning; never replay
-  a possibly consumed enrollment credential.
+  pending activation remains, resume its exact REG with the same enrollment
+  credential. If the pending completion exists, resume with an empty enrollment
+  credential. Never request a replacement from save ambiguity alone: only an
+  authenticated `52111` or account `52101` from the exact pending-activation
+  replay may authorize the one bounded replacement above.
 
 ## Errors
 
@@ -254,10 +341,11 @@ Use `errors.Is` and `errors.As`:
 | `ErrOTPIncorrect` | Obtain the correct code and start a new explicit attempt as appropriate. |
 | `ErrOTPExpired` | Start a new explicit assignment/OTP attempt. |
 | `ErrAssignmentRecoveryRequired` / `*AssignmentRecoveryRequiredError` | The bounded Hub transaction was exhausted; inspect the matchable cause. |
+| `ErrRegistrationRecoveryRequired` / `*RegistrationRecoveryRequiredError` | The bounded assigned-cell REG transaction was ambiguous; re-run with the same store, Hub trust root, metadata, and enrollment credential so the exact pending activation is replayed first. |
 | `ErrAssignmentTicketInvalid` / `ErrAssignmentTicketExpired` | The assigned cell rejected the Hub ticket. Do not invent or retarget an endpoint. |
 | `ErrAgentIdentityConflict` | Stop and use explicit owner-controlled native reprovisioning. |
 | `ErrDeviceKeyQuotaExceeded` | Revoke an unused device credential, then resume according to authority guidance. |
-| `ErrAgentCompletionCandidatePersistence` / `*AgentCompletionCandidatePersistenceError` | Reload state before any retry; never replay the enrollment credential. |
+| `ErrAgentCompletionCandidatePersistence` / `*AgentCompletionCandidatePersistenceError` | Reload state before any retry; resume the exact pending activation with the same enrollment credential or the exact pending completion with an empty credential. Save ambiguity alone never authorizes replacement; only an exact pending-activation replay authenticated as `52111` or account `52101` permits the one bounded replacement. |
 | `ErrCompletionRecoveryRequired` / `*CompletionRecoveryRequiredError` | Re-run `RegisterAgentRuntime` with the same store and empty enrollment credential to resume the exact pending candidate. |
 | `ErrCompletionCredentialConflict` / `*CompletionError` | The authority already committed a different candidate. Stop and use explicit NHP-native credential recovery or reprovisioning; never delete the persisted candidate or mint a replacement locally. |
 | `*NativeCredentialRecoveryRequiredError` | Native completed credential state is absent or malformed; explicit native recovery/reprovisioning is required. |

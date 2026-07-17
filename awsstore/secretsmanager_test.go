@@ -2,6 +2,8 @@ package awsstore_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -13,6 +15,7 @@ import (
 	smtypes "github.com/aws/aws-sdk-go-v2/service/secretsmanager/types"
 
 	"github.com/layervai/qurl-go/awsstore"
+	"github.com/layervai/qurl-go/internal/agentstatecontract"
 	"github.com/layervai/qurl-go/qurl"
 )
 
@@ -103,7 +106,7 @@ func sampleState() *qurl.AgentState {
 		RegisteredAt:   &ts,
 		DeviceAPIKey:   "dev-secret-bearer",
 		DeviceAPIKeyID: "key_AbCdEf123456",
-		SchemaVersion:  4,
+		SchemaVersion:  5,
 		Assignment: &qurl.AgentAssignment{
 			CellID: "cell0", AssignmentGeneration: 1, EndpointRevision: 1,
 			LeaseExpiresAt: ts.Add(time.Hour),
@@ -113,6 +116,41 @@ func sampleState() *qurl.AgentState {
 			},
 		},
 	}
+}
+
+func samplePendingActivationState(enrollmentCredential string) *qurl.AgentState {
+	state := sampleState()
+	state.PrivateKeyB64 = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
+	state.PublicKeyB64 = "Hh8cHRobGBkWFxQVFBMSEQ4PDA0KCwgJBgcEBQIDAQA="
+	state.RegisteredAt = nil
+	state.DeviceAPIKey = ""
+	state.DeviceAPIKeyID = ""
+	ticketExpiry := state.Assignment.LeaseExpiresAt.Add(-45 * time.Minute)
+	state.PendingActivation = &qurl.PendingAgentActivation{
+		AssignmentTicket:          "assignment-ticket-pending-0001",
+		AssignmentTicketExpiresAt: ticketExpiry,
+		AgentID:                   state.AgentID,
+		AgentPublicKeyB64:         state.PublicKeyB64,
+		Assignment:                *state.Assignment,
+		Registration: qurl.AssignmentRegistration{
+			KeyID:   "key_A1b2C3d4E5f6",
+			KeyKind: string(qurl.RegistrationKeyKindConnectorBootstrap),
+		},
+		Hostname:                           "connector-host",
+		AgentVersion:                       "qurl-go/test",
+		EnrollmentCredentialFingerprintB64: sampleEnrollmentCredentialFingerprint(enrollmentCredential),
+	}
+	return state
+}
+
+func sampleEnrollmentCredentialFingerprint(value string) string {
+	// Keep the algorithm independent from qurl.enrollmentCredentialFingerprint
+	// while compiling both modules against the same repo-internal domain. The
+	// production helper stays unexported rather than widening the public SDK API
+	// for one cross-module contract fixture.
+	const domain = agentstatecontract.PendingActivationEnrollmentCredentialFingerprintDomain
+	digest := sha256.Sum256([]byte(domain + value))
+	return base64.RawURLEncoding.EncodeToString(digest[:])
 }
 
 func assertStateEqual(t *testing.T, want, got *qurl.AgentState) {
