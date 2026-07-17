@@ -355,7 +355,7 @@ func TestReplyTypeAllowed(t *testing.T) {
 		{relayknock.TypeListRequest, relayknock.TypeCookieChallenge, false},
 		{relayknock.TypeListRequest, relayknock.TypeACK, false},
 		{relayknock.TypeRegister, relayknock.TypeRegisterAck, true},
-		{relayknock.TypeRegister, relayknock.TypeCookieChallenge, true},
+		{relayknock.TypeRegister, relayknock.TypeCookieChallenge, false},
 		{relayknock.TypeRegister, relayknock.TypeACK, false},
 		{relayknock.TypeOTP, relayknock.TypeACK, false},
 	}
@@ -363,6 +363,125 @@ func TestReplyTypeAllowed(t *testing.T) {
 		if got := replyTypeAllowed(tc.req, tc.reply); got != tc.want {
 			t.Errorf("replyTypeAllowed(%d,%d) = %v, want %v", tc.req, tc.reply, got, tc.want)
 		}
+	}
+}
+
+func TestCorrelateDecryptedReply_CookieChallengeBeforeCounterCheck(t *testing.T) {
+	body := []byte("authenticated-overload-cookie")
+	reply := &relayknock.Reply{
+		Type:    relayknock.TypeCookieChallenge,
+		Counter: 43,
+		Body:    body,
+	}
+	got, err := correlateDecryptedReply(reply, relayknock.TypeKnock, 42)
+	if err != nil {
+		t.Fatalf("mismatched-counter COK correlation = %v, want retryable reply", err)
+	}
+	if got != reply || !got.IsCookieChallenge() {
+		t.Fatalf("mismatched-counter COK = %#v, want original cookie-challenge reply", got)
+	}
+	if !bytes.Equal(body, []byte("authenticated-overload-cookie")) {
+		t.Fatalf("accepted COK body was unexpectedly wiped: %x", body)
+	}
+}
+
+func TestCorrelateDecryptedReplyWipesRejectedBody(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		requestType int
+		replyType   int
+		counter     uint64
+		wantCounter uint64
+	}{
+		{name: "counter mismatch", requestType: relayknock.TypeKnock, replyType: relayknock.TypeACK, counter: 43, wantCounter: 42},
+		{name: "type mismatch", requestType: relayknock.TypeKnock, replyType: relayknock.TypeRegisterAck, counter: 42, wantCounter: 42},
+		{name: "register cookie challenge", requestType: relayknock.TypeRegister, replyType: relayknock.TypeCookieChallenge, counter: 42, wantCounter: 42},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			body := []byte("secret-bearing-authenticated-body")
+			_, err := correlateDecryptedReply(&relayknock.Reply{Type: test.replyType, Counter: test.counter, Body: body}, test.requestType, test.wantCounter)
+			if !errors.Is(err, relayknock.ErrMalformedReply) {
+				t.Fatalf("correlation error = %v, want ErrMalformedReply", err)
+			}
+			if !bytes.Equal(body, make([]byte, len(body))) {
+				t.Fatalf("rejected decrypted body was not wiped: %x", body)
+			}
+		})
+	}
+}
+
+func TestAgentKnockGoldenTransportCorrelationCases(t *testing.T) {
+	vectors, err := conformance.AgentKnockApplication()
+	if err != nil {
+		t.Fatal(err)
+	}
+	executed := 0
+	for _, vector := range vectors.ReplyCases {
+		if vector.RejectClass != conformance.AgentKnockRejectCounter && vector.RejectClass != conformance.AgentKnockRejectReplyType {
+			continue
+		}
+		executed++
+		t.Run(vector.Name, func(t *testing.T) {
+			requestCounter, parseErr := strconv.ParseUint(vector.RequestCounter, 10, 64)
+			if parseErr != nil {
+				t.Fatal(parseErr)
+			}
+			replyCounter, parseErr := strconv.ParseUint(vector.ReplyCounter, 10, 64)
+			if parseErr != nil {
+				t.Fatal(parseErr)
+			}
+			body := []byte(vector.BodyJSON)
+			_, err := correlateDecryptedReply(&relayknock.Reply{Type: vector.ReplyType, Counter: replyCounter, Body: body}, relayknock.TypeKnock, requestCounter)
+			if !errors.Is(err, relayknock.ErrMalformedReply) {
+				t.Fatalf("golden correlation reject = %v, want ErrMalformedReply", err)
+			}
+			if !bytes.Equal(body, make([]byte, len(body))) {
+				t.Fatal("golden correlation reject did not wipe authenticated body")
+			}
+		})
+	}
+	if executed != 2 {
+		t.Fatalf("transport-only golden reply cases = %d, want 2", executed)
+	}
+}
+
+func TestSendDatagramPreservesContextCancellation(t *testing.T) {
+	address := netip.MustParseAddr("192.0.2.1")
+	packet := []byte{1, 2, 3}
+	t.Run("dial", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		dialer := dialerFunc(func(context.Context, string, string) (net.Conn, error) {
+			cancel()
+			return nil, errors.New("dial failed after cancellation")
+		})
+		err := sendDatagram(ctx, address, 62206, packet, Options{Dialer: dialer})
+		if !errors.Is(err, context.Canceled) || errors.Is(err, ErrTransport) {
+			t.Fatalf("dial cancellation = %v, want context.Canceled only", err)
+		}
+	})
+	for _, phase := range []string{"after dial", "deadline", "write error", "short write"} {
+		t.Run(phase, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			conn := &scriptedDatagramConn{}
+			switch phase {
+			case "deadline":
+				conn.setDeadline = func(time.Time) error { cancel(); return errors.New("deadline failed") }
+			case "write error":
+				conn.write = func([]byte) (int, error) { cancel(); return 0, errors.New("write failed") }
+			case "short write":
+				conn.write = func(p []byte) (int, error) { cancel(); return len(p) - 1, nil }
+			}
+			dialer := dialerFunc(func(context.Context, string, string) (net.Conn, error) {
+				if phase == "after dial" {
+					cancel()
+				}
+				return conn, nil
+			})
+			err := sendDatagram(ctx, address, 62206, packet, Options{Dialer: dialer})
+			if !errors.Is(err, context.Canceled) || errors.Is(err, ErrTransport) {
+				t.Fatalf("%s cancellation = %v, want context.Canceled only", phase, err)
+			}
+		})
 	}
 }
 
@@ -435,6 +554,30 @@ func (oversizeReadConn) Read(p []byte) (int, error) {
 }
 
 func (oversizeReadConn) Write(p []byte) (int, error) { return len(p), nil }
+
+type scriptedDatagramConn struct {
+	setDeadline func(time.Time) error
+	write       func([]byte) (int, error)
+}
+
+func (*scriptedDatagramConn) Read([]byte) (int, error) { return 0, errors.New("unexpected read") }
+func (c *scriptedDatagramConn) Write(p []byte) (int, error) {
+	if c.write != nil {
+		return c.write(p)
+	}
+	return len(p), nil
+}
+func (*scriptedDatagramConn) Close() error         { return nil }
+func (*scriptedDatagramConn) LocalAddr() net.Addr  { return &net.UDPAddr{} }
+func (*scriptedDatagramConn) RemoteAddr() net.Addr { return &net.UDPAddr{} }
+func (c *scriptedDatagramConn) SetDeadline(deadline time.Time) error {
+	if c.setDeadline != nil {
+		return c.setDeadline(deadline)
+	}
+	return nil
+}
+func (*scriptedDatagramConn) SetReadDeadline(time.Time) error  { return nil }
+func (*scriptedDatagramConn) SetWriteDeadline(time.Time) error { return nil }
 
 func freshX25519Priv(t *testing.T) []byte {
 	t.Helper()

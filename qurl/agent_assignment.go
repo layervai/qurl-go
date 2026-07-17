@@ -80,9 +80,8 @@ type AgentAssignment struct {
 }
 
 // AssignmentRegistration is the enrollment identity the assigned-cell REG will
-// present. It is attempt-scoped output, not durable assignment state. In
-// particular, callers must not copy it into AgentState.KeyID, which belongs to
-// the separate legacy HTTPS registration lifecycle.
+// present. It is attempt-scoped output, not durable assignment state, and must
+// not be persisted as the completed device credential id.
 type AssignmentRegistration struct {
 	KeyID   string `json:"key_id"`
 	KeyKind string `json:"key_kind"`
@@ -112,6 +111,22 @@ func (a *AgentAssignment) clone() *AgentAssignment {
 	return &cloned
 }
 
+// sameAgentAssignment compares the durable wire fields while using time.Equal
+// for the lease instant. Direct struct equality would also compare time.Time's
+// location and monotonic metadata, which are not part of the assignment
+// contract and could cause a redundant durable write after a future in-memory
+// producer starts carrying either.
+func sameAgentAssignment(a, b *AgentAssignment) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.CellID == b.CellID &&
+		a.AssignmentGeneration == b.AssignmentGeneration &&
+		a.EndpointRevision == b.EndpointRevision &&
+		a.LeaseExpiresAt.Equal(b.LeaseExpiresAt) &&
+		a.Endpoint == b.Endpoint
+}
+
 // DecodedServerKey returns the assignment's canonical 32-byte X25519 server
 // identity. Persisted/caller-built state is revalidated on every use.
 func (a *AgentAssignment) DecodedServerKey() ([]byte, error) {
@@ -130,9 +145,13 @@ func (a *AgentAssignment) Validate(now time.Time) error {
 		return err
 	}
 	if !a.LeaseExpiresAt.After(now) {
-		return invalidAssignmentResponse("assignment", errors.New("lease must be in the future"))
+		return fmt.Errorf("%w: assignment lease must be in the future: %w", ErrAssignmentInvalidResponse, ErrAssignmentLeaseExpired)
 	}
 	return nil
+}
+
+func validNetworkPort(port int) bool {
+	return port > 0 && port <= 65535
 }
 
 // LeaseExpired reports only whether the assignment is absent or its lease is no
@@ -152,6 +171,11 @@ var (
 	// It is terminal: retrying cannot repair an authenticated producer-contract
 	// violation and could conceal a hub deployment error.
 	ErrAssignmentInvalidResponse = errors.New("qurl: assignment response invalid")
+	// ErrAssignmentLeaseExpired distinguishes structurally valid persisted state
+	// whose authority lease is no longer live. Validation errors in this class
+	// also match ErrAssignmentInvalidResponse, but callers may safely select an
+	// explicit RefreshAgentRuntime only for this narrower class.
+	ErrAssignmentLeaseExpired = errors.New("qurl: assignment lease expired")
 	// ErrAssignmentUnavailable is the sole retryable assignment application
 	// result (52200), bounded together with transport misses by the transaction
 	// retry budget.
@@ -177,16 +201,17 @@ var (
 )
 
 // AssignmentError is a valid authenticated application error from the closed
-// qurl-conformance v1 taxonomy. Policy comes only from Code; Message is
-// diagnostic. RetryAfter is populated only for codes that permit it. In
+// qurl-conformance v1 taxonomy. Policy comes only from the closed Code set;
+// authenticated producer diagnostics are deliberately discarded because a
+// buggy producer could reflect a submitted credential. RetryAfter is populated
+// only for codes that permit it. In
 // particular, 52204 is terminal within the current transaction; callers must
 // wait at least RetryAfter before starting a new whole assignment transaction.
 // The outer lifecycle owns that inter-transaction gate; this helper only bounds
-// retries within one transaction. Lifecycle enforcement is tracked by
-// https://github.com/layervai/qurl-go/issues/66.
+// retries within one transaction. RegisterAgentRuntime and RefreshAgentRuntime
+// enforce the outer inter-transaction budget.
 type AssignmentError struct {
 	Code       string
-	Message    string
 	RetryAfter time.Duration
 	kind       error
 }
@@ -195,11 +220,10 @@ func (e *AssignmentError) Error() string {
 	if e == nil {
 		return "qurl: assignment error"
 	}
-	msg := "qurl: assignment error " + e.Code
-	if e.Message != "" {
-		msg += ": " + e.Message
+	if e.Code == "52109" {
+		return "qurl: native Hub assignment request rejected (52109); correct WithAgentRuntimeIdentity or the Hub request contract before retrying"
 	}
-	return msg
+	return "qurl: assignment error " + e.Code
 }
 
 func (e *AssignmentError) Unwrap() error {
@@ -213,8 +237,7 @@ func (e *AssignmentError) Unwrap() error {
 // losing its typed cause. Callers surface recovery instead of starting an
 // unbounded loop. In particular, a Last cause matching
 // nativeudp.ErrServerUnauthenticated is operator-actionable trust/bootstrap
-// recovery and must not be silently re-driven by the outer lifecycle; that
-// lifecycle enforcement is tracked by qurl-go issue #66.
+// recovery and must not be silently re-driven by the outer lifecycle.
 type AssignmentRecoveryRequiredError struct {
 	Attempts int
 	Elapsed  time.Duration
@@ -354,7 +377,7 @@ func FetchInitialAgentAssignment(ctx context.Context, hub HubBootstrap, agentID,
 	}
 	defer wipeBytes(body)
 
-	return runAssignmentExchange(ctx, cfg, endpoint, body, transport, func(reply []byte, now time.Time) (*InitialAgentAssignment, error) {
+	return runAssignmentExchange(ctx, cfg, endpoint, body, transport, assignmentRetryInfo, newAssignmentRecovery, func(reply []byte, now time.Time) (*InitialAgentAssignment, error) {
 		return parseInitialAssignmentReply(reply, agentID, now)
 	})
 }
@@ -380,12 +403,25 @@ func RefreshAgentAssignment(ctx context.Context, hub HubBootstrap, agentID strin
 	}
 	// Refresh is intentionally credential-free, so there is no mutable secret
 	// buffer to wipe. Any future secret-bearing field must add explicit wiping.
-	return runAssignmentExchange(ctx, cfg, endpoint, body, transport, func(reply []byte, now time.Time) (*AgentAssignment, error) {
+	return runAssignmentExchange(ctx, cfg, endpoint, body, transport, assignmentRetryInfo, newAssignmentRecovery, func(reply []byte, now time.Time) (*AgentAssignment, error) {
 		return parseRefreshAssignmentReply(reply, agentID, now)
 	})
 }
 
-func runAssignmentExchange[T any](ctx context.Context, c *assignmentConfig, endpoint nativeudp.Endpoint, body []byte, transport nativeudp.Options, parse func([]byte, time.Time) (*T, error)) (*T, error) {
+// recoveryFunc builds the phase-specific recovery-required error for a final
+// failed attempt. Assignment and completion share one bounded retry loop while
+// preserving distinct public recovery error types.
+type recoveryFunc func(attempts int, elapsed time.Duration, last error) error
+
+func newAssignmentRecovery(attempts int, elapsed time.Duration, last error) error {
+	return &AssignmentRecoveryRequiredError{Attempts: attempts, Elapsed: elapsed, Last: last}
+}
+
+// runAssignmentExchange is the single bounded, jittered retry driver for
+// authenticated NHP assignment and pending-credential completion transactions.
+// retryInfo classifies retryable failures and newRecovery preserves the phase's
+// public recovery error type.
+func runAssignmentExchange[T any](ctx context.Context, c *assignmentConfig, endpoint nativeudp.Endpoint, body []byte, transport nativeudp.Options, retryInfo func(error) (time.Duration, bool), newRecovery recoveryFunc, parse func([]byte, time.Time) (*T, error)) (*T, error) {
 	start := c.clock()
 	transactionCtx, cancel := context.WithTimeout(ctx, c.budget)
 	defer cancel()
@@ -400,7 +436,7 @@ func runAssignmentExchange[T any](ctx context.Context, c *assignmentConfig, endp
 			}
 			err = parseErr
 		}
-		retryAfter, retryable := assignmentRetryInfo(err)
+		retryAfter, retryable := retryInfo(err)
 		if replyAuthenticated && !retryable {
 			// A parsed authenticated terminal result wins over a retry-budget
 			// deadline that fires concurrently. In particular, identity rejection
@@ -415,49 +451,45 @@ func runAssignmentExchange[T any](ctx context.Context, c *assignmentConfig, endp
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
-			return nil, c.recoveryRequired(attempt, start, errors.Join(err, transactionCtx.Err()))
+			return nil, c.recoveryRequired(newRecovery, attempt, start, errors.Join(err, transactionCtx.Err()))
 		}
 		if !retryable {
 			return nil, err
 		}
 		elapsed := c.elapsedSince(start)
+		// Preserve observed elapsed time for ordinary attempt exhaustion; a fixed
+		// test clock can therefore report zero. recoveryRequired clamps separately
+		// only when the real transaction deadline proves the budget was exhausted.
 		if attempt == c.maxAttempts || elapsed >= c.budget {
-			return nil, c.recoveryAt(attempt, elapsed, err)
+			return nil, newRecovery(attempt, elapsed, err)
 		}
 		delay, backoffErr := c.backoff(attempt, retryAfter)
 		if backoffErr != nil {
-			return nil, c.recoveryAt(attempt, elapsed, errors.Join(err, backoffErr))
+			return nil, newRecovery(attempt, elapsed, errors.Join(err, backoffErr))
 		}
 		if delay > c.budget-elapsed {
-			return nil, c.recoveryAt(attempt, elapsed, err)
+			return nil, newRecovery(attempt, elapsed, err)
 		}
 		if sleepErr := c.sleep(transactionCtx, delay); sleepErr != nil {
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
 			if transactionCtx.Err() != nil {
-				return nil, c.recoveryRequired(attempt, start, errors.Join(err, transactionCtx.Err()))
+				return nil, c.recoveryRequired(newRecovery, attempt, start, errors.Join(err, transactionCtx.Err()))
 			}
 			return nil, sleepErr
 		}
 	}
 }
 
-func (c *assignmentConfig) recoveryAt(attempts int, elapsed time.Duration, last error) *AssignmentRecoveryRequiredError {
-	// Preserve observed elapsed time for ordinary attempt exhaustion; a fixed
-	// test clock can therefore report zero. recoveryRequired clamps separately
-	// only when the real transaction deadline proves the budget was exhausted.
-	return &AssignmentRecoveryRequiredError{Attempts: attempts, Elapsed: elapsed, Last: last}
-}
-
-func (c *assignmentConfig) recoveryRequired(attempts int, start time.Time, last error) *AssignmentRecoveryRequiredError {
+func (c *assignmentConfig) recoveryRequired(newRecovery recoveryFunc, attempts int, start time.Time, last error) error {
 	elapsed := c.elapsedSince(start)
 	if elapsed < c.budget {
 		// The real transaction timer may expire while a test clock is fixed or
 		// moves backward. Report the budget that was actually exhausted.
 		elapsed = c.budget
 	}
-	return c.recoveryAt(attempts, elapsed, last)
+	return newRecovery(attempts, elapsed, last)
 }
 
 func (c *assignmentConfig) elapsedSince(start time.Time) time.Duration {
@@ -469,7 +501,7 @@ func (c *assignmentConfig) elapsedSince(start time.Time) time.Duration {
 }
 
 func assignmentRetryInfo(err error) (time.Duration, bool) {
-	if errors.Is(err, nativeudp.ErrTransport) || errors.Is(err, nativeudp.ErrResolve) {
+	if nativeTransportRetryable(err) {
 		return 0, true
 	}
 	var appErr *AssignmentError
@@ -477,6 +509,10 @@ func assignmentRetryInfo(err error) (time.Duration, bool) {
 		return appErr.RetryAfter, true
 	}
 	return 0, false
+}
+
+func nativeTransportRetryable(err error) bool {
+	return errors.Is(err, nativeudp.ErrTransport) || errors.Is(err, nativeudp.ErrResolve)
 }
 
 func (c *assignmentConfig) backoff(attempt int, retryAfter time.Duration) (time.Duration, error) {
@@ -613,7 +649,7 @@ func parseInitialAssignmentReply(body []byte, wantAgentID string, now time.Time)
 	if err := decodeExactObject(wire.Registration, &registration, []string{"key_id", "key_kind"}); err != nil {
 		return nil, invalidAssignmentResponse("initial registration metadata", err)
 	}
-	if !validAgentAPIKeyID(registration.KeyID) {
+	if !validAPIKeyID(registration.KeyID) {
 		return nil, invalidAssignmentResponse("initial registration metadata", errors.New("key_id is not canonical"))
 	}
 	if !validPublicRegistrationKeyKind(registration.KeyKind) {
@@ -737,24 +773,38 @@ func classifyAssignmentApplicationError(envelope assignmentEnvelope, fields map[
 		}
 	}
 	if kind == nil {
-		return invalidAssignmentResponse("error LRT envelope", fmt.Errorf("unknown or phase-invalid errCode %q", envelope.ErrCode))
+		return invalidAssignmentResponse("error LRT envelope", errors.New("unknown or phase-invalid errCode"))
 	}
 
+	retryAfter, err := parseEnvelopeRetryAfter(envelope, fields, retryPermitted, retryRequired)
+	if err != nil {
+		return invalidAssignmentResponse("error LRT envelope", err)
+	}
+	return &AssignmentError{Code: envelope.ErrCode, RetryAfter: retryAfter, kind: kind}
+}
+
+// parseEnvelopeRetryAfter validates the authenticated LRT error body's
+// retryAfterSeconds wire grammar shared by every phase-specific classifier and
+// returns the bounded retry delay. retryPermitted/retryRequired describe the
+// code-specific grammar; the returned error is a plain reason the caller wraps
+// in its own phase-specific class. This is the single overflow guard for the
+// seconds-to-Duration conversion so the load-bearing bound cannot drift between
+// the assignment and completion classifiers.
+func parseEnvelopeRetryAfter(envelope assignmentEnvelope, fields map[string]json.RawMessage, retryPermitted, retryRequired bool) (time.Duration, error) {
 	_, retryPresent := fields["retryAfterSeconds"]
 	if retryRequired && !retryPresent {
-		return invalidAssignmentResponse("error LRT envelope", errors.New("retryAfterSeconds is required"))
+		return 0, errors.New("retryAfterSeconds is required")
 	}
 	if retryPresent && !retryPermitted {
-		return invalidAssignmentResponse("error LRT envelope", errors.New("retryAfterSeconds is forbidden for this code"))
+		return 0, errors.New("retryAfterSeconds is forbidden for this code")
 	}
-	var retryAfter time.Duration
-	if retryPresent {
-		if envelope.RetryAfterSeconds == nil || *envelope.RetryAfterSeconds <= 0 || *envelope.RetryAfterSeconds > math.MaxInt64/int64(time.Second) {
-			return invalidAssignmentResponse("error LRT envelope", errors.New("retryAfterSeconds must be a positive bounded integer"))
-		}
-		retryAfter = time.Duration(*envelope.RetryAfterSeconds) * time.Second
+	if !retryPresent {
+		return 0, nil
 	}
-	return &AssignmentError{Code: envelope.ErrCode, Message: envelope.ErrMsg, RetryAfter: retryAfter, kind: kind}
+	if envelope.RetryAfterSeconds == nil || *envelope.RetryAfterSeconds <= 0 || *envelope.RetryAfterSeconds > math.MaxInt64/int64(time.Second) {
+		return 0, errors.New("retryAfterSeconds must be a positive bounded integer")
+	}
+	return time.Duration(*envelope.RetryAfterSeconds) * time.Second, nil
 }
 
 func parseWireAssignment(raw []byte, now time.Time) (*AgentAssignment, error) {
@@ -861,18 +911,6 @@ func validAssignmentCellID(cellID string) bool {
 	return cellID[len(cellID)-1] != '-'
 }
 
-func validAgentAPIKeyID(id string) bool {
-	if len(id) != len("key_")+12 || !strings.HasPrefix(id, "key_") {
-		return false
-	}
-	for _, b := range []byte(id[len("key_"):]) {
-		if !isASCIIAlnum(b) {
-			return false
-		}
-	}
-	return true
-}
-
 func isJSONNull(raw json.RawMessage) bool {
 	return bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
 }
@@ -883,10 +921,6 @@ func isASCIILowerAlnum(b byte) bool {
 
 func isASCIILowerLDH(b byte) bool {
 	return isASCIILowerAlnum(b) || b == '-'
-}
-
-func isASCIIAlnum(b byte) bool {
-	return isASCIILowerAlnum(b) || b >= 'A' && b <= 'Z'
 }
 
 func validPublicRegistrationKeyKind(kind string) bool {
@@ -934,8 +968,11 @@ func decodeAssignmentServerPublicKey(encoded string) ([]byte, error) {
 	return key, nil
 }
 
-func invalidAssignmentResponse(part string, cause error) error {
-	return fmt.Errorf("%w: %s: %w", ErrAssignmentInvalidResponse, part, cause)
+func invalidAssignmentResponse(part string, _ error) error {
+	// The cause may contain an authenticated producer's reflected enrollment
+	// credential in a value or even a JSON field name. Keep the stable class and
+	// code-owned phase, never the raw parser text.
+	return fmt.Errorf("%w: invalid %s", ErrAssignmentInvalidResponse, part)
 }
 
 func decodeExactObject(raw []byte, dst any, required []string) error {

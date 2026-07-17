@@ -1,783 +1,283 @@
-# Register an Agent
+# Register a qURL Connector agent
 
-`RegisterAgent` is the one-call front door for enrolling an agent and getting a
-ready-to-use `Client`. Hand it your API key and a place to persist state; it
-returns a `Client` you immediately use to protect URLs and mint portals:
+`RegisterAgentRuntime` enrolls a qURL Connector and returns both:
+
+- a `Client` authorized for steady-state qURL resource CRUD; and
+- an `AgentRuntimeBinding` containing the authority-provided NHP UDP assignment
+  needed for a direct knock.
+
+The lifecycle is UDP-only. Hub assignment, optional account OTP, assigned-cell
+REG/RAK, completion, refresh, and knock never use a public HTTP endpoint. The
+resource `Client` returned after enrollment continues to use the qURL HTTPS API.
+Browser relay is a separate browser path and is not used by this runtime.
+
+## Basic flow
+
+Trusted deployment configuration supplies one Hub endpoint and pinned X25519
+server public key:
 
 ```go
 store := qurl.FileAgentState("/var/lib/layerv/qurl/agent-state.json")
-
-client, err := qurl.RegisterAgent(ctx, apiKey, store)
-if err != nil {
-	return err
+hub := qurl.HubBootstrap{
+	Host:               "hub.nhp.layerv.ai",
+	Port:               62206,
+	ServerPublicKeyB64: configuredHubPublicKey,
 }
 
-resource, err := client.ProtectURL(ctx, "https://dashboard.internal.acme.com")
-if err != nil {
-	return err
-}
-
-portal, err := resource.CreatePortal(ctx, qurl.ValidFor(time.Hour))
-if err != nil {
-	return err
-}
-
-fmt.Println(portal.Link)
-```
-
-That is the whole target flow: `RegisterAgent` → `ProtectURL` → `CreatePortal`
-→ the qURL link.
-
-`RegisterAgent` is idempotent. The first call enrolls the agent and persists a
-device credential into `store`. Every later call loads that credential and
-returns a `Client` with **no qURL API calls** — so calling it unconditionally on
-startup is the intended pattern, not a thing to guard against. A sealed or
-network-backed store may still call its key or storage provider while loading.
-
-The `key` argument is used only during first enrollment. Once `store` holds a
-completed registration, the fast path serves the `Client` entirely from it and
-never re-validates the key. Rotating or mistyping the key against an
-already-registered `store` is therefore not detected; the persisted device
-credential is authoritative from then on.
-
-For an explicit reopen without enrollment or resource API calls, use
-`OpenRegisteredAgent`. It takes `ClientOption` values and makes no qURL API call;
-loading a sealed store may still call its key wrapper/KMS.
-The resource API origin is independent of the registration origin:
-
-```go
-client, err := qurl.OpenRegisteredAgent(ctx, store,
-	qurl.WithAgentClientBaseURL(resourceAPIURL),
-)
-```
-
-The returned client caches the store-backed Authorization value for up to one
-minute. After credential recovery, use the new client returned by
-`RecoverAgentCredential` for immediate cutover; an older client observes the
-replacement only after its cache expires.
-
-qURL Connector processes that also need NHP knock state should use the combined
-runtime APIs. They validate a live peer, relay URL, and key id; return a primed
-Client plus `AgentRuntimeBinding`; and avoid loading/unsealing the store again
-for the binding or first resource request. Unlike REST-only
-`OpenRegisteredAgent`, a runtime open rejects an expired peer without network
-I/O because it cannot be knocked. Call `RefreshAgentRegistration` with an
-enrollment key to obtain a fresh binding, then continue startup:
-
-```go
-client, binding, err := qurl.OpenRegisteredAgentRuntime(ctx, store,
-	qurl.WithAgentClientBaseURL(resourceAPIURL),
+client, binding, err := qurl.RegisterAgentRuntime(ctx, enrollmentCredential, store,
+	qurl.WithAgentRuntimeHub(hub),
+	qurl.WithAgentRuntimeIdentity("connector-prod-1"),
+	qurl.WithAgentRuntimeMetadata(hostname, version),
 )
 if err != nil {
 	return err
 }
 defer binding.Destroy()
-devicePrivateKey := binding.TakeDeviceStaticPrivateKey()
-defer func() { clear(devicePrivateKey) }()
 ```
 
-Use `RegisterAgentRuntime` with the same `RegisterOption` values as
-`RegisterAgent` on a fresh install. Its registration state machine captures the
-runtime key before network I/O and returns the Client/binding pair from the
-in-memory completed state, without a post-registration store/KMS reload. The
-primed Client caches that exact credential for one minute; if the owner later
-revokes it, the Client observes that subsequent revocation after the cache TTL.
+The SDK then:
 
-`WithRegisterBaseURL` targets only registration-info and completion.
-`WithAgentClientBaseURL` and `WithAgentClientHTTPClient` are dual-purpose
-options accepted by registration/recovery and both `OpenRegisteredAgent` APIs,
-so the same resource origin and transport can be reused across the lifecycle.
-This prevents a dedicated registration origin from silently retargeting later
-`/v1/resources` calls:
+1. loads or creates the persistent X25519 agent identity;
+2. asks the pinned Hub for an assignment over authenticated NHP UDP;
+3. persists the Hub-provided cell id, generation, endpoint revision, lease,
+   LayerV-owned DNS host, UDP port, and assigned-cell server public key;
+4. sends optional account OTP and REG directly to that assigned cell;
+5. persists one exact completion candidate before sending completion;
+6. completes directly with the assigned cell; and
+7. returns the resource `Client` and a private-key-owning runtime binding.
 
-```go
-client, err := qurl.RegisterAgent(ctx, enrollmentKey, store,
-	qurl.WithRegisterBaseURL(registrationURL),
-	qurl.WithAgentClientBaseURL(resourceAPIURL),
-)
-```
+The SDK does not calculate a cell address. It resolves the exact host supplied
+by the authenticated Hub response and authenticates the responding cell against
+the supplied public key.
 
-Headless callers that refuse account-key/OTP enrollment can enforce that policy
-before any OTP email or NHP registration side effect:
+Placement rollout guard: this SDK release accepts assigned hosts only beneath
+the LayerV DNS apexes encoded by its endpoint policy, and accepts IPv6 addresses
+only from its release-gated IANA allocation allowlist. Provisioning a cell under
+a new LayerV DNS apex or exclusively in a newly allocated IPv6 prefix therefore
+requires an updated qurl-go release before the placement is enabled; older SDKs
+intentionally fail resolution closed.
 
-```go
-qurl.WithAllowedRegistrationKeyKinds(qurl.RegistrationKeyKindBootstrap)
-```
+## Credential policy
 
-## Which key do I use?
+By default the runtime accepts unattended credentials of these authenticated
+Hub-reported kinds:
 
-You pass one key at enrollment. After that the agent runs entirely off the
-device credential in its `store` and never uses the key again — the key is
-**enrollment-only material**, so mount it as a secret or env var for the first
-run. Pick it by how the agent is deployed:
+- `connector_bootstrap`
+- `bootstrap`
+- `agent`
 
-| Deployment | Key | Lifetime & blast radius |
-| --- | --- | --- |
-| **A fleet** of headless agents (containers, CI, autoscalers) | one **durable `qurl:agent`-scoped** key, shared by all | long-lived until revoked; revoking it cuts off the whole fleet at once |
-| **One** headless agent, provisioned on its own | a **one-shot** enrollment key, minted per agent | single-use and short-lived under LayerV key policy — LayerV consumes it on first enrollment, so a leaked key can't enroll a second device |
-| An agent acting **as a person's account** | that account's existing **API key** | long-lived; enrollment needs an emailed one-time code (see below) |
+The durable `agent` kind is appropriate when one owner-managed enrollment key
+fans out across a controlled Connector fleet. Apply owner-side scope, rotation,
+and revocation policy to that credential.
 
-Create the key from your LayerV account's key management, scoping it to
-`qurl:agent` for the durable/fleet case. Lifetime and single-use-vs-reusable are
-**LayerV key policy**, set when you mint the key — the SDK treats every
-pre-issued (bootstrap-kind) key identically and does not itself expire or consume
-keys.
-
-**Fleets — one key, many agents.** Mint a single durable `qurl:agent` key, give
-every agent the same secret, and give each agent its **own** `store` (its own
-file path or secret id). Each agent generates its own device keypair and id and
-enrolls idempotently; under LayerV key policy the durable key is hash-matched
-and **not consumed**, so it survives any number of enrollments. Don't point two
-agents at one `store` — that is a single shared identity, not a fleet.
-
-## Two enrollment paths
-
-`RegisterAgent` picks the enrollment path automatically from the kind of key you
-pass. You call the same function either way. Pass the credential byte-exact:
-surrounding whitespace and control characters are rejected before store or
-network I/O because HTTPS authorization and the NHP REG/OTP payload must use the
-same bytes.
-
-### Pre-issued (bootstrap) key — one call, headless
-
-A pre-issued key **is** the enrollment credential. `RegisterAgent` completes in
-a single call with no email and no prompt — the right fit for headless agents
-and CI:
+Account enrollment is interactive and opt-in:
 
 ```go
-store := qurl.FileAgentState("/var/lib/layerv/qurl/agent-state.json")
-
-client, err := qurl.RegisterAgent(ctx, preIssuedKey, store)
-if err != nil {
-	return err
-}
-// client is ready.
-```
-
-### Account key + email one-time code
-
-An account key enrolls with an email one-time code (OTP). This path is
-**two-phase and re-entrant**: the first call asks LayerV to email a code and
-returns `*OTPPendingError` (which unwraps to `ErrOTPPending`); you re-run
-`RegisterAgent` with the code once it arrives.
-
-This is a pause point, not a failure. Match `*OTPPendingError` with
-`errors.As`, read `MaskedEmail` so you can tell the operator which inbox to
-check, obtain the code, and re-run with `WithOTP`:
-
-```go
-client, err := qurl.RegisterAgent(ctx, accountKey, store)
-
-var pending *qurl.OTPPendingError
-switch {
-case errors.As(err, &pending):
-	// LayerV emailed a code to pending.MaskedEmail (e.g. "j***@acme.com").
-	// Obtain it out of band, then resume.
-	code := readOneTimeCode(pending.MaskedEmail)
-
-	client, err = qurl.RegisterAgent(ctx, accountKey, store, qurl.WithOTP(code))
-	if err != nil {
-		return err
-	}
-	use(client)
-case err != nil:
-	return err
-default:
-	// Already registered on a prior run — client returned with no code needed.
-	use(client)
-}
-```
-
-`errors.Is(err, qurl.ErrOTPPending)` matches the same pause if you only need the
-boolean and not the masked destination.
-
-The re-entrancy is durable across process restarts. `store` records that a code
-was requested, so a crashed-and-restarted process resumes the **same enrollment
-identity** (the same device keypair and `agent_id`) rather than starting over —
-and, within the resend cooldown, keeps waiting on the already-emailed code rather
-than sending a new one. Re-running with **no** code only re-sends a fresh code
-once that short cooldown has elapsed (so a long-idle restart refreshes an expired
-code), then pauses again.
-
-#### Single-call variant with `WithOTPProvider`
-
-If the agent can fetch its own code — for example by reading a mailbox API —
-`WithOTPProvider` supplies it from a callback so one `RegisterAgent` call both
-requests and consumes the code:
-
-```go
-client, err := qurl.RegisterAgent(ctx, accountKey, store,
-	qurl.WithOTPProvider(func(ctx context.Context) (string, error) {
-		return fetchLatestOneTimeCode(ctx) // polls until the code arrives
+client, binding, err := qurl.RegisterAgentRuntime(ctx, accountCredential, store,
+	qurl.WithAgentRuntimeHub(hub),
+	qurl.WithAgentRuntimeAllowedRegistrationKeyKinds(
+		qurl.RegistrationKeyKindAccount,
+	),
+	qurl.WithAgentRuntimeOTPProvider(func(ctx context.Context, challenge qurl.AgentOTPChallenge) (string, error) {
+		return readEightDigitCode(ctx, challenge)
 	}),
 )
 ```
 
-**Caveat (from the `WithOTPProvider` godoc):** on a fresh store the code is
-dispatched and *then* the provider is invoked within the same call, so the
-provider must **await delivery** — poll or block until the code is actually in
-the mailbox. A provider that returns early hands back a stale or empty value: an
-empty (whitespace-only) return fails fast with `ErrInvalidRegisterConfig` before
-any registration round trip, while a non-empty but wrong code reaches the
-enrollment service and fails with `ErrOTPIncorrect`. Set at most one of `WithOTP`
-or `WithOTPProvider`.
+The assigned cell receives a one-way OTP request before the callback runs. The
+callback receives only bounded, non-secret challenge metadata. It must return
+exactly eight ASCII digits. The code is never persisted or included in an
+error. One invocation never silently requests a second OTP; ticket expiry
+requires a new explicit call.
 
-## Credential storage
+The SDK refuses to dispatch OTP unless the assignment ticket has at least the
+conformance contract's inclusive 630 seconds remaining.
 
-Registration writes an `AgentState`. Once enrollment completes, that state is a
-**credential file**: it holds `DeviceAPIKey`, the bearer token the returned
-`Client` authorizes with. From then on the `Client` authenticates purely from
-persisted state — the API key you passed at enrollment is not needed again.
+## Use the assignment
 
-Treat the state as secret. Keep it out of logs, crash dumps, and support
-bundles.
+Take the private key exactly once. The binding owns and redacts it until then:
 
-Pick a store by runtime. They all satisfy the same two-method
-`AgentStateStore` interface (`LoadAgentState` / `SaveAgentState`), so the rest of
-your code is identical whichever you choose:
+```go
+privateKey := binding.TakeDeviceStaticPrivateKey()
+defer clear(privateKey)
 
-| Runtime | Store |
-| --- | --- |
-| Single host / VM / container with a durable disk | `qurl.FileAgentState(path)` |
-| Local disk with a KMS/HSM/attested release boundary | `qurl.NewSealedFileAgentState(path, providerID, wrapper)` |
-| Shared POSIX / EFS across tasks | `qurl.FileAgentState(mountPath)` — **not** the AWS stores |
-| Ephemeral / autoscaling / Lambda / Fargate (no durable disk) | `awsstore.NewSecretsManagerStore(...)` |
-| Cost-sensitive AWS fleets | `awsstore.NewParameterStore(...)` (KMS SecureString) |
-| Custom backend / tests | implement `AgentStateStore`; return `qurl.ErrAgentStateNotFound` when empty |
+connector, err := client.EnsureConnectorResource(ctx, "prod-dashboard")
+if err != nil {
+	return err
+}
 
-### File storage (`FileAgentState`)
+runID, err := qurl.NewCycleRunID()
+if err != nil {
+	return err
+}
 
-`qurl.FileAgentState(path)` writes plaintext JSON protected by filesystem
-permissions: the file is `0600` under a `0700` directory, written atomically
-(temp file + rename). It is the right store for a single host — or for shared
-POSIX storage such as EFS (see below):
+admission, err := qurl.KnockRegisteredAgent(ctx, binding, privateKey,
+	connector.Resource.KnockResourceID,
+	qurl.NativeKnockOptions{RunID: runID},
+)
+if err != nil {
+	return err
+}
+```
+
+Use one caller-owned `RunID` for the whole Connector cycle. Do not regenerate it
+between knock and FRP login. `KnockResourceID` is placement-neutral; the
+assigned cell returns the runtime resource host.
+
+## Warm open and refresh
+
+A completed warm start performs no enrollment or resource network call:
+
+```go
+client, binding, err := qurl.OpenRegisteredAgentRuntime(ctx, store)
+```
+
+The store itself may perform I/O or call KMS. The open validates the native
+identity, credential pair, assignment, server key, and live lease, and primes
+the resource client's one-minute credential cache from that same state load.
+
+If the assignment is expired or near expiry, refresh through the same pinned
+Hub:
+
+```go
+client, binding, err := qurl.RefreshAgentRuntime(ctx, hub, store)
+```
+
+Refresh has no enrollment credential. A newer endpoint revision within the same
+cell and assignment generation is accepted. A new cell or generation returns
+`*qurl.AgentAssignmentChangedError`; the caller must explicitly adopt the
+reassignment in the provisioned workflow. The SDK never infers an endpoint or
+silently crosses that authority boundary.
+
+`OpenRegisteredAgent` is available when a process needs only the steady-state
+resource `Client` and will not knock. It still accepts native completed state
+only; assignment expiry does not block resource CRUD.
+
+## Resource-client options
+
+These options configure only the returned HTTPS resource client:
+
+```go
+qurl.WithAgentClientBaseURL("https://api.layerv.ai")
+qurl.WithAgentClientHTTPClient(customHTTPClient)
+```
+
+They do not configure Hub, cell, assignment, registration, completion, or knock
+transport. Native UDP uses the closed `AgentRuntime*Option` sets, so an option
+cannot accidentally retarget both trust paths.
+
+## State storage
+
+`AgentState` contains the X25519 private key, completed device credential, Hub
+assignment, and possibly a crash-recovery completion candidate. It is a
+credential file: never log it or attach it to support bundles.
+
+### Plaintext local file
 
 ```go
 store := qurl.FileAgentState("/var/lib/layerv/qurl/agent-state.json")
 ```
 
-On a shared or multi-tenant host where filesystem permissions are not a
-sufficient boundary, use the sealed file store below or back the state with a
-secret manager.
+The parent directory must be exactly `0700`; the file is atomically written
+`0600`. Symlinks, oversized files, insecure permissions, corrupt JSON, duplicate
+or unknown fields, and inconsistent assignments fail closed. Local stores use a
+sidecar setup lock so two processes cannot mint competing identities against one
+path.
+Because unknown fields fail closed, an SDK downgrade may not be able to open
+state written by a newer SDK. Treat that as an explicit state-schema migration
+or reprovisioning operation; never delete credential state merely to bypass the
+decode failure.
 
-### Sealed file storage (`NewSealedFileAgentState`)
-
-`NewSealedFileAgentState` encrypts the complete `AgentState`—including the
-device API credential and X25519 private key—under an SDK-owned AES-256-GCM
-envelope. Every save generates a fresh 32-byte data-encryption key (DEK) and
-nonce. Your `AgentStateKeyWrapper` integrates the chosen KMS, HSM, or attested
-key-release provider and sees only that exact 32-byte DEK, never AgentState JSON.
-Both full-AgentState file stores cap encoded state at 1 MiB so plaintext and
-sealed deployments have the same schema-growth budget. `FileCredentials` keeps
-its historical 64 KiB issuer-credential cap; the sealed envelope, wrapped key,
-and provider metadata are independently bounded.
+### Sealed local file
 
 ```go
 store, err := qurl.NewSealedFileAgentState(
-	"/var/lib/layerv/qurl/agent_state.sealed.json",
+	"/var/lib/layerv/qurl/agent-state.sealed.json",
 	"aws-kms",
-	myKMSWrapper,
-)
-if err != nil {
-	return err
-}
-client, err := qurl.RegisterAgent(ctx, enrollmentKey, store)
-```
-
-The wrapper must authenticate every field in `AgentStateKeyBinding` as its KMS
-encryption context (or equivalent): purpose, envelope version, provider id, and
-agent id. It owns the version and optional JSON metadata in
-`WrappedAgentStateKey`. The SDK may compact, indent, or otherwise reserialize
-that metadata between wrap and unwrap, so treat it as JSON semantics rather than
-byte-identical whitespace or object-member ordering. Return
-`qurl.ErrInvalidWrappedAgentStateKey` when a persisted wrapper record fails
-authentication; ordinary KMS/network failures remain operational
-`qurl.ErrAgentStateKeyWrapper` errors rather than being misreported as corrupt
-state. If the provider cannot distinguish authentication failure from another
-decrypt failure, return the invalid-record sentinel and fail closed. The SDK
-includes wrapper metadata in its AES-GCM AAD; wrappers that use metadata to
-choose or configure unwrap must cryptographically authenticate a
-provider-defined canonical or semantic representation in their wrapped-key
-record or provider encryption context too, because unwrap necessarily runs
-before the SDK can verify that AAD.
-
-Every successful state mutation performs `WrapKey` and a verification
-`UnwrapKey` before the atomic commit—two provider operations per save. This is a
-deliberate fail-before-commit check. The runtime identity therefore needs both
-wrap/encrypt and unwrap/decrypt permission during initial enrollment and any
-later workflow that mutates state. Decrypt-only permission is insufficient. A
-fresh pre-issued-key enrollment persists three transitions (typically six
-provider operations); an account enrollment that requests and completes OTP
-persists four (typically eight). Restarts, retries, or OTP re-sends can add more,
-and resumed incomplete setup unwraps once before and again after acquiring the
-lock. These paths compound during retry storms and OTP redispatch, so size
-KMS/HSM quotas and latency budgets for degraded workflows, not only the happy
-path's six or eight calls. The second incomplete-state read ensures only the
-locked snapshot can drive mutation if another process completed setup between
-the two loads.
-
-The wrapper binding authenticates the agent id stored in the envelope; the
-store does not accept a separately configured expected agent id. A principal
-that can unwrap state for multiple agents could therefore substitute another
-valid envelope within that principal's decrypt scope. Scope each runtime's KMS
-key or decrypt policy to one installation when cross-agent substitution must be
-prevented, and authenticate every binding field in the provider encryption
-context. When the agent id is known in configuration, also pass
-`qurl.WithExpectedSealedAgentID(id)` to the store and the same id through
-`qurl.WithDeviceID(id)` (or `qurl.WithAgentID(id)` for `BootstrapAgent`); the
-store then rejects a different envelope before it calls the key wrapper. Sealed
-store agent ids must be valid UTF-8, at most 256 bytes, and contain neither
-surrounding whitespace nor control characters.
-
-This identity binding assumes `agent_id` is generated by the SDK or supplied by
-the caller and registration completion echoes it unchanged. If the service ever
-introduces an independently server-minted id, update the plaintext and sealed
-AgentState validation contracts together; do not relax only the sealed decoder.
-
-Sealing authenticates each envelope but does not provide freshness or
-anti-rollback protection. An attacker who can replace the file with an older
-valid envelope for the same provider and agent id will not be detected by this
-store alone; deployments requiring rollback detection must keep a monotonic
-version in an external trusted store and enforce it around `AgentStateStore`.
-
-The SDK wipes its temporary plaintext and DEK byte buffers after use. Go's JSON
-decoder copies credential fields into `AgentState` strings, which are immutable
-and cannot be explicitly wiped; buffer wiping is best-effort defense in depth,
-not a guarantee that no plaintext copies remain in process memory.
-
-Both SDK local-file stores require an immediate `0700` state directory, write a
-`0600` state file atomically, and take the same mandatory setup lock. Lock
-failures stop registration; custom/network stores remain caller-serialized.
-"Mandatory" means the SDK refuses to proceed unless it acquires the OS advisory
-`flock`; it does not turn advisory locking into kernel-enforced exclusion for a
-non-cooperating writer.
-The exact directory mode is enforced on load as well as save, including a
-completed registration's read-only fast path; correct a pre-existing `0750` or
-`0755` directory to `0700` before upgrading. A read-only filesystem mount is
-supported when the directory metadata remains exactly `0700`; changing the mode
-to `0500`, `0555`, or another "stricter" value is rejected by policy.
-If lock release fails after a state mutation was atomically persisted, the call
-still returns `ErrAgentSetupLock` and no client/state because ownership is
-ambiguous. Load the durable state first. After initial enrollment or credential
-recovery, call `OpenRegisteredAgent`; it recovers the persisted credential
-without enrollment or completion. After binding refresh, inspect the loaded
-binding before deciding whether another refresh is needed. Never blindly retry
-`RecoverAgentCredential`: its completion and save may already have succeeded,
-and a retry would attempt a second one-time credential mint.
-Windows, Plan 9, and js/wasm do not currently have an SDK local-file lock
-implementation, so fresh or incomplete local-file enrollment fails closed with
-`ErrAgentSetupLock` there. Use a custom/network store (including `awsstore` where
-applicable) that serializes setup itself. A completed registration reopens on a
-lock-free read-only fast path; direct `LoadAgentState` and `SaveAgentState` calls
-are also unaffected.
-
-### AWS storage (`awsstore`)
-
-The `awsstore` submodule provides `AgentStateStore` implementations backed by
-AWS Secrets Manager and SSM Parameter Store. It is a **separate Go module**, so
-the AWS SDK dependency never leaks into the root `qurl` module — programs using
-the file store pull in no AWS code.
-
-```sh
-go get github.com/layervai/qurl-go/awsstore@latest
-```
-
-**Secrets Manager** — reach for it when the identity is a first-class secret you
-want rotation hooks, resource policies, and CloudTrail data events on:
-
-```go
-import (
-	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
-
-	"github.com/layervai/qurl-go/awsstore"
-	"github.com/layervai/qurl-go/qurl"
-)
-
-cfg, err := config.LoadDefaultConfig(ctx)
-if err != nil {
-	return err
-}
-store := awsstore.NewSecretsManagerStore(
-	secretsmanager.NewFromConfig(cfg),
-	"qurl/agent-state",                        // secret name or ARN
-	awsstore.WithKMSKeyID("alias/qurl-agent"), // customer-managed CMK (recommended)
-)
-
-client, err := qurl.RegisterAgent(ctx, apiKey, store)
-```
-
-**Parameter Store** — a lighter-weight, lower-cost option that is still
-KMS-encrypted at rest:
-
-```go
-import (
-	"github.com/aws/aws-sdk-go-v2/service/ssm"
-	"github.com/layervai/qurl-go/awsstore"
-)
-
-store := awsstore.NewParameterStore(
-	ssm.NewFromConfig(cfg),
-	"/qurl/agent-state",                       // parameter name
-	awsstore.WithKMSKeyID("alias/qurl-agent"),
+	wrapper,
+	qurl.WithExpectedSealedAgentID("connector-prod-1"),
 )
 ```
 
-Because the stored value is a credential, encrypt it with a customer-managed KMS
-key via `WithKMSKeyID` and scope IAM to the single resource. The
-[`awsstore` README](../awsstore/README.md) has the least-privilege IAM policies
-for each store, the KMS-binding note (on Secrets Manager the CMK is bound at
-`CreateSecret` time), and the store contract.
+The SDK encrypts the full state with a fresh AES-256-GCM data-encryption key on
+every save. The adapter wraps exactly that 32-byte key and must implement both
+wrap and unwrap. The authenticated envelope binds provider id, agent id, wrapped
+key metadata, nonce, and ciphertext. Scope unwrap permission to the intended
+installation.
 
-**EFS = `FileAgentState`.** For EFS-backed or other shared POSIX storage, do
-**not** use the AWS stores — point the root module's file store at the mounted
-path:
+### AWS stores
 
-```go
-store := qurl.FileAgentState("/mnt/efs/qurl/agent-state.json")
-```
+`github.com/layervai/qurl-go/awsstore` provides Secrets Manager and SSM
+Parameter Store implementations. See [the AWS store guide](../awsstore/README.md)
+for IAM and consistency requirements.
 
-`FileAgentState` writes atomically with the same `0600`/`0700` posture across
-the shared mount and pulls in no AWS SDK. Encrypt the file system at rest and
-restrict the access point's POSIX uid/gid to the agent. See the
-[EFS recipe](../awsstore/README.md#efs-recipe-shared-storage--no-aws-store-needed).
+### Custom stores
 
-For `FileAgentState` and `NewSealedFileAgentState`, the SDK serializes concurrent
-setup across processes with a mandatory sidecar lock. Run enrollment from **one
-process at a time** for custom/network stores; the SDK cannot derive a shared
-lock for them, and concurrent account-path setup can dispatch multiple OTPs.
+An `AgentStateStore` must:
 
-## Binding refresh and credential recovery
+- return `ErrAgentStateNotFound` only when no state exists;
+- return `ErrInvalidAgentState` for present but unreadable/corrupt state;
+- return a fresh caller-owned snapshot on every load;
+- encode or clone synchronously during save rather than retaining the pointer;
+- propagate context cancellation; and
+- serialize setup externally if it does not implement the SDK local-file lock.
 
-These are deliberately separate operations:
+Save can commit and still return an acknowledgement error. Callers must reload
+before deciding whether a completion candidate exists.
 
-- `RefreshAgentRegistration` always fetches current registration-info, validates
-  the relay `server_id` against the NHP peer key, sends a real `NHP_REG`, and
-  requires a successful `NHP_RAK`. It then saves the authoritative relay/peer
-  metadata while preserving `DeviceAPIKey` and `RegisteredAt`. It never calls
-  completion, even when the old peer is expired or missing. `WithTakeover()` is
-  honored only when explicitly supplied. It returns a narrow
-  `AgentRuntimeBinding` with the refreshed relay/peer identity and a wipeable
-  copy of the private-key bytes so the caller can knock immediately without a
-  second state-store/KMS load. The binding deliberately omits `DeviceAPIKey`,
-  schema, and OTP state; the preserved REST credential remains only in the
-  configured store. Do not copy or log the binding, and wipe/destroy its private
-  key after the runtime handoff.
-  Refresh with an account key uses the same email-OTP dispatch/two-call resume
-  as enrollment: a static `WithOTP` on a first call cannot match the code that
-  call dispatches, so it returns `OTPPendingError`; resume with the received
-  code. The anti-spam `OTPRequestedAt` marker is persisted before dispatch/RAK
-  and intentionally remains on the otherwise-completed state when the caller
-  pauses or abandons the attempt. `OpenRegisteredAgent` ignores it; a later
-  successful resumed RAK clears it. This durable marker prevents repeated calls
-  from fanning out email, while refreshed binding metadata remains uncommitted
-  until RAK succeeds.
-  `RegisterAgent` keeps account keys enabled by default for interactive
-  enrollment compatibility. The repair-oriented `RefreshAgentRegistration` and
-  `RecoverAgentCredential` default to bootstrap-only; interactive account-key
-  repair must opt in with
-  `WithAllowedRegistrationKeyKinds(RegistrationKeyKindAccount)`. Fleet qURL
-  Connector deployments should still set the bootstrap-only policy explicitly
-  so their security posture is visible at the call site.
-- `RecoverAgentCredential` is the operator-controlled path for a revoked or
-  locally lost device credential. It preserves the persisted device id and
-  X25519 keypair and, once enrollment authorization is available, sends REG,
-  calls completion exactly once, and persists the replacement before returning
-  a `Client`. An account key may first pause for the same OTP flow described
-  above. It is never triggered automatically by a 401 or by ordinary binding
-  refresh.
+## Crash and retry boundaries
 
-```go
-binding, err := qurl.RefreshAgentRegistration(ctx, enrollmentKey, store,
-	qurl.WithAllowedRegistrationKeyKinds(qurl.RegistrationKeyKindBootstrap),
-	qurl.WithRegisterBaseURL(registrationURL),
-)
-if err != nil {
-	return err
-}
-defer binding.Destroy()
-devicePrivateKey := binding.TakeDeviceStaticPrivateKey()
-defer func() { clear(devicePrivateKey) }()
+The lifecycle separates retryable transport from security-sensitive mutation:
 
-client, err := qurl.RecoverAgentCredential(ctx, enrollmentKey, store,
-	qurl.WithDeviceID(binding.AgentID),
-	qurl.WithRegisterBaseURL(registrationURL),
-	qurl.WithAgentClientBaseURL(resourceAPIURL),
-)
-```
-
-Interactive account-key repair must make its wider policy explicit on every
-phase, including the resume call:
-
-```go
-accountRepair := qurl.WithAllowedRegistrationKeyKinds(qurl.RegistrationKeyKindAccount)
-_, err := qurl.RefreshAgentRegistration(ctx, accountKey, store, accountRepair)
-// After OTPPendingError and receipt of the emailed code:
-binding, err := qurl.RefreshAgentRegistration(ctx, accountKey, store,
-	accountRepair,
-	qurl.WithOTP(refreshCode),
-)
-
-// Or, after a separate recovery dispatch/pause and owner-side revoke:
-client, err := qurl.RecoverAgentCredential(ctx, accountKey, store,
-	accountRepair,
-	qurl.WithOTP(recoveryCode),
-)
-```
-
-Recovery's first call follows the same dispatch/pause pattern when no current
-code is supplied. Prefer a fresh `WithOTPProvider` option for each call when a
-mailbox integration owns code retrieval.
-
-After successful credential recovery, immediately discard every older `Client`
-for the agent and cut over to the returned `Client`. Older instances may retain
-the revoked credential in their one-minute authorization cache; only the newly
-returned client is guaranteed to use the replacement immediately.
-
-Credential recovery has an intentional owner step: first revoke
-`agent:<device_id>` with an owner credential. qurl-service atomically revokes
-the prior device key and clears its first-issue sentinel; only then can explicit
-same-id recovery mint one replacement. The SDK proceeds even when local state
-still contains `DeviceAPIKey`: that value may already be revoked server-side, so
-a local no-op guard would block valid recovery. If the sentinel is still present,
-completion returns `device_key_already_issued`, mapped to
-`*CredentialRecoveryRequiredError`. Use an active durable `qurl:agent` or
-account enrollment key for recovery; a consumed one-shot bootstrap key cannot
-perform a later registration-info refresh.
-
-`WithTakeover` does not clear the issuance sentinel and is never a substitute
-for revocation. Revoke the active device key first; add `WithTakeover` during
-re-enrollment only when the replacement host/keypair must re-bind the same
-device id. The only no-revoke alternative is to enroll a distinct new device id
-in a separate state store, which creates a separate identity.
-
-Completion and local persistence are a distributed transaction. If completion
-returns a plaintext key but the final `SaveAgentState` fails, the SDK returns
-`*CredentialPersistenceError` carrying the device id. It never retries
-completion in that call. Revoke `agent:<device_id>`, then invoke
-`RecoverAgentCredential`; do not delete the state or choose a new identity.
-
-The same recovery-required class covers every ambiguous post-completion result:
-a transport failure after dispatch, an unclassified 5xx, malformed/invalid 2xx
-response, response agent-id mismatch, or a completion peer key that differs from
-the peer that authenticated the RAK. Completion is first-issue-only, so none of
-those conditions is safe to retry automatically. The sole 5xx exception is
-qurl-service's structured `503 service_unavailable`, emitted only as an
-authoritative no-write admission result; that maps to
-`ErrRegistrationRetryLater`. The SDK preserves the RAK-authenticated peer and
-requires qurl-service's completion response to report the same key; the response
-cannot silently rotate binding state after the handshake.
-
-`RecoverAgentCredential` intentionally has no crash-recovery completion probe:
-the probe would itself call the first-issue endpoint and cannot re-fetch an
-already-issued plaintext key. If account recovery stops after an authenticated
-RAK but before completion is dispatched, the next explicit recovery re-REGs the
-same device key and then completes. qurl-service and its relay must accept that
-same-key re-REG idempotently; deploy the cross-repo repeated-REG regression
-before enabling recovery. If recovery instead crashes after replacement mint
-but before durable persistence, the next attempt returns already-issued. Revoke
-the active device key again, then start another explicit recovery cycle; never
-blindly probe or retry.
-
-Context cancellation or deadline expiry while the completion transport is in
-flight is also outcome-unknown: the SDK cannot prove the request stayed
-pre-dispatch. It therefore preserves `context.Canceled`/`context.DeadlineExceeded`
-as a matchable cause inside `CredentialPersistenceError` while requiring the
-same owner-revoke and explicit-recovery procedure.
-
-Only explicitly recognized qurl-service no-write outcomes bypass ambiguity:
-authentication rejection, rate-limit admission, structured
-`service_unavailable`, structured not-enrolled, and consumed bootstrap-key
-outcomes, the atomic mint transaction's no-write device-key quota rejection
-(`409 device_key_quota_exceeded`), plus request-size admission (413). A bare 404
-is trusted only by the pre-REG account crash probe; after a REG, the same
-unstructured status is mint-ambiguous.
-
-qurl-service must produce completion 401/403 authentication failures only when
-it can prove the atomic mint transaction made no device-key write. The SDK
-treats those statuses as authoritative no-write rejections; emitting either
-after a credential was minted would make a retry look safe when it is not.
-
-Completion must also be excluded from qurl-service's global POST idempotency
-cache. Its response carries a one-time plaintext device secret: persisting or
-replaying that body would violate first-issue-only custody, and accepting an
-idempotency-key replay across different completion bodies could bind the wrong
-request to a prior credential response. Deploy the completion idempotency
-exclusion and its body-binding regressions before enabling this SDK lifecycle.
-`device_key_already_issued` enters explicit recovery because it describes a
-prior first issue. Every unclassified completion HTTP response, including a new
-4xx or unrelated 409, is recovery-required by default; the SDK never assumes a
-new server error happened before the atomic mint. A new retryable/terminal 4xx
-must be added to the authoritative no-write taxonomy before it ships.
-
-The registration-info/RAK peer remains authoritative for all durable
-coordinates and lease state. Completion corroborates the decoded public key
-only; its host, port, and expiry are ignored and cannot replace the
-RAK-authenticated values. During rotation, qurl-service deployments must keep
-registration-info and completion on the same peer key. A key mismatch fails
-recovery-required after a possible mint, while any same-key coordinate
-discrepancy preserves the registration-info/RAK values and should be treated as
-deployment skew to correct.
+- Hub assignment uses one bounded transaction budget. Authenticated rate-limit
+  advice may delay and retry within that budget.
+- Assigned-cell REG may reassign once for an expired bootstrap ticket. Account
+  OTP never performs a hidden second assignment/OTP attempt.
+- Completion retries only resolution/transport faults and authenticated `52300`
+  unavailable responses.
+- The exact candidate is durable before the first completion packet. Lost or
+  ambiguous completion resumes that candidate; it never generates another.
+- A save error immediately after RAK may have committed. Reload first. If the
+  exact pending candidate exists, resume with an empty enrollment credential.
+  If it does not, use explicit native owner recovery/reprovisioning; never replay
+  a possibly consumed enrollment credential.
 
 ## Errors
 
-Match errors by type, not message text: use `errors.Is` against a sentinel for a
-broad outcome, and `errors.As` against a typed error to read structured detail.
-Every message names the next concrete step.
+Use `errors.Is` and `errors.As`:
 
-| Error | When it happens | Handle it by |
-| --- | --- | --- |
-| `*qurl.OTPPendingError` (unwraps `ErrOTPPending`) | Account path emailed a code and is waiting for it. Not a failure — the pause point. | `errors.As` to read `MaskedEmail`; re-run the same operation with `WithOTP(code)`. |
-| `qurl.ErrOTPIncorrect` | Supplied one-time code was wrong. | Re-run the same operation with the correct `WithOTP` code. |
-| `qurl.ErrOTPExpired` | Code was valid but expired. | Re-run the same operation with **no** code to request a fresh one, then re-run it with the new code. |
-| `qurl.ErrRegistrationRateLimited` | Too many attempts, or the service is rate limiting. | Back off and retry later. |
-| `*qurl.DeviceKeyQuotaExceededError` (unwraps `ErrDeviceKeyQuotaExceeded` and `*APIError`) | Completion's atomic mint transaction rejected without writing because the account has reached its active device-key limit. | Revoke an existing unused agent device key to free a slot, then retry the same `RegisterAgent` or `RecoverAgentCredential` operation. Use `WithTakeover` only for an intentional different-key rebind of that device id. |
-| `qurl.ErrRegistrationRetryLater` | The relay returned an overload cookie, or completion returned a structured, authoritative no-write `service_unavailable` admission result. | Back off briefly and re-run the same operation. |
-| `qurl.ErrKeyRejected` | The API key (or a pre-issued key used as the credential) was rejected. | Check the key and re-run. |
-| `qurl.ErrBootstrapSetupKeyConsumed` | A pre-issued **one-shot** setup key was already consumed by an earlier enrollment (RAK code 52108, or reported by the completion call). | Mint a fresh setup key, or restore the completed agent state from the run that consumed it. |
-| `qurl.ErrAgentIdentityConflict` | This device id is already enrolled to a different key or agent. | Re-run with `WithTakeover()` to re-bind, or pick a different `WithDeviceID`. |
-| `qurl.ErrNoAccountEmail` | Account key has no email on file for the code. | Add an email to the account, or use a pre-issued key. |
-| `*qurl.RegistrationKeyKindDisallowedError` (unwraps `ErrRegistrationKeyKindDisallowed`) | Registration-info returned a valid key kind rejected by caller policy. No OTP/REG side effect occurred. | Supply an allowed enrollment key or deliberately widen `WithAllowedRegistrationKeyKinds`. |
-| `*qurl.RegistrationRequestTooLargeError` (unwraps `ErrRegistrationRequestTooLarge`) | Completion was authoritatively rejected with HTTP 413 before any device-key mint. | Correct the SDK/service request-size contract, then retry the same registration or recovery operation. |
-| `*qurl.CredentialPersistenceError` (unwraps `ErrCredentialRecoveryRequired` and `ErrDeviceCredentialMissing`) | Completion may have minted a key, but transport/5xx/response validation or the final state save left no provably durable credential. | Revoke `agent:<DeviceID>`, then call `RecoverAgentCredential` with the same store. Never loop ordinary registration. |
-| `*qurl.CredentialRecoveryRequiredError` (unwraps `ErrCredentialRecoveryRequired` and `ErrDeviceCredentialMissing`) | The device key was already issued, is absent locally, or the persisted value is malformed/unsafe for an Authorization header. | Revoke `agent:<DeviceID>`, then call `RecoverAgentCredential` with the same store and enrollment key. Do not trim or repair a minted credential in place. |
-| `qurl.ErrRegistrationInvalidInput` | The service rejected a registration input as malformed (e.g. a bad device id). | Fix the input (use a valid `WithDeviceID`) and re-run. |
-| `qurl.ErrRegistrationDisabled` | Agent registration is disabled for the account. | Contact the account owner to enable it. |
-| `qurl.ErrInvalidRegisterConfig` | Inputs or options were invalid before any network call (empty key, nil store, conflicting options). | Fix the call. |
-| `qurl.ErrAgentBindingPersistence` | Refresh authenticated a new NHP binding, but the store rejected its metadata save. The wrapped store cause remains matchable; no device credential was minted or changed. | Correct the store failure, then safely retry `RefreshAgentRegistration`. |
-| `qurl.ErrInvalidAgentState` | Persisted state exists but is corrupt/unreadable — surfaced wrapped in the front-door config error. (`ErrAgentStateNotFound` is **not** caller-facing: it is the store-contract sentinel a custom `AgentStateStore` returns when empty, which the engine converts into a fresh enrollment.) | Restore a known-good backup. If recovery is impossible, use an owner credential to revoke `agent:<known-agent-id>` before clearing and re-enrolling. If the id is unreadable, inventory and revoke the account's affected agent keys first; never clear state and leave an orphan credential active. |
-| `qurl.ErrAgentStateKeyWrapper` | A sealed store's KMS/HSM wrapper is unavailable or violated its 32-byte DEK contract. | Restore provider access/configuration; do not delete otherwise valid state for an operational outage. |
-| `qurl.ErrAgentSetupLock` | The mandatory local-file setup lock could not be acquired or released. A release failure may follow a successful durable mutation. | Fix state-directory/sidecar permissions or platform support; do not run setup unlocked. On release failure, load first or call `OpenRegisteredAgent`; never blindly retry credential recovery. |
-| `*qurl.RegistrationDenyError` | An authenticated enrollment denial carrying a wire code newer than this SDK. | Read `ErrCode` / `ErrMsg`; `errors.Is` still matches the typed sentinel for known codes. |
+| Error | Meaning and action |
+| --- | --- |
+| `ErrInvalidRegisterConfig` | Correct Hub, identity, metadata, credential, or option input before retrying. |
+| `ErrRegistrationKeyKindDisallowed` / `*RegistrationKeyKindDisallowedError` | The authenticated Hub reported a valid kind outside caller policy. |
+| `ErrAgentOTPRequired` | Account enrollment lacks the explicit OTP provider. |
+| `ErrOTPIncorrect` | Obtain the correct code and start a new explicit attempt as appropriate. |
+| `ErrOTPExpired` | Start a new explicit assignment/OTP attempt. |
+| `ErrAssignmentRecoveryRequired` / `*AssignmentRecoveryRequiredError` | The bounded Hub transaction was exhausted; inspect the matchable cause. |
+| `ErrAssignmentTicketInvalid` / `ErrAssignmentTicketExpired` | The assigned cell rejected the Hub ticket. Do not invent or retarget an endpoint. |
+| `ErrAgentIdentityConflict` | Stop and use explicit owner-controlled native reprovisioning. |
+| `ErrDeviceKeyQuotaExceeded` | Revoke an unused device credential, then resume according to authority guidance. |
+| `ErrAgentCompletionCandidatePersistence` / `*AgentCompletionCandidatePersistenceError` | Reload state before any retry; never replay the enrollment credential. |
+| `ErrCompletionRecoveryRequired` / `*CompletionRecoveryRequiredError` | Re-run `RegisterAgentRuntime` with the same store and empty enrollment credential to resume the exact pending candidate. |
+| `ErrCompletionCredentialConflict` / `*CompletionError` | The authority already committed a different candidate. Stop and use explicit NHP-native credential recovery or reprovisioning; never delete the persisted candidate or mint a replacement locally. |
+| `*NativeCredentialRecoveryRequiredError` | Native completed credential state is absent or malformed; explicit native recovery/reprovisioning is required. |
+| `*AgentAssignmentChangedError` | A new cell or generation requires explicit reassignment adoption. |
+| `ErrAgentSetupLock` | Repair state-path locking/permissions. Reload before retry because release can fail after a committed save. |
 
-A worked pattern:
+Producer-controlled diagnostic strings are not reflected into native lifecycle
+errors. Unknown or malformed authenticated responses fail closed under the
+appropriate strict response sentinel.
 
-```go
-client, err := qurl.RegisterAgent(ctx, apiKey, store)
+## Transport boundary
 
-var pending *qurl.OTPPendingError
-switch {
-case err == nil:
-	use(client)
-case errors.As(err, &pending):
-	resumeWithCode(pending.MaskedEmail) // re-run with WithOTP
-case errors.Is(err, qurl.ErrAgentIdentityConflict):
-	// deliberate re-bind, replaces the prior binding
-	client, err = qurl.RegisterAgent(ctx, apiKey, store, qurl.WithTakeover())
-	// ...
-case errors.Is(err, qurl.ErrDeviceKeyQuotaExceeded):
-	// Owner action: revoke an existing unused agent device key, then retry safely.
-	return err
-case errors.Is(err, qurl.ErrRegistrationRetryLater),
-	errors.Is(err, qurl.ErrRegistrationRateLimited):
-	backOffAndRetry()
-default:
-	return err
-}
-```
+The native lifecycle exposes no HTTP assignment or registration route. Its only
+network destinations are:
 
-## Troubleshooting
+- the configured Hub over NHP UDP;
+- the Hub-assigned cell over NHP UDP; and
+- the qURL API over HTTPS after enrollment, for resource CRUD performed by the
+  returned `Client`.
 
-**No email arrives on the account path.** If registration returns
-`ErrNoAccountEmail`, the account key has no usable email on file — the code can
-never be delivered. Add an email to the account, or enroll with a pre-issued key
-(which needs no email). If a code *was* sent but has not arrived, re-running
-`RegisterAgent` with no code re-sends a fresh one after a short cooldown.
-
-**Lost device credential.** Match `ErrCredentialRecoveryRequired` and use
-`errors.As` to read `DeviceID` from `CredentialPersistenceError` or
-`CredentialRecoveryRequiredError`. Do not clear the state or rotate the device
-id: an owner first revokes `agent:<device_id>`, then the agent calls
-`RecoverAgentCredential` with the same store and enrollment key.
-
-**Setup key already consumed.** `ErrBootstrapSetupKeyConsumed` means a pre-issued
-one-shot setup key was accepted by an earlier enrollment and cannot enroll again.
-Mint a fresh setup key from LayerV, or restore the completed `AgentState` from the
-run that consumed the key.
-
-**Identity conflict / takeover.** `ErrAgentIdentityConflict` means the device id
-is already enrolled to a different key or agent. Re-run with `WithTakeover()` to
-deliberately re-bind it — this **replaces** the prior binding, so use it
-knowingly — or choose a different id with `WithDeviceID`.
-
-**Rate limiting / retry.** `ErrRegistrationRateLimited` (too many attempts) and
-`ErrRegistrationRetryLater` (relay overload or an authoritative no-write
-admission outage) are both back-off signals. Wait and re-run the same operation.
-
-**Device-key quota.** `ErrDeviceKeyQuotaExceeded` is an authoritative no-write
-result from the atomic mint transaction, not credential ambiguity. An owner must
-revoke an existing unused agent device key to free a slot; then retry the same
-registration or recovery operation. `DeviceKeyQuotaExceededError` carries the
-attempted `DeviceID`, and the underlying `*APIError` remains available with
-`errors.As`.
-Use `WithTakeover` only when intentionally re-binding that device id from a
-different key: revoke that device key, then retry with the takeover option.
-
-## Migrating from BootstrapAgent
-
-`BootstrapAgent` still works — it now runs the same NHP enrollment engine as
-`RegisterAgent`'s pre-issued-key path — but **prefer `RegisterAgent` for new
-code**. `RegisterAgent` returns a ready-to-use `Client` and covers both the
-pre-issued-key and email-OTP paths; `BootstrapAgent` is the pre-issued path
-specialized to return the raw `AgentState`, kept for callers that build the
-`Client` separately.
-
-`BootstrapAgent`:
-
-```go
-state, err := qurl.BootstrapAgent(ctx, setupKey, store, qurl.WithAgentID("prod-us-east-1"))
-```
-
-The equivalent with `RegisterAgent`, which additionally hands back a `Client`:
-
-```go
-client, err := qurl.RegisterAgent(ctx, setupKey, store, qurl.WithDeviceID("prod-us-east-1"))
-```
-
-**Breaking change — the bootstrap origin moved.** Agent enrollment is now
-NHP-native, and the endpoints live on the main API origin, `api.layerv.ai`. Two
-consequences:
-
-- The default bootstrap origin changed to `api.layerv.ai`. Anyone pinning
-  `WithBootstrapBaseURL("https://bootstrap.layerv.ai")` (the old dedicated
-  bootstrap host) **must migrate** — drop the override to use the default, or
-  point it at the current API origin.
-- The legacy `POST /v1/agent/bootstrap` HTTP path is **gone**. Enrollment now
-  runs over NHP, so the backend NHP endpoints must be deployed before this
-  version of the SDK can register or bootstrap an agent.
-
-Existing state files are unaffected: the `AgentState` schema is additive and
-backward compatible, so a state written by an older `BootstrapAgent` loads and
-validates without migration, and a state written by `RegisterAgent` is still
-readable by older code that ignores the new fields.
-
-## How enrollment works
-
-Enrollment is agent-initiated and travels over a relay, in the shape described
-by the Cloud Security Alliance's Software-Defined Perimeter (SDP) / NHP
-specification: the agent knocks to request an OTP, then sends a registration
-(REG) and receives the server's registration acknowledgement (RAK). Those
-OTP/REG/RAK messages ride the relay as encrypted NHP packets rather than hitting
-a standing public endpoint — but the RAK is only an acknowledgement (an
-`errCode`/`errMsg` status, **not** a credential). The device credential is minted
-separately, by the authenticated HTTPS completion call
-(`POST /v1/agent/registration/complete`), and the path-selecting discovery
-pre-flight (`GET /v1/agent/registration-info`) is likewise a standing,
-authenticated HTTPS call to the LayerV API. `RegisterAgent` proves the agent's
-X25519 device key through the handshake, so the same keypair is reused across
-resumes, and the enrollment service never becomes public inventory. You do not
-configure any of this: the side-effect-free pre-flight tells the SDK which path
-the key takes and where to knock.
-
-The `WithRelayURL` and `WithNHPPeer` options exist for advanced routing (pinned
-or test endpoints) and are not needed in normal use; an overridden peer bypasses
-the pre-flight's integrity check, so pin only a peer you trust. The completion
-response must still report that same peer key: the SDK preserves the peer that
-authenticated the RAK and rejects any post-handshake replacement.
-
-## Next
-
-- [Issue links](issuing-links.md)
-- [Open links](opening-links.md)
-- [Protect a private service](secure-a-private-service.md)
-- [`awsstore` README](../awsstore/README.md) — AWS-backed state stores
+The browser relay remains separate: browsers address a relay route using the
+assigned cell public-key fingerprint, while the relay uses its provisioned
+lookup table. Native SDKs do not call the relay or use it for discovery.

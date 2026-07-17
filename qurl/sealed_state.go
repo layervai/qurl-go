@@ -127,7 +127,7 @@ type sealedFileAgentStateOptions struct {
 // valid envelope for any other agent before calling the key wrapper, and Save
 // rejects mismatched state. The id must be canonical valid UTF-8 without
 // surrounding whitespace or control characters. On first enrollment, pass the
-// same id through WithDeviceID (RegisterAgent) or WithAgentID (BootstrapAgent).
+// same id through WithAgentRuntimeIdentity.
 func WithExpectedSealedAgentID(agentID string) SealedFileAgentStateOption {
 	return sealedFileAgentStateOptionFunc(func(o *sealedFileAgentStateOptions) error {
 		normalized, err := normalizeSealedAgentID(agentID)
@@ -256,7 +256,10 @@ func (s *SealedFileAgentStateStore) LoadAgentState(ctx context.Context) (*AgentS
 	}
 	defer wipeBytes(plaintext)
 	var state AgentState
-	if err := json.Unmarshal(plaintext, &state); err != nil {
+	// AgentState.UnmarshalJSON already owns its exact-field/depth contract.
+	// Retain the package-wide strict helper as defense in depth if that custom
+	// decoder changes; it does not add a second independent strictness layer today.
+	if err := strictDecodeJSON(plaintext, &state); err != nil {
 		return nil, invalidSealedState("decrypted agent state is not valid JSON")
 	}
 	innerID, err := normalizeSealedAgentID(state.AgentID)

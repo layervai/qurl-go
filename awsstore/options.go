@@ -1,9 +1,12 @@
 package awsstore
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"strings"
 
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
@@ -95,9 +98,21 @@ func marshalAgentState(state *qurl.AgentState, resourceID, resourceLabel string)
 
 // unmarshalAgentState decodes a loaded value into an AgentState, mapping a decode
 // failure to a wrapped [qurl.ErrInvalidAgentState] so callers' errors.Is matches.
+// This separate module owns only the strict custody/decode boundary. Native
+// assignment and pending-completion structural validation remains lifecycle-
+// owned in qurl, which deliberately repeats it for every custom/network store.
 func unmarshalAgentState(raw []byte) (*qurl.AgentState, error) {
 	var state qurl.AgentState
-	if err := json.Unmarshal(raw, &state); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	// AgentState.UnmarshalJSON currently enforces exact fields itself. Keep this
+	// as defense in depth if that custom decoder is ever removed; the trailing
+	// Decode below remains independently load-bearing today.
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&state); err != nil {
+		return nil, fmt.Errorf("%w: decode agent state", qurl.ErrInvalidAgentState)
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
 		// Deliberately do NOT %w the decoder error: encoding/json errors can embed
 		// the offending input character/offset, and raw here is a decrypted
 		// credential blob. Dropping the cause keeps stored bytes out of the error

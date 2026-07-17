@@ -97,16 +97,20 @@ func (f *fakeSecretsManager) CreateSecret(_ context.Context, in *secretsmanager.
 func sampleState() *qurl.AgentState {
 	ts := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
 	return &qurl.AgentState{
-		AgentID:       "agent-123",
-		PrivateKeyB64: "cHJpdmF0ZS1rZXk=",
-		PublicKeyB64:  "cHVibGljLWtleQ==",
-		RegisteredAt:  &ts,
-		DeviceAPIKey:  "dev-secret-bearer",
-		SchemaVersion: 2,
-		NHPPeer: &qurl.NHPServerPeerInfo{
-			PublicKeyB64: "cGVlci1rZXk=",
-			Host:         "relay.example.com",
-			Port:         443,
+		AgentID:        "agent-123",
+		PrivateKeyB64:  "cHJpdmF0ZS1rZXk=",
+		PublicKeyB64:   "cHVibGljLWtleQ==",
+		RegisteredAt:   &ts,
+		DeviceAPIKey:   "dev-secret-bearer",
+		DeviceAPIKeyID: "key_AbCdEf123456",
+		SchemaVersion:  4,
+		Assignment: &qurl.AgentAssignment{
+			CellID: "cell0", AssignmentGeneration: 1, EndpointRevision: 1,
+			LeaseExpiresAt: ts.Add(time.Hour),
+			Endpoint: qurl.NHPUDPEndpoint{
+				Host: "cell0.nhp.layerv.ai", Port: 62206,
+				ServerPublicKeyB64: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+			},
 		},
 	}
 }

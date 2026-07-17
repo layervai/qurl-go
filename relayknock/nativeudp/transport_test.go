@@ -55,6 +55,7 @@ type fakeServer struct {
 
 	mu       sync.Mutex
 	received int
+	types    []int
 }
 
 func newFakeServer(t *testing.T, serverPriv, agentPub []byte, b behavior) *fakeServer {
@@ -96,6 +97,12 @@ func (s *fakeServer) receivedCount() int {
 	return s.received
 }
 
+func (s *fakeServer) receivedTypes() []int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]int(nil), s.types...)
+}
+
 func (s *fakeServer) serve() {
 	buf := make([]byte, 1<<16)
 	for {
@@ -114,6 +121,9 @@ func (s *fakeServer) serve() {
 			s.t.Logf("server: open initiator: %v", err)
 			continue
 		}
+		s.mu.Lock()
+		s.types = append(s.types, msg.Type)
+		s.mu.Unlock()
 		resp := s.buildResponse(msg)
 		if resp == nil {
 			continue // silent
@@ -271,6 +281,59 @@ func TestRoundTripHelpers(t *testing.T) {
 	}
 }
 
+type countingLoopbackDialer struct {
+	mu     sync.Mutex
+	target string
+	calls  int
+}
+
+func (d *countingLoopbackDialer) DialContext(ctx context.Context, network, _ string) (net.Conn, error) {
+	d.mu.Lock()
+	d.calls++
+	d.mu.Unlock()
+	return (&net.Dialer{}).DialContext(ctx, network, d.target)
+}
+
+func (d *countingLoopbackDialer) count() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.calls
+}
+
+func TestSendOTP_IsOneDatagramWithNoReplyWaitOrAddressFallback(t *testing.T) {
+	t.Parallel()
+	serverPriv, serverPub := mustKeypair(t)
+	devicePriv := mustPriv(t)
+	server := newFakeServer(t, serverPriv, pubOf(t, devicePriv), behaviorSilent)
+	dialer := &countingLoopbackDialer{target: server.conn.LocalAddr().String()}
+	opts := nativeudp.Options{
+		DeviceStaticPriv: devicePriv,
+		Resolver: resolverReturning([]netip.Addr{
+			netip.MustParseAddr("8.8.8.8"),
+			netip.MustParseAddr("9.9.9.9"),
+		}),
+		Dialer: dialer, Timeout: 10 * time.Second, MaxAddresses: 2,
+	}
+	ep := nativeudp.Endpoint{Host: "cell0.nhp.test", Port: server.port(), ServerStaticPub: serverPub}
+	start := time.Now()
+	if err := nativeudp.SendOTP(context.Background(), ep, []byte(`{"otp":true}`), opts); err != nil {
+		t.Fatalf("SendOTP: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("SendOTP waited for a reply: %s", elapsed)
+	}
+	deadline := time.Now().Add(time.Second)
+	for len(server.receivedTypes()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if dialer.count() != 1 || server.receivedCount() != 1 {
+		t.Fatalf("OTP dial/datagram counts = %d/%d, want 1/1", dialer.count(), server.receivedCount())
+	}
+	if got := server.receivedTypes(); len(got) != 1 || got[0] != relayknock.TypeOTP {
+		t.Fatalf("OTP received types = %v, want [%d]", got, relayknock.TypeOTP)
+	}
+}
+
 func TestExchange_CookieChallengeIsRetryable(t *testing.T) {
 	t.Parallel()
 	_, ep, opts := newLoopbackExchange(t, behaviorCookie)
@@ -292,11 +355,25 @@ func TestExchange_ListRejectsCookieChallenge(t *testing.T) {
 	}
 }
 
-func TestExchange_CookieChallengeMustEchoCounter(t *testing.T) {
+func TestExchange_KnockCookieChallengePrecedesCounterCheck(t *testing.T) {
 	t.Parallel()
 	_, ep, opts := newLoopbackExchange(t, behaviorCookieWrongCounter)
-	if _, err := nativeudp.Knock(context.Background(), ep, nil, opts); !errors.Is(err, relayknock.ErrMalformedReply) {
-		t.Fatalf("uncorrelated cookie-challenge error = %v, want ErrMalformedReply", err)
+	reply, err := nativeudp.Knock(context.Background(), ep, nil, opts)
+	if err != nil {
+		t.Fatalf("mismatched-counter knock COK = %v, want retryable reply", err)
+	}
+	if !reply.IsCookieChallenge() {
+		t.Fatalf("reply type = %d, want NHP_COK cookie-challenge", reply.Type)
+	}
+}
+
+func TestExchange_RegisterRejectsCookieChallenge(t *testing.T) {
+	t.Parallel()
+	for _, b := range []behavior{behaviorCookie, behaviorCookieWrongCounter} {
+		_, ep, opts := newLoopbackExchange(t, b)
+		if _, err := nativeudp.Register(context.Background(), ep, nil, opts); !errors.Is(err, relayknock.ErrMalformedReply) {
+			t.Fatalf("register COK behavior %d error = %v, want ErrMalformedReply", b, err)
+		}
 	}
 }
 

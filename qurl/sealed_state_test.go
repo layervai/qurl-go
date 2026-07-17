@@ -21,6 +21,15 @@ import (
 	"time"
 )
 
+func secureAgentStateTestDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 type testAgentStateKeyWrapper struct {
 	mu sync.Mutex
 
@@ -124,13 +133,15 @@ func testAgentState(t *testing.T) *AgentState {
 	state.AgentID = "agent-sealed-test"
 	state.RegisteredAt = &now
 	state.SchemaVersion = agentStateSchemaVersion
-	state.DeviceAPIKey = "lv_device_super_secret"
-	state.RelayURL = "https://relay.example.test"
-	state.KeyID = "key_test"
-	state.NHPPeer = &NHPServerPeerInfo{
-		PublicKeyB64: validTestNHPServerPublicKeyB64,
-		Host:         "nhp.example.test",
-		Port:         62206,
+	state.DeviceAPIKey = canonicalNativeDeviceCredential
+	state.DeviceAPIKeyID = "key_AbCdEf123456"
+	state.Assignment = &AgentAssignment{
+		CellID: "cell0", AssignmentGeneration: 1, EndpointRevision: 1,
+		LeaseExpiresAt: now.Add(time.Hour),
+		Endpoint: NHPUDPEndpoint{
+			Host: "cell0.nhp.layerv.ai", Port: standardNHPUDPPort,
+			ServerPublicKeyB64: validTestNHPServerPublicKeyB64,
+		},
 	}
 	return state
 }
@@ -638,7 +649,7 @@ func TestLocalAgentStateStoreContract(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if loaded.DeviceAPIKey != "lv_device_super_secret" {
+			if loaded.DeviceAPIKey != canonicalNativeDeviceCredential {
 				t.Fatal("store retained caller state pointer instead of snapshotting on save")
 			}
 			loaded.DeviceAPIKey = "mutated-after-load"
@@ -646,7 +657,7 @@ func TestLocalAgentStateStoreContract(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if reloaded.DeviceAPIKey != "lv_device_super_secret" {
+			if reloaded.DeviceAPIKey != canonicalNativeDeviceCredential {
 				t.Fatal("store shared loaded state pointer across calls")
 			}
 		})
@@ -840,7 +851,18 @@ func TestSealedFileAgentState_AtomicFailureInjection(t *testing.T) {
 				t.Fatalf("failed save left temporary files: %v", temps)
 			}
 			if fault == "sync-dir" {
-				return // rename committed before the directory durability check failed
+				// Rename committed before the directory durability acknowledgement
+				// failed. Reload must inspect that visible state rather than assuming
+				// the save error means the prior value survived.
+				store.fileOps = defaultPrivateStateFileOps
+				loaded, err := store.LoadAgentState(context.Background())
+				if err != nil {
+					t.Fatal(err)
+				}
+				if loaded.DeviceAPIKey != updated.DeviceAPIKey {
+					t.Fatalf("post-rename sync failure visible state = %q, want committed %q", loaded.DeviceAPIKey, updated.DeviceAPIKey)
+				}
+				return
 			}
 			store.fileOps = defaultPrivateStateFileOps
 			loaded, err := store.LoadAgentState(context.Background())
@@ -1037,16 +1059,14 @@ func TestSealedFileAgentState_SetupLockFailuresFailClosed(t *testing.T) {
 		lockCalls++
 		return nil, errors.New("lock unavailable")
 	}
-	if _, err := RegisterAgent(context.Background(), "unused-on-fast-path", store); err != nil {
-		t.Fatalf("completed fast path must not acquire setup lock: %v", err)
-	}
 	networkCalls := 0
 	refusing := doerFunc(func(*http.Request) (*http.Response, error) {
 		networkCalls++
 		return nil, errors.New("network must not be used on completed runtime fast path")
 	})
 	client, binding, err := RegisterAgentRuntime(context.Background(), "unused-on-runtime-fast-path", store,
-		WithRegisterHTTPClient(refusing),
+		WithAgentRuntimeHub(runtimeTestHub()),
+		WithAgentClientHTTPClient(refusing),
 	)
 	if err != nil || client == nil || binding == nil {
 		t.Fatalf("completed runtime fast path must not acquire setup lock: client %v, binding %v, error %v", client, binding, err)
@@ -1056,12 +1076,16 @@ func TestSealedFileAgentState_SetupLockFailuresFailClosed(t *testing.T) {
 		t.Fatalf("completed runtime fast path lock/network calls = %d/%d, want 0/0", lockCalls, networkCalls)
 	}
 
-	state.RegisteredAt = nil
-	state.DeviceAPIKey = ""
-	if err := store.SaveAgentState(context.Background(), state); err != nil {
+	incomplete, err := newAgentState()
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := RegisterAgent(context.Background(), "enrollment-key", store); !errors.Is(err, ErrAgentSetupLock) {
+	incomplete.AgentID = "agent-sealed-test"
+	incomplete.SchemaVersion = agentStateSchemaVersion
+	if err := store.SaveAgentState(context.Background(), incomplete); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := RegisterAgentRuntime(context.Background(), "enrollment-key", store, WithAgentRuntimeHub(runtimeTestHub())); !errors.Is(err, ErrAgentSetupLock) {
 		t.Fatalf("acquire failure = %v, want ErrAgentSetupLock", err)
 	}
 
@@ -1070,54 +1094,8 @@ func TestSealedFileAgentState_SetupLockFailuresFailClosed(t *testing.T) {
 		cancel() // force the post-acquire reload to fail before any network call
 		return testSetupLock{closeErr: errors.New("unlock failed")}, nil
 	}
-	if _, err := RegisterAgent(ctx, "enrollment-key", store); !errors.Is(err, ErrAgentSetupLock) || !errors.Is(err, context.Canceled) {
+	if _, _, err := RegisterAgentRuntime(ctx, "enrollment-key", store, WithAgentRuntimeHub(runtimeTestHub())); !errors.Is(err, ErrAgentSetupLock) || !errors.Is(err, context.Canceled) {
 		t.Fatalf("release failure = %v, want joined ErrAgentSetupLock + context.Canceled", err)
-	}
-}
-
-func TestRegisterAgent_SetupLockReleaseFailureRecoversFromCompletedState(t *testing.T) {
-	h := newRegisterHarness(t)
-	h.svc.keyKind = keyKindBootstrap
-	dir := t.TempDir()
-	if err := os.Chmod(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	store, err := NewSealedFileAgentState(filepath.Join(dir, "agent_state.sealed.json"), "test-wrapper", &testAgentStateKeyWrapper{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	h.store = store
-	h.armDevicePubOnInfo()
-	store.lockFile = func(context.Context, string) (setupLock, error) {
-		return testSetupLock{closeErr: errors.New("unlock failed")}, nil
-	}
-
-	client, err := RegisterAgent(context.Background(), "lv_bootstrap_key", store, h.registerOpts()...)
-	if client != nil || !errors.Is(err, ErrAgentSetupLock) {
-		t.Fatalf("first registration = (%v, %v), want nil client + ErrAgentSetupLock", client, err)
-	}
-	state, err := store.LoadAgentState(context.Background())
-	if err != nil {
-		t.Fatalf("load persisted registration: %v", err)
-	}
-	if state.RegisteredAt == nil || state.DeviceAPIKey == "" {
-		t.Fatalf("release failure must leave completed durable state: %#v", state)
-	}
-
-	// Prove recovery uses the pre-lock completed-state path: make any attempted
-	// lock acquisition fail, then retry with a deliberately unusable setup key.
-	store.lockFile = func(context.Context, string) (setupLock, error) {
-		return nil, errors.New("lock must not be acquired on recovery")
-	}
-	client, err = RegisterAgent(context.Background(), "unused-on-fast-path", store, h.registerOpts()...)
-	if err != nil || client == nil {
-		t.Fatalf("recovery registration = (%v, %v), want non-nil client + nil error", client, err)
-	}
-	if got := h.nhp.regCount(); got != 1 {
-		t.Fatalf("REG count = %d, want 1", got)
-	}
-	if got := h.svc.completionCalls.Load(); got != 1 {
-		t.Fatalf("completion calls = %d, want 1", got)
 	}
 }
 
@@ -1169,48 +1147,54 @@ func TestSealedFileAgentState_RejectsInnerOuterAgentMismatch(t *testing.T) {
 	}
 }
 
-func TestRegisterAgent_ConcurrentFreshSealedStoreSetupSerializes(t *testing.T) {
-	h := newRegisterHarness(t)
-	h.svc.keyKind = keyKindBootstrap
-	h.armDevicePubOnInfo()
-	dir := t.TempDir()
-	if err := os.Chmod(dir, 0o700); err != nil {
+func TestSealedFileAgentState_RejectsUnknownNativeStateField(t *testing.T) {
+	wrapper := &testAgentStateKeyWrapper{}
+	store := testSealedStore(t, wrapper)
+	if err := store.SaveAgentState(context.Background(), testAgentState(t)); err != nil {
 		t.Fatal(err)
 	}
-	store, err := NewSealedFileAgentState(filepath.Join(dir, "agent_state.sealed.json"), "test-wrapper", &testAgentStateKeyWrapper{})
+	raw, err := os.ReadFile(store.path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	h.store = store
-	h.statePath = store.path
-
-	const goroutines = 2
-	var wg sync.WaitGroup
-	errs := make([]error, goroutines)
-	start := make(chan struct{})
-	for i := range goroutines {
-		wg.Add(1)
-		go func(index int) {
-			defer wg.Done()
-			<-start
-			_, errs[index] = RegisterAgent(context.Background(), "lv_bootstrap_key", h.store, h.registerOpts()...)
-		}(i)
+	var envelope sealedAgentStateEnvelope
+	if err := decodeSealedAgentStateEnvelope(raw, &envelope); err != nil {
+		t.Fatal(err)
 	}
-	close(start)
-	wg.Wait()
-	for i, err := range errs {
-		if err != nil {
-			for cause := err; cause != nil; cause = errors.Unwrap(cause) {
-				t.Logf("error chain: %T: %v", cause, cause)
-			}
-			t.Fatalf("goroutine %d: %v", i, err)
-		}
+	dek, err := wrapper.UnwrapKey(context.Background(), cloneWrappedAgentStateKey(envelope.WrappedKey), envelope.binding())
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := h.nhp.regCount(); got != 1 {
-		t.Fatalf("REG count = %d, want 1", got)
+	defer wipeBytes(dek)
+	aad, err := envelope.aad()
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := h.svc.completionCalls.Load(); got != 1 {
-		t.Fatalf("completion count = %d, want 1", got)
+	plaintext, err := openSealedAgentState(dek, envelope.Nonce, envelope.Ciphertext, aad)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer wipeBytes(plaintext)
+	mutated := append(bytes.Clone(bytes.TrimSuffix(plaintext, []byte("}"))), []byte(`,"retired_http_field":true}`)...)
+	defer wipeBytes(mutated)
+	block, err := aes.NewCipher(dek)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope.Ciphertext = gcm.Seal(nil, envelope.Nonce, mutated, aad)
+	tampered, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(store.path, tampered, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.LoadAgentState(context.Background()); !errors.Is(err, ErrInvalidAgentState) {
+		t.Fatalf("unknown inner field error = %v, want ErrInvalidAgentState", err)
 	}
 }
 

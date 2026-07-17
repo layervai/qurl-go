@@ -939,7 +939,7 @@ func applyPortalOptions(opts []PortalOption) (portalOptions, error) {
 
 func validateTargetURL(targetURL string, errKind error) error {
 	// Protected targets may be private http:// services. Credential-bearing API
-	// and bootstrap origins layer validateHTTPSOrLoopbackURL on top instead.
+	// origins layer validateHTTPSOrLoopbackURL on top instead.
 	// This client only rejects malformed URLs and embedded credentials; LayerV
 	// performs the server-side resource checks when the target is registered.
 	_, err := parseHTTPURL(targetURL, "target URL", errKind)

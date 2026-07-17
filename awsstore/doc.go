@@ -41,15 +41,16 @@
 //
 // # Implementor contract
 //
-// Both stores honor the [qurl.AgentStateStore] implementor contract that
-// RegisterAgent/BootstrapAgent rely on:
+// Both stores honor the [qurl.AgentStateStore] implementor contract used by the
+// native UDP registered-agent lifecycle:
 //
 //   - LoadAgentState returns [qurl.ErrAgentStateNotFound] (matchable with
 //     errors.Is) when no state has been persisted yet, so the caller starts a
 //     fresh enrollment instead of failing.
 //   - LoadAgentState returns [qurl.ErrInvalidAgentState] (wrapped, matchable with
 //     errors.Is) when a value IS present but cannot be decoded — a corrupt or
-//     non-JSON blob — distinct from the not-found case.
+//     non-JSON blob, unknown field, or trailing value — distinct from the
+//     not-found case.
 //   - SaveAgentState writes the state so a subsequent LoadAgentState returns an
 //     equal value.
 package awsstore

@@ -11,10 +11,13 @@
 // # Scope
 //
 // Round-trip initiator messages only: NHP_LST (answered exactly by NHP_LRT),
-// NHP_KNK (answered by NHP_ACK/NHP_COK), and NHP_REG (answered by
-// NHP_RAK/NHP_COK). LST never accepts a cookie challenge; handler-budget or
+// NHP_KNK (answered by NHP_ACK/NHP_COK), and NHP_REG (answered exactly by
+// NHP_RAK). LST and REG never accept a cookie challenge; handler-budget or
 // pre-handler overload shedding is a timeout owned by the caller's bounded
-// transaction retry. Every reply, including COK, must echo the request counter.
+// transaction retry. Transaction replies must echo the request counter. An
+// authenticated KNK→COK overload signal is classified before that ordinary
+// counter gate because its request and reply counters are intentionally
+// unconstrained relative to one another.
 // The re-knock/cookie-answer NHP_RKN and any exit message stay out of scope here.
 // The application body is opaque — a caller supplies already-serialized bytes
 // and interprets the decrypted authenticated reply body itself.
