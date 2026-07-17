@@ -187,11 +187,7 @@ func validateLoadedAgentAssignment(state *AgentState) error {
 		}
 	}
 	if state.PendingActivation != nil {
-		pending := state.PendingActivation
-		if state.Assignment == nil {
-			return fmt.Errorf("%w: pending activation requires an assignment", ErrInvalidAgentState)
-		}
-		if err := validatePendingAgentActivation(pending, state); err != nil {
+		if err := validatePendingAgentActivation(state.PendingActivation, state); err != nil {
 			return err
 		}
 		if state.PendingCompletion != nil || state.RegisteredAt != nil || state.DeviceAPIKey != "" || state.DeviceAPIKeyID != "" {
