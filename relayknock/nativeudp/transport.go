@@ -344,18 +344,14 @@ func rejectCookieChallenge(class, detail string) error {
 // json.Unmarshal: COK is authenticated server input and the v0.6 contract
 // rejects duplicate/unknown keys, nulls, trailing values, non-canonical base64,
 // and transaction mismatch before RKN can be emitted.
-func parseCookieChallenge(body []byte, requestCounter uint64) (cookie []byte, err error) {
+func parseCookieChallenge(body []byte, requestCounter uint64) ([]byte, error) {
 	dec := json.NewDecoder(bytes.NewReader(body))
 	first, err := dec.Token()
 	if err != nil || first != json.Delim('{') {
 		return nil, rejectCookieChallenge(cookieRejectBodyParse, "body must be one JSON object")
 	}
 	var parsed cookieChallengeBody
-	defer func() {
-		if err != nil {
-			cryptoutil.Wipe(parsed.cookie)
-		}
-	}()
+	defer func() { cryptoutil.Wipe(parsed.cookie) }()
 	seen := make(map[string]struct{}, 2)
 	for dec.More() {
 		token, err := dec.Token()
@@ -401,7 +397,9 @@ func parseCookieChallenge(body []byte, requestCounter uint64) (cookie []byte, er
 	if parsed.transactionID != requestCounter {
 		return nil, rejectCookieChallenge(cookieRejectCounter, "transaction does not match the knock")
 	}
-	return parsed.cookie, nil
+	cookie := parsed.cookie
+	parsed.cookie = nil
+	return cookie, nil
 }
 
 // decodeCookieChallenge retains the authenticated cookie only in wipeable byte

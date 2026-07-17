@@ -282,6 +282,9 @@ func WithAgentRuntimeUDPDialer(dialer nativeudp.Dialer) AgentRuntimeUDPOption {
 }
 
 // WithAgentRuntimeUDPBounds bounds one address attempt and DNS address fan-out.
+// KNK and a possible RKN are independent exchanges, so their worst-case
+// transport budget is roughly 2 * maxAddresses * timeout. Callers that need one
+// aggregate deadline must set it on the context.
 func WithAgentRuntimeUDPBounds(timeout time.Duration, maxAddresses int) AgentRuntimeUDPOption {
 	return nativeRuntimeUDPOptionFunc(func(c *nativeAgentRuntimeConfig) error {
 		if timeout <= 0 || maxAddresses < 1 {
