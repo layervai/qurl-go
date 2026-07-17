@@ -1488,9 +1488,9 @@ func KnockRegisteredAgent(ctx context.Context, binding *AgentRuntimeBinding, dev
 // registered-agent session. It uses the same validation and pinned assigned-cell
 // endpoint as KnockRegisteredAgent, never contacts the Hub or any HTTP surface,
 // and accepts only the authenticated EXT-correlated ACK. The v0.6 EXT ACK uses
-// the same resource-admission envelope as KNK/RKN, so it is validated and wiped
-// before this function returns; clean exit never changes durable enrollment or
-// assignment state.
+// the same resource-admission envelope as KNK/RKN. Its decrypted body buffer is
+// wiped after strict validation and the parsed result is discarded; clean exit
+// never changes durable enrollment or assignment state.
 func ExitRegisteredAgentSession(ctx context.Context, binding *AgentRuntimeBinding, deviceStaticPrivateKey []byte, knockResourceID string, opts NativeKnockOptions, transportOpts ...AgentRuntimeUDPOption) error {
 	cfg, endpoint, err := registeredAgentSessionEndpoint(binding, deviceStaticPrivateKey, transportOpts)
 	if err != nil {
