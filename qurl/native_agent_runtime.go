@@ -30,7 +30,9 @@ const (
 	// The assigned-cell account-OTP contract rejects a ticket with less than
 	// this much lifetime remaining. Because OTP is one-way, enforce the same
 	// inclusive boundary before dispatch so the caller never waits for a code
-	// that the cell could not have issued.
+	// that the cell could not have issued. The v0.5 assignment golden freezes
+	// both the 630-second acceptance case and 629-second rejection; the SDK test
+	// reads that metadata so this constant cannot drift silently.
 	nativeAccountOTPMinimumTicketRemaining = 630 * time.Second
 	// qurl-conformance v1 freezes this as the native Connector knock deny. Other
 	// values are producer-contract violations, not open-ended diagnostic text.
@@ -442,8 +444,6 @@ func (c *nativeAgentRuntimeConfig) registerLocked(ctx context.Context, enrollmen
 				return nil, err
 			}
 			state.Assignment = fresh.clone()
-			state.PendingCompletion.CellID = fresh.CellID
-			state.PendingCompletion.AssignmentGeneration = fresh.AssignmentGeneration
 			if err := store.SaveAgentState(ctx, state); err != nil {
 				return nil, fmt.Errorf("%w: save refreshed pending assignment: %w", ErrAgentBindingPersistence, err)
 			}

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -183,6 +184,61 @@ func TestAgentRuntimeBinding_AccidentalCopySharesOneShotKey(t *testing.T) {
 	wipeBytes(first)
 	binding.Destroy()
 	copied.Destroy()
+}
+
+func TestAgentRuntimeBinding_ConcurrentCopiesSynchronizeKeyOwnership(t *testing.T) {
+	const workers = 32
+	for _, test := range []struct {
+		name         string
+		destroyEvery int
+		wantExact    int
+	}{
+		{name: "concurrent takes", wantExact: 1},
+		{name: "take races destroy", destroyEvery: 2, wantExact: -1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			want := bytes.Repeat([]byte{0x5a}, 32)
+			binding := &AgentRuntimeBinding{deviceStaticPrivateKey: newAgentRuntimePrivateKey(bytes.Clone(want))}
+			start := make(chan struct{})
+			results := make(chan []byte, workers)
+			var group sync.WaitGroup
+			for i := 0; i < workers; i++ {
+				copied := *binding
+				group.Add(1)
+				go func(index int) {
+					defer group.Done()
+					<-start
+					if test.destroyEvery > 0 && index%test.destroyEvery == 0 {
+						copied.Destroy()
+						return
+					}
+					results <- copied.TakeDeviceStaticPrivateKey()
+				}(i)
+			}
+			close(start)
+			group.Wait()
+			close(results)
+
+			owned := 0
+			for key := range results {
+				if key == nil {
+					continue
+				}
+				if !bytes.Equal(key, want) {
+					t.Errorf("transferred key = %x, want %x", key, want)
+				}
+				owned++
+				wipeBytes(key)
+			}
+			binding.Destroy()
+			if test.wantExact >= 0 && owned != test.wantExact {
+				t.Fatalf("successful key transfers = %d, want %d", owned, test.wantExact)
+			}
+			if owned > 1 {
+				t.Fatalf("successful key transfers = %d, want at most 1", owned)
+			}
+		})
+	}
 }
 
 func TestAgentRuntimeBindingFormattingRedactsPrivateKey(t *testing.T) {

@@ -547,7 +547,9 @@ func resolveAddresses(ctx context.Context, host string, opts Options) ([]netip.A
 // netip.Addr.IsGlobalUnicast follows the protocol definition and therefore
 // includes reserved space such as 200::/7 and unallocated space inside
 // 2000::/3. This release-gated allowlist mirrors the IANA IPv6 Global Unicast
-// Address Space allocations; a new allocation requires an SDK release.
+// Address Space allocations. Operators must update this list and ship an SDK
+// release before provisioning a cell endpoint exclusively in a newly allocated
+// prefix; until then resolution deliberately fails closed with ErrResolve.
 var allocatedIPv6GlobalUnicastPrefixes = [...]netip.Prefix{
 	netip.MustParsePrefix("2001:200::/23"),
 	netip.MustParsePrefix("2001:400::/23"),
