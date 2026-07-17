@@ -688,6 +688,29 @@ func TestRegisterAgentRuntime_RejectsMutuallyExclusiveRecoveryMarkersBeforeIO(t 
 	}
 }
 
+func TestNewPendingAgentActivation_RequiresInitialAssignmentMatch(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	initial, err := parseInitialAssignmentReply(
+		[]byte(contract.InitialAssignment.Result.BodyJSON),
+		"agent-conform",
+		assignmentFixtureNow,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := newAgentState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.AgentID = "agent-conform"
+	state.Assignment = initial.Assignment.clone()
+	state.Assignment.EndpointRevision++
+	_, err = newPendingAgentActivation(initial, state, "host", "version", conformance.AgentAssignmentBootstrapCredentialFixture)
+	if !errors.Is(err, ErrInvalidRegisterConfig) || !strings.Contains(err.Error(), "does not match initial assignment") {
+		t.Fatalf("assignment mismatch = %v, want invalid config", err)
+	}
+}
+
 func TestRegisterAgentRuntime_UDPOnlyGoldenLifecycle(t *testing.T) {
 	contract := loadAssignmentFixture(t)
 	f := newRuntimeFixture(t,
@@ -1156,6 +1179,9 @@ func TestCompletionRecoveryRequiredError_NilSafety(t *testing.T) {
 	}
 	last := errors.New("last completion transport failure")
 	recovery := &CompletionRecoveryRequiredError{Attempts: 1, Elapsed: time.Second, Last: last}
+	if recovery.Error() != "qurl: completion retry budget exhausted after 1 attempts over 1s; reopen the persisted pending candidate: last completion transport failure" {
+		t.Fatalf("completion recovery message = %q", recovery.Error())
+	}
 	if !errors.Is(recovery, ErrCompletionRecoveryRequired) {
 		t.Fatalf("completion recovery lost sentinel: %v", recovery)
 	}
@@ -1172,6 +1198,9 @@ func TestRegistrationRecoveryRequiredError_NilSafety(t *testing.T) {
 	}
 	last := errors.New("last registration transport failure")
 	recovery := &RegistrationRecoveryRequiredError{Attempts: 1, Elapsed: time.Second, Last: last}
+	if recovery.Error() != "qurl: assigned-cell registration retry budget exhausted after 1 attempts over 1s; resume the exact pending activation with the same enrollment credential: last registration transport failure" {
+		t.Fatalf("registration recovery message = %q", recovery.Error())
+	}
 	if !errors.Is(recovery, ErrRegistrationRecoveryRequired) {
 		t.Fatalf("registration recovery lost sentinel: %v", recovery)
 	}

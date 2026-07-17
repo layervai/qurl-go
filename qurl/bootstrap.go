@@ -342,6 +342,19 @@ func validatePersistedAgentID(state *AgentState, errKind error) error {
 	return nil
 }
 
+// prepareLoadedAgentState applies the lifecycle trust boundary to every load.
+// Built-in stores validate too, but public custom AgentStateStore implementations
+// are not trusted to do so before returning state.
+func prepareLoadedAgentState(state *AgentState, errKind error) error {
+	if state == nil {
+		return fmt.Errorf("%w: agent state store returned nil state", errKind)
+	}
+	if err := validateLoadedAgentAssignment(state); err != nil {
+		return fmt.Errorf("%w: %w", errKind, err)
+	}
+	return state.ensureKeypair(errKind)
+}
+
 // loadOrCreateAgentState loads the persisted state (creating a fresh keypair when
 // none exists), validating a loaded keypair. The underlying store sentinel stays
 // matchable through the front-door error wrap.
@@ -349,13 +362,7 @@ func loadOrCreateAgentState(ctx context.Context, store AgentStateStore, invalidC
 	state, err := store.LoadAgentState(ctx)
 	switch {
 	case err == nil:
-		if state == nil {
-			return nil, fmt.Errorf("%w: agent state store returned nil state", invalidConfigErr)
-		}
-		if err := validateLoadedAgentAssignment(state); err != nil {
-			return nil, fmt.Errorf("%w: %w", invalidConfigErr, err)
-		}
-		if err := state.ensureKeypair(invalidConfigErr); err != nil {
+		if err := prepareLoadedAgentState(state, invalidConfigErr); err != nil {
 			return nil, err
 		}
 		return state, nil

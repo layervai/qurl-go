@@ -250,14 +250,14 @@ func (e *AssignmentRecoveryRequiredError) Error() string {
 	if e == nil {
 		return ErrAssignmentRecoveryRequired.Error()
 	}
-	return fmt.Sprintf("qurl: assignment retry budget exhausted after %d attempts over %s; surface recovery: %v", e.Attempts, e.Elapsed, e.Last)
+	return recoveryBudgetErrorString("assignment", "surface recovery", e.Attempts, e.Elapsed, e.Last)
 }
 
 func (e *AssignmentRecoveryRequiredError) Unwrap() []error {
-	if e == nil || e.Last == nil {
+	if e == nil {
 		return []error{ErrAssignmentRecoveryRequired}
 	}
-	return []error{ErrAssignmentRecoveryRequired, e.Last}
+	return unwrapWithCause(e.Last, ErrAssignmentRecoveryRequired)
 }
 
 type assignmentConfig struct {

@@ -676,13 +676,7 @@ func loadNativeAgentStateIfPresent(ctx context.Context, store AgentStateStore) (
 	state, err := store.LoadAgentState(ctx)
 	switch {
 	case err == nil:
-		if state == nil {
-			return nil, false, fmt.Errorf("%w: agent state store returned nil state", ErrInvalidRegisterConfig)
-		}
-		if err := validateLoadedAgentAssignment(state); err != nil {
-			return nil, false, fmt.Errorf("%w: %w", ErrInvalidRegisterConfig, err)
-		}
-		if err := state.ensureKeypair(ErrInvalidRegisterConfig); err != nil {
+		if err := prepareLoadedAgentState(state, ErrInvalidRegisterConfig); err != nil {
 			return nil, false, err
 		}
 		return state, true, nil
@@ -823,10 +817,16 @@ func newPendingAgentActivation(initial *InitialAgentAssignment, state *AgentStat
 	if initial == nil || state == nil || state.Assignment == nil {
 		return nil, fmt.Errorf("%w: pending activation requires initial assignment and state", ErrInvalidRegisterConfig)
 	}
+	if !sameAgentAssignment(&initial.Assignment, state.Assignment) {
+		return nil, fmt.Errorf("%w: pending activation state assignment does not match initial assignment", ErrInvalidRegisterConfig)
+	}
+	// state.Assignment is already the isolated fresh clone. Copy its value into
+	// the pending record instead of cloning the same assignment a second time.
+	assignment := *state.Assignment
 	pending := &PendingAgentActivation{
 		AssignmentTicket: initial.AssignmentTicket, AssignmentTicketExpiresAt: initial.AssignmentTicketExpiresAt,
 		AgentID: state.AgentID, AgentPublicKeyB64: state.PublicKeyB64,
-		Assignment: *initial.Assignment.clone(), Registration: initial.Registration,
+		Assignment: assignment, Registration: initial.Registration,
 		Hostname: hostname, AgentVersion: version,
 		EnrollmentCredentialFingerprintB64: enrollmentCredentialFingerprint(enrollmentCredential),
 	}
@@ -1032,14 +1032,14 @@ func (e *RegistrationRecoveryRequiredError) Error() string {
 	if e == nil {
 		return ErrRegistrationRecoveryRequired.Error()
 	}
-	return fmt.Sprintf("qurl: assigned-cell registration retry budget exhausted after %d attempts over %s; resume the exact pending activation with the same enrollment credential: %v", e.Attempts, e.Elapsed, e.Last)
+	return recoveryBudgetErrorString("assigned-cell registration", "resume the exact pending activation with the same enrollment credential", e.Attempts, e.Elapsed, e.Last)
 }
 
 func (e *RegistrationRecoveryRequiredError) Unwrap() []error {
-	if e == nil || e.Last == nil {
+	if e == nil {
 		return []error{ErrRegistrationRecoveryRequired}
 	}
-	return []error{ErrRegistrationRecoveryRequired, e.Last}
+	return unwrapWithCause(e.Last, ErrRegistrationRecoveryRequired)
 }
 
 func newRegistrationRecovery(attempts int, elapsed time.Duration, last error) error {
@@ -1237,14 +1237,14 @@ func (e *CompletionRecoveryRequiredError) Error() string {
 	if e == nil {
 		return ErrCompletionRecoveryRequired.Error()
 	}
-	return fmt.Sprintf("qurl: completion retry budget exhausted after %d attempts over %s; reopen the persisted pending candidate: %v", e.Attempts, e.Elapsed, e.Last)
+	return recoveryBudgetErrorString("completion", "reopen the persisted pending candidate", e.Attempts, e.Elapsed, e.Last)
 }
 
 func (e *CompletionRecoveryRequiredError) Unwrap() []error {
-	if e == nil || e.Last == nil {
+	if e == nil {
 		return []error{ErrCompletionRecoveryRequired}
 	}
-	return []error{ErrCompletionRecoveryRequired, e.Last}
+	return unwrapWithCause(e.Last, ErrCompletionRecoveryRequired)
 }
 
 func (c *nativeAgentRuntimeConfig) completePending(ctx context.Context, store AgentStateStore, state *AgentState, privateKey []byte) error {

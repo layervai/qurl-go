@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // ErrInvalidRegisterConfig is returned when native registration inputs or
@@ -198,6 +199,12 @@ func unwrapWithCause(cause error, sentinels ...error) []error {
 		return sentinels
 	}
 	return append(sentinels, cause)
+}
+
+// recoveryBudgetErrorString keeps the three phase-specific public recovery
+// types source-compatible while centralizing their identical message shape.
+func recoveryBudgetErrorString(scope, guidance string, attempts int, elapsed time.Duration, last error) string {
+	return fmt.Sprintf("qurl: %s retry budget exhausted after %d attempts over %s; %s: %v", scope, attempts, elapsed, guidance, last)
 }
 
 func messageWithCause(message string, cause error) string {

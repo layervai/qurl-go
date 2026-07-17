@@ -32,6 +32,24 @@ func secureAgentStateTestDir(t *testing.T) string {
 	return dir
 }
 
+type localAgentStateStoreFactory struct {
+	name string
+	new  func(*testing.T) (AgentStateStore, string)
+}
+
+func localAgentStateStoreFactories() []localAgentStateStoreFactory {
+	return []localAgentStateStoreFactory{
+		{name: "plaintext", new: func(t *testing.T) (AgentStateStore, string) {
+			path := filepath.Join(secureAgentStateTestDir(t), "agent_state.json")
+			return FileAgentState(path), path
+		}},
+		{name: "sealed", new: func(t *testing.T) (AgentStateStore, string) {
+			store := testSealedStore(t, &testAgentStateKeyWrapper{})
+			return store, store.path
+		}},
+	}
+}
+
 type testAgentStateKeyWrapper struct {
 	mu sync.Mutex
 
@@ -619,26 +637,9 @@ func TestSealedFileAgentState_StoreSentinelsAndContext(t *testing.T) {
 }
 
 func TestLocalAgentStateStoreContract(t *testing.T) {
-	tests := []struct {
-		name string
-		new  func(*testing.T) AgentStateStore
-	}{
-		{
-			name: "plaintext",
-			new: func(t *testing.T) AgentStateStore {
-				return FileAgentState(filepath.Join(secureAgentStateTestDir(t), "agent_state.json"))
-			},
-		},
-		{
-			name: "sealed",
-			new: func(t *testing.T) AgentStateStore {
-				return testSealedStore(t, &testAgentStateKeyWrapper{})
-			},
-		},
-	}
-	for _, tt := range tests {
+	for _, tt := range localAgentStateStoreFactories() {
 		t.Run(tt.name, func(t *testing.T) {
-			store := tt.new(t)
+			store, _ := tt.new(t)
 			if _, err := store.LoadAgentState(context.Background()); !errors.Is(err, ErrAgentStateNotFound) {
 				t.Fatalf("empty load = %v, want ErrAgentStateNotFound", err)
 			}
@@ -672,19 +673,7 @@ func TestLocalAgentStateStores_PendingActivationRoundTripWithoutPlainCredential(
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, tt := range []struct {
-		name string
-		new  func(*testing.T) (AgentStateStore, string)
-	}{
-		{"plaintext", func(t *testing.T) (AgentStateStore, string) {
-			path := filepath.Join(secureAgentStateTestDir(t), "agent_state.json")
-			return FileAgentState(path), path
-		}},
-		{"sealed", func(t *testing.T) (AgentStateStore, string) {
-			store := testSealedStore(t, &testAgentStateKeyWrapper{})
-			return store, store.path
-		}},
-	} {
+	for _, tt := range localAgentStateStoreFactories() {
 		t.Run(tt.name, func(t *testing.T) {
 			state, err := newAgentState()
 			if err != nil {
@@ -734,20 +723,7 @@ func TestLocalAgentStateStores_PendingActivationRoundTripWithoutPlainCredential(
 }
 
 func TestAgentStateFileStores_LargeStateParityAndOverCapNoCommit(t *testing.T) {
-	tests := []struct {
-		name string
-		new  func(*testing.T) (AgentStateStore, string)
-	}{
-		{"plaintext", func(t *testing.T) (AgentStateStore, string) {
-			path := filepath.Join(secureAgentStateTestDir(t), "agent_state.json")
-			return FileAgentState(path), path
-		}},
-		{"sealed", func(t *testing.T) (AgentStateStore, string) {
-			store := testSealedStore(t, &testAgentStateKeyWrapper{})
-			return store, store.path
-		}},
-	}
-	for _, tt := range tests {
+	for _, tt := range localAgentStateStoreFactories() {
 		t.Run(tt.name, func(t *testing.T) {
 			store, path := tt.new(t)
 			state := testAgentState(t)
