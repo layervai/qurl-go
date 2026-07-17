@@ -1463,6 +1463,9 @@ func KnockRegisteredAgent(ctx context.Context, binding *AgentRuntimeBinding, dev
 		return nil, err
 	}
 	defer wipeBytes(body)
+	// Build the possible RKN body before I/O: the bounded transport only owns
+	// packet exchange, while qurl keeps the immutable session identity and body
+	// policy at this trust boundary even when the usual KNK receives an ACK.
 	reknockBody, err := marshalNativeSessionApplicationBody(binding.AgentID, knockResourceID, opts, nhpRKNHeaderType)
 	if err != nil {
 		return nil, err

@@ -106,10 +106,11 @@ func nonceForCounter(counter uint64) []byte {
 	return nonce
 }
 
-// headerDigest is the unkeyed BLAKE2s(INITIAL_HASH ‖ peerStaticPub ‖
-// header[0:offDigest] ‖ cookie). cookie is empty for every message except RKN,
-// where it is the exact decoded 32-byte COK cookie. Integrity, not
-// authentication — all inputs are public.
+// headerDigest is BLAKE2s(INITIAL_HASH ‖ peerStaticPub ‖ header[0:offDigest] ‖
+// cookie). cookie is empty for every message except RKN, where it is the exact
+// decoded 32-byte COK cookie. The ordinary digest is unkeyed integrity over
+// public inputs; the RKN cookie additionally proves possession of the
+// server-issued secret.
 func headerDigest(peerStaticPub, header, cookie []byte) []byte {
 	return blake2sHash(initialHash, peerStaticPub, header[0:offDigest], cookie)
 }

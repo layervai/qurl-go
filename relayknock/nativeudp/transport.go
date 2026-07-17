@@ -307,8 +307,8 @@ func exchange(ctx context.Context, ep Endpoint, headerType int, body, cookie []b
 }
 
 type cookieChallengeBody struct {
-	TransactionID uint64
-	Cookie        string
+	transactionID uint64
+	cookie        string
 }
 
 const (
@@ -365,11 +365,11 @@ func parseCookieChallenge(body []byte, requestCounter uint64) ([]byte, error) {
 		}
 		switch key {
 		case "trxId":
-			if err := json.Unmarshal(raw, &parsed.TransactionID); err != nil {
+			if err := json.Unmarshal(raw, &parsed.transactionID); err != nil {
 				return nil, rejectCookieChallenge(cookieRejectBodyParse, "trxId has an invalid type")
 			}
 		case "cookie":
-			if err := json.Unmarshal(raw, &parsed.Cookie); err != nil || parsed.Cookie == "" {
+			if err := json.Unmarshal(raw, &parsed.cookie); err != nil || parsed.cookie == "" {
 				return nil, rejectCookieChallenge(cookieRejectBodyParse, "cookie has an invalid type")
 			}
 		default:
@@ -385,17 +385,17 @@ func parseCookieChallenge(body []byte, requestCounter uint64) ([]byte, error) {
 	if len(seen) != 2 {
 		return nil, rejectCookieChallenge(cookieRejectBodyParse, "missing required field")
 	}
-	if parsed.TransactionID != requestCounter {
+	if parsed.transactionID != requestCounter {
 		return nil, rejectCookieChallenge(cookieRejectCounter, "transaction does not match the knock")
 	}
-	if bytes.IndexFunc([]byte(parsed.Cookie), func(r rune) bool {
+	if bytes.IndexFunc([]byte(parsed.cookie), func(r rune) bool {
 		return r == ' ' || r == '\t' || r == '\r' || r == '\n'
 	}) >= 0 {
 		return nil, rejectCookieChallenge(cookieRejectEncoding, "cookie is not strict base64")
 	}
-	cookie, err := base64.StdEncoding.Strict().DecodeString(parsed.Cookie)
+	cookie, err := base64.StdEncoding.Strict().DecodeString(parsed.cookie)
 	if err != nil {
-		if raw, rawErr := base64.RawStdEncoding.Strict().DecodeString(parsed.Cookie); rawErr == nil && len(raw) == nhpwire.CookieSize {
+		if raw, rawErr := base64.RawStdEncoding.Strict().DecodeString(parsed.cookie); rawErr == nil && len(raw) == nhpwire.CookieSize {
 			cryptoutil.Wipe(raw)
 			return nil, rejectCookieChallenge(cookieRejectCanonical, "cookie is not canonical padded base64")
 		}
