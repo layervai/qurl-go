@@ -904,9 +904,7 @@ func enrollmentCredentialFingerprint(value string) string {
 	copy(material[len(domain):], value)
 	digest := sha256.Sum256(material)
 	wipeBytes(material)
-	encoded := base64.RawURLEncoding.EncodeToString(digest[:])
-	wipeBytes(digest[:])
-	return encoded
+	return base64.RawURLEncoding.EncodeToString(digest[:])
 }
 
 func (c *nativeAgentRuntimeConfig) registrationCredential(ctx context.Context, state *AgentState, initial *InitialAgentAssignment, enrollmentCredential string, privateKey []byte) (string, error) {
