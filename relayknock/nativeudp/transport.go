@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/netip"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/layervai/qurl-go/internal/cryptoutil"
@@ -388,9 +389,7 @@ func parseCookieChallenge(body []byte, requestCounter uint64) ([]byte, error) {
 	if parsed.transactionID != requestCounter {
 		return nil, rejectCookieChallenge(cookieRejectCounter, "transaction does not match the knock")
 	}
-	if bytes.IndexFunc([]byte(parsed.cookie), func(r rune) bool {
-		return r == ' ' || r == '\t' || r == '\r' || r == '\n'
-	}) >= 0 {
+	if strings.ContainsAny(parsed.cookie, " \t\r\n") {
 		return nil, rejectCookieChallenge(cookieRejectEncoding, "cookie is not strict base64")
 	}
 	cookie, err := base64.StdEncoding.Strict().DecodeString(parsed.cookie)
