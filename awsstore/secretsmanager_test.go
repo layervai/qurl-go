@@ -143,6 +143,10 @@ func samplePendingActivationState(enrollmentCredential string) *qurl.AgentState 
 }
 
 func sampleEnrollmentCredentialFingerprint(value string) string {
+	// Keep the domain and encoding aligned with
+	// qurl.enrollmentCredentialFingerprint. The awsstore module cannot call that
+	// unexported helper, and exporting a security-internal function for one
+	// cross-module contract fixture would widen the public API unnecessarily.
 	const domain = "qurl-go/pending-activation-enrollment-credential-v1\x00"
 	digest := sha256.Sum256([]byte(domain + value))
 	return base64.RawURLEncoding.EncodeToString(digest[:])

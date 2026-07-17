@@ -22,7 +22,9 @@ import (
 // paths require a live assignment lease; after expiry, call RefreshAgentRuntime
 // instead of expecting RegisterAgentRuntime to return the completed binding.
 // enrollmentCredential must be a server-minted high-entropy token of at least
-// 32 bytes; user-chosen passwords are not valid enrollment credentials.
+// 32 bytes; user-chosen passwords are not valid enrollment credentials. The
+// SDK enforces token syntax and byte length, while the minting authority is
+// responsible for the entropy guarantee.
 func RegisterAgentRuntime(ctx context.Context, enrollmentCredential string, store AgentStateStore, opts ...AgentRuntimeRegistrationOption) (*Client, *AgentRuntimeBinding, error) {
 	return registerNativeAgentRuntime(ctx, enrollmentCredential, store, opts)
 }
