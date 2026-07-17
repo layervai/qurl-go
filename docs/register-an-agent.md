@@ -141,6 +141,10 @@ The recovery branch above must return the previously issued code. It must never
 request, generate, or dispatch a new code; the SDK intentionally suppresses
 NHP_OTP while replaying a pending activation.
 
+Pending-activation recovery calls the provider with the caller's context because
+an exact replay may occur after the ticket window has expired. Set an outer
+context deadline to bound that operator or provider wait.
+
 The SDK refuses to dispatch OTP unless the assignment ticket has at least the
 conformance contract's inclusive 630 seconds remaining.
 

@@ -170,11 +170,11 @@ func validateLoadedAgentAssignment(state *AgentState) error {
 	if state == nil {
 		return nil
 	}
-	// Assignment, pending activation/completion, and native credential-id fields are durable
-	// native-runtime markers. Once any marker exists, the identity that the Hub
-	// and assigned cell authenticated must already be persisted in canonical wire
-	// form. Never let a later lifecycle call manufacture or normalize a different
-	// identity around those authority-bound fields.
+	// Assignment, pending activation/completion, and native credential-id fields
+	// are durable native-runtime markers. Once any marker exists, the identity
+	// authenticated by the Hub and assigned cell must already be persisted in
+	// canonical wire form. Never let a later lifecycle call manufacture or
+	// normalize a different identity around those authority-bound fields.
 	if isNativeAgentRuntimeState(state) {
 		if err := validateAssignmentAgentID(state.AgentID); err != nil {
 			return fmt.Errorf("%w: persisted native agent id is missing or non-canonical", ErrInvalidAgentState)
