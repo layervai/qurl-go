@@ -50,6 +50,13 @@ The SDK does not calculate a cell address. It resolves the exact host supplied
 by the authenticated Hub response and authenticates the responding cell against
 the supplied public key.
 
+Placement rollout guard: this SDK release accepts assigned hosts only beneath
+the LayerV DNS apexes encoded by its endpoint policy, and accepts IPv6 addresses
+only from its release-gated IANA allocation allowlist. Provisioning a cell under
+a new LayerV DNS apex or exclusively in a newly allocated IPv6 prefix therefore
+requires an updated qurl-go release before the placement is enabled; older SDKs
+intentionally fail resolution closed.
+
 ## Credential policy
 
 By default the runtime accepts unattended credentials of these authenticated

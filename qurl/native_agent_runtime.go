@@ -296,19 +296,23 @@ func withAgentRuntimeDeviceCredential(candidate string) AgentRuntimeRegistration
 	})
 }
 
-func newNativeAgentRuntimeConfig(opts []AgentRuntimeRegistrationOption) (*nativeAgentRuntimeConfig, error) {
-	c := &nativeAgentRuntimeConfig{
+func defaultNativeAgentRuntimeConfig() *nativeAgentRuntimeConfig {
+	return &nativeAgentRuntimeConfig{
 		baseURL:      defaultAPIBaseURL,
 		httpClient:   defaultAPIHTTPClient,
 		timeout:      nativeudp.DefaultTimeout,
 		maxAddresses: nativeudp.DefaultMaxAddresses,
-		allowedKeyKinds: map[RegistrationKeyKind]struct{}{
-			RegistrationKeyKindConnectorBootstrap: {},
-			RegistrationKeyKindBootstrap:          {},
-			RegistrationKeyKindAgent:              {},
-		},
-		clock:  time.Now,
-		random: rand.Reader,
+		clock:        time.Now,
+		random:       rand.Reader,
+	}
+}
+
+func newNativeAgentRuntimeConfig(opts []AgentRuntimeRegistrationOption) (*nativeAgentRuntimeConfig, error) {
+	c := defaultNativeAgentRuntimeConfig()
+	c.allowedKeyKinds = map[RegistrationKeyKind]struct{}{
+		RegistrationKeyKindConnectorBootstrap: {},
+		RegistrationKeyKindBootstrap:          {},
+		RegistrationKeyKindAgent:              {},
 	}
 	for _, opt := range opts {
 		if opt == nil {
@@ -1252,9 +1256,6 @@ func (v *nativeJSONStringMap) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
 	}
-	if raw == nil {
-		return errors.New("must be a JSON object or null")
-	}
 	v.Value = make(map[string]string, len(raw))
 	for key, valueJSON := range raw {
 		var value nativeJSONValue[string]
@@ -1362,7 +1363,8 @@ func RefreshAgentRuntime(ctx context.Context, hub HubBootstrap, store AgentState
 	if store == nil {
 		return nil, nil, fmt.Errorf("%w: state store must not be nil", ErrInvalidRegisterConfig)
 	}
-	cfg := &nativeAgentRuntimeConfig{hub: &hub, baseURL: defaultAPIBaseURL, httpClient: defaultAPIHTTPClient, timeout: nativeudp.DefaultTimeout, maxAddresses: nativeudp.DefaultMaxAddresses, clock: time.Now, random: rand.Reader}
+	cfg := defaultNativeAgentRuntimeConfig()
+	cfg.hub = &hub
 	for _, opt := range opts {
 		if opt == nil {
 			return nil, nil, fmt.Errorf("%w: nil runtime option", ErrInvalidRegisterConfig)
