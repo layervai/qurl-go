@@ -142,6 +142,9 @@ type PendingAgentCompletion struct {
 // EnrollmentCredentialFingerprintB64 is a domain-separated SHA-256 identity of
 // the high-entropy caller-supplied enrollment credential. It permits only that
 // same credential to resume the record without retaining the bearer value.
+// RegisterAgentRuntime enforces the producer contract's minimum token length;
+// this fingerprint is an equality tag for a server-minted secret, never a
+// password verifier.
 // The REG credential itself is never persisted: unattended kinds re-derive it
 // from the corroborated enrollment credential, while account recovery asks the
 // explicit OTP provider for the original code and never dispatches another OTP.

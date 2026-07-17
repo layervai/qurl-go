@@ -49,6 +49,11 @@ const (
 	// hostname, cell, or environment; no such selector exists on this wire.
 	deviceKeyPrefix       = "lv_live_"
 	deviceKeyRandomLength = 32
+	// Persisted enrollment-credential fingerprints are safe only for
+	// producer-minted high-entropy tokens. Current qURL credentials carry 32
+	// random bytes; this lower bound also remains compatible with deterministic
+	// conformance fixtures without coupling the SDK to one public prefix.
+	minimumRecoverableEnrollmentCredentialBytes = 32
 )
 
 var (
@@ -484,17 +489,12 @@ func (c *nativeAgentRuntimeConfig) registerLocked(ctx context.Context, enrollmen
 		}
 		return finishNativeRuntimeResult(store, state, c)
 	}
-	if state.PendingActivation != nil {
-		if err := validateExactBearerToken(enrollmentCredential, "enrollment credential", ErrInvalidRegisterConfig); err != nil {
-			return nil, err
-		}
-		return c.activateAndComplete(ctx, enrollmentCredential, store, state, privateKey)
-	}
 	// Enrollment credentials are attempt-scoped Hub inputs. Completed and
-	// pending-completion paths above do not need one. Pending activation requires
-	// the same credential to corroborate its durable fingerprint; a transaction
-	// with no pending activation needs it to obtain a fresh Hub assignment.
-	if err := validateExactBearerToken(enrollmentCredential, "enrollment credential", ErrInvalidRegisterConfig); err != nil {
+	// pending-completion paths above do not need one. A pending activation (a
+	// native marker, so the save block below is skipped) requires the same
+	// credential to corroborate its durable fingerprint; a transaction with no
+	// pending activation needs it to obtain a fresh Hub assignment.
+	if err := validateRecoverableEnrollmentCredential(enrollmentCredential); err != nil {
 		return nil, err
 	}
 	if !nativeMarker {
@@ -518,7 +518,10 @@ func (c *nativeAgentRuntimeConfig) registerLocked(ctx context.Context, enrollmen
 // replay proof.
 func (c *nativeAgentRuntimeConfig) activateAndComplete(ctx context.Context, enrollmentCredential string, store AgentStateStore, state *AgentState, privateKey []byte) (*nativeRuntimeResult, error) {
 	forceFresh := state.PendingActivation == nil
-	for attempt := 0; attempt < 2; attempt++ {
+	// At most one replacement attempt: the first REG either commits, fails
+	// terminally, or returns an authenticated verdict permitting exactly one
+	// replacement (attempt 0 only). Attempt 1 therefore always returns.
+	for attempt := 0; ; attempt++ {
 		var credential string
 		var err error
 		if forceFresh {
@@ -539,18 +542,25 @@ func (c *nativeAgentRuntimeConfig) activateAndComplete(ctx context.Context, enro
 			}
 			return finishNativeRuntimeResult(store, state, c)
 		}
-		if attempt == 0 && (errors.Is(err, ErrAssignmentTicketExpired) || errors.Is(err, ErrOTPExpired)) {
-			// qurl-conformance v0.5 reserves 52111 for marker-absent first use.
-			// A committed activation must exact-replay even after expiry. Account
-			// 52101 likewise proves the OTP did not activate the ticket. Fetch a
-			// replacement only after either authenticated verdict, and retain the
-			// old record until persistFreshPendingActivation commits the replacement.
+		if attempt == 0 && registrationVerdictPermitsReplacement(err) {
+			// Fetch a replacement only after an authenticated non-commit verdict,
+			// and retain the old record until persistFreshPendingActivation commits
+			// the replacement.
 			forceFresh = true
 			continue
 		}
 		return nil, err
 	}
-	return nil, ErrAssignmentTicketExpired
+}
+
+// registrationVerdictPermitsReplacement reports whether an authenticated
+// assigned-cell REG verdict proves the resumed one-shot ticket did not commit,
+// the sole condition that authorizes fetching one replacement assignment.
+// qurl-conformance v0.5 reserves 52111 (ticket expired, marker-absent) and
+// account 52101 (OTP expired) for this; every other authenticated denial is
+// terminal.
+func registrationVerdictPermitsReplacement(err error) bool {
+	return errors.Is(err, ErrAssignmentTicketExpired) || errors.Is(err, ErrOTPExpired)
 }
 
 func (c *nativeAgentRuntimeConfig) persistFreshPendingActivation(ctx context.Context, enrollmentCredential string, store AgentStateStore, state *AgentState, privateKey []byte) (string, error) {
@@ -859,6 +869,16 @@ func validateOptionalRuntimeMetadata(label, value string) error {
 	return validateRuntimeMetadata(label, value)
 }
 
+func validateRecoverableEnrollmentCredential(value string) error {
+	if err := validateExactBearerToken(value, "enrollment credential", ErrInvalidRegisterConfig); err != nil {
+		return err
+	}
+	if len(value) < minimumRecoverableEnrollmentCredentialBytes {
+		return fmt.Errorf("%w: enrollment credential must be a server-minted high-entropy token of at least %d bytes", ErrInvalidRegisterConfig, minimumRecoverableEnrollmentCredentialBytes)
+	}
+	return nil
+}
+
 func enrollmentCredentialFingerprint(value string) string {
 	const domain = "qurl-go/pending-activation-enrollment-credential-v1\x00"
 	material := make([]byte, len(domain)+len(value))
@@ -1013,6 +1033,9 @@ func (c *nativeAgentRuntimeConfig) registerPendingActivation(ctx context.Context
 		return fmt.Errorf("%w: assigned-cell REG requires pending activation", ErrInvalidAgentState)
 	}
 	pending := state.PendingActivation
+	// Do not reject locally when the persisted ticket has expired. The pinned
+	// cell must distinguish an exact committed replay from marker-absent 52111;
+	// only that authenticated verdict can authorize one replacement assignment.
 	body, err := marshalRegisterRequestBody(pending.Registration.KeyID, pending.AgentID, credential, registerUserData{
 		Hostname: pending.Hostname, Version: pending.AgentVersion, AssignmentTicket: pending.AssignmentTicket,
 	})
@@ -1080,7 +1103,7 @@ func classifyNativeRegisterError(ack *registerAckBody, keyKind string) error {
 	}
 	switch ack.ErrCode {
 	case rakCredentialExpired:
-		return fmt.Errorf("qurl: native account OTP expired (errCode=%q); invoke RegisterAgentRuntime again explicitly so one fresh assignment and OTP attempt can run: %w", ack.ErrCode, kind)
+		return fmt.Errorf("qurl: native account OTP expired after the bounded fresh-assignment recovery attempt (errCode=%q); start a new explicit RegisterAgentRuntime call only when another OTP attempt is intended: %w", ack.ErrCode, kind)
 	case rakIdentityConflict:
 		return fmt.Errorf("qurl: native assigned-cell identity conflict (errCode=%q); stop and use explicit NHP-native reprovisioning because takeover is not supported by this runtime: %w", ack.ErrCode, kind)
 	case rakInvalidInput:

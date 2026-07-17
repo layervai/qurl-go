@@ -925,17 +925,24 @@ func TestRegisterAgentRuntime_CompletedIdentityMismatchFailsBeforeIO(t *testing.
 }
 
 func TestRegisterAgentRuntime_FreshEnrollmentRequiresCredentialBeforeMutationOrIO(t *testing.T) {
-	f := newRuntimeFixture(t, nil, nil)
-	resolver := &noIONativeResolver{}
-	dialer := &noIONativeDialer{}
-	_, _, err := RegisterAgentRuntime(context.Background(), "", f.store,
-		WithAgentRuntimeHub(f.hub), WithAgentRuntimeUDPResolver(resolver), WithAgentRuntimeUDPDialer(dialer))
-	if !errors.Is(err, ErrInvalidRegisterConfig) || !strings.Contains(err.Error(), "enrollment credential") {
-		t.Fatalf("fresh empty credential error = %v", err)
-	}
-	if len(f.store.snapshots()) != 0 || resolver.calls.Load() != 0 || dialer.calls.Load() != 0 || len(f.hubUDP.snapshot()) != 0 || len(f.cellUDP.snapshot()) != 0 {
-		t.Fatalf("fresh invalid credential mutated/performed I/O: saves=%d resolver=%d dialer=%d Hub=%d cell=%d",
-			len(f.store.snapshots()), resolver.calls.Load(), dialer.calls.Load(), len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot()))
+	for name, credential := range map[string]string{
+		"empty":             "",
+		"low entropy shape": "user-chosen-password",
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newRuntimeFixture(t, nil, nil)
+			resolver := &noIONativeResolver{}
+			dialer := &noIONativeDialer{}
+			_, _, err := RegisterAgentRuntime(context.Background(), credential, f.store,
+				WithAgentRuntimeHub(f.hub), WithAgentRuntimeUDPResolver(resolver), WithAgentRuntimeUDPDialer(dialer))
+			if !errors.Is(err, ErrInvalidRegisterConfig) || !strings.Contains(err.Error(), "enrollment credential") {
+				t.Fatalf("fresh invalid credential error = %v", err)
+			}
+			if len(f.store.snapshots()) != 0 || resolver.calls.Load() != 0 || dialer.calls.Load() != 0 || len(f.hubUDP.snapshot()) != 0 || len(f.cellUDP.snapshot()) != 0 {
+				t.Fatalf("fresh invalid credential mutated/performed I/O: saves=%d resolver=%d dialer=%d Hub=%d cell=%d",
+					len(f.store.snapshots()), resolver.calls.Load(), dialer.calls.Load(), len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot()))
+			}
+		})
 	}
 }
 

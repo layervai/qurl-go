@@ -21,6 +21,8 @@ import (
 // OpenRegisteredAgentRuntime, which performs no network I/O. Both warm-open
 // paths require a live assignment lease; after expiry, call RefreshAgentRuntime
 // instead of expecting RegisterAgentRuntime to return the completed binding.
+// enrollmentCredential must be a server-minted high-entropy token of at least
+// 32 bytes; user-chosen passwords are not valid enrollment credentials.
 func RegisterAgentRuntime(ctx context.Context, enrollmentCredential string, store AgentStateStore, opts ...AgentRuntimeRegistrationOption) (*Client, *AgentRuntimeBinding, error) {
 	return registerNativeAgentRuntime(ctx, enrollmentCredential, store, opts)
 }
