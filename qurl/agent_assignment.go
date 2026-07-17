@@ -377,7 +377,7 @@ func FetchInitialAgentAssignment(ctx context.Context, hub HubBootstrap, agentID,
 	}
 	defer wipeBytes(body)
 
-	return runAssignmentExchange(ctx, cfg, endpoint, body, transport, func(reply []byte, now time.Time) (*InitialAgentAssignment, error) {
+	return runAssignmentExchange(ctx, cfg, endpoint, body, transport, assignmentRetryInfo, newAssignmentRecovery, func(reply []byte, now time.Time) (*InitialAgentAssignment, error) {
 		return parseInitialAssignmentReply(reply, agentID, now)
 	})
 }
@@ -403,12 +403,25 @@ func RefreshAgentAssignment(ctx context.Context, hub HubBootstrap, agentID strin
 	}
 	// Refresh is intentionally credential-free, so there is no mutable secret
 	// buffer to wipe. Any future secret-bearing field must add explicit wiping.
-	return runAssignmentExchange(ctx, cfg, endpoint, body, transport, func(reply []byte, now time.Time) (*AgentAssignment, error) {
+	return runAssignmentExchange(ctx, cfg, endpoint, body, transport, assignmentRetryInfo, newAssignmentRecovery, func(reply []byte, now time.Time) (*AgentAssignment, error) {
 		return parseRefreshAssignmentReply(reply, agentID, now)
 	})
 }
 
-func runAssignmentExchange[T any](ctx context.Context, c *assignmentConfig, endpoint nativeudp.Endpoint, body []byte, transport nativeudp.Options, parse func([]byte, time.Time) (*T, error)) (*T, error) {
+// recoveryFunc builds the phase-specific recovery-required error for a final
+// failed attempt. Assignment and completion share one bounded retry loop while
+// preserving distinct public recovery error types.
+type recoveryFunc func(attempts int, elapsed time.Duration, last error) error
+
+func newAssignmentRecovery(attempts int, elapsed time.Duration, last error) error {
+	return &AssignmentRecoveryRequiredError{Attempts: attempts, Elapsed: elapsed, Last: last}
+}
+
+// runAssignmentExchange is the single bounded, jittered retry driver for
+// authenticated NHP assignment and pending-credential completion transactions.
+// retryInfo classifies retryable failures and newRecovery preserves the phase's
+// public recovery error type.
+func runAssignmentExchange[T any](ctx context.Context, c *assignmentConfig, endpoint nativeudp.Endpoint, body []byte, transport nativeudp.Options, retryInfo func(error) (time.Duration, bool), newRecovery recoveryFunc, parse func([]byte, time.Time) (*T, error)) (*T, error) {
 	start := c.clock()
 	transactionCtx, cancel := context.WithTimeout(ctx, c.budget)
 	defer cancel()
@@ -423,7 +436,7 @@ func runAssignmentExchange[T any](ctx context.Context, c *assignmentConfig, endp
 			}
 			err = parseErr
 		}
-		retryAfter, retryable := assignmentRetryInfo(err)
+		retryAfter, retryable := retryInfo(err)
 		if replyAuthenticated && !retryable {
 			// A parsed authenticated terminal result wins over a retry-budget
 			// deadline that fires concurrently. In particular, identity rejection
@@ -438,49 +451,45 @@ func runAssignmentExchange[T any](ctx context.Context, c *assignmentConfig, endp
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
-			return nil, c.recoveryRequired(attempt, start, errors.Join(err, transactionCtx.Err()))
+			return nil, c.recoveryRequired(newRecovery, attempt, start, errors.Join(err, transactionCtx.Err()))
 		}
 		if !retryable {
 			return nil, err
 		}
 		elapsed := c.elapsedSince(start)
+		// Preserve observed elapsed time for ordinary attempt exhaustion; a fixed
+		// test clock can therefore report zero. recoveryRequired clamps separately
+		// only when the real transaction deadline proves the budget was exhausted.
 		if attempt == c.maxAttempts || elapsed >= c.budget {
-			return nil, c.recoveryAt(attempt, elapsed, err)
+			return nil, newRecovery(attempt, elapsed, err)
 		}
 		delay, backoffErr := c.backoff(attempt, retryAfter)
 		if backoffErr != nil {
-			return nil, c.recoveryAt(attempt, elapsed, errors.Join(err, backoffErr))
+			return nil, newRecovery(attempt, elapsed, errors.Join(err, backoffErr))
 		}
 		if delay > c.budget-elapsed {
-			return nil, c.recoveryAt(attempt, elapsed, err)
+			return nil, newRecovery(attempt, elapsed, err)
 		}
 		if sleepErr := c.sleep(transactionCtx, delay); sleepErr != nil {
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
 			if transactionCtx.Err() != nil {
-				return nil, c.recoveryRequired(attempt, start, errors.Join(err, transactionCtx.Err()))
+				return nil, c.recoveryRequired(newRecovery, attempt, start, errors.Join(err, transactionCtx.Err()))
 			}
 			return nil, sleepErr
 		}
 	}
 }
 
-func (c *assignmentConfig) recoveryAt(attempts int, elapsed time.Duration, last error) *AssignmentRecoveryRequiredError {
-	// Preserve observed elapsed time for ordinary attempt exhaustion; a fixed
-	// test clock can therefore report zero. recoveryRequired clamps separately
-	// only when the real transaction deadline proves the budget was exhausted.
-	return &AssignmentRecoveryRequiredError{Attempts: attempts, Elapsed: elapsed, Last: last}
-}
-
-func (c *assignmentConfig) recoveryRequired(attempts int, start time.Time, last error) *AssignmentRecoveryRequiredError {
+func (c *assignmentConfig) recoveryRequired(newRecovery recoveryFunc, attempts int, start time.Time, last error) error {
 	elapsed := c.elapsedSince(start)
 	if elapsed < c.budget {
 		// The real transaction timer may expire while a test clock is fixed or
 		// moves backward. Report the budget that was actually exhausted.
 		elapsed = c.budget
 	}
-	return c.recoveryAt(attempts, elapsed, last)
+	return newRecovery(attempts, elapsed, last)
 }
 
 func (c *assignmentConfig) elapsedSince(start time.Time) time.Duration {

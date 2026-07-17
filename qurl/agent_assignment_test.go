@@ -303,6 +303,7 @@ func TestRunAssignmentExchangeWipesDecryptedReply(t *testing.T) {
 			parseErr := errors.New("parse failed")
 			_, err = runAssignmentExchange(
 				context.Background(), cfg, endpoint, []byte(`{}`), transport,
+				assignmentRetryInfo, newAssignmentRecovery,
 				func(reply []byte, _ time.Time) (*struct{}, error) {
 					decrypted = reply
 					if parseFails {

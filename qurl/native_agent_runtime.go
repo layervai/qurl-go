@@ -608,14 +608,14 @@ func runAssignmentLifecycle[T any](ctx context.Context, options []AssignmentOpti
 		}
 		elapsed := cfg.elapsedSince(start)
 		if attempt == cfg.maxAttempts || elapsed >= cfg.budget || appErr.RetryAfter > cfg.budget-elapsed {
-			return nil, cfg.recoveryAt(attempt, elapsed, err)
+			return nil, newAssignmentRecovery(attempt, elapsed, err)
 		}
 		if sleepErr := cfg.sleep(lifecycleCtx, appErr.RetryAfter); sleepErr != nil {
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
 			if lifecycleCtx.Err() != nil {
-				return nil, cfg.recoveryRequired(attempt, start, errors.Join(err, lifecycleCtx.Err()))
+				return nil, cfg.recoveryRequired(newAssignmentRecovery, attempt, start, errors.Join(err, lifecycleCtx.Err()))
 			}
 			return nil, sleepErr
 		}
@@ -975,68 +975,23 @@ func (c *nativeAgentRuntimeConfig) runCompletionExchange(ctx context.Context, en
 	if err != nil {
 		return "", err
 	}
-	start := retry.clock()
-	txCtx, cancel := context.WithTimeout(ctx, retry.budget)
-	defer cancel()
-	for attempt := 1; ; attempt++ {
-		reply, exchangeErr := nativeudp.List(txCtx, endpoint, body, transport)
-		authenticated := exchangeErr == nil
-		if authenticated {
-			keyID, parseErr := parseCompletionReply(reply.Body)
-			wipeBytes(reply.Body)
-			if parseErr == nil {
-				return keyID, nil
-			}
-			exchangeErr = parseErr
+	// Pending-credential completion shares the bounded assignment retry driver;
+	// only its retry classifier, recovery type, and reply parser differ.
+	keyID, err := runAssignmentExchange(ctx, retry, endpoint, body, transport, completionRetryInfo, newCompletionRecovery, func(reply []byte, _ time.Time) (*string, error) {
+		id, parseErr := parseCompletionReply(reply)
+		if parseErr != nil {
+			return nil, parseErr
 		}
-		retryAfter, retryable := completionRetryInfo(exchangeErr)
-		if authenticated && !retryable {
-			return "", exchangeErr
-		}
-		if txCtx.Err() != nil {
-			if ctx.Err() != nil {
-				return "", ctx.Err()
-			}
-			return "", retry.completionRecoveryRequired(attempt, start, errors.Join(exchangeErr, txCtx.Err()))
-		}
-		if !retryable {
-			return "", exchangeErr
-		}
-		elapsed := retry.elapsedSince(start)
-		if attempt == retry.maxAttempts || elapsed >= retry.budget {
-			return "", retry.completionRecoveryAt(attempt, elapsed, exchangeErr)
-		}
-		delay, backoffErr := retry.backoff(attempt, retryAfter)
-		if backoffErr != nil {
-			return "", retry.completionRecoveryAt(attempt, elapsed, errors.Join(exchangeErr, backoffErr))
-		}
-		if delay > retry.budget-elapsed {
-			return "", retry.completionRecoveryAt(attempt, elapsed, exchangeErr)
-		}
-		if sleepErr := retry.sleep(txCtx, delay); sleepErr != nil {
-			if ctx.Err() != nil {
-				return "", ctx.Err()
-			}
-			if txCtx.Err() != nil {
-				return "", retry.completionRecoveryRequired(attempt, start, errors.Join(exchangeErr, txCtx.Err()))
-			}
-			return "", sleepErr
-		}
+		return &id, nil
+	})
+	if err != nil {
+		return "", err
 	}
+	return *keyID, nil
 }
 
-func (c *assignmentConfig) completionRecoveryAt(attempts int, elapsed time.Duration, last error) *CompletionRecoveryRequiredError {
+func newCompletionRecovery(attempts int, elapsed time.Duration, last error) error {
 	return &CompletionRecoveryRequiredError{Attempts: attempts, Elapsed: elapsed, Last: last}
-}
-
-func (c *assignmentConfig) completionRecoveryRequired(attempts int, start time.Time, last error) *CompletionRecoveryRequiredError {
-	elapsed := c.elapsedSince(start)
-	if elapsed < c.budget {
-		// The real transaction timer may expire while an injected clock is fixed
-		// or moves backward. Report the budget that was actually exhausted.
-		elapsed = c.budget
-	}
-	return c.completionRecoveryAt(attempts, elapsed, last)
 }
 
 func completionRetryInfo(err error) (time.Duration, bool) {
