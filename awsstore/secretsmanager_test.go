@@ -2,6 +2,8 @@ package awsstore_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -115,7 +117,7 @@ func sampleState() *qurl.AgentState {
 	}
 }
 
-func samplePendingActivationState() *qurl.AgentState {
+func samplePendingActivationState(enrollmentCredential string) *qurl.AgentState {
 	state := sampleState()
 	state.PrivateKeyB64 = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
 	state.PublicKeyB64 = "Hh8cHRobGBkWFxQVFBMSEQ4PDA0KCwgJBgcEBQIDAQA="
@@ -135,9 +137,15 @@ func samplePendingActivationState() *qurl.AgentState {
 		},
 		Hostname:                           "connector-host",
 		AgentVersion:                       "qurl-go/test",
-		EnrollmentCredentialFingerprintB64: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+		EnrollmentCredentialFingerprintB64: sampleEnrollmentCredentialFingerprint(enrollmentCredential),
 	}
 	return state
+}
+
+func sampleEnrollmentCredentialFingerprint(value string) string {
+	const domain = "qurl-go/pending-activation-enrollment-credential-v1\x00"
+	digest := sha256.Sum256([]byte(domain + value))
+	return base64.RawURLEncoding.EncodeToString(digest[:])
 }
 
 func assertStateEqual(t *testing.T, want, got *qurl.AgentState) {

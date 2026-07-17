@@ -97,18 +97,20 @@ func TestStoreContract(t *testing.T) {
 
 			t.Run("PendingActivationRoundTrip", func(t *testing.T) {
 				store, persistedValue := c.roundTrip()
-				want := samplePendingActivationState()
+				const enrollmentCredential = "lv_enrollment_AAECAwQFBgcICQoLDA0ODxAREhMUFRYX"
+				want := samplePendingActivationState(enrollmentCredential)
 				if err := store.SaveAgentState(context.Background(), want); err != nil {
 					t.Fatalf("save pending activation: %v", err)
 				}
-				for _, forbidden := range []string{
-					"forbidden-enrollment-credential",
-					"12345678",
-					"forbidden-device-secret",
-				} {
-					if strings.Contains(persistedValue(), forbidden) {
-						t.Fatalf("AWS backend persisted forbidden plaintext %q", forbidden)
-					}
+				persisted := persistedValue()
+				if strings.Contains(persisted, enrollmentCredential) {
+					t.Fatalf("AWS backend persisted plaintext enrollment credential %q", enrollmentCredential)
+				}
+				// Prove the forbidden value above is the source material for this
+				// fixture rather than an unrelated literal: its derived equality tag
+				// must be the value that actually reached the backend.
+				if !strings.Contains(persisted, want.PendingActivation.EnrollmentCredentialFingerprintB64) {
+					t.Fatalf("AWS backend omitted pending activation credential fingerprint: %s", persisted)
 				}
 				got, err := store.LoadAgentState(context.Background())
 				if err != nil {

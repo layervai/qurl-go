@@ -176,7 +176,7 @@ func ExampleNewSealedFileAgentState() {
 	if err != nil {
 		panic(err)
 	}
-	_, binding, _ := qurl.RegisterAgentRuntime(context.Background(), "lv_enrollment_key", store,
+	_, binding, _ := qurl.RegisterAgentRuntime(context.Background(), "lv_enrollment_AAECAwQFBgcICQoLDA0ODxAREhMUFRYX", store,
 		qurl.WithAgentRuntimeHub(qurl.HubBootstrap{
 			Host: "hub.nhp.layerv.ai", Port: 62206,
 			ServerPublicKeyB64: configuredHubPublicKeyB64(),

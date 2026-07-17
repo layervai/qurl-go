@@ -523,6 +523,144 @@ func TestNativeDeviceCredentialValidation_FailsClosedForPersistedState(t *testin
 	}
 }
 
+func TestRegisterAgentRuntime_RejectsMutuallyExclusiveRecoveryMarkersBeforeIO(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	initial, err := parseInitialAssignmentReply(
+		[]byte(contract.InitialAssignment.Result.BodyJSON),
+		"agent-conform",
+		assignmentFixtureNow,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	activation, err := newAgentState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	activation.AgentID = "agent-conform"
+	activation.Assignment = initial.Assignment.clone()
+	activation.SchemaVersion = agentStateSchemaVersion
+	activation.PendingActivation, err = newPendingAgentActivation(
+		initial,
+		activation,
+		"conformance-host",
+		"0.0.0-conformance",
+		conformance.AgentAssignmentBootstrapCredentialFixture,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateLoadedAgentAssignment(activation); err != nil {
+		t.Fatalf("valid activation fixture: %v", err)
+	}
+
+	completion := activation.clone()
+	completion.PendingActivation = nil
+	completion.PendingCompletion = &PendingAgentCompletion{
+		DeviceAPIKey:         canonicalNativeDeviceCredential,
+		CellID:               completion.Assignment.CellID,
+		AssignmentGeneration: completion.Assignment.AssignmentGeneration,
+	}
+	if err := validateLoadedAgentAssignment(completion); err != nil {
+		t.Fatalf("valid completion fixture: %v", err)
+	}
+
+	pendingCompletion := func(state *AgentState) *PendingAgentCompletion {
+		return &PendingAgentCompletion{
+			DeviceAPIKey:         canonicalNativeDeviceCredential,
+			CellID:               state.Assignment.CellID,
+			AssignmentGeneration: state.Assignment.AssignmentGeneration,
+		}
+	}
+	tests := []struct {
+		name       string
+		base       *AgentState
+		credential string
+		mutate     func(*AgentState)
+	}{
+		{
+			name: "activation with pending completion", base: activation,
+			credential: conformance.AgentAssignmentBootstrapCredentialFixture,
+			mutate:     func(state *AgentState) { state.PendingCompletion = pendingCompletion(state) },
+		},
+		{
+			name: "activation with registered at", base: activation,
+			credential: conformance.AgentAssignmentBootstrapCredentialFixture,
+			mutate: func(state *AgentState) {
+				registeredAt := assignmentFixtureNow
+				state.RegisteredAt = &registeredAt
+			},
+		},
+		{
+			name: "activation with device API key", base: activation,
+			credential: conformance.AgentAssignmentBootstrapCredentialFixture,
+			mutate:     func(state *AgentState) { state.DeviceAPIKey = canonicalNativeDeviceCredential },
+		},
+		{
+			name: "activation with device API key id", base: activation,
+			credential: conformance.AgentAssignmentBootstrapCredentialFixture,
+			mutate:     func(state *AgentState) { state.DeviceAPIKeyID = "key_AbCdEf123456" },
+		},
+		{
+			name: "completion with pending activation", base: completion,
+			mutate: func(state *AgentState) {
+				state.PendingActivation = activation.clone().PendingActivation
+			},
+		},
+		{
+			name: "completion with registered at", base: completion,
+			mutate: func(state *AgentState) {
+				registeredAt := assignmentFixtureNow
+				state.RegisteredAt = &registeredAt
+			},
+		},
+		{
+			name: "completion with device API key", base: completion,
+			mutate: func(state *AgentState) {
+				state.DeviceAPIKey = canonicalNativeDeviceCredential
+			},
+		},
+		{
+			name: "completion with device API key id", base: completion,
+			mutate: func(state *AgentState) {
+				state.DeviceAPIKeyID = "key_AbCdEf123456"
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			state := test.base.clone()
+			test.mutate(state)
+			fixture := newRuntimeFixture(t, nil, nil)
+			if err := fixture.store.SaveAgentState(context.Background(), state); err != nil {
+				t.Fatal(err)
+			}
+			resolver := &noIONativeResolver{}
+			dialer := &noIONativeDialer{}
+			_, _, err := RegisterAgentRuntime(
+				context.Background(),
+				test.credential,
+				fixture.store,
+				fixture.options(
+					WithAgentRuntimeUDPResolver(resolver),
+					WithAgentRuntimeUDPDialer(dialer),
+				)...,
+			)
+			if !errors.Is(err, ErrInvalidAgentState) || !errors.Is(err, ErrInvalidRegisterConfig) {
+				t.Fatalf("mutually exclusive state error = %v, want invalid persisted state", err)
+			}
+			if resolver.calls.Load() != 0 || dialer.calls.Load() != 0 ||
+				len(fixture.hubUDP.snapshot()) != 0 || len(fixture.cellUDP.snapshot()) != 0 {
+				t.Fatalf(
+					"mutually exclusive state performed I/O: resolver=%d dialer=%d Hub=%d cell=%d",
+					resolver.calls.Load(), dialer.calls.Load(),
+					len(fixture.hubUDP.snapshot()), len(fixture.cellUDP.snapshot()),
+				)
+			}
+		})
+	}
+}
+
 func TestRegisterAgentRuntime_UDPOnlyGoldenLifecycle(t *testing.T) {
 	contract := loadAssignmentFixture(t)
 	f := newRuntimeFixture(t,
@@ -989,14 +1127,14 @@ func TestCompletionRecoveryRequiredError_NilSafety(t *testing.T) {
 	if nilRecovery.Error() != ErrCompletionRecoveryRequired.Error() || !errors.Is(nilRecovery, ErrCompletionRecoveryRequired) {
 		t.Fatalf("nil completion recovery = %q / %v, want stable sentinel", nilRecovery.Error(), nilRecovery.Unwrap())
 	}
-	recovery := &CompletionRecoveryRequiredError{Attempts: 1, Elapsed: time.Second}
+	last := errors.New("last completion transport failure")
+	recovery := &CompletionRecoveryRequiredError{Attempts: 1, Elapsed: time.Second, Last: last}
 	if !errors.Is(recovery, ErrCompletionRecoveryRequired) {
-		t.Fatalf("nil-cause completion recovery lost sentinel: %v", recovery)
+		t.Fatalf("completion recovery lost sentinel: %v", recovery)
 	}
-	for _, cause := range recovery.Unwrap() {
-		if cause == nil {
-			t.Fatal("completion recovery Unwrap returned a nil cause")
-		}
+	causes := recovery.Unwrap()
+	if len(causes) != 2 || !errors.Is(causes[0], ErrCompletionRecoveryRequired) || !errors.Is(causes[1], last) {
+		t.Fatalf("completion recovery causes = %#v, want sentinel then non-nil last cause", causes)
 	}
 }
 
