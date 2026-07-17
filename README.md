@@ -148,12 +148,13 @@ For account enrollment, the one-way OTP dispatch intentionally occurs before
 the pending-activation save. A save failure cannot have sent REG; a later
 explicit attempt may obtain a new ticket and dispatch that ticket's single OTP.
 
-Every `RegisterAgentRuntime` enrollment credential must be a server-minted,
-high-entropy token of at least 32 bytes. Shorter values and user-chosen
-passwords are rejected before state mutation or network I/O. This requirement
-is part of the initial pre-1.0 native-UDP contract for all credential kinds.
-The SDK can enforce token syntax and byte length; the minting authority remains
-responsible for supplying the required entropy.
+Every `RegisterAgentRuntime` enrollment credential must be a server-minted
+encoded token whose total string length is at least 32 bytes, including any
+prefix. Shorter values and user-chosen passwords are rejected before state
+mutation or network I/O. This requirement is part of the initial pre-1.0
+native-UDP contract for all credential kinds. This is a syntax and total-length
+check, not an entropy measurement; the minting authority must use
+cryptographically random token material.
 
 Warm starts call `OpenRegisteredAgentRuntime`, which loads completed state
 without network I/O. `RefreshAgentRuntime` refreshes an expiring assignment only

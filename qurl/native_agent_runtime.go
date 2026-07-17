@@ -50,11 +50,12 @@ const (
 	// hostname, cell, or environment; no such selector exists on this wire.
 	deviceKeyPrefix       = "lv_live_"
 	deviceKeyRandomLength = 32
-	// Persisted enrollment-credential fingerprints are safe only for
-	// producer-minted high-entropy tokens. Current qURL credentials carry 32
-	// random bytes; this lower bound also remains compatible with deterministic
-	// conformance fixtures without coupling the SDK to one public prefix.
-	minimumRecoverableEnrollmentCredentialBytes = 32
+	// Persisted enrollment-credential fingerprints are safe only for tokens
+	// minted with cryptographic randomness. The SDK can enforce only this total
+	// encoded-token byte-length floor, including any prefix; it is not an entropy
+	// measurement. The floor remains compatible with deterministic conformance
+	// fixtures without coupling the SDK to one public prefix.
+	minimumRecoverableEnrollmentCredentialEncodedLength = 32
 )
 
 var (
@@ -891,8 +892,8 @@ func validateRecoverableEnrollmentCredential(value string) error {
 	if err := validateExactBearerToken(value, "enrollment credential", ErrInvalidRegisterConfig); err != nil {
 		return err
 	}
-	if len(value) < minimumRecoverableEnrollmentCredentialBytes {
-		return fmt.Errorf("%w: enrollment credential must be a server-minted high-entropy token of at least %d bytes", ErrInvalidRegisterConfig, minimumRecoverableEnrollmentCredentialBytes)
+	if len(value) < minimumRecoverableEnrollmentCredentialEncodedLength {
+		return fmt.Errorf("%w: enrollment credential encoded token must be at least %d bytes in total length", ErrInvalidRegisterConfig, minimumRecoverableEnrollmentCredentialEncodedLength)
 	}
 	return nil
 }

@@ -84,14 +84,15 @@ intentionally fail resolution closed.
 
 ## Credential policy
 
-`RegisterAgentRuntime` requires a server-minted, high-entropy enrollment token
-of at least 32 bytes and rejects shorter values before any state mutation or
-network I/O. User-chosen passwords are not enrollment credentials. This is part
-of the initial pre-1.0 native-UDP contract for every key kind, including
-interactive account enrollment. The SDK validates token syntax and byte length;
-the minting authority, not the SDK, guarantees the token's entropy. Hub
-operators must enforce cryptographically random minting upstream; a 32-byte
-low-entropy value violates this contract even though the SDK cannot detect it.
+`RegisterAgentRuntime` requires a server-minted encoded enrollment token whose
+total string length is at least 32 bytes, including any prefix, and rejects
+shorter values before any state mutation or network I/O. User-chosen passwords
+are not enrollment credentials. This is part of the initial pre-1.0 native-UDP
+contract for every key kind, including interactive account enrollment. The SDK
+validates token syntax and this total-length floor; it does not measure decoded
+random material or entropy. Hub operators must enforce cryptographically random
+minting upstream; a low-entropy value violates this contract even if it passes
+the SDK's length check.
 
 By default the runtime accepts unattended credentials of these authenticated
 Hub-reported kinds:
