@@ -58,6 +58,16 @@ exact committed activation may replay after ticket expiry; an authenticated
 credential remains active. Transport ambiguity never triggers Hub or cross-cell
 fallback.
 
+Exact replay includes the persisted `hostname` and `version`; both are exact
+REG body fields, so recovery must use the identical
+`WithAgentRuntimeMetadata` values. Do not change the reported version or rename
+the host until activation completes. A mismatch fails before network I/O and
+does not authorize a replacement ticket.
+
+The v0.5 Hub contract requires the assignment lease to expire strictly after
+the assignment ticket. The SDK enforces that ordering when it creates and
+reloads pending activation state.
+
 The SDK does not calculate a cell address. It resolves the exact host supplied
 by the authenticated Hub response and authenticates the responding cell against
 the supplied public key.
@@ -106,6 +116,12 @@ The assigned cell receives a one-way OTP request before the callback runs. The
 callback receives only bounded, non-secret challenge metadata. It must return
 exactly eight ASCII digits. The code is never persisted or included in an
 error. Each assignment ticket dispatches at most one NHP_OTP.
+
+OTP dispatch intentionally precedes the pending-activation save: persisting a
+"dispatched" record before the one-way send could strand the ticket if the
+process exits between those operations. If the later state save fails, no REG
+was sent; a new explicit attempt may obtain a new ticket and dispatch that
+ticket's single OTP.
 
 If REG has an ambiguous/lost RAK, recovery invokes the callback again with
 `challenge.PendingActivationRecovery == true` so the caller can supply the

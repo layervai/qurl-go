@@ -573,6 +573,10 @@ func (c *nativeAgentRuntimeConfig) persistFreshPendingActivation(ctx context.Con
 	}
 	candidateState := state.clone()
 	candidateState.Assignment = initial.Assignment.clone()
+	// Account OTP is intentionally dispatched before PendingActivation commits.
+	// Persisting a "dispatched" record first could strand the ticket if the
+	// process exits before the one-way send. A later save failure is safe: no REG
+	// occurred and a new explicit attempt may obtain a new ticket and its one OTP.
 	credential, err := c.registrationCredential(ctx, candidateState, initial, enrollmentCredential, privateKey)
 	if err != nil {
 		return "", err
@@ -602,6 +606,9 @@ func (c *nativeAgentRuntimeConfig) pendingRegistrationCredential(ctx context.Con
 		return "", fmt.Errorf("%w: runtime metadata does not match pending activation", ErrInvalidRegisterConfig)
 	}
 	want := enrollmentCredentialFingerprint(enrollmentCredential)
+	// The equality tag is not itself a secret, but the negligible constant-time
+	// comparison keeps credential corroboration timing-independent if the stored
+	// representation evolves later.
 	if subtle.ConstantTimeCompare([]byte(want), []byte(pending.EnrollmentCredentialFingerprintB64)) != 1 {
 		return "", fmt.Errorf("%w: enrollment credential does not match pending activation", ErrInvalidRegisterConfig)
 	}
@@ -842,6 +849,9 @@ func validatePendingAgentActivation(pending *PendingAgentActivation, state *Agen
 	if err := validatePersistedAgentAssignment(&pending.Assignment); err != nil || !sameAgentAssignment(&pending.Assignment, state.Assignment) {
 		return invalid("assignment binding does not match state")
 	}
+	// qurl-conformance v0.5 requires the assignment lease to outlive its
+	// one-shot ticket strictly. Repeat that producer invariant at the durable
+	// boundary so a corrupted pending record cannot outlive its authority.
 	if !pending.Assignment.LeaseExpiresAt.After(pending.AssignmentTicketExpiresAt) {
 		return invalid("ticket expiry must precede the assignment lease")
 	}

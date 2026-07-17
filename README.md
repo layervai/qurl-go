@@ -134,10 +134,19 @@ after ticket expiry—before any new Hub assignment. Plaintext enrollment
 credentials and OTP codes are never persisted. The SDK never calculates a cell
 address or involves the browser relay in native discovery.
 
+Recovery must use the identical persisted hostname and version because those
+bytes are part of the exact REG replay. Change that metadata only after
+activation completes. The v0.5 assignment lease must also expire strictly after
+its ticket; pending-state validation enforces that producer invariant.
+
 The default policy accepts unattended `connector_bootstrap`, `bootstrap`, and
 durable `agent` credentials. Interactive account enrollment must explicitly add
 both `WithAgentRuntimeAllowedRegistrationKeyKinds(RegistrationKeyKindAccount)`
 and `WithAgentRuntimeOTPProvider`.
+
+For account enrollment, the one-way OTP dispatch intentionally occurs before
+the pending-activation save. A save failure cannot have sent REG; a later
+explicit attempt may obtain a new ticket and dispatch that ticket's single OTP.
 
 Every `RegisterAgentRuntime` enrollment credential must be a server-minted,
 high-entropy token of at least 32 bytes. Shorter values and user-chosen

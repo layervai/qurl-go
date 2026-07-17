@@ -1284,6 +1284,9 @@ func TestRegisterAgentRuntime_PendingActivationCorruptionAndChangedCredentialFai
 		},
 		"cell":       func(state *AgentState) { state.PendingActivation.Assignment.CellID = "cell1" },
 		"generation": func(state *AgentState) { state.PendingActivation.Assignment.AssignmentGeneration++ },
+		"ticket expiry equals lease": func(state *AgentState) {
+			state.PendingActivation.AssignmentTicketExpiresAt = state.PendingActivation.Assignment.LeaseExpiresAt
+		},
 		"server identity": func(state *AgentState) {
 			state.PendingActivation.Assignment.Endpoint.ServerPublicKeyB64 = base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x24}, x25519key.Size))
 		},
@@ -1709,6 +1712,38 @@ func TestRegisterAgentRuntime_AccountOTPProviderFailuresSendOneOTPNoREGAndPersis
 				t.Fatalf("provider failure persisted OTP/candidate state: %s", rawState)
 			}
 		})
+	}
+}
+
+func TestRegisterAgentRuntime_AccountPendingSaveFailureSendsOneOTPNoREG(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	f := newRuntimeFixture(t,
+		[]runtimeUDPStep{{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: accountAssignmentResult(contract, "conformance-account-assignment-ticket-0001")}},
+		[]runtimeUDPStep{{requestType: relayknock.TypeOTP, noReply: true}},
+	)
+	f.store.fail = 2 // initial identity save succeeds; pending activation save fails after OTP dispatch
+	_, _, err := RegisterAgentRuntime(context.Background(), conformance.AgentAssignmentAccountCredentialFixture, f.store,
+		f.options(
+			WithAgentRuntimeAllowedRegistrationKeyKinds(RegistrationKeyKindAccount),
+			WithAgentRuntimeOTPProvider(func(context.Context, AgentOTPChallenge) (string, error) { return "12345678", nil }),
+		)...)
+	if !errors.Is(err, ErrAgentBindingPersistence) {
+		t.Fatalf("account pending save failure = %v, want ErrAgentBindingPersistence", err)
+	}
+	requests := waitRuntimeUDPRequests(t, f.cellUDP, 1)
+	if len(requests) != 1 || requests[0].typeID != relayknock.TypeOTP {
+		t.Fatalf("account pending save failure cell requests = %v, want one OTP and zero REG", requests)
+	}
+	persisted, loadErr := f.store.LoadAgentState(context.Background())
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	raw, marshalErr := json.Marshal(persisted)
+	if marshalErr != nil {
+		t.Fatal(marshalErr)
+	}
+	if persisted.Assignment != nil || persisted.PendingActivation != nil || bytes.Contains(raw, []byte("12345678")) {
+		t.Fatalf("account pending save failure persisted attempted ticket or OTP: %s", raw)
 	}
 }
 
