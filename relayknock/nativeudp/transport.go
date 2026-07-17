@@ -224,11 +224,13 @@ func SendOTP(ctx context.Context, ep Endpoint, body []byte, opts Options) error 
 }
 
 // Exchange performs one native-UDP NHP request/reply round trip: it builds a
-// packet of the given round-trip initiator header type (relayknock.TypeKnock,
-// relayknock.TypeListRequest, or relayknock.TypeRegister) for body with fresh
-// per-message randomness, resolves the endpoint host, sends the datagram to the
-// assigned host/port, and decrypts and authenticates the reply against
-// ep.ServerStaticPub.
+// packet of the given public round-trip initiator header type
+// (relayknock.TypeKnock, relayknock.TypeListRequest, relayknock.TypeRegister, or
+// relayknock.TypeExit) for body with fresh per-message randomness, resolves the
+// endpoint host, sends the datagram to the assigned host/port, and decrypts and
+// authenticates the reply against ep.ServerStaticPub. Cookie-bearing NHP_RKN is
+// intentionally not a public Exchange operation; KnockWithReknock owns that
+// bounded transition so a caller cannot detach RKN from its authenticated COK.
 //
 // The reply is accepted only when the NHP handshake authenticates the pinned
 // server public key. On top of that authentication Exchange enforces the native
