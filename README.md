@@ -139,6 +139,11 @@ durable `agent` credentials. Interactive account enrollment must explicitly add
 both `WithAgentRuntimeAllowedRegistrationKeyKinds(RegistrationKeyKindAccount)`
 and `WithAgentRuntimeOTPProvider`.
 
+Every `RegisterAgentRuntime` enrollment credential must be a server-minted,
+high-entropy token of at least 32 bytes. Shorter values and user-chosen
+passwords are rejected before state mutation or network I/O. This requirement
+is part of the initial pre-1.0 native-UDP contract for all credential kinds.
+
 Warm starts call `OpenRegisteredAgentRuntime`, which loads completed state
 without network I/O. `RefreshAgentRuntime` refreshes an expiring assignment only
 through the pinned Hub. It accepts endpoint revisions within the same cell and

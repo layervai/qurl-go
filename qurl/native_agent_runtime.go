@@ -853,7 +853,7 @@ func validatePendingAgentActivation(pending *PendingAgentActivation, state *Agen
 	}
 	fingerprint, err := base64.RawURLEncoding.Strict().DecodeString(pending.EnrollmentCredentialFingerprintB64)
 	defer wipeBytes(fingerprint)
-	if err != nil || len(fingerprint) != sha256.Size || base64.RawURLEncoding.EncodeToString(fingerprint) != pending.EnrollmentCredentialFingerprintB64 {
+	if err != nil || len(fingerprint) != sha256.Size {
 		return invalid("enrollment credential identity is invalid")
 	}
 	return nil
@@ -1077,7 +1077,13 @@ func classifyNativeRegisterError(ack *registerAckBody, keyKind string) error {
 			kind = ErrKeyRejected
 		}
 	case rakCredentialExpired:
-		kind = ErrOTPExpired
+		if keyKind == keyKindAccount {
+			kind = ErrOTPExpired
+		} else {
+			// 52101 is defined only for account OTP. An unattended producer that
+			// emits it is out of contract and must not gain replacement authority.
+			kind = ErrKeyRejected
+		}
 	case rakAttemptsExceeded, rakRateLimited:
 		kind = ErrRegistrationRateLimited
 	case rakIdentityConflict:
@@ -1103,7 +1109,10 @@ func classifyNativeRegisterError(ack *registerAckBody, keyKind string) error {
 	}
 	switch ack.ErrCode {
 	case rakCredentialExpired:
-		return fmt.Errorf("qurl: native account OTP expired after the bounded fresh-assignment recovery attempt (errCode=%q); start a new explicit RegisterAgentRuntime call only when another OTP attempt is intended: %w", ack.ErrCode, kind)
+		if keyKind == keyKindAccount {
+			return fmt.Errorf("qurl: native account OTP expired after the bounded fresh-assignment recovery attempt (errCode=%q); start a new explicit RegisterAgentRuntime call only when another OTP attempt is intended: %w", ack.ErrCode, kind)
+		}
+		return fmt.Errorf("qurl: assigned-cell registration denied (errCode=%q): %w", ack.ErrCode, kind)
 	case rakIdentityConflict:
 		return fmt.Errorf("qurl: native assigned-cell identity conflict (errCode=%q); stop and use explicit NHP-native reprovisioning because takeover is not supported by this runtime: %w", ack.ErrCode, kind)
 	case rakInvalidInput:
@@ -1199,10 +1208,16 @@ type CompletionRecoveryRequiredError struct {
 }
 
 func (e *CompletionRecoveryRequiredError) Error() string {
+	if e == nil {
+		return ErrCompletionRecoveryRequired.Error()
+	}
 	return fmt.Sprintf("qurl: completion retry budget exhausted after %d attempts over %s; reopen the persisted pending candidate: %v", e.Attempts, e.Elapsed, e.Last)
 }
 
 func (e *CompletionRecoveryRequiredError) Unwrap() []error {
+	if e == nil || e.Last == nil {
+		return []error{ErrCompletionRecoveryRequired}
+	}
 	return []error{ErrCompletionRecoveryRequired, e.Last}
 }
 

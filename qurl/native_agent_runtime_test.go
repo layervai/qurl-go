@@ -984,6 +984,22 @@ func TestRunCompletionExchange_DeadlineDuringBackoffRequiresRecovery(t *testing.
 	}
 }
 
+func TestCompletionRecoveryRequiredError_NilSafety(t *testing.T) {
+	var nilRecovery *CompletionRecoveryRequiredError
+	if nilRecovery.Error() != ErrCompletionRecoveryRequired.Error() || !errors.Is(nilRecovery, ErrCompletionRecoveryRequired) {
+		t.Fatalf("nil completion recovery = %q / %v, want stable sentinel", nilRecovery.Error(), nilRecovery.Unwrap())
+	}
+	recovery := &CompletionRecoveryRequiredError{Attempts: 1, Elapsed: time.Second}
+	if !errors.Is(recovery, ErrCompletionRecoveryRequired) {
+		t.Fatalf("nil-cause completion recovery lost sentinel: %v", recovery)
+	}
+	for _, cause := range recovery.Unwrap() {
+		if cause == nil {
+			t.Fatal("completion recovery Unwrap returned a nil cause")
+		}
+	}
+}
+
 func TestRegisterAgentRuntime_RateLimitRetriesWholeHubTransactionWithinBudget(t *testing.T) {
 	contract := loadAssignmentFixture(t)
 	const reflectedSecret = "lv_live_rate_limit_reflection"
@@ -2297,6 +2313,7 @@ func TestClassifyNativeRegisterError_RetainsEstablished521xxTaxonomy(t *testing.
 		{rakCredentialInvalid, keyKindAccount, ErrOTPIncorrect},
 		{rakCredentialInvalid, keyKindBootstrap, ErrKeyRejected},
 		{rakCredentialExpired, keyKindAccount, ErrOTPExpired},
+		{rakCredentialExpired, keyKindBootstrap, ErrKeyRejected},
 		{rakAttemptsExceeded, keyKindAccount, ErrRegistrationRateLimited},
 		{rakRateLimited, keyKindBootstrap, ErrRegistrationRateLimited},
 		{rakEmailUnavailable, keyKindAccount, ErrNoAccountEmail},
@@ -2310,6 +2327,9 @@ func TestClassifyNativeRegisterError_RetainsEstablished521xxTaxonomy(t *testing.
 			err := classifyNativeRegisterError(&registerAckBody{ErrCode: test.code, ErrMsg: "untrusted detail"}, test.keyKind)
 			if !errors.Is(err, test.want) || strings.Contains(err.Error(), "untrusted detail") {
 				t.Fatalf("native RAK %s/%s = %v, want %v without errMsg echo", test.code, test.keyKind, err, test.want)
+			}
+			if test.code == rakCredentialExpired && test.keyKind != keyKindAccount && (errors.Is(err, ErrOTPExpired) || registrationVerdictPermitsReplacement(err)) {
+				t.Fatalf("out-of-contract %s/%s gained account replacement authority: %v", test.code, test.keyKind, err)
 			}
 		})
 	}
