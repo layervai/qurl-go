@@ -98,6 +98,9 @@ func marshalAgentState(state *qurl.AgentState, resourceID, resourceLabel string)
 
 // unmarshalAgentState decodes a loaded value into an AgentState, mapping a decode
 // failure to a wrapped [qurl.ErrInvalidAgentState] so callers' errors.Is matches.
+// This separate module owns only the strict custody/decode boundary. Native
+// assignment and pending-completion structural validation remains lifecycle-
+// owned in qurl, which deliberately repeats it for every custom/network store.
 func unmarshalAgentState(raw []byte) (*qurl.AgentState, error) {
 	var state qurl.AgentState
 	decoder := json.NewDecoder(bytes.NewReader(raw))

@@ -798,6 +798,28 @@ func TestAgentAssignmentCloneAndLease(t *testing.T) {
 	}
 }
 
+func TestSameAgentAssignmentComparesLeaseInstant(t *testing.T) {
+	base := &AgentAssignment{
+		CellID: "cell0", AssignmentGeneration: 1, EndpointRevision: 2,
+		LeaseExpiresAt: assignmentFixtureNow,
+		Endpoint: NHPUDPEndpoint{
+			Host: "cell0.nhp.layerv.ai", Port: 62206,
+			ServerPublicKeyB64: validTestNHPServerPublicKeyB64,
+		},
+	}
+	sameInstant := base.clone()
+	sameInstant.LeaseExpiresAt = base.LeaseExpiresAt.In(time.FixedZone("same-instant", 3600))
+	if !sameAgentAssignment(base, sameInstant) {
+		t.Fatal("equal lease instants with different locations compared unequal")
+	}
+
+	changed := base.clone()
+	changed.EndpointRevision++
+	if sameAgentAssignment(base, changed) || sameAgentAssignment(base, nil) || sameAgentAssignment(nil, base) || !sameAgentAssignment(nil, nil) {
+		t.Fatal("assignment field or nil difference compared equal")
+	}
+}
+
 func TestPersistedAgentAssignmentTrustFieldsValidatedOnLoad(t *testing.T) {
 	fixture := loadAssignmentFixture(t)
 	initial, err := parseInitialAssignmentReply([]byte(fixture.InitialAssignment.Result.BodyJSON), "agent-conform", assignmentFixtureNow)

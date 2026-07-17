@@ -111,6 +111,22 @@ func (a *AgentAssignment) clone() *AgentAssignment {
 	return &cloned
 }
 
+// sameAgentAssignment compares the durable wire fields while using time.Equal
+// for the lease instant. Direct struct equality would also compare time.Time's
+// location and monotonic metadata, which are not part of the assignment
+// contract and could cause a redundant durable write after a future in-memory
+// producer starts carrying either.
+func sameAgentAssignment(a, b *AgentAssignment) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.CellID == b.CellID &&
+		a.AssignmentGeneration == b.AssignmentGeneration &&
+		a.EndpointRevision == b.EndpointRevision &&
+		a.LeaseExpiresAt.Equal(b.LeaseExpiresAt) &&
+		a.Endpoint == b.Endpoint
+}
+
 // DecodedServerKey returns the assignment's canonical 32-byte X25519 server
 // identity. Persisted/caller-built state is revalidated on every use.
 func (a *AgentAssignment) DecodedServerKey() ([]byte, error) {

@@ -1429,7 +1429,7 @@ func RefreshAgentRuntime(ctx context.Context, hub HubBootstrap, store AgentState
 		if err := ensureAssignmentContinuity(state.Assignment, fresh); err != nil {
 			return nil, err
 		}
-		if *state.Assignment != *fresh {
+		if !sameAgentAssignment(state.Assignment, fresh) {
 			state.Assignment = fresh.clone()
 			if err := store.SaveAgentState(ctx, state); err != nil {
 				return nil, fmt.Errorf("%w: save refreshed assignment: %w", ErrAgentBindingPersistence, err)
