@@ -1451,6 +1451,7 @@ func TestRegisterAgentRuntime_ConsumedCredentialCannotReplaceExpiredUncommittedT
 func TestRegisterAgentRuntime_PendingActivationCorruptionAndChangedCredentialFailBeforeIO(t *testing.T) {
 	contract := loadAssignmentFixture(t)
 	tests := map[string]func(*AgentState){
+		"missing assignment": func(state *AgentState) { state.Assignment = nil },
 		"peer": func(state *AgentState) {
 			state.PendingActivation.AgentPublicKeyB64 = base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x42}, x25519key.Size))
 		},
@@ -1477,11 +1478,15 @@ func TestRegisterAgentRuntime_PendingActivationCorruptionAndChangedCredentialFai
 				t.Fatal(saveErr)
 			}
 			hubBefore, cellBefore := len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot())
-			_, _, err := RegisterAgentRuntime(context.Background(), conformance.AgentAssignmentBootstrapCredentialFixture, f.store, f.options()...)
+			resolver := &noIONativeResolver{}
+			dialer := &noIONativeDialer{}
+			_, _, err := RegisterAgentRuntime(context.Background(), conformance.AgentAssignmentBootstrapCredentialFixture, f.store,
+				f.options(WithAgentRuntimeUDPResolver(resolver), WithAgentRuntimeUDPDialer(dialer))...)
 			if !errors.Is(err, ErrInvalidAgentState) || !errors.Is(err, ErrInvalidRegisterConfig) {
 				t.Fatalf("changed %s pending state = %v, want invalid durable state", name, err)
 			}
-			if len(f.hubUDP.snapshot()) != hubBefore || len(f.cellUDP.snapshot()) != cellBefore {
+			if resolver.calls.Load() != 0 || dialer.calls.Load() != 0 ||
+				len(f.hubUDP.snapshot()) != hubBefore || len(f.cellUDP.snapshot()) != cellBefore {
 				t.Fatalf("changed %s pending state performed I/O", name)
 			}
 		})
