@@ -21,10 +21,16 @@ const (
 	producerConnectorResourceType = "tunnel"
 	// Explicit, unequal length gates make the public identity and routing
 	// namespaces disjoint before their content validators run.
-	connectorResourceIDLength = 122 // Canonical unpadded-base64url P-256 DER SPKI.
-	connectorRoutingIDLength  = 54  // "c-" plus a 52-character base32 digest (32 decoded bytes).
-	connectorRoutingIDPrefix  = "c-"
+	connectorResourceIDLength      = 122 // Canonical unpadded-base64url P-256 DER SPKI.
+	connectorRoutingIDDigestLength = 32
+	connectorRoutingIDPrefix       = "c-"
+	connectorRoutingIDLength       = len(connectorRoutingIDPrefix) + (connectorRoutingIDDigestLength*8+4)/5
 )
+
+type canonicalEncoding interface {
+	DecodeString(string) ([]byte, error)
+	EncodeToString([]byte) string
+}
 
 var (
 	// qurl-service's OpenAPI contract intentionally gives immutable connector
@@ -394,13 +400,8 @@ func isValidConnectorResourceID(resourceID string) bool {
 	if len(resourceID) != connectorResourceIDLength {
 		return false
 	}
-	der, err := b64url.DecodeString(resourceID)
-	if err != nil {
-		return false
-	}
-	// An exact round trip rejects padding, alternate alphabets, embedded CR/LF,
-	// non-zero trailing bits, and every other non-canonical spelling.
-	if b64url.EncodeToString(der) != resourceID {
+	der, ok := decodeCanonical(b64url, resourceID)
+	if !ok {
 		return false
 	}
 	publicKey, err := ParseP256PublicKeyDER(der)
@@ -416,14 +417,16 @@ func isValidConnectorRoutingID(routingID string) bool {
 	if !ok || len(routingID) != connectorRoutingIDLength {
 		return false
 	}
-	digest, err := connectorRoutingIDEncoding.DecodeString(payload)
-	if err != nil {
-		return false
+	_, canonical := decodeCanonical(connectorRoutingIDEncoding, payload)
+	return canonical
+}
+
+func decodeCanonical(encoding canonicalEncoding, encoded string) ([]byte, bool) {
+	decoded, err := encoding.DecodeString(encoded)
+	if err != nil || encoding.EncodeToString(decoded) != encoded {
+		return nil, false
 	}
-	// Decode rejects padding and alternate alphabets. Exact re-encoding rejects
-	// decoder-ignored CR/LF, non-zero trailing bits, and every other
-	// non-canonical spelling.
-	return connectorRoutingIDEncoding.EncodeToString(digest) == payload
+	return decoded, true
 }
 
 // connectorResourceOperation drives lifecycle-specific error classification.
