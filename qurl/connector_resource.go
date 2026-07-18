@@ -420,9 +420,9 @@ func isValidConnectorRoutingID(routingID string) bool {
 	if err != nil {
 		return false
 	}
-	// The lowercase, unpadded decoder plus exact round trip reject padding,
-	// alternate alphabets, embedded CR/LF, non-zero trailing bits, and every
-	// other non-canonical spelling.
+	// Decode rejects padding and alternate alphabets. Exact re-encoding rejects
+	// decoder-ignored CR/LF, non-zero trailing bits, and every other
+	// non-canonical spelling.
 	return connectorRoutingIDEncoding.EncodeToString(digest) == payload
 }
 
