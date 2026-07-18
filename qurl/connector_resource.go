@@ -21,10 +21,9 @@ const (
 	producerConnectorResourceType = "tunnel"
 	// Explicit, unequal length gates make the public identity and routing
 	// namespaces disjoint before their content validators run.
-	connectorResourceIDLength    = 122 // Canonical unpadded-base64url P-256 DER SPKI.
-	connectorRoutingIDLength     = 54  // "c-" plus a 52-character base32 digest.
-	connectorRoutingIDPrefix     = "c-"
-	connectorRoutingIDDigestSize = 32
+	connectorResourceIDLength = 122 // Canonical unpadded-base64url P-256 DER SPKI.
+	connectorRoutingIDLength  = 54  // "c-" plus a 52-character base32 digest.
+	connectorRoutingIDPrefix  = "c-"
 )
 
 var (
@@ -418,7 +417,7 @@ func isValidConnectorRoutingID(routingID string) bool {
 	}
 	payload := routingID[len(connectorRoutingIDPrefix):]
 	digest, err := connectorRoutingIDEncoding.DecodeString(payload)
-	if err != nil || len(digest) != connectorRoutingIDDigestSize {
+	if err != nil {
 		return false
 	}
 	// An exact round trip rejects padding, uppercase, alternate alphabets,
