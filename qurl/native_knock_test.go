@@ -25,6 +25,71 @@ func TestMarshalNativeKnockApplicationBody(t *testing.T) {
 	}
 }
 
+func TestMarshalNativeSessionApplicationBody_ConformanceSessionVectors(t *testing.T) {
+	vectors, err := conformance.AgentSessionControl()
+	if err != nil {
+		t.Fatalf("load qurl-conformance agent-session vectors: %v", err)
+	}
+	for _, tc := range []struct {
+		name       string
+		headerType int
+		packet     conformance.AgentSessionPacket
+	}{
+		{name: "knock", headerType: nhpKNKHeaderType, packet: vectors.OverloadReknock.KnockRequest},
+		{name: "reknock", headerType: nhpRKNHeaderType, packet: vectors.OverloadReknock.ReknockRequest},
+		{name: "exit", headerType: nhpEXTHeaderType, packet: vectors.CleanExit.Request},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var fields nativeAgentKnockBody
+			if err := json.Unmarshal([]byte(tc.packet.BodyJSON), &fields); err != nil {
+				t.Fatalf("decode conformance body: %v", err)
+			}
+			got, err := marshalNativeSessionApplicationBody(fields.DeviceID, fields.KnockResourceID, NativeKnockOptions{RunID: fields.RunID}, tc.headerType)
+			if err != nil {
+				t.Fatalf("marshal session body: %v", err)
+			}
+			if !bytes.Equal(got, []byte(tc.packet.BodyJSON)) {
+				t.Fatalf("session body mismatch:\n got=%s\nwant=%s", got, tc.packet.BodyJSON)
+			}
+			if fields.HeaderType != tc.headerType || fields.UserID != fields.DeviceID || fields.AuthServiceID != agentAspID {
+				t.Fatalf("conformance session fields drifted: %#v", fields)
+			}
+		})
+	}
+	if _, err := marshalNativeSessionApplicationBody("agent-01", "connector-01", NativeKnockOptions{RunID: "0123456789abcdef"}, 7); !errors.Is(err, ErrInvalidNativeKnockInput) {
+		t.Fatalf("unsupported session header error = %v, want ErrInvalidNativeKnockInput", err)
+	}
+}
+
+func TestInterpretNativeAgentKnockReply_ConformanceSessionACKs(t *testing.T) {
+	vectors, err := conformance.AgentSessionControl()
+	if err != nil {
+		t.Fatalf("load qurl-conformance agent-session vectors: %v", err)
+	}
+	for _, tc := range []struct {
+		name    string
+		request conformance.AgentSessionPacket
+		ack     conformance.AgentSessionPacket
+	}{
+		{name: "reknock", request: vectors.OverloadReknock.ReknockRequest, ack: vectors.OverloadReknock.ACK},
+		{name: "exit", request: vectors.CleanExit.Request, ack: vectors.CleanExit.ACK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var request nativeAgentKnockBody
+			if err := json.Unmarshal([]byte(tc.request.BodyJSON), &request); err != nil {
+				t.Fatalf("decode conformance request body: %v", err)
+			}
+			result, err := interpretNativeAgentKnockReply(&relayknock.Reply{Type: relayknock.TypeACK, Body: []byte(tc.ack.BodyJSON)}, request.KnockResourceID)
+			if err != nil {
+				t.Fatalf("interpret conformance ACK: %v", err)
+			}
+			if result == nil || result.ACToken == "" || result.ResourceHost == "" {
+				t.Fatalf("conformance ACK did not contain a full admission envelope: %#v", result)
+			}
+		})
+	}
+}
+
 func TestMarshalNativeKnockApplicationBody_RejectsRunIDBeforeOtherInputs(t *testing.T) {
 	secretShapedRunID := "SECRET-UPPERCASE"
 	_, err := marshalNativeKnockApplicationBody("", "", NativeKnockOptions{RunID: secretShapedRunID})

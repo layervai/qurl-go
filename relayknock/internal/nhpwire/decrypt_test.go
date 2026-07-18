@@ -99,7 +99,7 @@ func TestDecryptMessage_RejectsTamperedReply(t *testing.T) {
 				pkt[offTimestamp] ^= 0xff // corrupt the sealed timestamp...
 				// ...then re-stamp the digest so the digest gate passes and the
 				// ss-keyed timestamp open is the guard that trips.
-				copy(pkt[offDigest:offDigest+hashSize], headerDigest(devicePub, pkt[:HeaderSize]))
+				copy(pkt[offDigest:offDigest+hashSize], headerDigest(devicePub, pkt[:HeaderSize], nil))
 			}),
 			serverPub: serverPub,
 			wantSub:   "server authentication failed",

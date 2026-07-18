@@ -120,6 +120,96 @@ func TestDecryptAndCorrelate_ConformanceLRT(t *testing.T) {
 	assertCorrelationRejections(t, agentPriv, hubPub, relayknock.TypeListRequest, relayknock.TypeRegister, counter, packet)
 }
 
+func TestParseCookieChallenge_ConformanceCases(t *testing.T) {
+	f, err := conformance.AgentSessionControl()
+	if err != nil {
+		t.Fatalf("load qurl-conformance agent-session vectors: %v", err)
+	}
+	requestCounter, err := strconv.ParseUint(f.OverloadReknock.KnockRequest.Counter, 10, 64)
+	if err != nil {
+		t.Fatalf("parse knock counter: %v", err)
+	}
+	wantCookie := mustHexBytes(t, f.OverloadReknock.CookieHex)
+	for _, tc := range f.CookieBodyCases {
+		t.Run(tc.Name, func(t *testing.T) {
+			cookie, err := parseCookieChallenge([]byte(tc.BodyJSON), requestCounter)
+			if tc.Outcome == conformance.AgentSessionOutcomeAccept {
+				if err != nil || !bytes.Equal(cookie, wantCookie) {
+					t.Fatalf("parseCookieChallenge = %x, %v; want canonical cookie", cookie, err)
+				}
+				return
+			}
+			if !errors.Is(err, relayknock.ErrMalformedReply) {
+				t.Fatalf("error = %v, want ErrMalformedReply", err)
+			}
+			var classified *cookieChallengeError
+			if !errors.As(err, &classified) || classified.rejectClass != tc.RejectClass {
+				t.Fatalf("reject class = %v, want %q (error %v)", classified, tc.RejectClass, err)
+			}
+			if len(cookie) != 0 {
+				t.Fatalf("rejected cookie retained %d bytes", len(cookie))
+			}
+			if strings.Contains(err.Error(), f.OverloadReknock.CookieB64) {
+				t.Fatal("error leaked the cookie")
+			}
+		})
+	}
+}
+
+func TestParseCookieChallenge_RejectsEscapedCookieText(t *testing.T) {
+	body := []byte(`{"trxId":41,"cookie":"\u0041AECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="}`)
+	_, err := parseCookieChallenge(body, 41)
+	var classified *cookieChallengeError
+	if !errors.As(err, &classified) || classified.rejectClass != cookieRejectEncoding {
+		t.Fatalf("escaped cookie error = %v, want %q", err, cookieRejectEncoding)
+	}
+}
+
+func TestCorrelateDecryptedReply_AgentSessionTransitions(t *testing.T) {
+	f, err := conformance.AgentSessionControl()
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentPriv := mustHexBytes(t, f.Keys.Agent.StaticPrivateHex)
+	cellPub := mustHexBytes(t, f.Keys.AssignedCell.StaticPublicHex)
+	for _, tc := range []struct {
+		name        string
+		requestType int
+		request     conformance.AgentSessionPacket
+		ack         conformance.AgentSessionPacket
+	}{
+		{name: "reknock", requestType: relayknock.TypeReknock, request: f.OverloadReknock.ReknockRequest, ack: f.OverloadReknock.ACK},
+		{name: "exit", requestType: relayknock.TypeExit, request: f.CleanExit.Request, ack: f.CleanExit.ACK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			counter, err := strconv.ParseUint(tc.request.Counter, 10, 64)
+			if err != nil {
+				t.Fatal(err)
+			}
+			packet := mustHexBytes(t, tc.ack.PacketHex)
+			reply, err := decryptAndCorrelate(agentPriv, cellPub, tc.requestType, counter, packet)
+			if err != nil || !reply.IsACK() {
+				t.Fatalf("valid %s ACK = %v, %v", tc.name, reply, err)
+			}
+			if _, err := decryptAndCorrelate(agentPriv, cellPub, tc.requestType, counter+1, packet); !errors.Is(err, relayknock.ErrMalformedReply) {
+				t.Fatalf("wrong-counter %s ACK error = %v", tc.name, err)
+			}
+		})
+	}
+
+	cok := f.OverloadReknock.CookieReply
+	cokPacket := mustHexBytes(t, cok.PacketHex)
+	counter, err := strconv.ParseUint(cok.Counter, 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, requestType := range []int{relayknock.TypeReknock, relayknock.TypeExit} {
+		if _, err := decryptAndCorrelate(agentPriv, cellPub, requestType, counter, cokPacket); !errors.Is(err, relayknock.ErrMalformedReply) {
+			t.Fatalf("type %d accepted COK: %v", requestType, err)
+		}
+	}
+}
+
 func TestDecryptAndCorrelate_RejectsMalformedDatagram(t *testing.T) {
 	devicePriv := freshX25519Priv(t)
 	serverPub := freshX25519Pub(t)
@@ -239,7 +329,7 @@ func TestBuildPacketClassifiesEntropyFailureAsTransport(t *testing.T) {
 	t.Cleanup(func() { rand.Reader = originalReader })
 
 	rand.Reader = iotest.ErrReader(errors.New("injected entropy failure"))
-	_, _, err := buildPacket(relayknock.TypeListRequest, serverPub, devicePriv, nil)
+	_, _, err := buildPacket(relayknock.TypeListRequest, serverPub, devicePriv, nil, nil)
 	if !errors.Is(err, ErrTransport) || errors.Is(err, ErrInvalidRequest) {
 		t.Fatalf("buildPacket error = %v, want only ErrTransport", err)
 	}
@@ -253,7 +343,7 @@ func TestBuildPacketDrawsAndWipesRandomnessOnce(t *testing.T) {
 	rand.Reader = reader
 	t.Cleanup(func() { rand.Reader = originalReader })
 
-	_, counter, err := buildPacket(relayknock.TypeListRequest, serverPub, devicePriv, []byte("body"))
+	_, counter, err := buildPacket(relayknock.TypeListRequest, serverPub, devicePriv, []byte("body"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

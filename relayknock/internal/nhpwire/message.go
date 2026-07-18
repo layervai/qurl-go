@@ -28,10 +28,12 @@ type Inputs struct {
 	Counter          uint64 // transaction id
 	Preamble         uint32 // HeaderCommon obfuscation preamble
 	Body             []byte // serialized, uncompressed application body
+	Cookie           []byte // exact 32-byte COK cookie for RKN; empty otherwise
 }
 
 // Message is a decrypted, authenticated NHP message. Type is the raw NHP header
-// type (nhpwire.TypeKNK…TypeRAK); the wrapping packages interpret it.
+// type (one of the declared NHP header-type constants); the wrapping packages
+// interpret it.
 type Message struct {
 	Type           int
 	Counter        uint64
@@ -41,13 +43,23 @@ type Message struct {
 
 // BuildMessage builds a complete single-message NHP packet (240-byte header ‖
 // sealed body) of the given header type. It folds material into the chain
-// hash/key in the exact order the responder expects, so every AEAD opens. The
-// transcript is independent of the header type — only the obfuscated type field
-// in HeaderCommon[0:8] differs — so the NHP_KNK golden vector fences every type
-// built here. It applies NO header-type restriction: the initiator/reply gating
-// lives in the wrapping packages (relayknock builds initiator types;
-// relayknocktest builds reply types).
+// hash/key in the exact order the responder expects, so every AEAD opens. For
+// ordinary messages only the obfuscated type field in HeaderCommon[0:8]
+// differs. RKN additionally mixes its exact COK cookie into the header digest;
+// the dedicated session-control vectors fence that variant. BuildMessage
+// enforces this RKN/cookie wire invariant but applies no initiator/reply type
+// allowlist; directional type gating lives in the wrapping packages.
 func BuildMessage(headerType int, inp *Inputs) ([]byte, error) {
+	if inp == nil {
+		return nil, errors.New("message inputs must not be nil")
+	}
+	if headerType == TypeRKN {
+		if len(inp.Cookie) != CookieSize {
+			return nil, fmt.Errorf("RKN cookie must be %d bytes, got %d", CookieSize, len(inp.Cookie))
+		}
+	} else if len(inp.Cookie) != 0 {
+		return nil, fmt.Errorf("header type %d must not carry an RKN cookie", headerType)
+	}
 	if len(inp.ServerStaticPub) != PublicKeySize {
 		return nil, fmt.Errorf("server static pub must be %d bytes, got %d", PublicKeySize, len(inp.ServerStaticPub))
 	}
@@ -124,7 +136,7 @@ func BuildMessage(headerType int, inp *Inputs) ([]byte, error) {
 	setCounter(header, inp.Counter)
 	setFlag(header, 0)
 	setTypeAndPayloadSize(header, headerType, len(sealedBody), inp.Preamble)
-	copy(header[offDigest:offDigest+hashSize], headerDigest(inp.ServerStaticPub, header))
+	copy(header[offDigest:offDigest+hashSize], headerDigest(inp.ServerStaticPub, header, inp.Cookie))
 
 	packet := make([]byte, HeaderSize+len(sealedBody))
 	copy(packet, header)
@@ -139,6 +151,20 @@ func BuildMessage(headerType int, inp *Inputs) ([]byte, error) {
 // Authentication completes at the ss-keyed opens: only the real sender's static
 // private key yields a valid tag there.
 func DecryptMessage(devicePriv, expectedServerStaticPub, packet []byte) (*Message, error) {
+	return decryptMessage(devicePriv, expectedServerStaticPub, nil, packet)
+}
+
+// DecryptReknockMessage opens an NHP_RKN request using the exact decoded COK
+// cookie that the initiator mixed into the header digest. The authenticated
+// message type is still returned to the caller for an explicit RKN gate.
+func DecryptReknockMessage(devicePriv, expectedServerStaticPub, cookie, packet []byte) (*Message, error) {
+	if len(cookie) != CookieSize {
+		return nil, fmt.Errorf("RKN cookie must be %d bytes, got %d", CookieSize, len(cookie))
+	}
+	return decryptMessage(devicePriv, expectedServerStaticPub, cookie, packet)
+}
+
+func decryptMessage(devicePriv, expectedServerStaticPub, cookie, packet []byte) (*Message, error) {
 	if len(packet) < HeaderSize {
 		return nil, fmt.Errorf("reply too short: %d bytes < %d-byte header", len(packet), HeaderSize)
 	}
@@ -152,7 +178,7 @@ func DecryptMessage(devicePriv, expectedServerStaticPub, packet []byte) (*Messag
 	if err != nil {
 		return nil, fmt.Errorf("derive agent pub: %w", err)
 	}
-	if !bytes.Equal(headerDigest(agentPub, header), header[offDigest:offDigest+hashSize]) {
+	if !bytes.Equal(headerDigest(agentPub, header, cookie), header[offDigest:offDigest+hashSize]) {
 		return nil, errors.New("reply header digest mismatch (tampered, or wrong device key)")
 	}
 

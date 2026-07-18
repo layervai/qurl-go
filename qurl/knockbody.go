@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/layervai/qurl-go/internal/qv2"
+	"github.com/layervai/qurl-go/relayknock"
 )
 
 // qURL knock-body construction.
@@ -50,9 +51,14 @@ const (
 	sigUserDataKey    = "qurl_issuer_sig_b64"
 )
 
-// nhpKNKHeaderType is the NHP_KNK header-type value echoed in the body envelope
-// (the KNK packet header-type, value 1).
-const nhpKNKHeaderType = 1
+// Native session-control body header values must exactly match their outer NHP
+// packet types. Keeping them together makes it hard for a re-knock or clean
+// exit to accidentally reuse the ordinary KNK body envelope.
+const (
+	nhpKNKHeaderType = relayknock.TypeKnock
+	nhpRKNHeaderType = relayknock.TypeReknock
+	nhpEXTHeaderType = relayknock.TypeExit
+)
 
 // buildKnockBody serializes the provisional qURL knock body for a verified fragment:
 // resId = resource_public_key_b64, usrData = the signed claims + issuer signature,
