@@ -398,7 +398,7 @@ func registerNativeAgentRuntime(ctx context.Context, enrollmentCredential string
 	if found && state.RegisteredAt != nil {
 		return finishNativeRuntime(store, state, cfg)
 	}
-	result, err := withAgentSetupLock(ctx, store, func() (*nativeRuntimeResult, error) {
+	result, err := withAgentSetupLock(ctx, store, destroyNativeRuntimeResult, func() (*nativeRuntimeResult, error) {
 		return cfg.registerLocked(ctx, enrollmentCredential, store)
 	})
 	if err != nil {
@@ -410,6 +410,15 @@ func registerNativeAgentRuntime(ctx context.Context, enrollmentCredential string
 type nativeRuntimeResult struct {
 	client  *Client
 	binding *AgentRuntimeBinding
+}
+
+func destroyNativeRuntimeResult(result *nativeRuntimeResult) {
+	if result == nil {
+		return
+	}
+	// Only the one-shot binding owns in-memory-only key material. The client
+	// holds the already-persisted device API credential and owns no live handle.
+	result.binding.Destroy()
 }
 
 func (r *nativeRuntimeResult) split() (*Client, *AgentRuntimeBinding, error) {
@@ -1733,7 +1742,7 @@ func RefreshAgentRuntime(ctx context.Context, hub HubBootstrap, store AgentState
 	if _, err := hub.nativeEndpoint(); err != nil {
 		return nil, nil, fmt.Errorf("%w: Hub trust root: %w", ErrInvalidRegisterConfig, err)
 	}
-	result, err := withAgentSetupLock(ctx, store, func() (*nativeRuntimeResult, error) {
+	result, err := withAgentSetupLock(ctx, store, destroyNativeRuntimeResult, func() (*nativeRuntimeResult, error) {
 		state, err := loadCompletedRegisteredState(ctx, store, ErrInvalidRegisterConfig)
 		if err != nil {
 			return nil, err
