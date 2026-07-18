@@ -29,12 +29,8 @@ type releaseErrorAgentStateStore struct {
 	closeErr error
 }
 
-type setupLockFunc func() error
-
-func (f setupLockFunc) Close() error { return f() }
-
 func (s *releaseErrorAgentStateStore) acquireSetupLock(context.Context) (setupLock, error) {
-	return setupLockFunc(func() error { return s.closeErr }), nil
+	return testSetupLock{closeErr: s.closeErr}, nil
 }
 
 func (s *memoryAgentStateStore) LoadAgentState(context.Context) (*AgentState, error) {
@@ -62,50 +58,38 @@ func runtimeTestHub() HubBootstrap {
 	return HubBootstrap{Host: "hub.nhp.layerv.ai", Port: standardNHPUDPPort, ServerPublicKeyB64: validTestNHPServerPublicKeyB64}
 }
 
-func TestWithAgentSetupLock_CleansSuccessfulResultBeforeZeroingOnReleaseFailure(t *testing.T) {
-	releaseErr := errors.New("release failed")
-	store := &releaseErrorAgentStateStore{
-		memoryAgentStateStore: &memoryAgentStateStore{},
-		closeErr:              releaseErr,
-	}
-	want := new(int)
-	cleanupSawResult := false
-
-	got, err := withAgentSetupLock(context.Background(), store, func(result *int) {
-		cleanupSawResult = result == want
-	}, func() (*int, error) {
-		return want, nil
-	})
-
-	if got != nil || !errors.Is(err, ErrAgentSetupLock) || !errors.Is(err, releaseErr) {
-		t.Fatalf("release failure = result %v, error %v; want nil and joined lock/release errors", got, err)
-	}
-	if !cleanupSawResult {
-		t.Fatal("cleanup did not receive the successful result before it was zeroed")
-	}
-}
-
-func TestWithAgentSetupLock_CleansErrorResultBeforeJoiningReleaseFailure(t *testing.T) {
+func TestWithAgentSetupLock_CleansResultBeforeZeroingOnReleaseFailure(t *testing.T) {
 	releaseErr := errors.New("release failed")
 	transitionErr := errors.New("transition failed")
-	store := &releaseErrorAgentStateStore{
-		memoryAgentStateStore: &memoryAgentStateStore{},
-		closeErr:              releaseErr,
-	}
-	want := new(int)
-	cleanupSawResult := false
+	for _, test := range []struct {
+		name          string
+		transitionErr error
+	}{
+		{name: "successful transition"},
+		{name: "failed transition", transitionErr: transitionErr},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := &releaseErrorAgentStateStore{
+				memoryAgentStateStore: &memoryAgentStateStore{},
+				closeErr:              releaseErr,
+			}
+			want := new(int)
+			cleanupSawResult := false
 
-	got, err := withAgentSetupLock(context.Background(), store, func(result *int) {
-		cleanupSawResult = result == want
-	}, func() (*int, error) {
-		return want, transitionErr
-	})
+			got, err := withAgentSetupLock(context.Background(), store, func(result *int) {
+				cleanupSawResult = result == want
+			}, func() (*int, error) {
+				return want, test.transitionErr
+			})
 
-	if got != nil || !errors.Is(err, transitionErr) || !errors.Is(err, ErrAgentSetupLock) || !errors.Is(err, releaseErr) {
-		t.Fatalf("combined failure = result %v, error %v; want nil and joined transition/lock/release errors", got, err)
-	}
-	if !cleanupSawResult {
-		t.Fatal("cleanup did not receive the error result before it was zeroed")
+			if got != nil || !errors.Is(err, ErrAgentSetupLock) || !errors.Is(err, releaseErr) ||
+				(test.transitionErr != nil && !errors.Is(err, test.transitionErr)) {
+				t.Fatalf("release failure = result %v, error %v; want nil and all transition/lock/release errors", got, err)
+			}
+			if !cleanupSawResult {
+				t.Fatal("cleanup did not receive the result before it was zeroed")
+			}
+		})
 	}
 }
 
