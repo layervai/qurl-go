@@ -182,8 +182,7 @@ func Register(ctx context.Context, ep Endpoint, body []byte, opts Options) (*rel
 // accepts only an authenticated NHP_ACK whose counter echoes EXT; NHP_COK is not
 // valid for this transition.
 func Exit(ctx context.Context, ep Endpoint, body []byte, opts Options) (*relayknock.Reply, error) {
-	reply, _, err := exchange(ctx, ep, relayknock.TypeExit, body, nil, opts)
-	return reply, err
+	return Exchange(ctx, ep, relayknock.TypeExit, body, opts)
 }
 
 // SendOTP sends exactly one fire-and-forget NHP_OTP datagram to the first
@@ -367,7 +366,7 @@ func parseCookieChallenge(body []byte, requestCounter uint64) ([]byte, error) {
 		}
 		seen[key] = struct{}{}
 		var raw json.RawMessage
-		if err := dec.Decode(&raw); err != nil || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		if err := dec.Decode(&raw); err != nil || bytes.Equal(raw, []byte("null")) {
 			return nil, rejectCookieChallenge(cookieRejectBodyParse, "field has an invalid value")
 		}
 		switch key {

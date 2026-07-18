@@ -165,12 +165,6 @@ type runtimeRouteResolver struct {
 	hosts map[string]netip.Addr
 }
 
-type runtimeResolverFunc func(context.Context, string, string) ([]netip.Addr, error)
-
-func (f runtimeResolverFunc) LookupNetIP(ctx context.Context, network, host string) ([]netip.Addr, error) {
-	return f(ctx, network, host)
-}
-
 func (r runtimeRouteResolver) LookupNetIP(_ context.Context, network, host string) ([]netip.Addr, error) {
 	if network != "ip" {
 		return nil, fmt.Errorf("unexpected network %q", network)
@@ -895,7 +889,7 @@ func TestKnockRegisteredAgent_CookieChallengeReResolvesForOneBoundReknock(t *tes
 	knockAddress := netip.MustParseAddr("9.9.9.9")
 	reknockAddress := netip.MustParseAddr("149.112.112.112")
 	var resolveCalls atomic.Int32
-	resolver := runtimeResolverFunc(func(_ context.Context, network, host string) ([]netip.Addr, error) {
+	resolver := assignmentTestResolverFunc(func(_ context.Context, network, host string) ([]netip.Addr, error) {
 		if network != "ip" || host != "cell0.nhp.layerv.ai" {
 			return nil, fmt.Errorf("unexpected resolution %q %q", network, host)
 		}
