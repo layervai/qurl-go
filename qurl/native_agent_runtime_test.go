@@ -2741,14 +2741,17 @@ func TestRefreshAgentRuntime_ReassignmentAdoptionRejectsStaleOrExpiredTarget(t *
 		leaseExpiresAt     time.Time
 		agentID            string
 		want               []error
+		wantDetail         string
 	}{
 		{
 			name: "same-generation cell move is stale", previousGeneration: 1, targetGeneration: 1,
 			leaseExpiresAt: reassignmentFixtureLeaseExpiresAt, want: []error{ErrAssignmentInvalidResponse},
+			wantDetail: "assignment generation must advance",
 		},
 		{
 			name: "generation regression", previousGeneration: 2, targetGeneration: 1,
 			leaseExpiresAt: reassignmentFixtureLeaseExpiresAt, want: []error{ErrAssignmentInvalidResponse},
+			wantDetail: "assignment generation must advance",
 		},
 		{
 			name: "expired target", previousGeneration: 1, targetGeneration: 2,
@@ -2790,6 +2793,9 @@ func TestRefreshAgentRuntime_ReassignmentAdoptionRejectsStaleOrExpiredTarget(t *
 				if !errors.Is(err, want) {
 					t.Fatalf("stale reassignment error = %v, want %v", err, want)
 				}
+			}
+			if testCase.wantDetail != "" && !strings.Contains(err.Error(), testCase.wantDetail) {
+				t.Fatalf("stale reassignment error = %v, want safe detail %q", err, testCase.wantDetail)
 			}
 			persisted, loadErr := f.store.LoadAgentState(context.Background())
 			if loadErr != nil {

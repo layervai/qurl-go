@@ -1471,7 +1471,7 @@ func ensureRefreshAssignmentContinuity(previous, current *AgentAssignment, adopt
 	err := ensureAssignmentContinuity(previous, current)
 	if adoptReassignment && errors.Is(err, ErrAssignmentReassignmentRequired) {
 		if current.AssignmentGeneration <= previous.AssignmentGeneration {
-			return invalidAssignmentResponse("refresh reassignment", errors.New("assignment generation must advance"))
+			return invalidAssignmentResponse("refresh reassignment generation must advance", nil)
 		}
 		return nil
 	}
