@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/x509"
+	"encoding/base32"
 	"errors"
 	"fmt"
 	"net/http"
@@ -20,18 +21,20 @@ const (
 	producerConnectorResourceType = "tunnel"
 	// Explicit, unequal length gates make the public identity and routing
 	// namespaces disjoint before their content validators run.
-	connectorResourceIDLength = 122 // Canonical unpadded-base64url P-256 DER SPKI.
-	connectorRoutingIDLength  = 54  // "c-" plus a 52-character base32 digest.
+	connectorResourceIDLength    = 122 // Canonical unpadded-base64url P-256 DER SPKI.
+	connectorRoutingIDLength     = 54  // "c-" plus a 52-character base32 digest.
+	connectorRoutingIDPrefix     = "c-"
+	connectorRoutingIDDigestSize = 32
 )
 
 var (
 	// qurl-service's OpenAPI contract intentionally gives immutable connector
 	// slugs and mutable aliases the same exact lowercase 3-64 character grammar.
 	connectorSlugPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{1,62}[a-z0-9]$`)
-	// connectorRoutingIDPattern mirrors qurl-service's opaque, server-derived
+	// connectorRoutingIDEncoding mirrors qurl-service's opaque, server-derived
 	// reverse-connection routing label. The SDK validates and consumes this
 	// value verbatim; it must never derive the label from ResourceID.
-	connectorRoutingIDPattern = regexp.MustCompile(`^c-[a-z2-7]{52}$`)
+	connectorRoutingIDEncoding = base32.NewEncoding("abcdefghijklmnopqrstuvwxyz234567").WithPadding(base32.NoPadding)
 
 	// ErrConnectorResourceNotFound is returned when a qURL Connector resource
 	// lookup or deletion cannot find a resource owned by the current credential.
@@ -410,7 +413,17 @@ func isValidConnectorResourceID(resourceID string) bool {
 }
 
 func isValidConnectorRoutingID(routingID string) bool {
-	return len(routingID) == connectorRoutingIDLength && connectorRoutingIDPattern.MatchString(routingID)
+	if len(routingID) != connectorRoutingIDLength || !strings.HasPrefix(routingID, connectorRoutingIDPrefix) {
+		return false
+	}
+	payload := routingID[len(connectorRoutingIDPrefix):]
+	digest, err := connectorRoutingIDEncoding.DecodeString(payload)
+	if err != nil || len(digest) != connectorRoutingIDDigestSize {
+		return false
+	}
+	// An exact round trip rejects padding, uppercase, alternate alphabets,
+	// non-zero trailing bits, and every other non-canonical spelling.
+	return connectorRoutingIDEncoding.EncodeToString(digest) == payload
 }
 
 // connectorResourceOperation drives lifecycle-specific error classification.

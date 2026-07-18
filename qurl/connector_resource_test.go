@@ -1062,6 +1062,8 @@ func TestConnectorRoutingIDContract(t *testing.T) {
 		{name: "wrong prefix", id: "r-" + testConnectorRoutingID[2:]},
 		{name: "short", id: testConnectorRoutingID[:len(testConnectorRoutingID)-1]},
 		{name: "long", id: testConnectorRoutingID + "a"},
+		{name: "non-zero trailing bits", id: testConnectorRoutingID[:len(testConnectorRoutingID)-1] + "b"},
+		{name: "padded", id: testConnectorRoutingID + "===="},
 		{name: "uppercase", id: "c-A" + testConnectorRoutingID[3:]},
 		{name: "digit zero", id: "c-0" + testConnectorRoutingID[3:]},
 		{name: "digit one", id: "c-1" + testConnectorRoutingID[3:]},
