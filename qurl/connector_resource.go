@@ -421,8 +421,8 @@ func isValidConnectorRoutingID(routingID string) bool {
 	if !ok {
 		return false
 	}
-	_, canonical := decodeCanonical(connectorRoutingIDEncoding, payload)
-	return canonical
+	digest, canonical := decodeCanonical(connectorRoutingIDEncoding, payload)
+	return canonical && len(digest) == connectorRoutingIDDigestLength
 }
 
 func decodeCanonical(encoding canonicalEncoding, encoded string) ([]byte, bool) {
