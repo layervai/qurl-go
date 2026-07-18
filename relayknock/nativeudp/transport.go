@@ -273,7 +273,7 @@ func exchange(ctx context.Context, ep Endpoint, headerType int, body, cookie []b
 	if err := ctxErr(ctx); err != nil {
 		return nil, 0, err
 	}
-	if err := validateHeaderType(headerType, cookie); err != nil {
+	if err := validateHeaderType(headerType); err != nil {
 		return nil, 0, err
 	}
 	if err := validateEndpoint(ep); err != nil {
@@ -419,12 +419,11 @@ func decodeCookieChallenge(raw []byte) ([]byte, error) {
 	if err != nil {
 		cryptoutil.Wipe(cookie)
 		rawCookie := make([]byte, base64.RawStdEncoding.DecodedLen(len(encoded)))
+		defer cryptoutil.Wipe(rawCookie)
 		rawN, rawErr := base64.RawStdEncoding.Strict().Decode(rawCookie, encoded)
 		if rawErr == nil && rawN == nhpwire.CookieSize {
-			cryptoutil.Wipe(rawCookie)
 			return nil, rejectCookieChallenge(cookieRejectCanonical, "cookie is not canonical padded base64")
 		}
-		cryptoutil.Wipe(rawCookie)
 		return nil, rejectCookieChallenge(cookieRejectEncoding, "cookie is not strict base64")
 	}
 	cookie = cookie[:n]
@@ -812,20 +811,13 @@ func publicRoutableAddress(addr netip.Addr) bool {
 	return true
 }
 
-func validateHeaderType(headerType int, cookie []byte) error {
+func validateHeaderType(headerType int) error {
 	switch headerType {
-	case relayknock.TypeKnock, relayknock.TypeListRequest, relayknock.TypeRegister, relayknock.TypeExit:
-		if len(cookie) == 0 {
-			return nil
-		}
-	case relayknock.TypeReknock:
-		if len(cookie) == nhpwire.CookieSize {
-			return nil
-		}
+	case relayknock.TypeKnock, relayknock.TypeListRequest, relayknock.TypeReknock, relayknock.TypeRegister, relayknock.TypeExit:
+		return nil
 	default:
 		return fmt.Errorf("%w: header type %d is not a native-UDP round-trip type", ErrInvalidRequest, headerType)
 	}
-	return fmt.Errorf("%w: header type %d has an invalid cookie", ErrInvalidRequest, headerType)
 }
 
 func validateEndpoint(ep Endpoint) error {
