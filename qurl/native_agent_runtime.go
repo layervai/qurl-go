@@ -141,6 +141,7 @@ type nativeAgentRuntimeConfig struct {
 	agentID           string
 	hostname          string
 	version           string
+	adoptReassignment bool
 	baseURL           string
 	httpClient        HTTPDoer
 	resolver          nativeudp.Resolver
@@ -181,6 +182,14 @@ func (f nativeRuntimeLifecycleOptionFunc) applyAgentRuntimeOption(c *nativeAgent
 
 func (nativeRuntimeLifecycleOptionFunc) isAgentRuntimeRegistrationOption() {}
 func (nativeRuntimeLifecycleOptionFunc) isAgentRuntimeRefreshOption()      {}
+
+type nativeRuntimeRefreshOptionFunc func(*nativeAgentRuntimeConfig) error
+
+func (f nativeRuntimeRefreshOptionFunc) applyAgentRuntimeOption(c *nativeAgentRuntimeConfig) error {
+	return f(c)
+}
+
+func (nativeRuntimeRefreshOptionFunc) isAgentRuntimeRefreshOption() {}
 
 // WithAgentRuntimeHub configures the single pinned LayerV Hub trust root used
 // for initial assignment. It is mandatory for RegisterAgentRuntime.
@@ -303,6 +312,18 @@ func WithAgentRuntimeAssignmentRetryBudget(maxAttempts int, budget time.Duration
 			return fmt.Errorf("%w: assignment retry budget: %w", ErrInvalidRegisterConfig, err)
 		}
 		c.assignmentOptions = append(c.assignmentOptions, opt)
+		return nil
+	})
+}
+
+// WithAgentRuntimeReassignmentAdoption explicitly permits RefreshAgentRuntime
+// to adopt a newer assignment generation from that call's authenticated Hub
+// LRT. Without this option, a cell or generation move remains fail-closed as an
+// AgentAssignmentChangedError. The SDK never accepts caller-supplied placement,
+// derives a cell endpoint, or contacts the newly assigned cell during refresh.
+func WithAgentRuntimeReassignmentAdoption() AgentRuntimeRefreshOption {
+	return nativeRuntimeRefreshOptionFunc(func(c *nativeAgentRuntimeConfig) error {
+		c.adoptReassignment = true
 		return nil
 	})
 }
@@ -1440,6 +1461,23 @@ func ensureAssignmentContinuity(previous, current *AgentAssignment) error {
 	return nil
 }
 
+// ensureRefreshAssignmentContinuity narrows explicit adoption to a fresh,
+// authority-versioned move. The caller has already authenticated and strictly
+// decoded current through RefreshAgentAssignment. Requiring the generation to
+// advance prevents an opted-in caller from rolling back or switching cells on
+// a stale same-generation result. A new generation owns its endpoint revision,
+// so revision continuity is intentionally enforced only within one generation.
+func ensureRefreshAssignmentContinuity(previous, current *AgentAssignment, adoptReassignment bool) error {
+	err := ensureAssignmentContinuity(previous, current)
+	if adoptReassignment && errors.Is(err, ErrAssignmentReassignmentRequired) {
+		if current.AssignmentGeneration <= previous.AssignmentGeneration {
+			return invalidAssignmentResponse("refresh reassignment", errors.New("assignment generation must advance"))
+		}
+		return nil
+	}
+	return err
+}
+
 // NativeKnockResult is the authenticated, resource-specific admission returned
 // by KnockRegisteredAgent. ACToken is a bearer credential and is redacted from
 // String and GoString; callers remain responsible for explicit field access or
@@ -1721,7 +1759,10 @@ func consumeNativeAgentKnockReply(reply *relayknock.Reply, knockResourceID strin
 
 // RefreshAgentRuntime refreshes a completed binding only through the pinned Hub
 // using the registered Noise identity and final agent id. It sends no enrollment
-// or device credential and performs no public HTTP request.
+// or device credential and performs no public HTTP request. A cell or generation
+// move fails closed unless WithAgentRuntimeReassignmentAdoption is passed for
+// this call; opted-in adoption still accepts placement only from the fresh,
+// authenticated Hub result and requires the assignment generation to advance.
 func RefreshAgentRuntime(ctx context.Context, hub HubBootstrap, store AgentStateStore, opts ...AgentRuntimeRefreshOption) (*Client, *AgentRuntimeBinding, error) {
 	if err := validateContext(ctx, ErrInvalidRegisterConfig); err != nil {
 		return nil, nil, err
@@ -1759,14 +1800,16 @@ func RefreshAgentRuntime(ctx context.Context, hub HubBootstrap, store AgentState
 		if err != nil {
 			return nil, err
 		}
-		if err := ensureAssignmentContinuity(state.Assignment, fresh); err != nil {
+		if err := ensureRefreshAssignmentContinuity(state.Assignment, fresh, cfg.adoptReassignment); err != nil {
 			return nil, err
 		}
 		if !sameAgentAssignment(state.Assignment, fresh) {
-			state.Assignment = fresh.clone()
-			if err := store.SaveAgentState(ctx, state); err != nil {
+			candidate := state.clone()
+			candidate.Assignment = fresh.clone()
+			if err := store.SaveAgentState(ctx, candidate); err != nil {
 				return nil, fmt.Errorf("%w: save refreshed assignment: %w", ErrAgentBindingPersistence, err)
 			}
+			state = candidate
 		}
 		return finishNativeRuntimeResult(store, state, cfg)
 	})

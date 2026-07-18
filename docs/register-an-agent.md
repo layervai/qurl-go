@@ -215,6 +215,23 @@ cell and assignment generation is accepted. A new cell or generation returns
 reassignment in the provisioned workflow. The SDK never infers an endpoint or
 silently crosses that authority boundary.
 
+Once that workflow has deliberately accepted the move, opt into exactly one
+fresh authenticated Hub refresh:
+
+```go
+client, binding, err := qurl.RefreshAgentRuntime(ctx, hub, store,
+	qurl.WithAgentRuntimeReassignmentAdoption(),
+)
+```
+
+This option takes no cell or endpoint input. It accepts only a higher assignment
+generation from that call's authenticated LRT and persists the full
+authority-provided cell, endpoint, pinned server key, and lease in one store
+save. Refresh does
+not probe or contact either cell, and still sends no setup or device credential
+and performs no HTTP request. A stale, regressed, expired, or identity-mismatched
+target fails without changing durable state.
+
 `OpenRegisteredAgent` is available when a process needs only the steady-state
 resource `Client` and will not knock. It still accepts native completed state
 only; assignment expiry does not block resource CRUD.
@@ -341,6 +358,7 @@ Use `errors.Is` and `errors.As`:
 | `ErrOTPIncorrect` | Obtain the correct code and start a new explicit attempt as appropriate. |
 | `ErrOTPExpired` | Start a new explicit assignment/OTP attempt. |
 | `ErrAssignmentRecoveryRequired` / `*AssignmentRecoveryRequiredError` | The bounded Hub transaction was exhausted; inspect the matchable cause. |
+| `ErrAgentBindingPersistence` | A state save failed or its acknowledgement was lost. Reload before retry; a refreshed or reassigned binding may already be durable. |
 | `ErrRegistrationRecoveryRequired` / `*RegistrationRecoveryRequiredError` | The bounded assigned-cell REG transaction was ambiguous; re-run with the same store, Hub trust root, metadata, and enrollment credential so the exact pending activation is replayed first. |
 | `ErrAssignmentTicketInvalid` / `ErrAssignmentTicketExpired` | The assigned cell rejected the Hub ticket. Do not invent or retarget an endpoint. |
 | `ErrAgentIdentityConflict` | Stop and use explicit owner-controlled native reprovisioning. |
@@ -349,7 +367,7 @@ Use `errors.Is` and `errors.As`:
 | `ErrCompletionRecoveryRequired` / `*CompletionRecoveryRequiredError` | Re-run `RegisterAgentRuntime` with the same store and empty enrollment credential to resume the exact pending candidate. |
 | `ErrCompletionCredentialConflict` / `*CompletionError` | The authority already committed a different candidate. Stop and use explicit NHP-native credential recovery or reprovisioning; never delete the persisted candidate or mint a replacement locally. |
 | `*NativeCredentialRecoveryRequiredError` | Native completed credential state is absent or malformed; explicit native recovery/reprovisioning is required. |
-| `*AgentAssignmentChangedError` | A new cell or generation requires explicit reassignment adoption. |
+| `*AgentAssignmentChangedError` | A new cell or generation was refused by default; deliberately re-run refresh with `WithAgentRuntimeReassignmentAdoption` to accept a newer generation. |
 | `ErrAgentSetupLock` | Repair state-path locking/permissions. Reload before retry because release can fail after a committed save. |
 
 Producer-controlled diagnostic strings are not reflected into native lifecycle

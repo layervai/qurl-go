@@ -11,9 +11,11 @@ import (
 // options are invalid before any UDP exchange.
 var ErrInvalidRegisterConfig = errors.New("qurl: invalid register config")
 
-// ErrAgentBindingPersistence means a native lifecycle transition could not
-// durably commit AgentState. Reload first: PendingActivation resumes with the
-// same enrollment credential, while PendingCompletion resumes without one.
+// ErrAgentBindingPersistence means an AgentState save reported failure. The
+// save may have committed before its acknowledgement failed, so reload first.
+// PendingActivation resumes with the same enrollment credential,
+// PendingCompletion resumes without one, and completed state may already hold
+// the authenticated refreshed or reassigned binding.
 var ErrAgentBindingPersistence = errors.New("qurl: agent binding persistence failed")
 
 // ErrAgentCompletionCandidatePersistence means assigned-cell registration was
