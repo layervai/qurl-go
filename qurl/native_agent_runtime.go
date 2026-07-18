@@ -416,6 +416,8 @@ func destroyNativeRuntimeResult(result *nativeRuntimeResult) {
 	if result == nil {
 		return
 	}
+	// Only the one-shot binding owns in-memory-only key material. The client
+	// holds the already-persisted device API credential and owns no live handle.
 	result.binding.Destroy()
 }
 

@@ -296,7 +296,8 @@ func loadExistingAgentState(ctx context.Context, store AgentStateStore, errKind 
 // withAgentSetupLock holds the SDK local-file setup lock across an entire native
 // lifecycle transition and makes release failure override a nominal success.
 // cleanup releases resources owned by the result before release failure hides
-// it; it must accept the zero value because fn may fail without a result.
+// it; it must be non-nil and accept the zero value because fn may fail without
+// a result.
 // Custom and network stores retain the documented caller-serialization
 // requirement.
 func withAgentSetupLock[T any](ctx context.Context, store AgentStateStore, cleanup func(T), fn func() (T, error)) (result T, resultErr error) {
