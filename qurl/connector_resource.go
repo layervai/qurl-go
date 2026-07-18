@@ -24,7 +24,8 @@ const (
 	connectorResourceIDLength      = 122 // Canonical unpadded-base64url P-256 DER SPKI.
 	connectorRoutingIDDigestLength = 32
 	connectorRoutingIDPrefix       = "c-"
-	connectorRoutingIDLength       = len(connectorRoutingIDPrefix) + (connectorRoutingIDDigestLength*8+4)/5
+	// (digest*8+4)/5 is ceil(digest bytes * 8 / 5): the unpadded base32 length.
+	connectorRoutingIDLength = len(connectorRoutingIDPrefix) + (connectorRoutingIDDigestLength*8+4)/5
 )
 
 type canonicalEncoding interface {
@@ -413,8 +414,11 @@ func isValidConnectorResourceID(resourceID string) bool {
 }
 
 func isValidConnectorRoutingID(routingID string) bool {
+	if len(routingID) != connectorRoutingIDLength {
+		return false
+	}
 	payload, ok := strings.CutPrefix(routingID, connectorRoutingIDPrefix)
-	if !ok || len(routingID) != connectorRoutingIDLength {
+	if !ok {
 		return false
 	}
 	_, canonical := decodeCanonical(connectorRoutingIDEncoding, payload)
