@@ -61,6 +61,35 @@ func TestMarshalNativeSessionApplicationBody_ConformanceSessionVectors(t *testin
 	}
 }
 
+func TestInterpretNativeAgentKnockReply_ConformanceSessionACKs(t *testing.T) {
+	vectors, err := conformance.AgentSessionControl()
+	if err != nil {
+		t.Fatalf("load qurl-conformance agent-session vectors: %v", err)
+	}
+	for _, tc := range []struct {
+		name    string
+		request conformance.AgentSessionPacket
+		ack     conformance.AgentSessionPacket
+	}{
+		{name: "reknock", request: vectors.OverloadReknock.ReknockRequest, ack: vectors.OverloadReknock.ACK},
+		{name: "exit", request: vectors.CleanExit.Request, ack: vectors.CleanExit.ACK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var request nativeAgentKnockBody
+			if err := json.Unmarshal([]byte(tc.request.BodyJSON), &request); err != nil {
+				t.Fatalf("decode conformance request body: %v", err)
+			}
+			result, err := interpretNativeAgentKnockReply(&relayknock.Reply{Type: relayknock.TypeACK, Body: []byte(tc.ack.BodyJSON)}, request.KnockResourceID)
+			if err != nil {
+				t.Fatalf("interpret conformance ACK: %v", err)
+			}
+			if result == nil || result.ACToken == "" || result.ResourceHost == "" {
+				t.Fatalf("conformance ACK did not contain a full admission envelope: %#v", result)
+			}
+		})
+	}
+}
+
 func TestMarshalNativeKnockApplicationBody_RejectsRunIDBeforeOtherInputs(t *testing.T) {
 	secretShapedRunID := "SECRET-UPPERCASE"
 	_, err := marshalNativeKnockApplicationBody("", "", NativeKnockOptions{RunID: secretShapedRunID})

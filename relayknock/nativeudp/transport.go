@@ -137,10 +137,12 @@ func Knock(ctx context.Context, ep Endpoint, body []byte, opts Options) (*relayk
 // exact decoded 32-byte cookie is mixed into a fresh NHP_RKN whose only accepted
 // reply is an echoed-counter NHP_ACK. COK's outer wire counter is deliberately
 // unconstrained; no other transition permits COK. KNK and the possible RKN are
-// separate exchanges, so ep.Host is resolved again before RKN. Cell replicas
-// must share the stateless COK-signing key: DNS may route RKN to a different
-// replica, while both replies remain authenticated against ep.ServerStaticPub
-// and the decoded cookie plus body.trxId bind RKN to the initiating KNK.
+// separate exchanges, so ep.Host is resolved again before RKN. A caller context
+// deadline is shared by both legs: time spent on KNK reduces the budget left for
+// RKN. Cell replicas must share the stateless COK-signing key: DNS may route RKN
+// to a different replica, while both replies remain authenticated against
+// ep.ServerStaticPub and the decoded cookie plus body.trxId bind RKN to the
+// initiating KNK.
 //
 // knockBody and reknockBody are already-serialized application bodies. The
 // transport does not rewrite headerType inside those authenticated bodies; the
