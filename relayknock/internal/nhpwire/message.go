@@ -43,12 +43,12 @@ type Message struct {
 
 // BuildMessage builds a complete single-message NHP packet (240-byte header ‖
 // sealed body) of the given header type. It folds material into the chain
-// hash/key in the exact order the responder expects, so every AEAD opens. The
-// For ordinary messages only the obfuscated type field in HeaderCommon[0:8]
+// hash/key in the exact order the responder expects, so every AEAD opens. For
+// ordinary messages only the obfuscated type field in HeaderCommon[0:8]
 // differs. RKN additionally mixes its exact COK cookie into the header digest;
-// the dedicated session-control vectors fence that variant. BuildMessage applies
-// NO header-type restriction: the initiator/reply gating lives in the wrapping
-// packages (relayknock builds initiator types; relayknocktest builds reply types).
+// the dedicated session-control vectors fence that variant. BuildMessage
+// enforces this RKN/cookie wire invariant but applies no initiator/reply type
+// allowlist; directional type gating lives in the wrapping packages.
 func BuildMessage(headerType int, inp *Inputs) ([]byte, error) {
 	if inp == nil {
 		return nil, errors.New("message inputs must not be nil")
