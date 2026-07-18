@@ -412,10 +412,10 @@ func isValidConnectorResourceID(resourceID string) bool {
 }
 
 func isValidConnectorRoutingID(routingID string) bool {
-	if len(routingID) != connectorRoutingIDLength || !strings.HasPrefix(routingID, connectorRoutingIDPrefix) {
+	payload, ok := strings.CutPrefix(routingID, connectorRoutingIDPrefix)
+	if !ok || len(routingID) != connectorRoutingIDLength {
 		return false
 	}
-	payload := routingID[len(connectorRoutingIDPrefix):]
 	digest, err := connectorRoutingIDEncoding.DecodeString(payload)
 	if err != nil {
 		return false
