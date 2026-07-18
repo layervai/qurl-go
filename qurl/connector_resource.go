@@ -22,7 +22,7 @@ const (
 	// Explicit, unequal length gates make the public identity and routing
 	// namespaces disjoint before their content validators run.
 	connectorResourceIDLength = 122 // Canonical unpadded-base64url P-256 DER SPKI.
-	connectorRoutingIDLength  = 54  // "c-" plus a 52-character base32 digest.
+	connectorRoutingIDLength  = 54  // "c-" plus a 52-character base32 digest (32 decoded bytes).
 	connectorRoutingIDPrefix  = "c-"
 )
 
@@ -421,8 +421,8 @@ func isValidConnectorRoutingID(routingID string) bool {
 		return false
 	}
 	// The lowercase, unpadded decoder plus exact round trip reject padding,
-	// alternate alphabets, non-zero trailing bits, and every other
-	// non-canonical spelling.
+	// alternate alphabets, embedded CR/LF, non-zero trailing bits, and every
+	// other non-canonical spelling.
 	return connectorRoutingIDEncoding.EncodeToString(digest) == payload
 }
 

@@ -1070,6 +1070,8 @@ func TestConnectorRoutingIDContract(t *testing.T) {
 		{name: "digit one", id: "c-1" + testConnectorRoutingID[3:]},
 		{name: "digit eight", id: "c-8" + testConnectorRoutingID[3:]},
 		{name: "hyphen in digest", id: "c--" + testConnectorRoutingID[3:]},
+		{name: "embedded carriage return", id: testConnectorRoutingID[:25] + "\r" + testConnectorRoutingID[26:]},
+		{name: "embedded line feed", id: testConnectorRoutingID[:25] + "\n" + testConnectorRoutingID[26:]},
 		{name: "leading whitespace", id: " " + testConnectorRoutingID},
 		{name: "trailing newline", id: testConnectorRoutingID + "\n"},
 	}
