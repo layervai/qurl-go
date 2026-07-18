@@ -24,6 +24,19 @@ type memoryAgentStateStore struct {
 	state *AgentState
 }
 
+type releaseErrorAgentStateStore struct {
+	*memoryAgentStateStore
+	closeErr error
+}
+
+type setupLockFunc func() error
+
+func (f setupLockFunc) Close() error { return f() }
+
+func (s *releaseErrorAgentStateStore) acquireSetupLock(context.Context) (setupLock, error) {
+	return setupLockFunc(func() error { return s.closeErr }), nil
+}
+
 func (s *memoryAgentStateStore) LoadAgentState(context.Context) (*AgentState, error) {
 	if s.state == nil {
 		return nil, ErrAgentStateNotFound
@@ -47,6 +60,79 @@ func (s *countingAgentStateStore) SaveAgentState(ctx context.Context, state *Age
 
 func runtimeTestHub() HubBootstrap {
 	return HubBootstrap{Host: "hub.nhp.layerv.ai", Port: standardNHPUDPPort, ServerPublicKeyB64: validTestNHPServerPublicKeyB64}
+}
+
+func TestWithAgentSetupLock_CleansSuccessfulResultBeforeZeroingOnReleaseFailure(t *testing.T) {
+	releaseErr := errors.New("release failed")
+	store := &releaseErrorAgentStateStore{
+		memoryAgentStateStore: &memoryAgentStateStore{},
+		closeErr:              releaseErr,
+	}
+	want := new(int)
+	cleanupSawResult := false
+
+	got, err := withAgentSetupLock(context.Background(), store, func(result *int) {
+		cleanupSawResult = result == want
+	}, func() (*int, error) {
+		return want, nil
+	})
+
+	if got != nil || !errors.Is(err, ErrAgentSetupLock) || !errors.Is(err, releaseErr) {
+		t.Fatalf("release failure = result %v, error %v; want nil and joined lock/release errors", got, err)
+	}
+	if !cleanupSawResult {
+		t.Fatal("cleanup did not receive the successful result before it was zeroed")
+	}
+}
+
+func TestWithAgentSetupLock_CleansErrorResultBeforeJoiningReleaseFailure(t *testing.T) {
+	releaseErr := errors.New("release failed")
+	transitionErr := errors.New("transition failed")
+	store := &releaseErrorAgentStateStore{
+		memoryAgentStateStore: &memoryAgentStateStore{},
+		closeErr:              releaseErr,
+	}
+	want := new(int)
+	cleanupSawResult := false
+
+	got, err := withAgentSetupLock(context.Background(), store, func(result *int) {
+		cleanupSawResult = result == want
+	}, func() (*int, error) {
+		return want, transitionErr
+	})
+
+	if got != nil || !errors.Is(err, transitionErr) || !errors.Is(err, ErrAgentSetupLock) || !errors.Is(err, releaseErr) {
+		t.Fatalf("combined failure = result %v, error %v; want nil and joined transition/lock/release errors", got, err)
+	}
+	if !cleanupSawResult {
+		t.Fatal("cleanup did not receive the error result before it was zeroed")
+	}
+}
+
+func TestWithAgentSetupLock_ReleaseFailureDestroysNativeRuntimePrivateKey(t *testing.T) {
+	releaseErr := errors.New("release failed")
+	store := &releaseErrorAgentStateStore{
+		memoryAgentStateStore: &memoryAgentStateStore{},
+		closeErr:              releaseErr,
+	}
+	privateKey := bytes.Repeat([]byte{0x5a}, 32)
+	result := &nativeRuntimeResult{
+		binding: &AgentRuntimeBinding{deviceStaticPrivateKey: newAgentRuntimePrivateKey(privateKey)},
+	}
+
+	got, err := withAgentSetupLock(context.Background(), store, destroyNativeRuntimeResult, func() (*nativeRuntimeResult, error) {
+		return result, nil
+	})
+
+	if got != nil || !errors.Is(err, ErrAgentSetupLock) || !errors.Is(err, releaseErr) {
+		t.Fatalf("release failure = result %v, error %v; want nil and joined lock/release errors", got, err)
+	}
+	if key := result.binding.TakeDeviceStaticPrivateKey(); key != nil {
+		t.Fatalf("destroyed binding retained private key %x", key)
+	}
+	if !bytes.Equal(privateKey, make([]byte, len(privateKey))) {
+		t.Fatalf("private key backing bytes = %x, want zeroed", privateKey)
+	}
 }
 
 func completedNativeTestState(t *testing.T) *AgentState {
