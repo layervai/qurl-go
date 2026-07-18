@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/x509"
+	"encoding/base32"
 	"errors"
 	"fmt"
 	"net/http"
@@ -20,18 +21,26 @@ const (
 	producerConnectorResourceType = "tunnel"
 	// Explicit, unequal length gates make the public identity and routing
 	// namespaces disjoint before their content validators run.
-	connectorResourceIDLength = 122 // Canonical unpadded-base64url P-256 DER SPKI.
-	connectorRoutingIDLength  = 54  // "c-" plus a 52-character base32 digest.
+	connectorResourceIDLength      = 122 // Canonical unpadded-base64url P-256 DER SPKI.
+	connectorRoutingIDDigestLength = 32
+	connectorRoutingIDPrefix       = "c-"
+	// (digest*8+4)/5 is ceil(digest bytes * 8 / 5): the unpadded base32 length.
+	connectorRoutingIDLength = len(connectorRoutingIDPrefix) + (connectorRoutingIDDigestLength*8+4)/5
 )
+
+type canonicalEncoding interface {
+	DecodeString(string) ([]byte, error)
+	EncodeToString([]byte) string
+}
 
 var (
 	// qurl-service's OpenAPI contract intentionally gives immutable connector
 	// slugs and mutable aliases the same exact lowercase 3-64 character grammar.
 	connectorSlugPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{1,62}[a-z0-9]$`)
-	// connectorRoutingIDPattern mirrors qurl-service's opaque, server-derived
+	// connectorRoutingIDEncoding mirrors qurl-service's opaque, server-derived
 	// reverse-connection routing label. The SDK validates and consumes this
 	// value verbatim; it must never derive the label from ResourceID.
-	connectorRoutingIDPattern = regexp.MustCompile(`^c-[a-z2-7]{52}$`)
+	connectorRoutingIDEncoding = base32.NewEncoding("abcdefghijklmnopqrstuvwxyz234567").WithPadding(base32.NoPadding)
 
 	// ErrConnectorResourceNotFound is returned when a qURL Connector resource
 	// lookup or deletion cannot find a resource owned by the current credential.
@@ -392,13 +401,8 @@ func isValidConnectorResourceID(resourceID string) bool {
 	if len(resourceID) != connectorResourceIDLength {
 		return false
 	}
-	der, err := b64url.DecodeString(resourceID)
-	if err != nil {
-		return false
-	}
-	// An exact round trip rejects padding, alternate alphabets, embedded CR/LF,
-	// non-zero trailing bits, and every other non-canonical spelling.
-	if b64url.EncodeToString(der) != resourceID {
+	der, ok := decodeCanonical(b64url, resourceID)
+	if !ok {
 		return false
 	}
 	publicKey, err := ParseP256PublicKeyDER(der)
@@ -410,7 +414,26 @@ func isValidConnectorResourceID(resourceID string) bool {
 }
 
 func isValidConnectorRoutingID(routingID string) bool {
-	return len(routingID) == connectorRoutingIDLength && connectorRoutingIDPattern.MatchString(routingID)
+	if len(routingID) != connectorRoutingIDLength {
+		return false
+	}
+	payload, ok := strings.CutPrefix(routingID, connectorRoutingIDPrefix)
+	if !ok {
+		return false
+	}
+	digest, canonical := decodeCanonical(connectorRoutingIDEncoding, payload)
+	return canonical && len(digest) == connectorRoutingIDDigestLength
+}
+
+func decodeCanonical(encoding canonicalEncoding, encoded string) ([]byte, bool) {
+	decoded, err := encoding.DecodeString(encoded)
+	// Decoding plus exact re-encoding rejects decoder-ignored CR/LF, non-zero
+	// trailing bits, padding, alternate alphabets, and every other non-canonical
+	// spelling.
+	if err != nil || encoding.EncodeToString(decoded) != encoded {
+		return nil, false
+	}
+	return decoded, true
 }
 
 // connectorResourceOperation drives lifecycle-specific error classification.

@@ -1062,13 +1062,18 @@ func TestConnectorRoutingIDContract(t *testing.T) {
 		{name: "wrong prefix", id: "r-" + testConnectorRoutingID[2:]},
 		{name: "short", id: testConnectorRoutingID[:len(testConnectorRoutingID)-1]},
 		{name: "long", id: testConnectorRoutingID + "a"},
+		{name: "non-zero trailing bits", id: testConnectorRoutingID[:len(testConnectorRoutingID)-1] + "b"},
+		{name: "padding character", id: testConnectorRoutingID[:len(testConnectorRoutingID)-1] + "="},
+		{name: "standard padded encoding exceeds fixed wire width", id: testConnectorRoutingID + "===="},
 		{name: "uppercase", id: "c-A" + testConnectorRoutingID[3:]},
 		{name: "digit zero", id: "c-0" + testConnectorRoutingID[3:]},
 		{name: "digit one", id: "c-1" + testConnectorRoutingID[3:]},
 		{name: "digit eight", id: "c-8" + testConnectorRoutingID[3:]},
 		{name: "hyphen in digest", id: "c--" + testConnectorRoutingID[3:]},
+		{name: "embedded carriage return", id: testConnectorRoutingID[:25] + "\r" + testConnectorRoutingID[26:]},
+		{name: "embedded line feed", id: testConnectorRoutingID[:25] + "\n" + testConnectorRoutingID[26:]},
 		{name: "leading whitespace", id: " " + testConnectorRoutingID},
-		{name: "trailing newline", id: testConnectorRoutingID + "\n"},
+		{name: "trailing newline exceeds fixed wire width", id: testConnectorRoutingID + "\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
