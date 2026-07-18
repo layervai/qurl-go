@@ -427,6 +427,9 @@ func isValidConnectorRoutingID(routingID string) bool {
 
 func decodeCanonical(encoding canonicalEncoding, encoded string) ([]byte, bool) {
 	decoded, err := encoding.DecodeString(encoded)
+	// Decoding plus exact re-encoding rejects decoder-ignored CR/LF, non-zero
+	// trailing bits, padding, alternate alphabets, and every other non-canonical
+	// spelling.
 	if err != nil || encoding.EncodeToString(decoded) != encoded {
 		return nil, false
 	}
