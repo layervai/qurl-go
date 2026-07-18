@@ -402,10 +402,10 @@ func parseCookieChallenge(body []byte, requestCounter uint64) ([]byte, error) {
 	return cookie, nil
 }
 
-// decodeCookieChallenge retains the authenticated cookie only in wipeable byte
-// slices. Canonical standard base64 needs no JSON escapes, so an escaped or
-// otherwise non-literal string is rejected instead of materialized as an
-// immutable Go string.
+// decodeCookieChallenge keeps decoded cookie bytes in caller-wiped byte slices.
+// The enclosing JSON decoder may retain short-lived encoded-text temporaries;
+// canonical base64 needs no escapes, so this function never materializes the
+// cookie as an immutable Go string.
 func decodeCookieChallenge(raw []byte) ([]byte, error) {
 	if len(raw) < 3 || raw[0] != '"' || raw[len(raw)-1] != '"' {
 		return nil, rejectCookieChallenge(cookieRejectBodyParse, "cookie has an invalid type")
