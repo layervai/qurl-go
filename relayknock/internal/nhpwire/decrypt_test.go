@@ -123,3 +123,13 @@ func TestDecryptMessage_RejectsTamperedReply(t *testing.T) {
 		})
 	}
 }
+
+func TestAcceptReplyMessageWipesBodyOnRejectedHeaderType(t *testing.T) {
+	body := []byte("lv_live_reflected_plaintext")
+	if msg, err := acceptReplyMessage(&Message{Type: TypeREG, Body: body}); msg != nil || err == nil {
+		t.Fatalf("accepted reply = %#v, %v; want rejection", msg, err)
+	}
+	if !bytes.Equal(body, make([]byte, len(body))) {
+		t.Fatalf("rejected authenticated reply retained plaintext body: %x", body)
+	}
+}

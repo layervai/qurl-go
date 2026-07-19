@@ -10,12 +10,14 @@
 //
 // # Scope
 //
-// Round-trip initiator messages are NHP_LST (answered exactly by NHP_LRT),
+// Round-trip initiator messages are NHP_LST (answered by NHP_LRT; the dedicated
+// Hub assignment profile first requires one NHP_COK→fresh proof NHP_LST),
 // NHP_KNK (answered directly by NHP_ACK or, once, by NHP_COK→NHP_RKN→NHP_ACK),
 // NHP_REG (answered exactly by NHP_RAK), and NHP_EXT (answered exactly by
-// NHP_ACK). LST and REG never accept a cookie challenge; handler-budget or
-// pre-handler overload shedding is a timeout owned by the caller's bounded
-// transaction retry. RKN and EXT accept only an echoed-counter ACK. An
+// NHP_ACK). Generic LST and REG never accept a cookie challenge. Only
+// AssignmentList accepts the Hub's return-routability COK and sends one proof
+// LST with the exact body, fresh packet material, exclusive proof flag, and raw
+// cookie mixed into the digest. RKN and EXT accept only an echoed-counter ACK. An
 // authenticated KNK→COK signal is classified before the ordinary counter gate
 // because its wire counter is deliberately unconstrained; the decrypted COK
 // body must instead carry the original KNK transaction id. The exact decoded
@@ -36,16 +38,16 @@
 // and a resolved IP is never persisted, preserving DNS/NLB replacement and
 // multi-address behavior. KNK and its possible RKN are separate exchanges and
 // may reach different replicas; every cell replica must therefore share the
-// stateless COK-signing key. Both legs still authenticate against the assignment's
-// pinned server public key, while the cookie and body transaction id bind RKN to
-// the original KNK.
+// stateless overload-COK signing key. Both legs still authenticate against the
+// assignment's pinned server public key, while the cookie and body transaction
+// id bind RKN to the original KNK.
 //
 // # Dependency policy
 //
 // Like relayknock, the only non-stdlib dependency reached from here is
 // golang.org/x/crypto (via the internal nhpwire codec). The transport reuses the
-// public relayknock initiator/reply API for all crypto; it adds only the UDP
-// socket handling, DNS resolution, deadlines, packet-size bounds, request/reply
-// correlation, the bounded COK→RKN transition, cancellation, and secret
+// shared relayknock wire codec and public reply model; it adds only UDP socket
+// handling, DNS resolution, deadlines, packet-size bounds, request/reply
+// correlation, the bounded cookie transitions, cancellation, and secret
 // scrubbing. NHP_EXT is the matching one-round-trip clean-exit primitive.
 package nativeudp

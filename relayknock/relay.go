@@ -66,7 +66,7 @@ func (e *RelayError) Error() string {
 // consumer-side mapping (qurl/portal.go normalizeRelayError, translating this to
 // the portal ErrMalformedReply / enrollment ErrRegisterReplyMalformed taxonomy)
 // lives in this module's qurl package (portal.go / register.go).
-var ErrMalformedReply = errors.New("relayknock: malformed reply")
+var ErrMalformedReply = nhpwire.ErrMalformedReply
 
 // RelayPost delivers a round-trip NHP packet (knock or register) to the relay
 // and returns the server's reply packet bytes. 200 → reply bytes; any other

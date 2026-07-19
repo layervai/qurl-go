@@ -3,7 +3,6 @@ package relayknock
 import (
 	"fmt"
 
-	"github.com/layervai/qurl-go/internal/cryptoutil"
 	"github.com/layervai/qurl-go/relayknock/internal/nhpwire"
 )
 
@@ -127,7 +126,8 @@ const (
 	// TypeListResult is NHP_LRT: the authenticated result of an NHP_LST
 	// list/query request.
 	TypeListResult = nhpwire.TypeLRT
-	// TypeCookieChallenge is NHP_COK: an overload cookie-challenge.
+	// TypeCookieChallenge is NHP_COK: an authenticated cookie-challenge. KNK
+	// uses it for overload shedding; Hub assignment uses it for return-routability.
 	TypeCookieChallenge = nhpwire.TypeCOK
 	// TypeRegisterAck is NHP_RAK: the reply to an NHP_REG registration message.
 	TypeRegisterAck = nhpwire.TypeRAK
@@ -154,8 +154,8 @@ func (r *Reply) IsACK() bool { return r.Type == nhpwire.TypeACK }
 // an NHP_LST list/query request.
 func (r *Reply) IsListResult() bool { return r.Type == nhpwire.TypeLRT }
 
-// IsCookieChallenge reports whether the reply is an NHP_COK overload
-// cookie-challenge. Native UDP callers that use KnockWithReknock consume the
+// IsCookieChallenge reports whether the reply is an NHP_COK cookie-challenge.
+// Native UDP callers using KnockWithReknock or AssignmentList consume the
 // challenge internally; raw single-message callers can inspect it directly.
 func (r *Reply) IsCookieChallenge() bool { return r.Type == nhpwire.TypeCOK }
 
@@ -181,33 +181,25 @@ func (r *Reply) IsRegisterAck() bool { return r.Type == nhpwire.TypeRAK }
 // DecryptReply authenticates the sender and body, but it does not know which
 // request the caller sent. A custom transport MUST additionally require the
 // expected request→reply type pair and, for transaction replies, the echoed
-// request counter. An authenticated NHP_COK overload signal is classified before
-// that ordinary counter gate because it is not a completed transaction; whether a
-// request type may receive COK is transport/profile policy. In particular,
-// NHP_LST accepts only NHP_LRT; it does not use NHP_COK. Exchange performs the
-// corresponding checks for its HTTP KNK/REG subset.
+// request counter. An authenticated NHP_COK is classified before that ordinary
+// counter gate because it is not a completed transaction; whether a request type
+// may receive COK is transport/profile policy. In particular, generic NHP_LST
+// accepts only NHP_LRT. The native Hub-assignment transport has
+// a dedicated, bounded LST/COK/proof-LST profile above this shared decrypt gate.
+// Exchange performs the corresponding checks for its HTTP KNK/REG subset.
 func DecryptReply(devicePriv, expectedServerStaticPub, packet []byte) (*Reply, error) {
-	msg, err := nhpwire.DecryptMessage(devicePriv, expectedServerStaticPub, packet)
+	msg, err := nhpwire.DecryptReplyMessage(devicePriv, expectedServerStaticPub, packet)
 	if err != nil {
 		return nil, err
 	}
-	return acceptDecryptedReply(msg)
+	return replyFromWire(msg), nil
 }
 
-func acceptDecryptedReply(msg *nhpwire.Message) (*Reply, error) {
-	switch msg.Type {
-	case nhpwire.TypeACK, nhpwire.TypeLRT, nhpwire.TypeCOK, nhpwire.TypeRAK:
-		return &Reply{Type: msg.Type, Counter: msg.Counter, TimestampNanos: msg.TimestampNanos, Body: msg.Body}, nil
-	default:
-		cryptoutil.Wipe(msg.Body)
-		// This is the single reply-type-policy site (nhpwire's codec no longer
-		// gates the type). Anything that is not a reply type — a known initiator
-		// type (KNK/LST/RKN/OTP/REG/EXT) or a garbage type that rode in outside
-		// the AEAD — is a reply this request cannot accept, wrapped in
-		// ErrMalformedReply so a consumer's errors.Is catches the whole class
-		// uniformly (the same sentinel Exchange's replyTypeAllowed mismatch uses).
-		// A conforming server never produces either; only a byzantine one reaches
-		// here.
-		return nil, fmt.Errorf("%w: header type %d is not a server reply", ErrMalformedReply, msg.Type)
+func replyFromWire(msg *nhpwire.Message) *Reply {
+	return &Reply{
+		Type:           msg.Type,
+		Counter:        msg.Counter,
+		TimestampNanos: msg.TimestampNanos,
+		Body:           msg.Body,
 	}
 }

@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+
+	"github.com/layervai/qurl-go/internal/cryptoutil"
 )
 
 // NHP message construction and reply decryption (initiator/responder transcripts
@@ -28,7 +30,7 @@ type Inputs struct {
 	Counter          uint64 // transaction id
 	Preamble         uint32 // HeaderCommon obfuscation preamble
 	Body             []byte // serialized, uncompressed application body
-	Cookie           []byte // exact 32-byte COK cookie for RKN; empty otherwise
+	Cookie           []byte // exact 32-byte COK cookie for RKN or Hub LST proof
 }
 
 // Message is a decrypted, authenticated NHP message. Type is the raw NHP header
@@ -36,30 +38,80 @@ type Inputs struct {
 // interpret it.
 type Message struct {
 	Type           int
+	Flags          uint16
 	Counter        uint64
 	TimestampNanos uint64
 	Body           []byte
 }
+
+// ErrMalformedReply marks an authenticated message whose header type is not a
+// server reply. relayknock aliases this sentinel as its public
+// ErrMalformedReply so every reply consumer observes one errors.Is identity
+// while the shared type gate remains next to the private wire metadata.
+var ErrMalformedReply = errors.New("relayknock: malformed reply")
 
 // BuildMessage builds a complete single-message NHP packet (240-byte header ‖
 // sealed body) of the given header type. It folds material into the chain
 // hash/key in the exact order the responder expects, so every AEAD opens. For
 // ordinary messages only the obfuscated type field in HeaderCommon[0:8]
 // differs. RKN additionally mixes its exact COK cookie into the header digest;
-// the dedicated session-control vectors fence that variant. BuildMessage
-// enforces this RKN/cookie wire invariant but applies no initiator/reply type
-// allowlist; directional type gating lives in the wrapping packages.
+// the dedicated session-control vectors fence that variant. Hub assignment LST
+// proof is built only through BuildHubLSTCookieProof. BuildMessage enforces the
+// ordinary/RKN cookie invariant but applies no initiator/reply type allowlist;
+// directional type gating lives in the wrapping packages.
 func BuildMessage(headerType int, inp *Inputs) ([]byte, error) {
+	return buildMessage(headerType, 0, inp)
+}
+
+// BuildHubLSTCookieProof builds the one dedicated assignment-proof NHP_LST.
+// The raw 32-byte Hub cookie is mixed into the header digest and the proof bit
+// is set exclusively. Keeping this separate from BuildMessage prevents generic
+// LST, REG, and KNK callers from acquiring the proof capability accidentally.
+func BuildHubLSTCookieProof(inp *Inputs) ([]byte, error) {
+	return buildMessage(TypeLST, hubLSTCookieProofFlag, inp)
+}
+
+// BuildReplyWithFlagsForTest builds a reply packet carrying an explicit flag
+// word so relayknocktest can prove consumers fail closed on out-of-profile
+// replies. It is internal to the relayknock subtree and cannot build initiator
+// messages or carry proof/RKN cookies.
+func BuildReplyWithFlagsForTest(headerType int, flags uint16, inp *Inputs) ([]byte, error) {
 	if inp == nil {
 		return nil, errors.New("message inputs must not be nil")
 	}
-	if headerType == TypeRKN {
+	switch headerType {
+	case TypeACK, TypeLRT, TypeCOK, TypeRAK:
+	default:
+		return nil, fmt.Errorf("header type %d is not a reply", headerType)
+	}
+	if len(inp.Cookie) != 0 {
+		return nil, fmt.Errorf("reply header type %d must not carry a cookie", headerType)
+	}
+	return buildMessageUnchecked(headerType, flags, inp)
+}
+
+func buildMessage(headerType int, flags uint16, inp *Inputs) ([]byte, error) {
+	if inp == nil {
+		return nil, errors.New("message inputs must not be nil")
+	}
+	switch {
+	case headerType == TypeRKN && flags == 0:
 		if len(inp.Cookie) != CookieSize {
 			return nil, fmt.Errorf("RKN cookie must be %d bytes, got %d", CookieSize, len(inp.Cookie))
 		}
-	} else if len(inp.Cookie) != 0 {
-		return nil, fmt.Errorf("header type %d must not carry an RKN cookie", headerType)
+	case headerType == TypeLST && flags == hubLSTCookieProofFlag:
+		if len(inp.Cookie) != CookieSize {
+			return nil, fmt.Errorf("hub LST proof cookie must be %d bytes, got %d", CookieSize, len(inp.Cookie))
+		}
+	case flags != 0:
+		return nil, fmt.Errorf("header type %d does not support flags %#04x", headerType, flags)
+	case len(inp.Cookie) != 0:
+		return nil, fmt.Errorf("header type %d must not carry a cookie", headerType)
 	}
+	return buildMessageUnchecked(headerType, flags, inp)
+}
+
+func buildMessageUnchecked(headerType int, flags uint16, inp *Inputs) ([]byte, error) {
 	if len(inp.ServerStaticPub) != PublicKeySize {
 		return nil, fmt.Errorf("server static pub must be %d bytes, got %d", PublicKeySize, len(inp.ServerStaticPub))
 	}
@@ -134,7 +186,7 @@ func BuildMessage(headerType int, inp *Inputs) ([]byte, error) {
 	// HeaderCommon — set everything before the digest, which covers header[0:208].
 	setVersion(header, protocolVersionMajor, protocolVersionMinor)
 	setCounter(header, inp.Counter)
-	setFlag(header, 0)
+	setFlag(header, flags)
 	setTypeAndPayloadSize(header, headerType, len(sealedBody), inp.Preamble)
 	copy(header[offDigest:offDigest+hashSize], headerDigest(inp.ServerStaticPub, header, inp.Cookie))
 
@@ -145,13 +197,38 @@ func BuildMessage(headerType int, inp *Inputs) ([]byte, error) {
 }
 
 // DecryptMessage decrypts and authenticates any NHP message this package speaks
-// against the sender's static key, admitting both reply and initiator types. The
-// wrapping packages gate the header type (relayknock.DecryptReply admits reply
-// types; relayknocktest.OpenInitiatorMessage admits initiator types).
+// against the sender's static key, admitting both reply and initiator types.
+// DecryptReplyMessage applies the shared reply gate; responder/test code applies
+// the corresponding initiator gate after calling this generic codec.
 // Authentication completes at the ss-keyed opens: only the real sender's static
 // private key yields a valid tag there.
 func DecryptMessage(devicePriv, expectedServerStaticPub, packet []byte) (*Message, error) {
 	return decryptMessage(devicePriv, expectedServerStaticPub, nil, packet)
+}
+
+// DecryptReplyMessage decrypts and authenticates a message and admits only the
+// four server reply types. It intentionally returns the internal Message so
+// transports with a narrower profile can inspect authenticated header metadata
+// without widening relayknock.Reply's public API.
+func DecryptReplyMessage(devicePriv, expectedServerStaticPub, packet []byte) (*Message, error) {
+	msg, err := DecryptMessage(devicePriv, expectedServerStaticPub, packet)
+	if err != nil {
+		return nil, err
+	}
+	return acceptReplyMessage(msg)
+}
+
+func acceptReplyMessage(msg *Message) (*Message, error) {
+	if msg == nil {
+		return nil, fmt.Errorf("%w: decrypted message is nil", ErrMalformedReply)
+	}
+	switch msg.Type {
+	case TypeACK, TypeLRT, TypeCOK, TypeRAK:
+		return msg, nil
+	default:
+		cryptoutil.Wipe(msg.Body)
+		return nil, fmt.Errorf("%w: header type %d is not a server reply", ErrMalformedReply, msg.Type)
+	}
 }
 
 // DecryptReknockMessage opens an NHP_RKN request using the exact decoded COK
@@ -162,6 +239,32 @@ func DecryptReknockMessage(devicePriv, expectedServerStaticPub, cookie, packet [
 		return nil, fmt.Errorf("RKN cookie must be %d bytes, got %d", CookieSize, len(cookie))
 	}
 	return decryptMessage(devicePriv, expectedServerStaticPub, cookie, packet)
+}
+
+// DecryptHubLSTCookieProofMessage opens the dedicated proof LST using the exact
+// raw cookie returned by the Hub. Both its type and exclusive proof flag are
+// verified after authenticated decryption so test/responder code cannot confuse
+// an ordinary LST or RKN with this assignment-only transition.
+func DecryptHubLSTCookieProofMessage(devicePriv, expectedServerStaticPub, cookie, packet []byte) (*Message, error) {
+	if len(cookie) != CookieSize {
+		return nil, fmt.Errorf("hub LST proof cookie must be %d bytes, got %d", CookieSize, len(cookie))
+	}
+	msg, err := decryptMessage(devicePriv, expectedServerStaticPub, cookie, packet)
+	if err != nil {
+		return nil, err
+	}
+	return acceptHubLSTCookieProofMessage(msg)
+}
+
+func acceptHubLSTCookieProofMessage(msg *Message) (*Message, error) {
+	if msg == nil {
+		return nil, errors.New("decrypted Hub LST cookie proof is nil")
+	}
+	if msg.Type != TypeLST || msg.Flags != hubLSTCookieProofFlag {
+		cryptoutil.Wipe(msg.Body)
+		return nil, fmt.Errorf("not a Hub LST cookie proof: type %d flags %#04x", msg.Type, msg.Flags)
+	}
+	return msg, nil
 }
 
 func decryptMessage(devicePriv, expectedServerStaticPub, cookie, packet []byte) (*Message, error) {
@@ -245,15 +348,13 @@ func decryptMessage(devicePriv, expectedServerStaticPub, cookie, packet []byte) 
 	// ignored: the body AEAD opened above already fences the actual sealedBody
 	// bytes, so the header's self-described size is not load-bearing for integrity
 	// and needs no cross-check against len(sealedBody).
-	// This codec does NOT gate the header type — the type rides outside the AEAD,
-	// so a garbage type decrypts fine, and the single type-policy site lives in the
-	// wrapping packages instead: relayknock.DecryptReply admits only reply types and
-	// relayknocktest.OpenInitiatorMessage only initiator types, so any other type
-	// (a wrong-direction known type, or garbage) becomes that package's rejection.
-	// One policy site per direction keeps the error class uniform for consumers.
+	// This generic codec does NOT gate the header type — the type rides outside
+	// the AEAD, so a garbage type decrypts fine. DecryptReplyMessage applies the
+	// single reply policy; responder/test code owns the initiator policy.
 	typ, _ := getTypeAndPayloadSize(header)
 	return &Message{
 		Type:           typ,
+		Flags:          getFlag(header),
 		Counter:        counter,
 		TimestampNanos: binary.BigEndian.Uint64(tsBytes),
 		Body:           body,
@@ -264,8 +365,19 @@ func decryptMessage(devicePriv, expectedServerStaticPub, cookie, packet []byte) 
 // the PacketBufferSize check in DecryptMessage and is post-AEAD (in-TCB), so no
 // decompression-bomb exposure beyond one buffer. The compress flag rides on the
 // server's reply and is outside the agent's control, so this fails closed on an
-// over-large inflated body rather than returning a silently truncated one.
-func inflateZlib(compressed []byte) ([]byte, error) {
+// over-large inflated body rather than returning a silently truncated one. It
+// takes ownership of compressed and wipes it on every return; any partial
+// inflated plaintext is also wiped and suppressed on error.
+func inflateZlib(compressed []byte) (body []byte, err error) {
+	defer cryptoutil.Wipe(compressed)
+	// Any read or size failure may occur after partial plaintext was produced.
+	// Named returns let one guard wipe that buffer and prevent its escape.
+	defer func() {
+		if err != nil {
+			cryptoutil.Wipe(body)
+			body = nil
+		}
+	}()
 	r, err := zlib.NewReader(bytes.NewReader(compressed))
 	if err != nil {
 		return nil, err
@@ -274,12 +386,12 @@ func inflateZlib(compressed []byte) ([]byte, error) {
 	// Read one byte past the cap so a body that inflates to exactly the limit is
 	// distinguishable from one truncated at it: return an explicit error instead
 	// of a corrupt, silently-cut body for a downstream JSON parse to trip on.
-	body, err := io.ReadAll(io.LimitReader(r, PacketBufferSize+1))
+	body, err = io.ReadAll(io.LimitReader(r, PacketBufferSize+1))
 	if err != nil {
-		return nil, err
+		return body, err
 	}
 	if len(body) > PacketBufferSize {
-		return nil, fmt.Errorf("inflated body exceeds %d-byte limit", PacketBufferSize)
+		return body, fmt.Errorf("inflated body exceeds %d-byte limit", PacketBufferSize)
 	}
 	return body, nil
 }

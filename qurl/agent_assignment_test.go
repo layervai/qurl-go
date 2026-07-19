@@ -117,12 +117,21 @@ func newAssignmentTestServer(t *testing.T, serverPriv, agentPub []byte, replies 
 func (s *assignmentTestServer) serve() {
 	defer close(s.done)
 	buffer := make([]byte, 4096)
+	cookie := bytes.Repeat([]byte{0x5a}, 32)
+	var awaitingProof bool
+	var unprovenBody []byte
 	for {
 		n, addr, err := s.conn.ReadFromUDP(buffer)
 		if err != nil {
 			return
 		}
-		opened, err := relayknocktest.OpenInitiatorMessage(s.serverPriv, s.agentPub, append([]byte(nil), buffer[:n]...))
+		requestPacket := append([]byte(nil), buffer[:n]...)
+		var opened *relayknock.Reply
+		if awaitingProof {
+			opened, err = relayknocktest.OpenHubLSTCookieProofMessage(s.serverPriv, s.agentPub, cookie, requestPacket)
+		} else {
+			opened, err = relayknocktest.OpenInitiatorMessage(s.serverPriv, s.agentPub, requestPacket)
+		}
 		if err != nil {
 			s.t.Errorf("open assignment request: %v", err)
 			continue
@@ -131,35 +140,74 @@ func (s *assignmentTestServer) serve() {
 			s.t.Errorf("assignment request type = %d, want NHP_LST (%d)", opened.Type, conformance.AgentAssignmentRequestHeaderType)
 			continue
 		}
+		if !awaitingProof {
+			s.mu.Lock()
+			index := len(s.requests)
+			s.requests = append(s.requests, append([]byte(nil), opened.Body...))
+			s.packets = append(s.packets, requestPacket)
+			s.mu.Unlock()
+			select {
+			case s.requestSeen <- struct{}{}:
+			default:
+			}
+			if index >= len(s.replies) {
+				continue
+			}
+			if !isHubAssignmentRequest(opened.Body) {
+				packet, buildErr := s.buildReply(relayknock.TypeListResult, opened.Counter, s.replies[index], index)
+				if buildErr != nil {
+					s.t.Errorf("build generic list result: %v", buildErr)
+					continue
+				}
+				if _, err := s.conn.WriteToUDP(packet, addr); err != nil {
+					s.t.Logf("write generic list result: %v", err)
+				}
+				continue
+			}
+			unprovenBody = bytes.Clone(opened.Body)
+			challengeBody := []byte(fmt.Sprintf(`{"trxId":%d,"cookie":%q}`, opened.Counter, base64.StdEncoding.EncodeToString(cookie)))
+			packet, buildErr := s.buildReply(relayknock.TypeCookieChallenge, opened.Counter+99, challengeBody, index*2)
+			if buildErr != nil {
+				s.t.Errorf("build assignment challenge: %v", buildErr)
+				continue
+			}
+			awaitingProof = true
+			if _, err := s.conn.WriteToUDP(packet, addr); err != nil {
+				s.t.Logf("write assignment challenge: %v", err)
+			}
+			continue
+		}
+
+		if !bytes.Equal(opened.Body, unprovenBody) {
+			s.t.Errorf("proof assignment body changed: got %q want %q", opened.Body, unprovenBody)
+			continue
+		}
 		s.mu.Lock()
-		index := len(s.requests)
-		s.requests = append(s.requests, append([]byte(nil), opened.Body...))
-		s.packets = append(s.packets, append([]byte(nil), buffer[:n]...))
+		index := len(s.requests) - 1
 		s.mu.Unlock()
-		select {
-		case s.requestSeen <- struct{}{}:
-		default:
-		}
-		if index >= len(s.replies) {
-			continue
-		}
-		packet, err := relayknocktest.BuildReply(relayknock.TypeListResult, &relayknock.KnockInputs{
-			DeviceStaticPriv: s.serverPriv,
-			ServerStaticPub:  s.agentPub,
-			EphemeralPriv:    bytes.Repeat([]byte{byte(0x80 + index)}, 32),
-			TimestampNanos:   uint64(assignmentFixtureNow.UnixNano()) + uint64(index),
-			Counter:          opened.Counter,
-			Preamble:         uint32(0x11223344 + index),
-			Body:             s.replies[index],
-		})
+		packet, err := s.buildReply(relayknock.TypeListResult, opened.Counter, s.replies[index], index*2+1)
 		if err != nil {
-			s.t.Errorf("build assignment reply: %v", err)
+			s.t.Errorf("build assignment result: %v", err)
 			continue
 		}
+		awaitingProof = false
+		unprovenBody = nil
 		if _, err := s.conn.WriteToUDP(packet, addr); err != nil {
-			s.t.Logf("write assignment reply: %v", err)
+			s.t.Logf("write assignment result: %v", err)
 		}
 	}
+}
+
+func (s *assignmentTestServer) buildReply(replyType int, counter uint64, body []byte, sequence int) ([]byte, error) {
+	return relayknocktest.BuildReply(replyType, &relayknock.KnockInputs{
+		DeviceStaticPriv: s.serverPriv,
+		ServerStaticPub:  s.agentPub,
+		EphemeralPriv:    bytes.Repeat([]byte{byte(0x80 + sequence)}, 32),
+		TimestampNanos:   uint64(assignmentFixtureNow.UnixNano()) + uint64(sequence),
+		Counter:          counter,
+		Preamble:         uint32(0x11223344 + sequence),
+		Body:             body,
+	})
 }
 
 func (s *assignmentTestServer) requestPackets() [][]byte {
@@ -338,8 +386,8 @@ func TestHubAssignmentRetriesResolveFailure(t *testing.T) {
 	if err != nil || assignment.CellID != "cell0" {
 		t.Fatalf("RefreshAgentAssignment = %#v, %v", assignment, err)
 	}
-	if resolveCalls != 2 || nonceCalls != 1 || fmt.Sprint(slept) != "[0s]" || len(server.requestBodies()) != 1 {
-		t.Fatalf("resolve/nonce/sleep/request counts = %d/%d/%v/%d, want 2/1/[0s]/1", resolveCalls, nonceCalls, slept, len(server.requestBodies()))
+	if resolveCalls != 3 || nonceCalls != 1 || fmt.Sprint(slept) != "[0s]" || len(server.requestBodies()) != 1 {
+		t.Fatalf("resolve/nonce/sleep/request counts = %d/%d/%v/%d, want 3/1/[0s]/1", resolveCalls, nonceCalls, slept, len(server.requestBodies()))
 	}
 }
 
@@ -364,8 +412,8 @@ func TestHubAssignmentAddressFallbackUsesOneRequestNonce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if dialer.calls != 2 || nonceCalls != 1 || len(server.requestBodies()) != 1 {
-		t.Fatalf("address dials/nonce draws/requests = %d/%d/%d, want 2/1/1", dialer.calls, nonceCalls, len(server.requestBodies()))
+	if dialer.calls != 3 || nonceCalls != 1 || len(server.requestBodies()) != 1 {
+		t.Fatalf("address dials/nonce draws/requests = %d/%d/%d, want 3/1/1", dialer.calls, nonceCalls, len(server.requestBodies()))
 	}
 }
 
@@ -782,6 +830,7 @@ func TestAssignmentConformanceErrorTaxonomy(t *testing.T) {
 		fixture.ErrorContract.InitialCredentialCases,
 	}
 	executedErrors := 0
+	var invalidRequestPhases []string
 	for groupIndex, group := range groups {
 		if len(group) == 0 {
 			t.Fatalf("conformance error group %d is empty", groupIndex)
@@ -792,17 +841,29 @@ func TestAssignmentConformanceErrorTaxonomy(t *testing.T) {
 				t.Fatalf("conformance error case %q has unknown code %q", testCase.Name, testCase.ErrCode)
 			}
 			executedErrors++
-			t.Run(testCase.Name, func(t *testing.T) {
-				initial := testCase.Phase == "initial_assignment"
-				_, err := parseAssignmentEnvelope([]byte(testCase.BodyJSON), initial)
-				if !errors.Is(err, expected) || errors.Is(err, ErrAssignmentInvalidResponse) {
-					t.Fatalf("error = %v, want %v only", err, expected)
+			requestPhases := []string{testCase.Phase}
+			if len(testCase.AcceptedPhases) != 0 {
+				requestPhases = testCase.AcceptedPhases
+			}
+			for _, phase := range requestPhases {
+				t.Run(testCase.Name+"/"+phase, func(t *testing.T) {
+					initial := phase == "initial_assignment"
+					_, err := parseAssignmentEnvelope([]byte(testCase.BodyJSON), initial)
+					if !errors.Is(err, expected) || errors.Is(err, ErrAssignmentInvalidResponse) {
+						t.Fatalf("error = %v, want %v only", err, expected)
+					}
+				})
+				if testCase.ErrCode == "52205" {
+					invalidRequestPhases = append(invalidRequestPhases, phase)
 				}
-			})
+			}
 		}
 	}
 	if executedErrors == 0 {
 		t.Fatal("conformance error fixture executed no taxonomy cases")
+	}
+	if want := []string{"initial_assignment", "refresh_assignment"}; !slices.Equal(invalidRequestPhases, want) {
+		t.Fatalf("52205 executed phases = %v, want %v", invalidRequestPhases, want)
 	}
 	executedMalformed := 0
 	for _, testCase := range fixture.ErrorContract.MalformedCases {

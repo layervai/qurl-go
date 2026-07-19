@@ -17,8 +17,10 @@ import (
 
 	conformance "github.com/layervai/qurl-conformance"
 
+	"github.com/layervai/qurl-go/internal/cryptoutil"
 	"github.com/layervai/qurl-go/internal/nhpcontract"
 	"github.com/layervai/qurl-go/internal/udpfence"
+	"github.com/layervai/qurl-go/internal/x25519key"
 	"github.com/layervai/qurl-go/relayknock"
 	"github.com/layervai/qurl-go/relayknock/internal/nhpwire"
 )
@@ -163,6 +165,98 @@ func TestParseCookieChallenge_RejectsEscapedCookieText(t *testing.T) {
 	var classified *cookieChallengeError
 	if !errors.As(err, &classified) || classified.rejectClass != cookieRejectEncoding {
 		t.Fatalf("escaped cookie error = %v, want %q", err, cookieRejectEncoding)
+	}
+}
+
+func TestHubAssignmentCookieChallengeConformanceCases(t *testing.T) {
+	fixture, err := conformance.ConnectorHubLSTCookie()
+	if err != nil {
+		t.Fatal(err)
+	}
+	flowCounters := make(map[string]uint64, len(fixture.Flows))
+	for _, flow := range fixture.Flows {
+		counter, err := strconv.ParseUint(flow.UnprovenCounter, 10, 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		flowCounters[flow.Phase] = counter
+	}
+	wantCookie := mustHexBytes(t, fixture.CookieKATs[0].CookieHex)
+	wantChallengeFlags, err := strconv.ParseUint(fixture.Contract.ChallengeHeaderFlagsHex, 16, 16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wantChallengeFlags != 0 {
+		t.Fatalf("challenge flags = %#04x, want frozen flag-zero profile", wantChallengeFlags)
+	}
+	executed := make(map[string]struct{}, len(fixture.ChallengeCases))
+	for _, testCase := range fixture.ChallengeCases {
+		t.Run(testCase.Name, func(t *testing.T) {
+			headerFlags, err := strconv.ParseUint(testCase.HeaderFlagsHex, 16, 16)
+			if err != nil {
+				t.Fatal(err)
+			}
+			requestCounter := flowCounters["initial_assignment"]
+			wantParse := false
+			switch testCase.Name {
+			case "accept_initial_challenge":
+				wantParse = true
+			case "accept_refresh_challenge":
+				requestCounter = flowCounters["refresh_assignment"]
+				wantParse = true
+			case "reject_untrusted_server":
+				// The strict body is valid; pinned-key authentication rejects this
+				// case before parseCookieChallenge is called.
+				wantParse = true
+			case "reject_compressed_challenge", "reject_unknown_flag_challenge":
+				// The strict body is valid; the assignment-only authenticated-header
+				// gate rejects every nonzero COK flag before body parsing.
+			case "reject_second_challenge":
+				// The strict body is valid; AssignmentList's one-proof state gate
+				// rejects it without sending a third LST.
+				wantParse = true
+				requestCounter, err = strconv.ParseUint(fixture.Flows[0].ProofCounter, 10, 64)
+				if err != nil {
+					t.Fatal(err)
+				}
+			case "reject_malformed_body", "reject_unknown_field", "reject_duplicate_field", "reject_wrong_transaction", "reject_cookie_encoding", "reject_cookie_length":
+			default:
+				t.Fatalf("unhandled Hub challenge case %q", testCase.Name)
+			}
+
+			body := []byte(testCase.BodyJSON)
+			gated, gateErr := correlateAssignmentReply(&nhpwire.Message{
+				Type:  relayknock.TypeCookieChallenge,
+				Flags: uint16(headerFlags),
+				Body:  body,
+			}, requestCounter)
+			if headerFlags != wantChallengeFlags {
+				if gated != nil || !errors.Is(gateErr, relayknock.ErrMalformedReply) {
+					t.Fatalf("flagged challenge gate = %#v, %v; want ErrMalformedReply", gated, gateErr)
+				}
+				if !bytes.Equal(body, make([]byte, len(body))) {
+					t.Fatalf("flagged challenge retained plaintext body: %x", body)
+				}
+				return
+			}
+			if gateErr != nil || gated == nil {
+				t.Fatalf("flag-zero challenge gate = %#v, %v; want accepted reply", gated, gateErr)
+			}
+
+			cookie, err := parseCookieChallenge(gated.Body, requestCounter)
+			defer cryptoutil.Wipe(cookie)
+			if wantParse {
+				if err != nil || !bytes.Equal(cookie, wantCookie) {
+					t.Fatalf("parseCookieChallenge = %x, %v; want canonical cookie", cookie, err)
+				}
+			} else if !errors.Is(err, relayknock.ErrMalformedReply) {
+				t.Fatalf("parseCookieChallenge error = %v, want ErrMalformedReply", err)
+			}
+		})
+		executed[testCase.Name] = struct{}{}
+	}
+	if len(executed) != len(fixture.ChallengeCases) {
+		t.Fatalf("executed %d/%d Hub challenge cases", len(executed), len(fixture.ChallengeCases))
 	}
 }
 
@@ -360,6 +454,48 @@ func TestBuildPacketDrawsAndWipesRandomnessOnce(t *testing.T) {
 	}
 }
 
+func TestBuildHubAssignmentProofDrawsOnceAndFailsOnCollision(t *testing.T) {
+	serverPub := freshX25519Pub(t)
+	devicePriv := freshX25519Priv(t)
+	cookie := bytes.Repeat([]byte{0x5a}, nhpwire.CookieSize)
+	originalReader := rand.Reader
+	t.Cleanup(func() { rand.Reader = originalReader })
+
+	reader := &recordingEntropyReader{}
+	rand.Reader = reader
+	packet, fresh, err := buildHubAssignmentProofPacket(serverPub, devicePriv, []byte("assignment"), cookie, packetFreshness{
+		ephemeralPub: bytes.Repeat([]byte{0xff}, nhpwire.PublicKeySize),
+		counter:      1,
+	})
+	if err != nil || len(packet) == 0 || fresh.counter != 0x2122232425262728 {
+		t.Fatalf("proof packet/freshness/error = %d/%#x/%v", len(packet), fresh.counter, err)
+	}
+	if reader.calls != 1 || !bytes.Equal(reader.buffer, make([]byte, len(reader.buffer))) {
+		t.Fatalf("proof entropy reads/wipe = %d/%x, want one zeroed draw", reader.calls, reader.buffer)
+	}
+
+	repeatedPrivate := make([]byte, x25519key.Size)
+	for i := range repeatedPrivate {
+		repeatedPrivate[i] = byte(i + 1)
+	}
+	repeatedPublic, err := nhpwire.X25519Public(repeatedPrivate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader = &recordingEntropyReader{}
+	rand.Reader = reader
+	packet, _, err = buildHubAssignmentProofPacket(serverPub, devicePriv, nil, cookie, packetFreshness{
+		ephemeralPub: repeatedPublic,
+		counter:      0x2122232425262728,
+	})
+	if packet != nil || !errors.Is(err, ErrTransport) || errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("collision packet/error = %x/%v, want nil ErrTransport only", packet, err)
+	}
+	if reader.calls != 1 || !bytes.Equal(reader.buffer, make([]byte, len(reader.buffer))) {
+		t.Fatalf("collision entropy reads/wipe = %d/%x, want one zeroed draw", reader.calls, reader.buffer)
+	}
+}
+
 func TestResolveAddresses_CapAndEmpty(t *testing.T) {
 	many := []netip.Addr{
 		netip.MustParseAddr("8.8.8.8"),
@@ -473,6 +609,19 @@ func TestCorrelateDecryptedReply_CookieChallengeBeforeCounterCheck(t *testing.T)
 	}
 	if !bytes.Equal(body, []byte("authenticated-overload-cookie")) {
 		t.Fatalf("accepted COK body was unexpectedly wiped: %x", body)
+	}
+}
+
+func TestCorrelateAssignmentReplyRejectsAndWipesFlaggedChallenge(t *testing.T) {
+	for _, flags := range []uint16{0x0002, 0x0008} {
+		body := []byte("decrypted-cookie-secret")
+		msg := &nhpwire.Message{Type: relayknock.TypeCookieChallenge, Flags: flags, Body: body}
+		if got, err := correlateAssignmentReply(msg, 41); got != nil || !errors.Is(err, relayknock.ErrMalformedReply) {
+			t.Fatalf("flags %#04x reply/error = %#v/%v, want nil ErrMalformedReply", flags, got, err)
+		}
+		if !bytes.Equal(body, make([]byte, len(body))) {
+			t.Fatalf("flags %#04x rejected body was not wiped: %x", flags, body)
+		}
 	}
 }
 
