@@ -214,13 +214,9 @@ func AssignmentList(ctx context.Context, ep Endpoint, body []byte, opts Options)
 	if err != nil {
 		return nil, err
 	}
-	reply, err = exchangeBuiltPacket(ctx, ep, relayknock.TypeListRequest, proof.counter, proofPacket, opts, true)
+	reply, err = exchangeBuiltPacket(ctx, ep, relayknock.TypeListRequest, proof.counter, proofPacket, opts, false)
 	if err != nil {
 		return nil, err
-	}
-	if reply.IsCookieChallenge() {
-		cryptoutil.Wipe(reply.Body)
-		return nil, fmt.Errorf("%w: Hub returned a second assignment cookie challenge", relayknock.ErrMalformedReply)
 	}
 	return reply, nil
 }
@@ -343,11 +339,6 @@ func exchange(ctx context.Context, ep Endpoint, headerType int, body, cookie []b
 	if err != nil {
 		return nil, 0, err
 	}
-	// The built packet must fit the fixed receive buffer of the reference server.
-	if len(packet) > nhpwire.PacketBufferSize {
-		return nil, 0, fmt.Errorf("%w: packet of %d bytes exceeds the %d-byte NHP buffer", ErrInvalidRequest, len(packet), nhpwire.PacketBufferSize)
-	}
-
 	opened, err := exchangeBuiltPacket(ctx, ep, headerType, counter, packet, opts, false)
 	return opened, counter, err
 }
