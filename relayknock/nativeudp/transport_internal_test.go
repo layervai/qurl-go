@@ -18,6 +18,7 @@ import (
 	conformance "github.com/layervai/qurl-conformance"
 
 	"github.com/layervai/qurl-go/internal/nhpcontract"
+	"github.com/layervai/qurl-go/internal/udpfence"
 	"github.com/layervai/qurl-go/relayknock"
 	"github.com/layervai/qurl-go/relayknock/internal/nhpwire"
 )
@@ -594,6 +595,64 @@ func TestSendOnePreservesOversizeBytesWhenReadAlsoReturnsError(t *testing.T) {
 	}
 	if len(reply) != nhpwire.PacketBufferSize+1 {
 		t.Fatalf("reply length = %d, want %d", len(reply), nhpwire.PacketBufferSize+1)
+	}
+}
+
+func TestSendToAddresses_RechecksFenceBeforeFallbackDatagram(t *testing.T) {
+	fenceErr := errors.New("recovery deadline reached")
+	expired := false
+	writes := 0
+	dials := 0
+	ctx := udpfence.With(context.Background(), func() error {
+		if expired {
+			return fenceErr
+		}
+		return nil
+	})
+	dialer := dialerFunc(func(context.Context, string, string) (net.Conn, error) {
+		dials++
+		return &scriptedDatagramConn{write: func([]byte) (int, error) {
+			writes++
+			expired = true
+			return 0, errors.New("first address write failed")
+		}}, nil
+	})
+
+	_, err := sendToAddresses(ctx, []netip.Addr{
+		netip.MustParseAddr("192.0.2.1"), netip.MustParseAddr("192.0.2.2"),
+	}, 62206, []byte{1, 2, 3}, Options{Dialer: dialer})
+	if !errors.Is(err, fenceErr) {
+		t.Fatalf("fallback fence error = %v, want preserved fence error", err)
+	}
+	if writes != 1 || dials != 1 {
+		t.Fatalf("fallback after deadline = %d writes / %d dials, want 1/1", writes, dials)
+	}
+}
+
+func TestSendToAddresses_PreservesFenceThatClosesDuringDial(t *testing.T) {
+	fenceErr := errors.New("recovery deadline reached")
+	expired := false
+	writes := 0
+	ctx := udpfence.With(context.Background(), func() error {
+		if expired {
+			return fenceErr
+		}
+		return nil
+	})
+	dialer := dialerFunc(func(context.Context, string, string) (net.Conn, error) {
+		expired = true
+		return &scriptedDatagramConn{write: func(p []byte) (int, error) {
+			writes++
+			return len(p), nil
+		}}, nil
+	})
+
+	_, err := sendToAddresses(ctx, []netip.Addr{netip.MustParseAddr("192.0.2.1")}, 62206, []byte{1}, Options{Dialer: dialer})
+	if !errors.Is(err, fenceErr) || errors.Is(err, ErrTransport) {
+		t.Fatalf("pre-write fence = %v, want preserved fence only", err)
+	}
+	if writes != 0 {
+		t.Fatalf("pre-write fence allowed %d datagrams", writes)
 	}
 }
 

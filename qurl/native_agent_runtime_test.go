@@ -167,6 +167,12 @@ type runtimeRouteResolver struct {
 	hosts map[string]netip.Addr
 }
 
+type runtimeResolverFunc func(context.Context, string, string) ([]netip.Addr, error)
+
+func (f runtimeResolverFunc) LookupNetIP(ctx context.Context, network, host string) ([]netip.Addr, error) {
+	return f(ctx, network, host)
+}
+
 func (r runtimeRouteResolver) LookupNetIP(_ context.Context, network, host string) ([]netip.Addr, error) {
 	if network != "ip" {
 		return nil, fmt.Errorf("unexpected network %q", network)
@@ -680,11 +686,11 @@ func TestRegisterAgentRuntime_RejectsMutuallyExclusiveRecoveryMarkersBeforeIO(t 
 	completion := activation.clone()
 	completion.PendingActivation = nil
 	completion.PendingCompletion = &PendingAgentCompletion{
-		DeviceAPIKey:              canonicalNativeDeviceCredential,
-		CellID:                    completion.Assignment.CellID,
-		AssignmentGeneration:      completion.Assignment.AssignmentGeneration,
-		AssignmentTicketExpiresAt: activation.PendingActivation.AssignmentTicketExpiresAt,
-		RecoveryExpiresAt:         activation.PendingActivation.RecoveryExpiresAt,
+		DeviceAPIKey:                  canonicalNativeDeviceCredential,
+		CellID:                        completion.Assignment.CellID,
+		AssignmentGeneration:          completion.Assignment.AssignmentGeneration,
+		RecoveryAnchorTicketExpiresAt: activation.PendingActivation.RecoveryAnchorTicketExpiresAt,
+		RecoveryExpiresAt:             activation.PendingActivation.RecoveryExpiresAt,
 	}
 	if err := validateLoadedAgentAssignment(completion); err != nil {
 		t.Fatalf("valid completion fixture: %v", err)
@@ -692,11 +698,11 @@ func TestRegisterAgentRuntime_RejectsMutuallyExclusiveRecoveryMarkersBeforeIO(t 
 
 	pendingCompletion := func(state *AgentState) *PendingAgentCompletion {
 		return &PendingAgentCompletion{
-			DeviceAPIKey:              canonicalNativeDeviceCredential,
-			CellID:                    state.Assignment.CellID,
-			AssignmentGeneration:      state.Assignment.AssignmentGeneration,
-			AssignmentTicketExpiresAt: activation.PendingActivation.AssignmentTicketExpiresAt,
-			RecoveryExpiresAt:         activation.PendingActivation.RecoveryExpiresAt,
+			DeviceAPIKey:                  canonicalNativeDeviceCredential,
+			CellID:                        state.Assignment.CellID,
+			AssignmentGeneration:          state.Assignment.AssignmentGeneration,
+			RecoveryAnchorTicketExpiresAt: activation.PendingActivation.RecoveryAnchorTicketExpiresAt,
+			RecoveryExpiresAt:             activation.PendingActivation.RecoveryExpiresAt,
 		}
 	}
 	tests := []struct {
@@ -1406,8 +1412,7 @@ func TestRunCompletionExchange_DeadlineDuringBackoffRequiresRecovery(t *testing.
 		Host: "cell0.nhp.layerv.ai", Port: standardNHPUDPPort,
 		ServerStaticPub: assignmentHex(t, contract.Keys.AssignedCell.StaticPubHex),
 	}
-	state := &AgentState{PendingCompletion: &PendingAgentCompletion{RecoveryExpiresAt: fixed.Add(time.Hour)}}
-	_, err := cfg.runCompletionExchange(context.Background(), state, endpoint, []byte(`{"query":"register_agent"}`), cfg.udpOptions(agentPrivate))
+	_, err := cfg.runCompletionExchange(context.Background(), endpoint, []byte(`{"query":"register_agent"}`), cfg.udpOptions(agentPrivate))
 	var recovery *CompletionRecoveryRequiredError
 	if !errors.As(err, &recovery) || !errors.Is(err, ErrCompletionRecoveryRequired) ||
 		!errors.Is(err, nativeudp.ErrTransport) || !errors.Is(err, context.DeadlineExceeded) {

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/netip"
 	"os"
@@ -1125,6 +1126,39 @@ func TestInitialAssignmentDeadlineClocksAreIndependent(t *testing.T) {
 	}
 }
 
+func TestInitialAssignmentEnforcesConformanceTicketLifetime(t *testing.T) {
+	fixture := loadAssignmentFixture(t)
+	var envelope map[string]any
+	if err := json.Unmarshal([]byte(fixture.InitialAssignment.Result.BodyJSON), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	list := envelope["list"].(map[string]any)
+
+	for _, test := range []struct {
+		name    string
+		expiry  time.Time
+		wantErr bool
+	}{
+		{name: "exact maximum", expiry: assignmentFixtureNow.Add(maxAssignmentTicketLifetime)},
+		{name: "maximum plus one second", expiry: assignmentFixtureNow.Add(maxAssignmentTicketLifetime + time.Second), wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := maps.Clone(list)
+			candidate["assignment_ticket_expires_at"] = test.expiry.UTC().Format(time.RFC3339)
+			document := maps.Clone(envelope)
+			document["list"] = candidate
+			body, err := json.Marshal(document)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = parseInitialAssignmentReply(body, "agent-conform", assignmentFixtureNow)
+			if test.wantErr != errors.Is(err, ErrAssignmentInvalidResponse) {
+				t.Fatalf("ticket lifetime parse = %v, want invalid=%t", err, test.wantErr)
+			}
+		})
+	}
+}
+
 func TestParseCanonicalRFC3339PinsProducerSpelling(t *testing.T) {
 	canonical := "2026-07-15T23:30:00Z"
 	parsed, err := parseCanonicalRFC3339(canonical)
@@ -1207,6 +1241,9 @@ func TestAssignmentTicketMatchesReleasedConformanceBoundary(t *testing.T) {
 	}
 	if maxAssignmentTicketBytes != ticketArtifact.Contract.MaxTicketASCIIBytes {
 		t.Fatalf("SDK ticket limit = %d, released conformance limit = %d", maxAssignmentTicketBytes, ticketArtifact.Contract.MaxTicketASCIIBytes)
+	}
+	if maxAssignmentTicketLifetime != time.Duration(ticketArtifact.Contract.MaxLifetimeSeconds)*time.Second {
+		t.Fatalf("SDK ticket lifetime = %s, released conformance limit = %ds", maxAssignmentTicketLifetime, ticketArtifact.Contract.MaxLifetimeSeconds)
 	}
 
 	maxTicket := "!" + strings.Repeat("~", maxAssignmentTicketBytes-1)

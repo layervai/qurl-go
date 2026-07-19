@@ -63,8 +63,9 @@ var ErrBootstrapSetupKeyConsumed = errors.New("qurl: bootstrap setup key already
 // rather than a world-readable path.
 //
 // The state schema is native-only. Unknown JSON fields fail closed; no retired
-// HTTP enrollment schema is accepted or migrated. SchemaVersion is
-// informational; readiness comes from validated native fields.
+// HTTP enrollment schema is accepted or migrated. SchemaVersion selects the
+// closed legacy/current recovery-field grammar; readiness still comes from the
+// validated native fields rather than the number alone.
 type AgentState struct {
 	AgentID       string     `json:"agent_id,omitempty"`
 	PrivateKeyB64 string     `json:"private_key_b64"`
@@ -72,7 +73,8 @@ type AgentState struct {
 	RegisteredAt  *time.Time `json:"registered_at,omitempty"`
 
 	// SchemaVersion is the AgentState schema version. RegisterAgentRuntime writes
-	// agentStateSchemaVersion. Informational only.
+	// agentStateSchemaVersion; pending schema-v5 state must not populate schema-v6
+	// recovery fields.
 	SchemaVersion int `json:"schema_version,omitempty"`
 	// DeviceAPIKey is the device REST bearer credential minted at registration
 	// completion. Its presence alongside RegisteredAt marks a state ready to back
@@ -134,10 +136,10 @@ type PendingAgentCompletion struct {
 	DeviceAPIKey         string `json:"device_api_key"`
 	CellID               string `json:"cell_id"`
 	AssignmentGeneration int64  `json:"assignment_generation"`
-	// AssignmentTicketExpiresAt retains the authenticated Hub timestamp that
-	// anchored this transaction before RAK. Completion never reuses the ticket;
-	// the timestamp exists only to validate the copied recovery deadline.
-	AssignmentTicketExpiresAt time.Time `json:"assignment_ticket_expires_at,omitempty"`
+	// RecoveryAnchorTicketExpiresAt retains the first authenticated Hub ticket
+	// expiry for this recovery episode. Completion never reuses the ticket; the
+	// timestamp exists only to validate the copied immutable deadline.
+	RecoveryAnchorTicketExpiresAt time.Time `json:"recovery_anchor_ticket_expires_at,omitempty"`
 	// RecoveryExpiresAt is the absolute deadline inherited unchanged from the
 	// activation ticket. It is never reset by RAK, restart, assignment refresh,
 	// retry, or completion response.
@@ -164,9 +166,13 @@ type PendingAgentCompletion struct {
 type PendingAgentActivation struct {
 	AssignmentTicket          string    `json:"assignment_ticket"`
 	AssignmentTicketExpiresAt time.Time `json:"assignment_ticket_expires_at"`
-	// RecoveryExpiresAt is exactly AssignmentTicketExpiresAt plus the released
-	// AgentRegistrationRecoveryHorizon. The authenticated Hub timestamp, rather
-	// than a local process timestamp, anchors the finite recovery contract.
+	// RecoveryAnchorTicketExpiresAt is the first authenticated ticket expiry in
+	// this recovery episode. An authenticated non-commit verdict may replace the
+	// current ticket, but it cannot replace this non-secret authority anchor.
+	RecoveryAnchorTicketExpiresAt time.Time `json:"recovery_anchor_ticket_expires_at,omitempty"`
+	// RecoveryExpiresAt is exactly RecoveryAnchorTicketExpiresAt plus the released
+	// AgentRegistrationRecoveryHorizon. The first authenticated Hub timestamp,
+	// rather than a local process timestamp, anchors the finite recovery contract.
 	RecoveryExpiresAt                  time.Time              `json:"recovery_expires_at,omitempty"`
 	AgentID                            string                 `json:"agent_id"`
 	AgentPublicKeyB64                  string                 `json:"agent_public_key_b64"`

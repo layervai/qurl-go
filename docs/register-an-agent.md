@@ -40,9 +40,10 @@ The SDK then:
 1. loads or creates the persistent X25519 agent identity;
 2. asks the pinned Hub for an assignment over authenticated NHP UDP;
 3. obtains the optional account OTP, then durably persists one exact pending
-   activation: ticket, ticket expiry, 90-day recovery deadline, agent id/public
-   key, registration key id/kind, metadata, complete assigned-cell binding, and
-   a one-way identity of the caller-supplied enrollment credential;
+   activation: current ticket and expiry, first-ticket recovery anchor, 90-day
+   absolute recovery deadline, agent id/public key, registration key id/kind,
+   metadata, complete assigned-cell binding, and a one-way identity of the
+   caller-supplied enrollment credential;
 4. sends REG directly to only that persisted assigned cell;
 5. after an authenticated RAK, atomically replaces the pending activation with
    one exact completion candidate before sending completion;
@@ -55,7 +56,9 @@ next call must supply the same enrollment credential. The SDK re-drives the
 persisted REG to its pinned cell before asking the Hub for anything new. An
 exact committed activation may replay after ticket expiry while its persisted
 recovery deadline remains live; an authenticated `52111` marker-absent result
-permits one replacement Hub ticket while the credential remains active.
+permits one replacement Hub ticket while the credential remains active. That
+replacement changes the current ticket, never the first-ticket recovery anchor
+or absolute deadline, including after a process restart.
 Transport ambiguity never triggers Hub or cross-cell fallback.
 
 Metadata is optional only when constructing a fresh REG. Once a
@@ -68,21 +71,27 @@ restored, explicitly reprovision the agent rather than substituting new
 metadata.
 
 The v0.5 Hub contract requires the assignment lease to expire strictly after
-the assignment ticket. The SDK enforces that ordering when it creates and
-reloads pending activation state.
+the assignment ticket and caps a ticket at the qurl-conformance maximum of 900
+seconds from the authenticated response clock. The SDK enforces both bounds
+when it creates pending activation state and rechecks lease ordering on reload.
 
 ## Finite recovery horizon
 
 `AgentRegistrationRecoveryHorizon` is exactly 90 days. A fresh pending
 activation persists
-`recovery_expires_at = assignment_ticket_expires_at + 90 days`, where the anchor
-is the timestamp from the authenticated Hub LRT. After RAK, the SDK copies that
-same absolute deadline unchanged into `PendingCompletion`. RAK, restart,
-assignment refresh, retries, SDK upgrade, and local save time never reset it.
+`recovery_anchor_ticket_expires_at = assignment_ticket_expires_at` and
+`recovery_expires_at = recovery_anchor_ticket_expires_at + 90 days`, where the
+anchor is the first timestamp from the authenticated Hub LRT. A replacement
+ticket keeps its own current expiry but copies that original anchor and deadline.
+After RAK, the SDK copies the same immutable pair into `PendingCompletion`. RAK,
+replacement, restart, assignment refresh, retries, SDK upgrade, and local save
+time never reset it.
 
-`RegisterAgentRuntime` checks the deadline before any recovery UDP packet and
-again before each REG or completion exchange. At or after the deadline it
-returns `*AgentRecoveryExpiredError`, matchable with
+`RegisterAgentRuntime` clamps pending-recovery contexts to the deadline and
+checks the same boundary before DNS and immediately before every Hub or cell UDP
+datagram write, including OTP and each multi-address fallback. No recovery
+datagram is dispatched at or after the deadline. It returns
+`*AgentRecoveryExpiredError`, matchable with
 `ErrAgentRecoveryExpired`, containing only the non-secret phase and deadline.
 The pending record remains intact. Do not delete it to force reenrollment; use
 the explicit NHP-native credential recovery or reprovisioning workflow.
@@ -98,8 +107,10 @@ the SDK's 90-day guarantee.
 
 qurl-go v0.1.1 wrote schema-v5 pending records without a finite deadline. On
 load, this SDK can migrate `PendingActivation` exactly because its authenticated
-ticket expiry is present: it derives the 90-day deadline and durably writes
-schema v6 before any UDP I/O. A schema-v5 `PendingCompletion` no longer retains
+ticket expiry is present: it derives the first-ticket anchor and 90-day deadline
+and durably writes schema v6 before any UDP I/O. Schema-v5 records carrying any
+forward-populated recovery field are rejected as corrupt rather than trusted as
+invented history. A schema-v5 `PendingCompletion` no longer retains
 that ticket anchor. Inventing `upgrade time + 90 days` would make server
 retention unbounded for installations that upgrade arbitrarily late, so the SDK
 instead returns `*AgentRecoveryMigrationRequiredError`, matchable with

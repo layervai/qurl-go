@@ -1,16 +1,20 @@
 package qurl
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"time"
+
+	"github.com/layervai/qurl-go/internal/udpfence"
 )
 
 // AgentRegistrationRecoveryHorizon is the maximum supported age of one
 // persisted native-UDP registration transaction. The horizon is anchored to
-// the authenticated Hub assignment-ticket expiry, not to a caller or local
-// process timestamp, and is copied unchanged from pending activation into
-// pending completion.
+// the first authenticated Hub assignment-ticket expiry in the recovery episode,
+// not to a caller or local process timestamp, and is copied unchanged through
+// replacement activation and pending completion.
 //
 // A caller may begin an exact recovery only while its persisted deadline is
 // live. The authority retains replay evidence beyond this horizon for bounded
@@ -105,19 +109,93 @@ func pendingRecoveryDeadline(state *AgentState) (AgentRecoveryPhase, time.Time, 
 	return "", time.Time{}, false
 }
 
-func legacyPendingActivationDeadlineAllowed(state *AgentState, deadline time.Time) bool {
-	return deadline.IsZero() && state != nil && state.SchemaVersion < agentStateSchemaVersion
+// agentRecoveryBoundary binds one loaded pending phase to its immutable
+// absolute deadline. Its context timer stops blocked DNS/socket/backoff work,
+// while its internal UDP fence rechecks the injected lifecycle clock at the
+// closest reliable point before every datagram write.
+type agentRecoveryBoundary struct {
+	phase    AgentRecoveryPhase
+	deadline time.Time
+	clock    func() time.Time
+	expired  atomic.Bool
+}
+
+func newAgentRecoveryBoundary(state *AgentState, clock func() time.Time) (*agentRecoveryBoundary, error) {
+	phase, deadline, pending := pendingRecoveryDeadline(state)
+	if !pending {
+		return nil, fmt.Errorf("%w: recovery boundary requires pending state", ErrInvalidAgentState)
+	}
+	if clock == nil {
+		return nil, fmt.Errorf("%w: recovery clock is nil", ErrInvalidRegisterConfig)
+	}
+	boundary := &agentRecoveryBoundary{phase: phase, deadline: deadline, clock: clock}
+	if err := boundary.check(); err != nil {
+		return nil, err
+	}
+	return boundary, nil
+}
+
+func (b *agentRecoveryBoundary) expiredError() error {
+	return &AgentRecoveryExpiredError{Phase: b.phase, RecoveryExpiresAt: b.deadline}
+}
+
+func (b *agentRecoveryBoundary) check() error {
+	if b == nil || b.deadline.IsZero() {
+		return fmt.Errorf("%w: recovery boundary is missing", ErrInvalidAgentState)
+	}
+	return b.checkAt(b.clock().UTC())
+}
+
+func (b *agentRecoveryBoundary) checkAt(now time.Time) error {
+	if b.expired.Load() {
+		return b.expiredError()
+	}
+	if now.IsZero() {
+		return fmt.Errorf("%w: recovery clock returned zero", ErrInvalidRegisterConfig)
+	}
+	if !now.Before(b.deadline) {
+		b.expired.Store(true)
+		return b.expiredError()
+	}
+	return nil
+}
+
+func (b *agentRecoveryBoundary) context(ctx context.Context) (context.Context, context.CancelFunc, error) {
+	now := b.clock().UTC()
+	if err := b.checkAt(now); err != nil {
+		return nil, nil, err
+	}
+	remaining := b.deadline.Sub(now)
+	bounded, cancel := context.WithTimeout(ctx, remaining)
+	return udpfence.With(bounded, b.check), cancel, nil
+}
+
+func (b *agentRecoveryBoundary) mapError(parent, bounded context.Context, err error) error {
+	if err == nil || errors.Is(err, ErrAgentRecoveryExpired) {
+		return err
+	}
+	if parent.Err() != nil {
+		return parent.Err()
+	}
+	if bounded.Err() != nil {
+		return b.expiredError()
+	}
+	return err
 }
 
 func validatePendingActivationRecoveryDeadline(pending *PendingAgentActivation, state *AgentState) error {
-	if pending == nil {
+	if pending == nil || state == nil {
 		return fmt.Errorf("%w: pending activation is nil", ErrInvalidAgentState)
 	}
-	if legacyPendingActivationDeadlineAllowed(state, pending.RecoveryExpiresAt) {
+	if state.SchemaVersion < agentStateSchemaVersion {
+		if !pending.RecoveryAnchorTicketExpiresAt.IsZero() || !pending.RecoveryExpiresAt.IsZero() {
+			return fmt.Errorf("%w: legacy pending activation contains forward recovery fields", ErrInvalidAgentState)
+		}
 		return nil
 	}
-	expected, err := agentRecoveryDeadline(pending.AssignmentTicketExpiresAt)
-	if err != nil || pending.RecoveryExpiresAt.IsZero() || pending.RecoveryExpiresAt.Nanosecond() != 0 ||
+	expected, err := agentRecoveryDeadline(pending.RecoveryAnchorTicketExpiresAt)
+	if err != nil || pending.RecoveryAnchorTicketExpiresAt.Nanosecond() != 0 ||
+		pending.RecoveryExpiresAt.IsZero() || pending.RecoveryExpiresAt.Nanosecond() != 0 ||
 		!pending.RecoveryExpiresAt.Equal(expected) {
 		return fmt.Errorf("%w: pending activation recovery deadline is invalid", ErrInvalidAgentState)
 	}
@@ -128,13 +206,16 @@ func validatePendingCompletionRecoveryDeadline(pending *PendingAgentCompletion, 
 	if pending == nil || state == nil || state.Assignment == nil {
 		return fmt.Errorf("%w: pending completion recovery deadline requires an assignment", ErrInvalidAgentState)
 	}
-	if state.SchemaVersion < agentStateSchemaVersion && pending.AssignmentTicketExpiresAt.IsZero() && pending.RecoveryExpiresAt.IsZero() {
+	if state.SchemaVersion < agentStateSchemaVersion {
+		if !pending.RecoveryAnchorTicketExpiresAt.IsZero() || !pending.RecoveryExpiresAt.IsZero() {
+			return fmt.Errorf("%w: legacy pending completion contains forward recovery fields", ErrInvalidAgentState)
+		}
 		return nil
 	}
-	expected, err := agentRecoveryDeadline(pending.AssignmentTicketExpiresAt)
-	if err != nil || pending.RecoveryExpiresAt.IsZero() || pending.RecoveryExpiresAt.Nanosecond() != 0 ||
-		!pending.RecoveryExpiresAt.Equal(expected) ||
-		!state.Assignment.LeaseExpiresAt.After(pending.AssignmentTicketExpiresAt) {
+	expected, err := agentRecoveryDeadline(pending.RecoveryAnchorTicketExpiresAt)
+	if err != nil || pending.RecoveryAnchorTicketExpiresAt.Nanosecond() != 0 ||
+		pending.RecoveryExpiresAt.IsZero() || pending.RecoveryExpiresAt.Nanosecond() != 0 ||
+		!pending.RecoveryExpiresAt.Equal(expected) {
 		return fmt.Errorf("%w: pending completion recovery deadline is invalid", ErrInvalidAgentState)
 	}
 	return nil

@@ -132,10 +132,12 @@ identity, and a one-way identity of the caller's enrollment credential. A lost
 RAK therefore restarts by re-driving the same REG to the same pinned cell—even
 after ticket expiry—before any new Hub assignment, within the released 90-day
 recovery horizon. The authenticated assignment-ticket expiry anchors that
-deadline; RAK copies it unchanged into pending completion, so retries and
-restarts cannot extend it. Plaintext enrollment credentials and OTP codes are
-never persisted. The SDK never calculates a cell address or involves the
-browser relay in native discovery.
+deadline. An authenticated non-commit verdict may replace the current ticket,
+but the first ticket-expiry anchor and its absolute deadline remain unchanged
+across the replacement, RAK, retries, restarts, and pending completion.
+Plaintext enrollment credentials and OTP codes are never persisted. The SDK
+never calculates a cell address or involves the browser relay in native
+discovery.
 
 Recovery must use the identical persisted hostname and version because those
 bytes are part of the exact REG replay. Change that metadata only after
@@ -276,8 +278,9 @@ Match errors by type or sentinel, not message text:
 - Added the qURL Connector native UDP lifecycle: Hub assignment, assigned-cell
   OTP/REG/completion, direct knock, strict golden-vector conformance, crash-safe
   activation/completion, and explicit opt-in assignment reassignment adoption.
-- Bounded native registration recovery to 90 days after the authenticated
-  assignment-ticket expiry, with fail-closed pre-v6 pending-state migration.
+- Bounded native registration recovery to 90 days after the first authenticated
+  assignment-ticket expiry, with a per-datagram deadline fence, immutable
+  replacement anchor, and fail-closed pre-v6 pending-state migration.
 - Registration retry budgets are per phase, so one call can span initial Hub,
   first REG, replacement Hub, second REG, and completion budgets. Use an outer
   context deadline when a smaller aggregate wall-clock ceiling is required.

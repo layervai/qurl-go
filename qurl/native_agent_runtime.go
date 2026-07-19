@@ -510,12 +510,24 @@ func (c *nativeAgentRuntimeConfig) registerLocked(ctx context.Context, enrollmen
 	defer wipeBytes(privateKey)
 
 	if state.PendingCompletion != nil {
+		boundary, err := newAgentRecoveryBoundary(state, c.clock)
+		if err != nil {
+			return nil, err
+		}
+		recoveryCtx, cancel, err := boundary.context(ctx)
+		if err != nil {
+			return nil, err
+		}
+		defer cancel()
 		if state.Assignment == nil {
 			return nil, fmt.Errorf("%w: pending completion has no assignment", ErrInvalidAgentState)
 		}
 		if state.Assignment.LeaseExpired(c.clock()) {
-			fresh, err := c.refreshAssignmentLifecycle(ctx, *c.hub, state.AgentID, privateKey)
+			fresh, err := c.refreshAssignmentLifecycle(recoveryCtx, *c.hub, state.AgentID, privateKey)
 			if err != nil {
+				return nil, boundary.mapError(ctx, recoveryCtx, err)
+			}
+			if err := boundary.check(); err != nil {
 				return nil, err
 			}
 			if err := ensureAssignmentContinuity(state.Assignment, fresh); err != nil {
@@ -524,12 +536,18 @@ func (c *nativeAgentRuntimeConfig) registerLocked(ctx context.Context, enrollmen
 			// The previous lease is expired and fresh is validated as live, so the
 			// assignment necessarily changed. Persist it before resuming completion.
 			state.Assignment = fresh.clone()
-			if err := store.SaveAgentState(ctx, state); err != nil {
+			if err := store.SaveAgentState(recoveryCtx, state); err != nil {
+				if ctx.Err() != nil {
+					return nil, ctx.Err()
+				}
+				if recoveryCtx.Err() != nil {
+					return nil, boundary.expiredError()
+				}
 				return nil, fmt.Errorf("%w: save refreshed pending assignment: %w", ErrAgentBindingPersistence, err)
 			}
 		}
-		if err := c.completePending(ctx, store, state, privateKey); err != nil {
-			return nil, err
+		if err := c.completePending(recoveryCtx, store, state, privateKey); err != nil {
+			return nil, boundary.mapError(ctx, recoveryCtx, err)
 		}
 		return finishNativeRuntimeResult(store, state, c)
 	}
@@ -565,11 +583,13 @@ func (c *nativeAgentRuntimeConfig) preparePendingRecovery(ctx context.Context, s
 		return fmt.Errorf("%w: pending recovery state is nil", ErrInvalidAgentState)
 	}
 	if state.PendingActivation != nil && state.PendingActivation.RecoveryExpiresAt.IsZero() {
-		deadline, err := agentRecoveryDeadline(state.PendingActivation.AssignmentTicketExpiresAt)
+		anchor := state.PendingActivation.AssignmentTicketExpiresAt
+		deadline, err := agentRecoveryDeadline(anchor)
 		if err != nil {
 			return err
 		}
 		next := state.clone()
+		next.PendingActivation.RecoveryAnchorTicketExpiresAt = anchor
 		next.PendingActivation.RecoveryExpiresAt = deadline
 		next.SchemaVersion = agentStateSchemaVersion
 		if err := store.SaveAgentState(ctx, next); err != nil {
@@ -586,34 +606,12 @@ func (c *nativeAgentRuntimeConfig) preparePendingRecovery(ctx context.Context, s
 }
 
 func (c *nativeAgentRuntimeConfig) requirePendingRecoveryLive(state *AgentState) error {
-	phase, deadline, pending := pendingRecoveryDeadline(state)
+	_, _, pending := pendingRecoveryDeadline(state)
 	if !pending {
 		return nil
 	}
-	if deadline.IsZero() {
-		return fmt.Errorf("%w: pending %s recovery deadline is missing", ErrInvalidAgentState, phase)
-	}
-	now := c.clock().UTC()
-	if now.IsZero() {
-		return fmt.Errorf("%w: recovery clock returned zero", ErrInvalidRegisterConfig)
-	}
-	if !now.Before(deadline) {
-		return &AgentRecoveryExpiredError{Phase: phase, RecoveryExpiresAt: deadline}
-	}
-	return nil
-}
-
-// recoveryBoundExchange rechecks the finite deadline immediately before every
-// retry driver's UDP attempt. A transaction that starts just before expiry may
-// therefore finish an in-flight exchange, but it cannot dispatch a later retry
-// after the local clock reaches the authority-anchored boundary.
-func (c *nativeAgentRuntimeConfig) recoveryBoundExchange(state *AgentState, exchange nativeExchangeFunc) nativeExchangeFunc {
-	return func(ctx context.Context, endpoint nativeudp.Endpoint, body []byte, transport nativeudp.Options) (*relayknock.Reply, error) {
-		if err := c.requirePendingRecoveryLive(state); err != nil {
-			return nil, err
-		}
-		return exchange(ctx, endpoint, body, transport)
-	}
+	_, err := newAgentRecoveryBoundary(state, c.clock)
+	return err
 }
 
 // activateAndComplete recovers an existing pending REG before asking the Hub
@@ -674,9 +672,36 @@ func registrationVerdictPermitsReplacement(err error) bool {
 }
 
 func (c *nativeAgentRuntimeConfig) persistFreshPendingActivation(ctx context.Context, enrollmentCredential string, store AgentStateStore, state *AgentState, privateKey []byte) (string, error) {
-	initial, err := c.fetchInitialAssignmentLifecycle(ctx, *c.hub, state.AgentID, enrollmentCredential, privateKey)
+	operationCtx := ctx
+	var boundary *agentRecoveryBoundary
+	var cancel context.CancelFunc
+	var err error
+	if state.PendingActivation != nil {
+		boundary, err = newAgentRecoveryBoundary(state, c.clock)
+		if err != nil {
+			return "", err
+		}
+		operationCtx, cancel, err = boundary.context(ctx)
+		if err != nil {
+			return "", err
+		}
+		defer cancel()
+	}
+	mapRecoveryError := func(err error) error {
+		if boundary == nil {
+			return err
+		}
+		return boundary.mapError(ctx, operationCtx, err)
+	}
+
+	initial, err := c.fetchInitialAssignmentLifecycle(operationCtx, *c.hub, state.AgentID, enrollmentCredential, privateKey)
 	if err != nil {
-		return "", err
+		return "", mapRecoveryError(err)
+	}
+	if boundary != nil {
+		if err := boundary.check(); err != nil {
+			return "", err
+		}
 	}
 	if err := c.requireAllowedRegistrationKeyKind(initial.Registration.KeyKind); err != nil {
 		return "", err
@@ -687,17 +712,36 @@ func (c *nativeAgentRuntimeConfig) persistFreshPendingActivation(ctx context.Con
 	// Persisting a "dispatched" record first could strand the ticket if the
 	// process exits before the one-way send. A later save failure is safe: no REG
 	// occurred and a new explicit attempt may obtain a new ticket and its one OTP.
-	credential, err := c.registrationCredential(ctx, candidateState, initial, enrollmentCredential, privateKey)
+	credential, err := c.registrationCredential(operationCtx, candidateState, initial, enrollmentCredential, privateKey)
+	if err != nil {
+		return "", mapRecoveryError(err)
+	}
+	var pending *PendingAgentActivation
+	if boundary != nil {
+		pending, err = newPendingAgentActivationWithRecoveryAnchor(
+			initial, candidateState, c.hostname, c.version, enrollmentCredential,
+			state.PendingActivation.RecoveryAnchorTicketExpiresAt,
+		)
+	} else {
+		pending, err = newPendingAgentActivation(initial, candidateState, c.hostname, c.version, enrollmentCredential)
+	}
 	if err != nil {
 		return "", err
 	}
-	pending, err := newPendingAgentActivation(initial, candidateState, c.hostname, c.version, enrollmentCredential)
-	if err != nil {
-		return "", err
+	if boundary != nil {
+		if err := boundary.check(); err != nil {
+			return "", err
+		}
 	}
 	candidateState.PendingActivation = pending
 	candidateState.SchemaVersion = agentStateSchemaVersion
-	if err := store.SaveAgentState(ctx, candidateState); err != nil {
+	if err := store.SaveAgentState(operationCtx, candidateState); err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		if boundary != nil && operationCtx.Err() != nil {
+			return "", boundary.expiredError()
+		}
 		return "", fmt.Errorf("%w: save pending assigned-cell activation before REG: %w", ErrAgentBindingPersistence, err)
 	}
 	*state = *candidateState
@@ -762,11 +806,11 @@ func (c *nativeAgentRuntimeConfig) transitionPendingActivation(ctx context.Conte
 	}
 	next := state.clone()
 	next.PendingCompletion = &PendingAgentCompletion{
-		DeviceAPIKey:              candidate,
-		CellID:                    state.Assignment.CellID,
-		AssignmentGeneration:      state.Assignment.AssignmentGeneration,
-		AssignmentTicketExpiresAt: state.PendingActivation.AssignmentTicketExpiresAt,
-		RecoveryExpiresAt:         state.PendingActivation.RecoveryExpiresAt,
+		DeviceAPIKey:                  candidate,
+		CellID:                        state.Assignment.CellID,
+		AssignmentGeneration:          state.Assignment.AssignmentGeneration,
+		RecoveryAnchorTicketExpiresAt: state.PendingActivation.RecoveryAnchorTicketExpiresAt,
+		RecoveryExpiresAt:             state.PendingActivation.RecoveryExpiresAt,
 	}
 	next.PendingActivation = nil
 	next.SchemaVersion = agentStateSchemaVersion
@@ -870,6 +914,13 @@ func validateIncompleteNativeState(state *AgentState) error {
 }
 
 func newPendingAgentActivation(initial *InitialAgentAssignment, state *AgentState, hostname, version, enrollmentCredential string) (*PendingAgentActivation, error) {
+	if initial == nil {
+		return nil, fmt.Errorf("%w: pending activation requires initial assignment", ErrInvalidRegisterConfig)
+	}
+	return newPendingAgentActivationWithRecoveryAnchor(initial, state, hostname, version, enrollmentCredential, initial.AssignmentTicketExpiresAt)
+}
+
+func newPendingAgentActivationWithRecoveryAnchor(initial *InitialAgentAssignment, state *AgentState, hostname, version, enrollmentCredential string, recoveryAnchor time.Time) (*PendingAgentActivation, error) {
 	if initial == nil || state == nil || state.Assignment == nil {
 		return nil, fmt.Errorf("%w: pending activation requires initial assignment and state", ErrInvalidRegisterConfig)
 	}
@@ -881,12 +932,13 @@ func newPendingAgentActivation(initial *InitialAgentAssignment, state *AgentStat
 	assignment := *state.Assignment
 	pending := &PendingAgentActivation{
 		AssignmentTicket: initial.AssignmentTicket, AssignmentTicketExpiresAt: initial.AssignmentTicketExpiresAt,
-		AgentID: state.AgentID, AgentPublicKeyB64: state.PublicKeyB64,
+		RecoveryAnchorTicketExpiresAt: recoveryAnchor,
+		AgentID:                       state.AgentID, AgentPublicKeyB64: state.PublicKeyB64,
 		Assignment: assignment, Registration: initial.Registration,
 		Hostname: hostname, AgentVersion: version,
 		EnrollmentCredentialFingerprintB64: enrollmentCredentialFingerprint(enrollmentCredential),
 	}
-	deadline, err := agentRecoveryDeadline(pending.AssignmentTicketExpiresAt)
+	deadline, err := agentRecoveryDeadline(pending.RecoveryAnchorTicketExpiresAt)
 	if err != nil {
 		return nil, fmt.Errorf("%w: construct pending activation recovery deadline: %w", ErrInvalidRegisterConfig, err)
 	}
@@ -1123,9 +1175,15 @@ func (c *nativeAgentRuntimeConfig) registerPendingActivation(ctx context.Context
 		return fmt.Errorf("%w: assigned-cell REG requires pending activation", ErrInvalidAgentState)
 	}
 	pending := state.PendingActivation
-	if err := c.requirePendingRecoveryLive(state); err != nil {
+	boundary, err := newAgentRecoveryBoundary(state, c.clock)
+	if err != nil {
 		return err
 	}
+	recoveryCtx, cancel, err := boundary.context(ctx)
+	if err != nil {
+		return err
+	}
+	defer cancel()
 	// Within the finite SDK recovery horizon, do not reject locally merely because
 	// the one-shot ticket has expired. The pinned cell must distinguish an exact
 	// committed replay from marker-absent 52111; only that authenticated verdict
@@ -1145,7 +1203,7 @@ func (c *nativeAgentRuntimeConfig) registerPendingActivation(ctx context.Context
 	if err != nil {
 		return err
 	}
-	_, err = runNativeExchange(ctx, retry, endpoint, body, c.udpOptions(privateKey), c.recoveryBoundExchange(state, nativeudp.Register), registrationRetryInfo, newRegistrationRecovery, func(reply []byte, _ time.Time) (*struct{}, error) {
+	_, err = runNativeExchange(recoveryCtx, retry, endpoint, body, c.udpOptions(privateKey), nativeudp.Register, registrationRetryInfo, newRegistrationRecovery, func(reply []byte, _ time.Time) (*struct{}, error) {
 		ack, parseErr := parseNativeRegisterAck(reply)
 		if parseErr != nil {
 			return nil, parseErr
@@ -1155,7 +1213,7 @@ func (c *nativeAgentRuntimeConfig) registerPendingActivation(ctx context.Context
 		}
 		return nil, classifyNativeRegisterError(ack, pending.Registration.KeyKind)
 	})
-	return err
+	return boundary.mapError(ctx, recoveryCtx, err)
 }
 
 func classifyNativeRegisterError(ack *registerAckBody, keyKind string) error {
@@ -1319,9 +1377,15 @@ func (c *nativeAgentRuntimeConfig) completePending(ctx context.Context, store Ag
 	if state.PendingCompletion == nil || state.Assignment == nil {
 		return fmt.Errorf("%w: completion requires pending candidate and assignment", ErrInvalidAgentState)
 	}
-	if err := c.requirePendingRecoveryLive(state); err != nil {
+	boundary, err := newAgentRecoveryBoundary(state, c.clock)
+	if err != nil {
 		return err
 	}
+	recoveryCtx, cancel, err := boundary.context(ctx)
+	if err != nil {
+		return err
+	}
+	defer cancel()
 	body, err := json.Marshal(completionRequest{
 		UsrID: "", DevID: state.AgentID, AspID: agentAspID,
 		UsrData: completionUserData{Query: completionQuery, Version: completionVersion, DeviceAPIKey: state.PendingCompletion.DeviceAPIKey},
@@ -1334,9 +1398,9 @@ func (c *nativeAgentRuntimeConfig) completePending(ctx context.Context, store Ag
 	if err != nil {
 		return err
 	}
-	keyID, err := c.runCompletionExchange(ctx, state, endpoint, body, c.udpOptions(privateKey))
+	keyID, err := c.runCompletionExchange(recoveryCtx, endpoint, body, c.udpOptions(privateKey))
 	if err != nil {
-		return err
+		return boundary.mapError(ctx, recoveryCtx, err)
 	}
 	previous := state.clone()
 	state.DeviceAPIKey = state.PendingCompletion.DeviceAPIKey
@@ -1345,21 +1409,27 @@ func (c *nativeAgentRuntimeConfig) completePending(ctx context.Context, store Ag
 	registeredAt := c.clock().UTC()
 	state.RegisteredAt = &registeredAt
 	state.SchemaVersion = agentStateSchemaVersion
-	if err := store.SaveAgentState(ctx, state); err != nil {
+	if err := store.SaveAgentState(recoveryCtx, state); err != nil {
 		*state = *previous
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if recoveryCtx.Err() != nil {
+			return boundary.expiredError()
+		}
 		return fmt.Errorf("%w: persist completed native credential: %w", ErrAgentBindingPersistence, err)
 	}
 	return nil
 }
 
-func (c *nativeAgentRuntimeConfig) runCompletionExchange(ctx context.Context, state *AgentState, endpoint nativeudp.Endpoint, body []byte, transport nativeudp.Options) (string, error) {
+func (c *nativeAgentRuntimeConfig) runCompletionExchange(ctx context.Context, endpoint nativeudp.Endpoint, body []byte, transport nativeudp.Options) (string, error) {
 	retry, err := newAssignmentConfig(c.assignmentOptions)
 	if err != nil {
 		return "", err
 	}
 	// Pending-credential completion shares the bounded assignment retry driver;
 	// only its retry classifier, recovery type, and reply parser differ.
-	keyID, err := runNativeExchange(ctx, retry, endpoint, body, transport, c.recoveryBoundExchange(state, nativeudp.List), completionRetryInfo, newCompletionRecovery, func(reply []byte, _ time.Time) (*string, error) {
+	keyID, err := runNativeExchange(ctx, retry, endpoint, body, transport, nativeudp.List, completionRetryInfo, newCompletionRecovery, func(reply []byte, _ time.Time) (*string, error) {
 		id, parseErr := parseCompletionReply(reply)
 		if parseErr != nil {
 			return nil, parseErr
