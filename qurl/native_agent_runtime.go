@@ -582,6 +582,9 @@ func (c *nativeAgentRuntimeConfig) preparePendingRecovery(ctx context.Context, s
 		next.PendingActivation.RecoveryAnchorTicketExpiresAt = anchor
 		next.PendingActivation.RecoveryExpiresAt = deadline
 		next.SchemaVersion = agentStateSchemaVersion
+		if err := validatePendingActivationRecoveryDeadline(next.PendingActivation, next); err != nil {
+			return fmt.Errorf("%w: validate migrated pending activation recovery deadline: %w", ErrInvalidRegisterConfig, err)
+		}
 		// Persist the authoritative v6 anchor even when it is already expired, so
 		// later starts fail the same closed deadline without reinterpreting v5 state.
 		if err := store.SaveAgentState(ctx, next); err != nil {
@@ -624,12 +627,6 @@ func (c *nativeAgentRuntimeConfig) activateAndComplete(ctx context.Context, enro
 		operationCtx := ctx
 		var boundary *agentRecoveryBoundary
 		cancel := func() {}
-		if !forceFresh {
-			boundary, operationCtx, cancel, err = boundedRecovery(ctx, state, c.clock)
-			if err != nil {
-				return nil, err
-			}
-		}
 		if forceFresh {
 			credential, err = c.persistFreshPendingActivation(ctx, enrollmentCredential, store, state, privateKey)
 			if err == nil {
@@ -639,6 +636,10 @@ func (c *nativeAgentRuntimeConfig) activateAndComplete(ctx context.Context, enro
 				}
 			}
 		} else {
+			boundary, operationCtx, cancel, err = boundedRecovery(ctx, state, c.clock)
+			if err != nil {
+				return nil, err
+			}
 			credential, err = c.pendingRegistrationCredential(operationCtx, state, enrollmentCredential)
 		}
 		if boundary != nil {
@@ -653,6 +654,10 @@ func (c *nativeAgentRuntimeConfig) activateAndComplete(ctx context.Context, enro
 			}
 			cancel()
 			return nil, err
+		}
+		if boundary == nil {
+			cancel()
+			return nil, fmt.Errorf("%w: activation recovery boundary is missing before REG", ErrInvalidAgentState)
 		}
 		err = c.registerPendingActivation(operationCtx, state, credential, privateKey)
 		if boundaryErr := boundary.check(); boundaryErr != nil {
@@ -671,9 +676,7 @@ func (c *nativeAgentRuntimeConfig) activateAndComplete(ctx context.Context, enro
 			}
 			return finishNativeRuntimeResult(store, state, c)
 		}
-		if boundary != nil {
-			err = boundary.mapError(ctx, operationCtx, err)
-		}
+		err = boundary.mapError(ctx, operationCtx, err)
 		cancel()
 		if attempt == 0 && registrationVerdictPermitsReplacement(err) {
 			// Fetch a replacement only after an authenticated non-commit verdict,

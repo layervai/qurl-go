@@ -87,6 +87,12 @@ After RAK, the SDK copies the same immutable pair into `PendingCompletion`. RAK,
 replacement, restart, assignment refresh, retries, SDK upgrade, and local save
 time never reset it.
 
+Credential-free assignment refresh carries no activation ticket and updates
+only the assigned-cell binding and lease. It deliberately cannot re-anchor or
+extend registration recovery. The 900-second lifetime cap therefore applies to
+initial and replacement activation tickets, while a refreshed assignment has no
+ticket-derived recovery authority to cap.
+
 `RegisterAgentRuntime` clamps pending-recovery contexts to the deadline and
 checks the same boundary before DNS and immediately before every Hub or cell UDP
 datagram write, including OTP and each multi-address fallback. No recovery

@@ -200,6 +200,38 @@ func TestRegisterAgentRuntime_MigratesLegacyActivationThenExpiresWithoutUDP(t *t
 	}
 }
 
+func TestRegisterAgentRuntime_RejectsSubsecondLegacyActivationMigrationBeforeSaveOrUDP(t *testing.T) {
+	state, _ := recoveryTestPendingActivation(t)
+	state.SchemaVersion = 5 // v0.1.1
+	state.PendingActivation.AssignmentTicketExpiresAt = state.PendingActivation.AssignmentTicketExpiresAt.Add(500 * time.Millisecond)
+	state.PendingActivation.RecoveryAnchorTicketExpiresAt = time.Time{}
+	state.PendingActivation.RecoveryExpiresAt = time.Time{}
+	f := newRuntimeFixture(t, nil, nil)
+	if err := f.store.SaveAgentState(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+	beforeSaves := len(f.store.snapshots())
+
+	_, _, err := RegisterAgentRuntime(
+		context.Background(), conformance.AgentAssignmentBootstrapCredentialFixture, f.store,
+		f.options()...,
+	)
+	if !errors.Is(err, ErrInvalidAgentState) || !errors.Is(err, ErrInvalidRegisterConfig) {
+		t.Fatalf("subsecond legacy activation migration = %v, want invalid state/config", err)
+	}
+	if len(f.store.snapshots()) != beforeSaves || len(f.hubUDP.snapshot()) != 0 || len(f.cellUDP.snapshot()) != 0 {
+		t.Fatalf("invalid legacy migration saved or sent UDP: saves=%d/%d Hub/cell=%d/%d",
+			len(f.store.snapshots()), beforeSaves, len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot()))
+	}
+	loaded, loadErr := f.store.LoadAgentState(context.Background())
+	if loadErr != nil || loaded.SchemaVersion != 5 || loaded.PendingActivation == nil ||
+		loaded.PendingActivation.AssignmentTicketExpiresAt.Nanosecond() == 0 ||
+		!loaded.PendingActivation.RecoveryAnchorTicketExpiresAt.IsZero() ||
+		!loaded.PendingActivation.RecoveryExpiresAt.IsZero() {
+		t.Fatalf("invalid legacy migration mutated durable state: %#v / %v", loaded, loadErr)
+	}
+}
+
 func TestRegisterAgentRuntime_LegacyActivationMigrationMustPersistBeforeUDP(t *testing.T) {
 	state, _ := recoveryTestPendingActivation(t)
 	state.SchemaVersion = 5 // v0.1.1
@@ -610,6 +642,35 @@ func TestAgentRecoveryBoundary_LatchesClosedAcrossClockRollback(t *testing.T) {
 	now = deadline.Add(-time.Hour)
 	if err := boundary.check(); !errors.Is(err, ErrAgentRecoveryExpired) {
 		t.Fatalf("rolled-back clock reopened recovery fence: %v", err)
+	}
+}
+
+func TestAgentRecoveryBoundary_MapErrorFailsClosedWhenRealTimeoutPrecedesInjectedClock(t *testing.T) {
+	state, _ := recoveryTestPendingActivation(t)
+	deadline := state.PendingActivation.RecoveryExpiresAt
+	frozenNow := deadline.Add(-20 * time.Millisecond)
+	boundary, recoveryCtx, cancel, err := boundedRecovery(
+		context.Background(), state, func() time.Time { return frozenNow },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cancel()
+	select {
+	case <-recoveryCtx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("real recovery timeout did not fire")
+	}
+	if err := boundary.check(); err != nil {
+		t.Fatalf("injected clock crossed unexpectedly: %v", err)
+	}
+	sentinel := errors.New("injected transport failure")
+	mapped := boundary.mapError(context.Background(), recoveryCtx, sentinel)
+	var expired *AgentRecoveryExpiredError
+	if !errors.Is(mapped, ErrAgentRecoveryExpired) || !errors.As(mapped, &expired) ||
+		errors.Is(mapped, sentinel) || expired.Phase != AgentRecoveryPhaseActivation ||
+		!expired.RecoveryExpiresAt.Equal(deadline) {
+		t.Fatalf("real-timeout map = %T %#v / %v, want fail-closed recovery expiry", mapped, expired, mapped)
 	}
 }
 
