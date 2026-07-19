@@ -166,6 +166,22 @@ through the pinned Hub. It accepts endpoint revisions within the same cell and
 assignment generation; a cell or generation move returns
 `*AgentAssignmentChangedError` for explicit caller handling.
 
+After the provisioned workflow has deliberately accepted that authority move,
+the caller opts into one fresh authenticated refresh:
+
+```go
+client, binding, err := qurl.RefreshAgentRuntime(ctx, hub, store,
+	qurl.WithAgentRuntimeReassignmentAdoption(),
+)
+```
+
+The option has no placement arguments: it can adopt only the Hub LRT returned
+by that call, and only when the assignment generation advances. The SDK writes
+the complete cell, endpoint, pinned server key, and lease snapshot in one save;
+it never derives, probes, or contacts the new cell during refresh. Without the
+option, the same response continues to return `*AgentAssignmentChangedError`
+without changing durable state.
+
 For each Connector cycle, take the private key once, create one `RunID`, and
 knock with the resource's placement-neutral `KnockResourceID`:
 
@@ -229,9 +245,10 @@ Match errors by type or sentinel, not message text:
 | `qurl.ErrInvalidClientConfig` | Resource-client credentials or options are malformed |
 | `qurl.ErrInvalidRegisterConfig` | Native lifecycle inputs are malformed |
 | `qurl.ErrAssignmentRecoveryRequired` | Hub assignment exhausted its bounded transaction |
+| `qurl.ErrAgentBindingPersistence` | A state save failed or its acknowledgement was lost; reload before retry because the refreshed assignment may already be durable |
 | `qurl.ErrCompletionRecoveryRequired` | Resume the exact persisted completion candidate |
 | `*qurl.NativeCredentialRecoveryRequiredError` | Completed native credential state is absent or malformed; explicit native recovery or reprovisioning is required |
-| `*qurl.AgentAssignmentChangedError` | The Hub assigned a new cell or generation that needs explicit adoption |
+| `*qurl.AgentAssignmentChangedError` | The Hub assigned a new cell or generation; deliberately re-run refresh with `WithAgentRuntimeReassignmentAdoption` to accept a newer generation |
 | `*qurl.APIError` | LayerV returned a non-2xx steady-state resource response |
 | `*qurl.ServerDenyError` | qURL denied an authenticated NHP operation |
 
@@ -253,8 +270,7 @@ Match errors by type or sentinel, not message text:
 
 - Added the qURL Connector native UDP lifecycle: Hub assignment, assigned-cell
   OTP/REG/completion, direct knock, strict golden-vector conformance, crash-safe
-  activation/completion, and explicit assignment refresh/reassignment
-  boundaries.
+  activation/completion, and explicit opt-in assignment reassignment adoption.
 - Registration retry budgets are per phase, so one call can span initial Hub,
   first REG, replacement Hub, second REG, and completion budgets. Use an outer
   context deadline when a smaller aggregate wall-clock ceiling is required.

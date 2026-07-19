@@ -30,6 +30,8 @@ import (
 
 const canonicalNativeDeviceCredential = "lv_live_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
 
+var reassignmentFixtureLeaseExpiresAt = time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC)
+
 type runtimeUDPStep struct {
 	requestType       int
 	replyType         int
@@ -339,6 +341,72 @@ func (f *runtimeFixture) optionsWithMetadata(include bool, extra ...AgentRuntime
 		opts = append(opts, WithAgentRuntimeMetadata("conformance-host", "0.0.0-conformance"))
 	}
 	return append(opts, extra...)
+}
+
+func (f *runtimeFixture) refreshOptions(extra ...AgentRuntimeRefreshOption) []AgentRuntimeRefreshOption {
+	opts := []AgentRuntimeRefreshOption{
+		WithAgentRuntimeUDPResolver(f.resolver),
+		WithAgentRuntimeUDPDialer(f.dialer),
+		WithAgentRuntimeUDPBounds(time.Second, 1),
+		WithAgentRuntimeAssignmentRetryBudget(1, time.Second),
+		withAgentRuntimeClock(func() time.Time { return assignmentFixtureNow }),
+	}
+	return append(opts, extra...)
+}
+
+func seedCompletedRuntimeAssignment(t *testing.T, f *runtimeFixture, assignment *AgentAssignment) {
+	t.Helper()
+	state, err := f.store.LoadAgentState(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	registeredAt := assignmentFixtureNow.Add(-time.Hour)
+	state.RegisteredAt = &registeredAt
+	state.DeviceAPIKey = canonicalNativeDeviceCredential
+	state.DeviceAPIKeyID = "key_DvK9mN2pQr7S"
+	state.Assignment = assignment.clone()
+	if err := f.store.SaveAgentState(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func rewriteRefreshAssignment(t *testing.T, contract *conformance.AgentAssignmentFile, assignment *AgentAssignment) string {
+	t.Helper()
+	return strings.NewReplacer(
+		`"cell_id":"cell0"`, fmt.Sprintf(`"cell_id":%q`, assignment.CellID),
+		`"assignment_generation":1`, fmt.Sprintf(`"assignment_generation":%d`, assignment.AssignmentGeneration),
+		`"endpoint_revision":1`, fmt.Sprintf(`"endpoint_revision":%d`, assignment.EndpointRevision),
+		`"lease_expires_at":"2026-07-16T12:00:00Z"`, fmt.Sprintf(`"lease_expires_at":%q`, assignment.LeaseExpiresAt.Format(time.RFC3339)),
+		`"host":"cell0.nhp.layerv.ai"`, fmt.Sprintf(`"host":%q`, assignment.Endpoint.Host),
+		base64.StdEncoding.EncodeToString(assignmentHex(t, contract.Keys.AssignedCell.StaticPubHex)), assignment.Endpoint.ServerPublicKeyB64,
+	).Replace(contract.RefreshAssignment.Result.BodyJSON)
+}
+
+// refusingReassignmentHTTP returns an HTTP doer that refuses every request and a
+// counter of attempts, proving reassignment adoption performs no HTTP.
+func refusingReassignmentHTTP() (*atomic.Int32, HTTPDoer) {
+	httpCalls := new(atomic.Int32)
+	return httpCalls, doerFunc(func(*http.Request) (*http.Response, error) {
+		httpCalls.Add(1)
+		return nil, errors.New("HTTP is forbidden during native reassignment adoption")
+	})
+}
+
+func newReassignmentTarget(t *testing.T, contract *conformance.AgentAssignmentFile, cellID string, generation int64, serverPublicKeyB64 string, leaseExpiresAt time.Time) *AgentAssignment {
+	t.Helper()
+	if serverPublicKeyB64 == "" {
+		serverPublicKeyB64 = base64.StdEncoding.EncodeToString(assignmentHex(t, contract.Keys.AssignedCell.StaticPubHex))
+	}
+	if leaseExpiresAt.IsZero() {
+		leaseExpiresAt = reassignmentFixtureLeaseExpiresAt
+	}
+	return &AgentAssignment{
+		CellID: cellID, AssignmentGeneration: generation, EndpointRevision: 1,
+		LeaseExpiresAt: leaseExpiresAt,
+		Endpoint: NHPUDPEndpoint{
+			Host: cellID + ".nhp.layerv.ai", Port: standardNHPUDPPort, ServerPublicKeyB64: serverPublicKeyB64,
+		},
+	}
 }
 
 func seedPendingActivation(t *testing.T, contract *conformance.AgentAssignmentFile, optionSet func(*runtimeFixture) []AgentRuntimeRegistrationOption) *runtimeFixture {
@@ -2498,18 +2566,7 @@ func TestRefreshAgentRuntime_PersistsRevisionedEndpointAndKeyRotationForNextKnoc
 	if err != nil {
 		t.Fatal(err)
 	}
-	state, err := f.store.LoadAgentState(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	registeredAt := assignmentFixtureNow.Add(-time.Hour)
-	state.RegisteredAt = &registeredAt
-	state.DeviceAPIKey = canonicalNativeDeviceCredential
-	state.DeviceAPIKeyID = "key_DvK9mN2pQr7S"
-	state.Assignment = initial.Assignment.clone()
-	if err := f.store.SaveAgentState(context.Background(), state); err != nil {
-		t.Fatal(err)
-	}
+	seedCompletedRuntimeAssignment(t, f, &initial.Assignment)
 
 	_, binding, err := RefreshAgentRuntime(context.Background(), f.hub, f.store,
 		WithAgentRuntimeUDPResolver(f.resolver), WithAgentRuntimeUDPDialer(f.dialer), WithAgentRuntimeUDPBounds(time.Second, 1),
@@ -2545,43 +2602,18 @@ func TestRefreshAgentRuntime_PersistsRevisionedEndpointAndKeyRotationForNextKnoc
 
 func TestRefreshAgentRuntime_ReassignmentIsExplicitAndNotPersisted(t *testing.T) {
 	contract := loadAssignmentFixture(t)
-	reassignedResult := strings.Replace(
-		contract.RefreshAssignment.Result.BodyJSON,
-		`"cell_id":"cell0"`,
-		`"cell_id":"cell1"`,
-		1,
-	)
+	target := newReassignmentTarget(t, contract, "cell1", 2, "", time.Time{})
 	f := newRuntimeFixture(t,
-		[]runtimeUDPStep{{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: reassignedResult}},
+		[]runtimeUDPStep{{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: rewriteRefreshAssignment(t, contract, target)}},
 		nil,
 	)
-	initial, err := parseInitialAssignmentReply(
-		[]byte(contract.InitialAssignment.Result.BodyJSON),
-		"agent-conform",
-		assignmentFixtureNow,
-	)
+	initial, err := parseInitialAssignmentReply([]byte(contract.InitialAssignment.Result.BodyJSON), "agent-conform", assignmentFixtureNow)
 	if err != nil {
 		t.Fatal(err)
 	}
-	state, err := f.store.LoadAgentState(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	registeredAt := assignmentFixtureNow.Add(-time.Hour)
-	state.RegisteredAt = &registeredAt
-	state.DeviceAPIKey = canonicalNativeDeviceCredential
-	state.DeviceAPIKeyID = "key_DvK9mN2pQr7S"
-	state.Assignment = initial.Assignment.clone()
-	if err := f.store.SaveAgentState(context.Background(), state); err != nil {
-		t.Fatal(err)
-	}
+	seedCompletedRuntimeAssignment(t, f, &initial.Assignment)
 
-	_, binding, err := RefreshAgentRuntime(context.Background(), f.hub, f.store,
-		WithAgentRuntimeUDPResolver(f.resolver),
-		WithAgentRuntimeUDPDialer(f.dialer),
-		WithAgentRuntimeUDPBounds(time.Second, 1),
-		withAgentRuntimeClock(func() time.Time { return assignmentFixtureNow }),
-	)
+	_, binding, err := RefreshAgentRuntime(context.Background(), f.hub, f.store, f.refreshOptions()...)
 	if binding != nil {
 		binding.Destroy()
 		t.Fatal("reassignment unexpectedly returned an adopted binding")
@@ -2590,7 +2622,7 @@ func TestRefreshAgentRuntime_ReassignmentIsExplicitAndNotPersisted(t *testing.T)
 	if !errors.As(err, &changed) || !errors.Is(err, ErrAssignmentReassignmentRequired) {
 		t.Fatalf("reassignment refresh error = %v, want AgentAssignmentChangedError", err)
 	}
-	if changed.Previous.CellID != "cell0" || changed.Current.CellID != "cell1" {
+	if changed.Previous.CellID != "cell0" || changed.Current.CellID != "cell1" || changed.Current.AssignmentGeneration != 2 {
 		t.Fatalf("reassignment snapshots = %#v -> %#v", changed.Previous, changed.Current)
 	}
 	persisted, err := f.store.LoadAgentState(context.Background())
@@ -2599,6 +2631,238 @@ func TestRefreshAgentRuntime_ReassignmentIsExplicitAndNotPersisted(t *testing.T)
 	}
 	if persisted.Assignment.CellID != "cell0" || len(f.hubUDP.snapshot()) != 1 || len(f.cellUDP.snapshot()) != 0 {
 		t.Fatalf("reassignment was adopted or contacted a cell: state=%#v Hub/cell=%d/%d", persisted.Assignment, len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot()))
+	}
+}
+
+func TestRefreshAgentRuntime_ExplicitlyAdoptsAuthenticatedReassignmentForNextKnock(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	cell1PrivateBytes := bytes.Repeat([]byte{0x22}, x25519key.Size)
+	cell1Private, err := ecdh.X25519().NewPrivateKey(cell1PrivateBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cell1PublicB64 := base64.StdEncoding.EncodeToString(cell1Private.PublicKey().Bytes())
+	target := newReassignmentTarget(t, contract, "cell1", 2, cell1PublicB64, time.Time{})
+	f := newRuntimeFixture(t,
+		[]runtimeUDPStep{{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: rewriteRefreshAssignment(t, contract, target)}},
+		nil,
+	)
+	knockBody := `{"errCode":"0","resHost":{"resource-public-key":"frps.cell1.example:7000"},"opnTime":900,"agentAddr":"203.0.113.9:49152","acTokens":{"resource-public-key":"ac-cell1"},"preActions":{"resource-public-key":null}}`
+	cell1 := newRuntimeUDPServer(t, cell1PrivateBytes, assignmentHex(t, contract.Keys.Agent.StaticPubHex),
+		runtimeUDPStep{requestType: relayknock.TypeKnock, replyType: relayknock.TypeACK, replyBody: knockBody})
+	cell1Address := netip.MustParseAddr("11.11.11.11")
+	f.resolver.hosts[target.Endpoint.Host] = cell1Address
+	f.dialer.targets[cell1Address.String()] = cell1.conn.LocalAddr().String()
+
+	initial, err := parseInitialAssignmentReply([]byte(contract.InitialAssignment.Result.BodyJSON), "agent-conform", assignmentFixtureNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedCompletedRuntimeAssignment(t, f, &initial.Assignment)
+	httpCalls, refusingHTTP := refusingReassignmentHTTP()
+
+	client, binding, err := RefreshAgentRuntime(context.Background(), f.hub, f.store,
+		f.refreshOptions(WithAgentRuntimeReassignmentAdoption(), WithAgentClientHTTPClient(refusingHTTP))...)
+	if err != nil || client == nil || binding == nil {
+		t.Fatalf("adopt reassignment = client %v, binding %v, err %v", client, binding, err)
+	}
+	defer binding.Destroy()
+	if binding.CellID != target.CellID || binding.AssignmentGeneration != target.AssignmentGeneration ||
+		binding.EndpointRevision != target.EndpointRevision || binding.NHPUDPEndpoint != target.Endpoint ||
+		!binding.LeaseExpiresAt.Equal(target.LeaseExpiresAt) {
+		t.Fatalf("adopted binding = %#v, want %#v", binding, target)
+	}
+	hubRequests := f.hubUDP.snapshot()
+	if httpCalls.Load() != 0 || len(hubRequests) != 1 || string(hubRequests[0].body) != contract.RefreshAssignment.Request.BodyJSON ||
+		len(f.cellUDP.snapshot()) != 0 || len(cell1.snapshot()) != 0 {
+		t.Fatalf("adoption used an unexpected transport or request: HTTP=%d Hub=%v old/new cell=%d/%d", httpCalls.Load(), hubRequests, len(f.cellUDP.snapshot()), len(cell1.snapshot()))
+	}
+	persisted, err := f.store.LoadAgentState(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameAgentAssignment(persisted.Assignment, target) {
+		t.Fatalf("persisted assignment = %#v, want %#v", persisted.Assignment, target)
+	}
+
+	agentPrivate := binding.TakeDeviceStaticPrivateKey()
+	defer wipeBytes(agentPrivate)
+	result, err := KnockRegisteredAgent(context.Background(), binding, agentPrivate, "resource-public-key", NativeKnockOptions{RunID: "0123456789abcdef"},
+		WithAgentRuntimeUDPResolver(f.resolver), WithAgentRuntimeUDPDialer(f.dialer), WithAgentRuntimeUDPBounds(time.Second, 1))
+	if err != nil || result == nil || result.ACToken != "ac-cell1" || result.ResourceHost != "frps.cell1.example:7000" {
+		t.Fatalf("knock after reassignment = %#v, %v", result, err)
+	}
+	if len(f.cellUDP.snapshot()) != 0 || len(cell1.snapshot()) != 1 {
+		t.Fatalf("old/new cell calls = %d/%d, want 0/1", len(f.cellUDP.snapshot()), len(cell1.snapshot()))
+	}
+}
+
+func TestRefreshAgentRuntime_ExplicitlyAdoptsSameCellGenerationAdvance(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	target := newReassignmentTarget(t, contract, "cell0", 2, "", time.Time{})
+	f := newRuntimeFixture(t,
+		[]runtimeUDPStep{{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: rewriteRefreshAssignment(t, contract, target)}},
+		nil,
+	)
+	initial, err := parseInitialAssignmentReply([]byte(contract.InitialAssignment.Result.BodyJSON), "agent-conform", assignmentFixtureNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedCompletedRuntimeAssignment(t, f, &initial.Assignment)
+	httpCalls, refusingHTTP := refusingReassignmentHTTP()
+
+	client, binding, err := RefreshAgentRuntime(context.Background(), f.hub, f.store,
+		f.refreshOptions(WithAgentRuntimeReassignmentAdoption(), WithAgentClientHTTPClient(refusingHTTP))...)
+	if err != nil || client == nil || binding == nil {
+		t.Fatalf("adopt same-cell generation advance = client %v, binding %v, err %v", client, binding, err)
+	}
+	defer binding.Destroy()
+	if binding.CellID != target.CellID || binding.AssignmentGeneration != target.AssignmentGeneration {
+		t.Fatalf("adopted binding = %#v, want cell %q generation %d", binding, target.CellID, target.AssignmentGeneration)
+	}
+	persisted, err := f.store.LoadAgentState(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameAgentAssignment(persisted.Assignment, target) || httpCalls.Load() != 0 ||
+		len(f.hubUDP.snapshot()) != 1 || len(f.cellUDP.snapshot()) != 0 {
+		t.Fatalf("same-cell adoption changed transport or persisted the wrong assignment: state=%#v HTTP=%d Hub/cell=%d/%d",
+			persisted.Assignment, httpCalls.Load(), len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot()))
+	}
+}
+
+func TestRefreshAgentRuntime_ReassignmentAdoptionRejectsStaleOrExpiredTarget(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	serverPublicKeyB64 := base64.StdEncoding.EncodeToString(assignmentHex(t, contract.Keys.AssignedCell.StaticPubHex))
+	tests := []struct {
+		name               string
+		previousGeneration int64
+		targetGeneration   int64
+		leaseExpiresAt     time.Time
+		agentID            string
+		want               []error
+		wantDetail         string
+	}{
+		{
+			name: "same-generation cell move is stale", previousGeneration: 1, targetGeneration: 1,
+			leaseExpiresAt: reassignmentFixtureLeaseExpiresAt, want: []error{ErrAssignmentInvalidResponse},
+			wantDetail: "assignment generation must advance",
+		},
+		{
+			name: "generation regression", previousGeneration: 2, targetGeneration: 1,
+			leaseExpiresAt: reassignmentFixtureLeaseExpiresAt, want: []error{ErrAssignmentInvalidResponse},
+			wantDetail: "assignment generation must advance",
+		},
+		{
+			name: "expired target", previousGeneration: 1, targetGeneration: 2,
+			leaseExpiresAt: assignmentFixtureNow, want: []error{ErrAssignmentInvalidResponse, ErrAssignmentLeaseExpired},
+		},
+		{
+			name: "mismatched agent identity", previousGeneration: 1, targetGeneration: 2,
+			leaseExpiresAt: reassignmentFixtureLeaseExpiresAt, agentID: "agent-other", want: []error{ErrAssignmentInvalidResponse},
+		},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			target := newReassignmentTarget(t, contract, "cell1", testCase.targetGeneration, serverPublicKeyB64, testCase.leaseExpiresAt)
+			replyBody := rewriteRefreshAssignment(t, contract, target)
+			if testCase.agentID != "" {
+				replyBody = strings.Replace(replyBody, `"agent_id":"agent-conform"`, fmt.Sprintf(`"agent_id":%q`, testCase.agentID), 1)
+			}
+			f := newRuntimeFixture(t,
+				[]runtimeUDPStep{{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: replyBody}},
+				nil,
+			)
+			initial, err := parseInitialAssignmentReply([]byte(contract.InitialAssignment.Result.BodyJSON), "agent-conform", assignmentFixtureNow)
+			if err != nil {
+				t.Fatal(err)
+			}
+			previous := initial.Assignment.clone()
+			previous.AssignmentGeneration = testCase.previousGeneration
+			seedCompletedRuntimeAssignment(t, f, previous)
+
+			client, binding, err := RefreshAgentRuntime(context.Background(), f.hub, f.store,
+				f.refreshOptions(WithAgentRuntimeReassignmentAdoption())...)
+			if client != nil || binding != nil {
+				if binding != nil {
+					binding.Destroy()
+				}
+				t.Fatalf("stale reassignment returned client/binding: %v/%v", client, binding)
+			}
+			for _, want := range testCase.want {
+				if !errors.Is(err, want) {
+					t.Fatalf("stale reassignment error = %v, want %v", err, want)
+				}
+			}
+			if testCase.wantDetail != "" && !strings.Contains(err.Error(), testCase.wantDetail) {
+				t.Fatalf("stale reassignment error = %v, want safe detail %q", err, testCase.wantDetail)
+			}
+			persisted, loadErr := f.store.LoadAgentState(context.Background())
+			if loadErr != nil {
+				t.Fatal(loadErr)
+			}
+			if !sameAgentAssignment(persisted.Assignment, previous) || len(f.store.snapshots()) != 1 ||
+				len(f.hubUDP.snapshot()) != 1 || len(f.cellUDP.snapshot()) != 0 {
+				t.Fatalf("rejected target changed state or contacted a cell: state=%#v saves=%d Hub/cell=%d/%d", persisted.Assignment, len(f.store.snapshots()), len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot()))
+			}
+		})
+	}
+}
+
+func TestRefreshAgentRuntime_ReassignmentAdoptionPersistenceIsAtomic(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	target := newReassignmentTarget(t, contract, "cell1", 2, "", time.Time{})
+	tests := []struct {
+		name             string
+		failBeforeCommit bool
+		wantCommitted    bool
+	}{
+		{name: "save fails before commit", failBeforeCommit: true},
+		{name: "save acknowledgement fails after atomic commit", wantCommitted: true},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			f := newRuntimeFixture(t,
+				[]runtimeUDPStep{{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: rewriteRefreshAssignment(t, contract, target)}},
+				nil,
+			)
+			initial, err := parseInitialAssignmentReply([]byte(contract.InitialAssignment.Result.BodyJSON), "agent-conform", assignmentFixtureNow)
+			if err != nil {
+				t.Fatal(err)
+			}
+			previous := initial.Assignment.clone()
+			seedCompletedRuntimeAssignment(t, f, previous)
+			if testCase.failBeforeCommit {
+				f.store.fail = 2
+			} else {
+				f.store.failAfterCommit = 2
+			}
+
+			client, binding, err := RefreshAgentRuntime(context.Background(), f.hub, f.store,
+				f.refreshOptions(WithAgentRuntimeReassignmentAdoption())...)
+			if client != nil || binding != nil {
+				if binding != nil {
+					binding.Destroy()
+				}
+				t.Fatalf("failed save returned client/binding: %v/%v", client, binding)
+			}
+			if !errors.Is(err, ErrAgentBindingPersistence) {
+				t.Fatalf("failed reassignment save = %v, want ErrAgentBindingPersistence", err)
+			}
+			persisted, loadErr := f.store.LoadAgentState(context.Background())
+			if loadErr != nil {
+				t.Fatal(loadErr)
+			}
+			want := previous
+			if testCase.wantCommitted {
+				want = target
+			}
+			if !sameAgentAssignment(persisted.Assignment, want) ||
+				persisted.DeviceAPIKey != canonicalNativeDeviceCredential || persisted.DeviceAPIKeyID != "key_DvK9mN2pQr7S" ||
+				len(f.cellUDP.snapshot()) != 0 {
+				t.Fatalf("persistence failure left a partial state: state=%#v cell=%d", persisted, len(f.cellUDP.snapshot()))
+			}
+		})
 	}
 }
 
