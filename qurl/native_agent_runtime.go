@@ -586,6 +586,8 @@ func (c *nativeAgentRuntimeConfig) preparePendingRecovery(ctx context.Context, s
 		next.PendingActivation.RecoveryAnchorTicketExpiresAt = anchor
 		next.PendingActivation.RecoveryExpiresAt = deadline
 		next.SchemaVersion = agentStateSchemaVersion
+		// Persist the authoritative v6 anchor even when it is already expired, so
+		// later starts fail the same closed deadline without reinterpreting v5 state.
 		if err := store.SaveAgentState(ctx, next); err != nil {
 			return fmt.Errorf("%w: migrate legacy pending activation recovery deadline: %w", ErrAgentBindingPersistence, err)
 		}
