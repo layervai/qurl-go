@@ -731,6 +731,59 @@ func TestRegisterAgentRuntime_ReplacementHubCannotCrossOriginalDeadline(t *testi
 	}
 }
 
+func TestRegisterAgentRuntime_ReplacementBoundarySetupExpiryReturnsWithoutPanic(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	f := newRuntimeFixture(t,
+		[]runtimeUDPStep{{
+			requestType: relayknock.TypeListRequest,
+			replyType:   relayknock.TypeListResult,
+			replyBody:   bootstrapAssignmentResult(contract, "conformance-assignment-ticket-0002"),
+		}},
+		[]runtimeUDPStep{{
+			requestType: relayknock.TypeRegister,
+			replyType:   relayknock.TypeRegisterAck,
+			replyBody:   `{"errCode":"52111","errMsg":"expired","aspId":"agent"}`,
+		}},
+	)
+	state := seedRecoveryRuntimePendingActivation(t, f)
+	deadline := state.PendingActivation.RecoveryExpiresAt
+	postReplacementClockCalls := 0
+	clock := func() time.Time {
+		// The second persisted snapshot is the replacement activation. Step the
+		// clock across its deadline between boundary construction and context setup.
+		if len(f.store.snapshots()) < 2 {
+			return assignmentFixtureNow
+		}
+		postReplacementClockCalls++
+		if postReplacementClockCalls == 1 {
+			return deadline.Add(-time.Nanosecond)
+		}
+		return deadline
+	}
+
+	_, _, err := RegisterAgentRuntime(
+		context.Background(), conformance.AgentAssignmentBootstrapCredentialFixture, f.store,
+		f.options(withAgentRuntimeClock(clock))...,
+	)
+	var expired *AgentRecoveryExpiredError
+	if !errors.Is(err, ErrAgentRecoveryExpired) || !errors.As(err, &expired) ||
+		expired.Phase != AgentRecoveryPhaseActivation || !expired.RecoveryExpiresAt.Equal(deadline) {
+		t.Fatalf("replacement boundary setup expiry = %T %#v / %v", err, expired, err)
+	}
+	if postReplacementClockCalls != 2 {
+		t.Fatalf("post-replacement boundary clock samples = %d, want construction then context", postReplacementClockCalls)
+	}
+	if len(f.hubUDP.snapshot()) != 1 || len(f.cellUDP.snapshot()) != 1 {
+		t.Fatalf("replacement boundary setup Hub/cell calls = %d/%d, want replacement LST and no replacement REG",
+			len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot()))
+	}
+	loaded, loadErr := f.store.LoadAgentState(context.Background())
+	if loadErr != nil || loaded.PendingActivation == nil ||
+		loaded.PendingActivation.AssignmentTicket != "conformance-assignment-ticket-0002" {
+		t.Fatalf("replacement boundary setup lost committed replacement: %#v / %v", loaded, loadErr)
+	}
+}
+
 func TestRegisterAgentRuntime_ReplacementOTPCannotCrossOriginalDeadline(t *testing.T) {
 	contract := loadAssignmentFixture(t)
 	first := accountAssignmentResult(contract, "conformance-account-assignment-ticket-0001")

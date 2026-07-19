@@ -510,11 +510,7 @@ func (c *nativeAgentRuntimeConfig) registerLocked(ctx context.Context, enrollmen
 	defer wipeBytes(privateKey)
 
 	if state.PendingCompletion != nil {
-		boundary, err := newAgentRecoveryBoundary(state, c.clock)
-		if err != nil {
-			return nil, err
-		}
-		recoveryCtx, cancel, err := boundary.context(ctx)
+		boundary, recoveryCtx, cancel, err := boundedRecovery(ctx, state, c.clock)
 		if err != nil {
 			return nil, err
 		}
@@ -629,10 +625,7 @@ func (c *nativeAgentRuntimeConfig) activateAndComplete(ctx context.Context, enro
 		var boundary *agentRecoveryBoundary
 		cancel := func() {}
 		if !forceFresh {
-			boundary, err = newAgentRecoveryBoundary(state, c.clock)
-			if err == nil {
-				operationCtx, cancel, err = boundary.context(ctx)
-			}
+			boundary, operationCtx, cancel, err = boundedRecovery(ctx, state, c.clock)
 			if err != nil {
 				return nil, err
 			}
@@ -640,9 +633,9 @@ func (c *nativeAgentRuntimeConfig) activateAndComplete(ctx context.Context, enro
 		if forceFresh {
 			credential, err = c.persistFreshPendingActivation(ctx, enrollmentCredential, store, state, privateKey)
 			if err == nil {
-				boundary, err = newAgentRecoveryBoundary(state, c.clock)
-				if err == nil {
-					operationCtx, cancel, err = boundary.context(ctx)
+				boundary, operationCtx, cancel, err = boundedRecovery(ctx, state, c.clock)
+				if err != nil {
+					return nil, err
 				}
 			}
 		} else {
@@ -712,11 +705,7 @@ func (c *nativeAgentRuntimeConfig) persistFreshPendingActivation(ctx context.Con
 	var cancel context.CancelFunc
 	var err error
 	if state.PendingActivation != nil {
-		boundary, err = newAgentRecoveryBoundary(state, c.clock)
-		if err != nil {
-			return "", err
-		}
-		operationCtx, cancel, err = boundary.context(ctx)
+		boundary, operationCtx, cancel, err = boundedRecovery(ctx, state, c.clock)
 		if err != nil {
 			return "", err
 		}
@@ -1204,11 +1193,7 @@ func (c *nativeAgentRuntimeConfig) registerPendingActivation(ctx context.Context
 		return fmt.Errorf("%w: assigned-cell REG requires pending activation", ErrInvalidAgentState)
 	}
 	pending := state.PendingActivation
-	boundary, err := newAgentRecoveryBoundary(state, c.clock)
-	if err != nil {
-		return err
-	}
-	recoveryCtx, cancel, err := boundary.context(ctx)
+	boundary, recoveryCtx, cancel, err := boundedRecovery(ctx, state, c.clock)
 	if err != nil {
 		return err
 	}
@@ -1243,6 +1228,8 @@ func (c *nativeAgentRuntimeConfig) registerPendingActivation(ctx context.Context
 		return nil, classifyNativeRegisterError(ack, pending.Registration.KeyKind)
 	})
 	if err == nil {
+		// Fail closed if the deadline is observed after an authenticated RAK; do
+		// not promote the activation into a new completion mutation.
 		return boundary.check()
 	}
 	return boundary.mapError(ctx, recoveryCtx, err)
@@ -1409,11 +1396,7 @@ func (c *nativeAgentRuntimeConfig) completePending(ctx context.Context, store Ag
 	if state.PendingCompletion == nil || state.Assignment == nil {
 		return fmt.Errorf("%w: completion requires pending candidate and assignment", ErrInvalidAgentState)
 	}
-	boundary, err := newAgentRecoveryBoundary(state, c.clock)
-	if err != nil {
-		return err
-	}
-	recoveryCtx, cancel, err := boundary.context(ctx)
+	boundary, recoveryCtx, cancel, err := boundedRecovery(ctx, state, c.clock)
 	if err != nil {
 		return err
 	}

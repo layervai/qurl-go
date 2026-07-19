@@ -137,6 +137,21 @@ func newAgentRecoveryBoundary(state *AgentState, clock func() time.Time) (*agent
 	return boundary, nil
 }
 
+// boundedRecovery constructs the pending recovery boundary and its bounded,
+// UDP-fenced context as one operation. On success the caller must cancel the
+// returned context; on error there is nothing to clean up.
+func boundedRecovery(ctx context.Context, state *AgentState, clock func() time.Time) (*agentRecoveryBoundary, context.Context, context.CancelFunc, error) {
+	boundary, err := newAgentRecoveryBoundary(state, clock)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	recoveryCtx, cancel, err := boundary.context(ctx)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return boundary, recoveryCtx, cancel, nil
+}
+
 func (b *agentRecoveryBoundary) expiredError() error {
 	return &AgentRecoveryExpiredError{Phase: b.phase, RecoveryExpiresAt: b.deadline}
 }
@@ -168,10 +183,14 @@ func (b *agentRecoveryBoundary) context(ctx context.Context) (context.Context, c
 		return nil, nil, err
 	}
 	remaining := b.deadline.Sub(now)
+	// remaining uses the injected clock while WithTimeout uses real monotonic
+	// time; the UDP fence remains the authoritative per-write deadline check.
 	bounded, cancel := context.WithTimeout(ctx, remaining)
 	return udpfence.With(bounded, b.check), cancel, nil
 }
 
+// mapError requires the non-nil parent and bounded contexts used for the
+// attempted operation; callers invoke it only after boundedRecovery succeeds.
 func (b *agentRecoveryBoundary) mapError(parent, bounded context.Context, err error) error {
 	if err == nil || errors.Is(err, ErrAgentRecoveryExpired) {
 		return err
