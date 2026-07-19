@@ -196,36 +196,38 @@ func validatePendingActivationRecoveryDeadline(pending *PendingAgentActivation, 
 	if pending == nil || state == nil {
 		return fmt.Errorf("%w: pending activation is nil", ErrInvalidAgentState)
 	}
-	if state.SchemaVersion < agentStateSchemaVersion {
-		if !pending.RecoveryAnchorTicketExpiresAt.IsZero() || !pending.RecoveryExpiresAt.IsZero() {
-			return fmt.Errorf("%w: legacy pending activation contains forward recovery fields", ErrInvalidAgentState)
-		}
-		return nil
-	}
-	expected, err := agentRecoveryDeadline(pending.RecoveryAnchorTicketExpiresAt)
-	if err != nil || pending.RecoveryAnchorTicketExpiresAt.Nanosecond() != 0 ||
-		pending.RecoveryExpiresAt.IsZero() || pending.RecoveryExpiresAt.Nanosecond() != 0 ||
-		!pending.RecoveryExpiresAt.Equal(expected) {
-		return fmt.Errorf("%w: pending activation recovery deadline is invalid", ErrInvalidAgentState)
-	}
-	return nil
+	return validateRecoveryDeadlineFields(
+		pending.RecoveryAnchorTicketExpiresAt,
+		pending.RecoveryExpiresAt,
+		state.SchemaVersion,
+		AgentRecoveryPhaseActivation,
+	)
 }
 
 func validatePendingCompletionRecoveryDeadline(pending *PendingAgentCompletion, state *AgentState) error {
 	if pending == nil || state == nil || state.Assignment == nil {
 		return fmt.Errorf("%w: pending completion recovery deadline requires an assignment", ErrInvalidAgentState)
 	}
-	if state.SchemaVersion < agentStateSchemaVersion {
-		if !pending.RecoveryAnchorTicketExpiresAt.IsZero() || !pending.RecoveryExpiresAt.IsZero() {
-			return fmt.Errorf("%w: legacy pending completion contains forward recovery fields", ErrInvalidAgentState)
+	return validateRecoveryDeadlineFields(
+		pending.RecoveryAnchorTicketExpiresAt,
+		pending.RecoveryExpiresAt,
+		state.SchemaVersion,
+		AgentRecoveryPhaseCompletion,
+	)
+}
+
+func validateRecoveryDeadlineFields(anchor, deadline time.Time, schemaVersion int, phase AgentRecoveryPhase) error {
+	if schemaVersion < agentStateSchemaVersion {
+		if !anchor.IsZero() || !deadline.IsZero() {
+			return fmt.Errorf("%w: legacy pending %s contains forward recovery fields", ErrInvalidAgentState, phase)
 		}
 		return nil
 	}
-	expected, err := agentRecoveryDeadline(pending.RecoveryAnchorTicketExpiresAt)
-	if err != nil || pending.RecoveryAnchorTicketExpiresAt.Nanosecond() != 0 ||
-		pending.RecoveryExpiresAt.IsZero() || pending.RecoveryExpiresAt.Nanosecond() != 0 ||
-		!pending.RecoveryExpiresAt.Equal(expected) {
-		return fmt.Errorf("%w: pending completion recovery deadline is invalid", ErrInvalidAgentState)
+	expected, err := agentRecoveryDeadline(anchor)
+	if err != nil || anchor.Nanosecond() != 0 ||
+		deadline.IsZero() || deadline.Nanosecond() != 0 ||
+		!deadline.Equal(expected) {
+		return fmt.Errorf("%w: pending %s recovery deadline is invalid", ErrInvalidAgentState, phase)
 	}
 	return nil
 }
