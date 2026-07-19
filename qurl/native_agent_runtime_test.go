@@ -167,6 +167,12 @@ type runtimeRouteResolver struct {
 	hosts map[string]netip.Addr
 }
 
+type runtimeResolverFunc func(context.Context, string, string) ([]netip.Addr, error)
+
+func (f runtimeResolverFunc) LookupNetIP(ctx context.Context, network, host string) ([]netip.Addr, error) {
+	return f(ctx, network, host)
+}
+
 func (r runtimeRouteResolver) LookupNetIP(_ context.Context, network, host string) ([]netip.Addr, error) {
 	if network != "ip" {
 		return nil, fmt.Errorf("unexpected network %q", network)
@@ -219,14 +225,15 @@ func (d *noIONativeDialer) DialContext(context.Context, string, string) (net.Con
 }
 
 type runtimeRecordingStore struct {
-	inner           AgentStateStore
-	mu              sync.Mutex
-	saves           []*AgentState
-	calls           int
-	fail            int
-	failAfterCommit int
-	cancelOnSave    int
-	cancel          context.CancelFunc
+	inner                     AgentStateStore
+	mu                        sync.Mutex
+	saves                     []*AgentState
+	calls                     int
+	fail                      int
+	failAfterCommit           int
+	waitForContextAfterCommit int
+	cancelOnSave              int
+	cancel                    context.CancelFunc
 }
 
 func (s *runtimeRecordingStore) LoadAgentState(ctx context.Context) (*AgentState, error) {
@@ -247,6 +254,7 @@ func (s *runtimeRecordingStore) SaveAgentState(ctx context.Context, state *Agent
 	call := s.calls
 	fail := s.fail
 	failAfterCommit := s.failAfterCommit
+	waitForContextAfterCommit := s.waitForContextAfterCommit
 	cancelOnSave := s.cancelOnSave
 	cancel := s.cancel
 	s.mu.Unlock()
@@ -261,6 +269,9 @@ func (s *runtimeRecordingStore) SaveAgentState(ctx context.Context, state *Agent
 	s.mu.Unlock()
 	if call == cancelOnSave && cancel != nil {
 		cancel()
+	}
+	if call == waitForContextAfterCommit {
+		<-ctx.Done()
 	}
 	if call == failAfterCommit {
 		return errors.New("injected runtime state post-commit acknowledgement failure")
@@ -680,9 +691,11 @@ func TestRegisterAgentRuntime_RejectsMutuallyExclusiveRecoveryMarkersBeforeIO(t 
 	completion := activation.clone()
 	completion.PendingActivation = nil
 	completion.PendingCompletion = &PendingAgentCompletion{
-		DeviceAPIKey:         canonicalNativeDeviceCredential,
-		CellID:               completion.Assignment.CellID,
-		AssignmentGeneration: completion.Assignment.AssignmentGeneration,
+		DeviceAPIKey:                  canonicalNativeDeviceCredential,
+		CellID:                        completion.Assignment.CellID,
+		AssignmentGeneration:          completion.Assignment.AssignmentGeneration,
+		RecoveryAnchorTicketExpiresAt: activation.PendingActivation.RecoveryAnchorTicketExpiresAt,
+		RecoveryExpiresAt:             activation.PendingActivation.RecoveryExpiresAt,
 	}
 	if err := validateLoadedAgentAssignment(completion); err != nil {
 		t.Fatalf("valid completion fixture: %v", err)
@@ -690,9 +703,11 @@ func TestRegisterAgentRuntime_RejectsMutuallyExclusiveRecoveryMarkersBeforeIO(t 
 
 	pendingCompletion := func(state *AgentState) *PendingAgentCompletion {
 		return &PendingAgentCompletion{
-			DeviceAPIKey:         canonicalNativeDeviceCredential,
-			CellID:               state.Assignment.CellID,
-			AssignmentGeneration: state.Assignment.AssignmentGeneration,
+			DeviceAPIKey:                  canonicalNativeDeviceCredential,
+			CellID:                        state.Assignment.CellID,
+			AssignmentGeneration:          state.Assignment.AssignmentGeneration,
+			RecoveryAnchorTicketExpiresAt: activation.PendingActivation.RecoveryAnchorTicketExpiresAt,
+			RecoveryExpiresAt:             activation.PendingActivation.RecoveryExpiresAt,
 		}
 	}
 	tests := []struct {
@@ -1387,6 +1402,7 @@ func TestRunCompletionExchange_DeadlineDuringBackoffRequiresRecovery(t *testing.
 	const budget = 20 * time.Millisecond
 	cfg := &nativeAgentRuntimeConfig{
 		resolver: resolver, dialer: dialer, timeout: time.Millisecond, maxAddresses: 1,
+		clock: func() time.Time { return fixed },
 		assignmentOptions: []AssignmentOption{
 			WithAssignmentRetryBudget(2, budget),
 			withAssignmentClock(func() time.Time { return fixed }),

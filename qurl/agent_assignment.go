@@ -36,8 +36,10 @@ const (
 	assignmentKeyKindAgent              = "agent"
 	standardNHPUDPPort                  = 62206
 	maxAssignmentTicketBytes            = 2304
-	maxAssignmentJSONDepth              = 64
-	assignmentRequestNonceBytes         = 32
+	// Pinned by TestAssignmentTicketMatchesReleasedConformanceBoundary.
+	maxAssignmentTicketLifetime = 15 * time.Minute
+	maxAssignmentJSONDepth      = 64
+	assignmentRequestNonceBytes = 32
 
 	// These suffixes are a release-gated trust allowlist, not runtime
 	// configuration. Adding an endpoint apex requires an SDK release.
@@ -96,7 +98,8 @@ type AssignmentRegistration struct {
 // PendingAgentActivation before REG so an ambiguous/lost RAK can replay the
 // same one-shot authorization. This transport slice treats the ticket as
 // 1-2304 opaque printable non-space ASCII bytes (0x21-0x7e); assigned-cell
-// registration owns qat1 semantic validation.
+// registration owns qat1 semantic validation. The authenticated response's
+// public expiry must be no more than the conformance maximum 900 seconds ahead.
 type InitialAgentAssignment struct {
 	Registration              AssignmentRegistration
 	Assignment                AgentAssignment
@@ -715,6 +718,9 @@ func parseInitialAssignmentReply(body []byte, wantAgentID string, now time.Time)
 	}
 	if !ticketExpiry.After(now) {
 		return nil, invalidAssignmentResponse("assignment_ticket_expires_at", errors.New("ticket is not in the future"))
+	}
+	if ticketExpiry.Sub(now) > maxAssignmentTicketLifetime {
+		return nil, invalidAssignmentResponse("assignment_ticket_expires_at", errors.New("ticket exceeds the conformance maximum lifetime"))
 	}
 	if !assignment.LeaseExpiresAt.After(ticketExpiry) {
 		return nil, invalidAssignmentResponse("initial assignment deadlines", errors.New("ticket must expire before lease"))

@@ -231,9 +231,9 @@ func WithAgentRuntimeMetadata(hostname, version string) AgentRuntimeRegistration
 // WithAgentRuntimeOTPProvider opts into account-credential enrollment. A fresh
 // callback follows one fire-and-forget assigned-cell NHP_OTP dispatch and is
 // bounded by the ticket window. Pending-activation recovery instead sets
-// AgentOTPChallenge.PendingActivationRecovery, dispatches no OTP, and passes the
-// caller context because exact replay may outlive that window; callers must set
-// an outer deadline when the provider could block.
+// AgentOTPChallenge.PendingActivationRecovery, dispatches no OTP, and receives
+// the caller context clamped to the persisted recovery deadline. Callers may set
+// an earlier outer deadline when the provider could block.
 func WithAgentRuntimeOTPProvider(provider func(context.Context, AgentOTPChallenge) (string, error)) AgentRuntimeRegistrationOption {
 	return nativeRuntimeOptionFunc(func(c *nativeAgentRuntimeConfig) error {
 		if provider == nil {
@@ -500,6 +500,9 @@ func (c *nativeAgentRuntimeConfig) registerLocked(ctx context.Context, enrollmen
 			return nil, err
 		}
 	}
+	if err := c.preparePendingRecovery(ctx, store, state); err != nil {
+		return nil, err
+	}
 	privateKey, err := decodeRuntimePrivateKey(state, ErrInvalidRegisterConfig)
 	if err != nil {
 		return nil, err
@@ -507,12 +510,20 @@ func (c *nativeAgentRuntimeConfig) registerLocked(ctx context.Context, enrollmen
 	defer wipeBytes(privateKey)
 
 	if state.PendingCompletion != nil {
+		boundary, recoveryCtx, cancel, err := boundedRecovery(ctx, state, c.clock)
+		if err != nil {
+			return nil, err
+		}
+		defer cancel()
 		if state.Assignment == nil {
 			return nil, fmt.Errorf("%w: pending completion has no assignment", ErrInvalidAgentState)
 		}
 		if state.Assignment.LeaseExpired(c.clock()) {
-			fresh, err := c.refreshAssignmentLifecycle(ctx, *c.hub, state.AgentID, privateKey)
+			fresh, err := c.refreshAssignmentLifecycle(recoveryCtx, *c.hub, state.AgentID, privateKey)
 			if err != nil {
+				return nil, boundary.mapError(ctx, recoveryCtx, err)
+			}
+			if err := boundary.check(); err != nil {
 				return nil, err
 			}
 			if err := ensureAssignmentContinuity(state.Assignment, fresh); err != nil {
@@ -521,12 +532,12 @@ func (c *nativeAgentRuntimeConfig) registerLocked(ctx context.Context, enrollmen
 			// The previous lease is expired and fresh is validated as live, so the
 			// assignment necessarily changed. Persist it before resuming completion.
 			state.Assignment = fresh.clone()
-			if err := store.SaveAgentState(ctx, state); err != nil {
+			if err := store.SaveAgentState(recoveryCtx, state); err != nil {
 				return nil, fmt.Errorf("%w: save refreshed pending assignment: %w", ErrAgentBindingPersistence, err)
 			}
 		}
-		if err := c.completePending(ctx, store, state, privateKey); err != nil {
-			return nil, err
+		if err := c.completePending(recoveryCtx, store, state, privateKey); err != nil {
+			return nil, boundary.mapError(ctx, recoveryCtx, err)
 		}
 		return finishNativeRuntimeResult(store, state, c)
 	}
@@ -551,6 +562,53 @@ func (c *nativeAgentRuntimeConfig) registerLocked(ctx context.Context, enrollmen
 	return c.activateAndComplete(ctx, enrollmentCredential, store, state, privateKey)
 }
 
+// preparePendingRecovery performs the only supported pre-v6 pending-state
+// migration while the setup lock is held and before any UDP I/O. A legacy
+// activation has the authenticated assignment-ticket expiry needed to derive
+// its exact finite deadline. A legacy completion does not retain that anchor;
+// inventing one from the upgrade clock would make server retention unbounded,
+// so it fails closed for explicit recovery or reprovisioning.
+func (c *nativeAgentRuntimeConfig) preparePendingRecovery(ctx context.Context, store AgentStateStore, state *AgentState) error {
+	if state == nil {
+		return fmt.Errorf("%w: pending recovery state is nil", ErrInvalidAgentState)
+	}
+	if state.PendingActivation != nil && state.PendingActivation.RecoveryExpiresAt.IsZero() {
+		anchor := state.PendingActivation.AssignmentTicketExpiresAt
+		deadline, err := agentRecoveryDeadline(anchor)
+		if err != nil {
+			return err
+		}
+		next := state.clone()
+		next.PendingActivation.RecoveryAnchorTicketExpiresAt = anchor
+		next.PendingActivation.RecoveryExpiresAt = deadline
+		next.SchemaVersion = agentStateSchemaVersion
+		if err := validatePendingActivationRecoveryDeadline(next.PendingActivation, next); err != nil {
+			return fmt.Errorf("%w: validate migrated pending activation recovery deadline: %w", ErrInvalidRegisterConfig, err)
+		}
+		// Persist the authoritative v6 anchor even when it is already expired, so
+		// later starts fail the same closed deadline without reinterpreting v5 state.
+		if err := store.SaveAgentState(ctx, next); err != nil {
+			return fmt.Errorf("%w: migrate legacy pending activation recovery deadline: %w", ErrAgentBindingPersistence, err)
+		}
+		*state = *next
+	}
+	if state.PendingCompletion != nil && state.PendingCompletion.RecoveryExpiresAt.IsZero() {
+		return &AgentRecoveryMigrationRequiredError{
+			Phase: AgentRecoveryPhaseCompletion, SchemaVersion: state.SchemaVersion,
+		}
+	}
+	return c.requirePendingRecoveryLive(state)
+}
+
+func (c *nativeAgentRuntimeConfig) requirePendingRecoveryLive(state *AgentState) error {
+	_, _, pending := pendingRecoveryDeadline(state)
+	if !pending {
+		return nil
+	}
+	_, err := newAgentRecoveryBoundary(state, c.clock)
+	return err
+}
+
 // activateAndComplete recovers an existing pending REG before asking the Hub
 // for anything new. Only an authenticated 52111, or account 52101, proves that
 // exact attempt was not committed and permits one replacement assignment. The
@@ -566,24 +624,60 @@ func (c *nativeAgentRuntimeConfig) activateAndComplete(ctx context.Context, enro
 	for attempt := 0; attempt < 2; attempt++ {
 		var credential string
 		var err error
+		operationCtx := ctx
+		var boundary *agentRecoveryBoundary
+		cancel := func() {}
 		if forceFresh {
 			credential, err = c.persistFreshPendingActivation(ctx, enrollmentCredential, store, state, privateKey)
+			if err == nil {
+				boundary, operationCtx, cancel, err = boundedRecovery(ctx, state, c.clock)
+				if err != nil {
+					return nil, err
+				}
+			}
 		} else {
-			credential, err = c.pendingRegistrationCredential(ctx, state, enrollmentCredential)
-		}
-		if err != nil {
-			return nil, err
-		}
-		err = c.registerPendingActivation(ctx, state, credential, privateKey)
-		if err == nil {
-			if err := c.transitionPendingActivation(ctx, store, state); err != nil {
+			boundary, operationCtx, cancel, err = boundedRecovery(ctx, state, c.clock)
+			if err != nil {
 				return nil, err
 			}
+			credential, err = c.pendingRegistrationCredential(operationCtx, state, enrollmentCredential)
+		}
+		if boundary != nil {
+			if boundaryErr := boundary.check(); boundaryErr != nil {
+				cancel()
+				return nil, boundaryErr
+			}
+		}
+		if err != nil {
+			if boundary != nil {
+				err = boundary.mapError(ctx, operationCtx, err)
+			}
+			cancel()
+			return nil, err
+		}
+		if boundary == nil {
+			cancel()
+			return nil, fmt.Errorf("%w: activation recovery boundary is missing before REG", ErrInvalidAgentState)
+		}
+		err = c.registerPendingActivation(operationCtx, state, credential, privateKey)
+		if boundaryErr := boundary.check(); boundaryErr != nil {
+			cancel()
+			return nil, boundaryErr
+		}
+		if err == nil {
+			if err := c.transitionPendingActivation(operationCtx, store, state); err != nil {
+				err = boundary.mapError(ctx, operationCtx, err)
+				cancel()
+				return nil, err
+			}
+			cancel()
 			if err := c.completePending(ctx, store, state, privateKey); err != nil {
 				return nil, err
 			}
 			return finishNativeRuntimeResult(store, state, c)
 		}
+		err = boundary.mapError(ctx, operationCtx, err)
+		cancel()
 		if attempt == 0 && registrationVerdictPermitsReplacement(err) {
 			// Fetch a replacement only after an authenticated non-commit verdict,
 			// and retain the old record until persistFreshPendingActivation commits
@@ -609,9 +703,32 @@ func registrationVerdictPermitsReplacement(err error) bool {
 }
 
 func (c *nativeAgentRuntimeConfig) persistFreshPendingActivation(ctx context.Context, enrollmentCredential string, store AgentStateStore, state *AgentState, privateKey []byte) (string, error) {
-	initial, err := c.fetchInitialAssignmentLifecycle(ctx, *c.hub, state.AgentID, enrollmentCredential, privateKey)
+	operationCtx := ctx
+	var boundary *agentRecoveryBoundary
+	var cancel context.CancelFunc
+	var err error
+	if state.PendingActivation != nil {
+		boundary, operationCtx, cancel, err = boundedRecovery(ctx, state, c.clock)
+		if err != nil {
+			return "", err
+		}
+		defer cancel()
+	}
+	mapRecoveryError := func(err error) error {
+		if boundary == nil {
+			return err
+		}
+		return boundary.mapError(ctx, operationCtx, err)
+	}
+
+	initial, err := c.fetchInitialAssignmentLifecycle(operationCtx, *c.hub, state.AgentID, enrollmentCredential, privateKey)
 	if err != nil {
-		return "", err
+		return "", mapRecoveryError(err)
+	}
+	if boundary != nil {
+		if err := boundary.check(); err != nil {
+			return "", err
+		}
 	}
 	if err := c.requireAllowedRegistrationKeyKind(initial.Registration.KeyKind); err != nil {
 		return "", err
@@ -622,17 +739,30 @@ func (c *nativeAgentRuntimeConfig) persistFreshPendingActivation(ctx context.Con
 	// Persisting a "dispatched" record first could strand the ticket if the
 	// process exits before the one-way send. A later save failure is safe: no REG
 	// occurred and a new explicit attempt may obtain a new ticket and its one OTP.
-	credential, err := c.registrationCredential(ctx, candidateState, initial, enrollmentCredential, privateKey)
+	credential, err := c.registrationCredential(operationCtx, candidateState, initial, enrollmentCredential, privateKey)
+	if err != nil {
+		return "", mapRecoveryError(err)
+	}
+	var pending *PendingAgentActivation
+	if boundary != nil {
+		pending, err = newPendingAgentActivationWithRecoveryAnchor(
+			initial, candidateState, c.hostname, c.version, enrollmentCredential,
+			state.PendingActivation.RecoveryAnchorTicketExpiresAt,
+		)
+	} else {
+		pending, err = newPendingAgentActivation(initial, candidateState, c.hostname, c.version, enrollmentCredential)
+	}
 	if err != nil {
 		return "", err
 	}
-	pending, err := newPendingAgentActivation(initial, candidateState, c.hostname, c.version, enrollmentCredential)
-	if err != nil {
-		return "", err
+	if boundary != nil {
+		if err := boundary.check(); err != nil {
+			return "", err
+		}
 	}
 	candidateState.PendingActivation = pending
 	candidateState.SchemaVersion = agentStateSchemaVersion
-	if err := store.SaveAgentState(ctx, candidateState); err != nil {
+	if err := store.SaveAgentState(operationCtx, candidateState); err != nil {
 		return "", fmt.Errorf("%w: save pending assigned-cell activation before REG: %w", ErrAgentBindingPersistence, err)
 	}
 	*state = *candidateState
@@ -665,8 +795,8 @@ func (c *nativeAgentRuntimeConfig) pendingRegistrationCredential(ctx context.Con
 			return "", fmt.Errorf("%w: pending account activation requires the original code through WithAgentRuntimeOTPProvider", ErrAgentOTPRequired)
 		}
 		// Exact replay may outlive the local ticket window, so the assigned cell
-		// decides validity. The raw caller context intentionally lets the outer
-		// registration deadline bound this callback without a fresh OTP window.
+		// decides validity. The pending-recovery context is clamped to the durable
+		// recovery deadline without inventing a fresh OTP window.
 		code, err := c.otpProvider(ctx, AgentOTPChallenge{
 			AgentID: pending.AgentID, CredentialKeyID: pending.Registration.KeyID,
 			CellID: pending.Assignment.CellID, AssignmentTicketExpiresAt: pending.AssignmentTicketExpiresAt,
@@ -697,8 +827,11 @@ func (c *nativeAgentRuntimeConfig) transitionPendingActivation(ctx context.Conte
 	}
 	next := state.clone()
 	next.PendingCompletion = &PendingAgentCompletion{
-		DeviceAPIKey: candidate, CellID: state.Assignment.CellID,
-		AssignmentGeneration: state.Assignment.AssignmentGeneration,
+		DeviceAPIKey:                  candidate,
+		CellID:                        state.Assignment.CellID,
+		AssignmentGeneration:          state.Assignment.AssignmentGeneration,
+		RecoveryAnchorTicketExpiresAt: state.PendingActivation.RecoveryAnchorTicketExpiresAt,
+		RecoveryExpiresAt:             state.PendingActivation.RecoveryExpiresAt,
 	}
 	next.PendingActivation = nil
 	next.SchemaVersion = agentStateSchemaVersion
@@ -802,6 +935,13 @@ func validateIncompleteNativeState(state *AgentState) error {
 }
 
 func newPendingAgentActivation(initial *InitialAgentAssignment, state *AgentState, hostname, version, enrollmentCredential string) (*PendingAgentActivation, error) {
+	if initial == nil {
+		return nil, fmt.Errorf("%w: pending activation requires initial assignment", ErrInvalidRegisterConfig)
+	}
+	return newPendingAgentActivationWithRecoveryAnchor(initial, state, hostname, version, enrollmentCredential, initial.AssignmentTicketExpiresAt)
+}
+
+func newPendingAgentActivationWithRecoveryAnchor(initial *InitialAgentAssignment, state *AgentState, hostname, version, enrollmentCredential string, recoveryAnchor time.Time) (*PendingAgentActivation, error) {
 	if initial == nil || state == nil || state.Assignment == nil {
 		return nil, fmt.Errorf("%w: pending activation requires initial assignment and state", ErrInvalidRegisterConfig)
 	}
@@ -813,11 +953,17 @@ func newPendingAgentActivation(initial *InitialAgentAssignment, state *AgentStat
 	assignment := *state.Assignment
 	pending := &PendingAgentActivation{
 		AssignmentTicket: initial.AssignmentTicket, AssignmentTicketExpiresAt: initial.AssignmentTicketExpiresAt,
-		AgentID: state.AgentID, AgentPublicKeyB64: state.PublicKeyB64,
+		RecoveryAnchorTicketExpiresAt: recoveryAnchor,
+		AgentID:                       state.AgentID, AgentPublicKeyB64: state.PublicKeyB64,
 		Assignment: assignment, Registration: initial.Registration,
 		Hostname: hostname, AgentVersion: version,
 		EnrollmentCredentialFingerprintB64: enrollmentCredentialFingerprint(enrollmentCredential),
 	}
+	deadline, err := agentRecoveryDeadline(pending.RecoveryAnchorTicketExpiresAt)
+	if err != nil {
+		return nil, fmt.Errorf("%w: construct pending activation recovery deadline: %w", ErrInvalidRegisterConfig, err)
+	}
+	pending.RecoveryExpiresAt = deadline
 	if err := validatePendingAgentActivation(pending, state); err != nil {
 		return nil, fmt.Errorf("%w: construct pending activation: %w", ErrInvalidRegisterConfig, err)
 	}
@@ -836,6 +982,9 @@ func validatePendingAgentActivation(pending *PendingAgentActivation, state *Agen
 	}
 	if pending.AssignmentTicketExpiresAt.IsZero() {
 		return invalid("ticket expiry is missing")
+	}
+	if err := validatePendingActivationRecoveryDeadline(pending, state); err != nil {
+		return err
 	}
 	if err := validateAssignmentAgentID(pending.AgentID); err != nil || pending.AgentID != state.AgentID {
 		return invalid("agent identity does not match state")
@@ -1047,9 +1196,15 @@ func (c *nativeAgentRuntimeConfig) registerPendingActivation(ctx context.Context
 		return fmt.Errorf("%w: assigned-cell REG requires pending activation", ErrInvalidAgentState)
 	}
 	pending := state.PendingActivation
-	// Do not reject locally when the persisted ticket has expired. The pinned
-	// cell must distinguish an exact committed replay from marker-absent 52111;
-	// only that authenticated verdict can authorize one replacement assignment.
+	boundary, recoveryCtx, cancel, err := boundedRecovery(ctx, state, c.clock)
+	if err != nil {
+		return err
+	}
+	defer cancel()
+	// Within the finite SDK recovery horizon, do not reject locally merely because
+	// the one-shot ticket has expired. The pinned cell must distinguish an exact
+	// committed replay from marker-absent 52111; only that authenticated verdict
+	// can authorize one replacement assignment.
 	body, err := marshalRegisterRequestBody(pending.Registration.KeyID, pending.AgentID, credential, registerUserData{
 		Hostname: pending.Hostname, Version: pending.AgentVersion, AssignmentTicket: pending.AssignmentTicket,
 	})
@@ -1065,7 +1220,7 @@ func (c *nativeAgentRuntimeConfig) registerPendingActivation(ctx context.Context
 	if err != nil {
 		return err
 	}
-	_, err = runNativeExchange(ctx, retry, endpoint, body, c.udpOptions(privateKey), nativeudp.Register, registrationRetryInfo, newRegistrationRecovery, func(reply []byte, _ time.Time) (*struct{}, error) {
+	_, err = runNativeExchange(recoveryCtx, retry, endpoint, body, c.udpOptions(privateKey), nativeudp.Register, registrationRetryInfo, newRegistrationRecovery, func(reply []byte, _ time.Time) (*struct{}, error) {
 		ack, parseErr := parseNativeRegisterAck(reply)
 		if parseErr != nil {
 			return nil, parseErr
@@ -1075,7 +1230,12 @@ func (c *nativeAgentRuntimeConfig) registerPendingActivation(ctx context.Context
 		}
 		return nil, classifyNativeRegisterError(ack, pending.Registration.KeyKind)
 	})
-	return err
+	if err == nil {
+		// Fail closed if the deadline is observed after an authenticated RAK; do
+		// not promote the activation into a new completion mutation.
+		return boundary.check()
+	}
+	return boundary.mapError(ctx, recoveryCtx, err)
 }
 
 func classifyNativeRegisterError(ack *registerAckBody, keyKind string) error {
@@ -1239,6 +1399,11 @@ func (c *nativeAgentRuntimeConfig) completePending(ctx context.Context, store Ag
 	if state.PendingCompletion == nil || state.Assignment == nil {
 		return fmt.Errorf("%w: completion requires pending candidate and assignment", ErrInvalidAgentState)
 	}
+	boundary, recoveryCtx, cancel, err := boundedRecovery(ctx, state, c.clock)
+	if err != nil {
+		return err
+	}
+	defer cancel()
 	body, err := json.Marshal(completionRequest{
 		UsrID: "", DevID: state.AgentID, AspID: agentAspID,
 		UsrData: completionUserData{Query: completionQuery, Version: completionVersion, DeviceAPIKey: state.PendingCompletion.DeviceAPIKey},
@@ -1251,8 +1416,11 @@ func (c *nativeAgentRuntimeConfig) completePending(ctx context.Context, store Ag
 	if err != nil {
 		return err
 	}
-	keyID, err := c.runCompletionExchange(ctx, endpoint, body, c.udpOptions(privateKey))
+	keyID, err := c.runCompletionExchange(recoveryCtx, endpoint, body, c.udpOptions(privateKey))
 	if err != nil {
+		return boundary.mapError(ctx, recoveryCtx, err)
+	}
+	if err := boundary.check(); err != nil {
 		return err
 	}
 	previous := state.clone()
@@ -1262,7 +1430,7 @@ func (c *nativeAgentRuntimeConfig) completePending(ctx context.Context, store Ag
 	registeredAt := c.clock().UTC()
 	state.RegisteredAt = &registeredAt
 	state.SchemaVersion = agentStateSchemaVersion
-	if err := store.SaveAgentState(ctx, state); err != nil {
+	if err := store.SaveAgentState(recoveryCtx, state); err != nil {
 		*state = *previous
 		return fmt.Errorf("%w: persist completed native credential: %w", ErrAgentBindingPersistence, err)
 	}

@@ -16,6 +16,7 @@ import (
 
 	"github.com/layervai/qurl-go/internal/cryptoutil"
 	"github.com/layervai/qurl-go/internal/nhpcontract"
+	"github.com/layervai/qurl-go/internal/udpfence"
 	"github.com/layervai/qurl-go/internal/x25519key"
 	"github.com/layervai/qurl-go/relayknock"
 	"github.com/layervai/qurl-go/relayknock/internal/nhpwire"
@@ -198,6 +199,9 @@ func SendOTP(ctx context.Context, ep Endpoint, body []byte, opts Options) error 
 	if err := ctxErr(ctx); err != nil {
 		return err
 	}
+	if err := udpfence.Check(ctx); err != nil {
+		return err
+	}
 	if err := validateEndpoint(ep); err != nil {
 		return err
 	}
@@ -273,6 +277,9 @@ func Exchange(ctx context.Context, ep Endpoint, headerType int, body []byte, opt
 
 func exchange(ctx context.Context, ep Endpoint, headerType int, body, cookie []byte, opts Options) (*relayknock.Reply, uint64, error) {
 	if err := ctxErr(ctx); err != nil {
+		return nil, 0, err
+	}
+	if err := udpfence.Check(ctx); err != nil {
 		return nil, 0, err
 	}
 	if err := validateHeaderType(headerType); err != nil {
@@ -462,11 +469,17 @@ func sendToAddresses(ctx context.Context, addrs []netip.Addr, port int, packet [
 		if err := ctxErr(ctx); err != nil {
 			return nil, err
 		}
+		if err := udpfence.Check(ctx); err != nil {
+			return nil, err
+		}
 		// net.JoinHostPort brackets IPv6 and avoids a bounds-unchecked uint16(port)
 		// conversion; port is already validated to 1..65535 by validateEndpoint.
 		reply, err := sendOne(ctx, dialer, net.JoinHostPort(addr.String(), portStr), packet, timeout, replyBuffer)
 		if err == nil {
 			return reply, nil
+		}
+		if fenceErr := udpfence.Check(ctx); fenceErr != nil {
+			return nil, fenceErr
 		}
 		if cerr := ctxErr(ctx); cerr != nil {
 			// A cancelled/expired context aborts the whole exchange; do not keep
@@ -494,6 +507,12 @@ func sendOne(ctx context.Context, dialer Dialer, address string, packet []byte, 
 	defer func() { _ = conn.Close() }()
 	defer stopCancellation()
 
+	if err := ctxErr(ctx); err != nil {
+		return nil, err
+	}
+	if err := udpfence.Check(ctx); err != nil {
+		return nil, err
+	}
 	n, err := conn.Write(packet)
 	if err != nil {
 		return nil, fmt.Errorf("write to %s: %w", address, err)
@@ -540,6 +559,9 @@ func sendDatagram(ctx context.Context, addr netip.Addr, port int, packet []byte,
 	defer stopCancellation()
 	if cerr := ctxErr(ctx); cerr != nil {
 		return cerr
+	}
+	if err := udpfence.Check(ctx); err != nil {
+		return err
 	}
 	n, err := conn.Write(packet)
 	if err != nil {
@@ -686,6 +708,9 @@ func buildPacket(headerType int, serverStaticPub, devicePriv, body, cookie []byt
 // re-resolves on every exchange (a resolved IP is never persisted) so DNS/NLB
 // replacement and multi-address behavior are preserved.
 func resolveAddresses(ctx context.Context, host string, opts Options) ([]netip.Addr, error) {
+	if err := udpfence.Check(ctx); err != nil {
+		return nil, err
+	}
 	resolver := opts.Resolver
 	if resolver == nil {
 		resolver = net.DefaultResolver

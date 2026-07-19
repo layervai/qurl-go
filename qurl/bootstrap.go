@@ -63,8 +63,9 @@ var ErrBootstrapSetupKeyConsumed = errors.New("qurl: bootstrap setup key already
 // rather than a world-readable path.
 //
 // The state schema is native-only. Unknown JSON fields fail closed; no retired
-// HTTP enrollment schema is accepted or migrated. SchemaVersion is
-// informational; readiness comes from validated native fields.
+// HTTP enrollment schema is accepted or migrated. SchemaVersion selects the
+// closed legacy/current recovery-field grammar; readiness still comes from the
+// validated native fields rather than the number alone.
 type AgentState struct {
 	AgentID       string     `json:"agent_id,omitempty"`
 	PrivateKeyB64 string     `json:"private_key_b64"`
@@ -72,7 +73,8 @@ type AgentState struct {
 	RegisteredAt  *time.Time `json:"registered_at,omitempty"`
 
 	// SchemaVersion is the AgentState schema version. RegisterAgentRuntime writes
-	// agentStateSchemaVersion. Informational only.
+	// agentStateSchemaVersion; pending schema-v5 state must not populate schema-v6
+	// recovery fields.
 	SchemaVersion int `json:"schema_version,omitempty"`
 	// DeviceAPIKey is the device REST bearer credential minted at registration
 	// completion. Its presence alongside RegisteredAt marks a state ready to back
@@ -96,14 +98,15 @@ type AgentState struct {
 	// AgentStateStore before the first assigned-cell REG. It retains the exact
 	// non-secret activation proof and placement needed to recover an
 	// ambiguous/lost RAK without asking the Hub for another one-shot ticket.
-	// Enrollment credentials, OTP codes, and device credentials are never stored
-	// here.
+	// Schema v6 adds its authority-anchored finite recovery deadline. Enrollment
+	// credentials, OTP codes, and device credentials are never stored here.
 	PendingActivation *PendingAgentActivation `json:"pending_activation,omitempty"`
 
 	// PendingCompletion is written only after an authenticated assigned-cell RAK
 	// and before the first completion LST. It keeps the SDK-generated device
 	// secret crash-safe across an ambiguous/lost LRT. A retry must reuse this
-	// exact candidate; generating a replacement could mint a second credential.
+	// exact candidate before the same schema-v6 recovery deadline; generating a
+	// replacement could mint a second credential.
 	PendingCompletion *PendingAgentCompletion `json:"pending_completion,omitempty"`
 }
 
@@ -133,6 +136,14 @@ type PendingAgentCompletion struct {
 	DeviceAPIKey         string `json:"device_api_key"`
 	CellID               string `json:"cell_id"`
 	AssignmentGeneration int64  `json:"assignment_generation"`
+	// RecoveryAnchorTicketExpiresAt retains the first authenticated Hub ticket
+	// expiry for this recovery episode. Completion never reuses the ticket; the
+	// timestamp exists only to validate the copied immutable deadline.
+	RecoveryAnchorTicketExpiresAt time.Time `json:"recovery_anchor_ticket_expires_at,omitempty"`
+	// RecoveryExpiresAt is the absolute deadline inherited unchanged from the
+	// activation ticket. It is never reset by RAK, restart, assignment refresh,
+	// retry, or completion response.
+	RecoveryExpiresAt time.Time `json:"recovery_expires_at,omitempty"`
 }
 
 // PendingAgentActivation is the exact durable input for one assigned-cell REG.
@@ -153,8 +164,16 @@ type PendingAgentCompletion struct {
 // from the corroborated enrollment credential, while account recovery asks the
 // explicit OTP provider for the original code and never dispatches another OTP.
 type PendingAgentActivation struct {
-	AssignmentTicket                   string                 `json:"assignment_ticket"`
-	AssignmentTicketExpiresAt          time.Time              `json:"assignment_ticket_expires_at"`
+	AssignmentTicket          string    `json:"assignment_ticket"`
+	AssignmentTicketExpiresAt time.Time `json:"assignment_ticket_expires_at"`
+	// RecoveryAnchorTicketExpiresAt is the first authenticated ticket expiry in
+	// this recovery episode. An authenticated non-commit verdict may replace the
+	// current ticket, but it cannot replace this non-secret authority anchor.
+	RecoveryAnchorTicketExpiresAt time.Time `json:"recovery_anchor_ticket_expires_at,omitempty"`
+	// RecoveryExpiresAt is exactly RecoveryAnchorTicketExpiresAt plus the released
+	// AgentRegistrationRecoveryHorizon. The first authenticated Hub timestamp,
+	// rather than a local process timestamp, anchors the finite recovery contract.
+	RecoveryExpiresAt                  time.Time              `json:"recovery_expires_at,omitempty"`
 	AgentID                            string                 `json:"agent_id"`
 	AgentPublicKeyB64                  string                 `json:"agent_public_key_b64"`
 	Assignment                         AgentAssignment        `json:"assignment"`
@@ -170,6 +189,13 @@ type PendingAgentActivation struct {
 func validateLoadedAgentAssignment(state *AgentState) error {
 	if state == nil {
 		return nil
+	}
+	// Zero is the original, pre-versioned state shape and versions through the
+	// current one remain readable for the explicit migrations below. Negative
+	// versions are invalid, while a greater version belongs to a newer SDK whose
+	// invariants this binary cannot safely interpret.
+	if state.SchemaVersion < 0 || state.SchemaVersion > agentStateSchemaVersion {
+		return fmt.Errorf("%w: unsupported agent state schema version %d", ErrInvalidAgentState, state.SchemaVersion)
 	}
 	// Assignment, pending activation/completion, and native credential-id fields
 	// are durable native-runtime markers. Once any marker exists, the identity
@@ -204,6 +230,9 @@ func validateLoadedAgentAssignment(state *AgentState) error {
 		}
 		if pending.CellID != state.Assignment.CellID || pending.AssignmentGeneration != state.Assignment.AssignmentGeneration {
 			return fmt.Errorf("%w: pending completion does not match the persisted assignment", ErrInvalidAgentState)
+		}
+		if err := validatePendingCompletionRecoveryDeadline(pending, state); err != nil {
+			return err
 		}
 		if state.RegisteredAt != nil || state.DeviceAPIKey != "" || state.DeviceAPIKeyID != "" {
 			return fmt.Errorf("%w: pending completion cannot coexist with a completed device credential", ErrInvalidAgentState)
@@ -241,7 +270,7 @@ func (s *AgentState) clone() *AgentState {
 }
 
 // agentStateSchemaVersion is the current native AgentState schema version.
-const agentStateSchemaVersion = 5
+const agentStateSchemaVersion = 6
 
 // AgentStateStore loads and saves the bootstrapped local identity. The
 // file-backed store writes plaintext JSON protected by filesystem permissions;

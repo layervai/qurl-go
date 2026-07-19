@@ -12,7 +12,9 @@ import (
 var ErrInvalidRegisterConfig = errors.New("qurl: invalid register config")
 
 // ErrAgentBindingPersistence means an AgentState save reported failure. The
-// save may have committed before its acknowledgement failed, so reload first.
+// save may have committed before its acknowledgement failed, even when a
+// recovery deadline or caller cancellation occurred concurrently, so reload
+// first.
 // PendingActivation resumes with the same enrollment credential,
 // PendingCompletion resumes without one, and completed state may already hold
 // the authenticated refreshed or reassigned binding.

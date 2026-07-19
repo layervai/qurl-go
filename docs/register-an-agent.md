@@ -40,7 +40,8 @@ The SDK then:
 1. loads or creates the persistent X25519 agent identity;
 2. asks the pinned Hub for an assignment over authenticated NHP UDP;
 3. obtains the optional account OTP, then durably persists one exact pending
-   activation: ticket and expiry, agent id/public key, registration key id/kind,
+   activation: current ticket and expiry, first-ticket recovery anchor, 90-day
+   absolute recovery deadline, agent id/public key, registration key id/kind,
    metadata, complete assigned-cell binding, and a one-way identity of the
    caller-supplied enrollment credential;
 4. sends REG directly to only that persisted assigned cell;
@@ -53,10 +54,12 @@ The pending activation never contains the plaintext enrollment credential, OTP
 code, or device credential. If RAK is lost after the authority commits REG, the
 next call must supply the same enrollment credential. The SDK re-drives the
 persisted REG to its pinned cell before asking the Hub for anything new. An
-exact committed activation may replay after ticket expiry; an authenticated
-`52111` marker-absent result permits one replacement Hub ticket while the
-credential remains active. Transport ambiguity never triggers Hub or cross-cell
-fallback.
+exact committed activation may replay after ticket expiry while its persisted
+recovery deadline remains live; an authenticated `52111` marker-absent result
+permits one replacement Hub ticket while the credential remains active. That
+replacement changes the current ticket, never the first-ticket recovery anchor
+or absolute deadline, including after a process restart.
+Transport ambiguity never triggers Hub or cross-cell fallback.
 
 Metadata is optional only when constructing a fresh REG. Once a
 `PendingActivation` exists, its persisted `hostname` and `version` are exact
@@ -68,8 +71,89 @@ restored, explicitly reprovision the agent rather than substituting new
 metadata.
 
 The v0.5 Hub contract requires the assignment lease to expire strictly after
-the assignment ticket. The SDK enforces that ordering when it creates and
-reloads pending activation state.
+the assignment ticket and caps a ticket at the qurl-conformance maximum of 900
+seconds from the authenticated response clock. The SDK enforces both bounds
+when it creates pending activation state and rechecks lease ordering on reload.
+
+## Finite recovery horizon
+
+`AgentRegistrationRecoveryHorizon` is exactly 90 days. A fresh pending
+activation persists
+`recovery_anchor_ticket_expires_at = assignment_ticket_expires_at` and
+`recovery_expires_at = recovery_anchor_ticket_expires_at + 90 days`, where the
+anchor is the first timestamp from the authenticated Hub LRT. A replacement
+ticket keeps its own current expiry but copies that original anchor and deadline.
+After RAK, the SDK copies the same immutable pair into `PendingCompletion`. RAK,
+replacement, restart, assignment refresh, retries, SDK upgrade, and local save
+time never reset it.
+
+Credential-free assignment refresh carries no activation ticket and updates
+only the assigned-cell binding and lease. It deliberately cannot re-anchor or
+extend registration recovery. The 900-second lifetime cap therefore applies to
+initial and replacement activation tickets, while a refreshed assignment has no
+ticket-derived recovery authority to cap.
+
+`RegisterAgentRuntime` clamps pending-recovery contexts to the deadline and
+checks the same boundary before DNS and immediately before every Hub or cell UDP
+datagram write, including OTP and each multi-address fallback. No recovery
+datagram is dispatched at or after the deadline. It returns
+`*AgentRecoveryExpiredError`, matchable with
+`ErrAgentRecoveryExpired`, containing only the non-secret phase and deadline.
+An invocation that began before the deadline may already have sent an earlier
+datagram or completed a durable state transition. A save error therefore keeps
+`ErrAgentBindingPersistence` (and, after RAK,
+`ErrAgentCompletionCandidatePersistence`) even if the deadline expires at the
+same time: reload before deciding which exact pending or completed state won.
+Do not delete pending state to force reenrollment; use the explicit NHP-native
+credential recovery or reprovisioning workflow.
+
+The absolute deadline is authority-anchored, but the SDK compares it with the
+host's UTC wall clock. Keep system time synchronized. Clock error can make the
+local decision early or late, but it cannot extend server authority: an
+authority whose replay evidence has retired still rejects mutation. The server
+keeps an additional bounded in-flight/cleanup grace; that grace is not part of
+the SDK's 90-day guarantee.
+
+### Pre-v6 state
+
+qurl-go v0.1.1 wrote schema-v5 pending records without a finite deadline. On
+load, this SDK can migrate `PendingActivation` exactly because its authenticated
+ticket expiry is present: it derives the first-ticket anchor and 90-day deadline
+and durably writes schema v6 before any UDP I/O. Schema-v5 records carrying any
+forward-populated recovery field are rejected as corrupt rather than trusted as
+invented history. A schema-v5 `PendingCompletion` no longer retains
+that ticket anchor. Inventing `upgrade time + 90 days` would make server
+retention unbounded for installations that upgrade arbitrarily late, so the SDK
+instead returns `*AgentRecoveryMigrationRequiredError`, matchable with
+`ErrAgentRecoveryMigrationRequired`, and preserves the record without network
+I/O. Use explicit recovery or reprovisioning; never hand-edit a deadline.
+
+Negative schema versions and versions greater than the current schema are also
+invalid. They fail closed before resolver, socket, or UDP activity; a newer
+version requires an explicit compatible SDK upgrade or state migration.
+
+### Authority rollout handoff
+
+This finite contract is a greenfield, pre-enable cutoff. Before native
+registration becomes reachable or replay cleanup starts, operators must prove
+that Control contains zero legacy `registration_activation_v1`,
+`registration_completion_v1`, and
+`registration_completion_device_locator_v1` records and that every distributed
+client includes this schema-v6 contract. If that proof is not zero, cleanup
+must remain disabled until the records are explicitly reconciled; age alone is
+not proof that a v0.1.1 recovery promise can be retired.
+
+For records created after that gate, the authority must retain activation
+outcomes through signed ticket expiry plus 90 days and its documented cleanup
+grace. Completion does not receive the ticket expiry, so its replay metadata
+must remain through `completed_at + 90 days + 15 minutes` (the current maximum
+ticket lifetime) plus the same grace. Completion retirement must atomically
+strip replay-only attributes from the device-key row and replace the detailed
+owner/agent sentinel with a compact, non-replayable per-agent completion fence.
+That fence remains for the registered agent's lifetime and denies every later
+candidate; otherwise later device-key revocation/row deletion could let stale
+completion state mint again. Deleting only one side, deleting the fence while
+the agent still exists, or applying independent DynamoDB TTLs is invalid.
 
 The SDK does not calculate a cell address. It resolves the exact host supplied
 by the authenticated Hub response and authenticates the responding cell against
@@ -152,9 +236,10 @@ The recovery branch above must return the previously issued code. It must never
 request, generate, or dispatch a new code; the SDK intentionally suppresses
 NHP_OTP while replaying a pending activation.
 
-Pending-activation recovery calls the provider with the caller's context because
-an exact replay may occur after the ticket window has expired. Set an outer
-context deadline to bound that operator or provider wait.
+Pending-activation recovery calls the provider with the caller's context
+clamped to the persisted recovery deadline because an exact replay may occur
+after the ticket window has expired. Set an earlier outer context deadline to
+bound that operator or provider wait more tightly.
 
 The SDK refuses to dispatch OTP unless the assignment ticket has at least the
 conformance contract's inclusive 630 seconds remaining.
@@ -308,7 +393,9 @@ An `AgentStateStore` must:
 - serialize setup externally if it does not implement the SDK local-file lock.
 
 Save can commit and still return an acknowledgement error. Callers must reload
-before deciding whether a pending activation or completion candidate exists.
+before deciding whether a pending activation, completion candidate, refreshed
+assignment, or completed credential exists. Concurrent context cancellation or
+recovery expiry does not remove this reload-first requirement.
 
 ## Crash and retry boundaries
 
@@ -329,7 +416,7 @@ deadline.
   transport faults retry only that body and pinned cell within the configured
   attempt/elapsed budget. Exhaustion returns
   `*RegistrationRecoveryRequiredError`; restart with the same enrollment
-  credential.
+  credential before its persisted 90-day deadline.
 - An authenticated assigned-cell REG rate limit is terminal for that call. The
   SDK automatically retries only network ambiguity. RAK has no retry-after field
   in this wire contract; after any authority- or operator-required delay, callers
@@ -342,7 +429,8 @@ deadline.
 - Completion retries only resolution/transport faults and authenticated `52300`
   unavailable responses.
 - The exact candidate is durable before the first completion packet. Lost or
-  ambiguous completion resumes that candidate; it never generates another.
+  ambiguous completion resumes that candidate before the same unchanged
+  90-day deadline; it never generates another.
 - A save error immediately after RAK may have committed. Reload first. If the
   pending activation remains, resume its exact REG with the same enrollment
   credential. If the pending completion exists, resume with an empty enrollment
@@ -369,6 +457,8 @@ Use `errors.Is` and `errors.As`:
 | `ErrDeviceKeyQuotaExceeded` | Revoke an unused device credential, then resume according to authority guidance. |
 | `ErrAgentCompletionCandidatePersistence` / `*AgentCompletionCandidatePersistenceError` | Reload state before any retry; resume the exact pending activation with the same enrollment credential or the exact pending completion with an empty credential. Save ambiguity alone never authorizes replacement; only an exact pending-activation replay authenticated as `52111` or account `52101` permits the one bounded replacement. |
 | `ErrCompletionRecoveryRequired` / `*CompletionRecoveryRequiredError` | Re-run `RegisterAgentRuntime` with the same store and empty enrollment credential to resume the exact pending candidate. |
+| `ErrAgentRecoveryExpired` / `*AgentRecoveryExpiredError` | The pending phase is at or beyond its authority-anchored 90-day deadline. No datagram is sent at or after that boundary, but the invocation may have sent earlier traffic. A concurrent save ambiguity is reported with the reload-first persistence errors instead. |
+| `ErrAgentRecoveryMigrationRequired` / `*AgentRecoveryMigrationRequiredError` | A legacy schema-v5 pending completion has no authenticated deadline anchor. No recovery UDP was sent; preserve it and use explicit NHP-native recovery or reprovisioning. |
 | `ErrCompletionCredentialConflict` / `*CompletionError` | The authority already committed a different candidate. Stop and use explicit NHP-native credential recovery or reprovisioning; never delete the persisted candidate or mint a replacement locally. |
 | `*NativeCredentialRecoveryRequiredError` | Native completed credential state is absent or malformed; explicit native recovery/reprovisioning is required. |
 | `*AgentAssignmentChangedError` | A new cell or generation was refused by default; deliberately re-run refresh with `WithAgentRuntimeReassignmentAdoption` to accept a newer generation. |
