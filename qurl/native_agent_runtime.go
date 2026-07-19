@@ -629,24 +629,63 @@ func (c *nativeAgentRuntimeConfig) activateAndComplete(ctx context.Context, enro
 	for attempt := 0; attempt < 2; attempt++ {
 		var credential string
 		var err error
-		if forceFresh {
-			credential, err = c.persistFreshPendingActivation(ctx, enrollmentCredential, store, state, privateKey)
-		} else {
-			credential, err = c.pendingRegistrationCredential(ctx, state, enrollmentCredential)
-		}
-		if err != nil {
-			return nil, err
-		}
-		err = c.registerPendingActivation(ctx, state, credential, privateKey)
-		if err == nil {
-			if err := c.transitionPendingActivation(ctx, store, state); err != nil {
+		operationCtx := ctx
+		var boundary *agentRecoveryBoundary
+		cancel := func() {}
+		if !forceFresh {
+			boundary, err = newAgentRecoveryBoundary(state, c.clock)
+			if err == nil {
+				operationCtx, cancel, err = boundary.context(ctx)
+			}
+			if err != nil {
 				return nil, err
 			}
+		}
+		if forceFresh {
+			credential, err = c.persistFreshPendingActivation(ctx, enrollmentCredential, store, state, privateKey)
+			if err == nil {
+				boundary, err = newAgentRecoveryBoundary(state, c.clock)
+				if err == nil {
+					operationCtx, cancel, err = boundary.context(ctx)
+				}
+			}
+		} else {
+			credential, err = c.pendingRegistrationCredential(operationCtx, state, enrollmentCredential)
+		}
+		if boundary != nil {
+			if boundaryErr := boundary.check(); boundaryErr != nil {
+				cancel()
+				return nil, boundaryErr
+			}
+		}
+		if err != nil {
+			if boundary != nil {
+				err = boundary.mapError(ctx, operationCtx, err)
+			}
+			cancel()
+			return nil, err
+		}
+		err = c.registerPendingActivation(operationCtx, state, credential, privateKey)
+		if boundaryErr := boundary.check(); boundaryErr != nil {
+			cancel()
+			return nil, boundaryErr
+		}
+		if err == nil {
+			if err := c.transitionPendingActivation(operationCtx, store, state); err != nil {
+				err = boundary.mapError(ctx, operationCtx, err)
+				cancel()
+				return nil, err
+			}
+			cancel()
 			if err := c.completePending(ctx, store, state, privateKey); err != nil {
 				return nil, err
 			}
 			return finishNativeRuntimeResult(store, state, c)
 		}
+		if boundary != nil {
+			err = boundary.mapError(ctx, operationCtx, err)
+		}
+		cancel()
 		if attempt == 0 && registrationVerdictPermitsReplacement(err) {
 			// Fetch a replacement only after an authenticated non-commit verdict,
 			// and retain the old record until persistFreshPendingActivation commits
@@ -1213,6 +1252,9 @@ func (c *nativeAgentRuntimeConfig) registerPendingActivation(ctx context.Context
 		}
 		return nil, classifyNativeRegisterError(ack, pending.Registration.KeyKind)
 	})
+	if err == nil {
+		return boundary.check()
+	}
 	return boundary.mapError(ctx, recoveryCtx, err)
 }
 
@@ -1401,6 +1443,9 @@ func (c *nativeAgentRuntimeConfig) completePending(ctx context.Context, store Ag
 	keyID, err := c.runCompletionExchange(recoveryCtx, endpoint, body, c.udpOptions(privateKey))
 	if err != nil {
 		return boundary.mapError(ctx, recoveryCtx, err)
+	}
+	if err := boundary.check(); err != nil {
+		return err
 	}
 	previous := state.clone()
 	state.DeviceAPIKey = state.PendingCompletion.DeviceAPIKey

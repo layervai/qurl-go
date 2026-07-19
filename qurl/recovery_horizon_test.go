@@ -613,3 +613,70 @@ func TestRegisterAgentRuntime_ReplacementOTPCannotCrossOriginalDeadline(t *testi
 		t.Fatalf("replacement OTP boundary replaced old pending: %#v / %v", loaded, loadErr)
 	}
 }
+
+func TestRegisterAgentRuntime_PendingAccountOTPProviderCannotOutliveDeadline(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	f := newRuntimeFixture(t,
+		[]runtimeUDPStep{{
+			requestType: relayknock.TypeListRequest,
+			replyType:   relayknock.TypeListResult,
+			replyBody:   accountAssignmentResult(contract, "conformance-account-assignment-ticket-0001"),
+		}},
+		[]runtimeUDPStep{
+			{requestType: relayknock.TypeOTP, noReply: true},
+			{requestType: relayknock.TypeRegister, noReply: true},
+		},
+	)
+	firstProvider := func(context.Context, AgentOTPChallenge) (string, error) {
+		return "12345678", nil
+	}
+	_, _, err := RegisterAgentRuntime(
+		context.Background(), conformance.AgentAssignmentAccountCredentialFixture, f.store,
+		f.options(
+			WithAgentRuntimeAllowedRegistrationKeyKinds(RegistrationKeyKindAccount),
+			WithAgentRuntimeOTPProvider(firstProvider),
+		)...,
+	)
+	if !errors.Is(err, ErrRegistrationRecoveryRequired) {
+		t.Fatalf("seed account recovery = %v, want ErrRegistrationRecoveryRequired", err)
+	}
+	state, err := f.store.LoadAgentState(context.Background())
+	if err != nil || state.PendingActivation == nil {
+		t.Fatalf("load pending account activation = %#v / %v", state, err)
+	}
+	deadline := time.Now().UTC().Truncate(time.Second).Add(2 * time.Second)
+	state.PendingActivation.RecoveryAnchorTicketExpiresAt = deadline.Add(-AgentRegistrationRecoveryHorizon)
+	state.PendingActivation.RecoveryExpiresAt = deadline
+	if err := f.store.SaveAgentState(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+	beforeHub, beforeCell := len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot())
+	blockingProvider := func(ctx context.Context, _ AgentOTPChallenge) (string, error) {
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+
+	started := time.Now()
+	_, _, err = RegisterAgentRuntime(
+		context.Background(), conformance.AgentAssignmentAccountCredentialFixture, f.store,
+		f.options(
+			withAgentRuntimeClock(time.Now),
+			WithAgentRuntimeAllowedRegistrationKeyKinds(RegistrationKeyKindAccount),
+			WithAgentRuntimeOTPProvider(blockingProvider),
+		)...,
+	)
+	var expired *AgentRecoveryExpiredError
+	if !errors.Is(err, ErrAgentRecoveryExpired) || !errors.As(err, &expired) || expired.Phase != AgentRecoveryPhaseActivation {
+		t.Fatalf("blocking pending OTP deadline = %T %#v / %v", err, expired, err)
+	}
+	if elapsed := time.Since(started); elapsed > 3*time.Second {
+		t.Fatalf("blocking pending OTP returned after %s, want bounded by recovery deadline", elapsed)
+	}
+	if gotHub, gotCell := len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot()); gotHub != beforeHub || gotCell != beforeCell {
+		t.Fatalf("expired pending OTP sent Hub/cell UDP = %d/%d, want unchanged %d/%d", gotHub, gotCell, beforeHub, beforeCell)
+	}
+	loaded, loadErr := f.store.LoadAgentState(context.Background())
+	if loadErr != nil || loaded.PendingActivation == nil || loaded.PendingActivation.AssignmentTicket != state.PendingActivation.AssignmentTicket {
+		t.Fatalf("expired pending OTP did not preserve activation: %#v / %v", loaded, loadErr)
+	}
+}
