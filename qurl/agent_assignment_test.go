@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -60,6 +61,19 @@ func (d assignmentTestDialer) DialContext(ctx context.Context, network, _ string
 	return (&net.Dialer{}).DialContext(ctx, network, d.target)
 }
 
+type assignmentFallbackDialer struct {
+	target string
+	calls  int
+}
+
+func (d *assignmentFallbackDialer) DialContext(ctx context.Context, network, _ string) (net.Conn, error) {
+	d.calls++
+	if d.calls == 1 {
+		return nil, errors.New("injected first-address dial failure")
+	}
+	return (&net.Dialer{}).DialContext(ctx, network, d.target)
+}
+
 type assignmentTestServer struct {
 	t           *testing.T
 	conn        *net.UDPConn
@@ -71,6 +85,7 @@ type assignmentTestServer struct {
 
 	mu       sync.Mutex
 	requests [][]byte
+	packets  [][]byte
 }
 
 func newAssignmentTestServer(t *testing.T, serverPriv, agentPub []byte, replies ...string) *assignmentTestServer {
@@ -118,6 +133,7 @@ func (s *assignmentTestServer) serve() {
 		s.mu.Lock()
 		index := len(s.requests)
 		s.requests = append(s.requests, append([]byte(nil), opened.Body...))
+		s.packets = append(s.packets, append([]byte(nil), buffer[:n]...))
 		s.mu.Unlock()
 		select {
 		case s.requestSeen <- struct{}{}:
@@ -143,6 +159,16 @@ func (s *assignmentTestServer) serve() {
 			s.t.Logf("write assignment reply: %v", err)
 		}
 	}
+}
+
+func (s *assignmentTestServer) requestPackets() [][]byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	result := make([][]byte, len(s.packets))
+	for i := range s.packets {
+		result[i] = append([]byte(nil), s.packets[i]...)
+	}
+	return result
 }
 
 func (s *assignmentTestServer) requestBodies() [][]byte {
@@ -201,6 +227,15 @@ func zeroAssignmentJitter() AssignmentOption {
 	return withAssignmentJitter(func(time.Duration) (time.Duration, error) { return 0, nil })
 }
 
+func conformanceAssignmentNonceSource(t *testing.T, encoded string) AssignmentOption {
+	t.Helper()
+	nonce, err := conformance.DecodeConnectorHubRequestNonce(encoded)
+	if err != nil {
+		t.Fatalf("decode conformance request nonce: %v", err)
+	}
+	return withAssignmentNonceSource(func() ([]byte, error) { return bytes.Clone(nonce), nil })
+}
+
 func TestHubAssignmentInitialAndRefreshMatchConformanceBodies(t *testing.T) {
 	fixture := loadAssignmentFixture(t)
 	hub, transport, server := assignmentTestSetup(t,
@@ -208,9 +243,13 @@ func TestHubAssignmentInitialAndRefreshMatchConformanceBodies(t *testing.T) {
 		fixture.RefreshAssignment.Result.BodyJSON,
 	)
 	var slept []time.Duration
+	initialOptions := append(
+		deterministicAssignmentOptions(&slept, 1),
+		conformanceAssignmentNonceSource(t, conformance.AgentAssignmentInitialRequestNonceFixture),
+	)
 	initial, err := FetchInitialAgentAssignment(
 		context.Background(), hub, "agent-conform", conformance.AgentAssignmentBootstrapCredentialFixture,
-		transport, deterministicAssignmentOptions(&slept, 1)...,
+		transport, initialOptions...,
 	)
 	if err != nil {
 		t.Fatalf("FetchInitialAgentAssignment: %v", err)
@@ -219,8 +258,12 @@ func TestHubAssignmentInitialAndRefreshMatchConformanceBodies(t *testing.T) {
 		initial.Assignment.CellID != "cell0" || initial.AssignmentTicket != "conformance-assignment-ticket-0001" {
 		t.Fatalf("initial result = %#v", initial)
 	}
+	refreshOptions := append(
+		deterministicAssignmentOptions(&slept, 1),
+		conformanceAssignmentNonceSource(t, conformance.AgentAssignmentRefreshRequestNonceFixture),
+	)
 	refreshed, err := RefreshAgentAssignment(
-		context.Background(), hub, "agent-conform", transport, deterministicAssignmentOptions(&slept, 1)...,
+		context.Background(), hub, "agent-conform", transport, refreshOptions...,
 	)
 	if err != nil {
 		t.Fatalf("RefreshAgentAssignment: %v", err)
@@ -249,6 +292,14 @@ func TestHubAssignmentRetriesOnlyBoundedRetryableResults(t *testing.T) {
 	if fmt.Sprint(slept) != "[5s 5s]" || len(server.requestBodies()) != 3 {
 		t.Fatalf("slept/requests = %v/%d, want [5s 5s]/3", slept, len(server.requestBodies()))
 	}
+	requestBodies := server.requestBodies()
+	if !bytes.Equal(requestBodies[0], requestBodies[1]) || !bytes.Equal(requestBodies[1], requestBodies[2]) {
+		t.Fatalf("retry request bodies changed within one logical operation: %q", requestBodies)
+	}
+	requestPackets := server.requestPackets()
+	if bytes.Equal(requestPackets[0], requestPackets[1]) || bytes.Equal(requestPackets[1], requestPackets[2]) || bytes.Equal(requestPackets[0], requestPackets[2]) {
+		t.Fatal("fresh UDP exchanges reused an outer NHP packet")
+	}
 
 	hub, transport, server = assignmentTestSetup(t, retryBody, retryBody)
 	slept = nil
@@ -274,15 +325,46 @@ func TestHubAssignmentRetriesResolveFailure(t *testing.T) {
 		return []netip.Addr{netip.MustParseAddr("8.8.8.8")}, nil
 	})
 	var slept []time.Duration
+	nonceCalls := 0
+	nonceOption := withAssignmentNonceSource(func() ([]byte, error) {
+		nonceCalls++
+		return bytes.Repeat([]byte{0x42}, assignmentRequestNonceBytes), nil
+	})
 	assignment, err := RefreshAgentAssignment(
 		context.Background(), hub, "agent-conform", transport,
-		deterministicAssignmentOptions(&slept, 2)...,
+		append(deterministicAssignmentOptions(&slept, 2), nonceOption)...,
 	)
 	if err != nil || assignment.CellID != "cell0" {
 		t.Fatalf("RefreshAgentAssignment = %#v, %v", assignment, err)
 	}
-	if resolveCalls != 2 || fmt.Sprint(slept) != "[0s]" || len(server.requestBodies()) != 1 {
-		t.Fatalf("resolve/sleep/request counts = %d/%v/%d, want 2/[0s]/1", resolveCalls, slept, len(server.requestBodies()))
+	if resolveCalls != 2 || nonceCalls != 1 || fmt.Sprint(slept) != "[0s]" || len(server.requestBodies()) != 1 {
+		t.Fatalf("resolve/nonce/sleep/request counts = %d/%d/%v/%d, want 2/1/[0s]/1", resolveCalls, nonceCalls, slept, len(server.requestBodies()))
+	}
+}
+
+func TestHubAssignmentAddressFallbackUsesOneRequestNonce(t *testing.T) {
+	fixture := loadAssignmentFixture(t)
+	hub, transport, server := assignmentTestSetup(t, fixture.RefreshAssignment.Result.BodyJSON)
+	transport.Resolver = assignmentTestResolverFunc(func(context.Context, string, string) ([]netip.Addr, error) {
+		return []netip.Addr{netip.MustParseAddr("8.8.8.8"), netip.MustParseAddr("8.8.4.4")}, nil
+	})
+	dialer := &assignmentFallbackDialer{target: server.conn.LocalAddr().String()}
+	transport.Dialer = dialer
+	nonceCalls := 0
+	_, err := RefreshAgentAssignment(
+		context.Background(), hub, "agent-conform", transport,
+		WithAssignmentRetryBudget(1, time.Minute),
+		fixedAssignmentClock(),
+		withAssignmentNonceSource(func() ([]byte, error) {
+			nonceCalls++
+			return bytes.Repeat([]byte{0x43}, assignmentRequestNonceBytes), nil
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dialer.calls != 2 || nonceCalls != 1 || len(server.requestBodies()) != 1 {
+		t.Fatalf("address dials/nonce draws/requests = %d/%d/%d, want 2/1/1", dialer.calls, nonceCalls, len(server.requestBodies()))
 	}
 }
 
@@ -425,16 +507,107 @@ func TestHubAssignmentTerminalResultWinsElapsedBudget(t *testing.T) {
 	}
 }
 
-func TestHubAssignmentTerminalResultDoesNotRetry(t *testing.T) {
-	hub, transport, server := assignmentTestSetup(t, `{"errCode":"52204","errMsg":"slow down","retryAfterSeconds":60}`)
+func TestHubAssignmentRateLimitRetriesSameLogicalRequest(t *testing.T) {
+	fixture := loadAssignmentFixture(t)
+	hub, transport, server := assignmentTestSetup(t,
+		`{"errCode":"52204","errMsg":"slow down","retryAfterSeconds":1}`,
+		fixture.RefreshAssignment.Result.BodyJSON,
+	)
 	var slept []time.Duration
-	_, err := RefreshAgentAssignment(context.Background(), hub, "agent-conform", transport, deterministicAssignmentOptions(&slept, 4)...)
-	var appErr *AssignmentError
-	if !errors.As(err, &appErr) || !errors.Is(err, ErrAssignmentRateLimited) || appErr.RetryAfter != time.Minute {
-		t.Fatalf("rate-limit error = %#v", err)
+	assignment, err := RefreshAgentAssignment(context.Background(), hub, "agent-conform", transport, deterministicAssignmentOptions(&slept, 2)...)
+	if err != nil || assignment.CellID != "cell0" {
+		t.Fatalf("rate-limited assignment = %#v, %v", assignment, err)
 	}
-	if len(slept) != 0 || len(server.requestBodies()) != 1 {
-		t.Fatalf("terminal error slept/sent = %v/%d", slept, len(server.requestBodies()))
+	bodies := server.requestBodies()
+	if !slices.Equal(slept, []time.Duration{time.Second}) || len(bodies) != 2 || !bytes.Equal(bodies[0], bodies[1]) {
+		t.Fatalf("rate-limit sleeps/bodies = %v/%q, want one wait and identical bodies", slept, bodies)
+	}
+}
+
+func TestHubAssignmentLaterPublicCallMintsFreshRequestNonce(t *testing.T) {
+	fixture := loadAssignmentFixture(t)
+	hub, transport, server := assignmentTestSetup(t,
+		fixture.RefreshAssignment.Result.BodyJSON,
+		fixture.RefreshAssignment.Result.BodyJSON,
+	)
+	nonceCalls := byte(0)
+	nonceOption := withAssignmentNonceSource(func() ([]byte, error) {
+		nonceCalls++
+		return bytes.Repeat([]byte{nonceCalls}, assignmentRequestNonceBytes), nil
+	})
+	for range 2 {
+		var slept []time.Duration
+		if _, err := RefreshAgentAssignment(
+			context.Background(), hub, "agent-conform", transport,
+			append(deterministicAssignmentOptions(&slept, 1), nonceOption)...,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bodies := server.requestBodies()
+	if nonceCalls != 2 || len(bodies) != 2 || bytes.Equal(bodies[0], bodies[1]) {
+		t.Fatalf("nonce calls/bodies = %d/%q, want one fresh nonce per public call", nonceCalls, bodies)
+	}
+	var first, second assignmentListRequest
+	if err := json.Unmarshal(bodies[0], &first); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(bodies[1], &second); err != nil {
+		t.Fatal(err)
+	}
+	if first.UsrData.RequestNonce == second.UsrData.RequestNonce {
+		t.Fatalf("later public call reused request_nonce %q", first.UsrData.RequestNonce)
+	}
+}
+
+func TestHubAssignmentNonceFailurePreventsNetworkIO(t *testing.T) {
+	hub, transport, server := assignmentTestSetup(t)
+	resolveCalls := 0
+	transport.Resolver = assignmentTestResolverFunc(func(context.Context, string, string) ([]netip.Addr, error) {
+		resolveCalls++
+		return nil, errors.New("unexpected DNS resolution")
+	})
+	sentinel := errors.New("entropy unavailable")
+	partial := bytes.Repeat([]byte{0xa5}, 16)
+	_, err := RefreshAgentAssignment(
+		context.Background(), hub, "agent-conform", transport,
+		withAssignmentNonceSource(func() ([]byte, error) { return partial, sentinel }),
+	)
+	if errors.Is(err, ErrInvalidAssignmentConfig) || !errors.Is(err, sentinel) {
+		t.Fatalf("nonce entropy failure = %v, want operational source error without invalid-config classification", err)
+	}
+	if resolveCalls != 0 || len(server.requestBodies()) != 0 {
+		t.Fatalf("nonce entropy failure performed network I/O: resolve=%d requests=%d", resolveCalls, len(server.requestBodies()))
+	}
+	if !bytes.Equal(partial, make([]byte, len(partial))) {
+		t.Fatalf("partial nonce was not wiped after source failure: %x", partial)
+	}
+}
+
+func TestHubAssignmentRejectsInvalidNonceSourcesBeforeNetworkIO(t *testing.T) {
+	for _, testCase := range []struct {
+		name string
+		opt  AssignmentOption
+	}{
+		{name: "nil source", opt: withAssignmentNonceSource(nil)},
+		{name: "31 bytes", opt: withAssignmentNonceSource(func() ([]byte, error) { return make([]byte, 31), nil })},
+		{name: "33 bytes", opt: withAssignmentNonceSource(func() ([]byte, error) { return make([]byte, 33), nil })},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			hub, transport, server := assignmentTestSetup(t)
+			resolveCalls := 0
+			transport.Resolver = assignmentTestResolverFunc(func(context.Context, string, string) ([]netip.Addr, error) {
+				resolveCalls++
+				return nil, errors.New("unexpected DNS resolution")
+			})
+			_, err := RefreshAgentAssignment(context.Background(), hub, "agent-conform", transport, testCase.opt)
+			if !errors.Is(err, ErrInvalidAssignmentConfig) {
+				t.Fatalf("invalid nonce source = %v, want ErrInvalidAssignmentConfig", err)
+			}
+			if resolveCalls != 0 || len(server.requestBodies()) != 0 {
+				t.Fatalf("invalid nonce source performed network I/O: resolve=%d requests=%d", resolveCalls, len(server.requestBodies()))
+			}
+		})
 	}
 }
 
@@ -518,7 +691,7 @@ func TestHubAssignmentParentCancellation(t *testing.T) {
 }
 
 func TestHubAssignmentSleepFailures(t *testing.T) {
-	t.Run("transaction budget", func(t *testing.T) {
+	t.Run("logical operation budget", func(t *testing.T) {
 		hub, transport, server := assignmentTestSetup(t, `{"errCode":"52200","errMsg":"temporary"}`)
 		_, err := RefreshAgentAssignment(
 			context.Background(), hub, "agent-conform", transport,
