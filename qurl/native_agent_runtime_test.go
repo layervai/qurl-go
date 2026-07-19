@@ -335,6 +335,7 @@ func (f *runtimeFixture) optionsWithMetadata(include bool, extra ...AgentRuntime
 		WithAgentRuntimeUDPBounds(100*time.Millisecond, 1),
 		WithAgentRuntimeAssignmentRetryBudget(1, time.Second),
 		withAgentRuntimeClock(func() time.Time { return assignmentFixtureNow }),
+		withTestAgentRuntimeAssignmentNonce(conformance.AgentAssignmentInitialRequestNonceFixture),
 		withAgentRuntimeDeviceCredential(canonicalNativeDeviceCredential),
 	}
 	if include {
@@ -350,6 +351,7 @@ func (f *runtimeFixture) refreshOptions(extra ...AgentRuntimeRefreshOption) []Ag
 		WithAgentRuntimeUDPBounds(time.Second, 1),
 		WithAgentRuntimeAssignmentRetryBudget(1, time.Second),
 		withAgentRuntimeClock(func() time.Time { return assignmentFixtureNow }),
+		withTestAgentRuntimeAssignmentNonce(conformance.AgentAssignmentRefreshRequestNonceFixture),
 	}
 	return append(opts, extra...)
 }
@@ -429,6 +431,19 @@ func seedPendingActivation(t *testing.T, contract *conformance.AgentAssignmentFi
 func withTestAgentRuntimeAssignmentSleep(sleep func(context.Context, time.Duration) error) AgentRuntimeLifecycleOption {
 	return nativeRuntimeLifecycleOptionFunc(func(c *nativeAgentRuntimeConfig) error {
 		c.assignmentOptions = append(c.assignmentOptions, withAssignmentSleep(sleep))
+		return nil
+	})
+}
+
+func withTestAgentRuntimeAssignmentNonce(encoded string) AgentRuntimeLifecycleOption {
+	return nativeRuntimeLifecycleOptionFunc(func(c *nativeAgentRuntimeConfig) error {
+		nonce, err := conformance.DecodeConnectorHubRequestNonce(encoded)
+		if err != nil {
+			return err
+		}
+		c.assignmentOptions = append(c.assignmentOptions, withAssignmentNonceSource(func() ([]byte, error) {
+			return bytes.Clone(nonce), nil
+		}))
 		return nil
 	})
 }
@@ -839,6 +854,15 @@ func TestRegisterAgentRuntime_UDPOnlyGoldenLifecycle(t *testing.T) {
 	}
 	if state.DeviceAPIKey != conformance.AgentAssignmentDeviceAPIKeyFixture || state.DeviceAPIKeyID != "key_DvK9mN2pQr7S" || state.PendingActivation != nil || state.PendingCompletion != nil || state.RegisteredAt == nil {
 		t.Fatalf("completed native state = %#v", state)
+	}
+	for i, snapshot := range f.store.snapshots() {
+		persisted, err := json.Marshal(snapshot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(persisted, []byte(conformance.AgentAssignmentInitialRequestNonceFixture)) {
+			t.Fatalf("assignment request nonce persisted in state snapshot %d: %s", i, persisted)
+		}
 	}
 	activationWasDurable := false
 	pendingWasDurable := false
@@ -1391,7 +1415,7 @@ func TestRunCompletionExchange_DeadlineDuringBackoffRequiresRecovery(t *testing.
 	}
 }
 
-func TestRegisterAgentRuntime_RateLimitRetriesWholeHubTransactionWithinBudget(t *testing.T) {
+func TestRegisterAgentRuntime_RateLimitRetriesSameHubOperationWithinBudget(t *testing.T) {
 	contract := loadAssignmentFixture(t)
 	const reflectedSecret = "lv_live_rate_limit_reflection"
 	f := newRuntimeFixture(t,
@@ -1422,6 +1446,10 @@ func TestRegisterAgentRuntime_RateLimitRetriesWholeHubTransactionWithinBudget(t 
 	binding.Destroy()
 	if !slices.Equal(slept, []time.Duration{time.Second}) || len(f.hubUDP.snapshot()) != 2 {
 		t.Fatalf("rate-limit sleeps/Hub calls = %v/%d, want [1s]/2", slept, len(f.hubUDP.snapshot()))
+	}
+	hubRequests := f.hubUDP.snapshot()
+	if !bytes.Equal(hubRequests[0].body, hubRequests[1].body) {
+		t.Fatalf("rate-limit retry changed the logical Hub request body: %v", hubRequests)
 	}
 	if strings.Contains(fmt.Sprint(err), reflectedSecret) {
 		t.Fatalf("rate-limit lifecycle leaked Hub diagnostic: %v", err)
@@ -1464,27 +1492,6 @@ func TestRegisterAgentRuntime_RateLimitParentCancellationWins(t *testing.T) {
 		)...)
 	if !errors.Is(err, context.Canceled) || errors.Is(err, ErrAssignmentRecoveryRequired) {
 		t.Fatalf("parent cancellation = %v, want context.Canceled only", err)
-	}
-}
-
-func TestRunAssignmentLifecycle_DeadlineDuringRateLimitWaitRequiresRecovery(t *testing.T) {
-	fixed := assignmentFixtureNow
-	_, err := runAssignmentLifecycle(context.Background(), []AssignmentOption{
-		WithAssignmentRetryBudget(2, 20*time.Millisecond),
-		withAssignmentClock(func() time.Time { return fixed }),
-		withAssignmentSleep(func(ctx context.Context, _ time.Duration) error {
-			<-ctx.Done()
-			return ctx.Err()
-		}),
-	}, func(context.Context) (*AgentAssignment, error) {
-		return nil, &AssignmentError{Code: "52204", RetryAfter: time.Millisecond, kind: ErrAssignmentRateLimited}
-	})
-	var recovery *AssignmentRecoveryRequiredError
-	if !errors.As(err, &recovery) || !errors.Is(err, ErrAssignmentRecoveryRequired) || !errors.Is(err, ErrAssignmentRateLimited) || !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("rate-limit deadline = %T: %v, want recovery preserving rate limit/deadline", err, err)
-	}
-	if recovery.Attempts != 1 || recovery.Elapsed != 20*time.Millisecond {
-		t.Fatalf("rate-limit deadline attempts/elapsed = %d/%s", recovery.Attempts, recovery.Elapsed)
 	}
 }
 
@@ -2515,9 +2522,7 @@ func TestRefreshAgentRuntime_UsesCredentialFreeHubRefreshOnly(t *testing.T) {
 	}
 	first.Destroy()
 	client, refreshed, err := RefreshAgentRuntime(context.Background(), f.hub, f.store,
-		WithAgentRuntimeUDPResolver(f.resolver), WithAgentRuntimeUDPDialer(f.dialer), WithAgentRuntimeUDPBounds(time.Second, 1),
-		WithAgentClientBaseURL("https://resources.example.test"),
-		withAgentRuntimeClock(func() time.Time { return assignmentFixtureNow }))
+		f.refreshOptions(WithAgentClientBaseURL("https://resources.example.test"))...)
 	if err != nil {
 		t.Fatalf("RefreshAgentRuntime: %v", err)
 	}

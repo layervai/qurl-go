@@ -319,8 +319,12 @@ assignment, first REG, replacement Hub assignment, second REG, and completion.
 Callers that need a smaller aggregate ceiling must set an outer context
 deadline.
 
-- Hub assignment uses one bounded transaction budget. Authenticated rate-limit
-  advice may delay and retry within that budget.
+- Hub assignment uses one bounded logical-operation budget. Authenticated rate-limit
+  advice may delay and retry within that budget. The SDK draws one fresh
+  32-byte request nonce and serializes the LST body once per logical operation;
+  DNS/address fallback and every bounded retry reuse that exact body while each
+  new UDP exchange gets fresh NHP packet randomness. A later public assignment
+  call draws a new nonce. The nonce is never returned or persisted.
 - The exact pending activation is durable before the first REG. Resolution and
   transport faults retry only that body and pinned cell within the configured
   attempt/elapsed budget. Exhaustion returns
@@ -357,7 +361,7 @@ Use `errors.Is` and `errors.As`:
 | `ErrAgentOTPRequired` | Account enrollment lacks the explicit OTP provider. |
 | `ErrOTPIncorrect` | Obtain the correct code and start a new explicit attempt as appropriate. |
 | `ErrOTPExpired` | Start a new explicit assignment/OTP attempt. |
-| `ErrAssignmentRecoveryRequired` / `*AssignmentRecoveryRequiredError` | The bounded Hub transaction was exhausted; inspect the matchable cause. |
+| `ErrAssignmentRecoveryRequired` / `*AssignmentRecoveryRequiredError` | The bounded logical Hub operation was exhausted; inspect the matchable cause. |
 | `ErrAgentBindingPersistence` | A state save failed or its acknowledgement was lost. Reload before retry; a refreshed or reassigned binding may already be durable. |
 | `ErrRegistrationRecoveryRequired` / `*RegistrationRecoveryRequiredError` | The bounded assigned-cell REG transaction was ambiguous; re-run with the same store, Hub trust root, metadata, and enrollment credential so the exact pending activation is replayed first. |
 | `ErrAssignmentTicketInvalid` / `ErrAssignmentTicketExpired` | The assigned cell rejected the Hub ticket. Do not invent or retarget an endpoint. |

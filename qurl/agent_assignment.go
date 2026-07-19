@@ -3,6 +3,7 @@ package qurl
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -36,6 +37,7 @@ const (
 	standardNHPUDPPort                  = 62206
 	maxAssignmentTicketBytes            = 2304
 	maxAssignmentJSONDepth              = 64
+	assignmentRequestNonceBytes         = 32
 
 	// These suffixes are a release-gated trust allowlist, not runtime
 	// configuration. Adding an endpoint apex requires an SDK release.
@@ -178,9 +180,8 @@ var (
 	// also match ErrAssignmentInvalidResponse, but callers may safely select an
 	// explicit RefreshAgentRuntime only for this narrower class.
 	ErrAssignmentLeaseExpired = errors.New("qurl: assignment lease expired")
-	// ErrAssignmentUnavailable is the sole retryable assignment application
-	// result (52200), bounded together with transport misses by the transaction
-	// retry budget.
+	// ErrAssignmentUnavailable marks retryable 52200, bounded together with
+	// transport misses and authenticated rate limits by one operation budget.
 	ErrAssignmentUnavailable = errors.New("qurl: cell assignment unavailable")
 	// ErrAssignmentRecoveryRequired marks exhaustion of that bounded budget.
 	ErrAssignmentRecoveryRequired = errors.New("qurl: cell assignment recovery required")
@@ -190,7 +191,9 @@ var (
 	ErrAssignmentReassignmentRequired = errors.New("qurl: cell reassignment in progress")
 	// ErrAssignmentQuotaExceeded marks 52203.
 	ErrAssignmentQuotaExceeded = errors.New("qurl: agent assignment quota exceeded")
-	// ErrAssignmentRateLimited marks 52204.
+	// ErrAssignmentRateLimited marks retryable 52204. Its authenticated
+	// RetryAfter is honored inside the same bounded logical operation while the
+	// exact serialized request body is reused.
 	ErrAssignmentRateLimited = errors.New("qurl: assignment rate limited")
 	// ErrAssignmentRequestRejected marks 52205 or 52109.
 	ErrAssignmentRequestRejected = errors.New("qurl: assignment request rejected")
@@ -207,11 +210,10 @@ var (
 // authenticated producer diagnostics are deliberately discarded because a
 // buggy producer could reflect a submitted credential. RetryAfter is populated
 // only for codes that permit it. In
-// particular, 52204 is terminal within the current transaction; callers must
-// wait at least RetryAfter before starting a new whole assignment transaction.
-// The outer lifecycle owns that inter-transaction gate; this helper only bounds
-// retries within one transaction. RegisterAgentRuntime and RefreshAgentRuntime
-// enforce the outer inter-transaction budget.
+// particular, 52204 is retried only inside the current bounded logical
+// operation, with its RetryAfter enforced as a lower bound. The operation
+// reuses the exact serialized request body and request_nonce while each new UDP
+// exchange builds a fresh NHP packet.
 type AssignmentError struct {
 	Code       string
 	RetryAfter time.Duration
@@ -239,7 +241,7 @@ func (e *AssignmentError) Unwrap() error {
 // losing its typed cause. Callers surface recovery instead of starting an
 // unbounded loop. In particular, a Last cause matching
 // nativeudp.ErrServerUnauthenticated is operator-actionable trust/bootstrap
-// recovery and must not be silently re-driven by the outer lifecycle.
+// recovery and must not silently start a new logical operation.
 type AssignmentRecoveryRequiredError struct {
 	Attempts int
 	Elapsed  time.Duration
@@ -266,10 +268,11 @@ type assignmentConfig struct {
 	clock       func() time.Time
 	sleep       func(context.Context, time.Duration) error
 	jitter      func(time.Duration) (time.Duration, error)
+	nonceSource func() ([]byte, error)
 }
 
-// AssignmentOption customizes the bounded hub transaction. Transport injection
-// belongs to nativeudp.Options, passed directly to the public operation.
+// AssignmentOption customizes one bounded logical Hub operation. Transport
+// injection belongs to nativeudp.Options, passed directly to the public call.
 type AssignmentOption interface {
 	applyAssignmentOption(*assignmentConfig) error
 }
@@ -278,8 +281,8 @@ type assignmentOptionFunc func(*assignmentConfig) error
 
 func (f assignmentOptionFunc) applyAssignmentOption(c *assignmentConfig) error { return f(c) }
 
-// WithAssignmentRetryBudget bounds a single hub transaction by attempts and
-// elapsed time. Both must be positive.
+// WithAssignmentRetryBudget bounds one logical Hub assignment operation by
+// attempts and elapsed time. Both must be positive.
 func WithAssignmentRetryBudget(maxAttempts int, budget time.Duration) AssignmentOption {
 	return assignmentOptionFunc(func(c *assignmentConfig) error {
 		if maxAttempts < 1 {
@@ -324,6 +327,19 @@ func withAssignmentJitter(jitter func(time.Duration) (time.Duration, error)) Ass
 	})
 }
 
+// withAssignmentNonceSource is test-only dependency injection. The source must
+// return a newly owned byte slice because request construction wipes it before
+// returning. Production always uses the OS cryptographic random source.
+func withAssignmentNonceSource(source func() ([]byte, error)) AssignmentOption {
+	return assignmentOptionFunc(func(c *assignmentConfig) error {
+		if source == nil {
+			return fmt.Errorf("%w: assignment request nonce source must not be nil", ErrInvalidAssignmentConfig)
+		}
+		c.nonceSource = source
+		return nil
+	})
+}
+
 func newAssignmentConfig(opts []AssignmentOption) (*assignmentConfig, error) {
 	c := &assignmentConfig{
 		maxAttempts: defaultAssignmentMaxAttempts,
@@ -331,6 +347,7 @@ func newAssignmentConfig(opts []AssignmentOption) (*assignmentConfig, error) {
 		clock:       time.Now,
 		sleep:       sleepAssignmentBackoff,
 		jitter:      cryptoAssignmentJitter,
+		nonceSource: func() ([]byte, error) { return cryptoutil.RandomBytes(assignmentRequestNonceBytes) },
 	}
 	for _, opt := range opts {
 		if opt == nil {
@@ -371,9 +388,16 @@ func FetchInitialAgentAssignment(ctx context.Context, hub HubBootstrap, agentID,
 	if err != nil {
 		return nil, err
 	}
+	requestNonce, err := drawAssignmentRequestNonce(cfg)
+	if err != nil {
+		return nil, err
+	}
 	body, err := marshalAssignmentRequest(assignmentListRequest{
 		UsrID: "", DevID: agentID, AspID: agentAspID,
-		UsrData: assignmentRequestData{Query: assignmentQuery, Version: assignmentVersion, Mode: assignmentModeEnroll, Credential: enrollmentCredential},
+		UsrData: assignmentRequestData{
+			Query: assignmentQuery, Version: assignmentVersion, Mode: assignmentModeEnroll,
+			RequestNonce: requestNonce, Credential: enrollmentCredential,
+		},
 	})
 	if err != nil {
 		return nil, err
@@ -397,15 +421,18 @@ func RefreshAgentAssignment(ctx context.Context, hub HubBootstrap, agentID strin
 	if err != nil {
 		return nil, err
 	}
+	requestNonce, err := drawAssignmentRequestNonce(cfg)
+	if err != nil {
+		return nil, err
+	}
 	body, err := marshalAssignmentRequest(assignmentListRequest{
 		UsrID: "", DevID: agentID, AspID: agentAspID,
-		UsrData: assignmentRequestData{Query: assignmentQuery, Version: assignmentVersion, Mode: assignmentModeRefresh},
+		UsrData: assignmentRequestData{Query: assignmentQuery, Version: assignmentVersion, Mode: assignmentModeRefresh, RequestNonce: requestNonce},
 	})
 	if err != nil {
 		return nil, err
 	}
-	// Refresh is intentionally credential-free, so there is no mutable secret
-	// buffer to wipe. Any future secret-bearing field must add explicit wiping.
+	defer wipeBytes(body)
 	return runNativeExchange(ctx, cfg, endpoint, body, transport, nativeudp.List, assignmentRetryInfo, newAssignmentRecovery, func(reply []byte, now time.Time) (*AgentAssignment, error) {
 		return parseRefreshAssignmentReply(reply, agentID, now)
 	})
@@ -511,7 +538,7 @@ func assignmentRetryInfo(err error) (time.Duration, bool) {
 		return 0, true
 	}
 	var appErr *AssignmentError
-	if errors.As(err, &appErr) && errors.Is(appErr, ErrAssignmentUnavailable) {
+	if errors.As(err, &appErr) && (errors.Is(appErr, ErrAssignmentUnavailable) || errors.Is(appErr, ErrAssignmentRateLimited)) {
 		return appErr.RetryAfter, true
 	}
 	return 0, false
@@ -535,7 +562,7 @@ func (c *assignmentConfig) backoff(attempt int, retryAfter time.Duration) (time.
 		return 0, errors.New("assignment retry jitter must be in [0, window)")
 	}
 	// Authenticated RetryAfter is a lower bound, not a value to clamp. If it
-	// exceeds the remaining transaction budget, the caller surfaces recovery
+	// exceeds the remaining operation budget, the caller surfaces recovery
 	// rather than sleeping past that budget.
 	return max(retryAfter, jittered), nil
 }
@@ -583,10 +610,23 @@ type assignmentListRequest struct {
 }
 
 type assignmentRequestData struct {
-	Query      string `json:"query"`
-	Version    int    `json:"version"`
-	Mode       string `json:"mode"`
-	Credential string `json:"credential,omitempty"`
+	Query        string `json:"query"`
+	Version      int    `json:"version"`
+	Mode         string `json:"mode"`
+	RequestNonce string `json:"request_nonce"`
+	Credential   string `json:"credential,omitempty"`
+}
+
+func drawAssignmentRequestNonce(c *assignmentConfig) (string, error) {
+	nonce, err := c.nonceSource()
+	defer wipeBytes(nonce)
+	if err != nil {
+		return "", fmt.Errorf("qurl: generate assignment request nonce: %w", err)
+	}
+	if len(nonce) != assignmentRequestNonceBytes {
+		return "", fmt.Errorf("%w: assignment request nonce source returned %d bytes (want %d)", ErrInvalidAssignmentConfig, len(nonce), assignmentRequestNonceBytes)
+	}
+	return base64.RawURLEncoding.EncodeToString(nonce), nil
 }
 
 func marshalAssignmentRequest(request assignmentListRequest) ([]byte, error) {

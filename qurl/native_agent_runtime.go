@@ -761,65 +761,16 @@ func generateDeviceID() (string, error) {
 	return "agent-" + hex.EncodeToString(random[:]), nil
 }
 
-// runAssignmentLifecycle owns inter-transaction 52204 handling. One Hub
-// transaction deliberately returns an authenticated rate limit immediately;
-// this outer gate honors RetryAfter while keeping the whole lifecycle bounded by
-// the same configured budget, context, clock, and sleep policy. Attempt caps are
-// per level, but the retry classes are deliberately disjoint: authenticated
-// 52204 is inner-terminal, while transport/52200 failures are outer-terminal.
-// Therefore the caps cannot multiply; the shared elapsed budget is the final
-// hard bound. Keep that separation if another retryable class is introduced.
-func runAssignmentLifecycle[T any](ctx context.Context, options []AssignmentOption, exchange func(context.Context) (*T, error)) (*T, error) {
-	cfg, err := newAssignmentConfig(options)
-	if err != nil {
-		return nil, err
-	}
-	start := cfg.clock()
-	lifecycleCtx, cancel := context.WithTimeout(ctx, cfg.budget)
-	defer cancel()
-	for attempt := 1; ; attempt++ {
-		result, err := exchange(lifecycleCtx)
-		if err == nil {
-			return result, nil
-		}
-		var appErr *AssignmentError
-		if !errors.As(err, &appErr) || !errors.Is(appErr, ErrAssignmentRateLimited) {
-			return nil, err
-		}
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		elapsed := cfg.elapsedSince(start)
-		if attempt == cfg.maxAttempts || elapsed >= cfg.budget || appErr.RetryAfter > cfg.budget-elapsed {
-			return nil, newAssignmentRecovery(attempt, elapsed, err)
-		}
-		if sleepErr := cfg.sleep(lifecycleCtx, appErr.RetryAfter); sleepErr != nil {
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
-			}
-			if lifecycleCtx.Err() != nil {
-				return nil, cfg.recoveryRequired(newAssignmentRecovery, attempt, start, errors.Join(err, lifecycleCtx.Err()))
-			}
-			return nil, sleepErr
-		}
-	}
-}
-
-// The lifecycle wrappers intentionally keep transaction construction and
-// validation in the public Fetch/Refresh operations. AssignmentOption is
-// closed to this package and its constructors are pure configuration setters,
-// so their repeated parse is deterministic; runAssignmentLifecycle's parse
-// owns only the shared inter-transaction budget.
+// The lifecycle wrappers delegate one logical operation to the public
+// Fetch/Refresh functions. Their single bounded exchange loop owns DNS and UDP
+// recovery plus authenticated 52200/52204 waits, so one request_nonce and one
+// serialized LST body cover the whole operation without nested retry budgets.
 func (c *nativeAgentRuntimeConfig) fetchInitialAssignmentLifecycle(ctx context.Context, hub HubBootstrap, agentID, enrollmentCredential string, privateKey []byte) (*InitialAgentAssignment, error) {
-	return runAssignmentLifecycle(ctx, c.assignmentOptions, func(transactionCtx context.Context) (*InitialAgentAssignment, error) {
-		return FetchInitialAgentAssignment(transactionCtx, hub, agentID, enrollmentCredential, c.udpOptions(privateKey), c.assignmentOptions...)
-	})
+	return FetchInitialAgentAssignment(ctx, hub, agentID, enrollmentCredential, c.udpOptions(privateKey), c.assignmentOptions...)
 }
 
 func (c *nativeAgentRuntimeConfig) refreshAssignmentLifecycle(ctx context.Context, hub HubBootstrap, agentID string, privateKey []byte) (*AgentAssignment, error) {
-	return runAssignmentLifecycle(ctx, c.assignmentOptions, func(transactionCtx context.Context) (*AgentAssignment, error) {
-		return RefreshAgentAssignment(transactionCtx, hub, agentID, c.udpOptions(privateKey), c.assignmentOptions...)
-	})
+	return RefreshAgentAssignment(ctx, hub, agentID, c.udpOptions(privateKey), c.assignmentOptions...)
 }
 
 func (c *nativeAgentRuntimeConfig) requireAllowedRegistrationKeyKind(raw string) error {

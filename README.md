@@ -244,7 +244,7 @@ Match errors by type or sentinel, not message text:
 | --- | --- |
 | `qurl.ErrInvalidClientConfig` | Resource-client credentials or options are malformed |
 | `qurl.ErrInvalidRegisterConfig` | Native lifecycle inputs are malformed |
-| `qurl.ErrAssignmentRecoveryRequired` | Hub assignment exhausted its bounded transaction |
+| `qurl.ErrAssignmentRecoveryRequired` | Hub assignment exhausted its bounded logical operation |
 | `qurl.ErrAgentBindingPersistence` | A state save failed or its acknowledgement was lost; reload before retry because the refreshed assignment may already be durable |
 | `qurl.ErrCompletionRecoveryRequired` | Resume the exact persisted completion candidate |
 | `*qurl.NativeCredentialRecoveryRequiredError` | Completed native credential state is absent or malformed; explicit native recovery or reprovisioning is required |
