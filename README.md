@@ -153,9 +153,9 @@ For account enrollment, the one-way OTP dispatch intentionally occurs before
 the pending-activation save. A save failure cannot have sent REG; a later
 explicit attempt may obtain a new ticket and dispatch that ticket's single OTP.
 Pending-activation recovery invokes the provider without another OTP dispatch
-and uses the `RegisterAgentRuntime` caller context because exact replay may
-outlive the ticket window. Set an outer context deadline when the provider could
-otherwise block indefinitely.
+and uses the `RegisterAgentRuntime` caller context clamped to the persisted
+recovery deadline because exact replay may outlive the ticket window. Set an
+earlier outer context deadline when the provider should return sooner.
 
 Every `RegisterAgentRuntime` enrollment credential must be a server-minted
 encoded token whose total string length is at least 32 bytes, including any
@@ -215,7 +215,8 @@ resource client; they never affect Hub or cell UDP transport.
 Agent state may be stored in a strict `0600` file under a `0700` directory, in a
 sealed file using `NewSealedFileAgentState`, in AWS Secrets Manager or SSM via
 `awsstore`, or in a custom `AgentStateStore`. The schema is native-only and
-duplicate or unknown persisted fields fail closed. An older SDK therefore
+duplicate fields, unknown fields, negative schema versions, and versions newer
+than this SDK fail closed before lifecycle network I/O. An older SDK therefore
 cannot open state containing fields introduced by a newer SDK; treat a downgrade
 as an explicit state-schema migration or reprovisioning operation rather than
 deleting state.
@@ -252,7 +253,7 @@ Match errors by type or sentinel, not message text:
 | `qurl.ErrAssignmentRecoveryRequired` | Hub assignment exhausted its bounded logical operation |
 | `qurl.ErrAgentBindingPersistence` | A state save failed or its acknowledgement was lost; reload before retry because the refreshed assignment may already be durable |
 | `qurl.ErrCompletionRecoveryRequired` | Resume the exact persisted completion candidate |
-| `qurl.ErrAgentRecoveryExpired` | The preserved pending activation/completion is outside the 90-day guarantee; use explicit NHP-native recovery or reprovisioning |
+| `qurl.ErrAgentRecoveryExpired` | The pending activation/completion reached the 90-day boundary; no datagram is sent at or after it, though the call may already have sent earlier traffic; use explicit NHP-native recovery or reprovisioning |
 | `qurl.ErrAgentRecoveryMigrationRequired` | A legacy pending completion has no authenticated finite-deadline anchor; preserve it and use explicit NHP-native recovery or reprovisioning |
 | `*qurl.NativeCredentialRecoveryRequiredError` | Completed native credential state is absent or malformed; explicit native recovery or reprovisioning is required |
 | `*qurl.AgentAssignmentChangedError` | The Hub assigned a new cell or generation; deliberately re-run refresh with `WithAgentRuntimeReassignmentAdoption` to accept a newer generation |

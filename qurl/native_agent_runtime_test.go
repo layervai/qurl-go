@@ -225,14 +225,15 @@ func (d *noIONativeDialer) DialContext(context.Context, string, string) (net.Con
 }
 
 type runtimeRecordingStore struct {
-	inner           AgentStateStore
-	mu              sync.Mutex
-	saves           []*AgentState
-	calls           int
-	fail            int
-	failAfterCommit int
-	cancelOnSave    int
-	cancel          context.CancelFunc
+	inner                     AgentStateStore
+	mu                        sync.Mutex
+	saves                     []*AgentState
+	calls                     int
+	fail                      int
+	failAfterCommit           int
+	waitForContextAfterCommit int
+	cancelOnSave              int
+	cancel                    context.CancelFunc
 }
 
 func (s *runtimeRecordingStore) LoadAgentState(ctx context.Context) (*AgentState, error) {
@@ -253,6 +254,7 @@ func (s *runtimeRecordingStore) SaveAgentState(ctx context.Context, state *Agent
 	call := s.calls
 	fail := s.fail
 	failAfterCommit := s.failAfterCommit
+	waitForContextAfterCommit := s.waitForContextAfterCommit
 	cancelOnSave := s.cancelOnSave
 	cancel := s.cancel
 	s.mu.Unlock()
@@ -267,6 +269,9 @@ func (s *runtimeRecordingStore) SaveAgentState(ctx context.Context, state *Agent
 	s.mu.Unlock()
 	if call == cancelOnSave && cancel != nil {
 		cancel()
+	}
+	if call == waitForContextAfterCommit {
+		<-ctx.Done()
 	}
 	if call == failAfterCommit {
 		return errors.New("injected runtime state post-commit acknowledgement failure")

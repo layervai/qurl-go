@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/netip"
 	"testing"
 	"time"
@@ -80,6 +81,18 @@ func assignmentResultWithTicketExpiry(t *testing.T, body, ticket string, expiry 
 		t.Fatal(err)
 	}
 	return string(encoded)
+}
+
+func setTestRecoveryDeadline(state *AgentState, deadline time.Time) {
+	anchor := deadline.Add(-AgentRegistrationRecoveryHorizon)
+	if state.PendingActivation != nil {
+		state.PendingActivation.RecoveryAnchorTicketExpiresAt = anchor
+		state.PendingActivation.RecoveryExpiresAt = deadline
+	}
+	if state.PendingCompletion != nil {
+		state.PendingCompletion.RecoveryAnchorTicketExpiresAt = anchor
+		state.PendingCompletion.RecoveryExpiresAt = deadline
+	}
 }
 
 func TestAgentRegistrationRecoveryHorizonContract(t *testing.T) {
@@ -298,6 +311,164 @@ func TestRegisterAgentRuntime_RejectsSchemaV5ForwardRecoveryFields(t *testing.T)
 				}
 			})
 		}
+	}
+}
+
+func TestRegisterAgentRuntime_RejectsUnsupportedSchemaVersionsBeforeNetworkIO(t *testing.T) {
+	for _, version := range []int{-1, agentStateSchemaVersion + 1} {
+		t.Run(fmt.Sprintf("version_%d", version), func(t *testing.T) {
+			f := newRuntimeFixture(t, nil, nil)
+			state, err := f.store.LoadAgentState(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			state.SchemaVersion = version
+			if err := f.store.inner.SaveAgentState(context.Background(), state); err != nil {
+				t.Fatal(err)
+			}
+			resolver := &noIONativeResolver{}
+			dialer := &noIONativeDialer{}
+
+			_, _, err = RegisterAgentRuntime(
+				context.Background(), conformance.AgentAssignmentBootstrapCredentialFixture, f.store,
+				f.options(WithAgentRuntimeUDPResolver(resolver), WithAgentRuntimeUDPDialer(dialer))...,
+			)
+			if !errors.Is(err, ErrInvalidAgentState) || !errors.Is(err, ErrInvalidRegisterConfig) {
+				t.Fatalf("schema version %d = %v, want invalid state/config", version, err)
+			}
+			if len(f.store.snapshots()) != 0 || resolver.calls.Load() != 0 || dialer.calls.Load() != 0 ||
+				len(f.hubUDP.snapshot()) != 0 || len(f.cellUDP.snapshot()) != 0 {
+				t.Fatalf("schema version %d performed I/O: saves=%d resolver=%d dialer=%d Hub/cell=%d/%d",
+					version, len(f.store.snapshots()), resolver.calls.Load(), dialer.calls.Load(), len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot()))
+			}
+		})
+	}
+}
+
+func TestRegisterAgentRuntime_DeadlineDoesNotMaskPostRAKPersistenceAmbiguity(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	f := newRuntimeFixture(t, nil, []runtimeUDPStep{{
+		requestType: relayknock.TypeRegister,
+		replyType:   relayknock.TypeRegisterAck,
+		replyBody:   contract.AssignedCellRegistration.Result.BodyJSON,
+	}})
+	state := seedRecoveryRuntimePendingActivation(t, f)
+	deadline := assignmentFixtureNow.Add(time.Second)
+	now := deadline.Add(-500 * time.Millisecond)
+	setTestRecoveryDeadline(state, deadline)
+	if err := f.store.SaveAgentState(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+	// Seed + deadline rewrite succeed. The post-RAK transition commits, waits
+	// for its bounded context to expire, then loses its acknowledgement.
+	f.store.waitForContextAfterCommit = 3
+	f.store.failAfterCommit = 3
+
+	_, _, err := RegisterAgentRuntime(
+		context.Background(), conformance.AgentAssignmentBootstrapCredentialFixture, f.store,
+		f.options(withAgentRuntimeClock(func() time.Time { return now }))...,
+	)
+	if !errors.Is(err, ErrAgentCompletionCandidatePersistence) || !errors.Is(err, ErrAgentBindingPersistence) || errors.Is(err, ErrAgentRecoveryExpired) {
+		t.Fatalf("deadline-racing post-RAK save = %v, want reload-first candidate persistence only", err)
+	}
+	loaded, loadErr := f.store.LoadAgentState(context.Background())
+	if loadErr != nil || loaded.PendingCompletion == nil || loaded.PendingActivation != nil {
+		t.Fatalf("post-RAK committed state = %#v / %v", loaded, loadErr)
+	}
+}
+
+func TestRegisterAgentRuntime_DeadlineDoesNotMaskReplacementPersistenceAmbiguity(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	f := newRuntimeFixture(t,
+		[]runtimeUDPStep{{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: bootstrapAssignmentResult(contract, "conformance-assignment-ticket-0002")}},
+		[]runtimeUDPStep{{requestType: relayknock.TypeRegister, replyType: relayknock.TypeRegisterAck, replyBody: `{"errCode":"52111","errMsg":"expired","aspId":"agent"}`}},
+	)
+	state := seedRecoveryRuntimePendingActivation(t, f)
+	deadline := assignmentFixtureNow.Add(time.Second)
+	now := deadline.Add(-500 * time.Millisecond)
+	setTestRecoveryDeadline(state, deadline)
+	if err := f.store.SaveAgentState(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+	f.store.waitForContextAfterCommit = 3
+	f.store.failAfterCommit = 3
+
+	_, _, err := RegisterAgentRuntime(
+		context.Background(), conformance.AgentAssignmentBootstrapCredentialFixture, f.store,
+		f.options(withAgentRuntimeClock(func() time.Time { return now }))...,
+	)
+	if !errors.Is(err, ErrAgentBindingPersistence) || errors.Is(err, ErrAgentRecoveryExpired) {
+		t.Fatalf("deadline-racing replacement save = %v, want reload-first binding persistence only", err)
+	}
+	loaded, loadErr := f.store.LoadAgentState(context.Background())
+	if loadErr != nil || loaded.PendingActivation == nil || loaded.PendingActivation.AssignmentTicket != "conformance-assignment-ticket-0002" {
+		t.Fatalf("committed replacement state = %#v / %v", loaded, loadErr)
+	}
+}
+
+func TestRegisterAgentRuntime_DeadlineDoesNotMaskPendingCompletionRefreshPersistenceAmbiguity(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	f := newRuntimeFixture(t,
+		[]runtimeUDPStep{{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: contract.RefreshAssignment.Result.BodyJSON}},
+		nil,
+	)
+	state := seedRecoveryRuntimePendingActivation(t, f)
+	cfg := defaultNativeAgentRuntimeConfig()
+	cfg.deviceCredential = canonicalNativeDeviceCredential
+	if err := cfg.transitionPendingActivation(context.Background(), f.store, state); err != nil {
+		t.Fatal(err)
+	}
+	deadline := assignmentFixtureNow.Add(time.Second)
+	now := deadline.Add(-500 * time.Millisecond)
+	setTestRecoveryDeadline(state, deadline)
+	state.Assignment.LeaseExpiresAt = assignmentFixtureNow.Add(-time.Second)
+	if err := f.store.SaveAgentState(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+	f.store.waitForContextAfterCommit = 4
+	f.store.failAfterCommit = 4
+
+	_, _, err := RegisterAgentRuntime(context.Background(), "", f.store,
+		f.options(withAgentRuntimeClock(func() time.Time { return now }))...)
+	if !errors.Is(err, ErrAgentBindingPersistence) || errors.Is(err, ErrAgentRecoveryExpired) {
+		t.Fatalf("deadline-racing pending-completion refresh save = %v, want reload-first binding persistence only", err)
+	}
+	loaded, loadErr := f.store.LoadAgentState(context.Background())
+	if loadErr != nil || loaded.PendingCompletion == nil || loaded.Assignment.LeaseExpired(assignmentFixtureNow) {
+		t.Fatalf("committed refreshed completion state = %#v / %v", loaded, loadErr)
+	}
+}
+
+func TestRegisterAgentRuntime_DeadlineDoesNotMaskFinalPromotionPersistenceAmbiguity(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	f := newRuntimeFixture(t, nil, []runtimeUDPStep{{
+		requestType: relayknock.TypeListRequest,
+		replyType:   relayknock.TypeListResult,
+		replyBody:   contract.RegistrationCompletion.Result.BodyJSON,
+	}})
+	state := seedRecoveryRuntimePendingActivation(t, f)
+	cfg := defaultNativeAgentRuntimeConfig()
+	cfg.deviceCredential = canonicalNativeDeviceCredential
+	if err := cfg.transitionPendingActivation(context.Background(), f.store, state); err != nil {
+		t.Fatal(err)
+	}
+	deadline := assignmentFixtureNow.Add(time.Second)
+	now := deadline.Add(-500 * time.Millisecond)
+	setTestRecoveryDeadline(state, deadline)
+	if err := f.store.SaveAgentState(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+	f.store.waitForContextAfterCommit = 4
+	f.store.failAfterCommit = 4
+
+	_, _, err := RegisterAgentRuntime(context.Background(), "", f.store,
+		f.options(withAgentRuntimeClock(func() time.Time { return now }))...)
+	if !errors.Is(err, ErrAgentBindingPersistence) || errors.Is(err, ErrAgentRecoveryExpired) {
+		t.Fatalf("deadline-racing final promotion = %v, want reload-first binding persistence only", err)
+	}
+	loaded, loadErr := f.store.LoadAgentState(context.Background())
+	if loadErr != nil || loaded.PendingCompletion != nil || loaded.RegisteredAt == nil || loaded.DeviceAPIKey != canonicalNativeDeviceCredential {
+		t.Fatalf("committed final state = %#v / %v", loaded, loadErr)
 	}
 }
 

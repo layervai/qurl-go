@@ -93,8 +93,13 @@ datagram write, including OTP and each multi-address fallback. No recovery
 datagram is dispatched at or after the deadline. It returns
 `*AgentRecoveryExpiredError`, matchable with
 `ErrAgentRecoveryExpired`, containing only the non-secret phase and deadline.
-The pending record remains intact. Do not delete it to force reenrollment; use
-the explicit NHP-native credential recovery or reprovisioning workflow.
+An invocation that began before the deadline may already have sent an earlier
+datagram or completed a durable state transition. A save error therefore keeps
+`ErrAgentBindingPersistence` (and, after RAK,
+`ErrAgentCompletionCandidatePersistence`) even if the deadline expires at the
+same time: reload before deciding which exact pending or completed state won.
+Do not delete pending state to force reenrollment; use the explicit NHP-native
+credential recovery or reprovisioning workflow.
 
 The absolute deadline is authority-anchored, but the SDK compares it with the
 host's UTC wall clock. Keep system time synchronized. Clock error can make the
@@ -116,6 +121,10 @@ retention unbounded for installations that upgrade arbitrarily late, so the SDK
 instead returns `*AgentRecoveryMigrationRequiredError`, matchable with
 `ErrAgentRecoveryMigrationRequired`, and preserves the record without network
 I/O. Use explicit recovery or reprovisioning; never hand-edit a deadline.
+
+Negative schema versions and versions greater than the current schema are also
+invalid. They fail closed before resolver, socket, or UDP activity; a newer
+version requires an explicit compatible SDK upgrade or state migration.
 
 ### Authority rollout handoff
 
@@ -221,9 +230,10 @@ The recovery branch above must return the previously issued code. It must never
 request, generate, or dispatch a new code; the SDK intentionally suppresses
 NHP_OTP while replaying a pending activation.
 
-Pending-activation recovery calls the provider with the caller's context because
-an exact replay may occur after the ticket window has expired. Set an outer
-context deadline to bound that operator or provider wait.
+Pending-activation recovery calls the provider with the caller's context
+clamped to the persisted recovery deadline because an exact replay may occur
+after the ticket window has expired. Set an earlier outer context deadline to
+bound that operator or provider wait more tightly.
 
 The SDK refuses to dispatch OTP unless the assignment ticket has at least the
 conformance contract's inclusive 630 seconds remaining.
@@ -377,7 +387,9 @@ An `AgentStateStore` must:
 - serialize setup externally if it does not implement the SDK local-file lock.
 
 Save can commit and still return an acknowledgement error. Callers must reload
-before deciding whether a pending activation or completion candidate exists.
+before deciding whether a pending activation, completion candidate, refreshed
+assignment, or completed credential exists. Concurrent context cancellation or
+recovery expiry does not remove this reload-first requirement.
 
 ## Crash and retry boundaries
 
@@ -439,7 +451,7 @@ Use `errors.Is` and `errors.As`:
 | `ErrDeviceKeyQuotaExceeded` | Revoke an unused device credential, then resume according to authority guidance. |
 | `ErrAgentCompletionCandidatePersistence` / `*AgentCompletionCandidatePersistenceError` | Reload state before any retry; resume the exact pending activation with the same enrollment credential or the exact pending completion with an empty credential. Save ambiguity alone never authorizes replacement; only an exact pending-activation replay authenticated as `52111` or account `52101` permits the one bounded replacement. |
 | `ErrCompletionRecoveryRequired` / `*CompletionRecoveryRequiredError` | Re-run `RegisterAgentRuntime` with the same store and empty enrollment credential to resume the exact pending candidate. |
-| `ErrAgentRecoveryExpired` / `*AgentRecoveryExpiredError` | The preserved pending phase is at or beyond its authority-anchored 90-day deadline. No recovery UDP was sent; use explicit NHP-native credential recovery or reprovisioning. |
+| `ErrAgentRecoveryExpired` / `*AgentRecoveryExpiredError` | The pending phase is at or beyond its authority-anchored 90-day deadline. No datagram is sent at or after that boundary, but the invocation may have sent earlier traffic. A concurrent save ambiguity is reported with the reload-first persistence errors instead. |
 | `ErrAgentRecoveryMigrationRequired` / `*AgentRecoveryMigrationRequiredError` | A legacy schema-v5 pending completion has no authenticated deadline anchor. No recovery UDP was sent; preserve it and use explicit NHP-native recovery or reprovisioning. |
 | `ErrCompletionCredentialConflict` / `*CompletionError` | The authority already committed a different candidate. Stop and use explicit NHP-native credential recovery or reprovisioning; never delete the persisted candidate or mint a replacement locally. |
 | `*NativeCredentialRecoveryRequiredError` | Native completed credential state is absent or malformed; explicit native recovery/reprovisioning is required. |

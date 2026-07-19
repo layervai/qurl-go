@@ -190,6 +190,13 @@ func validateLoadedAgentAssignment(state *AgentState) error {
 	if state == nil {
 		return nil
 	}
+	// Zero is the original, pre-versioned state shape and versions through the
+	// current one remain readable for the explicit migrations below. Negative
+	// versions are invalid, while a greater version belongs to a newer SDK whose
+	// invariants this binary cannot safely interpret.
+	if state.SchemaVersion < 0 || state.SchemaVersion > agentStateSchemaVersion {
+		return fmt.Errorf("%w: unsupported agent state schema version %d", ErrInvalidAgentState, state.SchemaVersion)
+	}
 	// Assignment, pending activation/completion, and native credential-id fields
 	// are durable native-runtime markers. Once any marker exists, the identity
 	// authenticated by the Hub and assigned cell must already be persisted in

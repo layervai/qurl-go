@@ -231,9 +231,9 @@ func WithAgentRuntimeMetadata(hostname, version string) AgentRuntimeRegistration
 // WithAgentRuntimeOTPProvider opts into account-credential enrollment. A fresh
 // callback follows one fire-and-forget assigned-cell NHP_OTP dispatch and is
 // bounded by the ticket window. Pending-activation recovery instead sets
-// AgentOTPChallenge.PendingActivationRecovery, dispatches no OTP, and passes the
-// caller context because exact replay may outlive that window; callers must set
-// an outer deadline when the provider could block.
+// AgentOTPChallenge.PendingActivationRecovery, dispatches no OTP, and receives
+// the caller context clamped to the persisted recovery deadline. Callers may set
+// an earlier outer deadline when the provider could block.
 func WithAgentRuntimeOTPProvider(provider func(context.Context, AgentOTPChallenge) (string, error)) AgentRuntimeRegistrationOption {
 	return nativeRuntimeOptionFunc(func(c *nativeAgentRuntimeConfig) error {
 		if provider == nil {
@@ -537,12 +537,6 @@ func (c *nativeAgentRuntimeConfig) registerLocked(ctx context.Context, enrollmen
 			// assignment necessarily changed. Persist it before resuming completion.
 			state.Assignment = fresh.clone()
 			if err := store.SaveAgentState(recoveryCtx, state); err != nil {
-				if ctx.Err() != nil {
-					return nil, ctx.Err()
-				}
-				if recoveryCtx.Err() != nil {
-					return nil, boundary.expiredError()
-				}
 				return nil, fmt.Errorf("%w: save refreshed pending assignment: %w", ErrAgentBindingPersistence, err)
 			}
 		}
@@ -775,12 +769,6 @@ func (c *nativeAgentRuntimeConfig) persistFreshPendingActivation(ctx context.Con
 	candidateState.PendingActivation = pending
 	candidateState.SchemaVersion = agentStateSchemaVersion
 	if err := store.SaveAgentState(operationCtx, candidateState); err != nil {
-		if ctx.Err() != nil {
-			return "", ctx.Err()
-		}
-		if boundary != nil && operationCtx.Err() != nil {
-			return "", boundary.expiredError()
-		}
 		return "", fmt.Errorf("%w: save pending assigned-cell activation before REG: %w", ErrAgentBindingPersistence, err)
 	}
 	*state = *candidateState
@@ -813,8 +801,8 @@ func (c *nativeAgentRuntimeConfig) pendingRegistrationCredential(ctx context.Con
 			return "", fmt.Errorf("%w: pending account activation requires the original code through WithAgentRuntimeOTPProvider", ErrAgentOTPRequired)
 		}
 		// Exact replay may outlive the local ticket window, so the assigned cell
-		// decides validity. The raw caller context intentionally lets the outer
-		// registration deadline bound this callback without a fresh OTP window.
+		// decides validity. The pending-recovery context is clamped to the durable
+		// recovery deadline without inventing a fresh OTP window.
 		code, err := c.otpProvider(ctx, AgentOTPChallenge{
 			AgentID: pending.AgentID, CredentialKeyID: pending.Registration.KeyID,
 			CellID: pending.Assignment.CellID, AssignmentTicketExpiresAt: pending.AssignmentTicketExpiresAt,
@@ -1456,12 +1444,6 @@ func (c *nativeAgentRuntimeConfig) completePending(ctx context.Context, store Ag
 	state.SchemaVersion = agentStateSchemaVersion
 	if err := store.SaveAgentState(recoveryCtx, state); err != nil {
 		*state = *previous
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		if recoveryCtx.Err() != nil {
-			return boundary.expiredError()
-		}
 		return fmt.Errorf("%w: persist completed native credential: %w", ErrAgentBindingPersistence, err)
 	}
 	return nil

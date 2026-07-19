@@ -36,8 +36,10 @@ const (
 
 var (
 	// ErrAgentRecoveryExpired reports that a durable pending transaction is
-	// outside the released SDK recovery guarantee. The state is preserved and no
-	// recovery packet is sent.
+	// outside the released SDK recovery guarantee. No recovery datagram is sent
+	// at or after the deadline. A call that crossed the boundary may already have
+	// sent earlier datagrams or committed a state transition, so persistence
+	// errors retain their mandatory reload-first classification.
 	ErrAgentRecoveryExpired = errors.New("qurl: agent registration recovery horizon expired")
 	// ErrAgentRecoveryMigrationRequired reports legacy pending state that cannot
 	// be assigned a finite authority-time deadline without inventing history.
@@ -172,6 +174,13 @@ func (b *agentRecoveryBoundary) context(ctx context.Context) (context.Context, c
 
 func (b *agentRecoveryBoundary) mapError(parent, bounded context.Context, err error) error {
 	if err == nil || errors.Is(err, ErrAgentRecoveryExpired) {
+		return err
+	}
+	// A save may commit before returning an acknowledgement failure. Deadline or
+	// caller cancellation observed concurrently cannot prove which durable state
+	// won, so never replace either reload-first persistence classification with a
+	// timing error.
+	if errors.Is(err, ErrAgentBindingPersistence) || errors.Is(err, ErrAgentCompletionCandidatePersistence) {
 		return err
 	}
 	if parent.Err() != nil {
