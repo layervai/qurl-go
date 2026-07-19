@@ -680,9 +680,11 @@ func TestRegisterAgentRuntime_RejectsMutuallyExclusiveRecoveryMarkersBeforeIO(t 
 	completion := activation.clone()
 	completion.PendingActivation = nil
 	completion.PendingCompletion = &PendingAgentCompletion{
-		DeviceAPIKey:         canonicalNativeDeviceCredential,
-		CellID:               completion.Assignment.CellID,
-		AssignmentGeneration: completion.Assignment.AssignmentGeneration,
+		DeviceAPIKey:              canonicalNativeDeviceCredential,
+		CellID:                    completion.Assignment.CellID,
+		AssignmentGeneration:      completion.Assignment.AssignmentGeneration,
+		AssignmentTicketExpiresAt: activation.PendingActivation.AssignmentTicketExpiresAt,
+		RecoveryExpiresAt:         activation.PendingActivation.RecoveryExpiresAt,
 	}
 	if err := validateLoadedAgentAssignment(completion); err != nil {
 		t.Fatalf("valid completion fixture: %v", err)
@@ -690,9 +692,11 @@ func TestRegisterAgentRuntime_RejectsMutuallyExclusiveRecoveryMarkersBeforeIO(t 
 
 	pendingCompletion := func(state *AgentState) *PendingAgentCompletion {
 		return &PendingAgentCompletion{
-			DeviceAPIKey:         canonicalNativeDeviceCredential,
-			CellID:               state.Assignment.CellID,
-			AssignmentGeneration: state.Assignment.AssignmentGeneration,
+			DeviceAPIKey:              canonicalNativeDeviceCredential,
+			CellID:                    state.Assignment.CellID,
+			AssignmentGeneration:      state.Assignment.AssignmentGeneration,
+			AssignmentTicketExpiresAt: activation.PendingActivation.AssignmentTicketExpiresAt,
+			RecoveryExpiresAt:         activation.PendingActivation.RecoveryExpiresAt,
 		}
 	}
 	tests := []struct {
@@ -1387,6 +1391,7 @@ func TestRunCompletionExchange_DeadlineDuringBackoffRequiresRecovery(t *testing.
 	const budget = 20 * time.Millisecond
 	cfg := &nativeAgentRuntimeConfig{
 		resolver: resolver, dialer: dialer, timeout: time.Millisecond, maxAddresses: 1,
+		clock: func() time.Time { return fixed },
 		assignmentOptions: []AssignmentOption{
 			WithAssignmentRetryBudget(2, budget),
 			withAssignmentClock(func() time.Time { return fixed }),
@@ -1401,7 +1406,8 @@ func TestRunCompletionExchange_DeadlineDuringBackoffRequiresRecovery(t *testing.
 		Host: "cell0.nhp.layerv.ai", Port: standardNHPUDPPort,
 		ServerStaticPub: assignmentHex(t, contract.Keys.AssignedCell.StaticPubHex),
 	}
-	_, err := cfg.runCompletionExchange(context.Background(), endpoint, []byte(`{"query":"register_agent"}`), cfg.udpOptions(agentPrivate))
+	state := &AgentState{PendingCompletion: &PendingAgentCompletion{RecoveryExpiresAt: fixed.Add(time.Hour)}}
+	_, err := cfg.runCompletionExchange(context.Background(), state, endpoint, []byte(`{"query":"register_agent"}`), cfg.udpOptions(agentPrivate))
 	var recovery *CompletionRecoveryRequiredError
 	if !errors.As(err, &recovery) || !errors.Is(err, ErrCompletionRecoveryRequired) ||
 		!errors.Is(err, nativeudp.ErrTransport) || !errors.Is(err, context.DeadlineExceeded) {

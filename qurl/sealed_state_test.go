@@ -702,7 +702,8 @@ func TestLocalAgentStateStores_PendingActivationRoundTripWithoutPlainCredential(
 				t.Fatal(err)
 			}
 			if loaded.PendingActivation == nil || loaded.PendingActivation.AssignmentTicket != initial.AssignmentTicket ||
-				!sameAgentAssignment(&loaded.PendingActivation.Assignment, loaded.Assignment) {
+				!sameAgentAssignment(&loaded.PendingActivation.Assignment, loaded.Assignment) ||
+				!loaded.PendingActivation.RecoveryExpiresAt.Equal(initial.AssignmentTicketExpiresAt.Add(AgentRegistrationRecoveryHorizon)) {
 				t.Fatalf("pending activation did not round trip: %#v", loaded.PendingActivation)
 			}
 			raw, err := json.Marshal(loaded)

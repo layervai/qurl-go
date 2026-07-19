@@ -96,14 +96,15 @@ type AgentState struct {
 	// AgentStateStore before the first assigned-cell REG. It retains the exact
 	// non-secret activation proof and placement needed to recover an
 	// ambiguous/lost RAK without asking the Hub for another one-shot ticket.
-	// Enrollment credentials, OTP codes, and device credentials are never stored
-	// here.
+	// Schema v6 adds its authority-anchored finite recovery deadline. Enrollment
+	// credentials, OTP codes, and device credentials are never stored here.
 	PendingActivation *PendingAgentActivation `json:"pending_activation,omitempty"`
 
 	// PendingCompletion is written only after an authenticated assigned-cell RAK
 	// and before the first completion LST. It keeps the SDK-generated device
 	// secret crash-safe across an ambiguous/lost LRT. A retry must reuse this
-	// exact candidate; generating a replacement could mint a second credential.
+	// exact candidate before the same schema-v6 recovery deadline; generating a
+	// replacement could mint a second credential.
 	PendingCompletion *PendingAgentCompletion `json:"pending_completion,omitempty"`
 }
 
@@ -133,6 +134,14 @@ type PendingAgentCompletion struct {
 	DeviceAPIKey         string `json:"device_api_key"`
 	CellID               string `json:"cell_id"`
 	AssignmentGeneration int64  `json:"assignment_generation"`
+	// AssignmentTicketExpiresAt retains the authenticated Hub timestamp that
+	// anchored this transaction before RAK. Completion never reuses the ticket;
+	// the timestamp exists only to validate the copied recovery deadline.
+	AssignmentTicketExpiresAt time.Time `json:"assignment_ticket_expires_at,omitempty"`
+	// RecoveryExpiresAt is the absolute deadline inherited unchanged from the
+	// activation ticket. It is never reset by RAK, restart, assignment refresh,
+	// retry, or completion response.
+	RecoveryExpiresAt time.Time `json:"recovery_expires_at,omitempty"`
 }
 
 // PendingAgentActivation is the exact durable input for one assigned-cell REG.
@@ -153,8 +162,12 @@ type PendingAgentCompletion struct {
 // from the corroborated enrollment credential, while account recovery asks the
 // explicit OTP provider for the original code and never dispatches another OTP.
 type PendingAgentActivation struct {
-	AssignmentTicket                   string                 `json:"assignment_ticket"`
-	AssignmentTicketExpiresAt          time.Time              `json:"assignment_ticket_expires_at"`
+	AssignmentTicket          string    `json:"assignment_ticket"`
+	AssignmentTicketExpiresAt time.Time `json:"assignment_ticket_expires_at"`
+	// RecoveryExpiresAt is exactly AssignmentTicketExpiresAt plus the released
+	// AgentRegistrationRecoveryHorizon. The authenticated Hub timestamp, rather
+	// than a local process timestamp, anchors the finite recovery contract.
+	RecoveryExpiresAt                  time.Time              `json:"recovery_expires_at,omitempty"`
 	AgentID                            string                 `json:"agent_id"`
 	AgentPublicKeyB64                  string                 `json:"agent_public_key_b64"`
 	Assignment                         AgentAssignment        `json:"assignment"`
@@ -205,6 +218,9 @@ func validateLoadedAgentAssignment(state *AgentState) error {
 		if pending.CellID != state.Assignment.CellID || pending.AssignmentGeneration != state.Assignment.AssignmentGeneration {
 			return fmt.Errorf("%w: pending completion does not match the persisted assignment", ErrInvalidAgentState)
 		}
+		if err := validatePendingCompletionRecoveryDeadline(pending, state); err != nil {
+			return err
+		}
 		if state.RegisteredAt != nil || state.DeviceAPIKey != "" || state.DeviceAPIKeyID != "" {
 			return fmt.Errorf("%w: pending completion cannot coexist with a completed device credential", ErrInvalidAgentState)
 		}
@@ -241,7 +257,7 @@ func (s *AgentState) clone() *AgentState {
 }
 
 // agentStateSchemaVersion is the current native AgentState schema version.
-const agentStateSchemaVersion = 5
+const agentStateSchemaVersion = 6
 
 // AgentStateStore loads and saves the bootstrapped local identity. The
 // file-backed store writes plaintext JSON protected by filesystem permissions;
