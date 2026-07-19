@@ -407,7 +407,7 @@ func FetchInitialAgentAssignment(ctx context.Context, hub HubBootstrap, agentID,
 	}
 	defer wipeBytes(body)
 
-	return runNativeExchange(ctx, cfg, endpoint, body, transport, nativeudp.List, assignmentRetryInfo, newAssignmentRecovery, func(reply []byte, now time.Time) (*InitialAgentAssignment, error) {
+	return runNativeExchange(ctx, cfg, endpoint, body, transport, nativeudp.AssignmentList, assignmentRetryInfo, newAssignmentRecovery, func(reply []byte, now time.Time) (*InitialAgentAssignment, error) {
 		return parseInitialAssignmentReply(reply, agentID, now)
 	})
 }
@@ -436,7 +436,7 @@ func RefreshAgentAssignment(ctx context.Context, hub HubBootstrap, agentID strin
 		return nil, err
 	}
 	defer wipeBytes(body)
-	return runNativeExchange(ctx, cfg, endpoint, body, transport, nativeudp.List, assignmentRetryInfo, newAssignmentRecovery, func(reply []byte, now time.Time) (*AgentAssignment, error) {
+	return runNativeExchange(ctx, cfg, endpoint, body, transport, nativeudp.AssignmentList, assignmentRetryInfo, newAssignmentRecovery, func(reply []byte, now time.Time) (*AgentAssignment, error) {
 		return parseRefreshAssignmentReply(reply, agentID, now)
 	})
 }

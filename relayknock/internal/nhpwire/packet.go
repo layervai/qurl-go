@@ -33,9 +33,11 @@ const (
 	maxApplicationBodySize = nhpcontract.MaxApplicationBodySize
 	maxSealedBodySize      = maxApplicationBodySize + gcmTagSize
 
-	// Header flags (reference NHP relay common): COMPRESS = 1<<1. The agent never sets
-	// it (bodies sent uncompressed); kept to decode a compressed reply.
-	nhpFlagCompress = 1 << 1
+	// Header flags (reference NHP relay common). Ordinary initiator bodies are
+	// uncompressed. The dedicated Hub assignment proof builder is the sole SDK
+	// path that sets bit 2; it always sets that bit exclusively.
+	nhpFlagCompress       = 1 << 1
+	hubLSTCookieProofFlag = 1 << 2
 
 	protocolVersionMajor = 1
 	protocolVersionMinor = 0

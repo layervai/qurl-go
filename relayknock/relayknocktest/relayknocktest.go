@@ -48,6 +48,18 @@ func BuildReply(headerType int, inp *relayknock.KnockInputs) ([]byte, error) {
 	}
 }
 
+// BuildReplyWithFlags builds a server reply with an explicit header flag word
+// for fail-closed consumer tests. Production responders use BuildReply. This
+// helper cannot build initiator messages, including Hub assignment proof LST.
+func BuildReplyWithFlags(headerType int, flags uint16, inp *relayknock.KnockInputs) ([]byte, error) {
+	switch headerType {
+	case relayknock.TypeACK, relayknock.TypeListResult, relayknock.TypeCookieChallenge, relayknock.TypeRegisterAck:
+		return nhpwire.BuildReplyWithFlagsForTest(headerType, flags, inp.WireInputs())
+	default:
+		return nil, fmt.Errorf("unsupported reply header type %d", headerType)
+	}
+}
+
 // OpenInitiatorMessage decrypts and authenticates an initiator packet in the
 // responder role. It accepts NHP_KNK, NHP_LST, NHP_OTP, NHP_REG, and NHP_EXT:
 // the open a server (or test double) performs on an agent packet. It mirrors
@@ -87,6 +99,23 @@ func OpenReknockMessage(serverPriv, expectedDevicePub, cookie, packet []byte) (*
 	}
 	if msg.Type != relayknock.TypeReknock {
 		return nil, fmt.Errorf("not a re-knock message: header type %d is not TypeReknock", msg.Type)
+	}
+	return &relayknock.Reply{
+		Type:           msg.Type,
+		Counter:        msg.Counter,
+		TimestampNanos: msg.TimestampNanos,
+		Body:           msg.Body,
+	}, nil
+}
+
+// OpenHubLSTCookieProofMessage decrypts the assignment-only proof LST using the
+// exact cookie the test Hub returned in its authenticated COK. It rejects an
+// ordinary LST, any non-exclusive flag combination, or a digest built with a
+// different cookie.
+func OpenHubLSTCookieProofMessage(serverPriv, expectedDevicePub, cookie, packet []byte) (*relayknock.Reply, error) {
+	msg, err := nhpwire.DecryptHubLSTCookieProofMessage(serverPriv, expectedDevicePub, cookie, packet)
+	if err != nil {
+		return nil, err
 	}
 	return &relayknock.Reply{
 		Type:           msg.Type,

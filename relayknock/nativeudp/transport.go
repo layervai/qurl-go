@@ -167,8 +167,63 @@ func KnockWithReknock(ctx context.Context, ep Endpoint, knockBody, reknockBody [
 	return reply, err
 }
 
-// List sends an NHP_LST to the configured endpoint over native UDP and returns
-// the authenticated NHP_LRT. NHP_LST never accepts NHP_COK; a handler-budget or
+// AssignmentList performs the assignment-only Hub LST return-routability
+// exchange. The first LST is an ordinary flag-zero message and must receive one
+// authenticated flag-zero COK whose strict body.trxId matches that LST counter;
+// an LRT before proof is terminal. AssignmentList then sends exactly one fresh
+// proof LST: the application body is byte-identical, the ephemeral
+// key/counter/timestamp are fresh, flag 0x0004 is exclusive, and the raw 32-byte
+// cookie is mixed into the header digest. Only that proof flight may receive the
+// final LRT.
+//
+// A malformed or untrusted challenge, a wrong reply type/counter, or a second
+// COK is terminal. There is no third LST, HTTP path, request padding, or hidden
+// endpoint fallback. Both legs share ctx; qurl's assignment driver supplies the
+// one top-level 30-second logical-operation budget and may retry only a returned
+// transport/resolve failure with a wholly fresh unproven exchange.
+func AssignmentList(ctx context.Context, ep Endpoint, body []byte, opts Options) (*relayknock.Reply, error) {
+	if err := validateExchangeInputs(ctx, ep, relayknock.TypeListRequest, body, opts); err != nil {
+		return nil, err
+	}
+	firstPacket, first, err := buildPacketWithFreshness(relayknock.TypeListRequest, ep.ServerStaticPub, opts.DeviceStaticPriv, body, nil)
+	if err != nil {
+		return nil, err
+	}
+	reply, err := exchangeBuiltPacket(ctx, ep, relayknock.TypeListRequest, first.counter, firstPacket, opts, true)
+	if err != nil {
+		return nil, err
+	}
+	if !reply.IsCookieChallenge() {
+		cryptoutil.Wipe(reply.Body)
+		return nil, fmt.Errorf("%w: Hub returned an assignment result before source proof", relayknock.ErrMalformedReply)
+	}
+
+	cookie, err := parseCookieChallenge(reply.Body, first.counter)
+	cryptoutil.Wipe(reply.Body)
+	if err != nil {
+		return nil, err
+	}
+	defer cryptoutil.Wipe(cookie)
+	if err := ctxErr(ctx); err != nil {
+		return nil, err
+	}
+	if err := udpfence.Check(ctx); err != nil {
+		return nil, err
+	}
+	proofPacket, proof, err := buildHubAssignmentProofPacket(ep.ServerStaticPub, opts.DeviceStaticPriv, body, cookie, first)
+	if err != nil {
+		return nil, err
+	}
+	reply, err = exchangeBuiltPacket(ctx, ep, relayknock.TypeListRequest, proof.counter, proofPacket, opts, false)
+	if err != nil {
+		return nil, err
+	}
+	return reply, nil
+}
+
+// List sends a generic NHP_LST to the configured endpoint over native UDP and
+// returns the authenticated NHP_LRT. This helper never accepts NHP_COK; only the
+// assignment-specific AssignmentList profile does. A handler-budget or
 // pre-handler overload miss is observed as a timeout and belongs to the caller's
 // bounded transaction retry.
 func List(ctx context.Context, ep Endpoint, body []byte, opts Options) (*relayknock.Reply, error) {
@@ -276,48 +331,59 @@ func Exchange(ctx context.Context, ep Endpoint, headerType int, body []byte, opt
 }
 
 func exchange(ctx context.Context, ep Endpoint, headerType int, body, cookie []byte, opts Options) (*relayknock.Reply, uint64, error) {
-	if err := ctxErr(ctx); err != nil {
+	if err := validateExchangeInputs(ctx, ep, headerType, body, opts); err != nil {
 		return nil, 0, err
-	}
-	if err := udpfence.Check(ctx); err != nil {
-		return nil, 0, err
-	}
-	if err := validateHeaderType(headerType); err != nil {
-		return nil, 0, err
-	}
-	if err := validateEndpoint(ep); err != nil {
-		return nil, 0, err
-	}
-	if len(opts.DeviceStaticPriv) != x25519key.Size {
-		return nil, 0, fmt.Errorf("%w: device static private key must be %d bytes", ErrInvalidRequest, x25519key.Size)
-	}
-	// Explicit pre-I/O packet-size bound: the aggregate encoded body must fit the
-	// NHP plaintext ceiling. BuildMessage re-checks the sealed size, but bounding
-	// here keeps the size contract explicit before any socket work.
-	if len(body) > nhpcontract.MaxApplicationBodySize {
-		return nil, 0, fmt.Errorf("%w: application body of %d bytes exceeds the %d-byte NHP maximum", ErrInvalidRequest, len(body), nhpcontract.MaxApplicationBodySize)
 	}
 
 	packet, counter, err := buildPacket(headerType, ep.ServerStaticPub, opts.DeviceStaticPriv, body, cookie)
 	if err != nil {
 		return nil, 0, err
 	}
-	// The built packet must fit the fixed receive buffer of the reference server.
-	if len(packet) > nhpwire.PacketBufferSize {
-		return nil, 0, fmt.Errorf("%w: packet of %d bytes exceeds the %d-byte NHP buffer", ErrInvalidRequest, len(packet), nhpwire.PacketBufferSize)
-	}
+	opened, err := exchangeBuiltPacket(ctx, ep, headerType, counter, packet, opts, false)
+	return opened, counter, err
+}
 
+func validateExchangeInputs(ctx context.Context, ep Endpoint, headerType int, body []byte, opts Options) error {
+	if err := ctxErr(ctx); err != nil {
+		return err
+	}
+	if err := udpfence.Check(ctx); err != nil {
+		return err
+	}
+	if err := validateHeaderType(headerType); err != nil {
+		return err
+	}
+	if err := validateEndpoint(ep); err != nil {
+		return err
+	}
+	if len(opts.DeviceStaticPriv) != x25519key.Size {
+		return fmt.Errorf("%w: device static private key must be %d bytes", ErrInvalidRequest, x25519key.Size)
+	}
+	// Explicit pre-I/O packet-size bound: the aggregate encoded body must fit the
+	// NHP plaintext ceiling. BuildMessage re-checks the sealed size, but bounding
+	// here keeps the size contract explicit before any socket work.
+	if len(body) > nhpcontract.MaxApplicationBodySize {
+		return fmt.Errorf("%w: application body of %d bytes exceeds the %d-byte NHP maximum", ErrInvalidRequest, len(body), nhpcontract.MaxApplicationBodySize)
+	}
+	return nil
+}
+
+func exchangeBuiltPacket(ctx context.Context, ep Endpoint, headerType int, counter uint64, packet []byte, opts Options, allowAssignmentChallenge bool) (*relayknock.Reply, error) {
+	if len(packet) > nhpwire.PacketBufferSize {
+		return nil, fmt.Errorf("%w: packet of %d bytes exceeds the %d-byte NHP buffer", ErrInvalidRequest, len(packet), nhpwire.PacketBufferSize)
+	}
 	addrs, err := resolveAddresses(ctx, ep.Host, opts)
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
-
 	reply, err := sendToAddresses(ctx, addrs, ep.Port, packet, opts)
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
-	opened, err := decryptAndCorrelate(opts.DeviceStaticPriv, ep.ServerStaticPub, headerType, counter, reply)
-	return opened, counter, err
+	if allowAssignmentChallenge {
+		return decryptAndCorrelateAssignment(opts.DeviceStaticPriv, ep.ServerStaticPub, counter, reply)
+	}
+	return decryptAndCorrelate(opts.DeviceStaticPriv, ep.ServerStaticPub, headerType, counter, reply)
 }
 
 type cookieChallengeBody struct {
@@ -349,7 +415,7 @@ func rejectCookieChallenge(class, detail string) error {
 }
 
 // parseCookieChallenge is a dedicated closed parser rather than an ordinary
-// json.Unmarshal: COK is authenticated server input and the v0.6 contract
+// json.Unmarshal: COK is authenticated server input and the shared contracts
 // rejects duplicate/unknown keys, nulls, trailing values, non-canonical base64,
 // and transaction mismatch before RKN can be emitted.
 func parseCookieChallenge(body []byte, requestCounter uint64) ([]byte, error) {
@@ -403,7 +469,7 @@ func parseCookieChallenge(body []byte, requestCounter uint64) ([]byte, error) {
 		return nil, rejectCookieChallenge(cookieRejectBodyParse, "missing required field")
 	}
 	if parsed.transactionID != requestCounter {
-		return nil, rejectCookieChallenge(cookieRejectCounter, "transaction does not match the knock")
+		return nil, rejectCookieChallenge(cookieRejectCounter, "transaction does not match the request")
 	}
 	cookie := parsed.cookie
 	// Ownership transfers to the caller; the deferred local wipe becomes a no-op.
@@ -607,6 +673,40 @@ func dialWithDeadline(ctx context.Context, dialer Dialer, address string, timeou
 // overload signal rather than a completed transaction. All transaction replies
 // require an exact counter echo and an allowed reply type.
 func decryptAndCorrelate(devicePriv, serverStaticPub []byte, requestType int, counter uint64, reply []byte) (*relayknock.Reply, error) {
+	msg, err := decryptAuthenticatedReply(devicePriv, serverStaticPub, reply)
+	if err != nil {
+		return nil, err
+	}
+	return correlateDecryptedReply(replyFromWire(msg), requestType, counter)
+}
+
+// decryptAndCorrelateAssignment is deliberately separate from the generic LST
+// correlation policy. Only the qURL assignment exchange may surface a COK; the
+// ordinary List helper continues to reject it. The COK body parser, rather than
+// its outer response counter, binds the challenge to the unproven LST.
+func decryptAndCorrelateAssignment(devicePriv, serverStaticPub []byte, counter uint64, reply []byte) (*relayknock.Reply, error) {
+	msg, err := decryptAuthenticatedReply(devicePriv, serverStaticPub, reply)
+	if err != nil {
+		return nil, err
+	}
+	return correlateAssignmentReply(msg, counter)
+}
+
+func correlateAssignmentReply(msg *nhpwire.Message, counter uint64) (*relayknock.Reply, error) {
+	if msg == nil {
+		return nil, fmt.Errorf("%w: decrypted assignment reply is nil", relayknock.ErrMalformedReply)
+	}
+	if msg.Type == relayknock.TypeCookieChallenge {
+		if msg.Flags != 0 {
+			cryptoutil.Wipe(msg.Body)
+			return nil, fmt.Errorf("%w: assignment cookie challenge flags %#04x must be zero", relayknock.ErrMalformedReply, msg.Flags)
+		}
+		return replyFromWire(msg), nil
+	}
+	return correlateDecryptedReply(replyFromWire(msg), relayknock.TypeListRequest, counter)
+}
+
+func decryptAuthenticatedReply(devicePriv, serverStaticPub, reply []byte) (*nhpwire.Message, error) {
 	// Explicit receive-side packet-size bound: a conforming server never exceeds
 	// the fixed NHP buffer, so an oversize datagram is a rejection, not something
 	// to open. (DecryptReply also rejects it; gating here keeps the size contract
@@ -614,7 +714,7 @@ func decryptAndCorrelate(devicePriv, serverStaticPub []byte, requestType int, co
 	if len(reply) > nhpwire.PacketBufferSize {
 		return nil, fmt.Errorf("%w: reply of %d bytes exceeds the %d-byte NHP buffer", ErrServerUnauthenticated, len(reply), nhpwire.PacketBufferSize)
 	}
-	dr, err := relayknock.DecryptReply(devicePriv, serverStaticPub, reply)
+	msg, err := nhpwire.DecryptReplyMessage(devicePriv, serverStaticPub, reply)
 	if err != nil {
 		// Any datagram that does not open as an authenticated reply from the pinned
 		// key is unauthenticated. The underlying relayknock error (e.g. static-key
@@ -623,7 +723,16 @@ func decryptAndCorrelate(devicePriv, serverStaticPub []byte, requestType int, co
 		// %w, because decrypt-stage failures must not also match ErrMalformedReply.
 		return nil, fmt.Errorf("%w: %s", ErrServerUnauthenticated, err.Error())
 	}
-	return correlateDecryptedReply(dr, requestType, counter)
+	return msg, nil
+}
+
+func replyFromWire(msg *nhpwire.Message) *relayknock.Reply {
+	return &relayknock.Reply{
+		Type:           msg.Type,
+		Counter:        msg.Counter,
+		TimestampNanos: msg.TimestampNanos,
+		Body:           msg.Body,
+	}
 }
 
 func correlateDecryptedReply(dr *relayknock.Reply, requestType int, counter uint64) (*relayknock.Reply, error) {
@@ -675,23 +784,47 @@ func replyTypeAllowed(requestType, replyType int) bool {
 // the packet and the counter a round-trip caller requires the reply to echo. The
 // ephemeral private key is wiped before returning; the device static private key
 // belongs to the caller and is not wiped here.
+type packetFreshness struct {
+	ephemeralPub   []byte
+	counter        uint64
+	timestampNanos uint64
+}
+
 func buildPacket(headerType int, serverStaticPub, devicePriv, body, cookie []byte) (packet []byte, counter uint64, err error) {
+	packet, fresh, err := buildPacketMaterial(headerType, serverStaticPub, devicePriv, body, cookie, false)
+	return packet, fresh.counter, err
+}
+
+func buildPacketWithFreshness(headerType int, serverStaticPub, devicePriv, body, cookie []byte) (packet []byte, fresh packetFreshness, err error) {
+	return buildPacketMaterial(headerType, serverStaticPub, devicePriv, body, cookie, true)
+}
+
+// captureEphemeral is assignment-only: generic exchanges do not need to derive
+// the public key a second time merely to retain freshness metadata.
+func buildPacketMaterial(headerType int, serverStaticPub, devicePriv, body, cookie []byte, captureEphemeral bool) (packet []byte, fresh packetFreshness, err error) {
 	random, err := cryptoutil.RandomBytes(x25519key.Size + 8 + 4)
 	if err != nil {
-		return nil, 0, fmt.Errorf("%w: generate packet randomness: %w", ErrTransport, err)
+		return nil, packetFreshness{}, fmt.Errorf("%w: generate packet randomness: %w", ErrTransport, err)
 	}
 	defer cryptoutil.Wipe(random)
 
 	ephemeralPriv := random[:x25519key.Size]
-	counter = binary.BigEndian.Uint64(random[x25519key.Size : x25519key.Size+8])
+	if captureEphemeral {
+		fresh.ephemeralPub, err = nhpwire.X25519Public(ephemeralPriv)
+		if err != nil {
+			return nil, packetFreshness{}, fmt.Errorf("%w: derive packet ephemeral key: %w", ErrTransport, err)
+		}
+	}
+	fresh.counter = binary.BigEndian.Uint64(random[x25519key.Size : x25519key.Size+8])
+	fresh.timestampNanos = uint64(time.Now().UnixNano())
 	preamble := binary.BigEndian.Uint32(random[x25519key.Size+8:])
 
 	packet, err = relayknock.BuildMessage(headerType, &relayknock.KnockInputs{
 		DeviceStaticPriv: devicePriv,
 		ServerStaticPub:  serverStaticPub,
 		EphemeralPriv:    ephemeralPriv,
-		TimestampNanos:   uint64(time.Now().UnixNano()),
-		Counter:          counter,
+		TimestampNanos:   fresh.timestampNanos,
+		Counter:          fresh.counter,
 		Preamble:         preamble,
 		Body:             body,
 		Cookie:           cookie,
@@ -699,9 +832,48 @@ func buildPacket(headerType int, serverStaticPub, devicePriv, body, cookie []byt
 	if err != nil {
 		// BuildMessage errors never quote key or body plaintext (they report only
 		// sizes and the header type), so wrapping is safe.
-		return nil, 0, fmt.Errorf("%w: build packet: %w", ErrInvalidRequest, err)
+		return nil, packetFreshness{}, fmt.Errorf("%w: build packet: %w", ErrInvalidRequest, err)
 	}
-	return packet, counter, nil
+	return packet, fresh, nil
+}
+
+func buildHubAssignmentProofPacket(serverStaticPub, devicePriv, body, cookie []byte, first packetFreshness) (packet []byte, fresh packetFreshness, err error) {
+	random, randomErr := cryptoutil.RandomBytes(x25519key.Size + 8 + 4)
+	if randomErr != nil {
+		return nil, packetFreshness{}, fmt.Errorf("%w: generate proof packet randomness: %w", ErrTransport, randomErr)
+	}
+	defer cryptoutil.Wipe(random)
+	ephemeralPriv := random[:x25519key.Size]
+	ephemeralPub, deriveErr := nhpwire.X25519Public(ephemeralPriv)
+	if deriveErr != nil {
+		return nil, packetFreshness{}, fmt.Errorf("%w: derive proof ephemeral key: %w", ErrTransport, deriveErr)
+	}
+	counter := binary.BigEndian.Uint64(random[x25519key.Size : x25519key.Size+8])
+	if counter == first.counter || bytes.Equal(ephemeralPub, first.ephemeralPub) {
+		return nil, packetFreshness{}, fmt.Errorf("%w: proof packet randomness repeated first-flight material", ErrTransport)
+	}
+	timestamp := uint64(time.Now().UnixNano())
+	if timestamp <= first.timestampNanos {
+		if first.timestampNanos == ^uint64(0) {
+			return nil, packetFreshness{}, fmt.Errorf("%w: first assignment timestamp cannot be advanced", ErrTransport)
+		}
+		timestamp = first.timestampNanos + 1
+	}
+	fresh = packetFreshness{ephemeralPub: ephemeralPub, counter: counter, timestampNanos: timestamp}
+	packet, err = nhpwire.BuildHubLSTCookieProof(&nhpwire.Inputs{
+		DeviceStaticPriv: devicePriv,
+		ServerStaticPub:  serverStaticPub,
+		EphemeralPriv:    ephemeralPriv,
+		TimestampNanos:   timestamp,
+		Counter:          counter,
+		Preamble:         binary.BigEndian.Uint32(random[x25519key.Size+8:]),
+		Body:             body,
+		Cookie:           cookie,
+	})
+	if err != nil {
+		return nil, packetFreshness{}, fmt.Errorf("%w: build Hub assignment proof packet: %w", ErrInvalidRequest, err)
+	}
+	return packet, fresh, nil
 }
 
 // resolveAddresses resolves host to at most opts.MaxAddresses IP addresses. It

@@ -46,6 +46,12 @@ type runtimeUDPRequest struct {
 	body   []byte
 }
 
+type runtimeAssignmentProof struct {
+	stepIndex int
+	body      []byte
+	cookie    []byte
+}
+
 type runtimeUDPServer struct {
 	t          *testing.T
 	conn       *net.UDPConn
@@ -83,19 +89,42 @@ func newRuntimeUDPServer(t *testing.T, serverPriv, agentPub []byte, steps ...run
 func (s *runtimeUDPServer) serve() {
 	defer close(s.done)
 	buffer := make([]byte, 4096)
+	var assignmentProof *runtimeAssignmentProof
 	for {
 		n, remote, err := s.conn.ReadFromUDP(buffer)
 		if err != nil {
 			return
+		}
+		packet := bytes.Clone(buffer[:n])
+		if assignmentProof != nil {
+			opened, openErr := relayknocktest.OpenHubLSTCookieProofMessage(s.serverPriv, s.agentPub, assignmentProof.cookie, packet)
+			if openErr != nil {
+				s.t.Errorf("open runtime assignment proof: %v", openErr)
+				continue
+			}
+			if !bytes.Equal(opened.Body, assignmentProof.body) {
+				s.t.Errorf("runtime assignment proof body changed: got %q want %q", opened.Body, assignmentProof.body)
+				continue
+			}
+			stepIndex := assignmentProof.stepIndex
+			step := s.steps[stepIndex]
+			assignmentProof = nil
+			if step.noReply {
+				continue
+			}
+			if err := s.writeReply(remote, step.replyType, opened.Counter+step.replyCounterDelta, []byte(step.replyBody), stepIndex*2+1); err != nil {
+				s.t.Logf("write runtime assignment result: %v", err)
+			}
+			continue
 		}
 		s.mu.Lock()
 		index := len(s.requests)
 		s.mu.Unlock()
 		var opened *relayknock.Reply
 		if index < len(s.steps) && s.steps[index].requestType == relayknock.TypeReknock {
-			opened, err = relayknocktest.OpenReknockMessage(s.serverPriv, s.agentPub, s.steps[index].reknockCookie, bytes.Clone(buffer[:n]))
+			opened, err = relayknocktest.OpenReknockMessage(s.serverPriv, s.agentPub, s.steps[index].reknockCookie, packet)
 		} else {
-			opened, err = relayknocktest.OpenInitiatorMessage(s.serverPriv, s.agentPub, bytes.Clone(buffer[:n]))
+			opened, err = relayknocktest.OpenInitiatorMessage(s.serverPriv, s.agentPub, packet)
 		}
 		if err != nil {
 			s.t.Errorf("open runtime request: %v", err)
@@ -112,6 +141,16 @@ func (s *runtimeUDPServer) serve() {
 			s.t.Errorf("runtime request %d type = %d, want %d", index, opened.Type, step.requestType)
 			continue
 		}
+		if opened.Type == relayknock.TypeListRequest && isHubAssignmentRequest(opened.Body) {
+			cookie := bytes.Repeat([]byte{0x5a}, 32)
+			challengeBody := []byte(fmt.Sprintf(`{"trxId":%d,"cookie":%q}`, opened.Counter, base64.StdEncoding.EncodeToString(cookie)))
+			if err := s.writeReply(remote, relayknock.TypeCookieChallenge, opened.Counter+99, challengeBody, index*2); err != nil {
+				s.t.Logf("write runtime assignment challenge: %v", err)
+				continue
+			}
+			assignmentProof = &runtimeAssignmentProof{stepIndex: index, body: bytes.Clone(opened.Body), cookie: cookie}
+			continue
+		}
 		if step.noReply {
 			continue
 		}
@@ -119,23 +158,36 @@ func (s *runtimeUDPServer) serve() {
 		if step.replyType == relayknock.TypeCookieChallenge && len(step.reknockCookie) != 0 {
 			replyBody = fmt.Sprintf(`{"trxId":%d,"cookie":%q}`, opened.Counter, base64.StdEncoding.EncodeToString(step.reknockCookie))
 		}
-		packet, err := relayknocktest.BuildReply(step.replyType, &relayknock.KnockInputs{
-			DeviceStaticPriv: s.serverPriv,
-			ServerStaticPub:  s.agentPub,
-			EphemeralPriv:    bytes.Repeat([]byte{byte(0x40 + index)}, 32),
-			TimestampNanos:   uint64(assignmentFixtureNow.UnixNano()) + uint64(index),
-			Counter:          opened.Counter + step.replyCounterDelta,
-			Preamble:         uint32(0x50607080 + index),
-			Body:             []byte(replyBody),
-		})
-		if err != nil {
-			s.t.Errorf("build runtime reply: %v", err)
-			continue
-		}
-		if _, err := s.conn.WriteToUDP(packet, remote); err != nil {
+		if err := s.writeReply(remote, step.replyType, opened.Counter+step.replyCounterDelta, []byte(replyBody), index); err != nil {
 			s.t.Logf("write runtime reply: %v", err)
 		}
 	}
+}
+
+func isHubAssignmentRequest(body []byte) bool {
+	var request struct {
+		UsrData struct {
+			Query string `json:"query"`
+		} `json:"usrData"`
+	}
+	return json.Unmarshal(body, &request) == nil && request.UsrData.Query == assignmentQuery
+}
+
+func (s *runtimeUDPServer) writeReply(remote *net.UDPAddr, replyType int, counter uint64, body []byte, sequence int) error {
+	packet, err := relayknocktest.BuildReply(replyType, &relayknock.KnockInputs{
+		DeviceStaticPriv: s.serverPriv,
+		ServerStaticPub:  s.agentPub,
+		EphemeralPriv:    bytes.Repeat([]byte{byte(0x40 + sequence)}, 32),
+		TimestampNanos:   uint64(assignmentFixtureNow.UnixNano()) + uint64(sequence),
+		Counter:          counter,
+		Preamble:         uint32(0x50607080 + sequence),
+		Body:             body,
+	})
+	if err != nil {
+		return fmt.Errorf("build runtime reply: %w", err)
+	}
+	_, err = s.conn.WriteToUDP(packet, remote)
+	return err
 }
 
 func (s *runtimeUDPServer) snapshot() []runtimeUDPRequest {
@@ -2180,11 +2232,11 @@ func TestRegisterAgentRuntime_AccountOTPProviderFailuresSendOneOTPNoREGAndPersis
 			if len(requests) != 1 || requests[0].typeID != relayknock.TypeOTP {
 				t.Fatalf("provider failure cell requests = %v, want exactly one OTP and zero REG", requests)
 			}
-			// Hub assignment and the one OTP each require one synchronous dial. A
-			// REG-after-OTP regression would increment this before the lifecycle
-			// returns, even if the UDP server has not recorded that datagram yet.
-			if dialer.calls.Load() != 2 {
-				t.Fatalf("provider failure UDP dials = %d, want Hub + OTP only", dialer.calls.Load())
+			// Mandatory Hub challenge/proof uses two synchronous dials and OTP uses
+			// one. A REG-after-OTP regression would increment this before the
+			// lifecycle returns, even if the server has not recorded that datagram.
+			if dialer.calls.Load() != 3 {
+				t.Fatalf("provider failure UDP dials = %d, want Hub challenge/proof + OTP only", dialer.calls.Load())
 			}
 			persisted, loadErr := f.store.LoadAgentState(context.Background())
 			if loadErr != nil {
@@ -2222,8 +2274,8 @@ func TestRegisterAgentRuntime_AccountPendingSaveFailureSendsOneOTPNoREG(t *testi
 	if len(requests) != 1 || requests[0].typeID != relayknock.TypeOTP {
 		t.Fatalf("account pending save failure cell requests = %v, want one OTP and zero REG", requests)
 	}
-	if dialer.calls.Load() != 2 {
-		t.Fatalf("account pending save failure UDP dials = %d, want Hub + OTP only", dialer.calls.Load())
+	if dialer.calls.Load() != 3 {
+		t.Fatalf("account pending save failure UDP dials = %d, want Hub challenge/proof + OTP only", dialer.calls.Load())
 	}
 	persisted, loadErr := f.store.LoadAgentState(context.Background())
 	if loadErr != nil {

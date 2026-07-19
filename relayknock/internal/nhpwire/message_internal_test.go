@@ -21,8 +21,13 @@ func TestInflateZlib_FailsClosedOnOversize(t *testing.T) {
 		t.Fatalf("zlib close: %v", err)
 	}
 
-	if _, err := inflateZlib(buf.Bytes()); err == nil {
+	compressed := bytes.Clone(buf.Bytes())
+	body, err := inflateZlib(compressed)
+	if err == nil || body != nil {
 		t.Fatal("inflateZlib accepted an over-large inflated body; want a fail-closed error")
+	}
+	if !bytes.Equal(compressed, make([]byte, len(compressed))) {
+		t.Fatalf("owned compressed plaintext was not wiped: %x", compressed)
 	}
 }
 
@@ -45,5 +50,41 @@ func TestInflateZlib_AcceptsAtLimit(t *testing.T) {
 	}
 	if len(body) != PacketBufferSize {
 		t.Fatalf("inflated length = %d, want %d", len(body), PacketBufferSize)
+	}
+}
+
+func TestInflateZlibWipesInputOnSuccess(t *testing.T) {
+	var buf bytes.Buffer
+	w := zlib.NewWriter(&buf)
+	want := []byte("authenticated compressed reply plaintext")
+	if _, err := w.Write(want); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	compressed := bytes.Clone(buf.Bytes())
+	body, err := inflateZlib(compressed)
+	if err != nil || !bytes.Equal(body, want) {
+		t.Fatalf("inflateZlib = %q, %v; want %q", body, err, want)
+	}
+	if !bytes.Equal(compressed, make([]byte, len(compressed))) {
+		t.Fatalf("owned compressed plaintext was not wiped: %x", compressed)
+	}
+}
+
+func TestInflateZlibReturnsNoPartialPlaintextOnChecksumFailure(t *testing.T) {
+	var buf bytes.Buffer
+	w := zlib.NewWriter(&buf)
+	if _, err := w.Write([]byte("partial plaintext before checksum failure")); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	corrupt := bytes.Clone(buf.Bytes())
+	corrupt[len(corrupt)-1] ^= 0xff
+	if body, err := inflateZlib(corrupt); err == nil || body != nil {
+		t.Fatalf("inflateZlib checksum failure = %q, %v; want nil body and error", body, err)
 	}
 }
