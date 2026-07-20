@@ -222,6 +222,10 @@ func (e *CredentialRecoveredAssignmentRefreshRequiredError) Unwrap() []error {
 // persistence runs once after the network retry loop, so a store failure cannot
 // mint or rotate a replacement candidate. The returned Client's ordinary qURL
 // resource operations remain the separate steady-state HTTPS API.
+//
+// recoveryCredential is required whenever recovery must issue or renew a Hub
+// grant. A pure resume of an already-persisted cell completion uses its durable
+// grant and candidate instead, so that path does not inspect the argument.
 func RecoverAgentRuntime(ctx context.Context, recoveryCredential string, store AgentStateStore, opts ...AgentRuntimeRecoveryOption) (*Client, *AgentRuntimeBinding, error) {
 	if err := validateContext(ctx, ErrInvalidRegisterConfig); err != nil {
 		return nil, nil, err
@@ -446,6 +450,8 @@ func concatCredentialRecoveryBody(authority string, parts ...string) ([]byte, er
 	for _, part := range parts {
 		body = append(body, part...)
 	}
+	// Exact capacity is part of the secret-wiping contract: no hidden backing
+	// allocation may retain an earlier copy after callers wipe the returned body.
 	if len(body) != want || cap(body) != want {
 		wipeBytes(body)
 		return nil, fmt.Errorf("%w: encoded %s recovery request exceeds NHP application limit", ErrInvalidRegisterConfig, authority)
@@ -481,6 +487,9 @@ func (c *nativeAgentRuntimeConfig) issueAndPersistCredentialRecovery(ctx context
 		}
 	}
 	defer func() { cancel() }()
+	// qurl-conformance v0.9 freezes reusable qurl:agent credentials to the
+	// canonical device-key encoding. Keep this shared validator coupled to that
+	// producer contract; a future credential format needs an explicit revision.
 	if err := validateNativeDeviceCredential(credential, "recovery credential", ErrInvalidRegisterConfig); err != nil {
 		return "", err
 	}
