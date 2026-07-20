@@ -430,19 +430,25 @@ func marshalCredentialRecoveryIssueRequest(agentID, nonce, credential string) ([
 		validateNativeDeviceCredential(credential, "recovery credential", ErrInvalidRegisterConfig) != nil {
 		return nil, invalidCredentialRecoveryRequest(credentialRecoveryHubPhase)
 	}
-	want := len(credentialRecoveryIssuePrefix) + len(agentID) + len(credentialRecoveryIssueAgentSuffix) +
-		len(nonce) + len(credentialRecoveryIssueNonceSuffix) + len(credential) + len(credentialRecoveryIssueSuffix)
+	return concatCredentialRecoveryBody("Hub", credentialRecoveryIssuePrefix, agentID, credentialRecoveryIssueAgentSuffix,
+		nonce, credentialRecoveryIssueNonceSuffix, credential, credentialRecoveryIssueSuffix)
+}
+
+func concatCredentialRecoveryBody(authority string, parts ...string) ([]byte, error) {
+	want := 0
+	for _, part := range parts {
+		if len(part) > nhpcontract.MaxApplicationBodySize-want {
+			return nil, fmt.Errorf("%w: encoded %s recovery request exceeds NHP application limit", ErrInvalidRegisterConfig, authority)
+		}
+		want += len(part)
+	}
 	body := make([]byte, 0, want)
-	body = append(body, credentialRecoveryIssuePrefix...)
-	body = append(body, agentID...)
-	body = append(body, credentialRecoveryIssueAgentSuffix...)
-	body = append(body, nonce...)
-	body = append(body, credentialRecoveryIssueNonceSuffix...)
-	body = append(body, credential...)
-	body = append(body, credentialRecoveryIssueSuffix...)
-	if len(body) != want || cap(body) != want || len(body) > nhpcontract.MaxApplicationBodySize {
+	for _, part := range parts {
+		body = append(body, part...)
+	}
+	if len(body) != want || cap(body) != want {
 		wipeBytes(body)
-		return nil, fmt.Errorf("%w: encoded Hub recovery request exceeds NHP application limit", ErrInvalidRegisterConfig)
+		return nil, fmt.Errorf("%w: encoded %s recovery request exceeds NHP application limit", ErrInvalidRegisterConfig, authority)
 	}
 	return body, nil
 }
@@ -593,7 +599,8 @@ func (c *nativeAgentRuntimeConfig) persistCredentialRecoveryIssueIntent(ctx cont
 }
 
 func (c *nativeAgentRuntimeConfig) issueCredentialRecovery(ctx context.Context, agentID, credential, nonce string, privateKey []byte) (*credentialRecoveryIssue, error) {
-	endpoint, err := validateAssignmentInputs(ctx, *c.hub, agentID, c.udpOptions(privateKey))
+	udpOptions := c.udpOptions(privateKey)
+	endpoint, err := validateAssignmentInputs(ctx, *c.hub, agentID, udpOptions)
 	if err != nil {
 		return nil, err
 	}
@@ -606,7 +613,7 @@ func (c *nativeAgentRuntimeConfig) issueCredentialRecovery(ctx context.Context, 
 		return nil, err
 	}
 	defer wipeBytes(body)
-	return runNativeExchange(ctx, retry, endpoint, body, c.udpOptions(privateKey), nativeudp.AssignmentList,
+	return runNativeExchange(ctx, retry, endpoint, body, udpOptions, nativeudp.AssignmentList,
 		credentialRecoveryRetryInfo, newCredentialRecoveryRequired(credentialRecoveryHubPhase),
 		func(reply []byte, now time.Time) (*credentialRecoveryIssue, error) {
 			return parseCredentialRecoveryIssueReply(reply, agentID, now)
@@ -756,21 +763,8 @@ func marshalCredentialRecoveryCompletionRequest(agentID, grant, candidate string
 		validateNativeDeviceCredential(candidate, "recovery candidate", ErrInvalidRegisterConfig) != nil {
 		return nil, invalidCredentialRecoveryRequest(credentialRecoveryCellPhase)
 	}
-	want := len(credentialRecoveryCompletePrefix) + len(agentID) + len(credentialRecoveryCompleteAgentTail) +
-		len(grant) + len(credentialRecoveryCompleteGrantTail) + len(candidate) + len(credentialRecoveryCompleteSuffix)
-	body := make([]byte, 0, want)
-	body = append(body, credentialRecoveryCompletePrefix...)
-	body = append(body, agentID...)
-	body = append(body, credentialRecoveryCompleteAgentTail...)
-	body = append(body, grant...)
-	body = append(body, credentialRecoveryCompleteGrantTail...)
-	body = append(body, candidate...)
-	body = append(body, credentialRecoveryCompleteSuffix...)
-	if len(body) != want || cap(body) != want || len(body) > nhpcontract.MaxApplicationBodySize {
-		wipeBytes(body)
-		return nil, fmt.Errorf("%w: encoded assigned-cell recovery request exceeds NHP application limit", ErrInvalidRegisterConfig)
-	}
-	return body, nil
+	return concatCredentialRecoveryBody("assigned-cell", credentialRecoveryCompletePrefix, agentID, credentialRecoveryCompleteAgentTail,
+		grant, credentialRecoveryCompleteGrantTail, candidate, credentialRecoveryCompleteSuffix)
 }
 
 func validateCredentialRecoveryCompletionRequest(body []byte) error {
@@ -966,13 +960,7 @@ func validateCredentialRecoveryRequestNonce(nonce string) error {
 }
 
 func credentialRecoveryCredentialFingerprint(credential string) string {
-	const domain = agentstatecontract.PendingCredentialRecoveryCredentialFingerprintDomain
-	material := make([]byte, len(domain)+len(credential))
-	copy(material, domain)
-	copy(material[len(domain):], credential)
-	digest := sha256.Sum256(material)
-	wipeBytes(material)
-	return base64.RawURLEncoding.EncodeToString(digest[:])
+	return fingerprintWithDomain(agentstatecontract.PendingCredentialRecoveryCredentialFingerprintDomain, credential)
 }
 
 func sameCredentialRecoveryCredential(credential, wantFingerprint string) bool {
@@ -1076,20 +1064,18 @@ func (c *nativeAgentRuntimeConfig) credentialRecoveryBoundary(ctx context.Contex
 	if err := c.requireCredentialRecoveryLive(pending); err != nil {
 		return nil, nil, nil, err
 	}
-	boundary := &credentialRecoveryBoundary{deadline: pending.RecoveryExpiresAt, clock: c.clock}
-	now := c.clock().UTC()
-	if err := boundary.checkAt(now); err != nil {
-		return nil, nil, nil, err
-	}
-	bounded, cancel := context.WithTimeout(ctx, boundary.deadline.Sub(now))
-	return boundary, udpfence.With(bounded, boundary.check), cancel, nil
+	return c.boundedCredentialRecovery(ctx, pending.RecoveryExpiresAt)
 }
 
 func (c *nativeAgentRuntimeConfig) credentialRecoveryIssueBoundary(ctx context.Context, issue *PendingAgentCredentialRecoveryIssue) (*credentialRecoveryBoundary, context.Context, context.CancelFunc, error) {
 	if err := c.requireCredentialRecoveryIssueLive(issue); err != nil {
 		return nil, nil, nil, err
 	}
-	boundary := &credentialRecoveryBoundary{deadline: issue.ReplayNotAfter, clock: c.clock}
+	return c.boundedCredentialRecovery(ctx, issue.ReplayNotAfter)
+}
+
+func (c *nativeAgentRuntimeConfig) boundedCredentialRecovery(ctx context.Context, deadline time.Time) (*credentialRecoveryBoundary, context.Context, context.CancelFunc, error) {
+	boundary := &credentialRecoveryBoundary{deadline: deadline, clock: c.clock}
 	now := c.clock().UTC()
 	if err := boundary.checkAt(now); err != nil {
 		return nil, nil, nil, err
