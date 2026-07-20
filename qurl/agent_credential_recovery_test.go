@@ -1333,6 +1333,46 @@ func TestRecoverAgentRuntime_GrantRejectAtHorizonPersistsRenewalMarker(t *testin
 	}
 }
 
+func TestRecoverAgentRuntime_AuthenticatedGrantRejectIgnoresCallerCancellationForMarkerSave(t *testing.T) {
+	fixture := loadCredentialRecoveryFixture(t)
+	f, _ := newCredentialRecoveryRuntimeFixture(t, nil,
+		[]runtimeUDPStep{{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: `{"errCode":"52411","errMsg":"credential recovery grant rejected"}`}},
+	)
+	seedPendingCredentialRecovery(t, f, fixture, false)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.store.mu.Lock()
+	f.store.cancelBeforeSave = f.store.calls + 1
+	f.store.cancel = cancel
+	f.store.mu.Unlock()
+
+	_, _, err := RecoverAgentRuntime(ctx, "", f.store, recoveryOptions(t, f, fixture, func() time.Time { return credentialRecoveryFixtureNow })...)
+	if !errors.Is(err, ErrCredentialRecoveryGrantRejected) {
+		t.Fatalf("caller-canceled grant rejection = %v", err)
+	}
+	if !errors.Is(ctx.Err(), context.Canceled) {
+		t.Fatalf("caller context = %v, want canceled", ctx.Err())
+	}
+	loaded, loadErr := f.store.LoadAgentState(context.Background())
+	if loadErr != nil || loaded.PendingCredentialRecovery == nil || !loaded.PendingCredentialRecovery.NeedsFreshGrant {
+		t.Fatalf("caller-canceled grant rejection marker = %#v/%v", loaded, loadErr)
+	}
+}
+
+func TestSameCredentialRecoveryStateComparesIssueTimeByInstant(t *testing.T) {
+	left := &AgentState{PendingCredentialRecoveryIssue: &PendingAgentCredentialRecoveryIssue{
+		RequestNonce: "nonce", ReplayNotAfter: credentialRecoveryFixtureNow,
+		RecoveryCredentialFingerprintB64: "fingerprint", AgentID: "agent-conform",
+		AgentPublicKeyB64: "public-key", HubHost: "hub.nhp.layerv.ai", HubPort: standardNHPUDPPort,
+		HubServerPublicKeyB64: "server-key",
+	}}
+	right := left.clone()
+	right.PendingCredentialRecoveryIssue.ReplayNotAfter = credentialRecoveryFixtureNow.In(time.FixedZone("same-instant", -7*60*60))
+	if !sameCredentialRecoveryState(left, right) {
+		t.Fatal("same recovery Issue instant compared by time representation")
+	}
+}
+
 func TestRecoverAgentRuntime_CommittedReplayAfterGrantExpiryUsesPersistedCellRequest(t *testing.T) {
 	fixture := loadCredentialRecoveryFixture(t)
 	f, _ := newCredentialRecoveryRuntimeFixture(t, nil,
