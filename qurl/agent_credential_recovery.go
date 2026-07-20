@@ -23,6 +23,7 @@ const (
 	credentialRecoveryQuery                 = "agent_credential_recovery" //nolint:gosec // Protocol query name, not a credential.
 	credentialRecoveryVersion               = 1
 	credentialRecoveryMode                  = "recover"
+	credentialRecoveryTestAPIKeyPrefix      = "lv_test_"
 	credentialRecoveryGrantPrefix           = "qrg1."
 	credentialRecoveryMaxGrantBytes         = 2304
 	credentialRecoveryGrantLifetime         = 15 * time.Minute
@@ -431,7 +432,7 @@ func marshalCredentialRecoveryIssueRequest(agentID, nonce, credential string) ([
 	// validator below guarantees a JSON-literal-safe ASCII alphabet (no quote or
 	// backslash). If a wire alphabet changes, replace or escape this encoder too.
 	if validateAssignmentAgentID(agentID) != nil || validateCredentialRecoveryRequestNonce(nonce) != nil ||
-		validateNativeDeviceCredential(credential, "recovery credential", ErrInvalidRegisterConfig) != nil {
+		validateCredentialRecoveryCredential(credential) != nil {
 		return nil, invalidCredentialRecoveryRequest(credentialRecoveryHubPhase)
 	}
 	return concatCredentialRecoveryBody("Hub", credentialRecoveryIssuePrefix, agentID, credentialRecoveryIssueAgentSuffix,
@@ -487,10 +488,7 @@ func (c *nativeAgentRuntimeConfig) issueAndPersistCredentialRecovery(ctx context
 		}
 	}
 	defer func() { cancel() }()
-	// qurl-conformance v0.9 freezes reusable qurl:agent credentials to the
-	// canonical device-key encoding. Keep this shared validator coupled to that
-	// producer contract; a future credential format needs an explicit revision.
-	if err := validateNativeDeviceCredential(credential, "recovery credential", ErrInvalidRegisterConfig); err != nil {
+	if err := validateCredentialRecoveryCredential(credential); err != nil {
 		return "", err
 	}
 
@@ -639,7 +637,7 @@ func validateCredentialRecoveryIssueRequest(body []byte) error {
 		outer.UsrID != "" || validateAssignmentAgentID(outer.DevID) != nil || outer.AspID != agentAspID ||
 		data.Query != assignmentQuery || data.Version != assignmentVersion || data.Mode != credentialRecoveryMode ||
 		validateCredentialRecoveryRequestNonce(data.RequestNonce) != nil ||
-		validateNativeDeviceCredential(data.Credential, "recovery credential", ErrInvalidRegisterConfig) != nil {
+		validateCredentialRecoveryCredential(data.Credential) != nil {
 		return invalidCredentialRecoveryRequest(credentialRecoveryHubPhase)
 	}
 	return nil
@@ -964,6 +962,26 @@ func validateCredentialRecoveryRequestNonce(nonce string) error {
 	defer wipeBytes(raw)
 	if err != nil || len(raw) != assignmentRequestNonceBytes || base64.RawURLEncoding.EncodeToString(raw) != nonce {
 		return errors.New("invalid credential recovery request nonce")
+	}
+	return nil
+}
+
+func validateCredentialRecoveryCredential(value string) error {
+	malformed := fmt.Errorf("%w: recovery credential must match %s or %s plus canonical unpadded base64url of %d bytes",
+		ErrInvalidRegisterConfig, deviceKeyPrefix, credentialRecoveryTestAPIKeyPrefix, deviceKeyRandomLength)
+	encodedLength := base64.RawURLEncoding.EncodedLen(deviceKeyRandomLength)
+	if len(value) != len(deviceKeyPrefix)+encodedLength {
+		return malformed
+	}
+	prefix := value[:len(deviceKeyPrefix)]
+	if prefix != deviceKeyPrefix && prefix != credentialRecoveryTestAPIKeyPrefix {
+		return malformed
+	}
+	encoded := value[len(deviceKeyPrefix):]
+	decoded, err := base64.RawURLEncoding.Strict().DecodeString(encoded)
+	defer wipeBytes(decoded)
+	if err != nil || len(decoded) != deviceKeyRandomLength || base64.RawURLEncoding.EncodeToString(decoded) != encoded {
+		return malformed
 	}
 	return nil
 }
