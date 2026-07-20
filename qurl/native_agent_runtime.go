@@ -1073,7 +1073,10 @@ func validateRecoverableEnrollmentCredential(value string) error {
 }
 
 func enrollmentCredentialFingerprint(value string) string {
-	const domain = agentstatecontract.PendingActivationEnrollmentCredentialFingerprintDomain
+	return fingerprintWithDomain(agentstatecontract.PendingActivationEnrollmentCredentialFingerprintDomain, value)
+}
+
+func fingerprintWithDomain(domain, value string) string {
 	material := make([]byte, len(domain)+len(value))
 	copy(material, domain)
 	copy(material[len(domain):], value)
