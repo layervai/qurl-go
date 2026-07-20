@@ -33,6 +33,46 @@ func TestCredentialRecoveryProtocolConstantsMatchConformance(t *testing.T) {
 	}
 }
 
+func TestValidateCredentialRecoveryCredentialExactConformanceShape(t *testing.T) {
+	body := base64.RawURLEncoding.EncodeToString([]byte{
+		0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+		0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+		0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+		0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+	})
+	for _, prefix := range []string{deviceKeyPrefix, credentialRecoveryTestAPIKeyPrefix} {
+		if err := validateCredentialRecoveryCredential(prefix + body); err != nil {
+			t.Fatalf("valid %s recovery credential: %v", prefix, err)
+		}
+	}
+
+	valid := deviceKeyPrefix + body
+	allOnesBody := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0xff}, deviceKeyRandomLength))
+	noncanonical := valid[:len(valid)-1] + "9"
+	canonicalBytes, err := base64.RawURLEncoding.DecodeString(valid[len(deviceKeyPrefix):])
+	if err != nil {
+		t.Fatal(err)
+	}
+	noncanonicalBytes, err := base64.RawURLEncoding.DecodeString(noncanonical[len(deviceKeyPrefix):])
+	if err != nil || !bytes.Equal(noncanonicalBytes, canonicalBytes) {
+		t.Fatalf("test setup: noncanonical spelling must decode to the canonical bytes: %x / %x, %v", noncanonicalBytes, canonicalBytes, err)
+	}
+	for name, credential := range map[string]string{
+		"wrong prefix":               "lv_prod_" + body,
+		"wrong decoded length":       deviceKeyPrefix + base64.RawURLEncoding.EncodeToString(make([]byte, deviceKeyRandomLength-1)),
+		"padding":                    valid + "=",
+		"standard alphabet":          deviceKeyPrefix + strings.Replace(allOnesBody, "_", "/", 1),
+		"invalid body":               deviceKeyPrefix + "!" + body[1:],
+		"noncanonical trailing bits": noncanonical,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := validateCredentialRecoveryCredential(credential); !errors.Is(err, ErrInvalidRegisterConfig) {
+				t.Fatalf("validateCredentialRecoveryCredential(%q) = %v, want ErrInvalidRegisterConfig", credential, err)
+			}
+		})
+	}
+}
+
 func loadCredentialRecoveryFixture(t *testing.T) *conformance.AgentCredentialRecoveryFile {
 	t.Helper()
 	fixture, err := conformance.AgentCredentialRecovery()
@@ -153,6 +193,27 @@ func TestRecoverAgentRuntime_ConformanceGoldenEndToEndAndZeroLifecycleHTTP(t *te
 		state.Assignment.CellID != fixture.Fixtures.CellID || state.Assignment.Endpoint.Host != fixture.Fixtures.NHPHost ||
 		binding.DeviceAPIKeyID != fixture.Fixtures.DeviceAPIKeyID || binding.NHPUDPEndpoint.Host != fixture.Fixtures.NHPHost {
 		t.Fatalf("recovered state/binding drifted: state=%#v binding=%s", state, binding)
+	}
+}
+
+func TestRecoverAgentRuntime_TestRecoveryCredentialGoldenPath(t *testing.T) {
+	fixture := loadCredentialRecoveryFixture(t)
+	testCredential := credentialRecoveryTestAPIKeyPrefix + strings.TrimPrefix(fixture.Fixtures.RecoveryCredential, deviceKeyPrefix)
+	f, _ := newCredentialRecoveryRuntimeFixture(t,
+		[]runtimeUDPStep{{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: fixture.PublicExchanges["hub_issue_recovery"].SuccessBodyJSON}},
+		[]runtimeUDPStep{{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: fixture.PublicExchanges["assigned_cell_complete_recovery"].SuccessBodyJSON}},
+	)
+	client, binding, err := RecoverAgentRuntime(context.Background(), testCredential, f.store,
+		recoveryOptions(t, f, fixture, func() time.Time { return credentialRecoveryFixtureNow })...)
+	if err != nil || client == nil || binding == nil {
+		t.Fatalf("RecoverAgentRuntime with lv_test_ credential = %v/%v/%v", client, binding, err)
+	}
+	defer binding.Destroy()
+	hubRequests := f.hubUDP.snapshot()
+	wantBody := strings.Replace(fixture.PublicExchanges["hub_issue_recovery"].RequestBodyJSON,
+		fixture.Fixtures.RecoveryCredential, testCredential, 1)
+	if len(hubRequests) != 1 || string(hubRequests[0].body) != wantBody {
+		t.Fatalf("Hub recovery requests = %#v, want exact lv_test_ body", hubRequests)
 	}
 }
 
