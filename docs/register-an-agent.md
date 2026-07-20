@@ -118,11 +118,13 @@ the SDK's 90-day guarantee.
 
 qurl-go v0.1.1 wrote schema-v5 pending records without a finite deadline. On
 load, this SDK can migrate `PendingActivation` exactly because its authenticated
-ticket expiry is present: it derives the first-ticket anchor and 90-day deadline
-and durably writes the current schema v7 before any UDP I/O. Schema-v5 records carrying any
-forward-populated recovery field are rejected as corrupt rather than trusted as
-invented history. A schema-v5 `PendingCompletion` no longer retains
-that ticket anchor. Inventing `upgrade time + 90 days` would make server
+ticket expiry is present. It derives the finite registration-recovery fields
+introduced by schema v6, then durably writes them in the current schema v7
+before any UDP I/O. Schema v7 additionally carries explicit device-credential
+recovery state. Schema-v5 records carrying any forward-populated recovery field
+are rejected as corrupt rather than trusted as invented history. A schema-v5
+`PendingCompletion` no longer retains that ticket anchor. Inventing
+`upgrade time + 90 days` would make server
 retention unbounded for installations that upgrade arbitrarily late, so the SDK
 instead returns `*AgentRecoveryMigrationRequiredError`, matchable with
 `ErrAgentRecoveryMigrationRequired`, and preserves the record without network
@@ -216,8 +218,9 @@ registration becomes reachable or replay cleanup starts, operators must prove
 that Control contains zero legacy `registration_activation_v1`,
 `registration_completion_v1`, and
 `registration_completion_device_locator_v1` records and that every distributed
-client includes the v6-or-newer finite-recovery contract (the current state
-schema is v7). If that proof is not zero, cleanup
+client includes the finite registration-recovery behavior introduced by schema
+v6 or newer. The current state schema is v7 because it also adds explicit
+device-credential recovery. If that proof is not zero, cleanup
 must remain disabled until the records are explicitly reconciled; age alone is
 not proof that a v0.1.1 recovery promise can be retired.
 
