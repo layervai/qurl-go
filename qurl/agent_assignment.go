@@ -864,8 +864,10 @@ func parseWireAssignment(raw []byte, now time.Time) (*AgentAssignment, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := assignment.Validate(now); err != nil {
-		return nil, err
+	// parsePersistedWireAssignment already validated the complete structural
+	// trust boundary; only liveness remains for an authenticated wire result.
+	if !assignment.LeaseExpiresAt.After(now) {
+		return nil, fmt.Errorf("%w: assignment lease must be in the future: %w", ErrAssignmentInvalidResponse, ErrAssignmentLeaseExpired)
 	}
 	return assignment, nil
 }
