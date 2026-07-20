@@ -121,11 +121,21 @@ type AgentRuntimeRefreshOption interface {
 	isAgentRuntimeRefreshOption()
 }
 
-// AgentRuntimeLifecycleOption can configure both native registration and
-// refresh, but is still broader than one knock exchange.
+// AgentRuntimeRecoveryOption is the closed option set for RecoverAgentRuntime.
+// It deliberately excludes caller-selected identity, enrollment metadata, OTP,
+// and registration-key policy: recovery preserves the persisted X25519 identity
+// and obtains placement only from the authenticated Hub result.
+type AgentRuntimeRecoveryOption interface {
+	agentRuntimeOption
+	isAgentRuntimeRecoveryOption()
+}
+
+// AgentRuntimeLifecycleOption configures registration, refresh, and explicit
+// credential recovery, but is still broader than one knock exchange.
 type AgentRuntimeLifecycleOption interface {
 	AgentRuntimeRegistrationOption
 	AgentRuntimeRefreshOption
+	AgentRuntimeRecoveryOption
 }
 
 // AgentRuntimeUDPOption is the closed subset of runtime options that can alter
@@ -172,6 +182,7 @@ func (f nativeRuntimeUDPOptionFunc) applyAgentRuntimeOption(c *nativeAgentRuntim
 
 func (nativeRuntimeUDPOptionFunc) isAgentRuntimeRegistrationOption() {}
 func (nativeRuntimeUDPOptionFunc) isAgentRuntimeRefreshOption()      {}
+func (nativeRuntimeUDPOptionFunc) isAgentRuntimeRecoveryOption()     {}
 func (nativeRuntimeUDPOptionFunc) isAgentRuntimeUDPOption()          {}
 
 type nativeRuntimeLifecycleOptionFunc func(*nativeAgentRuntimeConfig) error
@@ -182,6 +193,7 @@ func (f nativeRuntimeLifecycleOptionFunc) applyAgentRuntimeOption(c *nativeAgent
 
 func (nativeRuntimeLifecycleOptionFunc) isAgentRuntimeRegistrationOption() {}
 func (nativeRuntimeLifecycleOptionFunc) isAgentRuntimeRefreshOption()      {}
+func (nativeRuntimeLifecycleOptionFunc) isAgentRuntimeRecoveryOption()     {}
 
 type nativeRuntimeRefreshOptionFunc func(*nativeAgentRuntimeConfig) error
 
@@ -191,10 +203,30 @@ func (f nativeRuntimeRefreshOptionFunc) applyAgentRuntimeOption(c *nativeAgentRu
 
 func (nativeRuntimeRefreshOptionFunc) isAgentRuntimeRefreshOption() {}
 
+type nativeRuntimeRecoveryOptionFunc func(*nativeAgentRuntimeConfig) error
+
+func (f nativeRuntimeRecoveryOptionFunc) applyAgentRuntimeOption(c *nativeAgentRuntimeConfig) error {
+	return f(c)
+}
+
+func (nativeRuntimeRecoveryOptionFunc) isAgentRuntimeRecoveryOption() {}
+
 // WithAgentRuntimeHub configures the single pinned LayerV Hub trust root used
-// for initial assignment. It is mandatory for RegisterAgentRuntime.
+// by RegisterAgentRuntime. Its original return type remains source-compatible
+// with callers that retain registration options for later use.
 func WithAgentRuntimeHub(hub HubBootstrap) AgentRuntimeRegistrationOption {
 	return nativeRuntimeOptionFunc(func(c *nativeAgentRuntimeConfig) error {
+		hubCopy := hub
+		c.hub = &hubCopy
+		return nil
+	})
+}
+
+// WithAgentRuntimeRecoveryHub configures the pinned LayerV Hub trust root used
+// by RecoverAgentRuntime. Recovery obtains placement only from the authenticated
+// Hub result; this option never supplies or derives an assigned cell.
+func WithAgentRuntimeRecoveryHub(hub HubBootstrap) AgentRuntimeRecoveryOption {
+	return nativeRuntimeRecoveryOptionFunc(func(c *nativeAgentRuntimeConfig) error {
 		hubCopy := hub
 		c.hub = &hubCopy
 		return nil

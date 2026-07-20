@@ -284,6 +284,7 @@ type runtimeRecordingStore struct {
 	fail                      int
 	failAfterCommit           int
 	waitForContextAfterCommit int
+	cancelBeforeSave          int
 	cancelOnSave              int
 	cancel                    context.CancelFunc
 }
@@ -307,9 +308,13 @@ func (s *runtimeRecordingStore) SaveAgentState(ctx context.Context, state *Agent
 	fail := s.fail
 	failAfterCommit := s.failAfterCommit
 	waitForContextAfterCommit := s.waitForContextAfterCommit
+	cancelBeforeSave := s.cancelBeforeSave
 	cancelOnSave := s.cancelOnSave
 	cancel := s.cancel
 	s.mu.Unlock()
+	if call == cancelBeforeSave && cancel != nil {
+		cancel()
+	}
 	if call == fail {
 		return errors.New("injected runtime state save failure")
 	}

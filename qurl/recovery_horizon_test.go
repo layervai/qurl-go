@@ -1,6 +1,7 @@
 package qurl
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -121,6 +122,47 @@ func TestAgentRegistrationRecoveryHorizonContract(t *testing.T) {
 	if err != nil || loaded.PendingCompletion == nil ||
 		!loaded.PendingCompletion.RecoveryExpiresAt.Equal(want) {
 		t.Fatalf("persisted completion recovery deadline = %#v, %v", loaded, err)
+	}
+}
+
+func TestRegisterAgentRuntime_SchemaV6PendingRecoveryRemainsResumable(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	for _, phase := range []AgentRecoveryPhase{AgentRecoveryPhaseActivation, AgentRecoveryPhaseCompletion} {
+		t.Run(string(phase), func(t *testing.T) {
+			steps := []runtimeUDPStep{{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: contract.RegistrationCompletion.Result.BodyJSON}}
+			if phase == AgentRecoveryPhaseActivation {
+				steps = append([]runtimeUDPStep{{requestType: relayknock.TypeRegister, replyType: relayknock.TypeRegisterAck, replyBody: contract.AssignedCellRegistration.Result.BodyJSON}}, steps...)
+			}
+			f := newRuntimeFixture(t, nil, steps)
+			state := seedRecoveryRuntimePendingActivation(t, f)
+			candidate := canonicalNativeDeviceCredential
+			if phase == AgentRecoveryPhaseCompletion {
+				activation := state.PendingActivation
+				state.PendingActivation = nil
+				state.PendingCompletion = &PendingAgentCompletion{
+					DeviceAPIKey: candidate, CellID: state.Assignment.CellID, AssignmentGeneration: state.Assignment.AssignmentGeneration,
+					RecoveryAnchorTicketExpiresAt: activation.RecoveryAnchorTicketExpiresAt,
+					RecoveryExpiresAt:             activation.RecoveryExpiresAt,
+				}
+			}
+			state.SchemaVersion = registrationRecoveryStateSchemaVersion
+			if err := f.store.inner.SaveAgentState(context.Background(), state); err != nil {
+				t.Fatal(err)
+			}
+			credential := ""
+			if phase == AgentRecoveryPhaseActivation {
+				credential = conformance.AgentAssignmentBootstrapCredentialFixture
+			}
+			client, binding, err := RegisterAgentRuntime(context.Background(), credential, f.store, f.options()...)
+			if err != nil || client == nil || binding == nil {
+				t.Fatalf("schema-v6 %s resume = %v/%v/%v", phase, client, binding, err)
+			}
+			defer binding.Destroy()
+			requests := f.cellUDP.snapshot()
+			if len(f.hubUDP.snapshot()) != 0 || len(requests) != len(steps) || !bytes.Contains(requests[len(requests)-1].body, []byte(candidate)) {
+				t.Fatalf("schema-v6 %s rotated/fell back: Hub=%d cell=%v", phase, len(f.hubUDP.snapshot()), requests)
+			}
+		})
 	}
 }
 

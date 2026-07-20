@@ -163,6 +163,27 @@ func ExampleRegisterAgentRuntime() {
 	fmt.Println(admission.ResourceHost)
 }
 
+func ExampleRecoverAgentRuntime() {
+	// Recovery is an explicit operator action after the current device API key
+	// has been deliberately revoked. Both lifecycle legs use authenticated NHP
+	// UDP; the returned Client alone uses HTTPS for later resource CRUD.
+	ctx := context.Background()
+	store := qurl.FileAgentState("/var/lib/layerv/qurl/agent-state.json")
+	hub := qurl.HubBootstrap{
+		Host:               "hub.nhp.layerv.ai",
+		Port:               62206,
+		ServerPublicKeyB64: configuredHubPublicKeyB64(),
+	}
+	client, binding, err := qurl.RecoverAgentRuntime(ctx, recoveryCredentialFromOperator(), store,
+		qurl.WithAgentRuntimeRecoveryHub(hub),
+	)
+	if err != nil {
+		panic(err)
+	}
+	defer binding.Destroy()
+	_, _ = client, binding
+}
+
 func ExampleNewSealedFileAgentState() {
 	// Production wrappers call a KMS/HSM/attested release API and authenticate
 	// every binding field as provider encryption context. They wrap only the
@@ -210,3 +231,4 @@ func callKMSUnwrap(qurl.WrappedAgentStateKey, qurl.AgentStateKeyBinding) ([]byte
 
 func configuredHubPublicKeyB64() string         { return "configured-padded-base64-x25519-key" }
 func enrollmentCredentialFromInstaller() string { return "configured-enrollment-credential" }
+func recoveryCredentialFromOperator() string    { return "configured-qurl-agent-recovery-credential" }

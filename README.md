@@ -171,6 +171,37 @@ through the pinned Hub. It accepts endpoint revisions within the same cell and
 assignment generation; a cell or generation move returns
 `*AgentAssignmentChangedError` for explicit caller handling.
 
+Device-credential recovery is a separate, explicit operator action. After the
+current device key has been deliberately revoked, call `RecoverAgentRuntime`
+with a live reusable `qurl:agent` credential and the same pinned Hub:
+
+```go
+client, binding, err := qurl.RecoverAgentRuntime(ctx, recoveryCredential, store,
+	qurl.WithAgentRuntimeRecoveryHub(hub),
+)
+```
+
+Recovery uses only authenticated NHP UDP. The SDK asks the Hub to issue a
+short-lived grant and authoritative cell assignment, then sends the same
+durably persisted replacement candidate only to that assigned cell. It neither
+uses HTTP/relay nor derives, probes, or falls back to a cell. The exact Hub
+nonce, credential fingerprint, and Hub trust root are persisted before the
+first datagram; the raw recovery credential is never stored. That unanchored
+intent also carries a conservative local replay cutoff, so a response that was
+lost for the full recovery window cannot trigger a discovery datagram at the
+Authority horizon. Retry the explicit call with the same credential after
+transport or save ambiguity. The first authenticated grant expiry anchors an
+immutable 90-day recovery horizon;
+later grants and restarts cannot extend it, and no recovery datagram is written
+at or after the boundary. Only authenticated `52400`, `52404`, and `52410`
+responses are retryable. Other `524xx` outcomes require operator correction or
+termination as described in [Register an agent](docs/register-an-agent.md).
+If the cell has already committed the replacement but the persisted assignment
+lease is stale, recovery automatically asks the Hub for one live assignment. A
+failure then matches `ErrCredentialRecoveredAssignmentRefreshRequired`: the new
+credential is already durable, so call `RefreshAgentRuntime` rather than starting
+another recovery episode.
+
 After the provisioned workflow has deliberately accepted that authority move,
 the caller opts into one fresh authenticated refresh:
 
@@ -253,6 +284,9 @@ Match errors by type or sentinel, not message text:
 | `qurl.ErrAssignmentRecoveryRequired` | Hub assignment exhausted its bounded logical operation |
 | `qurl.ErrAgentBindingPersistence` | A state save failed or its acknowledgement was lost; reload before retry because the refreshed assignment may already be durable |
 | `qurl.ErrCompletionRecoveryRequired` | Resume the exact persisted completion candidate |
+| `qurl.ErrCredentialRecoveryRetryRequired` | Resume the persisted explicit credential-recovery operation; its Hub nonce/grant/candidate was not rotated |
+| `qurl.ErrCredentialRecoveryCandidatePersistence` | The replacement candidate save could not be reconciled; reload and retry the same explicit recovery (also matches `ErrAgentBindingPersistence`) |
+| `qurl.ErrCredentialRecoveryExpired` | The immutable first-grant recovery horizon was reached; no further recovery datagram is sent |
 | `qurl.ErrAgentRecoveryExpired` | The pending activation/completion reached the 90-day boundary; no datagram is sent at or after it, though the call may already have sent earlier traffic; use explicit NHP-native recovery or reprovisioning |
 | `qurl.ErrAgentRecoveryMigrationRequired` | A legacy pending completion has no authenticated finite-deadline anchor; preserve it and use explicit NHP-native recovery or reprovisioning |
 | `*qurl.NativeCredentialRecoveryRequiredError` | Completed native credential state is absent or malformed; explicit native recovery or reprovisioning is required |
@@ -281,7 +315,7 @@ Match errors by type or sentinel, not message text:
   activation/completion, and explicit opt-in assignment reassignment adoption.
 - Bounded native registration recovery to 90 days after the first authenticated
   assignment-ticket expiry, with a per-datagram deadline fence, immutable
-  replacement anchor, and fail-closed pre-v6 pending-state migration.
+  replacement anchor, v6 compatibility, and fail-closed pre-v6 pending-state migration.
 - Registration retry budgets are per phase, so one call can span initial Hub,
   first REG, replacement Hub, second REG, and completion budgets. Use an outer
   context deadline when a smaller aggregate wall-clock ceiling is required.

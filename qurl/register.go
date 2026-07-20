@@ -112,8 +112,9 @@ func (p *storeCredentialProvider) Authorize(ctx context.Context, req *http.Reque
 }
 
 // AgentResourceClientOption configures the steady-state HTTPS resource Client
-// returned by native registration/refresh or opened from completed state. These
-// options never configure Hub, assigned-cell, enrollment, or relay transport.
+// returned by native registration, refresh, explicit credential recovery, or
+// opened from completed state. These options never configure Hub, assigned-cell,
+// enrollment, recovery, or relay lifecycle transport.
 type AgentResourceClientOption interface {
 	ClientOption
 	AgentRuntimeLifecycleOption
@@ -137,7 +138,8 @@ const (
 
 // WithAgentClientBaseURL points only the completed agent's steady-state resource
 // Client at a non-default API origin. It is accepted by OpenRegisteredAgent,
-// OpenRegisteredAgentRuntime, RegisterAgentRuntime, and RefreshAgentRuntime.
+// OpenRegisteredAgentRuntime, RegisterAgentRuntime, RefreshAgentRuntime, and
+// RecoverAgentRuntime.
 func WithAgentClientBaseURL(rawURL string) AgentResourceClientOption {
 	return agentClientBaseURLOption(rawURL)
 }
@@ -174,6 +176,7 @@ func (o agentClientBaseURLOption) applyAgentRuntimeOption(cfg *nativeAgentRuntim
 
 func (agentClientBaseURLOption) isAgentRuntimeRegistrationOption() {}
 func (agentClientBaseURLOption) isAgentRuntimeRefreshOption()      {}
+func (agentClientBaseURLOption) isAgentRuntimeRecoveryOption()     {}
 
 // WithAgentClientHTTPClient injects only the completed agent's steady-state
 // resource Client transport. Native lifecycle UDP never uses this HTTP client.
@@ -206,3 +209,4 @@ func (o agentClientHTTPClientOption) applyAgentRuntimeOption(cfg *nativeAgentRun
 
 func (agentClientHTTPClientOption) isAgentRuntimeRegistrationOption() {}
 func (agentClientHTTPClientOption) isAgentRuntimeRefreshOption()      {}
+func (agentClientHTTPClientOption) isAgentRuntimeRecoveryOption()     {}

@@ -860,6 +860,21 @@ func parseEnvelopeRetryAfter(envelope assignmentEnvelope, fields map[string]json
 }
 
 func parseWireAssignment(raw []byte, now time.Time) (*AgentAssignment, error) {
+	assignment, err := parsePersistedWireAssignment(raw)
+	if err != nil {
+		return nil, err
+	}
+	if err := assignment.Validate(now); err != nil {
+		return nil, err
+	}
+	return assignment, nil
+}
+
+// parsePersistedWireAssignment validates the complete authenticated wire shape
+// without requiring a live lease. Credential recovery uses this only to learn
+// and durably close an already-expired replay episode; its caller must not use
+// the returned endpoint for network I/O.
+func parsePersistedWireAssignment(raw []byte) (*AgentAssignment, error) {
 	var wire assignmentWire
 	if err := decodeExactObject(raw, &wire,
 		[]string{"cell_id", "assignment_generation", "endpoint_revision", "lease_expires_at", "nhp_udp_endpoint"}); err != nil {
@@ -877,7 +892,7 @@ func parseWireAssignment(raw []byte, now time.Time) (*AgentAssignment, error) {
 		CellID: wire.CellID, AssignmentGeneration: wire.AssignmentGeneration,
 		EndpointRevision: wire.EndpointRevision, LeaseExpiresAt: lease, Endpoint: endpoint,
 	}
-	if err := assignment.Validate(now); err != nil {
+	if err := validatePersistedAgentAssignment(assignment); err != nil {
 		return nil, err
 	}
 	return assignment, nil
