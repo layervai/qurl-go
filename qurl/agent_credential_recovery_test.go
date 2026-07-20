@@ -1306,6 +1306,19 @@ func TestCredentialRecoveryBoundaryPreservesAuthenticatedClassification(t *testi
 	}
 }
 
+func TestCredentialRecoveryBoundaryRejectsZeroClockWithoutLatching(t *testing.T) {
+	deadline := credentialRecoveryFixtureNow.Add(time.Hour)
+	now := time.Time{}
+	boundary := &credentialRecoveryBoundary{deadline: deadline, clock: func() time.Time { return now }}
+	if err := boundary.check(); !errors.Is(err, ErrInvalidRegisterConfig) || errors.Is(err, ErrCredentialRecoveryExpired) {
+		t.Fatalf("zero credential recovery clock = %v, want invalid config only", err)
+	}
+	now = deadline.Add(-time.Second)
+	if err := boundary.check(); err != nil {
+		t.Fatalf("valid clock after zero result remained latched: %v", err)
+	}
+}
+
 func TestRecoverAgentRuntime_GrantRejectAtHorizonPersistsRenewalMarker(t *testing.T) {
 	fixture := loadCredentialRecoveryFixture(t)
 	f, _ := newCredentialRecoveryRuntimeFixture(t, nil,

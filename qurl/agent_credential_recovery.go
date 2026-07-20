@@ -43,7 +43,9 @@ const (
 
 // AgentCredentialRecoveryHorizon is the immutable client recovery window for
 // one revoked-device episode. Its anchor is the first authenticated Hub grant
-// expiry, never local receipt time or a later grant.
+// expiry, never local receipt time or a later grant. It currently matches
+// AgentRegistrationRecoveryHorizon in duration, but the authority anchors and
+// state machines are deliberately separate contracts.
 const AgentCredentialRecoveryHorizon = 90 * 24 * time.Hour
 
 var (
@@ -456,6 +458,10 @@ func (c *nativeAgentRuntimeConfig) issueAndPersistCredentialRecovery(ctx context
 		if !state.PendingCredentialRecovery.NeedsFreshGrant {
 			return "", fmt.Errorf("%w: usable recovery grant cannot issue another Hub request", ErrInvalidAgentState)
 		}
+		// Once the first authenticated grant established the Authority episode,
+		// its immutable RecoveryExpiresAt is the write boundary. ReplayNotAfter is
+		// only the conservative pre-anchor cutoff, so it does not shorten a known
+		// episode when an exact renewal Issue response was lost.
 		var err error
 		boundary, operationCtx, cancel, err = c.credentialRecoveryBoundary(ctx, state.PendingCredentialRecovery)
 		if err != nil {
@@ -1104,7 +1110,13 @@ func (b *credentialRecoveryBoundary) check() error {
 }
 
 func (b *credentialRecoveryBoundary) checkAt(now time.Time) error {
-	if b.expired.Load() || now.IsZero() || !now.Before(b.deadline) {
+	if b.expired.Load() {
+		return b.expiredError()
+	}
+	if now.IsZero() {
+		return fmt.Errorf("%w: credential recovery clock returned zero", ErrInvalidRegisterConfig)
+	}
+	if !now.Before(b.deadline) {
 		b.expired.Store(true)
 		return b.expiredError()
 	}
