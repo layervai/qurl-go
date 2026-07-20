@@ -1121,7 +1121,13 @@ func (c *nativeAgentRuntimeConfig) markCredentialRecoveryGrantRejected(ctx conte
 	}
 	next := state.clone()
 	next.PendingCredentialRecovery.NeedsFreshGrant = true
-	return c.saveCredentialRecoveryState(ctx, store, state, next, ErrAgentBindingPersistence, "persist rejected recovery grant")
+	// The authenticated cell verdict is durable authority state even when caller
+	// cancellation races the response. Save the renewal marker under the same
+	// small detached budget as final promotion so the next explicit call does not
+	// waste a cell round-trip replaying a grant already known to be rejected.
+	persistCtx, cancelPersist := credentialRecoveryPersistenceContext(ctx)
+	defer cancelPersist()
+	return c.saveCredentialRecoveryState(persistCtx, store, state, next, ErrAgentBindingPersistence, "persist rejected recovery grant")
 }
 
 func (c *nativeAgentRuntimeConfig) saveCredentialRecoveryState(ctx context.Context, store AgentStateStore, current, next *AgentState, kind error, action string) error {
@@ -1171,7 +1177,10 @@ func sameCredentialRecoveryState(left, right *AgentState) bool {
 	}
 	if left.PendingCredentialRecoveryIssue != nil {
 		l, r := left.PendingCredentialRecoveryIssue, right.PendingCredentialRecoveryIssue
-		if *l != *r {
+		if l.RequestNonce != r.RequestNonce || !l.ReplayNotAfter.Equal(r.ReplayNotAfter) ||
+			l.RecoveryCredentialFingerprintB64 != r.RecoveryCredentialFingerprintB64 || l.AgentID != r.AgentID ||
+			l.AgentPublicKeyB64 != r.AgentPublicKeyB64 || l.HubHost != r.HubHost || l.HubPort != r.HubPort ||
+			l.HubServerPublicKeyB64 != r.HubServerPublicKeyB64 {
 			return false
 		}
 	}
