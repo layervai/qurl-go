@@ -123,6 +123,70 @@ func TestBuildHubLSTCookieProofConsumesAssignmentFlows(t *testing.T) {
 	}
 }
 
+func TestBuildHubLSTCookieProofConsumesCredentialRecoveryGolden(t *testing.T) {
+	recovery, err := conformance.AgentCredentialRecovery()
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, err := conformance.ConnectorHubLSTCookie()
+	if err != nil {
+		t.Fatal(err)
+	}
+	assignment, err := conformance.AgentAssignmentGolden()
+	if err != nil {
+		t.Fatal(err)
+	}
+	flow := recovery.HubCookie
+	unprovenCounter, err := strconv.ParseUint(flow.UnprovenCounter, 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proofCounter, err := strconv.ParseUint(flow.ProofCounter, 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unprovenFlags, _ := strconv.ParseUint(flow.UnprovenHeaderFlagsHex, 16, 16)
+	proofFlags, _ := strconv.ParseUint(flow.ProofHeaderFlagsHex, 16, 16)
+	agentPrivate := hubCookieHex(t, assignment.Keys.Agent.StaticPrivHex)
+	agentPublic := hubCookieHex(t, assignment.Keys.Agent.StaticPubHex)
+	hubPrivate := hubCookieHex(t, assignment.Keys.Hub.StaticPrivHex)
+	hubPublic := hubCookieHex(t, assignment.Keys.Hub.StaticPubHex)
+	cookie := hubCookieHex(t, base.CookieKATs[0].CookieHex)
+	unprovenPacket, err := BuildMessage(TypeLST, &Inputs{
+		DeviceStaticPriv: agentPrivate, ServerStaticPub: hubPublic,
+		EphemeralPriv: bytes.Repeat([]byte{0x71}, PublicKeySize), TimestampNanos: 1700000000000007000,
+		Counter: unprovenCounter, Preamble: 0x718293a4, Body: []byte(flow.UnprovenBodyJSON),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proofPacket, err := BuildHubLSTCookieProof(&Inputs{
+		DeviceStaticPriv: agentPrivate, ServerStaticPub: hubPublic,
+		EphemeralPriv: bytes.Repeat([]byte{0x72}, PublicKeySize), TimestampNanos: 1700000000000008000,
+		Counter: proofCounter, Preamble: 0x728394a5, Body: []byte(flow.ProofBodyJSON), Cookie: cookie,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unprovenPacket) != flow.UnprovenRequestPacketBytes || len(proofPacket) != flow.ProofRequestPacketBytes ||
+		uint64(getFlag(unprovenPacket)) != unprovenFlags || uint64(getFlag(proofPacket)) != proofFlags ||
+		flow.ChallengePacketBytes >= flow.UnprovenRequestPacketBytes || flow.AuthorityInvocationsBeforeProof != 0 || flow.AuthorityInvocationsAfterProof != 1 {
+		t.Fatalf("recovery cookie composition drifted: unproven=%d/%#x proof=%d/%#x challenge=%d authority=%d/%d", len(unprovenPacket), getFlag(unprovenPacket), len(proofPacket), getFlag(proofPacket), flow.ChallengePacketBytes, flow.AuthorityInvocationsBeforeProof, flow.AuthorityInvocationsAfterProof)
+	}
+	unproven, err := DecryptMessage(hubPrivate, agentPublic, unprovenPacket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof, err := DecryptHubLSTCookieProofMessage(hubPrivate, agentPublic, cookie, proofPacket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unproven.Type != TypeLST || proof.Type != TypeLST || unproven.Counter != unprovenCounter || proof.Counter != proofCounter ||
+		!bytes.Equal(unproven.Body, proof.Body) || string(proof.Body) != recovery.PublicExchanges[conformance.AgentCredentialRecoveryHubPhase].RequestBodyJSON {
+		t.Fatalf("recovery cookie proof did not preserve exact request: unproven=%#v proof=%#v", unproven, proof)
+	}
+}
+
 func TestHubLSTCookieProofBuilderIsNarrow(t *testing.T) {
 	devicePrivate, _ := keyPair(t, 0x11)
 	_, serverPublic := keyPair(t, 0x22)

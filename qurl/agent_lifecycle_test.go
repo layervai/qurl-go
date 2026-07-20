@@ -144,7 +144,7 @@ func completedNativeTestState(t *testing.T) *AgentState {
 
 func TestAgentStateClone_IsolatesEveryMutableField(t *testing.T) {
 	stateType := reflect.TypeOf(AgentState{})
-	handledNames := []string{"RegisteredAt", "Assignment", "PendingActivation", "PendingCompletion"}
+	handledNames := []string{"RegisteredAt", "Assignment", "PendingActivation", "PendingCompletion", "PendingCredentialRecovery", "PendingCredentialRecoveryIssue"}
 	handled := make(map[string]bool, len(handledNames))
 	for _, name := range handledNames {
 		handled[name] = false
@@ -174,16 +174,23 @@ func TestAgentStateClone_IsolatesEveryMutableField(t *testing.T) {
 	original := completedNativeTestState(t)
 	original.PendingCompletion = &PendingAgentCompletion{DeviceAPIKey: "candidate", CellID: "cell0", AssignmentGeneration: 1}
 	original.PendingActivation = &PendingAgentActivation{AssignmentTicket: "ticket-original", Assignment: AgentAssignment{CellID: "cell0"}}
+	original.PendingCredentialRecovery = &PendingAgentCredentialRecovery{RecoveryGrant: "qrg1.original", Assignment: AgentAssignment{CellID: "cell0"}}
+	original.PendingCredentialRecoveryIssue = &PendingAgentCredentialRecoveryIssue{RequestNonce: "original-nonce", HubHost: "hub.nhp.layerv.ai"}
 	cloned := original.clone()
 	*cloned.RegisteredAt = cloned.RegisteredAt.Add(time.Hour)
 	cloned.Assignment.Endpoint.Host = "changed.nhp.layerv.ai"
 	cloned.PendingCompletion.DeviceAPIKey = "changed"
 	cloned.PendingActivation.AssignmentTicket = "ticket-changed"
 	cloned.PendingActivation.Assignment.CellID = "cell1"
+	cloned.PendingCredentialRecovery.RecoveryGrant = "qrg1.changed"
+	cloned.PendingCredentialRecovery.Assignment.CellID = "cell2"
+	cloned.PendingCredentialRecoveryIssue.RequestNonce = "changed-nonce"
 
 	if original.Assignment.Endpoint.Host != "cell0.nhp.layerv.ai" ||
 		original.PendingActivation.AssignmentTicket != "ticket-original" || original.PendingActivation.Assignment.CellID != "cell0" ||
 		original.PendingCompletion.DeviceAPIKey != "candidate" ||
+		original.PendingCredentialRecovery.RecoveryGrant != "qrg1.original" || original.PendingCredentialRecovery.Assignment.CellID != "cell0" ||
+		original.PendingCredentialRecoveryIssue.RequestNonce != "original-nonce" ||
 		original.RegisteredAt.Equal(*cloned.RegisteredAt) {
 		t.Fatalf("AgentState clone mutated source: %#v", original)
 	}
@@ -232,6 +239,22 @@ func TestOpenRegisteredAgent_NativeCredentialFaultFailsClosed(t *testing.T) {
 		!errors.Is(err, ErrCredentialRecoveryRequired) || !errors.Is(err, ErrDeviceCredentialMissing) ||
 		strings.Contains(err.Error(), "HTTP recovery") {
 		t.Fatalf("native resource-open credential error = client %v, %T: %v", client, err, err)
+	}
+}
+
+func TestNativeCredentialRecoveryRequiredError_PendingEpisodeDoesNotClaimMissingCredential(t *testing.T) {
+	state := completedNativeTestState(t)
+	state.PendingCredentialRecoveryIssue = &PendingAgentCredentialRecoveryIssue{}
+	err := validatePersistedNativeDeviceCredential(state, ErrInvalidAgentState)
+	if !errors.Is(err, ErrCredentialRecoveryRequired) || errors.Is(err, ErrDeviceCredentialMissing) {
+		t.Fatalf("pending recovery classification = %v; want recovery-required without device-missing", err)
+	}
+
+	state.PendingCredentialRecoveryIssue = nil
+	state.DeviceAPIKey = ""
+	err = validatePersistedNativeDeviceCredential(state, ErrInvalidAgentState)
+	if !errors.Is(err, ErrCredentialRecoveryRequired) || !errors.Is(err, ErrDeviceCredentialMissing) {
+		t.Fatalf("missing credential classification = %v; want recovery-required plus device-missing", err)
 	}
 }
 
@@ -342,12 +365,18 @@ func TestAgentRuntimeBindingFormattingRedactsPrivateKey(t *testing.T) {
 }
 
 func TestAgentRuntimeOptionSetsCompileForIntendedSurfaces(_ *testing.T) {
+	// Preserve the original public function signature; recovery has its own Hub
+	// option instead of widening this return type and breaking function values.
+	acceptRegistrationHubFactory := func(func(HubBootstrap) AgentRuntimeRegistrationOption) {}
+	acceptRegistrationHubFactory(WithAgentRuntimeHub)
 	acceptClient := func(ClientOption) {}
 	acceptRegistration := func(AgentRuntimeRegistrationOption) {}
 	acceptRefresh := func(AgentRuntimeRefreshOption) {}
+	acceptRecovery := func(AgentRuntimeRecoveryOption) {}
 	acceptLifecycle := func(AgentRuntimeLifecycleOption) {}
 	acceptUDP := func(AgentRuntimeUDPOption) {}
 	acceptRegistration(WithAgentRuntimeHub(runtimeTestHub()))
+	acceptRecovery(WithAgentRuntimeRecoveryHub(runtimeTestHub()))
 	acceptRegistration(WithAgentRuntimeAllowedRegistrationKeyKinds(RegistrationKeyKindAgent))
 	acceptRegistration(WithAgentRuntimeUDPBounds(time.Second, 1))
 	acceptRefresh(WithAgentRuntimeUDPBounds(time.Second, 1))
@@ -355,11 +384,13 @@ func TestAgentRuntimeOptionSetsCompileForIntendedSurfaces(_ *testing.T) {
 	acceptClient(baseURL)
 	acceptRegistration(baseURL)
 	acceptRefresh(baseURL)
+	acceptRecovery(baseURL)
 	acceptLifecycle(baseURL)
 	httpClient := WithAgentClientHTTPClient(defaultAPIHTTPClient)
 	acceptClient(httpClient)
 	acceptRegistration(httpClient)
 	acceptRefresh(httpClient)
+	acceptRecovery(httpClient)
 	acceptLifecycle(httpClient)
 	acceptUDP(WithAgentRuntimeUDPBounds(time.Second, 1))
 }
