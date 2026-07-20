@@ -123,8 +123,10 @@ func (e *CredentialRecoveryError) Unwrap() error {
 }
 
 // CredentialRecoveryRetryRequiredError reports one exhausted Hub or cell
-// logical-operation budget. It preserves the last classification without
-// leaking secret-bearing bodies.
+// logical-operation budget. Attempts counts transport attempts for an ordinary
+// exchange and the two outer Hub Issue operations for the stale-result renewal
+// cap. It preserves the last classification without leaking secret-bearing
+// bodies.
 type CredentialRecoveryRetryRequiredError struct {
 	Phase    string
 	Attempts int
@@ -303,6 +305,8 @@ func (c *nativeAgentRuntimeConfig) recoverAgentRuntimeLocked(ctx context.Context
 			}
 			if state.PendingCredentialRecovery.NeedsFreshGrant {
 				return nil, &CredentialRecoveryRetryRequiredError{
+					// The stale exact Issue and one fresh Issue are the two bounded
+					// outer logical operations; each owns its own inner retry budget.
 					Phase: string(credentialRecoveryHubPhase), Attempts: 2,
 					Last: errors.New("authenticated Hub recovery grant replay is no longer live"),
 				}
@@ -417,6 +421,9 @@ const (
 )
 
 func marshalCredentialRecoveryIssueRequest(agentID, nonce, credential string) ([]byte, error) {
+	// This allocation-controlled encoder is safe only while every interpolated
+	// validator below guarantees a JSON-literal-safe ASCII alphabet (no quote or
+	// backslash). If a wire alphabet changes, replace or escape this encoder too.
 	if validateAssignmentAgentID(agentID) != nil || validateCredentialRecoveryRequestNonce(nonce) != nil ||
 		validateNativeDeviceCredential(credential, "recovery credential", ErrInvalidRegisterConfig) != nil {
 		return nil, invalidCredentialRecoveryRequest(credentialRecoveryHubPhase)
@@ -736,6 +743,9 @@ type credentialRecoveryCompletionList struct {
 }
 
 func marshalCredentialRecoveryCompletionRequest(agentID, grant, candidate string) ([]byte, error) {
+	// Keep this manual encoder coupled to the same JSON-literal-safe alphabets as
+	// the Hub encoder above; changing any validator requires escaping or replacing
+	// both allocation-controlled encoders.
 	if validateAssignmentAgentID(agentID) != nil || validateCredentialRecoveryGrant(grant) != nil ||
 		validateNativeDeviceCredential(candidate, "recovery candidate", ErrInvalidRegisterConfig) != nil {
 		return nil, invalidCredentialRecoveryRequest(credentialRecoveryCellPhase)
@@ -891,6 +901,9 @@ func classifyCredentialRecoveryError(envelope assignmentEnvelope, fields map[str
 	if kind == nil {
 		return invalidCredentialRecoveryResponse(phase)
 	}
+	// Recovery v1 freezes these exact public retry delays in qurl-conformance;
+	// accepting producer-selected values would silently change the bounded wire
+	// contract. Any future tuning requires a versioned contract and SDK update.
 	retryAfter, err := parseEnvelopeRetryAfter(envelope, fields, retry > 0, retry > 0)
 	if err != nil || retryAfter != retry {
 		return invalidCredentialRecoveryResponse(phase)
