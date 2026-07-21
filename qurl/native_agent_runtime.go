@@ -124,7 +124,8 @@ type AgentRuntimeRefreshOption interface {
 // AgentRuntimeRecoveryOption is the closed option set for RecoverAgentRuntime.
 // It deliberately excludes caller-selected identity, enrollment metadata, OTP,
 // and registration-key policy: recovery preserves the persisted X25519 identity
-// and obtains placement only from the authenticated Hub result.
+// and obtains placement only from the authenticated Hub result. Callers may
+// assert the expected persisted agent id, but cannot select or change it.
 type AgentRuntimeRecoveryOption interface {
 	agentRuntimeOption
 	isAgentRuntimeRecoveryOption()
@@ -149,6 +150,7 @@ type AgentRuntimeUDPOption interface {
 type nativeAgentRuntimeConfig struct {
 	hub               *HubBootstrap
 	agentID           string
+	recoveryAgentID   string
 	hostname          string
 	version           string
 	adoptReassignment bool
@@ -229,6 +231,20 @@ func WithAgentRuntimeRecoveryHub(hub HubBootstrap) AgentRuntimeRecoveryOption {
 	return nativeRuntimeRecoveryOptionFunc(func(c *nativeAgentRuntimeConfig) error {
 		hubCopy := hub
 		c.hub = &hubCopy
+		return nil
+	})
+}
+
+// WithExpectedAgentRuntimeRecoveryAgentID requires RecoverAgentRuntime to load
+// the exact persisted agent id. The assertion is checked while the SDK setup
+// lock is held and before private-key decoding, DNS resolution, or UDP I/O. It
+// never selects, creates, or changes an identity.
+func WithExpectedAgentRuntimeRecoveryAgentID(agentID string) AgentRuntimeRecoveryOption {
+	return nativeRuntimeRecoveryOptionFunc(func(c *nativeAgentRuntimeConfig) error {
+		if err := validateAssignmentAgentID(agentID); err != nil {
+			return fmt.Errorf("%w: expected recovery agent identity: %w", ErrInvalidRegisterConfig, err)
+		}
+		c.recoveryAgentID = agentID
 		return nil
 	})
 }

@@ -267,11 +267,26 @@ func newNativeAgentCredentialRecoveryConfig(opts []AgentRuntimeRecoveryOption) (
 }
 
 func (c *nativeAgentRuntimeConfig) recoverAgentRuntimeLocked(ctx context.Context, recoveryCredential string, store AgentStateStore) (*nativeRuntimeResult, error) {
-	state, err := loadExistingAgentState(ctx, store, ErrInvalidRegisterConfig)
+	state, err := store.LoadAgentState(ctx)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: load agent state: %w", ErrInvalidRegisterConfig, err)
+	}
+	if state == nil {
+		return nil, fmt.Errorf("%w: agent state store returned nil state", ErrInvalidRegisterConfig)
 	}
 	if err := validateCompletedAgentIdentity(state, ErrInvalidRegisterConfig); err != nil {
+		return nil, err
+	}
+	if err := validatePersistedNativeAgentID(state.AgentID); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidRegisterConfig, err)
+	}
+	if err := reconcileNativeAgentIdentity(state, c.recoveryAgentID); err != nil {
+		return nil, err
+	}
+	// Keep the optional operator assertion ahead of the lifecycle's own full
+	// trust-state and X25519-key validation. A mismatched explicit identity must
+	// not advance far enough to resolve placement or emit a datagram.
+	if err := prepareLoadedAgentState(state, ErrInvalidRegisterConfig); err != nil {
 		return nil, err
 	}
 	if state.PendingActivation != nil || state.PendingCompletion != nil {
