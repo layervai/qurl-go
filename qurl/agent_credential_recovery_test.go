@@ -217,6 +217,60 @@ func TestRecoverAgentRuntime_TestRecoveryCredentialGoldenPath(t *testing.T) {
 	}
 }
 
+func TestRecoverAgentRuntime_ExpectedAgentIDOptionRejectsInvalidBeforeStateLoad(t *testing.T) {
+	for name, agentID := range map[string]string{
+		"missing":                "",
+		"surrounding whitespace": " agent-a",
+		"uppercase":              "Agent-a",
+	} {
+		t.Run(name, func(t *testing.T) {
+			store := &countingAgentStateStore{inner: &memoryAgentStateStore{}}
+			client, binding, err := RecoverAgentRuntime(context.Background(), "unused", store,
+				WithAgentRuntimeRecoveryHub(runtimeTestHub()),
+				WithExpectedAgentRuntimeRecoveryAgentID(agentID),
+			)
+			if client != nil || binding != nil || !errors.Is(err, ErrInvalidRegisterConfig) {
+				t.Fatalf("invalid expected agent id %q = %v/%v/%v, want nil/nil/ErrInvalidRegisterConfig", agentID, client, binding, err)
+			}
+			if store.loads.Load() != 0 {
+				t.Fatalf("invalid expected agent id loaded state %d times, want zero", store.loads.Load())
+			}
+		})
+	}
+}
+
+func TestRecoverAgentRuntime_ExpectedAgentIDMismatchFailsBeforeKeyDecodeOrIO(t *testing.T) {
+	fixture := loadCredentialRecoveryFixture(t)
+	f, _ := newCredentialRecoveryRuntimeFixture(t, nil, nil)
+	state, err := f.store.LoadAgentState(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A mismatched explicit identity must win before the lifecycle decodes this
+	// deliberately corrupt key, proving the assertion's pre-I/O position.
+	state.PrivateKeyB64 = "not-base64"
+	if err := f.store.inner.SaveAgentState(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+	beforeSaves := len(f.store.snapshots())
+	resolver := &noIONativeResolver{}
+	dialer := &noIONativeDialer{}
+	client, binding, err := RecoverAgentRuntime(context.Background(), fixture.Fixtures.RecoveryCredential, f.store,
+		recoveryOptions(t, f, fixture, func() time.Time { return credentialRecoveryFixtureNow },
+			WithExpectedAgentRuntimeRecoveryAgentID("agent-different"),
+			WithAgentRuntimeUDPResolver(resolver),
+			WithAgentRuntimeUDPDialer(dialer),
+		)...,
+	)
+	if client != nil || binding != nil || !errors.Is(err, ErrInvalidRegisterConfig) || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("expected agent id mismatch = %v/%v/%v, want nil/nil/ErrInvalidRegisterConfig mismatch", client, binding, err)
+	}
+	if resolver.calls.Load() != 0 || dialer.calls.Load() != 0 || len(f.hubUDP.snapshot()) != 0 || len(f.cellUDP.snapshot()) != 0 || len(f.store.snapshots()) != beforeSaves {
+		t.Fatalf("identity mismatch mutated/performed I/O: resolver=%d dialer=%d Hub=%d cell=%d saves=%d/%d",
+			resolver.calls.Load(), dialer.calls.Load(), len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot()), len(f.store.snapshots()), beforeSaves)
+	}
+}
+
 func TestRecoverAgentRuntime_AuthenticatedCellSuccessCrossingHorizonIsPromoted(t *testing.T) {
 	fixture := loadCredentialRecoveryFixture(t)
 	f, _ := newCredentialRecoveryRuntimeFixture(t, nil,
@@ -806,7 +860,8 @@ func TestRecoverAgentRuntime_TransportAmbiguityResumesCellWithoutHubOrCandidateR
 			{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: fixture.PublicExchanges["assigned_cell_complete_recovery"].SuccessBodyJSON},
 		},
 	)
-	opts := recoveryOptions(t, f, fixture, func() time.Time { return credentialRecoveryFixtureNow })
+	opts := recoveryOptions(t, f, fixture, func() time.Time { return credentialRecoveryFixtureNow },
+		WithExpectedAgentRuntimeRecoveryAgentID(fixture.Fixtures.AgentID))
 	_, _, err := RecoverAgentRuntime(context.Background(), fixture.Fixtures.RecoveryCredential, f.store, opts...)
 	if !errors.Is(err, ErrCredentialRecoveryRetryRequired) {
 		t.Fatalf("ambiguous completion = %v, want retry required", err)

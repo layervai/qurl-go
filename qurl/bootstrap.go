@@ -260,8 +260,8 @@ func validateLoadedAgentAssignment(state *AgentState) error {
 	// canonical wire form. Never let a later lifecycle call manufacture or
 	// normalize a different identity around those authority-bound fields.
 	if isNativeAgentRuntimeState(state) {
-		if err := validateAssignmentAgentID(state.AgentID); err != nil {
-			return fmt.Errorf("%w: persisted native agent id is missing or non-canonical", ErrInvalidAgentState)
+		if err := validatePersistedNativeAgentID(state.AgentID); err != nil {
+			return err
 		}
 	}
 	if state.Assignment != nil {
@@ -331,6 +331,13 @@ func validateLoadedAgentAssignment(state *AgentState) error {
 		if err := validatePendingAgentCredentialRecovery(state.PendingCredentialRecovery, state); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func validatePersistedNativeAgentID(agentID string) error {
+	if err := validateAssignmentAgentID(agentID); err != nil {
+		return fmt.Errorf("%w: persisted native agent id is missing or non-canonical", ErrInvalidAgentState)
 	}
 	return nil
 }
