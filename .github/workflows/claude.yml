@@ -90,6 +90,7 @@ jobs:
           base_repo="$(jq -r '.base.repo.full_name // ""' <<<"${pr}")"
           base_sha="$(jq -r '.base.sha // ""' <<<"${pr}")"
           base_ref="$(jq -r '.base.ref // ""' <<<"${pr}")"
+          default_ref="$(jq -r '.base.repo.default_branch // ""' <<<"${pr}")"
 
           if [[ "${state}" != "open" ||
                 "${head_repo}" != "${GITHUB_REPOSITORY}" ||
@@ -98,8 +99,10 @@ jobs:
              ! validate_sha "${base_sha}" ||
              ! validate_ref "${head_ref}" ||
              ! validate_ref "${base_ref}" ||
-             [[ "${base_ref}" != "${TRUSTED_DEFAULT_REF}" ||
-                "${head_ref}" == "${TRUSTED_DEFAULT_REF}" ]] ||
+             ! validate_ref "${default_ref}" ||
+             [[ "${default_ref}" != "${TRUSTED_DEFAULT_REF}" ||
+                "${base_ref}" != "${default_ref}" ||
+                "${head_ref}" == "${default_ref}" ]] ||
              [[ "${head_ref}" == "${base_ref}" ||
                 "${head_ref}" == "${base_ref}/"* ||
                 "${base_ref}" == "${head_ref}/"* ]]; then
@@ -113,6 +116,7 @@ jobs:
             echo "head_ref=${head_ref}"
             echo "base_sha=${base_sha}"
             echo "base_ref=${base_ref}"
+            echo "default_branch=${default_ref}"
             echo "checkout_allowed=true"
           } >> "${GITHUB_OUTPUT}"
 
@@ -121,7 +125,7 @@ jobs:
         if: steps.claude_pr.outputs.checkout_allowed == 'true'
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: ${{ github.event.repository.default_branch }}
+          ref: ${{ steps.claude_pr.outputs.default_branch }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -133,7 +137,7 @@ jobs:
           EXPECTED_HEAD_REF: ${{ steps.claude_pr.outputs.head_ref }}
           EXPECTED_BASE_SHA: ${{ steps.claude_pr.outputs.base_sha }}
           EXPECTED_BASE_REF: ${{ steps.claude_pr.outputs.base_ref }}
-          TRUSTED_DEFAULT_REF: ${{ github.event.repository.default_branch }}
+          TRUSTED_DEFAULT_REF: ${{ steps.claude_pr.outputs.default_branch }}
         run: |
           set -euo pipefail
 
@@ -277,7 +281,7 @@ jobs:
           EXPECTED_HEAD_REF: ${{ steps.claude_pr.outputs.head_ref }}
           EXPECTED_BASE_SHA: ${{ steps.claude_pr.outputs.base_sha }}
           EXPECTED_BASE_REF: ${{ steps.claude_pr.outputs.base_ref }}
-          TRUSTED_DEFAULT_REF: ${{ github.event.repository.default_branch }}
+          TRUSTED_DEFAULT_REF: ${{ steps.claude_pr.outputs.default_branch }}
           EXPECTED_ORIGIN: ${{ steps.local_origin.outputs.path }}
           EXPECTED_LOCAL_SHA: ${{ steps.local_origin.outputs.trusted_sha }}
           EXPECTED_TRIGGER_ACTOR: ${{ github.event.comment.user.login || github.actor }}
@@ -326,6 +330,7 @@ jobs:
               ;;
           esac
 
+          current_default_ref="$(jq -r '.base.repo.default_branch // ""' <<<"${current_pr}")"
           if [[ "$(jq -r '.state // ""' <<<"${current_pr}")" != "open" ||
                 "$(jq -r '.head.repo.full_name // ""' <<<"${current_pr}")" != "${GITHUB_REPOSITORY}" ||
                 "$(jq -r '.base.repo.full_name // ""' <<<"${current_pr}")" != "${GITHUB_REPOSITORY}" ||
@@ -333,8 +338,9 @@ jobs:
                 "$(jq -r '.base.sha // ""' <<<"${current_pr}")" != "${EXPECTED_BASE_SHA}" ||
                 "$(jq -r '.head.ref // ""' <<<"${current_pr}")" != "${EXPECTED_HEAD_REF}" ||
                 "$(jq -r '.base.ref // ""' <<<"${current_pr}")" != "${EXPECTED_BASE_REF}" ||
-                "${EXPECTED_BASE_REF}" != "${TRUSTED_DEFAULT_REF}" ||
-                "${EXPECTED_HEAD_REF}" == "${TRUSTED_DEFAULT_REF}" ]]; then
+                "${current_default_ref}" != "${TRUSTED_DEFAULT_REF}" ||
+                "${EXPECTED_BASE_REF}" != "${current_default_ref}" ||
+                "${EXPECTED_HEAD_REF}" == "${current_default_ref}" ]]; then
             echo "::error::Claude command is stale or the PR trust boundary changed."
             exit 1
           fi

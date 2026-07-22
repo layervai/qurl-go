@@ -32,11 +32,75 @@ jobs:
       pull-requests: write
 
     steps:
+      - name: Resolve live review context
+        id: review_pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          EXPECTED_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          EXPECTED_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          EXPECTED_BASE_REPO: ${{ github.event.pull_request.base.repo.full_name }}
+          EXPECTED_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          EXPECTED_BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+
+          validate_sha() {
+            [[ "$1" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]
+          }
+          validate_ref() {
+            [[ "$1" != "@" ]] &&
+              [[ "$1" =~ ^[A-Za-z0-9@_][A-Za-z0-9/_.#+,@-]*$ ]] &&
+              git check-ref-format "refs/heads/$1" >/dev/null 2>&1
+          }
+
+          if [[ ! "${PR_NUMBER}" =~ ^[1-9][0-9]*$ ]] ||
+             ! current_pr="$(timeout 30s gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}")"; then
+            echo "::error::Unable to resolve the current Claude review context."
+            exit 1
+          fi
+          current_state="$(jq -r '.state // ""' <<<"${current_pr}")"
+          current_draft="$(jq -r 'if .draft == null then "" else (.draft | tostring) end' <<<"${current_pr}")"
+          current_head_repo="$(jq -r '.head.repo.full_name // ""' <<<"${current_pr}")"
+          current_head_sha="$(jq -r '.head.sha // ""' <<<"${current_pr}")"
+          current_head_ref="$(jq -r '.head.ref // ""' <<<"${current_pr}")"
+          current_base_repo="$(jq -r '.base.repo.full_name // ""' <<<"${current_pr}")"
+          current_base_sha="$(jq -r '.base.sha // ""' <<<"${current_pr}")"
+          current_base_ref="$(jq -r '.base.ref // ""' <<<"${current_pr}")"
+          current_default_ref="$(jq -r '.base.repo.default_branch // ""' <<<"${current_pr}")"
+
+          if [[ "${current_state}" != "open" || "${current_draft}" != "false" ||
+                "${current_head_repo}" != "${GITHUB_REPOSITORY}" ||
+                "${current_base_repo}" != "${GITHUB_REPOSITORY}" ||
+                "${current_head_repo}" != "${EXPECTED_HEAD_REPO}" ||
+                "${current_base_repo}" != "${EXPECTED_BASE_REPO}" ||
+                "${current_head_sha}" != "${EXPECTED_HEAD_SHA}" ||
+                "${current_base_sha}" != "${EXPECTED_BASE_SHA}" ||
+                "${current_head_ref}" != "${EXPECTED_HEAD_REF}" ||
+                "${current_base_ref}" != "${EXPECTED_BASE_REF}" ]] ||
+             ! validate_sha "${current_head_sha}" ||
+             ! validate_sha "${current_base_sha}" ||
+             ! validate_ref "${current_head_ref}" ||
+             ! validate_ref "${current_base_ref}" ||
+             ! validate_ref "${current_default_ref}" ||
+             [[ "${current_base_ref}" != "${current_default_ref}" ||
+                "${current_head_ref}" == "${current_default_ref}" ]]; then
+            echo "::error::Claude review requires a current open same-repository default-base PR with a non-default head."
+            exit 1
+          fi
+
+          {
+            echo "default_branch=${current_default_ref}"
+            echo "ready=true"
+          } >> "${GITHUB_OUTPUT}"
+
       - name: Checkout trusted default branch history
         id: checkout
+        if: steps.review_pr.outputs.ready == 'true'
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: ${{ github.event.repository.default_branch }}
+          ref: ${{ steps.review_pr.outputs.default_branch }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -52,7 +116,7 @@ jobs:
           EXPECTED_BASE_REPO: ${{ github.event.pull_request.base.repo.full_name }}
           EXPECTED_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           EXPECTED_BASE_REF: ${{ github.event.pull_request.base.ref }}
-          TRUSTED_DEFAULT_REF: ${{ github.event.repository.default_branch }}
+          TRUSTED_DEFAULT_REF: ${{ steps.review_pr.outputs.default_branch }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
@@ -207,7 +271,7 @@ jobs:
           EXPECTED_HEAD_REF: ${{ github.event.pull_request.head.ref }}
           EXPECTED_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           EXPECTED_BASE_REF: ${{ github.event.pull_request.base.ref }}
-          TRUSTED_DEFAULT_REF: ${{ github.event.repository.default_branch }}
+          TRUSTED_DEFAULT_REF: ${{ steps.review_pr.outputs.default_branch }}
           EXPECTED_ORIGIN: ${{ steps.review_origin.outputs.path }}
           EXPECTED_LOCAL_SHA: ${{ steps.review_origin.outputs.trusted_sha }}
           EXPECTED_REVIEW_MARKER: ${{ steps.review_origin.outputs.review_marker }}
@@ -264,13 +328,14 @@ jobs:
             exit 1
           fi
           current_state="$(jq -r '.state // ""' <<<"${current_pr}")"
-          current_draft="$(jq -r '.draft // ""' <<<"${current_pr}")"
+          current_draft="$(jq -r 'if .draft == null then "" else (.draft | tostring) end' <<<"${current_pr}")"
           current_head_repo="$(jq -r '.head.repo.full_name // ""' <<<"${current_pr}")"
           current_head_sha="$(jq -r '.head.sha // ""' <<<"${current_pr}")"
           current_head_ref="$(jq -r '.head.ref // ""' <<<"${current_pr}")"
           current_base_repo="$(jq -r '.base.repo.full_name // ""' <<<"${current_pr}")"
           current_base_sha="$(jq -r '.base.sha // ""' <<<"${current_pr}")"
           current_base_ref="$(jq -r '.base.ref // ""' <<<"${current_pr}")"
+          current_default_ref="$(jq -r '.base.repo.default_branch // ""' <<<"${current_pr}")"
           if [[ "${current_state}" != "open" || "${current_draft}" != "false" ||
                 "${current_head_repo}" != "${GITHUB_REPOSITORY}" ||
                 "${current_base_repo}" != "${GITHUB_REPOSITORY}" ||
@@ -278,8 +343,9 @@ jobs:
                 "${current_base_sha}" != "${EXPECTED_BASE_SHA}" ||
                 "${current_head_ref}" != "${EXPECTED_HEAD_REF}" ||
                 "${current_base_ref}" != "${EXPECTED_BASE_REF}" ||
-                "${current_base_ref}" != "${TRUSTED_DEFAULT_REF}" ||
-                "${current_head_ref}" == "${TRUSTED_DEFAULT_REF}" ]]; then
+                "${current_default_ref}" != "${TRUSTED_DEFAULT_REF}" ||
+                "${current_base_ref}" != "${current_default_ref}" ||
+                "${current_head_ref}" == "${current_default_ref}" ]]; then
             echo "::error::Claude review is stale or the PR trust boundary changed."
             exit 1
           fi

@@ -4,6 +4,7 @@
 package workflowcontract
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -29,7 +30,9 @@ func TestAutomaticClaudeWorkflowUsesTrustedReadOnlySnapshots(t *testing.T) {
 		"github.event.pull_request.base.repo.full_name == github.repository",
 		"github.event.pull_request.base.ref == github.event.repository.default_branch",
 		"github.event.pull_request.head.ref != github.event.repository.default_branch",
-		"ref: ${{ github.event.repository.default_branch }}",
+		"Resolve live review context",
+		".base.repo.default_branch",
+		"ref: ${{ steps.review_pr.outputs.default_branch }}",
 		"fetch-depth: 0",
 		"persist-credentials: false",
 		"Prepare credential-free review origin",
@@ -41,7 +44,8 @@ func TestAutomaticClaudeWorkflowUsesTrustedReadOnlySnapshots(t *testing.T) {
 		"steps.claude_review.outputs.execution_file",
 		`current_state}" != "open"`,
 		`current_draft}" != "false"`,
-		`current_head_ref}" == "${TRUSTED_DEFAULT_REF}"`,
+		`current_default_ref}" != "${TRUSTED_DEFAULT_REF}"`,
+		`current_head_ref}" == "${current_default_ref}"`,
 		"] | length == 1",
 	)
 	requireReadOnlyActionContract(t, workflow)
@@ -74,8 +78,10 @@ func TestInteractiveClaudeWorkflowUsesDefaultBranchCommentPath(t *testing.T) {
 		`state}" != "open"`,
 		`head_repo}" != "${GITHUB_REPOSITORY}"`,
 		`base_repo}" != "${GITHUB_REPOSITORY}"`,
-		`head_ref}" == "${TRUSTED_DEFAULT_REF}"`,
-		"ref: ${{ github.event.repository.default_branch }}",
+		`default_ref}" != "${TRUSTED_DEFAULT_REF}"`,
+		`head_ref}" == "${default_ref}"`,
+		".base.repo.default_branch",
+		"ref: ${{ steps.claude_pr.outputs.default_branch }}",
 		"Prepare credential-free Claude origin",
 		"do not edit or commit files",
 		"steps.claude.outputs.execution_file",
@@ -175,6 +181,174 @@ func TestAutomaticOriginRejectsClosedOrDefaultHead(t *testing.T) {
 				env[key] = value
 			}
 			runScript(t, fixture.repository, script, env, false)
+		})
+	}
+}
+
+func TestLivePRResolversRejectUnsafeCurrentState(t *testing.T) {
+	tests := []struct {
+		name     string
+		workflow string
+		step     string
+		extra    func(gitFixture) map[string]string
+	}{
+		{
+			name: "automatic", workflow: "claude-code-review.yml", step: "Resolve live review context",
+			extra: func(fixture gitFixture) map[string]string {
+				return map[string]string{
+					"EXPECTED_HEAD_REPO": "layervai/qurl-go", "EXPECTED_BASE_REPO": "layervai/qurl-go",
+					"EXPECTED_HEAD_SHA": fixture.headSHA, "EXPECTED_HEAD_REF": fixture.headRef,
+					"EXPECTED_BASE_SHA": fixture.baseSHA, "EXPECTED_BASE_REF": fixture.baseRef,
+				}
+			},
+		},
+		{
+			name: "interactive", workflow: "claude.yml", step: "Resolve Claude pull request context",
+			extra: func(fixture gitFixture) map[string]string {
+				return map[string]string{"TRUSTED_DEFAULT_REF": fixture.baseRef}
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newGitFixture(t)
+			mockBin := writeGHMock(t)
+			script := stepRun(t, readWorkflow(t, test.workflow), test.step)
+			baseEnv := map[string]string{
+				"PATH":              mockBin + string(os.PathListSeparator) + os.Getenv("PATH"),
+				"GH_TOKEN":          "test-token",
+				"GITHUB_REPOSITORY": "layervai/qurl-go",
+				"GITHUB_OUTPUT":     filepath.Join(t.TempDir(), "outputs"),
+				"PR_NUMBER":         "100",
+			}
+			for key, value := range test.extra(fixture) {
+				baseEnv[key] = value
+			}
+			baseEnv["MOCK_PR_JSON"] = mockPullRequestJSON(t, fixture, "open", false, fixture.baseRef)
+			runScript(t, fixture.repository, script, baseEnv, true)
+
+			unsafePRs := []struct {
+				name       string
+				state      string
+				defaultRef string
+			}{
+				{name: "closed", state: "closed", defaultRef: fixture.baseRef},
+				{name: "head is default", state: "open", defaultRef: fixture.headRef},
+				{name: "default changed", state: "open", defaultRef: "release/stable"},
+			}
+			for _, unsafe := range unsafePRs {
+				t.Run(unsafe.name, func(t *testing.T) {
+					env := cloneEnvironment(baseEnv)
+					env["MOCK_PR_JSON"] = mockPullRequestJSON(t, fixture, unsafe.state, false, unsafe.defaultRef)
+					runScript(t, fixture.repository, script, env, false)
+				})
+			}
+		})
+	}
+}
+
+func TestTerminalVerifiersRejectUnsafeCurrentState(t *testing.T) {
+	tests := []struct {
+		name        string
+		workflow    string
+		prepareStep string
+		verifyStep  string
+		extra       map[string]string
+	}{
+		{
+			name: "automatic", workflow: "claude-code-review.yml",
+			prepareStep: "Prepare credential-free review origin", verifyStep: "Verify reviewed pull request snapshots",
+			extra: map[string]string{
+				"EXPECTED_STATE": "open", "EXPECTED_DRAFT": "false",
+				"EXPECTED_HEAD_REPO": "layervai/qurl-go", "EXPECTED_BASE_REPO": "layervai/qurl-go",
+				"PR_NUMBER": "100", "RUN_ID": "123", "RUN_ATTEMPT": "1",
+			},
+		},
+		{
+			name: "interactive", workflow: "claude.yml",
+			prepareStep: "Prepare credential-free Claude origin", verifyStep: "Verify reviewed pull request snapshots",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newGitFixture(t)
+			outputFile := filepath.Join(t.TempDir(), "outputs")
+			prepareEnv := map[string]string{
+				"GITHUB_REPOSITORY":   "layervai/qurl-go",
+				"GITHUB_OUTPUT":       outputFile,
+				"RUNNER_TEMP":         t.TempDir(),
+				"EXPECTED_HEAD_SHA":   fixture.headSHA,
+				"EXPECTED_HEAD_REF":   fixture.headRef,
+				"EXPECTED_BASE_SHA":   fixture.baseSHA,
+				"EXPECTED_BASE_REF":   fixture.baseRef,
+				"TRUSTED_DEFAULT_REF": fixture.baseRef,
+			}
+			for key, value := range test.extra {
+				prepareEnv[key] = value
+			}
+			runScript(t, fixture.repository, stepRun(t, readWorkflow(t, test.workflow), test.prepareStep), prepareEnv, true)
+			outputs := readStepOutputs(t, outputFile)
+
+			executionFile := filepath.Join(t.TempDir(), "execution.json")
+			if err := os.WriteFile(executionFile, []byte("{\"subtype\":\"success\"}\n"), 0o600); err != nil {
+				t.Fatalf("write execution fixture: %v", err)
+			}
+			marker := outputs["review_marker"]
+			if marker == "" {
+				marker = "<!-- claude-command:layervai/qurl-go:pr-100:run-123:attempt-1:head-" + fixture.headSHA + " -->"
+			}
+			comments, err := json.Marshal([][]map[string]any{{{
+				"user": map[string]string{"login": "github-actions[bot]"},
+				"body": "No findings.\n" + marker,
+			}}})
+			if err != nil {
+				t.Fatalf("marshal comment fixture: %v", err)
+			}
+
+			mockBin := writeGHMock(t)
+			verifyEnv := map[string]string{
+				"PATH":                  mockBin + string(os.PathListSeparator) + os.Getenv("PATH"),
+				"GH_TOKEN":              "test-token",
+				"GITHUB_REPOSITORY":     "layervai/qurl-go",
+				"PR_NUMBER":             "100",
+				"EXPECTED_HEAD_SHA":     fixture.headSHA,
+				"EXPECTED_HEAD_REF":     fixture.headRef,
+				"EXPECTED_BASE_SHA":     fixture.baseSHA,
+				"EXPECTED_BASE_REF":     fixture.baseRef,
+				"TRUSTED_DEFAULT_REF":   fixture.baseRef,
+				"EXPECTED_ORIGIN":       outputs["path"],
+				"EXPECTED_LOCAL_SHA":    outputs["trusted_sha"],
+				"CLAUDE_EXECUTION_FILE": executionFile,
+				"MOCK_PR_JSON":          mockPullRequestJSON(t, fixture, "open", false, fixture.baseRef),
+				"MOCK_COMMENTS_JSON":    string(comments),
+			}
+			if test.name == "automatic" {
+				verifyEnv["EXPECTED_REVIEW_MARKER"] = marker
+			} else {
+				verifyEnv["EXPECTED_TRIGGER_ACTOR"] = "maintainer"
+				verifyEnv["EXPECTED_RESULT_MARKER"] = marker
+			}
+			verifier := stepRun(t, readWorkflow(t, test.workflow), test.verifyStep)
+			runScript(t, fixture.repository, verifier, verifyEnv, true)
+
+			unsafePRs := []struct {
+				name       string
+				state      string
+				defaultRef string
+			}{
+				{name: "closed", state: "closed", defaultRef: fixture.baseRef},
+				{name: "head is default", state: "open", defaultRef: fixture.headRef},
+				{name: "default changed", state: "open", defaultRef: "release/stable"},
+			}
+			for _, unsafe := range unsafePRs {
+				t.Run(unsafe.name, func(t *testing.T) {
+					env := cloneEnvironment(verifyEnv)
+					env["MOCK_PR_JSON"] = mockPullRequestJSON(t, fixture, unsafe.state, false, unsafe.defaultRef)
+					runScript(t, fixture.repository, verifier, env, false)
+				})
+			}
 		})
 	}
 }
@@ -298,6 +472,80 @@ func stepRun(t *testing.T, workflow, name string) string {
 		script = append(script, strings.TrimPrefix(line, "          "))
 	}
 	return strings.Join(script, "\n")
+}
+
+func mockPullRequestJSON(t *testing.T, fixture gitFixture, state string, draft bool, defaultRef string) string {
+	t.Helper()
+	payload := map[string]any{
+		"state": state,
+		"draft": draft,
+		"head": map[string]any{
+			"sha":  fixture.headSHA,
+			"ref":  fixture.headRef,
+			"repo": map[string]string{"full_name": "layervai/qurl-go"},
+		},
+		"base": map[string]any{
+			"sha": fixture.baseSHA,
+			"ref": fixture.baseRef,
+			"repo": map[string]string{
+				"full_name":      "layervai/qurl-go",
+				"default_branch": defaultRef,
+			},
+		},
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal pull request fixture: %v", err)
+	}
+	return string(encoded)
+}
+
+func writeGHMock(t *testing.T) string {
+	t.Helper()
+	mockBin := t.TempDir()
+	script := `#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  *'/collaborators/'*)
+    printf '%s\n' "${MOCK_PERMISSION:-write}"
+    ;;
+  *'/comments?'*)
+    printf '%s\n' "${MOCK_COMMENTS_JSON:-[[]]}"
+    ;;
+  *)
+    printf '%s\n' "${MOCK_PR_JSON}"
+    ;;
+esac
+`
+	path := filepath.Join(mockBin, "gh")
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("write gh mock: %v", err)
+	}
+	return mockBin
+}
+
+func readStepOutputs(t *testing.T, path string) map[string]string {
+	t.Helper()
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read step outputs: %v", err)
+	}
+	outputs := make(map[string]string)
+	for _, line := range strings.Split(strings.TrimSpace(string(contents)), "\n") {
+		key, value, ok := strings.Cut(line, "=")
+		if ok {
+			outputs[key] = value
+		}
+	}
+	return outputs
+}
+
+func cloneEnvironment(environment map[string]string) map[string]string {
+	clone := make(map[string]string, len(environment))
+	for key, value := range environment {
+		clone[key] = value
+	}
+	return clone
 }
 
 func runScript(t *testing.T, directory, script string, environment map[string]string, wantSuccess bool) {
