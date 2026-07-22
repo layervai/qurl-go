@@ -19,6 +19,7 @@ const (
 	enrollmentEnv         = "QURL_GO_SANDBOX_ENROLLMENT_CREDENTIAL"
 	agentIDEnv            = "QURL_GO_SANDBOX_AGENT_ID"
 	statePathEnv          = "QURL_GO_SANDBOX_STATE_PATH"
+	provenancePathEnv     = "QURL_GO_SANDBOX_PROVENANCE_PATH"
 	knockResourceIDEnv    = "QURL_GO_SANDBOX_KNOCK_RESOURCE_ID"
 	expectedCellIDEnv     = "QURL_GO_SANDBOX_EXPECTED_CELL_ID"
 	standardNHPUDPPort    = 62206
@@ -33,6 +34,7 @@ type sandboxConfig struct {
 	enrollment      string
 	agentID         string
 	statePath       string
+	provenancePath  string
 	knockResourceID string
 	expectedCellID  string
 }
@@ -55,6 +57,7 @@ func loadSandboxConfig(lookup func(string) string) (sandboxConfig, bool, error) 
 		enrollmentEnv,
 		agentIDEnv,
 		statePathEnv,
+		provenancePathEnv,
 		knockResourceIDEnv,
 	}
 	missing := make([]string, 0, len(required))
@@ -79,6 +82,7 @@ func loadSandboxConfig(lookup func(string) string) (sandboxConfig, bool, error) 
 		enrollment:      lookup(enrollmentEnv),
 		agentID:         lookup(agentIDEnv),
 		statePath:       lookup(statePathEnv),
+		provenancePath:  lookup(provenancePathEnv),
 		knockResourceID: lookup(knockResourceIDEnv),
 		expectedCellID:  lookup(expectedCellIDEnv),
 	}
@@ -92,6 +96,7 @@ func loadSandboxConfig(lookup func(string) string) (sandboxConfig, bool, error) 
 		enrollmentEnv:      cfg.enrollment,
 		agentIDEnv:         cfg.agentID,
 		statePathEnv:       cfg.statePath,
+		provenancePathEnv:  cfg.provenancePath,
 		knockResourceIDEnv: cfg.knockResourceID,
 		expectedCellIDEnv:  cfg.expectedCellID,
 	} {
@@ -107,6 +112,25 @@ func loadSandboxConfig(lookup func(string) string) (sandboxConfig, bool, error) 
 	}
 	if !filepath.IsAbs(cfg.statePath) {
 		return sandboxConfig{}, true, fmt.Errorf("%s must be an absolute path", statePathEnv)
+	}
+	if !filepath.IsAbs(cfg.provenancePath) {
+		return sandboxConfig{}, true, fmt.Errorf("%s must be an absolute path", provenancePathEnv)
+	}
+	paths := []struct {
+		name string
+		path string
+	}{
+		{name: statePathEnv, path: filepath.Clean(cfg.statePath)},
+		{name: statePathEnv + " lock", path: filepath.Clean(cfg.statePath + ".lock")},
+		{name: provenancePathEnv, path: filepath.Clean(cfg.provenancePath)},
+		{name: provenancePathEnv + " temporary", path: filepath.Clean(cfg.provenancePath + ".tmp")},
+	}
+	seenPaths := make(map[string]string, len(paths))
+	for _, candidate := range paths {
+		if prior, exists := seenPaths[candidate.path]; exists {
+			return sandboxConfig{}, true, fmt.Errorf("%s and %s must resolve to distinct paths", prior, candidate.name)
+		}
+		seenPaths[candidate.path] = candidate.name
 	}
 	serverKey, err := base64.StdEncoding.Strict().DecodeString(cfg.hubServerKeyB64)
 	if err != nil || len(serverKey) != x25519PublicKeyLength || base64.StdEncoding.EncodeToString(serverKey) != cfg.hubServerKeyB64 {
@@ -151,6 +175,7 @@ func TestSandboxConfigStrictMode(t *testing.T) {
 		enrollmentEnv:      strings.Repeat("credential", 4),
 		agentIDEnv:         "qurl-go-sandbox-123-1",
 		statePathEnv:       filepath.Join(t.TempDir(), "agent-state.json"),
+		provenancePathEnv:  filepath.Join(t.TempDir(), "provenance.json"),
 		knockResourceIDEnv: "knock-resource-id",
 	}
 	lookup := func(values map[string]string) func(string) string {
@@ -176,7 +201,7 @@ func TestSandboxConfigStrictMode(t *testing.T) {
 		if !enabled || err == nil || cfg != (sandboxConfig{}) {
 			t.Fatalf("missing config = %#v, %t, %v; want enabled failure", cfg, enabled, err)
 		}
-		for _, name := range []string{buildSHAEnv, hubHostEnv, hubPortEnv, hubServerKeyEnv, enrollmentEnv, agentIDEnv, statePathEnv, knockResourceIDEnv} {
+		for _, name := range []string{buildSHAEnv, hubHostEnv, hubPortEnv, hubServerKeyEnv, enrollmentEnv, agentIDEnv, statePathEnv, provenancePathEnv, knockResourceIDEnv} {
 			if !strings.Contains(err.Error(), name) {
 				t.Errorf("missing-config error %q omits %s", err, name)
 			}
@@ -187,6 +212,50 @@ func TestSandboxConfigStrictMode(t *testing.T) {
 		cfg, enabled, err := loadSandboxConfig(lookup(map[string]string{strictEnv: "TRUE"}))
 		if enabled || err == nil || cfg != (sandboxConfig{}) {
 			t.Fatalf("invalid strict marker = %#v, %t, %v; want disabled-shape error", cfg, enabled, err)
+		}
+	})
+
+	t.Run("strict rejects state and provenance path collisions", func(t *testing.T) {
+		base := t.TempDir()
+		tests := []struct {
+			name       string
+			state      string
+			provenance string
+		}{
+			{
+				name:       "same path",
+				state:      filepath.Join(base, "shared.json"),
+				provenance: filepath.Join(base, "shared.json"),
+			},
+			{
+				name:       "provenance aliases state lock",
+				state:      filepath.Join(base, "agent-state.json"),
+				provenance: filepath.Join(base, "agent-state.json.lock"),
+			},
+			{
+				name:       "state aliases provenance temporary",
+				state:      filepath.Join(base, "provenance.json.tmp"),
+				provenance: filepath.Join(base, "provenance.json"),
+			},
+			{
+				name:       "cleaned paths alias",
+				state:      filepath.Join(base, "agent-state.json"),
+				provenance: filepath.Join(base, "nested", "..", "agent-state.json"),
+			},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				values := make(map[string]string, len(valid))
+				for name, value := range valid {
+					values[name] = value
+				}
+				values[statePathEnv] = tt.state
+				values[provenancePathEnv] = tt.provenance
+				cfg, enabled, err := loadSandboxConfig(lookup(values))
+				if !enabled || err == nil || cfg != (sandboxConfig{}) || !strings.Contains(err.Error(), "must resolve to distinct paths") {
+					t.Fatalf("colliding config = %#v, %t, %v; want enabled distinct-path failure", cfg, enabled, err)
+				}
+			})
 		}
 	})
 }

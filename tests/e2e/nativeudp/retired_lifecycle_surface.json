@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "gate": "udp_lifecycle_retirement",
+  "public_http_operations": [
+    {
+      "method": "POST",
+      "path": "/v1/agent/bootstrap",
+      "operation_id": "postV1AgentBootstrap"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/agent/registration-info",
+      "operation_id": "getV1AgentRegistrationInfo"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/agent/registration/complete",
+      "operation_id": "postV1AgentRegistrationComplete"
+    }
+  ],
+  "internal_http_operations": [
+    {
+      "method": "POST",
+      "path": "/internal/v1/agent/otp",
+      "operation_id": "handlers.AgentOTPInternalHandler.IssueOTP"
+    },
+    {
+      "method": "POST",
+      "path": "/internal/v1/agent/register",
+      "operation_id": "handlers.AgentOTPInternalHandler.Register"
+    }
+  ],
+  "retired_relay_sdk_aliases": [
+    {
+      "package": "relayknock",
+      "symbol": "Exchange",
+      "request_message_types": ["NHP_REG"],
+      "response_message_types": ["NHP_RAK"]
+    },
+    {
+      "package": "relayknock",
+      "symbol": "Send",
+      "request_message_types": ["NHP_OTP"],
+      "response_message_types": []
+    }
+  ],
+  "relay_message_type_aliases": [
+    {
+      "alias": "relayknock.TypeListRequest",
+      "message_type": "NHP_LST",
+      "wire_value": 5
+    },
+    {
+      "alias": "relayknock.TypeListResult",
+      "message_type": "NHP_LRT",
+      "wire_value": 6
+    },
+    {
+      "alias": "relayknock.TypeOTP",
+      "message_type": "NHP_OTP",
+      "wire_value": 12
+    },
+    {
+      "alias": "relayknock.TypeRegister",
+      "message_type": "NHP_REG",
+      "wire_value": 13
+    },
+    {
+      "alias": "relayknock.TypeRegisterAck",
+      "message_type": "NHP_RAK",
+      "wire_value": 14
+    }
+  ],
+  "retained_relay_http_operations": [
+    {
+      "method": "POST",
+      "path": "/relay/{serverId}",
+      "operation_id": "relay.handleRelay"
+    }
+  ],
+  "relay_forbidden_lifecycle_message_types": ["NHP_OTP", "NHP_REG", "NHP_RAK", "NHP_LST", "NHP_LRT"],
+  "relay_post_removal_injection_message_types": ["NHP_OTP", "NHP_REG", "NHP_LST", "NHP_LRT"]
+}
