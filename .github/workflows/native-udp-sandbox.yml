@@ -1,0 +1,104 @@
+name: Native UDP sandbox proof
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: native-udp-sandbox-proof
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  prove:
+    name: direct UDP lifecycle
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: sandbox
+    env:
+      QURL_GO_SANDBOX_STRICT: "true"
+      QURL_GO_SANDBOX_EXPECTED_SHA: ${{ github.sha }}
+      QURL_GO_SANDBOX_HUB_HOST: ${{ vars.QURL_GO_SANDBOX_HUB_HOST }}
+      QURL_GO_SANDBOX_HUB_PORT: ${{ vars.QURL_GO_SANDBOX_HUB_PORT }}
+      QURL_GO_SANDBOX_HUB_SERVER_PUBLIC_KEY_B64: ${{ vars.QURL_GO_SANDBOX_HUB_SERVER_PUBLIC_KEY_B64 }}
+      QURL_GO_SANDBOX_AGENT_ID: qurl-go-sandbox-${{ github.run_id }}-${{ github.run_attempt }}
+      QURL_GO_SANDBOX_KNOCK_RESOURCE_ID: ${{ vars.QURL_GO_SANDBOX_KNOCK_RESOURCE_ID }}
+      QURL_GO_SANDBOX_EXPECTED_CELL_ID: ${{ vars.QURL_GO_SANDBOX_EXPECTED_CELL_ID }}
+    steps:
+      - name: Checkout exact build
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: Verify clean exact checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${QURL_GO_SANDBOX_EXPECTED_SHA}"
+          test -z "$(git status --short)"
+
+      - name: Validate exact pre-retirement inventory
+        run: go test -count=1 ./tests/e2e/nativeudp -run '^TestPreRetirementScenarioInventory$'
+
+      - name: Run strict direct UDP proof
+        shell: bash
+        env:
+          QURL_GO_SANDBOX_ENROLLMENT_CREDENTIAL: ${{ secrets.QURL_GO_SANDBOX_ENROLLMENT_CREDENTIAL }}
+          QURL_GO_SANDBOX_STATE_PATH: ${{ runner.temp }}/qurl-go-native-udp/agent-state.json
+        run: |
+          set -euo pipefail
+          artifact="${RUNNER_TEMP}/native-udp-sandbox.json"
+          : > "${artifact}"
+          go test -count=1 -timeout=10m -json ./tests/e2e/nativeudp \
+            -run '^TestSandboxNativeUDPLifecycle$' | tee "${artifact}"
+
+      - name: Enforce full pre-retirement scenario inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact="${RUNNER_TEMP}/native-udp-sandbox.json"
+          inventory="tests/e2e/nativeudp/pre_retirement_scenarios.json"
+          test "$(jq -r '.all_scenarios_required' "${inventory}")" = "true"
+          while IFS=$'\t' read -r scenario_id test_name; do
+            passes="$(jq -s --arg test_name "${test_name}" '[.[] | select(.Action == "pass" and .Test == $test_name)] | length' "${artifact}")"
+            if [[ "${passes}" != "1" ]]; then
+              echo "::error title=Missing sandbox evidence::${scenario_id} (${test_name}) emitted ${passes} passing events; require exactly one"
+              exit 1
+            fi
+            skips="$(jq -s --arg test_name "${test_name}" '[.[] | select(.Action == "skip" and .Test == $test_name)] | length' "${artifact}")"
+            if [[ "${skips}" != "0" ]]; then
+              echo "::error title=Skipped sandbox evidence::${scenario_id} (${test_name}) emitted ${skips} skip events"
+              exit 1
+            fi
+          done < <(jq -r '.scenarios[] | select(.status == "implemented") | [.id, .test_name] | @tsv' "${inventory}")
+          failures="$(jq -s '[.[] | select(.Action == "fail")] | length' "${artifact}")"
+          test "${failures}" = "0"
+          outstanding="$(jq '[.scenarios[] | select(.status != "implemented")] | length' "${inventory}")"
+          if [[ "${outstanding}" != "0" ]]; then
+            jq -r '.scenarios[] | select(.status != "implemented") | "::error title=Pre-retirement scenario pending::\(.id) owner=\(.owner) status=\(.status)"' "${inventory}"
+            echo "::error::${outstanding} required pre-retirement scenarios remain unproven; HTTP lifecycle retirement is blocked"
+            exit 1
+          fi
+
+      - name: Upload non-secret JSON evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0 # v7.0.1
+        with:
+          name: native-udp-sandbox-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/native-udp-sandbox.json
+            tests/e2e/nativeudp/pre_retirement_scenarios.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Remove credential state
+        if: always()
+        shell: bash
+        run: rm -rf "${RUNNER_TEMP}/qurl-go-native-udp"

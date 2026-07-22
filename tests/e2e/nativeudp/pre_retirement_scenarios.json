@@ -1,0 +1,385 @@
+{
+  "schema_version": 1,
+  "gate": "udp_lifecycle_pre_retirement",
+  "all_scenarios_required": true,
+  "scenarios": [
+    {
+      "id": "provenance.exact_build_and_hub_trust",
+      "owner": "qurl-go",
+      "status": "implemented",
+      "test_name": "TestSandboxNativeUDPLifecycle/provenance_and_hub_trust",
+      "requirement": "Record one clean exact qurl-go build SHA and the atomic public Hub host, UDP port, and server key."
+    },
+    {
+      "id": "registration.public_api_lifecycle_success",
+      "owner": "qurl-go",
+      "status": "implemented",
+      "test_name": "TestSandboxNativeUDPLifecycle/fresh_registration_via_hub_and_assigned_cell",
+      "requirement": "Call RegisterAgentRuntime against the real public Hub and obtain a persisted registered runtime with an authenticated assigned-cell tuple."
+    },
+    {
+      "id": "assignment.hub_cookie_reknock_return_routability",
+      "owner": "qurl-go",
+      "status": "todo",
+      "test_name": "TestSandboxNativeUDPLifecycle/hub_cookie_reknock_return_routability",
+      "requirement": "Force Hub COK and prove the SDK's RKN reaches the public Hub and completes assignment."
+    },
+    {
+      "id": "otp.send",
+      "owner": "qurl-go",
+      "status": "todo",
+      "test_name": "TestSandboxNativeUDPLifecycle/account_otp_send",
+      "requirement": "Use an account credential to send exactly one assigned-cell OTP request before REG."
+    },
+    {
+      "id": "otp.dedupe",
+      "owner": "qurl-go",
+      "status": "todo",
+      "test_name": "TestSandboxNativeUDPLifecycle/account_otp_dedupe",
+      "requirement": "Prove duplicate/restarted account enrollment cannot dispatch a second OTP for one ticket."
+    },
+    {
+      "id": "otp.rate_limit",
+      "owner": "qurl-go",
+      "status": "todo",
+      "test_name": "TestSandboxNativeUDPLifecycle/account_otp_rate_limit",
+      "requirement": "Exercise the authenticated assigned-cell OTP rate-limit result and bounded client behavior."
+    },
+    {
+      "id": "otp.error",
+      "owner": "qurl-go",
+      "status": "todo",
+      "test_name": "TestSandboxNativeUDPLifecycle/account_otp_error",
+      "requirement": "Exercise terminal and retryable OTP failures without a hidden second send or HTTP fallback."
+    },
+    {
+      "id": "session.public_api_knock_success",
+      "owner": "qurl-go",
+      "status": "implemented",
+      "test_name": "TestSandboxNativeUDPLifecycle/assigned_cell_knock",
+      "requirement": "Call KnockRegisteredAgent with the Hub-assigned binding and receive the SDK's authenticated resource admission result."
+    },
+    {
+      "id": "session.cell_cookie_reknock_return_routability",
+      "owner": "qurl-go",
+      "status": "todo",
+      "test_name": "TestSandboxNativeUDPLifecycle/assigned_cell_cookie_reknock_return_routability",
+      "requirement": "Force assigned-cell COK and prove the SDK's RKN receives the authenticated ACK."
+    },
+    {
+      "id": "session.public_api_exit_success",
+      "owner": "qurl-go",
+      "status": "implemented",
+      "test_name": "TestSandboxNativeUDPLifecycle/assigned_cell_clean_exit",
+      "requirement": "Call ExitRegisteredAgentSession with the exact public session identity and receive SDK success."
+    },
+    {
+      "id": "assignment.authenticated_refresh",
+      "owner": "qurl-go",
+      "status": "implemented",
+      "test_name": "TestSandboxNativeUDPLifecycle/authenticated_hub_refresh",
+      "requirement": "Refresh placement through the pinned Hub and record the resulting assigned-cell trust tuple."
+    },
+    {
+      "id": "assignment.lease_expiry_refresh",
+      "owner": "qurl-go",
+      "status": "todo",
+      "test_name": "TestSandboxNativeUDPLifecycle/expired_lease_refresh",
+      "requirement": "Expire an ephemeral assignment and prove no cell traffic occurs until an authenticated Hub refresh succeeds."
+    },
+    {
+      "id": "reassignment.cell0_to_cell1",
+      "owner": "qurl-go",
+      "status": "todo",
+      "test_name": "TestSandboxNativeUDPLifecycle/cell0_to_cell1_reassignment",
+      "requirement": "Move one ephemeral agent from cell0 to real cell1 and contact only the newly assigned endpoint after explicit adoption."
+    },
+    {
+      "id": "reassignment.stale_assignment_rejection",
+      "owner": "qurl-go",
+      "status": "todo",
+      "test_name": "TestSandboxNativeUDPLifecycle/stale_assignment_rejection",
+      "requirement": "Reject stale generation, revision, endpoint, or lease state before a datagram is sent."
+    },
+    {
+      "id": "recovery.ambiguous_rak",
+      "owner": "qurl-go",
+      "status": "todo",
+      "test_name": "TestSandboxNativeUDPLifecycle/ambiguous_rak_recovery",
+      "requirement": "Drop an authenticated RAK result and prove restart replays the exact persisted activation without a new assignment."
+    },
+    {
+      "id": "recovery.registration_restart",
+      "owner": "qurl-go",
+      "status": "todo",
+      "test_name": "TestSandboxNativeUDPLifecycle/registration_restart_recovery",
+      "requirement": "Restart at every durable registration boundary and resume the exact pending episode."
+    },
+    {
+      "id": "recovery.device_credential",
+      "owner": "qurl-go",
+      "status": "todo",
+      "test_name": "TestSandboxNativeUDPLifecycle/device_credential_recovery",
+      "requirement": "Revoke an ephemeral device credential and complete explicit Hub-to-cell UDP recovery with the same agent identity."
+    },
+    {
+      "id": "recovery.two_cell_completion_refresh",
+      "owner": "qurl-go",
+      "status": "todo",
+      "test_name": "TestSandboxNativeUDPLifecycle/two_cell_completion_refresh_recovery",
+      "requirement": "Complete, refresh, and recover across the real two-cell topology without cell inference or cross-cell fallback."
+    },
+    {
+      "id": "dns.hub_authoritative_address_refresh",
+      "owner": "qurl-go",
+      "status": "todo",
+      "test_name": "TestSandboxNativeUDPLifecycle/hub_dns_address_refresh",
+      "requirement": "Change the Hub DNS answer and prove each exchange resolves the authoritative public name again."
+    },
+    {
+      "id": "dns.cell_authoritative_address_refresh",
+      "owner": "qurl-go",
+      "status": "todo",
+      "test_name": "TestSandboxNativeUDPLifecycle/cell_dns_address_refresh",
+      "requirement": "Change the assigned-cell DNS answer and prove each exchange resolves the authenticated endpoint name again."
+    },
+    {
+      "id": "negative.hub_dns_failure",
+      "owner": "qurl-go",
+      "status": "todo",
+      "test_name": "TestSandboxNativeUDPLifecycle/hub_dns_failure",
+      "requirement": "Fail closed on public Hub DNS failure with no HTTP, relay, inferred cell, or fallback endpoint."
+    },
+    {
+      "id": "negative.cell_dns_failure",
+      "owner": "qurl-go",
+      "status": "todo",
+      "test_name": "TestSandboxNativeUDPLifecycle/cell_dns_failure",
+      "requirement": "Fail closed on assigned-cell DNS failure with no HTTP, relay, or cross-cell fallback."
+    },
+    {
+      "id": "negative.wrong_hub_key",
+      "owner": "qurl-go",
+      "status": "todo",
+      "test_name": "TestSandboxNativeUDPLifecycle/wrong_hub_key",
+      "requirement": "Reject a Hub response that cannot authenticate to the configured Hub public key."
+    },
+    {
+      "id": "negative.wrong_cell_key",
+      "owner": "qurl-go",
+      "status": "todo",
+      "test_name": "TestSandboxNativeUDPLifecycle/wrong_cell_key",
+      "requirement": "Reject a cell response that cannot authenticate to the Hub-assigned cell public key."
+    },
+    {
+      "id": "negative.wrong_source",
+      "owner": "nhp-orchestrator",
+      "status": "external_dependency",
+      "test_name": "TestSandboxNativeUDPLifecycle/wrong_response_source",
+      "requirement": "Inject an otherwise valid response from the wrong network source and prove the client/server source binding fails closed."
+    },
+    {
+      "id": "negative.wrong_caller",
+      "owner": "nhp-orchestrator",
+      "status": "external_dependency",
+      "test_name": "TestSandboxNativeUDPLifecycle/wrong_authenticated_caller",
+      "requirement": "Use the wrong authenticated peer/caller against Hub and cell operations and observe terminal denial."
+    },
+    {
+      "id": "packet.replay",
+      "owner": "qurl-go",
+      "status": "todo",
+      "test_name": "TestSandboxNativeUDPLifecycle/packet_replay",
+      "requirement": "Replay captured request and response datagrams and observe authenticated replay rejection without state advancement."
+    },
+    {
+      "id": "packet.duplicate",
+      "owner": "qurl-go",
+      "status": "todo",
+      "test_name": "TestSandboxNativeUDPLifecycle/packet_duplicate",
+      "requirement": "Duplicate datagrams client-side and prove idempotent or terminal behavior matches the released contract."
+    },
+    {
+      "id": "packet.loss",
+      "owner": "qurl-go",
+      "status": "todo",
+      "test_name": "TestSandboxNativeUDPLifecycle/packet_loss",
+      "requirement": "Drop selected datagrams and prove bounded retry or durable recovery with no new logical operation."
+    },
+    {
+      "id": "packet.reorder",
+      "owner": "qurl-go",
+      "status": "todo",
+      "test_name": "TestSandboxNativeUDPLifecycle/packet_reorder",
+      "requirement": "Reorder datagrams client-side and prove stale/out-of-order packets cannot advance lifecycle state."
+    },
+    {
+      "id": "packet.delay",
+      "owner": "qurl-go",
+      "status": "todo",
+      "test_name": "TestSandboxNativeUDPLifecycle/packet_delay",
+      "requirement": "Delay selected datagrams across retry and lease boundaries and observe bounded contract behavior."
+    },
+    {
+      "id": "packet.timeout",
+      "owner": "qurl-go",
+      "status": "todo",
+      "test_name": "TestSandboxNativeUDPLifecycle/packet_timeout",
+      "requirement": "Force UDP timeouts and observe the exact retry/recovery taxonomy without HTTP fallback."
+    },
+    {
+      "id": "packet.cancellation",
+      "owner": "qurl-go",
+      "status": "todo",
+      "test_name": "TestSandboxNativeUDPLifecycle/packet_cancellation",
+      "requirement": "Cancel at each network phase and prove no post-boundary datagram or unsafe state mutation occurs."
+    },
+    {
+      "id": "packet.malformed",
+      "owner": "qurl-go",
+      "status": "todo",
+      "test_name": "TestSandboxNativeUDPLifecycle/malformed_packet",
+      "requirement": "Inject authenticated malformed envelopes and application bodies and observe generic fail-closed errors."
+    },
+    {
+      "id": "packet.oversize",
+      "owner": "qurl-go",
+      "status": "todo",
+      "test_name": "TestSandboxNativeUDPLifecycle/oversize_packet",
+      "requirement": "Inject over-limit request/reply material and prove the 4096-byte packet boundary fails closed."
+    },
+    {
+      "id": "packet.unknown_message",
+      "owner": "qurl-go",
+      "status": "todo",
+      "test_name": "TestSandboxNativeUDPLifecycle/unknown_message",
+      "requirement": "Inject an authenticated unknown or phase-invalid NHP message and observe terminal rejection."
+    },
+    {
+      "id": "state.persisted_runtime_warm_open",
+      "owner": "qurl-go",
+      "status": "implemented",
+      "test_name": "TestSandboxNativeUDPLifecycle/persisted_runtime_warm_open",
+      "requirement": "Open the just-persisted native runtime without an enrollment credential or network enrollment call."
+    },
+    {
+      "id": "state.sealed_cold_start",
+      "owner": "qurl-go",
+      "status": "todo",
+      "test_name": "TestSandboxNativeUDPLifecycle/sealed_state_cold_start",
+      "requirement": "Register from a real sandbox KMS-backed sealed store without leaving plaintext durable key state."
+    },
+    {
+      "id": "state.sealed_warm_restart_without_setup_credential",
+      "owner": "qurl-go",
+      "status": "todo",
+      "test_name": "TestSandboxNativeUDPLifecycle/sealed_state_warm_restart",
+      "requirement": "Restart from sealed state and knock successfully without any enrollment or recovery credential."
+    },
+    {
+      "id": "transport.zero_http_injected_trap",
+      "owner": "qurl-go",
+      "status": "implemented",
+      "test_name": "TestSandboxNativeUDPLifecycle/zero_lifecycle_http",
+      "requirement": "Observe zero calls through both the injected SDK HTTP client and process-wide default HTTP transport."
+    },
+    {
+      "id": "wire.registration_lst_lrt_reg_rak_completion",
+      "owner": "nhp-orchestrator",
+      "status": "external_dependency",
+      "test_name": "TestSandboxWireEvidence/registration_lst_lrt_reg_rak_completion",
+      "requirement": "Attribute the exact Hub LST/LRT, assigned-cell REG/RAK, and completion LST/LRT packet sequence to the ephemeral agent."
+    },
+    {
+      "id": "wire.session_knk_ack_ext_ack",
+      "owner": "nhp-orchestrator",
+      "status": "external_dependency",
+      "test_name": "TestSandboxWireEvidence/session_knk_ack_ext_ack",
+      "requirement": "Attribute the exact assigned-cell KNK/ACK and EXT/ACK sequence, including any forced COK/RKN, to the ephemeral session."
+    },
+    {
+      "id": "connector.hardened_linux_container",
+      "owner": "qurl-connector",
+      "status": "external_dependency",
+      "test_name": "TestSandboxConnectorUDP/hardened_linux_container",
+      "requirement": "Run the exact Connector candidate in its hardened Linux container on the dedicated EC2 proof runner."
+    },
+    {
+      "id": "connector.frp_authenticated_login_before_proxy",
+      "owner": "qurl-connector",
+      "status": "external_dependency",
+      "test_name": "TestSandboxConnectorUDP/frp_authenticated_login_before_proxy",
+      "requirement": "Prove native KNK admission and authenticated FRP login complete before any proxy registration starts."
+    },
+    {
+      "id": "connector.real_backend_traffic",
+      "owner": "qurl-connector",
+      "status": "external_dependency",
+      "test_name": "TestSandboxConnectorUDP/real_backend_traffic",
+      "requirement": "Carry real application traffic through the admitted FRP path and verify the expected backend response."
+    },
+    {
+      "id": "connector.resource_id_distinct_from_knock_resource_id",
+      "owner": "qurl-connector",
+      "status": "external_dependency",
+      "test_name": "TestSandboxConnectorUDP/resource_and_knock_identity_distinct",
+      "requirement": "Prove canonical public resource_id remains distinct from placement knock_resource_id through provisioning and knock."
+    },
+    {
+      "id": "connector.provision_journal_crash_consistency",
+      "owner": "qurl-connector",
+      "status": "external_dependency",
+      "test_name": "TestSandboxConnectorUDP/provision_journal_crash_consistency",
+      "requirement": "Crash at each provision boundary and reconcile without duplicate or lost resource identity."
+    },
+    {
+      "id": "connector.remove_journal_crash_consistency",
+      "owner": "qurl-connector",
+      "status": "external_dependency",
+      "test_name": "TestSandboxConnectorUDP/remove_journal_crash_consistency",
+      "requirement": "Crash at each removal boundary and retain the journal until authoritative deletion is proven."
+    },
+    {
+      "id": "connector.sealed_restart_without_setup_mount",
+      "owner": "qurl-connector",
+      "status": "external_dependency",
+      "test_name": "TestSandboxConnectorUDP/sealed_restart_without_setup_mount",
+      "requirement": "Restart the container from sealed state after physically removing the enrollment-secret mount source."
+    },
+    {
+      "id": "connector.zero_http_network_capture",
+      "owner": "qurl-connector",
+      "status": "external_dependency",
+      "test_name": "TestSandboxConnectorUDP/zero_lifecycle_http_packet_capture",
+      "requirement": "Capture the lifecycle and prove no bootstrap, assignment, OTP, REG, completion, relay, refresh, or recovery HTTP route is contacted."
+    },
+    {
+      "id": "connector.exact_artifact_manifest",
+      "owner": "qurl-connector",
+      "status": "external_dependency",
+      "test_name": "TestSandboxConnectorUDP/exact_artifact_manifest",
+      "requirement": "Bind qurl-go, Connector, NHP, qurl-service, qRTS, FRP commits and image digests into one redacted evidence manifest."
+    },
+    {
+      "id": "connector.dns_key_destination_source_observations",
+      "owner": "qurl-connector",
+      "status": "external_dependency",
+      "test_name": "TestSandboxConnectorUDP/network_observations",
+      "requirement": "Record DNS, server key, destination, source, identity-tuple hash, message outcome, and API-route-count observations."
+    },
+    {
+      "id": "orchestrator.real_hub_authority_and_two_cells",
+      "owner": "nhp-orchestrator",
+      "status": "external_dependency",
+      "test_name": "TestSandboxTopology/real_hub_authority_and_two_cells",
+      "requirement": "Provide a live public Hub, dark Authority, cell0, cell1, LayerV DNS/trust roots, OTP/SES, and safe ephemeral mutation controls."
+    },
+    {
+      "id": "orchestrator.dedicated_linux_fault_runner",
+      "owner": "nhp-orchestrator",
+      "status": "external_dependency",
+      "test_name": "TestSandboxTopology/dedicated_linux_fault_runner",
+      "requirement": "Provide the reviewed-source-CIDR EC2 runner with Docker, NET_ADMIN, packet capture, narrow KMS role, UDP proxy, and tc netem."
+    }
+  ]
+}
