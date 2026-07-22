@@ -32,7 +32,7 @@ func TestAutomaticClaudeWorkflowUsesTrustedReadOnlySnapshots(t *testing.T) {
 		"github.event.pull_request.head.ref != github.event.repository.default_branch",
 		"Resolve live review context",
 		".base.repo.default_branch",
-		"ref: ${{ steps.review_pr.outputs.default_branch }}",
+		"ref: ${{ github.sha }}",
 		"fetch-depth: 0",
 		"persist-credentials: false",
 		"Prepare credential-free review origin",
@@ -81,7 +81,7 @@ func TestInteractiveClaudeWorkflowUsesDefaultBranchCommentPath(t *testing.T) {
 		`default_ref}" != "${TRUSTED_DEFAULT_REF}"`,
 		`head_ref}" == "${default_ref}"`,
 		".base.repo.default_branch",
-		"ref: ${{ steps.claude_pr.outputs.default_branch }}",
+		"ref: ${{ github.sha }}",
 		"Prepare credential-free Claude origin",
 		"do not edit or commit files",
 		"steps.claude.outputs.execution_file",
@@ -129,19 +129,24 @@ func TestCredentialFreeOriginPreparationExecutes(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newGitFixture(t)
+			runGit(t, fixture.repository, "checkout", "--detach", "--quiet", fixture.baseSHA)
 			env := map[string]string{
-				"GITHUB_REPOSITORY":   "layervai/qurl-go",
-				"GITHUB_OUTPUT":       filepath.Join(t.TempDir(), "outputs"),
-				"RUNNER_TEMP":         t.TempDir(),
-				"EXPECTED_HEAD_SHA":   fixture.headSHA,
-				"EXPECTED_HEAD_REF":   fixture.headRef,
-				"EXPECTED_BASE_SHA":   fixture.baseSHA,
-				"EXPECTED_BASE_REF":   fixture.baseRef,
-				"TRUSTED_DEFAULT_REF": fixture.baseRef,
+				"GITHUB_REPOSITORY":    "layervai/qurl-go",
+				"GITHUB_OUTPUT":        filepath.Join(t.TempDir(), "outputs"),
+				"RUNNER_TEMP":          t.TempDir(),
+				"EXPECTED_HEAD_SHA":    fixture.headSHA,
+				"EXPECTED_HEAD_REF":    fixture.headRef,
+				"EXPECTED_BASE_SHA":    fixture.baseSHA,
+				"EXPECTED_BASE_REF":    fixture.baseRef,
+				"TRUSTED_DEFAULT_REF":  fixture.baseRef,
+				"EXPECTED_TRUSTED_SHA": fixture.baseSHA,
 			}
 			for key, value := range test.extra {
 				env[key] = value
 			}
+			wrongTrustedSHA := cloneEnvironment(env)
+			wrongTrustedSHA["EXPECTED_TRUSTED_SHA"] = fixture.headSHA
+			runScript(t, fixture.repository, stepRun(t, readWorkflow(t, test.workflow), test.step), wrongTrustedSHA, false)
 			runScript(t, fixture.repository, stepRun(t, readWorkflow(t, test.workflow), test.step), env, true)
 			outputs, err := os.ReadFile(env["GITHUB_OUTPUT"])
 			if err != nil {
@@ -169,6 +174,7 @@ func TestAutomaticOriginRejectsClosedOrDefaultHead(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newGitFixture(t)
+			runGit(t, fixture.repository, "checkout", "--detach", "--quiet", fixture.baseSHA)
 			env := map[string]string{
 				"GITHUB_REPOSITORY": "layervai/qurl-go", "GITHUB_OUTPUT": filepath.Join(t.TempDir(), "outputs"),
 				"RUNNER_TEMP": t.TempDir(), "EXPECTED_STATE": "open", "EXPECTED_DRAFT": "false",
@@ -176,6 +182,7 @@ func TestAutomaticOriginRejectsClosedOrDefaultHead(t *testing.T) {
 				"EXPECTED_HEAD_SHA": fixture.headSHA, "EXPECTED_HEAD_REF": fixture.headRef,
 				"EXPECTED_BASE_SHA": fixture.baseSHA, "EXPECTED_BASE_REF": fixture.baseRef,
 				"TRUSTED_DEFAULT_REF": fixture.baseRef, "PR_NUMBER": "93", "RUN_ID": "123", "RUN_ATTEMPT": "1",
+				"EXPECTED_TRUSTED_SHA": fixture.baseSHA,
 			}
 			for key, value := range test.env {
 				env[key] = value
@@ -199,13 +206,18 @@ func TestLivePRResolversRejectUnsafeCurrentState(t *testing.T) {
 					"EXPECTED_HEAD_REPO": "layervai/qurl-go", "EXPECTED_BASE_REPO": "layervai/qurl-go",
 					"EXPECTED_HEAD_SHA": fixture.headSHA, "EXPECTED_HEAD_REF": fixture.headRef,
 					"EXPECTED_BASE_SHA": fixture.baseSHA, "EXPECTED_BASE_REF": fixture.baseRef,
+					"TRUSTED_EVENT_DEFAULT_REF": fixture.baseRef,
+					"EXPECTED_TRUSTED_SHA":      fixture.baseSHA,
 				}
 			},
 		},
 		{
 			name: "interactive", workflow: "claude.yml", step: "Resolve Claude pull request context",
 			extra: func(fixture gitFixture) map[string]string {
-				return map[string]string{"TRUSTED_DEFAULT_REF": fixture.baseRef}
+				return map[string]string{
+					"TRUSTED_DEFAULT_REF":  fixture.baseRef,
+					"EXPECTED_TRUSTED_SHA": fixture.baseSHA,
+				}
 			},
 		},
 	}
@@ -213,6 +225,7 @@ func TestLivePRResolversRejectUnsafeCurrentState(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newGitFixture(t)
+			runGit(t, fixture.repository, "checkout", "--detach", "--quiet", fixture.baseSHA)
 			mockBin := writeGHMock(t)
 			script := stepRun(t, readWorkflow(t, test.workflow), test.step)
 			baseEnv := map[string]string{
@@ -276,14 +289,15 @@ func TestTerminalVerifiersRejectUnsafeCurrentState(t *testing.T) {
 			fixture := newGitFixture(t)
 			outputFile := filepath.Join(t.TempDir(), "outputs")
 			prepareEnv := map[string]string{
-				"GITHUB_REPOSITORY":   "layervai/qurl-go",
-				"GITHUB_OUTPUT":       outputFile,
-				"RUNNER_TEMP":         t.TempDir(),
-				"EXPECTED_HEAD_SHA":   fixture.headSHA,
-				"EXPECTED_HEAD_REF":   fixture.headRef,
-				"EXPECTED_BASE_SHA":   fixture.baseSHA,
-				"EXPECTED_BASE_REF":   fixture.baseRef,
-				"TRUSTED_DEFAULT_REF": fixture.baseRef,
+				"GITHUB_REPOSITORY":    "layervai/qurl-go",
+				"GITHUB_OUTPUT":        outputFile,
+				"RUNNER_TEMP":          t.TempDir(),
+				"EXPECTED_HEAD_SHA":    fixture.headSHA,
+				"EXPECTED_HEAD_REF":    fixture.headRef,
+				"EXPECTED_BASE_SHA":    fixture.baseSHA,
+				"EXPECTED_BASE_REF":    fixture.baseRef,
+				"TRUSTED_DEFAULT_REF":  fixture.baseRef,
+				"EXPECTED_TRUSTED_SHA": fixture.baseSHA,
 			}
 			for key, value := range test.extra {
 				prepareEnv[key] = value
@@ -349,6 +363,11 @@ func TestTerminalVerifiersRejectUnsafeCurrentState(t *testing.T) {
 					runScript(t, fixture.repository, verifier, env, false)
 				})
 			}
+
+			t.Run("local HEAD changed", func(t *testing.T) {
+				runGit(t, fixture.repository, "checkout", "--detach", "--quiet", fixture.headSHA)
+				runScript(t, fixture.repository, verifier, verifyEnv, false)
+			})
 		})
 	}
 }
