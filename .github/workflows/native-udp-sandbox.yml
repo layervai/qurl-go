@@ -1219,6 +1219,7 @@ jobs:
             .strict_outcome == "success" and
             .enforcement_outcome == "success" and
             .inputs_unchanged == true and
+            .counts.implemented == 68 and
             .counts.blocking == 0 and .counts.failures == 0 and .counts.skips == 0 and
             .counts.exact_passes == .counts.implemented and
             .provenance_valid == true and .two_cell_provenance == true and

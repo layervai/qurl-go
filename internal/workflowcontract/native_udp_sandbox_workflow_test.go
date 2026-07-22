@@ -1116,6 +1116,11 @@ func TestNativeUDPSandboxRequiresCompletePublishedProof(t *testing.T) {
 		{name: "enforcement failed", mutate: func(value map[string]any) { value["enforcement_outcome"] = "failure" }},
 		{name: "inputs changed", mutate: func(value map[string]any) { value["inputs_unchanged"] = false }},
 		{name: "blocking", mutate: func(value map[string]any) { value["counts"].(map[string]any)["blocking"] = 1 }},
+		{name: "zero implemented", mutate: func(value map[string]any) {
+			value["counts"].(map[string]any)["implemented"] = 0
+			value["counts"].(map[string]any)["exact_passes"] = 0
+			value["typed_evidence"] = []any{}
+		}},
 		{name: "failure", mutate: func(value map[string]any) { value["counts"].(map[string]any)["failures"] = 1 }},
 		{name: "skip", mutate: func(value map[string]any) { value["counts"].(map[string]any)["skips"] = 1 }},
 		{name: "pass mismatch", mutate: func(value map[string]any) { value["counts"].(map[string]any)["exact_passes"] = 63 }},
