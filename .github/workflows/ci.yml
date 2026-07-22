@@ -76,6 +76,13 @@ jobs:
           go-version-file: go.mod
           check-latest: true
 
+      # Workflow changes carry credentials and are part of the executable
+      # security boundary. Keep syntax validation inside the existing required
+      # lint context so this hardening does not create a new branch-protection
+      # check that could strand unrelated pull requests.
+      - name: actionlint
+        uses: reviewdog/action-actionlint@6fb7acc99f4a1008869fa8a0f09cfca740837d9d # v1.72.0
+
       # Pinned action + pinned linter version, matching the Makefile's
       # GOLANGCI_LINT_VERSION, so local `make lint` and CI run the same analyzers.
       # `golangci-lint run` also enforces formatting (gofmt/gofumpt/goimports).
