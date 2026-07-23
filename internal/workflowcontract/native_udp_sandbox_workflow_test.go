@@ -154,7 +154,10 @@ func TestNativeUDPSandboxWorkflowIsAttendedStrictAndEvidenceBearing(t *testing.T
 	requireNotContains(t, workflow,
 		"schedule:",
 		"pull_request:",
+		"pull_request_target:",
 		"push:",
+		"repository_dispatch:",
+		"workflow_call:",
 		"continue-on-error:",
 		"QURL_GO_SANDBOX_ATTESTATION_TOKEN",
 		" | tee ",
@@ -175,6 +178,9 @@ func TestNativeUDPSandboxWorkflowIsAttendedStrictAndEvidenceBearing(t *testing.T
 	)
 	if got := strings.Count(workflow, "def valid_counter:"); got != 3 {
 		t.Fatalf("valid_counter definition count = %d, want 3", got)
+	}
+	if got := strings.Count(workflow, "permissions:"); got != 1 {
+		t.Fatalf("permissions boundary count = %d, want one exact read-only workflow boundary", got)
 	}
 }
 

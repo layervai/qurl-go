@@ -26,8 +26,7 @@ import (
 
 const (
 	sandboxProofTimeout            = 50 * time.Minute
-	udpAttemptTimeout              = 5 * time.Second
-	udpMaxAddresses                = 4
+	faultUDPAttemptTimeout         = 5 * time.Second
 	currentAgentStateSchemaVersion = 6
 	nonSecretFaultCredential       = "not-server-minted-native-udp-proof-credential"
 )
@@ -221,13 +220,13 @@ func TestSandboxNativeUDPLifecycle(t *testing.T) {
 	}
 
 	cellEvidence := make([]sandboxCellEvidence, 0, 3)
+	// Happy-path lifecycle calls deliberately omit UDP and retry overrides so
+	// the deployed proof measures the SDK's out-of-box production defaults.
 	if !runTypedEvidenceScenario(t, "fresh_registration_via_hub_and_assigned_cell", "registration.public_api_lifecycle_success", []string{"lifecycle_exchange"}, func(t *testing.T) {
 		client, binding, err := qurl.RegisterAgentRuntime(ctx, cfg.enrollment, store,
 			qurl.WithAgentRuntimeHub(hub),
 			qurl.WithAgentRuntimeIdentity(cfg.agentID),
 			qurl.WithAgentRuntimeMetadata("qurl-go-sandbox", cfg.buildSHA),
-			qurl.WithAgentRuntimeUDPBounds(udpAttemptTimeout, udpMaxAddresses),
-			qurl.WithAgentRuntimeAssignmentRetryBudget(4, 30*time.Second),
 			qurl.WithAgentClientBaseURL("http://127.0.0.1:1"),
 			qurl.WithAgentClientHTTPClient(httpTrap),
 		)
@@ -264,8 +263,6 @@ func TestSandboxNativeUDPLifecycle(t *testing.T) {
 	refreshPassed := runTypedEvidenceScenario(t, "authenticated_hub_refresh", "assignment.authenticated_refresh", []string{"assignment_response"}, func(t *testing.T) {
 		client, binding, err := qurl.RefreshAgentRuntime(ctx, hub, store,
 			qurl.WithAgentRuntimeReassignmentAdoption(),
-			qurl.WithAgentRuntimeUDPBounds(udpAttemptTimeout, udpMaxAddresses),
-			qurl.WithAgentRuntimeAssignmentRetryBudget(4, 30*time.Second),
 			qurl.WithAgentClientBaseURL("http://127.0.0.1:1"),
 			qurl.WithAgentClientHTTPClient(httpTrap),
 		)
@@ -296,10 +293,9 @@ func TestSandboxNativeUDPLifecycle(t *testing.T) {
 		t.Fatalf("NewCycleRunID: %v", err)
 	}
 	knockOptions := qurl.NativeKnockOptions{RunID: runID}
-	udpOptions := []qurl.AgentRuntimeUDPOption{qurl.WithAgentRuntimeUDPBounds(udpAttemptTimeout, udpMaxAddresses)}
 
 	if !runTypedEvidenceScenario(t, "assigned_cell_knock", "session.public_api_knock_success", []string{"lifecycle_exchange"}, func(t *testing.T) {
-		result, err := qurl.KnockRegisteredAgent(ctx, refreshed, privateKey, cfg.knockResourceID, knockOptions, udpOptions...)
+		result, err := qurl.KnockRegisteredAgent(ctx, refreshed, privateKey, cfg.knockResourceID, knockOptions)
 		if err != nil {
 			t.Fatalf("KnockRegisteredAgent: %v", err)
 		}
@@ -312,7 +308,7 @@ func TestSandboxNativeUDPLifecycle(t *testing.T) {
 	}
 
 	if !runTypedEvidenceScenario(t, "assigned_cell_clean_exit", "session.public_api_exit_success", []string{"lifecycle_exchange"}, func(t *testing.T) {
-		if err := qurl.ExitRegisteredAgentSession(ctx, refreshed, privateKey, cfg.knockResourceID, knockOptions, udpOptions...); err != nil {
+		if err := qurl.ExitRegisteredAgentSession(ctx, refreshed, privateKey, cfg.knockResourceID, knockOptions); err != nil {
 			t.Fatalf("ExitRegisteredAgentSession: %v", err)
 		}
 		t.Log("EVIDENCE assigned-cell EXT received an authenticated ACK")
@@ -434,7 +430,7 @@ func proveHubDNSFailure(ctx context.Context, t *testing.T, hub qurl.HubBootstrap
 		qurl.WithAgentRuntimeMetadata("qurl-go-sandbox", "dns-failure"),
 		qurl.WithAgentRuntimeUDPResolver(resolver),
 		qurl.WithAgentRuntimeUDPDialer(dialer),
-		qurl.WithAgentRuntimeUDPBounds(udpAttemptTimeout, 1),
+		qurl.WithAgentRuntimeUDPBounds(faultUDPAttemptTimeout, 1),
 		qurl.WithAgentRuntimeAssignmentRetryBudget(1, 15*time.Second),
 		qurl.WithAgentClientBaseURL("http://127.0.0.1:1"),
 		qurl.WithAgentClientHTTPClient(httpTrap),

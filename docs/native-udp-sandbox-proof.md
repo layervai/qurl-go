@@ -132,7 +132,10 @@ actual behavioral bounds; the larger outer ceilings do not relax them.
 The HTTP proof installs both the SDK's explicit resource-client trap and a
 process-wide default-transport trap. Any lifecycle HTTP attempt is observable
 and fails the run. Successful live Hub/cell exchanges retain the SDK's real
-public resolver and dialer defaults. The DNS-failure case records the exact Hub
+public resolver and dialer defaults. Registration, refresh, KNK, and EXT pass no
+UDP-bound or retry-budget override, so the proof measures the shipped three-
+second per-address timeout, three-address fan-out, and four-attempt/30-second
+assignment budget. The DNS-failure case records the exact Hub
 hostname requested before delegating to the OS resolver for a reserved failing
 name; the timeout case records the exact public logical destination before a
 test-only dialer redirects the real UDP socket to an ephemeral local no-reply
