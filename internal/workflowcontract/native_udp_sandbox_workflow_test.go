@@ -19,6 +19,7 @@ import (
 const (
 	nativeUDPWorkflowID                   = "4242"
 	reviewedInventoryMappingSHA256Fixture = "1dff59c8188ca1cb72847135b5e4a9e2c2bba4f737d788379c93a568152dc88d"
+	reviewedConnectorScenarioNamesSHA256  = "b59ce836704174518c3c66a79f49a51487379bd7efbd9db09e50f829a7d8bb3c"
 )
 
 type nativeUDPProofFixture struct {
@@ -1913,8 +1914,24 @@ func connectorStrictScenarioNames(t *testing.T) []string {
 	if err := json.Unmarshal(raw, &contract); err != nil {
 		t.Fatal(err)
 	}
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, raw); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(compact.Bytes())
+	if got := fmt.Sprintf("%x", digest); got != reviewedConnectorScenarioNamesSHA256 {
+		t.Fatalf("Connector scenario-name contract digest = %s, want %s", got, reviewedConnectorScenarioNamesSHA256)
+	}
 	if contract.SchemaVersion != 1 || contract.Gate != "udp_lifecycle_retirement" || len(contract.ScenarioNames) != 60 {
 		t.Fatalf("invalid Connector scenario-name contract: schema=%d gate=%q names=%d", contract.SchemaVersion, contract.Gate, len(contract.ScenarioNames))
+	}
+	if !sort.StringsAreSorted(contract.ScenarioNames) {
+		t.Fatal("Connector scenario-name contract must be sorted")
+	}
+	for index := 1; index < len(contract.ScenarioNames); index++ {
+		if contract.ScenarioNames[index] == contract.ScenarioNames[index-1] {
+			t.Fatalf("duplicate Connector scenario name: %q", contract.ScenarioNames[index])
+		}
 	}
 	return contract.ScenarioNames
 }

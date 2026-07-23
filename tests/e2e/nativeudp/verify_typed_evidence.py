@@ -192,9 +192,10 @@ def verify(
     contract_path: Path,
     observations_path: Path,
 ) -> tuple[bool, list[dict[str, Any]]]:
-    scenario_keys, required = validate_contract(
-        load_document(inventory_path), load_document(contract_path)
-    )
+    inventory = load_document(inventory_path)
+    contract = load_document(contract_path)
+    scenario_keys, required = validate_contract(inventory, contract)
+    kind_contracts = contract["evidence_kinds"]
     observed: dict[str, dict[str, dict[str, Any]]] = {key: {} for key in scenario_keys}
 
     if observations_path.exists():
@@ -221,7 +222,7 @@ def verify(
             if kind in observed[scenario_key]:
                 raise ValueError(f"duplicate typed evidence kind {kind!r} for {scenario_key}")
             canonical_observation = validate_sanitized_observation(record["observation"])
-            exact_observation = load_document(contract_path)["evidence_kinds"][kind]["exact_observation"]
+            exact_observation = kind_contracts[kind]["exact_observation"]
             if record["observation"] != exact_observation:
                 raise ValueError(f"typed evidence observation does not prove success for {scenario_key}/{kind}")
             expected_digest = hashlib.sha256(canonical_observation).hexdigest()

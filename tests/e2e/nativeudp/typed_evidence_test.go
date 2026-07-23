@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -237,7 +238,86 @@ func TestWorkflowMakesTypedEvidenceARequiredGateInput(t *testing.T) {
 			t.Errorf("workflow does not bind typed evidence with %q", snippet)
 		}
 	}
-	if bytes.Contains(workflow, []byte("native-udp-sandbox.typed-observations.jsonl\n            ${{ runner.temp }}")) {
-		t.Fatal("raw typed observations must not be uploaded as proof evidence")
+	uploadPaths := artifactUploadPaths(t, workflow)
+	if len(uploadPaths) == 0 {
+		t.Fatal("workflow has no upload-artifact path inventory")
 	}
+	for _, path := range uploadPaths {
+		if strings.Contains(path, "native-udp-sandbox.typed-observations.jsonl") {
+			t.Fatalf("raw typed observations must not be uploaded as proof evidence: %q", path)
+		}
+	}
+}
+
+func TestArtifactUploadPathsTracksBlockScalarAcrossFormatting(t *testing.T) {
+	workflow := []byte(`steps:
+  - name: Upload proof
+    uses: actions/upload-artifact@deadbeef
+    with:
+      path: |-
+          proof.json
+          native-udp-sandbox.typed-observations.jsonl
+      retention-days: 30
+`)
+	paths := artifactUploadPaths(t, workflow)
+	if got, want := strings.Join(paths, "\n"), "proof.json\nnative-udp-sandbox.typed-observations.jsonl"; got != want {
+		t.Fatalf("upload paths = %q, want %q", got, want)
+	}
+}
+
+func artifactUploadPaths(t *testing.T, workflow []byte) []string {
+	t.Helper()
+	lines := strings.Split(string(workflow), "\n")
+	var paths []string
+	for usesLine, line := range lines {
+		if !strings.HasPrefix(strings.TrimSpace(line), "uses: actions/upload-artifact@") {
+			continue
+		}
+		usesIndent := yamlIndent(line)
+		stepIndent := -1
+		for index := usesLine - 1; index >= 0; index-- {
+			trimmed := strings.TrimSpace(lines[index])
+			if strings.HasPrefix(trimmed, "- ") && yamlIndent(lines[index]) < usesIndent {
+				stepIndent = yamlIndent(lines[index])
+				break
+			}
+		}
+		if stepIndent < 0 {
+			t.Fatalf("upload-artifact action at line %d has no enclosing step", usesLine+1)
+		}
+		stepEnd := len(lines)
+		for index := usesLine + 1; index < len(lines); index++ {
+			if strings.HasPrefix(strings.TrimSpace(lines[index]), "- ") && yamlIndent(lines[index]) == stepIndent {
+				stepEnd = index
+				break
+			}
+		}
+		for index := usesLine + 1; index < stepEnd; index++ {
+			trimmed := strings.TrimSpace(lines[index])
+			if trimmed != "path:" && !strings.HasPrefix(trimmed, "path: ") {
+				continue
+			}
+			pathIndent := yamlIndent(lines[index])
+			value := strings.TrimSpace(strings.TrimPrefix(trimmed, "path:"))
+			isBlockScalar := value == "" || strings.HasPrefix(value, "|") || strings.HasPrefix(value, ">")
+			if !isBlockScalar {
+				paths = append(paths, value)
+				continue
+			}
+			for index++; index < stepEnd; index++ {
+				if strings.TrimSpace(lines[index]) == "" {
+					continue
+				}
+				if yamlIndent(lines[index]) <= pathIndent {
+					break
+				}
+				paths = append(paths, strings.TrimSpace(lines[index]))
+			}
+		}
+	}
+	return paths
+}
+
+func yamlIndent(line string) int {
+	return len(line) - len(strings.TrimLeft(line, " "))
 }
