@@ -108,6 +108,15 @@ type retainedLocalAgentStateStore struct {
 	setup *pinnedSetupLockToken
 }
 
+// agentStateStoreDecorator is the package-private contract for SDK-internal
+// wrappers that must preserve a local store's retained directory and setup-lock
+// capabilities. Keeping this unexported prevents arbitrary application stores
+// from acquiring either capability.
+type agentStateStoreDecorator interface {
+	decoratedAgentStateStore() AgentStateStore
+	withDecoratedAgentStateStore(AgentStateStore) AgentStateStore
+}
+
 func (s *retainedLocalAgentStateStore) LoadAgentState(ctx context.Context) (*AgentState, error) {
 	switch base := s.base.(type) {
 	case *FileAgentStateStore:
@@ -176,10 +185,16 @@ func localStateStoreName(store AgentStateStore) (string, error) {
 }
 
 func baseAgentStateStore(store AgentStateStore) AgentStateStore {
-	if retained, ok := store.(*retainedLocalAgentStateStore); ok {
-		return retained.base
+	for {
+		switch current := store.(type) {
+		case *retainedLocalAgentStateStore:
+			store = current.base
+		case agentStateStoreDecorator:
+			store = current.decoratedAgentStateStore()
+		default:
+			return store
+		}
 	}
-	return store
 }
 
 func openPinnedStatePath(path, label string) (*pinnedStateDir, string, error) {
@@ -341,6 +356,13 @@ func (o *pinnedStateOperation) save(ctx context.Context, setup *pinnedSetupLockT
 }
 
 func retainAgentStateContinuity(store AgentStateStore) (AgentStateStore, func() error, func() error, error) {
+	if decorator, ok := store.(agentStateStoreDecorator); ok {
+		retained, validate, release, err := retainAgentStateContinuity(decorator.decoratedAgentStateStore())
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		return decorator.withDecoratedAgentStateStore(retained), validate, release, nil
+	}
 	local, ok := store.(interface {
 		retainContinuity() (AgentStateStore, func() error, error)
 	})
@@ -355,6 +377,9 @@ func retainAgentStateContinuity(store AgentStateStore) (AgentStateStore, func() 
 }
 
 func validateAgentStateStoreContinuity(store AgentStateStore) error {
+	if decorator, ok := store.(agentStateStoreDecorator); ok {
+		return validateAgentStateStoreContinuity(decorator.decoratedAgentStateStore())
+	}
 	local, ok := store.(interface{ ValidateContinuity() error })
 	if !ok {
 		return nil
