@@ -238,8 +238,8 @@ func RecoverAgentRuntime(ctx context.Context, recoveryCredential string, store A
 	if err != nil {
 		return nil, nil, err
 	}
-	result, err := withAgentSetupLock(ctx, store, destroyNativeRuntimeResult, func() (*nativeRuntimeResult, error) {
-		return cfg.recoverAgentRuntimeLocked(ctx, recoveryCredential, store)
+	result, err := withAgentSetupLock(ctx, store, destroyNativeRuntimeResult, func(lockedCtx context.Context, locked AgentStateStore) (*nativeRuntimeResult, error) {
+		return cfg.recoverAgentRuntimeLocked(lockedCtx, recoveryCredential, locked)
 	})
 	if err != nil {
 		return nil, nil, err
@@ -267,6 +267,8 @@ func newNativeAgentCredentialRecoveryConfig(opts []AgentRuntimeRecoveryOption) (
 }
 
 func (c *nativeAgentRuntimeConfig) recoverAgentRuntimeLocked(ctx context.Context, recoveryCredential string, store AgentStateStore) (*nativeRuntimeResult, error) {
+	c.continuityStore = store
+	defer func() { c.continuityStore = nil }()
 	state, err := store.LoadAgentState(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("%w: load agent state: %w", ErrInvalidRegisterConfig, err)
@@ -635,7 +637,7 @@ func (c *nativeAgentRuntimeConfig) issueCredentialRecovery(ctx context.Context, 
 		return nil, err
 	}
 	defer wipeBytes(body)
-	return runNativeExchange(ctx, retry, endpoint, body, udpOptions, nativeudp.AssignmentList,
+	return runNativeExchange(ctx, retry, endpoint, body, udpOptions, c.validateStateContinuity, nativeudp.AssignmentList,
 		credentialRecoveryRetryInfo, newCredentialRecoveryRequired(credentialRecoveryHubPhase),
 		func(reply []byte, now time.Time) (*credentialRecoveryIssue, error) {
 			return parseCredentialRecoveryIssueReply(reply, agentID, now)
@@ -828,7 +830,7 @@ func (c *nativeAgentRuntimeConfig) completeCredentialRecovery(ctx context.Contex
 	if err != nil {
 		return "", err
 	}
-	keyID, err := runNativeExchange(recoveryCtx, retry, endpoint, body, c.udpOptions(privateKey), nativeudp.List,
+	keyID, err := runNativeExchange(recoveryCtx, retry, endpoint, body, c.udpOptions(privateKey), c.validateStateContinuity, nativeudp.List,
 		credentialRecoveryRetryInfo, newCredentialRecoveryRequired(credentialRecoveryCellPhase),
 		func(reply []byte, _ time.Time) (*string, error) {
 			return parseCredentialRecoveryCompletionReply(reply)

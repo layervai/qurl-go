@@ -109,7 +109,12 @@ Trusted deployment configuration supplies one LayerV-owned Hub DNS name, UDP
 port, and pinned server public key:
 
 ```go
-store := qurl.FileAgentState("/var/lib/layerv/qurl/agent-state.json")
+store, err := qurl.OpenFileAgentState("/var/lib/layerv/qurl/agent-state.json")
+if err != nil {
+	return err
+}
+defer store.Close() // after every Client and runtime operation using this store
+
 hub := qurl.HubBootstrap{
 	Host:               "hub.nhp.layerv.ai",
 	Port:               62206,

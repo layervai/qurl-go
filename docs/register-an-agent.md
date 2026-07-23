@@ -17,7 +17,12 @@ Trusted deployment configuration supplies one Hub endpoint and pinned X25519
 server public key:
 
 ```go
-store := qurl.FileAgentState("/var/lib/layerv/qurl/agent-state.json")
+store, err := qurl.OpenFileAgentState("/var/lib/layerv/qurl/agent-state.json")
+if err != nil {
+	return err
+}
+defer store.Close()
+
 hub := qurl.HubBootstrap{
 	Host:               "hub.nhp.layerv.ai",
 	Port:               62206,
@@ -420,20 +425,40 @@ cannot accidentally retarget both trust paths.
 `AgentState` contains the X25519 private key, completed device credential, Hub
 assignment, and possibly a crash-recovery activation record or completion
 candidate. It is a credential file: never log it or attach it to support
-bundles. `FileAgentState` is permission-protected plaintext; use a sealed or
+bundles. `OpenFileAgentState` is permission-protected plaintext; use a sealed or
 secret-manager store when the complete state must be encrypted at rest.
 
 ### Plaintext local file
 
 ```go
-store := qurl.FileAgentState("/var/lib/layerv/qurl/agent-state.json")
+store, err := qurl.OpenFileAgentState("/var/lib/layerv/qurl/agent-state.json")
+if err != nil {
+	return err
+}
+defer store.Close()
 ```
 
-The parent directory must be exactly `0700`; the file is atomically written
-`0600`. Symlinks, oversized files, insecure permissions, corrupt JSON, duplicate
-or unknown fields, and inconsistent assignments fail closed. Local stores use a
-sidecar setup lock so two processes cannot mint competing identities against one
-path.
+The constructor pins the complete directory path through no-follow component
+traversal and retains that directory capability for the store lifetime. The
+state directory must be owned by the effective user and exactly `0700`. Every
+ancestor must be root- or effective-user-owned and non-writable by group/other;
+root-owned sticky shared roots such as `/tmp` are the deliberate exception.
+State, temporary, and setup-lock files must be owned by the effective user,
+regular, singly linked, and exactly `0600`. Every load, lock, and atomic replace
+is relative to the retained capability. Namespace replacement, inode/link
+replacement, symlinks, oversized files, insecure permissions, corrupt JSON,
+duplicate or unknown fields, and inconsistent assignments fail closed. Missing
+directory components and every parent edge are durably synced, including retry
+after an earlier parent-fsync failure.
+
+The store must remain open for every `Client`, registration, warm open, refresh,
+recovery, and knock operation that depends on it. Close it only during Connector
+shutdown. Server/desktop Linux and Darwin are supported; Android, iOS, Windows,
+and other platforms fail before filesystem mutation until equivalent ACL,
+locking, and durability support exists. The older `FileAgentState(path)`
+compatibility helper also pins, but
+qURL Connector must migrate to `OpenFileAgentState(path)` so constructor failure
+and `Close` ownership are explicit.
 Because unknown fields fail closed, an SDK downgrade may not be able to open
 state written by a newer SDK. Treat that as an explicit state-schema migration
 or reprovisioning operation; never delete credential state merely to bypass the
@@ -448,6 +473,10 @@ store, err := qurl.NewSealedFileAgentState(
 	wrapper,
 	qurl.WithExpectedSealedAgentID("connector-prod-1"),
 )
+if err != nil {
+	return err
+}
+defer store.Close()
 ```
 
 The SDK encrypts the full state with a fresh AES-256-GCM data-encryption key on
