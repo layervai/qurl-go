@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -33,6 +34,16 @@ func canonicalTypedEvidenceJSON(t *testing.T, value any) []byte {
 func typedEvidenceDigest(raw []byte) string {
 	digest := sha256.Sum256(raw)
 	return hex.EncodeToString(digest[:])
+}
+
+func wireTraceRecord(t *testing.T, observation map[string]any) map[string]any {
+	t.Helper()
+	return map[string]any{
+		"kind":               "wire_trace",
+		"observation":        observation,
+		"observation_sha256": typedEvidenceDigest(canonicalTypedEvidenceJSON(t, observation)),
+		"scenario_key":       "alpha",
+	}
 }
 
 func runTypedEvidenceVerifier(t *testing.T, observations []byte, allowIncomplete bool) ([]byte, error) {
@@ -78,14 +89,7 @@ func runTypedEvidenceVerifier(t *testing.T, observations []byte, allowIncomplete
 
 func validTypedEvidenceRecord(t *testing.T) []byte {
 	t.Helper()
-	observation := map[string]any{"verified": true}
-	canonicalObservation := canonicalTypedEvidenceJSON(t, observation)
-	return canonicalTypedEvidenceJSON(t, map[string]any{
-		"kind":               "wire_trace",
-		"observation":        observation,
-		"observation_sha256": typedEvidenceDigest(canonicalObservation),
-		"scenario_key":       "alpha",
-	})
+	return canonicalTypedEvidenceJSON(t, wireTraceRecord(t, map[string]any{"verified": true}))
 }
 
 func TestTypedEvidenceVerifierAcceptsExactCanonicalEvidence(t *testing.T) {
@@ -120,46 +124,20 @@ func TestTypedEvidenceVerifierFailsClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	badDigest := make(map[string]any, len(record))
-	for key, value := range record {
-		badDigest[key] = value
-	}
+	badDigest := maps.Clone(record)
 	badDigest["observation_sha256"] = string(make([]byte, 64))
 
-	extraKind := make(map[string]any, len(record))
-	for key, value := range record {
-		extraKind[key] = value
-	}
+	extraKind := maps.Clone(record)
 	extraKind["kind"] = "unexpected_kind"
 
 	secretObservation := map[string]any{"value": "lv_live_must_not_escape"}
-	secret := map[string]any{
-		"kind":               "wire_trace",
-		"observation":        secretObservation,
-		"observation_sha256": typedEvidenceDigest(canonicalTypedEvidenceJSON(t, secretObservation)),
-		"scenario_key":       "alpha",
-	}
+	secret := wireTraceRecord(t, secretObservation)
 	secretKeyObservation := map[string]any{"api_key": "short-secret"}
-	secretKey := map[string]any{
-		"kind":               "wire_trace",
-		"observation":        secretKeyObservation,
-		"observation_sha256": typedEvidenceDigest(canonicalTypedEvidenceJSON(t, secretKeyObservation)),
-		"scenario_key":       "alpha",
-	}
+	secretKey := wireTraceRecord(t, secretKeyObservation)
 	falseObservation := map[string]any{"verified": false}
-	falseEvidence := map[string]any{
-		"kind":               "wire_trace",
-		"observation":        falseObservation,
-		"observation_sha256": typedEvidenceDigest(canonicalTypedEvidenceJSON(t, falseObservation)),
-		"scenario_key":       "alpha",
-	}
+	falseEvidence := wireTraceRecord(t, falseObservation)
 	opaqueObservation := map[string]any{"payload": "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=", "verified": true}
-	opaqueEvidence := map[string]any{
-		"kind":               "wire_trace",
-		"observation":        opaqueObservation,
-		"observation_sha256": typedEvidenceDigest(canonicalTypedEvidenceJSON(t, opaqueObservation)),
-		"scenario_key":       "alpha",
-	}
+	opaqueEvidence := wireTraceRecord(t, opaqueObservation)
 
 	tests := map[string][]byte{
 		"missing":             nil,
