@@ -3,12 +3,13 @@ package nativeudp_test
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -81,29 +82,17 @@ func scenarioInventoryMappingSHA256(inventory scenarioInventory) (string, error)
 	}
 	encoded := bytes.TrimSuffix(canonical.Bytes(), []byte{'\n'})
 	digest := sha256.Sum256(encoded)
-	return fmt.Sprintf("%x", digest), nil
+	return hex.EncodeToString(digest[:]), nil
 }
 
 func decodeScenarioInventory(raw []byte) (scenarioInventory, error) {
-	if err := rejectDuplicateJSONKeys(raw); err != nil {
-		return scenarioInventory{}, err
-	}
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
-	var inventory scenarioInventory
-	if err := decoder.Decode(&inventory); err != nil {
-		return scenarioInventory{}, err
-	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return scenarioInventory{}, fmt.Errorf("scenario inventory contains trailing JSON: %w", err)
-	}
-	return inventory, nil
+	return decodeStrictJSON[scenarioInventory](raw, "scenario inventory")
 }
 
 func validateScenarioInventory(t *testing.T, inventory scenarioInventory) {
 	t.Helper()
 	if inventory.SchemaVersion != 1 || inventory.Gate != "udp_lifecycle_retirement" ||
-		!slicesEqual(inventory.ProofPhases, []string{"pre_removal", "post_removal"}) || !inventory.AllScenariosRequired {
+		!slices.Equal(inventory.ProofPhases, []string{"pre_removal", "post_removal"}) || !inventory.AllScenariosRequired {
 		t.Fatalf("scenario inventory header = version %d, gate %q, phases %q, all required %t", inventory.SchemaVersion, inventory.Gate, inventory.ProofPhases, inventory.AllScenariosRequired)
 	}
 
@@ -223,7 +212,7 @@ func validateScenarioInventory(t *testing.T, inventory scenarioInventory) {
 		}
 	}
 	sort.Strings(actualIDs)
-	if !slicesEqual(actualIDs, expectedIDs) {
+	if !slices.Equal(actualIDs, expectedIDs) {
 		t.Fatalf("scenario inventory ids =\n%q\nwant exact pre-retirement inventory\n%q", actualIDs, expectedIDs)
 	}
 	if implemented != 10 || len(inventory.Scenarios)-implemented != 58 {
@@ -280,16 +269,4 @@ func TestScenarioAdapterNamespacesFailClosed(t *testing.T) {
 			t.Fatalf("owner %q accepted wrong adapter %q", scenario.Owner, scenario.TestName)
 		}
 	}
-}
-
-func slicesEqual(left, right []string) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	for i := range left {
-		if left[i] != right[i] {
-			return false
-		}
-	}
-	return true
 }

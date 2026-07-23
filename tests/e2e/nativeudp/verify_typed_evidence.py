@@ -16,8 +16,7 @@ import sys
 from typing import Any
 
 
-KIND_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
-KEY_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+IDENTIFIER_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 SENSITIVE_KEY_PATTERN = re.compile(
     r"(?:^|_)(?:api_key|authorization|code|cookie|credential|otp|password|private_key|secret|token)(?:_|$)"
 )
@@ -105,7 +104,7 @@ def validate_sanitized_observation(observation: Any) -> bytes:
             if len(value) > 32:
                 raise ValueError("observation object exceeds the field limit")
             for key, item in value.items():
-                if not isinstance(key, str) or KEY_PATTERN.fullmatch(key) is None:
+                if not isinstance(key, str) or IDENTIFIER_PATTERN.fullmatch(key) is None:
                     raise ValueError(f"observation key is not allowlisted: {key!r}")
                 if SENSITIVE_KEY_PATTERN.search(key) and not key.endswith(SAFE_SENSITIVE_KEY_SUFFIXES):
                     raise ValueError(f"observation key could expose a secret: {key!r}")
@@ -145,7 +144,7 @@ def validate_contract(inventory: Any, contract: Any) -> tuple[list[str], dict[st
     for kind, kind_contract in contract["evidence_kinds"].items():
         if (
             not isinstance(kind, str)
-            or KIND_PATTERN.fullmatch(kind) is None
+            or IDENTIFIER_PATTERN.fullmatch(kind) is None
             or not isinstance(kind_contract, dict)
             or set(kind_contract) != {"exact_observation"}
             or kind_contract["exact_observation"] != {"verified": True}
@@ -176,7 +175,7 @@ def validate_contract(inventory: Any, contract: Any) -> tuple[list[str], dict[st
             or not kinds
             or kinds != sorted(kinds)
             or len(kinds) != len(set(kinds))
-            or any(not isinstance(kind, str) or KIND_PATTERN.fullmatch(kind) is None for kind in kinds)
+            or any(not isinstance(kind, str) or IDENTIFIER_PATTERN.fullmatch(kind) is None for kind in kinds)
             or any(kind not in kind_contracts for kind in kinds)
         ):
             raise ValueError(f"typed evidence kinds are invalid for {scenario_key}")

@@ -130,19 +130,23 @@ func TestSandboxConnectorUDP(t *testing.T) {
 }
 
 func decodeConnectorProofAttestation(raw []byte) (connectorProofAttestation, error) {
+	return decodeStrictJSON[connectorProofAttestation](raw, "attestation")
+}
+
+func decodeStrictJSON[T any](raw []byte, what string) (T, error) {
+	var value T
 	if err := rejectDuplicateJSONKeys(raw); err != nil {
-		return connectorProofAttestation{}, err
+		return value, err
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
-	var attestation connectorProofAttestation
-	if err := decoder.Decode(&attestation); err != nil {
-		return connectorProofAttestation{}, err
+	if err := decoder.Decode(&value); err != nil {
+		return value, err
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return connectorProofAttestation{}, fmt.Errorf("attestation contains trailing JSON: %w", err)
+		return value, fmt.Errorf("%s contains trailing JSON: %w", what, err)
 	}
-	return attestation, nil
+	return value, nil
 }
 
 func rejectDuplicateJSONKeys(raw []byte) error {

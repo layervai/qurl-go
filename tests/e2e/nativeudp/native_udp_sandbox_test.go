@@ -158,6 +158,21 @@ func (t *lifecycleHTTPTrap) snapshot() (int64, string) {
 	return t.calls.Load(), t.first
 }
 
+func installLifecycleHTTPTrap(t *testing.T) *lifecycleHTTPTrap {
+	t.Helper()
+	trap := &lifecycleHTTPTrap{}
+	previousDefaultClient := http.DefaultClient
+	previousDefaultTransport := http.DefaultTransport
+	http.DefaultClient = &http.Client{Transport: trap}
+	http.DefaultTransport = trap
+	t.Cleanup(func() {
+		http.DefaultClient = previousDefaultClient
+		http.DefaultTransport = previousDefaultTransport
+		assertNoLifecycleHTTP(t, trap)
+	})
+	return trap
+}
+
 func TestSandboxNativeUDPLifecycle(t *testing.T) {
 	cfg, enabled, err := loadSandboxConfig(os.Getenv)
 	if err != nil {
@@ -167,19 +182,7 @@ func TestSandboxNativeUDPLifecycle(t *testing.T) {
 		t.Skip("attended proof only; set QURL_GO_SANDBOX_STRICT=true to require live sandbox execution")
 	}
 
-	httpTrap := &lifecycleHTTPTrap{}
-	previousDefaultClient := http.DefaultClient
-	previousDefaultTransport := http.DefaultTransport
-	http.DefaultClient = &http.Client{Transport: httpTrap}
-	http.DefaultTransport = httpTrap
-	t.Cleanup(func() {
-		http.DefaultClient = previousDefaultClient
-		http.DefaultTransport = previousDefaultTransport
-		calls, first := httpTrap.snapshot()
-		if calls != 0 {
-			t.Errorf("native lifecycle made %d forbidden HTTP call(s); first=%q", calls, first)
-		}
-	})
+	httpTrap := installLifecycleHTTPTrap(t)
 
 	ctx, cancel := context.WithTimeout(t.Context(), sandboxProofTimeout)
 	defer cancel()
@@ -332,23 +335,13 @@ func TestNativeUDPClientFaultPaths(t *testing.T) {
 		Port:               standardNHPUDPPort,
 		ServerPublicKeyB64: base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef")),
 	}
-	httpTrap := &lifecycleHTTPTrap{}
-	previousDefaultClient := http.DefaultClient
-	previousDefaultTransport := http.DefaultTransport
-	http.DefaultClient = &http.Client{Transport: httpTrap}
-	http.DefaultTransport = httpTrap
-	t.Cleanup(func() {
-		http.DefaultClient = previousDefaultClient
-		http.DefaultTransport = previousDefaultTransport
-		assertNoLifecycleHTTP(t, httpTrap)
-	})
+	httpTrap := installLifecycleHTTPTrap(t)
 	t.Run("hub_dns_failure", func(t *testing.T) {
 		proveHubDNSFailure(t.Context(), t, hub, httpTrap)
 	})
 	t.Run("packet_timeout", func(t *testing.T) {
 		provePacketTimeout(t.Context(), t, hub, httpTrap)
 	})
-	assertNoLifecycleHTTP(t, httpTrap)
 }
 
 func TestSandboxProofProvenanceIsAllowlisted(t *testing.T) {

@@ -206,7 +206,6 @@ func TestTypedEvidenceScenarioProducerSubprocess(t *testing.T) {
 	if mode == "" {
 		return
 	}
-	path := os.Getenv(typedEvidencePathEnv)
 	run := func(t *testing.T) {
 		switch mode {
 		case "success", "duplicate":
@@ -224,7 +223,6 @@ func TestTypedEvidenceScenarioProducerSubprocess(t *testing.T) {
 	if mode == "duplicate" {
 		runTypedEvidenceScenario(t, "duplicate", "proof.success-only", []string{"wire_trace"}, run)
 	}
-	_ = path
 }
 
 func TestTypedEvidenceScenarioProducerEmitsOnlyAfterSuccess(t *testing.T) {

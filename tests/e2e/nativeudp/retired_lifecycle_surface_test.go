@@ -3,6 +3,7 @@ package nativeudp_test
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -97,19 +98,7 @@ func TestRetiredLifecycleSurfaceContract(t *testing.T) {
 }
 
 func decodeRetiredLifecycleSurface(raw []byte) (retiredLifecycleSurface, error) {
-	if err := rejectDuplicateJSONKeys(raw); err != nil {
-		return retiredLifecycleSurface{}, err
-	}
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
-	var surface retiredLifecycleSurface
-	if err := decoder.Decode(&surface); err != nil {
-		return retiredLifecycleSurface{}, err
-	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return retiredLifecycleSurface{}, fmt.Errorf("retired lifecycle surface contains trailing JSON: %w", err)
-	}
-	return surface, nil
+	return decodeStrictJSON[retiredLifecycleSurface](raw, "retired lifecycle surface")
 }
 
 func canonicalJSONSHA256(raw []byte) (string, error) {
@@ -130,7 +119,7 @@ func canonicalJSONSHA256(raw []byte) (string, error) {
 		return "", err
 	}
 	digest := sha256.Sum256(canonical)
-	return fmt.Sprintf("%x", digest), nil
+	return hex.EncodeToString(digest[:]), nil
 }
 
 func TestDecodeRetiredLifecycleSurfaceRejectsAmbiguousJSON(t *testing.T) {
