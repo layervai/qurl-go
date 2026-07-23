@@ -128,7 +128,11 @@ func ExampleRegisterAgentRuntime() {
 	// The default policy accepts pre-issued/headless key kinds, including the
 	// durable qurl:agent kind, and rejects account enrollment.
 	ctx := context.Background()
-	store := qurl.FileAgentState("/var/lib/layerv/qurl/agent-state.json")
+	store, err := qurl.OpenFileAgentState("/var/lib/layerv/qurl/agent-state.json")
+	if err != nil {
+		panic(err)
+	}
+	defer store.Close()
 	hub := qurl.HubBootstrap{
 		Host:               "hub.nhp.layerv.ai",
 		Port:               62206,
@@ -168,7 +172,11 @@ func ExampleRecoverAgentRuntime() {
 	// has been deliberately revoked. Both lifecycle legs use authenticated NHP
 	// UDP; the returned Client alone uses HTTPS for later resource CRUD.
 	ctx := context.Background()
-	store := qurl.FileAgentState("/var/lib/layerv/qurl/agent-state.json")
+	store, err := qurl.OpenFileAgentState("/var/lib/layerv/qurl/agent-state.json")
+	if err != nil {
+		panic(err)
+	}
+	defer store.Close()
 	hub := qurl.HubBootstrap{
 		Host:               "hub.nhp.layerv.ai",
 		Port:               62206,
@@ -197,6 +205,7 @@ func ExampleNewSealedFileAgentState() {
 	if err != nil {
 		panic(err)
 	}
+	defer store.Close()
 	_, binding, _ := qurl.RegisterAgentRuntime(context.Background(), "lv_enrollment_AAECAwQFBgcICQoLDA0ODxAREhMUFRYX", store,
 		qurl.WithAgentRuntimeHub(qurl.HubBootstrap{
 			Host: "hub.nhp.layerv.ai", Port: 62206,

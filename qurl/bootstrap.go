@@ -8,7 +8,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -405,24 +407,136 @@ type AgentStateStore interface {
 	SaveAgentState(context.Context, *AgentState) error
 }
 
+// OpenFileAgentState pins the complete no-follow path to a trusted 0700
+// state directory and returns a plaintext local store whose state and mandatory
+// setup lock are always accessed relative to that retained directory capability.
+// The caller owns the returned handle and must Close it after every Client and
+// native lifecycle operation that can use the store has finished.
+//
+// Linux and Darwin are supported, excluding Android and iOS. Mobile and other
+// platforms fail before filesystem mutation until they have reviewed ACL,
+// locking, and durability primitives.
+func OpenFileAgentState(path string) (*FileAgentStateStore, error) {
+	dir, name, err := openPinnedStatePath(path, "agent state")
+	if err != nil {
+		return nil, err
+	}
+	store := &FileAgentStateStore{dir: dir, name: name, path: path}
+	cleanup := runtime.AddCleanup(store, closePinnedStateDir, dir)
+	store.cleanup = &cleanup
+	return store, nil
+}
+
 // FileAgentState stores bootstrap state in a local plaintext JSON file written
-// 0600. Local filesystem I/O is synchronous; the context passed to LoadAgentState
-// or SaveAgentState cannot interrupt a read or write once it has started.
+// 0600. It is retained for source compatibility with early SDK releases.
+// New process-lifetime integrations such as qURL Connector must use
+// OpenFileAgentState so construction errors and Close ownership are explicit.
+//
+// This compatibility constructor still pins immediately. If construction fails,
+// it returns a store whose operations deterministically return that error; it
+// never falls back to pathname I/O. Its dynamic value implements io.Closer and
+// should be closed after its last use; a runtime cleanup is only a leak-safety
+// fallback for legacy callers whose static AgentStateStore value hides Close.
 func FileAgentState(path string) AgentStateStore {
-	return fileAgentStateStore{fileSetupLock: fileSetupLock{path: path, lockFile: lockFileExclusive}}
+	store, err := OpenFileAgentState(path)
+	if err != nil {
+		return &FileAgentStateStore{initErr: err}
+	}
+	return store
 }
 
-type fileAgentStateStore struct {
-	fileSetupLock
+// FileAgentStateStore is an SDK-owned pinned plaintext AgentState store.
+// Do not copy it; retain the constructor-returned pointer and Close it once.
+type FileAgentStateStore struct {
+	dir     *pinnedStateDir
+	name    string
+	path    string
+	initErr error
+	closeMu sync.Mutex
+	cleanup *runtime.Cleanup
 }
 
-func (s fileAgentStateStore) LoadAgentState(ctx context.Context) (*AgentState, error) {
+func closePinnedStateDir(dir *pinnedStateDir) { _ = dir.close() }
+
+func (s *FileAgentStateStore) operationalError() error {
+	if s == nil {
+		return fmt.Errorf("%w: plaintext agent state store is nil", ErrAgentStateContinuity)
+	}
+	return s.initErr
+}
+
+// Close releases the retained state-directory capability. It is idempotent and
+// waits for an in-flight store or setup-lock operation to release its reference.
+func (s *FileAgentStateStore) Close() (resultErr error) {
+	if err := s.operationalError(); err != nil {
+		return err
+	}
+	s.closeMu.Lock()
+	if s.cleanup != nil {
+		s.cleanup.Stop()
+		s.cleanup = nil
+	}
+	s.closeMu.Unlock()
+	resultErr = s.dir.close()
+	runtime.KeepAlive(s)
+	return resultErr
+}
+
+// ValidateContinuity proves that the configured path still resolves through
+// no-follow traversal to the directory retained by OpenFileAgentState.
+func (s *FileAgentStateStore) ValidateContinuity() (resultErr error) {
+	if err := s.operationalError(); err != nil {
+		return err
+	}
+	resultErr = s.dir.validate()
+	runtime.KeepAlive(s)
+	return resultErr
+}
+
+func (s *FileAgentStateStore) retainContinuity() (AgentStateStore, func() error, error) {
+	if err := s.operationalError(); err != nil {
+		return nil, nil, err
+	}
+	retained, release, err := s.dir.retainOperation(s)
+	runtime.KeepAlive(s)
+	return retained, release, err
+}
+
+func (s *FileAgentStateStore) acquireSetupLock(ctx context.Context) (setupLock, error) {
+	if err := s.operationalError(); err != nil {
+		return nil, err
+	}
+	lock, err := s.dir.lock(ctx, s.name+agentSetupLockSuffix)
+	runtime.KeepAlive(s)
+	if err != nil {
+		return nil, fmt.Errorf("%w: acquire pinned setup lock: %w", ErrAgentSetupLock, err)
+	}
+	return lock, nil
+}
+
+// LoadAgentState loads and validates a fresh caller-owned state snapshot from
+// the pinned plaintext file.
+func (s *FileAgentStateStore) LoadAgentState(ctx context.Context) (state *AgentState, resultErr error) {
+	if err := validateContext(ctx, ErrInvalidBootstrapConfig); err != nil {
+		return nil, err
+	}
+	state, resultErr = withAgentStoreContinuity(s, func(*AgentState) {}, func(retained AgentStateStore) (*AgentState, error) {
+		return retained.LoadAgentState(ctx)
+	})
+	runtime.KeepAlive(s)
+	return state, resultErr
+}
+
+func (s *FileAgentStateStore) loadAgentStateRetained(ctx context.Context, op *pinnedStateOperation) (*AgentState, error) {
+	if err := s.operationalError(); err != nil {
+		return nil, err
+	}
 	if err := validateContext(ctx, ErrInvalidBootstrapConfig); err != nil {
 		return nil, err
 	}
 	// Corrupt-content faults use the store-neutral ErrInvalidAgentState class;
 	// lifecycle front doors re-wrap it in their own config-error class.
-	raw, err := readPrivateStateFileBounded(s.path, "agent state", maxAgentStateBytes, privateStateDirExact0700, ErrAgentStateNotFound, ErrInvalidAgentState, ErrInsecureAgentStatePermissions)
+	raw, err := op.load(ctx, s.name, "agent state", maxAgentStateBytes, ErrAgentStateNotFound)
 	if err != nil {
 		return nil, err
 	}
@@ -438,9 +552,27 @@ func (s fileAgentStateStore) LoadAgentState(ctx context.Context) (*AgentState, e
 	return &state, nil
 }
 
-func (s fileAgentStateStore) SaveAgentState(ctx context.Context, state *AgentState) error {
-	if strings.TrimSpace(s.path) == "" {
-		return fmt.Errorf("%w: state path must not be empty", ErrInvalidBootstrapConfig)
+// SaveAgentState atomically replaces the pinned plaintext file after continuity
+// and descriptor-to-entry validation.
+func (s *FileAgentStateStore) SaveAgentState(ctx context.Context, state *AgentState) (resultErr error) {
+	if err := validateContext(ctx, ErrInvalidBootstrapConfig); err != nil {
+		return err
+	}
+	if err := rejectSetupLockReentry(ctx, s); err != nil {
+		return err
+	}
+	_, resultErr = withAgentStoreContinuity(s, func(struct{}) {}, func(retained AgentStateStore) (struct{}, error) {
+		return withAgentSetupLock(ctx, retained, func(struct{}) {}, func(lockedCtx context.Context, locked AgentStateStore) (struct{}, error) {
+			return struct{}{}, locked.SaveAgentState(lockedCtx, state)
+		})
+	})
+	runtime.KeepAlive(s)
+	return resultErr
+}
+
+func (s *FileAgentStateStore) saveAgentStateRetained(ctx context.Context, state *AgentState, op *pinnedStateOperation, setup *pinnedSetupLockToken) error {
+	if err := s.operationalError(); err != nil {
+		return err
 	}
 	if state == nil {
 		return fmt.Errorf("%w: state must not be nil", ErrInvalidBootstrapConfig)
@@ -456,7 +588,7 @@ func (s fileAgentStateStore) SaveAgentState(ctx context.Context, state *AgentSta
 	if len(raw) > maxAgentStateBytes {
 		return fmt.Errorf("%w: encoded agent state exceeds %d bytes", ErrInvalidBootstrapConfig, maxAgentStateBytes)
 	}
-	return writePrivateStateFileAtomic(ctx, s.path, "agent state", ".qurl-agent-state-*", raw, defaultPrivateStateFileOps)
+	return op.save(ctx, setup, s.name, "agent state", ".qurl-agent-state-", raw)
 }
 
 // validateCompletedAgentIdentity checks the durable identity fields required by

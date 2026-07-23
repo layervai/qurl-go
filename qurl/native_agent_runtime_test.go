@@ -1337,9 +1337,9 @@ func TestRegisterAgentRuntime_RejectsIncompleteCredentialStateBeforeIO(t *testin
 
 func TestRegisterAgentRuntime_InitialIdentitySaveUsesBindingPersistenceTaxonomy(t *testing.T) {
 	f := newRuntimeFixture(t, nil, nil)
-	inner, ok := f.store.inner.(fileAgentStateStore)
+	inner, ok := f.store.inner.(*FileAgentStateStore)
 	if !ok {
-		t.Fatalf("fixture store = %T, want fileAgentStateStore", f.store.inner)
+		t.Fatalf("fixture store = %T, want *FileAgentStateStore", f.store.inner)
 	}
 	if err := os.Remove(inner.path); err != nil {
 		t.Fatal(err)
@@ -1631,7 +1631,7 @@ func TestRegisterAgentRuntime_PreREGCancellationLeavesExactPendingActivation(t *
 	if marshalErr != nil {
 		t.Fatal(marshalErr)
 	}
-	fileStore, ok := f.store.inner.(fileAgentStateStore)
+	fileStore, ok := f.store.inner.(*FileAgentStateStore)
 	if !ok {
 		t.Fatal("runtime fixture is not backed by FileAgentState")
 	}

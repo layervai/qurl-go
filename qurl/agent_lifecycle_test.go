@@ -29,6 +29,10 @@ type releaseErrorAgentStateStore struct {
 	closeErr error
 }
 
+type testSetupLock struct{ closeErr error }
+
+func (l testSetupLock) Close() error { return l.closeErr }
+
 func (s *releaseErrorAgentStateStore) acquireSetupLock(context.Context) (setupLock, error) {
 	return testSetupLock{closeErr: s.closeErr}, nil
 }
@@ -78,7 +82,7 @@ func TestWithAgentSetupLock_CleansResultBeforeZeroingOnReleaseFailure(t *testing
 
 			got, err := withAgentSetupLock(context.Background(), store, func(result *int) {
 				cleanupSawResult = result == want
-			}, func() (*int, error) {
+			}, func(context.Context, AgentStateStore) (*int, error) {
 				return want, test.transitionErr
 			})
 
@@ -104,7 +108,7 @@ func TestWithAgentSetupLock_ReleaseFailureDestroysNativeRuntimePrivateKey(t *tes
 		binding: &AgentRuntimeBinding{deviceStaticPrivateKey: newAgentRuntimePrivateKey(privateKey)},
 	}
 
-	got, err := withAgentSetupLock(context.Background(), store, destroyNativeRuntimeResult, func() (*nativeRuntimeResult, error) {
+	got, err := withAgentSetupLock(context.Background(), store, destroyNativeRuntimeResult, func(context.Context, AgentStateStore) (*nativeRuntimeResult, error) {
 		return result, nil
 	})
 

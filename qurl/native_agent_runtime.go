@@ -166,6 +166,7 @@ type nativeAgentRuntimeConfig struct {
 	clock             func() time.Time
 	random            io.Reader
 	deviceCredential  string
+	continuityStore   AgentStateStore
 }
 
 type nativeRuntimeOptionFunc func(*nativeAgentRuntimeConfig) error
@@ -448,6 +449,13 @@ func (c *nativeAgentRuntimeConfig) udpOptions(privateKey []byte) nativeudp.Optio
 	return nativeudp.Options{DeviceStaticPriv: privateKey, Resolver: c.resolver, Dialer: c.dialer, Timeout: c.timeout, MaxAddresses: c.maxAddresses}
 }
 
+func (c *nativeAgentRuntimeConfig) validateStateContinuity() error {
+	if c == nil {
+		return fmt.Errorf("%w: native runtime config is nil", ErrAgentStateContinuity)
+	}
+	return validateAgentStateStoreContinuity(c.continuityStore)
+}
+
 func registerNativeAgentRuntime(ctx context.Context, enrollmentCredential string, store AgentStateStore, opts []AgentRuntimeRegistrationOption) (*Client, *AgentRuntimeBinding, error) {
 	if err := validateContext(ctx, ErrInvalidRegisterConfig); err != nil {
 		return nil, nil, err
@@ -460,15 +468,17 @@ func registerNativeAgentRuntime(ctx context.Context, enrollmentCredential string
 		return nil, nil, err
 	}
 
-	state, found, err := loadNativeAgentStateIfPresent(ctx, store)
-	if err != nil {
-		return nil, nil, err
-	}
-	if found && state.RegisteredAt != nil {
-		return finishNativeRuntime(store, state, cfg)
-	}
-	result, err := withAgentSetupLock(ctx, store, destroyNativeRuntimeResult, func() (*nativeRuntimeResult, error) {
-		return cfg.registerLocked(ctx, enrollmentCredential, store)
+	result, err := withAgentStoreContinuity(store, destroyNativeRuntimeResult, func(retained AgentStateStore) (*nativeRuntimeResult, error) {
+		state, found, err := loadNativeAgentStateIfPresent(ctx, retained)
+		if err != nil {
+			return nil, err
+		}
+		if found && state.RegisteredAt != nil {
+			return finishNativeRuntimeResult(store, state, cfg)
+		}
+		return withAgentSetupLock(ctx, retained, destroyNativeRuntimeResult, func(lockedCtx context.Context, locked AgentStateStore) (*nativeRuntimeResult, error) {
+			return cfg.registerLocked(lockedCtx, enrollmentCredential, locked)
+		})
 	})
 	if err != nil {
 		return nil, nil, err
@@ -498,6 +508,7 @@ func (r *nativeRuntimeResult) split() (*Client, *AgentRuntimeBinding, error) {
 }
 
 func finishNativeRuntime(store AgentStateStore, state *AgentState, cfg *nativeAgentRuntimeConfig) (*Client, *AgentRuntimeBinding, error) {
+	store = baseAgentStateStore(store)
 	if err := validateCompletedAgentIdentity(state, ErrInvalidRegisterConfig); err != nil {
 		return nil, nil, err
 	}
@@ -530,6 +541,8 @@ func finishNativeRuntimeResult(store AgentStateStore, state *AgentState, cfg *na
 }
 
 func (c *nativeAgentRuntimeConfig) registerLocked(ctx context.Context, enrollmentCredential string, store AgentStateStore) (*nativeRuntimeResult, error) {
+	c.continuityStore = store
+	defer func() { c.continuityStore = nil }()
 	state, err := loadOrCreateAgentState(ctx, store, ErrInvalidRegisterConfig)
 	if err != nil {
 		return nil, err
@@ -947,11 +960,11 @@ func generateDeviceID() (string, error) {
 // recovery plus authenticated 52200/52204 waits, so one request_nonce and one
 // serialized LST body cover the whole operation without nested retry budgets.
 func (c *nativeAgentRuntimeConfig) fetchInitialAssignmentLifecycle(ctx context.Context, hub HubBootstrap, agentID, enrollmentCredential string, privateKey []byte) (*InitialAgentAssignment, error) {
-	return FetchInitialAgentAssignment(ctx, hub, agentID, enrollmentCredential, c.udpOptions(privateKey), c.assignmentOptions...)
+	return fetchInitialAgentAssignment(ctx, hub, agentID, enrollmentCredential, c.udpOptions(privateKey), c.validateStateContinuity, c.assignmentOptions...)
 }
 
 func (c *nativeAgentRuntimeConfig) refreshAssignmentLifecycle(ctx context.Context, hub HubBootstrap, agentID string, privateKey []byte) (*AgentAssignment, error) {
-	return RefreshAgentAssignment(ctx, hub, agentID, c.udpOptions(privateKey), c.assignmentOptions...)
+	return refreshAgentAssignment(ctx, hub, agentID, c.udpOptions(privateKey), c.validateStateContinuity, c.assignmentOptions...)
 }
 
 func (c *nativeAgentRuntimeConfig) requireAllowedRegistrationKeyKind(raw string) error {
@@ -1131,6 +1144,9 @@ func (c *nativeAgentRuntimeConfig) registrationCredential(ctx context.Context, s
 		if err != nil {
 			return "", err
 		}
+		if err := c.validateStateContinuity(); err != nil {
+			return "", err
+		}
 		if err := nativeudp.SendOTP(providerCtx, endpoint, body, c.udpOptions(privateKey)); err != nil {
 			if ctx.Err() != nil {
 				return "", ctx.Err()
@@ -1271,7 +1287,7 @@ func (c *nativeAgentRuntimeConfig) registerPendingActivation(ctx context.Context
 	if err != nil {
 		return err
 	}
-	_, err = runNativeExchange(recoveryCtx, retry, endpoint, body, c.udpOptions(privateKey), nativeudp.Register, registrationRetryInfo, newRegistrationRecovery, func(reply []byte, _ time.Time) (*struct{}, error) {
+	_, err = runNativeExchange(recoveryCtx, retry, endpoint, body, c.udpOptions(privateKey), c.validateStateContinuity, nativeudp.Register, registrationRetryInfo, newRegistrationRecovery, func(reply []byte, _ time.Time) (*struct{}, error) {
 		ack, parseErr := parseNativeRegisterAck(reply)
 		if parseErr != nil {
 			return nil, parseErr
@@ -1495,7 +1511,7 @@ func (c *nativeAgentRuntimeConfig) runCompletionExchange(ctx context.Context, en
 	}
 	// Pending-credential completion shares the bounded assignment retry driver;
 	// only its retry classifier, recovery type, and reply parser differ.
-	keyID, err := runNativeExchange(ctx, retry, endpoint, body, transport, nativeudp.List, completionRetryInfo, newCompletionRecovery, func(reply []byte, _ time.Time) (*string, error) {
+	keyID, err := runNativeExchange(ctx, retry, endpoint, body, transport, c.validateStateContinuity, nativeudp.List, completionRetryInfo, newCompletionRecovery, func(reply []byte, _ time.Time) (*string, error) {
 		id, parseErr := parseCompletionReply(reply)
 		if parseErr != nil {
 			return nil, parseErr
@@ -1953,8 +1969,10 @@ func RefreshAgentRuntime(ctx context.Context, hub HubBootstrap, store AgentState
 	if _, err := hub.nativeEndpoint(); err != nil {
 		return nil, nil, fmt.Errorf("%w: Hub trust root: %w", ErrInvalidRegisterConfig, err)
 	}
-	result, err := withAgentSetupLock(ctx, store, destroyNativeRuntimeResult, func() (*nativeRuntimeResult, error) {
-		state, err := loadCompletedRegisteredState(ctx, store, ErrInvalidRegisterConfig)
+	result, err := withAgentSetupLock(ctx, store, destroyNativeRuntimeResult, func(lockedCtx context.Context, locked AgentStateStore) (*nativeRuntimeResult, error) {
+		cfg.continuityStore = locked
+		defer func() { cfg.continuityStore = nil }()
+		state, err := loadCompletedRegisteredState(lockedCtx, locked, ErrInvalidRegisterConfig)
 		if err != nil {
 			return nil, err
 		}
@@ -1966,7 +1984,7 @@ func RefreshAgentRuntime(ctx context.Context, hub HubBootstrap, store AgentState
 			return nil, err
 		}
 		defer wipeBytes(privateKey)
-		fresh, err := cfg.refreshAssignmentLifecycle(ctx, hub, state.AgentID, privateKey)
+		fresh, err := cfg.refreshAssignmentLifecycle(lockedCtx, hub, state.AgentID, privateKey)
 		if err != nil {
 			return nil, err
 		}
@@ -1976,12 +1994,12 @@ func RefreshAgentRuntime(ctx context.Context, hub HubBootstrap, store AgentState
 		if !sameAgentAssignment(state.Assignment, fresh) {
 			candidate := state.clone()
 			candidate.Assignment = fresh.clone()
-			if err := store.SaveAgentState(ctx, candidate); err != nil {
+			if err := locked.SaveAgentState(lockedCtx, candidate); err != nil {
 				return nil, fmt.Errorf("%w: save refreshed assignment: %w", ErrAgentBindingPersistence, err)
 			}
 			state = candidate
 		}
-		return finishNativeRuntimeResult(store, state, cfg)
+		return finishNativeRuntimeResult(locked, state, cfg)
 	})
 	if err != nil {
 		return nil, nil, err
