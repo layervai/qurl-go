@@ -18,6 +18,14 @@ on:
         description: Successful same-phase qurl-connector Sandbox Smoke proof run id
         required: true
         type: string
+      nhp_controller_run_id:
+        description: NHP attended controller workflow run id that created this proof runner
+        required: true
+        type: string
+      nhp_controller_run_attempt:
+        description: NHP attended controller workflow run attempt that created this proof runner
+        required: true
+        type: string
       pre_removal_run_id:
         description: Required for post_removal; successful paired pre_removal workflow run id
         required: false
@@ -34,7 +42,9 @@ permissions:
 jobs:
   prove:
     name: direct UDP lifecycle
-    runs-on: ubuntu-latest
+    runs-on:
+      group: udp-proof-sandbox
+      labels: run-${{ inputs.nhp_controller_run_id }}-attempt-${{ inputs.nhp_controller_run_attempt }}
     timeout-minutes: 75
     environment: sandbox
     env:
@@ -81,6 +91,8 @@ jobs:
       - name: Verify exact proof inputs
         env:
           GH_TOKEN: ${{ steps.proof-token.outputs.token }}
+          QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ID: ${{ inputs.nhp_controller_run_id }}
+          QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ATTEMPT: ${{ inputs.nhp_controller_run_attempt }}
         shell: bash
         run: |
           set -euo pipefail
@@ -270,6 +282,11 @@ jobs:
 
           test "$(git rev-parse HEAD)" = "${QURL_GO_SANDBOX_EXPECTED_SHA}"
           test -z "$(git status --short)"
+          if [[ ! "${QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ID}" =~ ^[1-9][0-9]{0,19}$ ]] ||
+            [[ ! "${QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ATTEMPT}" =~ ^[1-9][0-9]{0,9}$ ]]; then
+            echo "::error::invalid NHP controller run identity"
+            exit 1
+          fi
           case "${QURL_GO_SANDBOX_PROOF_PHASE}" in
             pre_removal|post_removal) ;;
             *) echo "::error::invalid proof phase"; exit 1 ;;
@@ -424,11 +441,13 @@ jobs:
               $left.endpoint_revision == $right.endpoint_revision and $left.lease_expires_at == $right.lease_expires_at;
             . as $evidence | $deployment[0] as $deployed | $scenarios[0] as $inventory |
             type == "object" and
-            (keys | sort) == ["commit_sha", "connector_attestation_sha256", "connector_proof_run_id", "counts", "deployment_manifest_sha256", "enforcement_outcome", "gate_passed", "inputs_unchanged", "inventory_mapping_sha256", "inventory_sha256", "phase", "pre_removal_deployment_sha256", "pre_removal_evidence_sha256", "pre_removal_run_id", "proof_harness_sha256", "provenance", "provenance_valid", "repository", "retired_lifecycle_surface_sha256", "run_attempt", "run_id", "scenario_contract_sha256", "scenario_results", "schema_version", "strict_outcome", "two_cell_provenance", "typed_evidence", "typed_evidence_complete", "typed_evidence_contract_sha256"] and
+            (keys | sort) == ["commit_sha", "connector_attestation_sha256", "connector_proof_run_id", "counts", "deployment_manifest_sha256", "enforcement_outcome", "gate_passed", "inputs_unchanged", "inventory_mapping_sha256", "inventory_sha256", "nhp_controller_run_attempt", "nhp_controller_run_id", "phase", "pre_removal_deployment_sha256", "pre_removal_evidence_sha256", "pre_removal_run_id", "proof_harness_sha256", "provenance", "provenance_valid", "repository", "retired_lifecycle_surface_sha256", "run_attempt", "run_id", "scenario_contract_sha256", "scenario_results", "schema_version", "strict_outcome", "two_cell_provenance", "typed_evidence", "typed_evidence_complete", "typed_evidence_contract_sha256"] and
             .schema_version == 1 and .phase == "pre_removal" and .gate_passed == true and
             .repository == $repository and .run_id == $run_id and .run_attempt == $run_attempt and
             .commit_sha == $commit_sha and .strict_outcome == "success" and .enforcement_outcome == "success" and
             .inputs_unchanged == true and .provenance_valid == true and .two_cell_provenance == true and .typed_evidence_complete == true and
+            (.nhp_controller_run_id | type == "string" and test("^[1-9][0-9]{0,19}$")) and
+            (.nhp_controller_run_attempt | type == "string" and test("^[1-9][0-9]{0,9}$")) and
             .pre_removal_run_id == null and .pre_removal_evidence_sha256 == null and .pre_removal_deployment_sha256 == null and
             ($inventory | type == "object" and
               (keys | sort) == ["all_scenarios_required", "gate", "proof_phases", "scenarios", "schema_version"] and
@@ -1014,6 +1033,8 @@ jobs:
         env:
           STRICT_OUTCOME: ${{ steps.strict.outcome }}
           ENFORCEMENT_OUTCOME: ${{ steps.enforce.outcome }}
+          QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ID: ${{ inputs.nhp_controller_run_id }}
+          QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ATTEMPT: ${{ inputs.nhp_controller_run_attempt }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1050,7 +1071,9 @@ jobs:
           trap 'rm -f "${raw}" "${typed_observations}" "${typed_evidence_summary}"' EXIT
 
           inputs_unchanged=false
-          if [[ "${QURL_GO_SANDBOX_CONNECTOR_PROOF_RUN_ID}" =~ ^[1-9][0-9]*$ ]] &&
+          if [[ "${QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ID}" =~ ^[1-9][0-9]{0,19}$ ]] &&
+            [[ "${QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ATTEMPT}" =~ ^[1-9][0-9]{0,9}$ ]] &&
+            [[ "${QURL_GO_SANDBOX_CONNECTOR_PROOF_RUN_ID}" =~ ^[1-9][0-9]*$ ]] &&
             [[ "${QURL_GO_SANDBOX_CONNECTOR_ATTESTATION_SHA256:-}" =~ ^[0-9a-f]{64}$ ]] &&
             [[ -n "${QURL_GO_SANDBOX_INVENTORY_SHA256:-}" && -n "${QURL_GO_SANDBOX_INVENTORY_MAPPING_SHA256:-}" && -n "${QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_SHA256:-}" && -n "${QURL_GO_SANDBOX_PROOF_HARNESS_SHA256:-}" && -n "${QURL_GO_SANDBOX_SCENARIO_CONTRACT_SHA256:-}" && -n "${QURL_GO_SANDBOX_TYPED_EVIDENCE_CONTRACT_SHA256:-}" && -n "${QURL_GO_SANDBOX_RETIRED_LIFECYCLE_SURFACE_SHA256:-}" && -s "${inventory_source}" && -s "${inventory}" && -s "${retired_surface_source}" && -s "${retired_surface}" && -s "${deployment}" && -s "${connector_attestation_path}" ]] &&
             [[ "$(jq -cS -j '.' "${inventory_source}" | sha256sum | cut -d' ' -f1)" == "${QURL_GO_SANDBOX_INVENTORY_SHA256}" ]] &&
@@ -1163,6 +1186,8 @@ jobs:
             --arg commit_sha "${GITHUB_SHA}" \
             --arg run_id "${GITHUB_RUN_ID}" \
             --arg run_attempt "${GITHUB_RUN_ATTEMPT}" \
+            --arg nhp_controller_run_id "${QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ID}" \
+            --arg nhp_controller_run_attempt "${QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ATTEMPT}" \
             --arg phase "${QURL_GO_SANDBOX_PROOF_PHASE}" \
             --arg connector_proof_run_id "${QURL_GO_SANDBOX_CONNECTOR_PROOF_RUN_ID}" \
             --arg connector_attestation_sha256 "${QURL_GO_SANDBOX_CONNECTOR_ATTESTATION_SHA256:-}" \
@@ -1191,7 +1216,7 @@ jobs:
             --argjson typed_evidence_complete "${typed_evidence_complete}" \
             --argjson typed_evidence "${typed_evidence}" \
             --argjson scenario_results "${scenario_results}" \
-            '{schema_version: 1, phase: $phase, repository: $repository, commit_sha: $commit_sha, run_id: $run_id, run_attempt: $run_attempt, connector_proof_run_id: $connector_proof_run_id, connector_attestation_sha256: (if $connector_attestation_sha256 == "" then null else $connector_attestation_sha256 end), pre_removal_run_id: (if $pre_removal_run_id == "" then null else $pre_removal_run_id end), pre_removal_evidence_sha256: (if $pre_removal_evidence_sha256 == "" then null else $pre_removal_evidence_sha256 end), pre_removal_deployment_sha256: (if $pre_removal_deployment_sha256 == "" then null else $pre_removal_deployment_sha256 end), deployment_manifest_sha256: $deployment_manifest_sha256, inventory_sha256: $inventory_sha256, inventory_mapping_sha256: $inventory_mapping_sha256, scenario_contract_sha256: $scenario_contract_sha256, retired_lifecycle_surface_sha256: $retired_lifecycle_surface_sha256, typed_evidence_contract_sha256: $typed_evidence_contract_sha256, proof_harness_sha256: $proof_harness_sha256, strict_outcome: $strict_outcome, enforcement_outcome: $enforcement_outcome, inputs_unchanged: $inputs_unchanged, gate_passed: $gate_passed, counts: {implemented: $implemented_count, blocking: $blocking_count, failures: $failure_count, skips: $skip_count, exact_passes: $exact_pass_count}, provenance_valid: $provenance_valid, two_cell_provenance: $two_cell_provenance, provenance: $provenance, typed_evidence_complete: $typed_evidence_complete, typed_evidence: $typed_evidence, scenario_results: $scenario_results}' \
+            '{schema_version: 1, phase: $phase, repository: $repository, commit_sha: $commit_sha, run_id: $run_id, run_attempt: $run_attempt, nhp_controller_run_id: $nhp_controller_run_id, nhp_controller_run_attempt: $nhp_controller_run_attempt, connector_proof_run_id: $connector_proof_run_id, connector_attestation_sha256: (if $connector_attestation_sha256 == "" then null else $connector_attestation_sha256 end), pre_removal_run_id: (if $pre_removal_run_id == "" then null else $pre_removal_run_id end), pre_removal_evidence_sha256: (if $pre_removal_evidence_sha256 == "" then null else $pre_removal_evidence_sha256 end), pre_removal_deployment_sha256: (if $pre_removal_deployment_sha256 == "" then null else $pre_removal_deployment_sha256 end), deployment_manifest_sha256: $deployment_manifest_sha256, inventory_sha256: $inventory_sha256, inventory_mapping_sha256: $inventory_mapping_sha256, scenario_contract_sha256: $scenario_contract_sha256, retired_lifecycle_surface_sha256: $retired_lifecycle_surface_sha256, typed_evidence_contract_sha256: $typed_evidence_contract_sha256, proof_harness_sha256: $proof_harness_sha256, strict_outcome: $strict_outcome, enforcement_outcome: $enforcement_outcome, inputs_unchanged: $inputs_unchanged, gate_passed: $gate_passed, counts: {implemented: $implemented_count, blocking: $blocking_count, failures: $failure_count, skips: $skip_count, exact_passes: $exact_pass_count}, provenance_valid: $provenance_valid, two_cell_provenance: $two_cell_provenance, provenance: $provenance, typed_evidence_complete: $typed_evidence_complete, typed_evidence: $typed_evidence, scenario_results: $scenario_results}' \
             > "${evidence}"
 
       - name: Upload non-secret JSON evidence
@@ -1219,6 +1244,8 @@ jobs:
             .strict_outcome == "success" and
             .enforcement_outcome == "success" and
             .inputs_unchanged == true and
+            (.nhp_controller_run_id | type == "string" and test("^[1-9][0-9]{0,19}$")) and
+            (.nhp_controller_run_attempt | type == "string" and test("^[1-9][0-9]{0,9}$")) and
             .counts.implemented == 68 and
             .counts.blocking == 0 and .counts.failures == 0 and .counts.skips == 0 and
             .counts.exact_passes == .counts.implemented and

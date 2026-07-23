@@ -48,13 +48,18 @@ func TestNativeUDPSandboxWorkflowIsAttendedStrictAndEvidenceBearing(t *testing.T
 		"proof_phase:",
 		"deployment_manifest_b64:",
 		"connector_proof_run_id:",
+		"nhp_controller_run_id:",
+		"nhp_controller_run_attempt:",
 		"pre_removal_run_id:",
 		"- pre_removal",
 		"- post_removal",
 		"environment: sandbox",
+		"runs-on:\n      group: udp-proof-sandbox\n      labels: run-${{ inputs.nhp_controller_run_id }}-attempt-${{ inputs.nhp_controller_run_attempt }}",
 		"permissions:\n  actions: read\n  contents: read",
 		"QURL_GO_SANDBOX_STRICT: \"true\"",
 		"QURL_GO_SANDBOX_EXPECTED_SHA: ${{ github.sha }}",
+		"QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ID: ${{ inputs.nhp_controller_run_id }}",
+		"QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ATTEMPT: ${{ inputs.nhp_controller_run_attempt }}",
 		"QURL_GO_SANDBOX_ENROLLMENT_CREDENTIAL: ${{ secrets.QURL_GO_SANDBOX_ENROLLMENT_CREDENTIAL }}",
 		"Mint read-only proof-attestation token",
 		"actions/create-github-app-token@",
@@ -63,6 +68,9 @@ func TestNativeUDPSandboxWorkflowIsAttendedStrictAndEvidenceBearing(t *testing.T
 		"            frp\n            nhp\n            qurl-connector\n            qurl-go\n            qurl-integrations\n            qurl-mcp\n            qurl-python\n            qurl-reverse-tunnel-server\n            qurl-service\n            qurl-typescript\n            website",
 		"test \"$(git rev-parse HEAD)\" = \"${QURL_GO_SANDBOX_EXPECTED_SHA}\"",
 		"test -z \"$(git status --short)\"",
+		`[[ ! "${QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ID}" =~ ^[1-9][0-9]{0,19}$ ]]`,
+		`[[ ! "${QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ATTEMPT}" =~ ^[1-9][0-9]{0,9}$ ]]`,
+		"invalid NHP controller run identity",
 		"canonicalize_json()",
 		"reject_duplicate_keys",
 		".qurl_go == $qurl_go_sha",
@@ -136,6 +144,8 @@ func TestNativeUDPSandboxWorkflowIsAttendedStrictAndEvidenceBearing(t *testing.T
 		"inventory_sha256",
 		"scenario_contract_sha256",
 		"proof_harness_sha256",
+		"nhp_controller_run_id",
+		"nhp_controller_run_attempt",
 		"inputs_unchanged",
 		"gate_passed",
 		"provenance_valid",
@@ -159,6 +169,8 @@ func TestNativeUDPSandboxWorkflowIsAttendedStrictAndEvidenceBearing(t *testing.T
 		"repository_dispatch:",
 		"workflow_call:",
 		"continue-on-error:",
+		"runs-on: ubuntu-latest",
+		"labels: self-hosted",
 		"QURL_GO_SANDBOX_ATTESTATION_TOKEN",
 		" | tee ",
 		"test \"${pre_head_sha}\" = \"${GITHUB_SHA}\"",
@@ -181,6 +193,45 @@ func TestNativeUDPSandboxWorkflowIsAttendedStrictAndEvidenceBearing(t *testing.T
 	}
 	if got := strings.Count(workflow, "permissions:"); got != 1 {
 		t.Fatalf("permissions boundary count = %d, want one exact read-only workflow boundary", got)
+	}
+}
+
+func TestNativeUDPSandboxRejectsMalformedNHPControllerRunIdentity(t *testing.T) {
+	fixture := newNativeUDPProofFixture(t)
+	manifest := deploymentManifestBytes(t, "pre_removal", fixture.postSHA)
+	tests := []struct {
+		name       string
+		runID      string
+		runAttempt string
+	}{
+		{name: "missing run id", runID: "", runAttempt: "1"},
+		{name: "zero run id", runID: "0", runAttempt: "1"},
+		{name: "leading-zero run id", runID: "01", runAttempt: "1"},
+		{name: "non-numeric run id", runID: "run-1", runAttempt: "1"},
+		{name: "oversized run id", runID: strings.Repeat("1", 21), runAttempt: "1"},
+		{name: "missing run attempt", runID: "1234", runAttempt: ""},
+		{name: "zero run attempt", runID: "1234", runAttempt: "0"},
+		{name: "leading-zero run attempt", runID: "1234", runAttempt: "01"},
+		{name: "non-numeric run attempt", runID: "1234", runAttempt: "rerun"},
+		{name: "oversized run attempt", runID: "1234", runAttempt: strings.Repeat("1", 11)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			verifyNativeUDPManifest(
+				t,
+				fixture,
+				fixture.postSHA,
+				t.TempDir(),
+				"pre_removal",
+				"",
+				manifest,
+				map[string]string{
+					"QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ID":      test.runID,
+					"QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ATTEMPT": test.runAttempt,
+				},
+				false,
+			)
+		})
 	}
 }
 
@@ -782,6 +833,8 @@ func validPreRemovalEvidence(t *testing.T, commitSHA string, outputs map[string]
 		"commit_sha":                       commitSHA,
 		"run_id":                           "987",
 		"run_attempt":                      "3",
+		"nhp_controller_run_id":            "123456",
+		"nhp_controller_run_attempt":       "1",
 		"connector_proof_run_id":           "777",
 		"connector_attestation_sha256":     strings.Repeat("c", 64),
 		"pre_removal_run_id":               nil,
@@ -880,6 +933,8 @@ func TestNativeUDPSandboxEvidenceManifestIsAllowlisted(t *testing.T) {
 		"gate_passed":                  false,
 		"connector_proof_run_id":       "777",
 		"connector_attestation_sha256": sha256Hex(connectorAttestation),
+		"nhp_controller_run_id":        "123456",
+		"nhp_controller_run_attempt":   "1",
 		"provenance_valid":             true,
 		"two_cell_provenance":          true,
 	} {
@@ -1112,6 +1167,8 @@ func TestNativeUDPSandboxRequiresCompletePublishedProof(t *testing.T) {
 		"strict_outcome":                 "success",
 		"enforcement_outcome":            "success",
 		"inputs_unchanged":               true,
+		"nhp_controller_run_id":          "123456",
+		"nhp_controller_run_attempt":     "1",
 		"counts":                         map[string]any{"implemented": 68, "blocking": 0, "failures": 0, "skips": 0, "exact_passes": 68},
 		"provenance_valid":               true,
 		"two_cell_provenance":            true,
@@ -1129,6 +1186,8 @@ func TestNativeUDPSandboxRequiresCompletePublishedProof(t *testing.T) {
 		{name: "strict failed", mutate: func(value map[string]any) { value["strict_outcome"] = "failure" }},
 		{name: "enforcement failed", mutate: func(value map[string]any) { value["enforcement_outcome"] = "failure" }},
 		{name: "inputs changed", mutate: func(value map[string]any) { value["inputs_unchanged"] = false }},
+		{name: "missing controller run id", mutate: func(value map[string]any) { delete(value, "nhp_controller_run_id") }},
+		{name: "invalid controller run attempt", mutate: func(value map[string]any) { value["nhp_controller_run_attempt"] = "0" }},
 		{name: "blocking", mutate: func(value map[string]any) { value["counts"].(map[string]any)["blocking"] = 1 }},
 		{name: "zero implemented", mutate: func(value map[string]any) {
 			value["counts"].(map[string]any)["implemented"] = 0
@@ -1324,18 +1383,20 @@ func verifyNativeUDPManifest(
 	githubEnv := filepath.Join(runnerTemp, "github.env")
 	commitMockBin := writeManifestCommitGHMock(t)
 	environment := map[string]string{
-		"PATH":                         commitMockBin + string(os.PathListSeparator) + os.Getenv("PATH"),
-		"RUNNER_TEMP":                  runnerTemp,
-		"GITHUB_ENV":                   githubEnv,
-		"GITHUB_REPOSITORY":            "layervai/qurl-go",
-		"GITHUB_SHA":                   buildSHA,
-		"QURL_GO_SANDBOX_EXPECTED_SHA": buildSHA,
-		"QURL_GO_SANDBOX_PROOF_PHASE":  phase,
-		"QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_B64":   base64.StdEncoding.EncodeToString(manifest),
-		"QURL_GO_SANDBOX_PRE_REMOVAL_RUN_ID":        preRemovalRunID,
-		"QURL_GO_SANDBOX_HUB_HOST":                  "hub.nhp.layerv.ai",
-		"QURL_GO_SANDBOX_HUB_PORT":                  "62206",
-		"QURL_GO_SANDBOX_HUB_SERVER_PUBLIC_KEY_B64": base64.StdEncoding.EncodeToString(nativeUDPProofHubKey()),
+		"PATH":                                  commitMockBin + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"RUNNER_TEMP":                           runnerTemp,
+		"GITHUB_ENV":                            githubEnv,
+		"GITHUB_REPOSITORY":                     "layervai/qurl-go",
+		"GITHUB_SHA":                            buildSHA,
+		"QURL_GO_SANDBOX_EXPECTED_SHA":          buildSHA,
+		"QURL_GO_SANDBOX_PROOF_PHASE":           phase,
+		"QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ID": "123456",
+		"QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ATTEMPT": "1",
+		"QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_B64":    base64.StdEncoding.EncodeToString(manifest),
+		"QURL_GO_SANDBOX_PRE_REMOVAL_RUN_ID":         preRemovalRunID,
+		"QURL_GO_SANDBOX_HUB_HOST":                   "hub.nhp.layerv.ai",
+		"QURL_GO_SANDBOX_HUB_PORT":                   "62206",
+		"QURL_GO_SANDBOX_HUB_SERVER_PUBLIC_KEY_B64":  base64.StdEncoding.EncodeToString(nativeUDPProofHubKey()),
 	}
 	for key, value := range extra {
 		environment[key] = value
@@ -1384,7 +1445,9 @@ esac
 
 func proofHashEnvironment(runnerTemp string, outputs map[string]string) map[string]string {
 	return map[string]string{
-		"RUNNER_TEMP": runnerTemp,
+		"RUNNER_TEMP":                                      runnerTemp,
+		"QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ID":            "123456",
+		"QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ATTEMPT":       "1",
 		"QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_PATH":         outputs["QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_PATH"],
 		"QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_SHA256":       outputs["QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_SHA256"],
 		"QURL_GO_SANDBOX_INVENTORY_PATH":                   outputs["QURL_GO_SANDBOX_INVENTORY_PATH"],
