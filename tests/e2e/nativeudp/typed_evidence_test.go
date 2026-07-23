@@ -5,12 +5,21 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 )
+
+var approvedArtifactUploadPaths = []string{
+	"${{ runner.temp }}/native-udp-sandbox.evidence.json",
+	"${{ runner.temp }}/sandbox-deployment-manifest.json",
+	"${{ runner.temp }}/pre_retirement_scenarios.json",
+	"${{ runner.temp }}/retired_lifecycle_surface.json",
+}
 
 func canonicalTypedEvidenceJSON(t *testing.T, value any) []byte {
 	t.Helper()
@@ -238,65 +247,132 @@ func TestWorkflowMakesTypedEvidenceARequiredGateInput(t *testing.T) {
 			t.Errorf("workflow does not bind typed evidence with %q", snippet)
 		}
 	}
-	uploadPaths := artifactUploadPaths(t, workflow)
-	if len(uploadPaths) == 0 {
-		t.Fatal("workflow has no upload-artifact path inventory")
-	}
-	for _, path := range uploadPaths {
-		if strings.Contains(path, "native-udp-sandbox.typed-observations.jsonl") {
-			t.Fatalf("raw typed observations must not be uploaded as proof evidence: %q", path)
-		}
+	if err := validateArtifactUploadPaths(workflow); err != nil {
+		t.Fatal(err)
 	}
 }
 
-func TestArtifactUploadPathsTracksBlockScalarAcrossFormatting(t *testing.T) {
+func TestArtifactUploadPathsRejectsBroadGlobWhenPathPrecedesUses(t *testing.T) {
+	workflow := []byte(`steps:
+  - name: Upload proof
+    with:
+      path: |-
+          ${{ runner.temp }}/native-udp-sandbox.evidence.json
+          ${{ runner.temp }}/sandbox-deployment-manifest.json
+          ${{ runner.temp }}/pre_retirement_scenarios.json
+          ${{ runner.temp }}/retired_lifecycle_surface.json
+          ${{ runner.temp }}/*
+      retention-days: 30
+    uses: "actions/upload-artifact@deadbeef"
+`)
+	paths, err := artifactUploadPaths(workflow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := paths[len(paths)-1], "${{ runner.temp }}/*"; got != want {
+		t.Fatalf("last upload path = %q, want %q", got, want)
+	}
+	if err := validateArtifactUploadPaths(workflow); err == nil {
+		t.Fatal("broad runner.temp upload unexpectedly passed the artifact allowlist")
+	}
+}
+
+func TestArtifactUploadPathsRejectsMultipleActionsIncludingQuotedAction(t *testing.T) {
 	workflow := []byte(`steps:
   - name: Upload proof
     uses: actions/upload-artifact@deadbeef
     with:
-      path: |-
-          proof.json
-          native-udp-sandbox.typed-observations.jsonl
-      retention-days: 30
+      path: |
+        ${{ runner.temp }}/native-udp-sandbox.evidence.json
+        ${{ runner.temp }}/sandbox-deployment-manifest.json
+        ${{ runner.temp }}/pre_retirement_scenarios.json
+        ${{ runner.temp }}/retired_lifecycle_surface.json
+  - name: Upload broad state
+    uses: "actions/upload-artifact@deadbeef"
+    with:
+      path: ${{ runner.temp }}/*
 `)
-	paths := artifactUploadPaths(t, workflow)
-	if got, want := strings.Join(paths, "\n"), "proof.json\nnative-udp-sandbox.typed-observations.jsonl"; got != want {
-		t.Fatalf("upload paths = %q, want %q", got, want)
+	if err := validateArtifactUploadPaths(workflow); err == nil {
+		t.Fatal("multiple upload-artifact actions unexpectedly passed the artifact allowlist")
 	}
 }
 
-func artifactUploadPaths(t *testing.T, workflow []byte) []string {
-	t.Helper()
+func validateArtifactUploadPaths(workflow []byte) error {
+	paths, err := artifactUploadPaths(workflow)
+	if err != nil {
+		return err
+	}
+	got := append([]string(nil), paths...)
+	want := append([]string(nil), approvedArtifactUploadPaths...)
+	sort.Strings(got)
+	sort.Strings(want)
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		return fmt.Errorf("upload-artifact paths = %q, want exact allowlist %q", got, want)
+	}
+	return nil
+}
+
+func artifactUploadPaths(workflow []byte) ([]string, error) {
 	lines := strings.Split(string(workflow), "\n")
 	var paths []string
+	actionCount := 0
 	for usesLine, line := range lines {
-		if !strings.HasPrefix(strings.TrimSpace(line), "uses: actions/upload-artifact@") {
+		trimmedUses := strings.TrimSpace(line)
+		if !strings.Contains(trimmedUses, "actions/upload-artifact@") {
 			continue
 		}
+		actionCount++
 		usesIndent := yamlIndent(line)
+		stepStart := -1
 		stepIndent := -1
-		for index := usesLine - 1; index >= 0; index-- {
-			trimmed := strings.TrimSpace(lines[index])
-			if strings.HasPrefix(trimmed, "- ") && yamlIndent(lines[index]) < usesIndent {
-				stepIndent = yamlIndent(lines[index])
-				break
+		if strings.HasPrefix(trimmedUses, "- ") {
+			stepStart = usesLine
+			stepIndent = usesIndent
+		} else {
+			for index := usesLine - 1; index >= 0; index-- {
+				trimmed := strings.TrimSpace(lines[index])
+				if strings.HasPrefix(trimmed, "- ") && yamlIndent(lines[index]) < usesIndent {
+					stepStart = index
+					stepIndent = yamlIndent(lines[index])
+					break
+				}
 			}
 		}
 		if stepIndent < 0 {
-			t.Fatalf("upload-artifact action at line %d has no enclosing step", usesLine+1)
+			return nil, fmt.Errorf("upload-artifact action at line %d has no enclosing step", usesLine+1)
 		}
 		stepEnd := len(lines)
-		for index := usesLine + 1; index < len(lines); index++ {
+		for index := stepStart + 1; index < len(lines); index++ {
 			if strings.HasPrefix(strings.TrimSpace(lines[index]), "- ") && yamlIndent(lines[index]) == stepIndent {
 				stepEnd = index
 				break
 			}
 		}
-		for index := usesLine + 1; index < stepEnd; index++ {
+		var withLines []int
+		for index := stepStart + 1; index < stepEnd; index++ {
+			if strings.TrimSpace(lines[index]) == "with:" && yamlIndent(lines[index]) > stepIndent {
+				withLines = append(withLines, index)
+			}
+		}
+		if len(withLines) != 1 {
+			return nil, fmt.Errorf("upload-artifact action at line %d has %d with blocks, want 1", usesLine+1, len(withLines))
+		}
+		withLine := withLines[0]
+		withIndent := yamlIndent(lines[withLine])
+		withEnd := stepEnd
+		for index := withLine + 1; index < stepEnd; index++ {
+			if strings.TrimSpace(lines[index]) != "" && yamlIndent(lines[index]) <= withIndent {
+				withEnd = index
+				break
+			}
+		}
+		pathKeys := 0
+		for index := withLine + 1; index < withEnd; index++ {
 			trimmed := strings.TrimSpace(lines[index])
-			if trimmed != "path:" && !strings.HasPrefix(trimmed, "path: ") {
+			if (trimmed != "path:" && !strings.HasPrefix(trimmed, "path: ")) || yamlIndent(lines[index]) <= withIndent {
 				continue
 			}
+			pathKeys++
 			pathIndent := yamlIndent(lines[index])
 			value := strings.TrimSpace(strings.TrimPrefix(trimmed, "path:"))
 			isBlockScalar := value == "" || strings.HasPrefix(value, "|") || strings.HasPrefix(value, ">")
@@ -304,7 +380,7 @@ func artifactUploadPaths(t *testing.T, workflow []byte) []string {
 				paths = append(paths, value)
 				continue
 			}
-			for index++; index < stepEnd; index++ {
+			for index++; index < withEnd; index++ {
 				if strings.TrimSpace(lines[index]) == "" {
 					continue
 				}
@@ -314,8 +390,17 @@ func artifactUploadPaths(t *testing.T, workflow []byte) []string {
 				paths = append(paths, strings.TrimSpace(lines[index]))
 			}
 		}
+		if pathKeys != 1 {
+			return nil, fmt.Errorf("upload-artifact action at line %d has %d with.path keys, want 1", usesLine+1, pathKeys)
+		}
 	}
-	return paths
+	if actionCount != 1 {
+		return nil, fmt.Errorf("workflow has %d upload-artifact actions, want exactly 1", actionCount)
+	}
+	if len(paths) == 0 {
+		return nil, fmt.Errorf("workflow has no upload-artifact path inventory")
+	}
+	return paths, nil
 }
 
 func yamlIndent(line string) int {

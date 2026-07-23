@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -31,6 +32,12 @@ type nativeUDPProofFixture struct {
 type connectorProofZIPOptions struct {
 	phase    string
 	mutation string
+}
+
+type connectorScenarioNameContract struct {
+	SchemaVersion int      `json:"schema_version"`
+	Gate          string   `json:"gate"`
+	ScenarioNames []string `json:"scenario_names"`
 }
 
 func TestNativeUDPSandboxWorkflowIsAttendedStrictAndEvidenceBearing(t *testing.T) {
@@ -1906,21 +1913,12 @@ func connectorStrictScenarioNames(t *testing.T) []string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var contract struct {
-		SchemaVersion int      `json:"schema_version"`
-		Gate          string   `json:"gate"`
-		ScenarioNames []string `json:"scenario_names"`
-	}
-	if err := json.Unmarshal(raw, &contract); err != nil {
+	contract, digest, err := normalizedConnectorScenarioNameContract(raw)
+	if err != nil {
 		t.Fatal(err)
 	}
-	var compact bytes.Buffer
-	if err := json.Compact(&compact, raw); err != nil {
-		t.Fatal(err)
-	}
-	digest := sha256.Sum256(compact.Bytes())
-	if got := fmt.Sprintf("%x", digest); got != reviewedConnectorScenarioNamesSHA256 {
-		t.Fatalf("Connector scenario-name contract digest = %s, want %s", got, reviewedConnectorScenarioNamesSHA256)
+	if digest != reviewedConnectorScenarioNamesSHA256 {
+		t.Fatalf("Connector scenario-name contract digest = %s, want %s", digest, reviewedConnectorScenarioNamesSHA256)
 	}
 	if contract.SchemaVersion != 1 || contract.Gate != "udp_lifecycle_retirement" || len(contract.ScenarioNames) != 60 {
 		t.Fatalf("invalid Connector scenario-name contract: schema=%d gate=%q names=%d", contract.SchemaVersion, contract.Gate, len(contract.ScenarioNames))
@@ -1934,6 +1932,101 @@ func connectorStrictScenarioNames(t *testing.T) []string {
 		}
 	}
 	return contract.ScenarioNames
+}
+
+func TestNormalizedConnectorScenarioNameContractIgnoresObjectKeyOrder(t *testing.T) {
+	first := []byte(`{"schema_version":1,"gate":"udp_lifecycle_retirement","scenario_names":["alpha","beta"]}`)
+	second := []byte(`{"scenario_names":["alpha","beta"],"schema_version":1,"gate":"udp_lifecycle_retirement"}`)
+	_, firstDigest, err := normalizedConnectorScenarioNameContract(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, secondDigest, err := normalizedConnectorScenarioNameContract(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstDigest != secondDigest {
+		t.Fatalf("semantic-equivalent contract digests differ: %s != %s", firstDigest, secondDigest)
+	}
+}
+
+func TestNormalizedConnectorScenarioNameContractRejectsAmbiguousJSON(t *testing.T) {
+	tests := map[string][]byte{
+		"duplicate key": []byte(`{"schema_version":0,"schema_version":1,"gate":"udp_lifecycle_retirement","scenario_names":[]}`),
+		"unknown key":   []byte(`{"schema_version":1,"gate":"udp_lifecycle_retirement","scenario_names":[],"extra":true}`),
+		"trailing value": []byte(
+			`{"schema_version":1,"gate":"udp_lifecycle_retirement","scenario_names":[]} {}`,
+		),
+	}
+	for name, raw := range tests {
+		t.Run(name, func(t *testing.T) {
+			if _, _, err := normalizedConnectorScenarioNameContract(raw); err == nil {
+				t.Fatal("ambiguous Connector scenario-name contract unexpectedly passed")
+			}
+		})
+	}
+}
+
+func normalizedConnectorScenarioNameContract(raw []byte) (connectorScenarioNameContract, string, error) {
+	var contract connectorScenarioNameContract
+	if err := rejectDuplicateTopLevelJSONKeys(raw); err != nil {
+		return contract, "", err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&contract); err != nil {
+		return contract, "", err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			return contract, "", fmt.Errorf("Connector scenario-name contract must contain exactly one JSON value")
+		}
+		return contract, "", fmt.Errorf("Connector scenario-name contract must contain exactly one JSON value: %w", err)
+	}
+	normalized, err := json.Marshal(contract)
+	if err != nil {
+		return contract, "", err
+	}
+	digest := sha256.Sum256(normalized)
+	return contract, fmt.Sprintf("%x", digest), nil
+}
+
+func rejectDuplicateTopLevelJSONKeys(raw []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	opening, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	if opening != json.Delim('{') {
+		return fmt.Errorf("Connector scenario-name contract must be a JSON object")
+	}
+	seen := make(map[string]struct{})
+	for decoder.More() {
+		keyToken, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		key, ok := keyToken.(string)
+		if !ok {
+			return fmt.Errorf("Connector scenario-name contract key is not a string")
+		}
+		if _, duplicate := seen[key]; duplicate {
+			return fmt.Errorf("Connector scenario-name contract contains duplicate key %q", key)
+		}
+		seen[key] = struct{}{}
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return err
+		}
+	}
+	closing, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	if closing != json.Delim('}') {
+		return fmt.Errorf("Connector scenario-name contract object is not closed")
+	}
+	return nil
 }
 
 func connectorProofObservation(phase, cellID, host, key string, generation, revision int) map[string]any {
