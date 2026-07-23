@@ -20,7 +20,8 @@ import (
 const (
 	nativeUDPWorkflowID                   = "4242"
 	reviewedInventoryMappingSHA256Fixture = "1dff59c8188ca1cb72847135b5e4a9e2c2bba4f737d788379c93a568152dc88d"
-	reviewedConnectorScenarioNamesSHA256  = "b59ce836704174518c3c66a79f49a51487379bd7efbd9db09e50f829a7d8bb3c"
+	reviewedConnectorScenarioNamesSHA256  = "3dc7c570f55a8179ac9ac568c1d910ab67dbf0b859bb82b7e2df8a37f519abc6"
+	connectorTypedEvidenceContractSHA256  = "b8246482ec1ca7ab3aaba074540d5f3f151d7ee752dd8a166b552b2fe46f54ff"
 )
 
 type nativeUDPProofFixture struct {
@@ -295,7 +296,7 @@ func TestNativeUDPSandboxNestedRequiredScenarioEventsFailClosed(t *testing.T) {
 				proofHashEnvironment(runnerTemp, inputs), false)
 
 			agentID := "qurl-go-sandbox-nested-1"
-			writeProofProvenance(t, runnerTemp, fixture.postSHA, agentID)
+			writeProofProvenance(t, runnerTemp, fixture.postSHA, agentID, inputs)
 			connectorAttestation := []byte(`{"schema_version":1,"gate_passed":true}`)
 			if err := os.WriteFile(filepath.Join(runnerTemp, "connector-proof-attestation.json"), connectorAttestation, 0o444); err != nil {
 				t.Fatal(err)
@@ -565,6 +566,13 @@ func TestNativeUDPSandboxAttestsExactConnectorProof(t *testing.T) {
 		{name: "refresh tuple drift", phase: "pre_removal", headSHA: connectorSHA, runWorkflowID: "9001", mutation: "refresh_drift"},
 		{name: "stale refresh generation", phase: "pre_removal", headSHA: connectorSHA, runWorkflowID: "9001", mutation: "stale_refresh_generation"},
 		{name: "stale refresh revision", phase: "pre_removal", headSHA: connectorSHA, runWorkflowID: "9001", mutation: "stale_refresh_revision"},
+		{name: "stale refresh lease", phase: "pre_removal", headSHA: connectorSHA, runWorkflowID: "9001", mutation: "stale_refresh_lease"},
+		{name: "invalid refresh lease", phase: "pre_removal", headSHA: connectorSHA, runWorkflowID: "9001", mutation: "invalid_refresh_lease"},
+		{name: "wrong operational schema", phase: "pre_removal", headSHA: connectorSHA, runWorkflowID: "9001", mutation: "wrong_operational_schema"},
+		{name: "invalid operational agent id", phase: "pre_removal", headSHA: connectorSHA, runWorkflowID: "9001", mutation: "invalid_operational_agent_id"},
+		{name: "wrong operational deployment digest", phase: "pre_removal", headSHA: connectorSHA, runWorkflowID: "9001", mutation: "wrong_operational_deployment_digest"},
+		{name: "wrong operational typed contract digest", phase: "pre_removal", headSHA: connectorSHA, runWorkflowID: "9001", mutation: "wrong_operational_typed_digest"},
+		{name: "stale outer typed contract digest", phase: "pre_removal", headSHA: connectorSHA, runWorkflowID: "9001", mutation: "stale_outer_typed_digest"},
 		{name: "wrong image digest", phase: "pre_removal", headSHA: connectorSHA, runWorkflowID: "9001", mutation: "wrong_image"},
 		{name: "wrong qurl-go module", phase: "pre_removal", headSHA: connectorSHA, runWorkflowID: "9001", mutation: "wrong_module"},
 		{name: "malformed post pairing", phase: "post_removal", headSHA: connectorSHA, runWorkflowID: "9001", mutation: "malformed_post_pairing"},
@@ -731,6 +739,7 @@ func TestNativeUDPSandboxPostRemovalRejectsUntrustedPairedArtifacts(t *testing.T
 		oversize       bool
 		badHash        bool
 		mutateManifest func(map[string]any)
+		mutateEvidence func(map[string]any)
 	}{
 		{name: "extra archive file", mutation: "extra_zip_file"},
 		{name: "unsafe archive path", mutation: "unsafe_zip_path"},
@@ -739,6 +748,15 @@ func TestNativeUDPSandboxPostRemovalRejectsUntrustedPairedArtifacts(t *testing.T
 		{name: "noncanonical retired lifecycle surface", mutation: "noncanonical_retired_surface"},
 		{name: "changed retired lifecycle surface", mutation: "changed_retired_surface"},
 		{name: "pre-removal strict step failed", mutation: "strict_failed"},
+		{name: "pre-removal provenance schema is stale", mutateEvidence: func(value map[string]any) {
+			value["provenance"].(map[string]any)["schema_version"] = 1
+		}},
+		{name: "pre-removal provenance deployment digest mismatches", mutateEvidence: func(value map[string]any) {
+			value["provenance"].(map[string]any)["deployment_manifest_sha256"] = strings.Repeat("f", 64)
+		}},
+		{name: "pre-removal provenance typed contract digest mismatches", mutateEvidence: func(value map[string]any) {
+			value["provenance"].(map[string]any)["typed_evidence_contract_sha256"] = strings.Repeat("f", 64)
+		}},
 		{name: "artifact API oversize", oversize: true},
 		{name: "artifact digest mismatch", badHash: true},
 		{name: "FRP repository and Connector module repinned", mutateManifest: func(value map[string]any) {
@@ -758,7 +776,11 @@ func TestNativeUDPSandboxPostRemovalRejectsUntrustedPairedArtifacts(t *testing.T
 			preManifest := deploymentManifestBytes(t, "pre_removal", fixture.preSHA)
 			preOutputs := verifyNativeUDPManifest(t, fixture, fixture.preSHA, preRunnerTemp, "pre_removal", "", preManifest, nil, true)
 			preEvidence := filepath.Join(preRunnerTemp, "pre-removal.evidence.json")
-			writeJSONFile(t, preEvidence, validPreRemovalEvidence(t, fixture.preSHA, preOutputs))
+			evidence := validPreRemovalEvidence(t, fixture.preSHA, preOutputs)
+			if test.mutateEvidence != nil {
+				test.mutateEvidence(evidence)
+			}
+			writeJSONFile(t, preEvidence, evidence)
 			preArchive := filepath.Join(preRunnerTemp, "native-udp-sandbox-pre.zip")
 			writeQURLGoProofZIP(t, preArchive, preEvidence,
 				filepath.Join(preRunnerTemp, "sandbox-deployment-manifest.json"),
@@ -856,8 +878,13 @@ func validPreRemovalEvidence(t *testing.T, commitSHA string, outputs map[string]
 		"proof_harness_sha256":             outputs["QURL_GO_SANDBOX_PROOF_HARNESS_SHA256"],
 		"strict_outcome":                   "success",
 		"counts":                           map[string]int{"implemented": len(inventory.Scenarios), "blocking": 0, "failures": 0, "skips": 0, "exact_passes": len(inventory.Scenarios)},
-		"provenance":                       proofProvenanceValue(commitSHA, "qurl-go-sandbox-pre-proof"),
-		"scenario_results":                 scenarioResults,
+		"provenance": proofProvenanceValue(
+			commitSHA,
+			"qurl-go-sandbox-pre-proof",
+			outputs["QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_SHA256"],
+			outputs["QURL_GO_SANDBOX_TYPED_EVIDENCE_CONTRACT_SHA256"],
+		),
+		"scenario_results": scenarioResults,
 	}
 }
 
@@ -867,7 +894,7 @@ func TestNativeUDPSandboxEvidenceManifestIsAllowlisted(t *testing.T) {
 	manifest := deploymentManifestBytes(t, "pre_removal", fixture.postSHA)
 	inputs := verifyNativeUDPManifest(t, fixture, fixture.postSHA, runnerTemp, "pre_removal", "", manifest, nil, true)
 	agentID := "qurl-go-sandbox-1234-2"
-	writeProofProvenance(t, runnerTemp, fixture.postSHA, agentID)
+	writeProofProvenance(t, runnerTemp, fixture.postSHA, agentID, inputs)
 
 	rawPath := filepath.Join(runnerTemp, "native-udp-sandbox.raw.json")
 	const reflectedSecret = "server-minted-enrollment-secret-must-not-upload"
@@ -974,7 +1001,7 @@ func TestNativeUDPSandboxEvidenceFailsClosedWhenInventorySnapshotIsReplaced(t *t
 	manifest := deploymentManifestBytes(t, "pre_removal", fixture.postSHA)
 	inputs := verifyNativeUDPManifest(t, fixture, fixture.postSHA, runnerTemp, "pre_removal", "", manifest, nil, true)
 	agentID := "qurl-go-sandbox-4321-1"
-	writeProofProvenance(t, runnerTemp, fixture.postSHA, agentID)
+	writeProofProvenance(t, runnerTemp, fixture.postSHA, agentID, inputs)
 
 	snapshot := inputs["QURL_GO_SANDBOX_INVENTORY_PATH"]
 	if err := os.Remove(snapshot); err != nil {
@@ -1039,7 +1066,7 @@ func TestNativeUDPSandboxEvidenceRequiresStrictStepSuccess(t *testing.T) {
 		t.Fatal(err)
 	}
 	agentID := "qurl-go-sandbox-strict-1"
-	writeProofProvenance(t, runnerTemp, fixture.postSHA, agentID)
+	writeProofProvenance(t, runnerTemp, fixture.postSHA, agentID, inputs)
 	connectorAttestation := []byte(`{"schema_version":1,"gate_passed":true}`)
 	if err := os.WriteFile(filepath.Join(runnerTemp, "connector-proof-attestation.json"), connectorAttestation, 0o444); err != nil {
 		t.Fatal(err)
@@ -1081,22 +1108,48 @@ func TestNativeUDPSandboxEvidenceRequiresStrictStepSuccess(t *testing.T) {
 
 func TestNativeUDPSandboxOperationalProvenanceRequiresExactTransition(t *testing.T) {
 	fixture := newNativeUDPProofFixture(t)
-	tests := map[string]func([]any){
-		"wrong phase order": func(cells []any) { cells[0], cells[1] = cells[1], cells[0] },
-		"warm tuple drift": func(cells []any) {
+	cells := func(provenance map[string]any) []any {
+		return provenance["assigned_cells"].([]any)
+	}
+	tests := map[string]func(map[string]any){
+		"wrong phase order": func(provenance map[string]any) {
+			observations := cells(provenance)
+			observations[0], observations[1] = observations[1], observations[0]
+		},
+		"warm tuple drift": func(provenance map[string]any) {
+			cells := cells(provenance)
 			cells[1] = proofCell("warm_open", "cell1", "cell1.nhp.layerv.ai", strings.Repeat("1", 64), 1, 1)
 		},
-		"stale reassignment generation": func(cells []any) {
+		"stale reassignment generation": func(provenance map[string]any) {
+			cells := cells(provenance)
 			cells[2] = proofCell("reassignment", "cell1", "cell1.nhp.layerv.ai", strings.Repeat("1", 64), 1, 2)
 		},
-		"refresh tuple drift": func(cells []any) {
+		"refresh tuple drift": func(provenance map[string]any) {
+			cells := cells(provenance)
 			cells[3] = proofCell("refresh", "cell0", "cell0.nhp.layerv.ai", strings.Repeat("0", 64), 2, 3)
 		},
-		"stale refresh generation": func(cells []any) {
+		"stale refresh generation": func(provenance map[string]any) {
+			cells := cells(provenance)
 			cells[3] = proofCell("refresh", "cell1", "cell1.nhp.layerv.ai", strings.Repeat("1", 64), 1, 2)
 		},
-		"stale refresh revision": func(cells []any) {
+		"stale refresh revision": func(provenance map[string]any) {
+			cells := cells(provenance)
 			cells[3] = proofCell("refresh", "cell1", "cell1.nhp.layerv.ai", strings.Repeat("1", 64), 2, 1)
+		},
+		"regressed refresh lease": func(provenance map[string]any) {
+			cells(provenance)[3].(map[string]any)["lease_expires_at"] = "2026-07-22T11:59:59.999999999Z"
+		},
+		"invalid calendar refresh lease": func(provenance map[string]any) {
+			cells(provenance)[3].(map[string]any)["lease_expires_at"] = "2026-02-31T12:30:00Z"
+		},
+		"wrong deployment digest": func(provenance map[string]any) {
+			provenance["deployment_manifest_sha256"] = strings.Repeat("f", 64)
+		},
+		"wrong typed contract digest": func(provenance map[string]any) {
+			provenance["typed_evidence_contract_sha256"] = strings.Repeat("f", 64)
+		},
+		"legacy provenance schema": func(provenance map[string]any) {
+			provenance["schema_version"] = 1
 		},
 	}
 	for name, mutate := range tests {
@@ -1105,8 +1158,13 @@ func TestNativeUDPSandboxOperationalProvenanceRequiresExactTransition(t *testing
 			manifest := deploymentManifestBytes(t, "pre_removal", fixture.postSHA)
 			inputs := verifyNativeUDPManifest(t, fixture, fixture.postSHA, runnerTemp, "pre_removal", "", manifest, nil, true)
 			agentID := "qurl-go-sandbox-transition-1"
-			provenance := proofProvenanceValue(fixture.postSHA, agentID)
-			mutate(provenance["assigned_cells"].([]any))
+			provenance := proofProvenanceValue(
+				fixture.postSHA,
+				agentID,
+				inputs["QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_SHA256"],
+				inputs["QURL_GO_SANDBOX_TYPED_EVIDENCE_CONTRACT_SHA256"],
+			)
+			mutate(provenance)
 			writeProofProvenanceValue(t, runnerTemp, provenance)
 			if err := os.WriteFile(filepath.Join(runnerTemp, "native-udp-sandbox.raw.json"),
 				[]byte(`{"Action":"pass","Test":"TestSandboxNativeUDPLifecycle/hub_dns_failure"}`+"\n"), 0o600); err != nil {
@@ -1533,9 +1591,14 @@ func mutateDeploymentManifest(t *testing.T, manifest []byte, mutate func(map[str
 	return encoded
 }
 
-func writeProofProvenance(t *testing.T, runnerTemp, buildSHA, agentID string) {
+func writeProofProvenance(t *testing.T, runnerTemp, buildSHA, agentID string, inputs map[string]string) {
 	t.Helper()
-	writeProofProvenanceValue(t, runnerTemp, proofProvenanceValue(buildSHA, agentID))
+	writeProofProvenanceValue(t, runnerTemp, proofProvenanceValue(
+		buildSHA,
+		agentID,
+		inputs["QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_SHA256"],
+		inputs["QURL_GO_SANDBOX_TYPED_EVIDENCE_CONTRACT_SHA256"],
+	))
 }
 
 func writeProofProvenanceValue(t *testing.T, runnerTemp string, value map[string]any) {
@@ -1547,11 +1610,15 @@ func writeProofProvenanceValue(t *testing.T, runnerTemp string, value map[string
 	writeJSONFile(t, filepath.Join(directory, "provenance.json"), value)
 }
 
-func proofProvenanceValue(buildSHA, agentID string) map[string]any {
+func proofProvenanceValue(buildSHA, agentID, deploymentManifestSHA, typedEvidenceContractSHA string) map[string]any {
+	refresh := proofCell("refresh", "cell1", "cell1.nhp.layerv.ai", strings.Repeat("1", 64), 2, 3)
+	refresh["lease_expires_at"] = "2026-07-22T12:30:00.123456789Z"
 	return map[string]any{
-		"schema_version": 1,
-		"build_sha":      buildSHA,
-		"agent_id":       agentID,
+		"schema_version":                 2,
+		"build_sha":                      buildSHA,
+		"agent_id":                       agentID,
+		"deployment_manifest_sha256":     deploymentManifestSHA,
+		"typed_evidence_contract_sha256": typedEvidenceContractSHA,
 		"hub": map[string]any{
 			"host":                     "hub.nhp.layerv.ai",
 			"port":                     62206,
@@ -1561,7 +1628,7 @@ func proofProvenanceValue(buildSHA, agentID string) map[string]any {
 			proofCell("registration", "cell0", "cell0.nhp.layerv.ai", strings.Repeat("0", 64), 1, 1),
 			proofCell("warm_open", "cell0", "cell0.nhp.layerv.ai", strings.Repeat("0", 64), 1, 1),
 			proofCell("reassignment", "cell1", "cell1.nhp.layerv.ai", strings.Repeat("1", 64), 2, 2),
-			proofCell("refresh", "cell1", "cell1.nhp.layerv.ai", strings.Repeat("1", 64), 2, 2),
+			refresh,
 		},
 	}
 }
@@ -1794,8 +1861,9 @@ func writeConnectorProofZIP(t *testing.T, path string, manifest []byte, connecto
 		connectorProofObservation("registration", "cell0", "cell0.nhp.layerv.ai", strings.Repeat("0", 64), 1, 1),
 		connectorProofObservation("warm_open", "cell0", "cell0.nhp.layerv.ai", strings.Repeat("0", 64), 1, 1),
 		connectorProofObservation("reassignment", "cell1", "cell1.nhp.layerv.ai", strings.Repeat("1", 64), 2, 2),
-		connectorProofObservation("refresh", "cell1", "cell1.nhp.layerv.ai", strings.Repeat("1", 64), 2, 2),
+		connectorProofObservation("refresh", "cell1", "cell1.nhp.layerv.ai", strings.Repeat("1", 64), 2, 3),
 	}
+	observations[3].(map[string]any)["lease_expires_at"] = "2026-07-22T12:30:00.123456789Z"
 	switch options.mutation {
 	case "one_cell":
 		observations = []any{
@@ -1818,6 +1886,12 @@ func writeConnectorProofZIP(t *testing.T, path string, manifest []byte, connecto
 		observations[3] = connectorProofObservation("refresh", "cell1", "cell1.nhp.layerv.ai", strings.Repeat("1", 64), 1, 2)
 	case "stale_refresh_revision":
 		observations[3] = connectorProofObservation("refresh", "cell1", "cell1.nhp.layerv.ai", strings.Repeat("1", 64), 2, 1)
+	case "stale_refresh_lease":
+		observations[3] = connectorProofObservation("refresh", "cell1", "cell1.nhp.layerv.ai", strings.Repeat("1", 64), 2, 3)
+		observations[3].(map[string]any)["lease_expires_at"] = "2026-07-22T11:59:59.999999999Z"
+	case "invalid_refresh_lease":
+		observations[3] = connectorProofObservation("refresh", "cell1", "cell1.nhp.layerv.ai", strings.Repeat("1", 64), 2, 3)
+		observations[3].(map[string]any)["lease_expires_at"] = "2026-02-31T12:30:00Z"
 	}
 	module := func(path, sha string) map[string]any {
 		return map[string]any{
@@ -1882,7 +1956,7 @@ func writeConnectorProofZIP(t *testing.T, path string, manifest []byte, connecto
 		"two_cell_provenance":            true,
 		"typed_evidence_complete":        true,
 		"typed_evidence":                 typedEvidence,
-		"typed_evidence_contract_sha256": "27782f1b8591ef08cd08eb555c643d309ed317da69e63ade714c04489385b063",
+		"typed_evidence_contract_sha256": connectorTypedEvidenceContractSHA256,
 		"provenance": map[string]any{
 			"schema":    1,
 			"connector": map[string]any{"git_sha": connectorSHA},
@@ -1898,10 +1972,13 @@ func writeConnectorProofZIP(t *testing.T, path string, manifest []byte, connecto
 				"source_revision":     connectorSHA,
 			},
 			"operational": map[string]any{
-				"schema_version": 1,
-				"connector_sha":  connectorSHA,
-				"hub":            deployment["hub"],
-				"observations":   observations,
+				"schema_version":                 2,
+				"agent_id":                       "qurl-go-proof-agent",
+				"connector_sha":                  connectorSHA,
+				"deployment_manifest_sha256":     sha256Hex(manifest),
+				"typed_evidence_contract_sha256": connectorTypedEvidenceContractSHA256,
+				"hub":                            deployment["hub"],
+				"observations":                   observations,
 			},
 		},
 		"scenario_results": scenarioResults,
@@ -1912,11 +1989,22 @@ func writeConnectorProofZIP(t *testing.T, path string, manifest []byte, connecto
 	provenance := evidence["provenance"].(map[string]any)
 	image := provenance["image"].(map[string]any)
 	modules := provenance["modules"].(map[string]any)
+	operational := provenance["operational"].(map[string]any)
 	switch options.mutation {
 	case "wrong_image":
 		image["oci_manifest_digest"] = "sha256:" + strings.Repeat("f", 64)
 	case "wrong_module":
 		modules["qurl_go"].(map[string]any)["git_sha"] = strings.Repeat("e", 40)
+	case "wrong_operational_schema":
+		operational["schema_version"] = 1
+	case "invalid_operational_agent_id":
+		operational["agent_id"] = "INVALID_AGENT"
+	case "wrong_operational_deployment_digest":
+		operational["deployment_manifest_sha256"] = strings.Repeat("f", 64)
+	case "wrong_operational_typed_digest":
+		operational["typed_evidence_contract_sha256"] = strings.Repeat("f", 64)
+	case "stale_outer_typed_digest":
+		evidence["typed_evidence_contract_sha256"] = "27782f1b8591ef08cd08eb555c643d309ed317da69e63ade714c04489385b063"
 	}
 	evidenceBytes, err := json.Marshal(evidence)
 	if err != nil {
@@ -1989,7 +2077,7 @@ func connectorStrictScenarioNames(t *testing.T) []string {
 	if digest != reviewedConnectorScenarioNamesSHA256 {
 		t.Fatalf("Connector scenario-name contract digest = %s, want %s", digest, reviewedConnectorScenarioNamesSHA256)
 	}
-	if contract.SchemaVersion != 1 || contract.Gate != "udp_lifecycle_retirement" || len(contract.ScenarioNames) != 60 {
+	if contract.SchemaVersion != 1 || contract.Gate != "udp_lifecycle_retirement" || len(contract.ScenarioNames) != 56 {
 		t.Fatalf("invalid Connector scenario-name contract: schema=%d gate=%q names=%d", contract.SchemaVersion, contract.Gate, len(contract.ScenarioNames))
 	}
 	if !sort.StringsAreSorted(contract.ScenarioNames) {
