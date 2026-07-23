@@ -41,22 +41,22 @@ type lifecycleHTTPTrap struct {
 	first string
 }
 
-type osFailureResolver struct {
+type failureResolver struct {
 	calls atomic.Int64
 	mu    sync.Mutex
 	host  string
 	net   string
 }
 
-func (r *osFailureResolver) LookupNetIP(ctx context.Context, network, host string) ([]netip.Addr, error) {
+func (r *failureResolver) LookupNetIP(_ context.Context, network, host string) ([]netip.Addr, error) {
 	r.calls.Add(1)
 	r.mu.Lock()
 	r.net, r.host = network, host
 	r.mu.Unlock()
-	return net.DefaultResolver.LookupNetIP(ctx, network, "qurl-native-udp-proof.invalid")
+	return nil, &net.DNSError{Err: "no such host", Name: host, IsNotFound: true}
 }
 
-func (r *osFailureResolver) snapshot() (int64, string, string) {
+func (r *failureResolver) snapshot() (int64, string, string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.calls.Load(), r.net, r.host
@@ -415,7 +415,7 @@ func proveHubDNSFailure(ctx context.Context, t *testing.T, hub qurl.HubBootstrap
 	t.Helper()
 	const agentID = "qurl-go-fault-proof-dns"
 	store := faultStateStore(t)
-	resolver := &osFailureResolver{}
+	resolver := &failureResolver{}
 	dialer := &redirectingDialer{}
 	client, binding, err := qurl.RegisterAgentRuntime(ctx, nonSecretFaultCredential, store,
 		qurl.WithAgentRuntimeHub(hub),
