@@ -27,7 +27,7 @@ import (
 const (
 	sandboxProofTimeout            = 50 * time.Minute
 	faultUDPAttemptTimeout         = 5 * time.Second
-	currentAgentStateSchemaVersion = 6
+	currentAgentStateSchemaVersion = 7
 	nonSecretFaultCredential       = "not-server-minted-native-udp-proof-credential"
 )
 
