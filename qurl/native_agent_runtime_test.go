@@ -289,8 +289,21 @@ type runtimeRecordingStore struct {
 	cancel                    context.CancelFunc
 }
 
+type runtimeRecordingStoreView struct {
+	recorder *runtimeRecordingStore
+	inner    AgentStateStore
+}
+
 func (s *runtimeRecordingStore) LoadAgentState(ctx context.Context) (*AgentState, error) {
 	return s.inner.LoadAgentState(ctx)
+}
+
+func (s *runtimeRecordingStore) decoratedAgentStateStore() AgentStateStore {
+	return s.inner
+}
+
+func (s *runtimeRecordingStore) withDecoratedAgentStateStore(inner AgentStateStore) AgentStateStore {
+	return &runtimeRecordingStoreView{recorder: s, inner: inner}
 }
 
 func (s *runtimeRecordingStore) acquireSetupLock(ctx context.Context) (setupLock, error) {
@@ -302,6 +315,10 @@ func (s *runtimeRecordingStore) acquireSetupLock(ctx context.Context) (setupLock
 }
 
 func (s *runtimeRecordingStore) SaveAgentState(ctx context.Context, state *AgentState) error {
+	return s.saveAgentState(ctx, s.inner, state)
+}
+
+func (s *runtimeRecordingStore) saveAgentState(ctx context.Context, inner AgentStateStore, state *AgentState) error {
 	s.mu.Lock()
 	s.calls++
 	call := s.calls
@@ -318,7 +335,7 @@ func (s *runtimeRecordingStore) SaveAgentState(ctx context.Context, state *Agent
 	if call == fail {
 		return errors.New("injected runtime state save failure")
 	}
-	if err := s.inner.SaveAgentState(ctx, state); err != nil {
+	if err := inner.SaveAgentState(ctx, state); err != nil {
 		return err
 	}
 	s.mu.Lock()
@@ -336,6 +353,30 @@ func (s *runtimeRecordingStore) SaveAgentState(ctx context.Context, state *Agent
 	return nil
 }
 
+func (s *runtimeRecordingStoreView) LoadAgentState(ctx context.Context) (*AgentState, error) {
+	return s.inner.LoadAgentState(ctx)
+}
+
+func (s *runtimeRecordingStoreView) SaveAgentState(ctx context.Context, state *AgentState) error {
+	return s.recorder.saveAgentState(ctx, s.inner, state)
+}
+
+func (s *runtimeRecordingStoreView) decoratedAgentStateStore() AgentStateStore {
+	return s.inner
+}
+
+func (s *runtimeRecordingStoreView) withDecoratedAgentStateStore(inner AgentStateStore) AgentStateStore {
+	return &runtimeRecordingStoreView{recorder: s.recorder, inner: inner}
+}
+
+func (s *runtimeRecordingStoreView) acquireSetupLock(ctx context.Context) (setupLock, error) {
+	locker, ok := s.inner.(setupLockingAgentStateStore)
+	if !ok {
+		return nil, errors.New("runtime test store view lost its setup-lock capability")
+	}
+	return locker.acquireSetupLock(ctx)
+}
+
 func (s *runtimeRecordingStore) snapshots() []*AgentState {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -344,6 +385,39 @@ func (s *runtimeRecordingStore) snapshots() []*AgentState {
 		result[i] = s.saves[i].clone()
 	}
 	return result
+}
+
+func TestRuntimeRecordingStorePreservesPinnedSetupCapability(t *testing.T) {
+	stateDir := t.TempDir()
+	if err := os.Chmod(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	inner, err := OpenFileAgentState(filepath.Join(stateDir, "agent-state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := inner.Close(); err != nil {
+			t.Errorf("close state store: %v", err)
+		}
+	})
+	store := &runtimeRecordingStore{inner: inner}
+	state := &AgentState{AgentID: "agent-decorator", SchemaVersion: agentStateSchemaVersion}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	_, err = withAgentSetupLock(ctx, store, func(struct{}) {}, func(lockedCtx context.Context, locked AgentStateStore) (struct{}, error) {
+		if err := store.SaveAgentState(lockedCtx, state); !errors.Is(err, ErrAgentSetupLock) {
+			return struct{}{}, fmt.Errorf("reentrant public save error = %w, want ErrAgentSetupLock", err)
+		}
+		return struct{}{}, locked.SaveAgentState(lockedCtx, state)
+	})
+	if err != nil {
+		t.Fatalf("save through lock-bound decorator: %v", err)
+	}
+	if got := len(store.snapshots()); got != 1 {
+		t.Fatalf("successful recorded saves = %d, want 1", got)
+	}
 }
 
 type runtimeFixture struct {

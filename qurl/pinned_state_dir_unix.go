@@ -601,6 +601,10 @@ type pinnedSetupLock struct {
 }
 
 func (l *pinnedSetupLock) bindStore(store AgentStateStore) AgentStateStore {
+	if decorator, ok := store.(agentStateStoreDecorator); ok {
+		bound := l.bindStore(decorator.decoratedAgentStateStore())
+		return decorator.withDecoratedAgentStateStore(bound)
+	}
 	retained, ok := store.(*retainedLocalAgentStateStore)
 	if !ok || l == nil || l.token == nil {
 		return store
