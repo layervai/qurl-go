@@ -32,6 +32,8 @@ const (
 	nonSecretFaultCredential       = "not-server-minted-native-udp-proof-credential"
 )
 
+// Keep tests that install lifecycleHTTPTrap serial: they temporarily replace
+// process-wide net/http defaults to prove that the native lifecycle uses no HTTP.
 var errLifecycleHTTP = errors.New("native lifecycle attempted forbidden HTTP")
 
 type lifecycleHTTPTrap struct {
@@ -259,7 +261,7 @@ func TestSandboxNativeUDPLifecycle(t *testing.T) {
 	}
 
 	var refreshed *qurl.AgentRuntimeBinding
-	if !runTypedEvidenceScenario(t, "authenticated_hub_refresh", "assignment.authenticated_refresh", []string{"assignment_response"}, func(t *testing.T) {
+	refreshPassed := runTypedEvidenceScenario(t, "authenticated_hub_refresh", "assignment.authenticated_refresh", []string{"assignment_response"}, func(t *testing.T) {
 		client, binding, err := qurl.RefreshAgentRuntime(ctx, hub, store,
 			qurl.WithAgentRuntimeReassignmentAdoption(),
 			qurl.WithAgentRuntimeUDPBounds(udpAttemptTimeout, udpMaxAddresses),
@@ -273,12 +275,15 @@ func TestSandboxNativeUDPLifecycle(t *testing.T) {
 		if client == nil || binding == nil {
 			t.Fatal("RefreshAgentRuntime returned a nil client or binding")
 		}
-		cellEvidence = append(cellEvidence, assertAssignedCell(t, cfg, binding, "refresh"))
 		refreshed = binding
-	}) {
+		cellEvidence = append(cellEvidence, assertAssignedCell(t, cfg, binding, "refresh"))
+	})
+	if refreshed != nil {
+		defer refreshed.Destroy()
+	}
+	if !refreshPassed {
 		return
 	}
-	defer refreshed.Destroy()
 
 	privateKey := refreshed.TakeDeviceStaticPrivateKey()
 	if len(privateKey) != x25519PublicKeyLength {
