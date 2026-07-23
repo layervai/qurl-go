@@ -1,0 +1,386 @@
+package nativeudp_test
+
+import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"maps"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sort"
+	"strings"
+	"testing"
+)
+
+var approvedArtifactUploadPaths = []string{
+	"${{ runner.temp }}/native-udp-sandbox.evidence.json",
+	"${{ runner.temp }}/sandbox-deployment-manifest.json",
+	"${{ runner.temp }}/pre_retirement_scenarios.json",
+	"${{ runner.temp }}/retired_lifecycle_surface.json",
+}
+
+func canonicalTypedEvidenceJSON(t *testing.T, value any) []byte {
+	t.Helper()
+	raw, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+func typedEvidenceDigest(raw []byte) string {
+	digest := sha256.Sum256(raw)
+	return hex.EncodeToString(digest[:])
+}
+
+func wireTraceRecord(t *testing.T, observation map[string]any) map[string]any {
+	t.Helper()
+	return map[string]any{
+		"kind":               "wire_trace",
+		"observation":        observation,
+		"observation_sha256": typedEvidenceDigest(canonicalTypedEvidenceJSON(t, observation)),
+		"scenario_key":       "alpha",
+	}
+}
+
+func runTypedEvidenceVerifier(t *testing.T, observations []byte, allowIncomplete bool) ([]byte, error) {
+	t.Helper()
+	root := t.TempDir()
+	inventory := filepath.Join(root, "inventory.json")
+	contract := filepath.Join(root, "contract.json")
+	observationPath := filepath.Join(root, "observations.jsonl")
+	output := filepath.Join(root, "output.json")
+	if err := os.WriteFile(inventory, []byte(`{"gate":"test_gate","scenarios":[{"id":"alpha"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(contract, []byte(`{"evidence_kinds":{"wire_trace":{"exact_observation":{"verified":true}}},"gate":"test_gate","scenario_key_field":"id","scenarios":{"alpha":["wire_trace"]},"schema_version":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if observations != nil {
+		if err := os.WriteFile(observationPath, observations, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	args := []string{
+		"verify_typed_evidence.py",
+		"--inventory", inventory,
+		"--contract", contract,
+		"--observations", observationPath,
+		"--output", output,
+	}
+	if allowIncomplete {
+		args = append(args, "--allow-incomplete")
+	}
+	command := exec.CommandContext(t.Context(), "python3", args...)
+	command.Dir = "."
+	combined, err := command.CombinedOutput()
+	if err != nil {
+		return combined, err
+	}
+	raw, readErr := os.ReadFile(output)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	return raw, nil
+}
+
+func validTypedEvidenceRecord(t *testing.T) []byte {
+	t.Helper()
+	return canonicalTypedEvidenceJSON(t, wireTraceRecord(t, map[string]any{"verified": true}))
+}
+
+func TestTypedEvidenceVerifierAcceptsExactCanonicalEvidence(t *testing.T) {
+	raw, err := runTypedEvidenceVerifier(t, validTypedEvidenceRecord(t), false)
+	if err != nil {
+		t.Fatalf("verifier rejected valid evidence: %v: %s", err, raw)
+	}
+	var result struct {
+		Complete  bool `json:"complete"`
+		Scenarios []struct {
+			Evidence []struct {
+				Observation       map[string]any `json:"observation"`
+				ObservationSHA256 string         `json:"observation_sha256"`
+			} `json:"evidence"`
+		} `json:"scenarios"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatal(err)
+	}
+	if !result.Complete || len(result.Scenarios) != 1 || len(result.Scenarios[0].Evidence) != 1 {
+		t.Fatalf("unexpected typed evidence result: %s", raw)
+	}
+	if result.Scenarios[0].Evidence[0].ObservationSHA256 == "" || result.Scenarios[0].Evidence[0].Observation["verified"] != true {
+		t.Fatalf("sanitized observation or digest was not retained: %s", raw)
+	}
+}
+
+func TestTypedEvidenceVerifierFailsClosed(t *testing.T) {
+	valid := validTypedEvidenceRecord(t)
+	var record map[string]any
+	if err := json.Unmarshal(valid, &record); err != nil {
+		t.Fatal(err)
+	}
+
+	badDigest := maps.Clone(record)
+	badDigest["observation_sha256"] = string(make([]byte, 64))
+
+	extraKind := maps.Clone(record)
+	extraKind["kind"] = "unexpected_kind"
+
+	secretObservation := map[string]any{"value": "lv_live_must_not_escape"}
+	secret := wireTraceRecord(t, secretObservation)
+	secretKeyObservation := map[string]any{"api_key": "short-secret"}
+	secretKey := wireTraceRecord(t, secretKeyObservation)
+	falseObservation := map[string]any{"verified": false}
+	falseEvidence := wireTraceRecord(t, falseObservation)
+	opaqueObservation := map[string]any{"payload": "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=", "verified": true}
+	opaqueEvidence := wireTraceRecord(t, opaqueObservation)
+
+	tests := map[string][]byte{
+		"missing":             nil,
+		"extra kind":          canonicalTypedEvidenceJSON(t, extraKind),
+		"duplicate kind":      append(append(valid, '\n'), valid...),
+		"bad digest":          canonicalTypedEvidenceJSON(t, badDigest),
+		"noncanonical object": append([]byte(" "), valid...),
+		"secret value":        canonicalTypedEvidenceJSON(t, secret),
+		"secret key":          canonicalTypedEvidenceJSON(t, secretKey),
+		"false success":       canonicalTypedEvidenceJSON(t, falseEvidence),
+		"opaque payload":      canonicalTypedEvidenceJSON(t, opaqueEvidence),
+		"duplicate key":       []byte(`{"kind":"wire_trace","kind":"wire_trace","observation":{"verified":true},"observation_sha256":"00","scenario_key":"alpha"}`),
+	}
+	for name, observations := range tests {
+		t.Run(name, func(t *testing.T) {
+			if output, err := runTypedEvidenceVerifier(t, observations, false); err == nil {
+				t.Fatalf("verifier accepted %s: %s", name, output)
+			}
+		})
+	}
+}
+
+func TestTypedEvidenceVerifierAllowsHonestIncompleteArtifact(t *testing.T) {
+	raw, err := runTypedEvidenceVerifier(t, nil, true)
+	if err != nil {
+		t.Fatalf("allow-incomplete rejected missing evidence: %v: %s", err, raw)
+	}
+	var result struct {
+		Complete bool `json:"complete"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Complete {
+		t.Fatalf("missing typed evidence was marked complete: %s", raw)
+	}
+}
+
+func TestRepositoryTypedEvidenceContractCoversEveryScenario(t *testing.T) {
+	output := filepath.Join(t.TempDir(), "typed-evidence.json")
+	command := exec.CommandContext(
+		t.Context(),
+		"python3", "verify_typed_evidence.py",
+		"--inventory", "pre_retirement_scenarios.json",
+		"--contract", "typed_evidence_contract.json",
+		"--observations", filepath.Join(t.TempDir(), "missing.jsonl"),
+		"--output", output,
+		"--allow-incomplete",
+	)
+	command.Dir = "."
+	if combined, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("repository typed evidence contract is invalid: %v: %s", err, combined)
+	}
+	var result struct {
+		Complete  bool             `json:"complete"`
+		Scenarios []map[string]any `json:"scenarios"`
+	}
+	raw, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Complete || len(result.Scenarios) != 68 {
+		t.Fatalf("repository typed evidence coverage = complete %t, scenarios %d, want false/68", result.Complete, len(result.Scenarios))
+	}
+}
+
+func TestWorkflowMakesTypedEvidenceARequiredGateInput(t *testing.T) {
+	workflow, err := os.ReadFile("../../../.github/workflows/native-udp-sandbox.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	required := [][]byte{
+		[]byte("QURL_GO_SANDBOX_TYPED_EVIDENCE_PATH:"),
+		[]byte("python3 tests/e2e/nativeudp/verify_typed_evidence.py"),
+		[]byte(`"${typed_evidence_complete}" == "true"`),
+		[]byte("--argjson typed_evidence_complete"),
+		[]byte("--argjson typed_evidence"),
+		[]byte(".typed_evidence_complete == true"),
+	}
+	for _, snippet := range required {
+		if !bytes.Contains(workflow, snippet) {
+			t.Errorf("workflow does not bind typed evidence with %q", snippet)
+		}
+	}
+	if err := validateArtifactUploadPaths(workflow); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestArtifactUploadPathsRejectsBroadGlobWhenPathPrecedesUses(t *testing.T) {
+	workflow := []byte(`steps:
+  - name: Upload proof
+    with:
+      path: |-
+          ${{ runner.temp }}/native-udp-sandbox.evidence.json
+          ${{ runner.temp }}/sandbox-deployment-manifest.json
+          ${{ runner.temp }}/pre_retirement_scenarios.json
+          ${{ runner.temp }}/retired_lifecycle_surface.json
+          ${{ runner.temp }}/*
+      retention-days: 30
+    uses: "actions/upload-artifact@deadbeef"
+`)
+	paths, err := artifactUploadPaths(workflow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := paths[len(paths)-1], "${{ runner.temp }}/*"; got != want {
+		t.Fatalf("last upload path = %q, want %q", got, want)
+	}
+	if err := validateArtifactUploadPaths(workflow); err == nil {
+		t.Fatal("broad runner.temp upload unexpectedly passed the artifact allowlist")
+	}
+}
+
+func TestArtifactUploadPathsRejectsMultipleActionsIncludingQuotedAction(t *testing.T) {
+	workflow := []byte(`steps:
+  - name: Upload proof
+    uses: actions/upload-artifact@deadbeef
+    with:
+      path: |
+        ${{ runner.temp }}/native-udp-sandbox.evidence.json
+        ${{ runner.temp }}/sandbox-deployment-manifest.json
+        ${{ runner.temp }}/pre_retirement_scenarios.json
+        ${{ runner.temp }}/retired_lifecycle_surface.json
+  - name: Upload broad state
+    uses: "actions/upload-artifact@deadbeef"
+    with:
+      path: ${{ runner.temp }}/*
+`)
+	if err := validateArtifactUploadPaths(workflow); err == nil {
+		t.Fatal("multiple upload-artifact actions unexpectedly passed the artifact allowlist")
+	}
+}
+
+func validateArtifactUploadPaths(workflow []byte) error {
+	paths, err := artifactUploadPaths(workflow)
+	if err != nil {
+		return err
+	}
+	got := append([]string(nil), paths...)
+	want := append([]string(nil), approvedArtifactUploadPaths...)
+	sort.Strings(got)
+	sort.Strings(want)
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		return fmt.Errorf("upload-artifact paths = %q, want exact allowlist %q", got, want)
+	}
+	return nil
+}
+
+func artifactUploadPaths(workflow []byte) ([]string, error) {
+	lines := strings.Split(string(workflow), "\n")
+	var paths []string
+	actionCount := 0
+	for usesLine, line := range lines {
+		trimmedUses := strings.TrimSpace(line)
+		if !strings.Contains(trimmedUses, "actions/upload-artifact@") {
+			continue
+		}
+		actionCount++
+		usesIndent := yamlIndent(line)
+		stepStart := -1
+		stepIndent := -1
+		if strings.HasPrefix(trimmedUses, "- ") {
+			stepStart = usesLine
+			stepIndent = usesIndent
+		} else {
+			for index := usesLine - 1; index >= 0; index-- {
+				trimmed := strings.TrimSpace(lines[index])
+				if strings.HasPrefix(trimmed, "- ") && yamlIndent(lines[index]) < usesIndent {
+					stepStart = index
+					stepIndent = yamlIndent(lines[index])
+					break
+				}
+			}
+		}
+		if stepIndent < 0 {
+			return nil, fmt.Errorf("upload-artifact action at line %d has no enclosing step", usesLine+1)
+		}
+		stepEnd := len(lines)
+		for index := stepStart + 1; index < len(lines); index++ {
+			if strings.HasPrefix(strings.TrimSpace(lines[index]), "- ") && yamlIndent(lines[index]) == stepIndent {
+				stepEnd = index
+				break
+			}
+		}
+		var withLines []int
+		for index := stepStart + 1; index < stepEnd; index++ {
+			if strings.TrimSpace(lines[index]) == "with:" && yamlIndent(lines[index]) > stepIndent {
+				withLines = append(withLines, index)
+			}
+		}
+		if len(withLines) != 1 {
+			return nil, fmt.Errorf("upload-artifact action at line %d has %d with blocks, want 1", usesLine+1, len(withLines))
+		}
+		withLine := withLines[0]
+		withIndent := yamlIndent(lines[withLine])
+		withEnd := stepEnd
+		for index := withLine + 1; index < stepEnd; index++ {
+			if strings.TrimSpace(lines[index]) != "" && yamlIndent(lines[index]) <= withIndent {
+				withEnd = index
+				break
+			}
+		}
+		pathKeys := 0
+		for index := withLine + 1; index < withEnd; index++ {
+			trimmed := strings.TrimSpace(lines[index])
+			if (trimmed != "path:" && !strings.HasPrefix(trimmed, "path: ")) || yamlIndent(lines[index]) <= withIndent {
+				continue
+			}
+			pathKeys++
+			pathIndent := yamlIndent(lines[index])
+			value := strings.TrimSpace(strings.TrimPrefix(trimmed, "path:"))
+			isBlockScalar := value == "" || strings.HasPrefix(value, "|") || strings.HasPrefix(value, ">")
+			if !isBlockScalar {
+				paths = append(paths, value)
+				continue
+			}
+			for index++; index < withEnd; index++ {
+				if strings.TrimSpace(lines[index]) == "" {
+					continue
+				}
+				if yamlIndent(lines[index]) <= pathIndent {
+					break
+				}
+				paths = append(paths, strings.TrimSpace(lines[index]))
+			}
+		}
+		if pathKeys != 1 {
+			return nil, fmt.Errorf("upload-artifact action at line %d has %d with.path keys, want 1", usesLine+1, pathKeys)
+		}
+	}
+	if actionCount != 1 {
+		return nil, fmt.Errorf("workflow has %d upload-artifact actions, want exactly 1", actionCount)
+	}
+	if len(paths) == 0 {
+		return nil, fmt.Errorf("workflow has no upload-artifact path inventory")
+	}
+	return paths, nil
+}
+
+func yamlIndent(line string) int {
+	return len(line) - len(strings.TrimLeft(line, " "))
+}

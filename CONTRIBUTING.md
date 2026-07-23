@@ -8,6 +8,14 @@ is high — but the workflow is simple: one command runs everything CI runs.
 > `relayknock`; `qurl` re-exports exactly the surface callers need (see
 > [`qurl/facade.go`](qurl/facade.go)). New customer-facing API belongs on `qurl`.
 
+## Prerequisites
+
+Use the Go version declared in [`go.mod`](go.mod), and keep both `git` and
+`python3` available on `PATH`. The native UDP proof-contract tests inspect the
+current Git checkout and invoke the Python typed-evidence verifier, so
+`go test ./...` and `make check` intentionally fail closed when either tool is
+missing rather than silently skipping a release gate.
+
 ## The one quality gate
 
 ```sh

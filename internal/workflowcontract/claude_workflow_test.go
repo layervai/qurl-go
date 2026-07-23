@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -571,9 +572,28 @@ func runScript(t *testing.T, directory, script string, environment map[string]st
 	t.Helper()
 	command := exec.CommandContext(t.Context(), "bash", "-c", script)
 	command.Dir = directory
-	command.Env = os.Environ()
+	controlled := map[string]string{
+		"GIT_CONFIG_GLOBAL":   "/dev/null",
+		"GIT_CONFIG_NOSYSTEM": "1",
+		"LANG":                "C",
+		"LC_ALL":              "C",
+		"TZ":                  "UTC",
+	}
+	for _, key := range []string{"HOME", "PATH", "TMPDIR"} {
+		if value := os.Getenv(key); value != "" {
+			controlled[key] = value
+		}
+	}
 	for key, value := range environment {
-		command.Env = append(command.Env, key+"="+value)
+		controlled[key] = value
+	}
+	keys := make([]string, 0, len(controlled))
+	for key := range controlled {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		command.Env = append(command.Env, key+"="+controlled[key])
 	}
 	output, err := command.CombinedOutput()
 	if wantSuccess && err != nil {
@@ -582,6 +602,18 @@ func runScript(t *testing.T, directory, script string, environment map[string]st
 	if !wantSuccess && err == nil {
 		t.Fatalf("script succeeded unexpectedly:\n%s", output)
 	}
+}
+
+func TestRunScriptDoesNotInheritWorkflowControlVariables(t *testing.T) {
+	t.Setenv("MOCK_CANDIDATE_STATE", "closed")
+	t.Setenv("QURL_GO_SANDBOX_PROOF_PHASE", "post_removal")
+	t.Setenv("GITHUB_SHA", strings.Repeat("f", 40))
+	runScript(t, t.TempDir(), `
+		set -euo pipefail
+		test -z "${MOCK_CANDIDATE_STATE:-}"
+		test -z "${QURL_GO_SANDBOX_PROOF_PHASE:-}"
+		test -z "${GITHUB_SHA:-}"
+	`, nil, true)
 }
 
 func runGit(t *testing.T, directory string, args ...string) string {
