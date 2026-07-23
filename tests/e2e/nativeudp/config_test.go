@@ -11,32 +11,36 @@ import (
 )
 
 const (
-	strictEnv             = "QURL_GO_SANDBOX_STRICT"
-	buildSHAEnv           = "QURL_GO_SANDBOX_EXPECTED_SHA"
-	hubHostEnv            = "QURL_GO_SANDBOX_HUB_HOST"
-	hubPortEnv            = "QURL_GO_SANDBOX_HUB_PORT"
-	hubServerKeyEnv       = "QURL_GO_SANDBOX_HUB_SERVER_PUBLIC_KEY_B64"
-	enrollmentEnv         = "QURL_GO_SANDBOX_ENROLLMENT_CREDENTIAL"
-	agentIDEnv            = "QURL_GO_SANDBOX_AGENT_ID"
-	statePathEnv          = "QURL_GO_SANDBOX_STATE_PATH"
-	provenancePathEnv     = "QURL_GO_SANDBOX_PROVENANCE_PATH"
-	knockResourceIDEnv    = "QURL_GO_SANDBOX_KNOCK_RESOURCE_ID"
-	expectedCellIDEnv     = "QURL_GO_SANDBOX_EXPECTED_CELL_ID"
-	standardNHPUDPPort    = 62206
-	x25519PublicKeyLength = 32
+	strictEnv                = "QURL_GO_SANDBOX_STRICT"
+	buildSHAEnv              = "QURL_GO_SANDBOX_EXPECTED_SHA"
+	hubHostEnv               = "QURL_GO_SANDBOX_HUB_HOST"
+	hubPortEnv               = "QURL_GO_SANDBOX_HUB_PORT"
+	hubServerKeyEnv          = "QURL_GO_SANDBOX_HUB_SERVER_PUBLIC_KEY_B64"
+	enrollmentEnv            = "QURL_GO_SANDBOX_ENROLLMENT_CREDENTIAL"
+	agentIDEnv               = "QURL_GO_SANDBOX_AGENT_ID"
+	statePathEnv             = "QURL_GO_SANDBOX_STATE_PATH"
+	provenancePathEnv        = "QURL_GO_SANDBOX_PROVENANCE_PATH"
+	deploymentManifestSHAEnv = "QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_SHA256"
+	typedContractSHAEnv      = "QURL_GO_SANDBOX_TYPED_EVIDENCE_CONTRACT_SHA256"
+	knockResourceIDEnv       = "QURL_GO_SANDBOX_KNOCK_RESOURCE_ID"
+	expectedCellIDEnv        = "QURL_GO_SANDBOX_EXPECTED_CELL_ID"
+	standardNHPUDPPort       = 62206
+	x25519PublicKeyLength    = 32
 )
 
 type sandboxConfig struct {
-	buildSHA        string
-	hubHost         string
-	hubPort         int
-	hubServerKeyB64 string
-	enrollment      string
-	agentID         string
-	statePath       string
-	provenancePath  string
-	knockResourceID string
-	expectedCellID  string
+	buildSHA         string
+	hubHost          string
+	hubPort          int
+	hubServerKeyB64  string
+	enrollment       string
+	agentID          string
+	statePath        string
+	provenancePath   string
+	deploymentSHA    string
+	typedContractSHA string
+	knockResourceID  string
+	expectedCellID   string
 }
 
 func loadSandboxConfig(lookup func(string) string) (sandboxConfig, bool, error) {
@@ -58,6 +62,8 @@ func loadSandboxConfig(lookup func(string) string) (sandboxConfig, bool, error) 
 		agentIDEnv,
 		statePathEnv,
 		provenancePathEnv,
+		deploymentManifestSHAEnv,
+		typedContractSHAEnv,
 		knockResourceIDEnv,
 	}
 	missing := make([]string, 0, len(required))
@@ -75,30 +81,34 @@ func loadSandboxConfig(lookup func(string) string) (sandboxConfig, bool, error) 
 		return sandboxConfig{}, true, fmt.Errorf("%s must be the native NHP UDP port %d", hubPortEnv, standardNHPUDPPort)
 	}
 	cfg := sandboxConfig{
-		buildSHA:        lookup(buildSHAEnv),
-		hubHost:         lookup(hubHostEnv),
-		hubPort:         port,
-		hubServerKeyB64: lookup(hubServerKeyEnv),
-		enrollment:      lookup(enrollmentEnv),
-		agentID:         lookup(agentIDEnv),
-		statePath:       lookup(statePathEnv),
-		provenancePath:  lookup(provenancePathEnv),
-		knockResourceID: lookup(knockResourceIDEnv),
-		expectedCellID:  lookup(expectedCellIDEnv),
+		buildSHA:         lookup(buildSHAEnv),
+		hubHost:          lookup(hubHostEnv),
+		hubPort:          port,
+		hubServerKeyB64:  lookup(hubServerKeyEnv),
+		enrollment:       lookup(enrollmentEnv),
+		agentID:          lookup(agentIDEnv),
+		statePath:        lookup(statePathEnv),
+		provenancePath:   lookup(provenancePathEnv),
+		deploymentSHA:    lookup(deploymentManifestSHAEnv),
+		typedContractSHA: lookup(typedContractSHAEnv),
+		knockResourceID:  lookup(knockResourceIDEnv),
+		expectedCellID:   lookup(expectedCellIDEnv),
 	}
 
 	if !canonicalLowerHex(cfg.buildSHA, 40) {
 		return sandboxConfig{}, true, fmt.Errorf("%s must be an exact 40-character lowercase Git SHA", buildSHAEnv)
 	}
 	for name, value := range map[string]string{
-		hubHostEnv:         cfg.hubHost,
-		hubServerKeyEnv:    cfg.hubServerKeyB64,
-		enrollmentEnv:      cfg.enrollment,
-		agentIDEnv:         cfg.agentID,
-		statePathEnv:       cfg.statePath,
-		provenancePathEnv:  cfg.provenancePath,
-		knockResourceIDEnv: cfg.knockResourceID,
-		expectedCellIDEnv:  cfg.expectedCellID,
+		hubHostEnv:               cfg.hubHost,
+		hubServerKeyEnv:          cfg.hubServerKeyB64,
+		enrollmentEnv:            cfg.enrollment,
+		agentIDEnv:               cfg.agentID,
+		statePathEnv:             cfg.statePath,
+		provenancePathEnv:        cfg.provenancePath,
+		deploymentManifestSHAEnv: cfg.deploymentSHA,
+		typedContractSHAEnv:      cfg.typedContractSHA,
+		knockResourceIDEnv:       cfg.knockResourceID,
+		expectedCellIDEnv:        cfg.expectedCellID,
 	} {
 		if value != strings.TrimSpace(value) || strings.IndexFunc(value, unicode.IsControl) >= 0 {
 			return sandboxConfig{}, true, fmt.Errorf("%s must be canonical and contain no control characters", name)
@@ -115,6 +125,12 @@ func loadSandboxConfig(lookup func(string) string) (sandboxConfig, bool, error) 
 	}
 	if !filepath.IsAbs(cfg.provenancePath) {
 		return sandboxConfig{}, true, fmt.Errorf("%s must be an absolute path", provenancePathEnv)
+	}
+	if !canonicalLowerHex(cfg.deploymentSHA, 64) {
+		return sandboxConfig{}, true, fmt.Errorf("%s must be an exact lowercase SHA-256 digest", deploymentManifestSHAEnv)
+	}
+	if !canonicalLowerHex(cfg.typedContractSHA, 64) {
+		return sandboxConfig{}, true, fmt.Errorf("%s must be an exact lowercase SHA-256 digest", typedContractSHAEnv)
 	}
 	paths := []struct {
 		name string
@@ -167,16 +183,18 @@ func validateSandboxAgentID(agentID string) error {
 
 func TestSandboxConfigStrictMode(t *testing.T) {
 	valid := map[string]string{
-		strictEnv:          "true",
-		buildSHAEnv:        strings.Repeat("a", 40),
-		hubHostEnv:         "hub.nhp.layerv.ai",
-		hubPortEnv:         strconv.Itoa(standardNHPUDPPort),
-		hubServerKeyEnv:    base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef")),
-		enrollmentEnv:      strings.Repeat("credential", 4),
-		agentIDEnv:         "qurl-go-sandbox-123-1",
-		statePathEnv:       filepath.Join(t.TempDir(), "agent-state.json"),
-		provenancePathEnv:  filepath.Join(t.TempDir(), "provenance.json"),
-		knockResourceIDEnv: "knock-resource-id",
+		strictEnv:                "true",
+		buildSHAEnv:              strings.Repeat("a", 40),
+		hubHostEnv:               "hub.nhp.layerv.ai",
+		hubPortEnv:               strconv.Itoa(standardNHPUDPPort),
+		hubServerKeyEnv:          base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef")),
+		enrollmentEnv:            strings.Repeat("credential", 4),
+		agentIDEnv:               "qurl-go-sandbox-123-1",
+		statePathEnv:             filepath.Join(t.TempDir(), "agent-state.json"),
+		provenancePathEnv:        filepath.Join(t.TempDir(), "provenance.json"),
+		deploymentManifestSHAEnv: strings.Repeat("d", 64),
+		typedContractSHAEnv:      strings.Repeat("e", 64),
+		knockResourceIDEnv:       "knock-resource-id",
 	}
 	lookup := func(values map[string]string) func(string) string {
 		return func(name string) string { return values[name] }
@@ -196,12 +214,26 @@ func TestSandboxConfigStrictMode(t *testing.T) {
 		}
 	})
 
+	for _, name := range []string{deploymentManifestSHAEnv, typedContractSHAEnv} {
+		t.Run("strict rejects noncanonical "+name, func(t *testing.T) {
+			values := make(map[string]string, len(valid))
+			for key, value := range valid {
+				values[key] = value
+			}
+			values[name] = strings.Repeat("A", 64)
+			cfg, enabled, err := loadSandboxConfig(lookup(values))
+			if !enabled || err == nil || cfg != (sandboxConfig{}) || !strings.Contains(err.Error(), name) {
+				t.Fatalf("noncanonical digest config = %#v, %t, %v", cfg, enabled, err)
+			}
+		})
+	}
+
 	t.Run("strict reports every missing prerequisite", func(t *testing.T) {
 		cfg, enabled, err := loadSandboxConfig(lookup(map[string]string{strictEnv: "1"}))
 		if !enabled || err == nil || cfg != (sandboxConfig{}) {
 			t.Fatalf("missing config = %#v, %t, %v; want enabled failure", cfg, enabled, err)
 		}
-		for _, name := range []string{buildSHAEnv, hubHostEnv, hubPortEnv, hubServerKeyEnv, enrollmentEnv, agentIDEnv, statePathEnv, provenancePathEnv, knockResourceIDEnv} {
+		for _, name := range []string{buildSHAEnv, hubHostEnv, hubPortEnv, hubServerKeyEnv, enrollmentEnv, agentIDEnv, statePathEnv, provenancePathEnv, deploymentManifestSHAEnv, typedContractSHAEnv, knockResourceIDEnv} {
 			if !strings.Contains(err.Error(), name) {
 				t.Errorf("missing-config error %q omits %s", err, name)
 			}

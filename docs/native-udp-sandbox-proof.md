@@ -62,7 +62,8 @@ Configure the protected GitHub `sandbox` environment before dispatching it:
 - variable `QURL_GO_SANDBOX_KNOCK_RESOURCE_ID`: a live sandbox Connector knock
   resource;
 - optional variable `QURL_GO_SANDBOX_EXPECTED_CELL_ID`: an operator assertion
-  when a particular assignment is expected.
+  for the initial registration and credentialless warm-open cell. The explicit
+  reassignment observation must move away from it.
 
 The required `connector_proof_run_id` dispatch input is not trusted on its own.
 A workflow-only App token resolves qURL Connector's exact
@@ -82,6 +83,17 @@ then hash ASCII, key-sorted, compact JSON. The App
 token and raw Connector evidence are never placed in the `go test` environment.
 The named Go adapter receives only a read-only allowlisted attestation and its
 SHA-256 digest; that attestation carries no credential or raw packet evidence.
+The Connector attestation independently requires its schema-v2 operational
+sidecar to bind the exact Connector SHA, canonical proof agent id, deployment
+manifest SHA-256, and Connector typed-evidence-contract SHA-256. Its four
+observations must prove the same registration/warm-open/cell0-to-cell1/
+same-cell-refresh sequence, including nonregressing endpoint revision and
+parsed lease expiry.
+The Connector inventory contains exactly 56 headless-runtime scenarios. Its
+public runtime deliberately accepts only non-account enrollment credentials,
+so the four account-OTP scenarios remain solely in qurl-go's complete 68-row
+matrix instead of adding a Connector prompt or callback that the product does
+not otherwise need.
 
 Strict mode fails when any required value is absent. It records the exact clean
 Git build SHA, Hub trust root, deployment/inventory/proof-harness digests, and
@@ -98,27 +110,38 @@ manifest, inventory, and retired surface are snapshotted read-only and all input
 digests are rechecked after the test process. Raw `go test -json` output is
 redirected only to an ephemeral runner file: it is neither printed to the
 Actions log nor uploaded, and it is deleted before artifact publication.
-The test writes a separate strict non-secret provenance sidecar containing the
-Hub host/port/key fingerprint and every authenticated assigned-cell
+The test writes a separate strict non-secret schema-v2 provenance sidecar
+containing the exact build SHA, generated agent id, deployment-manifest
+SHA-256, typed-evidence-contract SHA-256, Hub host/port/key fingerprint, and
+every authenticated assigned-cell
 generation/revision/lease/host/port/key fingerprint observed by the public SDK.
 The workflow requires the exact generated agent id, canonical bounded lease
 timestamps, safe positive integer generation/revision counters no greater than
 `9007199254740991`, and exactly four ordered observations: registration, warm
 open, reassignment, and refresh. Registration and warm open must preserve the
 entire assignment binding; reassignment must move to a different deployed cell
-at a strictly newer generation; refresh must preserve the entire reassigned
-binding. At least two distinct authenticated cell ids, hosts, and server
+in the explicit cell0-to-cell1 fixture at a strictly newer generation; refresh
+must preserve the reassigned
+cell/generation/host/port/key tuple, may advance endpoint revision, and may
+extend but never regress the parsed lease timestamp. The sidecar is published
+with exclusive no-replace semantics, so an existing file or partial temporary
+artifact fails closed instead of being overwritten. At least two distinct authenticated cell ids, hosts, and server
 identities must come from the supplied deployment manifest. Every artifact
 states `gate_passed`, the independent strict-test and inventory-enforcement
 outcomes, input integrity, two-cell
 provenance, and exact implemented/blocking/failure/skip/pass counts, so a
 partial or one-cell run cannot be mistaken for proof.
-The workflow requires exactly one passing and
-zero skipped events for every scenario marked `implemented` in
-`tests/e2e/nativeudp/pre_retirement_scenarios.json`: provenance, fail-closed Hub
-DNS resolution, one-attempt real-socket UDP timeout, fresh registration,
-persisted warm open, Hub refresh with authenticated reassignment adoption,
-assigned-cell KNK, assigned-cell EXT, and zero lifecycle HTTP calls.
+The workflow requires exactly one passing and zero skipped events for every
+scenario marked `implemented` in
+`tests/e2e/nativeudp/pre_retirement_scenarios.json`. The live lifecycle source
+path now performs provenance, fail-closed Hub DNS resolution, one-attempt
+real-socket UDP timeout, fresh registration, persisted credentialless warm
+open, an authenticated opt-in cell0-to-cell1 reassignment refresh, a following
+ordinary same-cell Hub refresh, assigned-cell KNK, assigned-cell EXT, and zero
+lifecycle HTTP calls.
+The reassignment inventory row remains blocking until the deployed uniquely
+tagged Authority fixture actually returns that real sequence; the client never
+self-asserts or simulates the move.
 Any skip beneath a required scenario's nested subtest namespace also fails the
 parent scenario, and every failing event is counted globally. A successful
 inventory scan cannot mask a failed strict `go test` process: `strict_outcome`

@@ -17,7 +17,6 @@ import (
 const (
 	connectorAttestationPathEnv  = "QURL_GO_SANDBOX_CONNECTOR_ATTESTATION_PATH"
 	connectorAttestationSHAEnv   = "QURL_GO_SANDBOX_CONNECTOR_ATTESTATION_SHA256"
-	deploymentManifestSHAEnv     = "QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_SHA256"
 	proofPhaseEnv                = "QURL_GO_SANDBOX_PROOF_PHASE"
 	preRemovalConnectorRunIDEnv  = "QURL_GO_SANDBOX_PRE_REMOVAL_CONNECTOR_PROOF_RUN_ID"
 	connectorProofRepository     = "layervai/qurl-connector"
@@ -276,8 +275,8 @@ func validateConnectorProofAttestation(attestation connectorProofAttestation, ph
 			attestation.TwoCellProvenance,
 		)
 	}
-	if attestation.Counts.Implemented != 60 || attestation.Counts.Blocking != 0 || attestation.Counts.Failures != 0 ||
-		attestation.Counts.Skips != 0 || attestation.Counts.ExactPasses != 60 {
+	if attestation.Counts.Implemented != 56 || attestation.Counts.Blocking != 0 || attestation.Counts.Failures != 0 ||
+		attestation.Counts.Skips != 0 || attestation.Counts.ExactPasses != 56 {
 		return fmt.Errorf("Connector proof counts are incomplete: %+v", attestation.Counts)
 	}
 	return nil
@@ -335,7 +334,7 @@ func TestValidateConnectorProofAttestationFailsClosed(t *testing.T) {
 			EnforcementOutcome:       "success",
 			InputsUnchanged:          true,
 			GatePassed:               true,
-			Counts:                   connectorAttestationCounts{Implemented: 60, ExactPasses: 60},
+			Counts:                   connectorAttestationCounts{Implemented: 56, ExactPasses: 56},
 			ProvenanceValid:          true,
 			TwoCellProvenance:        true,
 		}
@@ -360,7 +359,7 @@ func TestValidateConnectorProofAttestationFailsClosed(t *testing.T) {
 		"failures":                  func(value *connectorProofAttestation) { value.Counts.Failures = 1 },
 		"skips":                     func(value *connectorProofAttestation) { value.Counts.Skips = 1 },
 		"passes mismatch":           func(value *connectorProofAttestation) { value.Counts.ExactPasses-- },
-		"truncated scenario count":  func(value *connectorProofAttestation) { value.Counts.Implemented = 58; value.Counts.ExactPasses = 58 },
+		"truncated scenario count":  func(value *connectorProofAttestation) { value.Counts.Implemented = 55; value.Counts.ExactPasses = 55 },
 		"provenance false":          func(value *connectorProofAttestation) { value.ProvenanceValid = false },
 		"two-cell false":            func(value *connectorProofAttestation) { value.TwoCellProvenance = false },
 		"wrong deployment":          func(value *connectorProofAttestation) { value.DeploymentManifestSHA256 = strings.Repeat("e", 64) },
