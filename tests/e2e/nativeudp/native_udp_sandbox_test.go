@@ -222,6 +222,34 @@ func TestSandboxNativeUDPLifecycle(t *testing.T) {
 		return
 	}
 
+	// Self-contained authentication and packet-boundary proofs. Like the DNS and
+	// timeout proofs above they drive the real transport over loopback sockets and
+	// need no live cell, so they run identically here and in the always-on
+	// TestNativeUDPClientFaultPaths.
+	if !runTypedEvidenceScenario(t, "wrong_hub_key", "negative.wrong_hub_key", []string{"rejection_observation"}, func(t *testing.T) {
+		proveWrongHubKey(ctx, t, httpTrap)
+	}) {
+		return
+	}
+
+	if !runTypedEvidenceScenario(t, "wrong_cell_key", "negative.wrong_cell_key", []string{"rejection_observation"}, func(t *testing.T) {
+		proveWrongCellKey(ctx, t, httpTrap)
+	}) {
+		return
+	}
+
+	if !runTypedEvidenceScenario(t, "oversize_packet", "packet.oversize", []string{"packet_fault_observation"}, func(t *testing.T) {
+		provePacketOversize(ctx, t, httpTrap)
+	}) {
+		return
+	}
+
+	if !runTypedEvidenceScenario(t, "cell_dns_failure", "negative.cell_dns_failure", []string{"rejection_observation"}, func(t *testing.T) {
+		proveCellDNSFailure(ctx, t, httpTrap)
+	}) {
+		return
+	}
+
 	cellEvidence := make([]sandboxCellEvidence, 0, 3)
 	// Happy-path lifecycle calls deliberately omit UDP and retry overrides so
 	// the deployed proof measures the SDK's out-of-box production defaults.
@@ -341,6 +369,18 @@ func TestNativeUDPClientFaultPaths(t *testing.T) {
 	})
 	t.Run("packet_timeout", func(t *testing.T) {
 		provePacketTimeout(t.Context(), t, hub, httpTrap)
+	})
+	t.Run("wrong_hub_key", func(t *testing.T) {
+		proveWrongHubKey(t.Context(), t, httpTrap)
+	})
+	t.Run("wrong_cell_key", func(t *testing.T) {
+		proveWrongCellKey(t.Context(), t, httpTrap)
+	})
+	t.Run("oversize_packet", func(t *testing.T) {
+		provePacketOversize(t.Context(), t, httpTrap)
+	})
+	t.Run("cell_dns_failure", func(t *testing.T) {
+		proveCellDNSFailure(t.Context(), t, httpTrap)
 	})
 }
 
