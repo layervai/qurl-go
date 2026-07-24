@@ -24,6 +24,12 @@ type memoryAgentStateStore struct {
 	state *AgentState
 }
 
+type sequenceAgentStateStore struct {
+	states   []*AgentState
+	returned []*AgentState
+	loads    atomic.Int32
+}
+
 type releaseErrorAgentStateStore struct {
 	*memoryAgentStateStore
 	closeErr error
@@ -56,6 +62,20 @@ func (s *countingAgentStateStore) LoadAgentState(ctx context.Context) (*AgentSta
 
 func (s *countingAgentStateStore) SaveAgentState(ctx context.Context, state *AgentState) error {
 	return s.inner.SaveAgentState(ctx, state)
+}
+
+func (s *sequenceAgentStateStore) LoadAgentState(context.Context) (*AgentState, error) {
+	index := int(s.loads.Add(1)) - 1
+	if index >= len(s.states) {
+		return nil, fmt.Errorf("unexpected load %d", index+1)
+	}
+	state := s.states[index].clone()
+	s.returned = append(s.returned, state)
+	return state, nil
+}
+
+func (s *sequenceAgentStateStore) SaveAgentState(context.Context, *AgentState) error {
+	return errors.New("unexpected save")
 }
 
 func runtimeTestHub() HubBootstrap {
@@ -231,6 +251,182 @@ func TestOpenRegisteredAgentRuntime_OneLoadThroughFirstAuthorization(t *testing.
 		t.Fatalf("warm runtime private key length = %d, want 32", len(privateKey))
 	}
 	wipeBytes(privateKey)
+}
+
+func TestOpenRegisteredAgentWithIdentity_OneSnapshotPinsClientIdentity(t *testing.T) {
+	now := time.Now().UTC()
+	clock := now
+	stateA := completedNativeTestState(t)
+	stateA.AgentID = "agent-a"
+	stateA.DeviceAPIKey = canonicalNativeDeviceCredential
+	stateB := completedNativeTestState(t)
+	stateB.AgentID = "agent-b"
+	stateB.DeviceAPIKey = canonicalNativeDeviceCredential
+	stateC := completedNativeTestState(t)
+	stateC.AgentID = "agent-c"
+	stateC.DeviceAPIKey = canonicalNativeDeviceCredential
+	store := &sequenceAgentStateStore{states: []*AgentState{stateA, stateB, stateC}}
+
+	client, agentID, err := openRegisteredAgentWithIdentity(context.Background(), store, func() time.Time { return clock })
+	if err != nil {
+		t.Fatalf("OpenRegisteredAgentWithIdentity: %v", err)
+	}
+	if agentID != stateA.AgentID || store.loads.Load() != 1 {
+		t.Fatalf("open = agent %q, loads %d; want %q and 1", agentID, store.loads.Load(), stateA.AgentID)
+	}
+	if got := *store.returned[0]; !reflect.DeepEqual(got, AgentState{}) {
+		t.Fatalf("open retained full owned AgentState snapshot: %#v", got)
+	}
+
+	first, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://resources.example.test/v1/resources", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.credentials.Authorize(context.Background(), first); err != nil {
+		t.Fatalf("authorize from exact open snapshot: %v", err)
+	}
+	if got := first.Header.Get("Authorization"); got != "Bearer "+stateA.DeviceAPIKey || store.loads.Load() != 1 {
+		t.Fatalf("primed authorization = %q, loads %d; want agent A credential and one load", got, store.loads.Load())
+	}
+
+	clock = clock.Add(storeCredentialCacheTTL)
+	second, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://resources.example.test/v1/resources", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = client.credentials.Authorize(context.Background(), second)
+	if !errors.Is(err, ErrInvalidClientConfig) || second.Header.Get("Authorization") != "" {
+		t.Fatalf("post-TTL identity change = authorization %q, error %v; want fail closed before header", second.Header.Get("Authorization"), err)
+	}
+	if store.loads.Load() != 2 {
+		t.Fatalf("identity mismatch loads = %d, want A then B only; C must remain unread", store.loads.Load())
+	}
+	if got := *store.returned[1]; !reflect.DeepEqual(got, AgentState{}) {
+		t.Fatalf("post-TTL authorization retained full owned AgentState snapshot: %#v", got)
+	}
+}
+
+func TestOpenRegisteredAgentWithIdentity_RejectsIncompleteStateAfterOneLoad(t *testing.T) {
+	state := completedNativeTestState(t)
+	state.RegisteredAt = nil
+	store := &sequenceAgentStateStore{states: []*AgentState{state, completedNativeTestState(t)}}
+
+	client, agentID, err := OpenRegisteredAgentWithIdentity(context.Background(), store)
+	if client != nil || agentID != "" || !errors.Is(err, ErrInvalidClientConfig) {
+		t.Fatalf("incomplete open = client %v, agent %q, error %v; want nil, empty, invalid config", client, agentID, err)
+	}
+	if store.loads.Load() != 1 {
+		t.Fatalf("incomplete open loads = %d, want exactly 1", store.loads.Load())
+	}
+	if got := *store.returned[0]; !reflect.DeepEqual(got, AgentState{}) {
+		t.Fatalf("rejected open retained full owned AgentState snapshot: %#v", got)
+	}
+}
+
+func TestOpenRegisteredAgentWithIdentity_AllowsPostTTLCredentialRotationForSameIdentity(t *testing.T) {
+	clock := time.Now().UTC()
+	stateA := completedNativeTestState(t)
+	stateA.AgentID = "agent-a"
+	stateB := completedNativeTestState(t)
+	stateB.AgentID = stateA.AgentID
+	stateB.DeviceAPIKey = deviceKeyPrefix + base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x5a}, deviceKeyRandomLength))
+	store := &sequenceAgentStateStore{states: []*AgentState{stateA, stateB}}
+
+	client, agentID, err := openRegisteredAgentWithIdentity(context.Background(), store, func() time.Time { return clock })
+	if err != nil {
+		t.Fatalf("OpenRegisteredAgentWithIdentity: %v", err)
+	}
+	if agentID != stateA.AgentID {
+		t.Fatalf("opened agent id = %q, want %q", agentID, stateA.AgentID)
+	}
+
+	clock = clock.Add(storeCredentialCacheTTL)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://resources.example.test/v1/resources", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.credentials.Authorize(context.Background(), req); err != nil {
+		t.Fatalf("authorize after same-agent credential rotation: %v", err)
+	}
+	if got := req.Header.Get("Authorization"); got != "Bearer "+stateB.DeviceAPIKey {
+		t.Fatalf("rotated Authorization = %q, want rotated credential", got)
+	}
+	if store.loads.Load() != 2 {
+		t.Fatalf("same-agent rotation loads = %d, want initial and post-TTL loads", store.loads.Load())
+	}
+	for i, returned := range store.returned {
+		if got := *returned; !reflect.DeepEqual(got, AgentState{}) {
+			t.Fatalf("load %d retained full owned AgentState snapshot: %#v", i+1, got)
+		}
+	}
+}
+
+func TestNativeRuntimeClients_RejectPostTTLIdentityChange(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		open func(*sequenceAgentStateStore, func() time.Time) (*Client, func(), error)
+	}{
+		{
+			name: "warm runtime open",
+			open: func(store *sequenceAgentStateStore, now func() time.Time) (*Client, func(), error) {
+				client, binding, err := openRegisteredAgentRuntime(context.Background(), store, now)
+				if err != nil {
+					return nil, func() {}, err
+				}
+				if len(store.returned) != 1 || !reflect.DeepEqual(*store.returned[0], AgentState{}) {
+					binding.Destroy()
+					return nil, func() {}, fmt.Errorf("runtime open retained full owned AgentState snapshot: %#v", store.returned)
+				}
+				return client, binding.Destroy, nil
+			},
+		},
+		{
+			name: "registration finish",
+			open: func(store *sequenceAgentStateStore, now func() time.Time) (*Client, func(), error) {
+				state := store.states[0].clone()
+				// Registration already owns the exact committed state snapshot;
+				// the store's first load is therefore the later credential refresh.
+				store.states = store.states[1:]
+				cfg := defaultNativeAgentRuntimeConfig()
+				cfg.clock = now
+				client, binding, err := finishNativeRuntime(store, state, cfg)
+				if err != nil {
+					return nil, func() {}, err
+				}
+				if !reflect.DeepEqual(*state, AgentState{}) {
+					binding.Destroy()
+					return nil, func() {}, fmt.Errorf("registration finish retained full owned AgentState snapshot: %#v", state)
+				}
+				return client, binding.Destroy, nil
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			clock := time.Now().UTC()
+			stateA := completedNativeTestState(t)
+			stateA.AgentID = "agent-a"
+			stateB := completedNativeTestState(t)
+			stateB.AgentID = "agent-b"
+			store := &sequenceAgentStateStore{states: []*AgentState{stateA, stateB}}
+			client, cleanup, err := test.open(store, func() time.Time { return clock })
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer cleanup()
+
+			clock = clock.Add(storeCredentialCacheTTL)
+			req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://resources.example.test/v1/resources", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := client.credentials.Authorize(context.Background(), req); !errors.Is(err, ErrInvalidClientConfig) {
+				t.Fatalf("post-TTL identity change = %v, want invalid client config", err)
+			}
+			if req.Header.Get("Authorization") != "" {
+				t.Fatalf("identity-changed client set Authorization %q", req.Header.Get("Authorization"))
+			}
+		})
+	}
 }
 
 func TestOpenRegisteredAgent_NativeCredentialFaultFailsClosed(t *testing.T) {

@@ -406,6 +406,10 @@ target fails without changing durable state.
 `OpenRegisteredAgent` is available when a process needs only the steady-state
 resource `Client` and will not knock. It still accepts native completed state
 only; assignment expiry does not block resource CRUD.
+`OpenRegisteredAgentWithIdentity` additionally returns the agent id from the
+same single state snapshot that primes the resource client. Both APIs pin that
+identity: after the one-minute credential cache expires, a store reload for a
+different agent fails before setting `Authorization`.
 
 ## Resource-client options
 
@@ -463,6 +467,15 @@ Because unknown fields fail closed, an SDK downgrade may not be able to open
 state written by a newer SDK. Treat that as an explicit state-schema migration
 or reprovisioning operation; never delete credential state merely to bypass the
 decode failure.
+
+Read-only commands that only need to inspect identity state should instead use
+`OpenFileAgentStateReadOnly`. Its returned `AgentStateReader` exposes only
+`LoadAgentState` and `Close`: construction and reads never create directories or
+locks, change permissions, sync, rename, unlink, or write. It retains the same
+0700 directory, 0600 singly-linked file, no-follow, ownership, and namespace
+continuity checks. The sealed equivalent is
+`OpenSealedFileAgentStateReadOnly`, with the same provider and
+`WithExpectedSealedAgentID` contract as the writable sealed store.
 
 ### Sealed local file
 

@@ -27,6 +27,13 @@ type AgentStateContinuity interface {
 	ValidateContinuity() error
 }
 
+type pinnedStateDirOpenMode uint8
+
+const (
+	pinnedStateDirWritable pinnedStateDirOpenMode = iota
+	pinnedStateDirReadOnly
+)
+
 var (
 	_ func(string) AgentStateStore = FileAgentState
 	_ AgentStateStore              = (*FileAgentStateStore)(nil)
@@ -198,6 +205,14 @@ func baseAgentStateStore(store AgentStateStore) AgentStateStore {
 }
 
 func openPinnedStatePath(path, label string) (*pinnedStateDir, string, error) {
+	return openPinnedStatePathWithMode(path, label, pinnedStateDirWritable)
+}
+
+func openPinnedStatePathReadOnly(path, label string) (*pinnedStateDir, string, error) {
+	return openPinnedStatePathWithMode(path, label, pinnedStateDirReadOnly)
+}
+
+func openPinnedStatePathWithMode(path, label string, mode pinnedStateDirOpenMode) (*pinnedStateDir, string, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, "", fmt.Errorf("%w: %s path must not be empty", ErrInvalidBootstrapConfig, label)
 	}
@@ -211,7 +226,7 @@ func openPinnedStatePath(path, label string) (*pinnedStateDir, string, error) {
 	if name == "." || name == string(filepath.Separator) || name == "" {
 		return nil, "", fmt.Errorf("%w: %s path must name a file", ErrInvalidBootstrapConfig, label)
 	}
-	impl, err := openPinnedStateDir(filepath.Dir(absolute), label)
+	impl, err := openPinnedStateDir(filepath.Dir(absolute), label, mode)
 	if err != nil {
 		return nil, "", err
 	}

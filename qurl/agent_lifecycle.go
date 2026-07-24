@@ -26,16 +26,47 @@ import (
 // native registration, refresh, and open. Ordinary WithBaseURL and
 // WithHTTPClient ClientOptions remain supported here too.
 func OpenRegisteredAgent(ctx context.Context, store AgentStateStore, opts ...ClientOption) (*Client, error) {
+	client, _, err := OpenRegisteredAgentWithIdentity(ctx, store, opts...)
+	return client, err
+}
+
+// OpenRegisteredAgentWithIdentity opens a resource Client and returns the
+// authoritative agent id from the exact completed AgentState snapshot that
+// primed the Client. It performs exactly one store load and no resource or
+// lifecycle network call. Future credential reloads fail closed if the store
+// presents a different agent id, preventing a long-lived Client from silently
+// crossing identities after its one-minute credential cache expires.
+func OpenRegisteredAgentWithIdentity(ctx context.Context, store AgentStateStore, opts ...ClientOption) (*Client, string, error) {
+	return openRegisteredAgentWithIdentity(ctx, store, time.Now, opts...)
+}
+
+func openRegisteredAgentWithIdentity(ctx context.Context, store AgentStateStore, now func() time.Time, opts ...ClientOption) (*Client, string, error) {
 	cfg, err := validateRegisteredAgentOpenInputs(ctx, store, opts)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	return withAgentStoreContinuity(store, func(*Client) {}, func(retained AgentStateStore) (*Client, error) {
-		if _, err := loadCompletedRegisteredState(ctx, retained, ErrInvalidClientConfig); err != nil {
+	if now == nil {
+		now = time.Now
+	}
+	type openResult struct {
+		client  *Client
+		agentID string
+	}
+	result, err := withAgentStoreContinuity(store, func(*openResult) {}, func(retained AgentStateStore) (*openResult, error) {
+		state, err := loadCompletedRegisteredState(ctx, retained, ErrInvalidClientConfig)
+		if err != nil {
 			return nil, err
 		}
-		return newStoreBackedClient(store, cfg.baseURL, cfg.httpClient), nil
+		defer clearOwnedAgentState(state)
+		return &openResult{
+			client:  newPrimedStoreBackedClient(store, cfg.baseURL, cfg.httpClient, state.DeviceAPIKey, state.AgentID, now),
+			agentID: state.AgentID,
+		}, nil
 	})
+	if err != nil {
+		return nil, "", err
+	}
+	return result.client, result.agentID, nil
 }
 
 // OpenRegisteredAgentRuntime opens both a store-backed resource Client and the
@@ -67,6 +98,7 @@ func openRegisteredAgentRuntime(ctx context.Context, store AgentStateStore, now 
 		if err != nil {
 			return nil, err
 		}
+		defer clearOwnedAgentState(state)
 		if err := validateAgentRuntimeMetadata(state, now(), ErrInvalidClientConfig); err != nil {
 			return nil, err
 		}
@@ -75,7 +107,7 @@ func openRegisteredAgentRuntime(ctx context.Context, store AgentStateStore, now 
 			return nil, err
 		}
 		defer func() { wipeBytes(privateKey) }()
-		client := newPrimedStoreBackedClient(store, cfg.baseURL, cfg.httpClient, state.DeviceAPIKey, now)
+		client := newPrimedStoreBackedClient(store, cfg.baseURL, cfg.httpClient, state.DeviceAPIKey, state.AgentID, now)
 		binding := newAgentRuntimeBinding(state, privateKey)
 		privateKey = nil // binding owns the slice and its cleanup from this point.
 		return &nativeRuntimeResult{client: client, binding: binding}, nil
@@ -282,9 +314,11 @@ func loadCompletedRegisteredState(ctx context.Context, store AgentStateStore, er
 		return nil, err
 	}
 	if err := validateCompletedAgentIdentity(state, errKind); err != nil {
+		clearOwnedAgentState(state)
 		return nil, err
 	}
 	if err := validatePersistedCredentialForState(state, errKind); err != nil {
+		clearOwnedAgentState(state)
 		return nil, err
 	}
 	return state, nil
@@ -293,12 +327,25 @@ func loadCompletedRegisteredState(ctx context.Context, store AgentStateStore, er
 func loadExistingAgentState(ctx context.Context, store AgentStateStore, errKind error) (*AgentState, error) {
 	state, err := store.LoadAgentState(ctx)
 	if err != nil {
+		clearOwnedAgentState(state)
 		return nil, fmt.Errorf("%w: load agent state: %w", errKind, err)
 	}
 	if err := prepareLoadedAgentState(state, errKind); err != nil {
+		clearOwnedAgentState(state)
 		return nil, err
 	}
 	return state, nil
+}
+
+// clearOwnedAgentState promptly drops all references held by one caller-owned
+// loaded snapshot after its required identity and credential fields have been
+// copied into their next owner. Go strings cannot be reliably overwritten, but
+// clearing the complete struct avoids retaining private-key and recovery fields
+// that a resource Client does not need.
+func clearOwnedAgentState(state *AgentState) {
+	if state != nil {
+		*state = AgentState{}
+	}
 }
 
 // withAgentSetupLock holds the SDK local-file setup lock across an entire native

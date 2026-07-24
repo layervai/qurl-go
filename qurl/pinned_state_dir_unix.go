@@ -69,9 +69,12 @@ type pinnedFileIdentity struct {
 	exists bool
 }
 
-func openPinnedStateDir(path, label string) (*pinnedStateDirImpl, error) {
+func openPinnedStateDir(path, label string, mode pinnedStateDirOpenMode) (*pinnedStateDirImpl, error) {
 	if !filepath.IsAbs(path) {
 		return nil, fmt.Errorf("%w: %s directory must resolve to an absolute path", ErrInvalidBootstrapConfig, label)
+	}
+	if mode != pinnedStateDirWritable && mode != pinnedStateDirReadOnly {
+		return nil, fmt.Errorf("%w: invalid %s directory open mode", ErrInvalidBootstrapConfig, label)
 	}
 	rootFD, err := unix.Open(string(filepath.Separator), unix.O_RDONLY|unix.O_CLOEXEC|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
 	if err != nil {
@@ -107,7 +110,7 @@ func openPinnedStateDir(path, label string) (*pinnedStateDirImpl, error) {
 		}
 		nextFD, openErr := unix.Openat(currentFD, component, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
 		created := false
-		if errors.Is(openErr, unix.ENOENT) {
+		if errors.Is(openErr, unix.ENOENT) && mode == pinnedStateDirWritable {
 			if err := unix.Mkdirat(currentFD, component, 0o700); err != nil {
 				if !errors.Is(err, unix.EEXIST) {
 					return nil, fmt.Errorf("%w: create %s directory component: %w", ErrAgentStateContinuity, label, err)
@@ -135,19 +138,22 @@ func openPinnedStateDir(path, label string) (*pinnedStateDirImpl, error) {
 			_ = unix.Close(nextFD)
 			return nil, err
 		}
-		// Persist the created directory's own mode metadata before publishing its
-		// edge in the parent. Repeating this sync for existing components closes a
-		// retry after a prior process completed mkdir/chmod but lost the sync.
-		if err := unix.Fsync(nextFD); err != nil {
-			_ = unix.Close(nextFD)
-			return nil, fmt.Errorf("%w: sync %s directory component: %w", ErrAgentStateContinuity, label, err)
-		}
-		// Sync every traversed parent edge, not only the process that observed a
-		// successful mkdir. If a previous process crashed after mkdir but before
-		// fsync, its retry still closes the durability gap.
-		if err := defaultPinnedStateDirHooks.syncFD(currentFD); err != nil {
-			_ = unix.Close(nextFD)
-			return nil, fmt.Errorf("%w: sync %s parent edge: %w", ErrAgentStateContinuity, label, err)
+		if mode == pinnedStateDirWritable {
+			// Persist the created directory's own mode metadata before publishing
+			// its edge in the parent. Repeating this sync for existing components
+			// closes a retry after a prior process completed mkdir/chmod but lost
+			// the sync.
+			if err := unix.Fsync(nextFD); err != nil {
+				_ = unix.Close(nextFD)
+				return nil, fmt.Errorf("%w: sync %s directory component: %w", ErrAgentStateContinuity, label, err)
+			}
+			// Sync every traversed parent edge, not only the process that observed
+			// a successful mkdir. If a previous process crashed after mkdir but
+			// before fsync, its retry still closes the durability gap.
+			if err := defaultPinnedStateDirHooks.syncFD(currentFD); err != nil {
+				_ = unix.Close(nextFD)
+				return nil, fmt.Errorf("%w: sync %s parent edge: %w", ErrAgentStateContinuity, label, err)
+			}
 		}
 		if currentFD != rootFD {
 			_ = unix.Close(currentFD)

@@ -508,6 +508,7 @@ func (r *nativeRuntimeResult) split() (*Client, *AgentRuntimeBinding, error) {
 }
 
 func finishNativeRuntime(store AgentStateStore, state *AgentState, cfg *nativeAgentRuntimeConfig) (*Client, *AgentRuntimeBinding, error) {
+	defer clearOwnedAgentState(state)
 	store = baseAgentStateStore(store)
 	if err := validateCompletedAgentIdentity(state, ErrInvalidRegisterConfig); err != nil {
 		return nil, nil, err
@@ -530,7 +531,7 @@ func finishNativeRuntime(store AgentStateStore, state *AgentState, cfg *nativeAg
 	if err != nil {
 		return nil, nil, err
 	}
-	client := newPrimedStoreBackedClient(store, cfg.baseURL, cfg.httpClient, state.DeviceAPIKey, cfg.clock)
+	client := newPrimedStoreBackedClient(store, cfg.baseURL, cfg.httpClient, state.DeviceAPIKey, state.AgentID, cfg.clock)
 	binding := newAgentRuntimeBinding(state, privateKey)
 	return client, binding, nil
 }

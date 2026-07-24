@@ -25,6 +25,18 @@ func TestPinnedAgentState_UnsupportedPlatformFailsBeforeMutation(t *testing.T) {
 	if _, err := os.Lstat(dir); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("unsupported sealed constructor mutated filesystem: %v", err)
 	}
+	if reader, err := OpenFileAgentStateReadOnly(filepath.Join(dir, "agent-read-only.json")); reader != nil || !errors.Is(err, errPinnedStateUnsupported) || !errors.Is(err, ErrAgentStateContinuity) {
+		t.Fatalf("OpenFileAgentStateReadOnly = (%T, %v), want unsupported continuity error", reader, err)
+	}
+	if _, err := os.Lstat(dir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unsupported read-only constructor mutated filesystem: %v", err)
+	}
+	if reader, err := OpenSealedFileAgentStateReadOnly(filepath.Join(dir, "sealed-read-only.json"), "test", unsupportedTestWrapper{}); reader != nil || !errors.Is(err, errPinnedStateUnsupported) || !errors.Is(err, ErrAgentStateContinuity) {
+		t.Fatalf("OpenSealedFileAgentStateReadOnly = (%T, %v), want unsupported continuity error", reader, err)
+	}
+	if _, err := os.Lstat(dir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unsupported sealed read-only constructor mutated filesystem: %v", err)
+	}
 }
 
 type unsupportedTestWrapper struct{}
