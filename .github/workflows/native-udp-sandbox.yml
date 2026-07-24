@@ -343,7 +343,7 @@ jobs:
           deployment_manifest_sha256="$(sha256sum "${manifest}" | cut -d' ' -f1)"
           inventory_sha256="$(sha256sum "${inventory_snapshot}" | cut -d' ' -f1)"
           inventory_mapping_sha256="$(jq -cS -j '{schema_version, gate, proof_phases, all_scenarios_required, scenarios: ([.scenarios[] | {id, owner, status, test_name, requirement}] | sort_by(.id))}' "${inventory}" | sha256sum | cut -d' ' -f1)"
-          test "${inventory_mapping_sha256}" = "1dff59c8188ca1cb72847135b5e4a9e2c2bba4f737d788379c93a568152dc88d"
+          test "${inventory_mapping_sha256}" = "f5aaef5b840c461ed91530fe6e3b820f47476eaa0f5da327db48c2213e60176c"
           scenario_contract_sha256="$(jq -cS '{schema_version, gate, proof_phases, all_scenarios_required, scenarios: ([.scenarios[] | {id, owner, test_name, requirement}] | sort_by(.id))}' "${inventory}" | sha256sum | cut -d' ' -f1)"
           typed_evidence_contract_sha256="$(sha256sum "${typed_evidence_contract}" | cut -d' ' -f1)"
           test "${typed_evidence_contract_sha256}" = "e15008760ea838875de9c75561726c86e9d2e7f7f507247e55a588fa3ac65fe5"
@@ -520,7 +520,7 @@ jobs:
           test "$(jq -r '.inventory_sha256' "${pre_evidence}")" = "${pre_inventory_sha256}"
           test "${pre_inventory_sha256}" = "${inventory_sha256}"
           test "${pre_inventory_mapping_sha256}" = "${inventory_mapping_sha256}"
-          test "${pre_inventory_mapping_sha256}" = "1dff59c8188ca1cb72847135b5e4a9e2c2bba4f737d788379c93a568152dc88d"
+          test "${pre_inventory_mapping_sha256}" = "f5aaef5b840c461ed91530fe6e3b820f47476eaa0f5da327db48c2213e60176c"
           test "${pre_retired_lifecycle_surface_sha256}" = "${retired_lifecycle_surface_sha256}"
           test "${pre_retired_lifecycle_surface_sha256}" = "3fe8872c3da9913c28d763f5561d82b67805aae5a6962c6dc403c7d6305da00c"
 
@@ -1001,7 +1001,7 @@ jobs:
           test "$(sha256sum "${QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_PATH}" | cut -d' ' -f1)" = "${QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_SHA256}"
           test "$(compute_proof_harness_sha256)" = "${QURL_GO_SANDBOX_PROOF_HARNESS_SHA256}"
           test "$(jq -cS -j '{schema_version, gate, proof_phases, all_scenarios_required, scenarios: ([.scenarios[] | {id, owner, status, test_name, requirement}] | sort_by(.id))}' "${inventory}" | sha256sum | cut -d' ' -f1)" = "${QURL_GO_SANDBOX_INVENTORY_MAPPING_SHA256}"
-          test "${QURL_GO_SANDBOX_INVENTORY_MAPPING_SHA256}" = "1dff59c8188ca1cb72847135b5e4a9e2c2bba4f737d788379c93a568152dc88d"
+          test "${QURL_GO_SANDBOX_INVENTORY_MAPPING_SHA256}" = "f5aaef5b840c461ed91530fe6e3b820f47476eaa0f5da327db48c2213e60176c"
           test "$(jq -cS '{schema_version, gate, proof_phases, all_scenarios_required, scenarios: ([.scenarios[] | {id, owner, test_name, requirement}] | sort_by(.id))}' "${inventory}" | sha256sum | cut -d' ' -f1)" = "${QURL_GO_SANDBOX_SCENARIO_CONTRACT_SHA256}"
           test "$(jq -cS -j . "${retired_surface_source}" | sha256sum | cut -d' ' -f1)" = "${QURL_GO_SANDBOX_RETIRED_LIFECYCLE_SURFACE_SHA256}"
           test "$(sha256sum "${retired_surface}" | cut -d' ' -f1)" = "${QURL_GO_SANDBOX_RETIRED_LIFECYCLE_SURFACE_SHA256}"
@@ -1082,7 +1082,7 @@ jobs:
             [[ "$(sha256sum "${connector_attestation_path}" | cut -d' ' -f1)" == "${QURL_GO_SANDBOX_CONNECTOR_ATTESTATION_SHA256}" ]] &&
             [[ "$(compute_proof_harness_sha256)" == "${QURL_GO_SANDBOX_PROOF_HARNESS_SHA256}" ]] &&
             [[ "$(jq -cS -j '{schema_version, gate, proof_phases, all_scenarios_required, scenarios: ([.scenarios[] | {id, owner, status, test_name, requirement}] | sort_by(.id))}' "${inventory}" | sha256sum | cut -d' ' -f1)" == "${QURL_GO_SANDBOX_INVENTORY_MAPPING_SHA256}" ]] &&
-            [[ "${QURL_GO_SANDBOX_INVENTORY_MAPPING_SHA256}" == "1dff59c8188ca1cb72847135b5e4a9e2c2bba4f737d788379c93a568152dc88d" ]] &&
+            [[ "${QURL_GO_SANDBOX_INVENTORY_MAPPING_SHA256}" == "f5aaef5b840c461ed91530fe6e3b820f47476eaa0f5da327db48c2213e60176c" ]] &&
             [[ "$(jq -cS -j . "${retired_surface_source}" | sha256sum | cut -d' ' -f1)" == "${QURL_GO_SANDBOX_RETIRED_LIFECYCLE_SURFACE_SHA256}" ]] &&
             [[ "$(sha256sum "${retired_surface}" | cut -d' ' -f1)" == "${QURL_GO_SANDBOX_RETIRED_LIFECYCLE_SURFACE_SHA256}" ]] &&
             [[ "${QURL_GO_SANDBOX_RETIRED_LIFECYCLE_SURFACE_SHA256}" == "3fe8872c3da9913c28d763f5561d82b67805aae5a6962c6dc403c7d6305da00c" ]] &&
