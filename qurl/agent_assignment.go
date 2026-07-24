@@ -380,6 +380,10 @@ func sleepAssignmentBackoff(ctx context.Context, delay time.Duration) error {
 // registration metadata and ticket are attempt-scoped until the lifecycle
 // durably binds them into PendingAgentActivation immediately before REG.
 func FetchInitialAgentAssignment(ctx context.Context, hub HubBootstrap, agentID, enrollmentCredential string, transport nativeudp.Options, opts ...AssignmentOption) (*InitialAgentAssignment, error) {
+	return fetchInitialAgentAssignment(ctx, hub, agentID, enrollmentCredential, transport, nil, opts...)
+}
+
+func fetchInitialAgentAssignment(ctx context.Context, hub HubBootstrap, agentID, enrollmentCredential string, transport nativeudp.Options, beforeExchange func() error, opts ...AssignmentOption) (*InitialAgentAssignment, error) {
 	endpoint, err := validateAssignmentInputs(ctx, hub, agentID, transport)
 	if err != nil {
 		return nil, err
@@ -407,7 +411,7 @@ func FetchInitialAgentAssignment(ctx context.Context, hub HubBootstrap, agentID,
 	}
 	defer wipeBytes(body)
 
-	return runNativeExchange(ctx, cfg, endpoint, body, transport, nativeudp.AssignmentList, assignmentRetryInfo, newAssignmentRecovery, func(reply []byte, now time.Time) (*InitialAgentAssignment, error) {
+	return runNativeExchange(ctx, cfg, endpoint, body, transport, beforeExchange, nativeudp.AssignmentList, assignmentRetryInfo, newAssignmentRecovery, func(reply []byte, now time.Time) (*InitialAgentAssignment, error) {
 		return parseInitialAssignmentReply(reply, agentID, now)
 	})
 }
@@ -416,6 +420,10 @@ func FetchInitialAgentAssignment(ctx context.Context, hub HubBootstrap, agentID,
 // final agentID to the hub. The body has empty usrId and no enrollment or device
 // credential. A successful refresh returns only durable assignment state.
 func RefreshAgentAssignment(ctx context.Context, hub HubBootstrap, agentID string, transport nativeudp.Options, opts ...AssignmentOption) (*AgentAssignment, error) {
+	return refreshAgentAssignment(ctx, hub, agentID, transport, nil, opts...)
+}
+
+func refreshAgentAssignment(ctx context.Context, hub HubBootstrap, agentID string, transport nativeudp.Options, beforeExchange func() error, opts ...AssignmentOption) (*AgentAssignment, error) {
 	endpoint, err := validateAssignmentInputs(ctx, hub, agentID, transport)
 	if err != nil {
 		return nil, err
@@ -436,7 +444,7 @@ func RefreshAgentAssignment(ctx context.Context, hub HubBootstrap, agentID strin
 		return nil, err
 	}
 	defer wipeBytes(body)
-	return runNativeExchange(ctx, cfg, endpoint, body, transport, nativeudp.AssignmentList, assignmentRetryInfo, newAssignmentRecovery, func(reply []byte, now time.Time) (*AgentAssignment, error) {
+	return runNativeExchange(ctx, cfg, endpoint, body, transport, beforeExchange, nativeudp.AssignmentList, assignmentRetryInfo, newAssignmentRecovery, func(reply []byte, now time.Time) (*AgentAssignment, error) {
 		return parseRefreshAssignmentReply(reply, agentID, now)
 	})
 }
@@ -457,11 +465,16 @@ type nativeExchangeFunc func(context.Context, nativeudp.Endpoint, []byte, native
 // completion transactions. exchange fixes the NHP request/reply type for the
 // phase; retryInfo classifies retryable failures and newRecovery preserves the
 // phase's public recovery error type.
-func runNativeExchange[T any](ctx context.Context, c *assignmentConfig, endpoint nativeudp.Endpoint, body []byte, transport nativeudp.Options, exchange nativeExchangeFunc, retryInfo func(error) (time.Duration, bool), newRecovery recoveryFunc, parse func([]byte, time.Time) (*T, error)) (*T, error) {
+func runNativeExchange[T any](ctx context.Context, c *assignmentConfig, endpoint nativeudp.Endpoint, body []byte, transport nativeudp.Options, beforeExchange func() error, exchange nativeExchangeFunc, retryInfo func(error) (time.Duration, bool), newRecovery recoveryFunc, parse func([]byte, time.Time) (*T, error)) (*T, error) {
 	start := c.clock()
 	transactionCtx, cancel := context.WithTimeout(ctx, c.budget)
 	defer cancel()
 	for attempt := 1; ; attempt++ {
+		if beforeExchange != nil {
+			if err := beforeExchange(); err != nil {
+				return nil, err
+			}
+		}
 		reply, err := exchange(transactionCtx, endpoint, body, transport)
 		replyAuthenticated := err == nil
 		if replyAuthenticated {
@@ -860,6 +873,23 @@ func parseEnvelopeRetryAfter(envelope assignmentEnvelope, fields map[string]json
 }
 
 func parseWireAssignment(raw []byte, now time.Time) (*AgentAssignment, error) {
+	assignment, err := parsePersistedWireAssignment(raw)
+	if err != nil {
+		return nil, err
+	}
+	// parsePersistedWireAssignment already validated the complete structural
+	// trust boundary; only liveness remains for an authenticated wire result.
+	if !assignment.LeaseExpiresAt.After(now) {
+		return nil, fmt.Errorf("%w: assignment lease must be in the future: %w", ErrAssignmentInvalidResponse, ErrAssignmentLeaseExpired)
+	}
+	return assignment, nil
+}
+
+// parsePersistedWireAssignment validates the complete authenticated wire shape
+// without requiring a live lease. Credential recovery uses this only to learn
+// and durably close an already-expired replay episode; its caller must not use
+// the returned endpoint for network I/O.
+func parsePersistedWireAssignment(raw []byte) (*AgentAssignment, error) {
 	var wire assignmentWire
 	if err := decodeExactObject(raw, &wire,
 		[]string{"cell_id", "assignment_generation", "endpoint_revision", "lease_expires_at", "nhp_udp_endpoint"}); err != nil {
@@ -877,7 +907,7 @@ func parseWireAssignment(raw []byte, now time.Time) (*AgentAssignment, error) {
 		CellID: wire.CellID, AssignmentGeneration: wire.AssignmentGeneration,
 		EndpointRevision: wire.EndpointRevision, LeaseExpiresAt: lease, Endpoint: endpoint,
 	}
-	if err := assignment.Validate(now); err != nil {
+	if err := validatePersistedAgentAssignment(assignment); err != nil {
 		return nil, err
 	}
 	return assignment, nil

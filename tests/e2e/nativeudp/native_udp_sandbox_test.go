@@ -27,7 +27,7 @@ import (
 const (
 	sandboxProofTimeout            = 50 * time.Minute
 	faultUDPAttemptTimeout         = 5 * time.Second
-	currentAgentStateSchemaVersion = 6
+	currentAgentStateSchemaVersion = 7
 	nonSecretFaultCredential       = "not-server-minted-native-udp-proof-credential"
 )
 
@@ -93,11 +93,13 @@ type redirectingDialer struct {
 }
 
 type sandboxProofProvenance struct {
-	SchemaVersion int                   `json:"schema_version"`
-	BuildSHA      string                `json:"build_sha"`
-	AgentID       string                `json:"agent_id"`
-	Hub           sandboxHubEvidence    `json:"hub"`
-	AssignedCells []sandboxCellEvidence `json:"assigned_cells"`
+	SchemaVersion               int                   `json:"schema_version"`
+	BuildSHA                    string                `json:"build_sha"`
+	AgentID                     string                `json:"agent_id"`
+	DeploymentManifestSHA256    string                `json:"deployment_manifest_sha256"`
+	TypedEvidenceContractSHA256 string                `json:"typed_evidence_contract_sha256"`
+	Hub                         sandboxHubEvidence    `json:"hub"`
+	AssignedCells               []sandboxCellEvidence `json:"assigned_cells"`
 }
 
 type sandboxHubEvidence struct {
@@ -222,7 +224,7 @@ func TestSandboxNativeUDPLifecycle(t *testing.T) {
 		return
 	}
 
-	cellEvidence := make([]sandboxCellEvidence, 0, 3)
+	cellEvidence := make([]sandboxCellEvidence, 0, 4)
 	// Happy-path lifecycle calls deliberately omit UDP and retry overrides so
 	// the deployed proof measures the SDK's out-of-box production defaults.
 	if !runTypedEvidenceScenario(t, "fresh_registration_via_hub_and_assigned_cell", "registration.public_api_lifecycle_success", []string{"lifecycle_exchange"}, func(t *testing.T) {
@@ -258,14 +260,39 @@ func TestSandboxNativeUDPLifecycle(t *testing.T) {
 		}
 		defer binding.Destroy()
 		cellEvidence = append(cellEvidence, assertAssignedCell(t, cfg, binding, "warm_open"))
+		assertRegistrationWarmContinuity(t, cellEvidence[0], cellEvidence[1])
 	}) {
+		return
+	}
+
+	var reassigned *qurl.AgentRuntimeBinding
+	reassignmentPassed := runTypedEvidenceScenario(t, "cell0_to_cell1_reassignment", "reassignment.cell0_to_cell1", []string{"assignment_transition"}, func(t *testing.T) {
+		client, binding, err := qurl.RefreshAgentRuntime(ctx, hub, store,
+			qurl.WithAgentRuntimeReassignmentAdoption(),
+			qurl.WithAgentClientBaseURL("http://127.0.0.1:1"),
+			qurl.WithAgentClientHTTPClient(httpTrap),
+		)
+		if err != nil {
+			t.Fatalf("RefreshAgentRuntime(reassignment): %v", err)
+		}
+		if client == nil || binding == nil {
+			t.Fatal("RefreshAgentRuntime(reassignment) returned a nil client or binding")
+		}
+		reassigned = binding
+		cellEvidence = append(cellEvidence, assertAssignedCell(t, cfg, binding, "reassignment"))
+		assertCell0ToCell1Reassignment(t, cellEvidence[1], cellEvidence[2])
+	})
+	if reassigned != nil {
+		reassigned.Destroy()
+		reassigned = nil
+	}
+	if !reassignmentPassed {
 		return
 	}
 
 	var refreshed *qurl.AgentRuntimeBinding
 	refreshPassed := runTypedEvidenceScenario(t, "authenticated_hub_refresh", "assignment.authenticated_refresh", []string{"assignment_response"}, func(t *testing.T) {
 		client, binding, err := qurl.RefreshAgentRuntime(ctx, hub, store,
-			qurl.WithAgentRuntimeReassignmentAdoption(),
 			qurl.WithAgentClientBaseURL("http://127.0.0.1:1"),
 			qurl.WithAgentClientHTTPClient(httpTrap),
 		)
@@ -277,6 +304,7 @@ func TestSandboxNativeUDPLifecycle(t *testing.T) {
 		}
 		refreshed = binding
 		cellEvidence = append(cellEvidence, assertAssignedCell(t, cfg, binding, "refresh"))
+		assertSameCellRefresh(t, cellEvidence[2], cellEvidence[3])
 	})
 	if refreshed != nil {
 		defer refreshed.Destroy()
@@ -346,22 +374,21 @@ func TestNativeUDPClientFaultPaths(t *testing.T) {
 
 func TestSandboxProofProvenanceIsAllowlisted(t *testing.T) {
 	serverKey := base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef"))
+	provenanceDirectory := filepath.Join(t.TempDir(), "qurl-go-native-udp")
+	if err := os.Mkdir(provenanceDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	cfg := sandboxConfig{
-		buildSHA:       strings.Repeat("a", 40),
-		agentID:        "qurl-go-proof-provenance",
-		provenancePath: filepath.Join(t.TempDir(), "provenance.json"),
+		buildSHA:         strings.Repeat("a", 40),
+		agentID:          "qurl-go-proof-provenance",
+		provenancePath:   filepath.Join(provenanceDirectory, "provenance.json"),
+		deploymentSHA:    strings.Repeat("d", 64),
+		typedContractSHA: strings.Repeat("e", 64),
 	}
 	hub := qurl.HubBootstrap{Host: "hub.nhp.layerv.ai", Port: standardNHPUDPPort, ServerPublicKeyB64: serverKey}
-	cells := []sandboxCellEvidence{{
-		Phase:                 "registration",
-		CellID:                "cell0",
-		AssignmentGeneration:  1,
-		EndpointRevision:      2,
-		LeaseExpiresAt:        "2026-07-22T12:00:00Z",
-		Host:                  "cell0.nhp.layerv.ai",
-		Port:                  standardNHPUDPPort,
-		ServerPublicKeySHA256: publicKeySHA256(t, serverKey),
-	}}
+	cell0Key := publicKeySHA256(t, serverKey)
+	cell1Key := strings.Repeat("1", 64)
+	cells := sandboxProvenanceCellChain(cell0Key, cell1Key)
 	writeSandboxProvenance(t, cfg, hub, cells)
 
 	raw, err := os.ReadFile(cfg.provenancePath)
@@ -377,7 +404,10 @@ func TestSandboxProofProvenanceIsAllowlisted(t *testing.T) {
 	if err := decoder.Decode(&got); err != nil {
 		t.Fatal(err)
 	}
-	if got.SchemaVersion != 1 || got.BuildSHA != cfg.buildSHA || got.AgentID != cfg.agentID || got.Hub.Host != hub.Host || len(got.AssignedCells) != 1 {
+	if got.SchemaVersion != 2 || got.BuildSHA != cfg.buildSHA || got.AgentID != cfg.agentID ||
+		got.DeploymentManifestSHA256 != cfg.deploymentSHA ||
+		got.TypedEvidenceContractSHA256 != cfg.typedContractSHA ||
+		got.Hub.Host != hub.Host || len(got.AssignedCells) != 4 {
 		t.Fatalf("provenance mismatch: %#v", got)
 	}
 	info, err := os.Stat(cfg.provenancePath)
@@ -386,6 +416,141 @@ func TestSandboxProofProvenanceIsAllowlisted(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0o600 {
 		t.Fatalf("provenance mode = %o, want 600", info.Mode().Perm())
+	}
+}
+
+func TestSandboxProofProvenanceRejectsNonPrivateParent(t *testing.T) {
+	directory := t.TempDir()
+	if err := os.Chmod(directory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	err := validateSandboxProvenanceDirectory(filepath.Join(directory, "provenance.json"))
+	if err == nil || !strings.Contains(err.Error(), "private 0700 non-symlink directory") {
+		t.Fatalf("non-private provenance directory error = %v", err)
+	}
+}
+
+func sandboxProvenanceCellChain(cell0Key, cell1Key string) []sandboxCellEvidence {
+	return []sandboxCellEvidence{
+		{
+			Phase:                 "registration",
+			CellID:                "cell0",
+			AssignmentGeneration:  1,
+			EndpointRevision:      2,
+			LeaseExpiresAt:        "2026-07-22T12:00:00Z",
+			Host:                  "cell0.nhp.layerv.ai",
+			Port:                  standardNHPUDPPort,
+			ServerPublicKeySHA256: cell0Key,
+		},
+		{
+			Phase:                 "warm_open",
+			CellID:                "cell0",
+			AssignmentGeneration:  1,
+			EndpointRevision:      2,
+			LeaseExpiresAt:        "2026-07-22T12:00:00Z",
+			Host:                  "cell0.nhp.layerv.ai",
+			Port:                  standardNHPUDPPort,
+			ServerPublicKeySHA256: cell0Key,
+		},
+		{
+			Phase:                 "reassignment",
+			CellID:                "cell1",
+			AssignmentGeneration:  2,
+			EndpointRevision:      1,
+			LeaseExpiresAt:        "2026-07-22T12:30:00Z",
+			Host:                  "cell1.nhp.layerv.ai",
+			Port:                  standardNHPUDPPort,
+			ServerPublicKeySHA256: cell1Key,
+		},
+		{
+			Phase:                 "refresh",
+			CellID:                "cell1",
+			AssignmentGeneration:  2,
+			EndpointRevision:      2,
+			LeaseExpiresAt:        "2026-07-22T13:00:00Z",
+			Host:                  "cell1.nhp.layerv.ai",
+			Port:                  standardNHPUDPPort,
+			ServerPublicKeySHA256: cell1Key,
+		},
+	}
+}
+
+func TestSandboxProvenanceTransitionValidation(t *testing.T) {
+	base := sandboxProvenanceCellChain(strings.Repeat("0", 64), strings.Repeat("1", 64))
+	if err := validateRegistrationWarmContinuity(base[0], base[1]); err != nil {
+		t.Fatalf("valid registration/warm chain rejected: %v", err)
+	}
+	if err := validateCell0ToCell1Reassignment(base[1], base[2]); err != nil {
+		t.Fatalf("valid reassignment rejected: %v", err)
+	}
+	if err := validateSameCellRefresh(base[2], base[3]); err != nil {
+		t.Fatalf("valid same-cell refresh rejected: %v", err)
+	}
+
+	tests := map[string]func([]sandboxCellEvidence) error{
+		"warm tuple drift": func(cells []sandboxCellEvidence) error {
+			cells[1].LeaseExpiresAt = "2026-07-22T12:00:01Z"
+			return validateRegistrationWarmContinuity(cells[0], cells[1])
+		},
+		"wrong reassignment destination": func(cells []sandboxCellEvidence) error {
+			cells[2].CellID = "cell2"
+			return validateCell0ToCell1Reassignment(cells[1], cells[2])
+		},
+		"stale reassignment generation": func(cells []sandboxCellEvidence) error {
+			cells[2].AssignmentGeneration = cells[1].AssignmentGeneration
+			return validateCell0ToCell1Reassignment(cells[1], cells[2])
+		},
+		"refresh endpoint drift": func(cells []sandboxCellEvidence) error {
+			cells[3].Host = "other.nhp.layerv.ai"
+			return validateSameCellRefresh(cells[2], cells[3])
+		},
+		"refresh revision regression": func(cells []sandboxCellEvidence) error {
+			cells[3].EndpointRevision = cells[2].EndpointRevision - 1
+			return validateSameCellRefresh(cells[2], cells[3])
+		},
+		"refresh lease regression": func(cells []sandboxCellEvidence) error {
+			cells[3].LeaseExpiresAt = "2026-07-22T12:29:59.999999999Z"
+			return validateSameCellRefresh(cells[2], cells[3])
+		},
+		"invalid refresh lease": func(cells []sandboxCellEvidence) error {
+			cells[3].LeaseExpiresAt = "not-a-time"
+			return validateSameCellRefresh(cells[2], cells[3])
+		},
+	}
+	for name, mutateAndValidate := range tests {
+		t.Run(name, func(t *testing.T) {
+			cells := append([]sandboxCellEvidence(nil), base...)
+			if err := mutateAndValidate(cells); err == nil {
+				t.Fatal("invalid provenance transition was accepted")
+			}
+		})
+	}
+}
+
+func TestPublishSandboxProvenanceIsExclusive(t *testing.T) {
+	directory := t.TempDir()
+	temporary := filepath.Join(directory, "provenance.json.tmp")
+	destination := filepath.Join(directory, "provenance.json")
+	payload := []byte("{\"schema_version\":2}\n")
+	if err := publishSandboxProvenance(temporary, destination, payload); err != nil {
+		t.Fatalf("publish fresh provenance: %v", err)
+	}
+	if raw, err := os.ReadFile(destination); err != nil || string(raw) != string(payload) {
+		t.Fatalf("published provenance = %q, %v", raw, err)
+	}
+	if _, err := os.Lstat(temporary); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("temporary provenance remains after publication: %v", err)
+	}
+
+	replacement := []byte("{\"schema_version\":999}\n")
+	if err := publishSandboxProvenance(temporary, destination, replacement); err == nil {
+		t.Fatal("exclusive publication replaced an existing provenance file")
+	}
+	if raw, err := os.ReadFile(destination); err != nil || string(raw) != string(payload) {
+		t.Fatalf("failed replacement changed provenance = %q, %v", raw, err)
+	}
+	if _, err := os.Lstat(temporary); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("temporary provenance remains after rejected replacement: %v", err)
 	}
 }
 
@@ -573,7 +738,7 @@ func assertAssignedCell(t *testing.T, cfg sandboxConfig, binding *qurl.AgentRunt
 	if binding.AgentID != cfg.agentID {
 		t.Fatalf("%s agent id = %q, want %q", phase, binding.AgentID, cfg.agentID)
 	}
-	if cfg.expectedCellID != "" && binding.CellID != cfg.expectedCellID {
+	if cfg.expectedCellID != "" && (phase == "registration" || phase == "warm_open") && binding.CellID != cfg.expectedCellID {
 		t.Fatalf("%s assigned cell = %q, want operator-pinned %q", phase, binding.CellID, cfg.expectedCellID)
 	}
 	if binding.CellID == "" || binding.AssignmentGeneration < 1 || binding.EndpointRevision < 1 ||
@@ -602,15 +767,88 @@ func assertAssignedCell(t *testing.T, cfg sandboxConfig, binding *qurl.AgentRunt
 	}
 }
 
+func assertRegistrationWarmContinuity(t *testing.T, registration, warm sandboxCellEvidence) {
+	t.Helper()
+	if err := validateRegistrationWarmContinuity(registration, warm); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertCell0ToCell1Reassignment(t *testing.T, previous, current sandboxCellEvidence) {
+	t.Helper()
+	if err := validateCell0ToCell1Reassignment(previous, current); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertSameCellRefresh(t *testing.T, reassignment, refresh sandboxCellEvidence) {
+	t.Helper()
+	if err := validateSameCellRefresh(reassignment, refresh); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func validateRegistrationWarmContinuity(registration, warm sandboxCellEvidence) error {
+	if registration.Phase != "registration" || warm.Phase != "warm_open" || !sameSandboxAssignmentBinding(registration, warm) {
+		return fmt.Errorf("credentialless warm open changed the registered assignment binding: registration=%+v warm_open=%+v", registration, warm)
+	}
+	return nil
+}
+
+func validateCell0ToCell1Reassignment(previous, current sandboxCellEvidence) error {
+	if previous.Phase != "warm_open" || current.Phase != "reassignment" ||
+		previous.CellID != "cell0" || current.CellID != "cell1" ||
+		previous.Host == current.Host || previous.ServerPublicKeySHA256 == current.ServerPublicKeySHA256 ||
+		current.AssignmentGeneration <= previous.AssignmentGeneration {
+		return fmt.Errorf("authenticated reassignment is not a real cell0-to-cell1 generation advance: previous=%+v current=%+v", previous, current)
+	}
+	return nil
+}
+
+func validateSameCellRefresh(reassignment, refresh sandboxCellEvidence) error {
+	reassignmentLease, reassignmentLeaseErr := time.Parse(time.RFC3339Nano, reassignment.LeaseExpiresAt)
+	refreshLease, refreshLeaseErr := time.Parse(time.RFC3339Nano, refresh.LeaseExpiresAt)
+	if reassignment.Phase != "reassignment" || refresh.Phase != "refresh" ||
+		reassignment.CellID != refresh.CellID ||
+		reassignment.AssignmentGeneration != refresh.AssignmentGeneration ||
+		reassignment.Host != refresh.Host ||
+		reassignment.Port != refresh.Port ||
+		reassignment.ServerPublicKeySHA256 != refresh.ServerPublicKeySHA256 ||
+		refresh.EndpointRevision < reassignment.EndpointRevision ||
+		reassignmentLeaseErr != nil || refreshLeaseErr != nil ||
+		refreshLease.Before(reassignmentLease) {
+		return fmt.Errorf("same-cell refresh changed reassigned placement, regressed endpoint revision/lease, or carried an invalid lease: reassignment=%+v refresh=%+v", reassignment, refresh)
+	}
+	return nil
+}
+
+func sameSandboxAssignmentBinding(left, right sandboxCellEvidence) bool {
+	return left.CellID == right.CellID &&
+		left.AssignmentGeneration == right.AssignmentGeneration &&
+		left.EndpointRevision == right.EndpointRevision &&
+		left.LeaseExpiresAt == right.LeaseExpiresAt &&
+		left.Host == right.Host &&
+		left.Port == right.Port &&
+		left.ServerPublicKeySHA256 == right.ServerPublicKeySHA256
+}
+
 func writeSandboxProvenance(t *testing.T, cfg sandboxConfig, hub qurl.HubBootstrap, cells []sandboxCellEvidence) {
 	t.Helper()
-	if len(cells) == 0 {
-		t.Fatal("refuse to write sandbox provenance without an authenticated assigned-cell observation")
+	if err := validateSandboxProvenanceDirectory(cfg.provenancePath); err != nil {
+		t.Fatal(err)
 	}
+	if len(cells) != 4 {
+		t.Fatalf("refuse to write sandbox provenance without the exact four-observation chain: got %d", len(cells))
+	}
+	assertRegistrationWarmContinuity(t, cells[0], cells[1])
+	assertCell0ToCell1Reassignment(t, cells[1], cells[2])
+	assertSameCellRefresh(t, cells[2], cells[3])
 	evidence := sandboxProofProvenance{
-		SchemaVersion: 1,
-		BuildSHA:      cfg.buildSHA,
-		AgentID:       cfg.agentID,
+		SchemaVersion:               2,
+		BuildSHA:                    cfg.buildSHA,
+		AgentID:                     cfg.agentID,
+		DeploymentManifestSHA256:    cfg.deploymentSHA,
+		TypedEvidenceContractSHA256: cfg.typedContractSHA,
 		Hub: sandboxHubEvidence{
 			Host:                  hub.Host,
 			Port:                  hub.Port,
@@ -623,13 +861,54 @@ func writeSandboxProvenance(t *testing.T, cfg sandboxConfig, hub qurl.HubBootstr
 		t.Fatalf("marshal sandbox provenance: %v", err)
 	}
 	temporary := cfg.provenancePath + ".tmp"
-	t.Cleanup(func() { _ = os.Remove(temporary) })
-	if err := os.WriteFile(temporary, append(raw, '\n'), 0o600); err != nil {
-		t.Fatalf("write sandbox provenance: %v", err)
+	if err := publishSandboxProvenance(temporary, cfg.provenancePath, append(raw, '\n')); err != nil {
+		t.Fatalf("atomically publish sandbox provenance: %v", err)
 	}
-	if err := os.Rename(temporary, cfg.provenancePath); err != nil {
-		t.Fatalf("publish sandbox provenance: %v", err)
+}
+
+func validateSandboxProvenanceDirectory(path string) error {
+	parent, err := os.Lstat(filepath.Dir(path))
+	if err != nil {
+		return fmt.Errorf("inspect provenance directory: %w", err)
 	}
+	if !parent.IsDir() || parent.Mode()&os.ModeSymlink != 0 || parent.Mode().Perm() != 0o700 {
+		return fmt.Errorf("provenance directory mode = %v, want a private 0700 non-symlink directory", parent.Mode())
+	}
+	return nil
+}
+
+func publishSandboxProvenance(temporary, destination string, payload []byte) (retErr error) {
+	file, err := os.OpenFile(temporary, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return fmt.Errorf("create temporary provenance: %w", err)
+	}
+	closed := false
+	defer func() {
+		if !closed {
+			if closeErr := file.Close(); retErr == nil && closeErr != nil {
+				retErr = fmt.Errorf("close temporary provenance: %w", closeErr)
+			}
+		}
+		if removeErr := os.Remove(temporary); retErr == nil && removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			retErr = fmt.Errorf("remove temporary provenance: %w", removeErr)
+		}
+	}()
+	if written, err := file.Write(payload); err != nil {
+		return fmt.Errorf("write temporary provenance: %w", err)
+	} else if written != len(payload) {
+		return fmt.Errorf("write temporary provenance: wrote %d of %d bytes", written, len(payload))
+	}
+	if err := file.Sync(); err != nil {
+		return fmt.Errorf("sync temporary provenance: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close temporary provenance before publication: %w", err)
+	}
+	closed = true
+	if err := os.Link(temporary, destination); err != nil {
+		return fmt.Errorf("publish provenance without replacement: %w", err)
+	}
+	return nil
 }
 
 func publicKeySHA256(t *testing.T, encoded string) string {

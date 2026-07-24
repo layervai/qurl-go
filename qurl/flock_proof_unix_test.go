@@ -1,4 +1,4 @@
-//go:build unix
+//go:build (linux && !android) || (darwin && !ios)
 
 package qurl
 

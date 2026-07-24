@@ -12,27 +12,46 @@ type setupLock interface {
 	Close() error
 }
 
+type setupLockStoreBinder interface {
+	bindStore(AgentStateStore) AgentStateStore
+}
+
+// setupLockReentryMarker is deliberately a denial-only context marker, not a
+// lock or write capability. SDK callbacks receive it while a local store's
+// setup lock is held so an accidental SaveAgentState call on that same public
+// handle fails promptly instead of waiting on its own flock forever.
+type setupLockReentryMarker struct {
+	store AgentStateStore
+}
+
+type setupLockReentryContextKey struct{}
+
+func markSetupLockReentry(ctx context.Context, store AgentStateStore) context.Context {
+	if ctx == nil {
+		return nil
+	}
+	base := baseAgentStateStore(store)
+	switch base.(type) {
+	case *FileAgentStateStore, *SealedFileAgentStateStore:
+		return context.WithValue(ctx, setupLockReentryContextKey{}, setupLockReentryMarker{store: base})
+	default:
+		return ctx
+	}
+}
+
+func rejectSetupLockReentry(ctx context.Context, store AgentStateStore) error {
+	if ctx == nil {
+		return nil
+	}
+	marker, ok := ctx.Value(setupLockReentryContextKey{}).(setupLockReentryMarker)
+	if !ok || marker.store != baseAgentStateStore(store) {
+		return nil
+	}
+	return fmt.Errorf("%w: reentrant save on the store whose setup lock is active", ErrAgentSetupLock)
+}
+
 type setupLockingAgentStateStore interface {
 	acquireSetupLock(context.Context) (setupLock, error)
-}
-
-// fileSetupLock is the shared setup-lock behavior for SDK local-file stores.
-// Embedding it provides one source for path derivation, typed error wrapping,
-// and the injected lock seam used by failure tests.
-type fileSetupLock struct {
-	path     string
-	lockFile func(context.Context, string) (setupLock, error)
-}
-
-func (l fileSetupLock) setupLockPath() string { return l.path + agentSetupLockSuffix }
-
-func (l fileSetupLock) acquireSetupLock(ctx context.Context) (setupLock, error) {
-	path := l.setupLockPath()
-	lock, err := l.lockFile(ctx, path)
-	if err != nil {
-		return nil, fmt.Errorf("%w: acquire %s: %w", ErrAgentSetupLock, path, err)
-	}
-	return lock, nil
 }
 
 // acquireAgentSetupLock takes the mandatory exclusive setup lock for SDK local
@@ -40,17 +59,26 @@ func (l fileSetupLock) acquireSetupLock(ctx context.Context) (setupLock, error) 
 // serialization could mint competing identities. Custom and network stores
 // retain the caller-serialization contract and receive a no-op release.
 func acquireAgentSetupLock(ctx context.Context, store AgentStateStore) (func() error, error) {
+	_, release, err := acquireAgentSetupLockStore(ctx, store)
+	return release, err
+}
+
+func acquireAgentSetupLockStore(ctx context.Context, store AgentStateStore) (AgentStateStore, func() error, error) {
 	noop := func() error { return nil }
 	fs, ok := store.(setupLockingAgentStateStore)
 	if !ok {
-		return noop, nil
+		return store, noop, nil
 	}
 	lock, err := fs.acquireSetupLock(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if lock == nil {
-		return nil, ErrAgentSetupLock
+		return nil, nil, ErrAgentSetupLock
 	}
-	return lock.Close, nil
+	lockedStore := store
+	if binder, ok := lock.(setupLockStoreBinder); ok {
+		lockedStore = binder.bindStore(store)
+	}
+	return lockedStore, lock.Close, nil
 }

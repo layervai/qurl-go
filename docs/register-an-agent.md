@@ -17,7 +17,12 @@ Trusted deployment configuration supplies one Hub endpoint and pinned X25519
 server public key:
 
 ```go
-store := qurl.FileAgentState("/var/lib/layerv/qurl/agent-state.json")
+store, err := qurl.OpenFileAgentState("/var/lib/layerv/qurl/agent-state.json")
+if err != nil {
+	return err
+}
+defer store.Close()
+
 hub := qurl.HubBootstrap{
 	Host:               "hub.nhp.layerv.ai",
 	Port:               62206,
@@ -118,11 +123,13 @@ the SDK's 90-day guarantee.
 
 qurl-go v0.1.1 wrote schema-v5 pending records without a finite deadline. On
 load, this SDK can migrate `PendingActivation` exactly because its authenticated
-ticket expiry is present: it derives the first-ticket anchor and 90-day deadline
-and durably writes schema v6 before any UDP I/O. Schema-v5 records carrying any
-forward-populated recovery field are rejected as corrupt rather than trusted as
-invented history. A schema-v5 `PendingCompletion` no longer retains
-that ticket anchor. Inventing `upgrade time + 90 days` would make server
+ticket expiry is present. It derives the finite registration-recovery fields
+introduced by schema v6, then durably writes them in the current schema v7
+before any UDP I/O. Schema v7 additionally carries explicit device-credential
+recovery state. Schema-v5 records carrying any forward-populated recovery field
+are rejected as corrupt rather than trusted as invented history. A schema-v5
+`PendingCompletion` no longer retains that ticket anchor. Inventing
+`upgrade time + 90 days` would make server
 retention unbounded for installations that upgrade arbitrarily late, so the SDK
 instead returns `*AgentRecoveryMigrationRequiredError`, matchable with
 `ErrAgentRecoveryMigrationRequired`, and preserves the record without network
@@ -132,6 +139,83 @@ Negative schema versions and versions greater than the current schema are also
 invalid. They fail closed before resolver, socket, or UDP activity; a newer
 version requires an explicit compatible SDK upgrade or state migration.
 
+## Explicit device-credential recovery
+
+`RecoverAgentRuntime` replaces a lost or deliberately revoked native device API
+key while preserving the existing agent id and X25519 identity. It is never
+triggered by a resource API `401`; an operator must supply a live reusable
+credential of exact kind `agent` with `qurl:agent` scope:
+
+```go
+client, binding, err := qurl.RecoverAgentRuntime(ctx, recoveryCredential, store,
+	qurl.WithAgentRuntimeRecoveryHub(hub),
+)
+```
+
+The recovery lifecycle has zero HTTP legs. First, the SDK sends
+`IssueCredentialRecovery` to the pinned Hub over cookie-proven NHP UDP. The
+authenticated result supplies the complete current cell id, generation, lease,
+LayerV-owned UDP host/port, pinned server key, and a 15-minute opaque recovery
+grant. The SDK never calculates or probes a cell and never uses the browser
+relay. It then persists one replacement candidate and sends
+`CompleteCredentialRecovery` directly to only that assigned cell.
+
+Before the first Hub datagram, schema v7 persists the exact request nonce, a
+domain-separated fingerprint of the recovery credential, and the exact Hub
+host/port/server key. It never stores the raw recovery credential. A restart or
+lost Hub reply requires the same credential and Hub trust root and replays the
+byte-identical request only before its durable conservative `replay_not_after`
+cutoff. That pre-anchor cutoff is locally derived to end before the released
+Authority horizon; at or after it the SDK returns
+`ErrCredentialRecoveryExpired` without DNS, socket, or UDP activity. After an
+authenticated Issue response, the state clears
+the revoked old device secret/id and persists the grant, assignment, candidate,
+and first-grant recovery anchor before any cell datagram. Transport ambiguity,
+completion-response loss, and save ambiguity always resume these exact durable
+values; they never mint another logical request or candidate.
+
+The first authenticated `recovery_grant_expires_at` anchors the immutable
+90-day `AgentCredentialRecoveryHorizon`. A later grant in the same Authority
+episode may replace an expired/rejected current grant but cannot move the
+anchor or candidate. An exact Hub Issue replay that arrives with a stale grant
+or assignment is persisted for its original anchor, then the same explicit SDK
+call spends at most one new nonce to obtain live authority data before any cell
+write. Exact committed completion may replay after grant expiry while the
+horizon is live. An uncommitted expired grant is rejected. DNS, cookie proof,
+retry, and cell writes are all fenced so no recovery datagram is written at or
+after the exact horizon boundary.
+
+Only authenticated Hub `52400`/`52404` and cell `52410` are retryable within the
+caller's bounded operation. A terminal Hub denial clears its request intent so
+the operator can correct revocation or credential state and start a new nonce;
+transport ambiguity and malformed authenticated results retain the exact intent
+because issuance is unknown. Cell `52411` retains the candidate and immutable
+anchor but requires a later explicit call to obtain a fresh grant. Identity,
+request, and candidate-conflict outcomes are terminal and never cause HTTP,
+relay, cell-selection, takeover, or cross-cell fallback.
+
+| Phase | Code | SDK action |
+|---|---:|---|
+| Hub | `52400` | Retry inside the current bounded operation after 5 seconds |
+| Hub | `52401` | Stop: recovery credential rejected |
+| Hub | `52402` | Stop: persisted agent identity rejected |
+| Hub | `52403` | Stop: deliberately revoke the current device credential first |
+| Hub | `52404` | Retry inside the current bounded operation after 60 seconds |
+| Hub | `52405` | Stop: request contract rejected |
+| Hub | `52406` | Stop: assignment requires operator recovery |
+| Cell | `52410` | Retry inside the current bounded operation after 5 seconds |
+| Cell | `52411` | Preserve the exact candidate; the next explicit call obtains a fresh grant |
+| Cell | `52412` | Stop: persisted agent identity rejected |
+| Cell | `52413` | Stop: a different replacement candidate already owns the episode |
+| Cell | `52414` | Stop: request contract rejected |
+
+After an authenticated cell success, the replacement credential is persisted
+before the SDK materializes a runtime binding. If that assignment lease has
+expired, the SDK immediately performs one credential-free Hub refresh. A
+failure matches `ErrCredentialRecoveredAssignmentRefreshRequired` and unwraps
+the underlying cause: the credential is already recovered, so call
+`RefreshAgentRuntime`; do not start a second recovery episode.
+
 ### Authority rollout handoff
 
 This finite contract is a greenfield, pre-enable cutoff. Before native
@@ -139,7 +223,9 @@ registration becomes reachable or replay cleanup starts, operators must prove
 that Control contains zero legacy `registration_activation_v1`,
 `registration_completion_v1`, and
 `registration_completion_device_locator_v1` records and that every distributed
-client includes this schema-v6 contract. If that proof is not zero, cleanup
+client includes the finite registration-recovery behavior introduced by schema
+v6 or newer. The current state schema is v7 because it also adds explicit
+device-credential recovery. If that proof is not zero, cleanup
 must remain disabled until the records are explicitly reconciled; age alone is
 not proof that a v0.1.1 recovery promise can be retired.
 
@@ -320,6 +406,10 @@ target fails without changing durable state.
 `OpenRegisteredAgent` is available when a process needs only the steady-state
 resource `Client` and will not knock. It still accepts native completed state
 only; assignment expiry does not block resource CRUD.
+`OpenRegisteredAgentWithIdentity` additionally returns the agent id from the
+same single state snapshot that primes the resource client. Both APIs pin that
+identity: after the one-minute credential cache expires, a store reload for a
+different agent fails before setting `Authorization`.
 
 ## Resource-client options
 
@@ -339,24 +429,53 @@ cannot accidentally retarget both trust paths.
 `AgentState` contains the X25519 private key, completed device credential, Hub
 assignment, and possibly a crash-recovery activation record or completion
 candidate. It is a credential file: never log it or attach it to support
-bundles. `FileAgentState` is permission-protected plaintext; use a sealed or
+bundles. `OpenFileAgentState` is permission-protected plaintext; use a sealed or
 secret-manager store when the complete state must be encrypted at rest.
 
 ### Plaintext local file
 
 ```go
-store := qurl.FileAgentState("/var/lib/layerv/qurl/agent-state.json")
+store, err := qurl.OpenFileAgentState("/var/lib/layerv/qurl/agent-state.json")
+if err != nil {
+	return err
+}
+defer store.Close()
 ```
 
-The parent directory must be exactly `0700`; the file is atomically written
-`0600`. Symlinks, oversized files, insecure permissions, corrupt JSON, duplicate
-or unknown fields, and inconsistent assignments fail closed. Local stores use a
-sidecar setup lock so two processes cannot mint competing identities against one
-path.
+The constructor pins the complete directory path through no-follow component
+traversal and retains that directory capability for the store lifetime. The
+state directory must be owned by the effective user and exactly `0700`. Every
+ancestor must be root- or effective-user-owned and non-writable by group/other;
+root-owned sticky shared roots such as `/tmp` are the deliberate exception.
+State, temporary, and setup-lock files must be owned by the effective user,
+regular, singly linked, and exactly `0600`. Every load, lock, and atomic replace
+is relative to the retained capability. Namespace replacement, inode/link
+replacement, symlinks, oversized files, insecure permissions, corrupt JSON,
+duplicate or unknown fields, and inconsistent assignments fail closed. Missing
+directory components and every parent edge are durably synced, including retry
+after an earlier parent-fsync failure.
+
+The store must remain open for every `Client`, registration, warm open, refresh,
+recovery, and knock operation that depends on it. Close it only during Connector
+shutdown. Server/desktop Linux and Darwin are supported; Android, iOS, Windows,
+and other platforms fail before filesystem mutation until equivalent ACL,
+locking, and durability support exists. The older `FileAgentState(path)`
+compatibility helper also pins, but
+qURL Connector must migrate to `OpenFileAgentState(path)` so constructor failure
+and `Close` ownership are explicit.
 Because unknown fields fail closed, an SDK downgrade may not be able to open
 state written by a newer SDK. Treat that as an explicit state-schema migration
 or reprovisioning operation; never delete credential state merely to bypass the
 decode failure.
+
+Read-only commands that only need to inspect identity state should instead use
+`OpenFileAgentStateReadOnly`. Its returned `AgentStateReader` exposes only
+`LoadAgentState` and `Close`: construction and reads never create directories or
+locks, change permissions, sync, rename, unlink, or write. It retains the same
+0700 directory, 0600 singly-linked file, no-follow, ownership, and namespace
+continuity checks. The sealed equivalent is
+`OpenSealedFileAgentStateReadOnly`, with the same provider and
+`WithExpectedSealedAgentID` contract as the writable sealed store.
 
 ### Sealed local file
 
@@ -367,6 +486,10 @@ store, err := qurl.NewSealedFileAgentState(
 	wrapper,
 	qurl.WithExpectedSealedAgentID("connector-prod-1"),
 )
+if err != nil {
+	return err
+}
+defer store.Close()
 ```
 
 The SDK encrypts the full state with a fresh AES-256-GCM data-encryption key on
@@ -457,6 +580,13 @@ Use `errors.Is` and `errors.As`:
 | `ErrDeviceKeyQuotaExceeded` | Revoke an unused device credential, then resume according to authority guidance. |
 | `ErrAgentCompletionCandidatePersistence` / `*AgentCompletionCandidatePersistenceError` | Reload state before any retry; resume the exact pending activation with the same enrollment credential or the exact pending completion with an empty credential. Save ambiguity alone never authorizes replacement; only an exact pending-activation replay authenticated as `52111` or account `52101` permits the one bounded replacement. |
 | `ErrCompletionRecoveryRequired` / `*CompletionRecoveryRequiredError` | Re-run `RegisterAgentRuntime` with the same store and empty enrollment credential to resume the exact pending candidate. |
+| `ErrCredentialRecoveryRetryRequired` / `*CredentialRecoveryRetryRequiredError` | Re-run `RecoverAgentRuntime` with the same store, Hub trust root, and recovery credential when a Hub issue is pending; a pending cell completion needs no credential unless its authenticated grant was rejected. |
+| `ErrCredentialRecoveryCandidatePersistence` / `*CredentialRecoveryCandidatePersistenceError` | The recovery candidate save failed before durability could be reconciled. Reload and retry the same explicit recovery; never mint a replacement after ambiguity. Also matches `ErrAgentBindingPersistence`. |
+| `ErrCredentialRecoveryExpired` / `*CredentialRecoveryExpiredError` | The explicit device-credential recovery episode reached its immutable first-grant-plus-90-day deadline. No recovery datagram is sent at or after it. |
+| `ErrRecoveryCredentialRejected` | Correct or replace the reusable `qurl:agent` credential, then make a new explicit recovery attempt. |
+| `ErrCredentialRecoveryRevokeRequired` | Deliberately revoke the current device credential, then make a new explicit recovery attempt. |
+| `ErrCredentialRecoveryGrantRejected` | The cell rejected the grant or its live credential fences. Re-run explicitly with the recovery credential; the SDK retains the exact candidate and original horizon. |
+| `ErrCredentialRecoveryCandidateConflict` | A different candidate was already committed. Stop; never delete durable pending state or rotate the candidate locally. |
 | `ErrAgentRecoveryExpired` / `*AgentRecoveryExpiredError` | The pending phase is at or beyond its authority-anchored 90-day deadline. No datagram is sent at or after that boundary, but the invocation may have sent earlier traffic. A concurrent save ambiguity is reported with the reload-first persistence errors instead. |
 | `ErrAgentRecoveryMigrationRequired` / `*AgentRecoveryMigrationRequiredError` | A legacy schema-v5 pending completion has no authenticated deadline anchor. No recovery UDP was sent; preserve it and use explicit NHP-native recovery or reprovisioning. |
 | `ErrCompletionCredentialConflict` / `*CompletionError` | The authority already committed a different candidate. Stop and use explicit NHP-native credential recovery or reprovisioning; never delete the persisted candidate or mint a replacement locally. |
