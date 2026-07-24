@@ -22,7 +22,7 @@ type pinnedStateDirImpl struct {
 
 func canonicalPinnedStatePath(path string) string { return path }
 
-func openPinnedStateDir(_ string, _ string) (*pinnedStateDirImpl, error) {
+func openPinnedStateDir(_ string, _ string, _ pinnedStateDirOpenMode) (*pinnedStateDirImpl, error) {
 	// Fail before creating a directory, lock, temp, or state file. Windows needs
 	// a real CreateFile/LockFileEx/ACL/FlushFileBuffers implementation rather than
 	// a pathname approximation; other platforms need equivalent reviewed support.

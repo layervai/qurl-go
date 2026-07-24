@@ -163,20 +163,9 @@ func NewSealedFileAgentState(path, providerID string, wrapper AgentStateKeyWrapp
 	if strings.TrimSpace(path) == "" {
 		return nil, fmt.Errorf("%w: sealed agent state path must not be empty", ErrInvalidBootstrapConfig)
 	}
-	if err := validateProviderID(providerID); err != nil {
+	cfg, err := validateSealedFileAgentStateOptions(providerID, wrapper, opts)
+	if err != nil {
 		return nil, err
-	}
-	if isNilAgentStateKeyWrapper(wrapper) {
-		return nil, fmt.Errorf("%w: agent state key wrapper must not be nil", ErrInvalidBootstrapConfig)
-	}
-	var cfg sealedFileAgentStateOptions
-	for _, opt := range opts {
-		if opt == nil {
-			return nil, fmt.Errorf("%w: nil SealedFileAgentStateOption", ErrInvalidBootstrapConfig)
-		}
-		if err := opt.applySealedFileAgentStateOption(&cfg); err != nil {
-			return nil, err
-		}
 	}
 	dir, name, err := openPinnedStatePath(path, "sealed agent state")
 	if err != nil {
@@ -194,6 +183,25 @@ func NewSealedFileAgentState(path, providerID string, wrapper AgentStateKeyWrapp
 	cleanup := runtime.AddCleanup(store, closePinnedStateDir, dir)
 	store.cleanup = &cleanup
 	return store, nil
+}
+
+func validateSealedFileAgentStateOptions(providerID string, wrapper AgentStateKeyWrapper, opts []SealedFileAgentStateOption) (sealedFileAgentStateOptions, error) {
+	if err := validateProviderID(providerID); err != nil {
+		return sealedFileAgentStateOptions{}, err
+	}
+	if isNilAgentStateKeyWrapper(wrapper) {
+		return sealedFileAgentStateOptions{}, fmt.Errorf("%w: agent state key wrapper must not be nil", ErrInvalidBootstrapConfig)
+	}
+	var cfg sealedFileAgentStateOptions
+	for _, opt := range opts {
+		if opt == nil {
+			return sealedFileAgentStateOptions{}, fmt.Errorf("%w: nil SealedFileAgentStateOption", ErrInvalidBootstrapConfig)
+		}
+		if err := opt.applySealedFileAgentStateOption(&cfg); err != nil {
+			return sealedFileAgentStateOptions{}, err
+		}
+	}
+	return cfg, nil
 }
 
 // Close releases the retained state-directory capability. It is idempotent and
@@ -302,18 +310,22 @@ func (s *SealedFileAgentStateStore) loadAgentStateRetained(ctx context.Context, 
 	if err != nil {
 		return nil, err
 	}
+	return decodeSealedAgentState(ctx, raw, s.providerID, s.expectedAgentID, s.wrapper)
+}
+
+func decodeSealedAgentState(ctx context.Context, raw []byte, providerID, expectedAgentID string, wrapper AgentStateKeyWrapper) (*AgentState, error) {
 	var envelope sealedAgentStateEnvelope
 	if err := decodeSealedAgentStateEnvelope(raw, &envelope); err != nil {
 		return nil, err
 	}
-	if envelope.ProviderID != s.providerID {
+	if envelope.ProviderID != providerID {
 		return nil, invalidSealedState("provider id does not match configured wrapper")
 	}
-	if s.expectedAgentID != "" && envelope.AgentID != s.expectedAgentID {
+	if expectedAgentID != "" && envelope.AgentID != expectedAgentID {
 		return nil, invalidSealedState("agent id does not match configured expectation")
 	}
 	binding := envelope.binding()
-	dek, err := s.wrapper.UnwrapKey(ctx, cloneWrappedAgentStateKey(envelope.WrappedKey), binding)
+	dek, err := wrapper.UnwrapKey(ctx, cloneWrappedAgentStateKey(envelope.WrappedKey), binding)
 	if err != nil {
 		if errors.Is(err, ErrInvalidWrappedAgentStateKey) {
 			return nil, invalidSealedState("wrapped key authentication failed")

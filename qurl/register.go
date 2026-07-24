@@ -39,31 +39,24 @@ func validateAgentRuntimeMetadata(state *AgentState, now time.Time, errKind erro
 	return nil
 }
 
-// newStoreBackedClient returns a Client authorized by the device API key
-// persisted in store. Construction makes no qURL API calls; loading a
-// network-backed store can still perform I/O on the first resource request.
-func newStoreBackedClient(store AgentStateStore, baseURL string, httpClient HTTPDoer) *Client {
-	return newStoreBackedClientWithCredential(store, baseURL, httpClient, "", time.Now)
-}
-
 // newPrimedStoreBackedClient is deliberately infallible after callers validate
 // the exact credential as part of their pre-commit state/completion contract.
 // Keeping construction infallible prevents a committed lifecycle mutation from
 // acquiring a new post-commit error tail merely while materializing its Client.
-func newPrimedStoreBackedClient(store AgentStateStore, baseURL string, httpClient HTTPDoer, validatedDeviceAPIKey string, now func() time.Time) *Client {
-	return newStoreBackedClientWithCredential(store, baseURL, httpClient, validatedDeviceAPIKey, now)
+func newPrimedStoreBackedClient(store AgentStateStore, baseURL string, httpClient HTTPDoer, validatedDeviceAPIKey, expectedAgentID string, now func() time.Time) *Client {
+	return newStoreBackedClientWithCredential(store, baseURL, httpClient, validatedDeviceAPIKey, expectedAgentID, now)
 }
 
 // newStoreBackedClientWithCredential optionally primes the one-minute cache from
 // an already validated AgentState so a combined runtime open does not unseal or
 // reload the same store on its first resource request. The wrapped store provider
 // remains authoritative after the cache expires.
-func newStoreBackedClientWithCredential(store AgentStateStore, baseURL string, httpClient HTTPDoer, deviceAPIKey string, now func() time.Time) *Client {
+func newStoreBackedClientWithCredential(store AgentStateStore, baseURL string, httpClient HTTPDoer, deviceAPIKey, expectedAgentID string, now func() time.Time) *Client {
 	if now == nil {
 		now = time.Now
 	}
 	provider := &cachedCredentialProvider{
-		provider: &storeCredentialProvider{store: store},
+		provider: &storeCredentialProvider{store: store, expectedAgentID: expectedAgentID},
 		ttl:      storeCredentialCacheTTL,
 		now:      now,
 	}
@@ -87,7 +80,8 @@ const storeCredentialCacheTTL = time.Minute
 // completed device credential in AgentStateStore. It is not an enrollment,
 // assignment, completion, refresh, or knock transport.
 type storeCredentialProvider struct {
-	store AgentStateStore
+	store           AgentStateStore
+	expectedAgentID string
 }
 
 func (p *storeCredentialProvider) Authorize(ctx context.Context, req *http.Request) error {
@@ -98,6 +92,9 @@ func (p *storeCredentialProvider) Authorize(ctx context.Context, req *http.Reque
 		return err
 	}
 	state, err := p.store.LoadAgentState(ctx)
+	if state != nil {
+		defer clearOwnedAgentState(state)
+	}
 	if err != nil {
 		return fmt.Errorf("qurl: load device credential for authorization: %w", err)
 	}
@@ -106,6 +103,9 @@ func (p *storeCredentialProvider) Authorize(ctx context.Context, req *http.Reque
 	}
 	if err := validatePersistedCredentialForState(state, ErrInvalidClientConfig); err != nil {
 		return err
+	}
+	if state.AgentID != p.expectedAgentID {
+		return fmt.Errorf("%w: agent state identity changed after client open", ErrInvalidClientConfig)
 	}
 	req.Header.Set("Authorization", "Bearer "+state.DeviceAPIKey)
 	return nil
@@ -138,8 +138,8 @@ const (
 
 // WithAgentClientBaseURL points only the completed agent's steady-state resource
 // Client at a non-default API origin. It is accepted by OpenRegisteredAgent,
-// OpenRegisteredAgentRuntime, RegisterAgentRuntime, RefreshAgentRuntime, and
-// RecoverAgentRuntime.
+// OpenRegisteredAgentWithIdentity, OpenRegisteredAgentRuntime,
+// RegisterAgentRuntime, RefreshAgentRuntime, and RecoverAgentRuntime.
 func WithAgentClientBaseURL(rawURL string) AgentResourceClientOption {
 	return agentClientBaseURLOption(rawURL)
 }

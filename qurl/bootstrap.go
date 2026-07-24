@@ -540,6 +540,10 @@ func (s *FileAgentStateStore) loadAgentStateRetained(ctx context.Context, op *pi
 	if err != nil {
 		return nil, err
 	}
+	return decodePlaintextAgentState(raw)
+}
+
+func decodePlaintextAgentState(raw []byte) (*AgentState, error) {
 	var state AgentState
 	if err := strictDecodeJSON(raw, &state); err != nil {
 		// The decoder's detail can contain producer-controlled field names or
