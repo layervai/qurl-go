@@ -189,21 +189,21 @@
     {
       "id": "negative.cell_dns_failure",
       "owner": "qurl-go",
-      "status": "todo",
+      "status": "implemented",
       "test_name": "TestSandboxNativeUDPLifecycle/cell_dns_failure",
       "requirement": "Fail closed on assigned-cell DNS failure with no HTTP, relay, or cross-cell fallback."
     },
     {
       "id": "negative.wrong_hub_key",
       "owner": "qurl-go",
-      "status": "todo",
+      "status": "implemented",
       "test_name": "TestSandboxNativeUDPLifecycle/wrong_hub_key",
       "requirement": "Reject a Hub response that cannot authenticate to the configured Hub public key."
     },
     {
       "id": "negative.wrong_cell_key",
       "owner": "qurl-go",
-      "status": "todo",
+      "status": "implemented",
       "test_name": "TestSandboxNativeUDPLifecycle/wrong_cell_key",
       "requirement": "Reject a cell response that cannot authenticate to the Hub-assigned cell public key."
     },
@@ -287,7 +287,7 @@
     {
       "id": "packet.oversize",
       "owner": "qurl-go",
-      "status": "todo",
+      "status": "implemented",
       "test_name": "TestSandboxNativeUDPLifecycle/oversize_packet",
       "requirement": "Inject over-limit request/reply material at every Hub, REG, completion, KNK/RKN, EXT, and refresh/recovery phase and prove the 4096-byte packet boundary fails closed."
     },
