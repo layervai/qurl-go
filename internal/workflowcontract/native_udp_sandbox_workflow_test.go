@@ -45,7 +45,9 @@ func TestNativeUDPSandboxWorkflowIsAttendedStrictAndEvidenceBearing(t *testing.T
 	workflow := readWorkflow(t, "native-udp-sandbox.yml")
 
 	requireContains(t, workflow,
+		"run-name: UDP proof [corr:${{ inputs.dispatch_correlation_id }}]",
 		"workflow_dispatch:",
+		"dispatch_correlation_id:",
 		"proof_phase:",
 		"deployment_manifest_b64:",
 		"connector_proof_run_id:",
@@ -59,6 +61,7 @@ func TestNativeUDPSandboxWorkflowIsAttendedStrictAndEvidenceBearing(t *testing.T
 		"permissions:\n  actions: read\n  contents: read",
 		"QURL_GO_SANDBOX_STRICT: \"true\"",
 		"QURL_GO_SANDBOX_EXPECTED_SHA: ${{ github.sha }}",
+		"QURL_GO_SANDBOX_DISPATCH_CORRELATION_ID: ${{ inputs.dispatch_correlation_id }}",
 		"QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ID: ${{ inputs.nhp_controller_run_id }}",
 		"QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ATTEMPT: ${{ inputs.nhp_controller_run_attempt }}",
 		"QURL_GO_SANDBOX_ENROLLMENT_CREDENTIAL: ${{ secrets.QURL_GO_SANDBOX_ENROLLMENT_CREDENTIAL }}",
@@ -66,12 +69,15 @@ func TestNativeUDPSandboxWorkflowIsAttendedStrictAndEvidenceBearing(t *testing.T
 		"actions/create-github-app-token@",
 		"permission-actions: read",
 		"permission-contents: read",
+		"permission-pull-requests: read",
 		"            frp\n            nhp\n            qurl-connector\n            qurl-go\n            qurl-integrations\n            qurl-mcp\n            qurl-python\n            qurl-reverse-tunnel-server\n            qurl-service\n            qurl-typescript\n            website",
 		"test \"$(git rev-parse HEAD)\" = \"${QURL_GO_SANDBOX_EXPECTED_SHA}\"",
 		"test -z \"$(git status --short)\"",
 		`[[ ! "${QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ID}" =~ ^[1-9][0-9]{0,19}$ ]]`,
 		`[[ ! "${QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ATTEMPT}" =~ ^[1-9][0-9]{0,9}$ ]]`,
 		"invalid NHP controller run identity",
+		"invalid dispatch correlation id",
+		"-qurl_go-${QURL_GO_SANDBOX_PROOF_PHASE}-[0-9a-f]{32}$",
 		"canonicalize_json()",
 		"reject_duplicate_keys",
 		".qurl_go == $qurl_go_sha",
@@ -147,6 +153,7 @@ func TestNativeUDPSandboxWorkflowIsAttendedStrictAndEvidenceBearing(t *testing.T
 		"proof_harness_sha256",
 		"nhp_controller_run_id",
 		"nhp_controller_run_attempt",
+		"dispatch_correlation_id",
 		"inputs_unchanged",
 		"gate_passed",
 		"provenance_valid",
@@ -229,6 +236,38 @@ func TestNativeUDPSandboxRejectsMalformedNHPControllerRunIdentity(t *testing.T) 
 				map[string]string{
 					"QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ID":      test.runID,
 					"QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ATTEMPT": test.runAttempt,
+				},
+				false,
+			)
+		})
+	}
+}
+
+func TestNativeUDPSandboxRejectsMalformedDispatchCorrelationID(t *testing.T) {
+	fixture := newNativeUDPProofFixture(t)
+	manifest := deploymentManifestBytes(t, "pre_removal", fixture.postSHA)
+	tests := []string{
+		"",
+		"nhp-123456-1-qurl_go-pre_removal",
+		"nhp-123456-1-qurl_go-pre_removal-" + strings.Repeat("a", 31),
+		"nhp-123456-1-qurl_go-pre_removal-" + strings.Repeat("a", 33),
+		"nhp-123456-1-qurl_go-pre_removal-" + strings.Repeat("A", 32),
+		"nhp-123456-2-qurl_go-pre_removal-" + strings.Repeat("a", 32),
+		"nhp-123456-1-connector-pre_removal-" + strings.Repeat("a", 32),
+		"nhp-123456-1-qurl_go-post_removal-" + strings.Repeat("a", 32),
+	}
+	for _, correlationID := range tests {
+		t.Run(correlationID, func(t *testing.T) {
+			verifyNativeUDPManifest(
+				t,
+				fixture,
+				fixture.postSHA,
+				t.TempDir(),
+				"pre_removal",
+				"",
+				manifest,
+				map[string]string{
+					"QURL_GO_SANDBOX_DISPATCH_CORRELATION_ID": correlationID,
 				},
 				false,
 			)
@@ -555,6 +594,8 @@ func TestNativeUDPSandboxAttestsExactConnectorProof(t *testing.T) {
 		{name: "duplicate scenarios", phase: "pre_removal", headSHA: connectorSHA, runWorkflowID: "9001", mutation: "duplicate_inventory"},
 		{name: "noncanonical inventory", phase: "pre_removal", headSHA: connectorSHA, runWorkflowID: "9001", mutation: "noncanonical_inventory"},
 		{name: "wrong scenario contract digest", phase: "pre_removal", headSHA: connectorSHA, runWorkflowID: "9001", mutation: "wrong_scenario_contract"},
+		{name: "wrong dispatch correlation", phase: "pre_removal", headSHA: connectorSHA, runWorkflowID: "9001", mutation: "wrong_dispatch_correlation"},
+		{name: "wrong controller run identity", phase: "pre_removal", headSHA: connectorSHA, runWorkflowID: "9001", mutation: "wrong_controller_run_identity"},
 		{name: "blocking count", phase: "pre_removal", headSHA: connectorSHA, runWorkflowID: "9001", mutation: "blocking_count"},
 		{name: "skip count", phase: "pre_removal", headSHA: connectorSHA, runWorkflowID: "9001", mutation: "skip_count"},
 		{name: "failure count", phase: "pre_removal", headSHA: connectorSHA, runWorkflowID: "9001", mutation: "failure_count"},
@@ -757,6 +798,12 @@ func TestNativeUDPSandboxPostRemovalRejectsUntrustedPairedArtifacts(t *testing.T
 		{name: "pre-removal provenance typed contract digest mismatches", mutateEvidence: func(value map[string]any) {
 			value["provenance"].(map[string]any)["typed_evidence_contract_sha256"] = strings.Repeat("f", 64)
 		}},
+		{name: "pre-removal dispatch correlation mismatches", mutateEvidence: func(value map[string]any) {
+			value["dispatch_correlation_id"] = nativeUDPDispatchCorrelation("connector", "pre_removal")
+		}},
+		{name: "pre-removal controller identity mismatches correlation", mutateEvidence: func(value map[string]any) {
+			value["nhp_controller_run_attempt"] = "2"
+		}},
 		{name: "artifact API oversize", oversize: true},
 		{name: "artifact digest mismatch", badHash: true},
 		{name: "FRP repository and Connector module repinned", mutateManifest: func(value map[string]any) {
@@ -855,6 +902,7 @@ func validPreRemovalEvidence(t *testing.T, commitSHA string, outputs map[string]
 		"commit_sha":                       commitSHA,
 		"run_id":                           "987",
 		"run_attempt":                      "3",
+		"dispatch_correlation_id":          nativeUDPDispatchCorrelation("qurl_go", "pre_removal"),
 		"nhp_controller_run_id":            "123456",
 		"nhp_controller_run_attempt":       "1",
 		"connector_proof_run_id":           "777",
@@ -960,6 +1008,7 @@ func TestNativeUDPSandboxEvidenceManifestIsAllowlisted(t *testing.T) {
 		"gate_passed":                  false,
 		"connector_proof_run_id":       "777",
 		"connector_attestation_sha256": sha256Hex(connectorAttestation),
+		"dispatch_correlation_id":      nativeUDPDispatchCorrelation("qurl_go", "pre_removal"),
 		"nhp_controller_run_id":        "123456",
 		"nhp_controller_run_attempt":   "1",
 		"provenance_valid":             true,
@@ -1222,11 +1271,13 @@ func TestNativeUDPSandboxRequiresCompletePublishedProof(t *testing.T) {
 	}
 	base := map[string]any{
 		"gate_passed":                    true,
+		"phase":                          "pre_removal",
 		"strict_outcome":                 "success",
 		"enforcement_outcome":            "success",
 		"inputs_unchanged":               true,
 		"nhp_controller_run_id":          "123456",
 		"nhp_controller_run_attempt":     "1",
+		"dispatch_correlation_id":        nativeUDPDispatchCorrelation("qurl_go", "pre_removal"),
 		"counts":                         map[string]any{"implemented": 68, "blocking": 0, "failures": 0, "skips": 0, "exact_passes": 68},
 		"provenance_valid":               true,
 		"two_cell_provenance":            true,
@@ -1246,6 +1297,10 @@ func TestNativeUDPSandboxRequiresCompletePublishedProof(t *testing.T) {
 		{name: "inputs changed", mutate: func(value map[string]any) { value["inputs_unchanged"] = false }},
 		{name: "missing controller run id", mutate: func(value map[string]any) { delete(value, "nhp_controller_run_id") }},
 		{name: "invalid controller run attempt", mutate: func(value map[string]any) { value["nhp_controller_run_attempt"] = "0" }},
+		{name: "wrong dispatch correlation", mutate: func(value map[string]any) {
+			value["dispatch_correlation_id"] = nativeUDPDispatchCorrelation("connector", "pre_removal")
+		}},
+		{name: "wrong dispatch phase", mutate: func(value map[string]any) { value["phase"] = "post_removal" }},
 		{name: "blocking", mutate: func(value map[string]any) { value["counts"].(map[string]any)["blocking"] = 1 }},
 		{name: "zero implemented", mutate: func(value map[string]any) {
 			value["counts"].(map[string]any)["implemented"] = 0
@@ -1441,14 +1496,18 @@ func verifyNativeUDPManifest(
 	githubEnv := filepath.Join(runnerTemp, "github.env")
 	commitMockBin := writeManifestCommitGHMock(t)
 	environment := map[string]string{
-		"PATH":                                  commitMockBin + string(os.PathListSeparator) + os.Getenv("PATH"),
-		"RUNNER_TEMP":                           runnerTemp,
-		"GITHUB_ENV":                            githubEnv,
-		"GITHUB_REPOSITORY":                     "layervai/qurl-go",
-		"GITHUB_SHA":                            buildSHA,
-		"QURL_GO_SANDBOX_EXPECTED_SHA":          buildSHA,
-		"QURL_GO_SANDBOX_PROOF_PHASE":           phase,
-		"QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ID": "123456",
+		"PATH":                         commitMockBin + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"RUNNER_TEMP":                  runnerTemp,
+		"GITHUB_ENV":                   githubEnv,
+		"GITHUB_REPOSITORY":            "layervai/qurl-go",
+		"GITHUB_SHA":                   buildSHA,
+		"QURL_GO_SANDBOX_EXPECTED_SHA": buildSHA,
+		"QURL_GO_SANDBOX_PROOF_PHASE":  phase,
+		"QURL_GO_SANDBOX_DISPATCH_CORRELATION_ID": nativeUDPDispatchCorrelation(
+			"qurl_go",
+			phase,
+		),
+		"QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ID":      "123456",
 		"QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ATTEMPT": "1",
 		"QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_B64":    base64.StdEncoding.EncodeToString(manifest),
 		"QURL_GO_SANDBOX_PRE_REMOVAL_RUN_ID":         preRemovalRunID,
@@ -1503,7 +1562,8 @@ esac
 
 func proofHashEnvironment(runnerTemp string, outputs map[string]string) map[string]string {
 	return map[string]string{
-		"RUNNER_TEMP":                                      runnerTemp,
+		"RUNNER_TEMP": runnerTemp,
+		"QURL_GO_SANDBOX_DISPATCH_CORRELATION_ID":          nativeUDPDispatchCorrelation("qurl_go", "pre_removal"),
 		"QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ID":            "123456",
 		"QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ATTEMPT":       "1",
 		"QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_PATH":         outputs["QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_PATH"],
@@ -1517,6 +1577,10 @@ func proofHashEnvironment(runnerTemp string, outputs map[string]string) map[stri
 		"QURL_GO_SANDBOX_TYPED_EVIDENCE_CONTRACT_SHA256":   outputs["QURL_GO_SANDBOX_TYPED_EVIDENCE_CONTRACT_SHA256"],
 		"QURL_GO_SANDBOX_PROOF_HARNESS_SHA256":             outputs["QURL_GO_SANDBOX_PROOF_HARNESS_SHA256"],
 	}
+}
+
+func nativeUDPDispatchCorrelation(client, phase string) string {
+	return "nhp-123456-1-" + client + "-" + phase + "-" + strings.Repeat("a", 32)
 }
 
 func deploymentManifestBytes(t *testing.T, phase, qurlGoSHA string) []byte {
@@ -1940,6 +2004,9 @@ func writeConnectorProofZIP(t *testing.T, path string, manifest []byte, connecto
 		"commit_sha":                     connectorSHA,
 		"run_id":                         "777",
 		"run_attempt":                    "2",
+		"dispatch_correlation_id":        nativeUDPDispatchCorrelation("connector", phase),
+		"nhp_controller_run_id":          "123456",
+		"nhp_controller_run_attempt":     "1",
 		"pre_removal_run_id":             preRemovalRunID,
 		"pre_removal_evidence_sha256":    preRemovalEvidenceSHA,
 		"pre_removal_deployment_sha256":  preRemovalDeploymentSHA,
@@ -1991,6 +2058,10 @@ func writeConnectorProofZIP(t *testing.T, path string, manifest []byte, connecto
 	modules := provenance["modules"].(map[string]any)
 	operational := provenance["operational"].(map[string]any)
 	switch options.mutation {
+	case "wrong_dispatch_correlation":
+		evidence["dispatch_correlation_id"] = nativeUDPDispatchCorrelation("qurl_go", phase)
+	case "wrong_controller_run_identity":
+		evidence["nhp_controller_run_attempt"] = "2"
 	case "wrong_image":
 		image["oci_manifest_digest"] = "sha256:" + strings.Repeat("f", 64)
 	case "wrong_module":
