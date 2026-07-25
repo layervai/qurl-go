@@ -100,7 +100,7 @@ Git build SHA, Hub trust root, deployment/inventory/proof-harness digests, and
 every authenticated assigned-cell tuple in a 30-day allowlisted JSON evidence
 manifest. The full normalized inventory mapping and checked-in exact retired
 lifecycle surface have separately reviewed literal SHA-256 values
-(`1dff59c8188ca1cb72847135b5e4a9e2c2bba4f737d788379c93a568152dc88d`
+(`f5aaef5b840c461ed91530fe6e3b820f47476eaa0f5da327db48c2213e60176c`
 and `3fe8872c3da9913c28d763f5561d82b67805aae5a6962c6dc403c7d6305da00c`,
 respectively); both are carried in evidence and must match across phases. The
 latter enumerates the
@@ -164,7 +164,7 @@ hostname requested before a test-only resolver returns a deterministic
 before a test-only dialer redirects the real UDP socket to an ephemeral local
 no-reply peer. Neither seam weakens the production endpoint validation path.
 
-These nine SDK scenarios prove public API outcomes; they do not by themselves
+These thirteen SDK scenarios prove public API outcomes; they do not by themselves
 attribute every NHP message visible on the wire. Exact Hub
 LST/COK/cookie-bound proof-LST/LRT, assigned-cell REG/RAK and completion
 LST/LRT, and KNK/ACK/EXT/ACK sequences remain separate blocking
@@ -194,7 +194,7 @@ artifact evidence. The attended command explicitly includes all four proof top
 levels, so external rows are finishable without reassigning their owner. Both
 non-implemented statuses are blocking. The workflow deliberately
 ends red while any required row is not implemented and backed by an exact named
-pass, so today's 10 implemented and 58 blocking scenarios cannot authorize any
+pass, so today's 14 implemented and 54 blocking scenarios cannot authorize any
 retirement or removal. The DNS and timeout cases are inherently client-side failure paths,
 run in ordinary CI as well as the attended runner through only the public SDK.
 Add other evidence only when the real Hub/Authority/cell prerequisites and
