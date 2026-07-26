@@ -10,8 +10,16 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
+)
+
+var (
+	connectorScenarioNameRegexp = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
+	connectorScenarioTestRegexp = regexp.MustCompile(`^Test[A-Za-z0-9_]+$`)
 )
 
 const (
@@ -22,6 +30,12 @@ const (
 	connectorProofRepository     = "layervai/qurl-connector"
 	connectorRetirementProofGate = "udp_lifecycle_retirement"
 	maxConnectorAttestationBytes = 32 * 1024
+	// connectorAttestationSchemaVersion 2 adds the per-scenario records. A v1
+	// attestation carries only aggregate counts and cannot prove any individual
+	// Connector scenario, so it is rejected outright rather than tolerated.
+	connectorAttestationSchemaVersion = 2
+	connectorScenarioOutcomePass      = "pass"
+	connectorScenarioCount            = 56
 )
 
 type connectorProofAttestation struct {
@@ -50,6 +64,7 @@ type connectorProofAttestation struct {
 	Counts                   connectorAttestationCounts `json:"counts"`
 	ProvenanceValid          bool                       `json:"provenance_valid"`
 	TwoCellProvenance        bool                       `json:"two_cell_provenance"`
+	Scenarios                []connectorScenarioRecord  `json:"scenarios"`
 }
 
 type connectorAttestationCounts struct {
@@ -60,6 +75,18 @@ type connectorAttestationCounts struct {
 	ExactPasses int `json:"exact_passes"`
 }
 
+// connectorScenarioRecord is one Connector inventory row as the Connector
+// projected it. Outcome is only ever connectorScenarioOutcomePass when that row
+// had an exact top-level test pass and its complete required typed evidence.
+type connectorScenarioRecord struct {
+	Name                  string   `json:"name"`
+	ObservedEvidenceKinds []string `json:"observed_evidence_kinds"`
+	Outcome               string   `json:"outcome"`
+	RequiredEvidenceKinds []string `json:"required_evidence_kinds"`
+	Status                string   `json:"status"`
+	Test                  *string  `json:"test"`
+}
+
 func TestSandboxConnectorUDP(t *testing.T) {
 	switch os.Getenv(strictEnv) {
 	case "", "0", "false":
@@ -68,6 +95,11 @@ func TestSandboxConnectorUDP(t *testing.T) {
 	default:
 		t.Fatalf("%s must be true/1 or false/0", strictEnv)
 	}
+
+	// Decoded once by the aggregate adapter below, then reused by the
+	// per-scenario adapters. A zero value proves nothing: every per-scenario
+	// assertion requires the complete 56-record projection.
+	var attested connectorProofAttestation
 
 	runTypedEvidenceScenario(t, "complete_strict_evidence_attestation", "connector.complete_strict_evidence_attestation", []string{"connector_attestation"}, func(t *testing.T) {
 		phase := os.Getenv(proofPhaseEnv)
@@ -116,6 +148,7 @@ func TestSandboxConnectorUDP(t *testing.T) {
 		if err := validateConnectorProofAttestation(attestation, phase, expectedDeploymentSHA, os.Getenv(preRemovalConnectorRunIDEnv)); err != nil {
 			t.Fatal(err)
 		}
+		attested = attestation
 		t.Logf("EVIDENCE connector_repository=%s connector_commit_sha=%s connector_run_id=%d connector_run_attempt=%d artifact_name=%s artifact_sha256=%s evidence_sha256=%s",
 			attestation.ConnectorRepository,
 			attestation.ConnectorCommitSHA,
@@ -126,6 +159,8 @@ func TestSandboxConnectorUDP(t *testing.T) {
 			attestation.EvidenceSHA256,
 		)
 	})
+
+	connectorScenarioAdapters(t, attested)
 }
 
 func decodeConnectorProofAttestation(raw []byte) (connectorProofAttestation, error) {
@@ -219,9 +254,11 @@ func consumeUniqueJSONValue(decoder *json.Decoder) error {
 }
 
 func validateConnectorProofAttestation(attestation connectorProofAttestation, phase, deploymentSHA, expectedPreRemovalRunID string) error {
-	if attestation.SchemaVersion != 1 || attestation.Gate != connectorRetirementProofGate || attestation.Phase != phase {
-		return fmt.Errorf("Connector attestation header = schema %d, gate %q, phase %q; want 1, %q, %q",
-			attestation.SchemaVersion, attestation.Gate, attestation.Phase, connectorRetirementProofGate, phase)
+	if attestation.SchemaVersion != connectorAttestationSchemaVersion ||
+		attestation.Gate != connectorRetirementProofGate || attestation.Phase != phase {
+		return fmt.Errorf("Connector attestation header = schema %d, gate %q, phase %q; want %d, %q, %q",
+			attestation.SchemaVersion, attestation.Gate, attestation.Phase,
+			connectorAttestationSchemaVersion, connectorRetirementProofGate, phase)
 	}
 	if attestation.ConnectorRepository != connectorProofRepository || !canonicalLowerHex(attestation.ConnectorCommitSHA, 40) {
 		return fmt.Errorf("Connector attestation repository/commit is not canonical: repository=%q commit=%q",
@@ -275,9 +312,73 @@ func validateConnectorProofAttestation(attestation connectorProofAttestation, ph
 			attestation.TwoCellProvenance,
 		)
 	}
-	if attestation.Counts.Implemented != 56 || attestation.Counts.Blocking != 0 || attestation.Counts.Failures != 0 ||
-		attestation.Counts.Skips != 0 || attestation.Counts.ExactPasses != 56 {
+	if attestation.Counts.Implemented != connectorScenarioCount || attestation.Counts.Blocking != 0 || attestation.Counts.Failures != 0 ||
+		attestation.Counts.Skips != 0 || attestation.Counts.ExactPasses != connectorScenarioCount {
 		return fmt.Errorf("Connector proof counts are incomplete: %+v", attestation.Counts)
+	}
+	if _, err := connectorScenarioIndex(attestation); err != nil {
+		return err
+	}
+	return nil
+}
+
+// connectorScenarioIndex builds the per-scenario lookup, rejecting any
+// projection that is not exactly one well-formed record per Connector inventory
+// row. A missing, duplicated, or malformed row is an error, never a default.
+func connectorScenarioIndex(attestation connectorProofAttestation) (map[string]connectorScenarioRecord, error) {
+	if len(attestation.Scenarios) != connectorScenarioCount {
+		return nil, fmt.Errorf("Connector attestation carries %d scenario records, want exactly %d",
+			len(attestation.Scenarios), connectorScenarioCount)
+	}
+	index := make(map[string]connectorScenarioRecord, len(attestation.Scenarios))
+	for _, record := range attestation.Scenarios {
+		if !connectorScenarioNameRegexp.MatchString(record.Name) {
+			return nil, fmt.Errorf("Connector scenario name %q is not canonical", record.Name)
+		}
+		if _, duplicate := index[record.Name]; duplicate {
+			return nil, fmt.Errorf("Connector attestation repeats scenario %q", record.Name)
+		}
+		if len(record.RequiredEvidenceKinds) == 0 {
+			return nil, fmt.Errorf("Connector scenario %q requires no typed evidence", record.Name)
+		}
+		if !sort.StringsAreSorted(record.RequiredEvidenceKinds) || !sort.StringsAreSorted(record.ObservedEvidenceKinds) {
+			return nil, fmt.Errorf("Connector scenario %q has unsorted evidence kinds", record.Name)
+		}
+		if !slices.Equal(record.ObservedEvidenceKinds, record.RequiredEvidenceKinds) {
+			return nil, fmt.Errorf("Connector scenario %q observed %q, want its complete required evidence %q",
+				record.Name, record.ObservedEvidenceKinds, record.RequiredEvidenceKinds)
+		}
+		index[record.Name] = record
+	}
+	return index, nil
+}
+
+// requireConnectorScenarioPass fails unless every named Connector inventory row
+// is present in the attestation and was projected as an exact pass. An unknown
+// name is a hard error, so a renamed or dropped Connector row can never be read
+// as success.
+func requireConnectorScenarioPass(attestation connectorProofAttestation, names ...string) error {
+	index, err := connectorScenarioIndex(attestation)
+	if err != nil {
+		return err
+	}
+	if len(names) == 0 {
+		return errors.New("no Connector scenario was named; refusing to assert a vacuous pass")
+	}
+	for _, name := range names {
+		record, ok := index[name]
+		if !ok {
+			return fmt.Errorf("Connector attestation has no record for scenario %q", name)
+		}
+		if record.Status != "implemented" {
+			return fmt.Errorf("Connector scenario %q status = %q, want implemented", name, record.Status)
+		}
+		if record.Outcome != connectorScenarioOutcomePass {
+			return fmt.Errorf("Connector scenario %q outcome = %q, want %q", name, record.Outcome, connectorScenarioOutcomePass)
+		}
+		if record.Test == nil || !connectorScenarioTestRegexp.MatchString(*record.Test) {
+			return fmt.Errorf("Connector scenario %q has no exact Go test name", name)
+		}
 	}
 	return nil
 }
@@ -309,11 +410,30 @@ func TestDecodeConnectorProofAttestationRejectsAmbiguousJSON(t *testing.T) {
 	}
 }
 
+func completeConnectorScenarioRecords(t *testing.T) []connectorScenarioRecord {
+	t.Helper()
+	names := loadConnectorStrictScenarioNames(t)
+	records := make([]connectorScenarioRecord, 0, len(names))
+	for index, name := range names {
+		test := fmt.Sprintf("TestConnectorScenario%d", index)
+		records = append(records, connectorScenarioRecord{
+			Name:                  name,
+			ObservedEvidenceKinds: []string{"cell_exchange"},
+			Outcome:               connectorScenarioOutcomePass,
+			RequiredEvidenceKinds: []string{"cell_exchange"},
+			Status:                "implemented",
+			Test:                  &test,
+		})
+	}
+	return records
+}
+
 func TestValidateConnectorProofAttestationFailsClosed(t *testing.T) {
 	deploymentSHA := strings.Repeat("d", 64)
 	valid := func(phase string) connectorProofAttestation {
 		attestation := connectorProofAttestation{
-			SchemaVersion:            1,
+			SchemaVersion:            connectorAttestationSchemaVersion,
+			Scenarios:                completeConnectorScenarioRecords(t),
 			Gate:                     connectorRetirementProofGate,
 			Phase:                    phase,
 			ConnectorRepository:      connectorProofRepository,
@@ -365,6 +485,20 @@ func TestValidateConnectorProofAttestationFailsClosed(t *testing.T) {
 		"wrong deployment":          func(value *connectorProofAttestation) { value.DeploymentManifestSHA256 = strings.Repeat("e", 64) },
 		"wrong pre baseline":        func(value *connectorProofAttestation) { wrong := "455"; value.PreRemovalRunID = &wrong },
 		"missing post pre baseline": func(value *connectorProofAttestation) { value.PreRemovalRunID = nil },
+		"aggregate-only schema": func(value *connectorProofAttestation) {
+			value.SchemaVersion = 1
+			value.Scenarios = nil
+		},
+		"absent scenario projection": func(value *connectorProofAttestation) { value.Scenarios = nil },
+		"truncated scenario projection": func(value *connectorProofAttestation) {
+			value.Scenarios = value.Scenarios[1:]
+		},
+		"duplicated scenario record": func(value *connectorProofAttestation) {
+			value.Scenarios[1] = value.Scenarios[0]
+		},
+		"scenario record missing evidence": func(value *connectorProofAttestation) {
+			value.Scenarios[0].ObservedEvidenceKinds = nil
+		},
 	}
 	for name, mutate := range tests {
 		t.Run(name, func(t *testing.T) {

@@ -710,6 +710,13 @@ func TestNativeUDPSandboxAttestsExactConnectorProof(t *testing.T) {
 		{name: "wrong qurl-go module", phase: "pre_removal", headSHA: connectorSHA, runWorkflowID: "9001", mutation: "wrong_module"},
 		{name: "malformed post pairing", phase: "post_removal", headSHA: connectorSHA, runWorkflowID: "9001", mutation: "malformed_post_pairing"},
 		{name: "mismatched connector pre baseline", phase: "post_removal", headSHA: connectorSHA, runWorkflowID: "9001", mutation: "mismatched_pre_baseline"},
+		{name: "unproven scenario row", phase: "pre_removal", headSHA: connectorSHA, runWorkflowID: "9001", mutation: "unproven_scenario_row"},
+		{name: "scenario row without evidence", phase: "pre_removal", headSHA: connectorSHA, runWorkflowID: "9001", mutation: "scenario_row_without_evidence"},
+		{name: "dropped scenario row", phase: "pre_removal", headSHA: connectorSHA, runWorkflowID: "9001", mutation: "dropped_scenario_row"},
+		{name: "duplicate scenario row", phase: "pre_removal", headSHA: connectorSHA, runWorkflowID: "9001", mutation: "duplicate_scenario_row"},
+		{name: "renamed scenario row", phase: "pre_removal", headSHA: connectorSHA, runWorkflowID: "9001", mutation: "renamed_scenario_row"},
+		{name: "mismatched scenario test", phase: "pre_removal", headSHA: connectorSHA, runWorkflowID: "9001", mutation: "mismatched_scenario_test"},
+		{name: "wrong scenario projection contract", phase: "pre_removal", headSHA: connectorSHA, runWorkflowID: "9001", mutation: "wrong_scenario_projection_contract"},
 		{name: "artifact API oversize", phase: "pre_removal", headSHA: connectorSHA, runWorkflowID: "9001", artifactSize: "5242881"},
 		{name: "artifact digest mismatch", phase: "pre_removal", headSHA: connectorSHA, runWorkflowID: "9001", artifactDigest: strings.Repeat("f", 64)},
 		{name: "deployment manifest mismatch", phase: "pre_removal", headSHA: connectorSHA, runWorkflowID: "9001", mutation: "manifest_mismatch"},
@@ -804,6 +811,22 @@ func TestNativeUDPSandboxAttestsExactConnectorProof(t *testing.T) {
 			}
 			if decoded["connector_commit_sha"] != connectorSHA || decoded["phase"] != test.phase || decoded["gate_passed"] != true {
 				t.Fatalf("Connector attestation did not bind the exact successful proof: %v", decoded)
+			}
+			// The attestation must carry the per-scenario projection, not just
+			// aggregate counts; otherwise no individual Connector scenario is
+			// provable downstream.
+			if decoded["schema_version"] != float64(2) {
+				t.Fatalf("Connector attestation schema_version = %v, want 2", decoded["schema_version"])
+			}
+			projected, ok := decoded["scenarios"].([]any)
+			if !ok || len(projected) != len(connectorStrictScenarioNames(t)) {
+				t.Fatalf("Connector attestation carried %v scenario records, want one per Connector inventory row", decoded["scenarios"])
+			}
+			for _, record := range projected {
+				row, ok := record.(map[string]any)
+				if !ok || row["outcome"] != "pass" || row["status"] != "implemented" {
+					t.Fatalf("Connector attestation projected a non-passing record: %v", record)
+				}
 			}
 			if test.phase == "post_removal" && decoded["pre_removal_run_id"] != "456" {
 				t.Fatalf("post-removal Connector attestation omitted its paired pre-removal baseline: %v", decoded)
@@ -2102,7 +2125,9 @@ func writeConnectorProofZIP(t *testing.T, path string, manifest []byte, connecto
 	scenarioResults := make([]any, 0, len(scenarioNames)+1)
 	contractScenarios := make([]any, 0, len(scenarioNames)+1)
 	for _, name := range scenarioNames {
-		testName := "TestSandboxConnectorStrict/" + name
+		// Connector inventory rows carry an exact Go test identifier, never a
+		// subtest path, so the fixture must use one too.
+		testName := "TestSandboxConnectorStrict" + strings.ReplaceAll(name, "-", "_")
 		scenario := map[string]any{
 			"name":         name,
 			"status":       "implemented",
@@ -2213,15 +2238,54 @@ func writeConnectorProofZIP(t *testing.T, path string, manifest []byte, connecto
 	implementedCount := len(scenarios)
 	counts := map[string]int{"implemented": implementedCount, "blocking": 0, "failures": 0, "skips": 0, "exact_passes": implementedCount}
 	typedEvidence := make([]any, 0, len(scenarios))
+	projectedScenarios := make([]any, 0, len(scenarios))
 	for _, item := range scenarios {
+		row := item.(map[string]any)
 		typedEvidence = append(typedEvidence, map[string]any{
-			"scenario_key": item.(map[string]any)["name"],
+			"scenario_key": row["name"],
 			"evidence": []any{map[string]any{
 				"kind":               "wire_trace",
 				"observation":        map[string]any{"verified": true},
 				"observation_sha256": "348f299cf43d57826c76c5ef7c8ccc37668b45161b857d4ef09f7125f3381be9",
 			}},
 		})
+		projectedScenarios = append(projectedScenarios, map[string]any{
+			"name":                    row["name"],
+			"observed_evidence_kinds": []string{"wire_trace"},
+			"outcome":                 "pass",
+			"required_evidence_kinds": []string{"wire_trace"},
+			"status":                  "implemented",
+			"test":                    row["test"],
+		})
+	}
+	scenarioAttestation := map[string]any{
+		"counts": map[string]any{
+			"proven":   len(projectedScenarios),
+			"total":    len(projectedScenarios),
+			"unproven": 0,
+		},
+		"gate":                           "udp_lifecycle_retirement",
+		"scenario_contract_sha256":       sha256Hex(contractBytes),
+		"scenario_key_field":             "name",
+		"scenarios":                      projectedScenarios,
+		"schema_version":                 1,
+		"typed_evidence_contract_sha256": connectorTypedEvidenceContractSHA256,
+	}
+	switch options.mutation {
+	case "unproven_scenario_row":
+		projectedScenarios[0].(map[string]any)["outcome"] = "not_proven"
+	case "scenario_row_without_evidence":
+		projectedScenarios[0].(map[string]any)["observed_evidence_kinds"] = []string{}
+	case "dropped_scenario_row":
+		scenarioAttestation["scenarios"] = projectedScenarios[1:]
+	case "duplicate_scenario_row":
+		projectedScenarios[1] = projectedScenarios[0]
+	case "renamed_scenario_row":
+		projectedScenarios[0].(map[string]any)["name"] = "scenario-not-in-connector-inventory"
+	case "mismatched_scenario_test":
+		projectedScenarios[0].(map[string]any)["test"] = "TestSomeOtherConnectorScenario"
+	case "wrong_scenario_projection_contract":
+		scenarioAttestation["scenario_contract_sha256"] = strings.Repeat("f", 64)
 	}
 	switch options.mutation {
 	case "blocking_count":
@@ -2277,6 +2341,7 @@ func writeConnectorProofZIP(t *testing.T, path string, manifest []byte, connecto
 		"typed_evidence_complete":        true,
 		"typed_evidence":                 typedEvidence,
 		"typed_evidence_contract_sha256": connectorTypedEvidenceContractSHA256,
+		"scenario_attestation":           scenarioAttestation,
 		"provenance": map[string]any{
 			"schema":    1,
 			"connector": map[string]any{"git_sha": connectorSHA},

@@ -1051,7 +1051,7 @@ jobs:
                ($right_lease[0] == $left_lease[0] and $right_lease[1] >= $left_lease[1]));
             . as $evidence | $inventory[0] as $scenarios | $deployment[0] as $deployed |
             type == "object" and
-            (keys | sort) == ["commit_sha", "counts", "deployment_manifest_sha256", "deployment_producer", "deployment_runtime_inputs_sha256", "dispatch_correlation_id", "enforcement_outcome", "gate_passed", "input_outcome", "inputs_unchanged", "inventory_sha256", "nhp_controller_run_attempt", "nhp_controller_run_id", "phase", "pre_removal_deployment_sha256", "pre_removal_evidence_sha256", "pre_removal_run_id", "proof_harness_sha256", "provenance", "provenance_valid", "repository", "run_attempt", "run_id", "scenario_contract_sha256", "scenario_results", "schema_version", "two_cell_provenance", "typed_evidence", "typed_evidence_complete", "typed_evidence_contract_sha256"] and
+            (keys | sort) == ["commit_sha", "counts", "deployment_manifest_sha256", "deployment_producer", "deployment_runtime_inputs_sha256", "dispatch_correlation_id", "enforcement_outcome", "gate_passed", "input_outcome", "inputs_unchanged", "inventory_sha256", "nhp_controller_run_attempt", "nhp_controller_run_id", "phase", "pre_removal_deployment_sha256", "pre_removal_evidence_sha256", "pre_removal_run_id", "proof_harness_sha256", "provenance", "provenance_valid", "repository", "run_attempt", "run_id", "scenario_attestation", "scenario_contract_sha256", "scenario_results", "schema_version", "two_cell_provenance", "typed_evidence", "typed_evidence_complete", "typed_evidence_contract_sha256"] and
             .schema_version == 1 and .phase == $phase and .repository == $repository and
             .commit_sha == $commit_sha and .run_id == $run_id and .run_attempt == $run_attempt and
             .input_outcome == "success" and .enforcement_outcome == "success" and
@@ -1139,6 +1139,40 @@ jobs:
                     (.kind | type == "string" and test("^[a-z][a-z0-9_]{0,63}$")) and
                     .observation == {"verified": true} and
                     .observation_sha256 == "348f299cf43d57826c76c5ef7c8ccc37668b45161b857d4ef09f7125f3381be9")))) and
+            # Per-scenario projection: exactly one record per Connector inventory
+            # row, so a single named Connector scenario can be proven here instead
+            # of only the aggregate counts. Fail-closed: every row must be present,
+            # implemented, and carry outcome "pass" with its complete required
+            # typed evidence; an absent, duplicated, or unproven row rejects.
+            (.scenario_attestation | . as $projection |
+              type == "object" and
+              (keys | sort) == ["counts", "gate", "scenario_contract_sha256", "scenario_key_field", "scenarios", "schema_version", "typed_evidence_contract_sha256"] and
+              .schema_version == 1 and .gate == "udp_lifecycle_retirement" and
+              .scenario_key_field == "name" and
+              .scenario_contract_sha256 == $scenario_contract_sha256 and
+              .typed_evidence_contract_sha256 == $evidence.typed_evidence_contract_sha256 and
+              (.counts | type == "object" and (keys | sort) == ["proven", "total", "unproven"]) and
+              .counts.total == $implemented_count and
+              .counts.proven == $implemented_count and .counts.unproven == 0 and
+              (.scenarios | type == "array" and length == $projection.counts.total and
+                ([.[].name] | unique | length) == length and
+                ([.[].name] | sort) == ($scenarios.scenarios | map(.name) | sort) and
+                all(.[];
+                  type == "object" and
+                  (keys | sort) == ["name", "observed_evidence_kinds", "outcome", "required_evidence_kinds", "status", "test"] and
+                  (.name | type == "string" and test("^[a-z0-9]+(?:-[a-z0-9]+)*$")) and
+                  .status == "implemented" and .outcome == "pass" and
+                  (.test | type == "string" and test("^Test[A-Za-z0-9_]+$")) and
+                  (.required_evidence_kinds | type == "array" and length >= 1 and
+                    . == sort and (unique | length) == length and
+                    all(.[]; type == "string" and test("^[a-z][a-z0-9_]{0,63}$"))) and
+                  .observed_evidence_kinds == .required_evidence_kinds))) and
+            # Every projected row must name the same test the Connector inventory
+            # assigns it, and that test must be one of the exact recorded passes.
+            all($scenarios.scenarios[];
+              . as $scenario |
+              ([$evidence.scenario_attestation.scenarios[] |
+                select(.name == $scenario.name and .test == $scenario.test)] | length) == 1) and
             (.scenario_results | type == "array" and
               length == $implemented_count and
               ([.[].test_name] | unique | length) == length and
@@ -1181,9 +1215,14 @@ jobs:
             --argjson connector_run_id "${QURL_GO_SANDBOX_CONNECTOR_PROOF_RUN_ID}" \
             --argjson connector_run_attempt "${connector_attempt}" \
             --argjson artifact_id "${connector_artifact_id}" \
-            --argjson implemented_count "${connector_implemented_count}" '
+            --argjson implemented_count "${connector_implemented_count}" \
+            --argjson scenarios "$(jq -c '.scenario_attestation.scenarios' "${connector_evidence}")" '
             {
-              schema_version: 1,
+              # schema_version 2 adds the per-scenario records. The consumer
+              # decodes with DisallowUnknownFields, so a v1 reader hard-fails on
+              # the new "scenarios" field and a v2 reader hard-fails on a v1
+              # document: the two are never silently interchangeable.
+              schema_version: 2,
               gate: $gate,
               phase: $phase,
               connector_repository: $connector_repository,
@@ -1207,7 +1246,8 @@ jobs:
               gate_passed: true,
               counts: {implemented: $implemented_count, blocking: 0, failures: 0, skips: 0, exact_passes: $implemented_count},
               provenance_valid: true,
-              two_cell_provenance: true
+              two_cell_provenance: true,
+              scenarios: $scenarios
             }
           ' > "${connector_attestation}"
           chmod 0444 "${connector_attestation}"
