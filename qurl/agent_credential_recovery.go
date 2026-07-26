@@ -581,7 +581,13 @@ func (c *nativeAgentRuntimeConfig) clearCredentialRecoveryIssueIntent(ctx contex
 	}
 	next := state.clone()
 	next.PendingCredentialRecoveryIssue = nil
-	return c.saveCredentialRecoveryState(ctx, store, state, next, ErrAgentBindingPersistence, "clear terminal credential recovery Hub request intent")
+	// A terminal authenticated Hub denial is authoritative even when caller
+	// cancellation races its LRT. Clear the exact request intent under the same
+	// detached bounded persistence budget used by final credential promotion and
+	// grant-rejection marking, so a corrected credential can start a new nonce.
+	persistCtx, cancelPersist := credentialRecoveryPersistenceContext(ctx)
+	defer cancelPersist()
+	return c.saveCredentialRecoveryState(persistCtx, store, state, next, ErrAgentBindingPersistence, "clear terminal credential recovery Hub request intent")
 }
 
 func (c *nativeAgentRuntimeConfig) persistCredentialRecoveryIssueIntent(ctx context.Context, store AgentStateStore, state *AgentState, credential, forbiddenNonce string) error {

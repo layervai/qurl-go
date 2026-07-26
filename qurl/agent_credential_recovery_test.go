@@ -1086,6 +1086,57 @@ func TestRecoverAgentRuntime_TerminalHubDenialClearsIntentForCorrectedAttempt(t 
 	}
 }
 
+func TestRecoverAgentRuntime_AuthenticatedTerminalHubDenialIgnoresCallerCancellationForIntentClear(t *testing.T) {
+	fixture := loadCredentialRecoveryFixture(t)
+	denial := `{"errCode":"52401","errMsg":"recovery credential rejected"}`
+	for _, test := range []struct {
+		name    string
+		prepare func(*testing.T, *runtimeFixture, *conformance.AgentCredentialRecoveryFile)
+	}{
+		{name: "initial issue"},
+		{
+			name: "grant renewal",
+			prepare: func(t *testing.T, f *runtimeFixture, fixture *conformance.AgentCredentialRecoveryFile) {
+				seedPendingCredentialRecovery(t, f, fixture, true)
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f, _ := newCredentialRecoveryRuntimeFixture(t,
+				[]runtimeUDPStep{{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: denial}},
+				nil,
+			)
+			if test.prepare != nil {
+				test.prepare(t, f, fixture)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			f.store.mu.Lock()
+			// The next save persists the exact Hub Issue; the following save
+			// clears it after the authenticated terminal denial.
+			f.store.cancelBeforeSave = f.store.calls + 2
+			f.store.cancel = cancel
+			f.store.mu.Unlock()
+
+			_, _, err := RecoverAgentRuntime(ctx, fixture.Fixtures.RecoveryCredential, f.store,
+				recoveryOptions(t, f, fixture, func() time.Time { return credentialRecoveryFixtureNow })...)
+			if !errors.Is(err, ErrRecoveryCredentialRejected) || errors.Is(err, ErrAgentBindingPersistence) {
+				t.Fatalf("caller-canceled terminal Hub denial = %v, want rejection without persistence failure", err)
+			}
+			if !errors.Is(ctx.Err(), context.Canceled) {
+				t.Fatalf("caller context = %v, want canceled", ctx.Err())
+			}
+			state, loadErr := f.store.LoadAgentState(context.Background())
+			if loadErr != nil || state.PendingCredentialRecoveryIssue != nil {
+				t.Fatalf("caller-canceled terminal denial retained Hub intent: state=%#v load=%v", state, loadErr)
+			}
+			if test.prepare != nil && (state.PendingCredentialRecovery == nil || !state.PendingCredentialRecovery.NeedsFreshGrant) {
+				t.Fatalf("terminal renewal denial lost pending candidate/renewal state: %#v", state)
+			}
+		})
+	}
+}
+
 func TestRecoverAgentRuntime_TerminalHubIntentClearFailureReplaysExactDenial(t *testing.T) {
 	fixture := loadCredentialRecoveryFixture(t)
 	denial := `{"errCode":"52401","errMsg":"recovery credential rejected"}`
