@@ -4,9 +4,11 @@ The attended `Native UDP sandbox proof` workflow exercises the public Go SDK
 against the real sandbox Hub and its authenticated assigned cell. It does not
 use a browser relay, mock UDP transport, or HTTP lifecycle endpoint. The job is
 manual because each fresh run consumes a server-minted enrollment credential.
-Every dispatch selects `pre_removal` or `post_removal` and supplies base64 of
-the exact non-secret cross-repository sandbox deployment manifest plus the run
-id of a successful, same-phase qURL Connector strict proof. The workflow
+Every dispatch selects `pre_removal` or `post_removal` and supplies strict
+canonical base64 of the exact non-secret cross-repository sandbox deployment
+manifest and public Hub/cell runtime sidecar, the authenticated NHP producer
+run/attempt/signed-main SHA/artifact ID/artifact digest, plus the run id of a
+successful, same-phase qURL Connector strict proof. The workflow
 rejects duplicate keys, trailing input, non-finite numbers, and unknown or
 missing fields before atomically publishing canonical JSON. It validates the
 retirement state, the qurl-go SHA under test, and the exact existence of every
@@ -15,7 +17,8 @@ It also requires the tested SHA to be the current head of open, same-repository
 qurl-go PR #93 targeting `main`, and requires GitHub to report that exact
 commit as cryptographically verified.
 It records all supplied image digests, validates the public Hub trust root, and
-requires at least two cells with distinct endpoint names and server identities;
+requires exactly the ordered `cell0` and `cell1` endpoints with distinct names
+and server identities;
 the blocking topology/retirement evidence must still prove those images are
 actually deployed, while the Connector image is separately attested below. A
 post-removal dispatch must also name a successful pre-removal run of the same
@@ -23,17 +26,16 @@ workflow.
 The workflow resolves exactly one unexpired artifact for that run and exact
 phase/SHA/attempt name through the Actions API, verifies the archive SHA-256,
 rejects unsafe paths, symlinks, duplicate or extra files, and bounded declared
-and actual expansion, then accepts only the four exact root files. It requires
-canonical evidence, deployment manifest, inventory, and retired-lifecycle
-surface bytes. The two runs must use the same executable proof-harness digest,
+and actual expansion, then accepts only the five exact root files. It requires
+canonical evidence, deployment manifest, public runtime sidecar, inventory,
+and retired-lifecycle surface bytes. The two runs must use the same executable proof-harness digest,
 frozen full inventory mapping, retired-surface contract, Hub/cell topology,
 FRP module/repository, and qRTS repository/image identities. The Connector's
 module map is a
 strict object containing only the Connector binary's embedded `frp` and
-`qurl_go` module SHAs; its FRP SHA must equal `repositories.frp`, while its
-qurl-go module SHA may intentionally differ from the qurl-go proof commit in
-`repositories.qurl_go`. Connector provenance is checked against these embedded
-module identities, not against the phase's qurl-go proof HEAD. Each qurl-go run
+`qurl_go` module SHAs; each module SHA must equal its corresponding repository
+SHA in the producer snapshot. Connector provenance is checked against these
+embedded module identities and the phase's exact qurl-go proof HEAD. Each qurl-go run
 is bound to its own manifest SHA because qurl-go's HTTP cleanup is itself part
 of the isolated cut; qurl-go is therefore in the explicit retirement set. The
 qurl-go and Connector repository SHAs, Connector image, and Connector's
@@ -52,18 +54,23 @@ Configure the protected GitHub `sandbox` environment before dispatching it:
   `connector_bootstrap`, `bootstrap`, or `agent` enrollment credential;
 - secrets `OPS_ROUTINES_APP_ID` and `OPS_ROUTINES_APP_PRIVATE_KEY`: credentials
   for the organization App installed on exactly the repositories enumerated by
-  the workflow. Its minted token has only `actions:read` and `contents:read` and
-  lets the proof adapters verify the exact private-repository manifest,
+  the workflow. Its minted token has only `actions:read`, `contents:read`, and
+  `pull-requests:read` and lets the proof adapters verify the exact
+  private-repository manifest,
   including Connector, NHP, qURL service, qRTS, FRP, and website, instead of
   trusting operator-entered digests;
-- variables `QURL_GO_SANDBOX_HUB_HOST`, `QURL_GO_SANDBOX_HUB_PORT` (currently
-  `62206`), and `QURL_GO_SANDBOX_HUB_SERVER_PUBLIC_KEY_B64`: the atomic public
-  Hub trust root;
 - variable `QURL_GO_SANDBOX_KNOCK_RESOURCE_ID`: a live sandbox Connector knock
   resource;
 - optional variable `QURL_GO_SANDBOX_EXPECTED_CELL_ID`: an operator assertion
   for the initial registration and credentialless warm-open cell. The explicit
   reassignment observation must move away from it.
+
+The attended job derives the Hub endpoint and pinned X25519 key only from the
+validated runtime sidecar. It rejects noncanonical bytes, verifies each
+decoded 32-byte public key against the deployment manifest fingerprint, and
+reauthenticates the exact successful NHP producer run, immutable artifact
+identity/digest, and signed trusted-main producer commit. Mutable repository
+variables never supply its Hub trust root.
 
 The required `connector_proof_run_id` dispatch input is not trusted on its own.
 A workflow-only App token resolves qURL Connector's exact
@@ -73,9 +80,10 @@ attempt. The manifest SHA must also be the current head of open,
 same-repository qURL Connector PR #452 targeting `main`, and its exact commit
 must be cryptographically verified by GitHub. It downloads only the exact
 phase/SHA/attempt artifact, verifies the
-GitHub artifact archive digest and safe three-file shape, rejects ambiguous
-JSON, requires canonical Connector evidence and a byte-identical deployment
-manifest, and recomputes the inventory and scenario-contract digests. The
+GitHub artifact archive digest and safe four-file shape, rejects ambiguous
+JSON, requires canonical Connector evidence plus byte-identical deployment
+manifest and public runtime sidecar, and recomputes the inventory and
+scenario-contract digests. The
 Connector scenario contract uses the producer's exact algorithm: sort rows by
 `name`, project only `name`, `status`, `test`, `requires_env`, and `reason`
 (defaulting missing `test` to JSON `null` and missing `requires_env` to `[]`),

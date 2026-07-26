@@ -19,6 +19,30 @@ on:
         description: Base64 of the exact non-secret cross-repository sandbox deployment manifest
         required: true
         type: string
+      deployment_runtime_inputs_b64:
+        description: Base64 of the exact public runtime sidecar authenticated by the NHP controller
+        required: true
+        type: string
+      deployment_producer_run_id:
+        description: Authenticated NHP deployment-manifest producer run id
+        required: true
+        type: string
+      deployment_producer_run_attempt:
+        description: Authenticated NHP deployment-manifest producer run attempt
+        required: true
+        type: string
+      deployment_producer_head_sha:
+        description: Authenticated trusted-main NHP producer commit
+        required: true
+        type: string
+      deployment_artifact_id:
+        description: Immutable GitHub artifact id selected by the NHP controller
+        required: true
+        type: string
+      deployment_artifact_digest:
+        description: SHA-256 digest of the selected NHP producer artifact
+        required: true
+        type: string
       connector_proof_run_id:
         description: Successful same-phase qurl-connector Sandbox Smoke proof run id
         required: true
@@ -55,15 +79,18 @@ jobs:
     env:
       QURL_GO_SANDBOX_STRICT: "true"
       QURL_GO_SANDBOX_EXPECTED_SHA: ${{ github.sha }}
-      QURL_GO_SANDBOX_HUB_HOST: ${{ vars.QURL_GO_SANDBOX_HUB_HOST }}
-      QURL_GO_SANDBOX_HUB_PORT: ${{ vars.QURL_GO_SANDBOX_HUB_PORT }}
-      QURL_GO_SANDBOX_HUB_SERVER_PUBLIC_KEY_B64: ${{ vars.QURL_GO_SANDBOX_HUB_SERVER_PUBLIC_KEY_B64 }}
       QURL_GO_SANDBOX_AGENT_ID: qurl-go-sandbox-${{ github.run_id }}-${{ github.run_attempt }}
       QURL_GO_SANDBOX_KNOCK_RESOURCE_ID: ${{ vars.QURL_GO_SANDBOX_KNOCK_RESOURCE_ID }}
       QURL_GO_SANDBOX_EXPECTED_CELL_ID: ${{ vars.QURL_GO_SANDBOX_EXPECTED_CELL_ID }}
       QURL_GO_SANDBOX_DISPATCH_CORRELATION_ID: ${{ inputs.dispatch_correlation_id }}
       QURL_GO_SANDBOX_PROOF_PHASE: ${{ inputs.proof_phase }}
       QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_B64: ${{ inputs.deployment_manifest_b64 }}
+      QURL_GO_SANDBOX_DEPLOYMENT_RUNTIME_INPUTS_B64: ${{ inputs.deployment_runtime_inputs_b64 }}
+      QURL_GO_SANDBOX_DEPLOYMENT_PRODUCER_RUN_ID: ${{ inputs.deployment_producer_run_id }}
+      QURL_GO_SANDBOX_DEPLOYMENT_PRODUCER_RUN_ATTEMPT: ${{ inputs.deployment_producer_run_attempt }}
+      QURL_GO_SANDBOX_DEPLOYMENT_PRODUCER_HEAD_SHA: ${{ inputs.deployment_producer_head_sha }}
+      QURL_GO_SANDBOX_DEPLOYMENT_ARTIFACT_ID: ${{ inputs.deployment_artifact_id }}
+      QURL_GO_SANDBOX_DEPLOYMENT_ARTIFACT_DIGEST: ${{ inputs.deployment_artifact_digest }}
       QURL_GO_SANDBOX_CONNECTOR_PROOF_RUN_ID: ${{ inputs.connector_proof_run_id }}
       QURL_GO_SANDBOX_PRE_REMOVAL_RUN_ID: ${{ inputs.pre_removal_run_id }}
     steps:
@@ -143,11 +170,15 @@ jobs:
           def reject_constant(value):
               raise ValueError(f"non-finite JSON number: {value}")
 
+          def reject_float(value):
+              raise ValueError(f"floating-point JSON number is not allowed: {value}")
+
           with open(source, "r", encoding="utf-8") as handle:
               value = json.load(
                   handle,
                   object_pairs_hook=reject_duplicate_keys,
                   parse_constant=reject_constant,
+                  parse_float=reject_float,
               )
 
           encoded = json.dumps(
@@ -163,6 +194,30 @@ jobs:
           PY
           }
 
+          decode_canonical_base64() {
+            python3 - "$1" "$2" "$3" <<'PY'
+          import base64
+          import binascii
+          import os
+          import sys
+
+          variable, destination, maximum = sys.argv[1], sys.argv[2], int(sys.argv[3])
+          encoded = os.environ.get(variable, "")
+          try:
+              encoded_bytes = encoded.encode("ascii")
+              raw = base64.b64decode(encoded_bytes, validate=True)
+          except (UnicodeEncodeError, binascii.Error) as exc:
+              raise SystemExit(f"{variable} is not strict standard base64: {exc}")
+          if base64.b64encode(raw) != encoded_bytes:
+              raise SystemExit(f"{variable} is not canonical standard base64")
+          if not 1 <= len(raw) <= maximum:
+              raise SystemExit(f"{variable} decoded size is outside 1..{maximum}")
+          descriptor = os.open(destination, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+          with os.fdopen(descriptor, "wb") as handle:
+              handle.write(raw)
+          PY
+          }
+
           extract_exact_qurl_go_artifact() {
             python3 - "$1" "$2" <<'PY'
           import os
@@ -173,6 +228,7 @@ jobs:
           archive, destination = sys.argv[1:]
           expected = {
               "native-udp-sandbox.evidence.json",
+              "deployment-runtime-inputs.json",
               "pre_retirement_scenarios.json",
               "retired_lifecycle_surface.json",
               "sandbox-deployment-manifest.json",
@@ -241,7 +297,8 @@ jobs:
               (.connector_modules | type == "object" and
                 (keys | sort) == ["frp", "qurl_go"] and
                 all(.[]; type == "string" and test("^[0-9a-f]{40}$")) and
-                .frp == $root.repositories.frp) and
+                .frp == $root.repositories.frp and
+                .qurl_go == $root.repositories.qurl_go) and
               (.images | type == "object" and
                 (keys | sort) == ["nhp_cell0", "nhp_cell1", "nhp_hub", "qurl_connector", "qurl_reverse_tunnel_server", "qurl_service_authority", "qurl_service_cell0", "qurl_service_cell1"] and
                 all(.[]; type == "string" and test("^sha256:[0-9a-f]{64}$"))) and
@@ -249,7 +306,8 @@ jobs:
                 (keys | sort) == ["host", "port", "server_public_key_sha256"] and
                 (.host | valid_host) and .port == 62206 and
                 (.server_public_key_sha256 | test("^[0-9a-f]{64}$"))) and
-              (.cells | type == "array" and length >= 2 and
+              (.cells | type == "array" and length == 2 and
+                [.[].cell_id] == ["cell0", "cell1"] and
                 ([.[].cell_id] | unique | length) == length and
                 ([.[].host] | unique | length) == length and
                 ([.[].server_public_key_sha256] | unique | length) == length and
@@ -261,6 +319,56 @@ jobs:
                   (.cell_id | valid_cell_id) and (.host | valid_host) and .port == 62206 and
                   (.server_public_key_sha256 | test("^[0-9a-f]{64}$"))))
             ' "${manifest}" >/dev/null
+          }
+
+          validate_runtime_inputs() {
+            local runtime="$1"
+            local manifest="$2"
+            jq -e --slurpfile manifest "${manifest}" '
+              def valid_host:
+                length <= 253 and
+                test("^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*\\.nhp\\.layerv\\.(ai|xyz)$");
+              def valid_key:
+                test("^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]=$");
+              . as $runtime | $manifest[0] as $deployed |
+              type == "object" and
+              (keys | sort) == ["cells", "hub", "schema_version"] and
+              .schema_version == 1 and
+              (.hub | type == "object" and
+                (keys | sort) == ["host", "port", "server_public_key_b64"] and
+                (.host | valid_host) and .port == 62206 and
+                (.server_public_key_b64 | valid_key) and
+                .host == $deployed.hub.host and .port == $deployed.hub.port) and
+              (.cells | type == "array" and length == 2 and
+                [.[].cell_id] == ["cell0", "cell1"] and
+                all(.[];
+                  type == "object" and
+                  (keys | sort) == ["cell_id", "host", "port", "server_public_key_b64"] and
+                  (.host | valid_host) and .port == 62206 and
+                  (.server_public_key_b64 | valid_key)) and
+                all(.[];
+                  . as $runtime_cell |
+                  any($deployed.cells[];
+                    .cell_id == $runtime_cell.cell_id and
+                    .host == $runtime_cell.host and
+                    .port == $runtime_cell.port)))
+            ' "${runtime}" >/dev/null
+
+            while IFS=$'\t' read -r kind identifier key_b64 expected_sha256; do
+              local key_file="${RUNNER_TEMP}/runtime-${kind}-${identifier}.public-key"
+              printf '%s' "${key_b64}" | base64 --decode > "${key_file}"
+              test "$(wc -c < "${key_file}")" -eq 32
+              test "$(sha256sum "${key_file}" | cut -d' ' -f1)" = "${expected_sha256}"
+              rm -f "${key_file}"
+            done < <(
+              jq -r --slurpfile manifest "${manifest}" '
+                ["hub", "hub", .hub.server_public_key_b64, $manifest[0].hub.server_public_key_sha256],
+                (.cells[] as $cell |
+                  ["cell", $cell.cell_id, $cell.server_public_key_b64,
+                   ($manifest[0].cells[] | select(.cell_id == $cell.cell_id) | .server_public_key_sha256)])
+                | @tsv
+              ' "${runtime}"
+            )
           }
 
           verify_repository_commits() {
@@ -304,19 +412,88 @@ jobs:
             echo "::error::invalid dispatch correlation id"
             exit 1
           fi
+          if [[ ! "${QURL_GO_SANDBOX_DEPLOYMENT_PRODUCER_RUN_ID}" =~ ^[1-9][0-9]{0,19}$ ]] ||
+            [[ ! "${QURL_GO_SANDBOX_DEPLOYMENT_PRODUCER_RUN_ATTEMPT}" =~ ^[1-9][0-9]{0,9}$ ]] ||
+            [[ ! "${QURL_GO_SANDBOX_DEPLOYMENT_PRODUCER_HEAD_SHA}" =~ ^[0-9a-f]{40}$ ]] ||
+            [[ ! "${QURL_GO_SANDBOX_DEPLOYMENT_ARTIFACT_ID}" =~ ^[1-9][0-9]{0,19}$ ]] ||
+            [[ ! "${QURL_GO_SANDBOX_DEPLOYMENT_ARTIFACT_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::invalid deployment producer provenance"
+            exit 1
+          fi
+          [[ "${QURL_GO_SANDBOX_CONNECTOR_PROOF_RUN_ID}" =~ ^[1-9][0-9]{0,19}$ ]] || {
+            echo "::error::invalid same-phase Connector proof lineage"
+            exit 1
+          }
+          if [[ "${QURL_GO_SANDBOX_PROOF_PHASE}" == "pre_removal" ]]; then
+            test -z "${QURL_GO_SANDBOX_PRE_REMOVAL_RUN_ID}"
+          else
+            [[ "${QURL_GO_SANDBOX_PRE_REMOVAL_RUN_ID}" =~ ^[1-9][0-9]{0,19}$ ]] || {
+              echo "::error::invalid pre-removal qurl-go proof lineage"
+              exit 1
+            }
+          fi
+
+          producer_run="${RUNNER_TEMP}/deployment-producer-run.json"
+          producer_artifact="${RUNNER_TEMP}/deployment-producer-artifact.json"
+          gh api \
+            "repos/layervai/nhp/actions/runs/${QURL_GO_SANDBOX_DEPLOYMENT_PRODUCER_RUN_ID}" \
+            > "${producer_run}"
+          jq -e \
+            --arg run_id "${QURL_GO_SANDBOX_DEPLOYMENT_PRODUCER_RUN_ID}" \
+            --arg run_attempt "${QURL_GO_SANDBOX_DEPLOYMENT_PRODUCER_RUN_ATTEMPT}" \
+            --arg head_sha "${QURL_GO_SANDBOX_DEPLOYMENT_PRODUCER_HEAD_SHA}" '
+            (.id | tostring) == $run_id and
+            (.run_attempt | tostring) == $run_attempt and
+            .path == ".github/workflows/udp-proof-deployment-manifest.yml" and
+            .event == "workflow_dispatch" and .status == "completed" and
+            .conclusion == "success" and .head_branch == "main" and
+            .head_sha == $head_sha and
+            .repository.full_name == "layervai/nhp" and
+            .head_repository.full_name == "layervai/nhp"
+          ' "${producer_run}" >/dev/null
+          gh api \
+            "repos/layervai/nhp/actions/artifacts/${QURL_GO_SANDBOX_DEPLOYMENT_ARTIFACT_ID}" \
+            > "${producer_artifact}"
+          jq -e \
+            --arg artifact_id "${QURL_GO_SANDBOX_DEPLOYMENT_ARTIFACT_ID}" \
+            --arg artifact_name "udp-proof-deployment-manifest-${QURL_GO_SANDBOX_DEPLOYMENT_PRODUCER_RUN_ID}-${QURL_GO_SANDBOX_DEPLOYMENT_PRODUCER_RUN_ATTEMPT}" \
+            --arg artifact_digest "${QURL_GO_SANDBOX_DEPLOYMENT_ARTIFACT_DIGEST}" \
+            --arg run_id "${QURL_GO_SANDBOX_DEPLOYMENT_PRODUCER_RUN_ID}" \
+            --arg head_sha "${QURL_GO_SANDBOX_DEPLOYMENT_PRODUCER_HEAD_SHA}" '
+            (.id | tostring) == $artifact_id and .name == $artifact_name and
+            .digest == $artifact_digest and .expired == false and
+            (.size_in_bytes | type == "number" and . >= 1 and . <= 262144) and
+            (.workflow_run.id | tostring) == $run_id and
+            .workflow_run.head_branch == "main" and .workflow_run.head_sha == $head_sha
+          ' "${producer_artifact}" >/dev/null
+          producer_commit="${RUNNER_TEMP}/deployment-producer-commit.json"
+          gh api \
+            "repos/layervai/nhp/commits/${QURL_GO_SANDBOX_DEPLOYMENT_PRODUCER_HEAD_SHA}" \
+            > "${producer_commit}"
+          jq -e --arg sha "${QURL_GO_SANDBOX_DEPLOYMENT_PRODUCER_HEAD_SHA}" '
+            .sha == $sha and .commit.verification.verified == true
+          ' "${producer_commit}" >/dev/null
 
           manifest_raw="${RUNNER_TEMP}/sandbox-deployment-manifest.input.json"
           manifest_candidate="${RUNNER_TEMP}/sandbox-deployment-manifest.canonical.tmp"
           manifest="${RUNNER_TEMP}/sandbox-deployment-manifest.json"
+          runtime_raw="${RUNNER_TEMP}/deployment-runtime-inputs.input.json"
+          runtime_candidate="${RUNNER_TEMP}/deployment-runtime-inputs.canonical.tmp"
+          runtime="${RUNNER_TEMP}/deployment-runtime-inputs.json"
           inventory="tests/e2e/nativeudp/pre_retirement_scenarios.json"
           inventory_snapshot="${RUNNER_TEMP}/pre_retirement_scenarios.json"
           typed_evidence_contract="tests/e2e/nativeudp/typed_evidence_contract.json"
           retired_surface="tests/e2e/nativeudp/retired_lifecycle_surface.json"
           retired_surface_snapshot="${RUNNER_TEMP}/retired_lifecycle_surface.json"
-          trap 'rm -f "${manifest_raw}" "${manifest_candidate}"' EXIT
-          printf '%s' "${QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_B64}" | base64 --decode > "${manifest_raw}"
-          test -s "${manifest_raw}"
+          trap 'rm -f "${manifest_raw}" "${manifest_candidate}" "${runtime_raw}" "${runtime_candidate}"' EXIT
+          decode_canonical_base64 \
+            QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_B64 "${manifest_raw}" 32768
           canonicalize_json "${manifest_raw}" "${manifest_candidate}"
+          cmp "${manifest_raw}" "${manifest_candidate}"
+          decode_canonical_base64 \
+            QURL_GO_SANDBOX_DEPLOYMENT_RUNTIME_INPUTS_B64 "${runtime_raw}" 8192
+          canonicalize_json "${runtime_raw}" "${runtime_candidate}"
+          cmp "${runtime_raw}" "${runtime_candidate}"
 
           retirement_state="http_lifecycle_present"
           if [[ "${QURL_GO_SANDBOX_PROOF_PHASE}" == "post_removal" ]]; then
@@ -328,15 +505,10 @@ jobs:
             "${retirement_state}" \
             "${GITHUB_SHA}"
 
-          hub_key_sha256="$(printf '%s' "${QURL_GO_SANDBOX_HUB_SERVER_PUBLIC_KEY_B64}" | base64 --decode | sha256sum | cut -d' ' -f1)"
-          jq -e \
-            --arg host "${QURL_GO_SANDBOX_HUB_HOST}" \
-            --argjson port "${QURL_GO_SANDBOX_HUB_PORT}" \
-            --arg key "${hub_key_sha256}" \
-            '.hub.host == $host and .hub.port == $port and .hub.server_public_key_sha256 == $key' \
-            "${manifest_candidate}" >/dev/null
+          validate_runtime_inputs "${runtime_candidate}" "${manifest_candidate}"
 
           mv "${manifest_candidate}" "${manifest}"
+          mv "${runtime_candidate}" "${runtime}"
           verify_repository_commits "${manifest}"
           candidate_pr="${RUNNER_TEMP}/qurl-go-pr-93.json"
           gh api "repos/${GITHUB_REPOSITORY}/pulls/93" > "${candidate_pr}"
@@ -352,8 +524,10 @@ jobs:
           ' "${candidate_commit}" >/dev/null
           canonicalize_json "${inventory}" "${inventory_snapshot}"
           canonicalize_json "${retired_surface}" "${retired_surface_snapshot}"
-          chmod 0444 "${manifest}" "${inventory_snapshot}" "${retired_surface_snapshot}"
+          chmod 0444 \
+            "${manifest}" "${runtime}" "${inventory_snapshot}" "${retired_surface_snapshot}"
           deployment_manifest_sha256="$(sha256sum "${manifest}" | cut -d' ' -f1)"
+          deployment_runtime_inputs_sha256="$(sha256sum "${runtime}" | cut -d' ' -f1)"
           inventory_sha256="$(sha256sum "${inventory_snapshot}" | cut -d' ' -f1)"
           inventory_mapping_sha256="$(jq -cS -j '{schema_version, gate, proof_phases, all_scenarios_required, scenarios: ([.scenarios[] | {id, owner, status, test_name, requirement}] | sort_by(.id))}' "${inventory}" | sha256sum | cut -d' ' -f1)"
           test "${inventory_mapping_sha256}" = "f5aaef5b840c461ed91530fe6e3b820f47476eaa0f5da327db48c2213e60176c"
@@ -366,6 +540,11 @@ jobs:
           {
             echo "QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_PATH=${manifest}"
             echo "QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_SHA256=${deployment_manifest_sha256}"
+            echo "QURL_GO_SANDBOX_DEPLOYMENT_RUNTIME_INPUTS_PATH=${runtime}"
+            echo "QURL_GO_SANDBOX_DEPLOYMENT_RUNTIME_INPUTS_SHA256=${deployment_runtime_inputs_sha256}"
+            echo "QURL_GO_SANDBOX_HUB_HOST=$(jq -r '.hub.host' "${runtime}")"
+            echo "QURL_GO_SANDBOX_HUB_PORT=$(jq -r '.hub.port' "${runtime}")"
+            echo "QURL_GO_SANDBOX_HUB_SERVER_PUBLIC_KEY_B64=$(jq -r '.hub.server_public_key_b64' "${runtime}")"
             echo "QURL_GO_SANDBOX_INVENTORY_PATH=${inventory_snapshot}"
             echo "QURL_GO_SANDBOX_INVENTORY_SHA256=${inventory_sha256}"
             echo "QURL_GO_SANDBOX_INVENTORY_MAPPING_SHA256=${inventory_mapping_sha256}"
@@ -415,23 +594,29 @@ jobs:
 
           pre_evidence="${pre_dir}/artifact/native-udp-sandbox.evidence.json"
           pre_manifest="${pre_dir}/artifact/sandbox-deployment-manifest.json"
+          pre_runtime="${pre_dir}/artifact/deployment-runtime-inputs.json"
           pre_inventory="${pre_dir}/artifact/pre_retirement_scenarios.json"
           pre_retired_surface="${pre_dir}/artifact/retired_lifecycle_surface.json"
 
           pre_manifest_canonical="${pre_dir}/pre-manifest.canonical.json"
+          pre_runtime_canonical="${pre_dir}/pre-runtime.canonical.json"
           pre_evidence_canonical="${pre_dir}/pre-evidence.canonical.json"
           pre_inventory_canonical="${pre_dir}/pre-inventory.canonical.json"
           pre_retired_surface_canonical="${pre_dir}/pre-retired-surface.canonical.json"
           canonicalize_json "${pre_manifest}" "${pre_manifest_canonical}"
+          canonicalize_json "${pre_runtime}" "${pre_runtime_canonical}"
           canonicalize_json "${pre_evidence}" "${pre_evidence_canonical}"
           canonicalize_json "${pre_inventory}" "${pre_inventory_canonical}"
           canonicalize_json "${pre_retired_surface}" "${pre_retired_surface_canonical}"
           cmp -s "${pre_manifest}" "${pre_manifest_canonical}"
+          cmp -s "${pre_runtime}" "${pre_runtime_canonical}"
           cmp -s "${pre_evidence}" "${pre_evidence_canonical}"
           cmp -s "${pre_inventory}" "${pre_inventory_canonical}"
           cmp -s "${pre_retired_surface}" "${pre_retired_surface_canonical}"
           validate_manifest "${pre_manifest}" "pre_removal" "http_lifecycle_present" "${pre_head_sha}"
+          validate_runtime_inputs "${pre_runtime}" "${pre_manifest}"
           verify_repository_commits "${pre_manifest}"
+          pre_runtime_sha256="$(sha256sum "${pre_runtime}" | cut -d' ' -f1)"
 
           jq -e \
             --slurpfile deployment "${pre_manifest}" \
@@ -444,6 +629,7 @@ jobs:
             --arg harness "${proof_harness_sha256}" \
             --arg inventory_sha "${inventory_sha256}" \
             --arg inventory_mapping_sha "${inventory_mapping_sha256}" \
+            --arg runtime_sha "${pre_runtime_sha256}" \
             --arg retired_surface_sha "${retired_lifecycle_surface_sha256}" '
             def valid_counter:
               type == "number" and isfinite and . == floor and . >= 1 and . <= 9007199254740991;
@@ -470,7 +656,7 @@ jobs:
                ($right_lease[0] == $left_lease[0] and $right_lease[1] >= $left_lease[1]));
             . as $evidence | $deployment[0] as $deployed | $scenarios[0] as $inventory |
             type == "object" and
-            (keys | sort) == ["commit_sha", "connector_attestation_sha256", "connector_proof_run_id", "counts", "deployment_manifest_sha256", "dispatch_correlation_id", "enforcement_outcome", "gate_passed", "inputs_unchanged", "inventory_mapping_sha256", "inventory_sha256", "nhp_controller_run_attempt", "nhp_controller_run_id", "phase", "pre_removal_deployment_sha256", "pre_removal_evidence_sha256", "pre_removal_run_id", "proof_harness_sha256", "provenance", "provenance_valid", "repository", "retired_lifecycle_surface_sha256", "run_attempt", "run_id", "scenario_contract_sha256", "scenario_results", "schema_version", "strict_outcome", "two_cell_provenance", "typed_evidence", "typed_evidence_complete", "typed_evidence_contract_sha256"] and
+            (keys | sort) == ["commit_sha", "connector_attestation_sha256", "connector_proof_run_id", "counts", "deployment_manifest_sha256", "deployment_producer", "deployment_runtime_inputs_sha256", "dispatch_correlation_id", "enforcement_outcome", "gate_passed", "inputs_unchanged", "inventory_mapping_sha256", "inventory_sha256", "nhp_controller_run_attempt", "nhp_controller_run_id", "phase", "pre_removal_deployment_sha256", "pre_removal_evidence_sha256", "pre_removal_run_id", "proof_harness_sha256", "provenance", "provenance_valid", "repository", "retired_lifecycle_surface_sha256", "run_attempt", "run_id", "scenario_contract_sha256", "scenario_results", "schema_version", "strict_outcome", "two_cell_provenance", "typed_evidence", "typed_evidence_complete", "typed_evidence_contract_sha256"] and
             .schema_version == 1 and .phase == "pre_removal" and .gate_passed == true and
             .repository == $repository and .run_id == $run_id and .run_attempt == $run_attempt and
             .commit_sha == $commit_sha and .strict_outcome == "success" and .enforcement_outcome == "success" and
@@ -479,6 +665,16 @@ jobs:
             (.nhp_controller_run_attempt | type == "string" and test("^[1-9][0-9]{0,9}$")) and
             (. as $e | $e.dispatch_correlation_id | type == "string" and
               test("^nhp-" + $e.nhp_controller_run_id + "-" + $e.nhp_controller_run_attempt + "-qurl_go-pre_removal-[0-9a-f]{32}$")) and
+            (.deployment_producer |
+              (keys | sort) == ["artifact_digest", "artifact_id", "head_sha", "repository", "run_attempt", "run_id", "workflow_path"] and
+              .repository == "layervai/nhp" and
+              .workflow_path == ".github/workflows/udp-proof-deployment-manifest.yml" and
+              (.run_id | test("^[1-9][0-9]{0,19}$")) and
+              (.run_attempt | test("^[1-9][0-9]{0,9}$")) and
+              (.head_sha | test("^[0-9a-f]{40}$")) and
+              (.artifact_id | test("^[1-9][0-9]{0,19}$")) and
+              (.artifact_digest | test("^sha256:[0-9a-f]{64}$"))) and
+            .deployment_runtime_inputs_sha256 == $runtime_sha and
             .pre_removal_run_id == null and .pre_removal_evidence_sha256 == null and .pre_removal_deployment_sha256 == null and
             ($inventory | type == "object" and
               (keys | sort) == ["all_scenarios_required", "gate", "proof_phases", "scenarios", "schema_version"] and
@@ -662,6 +858,7 @@ jobs:
 
           archive, destination = sys.argv[1:]
           expected = {
+              "deployment-runtime-inputs.json",
               "sandbox-deployment-manifest.json",
               "strict-proof-scenarios.json",
               "strict-sandbox-proof.evidence.json",
@@ -768,18 +965,23 @@ jobs:
 
           connector_evidence="${connector_dir}/artifact/strict-sandbox-proof.evidence.json"
           connector_manifest="${connector_dir}/artifact/sandbox-deployment-manifest.json"
+          connector_runtime="${connector_dir}/artifact/deployment-runtime-inputs.json"
           connector_inventory="${connector_dir}/artifact/strict-proof-scenarios.json"
           connector_expected_scenarios="tests/e2e/nativeudp/connector_strict_scenario_names.json"
           canonicalize_json "${connector_evidence}" "${connector_dir}/evidence.canonical.json"
           canonicalize_json "${connector_manifest}" "${connector_dir}/manifest.canonical.json"
+          canonicalize_json "${connector_runtime}" "${connector_dir}/runtime.canonical.json"
           canonicalize_json "${connector_inventory}" "${connector_dir}/inventory.canonical.json"
           cmp -s "${connector_evidence}" "${connector_dir}/evidence.canonical.json"
           cmp -s "${connector_manifest}" "${connector_dir}/manifest.canonical.json"
+          cmp -s "${connector_runtime}" "${connector_dir}/runtime.canonical.json"
           cmp -s "${connector_inventory}" "${connector_dir}/inventory.canonical.json"
           cmp -s "${connector_manifest}" "${QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_PATH}"
+          cmp -s "${connector_runtime}" "${QURL_GO_SANDBOX_DEPLOYMENT_RUNTIME_INPUTS_PATH}"
 
           connector_evidence_sha256="$(sha256sum "${connector_evidence}" | cut -d' ' -f1)"
           connector_manifest_sha256="$(sha256sum "${connector_manifest}" | cut -d' ' -f1)"
+          connector_runtime_sha256="$(sha256sum "${connector_runtime}" | cut -d' ' -f1)"
           connector_inventory_sha256="$(sha256sum "${connector_inventory}" | cut -d' ' -f1)"
           connector_scenario_contract_sha256="$(connector_scenario_contract_sha256 "${connector_inventory}")"
 
@@ -820,6 +1022,12 @@ jobs:
             --arg run_id "${QURL_GO_SANDBOX_CONNECTOR_PROOF_RUN_ID}" \
             --arg run_attempt "${connector_attempt}" \
             --arg deployment_sha256 "${connector_manifest_sha256}" \
+            --arg runtime_sha256 "${connector_runtime_sha256}" \
+            --arg producer_run_id "${QURL_GO_SANDBOX_DEPLOYMENT_PRODUCER_RUN_ID}" \
+            --arg producer_run_attempt "${QURL_GO_SANDBOX_DEPLOYMENT_PRODUCER_RUN_ATTEMPT}" \
+            --arg producer_head_sha "${QURL_GO_SANDBOX_DEPLOYMENT_PRODUCER_HEAD_SHA}" \
+            --arg artifact_id "${QURL_GO_SANDBOX_DEPLOYMENT_ARTIFACT_ID}" \
+            --arg artifact_digest "${QURL_GO_SANDBOX_DEPLOYMENT_ARTIFACT_DIGEST}" \
             --arg inventory_sha256 "${connector_inventory_sha256}" \
             --arg scenario_contract_sha256 "${connector_scenario_contract_sha256}" \
             --argjson implemented_count "${connector_implemented_count}" '
@@ -848,7 +1056,7 @@ jobs:
                ($right_lease[0] == $left_lease[0] and $right_lease[1] >= $left_lease[1]));
             . as $evidence | $inventory[0] as $scenarios | $deployment[0] as $deployed |
             type == "object" and
-            (keys | sort) == ["commit_sha", "counts", "deployment_manifest_sha256", "dispatch_correlation_id", "enforcement_outcome", "gate_passed", "input_outcome", "inputs_unchanged", "inventory_sha256", "nhp_controller_run_attempt", "nhp_controller_run_id", "phase", "pre_removal_deployment_sha256", "pre_removal_evidence_sha256", "pre_removal_run_id", "proof_harness_sha256", "provenance", "provenance_valid", "repository", "run_attempt", "run_id", "scenario_contract_sha256", "scenario_results", "schema_version", "two_cell_provenance", "typed_evidence", "typed_evidence_complete", "typed_evidence_contract_sha256"] and
+            (keys | sort) == ["commit_sha", "counts", "deployment_manifest_sha256", "deployment_producer", "deployment_runtime_inputs_sha256", "dispatch_correlation_id", "enforcement_outcome", "gate_passed", "input_outcome", "inputs_unchanged", "inventory_sha256", "nhp_controller_run_attempt", "nhp_controller_run_id", "phase", "pre_removal_deployment_sha256", "pre_removal_evidence_sha256", "pre_removal_run_id", "proof_harness_sha256", "provenance", "provenance_valid", "repository", "run_attempt", "run_id", "scenario_contract_sha256", "scenario_results", "schema_version", "two_cell_provenance", "typed_evidence", "typed_evidence_complete", "typed_evidence_contract_sha256"] and
             .schema_version == 1 and .phase == $phase and .repository == $repository and
             .commit_sha == $commit_sha and .run_id == $run_id and .run_attempt == $run_attempt and
             .input_outcome == "success" and .enforcement_outcome == "success" and
@@ -857,7 +1065,17 @@ jobs:
             (.nhp_controller_run_attempt | type == "string" and test("^[1-9][0-9]{0,9}$")) and
             (. as $e | $e.dispatch_correlation_id | type == "string" and
               test("^nhp-" + $e.nhp_controller_run_id + "-" + $e.nhp_controller_run_attempt + "-connector-" + $e.phase + "-[0-9a-f]{32}$")) and
+            .deployment_producer == {
+              repository: "layervai/nhp",
+              workflow_path: ".github/workflows/udp-proof-deployment-manifest.yml",
+              run_id: $producer_run_id,
+              run_attempt: $producer_run_attempt,
+              head_sha: $producer_head_sha,
+              artifact_id: $artifact_id,
+              artifact_digest: $artifact_digest
+            } and
             .deployment_manifest_sha256 == $deployment_sha256 and
+            .deployment_runtime_inputs_sha256 == $runtime_sha256 and
             .inventory_sha256 == $inventory_sha256 and
             .scenario_contract_sha256 == $scenario_contract_sha256 and
             .typed_evidence_contract_sha256 == "b8246482ec1ca7ab3aaba074540d5f3f151d7ee752dd8a166b552b2fe46f54ff" and
@@ -1128,6 +1346,7 @@ jobs:
           retired_surface_source="tests/e2e/nativeudp/retired_lifecycle_surface.json"
           retired_surface="${QURL_GO_SANDBOX_RETIRED_LIFECYCLE_SURFACE_PATH:-${retired_surface_source}}"
           deployment="${RUNNER_TEMP}/sandbox-deployment-manifest.json"
+          deployment_runtime="${RUNNER_TEMP}/deployment-runtime-inputs.json"
           provenance_path="${RUNNER_TEMP}/qurl-go-native-udp/provenance.json"
           connector_attestation_path="${RUNNER_TEMP}/connector-proof-attestation.json"
           typed_evidence_contract="tests/e2e/nativeudp/typed_evidence_contract.json"
@@ -1139,12 +1358,18 @@ jobs:
           if [[ "${QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ID}" =~ ^[1-9][0-9]{0,19}$ ]] &&
             [[ "${QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ATTEMPT}" =~ ^[1-9][0-9]{0,9}$ ]] &&
             [[ "${QURL_GO_SANDBOX_DISPATCH_CORRELATION_ID}" =~ ^nhp-${QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ID}-${QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ATTEMPT}-qurl_go-${QURL_GO_SANDBOX_PROOF_PHASE}-[0-9a-f]{32}$ ]] &&
+            [[ "${QURL_GO_SANDBOX_DEPLOYMENT_PRODUCER_RUN_ID}" =~ ^[1-9][0-9]{0,19}$ ]] &&
+            [[ "${QURL_GO_SANDBOX_DEPLOYMENT_PRODUCER_RUN_ATTEMPT}" =~ ^[1-9][0-9]{0,9}$ ]] &&
+            [[ "${QURL_GO_SANDBOX_DEPLOYMENT_PRODUCER_HEAD_SHA}" =~ ^[0-9a-f]{40}$ ]] &&
+            [[ "${QURL_GO_SANDBOX_DEPLOYMENT_ARTIFACT_ID}" =~ ^[1-9][0-9]{0,19}$ ]] &&
+            [[ "${QURL_GO_SANDBOX_DEPLOYMENT_ARTIFACT_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]] &&
             [[ "${QURL_GO_SANDBOX_CONNECTOR_PROOF_RUN_ID}" =~ ^[1-9][0-9]*$ ]] &&
             [[ "${QURL_GO_SANDBOX_CONNECTOR_ATTESTATION_SHA256:-}" =~ ^[0-9a-f]{64}$ ]] &&
-            [[ -n "${QURL_GO_SANDBOX_INVENTORY_SHA256:-}" && -n "${QURL_GO_SANDBOX_INVENTORY_MAPPING_SHA256:-}" && -n "${QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_SHA256:-}" && -n "${QURL_GO_SANDBOX_PROOF_HARNESS_SHA256:-}" && -n "${QURL_GO_SANDBOX_SCENARIO_CONTRACT_SHA256:-}" && -n "${QURL_GO_SANDBOX_TYPED_EVIDENCE_CONTRACT_SHA256:-}" && -n "${QURL_GO_SANDBOX_RETIRED_LIFECYCLE_SURFACE_SHA256:-}" && -s "${inventory_source}" && -s "${inventory}" && -s "${retired_surface_source}" && -s "${retired_surface}" && -s "${deployment}" && -s "${connector_attestation_path}" ]] &&
+            [[ -n "${QURL_GO_SANDBOX_INVENTORY_SHA256:-}" && -n "${QURL_GO_SANDBOX_INVENTORY_MAPPING_SHA256:-}" && -n "${QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_SHA256:-}" && -n "${QURL_GO_SANDBOX_DEPLOYMENT_RUNTIME_INPUTS_SHA256:-}" && -n "${QURL_GO_SANDBOX_PROOF_HARNESS_SHA256:-}" && -n "${QURL_GO_SANDBOX_SCENARIO_CONTRACT_SHA256:-}" && -n "${QURL_GO_SANDBOX_TYPED_EVIDENCE_CONTRACT_SHA256:-}" && -n "${QURL_GO_SANDBOX_RETIRED_LIFECYCLE_SURFACE_SHA256:-}" && -s "${inventory_source}" && -s "${inventory}" && -s "${retired_surface_source}" && -s "${retired_surface}" && -s "${deployment}" && -s "${deployment_runtime}" && -s "${connector_attestation_path}" ]] &&
             [[ "$(jq -cS -j '.' "${inventory_source}" | sha256sum | cut -d' ' -f1)" == "${QURL_GO_SANDBOX_INVENTORY_SHA256}" ]] &&
             [[ "$(sha256sum "${inventory}" | cut -d' ' -f1)" == "${QURL_GO_SANDBOX_INVENTORY_SHA256}" ]] &&
             [[ "$(sha256sum "${deployment}" | cut -d' ' -f1)" == "${QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_SHA256}" ]] &&
+            [[ "$(sha256sum "${deployment_runtime}" | cut -d' ' -f1)" == "${QURL_GO_SANDBOX_DEPLOYMENT_RUNTIME_INPUTS_SHA256}" ]] &&
             [[ "$(sha256sum "${connector_attestation_path}" | cut -d' ' -f1)" == "${QURL_GO_SANDBOX_CONNECTOR_ATTESTATION_SHA256}" ]] &&
             [[ "$(compute_proof_harness_sha256)" == "${QURL_GO_SANDBOX_PROOF_HARNESS_SHA256}" ]] &&
             [[ "$(jq -cS -j '{schema_version, gate, proof_phases, all_scenarios_required, scenarios: ([.scenarios[] | {id, owner, status, test_name, requirement}] | sort_by(.id))}' "${inventory}" | sha256sum | cut -d' ' -f1)" == "${QURL_GO_SANDBOX_INVENTORY_MAPPING_SHA256}" ]] &&
@@ -1280,6 +1505,11 @@ jobs:
             --arg nhp_controller_run_id "${QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ID}" \
             --arg nhp_controller_run_attempt "${QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ATTEMPT}" \
             --arg phase "${QURL_GO_SANDBOX_PROOF_PHASE}" \
+            --arg deployment_producer_run_id "${QURL_GO_SANDBOX_DEPLOYMENT_PRODUCER_RUN_ID}" \
+            --arg deployment_producer_run_attempt "${QURL_GO_SANDBOX_DEPLOYMENT_PRODUCER_RUN_ATTEMPT}" \
+            --arg deployment_producer_head_sha "${QURL_GO_SANDBOX_DEPLOYMENT_PRODUCER_HEAD_SHA}" \
+            --arg deployment_artifact_id "${QURL_GO_SANDBOX_DEPLOYMENT_ARTIFACT_ID}" \
+            --arg deployment_artifact_digest "${QURL_GO_SANDBOX_DEPLOYMENT_ARTIFACT_DIGEST}" \
             --arg connector_proof_run_id "${QURL_GO_SANDBOX_CONNECTOR_PROOF_RUN_ID}" \
             --arg connector_attestation_sha256 "${QURL_GO_SANDBOX_CONNECTOR_ATTESTATION_SHA256:-}" \
             --arg pre_removal_run_id "${QURL_GO_SANDBOX_PRE_REMOVAL_RUN_ID}" \
@@ -1288,6 +1518,7 @@ jobs:
             --arg strict_outcome "${STRICT_OUTCOME}" \
             --arg enforcement_outcome "${ENFORCEMENT_OUTCOME}" \
             --arg deployment_manifest_sha256 "${QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_SHA256:-}" \
+            --arg deployment_runtime_inputs_sha256 "${QURL_GO_SANDBOX_DEPLOYMENT_RUNTIME_INPUTS_SHA256:-}" \
             --arg inventory_sha256 "${QURL_GO_SANDBOX_INVENTORY_SHA256:-}" \
             --arg inventory_mapping_sha256 "${QURL_GO_SANDBOX_INVENTORY_MAPPING_SHA256:-}" \
             --arg scenario_contract_sha256 "${QURL_GO_SANDBOX_SCENARIO_CONTRACT_SHA256:-}" \
@@ -1307,7 +1538,7 @@ jobs:
             --argjson typed_evidence_complete "${typed_evidence_complete}" \
             --argjson typed_evidence "${typed_evidence}" \
             --argjson scenario_results "${scenario_results}" \
-            '{schema_version: 1, phase: $phase, repository: $repository, commit_sha: $commit_sha, run_id: $run_id, run_attempt: $run_attempt, dispatch_correlation_id: $dispatch_correlation_id, nhp_controller_run_id: $nhp_controller_run_id, nhp_controller_run_attempt: $nhp_controller_run_attempt, connector_proof_run_id: $connector_proof_run_id, connector_attestation_sha256: (if $connector_attestation_sha256 == "" then null else $connector_attestation_sha256 end), pre_removal_run_id: (if $pre_removal_run_id == "" then null else $pre_removal_run_id end), pre_removal_evidence_sha256: (if $pre_removal_evidence_sha256 == "" then null else $pre_removal_evidence_sha256 end), pre_removal_deployment_sha256: (if $pre_removal_deployment_sha256 == "" then null else $pre_removal_deployment_sha256 end), deployment_manifest_sha256: $deployment_manifest_sha256, inventory_sha256: $inventory_sha256, inventory_mapping_sha256: $inventory_mapping_sha256, scenario_contract_sha256: $scenario_contract_sha256, retired_lifecycle_surface_sha256: $retired_lifecycle_surface_sha256, typed_evidence_contract_sha256: $typed_evidence_contract_sha256, proof_harness_sha256: $proof_harness_sha256, strict_outcome: $strict_outcome, enforcement_outcome: $enforcement_outcome, inputs_unchanged: $inputs_unchanged, gate_passed: $gate_passed, counts: {implemented: $implemented_count, blocking: $blocking_count, failures: $failure_count, skips: $skip_count, exact_passes: $exact_pass_count}, provenance_valid: $provenance_valid, two_cell_provenance: $two_cell_provenance, provenance: $provenance, typed_evidence_complete: $typed_evidence_complete, typed_evidence: $typed_evidence, scenario_results: $scenario_results}' \
+            '{schema_version: 1, phase: $phase, repository: $repository, commit_sha: $commit_sha, run_id: $run_id, run_attempt: $run_attempt, dispatch_correlation_id: $dispatch_correlation_id, nhp_controller_run_id: $nhp_controller_run_id, nhp_controller_run_attempt: $nhp_controller_run_attempt, deployment_producer: {repository: "layervai/nhp", workflow_path: ".github/workflows/udp-proof-deployment-manifest.yml", run_id: $deployment_producer_run_id, run_attempt: $deployment_producer_run_attempt, head_sha: $deployment_producer_head_sha, artifact_id: $deployment_artifact_id, artifact_digest: $deployment_artifact_digest}, connector_proof_run_id: $connector_proof_run_id, connector_attestation_sha256: (if $connector_attestation_sha256 == "" then null else $connector_attestation_sha256 end), pre_removal_run_id: (if $pre_removal_run_id == "" then null else $pre_removal_run_id end), pre_removal_evidence_sha256: (if $pre_removal_evidence_sha256 == "" then null else $pre_removal_evidence_sha256 end), pre_removal_deployment_sha256: (if $pre_removal_deployment_sha256 == "" then null else $pre_removal_deployment_sha256 end), deployment_manifest_sha256: $deployment_manifest_sha256, deployment_runtime_inputs_sha256: $deployment_runtime_inputs_sha256, inventory_sha256: $inventory_sha256, inventory_mapping_sha256: $inventory_mapping_sha256, scenario_contract_sha256: $scenario_contract_sha256, retired_lifecycle_surface_sha256: $retired_lifecycle_surface_sha256, typed_evidence_contract_sha256: $typed_evidence_contract_sha256, proof_harness_sha256: $proof_harness_sha256, strict_outcome: $strict_outcome, enforcement_outcome: $enforcement_outcome, inputs_unchanged: $inputs_unchanged, gate_passed: $gate_passed, counts: {implemented: $implemented_count, blocking: $blocking_count, failures: $failure_count, skips: $skip_count, exact_passes: $exact_pass_count}, provenance_valid: $provenance_valid, two_cell_provenance: $two_cell_provenance, provenance: $provenance, typed_evidence_complete: $typed_evidence_complete, typed_evidence: $typed_evidence, scenario_results: $scenario_results}' \
             > "${evidence}"
 
       - name: Upload non-secret JSON evidence
@@ -1318,6 +1549,7 @@ jobs:
           path: |
             ${{ runner.temp }}/native-udp-sandbox.evidence.json
             ${{ runner.temp }}/sandbox-deployment-manifest.json
+            ${{ runner.temp }}/deployment-runtime-inputs.json
             ${{ runner.temp }}/pre_retirement_scenarios.json
             ${{ runner.temp }}/retired_lifecycle_surface.json
           if-no-files-found: error
@@ -1339,6 +1571,16 @@ jobs:
             (.nhp_controller_run_attempt | type == "string" and test("^[1-9][0-9]{0,9}$")) and
             (. as $e | $e.dispatch_correlation_id | type == "string" and
               test("^nhp-" + $e.nhp_controller_run_id + "-" + $e.nhp_controller_run_attempt + "-qurl_go-" + $e.phase + "-[0-9a-f]{32}$")) and
+            (.deployment_producer |
+              (keys | sort) == ["artifact_digest", "artifact_id", "head_sha", "repository", "run_attempt", "run_id", "workflow_path"] and
+              .repository == "layervai/nhp" and
+              .workflow_path == ".github/workflows/udp-proof-deployment-manifest.yml" and
+              (.run_id | test("^[1-9][0-9]{0,19}$")) and
+              (.run_attempt | test("^[1-9][0-9]{0,9}$")) and
+              (.head_sha | test("^[0-9a-f]{40}$")) and
+              (.artifact_id | test("^[1-9][0-9]{0,19}$")) and
+              (.artifact_digest | test("^sha256:[0-9a-f]{64}$"))) and
+            (.deployment_runtime_inputs_sha256 | test("^[0-9a-f]{64}$")) and
             .counts.implemented == 68 and
             .counts.blocking == 0 and .counts.failures == 0 and .counts.skips == 0 and
             .counts.exact_passes == .counts.implemented and

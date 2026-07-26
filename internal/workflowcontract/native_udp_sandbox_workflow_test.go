@@ -50,6 +50,12 @@ func TestNativeUDPSandboxWorkflowIsAttendedStrictAndEvidenceBearing(t *testing.T
 		"dispatch_correlation_id:",
 		"proof_phase:",
 		"deployment_manifest_b64:",
+		"deployment_runtime_inputs_b64:",
+		"deployment_producer_run_id:",
+		"deployment_producer_run_attempt:",
+		"deployment_producer_head_sha:",
+		"deployment_artifact_id:",
+		"deployment_artifact_digest:",
 		"connector_proof_run_id:",
 		"nhp_controller_run_id:",
 		"nhp_controller_run_attempt:",
@@ -112,6 +118,12 @@ func TestNativeUDPSandboxWorkflowIsAttendedStrictAndEvidenceBearing(t *testing.T
 		"QURL_GO_SANDBOX_CONNECTOR_ATTESTATION_PATH",
 		"QURL_GO_SANDBOX_CONNECTOR_ATTESTATION_SHA256",
 		"base64 --decode",
+		"decode_canonical_base64()",
+		"validate_runtime_inputs()",
+		"deployment_runtime_inputs_sha256",
+		`repos/layervai/nhp/actions/runs/${QURL_GO_SANDBOX_DEPLOYMENT_PRODUCER_RUN_ID}`,
+		`repos/layervai/nhp/actions/artifacts/${QURL_GO_SANDBOX_DEPLOYMENT_ARTIFACT_ID}`,
+		`workflow_path: ".github/workflows/udp-proof-deployment-manifest.yml"`,
 		"http_lifecycle_present",
 		"http_lifecycle_removed",
 		"actions/workflows/native-udp-sandbox.yml",
@@ -180,6 +192,9 @@ func TestNativeUDPSandboxWorkflowIsAttendedStrictAndEvidenceBearing(t *testing.T
 		"runs-on: ubuntu-latest",
 		"labels: self-hosted",
 		"QURL_GO_SANDBOX_ATTESTATION_TOKEN",
+		"${{ vars.QURL_GO_SANDBOX_HUB_HOST }}",
+		"${{ vars.QURL_GO_SANDBOX_HUB_PORT }}",
+		"${{ vars.QURL_GO_SANDBOX_HUB_SERVER_PUBLIC_KEY_B64 }}",
 		" | tee ",
 		"test \"${pre_head_sha}\" = \"${GITHUB_SHA}\"",
 		"pre_protected=\"$(jq -cS '{repositories: {frp: .repositories.frp, qurl_connector: .repositories.qurl_connector, qurl_go:",
@@ -416,6 +431,22 @@ func TestNativeUDPSandboxVerifiesManifestBytes(t *testing.T) {
 	if outputs["QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_SHA256"] != sha256Hex(manifest) {
 		t.Fatalf("deployment hash = %q, want %q", outputs["QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_SHA256"], sha256Hex(manifest))
 	}
+	runtime := deploymentRuntimeInputsBytes(t, manifest)
+	publishedRuntime, err := os.ReadFile(filepath.Join(runnerTemp, "deployment-runtime-inputs.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(publishedRuntime, runtime) {
+		t.Fatalf("published runtime sidecar is not the canonical submitted sidecar:\n got %s\nwant %s", publishedRuntime, runtime)
+	}
+	if outputs["QURL_GO_SANDBOX_DEPLOYMENT_RUNTIME_INPUTS_SHA256"] != sha256Hex(runtime) {
+		t.Fatalf("runtime sidecar hash = %q, want %q", outputs["QURL_GO_SANDBOX_DEPLOYMENT_RUNTIME_INPUTS_SHA256"], sha256Hex(runtime))
+	}
+	if info, err := os.Stat(filepath.Join(runnerTemp, "deployment-runtime-inputs.json")); err != nil {
+		t.Fatal(err)
+	} else if info.Mode().Perm() != 0o444 {
+		t.Fatalf("runtime sidecar mode = %o, want 444", info.Mode().Perm())
+	}
 	if outputs["QURL_GO_SANDBOX_PROOF_HARNESS_SHA256"] != runProofHarness(t, fixture.repository) {
 		t.Fatalf("workflow did not bind the fixture's complete proof harness: %v", outputs)
 	}
@@ -501,6 +532,58 @@ func TestNativeUDPSandboxRejectsMalformedDeploymentManifests(t *testing.T) {
 	}
 }
 
+func TestNativeUDPSandboxRejectsUnboundRuntimeAndProducerInputs(t *testing.T) {
+	fixture := newNativeUDPProofFixture(t)
+	manifest := deploymentManifestBytes(t, "pre_removal", fixture.postSHA)
+	validRuntime := deploymentRuntimeInputsBytes(t, manifest)
+
+	mutateRuntime := func(mutate func(map[string]any)) string {
+		t.Helper()
+		var runtime map[string]any
+		if err := json.Unmarshal(validRuntime, &runtime); err != nil {
+			t.Fatal(err)
+		}
+		mutate(runtime)
+		encoded, err := json.Marshal(runtime)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return base64.StdEncoding.EncodeToString(encoded)
+	}
+
+	tests := map[string]map[string]string{
+		"noncanonical runtime JSON": {
+			"QURL_GO_SANDBOX_DEPLOYMENT_RUNTIME_INPUTS_B64": base64.StdEncoding.EncodeToString(append(validRuntime, '\n')),
+		},
+		"runtime Hub key does not match manifest": {
+			"QURL_GO_SANDBOX_DEPLOYMENT_RUNTIME_INPUTS_B64": mutateRuntime(func(runtime map[string]any) {
+				runtime["hub"].(map[string]any)["server_public_key_b64"] =
+					base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x44}, 32))
+			}),
+		},
+		"runtime cell order differs from producer": {
+			"QURL_GO_SANDBOX_DEPLOYMENT_RUNTIME_INPUTS_B64": mutateRuntime(func(runtime map[string]any) {
+				cells := runtime["cells"].([]any)
+				cells[0], cells[1] = cells[1], cells[0]
+			}),
+		},
+		"producer run metadata does not match dispatch": {
+			"MOCK_PRODUCER_HEAD_SHA": strings.Repeat("f", 40),
+		},
+		"noncanonical runtime base64": {
+			"QURL_GO_SANDBOX_DEPLOYMENT_RUNTIME_INPUTS_B64": base64.StdEncoding.EncodeToString(validRuntime) + "\n",
+		},
+	}
+	for name, extra := range tests {
+		t.Run(name, func(t *testing.T) {
+			verifyNativeUDPManifest(
+				t, fixture, fixture.postSHA, t.TempDir(), "pre_removal", "",
+				manifest, extra, false,
+			)
+		})
+	}
+}
+
 func TestNativeUDPSandboxRejectsMissingRepositoryCommit(t *testing.T) {
 	fixture := newNativeUDPProofFixture(t)
 	manifest := deploymentManifestBytes(t, "pre_removal", fixture.postSHA)
@@ -528,7 +611,7 @@ func TestNativeUDPSandboxRejectsMissingConnectorModuleCommit(t *testing.T) {
 		"pre_removal",
 		"",
 		manifest,
-		map[string]string{"MOCK_MISSING_SHA": strings.Repeat("d", 40)},
+		map[string]string{"MOCK_MISSING_SHA": fixture.postSHA},
 		false,
 	)
 }
@@ -637,6 +720,10 @@ func TestNativeUDPSandboxAttestsExactConnectorProof(t *testing.T) {
 			if err := os.WriteFile(manifestPath, manifest, 0o444); err != nil {
 				t.Fatal(err)
 			}
+			runtimePath := filepath.Join(runnerTemp, "deployment-runtime-inputs.json")
+			if err := os.WriteFile(runtimePath, deploymentRuntimeInputsBytes(t, manifest), 0o444); err != nil {
+				t.Fatal(err)
+			}
 			archivePath := filepath.Join(runnerTemp, "connector-proof.zip")
 			writeConnectorProofZIP(t, archivePath, artifactManifest, connectorSHA, connectorProofZIPOptions{
 				phase:    test.phase,
@@ -663,14 +750,20 @@ func TestNativeUDPSandboxAttestsExactConnectorProof(t *testing.T) {
 				"GH_TOKEN":                               "workflow-only-test-token",
 				"QURL_GO_SANDBOX_PROOF_PHASE":            test.phase,
 				"QURL_GO_SANDBOX_CONNECTOR_PROOF_RUN_ID": "777",
-				"QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_PATH": manifestPath,
-				"MOCK_CONNECTOR_WORKFLOW_ID":               "9001",
-				"MOCK_CONNECTOR_RUN_WORKFLOW_ID":           test.runWorkflowID,
-				"MOCK_CONNECTOR_HEAD_SHA":                  test.headSHA,
-				"MOCK_CONNECTOR_PHASE":                     test.phase,
-				"MOCK_CONNECTOR_ARTIFACT_ZIP":              archivePath,
-				"MOCK_CONNECTOR_ARTIFACT_SHA256":           artifactDigest,
-				"MOCK_CONNECTOR_ARTIFACT_SIZE":             artifactSize,
+				"QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_PATH":        manifestPath,
+				"QURL_GO_SANDBOX_DEPLOYMENT_RUNTIME_INPUTS_PATH":  runtimePath,
+				"QURL_GO_SANDBOX_DEPLOYMENT_PRODUCER_RUN_ID":      "987654",
+				"QURL_GO_SANDBOX_DEPLOYMENT_PRODUCER_RUN_ATTEMPT": "1",
+				"QURL_GO_SANDBOX_DEPLOYMENT_PRODUCER_HEAD_SHA":    strings.Repeat("c", 40),
+				"QURL_GO_SANDBOX_DEPLOYMENT_ARTIFACT_ID":          "7654321",
+				"QURL_GO_SANDBOX_DEPLOYMENT_ARTIFACT_DIGEST":      "sha256:" + strings.Repeat("d", 64),
+				"MOCK_CONNECTOR_WORKFLOW_ID":                      "9001",
+				"MOCK_CONNECTOR_RUN_WORKFLOW_ID":                  test.runWorkflowID,
+				"MOCK_CONNECTOR_HEAD_SHA":                         test.headSHA,
+				"MOCK_CONNECTOR_PHASE":                            test.phase,
+				"MOCK_CONNECTOR_ARTIFACT_ZIP":                     archivePath,
+				"MOCK_CONNECTOR_ARTIFACT_SHA256":                  artifactDigest,
+				"MOCK_CONNECTOR_ARTIFACT_SIZE":                    artifactSize,
 			}
 			if test.phase == "post_removal" {
 				environment["QURL_GO_SANDBOX_PRE_REMOVAL_CONNECTOR_PROOF_RUN_ID"] = "456"
@@ -734,7 +827,6 @@ func TestNativeUDPSandboxPostRemovalRequiresPairedSuccessfulRun(t *testing.T) {
 	postManifest := mutateDeploymentManifest(t, deploymentManifestBytes(t, "post_removal", fixture.postSHA), func(value map[string]any) {
 		value["repositories"].(map[string]any)["qurl_connector"] = strings.Repeat("c", 40)
 		value["repositories"].(map[string]any)["website"] = strings.Repeat("d", 40)
-		value["connector_modules"].(map[string]any)["qurl_go"] = strings.Repeat("e", 40)
 		value["images"].(map[string]any)["qurl_connector"] = "sha256:" + strings.Repeat("f", 64)
 	})
 	extra := map[string]string{
@@ -918,6 +1010,16 @@ func validPreRemovalEvidence(t *testing.T, commitSHA string, outputs map[string]
 		"typed_evidence_complete":          true,
 		"typed_evidence":                   typedEvidence,
 		"deployment_manifest_sha256":       outputs["QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_SHA256"],
+		"deployment_runtime_inputs_sha256": outputs["QURL_GO_SANDBOX_DEPLOYMENT_RUNTIME_INPUTS_SHA256"],
+		"deployment_producer": map[string]any{
+			"repository":      "layervai/nhp",
+			"workflow_path":   ".github/workflows/udp-proof-deployment-manifest.yml",
+			"run_id":          "987654",
+			"run_attempt":     "1",
+			"head_sha":        strings.Repeat("c", 40),
+			"artifact_id":     "7654321",
+			"artifact_digest": "sha256:" + strings.Repeat("d", 64),
+		},
 		"inventory_sha256":                 outputs["QURL_GO_SANDBOX_INVENTORY_SHA256"],
 		"inventory_mapping_sha256":         outputs["QURL_GO_SANDBOX_INVENTORY_MAPPING_SHA256"],
 		"scenario_contract_sha256":         outputs["QURL_GO_SANDBOX_SCENARIO_CONTRACT_SHA256"],
@@ -998,25 +1100,37 @@ func TestNativeUDPSandboxEvidenceManifestIsAllowlisted(t *testing.T) {
 		t.Fatalf("allowlisted evidence is not canonical JSON: %s", evidence)
 	}
 	for name, want := range map[string]any{
-		"phase":                        "pre_removal",
-		"repository":                   "layervai/qurl-go",
-		"commit_sha":                   fixture.postSHA,
-		"deployment_manifest_sha256":   sha256Hex(manifest),
-		"proof_harness_sha256":         inputs["QURL_GO_SANDBOX_PROOF_HARNESS_SHA256"],
-		"strict_outcome":               "success",
-		"inputs_unchanged":             true,
-		"gate_passed":                  false,
-		"connector_proof_run_id":       "777",
-		"connector_attestation_sha256": sha256Hex(connectorAttestation),
-		"dispatch_correlation_id":      nativeUDPDispatchCorrelation("qurl_go", "pre_removal"),
-		"nhp_controller_run_id":        "123456",
-		"nhp_controller_run_attempt":   "1",
-		"provenance_valid":             true,
-		"two_cell_provenance":          true,
+		"phase":                            "pre_removal",
+		"repository":                       "layervai/qurl-go",
+		"commit_sha":                       fixture.postSHA,
+		"deployment_manifest_sha256":       sha256Hex(manifest),
+		"deployment_runtime_inputs_sha256": inputs["QURL_GO_SANDBOX_DEPLOYMENT_RUNTIME_INPUTS_SHA256"],
+		"proof_harness_sha256":             inputs["QURL_GO_SANDBOX_PROOF_HARNESS_SHA256"],
+		"strict_outcome":                   "success",
+		"inputs_unchanged":                 true,
+		"gate_passed":                      false,
+		"connector_proof_run_id":           "777",
+		"connector_attestation_sha256":     sha256Hex(connectorAttestation),
+		"dispatch_correlation_id":          nativeUDPDispatchCorrelation("qurl_go", "pre_removal"),
+		"nhp_controller_run_id":            "123456",
+		"nhp_controller_run_attempt":       "1",
+		"provenance_valid":                 true,
+		"two_cell_provenance":              true,
 	} {
 		if got := decoded[name]; got != want {
 			t.Errorf("evidence %s = %v, want %v", name, got, want)
 		}
+	}
+	producer, ok := decoded["deployment_producer"].(map[string]any)
+	if !ok ||
+		producer["repository"] != "layervai/nhp" ||
+		producer["workflow_path"] != ".github/workflows/udp-proof-deployment-manifest.yml" ||
+		producer["run_id"] != "987654" ||
+		producer["run_attempt"] != "1" ||
+		producer["head_sha"] != strings.Repeat("c", 40) ||
+		producer["artifact_id"] != "7654321" ||
+		producer["artifact_digest"] != "sha256:"+strings.Repeat("d", 64) {
+		t.Fatalf("evidence deployment producer = %v", decoded["deployment_producer"])
 	}
 	counts := decoded["counts"].(map[string]any)
 	if counts["blocking"] != float64(54) {
@@ -1270,14 +1384,24 @@ func TestNativeUDPSandboxRequiresCompletePublishedProof(t *testing.T) {
 		}
 	}
 	base := map[string]any{
-		"gate_passed":                    true,
-		"phase":                          "pre_removal",
-		"strict_outcome":                 "success",
-		"enforcement_outcome":            "success",
-		"inputs_unchanged":               true,
-		"nhp_controller_run_id":          "123456",
-		"nhp_controller_run_attempt":     "1",
-		"dispatch_correlation_id":        nativeUDPDispatchCorrelation("qurl_go", "pre_removal"),
+		"gate_passed":                      true,
+		"phase":                            "pre_removal",
+		"strict_outcome":                   "success",
+		"enforcement_outcome":              "success",
+		"inputs_unchanged":                 true,
+		"nhp_controller_run_id":            "123456",
+		"nhp_controller_run_attempt":       "1",
+		"dispatch_correlation_id":          nativeUDPDispatchCorrelation("qurl_go", "pre_removal"),
+		"deployment_runtime_inputs_sha256": strings.Repeat("e", 64),
+		"deployment_producer": map[string]any{
+			"repository":      "layervai/nhp",
+			"workflow_path":   ".github/workflows/udp-proof-deployment-manifest.yml",
+			"run_id":          "987654",
+			"run_attempt":     "1",
+			"head_sha":        strings.Repeat("c", 40),
+			"artifact_id":     "7654321",
+			"artifact_digest": "sha256:" + strings.Repeat("d", 64),
+		},
 		"counts":                         map[string]any{"implemented": 68, "blocking": 0, "failures": 0, "skips": 0, "exact_passes": 68},
 		"provenance_valid":               true,
 		"two_cell_provenance":            true,
@@ -1301,6 +1425,13 @@ func TestNativeUDPSandboxRequiresCompletePublishedProof(t *testing.T) {
 			value["dispatch_correlation_id"] = nativeUDPDispatchCorrelation("connector", "pre_removal")
 		}},
 		{name: "wrong dispatch phase", mutate: func(value map[string]any) { value["phase"] = "post_removal" }},
+		{name: "missing runtime digest", mutate: func(value map[string]any) { delete(value, "deployment_runtime_inputs_sha256") }},
+		{name: "wrong producer repository", mutate: func(value map[string]any) {
+			value["deployment_producer"].(map[string]any)["repository"] = "someone/nhp"
+		}},
+		{name: "invalid producer artifact digest", mutate: func(value map[string]any) {
+			value["deployment_producer"].(map[string]any)["artifact_digest"] = strings.Repeat("d", 64)
+		}},
 		{name: "blocking", mutate: func(value map[string]any) { value["counts"].(map[string]any)["blocking"] = 1 }},
 		{name: "zero implemented", mutate: func(value map[string]any) {
 			value["counts"].(map[string]any)["implemented"] = 0
@@ -1510,10 +1641,21 @@ func verifyNativeUDPManifest(
 		"QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ID":      "123456",
 		"QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ATTEMPT": "1",
 		"QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_B64":    base64.StdEncoding.EncodeToString(manifest),
-		"QURL_GO_SANDBOX_PRE_REMOVAL_RUN_ID":         preRemovalRunID,
-		"QURL_GO_SANDBOX_HUB_HOST":                   "hub.nhp.layerv.ai",
-		"QURL_GO_SANDBOX_HUB_PORT":                   "62206",
-		"QURL_GO_SANDBOX_HUB_SERVER_PUBLIC_KEY_B64":  base64.StdEncoding.EncodeToString(nativeUDPProofHubKey()),
+		"QURL_GO_SANDBOX_DEPLOYMENT_RUNTIME_INPUTS_B64": base64.StdEncoding.EncodeToString(
+			deploymentRuntimeInputsBytes(t, manifest),
+		),
+		"QURL_GO_SANDBOX_DEPLOYMENT_PRODUCER_RUN_ID":      "987654",
+		"QURL_GO_SANDBOX_DEPLOYMENT_PRODUCER_RUN_ATTEMPT": "1",
+		"QURL_GO_SANDBOX_DEPLOYMENT_PRODUCER_HEAD_SHA":    strings.Repeat("c", 40),
+		"QURL_GO_SANDBOX_DEPLOYMENT_ARTIFACT_ID":          "7654321",
+		"QURL_GO_SANDBOX_DEPLOYMENT_ARTIFACT_DIGEST":      "sha256:" + strings.Repeat("d", 64),
+		"QURL_GO_SANDBOX_CONNECTOR_PROOF_RUN_ID":          "777",
+		"QURL_GO_SANDBOX_PRE_REMOVAL_RUN_ID":              preRemovalRunID,
+		"MOCK_PRODUCER_RUN_ID":                            "987654",
+		"MOCK_PRODUCER_RUN_ATTEMPT":                       "1",
+		"MOCK_PRODUCER_HEAD_SHA":                          strings.Repeat("c", 40),
+		"MOCK_PRODUCER_ARTIFACT_ID":                       "7654321",
+		"MOCK_PRODUCER_ARTIFACT_DIGEST":                   "sha256:" + strings.Repeat("d", 64),
 	}
 	for key, value := range extra {
 		environment[key] = value
@@ -1533,6 +1675,17 @@ func writeManifestCommitGHMock(t *testing.T) string {
 set -euo pipefail
 test "$1" = "api"
 case "$2" in
+  repos/layervai/nhp/actions/runs/*)
+    test "${2##*/}" = "${MOCK_PRODUCER_RUN_ID}"
+    printf '{"id":%s,"run_attempt":%s,"path":".github/workflows/udp-proof-deployment-manifest.yml","event":"workflow_dispatch","status":"completed","conclusion":"success","head_branch":"main","head_sha":"%s","repository":{"full_name":"layervai/nhp"},"head_repository":{"full_name":"layervai/nhp"}}\n' \
+      "${MOCK_PRODUCER_RUN_ID}" "${MOCK_PRODUCER_RUN_ATTEMPT}" "${MOCK_PRODUCER_HEAD_SHA}"
+    ;;
+  repos/layervai/nhp/actions/artifacts/*)
+    test "${2##*/}" = "${MOCK_PRODUCER_ARTIFACT_ID}"
+    printf '{"id":%s,"name":"udp-proof-deployment-manifest-%s-%s","digest":"%s","expired":false,"size_in_bytes":4096,"workflow_run":{"id":%s,"head_branch":"main","head_sha":"%s"}}\n' \
+      "${MOCK_PRODUCER_ARTIFACT_ID}" "${MOCK_PRODUCER_RUN_ID}" "${MOCK_PRODUCER_RUN_ATTEMPT}" \
+      "${MOCK_PRODUCER_ARTIFACT_DIGEST}" "${MOCK_PRODUCER_RUN_ID}" "${MOCK_PRODUCER_HEAD_SHA}"
+    ;;
   repos/layervai/qurl-go/pulls/93)
     printf '{"number":%s,"state":"%s","head":{"sha":"%s","repo":{"full_name":"%s"}},"base":{"ref":"%s","repo":{"full_name":"%s"}}}\n' \
       "${MOCK_CANDIDATE_NUMBER:-93}" "${MOCK_CANDIDATE_STATE:-open}" "${MOCK_CANDIDATE_HEAD_SHA:-${GITHUB_SHA}}" \
@@ -1568,6 +1721,13 @@ func proofHashEnvironment(runnerTemp string, outputs map[string]string) map[stri
 		"QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ATTEMPT":       "1",
 		"QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_PATH":         outputs["QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_PATH"],
 		"QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_SHA256":       outputs["QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_SHA256"],
+		"QURL_GO_SANDBOX_DEPLOYMENT_RUNTIME_INPUTS_PATH":   outputs["QURL_GO_SANDBOX_DEPLOYMENT_RUNTIME_INPUTS_PATH"],
+		"QURL_GO_SANDBOX_DEPLOYMENT_RUNTIME_INPUTS_SHA256": outputs["QURL_GO_SANDBOX_DEPLOYMENT_RUNTIME_INPUTS_SHA256"],
+		"QURL_GO_SANDBOX_DEPLOYMENT_PRODUCER_RUN_ID":       "987654",
+		"QURL_GO_SANDBOX_DEPLOYMENT_PRODUCER_RUN_ATTEMPT":  "1",
+		"QURL_GO_SANDBOX_DEPLOYMENT_PRODUCER_HEAD_SHA":     strings.Repeat("c", 40),
+		"QURL_GO_SANDBOX_DEPLOYMENT_ARTIFACT_ID":           "7654321",
+		"QURL_GO_SANDBOX_DEPLOYMENT_ARTIFACT_DIGEST":       "sha256:" + strings.Repeat("d", 64),
 		"QURL_GO_SANDBOX_INVENTORY_PATH":                   outputs["QURL_GO_SANDBOX_INVENTORY_PATH"],
 		"QURL_GO_SANDBOX_INVENTORY_SHA256":                 outputs["QURL_GO_SANDBOX_INVENTORY_SHA256"],
 		"QURL_GO_SANDBOX_INVENTORY_MAPPING_SHA256":         outputs["QURL_GO_SANDBOX_INVENTORY_MAPPING_SHA256"],
@@ -1599,7 +1759,7 @@ func deploymentManifestBytes(t *testing.T, phase, qurlGoSHA string) []byte {
 		"retirement_state": retirementState,
 		"connector_modules": map[string]string{
 			"frp":     strings.Repeat("1", 40),
-			"qurl_go": strings.Repeat("d", 40),
+			"qurl_go": qurlGoSHA,
 		},
 		"repositories": map[string]string{
 			"frp":                        strings.Repeat("1", 40),
@@ -1630,11 +1790,48 @@ func deploymentManifestBytes(t *testing.T, phase, qurlGoSHA string) []byte {
 			"server_public_key_sha256": sha256Hex(nativeUDPProofHubKey()),
 		},
 		"cells": []any{
-			map[string]any{"cell_id": "cell0", "host": "cell0.nhp.layerv.ai", "port": 62206, "server_public_key_sha256": strings.Repeat("0", 64)},
-			map[string]any{"cell_id": "cell1", "host": "cell1.nhp.layerv.ai", "port": 62206, "server_public_key_sha256": strings.Repeat("1", 64)},
+			map[string]any{"cell_id": "cell0", "host": "cell0.nhp.layerv.ai", "port": 62206, "server_public_key_sha256": sha256Hex(bytes.Repeat([]byte{0x11}, 32))},
+			map[string]any{"cell_id": "cell1", "host": "cell1.nhp.layerv.ai", "port": 62206, "server_public_key_sha256": sha256Hex(bytes.Repeat([]byte{0x22}, 32))},
 		},
 	}
 	encoded, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
+}
+
+func deploymentRuntimeInputsBytes(t *testing.T, manifest []byte) []byte {
+	t.Helper()
+	var deployed map[string]any
+	if err := json.Unmarshal(manifest, &deployed); err != nil {
+		t.Fatal(err)
+	}
+	hub := deployed["hub"].(map[string]any)
+	cells := deployed["cells"].([]any)
+	runtime := map[string]any{
+		"schema_version": 1,
+		"hub": map[string]any{
+			"host":                  hub["host"],
+			"port":                  hub["port"],
+			"server_public_key_b64": base64.StdEncoding.EncodeToString(nativeUDPProofHubKey()),
+		},
+		"cells": []any{
+			map[string]any{
+				"cell_id":               "cell0",
+				"host":                  cells[0].(map[string]any)["host"],
+				"port":                  cells[0].(map[string]any)["port"],
+				"server_public_key_b64": base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x11}, 32)),
+			},
+			map[string]any{
+				"cell_id":               "cell1",
+				"host":                  cells[1].(map[string]any)["host"],
+				"port":                  cells[1].(map[string]any)["port"],
+				"server_public_key_b64": base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x22}, 32)),
+			},
+		},
+	}
+	encoded, err := json.Marshal(runtime)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1675,7 +1872,9 @@ func writeProofProvenanceValue(t *testing.T, runnerTemp string, value map[string
 }
 
 func proofProvenanceValue(buildSHA, agentID, deploymentManifestSHA, typedEvidenceContractSHA string) map[string]any {
-	refresh := proofCell("refresh", "cell1", "cell1.nhp.layerv.ai", strings.Repeat("1", 64), 2, 3)
+	cell0KeySHA := sha256Hex(bytes.Repeat([]byte{0x11}, 32))
+	cell1KeySHA := sha256Hex(bytes.Repeat([]byte{0x22}, 32))
+	refresh := proofCell("refresh", "cell1", "cell1.nhp.layerv.ai", cell1KeySHA, 2, 3)
 	refresh["lease_expires_at"] = "2026-07-22T12:30:00.123456789Z"
 	return map[string]any{
 		"schema_version":                 2,
@@ -1689,9 +1888,9 @@ func proofProvenanceValue(buildSHA, agentID, deploymentManifestSHA, typedEvidenc
 			"server_public_key_sha256": sha256Hex(nativeUDPProofHubKey()),
 		},
 		"assigned_cells": []any{
-			proofCell("registration", "cell0", "cell0.nhp.layerv.ai", strings.Repeat("0", 64), 1, 1),
-			proofCell("warm_open", "cell0", "cell0.nhp.layerv.ai", strings.Repeat("0", 64), 1, 1),
-			proofCell("reassignment", "cell1", "cell1.nhp.layerv.ai", strings.Repeat("1", 64), 2, 2),
+			proofCell("registration", "cell0", "cell0.nhp.layerv.ai", cell0KeySHA, 1, 1),
+			proofCell("warm_open", "cell0", "cell0.nhp.layerv.ai", cell0KeySHA, 1, 1),
+			proofCell("reassignment", "cell1", "cell1.nhp.layerv.ai", cell1KeySHA, 2, 2),
 			refresh,
 		},
 	}
@@ -1737,6 +1936,17 @@ if [[ "$1" == "api" ]]; then
     exit 0
   fi
   case "$2" in
+    repos/layervai/nhp/actions/runs/*)
+      test "${2##*/}" = "${MOCK_PRODUCER_RUN_ID}"
+      printf '{"id":%s,"run_attempt":%s,"path":".github/workflows/udp-proof-deployment-manifest.yml","event":"workflow_dispatch","status":"completed","conclusion":"success","head_branch":"main","head_sha":"%s","repository":{"full_name":"layervai/nhp"},"head_repository":{"full_name":"layervai/nhp"}}\n' \
+        "${MOCK_PRODUCER_RUN_ID}" "${MOCK_PRODUCER_RUN_ATTEMPT}" "${MOCK_PRODUCER_HEAD_SHA}"
+      ;;
+    repos/layervai/nhp/actions/artifacts/*)
+      test "${2##*/}" = "${MOCK_PRODUCER_ARTIFACT_ID}"
+      printf '{"id":%s,"name":"udp-proof-deployment-manifest-%s-%s","digest":"%s","expired":false,"size_in_bytes":4096,"workflow_run":{"id":%s,"head_branch":"main","head_sha":"%s"}}\n' \
+        "${MOCK_PRODUCER_ARTIFACT_ID}" "${MOCK_PRODUCER_RUN_ID}" "${MOCK_PRODUCER_RUN_ATTEMPT}" \
+        "${MOCK_PRODUCER_ARTIFACT_DIGEST}" "${MOCK_PRODUCER_RUN_ID}" "${MOCK_PRODUCER_HEAD_SHA}"
+      ;;
     repos/layervai/qurl-go/actions/workflows/native-udp-sandbox.yml)
       test "$3" = "--jq"
       test "$4" = ".id"
@@ -1779,6 +1989,7 @@ func writeQURLGoProofZIP(t *testing.T, path, evidencePath, manifestPath, invento
 	}{
 		{name: "native-udp-sandbox.evidence.json", path: evidencePath},
 		{name: "sandbox-deployment-manifest.json", path: manifestPath},
+		{name: "deployment-runtime-inputs.json", path: filepath.Join(filepath.Dir(manifestPath), "deployment-runtime-inputs.json")},
 		{name: "pre_retirement_scenarios.json", path: inventoryPath},
 		{name: "retired_lifecycle_surface.json", path: filepath.Join(filepath.Dir(inventoryPath), "retired_lifecycle_surface.json")},
 	} {
@@ -1921,40 +2132,42 @@ func writeConnectorProofZIP(t *testing.T, path string, manifest []byte, connecto
 	connectorModules := deployment["connector_modules"].(map[string]any)
 	imageDigest := images["qurl_connector"].(string)
 	imageReference := "ghcr.io/layervai/qurl-connector@" + imageDigest
+	cell0KeySHA := sha256Hex(bytes.Repeat([]byte{0x11}, 32))
+	cell1KeySHA := sha256Hex(bytes.Repeat([]byte{0x22}, 32))
 	observations := []any{
-		connectorProofObservation("registration", "cell0", "cell0.nhp.layerv.ai", strings.Repeat("0", 64), 1, 1),
-		connectorProofObservation("warm_open", "cell0", "cell0.nhp.layerv.ai", strings.Repeat("0", 64), 1, 1),
-		connectorProofObservation("reassignment", "cell1", "cell1.nhp.layerv.ai", strings.Repeat("1", 64), 2, 2),
-		connectorProofObservation("refresh", "cell1", "cell1.nhp.layerv.ai", strings.Repeat("1", 64), 2, 3),
+		connectorProofObservation("registration", "cell0", "cell0.nhp.layerv.ai", cell0KeySHA, 1, 1),
+		connectorProofObservation("warm_open", "cell0", "cell0.nhp.layerv.ai", cell0KeySHA, 1, 1),
+		connectorProofObservation("reassignment", "cell1", "cell1.nhp.layerv.ai", cell1KeySHA, 2, 2),
+		connectorProofObservation("refresh", "cell1", "cell1.nhp.layerv.ai", cell1KeySHA, 2, 3),
 	}
 	observations[3].(map[string]any)["lease_expires_at"] = "2026-07-22T12:30:00.123456789Z"
 	switch options.mutation {
 	case "one_cell":
 		observations = []any{
-			connectorProofObservation("registration", "cell0", "cell0.nhp.layerv.ai", strings.Repeat("0", 64), 1, 1),
-			connectorProofObservation("warm_open", "cell0", "cell0.nhp.layerv.ai", strings.Repeat("0", 64), 1, 1),
-			connectorProofObservation("reassignment", "cell0", "cell0.nhp.layerv.ai", strings.Repeat("0", 64), 2, 2),
-			connectorProofObservation("refresh", "cell0", "cell0.nhp.layerv.ai", strings.Repeat("0", 64), 2, 3),
+			connectorProofObservation("registration", "cell0", "cell0.nhp.layerv.ai", cell0KeySHA, 1, 1),
+			connectorProofObservation("warm_open", "cell0", "cell0.nhp.layerv.ai", cell0KeySHA, 1, 1),
+			connectorProofObservation("reassignment", "cell0", "cell0.nhp.layerv.ai", cell0KeySHA, 2, 2),
+			connectorProofObservation("refresh", "cell0", "cell0.nhp.layerv.ai", cell0KeySHA, 2, 3),
 		}
 	case "wrong_cell":
 		observations[len(observations)-1] = connectorProofObservation("refresh", "cell9", "cell9.nhp.layerv.ai", strings.Repeat("9", 64), 2, 3)
 	case "wrong_order":
 		observations[0], observations[1] = observations[1], observations[0]
 	case "warm_mismatch":
-		observations[1] = connectorProofObservation("warm_open", "cell1", "cell1.nhp.layerv.ai", strings.Repeat("1", 64), 1, 1)
+		observations[1] = connectorProofObservation("warm_open", "cell1", "cell1.nhp.layerv.ai", cell1KeySHA, 1, 1)
 	case "stale_generation":
-		observations[2] = connectorProofObservation("reassignment", "cell1", "cell1.nhp.layerv.ai", strings.Repeat("1", 64), 1, 2)
+		observations[2] = connectorProofObservation("reassignment", "cell1", "cell1.nhp.layerv.ai", cell1KeySHA, 1, 2)
 	case "refresh_drift":
-		observations[3] = connectorProofObservation("refresh", "cell0", "cell0.nhp.layerv.ai", strings.Repeat("0", 64), 2, 3)
+		observations[3] = connectorProofObservation("refresh", "cell0", "cell0.nhp.layerv.ai", cell0KeySHA, 2, 3)
 	case "stale_refresh_generation":
-		observations[3] = connectorProofObservation("refresh", "cell1", "cell1.nhp.layerv.ai", strings.Repeat("1", 64), 1, 2)
+		observations[3] = connectorProofObservation("refresh", "cell1", "cell1.nhp.layerv.ai", cell1KeySHA, 1, 2)
 	case "stale_refresh_revision":
-		observations[3] = connectorProofObservation("refresh", "cell1", "cell1.nhp.layerv.ai", strings.Repeat("1", 64), 2, 1)
+		observations[3] = connectorProofObservation("refresh", "cell1", "cell1.nhp.layerv.ai", cell1KeySHA, 2, 1)
 	case "stale_refresh_lease":
-		observations[3] = connectorProofObservation("refresh", "cell1", "cell1.nhp.layerv.ai", strings.Repeat("1", 64), 2, 3)
+		observations[3] = connectorProofObservation("refresh", "cell1", "cell1.nhp.layerv.ai", cell1KeySHA, 2, 3)
 		observations[3].(map[string]any)["lease_expires_at"] = "2026-07-22T11:59:59.999999999Z"
 	case "invalid_refresh_lease":
-		observations[3] = connectorProofObservation("refresh", "cell1", "cell1.nhp.layerv.ai", strings.Repeat("1", 64), 2, 3)
+		observations[3] = connectorProofObservation("refresh", "cell1", "cell1.nhp.layerv.ai", cell1KeySHA, 2, 3)
 		observations[3].(map[string]any)["lease_expires_at"] = "2026-02-31T12:30:00Z"
 	}
 	module := func(path, sha string) map[string]any {
@@ -1998,19 +2211,29 @@ func writeConnectorProofZIP(t *testing.T, path string, manifest []byte, connecto
 		preRemovalRunID = "455"
 	}
 	evidence := map[string]any{
-		"schema_version":                 1,
-		"phase":                          phase,
-		"repository":                     "layervai/qurl-connector",
-		"commit_sha":                     connectorSHA,
-		"run_id":                         "777",
-		"run_attempt":                    "2",
-		"dispatch_correlation_id":        nativeUDPDispatchCorrelation("connector", phase),
-		"nhp_controller_run_id":          "123456",
-		"nhp_controller_run_attempt":     "1",
-		"pre_removal_run_id":             preRemovalRunID,
-		"pre_removal_evidence_sha256":    preRemovalEvidenceSHA,
-		"pre_removal_deployment_sha256":  preRemovalDeploymentSHA,
-		"deployment_manifest_sha256":     sha256Hex(manifest),
+		"schema_version":                   1,
+		"phase":                            phase,
+		"repository":                       "layervai/qurl-connector",
+		"commit_sha":                       connectorSHA,
+		"run_id":                           "777",
+		"run_attempt":                      "2",
+		"dispatch_correlation_id":          nativeUDPDispatchCorrelation("connector", phase),
+		"nhp_controller_run_id":            "123456",
+		"nhp_controller_run_attempt":       "1",
+		"pre_removal_run_id":               preRemovalRunID,
+		"pre_removal_evidence_sha256":      preRemovalEvidenceSHA,
+		"pre_removal_deployment_sha256":    preRemovalDeploymentSHA,
+		"deployment_manifest_sha256":       sha256Hex(manifest),
+		"deployment_runtime_inputs_sha256": sha256Hex(deploymentRuntimeInputsBytes(t, manifest)),
+		"deployment_producer": map[string]any{
+			"repository":      "layervai/nhp",
+			"workflow_path":   ".github/workflows/udp-proof-deployment-manifest.yml",
+			"run_id":          "987654",
+			"run_attempt":     "1",
+			"head_sha":        strings.Repeat("c", 40),
+			"artifact_id":     "7654321",
+			"artifact_digest": "sha256:" + strings.Repeat("d", 64),
+		},
 		"inventory_sha256":               sha256Hex(inventoryBytes),
 		"scenario_contract_sha256":       sha256Hex(contractBytes),
 		"proof_harness_sha256":           strings.Repeat("a", 64),
@@ -2092,6 +2315,7 @@ func writeConnectorProofZIP(t *testing.T, path string, manifest []byte, connecto
 		body []byte
 	}{
 		{name: "sandbox-deployment-manifest.json", body: manifest},
+		{name: "deployment-runtime-inputs.json", body: deploymentRuntimeInputsBytes(t, manifest)},
 		{name: "strict-proof-scenarios.json", body: inventoryBytes},
 		{name: "strict-sandbox-proof.evidence.json", body: evidenceBytes},
 	}

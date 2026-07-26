@@ -16,6 +16,7 @@ import (
 )
 
 var approvedArtifactUploadPaths = []string{
+	"${{ runner.temp }}/deployment-runtime-inputs.json",
 	"${{ runner.temp }}/native-udp-sandbox.evidence.json",
 	"${{ runner.temp }}/sandbox-deployment-manifest.json",
 	"${{ runner.temp }}/pre_retirement_scenarios.json",
