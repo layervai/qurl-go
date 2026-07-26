@@ -2538,6 +2538,52 @@ func TestRegisterAgentRuntime_FinalSaveFailureKeepsCandidateRecoverable(t *testi
 	}
 }
 
+func TestRegisterAgentRuntime_AuthenticatedCompletionIgnoresCallerCancellationForFinalSave(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	f := newRuntimeFixture(t,
+		[]runtimeUDPStep{{
+			requestType: relayknock.TypeListRequest,
+			replyType:   relayknock.TypeListResult,
+			replyBody:   contract.InitialAssignment.Result.BodyJSON,
+		}},
+		[]runtimeUDPStep{
+			{
+				requestType: relayknock.TypeRegister,
+				replyType:   relayknock.TypeRegisterAck,
+				replyBody:   contract.AssignedCellRegistration.Result.BodyJSON,
+			},
+			{
+				requestType: relayknock.TypeListRequest,
+				replyType:   relayknock.TypeListResult,
+				replyBody:   contract.RegistrationCompletion.Result.BodyJSON,
+			},
+		},
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.store.cancelBeforeSave = 4 // identity, pending activation, pending completion, final promotion
+	f.store.cancel = cancel
+
+	client, binding, err := RegisterAgentRuntime(
+		ctx, conformance.AgentAssignmentBootstrapCredentialFixture, f.store, f.options()...,
+	)
+	if err != nil || client == nil || binding == nil || !errors.Is(ctx.Err(), context.Canceled) {
+		t.Fatalf("canceled post-auth promotion = %v/%v/%v; context=%v", client, binding, err, ctx.Err())
+	}
+	defer binding.Destroy()
+	loaded, loadErr := f.store.LoadAgentState(context.Background())
+	if loadErr != nil || loaded.PendingCompletion != nil ||
+		loaded.DeviceAPIKey != canonicalNativeDeviceCredential ||
+		loaded.DeviceAPIKeyID != "key_DvK9mN2pQr7S" ||
+		loaded.RegisteredAt == nil {
+		t.Fatalf("canceled post-auth result was not durable: state=%#v load=%v", loaded, loadErr)
+	}
+	if len(f.hubUDP.snapshot()) != 1 || len(f.cellUDP.snapshot()) != 2 {
+		t.Fatalf("canceled post-auth result network = Hub %d cell %d, want 1/2",
+			len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot()))
+	}
+}
+
 func TestRegisterAgentRuntime_PostRAKPreCommitSaveFailureRequiresReloadBeforeRecovery(t *testing.T) {
 	contract := loadAssignmentFixture(t)
 	f := newRuntimeFixture(t,

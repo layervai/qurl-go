@@ -1488,9 +1488,6 @@ func (c *nativeAgentRuntimeConfig) completePending(ctx context.Context, store Ag
 	if err != nil {
 		return boundary.mapError(ctx, recoveryCtx, err)
 	}
-	if err := boundary.check(); err != nil {
-		return err
-	}
 	previous := state.clone()
 	state.DeviceAPIKey = state.PendingCompletion.DeviceAPIKey
 	state.DeviceAPIKeyID = keyID
@@ -1498,7 +1495,13 @@ func (c *nativeAgentRuntimeConfig) completePending(ctx context.Context, store Ag
 	registeredAt := c.clock().UTC()
 	state.RegisteredAt = &registeredAt
 	state.SchemaVersion = agentStateSchemaVersion
-	if err := store.SaveAgentState(recoveryCtx, state); err != nil {
+	// The authenticated cell may already have committed even if the caller is
+	// canceled or the recovery horizon closes as the LRT arrives. The per-write
+	// UDP fence remains authoritative; after success, persist that irreversible
+	// result under a small detached deadline while the setup lock is still held.
+	persistCtx, cancelPersist := credentialRecoveryPersistenceContext(recoveryCtx)
+	defer cancelPersist()
+	if err := store.SaveAgentState(persistCtx, state); err != nil {
 		*state = *previous
 		return fmt.Errorf("%w: persist completed native credential: %w", ErrAgentBindingPersistence, err)
 	}
