@@ -557,8 +557,7 @@ func TestNativeUDPSandboxRejectsUnboundRuntimeAndProducerInputs(t *testing.T) {
 		},
 		"runtime Hub key does not match manifest": {
 			"QURL_GO_SANDBOX_DEPLOYMENT_RUNTIME_INPUTS_B64": mutateRuntime(func(runtime map[string]any) {
-				runtime["hub"].(map[string]any)["server_public_key_b64"] =
-					base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x44}, 32))
+				runtime["hub"].(map[string]any)["server_public_key_b64"] = base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x44}, 32))
 			}),
 		},
 		"runtime cell order differs from producer": {
