@@ -1023,11 +1023,6 @@ jobs:
             --arg run_attempt "${connector_attempt}" \
             --arg deployment_sha256 "${connector_manifest_sha256}" \
             --arg runtime_sha256 "${connector_runtime_sha256}" \
-            --arg producer_run_id "${QURL_GO_SANDBOX_DEPLOYMENT_PRODUCER_RUN_ID}" \
-            --arg producer_run_attempt "${QURL_GO_SANDBOX_DEPLOYMENT_PRODUCER_RUN_ATTEMPT}" \
-            --arg producer_head_sha "${QURL_GO_SANDBOX_DEPLOYMENT_PRODUCER_HEAD_SHA}" \
-            --arg artifact_id "${QURL_GO_SANDBOX_DEPLOYMENT_ARTIFACT_ID}" \
-            --arg artifact_digest "${QURL_GO_SANDBOX_DEPLOYMENT_ARTIFACT_DIGEST}" \
             --arg inventory_sha256 "${connector_inventory_sha256}" \
             --arg scenario_contract_sha256 "${connector_scenario_contract_sha256}" \
             --argjson implemented_count "${connector_implemented_count}" '
@@ -1065,15 +1060,18 @@ jobs:
             (.nhp_controller_run_attempt | type == "string" and test("^[1-9][0-9]{0,9}$")) and
             (. as $e | $e.dispatch_correlation_id | type == "string" and
               test("^nhp-" + $e.nhp_controller_run_id + "-" + $e.nhp_controller_run_attempt + "-connector-" + $e.phase + "-[0-9a-f]{32}$")) and
-            .deployment_producer == {
-              repository: "layervai/nhp",
-              workflow_path: ".github/workflows/udp-proof-deployment-manifest.yml",
-              run_id: $producer_run_id,
-              run_attempt: $producer_run_attempt,
-              head_sha: $producer_head_sha,
-              artifact_id: $artifact_id,
-              artifact_digest: $artifact_digest
-            } and
+            # Connector may cite a different historical producer, authenticated independently by the NHP controller;
+            # this step enforces its exact shape while the cmp checks above bind byte-identical manifest/runtime inputs.
+            (.deployment_producer |
+              type == "object" and
+              (keys | sort) == ["artifact_digest", "artifact_id", "head_sha", "repository", "run_attempt", "run_id", "workflow_path"] and
+              .repository == "layervai/nhp" and
+              .workflow_path == ".github/workflows/udp-proof-deployment-manifest.yml" and
+              (.run_id | type == "string" and test("^[1-9][0-9]{0,19}$")) and
+              (.run_attempt | type == "string" and test("^[1-9][0-9]{0,9}$")) and
+              (.head_sha | type == "string" and test("^[0-9a-f]{40}$")) and
+              (.artifact_id | type == "string" and test("^[1-9][0-9]{0,19}$")) and
+              (.artifact_digest | type == "string" and test("^sha256:[0-9a-f]{64}$"))) and
             .deployment_manifest_sha256 == $deployment_sha256 and
             .deployment_runtime_inputs_sha256 == $runtime_sha256 and
             .inventory_sha256 == $inventory_sha256 and

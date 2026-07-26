@@ -658,8 +658,8 @@ func TestNativeUDPSandboxAttestsExactConnectorProof(t *testing.T) {
 		candidateEnv   map[string]string
 		wantSuccess    bool
 	}{
-		{name: "valid exact artifact", phase: "pre_removal", headSHA: connectorSHA, runWorkflowID: "9001", wantSuccess: true},
-		{name: "valid exact post artifact", phase: "post_removal", headSHA: connectorSHA, runWorkflowID: "9001", wantSuccess: true},
+		{name: "valid exact artifact from historical producer", phase: "pre_removal", headSHA: connectorSHA, runWorkflowID: "9001", wantSuccess: true},
+		{name: "valid exact post artifact from historical producer", phase: "post_removal", headSHA: connectorSHA, runWorkflowID: "9001", wantSuccess: true},
 		{name: "wrong run head", phase: "pre_removal", headSHA: strings.Repeat("f", 40), runWorkflowID: "9001"},
 		{name: "wrong workflow id", phase: "pre_removal", headSHA: connectorSHA, runWorkflowID: "9002"},
 		{name: "wrong PR number", phase: "pre_removal", headSHA: connectorSHA, runWorkflowID: "9001", candidateEnv: map[string]string{"MOCK_CONNECTOR_CANDIDATE_NUMBER": "453"}},
@@ -678,6 +678,16 @@ func TestNativeUDPSandboxAttestsExactConnectorProof(t *testing.T) {
 		{name: "wrong scenario contract digest", phase: "pre_removal", headSHA: connectorSHA, runWorkflowID: "9001", mutation: "wrong_scenario_contract"},
 		{name: "wrong dispatch correlation", phase: "pre_removal", headSHA: connectorSHA, runWorkflowID: "9001", mutation: "wrong_dispatch_correlation"},
 		{name: "wrong controller run identity", phase: "pre_removal", headSHA: connectorSHA, runWorkflowID: "9001", mutation: "wrong_controller_run_identity"},
+		{name: "extra producer field", phase: "pre_removal", headSHA: connectorSHA, runWorkflowID: "9001", mutation: "extra_producer_field"},
+		{name: "missing producer field", phase: "pre_removal", headSHA: connectorSHA, runWorkflowID: "9001", mutation: "missing_producer_field"},
+		{name: "wrong producer repository", phase: "pre_removal", headSHA: connectorSHA, runWorkflowID: "9001", mutation: "wrong_producer_repository"},
+		{name: "wrong producer workflow", phase: "pre_removal", headSHA: connectorSHA, runWorkflowID: "9001", mutation: "wrong_producer_workflow"},
+		{name: "zero producer run id", phase: "pre_removal", headSHA: connectorSHA, runWorkflowID: "9001", mutation: "zero_producer_run_id"},
+		{name: "numeric producer run id", phase: "pre_removal", headSHA: connectorSHA, runWorkflowID: "9001", mutation: "numeric_producer_run_id"},
+		{name: "zero producer run attempt", phase: "pre_removal", headSHA: connectorSHA, runWorkflowID: "9001", mutation: "zero_producer_run_attempt"},
+		{name: "invalid producer head sha", phase: "pre_removal", headSHA: connectorSHA, runWorkflowID: "9001", mutation: "invalid_producer_head_sha"},
+		{name: "zero producer artifact id", phase: "pre_removal", headSHA: connectorSHA, runWorkflowID: "9001", mutation: "zero_producer_artifact_id"},
+		{name: "invalid producer artifact digest", phase: "pre_removal", headSHA: connectorSHA, runWorkflowID: "9001", mutation: "invalid_producer_artifact_digest"},
 		{name: "blocking count", phase: "pre_removal", headSHA: connectorSHA, runWorkflowID: "9001", mutation: "blocking_count"},
 		{name: "skip count", phase: "pre_removal", headSHA: connectorSHA, runWorkflowID: "9001", mutation: "skip_count"},
 		{name: "failure count", phase: "pre_removal", headSHA: connectorSHA, runWorkflowID: "9001", mutation: "failure_count"},
@@ -703,6 +713,7 @@ func TestNativeUDPSandboxAttestsExactConnectorProof(t *testing.T) {
 		{name: "artifact API oversize", phase: "pre_removal", headSHA: connectorSHA, runWorkflowID: "9001", artifactSize: "5242881"},
 		{name: "artifact digest mismatch", phase: "pre_removal", headSHA: connectorSHA, runWorkflowID: "9001", artifactDigest: strings.Repeat("f", 64)},
 		{name: "deployment manifest mismatch", phase: "pre_removal", headSHA: connectorSHA, runWorkflowID: "9001", mutation: "manifest_mismatch"},
+		{name: "deployment runtime mismatch", phase: "pre_removal", headSHA: connectorSHA, runWorkflowID: "9001", mutation: "runtime_mismatch"},
 	}
 
 	for _, test := range tests {
@@ -1837,6 +1848,20 @@ func deploymentRuntimeInputsBytes(t *testing.T, manifest []byte) []byte {
 	return encoded
 }
 
+func mutateDeploymentRuntimeInputs(t *testing.T, runtime []byte, mutate func(map[string]any)) []byte {
+	t.Helper()
+	var value map[string]any
+	if err := json.Unmarshal(runtime, &value); err != nil {
+		t.Fatal(err)
+	}
+	mutate(value)
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
+}
+
 func mutateDeploymentManifest(t *testing.T, manifest []byte, mutate func(map[string]any)) []byte {
 	t.Helper()
 	var value map[string]any
@@ -2066,6 +2091,12 @@ func writeConnectorProofZIP(t *testing.T, path string, manifest []byte, connecto
 	if phase == "" {
 		phase = "pre_removal"
 	}
+	runtimeBytes := deploymentRuntimeInputsBytes(t, manifest)
+	if options.mutation == "runtime_mismatch" {
+		runtimeBytes = mutateDeploymentRuntimeInputs(t, runtimeBytes, func(value map[string]any) {
+			value["hub"].(map[string]any)["host"] = "other-hub.nhp.layerv.ai"
+		})
+	}
 	scenarioNames := connectorStrictScenarioNames(t)
 	scenarios := make([]any, 0, len(scenarioNames)+1)
 	scenarioResults := make([]any, 0, len(scenarioNames)+1)
@@ -2223,15 +2254,15 @@ func writeConnectorProofZIP(t *testing.T, path string, manifest []byte, connecto
 		"pre_removal_evidence_sha256":      preRemovalEvidenceSHA,
 		"pre_removal_deployment_sha256":    preRemovalDeploymentSHA,
 		"deployment_manifest_sha256":       sha256Hex(manifest),
-		"deployment_runtime_inputs_sha256": sha256Hex(deploymentRuntimeInputsBytes(t, manifest)),
+		"deployment_runtime_inputs_sha256": sha256Hex(runtimeBytes),
 		"deployment_producer": map[string]any{
 			"repository":      "layervai/nhp",
 			"workflow_path":   ".github/workflows/udp-proof-deployment-manifest.yml",
-			"run_id":          "987654",
-			"run_attempt":     "1",
-			"head_sha":        strings.Repeat("c", 40),
-			"artifact_id":     "7654321",
-			"artifact_digest": "sha256:" + strings.Repeat("d", 64),
+			"run_id":          "876543",
+			"run_attempt":     "2",
+			"head_sha":        strings.Repeat("b", 40),
+			"artifact_id":     "6543210",
+			"artifact_digest": "sha256:" + strings.Repeat("a", 64),
 		},
 		"inventory_sha256":               sha256Hex(inventoryBytes),
 		"scenario_contract_sha256":       sha256Hex(contractBytes),
@@ -2279,11 +2310,32 @@ func writeConnectorProofZIP(t *testing.T, path string, manifest []byte, connecto
 	image := provenance["image"].(map[string]any)
 	modules := provenance["modules"].(map[string]any)
 	operational := provenance["operational"].(map[string]any)
+	deploymentProducer := evidence["deployment_producer"].(map[string]any)
 	switch options.mutation {
 	case "wrong_dispatch_correlation":
 		evidence["dispatch_correlation_id"] = nativeUDPDispatchCorrelation("qurl_go", phase)
 	case "wrong_controller_run_identity":
 		evidence["nhp_controller_run_attempt"] = "2"
+	case "extra_producer_field":
+		deploymentProducer["unexpected"] = true
+	case "missing_producer_field":
+		delete(deploymentProducer, "artifact_id")
+	case "wrong_producer_repository":
+		deploymentProducer["repository"] = "someone/nhp"
+	case "wrong_producer_workflow":
+		deploymentProducer["workflow_path"] = ".github/workflows/other.yml"
+	case "zero_producer_run_id":
+		deploymentProducer["run_id"] = "0"
+	case "numeric_producer_run_id":
+		deploymentProducer["run_id"] = 876543
+	case "zero_producer_run_attempt":
+		deploymentProducer["run_attempt"] = "0"
+	case "invalid_producer_head_sha":
+		deploymentProducer["head_sha"] = strings.Repeat("B", 40)
+	case "zero_producer_artifact_id":
+		deploymentProducer["artifact_id"] = "0"
+	case "invalid_producer_artifact_digest":
+		deploymentProducer["artifact_digest"] = strings.Repeat("a", 64)
 	case "wrong_image":
 		image["oci_manifest_digest"] = "sha256:" + strings.Repeat("f", 64)
 	case "wrong_module":
@@ -2314,7 +2366,7 @@ func writeConnectorProofZIP(t *testing.T, path string, manifest []byte, connecto
 		body []byte
 	}{
 		{name: "sandbox-deployment-manifest.json", body: manifest},
-		{name: "deployment-runtime-inputs.json", body: deploymentRuntimeInputsBytes(t, manifest)},
+		{name: "deployment-runtime-inputs.json", body: runtimeBytes},
 		{name: "strict-proof-scenarios.json", body: inventoryBytes},
 		{name: "strict-sandbox-proof.evidence.json", body: evidenceBytes},
 	}
