@@ -171,7 +171,7 @@ artifact evidence. The attended command explicitly includes all four proof top
 levels, so external rows are finishable without reassigning their owner. Both
 non-implemented statuses are blocking. The workflow deliberately
 ends red while any required row is not implemented and backed by an exact named
-pass, so today's 10 implemented and 58 blocking scenarios cannot authorize any
+pass, so today's 25 implemented and 43 blocking scenarios cannot authorize any
 retirement or removal. The DNS and timeout cases are inherently client-side failure paths,
 run in ordinary CI as well as the attended runner through only the public SDK.
 Add other evidence only when the real Hub/Authority/cell prerequisites and
