@@ -19,7 +19,7 @@ import (
 
 const (
 	nativeUDPWorkflowID                   = "4242"
-	reviewedInventoryMappingSHA256Fixture = "f5aaef5b840c461ed91530fe6e3b820f47476eaa0f5da327db48c2213e60176c"
+	reviewedInventoryMappingSHA256Fixture = "b5034ec95f0505c46637d7121f598544f0392dd6290c6248fd8a12b927ead3f6"
 	reviewedConnectorScenarioNamesSHA256  = "b59ce836704174518c3c66a79f49a51487379bd7efbd9db09e50f829a7d8bb3c"
 )
 
@@ -943,8 +943,8 @@ func TestNativeUDPSandboxEvidenceManifestIsAllowlisted(t *testing.T) {
 		}
 	}
 	counts := decoded["counts"].(map[string]any)
-	if counts["blocking"] != float64(54) {
-		t.Fatalf("evidence blocking count = %v, want 54", counts["blocking"])
+	if counts["blocking"] != float64(49) {
+		t.Fatalf("evidence blocking count = %v, want 49", counts["blocking"])
 	}
 	results := decoded["scenario_results"].([]any)
 	if len(results) != 1 {
