@@ -250,6 +250,36 @@ func TestSandboxNativeUDPLifecycle(t *testing.T) {
 		return
 	}
 
+	if !runTypedEvidenceScenario(t, "remaining_phase_timeouts", "packet.remaining_phase_timeouts", []string{"packet_fault_observation"}, func(t *testing.T) {
+		provePacketRemainingPhaseTimeouts(ctx, t, httpTrap)
+	}) {
+		return
+	}
+
+	if !runTypedEvidenceScenario(t, "malformed_packet", "packet.malformed", []string{"packet_fault_observation"}, func(t *testing.T) {
+		provePacketMalformed(ctx, t, httpTrap)
+	}) {
+		return
+	}
+
+	if !runTypedEvidenceScenario(t, "packet_duplicate", "packet.duplicate", []string{"packet_fault_observation"}, func(t *testing.T) {
+		provePacketDuplicate(ctx, t, httpTrap)
+	}) {
+		return
+	}
+
+	if !runTypedEvidenceScenario(t, "multi_address_ipv4_ipv6_bounds", "dns.multi_address_ipv4_ipv6_bounds", []string{"dns_resolution"}, func(t *testing.T) {
+		proveMultiAddressBounds(ctx, t, httpTrap)
+	}) {
+		return
+	}
+
+	if !runTypedEvidenceScenario(t, "packet_cancellation", "packet.cancellation", []string{"packet_fault_observation"}, func(t *testing.T) {
+		provePacketCancellation(ctx, t, httpTrap)
+	}) {
+		return
+	}
+
 	cellEvidence := make([]sandboxCellEvidence, 0, 3)
 	// Happy-path lifecycle calls deliberately omit UDP and retry overrides so
 	// the deployed proof measures the SDK's out-of-box production defaults.
@@ -381,6 +411,21 @@ func TestNativeUDPClientFaultPaths(t *testing.T) {
 	})
 	t.Run("cell_dns_failure", func(t *testing.T) {
 		proveCellDNSFailure(t.Context(), t, httpTrap)
+	})
+	t.Run("remaining_phase_timeouts", func(t *testing.T) {
+		provePacketRemainingPhaseTimeouts(t.Context(), t, httpTrap)
+	})
+	t.Run("malformed_packet", func(t *testing.T) {
+		provePacketMalformed(t.Context(), t, httpTrap)
+	})
+	t.Run("packet_duplicate", func(t *testing.T) {
+		provePacketDuplicate(t.Context(), t, httpTrap)
+	})
+	t.Run("multi_address_ipv4_ipv6_bounds", func(t *testing.T) {
+		proveMultiAddressBounds(t.Context(), t, httpTrap)
+	})
+	t.Run("packet_cancellation", func(t *testing.T) {
+		provePacketCancellation(t.Context(), t, httpTrap)
 	})
 }
 
