@@ -280,6 +280,42 @@ func TestSandboxNativeUDPLifecycle(t *testing.T) {
 		return
 	}
 
+	if !runTypedEvidenceScenario(t, "packet_loss", "packet.loss", []string{"packet_fault_observation"}, func(t *testing.T) {
+		provePacketLoss(ctx, t, httpTrap)
+	}) {
+		return
+	}
+
+	if !runTypedEvidenceScenario(t, "packet_delay", "packet.delay", []string{"packet_fault_observation"}, func(t *testing.T) {
+		provePacketDelay(ctx, t, httpTrap)
+	}) {
+		return
+	}
+
+	if !runTypedEvidenceScenario(t, "packet_replay", "packet.replay", []string{"packet_fault_observation"}, func(t *testing.T) {
+		provePacketReplay(ctx, t, httpTrap)
+	}) {
+		return
+	}
+
+	if !runTypedEvidenceScenario(t, "hub_cookie_proof_lst_return_routability", "assignment.hub_cookie_proof_lst_return_routability", []string{"assignment_response"}, func(t *testing.T) {
+		proveHubCookieProofRoutability(ctx, t, httpTrap)
+	}) {
+		return
+	}
+
+	if !runTypedEvidenceScenario(t, "assigned_cell_cookie_reknock_return_routability", "session.cell_cookie_reknock_return_routability", []string{"lifecycle_exchange"}, func(t *testing.T) {
+		proveCellCookieReknockRoutability(ctx, t, httpTrap)
+	}) {
+		return
+	}
+
+	if !runTypedEvidenceScenario(t, "authenticated_invalid_assignment_matrix", "assignment.authenticated_invalid_response_matrix", []string{"assignment_response"}, func(t *testing.T) {
+		proveAuthenticatedInvalidAssignmentMatrix(ctx, t, httpTrap)
+	}) {
+		return
+	}
+
 	cellEvidence := make([]sandboxCellEvidence, 0, 3)
 	// Happy-path lifecycle calls deliberately omit UDP and retry overrides so
 	// the deployed proof measures the SDK's out-of-box production defaults.
@@ -426,6 +462,24 @@ func TestNativeUDPClientFaultPaths(t *testing.T) {
 	})
 	t.Run("packet_cancellation", func(t *testing.T) {
 		provePacketCancellation(t.Context(), t, httpTrap)
+	})
+	t.Run("packet_loss", func(t *testing.T) {
+		provePacketLoss(t.Context(), t, httpTrap)
+	})
+	t.Run("packet_delay", func(t *testing.T) {
+		provePacketDelay(t.Context(), t, httpTrap)
+	})
+	t.Run("packet_replay", func(t *testing.T) {
+		provePacketReplay(t.Context(), t, httpTrap)
+	})
+	t.Run("hub_cookie_proof_lst_return_routability", func(t *testing.T) {
+		proveHubCookieProofRoutability(t.Context(), t, httpTrap)
+	})
+	t.Run("assigned_cell_cookie_reknock_return_routability", func(t *testing.T) {
+		proveCellCookieReknockRoutability(t.Context(), t, httpTrap)
+	})
+	t.Run("authenticated_invalid_assignment_matrix", func(t *testing.T) {
+		proveAuthenticatedInvalidAssignmentMatrix(t.Context(), t, httpTrap)
 	})
 }
 

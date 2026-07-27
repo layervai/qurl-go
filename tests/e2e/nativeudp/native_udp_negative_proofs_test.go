@@ -1,6 +1,7 @@
 package nativeudp_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdh"
 	"crypto/rand"
@@ -55,6 +56,33 @@ const (
 	malformedHeaderBodyReplyBytes = 400
 )
 
+// loopbackFaultConfig carries the wire-fault knobs the loss, delay, and replay
+// proofs layer on top of an otherwise correct responder. They are deliberately
+// orthogonal to nhpResponder: each one models something that happens to a
+// well-formed authenticated reply in transit rather than a differently-built
+// reply.
+type loopbackFaultConfig struct {
+	// dropReplies withholds the reply to the first N received flights. The
+	// request itself is still received and counted, so a dropped flight is
+	// observable as a request the client sent and got no answer to.
+	dropReplies int
+
+	// replyDelay sleeps before writing each reply, modelling a slow path. A
+	// delay past the attempt timeout makes the reply arrive after the client
+	// has already given up on that address.
+	replyDelay time.Duration
+
+	// replayFirstReply answers every flight after the first with the exact
+	// captured bytes of the first authenticated reply, modelling an on-path
+	// replay of genuinely server-signed material.
+	replayFirstReply bool
+
+	// reflectRequest writes the agent's own initiator datagram straight back at
+	// it, modelling the reflection replay an on-path attacker can mount without
+	// holding any key at all.
+	reflectRequest bool
+}
+
 // loopbackNHPServer is a loopback NHP responder. It opens the agent's initiator
 // packet with the responder-role helpers and answers according to its configured
 // behavior, recording how many initiator datagrams it received.
@@ -66,14 +94,20 @@ type loopbackNHPServer struct {
 	agentPub       []byte
 	behavior       nhpResponder
 	malformedBytes int // garbage-datagram size written by respondMalformed
+	fault          loopbackFaultConfig
 	done           chan struct{}
 
-	mu       sync.Mutex
-	received int
-	replies  int
+	mu         sync.Mutex
+	received   int
+	replies    int
+	packets    [][]byte // every initiator datagram, in arrival order
+	firstReply []byte   // captured by replayFirstReply
 }
 
-func newLoopbackNHPServer(t *testing.T, serverPriv, agentPub []byte, behavior nhpResponder, malformedBytes int) *loopbackNHPServer {
+// newLoopbackNHPServer builds and starts a responder. Every knob is supplied
+// here rather than assigned afterwards: the serve goroutine starts before this
+// returns, so a post-construction field write would race it.
+func newLoopbackNHPServer(t *testing.T, serverPriv, agentPub []byte, behavior nhpResponder, malformedBytes int, fault loopbackFaultConfig) *loopbackNHPServer {
 	t.Helper()
 	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
 	if err != nil {
@@ -87,6 +121,7 @@ func newLoopbackNHPServer(t *testing.T, serverPriv, agentPub []byte, behavior nh
 		agentPub:       agentPub,
 		behavior:       behavior,
 		malformedBytes: malformedBytes,
+		fault:          fault,
 		done:           make(chan struct{}),
 	}
 	go func() {
@@ -110,6 +145,20 @@ func (s *loopbackNHPServer) receivedCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.received
+}
+
+// receivedPackets returns a copy of every initiator datagram in arrival order.
+// Byte identity across entries is how the loss proof distinguishes an in-exchange
+// address fallback — which deliberately resends the same packet — from a wholly
+// fresh outer retry, which must mint new randomness.
+func (s *loopbackNHPServer) receivedPackets() [][]byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	packets := make([][]byte, len(s.packets))
+	for i := range s.packets {
+		packets[i] = bytes.Clone(s.packets[i])
+	}
+	return packets
 }
 
 // replyCount is how many reply datagrams the responder has finished writing. It
@@ -159,7 +208,21 @@ func (s *loopbackNHPServer) serve() {
 		copy(pkt, buf[:n])
 		s.mu.Lock()
 		s.received++
+		flight := s.received
+		s.packets = append(s.packets, pkt)
 		s.mu.Unlock()
+
+		// packet.replay: a reflection replay needs no key, so it is applied before
+		// the responder even tries to open the datagram.
+		if s.fault.reflectRequest {
+			if _, err := s.conn.WriteToUDP(pkt, raddr); err != nil {
+				s.t.Logf("loopback server: reflect request: %v", err)
+			}
+			s.mu.Lock()
+			s.replies++
+			s.mu.Unlock()
+			continue
+		}
 
 		msg, err := relayknocktest.OpenInitiatorMessage(s.serverPriv, s.agentPub, pkt)
 		if err != nil {
@@ -169,6 +232,25 @@ func (s *loopbackNHPServer) serve() {
 		resp := s.buildResponse(msg)
 		if resp == nil {
 			continue
+		}
+		// packet.loss: the request was received but its reply never leaves.
+		if flight <= s.fault.dropReplies {
+			continue
+		}
+		// packet.replay: capture the first authenticated reply, then answer every
+		// later flight with those exact bytes.
+		if s.fault.replayFirstReply {
+			s.mu.Lock()
+			if s.firstReply == nil {
+				s.firstReply = bytes.Clone(resp)
+			} else {
+				resp = bytes.Clone(s.firstReply)
+			}
+			s.mu.Unlock()
+		}
+		// packet.delay: the reply is well-formed but late.
+		if s.fault.replyDelay > 0 {
+			time.Sleep(s.fault.replyDelay)
 		}
 		copies := 1
 		if s.behavior == respondDuplicate {
@@ -280,9 +362,23 @@ func newLoopbackNHPExchange(t *testing.T, behavior nhpResponder, malformedReplyB
 	default:
 		t.Fatalf("newLoopbackNHPExchange accepts at most one malformed reply size, got %d", len(malformedReplyBytes))
 	}
+	return newConfiguredLoopbackNHPExchange(t, behavior, malformedBytes, loopbackFaultConfig{})
+}
+
+// newLoopbackNHPFaultExchange wires an otherwise correct responder that applies
+// the given in-transit wire faults. It is the loss/delay/replay companion to
+// newLoopbackNHPExchange, which varies how the reply is built rather than what
+// happens to it.
+func newLoopbackNHPFaultExchange(t *testing.T, fault loopbackFaultConfig) (*loopbackNHPServer, nativeudp.Endpoint, nativeudp.Options) {
+	t.Helper()
+	return newConfiguredLoopbackNHPExchange(t, respondCorrectly, malformedHeaderReplyBytes, fault)
+}
+
+func newConfiguredLoopbackNHPExchange(t *testing.T, behavior nhpResponder, malformedBytes int, fault loopbackFaultConfig) (*loopbackNHPServer, nativeudp.Endpoint, nativeudp.Options) {
+	t.Helper()
 	serverPriv, serverPub := mustNHPKeypair(t)
 	devicePriv := mustNHPPriv(t)
-	srv := newLoopbackNHPServer(t, serverPriv, nhpPubOf(t, devicePriv), behavior, malformedBytes)
+	srv := newLoopbackNHPServer(t, serverPriv, nhpPubOf(t, devicePriv), behavior, malformedBytes, fault)
 	ep := nativeudp.Endpoint{Host: "cell0.nhp.test", Port: srv.port(), ServerStaticPub: serverPub}
 	opts := nativeudp.Options{
 		DeviceStaticPriv: devicePriv,
@@ -808,6 +904,1203 @@ func provePacketCancellation(ctx context.Context, t *testing.T, httpTrap *lifecy
 	assertNoLifecycleHTTP(t, httpTrap)
 	t.Logf("EVIDENCE packet_cancellation in_flight_phases=%d pre_boundary_phases=%d rejection=context.Canceled transport_recast=0 pre_boundary_dns_lookups=0 pre_boundary_dials=0 pre_boundary_datagrams=0 registration_state_mutation=0 lifecycle_http_calls=0",
 		len(hubAndCellExchanges()), len(hubAndCellExchanges()))
+}
+
+// cookieRoutabilityProfile selects which two-leg return-routability profile the
+// loopback responder speaks. Both share a shape — an ordinary first flight, an
+// authenticated NHP_COK carrying a 32-byte cookie bound to the first flight's
+// counter through body.trxId, then a cookie-bound second flight — but they admit
+// different header types and are opened by different responder-role helpers.
+type cookieRoutabilityProfile int
+
+const (
+	// hubAssignmentRoutability is NHP_LST -> NHP_COK -> cookie-bound proof
+	// NHP_LST -> NHP_LRT, driven by nativeudp.AssignmentList and opened with
+	// relayknocktest.OpenHubLSTCookieProofMessage.
+	hubAssignmentRoutability cookieRoutabilityProfile = iota
+	// cellReknockRoutability is NHP_KNK -> NHP_COK -> cookie-bound NHP_RKN ->
+	// NHP_ACK, driven by nativeudp.KnockWithReknock and opened with
+	// relayknocktest.OpenReknockMessage.
+	cellReknockRoutability
+)
+
+func (p cookieRoutabilityProfile) String() string {
+	if p == hubAssignmentRoutability {
+		return "hub_assignment_lst"
+	}
+	return "assigned_cell_reknock"
+}
+
+// firstFlightType is the initiator header type this profile's unproven first
+// flight must carry, and resultType is the reply type that completes it.
+func (p cookieRoutabilityProfile) firstFlightType() int {
+	if p == hubAssignmentRoutability {
+		return relayknock.TypeListRequest
+	}
+	return relayknock.TypeKnock
+}
+
+func (p cookieRoutabilityProfile) resultType() int {
+	if p == hubAssignmentRoutability {
+		return relayknock.TypeListResult
+	}
+	return relayknock.TypeACK
+}
+
+// cookieRoutabilityServer is a loopback responder that speaks a full two-leg
+// cookie return-routability profile. It dispatches on what each datagram
+// actually opens as rather than on arrival index: the second flight is
+// admissible only under the cookie-bound opener, so a correct dispatch is itself
+// evidence that a proof packet is not an ordinary initiator message. Every
+// proof flight is additionally probed with a deliberately wrong cookie, so the
+// digest binding is observed to fail closed rather than assumed.
+// cookieRoutabilityConfig carries every responder knob. Like the loopback
+// responder's fault config it is supplied at construction, because the serve
+// goroutine is already running by the time the constructor returns.
+type cookieRoutabilityConfig struct {
+	// resultBody is the application body of the completing reply. Empty means
+	// the default {"ok":true}.
+	resultBody []byte
+	// directResult answers the first flight with the completing reply instead of
+	// a challenge, so the no-challenge path can be driven from the same harness.
+	directResult bool
+	// replayFirstChallenge answers every later first flight with the exact
+	// captured bytes of the first NHP_COK, modelling an on-path replay of
+	// genuinely server-signed challenge material bound to a spent transaction.
+	replayFirstChallenge bool
+}
+
+type cookieRoutabilityServer struct {
+	t          *testing.T
+	conn       *net.UDPConn
+	serverPriv []byte
+	agentPub   []byte
+	cookie     []byte
+	profile    cookieRoutabilityProfile
+	config     cookieRoutabilityConfig
+	done       chan struct{}
+
+	mu             sync.Mutex
+	firstFlights   []*relayknock.Reply
+	proofFlights   []*relayknock.Reply
+	packets        [][]byte
+	firstChallenge []byte
+	wrongCookieErr error
+	initiatorErr   error
+}
+
+func newCookieRoutabilityServer(t *testing.T, serverPriv, agentPub []byte, profile cookieRoutabilityProfile, config cookieRoutabilityConfig) *cookieRoutabilityServer {
+	t.Helper()
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatalf("listen udp: %v", err)
+	}
+	if len(config.resultBody) == 0 {
+		config.resultBody = []byte(`{"ok":true}`)
+	}
+	s := &cookieRoutabilityServer{
+		t:          t,
+		conn:       conn,
+		serverPriv: serverPriv,
+		agentPub:   agentPub,
+		cookie:     mustNHPRand(t, 32),
+		profile:    profile,
+		config:     config,
+		done:       make(chan struct{}),
+	}
+	go func() {
+		defer close(s.done)
+		s.serve()
+	}()
+	t.Cleanup(func() {
+		_ = conn.Close()
+		select {
+		case <-s.done:
+		case <-time.After(2 * time.Second):
+			t.Error("cookie routability server did not stop after socket close")
+		}
+	})
+	return s
+}
+
+func (s *cookieRoutabilityServer) port() int { return s.conn.LocalAddr().(*net.UDPAddr).Port }
+
+func (s *cookieRoutabilityServer) serve() {
+	buf := make([]byte, 1<<16)
+	for {
+		n, raddr, err := s.conn.ReadFromUDP(buf)
+		if err != nil {
+			return // conn closed
+		}
+		packet := bytes.Clone(buf[:n])
+		s.mu.Lock()
+		s.packets = append(s.packets, packet)
+		s.mu.Unlock()
+
+		request, initiatorErr := relayknocktest.OpenInitiatorMessage(s.serverPriv, s.agentPub, packet)
+		if initiatorErr == nil {
+			s.serveFirstFlight(raddr, request)
+			continue
+		}
+		s.mu.Lock()
+		s.initiatorErr = initiatorErr
+		s.mu.Unlock()
+		s.serveProofFlight(raddr, packet)
+	}
+}
+
+func (s *cookieRoutabilityServer) serveFirstFlight(raddr *net.UDPAddr, request *relayknock.Reply) {
+	if request.Type != s.profile.firstFlightType() {
+		s.t.Errorf("%s first flight header type = %d, want %d", s.profile, request.Type, s.profile.firstFlightType())
+		return
+	}
+	s.mu.Lock()
+	s.firstFlights = append(s.firstFlights, request)
+	replay := s.config.replayFirstChallenge && s.firstChallenge != nil
+	captured := bytes.Clone(s.firstChallenge)
+	s.mu.Unlock()
+
+	if s.config.directResult {
+		s.write(raddr, s.buildReply(s.profile.resultType(), request.Counter, s.config.resultBody))
+		return
+	}
+	if replay {
+		// A spent, still perfectly authenticated challenge: only its body.trxId
+		// binding to the retired first flight can reject it.
+		s.write(raddr, captured)
+		return
+	}
+	// The challenge's own wire counter is deliberately unconstrained; body.trxId
+	// carries the binding to the flight being challenged.
+	challenge := s.buildReply(relayknock.TypeCookieChallenge, request.Counter+99,
+		[]byte(fmt.Sprintf(`{"trxId":%d,"cookie":%q}`, request.Counter, base64.StdEncoding.EncodeToString(s.cookie))))
+	s.mu.Lock()
+	if s.firstChallenge == nil {
+		s.firstChallenge = bytes.Clone(challenge)
+	}
+	s.mu.Unlock()
+	s.write(raddr, challenge)
+}
+
+func (s *cookieRoutabilityServer) serveProofFlight(raddr *net.UDPAddr, packet []byte) {
+	// Fail-closed probe: the same packet under a one-bit-different cookie must
+	// not open, so the accepted open below is a real digest binding.
+	wrongCookie := bytes.Clone(s.cookie)
+	wrongCookie[0] ^= 0xff
+	_, wrongCookieErr := s.openProof(wrongCookie, packet)
+	s.mu.Lock()
+	s.wrongCookieErr = wrongCookieErr
+	s.mu.Unlock()
+
+	request, err := s.openProof(s.cookie, packet)
+	if err != nil {
+		s.t.Errorf("%s open cookie-bound proof flight: %v", s.profile, err)
+		return
+	}
+	s.mu.Lock()
+	s.proofFlights = append(s.proofFlights, request)
+	s.mu.Unlock()
+	s.write(raddr, s.buildReply(s.profile.resultType(), request.Counter, s.config.resultBody))
+}
+
+func (s *cookieRoutabilityServer) openProof(cookie, packet []byte) (*relayknock.Reply, error) {
+	if s.profile == hubAssignmentRoutability {
+		return relayknocktest.OpenHubLSTCookieProofMessage(s.serverPriv, s.agentPub, cookie, packet)
+	}
+	return relayknocktest.OpenReknockMessage(s.serverPriv, s.agentPub, cookie, packet)
+}
+
+func (s *cookieRoutabilityServer) buildReply(replyType int, counter uint64, body []byte) []byte {
+	packet, err := relayknocktest.BuildReply(replyType, &relayknock.KnockInputs{
+		DeviceStaticPriv: s.serverPriv,
+		ServerStaticPub:  s.agentPub,
+		EphemeralPriv:    mustNHPRand(s.t, 32),
+		TimestampNanos:   uint64(time.Now().UnixNano()),
+		Counter:          counter,
+		Preamble:         binary.BigEndian.Uint32(mustNHPRand(s.t, 4)),
+		Body:             body,
+	})
+	if err != nil {
+		s.t.Errorf("%s build reply type %d: %v", s.profile, replyType, err)
+		return nil
+	}
+	return packet
+}
+
+func (s *cookieRoutabilityServer) write(raddr *net.UDPAddr, packet []byte) {
+	if packet == nil {
+		return
+	}
+	if _, err := s.conn.WriteToUDP(packet, raddr); err != nil {
+		s.t.Logf("%s write reply: %v", s.profile, err)
+	}
+}
+
+// snapshot returns the flights the responder admitted plus the two fail-closed
+// probes: initiatorErr is why a proof flight is not an ordinary initiator
+// message, and wrongCookieErr is why it does not open under a different cookie.
+func (s *cookieRoutabilityServer) snapshot() (first, proof []*relayknock.Reply, packets [][]byte, initiatorErr, wrongCookieErr error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	first = slices.Clone(s.firstFlights)
+	proof = slices.Clone(s.proofFlights)
+	packets = make([][]byte, len(s.packets))
+	for i := range s.packets {
+		packets[i] = bytes.Clone(s.packets[i])
+	}
+	return first, proof, packets, s.initiatorErr, s.wrongCookieErr
+}
+
+// cookieRoutabilityExchange bundles a two-leg responder with the transport
+// wiring that drives it, so a proof can assert the protocol outcome and the
+// per-leg resolve/dial bookkeeping together.
+type cookieRoutabilityExchange struct {
+	server   *cookieRoutabilityServer
+	endpoint nativeudp.Endpoint
+	options  nativeudp.Options
+	resolver *scriptedResolver
+	dialer   *addressRecordingDialer
+}
+
+// newCookieRoutabilityExchange wires a two-leg responder behind a globally
+// routable synthetic address, so the transport's non-public-address rejection
+// stays active and every leg is observed to dial the public endpoint.
+func newCookieRoutabilityExchange(t *testing.T, profile cookieRoutabilityProfile, config cookieRoutabilityConfig) *cookieRoutabilityExchange {
+	t.Helper()
+	devicePriv := mustNHPPriv(t)
+	return newCookieRoutabilityExchangeForAgent(t, profile, devicePriv, nhpPubOf(t, devicePriv), config)
+}
+
+// newCookieRoutabilityExchangeForAgent pins the responder to an agent public key
+// the caller already holds. The public registration driver mints and persists
+// its own device identity, so a responder that has to open its packets must be
+// keyed from that persisted state rather than from a key the test picked;
+// devicePriv only populates Options.DeviceStaticPriv, so such a caller passes nil.
+func newCookieRoutabilityExchangeForAgent(t *testing.T, profile cookieRoutabilityProfile, devicePriv, agentPub []byte, config cookieRoutabilityConfig) *cookieRoutabilityExchange {
+	t.Helper()
+	serverPriv, serverPub := mustNHPKeypair(t)
+	server := newCookieRoutabilityServer(t, serverPriv, agentPub, profile, config)
+	host := "hub.nhp.layerv.ai"
+	if profile == cellReknockRoutability {
+		host = "cell0.nhp.layerv.ai"
+	}
+	resolver := &scriptedResolver{answers: [][]netip.Addr{{netip.MustParseAddr("8.8.8.8")}}}
+	dialer := &addressRecordingDialer{port: server.port()}
+	return &cookieRoutabilityExchange{
+		server:   server,
+		endpoint: nativeudp.Endpoint{Host: host, Port: server.port(), ServerStaticPub: serverPub},
+		options: nativeudp.Options{
+			DeviceStaticPriv: devicePriv,
+			Resolver:         resolver,
+			Dialer:           dialer,
+			Timeout:          2 * time.Second,
+			MaxAddresses:     1,
+		},
+		resolver: resolver,
+		dialer:   dialer,
+	}
+}
+
+// assignedCellExchanges is the subset of exported phases that a single
+// authenticated in-profile reply completes. The Hub assignment LST is excluded
+// because its first flight accepts only NHP_COK, so it cannot succeed against a
+// single-reply responder.
+func assignedCellExchanges() []nhpExchange {
+	all := hubAndCellExchanges()
+	cell := make([]nhpExchange, 0, len(all))
+	for _, exchange := range all {
+		if exchange.singleReplyCompletes {
+			cell = append(cell, exchange)
+		}
+	}
+	return cell
+}
+
+// twoPublicAddresses is a two-answer DNS result used by the loss and delay
+// proofs to exercise the bounded serial address budget.
+func twoPublicAddresses() []netip.Addr {
+	return []netip.Addr{netip.MustParseAddr("8.8.8.8"), netip.MustParseAddr("8.8.4.4")}
+}
+
+// routingDialer maps each logical resolved address to its own concrete loopback
+// target, so one address can be a blackhole that swallows the request datagram
+// while another reaches the responder. It is how request-flight loss is modelled
+// without turning the loss into a dial failure.
+type routingDialer struct {
+	routes map[string]string
+
+	mu     sync.Mutex
+	dialed []string
+}
+
+func (d *routingDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	d.mu.Lock()
+	d.dialed = append(d.dialed, address)
+	target, ok := d.routes[address]
+	d.mu.Unlock()
+	if !ok {
+		return nil, fmt.Errorf("routingDialer has no route for %s", address)
+	}
+	return (&net.Dialer{}).DialContext(ctx, network, target)
+}
+
+func (d *routingDialer) snapshot() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return slices.Clone(d.dialed)
+}
+
+// recordingUDPBlackhole accepts datagrams and never answers, keeping every
+// datagram's bytes. startUDPBlackhole only counts; the loss proof additionally
+// needs the bytes, because whether two outer attempts are the same logical
+// operation or two fresh ones is exactly a question about those bytes.
+type recordingUDPBlackhole struct {
+	conn *net.UDPConn
+	done chan struct{}
+
+	mu      sync.Mutex
+	packets [][]byte
+}
+
+func startRecordingUDPBlackhole(t *testing.T) *recordingUDPBlackhole {
+	t.Helper()
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("bind recording UDP blackhole: %v", err)
+	}
+	b := &recordingUDPBlackhole{conn: conn, done: make(chan struct{})}
+	go func() {
+		defer close(b.done)
+		buf := make([]byte, 1<<16)
+		for {
+			n, _, err := conn.ReadFromUDP(buf)
+			if err != nil {
+				return
+			}
+			b.mu.Lock()
+			b.packets = append(b.packets, bytes.Clone(buf[:n]))
+			b.mu.Unlock()
+		}
+	}()
+	t.Cleanup(func() {
+		_ = conn.Close()
+		select {
+		case <-b.done:
+		case <-time.After(2 * time.Second):
+			t.Error("recording UDP blackhole did not stop after socket close")
+		}
+	})
+	return b
+}
+
+func (b *recordingUDPBlackhole) address() string { return b.conn.LocalAddr().String() }
+
+// awaitPackets waits until want datagrams have been recorded, then returns
+// everything recorded. It deliberately does not wait past want, so an extra
+// datagram still fails a caller's exact-count check.
+func (b *recordingUDPBlackhole) awaitPackets(want int) [][]byte {
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		b.mu.Lock()
+		got := len(b.packets)
+		b.mu.Unlock()
+		if got >= want || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	packets := make([][]byte, len(b.packets))
+	for i := range b.packets {
+		packets[i] = bytes.Clone(b.packets[i])
+	}
+	return packets
+}
+
+// provePacketLoss proves the SDK's response to a dropped flight is bounded
+// recovery that never invents a second logical operation. A lost reply is
+// recovered by the serial address budget, and the retried flight is the very
+// same packet — address fallback deliberately resends, so a server that already
+// accepted the first copy sees no new transaction. When every flight is lost the
+// exchange ends as a retryable ErrTransport timeout after exactly the budgeted
+// number of datagrams, never as a definitive resolve/authentication/correlation
+// rejection. A lost request behaves identically. Above that, the bounded outer
+// retry in the public registration driver mints a genuinely fresh packet per
+// attempt and still advances no durable state.
+func provePacketLoss(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTPTrap) {
+	t.Helper()
+	const attemptTimeout = 250 * time.Millisecond
+
+	// A lost reply is recovered inside the address budget with the same packet.
+	for _, exchange := range assignedCellExchanges() {
+		server, ep, opts := newLoopbackNHPFaultExchange(t, loopbackFaultConfig{dropReplies: 1})
+		dialer := &addressRecordingDialer{port: ep.Port}
+		opts.Resolver = fixedAddressesResolver{addresses: twoPublicAddresses()}
+		opts.Dialer, opts.MaxAddresses, opts.Timeout = dialer, 2, attemptTimeout
+		reply, err := exchange.call(ctx, ep, nil, opts)
+		if reply == nil || err != nil {
+			t.Fatalf("reply_loss/%s = reply %v, err %v; want the next address to complete the exchange", exchange.name, reply, err)
+		}
+		packets := server.receivedPackets()
+		if len(packets) != 2 {
+			t.Fatalf("reply_loss/%s delivered %d datagrams, want exactly 2 (the lost flight and one bounded retry)", exchange.name, len(packets))
+		}
+		if !bytes.Equal(packets[0], packets[1]) {
+			t.Fatalf("reply_loss/%s minted new request material for the address fallback; a resend must not be a second logical operation", exchange.name)
+		}
+		if got := len(dialer.snapshot()); got != 2 {
+			t.Fatalf("reply_loss/%s dialed %d addresses, want exactly 2", exchange.name, got)
+		}
+	}
+
+	// Total reply loss is a bounded retryable miss at every exported phase.
+	for _, exchange := range hubAndCellExchanges() {
+		server, ep, opts := newLoopbackNHPFaultExchange(t, loopbackFaultConfig{dropReplies: 1 << 20})
+		opts.Resolver = fixedAddressesResolver{addresses: twoPublicAddresses()}
+		opts.Dialer, opts.MaxAddresses, opts.Timeout = &addressRecordingDialer{port: ep.Port}, 2, attemptTimeout
+		reply, err := exchange.call(ctx, ep, nil, opts)
+		var netErr net.Error
+		classified := reply == nil && errors.Is(err, nativeudp.ErrTransport) &&
+			!errors.Is(err, nativeudp.ErrResolve) && !errors.Is(err, nativeudp.ErrServerUnauthenticated) &&
+			!errors.Is(err, relayknock.ErrMalformedReply) && errors.As(err, &netErr) && netErr.Timeout()
+		if !classified {
+			t.Fatalf("total_loss/%s classification mismatch: error_type=%T reply_non_nil=%t transport=%t resolve=%t unauthenticated=%t malformed=%t net_timeout=%t",
+				exchange.name, err, reply != nil,
+				errors.Is(err, nativeudp.ErrTransport), errors.Is(err, nativeudp.ErrResolve),
+				errors.Is(err, nativeudp.ErrServerUnauthenticated), errors.Is(err, relayknock.ErrMalformedReply),
+				errors.As(err, &netErr) && netErr.Timeout())
+		}
+		packets := server.receivedPackets()
+		if len(packets) != 2 {
+			t.Fatalf("total_loss/%s delivered %d datagrams, want exactly the 2-address budget and no unbounded retry", exchange.name, len(packets))
+		}
+		if !bytes.Equal(packets[0], packets[1]) {
+			t.Fatalf("total_loss/%s minted new request material inside one exchange", exchange.name)
+		}
+	}
+
+	// A lost request flight recovers the same way: the first address swallows the
+	// datagram outright, so the responder sees only the surviving address.
+	for _, exchange := range assignedCellExchanges() {
+		server, ep, opts := newLoopbackNHPFaultExchange(t, loopbackFaultConfig{})
+		lost := startUDPBlackhole(t)
+		addresses := twoPublicAddresses()
+		dialer := &routingDialer{routes: map[string]string{
+			netip.AddrPortFrom(addresses[0], uint16(ep.Port)).String(): lost.LocalAddr().String(),
+			netip.AddrPortFrom(addresses[1], uint16(ep.Port)).String(): net.JoinHostPort("127.0.0.1", strconv.Itoa(ep.Port)),
+		}}
+		opts.Resolver = fixedAddressesResolver{addresses: addresses}
+		opts.Dialer, opts.MaxAddresses, opts.Timeout = dialer, 2, attemptTimeout
+		reply, err := exchange.call(ctx, ep, nil, opts)
+		if reply == nil || err != nil {
+			t.Fatalf("request_loss/%s = reply %v, err %v; want the surviving address to complete the exchange", exchange.name, reply, err)
+		}
+		if got := server.receivedCount(); got != 1 {
+			t.Fatalf("request_loss/%s responder received %d datagrams, want exactly 1 (the lost flight never arrived)", exchange.name, got)
+		}
+		if dropped, _ := drainUDPBlackhole(t, lost); dropped != 1 {
+			t.Fatalf("request_loss/%s lost-address blackhole absorbed %d datagrams, want exactly 1", exchange.name, dropped)
+		}
+		wantDialed := []string{
+			netip.AddrPortFrom(addresses[0], uint16(ep.Port)).String(),
+			netip.AddrPortFrom(addresses[1], uint16(ep.Port)).String(),
+		}
+		if got := dialer.snapshot(); !slices.Equal(got, wantDialed) {
+			t.Fatalf("request_loss/%s dial sequence = %q, want the lost address first then the surviving one %q", exchange.name, got, wantDialed)
+		}
+	}
+
+	// Durable recovery: the public registration driver's bounded outer retry
+	// mints genuinely fresh material per attempt and advances no durable state.
+	const (
+		agentID       = "qurl-go-fault-proof-loss"
+		outerAttempts = 2
+	)
+	store := faultStateStore(t)
+	lostHub := startRecordingUDPBlackhole(t)
+	_, serverPub := mustNHPKeypair(t)
+	hub := qurl.HubBootstrap{
+		Host:               "loss-proof.nhp.layerv.ai",
+		Port:               standardNHPUDPPort,
+		ServerPublicKeyB64: base64.StdEncoding.EncodeToString(serverPub),
+	}
+	client, binding, err := qurl.RegisterAgentRuntime(ctx, nonSecretFaultCredential, store,
+		qurl.WithAgentRuntimeHub(hub),
+		qurl.WithAgentRuntimeIdentity(agentID),
+		qurl.WithAgentRuntimeMetadata("qurl-go-sandbox", "packet-loss"),
+		qurl.WithAgentRuntimeUDPResolver(&fixedResolver{address: netip.MustParseAddr("8.8.8.8")}),
+		qurl.WithAgentRuntimeUDPDialer(&redirectingDialer{target: lostHub.address()}),
+		qurl.WithAgentRuntimeUDPBounds(attemptTimeout, 1),
+		qurl.WithAgentRuntimeAssignmentRetryBudget(outerAttempts, 30*time.Second),
+		qurl.WithAgentClientBaseURL("http://127.0.0.1:1"),
+		qurl.WithAgentClientHTTPClient(httpTrap),
+	)
+	bindingNonNil := binding != nil
+	if binding != nil {
+		binding.Destroy()
+	}
+	var recovery *qurl.AssignmentRecoveryRequiredError
+	if client != nil || bindingNonNil || !errors.As(err, &recovery) || !errors.Is(err, nativeudp.ErrTransport) ||
+		recoveryAttempts(recovery) != outerAttempts {
+		t.Fatalf("registration loss recovery mismatch: error_type=%T client_non_nil=%t binding_non_nil=%t recovery=%t transport=%t attempts=%d (want %d)",
+			err, client != nil, bindingNonNil, errors.As(err, &recovery), errors.Is(err, nativeudp.ErrTransport),
+			recoveryAttempts(recovery), outerAttempts)
+	}
+	if strings.Contains(err.Error(), nonSecretFaultCredential) {
+		t.Fatal("registration loss recovery reflected the enrollment credential")
+	}
+	outer := lostHub.awaitPackets(outerAttempts)
+	if len(outer) != outerAttempts {
+		t.Fatalf("registration loss emitted %d datagrams, want exactly one per bounded outer attempt (%d)", len(outer), outerAttempts)
+	}
+	if bytes.Equal(outer[0], outer[1]) {
+		t.Fatal("registration loss re-drove the same packet across outer attempts; a fresh exchange must mint fresh randomness")
+	}
+	assertInitialIdentityOnly(ctx, t, store, agentID, "packet_loss")
+
+	assertNoLifecycleHTTP(t, httpTrap)
+	t.Logf("EVIDENCE packet_loss reply_loss_phases=%d total_loss_phases=%d request_loss_phases=%d in_exchange_resend=identical_packet address_budget=2 rejection=ErrTransport+net.Error.Timeout outer_attempts=%d outer_packets_distinct=true registration_state_mutation=0 lifecycle_http_calls=0",
+		len(assignedCellExchanges()), len(hubAndCellExchanges()), len(assignedCellExchanges()), outerAttempts)
+}
+
+// provePacketDelay proves the SDK's latency contract is a deadline rather than a
+// wait. A reply later than the attempt bound is a bounded retryable miss at every
+// exported phase and the client returns at its own deadline instead of waiting
+// for the slow path; the identical responder inside the bound completes the
+// exchange normally, so the rejection is genuinely about lateness. Across the
+// serial address budget the worst case stays at MaxAddresses × Timeout, and a
+// reply that lands after the client gave up can never be adopted by the next
+// exchange.
+func provePacketDelay(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTPTrap) {
+	t.Helper()
+	const (
+		attemptTimeout = 200 * time.Millisecond
+		// Comfortably past attemptTimeout, and short enough that the responder
+		// finishes well inside its own shutdown tolerance.
+		lateReply = 700 * time.Millisecond
+		// Comfortably inside the generous bound used by the in-budget case.
+		promptReply   = 25 * time.Millisecond
+		generousBound = 2 * time.Second
+	)
+
+	// A late reply is a bounded retryable miss, and the client does not wait for it.
+	for _, exchange := range hubAndCellExchanges() {
+		server, ep, opts := newLoopbackNHPFaultExchange(t, loopbackFaultConfig{replyDelay: lateReply})
+		opts.MaxAddresses, opts.Timeout = 1, attemptTimeout
+		started := time.Now()
+		reply, err := exchange.call(ctx, ep, nil, opts)
+		elapsed := time.Since(started)
+		var netErr net.Error
+		classified := reply == nil && errors.Is(err, nativeudp.ErrTransport) &&
+			!errors.Is(err, nativeudp.ErrResolve) && !errors.Is(err, nativeudp.ErrServerUnauthenticated) &&
+			!errors.Is(err, relayknock.ErrMalformedReply) && errors.As(err, &netErr) && netErr.Timeout() &&
+			elapsed >= attemptTimeout/2 && elapsed < lateReply
+		if !classified {
+			t.Fatalf("late_reply/%s classification mismatch: error_type=%T reply_non_nil=%t transport=%t resolve=%t unauthenticated=%t malformed=%t net_timeout=%t elapsed=%s (want >= %s and < the %s reply delay)",
+				exchange.name, err, reply != nil,
+				errors.Is(err, nativeudp.ErrTransport), errors.Is(err, nativeudp.ErrResolve),
+				errors.Is(err, nativeudp.ErrServerUnauthenticated), errors.Is(err, relayknock.ErrMalformedReply),
+				errors.As(err, &netErr) && netErr.Timeout(), elapsed, attemptTimeout/2, lateReply)
+		}
+		if got := server.awaitReceived(1); got != 1 {
+			t.Fatalf("late_reply/%s emitted %d datagrams, want exactly 1 for one bounded address attempt", exchange.name, got)
+		}
+		// The reply genuinely exists and is merely late: this is a delay fault,
+		// not the loss fault proven separately.
+		if got := server.awaitReplies(1); got != 1 {
+			t.Fatalf("late_reply/%s responder wrote %d replies, want 1 (the reply must be late, not absent)", exchange.name, got)
+		}
+	}
+
+	// The same responder inside the bound completes: the contract is a deadline,
+	// not a fixed wait, so the rejection above is about lateness alone.
+	for _, exchange := range assignedCellExchanges() {
+		_, ep, opts := newLoopbackNHPFaultExchange(t, loopbackFaultConfig{replyDelay: promptReply})
+		opts.MaxAddresses, opts.Timeout = 1, generousBound
+		reply, err := exchange.call(ctx, ep, nil, opts)
+		if reply == nil || err != nil {
+			t.Fatalf("in_budget_delay/%s = reply %v, err %v; want a delayed but in-budget reply to complete the exchange", exchange.name, reply, err)
+		}
+	}
+
+	// Worst-case serial fan-out stays at MaxAddresses × Timeout.
+	server, ep, opts := newLoopbackNHPFaultExchange(t, loopbackFaultConfig{replyDelay: lateReply})
+	opts.Resolver = fixedAddressesResolver{addresses: twoPublicAddresses()}
+	opts.Dialer, opts.MaxAddresses, opts.Timeout = &addressRecordingDialer{port: ep.Port}, 2, attemptTimeout
+	started := time.Now()
+	reply, err := nativeudp.Knock(ctx, ep, nil, opts)
+	elapsed := time.Since(started)
+	fanoutCeiling := 2*attemptTimeout + 500*time.Millisecond
+	if reply != nil || !errors.Is(err, nativeudp.ErrTransport) || elapsed < attemptTimeout || elapsed > fanoutCeiling {
+		t.Fatalf("delayed address fan-out = reply %v, err %v, elapsed %s; want ErrTransport bounded within [%s, %s]",
+			reply, err, elapsed, attemptTimeout, fanoutCeiling)
+	}
+	if got := server.awaitReceived(2); got != 2 {
+		t.Fatalf("delayed address fan-out emitted %d datagrams, want exactly the 2-address budget", got)
+	}
+
+	// A reply the client already gave up on cannot be adopted by a later
+	// exchange: each exchange owns a fresh socket and requires its own counter
+	// echo, so the next exchange completes on its own reply.
+	lateServer, lateEP, lateOpts := newLoopbackNHPFaultExchange(t, loopbackFaultConfig{replyDelay: lateReply})
+	lateOpts.MaxAddresses, lateOpts.Timeout = 1, attemptTimeout
+	if reply, err := nativeudp.Knock(ctx, lateEP, nil, lateOpts); reply != nil || !errors.Is(err, nativeudp.ErrTransport) {
+		t.Fatalf("abandoned late reply setup = reply %v, err %v; want ErrTransport", reply, err)
+	}
+	lateOpts.Timeout = generousBound
+	if reply, err := nativeudp.Knock(ctx, lateEP, nil, lateOpts); reply == nil || err != nil {
+		t.Fatalf("exchange after an abandoned late reply = reply %v, err %v; want its own correlated reply", reply, err)
+	}
+	if got := lateServer.awaitReceived(2); got != 2 {
+		t.Fatalf("abandoned-late-reply sequence emitted %d datagrams, want exactly 2 (one per exchange)", got)
+	}
+
+	assertNoLifecycleHTTP(t, httpTrap)
+	t.Logf("EVIDENCE packet_delay late_reply_phases=%d in_budget_phases=%d attempt_timeout=%s reply_delay=%s rejection=ErrTransport+net.Error.Timeout client_never_awaits_late_reply=true fanout_bound=max_addresses_times_timeout stale_reply_adopted=0 lifecycle_http_calls=0",
+		len(hubAndCellExchanges()), len(assignedCellExchanges()), attemptTimeout, lateReply)
+}
+
+// provePacketReplay proves captured, genuinely server-signed material cannot be
+// re-used to advance the client. A replayed authenticated reply is rejected by
+// the correlation gate at every assigned-cell phase — it is never conflated with
+// the unauthenticated class and never recast as a retryable miss. A spent Hub
+// NHP_COK replayed into a fresh assignment exchange cannot drive a proof flight,
+// because body.trxId still binds it to the retired first LST. A reflection replay
+// of the agent's own initiator datagram — the replay an on-path attacker can
+// mount holding no key at all — is rejected as unauthenticated and leaves durable
+// state at initial identity only.
+func provePacketReplay(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTPTrap) {
+	t.Helper()
+	const attemptTimeout = 250 * time.Millisecond
+
+	// A captured authenticated reply replayed into a later exchange is rejected.
+	for _, exchange := range assignedCellExchanges() {
+		server, ep, opts := newLoopbackNHPFaultExchange(t, loopbackFaultConfig{replayFirstReply: true})
+		if reply, err := exchange.call(ctx, ep, nil, opts); reply == nil || err != nil {
+			t.Fatalf("replayed_reply/%s setup exchange = reply %v, err %v; want success so a genuine reply is captured", exchange.name, reply, err)
+		}
+		captured := server.receivedCount()
+		reply, err := exchange.call(ctx, ep, nil, opts)
+		assertMalformedReplyRejection(t, "replayed_reply/"+exchange.name, reply, err, server.receivedCount()-captured)
+	}
+
+	// A spent Hub NHP_COK cannot drive a second proof flight.
+	replayHub := newCookieRoutabilityExchange(t, hubAssignmentRoutability, cookieRoutabilityConfig{replayFirstChallenge: true})
+	assignmentBody := []byte(`{"query":"cell_assignment","request_nonce":"hub-cookie-replay"}`)
+	if reply, err := nativeudp.AssignmentList(ctx, replayHub.endpoint, assignmentBody, replayHub.options); reply == nil || err != nil {
+		t.Fatalf("hub cookie replay setup = reply %v, err %v; want the first assignment to complete", reply, err)
+	}
+	_, _, before, _, _ := replayHub.server.snapshot()
+	reply, err := nativeudp.AssignmentList(ctx, replayHub.endpoint, assignmentBody, replayHub.options)
+	if reply != nil || !errors.Is(err, relayknock.ErrMalformedReply) {
+		t.Fatalf("replayed hub cookie challenge = reply %v, err %v; want the terminal ErrMalformedReply transaction-binding rejection", reply, err)
+	}
+	if errors.Is(err, nativeudp.ErrServerUnauthenticated) {
+		t.Fatalf("replayed hub cookie challenge was classified as unauthenticated; the replayed challenge is authentic and only its binding is spent: %v", err)
+	}
+	if errors.Is(err, nativeudp.ErrTransport) || errors.Is(err, nativeudp.ErrResolve) {
+		t.Fatalf("replayed hub cookie challenge was recast as a retryable transport miss: %v", err)
+	}
+	_, proof, after, _, _ := replayHub.server.snapshot()
+	if len(after)-len(before) != 1 {
+		t.Fatalf("replayed hub cookie challenge emitted %d datagrams, want exactly 1 (no proof flight on a spent challenge)", len(after)-len(before))
+	}
+	if len(proof) != 1 {
+		t.Fatalf("replayed hub cookie challenge produced %d proof flights in total, want the 1 from the legitimate exchange only", len(proof))
+	}
+
+	// A reflection replay is unauthenticated at every exported phase.
+	for _, exchange := range hubAndCellExchanges() {
+		server, ep, opts := newLoopbackNHPFaultExchange(t, loopbackFaultConfig{reflectRequest: true})
+		opts.Timeout = attemptTimeout
+		reply, err := exchange.call(ctx, ep, nil, opts)
+		assertUnauthenticatedRejection(t, "reflected_request/"+exchange.name, reply, err, server.receivedCount())
+	}
+
+	// A reflecting Hub advances no durable state through the public registration
+	// driver: an unauthenticated datagram is a definitive rejection, not a
+	// retryable miss, so the bounded outer retry never runs.
+	const agentID = "qurl-go-fault-proof-replay"
+	store := faultStateStore(t)
+	reflectServer, reflectEP, _ := newLoopbackNHPFaultExchange(t, loopbackFaultConfig{reflectRequest: true})
+	hub := qurl.HubBootstrap{
+		Host:               "replay-proof.nhp.layerv.ai",
+		Port:               standardNHPUDPPort,
+		ServerPublicKeyB64: base64.StdEncoding.EncodeToString(reflectEP.ServerStaticPub),
+	}
+	client, binding, err := qurl.RegisterAgentRuntime(ctx, nonSecretFaultCredential, store,
+		qurl.WithAgentRuntimeHub(hub),
+		qurl.WithAgentRuntimeIdentity(agentID),
+		qurl.WithAgentRuntimeMetadata("qurl-go-sandbox", "packet-replay"),
+		qurl.WithAgentRuntimeUDPResolver(&fixedResolver{address: netip.MustParseAddr("8.8.8.8")}),
+		qurl.WithAgentRuntimeUDPDialer(&redirectingDialer{target: net.JoinHostPort("127.0.0.1", strconv.Itoa(reflectEP.Port))}),
+		qurl.WithAgentRuntimeUDPBounds(attemptTimeout, 1),
+		qurl.WithAgentRuntimeAssignmentRetryBudget(2, 30*time.Second),
+		qurl.WithAgentClientBaseURL("http://127.0.0.1:1"),
+		qurl.WithAgentClientHTTPClient(httpTrap),
+	)
+	bindingNonNil := binding != nil
+	if binding != nil {
+		binding.Destroy()
+	}
+	if client != nil || bindingNonNil || !errors.Is(err, nativeudp.ErrServerUnauthenticated) {
+		t.Fatalf("reflecting-hub registration mismatch: error_type=%T client_non_nil=%t binding_non_nil=%t unauthenticated=%t err=%v",
+			err, client != nil, bindingNonNil, errors.Is(err, nativeudp.ErrServerUnauthenticated), err)
+	}
+	if strings.Contains(err.Error(), nonSecretFaultCredential) {
+		t.Fatal("reflecting-hub registration reflected the enrollment credential")
+	}
+	if got := reflectServer.awaitReceived(1); got != 1 {
+		t.Fatalf("reflecting-hub registration emitted %d datagrams, want exactly 1 (a definitive rejection is not retried)", got)
+	}
+	assertInitialIdentityOnly(ctx, t, store, agentID, "packet_replay")
+
+	assertNoLifecycleHTTP(t, httpTrap)
+	t.Logf("EVIDENCE packet_replay replayed_reply_phases=%d replayed_hub_cookie_challenge=1 reflected_request_phases=%d correlation_class=ErrMalformedReply reflection_class=ErrServerUnauthenticated spent_challenge_proof_flights=0 registration_state_mutation=0 lifecycle_http_calls=0",
+		len(assignedCellExchanges()), len(hubAndCellExchanges()))
+}
+
+// proveHubCookieProofRoutability proves the Hub assignment return-routability
+// profile end to end through the exported transport: an ordinary first NHP_LST
+// is answered only with an authenticated NHP_COK, and the SDK then sends exactly
+// one cookie-bound proof NHP_LST to the same public Hub address that receives the
+// final NHP_LRT. The proof flight is observed to be a distinct wire object — it
+// does not open as an ordinary initiator message and does not open under a
+// different cookie — while carrying a byte-identical application body under fresh
+// per-message randomness. There is no third flight and no HTTP.
+func proveHubCookieProofRoutability(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTPTrap) {
+	t.Helper()
+	exchange := newCookieRoutabilityExchange(t, hubAssignmentRoutability, cookieRoutabilityConfig{})
+	body := []byte(`{"query":"cell_assignment","request_nonce":"hub-cookie-proof-routability"}`)
+	reply, err := nativeudp.AssignmentList(ctx, exchange.endpoint, body, exchange.options)
+	if err != nil {
+		t.Fatalf("hub cookie-proof assignment: %v", err)
+	}
+	if reply == nil || !reply.IsListResult() || string(reply.Body) != `{"ok":true}` {
+		t.Fatalf("hub cookie-proof assignment reply = %#v, want the final authenticated NHP_LRT", reply)
+	}
+
+	first, proof, packets, initiatorErr, wrongCookieErr := exchange.server.snapshot()
+	if len(first) != 1 || len(proof) != 1 || len(packets) != 2 {
+		t.Fatalf("hub cookie-proof flights = first=%d proof=%d datagrams=%d; want exactly one unproven LST and one proof LST",
+			len(first), len(proof), len(packets))
+	}
+	if first[0].Type != relayknock.TypeListRequest || proof[0].Type != relayknock.TypeListRequest {
+		t.Fatalf("hub cookie-proof flight types = %d/%d, want both NHP_LST", first[0].Type, proof[0].Type)
+	}
+	// The proof flight is a distinct wire object, not a resend: it is inadmissible
+	// as an ordinary initiator message and inadmissible under any other cookie.
+	if initiatorErr == nil {
+		t.Fatal("hub cookie-proof flight opened as an ordinary initiator LST; the cookie-bound profile is not exclusive")
+	}
+	if wrongCookieErr == nil {
+		t.Fatal("hub cookie-proof flight opened under a different cookie; the header digest is not cookie-bound")
+	}
+	if !bytes.Equal(first[0].Body, body) || !bytes.Equal(proof[0].Body, body) {
+		t.Fatalf("hub cookie-proof bodies = %q / %q, want the caller's body byte-identical on both flights", first[0].Body, proof[0].Body)
+	}
+	if proof[0].Counter == first[0].Counter || proof[0].TimestampNanos <= first[0].TimestampNanos || bytes.Equal(packets[0], packets[1]) {
+		t.Fatalf("hub cookie-proof flight reused first-flight material: counters %d/%d timestamps %d/%d identical_packets=%t",
+			first[0].Counter, proof[0].Counter, first[0].TimestampNanos, proof[0].TimestampNanos, bytes.Equal(packets[0], packets[1]))
+	}
+	// Both legs reach the same public Hub address, each after its own resolution.
+	wantAddress := netip.AddrPortFrom(netip.MustParseAddr("8.8.8.8"), uint16(exchange.endpoint.Port)).String()
+	if dialed := exchange.dialer.snapshot(); !slices.Equal(dialed, []string{wantAddress, wantAddress}) {
+		t.Fatalf("hub cookie-proof dial sequence = %q, want both legs at the public Hub address %q", dialed, wantAddress)
+	}
+	if calls, network, host := exchange.resolver.snapshot(); calls != 2 || network != "ip" || host != exchange.endpoint.Host {
+		t.Fatalf("hub cookie-proof lookups = calls=%d network=%q host=%q; want 2, ip, %q (one per leg)", calls, network, host, exchange.endpoint.Host)
+	}
+	assertNoLifecycleHTTP(t, httpTrap)
+	t.Log("EVIDENCE hub_cookie_proof_lst_return_routability flights=2 challenge=NHP_COK proof_flight=cookie_bound_NHP_LST result=NHP_LRT ordinary_initiator_open=rejected wrong_cookie_open=rejected body_identical=true fresh_proof_randomness=true resolver_calls=2 dial_calls=2 lifecycle_http_calls=0")
+}
+
+// proveCellCookieReknockRoutability proves the assigned-cell registered-agent
+// admission sequence end to end: an authenticated NHP_COK for the initial
+// NHP_KNK is strictly decoded and its exact cookie mixed into one fresh NHP_RKN,
+// whose only accepted reply is an echoed-counter NHP_ACK. The re-knock flight is
+// observed to be cookie-bound rather than a re-sent knock, each leg carries its
+// own caller-supplied application body unrewritten by the transport, and the
+// direct-ACK path is proven to complete in a single flight with no re-knock.
+func proveCellCookieReknockRoutability(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTPTrap) {
+	t.Helper()
+	exchange := newCookieRoutabilityExchange(t, cellReknockRoutability, cookieRoutabilityConfig{})
+	knockBody := []byte(`{"phase":"knock","resource":"cell-cookie-reknock"}`)
+	reknockBody := []byte(`{"phase":"reknock","resource":"cell-cookie-reknock"}`)
+	reply, err := nativeudp.KnockWithReknock(ctx, exchange.endpoint, knockBody, reknockBody, exchange.options)
+	if err != nil {
+		t.Fatalf("assigned-cell cookie re-knock: %v", err)
+	}
+	if reply == nil || !reply.IsACK() || string(reply.Body) != `{"ok":true}` {
+		t.Fatalf("assigned-cell re-knock reply = %#v, want the authenticated NHP_ACK", reply)
+	}
+
+	first, proof, packets, initiatorErr, wrongCookieErr := exchange.server.snapshot()
+	if len(first) != 1 || len(proof) != 1 || len(packets) != 2 {
+		t.Fatalf("re-knock flights = knock=%d reknock=%d datagrams=%d; want exactly one KNK and one RKN",
+			len(first), len(proof), len(packets))
+	}
+	if first[0].Type != relayknock.TypeKnock || proof[0].Type != relayknock.TypeReknock {
+		t.Fatalf("re-knock flight types = %d/%d, want NHP_KNK then NHP_RKN", first[0].Type, proof[0].Type)
+	}
+	if initiatorErr == nil {
+		t.Fatal("re-knock flight opened as an ordinary initiator message; NHP_RKN is not cookie-bound")
+	}
+	if wrongCookieErr == nil {
+		t.Fatal("re-knock flight opened under a different cookie; the header digest is not cookie-bound")
+	}
+	// Each leg carries its own caller-supplied body: the transport does not
+	// rewrite an authenticated application body across the transition.
+	if !bytes.Equal(first[0].Body, knockBody) || !bytes.Equal(proof[0].Body, reknockBody) {
+		t.Fatalf("re-knock bodies = %q / %q, want %q / %q unrewritten", first[0].Body, proof[0].Body, knockBody, reknockBody)
+	}
+	if proof[0].Counter == first[0].Counter || bytes.Equal(packets[0], packets[1]) {
+		t.Fatalf("re-knock flight reused knock material: counters %d/%d identical_packets=%t",
+			first[0].Counter, proof[0].Counter, bytes.Equal(packets[0], packets[1]))
+	}
+	// KNK and RKN are separate exchanges, so the assigned name is resolved again
+	// before RKN: a replica change between legs is admissible by construction.
+	wantAddress := netip.AddrPortFrom(netip.MustParseAddr("8.8.8.8"), uint16(exchange.endpoint.Port)).String()
+	if dialed := exchange.dialer.snapshot(); !slices.Equal(dialed, []string{wantAddress, wantAddress}) {
+		t.Fatalf("re-knock dial sequence = %q, want both legs at the public cell address %q", dialed, wantAddress)
+	}
+	if calls, _, host := exchange.resolver.snapshot(); calls != 2 || host != exchange.endpoint.Host {
+		t.Fatalf("re-knock lookups = calls=%d host=%q; want 2, %q (KNK and RKN re-resolve independently)", calls, host, exchange.endpoint.Host)
+	}
+
+	// The direct-ACK path: a cell that does not challenge completes the knock in
+	// one flight and must not emit a re-knock.
+	direct := newCookieRoutabilityExchange(t, cellReknockRoutability, cookieRoutabilityConfig{directResult: true})
+	reply, err = nativeudp.KnockWithReknock(ctx, direct.endpoint, knockBody, reknockBody, direct.options)
+	if err != nil || reply == nil || !reply.IsACK() {
+		t.Fatalf("direct-ACK knock = reply %#v, err %v; want a completed single-flight admission", reply, err)
+	}
+	directFirst, directProof, directPackets, _, _ := direct.server.snapshot()
+	if len(directFirst) != 1 || len(directProof) != 0 || len(directPackets) != 1 {
+		t.Fatalf("direct-ACK knock flights = knock=%d reknock=%d datagrams=%d; want exactly one KNK and no re-knock",
+			len(directFirst), len(directProof), len(directPackets))
+	}
+	assertNoLifecycleHTTP(t, httpTrap)
+	t.Log("EVIDENCE cell_cookie_reknock_return_routability challenged_flights=2 challenge=NHP_COK proof_flight=cookie_bound_NHP_RKN result=NHP_ACK ordinary_initiator_open=rejected wrong_cookie_open=rejected bodies_unrewritten=true resolver_calls=2 dial_calls=2 direct_ack_flights=1 direct_ack_reknocks=0 lifecycle_http_calls=0")
+}
+
+// hubAssignmentWireBody renders an authenticated Hub NHP_LRT initial-assignment
+// application body. Every field is rendered from a variable so a case can make
+// exactly one thing wrong and leave the rest conforming; the numeric fields are
+// rendered raw so a wrong JSON type can be injected too.
+type hubAssignmentWireBody struct {
+	query, version, mode, agentID string
+	keyID, keyKind                string
+	cellID, generation, revision  string
+	leaseExpiresAt                string
+	host, port, serverKeyB64      string
+	ticket, ticketExpiresAt       string
+}
+
+func (b hubAssignmentWireBody) render() string {
+	return fmt.Sprintf(`{"errCode":"0","list":{"query":%q,"version":%s,"mode":%q,"agent_id":%q,`+
+		`"registration":{"key_id":%q,"key_kind":%q},`+
+		`"assignment":{"cell_id":%q,"assignment_generation":%s,"endpoint_revision":%s,"lease_expires_at":%q,`+
+		`"nhp_udp_endpoint":{"host":%q,"port":%s,"server_public_key_b64":%q}},`+
+		`"assignment_ticket":%q,"assignment_ticket_expires_at":%q}}`,
+		b.query, b.version, b.mode, b.agentID, b.keyID, b.keyKind,
+		b.cellID, b.generation, b.revision, b.leaseExpiresAt,
+		b.host, b.port, b.serverKeyB64, b.ticket, b.ticketExpiresAt)
+}
+
+// with returns a copy mutated by fn, so a case reads as "the conforming body,
+// except this one field".
+func (b hubAssignmentWireBody) with(fn func(*hubAssignmentWireBody)) string {
+	fn(&b)
+	return b.render()
+}
+
+// invalidAssignmentCase is one row of the authenticated-but-invalid assignment
+// matrix: a name and the exact application body a fully authenticated Hub
+// returns in its final NHP_LRT.
+type invalidAssignmentCase struct {
+	name string
+	body string
+}
+
+// hubAssignmentMatrix builds the conforming baseline plus every invalid
+// variation. The baseline is returned separately because it is the control: the
+// matrix only means something if the very same harness accepts a conforming body.
+func hubAssignmentMatrix(t *testing.T, agentID, cellHost string, cellPort int) (hubAssignmentWireBody, []invalidAssignmentCase) {
+	t.Helper()
+	_, cellKey := mustNHPKeypair(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	baseline := hubAssignmentWireBody{
+		query:           "cell_assignment",
+		version:         "1",
+		mode:            "enroll",
+		agentID:         agentID,
+		keyID:           "key_BsT4rP8wXn6Q",
+		keyKind:         "bootstrap",
+		cellID:          "cell0",
+		generation:      "1",
+		revision:        "1",
+		leaseExpiresAt:  now.Add(time.Hour).Format(time.RFC3339),
+		host:            cellHost,
+		port:            strconv.Itoa(cellPort),
+		serverKeyB64:    base64.StdEncoding.EncodeToString(cellKey),
+		ticket:          "native-udp-proof-assignment-ticket-0001",
+		ticketExpiresAt: now.Add(5 * time.Minute).Format(time.RFC3339),
+	}
+	// An all-zero X25519 public key is a low-order point: canonical base64 that
+	// must still be refused as a usable server key.
+	lowOrderKey := base64.StdEncoding.EncodeToString(make([]byte, 32))
+	unpaddedKey := strings.TrimRight(baseline.serverKeyB64, "=")
+	rendered := baseline.render()
+
+	drop := func(fragment string) string {
+		if !strings.Contains(rendered, fragment) {
+			t.Fatalf("assignment matrix cannot drop %q: not present in the baseline body", fragment)
+		}
+		return strings.Replace(rendered, fragment, "", 1)
+	}
+
+	return baseline, []invalidAssignmentCase{
+		// Endpoint host trust: only a LayerV-owned apex is admissible.
+		{"non_layerv_host", baseline.with(func(b *hubAssignmentWireBody) { b.host = "assignment-proof.attacker.example.com" })},
+		{"raw_aws_host", baseline.with(func(b *hubAssignmentWireBody) { b.host = "internal-a1b2c3.us-east-1.elb.amazonaws.com" })},
+		{"raw_ip_host", baseline.with(func(b *hubAssignmentWireBody) { b.host = "203.0.113.10" })},
+		// Endpoint port bounds.
+		{"port_zero", baseline.with(func(b *hubAssignmentWireBody) { b.port = "0" })},
+		{"port_above_range", baseline.with(func(b *hubAssignmentWireBody) { b.port = "65536" })},
+		// Lease liveness.
+		{"expired_lease", baseline.with(func(b *hubAssignmentWireBody) {
+			b.leaseExpiresAt = now.Add(-time.Minute).Format(time.RFC3339)
+			b.ticketExpiresAt = now.Add(-2 * time.Minute).Format(time.RFC3339)
+		})},
+		// Identity binding.
+		{"wrong_agent_id", baseline.with(func(b *hubAssignmentWireBody) { b.agentID = agentID + "-substituted" })},
+		{"missing_agent_id", drop(fmt.Sprintf(`"agent_id":%q,`, agentID))},
+		// Cell identity.
+		{"wrong_cell_id", baseline.with(func(b *hubAssignmentWireBody) { b.cellID = "CELL0" })},
+		{"missing_cell_id", drop(`"cell_id":"cell0",`)},
+		// Assignment ordering counters must be positive and present.
+		{"generation_zero", baseline.with(func(b *hubAssignmentWireBody) { b.generation = "0" })},
+		{"revision_zero", baseline.with(func(b *hubAssignmentWireBody) { b.revision = "0" })},
+		{"missing_generation", drop(`"assignment_generation":1,`)},
+		{"missing_revision", drop(`"endpoint_revision":1,`)},
+		// Server key trust.
+		{"low_order_server_key", baseline.with(func(b *hubAssignmentWireBody) { b.serverKeyB64 = lowOrderKey })},
+		{"non_canonical_server_key", baseline.with(func(b *hubAssignmentWireBody) { b.serverKeyB64 = unpaddedKey })},
+		{"missing_server_key", drop(fmt.Sprintf(`,"server_public_key_b64":%q`, baseline.serverKeyB64))},
+		// Strict-object boundaries.
+		{"duplicate_field", strings.Replace(rendered, `"cell_id":"cell0",`, `"cell_id":"cell0","cell_id":"cell9",`, 1)},
+		{"unknown_field", strings.Replace(rendered, `"cell_id":"cell0",`, `"cell_id":"cell0","unexpected_field":true,`, 1)},
+		{"trailing_input", rendered + `{"trailing":true}`},
+	}
+}
+
+// seedFaultAgentIdentity drives one deliberately unanswered registration so the
+// store holds the driver's own persisted device identity, and returns that
+// agent's X25519 public key. It is how a loopback Hub can be keyed to open
+// packets the public registration driver signs with a key it minted itself. The
+// attempt must leave durable state at initial identity only.
+func seedFaultAgentIdentity(ctx context.Context, t *testing.T, store qurl.AgentStateStore, agentID string, httpTrap *lifecycleHTTPTrap) []byte {
+	t.Helper()
+	_, serverPub := mustNHPKeypair(t)
+	client, binding, err := qurl.RegisterAgentRuntime(ctx, nonSecretFaultCredential, store,
+		qurl.WithAgentRuntimeHub(qurl.HubBootstrap{
+			Host:               "identity-seed-proof.nhp.layerv.ai",
+			Port:               standardNHPUDPPort,
+			ServerPublicKeyB64: base64.StdEncoding.EncodeToString(serverPub),
+		}),
+		qurl.WithAgentRuntimeIdentity(agentID),
+		qurl.WithAgentRuntimeMetadata("qurl-go-sandbox", "identity-seed"),
+		qurl.WithAgentRuntimeUDPResolver(&fixedResolver{address: netip.MustParseAddr("8.8.8.8")}),
+		qurl.WithAgentRuntimeUDPDialer(&redirectingDialer{target: startUDPBlackhole(t).LocalAddr().String()}),
+		qurl.WithAgentRuntimeUDPBounds(150*time.Millisecond, 1),
+		qurl.WithAgentRuntimeAssignmentRetryBudget(1, 10*time.Second),
+		qurl.WithAgentClientBaseURL("http://127.0.0.1:1"),
+		qurl.WithAgentClientHTTPClient(httpTrap),
+	)
+	if binding != nil {
+		binding.Destroy()
+	}
+	if client != nil || err == nil {
+		t.Fatalf("identity seed attempt = client_non_nil=%t err=%v; want an unanswered Hub to fail", client != nil, err)
+	}
+	assertInitialIdentityOnly(ctx, t, store, agentID, "identity_seed")
+	state, err := store.LoadAgentState(ctx)
+	if err != nil {
+		t.Fatalf("load seeded identity: %v", err)
+	}
+	agentPub, err := base64.StdEncoding.Strict().DecodeString(state.PublicKeyB64)
+	if err != nil || len(agentPub) != x25519PublicKeyLength {
+		t.Fatalf("seeded agent public key = %q (%d bytes decoded), want a canonical %d-byte X25519 key: %v",
+			state.PublicKeyB64, len(agentPub), x25519PublicKeyLength, err)
+	}
+	return agentPub
+}
+
+// hostRoutedResolver answers each host with its own public address, so the Hub
+// and the assigned cell are separately routable and a datagram sent to either is
+// unambiguously attributable.
+type hostRoutedResolver struct {
+	answers map[string]netip.Addr
+
+	mu    sync.Mutex
+	calls int
+}
+
+func (r *hostRoutedResolver) LookupNetIP(_ context.Context, _, host string) ([]netip.Addr, error) {
+	r.mu.Lock()
+	r.calls++
+	r.mu.Unlock()
+	addr, ok := r.answers[host]
+	if !ok {
+		return nil, &net.DNSError{Err: "no such host", Name: host, IsNotFound: true}
+	}
+	return []netip.Addr{addr}, nil
+}
+
+// proveAuthenticatedInvalidAssignmentMatrix proves the SDK refuses every
+// authenticated-but-invalid Hub assignment. Each case is delivered by a Hub that
+// completes the full two-leg return-routability profile and signs the final
+// NHP_LRT with the pinned key, so nothing about the transport or the
+// authentication is at fault — only the assignment content is. Every case is a
+// definitive ErrAssignmentInvalidResponse and never a retryable
+// transport/resolve miss. A conforming baseline through the identical harness is
+// the control, so the matrix cannot pass vacuously. Finally the public
+// registration driver is driven with an invalid assignment and must persist
+// nothing and send no assigned-cell datagram.
+func proveAuthenticatedInvalidAssignmentMatrix(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTPTrap) {
+	t.Helper()
+	const (
+		agentID  = "qurl-go-fault-proof-assignment-matrix"
+		hubHost  = "assignment-matrix-proof.nhp.layerv.ai"
+		cellHost = "cell0.nhp.layerv.ai"
+	)
+	baseline, cases := hubAssignmentMatrix(t, agentID, cellHost, standardNHPUDPPort)
+
+	// runAssignment drives one authenticated Hub answer through the exported
+	// assignment fetch and reports what the SDK made of it.
+	runAssignment := func(t *testing.T, body string) (*qurl.InitialAgentAssignment, int, error) {
+		t.Helper()
+		exchange := newCookieRoutabilityExchange(t, hubAssignmentRoutability, cookieRoutabilityConfig{resultBody: []byte(body)})
+		hub := qurl.HubBootstrap{
+			Host:               hubHost,
+			Port:               standardNHPUDPPort,
+			ServerPublicKeyB64: base64.StdEncoding.EncodeToString(exchange.endpoint.ServerStaticPub),
+		}
+		assignment, err := qurl.FetchInitialAgentAssignment(ctx, hub, agentID, nonSecretFaultCredential, nativeudp.Options{
+			DeviceStaticPriv: exchange.options.DeviceStaticPriv,
+			Resolver:         &fixedResolver{address: netip.MustParseAddr("8.8.8.8")},
+			Dialer:           &redirectingDialer{target: net.JoinHostPort("127.0.0.1", strconv.Itoa(exchange.endpoint.Port))},
+			Timeout:          2 * time.Second,
+			MaxAddresses:     1,
+		})
+		_, _, packets, _, _ := exchange.server.snapshot()
+		return assignment, len(packets), err
+	}
+
+	// Control: the identical harness must accept a conforming assignment, so a
+	// rejection below is attributable to the injected defect alone.
+	assignment, flights, err := runAssignment(t, baseline.render())
+	if err != nil || assignment == nil {
+		t.Fatalf("conforming assignment control = assignment %v, err %v; want the baseline body accepted (the matrix would otherwise pass vacuously)", assignment, err)
+	}
+	if assignment.Assignment.CellID != "cell0" || assignment.Assignment.Endpoint.Host != cellHost {
+		t.Fatalf("conforming assignment control returned %#v, want the baseline cell binding", assignment.Assignment)
+	}
+	if flights != 2 {
+		t.Fatalf("conforming assignment control used %d flights, want the 2-flight return-routability profile", flights)
+	}
+
+	for _, invalid := range cases {
+		t.Run(invalid.name, func(t *testing.T) {
+			assignment, flights, err := runAssignment(t, invalid.body)
+			if assignment != nil {
+				t.Fatalf("%s returned an assignment: %#v", invalid.name, assignment)
+			}
+			if !errors.Is(err, qurl.ErrAssignmentInvalidResponse) {
+				t.Fatalf("%s error = %v, want errors.Is qurl.ErrAssignmentInvalidResponse", invalid.name, err)
+			}
+			if errors.Is(err, nativeudp.ErrTransport) || errors.Is(err, nativeudp.ErrResolve) {
+				t.Fatalf("%s recast an authenticated invalid assignment as a retryable transport miss: %v", invalid.name, err)
+			}
+			if errors.Is(err, nativeudp.ErrServerUnauthenticated) {
+				t.Fatalf("%s conflated an authenticated invalid assignment with the unauthenticated class: %v", invalid.name, err)
+			}
+			// An invalid assignment is terminal, so the bounded outer retry must
+			// not re-drive the Hub: exactly the two flights of one profile run.
+			if flights != 2 {
+				t.Fatalf("%s used %d Hub flights, want exactly 2 (an invalid assignment is terminal, not retried)", invalid.name, flights)
+			}
+		})
+	}
+	// An expired lease is additionally distinguishable by its own sentinel.
+	if _, _, err := runAssignment(t, baseline.with(func(b *hubAssignmentWireBody) {
+		b.leaseExpiresAt = time.Now().UTC().Truncate(time.Second).Add(-time.Minute).Format(time.RFC3339)
+		b.ticketExpiresAt = time.Now().UTC().Truncate(time.Second).Add(-2 * time.Minute).Format(time.RFC3339)
+	})); !errors.Is(err, qurl.ErrAssignmentLeaseExpired) {
+		t.Fatalf("expired lease error = %v, want errors.Is qurl.ErrAssignmentLeaseExpired alongside the invalid-response class", err)
+	}
+
+	// The public registration driver persists nothing and never reaches the cell.
+	// It mints its own device identity, so the Hub responder is keyed from the
+	// identity a first, deliberately unanswered attempt leaves in the store.
+	store := faultStateStore(t)
+	agentPub := seedFaultAgentIdentity(ctx, t, store, agentID, httpTrap)
+	hubExchange := newCookieRoutabilityExchangeForAgent(t, hubAssignmentRoutability, nil, agentPub, cookieRoutabilityConfig{
+		resultBody: []byte(baseline.with(func(b *hubAssignmentWireBody) {
+			b.host = "assignment-proof.attacker.example.com"
+		})),
+	})
+	cell, cellEP, _ := newLoopbackNHPFaultExchange(t, loopbackFaultConfig{})
+	hubAddress := netip.MustParseAddr("8.8.8.8")
+	cellAddress := netip.MustParseAddr("9.9.9.9")
+	dialer := &routingDialer{routes: map[string]string{
+		netip.AddrPortFrom(hubAddress, standardNHPUDPPort).String():  net.JoinHostPort("127.0.0.1", strconv.Itoa(hubExchange.endpoint.Port)),
+		netip.AddrPortFrom(cellAddress, standardNHPUDPPort).String(): net.JoinHostPort("127.0.0.1", strconv.Itoa(cellEP.Port)),
+	}}
+	client, binding, err := qurl.RegisterAgentRuntime(ctx, nonSecretFaultCredential, store,
+		qurl.WithAgentRuntimeHub(qurl.HubBootstrap{
+			Host:               hubHost,
+			Port:               standardNHPUDPPort,
+			ServerPublicKeyB64: base64.StdEncoding.EncodeToString(hubExchange.endpoint.ServerStaticPub),
+		}),
+		qurl.WithAgentRuntimeIdentity(agentID),
+		qurl.WithAgentRuntimeMetadata("qurl-go-sandbox", "authenticated-invalid-assignment-matrix"),
+		qurl.WithAgentRuntimeUDPResolver(&hostRoutedResolver{answers: map[string]netip.Addr{
+			hubHost:  hubAddress,
+			cellHost: cellAddress,
+		}}),
+		qurl.WithAgentRuntimeUDPDialer(dialer),
+		qurl.WithAgentRuntimeUDPBounds(2*time.Second, 1),
+		qurl.WithAgentRuntimeAssignmentRetryBudget(2, 30*time.Second),
+		qurl.WithAgentClientBaseURL("http://127.0.0.1:1"),
+		qurl.WithAgentClientHTTPClient(httpTrap),
+	)
+	bindingNonNil := binding != nil
+	if binding != nil {
+		binding.Destroy()
+	}
+	if client != nil || bindingNonNil || !errors.Is(err, qurl.ErrAssignmentInvalidResponse) {
+		t.Fatalf("invalid-assignment registration mismatch: error_type=%T client_non_nil=%t binding_non_nil=%t invalid_response=%t err=%v",
+			err, client != nil, bindingNonNil, errors.Is(err, qurl.ErrAssignmentInvalidResponse), err)
+	}
+	if strings.Contains(err.Error(), nonSecretFaultCredential) {
+		t.Fatal("invalid-assignment registration reflected the enrollment credential")
+	}
+	if got := cell.receivedCount(); got != 0 {
+		t.Fatalf("invalid-assignment registration sent %d assigned-cell datagrams, want 0 (a rejected assignment is never dialed)", got)
+	}
+	// Stronger than a silent cell: the rejected endpoint is never even dialed.
+	cellDialAddress := netip.AddrPortFrom(cellAddress, standardNHPUDPPort).String()
+	if dialed := dialer.snapshot(); slices.Contains(dialed, cellDialAddress) {
+		t.Fatalf("invalid-assignment registration dialed the rejected assigned cell %q; dial sequence = %q", cellDialAddress, dialed)
+	}
+	assertInitialIdentityOnly(ctx, t, store, agentID, "authenticated_invalid_assignment_matrix")
+
+	assertNoLifecycleHTTP(t, httpTrap)
+	t.Logf("EVIDENCE authenticated_invalid_assignment_matrix conforming_control=accepted invalid_cases=%d rejection=ErrAssignmentInvalidResponse expired_lease_sentinel=ErrAssignmentLeaseExpired retryable_recast=0 unauthenticated_conflation=0 hub_flights_per_case=2 persisted_assignments=0 assigned_cell_datagrams=0 lifecycle_http_calls=0",
+		len(cases))
 }
 
 // assertMalformedReplyRejection is the shared fail-closed check for an
