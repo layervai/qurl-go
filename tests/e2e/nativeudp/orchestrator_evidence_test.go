@@ -23,10 +23,13 @@ import (
 // producer run identity, the deployment manifest both sides observed, and the
 // reviewed retired-lifecycle-surface contract. It never simulates a result.
 const (
-	orchestratorEvidencePathEnv = "QURL_GO_SANDBOX_ORCHESTRATOR_EVIDENCE_PATH"
-	orchestratorEvidenceSHAEnv  = "QURL_GO_SANDBOX_ORCHESTRATOR_EVIDENCE_SHA256"
-	nhpControllerRunIDEnv       = "QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ID"
-	nhpControllerRunAttemptEnv  = "QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ATTEMPT"
+	orchestratorEvidencePathEnv   = "QURL_GO_SANDBOX_ORCHESTRATOR_EVIDENCE_PATH"
+	orchestratorEvidenceSHAEnv    = "QURL_GO_SANDBOX_ORCHESTRATOR_EVIDENCE_SHA256"
+	deploymentRuntimeInputsSHAEnv = "QURL_GO_SANDBOX_DEPLOYMENT_RUNTIME_INPUTS_SHA256"
+	deploymentProducerRunIDEnv    = "QURL_GO_SANDBOX_DEPLOYMENT_PRODUCER_RUN_ID"
+	deploymentProducerAttemptEnv  = "QURL_GO_SANDBOX_DEPLOYMENT_PRODUCER_RUN_ATTEMPT"
+	deploymentProducerHeadSHAEnv  = "QURL_GO_SANDBOX_DEPLOYMENT_PRODUCER_HEAD_SHA"
+	orchestratorNHPSourceSHAEnv   = "QURL_GO_SANDBOX_NHP_SOURCE_SHA"
 
 	orchestratorProofRepository      = "layervai/nhp"
 	orchestratorProducerWorkflowPath = ".github/workflows/udp-proof-deployment-manifest.yml"
@@ -82,6 +85,17 @@ type orchestratorEvidenceRowV1 struct {
 	SurfaceEntryCount int    `json:"surface_entry_count"`
 }
 
+type orchestratorProofExpectations struct {
+	Phase                    string
+	DeploymentManifestSHA256 string
+	DeploymentRuntimeSHA256  string
+	ProducerRunID            string
+	ProducerRunAttempt       string
+	ProducerHeadSHA          string
+	NHPSourceSHA             string
+	QurlGoSourceSHA          string
+}
+
 func decodeOrchestratorProofEvidence(raw []byte) (orchestratorProofEvidence, error) {
 	return decodeStrictJSON[orchestratorProofEvidence](raw, "orchestrator evidence")
 }
@@ -92,11 +106,11 @@ func decodeOrchestratorProofEvidence(raw []byte) (orchestratorProofEvidence, err
 // stale evidence document cannot pick its own reference values.
 func validateOrchestratorProofEvidence(
 	evidence orchestratorProofEvidence,
-	phase, deploymentSHA, controllerRunID, controllerRunAttempt string,
+	expected orchestratorProofExpectations,
 ) error {
-	if evidence.SchemaVersion != 1 || evidence.Gate != orchestratorRetirementProofGate || evidence.Phase != phase {
+	if evidence.SchemaVersion != 1 || evidence.Gate != orchestratorRetirementProofGate || evidence.Phase != expected.Phase {
 		return fmt.Errorf("orchestrator evidence header = schema %d, gate %q, phase %q; want 1, %q, %q",
-			evidence.SchemaVersion, evidence.Gate, evidence.Phase, orchestratorRetirementProofGate, phase)
+			evidence.SchemaVersion, evidence.Gate, evidence.Phase, orchestratorRetirementProofGate, expected.Phase)
 	}
 	if evidence.ObservedAt == "" {
 		return errors.New("orchestrator evidence must record observed_at")
@@ -113,15 +127,20 @@ func validateOrchestratorProofEvidence(
 	if producer.RunID < 1 || producer.RunAttempt < 1 {
 		return errors.New("orchestrator producer run id and attempt must be positive")
 	}
-	// The attended controller run that created this proof runner is the only
-	// run allowed to have produced the evidence it is now judged by.
-	if !canonicalPositiveDecimal(controllerRunID) || !canonicalPositiveDecimal(controllerRunAttempt) {
-		return errors.New("attended NHP controller run identity must be canonical positive decimals")
+	// The controller authenticates one immutable deployment-producer artifact.
+	// Bind the embedded producer identity to that exact run, not to the distinct
+	// controller run that dispatched this client proof.
+	if !canonicalPositiveDecimal(expected.ProducerRunID) || !canonicalPositiveDecimal(expected.ProducerRunAttempt) {
+		return errors.New("authenticated deployment producer run identity must be canonical positive decimals")
 	}
-	if fmt.Sprintf("%d", producer.RunID) != controllerRunID ||
-		fmt.Sprintf("%d", producer.RunAttempt) != controllerRunAttempt {
-		return fmt.Errorf("orchestrator evidence producer run %d/%d is not the attended controller run %s/%s",
-			producer.RunID, producer.RunAttempt, controllerRunID, controllerRunAttempt)
+	if !canonicalLowerHex(expected.ProducerHeadSHA, 40) {
+		return errors.New("authenticated deployment producer head SHA must be a canonical commit SHA")
+	}
+	if fmt.Sprintf("%d", producer.RunID) != expected.ProducerRunID ||
+		fmt.Sprintf("%d", producer.RunAttempt) != expected.ProducerRunAttempt ||
+		producer.HeadSHA != expected.ProducerHeadSHA {
+		return fmt.Errorf("orchestrator evidence producer run %d/%d is not the authenticated deployment producer run %s/%s",
+			producer.RunID, producer.RunAttempt, expected.ProducerRunID, expected.ProducerRunAttempt)
 	}
 
 	bindings := evidence.Bindings
@@ -143,9 +162,21 @@ func validateOrchestratorProofEvidence(
 			return fmt.Errorf("orchestrator evidence %s is not a canonical commit SHA", name)
 		}
 	}
-	if bindings.DeploymentManifestSHA256 != deploymentSHA {
+	if bindings.DeploymentManifestSHA256 != expected.DeploymentManifestSHA256 {
 		return fmt.Errorf("orchestrator deployment manifest SHA-256 = %q, want current qurl-go manifest %q",
-			bindings.DeploymentManifestSHA256, deploymentSHA)
+			bindings.DeploymentManifestSHA256, expected.DeploymentManifestSHA256)
+	}
+	if bindings.DeploymentRuntimeInputsSHA256 != expected.DeploymentRuntimeSHA256 {
+		return fmt.Errorf("orchestrator deployment runtime inputs SHA-256 = %q, want current qurl-go runtime inputs %q",
+			bindings.DeploymentRuntimeInputsSHA256, expected.DeploymentRuntimeSHA256)
+	}
+	if bindings.NHPSourceSHA != expected.NHPSourceSHA {
+		return fmt.Errorf("orchestrator NHP source SHA = %q, want deployed NHP revision %q",
+			bindings.NHPSourceSHA, expected.NHPSourceSHA)
+	}
+	if bindings.QurlGoSourceSHA != expected.QurlGoSourceSHA {
+		return fmt.Errorf("orchestrator qurl-go source SHA = %q, want current qurl-go revision %q",
+			bindings.QurlGoSourceSHA, expected.QurlGoSourceSHA)
 	}
 	if bindings.RetiredLifecycleSurfacePath != retiredLifecycleSurfaceContractPath ||
 		bindings.RetiredLifecycleSurfaceRawSHA256 != retiredLifecycleSurfaceRawSHA256 ||
@@ -174,8 +205,8 @@ func validateOrchestratorProofEvidence(
 	}
 	for _, id := range orchestratorProducedRows {
 		row := evidence.Rows[id]
-		if row.Phase != phase {
-			return fmt.Errorf("orchestrator row %q phase = %q, want %q", id, row.Phase, phase)
+		if row.Phase != expected.Phase {
+			return fmt.Errorf("orchestrator row %q phase = %q, want %q", id, row.Phase, expected.Phase)
 		}
 		if !canonicalLowerHex(row.InterfacesSHA256, sha256.Size*2) {
 			return fmt.Errorf("orchestrator row %q interfaces_sha256 is not a canonical SHA-256 digest", id)
@@ -258,15 +289,35 @@ func requireOrchestratorProofInputs(t *testing.T) (orchestratorProofEvidence, st
 	if phase != "pre_removal" && phase != "post_removal" {
 		t.Fatalf("%s must be pre_removal or post_removal", proofPhaseEnv)
 	}
-	deploymentSHA := os.Getenv(deploymentManifestSHAEnv)
-	if !canonicalLowerHex(deploymentSHA, sha256.Size*2) {
-		t.Fatalf("%s must be an exact lowercase SHA-256 digest", deploymentManifestSHAEnv)
+	expected := orchestratorProofExpectations{
+		Phase:                    phase,
+		DeploymentManifestSHA256: os.Getenv(deploymentManifestSHAEnv),
+		DeploymentRuntimeSHA256:  os.Getenv(deploymentRuntimeInputsSHAEnv),
+		ProducerRunID:            os.Getenv(deploymentProducerRunIDEnv),
+		ProducerRunAttempt:       os.Getenv(deploymentProducerAttemptEnv),
+		ProducerHeadSHA:          os.Getenv(deploymentProducerHeadSHAEnv),
+		NHPSourceSHA:             os.Getenv(orchestratorNHPSourceSHAEnv),
+		QurlGoSourceSHA:          os.Getenv(buildSHAEnv),
+	}
+	for name, value := range map[string]string{
+		deploymentManifestSHAEnv:      expected.DeploymentManifestSHA256,
+		deploymentRuntimeInputsSHAEnv: expected.DeploymentRuntimeSHA256,
+	} {
+		if !canonicalLowerHex(value, sha256.Size*2) {
+			t.Fatalf("%s must be an exact lowercase SHA-256 digest", name)
+		}
+	}
+	for name, value := range map[string]string{
+		deploymentProducerHeadSHAEnv: expected.ProducerHeadSHA,
+		orchestratorNHPSourceSHAEnv:  expected.NHPSourceSHA,
+		buildSHAEnv:                  expected.QurlGoSourceSHA,
+	} {
+		if !canonicalLowerHex(value, 40) {
+			t.Fatalf("%s must be an exact lowercase commit SHA", name)
+		}
 	}
 	evidence := readOrchestratorProofEvidence(t)
-	if err := validateOrchestratorProofEvidence(
-		evidence, phase, deploymentSHA,
-		os.Getenv(nhpControllerRunIDEnv), os.Getenv(nhpControllerRunAttemptEnv),
-	); err != nil {
+	if err := validateOrchestratorProofEvidence(evidence, expected); err != nil {
 		t.Fatal(err)
 	}
 	return evidence, phase
@@ -337,6 +388,16 @@ func TestDecodeOrchestratorProofEvidenceRejectsAmbiguousJSON(t *testing.T) {
 
 func TestValidateOrchestratorProofEvidenceFailsClosed(t *testing.T) {
 	deploymentSHA := strings.Repeat("d", 64)
+	expected := orchestratorProofExpectations{
+		Phase:                    "post_removal",
+		DeploymentManifestSHA256: deploymentSHA,
+		DeploymentRuntimeSHA256:  strings.Repeat("1", 64),
+		ProducerRunID:            "12",
+		ProducerRunAttempt:       "3",
+		ProducerHeadSHA:          strings.Repeat("a", 40),
+		NHPSourceSHA:             strings.Repeat("b", 40),
+		QurlGoSourceSHA:          strings.Repeat("c", 40),
+	}
 	valid := func(phase string) orchestratorProofEvidence {
 		return orchestratorProofEvidence{
 			SchemaVersion: 1,
@@ -373,7 +434,9 @@ func TestValidateOrchestratorProofEvidenceFailsClosed(t *testing.T) {
 	}
 
 	for _, phase := range []string{"pre_removal", "post_removal"} {
-		if err := validateOrchestratorProofEvidence(valid(phase), phase, deploymentSHA, "12", "3"); err != nil {
+		phaseExpected := expected
+		phaseExpected.Phase = phase
+		if err := validateOrchestratorProofEvidence(valid(phase), phaseExpected); err != nil {
 			t.Fatalf("valid %s orchestrator evidence rejected: %v", phase, err)
 		}
 	}
@@ -388,12 +451,16 @@ func TestValidateOrchestratorProofEvidenceFailsClosed(t *testing.T) {
 		"bad head sha":           func(v *orchestratorProofEvidence) { v.Producer.HeadSHA = "not-a-sha" },
 		"zero run id":            func(v *orchestratorProofEvidence) { v.Producer.RunID = 0 },
 		"zero run attempt":       func(v *orchestratorProofEvidence) { v.Producer.RunAttempt = 0 },
-		"unattended run id":      func(v *orchestratorProofEvidence) { v.Producer.RunID = 99 },
-		"unattended run attempt": func(v *orchestratorProofEvidence) { v.Producer.RunAttempt = 9 },
+		"wrong producer run id":  func(v *orchestratorProofEvidence) { v.Producer.RunID = 99 },
+		"wrong producer attempt": func(v *orchestratorProofEvidence) { v.Producer.RunAttempt = 9 },
 		"wrong deployment":       func(v *orchestratorProofEvidence) { v.Bindings.DeploymentManifestSHA256 = strings.Repeat("e", 64) },
 		"bad runtime inputs":     func(v *orchestratorProofEvidence) { v.Bindings.DeploymentRuntimeInputsSHA256 = "short" },
+		"wrong runtime inputs":   func(v *orchestratorProofEvidence) { v.Bindings.DeploymentRuntimeInputsSHA256 = strings.Repeat("4", 64) },
 		"bad nhp source":         func(v *orchestratorProofEvidence) { v.Bindings.NHPSourceSHA = "nope" },
+		"wrong nhp source":       func(v *orchestratorProofEvidence) { v.Bindings.NHPSourceSHA = strings.Repeat("8", 40) },
 		"bad qurl-go source":     func(v *orchestratorProofEvidence) { v.Bindings.QurlGoSourceSHA = "nope" },
+		"wrong qurl-go source":   func(v *orchestratorProofEvidence) { v.Bindings.QurlGoSourceSHA = strings.Repeat("7", 40) },
+		"wrong producer head":    func(v *orchestratorProofEvidence) { v.Producer.HeadSHA = strings.Repeat("6", 40) },
 		"surface path drift":     func(v *orchestratorProofEvidence) { v.Bindings.RetiredLifecycleSurfacePath = "other.json" },
 		"surface raw drift": func(v *orchestratorProofEvidence) {
 			v.Bindings.RetiredLifecycleSurfaceRawSHA256 = strings.Repeat("f", 64)
@@ -438,27 +505,41 @@ func TestValidateOrchestratorProofEvidenceFailsClosed(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			evidence := valid("post_removal")
 			mutate(&evidence)
-			if err := validateOrchestratorProofEvidence(evidence, "post_removal", deploymentSHA, "12", "3"); err == nil {
+			if err := validateOrchestratorProofEvidence(evidence, expected); err == nil {
 				t.Fatal("invalid orchestrator evidence was accepted")
 			}
 		})
 	}
 
-	// The attended controller identity itself must be canonical.
-	for name, controller := range map[string][2]string{
-		"empty controller run":     {"", "3"},
-		"empty controller attempt": {"12", ""},
-		"zero-prefixed run":        {"012", "3"},
-		"non-numeric attempt":      {"12", "3a"},
+	// The authenticated producer identity itself must be canonical.
+	for name, producer := range map[string][2]string{
+		"empty producer run":     {"", "3"},
+		"empty producer attempt": {"12", ""},
+		"zero-prefixed run":      {"012", "3"},
+		"non-numeric attempt":    {"12", "3a"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if err := validateOrchestratorProofEvidence(
-				valid("post_removal"), "post_removal", deploymentSHA, controller[0], controller[1],
-			); err == nil {
-				t.Fatal("non-canonical attended controller identity was accepted")
+			invalidExpected := expected
+			invalidExpected.ProducerRunID = producer[0]
+			invalidExpected.ProducerRunAttempt = producer[1]
+			if err := validateOrchestratorProofEvidence(valid("post_removal"), invalidExpected); err == nil {
+				t.Fatal("non-canonical authenticated producer identity was accepted")
 			}
 		})
 	}
+
+	t.Run("controller identity cannot substitute for producer identity", func(t *testing.T) {
+		evidence := valid("post_removal")
+		if err := validateOrchestratorProofEvidence(evidence, expected); err != nil {
+			t.Fatalf("exact producer identity rejected: %v", err)
+		}
+		controllerExpected := expected
+		controllerExpected.ProducerRunID = "98"
+		controllerExpected.ProducerRunAttempt = "7"
+		if err := validateOrchestratorProofEvidence(evidence, controllerExpected); err == nil {
+			t.Fatal("distinct controller identity was accepted as the deployment producer")
+		}
+	})
 }
 
 // TestOrchestratorAdapterNamespacesMatchInventory proves the two proof top

@@ -105,6 +105,28 @@ func TestNativeUDPSandboxWorkflowIsAttendedStrictAndEvidenceBearing(t *testing.T
 		"QURL_GO_SANDBOX_PROOF_HARNESS_SHA256",
 		"pre_removal|post_removal",
 		"Verify exact proof inputs",
+		"Download authenticated deployment-producer evidence",
+		"actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1",
+		"artifact-ids: ${{ inputs.deployment_artifact_id }}",
+		"repository: layervai/nhp",
+		"run-id: ${{ inputs.deployment_producer_run_id }}",
+		"github-token: ${{ steps.proof-token.outputs.token }}",
+		"path: ${{ runner.temp }}/deployment-producer-artifact",
+		"digest-mismatch: error",
+		"Materialize authenticated orchestrator evidence",
+		`"deployment-manifest.json"`,
+		`"deployment-provenance.json"`,
+		`"deployment-runtime-inputs.json"`,
+		`"orchestrator-evidence.json"`,
+		"deployment producer artifact file set drift",
+		`cmp -- "${producer_dir}/deployment-manifest.json" "${RUNNER_TEMP}/sandbox-deployment-manifest.json"`,
+		`cmp -- "${producer_dir}/deployment-runtime-inputs.json" "${RUNNER_TEMP}/deployment-runtime-inputs.json"`,
+		"QURL_GO_SANDBOX_ORCHESTRATOR_EVIDENCE_PATH",
+		"QURL_GO_SANDBOX_ORCHESTRATOR_EVIDENCE_SHA256",
+		`QURL_GO_SANDBOX_NHP_SOURCE_SHA=$(jq -r '.repositories.nhp' "${manifest}")`,
+		`[[ "$(jq -r '.repositories.nhp' "${deployment}")" == "${QURL_GO_SANDBOX_NHP_SOURCE_SHA}" ]]`,
+		`[[ "${QURL_GO_SANDBOX_ORCHESTRATOR_EVIDENCE_PATH:-}" == "${orchestrator_evidence_path}" ]]`,
+		`[[ "$(sha256sum "${orchestrator_evidence_path}" | cut -d' ' -f1)" == "${QURL_GO_SANDBOX_ORCHESTRATOR_EVIDENCE_SHA256}" ]]`,
 		"Attest exact same-phase Connector proof",
 		"QURL_GO_SANDBOX_CONNECTOR_PROOF_RUN_ID",
 		"connector_workflow_file=\"sandbox-smoke.yml\"",
@@ -202,6 +224,8 @@ func TestNativeUDPSandboxWorkflowIsAttendedStrictAndEvidenceBearing(t *testing.T
 	requireBefore(t, workflow,
 		"Mint read-only proof-attestation token",
 		"Verify exact proof inputs",
+		"Download authenticated deployment-producer evidence",
+		"Materialize authenticated orchestrator evidence",
 		"Attest exact same-phase Connector proof",
 		"Validate exact retirement inventory",
 		"Run strict direct UDP proof",
@@ -216,6 +240,121 @@ func TestNativeUDPSandboxWorkflowIsAttendedStrictAndEvidenceBearing(t *testing.T
 	}
 	if got := strings.Count(workflow, "permissions:"); got != 1 {
 		t.Fatalf("permissions boundary count = %d, want one exact read-only workflow boundary", got)
+	}
+}
+
+func TestNativeUDPOrchestratorEvidenceMaterializationFailsClosed(t *testing.T) {
+	script := stepRun(t, readWorkflow(t, "native-udp-sandbox.yml"), "Materialize authenticated orchestrator evidence")
+	createArtifact := func(t *testing.T) (string, string) {
+		t.Helper()
+		runnerTemp := t.TempDir()
+		producerDir := filepath.Join(runnerTemp, "deployment-producer-artifact")
+		if err := os.Mkdir(producerDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		files := map[string][]byte{
+			"deployment-manifest.json":       []byte("{}"),
+			"deployment-provenance.json":     []byte("{}"),
+			"deployment-runtime-inputs.json": []byte("{}"),
+			"orchestrator-evidence.json":     []byte(`{"schema_version":1}`),
+		}
+		for name, contents := range files {
+			if err := os.WriteFile(filepath.Join(producerDir, name), contents, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(runnerTemp, "sandbox-deployment-manifest.json"), files["deployment-manifest.json"], 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(runnerTemp, "deployment-runtime-inputs.json"), files["deployment-runtime-inputs.json"], 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return runnerTemp, producerDir
+	}
+
+	t.Run("exact artifact", func(t *testing.T) {
+		runnerTemp, producerDir := createArtifact(t)
+		githubEnv := filepath.Join(runnerTemp, "github.env")
+		runScript(t, t.TempDir(), script, map[string]string{
+			"RUNNER_TEMP": runnerTemp,
+			"GITHUB_ENV":  githubEnv,
+		}, true)
+		evidencePath := filepath.Join(producerDir, "orchestrator-evidence.json")
+		outputs := readStepOutputs(t, githubEnv)
+		if outputs["QURL_GO_SANDBOX_ORCHESTRATOR_EVIDENCE_PATH"] != evidencePath {
+			t.Fatalf("orchestrator evidence path = %q, want %q",
+				outputs["QURL_GO_SANDBOX_ORCHESTRATOR_EVIDENCE_PATH"], evidencePath)
+		}
+		raw, err := os.ReadFile(evidencePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		digest := sha256.Sum256(raw)
+		if got, want := outputs["QURL_GO_SANDBOX_ORCHESTRATOR_EVIDENCE_SHA256"], fmt.Sprintf("%x", digest); got != want {
+			t.Fatalf("orchestrator evidence digest = %q, want %q", got, want)
+		}
+		info, err := os.Stat(evidencePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0o444 {
+			t.Fatalf("orchestrator evidence mode = %o, want 444", info.Mode().Perm())
+		}
+	})
+
+	tests := map[string]func(t *testing.T, producerDir string){
+		"missing file": func(t *testing.T, producerDir string) {
+			if err := os.Remove(filepath.Join(producerDir, "deployment-provenance.json")); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"extra file": func(t *testing.T, producerDir string) {
+			if err := os.WriteFile(filepath.Join(producerDir, "unexpected.json"), []byte("{}"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"manifest mismatch": func(t *testing.T, producerDir string) {
+			if err := os.WriteFile(filepath.Join(producerDir, "deployment-manifest.json"), []byte(`{"drift":true}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"orchestrator symlink": func(t *testing.T, producerDir string) {
+			path := filepath.Join(producerDir, "orchestrator-evidence.json")
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			target := filepath.Join(t.TempDir(), "evidence.json")
+			if err := os.WriteFile(target, []byte("{}"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, path); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"empty orchestrator evidence": func(t *testing.T, producerDir string) {
+			if err := os.WriteFile(filepath.Join(producerDir, "orchestrator-evidence.json"), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"oversized orchestrator evidence": func(t *testing.T, producerDir string) {
+			if err := os.WriteFile(
+				filepath.Join(producerDir, "orchestrator-evidence.json"),
+				bytes.Repeat([]byte("x"), 64*1024+1),
+				0o600,
+			); err != nil {
+				t.Fatal(err)
+			}
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			runnerTemp, producerDir := createArtifact(t)
+			mutate(t, producerDir)
+			runScript(t, t.TempDir(), script, map[string]string{
+				"RUNNER_TEMP": runnerTemp,
+				"GITHUB_ENV":  filepath.Join(runnerTemp, "github.env"),
+			}, false)
+		})
 	}
 }
 
@@ -1698,6 +1837,27 @@ func verifyNativeUDPManifest(
 	if !wantSuccess {
 		return nil
 	}
+	producerDir := filepath.Join(runnerTemp, "deployment-producer-artifact")
+	if err := os.Mkdir(producerDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, contents := range map[string][]byte{
+		"deployment-manifest.json":       manifest,
+		"deployment-provenance.json":     []byte("{}"),
+		"deployment-runtime-inputs.json": deploymentRuntimeInputsBytes(t, manifest),
+		"orchestrator-evidence.json":     []byte(`{"schema_version":1}`),
+	} {
+		if err := os.WriteFile(filepath.Join(producerDir, name), contents, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runScript(
+		t,
+		fixture.repository,
+		stepRun(t, readNativeUDPFixtureWorkflow(t, fixture), "Materialize authenticated orchestrator evidence"),
+		map[string]string{"RUNNER_TEMP": runnerTemp, "GITHUB_ENV": githubEnv},
+		true,
+	)
 	return readStepOutputs(t, githubEnv)
 }
 
@@ -1756,6 +1916,7 @@ func proofHashEnvironment(runnerTemp string, outputs map[string]string) map[stri
 		"QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_SHA256":       outputs["QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_SHA256"],
 		"QURL_GO_SANDBOX_DEPLOYMENT_RUNTIME_INPUTS_PATH":   outputs["QURL_GO_SANDBOX_DEPLOYMENT_RUNTIME_INPUTS_PATH"],
 		"QURL_GO_SANDBOX_DEPLOYMENT_RUNTIME_INPUTS_SHA256": outputs["QURL_GO_SANDBOX_DEPLOYMENT_RUNTIME_INPUTS_SHA256"],
+		"QURL_GO_SANDBOX_NHP_SOURCE_SHA":                   outputs["QURL_GO_SANDBOX_NHP_SOURCE_SHA"],
 		"QURL_GO_SANDBOX_DEPLOYMENT_PRODUCER_RUN_ID":       "987654",
 		"QURL_GO_SANDBOX_DEPLOYMENT_PRODUCER_RUN_ATTEMPT":  "1",
 		"QURL_GO_SANDBOX_DEPLOYMENT_PRODUCER_HEAD_SHA":     strings.Repeat("c", 40),
@@ -1769,6 +1930,8 @@ func proofHashEnvironment(runnerTemp string, outputs map[string]string) map[stri
 		"QURL_GO_SANDBOX_RETIRED_LIFECYCLE_SURFACE_SHA256": outputs["QURL_GO_SANDBOX_RETIRED_LIFECYCLE_SURFACE_SHA256"],
 		"QURL_GO_SANDBOX_TYPED_EVIDENCE_CONTRACT_SHA256":   outputs["QURL_GO_SANDBOX_TYPED_EVIDENCE_CONTRACT_SHA256"],
 		"QURL_GO_SANDBOX_PROOF_HARNESS_SHA256":             outputs["QURL_GO_SANDBOX_PROOF_HARNESS_SHA256"],
+		"QURL_GO_SANDBOX_ORCHESTRATOR_EVIDENCE_PATH":       outputs["QURL_GO_SANDBOX_ORCHESTRATOR_EVIDENCE_PATH"],
+		"QURL_GO_SANDBOX_ORCHESTRATOR_EVIDENCE_SHA256":     outputs["QURL_GO_SANDBOX_ORCHESTRATOR_EVIDENCE_SHA256"],
 	}
 }
 
