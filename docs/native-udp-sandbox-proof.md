@@ -7,12 +7,13 @@ manual because each fresh run consumes a server-minted enrollment credential.
 Every dispatch selects `pre_removal` or `post_removal` and supplies strict
 canonical base64 of the exact non-secret cross-repository sandbox deployment
 manifest and public Hub/cell runtime sidecar, the authenticated NHP producer
-run/attempt/signed-main SHA/artifact ID/artifact digest, plus the run id of a
-successful, same-phase qURL Connector strict proof. The workflow
+run/attempt/signed-main SHA/artifact ID/artifact digest. The workflow
 rejects duplicate keys, trailing input, non-finite numbers, and unknown or
 missing fields before atomically publishing canonical JSON. It validates the
 retirement state, the qurl-go SHA under test, and the exact existence of every
-SHA in the fixed eleven-repository map at its explicitly mapped GitHub repository.
+directly consumed repository SHA at its explicitly mapped GitHub repository.
+External deployment SHAs remain authenticated by the signed NHP producer
+artifact and are joined by the final NHP controller.
 It also requires the tested SHA to be the current head of open, same-repository
 qurl-go PR #93 targeting `main`, and requires GitHub to report that exact
 commit as cryptographically verified.
@@ -20,7 +21,7 @@ It records all supplied image digests, validates the public Hub trust root, and
 requires exactly the ordered `cell0` and `cell1` endpoints with distinct names
 and server identities;
 the blocking topology/retirement evidence must still prove those images are
-actually deployed, while the Connector image is separately attested below. A
+actually deployed. A
 post-removal dispatch must also name a successful pre-removal run of the same
 workflow.
 The workflow resolves exactly one unexpired artifact for that run and exact
@@ -30,12 +31,10 @@ and actual expansion, then accepts only the five exact root files. It requires
 canonical evidence, deployment manifest, public runtime sidecar, inventory,
 and retired-lifecycle surface bytes. The two runs must use the same executable proof-harness digest,
 frozen full inventory mapping, retired-surface contract, Hub/cell topology,
-FRP module/repository, and qRTS repository/image identities. The Connector's
-module map is a
-strict object containing only the Connector binary's embedded `frp` and
-`qurl_go` module SHAs; each module SHA must equal its corresponding repository
-SHA in the producer snapshot. Connector provenance is checked against these
-embedded module identities and the phase's exact qurl-go proof HEAD. Each qurl-go run
+FRP module/repository, and qRTS repository/image identities. The deployment
+manifest's Connector module map remains a strict producer-owned object whose
+`frp` and `qurl_go` SHAs equal the corresponding repository SHAs; qurl-go does
+not download or consume a Connector proof artifact. Each qurl-go run
 is bound to its own manifest SHA because qurl-go's HTTP cleanup is itself part
 of the isolated cut; qurl-go is therefore in the explicit retirement set. The
 qurl-go and Connector repository SHAs, Connector image, and Connector's
@@ -44,9 +43,6 @@ website and the other generated-artifact owners are also retirement-set inputs.
 At least one retirement repository, permitted module/image repin, or deployed
 NHP/qurl-service image must actually differ. A phase label alone is not a
 post-removal proof.
-The post-removal Connector proof must also name the exact Connector
-pre-removal run attested by the paired qurl-go pre-removal evidence; baselines
-from two otherwise valid but unrelated Connector proof pairs cannot be mixed.
 
 Configure the protected GitHub `sandbox` environment before dispatching it:
 
@@ -57,7 +53,7 @@ Configure the protected GitHub `sandbox` environment before dispatching it:
   the workflow. Its minted token has only `actions:read`, `contents:read`, and
   `pull-requests:read` and lets the proof adapters verify the exact
   private-repository manifest,
-  including Connector, NHP, qURL service, qRTS, FRP, and website, instead of
+  including NHP, qURL service, qRTS, FRP, and website, instead of
   trusting operator-entered digests;
 - variable `QURL_GO_SANDBOX_KNOCK_RESOURCE_ID`: a live sandbox Connector knock
   resource;
@@ -72,43 +68,22 @@ reauthenticates the exact successful NHP producer run, immutable artifact
 identity/digest, and signed trusted-main producer commit. Mutable repository
 variables never supply its Hub trust root.
 
-The required `connector_proof_run_id` dispatch input is not trusted on its own.
-A workflow-only App token resolves qURL Connector's exact
-`.github/workflows/sandbox-smoke.yml` workflow id, then verifies the run was a
-successful `workflow_dispatch` at the manifest's exact Connector SHA and
-attempt. The manifest SHA must also be the current head of open,
-same-repository qURL Connector PR #452 targeting `main`, and its exact commit
-must be cryptographically verified by GitHub. It downloads only the exact
-phase/SHA/attempt artifact, verifies the
-GitHub artifact archive digest and safe four-file shape, rejects ambiguous
-JSON, requires canonical Connector evidence plus byte-identical deployment
-manifest and public runtime sidecar, and recomputes the inventory and
-scenario-contract digests. The
-Connector scenario contract uses the producer's exact algorithm: sort rows by
-`name`, project only `name`, `status`, `test`, `requires_env`, and `reason`
-(defaulting missing `test` to JSON `null` and missing `requires_env` to `[]`),
-then hash ASCII, key-sorted, compact JSON. The App
-token and raw Connector evidence are never placed in the `go test` environment.
-The named Go adapter receives only a read-only allowlisted attestation and its
-SHA-256 digest; that attestation carries no credential or raw packet evidence.
-The Connector attestation independently requires its schema-v2 operational
-sidecar to bind the exact Connector SHA, canonical proof agent id, deployment
-manifest SHA-256, and Connector typed-evidence-contract SHA-256. Its four
-observations must prove the same registration/warm-open/cell0-to-cell1/
-same-cell-refresh sequence, including nonregressing endpoint revision and
-parsed lease expiry.
-The Connector inventory contains exactly 56 headless-runtime scenarios. Its
-public runtime deliberately accepts only non-account enrollment credentials,
-so the four account-OTP scenarios remain solely in qurl-go's complete 68-row
-matrix instead of adding a Connector prompt or callback that the product does
-not otherwise need.
+The qurl-go proof is deliberately independent of the Connector proof. It
+executes and publishes the complete 68-row inventory, but it only claims rows
+whose checked-in status is `implemented`; every qurl-go-owned row must be
+implemented and pass exactly once before this workflow is successful.
+Connector-owned rows remain `external_dependency` here. The NHP controller
+joins the successful qurl-go and Connector artifacts for the final pre-removal
+and post-removal decision. A successful qurl-go artifact therefore proves the
+SDK, authenticated deployment producer, Hub/cell trust, and phase pairing; it
+does not by itself authorize lifecycle removal.
 
 Strict mode fails when any required value is absent. It records the exact clean
 Git build SHA, Hub trust root, deployment/inventory/proof-harness digests, and
 every authenticated assigned-cell tuple in a 30-day allowlisted JSON evidence
 manifest. The full normalized inventory mapping and checked-in exact retired
 lifecycle surface have separately reviewed literal SHA-256 values
-(`f5aaef5b840c461ed91530fe6e3b820f47476eaa0f5da327db48c2213e60176c`
+(`48a38a9420dceafa5c7d0e20fa321da6c32eed245240904900264b033ecc565f`
 and `3fe8872c3da9913c28d763f5561d82b67805aae5a6962c6dc403c7d6305da00c`,
 respectively); both are carried in evidence and must match across phases. The
 latter enumerates the
@@ -188,22 +163,18 @@ Go SDK real-KMS sealed cold enrollment and credentialless warm restart, SDK
 packet-capture/legacy-route counters, producer-to-wire public resource versus
 knock identity, and the Connector's hardened-container, FRP, backend,
 resource-versus-knock identity, journal, packet-capture, and exact artifact
-evidence. It includes a mandatory attestation binding the complete Connector
-inventory and successful hardened run to the same proof phase and deployment
-manifest. Five phase-aware retirement rows also require deployed HTTP/OpenAPI,
+evidence. The NHP controller later binds the complete Connector inventory and
+successful hardened run to this proof's phase and deployment manifest. Five
+phase-aware retirement rows also require deployed HTTP/OpenAPI,
 retained-relay rejection of OTP/REG/LST/LRT before waiter/plugin/Authority,
 NHP registrar/interface, generated artifact, and Terraform saved-plan/live-state
 proof; changing only a manifest label or commit is insufficient. SDK-owned work
-is `todo`; Connector and topology work begins as an
-`external_dependency` and may become `implemented` only when an exact named
-adapter under `TestSandboxConnectorUDP`, `TestSandboxWireEvidence`, or
-`TestSandboxTopology` verifies immutable repository SHA, run, inventory, and
-artifact evidence. The attended command explicitly includes all four proof top
-levels, so external rows are finishable without reassigning their owner. Both
-non-implemented statuses are blocking. The workflow deliberately
-ends red while any required row is not implemented and backed by an exact named
-pass, so today's 25 implemented and 43 blocking scenarios cannot authorize any
-retirement or removal. The DNS and timeout cases are inherently client-side failure paths,
+is `todo`; Connector and topology work remains `external_dependency` for the
+final NHP-controller aggregation. Both non-implemented statuses remain blocking
+for retirement, but only unfinished qurl-go-owned rows fail this producer
+workflow. The artifact retains honest implemented/blocking counts for all 68
+rows, so it cannot be mistaken for the final removal decision. The DNS and
+timeout cases are inherently client-side failure paths,
 run in ordinary CI as well as the attended runner through only the public SDK.
 Add other evidence only when the real Hub/Authority/cell prerequisites and
 safe client-side fault injection exist; never convert an unavailable operation

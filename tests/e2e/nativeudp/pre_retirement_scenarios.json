@@ -427,9 +427,9 @@
     {
       "id": "connector.complete_strict_evidence_attestation",
       "owner": "qurl-connector",
-      "status": "implemented",
+      "status": "external_dependency",
       "test_name": "TestSandboxConnectorUDP/complete_strict_evidence_attestation",
-      "requirement": "Verify through a trusted read-only cross-repository adapter the exact Connector workflow id, commit, attempt, hardened-container image, complete inventory, scenario-contract and proof-harness digests, successful strict run id/URL, and artifact digest for the same phase and byte-identical canonical deployment manifest, with every Connector row passing exactly once and no skips or TODOs."
+      "requirement": "The final NHP controller must verify the exact Connector workflow id, commit, attempt, hardened-container image, complete inventory, scenario-contract and proof-harness digests, successful strict run id/URL, and artifact digest for the same phase and byte-identical canonical deployment manifest, with every Connector row passing exactly once and no skips or TODOs."
     },
     {
       "id": "orchestrator.real_hub_authority_and_two_cells",

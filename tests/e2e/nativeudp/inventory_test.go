@@ -15,7 +15,7 @@ import (
 	"testing"
 )
 
-const reviewedInventoryMappingSHA256 = "95b12ec289cffcc38e850d2ceb5d6479f3a0781c2bd8ce9fb37f311ed9d39989"
+const reviewedInventoryMappingSHA256 = "48a38a9420dceafa5c7d0e20fa321da6c32eed245240904900264b033ecc565f"
 
 type scenarioInventory struct {
 	SchemaVersion        int                    `json:"schema_version"`
@@ -201,8 +201,8 @@ func validateScenarioInventory(t *testing.T, inventory scenarioInventory) {
 		if scenario.Owner == "qurl-go" && scenario.Status == "external_dependency" {
 			t.Errorf("qurl-go-owned scenario %q cannot be an external dependency", scenario.ID)
 		}
-		if scenario.Owner != "qurl-go" && scenario.Status == "todo" {
-			t.Errorf("externally owned scenario %q must remain external_dependency until its exact evidence adapter is implemented", scenario.ID)
+		if scenario.Owner != "qurl-go" && scenario.Status != "external_dependency" {
+			t.Errorf("externally owned scenario %q must remain external_dependency for final controller aggregation", scenario.ID)
 		}
 		if err := validateScenarioAdapterNamespace(scenario); err != nil {
 			t.Errorf("scenario %q: %v", scenario.ID, err)
@@ -215,8 +215,8 @@ func validateScenarioInventory(t *testing.T, inventory scenarioInventory) {
 	if !slices.Equal(actualIDs, expectedIDs) {
 		t.Fatalf("scenario inventory ids =\n%q\nwant exact pre-retirement inventory\n%q", actualIDs, expectedIDs)
 	}
-	if implemented != 25 || len(inventory.Scenarios)-implemented != 43 {
-		t.Fatalf("scenario counts = %d implemented/%d blocking, want the current 25/43 honest gate", implemented, len(inventory.Scenarios)-implemented)
+	if implemented != 24 || len(inventory.Scenarios)-implemented != 44 {
+		t.Fatalf("scenario counts = %d implemented/%d blocking, want the current 24/44 honest gate", implemented, len(inventory.Scenarios)-implemented)
 	}
 }
 
