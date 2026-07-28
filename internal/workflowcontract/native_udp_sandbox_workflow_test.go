@@ -1801,20 +1801,6 @@ func deploymentRuntimeInputsBytes(t *testing.T, manifest []byte) []byte {
 	return encoded
 }
 
-func mutateDeploymentRuntimeInputs(t *testing.T, runtime []byte, mutate func(map[string]any)) []byte {
-	t.Helper()
-	var value map[string]any
-	if err := json.Unmarshal(runtime, &value); err != nil {
-		t.Fatal(err)
-	}
-	mutate(value)
-	encoded, err := json.Marshal(value)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return encoded
-}
-
 func mutateDeploymentManifest(t *testing.T, manifest []byte, mutate func(map[string]any)) []byte {
 	t.Helper()
 	var value map[string]any
