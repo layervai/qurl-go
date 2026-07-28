@@ -28,7 +28,7 @@
     {
       "id": "assignment.hub_cookie_proof_lst_return_routability",
       "owner": "qurl-go",
-      "status": "todo",
+      "status": "implemented",
       "test_name": "TestSandboxNativeUDPLifecycle/hub_cookie_proof_lst_return_routability",
       "requirement": "Force Hub COK and prove the SDK's cookie-bound proof LST reaches the public Hub and receives the final LRT."
     },
@@ -70,7 +70,7 @@
     {
       "id": "session.cell_cookie_reknock_return_routability",
       "owner": "qurl-go",
-      "status": "todo",
+      "status": "implemented",
       "test_name": "TestSandboxNativeUDPLifecycle/assigned_cell_cookie_reknock_return_routability",
       "requirement": "Force assigned-cell COK and prove the SDK's RKN receives the authenticated ACK."
     },
@@ -98,7 +98,7 @@
     {
       "id": "assignment.authenticated_invalid_response_matrix",
       "owner": "qurl-go",
-      "status": "todo",
+      "status": "implemented",
       "test_name": "TestSandboxNativeUDPLifecycle/authenticated_invalid_assignment_matrix",
       "requirement": "Reject authenticated assignments with a non-LayerV or raw AWS host, invalid port, expired lease, wrong or missing agent/cell/generation/revision/key, duplicate fields, unknown fields, or trailing input; persist none of them and send no assigned-cell datagram."
     },
@@ -175,7 +175,7 @@
     {
       "id": "dns.multi_address_ipv4_ipv6_bounds",
       "owner": "qurl-go",
-      "status": "todo",
+      "status": "implemented",
       "test_name": "TestSandboxNativeUDPLifecycle/multi_address_ipv4_ipv6_bounds",
       "requirement": "Exercise mixed IPv4/IPv6 answers with failing and successful addresses, enforce address-count and retry budgets, re-resolve on the next exchange, and persist no resolved IP."
     },
@@ -224,21 +224,21 @@
     {
       "id": "packet.replay",
       "owner": "qurl-go",
-      "status": "todo",
+      "status": "implemented",
       "test_name": "TestSandboxNativeUDPLifecycle/packet_replay",
       "requirement": "Replay captured requests and responses at Hub first/proof LST, REG, completion LST, KNK/RKN, EXT, and refresh/recovery boundaries; reject them without state advancement."
     },
     {
       "id": "packet.duplicate",
       "owner": "qurl-go",
-      "status": "todo",
+      "status": "implemented",
       "test_name": "TestSandboxNativeUDPLifecycle/packet_duplicate",
       "requirement": "Duplicate datagrams at Hub first/proof LST, REG, completion LST, KNK/RKN, EXT, and refresh/recovery boundaries; prove each phase's exact idempotent or terminal contract."
     },
     {
       "id": "packet.loss",
       "owner": "qurl-go",
-      "status": "todo",
+      "status": "implemented",
       "test_name": "TestSandboxNativeUDPLifecycle/packet_loss",
       "requirement": "Drop each request/reply flight across Hub first/proof LST, REG, completion LST, KNK/RKN, EXT, and refresh/recovery; prove bounded retry or durable recovery with no new logical operation."
     },
@@ -252,7 +252,7 @@
     {
       "id": "packet.delay",
       "owner": "qurl-go",
-      "status": "todo",
+      "status": "implemented",
       "test_name": "TestSandboxNativeUDPLifecycle/packet_delay",
       "requirement": "Delay each request/reply flight across Hub first/proof LST, REG, completion LST, KNK/RKN, EXT, and refresh/recovery retry/lease boundaries; observe bounded contract behavior."
     },
@@ -266,21 +266,21 @@
     {
       "id": "packet.remaining_phase_timeouts",
       "owner": "qurl-go",
-      "status": "todo",
+      "status": "implemented",
       "test_name": "TestSandboxNativeUDPLifecycle/remaining_phase_timeouts",
       "requirement": "Force request/reply timeouts at Hub proof LST, REG, completion LST, KNK/RKN, EXT, and refresh/recovery boundaries; prove each phase's exact bounded recovery taxonomy without HTTP fallback."
     },
     {
       "id": "packet.cancellation",
       "owner": "qurl-go",
-      "status": "todo",
+      "status": "implemented",
       "test_name": "TestSandboxNativeUDPLifecycle/packet_cancellation",
       "requirement": "Cancel at Hub first/proof LST, REG, completion LST, KNK/RKN, EXT, and refresh/recovery boundaries; prove no post-boundary datagram or unsafe state mutation occurs."
     },
     {
       "id": "packet.malformed",
       "owner": "qurl-go",
-      "status": "todo",
+      "status": "implemented",
       "test_name": "TestSandboxNativeUDPLifecycle/malformed_packet",
       "requirement": "Inject authenticated malformed envelopes and application bodies at every response-accepting Hub, REG, completion, KNK/RKN, EXT, and refresh/recovery phase; observe generic fail-closed errors."
     },
