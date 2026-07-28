@@ -2351,6 +2351,64 @@ func TestRegisterAgentRuntime_AccountOTPProviderFailuresSendOneOTPNoREGAndPersis
 	}
 }
 
+func TestRegisterAgentRuntime_AccountRegistrationRateLimitIsTerminalForCall(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	for _, code := range []string{rakAttemptsExceeded, rakRateLimited} {
+		t.Run(code, func(t *testing.T) {
+			f := newRuntimeFixture(t,
+				[]runtimeUDPStep{{
+					requestType: relayknock.TypeListRequest,
+					replyType:   relayknock.TypeListResult,
+					replyBody:   accountAssignmentResult(contract, "conformance-account-assignment-ticket-0001"),
+				}},
+				[]runtimeUDPStep{
+					{requestType: relayknock.TypeOTP, noReply: true},
+					{
+						requestType: relayknock.TypeRegister,
+						replyType:   relayknock.TypeRegisterAck,
+						replyBody:   fmt.Sprintf(`{"errCode":%q,"errMsg":"untrusted detail","aspId":"agent"}`, code),
+					},
+				},
+			)
+			callbacks := 0
+			_, _, err := RegisterAgentRuntime(
+				context.Background(),
+				conformance.AgentAssignmentAccountCredentialFixture,
+				f.store,
+				f.options(
+					WithAgentRuntimeAllowedRegistrationKeyKinds(RegistrationKeyKindAccount),
+					WithAgentRuntimeOTPProvider(func(context.Context, AgentOTPChallenge) (string, error) {
+						callbacks++
+						return "12345678", nil
+					}),
+				)...,
+			)
+			if !errors.Is(err, ErrRegistrationRateLimited) {
+				t.Fatalf("authenticated account REG %s = %v, want ErrRegistrationRateLimited", code, err)
+			}
+			if strings.Contains(err.Error(), "untrusted detail") {
+				t.Fatalf("authenticated account REG %s reflected producer detail: %v", code, err)
+			}
+			if callbacks != 1 || len(f.hubUDP.snapshot()) != 1 {
+				t.Fatalf("authenticated account REG %s callbacks/Hub requests = %d/%d, want 1/1", code, callbacks, len(f.hubUDP.snapshot()))
+			}
+			requests := f.cellUDP.snapshot()
+			if len(requests) != 2 ||
+				requests[0].typeID != relayknock.TypeOTP ||
+				requests[1].typeID != relayknock.TypeRegister {
+				t.Fatalf("authenticated account REG %s cell requests = %v, want one OTP then one REG", code, requests)
+			}
+			pending, loadErr := f.store.LoadAgentState(context.Background())
+			if loadErr != nil {
+				t.Fatal(loadErr)
+			}
+			if pending.PendingActivation == nil || pending.PendingCompletion != nil || pending.RegisteredAt != nil {
+				t.Fatalf("authenticated account REG %s lost exact pending activation: %#v", code, pending)
+			}
+		})
+	}
+}
+
 func TestRegisterAgentRuntime_AccountPendingSaveFailureSendsOneOTPNoREG(t *testing.T) {
 	contract := loadAssignmentFixture(t)
 	f := newRuntimeFixture(t,
