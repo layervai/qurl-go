@@ -373,7 +373,7 @@ func (d *pinnedStateDirImpl) readFile(name, label string, maxBytes int, notFound
 	fd, err := unix.Openat(d.fd, name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
 	if err != nil {
 		if errors.Is(err, unix.ENOENT) {
-			if err := d.recordActiveEntry(name, pinnedFileIdentity{}); err != nil {
+			if err := d.trackActiveEntry(name, pinnedFileIdentity{}); err != nil {
 				return nil, err
 			}
 			return nil, notFound
@@ -396,7 +396,7 @@ func (d *pinnedStateDirImpl) readFile(name, label string, maxBytes int, notFound
 	if err != nil {
 		return nil, fmt.Errorf("%w: capture opened %s identity: %w", ErrAgentStateContinuity, label, err)
 	}
-	if err := d.recordActiveEntry(name, identity); err != nil {
+	if err := d.trackActiveEntry(name, identity); err != nil {
 		return nil, err
 	}
 	raw, err := readCappedBody(file, maxBytes, label)
@@ -427,7 +427,7 @@ func (d *pinnedStateDirImpl) writeFileAtomic(ctx context.Context, token *pinnedS
 	if err != nil {
 		return err
 	}
-	if err := d.checkActiveEntry(name, baseline); err != nil {
+	if err := d.trackActiveEntry(name, baseline); err != nil {
 		return err
 	}
 	tempName, fd, err := d.createExclusiveTemp(tempPrefix, label)
@@ -490,7 +490,7 @@ func (d *pinnedStateDirImpl) writeFileAtomic(ctx context.Context, token *pinnedS
 	if current != baseline {
 		return fmt.Errorf("%w: %s entry changed before commit", ErrAgentStateContinuity, label)
 	}
-	if err := d.checkActiveEntry(name, current); err != nil {
+	if err := d.trackActiveEntry(name, current); err != nil {
 		return err
 	}
 	if err := d.hooks.rename(d.fd, tempName, d.fd, name); err != nil {
@@ -560,20 +560,7 @@ func (d *pinnedStateDirImpl) captureEntry(name, label string) (pinnedFileIdentit
 	return identityForFD(fd)
 }
 
-func (d *pinnedStateDirImpl) recordActiveEntry(name string, identity pinnedFileIdentity) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if d.activeLockFD < 0 {
-		return nil
-	}
-	if previous, ok := d.activeEntries[name]; ok && previous != identity {
-		return fmt.Errorf("%w: state entry changed while the setup lock was held", ErrAgentStateContinuity)
-	}
-	d.activeEntries[name] = identity
-	return nil
-}
-
-func (d *pinnedStateDirImpl) checkActiveEntry(name string, identity pinnedFileIdentity) error {
+func (d *pinnedStateDirImpl) trackActiveEntry(name string, identity pinnedFileIdentity) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.activeLockFD < 0 {
