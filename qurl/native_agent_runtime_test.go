@@ -1676,6 +1676,16 @@ func TestRegisterAgentRuntime_ResumesPersistedCandidateAfterLostCompletionReply(
 	if len(f.hubUDP.snapshot()) != 1 {
 		t.Fatal("live pending assignment unexpectedly refreshed through Hub")
 	}
+	completed, loadErr := f.store.LoadAgentState(context.Background())
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if completed.PendingCompletion != nil ||
+		completed.DeviceAPIKey != conformance.AgentAssignmentDeviceAPIKeyFixture ||
+		completed.DeviceAPIKeyID != "key_DvK9mN2pQr7S" ||
+		completed.RegisteredAt == nil {
+		t.Fatalf("completion recovery did not promote the exact candidate/key id: %#v", completed)
+	}
 }
 
 func TestRegisterAgentRuntime_PreREGCancellationLeavesExactPendingActivation(t *testing.T) {
@@ -2285,6 +2295,11 @@ func TestRegisterAgentRuntime_AccountOTPProviderFailuresSendOneOTPNoREGAndPersis
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			dialer := &countingNativeDialer{inner: f.dialer}
+			var httpCalls atomic.Int32
+			refusingHTTP := doerFunc(func(*http.Request) (*http.Response, error) {
+				httpCalls.Add(1)
+				return nil, errors.New("HTTP is forbidden during native OTP failure handling")
+			})
 			provider := func(context.Context, AgentOTPChallenge) (string, error) {
 				if test.cancel {
 					cancel()
@@ -2297,6 +2312,7 @@ func TestRegisterAgentRuntime_AccountOTPProviderFailuresSendOneOTPNoREGAndPersis
 					WithAgentRuntimeAllowedRegistrationKeyKinds(RegistrationKeyKindAccount),
 					WithAgentRuntimeOTPProvider(provider),
 					WithAgentRuntimeUDPDialer(dialer),
+					WithAgentClientHTTPClient(refusingHTTP),
 				)...)
 			if test.want != nil && !errors.Is(err, test.want) {
 				t.Fatalf("provider failure = %v, want %v", err, test.want)
@@ -2316,6 +2332,9 @@ func TestRegisterAgentRuntime_AccountOTPProviderFailuresSendOneOTPNoREGAndPersis
 			// lifecycle returns, even if the server has not recorded that datagram.
 			if dialer.calls.Load() != 3 {
 				t.Fatalf("provider failure UDP dials = %d, want Hub challenge/proof + OTP only", dialer.calls.Load())
+			}
+			if httpCalls.Load() != 0 {
+				t.Fatalf("provider failure attempted %d HTTP fallback calls", httpCalls.Load())
 			}
 			persisted, loadErr := f.store.LoadAgentState(context.Background())
 			if loadErr != nil {
@@ -2535,6 +2554,16 @@ func TestRegisterAgentRuntime_FinalSaveFailureKeepsCandidateRecoverable(t *testi
 	requests := f.cellUDP.snapshot()
 	if len(requests) != 3 || !bytes.Equal(requests[1].body, requests[2].body) {
 		t.Fatalf("final-save recovery changed completion candidate: %v", requests)
+	}
+	completed, loadErr := f.store.LoadAgentState(context.Background())
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if completed.PendingCompletion != nil ||
+		completed.DeviceAPIKey != conformance.AgentAssignmentDeviceAPIKeyFixture ||
+		completed.DeviceAPIKeyID != "key_DvK9mN2pQr7S" ||
+		completed.RegisteredAt == nil {
+		t.Fatalf("final-save recovery did not promote the exact candidate/key id: %#v", completed)
 	}
 }
 

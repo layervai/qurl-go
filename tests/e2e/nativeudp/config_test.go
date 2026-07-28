@@ -22,6 +22,8 @@ const (
 	provenancePathEnv        = "QURL_GO_SANDBOX_PROVENANCE_PATH"
 	deploymentManifestSHAEnv = "QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_SHA256"
 	typedContractSHAEnv      = "QURL_GO_SANDBOX_TYPED_EVIDENCE_CONTRACT_SHA256"
+	candidatePRPathEnv       = "QURL_GO_SANDBOX_CANDIDATE_PR_PATH"
+	candidateCommitPathEnv   = "QURL_GO_SANDBOX_CANDIDATE_COMMIT_PATH"
 	knockResourceIDEnv       = "QURL_GO_SANDBOX_KNOCK_RESOURCE_ID"
 	expectedCellIDEnv        = "QURL_GO_SANDBOX_EXPECTED_CELL_ID"
 	standardNHPUDPPort       = 62206
@@ -39,6 +41,8 @@ type sandboxConfig struct {
 	provenancePath   string
 	deploymentSHA    string
 	typedContractSHA string
+	candidatePRPath  string
+	candidateCommit  string
 	knockResourceID  string
 	expectedCellID   string
 }
@@ -64,6 +68,8 @@ func loadSandboxConfig(lookup func(string) string) (sandboxConfig, bool, error) 
 		provenancePathEnv,
 		deploymentManifestSHAEnv,
 		typedContractSHAEnv,
+		candidatePRPathEnv,
+		candidateCommitPathEnv,
 		knockResourceIDEnv,
 	}
 	missing := make([]string, 0, len(required))
@@ -91,6 +97,8 @@ func loadSandboxConfig(lookup func(string) string) (sandboxConfig, bool, error) 
 		provenancePath:   lookup(provenancePathEnv),
 		deploymentSHA:    lookup(deploymentManifestSHAEnv),
 		typedContractSHA: lookup(typedContractSHAEnv),
+		candidatePRPath:  lookup(candidatePRPathEnv),
+		candidateCommit:  lookup(candidateCommitPathEnv),
 		knockResourceID:  lookup(knockResourceIDEnv),
 		expectedCellID:   lookup(expectedCellIDEnv),
 	}
@@ -107,6 +115,8 @@ func loadSandboxConfig(lookup func(string) string) (sandboxConfig, bool, error) 
 		provenancePathEnv:        cfg.provenancePath,
 		deploymentManifestSHAEnv: cfg.deploymentSHA,
 		typedContractSHAEnv:      cfg.typedContractSHA,
+		candidatePRPathEnv:       cfg.candidatePRPath,
+		candidateCommitPathEnv:   cfg.candidateCommit,
 		knockResourceIDEnv:       cfg.knockResourceID,
 		expectedCellIDEnv:        cfg.expectedCellID,
 	} {
@@ -125,6 +135,15 @@ func loadSandboxConfig(lookup func(string) string) (sandboxConfig, bool, error) 
 	}
 	if !filepath.IsAbs(cfg.provenancePath) {
 		return sandboxConfig{}, true, fmt.Errorf("%s must be an absolute path", provenancePathEnv)
+	}
+	if !filepath.IsAbs(cfg.candidatePRPath) {
+		return sandboxConfig{}, true, fmt.Errorf("%s must be an absolute path", candidatePRPathEnv)
+	}
+	if !filepath.IsAbs(cfg.candidateCommit) {
+		return sandboxConfig{}, true, fmt.Errorf("%s must be an absolute path", candidateCommitPathEnv)
+	}
+	if filepath.Clean(cfg.candidatePRPath) == filepath.Clean(cfg.candidateCommit) {
+		return sandboxConfig{}, true, fmt.Errorf("%s and %s must resolve to distinct paths", candidatePRPathEnv, candidateCommitPathEnv)
 	}
 	if !canonicalLowerHex(cfg.deploymentSHA, 64) {
 		return sandboxConfig{}, true, fmt.Errorf("%s must be an exact lowercase SHA-256 digest", deploymentManifestSHAEnv)
@@ -194,6 +213,8 @@ func TestSandboxConfigStrictMode(t *testing.T) {
 		provenancePathEnv:        filepath.Join(t.TempDir(), "provenance.json"),
 		deploymentManifestSHAEnv: strings.Repeat("d", 64),
 		typedContractSHAEnv:      strings.Repeat("e", 64),
+		candidatePRPathEnv:       filepath.Join(t.TempDir(), "qurl-go-pr-93.json"),
+		candidateCommitPathEnv:   filepath.Join(t.TempDir(), "qurl-go-pr-93-commit.json"),
 		knockResourceIDEnv:       "knock-resource-id",
 	}
 	lookup := func(values map[string]string) func(string) string {
@@ -233,7 +254,7 @@ func TestSandboxConfigStrictMode(t *testing.T) {
 		if !enabled || err == nil || cfg != (sandboxConfig{}) {
 			t.Fatalf("missing config = %#v, %t, %v; want enabled failure", cfg, enabled, err)
 		}
-		for _, name := range []string{buildSHAEnv, hubHostEnv, hubPortEnv, hubServerKeyEnv, enrollmentEnv, agentIDEnv, statePathEnv, provenancePathEnv, deploymentManifestSHAEnv, typedContractSHAEnv, knockResourceIDEnv} {
+		for _, name := range []string{buildSHAEnv, hubHostEnv, hubPortEnv, hubServerKeyEnv, enrollmentEnv, agentIDEnv, statePathEnv, provenancePathEnv, deploymentManifestSHAEnv, typedContractSHAEnv, candidatePRPathEnv, candidateCommitPathEnv, knockResourceIDEnv} {
 			if !strings.Contains(err.Error(), name) {
 				t.Errorf("missing-config error %q omits %s", err, name)
 			}

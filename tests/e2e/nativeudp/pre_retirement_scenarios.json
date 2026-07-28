@@ -14,7 +14,7 @@
     {
       "id": "provenance.exact_qurl_go_93_candidate",
       "owner": "qurl-go",
-      "status": "todo",
+      "status": "implemented",
       "test_name": "TestSandboxNativeUDPLifecycle/exact_qurl_go_93_candidate",
       "requirement": "Prove the tested GITHUB_SHA is the current head of open same-repository layervai/qurl-go PR #93 targeting main, and that GitHub reports that exact lowercase commit SHA as cryptographically verified."
     },
@@ -42,7 +42,7 @@
     {
       "id": "otp.dedupe",
       "owner": "qurl-go",
-      "status": "todo",
+      "status": "implemented",
       "test_name": "TestSandboxNativeUDPLifecycle/account_otp_dedupe",
       "requirement": "Prove duplicate/restarted account enrollment cannot dispatch a second OTP for one ticket."
     },
@@ -56,7 +56,7 @@
     {
       "id": "otp.error",
       "owner": "qurl-go",
-      "status": "todo",
+      "status": "implemented",
       "test_name": "TestSandboxNativeUDPLifecycle/account_otp_error",
       "requirement": "Exercise terminal and retryable OTP failures without a hidden second send or HTTP fallback."
     },
@@ -119,28 +119,28 @@
     {
       "id": "recovery.ambiguous_rak",
       "owner": "qurl-go",
-      "status": "todo",
+      "status": "implemented",
       "test_name": "TestSandboxNativeUDPLifecycle/ambiguous_rak_recovery",
       "requirement": "Drop an authenticated RAK result and prove restart replays the exact persisted activation without a new assignment."
     },
     {
       "id": "recovery.registration_restart",
       "owner": "qurl-go",
-      "status": "todo",
+      "status": "implemented",
       "test_name": "TestSandboxNativeUDPLifecycle/registration_restart_recovery",
       "requirement": "Restart at every durable registration boundary and resume the exact pending episode."
     },
     {
       "id": "recovery.ambiguous_completion_lrt",
       "owner": "qurl-go",
-      "status": "todo",
+      "status": "implemented",
       "test_name": "TestSandboxNativeUDPLifecycle/ambiguous_completion_lrt_recovery",
       "requirement": "Drop the authenticated completion LRT, restart, and prove the exact persisted sealed device-credential candidate is replayed and resolves to the same device key id."
     },
     {
       "id": "recovery.final_state_save_ambiguity",
       "owner": "qurl-go",
-      "status": "todo",
+      "status": "implemented",
       "test_name": "TestSandboxNativeUDPLifecycle/final_state_save_ambiguity",
       "requirement": "Fail the final completed-state save after authenticated completion and prove restart reconciles without minting a second device credential or losing the exact candidate/key id."
     },

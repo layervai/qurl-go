@@ -17,7 +17,7 @@ import (
 
 const (
 	nativeUDPWorkflowID                   = "4242"
-	reviewedInventoryMappingSHA256Fixture = "48a38a9420dceafa5c7d0e20fa321da6c32eed245240904900264b033ecc565f"
+	reviewedInventoryMappingSHA256Fixture = "a2e2489e38eac9ad7c15df1a9edf4f4db4c1e427a1b6eb1a9de1eadbeba736c2"
 )
 
 type nativeUDPProofFixture struct {
@@ -79,6 +79,8 @@ func TestNativeUDPSandboxWorkflowIsAttendedStrictAndEvidenceBearing(t *testing.T
 		`.head.sha == $sha`,
 		`.base.ref == "main"`,
 		`.commit.verification.verified == true`,
+		"QURL_GO_SANDBOX_CANDIDATE_PR_PATH=${candidate_pr}",
+		"QURL_GO_SANDBOX_CANDIDATE_COMMIT_PATH=${candidate_commit}",
 		"QURL_GO_SANDBOX_INVENTORY_MAPPING_SHA256",
 		"QURL_GO_SANDBOX_RETIRED_LIFECYCLE_SURFACE_SHA256",
 		"retired_lifecycle_surface.json",
@@ -1078,8 +1080,8 @@ func TestNativeUDPSandboxEvidenceManifestIsAllowlisted(t *testing.T) {
 		t.Fatalf("evidence deployment producer = %v", decoded["deployment_producer"])
 	}
 	counts := decoded["counts"].(map[string]any)
-	if counts["blocking"] != float64(44) {
-		t.Fatalf("evidence blocking count = %v, want 44", counts["blocking"])
+	if counts["blocking"] != float64(37) {
+		t.Fatalf("evidence blocking count = %v, want 37", counts["blocking"])
 	}
 	results := decoded["scenario_results"].([]any)
 	if len(results) != 1 {

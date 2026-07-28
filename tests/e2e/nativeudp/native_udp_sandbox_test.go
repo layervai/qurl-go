@@ -212,6 +212,12 @@ func TestSandboxNativeUDPLifecycle(t *testing.T) {
 		return
 	}
 
+	if !runTypedEvidenceScenario(t, "exact_qurl_go_93_candidate", "provenance.exact_qurl_go_93_candidate", []string{"build_provenance"}, func(t *testing.T) {
+		proveExactQURLGo93Candidate(t, cfg)
+	}) {
+		return
+	}
+
 	if !runTypedEvidenceScenario(t, "hub_dns_failure", "negative.hub_dns_failure", []string{"rejection_observation"}, func(t *testing.T) {
 		proveHubDNSFailure(ctx, t, hub, httpTrap)
 	}) {
@@ -316,6 +322,14 @@ func TestSandboxNativeUDPLifecycle(t *testing.T) {
 		proveAuthenticatedInvalidAssignmentMatrix(ctx, t, httpTrap)
 	}) {
 		return
+	}
+
+	for _, proof := range nativeDurabilityProofAdapters() {
+		if !runTypedEvidenceScenario(t, proof.adapterName, proof.scenarioKey, []string{proof.evidenceKind}, func(t *testing.T) {
+			runProductionStateMachineProofs(t, proof.productionTests)
+		}) {
+			return
+		}
 	}
 
 	cellEvidence := make([]sandboxCellEvidence, 0, 4)
