@@ -3,6 +3,7 @@ package nativeudp_test
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The orchestrator half of the cross-repository proof. layervai/nhp already
@@ -48,6 +50,25 @@ const (
 // without the producer widening it too must fail closed.
 var orchestratorProducedRows = []string{"retirement.nhp_registrar_surface_state"}
 
+var (
+	orchestratorRetiredMessageTypes = []string{
+		"NHP_LRT", "NHP_LST", "NHP_OTP", "NHP_RAK", "NHP_REG",
+	}
+	orchestratorRetiredHTTPOperations = []orchestratorRetiredHTTPOperation{
+		{Method: "POST", Path: "/internal/v1/agent/otp"},
+		{Method: "POST", Path: "/internal/v1/agent/register"},
+	}
+)
+
+const (
+	orchestratorRegistrarRowKind     = "surface_inventory"
+	orchestratorRegistrarSurface     = "nhp_registrar"
+	orchestratorMessageTypeSource    = "nhp/core/packet.go"
+	orchestratorLegacyRegistrarRole  = "legacy_registrar"
+	orchestratorNativeRuntimeRole    = "native_runtime"
+	maxOrchestratorSurfaceInterfaces = 64
+)
+
 type orchestratorProofEvidence struct {
 	SchemaVersion int                                  `json:"schema_version"`
 	Gate          string                               `json:"gate"`
@@ -78,11 +99,40 @@ type orchestratorEvidenceBindings struct {
 }
 
 type orchestratorEvidenceRowV1 struct {
-	Phase             string `json:"phase"`
-	InterfacesSHA256  string `json:"interfaces_sha256"`
-	NHPSourceSHA      string `json:"nhp_source_sha"`
-	DispatchesWork    bool   `json:"dispatches_lifecycle_work"`
-	SurfaceEntryCount int    `json:"surface_entry_count"`
+	Kind                          string                               `json:"kind"`
+	Surface                       string                               `json:"surface"`
+	Phase                         string                               `json:"phase"`
+	SourceRepository              string                               `json:"source_repository"`
+	SourceSHA                     string                               `json:"source_sha"`
+	MessageTypeSourcePath         string                               `json:"message_type_source_path"`
+	MessageTypeSourceSHA256       string                               `json:"message_type_source_sha256"`
+	RetiredMessageTypeWireValues  orchestratorRetiredMessageTypeValues `json:"retired_message_type_wire_values"`
+	RetiredInternalHTTPOperations []orchestratorRetiredHTTPOperation   `json:"retired_internal_http_operations"`
+	Interfaces                    []orchestratorNHPInterface           `json:"interfaces"`
+	InterfacesSHA256              string                               `json:"interfaces_sha256"`
+}
+
+type orchestratorRetiredMessageTypeValues struct {
+	LST int `json:"NHP_LST"`
+	LRT int `json:"NHP_LRT"`
+	OTP int `json:"NHP_OTP"`
+	REG int `json:"NHP_REG"`
+	RAK int `json:"NHP_RAK"`
+}
+
+type orchestratorRetiredHTTPOperation struct {
+	Method string `json:"method"`
+	Path   string `json:"path"`
+}
+
+type orchestratorNHPInterface struct {
+	Symbol                  string   `json:"symbol"`
+	Path                    string   `json:"path"`
+	PathSHA256              string   `json:"path_sha256"`
+	Role                    string   `json:"role"`
+	State                   string   `json:"state"`
+	LifecycleMessageTypes   []string `json:"lifecycle_message_types"`
+	DispatchesLifecycleWork bool     `json:"dispatches_lifecycle_work"`
 }
 
 type orchestratorProofExpectations struct {
@@ -112,8 +162,8 @@ func validateOrchestratorProofEvidence(
 		return fmt.Errorf("orchestrator evidence header = schema %d, gate %q, phase %q; want 1, %q, %q",
 			evidence.SchemaVersion, evidence.Gate, evidence.Phase, orchestratorRetirementProofGate, expected.Phase)
 	}
-	if evidence.ObservedAt == "" {
-		return errors.New("orchestrator evidence must record observed_at")
+	if !canonicalWholeSecondUTC(evidence.ObservedAt) {
+		return errors.New("orchestrator evidence observed_at must be whole-second UTC RFC3339")
 	}
 
 	producer := evidence.Producer
@@ -205,24 +255,141 @@ func validateOrchestratorProofEvidence(
 	}
 	for _, id := range orchestratorProducedRows {
 		row := evidence.Rows[id]
-		if row.Phase != expected.Phase {
-			return fmt.Errorf("orchestrator row %q phase = %q, want %q", id, row.Phase, expected.Phase)
+		if err := validateNHPRegistrarSurfaceRow(row, expected.Phase, bindings.NHPSourceSHA); err != nil {
+			return fmt.Errorf("orchestrator row %q: %w", id, err)
 		}
-		if !canonicalLowerHex(row.InterfacesSHA256, sha256.Size*2) {
-			return fmt.Errorf("orchestrator row %q interfaces_sha256 is not a canonical SHA-256 digest", id)
+	}
+	return nil
+}
+
+func canonicalWholeSecondUTC(value string) bool {
+	parsed, err := time.Parse(time.RFC3339, value)
+	return err == nil &&
+		parsed.Nanosecond() == 0 &&
+		parsed.Location() == time.UTC &&
+		parsed.Format(time.RFC3339) == value
+}
+
+func validateNHPRegistrarSurfaceRow(row orchestratorEvidenceRowV1, phase, nhpSourceSHA string) error {
+	if row.Kind != orchestratorRegistrarRowKind ||
+		row.Surface != orchestratorRegistrarSurface ||
+		row.Phase != phase ||
+		row.SourceRepository != orchestratorProofRepository ||
+		row.SourceSHA != nhpSourceSHA {
+		return errors.New("NHP registrar surface identity or source binding drift")
+	}
+	if row.MessageTypeSourcePath != orchestratorMessageTypeSource ||
+		!canonicalLowerHex(row.MessageTypeSourceSHA256, sha256.Size*2) {
+		return errors.New("NHP registrar message-type source binding drift")
+	}
+	if row.RetiredMessageTypeWireValues != (orchestratorRetiredMessageTypeValues{
+		LST: 5,
+		LRT: 6,
+		OTP: 12,
+		REG: 13,
+		RAK: 14,
+	}) {
+		return errors.New("NHP registrar retired message-type wire values drift")
+	}
+	if !slices.Equal(row.RetiredInternalHTTPOperations, orchestratorRetiredHTTPOperations) {
+		return errors.New("NHP registrar retired internal HTTP operations drift")
+	}
+	if len(row.Interfaces) < 1 || len(row.Interfaces) > maxOrchestratorSurfaceInterfaces {
+		return fmt.Errorf("NHP registrar interfaces must contain 1..%d entries", maxOrchestratorSurfaceInterfaces)
+	}
+
+	seen := make(map[string]struct{}, len(row.Interfaces))
+	roleCoverage := map[string]map[string]struct{}{
+		orchestratorLegacyRegistrarRole: {},
+		orchestratorNativeRuntimeRole:   {},
+	}
+	for index, item := range row.Interfaces {
+		if err := validateNHPRegistrarInterface(item, phase); err != nil {
+			return fmt.Errorf("NHP registrar interfaces[%d]: %w", index, err)
 		}
-		if row.NHPSourceSHA != bindings.NHPSourceSHA {
-			return fmt.Errorf("orchestrator row %q observed NHP revision %q, want the bound %q",
-				id, row.NHPSourceSHA, bindings.NHPSourceSHA)
+		identity := item.Path + "\x00" + item.Symbol
+		if _, duplicate := seen[identity]; duplicate {
+			return fmt.Errorf("NHP registrar interfaces[%d] duplicates an earlier entry", index)
 		}
-		if row.SurfaceEntryCount < 1 {
-			return fmt.Errorf("orchestrator row %q must enumerate at least one surface entry", id)
+		seen[identity] = struct{}{}
+		for _, messageType := range item.LifecycleMessageTypes {
+			roleCoverage[item.Role][messageType] = struct{}{}
 		}
-		// A retired surface may remain deployed pre-removal, but it must never
-		// still dispatch lifecycle work in either phase.
-		if row.DispatchesWork {
-			return fmt.Errorf("orchestrator row %q still dispatches lifecycle work", id)
+	}
+	for role, covered := range roleCoverage {
+		if len(covered) != len(orchestratorRetiredMessageTypes) {
+			return fmt.Errorf("NHP registrar role %q does not cover every retired message type", role)
 		}
+		for _, messageType := range orchestratorRetiredMessageTypes {
+			if _, ok := covered[messageType]; !ok {
+				return fmt.Errorf("NHP registrar role %q does not cover %s", role, messageType)
+			}
+		}
+	}
+
+	interfacesRaw, err := json.Marshal(row.Interfaces)
+	if err != nil {
+		return fmt.Errorf("encode NHP registrar interfaces: %w", err)
+	}
+	interfacesSHA, err := canonicalJSONSHA256(interfacesRaw)
+	if err != nil {
+		return fmt.Errorf("hash NHP registrar interfaces: %w", err)
+	}
+	if row.InterfacesSHA256 != interfacesSHA {
+		return fmt.Errorf("NHP registrar interfaces SHA-256 = %q, want %q", row.InterfacesSHA256, interfacesSHA)
+	}
+	return nil
+}
+
+func validateNHPRegistrarInterface(item orchestratorNHPInterface, phase string) error {
+	if item.Symbol == "" || item.Symbol != strings.TrimSpace(item.Symbol) {
+		return errors.New("symbol must be a non-empty trimmed string")
+	}
+	if item.Path == "" ||
+		item.Path != strings.TrimSpace(item.Path) ||
+		strings.HasPrefix(item.Path, "/") ||
+		strings.HasSuffix(item.Path, "/") ||
+		strings.Contains(item.Path, "//") ||
+		strings.Contains(item.Path, "\\") ||
+		slices.Contains(strings.Split(item.Path, "/"), "..") {
+		return errors.New("path must be a clean relative repository path")
+	}
+	if !canonicalLowerHex(item.PathSHA256, sha256.Size*2) {
+		return errors.New("path_sha256 must be a canonical SHA-256 digest")
+	}
+	if item.Role != orchestratorLegacyRegistrarRole && item.Role != orchestratorNativeRuntimeRole {
+		return errors.New("role is not an allowed NHP registrar role")
+	}
+	if item.State != "present" && item.State != "absent" {
+		return errors.New("state must be present or absent")
+	}
+	if len(item.LifecycleMessageTypes) == 0 ||
+		!slices.IsSorted(item.LifecycleMessageTypes) ||
+		slices.ContainsFunc(item.LifecycleMessageTypes, func(messageType string) bool {
+			return !slices.Contains(orchestratorRetiredMessageTypes, messageType)
+		}) {
+		return errors.New("lifecycle_message_types must be a sorted non-empty retired-message subset")
+	}
+	for index := 1; index < len(item.LifecycleMessageTypes); index++ {
+		if item.LifecycleMessageTypes[index] == item.LifecycleMessageTypes[index-1] {
+			return errors.New("lifecycle_message_types must not contain duplicates")
+		}
+	}
+
+	if item.Role == orchestratorNativeRuntimeRole {
+		if item.State != "present" || !item.DispatchesLifecycleWork {
+			return errors.New("retained native runtime must remain present and dispatching")
+		}
+		return nil
+	}
+	if item.DispatchesLifecycleWork {
+		return errors.New("legacy registrar still dispatches lifecycle work")
+	}
+	if phase == "pre_removal" && item.State != "present" {
+		return errors.New("legacy registrar must remain present before removal")
+	}
+	if phase == "post_removal" && item.State != "absent" {
+		return errors.New("legacy registrar must be absent after removal")
 	}
 	return nil
 }
@@ -347,8 +514,8 @@ func TestSandboxTopology(t *testing.T) {
 	if slices.Contains(evidence.ProducedRows, "retirement.nhp_registrar_surface_state") {
 		t.Run("nhp_registrar_surface_state", func(t *testing.T) {
 			row := evidence.Rows["retirement.nhp_registrar_surface_state"]
-			t.Logf("EVIDENCE interfaces_sha256=%s surface_entry_count=%d dispatches_lifecycle_work=%t",
-				row.InterfacesSHA256, row.SurfaceEntryCount, row.DispatchesWork)
+			t.Logf("EVIDENCE interfaces_sha256=%s interface_count=%d",
+				row.InterfacesSHA256, len(row.Interfaces))
 		})
 	}
 }
@@ -398,7 +565,42 @@ func TestValidateOrchestratorProofEvidenceFailsClosed(t *testing.T) {
 		NHPSourceSHA:             strings.Repeat("b", 40),
 		QurlGoSourceSHA:          strings.Repeat("c", 40),
 	}
+	interfacesForPhase := func(phase string) []orchestratorNHPInterface {
+		legacyState := "present"
+		if phase == "post_removal" {
+			legacyState = "absent"
+		}
+		return []orchestratorNHPInterface{
+			{
+				Symbol:                  "legacyRegistrar",
+				Path:                    "endpoints/server/staticplugins/agent/registrar.go",
+				PathSHA256:              strings.Repeat("4", 64),
+				Role:                    orchestratorLegacyRegistrarRole,
+				State:                   legacyState,
+				LifecycleMessageTypes:   slices.Clone(orchestratorRetiredMessageTypes),
+				DispatchesLifecycleWork: false,
+			},
+			{
+				Symbol:                  "(*UdpServer).dispatchReceivedMessage",
+				Path:                    "endpoints/server/udpserver.go",
+				PathSHA256:              strings.Repeat("5", 64),
+				Role:                    orchestratorNativeRuntimeRole,
+				State:                   "present",
+				LifecycleMessageTypes:   slices.Clone(orchestratorRetiredMessageTypes),
+				DispatchesLifecycleWork: true,
+			},
+		}
+	}
 	valid := func(phase string) orchestratorProofEvidence {
+		interfaces := interfacesForPhase(phase)
+		interfacesRaw, err := json.Marshal(interfaces)
+		if err != nil {
+			t.Fatal(err)
+		}
+		interfacesSHA, err := canonicalJSONSHA256(interfacesRaw)
+		if err != nil {
+			t.Fatal(err)
+		}
 		return orchestratorProofEvidence{
 			SchemaVersion: 1,
 			Gate:          orchestratorRetirementProofGate,
@@ -423,11 +625,23 @@ func TestValidateOrchestratorProofEvidenceFailsClosed(t *testing.T) {
 			ProducedRows: []string{"retirement.nhp_registrar_surface_state"},
 			Rows: map[string]orchestratorEvidenceRowV1{
 				"retirement.nhp_registrar_surface_state": {
-					Phase:             phase,
-					InterfacesSHA256:  strings.Repeat("2", 64),
-					NHPSourceSHA:      strings.Repeat("b", 40),
-					DispatchesWork:    false,
-					SurfaceEntryCount: 2,
+					Kind:                    orchestratorRegistrarRowKind,
+					Surface:                 orchestratorRegistrarSurface,
+					Phase:                   phase,
+					SourceRepository:        orchestratorProofRepository,
+					SourceSHA:               strings.Repeat("b", 40),
+					MessageTypeSourcePath:   orchestratorMessageTypeSource,
+					MessageTypeSourceSHA256: strings.Repeat("3", 64),
+					RetiredMessageTypeWireValues: orchestratorRetiredMessageTypeValues{
+						LST: 5,
+						LRT: 6,
+						OTP: 12,
+						REG: 13,
+						RAK: 14,
+					},
+					RetiredInternalHTTPOperations: slices.Clone(orchestratorRetiredHTTPOperations),
+					Interfaces:                    interfaces,
+					InterfacesSHA256:              interfacesSHA,
 				},
 			},
 		}
@@ -436,16 +650,31 @@ func TestValidateOrchestratorProofEvidenceFailsClosed(t *testing.T) {
 	for _, phase := range []string{"pre_removal", "post_removal"} {
 		phaseExpected := expected
 		phaseExpected.Phase = phase
-		if err := validateOrchestratorProofEvidence(valid(phase), phaseExpected); err != nil {
+		evidence := valid(phase)
+		raw, err := json.Marshal(evidence)
+		if err != nil {
+			t.Fatal(err)
+		}
+		decoded, err := decodeOrchestratorProofEvidence(raw)
+		if err != nil {
+			t.Fatalf("decode producer-shaped %s orchestrator evidence: %v", phase, err)
+		}
+		if err := validateOrchestratorProofEvidence(decoded, phaseExpected); err != nil {
 			t.Fatalf("valid %s orchestrator evidence rejected: %v", phase, err)
 		}
 	}
 
 	tests := map[string]func(*orchestratorProofEvidence){
-		"schema drift":           func(v *orchestratorProofEvidence) { v.SchemaVersion = 2 },
-		"gate drift":             func(v *orchestratorProofEvidence) { v.Gate = "other_gate" },
-		"phase drift":            func(v *orchestratorProofEvidence) { v.Phase = "pre_removal" },
-		"missing observed_at":    func(v *orchestratorProofEvidence) { v.ObservedAt = "" },
+		"schema drift":        func(v *orchestratorProofEvidence) { v.SchemaVersion = 2 },
+		"gate drift":          func(v *orchestratorProofEvidence) { v.Gate = "other_gate" },
+		"phase drift":         func(v *orchestratorProofEvidence) { v.Phase = "pre_removal" },
+		"missing observed_at": func(v *orchestratorProofEvidence) { v.ObservedAt = "" },
+		"fractional observed_at": func(v *orchestratorProofEvidence) {
+			v.ObservedAt = "2026-07-27T00:00:00.123Z"
+		},
+		"offset observed_at": func(v *orchestratorProofEvidence) {
+			v.ObservedAt = "2026-07-26T18:00:00-06:00"
+		},
 		"foreign repository":     func(v *orchestratorProofEvidence) { v.Producer.Repository = "layervai/qurl-go" },
 		"foreign workflow":       func(v *orchestratorProofEvidence) { v.Producer.WorkflowPath = ".github/workflows/ci.yml" },
 		"bad head sha":           func(v *orchestratorProofEvidence) { v.Producer.HeadSHA = "not-a-sha" },
@@ -487,17 +716,37 @@ func TestValidateOrchestratorProofEvidenceFailsClosed(t *testing.T) {
 		},
 		"row nhp revision drift": func(v *orchestratorProofEvidence) {
 			row := v.Rows["retirement.nhp_registrar_surface_state"]
-			row.NHPSourceSHA = strings.Repeat("9", 40)
+			row.SourceSHA = strings.Repeat("9", 40)
 			v.Rows["retirement.nhp_registrar_surface_state"] = row
 		},
 		"row enumerates nothing": func(v *orchestratorProofEvidence) {
 			row := v.Rows["retirement.nhp_registrar_surface_state"]
-			row.SurfaceEntryCount = 0
+			row.Interfaces = nil
 			v.Rows["retirement.nhp_registrar_surface_state"] = row
 		},
 		"row still dispatches lifecycle work": func(v *orchestratorProofEvidence) {
 			row := v.Rows["retirement.nhp_registrar_surface_state"]
-			row.DispatchesWork = true
+			row.Interfaces[0].DispatchesLifecycleWork = true
+			v.Rows["retirement.nhp_registrar_surface_state"] = row
+		},
+		"row wire value drift": func(v *orchestratorProofEvidence) {
+			row := v.Rows["retirement.nhp_registrar_surface_state"]
+			row.RetiredMessageTypeWireValues.REG = 99
+			v.Rows["retirement.nhp_registrar_surface_state"] = row
+		},
+		"row operation drift": func(v *orchestratorProofEvidence) {
+			row := v.Rows["retirement.nhp_registrar_surface_state"]
+			row.RetiredInternalHTTPOperations[0].Path = "/other"
+			v.Rows["retirement.nhp_registrar_surface_state"] = row
+		},
+		"row native runtime stops dispatching": func(v *orchestratorProofEvidence) {
+			row := v.Rows["retirement.nhp_registrar_surface_state"]
+			row.Interfaces[1].DispatchesLifecycleWork = false
+			v.Rows["retirement.nhp_registrar_surface_state"] = row
+		},
+		"row interface message types are unsorted": func(v *orchestratorProofEvidence) {
+			row := v.Rows["retirement.nhp_registrar_surface_state"]
+			row.Interfaces[0].LifecycleMessageTypes = []string{"NHP_REG", "NHP_LST"}
 			v.Rows["retirement.nhp_registrar_surface_state"] = row
 		},
 	}
@@ -540,6 +789,30 @@ func TestValidateOrchestratorProofEvidenceFailsClosed(t *testing.T) {
 			t.Fatal("distinct controller identity was accepted as the deployment producer")
 		}
 	})
+}
+
+func TestNHPProducerFixtureMatchesConsumerContract(t *testing.T) {
+	raw, err := os.ReadFile("testdata/nhp_orchestrator_evidence_pre_removal.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence, err := decodeOrchestratorProofEvidence(raw)
+	if err != nil {
+		t.Fatalf("decode checked-in NHP producer fixture: %v", err)
+	}
+	expected := orchestratorProofExpectations{
+		Phase:                    "pre_removal",
+		DeploymentManifestSHA256: "bc21a6d296b57a8ead9a7233c1bbb7835d3d2f3f473093e94c28b72f5721aacc",
+		DeploymentRuntimeSHA256:  "93d1cf0f77f2f8d71f856ca4ae80d80ccab09bdf7fb01f0b6f8eab450707a3cf",
+		ProducerRunID:            "999",
+		ProducerRunAttempt:       "1",
+		ProducerHeadSHA:          strings.Repeat("a", 40),
+		NHPSourceSHA:             strings.Repeat("b", 40),
+		QurlGoSourceSHA:          strings.Repeat("d", 40),
+	}
+	if err := validateOrchestratorProofEvidence(evidence, expected); err != nil {
+		t.Fatalf("checked-in NHP producer fixture violates qurl-go consumer contract: %v", err)
+	}
 }
 
 // TestOrchestratorAdapterNamespacesMatchInventory proves the two proof top
