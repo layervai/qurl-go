@@ -438,6 +438,8 @@ func TestSandboxNativeUDPLifecycle(t *testing.T) {
 		return
 	}
 
+	assignmentReceipt := completeAssignmentHandshake(ctx, t, cfg, cellEvidence[1])
+
 	var reassigned *qurl.AgentRuntimeBinding
 	reassignmentPassed := runTypedEvidenceScenario(t, "cell0_to_cell1_reassignment", "reassignment.cell0_to_cell1", []string{"assignment_transition"}, func(t *testing.T) {
 		client, binding, err := qurl.RefreshAgentRuntime(ctx, hub, store,
@@ -454,6 +456,7 @@ func TestSandboxNativeUDPLifecycle(t *testing.T) {
 		reassigned = binding
 		cellEvidence = append(cellEvidence, assertAssignedCell(t, cfg, binding, "reassignment"))
 		assertCell0ToCell1Reassignment(t, cellEvidence[1], cellEvidence[2])
+		assertAssignmentReceiptMatchesRefresh(t, assignmentReceipt, cellEvidence[2])
 	})
 	if reassigned != nil {
 		reassigned.Destroy()

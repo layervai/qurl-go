@@ -51,6 +51,10 @@ on:
         description: NHP attended controller workflow run attempt that created this proof runner
         required: true
         type: string
+      assignment_handshake_b64:
+        description: Controller-armed, run-bound assignment mutation handshake
+        required: true
+        type: string
       pre_removal_run_id:
         description: Required for post_removal; successful paired pre_removal workflow run id
         required: false
@@ -75,7 +79,7 @@ jobs:
     env:
       QURL_GO_SANDBOX_STRICT: "true"
       QURL_GO_SANDBOX_EXPECTED_SHA: ${{ github.sha }}
-      QURL_GO_SANDBOX_AGENT_ID: qurl-go-sandbox-${{ github.run_id }}-${{ github.run_attempt }}
+      QURL_GO_SANDBOX_AGENT_ID: qurl-go-sandbox-${{ inputs.nhp_controller_run_id }}-${{ inputs.nhp_controller_run_attempt }}
       QURL_GO_SANDBOX_KNOCK_RESOURCE_ID: ${{ vars.QURL_GO_SANDBOX_KNOCK_RESOURCE_ID }}
       QURL_GO_SANDBOX_EXPECTED_CELL_ID: ${{ vars.QURL_GO_SANDBOX_EXPECTED_CELL_ID }}
       QURL_GO_SANDBOX_KMS_KEY_ID: alias/layerv-nhp-sandbox-udp-proof-agent-seal
@@ -89,6 +93,10 @@ jobs:
       QURL_GO_SANDBOX_DEPLOYMENT_ARTIFACT_ID: ${{ inputs.deployment_artifact_id }}
       QURL_GO_SANDBOX_DEPLOYMENT_ARTIFACT_DIGEST: ${{ inputs.deployment_artifact_digest }}
       QURL_GO_SANDBOX_PRE_REMOVAL_RUN_ID: ${{ inputs.pre_removal_run_id }}
+      QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ID: ${{ inputs.nhp_controller_run_id }}
+      QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ATTEMPT: ${{ inputs.nhp_controller_run_attempt }}
+      QURL_GO_SANDBOX_ASSIGNMENT_HANDSHAKE_B64: ${{ inputs.assignment_handshake_b64 }}
+      QURL_GO_SANDBOX_CLIENT_RUN_ID: ${{ github.run_id }}
     steps:
       - name: Checkout exact build
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0

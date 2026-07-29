@@ -26,26 +26,34 @@ const (
 	candidateCommitPathEnv   = "QURL_GO_SANDBOX_CANDIDATE_COMMIT_PATH"
 	knockResourceIDEnv       = "QURL_GO_SANDBOX_KNOCK_RESOURCE_ID"
 	expectedCellIDEnv        = "QURL_GO_SANDBOX_EXPECTED_CELL_ID"
+	assignmentHandshakeEnv   = "QURL_GO_SANDBOX_ASSIGNMENT_HANDSHAKE_B64"
+	controllerRunIDEnv       = "QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ID"
+	controllerRunAttemptEnv  = "QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ATTEMPT"
+	clientRunIDEnv           = "QURL_GO_SANDBOX_CLIENT_RUN_ID"
 	standardNHPUDPPort       = 62206
 	x25519PublicKeyLength    = 32
 )
 
 type sandboxConfig struct {
-	buildSHA         string
-	hubHost          string
-	hubPort          int
-	hubServerKeyB64  string
-	enrollment       string
-	agentID          string
-	statePath        string
-	provenancePath   string
-	deploymentSHA    string
-	typedContractSHA string
-	candidatePRPath  string
-	candidateCommit  string
-	knockResourceID  string
-	expectedCellID   string
-	kmsKeyID         string
+	buildSHA             string
+	hubHost              string
+	hubPort              int
+	hubServerKeyB64      string
+	enrollment           string
+	agentID              string
+	statePath            string
+	provenancePath       string
+	deploymentSHA        string
+	typedContractSHA     string
+	candidatePRPath      string
+	candidateCommit      string
+	knockResourceID      string
+	expectedCellID       string
+	kmsKeyID             string
+	assignmentHandshake  string
+	controllerRunID      string
+	controllerRunAttempt string
+	clientRunID          string
 }
 
 func loadSandboxConfig(lookup func(string) string) (sandboxConfig, bool, error) {
@@ -73,6 +81,10 @@ func loadSandboxConfig(lookup func(string) string) (sandboxConfig, bool, error) 
 		candidateCommitPathEnv,
 		knockResourceIDEnv,
 		sandboxKMSKeyIDEnv,
+		assignmentHandshakeEnv,
+		controllerRunIDEnv,
+		controllerRunAttemptEnv,
+		clientRunIDEnv,
 	}
 	missing := make([]string, 0, len(required))
 	for _, name := range required {
@@ -89,21 +101,25 @@ func loadSandboxConfig(lookup func(string) string) (sandboxConfig, bool, error) 
 		return sandboxConfig{}, true, fmt.Errorf("%s must be the native NHP UDP port %d", hubPortEnv, standardNHPUDPPort)
 	}
 	cfg := sandboxConfig{
-		buildSHA:         lookup(buildSHAEnv),
-		hubHost:          lookup(hubHostEnv),
-		hubPort:          port,
-		hubServerKeyB64:  lookup(hubServerKeyEnv),
-		enrollment:       lookup(enrollmentEnv),
-		agentID:          lookup(agentIDEnv),
-		statePath:        lookup(statePathEnv),
-		provenancePath:   lookup(provenancePathEnv),
-		deploymentSHA:    lookup(deploymentManifestSHAEnv),
-		typedContractSHA: lookup(typedContractSHAEnv),
-		candidatePRPath:  lookup(candidatePRPathEnv),
-		candidateCommit:  lookup(candidateCommitPathEnv),
-		knockResourceID:  lookup(knockResourceIDEnv),
-		expectedCellID:   lookup(expectedCellIDEnv),
-		kmsKeyID:         lookup(sandboxKMSKeyIDEnv),
+		buildSHA:             lookup(buildSHAEnv),
+		hubHost:              lookup(hubHostEnv),
+		hubPort:              port,
+		hubServerKeyB64:      lookup(hubServerKeyEnv),
+		enrollment:           lookup(enrollmentEnv),
+		agentID:              lookup(agentIDEnv),
+		statePath:            lookup(statePathEnv),
+		provenancePath:       lookup(provenancePathEnv),
+		deploymentSHA:        lookup(deploymentManifestSHAEnv),
+		typedContractSHA:     lookup(typedContractSHAEnv),
+		candidatePRPath:      lookup(candidatePRPathEnv),
+		candidateCommit:      lookup(candidateCommitPathEnv),
+		knockResourceID:      lookup(knockResourceIDEnv),
+		expectedCellID:       lookup(expectedCellIDEnv),
+		kmsKeyID:             lookup(sandboxKMSKeyIDEnv),
+		assignmentHandshake:  lookup(assignmentHandshakeEnv),
+		controllerRunID:      lookup(controllerRunIDEnv),
+		controllerRunAttempt: lookup(controllerRunAttemptEnv),
+		clientRunID:          lookup(clientRunIDEnv),
 	}
 
 	if !canonicalLowerHex(cfg.buildSHA, 40) {
@@ -123,6 +139,10 @@ func loadSandboxConfig(lookup func(string) string) (sandboxConfig, bool, error) 
 		knockResourceIDEnv:       cfg.knockResourceID,
 		expectedCellIDEnv:        cfg.expectedCellID,
 		sandboxKMSKeyIDEnv:       cfg.kmsKeyID,
+		assignmentHandshakeEnv:   cfg.assignmentHandshake,
+		controllerRunIDEnv:       cfg.controllerRunID,
+		controllerRunAttemptEnv:  cfg.controllerRunAttempt,
+		clientRunIDEnv:           cfg.clientRunID,
 	} {
 		if value != strings.TrimSpace(value) || strings.IndexFunc(value, unicode.IsControl) >= 0 {
 			return sandboxConfig{}, true, fmt.Errorf("%s must be canonical and contain no control characters", name)
@@ -130,6 +150,9 @@ func loadSandboxConfig(lookup func(string) string) (sandboxConfig, bool, error) 
 	}
 	if len(cfg.enrollment) < 32 {
 		return sandboxConfig{}, true, fmt.Errorf("%s must contain a server-minted credential of at least 32 bytes", enrollmentEnv)
+	}
+	if !assignmentRunRE.MatchString(cfg.clientRunID) {
+		return sandboxConfig{}, true, fmt.Errorf("%s must be a positive workflow run ID", clientRunIDEnv)
 	}
 	if cfg.kmsKeyID != sandboxKMSKeyID {
 		return sandboxConfig{}, true, fmt.Errorf("%s must be the Terraform-owned sandbox proof alias %q", sandboxKMSKeyIDEnv, sandboxKMSKeyID)
@@ -224,6 +247,10 @@ func TestSandboxConfigStrictMode(t *testing.T) {
 		candidateCommitPathEnv:   filepath.Join(t.TempDir(), "qurl-go-pr-93-commit.json"),
 		knockResourceIDEnv:       "knock-resource-id",
 		sandboxKMSKeyIDEnv:       sandboxKMSKeyID,
+		assignmentHandshakeEnv:   base64.StdEncoding.EncodeToString([]byte(`{"arm":{"result":{"agent_id":"qurl-go-sandbox-123-1","grant_correlation_id":"nhp-123-1-qurl_go-pre_removal-0123456789abcdef0123456789abcdef","lease_seconds":1200,"mutated_at":"2026-07-28T20:00:00Z","mutation":"arm","pinned_cell_id":"cell0","target_cell_id":"cell1"},"version":1},"descriptor":{"agent_id":"qurl-go-sandbox-123-1","arm_request_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bucket":"layerv-nhp-sandbox-udp-proof-handshake-767397897469","ca_pm_alias_arn":"arn:aws:lambda:us-east-2:767397897469:function:layerv-nhp-sandbox-ca-pm:blue","channel_id":"0123456789abcdef0123456789abcdef","checkpoint_key":"handshake/v1/123/1/0123456789abcdef0123456789abcdef/checkpoint.json","client":"qurl_go","controller_run_attempt":"1","controller_run_id":"123","correlation_id":"nhp-123-1-qurl_go-pre_removal-0123456789abcdef0123456789abcdef","expire_request_id":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","kms_key_alias_arn":"arn:aws:kms:us-east-2:767397897469:alias/layerv-nhp-sandbox-udp-proof-handshake","arm_lease_seconds":1200,"expire_lease_seconds":30,"move_request_id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","pinned_cell_id":"cell0","proof_phase":"pre_removal","receipt_key":"handshake/v1/123/1/0123456789abcdef0123456789abcdef/receipt.json","target_cell_id":"cell1","version":1}}`)),
+		controllerRunIDEnv:       "123",
+		controllerRunAttemptEnv:  "1",
+		clientRunIDEnv:           "456",
 	}
 	lookup := func(values map[string]string) func(string) string {
 		return func(name string) string { return values[name] }
@@ -262,7 +289,7 @@ func TestSandboxConfigStrictMode(t *testing.T) {
 		if !enabled || err == nil || cfg != (sandboxConfig{}) {
 			t.Fatalf("missing config = %#v, %t, %v; want enabled failure", cfg, enabled, err)
 		}
-		for _, name := range []string{buildSHAEnv, hubHostEnv, hubPortEnv, hubServerKeyEnv, enrollmentEnv, agentIDEnv, statePathEnv, provenancePathEnv, deploymentManifestSHAEnv, typedContractSHAEnv, candidatePRPathEnv, candidateCommitPathEnv, knockResourceIDEnv, sandboxKMSKeyIDEnv} {
+		for _, name := range []string{buildSHAEnv, hubHostEnv, hubPortEnv, hubServerKeyEnv, enrollmentEnv, agentIDEnv, statePathEnv, provenancePathEnv, deploymentManifestSHAEnv, typedContractSHAEnv, candidatePRPathEnv, candidateCommitPathEnv, knockResourceIDEnv, sandboxKMSKeyIDEnv, assignmentHandshakeEnv, controllerRunIDEnv, controllerRunAttemptEnv, clientRunIDEnv} {
 			if !strings.Contains(err.Error(), name) {
 				t.Errorf("missing-config error %q omits %s", err, name)
 			}
