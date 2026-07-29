@@ -30,6 +30,10 @@ const (
 	controllerRunIDEnv       = "QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ID"
 	controllerRunAttemptEnv  = "QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ATTEMPT"
 	clientRunIDEnv           = "QURL_GO_SANDBOX_CLIENT_RUN_ID"
+	otpMailboxQueueURLEnv    = "QURL_GO_SANDBOX_OTP_MAILBOX_QUEUE_URL"
+	otpMailboxBucketEnv      = "QURL_GO_SANDBOX_OTP_MAILBOX_BUCKET"
+	otpMailboxRecipientEnv   = "QURL_GO_SANDBOX_OTP_MAILBOX_RECIPIENT"
+	otpMailboxRegionEnv      = "QURL_GO_SANDBOX_OTP_MAILBOX_REGION"
 	standardNHPUDPPort       = 62206
 	x25519PublicKeyLength    = 32
 )
@@ -54,6 +58,10 @@ type sandboxConfig struct {
 	controllerRunID      string
 	controllerRunAttempt string
 	clientRunID          string
+	otpQueueURL          string
+	otpBucket            string
+	otpRecipient         string
+	otpRegion            string
 }
 
 func loadSandboxConfig(lookup func(string) string) (sandboxConfig, bool, error) {
@@ -85,6 +93,10 @@ func loadSandboxConfig(lookup func(string) string) (sandboxConfig, bool, error) 
 		controllerRunIDEnv,
 		controllerRunAttemptEnv,
 		clientRunIDEnv,
+		otpMailboxQueueURLEnv,
+		otpMailboxBucketEnv,
+		otpMailboxRecipientEnv,
+		otpMailboxRegionEnv,
 	}
 	missing := make([]string, 0, len(required))
 	for _, name := range required {
@@ -120,6 +132,10 @@ func loadSandboxConfig(lookup func(string) string) (sandboxConfig, bool, error) 
 		controllerRunID:      lookup(controllerRunIDEnv),
 		controllerRunAttempt: lookup(controllerRunAttemptEnv),
 		clientRunID:          lookup(clientRunIDEnv),
+		otpQueueURL:          lookup(otpMailboxQueueURLEnv),
+		otpBucket:            lookup(otpMailboxBucketEnv),
+		otpRecipient:         lookup(otpMailboxRecipientEnv),
+		otpRegion:            lookup(otpMailboxRegionEnv),
 	}
 
 	if !canonicalLowerHex(cfg.buildSHA, 40) {
@@ -143,6 +159,10 @@ func loadSandboxConfig(lookup func(string) string) (sandboxConfig, bool, error) 
 		controllerRunIDEnv:       cfg.controllerRunID,
 		controllerRunAttemptEnv:  cfg.controllerRunAttempt,
 		clientRunIDEnv:           cfg.clientRunID,
+		otpMailboxQueueURLEnv:    cfg.otpQueueURL,
+		otpMailboxBucketEnv:      cfg.otpBucket,
+		otpMailboxRecipientEnv:   cfg.otpRecipient,
+		otpMailboxRegionEnv:      cfg.otpRegion,
 	} {
 		if value != strings.TrimSpace(value) || strings.IndexFunc(value, unicode.IsControl) >= 0 {
 			return sandboxConfig{}, true, fmt.Errorf("%s must be canonical and contain no control characters", name)
@@ -156,6 +176,18 @@ func loadSandboxConfig(lookup func(string) string) (sandboxConfig, bool, error) 
 	}
 	if cfg.kmsKeyID != sandboxKMSKeyID {
 		return sandboxConfig{}, true, fmt.Errorf("%s must be the Terraform-owned sandbox proof alias %q", sandboxKMSKeyIDEnv, sandboxKMSKeyID)
+	}
+	if cfg.otpRegion != "us-east-2" {
+		return sandboxConfig{}, true, fmt.Errorf("%s must be us-east-2", otpMailboxRegionEnv)
+	}
+	if cfg.otpBucket != "layerv-nhp-sandbox-udp-proof-otp-mailbox" {
+		return sandboxConfig{}, true, fmt.Errorf("%s must name the exact private proof mailbox", otpMailboxBucketEnv)
+	}
+	if cfg.otpRecipient != "qurl-go@proof.notify.layerv.xyz" {
+		return sandboxConfig{}, true, fmt.Errorf("%s must name the exact private proof recipient", otpMailboxRecipientEnv)
+	}
+	if cfg.otpQueueURL != "https://sqs.us-east-2.amazonaws.com/767397897469/layerv-nhp-sandbox-udp-proof-otp-mailbox" {
+		return sandboxConfig{}, true, fmt.Errorf("%s must name the exact private proof queue", otpMailboxQueueURLEnv)
 	}
 	if err := validateSandboxAgentID(cfg.agentID); err != nil {
 		return sandboxConfig{}, true, fmt.Errorf("%s: %w", agentIDEnv, err)
@@ -251,6 +283,10 @@ func TestSandboxConfigStrictMode(t *testing.T) {
 		controllerRunIDEnv:       "123",
 		controllerRunAttemptEnv:  "1",
 		clientRunIDEnv:           "456",
+		otpMailboxQueueURLEnv:    "https://sqs.us-east-2.amazonaws.com/767397897469/layerv-nhp-sandbox-udp-proof-otp-mailbox",
+		otpMailboxBucketEnv:      "layerv-nhp-sandbox-udp-proof-otp-mailbox",
+		otpMailboxRecipientEnv:   "qurl-go@proof.notify.layerv.xyz",
+		otpMailboxRegionEnv:      "us-east-2",
 	}
 	lookup := func(values map[string]string) func(string) string {
 		return func(name string) string { return values[name] }

@@ -97,6 +97,11 @@ jobs:
       QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ATTEMPT: ${{ inputs.nhp_controller_run_attempt }}
       QURL_GO_SANDBOX_ASSIGNMENT_HANDSHAKE_B64: ${{ inputs.assignment_handshake_b64 }}
       QURL_GO_SANDBOX_CLIENT_RUN_ID: ${{ github.run_id }}
+      QURL_GO_SANDBOX_OTP_MAILBOX_QUEUE_URL: https://sqs.us-east-2.amazonaws.com/767397897469/layerv-nhp-sandbox-udp-proof-otp-mailbox
+      QURL_GO_SANDBOX_OTP_MAILBOX_BUCKET: layerv-nhp-sandbox-udp-proof-otp-mailbox
+      QURL_GO_SANDBOX_OTP_MAILBOX_RECIPIENT: qurl-go@proof.notify.layerv.xyz
+      QURL_GO_SANDBOX_OTP_MAILBOX_REGION: us-east-2
+      PROOF_ACCOUNT_RUN_SECRET: layerv-nhp-sandbox/udp-proof/jit/credential/${{ inputs.nhp_controller_run_id }}/${{ inputs.nhp_controller_run_attempt }}
     steps:
       - name: Checkout exact build
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -530,7 +535,7 @@ jobs:
           deployment_runtime_inputs_sha256="$(sha256sum "${runtime}" | cut -d' ' -f1)"
           inventory_sha256="$(sha256sum "${inventory_snapshot}" | cut -d' ' -f1)"
           inventory_mapping_sha256="$(jq -cS -j '{schema_version, gate, proof_phases, all_scenarios_required, scenarios: ([.scenarios[] | {id, owner, status, test_name, requirement}] | sort_by(.id))}' "${inventory}" | sha256sum | cut -d' ' -f1)"
-          test "${inventory_mapping_sha256}" = "b26426c4595933bf454b8c53000cd8ec392e052389ba93f7ffb4ddcd99de86e3"
+          test "${inventory_mapping_sha256}" = "119bacde1c8f802bc1b3873d3148ea9d347d7c80746c4a0b4278d8b00a55ac8f"
           scenario_contract_sha256="$(jq -cS '{schema_version, gate, proof_phases, all_scenarios_required, scenarios: ([.scenarios[] | {id, owner, test_name, requirement}] | sort_by(.id))}' "${inventory}" | sha256sum | cut -d' ' -f1)"
           typed_evidence_contract_sha256="$(sha256sum "${typed_evidence_contract}" | cut -d' ' -f1)"
           test "${typed_evidence_contract_sha256}" = "e15008760ea838875de9c75561726c86e9d2e7f7f507247e55a588fa3ac65fe5"
@@ -761,7 +766,7 @@ jobs:
           test "$(jq -r '.inventory_sha256' "${pre_evidence}")" = "${pre_inventory_sha256}"
           test "${pre_inventory_sha256}" = "${inventory_sha256}"
           test "${pre_inventory_mapping_sha256}" = "${inventory_mapping_sha256}"
-          test "${pre_inventory_mapping_sha256}" = "b26426c4595933bf454b8c53000cd8ec392e052389ba93f7ffb4ddcd99de86e3"
+          test "${pre_inventory_mapping_sha256}" = "119bacde1c8f802bc1b3873d3148ea9d347d7c80746c4a0b4278d8b00a55ac8f"
           test "${pre_retired_lifecycle_surface_sha256}" = "${retired_lifecycle_surface_sha256}"
           test "${pre_retired_lifecycle_surface_sha256}" = "3fe8872c3da9913c28d763f5561d82b67805aae5a6962c6dc403c7d6305da00c"
 
@@ -845,12 +850,56 @@ jobs:
         id: strict
         shell: bash
         env:
-          QURL_GO_SANDBOX_ENROLLMENT_CREDENTIAL: ${{ secrets.QURL_GO_SANDBOX_ENROLLMENT_CREDENTIAL }}
           QURL_GO_SANDBOX_STATE_PATH: ${{ runner.temp }}/qurl-go-native-udp/agent-state.json
           QURL_GO_SANDBOX_PROVENANCE_PATH: ${{ runner.temp }}/qurl-go-native-udp/provenance.json
           QURL_GO_SANDBOX_TYPED_EVIDENCE_PATH: ${{ runner.temp }}/native-udp-sandbox.typed-observations.jsonl
         run: |
           set -euo pipefail
+          credential_file="${RUNNER_TEMP}/proof-account-credential"
+          delete_error="${RUNNER_TEMP}/proof-account-secret-delete.err"
+          credential=""
+          cleanup_credential() {
+            credential=""
+            rm -f -- "${credential_file}" "${delete_error}"
+            unset QURL_GO_SANDBOX_ENROLLMENT_CREDENTIAL
+          }
+          trap cleanup_credential EXIT
+          install -m 0600 /dev/null "${credential_file}"
+          aws secretsmanager get-secret-value \
+            --secret-id "${PROOF_ACCOUNT_RUN_SECRET}" \
+            --query SecretString \
+            --output text \
+            --region "${QURL_GO_SANDBOX_OTP_MAILBOX_REGION}" >"${credential_file}"
+          credential="$(<"${credential_file}")"
+          rm -f -- "${credential_file}"
+          [[ "${credential}" =~ ^lv_test_[A-Za-z0-9_-]{43}$ ]] || {
+            echo "::error::run-bound proof account credential has the wrong wire format"
+            exit 1
+          }
+          echo "::add-mask::${credential}"
+
+          deleted=false
+          for attempt in 1 2 3; do
+            if aws secretsmanager delete-secret \
+              --secret-id "${PROOF_ACCOUNT_RUN_SECRET}" \
+              --force-delete-without-recovery \
+              --region "${QURL_GO_SANDBOX_OTP_MAILBOX_REGION}" \
+              >/dev/null 2>"${delete_error}"; then
+              deleted=true
+              break
+            fi
+            if grep -q 'ResourceNotFoundException' "${delete_error}"; then
+              deleted=true
+              break
+            fi
+          done
+          if [[ "${deleted}" != true ]]; then
+            echo "::error::could not delete the exact run-bound proof account credential"
+            exit 1
+          fi
+          rm -f -- "${delete_error}"
+          export QURL_GO_SANDBOX_ENROLLMENT_CREDENTIAL="${credential}"
+
           raw="${RUNNER_TEMP}/native-udp-sandbox.raw.json"
           adapter="tests/e2e/nativeudp/kms_sealed_adapter_aws_generated_test.go"
           trap 'rm -f "${adapter}"' EXIT
@@ -901,7 +950,7 @@ jobs:
           test "$(sha256sum "${QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_PATH}" | cut -d' ' -f1)" = "${QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_SHA256}"
           test "$(compute_proof_harness_sha256)" = "${QURL_GO_SANDBOX_PROOF_HARNESS_SHA256}"
           test "$(jq -cS -j '{schema_version, gate, proof_phases, all_scenarios_required, scenarios: ([.scenarios[] | {id, owner, status, test_name, requirement}] | sort_by(.id))}' "${inventory}" | sha256sum | cut -d' ' -f1)" = "${QURL_GO_SANDBOX_INVENTORY_MAPPING_SHA256}"
-          test "${QURL_GO_SANDBOX_INVENTORY_MAPPING_SHA256}" = "b26426c4595933bf454b8c53000cd8ec392e052389ba93f7ffb4ddcd99de86e3"
+          test "${QURL_GO_SANDBOX_INVENTORY_MAPPING_SHA256}" = "119bacde1c8f802bc1b3873d3148ea9d347d7c80746c4a0b4278d8b00a55ac8f"
           test "$(jq -cS '{schema_version, gate, proof_phases, all_scenarios_required, scenarios: ([.scenarios[] | {id, owner, test_name, requirement}] | sort_by(.id))}' "${inventory}" | sha256sum | cut -d' ' -f1)" = "${QURL_GO_SANDBOX_SCENARIO_CONTRACT_SHA256}"
           test "$(jq -cS -j . "${retired_surface_source}" | sha256sum | cut -d' ' -f1)" = "${QURL_GO_SANDBOX_RETIRED_LIFECYCLE_SURFACE_SHA256}"
           test "$(sha256sum "${retired_surface}" | cut -d' ' -f1)" = "${QURL_GO_SANDBOX_RETIRED_LIFECYCLE_SURFACE_SHA256}"
@@ -995,7 +1044,7 @@ jobs:
             [[ "$(sha256sum "${orchestrator_evidence_path}" | cut -d' ' -f1)" == "${QURL_GO_SANDBOX_ORCHESTRATOR_EVIDENCE_SHA256}" ]] &&
             [[ "$(compute_proof_harness_sha256)" == "${QURL_GO_SANDBOX_PROOF_HARNESS_SHA256}" ]] &&
             [[ "$(jq -cS -j '{schema_version, gate, proof_phases, all_scenarios_required, scenarios: ([.scenarios[] | {id, owner, status, test_name, requirement}] | sort_by(.id))}' "${inventory}" | sha256sum | cut -d' ' -f1)" == "${QURL_GO_SANDBOX_INVENTORY_MAPPING_SHA256}" ]] &&
-            [[ "${QURL_GO_SANDBOX_INVENTORY_MAPPING_SHA256}" == "b26426c4595933bf454b8c53000cd8ec392e052389ba93f7ffb4ddcd99de86e3" ]] &&
+            [[ "${QURL_GO_SANDBOX_INVENTORY_MAPPING_SHA256}" == "119bacde1c8f802bc1b3873d3148ea9d347d7c80746c4a0b4278d8b00a55ac8f" ]] &&
             [[ "$(jq -cS -j . "${retired_surface_source}" | sha256sum | cut -d' ' -f1)" == "${QURL_GO_SANDBOX_RETIRED_LIFECYCLE_SURFACE_SHA256}" ]] &&
             [[ "$(sha256sum "${retired_surface}" | cut -d' ' -f1)" == "${QURL_GO_SANDBOX_RETIRED_LIFECYCLE_SURFACE_SHA256}" ]] &&
             [[ "${QURL_GO_SANDBOX_RETIRED_LIFECYCLE_SURFACE_SHA256}" == "3fe8872c3da9913c28d763f5561d82b67805aae5a6962c6dc403c7d6305da00c" ]] &&

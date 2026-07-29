@@ -35,7 +35,7 @@
     {
       "id": "otp.send",
       "owner": "qurl-go",
-      "status": "todo",
+      "status": "implemented",
       "test_name": "TestSandboxNativeUDPLifecycle/account_otp_send",
       "requirement": "Use an account credential to send one OTP out of band, carry that exact code in exactly one assigned-cell REG, and complete the authenticated RAK plus completion LRT without a second registration call."
     },

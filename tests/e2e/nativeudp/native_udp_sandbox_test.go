@@ -373,13 +373,18 @@ func TestSandboxNativeUDPLifecycle(t *testing.T) {
 	}
 
 	cellEvidence := make([]sandboxCellEvidence, 0, 4)
+	otpMailbox := newSandboxOTPMailbox(cfg)
+	var registeredClient *qurl.Client
+	var registeredBinding *qurl.AgentRuntimeBinding
 	// Happy-path lifecycle calls deliberately omit UDP and retry overrides so
 	// the deployed proof measures the SDK's out-of-box production defaults.
-	if !runTypedEvidenceScenario(t, "fresh_registration_via_hub_and_assigned_cell", "registration.public_api_lifecycle_success", []string{"lifecycle_exchange"}, func(t *testing.T) {
+	if !runTypedEvidenceScenario(t, "account_otp_send", "otp.send", []string{"otp_flow_observation"}, func(t *testing.T) {
 		client, binding, err := qurl.RegisterAgentRuntime(ctx, cfg.enrollment, store,
 			qurl.WithAgentRuntimeHub(hub),
 			qurl.WithAgentRuntimeIdentity(cfg.agentID),
 			qurl.WithAgentRuntimeMetadata("qurl-go-sandbox", cfg.buildSHA),
+			qurl.WithAgentRuntimeAllowedRegistrationKeyKinds(qurl.RegistrationKeyKindAccount),
+			qurl.WithAgentRuntimeOTPProvider(otpMailbox.provide),
 			qurl.WithAgentClientBaseURL("http://127.0.0.1:1"),
 			qurl.WithAgentClientHTTPClient(httpTrap),
 		)
@@ -389,8 +394,23 @@ func TestSandboxNativeUDPLifecycle(t *testing.T) {
 		if client == nil || binding == nil {
 			t.Fatal("RegisterAgentRuntime returned a nil client or binding")
 		}
-		defer binding.Destroy()
-		cellEvidence = append(cellEvidence, assertAssignedCell(t, cfg, binding, "registration"))
+		registeredClient = client
+		registeredBinding = binding
+		t.Cleanup(binding.Destroy)
+		calls, fresh := otpMailbox.snapshot()
+		if calls != 1 || !fresh {
+			t.Fatalf("account OTP provider calls = %d, fresh=%t; want one fresh delivered code", calls, fresh)
+		}
+		t.Log("EVIDENCE one real out-of-band account OTP completed authenticated UDP registration")
+	}) {
+		return
+	}
+
+	if !runTypedEvidenceScenario(t, "fresh_registration_via_hub_and_assigned_cell", "registration.public_api_lifecycle_success", []string{"lifecycle_exchange"}, func(t *testing.T) {
+		if registeredClient == nil || registeredBinding == nil {
+			t.Fatal("account OTP scenario did not return the registered runtime")
+		}
+		cellEvidence = append(cellEvidence, assertAssignedCell(t, cfg, registeredBinding, "registration"))
 	}) {
 		return
 	}

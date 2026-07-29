@@ -17,7 +17,7 @@ import (
 
 const (
 	nativeUDPWorkflowID                   = "4242"
-	reviewedInventoryMappingSHA256Fixture = "b26426c4595933bf454b8c53000cd8ec392e052389ba93f7ffb4ddcd99de86e3"
+	reviewedInventoryMappingSHA256Fixture = "119bacde1c8f802bc1b3873d3148ea9d347d7c80746c4a0b4278d8b00a55ac8f"
 )
 
 type nativeUDPProofFixture struct {
@@ -54,7 +54,12 @@ func TestNativeUDPSandboxWorkflowIsAttendedStrictAndEvidenceBearing(t *testing.T
 		"QURL_GO_SANDBOX_DISPATCH_CORRELATION_ID: ${{ inputs.dispatch_correlation_id }}",
 		"QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ID: ${{ inputs.nhp_controller_run_id }}",
 		"QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ATTEMPT: ${{ inputs.nhp_controller_run_attempt }}",
-		"QURL_GO_SANDBOX_ENROLLMENT_CREDENTIAL: ${{ secrets.QURL_GO_SANDBOX_ENROLLMENT_CREDENTIAL }}",
+		"PROOF_ACCOUNT_RUN_SECRET: layerv-nhp-sandbox/udp-proof/jit/credential/${{ inputs.nhp_controller_run_id }}/${{ inputs.nhp_controller_run_attempt }}",
+		"QURL_GO_SANDBOX_OTP_MAILBOX_RECIPIENT: qurl-go@proof.notify.layerv.xyz",
+		"aws secretsmanager get-secret-value",
+		"aws secretsmanager delete-secret",
+		"--force-delete-without-recovery",
+		"export QURL_GO_SANDBOX_ENROLLMENT_CREDENTIAL=\"${credential}\"",
 		"Mint read-only proof-attestation token",
 		"actions/create-github-app-token@",
 		"permission-actions: read",
@@ -188,6 +193,7 @@ func TestNativeUDPSandboxWorkflowIsAttendedStrictAndEvidenceBearing(t *testing.T
 		"runs-on: ubuntu-latest",
 		"labels: self-hosted",
 		"QURL_GO_SANDBOX_ATTESTATION_TOKEN",
+		"QURL_GO_SANDBOX_ENROLLMENT_CREDENTIAL: ${{ secrets.",
 		"connector_proof_run_id",
 		"connector_attestation_sha256",
 		"QURL_GO_SANDBOX_CONNECTOR_PROOF_RUN_ID",
@@ -1081,8 +1087,8 @@ func TestNativeUDPSandboxEvidenceManifestIsAllowlisted(t *testing.T) {
 		t.Fatalf("evidence deployment producer = %v", decoded["deployment_producer"])
 	}
 	counts := decoded["counts"].(map[string]any)
-	if counts["blocking"] != float64(29) {
-		t.Fatalf("evidence blocking count = %v, want 29", counts["blocking"])
+	if counts["blocking"] != float64(28) {
+		t.Fatalf("evidence blocking count = %v, want 28", counts["blocking"])
 	}
 	results := decoded["scenario_results"].([]any)
 	if len(results) != 1 {
