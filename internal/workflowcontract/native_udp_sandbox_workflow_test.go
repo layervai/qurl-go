@@ -155,7 +155,7 @@ func TestNativeUDPSandboxWorkflowIsAttendedStrictAndEvidenceBearing(t *testing.T
 		"select(.status == \"implemented\")",
 		".Action == \"pass\"",
 		".Action == \"skip\"",
-		"select(.status != \"implemented\")",
+		"select(.owner != \"qurl-go\" and .status == \"external_dependency\")",
 		"qurl-go-owned native UDP scenarios remain unproven",
 		"Build allowlisted evidence manifest",
 		"native-udp-sandbox.raw.json",
@@ -176,6 +176,7 @@ func TestNativeUDPSandboxWorkflowIsAttendedStrictAndEvidenceBearing(t *testing.T
 		"trap 'rm -f \"${raw}\" \"${typed_observations}\" \"${typed_evidence_summary}\"' EXIT",
 		"${{ runner.temp }}/sandbox-deployment-manifest.json",
 		"${{ runner.temp }}/pre_retirement_scenarios.json",
+		"${{ runner.temp }}/typed_evidence_contract.json",
 		"if-no-files-found: error",
 		"retention-days: 30",
 		"Require complete qurl-go proof publication",
@@ -855,6 +856,32 @@ func TestNativeUDPSandboxPostRemovalRejectsUntrustedPairedArtifacts(t *testing.T
 		{name: "pre-removal controller identity mismatches correlation", mutateEvidence: func(value map[string]any) {
 			value["nhp_controller_run_attempt"] = "2"
 		}},
+		{name: "pre-removal typed observation digest mismatches", mutateEvidence: func(value map[string]any) {
+			for _, item := range value["typed_evidence"].([]any) {
+				row := item.(map[string]any)
+				if evidence := row["evidence"].([]any); len(evidence) > 0 {
+					evidence[0].(map[string]any)["observation_sha256"] = strings.Repeat("f", 64)
+					return
+				}
+			}
+			t.Fatal("typed evidence record not found")
+		}},
+		{name: "pre-removal static NHP source mismatches", mutateEvidence: func(value map[string]any) {
+			for _, item := range value["typed_evidence"].([]any) {
+				row := item.(map[string]any)
+				if row["scenario_key"] == "orchestrator.real_hub_authority_and_two_cells" {
+					record := row["evidence"].([]any)[0].(map[string]any)
+					record["observation"].(map[string]any)["source_sha"] = strings.Repeat("f", 40)
+					raw, err := json.Marshal(record["observation"])
+					if err != nil {
+						t.Fatal(err)
+					}
+					record["observation_sha256"] = sha256Hex(raw)
+					return
+				}
+			}
+			t.Fatal("static NHP evidence row not found")
+		}},
 		{name: "artifact API oversize", oversize: true},
 		{name: "artifact digest mismatch", badHash: true},
 		{name: "FRP repository and Connector module repinned", mutateManifest: func(value map[string]any) {
@@ -923,6 +950,7 @@ func validPreRemovalEvidence(t *testing.T, commitSHA string, outputs map[string]
 	var inventory struct {
 		Scenarios []struct {
 			ID       string `json:"id"`
+			Owner    string `json:"owner"`
 			Status   string `json:"status"`
 			TestName string `json:"test_name"`
 		} `json:"scenarios"`
@@ -930,11 +958,34 @@ func validPreRemovalEvidence(t *testing.T, commitSHA string, outputs map[string]
 	if err := json.Unmarshal(raw, &inventory); err != nil {
 		t.Fatal(err)
 	}
+	var contract struct {
+		Scenarios map[string][]string `json:"scenarios"`
+	}
+	contractRaw, err := os.ReadFile(filepath.Join(
+		filepath.Dir(outputs["QURL_GO_SANDBOX_INVENTORY_PATH"]),
+		"typed_evidence_contract.json",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(contractRaw, &contract); err != nil {
+		t.Fatal(err)
+	}
+	staticNHP := map[string]struct{}{
+		"orchestrator.real_hub_authority_and_two_cells":  {},
+		"retirement.generated_artifact_parity":           {},
+		"retirement.nhp_registrar_surface_state":         {},
+		"retirement.terraform_saved_plan_and_live_state": {},
+	}
 	scenarioResults := make([]any, 0, len(inventory.Scenarios))
 	typedEvidence := make([]any, 0, len(inventory.Scenarios))
 	implemented := 0
 	for _, scenario := range inventory.Scenarios {
 		evidence := []any{}
+		kinds := contract.Scenarios[scenario.ID]
+		if len(kinds) != 1 {
+			t.Fatalf("typed evidence kinds for %s = %v", scenario.ID, kinds)
+		}
 		if scenario.Status == "implemented" {
 			implemented++
 			scenarioResults = append(scenarioResults, map[string]any{
@@ -942,11 +993,13 @@ func validPreRemovalEvidence(t *testing.T, commitSHA string, outputs map[string]
 				"action":          "pass",
 				"elapsed_seconds": 1.0,
 			})
-			evidence = []any{map[string]any{
-				"kind":               "wire_trace",
-				"observation":        map[string]any{"verified": true},
-				"observation_sha256": "348f299cf43d57826c76c5ef7c8ccc37668b45161b857d4ef09f7125f3381be9",
-			}}
+			evidence = []any{qurlGoBoundTypedEvidence(
+				t, scenario.ID, scenario.TestName, kinds[0],
+			)}
+		} else if _, ok := staticNHP[scenario.ID]; ok {
+			evidence = []any{nhpBoundTypedEvidence(
+				t, scenario.ID, kinds[0], 987654, strings.Repeat("2", 40),
+			)}
 		}
 		typedEvidence = append(typedEvidence, map[string]any{
 			"scenario_key": scenario.ID,
@@ -991,7 +1044,7 @@ func validPreRemovalEvidence(t *testing.T, commitSHA string, outputs map[string]
 		"typed_evidence_contract_sha256":   outputs["QURL_GO_SANDBOX_TYPED_EVIDENCE_CONTRACT_SHA256"],
 		"proof_harness_sha256":             outputs["QURL_GO_SANDBOX_PROOF_HARNESS_SHA256"],
 		"strict_outcome":                   "success",
-		"counts":                           map[string]int{"implemented": implemented, "blocking": len(inventory.Scenarios) - implemented, "failures": 0, "skips": 0, "exact_passes": implemented},
+		"counts":                           map[string]int{"producer_owned": implemented, "external_dependency": len(inventory.Scenarios) - implemented, "failures": 0, "skips": 0, "exact_passes": implemented},
 		"provenance": proofProvenanceValue(
 			commitSHA,
 			"qurl-go-sandbox-pre-proof",
@@ -999,6 +1052,54 @@ func validPreRemovalEvidence(t *testing.T, commitSHA string, outputs map[string]
 			outputs["QURL_GO_SANDBOX_TYPED_EVIDENCE_CONTRACT_SHA256"],
 		),
 		"scenario_results": scenarioResults,
+	}
+}
+
+func qurlGoBoundTypedEvidence(t *testing.T, scenarioKey, testName, kind string) map[string]any {
+	t.Helper()
+	observation := map[string]any{
+		"evidence_kind": kind,
+		"outcome":       "pass",
+		"producer":      "layervai/qurl-go",
+		"scenario_key":  scenarioKey,
+		"test_name":     testName,
+		"verified":      true,
+	}
+	raw, err := json.Marshal(observation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return map[string]any{
+		"kind":               kind,
+		"observation":        observation,
+		"observation_sha256": sha256Hex(raw),
+	}
+}
+
+func nhpBoundTypedEvidence(
+	t *testing.T,
+	scenarioKey, kind string,
+	producerRunID int64,
+	sourceSHA string,
+) map[string]any {
+	t.Helper()
+	observation := map[string]any{
+		"evidence_kind":   kind,
+		"producer":        "layervai/nhp",
+		"producer_run_id": producerRunID,
+		"row_sha256":      strings.Repeat("a", 64),
+		"scenario_key":    scenarioKey,
+		"source_sha":      sourceSHA,
+		"verified":        true,
+	}
+	raw, err := json.Marshal(observation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return map[string]any{
+		"kind":               kind,
+		"observation":        observation,
+		"observation_sha256": sha256Hex(raw),
 	}
 }
 
@@ -1087,8 +1188,8 @@ func TestNativeUDPSandboxEvidenceManifestIsAllowlisted(t *testing.T) {
 		t.Fatalf("evidence deployment producer = %v", decoded["deployment_producer"])
 	}
 	counts := decoded["counts"].(map[string]any)
-	if counts["blocking"] != float64(22) {
-		t.Fatalf("evidence blocking count = %v, want 22", counts["blocking"])
+	if counts["producer_owned"] != float64(46) || counts["external_dependency"] != float64(22) {
+		t.Fatalf("evidence ownership counts = %v, want 46 producer-owned and 22 external dependencies", counts)
 	}
 	results := decoded["scenario_results"].([]any)
 	if len(results) != 1 {
@@ -1204,7 +1305,8 @@ func TestNativeUDPSandboxEvidenceRequiresStrictStepSuccess(t *testing.T) {
 	}
 	counts := evidence["counts"].(map[string]any)
 	if evidence["strict_outcome"] != "failure" || evidence["gate_passed"] != false ||
-		counts["blocking"] != float64(22) || counts["exact_passes"] != counts["implemented"] ||
+		counts["producer_owned"] != float64(46) || counts["external_dependency"] != float64(22) ||
+		counts["exact_passes"] != counts["producer_owned"] ||
 		evidence["provenance_valid"] != true || evidence["two_cell_provenance"] != true {
 		t.Fatalf("strict-step failure was not independently bound fail-closed: %v", evidence)
 	}
@@ -1315,21 +1417,56 @@ func TestNativeUDPSandboxRequiresCompletePublishedProof(t *testing.T) {
 	if err := json.Unmarshal(raw, &inventory); err != nil {
 		t.Fatal(err)
 	}
+	var typedContract struct {
+		Scenarios map[string][]string `json:"scenarios"`
+	}
+	contractRaw, err := os.ReadFile(filepath.Join(
+		workflowDir(t), "..", "..", "tests", "e2e", "nativeudp", "typed_evidence_contract.json",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(contractRaw, &typedContract); err != nil {
+		t.Fatal(err)
+	}
+	staticNHP := map[string]struct{}{
+		"orchestrator.real_hub_authority_and_two_cells":  {},
+		"retirement.generated_artifact_parity":           {},
+		"retirement.nhp_registrar_surface_state":         {},
+		"retirement.terraform_saved_plan_and_live_state": {},
+	}
 	typedEvidence := make([]any, 0, 68)
+	scenarioResults := make([]any, 0, 46)
 	implemented := 0
 	for _, value := range inventory["scenarios"].([]any) {
 		scenario := value.(map[string]any)
 		evidence := []any{}
+		scenarioID := scenario["id"].(string)
+		kinds := typedContract.Scenarios[scenarioID]
+		if len(kinds) != 1 {
+			t.Fatalf("typed evidence kinds for %s = %v", scenarioID, kinds)
+		}
 		if scenario["owner"] == "qurl-go" {
 			scenario["status"] = "implemented"
 			implemented++
-			evidence = []any{map[string]any{
-				"kind":               "wire_trace",
-				"observation":        map[string]any{"verified": true},
-				"observation_sha256": "348f299cf43d57826c76c5ef7c8ccc37668b45161b857d4ef09f7125f3381be9",
-			}}
+			evidence = []any{qurlGoBoundTypedEvidence(
+				t,
+				scenarioID,
+				scenario["test_name"].(string),
+				kinds[0],
+			)}
+			scenarioResults = append(scenarioResults, map[string]any{
+				"test_name":       scenario["test_name"],
+				"action":          "pass",
+				"elapsed_seconds": 0.1,
+			})
 		} else {
 			scenario["status"] = "external_dependency"
+			if _, ok := staticNHP[scenarioID]; ok {
+				evidence = []any{nhpBoundTypedEvidence(
+					t, scenarioID, kinds[0], 987654, strings.Repeat("2", 40),
+				)}
+			}
 		}
 		typedEvidence = append(typedEvidence, map[string]any{
 			"scenario_key": scenario["id"],
@@ -1369,14 +1506,14 @@ func TestNativeUDPSandboxRequiresCompletePublishedProof(t *testing.T) {
 			"artifact_id":     "7654321",
 			"artifact_digest": "sha256:" + strings.Repeat("d", 64),
 		},
-		"counts":                         map[string]any{"implemented": implemented, "blocking": 68 - implemented, "failures": 0, "skips": 0, "exact_passes": implemented},
+		"counts":                         map[string]any{"producer_owned": implemented, "external_dependency": 68 - implemented, "failures": 0, "skips": 0, "exact_passes": implemented},
 		"provenance_valid":               true,
 		"two_cell_provenance":            true,
 		"typed_evidence_complete":        true,
 		"typed_evidence":                 typedEvidence,
-		"typed_evidence_contract_sha256": "e15008760ea838875de9c75561726c86e9d2e7f7f507247e55a588fa3ac65fe5",
+		"typed_evidence_contract_sha256": "f4b37aceb2dd55f2c1cf6d7ec4e955cfeb69297ff6151b565935d03d01f65d08",
 		"provenance":                     nil,
-		"scenario_results":               []any{},
+		"scenario_results":               scenarioResults,
 	}
 	tests := []struct {
 		name        string
@@ -1385,10 +1522,31 @@ func TestNativeUDPSandboxRequiresCompletePublishedProof(t *testing.T) {
 	}{
 		{name: "qurl-go complete with visible external dependencies", wantSuccess: true},
 		{name: "gate false", mutate: func(value map[string]any) { value["gate_passed"] = false }},
-		{name: "global-looking zero blockers", mutate: func(value map[string]any) { value["counts"].(map[string]any)["blocking"] = 0 }},
+		{name: "external count hidden", mutate: func(value map[string]any) { value["counts"].(map[string]any)["external_dependency"] = 0 }},
 		{name: "Connector coupling field", mutate: func(value map[string]any) { value["connector_proof_run_id"] = "777" }},
 		{name: "missing inventory row", mutate: func(value map[string]any) {
 			value["typed_evidence"] = value["typed_evidence"].([]any)[:67]
+		}},
+		{name: "missing static NHP evidence", mutate: func(value map[string]any) {
+			for _, item := range value["typed_evidence"].([]any) {
+				row := item.(map[string]any)
+				if row["scenario_key"] == "orchestrator.real_hub_authority_and_two_cells" {
+					row["evidence"] = []any{}
+					return
+				}
+			}
+			t.Fatal("static NHP evidence row not found")
+		}},
+		{name: "wrong static NHP source binding", mutate: func(value map[string]any) {
+			for _, item := range value["typed_evidence"].([]any) {
+				row := item.(map[string]any)
+				if row["scenario_key"] == "orchestrator.real_hub_authority_and_two_cells" {
+					record := row["evidence"].([]any)[0].(map[string]any)
+					record["observation"].(map[string]any)["source_sha"] = strings.Repeat("f", 40)
+					return
+				}
+			}
+			t.Fatal("static NHP evidence row not found")
 		}},
 	}
 	for _, test := range tests {
@@ -1400,6 +1558,13 @@ func TestNativeUDPSandboxRequiresCompletePublishedProof(t *testing.T) {
 			}
 			writeJSONFile(t, filepath.Join(runnerTemp, "native-udp-sandbox.evidence.json"), value)
 			writeJSONFile(t, filepath.Join(runnerTemp, "pre_retirement_scenarios.json"), inventory)
+			if err := os.WriteFile(
+				filepath.Join(runnerTemp, "sandbox-deployment-manifest.json"),
+				deploymentManifestBytes(t, "pre_removal", strings.Repeat("a", 40)),
+				0o600,
+			); err != nil {
+				t.Fatal(err)
+			}
 			runScript(t, t.TempDir(), stepRun(t, readWorkflow(t, "native-udp-sandbox.yml"), "Require complete qurl-go proof publication"),
 				map[string]string{"RUNNER_TEMP": runnerTemp}, test.wantSuccess)
 		})
@@ -1688,29 +1853,32 @@ esac
 func proofHashEnvironment(runnerTemp string, outputs map[string]string) map[string]string {
 	return map[string]string{
 		"RUNNER_TEMP": runnerTemp,
-		"QURL_GO_SANDBOX_DISPATCH_CORRELATION_ID":          nativeUDPDispatchCorrelation("qurl_go", "pre_removal"),
-		"QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ID":            "123456",
-		"QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ATTEMPT":       "1",
-		"QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_PATH":         outputs["QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_PATH"],
-		"QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_SHA256":       outputs["QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_SHA256"],
-		"QURL_GO_SANDBOX_DEPLOYMENT_RUNTIME_INPUTS_PATH":   outputs["QURL_GO_SANDBOX_DEPLOYMENT_RUNTIME_INPUTS_PATH"],
-		"QURL_GO_SANDBOX_DEPLOYMENT_RUNTIME_INPUTS_SHA256": outputs["QURL_GO_SANDBOX_DEPLOYMENT_RUNTIME_INPUTS_SHA256"],
-		"QURL_GO_SANDBOX_NHP_SOURCE_SHA":                   outputs["QURL_GO_SANDBOX_NHP_SOURCE_SHA"],
-		"QURL_GO_SANDBOX_DEPLOYMENT_PRODUCER_RUN_ID":       "987654",
-		"QURL_GO_SANDBOX_DEPLOYMENT_PRODUCER_RUN_ATTEMPT":  "1",
-		"QURL_GO_SANDBOX_DEPLOYMENT_PRODUCER_HEAD_SHA":     strings.Repeat("c", 40),
-		"QURL_GO_SANDBOX_DEPLOYMENT_ARTIFACT_ID":           "7654321",
-		"QURL_GO_SANDBOX_DEPLOYMENT_ARTIFACT_DIGEST":       "sha256:" + strings.Repeat("d", 64),
-		"QURL_GO_SANDBOX_INVENTORY_PATH":                   outputs["QURL_GO_SANDBOX_INVENTORY_PATH"],
-		"QURL_GO_SANDBOX_INVENTORY_SHA256":                 outputs["QURL_GO_SANDBOX_INVENTORY_SHA256"],
-		"QURL_GO_SANDBOX_INVENTORY_MAPPING_SHA256":         outputs["QURL_GO_SANDBOX_INVENTORY_MAPPING_SHA256"],
-		"QURL_GO_SANDBOX_SCENARIO_CONTRACT_SHA256":         outputs["QURL_GO_SANDBOX_SCENARIO_CONTRACT_SHA256"],
-		"QURL_GO_SANDBOX_RETIRED_LIFECYCLE_SURFACE_PATH":   outputs["QURL_GO_SANDBOX_RETIRED_LIFECYCLE_SURFACE_PATH"],
-		"QURL_GO_SANDBOX_RETIRED_LIFECYCLE_SURFACE_SHA256": outputs["QURL_GO_SANDBOX_RETIRED_LIFECYCLE_SURFACE_SHA256"],
-		"QURL_GO_SANDBOX_TYPED_EVIDENCE_CONTRACT_SHA256":   outputs["QURL_GO_SANDBOX_TYPED_EVIDENCE_CONTRACT_SHA256"],
-		"QURL_GO_SANDBOX_PROOF_HARNESS_SHA256":             outputs["QURL_GO_SANDBOX_PROOF_HARNESS_SHA256"],
-		"QURL_GO_SANDBOX_ORCHESTRATOR_EVIDENCE_PATH":       outputs["QURL_GO_SANDBOX_ORCHESTRATOR_EVIDENCE_PATH"],
-		"QURL_GO_SANDBOX_ORCHESTRATOR_EVIDENCE_SHA256":     outputs["QURL_GO_SANDBOX_ORCHESTRATOR_EVIDENCE_SHA256"],
+		"QURL_GO_SANDBOX_DISPATCH_CORRELATION_ID":             nativeUDPDispatchCorrelation("qurl_go", "pre_removal"),
+		"QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ID":               "123456",
+		"QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ATTEMPT":          "1",
+		"QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_PATH":            outputs["QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_PATH"],
+		"QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_SHA256":          outputs["QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_SHA256"],
+		"QURL_GO_SANDBOX_DEPLOYMENT_RUNTIME_INPUTS_PATH":      outputs["QURL_GO_SANDBOX_DEPLOYMENT_RUNTIME_INPUTS_PATH"],
+		"QURL_GO_SANDBOX_DEPLOYMENT_RUNTIME_INPUTS_SHA256":    outputs["QURL_GO_SANDBOX_DEPLOYMENT_RUNTIME_INPUTS_SHA256"],
+		"QURL_GO_SANDBOX_DEPLOYMENT_PROVENANCE_SHA256":        outputs["QURL_GO_SANDBOX_DEPLOYMENT_PROVENANCE_SHA256"],
+		"QURL_GO_SANDBOX_NHP_SOURCE_SHA":                      outputs["QURL_GO_SANDBOX_NHP_SOURCE_SHA"],
+		"QURL_GO_SANDBOX_QURL_SERVICE_SOURCE_SHA":             outputs["QURL_GO_SANDBOX_QURL_SERVICE_SOURCE_SHA"],
+		"QURL_GO_SANDBOX_QURL_SERVICE_AUTHORITY_IMAGE_DIGEST": outputs["QURL_GO_SANDBOX_QURL_SERVICE_AUTHORITY_IMAGE_DIGEST"],
+		"QURL_GO_SANDBOX_DEPLOYMENT_PRODUCER_RUN_ID":          "987654",
+		"QURL_GO_SANDBOX_DEPLOYMENT_PRODUCER_RUN_ATTEMPT":     "1",
+		"QURL_GO_SANDBOX_DEPLOYMENT_PRODUCER_HEAD_SHA":        strings.Repeat("c", 40),
+		"QURL_GO_SANDBOX_DEPLOYMENT_ARTIFACT_ID":              "7654321",
+		"QURL_GO_SANDBOX_DEPLOYMENT_ARTIFACT_DIGEST":          "sha256:" + strings.Repeat("d", 64),
+		"QURL_GO_SANDBOX_INVENTORY_PATH":                      outputs["QURL_GO_SANDBOX_INVENTORY_PATH"],
+		"QURL_GO_SANDBOX_INVENTORY_SHA256":                    outputs["QURL_GO_SANDBOX_INVENTORY_SHA256"],
+		"QURL_GO_SANDBOX_INVENTORY_MAPPING_SHA256":            outputs["QURL_GO_SANDBOX_INVENTORY_MAPPING_SHA256"],
+		"QURL_GO_SANDBOX_SCENARIO_CONTRACT_SHA256":            outputs["QURL_GO_SANDBOX_SCENARIO_CONTRACT_SHA256"],
+		"QURL_GO_SANDBOX_RETIRED_LIFECYCLE_SURFACE_PATH":      outputs["QURL_GO_SANDBOX_RETIRED_LIFECYCLE_SURFACE_PATH"],
+		"QURL_GO_SANDBOX_RETIRED_LIFECYCLE_SURFACE_SHA256":    outputs["QURL_GO_SANDBOX_RETIRED_LIFECYCLE_SURFACE_SHA256"],
+		"QURL_GO_SANDBOX_TYPED_EVIDENCE_CONTRACT_SHA256":      outputs["QURL_GO_SANDBOX_TYPED_EVIDENCE_CONTRACT_SHA256"],
+		"QURL_GO_SANDBOX_PROOF_HARNESS_SHA256":                outputs["QURL_GO_SANDBOX_PROOF_HARNESS_SHA256"],
+		"QURL_GO_SANDBOX_ORCHESTRATOR_EVIDENCE_PATH":          outputs["QURL_GO_SANDBOX_ORCHESTRATOR_EVIDENCE_PATH"],
+		"QURL_GO_SANDBOX_ORCHESTRATOR_EVIDENCE_SHA256":        outputs["QURL_GO_SANDBOX_ORCHESTRATOR_EVIDENCE_SHA256"],
 	}
 }
 
@@ -1804,6 +1972,11 @@ func deploymentRuntimeInputsBytes(t *testing.T, manifest []byte) []byte {
 				"port":                  cells[1].(map[string]any)["port"],
 				"server_public_key_b64": base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x22}, 32)),
 			},
+		},
+		"connector_sealed_state": map[string]any{
+			"provider": "aws-kms",
+			"region":   "us-east-2",
+			"key_arn":  "arn:aws:kms:us-east-2:123456789012:key/11111111-2222-3333-4444-555555555555",
 		},
 	}
 	encoded, err := json.Marshal(runtime)
@@ -1967,6 +2140,7 @@ func writeQURLGoProofZIP(t *testing.T, path, evidencePath, manifestPath, invento
 		{name: "deployment-runtime-inputs.json", path: filepath.Join(filepath.Dir(manifestPath), "deployment-runtime-inputs.json")},
 		{name: "pre_retirement_scenarios.json", path: inventoryPath},
 		{name: "retired_lifecycle_surface.json", path: filepath.Join(filepath.Dir(inventoryPath), "retired_lifecycle_surface.json")},
+		{name: "typed_evidence_contract.json", path: filepath.Join(filepath.Dir(inventoryPath), "typed_evidence_contract.json")},
 	} {
 		body, err := os.ReadFile(item.path)
 		if err != nil {

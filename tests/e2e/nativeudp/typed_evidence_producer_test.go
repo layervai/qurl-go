@@ -20,25 +20,47 @@ import (
 )
 
 const (
-	typedEvidencePathEnv    = "QURL_GO_SANDBOX_TYPED_EVIDENCE_PATH"
-	typedEvidenceMaxBytes   = 1024 * 1024
-	verifiedObservationHash = "348f299cf43d57826c76c5ef7c8ccc37668b45161b857d4ef09f7125f3381be9"
+	typedEvidencePathEnv  = "QURL_GO_SANDBOX_TYPED_EVIDENCE_PATH"
+	typedEvidenceMaxBytes = 1024 * 1024
+	typedEvidenceProducer = "layervai/qurl-go"
 )
 
 var (
 	typedEvidenceMu         sync.Mutex
 	typedEvidenceNameRegexp = regexp.MustCompile(`^[a-z][a-z0-9_.-]{0,127}$`)
+	typedEvidenceTestRegexp = regexp.MustCompile(`^Test[A-Za-z0-9_]+(?:/[a-z0-9_]+)*$`)
 )
 
 type successfulTypedEvidenceObservation struct {
-	Verified bool `json:"verified"`
+	EvidenceKind string `json:"evidence_kind"`
+	Outcome      string `json:"outcome"`
+	Producer     string `json:"producer"`
+	ScenarioKey  string `json:"scenario_key"`
+	TestName     string `json:"test_name"`
+	Verified     bool   `json:"verified"`
 }
 
 type successfulTypedEvidenceRecord struct {
-	Kind              string                             `json:"kind"`
-	Observation       successfulTypedEvidenceObservation `json:"observation"`
-	ObservationSHA256 string                             `json:"observation_sha256"`
-	ScenarioKey       string                             `json:"scenario_key"`
+	Kind              string          `json:"kind"`
+	Observation       json.RawMessage `json:"observation"`
+	ObservationSHA256 string          `json:"observation_sha256"`
+	ScenarioKey       string          `json:"scenario_key"`
+}
+
+type nhpTypedEvidenceObservation struct {
+	EvidenceKind  string `json:"evidence_kind"`
+	Producer      string `json:"producer"`
+	ProducerRunID int64  `json:"producer_run_id"`
+	RowSHA256     string `json:"row_sha256"`
+	ScenarioKey   string `json:"scenario_key"`
+	SourceSHA     string `json:"source_sha"`
+	Verified      bool   `json:"verified"`
+}
+
+type nhpTypedEvidenceBinding struct {
+	ProducerRunID int64
+	RowSHA256     string
+	SourceSHA     string
 }
 
 // runTypedEvidenceScenario appends evidence only from the cleanup of a named
@@ -59,7 +81,7 @@ func runTypedEvidenceScenario(
 				return
 			}
 			if err := appendSuccessfulTypedEvidence(
-				os.Getenv(typedEvidencePathEnv), scenarioKey, kinds,
+				os.Getenv(typedEvidencePathEnv), scenarioKey, t.Name(), kinds,
 			); err != nil {
 				t.Errorf("append typed evidence for %s: %v", scenarioKey, err)
 			}
@@ -79,7 +101,23 @@ func runTypedEvidenceScenario(
 	})
 }
 
-func appendSuccessfulTypedEvidence(path, scenarioKey string, kinds []string) error {
+func appendSuccessfulTypedEvidence(path, scenarioKey, testName string, kinds []string) error {
+	return appendBoundTypedEvidence(path, scenarioKey, testName, kinds, nil)
+}
+
+func appendNHPOrchestratorTypedEvidence(
+	path, scenarioKey string,
+	kind string,
+	binding nhpTypedEvidenceBinding,
+) error {
+	return appendBoundTypedEvidence(path, scenarioKey, "", []string{kind}, &binding)
+}
+
+func appendBoundTypedEvidence(
+	path, scenarioKey, testName string,
+	kinds []string,
+	nhpBinding *nhpTypedEvidenceBinding,
+) error {
 	typedEvidenceMu.Lock()
 	defer typedEvidenceMu.Unlock()
 
@@ -88,6 +126,15 @@ func appendSuccessfulTypedEvidence(path, scenarioKey string, kinds []string) err
 	}
 	if !typedEvidenceNameRegexp.MatchString(scenarioKey) {
 		return fmt.Errorf("invalid typed evidence scenario key %q", scenarioKey)
+	}
+	if nhpBinding == nil && !typedEvidenceTestRegexp.MatchString(testName) {
+		return fmt.Errorf("invalid typed evidence test name %q", testName)
+	}
+	if nhpBinding != nil &&
+		(nhpBinding.ProducerRunID < 1 ||
+			!canonicalLowerHex(nhpBinding.RowSHA256, sha256.Size*2) ||
+			!canonicalLowerHex(nhpBinding.SourceSHA, 40)) {
+		return errors.New("invalid NHP typed evidence binding")
 	}
 	if len(kinds) == 0 || !sort.StringsAreSorted(kinds) {
 		return errors.New("typed evidence kinds must be a nonempty sorted list")
@@ -126,10 +173,36 @@ func appendSuccessfulTypedEvidence(path, scenarioKey string, kinds []string) err
 		if _, duplicate := existing[identity]; duplicate {
 			return fmt.Errorf("duplicate typed evidence kind %q for %s", kind, scenarioKey)
 		}
+		var observation any
+		if nhpBinding == nil {
+			observation = successfulTypedEvidenceObservation{
+				EvidenceKind: kind,
+				Outcome:      "pass",
+				Producer:     typedEvidenceProducer,
+				ScenarioKey:  scenarioKey,
+				TestName:     testName,
+				Verified:     true,
+			}
+		} else {
+			observation = nhpTypedEvidenceObservation{
+				EvidenceKind:  kind,
+				Producer:      orchestratorProofRepository,
+				ProducerRunID: nhpBinding.ProducerRunID,
+				RowSHA256:     nhpBinding.RowSHA256,
+				ScenarioKey:   scenarioKey,
+				SourceSHA:     nhpBinding.SourceSHA,
+				Verified:      true,
+			}
+		}
+		observationRaw, err := json.Marshal(observation)
+		if err != nil {
+			return fmt.Errorf("marshal typed evidence observation: %w", err)
+		}
+		observationDigest := sha256.Sum256(observationRaw)
 		record := successfulTypedEvidenceRecord{
 			Kind:              kind,
-			Observation:       successfulTypedEvidenceObservation{Verified: true},
-			ObservationSHA256: verifiedObservationHash,
+			Observation:       observationRaw,
+			ObservationSHA256: hex.EncodeToString(observationDigest[:]),
 			ScenarioKey:       scenarioKey,
 		}
 		encoded, err := json.Marshal(record)
@@ -184,10 +257,46 @@ func collectExistingTypedEvidence(raw []byte, identities map[string]struct{}) er
 		if err != nil || !bytes.Equal(canonical, line) {
 			return fmt.Errorf("typed evidence line %d is not canonical", lineNumber)
 		}
-		if !record.Observation.Verified || record.ObservationSHA256 != verifiedObservationHash ||
+		observationDigest := sha256.Sum256(record.Observation)
+		if record.ObservationSHA256 != hex.EncodeToString(observationDigest[:]) ||
 			!typedEvidenceNameRegexp.MatchString(record.ScenarioKey) ||
 			!typedEvidenceNameRegexp.MatchString(record.Kind) {
 			return fmt.Errorf("typed evidence line %d is not an exact success record", lineNumber)
+		}
+		var header struct {
+			Producer string `json:"producer"`
+		}
+		if err := json.Unmarshal(record.Observation, &header); err != nil {
+			return fmt.Errorf("decode typed evidence line %d observation header: %w", lineNumber, err)
+		}
+		switch header.Producer {
+		case typedEvidenceProducer:
+			observation, err := decodeStrictJSON[successfulTypedEvidenceObservation](
+				record.Observation, "qurl-go typed evidence observation",
+			)
+			if err != nil ||
+				!observation.Verified ||
+				observation.Outcome != "pass" ||
+				observation.ScenarioKey != record.ScenarioKey ||
+				observation.EvidenceKind != record.Kind ||
+				!typedEvidenceTestRegexp.MatchString(observation.TestName) {
+				return fmt.Errorf("typed evidence line %d is not a bound qurl-go success record", lineNumber)
+			}
+		case orchestratorProofRepository:
+			observation, err := decodeStrictJSON[nhpTypedEvidenceObservation](
+				record.Observation, "NHP typed evidence observation",
+			)
+			if err != nil ||
+				!observation.Verified ||
+				observation.ProducerRunID < 1 ||
+				observation.ScenarioKey != record.ScenarioKey ||
+				observation.EvidenceKind != record.Kind ||
+				!canonicalLowerHex(observation.RowSHA256, sha256.Size*2) ||
+				!canonicalLowerHex(observation.SourceSHA, 40) {
+				return fmt.Errorf("typed evidence line %d is not a bound NHP success record", lineNumber)
+			}
+		default:
+			return fmt.Errorf("typed evidence line %d has an unknown producer", lineNumber)
 		}
 		identity := record.ScenarioKey + "\x00" + record.Kind
 		if _, duplicate := identities[identity]; duplicate {
@@ -260,10 +369,9 @@ func TestTypedEvidenceScenarioProducerEmitsOnlyAfterSuccess(t *testing.T) {
 			if len(lines) != 1 {
 				t.Fatalf("%s wrote %d records, want exactly one: %q", mode, len(lines), raw)
 			}
-			if digest := sha256.Sum256([]byte(`{"verified":true}`)); hex.EncodeToString(digest[:]) != verifiedObservationHash {
-				t.Fatal("reviewed observation digest constant is stale")
-			}
-			want := `{"kind":"wire_trace","observation":{"verified":true},"observation_sha256":"` + verifiedObservationHash + `","scenario_key":"proof.success-only"}`
+			observation := `{"evidence_kind":"wire_trace","outcome":"pass","producer":"layervai/qurl-go","scenario_key":"proof.success-only","test_name":"TestTypedEvidenceScenarioProducerSubprocess/scenario","verified":true}`
+			digest := sha256.Sum256([]byte(observation))
+			want := `{"kind":"wire_trace","observation":` + observation + `,"observation_sha256":"` + hex.EncodeToString(digest[:]) + `","scenario_key":"proof.success-only"}`
 			if lines[0] != want {
 				t.Fatalf("noncanonical success evidence: got %q, want %q", lines[0], want)
 			}

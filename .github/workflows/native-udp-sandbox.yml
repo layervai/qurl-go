@@ -245,6 +245,7 @@ jobs:
               "pre_retirement_scenarios.json",
               "retired_lifecycle_surface.json",
               "sandbox-deployment-manifest.json",
+              "typed_evidence_contract.json",
           }
           found = {}
           total_size = 0
@@ -345,8 +346,12 @@ jobs:
                 test("^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]=$");
               . as $runtime | $manifest[0] as $deployed |
               type == "object" and
-              (keys | sort) == ["cells", "hub", "schema_version"] and
+              (keys | sort) == ["cells", "connector_sealed_state", "hub", "schema_version"] and
               .schema_version == 1 and
+              (.connector_sealed_state | type == "object" and
+                (keys | sort) == ["key_arn", "provider", "region"] and
+                .provider == "aws-kms" and .region == "us-east-2" and
+                (.key_arn | test("^arn:aws:kms:us-east-2:[0-9]{12}:key/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"))) and
               (.hub | type == "object" and
                 (keys | sort) == ["host", "port", "server_public_key_b64"] and
                 (.host | valid_host) and .port == 62206 and
@@ -491,6 +496,7 @@ jobs:
           inventory="tests/e2e/nativeudp/pre_retirement_scenarios.json"
           inventory_snapshot="${RUNNER_TEMP}/pre_retirement_scenarios.json"
           typed_evidence_contract="tests/e2e/nativeudp/typed_evidence_contract.json"
+          typed_evidence_contract_snapshot="${RUNNER_TEMP}/typed_evidence_contract.json"
           retired_surface="tests/e2e/nativeudp/retired_lifecycle_surface.json"
           retired_surface_snapshot="${RUNNER_TEMP}/retired_lifecycle_surface.json"
           trap 'rm -f "${manifest_raw}" "${manifest_candidate}" "${runtime_raw}" "${runtime_candidate}"' EXIT
@@ -533,16 +539,18 @@ jobs:
           chmod 0444 "${candidate_pr}" "${candidate_commit}"
           canonicalize_json "${inventory}" "${inventory_snapshot}"
           canonicalize_json "${retired_surface}" "${retired_surface_snapshot}"
+          cp -- "${typed_evidence_contract}" "${typed_evidence_contract_snapshot}"
           chmod 0444 \
-            "${manifest}" "${runtime}" "${inventory_snapshot}" "${retired_surface_snapshot}"
+            "${manifest}" "${runtime}" "${inventory_snapshot}" "${retired_surface_snapshot}" \
+            "${typed_evidence_contract_snapshot}"
           deployment_manifest_sha256="$(sha256sum "${manifest}" | cut -d' ' -f1)"
           deployment_runtime_inputs_sha256="$(sha256sum "${runtime}" | cut -d' ' -f1)"
           inventory_sha256="$(sha256sum "${inventory_snapshot}" | cut -d' ' -f1)"
           inventory_mapping_sha256="$(jq -cS -j '{schema_version, gate, proof_phases, all_scenarios_required, scenarios: ([.scenarios[] | {id, owner, status, test_name, requirement}] | sort_by(.id))}' "${inventory}" | sha256sum | cut -d' ' -f1)"
           test "${inventory_mapping_sha256}" = "f7eb7d7dd840dec15aacf929331657738c07ef6f2cdd00cb9046288d13e46bd4"
           scenario_contract_sha256="$(jq -cS '{schema_version, gate, proof_phases, all_scenarios_required, scenarios: ([.scenarios[] | {id, owner, test_name, requirement}] | sort_by(.id))}' "${inventory}" | sha256sum | cut -d' ' -f1)"
-          typed_evidence_contract_sha256="$(sha256sum "${typed_evidence_contract}" | cut -d' ' -f1)"
-          test "${typed_evidence_contract_sha256}" = "e15008760ea838875de9c75561726c86e9d2e7f7f507247e55a588fa3ac65fe5"
+          typed_evidence_contract_sha256="$(sha256sum "${typed_evidence_contract_snapshot}" | cut -d' ' -f1)"
+          test "${typed_evidence_contract_sha256}" = "f4b37aceb2dd55f2c1cf6d7ec4e955cfeb69297ff6151b565935d03d01f65d08"
           retired_lifecycle_surface_sha256="$(sha256sum "${retired_surface_snapshot}" | cut -d' ' -f1)"
           test "${retired_lifecycle_surface_sha256}" = "3fe8872c3da9913c28d763f5561d82b67805aae5a6962c6dc403c7d6305da00c"
           proof_harness_sha256="$(compute_proof_harness_sha256)"
@@ -552,6 +560,8 @@ jobs:
             echo "QURL_GO_SANDBOX_DEPLOYMENT_RUNTIME_INPUTS_PATH=${runtime}"
             echo "QURL_GO_SANDBOX_DEPLOYMENT_RUNTIME_INPUTS_SHA256=${deployment_runtime_inputs_sha256}"
             echo "QURL_GO_SANDBOX_NHP_SOURCE_SHA=$(jq -r '.repositories.nhp' "${manifest}")"
+            echo "QURL_GO_SANDBOX_QURL_SERVICE_SOURCE_SHA=$(jq -r '.repositories.qurl_service' "${manifest}")"
+            echo "QURL_GO_SANDBOX_QURL_SERVICE_AUTHORITY_IMAGE_DIGEST=$(jq -r '.images.qurl_service_authority' "${manifest}")"
             echo "QURL_GO_SANDBOX_HUB_HOST=$(jq -r '.hub.host' "${runtime}")"
             echo "QURL_GO_SANDBOX_HUB_PORT=$(jq -r '.hub.port' "${runtime}")"
             echo "QURL_GO_SANDBOX_HUB_SERVER_PUBLIC_KEY_B64=$(jq -r '.hub.server_public_key_b64' "${runtime}")"
@@ -609,6 +619,29 @@ jobs:
           pre_runtime="${pre_dir}/artifact/deployment-runtime-inputs.json"
           pre_inventory="${pre_dir}/artifact/pre_retirement_scenarios.json"
           pre_retired_surface="${pre_dir}/artifact/retired_lifecycle_surface.json"
+          pre_typed_evidence_contract="${pre_dir}/artifact/typed_evidence_contract.json"
+
+          python3 - "${pre_evidence}" <<'PY'
+          import hashlib
+          import json
+          import sys
+
+          with open(sys.argv[1], "rb") as handle:
+              evidence = json.load(handle)
+          for scenario in evidence["typed_evidence"]:
+              for item in scenario["evidence"]:
+                  canonical = json.dumps(
+                      item["observation"],
+                      allow_nan=False,
+                      ensure_ascii=False,
+                      separators=(",", ":"),
+                      sort_keys=True,
+                  ).encode("utf-8")
+                  if hashlib.sha256(canonical).hexdigest() != item["observation_sha256"]:
+                      raise SystemExit(
+                          f"typed evidence digest mismatch for {scenario['scenario_key']}/{item['kind']}"
+                      )
+          PY
 
           pre_manifest_canonical="${pre_dir}/pre-manifest.canonical.json"
           pre_runtime_canonical="${pre_dir}/pre-runtime.canonical.json"
@@ -699,16 +732,16 @@ jobs:
                   (if .owner == "qurl-go" then .status == "implemented" else .status == "external_dependency" end) and
                   (.test_name | type == "string" and length > 0)))) and
             (.counts | type == "object" and
-              (keys | sort) == ["blocking", "exact_passes", "failures", "implemented", "skips"] and
-              .implemented == ([$inventory.scenarios[] | select(.status == "implemented")] | length) and
-              .blocking == ([$inventory.scenarios[] | select(.status != "implemented")] | length) and
+              (keys | sort) == ["exact_passes", "external_dependency", "failures", "producer_owned", "skips"] and
+              .producer_owned == ([$inventory.scenarios[] | select(.owner == "qurl-go" and .status == "implemented")] | length) and
+              .external_dependency == ([$inventory.scenarios[] | select(.owner != "qurl-go" and .status == "external_dependency")] | length) and
               .failures == 0 and .skips == 0 and
-              .exact_passes == .implemented) and
+              .exact_passes == .producer_owned) and
             .scenario_contract_sha256 == $contract and .proof_harness_sha256 == $harness and
             .inventory_sha256 == $inventory_sha and
             .inventory_mapping_sha256 == $inventory_mapping_sha and
             .retired_lifecycle_surface_sha256 == $retired_surface_sha and
-            .typed_evidence_contract_sha256 == "e15008760ea838875de9c75561726c86e9d2e7f7f507247e55a588fa3ac65fe5" and
+            .typed_evidence_contract_sha256 == "f4b37aceb2dd55f2c1cf6d7ec4e955cfeb69297ff6151b565935d03d01f65d08" and
             (.provenance | type == "object" and
               (keys | sort) == ["agent_id", "assigned_cells", "build_sha", "deployment_manifest_sha256", "hub", "schema_version", "typed_evidence_contract_sha256"] and
               .schema_version == 2 and .build_sha == $commit_sha and
@@ -744,20 +777,52 @@ jobs:
                 (. as $typed |
                   ($inventory.scenarios[] | select(.id == $typed.scenario_key)) as $scenario |
                   (.evidence | type == "array") and
-                  (if $scenario.status == "implemented" then (.evidence | length >= 1) else true end) and
+                  (if $scenario.owner == "qurl-go" or
+                      ($scenario.id == "orchestrator.real_hub_authority_and_two_cells" or
+                       $scenario.id == "retirement.generated_artifact_parity" or
+                       $scenario.id == "retirement.nhp_registrar_surface_state" or
+                       $scenario.id == "retirement.terraform_saved_plan_and_live_state") then
+                    (.evidence | length >= 1)
+                  else
+                    (.evidence | length == 0)
+                  end) and
                   ([.evidence[].kind] | unique | length) == (.evidence | length) and
                   all(.evidence[];
                     type == "object" and (keys | sort) == ["kind", "observation", "observation_sha256"] and
                     (.kind | type == "string" and test("^[a-z][a-z0-9_]{0,63}$")) and
-                    .observation == {"verified": true} and
-                    .observation_sha256 == "348f299cf43d57826c76c5ef7c8ccc37668b45161b857d4ef09f7125f3381be9")))) and
+                    (. as $item |
+                      if $scenario.owner == "qurl-go" then
+                        $item.observation == {
+                          evidence_kind: $item.kind,
+                          outcome: "pass",
+                          producer: "layervai/qurl-go",
+                          scenario_key: $typed.scenario_key,
+                          test_name: $scenario.test_name,
+                          verified: true
+                        }
+                      else
+                        ($item.observation | type == "object" and
+                          (keys | sort) == ["evidence_kind", "producer", "producer_run_id", "row_sha256", "scenario_key", "source_sha", "verified"] and
+                          .evidence_kind == $item.kind and
+                          .producer == "layervai/nhp" and
+                          .scenario_key == $typed.scenario_key and
+                          .verified == true and
+                          (.producer_run_id | type == "number" and isfinite and . == floor and . >= 1) and
+                          (.producer_run_id | tostring) == $evidence.deployment_producer.run_id and
+                          (.row_sha256 | type == "string" and test("^[0-9a-f]{64}$")) and
+                          .source_sha == $deployed.repositories.nhp)
+                      end) and
+                    (.observation_sha256 | type == "string" and test("^[0-9a-f]{64}$")))))) and
             (.scenario_results | type == "array" and
+              length == ([$inventory.scenarios[] | select(.owner == "qurl-go" and .status == "implemented")] | length) and
               ([.[].test_name] | unique | length) == length and
               all(.[];
                 type == "object" and (keys | sort) == ["action", "elapsed_seconds", "test_name"] and
                 .action == "pass" and (.test_name | type == "string" and length > 0) and
+                (. as $result | any($inventory.scenarios[];
+                  .owner == "qurl-go" and .status == "implemented" and .test_name == $result.test_name)) and
                 (.elapsed_seconds == null or (.elapsed_seconds | type == "number" and isfinite and . >= 0))) and
-              all($inventory.scenarios[] | select(.status == "implemented");
+              all($inventory.scenarios[] | select(.owner == "qurl-go" and .status == "implemented");
                 . as $scenario |
                 ([$evidence.scenario_results[] | select(.test_name == $scenario.test_name and .action == "pass")] | length) == 1))
           ' "${pre_evidence}" >/dev/null
@@ -766,6 +831,7 @@ jobs:
           pre_inventory_sha256="$(sha256sum "${pre_inventory}" | cut -d' ' -f1)"
           pre_inventory_mapping_sha256="$(jq -cS -j '{schema_version, gate, proof_phases, all_scenarios_required, scenarios: ([.scenarios[] | {id, owner, status, test_name, requirement}] | sort_by(.id))}' "${pre_inventory}" | sha256sum | cut -d' ' -f1)"
           pre_retired_lifecycle_surface_sha256="$(sha256sum "${pre_retired_surface}" | cut -d' ' -f1)"
+          pre_typed_evidence_contract_sha256="$(sha256sum "${pre_typed_evidence_contract}" | cut -d' ' -f1)"
           test "$(jq -r '.deployment_manifest_sha256' "${pre_evidence}")" = "${pre_deployment_sha256}"
           test "$(jq -r '.inventory_sha256' "${pre_evidence}")" = "${pre_inventory_sha256}"
           test "${pre_inventory_sha256}" = "${inventory_sha256}"
@@ -773,6 +839,8 @@ jobs:
           test "${pre_inventory_mapping_sha256}" = "f7eb7d7dd840dec15aacf929331657738c07ef6f2cdd00cb9046288d13e46bd4"
           test "${pre_retired_lifecycle_surface_sha256}" = "${retired_lifecycle_surface_sha256}"
           test "${pre_retired_lifecycle_surface_sha256}" = "3fe8872c3da9913c28d763f5561d82b67805aae5a6962c6dc403c7d6305da00c"
+          test "$(jq -r '.typed_evidence_contract_sha256' "${pre_evidence}")" = "${pre_typed_evidence_contract_sha256}"
+          test "${pre_typed_evidence_contract_sha256}" = "${typed_evidence_contract_sha256}"
 
           pre_topology="$(jq -cS '{hub, cells: (.cells | sort_by(.cell_id))}' "${pre_manifest}")"
           post_topology="$(jq -cS '{hub, cells: (.cells | sort_by(.cell_id))}' "${manifest}")"
@@ -837,6 +905,7 @@ jobs:
           cmp -- "${producer_dir}/deployment-runtime-inputs.json" "${RUNNER_TEMP}/deployment-runtime-inputs.json"
           chmod 0444 "${orchestrator_evidence}"
           {
+            echo "QURL_GO_SANDBOX_DEPLOYMENT_PROVENANCE_SHA256=$(sha256sum "${producer_dir}/deployment-provenance.json" | cut -d' ' -f1)"
             echo "QURL_GO_SANDBOX_ORCHESTRATOR_EVIDENCE_PATH=${orchestrator_evidence}"
             echo "QURL_GO_SANDBOX_ORCHESTRATOR_EVIDENCE_SHA256=$(sha256sum "${orchestrator_evidence}" | cut -d' ' -f1)"
           } >> "${GITHUB_ENV}"
@@ -1202,6 +1271,7 @@ jobs:
           deployment_runtime="${RUNNER_TEMP}/deployment-runtime-inputs.json"
           provenance_path="${RUNNER_TEMP}/qurl-go-native-udp/provenance.json"
           typed_evidence_contract="tests/e2e/nativeudp/typed_evidence_contract.json"
+          typed_evidence_contract_snapshot="${RUNNER_TEMP}/typed_evidence_contract.json"
           typed_observations="${RUNNER_TEMP}/native-udp-sandbox.typed-observations.jsonl"
           typed_evidence_summary="${RUNNER_TEMP}/native-udp-sandbox.typed-evidence.json"
           orchestrator_evidence_path="${RUNNER_TEMP}/deployment-producer-artifact/orchestrator-evidence.json"
@@ -1217,6 +1287,9 @@ jobs:
             [[ "${QURL_GO_SANDBOX_DEPLOYMENT_ARTIFACT_ID}" =~ ^[1-9][0-9]{0,19}$ ]] &&
             [[ "${QURL_GO_SANDBOX_DEPLOYMENT_ARTIFACT_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]] &&
             [[ "${QURL_GO_SANDBOX_NHP_SOURCE_SHA:-}" =~ ^[0-9a-f]{40}$ ]] &&
+            [[ "${QURL_GO_SANDBOX_QURL_SERVICE_SOURCE_SHA:-}" =~ ^[0-9a-f]{40}$ ]] &&
+            [[ "${QURL_GO_SANDBOX_QURL_SERVICE_AUTHORITY_IMAGE_DIGEST:-}" =~ ^sha256:[0-9a-f]{64}$ ]] &&
+            [[ "${QURL_GO_SANDBOX_DEPLOYMENT_PROVENANCE_SHA256:-}" =~ ^[0-9a-f]{64}$ ]] &&
             [[ -n "${QURL_GO_SANDBOX_INVENTORY_SHA256:-}" && -n "${QURL_GO_SANDBOX_INVENTORY_MAPPING_SHA256:-}" && -n "${QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_SHA256:-}" && -n "${QURL_GO_SANDBOX_DEPLOYMENT_RUNTIME_INPUTS_SHA256:-}" && -n "${QURL_GO_SANDBOX_PROOF_HARNESS_SHA256:-}" && -n "${QURL_GO_SANDBOX_SCENARIO_CONTRACT_SHA256:-}" && -n "${QURL_GO_SANDBOX_TYPED_EVIDENCE_CONTRACT_SHA256:-}" && -n "${QURL_GO_SANDBOX_RETIRED_LIFECYCLE_SURFACE_SHA256:-}" && -s "${inventory_source}" && -s "${inventory}" && -s "${retired_surface_source}" && -s "${retired_surface}" && -s "${deployment}" && -s "${deployment_runtime}" ]] &&
             [[ "${QURL_GO_SANDBOX_ORCHESTRATOR_EVIDENCE_PATH:-}" == "${orchestrator_evidence_path}" ]] &&
             [[ "${QURL_GO_SANDBOX_ORCHESTRATOR_EVIDENCE_SHA256:-}" =~ ^[0-9a-f]{64}$ ]] &&
@@ -1226,6 +1299,8 @@ jobs:
             [[ "$(sha256sum "${deployment}" | cut -d' ' -f1)" == "${QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_SHA256}" ]] &&
             [[ "$(sha256sum "${deployment_runtime}" | cut -d' ' -f1)" == "${QURL_GO_SANDBOX_DEPLOYMENT_RUNTIME_INPUTS_SHA256}" ]] &&
             [[ "$(jq -r '.repositories.nhp' "${deployment}")" == "${QURL_GO_SANDBOX_NHP_SOURCE_SHA}" ]] &&
+            [[ "$(jq -r '.repositories.qurl_service' "${deployment}")" == "${QURL_GO_SANDBOX_QURL_SERVICE_SOURCE_SHA}" ]] &&
+            [[ "$(jq -r '.images.qurl_service_authority' "${deployment}")" == "${QURL_GO_SANDBOX_QURL_SERVICE_AUTHORITY_IMAGE_DIGEST}" ]] &&
             [[ "$(sha256sum "${orchestrator_evidence_path}" | cut -d' ' -f1)" == "${QURL_GO_SANDBOX_ORCHESTRATOR_EVIDENCE_SHA256}" ]] &&
             [[ "$(compute_proof_harness_sha256)" == "${QURL_GO_SANDBOX_PROOF_HARNESS_SHA256}" ]] &&
             [[ "$(jq -cS -j '{schema_version, gate, proof_phases, all_scenarios_required, scenarios: ([.scenarios[] | {id, owner, status, test_name, requirement}] | sort_by(.id))}' "${inventory}" | sha256sum | cut -d' ' -f1)" == "${QURL_GO_SANDBOX_INVENTORY_MAPPING_SHA256}" ]] &&
@@ -1233,8 +1308,8 @@ jobs:
             [[ "$(jq -cS -j . "${retired_surface_source}" | sha256sum | cut -d' ' -f1)" == "${QURL_GO_SANDBOX_RETIRED_LIFECYCLE_SURFACE_SHA256}" ]] &&
             [[ "$(sha256sum "${retired_surface}" | cut -d' ' -f1)" == "${QURL_GO_SANDBOX_RETIRED_LIFECYCLE_SURFACE_SHA256}" ]] &&
             [[ "${QURL_GO_SANDBOX_RETIRED_LIFECYCLE_SURFACE_SHA256}" == "3fe8872c3da9913c28d763f5561d82b67805aae5a6962c6dc403c7d6305da00c" ]] &&
-            [[ "$(sha256sum "${typed_evidence_contract}" | cut -d' ' -f1)" == "${QURL_GO_SANDBOX_TYPED_EVIDENCE_CONTRACT_SHA256}" ]] &&
-            [[ "${QURL_GO_SANDBOX_TYPED_EVIDENCE_CONTRACT_SHA256}" == "e15008760ea838875de9c75561726c86e9d2e7f7f507247e55a588fa3ac65fe5" ]] &&
+            [[ "$(sha256sum "${typed_evidence_contract_snapshot}" | cut -d' ' -f1)" == "${QURL_GO_SANDBOX_TYPED_EVIDENCE_CONTRACT_SHA256}" ]] &&
+            [[ "${QURL_GO_SANDBOX_TYPED_EVIDENCE_CONTRACT_SHA256}" == "f4b37aceb2dd55f2c1cf6d7ec4e955cfeb69297ff6151b565935d03d01f65d08" ]] &&
             [[ "$(jq -cS '{schema_version, gate, proof_phases, all_scenarios_required, scenarios: ([.scenarios[] | {id, owner, test_name, requirement}] | sort_by(.id))}' "${inventory}" | sha256sum | cut -d' ' -f1)" == "${QURL_GO_SANDBOX_SCENARIO_CONTRACT_SHA256}" ]]; then
             inputs_unchanged=true
           fi
@@ -1244,7 +1319,8 @@ jobs:
             scenario_results="$(jq -s --slurpfile inventory "${inventory}" '
               [.[] as $event
                 | select($event.Action == "pass" or $event.Action == "fail" or $event.Action == "skip")
-                | select($event.Test as $test | $inventory[0].scenarios | any(.test_name == $test))
+                | select($event.Test as $test | $inventory[0].scenarios |
+                    any(.owner == "qurl-go" and .status == "implemented" and .test_name == $test))
                 | {test_name: $event.Test, action: $event.Action, elapsed_seconds: ($event.Elapsed // null)}]
             ' "${raw}")"
           fi
@@ -1259,22 +1335,37 @@ jobs:
             --observations "${typed_observations}" \
             --output "${typed_evidence_summary}" \
             --allow-incomplete
+          verifier_aggregate_complete="$(jq -er '
+            .aggregate_complete |
+            if type == "boolean" then tostring
+            else error("aggregate_complete must be boolean")
+            end
+          ' "${typed_evidence_summary}")"
           typed_evidence_complete="$(jq -r \
             --slurpfile inventory "${typed_inventory}" \
             --slurpfile contract "${typed_evidence_contract}" '
+            def static_nhp:
+              . == "orchestrator.real_hub_authority_and_two_cells" or
+              . == "retirement.generated_artifact_parity" or
+              . == "retirement.nhp_registrar_surface_state" or
+              . == "retirement.terraform_saved_plan_and_live_state";
             .scenarios as $observed |
-            all($inventory[0].scenarios[] | select(.status == "implemented");
+            all($inventory[0].scenarios[];
               .id as $id |
               ([$observed[] | select(.scenario_key == $id) | .evidence[].kind] | sort) ==
-                ($contract[0].scenarios[$id] | sort))
+                (if .owner == "qurl-go" or ($id | static_nhp)
+                 then ($contract[0].scenarios[$id] | sort)
+                 else []
+                 end))
           ' "${typed_evidence_summary}")"
+          test "${typed_evidence_complete}" = "${verifier_aggregate_complete}"
           typed_evidence="$(jq -c '.scenarios' "${typed_evidence_summary}")"
 
-          implemented_count=0
-          blocking_count=1
+          producer_owned_count=0
+          external_dependency_count=1
           if [[ "${inputs_unchanged}" == "true" ]]; then
-            implemented_count="$(jq '[.scenarios[] | select(.status == "implemented")] | length' "${inventory}")"
-            blocking_count="$(jq '[.scenarios[] | select(.status != "implemented")] | length' "${inventory}")"
+            producer_owned_count="$(jq '[.scenarios[] | select(.owner == "qurl-go" and .status == "implemented")] | length' "${inventory}")"
+            external_dependency_count="$(jq '[.scenarios[] | select(.owner != "qurl-go" and .status == "external_dependency")] | length' "${inventory}")"
           fi
           failure_count=0
           skip_count=0
@@ -1356,7 +1447,7 @@ jobs:
           fi
 
           gate_passed=false
-          if [[ "${STRICT_OUTCOME}" == "success" && "${ENFORCEMENT_OUTCOME}" == "success" && "${inputs_unchanged}" == "true" && "${failure_count}" == "0" && "${skip_count}" == "0" && "${exact_pass_count}" == "${implemented_count}" && "${provenance_valid}" == "true" && "${two_cell_provenance}" == "true" && "${typed_evidence_complete}" == "true" ]]; then
+          if [[ "${STRICT_OUTCOME}" == "success" && "${ENFORCEMENT_OUTCOME}" == "success" && "${inputs_unchanged}" == "true" && "${failure_count}" == "0" && "${skip_count}" == "0" && "${exact_pass_count}" == "${producer_owned_count}" && "${provenance_valid}" == "true" && "${two_cell_provenance}" == "true" && "${typed_evidence_complete}" == "true" ]]; then
             gate_passed=true
           fi
 
@@ -1387,8 +1478,8 @@ jobs:
             --arg retired_lifecycle_surface_sha256 "${QURL_GO_SANDBOX_RETIRED_LIFECYCLE_SURFACE_SHA256:-}" \
             --arg typed_evidence_contract_sha256 "${QURL_GO_SANDBOX_TYPED_EVIDENCE_CONTRACT_SHA256:-}" \
             --arg proof_harness_sha256 "${QURL_GO_SANDBOX_PROOF_HARNESS_SHA256:-}" \
-            --argjson implemented_count "${implemented_count}" \
-            --argjson blocking_count "${blocking_count}" \
+            --argjson producer_owned_count "${producer_owned_count}" \
+            --argjson external_dependency_count "${external_dependency_count}" \
             --argjson failure_count "${failure_count}" \
             --argjson skip_count "${skip_count}" \
             --argjson exact_pass_count "${exact_pass_count}" \
@@ -1400,7 +1491,7 @@ jobs:
             --argjson typed_evidence_complete "${typed_evidence_complete}" \
             --argjson typed_evidence "${typed_evidence}" \
             --argjson scenario_results "${scenario_results}" \
-            '{schema_version: 1, phase: $phase, repository: $repository, commit_sha: $commit_sha, run_id: $run_id, run_attempt: $run_attempt, dispatch_correlation_id: $dispatch_correlation_id, nhp_controller_run_id: $nhp_controller_run_id, nhp_controller_run_attempt: $nhp_controller_run_attempt, deployment_producer: {repository: "layervai/nhp", workflow_path: ".github/workflows/udp-proof-deployment-manifest.yml", run_id: $deployment_producer_run_id, run_attempt: $deployment_producer_run_attempt, head_sha: $deployment_producer_head_sha, artifact_id: $deployment_artifact_id, artifact_digest: $deployment_artifact_digest}, pre_removal_run_id: (if $pre_removal_run_id == "" then null else $pre_removal_run_id end), pre_removal_evidence_sha256: (if $pre_removal_evidence_sha256 == "" then null else $pre_removal_evidence_sha256 end), pre_removal_deployment_sha256: (if $pre_removal_deployment_sha256 == "" then null else $pre_removal_deployment_sha256 end), deployment_manifest_sha256: $deployment_manifest_sha256, deployment_runtime_inputs_sha256: $deployment_runtime_inputs_sha256, inventory_sha256: $inventory_sha256, inventory_mapping_sha256: $inventory_mapping_sha256, scenario_contract_sha256: $scenario_contract_sha256, retired_lifecycle_surface_sha256: $retired_lifecycle_surface_sha256, typed_evidence_contract_sha256: $typed_evidence_contract_sha256, proof_harness_sha256: $proof_harness_sha256, strict_outcome: $strict_outcome, enforcement_outcome: $enforcement_outcome, inputs_unchanged: $inputs_unchanged, gate_passed: $gate_passed, counts: {implemented: $implemented_count, blocking: $blocking_count, failures: $failure_count, skips: $skip_count, exact_passes: $exact_pass_count}, provenance_valid: $provenance_valid, two_cell_provenance: $two_cell_provenance, provenance: $provenance, typed_evidence_complete: $typed_evidence_complete, typed_evidence: $typed_evidence, scenario_results: $scenario_results}' \
+            '{schema_version: 1, phase: $phase, repository: $repository, commit_sha: $commit_sha, run_id: $run_id, run_attempt: $run_attempt, dispatch_correlation_id: $dispatch_correlation_id, nhp_controller_run_id: $nhp_controller_run_id, nhp_controller_run_attempt: $nhp_controller_run_attempt, deployment_producer: {repository: "layervai/nhp", workflow_path: ".github/workflows/udp-proof-deployment-manifest.yml", run_id: $deployment_producer_run_id, run_attempt: $deployment_producer_run_attempt, head_sha: $deployment_producer_head_sha, artifact_id: $deployment_artifact_id, artifact_digest: $deployment_artifact_digest}, pre_removal_run_id: (if $pre_removal_run_id == "" then null else $pre_removal_run_id end), pre_removal_evidence_sha256: (if $pre_removal_evidence_sha256 == "" then null else $pre_removal_evidence_sha256 end), pre_removal_deployment_sha256: (if $pre_removal_deployment_sha256 == "" then null else $pre_removal_deployment_sha256 end), deployment_manifest_sha256: $deployment_manifest_sha256, deployment_runtime_inputs_sha256: $deployment_runtime_inputs_sha256, inventory_sha256: $inventory_sha256, inventory_mapping_sha256: $inventory_mapping_sha256, scenario_contract_sha256: $scenario_contract_sha256, retired_lifecycle_surface_sha256: $retired_lifecycle_surface_sha256, typed_evidence_contract_sha256: $typed_evidence_contract_sha256, proof_harness_sha256: $proof_harness_sha256, strict_outcome: $strict_outcome, enforcement_outcome: $enforcement_outcome, inputs_unchanged: $inputs_unchanged, gate_passed: $gate_passed, counts: {producer_owned: $producer_owned_count, external_dependency: $external_dependency_count, failures: $failure_count, skips: $skip_count, exact_passes: $exact_pass_count}, provenance_valid: $provenance_valid, two_cell_provenance: $two_cell_provenance, provenance: $provenance, typed_evidence_complete: $typed_evidence_complete, typed_evidence: $typed_evidence, scenario_results: $scenario_results}' \
             > "${evidence}"
 
       - name: Upload non-secret JSON evidence
@@ -1414,6 +1505,7 @@ jobs:
             ${{ runner.temp }}/deployment-runtime-inputs.json
             ${{ runner.temp }}/pre_retirement_scenarios.json
             ${{ runner.temp }}/retired_lifecycle_surface.json
+            ${{ runner.temp }}/typed_evidence_contract.json
           if-no-files-found: error
           retention-days: 30
 
@@ -1423,7 +1515,9 @@ jobs:
         run: |
           set -euo pipefail
           evidence="${RUNNER_TEMP}/native-udp-sandbox.evidence.json"
-          jq -e --slurpfile inventory "${RUNNER_TEMP}/pre_retirement_scenarios.json" '
+          jq -e \
+            --slurpfile inventory "${RUNNER_TEMP}/pre_retirement_scenarios.json" \
+            --slurpfile deployment "${RUNNER_TEMP}/sandbox-deployment-manifest.json" '
             . as $evidence | $inventory[0] as $scenarios |
             (keys | sort) == ["commit_sha", "counts", "deployment_manifest_sha256", "deployment_producer", "deployment_runtime_inputs_sha256", "dispatch_correlation_id", "enforcement_outcome", "gate_passed", "inputs_unchanged", "inventory_mapping_sha256", "inventory_sha256", "nhp_controller_run_attempt", "nhp_controller_run_id", "phase", "pre_removal_deployment_sha256", "pre_removal_evidence_sha256", "pre_removal_run_id", "proof_harness_sha256", "provenance", "provenance_valid", "repository", "retired_lifecycle_surface_sha256", "run_attempt", "run_id", "scenario_contract_sha256", "scenario_results", "schema_version", "strict_outcome", "two_cell_provenance", "typed_evidence", "typed_evidence_complete", "typed_evidence_contract_sha256"] and
             .gate_passed == true and
@@ -1446,13 +1540,27 @@ jobs:
             (.deployment_runtime_inputs_sha256 | test("^[0-9a-f]{64}$")) and
             ($scenarios.scenarios | length == 68 and
               all(.[]; if .owner == "qurl-go" then .status == "implemented" else .status == "external_dependency" end)) and
-            .counts.implemented == ([$scenarios.scenarios[] | select(.status == "implemented")] | length) and
-            .counts.blocking == ([$scenarios.scenarios[] | select(.status != "implemented")] | length) and
+            (.counts | type == "object" and
+              (keys | sort) == ["exact_passes", "external_dependency", "failures", "producer_owned", "skips"]) and
+            .counts.producer_owned == ([$scenarios.scenarios[] | select(.owner == "qurl-go" and .status == "implemented")] | length) and
+            .counts.external_dependency == ([$scenarios.scenarios[] | select(.owner != "qurl-go" and .status == "external_dependency")] | length) and
             .counts.failures == 0 and .counts.skips == 0 and
-            .counts.exact_passes == .counts.implemented and
+            .counts.exact_passes == .counts.producer_owned and
             .provenance_valid == true and .two_cell_provenance == true and
             .typed_evidence_complete == true and
-            .typed_evidence_contract_sha256 == "e15008760ea838875de9c75561726c86e9d2e7f7f507247e55a588fa3ac65fe5" and
+            (.scenario_results | type == "array" and
+              length == $evidence.counts.producer_owned and
+              ([.[].test_name] | unique | length) == length and
+              all(.[];
+                type == "object" and
+                (keys | sort) == ["action", "elapsed_seconds", "test_name"] and
+                .action == "pass" and
+                (.elapsed_seconds == null or
+                  (.elapsed_seconds | type == "number" and isfinite and . >= 0)) and
+                (. as $result | any($scenarios.scenarios[];
+                  .owner == "qurl-go" and .status == "implemented" and
+                  .test_name == $result.test_name)))) and
+            .typed_evidence_contract_sha256 == "f4b37aceb2dd55f2c1cf6d7ec4e955cfeb69297ff6151b565935d03d01f65d08" and
             (.typed_evidence | type == "array" and length == ($scenarios.scenarios | length) and
               ([.[].scenario_key] | sort) == ($scenarios.scenarios | map(.id) | sort) and
               all(.[];
@@ -1461,11 +1569,41 @@ jobs:
                 (. as $typed |
                   ($scenarios.scenarios[] | select(.id == $typed.scenario_key)) as $scenario |
                   (.evidence | type == "array") and
-                  (if $scenario.status == "implemented" then (.evidence | length >= 1) else true end) and
+                  (if $scenario.owner == "qurl-go" or
+                      ($scenario.id == "orchestrator.real_hub_authority_and_two_cells" or
+                       $scenario.id == "retirement.generated_artifact_parity" or
+                       $scenario.id == "retirement.nhp_registrar_surface_state" or
+                       $scenario.id == "retirement.terraform_saved_plan_and_live_state") then
+                    (.evidence | length >= 1)
+                  else
+                    (.evidence | length == 0)
+                  end) and
                   all(.evidence[];
                     (keys | sort) == ["kind", "observation", "observation_sha256"] and
-                    (.kind | type == "string") and .observation == {"verified": true} and
-                    .observation_sha256 == "348f299cf43d57826c76c5ef7c8ccc37668b45161b857d4ef09f7125f3381be9"))))
+                    (.kind | type == "string" and test("^[a-z][a-z0-9_]{0,63}$")) and
+                    (. as $item |
+                      if $scenario.owner == "qurl-go" then
+                        $item.observation == {
+                          evidence_kind: $item.kind,
+                          outcome: "pass",
+                          producer: "layervai/qurl-go",
+                          scenario_key: $typed.scenario_key,
+                          test_name: $scenario.test_name,
+                          verified: true
+                        }
+                      else
+                        ($item.observation | type == "object" and
+                          (keys | sort) == ["evidence_kind", "producer", "producer_run_id", "row_sha256", "scenario_key", "source_sha", "verified"] and
+                          .evidence_kind == $item.kind and
+                          .producer == "layervai/nhp" and
+                          .scenario_key == $typed.scenario_key and
+                          .verified == true and
+                          (.producer_run_id | type == "number" and isfinite and . == floor and . >= 1) and
+                          (.producer_run_id | tostring) == $evidence.deployment_producer.run_id and
+                          (.row_sha256 | type == "string" and test("^[0-9a-f]{64}$")) and
+                          .source_sha == $deployment[0].repositories.nhp)
+                      end) and
+                    (.observation_sha256 | type == "string" and test("^[0-9a-f]{64}$"))))))
           ' "${evidence}" >/dev/null
 
       - name: Remove credential state

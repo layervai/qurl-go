@@ -216,7 +216,7 @@ func validateScenarioInventory(t *testing.T, inventory scenarioInventory) {
 		t.Fatalf("scenario inventory ids =\n%q\nwant exact pre-retirement inventory\n%q", actualIDs, expectedIDs)
 	}
 	if implemented != 46 || len(inventory.Scenarios)-implemented != 22 {
-		t.Fatalf("scenario counts = %d implemented/%d blocking, want the current 46/22 honest gate", implemented, len(inventory.Scenarios)-implemented)
+		t.Fatalf("scenario counts = %d producer-owned/%d external dependencies, want the frozen 46/22 ownership split", implemented, len(inventory.Scenarios)-implemented)
 	}
 }
 
