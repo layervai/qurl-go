@@ -17,7 +17,7 @@ import (
 
 const (
 	nativeUDPWorkflowID                   = "4242"
-	reviewedInventoryMappingSHA256Fixture = "a2e2489e38eac9ad7c15df1a9edf4f4db4c1e427a1b6eb1a9de1eadbeba736c2"
+	reviewedInventoryMappingSHA256Fixture = "2f974c2a8815a1d949b815a14b05fc157973778b255c66abb66e9588cc42b0d2"
 )
 
 type nativeUDPProofFixture struct {
@@ -1080,8 +1080,8 @@ func TestNativeUDPSandboxEvidenceManifestIsAllowlisted(t *testing.T) {
 		t.Fatalf("evidence deployment producer = %v", decoded["deployment_producer"])
 	}
 	counts := decoded["counts"].(map[string]any)
-	if counts["blocking"] != float64(37) {
-		t.Fatalf("evidence blocking count = %v, want 37", counts["blocking"])
+	if counts["blocking"] != float64(36) {
+		t.Fatalf("evidence blocking count = %v, want 36", counts["blocking"])
 	}
 	results := decoded["scenario_results"].([]any)
 	if len(results) != 1 {

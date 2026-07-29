@@ -49,9 +49,9 @@
     {
       "id": "otp.rate_limit",
       "owner": "qurl-go",
-      "status": "todo",
+      "status": "implemented",
       "test_name": "TestSandboxNativeUDPLifecycle/account_otp_rate_limit",
-      "requirement": "Exercise the authenticated assigned-cell OTP rate-limit result and bounded client behavior."
+      "requirement": "Prove one-way NHP_OTP cannot carry a client-visible rate-limit result; exercise authenticated assigned-cell REG 52102/52104 denials and return ErrRegistrationRateLimited without automatic OTP/REG resend, Hub refresh, or cell fallback."
     },
     {
       "id": "otp.error",

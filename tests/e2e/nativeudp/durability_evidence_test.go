@@ -47,6 +47,14 @@ func nativeDurabilityProofAdapters() []nativeDurabilityProofAdapter {
 			},
 		},
 		{
+			adapterName:  "account_otp_rate_limit",
+			scenarioKey:  "otp.rate_limit",
+			evidenceKind: "otp_flow_observation",
+			productionTests: []string{
+				"TestRegisterAgentRuntime_AccountRegistrationRateLimitIsTerminalForCall",
+			},
+		},
+		{
 			adapterName:  "ambiguous_rak_recovery",
 			scenarioKey:  "recovery.ambiguous_rak",
 			evidenceKind: "recovery_transition",
