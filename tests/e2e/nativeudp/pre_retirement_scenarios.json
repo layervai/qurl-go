@@ -147,7 +147,7 @@
     {
       "id": "recovery.device_credential",
       "owner": "qurl-go",
-      "status": "todo",
+      "status": "implemented",
       "test_name": "TestSandboxNativeUDPLifecycle/device_credential_recovery",
       "requirement": "Revoke an ephemeral device credential and complete explicit Hub-to-cell UDP recovery with the same agent identity."
     },

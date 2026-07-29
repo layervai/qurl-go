@@ -458,6 +458,60 @@ func TestSandboxNativeUDPLifecycle(t *testing.T) {
 		return
 	}
 
+	if !runTypedEvidenceScenario(t, "device_credential_recovery", "recovery.device_credential", []string{"recovery_transition"}, func(t *testing.T) {
+		before, err := store.LoadAgentState(ctx)
+		if err != nil || before == nil || before.Assignment == nil ||
+			before.DeviceAPIKeyID == "" || before.AgentID != cfg.agentID {
+			t.Fatalf("load registered state before recovery: state_present=%t assignment_present=%t device_key_id_present=%t agent_match=%t err=%v",
+				before != nil,
+				before != nil && before.Assignment != nil,
+				before != nil && before.DeviceAPIKeyID != "",
+				before != nil && before.AgentID == cfg.agentID,
+				err,
+			)
+		}
+		recoveryCredential := exchangeSandboxRecoveryCredential(ctx, t, before)
+		client, binding, err := qurl.RecoverAgentRuntime(ctx, recoveryCredential, store,
+			qurl.WithAgentRuntimeRecoveryHub(hub),
+			qurl.WithExpectedAgentRuntimeRecoveryAgentID(cfg.agentID),
+			qurl.WithAgentClientBaseURL("http://127.0.0.1:1"),
+			qurl.WithAgentClientHTTPClient(httpTrap),
+		)
+		recoveryCredential = ""
+		if err != nil {
+			t.Fatalf("RecoverAgentRuntime: %v", err)
+		}
+		if client == nil || binding == nil {
+			t.Fatal("RecoverAgentRuntime returned a nil client or binding")
+		}
+		defer binding.Destroy()
+		cellEvidence = append(cellEvidence, assertAssignedCell(t, cfg, binding, "credential_recovery"))
+
+		after, err := store.LoadAgentState(ctx)
+		if err != nil || after == nil || after.AgentID != before.AgentID ||
+			after.PublicKeyB64 != before.PublicKeyB64 ||
+			after.DeviceAPIKeyID == "" || after.DeviceAPIKeyID == before.DeviceAPIKeyID ||
+			after.Assignment == nil ||
+			after.Assignment.CellID != before.Assignment.CellID ||
+			after.Assignment.AssignmentGeneration != before.Assignment.AssignmentGeneration {
+			t.Fatalf("recovered state violated identity/assignment continuity: state_present=%t agent_match=%t public_key_match=%t device_rotated=%t assignment_match=%t err=%v",
+				after != nil,
+				after != nil && after.AgentID == before.AgentID,
+				after != nil && after.PublicKeyB64 == before.PublicKeyB64,
+				after != nil && after.DeviceAPIKeyID != "" && after.DeviceAPIKeyID != before.DeviceAPIKeyID,
+				after != nil && after.Assignment != nil &&
+					after.Assignment.CellID == before.Assignment.CellID &&
+					after.Assignment.AssignmentGeneration == before.Assignment.AssignmentGeneration,
+				err,
+			)
+		}
+		t.Logf("EVIDENCE recovery_agent_id=%s old_device_api_key_id=%s new_device_api_key_id=%s cell_id=%s assignment_generation=%d",
+			after.AgentID, before.DeviceAPIKeyID, after.DeviceAPIKeyID,
+			after.Assignment.CellID, after.Assignment.AssignmentGeneration)
+	}) {
+		return
+	}
+
 	assignmentReceipt := completeAssignmentHandshake(ctx, t, cfg, cellEvidence[1])
 
 	var reassigned *qurl.AgentRuntimeBinding
@@ -475,8 +529,8 @@ func TestSandboxNativeUDPLifecycle(t *testing.T) {
 		}
 		reassigned = binding
 		cellEvidence = append(cellEvidence, assertAssignedCell(t, cfg, binding, "reassignment"))
-		assertCell0ToCell1Reassignment(t, cellEvidence[1], cellEvidence[2])
-		assertAssignmentReceiptMatchesRefresh(t, assignmentReceipt, cellEvidence[2])
+		assertCell0ToCell1Reassignment(t, cellEvidence[2], cellEvidence[3])
+		assertAssignmentReceiptMatchesRefresh(t, assignmentReceipt, cellEvidence[3])
 	})
 	if reassigned != nil {
 		reassigned.Destroy()
@@ -500,7 +554,7 @@ func TestSandboxNativeUDPLifecycle(t *testing.T) {
 		}
 		refreshed = binding
 		cellEvidence = append(cellEvidence, assertAssignedCell(t, cfg, binding, "refresh"))
-		assertSameCellRefresh(t, cellEvidence[2], cellEvidence[3])
+		assertSameCellRefresh(t, cellEvidence[3], cellEvidence[4])
 	})
 	if refreshed != nil {
 		defer refreshed.Destroy()
@@ -551,6 +605,195 @@ func TestSandboxNativeUDPLifecycle(t *testing.T) {
 		writeSandboxProvenance(t, cfg, hub, cellEvidence)
 		t.Log("EVIDENCE lifecycle_http_calls=0")
 	})
+}
+
+type sandboxRecoveryControlRequest struct {
+	Version              int    `json:"version"`
+	ControllerRunID      string `json:"controller_run_id"`
+	ControllerRunAttempt string `json:"controller_run_attempt"`
+	GrantCorrelationID   string `json:"grant_correlation_id"`
+	AgentID              string `json:"agent_id"`
+	DeviceAPIKeyID       string `json:"device_api_key_id"`
+	CellID               string `json:"cell_id"`
+	AssignmentGeneration string `json:"assignment_generation"`
+}
+
+type sandboxRecoveryControlResponse struct {
+	Version int `json:"version"`
+	Result  struct {
+		ControllerRunID         string `json:"controller_run_id"`
+		ControllerRunAttempt    string `json:"controller_run_attempt"`
+		GrantCorrelationID      string `json:"grant_correlation_id"`
+		AgentID                 string `json:"agent_id"`
+		RevokedDeviceAPIKeyID   string `json:"revoked_device_api_key_id"`
+		CellID                  string `json:"cell_id"`
+		AssignmentGeneration    string `json:"assignment_generation"`
+		RecoveryCredential      string `json:"recovery_credential"`
+		RecoveryCredentialKeyID string `json:"recovery_credential_key_id"`
+		RevokedAt               string `json:"revoked_at"`
+	} `json:"result"`
+}
+
+func exchangeSandboxRecoveryCredential(
+	ctx context.Context,
+	t *testing.T,
+	state *qurl.AgentState,
+) string {
+	t.Helper()
+	requestPath := os.Getenv("QURL_GO_SANDBOX_RECOVERY_REQUEST_PATH")
+	responsePath := os.Getenv("QURL_GO_SANDBOX_RECOVERY_RESPONSE_PATH")
+	controllerRunID := os.Getenv("QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ID")
+	controllerRunAttempt := os.Getenv("QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ATTEMPT")
+	correlationID := os.Getenv("QURL_GO_SANDBOX_DISPATCH_CORRELATION_ID")
+	correlationPrefix := "nhp-" + controllerRunID + "-" + controllerRunAttempt +
+		"-qurl_go-" + os.Getenv("QURL_GO_SANDBOX_PROOF_PHASE") + "-"
+	correlationNonce := strings.TrimPrefix(correlationID, correlationPrefix)
+	if state == nil || state.Assignment == nil ||
+		!canonicalPositiveProofInteger(controllerRunID, 20) ||
+		!canonicalPositiveProofInteger(controllerRunAttempt, 20) ||
+		correlationPrefix+correlationNonce != correlationID ||
+		!canonicalLowerHex(correlationNonce, 32) {
+		t.Fatal("sandbox recovery controller binding is invalid")
+	}
+	for name, path := range map[string]string{
+		"recovery request path":  requestPath,
+		"recovery response path": responsePath,
+	} {
+		if !filepath.IsAbs(path) {
+			t.Fatalf("%s must be absolute", name)
+		}
+		info, err := os.Stat(filepath.Dir(path))
+		if err != nil || !info.IsDir() || info.Mode().Perm() != 0o700 ||
+			info.Mode()&os.ModeSymlink != 0 {
+			t.Fatalf("%s parent must be a private 0700 non-symlink directory", name)
+		}
+	}
+	if filepath.Clean(requestPath) == filepath.Clean(responsePath) {
+		t.Fatal("sandbox recovery request and response paths must be distinct")
+	}
+
+	request := sandboxRecoveryControlRequest{
+		Version: 1, ControllerRunID: controllerRunID,
+		ControllerRunAttempt: controllerRunAttempt, GrantCorrelationID: correlationID,
+		AgentID: state.AgentID, DeviceAPIKeyID: state.DeviceAPIKeyID,
+		CellID:               state.Assignment.CellID,
+		AssignmentGeneration: fmt.Sprintf("%d", state.Assignment.AssignmentGeneration),
+	}
+	payload, err := json.Marshal(request)
+	if err != nil {
+		t.Fatalf("encode recovery checkpoint: %v", err)
+	}
+	if err := writeExclusivePrivateFile(requestPath, payload); err != nil {
+		t.Fatalf("publish recovery checkpoint: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Remove(requestPath)
+		_ = os.Remove(responsePath)
+	})
+
+	var responsePayload []byte
+	for {
+		responsePayload, err = os.ReadFile(responsePath)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("read recovery controller response: %v", err)
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("recovery controller response did not arrive before proof deadline")
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
+	if err := os.Remove(responsePath); err != nil {
+		t.Fatalf("remove consumed recovery controller response: %v", err)
+	}
+	response, err := decodeStrictJSON[sandboxRecoveryControlResponse](
+		responsePayload,
+		"recovery controller response",
+	)
+	for index := range responsePayload {
+		responsePayload[index] = 0
+	}
+	if err != nil {
+		t.Fatalf("decode recovery controller response: %v", err)
+	}
+	result := response.Result
+	if response.Version != 1 ||
+		result.ControllerRunID != controllerRunID ||
+		result.ControllerRunAttempt != controllerRunAttempt ||
+		result.GrantCorrelationID != correlationID ||
+		result.AgentID != state.AgentID ||
+		result.RevokedDeviceAPIKeyID != state.DeviceAPIKeyID ||
+		result.CellID != state.Assignment.CellID ||
+		result.AssignmentGeneration != request.AssignmentGeneration ||
+		result.RecoveryCredentialKeyID == "" ||
+		!canonicalSandboxRecoveryCredential(result.RecoveryCredential) {
+		t.Fatal("recovery controller response did not match the exact proof checkpoint")
+	}
+	if _, err := time.Parse(time.RFC3339, result.RevokedAt); err != nil {
+		t.Fatal("recovery controller response carried a noncanonical revocation receipt")
+	}
+	return result.RecoveryCredential
+}
+
+func canonicalSandboxRecoveryCredential(value string) bool {
+	const prefixLength = len("lv_live_")
+	if len(value) != prefixLength+43 ||
+		(!strings.HasPrefix(value, "lv_live_") && !strings.HasPrefix(value, "lv_test_")) {
+		return false
+	}
+	encoded := value[prefixLength:]
+	secret, err := base64.RawURLEncoding.Strict().DecodeString(encoded)
+	return err == nil && len(secret) == 32 &&
+		base64.RawURLEncoding.EncodeToString(secret) == encoded
+}
+
+func TestCanonicalSandboxRecoveryCredential(t *testing.T) {
+	t.Parallel()
+	canonical := "lv_live_" + strings.Repeat("A", 43)
+	if !canonicalSandboxRecoveryCredential(canonical) {
+		t.Fatal("canonical 32-byte recovery credential was rejected")
+	}
+	for _, value := range []string{
+		"lv_live_" + strings.Repeat("A", 42) + "B",
+		"lv_test_" + strings.Repeat("A", 42) + "=",
+		"lv_live_" + strings.Repeat("A", 42),
+		"lv_prod_" + strings.Repeat("A", 43),
+	} {
+		if canonicalSandboxRecoveryCredential(value) {
+			t.Fatalf("noncanonical recovery credential accepted: %q", value)
+		}
+	}
+}
+
+func canonicalPositiveProofInteger(value string, maxDigits int) bool {
+	if value == "" || len(value) > maxDigits || value[0] < '1' || value[0] > '9' {
+		return false
+	}
+	for index := 1; index < len(value); index++ {
+		if value[index] < '0' || value[index] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func writeExclusivePrivateFile(path string, payload []byte) (retErr error) {
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if closeErr := file.Close(); retErr == nil && closeErr != nil {
+			retErr = closeErr
+		}
+	}()
+	if _, err := file.Write(payload); err != nil {
+		return err
+	}
+	return file.Sync()
 }
 
 func TestNativeUDPClientFaultPaths(t *testing.T) {

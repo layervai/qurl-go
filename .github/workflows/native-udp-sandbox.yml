@@ -84,6 +84,8 @@ jobs:
       QURL_GO_SANDBOX_EXPECTED_CELL_ID: ${{ vars.QURL_GO_SANDBOX_EXPECTED_CELL_ID }}
       QURL_GO_SANDBOX_KMS_KEY_ID: alias/layerv-nhp-sandbox-udp-proof-agent-seal
       QURL_GO_SANDBOX_DISPATCH_CORRELATION_ID: ${{ inputs.dispatch_correlation_id }}
+      QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ID: ${{ inputs.nhp_controller_run_id }}
+      QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ATTEMPT: ${{ inputs.nhp_controller_run_attempt }}
       QURL_GO_SANDBOX_PROOF_PHASE: ${{ inputs.proof_phase }}
       QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_B64: ${{ inputs.deployment_manifest_b64 }}
       QURL_GO_SANDBOX_DEPLOYMENT_RUNTIME_INPUTS_B64: ${{ inputs.deployment_runtime_inputs_b64 }}
@@ -93,8 +95,6 @@ jobs:
       QURL_GO_SANDBOX_DEPLOYMENT_ARTIFACT_ID: ${{ inputs.deployment_artifact_id }}
       QURL_GO_SANDBOX_DEPLOYMENT_ARTIFACT_DIGEST: ${{ inputs.deployment_artifact_digest }}
       QURL_GO_SANDBOX_PRE_REMOVAL_RUN_ID: ${{ inputs.pre_removal_run_id }}
-      QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ID: ${{ inputs.nhp_controller_run_id }}
-      QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ATTEMPT: ${{ inputs.nhp_controller_run_attempt }}
       QURL_GO_SANDBOX_ASSIGNMENT_HANDSHAKE_B64: ${{ inputs.assignment_handshake_b64 }}
       QURL_GO_SANDBOX_CLIENT_RUN_ID: ${{ github.run_id }}
       QURL_GO_SANDBOX_OTP_MAILBOX_QUEUE_URL: https://sqs.us-east-2.amazonaws.com/767397897469/layerv-nhp-sandbox-udp-proof-otp-mailbox
@@ -102,6 +102,12 @@ jobs:
       QURL_GO_SANDBOX_OTP_MAILBOX_RECIPIENT: qurl-go@proof.notify.layerv.xyz
       QURL_GO_SANDBOX_OTP_MAILBOX_REGION: us-east-2
       PROOF_ACCOUNT_RUN_SECRET: layerv-nhp-sandbox/udp-proof/jit/credential/${{ inputs.nhp_controller_run_id }}/${{ inputs.nhp_controller_run_attempt }}
+      QURL_GO_SANDBOX_RECOVERY_REQUEST_PATH: ${{ runner.temp }}/qurl-go-native-udp-recovery/request.json
+      QURL_GO_SANDBOX_RECOVERY_RESPONSE_PATH: ${{ runner.temp }}/qurl-go-native-udp-recovery/response.json
+      QURL_GO_SANDBOX_RECOVERY_REQUEST_SECRET: layerv-nhp-sandbox/udp-proof/recovery/request/${{ inputs.nhp_controller_run_id }}/${{ inputs.nhp_controller_run_attempt }}
+      QURL_GO_SANDBOX_RECOVERY_RESPONSE_SECRET: layerv-nhp-sandbox/udp-proof/recovery/response/${{ inputs.nhp_controller_run_id }}/${{ inputs.nhp_controller_run_attempt }}
+      QURL_GO_SANDBOX_RECOVERY_KMS_KEY_ARN: arn:aws:kms:us-east-2:767397897469:key/2dc8590c-cf7e-4427-bf48-ea442a3f79d6
+      AWS_REGION: us-east-2
     steps:
       - name: Checkout exact build
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -535,7 +541,7 @@ jobs:
           deployment_runtime_inputs_sha256="$(sha256sum "${runtime}" | cut -d' ' -f1)"
           inventory_sha256="$(sha256sum "${inventory_snapshot}" | cut -d' ' -f1)"
           inventory_mapping_sha256="$(jq -cS -j '{schema_version, gate, proof_phases, all_scenarios_required, scenarios: ([.scenarios[] | {id, owner, status, test_name, requirement}] | sort_by(.id))}' "${inventory}" | sha256sum | cut -d' ' -f1)"
-          test "${inventory_mapping_sha256}" = "119bacde1c8f802bc1b3873d3148ea9d347d7c80746c4a0b4278d8b00a55ac8f"
+          test "${inventory_mapping_sha256}" = "f77ed83c53308f1a87127773ffce63775f86ea4c01ddf14beda634bac1dd87a3"
           scenario_contract_sha256="$(jq -cS '{schema_version, gate, proof_phases, all_scenarios_required, scenarios: ([.scenarios[] | {id, owner, test_name, requirement}] | sort_by(.id))}' "${inventory}" | sha256sum | cut -d' ' -f1)"
           typed_evidence_contract_sha256="$(sha256sum "${typed_evidence_contract}" | cut -d' ' -f1)"
           test "${typed_evidence_contract_sha256}" = "e15008760ea838875de9c75561726c86e9d2e7f7f507247e55a588fa3ac65fe5"
@@ -766,7 +772,7 @@ jobs:
           test "$(jq -r '.inventory_sha256' "${pre_evidence}")" = "${pre_inventory_sha256}"
           test "${pre_inventory_sha256}" = "${inventory_sha256}"
           test "${pre_inventory_mapping_sha256}" = "${inventory_mapping_sha256}"
-          test "${pre_inventory_mapping_sha256}" = "119bacde1c8f802bc1b3873d3148ea9d347d7c80746c4a0b4278d8b00a55ac8f"
+          test "${pre_inventory_mapping_sha256}" = "f77ed83c53308f1a87127773ffce63775f86ea4c01ddf14beda634bac1dd87a3"
           test "${pre_retired_lifecycle_surface_sha256}" = "${retired_lifecycle_surface_sha256}"
           test "${pre_retired_lifecycle_surface_sha256}" = "3fe8872c3da9913c28d763f5561d82b67805aae5a6962c6dc403c7d6305da00c"
 
@@ -855,6 +861,7 @@ jobs:
           QURL_GO_SANDBOX_TYPED_EVIDENCE_PATH: ${{ runner.temp }}/native-udp-sandbox.typed-observations.jsonl
         run: |
           set -euo pipefail
+          umask 077
           credential_file="${RUNNER_TEMP}/proof-account-credential"
           delete_error="${RUNNER_TEMP}/proof-account-secret-delete.err"
           credential=""
@@ -902,13 +909,62 @@ jobs:
 
           raw="${RUNNER_TEMP}/native-udp-sandbox.raw.json"
           adapter="tests/e2e/nativeudp/kms_sealed_adapter_aws_generated_test.go"
-          trap 'rm -f "${adapter}"' EXIT
           cp tests/e2e/nativeudp/kms_sealed_adapter_aws_test.go.tmpl "${adapter}"
+          recovery_directory="$(dirname "${QURL_GO_SANDBOX_RECOVERY_REQUEST_PATH}")"
+          install -d -m 0700 "${recovery_directory}"
+          recovery_exchange() {
+            local attempt temporary_response
+            temporary_response="${QURL_GO_SANDBOX_RECOVERY_RESPONSE_PATH}.tmp"
+            trap 'rm -f "${temporary_response}"' RETURN
+            for attempt in $(seq 1 2400); do
+              [[ -s "${QURL_GO_SANDBOX_RECOVERY_REQUEST_PATH}" ]] && break
+              sleep 0.25
+            done
+            [[ -s "${QURL_GO_SANDBOX_RECOVERY_REQUEST_PATH}" ]] || return 1
+            aws secretsmanager create-secret \
+              --name "${QURL_GO_SANDBOX_RECOVERY_REQUEST_SECRET}" \
+              --kms-key-id "${QURL_GO_SANDBOX_RECOVERY_KMS_KEY_ARN}" \
+              --secret-string "file://${QURL_GO_SANDBOX_RECOVERY_REQUEST_PATH}" \
+              --tags \
+                Key=Environment,Value=sandbox \
+                Key=Purpose,Value=udp-proof-recovery-request \
+                Key=GitHubRunId,Value="${QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ID}" \
+                Key=GitHubRunAttempt,Value="${QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ATTEMPT}" \
+              --region "${AWS_REGION}" >/dev/null
+            rm -f "${QURL_GO_SANDBOX_RECOVERY_REQUEST_PATH}"
+            for attempt in $(seq 1 2400); do
+              if aws secretsmanager get-secret-value \
+                --secret-id "${QURL_GO_SANDBOX_RECOVERY_RESPONSE_SECRET}" \
+                --query SecretString --output text \
+                --region "${AWS_REGION}" >"${temporary_response}" 2>/dev/null; then
+                chmod 0600 "${temporary_response}"
+                mv "${temporary_response}" "${QURL_GO_SANDBOX_RECOVERY_RESPONSE_PATH}"
+                aws secretsmanager delete-secret \
+                  --secret-id "${QURL_GO_SANDBOX_RECOVERY_RESPONSE_SECRET}" \
+                  --force-delete-without-recovery \
+                  --region "${AWS_REGION}" >/dev/null
+                aws secretsmanager delete-secret \
+                  --secret-id "${QURL_GO_SANDBOX_RECOVERY_REQUEST_SECRET}" \
+                  --force-delete-without-recovery \
+                  --region "${AWS_REGION}" >/dev/null 2>&1 || true
+                return 0
+              fi
+              sleep 0.25
+            done
+            return 1
+          }
           : > "${raw}"
+          recovery_exchange >"${RUNNER_TEMP}/recovery-exchange.log" 2>&1 &
+          recovery_pid=$!
+          trap 'kill "${recovery_pid}" >/dev/null 2>&1 || true; rm -f "${adapter}" "${QURL_GO_SANDBOX_RECOVERY_REQUEST_PATH}" "${QURL_GO_SANDBOX_RECOVERY_RESPONSE_PATH}" "${QURL_GO_SANDBOX_RECOVERY_RESPONSE_PATH}.tmp" "${RUNNER_TEMP}/recovery-exchange.log"' EXIT
           if ! go test -tags=qurl_sandbox_kms -count=1 -timeout=60m -json ./tests/e2e/nativeudp \
             -run '^(TestSandboxNativeUDPLifecycle|TestSandboxWireEvidence|TestSandboxTopology)$' \
             > "${raw}"; then
             echo "::error::strict UDP proof failed; raw output withheld because it may contain credentials"
+            exit 1
+          fi
+          if ! wait "${recovery_pid}"; then
+            echo "::error::private recovery controller exchange failed; output withheld because it may contain credentials"
             exit 1
           fi
 
@@ -950,7 +1006,7 @@ jobs:
           test "$(sha256sum "${QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_PATH}" | cut -d' ' -f1)" = "${QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_SHA256}"
           test "$(compute_proof_harness_sha256)" = "${QURL_GO_SANDBOX_PROOF_HARNESS_SHA256}"
           test "$(jq -cS -j '{schema_version, gate, proof_phases, all_scenarios_required, scenarios: ([.scenarios[] | {id, owner, status, test_name, requirement}] | sort_by(.id))}' "${inventory}" | sha256sum | cut -d' ' -f1)" = "${QURL_GO_SANDBOX_INVENTORY_MAPPING_SHA256}"
-          test "${QURL_GO_SANDBOX_INVENTORY_MAPPING_SHA256}" = "119bacde1c8f802bc1b3873d3148ea9d347d7c80746c4a0b4278d8b00a55ac8f"
+          test "${QURL_GO_SANDBOX_INVENTORY_MAPPING_SHA256}" = "f77ed83c53308f1a87127773ffce63775f86ea4c01ddf14beda634bac1dd87a3"
           test "$(jq -cS '{schema_version, gate, proof_phases, all_scenarios_required, scenarios: ([.scenarios[] | {id, owner, test_name, requirement}] | sort_by(.id))}' "${inventory}" | sha256sum | cut -d' ' -f1)" = "${QURL_GO_SANDBOX_SCENARIO_CONTRACT_SHA256}"
           test "$(jq -cS -j . "${retired_surface_source}" | sha256sum | cut -d' ' -f1)" = "${QURL_GO_SANDBOX_RETIRED_LIFECYCLE_SURFACE_SHA256}"
           test "$(sha256sum "${retired_surface}" | cut -d' ' -f1)" = "${QURL_GO_SANDBOX_RETIRED_LIFECYCLE_SURFACE_SHA256}"
@@ -1044,7 +1100,7 @@ jobs:
             [[ "$(sha256sum "${orchestrator_evidence_path}" | cut -d' ' -f1)" == "${QURL_GO_SANDBOX_ORCHESTRATOR_EVIDENCE_SHA256}" ]] &&
             [[ "$(compute_proof_harness_sha256)" == "${QURL_GO_SANDBOX_PROOF_HARNESS_SHA256}" ]] &&
             [[ "$(jq -cS -j '{schema_version, gate, proof_phases, all_scenarios_required, scenarios: ([.scenarios[] | {id, owner, status, test_name, requirement}] | sort_by(.id))}' "${inventory}" | sha256sum | cut -d' ' -f1)" == "${QURL_GO_SANDBOX_INVENTORY_MAPPING_SHA256}" ]] &&
-            [[ "${QURL_GO_SANDBOX_INVENTORY_MAPPING_SHA256}" == "119bacde1c8f802bc1b3873d3148ea9d347d7c80746c4a0b4278d8b00a55ac8f" ]] &&
+            [[ "${QURL_GO_SANDBOX_INVENTORY_MAPPING_SHA256}" == "f77ed83c53308f1a87127773ffce63775f86ea4c01ddf14beda634bac1dd87a3" ]] &&
             [[ "$(jq -cS -j . "${retired_surface_source}" | sha256sum | cut -d' ' -f1)" == "${QURL_GO_SANDBOX_RETIRED_LIFECYCLE_SURFACE_SHA256}" ]] &&
             [[ "$(sha256sum "${retired_surface}" | cut -d' ' -f1)" == "${QURL_GO_SANDBOX_RETIRED_LIFECYCLE_SURFACE_SHA256}" ]] &&
             [[ "${QURL_GO_SANDBOX_RETIRED_LIFECYCLE_SURFACE_SHA256}" == "3fe8872c3da9913c28d763f5561d82b67805aae5a6962c6dc403c7d6305da00c" ]] &&
