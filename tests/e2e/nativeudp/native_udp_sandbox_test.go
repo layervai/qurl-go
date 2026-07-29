@@ -194,7 +194,6 @@ func TestSandboxNativeUDPLifecycle(t *testing.T) {
 		Port:               cfg.hubPort,
 		ServerPublicKeyB64: cfg.hubServerKeyB64,
 	}
-	store := qurl.FileAgentState(cfg.statePath)
 	for name, path := range map[string]string{statePathEnv: cfg.statePath, provenancePathEnv: cfg.provenancePath} {
 		if _, err := os.Stat(path); err == nil {
 			t.Fatalf("strict proof requires a fresh path but %s already exists", name)
@@ -203,6 +202,17 @@ func TestSandboxNativeUDPLifecycle(t *testing.T) {
 		}
 	}
 	t.Cleanup(func() { cleanupSandboxProofFiles(cfg) })
+	t.Cleanup(func() { cleanupSandboxSealedProofFiles(cfg) })
+	sealedStore, err := openSandboxKMSSealedStore(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var store qurl.AgentStateStore = sealedStore
+	t.Cleanup(func() {
+		if sealedStore != nil {
+			_ = sealedStore.Close()
+		}
+	})
 
 	if !runTypedEvidenceScenario(t, "provenance_and_hub_trust", "provenance.exact_build_and_hub_trust", []string{"build_provenance"}, func(t *testing.T) {
 		assertBuildProvenance(t, cfg.buildSHA)
@@ -381,6 +391,31 @@ func TestSandboxNativeUDPLifecycle(t *testing.T) {
 		}
 		defer binding.Destroy()
 		cellEvidence = append(cellEvidence, assertAssignedCell(t, cfg, binding, "registration"))
+	}) {
+		return
+	}
+
+	var sealedKeyARN string
+	if !runTypedEvidenceScenario(t, "sealed_kms_cold_enrollment", "state.sealed_cold_start", []string{"state_observation"}, func(t *testing.T) {
+		sealedKeyARN = proveSandboxKMSColdState(ctx, t, cfg, store)
+		t.Logf("EVIDENCE kms_key_arn=%s provider=aws-kms plaintext_private_key_persisted=false setup_credential_persisted=false", sealedKeyARN)
+	}) {
+		return
+	}
+	if err := sealedStore.Close(); err != nil {
+		t.Fatalf("close cold KMS-sealed state: %v", err)
+	}
+	sealedStore = nil
+	removeSandboxSetupCredential(t, &cfg)
+	sealedStore, err = openSandboxKMSSealedStore(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store = sealedStore
+
+	if !runTypedEvidenceScenario(t, "sealed_kms_credentialless_warm_restart", "state.sealed_warm_restart_without_setup_credential", []string{"state_observation"}, func(t *testing.T) {
+		proveSandboxKMSCredentiallessWarmRestart(ctx, t, cfg, store, httpTrap)
+		t.Logf("EVIDENCE kms_key_arn=%s enrollment_credential_sources=0 recovery_credential_sources=0 warm_open=true authenticated_knock=true", sealedKeyARN)
 	}) {
 		return
 	}

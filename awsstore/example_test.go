@@ -6,6 +6,8 @@ import (
 	"log"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/kms"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
@@ -63,4 +65,29 @@ func ExampleNewParameterStore() {
 	if err := store.SaveAgentState(ctx, state); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func ExampleNewKMSAgentStateKeyWrapper() {
+	ctx := context.Background()
+	cfg, err := config.LoadDefaultConfig(ctx)
+	if err != nil {
+		log.Fatal(err)
+	}
+	wrapper, err := awsstore.NewKMSAgentStateKeyWrapper(
+		kms.NewFromConfig(cfg),
+		"alias/qurl-agent-state",
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
+	store, err := qurl.NewSealedFileAgentState(
+		"/var/lib/layerv/qurl/agent-state.sealed.json",
+		"aws-kms",
+		wrapper,
+		qurl.WithExpectedSealedAgentID("connector-prod-1"),
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer store.Close()
 }

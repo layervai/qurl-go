@@ -308,14 +308,14 @@
     {
       "id": "state.sealed_cold_start",
       "owner": "qurl-go",
-      "status": "todo",
+      "status": "implemented",
       "test_name": "TestSandboxNativeUDPLifecycle/sealed_kms_cold_enrollment",
       "requirement": "Use the public Go SDK with a real sandbox KMS-backed state provider for cold enrollment and prove no plaintext private key or setup credential is durably persisted."
     },
     {
       "id": "state.sealed_warm_restart_without_setup_credential",
       "owner": "qurl-go",
-      "status": "todo",
+      "status": "implemented",
       "test_name": "TestSandboxNativeUDPLifecycle/sealed_kms_credentialless_warm_restart",
       "requirement": "Restart the public Go SDK from real sandbox KMS-backed sealed state and knock successfully after physically removing every setup and recovery credential source."
     },

@@ -45,6 +45,7 @@ type sandboxConfig struct {
 	candidateCommit  string
 	knockResourceID  string
 	expectedCellID   string
+	kmsKeyID         string
 }
 
 func loadSandboxConfig(lookup func(string) string) (sandboxConfig, bool, error) {
@@ -71,6 +72,7 @@ func loadSandboxConfig(lookup func(string) string) (sandboxConfig, bool, error) 
 		candidatePRPathEnv,
 		candidateCommitPathEnv,
 		knockResourceIDEnv,
+		sandboxKMSKeyIDEnv,
 	}
 	missing := make([]string, 0, len(required))
 	for _, name := range required {
@@ -101,6 +103,7 @@ func loadSandboxConfig(lookup func(string) string) (sandboxConfig, bool, error) 
 		candidateCommit:  lookup(candidateCommitPathEnv),
 		knockResourceID:  lookup(knockResourceIDEnv),
 		expectedCellID:   lookup(expectedCellIDEnv),
+		kmsKeyID:         lookup(sandboxKMSKeyIDEnv),
 	}
 
 	if !canonicalLowerHex(cfg.buildSHA, 40) {
@@ -119,6 +122,7 @@ func loadSandboxConfig(lookup func(string) string) (sandboxConfig, bool, error) 
 		candidateCommitPathEnv:   cfg.candidateCommit,
 		knockResourceIDEnv:       cfg.knockResourceID,
 		expectedCellIDEnv:        cfg.expectedCellID,
+		sandboxKMSKeyIDEnv:       cfg.kmsKeyID,
 	} {
 		if value != strings.TrimSpace(value) || strings.IndexFunc(value, unicode.IsControl) >= 0 {
 			return sandboxConfig{}, true, fmt.Errorf("%s must be canonical and contain no control characters", name)
@@ -126,6 +130,9 @@ func loadSandboxConfig(lookup func(string) string) (sandboxConfig, bool, error) 
 	}
 	if len(cfg.enrollment) < 32 {
 		return sandboxConfig{}, true, fmt.Errorf("%s must contain a server-minted credential of at least 32 bytes", enrollmentEnv)
+	}
+	if cfg.kmsKeyID != sandboxKMSKeyID {
+		return sandboxConfig{}, true, fmt.Errorf("%s must be the Terraform-owned sandbox proof alias %q", sandboxKMSKeyIDEnv, sandboxKMSKeyID)
 	}
 	if err := validateSandboxAgentID(cfg.agentID); err != nil {
 		return sandboxConfig{}, true, fmt.Errorf("%s: %w", agentIDEnv, err)
@@ -216,6 +223,7 @@ func TestSandboxConfigStrictMode(t *testing.T) {
 		candidatePRPathEnv:       filepath.Join(t.TempDir(), "qurl-go-pr-93.json"),
 		candidateCommitPathEnv:   filepath.Join(t.TempDir(), "qurl-go-pr-93-commit.json"),
 		knockResourceIDEnv:       "knock-resource-id",
+		sandboxKMSKeyIDEnv:       sandboxKMSKeyID,
 	}
 	lookup := func(values map[string]string) func(string) string {
 		return func(name string) string { return values[name] }
@@ -254,7 +262,7 @@ func TestSandboxConfigStrictMode(t *testing.T) {
 		if !enabled || err == nil || cfg != (sandboxConfig{}) {
 			t.Fatalf("missing config = %#v, %t, %v; want enabled failure", cfg, enabled, err)
 		}
-		for _, name := range []string{buildSHAEnv, hubHostEnv, hubPortEnv, hubServerKeyEnv, enrollmentEnv, agentIDEnv, statePathEnv, provenancePathEnv, deploymentManifestSHAEnv, typedContractSHAEnv, candidatePRPathEnv, candidateCommitPathEnv, knockResourceIDEnv} {
+		for _, name := range []string{buildSHAEnv, hubHostEnv, hubPortEnv, hubServerKeyEnv, enrollmentEnv, agentIDEnv, statePathEnv, provenancePathEnv, deploymentManifestSHAEnv, typedContractSHAEnv, candidatePRPathEnv, candidateCommitPathEnv, knockResourceIDEnv, sandboxKMSKeyIDEnv} {
 			if !strings.Contains(err.Error(), name) {
 				t.Errorf("missing-config error %q omits %s", err, name)
 			}

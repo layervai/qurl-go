@@ -498,6 +498,11 @@ wrap and unwrap. The authenticated envelope binds provider id, agent id, wrapped
 key metadata, nonce, and ciphertext. Scope unwrap permission to the intended
 installation.
 
+AWS callers can use
+`github.com/layervai/qurl-go/awsstore.NewKMSAgentStateKeyWrapper`; it binds all
+four `AgentStateKeyBinding` fields into KMS encryption context and keeps the AWS
+SDK dependency in the separate `awsstore` module.
+
 ### AWS stores
 
 `github.com/layervai/qurl-go/awsstore` provides Secrets Manager and SSM

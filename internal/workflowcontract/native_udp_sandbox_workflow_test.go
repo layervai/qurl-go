@@ -17,7 +17,7 @@ import (
 
 const (
 	nativeUDPWorkflowID                   = "4242"
-	reviewedInventoryMappingSHA256Fixture = "8c40e18b93f14a05aa383bfa6455cf896bf4ae899afdc1e5a57a14b1df44d4f9"
+	reviewedInventoryMappingSHA256Fixture = "b26426c4595933bf454b8c53000cd8ec392e052389ba93f7ffb4ddcd99de86e3"
 )
 
 type nativeUDPProofFixture struct {
@@ -139,7 +139,8 @@ func TestNativeUDPSandboxWorkflowIsAttendedStrictAndEvidenceBearing(t *testing.T
 		"Validate exact retirement inventory",
 		"go test -count=1 ./tests/e2e/nativeudp -run '^(TestPreRetirementScenarioInventory|TestRetiredLifecycleSurfaceContract)$'",
 		"timeout-minutes: 75",
-		"go test -count=1 -timeout=60m -json ./tests/e2e/nativeudp",
+		"cp tests/e2e/nativeudp/kms_sealed_adapter_aws_test.go.tmpl",
+		"go test -tags=qurl_sandbox_kms -count=1 -timeout=60m -json ./tests/e2e/nativeudp",
 		"id: strict",
 		"STRICT_OUTCOME: ${{ steps.strict.outcome }}",
 		"TestSandboxNativeUDPLifecycle|TestSandboxWireEvidence|TestSandboxTopology",
@@ -1080,8 +1081,8 @@ func TestNativeUDPSandboxEvidenceManifestIsAllowlisted(t *testing.T) {
 		t.Fatalf("evidence deployment producer = %v", decoded["deployment_producer"])
 	}
 	counts := decoded["counts"].(map[string]any)
-	if counts["blocking"] != float64(31) {
-		t.Fatalf("evidence blocking count = %v, want 31", counts["blocking"])
+	if counts["blocking"] != float64(29) {
+		t.Fatalf("evidence blocking count = %v, want 29", counts["blocking"])
 	}
 	results := decoded["scenario_results"].([]any)
 	if len(results) != 1 {
@@ -1465,7 +1466,8 @@ func newNativeUDPProofFixtureWithInventory(t *testing.T, completeInventory bool)
 			return nil
 		}
 		extension := filepath.Ext(path)
-		if extension != ".go" && extension != ".json" && extension != ".py" {
+		if extension != ".go" && extension != ".json" && extension != ".py" &&
+			filepath.Base(path) != "kms_sealed_adapter_aws_test.go.tmpl" {
 			return nil
 		}
 		relativePath, err := filepath.Rel(sourceRoot, path)
@@ -2030,7 +2032,8 @@ mapfile -d '' -t proof_files < <(
   {
     printf '%s\0' \
       .github/workflows/native-udp-sandbox.yml \
-      internal/workflowcontract/native_udp_sandbox_workflow_test.go
+      internal/workflowcontract/native_udp_sandbox_workflow_test.go \
+      tests/e2e/nativeudp/kms_sealed_adapter_aws_test.go.tmpl
     find tests/e2e/nativeudp -type f \( -name '*.go' -o -name '*.json' -o -name '*.py' \) -print0
   } | sort -z -u
 )
