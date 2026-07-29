@@ -370,11 +370,12 @@ func (c *wrongSourceConn) Close() error {
 }
 
 type runtimeHTTPProbe struct {
-	Method         string `json:"method"`
-	Path           string `json:"path"`
-	Host           string `json:"host"`
-	Status         int    `json:"status"`
-	ResponseSHA256 string `json:"response_sha256"`
+	Method              string `json:"method"`
+	Path                string `json:"path"`
+	Host                string `json:"host"`
+	Status              int    `json:"status"`
+	CorrelationIDSHA256 string `json:"correlation_id_sha256"`
+	ResponseSHA256      string `json:"response_sha256"`
 }
 
 type retirementProbeTargets struct {
@@ -674,6 +675,12 @@ func postRemovalHTTPProbes(ctx context.Context, t *testing.T, targets retirement
 	t.Helper()
 	probes := make([]runtimeHTTPProbe, 0, len(targets.HTTPOperations))
 	for _, target := range targets.HTTPOperations {
+		correlationID := fmt.Sprintf(
+			"%s:http:%s:%s",
+			os.Getenv("QURL_GO_SANDBOX_DISPATCH_CORRELATION_ID"),
+			target.Method,
+			target.Path,
+		)
 		var body io.Reader = http.NoBody
 		if target.Method == http.MethodPost {
 			body = strings.NewReader(`{}`)
@@ -685,6 +692,7 @@ func postRemovalHTTPProbes(ctx context.Context, t *testing.T, targets retirement
 		if target.Method == http.MethodPost {
 			request.Header.Set("Content-Type", "application/json")
 		}
+		request.Header.Set("X-LayerV-UDP-Proof-Correlation", correlationID)
 		response, err := client.Do(request)
 		if err != nil {
 			t.Fatalf("execute retired HTTP operation %s %s: %v", target.Method, target.Path, err)
@@ -696,7 +704,8 @@ func postRemovalHTTPProbes(ctx context.Context, t *testing.T, targets retirement
 		digest := sha256.Sum256(responseBody)
 		probes = append(probes, runtimeHTTPProbe{
 			Method: target.Method, Path: target.Path, Host: target.Host, Status: response.StatusCode,
-			ResponseSHA256: hex.EncodeToString(digest[:]),
+			CorrelationIDSHA256: runtimeStringSHA256(correlationID),
+			ResponseSHA256:      hex.EncodeToString(digest[:]),
 		})
 	}
 	return probes
@@ -1074,7 +1083,11 @@ func validateRuntimeProbeArtifact(t *testing.T, artifact runtimeProbeArtifact) {
 			t.Fatal("pre-removal runtime artifact must carry only zero-use HTTP/relay observations")
 		}
 	} else {
-		validatePostRemovalHTTPObservations(t, artifact.Observations.HTTPLifecycle.Probes)
+		validatePostRemovalHTTPObservations(
+			t,
+			artifact.ClientBinding.DispatchCorrelationID,
+			artifact.Observations.HTTPLifecycle.Probes,
+		)
 		validatePostRemovalRelayObservations(
 			t,
 			artifact.ClientBinding.DispatchCorrelationID,
@@ -1223,7 +1236,7 @@ func validateWrongSourceObservations(t *testing.T, injections []wrongSourceInjec
 	}
 }
 
-func validatePostRemovalHTTPObservations(t *testing.T, probes []runtimeHTTPProbe) {
+func validatePostRemovalHTTPObservations(t *testing.T, dispatchCorrelationID string, probes []runtimeHTTPProbe) {
 	t.Helper()
 	want := []struct {
 		host, method, path string
@@ -1242,6 +1255,14 @@ func validatePostRemovalHTTPObservations(t *testing.T, probes []runtimeHTTPProbe
 			probe.Method != want[index].method ||
 			probe.Path != want[index].path ||
 			probe.Status != http.StatusNotFound ||
+			probe.CorrelationIDSHA256 != runtimeStringSHA256(
+				fmt.Sprintf(
+					"%s:http:%s:%s",
+					dispatchCorrelationID,
+					want[index].method,
+					want[index].path,
+				),
+			) ||
 			!canonicalLowerHex(probe.ResponseSHA256, 64) {
 			t.Fatalf("post-removal HTTP probe %d is not the exact terminal 404", index)
 		}
