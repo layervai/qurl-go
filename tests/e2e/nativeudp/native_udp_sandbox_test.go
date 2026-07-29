@@ -477,7 +477,6 @@ func TestSandboxNativeUDPLifecycle(t *testing.T) {
 			qurl.WithAgentClientBaseURL("http://127.0.0.1:1"),
 			qurl.WithAgentClientHTTPClient(httpTrap),
 		)
-		recoveryCredential = ""
 		if err != nil {
 			t.Fatalf("RecoverAgentRuntime: %v", err)
 		}

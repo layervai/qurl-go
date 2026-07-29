@@ -102,8 +102,6 @@ jobs:
       QURL_GO_SANDBOX_OTP_MAILBOX_RECIPIENT: qurl-go@proof.notify.layerv.xyz
       QURL_GO_SANDBOX_OTP_MAILBOX_REGION: us-east-2
       PROOF_ACCOUNT_RUN_SECRET: layerv-nhp-sandbox/udp-proof/jit/credential/${{ inputs.nhp_controller_run_id }}/${{ inputs.nhp_controller_run_attempt }}
-      QURL_GO_SANDBOX_RECOVERY_REQUEST_PATH: ${{ runner.temp }}/qurl-go-native-udp-recovery/request.json
-      QURL_GO_SANDBOX_RECOVERY_RESPONSE_PATH: ${{ runner.temp }}/qurl-go-native-udp-recovery/response.json
       QURL_GO_SANDBOX_RECOVERY_REQUEST_SECRET: layerv-nhp-sandbox/udp-proof/recovery/request/${{ inputs.nhp_controller_run_id }}/${{ inputs.nhp_controller_run_attempt }}
       QURL_GO_SANDBOX_RECOVERY_RESPONSE_SECRET: layerv-nhp-sandbox/udp-proof/recovery/response/${{ inputs.nhp_controller_run_id }}/${{ inputs.nhp_controller_run_attempt }}
       QURL_GO_SANDBOX_RECOVERY_KMS_KEY_ARN: arn:aws:kms:us-east-2:767397897469:key/2dc8590c-cf7e-4427-bf48-ea442a3f79d6
@@ -859,6 +857,8 @@ jobs:
           QURL_GO_SANDBOX_STATE_PATH: ${{ runner.temp }}/qurl-go-native-udp/agent-state.json
           QURL_GO_SANDBOX_PROVENANCE_PATH: ${{ runner.temp }}/qurl-go-native-udp/provenance.json
           QURL_GO_SANDBOX_TYPED_EVIDENCE_PATH: ${{ runner.temp }}/native-udp-sandbox.typed-observations.jsonl
+          QURL_GO_SANDBOX_RECOVERY_REQUEST_PATH: ${{ runner.temp }}/qurl-go-native-udp-recovery/request.json
+          QURL_GO_SANDBOX_RECOVERY_RESPONSE_PATH: ${{ runner.temp }}/qurl-go-native-udp-recovery/response.json
         run: |
           set -euo pipefail
           umask 077
@@ -886,7 +886,7 @@ jobs:
           echo "::add-mask::${credential}"
 
           deleted=false
-          for attempt in 1 2 3; do
+          for _ in 1 2 3; do
             if aws secretsmanager delete-secret \
               --secret-id "${PROOF_ACCOUNT_RUN_SECRET}" \
               --force-delete-without-recovery \
@@ -913,10 +913,10 @@ jobs:
           recovery_directory="$(dirname "${QURL_GO_SANDBOX_RECOVERY_REQUEST_PATH}")"
           install -d -m 0700 "${recovery_directory}"
           recovery_exchange() {
-            local attempt temporary_response
+            local temporary_response
             temporary_response="${QURL_GO_SANDBOX_RECOVERY_RESPONSE_PATH}.tmp"
             trap 'rm -f "${temporary_response}"' RETURN
-            for attempt in $(seq 1 2400); do
+            for _ in $(seq 1 2400); do
               [[ -s "${QURL_GO_SANDBOX_RECOVERY_REQUEST_PATH}" ]] && break
               sleep 0.25
             done
@@ -932,7 +932,7 @@ jobs:
                 Key=GitHubRunAttempt,Value="${QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ATTEMPT}" \
               --region "${AWS_REGION}" >/dev/null
             rm -f "${QURL_GO_SANDBOX_RECOVERY_REQUEST_PATH}"
-            for attempt in $(seq 1 2400); do
+            for _ in $(seq 1 2400); do
               if aws secretsmanager get-secret-value \
                 --secret-id "${QURL_GO_SANDBOX_RECOVERY_RESPONSE_SECRET}" \
                 --query SecretString --output text \
