@@ -168,7 +168,7 @@ func completeTransportProof(
 	cfg sandboxConfig,
 	httpTrap *lifecycleHTTPTrap,
 	cells []sandboxCellEvidence,
-) {
+) (transportCaptureObservation, transportCounterReceipt) {
 	t.Helper()
 	handshake := loadAssignmentHandshake(t, cfg)
 	calls, first := httpTrap.snapshot()
@@ -265,6 +265,7 @@ func completeTransportProof(
 		observation.UDPOutbound,
 		observation.UDPInbound,
 	)
+	return observation, receipt
 }
 
 func stopAndValidateTransportCapture(

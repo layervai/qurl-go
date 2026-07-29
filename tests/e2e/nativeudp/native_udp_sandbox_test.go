@@ -228,6 +228,8 @@ func TestSandboxNativeUDPLifecycle(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(t.Context(), sandboxProofTimeout)
 	defer cancel()
+	wireRecorder := newRuntimeWireRecorder(ctx, t)
+	runtimeObservations := runtimeProbeObservations{}
 
 	hub := qurl.HubBootstrap{
 		Host:               cfg.hubHost,
@@ -416,8 +418,11 @@ func TestSandboxNativeUDPLifecycle(t *testing.T) {
 	otpMailbox := newSandboxOTPMailbox(cfg)
 	var registeredClient *qurl.Client
 	var registeredBinding *qurl.AgentRuntimeBinding
+	registrationWireMark := wireRecorder.mark()
 	// Happy-path lifecycle calls deliberately omit UDP and retry overrides so
-	// the deployed proof measures the SDK's out-of-box production defaults.
+	// the deployed proof measures the SDK's out-of-box production bounds. The
+	// dialer wrapper changes no destination or timeout; it records only encrypted
+	// packet metadata for the controller-bound runtime artifact.
 	if !runTypedEvidenceScenario(t, "account_otp_send", "otp.send", []string{"otp_flow_observation"}, func(t *testing.T) {
 		client, binding, err := qurl.RegisterAgentRuntime(ctx, cfg.enrollment, store,
 			qurl.WithAgentRuntimeHub(hub),
@@ -425,6 +430,7 @@ func TestSandboxNativeUDPLifecycle(t *testing.T) {
 			qurl.WithAgentRuntimeMetadata("qurl-go-sandbox", cfg.buildSHA),
 			qurl.WithAgentRuntimeAllowedRegistrationKeyKinds(qurl.RegistrationKeyKindAccount),
 			qurl.WithAgentRuntimeOTPProvider(otpMailbox.provide),
+			qurl.WithAgentRuntimeUDPDialer(wireRecorder),
 			qurl.WithAgentClientBaseURL("http://127.0.0.1:1"),
 			qurl.WithAgentClientHTTPClient(httpTrap),
 		)
@@ -454,6 +460,19 @@ func TestSandboxNativeUDPLifecycle(t *testing.T) {
 	}) {
 		return
 	}
+	for _, event := range wireRecorder.since(registrationWireMark) {
+		if event.MessageType != "OTP" {
+			runtimeObservations.RegistrationWire.Events = append(runtimeObservations.RegistrationWire.Events, event)
+		}
+	}
+	for index := range runtimeObservations.RegistrationWire.Events {
+		runtimeObservations.RegistrationWire.Events[index].Ordinal = index + 1
+	}
+	assertRuntimeSequence(
+		t,
+		runtimeObservations.RegistrationWire.Events,
+		[]string{"LST", "COK", "LST", "LRT", "REG", "RAK", "LST", "LRT"},
+	)
 
 	var sealedKeyARN string
 	if !runTypedEvidenceScenario(t, "sealed_kms_cold_enrollment", "state.sealed_cold_start", []string{"state_observation"}, func(t *testing.T) {
@@ -836,9 +855,14 @@ func TestSandboxNativeUDPLifecycle(t *testing.T) {
 		t.Fatalf("NewCycleRunID: %v", err)
 	}
 	knockOptions := qurl.NativeKnockOptions{RunID: runID}
+	wireRecorder.setRunID(runID)
+	firstSessionMark := wireRecorder.mark()
 
 	if !runTypedEvidenceScenario(t, "assigned_cell_knock", "session.public_api_knock_success", []string{"lifecycle_exchange"}, func(t *testing.T) {
-		result, err := qurl.KnockRegisteredAgent(ctx, refreshed, privateKey, cfg.knockResourceID, knockOptions)
+		result, err := qurl.KnockRegisteredAgent(
+			ctx, refreshed, privateKey, cfg.knockResourceID, knockOptions,
+			qurl.WithAgentRuntimeUDPDialer(wireRecorder),
+		)
 		if err != nil {
 			t.Fatalf("KnockRegisteredAgent: %v", err)
 		}
@@ -851,13 +875,45 @@ func TestSandboxNativeUDPLifecycle(t *testing.T) {
 	}
 
 	if !runTypedEvidenceScenario(t, "assigned_cell_clean_exit", "session.public_api_exit_success", []string{"lifecycle_exchange"}, func(t *testing.T) {
-		if err := qurl.ExitRegisteredAgentSession(ctx, refreshed, privateKey, cfg.knockResourceID, knockOptions); err != nil {
+		if err := qurl.ExitRegisteredAgentSession(
+			ctx, refreshed, privateKey, cfg.knockResourceID, knockOptions,
+			qurl.WithAgentRuntimeUDPDialer(wireRecorder),
+		); err != nil {
 			t.Fatalf("ExitRegisteredAgentSession: %v", err)
 		}
 		t.Log("EVIDENCE assigned-cell EXT received an authenticated ACK")
 	}) {
 		return
 	}
+	firstCycle := runtimeSessionCycle{RunID: runID, Events: wireRecorder.since(firstSessionMark)}
+	assertRuntimeSequence(t, firstCycle.Events, []string{"KNK", "COK", "RKN", "ACK", "EXT", "ACK"})
+
+	nextRunID, err := qurl.NewCycleRunID()
+	if err != nil {
+		t.Fatalf("NewCycleRunID(next cycle): %v", err)
+	}
+	if nextRunID == runID {
+		t.Fatal("next session cycle reused the previous RunID")
+	}
+	wireRecorder.setRunID(nextRunID)
+	nextSessionMark := wireRecorder.mark()
+	nextOptions := qurl.NativeKnockOptions{RunID: nextRunID}
+	nextResult, err := qurl.KnockRegisteredAgent(
+		ctx, refreshed, privateKey, cfg.knockResourceID, nextOptions,
+		qurl.WithAgentRuntimeUDPDialer(wireRecorder),
+	)
+	if err != nil || nextResult == nil || nextResult.ACToken == "" || nextResult.ResourceHost == "" {
+		t.Fatalf("KnockRegisteredAgent(next cycle): result=%v err=%v", nextResult, err)
+	}
+	if err := qurl.ExitRegisteredAgentSession(
+		ctx, refreshed, privateKey, cfg.knockResourceID, nextOptions,
+		qurl.WithAgentRuntimeUDPDialer(wireRecorder),
+	); err != nil {
+		t.Fatalf("ExitRegisteredAgentSession(next cycle): %v", err)
+	}
+	nextCycle := runtimeSessionCycle{RunID: nextRunID, Events: wireRecorder.since(nextSessionMark)}
+	assertRuntimeSequence(t, nextCycle.Events, []string{"KNK", "COK", "RKN", "ACK", "EXT", "ACK"})
+	runtimeObservations.SessionWire.Cycles = []runtimeSessionCycle{firstCycle, nextCycle}
 
 	runTypedEvidenceScenario(t, "zero_lifecycle_http", "transport.zero_http_injected_trap", []string{"transport_capture"}, func(t *testing.T) {
 		calls, first := httpTrap.snapshot()
@@ -868,9 +924,35 @@ func TestSandboxNativeUDPLifecycle(t *testing.T) {
 		t.Log("EVIDENCE lifecycle_http_calls=0")
 	})
 
-	runTypedEvidenceScenario(t, "zero_lifecycle_http_packet_capture_and_route_counters", "transport.zero_http_packet_capture_and_route_counters", []string{"transport_capture"}, func(t *testing.T) {
-		completeTransportProof(ctx, t, cfg, httpTrap, cellEvidence)
-	})
+	var capture transportCaptureObservation
+	var receipt transportCounterReceipt
+	if !runTypedEvidenceScenario(t, "zero_lifecycle_http_packet_capture_and_route_counters", "transport.zero_http_packet_capture_and_route_counters", []string{"transport_capture"}, func(t *testing.T) {
+		capture, receipt = completeTransportProof(ctx, t, cfg, httpTrap, cellEvidence)
+	}) {
+		return
+	}
+
+	targets, targetsSHA256 := loadRetirementProbeTargets(t)
+	probeStartedAt := time.Now().UTC()
+	runtimeObservations.WrongCaller.Probes = wrongCallerProbes(ctx, t, cfg, hub, refreshed)
+	runtimeObservations.WrongSource.Injections = wrongSourceProbes(ctx, t, cfg, hub, refreshed, privateKey)
+	if os.Getenv(proofPhaseEnv) == "post_removal" {
+		httpClient := newRetirementProbeHTTPClient()
+		defer httpClient.CloseIdleConnections()
+		runtimeObservations.HTTPLifecycle.Probes = postRemovalHTTPProbes(ctx, t, targets, httpClient)
+		runtimeObservations.RelayLifecycle.Probes = postRemovalRelayProbes(ctx, t, targets, httpClient)
+	}
+	probeEndedAt := time.Now().UTC()
+	publishRuntimeProbeArtifact(
+		t,
+		cfg,
+		capture,
+		receipt,
+		targetsSHA256,
+		probeStartedAt,
+		probeEndedAt,
+		runtimeObservations,
+	)
 }
 
 type sandboxRecoveryControlRequest struct {

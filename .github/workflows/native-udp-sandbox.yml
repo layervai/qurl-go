@@ -23,6 +23,10 @@ on:
         description: Base64 of the exact public runtime sidecar authenticated by the NHP controller
         required: true
         type: string
+      retirement_probe_targets_b64:
+        description: Base64 of the exact canonical runtime-probe targets authenticated by the NHP controller
+        required: true
+        type: string
       deployment_producer_run_id:
         description: Authenticated NHP deployment-manifest producer run id
         required: true
@@ -89,6 +93,7 @@ jobs:
       QURL_GO_SANDBOX_PROOF_PHASE: ${{ inputs.proof_phase }}
       QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_B64: ${{ inputs.deployment_manifest_b64 }}
       QURL_GO_SANDBOX_DEPLOYMENT_RUNTIME_INPUTS_B64: ${{ inputs.deployment_runtime_inputs_b64 }}
+      QURL_GO_SANDBOX_RETIREMENT_PROBE_TARGETS_B64: ${{ inputs.retirement_probe_targets_b64 }}
       QURL_GO_SANDBOX_DEPLOYMENT_PRODUCER_RUN_ID: ${{ inputs.deployment_producer_run_id }}
       QURL_GO_SANDBOX_DEPLOYMENT_PRODUCER_RUN_ATTEMPT: ${{ inputs.deployment_producer_run_attempt }}
       QURL_GO_SANDBOX_DEPLOYMENT_PRODUCER_HEAD_SHA: ${{ inputs.deployment_producer_head_sha }}
@@ -493,13 +498,16 @@ jobs:
           runtime_raw="${RUNNER_TEMP}/deployment-runtime-inputs.input.json"
           runtime_candidate="${RUNNER_TEMP}/deployment-runtime-inputs.canonical.tmp"
           runtime="${RUNNER_TEMP}/deployment-runtime-inputs.json"
+          retirement_targets_raw="${RUNNER_TEMP}/retirement-probe-targets.input.json"
+          retirement_targets_candidate="${RUNNER_TEMP}/retirement-probe-targets.canonical.tmp"
+          retirement_targets="${RUNNER_TEMP}/retirement-probe-targets.json"
           inventory="tests/e2e/nativeudp/pre_retirement_scenarios.json"
           inventory_snapshot="${RUNNER_TEMP}/pre_retirement_scenarios.json"
           typed_evidence_contract="tests/e2e/nativeudp/typed_evidence_contract.json"
           typed_evidence_contract_snapshot="${RUNNER_TEMP}/typed_evidence_contract.json"
           retired_surface="tests/e2e/nativeudp/retired_lifecycle_surface.json"
           retired_surface_snapshot="${RUNNER_TEMP}/retired_lifecycle_surface.json"
-          trap 'rm -f "${manifest_raw}" "${manifest_candidate}" "${runtime_raw}" "${runtime_candidate}"' EXIT
+          trap 'rm -f "${manifest_raw}" "${manifest_candidate}" "${runtime_raw}" "${runtime_candidate}" "${retirement_targets_raw}" "${retirement_targets_candidate}"' EXIT
           decode_canonical_base64 \
             QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_B64 "${manifest_raw}" 32768
           canonicalize_json "${manifest_raw}" "${manifest_candidate}"
@@ -508,6 +516,10 @@ jobs:
             QURL_GO_SANDBOX_DEPLOYMENT_RUNTIME_INPUTS_B64 "${runtime_raw}" 8192
           canonicalize_json "${runtime_raw}" "${runtime_candidate}"
           cmp "${runtime_raw}" "${runtime_candidate}"
+          decode_canonical_base64 \
+            QURL_GO_SANDBOX_RETIREMENT_PROBE_TARGETS_B64 "${retirement_targets_raw}" 16384
+          canonicalize_json "${retirement_targets_raw}" "${retirement_targets_candidate}"
+          cmp "${retirement_targets_raw}" "${retirement_targets_candidate}"
 
           retirement_state="http_lifecycle_present"
           if [[ "${QURL_GO_SANDBOX_PROOF_PHASE}" == "post_removal" ]]; then
@@ -523,6 +535,7 @@ jobs:
 
           mv "${manifest_candidate}" "${manifest}"
           mv "${runtime_candidate}" "${runtime}"
+          mv "${retirement_targets_candidate}" "${retirement_targets}"
           verify_repository_commits "${manifest}"
           candidate_pr="${RUNNER_TEMP}/qurl-go-pr-93.json"
           gh api "repos/${GITHUB_REPOSITORY}/pulls/93" > "${candidate_pr}"
@@ -541,10 +554,11 @@ jobs:
           canonicalize_json "${retired_surface}" "${retired_surface_snapshot}"
           cp -- "${typed_evidence_contract}" "${typed_evidence_contract_snapshot}"
           chmod 0444 \
-            "${manifest}" "${runtime}" "${inventory_snapshot}" "${retired_surface_snapshot}" \
+            "${manifest}" "${runtime}" "${retirement_targets}" "${inventory_snapshot}" "${retired_surface_snapshot}" \
             "${typed_evidence_contract_snapshot}"
           deployment_manifest_sha256="$(sha256sum "${manifest}" | cut -d' ' -f1)"
           deployment_runtime_inputs_sha256="$(sha256sum "${runtime}" | cut -d' ' -f1)"
+          retirement_probe_targets_sha256="$(sha256sum "${retirement_targets}" | cut -d' ' -f1)"
           inventory_sha256="$(sha256sum "${inventory_snapshot}" | cut -d' ' -f1)"
           inventory_mapping_sha256="$(jq -cS -j '{schema_version, gate, proof_phases, all_scenarios_required, scenarios: ([.scenarios[] | {id, owner, status, test_name, requirement}] | sort_by(.id))}' "${inventory}" | sha256sum | cut -d' ' -f1)"
           test "${inventory_mapping_sha256}" = "f7eb7d7dd840dec15aacf929331657738c07ef6f2cdd00cb9046288d13e46bd4"
@@ -559,6 +573,8 @@ jobs:
             echo "QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_SHA256=${deployment_manifest_sha256}"
             echo "QURL_GO_SANDBOX_DEPLOYMENT_RUNTIME_INPUTS_PATH=${runtime}"
             echo "QURL_GO_SANDBOX_DEPLOYMENT_RUNTIME_INPUTS_SHA256=${deployment_runtime_inputs_sha256}"
+            echo "QURL_GO_SANDBOX_RETIREMENT_PROBE_TARGETS_PATH=${retirement_targets}"
+            echo "QURL_GO_SANDBOX_RETIREMENT_PROBE_TARGETS_SHA256=${retirement_probe_targets_sha256}"
             echo "QURL_GO_SANDBOX_NHP_SOURCE_SHA=$(jq -r '.repositories.nhp' "${manifest}")"
             echo "QURL_GO_SANDBOX_QURL_SERVICE_SOURCE_SHA=$(jq -r '.repositories.qurl_service' "${manifest}")"
             echo "QURL_GO_SANDBOX_QURL_SERVICE_AUTHORITY_IMAGE_DIGEST=$(jq -r '.images.qurl_service_authority' "${manifest}")"
@@ -926,6 +942,7 @@ jobs:
           QURL_GO_SANDBOX_STATE_PATH: ${{ runner.temp }}/qurl-go-native-udp/agent-state.json
           QURL_GO_SANDBOX_PROVENANCE_PATH: ${{ runner.temp }}/qurl-go-native-udp/provenance.json
           QURL_GO_SANDBOX_TYPED_EVIDENCE_PATH: ${{ runner.temp }}/native-udp-sandbox.typed-observations.jsonl
+          QURL_GO_SANDBOX_RUNTIME_PROBE_PATH: ${{ runner.temp }}/runtime-probe-observations.json
           QURL_GO_SANDBOX_RECOVERY_REQUEST_PATH: ${{ runner.temp }}/qurl-go-native-udp-recovery/request.json
           QURL_GO_SANDBOX_RECOVERY_RESPONSE_PATH: ${{ runner.temp }}/qurl-go-native-udp-recovery/response.json
         run: |
@@ -1501,6 +1518,7 @@ jobs:
           name: native-udp-sandbox-${{ inputs.proof_phase }}-${{ github.sha }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/native-udp-sandbox.evidence.json
+            ${{ runner.temp }}/runtime-probe-observations.json
             ${{ runner.temp }}/sandbox-deployment-manifest.json
             ${{ runner.temp }}/deployment-runtime-inputs.json
             ${{ runner.temp }}/pre_retirement_scenarios.json
@@ -1515,6 +1533,7 @@ jobs:
         run: |
           set -euo pipefail
           evidence="${RUNNER_TEMP}/native-udp-sandbox.evidence.json"
+          test -s "${RUNNER_TEMP}/runtime-probe-observations.json"
           jq -e \
             --slurpfile inventory "${RUNNER_TEMP}/pre_retirement_scenarios.json" \
             --slurpfile deployment "${RUNNER_TEMP}/sandbox-deployment-manifest.json" '

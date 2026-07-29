@@ -36,6 +36,7 @@ func TestNativeUDPSandboxWorkflowIsAttendedStrictAndEvidenceBearing(t *testing.T
 		"proof_phase:",
 		"deployment_manifest_b64:",
 		"deployment_runtime_inputs_b64:",
+		"retirement_probe_targets_b64:",
 		"deployment_producer_run_id:",
 		"deployment_producer_run_attempt:",
 		"deployment_producer_head_sha:",
@@ -1557,6 +1558,7 @@ func TestNativeUDPSandboxRequiresCompletePublishedProof(t *testing.T) {
 				test.mutate(value)
 			}
 			writeJSONFile(t, filepath.Join(runnerTemp, "native-udp-sandbox.evidence.json"), value)
+			writeJSONFile(t, filepath.Join(runnerTemp, "runtime-probe-observations.json"), map[string]any{"schema_version": 1})
 			writeJSONFile(t, filepath.Join(runnerTemp, "pre_retirement_scenarios.json"), inventory)
 			if err := os.WriteFile(
 				filepath.Join(runnerTemp, "sandbox-deployment-manifest.json"),
@@ -1760,6 +1762,9 @@ func verifyNativeUDPManifest(
 		"QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_B64":    base64.StdEncoding.EncodeToString(manifest),
 		"QURL_GO_SANDBOX_DEPLOYMENT_RUNTIME_INPUTS_B64": base64.StdEncoding.EncodeToString(
 			deploymentRuntimeInputsBytes(t, manifest),
+		),
+		"QURL_GO_SANDBOX_RETIREMENT_PROBE_TARGETS_B64": base64.StdEncoding.EncodeToString(
+			retirementProbeTargetsBytes(t, phase),
 		),
 		"QURL_GO_SANDBOX_DEPLOYMENT_PRODUCER_RUN_ID":      "987654",
 		"QURL_GO_SANDBOX_DEPLOYMENT_PRODUCER_RUN_ATTEMPT": "1",
@@ -1980,6 +1985,59 @@ func deploymentRuntimeInputsBytes(t *testing.T, manifest []byte) []byte {
 		},
 	}
 	encoded, err := json.Marshal(runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
+}
+
+func retirementProbeTargetsBytes(t *testing.T, phase string) []byte {
+	t.Helper()
+	serverID := func(key []byte) string {
+		digest := sha256.Sum256(key)
+		return base64.RawURLEncoding.EncodeToString(digest[:8])
+	}
+	route53 := func(recordName string) map[string]any {
+		return map[string]any{
+			"zone_id":        "Z1234567890",
+			"record_name":    recordName,
+			"alias_dns_name": "dualstack.example.elb.amazonaws.com",
+		}
+	}
+	targets := map[string]any{
+		"schema_version": 1,
+		"gate":           "udp_lifecycle_retirement",
+		"phase":          phase,
+		"observed_at":    "2026-07-29T00:00:00Z",
+		"producer": map[string]any{
+			"head_sha":                     strings.Repeat("c", 40),
+			"run_id":                       987654,
+			"run_attempt":                  1,
+			"deployment_provenance_sha256": sha256Hex([]byte("{}")),
+			"surface_contract_sha256":      "3fe8872c3da9913c28d763f5561d82b67805aae5a6962c6dc403c7d6305da00c",
+		},
+		"http_operations": []any{
+			map[string]any{"host": "bootstrap.layerv.xyz", "method": "POST", "path": "/v1/agent/bootstrap", "route53": route53("bootstrap.layerv.xyz")},
+			map[string]any{"host": "api.layerv.xyz", "method": "GET", "path": "/v1/agent/registration-info", "route53": route53("api.layerv.xyz")},
+			map[string]any{"host": "api.layerv.xyz", "method": "POST", "path": "/v1/agent/registration/complete", "route53": route53("api.layerv.xyz")},
+			map[string]any{"host": "internal-api.qurl.layerv.xyz", "method": "POST", "path": "/internal/v1/agent/otp", "route53": route53("internal-api.qurl.layerv.xyz")},
+			map[string]any{"host": "internal-api.qurl.layerv.xyz", "method": "POST", "path": "/internal/v1/agent/register", "route53": route53("internal-api.qurl.layerv.xyz")},
+		},
+		"relay": map[string]any{
+			"base_url": "https://relay.qurl.link.layerv.xyz",
+			"ssm": map[string]any{
+				"name":         "/sandbox/nhp/qurl/relay-url",
+				"version":      1,
+				"value_sha256": sha256Hex([]byte("https://relay.qurl.link.layerv.xyz")),
+			},
+			"route53": route53("relay.qurl.link.layerv.xyz"),
+			"aliases": []any{
+				map[string]any{"cell_id": "cell0", "server_id": serverID(bytes.Repeat([]byte{0x11}, 32))},
+				map[string]any{"cell_id": "cell1", "server_id": serverID(bytes.Repeat([]byte{0x22}, 32))},
+			},
+		},
+	}
+	encoded, err := json.Marshal(targets)
 	if err != nil {
 		t.Fatal(err)
 	}
