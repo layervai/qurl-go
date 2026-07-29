@@ -276,6 +276,18 @@ func TestSandboxNativeUDPLifecycle(t *testing.T) {
 		return
 	}
 
+	if !runTypedEvidenceScenario(t, "hub_dns_address_refresh", "dns.hub_authoritative_address_refresh", []string{"dns_resolution"}, func(t *testing.T) {
+		proveHubDNSAddressRefresh(ctx, t, httpTrap)
+	}) {
+		return
+	}
+
+	if !runTypedEvidenceScenario(t, "cell_dns_address_refresh", "dns.cell_authoritative_address_refresh", []string{"dns_resolution"}, func(t *testing.T) {
+		proveCellDNSAddressRefresh(ctx, t, httpTrap)
+	}) {
+		return
+	}
+
 	if !runTypedEvidenceScenario(t, "multi_address_ipv4_ipv6_bounds", "dns.multi_address_ipv4_ipv6_bounds", []string{"dns_resolution"}, func(t *testing.T) {
 		proveMultiAddressBounds(ctx, t, httpTrap)
 	}) {
@@ -302,6 +314,24 @@ func TestSandboxNativeUDPLifecycle(t *testing.T) {
 
 	if !runTypedEvidenceScenario(t, "packet_replay", "packet.replay", []string{"packet_fault_observation"}, func(t *testing.T) {
 		provePacketReplay(ctx, t, httpTrap)
+	}) {
+		return
+	}
+
+	if !runTypedEvidenceScenario(t, "packet_reorder", "packet.reorder", []string{"packet_fault_observation"}, func(t *testing.T) {
+		provePacketReorder(ctx, t, httpTrap)
+	}) {
+		return
+	}
+
+	if !runTypedEvidenceScenario(t, "unknown_message", "packet.unknown_message", []string{"packet_fault_observation"}, func(t *testing.T) {
+		provePacketUnknownMessage(ctx, t, httpTrap)
+	}) {
+		return
+	}
+
+	if !runTypedEvidenceScenario(t, "public_resource_and_knock_resource_id_wire_distinction", "identity.public_resource_id_distinct_from_knock_resource_id", []string{"identity_binding"}, func(t *testing.T) {
+		provePublicResourceAndKnockResourceIDWireDistinction(ctx, t, httpTrap)
 	}) {
 		return
 	}
@@ -499,6 +529,12 @@ func TestNativeUDPClientFaultPaths(t *testing.T) {
 	t.Run("packet_duplicate", func(t *testing.T) {
 		provePacketDuplicate(t.Context(), t, httpTrap)
 	})
+	t.Run("hub_dns_address_refresh", func(t *testing.T) {
+		proveHubDNSAddressRefresh(t.Context(), t, httpTrap)
+	})
+	t.Run("cell_dns_address_refresh", func(t *testing.T) {
+		proveCellDNSAddressRefresh(t.Context(), t, httpTrap)
+	})
 	t.Run("multi_address_ipv4_ipv6_bounds", func(t *testing.T) {
 		proveMultiAddressBounds(t.Context(), t, httpTrap)
 	})
@@ -513,6 +549,15 @@ func TestNativeUDPClientFaultPaths(t *testing.T) {
 	})
 	t.Run("packet_replay", func(t *testing.T) {
 		provePacketReplay(t.Context(), t, httpTrap)
+	})
+	t.Run("packet_reorder", func(t *testing.T) {
+		provePacketReorder(t.Context(), t, httpTrap)
+	})
+	t.Run("unknown_message", func(t *testing.T) {
+		provePacketUnknownMessage(t.Context(), t, httpTrap)
+	})
+	t.Run("public_resource_and_knock_resource_id_wire_distinction", func(t *testing.T) {
+		provePublicResourceAndKnockResourceIDWireDistinction(t.Context(), t, httpTrap)
 	})
 	t.Run("hub_cookie_proof_lst_return_routability", func(t *testing.T) {
 		proveHubCookieProofRoutability(t.Context(), t, httpTrap)

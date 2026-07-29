@@ -7,14 +7,18 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"net/netip"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -45,6 +49,8 @@ const (
 	respondMalformedCookie                     // authenticated NHP_COK whose application body is not a cookie challenge
 	respondDuplicate                           // the correct authenticated reply, written twice
 	respondSilently                            // no reply at all
+	respondUnknownMessage                      // authenticated reply with an unknown NHP header type
+	respondPhaseInvalid                        // authenticated known reply that is invalid for the request phase
 )
 
 // The respondMalformed garbage-datagram sizes straddle the fixed 240-byte NHP
@@ -54,6 +60,7 @@ const (
 	malformedShortReplyBytes      = 100
 	malformedHeaderReplyBytes     = 240
 	malformedHeaderBodyReplyBytes = 400
+	unknownReplyHeaderType        = 0x7ffe
 )
 
 // loopbackFaultConfig carries the wire-fault knobs the loss, delay, and replay
@@ -81,6 +88,16 @@ type loopbackFaultConfig struct {
 	// it, modelling the reflection replay an on-path attacker can mount without
 	// holding any key at all.
 	reflectRequest bool
+
+	// staleReplyFirst writes one authenticated reply with a non-echoing counter
+	// immediately before the correct reply. The client reads exactly one
+	// datagram, so accepting the later reply would require incorrectly skipping
+	// the stale first packet.
+	staleReplyFirst bool
+
+	// replyBody replaces the default {"ok":true} body for the one identity
+	// binding proof that drives the public registered-agent admission parser.
+	replyBody []byte
 }
 
 // loopbackNHPServer is a loopback NHP responder. It opens the agent's initiator
@@ -113,6 +130,7 @@ func newLoopbackNHPServer(t *testing.T, serverPriv, agentPub []byte, behavior nh
 	if err != nil {
 		t.Fatalf("listen udp: %v", err)
 	}
+	fault.replyBody = bytes.Clone(fault.replyBody)
 	s := &loopbackNHPServer{
 		t:              t,
 		conn:           conn,
@@ -252,6 +270,15 @@ func (s *loopbackNHPServer) serve() {
 		if s.fault.replyDelay > 0 {
 			time.Sleep(s.fault.replyDelay)
 		}
+		if s.fault.staleReplyFirst {
+			stale := s.buildReply(nhpReplyTypeFor(msg.Type), s.serverPriv, msg.Counter+1)
+			if _, err := s.conn.WriteToUDP(stale, raddr); err != nil {
+				s.t.Logf("loopback server: write stale reply: %v", err)
+			}
+			s.mu.Lock()
+			s.replies++
+			s.mu.Unlock()
+		}
 		copies := 1
 		if s.behavior == respondDuplicate {
 			copies = 2
@@ -290,6 +317,10 @@ func (s *loopbackNHPServer) buildResponse(msg *relayknock.Reply) []byte {
 		// cookie challenge at all. Only the Hub assignment profile accepts a COK
 		// for an LST, so this exercises the authenticated-body parse boundary.
 		return s.buildReply(relayknock.TypeCookieChallenge, s.serverPriv, msg.Counter)
+	case respondUnknownMessage:
+		return s.buildUnknownReply(msg.Counter)
+	case respondPhaseInvalid:
+		return s.buildReply(nhpPhaseInvalidReplyTypeFor(msg.Type), s.serverPriv, msg.Counter)
 	default:
 		return s.buildReply(nhpReplyTypeFor(msg.Type), s.serverPriv, msg.Counter)
 	}
@@ -300,6 +331,10 @@ func (s *loopbackNHPServer) buildResponse(msg *relayknock.Reply) []byte {
 // DeviceStaticPriv is the server static private key and ServerStaticPub is the
 // agent static public key.
 func (s *loopbackNHPServer) buildReply(replyType int, serverPriv []byte, counter uint64) []byte {
+	body := s.fault.replyBody
+	if len(body) == 0 {
+		body = []byte(`{"ok":true}`)
+	}
 	packet, err := relayknocktest.BuildReply(replyType, &relayknock.KnockInputs{
 		DeviceStaticPriv: serverPriv,
 		ServerStaticPub:  s.agentPub,
@@ -307,10 +342,27 @@ func (s *loopbackNHPServer) buildReply(replyType int, serverPriv []byte, counter
 		TimestampNanos:   uint64(time.Now().UnixNano()),
 		Counter:          counter,
 		Preamble:         binary.BigEndian.Uint32(mustNHPRand(s.t, 4)),
-		Body:             []byte(`{"ok":true}`),
+		Body:             body,
 	})
 	if err != nil {
 		s.t.Errorf("build reply: %v", err)
+		return nil
+	}
+	return packet
+}
+
+func (s *loopbackNHPServer) buildUnknownReply(counter uint64) []byte {
+	packet, err := relayknocktest.BuildUnknownReplyForTest(unknownReplyHeaderType, &relayknock.KnockInputs{
+		DeviceStaticPriv: s.serverPriv,
+		ServerStaticPub:  s.agentPub,
+		EphemeralPriv:    mustNHPRand(s.t, 32),
+		TimestampNanos:   uint64(time.Now().UnixNano()),
+		Counter:          counter,
+		Preamble:         binary.BigEndian.Uint32(mustNHPRand(s.t, 4)),
+		Body:             []byte(`{"authenticated":"unknown"}`),
+	})
+	if err != nil {
+		s.t.Errorf("build unknown reply: %v", err)
 		return nil
 	}
 	return packet
@@ -324,6 +376,15 @@ func nhpReplyTypeFor(initiatorType int) int {
 		return relayknock.TypeRegisterAck
 	default:
 		return relayknock.TypeACK
+	}
+}
+
+func nhpPhaseInvalidReplyTypeFor(initiatorType int) int {
+	switch initiatorType {
+	case relayknock.TypeRegister:
+		return relayknock.TypeACK
+	default:
+		return relayknock.TypeRegisterAck
 	}
 }
 
@@ -405,6 +466,7 @@ type nhpExchange struct {
 func hubAndCellExchanges() []nhpExchange {
 	return []nhpExchange{
 		{name: "hub_assignment_lst", call: nativeudp.AssignmentList},
+		{name: "assigned_cell_completion_lst", call: nativeudp.List, singleReplyCompletes: true},
 		{name: "assigned_cell_knock", call: nativeudp.Knock, singleReplyCompletes: true},
 		{name: "assigned_cell_register", call: nativeudp.Register, singleReplyCompletes: true},
 		{name: "assigned_cell_exit", call: nativeudp.Exit, singleReplyCompletes: true},
@@ -663,6 +725,90 @@ func provePacketDuplicate(ctx context.Context, t *testing.T, httpTrap *lifecycle
 	assertNoLifecycleHTTP(t, httpTrap)
 	t.Logf("EVIDENCE packet_duplicate phases=%d replies_delivered_per_phase=2 initiator_datagrams_per_phase=1 otp_datagrams=1 otp_address_fallback=0 lifecycle_http_calls=0",
 		len(hubAndCellExchanges()))
+}
+
+// proveHubDNSAddressRefresh drives two complete assignment return-routability
+// exchanges through the same authoritative Hub name while its scripted DNS
+// answer changes. Both the first and proof LST of each exchange resolve the
+// hostname; no address survives into the next exchange.
+func proveHubDNSAddressRefresh(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTPTrap) {
+	t.Helper()
+	firstAddress := netip.MustParseAddr("8.8.8.8")
+	secondAddress := netip.MustParseAddr("9.9.9.9")
+	exchange := newCookieRoutabilityExchange(t, hubAssignmentRoutability, cookieRoutabilityConfig{})
+	resolver := &scriptedResolver{answers: [][]netip.Addr{
+		{firstAddress},
+		{firstAddress},
+		{secondAddress},
+		{secondAddress},
+	}}
+	dialer := &addressRecordingDialer{port: exchange.endpoint.Port}
+	exchange.options.Resolver, exchange.options.Dialer = resolver, dialer
+
+	for attempt := 1; attempt <= 2; attempt++ {
+		body := []byte(fmt.Sprintf(`{"query":"cell_assignment","request_nonce":"hub-dns-refresh-%d"}`, attempt))
+		reply, err := nativeudp.AssignmentList(ctx, exchange.endpoint, body, exchange.options)
+		if reply == nil || err != nil {
+			t.Fatalf("Hub DNS refresh exchange %d = reply %v, err %v; want success", attempt, reply, err)
+		}
+	}
+	wantDialed := []string{
+		netip.AddrPortFrom(firstAddress, uint16(exchange.endpoint.Port)).String(),
+		netip.AddrPortFrom(firstAddress, uint16(exchange.endpoint.Port)).String(),
+		netip.AddrPortFrom(secondAddress, uint16(exchange.endpoint.Port)).String(),
+		netip.AddrPortFrom(secondAddress, uint16(exchange.endpoint.Port)).String(),
+	}
+	if got := dialer.snapshot(); !slices.Equal(got, wantDialed) {
+		t.Fatalf("Hub DNS refresh dial sequence = %q, want %q", got, wantDialed)
+	}
+	if calls, network, host := resolver.snapshot(); calls != 4 || network != "ip" || host != exchange.endpoint.Host {
+		t.Fatalf("Hub DNS refresh lookups = calls=%d network=%q host=%q; want 4, ip, %q",
+			calls, network, host, exchange.endpoint.Host)
+	}
+	first, proof, packets, _, _ := exchange.server.snapshot()
+	if len(first) != 2 || len(proof) != 2 || len(packets) != 4 {
+		t.Fatalf("Hub DNS refresh flights = first:%d proof:%d packets:%d; want 2/2/4", len(first), len(proof), len(packets))
+	}
+	assertNoLifecycleHTTP(t, httpTrap)
+	t.Logf("EVIDENCE hub_dns_address_refresh authoritative_host=%s logical_exchanges=2 resolutions=4 first_address_legs=2 second_address_legs=2 persisted_addresses=0 lifecycle_http_calls=0",
+		exchange.endpoint.Host)
+}
+
+// proveCellDNSAddressRefresh is the assigned-cell mirror: two KNK exchanges
+// retain the authenticated endpoint name and pinned key while independently
+// resolving two successive authoritative addresses.
+func proveCellDNSAddressRefresh(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTPTrap) {
+	t.Helper()
+	firstAddress := netip.MustParseAddr("8.8.8.8")
+	secondAddress := netip.MustParseAddr("9.9.9.9")
+	server, endpoint, opts := newLoopbackNHPExchange(t, respondCorrectly)
+	resolver := &scriptedResolver{answers: [][]netip.Addr{{firstAddress}, {secondAddress}}}
+	dialer := &addressRecordingDialer{port: endpoint.Port}
+	opts.Resolver, opts.Dialer = resolver, dialer
+
+	for attempt := 1; attempt <= 2; attempt++ {
+		reply, err := nativeudp.Knock(ctx, endpoint, []byte(fmt.Sprintf(`{"attempt":%d}`, attempt)), opts)
+		if reply == nil || err != nil {
+			t.Fatalf("cell DNS refresh exchange %d = reply %v, err %v; want success", attempt, reply, err)
+		}
+	}
+	wantDialed := []string{
+		netip.AddrPortFrom(firstAddress, uint16(endpoint.Port)).String(),
+		netip.AddrPortFrom(secondAddress, uint16(endpoint.Port)).String(),
+	}
+	if got := dialer.snapshot(); !slices.Equal(got, wantDialed) {
+		t.Fatalf("cell DNS refresh dial sequence = %q, want %q", got, wantDialed)
+	}
+	if calls, network, host := resolver.snapshot(); calls != 2 || network != "ip" || host != endpoint.Host {
+		t.Fatalf("cell DNS refresh lookups = calls=%d network=%q host=%q; want 2, ip, %q",
+			calls, network, host, endpoint.Host)
+	}
+	if got := server.receivedCount(); got != 2 {
+		t.Fatalf("cell DNS refresh responder received %d datagrams, want 2", got)
+	}
+	assertNoLifecycleHTTP(t, httpTrap)
+	t.Logf("EVIDENCE cell_dns_address_refresh authoritative_host=%s logical_exchanges=2 resolutions=2 first_address_exchanges=1 second_address_exchanges=1 persisted_addresses=0 lifecycle_http_calls=0",
+		endpoint.Host)
 }
 
 // proveMultiAddressBounds proves the mixed IPv4/IPv6 resolution contract through
@@ -968,6 +1114,15 @@ type cookieRoutabilityConfig struct {
 	// captured bytes of the first NHP_COK, modelling an on-path replay of
 	// genuinely server-signed challenge material bound to a spent transaction.
 	replayFirstChallenge bool
+	// staleResultFirst writes a correlated-profile result carrying the wrong
+	// counter immediately before the correct result on the proof/RKN leg.
+	staleResultFirst bool
+	// unknownResult replaces the completing proof/RKN reply with an
+	// authenticated packet whose header type is unknown to NHP.
+	unknownResult bool
+	// phaseInvalidResult replaces the completing reply with a known server reply
+	// type that is invalid for this phase.
+	phaseInvalidResult bool
 }
 
 type cookieRoutabilityServer struct {
@@ -984,6 +1139,7 @@ type cookieRoutabilityServer struct {
 	firstFlights   []*relayknock.Reply
 	proofFlights   []*relayknock.Reply
 	packets        [][]byte
+	replies        int
 	firstChallenge []byte
 	wrongCookieErr error
 	initiatorErr   error
@@ -1100,6 +1256,21 @@ func (s *cookieRoutabilityServer) serveProofFlight(raddr *net.UDPAddr, packet []
 	s.mu.Lock()
 	s.proofFlights = append(s.proofFlights, request)
 	s.mu.Unlock()
+	if s.config.unknownResult {
+		s.write(raddr, s.buildUnknownReply(request.Counter))
+		return
+	}
+	if s.config.phaseInvalidResult {
+		replyType := relayknock.TypeRegisterAck
+		if s.profile == hubAssignmentRoutability {
+			replyType = relayknock.TypeACK
+		}
+		s.write(raddr, s.buildReply(replyType, request.Counter, s.config.resultBody))
+		return
+	}
+	if s.config.staleResultFirst {
+		s.write(raddr, s.buildReply(s.profile.resultType(), request.Counter+1, s.config.resultBody))
+	}
 	s.write(raddr, s.buildReply(s.profile.resultType(), request.Counter, s.config.resultBody))
 }
 
@@ -1127,12 +1298,46 @@ func (s *cookieRoutabilityServer) buildReply(replyType int, counter uint64, body
 	return packet
 }
 
+func (s *cookieRoutabilityServer) buildUnknownReply(counter uint64) []byte {
+	packet, err := relayknocktest.BuildUnknownReplyForTest(unknownReplyHeaderType, &relayknock.KnockInputs{
+		DeviceStaticPriv: s.serverPriv,
+		ServerStaticPub:  s.agentPub,
+		EphemeralPriv:    mustNHPRand(s.t, 32),
+		TimestampNanos:   uint64(time.Now().UnixNano()),
+		Counter:          counter,
+		Preamble:         binary.BigEndian.Uint32(mustNHPRand(s.t, 4)),
+		Body:             []byte(`{"authenticated":"unknown"}`),
+	})
+	if err != nil {
+		s.t.Errorf("%s build unknown reply: %v", s.profile, err)
+		return nil
+	}
+	return packet
+}
+
 func (s *cookieRoutabilityServer) write(raddr *net.UDPAddr, packet []byte) {
 	if packet == nil {
 		return
 	}
 	if _, err := s.conn.WriteToUDP(packet, raddr); err != nil {
 		s.t.Logf("%s write reply: %v", s.profile, err)
+		return
+	}
+	s.mu.Lock()
+	s.replies++
+	s.mu.Unlock()
+}
+
+func (s *cookieRoutabilityServer) awaitReplies(want int) int {
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		s.mu.Lock()
+		got := s.replies
+		s.mu.Unlock()
+		if got >= want || time.Now().After(deadline) {
+			return got
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 
@@ -1659,6 +1864,312 @@ func provePacketReplay(ctx context.Context, t *testing.T, httpTrap *lifecycleHTT
 	assertNoLifecycleHTTP(t, httpTrap)
 	t.Logf("EVIDENCE packet_replay replayed_reply_phases=%d replayed_hub_cookie_challenge=1 reflected_request_phases=%d correlation_class=ErrMalformedReply reflection_class=ErrServerUnauthenticated spent_challenge_proof_flights=0 registration_state_mutation=0 lifecycle_http_calls=0",
 		len(assignedCellExchanges()), len(hubAndCellExchanges()))
+}
+
+// provePacketReorder puts a stale authenticated reply immediately before the
+// correct reply at every distinct transport boundary. The SDK reads and
+// evaluates the first datagram, returns a terminal correlation rejection, and
+// never skips ahead to the later packet. Tagged assignment requests repeat the
+// same Hub proof-LST behavior at initial, refresh, and recovery call sites.
+func provePacketReorder(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTPTrap) {
+	t.Helper()
+	rejected := 0
+
+	for _, exchange := range hubAndCellExchanges() {
+		server, endpoint, opts := newLoopbackNHPFaultExchange(t, loopbackFaultConfig{staleReplyFirst: true})
+		reply, err := exchange.call(ctx, endpoint, []byte(`{"reorder":"first-leg"}`), opts)
+		if reply != nil || !errors.Is(err, relayknock.ErrMalformedReply) ||
+			errors.Is(err, nativeudp.ErrTransport) || errors.Is(err, nativeudp.ErrServerUnauthenticated) {
+			t.Fatalf("reordered first reply/%s = reply %v, err %v; want terminal ErrMalformedReply only",
+				exchange.name, reply, err)
+		}
+		if got := server.awaitReplies(2); got != 2 {
+			t.Fatalf("reordered first reply/%s wrote %d datagrams, want stale then correct", exchange.name, got)
+		}
+		if got := server.receivedCount(); got != 1 {
+			t.Fatalf("reordered first reply/%s received %d requests, want 1", exchange.name, got)
+		}
+		rejected++
+	}
+
+	for _, boundary := range []string{"initial", "refresh", "recovery"} {
+		exchange := newCookieRoutabilityExchange(t, hubAssignmentRoutability, cookieRoutabilityConfig{staleResultFirst: true})
+		body := []byte(fmt.Sprintf(`{"query":"cell_assignment","request_nonce":"reorder-%s"}`, boundary))
+		reply, err := nativeudp.AssignmentList(ctx, exchange.endpoint, body, exchange.options)
+		if reply != nil || !errors.Is(err, relayknock.ErrMalformedReply) ||
+			errors.Is(err, nativeudp.ErrTransport) || errors.Is(err, nativeudp.ErrServerUnauthenticated) {
+			t.Fatalf("reordered Hub proof LST/%s = reply %v, err %v; want terminal ErrMalformedReply only",
+				boundary, reply, err)
+		}
+		first, proof, packets, _, _ := exchange.server.snapshot()
+		if len(first) != 1 || len(proof) != 1 || len(packets) != 2 {
+			t.Fatalf("reordered Hub proof LST/%s flights = first:%d proof:%d packets:%d; want 1/1/2",
+				boundary, len(first), len(proof), len(packets))
+		}
+		if got := exchange.server.awaitReplies(3); got != 3 {
+			t.Fatalf("reordered Hub proof LST/%s wrote %d replies, want challenge, stale result, correct result",
+				boundary, got)
+		}
+		rejected++
+	}
+
+	reknock := newCookieRoutabilityExchange(t, cellReknockRoutability, cookieRoutabilityConfig{staleResultFirst: true})
+	reply, err := nativeudp.KnockWithReknock(ctx, reknock.endpoint,
+		[]byte(`{"headerType":1,"runId":"reorder-proof"}`),
+		[]byte(`{"headerType":8,"runId":"reorder-proof"}`),
+		reknock.options)
+	if reply != nil || !errors.Is(err, relayknock.ErrMalformedReply) ||
+		errors.Is(err, nativeudp.ErrTransport) || errors.Is(err, nativeudp.ErrServerUnauthenticated) {
+		t.Fatalf("reordered RKN result = reply %v, err %v; want terminal ErrMalformedReply only", reply, err)
+	}
+	first, proof, packets, _, _ := reknock.server.snapshot()
+	if len(first) != 1 || len(proof) != 1 || len(packets) != 2 {
+		t.Fatalf("reordered RKN flights = first:%d proof:%d packets:%d; want 1/1/2",
+			len(first), len(proof), len(packets))
+	}
+	if got := reknock.server.awaitReplies(3); got != 3 {
+		t.Fatalf("reordered RKN wrote %d replies, want challenge, stale result, correct result", got)
+	}
+	rejected++
+
+	assertNoLifecycleHTTP(t, httpTrap)
+	t.Logf("EVIDENCE packet_reorder stale_first_rejections=%d assigned_cell_boundaries=%d hub_first_lst=1 hub_proof_boundaries=3 reknock=1 later_correct_reply_adopted=0 rejection=ErrMalformedReply lifecycle_http_calls=0",
+		rejected, len(assignedCellExchanges()))
+}
+
+// provePacketUnknownMessage sends authenticated packets with a genuinely
+// unknown header type and known-but-phase-invalid reply types. Unknown types
+// deliberately collapse into the opaque server-authentication class at the
+// public boundary; phase-invalid known replies reach correlation and return the
+// terminal malformed-reply class. Neither class falls through to another
+// address or advances a two-leg profile.
+func provePacketUnknownMessage(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTPTrap) {
+	t.Helper()
+	unknownRejected := 0
+	phaseInvalidRejected := 0
+
+	for _, exchange := range hubAndCellExchanges() {
+		server, endpoint, opts := newLoopbackNHPExchange(t, respondUnknownMessage)
+		reply, err := exchange.call(ctx, endpoint, []byte(`{"unknown":"first-leg"}`), opts)
+		assertUnauthenticatedRejection(t, "authenticated_unknown/"+exchange.name, reply, err, server.receivedCount())
+		unknownRejected++
+
+		server, endpoint, opts = newLoopbackNHPExchange(t, respondPhaseInvalid)
+		reply, err = exchange.call(ctx, endpoint, []byte(`{"phase_invalid":"first-leg"}`), opts)
+		assertMalformedReplyRejection(t, "phase_invalid/"+exchange.name, reply, err, server.receivedCount())
+		phaseInvalidRejected++
+	}
+
+	type invalidResultCase struct {
+		name   string
+		config cookieRoutabilityConfig
+		assert func(*testing.T, string, *relayknock.Reply, error, int)
+	}
+	invalidResults := []invalidResultCase{
+		{name: "unknown", config: cookieRoutabilityConfig{unknownResult: true}, assert: assertUnauthenticatedRejection},
+		{name: "phase_invalid", config: cookieRoutabilityConfig{phaseInvalidResult: true}, assert: assertMalformedReplyRejection},
+	}
+	for _, boundary := range []string{"initial", "refresh", "recovery"} {
+		for _, tc := range invalidResults {
+			exchange := newCookieRoutabilityExchange(t, hubAssignmentRoutability, tc.config)
+			body := []byte(fmt.Sprintf(`{"query":"cell_assignment","request_nonce":"%s-%s"}`, tc.name, boundary))
+			reply, err := nativeudp.AssignmentList(ctx, exchange.endpoint, body, exchange.options)
+			_, proof, packets, _, _ := exchange.server.snapshot()
+			tc.assert(t, tc.name+"/hub_proof_"+boundary, reply, err, len(proof))
+			if len(packets) != 2 {
+				t.Fatalf("%s Hub proof/%s emitted %d initiator packets, want first LST and proof LST", tc.name, boundary, len(packets))
+			}
+			if tc.name == "unknown" {
+				unknownRejected++
+			} else {
+				phaseInvalidRejected++
+			}
+		}
+	}
+
+	for _, tc := range invalidResults {
+		exchange := newCookieRoutabilityExchange(t, cellReknockRoutability, tc.config)
+		reply, err := nativeudp.KnockWithReknock(ctx, exchange.endpoint,
+			[]byte(`{"headerType":1,"runId":"unknown-proof"}`),
+			[]byte(`{"headerType":8,"runId":"unknown-proof"}`),
+			exchange.options)
+		_, proof, packets, _, _ := exchange.server.snapshot()
+		tc.assert(t, tc.name+"/assigned_cell_reknock", reply, err, len(proof))
+		if len(packets) != 2 {
+			t.Fatalf("%s RKN emitted %d initiator packets, want KNK and RKN", tc.name, len(packets))
+		}
+		if tc.name == "unknown" {
+			unknownRejected++
+		} else {
+			phaseInvalidRejected++
+		}
+	}
+
+	assertNoLifecycleHTTP(t, httpTrap)
+	t.Logf("EVIDENCE unknown_message authenticated_unknown_rejections=%d unknown_public_class=ErrServerUnauthenticated phase_invalid_rejections=%d phase_invalid_class=ErrMalformedReply address_fallback=0 accepted_results=0 lifecycle_http_calls=0",
+		unknownRejected, phaseInvalidRejected)
+}
+
+// provePublicResourceAndKnockResourceIDWireDistinction binds a producer-shaped
+// canonical P-256 public resource ID through EnsureConnectorResource, then uses
+// that returned resource's separate placement-only KnockResourceID in the public
+// registered-agent UDP API. The management call is completed and counted before
+// the zero-HTTP lifecycle interval begins; the decrypted NHP_KNK body proves the
+// public identity was not substituted into resId or copied elsewhere on wire.
+func provePublicResourceAndKnockResourceIDWireDistinction(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTPTrap) {
+	t.Helper()
+	const (
+		publicResourceID = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE2cTVv5_3eeYCcLLq5ROYCqcmY50HiKZ9ATglIkPnCji1E_S63UMtXba1moR8-Q6EV7oM6zwwh9_j2CDujzXvLA"
+		routingID        = "c-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		knockResourceID  = "connector-cell-placement-proof"
+		resourceSlug     = "udp-identity-proof"
+		deviceCredential = "lv_live_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
+	)
+
+	der, err := base64.RawURLEncoding.Strict().DecodeString(publicResourceID)
+	if err != nil || base64.RawURLEncoding.EncodeToString(der) != publicResourceID {
+		t.Fatalf("public resource id is not canonical unpadded base64url: %v", err)
+	}
+	if _, err := qurl.ParseP256PublicKeyDER(der); err != nil {
+		t.Fatalf("public resource id is not a canonical P-256 DER SPKI key: %v", err)
+	}
+	if publicResourceID == knockResourceID {
+		t.Fatal("public resource id and knock resource id fixtures must be distinct")
+	}
+
+	agentPriv, agentPub := mustNHPKeypair(t)
+	cellPriv, cellPub := mustNHPKeypair(t)
+	registeredAt := time.Now().UTC()
+	store := faultStateStore(t)
+	if err := store.SaveAgentState(ctx, &qurl.AgentState{
+		AgentID:        "qurl-go-identity-wire-proof",
+		PrivateKeyB64:  base64.StdEncoding.EncodeToString(agentPriv),
+		PublicKeyB64:   base64.StdEncoding.EncodeToString(agentPub),
+		RegisteredAt:   &registeredAt,
+		SchemaVersion:  currentAgentStateSchemaVersion,
+		DeviceAPIKey:   deviceCredential,
+		DeviceAPIKeyID: "key_AbCdEf123456",
+		Assignment: &qurl.AgentAssignment{
+			CellID:               "cell0",
+			AssignmentGeneration: 1,
+			EndpointRevision:     1,
+			LeaseExpiresAt:       registeredAt.Add(time.Hour),
+			Endpoint: qurl.NHPUDPEndpoint{
+				Host:               "cell0.nhp.layerv.ai",
+				Port:               standardNHPUDPPort,
+				ServerPublicKeyB64: base64.StdEncoding.EncodeToString(cellPub),
+			},
+		},
+	}); err != nil {
+		t.Fatalf("seed completed registered-agent state: %v", err)
+	}
+
+	var managementCalls atomic.Int32
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		managementCalls.Add(1)
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/resources" || r.URL.RawQuery != "" {
+			http.Error(w, "unexpected request", http.StatusBadRequest)
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer "+deviceCredential {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		var request struct {
+			Type         string `json:"type"`
+			Slug         string `json:"slug"`
+			FindOrCreate bool   `json:"find_or_create"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil ||
+			request.Type != "tunnel" || request.Slug != resourceSlug || !request.FindOrCreate {
+			http.Error(w, "invalid request", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = fmt.Fprintf(w, `{"data":{"resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q},"meta":{"found_existing":false}}`,
+			publicResourceID, routingID, knockResourceID, resourceSlug)
+	}))
+	defer api.Close()
+
+	client, binding, err := qurl.OpenRegisteredAgentRuntime(ctx, store,
+		qurl.WithAgentClientBaseURL(api.URL),
+		qurl.WithAgentClientHTTPClient(api.Client()),
+	)
+	if err != nil {
+		t.Fatalf("open completed registered-agent runtime: %v", err)
+	}
+	defer binding.Destroy()
+	resourceResult, err := client.EnsureConnectorResource(ctx, resourceSlug)
+	if err != nil {
+		t.Fatalf("EnsureConnectorResource: %v", err)
+	}
+	if resourceResult == nil || resourceResult.Resource == nil ||
+		resourceResult.Resource.ResourceID != publicResourceID ||
+		resourceResult.Resource.KnockResourceID != knockResourceID ||
+		resourceResult.Resource.ResourceID == resourceResult.Resource.KnockResourceID {
+		t.Fatalf("producer resource identity/admission binding = %#v", resourceResult)
+	}
+	if got := managementCalls.Load(); got != 1 {
+		t.Fatalf("management-plane resource calls = %d, want exactly 1 before native lifecycle proof", got)
+	}
+	assertNoLifecycleHTTP(t, httpTrap)
+
+	ackBody := []byte(fmt.Sprintf(
+		`{"errCode":"0","resHost":{%q:"frps.cell0.example:7000"},"opnTime":900,"agentAddr":"203.0.113.9:49152","acTokens":{%q:"proof-token"},"preActions":{%q:null}}`,
+		knockResourceID, knockResourceID, knockResourceID))
+	server := newLoopbackNHPServer(t, cellPriv, agentPub, respondCorrectly, malformedHeaderReplyBytes,
+		loopbackFaultConfig{replyBody: ackBody})
+	resolver := &scriptedResolver{answers: [][]netip.Addr{{netip.MustParseAddr("8.8.8.8")}}}
+	dialer := &addressRecordingDialer{port: server.port()}
+	privateKey := binding.TakeDeviceStaticPrivateKey()
+	defer wipe(privateKey)
+	result, err := qurl.KnockRegisteredAgent(ctx, binding, privateKey, resourceResult.Resource.KnockResourceID,
+		qurl.NativeKnockOptions{RunID: "0123456789abcdef"},
+		qurl.WithAgentRuntimeUDPResolver(resolver),
+		qurl.WithAgentRuntimeUDPDialer(dialer),
+		qurl.WithAgentRuntimeUDPBounds(2*time.Second, 1),
+	)
+	if err != nil {
+		t.Fatalf("KnockRegisteredAgent: %v", err)
+	}
+	if result == nil || result.ResourceHost != "frps.cell0.example:7000" || result.ACToken != "proof-token" {
+		t.Fatalf("native admission result = %v, want exact knock-resource admission", result)
+	}
+	packets := server.receivedPackets()
+	if len(packets) != 1 {
+		t.Fatalf("identity distinction emitted %d KNK packets, want exactly 1", len(packets))
+	}
+	opened, err := relayknocktest.OpenInitiatorMessage(cellPriv, agentPub, packets[0])
+	if err != nil {
+		t.Fatalf("open identity-distinction KNK: %v", err)
+	}
+	var wireBody struct {
+		HeaderType      int    `json:"headerType"`
+		UserID          string `json:"usrId"`
+		DeviceID        string `json:"devId"`
+		AuthServiceID   string `json:"aspId"`
+		KnockResourceID string `json:"resId"`
+		RunID           string `json:"runId"`
+	}
+	var wireFields map[string]json.RawMessage
+	if err := json.Unmarshal(opened.Body, &wireBody); err != nil {
+		t.Fatalf("decode identity-distinction KNK body: %v", err)
+	}
+	if err := json.Unmarshal(opened.Body, &wireFields); err != nil {
+		t.Fatalf("decode identity-distinction KNK fields: %v", err)
+	}
+	if len(wireFields) != 6 || wireBody.HeaderType != relayknock.TypeKnock ||
+		wireBody.KnockResourceID != knockResourceID ||
+		wireBody.KnockResourceID == publicResourceID ||
+		bytes.Contains(opened.Body, []byte(publicResourceID)) {
+		t.Fatalf("identity-distinction KNK body cross-wired public identity: fields=%d body=%s", len(wireFields), opened.Body)
+	}
+	if got := managementCalls.Load(); got != 1 {
+		t.Fatalf("native lifecycle made a management-plane HTTP call: total=%d", got)
+	}
+	assertNoLifecycleHTTP(t, httpTrap)
+	t.Log("EVIDENCE public_resource_and_knock_resource_id_wire_distinction public_resource_id_shape=canonical_P256_DER_SPKI producer_binding=accepted distinct_values=true nhp_resId=knock_resource_id public_resource_id_on_nhp_wire=0 management_http_calls_before_lifecycle=1 lifecycle_http_calls=0")
 }
 
 // proveHubCookieProofRoutability proves the Hub assignment return-routability

@@ -161,14 +161,14 @@
     {
       "id": "dns.hub_authoritative_address_refresh",
       "owner": "qurl-go",
-      "status": "todo",
+      "status": "implemented",
       "test_name": "TestSandboxNativeUDPLifecycle/hub_dns_address_refresh",
       "requirement": "Change the Hub DNS answer and prove each exchange resolves the authoritative public name again."
     },
     {
       "id": "dns.cell_authoritative_address_refresh",
       "owner": "qurl-go",
-      "status": "todo",
+      "status": "implemented",
       "test_name": "TestSandboxNativeUDPLifecycle/cell_dns_address_refresh",
       "requirement": "Change the assigned-cell DNS answer and prove each exchange resolves the authenticated endpoint name again."
     },
@@ -245,7 +245,7 @@
     {
       "id": "packet.reorder",
       "owner": "qurl-go",
-      "status": "todo",
+      "status": "implemented",
       "test_name": "TestSandboxNativeUDPLifecycle/packet_reorder",
       "requirement": "Reorder datagrams across Hub first/proof LST, REG, completion LST, KNK/RKN, EXT, and refresh/recovery boundaries; prove stale or out-of-order packets cannot advance state."
     },
@@ -294,7 +294,7 @@
     {
       "id": "packet.unknown_message",
       "owner": "qurl-go",
-      "status": "todo",
+      "status": "implemented",
       "test_name": "TestSandboxNativeUDPLifecycle/unknown_message",
       "requirement": "Inject authenticated unknown or phase-invalid NHP messages at every Hub, REG, completion, KNK/RKN, EXT, and refresh/recovery phase and observe terminal rejection."
     },
@@ -350,7 +350,7 @@
     {
       "id": "identity.public_resource_id_distinct_from_knock_resource_id",
       "owner": "qurl-go",
-      "status": "todo",
+      "status": "implemented",
       "test_name": "TestSandboxNativeUDPLifecycle/public_resource_and_knock_resource_id_wire_distinction",
       "requirement": "Bind the producer's public-key resource_id through the public Go SDK API and wire evidence while proving it remains distinct from the placement-only knock_resource_id used by assigned-cell NHP admission."
     },
