@@ -610,6 +610,35 @@ func TestSandboxNativeUDPLifecycle(t *testing.T) {
 			reassignedPrivateKey = nil
 			t.Fatalf("reassigned runtime private key length = %d, want %d", length, x25519PublicKeyLength)
 		}
+		runID, err := qurl.NewCycleRunID()
+		if err != nil {
+			t.Fatalf("NewCycleRunID(reassignment): %v", err)
+		}
+		resolver := &auditingResolver{}
+		dialer := &auditingDialer{}
+		result, err := qurl.KnockRegisteredAgent(
+			ctx,
+			binding,
+			reassignedPrivateKey,
+			cfg.knockResourceID,
+			qurl.NativeKnockOptions{RunID: runID},
+			qurl.WithAgentRuntimeUDPResolver(resolver),
+			qurl.WithAgentRuntimeUDPDialer(dialer),
+		)
+		if err != nil {
+			t.Fatalf("KnockRegisteredAgent(reassignment): %v", err)
+		}
+		if result == nil || result.ACToken == "" || result.ResourceHost == "" {
+			t.Fatal("reassignment knock returned incomplete authenticated admission")
+		}
+		resolvedHosts, resolvedAddresses := resolver.snapshot()
+		assertOnlyAssignedCellTraffic(t, resolvedHosts, resolvedAddresses, dialer.snapshot(), binding)
+		assertNoLifecycleHTTP(t, httpTrap)
+		t.Logf(
+			"EVIDENCE reassigned_cell=%s assignment_generation=%d exact_assigned_endpoint=true cell0_fallback=0 lifecycle_http_calls=0",
+			binding.CellID,
+			binding.AssignmentGeneration,
+		)
 	})
 	if !reassignmentPassed {
 		if reassigned != nil {
