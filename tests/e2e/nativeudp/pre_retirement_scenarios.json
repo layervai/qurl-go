@@ -91,7 +91,7 @@
     {
       "id": "assignment.lease_expiry_refresh",
       "owner": "qurl-go",
-      "status": "todo",
+      "status": "implemented",
       "test_name": "TestSandboxNativeUDPLifecycle/expired_lease_refresh",
       "requirement": "Expire an ephemeral assignment and prove no cell traffic occurs until an authenticated Hub refresh succeeds."
     },
@@ -105,14 +105,14 @@
     {
       "id": "reassignment.cell0_to_cell1",
       "owner": "qurl-go",
-      "status": "todo",
+      "status": "implemented",
       "test_name": "TestSandboxNativeUDPLifecycle/cell0_to_cell1_reassignment",
       "requirement": "Move one ephemeral agent from cell0 to real cell1 and contact only the newly assigned endpoint after explicit adoption."
     },
     {
       "id": "reassignment.stale_assignment_rejection",
       "owner": "qurl-go",
-      "status": "todo",
+      "status": "implemented",
       "test_name": "TestSandboxNativeUDPLifecycle/stale_assignment_rejection",
       "requirement": "Reject stale generation, revision, endpoint, or lease state and send no assigned-cell datagram until an authenticated Hub refresh and explicit adoption succeed."
     },
@@ -154,7 +154,7 @@
     {
       "id": "recovery.two_cell_completion_refresh",
       "owner": "qurl-go",
-      "status": "todo",
+      "status": "implemented",
       "test_name": "TestSandboxNativeUDPLifecycle/two_cell_completion_refresh_recovery",
       "requirement": "Complete, refresh, and recover across the real two-cell topology without cell inference or cross-cell fallback."
     },

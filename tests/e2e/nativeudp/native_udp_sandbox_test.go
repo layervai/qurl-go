@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -90,6 +91,45 @@ type redirectingDialer struct {
 	mu     sync.Mutex
 	net    string
 	addr   string
+}
+
+type auditingResolver struct {
+	mu        sync.Mutex
+	hosts     []string
+	addresses []netip.Addr
+}
+
+func (r *auditingResolver) LookupNetIP(ctx context.Context, network, host string) ([]netip.Addr, error) {
+	addresses, err := net.DefaultResolver.LookupNetIP(ctx, network, host)
+	r.mu.Lock()
+	r.hosts = append(r.hosts, host)
+	r.addresses = append(r.addresses, addresses...)
+	r.mu.Unlock()
+	return addresses, err
+}
+
+func (r *auditingResolver) snapshot() ([]string, []netip.Addr) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.hosts...), append([]netip.Addr(nil), r.addresses...)
+}
+
+type auditingDialer struct {
+	mu        sync.Mutex
+	addresses []string
+}
+
+func (d *auditingDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	d.mu.Lock()
+	d.addresses = append(d.addresses, address)
+	d.mu.Unlock()
+	return (&net.Dialer{}).DialContext(ctx, network, address)
+}
+
+func (d *auditingDialer) snapshot() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]string(nil), d.addresses...)
 }
 
 type sandboxProofProvenance struct {
@@ -458,6 +498,7 @@ func TestSandboxNativeUDPLifecycle(t *testing.T) {
 		return
 	}
 
+	var credentialRecoveryEvidence sandboxCellEvidence
 	if !runTypedEvidenceScenario(t, "device_credential_recovery", "recovery.device_credential", []string{"recovery_transition"}, func(t *testing.T) {
 		before, err := store.LoadAgentState(ctx)
 		if err != nil || before == nil || before.Assignment == nil ||
@@ -484,7 +525,10 @@ func TestSandboxNativeUDPLifecycle(t *testing.T) {
 			t.Fatal("RecoverAgentRuntime returned a nil client or binding")
 		}
 		defer binding.Destroy()
-		cellEvidence = append(cellEvidence, assertAssignedCell(t, cfg, binding, "credential_recovery"))
+		credentialRecoveryEvidence = assertAssignedCell(t, cfg, binding, "credential_recovery")
+		if !sameSandboxAssignmentBinding(credentialRecoveryEvidence, cellEvidence[1]) {
+			t.Fatalf("credential recovery changed the warm assignment binding: recovery=%+v warm=%+v", credentialRecoveryEvidence, cellEvidence[1])
+		}
 
 		after, err := store.LoadAgentState(ctx)
 		if err != nil || after == nil || after.AgentID != before.AgentID ||
@@ -514,7 +558,36 @@ func TestSandboxNativeUDPLifecycle(t *testing.T) {
 	assignmentReceipt := completeAssignmentHandshake(ctx, t, cfg, cellEvidence[1])
 
 	var reassigned *qurl.AgentRuntimeBinding
+	var reassignedPrivateKey []byte
 	reassignmentPassed := runTypedEvidenceScenario(t, "cell0_to_cell1_reassignment", "reassignment.cell0_to_cell1", []string{"assignment_transition"}, func(t *testing.T) {
+		rejectedClient, rejectedBinding, err := qurl.RefreshAgentRuntime(ctx, hub, store,
+			qurl.WithAgentClientBaseURL("http://127.0.0.1:1"),
+			qurl.WithAgentClientHTTPClient(httpTrap),
+		)
+		if rejectedBinding != nil {
+			rejectedBinding.Destroy()
+		}
+		if rejectedClient != nil || rejectedBinding != nil || !errors.Is(err, qurl.ErrAssignmentReassignmentRequired) {
+			t.Fatalf(
+				"implicit reassignment = client_non_nil:%t binding_non_nil:%t err:%v; want explicit-adoption rejection",
+				rejectedClient != nil,
+				rejectedBinding != nil,
+				err,
+			)
+		}
+		persistedClient, persistedBinding, err := qurl.OpenRegisteredAgentRuntime(ctx, store,
+			qurl.WithAgentClientBaseURL("http://127.0.0.1:1"),
+			qurl.WithAgentClientHTTPClient(httpTrap),
+		)
+		if err != nil || persistedClient == nil || persistedBinding == nil {
+			t.Fatalf("open after rejected implicit reassignment = client:%v binding:%v err:%v", persistedClient, persistedBinding, err)
+		}
+		persistedEvidence := assertAssignedCell(t, cfg, persistedBinding, "warm_open")
+		persistedBinding.Destroy()
+		if !sameSandboxAssignmentBinding(persistedEvidence, cellEvidence[1]) {
+			t.Fatalf("rejected implicit reassignment changed persisted placement: persisted=%+v warm=%+v", persistedEvidence, cellEvidence[1])
+		}
+
 		client, binding, err := qurl.RefreshAgentRuntime(ctx, hub, store,
 			qurl.WithAgentRuntimeReassignmentAdoption(),
 			qurl.WithAgentClientBaseURL("http://127.0.0.1:1"),
@@ -528,14 +601,110 @@ func TestSandboxNativeUDPLifecycle(t *testing.T) {
 		}
 		reassigned = binding
 		cellEvidence = append(cellEvidence, assertAssignedCell(t, cfg, binding, "reassignment"))
-		assertCell0ToCell1Reassignment(t, cellEvidence[2], cellEvidence[3])
-		assertAssignmentReceiptMatchesRefresh(t, assignmentReceipt, cellEvidence[3])
+		assertCell0ToCell1Reassignment(t, cellEvidence[1], cellEvidence[2])
+		assertAssignmentReceiptMatchesRefresh(t, assignmentReceipt, cellEvidence[2])
+		reassignedPrivateKey = binding.TakeDeviceStaticPrivateKey()
+		if len(reassignedPrivateKey) != x25519PublicKeyLength {
+			length := len(reassignedPrivateKey)
+			wipe(reassignedPrivateKey)
+			reassignedPrivateKey = nil
+			t.Fatalf("reassigned runtime private key length = %d, want %d", length, x25519PublicKeyLength)
+		}
 	})
-	if reassigned != nil {
-		reassigned.Destroy()
-		reassigned = nil
-	}
 	if !reassignmentPassed {
+		if reassigned != nil {
+			reassigned.Destroy()
+		}
+		wipe(reassignedPrivateKey)
+		return
+	}
+
+	staleAssignmentPassed := runTypedEvidenceScenario(t, "stale_assignment_rejection", "reassignment.stale_assignment_rejection", []string{"assignment_transition"}, func(t *testing.T) {
+		waitForAssignmentLeaseExpiry(ctx, t, reassigned.LeaseExpiresAt)
+		resolver := &fixedResolver{address: netip.MustParseAddr("127.0.0.1")}
+		dialer := &redirectingDialer{}
+		runID, err := qurl.NewCycleRunID()
+		if err != nil {
+			t.Fatalf("NewCycleRunID: %v", err)
+		}
+		result, err := qurl.KnockRegisteredAgent(
+			ctx,
+			reassigned,
+			reassignedPrivateKey,
+			cfg.knockResourceID,
+			qurl.NativeKnockOptions{RunID: runID},
+			qurl.WithAgentRuntimeUDPResolver(resolver),
+			qurl.WithAgentRuntimeUDPDialer(dialer),
+		)
+		resolverCalls, _, _ := resolver.snapshot()
+		dialerCalls, _, _ := dialer.snapshot()
+		if result != nil || !errors.Is(err, qurl.ErrInvalidNativeKnockInput) ||
+			!errors.Is(err, qurl.ErrAssignmentLeaseExpired) ||
+			resolverCalls != 0 || dialerCalls != 0 {
+			t.Fatalf(
+				"stale assignment rejection = result_non_nil:%t err:%v resolver_calls:%d dialer_calls:%d; want lease rejection before DNS or UDP",
+				result != nil,
+				err,
+				resolverCalls,
+				dialerCalls,
+			)
+		}
+		assertNoLifecycleHTTP(t, httpTrap)
+		t.Logf(
+			"EVIDENCE stale_cell_id=%s stale_generation=%d stale_revision=%d lease_expires_at=%s resolver_calls=0 udp_dial_calls=0 lifecycle_http_calls=0",
+			reassigned.CellID,
+			reassigned.AssignmentGeneration,
+			reassigned.EndpointRevision,
+			reassigned.LeaseExpiresAt.UTC().Format(time.RFC3339Nano),
+		)
+	})
+	reassigned.Destroy()
+	reassigned = nil
+	wipe(reassignedPrivateKey)
+	reassignedPrivateKey = nil
+	if !staleAssignmentPassed {
+		return
+	}
+
+	var leaseRefreshed *qurl.AgentRuntimeBinding
+	leaseRefreshPassed := runTypedEvidenceScenario(t, "expired_lease_refresh", "assignment.lease_expiry_refresh", []string{"assignment_response"}, func(t *testing.T) {
+		client, binding, err := qurl.OpenRegisteredAgentRuntime(ctx, store,
+			qurl.WithAgentClientBaseURL("http://127.0.0.1:1"),
+			qurl.WithAgentClientHTTPClient(httpTrap),
+		)
+		if client != nil || binding != nil || !errors.Is(err, qurl.ErrAssignmentLeaseExpired) {
+			if binding != nil {
+				binding.Destroy()
+			}
+			t.Fatalf("open expired assignment = client_non_nil:%t binding_non_nil:%t err:%v; want ErrAssignmentLeaseExpired", client != nil, binding != nil, err)
+		}
+
+		client, binding, err = qurl.RefreshAgentRuntime(ctx, hub, store,
+			qurl.WithAgentRuntimeReassignmentAdoption(),
+			qurl.WithAgentClientBaseURL("http://127.0.0.1:1"),
+			qurl.WithAgentClientHTTPClient(httpTrap),
+		)
+		if err != nil {
+			t.Fatalf("RefreshAgentRuntime(expired lease): %v", err)
+		}
+		if client == nil || binding == nil {
+			t.Fatal("RefreshAgentRuntime(expired lease) returned a nil client or binding")
+		}
+		leaseRefreshed = binding
+		refreshedEvidence := assertAssignedCell(t, cfg, binding, "refresh")
+		assertSameCellRefresh(t, cellEvidence[2], refreshedEvidence)
+		if refreshedEvidence.AssignmentGeneration != assignmentReceipt.Move.Result.NewAssignmentGeneration ||
+			refreshedEvidence.CellID != assignmentReceipt.Move.Result.NewCellID {
+			t.Fatalf("expired-lease refresh lost the exact controller generation: refresh=%+v move=%+v", refreshedEvidence, assignmentReceipt.Move.Result)
+		}
+		assertNoLifecycleHTTP(t, httpTrap)
+		t.Log("EVIDENCE expired persisted assignment rejected before cell I/O and renewed only through authenticated Hub refresh with explicit adoption")
+	})
+	if leaseRefreshed != nil {
+		leaseRefreshed.Destroy()
+		leaseRefreshed = nil
+	}
+	if !leaseRefreshPassed {
 		return
 	}
 
@@ -553,12 +722,77 @@ func TestSandboxNativeUDPLifecycle(t *testing.T) {
 		}
 		refreshed = binding
 		cellEvidence = append(cellEvidence, assertAssignedCell(t, cfg, binding, "refresh"))
-		assertSameCellRefresh(t, cellEvidence[3], cellEvidence[4])
+		assertSameCellRefresh(t, cellEvidence[2], cellEvidence[3])
 	})
 	if refreshed != nil {
 		defer refreshed.Destroy()
 	}
 	if !refreshPassed {
+		return
+	}
+
+	if !runTypedEvidenceScenario(t, "two_cell_completion_refresh_recovery", "recovery.two_cell_completion_refresh", []string{"recovery_transition"}, func(t *testing.T) {
+		client, recovered, err := qurl.OpenRegisteredAgentRuntime(ctx, store,
+			qurl.WithAgentClientBaseURL("http://127.0.0.1:1"),
+			qurl.WithAgentClientHTTPClient(httpTrap),
+		)
+		if err != nil {
+			t.Fatalf("OpenRegisteredAgentRuntime(two-cell recovery): %v", err)
+		}
+		if client == nil || recovered == nil {
+			t.Fatal("two-cell recovery returned a nil client or binding")
+		}
+		defer recovered.Destroy()
+		recoveredEvidence := assertAssignedCell(t, cfg, recovered, "recovery")
+		if credentialRecoveryEvidence.CellID != "cell0" ||
+			recoveredEvidence.CellID != "cell1" ||
+			recoveredEvidence.AssignmentGeneration != assignmentReceipt.Move.Result.NewAssignmentGeneration ||
+			!sameSandboxAssignmentBinding(recoveredEvidence, cellEvidence[3]) {
+			t.Fatalf(
+				"two-cell recovery did not complete on cell0 then reopen exact refreshed cell1: completion=%+v recovered=%+v refresh=%+v",
+				credentialRecoveryEvidence,
+				recoveredEvidence,
+				cellEvidence[3],
+			)
+		}
+		privateKey := recovered.TakeDeviceStaticPrivateKey()
+		if len(privateKey) != x25519PublicKeyLength {
+			wipe(privateKey)
+			t.Fatalf("recovered runtime private key length = %d, want %d", len(privateKey), x25519PublicKeyLength)
+		}
+		defer wipe(privateKey)
+		runID, err := qurl.NewCycleRunID()
+		if err != nil {
+			t.Fatalf("NewCycleRunID: %v", err)
+		}
+		resolver := &auditingResolver{}
+		dialer := &auditingDialer{}
+		result, err := qurl.KnockRegisteredAgent(
+			ctx,
+			recovered,
+			privateKey,
+			cfg.knockResourceID,
+			qurl.NativeKnockOptions{RunID: runID},
+			qurl.WithAgentRuntimeUDPResolver(resolver),
+			qurl.WithAgentRuntimeUDPDialer(dialer),
+		)
+		if err != nil {
+			t.Fatalf("KnockRegisteredAgent(two-cell recovery): %v", err)
+		}
+		if result == nil || result.ACToken == "" || result.ResourceHost == "" {
+			t.Fatal("two-cell recovery knock returned incomplete authenticated admission")
+		}
+		resolvedHosts, resolvedAddresses := resolver.snapshot()
+		assertOnlyAssignedCellTraffic(t, resolvedHosts, resolvedAddresses, dialer.snapshot(), recovered)
+		assertNoLifecycleHTTP(t, httpTrap)
+		t.Logf(
+			"EVIDENCE completed_cell=%s refreshed_cell=%s recovered_cell=%s exact_generation=%d cell0_fallback=0 hostname_inference=0 lifecycle_http_calls=0",
+			credentialRecoveryEvidence.CellID,
+			cellEvidence[3].CellID,
+			recovered.CellID,
+			recovered.AssignmentGeneration,
+		)
+	}) {
 		return
 	}
 
@@ -1287,6 +1521,40 @@ func assertSameCellRefresh(t *testing.T, reassignment, refresh sandboxCellEviden
 	t.Helper()
 	if err := validateSameCellRefresh(reassignment, refresh); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func waitForAssignmentLeaseExpiry(ctx context.Context, t *testing.T, expiresAt time.Time) {
+	t.Helper()
+	wait := time.Until(expiresAt.Add(250 * time.Millisecond))
+	if wait <= 0 {
+		return
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		t.Fatalf("wait for assignment lease expiry: %v", ctx.Err())
+	case <-timer.C:
+	}
+}
+
+func assertOnlyAssignedCellTraffic(t *testing.T, hosts []string, resolved []netip.Addr, dialed []string, binding *qurl.AgentRuntimeBinding) {
+	t.Helper()
+	if len(hosts) == 0 || len(resolved) == 0 || len(dialed) == 0 {
+		t.Fatalf("assigned-cell knock observed incomplete DNS or UDP dialing: hosts=%v resolved=%v dialed=%v", hosts, resolved, dialed)
+	}
+	for _, host := range hosts {
+		if host != binding.NHPUDPEndpoint.Host {
+			t.Fatalf("assigned-cell knock resolved inferred or fallback host %q, want exact Hub assignment %q", host, binding.NHPUDPEndpoint.Host)
+		}
+	}
+	for _, address := range dialed {
+		host, port, err := net.SplitHostPort(address)
+		dialedIP, parseErr := netip.ParseAddr(host)
+		if err != nil || parseErr != nil || port != fmt.Sprint(binding.NHPUDPEndpoint.Port) || !slices.Contains(resolved, dialedIP) {
+			t.Fatalf("assigned-cell knock dialed %q, want exact assigned UDP port %d", address, binding.NHPUDPEndpoint.Port)
+		}
 	}
 }
 

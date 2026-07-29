@@ -15,7 +15,7 @@ import (
 	"testing"
 )
 
-const reviewedInventoryMappingSHA256 = "edaa946a37ccbf77f41fd82c3b80fd6c31fb2ea602800832f3a36f1a517967d3"
+const reviewedInventoryMappingSHA256 = "f7eb7d7dd840dec15aacf929331657738c07ef6f2cdd00cb9046288d13e46bd4"
 
 type scenarioInventory struct {
 	SchemaVersion        int                    `json:"schema_version"`
@@ -215,8 +215,8 @@ func validateScenarioInventory(t *testing.T, inventory scenarioInventory) {
 	if !slices.Equal(actualIDs, expectedIDs) {
 		t.Fatalf("scenario inventory ids =\n%q\nwant exact pre-retirement inventory\n%q", actualIDs, expectedIDs)
 	}
-	if implemented != 42 || len(inventory.Scenarios)-implemented != 26 {
-		t.Fatalf("scenario counts = %d implemented/%d blocking, want the current 42/26 honest gate", implemented, len(inventory.Scenarios)-implemented)
+	if implemented != 46 || len(inventory.Scenarios)-implemented != 22 {
+		t.Fatalf("scenario counts = %d implemented/%d blocking, want the current 46/22 honest gate", implemented, len(inventory.Scenarios)-implemented)
 	}
 }
 

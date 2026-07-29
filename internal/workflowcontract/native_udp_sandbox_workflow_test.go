@@ -17,7 +17,7 @@ import (
 
 const (
 	nativeUDPWorkflowID                   = "4242"
-	reviewedInventoryMappingSHA256Fixture = "edaa946a37ccbf77f41fd82c3b80fd6c31fb2ea602800832f3a36f1a517967d3"
+	reviewedInventoryMappingSHA256Fixture = "f7eb7d7dd840dec15aacf929331657738c07ef6f2cdd00cb9046288d13e46bd4"
 )
 
 type nativeUDPProofFixture struct {
@@ -1087,8 +1087,8 @@ func TestNativeUDPSandboxEvidenceManifestIsAllowlisted(t *testing.T) {
 		t.Fatalf("evidence deployment producer = %v", decoded["deployment_producer"])
 	}
 	counts := decoded["counts"].(map[string]any)
-	if counts["blocking"] != float64(26) {
-		t.Fatalf("evidence blocking count = %v, want 26", counts["blocking"])
+	if counts["blocking"] != float64(22) {
+		t.Fatalf("evidence blocking count = %v, want 22", counts["blocking"])
 	}
 	results := decoded["scenario_results"].([]any)
 	if len(results) != 1 {
@@ -1511,11 +1511,13 @@ func newNativeUDPProofFixtureWithInventory(t *testing.T, completeInventory bool)
 			t.Fatal(err)
 		}
 		completeMappingSHA := normalizedInventoryMappingSHA256(t, canonical)
-		for _, path := range []string{
-			filepath.Join(repository, ".github", "workflows", "native-udp-sandbox.yml"),
-			filepath.Join(repository, "tests", "e2e", "nativeudp", "inventory_test.go"),
-		} {
-			replaceFixtureLiteral(t, path, reviewedInventoryMappingSHA256Fixture, completeMappingSHA)
+		if completeMappingSHA != reviewedInventoryMappingSHA256Fixture {
+			for _, path := range []string{
+				filepath.Join(repository, ".github", "workflows", "native-udp-sandbox.yml"),
+				filepath.Join(repository, "tests", "e2e", "nativeudp", "inventory_test.go"),
+			} {
+				replaceFixtureLiteral(t, path, reviewedInventoryMappingSHA256Fixture, completeMappingSHA)
+			}
 		}
 	}
 

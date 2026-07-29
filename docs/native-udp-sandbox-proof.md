@@ -83,7 +83,7 @@ Git build SHA, Hub trust root, deployment/inventory/proof-harness digests, and
 every authenticated assigned-cell tuple in a 30-day allowlisted JSON evidence
 manifest. The full normalized inventory mapping and checked-in exact retired
 lifecycle surface have separately reviewed literal SHA-256 values
-(`edaa946a37ccbf77f41fd82c3b80fd6c31fb2ea602800832f3a36f1a517967d3`
+(`f7eb7d7dd840dec15aacf929331657738c07ef6f2cdd00cb9046288d13e46bd4`
 and `3fe8872c3da9913c28d763f5561d82b67805aae5a6962c6dc403c7d6305da00c`,
 respectively); both are carried in evidence and must match across phases. The
 latter enumerates the
@@ -120,11 +120,13 @@ scenario marked `implemented` in
 path now performs provenance, fail-closed Hub DNS resolution, one-attempt
 real-socket UDP timeout, fresh registration, persisted credentialless warm
 open, an authenticated opt-in cell0-to-cell1 reassignment refresh, a following
-ordinary same-cell Hub refresh, assigned-cell KNK, assigned-cell EXT, and zero
-lifecycle HTTP calls.
-The reassignment inventory row remains blocking until the deployed uniquely
-tagged Authority fixture actually returns that real sequence; the client never
-self-asserts or simulates the move.
+expired-lease rejection before DNS or UDP I/O, an authenticated same-cell Hub
+renewal, a persisted cell1 reopen and exact-endpoint KNK, a following ordinary
+same-cell Hub refresh, assigned-cell KNK, assigned-cell EXT, and zero lifecycle
+HTTP calls. The assignment transition rows are implemented only when the
+deployed uniquely tagged Authority fixture returns the controller-receipted
+cell0-to-cell1 generation advance and shortened lease; the client never
+self-asserts, infers, or simulates the move.
 Any skip beneath a required scenario's nested subtest namespace also fails the
 parent scenario, and every failing event is counted globally. A successful
 inventory scan cannot mask a failed strict `go test` process: `strict_outcome`
