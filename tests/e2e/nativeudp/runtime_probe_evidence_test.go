@@ -36,6 +36,7 @@ const (
 	runtimeProbeGate           = "udp_lifecycle_retirement"
 	runtimeRelayBaseURL        = "https://relay.qurl.link.layerv.xyz"
 	runtimeMaxHTTPResponseSize = 1 << 20
+	runtimeProbeTimeLayout     = "2006-01-02T15:04:05.000000000Z"
 )
 
 var (
@@ -996,9 +997,9 @@ func publishRuntimeProbeArtifact(
 
 	artifact := runtimeProbeArtifact{
 		SchemaVersion: 1, Gate: runtimeProbeGate, Phase: os.Getenv("QURL_GO_SANDBOX_PROOF_PHASE"),
-		ObservedAt:                   probeEndedAt.Format(time.RFC3339Nano),
-		ProbeStartedAt:               probeStartedAt.Format(time.RFC3339Nano),
-		ProbeEndedAt:                 probeEndedAt.Format(time.RFC3339Nano),
+		ObservedAt:                   probeEndedAt.Format(runtimeProbeTimeLayout),
+		ProbeStartedAt:               probeStartedAt.Format(runtimeProbeTimeLayout),
+		ProbeEndedAt:                 probeEndedAt.Format(runtimeProbeTimeLayout),
 		RetirementProbeTargetsSHA256: targetsSHA256,
 		ClientBinding: runtimeProbeClientBinding{
 			Repository: "layervai/qurl-go", WorkflowPath: ".github/workflows/native-udp-sandbox.yml",
@@ -1101,11 +1102,11 @@ func validateRuntimeProbeArtifact(t *testing.T, artifact runtimeProbeArtifact) {
 }
 
 func parseRuntimeProbeTimestamp(value string) (time.Time, error) {
-	parsed, err := time.Parse(time.RFC3339Nano, value)
+	parsed, err := time.Parse(runtimeProbeTimeLayout, value)
 	if err != nil ||
 		!strings.HasSuffix(value, "Z") ||
-		parsed.Format(time.RFC3339Nano) != value {
-		return time.Time{}, errors.New("must be canonical RFC3339Nano UTC")
+		parsed.Format(runtimeProbeTimeLayout) != value {
+		return time.Time{}, errors.New("must be canonical fixed-nanosecond UTC")
 	}
 	return parsed, nil
 }
