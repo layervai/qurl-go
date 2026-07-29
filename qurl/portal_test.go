@@ -235,9 +235,8 @@ func TestNormalizeRelayErrorPreservesWrappedContext(t *testing.T) {
 
 // TestNormalizeRelayError_MalformedReplyMapsToClass pins the #54 fix at the
 // mapping seam both front doors share: a relayknock.ErrMalformedReply (the
-// counter/type-mismatch Exchange refuses on a byzantine relay) is re-wrapped
-// under the caller's front-door malformed-reply sentinel — ErrMalformedReply for
-// the portal, ErrRegisterReplyMalformed for enrollment — rather than passing
+// counter/type-mismatch Knock refuses on a byzantine relay) is re-wrapped
+// under the caller's selected malformed-reply sentinel rather than passing
 // through as a raw string. The original relayknock sentinel stays matchable
 // through the wrap so a caller can still detect the underlying cause.
 func TestNormalizeRelayError_MalformedReplyMapsToClass(t *testing.T) {

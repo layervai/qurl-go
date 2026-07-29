@@ -325,8 +325,9 @@ Match errors by type or sentinel, not message text:
   first REG, replacement Hub, second REG, and completion budgets. Use an outer
   context deadline when a smaller aggregate wall-clock ceiling is required.
 - Removed the superseded public HTTP agent assignment/registration lifecycle.
-  Steady-state resource CRUD remains HTTPS, and browser relay behavior is
-  unchanged.
+  The low-level HTTP relay now exposes only the browser KNK/RKN/EXT family; OTP,
+  registration, assignment, and registered-agent session control remain
+  available over native UDP. Steady-state resource CRUD remains HTTPS.
 - Added sealed full-AgentState storage and AWS-backed AgentState stores.
 
 ## License
