@@ -20,13 +20,13 @@ import (
 
 const (
 	assignmentHandshakeBucket = "layerv-nhp-sandbox-udp-proof-handshake-767397897469"
-	assignmentHandshakeKMS    = "arn:aws:kms:us-east-2:767397897469:alias/layerv-nhp-sandbox-udp-proof-handshake"
 )
 
 var (
 	assignmentRunRE   = regexp.MustCompile(`^[1-9][0-9]{0,19}$`)
 	assignmentHex32RE = regexp.MustCompile(`^[0-9a-f]{32}$`)
 	assignmentHex64RE = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	assignmentKMSRE   = regexp.MustCompile(`^arn:aws:kms:us-east-2:767397897469:key/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 	assignmentAliasRE = regexp.MustCompile(`^arn:aws:lambda:us-east-2:767397897469:function:layerv-nhp-sandbox-ca-pm:(blue|green)$`)
 	assignmentTimeRE  = regexp.MustCompile(`^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]Z$`)
 )
@@ -46,7 +46,7 @@ type assignmentHandshakeDescriptor struct {
 	CorrelationID        string `json:"correlation_id"`
 	AgentID              string `json:"agent_id"`
 	Bucket               string `json:"bucket"`
-	KMSKeyAliasARN       string `json:"kms_key_alias_arn"`
+	KMSKeyARN            string `json:"kms_key_arn"`
 	CheckpointKey        string `json:"checkpoint_key"`
 	ReceiptKey           string `json:"receipt_key"`
 	CAPMAliasARN         string `json:"ca_pm_alias_arn"`
@@ -147,7 +147,7 @@ func completeAssignmentHandshake(
 		"--body", checkpointPath,
 		"--content-type", "application/json",
 		"--server-side-encryption", "aws:kms",
-		"--ssekms-key-id", handshake.Descriptor.KMSKeyAliasARN,
+		"--ssekms-key-id", handshake.Descriptor.KMSKeyARN,
 		"--if-none-match", "*",
 	)
 
@@ -239,13 +239,13 @@ func loadAssignmentHandshake(t *testing.T, cfg sandboxConfig) assignmentHandshak
 		descriptor.CorrelationID != "nhp-"+cfg.controllerRunID+"-"+cfg.controllerRunAttempt+"-qurl_go-"+descriptor.ProofPhase+"-"+descriptor.ChannelID ||
 		descriptor.AgentID != cfg.agentID ||
 		descriptor.Bucket != assignmentHandshakeBucket ||
-		descriptor.KMSKeyAliasARN != assignmentHandshakeKMS ||
+		!assignmentKMSRE.MatchString(descriptor.KMSKeyARN) ||
 		descriptor.CheckpointKey != prefix+"/checkpoint.json" ||
 		descriptor.ReceiptKey != prefix+"/receipt.json" ||
 		!assignmentAliasRE.MatchString(descriptor.CAPMAliasARN) ||
 		descriptor.PinnedCellID != "cell0" ||
 		descriptor.TargetCellID != "cell1" ||
-		descriptor.ArmLeaseSeconds != 1200 ||
+		descriptor.ArmLeaseSeconds != 2100 ||
 		descriptor.ExpireLeaseSeconds != 30 ||
 		!assignmentHex64RE.MatchString(descriptor.ArmRequestID) ||
 		!assignmentHex64RE.MatchString(descriptor.MoveRequestID) ||
