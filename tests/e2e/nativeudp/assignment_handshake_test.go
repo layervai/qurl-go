@@ -34,6 +34,7 @@ var (
 type assignmentHandshake struct {
 	Descriptor assignmentHandshakeDescriptor `json:"descriptor"`
 	Arm        assignmentMutationEnvelope    `json:"arm"`
+	Transport  transportProofDescriptor      `json:"transport"`
 }
 
 type assignmentHandshakeDescriptor struct {
@@ -266,6 +267,7 @@ func loadAssignmentHandshake(t *testing.T, cfg sandboxConfig) assignmentHandshak
 		handshake.Arm.Result.GrantCorrelationID != descriptor.CorrelationID {
 		t.Fatal("assignment arm receipt differs from the descriptor")
 	}
+	validateTransportProofDescriptor(t, handshake.Transport, descriptor, cfg)
 	return handshake
 }
 

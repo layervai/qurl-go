@@ -539,7 +539,7 @@ jobs:
           deployment_runtime_inputs_sha256="$(sha256sum "${runtime}" | cut -d' ' -f1)"
           inventory_sha256="$(sha256sum "${inventory_snapshot}" | cut -d' ' -f1)"
           inventory_mapping_sha256="$(jq -cS -j '{schema_version, gate, proof_phases, all_scenarios_required, scenarios: ([.scenarios[] | {id, owner, status, test_name, requirement}] | sort_by(.id))}' "${inventory}" | sha256sum | cut -d' ' -f1)"
-          test "${inventory_mapping_sha256}" = "f77ed83c53308f1a87127773ffce63775f86ea4c01ddf14beda634bac1dd87a3"
+          test "${inventory_mapping_sha256}" = "edaa946a37ccbf77f41fd82c3b80fd6c31fb2ea602800832f3a36f1a517967d3"
           scenario_contract_sha256="$(jq -cS '{schema_version, gate, proof_phases, all_scenarios_required, scenarios: ([.scenarios[] | {id, owner, test_name, requirement}] | sort_by(.id))}' "${inventory}" | sha256sum | cut -d' ' -f1)"
           typed_evidence_contract_sha256="$(sha256sum "${typed_evidence_contract}" | cut -d' ' -f1)"
           test "${typed_evidence_contract_sha256}" = "e15008760ea838875de9c75561726c86e9d2e7f7f507247e55a588fa3ac65fe5"
@@ -770,7 +770,7 @@ jobs:
           test "$(jq -r '.inventory_sha256' "${pre_evidence}")" = "${pre_inventory_sha256}"
           test "${pre_inventory_sha256}" = "${inventory_sha256}"
           test "${pre_inventory_mapping_sha256}" = "${inventory_mapping_sha256}"
-          test "${pre_inventory_mapping_sha256}" = "f77ed83c53308f1a87127773ffce63775f86ea4c01ddf14beda634bac1dd87a3"
+          test "${pre_inventory_mapping_sha256}" = "edaa946a37ccbf77f41fd82c3b80fd6c31fb2ea602800832f3a36f1a517967d3"
           test "${pre_retired_lifecycle_surface_sha256}" = "${retired_lifecycle_surface_sha256}"
           test "${pre_retired_lifecycle_surface_sha256}" = "3fe8872c3da9913c28d763f5561d82b67805aae5a6962c6dc403c7d6305da00c"
 
@@ -953,10 +953,139 @@ jobs:
             done
             return 1
           }
+          capture_dir="${RUNNER_TEMP}/qurl-go-transport-capture"
+          capture_path="${capture_dir}/metadata.txt"
+          capture_pid_path="${capture_dir}/tcpdump.pid"
+          capture_done_path="${capture_dir}/tcpdump.done"
+          capture_error_path="${capture_dir}/tcpdump.stderr"
+          capture_targets_path="${capture_dir}/targets.json"
+          capture_wrapper_pid=""
+          recovery_pid=""
+          cleanup_capture() {
+            local capture_pid
+            if [[ -s "${capture_pid_path}" ]]; then
+              capture_pid="$(<"${capture_pid_path}")"
+              if [[ "${capture_pid}" =~ ^[1-9][0-9]*$ ]] && kill -0 "${capture_pid}" 2>/dev/null; then
+                kill -INT "${capture_pid}" 2>/dev/null || true
+              fi
+            fi
+            if [[ -n "${capture_wrapper_pid}" ]]; then
+              wait "${capture_wrapper_pid}" 2>/dev/null || true
+            fi
+            rm -rf "${capture_dir}"
+            rm -f "${adapter}"
+          }
+          cleanup_proof() {
+            if [[ -n "${recovery_pid}" ]]; then
+              kill "${recovery_pid}" >/dev/null 2>&1 || true
+            fi
+            cleanup_capture
+            cleanup_credential
+            rm -f \
+              "${QURL_GO_SANDBOX_RECOVERY_REQUEST_PATH}" \
+              "${QURL_GO_SANDBOX_RECOVERY_RESPONSE_PATH}" \
+              "${QURL_GO_SANDBOX_RECOVERY_RESPONSE_PATH}.tmp" \
+              "${RUNNER_TEMP}/recovery-exchange.log"
+          }
+          trap cleanup_proof EXIT
+          cp tests/e2e/nativeudp/kms_sealed_adapter_aws_test.go.tmpl "${adapter}"
+          install -d -m 0700 "${capture_dir}"
+
+          python3 - "${QURL_GO_SANDBOX_DEPLOYMENT_RUNTIME_INPUTS_PATH}" "${capture_targets_path}" <<'PY'
+          import json
+          import os
+          import socket
+          import sys
+
+          source, destination = sys.argv[1:]
+          with open(source, "r", encoding="utf-8") as stream:
+              runtime = json.load(stream)
+          hosts = {
+              runtime["hub"]["host"],
+              *(cell["host"] for cell in runtime["cells"]),
+              "api.layerv.xyz",
+              "bootstrap.layerv.xyz",
+              "relay.qurl.link.layerv.xyz",
+          }
+          entries = []
+          for host in sorted(hosts):
+              addresses = sorted({
+                  item[4][0]
+                  for item in socket.getaddrinfo(
+                      host, None, family=socket.AF_INET, type=socket.SOCK_DGRAM
+                  )
+              })
+              if not addresses:
+                  raise SystemExit(f"no IPv4 capture target resolved for {host}")
+              entries.append({"host": host, "addresses": addresses})
+          raw = json.dumps(
+              {"version": 1, "hosts": entries},
+              allow_nan=False,
+              ensure_ascii=True,
+              separators=(",", ":"),
+          ).encode("ascii")
+          descriptor = os.open(destination, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+          with os.fdopen(descriptor, "wb") as stream:
+              stream.write(raw)
+          PY
+          capture_targets_b64="$(base64 -w0 "${capture_targets_path}")"
+          mapfile -t capture_addresses < <(jq -r '.hosts[].addresses[]' "${capture_targets_path}")
+          (( ${#capture_addresses[@]} >= 6 )) || {
+            echo "::error::transport capture did not resolve every lifecycle target"
+            exit 1
+          }
+          capture_filter=""
+          for address in "${capture_addresses[@]}"; do
+            [[ "${address}" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || {
+              echo "::error::transport capture target is not canonical IPv4"
+              exit 1
+            }
+            if [[ -n "${capture_filter}" ]]; then
+              capture_filter+=" or "
+            fi
+            capture_filter+="host ${address}"
+          done
+          capture_started_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+          (
+            set +e
+            tcpdump -i any -n -l -tt -q "${capture_filter}" \
+              >"${capture_path}" 2>"${capture_error_path}" &
+            capture_pid=$!
+            printf '%s\n' "${capture_pid}" >"${capture_pid_path}"
+            chmod 0600 "${capture_pid_path}"
+            wait "${capture_pid}"
+            capture_status=$?
+            if (( capture_status == 0 )); then
+              printf 'ok\n' >"${capture_done_path}"
+            else
+              printf 'failed\n' >"${capture_done_path}"
+            fi
+            chmod 0600 "${capture_done_path}"
+          ) &
+          capture_wrapper_pid=$!
+          for _ in $(seq 1 50); do
+            [[ -s "${capture_pid_path}" ]] && break
+            sleep 0.1
+          done
+          [[ -s "${capture_pid_path}" ]] || {
+            echo "::error::transport metadata capture did not start"
+            exit 1
+          }
+          capture_pid="$(<"${capture_pid_path}")"
+          if [[ ! "${capture_pid}" =~ ^[1-9][0-9]*$ ]] || ! kill -0 "${capture_pid}"; then
+            echo "::error::transport metadata capture exited before the lifecycle"
+            sed -n '1,20p' "${capture_error_path}" >&2 || true
+            exit 1
+          fi
+          export QURL_GO_SANDBOX_TRANSPORT_CAPTURE_PATH="${capture_path}"
+          export QURL_GO_SANDBOX_TRANSPORT_CAPTURE_PID_PATH="${capture_pid_path}"
+          export QURL_GO_SANDBOX_TRANSPORT_CAPTURE_DONE_PATH="${capture_done_path}"
+          export QURL_GO_SANDBOX_TRANSPORT_CAPTURE_STARTED_AT="${capture_started_at}"
+          export QURL_GO_SANDBOX_TRANSPORT_CAPTURE_TARGETS_B64="${capture_targets_b64}"
+
           : > "${raw}"
           recovery_exchange >"${RUNNER_TEMP}/recovery-exchange.log" 2>&1 &
           recovery_pid=$!
-          trap 'kill "${recovery_pid}" >/dev/null 2>&1 || true; rm -f "${adapter}" "${QURL_GO_SANDBOX_RECOVERY_REQUEST_PATH}" "${QURL_GO_SANDBOX_RECOVERY_RESPONSE_PATH}" "${QURL_GO_SANDBOX_RECOVERY_RESPONSE_PATH}.tmp" "${RUNNER_TEMP}/recovery-exchange.log"' EXIT
           if ! go test -tags=qurl_sandbox_kms -count=1 -timeout=60m -json ./tests/e2e/nativeudp \
             -run '^(TestSandboxNativeUDPLifecycle|TestSandboxWireEvidence|TestSandboxTopology)$' \
             > "${raw}"; then
@@ -1006,7 +1135,7 @@ jobs:
           test "$(sha256sum "${QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_PATH}" | cut -d' ' -f1)" = "${QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_SHA256}"
           test "$(compute_proof_harness_sha256)" = "${QURL_GO_SANDBOX_PROOF_HARNESS_SHA256}"
           test "$(jq -cS -j '{schema_version, gate, proof_phases, all_scenarios_required, scenarios: ([.scenarios[] | {id, owner, status, test_name, requirement}] | sort_by(.id))}' "${inventory}" | sha256sum | cut -d' ' -f1)" = "${QURL_GO_SANDBOX_INVENTORY_MAPPING_SHA256}"
-          test "${QURL_GO_SANDBOX_INVENTORY_MAPPING_SHA256}" = "f77ed83c53308f1a87127773ffce63775f86ea4c01ddf14beda634bac1dd87a3"
+          test "${QURL_GO_SANDBOX_INVENTORY_MAPPING_SHA256}" = "edaa946a37ccbf77f41fd82c3b80fd6c31fb2ea602800832f3a36f1a517967d3"
           test "$(jq -cS '{schema_version, gate, proof_phases, all_scenarios_required, scenarios: ([.scenarios[] | {id, owner, test_name, requirement}] | sort_by(.id))}' "${inventory}" | sha256sum | cut -d' ' -f1)" = "${QURL_GO_SANDBOX_SCENARIO_CONTRACT_SHA256}"
           test "$(jq -cS -j . "${retired_surface_source}" | sha256sum | cut -d' ' -f1)" = "${QURL_GO_SANDBOX_RETIRED_LIFECYCLE_SURFACE_SHA256}"
           test "$(sha256sum "${retired_surface}" | cut -d' ' -f1)" = "${QURL_GO_SANDBOX_RETIRED_LIFECYCLE_SURFACE_SHA256}"
@@ -1100,7 +1229,7 @@ jobs:
             [[ "$(sha256sum "${orchestrator_evidence_path}" | cut -d' ' -f1)" == "${QURL_GO_SANDBOX_ORCHESTRATOR_EVIDENCE_SHA256}" ]] &&
             [[ "$(compute_proof_harness_sha256)" == "${QURL_GO_SANDBOX_PROOF_HARNESS_SHA256}" ]] &&
             [[ "$(jq -cS -j '{schema_version, gate, proof_phases, all_scenarios_required, scenarios: ([.scenarios[] | {id, owner, status, test_name, requirement}] | sort_by(.id))}' "${inventory}" | sha256sum | cut -d' ' -f1)" == "${QURL_GO_SANDBOX_INVENTORY_MAPPING_SHA256}" ]] &&
-            [[ "${QURL_GO_SANDBOX_INVENTORY_MAPPING_SHA256}" == "f77ed83c53308f1a87127773ffce63775f86ea4c01ddf14beda634bac1dd87a3" ]] &&
+            [[ "${QURL_GO_SANDBOX_INVENTORY_MAPPING_SHA256}" == "edaa946a37ccbf77f41fd82c3b80fd6c31fb2ea602800832f3a36f1a517967d3" ]] &&
             [[ "$(jq -cS -j . "${retired_surface_source}" | sha256sum | cut -d' ' -f1)" == "${QURL_GO_SANDBOX_RETIRED_LIFECYCLE_SURFACE_SHA256}" ]] &&
             [[ "$(sha256sum "${retired_surface}" | cut -d' ' -f1)" == "${QURL_GO_SANDBOX_RETIRED_LIFECYCLE_SURFACE_SHA256}" ]] &&
             [[ "${QURL_GO_SANDBOX_RETIRED_LIFECYCLE_SURFACE_SHA256}" == "3fe8872c3da9913c28d763f5561d82b67805aae5a6962c6dc403c7d6305da00c" ]] &&

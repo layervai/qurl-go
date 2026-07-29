@@ -604,6 +604,10 @@ func TestSandboxNativeUDPLifecycle(t *testing.T) {
 		writeSandboxProvenance(t, cfg, hub, cellEvidence)
 		t.Log("EVIDENCE lifecycle_http_calls=0")
 	})
+
+	runTypedEvidenceScenario(t, "zero_lifecycle_http_packet_capture_and_route_counters", "transport.zero_http_packet_capture_and_route_counters", []string{"transport_capture"}, func(t *testing.T) {
+		completeTransportProof(ctx, t, cfg, httpTrap, cellEvidence)
+	})
 }
 
 type sandboxRecoveryControlRequest struct {

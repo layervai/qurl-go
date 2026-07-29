@@ -83,7 +83,7 @@ Git build SHA, Hub trust root, deployment/inventory/proof-harness digests, and
 every authenticated assigned-cell tuple in a 30-day allowlisted JSON evidence
 manifest. The full normalized inventory mapping and checked-in exact retired
 lifecycle surface have separately reviewed literal SHA-256 values
-(`119bacde1c8f802bc1b3873d3148ea9d347d7c80746c4a0b4278d8b00a55ac8f`
+(`edaa946a37ccbf77f41fd82c3b80fd6c31fb2ea602800832f3a36f1a517967d3`
 and `3fe8872c3da9913c28d763f5561d82b67805aae5a6962c6dc403c7d6305da00c`,
 respectively); both are carried in evidence and must match across phases. The
 latter enumerates the

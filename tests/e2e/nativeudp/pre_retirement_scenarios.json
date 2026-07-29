@@ -329,7 +329,7 @@
     {
       "id": "transport.zero_http_packet_capture_and_route_counters",
       "owner": "qurl-go",
-      "status": "todo",
+      "status": "implemented",
       "test_name": "TestSandboxNativeUDPLifecycle/zero_lifecycle_http_packet_capture_and_route_counters",
       "requirement": "Capture the complete public Go SDK lifecycle and prove zero HTTP or relay packets plus zero per-client legacy lifecycle route counters while all required NHP UDP exchanges succeed."
     },
