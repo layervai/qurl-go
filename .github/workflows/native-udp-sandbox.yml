@@ -684,7 +684,7 @@ jobs:
           cmp -s "${pre_evidence}" "${pre_evidence_canonical}"
           cmp -s "${pre_inventory}" "${pre_inventory_canonical}"
           cmp -s "${pre_retired_surface}" "${pre_retired_surface_canonical}"
-          validate_manifest "${pre_manifest}" "pre_removal" "http_lifecycle_present" "${pre_head_sha}"
+          validate_manifest "${pre_manifest}" "pre_removal" "http_lifecycle_present" "${QURL_GO_SANDBOX_EXPECTED_SHA}"
           validate_runtime_inputs "${pre_runtime}" "${pre_manifest}"
           verify_repository_commits "${pre_manifest}"
           pre_runtime_sha256="$(sha256sum "${pre_runtime}" | cut -d' ' -f1)"
@@ -695,7 +695,7 @@ jobs:
             --arg repository "${GITHUB_REPOSITORY}" \
             --arg run_id "${QURL_GO_SANDBOX_PRE_REMOVAL_RUN_ID}" \
             --arg run_attempt "${pre_attempt}" \
-            --arg commit_sha "${pre_head_sha}" \
+            --arg commit_sha "${QURL_GO_SANDBOX_EXPECTED_SHA}" \
             --arg contract "${scenario_contract_sha256}" \
             --arg harness "${proof_harness_sha256}" \
             --arg inventory_sha "${inventory_sha256}" \
