@@ -1045,6 +1045,7 @@ jobs:
           rm -f -- "${delete_error}"
           export QURL_GO_SANDBOX_ENROLLMENT_CREDENTIAL="${credential}"
 
+          go mod download
           raw="${RUNNER_TEMP}/native-udp-sandbox.raw.json"
           adapter="tests/e2e/nativeudp/kms_sealed_adapter_aws_generated_test.go"
           printf '/%s\n' "${adapter}" >> "$(git rev-parse --git-path info/exclude)"
