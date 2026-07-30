@@ -1047,6 +1047,7 @@ jobs:
 
           raw="${RUNNER_TEMP}/native-udp-sandbox.raw.json"
           adapter="tests/e2e/nativeudp/kms_sealed_adapter_aws_generated_test.go"
+          printf '/%s\n' "${adapter}" >> "$(git rev-parse --git-path info/exclude)"
           cp tests/e2e/nativeudp/kms_sealed_adapter_aws_test.go.tmpl "${adapter}"
           recovery_directory="$(dirname "${QURL_GO_SANDBOX_RECOVERY_REQUEST_PATH}")"
           install -d -m 0700 "${recovery_directory}"
