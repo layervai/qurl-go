@@ -82,7 +82,7 @@ jobs:
     environment: sandbox
     env:
       QURL_GO_SANDBOX_STRICT: "true"
-      QURL_GO_SANDBOX_EXPECTED_SHA: ${{ github.sha }}
+      QURL_GO_SANDBOX_EXPECTED_SHA: 8d008270c911ae04ae8a82f62372c51e0d70b992
       QURL_GO_SANDBOX_AGENT_ID: qurl-go-sandbox-${{ inputs.nhp_controller_run_id }}-${{ inputs.nhp_controller_run_attempt }}
       QURL_GO_SANDBOX_KNOCK_RESOURCE_ID: ${{ vars.QURL_GO_SANDBOX_KNOCK_RESOURCE_ID }}
       QURL_GO_SANDBOX_EXPECTED_CELL_ID: ${{ vars.QURL_GO_SANDBOX_EXPECTED_CELL_ID }}
@@ -115,29 +115,39 @@ jobs:
       - name: Checkout exact build
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
+          ref: 8d008270c911ae04ae8a82f62372c51e0d70b992
           persist-credentials: false
 
       - name: Mint read-only proof-attestation token
         id: proof-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          app-id: ${{ secrets.OPS_ROUTINES_APP_ID }}
-          private-key: ${{ secrets.OPS_ROUTINES_APP_PRIVATE_KEY }}
-          owner: layervai
-          repositories: |
-            frp
-            nhp
-            qurl-go
-            qurl-integrations
-            qurl-mcp
-            qurl-python
-            qurl-reverse-tunnel-server
-            qurl-service
-            qurl-typescript
-            website
-          permission-actions: read
-          permission-contents: read
-          permission-pull-requests: read
+        env:
+          TOKEN: ${{ secrets.UDP_PROOF_FAST_GH_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${TOKEN}" ]]; then
+            echo "UDP_PROOF_FAST_GH_TOKEN is required" >&2
+            exit 1
+          fi
+          echo "::add-mask::${TOKEN}"
+          printf 'token=%s\n' "${TOKEN}" >> "${GITHUB_OUTPUT}"
+
+      - name: Install checksum-pinned GitHub CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/gh_2.96.0_linux_amd64.tar.gz"
+          install_dir="${RUNNER_TEMP}/gh-cli"
+          curl --fail --silent --show-error --location \
+            --output "${archive}" \
+            https://github.com/cli/cli/releases/download/v2.96.0/gh_2.96.0_linux_amd64.tar.gz
+          printf '%s  %s\n' \
+            83d5c2ccad5498f58bf6368acb1ab32588cf43ab3a4b1c301bf36328b1c8bd60 \
+            "${archive}" | sha256sum --check --strict
+          mkdir -p "${install_dir}"
+          tar -xzf "${archive}" -C "${install_dir}" --strip-components=1
+          printf '%s\n' "${install_dir}/bin" >> "${GITHUB_PATH}"
+          "${install_dir}/bin/gh" --version
 
       - name: Verify exact proof inputs
         env:
@@ -529,7 +539,7 @@ jobs:
             "${manifest_candidate}" \
             "${QURL_GO_SANDBOX_PROOF_PHASE}" \
             "${retirement_state}" \
-            "${GITHUB_SHA}"
+            "${QURL_GO_SANDBOX_EXPECTED_SHA}"
 
           validate_runtime_inputs "${runtime_candidate}" "${manifest_candidate}"
 
@@ -539,14 +549,14 @@ jobs:
           verify_repository_commits "${manifest}"
           candidate_pr="${RUNNER_TEMP}/qurl-go-pr-93.json"
           gh api "repos/${GITHUB_REPOSITORY}/pulls/93" > "${candidate_pr}"
-          jq -e --arg repository "${GITHUB_REPOSITORY}" --arg sha "${GITHUB_SHA}" '
+          jq -e --arg repository "${GITHUB_REPOSITORY}" --arg sha "${QURL_GO_SANDBOX_EXPECTED_SHA}" '
             .number == 93 and .state == "open" and
             .head.repo.full_name == $repository and .base.repo.full_name == $repository and
             .base.ref == "main" and .head.sha == $sha
           ' "${candidate_pr}" >/dev/null
           candidate_commit="${RUNNER_TEMP}/qurl-go-pr-93-commit.json"
-          gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}" > "${candidate_commit}"
-          jq -e --arg sha "${GITHUB_SHA}" '
+          gh api "repos/${GITHUB_REPOSITORY}/commits/${QURL_GO_SANDBOX_EXPECTED_SHA}" > "${candidate_commit}"
+          jq -e --arg sha "${QURL_GO_SANDBOX_EXPECTED_SHA}" '
             .sha == $sha and .commit.verification.verified == true
           ' "${candidate_commit}" >/dev/null
           chmod 0444 "${candidate_pr}" "${candidate_commit}"
@@ -902,6 +912,7 @@ jobs:
               "deployment-provenance.json",
               "deployment-runtime-inputs.json",
               "orchestrator-evidence.json",
+              "retirement-probe-targets.json",
           }
           entries = {entry.name: entry for entry in os.scandir(root)}
           if set(entries) != expected:
@@ -934,6 +945,47 @@ jobs:
 
       - name: Validate exact retirement inventory
         run: go test -count=1 ./tests/e2e/nativeudp -run '^(TestPreRetirementScenarioInventory|TestRetiredLifecycleSurfaceContract)$'
+
+      - name: Install checksum-pinned AWS CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/awscliv2.zip"
+          installer_dir="${RUNNER_TEMP}/awscli-installer"
+          install_dir="${RUNNER_TEMP}/aws-cli"
+          bin_dir="${RUNNER_TEMP}/aws-cli-bin"
+
+          curl --fail --silent --show-error --location \
+            --proto '=https' --tlsv1.2 \
+            --retry 4 --retry-all-errors --connect-timeout 10 --max-time 300 \
+            --output "${archive}" \
+            https://awscli.amazonaws.com/awscli-exe-linux-x86_64-2.36.11.zip
+          printf '%s  %s\n' \
+            '50fbb7a2f44a78eab4a210088040e8f0bc4b9937cac8043c2354269d58614df6' \
+            "${archive}" | sha256sum --check --strict
+          python3 - "${archive}" "${installer_dir}" <<'PY'
+          import pathlib
+          import stat
+          import sys
+          import zipfile
+
+          archive = pathlib.Path(sys.argv[1])
+          destination = pathlib.Path(sys.argv[2]).resolve()
+          with zipfile.ZipFile(archive) as bundle:
+              for entry in bundle.infolist():
+                  target = (destination / entry.filename).resolve()
+                  if target != destination and destination not in target.parents:
+                      raise SystemExit(f"unsafe AWS CLI archive entry: {entry.filename}")
+                  bundle.extract(entry, destination)
+                  mode = stat.S_IMODE(entry.external_attr >> 16)
+                  if mode and target.exists():
+                      target.chmod(mode)
+          PY
+          "${installer_dir}/aws/install" \
+            --bin-dir "${bin_dir}" \
+            --install-dir "${install_dir}"
+          printf '%s\n' "${bin_dir}" >> "${GITHUB_PATH}"
+          "${bin_dir}/aws" --version
 
       - name: Run strict direct UDP proof
         id: strict
@@ -1403,7 +1455,7 @@ jobs:
           provenance='null'
           if [[ "${inputs_unchanged}" == "true" && -s "${provenance_path}" ]] && jq -e \
             --slurpfile deployment "${deployment}" \
-            --arg build_sha "${GITHUB_SHA}" \
+            --arg build_sha "${QURL_GO_SANDBOX_EXPECTED_SHA}" \
             --arg agent_id "${QURL_GO_SANDBOX_AGENT_ID}" \
             --arg deployment_manifest_sha256 "${QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_SHA256}" \
             --arg typed_evidence_contract_sha256 "${QURL_GO_SANDBOX_TYPED_EVIDENCE_CONTRACT_SHA256}" '
@@ -1470,7 +1522,7 @@ jobs:
 
           jq -cS -j -n \
             --arg repository "${GITHUB_REPOSITORY}" \
-            --arg commit_sha "${GITHUB_SHA}" \
+            --arg commit_sha "${QURL_GO_SANDBOX_EXPECTED_SHA}" \
             --arg run_id "${GITHUB_RUN_ID}" \
             --arg run_attempt "${GITHUB_RUN_ATTEMPT}" \
             --arg dispatch_correlation_id "${QURL_GO_SANDBOX_DISPATCH_CORRELATION_ID}" \
