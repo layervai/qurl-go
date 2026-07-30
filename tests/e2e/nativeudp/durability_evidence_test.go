@@ -201,14 +201,11 @@ func runProductionStateMachineProofs(t *testing.T, exactTests []string) {
 	)
 	command.Dir = root
 	command.Env = productionProofEnvironment(os.Environ())
-	var stdout, stderr bytes.Buffer
-	command.Stdout = &stdout
-	command.Stderr = &stderr
-	runErr := command.Run()
-	if stdout.Len()+stderr.Len() > maxProductionTestBytes {
+	output, runErr := command.CombinedOutput()
+	if len(output) > maxProductionTestBytes {
 		t.Fatalf("production proof output exceeded %d bytes", maxProductionTestBytes)
 	}
-	if err := validateProductionProofEvents(stdout.Bytes(), exactTests); err != nil {
+	if err := validateProductionProofEvents(output, exactTests); err != nil {
 		t.Fatalf("production state-machine evidence failed: %v", err)
 	}
 	if runErr != nil {
