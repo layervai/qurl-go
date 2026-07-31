@@ -11,6 +11,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"runtime/debug"
 	"slices"
 	"strings"
@@ -38,10 +40,65 @@ func refuseRedirects(_ *http.Request, _ []*http.Request) error {
 	return http.ErrUseLastResponse
 }
 
-// DefaultIssuerStatePath is the default local LayerV credential path used by
-// OpenClient. Most applications should call OpenClient rather than reading this
-// file directly.
+// DefaultIssuerStatePath is the machine-wide LayerV credential path used by
+// OpenClient when no more specific credential is configured. Most applications
+// should call OpenClient rather than reading this file directly.
 const DefaultIssuerStatePath = "/var/lib/layerv/qurl/issuer-state.json"
+
+// EnvAPIKey and EnvAPIKeyFile name the credential a developer already has.
+//
+// OpenClient used to read ONLY DefaultIssuerStatePath — a root-owned system path
+// holding a hand-authored JSON document. That made the three-line issuing
+// example untrue for anyone who simply holds a LayerV API key: before writing a
+// line of Go they had to become root, hand-write a JSON file, and get its mode
+// right. The Connector already accepted QURL_API_KEY and QURL_API_KEY_FILE; the
+// SDK was the inconsistent one.
+const (
+	EnvAPIKey     = "QURL_API_KEY"
+	EnvAPIKeyFile = "QURL_API_KEY_FILE"
+)
+
+// UserIssuerStatePath is the per-user credential file, relative to the home
+// directory. It is the same location the Connector installer writes with
+// --token, so installing the Connector and using the SDK share one credential
+// rather than each demanding their own.
+const UserIssuerStatePath = ".config/qurl/token"
+
+// resolveCredentials picks the credential in the order a developer expects, most
+// specific first:
+//
+//  1. an explicit WithIssuerStatePath (or equivalent option)
+//  2. QURL_API_KEY — the key itself, for containers and CI
+//  3. QURL_API_KEY_FILE — a path, for mounted secrets that should stay on disk
+//  4. ~/.config/qurl/token — what the Connector installer already wrote
+//  5. /var/lib/layerv/qurl/issuer-state.json — the machine-wide default
+//
+// Every source is checked for existence before it is chosen, so a stale
+// environment variable pointing at a deleted file falls through rather than
+// failing the process with a confusing read error.
+func resolveCredentials(explicitPath string) (CredentialProvider, error) {
+	if explicitPath != "" {
+		return FileCredentials(explicitPath), nil
+	}
+	if token := strings.TrimSpace(os.Getenv(EnvAPIKey)); token != "" {
+		return BearerToken(token), nil
+	}
+	if path := strings.TrimSpace(os.Getenv(EnvAPIKeyFile)); path != "" {
+		// An explicitly named file that does not exist is a configuration error,
+		// not a reason to silently authenticate as somebody else.
+		if _, err := os.Stat(path); err != nil {
+			return nil, fmt.Errorf("%w: %s=%s: %w", ErrInvalidClientConfig, EnvAPIKeyFile, path, err)
+		}
+		return FileCredentials(path), nil
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		userPath := filepath.Join(home, UserIssuerStatePath)
+		if _, err := os.Stat(userPath); err == nil {
+			return FileCredentials(userPath), nil
+		}
+	}
+	return FileCredentials(DefaultIssuerStatePath), nil
+}
 
 // ErrInvalidClientConfig is returned when a Client cannot be configured.
 var ErrInvalidClientConfig = errors.New("qurl: invalid client config")
@@ -474,11 +531,10 @@ func OpenClientContext(ctx context.Context, opts ...ClientOption) (*Client, erro
 	if err != nil {
 		return nil, err
 	}
-	statePath := DefaultIssuerStatePath
-	if cfg.issuerStatePath != "" {
-		statePath = cfg.issuerStatePath
+	provider, err := resolveCredentials(cfg.issuerStatePath)
+	if err != nil {
+		return nil, err
 	}
-	provider := FileCredentials(statePath)
 	client := &Client{
 		credentials: provider,
 		baseURL:     cfg.baseURL,

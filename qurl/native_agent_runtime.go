@@ -425,7 +425,15 @@ func newNativeAgentRuntimeConfig(opts []AgentRuntimeRegistrationOption) (*native
 		}
 	}
 	if c.hub == nil {
-		return nil, fmt.Errorf("%w: WithAgentRuntimeHub is required", ErrInvalidRegisterConfig)
+		// Fall back to the hub this build ships. An explicit option still wins,
+		// so nothing that already passes WithAgentRuntimeHub changes behavior;
+		// this only removes the requirement that every integrator retype the
+		// Hub host, port, and X25519 key it had to source out of band.
+		hub, err := deploymentHub()
+		if err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrInvalidRegisterConfig, err)
+		}
+		c.hub = hub
 	}
 	if _, err := c.hub.nativeEndpoint(); err != nil {
 		return nil, fmt.Errorf("%w: Hub trust root: %w", ErrInvalidRegisterConfig, err)
