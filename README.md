@@ -263,13 +263,24 @@ storage contract, recovery boundaries, and error table.
 ## Opening Links
 
 Most recipients open qURL links directly and do not use this SDK. Programmatic
-recipients install opener trust configuration and call:
+recipients call:
 
 ```go
 portal, err := qurl.EnterPortal(ctx, link)
 ```
 
-`EnterPortal` fails closed when no provider is installed.
+That is the whole integration. The SDK ships the issuer keys it trusts and the
+cells it can reach, so there is no trust configuration to assemble first.
+
+`EnterPortal` verifies the link's issuer signature, then knocks the cell named
+by those verified claims **directly over UDP** — the HTTPS relay exists so that
+browsers, which cannot send UDP, can still deliver a knock. A link naming a cell
+this build does not know falls back to the relay automatically.
+
+To point the SDK at a different deployment (self-hosted, or a sandbox), set
+`QURL_DEPLOYMENT` to a deployment JSON file; to take full programmatic control,
+install a `Provider` with `SetDefaultProvider`. A build that ships no issuer keys
+fails closed rather than opening a link it cannot verify.
 
 ## Guides
 
