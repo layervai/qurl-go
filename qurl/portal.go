@@ -20,6 +20,7 @@ import (
 
 	"github.com/layervai/qurl-go/internal/qv2"
 	"github.com/layervai/qurl-go/relayknock"
+	"github.com/layervai/qurl-go/relayknock/nativeudp"
 )
 
 // Config carries opener configuration for EnterPortalWith. Most applications
@@ -28,11 +29,18 @@ import (
 type Config struct {
 	// TrustStore resolves trusted issuer keys. REQUIRED.
 	TrustStore *TrustStore
-	// RelayAllowlist is the qURL platform access endpoint allowlist. REQUIRED.
+	// Cells maps cell id to native NHP UDP endpoint. When the verified link names
+	// a cell in this catalog the knock goes straight there over UDP and the relay
+	// is never contacted, so RelayAllowlist and HTTPClient are unused for that
+	// open. Optional; nil routes every open through the relay.
+	Cells *CellCatalog
+	// RelayAllowlist is the qURL platform access endpoint allowlist. REQUIRED
+	// unless Cells covers every link this opener will see — it gates the relay
+	// path only, and there is no relay to gate on the native UDP path.
 	RelayAllowlist *RelayAllowlist
-	// HTTPClient is the client used for the qURL platform request. Optional; nil
-	// uses the default client. Advanced callers with fixed-egress requirements can
-	// supply their own client.
+	// HTTPClient is the client used for the relay request. Optional; nil uses the
+	// default client. Advanced callers with fixed-egress requirements can supply
+	// their own client. Unused on the native UDP path.
 	HTTPClient HTTPDoer
 }
 
@@ -73,7 +81,16 @@ func EnterPortal(ctx context.Context, qurlLink string) (*ResourceHandle, error) 
 // EnterPortalWith opens a qURL link using the supplied Config. It is the
 // injectable seam behind EnterPortal for tests and advanced callers.
 func EnterPortalWith(ctx context.Context, qurlLink string, cfg Config) (*ResourceHandle, error) {
-	if cfg.TrustStore == nil || cfg.RelayAllowlist == nil {
+	// A trust store is always required: nothing below runs on unverified claims.
+	if cfg.TrustStore == nil {
+		return nil, ErrNotConfigured
+	}
+	// With neither a cell catalog nor a relay allowlist there is no transport this
+	// open could ever use. That is a configuration fault, not a link fault, so it
+	// is reported here — before parsing — and every link fails it identically.
+	// Which of the two is actually needed depends on the cell the claims name, so
+	// that check necessarily happens after verification.
+	if cfg.Cells == nil && cfg.RelayAllowlist == nil {
 		return nil, ErrNotConfigured
 	}
 
@@ -86,18 +103,29 @@ func EnterPortalWith(ctx context.Context, qurlLink string, cfg Config) (*Resourc
 	}
 	claims := frag.Claims
 
-	// 3. The platform access URL is now trusted to act on; validate HTTPS and
-	// the configured allowlist before making a request.
-	if err := qv2.ValidateRelayURL(claims.RelayURL, cfg.RelayAllowlist.core()); err != nil {
-		return nil, err
-	}
-
-	// 4. Decode the verified platform access key used by the wire request.
+	// 3. Decode the verified platform access key. It both encrypts the knock and
+	// identifies the cell — the relay routes by a fingerprint of this same key —
+	// so it must be in hand before a transport can be chosen.
 	cellPub, err := qv2.DecodeCellPublicKey(claims)
 	if err != nil {
 		// Unreachable in practice: a verified claim already passed the parser's
 		// 32-byte platform access key length check. Kept as defense in depth.
 		return nil, fmt.Errorf("qurl: decode verified platform access key: %w", err)
+	}
+
+	// 4. Choose the transport. The knock is the same opaque NHP packet either
+	// way; the relay is a browser compatibility shim, not part of the protocol.
+	// A cell we know how to reach is knocked directly over UDP, dropping the
+	// relay and every HTTP dependency with it. Otherwise fall back to the relay,
+	// whose URL must clear the allowlist before it is acted on.
+	cellEndpoint, useNativeUDP := cfg.Cells.lookup(cellPub)
+	if !useNativeUDP {
+		if cfg.RelayAllowlist == nil {
+			return nil, ErrNotConfigured
+		}
+		if err := qv2.ValidateRelayURL(claims.RelayURL, cfg.RelayAllowlist.core()); err != nil {
+			return nil, err
+		}
 	}
 
 	// 5. Build the platform access request from the link's per-qURL key, the
@@ -113,11 +141,25 @@ func EnterPortalWith(ctx context.Context, qurlLink string, cfg Config) (*Resourc
 
 	// 6. Ask the qURL platform for one-shot access using the in-link key. The
 	// caller's egress IP is the one the platform opens access for (see
-	// ResourceHandle).
-	reply, err := relayknock.Knock(ctx, claims.RelayURL, cellPub, body, relayknock.KnockOptions{
-		HTTPClient:       cfg.HTTPClient,
-		DeviceStaticPriv: devicePriv,
-	})
+	// ResourceHandle) — that holds on both transports, since either way the
+	// packet arrives from this process.
+	//
+	// The reply is authenticated to cellPub, which came from the verified claims.
+	// That is what makes the carrier untrusted: a relay cannot forge a reply or
+	// substitute a resource URL, and neither can anything on the UDP path.
+	var reply *relayknock.Reply
+	if useNativeUDP {
+		reply, err = nativeudp.Knock(ctx, nativeudp.Endpoint{
+			Host:            cellEndpoint.Host,
+			Port:            cellEndpoint.Port,
+			ServerStaticPub: cellPub,
+		}, body, nativeudp.Options{DeviceStaticPriv: devicePriv})
+	} else {
+		reply, err = relayknock.Knock(ctx, claims.RelayURL, cellPub, body, relayknock.KnockOptions{
+			HTTPClient:       cfg.HTTPClient,
+			DeviceStaticPriv: devicePriv,
+		})
+	}
 	if err != nil {
 		return nil, normalizeRelayError(err, ErrMalformedReply)
 	}
@@ -213,11 +255,34 @@ func interpretReply(reply *relayknock.Reply) (*ResourceHandle, error) {
 func resolveDefaultConfig(ctx context.Context) (Config, error) {
 	p := DefaultProvider()
 	if p == nil {
-		return Config{}, ErrNotConfigured
+		// No provider installed is the COMMON case, not an error: fall back to the
+		// deployment this build ships (or the QURL_DEPLOYMENT override). That is
+		// what lets an integrator call EnterPortal with no setup at all.
+		return defaultDeploymentConfig()
 	}
 	ts, allow, err := p.Resolve(ctx)
 	if err != nil {
 		return Config{}, err
 	}
-	return Config{TrustStore: ts, RelayAllowlist: allow}, nil
+	cfg := Config{TrustStore: ts, RelayAllowlist: allow}
+	// A provider that also knows the deployment's cells opts into native UDP by
+	// implementing CellProvider. Providers that predate cells keep working
+	// unchanged and simply route through the relay.
+	if cp, ok := p.(CellProvider); ok {
+		cells, err := cp.ResolveCells(ctx)
+		if err != nil {
+			return Config{}, err
+		}
+		cfg.Cells = cells
+	}
+	return cfg, nil
+}
+
+// CellProvider is an optional Provider extension that also supplies the
+// deployment's native UDP cell catalog. A Provider that implements it lets
+// EnterPortal knock cells directly instead of through the relay; one that does
+// not is unaffected.
+type CellProvider interface {
+	Provider
+	ResolveCells(ctx context.Context) (*CellCatalog, error)
 }
