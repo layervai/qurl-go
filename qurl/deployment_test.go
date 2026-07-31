@@ -144,17 +144,30 @@ func TestLoadDeploymentRejectsUnknownFields(t *testing.T) {
 // list would look configured while rejecting every host — the open would die
 // later at relay validation with a far less obvious diagnostic.
 func TestDeploymentRejectsBlankOnlyRelayAllowlist(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "deployment.json")
-	body := `{"issuers":[{"kid":"k","spki_der_b64":"x"}],"relay_allowlist":["  ",""]}`
-	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	d, err := LoadDeployment(path)
+	// The issuer key must be VALID. With a bogus key the config would fail in
+	// buildTrustMaterial before the blank-only branch is ever reached, and this
+	// test would pass even if that guard were deleted — proving nothing.
+	vf, err := qv2.LoadVectorBytes(conformance.IssuerSignatureVectors())
 	if err != nil {
-		t.Fatalf("load: %v", err)
+		t.Fatalf("load signature vectors: %v", err)
 	}
-	if _, err := d.config(); err == nil {
+	d := &Deployment{
+		Issuers:        []ManifestIssuer{{Kid: vf.Issuer.KID, SPKIDERB64: vf.Issuer.SPKIDERB64}},
+		RelayAllowlist: []string{"  ", ""},
+	}
+	_, err = d.config()
+	if err == nil {
 		t.Fatal("a blank-only relay allowlist was accepted")
+	}
+	if !errors.Is(err, ErrNotConfigured) || !strings.Contains(err.Error(), "blank") {
+		t.Fatalf("failed for the wrong reason, want the blank-allowlist guard: %v", err)
+	}
+
+	// Control: the same deployment with one usable entry must succeed, which is
+	// what proves the rejection above came from blankness and nothing else.
+	d.RelayAllowlist = []string{"  ", "relay.example.com"}
+	if _, err := d.config(); err != nil {
+		t.Fatalf("a deployment with one usable relay entry was rejected: %v", err)
 	}
 }
 

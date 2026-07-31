@@ -94,8 +94,12 @@ func NewCellCatalog(entries []CellEntry) (*CellCatalog, error) {
 		// or silently drop a cell so its links quietly fall back to the relay.
 		// buildTrustMaterial rejects duplicate issuer kids for the same reason.
 		if prior, dup := byFingerprint[fingerprint]; dup {
+			priorLabel := strings.TrimSpace(prior.CellID)
+			if priorLabel == "" {
+				priorLabel = "(unlabelled cell)"
+			}
 			return nil, fmt.Errorf(
-				"qurl: cells %s and %s share a server public key", prior.CellID, entry.CellID)
+				"qurl: cells %s and %s share a server public key", priorLabel, label)
 		}
 		byFingerprint[fingerprint] = CellEndpoint{
 			CellID: entry.CellID, Host: host, Port: entry.Port,
