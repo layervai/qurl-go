@@ -15,5 +15,10 @@ func ExampleEnterPortal() {
 	if err != nil {
 		return
 	}
+	// The placeholder link cannot verify, so EnterPortal returns above and this
+	// never prints. The empty Output directive below is what makes `go test`
+	// actually RUN this example rather than only compile it.
 	fmt.Println(handle.ResourceURL)
+
+	// Output:
 }
