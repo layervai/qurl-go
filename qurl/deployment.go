@@ -61,6 +61,10 @@ var ErrNoDeployment = fmt.Errorf("%w: no issuer keys are configured (set %s)", E
 
 // LoadDeployment reads and validates a deployment JSON file.
 func LoadDeployment(path string) (*Deployment, error) {
+	// #nosec G304 G703 -- reading an operator-chosen path is this function's entire
+	// purpose: QURL_DEPLOYMENT names the deployment file. The contents are
+	// non-secret public trust config and are fully validated below; a caller who
+	// can set this path can already set anything else about the process.
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("qurl: read deployment %s: %w", path, err)

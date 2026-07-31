@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"path/filepath"
 	"testing"
 )
 
@@ -51,16 +52,23 @@ func countBudgetedStatements(fn *ast.FuncDecl) int {
 // quietly diverge from what customers are told to write.
 func TestBasicScenariosStayWithinFrictionBudget(t *testing.T) {
 	fset := token.NewFileSet()
-	// Scan the whole package rather than one file, so an example may live
-	// wherever it fits and can never dodge the budget by moving.
-	pkgs, err := parser.ParseDir(fset, ".", nil, parser.SkipObjectResolution)
+	// Scan every test file rather than one, so an example may live wherever it
+	// fits and can never dodge the budget by moving.
+	paths, err := filepath.Glob("*_test.go")
 	if err != nil {
-		t.Fatalf("parse package: %v", err)
+		t.Fatalf("glob test files: %v", err)
+	}
+	if len(paths) == 0 {
+		t.Fatal("no test files found; the budget would vacuously pass")
 	}
 
 	seen := map[string]bool{}
-	for _, pkg := range pkgs {
-		for _, file := range pkg.Files {
+	for _, path := range paths {
+		file, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatalf("parse %s: %v", path, err)
+		}
+		{
 			for _, decl := range file.Decls {
 				fn, ok := decl.(*ast.FuncDecl)
 				if !ok || fn.Body == nil {
