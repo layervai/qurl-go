@@ -157,3 +157,17 @@ func TestDeploymentRejectsBlankOnlyRelayAllowlist(t *testing.T) {
 		t.Fatal("a blank-only relay allowlist was accepted")
 	}
 }
+
+// TestLoadDeploymentRejectsTrailingData proves a second concatenated JSON value
+// is rejected rather than silently ignored. A deployment file describes trust,
+// so it gets the same strictness as an authenticated discovery manifest.
+func TestLoadDeploymentRejectsTrailingData(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "deployment.json")
+	body := `{"issuers":[]}{"issuers":[{"kid":"sneaky","spki_der_b64":"x"}]}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, err := LoadDeployment(path); err == nil {
+		t.Fatal("trailing JSON after the deployment object was silently ignored")
+	}
+}

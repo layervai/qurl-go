@@ -1,9 +1,7 @@
 package qurl
 
 import (
-	"bytes"
 	_ "embed"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -75,10 +73,11 @@ func LoadDeployment(path string) (*Deployment, error) {
 
 func parseDeployment(raw []byte, source string) (*Deployment, error) {
 	var d Deployment
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	// A typo'd or stale field is a silent trust misconfiguration otherwise.
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&d); err != nil {
+	// Reuse the manifest path's strict decoder rather than a looser local one:
+	// both files describe trust, so both should reject an unknown field (a typo
+	// or stale key silently ignored) and trailing data (a second concatenated
+	// value silently dropped) identically.
+	if err := strictDecodeJSON(raw, &d); err != nil {
 		return nil, fmt.Errorf("qurl: parse deployment %s: %w", source, err)
 	}
 	return &d, nil
