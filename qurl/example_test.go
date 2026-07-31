@@ -129,13 +129,10 @@ func ExampleRegisterAgentRuntime() {
 	// durable qurl:agent kind, and rejects account enrollment.
 	ctx := context.Background()
 	store := qurl.FileAgentState("/var/lib/layerv/qurl/agent-state.json")
-	hub := qurl.HubBootstrap{
-		Host:               "hub.nhp.layerv.ai",
-		Port:               62206,
-		ServerPublicKeyB64: configuredHubPublicKeyB64(),
-	}
+	// No hub wiring: the SDK ships the Hub trust root for the deployment it was
+	// built to talk to. WithAgentRuntimeHub still overrides it when an operator
+	// runs their own Hub.
 	client, binding, err := qurl.RegisterAgentRuntime(ctx, enrollmentCredentialFromInstaller(), store,
-		qurl.WithAgentRuntimeHub(hub),
 		qurl.WithAgentRuntimeMetadata("connector-host", "1.0.0"),
 	)
 	if err != nil {

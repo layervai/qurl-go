@@ -52,7 +52,40 @@ type Deployment struct {
 	Cells []DeploymentCell `json:"cells"`
 	// RelayAllowlist gates the relay fallback for cells absent from Cells.
 	RelayAllowlist []string `json:"relay_allowlist"`
+	// Hub is the single pinned Hub trust root an agent registers against. It is
+	// the same class of fact as Cells -- where a LayerV-operated endpoint lives
+	// and which key identifies it -- so it belongs in the same shipped file
+	// rather than being retyped by every integrator. Optional: a deployment that
+	// only opens links needs no hub, and an explicit WithAgentRuntimeHub still
+	// wins over whatever is shipped here.
+	Hub *HubBootstrap `json:"hub,omitempty"`
 }
+
+// deploymentHub returns the shipped Hub trust root, if this build has one.
+//
+// Registration used to demand that every caller hand-assemble HubBootstrap from
+// a host, a port, and a base64 X25519 key it had to source out of band. That is
+// the same "install the trust configuration yourself" step that made opening a
+// link a hundred-line exercise, and it has the same fix: the SDK already knows
+// the deployment it was built to talk to.
+func deploymentHub() (*HubBootstrap, error) {
+	d, err := resolveDeployment()
+	if err != nil {
+		return nil, err
+	}
+	if d == nil || d.Hub == nil {
+		return nil, ErrNoDeploymentHub
+	}
+	hub := *d.Hub
+	return &hub, nil
+}
+
+// ErrNoDeploymentHub reports that neither an explicit WithAgentRuntimeHub nor a
+// shipped deployment hub was available.
+var ErrNoDeploymentHub = fmt.Errorf(
+	"%w: no Hub trust root is configured (pass WithAgentRuntimeHub, or set %s to a deployment file with a \"hub\")",
+	ErrNotConfigured, EnvDeploymentPath,
+)
 
 // ErrNoDeployment reports that this build ships no issuer keys and no override
 // was supplied, so there is nothing to verify links against.
@@ -142,15 +175,19 @@ func (d *Deployment) config() (Config, error) {
 
 // defaultDeploymentConfig resolves opener config from the environment override
 // or the shipped deployment, in that order.
-func defaultDeploymentConfig() (Config, error) {
+// resolveDeployment applies the deployment precedence exactly once: an explicit
+// QURL_DEPLOYMENT file if set, otherwise whatever this build shipped. Both the
+// opener config and the agent hub read through it so the two can never disagree
+// about which deployment description is in effect.
+func resolveDeployment() (*Deployment, error) {
 	if path := strings.TrimSpace(os.Getenv(EnvDeploymentPath)); path != "" {
-		d, err := LoadDeployment(path)
-		if err != nil {
-			return Config{}, err
-		}
-		return d.config()
+		return LoadDeployment(path)
 	}
-	d, err := parseDeployment(shippedDeploymentJSON, "(shipped)")
+	return parseDeployment(shippedDeploymentJSON, "(shipped)")
+}
+
+func defaultDeploymentConfig() (Config, error) {
+	d, err := resolveDeployment()
 	if err != nil {
 		return Config{}, err
 	}

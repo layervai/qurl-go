@@ -21,13 +21,51 @@ import (
 //
 // Raising a budget is a product decision. If a change cannot fit, the correct
 // fix is nearly always to move the work into the SDK, not to raise the number.
+// Every scenario a customer performs is budgeted. Leaving one untracked is how
+// the opener silently grew to ~115 lines: nothing measured it, so nothing failed
+// when it got worse. A new exported entry point that a customer is expected to
+// call belongs here on the same commit that adds it.
 var frictionBudget = map[string]int{
+	// --- Opening -------------------------------------------------------------
 	// Verify a link and get a reachable URL. One call. No setup, no trust
 	// wiring, no transport selection — the SDK ships what it knows about the
 	// deployment it talks to.
 	"ExampleEnterPortal": 2,
+
+	// --- Issuing -------------------------------------------------------------
 	// Protect a URL and mint a link: open client, protect, create.
-	"ExampleOpenClient": 3,
+	"ExampleOpenClient":                     3,
+	"ExampleClient_ProtectURL":              3,
+	"ExampleClient_EnsureConnectorResource": 3,
+	"ExampleClient_CreatePortal":            4,
+	"ExampleNewClient":                      5,
+	// The package overview: open a client, protect, create, print.
+	"Example": 4,
+
+	// --- Agent runtime -------------------------------------------------------
+	// Registration is the highest-friction scenario in the SDK and the one an
+	// integrator hits first. It was 12; removing the hand-assembled Hub trust
+	// root (the SDK now ships it, exactly as it ships issuer keys and cells)
+	// brought it to 11.
+	//
+	// 11 is the honest floor, not a concession. What remains is:
+	//   open agent state / register / take the device key / ensure the resource
+	//   / mint a cycle run ID / knock — plus the three defers that release the
+	//   store, the binding, and the key material.
+	//
+	// Two of those look removable and are not:
+	//   - The device static private key is taken and cleared explicitly. Hiding
+	//     that inside the SDK would keep key material live longer than the
+	//     caller can see or control.
+	//   - The cycle RunID is caller-owned by frozen contract (issue #66): it is
+	//     generated once per knock/service cycle and REUSED across every retry
+	//     and reconnect. An SDK-generated ID would mint a fresh value per call
+	//     and silently break retry correlation.
+	// Lower this only by moving real work into the SDK, never by weakening
+	// either of those.
+	"ExampleRegisterAgentRuntime":    11,
+	"ExampleRecoverAgentRuntime":     7,
+	"ExampleNewSealedFileAgentState": 5,
 }
 
 // countBudgetedStatements counts top-level statements in fn, skipping the
