@@ -139,3 +139,84 @@ func TestEnterPortalWith_NoTransportConfiguredFailsBeforeParsing(t *testing.T) {
 		t.Fatalf("want ErrNotConfigured for a transportless config, got %v", err)
 	}
 }
+
+// cellAwareProvider is a Provider that also supplies a cell catalog, i.e. one
+// that opts into native UDP through the CellProvider extension.
+type cellAwareProvider struct {
+	trust      *TrustStore
+	allow      *RelayAllowlist
+	cells      *CellCatalog
+	cellsErr   error
+	cellsCalls int
+}
+
+func (p *cellAwareProvider) Resolve(context.Context) (*TrustStore, *RelayAllowlist, error) {
+	return p.trust, p.allow, nil
+}
+
+func (p *cellAwareProvider) ResolveCells(context.Context) (*CellCatalog, error) {
+	p.cellsCalls++
+	return p.cells, p.cellsErr
+}
+
+// TestEnterPortal_CellProviderRoutesOverNativeUDP proves the CellProvider
+// extension actually reaches the transport: a provider that returns a catalog
+// covering the link's cell gets a native UDP open, not a relay one.
+func TestEnterPortal_CellProviderRoutesOverNativeUDP(t *testing.T) {
+	link, trust, _ := vendoredAcceptLink(t)
+	provider := &cellAwareProvider{
+		trust: trust,
+		allow: NewRelayAllowlist([]string{"relay.example.com"}),
+		cells: unreachableCellCatalog(t, vectorCellKeyB64(t)),
+	}
+	prior := DefaultProvider()
+	SetDefaultProvider(provider)
+	t.Cleanup(func() { SetDefaultProvider(prior) })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	_, err := EnterPortal(ctx, link)
+	if provider.cellsCalls != 1 {
+		t.Fatalf("ResolveCells called %d times, want 1", provider.cellsCalls)
+	}
+	if err == nil || !strings.Contains(err.Error(), "nativeudp:") {
+		t.Fatalf("CellProvider did not route over native UDP: %v", err)
+	}
+}
+
+// TestEnterPortal_CellProviderErrorFailsClosed proves a provider that cannot
+// resolve its cells refuses the open instead of quietly falling back to the
+// relay — a catalog that failed to load is unknown state, not "no cells".
+func TestEnterPortal_CellProviderErrorFailsClosed(t *testing.T) {
+	link, trust, _ := vendoredAcceptLink(t)
+	provider := &cellAwareProvider{
+		trust:    trust,
+		allow:    NewRelayAllowlist([]string{"relay.example.com"}),
+		cellsErr: errors.New("catalog unavailable"),
+	}
+	prior := DefaultProvider()
+	SetDefaultProvider(provider)
+	t.Cleanup(func() { SetDefaultProvider(prior) })
+
+	_, err := EnterPortal(context.Background(), link)
+	if err == nil || !strings.Contains(err.Error(), "catalog unavailable") {
+		t.Fatalf("a ResolveCells failure did not fail the open: %v", err)
+	}
+}
+
+// TestNewCellCatalogRejectsDuplicateKeys proves two entries for one cell key is
+// a construction error rather than a silent last-wins.
+func TestNewCellCatalogRejectsDuplicateKeys(t *testing.T) {
+	key := vectorCellKeyB64(t)
+	_, err := NewCellCatalog([]CellEntry{
+		{ServerPublicKeyB64: key, CellID: "cell-a", Host: "a.example.com", Port: 62206},
+		{ServerPublicKeyB64: key, CellID: "cell-b", Host: "b.example.com", Port: 62206},
+	})
+	if err == nil {
+		t.Fatal("duplicate cell keys were silently collapsed")
+	}
+	if !strings.Contains(err.Error(), "cell-a") || !strings.Contains(err.Error(), "cell-b") {
+		t.Fatalf("error does not name both colliding cells: %v", err)
+	}
+}

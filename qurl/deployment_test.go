@@ -138,3 +138,22 @@ func TestLoadDeploymentRejectsUnknownFields(t *testing.T) {
 		t.Fatal("a misspelled trust field was accepted")
 	}
 }
+
+// TestDeploymentRejectsBlankOnlyRelayAllowlist proves a relay_allowlist of only
+// blank entries is rejected at load. NewRelayAllowlist drops blanks, so such a
+// list would look configured while rejecting every host — the open would die
+// later at relay validation with a far less obvious diagnostic.
+func TestDeploymentRejectsBlankOnlyRelayAllowlist(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "deployment.json")
+	body := `{"issuers":[{"kid":"k","spki_der_b64":"x"}],"relay_allowlist":["  ",""]}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	d, err := LoadDeployment(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if _, err := d.config(); err == nil {
+		t.Fatal("a blank-only relay allowlist was accepted")
+	}
+}

@@ -88,7 +88,16 @@ func NewCellCatalog(entries []CellEntry) (*CellCatalog, error) {
 		if entry.Port <= 0 || entry.Port > 65535 {
 			return nil, fmt.Errorf("qurl: cell %s has out-of-range port %d", label, entry.Port)
 		}
-		byFingerprint[relayknock.PubKeyFingerprint(key)] = CellEndpoint{
+		fingerprint := relayknock.PubKeyFingerprint(key)
+		// Two entries for one cell key is a misconfiguration, not a preference:
+		// last-wins would silently pick an address the operator did not intend,
+		// or silently drop a cell so its links quietly fall back to the relay.
+		// buildTrustMaterial rejects duplicate issuer kids for the same reason.
+		if prior, dup := byFingerprint[fingerprint]; dup {
+			return nil, fmt.Errorf(
+				"qurl: cells %s and %s share a server public key", prior.CellID, entry.CellID)
+		}
+		byFingerprint[fingerprint] = CellEndpoint{
 			CellID: entry.CellID, Host: host, Port: entry.Port,
 		}
 	}

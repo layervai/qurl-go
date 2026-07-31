@@ -1,6 +1,7 @@
 package qurl
 
 import (
+	"bytes"
 	_ "embed"
 	"encoding/json"
 	"errors"
@@ -74,7 +75,7 @@ func LoadDeployment(path string) (*Deployment, error) {
 
 func parseDeployment(raw []byte, source string) (*Deployment, error) {
 	var d Deployment
-	decoder := json.NewDecoder(strings.NewReader(string(raw)))
+	decoder := json.NewDecoder(bytes.NewReader(raw))
 	// A typo'd or stale field is a silent trust misconfiguration otherwise.
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&d); err != nil {
@@ -102,7 +103,20 @@ func (d *Deployment) config() (Config, error) {
 	}
 
 	cfg := Config{TrustStore: trust}
-	if len(d.RelayAllowlist) > 0 {
+	// A list of only blank entries is not an allowlist — NewRelayAllowlist drops
+	// blanks, so it would yield one that rejects every host while still looking
+	// configured. Reject it here rather than letting every open die later at
+	// ValidateRelayURL with a far less obvious diagnostic.
+	relays := 0
+	for _, entry := range d.RelayAllowlist {
+		if strings.TrimSpace(entry) != "" {
+			relays++
+		}
+	}
+	if len(d.RelayAllowlist) > 0 && relays == 0 {
+		return Config{}, fmt.Errorf("%w: relay_allowlist has only blank entries", ErrNotConfigured)
+	}
+	if relays > 0 {
 		cfg.RelayAllowlist = allow
 	}
 	if len(d.Cells) > 0 {
