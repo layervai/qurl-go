@@ -2,6 +2,7 @@ package qurl
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"net/http"
 	"strings"
@@ -28,15 +29,39 @@ func (d *refusingDoer) Do(*http.Request) (*http.Response, error) {
 // "nativeudp:" error. That is exactly the signal these tests want: it proves
 // WHICH transport took the open, without standing up a full NHP responder, and
 // the refusal itself is a real control (a knock must never be aimed inward).
-func unreachableCellCatalog(t *testing.T, cellID string) *CellCatalog {
+func unreachableCellCatalog(t *testing.T, cellKeyB64 string) *CellCatalog {
 	t.Helper()
-	catalog, err := NewCellCatalog(map[string]CellEndpoint{
-		cellID: {Host: "127.0.0.1", Port: 9},
-	})
+	catalog, err := NewCellCatalog([]CellEntry{{
+		ServerPublicKeyB64: cellKeyB64,
+		CellID:             "test-cell",
+		Host:               "127.0.0.1",
+		Port:               9,
+	}})
 	if err != nil {
 		t.Fatalf("build cell catalog: %v", err)
 	}
 	return catalog
+}
+
+// vectorCellKeyB64 is the accept vector's cell key (32 bytes of 0x44), the key
+// the vendored link's claims carry.
+func vectorCellKeyB64(t *testing.T) string {
+	t.Helper()
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = 0x44
+	}
+	return base64.RawURLEncoding.EncodeToString(key)
+}
+
+// otherCellKeyB64 is a well-formed key no link in these tests carries.
+func otherCellKeyB64(t *testing.T) string {
+	t.Helper()
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = 0x11
+	}
+	return base64.RawURLEncoding.EncodeToString(key)
 }
 
 // TestEnterPortalWith_KnownCellNeverContactsRelay proves that when the catalog
@@ -53,7 +78,7 @@ func TestEnterPortalWith_KnownCellNeverContactsRelay(t *testing.T) {
 	// No RelayAllowlist at all: on the native UDP path there is nothing to allow.
 	_, err := EnterPortalWith(ctx, link, Config{
 		TrustStore: trust,
-		Cells:      unreachableCellCatalog(t, "vector-cell"),
+		Cells:      unreachableCellCatalog(t, vectorCellKeyB64(t)),
 		HTTPClient: doer,
 	})
 
@@ -87,7 +112,7 @@ func TestEnterPortalWith_UnknownCellFallsBackToRelay(t *testing.T) {
 
 	_, err := EnterPortalWith(ctx, link, Config{
 		TrustStore:     trust,
-		Cells:          unreachableCellCatalog(t, "some-other-cell"),
+		Cells:          unreachableCellCatalog(t, otherCellKeyB64(t)),
 		RelayAllowlist: NewRelayAllowlist([]string{"relay.example.com"}),
 		HTTPClient:     doer,
 	})

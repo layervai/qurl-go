@@ -2,6 +2,7 @@ package qurl
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"os"
@@ -27,7 +28,16 @@ func writeVendoredDeployment(t *testing.T, withCells bool) string {
 		Issuers: []ManifestIssuer{{Kid: vf.Issuer.KID, SPKIDERB64: vf.Issuer.SPKIDERB64}},
 	}
 	if withCells {
-		d.Cells = []DeploymentCell{{CellID: "vector-cell", Host: "127.0.0.1", Port: 9}}
+		key := make([]byte, 32)
+		for i := range key {
+			key[i] = 0x44
+		}
+		d.Cells = []DeploymentCell{{
+			CellID:             "vector-cell",
+			Host:               "127.0.0.1",
+			Port:               9,
+			ServerPublicKeyB64: base64.RawURLEncoding.EncodeToString(key),
+		}}
 	} else {
 		d.RelayAllowlist = []string{"relay.example.com"}
 	}

@@ -1,9 +1,12 @@
 package qurl
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/layervai/qurl-go/relayknock"
 )
 
 // Native UDP cell endpoints.
@@ -14,25 +17,44 @@ import (
 // limitation, so when the opener knows where the named cell listens it sends the
 // same bytes straight there over UDP and skips the relay entirely.
 //
-// The endpoint is deployment knowledge, not link data: a link names a cell, it
-// never says where that cell lives. Keeping the address out of the link means a
-// forged or replayed link cannot aim a knock at an attacker-chosen host, and
-// re-addressing a cell never invalidates already-minted links.
+// Entries are keyed by the cell's PUBLIC KEY, not by cell id. Two reasons:
+// cell_id is an optional claim that real deployments do not always mint, so a
+// catalog keyed on it silently degrades to the relay; and the relay itself
+// already routes by a fingerprint of this key, so keying on it means the SDK and
+// the relay agree on cell identity by construction rather than by convention.
+//
+// The endpoint is deployment knowledge, not link data: a link says which cell
+// holds the resource, never where that cell lives. Keeping the address out of
+// the link means a forged link cannot aim a knock at an attacker-chosen host,
+// and re-addressing a cell never invalidates already-minted links.
 
-// CellEndpoint is one cell's native NHP UDP endpoint. It carries no key: the
-// cell's public key is already in the link's SIGNED claims, so the endpoint
-// supplies only the address and can never widen what the opener trusts.
+// CellEndpoint is one cell's native NHP UDP endpoint.
 type CellEndpoint struct {
+	// CellID is a human-readable label for diagnostics. It is NOT used to match
+	// links — the public key is.
+	CellID string
 	// Host is the cell's LayerV-owned DNS name, resolved on every exchange.
 	Host string
 	// Port is the cell's NHP UDP port.
 	Port int
 }
 
-// CellCatalog maps a cell id to its native UDP endpoint. It is immutable after
-// construction and safe for concurrent use.
+// CellEntry is one catalog entry as an operator writes it: where a cell lives,
+// identified by the same public key its links carry.
+type CellEntry struct {
+	// ServerPublicKeyB64 is the cell's raw 32-byte X25519 NHP key, base64. Both
+	// the standard and URL alphabets are accepted, padded or not, because this
+	// value is copied between tools that disagree about padding.
+	ServerPublicKeyB64 string
+	CellID             string
+	Host               string
+	Port               int
+}
+
+// CellCatalog maps a cell's public-key fingerprint to its native UDP endpoint.
+// It is immutable after construction and safe for concurrent use.
 type CellCatalog struct {
-	byID map[string]CellEndpoint
+	byFingerprint map[string]CellEndpoint
 }
 
 // ErrNoCellEndpoints is returned when a catalog would be built with no usable
@@ -40,40 +62,71 @@ type CellCatalog struct {
 // so it is rejected at construction where the mistake is still diagnosable.
 var ErrNoCellEndpoints = errors.New("qurl: cell catalog has no endpoints")
 
-// NewCellCatalog builds a catalog from cell id -> endpoint. Every entry must
-// carry a non-empty host and a port in range; a single bad entry fails the whole
-// catalog rather than silently dropping one cell, because a silently missing
-// cell degrades to the relay instead of failing, which is exactly the kind of
-// quiet fallback that hides a misconfiguration.
-func NewCellCatalog(endpoints map[string]CellEndpoint) (*CellCatalog, error) {
-	if len(endpoints) == 0 {
+// NewCellCatalog builds a catalog from cell entries. Every entry must carry a
+// valid 32-byte key, a host, and an in-range port; one bad entry fails the whole
+// catalog rather than silently dropping a cell, because a silently missing cell
+// degrades to the relay instead of failing — exactly the kind of quiet fallback
+// that hides a misconfiguration.
+func NewCellCatalog(entries []CellEntry) (*CellCatalog, error) {
+	if len(entries) == 0 {
 		return nil, ErrNoCellEndpoints
 	}
-	byID := make(map[string]CellEndpoint, len(endpoints))
-	for cellID, ep := range endpoints {
-		id := strings.TrimSpace(cellID)
-		if id == "" {
-			return nil, errors.New("qurl: cell catalog has an empty cell id")
+	byFingerprint := make(map[string]CellEndpoint, len(entries))
+	for _, entry := range entries {
+		label := strings.TrimSpace(entry.CellID)
+		if label == "" {
+			label = "(unlabelled cell)"
 		}
-		host := strings.TrimSpace(ep.Host)
+		key, err := decodeCellPublicKey(entry.ServerPublicKeyB64)
+		if err != nil {
+			return nil, fmt.Errorf("qurl: cell %s: %w", label, err)
+		}
+		host := strings.TrimSpace(entry.Host)
 		if host == "" {
-			return nil, fmt.Errorf("qurl: cell %q has no host", id)
+			return nil, fmt.Errorf("qurl: cell %s has no host", label)
 		}
-		if ep.Port <= 0 || ep.Port > 65535 {
-			return nil, fmt.Errorf("qurl: cell %q has out-of-range port %d", id, ep.Port)
+		if entry.Port <= 0 || entry.Port > 65535 {
+			return nil, fmt.Errorf("qurl: cell %s has out-of-range port %d", label, entry.Port)
 		}
-		byID[id] = CellEndpoint{Host: host, Port: ep.Port}
+		byFingerprint[relayknock.PubKeyFingerprint(key)] = CellEndpoint{
+			CellID: entry.CellID, Host: host, Port: entry.Port,
+		}
 	}
-	return &CellCatalog{byID: byID}, nil
+	return &CellCatalog{byFingerprint: byFingerprint}, nil
 }
 
-// Lookup returns the endpoint for cellID. A nil catalog, an empty cell id, or an
-// unknown cell all report false, which routes that open through the relay — the
-// correct behavior for a cell this build predates.
-func (c *CellCatalog) Lookup(cellID string) (CellEndpoint, bool) {
-	if c == nil || cellID == "" {
+// lookup returns the endpoint for the cell holding cellPub, which the caller
+// must have taken from VERIFIED claims. A nil catalog or an unknown cell reports
+// false, routing that open through the relay — the correct behavior for a cell
+// this build predates.
+func (c *CellCatalog) lookup(cellPub []byte) (CellEndpoint, bool) {
+	if c == nil || len(cellPub) == 0 {
 		return CellEndpoint{}, false
 	}
-	ep, ok := c.byID[cellID]
+	ep, ok := c.byFingerprint[relayknock.PubKeyFingerprint(cellPub)]
 	return ep, ok
+}
+
+// decodeCellPublicKey accepts a raw 32-byte X25519 key in any common base64
+// spelling. Operators copy these between Terraform, SSM, and JSON, which
+// disagree about alphabet and padding; rejecting a correct key over punctuation
+// would be friction with no security value, while the length check is what
+// actually matters.
+func decodeCellPublicKey(encoded string) ([]byte, error) {
+	trimmed := strings.TrimSpace(encoded)
+	if trimmed == "" {
+		return nil, errors.New("has no server public key")
+	}
+	for _, enc := range []*base64.Encoding{
+		base64.StdEncoding, base64.RawStdEncoding,
+		base64.URLEncoding, base64.RawURLEncoding,
+	} {
+		if key, err := enc.DecodeString(trimmed); err == nil {
+			if len(key) != 32 {
+				return nil, fmt.Errorf("server public key is %d bytes, want 32", len(key))
+			}
+			return key, nil
+		}
+	}
+	return nil, errors.New("server public key is not valid base64")
 }

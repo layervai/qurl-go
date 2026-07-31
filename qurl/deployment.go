@@ -33,13 +33,16 @@ const EnvDeploymentPath = "QURL_DEPLOYMENT"
 //go:embed deployment.json
 var shippedDeploymentJSON []byte
 
-// DeploymentCell is one cell's published identity: its id and where it listens
-// for native NHP UDP. The cell's public key is NOT here — that travels in the
-// link's signed claims, so this file can never widen what an opener trusts.
+// DeploymentCell is one cell's published identity: where it listens for native
+// NHP UDP, and the public key that identifies it. The key is how a link is
+// matched to a cell — links carry the same key in their signed claims — so a
+// deployment file can only say where a cell IS, never change which key an opener
+// will accept.
 type DeploymentCell struct {
-	CellID string `json:"cell_id"`
-	Host   string `json:"host"`
-	Port   int    `json:"port"`
+	CellID             string `json:"cell_id"`
+	Host               string `json:"host"`
+	Port               int    `json:"port"`
+	ServerPublicKeyB64 string `json:"server_public_key_b64"`
 }
 
 // Deployment is the static, non-secret description of a qURL deployment.
@@ -99,11 +102,16 @@ func (d *Deployment) config() (Config, error) {
 		cfg.RelayAllowlist = allow
 	}
 	if len(d.Cells) > 0 {
-		endpoints := make(map[string]CellEndpoint, len(d.Cells))
+		entries := make([]CellEntry, 0, len(d.Cells))
 		for _, cell := range d.Cells {
-			endpoints[cell.CellID] = CellEndpoint{Host: cell.Host, Port: cell.Port}
+			entries = append(entries, CellEntry{
+				ServerPublicKeyB64: cell.ServerPublicKeyB64,
+				CellID:             cell.CellID,
+				Host:               cell.Host,
+				Port:               cell.Port,
+			})
 		}
-		catalog, err := NewCellCatalog(endpoints)
+		catalog, err := NewCellCatalog(entries)
 		if err != nil {
 			return Config{}, err
 		}

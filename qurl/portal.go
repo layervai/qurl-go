@@ -103,13 +103,22 @@ func EnterPortalWith(ctx context.Context, qurlLink string, cfg Config) (*Resourc
 	}
 	claims := frag.Claims
 
-	// 3. Choose the transport. The knock is the same opaque NHP packet either
+	// 3. Decode the verified platform access key. It both encrypts the knock and
+	// identifies the cell — the relay routes by a fingerprint of this same key —
+	// so it must be in hand before a transport can be chosen.
+	cellPub, err := qv2.DecodeCellPublicKey(claims)
+	if err != nil {
+		// Unreachable in practice: a verified claim already passed the parser's
+		// 32-byte platform access key length check. Kept as defense in depth.
+		return nil, fmt.Errorf("qurl: decode verified platform access key: %w", err)
+	}
+
+	// 4. Choose the transport. The knock is the same opaque NHP packet either
 	// way; the relay is a browser compatibility shim, not part of the protocol.
-	// A cell named by the SIGNED claims and present in our catalog is reachable
-	// over UDP directly, so the relay — and every HTTP dependency with it — drops
-	// out of the path. Otherwise fall back to the relay, which needs its
-	// allowlist checked before the URL out of the link is acted on.
-	cellEndpoint, useNativeUDP := cfg.Cells.Lookup(claims.CellID)
+	// A cell we know how to reach is knocked directly over UDP, dropping the
+	// relay and every HTTP dependency with it. Otherwise fall back to the relay,
+	// whose URL must clear the allowlist before it is acted on.
+	cellEndpoint, useNativeUDP := cfg.Cells.lookup(cellPub)
 	if !useNativeUDP {
 		if cfg.RelayAllowlist == nil {
 			return nil, ErrNotConfigured
@@ -117,14 +126,6 @@ func EnterPortalWith(ctx context.Context, qurlLink string, cfg Config) (*Resourc
 		if err := qv2.ValidateRelayURL(claims.RelayURL, cfg.RelayAllowlist.core()); err != nil {
 			return nil, err
 		}
-	}
-
-	// 4. Decode the verified platform access key used by the wire request.
-	cellPub, err := qv2.DecodeCellPublicKey(claims)
-	if err != nil {
-		// Unreachable in practice: a verified claim already passed the parser's
-		// 32-byte platform access key length check. Kept as defense in depth.
-		return nil, fmt.Errorf("qurl: decode verified platform access key: %w", err)
 	}
 
 	// 5. Build the platform access request from the link's per-qURL key, the
