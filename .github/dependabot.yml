@@ -22,3 +22,17 @@ updates:
     labels: [dependencies, ci]
     commit-message:
       prefix: "chore(ci)"
+    # Dependabot treats every subpath of an action repo as its own
+    # dependency, so a repo used via several subpaths gets one PR each.
+    # Merged individually those PRs straddle two versions of the same
+    # action — codeql-action/init at 4.37.3 against analyze at 4.37.1
+    # fails outright ("Loaded a configuration file for version '4.37.3',
+    # but running version '4.37.1'"). Group by source repo so subpaths
+    # move together in a single PR.
+    groups:
+      codeql-action:
+        patterns:
+          - "github/codeql-action*"
+      ops-routines-workflows:
+        patterns:
+          - "layervai/ops-routines-workflows*"
