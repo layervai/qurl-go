@@ -62,11 +62,13 @@ func ConnectAgentRuntime(ctx context.Context, store AgentStateStore, opts ...Age
 // first-time enrollment. It is used only when nothing is registered yet; a start
 // that finds an existing registration ignores it and sends no credential to the
 // Hub.
+// The credential is deliberately not validated here. A start that finds an
+// existing registration never looks at it, exactly as the positional argument on
+// RegisterAgentRuntime was never looked at, so a service that keeps calling with
+// a credential that has since rotated or expired must keep starting cleanly.
+// Validation happens where the credential is actually used.
 func WithAgentRuntimeEnrollmentCredential(credential string) AgentRuntimeRegistrationOption {
 	return nativeRuntimeOptionFunc(func(c *nativeAgentRuntimeConfig) error {
-		if err := validateRecoverableEnrollmentCredential(credential); err != nil {
-			return err
-		}
 		c.enrollCredential = credential
 		return nil
 	})

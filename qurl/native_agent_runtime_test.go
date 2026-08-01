@@ -4452,3 +4452,27 @@ func TestDeprecatedEntryPointsStillDelegate(t *testing.T) {
 		}
 	})
 }
+
+// A service that calls ConnectAgentRuntime on every start keeps passing whatever
+// credential it was configured with. Once registered, that credential is never
+// used, so it must not matter if it has since rotated, expired, or become
+// malformed — the positional argument it replaces was ignored the same way.
+func TestConnectAgentRuntime_StaleCredentialIgnoredOnceRegistered(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	f := newRuntimeFixture(t, nil, nil)
+	initial, err := parseInitialAssignmentReply([]byte(contract.InitialAssignment.Result.BodyJSON), "agent-conform", assignmentFixtureNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedCompletedRuntimeAssignment(t, f, &initial.Assignment)
+
+	client, binding, err := ConnectAgentRuntime(context.Background(), f.store,
+		f.options(WithAgentRuntimeEnrollmentCredential("not-a-valid-credential"))...)
+	if err != nil || client == nil || binding == nil {
+		t.Fatalf("registered start with a stale credential = client %v, binding %v, err %v", client, binding, err)
+	}
+	defer binding.Destroy()
+	if len(f.hubUDP.snapshot()) != 0 || len(f.cellUDP.snapshot()) != 0 {
+		t.Fatalf("stale-credential start reached the network: Hub/cell=%d/%d", len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot()))
+	}
+}
