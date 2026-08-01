@@ -94,7 +94,9 @@ Then hand the store in exactly as you would `qurl.FileAgentState`:
 ```go
 store, err := newStore(ctx)
 // ...
-client, binding, err := qurl.RegisterAgentRuntime(ctx, enrollmentCredential, store)
+client, binding, err := qurl.RegisterAgentRuntime(ctx, enrollmentCredential, store,
+	qurl.WithAgentRuntimeOTPProvider(readOneTimeCode),
+)
 ```
 
 - **Load**: `GetSecretValue` → strict JSON decode of `SecretString`. A missing secret

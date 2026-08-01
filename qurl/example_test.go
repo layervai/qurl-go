@@ -123,10 +123,10 @@ func ExampleNewClient() {
 }
 
 func ExampleRegisterAgentRuntime() {
-	// The installer supplies one pinned Hub trust root. Assignment, optional OTP,
-	// REG/RAK, and completion then travel only over authenticated NHP UDP.
-	// The default policy accepts pre-issued/headless key kinds, including the
-	// durable qurl:agent kind, and rejects account enrollment.
+	// Assignment, OTP, REG/RAK, and completion travel only over authenticated
+	// NHP UDP. Enrollment defaults to a one-time code emailed to the credential's
+	// address: whatever reads that mailbox — a service account, an agent with its
+	// own address, an operator — returns the code through the provider.
 	ctx := context.Background()
 	store, err := qurl.OpenFileAgentState("/var/lib/layerv/qurl/agent-state.json")
 	if err != nil {
@@ -138,6 +138,7 @@ func ExampleRegisterAgentRuntime() {
 	// runs their own.
 	client, binding, err := qurl.RegisterAgentRuntime(ctx, enrollmentCredentialFromInstaller(), store,
 		qurl.WithAgentRuntimeMetadata("connector-host", "1.0.0"),
+		qurl.WithAgentRuntimeOTPProvider(readOneTimeCodeFromMailbox),
 	)
 	if err != nil {
 		panic(err)
@@ -162,6 +163,27 @@ func ExampleRegisterAgentRuntime() {
 		panic(err)
 	}
 	fmt.Println(admission.ResourceHost)
+}
+
+// ExampleWithAgentRuntimeHeadlessEnrollment shows the escape hatch: a runtime
+// with no mailbox at all, enrolling with a pre-issued credential and no code.
+// Prefer the default OTP path whenever some address can receive the code.
+func ExampleWithAgentRuntimeHeadlessEnrollment() {
+	ctx := context.Background()
+	store, err := qurl.OpenFileAgentState("/var/lib/layerv/qurl/agent-state.json")
+	if err != nil {
+		panic(err)
+	}
+	defer store.Close()
+	client, binding, err := qurl.RegisterAgentRuntime(ctx, enrollmentCredentialFromInstaller(), store,
+		qurl.WithAgentRuntimeMetadata("connector-host", "1.0.0"),
+		qurl.WithAgentRuntimeHeadlessEnrollment(),
+	)
+	if err != nil {
+		panic(err)
+	}
+	defer binding.Destroy()
+	_, _ = client, binding
 }
 
 func ExampleRecoverAgentRuntime() {
@@ -208,6 +230,7 @@ func ExampleNewSealedFileAgentState() {
 			Host: "hub.nhp.layerv.ai", Port: 62206,
 			ServerPublicKeyB64: configuredHubPublicKeyB64(),
 		}),
+		qurl.WithAgentRuntimeOTPProvider(readOneTimeCodeFromMailbox),
 	)
 	if binding != nil {
 		binding.Destroy()
@@ -237,4 +260,11 @@ func callKMSUnwrap(qurl.WrappedAgentStateKey, qurl.AgentStateKeyBinding) ([]byte
 
 func configuredHubPublicKeyB64() string         { return "configured-padded-base64-x25519-key" }
 func enrollmentCredentialFromInstaller() string { return "configured-enrollment-credential" }
-func recoveryCredentialFromOperator() string    { return "configured-qurl-agent-recovery-credential" }
+
+// readOneTimeCodeFromMailbox stands in for whatever reads the mailbox the code
+// was sent to. The challenge carries only bounded, non-secret context.
+func readOneTimeCodeFromMailbox(ctx context.Context, challenge qurl.AgentOTPChallenge) (string, error) {
+	_, _ = ctx, challenge
+	return "12345678", nil
+}
+func recoveryCredentialFromOperator() string { return "configured-qurl-agent-recovery-credential" }

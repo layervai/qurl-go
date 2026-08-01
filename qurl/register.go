@@ -122,17 +122,23 @@ type AgentResourceClientOption interface {
 
 // RegistrationKeyKind is the credential class reported by an authenticated Hub
 // assignment. Callers can restrict enrollment before OTP dispatch or REG.
+// RegistrationKeyKindAccount is the default; the pre-issued kinds below are
+// reached through WithAgentRuntimeHeadlessEnrollment.
 type RegistrationKeyKind string
 
 const (
-	// RegistrationKeyKindBootstrap is a pre-issued headless enrollment key.
+	// RegistrationKeyKindBootstrap is a pre-issued headless enrollment key. It
+	// carries its own proof and needs no one-time code.
 	RegistrationKeyKindBootstrap RegistrationKeyKind = keyKindBootstrap
 	// RegistrationKeyKindConnectorBootstrap is a Connector-specific pre-issued
 	// headless enrollment key.
 	RegistrationKeyKindConnectorBootstrap RegistrationKeyKind = assignmentKeyKindConnectorBootstrap
 	// RegistrationKeyKindAgent is a durable qurl:agent-scoped enrollment key.
 	RegistrationKeyKindAgent RegistrationKeyKind = assignmentKeyKindAgent
-	// RegistrationKeyKindAccount is an account API key requiring assigned-cell OTP.
+	// RegistrationKeyKindAccount enrolls with an assigned-cell one-time code sent
+	// to the credential's address. It is the default enrollment kind, and it is
+	// not specific to a human enrolling: any runtime that can read a mailbox uses
+	// it.
 	RegistrationKeyKindAccount RegistrationKeyKind = keyKindAccount
 )
 

@@ -14,6 +14,7 @@ defer store.Close()
 
 client, binding, err := qurl.RegisterAgentRuntime(ctx, enrollmentCredential, store,
 	qurl.WithAgentRuntimeMetadata(hostname, version),
+	qurl.WithAgentRuntimeOTPProvider(readOneTimeCode),
 )
 if err != nil {
 	return err
@@ -21,8 +22,14 @@ if err != nil {
 defer binding.Destroy()
 ```
 
-That is the whole enrollment. You supply the credential LayerV issued you and a
-file to keep state in; the SDK already knows how to reach LayerV.
+That is the whole enrollment. You supply the credential LayerV issued you, a
+file to keep state in, and a way to read the one-time code; the SDK already
+knows how to reach LayerV.
+
+`readOneTimeCode` is a function you write. That call **blocks** while LayerV
+emails a code to the address on your credential and waits for your callback to
+return it, so give the context a deadline if nothing may be watching the
+mailbox. [The one-time code](#the-one-time-code) below shows one.
 
 You get back two things:
 
@@ -31,37 +38,113 @@ You get back two things:
 - **`binding`** — proof of who this machine is. Keep it for the life of the
   process and `Destroy()` it on the way out.
 
-## Credentials
+## Which enrollment path?
 
-Pass the credential LayerV issued you. Credentials minted for unattended software
-work with no extra options.
+There are two, and the credential LayerV issued you decides which — not
+anything you configure:
 
-Credentials must be LayerV-minted tokens of at least 32 characters. Passwords and
-hand-picked strings are rejected before anything is written to disk or sent over
-the network. The check is on shape and length, so the token still has to come from
-LayerV to be accepted.
+| How you got the credential | Path | What you pass |
+|---|---|---|
+| Issued against an address — your account, a service account, a team alias | One-time code | `WithAgentRuntimeOTPProvider` (the default) |
+| Pre-issued for a machine — a connector bootstrap key, an agent key baked into an image or installer | No code | `WithAgentRuntimeHeadlessEnrollment` |
 
-### Enrolling as a person
+**The token itself will not tell you.** Credentials carry no kind you can parse;
+the SDK checks only shape and length, and LayerV reports the kind on the first
+authenticated call. Go by how you obtained it.
 
-If a human is enrolling and should receive a one-time code by email, opt in
-explicitly:
+**If you are not sure, just run it.** The default assumes the one-time code, and
+when that is wrong the error names the kind LayerV actually reported:
+
+```
+qurl: registration key kind "bootstrap" is disallowed; accepted kinds: account
+```
+
+That is a `*qurl.RegistrationKeyKindDisallowedError`, and its `Kind` field
+carries the same value. Add `qurl.WithAgentRuntimeHeadlessEnrollment()` and the
+call goes through. The check runs before anything is registered or written to
+disk, so a wrong first guess costs you nothing.
+
+Either way, the credential must be a LayerV-minted token of at least 32
+characters. Passwords and hand-picked strings are rejected before anything is
+written to disk or sent over the network.
+
+## The one-time code
+
+Enrollment sends a one-time code to the address on the credential, and your
+callback returns it. This is the default and it is what you should use.
+
+Nothing about it assumes a human is at a keyboard. Agents increasingly have
+their own mailboxes, and a service account or a shared operations alias is just
+as valid. The only question the SDK cares about is whether *something* can read
+the address the code went to and hand the code back:
+
+```go
+func readOneTimeCode(ctx context.Context, challenge qurl.AgentOTPChallenge) (string, error) {
+	// However this runtime reaches its mailbox: an IMAP poll, your inbox API,
+	// a prompt an operator answers. Return the code as exactly 8 decimal digits.
+	return pollMailboxForCode(ctx)
+}
+```
+
+Return **exactly 8 decimal digits**; anything else is rejected as a
+configuration error. Honor the `ctx` you are handed — it is already bounded by
+the assignment ticket, so returning late is the same as not returning at all.
+
+The `challenge` argument is for logging and correlation, not for fetching
+anything: it carries the agent id, credential key id, cell id, and ticket
+expiry, and deliberately excludes the credential and the ticket itself. There is
+nothing replayable in it.
+
+LayerV sends at most one code per attempt, the SDK never retries behind your
+back, and the code is never written to disk. If the code never arrives or comes
+back wrong, nothing is registered.
+
+Without a callback, enrollment stops with `qurl.ErrAgentOTPRequired` before any
+network call.
+
+### If nothing can read a mailbox
+
+Some runtimes genuinely have no address anywhere in reach — a sealed appliance,
+an air-gapped build agent, a container with no path to any inbox. Those enroll
+with a pre-issued credential and no code, and they have to say so:
 
 ```go
 client, binding, err := qurl.RegisterAgentRuntime(ctx, credential, store,
-	qurl.WithAgentRuntimeAllowedRegistrationKeyKinds(qurl.RegistrationKeyKindAccount),
-	qurl.WithAgentRuntimeOTPProvider(promptForEmailedCode),
+	qurl.WithAgentRuntimeMetadata(hostname, version),
+	qurl.WithAgentRuntimeHeadlessEnrollment(),
 )
 ```
 
-Both options are required together. That is deliberate: software enrolling on its
-own should never be able to trigger an email challenge by accident. Without the
-callback, a person-type credential is refused before any network call with
-`qurl.ErrAgentOTPRequired`.
+This is the escape hatch, not the shortcut. It accepts exactly the pre-issued
+kinds that carry their own proof (`connector_bootstrap`, `bootstrap`, `agent`)
+and refuses an OTP credential, since honoring one would need the code this
+runtime just said it cannot get. Reach for it only when no address — the
+runtime's own, an operator's, or a shared alias — can receive the code.
 
-Your callback receives only what it needs to prompt someone — never the
-credential, and never anything replayable. LayerV sends at most one code per
-attempt, the SDK never retries behind your back, and the code is never written to
-disk. If the person cancels or mistypes, nothing is registered.
+**It cannot be combined with an OTP provider.** One option says no code can be
+read; the other says how to read one. Passing both is a contradiction, not a
+harmless dead callback, and it fails with `qurl.ErrInvalidRegisterConfig` when
+the options are parsed.
+
+### Accepting either kind
+
+You need this only if one binary ships to both kinds of deployment and cannot
+know at build time which credential it will get. Keep the provider and widen the
+policy rather than reaching for the escape hatch:
+
+```go
+client, binding, err := qurl.RegisterAgentRuntime(ctx, credential, store,
+	qurl.WithAgentRuntimeMetadata(hostname, version),
+	qurl.WithAgentRuntimeAllowedRegistrationKeyKinds(
+		qurl.RegistrationKeyKindAccount,
+		qurl.RegistrationKeyKindBootstrap,
+	),
+	qurl.WithAgentRuntimeOTPProvider(readOneTimeCode),
+)
+```
+
+Whichever kind LayerV reports, this call takes it: the code path runs only for
+the account kind, and the pre-issued kind never touches your callback.
 
 ## Restarts, crashes, and flaky networks
 
@@ -163,7 +246,9 @@ Wipe the key bytes when the cycle ends (`clear()` above) and call
 
 | Error | What it means | What to do |
 |---|---|---|
-| `ErrAgentOTPRequired` | A person-type credential with no OTP callback | Add `WithAgentRuntimeOTPProvider`, or use a credential minted for software |
+| `ErrAgentOTPRequired` | OTP enrollment — the default — with no OTP callback | Add `WithAgentRuntimeOTPProvider`, or `WithAgentRuntimeHeadlessEnrollment` if nothing can read the code |
+| `*RegistrationKeyKindDisallowedError` | The credential's kind is outside your enrollment policy | A pre-issued credential needs `WithAgentRuntimeHeadlessEnrollment` |
+| `ErrInvalidRegisterConfig` | Among other causes: an OTP provider passed alongside `WithAgentRuntimeHeadlessEnrollment` | Drop one of the two — they contradict each other |
 | `ErrAssignmentKeyRejected` | LayerV did not accept this credential | Check you passed the right one and that it is not revoked |
 | `ErrAssignmentRateLimited` | Too many attempts too quickly | Back off and retry |
 | `ErrAssignmentQuotaExceeded` | Your account is at its limit | Raise the limit or retire an unused registration |

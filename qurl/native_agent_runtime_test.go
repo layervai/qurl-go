@@ -468,8 +468,24 @@ func (f *runtimeFixture) optionsWithoutMetadata(extra ...AgentRuntimeRegistratio
 	return f.optionsWithMetadata(false, extra...)
 }
 
+// defaultPolicyOptions builds the same fixture wiring but leaves the SDK's
+// enrollment policy at its default, so a test can prove what a plain
+// RegisterAgentRuntime call accepts.
+func (f *runtimeFixture) defaultPolicyOptions(extra ...AgentRuntimeRegistrationOption) []AgentRuntimeRegistrationOption {
+	return append(f.baseOptions(true), extra...)
+}
+
 func (f *runtimeFixture) optionsWithMetadata(include bool, extra ...AgentRuntimeRegistrationOption) []AgentRuntimeRegistrationOption {
-	opts := []AgentRuntimeRegistrationOption{
+	// These fixtures enroll with the pre-issued bootstrap credential, so they opt
+	// out of the default OTP policy. Cases that exercise OTP enrollment append
+	// their own key-kind and provider options, which overwrite this one.
+	opts := f.baseOptions(include, WithAgentRuntimeHeadlessEnrollment())
+	return append(opts, extra...)
+}
+
+func (f *runtimeFixture) baseOptions(includeMetadata bool, policy ...AgentRuntimeRegistrationOption) []AgentRuntimeRegistrationOption {
+	opts := append([]AgentRuntimeRegistrationOption{}, policy...)
+	opts = append(opts,
 		WithAgentRuntimeHub(f.hub),
 		WithAgentRuntimeIdentity("agent-conform"),
 		WithAgentRuntimeUDPResolver(f.resolver),
@@ -479,11 +495,11 @@ func (f *runtimeFixture) optionsWithMetadata(include bool, extra ...AgentRuntime
 		withAgentRuntimeClock(func() time.Time { return assignmentFixtureNow }),
 		withTestAgentRuntimeAssignmentNonce(conformance.AgentAssignmentInitialRequestNonceFixture),
 		withAgentRuntimeDeviceCredential(canonicalNativeDeviceCredential),
-	}
-	if include {
+	)
+	if includeMetadata {
 		opts = append(opts, WithAgentRuntimeMetadata("conformance-host", "0.0.0-conformance"))
 	}
-	return append(opts, extra...)
+	return opts
 }
 
 func (f *runtimeFixture) refreshOptions(extra ...AgentRuntimeRefreshOption) []AgentRuntimeRefreshOption {
@@ -590,8 +606,43 @@ func withTestAgentRuntimeAssignmentNonce(encoded string) AgentRuntimeLifecycleOp
 	})
 }
 
+func testOTPProvider(context.Context, AgentOTPChallenge) (string, error) { return "12345678", nil }
+
 func TestAgentRuntimeRegistrationKeyKindPolicy_AllNativeKinds(t *testing.T) {
-	cfg, err := newNativeAgentRuntimeConfig([]AgentRuntimeRegistrationOption{WithAgentRuntimeHub(runtimeTestHub())})
+	// The default policy is OTP alone. Every pre-issued kind is rejected until
+	// the caller says the runtime cannot receive a code.
+	cfg, err := newNativeAgentRuntimeConfig([]AgentRuntimeRegistrationOption{
+		WithAgentRuntimeHub(runtimeTestHub()),
+		WithAgentRuntimeOTPProvider(testOTPProvider),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.requireAllowedRegistrationKeyKind(string(RegistrationKeyKindAccount)); err != nil {
+		t.Fatalf("default policy rejected account enrollment: %v", err)
+	}
+	wantAllowed := []RegistrationKeyKind{RegistrationKeyKindAccount}
+	for _, kind := range []RegistrationKeyKind{
+		RegistrationKeyKindConnectorBootstrap,
+		RegistrationKeyKindBootstrap,
+		RegistrationKeyKindAgent,
+	} {
+		headlessErr := cfg.requireAllowedRegistrationKeyKind(string(kind))
+		var disallowed *RegistrationKeyKindDisallowedError
+		if !errors.As(headlessErr, &disallowed) || !errors.Is(headlessErr, ErrRegistrationKeyKindDisallowed) {
+			t.Fatalf("default policy error for %q = %v, want typed disallowed error", kind, headlessErr)
+		}
+		if !slices.Equal(disallowed.Allowed, wantAllowed) {
+			t.Fatalf("default allowed kinds = %v, want %v", disallowed.Allowed, wantAllowed)
+		}
+	}
+
+	// The escape hatch is the exact inverse: the three pre-issued kinds, and no
+	// account kind, because this runtime just said it cannot answer a code.
+	headlessCfg, err := newNativeAgentRuntimeConfig([]AgentRuntimeRegistrationOption{
+		WithAgentRuntimeHub(runtimeTestHub()),
+		WithAgentRuntimeHeadlessEnrollment(),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -600,34 +651,43 @@ func TestAgentRuntimeRegistrationKeyKindPolicy_AllNativeKinds(t *testing.T) {
 		RegistrationKeyKindBootstrap,
 		RegistrationKeyKindAgent,
 	} {
-		if err := cfg.requireAllowedRegistrationKeyKind(string(kind)); err != nil {
-			t.Errorf("default native policy rejected %q: %v", kind, err)
+		if err := headlessCfg.requireAllowedRegistrationKeyKind(string(kind)); err != nil {
+			t.Errorf("headless policy rejected %q: %v", kind, err)
 		}
 	}
-	accountErr := cfg.requireAllowedRegistrationKeyKind(string(RegistrationKeyKindAccount))
+	accountErr := headlessCfg.requireAllowedRegistrationKeyKind(string(RegistrationKeyKindAccount))
 	var disallowed *RegistrationKeyKindDisallowedError
 	if !errors.As(accountErr, &disallowed) || !errors.Is(accountErr, ErrRegistrationKeyKindDisallowed) {
-		t.Fatalf("default account policy error = %v, want typed disallowed error", accountErr)
+		t.Fatalf("headless account policy error = %v, want typed disallowed error", accountErr)
 	}
-	wantAllowed := []RegistrationKeyKind{
+	wantHeadless := []RegistrationKeyKind{
 		RegistrationKeyKindAgent,
 		RegistrationKeyKindBootstrap,
 		RegistrationKeyKindConnectorBootstrap,
 	}
-	if !slices.Equal(disallowed.Allowed, wantAllowed) {
-		t.Fatalf("default native allowed kinds = %v, want %v", disallowed.Allowed, wantAllowed)
+	if !slices.Equal(disallowed.Allowed, wantHeadless) {
+		t.Fatalf("headless allowed kinds = %v, want %v", disallowed.Allowed, wantHeadless)
 	}
 
-	accountCfg, err := newNativeAgentRuntimeConfig([]AgentRuntimeRegistrationOption{
+	// The last policy option wins, so one binary can still widen to both.
+	bothCfg, err := newNativeAgentRuntimeConfig([]AgentRuntimeRegistrationOption{
 		WithAgentRuntimeHub(runtimeTestHub()),
-		WithAgentRuntimeAllowedRegistrationKeyKinds(RegistrationKeyKindAccount),
+		WithAgentRuntimeHeadlessEnrollment(),
+		WithAgentRuntimeAllowedRegistrationKeyKinds(RegistrationKeyKindAccount, RegistrationKeyKindBootstrap),
+		WithAgentRuntimeOTPProvider(testOTPProvider),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := accountCfg.requireAllowedRegistrationKeyKind(string(RegistrationKeyKindAccount)); err != nil {
-		t.Fatalf("explicit account opt-in rejected: %v", err)
+	for _, kind := range []RegistrationKeyKind{RegistrationKeyKindAccount, RegistrationKeyKindBootstrap} {
+		if err := bothCfg.requireAllowedRegistrationKeyKind(string(kind)); err != nil {
+			t.Errorf("mixed policy rejected %q: %v", kind, err)
+		}
 	}
+	if err := bothCfg.requireAllowedRegistrationKeyKind(string(RegistrationKeyKindAgent)); !errors.Is(err, ErrRegistrationKeyKindDisallowed) {
+		t.Fatalf("mixed policy for agent kind = %v, want disallowed", err)
+	}
+
 	for _, kinds := range [][]RegistrationKeyKind{nil, {"future-kind"}} {
 		_, err := newNativeAgentRuntimeConfig([]AgentRuntimeRegistrationOption{
 			WithAgentRuntimeHub(runtimeTestHub()),
@@ -642,7 +702,146 @@ func TestAgentRuntimeRegistrationKeyKindPolicy_AllNativeKinds(t *testing.T) {
 	}
 }
 
-func TestRegisterAgentRuntime_DefaultKeyPolicy_AllFourKinds(t *testing.T) {
+// TestAgentRuntimeEnrollmentPolicyContradictions pins the other direction of
+// the invariant: a provider under a policy that rejects OTP is a contradiction,
+// not a harmless dead option, and is refused when the config is built.
+func TestAgentRuntimeEnrollmentPolicyContradictions(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		options []AgentRuntimeRegistrationOption
+		wantErr bool
+	}{
+		{
+			name: "headless with provider",
+			options: []AgentRuntimeRegistrationOption{
+				WithAgentRuntimeHeadlessEnrollment(),
+				WithAgentRuntimeOTPProvider(testOTPProvider),
+			},
+			wantErr: true,
+		},
+		{
+			name: "provider then headless",
+			options: []AgentRuntimeRegistrationOption{
+				WithAgentRuntimeOTPProvider(testOTPProvider),
+				WithAgentRuntimeHeadlessEnrollment(),
+			},
+			wantErr: true,
+		},
+		{
+			name: "explicit pre-issued kinds with provider",
+			options: []AgentRuntimeRegistrationOption{
+				WithAgentRuntimeAllowedRegistrationKeyKinds(RegistrationKeyKindBootstrap),
+				WithAgentRuntimeOTPProvider(testOTPProvider),
+			},
+			wantErr: true,
+		},
+		{
+			name: "headless widened back to account keeps the provider",
+			options: []AgentRuntimeRegistrationOption{
+				WithAgentRuntimeHeadlessEnrollment(),
+				WithAgentRuntimeAllowedRegistrationKeyKinds(RegistrationKeyKindAccount, RegistrationKeyKindBootstrap),
+				WithAgentRuntimeOTPProvider(testOTPProvider),
+			},
+		},
+		{
+			name:    "headless alone",
+			options: []AgentRuntimeRegistrationOption{WithAgentRuntimeHeadlessEnrollment()},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			opts := append([]AgentRuntimeRegistrationOption{WithAgentRuntimeHub(runtimeTestHub())}, test.options...)
+			_, err := newNativeAgentRuntimeConfig(opts)
+			if test.wantErr {
+				if !errors.Is(err, ErrInvalidRegisterConfig) {
+					t.Fatalf("config = %v, want ErrInvalidRegisterConfig", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("config = %v, want nil", err)
+			}
+		})
+	}
+}
+
+// TestRegisterAgentRuntime_ContradictoryPolicyFailsBeforeAnyIO proves the
+// contradiction is caught while the config is built: no packet is sent and
+// nothing on disk moves.
+func TestRegisterAgentRuntime_ContradictoryPolicyFailsBeforeAnyIO(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	f := newRuntimeFixture(t,
+		[]runtimeUDPStep{{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: contract.InitialAssignment.Result.BodyJSON}},
+		nil,
+	)
+	_, _, err := RegisterAgentRuntime(context.Background(), conformance.AgentAssignmentBootstrapCredentialFixture, f.store,
+		f.options(WithAgentRuntimeOTPProvider(testOTPProvider))...)
+	if !errors.Is(err, ErrInvalidRegisterConfig) {
+		t.Fatalf("headless plus provider = %v, want ErrInvalidRegisterConfig", err)
+	}
+	if len(f.hubUDP.snapshot()) != 0 || len(f.cellUDP.snapshot()) != 0 {
+		t.Fatalf("contradictory policy Hub/cell counts = %d/%d, want 0/0", len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot()))
+	}
+	state, err := f.store.LoadAgentState(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Assignment != nil || state.PendingActivation != nil {
+		t.Fatalf("contradictory policy mutated persisted state: %#v", state)
+	}
+}
+
+// TestAgentRuntimeOTPProviderRequiredBeforeNetworkIO pins the fail-fast half of
+// the default: whenever the account kind is accepted, a missing provider is a
+// config error, not something discovered after a Hub round trip.
+func TestAgentRuntimeOTPProviderRequiredBeforeNetworkIO(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		options []AgentRuntimeRegistrationOption
+		wantErr error
+	}{
+		{
+			name:    "default policy without provider",
+			options: nil,
+			wantErr: ErrAgentOTPRequired,
+		},
+		{
+			name:    "explicit account opt-in without provider",
+			options: []AgentRuntimeRegistrationOption{WithAgentRuntimeAllowedRegistrationKeyKinds(RegistrationKeyKindAccount)},
+			wantErr: ErrAgentOTPRequired,
+		},
+		{
+			name:    "default policy with provider",
+			options: []AgentRuntimeRegistrationOption{WithAgentRuntimeOTPProvider(testOTPProvider)},
+		},
+		{
+			name:    "headless escape hatch needs no provider",
+			options: []AgentRuntimeRegistrationOption{WithAgentRuntimeHeadlessEnrollment()},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			opts := append([]AgentRuntimeRegistrationOption{WithAgentRuntimeHub(runtimeTestHub())}, test.options...)
+			cfg, err := newNativeAgentRuntimeConfig(opts)
+			if err != nil {
+				t.Fatalf("config = %v, want nil", err)
+			}
+			err = cfg.requireOTPProviderForPolicy()
+			if test.wantErr == nil {
+				if err != nil {
+					t.Fatalf("policy = %v, want nil", err)
+				}
+				return
+			}
+			if !errors.Is(err, test.wantErr) {
+				t.Fatalf("policy = %v, want %v", err, test.wantErr)
+			}
+		})
+	}
+}
+
+// TestRegisterAgentRuntime_HeadlessKeyPolicy_AllFourKinds covers the escape
+// hatch end to end: the three pre-issued kinds reach REG, and an account kind
+// is refused before any cell I/O or OTP callback.
+func TestRegisterAgentRuntime_HeadlessKeyPolicy_AllFourKinds(t *testing.T) {
 	contract := loadAssignmentFixture(t)
 	for _, kind := range []RegistrationKeyKind{
 		RegistrationKeyKindConnectorBootstrap,
@@ -669,19 +868,18 @@ func TestRegisterAgentRuntime_DefaultKeyPolicy_AllFourKinds(t *testing.T) {
 				[]runtimeUDPStep{{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: assignmentResult}},
 				cellSteps,
 			)
-			var otpCallbacks atomic.Int32
+			// No OTP provider is installed, and under this policy none can be: the
+			// contradictory pair is rejected at config time, which is a stronger
+			// guarantee than watching a callback that never fires.
 			_, _, err := RegisterAgentRuntime(context.Background(), conformance.AgentAssignmentBootstrapCredentialFixture, f.store,
-				f.options(WithAgentRuntimeOTPProvider(func(context.Context, AgentOTPChallenge) (string, error) {
-					otpCallbacks.Add(1)
-					return "12345678", nil
-				}))...)
+				f.options()...)
 			if kind == RegistrationKeyKindAccount {
 				var disallowed *RegistrationKeyKindDisallowedError
 				if !errors.As(err, &disallowed) || disallowed.Kind != RegistrationKeyKindAccount {
-					t.Fatalf("default account policy error = %v, want typed account rejection", err)
+					t.Fatalf("headless account policy error = %v, want typed account rejection", err)
 				}
-				if len(f.cellUDP.snapshot()) != 0 || otpCallbacks.Load() != 0 {
-					t.Fatalf("account policy rejection cell/callback counts = %d/%d, want 0/0", len(f.cellUDP.snapshot()), otpCallbacks.Load())
+				if len(f.cellUDP.snapshot()) != 0 {
+					t.Fatalf("account policy rejection cell requests = %d, want 0", len(f.cellUDP.snapshot()))
 				}
 				state, loadErr := f.store.LoadAgentState(context.Background())
 				if loadErr != nil {
@@ -692,21 +890,77 @@ func TestRegisterAgentRuntime_DefaultKeyPolicy_AllFourKinds(t *testing.T) {
 				}
 			} else {
 				if !errors.Is(err, ErrAgentIdentityConflict) {
-					t.Fatalf("default native policy for %q = %v, want assigned-cell REG", kind, err)
+					t.Fatalf("headless native policy for %q = %v, want assigned-cell REG", kind, err)
 				}
 				requests := f.cellUDP.snapshot()
 				if len(requests) != 1 || requests[0].typeID != relayknock.TypeRegister {
-					t.Fatalf("default native policy for %q made cell requests %v, want one REG", kind, requests)
+					t.Fatalf("headless native policy for %q made cell requests %v, want one REG", kind, requests)
 				}
 			}
 			if len(f.hubUDP.snapshot()) != 1 {
-				t.Fatalf("default native policy for %q made %d Hub requests, want 1", kind, len(f.hubUDP.snapshot()))
+				t.Fatalf("headless native policy for %q made %d Hub requests, want 1", kind, len(f.hubUDP.snapshot()))
 			}
 		})
 	}
 }
 
-func TestRegisterAgentRuntime_AccountOptInStillRequiresOTPProviderBeforeCellIO(t *testing.T) {
+// TestRegisterAgentRuntime_OTPIsTheDefaultPolicy proves the shipped default:
+// with no policy option at all, an account credential enrolls and the OTP
+// callback fires.
+func TestRegisterAgentRuntime_OTPIsTheDefaultPolicy(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	f := newRuntimeFixture(t,
+		[]runtimeUDPStep{{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: accountAssignmentResult(contract, "conformance-account-assignment-ticket-0001")}},
+		[]runtimeUDPStep{
+			{requestType: relayknock.TypeOTP, noReply: true},
+			{
+				requestType: relayknock.TypeRegister,
+				replyType:   relayknock.TypeRegisterAck,
+				replyBody:   `{"errCode":"52103","errMsg":"identity conflict","aspId":"agent"}`,
+			},
+		},
+	)
+	var otpCallbacks atomic.Int32
+	_, _, err := RegisterAgentRuntime(context.Background(), conformance.AgentAssignmentAccountCredentialFixture, f.store,
+		f.defaultPolicyOptions(
+			WithAgentRuntimeOTPProvider(func(context.Context, AgentOTPChallenge) (string, error) {
+				otpCallbacks.Add(1)
+				return "12345678", nil
+			}),
+		)...)
+	if !errors.Is(err, ErrAgentIdentityConflict) {
+		t.Fatalf("default OTP enrollment = %v, want assigned-cell REG", err)
+	}
+	if otpCallbacks.Load() != 1 {
+		t.Fatalf("default OTP callbacks = %d, want 1", otpCallbacks.Load())
+	}
+}
+
+// TestRegisterAgentRuntime_PreIssuedCredentialNeedsHeadlessOptIn pins the other
+// half of the flip: a pre-issued credential under the default policy is refused
+// with the typed error that names the escape hatch, after the Hub round trip
+// that reported the kind and before any cell I/O.
+func TestRegisterAgentRuntime_PreIssuedCredentialNeedsHeadlessOptIn(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	f := newRuntimeFixture(t,
+		[]runtimeUDPStep{{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: contract.InitialAssignment.Result.BodyJSON}},
+		nil,
+	)
+	_, _, err := RegisterAgentRuntime(context.Background(), conformance.AgentAssignmentBootstrapCredentialFixture, f.store,
+		f.defaultPolicyOptions(WithAgentRuntimeOTPProvider(testOTPProvider))...)
+	var disallowed *RegistrationKeyKindDisallowedError
+	if !errors.As(err, &disallowed) || disallowed.Kind != RegistrationKeyKindBootstrap {
+		t.Fatalf("bootstrap credential under default policy = %v, want typed bootstrap rejection", err)
+	}
+	if len(f.hubUDP.snapshot()) != 1 || len(f.cellUDP.snapshot()) != 0 {
+		t.Fatalf("rejection Hub/cell counts = %d/%d, want 1/0", len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot()))
+	}
+}
+
+// TestRegisterAgentRuntime_AccountOptInStillRequiresOTPProviderBeforeAnyIO
+// keeps the explicit opt-in honest: naming the account kind without a provider
+// is now caught at config time, so no Hub request is made at all.
+func TestRegisterAgentRuntime_AccountOptInStillRequiresOTPProviderBeforeAnyIO(t *testing.T) {
 	contract := loadAssignmentFixture(t)
 	f := newRuntimeFixture(t,
 		[]runtimeUDPStep{{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: accountAssignmentResult(contract, "conformance-account-assignment-ticket-0001")}},
@@ -719,8 +973,8 @@ func TestRegisterAgentRuntime_AccountOptInStillRequiresOTPProviderBeforeCellIO(t
 	if !errors.Is(err, ErrAgentOTPRequired) {
 		t.Fatalf("account opt-in without provider = %v, want ErrAgentOTPRequired", err)
 	}
-	if len(f.hubUDP.snapshot()) != 1 || len(f.cellUDP.snapshot()) != 0 {
-		t.Fatalf("missing-provider Hub/cell counts = %d/%d, want 1/0", len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot()))
+	if len(f.hubUDP.snapshot()) != 0 || len(f.cellUDP.snapshot()) != 0 {
+		t.Fatalf("missing-provider Hub/cell counts = %d/%d, want 0/0", len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot()))
 	}
 }
 
@@ -1397,7 +1651,7 @@ func TestRegisterAgentRuntime_RejectsIncompleteCredentialStateBeforeIO(t *testin
 			resolver := &noIONativeResolver{}
 			dialer := &noIONativeDialer{}
 			_, _, err = RegisterAgentRuntime(context.Background(), conformance.AgentAssignmentBootstrapCredentialFixture, f.store,
-				WithAgentRuntimeHub(f.hub), WithAgentRuntimeUDPResolver(resolver), WithAgentRuntimeUDPDialer(dialer))
+				WithAgentRuntimeHeadlessEnrollment(), WithAgentRuntimeHub(f.hub), WithAgentRuntimeUDPResolver(resolver), WithAgentRuntimeUDPDialer(dialer))
 			if !errors.Is(err, ErrInvalidAgentState) {
 				t.Fatalf("incomplete credential state error = %v, want ErrInvalidAgentState", err)
 			}
@@ -1456,7 +1710,7 @@ func TestRegisterAgentRuntime_RejectsNonCanonicalPersistedNativeAgentIDBeforeMut
 			resolver := &noIONativeResolver{}
 			dialer := &noIONativeDialer{}
 			_, _, err = RegisterAgentRuntime(context.Background(), "", f.store,
-				WithAgentRuntimeHub(f.hub), WithAgentRuntimeUDPResolver(resolver), WithAgentRuntimeUDPDialer(dialer))
+				WithAgentRuntimeHeadlessEnrollment(), WithAgentRuntimeHub(f.hub), WithAgentRuntimeUDPResolver(resolver), WithAgentRuntimeUDPDialer(dialer))
 			if !errors.Is(err, ErrInvalidAgentState) || !errors.Is(err, ErrInvalidRegisterConfig) {
 				t.Fatalf("persisted native agent id %q error = %v, want invalid state/config", agentID, err)
 			}
@@ -1490,7 +1744,7 @@ func TestRegisterAgentRuntime_CompletedIdentityMismatchFailsBeforeIO(t *testing.
 	resolver := &noIONativeResolver{}
 	dialer := &noIONativeDialer{}
 	_, _, err = RegisterAgentRuntime(context.Background(), "unused-on-completed-fast-path", f.store,
-		WithAgentRuntimeHub(f.hub), WithAgentRuntimeIdentity("agent-different"),
+		WithAgentRuntimeHeadlessEnrollment(), WithAgentRuntimeHub(f.hub), WithAgentRuntimeIdentity("agent-different"),
 		WithAgentRuntimeUDPResolver(resolver), WithAgentRuntimeUDPDialer(dialer))
 	if !errors.Is(err, ErrInvalidRegisterConfig) || !strings.Contains(err.Error(), "does not match") {
 		t.Fatalf("completed identity mismatch error = %v, want ErrInvalidRegisterConfig mismatch", err)
@@ -1511,7 +1765,7 @@ func TestRegisterAgentRuntime_FreshEnrollmentRequiresCredentialBeforeMutationOrI
 			resolver := &noIONativeResolver{}
 			dialer := &noIONativeDialer{}
 			_, _, err := RegisterAgentRuntime(context.Background(), credential, f.store,
-				WithAgentRuntimeHub(f.hub), WithAgentRuntimeUDPResolver(resolver), WithAgentRuntimeUDPDialer(dialer))
+				WithAgentRuntimeHeadlessEnrollment(), WithAgentRuntimeHub(f.hub), WithAgentRuntimeUDPResolver(resolver), WithAgentRuntimeUDPDialer(dialer))
 			if !errors.Is(err, ErrInvalidRegisterConfig) || !strings.Contains(err.Error(), "enrollment credential") {
 				t.Fatalf("fresh invalid credential error = %v", err)
 			}

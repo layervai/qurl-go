@@ -59,8 +59,10 @@ const (
 )
 
 var (
-	// ErrAgentOTPRequired marks account enrollment attempted without an explicit OTP callback.
-	ErrAgentOTPRequired = errors.New("qurl: account enrollment requires an OTP provider")
+	// ErrAgentOTPRequired marks OTP enrollment — the default — attempted without
+	// an OTP callback. Runtimes that cannot receive a code opt out with
+	// WithAgentRuntimeHeadlessEnrollment instead of installing a provider.
+	ErrAgentOTPRequired = errors.New("qurl: OTP enrollment requires an OTP provider")
 	// ErrAssignmentTicketInvalid marks an assigned-cell rejection of the Hub ticket.
 	ErrAssignmentTicketInvalid = errors.New("qurl: assignment ticket invalid")
 	// ErrAssignmentTicketExpired marks a ticket that cannot authorize assigned-cell REG.
@@ -83,9 +85,11 @@ var (
 	ErrAssignmentEndpointContinuity = errors.New("qurl: assignment endpoint continuity violation")
 )
 
-// AgentOTPChallenge is the bounded, non-secret context passed to an optional
-// account-enrollment OTP provider. The assignment ticket and account credential
-// are intentionally excluded.
+// AgentOTPChallenge is the bounded, non-secret context passed to the
+// OTP-enrollment provider. Whoever holds the mailbox — a person, an agent with
+// its own address, a shared operations alias — receives the code out of band;
+// the SDK only asks the provider to return it. The assignment ticket and the
+// enrollment credential are intentionally excluded.
 type AgentOTPChallenge struct {
 	AgentID                   string
 	CredentialKeyID           string
@@ -277,12 +281,22 @@ func WithAgentRuntimeMetadata(hostname, version string) AgentRuntimeRegistration
 	})
 }
 
-// WithAgentRuntimeOTPProvider opts into account-credential enrollment. A fresh
-// callback follows one fire-and-forget assigned-cell NHP_OTP dispatch and is
-// bounded by the ticket window. Pending-activation recovery instead sets
-// AgentOTPChallenge.PendingActivationRecovery, dispatches no OTP, and receives
-// the caller context clamped to the persisted recovery deadline. Callers may set
-// an earlier outer deadline when the provider could block.
+// WithAgentRuntimeOTPProvider supplies the callback that returns the emailed
+// one-time code. OTP is the default enrollment path, so this is the option a
+// normal RegisterAgentRuntime call installs; nothing about it is specific to a
+// human enrolling.
+//
+// It requires an enrollment policy that accepts the account kind, which is the
+// default. Installing it under a policy that rejects OTP — most obviously
+// WithAgentRuntimeHeadlessEnrollment — is contradictory and fails with
+// ErrInvalidRegisterConfig rather than leaving a callback that can never fire.
+//
+// A fresh callback follows one fire-and-forget assigned-cell
+// NHP_OTP dispatch and is bounded by the ticket window. Pending-activation
+// recovery instead sets AgentOTPChallenge.PendingActivationRecovery, dispatches
+// no OTP, and receives the caller context clamped to the persisted recovery
+// deadline. Callers may set an earlier outer deadline when the provider could
+// block.
 func WithAgentRuntimeOTPProvider(provider func(context.Context, AgentOTPChallenge) (string, error)) AgentRuntimeRegistrationOption {
 	return nativeRuntimeOptionFunc(func(c *nativeAgentRuntimeConfig) error {
 		if provider == nil {
@@ -293,11 +307,49 @@ func WithAgentRuntimeOTPProvider(provider func(context.Context, AgentOTPChalleng
 	})
 }
 
+// WithAgentRuntimeHeadlessEnrollment opts out of OTP enrollment for a runtime
+// that has no mailbox to receive a code in — the escape hatch, not the norm.
+// It accepts exactly the pre-issued key kinds that carry their own proof:
+// connector_bootstrap, bootstrap, and agent. An account credential is rejected
+// under this policy, because honoring it would require a code this runtime has
+// already said it cannot obtain.
+//
+// It contradicts WithAgentRuntimeOTPProvider and cannot be combined with it:
+// one says no code can be read, the other says how to read one. Passing both
+// fails with ErrInvalidRegisterConfig. A binary that must accept either kind of
+// credential keeps the provider and widens the policy with
+// WithAgentRuntimeAllowedRegistrationKeyKinds instead.
+//
+// Prefer OTP. Reach for this only when no address — the runtime's own, an
+// operator's, or a shared alias — can receive the code.
+func WithAgentRuntimeHeadlessEnrollment() AgentRuntimeRegistrationOption {
+	return nativeRuntimeOptionFunc(func(c *nativeAgentRuntimeConfig) error {
+		c.allowedKeyKinds = headlessRegistrationKeyKinds()
+		return nil
+	})
+}
+
+// headlessRegistrationKeyKinds is the set of pre-issued kinds that enroll with
+// no one-time code.
+func headlessRegistrationKeyKinds() map[RegistrationKeyKind]struct{} {
+	return map[RegistrationKeyKind]struct{}{
+		RegistrationKeyKindConnectorBootstrap: {},
+		RegistrationKeyKindBootstrap:          {},
+		RegistrationKeyKindAgent:              {},
+	}
+}
+
 // WithAgentRuntimeAllowedRegistrationKeyKinds restricts the authenticated Hub
-// assignment key kinds accepted by RegisterAgentRuntime. The native default
-// accepts connector_bootstrap, bootstrap, and agent for unattended enrollment
-// and rejects account. Account enrollment requires both an explicit account
-// opt-in here and WithAgentRuntimeOTPProvider.
+// assignment key kinds accepted by RegisterAgentRuntime. It is the low-level
+// form of the same policy WithAgentRuntimeHeadlessEnrollment sets; reach for it
+// when one binary must accept both an OTP credential and a pre-issued one.
+//
+// The native default is account alone, so OTP enrollment is what a plain
+// RegisterAgentRuntime call performs. Policy and provider must agree in both
+// directions: accepting account without WithAgentRuntimeOTPProvider fails with
+// ErrAgentOTPRequired before any network I/O, and installing a provider while
+// excluding account fails with ErrInvalidRegisterConfig. Later options
+// overwrite earlier ones; the last policy option wins.
 func WithAgentRuntimeAllowedRegistrationKeyKinds(kinds ...RegistrationKeyKind) AgentRuntimeRegistrationOption {
 	return nativeRuntimeOptionFunc(func(c *nativeAgentRuntimeConfig) error {
 		if len(kinds) == 0 {
@@ -411,11 +463,11 @@ func defaultNativeAgentRuntimeConfig() *nativeAgentRuntimeConfig {
 
 func newNativeAgentRuntimeConfig(opts []AgentRuntimeRegistrationOption) (*nativeAgentRuntimeConfig, error) {
 	c := defaultNativeAgentRuntimeConfig()
-	c.allowedKeyKinds = map[RegistrationKeyKind]struct{}{
-		RegistrationKeyKindConnectorBootstrap: {},
-		RegistrationKeyKindBootstrap:          {},
-		RegistrationKeyKindAgent:              {},
-	}
+	// OTP is the default enrollment path. Anything that can be reached at an
+	// address can answer a code, which is most of what enrolls here; the
+	// pre-issued kinds are the exception and say so with
+	// WithAgentRuntimeHeadlessEnrollment.
+	c.allowedKeyKinds = map[RegistrationKeyKind]struct{}{RegistrationKeyKindAccount: {}}
 	for _, opt := range opts {
 		if opt == nil {
 			return nil, fmt.Errorf("%w: nil runtime option", ErrInvalidRegisterConfig)
@@ -423,6 +475,9 @@ func newNativeAgentRuntimeConfig(opts []AgentRuntimeRegistrationOption) (*native
 		if err := opt.applyAgentRuntimeOption(c); err != nil {
 			return nil, err
 		}
+	}
+	if err := c.validateEnrollmentPolicyOptions(); err != nil {
+		return nil, err
 	}
 	if c.hub == nil {
 		// Fall back to the hub this build ships. An explicit option still wins,
@@ -558,6 +613,13 @@ func (c *nativeAgentRuntimeConfig) registerLocked(ctx context.Context, enrollmen
 	}
 	if state.RegisteredAt != nil {
 		return finishNativeRuntimeResult(store, state, c)
+	}
+	// Only an attempt that will actually enroll needs the provider, so a completed
+	// state still reopens with no options. Checking here keeps the failure ahead
+	// of the Hub round trip that would otherwise burn an assignment ticket to
+	// learn what the option set already proves.
+	if err := c.requireOTPProviderForPolicy(); err != nil {
+		return nil, err
 	}
 	if err := validateIncompleteNativeState(state); err != nil {
 		return nil, err
@@ -976,6 +1038,31 @@ func (c *nativeAgentRuntimeConfig) refreshAssignmentLifecycle(ctx context.Contex
 	return refreshAgentAssignment(ctx, hub, agentID, c.udpOptions(privateKey), c.validateStateContinuity, c.assignmentOptions...)
 }
 
+// Enrollment policy and OTP provider must agree: a provider is installed
+// exactly when the resolved policy accepts the account kind. The two halves of
+// that invariant are checked in different places on purpose.
+//
+// validateEnrollmentPolicyOptions catches the contradictory half — a provider
+// under a policy that rejects OTP — at config construction, because no
+// enrollment, resumption, or reopen ever makes that option set correct.
+//
+// requireOTPProviderForPolicy catches the missing half at the point of
+// enrollment instead, because a completed registration still reopens through
+// RegisterAgentRuntime with no options at all, and that path needs no provider.
+func (c *nativeAgentRuntimeConfig) validateEnrollmentPolicyOptions() error {
+	if _, otpAllowed := c.allowedKeyKinds[RegistrationKeyKindAccount]; otpAllowed || c.otpProvider == nil {
+		return nil
+	}
+	return fmt.Errorf("%w: WithAgentRuntimeOTPProvider contradicts an enrollment policy that rejects the account kind; WithAgentRuntimeHeadlessEnrollment declares this runtime cannot receive a code, so pass one or the other", ErrInvalidRegisterConfig)
+}
+
+func (c *nativeAgentRuntimeConfig) requireOTPProviderForPolicy() error {
+	if _, otpAllowed := c.allowedKeyKinds[RegistrationKeyKindAccount]; !otpAllowed || c.otpProvider != nil {
+		return nil
+	}
+	return fmt.Errorf("%w: install WithAgentRuntimeOTPProvider, or pass WithAgentRuntimeHeadlessEnrollment if this runtime cannot receive a code", ErrAgentOTPRequired)
+}
+
 func (c *nativeAgentRuntimeConfig) requireAllowedRegistrationKeyKind(raw string) error {
 	kind := RegistrationKeyKind(strings.TrimSpace(raw))
 	switch kind {
@@ -1128,8 +1215,11 @@ func (c *nativeAgentRuntimeConfig) registrationCredential(ctx context.Context, s
 	case assignmentKeyKindConnectorBootstrap, keyKindBootstrap, assignmentKeyKindAgent:
 		return enrollmentCredential, nil
 	case keyKindAccount:
+		// requireOTPProviderForPolicy already rejects this combination before any
+		// network I/O. Keep the check as a fail-closed guard for callers that
+		// reach this path with a config built another way.
 		if c.otpProvider == nil {
-			return "", fmt.Errorf("%w: install WithAgentRuntimeOTPProvider before account enrollment", ErrAgentOTPRequired)
+			return "", fmt.Errorf("%w: install WithAgentRuntimeOTPProvider before OTP enrollment", ErrAgentOTPRequired)
 		}
 		now := c.clock()
 		if initial.AssignmentTicketExpiresAt.Sub(now) < nativeAccountOTPMinimumTicketRemaining {
