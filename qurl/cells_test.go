@@ -126,8 +126,10 @@ func TestCellCatalogLookup(t *testing.T) {
 	known := testCellKey(t, 5)
 	other := testCellKey(t, 6)
 	catalog, err := NewCellCatalog([]CellEntry{
-		{CellID: "cell0", Host: "a.example", Port: 62206,
-			ServerPublicKeyB64: base64.StdEncoding.EncodeToString(known)},
+		{
+			CellID: "cell0", Host: "a.example", Port: 62206,
+			ServerPublicKeyB64: base64.StdEncoding.EncodeToString(known),
+		},
 	})
 	if err != nil {
 		t.Fatalf("build catalog: %v", err)
@@ -166,8 +168,10 @@ func TestCellCatalogLookup(t *testing.T) {
 func TestCellCatalogIsIndependentOfCallerSlice(t *testing.T) {
 	key := testCellKey(t, 7)
 	entries := []CellEntry{
-		{CellID: "cell0", Host: "a.example", Port: 62206,
-			ServerPublicKeyB64: base64.StdEncoding.EncodeToString(key)},
+		{
+			CellID: "cell0", Host: "a.example", Port: 62206,
+			ServerPublicKeyB64: base64.StdEncoding.EncodeToString(key),
+		},
 	}
 	catalog, err := NewCellCatalog(entries)
 	if err != nil {
