@@ -133,13 +133,10 @@ func ExampleRegisterAgentRuntime() {
 		panic(err)
 	}
 	defer store.Close()
-	hub := qurl.HubBootstrap{
-		Host:               "hub.nhp.layerv.ai",
-		Port:               62206,
-		ServerPublicKeyB64: configuredHubPublicKeyB64(),
-	}
+	// No hub wiring: the SDK ships the trust root for the deployment it was
+	// built to talk to. WithAgentRuntimeHub still overrides it when an operator
+	// runs their own.
 	client, binding, err := qurl.RegisterAgentRuntime(ctx, enrollmentCredentialFromInstaller(), store,
-		qurl.WithAgentRuntimeHub(hub),
 		qurl.WithAgentRuntimeMetadata("connector-host", "1.0.0"),
 	)
 	if err != nil {

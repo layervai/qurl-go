@@ -184,3 +184,89 @@ func TestLoadDeploymentRejectsTrailingData(t *testing.T) {
 		t.Fatal("trailing JSON after the deployment object was silently ignored")
 	}
 }
+
+// The Hub trust root is the registration-side equivalent of the issuer keys and
+// cell endpoints: something the SDK knows about its own deployment, not
+// something every integrator should retype. These pin the resolution so a future
+// change cannot quietly put that burden back on the caller.
+
+func TestDeploymentHubFromOverrideFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "deployment.json")
+	if err := os.WriteFile(path, []byte(`{
+	  "issuers": [],
+	  "cells": [],
+	  "relay_allowlist": [],
+	  "hub": {"host":"hub.example","port":62206,"server_public_key_b64":"aGVsbG8="}
+	}`), 0o600); err != nil {
+		t.Fatalf("write deployment: %v", err)
+	}
+	t.Setenv(EnvDeploymentPath, path)
+
+	hub, err := deploymentHub()
+	if err != nil {
+		t.Fatalf("deploymentHub: %v", err)
+	}
+	if hub.Host != "hub.example" || hub.Port != 62206 {
+		t.Fatalf("hub = %+v", hub)
+	}
+}
+
+// A deployment without a hub must report the actionable sentinel rather than a
+// zero-valued hub, which would fail later and much less clearly.
+func TestDeploymentHubAbsentIsActionable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "deployment.json")
+	if err := os.WriteFile(path, []byte(`{"issuers":[],"cells":[],"relay_allowlist":[]}`), 0o600); err != nil {
+		t.Fatalf("write deployment: %v", err)
+	}
+	t.Setenv(EnvDeploymentPath, path)
+
+	if _, err := deploymentHub(); !errors.Is(err, ErrNoDeploymentHub) {
+		t.Fatalf("got %v, want ErrNoDeploymentHub", err)
+	}
+}
+
+// The returned hub must be a copy: mutating it cannot be allowed to repoint the
+// hub for every later registration in the process.
+func TestDeploymentHubReturnsCopy(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "deployment.json")
+	if err := os.WriteFile(path, []byte(`{
+	  "issuers": [], "cells": [], "relay_allowlist": [],
+	  "hub": {"host":"hub.example","port":62206,"server_public_key_b64":"aGVsbG8="}
+	}`), 0o600); err != nil {
+		t.Fatalf("write deployment: %v", err)
+	}
+	t.Setenv(EnvDeploymentPath, path)
+
+	first, err := deploymentHub()
+	if err != nil {
+		t.Fatalf("deploymentHub: %v", err)
+	}
+	first.Host = "attacker.example"
+
+	second, err := deploymentHub()
+	if err != nil {
+		t.Fatalf("deploymentHub second: %v", err)
+	}
+	if second.Host != "hub.example" {
+		t.Fatalf("hub mutation leaked across calls: %+v", second)
+	}
+}
+
+// Refresh must accept a zero-value hub and fall back to the shipped trust root,
+// the same way registration does. Without this a caller had to carry the host,
+// port, and key around solely to hand them back on renewal.
+func TestRefreshAgentRuntimeAcceptsZeroHub(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "deployment.json")
+	if err := os.WriteFile(path, []byte(`{"issuers":[],"cells":[],"relay_allowlist":[]}`), 0o600); err != nil {
+		t.Fatalf("write deployment: %v", err)
+	}
+	t.Setenv(EnvDeploymentPath, path)
+
+	// This build ships no hub, so the zero-value path must surface the
+	// actionable sentinel rather than a confusing endpoint-validation error.
+	store := FileAgentState(filepath.Join(t.TempDir(), "agent-state.json"))
+	_, _, err := RefreshAgentRuntime(context.Background(), HubBootstrap{}, store)
+	if !errors.Is(err, ErrNoDeploymentHub) {
+		t.Fatalf("zero hub with no shipped hub = %v, want ErrNoDeploymentHub", err)
+	}
+}
