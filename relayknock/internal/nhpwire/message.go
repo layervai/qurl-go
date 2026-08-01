@@ -31,6 +31,7 @@ type Inputs struct {
 	Preamble         uint32 // HeaderCommon obfuscation preamble
 	Body             []byte // serialized, uncompressed application body
 	Cookie           []byte // exact 32-byte COK cookie for RKN or Hub LST proof
+	Compress         bool   // zlib-compress Body and set NHP_FLAG_COMPRESS
 }
 
 // Message is a decrypted, authenticated NHP message. Type is the raw NHP header
@@ -94,8 +95,11 @@ func buildMessage(headerType int, flags uint16, inp *Inputs) ([]byte, error) {
 	if inp == nil {
 		return nil, errors.New("message inputs must not be nil")
 	}
+	if inp.Compress && len(inp.Body) > 0 {
+		flags |= nhpFlagCompress
+	}
 	switch {
-	case headerType == TypeRKN && flags == 0:
+	case headerType == TypeRKN && (flags == 0 || flags == nhpFlagCompress):
 		if len(inp.Cookie) != CookieSize {
 			return nil, fmt.Errorf("RKN cookie must be %d bytes, got %d", CookieSize, len(inp.Cookie))
 		}
@@ -103,7 +107,7 @@ func buildMessage(headerType int, flags uint16, inp *Inputs) ([]byte, error) {
 		if len(inp.Cookie) != CookieSize {
 			return nil, fmt.Errorf("hub LST proof cookie must be %d bytes, got %d", CookieSize, len(inp.Cookie))
 		}
-	case flags != 0:
+	case flags != 0 && flags != nhpFlagCompress:
 		return nil, fmt.Errorf("header type %d does not support flags %#04x", headerType, flags)
 	case len(inp.Cookie) != 0:
 		return nil, fmt.Errorf("header type %d must not carry a cookie", headerType)
@@ -114,6 +118,9 @@ func buildMessage(headerType int, flags uint16, inp *Inputs) ([]byte, error) {
 func buildMessageUnchecked(headerType int, flags uint16, inp *Inputs) ([]byte, error) {
 	if len(inp.ServerStaticPub) != PublicKeySize {
 		return nil, fmt.Errorf("server static pub must be %d bytes, got %d", PublicKeySize, len(inp.ServerStaticPub))
+	}
+	if len(inp.Body) > maxApplicationBodySize {
+		return nil, fmt.Errorf("knock body too large: %d bytes exceeds %d", len(inp.Body), maxApplicationBodySize)
 	}
 	nonce := nonceForCounter(inp.Counter)
 
@@ -172,9 +179,23 @@ func buildMessageUnchecked(headerType int, flags uint16, inp *Inputs) ([]byte, e
 	// derivation — evolved chain key discarded).
 	bodyAad := chainHash.Sum(nil)
 	_, aeadKey = keyGen2(chainKey, sealedTs)
+	body := inp.Body
+	if len(body) > 0 && flags&nhpFlagCompress != 0 {
+		var compressed bytes.Buffer
+		defer func() { cryptoutil.Wipe(compressed.Bytes()) }()
+		writer := zlib.NewWriter(&compressed)
+		if _, err = writer.Write(body); err != nil {
+			_ = writer.Close()
+			return nil, fmt.Errorf("compress body: %w", err)
+		}
+		if err = writer.Close(); err != nil {
+			return nil, fmt.Errorf("compress body: %w", err)
+		}
+		body = compressed.Bytes()
+	}
 	var sealedBody []byte
-	if len(inp.Body) > 0 { // empty body ⇒ no seal, size 0 (matches Go encryptBody)
-		sealedBody, err = aeadSeal(aeadKey, nonce, inp.Body, bodyAad)
+	if len(body) > 0 { // empty body ⇒ no seal, size 0 (matches Go encryptBody)
+		sealedBody, err = aeadSeal(aeadKey, nonce, body, bodyAad)
 		if err != nil {
 			return nil, fmt.Errorf("seal body: %w", err)
 		}

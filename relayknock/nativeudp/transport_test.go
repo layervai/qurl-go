@@ -1,6 +1,7 @@
 package nativeudp_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdh"
 	"crypto/rand"
@@ -14,6 +15,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	conformance "github.com/layervai/qurl-conformance"
 
 	"github.com/layervai/qurl-go/relayknock"
 	"github.com/layervai/qurl-go/relayknock/nativeudp"
@@ -56,6 +59,8 @@ type fakeServer struct {
 	mu       sync.Mutex
 	received int
 	types    []int
+	sizes    []int
+	bodies   [][]byte
 }
 
 func newFakeServer(t *testing.T, serverPriv, agentPub []byte, b behavior) *fakeServer {
@@ -103,6 +108,22 @@ func (s *fakeServer) receivedTypes() []int {
 	return append([]int(nil), s.types...)
 }
 
+func (s *fakeServer) receivedSizes() []int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]int(nil), s.sizes...)
+}
+
+func (s *fakeServer) receivedBodies() [][]byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	bodies := make([][]byte, len(s.bodies))
+	for i := range s.bodies {
+		bodies[i] = append([]byte(nil), s.bodies[i]...)
+	}
+	return bodies
+}
+
 func (s *fakeServer) serve() {
 	buf := make([]byte, 1<<16)
 	for {
@@ -114,6 +135,7 @@ func (s *fakeServer) serve() {
 		copy(pkt, buf[:n])
 		s.mu.Lock()
 		s.received++
+		s.sizes = append(s.sizes, n)
 		s.mu.Unlock()
 
 		msg, err := relayknocktest.OpenInitiatorMessage(s.serverPriv, s.agentPub, pkt)
@@ -123,6 +145,7 @@ func (s *fakeServer) serve() {
 		}
 		s.mu.Lock()
 		s.types = append(s.types, msg.Type)
+		s.bodies = append(s.bodies, append([]byte(nil), msg.Body...))
 		s.mu.Unlock()
 		resp := s.buildResponse(msg)
 		if resp == nil {
@@ -331,6 +354,86 @@ func TestSendOTP_IsOneDatagramWithNoReplyWaitOrAddressFallback(t *testing.T) {
 	}
 	if got := server.receivedTypes(); len(got) != 1 || got[0] != relayknock.TypeOTP {
 		t.Fatalf("OTP received types = %v, want [%d]", got, relayknock.TypeOTP)
+	}
+}
+
+func TestRegistrationPacketsAvoidIPFragmentation(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		send func(context.Context, nativeudp.Endpoint, []byte, nativeudp.Options) error
+	}{
+		{
+			name: "otp",
+			send: nativeudp.SendOTP,
+		},
+		{
+			name: "register",
+			send: func(ctx context.Context, ep nativeudp.Endpoint, body []byte, opts nativeudp.Options) error {
+				_, err := nativeudp.Register(ctx, ep, body, opts)
+				return err
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			serverPriv, serverPub := mustKeypair(t)
+			devicePriv := mustPriv(t)
+			server := newFakeServer(t, serverPriv, pubOf(t, devicePriv), behaviorNormal)
+			ticket, err := conformance.AssignmentTicket()
+			if err != nil {
+				t.Fatalf("load QAT1 fixture: %v", err)
+			}
+			body := []byte(fmt.Sprintf(
+				`{"usrId":"key_123456789012","devId":"qurl-go-production-ticket-proof","aspId":"agent","pass":"lv_test_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","usrData":{"query":"agent_registration_otp","version":1,"assignment_ticket":%q}}`,
+				ticket.Golden.Token,
+			))
+			if len(body)+240+16 <= 1472 {
+				t.Fatalf("QAT1 registration packet fixture is only %d bytes; test no longer crosses IPv4 MTU", len(body)+240+16)
+			}
+			opts := nativeudp.Options{
+				DeviceStaticPriv: devicePriv,
+				Resolver:         resolverReturning([]netip.Addr{netip.MustParseAddr("8.8.8.8")}),
+				Dialer:           &countingLoopbackDialer{target: server.conn.LocalAddr().String()},
+			}
+			ep := nativeudp.Endpoint{Host: "cell0.nhp.test", Port: server.port(), ServerStaticPub: serverPub}
+			if err := tc.send(context.Background(), ep, body, opts); err != nil {
+				t.Fatalf("send large %s: %v", tc.name, err)
+			}
+			deadline := time.Now().Add(time.Second)
+			for len(server.receivedBodies()) == 0 && time.Now().Before(deadline) {
+				time.Sleep(time.Millisecond)
+			}
+			sizes := server.receivedSizes()
+			bodies := server.receivedBodies()
+			if len(sizes) != 1 || sizes[0] > 1200 {
+				t.Fatalf("%s packet sizes = %v, want one packet at most 1200 bytes", tc.name, sizes)
+			}
+			if len(bodies) != 1 || !bytes.Equal(bodies[0], body) {
+				t.Fatalf("%s server did not recover the exact compressed body", tc.name)
+			}
+		})
+	}
+}
+
+func TestRegistrationPacketRejectsUncompressibleFragment(t *testing.T) {
+	t.Parallel()
+	serverPriv, serverPub := mustKeypair(t)
+	devicePriv := mustPriv(t)
+	server := newFakeServer(t, serverPriv, pubOf(t, devicePriv), behaviorSilent)
+	body := mustRand(t, 1300)
+	opts := nativeudp.Options{
+		DeviceStaticPriv: devicePriv,
+		Resolver:         resolverReturning([]netip.Addr{netip.MustParseAddr("8.8.8.8")}),
+		Dialer:           &countingLoopbackDialer{target: server.conn.LocalAddr().String()},
+	}
+	ep := nativeudp.Endpoint{Host: "cell0.nhp.test", Port: server.port(), ServerStaticPub: serverPub}
+	err := nativeudp.SendOTP(context.Background(), ep, body, opts)
+	if err == nil || !errors.Is(err, nativeudp.ErrInvalidRequest) {
+		t.Fatalf("SendOTP uncompressible fragment error = %v, want ErrInvalidRequest", err)
+	}
+	if server.receivedCount() != 0 {
+		t.Fatalf("server received %d datagrams after fragmentation reject, want 0", server.receivedCount())
 	}
 }
 

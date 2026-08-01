@@ -27,6 +27,7 @@ type KnockInputs struct {
 	Preamble         uint32 // HeaderCommon obfuscation preamble
 	Body             []byte // serialized, uncompressed application knock body
 	Cookie           []byte // exact 32-byte COK cookie for NHP_RKN; empty otherwise
+	Compress         bool   // zlib-compress Body and set NHP_FLAG_COMPRESS
 }
 
 // WireInputs converts the public KnockInputs into the nhpwire codec's Inputs. It
@@ -46,6 +47,7 @@ func (k *KnockInputs) WireInputs() *nhpwire.Inputs {
 		Preamble:         k.Preamble,
 		Body:             k.Body,
 		Cookie:           k.Cookie,
+		Compress:         k.Compress,
 	}
 }
 
