@@ -941,7 +941,10 @@ func TestHubAssignmentRejectsInvalidInputsBeforeIO(t *testing.T) {
 		{name: "missing hub", agentID: "agent-conform", credential: "valid", transport: validTransport},
 		{name: "IP hub", hub: HubBootstrap{Host: "203.0.113.1", Port: standardNHPUDPPort, ServerPublicKeyB64: validHub.ServerPublicKeyB64}, agentID: "agent-conform", credential: "valid", transport: validTransport},
 		{name: "AWS hub", hub: HubBootstrap{Host: "internal-hub.elb.amazonaws.com", Port: standardNHPUDPPort, ServerPublicKeyB64: validHub.ServerPublicKeyB64}, agentID: "agent-conform", credential: "valid", transport: validTransport},
-		{name: "unsupported port", hub: HubBootstrap{Host: validHub.Host, Port: 443, ServerPublicKeyB64: validHub.ServerPublicKeyB64}, agentID: "agent-conform", credential: "valid", transport: validTransport},
+		// 62206 was the original NHP port. It has to stay rejected: an agent that
+		// still reaches the old port is exactly the stale-config case the pin exists
+		// to catch, and 443 is now the only accepted value.
+		{name: "unsupported port", hub: HubBootstrap{Host: validHub.Host, Port: 62206, ServerPublicKeyB64: validHub.ServerPublicKeyB64}, agentID: "agent-conform", credential: "valid", transport: validTransport},
 		{name: "low-order key", hub: HubBootstrap{Host: validHub.Host, Port: standardNHPUDPPort, ServerPublicKeyB64: lowOrderTestNHPServerPublicKeyB64}, agentID: "agent-conform", credential: "valid", transport: validTransport},
 		{name: "invalid agent id", hub: validHub, agentID: "Bad_ID", credential: "valid", transport: validTransport},
 		{name: "invalid credential", hub: validHub, agentID: "agent-conform", credential: " secret ", transport: validTransport},
