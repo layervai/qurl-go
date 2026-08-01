@@ -42,6 +42,10 @@ var frictionBudget = map[string]int{
 	// The package overview: open a client, protect, create, print.
 	"Example": 4,
 
+	// ExampleRecoverAgentRuntime is budgeted on the branch that introduces
+	// credential recovery; it does not exist here, and a budget naming a
+	// missing example fails loudly by design.
+
 	// --- Agent runtime -------------------------------------------------------
 	// Registration is the highest-friction scenario in the SDK and the one an
 	// integrator hits first. It was 12; removing the hand-assembled Hub trust
@@ -64,7 +68,6 @@ var frictionBudget = map[string]int{
 	// Lower this only by moving real work into the SDK, never by weakening
 	// either of those.
 	"ExampleRegisterAgentRuntime":    11,
-	"ExampleRecoverAgentRuntime":     7,
 	"ExampleNewSealedFileAgentState": 5,
 }
 

@@ -1898,6 +1898,16 @@ func RefreshAgentRuntime(ctx context.Context, hub HubBootstrap, store AgentState
 		return nil, nil, fmt.Errorf("%w: state store must not be nil", ErrInvalidRegisterConfig)
 	}
 	cfg := defaultNativeAgentRuntimeConfig()
+	// A zero-value hub means "use the trust root this build ships", matching
+	// RegisterAgentRuntime. Refresh otherwise forced every caller to carry the
+	// host, port, and key around purely to hand them back on renewal.
+	if hub == (HubBootstrap{}) {
+		shipped, err := deploymentHub()
+		if err != nil {
+			return nil, nil, fmt.Errorf("%w: %w", ErrInvalidRegisterConfig, err)
+		}
+		hub = *shipped
+	}
 	cfg.hub = &hub
 	for _, opt := range opts {
 		if opt == nil {

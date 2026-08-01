@@ -98,26 +98,16 @@ client, err := qurl.OpenClient()
 For protected external credential storage, implement `qurl.CredentialProvider`
 and pass it to `qurl.NewClient`.
 
-## Native qURL Connector lifecycle
+## Connect a service or agent
 
-`RegisterAgentRuntime` is the only agent enrollment front door. Assignment,
-optional account OTP, REG/RAK, and completion travel directly over authenticated
-NHP UDP. There is no public HTTP assignment, registration, refresh, recovery, or
-completion API in this SDK.
-
-Trusted deployment configuration supplies one LayerV-owned Hub DNS name, UDP
-port, and pinned server public key:
+Your service registers once, then keeps serving. Registration happens over an
+authenticated UDP channel — no inbound ports, no public endpoint, nothing for a
+scanner to find.
 
 ```go
 store := qurl.FileAgentState("/var/lib/layerv/qurl/agent-state.json")
-hub := qurl.HubBootstrap{
-	Host:               "hub.nhp.layerv.ai",
-	Port:               62206,
-	ServerPublicKeyB64: configuredHubPublicKey,
-}
 
 client, binding, err := qurl.RegisterAgentRuntime(ctx, enrollmentCredential, store,
-	qurl.WithAgentRuntimeHub(hub),
 	qurl.WithAgentRuntimeMetadata(hostname, version),
 )
 if err != nil {
@@ -126,103 +116,61 @@ if err != nil {
 defer binding.Destroy()
 ```
 
-The Hub assigns the cell. Before REG, the SDK durably persists the exact ticket,
-registration identity/metadata, authority-provided UDP endpoint and server
-identity, and a one-way identity of the caller's enrollment credential. A lost
-RAK therefore restarts by re-driving the same REG to the same pinned cell—even
-after ticket expiry—before any new Hub assignment, within the released 90-day
-recovery horizon. The authenticated assignment-ticket expiry anchors that
-deadline. An authenticated non-commit verdict may replace the current ticket,
-but the first ticket-expiry anchor and its absolute deadline remain unchanged
-across the replacement, RAK, retries, restarts, and pending completion.
-Plaintext enrollment credentials and OTP codes are never persisted. The SDK
-never calculates a cell address or involves the browser relay in native
-discovery.
+That is the whole enrollment. You supply the credential you were issued and a
+file to keep state in; the SDK already knows how to reach LayerV.
 
-Recovery must use the identical persisted hostname and version because those
-bytes are part of the exact REG replay. Change that metadata only after
-activation completes. The v0.5 assignment lease must also expire strictly after
-its ticket; pending-state validation enforces that producer invariant.
+**It survives restarts and bad networks.** State is saved before anything
+irreversible happens, so a crash, a dropped reply, or a machine reboot resumes
+the same registration rather than starting a new one — for up to 90 days. You do
+not need to handle that; it is the default.
 
-The default policy accepts unattended `connector_bootstrap`, `bootstrap`, and
-durable `agent` credentials. Interactive account enrollment must explicitly add
-both `WithAgentRuntimeAllowedRegistrationKeyKinds(RegistrationKeyKindAccount)`
-and `WithAgentRuntimeOTPProvider`.
+**Warm starts are free.** After the first successful registration, use
+`OpenRegisteredAgentRuntime` — it loads saved state with no network calls at all.
 
-For account enrollment, the one-way OTP dispatch intentionally occurs before
-the pending-activation save. A save failure cannot have sent REG; a later
-explicit attempt may obtain a new ticket and dispatch that ticket's single OTP.
-Pending-activation recovery invokes the provider without another OTP dispatch
-and uses the `RegisterAgentRuntime` caller context clamped to the persisted
-recovery deadline because exact replay may outlive the ticket window. Set an
-earlier outer context deadline when the provider should return sooner.
+**Keep the metadata stable.** The hostname and version you pass become part of
+the saved registration. Change them only after registration has completed, or
+recovery has nothing to match.
 
-Every `RegisterAgentRuntime` enrollment credential must be a server-minted
-encoded token whose total string length is at least 32 bytes, including any
-prefix. Shorter values and user-chosen passwords are rejected before state
-mutation or network I/O. This requirement is part of the initial pre-1.0
-native-UDP contract for all credential kinds. This is a syntax and total-length
-check, not an entropy measurement; the minting authority must use
-cryptographically random token material.
+### Credentials
 
-Warm starts call `OpenRegisteredAgentRuntime`, which loads completed state
-without network I/O. `RefreshAgentRuntime` refreshes an expiring assignment only
-through the pinned Hub. It accepts endpoint revisions within the same cell and
-assignment generation; a cell or generation move returns
-`*AgentAssignmentChangedError` for explicit caller handling.
+Pass the credential LayerV issued you. Any credential minted for unattended
+software works out of the box.
 
-After the provisioned workflow has deliberately accepted that authority move,
-the caller opts into one fresh authenticated refresh:
+Enrolling as a *person* — where a one-time code is emailed to you — is opt-in,
+because software that registers by itself should never be able to trigger an
+email challenge by accident:
 
 ```go
-client, binding, err := qurl.RefreshAgentRuntime(ctx, hub, store,
+client, binding, err := qurl.RegisterAgentRuntime(ctx, credential, store,
+	qurl.WithAgentRuntimeAllowedRegistrationKeyKinds(qurl.RegistrationKeyKindAccount),
+	qurl.WithAgentRuntimeOTPProvider(promptForEmailedCode),
+)
+```
+
+Your callback receives only what it needs to prompt someone: never the
+credential, and never anything that could be replayed. LayerV sends at most one
+code per attempt, and the SDK never retries behind your back or writes the code
+to disk.
+
+Credentials must be LayerV-minted tokens of at least 32 characters. Passwords and
+hand-picked strings are rejected before anything is saved or sent.
+
+### If LayerV moves your service
+
+Occasionally LayerV relocates where your service is served from. The SDK will not
+silently follow — it returns `*AgentAssignmentChangedError` so the move is your
+decision. When you are ready:
+
+```go
+client, binding, err := qurl.RefreshAgentRuntime(ctx, qurl.HubBootstrap{}, store,
 	qurl.WithAgentRuntimeReassignmentAdoption(),
 )
 ```
 
-The option has no placement arguments: it can adopt only the Hub LRT returned
-by that call, and only when the assignment generation advances. The SDK writes
-the complete cell, endpoint, pinned server key, and lease snapshot in one save;
-it never derives, probes, or contacts the new cell during refresh. Without the
-option, the same response continues to return `*AgentAssignmentChangedError`
-without changing durable state.
-
-For each Connector cycle, take the private key once, create one `RunID`, and
-knock with the resource's placement-neutral `KnockResourceID`:
-
-```go
-privateKey := binding.TakeDeviceStaticPrivateKey()
-defer clear(privateKey)
-
-connector, err := client.EnsureConnectorResource(ctx, "prod-dashboard")
-if err != nil {
-	return err
-}
-runID, err := qurl.NewCycleRunID()
-if err != nil {
-	return err
-}
-admission, err := qurl.KnockRegisteredAgent(ctx, binding, privateKey,
-	connector.Resource.KnockResourceID,
-	qurl.NativeKnockOptions{RunID: runID},
-)
-```
-
-The returned `Client` uses HTTPS only for steady-state resource CRUD.
-`WithAgentClientBaseURL` and `WithAgentClientHTTPClient` configure only that
-resource client; they never affect Hub or cell UDP transport.
-
-Agent state may be stored in a strict `0600` file under a `0700` directory, in a
-sealed file using `NewSealedFileAgentState`, in AWS Secrets Manager or SSM via
-`awsstore`, or in a custom `AgentStateStore`. The schema is native-only and
-duplicate fields, unknown fields, negative schema versions, and versions newer
-than this SDK fail closed before lifecycle network I/O. An older SDK therefore
-cannot open state containing fields introduced by a newer SDK; treat a downgrade
-as an explicit state-schema migration or reprovisioning operation rather than
-deleting state.
-
-See [Register an agent](docs/register-an-agent.md) for the complete lifecycle,
-storage contract, recovery boundaries, and error table.
+The empty `HubBootstrap{}` means "use the trust root this build ships" — you only
+fill it in if you run your own LayerV deployment. There is nothing to look up:
+the option accepts only the move LayerV just told you about. Without it, the same
+call keeps returning the error and changes nothing on disk.
 
 ## Opening Links
 
@@ -236,10 +184,10 @@ portal, err := qurl.EnterPortal(ctx, link)
 That is the whole integration. The SDK ships the issuer keys it trusts and the
 cells it can reach, so there is no trust configuration to assemble first.
 
-`EnterPortal` verifies the link's issuer signature, then knocks the cell named
-by those verified claims **directly over UDP** — the HTTPS relay exists so that
-browsers, which cannot send UDP, can still deliver a knock. A link naming a cell
-this build does not know falls back to the relay automatically.
+`EnterPortal` checks that the link was really issued by LayerV, then opens it over
+a direct UDP connection. Browsers cannot send UDP, so links opened in a browser
+go through an HTTPS path instead; the SDK picks whichever works and you do not
+configure either one.
 
 To point the SDK at a different deployment (self-hosted, or a sandbox), set
 `QURL_DEPLOYMENT` to a deployment JSON file; to take full programmatic control,
@@ -261,43 +209,43 @@ Match errors by type or sentinel, not message text:
 | --- | --- |
 | `qurl.ErrInvalidClientConfig` | Resource-client credentials or options are malformed |
 | `qurl.ErrInvalidRegisterConfig` | Native lifecycle inputs are malformed |
-| `qurl.ErrAssignmentRecoveryRequired` | Hub assignment exhausted its bounded logical operation |
+| `qurl.ErrAssignmentRecoveryRequired` | Registration ran out of retries; start recovery |
 | `qurl.ErrAgentBindingPersistence` | A state save failed or its acknowledgement was lost; reload before retry because the refreshed assignment may already be durable |
 | `qurl.ErrCompletionRecoveryRequired` | Resume the exact persisted completion candidate |
-| `qurl.ErrAgentRecoveryExpired` | The pending activation/completion reached the 90-day boundary; no datagram is sent at or after it, though the call may already have sent earlier traffic; use explicit NHP-native recovery or reprovisioning |
-| `qurl.ErrAgentRecoveryMigrationRequired` | A legacy pending completion has no authenticated finite-deadline anchor; preserve it and use explicit NHP-native recovery or reprovisioning |
+| `qurl.ErrAgentRecoveryExpired` | This registration is older than 90 days and can no longer be resumed; enroll again |
+| `qurl.ErrAgentRecoveryMigrationRequired` | Saved state predates the current format; keep the file and enroll again |
 | `*qurl.NativeCredentialRecoveryRequiredError` | Completed native credential state is absent or malformed; explicit native recovery or reprovisioning is required |
-| `*qurl.AgentAssignmentChangedError` | The Hub assigned a new cell or generation; deliberately re-run refresh with `WithAgentRuntimeReassignmentAdoption` to accept a newer generation |
+| `*qurl.AgentAssignmentChangedError` | LayerV moved where your service is served from; opt in with `WithAgentRuntimeReassignmentAdoption` to accept a newer generation |
 | `*qurl.APIError` | LayerV returned a non-2xx steady-state resource response |
-| `*qurl.ServerDenyError` | qURL denied an authenticated NHP operation |
+| `*qurl.ServerDenyError` | LayerV refused the request |
 
 ## Security notes
 
 - Treat LayerV credentials, agent state, and qURL links like credentials. Do not
   log them.
-- Pin Hub and assigned-cell identities; do not derive or infer their addresses.
-- Keep the exact pending activation across ambiguous RAK delivery and the exact
+- Never guess or construct LayerV addresses yourself; use what the SDK ships.
+- Keep saved registration state across an unclear reply, and keep the exact
   pending completion candidate across ambiguous completion delivery.
-- Wipe the private-key bytes taken from `AgentRuntimeBinding` after the knock.
+- Wipe the private-key bytes taken from `AgentRuntimeBinding` once you are done with them.
 - Keep issuer credentials in protected state, KMS, a secret manager, or another
   protected store.
-- Browser relay traffic and native UDP agent traffic are separate trust paths.
+- Links opened in a browser and services connected over UDP are separate trust paths.
 
 ## Changes
 
 ### Unreleased
 
-- Added the qURL Connector native UDP lifecycle: Hub assignment, assigned-cell
-  OTP/REG/completion, direct knock, strict golden-vector conformance, crash-safe
+- Added the native UDP connection lifecycle for services and agents: enrollment,
+  optional emailed one-time codes, direct connections, strict conformance, crash-safe
   activation/completion, and explicit opt-in assignment reassignment adoption.
 - Bounded native registration recovery to 90 days after the first authenticated
   assignment-ticket expiry, with a per-datagram deadline fence, immutable
   replacement anchor, and fail-closed pre-v6 pending-state migration.
-- Registration retry budgets are per phase, so one call can span initial Hub,
-  first REG, replacement Hub, second REG, and completion budgets. Use an outer
+- Registration retries are budgeted per step, so a single call can span several
+  of them before giving up. Use an outer
   context deadline when a smaller aggregate wall-clock ceiling is required.
 - Removed the superseded public HTTP agent assignment/registration lifecycle.
-  Steady-state resource CRUD remains HTTPS, and browser relay behavior is
+  Everyday resource calls still use HTTPS, and browser behavior is
   unchanged.
 - Added sealed full-AgentState storage and AWS-backed AgentState stores.
 

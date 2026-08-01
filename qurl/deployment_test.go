@@ -251,3 +251,22 @@ func TestDeploymentHubReturnsCopy(t *testing.T) {
 		t.Fatalf("hub mutation leaked across calls: %+v", second)
 	}
 }
+
+// Refresh must accept a zero-value hub and fall back to the shipped trust root,
+// the same way registration does. Without this a caller had to carry the host,
+// port, and key around solely to hand them back on renewal.
+func TestRefreshAgentRuntimeAcceptsZeroHub(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "deployment.json")
+	if err := os.WriteFile(path, []byte(`{"issuers":[],"cells":[],"relay_allowlist":[]}`), 0o600); err != nil {
+		t.Fatalf("write deployment: %v", err)
+	}
+	t.Setenv(EnvDeploymentPath, path)
+
+	// This build ships no hub, so the zero-value path must surface the
+	// actionable sentinel rather than a confusing endpoint-validation error.
+	store := FileAgentState(filepath.Join(t.TempDir(), "agent-state.json"))
+	_, _, err := RefreshAgentRuntime(context.Background(), HubBootstrap{}, store)
+	if !errors.Is(err, ErrNoDeploymentHub) {
+		t.Fatalf("zero hub with no shipped hub = %v, want ErrNoDeploymentHub", err)
+	}
+}

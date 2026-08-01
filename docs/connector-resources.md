@@ -58,25 +58,25 @@ validates canonical wire encoding, DER structure, ECDSA key type, P-256 curve,
 a valid non-identity point, and the byte-exact canonical SPKI re-marshalling.
 The value is distinct from both `ConnectorRoutingID`, the opaque
 reverse-connection routing label, and `KnockResourceID`, the placement-neutral
-NHP admission target. The SDK requires all three values to be present and
+connection target. The SDK requires all three values to be present and
 mutually distinct: the public-key and routing grammars cannot overlap, while
-explicit comparisons reject an opaque knock id equal to either one.
+explicit comparisons reject an opaque connection id equal to either one.
 The immutable, customer-chosen slug is not one of those three control-plane
 values and may legitimately equal a syntactically valid routing or admission
-value. The knock id otherwise keeps its producer-owned opaque grammar, but the
+value. The connection id otherwise keeps its producer-owned opaque grammar, but the
 SDK rejects surrounding whitespace and control characters before forwarding
-the value to the NHP admission path.
+the value to the connection path.
 
 A cycle `RunID` is not a fourth resource identity and is intentionally absent
 from `ConnectorResource` and the resource CRUD wire contract. qURL Connector
-generates it separately with `NewCycleRunID` once per outer knock/service cycle
+generates it separately with `NewCycleRunID` once per connection cycle
 and reuses the exact value for that cycle's retries and reconnects. Never derive
 `RunID` from `ResourceID`, `ConnectorRoutingID`, `KnockResourceID`, or `Slug`, and
 never derive any of those durable control-plane values from `RunID`.
 
 `ConnectorRoutingID` has the exact producer-owned shape
 `^c-[a-z2-7]{52}$`. The SDK consumes that value verbatim; it never derives a
-routing label from the public key, slug, cell id, `qurl_site`, or any hostname.
+routing label from the public key, slug, location, `qurl_site`, or any hostname.
 
 The SDK strictly decodes base64url, parses a valid P-256 DER SPKI public key, and
 requires byte-exact canonical re-marshalling. Legacy `r_` storage identifiers
@@ -84,11 +84,11 @@ and non-key blobs are not public REST IDs and are rejected before dispatch.
 Update the producer fence and SDK together if any identity, routing, or
 admission contract changes.
 
-`KnockResourceID` is an opaque, producer-owned NHP admission target. The SDK
+`KnockResourceID` is an opaque, producer-owned connection target. The SDK
 requires it to be present, valid UTF-8, and free of surrounding whitespace or
 control characters, but does not impose an identifier grammar on its interior;
 for example, internal spaces are preserved verbatim. This deliberately keeps
-the client from deriving or normalizing a value that NHP must match exactly.
+the client from deriving or normalizing a value that LayerV must match exactly.
 
 The fenced qURL Connector resource status schema contains only `active` and
 `revoked`; any other status is invalid producer drift rather than a transitional

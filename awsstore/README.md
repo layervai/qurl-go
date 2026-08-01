@@ -53,15 +53,12 @@ func newStore(ctx context.Context) (qurl.AgentStateStore, error) {
 }
 ```
 
-Then hand the store to the native UDP runtime exactly as you would
-`qurl.FileAgentState`:
+Then hand the store in exactly as you would `qurl.FileAgentState`:
 
 ```go
 store, err := newStore(ctx)
 // ...
-client, binding, err := qurl.RegisterAgentRuntime(ctx, setupKey, store,
-	qurl.WithAgentRuntimeHub(hub),
-)
+client, binding, err := qurl.RegisterAgentRuntime(ctx, enrollmentCredential, store)
 ```
 
 - **Load**: `GetSecretValue` → strict JSON decode of `SecretString`. A missing secret
