@@ -94,7 +94,9 @@ var ErrCredentialRecoveryRequired = errors.New("qurl: agent credential recovery 
 var ErrRegistrationKeyKindDisallowed = errors.New("qurl: registration key kind disallowed")
 
 // RegistrationKeyKindDisallowedError carries the rejected kind and the
-// caller's accepted kinds. It is returned before OTP dispatch or REG.
+// caller's accepted kinds. It is returned before OTP dispatch or REG. The
+// common cause is a pre-issued credential presented under the default OTP
+// policy: pass WithAgentRuntimeHeadlessEnrollment to accept it.
 type RegistrationKeyKindDisallowedError struct {
 	Kind    RegistrationKeyKind
 	Allowed []RegistrationKeyKind

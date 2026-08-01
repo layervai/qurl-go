@@ -113,6 +113,7 @@ defer store.Close()
 
 client, binding, err := qurl.RegisterAgentRuntime(ctx, enrollmentCredential, store,
 	qurl.WithAgentRuntimeMetadata(hostname, version),
+	qurl.WithAgentRuntimeOTPProvider(readOneTimeCode),
 )
 if err != nil {
 	return err
@@ -120,8 +121,13 @@ if err != nil {
 defer binding.Destroy()
 ```
 
-That is the whole enrollment. You supply the credential you were issued and a
-file to keep state in; the SDK already knows how to reach LayerV.
+That is the whole enrollment. You supply the credential you were issued, a file
+to keep state in, and a way to read the one-time code; the SDK already knows how
+to reach LayerV.
+
+`readOneTimeCode` is a function you write. That call **blocks** while LayerV
+emails a code to the address on your credential and waits for your callback to
+return it — [The one-time code](#the-one-time-code) below shows one.
 
 **It survives restarts and bad networks.** State is saved before anything
 irreversible happens, so a crash, a dropped reply, or a machine reboot resumes
@@ -135,29 +141,60 @@ not need to handle that; it is the default.
 the saved registration. Change them only after registration has completed, or
 recovery has nothing to match.
 
-### Credentials
+### The one-time code
 
-Pass the credential LayerV issued you. Any credential minted for unattended
-software works out of the box.
+Enrollment sends a one-time code to the address on your credential, and your
+callback returns it. That is the default path.
 
-Enrolling as a *person* — where a one-time code is emailed to you — is opt-in,
-because software that registers by itself should never be able to trigger an
-email challenge by accident:
+It is not a "human" path. Agents increasingly have their own mailboxes, and a
+service account or a shared operations alias works just as well. All that
+matters is that *something* can read the address the code went to:
+
+```go
+func readOneTimeCode(ctx context.Context, challenge qurl.AgentOTPChallenge) (string, error) {
+	return pollMailboxForCode(ctx) // your inbox, your operator, your call
+}
+```
+
+Return exactly 8 decimal digits, and honor the `ctx` — it is already bounded by
+the assignment ticket. The `challenge` is for logging and correlation only: it
+carries no credential and nothing replayable. LayerV sends at most one code per
+attempt, and the SDK never retries behind your back or writes the code to disk.
+
+**If nothing can read a mailbox** — a sealed appliance, an air-gapped build
+agent — enroll with a pre-issued credential and say so explicitly:
 
 ```go
 client, binding, err := qurl.RegisterAgentRuntime(ctx, credential, store,
-	qurl.WithAgentRuntimeAllowedRegistrationKeyKinds(qurl.RegistrationKeyKindAccount),
-	qurl.WithAgentRuntimeOTPProvider(promptForEmailedCode),
+	qurl.WithAgentRuntimeMetadata(hostname, version),
+	qurl.WithAgentRuntimeHeadlessEnrollment(),
 )
 ```
 
-Your callback receives only what it needs to prompt someone: never the
-credential, and never anything that could be replayed. LayerV sends at most one
-code per attempt, and the SDK never retries behind your back or writes the code
-to disk.
+That is the escape hatch, not the shortcut. Use it only when no address in reach
+can receive the code — and note it cannot be combined with an OTP provider, since
+one option says no code can be read and the other says how to read one.
 
-Credentials must be LayerV-minted tokens of at least 32 characters. Passwords and
-hand-picked strings are rejected before anything is saved or sent.
+**Not sure which you have?** The token will not tell you — credentials carry no
+kind you can parse, and LayerV reports it on the first authenticated call. Go by
+how you got it: issued against an address means the code path, pre-issued for a
+machine means headless. Or just run the default and read the error, which names
+the kind LayerV actually reported:
+
+```
+qurl: registration key kind "bootstrap" is disallowed; accepted kinds: account
+```
+
+A wrong first guess costs you nothing — nothing is registered, and the retry
+reuses the same agent identity rather than enrolling a second one.
+[Connect a service or agent](docs/register-an-agent.md) has the full decision
+table.
+
+### Credentials
+
+Pass the credential LayerV issued you. Credentials must be LayerV-minted tokens
+of at least 32 characters. Passwords and hand-picked strings are rejected before
+anything is saved or sent.
 
 ### If LayerV moves your service
 
@@ -239,8 +276,17 @@ Match errors by type or sentinel, not message text:
 
 ### Unreleased
 
+- **Breaking:** enrollment now defaults to the emailed one-time code, for any
+  runtime that can read a mailbox rather than humans specifically. A runtime with
+  no address in reach opts out with the new
+  `WithAgentRuntimeHeadlessEnrollment`; callers that previously enrolled with a
+  pre-issued credential and no options must add it. Policy and provider must now
+  agree in both directions: accepting the OTP kind without
+  `WithAgentRuntimeOTPProvider` fails with `ErrAgentOTPRequired` before any
+  network I/O, and installing a provider while excluding that kind is rejected
+  as contradictory with `ErrInvalidRegisterConfig`.
 - Added the native UDP connection lifecycle for services and agents: enrollment,
-  optional emailed one-time codes, direct connections, strict conformance, crash-safe
+  emailed one-time codes, direct connections, strict conformance, crash-safe
   activation/completion, and explicit opt-in assignment reassignment adoption.
 - Bounded native registration recovery to 90 days after the first authenticated
   assignment-ticket expiry, with a per-datagram deadline fence, immutable
