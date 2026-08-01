@@ -46,16 +46,19 @@ func TestNewCellCatalogRejectsMalformedEntries(t *testing.T) {
 		entry CellEntry
 		want  string
 	}{
-		{"no key", CellEntry{CellID: "c", Host: "h", Port: 1}, "has no server public key"},
-		{"blank key", CellEntry{CellID: "c", Host: "h", Port: 1, ServerPublicKeyB64: "   "}, "has no server public key"},
-		{"not base64", CellEntry{CellID: "c", Host: "h", Port: 1, ServerPublicKeyB64: "!!!not base64!!!"}, "not valid base64"},
-		{"key too short", CellEntry{CellID: "c", Host: "h", Port: 1, ServerPublicKeyB64: short}, "31 bytes, want 32"},
-		{"key too long", CellEntry{CellID: "c", Host: "h", Port: 1, ServerPublicKeyB64: long}, "33 bytes, want 32"},
-		{"no host", CellEntry{CellID: "c", Port: 1, ServerPublicKeyB64: good}, "has no host"},
-		{"blank host", CellEntry{CellID: "c", Host: "  ", Port: 1, ServerPublicKeyB64: good}, "has no host"},
-		{"port zero", CellEntry{CellID: "c", Host: "h", ServerPublicKeyB64: good}, "out-of-range port"},
-		{"port negative", CellEntry{CellID: "c", Host: "h", Port: -1, ServerPublicKeyB64: good}, "out-of-range port"},
-		{"port too high", CellEntry{CellID: "c", Host: "h", Port: 65536, ServerPublicKeyB64: good}, "out-of-range port"},
+		{"no key", CellEntry{CellID: "c", Host: "h", Port: standardNHPUDPPort}, "has no server public key"},
+		{"blank key", CellEntry{CellID: "c", Host: "h", Port: standardNHPUDPPort, ServerPublicKeyB64: "   "}, "has no server public key"},
+		{"not base64", CellEntry{CellID: "c", Host: "h", Port: standardNHPUDPPort, ServerPublicKeyB64: "!!!not base64!!!"}, "not valid base64"},
+		{"key too short", CellEntry{CellID: "c", Host: "h", Port: standardNHPUDPPort, ServerPublicKeyB64: short}, "31 bytes, want 32"},
+		{"key too long", CellEntry{CellID: "c", Host: "h", Port: standardNHPUDPPort, ServerPublicKeyB64: long}, "33 bytes, want 32"},
+		{"no host", CellEntry{CellID: "c", Port: standardNHPUDPPort, ServerPublicKeyB64: good}, "has no host"},
+		{"blank host", CellEntry{CellID: "c", Host: "  ", Port: standardNHPUDPPort, ServerPublicKeyB64: good}, "has no host"},
+		{"port zero", CellEntry{CellID: "c", Host: "h", ServerPublicKeyB64: good}, "unsupported UDP port"},
+		{"port negative", CellEntry{CellID: "c", Host: "h", Port: -1, ServerPublicKeyB64: good}, "unsupported UDP port"},
+		{"port too high", CellEntry{CellID: "c", Host: "h", Port: 65536, ServerPublicKeyB64: good}, "unsupported UDP port"},
+		// 62206 was the original NHP port: it is in range but no longer permitted,
+		// which is exactly the misconfiguration the pin exists to catch.
+		{"former NHP port", CellEntry{CellID: "c", Host: "h", Port: 62206, ServerPublicKeyB64: good}, "unsupported UDP port"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := NewCellCatalog([]CellEntry{tc.entry})
@@ -74,8 +77,8 @@ func TestNewCellCatalogRejectsMalformedEntries(t *testing.T) {
 func TestNewCellCatalogFailsWholeCatalogOnOneBadEntry(t *testing.T) {
 	good := base64.StdEncoding.EncodeToString(testCellKey(t, 3))
 	if _, err := NewCellCatalog([]CellEntry{
-		{CellID: "good", Host: "a.example", Port: 62206, ServerPublicKeyB64: good},
-		{CellID: "bad", Host: "b.example", Port: 62206, ServerPublicKeyB64: "nope"},
+		{CellID: "good", Host: "a.example", Port: standardNHPUDPPort, ServerPublicKeyB64: good},
+		{CellID: "bad", Host: "b.example", Port: standardNHPUDPPort, ServerPublicKeyB64: "nope"},
 	}); err == nil {
 		t.Fatal("catalog built despite a malformed entry")
 	}
@@ -106,7 +109,7 @@ func TestCellCatalogAcceptsEveryBase64Spelling(t *testing.T) {
 	for name, encoded := range spellings {
 		t.Run(name, func(t *testing.T) {
 			catalog, err := NewCellCatalog([]CellEntry{
-				{CellID: "cell0", Host: "a.example", Port: 62206, ServerPublicKeyB64: encoded},
+				{CellID: "cell0", Host: "a.example", Port: standardNHPUDPPort, ServerPublicKeyB64: encoded},
 			})
 			if err != nil {
 				t.Fatalf("spelling %s rejected: %v", name, err)
@@ -115,7 +118,7 @@ func TestCellCatalogAcceptsEveryBase64Spelling(t *testing.T) {
 			if !ok {
 				t.Fatalf("spelling %s built a catalog that does not match its own key", name)
 			}
-			if ep.Host != "a.example" || ep.Port != 62206 || ep.CellID != "cell0" {
+			if ep.Host != "a.example" || ep.Port != standardNHPUDPPort || ep.CellID != "cell0" {
 				t.Fatalf("spelling %s produced %+v", name, ep)
 			}
 		})
@@ -127,7 +130,7 @@ func TestCellCatalogLookup(t *testing.T) {
 	other := testCellKey(t, 6)
 	catalog, err := NewCellCatalog([]CellEntry{
 		{
-			CellID: "cell0", Host: "a.example", Port: 62206,
+			CellID: "cell0", Host: "a.example", Port: standardNHPUDPPort,
 			ServerPublicKeyB64: base64.StdEncoding.EncodeToString(known),
 		},
 	})
@@ -169,7 +172,7 @@ func TestCellCatalogIsIndependentOfCallerSlice(t *testing.T) {
 	key := testCellKey(t, 7)
 	entries := []CellEntry{
 		{
-			CellID: "cell0", Host: "a.example", Port: 62206,
+			CellID: "cell0", Host: "a.example", Port: standardNHPUDPPort,
 			ServerPublicKeyB64: base64.StdEncoding.EncodeToString(key),
 		},
 	}
@@ -184,7 +187,7 @@ func TestCellCatalogIsIndependentOfCallerSlice(t *testing.T) {
 	if !ok {
 		t.Fatal("cell vanished after caller mutated its own slice")
 	}
-	if ep.Host != "a.example" || ep.Port != 62206 {
+	if ep.Host != "a.example" || ep.Port != standardNHPUDPPort {
 		t.Fatalf("catalog followed a caller mutation: %+v", ep)
 	}
 }

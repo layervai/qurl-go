@@ -111,7 +111,7 @@ func sampleState() *qurl.AgentState {
 			CellID: "cell0", AssignmentGeneration: 1, EndpointRevision: 1,
 			LeaseExpiresAt: ts.Add(time.Hour),
 			Endpoint: qurl.NHPUDPEndpoint{
-				Host: "cell0.nhp.layerv.ai", Port: 62206,
+				Host: "cell0.nhp.layerv.ai", Port: 443,
 				ServerPublicKeyB64: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
 			},
 		},

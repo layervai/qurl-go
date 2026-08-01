@@ -34,7 +34,7 @@ const (
 	otpMailboxBucketEnv      = "QURL_GO_SANDBOX_OTP_MAILBOX_BUCKET"
 	otpMailboxRecipientEnv   = "QURL_GO_SANDBOX_OTP_MAILBOX_RECIPIENT"
 	otpMailboxRegionEnv      = "QURL_GO_SANDBOX_OTP_MAILBOX_REGION"
-	standardNHPUDPPort       = 62206
+	standardNHPUDPPort       = 443
 	x25519PublicKeyLength    = 32
 )
 

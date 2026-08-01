@@ -34,8 +34,16 @@ const (
 	assignmentModeRefresh               = "refresh"
 	assignmentKeyKindConnectorBootstrap = "connector_bootstrap"
 	assignmentKeyKindAgent              = "agent"
-	standardNHPUDPPort                  = 62206
-	maxAssignmentTicketBytes            = 2304
+	// standardNHPUDPPort is the single UDP port every LayerV NHP endpoint listens
+	// on -- Hub bootstrap and assigned cells alike. It is 443 because restrictive
+	// egress filters usually already permit it for QUIC, and because high-entropy
+	// encrypted UDP is unremarkable there: nothing here speaks QUIC or TLS, but
+	// nothing on 443 is watching for a protocol shape the way a DNS or
+	// tunnel-detection middlebox watches 53. Endpoints are pinned to it rather
+	// than range-checked, so a deployment file cannot quietly place a cell on a
+	// port the agent's network will drop.
+	standardNHPUDPPort       = 443
+	maxAssignmentTicketBytes = 2304
 	// Pinned by TestAssignmentTicketMatchesReleasedConformanceBoundary.
 	maxAssignmentTicketLifetime = 15 * time.Minute
 	maxAssignmentJSONDepth      = 64
@@ -55,9 +63,8 @@ const (
 // HubBootstrap is the out-of-band trust root for native assignment. Host, Port,
 // and ServerPublicKeyB64 are one atomic revision supplied by trusted deployment
 // configuration. The SDK never synthesizes any of them from an API URL, cell id,
-// DNS response, or unauthenticated packet. Port must be the standard NHP UDP
-// bootstrap port 62206; unlike this pinned bootstrap contract, an authenticated
-// assigned-cell endpoint may carry any valid network port.
+// DNS response, or unauthenticated packet. Port must be standardNHPUDPPort,
+// which an authenticated assigned-cell endpoint is held to as well.
 type HubBootstrap struct {
 	Host               string `json:"host"`
 	Port               int    `json:"port"`
@@ -155,10 +162,6 @@ func (a *AgentAssignment) Validate(now time.Time) error {
 		return fmt.Errorf("%w: assignment lease must be in the future: %w", ErrAssignmentInvalidResponse, ErrAssignmentLeaseExpired)
 	}
 	return nil
-}
-
-func validNetworkPort(port int) bool {
-	return port > 0 && port <= 65535
 }
 
 // LeaseExpired reports only whether the assignment is absent or its lease is no
@@ -935,8 +938,12 @@ func validatePersistedAgentAssignment(a *AgentAssignment) error {
 	if err := validateAssignmentEndpointHost(a.Endpoint.Host, "assignment endpoint", ErrAssignmentInvalidResponse); err != nil {
 		return err
 	}
-	if !validNetworkPort(a.Endpoint.Port) {
-		return invalidAssignmentResponse("assignment endpoint", fmt.Errorf("port %d is out of range", a.Endpoint.Port))
+	// Pinned, not range-checked: an assigned cell the agent cannot reach through
+	// its egress filter is worse than a rejected assignment, and the Hub response
+	// that carries this endpoint is exactly the input an operator misconfiguration
+	// would arrive through.
+	if a.Endpoint.Port != standardNHPUDPPort {
+		return invalidAssignmentResponse("assignment endpoint", fmt.Errorf("unsupported UDP port %d (want %d)", a.Endpoint.Port, standardNHPUDPPort))
 	}
 	if _, err := decodeAssignmentServerPublicKey(a.Endpoint.ServerPublicKeyB64); err != nil {
 		return err

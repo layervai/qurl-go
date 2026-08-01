@@ -1073,7 +1073,7 @@ func TestSameAgentAssignmentComparesLeaseInstant(t *testing.T) {
 		CellID: "cell0", AssignmentGeneration: 1, EndpointRevision: 2,
 		LeaseExpiresAt: assignmentFixtureNow,
 		Endpoint: NHPUDPEndpoint{
-			Host: "cell0.nhp.layerv.ai", Port: 62206,
+			Host: "cell0.nhp.layerv.ai", Port: standardNHPUDPPort,
 			ServerPublicKeyB64: validTestNHPServerPublicKeyB64,
 		},
 	}

@@ -63,7 +63,7 @@ type CellCatalog struct {
 var ErrNoCellEndpoints = errors.New("qurl: cell catalog has no endpoints")
 
 // NewCellCatalog builds a catalog from cell entries. Every entry must carry a
-// valid 32-byte key, a host, and an in-range port; one bad entry fails the whole
+// valid 32-byte key, a host, and the standard NHP UDP port; one bad entry fails the whole
 // catalog rather than silently dropping a cell, because a silently missing cell
 // degrades to the relay instead of failing — exactly the kind of quiet fallback
 // that hides a misconfiguration.
@@ -85,8 +85,8 @@ func NewCellCatalog(entries []CellEntry) (*CellCatalog, error) {
 		if host == "" {
 			return nil, fmt.Errorf("qurl: cell %s has no host", label)
 		}
-		if entry.Port <= 0 || entry.Port > 65535 {
-			return nil, fmt.Errorf("qurl: cell %s has out-of-range port %d", label, entry.Port)
+		if entry.Port != standardNHPUDPPort {
+			return nil, fmt.Errorf("qurl: cell %s has unsupported UDP port %d (want %d)", label, entry.Port, standardNHPUDPPort)
 		}
 		fingerprint := relayknock.PubKeyFingerprint(key)
 		// Two entries for one cell key is a misconfiguration, not a preference:

@@ -35,7 +35,7 @@ func unreachableCellCatalog(t *testing.T, cellKeyB64 string) *CellCatalog {
 		ServerPublicKeyB64: cellKeyB64,
 		CellID:             "test-cell",
 		Host:               "127.0.0.1",
-		Port:               9,
+		Port:               standardNHPUDPPort,
 	}})
 	if err != nil {
 		t.Fatalf("build cell catalog: %v", err)
@@ -210,8 +210,8 @@ func TestEnterPortal_CellProviderErrorFailsClosed(t *testing.T) {
 func TestNewCellCatalogRejectsDuplicateKeys(t *testing.T) {
 	key := vectorCellKeyB64(t)
 	_, err := NewCellCatalog([]CellEntry{
-		{ServerPublicKeyB64: key, CellID: "cell-a", Host: "a.example.com", Port: 62206},
-		{ServerPublicKeyB64: key, CellID: "cell-b", Host: "b.example.com", Port: 62206},
+		{ServerPublicKeyB64: key, CellID: "cell-a", Host: "a.example.com", Port: standardNHPUDPPort},
+		{ServerPublicKeyB64: key, CellID: "cell-b", Host: "b.example.com", Port: standardNHPUDPPort},
 	})
 	if err == nil {
 		t.Fatal("duplicate cell keys were silently collapsed")

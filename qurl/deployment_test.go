@@ -36,7 +36,7 @@ func writeVendoredDeployment(t *testing.T, withCells bool) string {
 		d.Cells = []DeploymentCell{{
 			CellID:             "vector-cell",
 			Host:               "127.0.0.1",
-			Port:               9,
+			Port:               standardNHPUDPPort,
 			ServerPublicKeyB64: base64.RawURLEncoding.EncodeToString(key),
 		}}
 	} else {
@@ -196,7 +196,7 @@ func TestDeploymentHubFromOverrideFile(t *testing.T) {
 	  "issuers": [],
 	  "cells": [],
 	  "relay_allowlist": [],
-	  "hub": {"host":"hub.example","port":62206,"server_public_key_b64":"aGVsbG8="}
+	  "hub": {"host":"hub.example","port":443,"server_public_key_b64":"aGVsbG8="}
 	}`), 0o600); err != nil {
 		t.Fatalf("write deployment: %v", err)
 	}
@@ -206,7 +206,7 @@ func TestDeploymentHubFromOverrideFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("deploymentHub: %v", err)
 	}
-	if hub.Host != "hub.example" || hub.Port != 62206 {
+	if hub.Host != "hub.example" || hub.Port != standardNHPUDPPort {
 		t.Fatalf("hub = %+v", hub)
 	}
 }
@@ -231,7 +231,7 @@ func TestDeploymentHubReturnsCopy(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "deployment.json")
 	if err := os.WriteFile(path, []byte(`{
 	  "issuers": [], "cells": [], "relay_allowlist": [],
-	  "hub": {"host":"hub.example","port":62206,"server_public_key_b64":"aGVsbG8="}
+	  "hub": {"host":"hub.example","port":443,"server_public_key_b64":"aGVsbG8="}
 	}`), 0o600); err != nil {
 		t.Fatalf("write deployment: %v", err)
 	}

@@ -198,7 +198,7 @@ func ExampleRecoverAgentRuntime() {
 	defer store.Close()
 	hub := qurl.HubBootstrap{
 		Host:               "hub.nhp.layerv.ai",
-		Port:               62206,
+		Port:               443,
 		ServerPublicKeyB64: configuredHubPublicKeyB64(),
 	}
 	client, binding, err := qurl.RecoverAgentRuntime(ctx, recoveryCredentialFromOperator(), store,
@@ -227,7 +227,7 @@ func ExampleNewSealedFileAgentState() {
 	defer store.Close()
 	_, binding, _ := qurl.RegisterAgentRuntime(context.Background(), "lv_enrollment_AAECAwQFBgcICQoLDA0ODxAREhMUFRYX", store,
 		qurl.WithAgentRuntimeHub(qurl.HubBootstrap{
-			Host: "hub.nhp.layerv.ai", Port: 62206,
+			Host: "hub.nhp.layerv.ai", Port: 443,
 			ServerPublicKeyB64: configuredHubPublicKeyB64(),
 		}),
 		qurl.WithAgentRuntimeOTPProvider(readOneTimeCodeFromMailbox),
