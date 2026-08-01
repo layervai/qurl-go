@@ -9,10 +9,17 @@ import (
 )
 
 // RegisterAgentRuntime performs the qURL Connector's UDP-only enrollment
-// lifecycle: Hub assignment, optional assigned-cell OTP, assigned-cell REG/RAK,
-// and assigned-cell completion LST/LRT. It never calls a public enrollment,
-// assignment, or completion HTTP endpoint. WithAgentRuntimeHub is required;
-// only options explicitly documented for this runtime are accepted.
+// lifecycle: Hub assignment, assigned-cell OTP, assigned-cell REG/RAK, and
+// assigned-cell completion LST/LRT. It never calls a public enrollment,
+// assignment, or completion HTTP endpoint. Only options explicitly documented
+// for this runtime are accepted.
+//
+// Enrollment defaults to the one-time code, so a plain call installs
+// WithAgentRuntimeOTPProvider. The OTP leg is skipped only for a runtime that
+// declares it cannot receive a code with WithAgentRuntimeHeadlessEnrollment.
+// WithAgentRuntimeHub is optional: without it the SDK uses the trust root this
+// build ships, which is what every caller wants unless they run their own
+// LayerV deployment.
 //
 // The setup lock spans every incomplete-state transition. After RAK the SDK
 // durably persists one pending device-secret candidate before sending completion,
