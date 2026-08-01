@@ -24,10 +24,9 @@ import (
 // The setup lock spans every incomplete-state transition. After RAK the SDK
 // durably persists one pending device-secret candidate before sending completion,
 // so a crash or lost LRT reuses the same candidate and cannot mint a second
-// credential. A completed warm open should normally call
-// OpenRegisteredAgentRuntime, which performs no network I/O while the assignment
-// lease is live and renews it through the Hub once it expires. Either way, do not
-// expect RegisterAgentRuntime to return the completed binding after expiry.
+// credential. Re-running this call on an already-registered agent returns that
+// registration rather than enrolling again, renewing an expired lease and
+// following any relocation on the way, so it is safe on every start.
 // enrollmentCredential must be a server-minted encoded token whose total string
 // length, including any prefix, is at least 32 bytes; user-chosen passwords are
 // not valid enrollment credentials. The SDK enforces syntax and this length
