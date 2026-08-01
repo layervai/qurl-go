@@ -54,8 +54,12 @@ const DefaultIssuerStatePath = "/var/lib/layerv/qurl/issuer-state.json"
 // right. The Connector already accepted QURL_API_KEY and QURL_API_KEY_FILE; the
 // SDK was the inconsistent one.
 const (
+	// #nosec G101 -- these are the NAMES of environment variables, not secrets.
+	// gosec flags any identifier matching /API_KEY/; the values here are
+	// documentation of where a caller may put a credential, and both are
+	// deliberately part of the public API so integrators can reference them.
 	EnvAPIKey     = "QURL_API_KEY"
-	EnvAPIKeyFile = "QURL_API_KEY_FILE"
+	EnvAPIKeyFile = "QURL_API_KEY_FILE" // #nosec G101 -- env var name, not a secret
 )
 
 // UserIssuerStatePath is the per-user credential file, relative to the home
@@ -86,6 +90,12 @@ func resolveCredentials(explicitPath string) (CredentialProvider, error) {
 	if path := strings.TrimSpace(os.Getenv(EnvAPIKeyFile)); path != "" {
 		// An explicitly named file that does not exist is a configuration error,
 		// not a reason to silently authenticate as somebody else.
+		//
+		// #nosec G304 G703 -- reading an operator-chosen path is the entire
+		// purpose of QURL_API_KEY_FILE, exactly as QURL_DEPLOYMENT names a
+		// deployment file. A caller who can set this variable can already set
+		// anything else about the process; this Stat only decides whether to
+		// use the path or fall through.
 		if _, err := os.Stat(path); err != nil {
 			return nil, fmt.Errorf("%w: %s=%s: %w", ErrInvalidClientConfig, EnvAPIKeyFile, path, err)
 		}
