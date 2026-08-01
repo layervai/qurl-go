@@ -52,8 +52,9 @@ anything you configure:
 the SDK checks only shape and length, and LayerV reports the kind on the first
 authenticated call. Go by how you obtained it.
 
-**If you are not sure, just run it.** The default assumes the one-time code, and
-when that is wrong the error names the kind LayerV actually reported:
+**If you are not sure, run the call at the top of this page.** With a provider
+installed the default assumes the one-time code, and when that is wrong the
+error names the kind LayerV actually reported:
 
 ```
 qurl: registration key kind "bootstrap" is disallowed; accepted kinds: account
@@ -64,6 +65,10 @@ carries the same value. Add `qurl.WithAgentRuntimeHeadlessEnrollment()` and the
 call goes through. A wrong first guess costs you nothing: the check happens
 before any registration, and the retry reuses the same agent identity the first
 attempt saved to your state file rather than enrolling a second one.
+
+Do this with the provider installed. A call with *no* provider stops earlier
+still, with `qurl.ErrAgentOTPRequired` — that check runs before the Hub is
+contacted, so there is no reported kind for it to name.
 
 Either way, the credential must be a LayerV-minted token of at least 32
 characters. Passwords and hand-picked strings are rejected before anything is
@@ -157,12 +162,17 @@ That resume window is **90 days**. Within it, retrying is always safe — the SD
 replays the identical registration rather than creating a second one. Past it,
 `qurl.ErrAgentRecoveryExpired` tells you to enroll again.
 
-Two things you control:
+Three things you control:
 
 - **Keep the metadata stable.** The hostname and version you pass become part of
   the saved registration. Change them only after registration completes, or a
   resumed attempt has nothing to match.
 - **Keep the state file.** It is the only thing that makes a resume possible.
+- **Keep the enrollment options stable.** Resuming re-checks your policy before
+  it reads the interrupted registration, so an enrollment started with
+  `WithAgentRuntimeHeadlessEnrollment()` must be resumed with it still passed.
+  Dropping it fails with `qurl.ErrAgentOTPRequired`. Resuming with the same
+  options you started with is always correct.
 
 Retries are budgeted per step, so one call can spend several budgets before giving
 up. If you want a smaller overall ceiling, set a deadline on the context you pass.
