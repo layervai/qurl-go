@@ -61,8 +61,9 @@ qurl: registration key kind "bootstrap" is disallowed; accepted kinds: account
 
 That is a `*qurl.RegistrationKeyKindDisallowedError`, and its `Kind` field
 carries the same value. Add `qurl.WithAgentRuntimeHeadlessEnrollment()` and the
-call goes through. The check runs before anything is registered or written to
-disk, so a wrong first guess costs you nothing.
+call goes through. A wrong first guess costs you nothing: the check happens
+before any registration, and the retry reuses the same agent identity the first
+attempt saved to your state file rather than enrolling a second one.
 
 Either way, the credential must be a LayerV-minted token of at least 32
 characters. Passwords and hand-picked strings are rejected before anything is

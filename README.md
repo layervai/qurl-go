@@ -185,9 +185,10 @@ the kind LayerV actually reported:
 qurl: registration key kind "bootstrap" is disallowed; accepted kinds: account
 ```
 
-Nothing is registered or written before that check, so a wrong first guess costs
-you nothing. [Connect a service or agent](docs/register-an-agent.md) has the full
-decision table.
+A wrong first guess costs you nothing — nothing is registered, and the retry
+reuses the same agent identity rather than enrolling a second one.
+[Connect a service or agent](docs/register-an-agent.md) has the full decision
+table.
 
 ### Credentials
 

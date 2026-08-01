@@ -955,6 +955,20 @@ func TestRegisterAgentRuntime_PreIssuedCredentialNeedsHeadlessOptIn(t *testing.T
 	if len(f.hubUDP.snapshot()) != 1 || len(f.cellUDP.snapshot()) != 0 {
 		t.Fatalf("rejection Hub/cell counts = %d/%d, want 1/0", len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot()))
 	}
+	// The guide tells readers a wrong first guess is free, so pin exactly what a
+	// rejected attempt leaves behind: the agent identity persists (the retry
+	// reuses it rather than enrolling a second one), but no assignment or
+	// pending activation does.
+	state, err := f.store.LoadAgentState(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.AgentID == "" || state.PublicKeyB64 == "" {
+		t.Fatalf("rejected attempt did not retain a reusable identity: %#v", state)
+	}
+	if state.Assignment != nil || state.PendingActivation != nil || state.RegisteredAt != nil {
+		t.Fatalf("rejected attempt persisted registration progress: %#v", state)
+	}
 }
 
 // TestRegisterAgentRuntime_AccountOptInStillRequiresOTPProviderBeforeAnyIO
