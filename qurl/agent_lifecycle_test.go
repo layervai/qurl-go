@@ -369,7 +369,7 @@ func TestNativeRuntimeClients_RejectPostTTLIdentityChange(t *testing.T) {
 		{
 			name: "warm runtime open",
 			open: func(store *sequenceAgentStateStore, now func() time.Time) (*Client, func(), error) {
-				client, binding, err := openRegisteredAgentRuntime(context.Background(), store, now)
+				client, binding, err := openRegisteredAgentRuntime(context.Background(), store, now, HubBootstrap{}, nil)
 				if err != nil {
 					return nil, func() {}, err
 				}

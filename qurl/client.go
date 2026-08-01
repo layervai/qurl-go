@@ -428,11 +428,18 @@ func claimClientOptionSource(current *clientOptionSource, next clientOptionSourc
 	return nil
 }
 
-func applyClientOptions(opts []ClientOption) (clientOptions, error) {
-	cfg := clientOptions{
+// defaultClientOptions is the shared starting point for every option family
+// that ends up configuring a resource Client, so the closed runtime-open set
+// cannot drift from the generic one.
+func defaultClientOptions() clientOptions {
+	return clientOptions{
 		baseURL:    defaultAPIBaseURL,
 		httpClient: defaultAPIHTTPClient,
 	}
+}
+
+func applyClientOptions(opts []ClientOption) (clientOptions, error) {
+	cfg := defaultClientOptions()
 	for _, opt := range opts {
 		if opt == nil {
 			return clientOptions{}, fmt.Errorf("%w: nil ClientOption", ErrInvalidClientConfig)

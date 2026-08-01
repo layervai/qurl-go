@@ -554,7 +554,16 @@ func assignmentRetryInfo(err error) (time.Duration, bool) {
 		return 0, true
 	}
 	var appErr *AssignmentError
-	if errors.As(err, &appErr) && (errors.Is(appErr, ErrAssignmentUnavailable) || errors.Is(appErr, ErrAssignmentRateLimited)) {
+	if errors.As(err, &appErr) && (errors.Is(appErr, ErrAssignmentUnavailable) ||
+		errors.Is(appErr, ErrAssignmentRateLimited) ||
+		// 52202 says a move is in flight right now, which is transient by
+		// definition: the same request a moment later gets the new placement.
+		// Surfacing it made every caller hand-write a retry for a condition the
+		// Hub had already described as temporary. Its wire grammar still forbids
+		// retryAfterSeconds, so this waits on the shared jittered backoff inside
+		// the same bounded operation and still surfaces recovery if the budget
+		// runs out.
+		errors.Is(appErr, ErrAssignmentReassignmentRequired)) {
 		return appErr.RetryAfter, true
 	}
 	return 0, false

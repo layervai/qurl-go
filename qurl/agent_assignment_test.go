@@ -1361,3 +1361,46 @@ func TestAssignmentTicketMatchesReleasedConformanceBoundary(t *testing.T) {
 		})
 	}
 }
+
+// A Hub that says "a move is in flight" is describing a transient condition, so
+// the bounded operation waits it out instead of making every caller hand-write
+// the retry. Terminal policy results must stay terminal.
+func TestAssignmentRetryClasses(t *testing.T) {
+	tests := []struct {
+		name      string
+		err       error
+		retryable bool
+	}{
+		{name: "transport", err: nativeudp.ErrTransport, retryable: true},
+		{name: "resolve", err: nativeudp.ErrResolve, retryable: true},
+		{name: "unavailable 52200", err: &AssignmentError{Code: "52200", kind: ErrAssignmentUnavailable}, retryable: true},
+		{name: "rate limited 52204", err: &AssignmentError{Code: "52204", RetryAfter: time.Second, kind: ErrAssignmentRateLimited}, retryable: true},
+		{name: "reassignment in progress 52202", err: &AssignmentError{Code: "52202", kind: ErrAssignmentReassignmentRequired}, retryable: true},
+		{name: "identity rejected 52201", err: &AssignmentError{Code: "52201", kind: ErrAssignmentIdentityRejected}},
+		{name: "quota exceeded 52203", err: &AssignmentError{Code: "52203", kind: ErrAssignmentQuotaExceeded}},
+		{name: "request rejected 52205", err: &AssignmentError{Code: "52205", kind: ErrAssignmentRequestRejected}},
+		{name: "unauthenticated server", err: nativeudp.ErrServerUnauthenticated},
+		{name: "authenticated malformed", err: ErrAssignmentInvalidResponse},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			if _, retryable := assignmentRetryInfo(testCase.err); retryable != testCase.retryable {
+				t.Fatalf("retryable = %t, want %t", retryable, testCase.retryable)
+			}
+		})
+	}
+}
+
+// 52202 stays retryable without loosening its wire grammar: a producer that
+// sends retryAfterSeconds on it is still a contract violation.
+func TestAssignmentReassignmentRetryKeepsWireGrammar(t *testing.T) {
+	body := []byte(`{"errCode":"52202","retryAfterSeconds":5}`)
+	_, err := parseAssignmentEnvelope(body, false)
+	if !errors.Is(err, ErrAssignmentInvalidResponse) {
+		t.Fatalf("52202 with retryAfterSeconds = %v, want ErrAssignmentInvalidResponse", err)
+	}
+	valid, err := parseAssignmentEnvelope([]byte(`{"errCode":"52202"}`), false)
+	if valid != nil || !errors.Is(err, ErrAssignmentReassignmentRequired) {
+		t.Fatalf("bare 52202 = %v/%v, want ErrAssignmentReassignmentRequired", valid, err)
+	}
+}

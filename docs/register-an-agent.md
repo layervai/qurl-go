@@ -3,7 +3,9 @@
 Your software registers with LayerV once, then serves traffic. Nothing listens on
 a public port, so there is no endpoint for a scanner to find.
 
-## Connect
+## The whole thing
+
+This is a complete service: enroll, publish a resource, accept a connection.
 
 ```go
 store, err := qurl.OpenFileAgentState("/var/lib/layerv/qurl/agent-state.json")
@@ -12,31 +14,61 @@ if err != nil {
 }
 defer store.Close()
 
-client, binding, err := qurl.RegisterAgentRuntime(ctx, enrollmentCredential, store,
-	qurl.WithAgentRuntimeMetadata(hostname, version),
+client, binding, err := qurl.ConnectAgentRuntime(ctx, store,
+	qurl.WithAgentRuntimeEnrollmentCredential(enrollmentCredential),
 	qurl.WithAgentRuntimeOTPProvider(readOneTimeCode),
+	qurl.WithAgentRuntimeMetadata(hostname, version),
 )
 if err != nil {
 	return err
 }
 defer binding.Destroy()
+
+privateKey := binding.TakeDeviceStaticPrivateKey()
+defer clear(privateKey)
+
+connector, err := client.EnsureConnectorResource(ctx, "prod-dashboard")
+if err != nil {
+	return err
+}
+
+runID, err := qurl.NewCycleRunID()
+if err != nil {
+	return err
+}
+
+admission, err := qurl.KnockRegisteredAgent(ctx, binding, privateKey,
+	connector.Resource.KnockResourceID,
+	qurl.NativeKnockOptions{RunID: runID},
+)
+if err != nil {
+	return err
+}
 ```
 
-That is the whole enrollment. You supply the credential LayerV issued you, a
-file to keep state in, and a way to read the one-time code; the SDK already
-knows how to reach LayerV.
+You supply the credential LayerV issued you, a file to keep state in, and a way
+to read the one-time code. The SDK already knows how to reach LayerV.
 
-`readOneTimeCode` is a function you write. That call **blocks** while LayerV
-emails a code to the address on your credential and waits for your callback to
-return it, so give the context a deadline if nothing may be watching the
-mailbox. [The one-time code](#the-one-time-code) below shows one.
+`readOneTimeCode` is a function you write. On a first enrollment that call
+**blocks** while LayerV emails a code to the address on your credential and waits
+for your callback, so give the context a deadline if nothing may be watching the
+mailbox. [The one-time code](#the-one-time-code) shows one. Later starts never
+call it.
 
-You get back two things:
+Two things come back:
 
-- **`client`** — use it to create and manage protected resources, like any other
-  qURL client.
-- **`binding`** — proof of who this machine is. Keep it for the life of the
+- **`client`** — creates and manages protected resources, like any other qURL
+  client.
+- **`binding`** — proof of who this machine is. Hold it for the life of the
   process and `Destroy()` it on the way out.
+
+And two rules for the serving loop:
+
+- **One run ID per cycle.** Do not regenerate it between steps or retries — that
+  single ID is what lets LayerV correlate a retry with the attempt that started
+  it.
+- **Wipe the key** when the cycle ends, and call
+  `qurl.ExitRegisteredAgentSession` to close out cleanly.
 
 ## Which enrollment path?
 
@@ -115,7 +147,8 @@ an air-gapped build agent, a container with no path to any inbox. Those enroll
 with a pre-issued credential and no code, and they have to say so:
 
 ```go
-client, binding, err := qurl.RegisterAgentRuntime(ctx, credential, store,
+client, binding, err := qurl.ConnectAgentRuntime(ctx, store,
+	qurl.WithAgentRuntimeEnrollmentCredential(credential),
 	qurl.WithAgentRuntimeMetadata(hostname, version),
 	qurl.WithAgentRuntimeHeadlessEnrollment(),
 )
@@ -139,7 +172,8 @@ know at build time which credential it will get. Keep the provider and widen the
 policy rather than reaching for the escape hatch:
 
 ```go
-client, binding, err := qurl.RegisterAgentRuntime(ctx, credential, store,
+client, binding, err := qurl.ConnectAgentRuntime(ctx, store,
+	qurl.WithAgentRuntimeEnrollmentCredential(credential),
 	qurl.WithAgentRuntimeMetadata(hostname, version),
 	qurl.WithAgentRuntimeAllowedRegistrationKeyKinds(
 		qurl.RegistrationKeyKindAccount,
@@ -152,58 +186,72 @@ client, binding, err := qurl.RegisterAgentRuntime(ctx, credential, store,
 Whichever kind LayerV reports, this call takes it: the code path runs only for
 the account kind, and the pre-issued kind never touches your callback.
 
-## Restarts, crashes, and flaky networks
+## Running in production
 
-**This is handled for you.** State is saved before anything irreversible happens,
-so a crash, a dropped reply, or a reboot resumes the *same* registration instead
-of starting a new one.
+**Enrollment is durable, and staying connected is automatic.** In practice that
+means you can write the code above, run it under a supervisor, and stop thinking
+about the lifecycle. Specifically:
 
-That resume window is **90 days**. Within it, retrying is always safe — the SDK
-replays the identical registration rather than creating a second one. Past it,
-`qurl.ErrAgentRecoveryExpired` tells you to enroll again.
+- **Restart as often as you like.** `ConnectAgentRuntime` is the only call you
+  need, on every start. It enrolls when nothing is registered yet, and otherwise
+  returns your existing registration without contacting LayerV or touching your
+  OTP callback. Your process never has to work out whether this is the first
+  boot.
+- **Crashes and dropped replies resume.** State is saved before anything
+  irreversible happens, so an interrupted enrollment continues rather than
+  starting a second one — for up to 90 days. Past that,
+  `qurl.ErrAgentRecoveryExpired` tells you to enroll again.
+- **Leases renew themselves.** A registration holds a lease lasting hours. The
+  SDK renews it at startup if it lapsed while you were down, and mid-run as it
+  approaches expiry. You never track `LeaseExpiresAt` or catch an expiry error.
+- **Relocations are followed.** LayerV occasionally moves where your service is
+  served from. That is absorbed by the same renewal, so a move looks exactly like
+  an ordinary day.
 
-Three things you control:
+A process that restarts after a weekend outage, or one whose service was
+relocated overnight, runs the same code as one restarting after thirty seconds.
 
-- **Keep the metadata stable.** The hostname and version you pass become part of
-  the saved registration. Change them only after registration completes, or a
-  resumed attempt has nothing to match.
+If LayerV moved the agent *during* an interrupted enrollment, the resume returns
+the original registration when that attempt had already been recorded, and
+otherwise reports `ErrCompletionIdentityRejected` so you enroll again. Nothing
+was committed in the second case, so a fresh enrollment cannot leave a stray
+credential behind. Both outcomes are decided by LayerV, not guessed at locally.
+
+### If you have no enrollment credential at runtime
+
+Many services deliberately keep the enrollment credential out of the running
+process — an installer enrolls, and the service only ever starts. Drop the
+credential and OTP options:
+
+```go
+client, binding, err := qurl.ConnectAgentRuntime(ctx, store)
+```
+
+Same call, same behavior for an already-registered agent, including renewal and
+relocation. Without a credential it simply cannot create a registration, which is
+the property a service holding no enrollment secret wants.
+
+### Two things you still own
+
 - **Keep the state file.** It is the only thing that makes a resume possible.
-- **Keep the enrollment options stable.** Resuming re-checks your policy before
-  it reads the interrupted registration, so an enrollment started with
-  `WithAgentRuntimeHeadlessEnrollment()` must be resumed with it still passed.
-  Dropping it fails with `qurl.ErrAgentOTPRequired`. Resuming with the same
-  options you started with is always correct.
+  Losing it means enrolling again.
+- **Keep the metadata stable.** The hostname and version you pass become part of
+  the saved registration. Change them only after enrollment completes, or a
+  resumed attempt has nothing to match.
 
-Retries are budgeted per step, so one call can spend several budgets before giving
-up. If you want a smaller overall ceiling, set a deadline on the context you pass.
+### Details worth knowing, none of which need code
 
-## Starting up again later
-
-After the first successful registration, warm starts need no network at all:
-
-```go
-client, binding, err := qurl.OpenRegisteredAgentRuntime(ctx, store)
-```
-
-Use this on every normal start. Reserve `RegisterAgentRuntime` for first-time
-enrollment.
-
-## If LayerV moves your service
-
-Occasionally LayerV relocates where your service is served from. The SDK does not
-silently follow — it returns `*qurl.AgentAssignmentChangedError` so the move stays
-your decision. When you are ready to accept it:
-
-```go
-client, binding, err := qurl.RefreshAgentRuntime(ctx, qurl.HubBootstrap{}, store,
-	qurl.WithAgentRuntimeReassignmentAdoption(),
-)
-```
-
-The empty `qurl.HubBootstrap{}` means "use the trust root this build ships"; you
-only fill it in if you run your own LayerV deployment. There is nothing to look
-up — the option accepts only the move LayerV just told you about, and without it
-the call keeps returning the error and changes nothing on disk.
+- Renewal happens about once per lease, not once per knock. A knock comfortably
+  inside the lease makes no extra network call.
+- Renewing early is best effort. If LayerV is briefly unreachable while your
+  lease is still valid, the knock proceeds on that lease. Only a lease that has
+  actually run out turns a failed renewal into a failed knock.
+- Sharing one binding across goroutines is safe; concurrent knocks collapse into
+  a single renewal. `binding.Assignment()` reports live placement; the exported
+  fields are a fixed record of where the binding started and never change, so
+  either is safe to read from anywhere.
+- Retries are budgeted per step, so one call can spend several budgets. Set a
+  deadline on the context you pass if you want a smaller overall ceiling.
 
 ## Where state is stored
 
@@ -218,66 +266,80 @@ the call keeps returning the error and changes nothing on disk.
 Whichever you choose, the file must survive restarts. Losing it means losing the
 ability to resume, and you will need to enroll again.
 
-## Serving traffic
+## Taking manual control
 
-Each connection cycle takes the private key once and reuses one run ID for every
-retry in that cycle:
+Rarely needed. The defaults above suit almost every deployment.
+
+**Renew at a moment you choose** rather than on the next start or knock:
 
 ```go
-privateKey := binding.TakeDeviceStaticPrivateKey()
-defer clear(privateKey)
-
-connector, err := client.EnsureConnectorResource(ctx, "prod-dashboard")
-if err != nil {
-	return err
-}
-
-runID, err := qurl.NewCycleRunID()
-if err != nil {
-	return err
-}
-
-admission, err := qurl.KnockRegisteredAgent(ctx, binding, privateKey,
-	connector.Resource.KnockResourceID,
-	qurl.NativeKnockOptions{RunID: runID},
-)
-if err != nil {
-	return err
-}
+client, binding, err := qurl.RefreshAgentRuntime(ctx, qurl.HubBootstrap{}, store)
 ```
 
-Use **one** run ID for the whole cycle — do not regenerate it between steps. That
-single ID is what lets LayerV correlate every retry with the attempt that started
-it; a fresh one per retry breaks the correlation.
+The empty `qurl.HubBootstrap{}` means "use the trust root this build ships"; you
+only fill it in if you run your own LayerV deployment. Renewal everywhere else
+uses that same trust root, so a self-hosted deployment should point
+`QURL_DEPLOYMENT` at its deployment file.
 
-Wipe the key bytes when the cycle ends (`clear()` above) and call
-`qurl.ExitRegisteredAgentSession` to close out cleanly.
+**Turn off automatic behavior:**
+
+| Option | Effect |
+|---|---|
+| `qurl.WithAgentRuntimeOfflineOpen()` | `OpenRegisteredAgentRuntime` makes no network call, and its binding does not renew itself. An expired lease returns `ErrAssignmentLeaseExpired`. For a process that must start without reaching LayerV, or that renews on its own schedule. |
+| `qurl.WithAgentRuntimePinnedAssignment()` | `RefreshAgentRuntime` refuses to follow a relocation, returning `*qurl.AgentAssignmentChangedError` and changing nothing on disk. For placement that feeds an egress allowlist or a change-control process. |
 
 ## When something goes wrong
 
-| Error | What it means | What to do |
-|---|---|---|
-| `ErrAgentOTPRequired` | OTP enrollment — the default — with no OTP callback | Add `WithAgentRuntimeOTPProvider`, or `WithAgentRuntimeHeadlessEnrollment` if nothing can read the code |
-| `*RegistrationKeyKindDisallowedError` | The credential's kind is outside your enrollment policy | A pre-issued credential needs `WithAgentRuntimeHeadlessEnrollment` |
-| `ErrInvalidRegisterConfig` | Among other causes: an OTP provider passed alongside `WithAgentRuntimeHeadlessEnrollment` | Drop one of the two — they contradict each other |
-| `ErrAssignmentKeyRejected` | LayerV did not accept this credential | Check you passed the right one and that it is not revoked |
-| `ErrAssignmentRateLimited` | Too many attempts too quickly | Back off and retry |
-| `ErrAssignmentQuotaExceeded` | Your account is at its limit | Raise the limit or retire an unused registration |
-| `ErrAssignmentLeaseExpired` | This registration went stale | Call `RefreshAgentRuntime` |
-| `*AgentAssignmentChangedError` | LayerV moved your service | Opt in with `WithAgentRuntimeReassignmentAdoption` |
-| `ErrAgentRecoveryExpired` | Older than the 90-day resume window | Enroll again |
-| `ErrAgentRecoveryMigrationRequired` | Saved state predates the current format | Keep the file, enroll again |
-| `*ServerDenyError` | LayerV refused the request | The error carries the reason |
+**Fix the call:**
 
-## Security notes
+| Error | What to do |
+|---|---|
+| `ErrAgentOTPRequired` | The account kind is accepted but no OTP callback was installed. Add `WithAgentRuntimeOTPProvider`, or use `WithAgentRuntimeHeadlessEnrollment` for a pre-issued credential. |
+| `*RegistrationKeyKindDisallowedError` | LayerV reported a credential kind your policy does not accept; `Kind` names it. Add `WithAgentRuntimeHeadlessEnrollment`, or widen with `WithAgentRuntimeAllowedRegistrationKeyKinds`. |
+| `ErrAssignmentKeyRejected` | LayerV did not accept this credential. Check you passed the right one and that it is not revoked. |
+| `*AgentAssignmentChangedError` | You pinned placement and LayerV moved your service. Drop `WithAgentRuntimePinnedAssignment` to follow the move. |
+| `ErrAssignmentLeaseExpired` | LayerV could not be reached to renew, or you passed `WithAgentRuntimeOfflineOpen`. Check connectivity; drop the option if you did not mean to manage renewal yourself. |
 
-- Registration and connections travel over an authenticated UDP channel. No part
-  of it uses a public HTTP endpoint.
-- Never construct LayerV addresses yourself; the SDK ships what it needs.
-- Wipe private-key bytes taken from the binding as soon as the cycle ends.
-- Credentials and one-time codes are never written to disk.
-- Links opened in a browser and services connected this way are separate trust
-  paths; neither stands in for the other.
+**Wait and retry:**
+
+| Error | What to do |
+|---|---|
+| `ErrAssignmentRateLimited` | Too many attempts too quickly. Back off. |
+| `ErrAssignmentReassignmentRequired` | A move was in progress and the SDK's own retries did not outlast it. Retry later; if it persists, contact LayerV. |
+
+**Enroll again:**
+
+| Error | What to do |
+|---|---|
+| `ErrAgentRecoveryExpired` | Older than the 90-day resume window. |
+| `ErrAgentRecoveryMigrationRequired` | Saved state predates the current format. Keep the file and enroll again. |
+| `ErrCompletionIdentityRejected` | LayerV declined to finish an interrupted enrollment, usually because the agent moved before that attempt was recorded. Nothing was committed, so enrolling again cannot orphan a credential. |
+
+**Ask LayerV:**
+
+| Error | What to do |
+|---|---|
+| `ErrAssignmentQuotaExceeded` | Your account is at its limit. Raise it or retire an unused registration. |
+| `*ServerDenyError` | LayerV refused the request; the error carries the reason. |
+
+## How this stays safe
+
+Automatic does not mean unchecked. The guarantees behind the behavior above:
+
+- **Placement is never guessed.** Following a relocation means going where LayerV
+  said to go in an authenticated reply, and only when it advances the assignment
+  generation. A replayed or rolled-back placement is rejected. The SDK never
+  derives an address, reads one from config, or takes one from an unauthenticated
+  packet.
+- **One agent, one credential.** An interrupted enrollment resumes the exact
+  saved attempt rather than minting a second credential, and LayerV — not the
+  SDK — decides whether that attempt already counted.
+- **Enrollment and connections travel over an authenticated UDP channel.** No
+  part of it uses a public HTTP endpoint.
+- **Credentials and one-time codes are never written to disk.** Wipe private-key
+  bytes taken from the binding as soon as the cycle ends.
+- **Links and services are separate trust paths.** A link opened in a browser and
+  a service connected this way do not stand in for each other.
 
 ## See also
 

@@ -480,11 +480,16 @@ func TestRegisterAgentRuntime_DeadlineDoesNotMaskReplacementPersistenceAmbiguity
 	}
 }
 
-func TestRegisterAgentRuntime_DeadlineDoesNotMaskPendingCompletionRefreshPersistenceAmbiguity(t *testing.T) {
+// A resumed registration completes at the placement its candidate is bound to
+// without first renewing the lease. Completion carries no lease and the pending
+// candidate is 90-day-lived while a lease lasts hours, so requiring a live lease
+// here used to strand ordinary resumes. The Hub is unreachable in this fixture:
+// if completion still needed a refresh first, this could not succeed.
+func TestRegisterAgentRuntime_ResumedCompletionDoesNotRequireLiveLease(t *testing.T) {
 	contract := loadAssignmentFixture(t)
 	f := newRuntimeFixture(t,
-		[]runtimeUDPStep{{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: contract.RefreshAssignment.Result.BodyJSON}},
-		nil,
+		nil, // no Hub steps at all
+		[]runtimeUDPStep{{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: contract.RegistrationCompletion.Result.BodyJSON}},
 	)
 	state := seedRecoveryRuntimePendingActivation(t, f)
 	cfg := defaultNativeAgentRuntimeConfig()
@@ -492,24 +497,29 @@ func TestRegisterAgentRuntime_DeadlineDoesNotMaskPendingCompletionRefreshPersist
 	if err := cfg.transitionPendingActivation(context.Background(), f.store, state); err != nil {
 		t.Fatal(err)
 	}
-	deadline := assignmentFixtureNow.Add(time.Second)
-	now := deadline.Add(-500 * time.Millisecond)
-	setTestRecoveryDeadline(state, deadline)
-	state.Assignment.LeaseExpiresAt = assignmentFixtureNow.Add(-time.Second)
+	// Expired lease, live recovery horizon: the ordinary delayed-resume shape.
+	state.Assignment.LeaseExpiresAt = assignmentFixtureNow.Add(-time.Hour)
 	if err := f.store.SaveAgentState(context.Background(), state); err != nil {
 		t.Fatal(err)
 	}
-	f.store.waitForContextAfterCommit = 4
-	f.store.failAfterCommit = 4
 
-	_, _, err := RegisterAgentRuntime(context.Background(), "", f.store,
-		f.options(withAgentRuntimeClock(func() time.Time { return now }))...)
-	if !errors.Is(err, ErrAgentBindingPersistence) || errors.Is(err, ErrAgentRecoveryExpired) {
-		t.Fatalf("deadline-racing pending-completion refresh save = %v, want reload-first binding persistence only", err)
+	_, binding, err := RegisterAgentRuntime(context.Background(), "", f.store,
+		f.options(withAgentRuntimeClock(func() time.Time { return assignmentFixtureNow }))...)
+	if binding != nil {
+		defer binding.Destroy()
+	}
+	// The completion itself must have reached the bound cell.
+	if len(f.cellUDP.snapshot()) != 1 {
+		t.Fatalf("resumed completion sent %d cell datagrams, want 1; err=%v", len(f.cellUDP.snapshot()), err)
 	}
 	loaded, loadErr := f.store.LoadAgentState(context.Background())
-	if loadErr != nil || loaded.PendingCompletion == nil || loaded.Assignment.LeaseExpired(assignmentFixtureNow) {
-		t.Fatalf("committed refreshed completion state = %#v / %v", loaded, loadErr)
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	// Completion committed durably even though the lease was expired and no Hub
+	// was reachable. Placement reconciliation is a separate, later step.
+	if loaded.PendingCompletion != nil || loaded.RegisteredAt == nil || loaded.DeviceAPIKey != canonicalNativeDeviceCredential {
+		t.Fatalf("resumed completion did not commit: %#v", loaded)
 	}
 }
 
@@ -814,7 +824,10 @@ func TestRegisterAgentRuntime_RecoveryBackoffCannotDispatchAtDeadline(t *testing
 	}
 }
 
-func TestRegisterAgentRuntime_PendingCompletionHubRefreshCannotCrossDeadline(t *testing.T) {
+// The recovery deadline still fences the completion datagram itself. Completion
+// is now the first network step of a resume, so this is where the horizon has to
+// hold: nothing may be sent at or after it, and the candidate must survive.
+func TestRegisterAgentRuntime_PendingCompletionCannotCrossDeadline(t *testing.T) {
 	f := newRuntimeFixture(t, nil, nil)
 	state := seedRecoveryRuntimePendingActivation(t, f)
 	cfg := defaultNativeAgentRuntimeConfig()
@@ -824,8 +837,9 @@ func TestRegisterAgentRuntime_PendingCompletionHubRefreshCannotCrossDeadline(t *
 	}
 	deadline := state.PendingCompletion.RecoveryExpiresAt
 	now := state.Assignment.LeaseExpiresAt.Add(time.Second)
+	cellHost := state.Assignment.Endpoint.Host
 	resolver := runtimeResolverFunc(func(ctx context.Context, network, host string) ([]netip.Addr, error) {
-		if host == f.hub.Host {
+		if host == cellHost {
 			now = deadline
 		}
 		return f.resolver.LookupNetIP(ctx, network, host)
@@ -837,14 +851,14 @@ func TestRegisterAgentRuntime_PendingCompletionHubRefreshCannotCrossDeadline(t *
 	)
 	var expired *AgentRecoveryExpiredError
 	if !errors.Is(err, ErrAgentRecoveryExpired) || !errors.As(err, &expired) || expired.Phase != AgentRecoveryPhaseCompletion {
-		t.Fatalf("Hub refresh boundary = %T %#v / %v", err, expired, err)
+		t.Fatalf("completion boundary = %T %#v / %v", err, expired, err)
 	}
 	if len(f.hubUDP.snapshot()) != 0 || len(f.cellUDP.snapshot()) != 0 {
-		t.Fatalf("deadline-crossing refresh sent UDP = %d/%d", len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot()))
+		t.Fatalf("deadline-crossing completion sent UDP = %d/%d", len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot()))
 	}
 	loaded, loadErr := f.store.LoadAgentState(context.Background())
 	if loadErr != nil || loaded.PendingCompletion == nil || loaded.PendingCompletion.DeviceAPIKey != canonicalNativeDeviceCredential {
-		t.Fatalf("refresh boundary did not preserve completion: %#v / %v", loaded, loadErr)
+		t.Fatalf("completion boundary did not preserve the candidate: %#v / %v", loaded, loadErr)
 	}
 }
 
@@ -1051,5 +1065,53 @@ func TestRegisterAgentRuntime_PendingAccountOTPProviderCannotOutliveDeadline(t *
 	loaded, loadErr := f.store.LoadAgentState(context.Background())
 	if loadErr != nil || loaded.PendingActivation == nil || loaded.PendingActivation.AssignmentTicket != state.PendingActivation.AssignmentTicket {
 		t.Fatalf("expired pending OTP did not preserve activation: %#v / %v", loaded, loadErr)
+	}
+}
+
+// The case that used to be a permanent dead end: a registration interrupted
+// after RAK, resumed once its lease had expired, while LayerV had relocated the
+// agent in between. Completion now lands at the cell that minted the candidate,
+// and only then does placement reconcile onto the new cell.
+func TestRegisterAgentRuntime_ResumesInterruptedRegistrationAcrossRelocation(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	moved := newReassignmentTarget(t, contract, "cell1", 2, "", time.Time{})
+	f := newRuntimeFixture(t,
+		[]runtimeUDPStep{{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: rewriteRefreshAssignment(t, contract, moved)}},
+		[]runtimeUDPStep{{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: contract.RegistrationCompletion.Result.BodyJSON}},
+	)
+	state := seedRecoveryRuntimePendingActivation(t, f)
+	cfg := defaultNativeAgentRuntimeConfig()
+	cfg.deviceCredential = canonicalNativeDeviceCredential
+	if err := cfg.transitionPendingActivation(context.Background(), f.store, state); err != nil {
+		t.Fatal(err)
+	}
+	boundCell := state.PendingCompletion.CellID
+	state.Assignment.LeaseExpiresAt = assignmentFixtureNow.Add(-time.Hour)
+	if err := f.store.SaveAgentState(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+
+	client, binding, err := RegisterAgentRuntime(context.Background(), "", f.store,
+		f.options(withAgentRuntimeClock(func() time.Time { return assignmentFixtureNow }))...)
+	if err != nil || client == nil || binding == nil {
+		t.Fatalf("resume across relocation = client %v, binding %v, err %v", client, binding, err)
+	}
+	defer binding.Destroy()
+	if binding.CellID != "cell1" || binding.AssignmentGeneration != 2 {
+		t.Fatalf("resumed binding did not land on the new placement: %#v", binding)
+	}
+	loaded, loadErr := f.store.LoadAgentState(context.Background())
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	// Registration committed with its original candidate, and placement followed
+	// the move: one completion at the bound cell, one Hub renewal.
+	if loaded.PendingCompletion != nil || loaded.DeviceAPIKey != canonicalNativeDeviceCredential ||
+		!sameAgentAssignment(loaded.Assignment, moved) {
+		t.Fatalf("resume across relocation left the wrong state: %#v", loaded)
+	}
+	if boundCell != "cell0" || len(f.cellUDP.snapshot()) != 1 || len(f.hubUDP.snapshot()) != 1 {
+		t.Fatalf("expected one completion at the bound cell %q and one Hub renewal, got cell=%d Hub=%d",
+			boundCell, len(f.cellUDP.snapshot()), len(f.hubUDP.snapshot()))
 	}
 }

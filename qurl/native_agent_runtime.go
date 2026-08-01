@@ -34,6 +34,13 @@ const (
 	// both the 630-second acceptance case and 629-second rejection; the SDK test
 	// reads that metadata so this constant cannot drift silently.
 	nativeAccountOTPMinimumTicketRemaining = 630 * time.Second
+	// sessionLeaseRenewalLead is how far ahead of lease expiry a held binding
+	// renews. It must comfortably exceed one bounded Hub operation (30s default)
+	// so a renewal that starts in the window still finishes against a live lease,
+	// and must stay far below a lease lifetime so renewal happens about once per
+	// lease rather than on every knock. Renewing inside this window is best
+	// effort: the current lease is still valid, so a Hub failure is not fatal.
+	sessionLeaseRenewalLead = 5 * time.Minute
 	// qurl-conformance v1 freezes this as the native Connector knock deny. Other
 	// values are producer-contract violations, not open-ended diagnostic text.
 	nativeKnockResourceNotFoundCode  = "52004"
@@ -157,7 +164,7 @@ type nativeAgentRuntimeConfig struct {
 	recoveryAgentID   string
 	hostname          string
 	version           string
-	adoptReassignment bool
+	pinAssignment     bool
 	baseURL           string
 	httpClient        HTTPDoer
 	resolver          nativeudp.Resolver
@@ -170,6 +177,7 @@ type nativeAgentRuntimeConfig struct {
 	clock             func() time.Time
 	random            io.Reader
 	deviceCredential  string
+	enrollCredential  string
 	continuityStore   AgentStateStore
 }
 
@@ -417,14 +425,27 @@ func WithAgentRuntimeAssignmentRetryBudget(maxAttempts int, budget time.Duration
 	})
 }
 
-// WithAgentRuntimeReassignmentAdoption explicitly permits RefreshAgentRuntime
-// to adopt a newer assignment generation from that call's authenticated Hub
-// LRT. Without this option, a cell or generation move remains fail-closed as an
-// AgentAssignmentChangedError. The SDK never accepts caller-supplied placement,
-// derives a cell endpoint, or contacts the newly assigned cell during refresh.
+// WithAgentRuntimeReassignmentAdoption is a no-op retained for compatibility.
+//
+// Deprecated: RefreshAgentRuntime adopts an authority-directed move by default,
+// so this option no longer changes behavior. Existing callers keep working and
+// can drop it. Use WithAgentRuntimePinnedAssignment for the old fail-closed
+// behavior.
 func WithAgentRuntimeReassignmentAdoption() AgentRuntimeRefreshOption {
+	return nativeRuntimeRefreshOptionFunc(func(*nativeAgentRuntimeConfig) error { return nil })
+}
+
+// WithAgentRuntimePinnedAssignment makes RefreshAgentRuntime fail closed with
+// an AgentAssignmentChangedError instead of following a cell or generation move,
+// leaving durable state untouched. Reach for it only when placement is an input
+// to something outside the SDK — an egress allowlist pinned to a cell, or a
+// change-control process that must see the move first. Ordinary callers should
+// omit it: the adopted placement is still accepted only from that call's
+// authenticated Hub LRT, and the SDK never derives a cell endpoint, accepts
+// caller-supplied placement, or contacts the newly assigned cell during refresh.
+func WithAgentRuntimePinnedAssignment() AgentRuntimeRefreshOption {
 	return nativeRuntimeRefreshOptionFunc(func(c *nativeAgentRuntimeConfig) error {
-		c.adoptReassignment = true
+		c.pinAssignment = true
 		return nil
 	})
 }
@@ -530,13 +551,23 @@ func registerNativeAgentRuntime(ctx context.Context, enrollmentCredential string
 	if err != nil {
 		return nil, nil, err
 	}
+	if enrollmentCredential == "" {
+		enrollmentCredential = cfg.enrollCredential
+	}
 
 	result, err := withAgentStoreContinuity(store, destroyNativeRuntimeResult, func(retained AgentStateStore) (*nativeRuntimeResult, error) {
 		state, found, err := loadNativeAgentStateIfPresent(ctx, retained)
 		if err != nil {
 			return nil, err
 		}
-		if found && state.RegisteredAt != nil {
+		// Re-running RegisterAgentRuntime on every start is a supported pattern:
+		// a caller restarting in production cannot know whether this is the first
+		// enrollment. A completed registration whose lease is still live returns
+		// its binding here with no setup lock and no packet. An expired lease
+		// falls through to the locked path, which renews it rather than failing
+		// the way an unconditional re-register used to after any outage longer
+		// than the lease.
+		if found && state.RegisteredAt != nil && !state.Assignment.LeaseExpired(cfg.clock()) {
 			return finishNativeRuntimeResult(store, state, cfg)
 		}
 		return withAgentSetupLock(ctx, retained, destroyNativeRuntimeResult, func(lockedCtx context.Context, locked AgentStateStore) (*nativeRuntimeResult, error) {
@@ -601,7 +632,52 @@ func finishNativeRuntime(store AgentStateStore, state *AgentState, cfg *nativeAg
 
 func finishNativeRuntimeResult(store AgentStateStore, state *AgentState, cfg *nativeAgentRuntimeConfig) (*nativeRuntimeResult, error) {
 	client, binding, err := finishNativeRuntime(store, state, cfg)
+	// Every lifecycle-produced binding can renew its own lease, so a held binding
+	// keeps working past expiry instead of failing every later knock.
+	binding.attachRenewal(store, cfg)
 	return &nativeRuntimeResult{client: client, binding: binding}, err
+}
+
+// renewSessionAssignment refreshes and durably persists the assignment for a
+// completed registration and returns the fresh placement. It is the narrow
+// renewal a held binding performs; it deliberately builds no Client and reuses
+// the same locked, adoption-aware path as every other renewal.
+// now is the session clock that decided a renewal was due; freshness is judged
+// against that same instant here so one decision never straddles two clocks.
+func (c *nativeAgentRuntimeConfig) renewSessionAssignment(ctx context.Context, hub HubBootstrap, store AgentStateStore, agentID string, privateKey []byte, now time.Time) (*AgentAssignment, error) {
+	return withAgentSetupLock(ctx, store, func(*AgentAssignment) {}, func(lockedCtx context.Context, locked AgentStateStore) (*AgentAssignment, error) {
+		state, err := loadCompletedRegisteredState(lockedCtx, locked, ErrInvalidRegisterConfig)
+		if err != nil {
+			return nil, err
+		}
+		defer clearOwnedAgentState(state)
+		if state.AgentID != agentID {
+			return nil, fmt.Errorf("%w: persisted agent id changed under a held binding", ErrInvalidRegisterConfig)
+		}
+		if state.Assignment == nil {
+			return nil, fmt.Errorf("%w: completed state has no assignment", ErrInvalidRegisterConfig)
+		}
+		// Another process may already have renewed this shared state file. Adopt
+		// that result rather than spending a redundant Hub exchange.
+		if now.Add(sessionLeaseRenewalLead).Before(state.Assignment.LeaseExpiresAt) {
+			return state.Assignment.clone(), nil
+		}
+		fresh, err := c.refreshAssignmentLifecycle(lockedCtx, hub, state.AgentID, privateKey)
+		if err != nil {
+			return nil, err
+		}
+		if err := ensureRefreshAssignmentContinuity(state.Assignment, fresh, !c.pinAssignment); err != nil {
+			return nil, err
+		}
+		if !sameAgentAssignment(state.Assignment, fresh) {
+			candidate := state.clone()
+			candidate.Assignment = fresh.clone()
+			if err := locked.SaveAgentState(lockedCtx, candidate); err != nil {
+				return nil, fmt.Errorf("%w: save renewed assignment: %w", ErrAgentBindingPersistence, err)
+			}
+		}
+		return fresh.clone(), nil
+	})
 }
 
 func (c *nativeAgentRuntimeConfig) registerLocked(ctx context.Context, enrollmentCredential string, store AgentStateStore) (*nativeRuntimeResult, error) {
@@ -612,6 +688,12 @@ func (c *nativeAgentRuntimeConfig) registerLocked(ctx context.Context, enrollmen
 		return nil, err
 	}
 	if state.RegisteredAt != nil {
+		// Renew only a structurally sound assignment whose lease ran out. Missing
+		// or malformed assignment state keeps its original terminal error from
+		// finishNativeRuntimeResult rather than reaching for the network.
+		if state.Assignment != nil && state.Assignment.LeaseExpired(c.clock()) {
+			return c.renewCompletedAssignment(ctx, *c.hub, store, state)
+		}
 		return finishNativeRuntimeResult(store, state, c)
 	}
 	// Only an attempt that will actually enroll needs the provider, so a completed
@@ -642,34 +724,37 @@ func (c *nativeAgentRuntimeConfig) registerLocked(ctx context.Context, enrollmen
 	defer wipeBytes(privateKey)
 
 	if state.PendingCompletion != nil {
-		boundary, recoveryCtx, cancel, err := boundedRecovery(ctx, state, c.clock)
-		if err != nil {
-			return nil, err
-		}
-		defer cancel()
 		if state.Assignment == nil {
 			return nil, fmt.Errorf("%w: pending completion has no assignment", ErrInvalidAgentState)
 		}
-		if state.Assignment.LeaseExpired(c.clock()) {
-			fresh, err := c.refreshAssignmentLifecycle(recoveryCtx, *c.hub, state.AgentID, privateKey)
-			if err != nil {
-				return nil, boundary.mapError(ctx, recoveryCtx, err)
-			}
-			if err := boundary.check(); err != nil {
-				return nil, err
-			}
-			if err := ensureAssignmentContinuity(state.Assignment, fresh); err != nil {
-				return nil, err
-			}
-			// The previous lease is expired and fresh is validated as live, so the
-			// assignment necessarily changed. Persist it before resuming completion.
-			state.Assignment = fresh.clone()
-			if err := store.SaveAgentState(recoveryCtx, state); err != nil {
-				return nil, fmt.Errorf("%w: save refreshed pending assignment: %w", ErrAgentBindingPersistence, err)
-			}
+		// Finish the registration at the placement its candidate is bound to,
+		// whatever the lease says.
+		//
+		// A pending completion lives for the 90-day recovery horizon anchored to
+		// the activation ticket, while a lease lasts hours, so a resumed
+		// registration almost always meets an expired lease. Refreshing first used
+		// to turn that ordinary resume into a dead end whenever LayerV had moved
+		// the agent in between: the fresh placement fails continuity, and the
+		// candidate — bound by PendingAgentCompletion to the cell and generation
+		// that minted it — can never be replayed anywhere else.
+		//
+		// Completing first is correct rather than merely convenient. The
+		// completion request carries no lease, ticket, or placement field, the
+		// closed 523xx taxonomy has no lease-expiry rejection, and
+		// RecoveryExpiresAt is defined never to be reset by an assignment refresh.
+		// The lease governs which placement is current, not whether the cell that
+		// minted this candidate will still commit it. Replaying the same candidate
+		// to that same cell is the designed one-shot replay, so this cannot mint a
+		// second credential; if the cell no longer holds it, the answer is an
+		// authenticated 52301/52303 rather than a guess.
+		if err := c.completePending(ctx, store, state, privateKey); err != nil {
+			return nil, err
 		}
-		if err := c.completePending(recoveryCtx, store, state, privateKey); err != nil {
-			return nil, boundary.mapError(ctx, recoveryCtx, err)
+		// Registration is now complete and durable. Reconcile placement with the
+		// ordinary completed-state path, which renews an expired lease and adopts
+		// any move LayerV made while this registration was in flight.
+		if state.Assignment.LeaseExpired(c.clock()) {
+			return c.renewCompletedAssignment(ctx, *c.hub, store, state)
 		}
 		return finishNativeRuntimeResult(store, state, c)
 	}
@@ -1721,7 +1806,11 @@ func assignmentNativeEndpoint(assignment *AgentAssignment) (nativeudp.Endpoint, 
 }
 
 // AgentAssignmentChangedError reports an authority-directed cell/generation
-// move. The SDK never selects or silently adopts a different cell.
+// move that was not adopted. RefreshAgentRuntime follows such a move by default,
+// so this surfaces only for a caller that passed WithAgentRuntimePinnedAssignment
+// or for an in-flight registration whose pending completion is bound to the
+// previous placement and cannot be replayed against the new one. The SDK never
+// selects a cell itself; adoption only ever follows an authenticated Hub result.
 type AgentAssignmentChangedError struct {
 	Previous *AgentAssignment
 	Current  *AgentAssignment
@@ -1749,12 +1838,13 @@ func ensureAssignmentContinuity(previous, current *AgentAssignment) error {
 	return nil
 }
 
-// ensureRefreshAssignmentContinuity narrows explicit adoption to a fresh,
+// ensureRefreshAssignmentContinuity narrows adoption to a fresh,
 // authority-versioned move. The caller has already authenticated and strictly
 // decoded current through RefreshAgentAssignment. Requiring the generation to
-// advance prevents an opted-in caller from rolling back or switching cells on
-// a stale same-generation result. A new generation owns its endpoint revision,
-// so revision continuity is intentionally enforced only within one generation.
+// advance is what keeps adoption safe once it is the default: it prevents a
+// replayed or stale same-generation result from rolling the agent back or
+// sideways into another cell. A new generation owns its endpoint revision, so
+// revision continuity is intentionally enforced only within one generation.
 func ensureRefreshAssignmentContinuity(previous, current *AgentAssignment, adoptReassignment bool) error {
 	err := ensureAssignmentContinuity(previous, current)
 	if adoptReassignment && errors.Is(err, ErrAssignmentReassignmentRequired) {
@@ -1795,7 +1885,7 @@ func (r NativeKnockResult) GoString() string { return r.String() }
 // the pinned server key plus COK cookie/trxId continuity keeps a cross-replica
 // RKN bound to the initiating KNK.
 func KnockRegisteredAgent(ctx context.Context, binding *AgentRuntimeBinding, deviceStaticPrivateKey []byte, knockResourceID string, opts NativeKnockOptions, transportOpts ...AgentRuntimeUDPOption) (*NativeKnockResult, error) {
-	cfg, endpoint, err := registeredAgentSessionEndpoint(binding, deviceStaticPrivateKey, transportOpts)
+	cfg, endpoint, err := registeredAgentSessionEndpoint(ctx, binding, deviceStaticPrivateKey, transportOpts)
 	if err != nil {
 		return nil, err
 	}
@@ -1827,7 +1917,7 @@ func KnockRegisteredAgent(ctx context.Context, binding *AgentRuntimeBinding, dev
 // wiped after strict validation and the parsed result is discarded; clean exit
 // never changes durable enrollment or assignment state.
 func ExitRegisteredAgentSession(ctx context.Context, binding *AgentRuntimeBinding, deviceStaticPrivateKey []byte, knockResourceID string, opts NativeKnockOptions, transportOpts ...AgentRuntimeUDPOption) error {
-	cfg, endpoint, err := registeredAgentSessionEndpoint(binding, deviceStaticPrivateKey, transportOpts)
+	cfg, endpoint, err := registeredAgentSessionEndpoint(ctx, binding, deviceStaticPrivateKey, transportOpts)
 	if err != nil {
 		return err
 	}
@@ -1850,7 +1940,7 @@ func ExitRegisteredAgentSession(ctx context.Context, binding *AgentRuntimeBindin
 // native KNK/RKN and EXT. It intentionally validates the binding snapshot
 // before body construction, DNS, or socket creation so every session-control
 // operation has the same trust and placement boundary.
-func registeredAgentSessionEndpoint(binding *AgentRuntimeBinding, deviceStaticPrivateKey []byte, transportOpts []AgentRuntimeUDPOption) (*nativeAgentRuntimeConfig, nativeudp.Endpoint, error) {
+func registeredAgentSessionEndpoint(ctx context.Context, binding *AgentRuntimeBinding, deviceStaticPrivateKey []byte, transportOpts []AgentRuntimeUDPOption) (*nativeAgentRuntimeConfig, nativeudp.Endpoint, error) {
 	if binding == nil {
 		return nil, nativeudp.Endpoint{}, fmt.Errorf("%w: runtime binding must not be nil", ErrInvalidNativeKnockInput)
 	}
@@ -1869,9 +1959,12 @@ func registeredAgentSessionEndpoint(binding *AgentRuntimeBinding, deviceStaticPr
 			return nil, nativeudp.Endpoint{}, fmt.Errorf("%w: native UDP transport option: %w", ErrInvalidNativeKnockInput, err)
 		}
 	}
-	assignment := binding.assignment()
-	if assignment == nil || assignment.CellID != binding.CellID || assignment.AssignmentGeneration != binding.AssignmentGeneration || assignment.EndpointRevision != binding.EndpointRevision || assignment.Endpoint != binding.NHPUDPEndpoint {
-		return nil, nativeudp.Endpoint{}, fmt.Errorf("%w: runtime binding does not match its authoritative assignment", ErrInvalidNativeKnockInput)
+	// Renewal and the tamper check happen together against one placement. A
+	// caller holding a single binding for weeks never has to think about the
+	// lease; only an expired lease the Hub could not renew fails the exchange.
+	assignment, err := binding.liveSessionAssignment(ctx, deviceStaticPrivateKey, cfg.clock())
+	if err != nil {
+		return nil, nativeudp.Endpoint{}, err
 	}
 	if err := assignment.Validate(cfg.clock()); err != nil {
 		return nil, nativeudp.Endpoint{}, fmt.Errorf("%w: runtime assignment: %w", ErrInvalidNativeKnockInput, err)
@@ -2047,16 +2140,36 @@ func consumeNativeAgentKnockReply(reply *relayknock.Reply, knockResourceID strin
 
 // RefreshAgentRuntime refreshes a completed binding only through the pinned Hub
 // using the registered Noise identity and final agent id. It sends no enrollment
-// or device credential and performs no public HTTP request. A cell or generation
-// move fails closed unless WithAgentRuntimeReassignmentAdoption is passed for
-// this call; opted-in adoption still accepts placement only from the fresh,
-// authenticated Hub result and requires the assignment generation to advance.
+// or device credential and performs no public HTTP request.
+//
+// If LayerV has moved the agent to another cell or generation, this call follows
+// the move and persists it, so a relocation is indistinguishable from an ordinary
+// lease renewal and needs no code change. Placement is still taken only from this
+// call's freshly authenticated Hub result, the assignment generation must strictly
+// advance, and the endpoint must sit below a LayerV-owned apex with a live lease —
+// a replayed or rolled-back placement is rejected, not adopted. Pass
+// WithAgentRuntimePinnedAssignment to fail closed on a move instead.
 func RefreshAgentRuntime(ctx context.Context, hub HubBootstrap, store AgentStateStore, opts ...AgentRuntimeRefreshOption) (*Client, *AgentRuntimeBinding, error) {
-	if err := validateContext(ctx, ErrInvalidRegisterConfig); err != nil {
+	cfg, hub, err := newAgentRuntimeRefreshConfig(ctx, hub, store, opts)
+	if err != nil {
 		return nil, nil, err
 	}
+	result, err := refreshAgentRuntimeLocked(ctx, hub, store, cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	return result.split()
+}
+
+// newAgentRuntimeRefreshConfig validates the shared refresh inputs and resolves
+// the effective Hub. Warm open reuses it so an auto-renewal cannot drift from
+// the explicit RefreshAgentRuntime contract.
+func newAgentRuntimeRefreshConfig(ctx context.Context, hub HubBootstrap, store AgentStateStore, opts []AgentRuntimeRefreshOption) (*nativeAgentRuntimeConfig, HubBootstrap, error) {
+	if err := validateContext(ctx, ErrInvalidRegisterConfig); err != nil {
+		return nil, hub, err
+	}
 	if store == nil {
-		return nil, nil, fmt.Errorf("%w: state store must not be nil", ErrInvalidRegisterConfig)
+		return nil, hub, fmt.Errorf("%w: state store must not be nil", ErrInvalidRegisterConfig)
 	}
 	cfg := defaultNativeAgentRuntimeConfig()
 	// A zero-value hub means "use the trust root this build ships", matching
@@ -2065,56 +2178,80 @@ func RefreshAgentRuntime(ctx context.Context, hub HubBootstrap, store AgentState
 	if hub == (HubBootstrap{}) {
 		shipped, err := deploymentHub()
 		if err != nil {
-			return nil, nil, fmt.Errorf("%w: %w", ErrInvalidRegisterConfig, err)
+			return nil, hub, fmt.Errorf("%w: %w", ErrInvalidRegisterConfig, err)
 		}
 		hub = *shipped
 	}
 	cfg.hub = &hub
 	for _, opt := range opts {
 		if opt == nil {
-			return nil, nil, fmt.Errorf("%w: nil runtime option", ErrInvalidRegisterConfig)
+			return nil, hub, fmt.Errorf("%w: nil runtime option", ErrInvalidRegisterConfig)
 		}
 		if err := opt.applyAgentRuntimeOption(cfg); err != nil {
-			return nil, nil, err
+			return nil, hub, err
 		}
 	}
 	if _, err := hub.nativeEndpoint(); err != nil {
-		return nil, nil, fmt.Errorf("%w: Hub trust root: %w", ErrInvalidRegisterConfig, err)
+		return nil, hub, fmt.Errorf("%w: Hub trust root: %w", ErrInvalidRegisterConfig, err)
 	}
-	result, err := withAgentSetupLock(ctx, store, destroyNativeRuntimeResult, func(lockedCtx context.Context, locked AgentStateStore) (*nativeRuntimeResult, error) {
+	return cfg, hub, nil
+}
+
+func refreshAgentRuntimeLocked(ctx context.Context, hub HubBootstrap, store AgentStateStore, cfg *nativeAgentRuntimeConfig) (*nativeRuntimeResult, error) {
+	return withAgentSetupLock(ctx, store, destroyNativeRuntimeResult, func(lockedCtx context.Context, locked AgentStateStore) (*nativeRuntimeResult, error) {
 		cfg.continuityStore = locked
 		defer func() { cfg.continuityStore = nil }()
 		state, err := loadCompletedRegisteredState(lockedCtx, locked, ErrInvalidRegisterConfig)
 		if err != nil {
 			return nil, err
 		}
-		if state.Assignment == nil {
-			return nil, fmt.Errorf("%w: completed state has no assignment", ErrInvalidRegisterConfig)
-		}
-		privateKey, err := decodeRuntimePrivateKey(state, ErrInvalidRegisterConfig)
-		if err != nil {
-			return nil, err
-		}
-		defer wipeBytes(privateKey)
-		fresh, err := cfg.refreshAssignmentLifecycle(lockedCtx, hub, state.AgentID, privateKey)
-		if err != nil {
-			return nil, err
-		}
-		if err := ensureRefreshAssignmentContinuity(state.Assignment, fresh, cfg.adoptReassignment); err != nil {
-			return nil, err
-		}
-		if !sameAgentAssignment(state.Assignment, fresh) {
-			candidate := state.clone()
-			candidate.Assignment = fresh.clone()
-			if err := locked.SaveAgentState(lockedCtx, candidate); err != nil {
-				return nil, fmt.Errorf("%w: save refreshed assignment: %w", ErrAgentBindingPersistence, err)
-			}
-			state = candidate
-		}
-		return finishNativeRuntimeResult(locked, state, cfg)
+		return cfg.renewCompletedAssignment(lockedCtx, hub, locked, state)
 	})
-	if err != nil {
-		return nil, nil, err
+}
+
+// renewCompletedAssignment refreshes a completed registration's assignment
+// through the Hub and persists the result before finishing the runtime. It runs
+// only with the setup lock held. Every entry point that can meet an expired
+// lease on already-completed state routes through here — explicit refresh, warm
+// open, and a re-run of RegisterAgentRuntime — so none of them can drift on
+// trust root, move adoption, or persistence ordering.
+func (c *nativeAgentRuntimeConfig) renewCompletedAssignment(ctx context.Context, hub HubBootstrap, locked AgentStateStore, state *AgentState) (*nativeRuntimeResult, error) {
+	if state.Assignment == nil {
+		return nil, fmt.Errorf("%w: completed state has no assignment", ErrInvalidRegisterConfig)
 	}
-	return result.split()
+	// Run the completed-state guards finishNativeRuntime would apply before any
+	// packet leaves. A caller-asserted identity that does not match the persisted
+	// one, or a corrupt device credential, must fail closed rather than spend a
+	// Hub exchange first. These are the same checks, only earlier, so no path
+	// that used to succeed changes.
+	if err := validateCompletedAgentIdentity(state, ErrInvalidRegisterConfig); err != nil {
+		return nil, err
+	}
+	if err := reconcileNativeAgentIdentity(state, c.agentID); err != nil {
+		return nil, err
+	}
+	if err := validatePersistedNativeDeviceCredential(state, ErrInvalidRegisterConfig); err != nil {
+		return nil, err
+	}
+	privateKey, err := decodeRuntimePrivateKey(state, ErrInvalidRegisterConfig)
+	if err != nil {
+		return nil, err
+	}
+	defer wipeBytes(privateKey)
+	fresh, err := c.refreshAssignmentLifecycle(ctx, hub, state.AgentID, privateKey)
+	if err != nil {
+		return nil, err
+	}
+	if err := ensureRefreshAssignmentContinuity(state.Assignment, fresh, !c.pinAssignment); err != nil {
+		return nil, err
+	}
+	if !sameAgentAssignment(state.Assignment, fresh) {
+		candidate := state.clone()
+		candidate.Assignment = fresh.clone()
+		if err := locked.SaveAgentState(ctx, candidate); err != nil {
+			return nil, fmt.Errorf("%w: save refreshed assignment: %w", ErrAgentBindingPersistence, err)
+		}
+		state = candidate
+	}
+	return finishNativeRuntimeResult(locked, state, c)
 }
