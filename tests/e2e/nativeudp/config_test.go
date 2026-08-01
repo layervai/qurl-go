@@ -11,32 +11,57 @@ import (
 )
 
 const (
-	strictEnv             = "QURL_GO_SANDBOX_STRICT"
-	buildSHAEnv           = "QURL_GO_SANDBOX_EXPECTED_SHA"
-	hubHostEnv            = "QURL_GO_SANDBOX_HUB_HOST"
-	hubPortEnv            = "QURL_GO_SANDBOX_HUB_PORT"
-	hubServerKeyEnv       = "QURL_GO_SANDBOX_HUB_SERVER_PUBLIC_KEY_B64"
-	enrollmentEnv         = "QURL_GO_SANDBOX_ENROLLMENT_CREDENTIAL"
-	agentIDEnv            = "QURL_GO_SANDBOX_AGENT_ID"
-	statePathEnv          = "QURL_GO_SANDBOX_STATE_PATH"
-	provenancePathEnv     = "QURL_GO_SANDBOX_PROVENANCE_PATH"
-	knockResourceIDEnv    = "QURL_GO_SANDBOX_KNOCK_RESOURCE_ID"
-	expectedCellIDEnv     = "QURL_GO_SANDBOX_EXPECTED_CELL_ID"
-	standardNHPUDPPort    = 62206
-	x25519PublicKeyLength = 32
+	strictEnv                = "QURL_GO_SANDBOX_STRICT"
+	buildSHAEnv              = "QURL_GO_SANDBOX_EXPECTED_SHA"
+	hubHostEnv               = "QURL_GO_SANDBOX_HUB_HOST"
+	hubPortEnv               = "QURL_GO_SANDBOX_HUB_PORT"
+	hubServerKeyEnv          = "QURL_GO_SANDBOX_HUB_SERVER_PUBLIC_KEY_B64"
+	enrollmentEnv            = "QURL_GO_SANDBOX_ENROLLMENT_CREDENTIAL"
+	agentIDEnv               = "QURL_GO_SANDBOX_AGENT_ID"
+	statePathEnv             = "QURL_GO_SANDBOX_STATE_PATH"
+	provenancePathEnv        = "QURL_GO_SANDBOX_PROVENANCE_PATH"
+	deploymentManifestSHAEnv = "QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_SHA256"
+	typedContractSHAEnv      = "QURL_GO_SANDBOX_TYPED_EVIDENCE_CONTRACT_SHA256"
+	candidatePRPathEnv       = "QURL_GO_SANDBOX_CANDIDATE_PR_PATH"
+	candidateCommitPathEnv   = "QURL_GO_SANDBOX_CANDIDATE_COMMIT_PATH"
+	knockResourceIDEnv       = "QURL_GO_SANDBOX_KNOCK_RESOURCE_ID"
+	expectedCellIDEnv        = "QURL_GO_SANDBOX_EXPECTED_CELL_ID"
+	assignmentHandshakeEnv   = "QURL_GO_SANDBOX_ASSIGNMENT_HANDSHAKE_B64"
+	controllerRunIDEnv       = "QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ID"
+	controllerRunAttemptEnv  = "QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ATTEMPT"
+	clientRunIDEnv           = "QURL_GO_SANDBOX_CLIENT_RUN_ID"
+	otpMailboxQueueURLEnv    = "QURL_GO_SANDBOX_OTP_MAILBOX_QUEUE_URL"
+	otpMailboxBucketEnv      = "QURL_GO_SANDBOX_OTP_MAILBOX_BUCKET"
+	otpMailboxRecipientEnv   = "QURL_GO_SANDBOX_OTP_MAILBOX_RECIPIENT"
+	otpMailboxRegionEnv      = "QURL_GO_SANDBOX_OTP_MAILBOX_REGION"
+	standardNHPUDPPort       = 62206
+	x25519PublicKeyLength    = 32
 )
 
 type sandboxConfig struct {
-	buildSHA        string
-	hubHost         string
-	hubPort         int
-	hubServerKeyB64 string
-	enrollment      string
-	agentID         string
-	statePath       string
-	provenancePath  string
-	knockResourceID string
-	expectedCellID  string
+	buildSHA             string
+	hubHost              string
+	hubPort              int
+	hubServerKeyB64      string
+	enrollment           string
+	agentID              string
+	statePath            string
+	provenancePath       string
+	deploymentSHA        string
+	typedContractSHA     string
+	candidatePRPath      string
+	candidateCommit      string
+	knockResourceID      string
+	expectedCellID       string
+	kmsKeyID             string
+	assignmentHandshake  string
+	controllerRunID      string
+	controllerRunAttempt string
+	clientRunID          string
+	otpQueueURL          string
+	otpBucket            string
+	otpRecipient         string
+	otpRegion            string
 }
 
 func loadSandboxConfig(lookup func(string) string) (sandboxConfig, bool, error) {
@@ -58,7 +83,20 @@ func loadSandboxConfig(lookup func(string) string) (sandboxConfig, bool, error) 
 		agentIDEnv,
 		statePathEnv,
 		provenancePathEnv,
+		deploymentManifestSHAEnv,
+		typedContractSHAEnv,
+		candidatePRPathEnv,
+		candidateCommitPathEnv,
 		knockResourceIDEnv,
+		sandboxKMSKeyIDEnv,
+		assignmentHandshakeEnv,
+		controllerRunIDEnv,
+		controllerRunAttemptEnv,
+		clientRunIDEnv,
+		otpMailboxQueueURLEnv,
+		otpMailboxBucketEnv,
+		otpMailboxRecipientEnv,
+		otpMailboxRegionEnv,
 	}
 	missing := make([]string, 0, len(required))
 	for _, name := range required {
@@ -75,30 +113,56 @@ func loadSandboxConfig(lookup func(string) string) (sandboxConfig, bool, error) 
 		return sandboxConfig{}, true, fmt.Errorf("%s must be the native NHP UDP port %d", hubPortEnv, standardNHPUDPPort)
 	}
 	cfg := sandboxConfig{
-		buildSHA:        lookup(buildSHAEnv),
-		hubHost:         lookup(hubHostEnv),
-		hubPort:         port,
-		hubServerKeyB64: lookup(hubServerKeyEnv),
-		enrollment:      lookup(enrollmentEnv),
-		agentID:         lookup(agentIDEnv),
-		statePath:       lookup(statePathEnv),
-		provenancePath:  lookup(provenancePathEnv),
-		knockResourceID: lookup(knockResourceIDEnv),
-		expectedCellID:  lookup(expectedCellIDEnv),
+		buildSHA:             lookup(buildSHAEnv),
+		hubHost:              lookup(hubHostEnv),
+		hubPort:              port,
+		hubServerKeyB64:      lookup(hubServerKeyEnv),
+		enrollment:           lookup(enrollmentEnv),
+		agentID:              lookup(agentIDEnv),
+		statePath:            lookup(statePathEnv),
+		provenancePath:       lookup(provenancePathEnv),
+		deploymentSHA:        lookup(deploymentManifestSHAEnv),
+		typedContractSHA:     lookup(typedContractSHAEnv),
+		candidatePRPath:      lookup(candidatePRPathEnv),
+		candidateCommit:      lookup(candidateCommitPathEnv),
+		knockResourceID:      lookup(knockResourceIDEnv),
+		expectedCellID:       lookup(expectedCellIDEnv),
+		kmsKeyID:             lookup(sandboxKMSKeyIDEnv),
+		assignmentHandshake:  lookup(assignmentHandshakeEnv),
+		controllerRunID:      lookup(controllerRunIDEnv),
+		controllerRunAttempt: lookup(controllerRunAttemptEnv),
+		clientRunID:          lookup(clientRunIDEnv),
+		otpQueueURL:          lookup(otpMailboxQueueURLEnv),
+		otpBucket:            lookup(otpMailboxBucketEnv),
+		otpRecipient:         lookup(otpMailboxRecipientEnv),
+		otpRegion:            lookup(otpMailboxRegionEnv),
 	}
 
 	if !canonicalLowerHex(cfg.buildSHA, 40) {
 		return sandboxConfig{}, true, fmt.Errorf("%s must be an exact 40-character lowercase Git SHA", buildSHAEnv)
 	}
 	for name, value := range map[string]string{
-		hubHostEnv:         cfg.hubHost,
-		hubServerKeyEnv:    cfg.hubServerKeyB64,
-		enrollmentEnv:      cfg.enrollment,
-		agentIDEnv:         cfg.agentID,
-		statePathEnv:       cfg.statePath,
-		provenancePathEnv:  cfg.provenancePath,
-		knockResourceIDEnv: cfg.knockResourceID,
-		expectedCellIDEnv:  cfg.expectedCellID,
+		hubHostEnv:               cfg.hubHost,
+		hubServerKeyEnv:          cfg.hubServerKeyB64,
+		enrollmentEnv:            cfg.enrollment,
+		agentIDEnv:               cfg.agentID,
+		statePathEnv:             cfg.statePath,
+		provenancePathEnv:        cfg.provenancePath,
+		deploymentManifestSHAEnv: cfg.deploymentSHA,
+		typedContractSHAEnv:      cfg.typedContractSHA,
+		candidatePRPathEnv:       cfg.candidatePRPath,
+		candidateCommitPathEnv:   cfg.candidateCommit,
+		knockResourceIDEnv:       cfg.knockResourceID,
+		expectedCellIDEnv:        cfg.expectedCellID,
+		sandboxKMSKeyIDEnv:       cfg.kmsKeyID,
+		assignmentHandshakeEnv:   cfg.assignmentHandshake,
+		controllerRunIDEnv:       cfg.controllerRunID,
+		controllerRunAttemptEnv:  cfg.controllerRunAttempt,
+		clientRunIDEnv:           cfg.clientRunID,
+		otpMailboxQueueURLEnv:    cfg.otpQueueURL,
+		otpMailboxBucketEnv:      cfg.otpBucket,
+		otpMailboxRecipientEnv:   cfg.otpRecipient,
+		otpMailboxRegionEnv:      cfg.otpRegion,
 	} {
 		if value != strings.TrimSpace(value) || strings.IndexFunc(value, unicode.IsControl) >= 0 {
 			return sandboxConfig{}, true, fmt.Errorf("%s must be canonical and contain no control characters", name)
@@ -106,6 +170,24 @@ func loadSandboxConfig(lookup func(string) string) (sandboxConfig, bool, error) 
 	}
 	if len(cfg.enrollment) < 32 {
 		return sandboxConfig{}, true, fmt.Errorf("%s must contain a server-minted credential of at least 32 bytes", enrollmentEnv)
+	}
+	if !assignmentRunRE.MatchString(cfg.clientRunID) {
+		return sandboxConfig{}, true, fmt.Errorf("%s must be a positive workflow run ID", clientRunIDEnv)
+	}
+	if cfg.kmsKeyID != sandboxKMSKeyID {
+		return sandboxConfig{}, true, fmt.Errorf("%s must be the Terraform-owned sandbox proof alias %q", sandboxKMSKeyIDEnv, sandboxKMSKeyID)
+	}
+	if cfg.otpRegion != "us-east-2" {
+		return sandboxConfig{}, true, fmt.Errorf("%s must be us-east-2", otpMailboxRegionEnv)
+	}
+	if cfg.otpBucket != "layerv-nhp-sandbox-udp-proof-otp-mailbox" {
+		return sandboxConfig{}, true, fmt.Errorf("%s must name the exact private proof mailbox", otpMailboxBucketEnv)
+	}
+	if cfg.otpRecipient != "qurl-go@proof.notify.layerv.xyz" {
+		return sandboxConfig{}, true, fmt.Errorf("%s must name the exact private proof recipient", otpMailboxRecipientEnv)
+	}
+	if cfg.otpQueueURL != "https://sqs.us-east-2.amazonaws.com/767397897469/layerv-nhp-sandbox-udp-proof-otp-mailbox" {
+		return sandboxConfig{}, true, fmt.Errorf("%s must name the exact private proof queue", otpMailboxQueueURLEnv)
 	}
 	if err := validateSandboxAgentID(cfg.agentID); err != nil {
 		return sandboxConfig{}, true, fmt.Errorf("%s: %w", agentIDEnv, err)
@@ -115,6 +197,21 @@ func loadSandboxConfig(lookup func(string) string) (sandboxConfig, bool, error) 
 	}
 	if !filepath.IsAbs(cfg.provenancePath) {
 		return sandboxConfig{}, true, fmt.Errorf("%s must be an absolute path", provenancePathEnv)
+	}
+	if !filepath.IsAbs(cfg.candidatePRPath) {
+		return sandboxConfig{}, true, fmt.Errorf("%s must be an absolute path", candidatePRPathEnv)
+	}
+	if !filepath.IsAbs(cfg.candidateCommit) {
+		return sandboxConfig{}, true, fmt.Errorf("%s must be an absolute path", candidateCommitPathEnv)
+	}
+	if filepath.Clean(cfg.candidatePRPath) == filepath.Clean(cfg.candidateCommit) {
+		return sandboxConfig{}, true, fmt.Errorf("%s and %s must resolve to distinct paths", candidatePRPathEnv, candidateCommitPathEnv)
+	}
+	if !canonicalLowerHex(cfg.deploymentSHA, 64) {
+		return sandboxConfig{}, true, fmt.Errorf("%s must be an exact lowercase SHA-256 digest", deploymentManifestSHAEnv)
+	}
+	if !canonicalLowerHex(cfg.typedContractSHA, 64) {
+		return sandboxConfig{}, true, fmt.Errorf("%s must be an exact lowercase SHA-256 digest", typedContractSHAEnv)
 	}
 	paths := []struct {
 		name string
@@ -167,16 +264,29 @@ func validateSandboxAgentID(agentID string) error {
 
 func TestSandboxConfigStrictMode(t *testing.T) {
 	valid := map[string]string{
-		strictEnv:          "true",
-		buildSHAEnv:        strings.Repeat("a", 40),
-		hubHostEnv:         "hub.nhp.layerv.ai",
-		hubPortEnv:         strconv.Itoa(standardNHPUDPPort),
-		hubServerKeyEnv:    base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef")),
-		enrollmentEnv:      strings.Repeat("credential", 4),
-		agentIDEnv:         "qurl-go-sandbox-123-1",
-		statePathEnv:       filepath.Join(t.TempDir(), "agent-state.json"),
-		provenancePathEnv:  filepath.Join(t.TempDir(), "provenance.json"),
-		knockResourceIDEnv: "knock-resource-id",
+		strictEnv:                "true",
+		buildSHAEnv:              strings.Repeat("a", 40),
+		hubHostEnv:               "hub.nhp.layerv.ai",
+		hubPortEnv:               strconv.Itoa(standardNHPUDPPort),
+		hubServerKeyEnv:          base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef")),
+		enrollmentEnv:            strings.Repeat("credential", 4),
+		agentIDEnv:               "qurl-go-sandbox-123-1",
+		statePathEnv:             filepath.Join(t.TempDir(), "agent-state.json"),
+		provenancePathEnv:        filepath.Join(t.TempDir(), "provenance.json"),
+		deploymentManifestSHAEnv: strings.Repeat("d", 64),
+		typedContractSHAEnv:      strings.Repeat("e", 64),
+		candidatePRPathEnv:       filepath.Join(t.TempDir(), "qurl-go-pr-93.json"),
+		candidateCommitPathEnv:   filepath.Join(t.TempDir(), "qurl-go-pr-93-commit.json"),
+		knockResourceIDEnv:       "knock-resource-id",
+		sandboxKMSKeyIDEnv:       sandboxKMSKeyID,
+		assignmentHandshakeEnv:   base64.StdEncoding.EncodeToString([]byte(`{"arm":{"result":{"agent_id":"qurl-go-sandbox-123-1","grant_correlation_id":"nhp-123-1-qurl_go-pre_removal-0123456789abcdef0123456789abcdef","lease_seconds":2100,"mutated_at":"2026-07-28T20:00:00Z","mutation":"arm","pinned_cell_id":"cell0","target_cell_id":"cell1"},"version":1},"descriptor":{"agent_id":"qurl-go-sandbox-123-1","arm_request_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bucket":"layerv-nhp-sandbox-udp-proof-handshake-767397897469","ca_pm_alias_arn":"arn:aws:lambda:us-east-2:767397897469:function:layerv-nhp-sandbox-ca-pm:blue","channel_id":"0123456789abcdef0123456789abcdef","checkpoint_key":"handshake/v1/123/1/0123456789abcdef0123456789abcdef/checkpoint.json","client":"qurl_go","controller_run_attempt":"1","controller_run_id":"123","correlation_id":"nhp-123-1-qurl_go-pre_removal-0123456789abcdef0123456789abcdef","expire_request_id":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","kms_key_arn":"arn:aws:kms:us-east-2:767397897469:key/01234567-89ab-cdef-0123-456789abcdef","arm_lease_seconds":2100,"expire_lease_seconds":30,"move_request_id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","pinned_cell_id":"cell0","proof_phase":"pre_removal","receipt_key":"handshake/v1/123/1/0123456789abcdef0123456789abcdef/receipt.json","target_cell_id":"cell1","version":1}}`)),
+		controllerRunIDEnv:       "123",
+		controllerRunAttemptEnv:  "1",
+		clientRunIDEnv:           "456",
+		otpMailboxQueueURLEnv:    "https://sqs.us-east-2.amazonaws.com/767397897469/layerv-nhp-sandbox-udp-proof-otp-mailbox",
+		otpMailboxBucketEnv:      "layerv-nhp-sandbox-udp-proof-otp-mailbox",
+		otpMailboxRecipientEnv:   "qurl-go@proof.notify.layerv.xyz",
+		otpMailboxRegionEnv:      "us-east-2",
 	}
 	lookup := func(values map[string]string) func(string) string {
 		return func(name string) string { return values[name] }
@@ -196,12 +306,26 @@ func TestSandboxConfigStrictMode(t *testing.T) {
 		}
 	})
 
+	for _, name := range []string{deploymentManifestSHAEnv, typedContractSHAEnv} {
+		t.Run("strict rejects noncanonical "+name, func(t *testing.T) {
+			values := make(map[string]string, len(valid))
+			for key, value := range valid {
+				values[key] = value
+			}
+			values[name] = strings.Repeat("A", 64)
+			cfg, enabled, err := loadSandboxConfig(lookup(values))
+			if !enabled || err == nil || cfg != (sandboxConfig{}) || !strings.Contains(err.Error(), name) {
+				t.Fatalf("noncanonical digest config = %#v, %t, %v", cfg, enabled, err)
+			}
+		})
+	}
+
 	t.Run("strict reports every missing prerequisite", func(t *testing.T) {
 		cfg, enabled, err := loadSandboxConfig(lookup(map[string]string{strictEnv: "1"}))
 		if !enabled || err == nil || cfg != (sandboxConfig{}) {
 			t.Fatalf("missing config = %#v, %t, %v; want enabled failure", cfg, enabled, err)
 		}
-		for _, name := range []string{buildSHAEnv, hubHostEnv, hubPortEnv, hubServerKeyEnv, enrollmentEnv, agentIDEnv, statePathEnv, provenancePathEnv, knockResourceIDEnv} {
+		for _, name := range []string{buildSHAEnv, hubHostEnv, hubPortEnv, hubServerKeyEnv, enrollmentEnv, agentIDEnv, statePathEnv, provenancePathEnv, deploymentManifestSHAEnv, typedContractSHAEnv, candidatePRPathEnv, candidateCommitPathEnv, knockResourceIDEnv, sandboxKMSKeyIDEnv, assignmentHandshakeEnv, controllerRunIDEnv, controllerRunAttemptEnv, clientRunIDEnv} {
 			if !strings.Contains(err.Error(), name) {
 				t.Errorf("missing-config error %q omits %s", err, name)
 			}

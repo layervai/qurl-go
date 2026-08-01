@@ -284,12 +284,26 @@ type runtimeRecordingStore struct {
 	fail                      int
 	failAfterCommit           int
 	waitForContextAfterCommit int
+	cancelBeforeSave          int
 	cancelOnSave              int
 	cancel                    context.CancelFunc
 }
 
+type runtimeRecordingStoreView struct {
+	recorder *runtimeRecordingStore
+	inner    AgentStateStore
+}
+
 func (s *runtimeRecordingStore) LoadAgentState(ctx context.Context) (*AgentState, error) {
 	return s.inner.LoadAgentState(ctx)
+}
+
+func (s *runtimeRecordingStore) decoratedAgentStateStore() AgentStateStore {
+	return s.inner
+}
+
+func (s *runtimeRecordingStore) withDecoratedAgentStateStore(inner AgentStateStore) AgentStateStore {
+	return &runtimeRecordingStoreView{recorder: s, inner: inner}
 }
 
 func (s *runtimeRecordingStore) acquireSetupLock(ctx context.Context) (setupLock, error) {
@@ -301,19 +315,27 @@ func (s *runtimeRecordingStore) acquireSetupLock(ctx context.Context) (setupLock
 }
 
 func (s *runtimeRecordingStore) SaveAgentState(ctx context.Context, state *AgentState) error {
+	return s.saveAgentState(ctx, s.inner, state)
+}
+
+func (s *runtimeRecordingStore) saveAgentState(ctx context.Context, inner AgentStateStore, state *AgentState) error {
 	s.mu.Lock()
 	s.calls++
 	call := s.calls
 	fail := s.fail
 	failAfterCommit := s.failAfterCommit
 	waitForContextAfterCommit := s.waitForContextAfterCommit
+	cancelBeforeSave := s.cancelBeforeSave
 	cancelOnSave := s.cancelOnSave
 	cancel := s.cancel
 	s.mu.Unlock()
+	if call == cancelBeforeSave && cancel != nil {
+		cancel()
+	}
 	if call == fail {
 		return errors.New("injected runtime state save failure")
 	}
-	if err := s.inner.SaveAgentState(ctx, state); err != nil {
+	if err := inner.SaveAgentState(ctx, state); err != nil {
 		return err
 	}
 	s.mu.Lock()
@@ -331,6 +353,30 @@ func (s *runtimeRecordingStore) SaveAgentState(ctx context.Context, state *Agent
 	return nil
 }
 
+func (s *runtimeRecordingStoreView) LoadAgentState(ctx context.Context) (*AgentState, error) {
+	return s.inner.LoadAgentState(ctx)
+}
+
+func (s *runtimeRecordingStoreView) SaveAgentState(ctx context.Context, state *AgentState) error {
+	return s.recorder.saveAgentState(ctx, s.inner, state)
+}
+
+func (s *runtimeRecordingStoreView) decoratedAgentStateStore() AgentStateStore {
+	return s.inner
+}
+
+func (s *runtimeRecordingStoreView) withDecoratedAgentStateStore(inner AgentStateStore) AgentStateStore {
+	return &runtimeRecordingStoreView{recorder: s.recorder, inner: inner}
+}
+
+func (s *runtimeRecordingStoreView) acquireSetupLock(ctx context.Context) (setupLock, error) {
+	locker, ok := s.inner.(setupLockingAgentStateStore)
+	if !ok {
+		return nil, errors.New("runtime test store view lost its setup-lock capability")
+	}
+	return locker.acquireSetupLock(ctx)
+}
+
 func (s *runtimeRecordingStore) snapshots() []*AgentState {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -339,6 +385,39 @@ func (s *runtimeRecordingStore) snapshots() []*AgentState {
 		result[i] = s.saves[i].clone()
 	}
 	return result
+}
+
+func TestRuntimeRecordingStorePreservesPinnedSetupCapability(t *testing.T) {
+	stateDir := t.TempDir()
+	if err := os.Chmod(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	inner, err := OpenFileAgentState(filepath.Join(stateDir, "agent-state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := inner.Close(); err != nil {
+			t.Errorf("close state store: %v", err)
+		}
+	})
+	store := &runtimeRecordingStore{inner: inner}
+	state := &AgentState{AgentID: "agent-decorator", SchemaVersion: agentStateSchemaVersion}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	_, err = withAgentSetupLock(ctx, store, func(struct{}) {}, func(lockedCtx context.Context, locked AgentStateStore) (struct{}, error) {
+		if err := store.SaveAgentState(lockedCtx, state); !errors.Is(err, ErrAgentSetupLock) {
+			return struct{}{}, fmt.Errorf("reentrant public save error = %w, want ErrAgentSetupLock", err)
+		}
+		return struct{}{}, locked.SaveAgentState(lockedCtx, state)
+	})
+	if err != nil {
+		t.Fatalf("save through lock-bound decorator: %v", err)
+	}
+	if got := len(store.snapshots()); got != 1 {
+		t.Fatalf("successful recorded saves = %d, want 1", got)
+	}
 }
 
 type runtimeFixture struct {
@@ -1332,9 +1411,9 @@ func TestRegisterAgentRuntime_RejectsIncompleteCredentialStateBeforeIO(t *testin
 
 func TestRegisterAgentRuntime_InitialIdentitySaveUsesBindingPersistenceTaxonomy(t *testing.T) {
 	f := newRuntimeFixture(t, nil, nil)
-	inner, ok := f.store.inner.(fileAgentStateStore)
+	inner, ok := f.store.inner.(*FileAgentStateStore)
 	if !ok {
-		t.Fatalf("fixture store = %T, want fileAgentStateStore", f.store.inner)
+		t.Fatalf("fixture store = %T, want *FileAgentStateStore", f.store.inner)
 	}
 	if err := os.Remove(inner.path); err != nil {
 		t.Fatal(err)
@@ -1597,6 +1676,16 @@ func TestRegisterAgentRuntime_ResumesPersistedCandidateAfterLostCompletionReply(
 	if len(f.hubUDP.snapshot()) != 1 {
 		t.Fatal("live pending assignment unexpectedly refreshed through Hub")
 	}
+	completed, loadErr := f.store.LoadAgentState(context.Background())
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if completed.PendingCompletion != nil ||
+		completed.DeviceAPIKey != conformance.AgentAssignmentDeviceAPIKeyFixture ||
+		completed.DeviceAPIKeyID != "key_DvK9mN2pQr7S" ||
+		completed.RegisteredAt == nil {
+		t.Fatalf("completion recovery did not promote the exact candidate/key id: %#v", completed)
+	}
 }
 
 func TestRegisterAgentRuntime_PreREGCancellationLeavesExactPendingActivation(t *testing.T) {
@@ -1626,7 +1715,7 @@ func TestRegisterAgentRuntime_PreREGCancellationLeavesExactPendingActivation(t *
 	if marshalErr != nil {
 		t.Fatal(marshalErr)
 	}
-	fileStore, ok := f.store.inner.(fileAgentStateStore)
+	fileStore, ok := f.store.inner.(*FileAgentStateStore)
 	if !ok {
 		t.Fatal("runtime fixture is not backed by FileAgentState")
 	}
@@ -2206,6 +2295,11 @@ func TestRegisterAgentRuntime_AccountOTPProviderFailuresSendOneOTPNoREGAndPersis
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			dialer := &countingNativeDialer{inner: f.dialer}
+			var httpCalls atomic.Int32
+			refusingHTTP := doerFunc(func(*http.Request) (*http.Response, error) {
+				httpCalls.Add(1)
+				return nil, errors.New("HTTP is forbidden during native OTP failure handling")
+			})
 			provider := func(context.Context, AgentOTPChallenge) (string, error) {
 				if test.cancel {
 					cancel()
@@ -2218,6 +2312,7 @@ func TestRegisterAgentRuntime_AccountOTPProviderFailuresSendOneOTPNoREGAndPersis
 					WithAgentRuntimeAllowedRegistrationKeyKinds(RegistrationKeyKindAccount),
 					WithAgentRuntimeOTPProvider(provider),
 					WithAgentRuntimeUDPDialer(dialer),
+					WithAgentClientHTTPClient(refusingHTTP),
 				)...)
 			if test.want != nil && !errors.Is(err, test.want) {
 				t.Fatalf("provider failure = %v, want %v", err, test.want)
@@ -2238,6 +2333,9 @@ func TestRegisterAgentRuntime_AccountOTPProviderFailuresSendOneOTPNoREGAndPersis
 			if dialer.calls.Load() != 3 {
 				t.Fatalf("provider failure UDP dials = %d, want Hub challenge/proof + OTP only", dialer.calls.Load())
 			}
+			if httpCalls.Load() != 0 {
+				t.Fatalf("provider failure attempted %d HTTP fallback calls", httpCalls.Load())
+			}
 			persisted, loadErr := f.store.LoadAgentState(context.Background())
 			if loadErr != nil {
 				t.Fatal(loadErr)
@@ -2248,6 +2346,64 @@ func TestRegisterAgentRuntime_AccountOTPProviderFailuresSendOneOTPNoREGAndPersis
 			}
 			if persisted.PendingCompletion != nil || persisted.DeviceAPIKey != "" || (test.code != "" && bytes.Contains(rawState, []byte(test.code))) {
 				t.Fatalf("provider failure persisted OTP/candidate state: %s", rawState)
+			}
+		})
+	}
+}
+
+func TestRegisterAgentRuntime_AccountRegistrationRateLimitIsTerminalForCall(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	for _, code := range []string{rakAttemptsExceeded, rakRateLimited} {
+		t.Run(code, func(t *testing.T) {
+			f := newRuntimeFixture(t,
+				[]runtimeUDPStep{{
+					requestType: relayknock.TypeListRequest,
+					replyType:   relayknock.TypeListResult,
+					replyBody:   accountAssignmentResult(contract, "conformance-account-assignment-ticket-0001"),
+				}},
+				[]runtimeUDPStep{
+					{requestType: relayknock.TypeOTP, noReply: true},
+					{
+						requestType: relayknock.TypeRegister,
+						replyType:   relayknock.TypeRegisterAck,
+						replyBody:   fmt.Sprintf(`{"errCode":%q,"errMsg":"untrusted detail","aspId":"agent"}`, code),
+					},
+				},
+			)
+			callbacks := 0
+			_, _, err := RegisterAgentRuntime(
+				context.Background(),
+				conformance.AgentAssignmentAccountCredentialFixture,
+				f.store,
+				f.options(
+					WithAgentRuntimeAllowedRegistrationKeyKinds(RegistrationKeyKindAccount),
+					WithAgentRuntimeOTPProvider(func(context.Context, AgentOTPChallenge) (string, error) {
+						callbacks++
+						return "12345678", nil
+					}),
+				)...,
+			)
+			if !errors.Is(err, ErrRegistrationRateLimited) {
+				t.Fatalf("authenticated account REG %s = %v, want ErrRegistrationRateLimited", code, err)
+			}
+			if strings.Contains(err.Error(), "untrusted detail") {
+				t.Fatalf("authenticated account REG %s reflected producer detail: %v", code, err)
+			}
+			if callbacks != 1 || len(f.hubUDP.snapshot()) != 1 {
+				t.Fatalf("authenticated account REG %s callbacks/Hub requests = %d/%d, want 1/1", code, callbacks, len(f.hubUDP.snapshot()))
+			}
+			requests := f.cellUDP.snapshot()
+			if len(requests) != 2 ||
+				requests[0].typeID != relayknock.TypeOTP ||
+				requests[1].typeID != relayknock.TypeRegister {
+				t.Fatalf("authenticated account REG %s cell requests = %v, want one OTP then one REG", code, requests)
+			}
+			pending, loadErr := f.store.LoadAgentState(context.Background())
+			if loadErr != nil {
+				t.Fatal(loadErr)
+			}
+			if pending.PendingActivation == nil || pending.PendingCompletion != nil || pending.RegisteredAt != nil {
+				t.Fatalf("authenticated account REG %s lost exact pending activation: %#v", code, pending)
 			}
 		})
 	}
@@ -2456,6 +2612,62 @@ func TestRegisterAgentRuntime_FinalSaveFailureKeepsCandidateRecoverable(t *testi
 	requests := f.cellUDP.snapshot()
 	if len(requests) != 3 || !bytes.Equal(requests[1].body, requests[2].body) {
 		t.Fatalf("final-save recovery changed completion candidate: %v", requests)
+	}
+	completed, loadErr := f.store.LoadAgentState(context.Background())
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if completed.PendingCompletion != nil ||
+		completed.DeviceAPIKey != conformance.AgentAssignmentDeviceAPIKeyFixture ||
+		completed.DeviceAPIKeyID != "key_DvK9mN2pQr7S" ||
+		completed.RegisteredAt == nil {
+		t.Fatalf("final-save recovery did not promote the exact candidate/key id: %#v", completed)
+	}
+}
+
+func TestRegisterAgentRuntime_AuthenticatedCompletionIgnoresCallerCancellationForFinalSave(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	f := newRuntimeFixture(t,
+		[]runtimeUDPStep{{
+			requestType: relayknock.TypeListRequest,
+			replyType:   relayknock.TypeListResult,
+			replyBody:   contract.InitialAssignment.Result.BodyJSON,
+		}},
+		[]runtimeUDPStep{
+			{
+				requestType: relayknock.TypeRegister,
+				replyType:   relayknock.TypeRegisterAck,
+				replyBody:   contract.AssignedCellRegistration.Result.BodyJSON,
+			},
+			{
+				requestType: relayknock.TypeListRequest,
+				replyType:   relayknock.TypeListResult,
+				replyBody:   contract.RegistrationCompletion.Result.BodyJSON,
+			},
+		},
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.store.cancelBeforeSave = 4 // identity, pending activation, pending completion, final promotion
+	f.store.cancel = cancel
+
+	client, binding, err := RegisterAgentRuntime(
+		ctx, conformance.AgentAssignmentBootstrapCredentialFixture, f.store, f.options()...,
+	)
+	if err != nil || client == nil || binding == nil || !errors.Is(ctx.Err(), context.Canceled) {
+		t.Fatalf("canceled post-auth promotion = %v/%v/%v; context=%v", client, binding, err, ctx.Err())
+	}
+	defer binding.Destroy()
+	loaded, loadErr := f.store.LoadAgentState(context.Background())
+	if loadErr != nil || loaded.PendingCompletion != nil ||
+		loaded.DeviceAPIKey != canonicalNativeDeviceCredential ||
+		loaded.DeviceAPIKeyID != "key_DvK9mN2pQr7S" ||
+		loaded.RegisteredAt == nil {
+		t.Fatalf("canceled post-auth result was not durable: state=%#v load=%v", loaded, loadErr)
+	}
+	if len(f.hubUDP.snapshot()) != 1 || len(f.cellUDP.snapshot()) != 2 {
+		t.Fatalf("canceled post-auth result network = Hub %d cell %d, want 1/2",
+			len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot()))
 	}
 }
 

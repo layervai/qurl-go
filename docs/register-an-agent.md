@@ -6,7 +6,11 @@ a public port, so there is no endpoint for a scanner to find.
 ## Connect
 
 ```go
-store := qurl.FileAgentState("/var/lib/layerv/qurl/agent-state.json")
+store, err := qurl.OpenFileAgentState("/var/lib/layerv/qurl/agent-state.json")
+if err != nil {
+	return err
+}
+defer store.Close()
 
 client, binding, err := qurl.RegisterAgentRuntime(ctx, enrollmentCredential, store,
 	qurl.WithAgentRuntimeMetadata(hostname, version),
@@ -111,7 +115,8 @@ the call keeps returning the error and changes nothing on disk.
 
 | Store | Use it when |
 |---|---|
-| `qurl.FileAgentState(path)` | The host filesystem is already trusted. Simplest option. |
+| `qurl.OpenFileAgentState(path)` | The host filesystem is already trusted. Use this for anything long-running: it reports construction errors and you own `Close`. |
+| `qurl.FileAgentState(path)` | Compatibility only. Returns a store instead of an error, so a bad path surfaces later. |
 | `qurl.NewSealedFileAgentState(...)` | You want the file encrypted at rest with a key you control. |
 | `awsstore` | You want that key held in AWS KMS. See [`awsstore`](../awsstore/README.md). |
 | Your own | Implement `qurl.AgentStateStore` for anything else. |

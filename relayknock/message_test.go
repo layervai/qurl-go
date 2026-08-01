@@ -16,8 +16,8 @@ import (
 )
 
 // Tests for the list/query and registration message types (NHP_LST / NHP_LRT /
-// NHP_OTP / NHP_REG / NHP_RAK), their codec plumbing, and the existing HTTP
-// orchestrators (BuildMessage, Exchange, Send). The wire format itself is
+// NHP_OTP / NHP_REG / NHP_RAK), their transport-neutral codec plumbing, and the
+// browser-only HTTP Knock/RelayPost boundary. The wire format itself is
 // fenced byte-for-byte by knock_golden_test.go — the transcript is independent
 // of the header type — so these tests fence the type plumbing around it with
 // symmetric round trips: a packet built with the device key (relayknock's
@@ -217,37 +217,122 @@ func TestBuildMessage_RejectsNonInitiatorTypes(t *testing.T) {
 	}
 }
 
-// TestExchange_RejectsNonRoundTripTypes verifies Exchange fails closed — before
-// any relay POST — for the one-way TypeOTP (which has no reply to exchange) and
-// for non-initiator/unknown types.
-func TestExchange_RejectsNonRoundTripTypes(t *testing.T) {
+// TestRelayPost_CarriesBrowserControlPackets pins the raw public browser-relay
+// escape hatch after the typed HTTP lifecycle helpers are retired. A caller can
+// still build NHP_RKN or NHP_EXT and carry the exact bytes through RelayPost.
+func TestRelayPost_CarriesBrowserControlPackets(t *testing.T) {
+	devicePriv, _ := testKeyPair(t, 0x11)
 	_, serverPub := testKeyPair(t, 0x22)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		t.Error("Exchange must reject the header type before any relay POST")
-		w.WriteHeader(http.StatusInternalServerError)
+
+	for _, tt := range []struct {
+		name       string
+		headerType int
+		cookie     []byte
+	}{
+		{name: "reknock", headerType: relayknock.TypeReknock, cookie: bytes.Repeat([]byte{0x44}, 32)},
+		{name: "exit", headerType: relayknock.TypeExit},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			packet, err := relayknock.BuildMessage(tt.headerType, &relayknock.KnockInputs{
+				DeviceStaticPriv: devicePriv,
+				ServerStaticPub:  serverPub,
+				EphemeralPriv:    bytes.Repeat([]byte{0x33}, 32),
+				TimestampNanos:   1700000000123456789,
+				Counter:          42,
+				Preamble:         0x01020304,
+				Body:             []byte("browser control"),
+				Cookie:           tt.cookie,
+			})
+			if err != nil {
+				t.Fatalf("BuildMessage(%d): %v", tt.headerType, err)
+			}
+
+			wantReply := []byte{byte(relayknock.TypeACK), byte(tt.headerType)}
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/relay/cell-key-fingerprint" {
+					t.Errorf("relay path = %q, want /relay/cell-key-fingerprint", r.URL.Path)
+				}
+				if got := r.Header.Get("Content-Type"); got != "application/octet-stream" {
+					t.Errorf("Content-Type = %q, want application/octet-stream", got)
+				}
+				gotPacket, readErr := io.ReadAll(r.Body)
+				if readErr != nil {
+					t.Errorf("read relay request: %v", readErr)
+					w.WriteHeader(http.StatusInternalServerError)
+					return
+				}
+				if !bytes.Equal(gotPacket, packet) {
+					t.Error("RelayPost changed the caller-built browser control packet")
+				}
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write(wantReply)
+			}))
+			defer srv.Close()
+
+			gotReply, err := relayknock.RelayPost(context.Background(), nil, srv.URL, "cell-key-fingerprint", packet)
+			if err != nil {
+				t.Fatalf("RelayPost: %v", err)
+			}
+			if !bytes.Equal(gotReply, wantReply) {
+				t.Fatalf("RelayPost reply = %x, want %x", gotReply, wantReply)
+			}
+		})
+	}
+}
+
+func TestRelayPost_RejectsAgentLifecyclePacketsBeforeHTTP(t *testing.T) {
+	devicePriv, _ := testKeyPair(t, 0x11)
+	_, serverPub := testKeyPair(t, 0x22)
+
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		requests++
 	}))
 	defer srv.Close()
 
-	_, err := relayknock.Exchange(context.Background(), srv.URL, serverPub, relayknock.TypeOTP, []byte("x"), relayknock.KnockOptions{})
-	if err == nil {
-		t.Fatal("Exchange(TypeOTP) succeeded, want reject")
+	for _, tt := range []struct {
+		name       string
+		headerType int
+	}{
+		{name: "assignment", headerType: relayknock.TypeListRequest},
+		{name: "otp", headerType: relayknock.TypeOTP},
+		{name: "registration", headerType: relayknock.TypeRegister},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			packet, err := relayknock.BuildMessage(tt.headerType, &relayknock.KnockInputs{
+				DeviceStaticPriv: devicePriv,
+				ServerStaticPub:  serverPub,
+				EphemeralPriv:    bytes.Repeat([]byte{0x33}, 32),
+				TimestampNanos:   1700000000123456789,
+				Counter:          42,
+				Preamble:         0x01020304,
+				Body:             []byte("native UDP only"),
+			})
+			if err != nil {
+				t.Fatalf("BuildMessage(%d): %v", tt.headerType, err)
+			}
+			if _, err := relayknock.RelayPost(context.Background(), nil, srv.URL, "cell-key-fingerprint", packet); err == nil || !strings.Contains(err.Error(), "browser relay accepts only") {
+				t.Fatalf("RelayPost(%d) error = %v, want browser-relay type rejection", tt.headerType, err)
+			}
+		})
 	}
-	if !strings.Contains(err.Error(), "Send") {
-		t.Errorf("Exchange(TypeOTP) error %q does not point the caller at Send", err)
+	if requests != 0 {
+		t.Fatalf("agent lifecycle packets reached HTTP %d times, want 0", requests)
 	}
+}
 
-	_, err = relayknock.Exchange(context.Background(), srv.URL, serverPub, relayknock.TypeListRequest, []byte("x"), relayknock.KnockOptions{})
-	if err == nil {
-		t.Fatal("Exchange(TypeListRequest) succeeded, want reject")
-	}
-	if !strings.Contains(err.Error(), "native-UDP-only") {
-		t.Errorf("Exchange(TypeListRequest) error %q does not identify the native UDP boundary", err)
-	}
+func TestRelayPost_RejectsMalformedPacketBeforeHTTP(t *testing.T) {
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		requests++
+	}))
+	defer srv.Close()
 
-	for _, typ := range []int{relayknock.TypeACK, relayknock.TypeListResult, relayknock.TypeCookieChallenge, relayknock.TypeRegisterAck, 0, 99} {
-		if _, err := relayknock.Exchange(context.Background(), srv.URL, serverPub, typ, []byte("x"), relayknock.KnockOptions{}); err == nil {
-			t.Errorf("Exchange(%d) succeeded, want reject", typ)
-		}
+	if _, err := relayknock.RelayPost(context.Background(), nil, srv.URL, "cell-key-fingerprint", []byte{1, 2, 3}); err == nil || !strings.Contains(err.Error(), "malformed NHP packet") {
+		t.Fatalf("RelayPost(short packet) error = %v, want malformed-packet rejection", err)
+	}
+	if requests != 0 {
+		t.Fatalf("malformed packet reached HTTP %d times, want 0", requests)
 	}
 }
 
@@ -300,183 +385,22 @@ func TestDecryptReply_RegisterAck(t *testing.T) {
 	}
 }
 
-// TestExchange_RegisterRoundTrip runs the full NHP_REG round trip against an
-// httptest relay whose handler plays the server: it opens the posted packet
-// with the server static key, asserts it is an NHP_REG carrying the caller's
-// body, and answers with a fabricated NHP_RAK correlated by the request
-// counter.
-func TestExchange_RegisterRoundTrip(t *testing.T) {
-	devicePriv, devicePub := testKeyPair(t, 0x11)
-	serverPriv, serverPub := testKeyPair(t, 0x22)
-	regBody := []byte("serialized registration body")
-	rakBody := []byte("registration ack body")
-
-	counterCh := make(chan uint64, 1)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if want := "/relay/" + relayknock.PubKeyFingerprint(serverPub); r.URL.Path != want {
-			t.Errorf("relay path = %q, want %q", r.URL.Path, want)
-		}
-		packet, err := io.ReadAll(r.Body)
-		if err != nil {
-			t.Errorf("read posted packet: %v", err)
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-		req, err := relayknocktest.OpenInitiatorMessage(serverPriv, devicePub, packet)
-		if err != nil {
-			t.Errorf("server-side open of posted packet: %v", err)
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-		if req.Type != relayknock.TypeRegister {
-			t.Errorf("posted packet type = %d, want %d (TypeRegister)", req.Type, relayknock.TypeRegister)
-		}
-		if !bytes.Equal(req.Body, regBody) {
-			t.Errorf("posted body = %q, want %q", req.Body, regBody)
-		}
-		counterCh <- req.Counter
-
-		rak, err := fabricateRAK(serverPriv, devicePub, req.Counter, rakBody)
-		if err != nil {
-			t.Errorf("fabricate NHP_RAK: %v", err)
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/octet-stream")
-		_, _ = w.Write(rak)
-	}))
-	defer srv.Close()
-
-	reply, err := relayknock.Exchange(context.Background(), srv.URL, serverPub, relayknock.TypeRegister, regBody, relayknock.KnockOptions{
-		DeviceStaticPriv: devicePriv,
-	})
-	if err != nil {
-		t.Fatalf("Exchange(TypeRegister): %v", err)
-	}
-	if !reply.IsRegisterAck() {
-		t.Errorf("reply.Type = %d, want %d (NHP_RAK)", reply.Type, relayknock.TypeRegisterAck)
-	}
-	if !bytes.Equal(reply.Body, rakBody) {
-		t.Errorf("reply body = %q, want %q", reply.Body, rakBody)
-	}
-	if requestCounter := <-counterCh; reply.Counter != requestCounter {
-		t.Errorf("reply counter %#x does not correlate with request counter %#x", reply.Counter, requestCounter)
-	}
-}
-
-// TestSend_PostsOTPPacket verifies the packet Send actually posts: the relay
-// handler opens it with the server static key, asserts it is an NHP_OTP
-// carrying the caller's body, and acknowledges with the conforming
-// 202-empty-body dispatch ack.
-func TestSend_PostsOTPPacket(t *testing.T) {
-	devicePriv, devicePub := testKeyPair(t, 0x11)
-	serverPriv, serverPub := testKeyPair(t, 0x22)
-	otpBody := []byte("serialized otp request body")
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if want := "/relay/" + relayknock.PubKeyFingerprint(serverPub); r.URL.Path != want {
-			t.Errorf("relay path = %q, want %q", r.URL.Path, want)
-		}
-		packet, err := io.ReadAll(r.Body)
-		if err != nil {
-			t.Errorf("read posted packet: %v", err)
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-		req, err := relayknocktest.OpenInitiatorMessage(serverPriv, devicePub, packet)
-		if err != nil {
-			t.Errorf("server-side open of posted packet: %v", err)
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-		if req.Type != relayknock.TypeOTP {
-			t.Errorf("posted packet type = %d, want %d (TypeOTP)", req.Type, relayknock.TypeOTP)
-		}
-		if !bytes.Equal(req.Body, otpBody) {
-			t.Errorf("posted body = %q, want %q", req.Body, otpBody)
-		}
-		w.WriteHeader(http.StatusAccepted)
-	}))
-	defer srv.Close()
-
-	if err := relayknock.Send(context.Background(), srv.URL, serverPub, otpBody, relayknock.KnockOptions{
-		DeviceStaticPriv: devicePriv,
-	}); err != nil {
-		t.Fatalf("Send: %v", err)
-	}
-}
-
-// TestSend_RelayContract pins Send's HTTP-layer dispatch contract: 202 with an
-// empty body is the only success; a 200 with reply bytes, a 202 with a body,
-// and relay 5xx faults all fail with a *RelayError that carries the status and
-// states the retry semantics.
-func TestSend_RelayContract(t *testing.T) {
-	_, serverPub := testKeyPair(t, 0x22)
-
-	tests := []struct {
-		name     string
-		status   int
-		respBody []byte
-		wantErr  bool
-	}{
-		{name: "202 empty is the success", status: http.StatusAccepted, respBody: nil, wantErr: false},
-		{name: "200 with reply bytes", status: http.StatusOK, respBody: []byte{0xde, 0xad, 0xbe, 0xef}, wantErr: true},
-		{name: "200 empty", status: http.StatusOK, respBody: nil, wantErr: true},
-		{name: "202 with body", status: http.StatusAccepted, respBody: []byte("forwarded"), wantErr: true},
-		{name: "503 service unavailable", status: http.StatusServiceUnavailable, respBody: []byte("relay draining"), wantErr: true},
-		{name: "504 gateway timeout", status: http.StatusGatewayTimeout, respBody: nil, wantErr: true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				w.WriteHeader(tt.status)
-				if len(tt.respBody) > 0 {
-					_, _ = w.Write(tt.respBody)
-				}
-			}))
-			defer srv.Close()
-
-			err := relayknock.Send(context.Background(), srv.URL, serverPub, []byte("otp request"), relayknock.KnockOptions{})
-			if !tt.wantErr {
-				if err != nil {
-					t.Fatalf("Send: %v", err)
-				}
-				return
-			}
-			if err == nil {
-				t.Fatal("Send succeeded, want error")
-			}
-			var relayErr *relayknock.RelayError
-			if !errors.As(err, &relayErr) {
-				t.Fatalf("Send error is %T, want *RelayError", err)
-			}
-			if relayErr.Status != tt.status {
-				t.Errorf("RelayError.Status = %d, want %d", relayErr.Status, tt.status)
-			}
-			if !strings.Contains(err.Error(), "retry") {
-				t.Errorf("Send error %q does not state the retry semantics", err)
-			}
-		})
-	}
-}
-
-// TestExchange_RejectsMismatchedReply pins the defense-in-depth pairing: the
-// reply header's type and counter ride outside the AEAD, so Exchange itself —
+// TestKnock_RejectsMismatchedReply pins the defense-in-depth pairing: the reply
+// header's type and counter ride outside the AEAD, so Knock itself —
 // not just the caller's predicates — must reject an authenticated reply whose
 // type the request cannot elicit or whose counter does not echo the request.
-func TestExchange_RejectsMismatchedReply(t *testing.T) {
+func TestKnock_RejectsMismatchedReply(t *testing.T) {
 	devicePriv, devicePub := testKeyPair(t, 0x11)
 	serverPriv, serverPub := testKeyPair(t, 0x22)
 
 	tests := []struct {
 		name       string
-		reqType    int
 		replyType  int
 		counterOff uint64
 		wantSub    string
 	}{
-		{name: "ACK to a register", reqType: relayknock.TypeRegister, replyType: relayknock.TypeACK, wantSub: "not a valid reply"},
-		{name: "counter not echoed", reqType: relayknock.TypeRegister, replyType: relayknock.TypeRegisterAck, counterOff: 1, wantSub: "does not echo"},
+		{name: "RAK to a knock", replyType: relayknock.TypeRegisterAck, wantSub: "not a valid reply"},
+		{name: "counter not echoed", replyType: relayknock.TypeACK, counterOff: 1, wantSub: "does not echo"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -512,9 +436,9 @@ func TestExchange_RejectsMismatchedReply(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			_, err := relayknock.Exchange(context.Background(), srv.URL, serverPub, tt.reqType, []byte("request body"), relayknock.KnockOptions{DeviceStaticPriv: devicePriv})
+			_, err := relayknock.Knock(context.Background(), srv.URL, serverPub, []byte("request body"), relayknock.KnockOptions{DeviceStaticPriv: devicePriv})
 			if err == nil {
-				t.Fatal("Exchange succeeded, want mismatch rejection")
+				t.Fatal("Knock succeeded, want mismatch rejection")
 			}
 			if !errors.Is(err, relayknock.ErrMalformedReply) {
 				t.Errorf("error %q is not relayknock.ErrMalformedReply; a consumer taxonomy cannot map it", err)
@@ -526,59 +450,11 @@ func TestExchange_RejectsMismatchedReply(t *testing.T) {
 	}
 }
 
-// TestExchange_AdmitsCookieChallengeToRegister verifies an NHP_COK answer to a
-// registration is admitted (not rejected as a mismatched pairing), so the caller
-// can branch it with IsCookieChallenge as "retry later".
-func TestExchange_AdmitsCookieChallengeToRegister(t *testing.T) {
-	devicePriv, devicePub := testKeyPair(t, 0x11)
-	serverPriv, serverPub := testKeyPair(t, 0x22)
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		packet, err := io.ReadAll(r.Body)
-		if err != nil {
-			t.Errorf("read posted packet: %v", err)
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-		req, err := relayknocktest.OpenInitiatorMessage(serverPriv, devicePub, packet)
-		if err != nil {
-			t.Errorf("server-side open: %v", err)
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-		cok, err := relayknocktest.BuildReply(relayknock.TypeCookieChallenge, &relayknock.KnockInputs{
-			DeviceStaticPriv: serverPriv,
-			ServerStaticPub:  devicePub,
-			EphemeralPriv:    bytes.Repeat([]byte{0x47}, 32),
-			TimestampNanos:   1700000000987654321,
-			Counter:          req.Counter,
-			Preamble:         0xa1b2c3d4,
-			Body:             nil,
-		})
-		if err != nil {
-			t.Errorf("fabricate COK: %v", err)
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/octet-stream")
-		_, _ = w.Write(cok)
-	}))
-	defer srv.Close()
-
-	reply, err := relayknock.Exchange(context.Background(), srv.URL, serverPub, relayknock.TypeRegister, []byte("reg body"), relayknock.KnockOptions{DeviceStaticPriv: devicePriv})
-	if err != nil {
-		t.Fatalf("Exchange(TypeRegister) with COK reply: %v", err)
-	}
-	if !reply.IsCookieChallenge() {
-		t.Errorf("reply.Type = %d, want NHP_COK", reply.Type)
-	}
-}
-
 // TestKnock_RoundTrip exercises the production Knock front door end-to-end
 // against a fabricated matched NHP_ACK. The knock/ack golden vector is a
 // standalone reply that does not correlate to a request, so this is the test
-// that proves the KNK→ACK delegation through Exchange (the qURL resolve path,
-// which now enforces counter-echo + replyTypeAllowed): a reply whose counter
+// that proves the KNK→ACK qURL resolve path. It enforces counter echo and the
+// ACK/COK reply gate: a reply whose counter
 // echoes the knock is accepted (IsACK, body recovered), and a reply whose
 // counter does not echo is rejected as ErrMalformedReply.
 func TestKnock_RoundTrip(t *testing.T) {
@@ -646,8 +522,8 @@ func TestKnock_RoundTrip(t *testing.T) {
 	})
 }
 
-// TestExchange_CookieChallengeBeforeCounterCheck pins the overload-signal
-// ordering: an authenticated NHP_COK is a valid reply to a knock, and Exchange
+// TestKnock_CookieChallengeBeforeCounterCheck pins the overload-signal ordering:
+// an authenticated NHP_COK is a valid reply to a knock, and Knock
 // must return it as a cookie-challenge (the "server busy, retry later" signal a
 // caller branches with IsCookieChallenge) BEFORE applying the counter-echo
 // check. A COK is not a protocol transaction — the reference server documents it
@@ -656,7 +532,7 @@ func TestKnock_RoundTrip(t *testing.T) {
 // older/clustered server, a window boundary, a non-conforming relay) must not be
 // downgraded to ErrMalformedReply and lose the retryable overload outcome on the
 // hot path. Here the fabricated COK deliberately carries a non-matching counter.
-func TestExchange_CookieChallengeBeforeCounterCheck(t *testing.T) {
+func TestKnock_CookieChallengeBeforeCounterCheck(t *testing.T) {
 	devicePriv, devicePub := testKeyPair(t, 0x11)
 	serverPriv, serverPub := testKeyPair(t, 0x22)
 
@@ -694,9 +570,9 @@ func TestExchange_CookieChallengeBeforeCounterCheck(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	reply, err := relayknock.Exchange(context.Background(), srv.URL, serverPub, relayknock.TypeKnock, []byte("request body"), relayknock.KnockOptions{DeviceStaticPriv: devicePriv})
+	reply, err := relayknock.Knock(context.Background(), srv.URL, serverPub, []byte("request body"), relayknock.KnockOptions{DeviceStaticPriv: devicePriv})
 	if err != nil {
-		t.Fatalf("Exchange returned an error for an overload NHP_COK; the retryable signal was lost: %v", err)
+		t.Fatalf("Knock returned an error for an overload NHP_COK; the retryable signal was lost: %v", err)
 	}
 	if !reply.IsCookieChallenge() {
 		t.Fatalf("reply Type = %d, want NHP_COK (IsCookieChallenge); the caller cannot detect overload", reply.Type)
@@ -757,10 +633,9 @@ func TestBuildReply_RejectsInitiatorTypes(t *testing.T) {
 	}
 }
 
-// TestSendExchange_InputValidation locks the buildOutbound validation contract
-// as surfaced through Send and Exchange: bad key sizes error out before any
-// relay POST.
-func TestSendExchange_InputValidation(t *testing.T) {
+// TestKnock_InputValidation locks the outbound knock validation contract:
+// bad key material errors out before any relay POST.
+func TestKnock_InputValidation(t *testing.T) {
 	devicePriv, _ := testKeyPair(t, 0x11)
 	_, serverPub := testKeyPair(t, 0x22)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -769,41 +644,15 @@ func TestSendExchange_InputValidation(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if err := relayknock.Send(context.Background(), srv.URL, serverPub[:31], []byte("x"), relayknock.KnockOptions{}); err == nil || !strings.Contains(err.Error(), "server static pub") {
-		t.Errorf("Send(short server pub) = %v, want server-static-pub size error", err)
-	}
-	if err := relayknock.Send(context.Background(), srv.URL, make([]byte, 32), []byte("x"), relayknock.KnockOptions{}); err == nil || !strings.Contains(err.Error(), "server static pub") {
-		t.Errorf("Send(low-order server pub) = %v, want unusable-server-key error", err)
-	}
-	if err := relayknock.Send(context.Background(), srv.URL, serverPub, []byte("x"), relayknock.KnockOptions{DeviceStaticPriv: devicePriv[:16]}); err == nil || !strings.Contains(err.Error(), "device static priv") {
-		t.Errorf("Send(short device priv) = %v, want device-static-priv size error", err)
-	}
-	if _, err := relayknock.Exchange(context.Background(), srv.URL, serverPub[:31], relayknock.TypeRegister, []byte("x"), relayknock.KnockOptions{}); err == nil || !strings.Contains(err.Error(), "server static pub") {
-		t.Errorf("Exchange(short server pub) = %v, want server-static-pub size error", err)
+	if _, err := relayknock.Knock(context.Background(), srv.URL, serverPub[:31], []byte("x"), relayknock.KnockOptions{}); err == nil || !strings.Contains(err.Error(), "server static pub") {
+		t.Errorf("Knock(short server pub) = %v, want server-static-pub size error", err)
 	}
 	nonCanonical := bytes.Repeat([]byte{0xff}, 32)
-	if _, err := relayknock.Exchange(context.Background(), srv.URL, nonCanonical, relayknock.TypeRegister, []byte("x"), relayknock.KnockOptions{}); err == nil || !strings.Contains(err.Error(), "server static pub") {
-		t.Errorf("Exchange(non-canonical server pub) = %v, want unusable-server-key error", err)
+	if _, err := relayknock.Knock(context.Background(), srv.URL, nonCanonical, []byte("x"), relayknock.KnockOptions{}); err == nil || !strings.Contains(err.Error(), "server static pub") {
+		t.Errorf("Knock(non-canonical server pub) = %v, want unusable-server-key error", err)
 	}
-}
-
-// TestSend_TransportFault locks the Status-0 RelayError contract for a
-// transport-level failure (no HTTP response at all).
-func TestSend_TransportFault(t *testing.T) {
-	_, serverPub := testKeyPair(t, 0x22)
-	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {}))
-	srv.Close() // connection refused from here on
-
-	err := relayknock.Send(context.Background(), srv.URL, serverPub, []byte("x"), relayknock.KnockOptions{})
-	if err == nil {
-		t.Fatal("Send to a closed relay succeeded, want transport fault")
-	}
-	var re *relayknock.RelayError
-	if !errors.As(err, &re) {
-		t.Fatalf("Send transport fault is %T, want *RelayError", err)
-	}
-	if re.Status != 0 {
-		t.Errorf("transport fault Status = %d, want 0 (no HTTP response)", re.Status)
+	if _, err := relayknock.Knock(context.Background(), srv.URL, serverPub, []byte("x"), relayknock.KnockOptions{DeviceStaticPriv: devicePriv[:16]}); err == nil || !strings.Contains(err.Error(), "device static priv") {
+		t.Errorf("Knock(short device priv) = %v, want device-static-priv size error", err)
 	}
 }
 

@@ -2,6 +2,7 @@ package nhpwire
 
 import (
 	"encoding/binary"
+	"fmt"
 
 	"github.com/layervai/qurl-go/internal/nhpcontract"
 )
@@ -85,6 +86,23 @@ func getTypeAndPayloadSize(header []byte) (typ, size int) {
 	preamble := binary.BigEndian.Uint32(header[0:4])
 	tns := preamble ^ binary.BigEndian.Uint32(header[4:8])
 	return int((tns >> 16) & 0xffff), int(tns & 0xffff)
+}
+
+// PacketType returns the cleartext NHP header type after validating the packet's
+// framing. It is used at transport boundaries that must reject unsupported
+// message families before sending any bytes.
+func PacketType(packet []byte) (int, error) {
+	if len(packet) < HeaderSize {
+		return 0, fmt.Errorf("packet too short: %d bytes < %d-byte header", len(packet), HeaderSize)
+	}
+	if len(packet) > PacketBufferSize {
+		return 0, fmt.Errorf("packet too long: %d bytes > %d-byte buffer", len(packet), PacketBufferSize)
+	}
+	typ, payloadSize := getTypeAndPayloadSize(packet)
+	if payloadSize != len(packet)-HeaderSize {
+		return 0, fmt.Errorf("packet payload size %d does not match %d trailing bytes", payloadSize, len(packet)-HeaderSize)
+	}
+	return typ, nil
 }
 
 func setVersion(header []byte, major, minor byte) { header[8], header[9] = major, minor }

@@ -105,7 +105,11 @@ authenticated UDP channel — no inbound ports, no public endpoint, nothing for 
 scanner to find.
 
 ```go
-store := qurl.FileAgentState("/var/lib/layerv/qurl/agent-state.json")
+store, err := qurl.OpenFileAgentState("/var/lib/layerv/qurl/agent-state.json")
+if err != nil {
+	return err
+}
+defer store.Close()
 
 client, binding, err := qurl.RegisterAgentRuntime(ctx, enrollmentCredential, store,
 	qurl.WithAgentRuntimeMetadata(hostname, version),

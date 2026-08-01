@@ -433,7 +433,7 @@ func TestRunNativeExchangeWipesDecryptedReply(t *testing.T) {
 			var decrypted []byte
 			parseErr := errors.New("parse failed")
 			_, err = runNativeExchange(
-				context.Background(), cfg, endpoint, []byte(`{}`), transport,
+				context.Background(), cfg, endpoint, []byte(`{}`), transport, nil,
 				nativeudp.List,
 				assignmentRetryInfo, newAssignmentRecovery,
 				func(reply []byte, _ time.Time) (*struct{}, error) {
@@ -451,6 +451,39 @@ func TestRunNativeExchangeWipesDecryptedReply(t *testing.T) {
 				t.Fatalf("decrypted reply was not wiped: %q", decrypted)
 			}
 		})
+	}
+}
+
+func TestRunNativeExchangeChecksContinuityBeforeEveryAttempt(t *testing.T) {
+	var slept []time.Duration
+	cfg, err := newAssignmentConfig(deterministicAssignmentOptions(&slept, 3))
+	if err != nil {
+		t.Fatal(err)
+	}
+	continuityErr := errors.New("state continuity lost")
+	transportErr := errors.New("ambiguous transport")
+	beforeCalls := 0
+	exchangeCalls := 0
+	before := func() error {
+		beforeCalls++
+		if beforeCalls == 2 {
+			return continuityErr
+		}
+		return nil
+	}
+	exchange := func(context.Context, nativeudp.Endpoint, []byte, nativeudp.Options) (*relayknock.Reply, error) {
+		exchangeCalls++
+		return nil, transportErr
+	}
+	_, err = runNativeExchange(
+		context.Background(), cfg, nativeudp.Endpoint{}, nil, nativeudp.Options{}, before,
+		exchange,
+		func(error) (time.Duration, bool) { return 0, true },
+		newAssignmentRecovery,
+		func([]byte, time.Time) (*struct{}, error) { return &struct{}{}, nil },
+	)
+	if !errors.Is(err, continuityErr) || beforeCalls != 2 || exchangeCalls != 1 {
+		t.Fatalf("result = %v, before/exchange calls = %d/%d, want continuity failure before retry 2", err, beforeCalls, exchangeCalls)
 	}
 }
 

@@ -26,14 +26,47 @@ import (
 // native registration, refresh, and open. Ordinary WithBaseURL and
 // WithHTTPClient ClientOptions remain supported here too.
 func OpenRegisteredAgent(ctx context.Context, store AgentStateStore, opts ...ClientOption) (*Client, error) {
+	client, _, err := OpenRegisteredAgentWithIdentity(ctx, store, opts...)
+	return client, err
+}
+
+// OpenRegisteredAgentWithIdentity opens a resource Client and returns the
+// authoritative agent id from the exact completed AgentState snapshot that
+// primed the Client. It performs exactly one store load and no resource or
+// lifecycle network call. Future credential reloads fail closed if the store
+// presents a different agent id, preventing a long-lived Client from silently
+// crossing identities after its one-minute credential cache expires.
+func OpenRegisteredAgentWithIdentity(ctx context.Context, store AgentStateStore, opts ...ClientOption) (*Client, string, error) {
+	return openRegisteredAgentWithIdentity(ctx, store, time.Now, opts...)
+}
+
+func openRegisteredAgentWithIdentity(ctx context.Context, store AgentStateStore, now func() time.Time, opts ...ClientOption) (*Client, string, error) {
 	cfg, err := validateRegisteredAgentOpenInputs(ctx, store, opts)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	if _, err := loadCompletedRegisteredState(ctx, store, ErrInvalidClientConfig); err != nil {
-		return nil, err
+	if now == nil {
+		now = time.Now
 	}
-	return newStoreBackedClient(store, cfg.baseURL, cfg.httpClient), nil
+	type openResult struct {
+		client  *Client
+		agentID string
+	}
+	result, err := withAgentStoreContinuity(store, func(*openResult) {}, func(retained AgentStateStore) (*openResult, error) {
+		state, err := loadCompletedRegisteredState(ctx, retained, ErrInvalidClientConfig)
+		if err != nil {
+			return nil, err
+		}
+		defer clearOwnedAgentState(state)
+		return &openResult{
+			client:  newPrimedStoreBackedClient(store, cfg.baseURL, cfg.httpClient, state.DeviceAPIKey, state.AgentID, now),
+			agentID: state.AgentID,
+		}, nil
+	})
+	if err != nil {
+		return nil, "", err
+	}
+	return result.client, result.agentID, nil
 }
 
 // OpenRegisteredAgentRuntime opens both a store-backed resource Client and the
@@ -60,22 +93,29 @@ func openRegisteredAgentRuntime(ctx context.Context, store AgentStateStore, now 
 	if err != nil {
 		return nil, nil, err
 	}
-	state, err := loadCompletedRegisteredState(ctx, store, ErrInvalidClientConfig)
+	result, err := withAgentStoreContinuity(store, destroyNativeRuntimeResult, func(retained AgentStateStore) (*nativeRuntimeResult, error) {
+		state, err := loadCompletedRegisteredState(ctx, retained, ErrInvalidClientConfig)
+		if err != nil {
+			return nil, err
+		}
+		defer clearOwnedAgentState(state)
+		if err := validateAgentRuntimeMetadata(state, now(), ErrInvalidClientConfig); err != nil {
+			return nil, err
+		}
+		privateKey, err := decodeRuntimePrivateKey(state, ErrInvalidClientConfig)
+		if err != nil {
+			return nil, err
+		}
+		defer func() { wipeBytes(privateKey) }()
+		client := newPrimedStoreBackedClient(store, cfg.baseURL, cfg.httpClient, state.DeviceAPIKey, state.AgentID, now)
+		binding := newAgentRuntimeBinding(state, privateKey)
+		privateKey = nil // binding owns the slice and its cleanup from this point.
+		return &nativeRuntimeResult{client: client, binding: binding}, nil
+	})
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := validateAgentRuntimeMetadata(state, now(), ErrInvalidClientConfig); err != nil {
-		return nil, nil, err
-	}
-	privateKey, err := decodeRuntimePrivateKey(state, ErrInvalidClientConfig)
-	if err != nil {
-		return nil, nil, err
-	}
-	defer func() { wipeBytes(privateKey) }()
-	client := newPrimedStoreBackedClient(store, cfg.baseURL, cfg.httpClient, state.DeviceAPIKey, now)
-	binding := newAgentRuntimeBinding(state, privateKey)
-	privateKey = nil // binding owns the slice and its cleanup from this point.
-	return client, binding, nil
+	return result.split()
 }
 
 func validateRegisteredAgentOpenInputs(ctx context.Context, store AgentStateStore, opts []ClientOption) (clientOptions, error) {
@@ -274,9 +314,11 @@ func loadCompletedRegisteredState(ctx context.Context, store AgentStateStore, er
 		return nil, err
 	}
 	if err := validateCompletedAgentIdentity(state, errKind); err != nil {
+		clearOwnedAgentState(state)
 		return nil, err
 	}
 	if err := validatePersistedCredentialForState(state, errKind); err != nil {
+		clearOwnedAgentState(state)
 		return nil, err
 	}
 	return state, nil
@@ -285,12 +327,25 @@ func loadCompletedRegisteredState(ctx context.Context, store AgentStateStore, er
 func loadExistingAgentState(ctx context.Context, store AgentStateStore, errKind error) (*AgentState, error) {
 	state, err := store.LoadAgentState(ctx)
 	if err != nil {
+		clearOwnedAgentState(state)
 		return nil, fmt.Errorf("%w: load agent state: %w", errKind, err)
 	}
 	if err := prepareLoadedAgentState(state, errKind); err != nil {
+		clearOwnedAgentState(state)
 		return nil, err
 	}
 	return state, nil
+}
+
+// clearOwnedAgentState promptly drops all references held by one caller-owned
+// loaded snapshot after its required identity and credential fields have been
+// copied into their next owner. Go strings cannot be reliably overwritten, but
+// clearing the complete struct avoids retaining private-key and recovery fields
+// that a resource Client does not need.
+func clearOwnedAgentState(state *AgentState) {
+	if state != nil {
+		*state = AgentState{}
+	}
 }
 
 // withAgentSetupLock holds the SDK local-file setup lock across an entire native
@@ -300,12 +355,42 @@ func loadExistingAgentState(ctx context.Context, store AgentStateStore, errKind 
 // a result.
 // Custom and network stores retain the documented caller-serialization
 // requirement.
-func withAgentSetupLock[T any](ctx context.Context, store AgentStateStore, cleanup func(T), fn func() (T, error)) (result T, resultErr error) {
-	release, err := acquireAgentSetupLock(ctx, store)
+func withAgentSetupLock[T any](ctx context.Context, store AgentStateStore, cleanup func(T), fn func(context.Context, AgentStateStore) (T, error)) (result T, resultErr error) {
+	retainedStore, validateContinuity, releaseContinuity, err := retainAgentStateContinuity(store)
 	if err != nil {
 		return result, err
 	}
 	defer func() {
+		if err := releaseContinuity(); err != nil {
+			continuityErr := fmt.Errorf("%w: release lifecycle state capability: %w", ErrAgentStateContinuity, err)
+			cleanup(result)
+			var zero T
+			result = zero
+			if resultErr == nil {
+				resultErr = continuityErr
+			} else {
+				resultErr = errors.Join(resultErr, continuityErr)
+			}
+		}
+	}()
+	if err := validateContinuity(); err != nil {
+		return result, err
+	}
+	lockedStore, release, err := acquireAgentSetupLockStore(ctx, retainedStore)
+	if err != nil {
+		return result, err
+	}
+	defer func() {
+		if err := validateContinuity(); err != nil {
+			cleanup(result)
+			var zero T
+			result = zero
+			if resultErr == nil {
+				resultErr = err
+			} else {
+				resultErr = errors.Join(resultErr, err)
+			}
+		}
 		if err := release(); err != nil {
 			lockErr := fmt.Errorf("%w: release setup lock: %w", ErrAgentSetupLock, err)
 			cleanup(result)
@@ -318,5 +403,42 @@ func withAgentSetupLock[T any](ctx context.Context, store AgentStateStore, clean
 			}
 		}
 	}()
-	return fn()
+	return fn(markSetupLockReentry(ctx, store), lockedStore)
+}
+
+// withAgentStoreContinuity retains a local directory capability for an
+// otherwise lock-free operation such as warm open. It validates both boundaries
+// and makes a final continuity/release failure override apparent success.
+func withAgentStoreContinuity[T any](store AgentStateStore, cleanup func(T), fn func(AgentStateStore) (T, error)) (result T, resultErr error) {
+	retainedStore, validateContinuity, release, err := retainAgentStateContinuity(store)
+	if err != nil {
+		return result, err
+	}
+	defer func() {
+		if err := validateContinuity(); err != nil {
+			cleanup(result)
+			var zero T
+			result = zero
+			if resultErr == nil {
+				resultErr = err
+			} else {
+				resultErr = errors.Join(resultErr, err)
+			}
+		}
+		if err := release(); err != nil {
+			cleanup(result)
+			var zero T
+			result = zero
+			wrapped := fmt.Errorf("%w: release state capability: %w", ErrAgentStateContinuity, err)
+			if resultErr == nil {
+				resultErr = wrapped
+			} else {
+				resultErr = errors.Join(resultErr, wrapped)
+			}
+		}
+	}()
+	if err := validateContinuity(); err != nil {
+		return result, err
+	}
+	return fn(retainedStore)
 }

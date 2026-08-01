@@ -1,6 +1,7 @@
 package qurl
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -121,6 +122,47 @@ func TestAgentRegistrationRecoveryHorizonContract(t *testing.T) {
 	if err != nil || loaded.PendingCompletion == nil ||
 		!loaded.PendingCompletion.RecoveryExpiresAt.Equal(want) {
 		t.Fatalf("persisted completion recovery deadline = %#v, %v", loaded, err)
+	}
+}
+
+func TestRegisterAgentRuntime_SchemaV6PendingRecoveryRemainsResumable(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	for _, phase := range []AgentRecoveryPhase{AgentRecoveryPhaseActivation, AgentRecoveryPhaseCompletion} {
+		t.Run(string(phase), func(t *testing.T) {
+			steps := []runtimeUDPStep{{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: contract.RegistrationCompletion.Result.BodyJSON}}
+			if phase == AgentRecoveryPhaseActivation {
+				steps = append([]runtimeUDPStep{{requestType: relayknock.TypeRegister, replyType: relayknock.TypeRegisterAck, replyBody: contract.AssignedCellRegistration.Result.BodyJSON}}, steps...)
+			}
+			f := newRuntimeFixture(t, nil, steps)
+			state := seedRecoveryRuntimePendingActivation(t, f)
+			candidate := canonicalNativeDeviceCredential
+			if phase == AgentRecoveryPhaseCompletion {
+				activation := state.PendingActivation
+				state.PendingActivation = nil
+				state.PendingCompletion = &PendingAgentCompletion{
+					DeviceAPIKey: candidate, CellID: state.Assignment.CellID, AssignmentGeneration: state.Assignment.AssignmentGeneration,
+					RecoveryAnchorTicketExpiresAt: activation.RecoveryAnchorTicketExpiresAt,
+					RecoveryExpiresAt:             activation.RecoveryExpiresAt,
+				}
+			}
+			state.SchemaVersion = registrationRecoveryStateSchemaVersion
+			if err := f.store.inner.SaveAgentState(context.Background(), state); err != nil {
+				t.Fatal(err)
+			}
+			credential := ""
+			if phase == AgentRecoveryPhaseActivation {
+				credential = conformance.AgentAssignmentBootstrapCredentialFixture
+			}
+			client, binding, err := RegisterAgentRuntime(context.Background(), credential, f.store, f.options()...)
+			if err != nil || client == nil || binding == nil {
+				t.Fatalf("schema-v6 %s resume = %v/%v/%v", phase, client, binding, err)
+			}
+			defer binding.Destroy()
+			requests := f.cellUDP.snapshot()
+			if len(f.hubUDP.snapshot()) != 0 || len(requests) != len(steps) || !bytes.Contains(requests[len(requests)-1].body, []byte(candidate)) {
+				t.Fatalf("schema-v6 %s rotated/fell back: Hub=%d cell=%v", phase, len(f.hubUDP.snapshot()), requests)
+			}
+		})
 	}
 }
 
@@ -501,6 +543,52 @@ func TestRegisterAgentRuntime_DeadlineDoesNotMaskFinalPromotionPersistenceAmbigu
 	loaded, loadErr := f.store.LoadAgentState(context.Background())
 	if loadErr != nil || loaded.PendingCompletion != nil || loaded.RegisteredAt == nil || loaded.DeviceAPIKey != canonicalNativeDeviceCredential {
 		t.Fatalf("committed final state = %#v / %v", loaded, loadErr)
+	}
+}
+
+func TestRegisterAgentRuntime_AuthenticatedCompletionCrossingHorizonIsPromoted(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	f := newRuntimeFixture(t, nil, []runtimeUDPStep{{
+		requestType: relayknock.TypeListRequest,
+		replyType:   relayknock.TypeListResult,
+		replyBody:   contract.RegistrationCompletion.Result.BodyJSON,
+	}})
+	state := seedRecoveryRuntimePendingActivation(t, f)
+	cfg := defaultNativeAgentRuntimeConfig()
+	cfg.deviceCredential = canonicalNativeDeviceCredential
+	if err := cfg.transitionPendingActivation(context.Background(), f.store, state); err != nil {
+		t.Fatal(err)
+	}
+	deadline := state.PendingCompletion.RecoveryExpiresAt
+	state.Assignment.LeaseExpiresAt = deadline.Add(time.Hour)
+	if err := f.store.SaveAgentState(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+	clock := func() time.Time {
+		if len(f.cellUDP.snapshot()) == 0 {
+			return deadline.Add(-time.Second)
+		}
+		return deadline
+	}
+
+	client, binding, err := RegisterAgentRuntime(
+		context.Background(), "", f.store,
+		f.options(withAgentRuntimeClock(clock))...,
+	)
+	if err != nil || client == nil || binding == nil {
+		t.Fatalf("horizon-crossing authenticated success = %v/%v/%v", client, binding, err)
+	}
+	defer binding.Destroy()
+	loaded, loadErr := f.store.LoadAgentState(context.Background())
+	if loadErr != nil || loaded.PendingCompletion != nil ||
+		loaded.DeviceAPIKey != canonicalNativeDeviceCredential ||
+		loaded.DeviceAPIKeyID != "key_DvK9mN2pQr7S" ||
+		loaded.RegisteredAt == nil || !loaded.RegisteredAt.Equal(deadline) {
+		t.Fatalf("horizon-crossing success was not promoted: state=%#v load=%v", loaded, loadErr)
+	}
+	if len(f.hubUDP.snapshot()) != 0 || len(f.cellUDP.snapshot()) != 1 {
+		t.Fatalf("horizon-crossing success network = Hub %d cell %d, want 0/1",
+			len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot()))
 	}
 }
 
