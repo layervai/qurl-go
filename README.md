@@ -111,7 +111,8 @@ if err != nil {
 }
 defer store.Close()
 
-client, binding, err := qurl.RegisterAgentRuntime(ctx, enrollmentCredential, store,
+client, binding, err := qurl.ConnectAgentRuntime(ctx, store,
+	qurl.WithAgentRuntimeEnrollmentCredential(enrollmentCredential),
 	qurl.WithAgentRuntimeMetadata(hostname, version),
 	qurl.WithAgentRuntimeOTPProvider(readOneTimeCode),
 )
@@ -129,17 +130,23 @@ to reach LayerV.
 emails a code to the address on your credential and waits for your callback to
 return it — [The one-time code](#the-one-time-code) below shows one.
 
-**It survives restarts and bad networks.** State is saved before anything
-irreversible happens, so a crash, a dropped reply, or a machine reboot resumes
-the same registration rather than starting a new one — for up to 90 days. You do
-not need to handle that; it is the default.
+**Then it stays connected on its own.** Run that on every start, under a
+supervisor, and stop thinking about the lifecycle:
 
-**Warm starts are free.** After the first successful registration, use
-`OpenRegisteredAgentRuntime` — it loads saved state with no network calls at all.
+- Restarts are safe — it enrolls only when nothing is registered yet.
+- Crashes and dropped replies resume the same registration, for up to 90 days.
+- Leases renew themselves, at startup and mid-run.
+- Relocations are followed by that same renewal.
 
-**Keep the metadata stable.** The hostname and version you pass become part of
-the saved registration. Change them only after registration has completed, or
-recovery has nothing to match.
+A process restarting after a weekend outage runs the same code as one restarting
+after thirty seconds. If your service should not hold an enrollment credential at
+runtime, drop the credential option: the same call then renews and serves an
+existing registration but can never create one. See
+[Connect a service or agent](docs/register-an-agent.md).
+
+**Keep the state file and keep the metadata stable.** The file is what makes a
+resume possible, and the hostname and version you pass become part of the saved
+registration.
 
 ### The one-time code
 
@@ -165,7 +172,8 @@ attempt, and the SDK never retries behind your back or writes the code to disk.
 agent — enroll with a pre-issued credential and say so explicitly:
 
 ```go
-client, binding, err := qurl.RegisterAgentRuntime(ctx, credential, store,
+client, binding, err := qurl.ConnectAgentRuntime(ctx, store,
+	qurl.WithAgentRuntimeEnrollmentCredential(credential),
 	qurl.WithAgentRuntimeMetadata(hostname, version),
 	qurl.WithAgentRuntimeHeadlessEnrollment(),
 )
@@ -196,22 +204,13 @@ Pass the credential LayerV issued you. Credentials must be LayerV-minted tokens
 of at least 32 characters. Passwords and hand-picked strings are rejected before
 anything is saved or sent.
 
-### If LayerV moves your service
+### Taking manual control
 
-Occasionally LayerV relocates where your service is served from. The SDK will not
-silently follow — it returns `*AgentAssignmentChangedError` so the move is your
-decision. When you are ready:
-
-```go
-client, binding, err := qurl.RefreshAgentRuntime(ctx, qurl.HubBootstrap{}, store,
-	qurl.WithAgentRuntimeReassignmentAdoption(),
-)
-```
-
-The empty `HubBootstrap{}` means "use the trust root this build ships" — you only
-fill it in if you run your own LayerV deployment. There is nothing to look up:
-the option accepts only the move LayerV just told you about. Without it, the same
-call keeps returning the error and changes nothing on disk.
+Renewal and relocation are automatic, and following a relocation means going
+where LayerV said to go in an authenticated reply — never a guessed or
+config-supplied address. To renew at a moment you choose, or to opt out of the
+automatic behavior entirely, see
+[Taking manual control](docs/register-an-agent.md#taking-manual-control).
 
 ## Opening Links
 
@@ -256,7 +255,7 @@ Match errors by type or sentinel, not message text:
 | `qurl.ErrAgentRecoveryExpired` | This registration is older than 90 days and can no longer be resumed; enroll again |
 | `qurl.ErrAgentRecoveryMigrationRequired` | Saved state predates the current format; keep the file and enroll again |
 | `*qurl.NativeCredentialRecoveryRequiredError` | Completed native credential state is absent or malformed; explicit native recovery or reprovisioning is required |
-| `*qurl.AgentAssignmentChangedError` | LayerV moved where your service is served from; opt in with `WithAgentRuntimeReassignmentAdoption` to accept a newer generation |
+| `*qurl.AgentAssignmentChangedError` | A refresh pinned with `WithAgentRuntimePinnedAssignment` found that LayerV moved your service; drop the option to follow the move |
 | `*qurl.APIError` | LayerV returned a non-2xx steady-state resource response |
 | `*qurl.ServerDenyError` | LayerV refused the request |
 
@@ -286,8 +285,33 @@ Match errors by type or sentinel, not message text:
   network I/O, and installing a provider while excluding that kind is rejected
   as contradictory with `ErrInvalidRegisterConfig`.
 - Added the native UDP connection lifecycle for services and agents: enrollment,
-  emailed one-time codes, direct connections, strict conformance, crash-safe
-  activation/completion, and explicit opt-in assignment reassignment adoption.
+  emailed one-time codes, direct connections, strict conformance, and
+  crash-safe activation/completion.
+- Leases and relocation are now handled for you. Warm open renews an expired
+  lease, a held binding renews itself as expiry approaches, re-running the
+  connect call is safe on every start, and an authority-directed move is followed
+  rather than surfaced. Placement is still only ever taken from an authenticated
+  Hub result whose assignment generation advances.
+  `WithAgentRuntimeReassignmentAdoption` is now a no-op and deprecated; opt out
+  with `WithAgentRuntimeOfflineOpen` or `WithAgentRuntimePinnedAssignment`.
+- Added `ConnectAgentRuntime`, the single call a service makes on every start. It
+  enrolls when nothing is registered yet (supply the credential with
+  `WithAgentRuntimeEnrollmentCredential`), resumes an interrupted enrollment, and
+  otherwise returns the existing registration. `RegisterAgentRuntime` and
+  `OpenRegisteredAgentRuntime` are deprecated in its favor and unchanged.
+- `AgentRuntimeBinding`'s exported assignment fields are now written once, at
+  construction, and never mutated by a renewal. They are safe to read from any
+  goroutine; `binding.Assignment()` reports live placement.
+- **Breaking:** `OpenRegisteredAgentRuntime` now takes the closed
+  `AgentRuntimeOpenOption` set instead of `ClientOption`, matching the other
+  lifecycle entry points. `WithAgentClientBaseURL` and
+  `WithAgentClientHTTPClient` are unchanged there; generic `WithBaseURL`,
+  `WithHTTPClient`, and `WithIssuerStatePath` are now rejected at compile time
+  rather than at run time. The resource-only `OpenRegisteredAgent` still takes
+  `ClientOption`.
+- An interrupted registration now finishes at the placement its candidate is
+  bound to before placement is reconciled, so a resume recovers a registration
+  that was already recorded instead of losing it.
 - Bounded native registration recovery to 90 days after the first authenticated
   assignment-ticket expiry, with a per-datagram deadline fence, immutable
   replacement anchor, and fail-closed pre-v6 pending-state migration.

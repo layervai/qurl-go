@@ -18,9 +18,10 @@ import (
 // wrapper or KMS.
 // The device credential is read from store behind a one-minute cache. Native
 // assignment absence, corruption, or expiry does not invalidate this resource
-// client; qURL Connector callers that will knock must instead open or explicitly
-// refresh the registered runtime. The persisted agent id and X25519 keypair
-// remain the durable device identity.
+// client; qURL Connector callers that will knock must instead use
+// OpenRegisteredAgentRuntime, which validates the assignment and renews an
+// expired lease. The persisted agent id and X25519 keypair remain the durable
+// device identity.
 //
 // WithAgentClientBaseURL and WithAgentClientHTTPClient can be reused across
 // native registration, refresh, and open. Ordinary WithBaseURL and
@@ -71,27 +72,52 @@ func openRegisteredAgentWithIdentity(ctx context.Context, store AgentStateStore,
 
 // OpenRegisteredAgentRuntime opens both a store-backed resource Client and the
 // validated runtime binding needed for an immediate native UDP qURL Connector
-// knock. It performs one AgentStateStore load, no enrollment/resource API calls,
-// requires a live authority-provided assignment, and primes the Client's one-minute
-// credential cache from that same state so its first request does not reload or
-// unseal the store. Unlike resource-only OpenRegisteredAgent, it rejects an expired
-// assignment without network I/O because that endpoint cannot be knocked; call
-// RefreshAgentRuntime through the pinned Hub to obtain a fresh binding.
+// knock. Use it on every normal start.
+//
+// The common case performs one AgentStateStore load, no network I/O and no
+// enrollment/resource API calls, and primes the Client's one-minute credential
+// cache from that same state so its first request does not reload or unseal the
+// store.
+//
+// If the persisted assignment lease has expired, this call renews it through the
+// pinned Hub rather than failing: it takes the setup lock, performs exactly the
+// RefreshAgentRuntime exchange with the trust root this build ships, follows any
+// relocation LayerV has made, and persists the result before returning a
+// knockable binding. A restart after a lease expiry or a move therefore needs no
+// special-case code. Pass WithAgentRuntimeOfflineOpen to keep the call offline
+// and receive ErrAssignmentLeaseExpired instead.
+//
 // The caller must immediately defer binding.Destroy, then take and eventually
 // wipe the runtime private key.
-func OpenRegisteredAgentRuntime(ctx context.Context, store AgentStateStore, opts ...ClientOption) (*Client, *AgentRuntimeBinding, error) {
-	return openRegisteredAgentRuntime(ctx, store, nil, opts...)
+//
+// Deprecated: use ConnectAgentRuntime with no enrollment credential. It behaves
+// identically — including the inability to enroll — and is the single call a
+// service needs on every start.
+func OpenRegisteredAgentRuntime(ctx context.Context, store AgentStateStore, opts ...AgentRuntimeOpenOption) (*Client, *AgentRuntimeBinding, error) {
+	return openRegisteredAgentRuntime(ctx, store, nil, HubBootstrap{}, nil, opts...)
 }
 
-func openRegisteredAgentRuntime(ctx context.Context, store AgentStateStore, now func() time.Time, opts ...ClientOption) (*Client, *AgentRuntimeBinding, error) {
+// openRegisteredAgentRuntime takes the renewal Hub and refresh options as
+// parameters rather than public options: warm open renews through the shipped
+// trust root, and only tests substitute a fixture Hub and UDP transport.
+func openRegisteredAgentRuntime(ctx context.Context, store AgentStateStore, now func() time.Time, renewHub HubBootstrap, renewOpts []AgentRuntimeRefreshOption, opts ...AgentRuntimeOpenOption) (*Client, *AgentRuntimeBinding, error) {
 	// A nil clock selects the production wall clock; tests pass an explicit clock
 	// only when they need deterministic assignment and cache-expiry boundaries.
 	if now == nil {
 		now = time.Now
 	}
-	cfg, err := validateRegisteredAgentOpenInputs(ctx, store, opts)
+	open, err := validateRegisteredAgentRuntimeOpenInputs(ctx, store, opts)
 	if err != nil {
 		return nil, nil, err
+	}
+	cfg := open.client
+	// Resolve the renewal config once, best effort. A build that ships no Hub
+	// trust root must still complete a warm open exactly as it did before; it
+	// simply gets a binding that cannot renew itself.
+	renewCfg, resolvedHub, renewCfgErr := newAgentRuntimeRefreshConfig(ctx, renewHub, store, renewOpts)
+	if renewCfgErr == nil {
+		renewCfg.baseURL = cfg.baseURL
+		renewCfg.httpClient = cfg.httpClient
 	}
 	result, err := withAgentStoreContinuity(store, destroyNativeRuntimeResult, func(retained AgentStateStore) (*nativeRuntimeResult, error) {
 		state, err := loadCompletedRegisteredState(ctx, retained, ErrInvalidClientConfig)
@@ -110,12 +136,91 @@ func openRegisteredAgentRuntime(ctx context.Context, store AgentStateStore, now 
 		client := newPrimedStoreBackedClient(store, cfg.baseURL, cfg.httpClient, state.DeviceAPIKey, state.AgentID, now)
 		binding := newAgentRuntimeBinding(state, privateKey)
 		privateKey = nil // binding owns the slice and its cleanup from this point.
+		// WithAgentRuntimeOfflineOpen means this process renews on its own
+		// schedule, so honor that for the session too rather than renewing
+		// behind its back on the first knock.
+		if renewCfgErr == nil && !open.offlineOpen {
+			binding.attachRenewal(store, renewCfg)
+		}
 		return &nativeRuntimeResult{client: client, binding: binding}, nil
 	})
 	if err != nil {
-		return nil, nil, err
+		// ErrAssignmentLeaseExpired is the one structurally sound failure a Hub
+		// renewal can repair. Every other class — corrupt, absent, or malformed
+		// assignment state — still fails closed without network I/O.
+		if open.offlineOpen || !errors.Is(err, ErrAssignmentLeaseExpired) {
+			return nil, nil, err
+		}
+		if renewCfgErr != nil {
+			return nil, nil, renewCfgErr
+		}
+		renewed, renewErr := refreshAgentRuntimeLocked(ctx, resolvedHub, store, renewCfg)
+		if renewErr != nil {
+			return nil, nil, renewErr
+		}
+		return renewed.split()
 	}
 	return result.split()
+}
+
+// AgentRuntimeOpenOption is the closed option set for OpenRegisteredAgentRuntime.
+// It admits the agent resource-client options and the open-specific policy
+// options only. Generic ClientOptions such as WithBaseURL, WithHTTPClient, and
+// WithIssuerStatePath are deliberately excluded, so the compiler enforces what
+// this entry point used to reject at run time; the resource-only
+// OpenRegisteredAgent keeps accepting them. Lifecycle transport options are
+// excluded for the same reason they are excluded from KnockRegisteredAgent.
+type AgentRuntimeOpenOption interface {
+	applyAgentRuntimeOpenOption(*agentRuntimeOpenConfig) error
+}
+
+type agentRuntimeOpenConfig struct {
+	client      clientOptions
+	offlineOpen bool
+}
+
+type agentRuntimeOpenOptionFunc func(*agentRuntimeOpenConfig) error
+
+func (f agentRuntimeOpenOptionFunc) applyAgentRuntimeOpenOption(cfg *agentRuntimeOpenConfig) error {
+	return f(cfg)
+}
+
+// WithAgentRuntimeOfflineOpen keeps OpenRegisteredAgentRuntime free of network
+// I/O even when the persisted assignment lease has expired, so the call returns
+// ErrAssignmentLeaseExpired instead of renewing through the Hub, and the binding
+// it returns does not renew itself either. Use it when a process must be able to
+// start without reaching LayerV, or when renewal has to happen at a moment you
+// choose; recover with an explicit RefreshAgentRuntime.
+//
+// It is deliberately not a ClientOption: it means nothing to the resource-only
+// OpenRegisteredAgent or to NewClient, so those must not silently accept it.
+func WithAgentRuntimeOfflineOpen() AgentRuntimeOpenOption {
+	return agentRuntimeOpenOptionFunc(func(cfg *agentRuntimeOpenConfig) error {
+		cfg.offlineOpen = true
+		return nil
+	})
+}
+
+// validateRegisteredAgentRuntimeOpenInputs applies the closed runtime-open set.
+// It needs no WithIssuerStatePath rejection: that option cannot satisfy
+// AgentRuntimeOpenOption, so the type system already excludes it here.
+func validateRegisteredAgentRuntimeOpenInputs(ctx context.Context, store AgentStateStore, opts []AgentRuntimeOpenOption) (agentRuntimeOpenConfig, error) {
+	if store == nil {
+		return agentRuntimeOpenConfig{}, fmt.Errorf("%w: agent state store must not be nil", ErrInvalidClientConfig)
+	}
+	if err := validateContext(ctx, ErrInvalidClientConfig); err != nil {
+		return agentRuntimeOpenConfig{}, err
+	}
+	open := agentRuntimeOpenConfig{client: defaultClientOptions()}
+	for _, opt := range opts {
+		if opt == nil {
+			return agentRuntimeOpenConfig{}, fmt.Errorf("%w: nil AgentRuntimeOpenOption", ErrInvalidClientConfig)
+		}
+		if err := opt.applyAgentRuntimeOpenOption(&open); err != nil {
+			return agentRuntimeOpenConfig{}, err
+		}
+	}
+	return open, nil
 }
 
 func validateRegisteredAgentOpenInputs(ctx context.Context, store AgentStateStore, opts []ClientOption) (clientOptions, error) {
@@ -148,6 +253,15 @@ func validateRegisteredAgentOpenInputs(ctx context.Context, store AgentStateStor
 // those bytes after use. A runtime cleanup best-effort wipes a retained key only
 // after every accidental copy becomes unreachable; it is defense in depth, not
 // a substitute for deterministic Destroy.
+//
+// A binding keeps its own assignment lease current. KnockRegisteredAgent and
+// ExitRegisteredAgentSession renew it through the Hub as it approaches expiry, so
+// a process may hold one binding indefinitely without tracking leases.
+//
+// The exported assignment fields are written once, when the binding is created,
+// and are never touched again. They are a stable record of the placement this
+// binding started from, safe to read from any goroutine. Renewal updates the
+// live placement instead, which Assignment returns.
 type AgentRuntimeBinding struct {
 	AgentID              string
 	PublicKeyB64         string
@@ -162,7 +276,42 @@ type AgentRuntimeBinding struct {
 	authoritativeAgentID      string
 	authoritativePublicKeyB64 string
 	authoritativeAssignment   *AgentAssignment
+	renewedAssignment         *AgentAssignment
 	deviceStaticPrivateKey    *agentRuntimePrivateKey
+	renewal                   *agentRuntimeRenewal
+}
+
+// agentRuntimeRenewal carries what a held binding needs to renew its own lease:
+// the store that owns the durable assignment and the lifecycle transport that
+// produced it. It is absent only for a binding built outside a lifecycle call,
+// which then keeps the pre-renewal behavior of failing on an expired lease.
+type agentRuntimeRenewal struct {
+	mu    sync.Mutex
+	store AgentStateStore
+	hub   HubBootstrap
+	cfg   *nativeAgentRuntimeConfig
+}
+
+// Assignment returns the binding's current authoritative placement, including
+// any lease renewal or relocation a knock has applied. Use it whenever you need
+// live placement; the exported fields deliberately keep their construction-time
+// values and will be stale after a renewal.
+func (b *AgentRuntimeBinding) Assignment() AgentAssignment {
+	if b == nil {
+		return AgentAssignment{}
+	}
+	if b.renewal == nil {
+		if live := b.livePlacement(); live != nil {
+			return *live
+		}
+		return AgentAssignment{}
+	}
+	b.renewal.mu.Lock()
+	defer b.renewal.mu.Unlock()
+	if live := b.livePlacement(); live != nil {
+		return *live
+	}
+	return AgentAssignment{}
 }
 
 // agentRuntimePrivateKey centralizes one-shot ownership across accidental
@@ -302,6 +451,93 @@ func newAgentRuntimeBinding(state *AgentState, privateKey []byte) *AgentRuntimeB
 func (b *AgentRuntimeBinding) assignment() *AgentAssignment {
 	if b == nil {
 		return nil
+	}
+	return b.livePlacement()
+}
+
+// attachRenewal lets a binding produced by a lifecycle call keep its own lease
+// current. The config is the one that built the binding, so a renewal reuses the
+// same Hub trust root and lifecycle transport rather than inventing defaults.
+func (b *AgentRuntimeBinding) attachRenewal(store AgentStateStore, cfg *nativeAgentRuntimeConfig) {
+	if b == nil || store == nil || cfg == nil || cfg.hub == nil {
+		return
+	}
+	renewalCfg := *cfg
+	// continuityStore is scoped to the lifecycle call that is finishing now.
+	// A later renewal retains its own store capability instead.
+	renewalCfg.continuityStore = nil
+	// Renewal sends no credential, so the binding must not hold one for the life
+	// of the process just because the lifecycle call was given one.
+	renewalCfg.deviceCredential = ""
+	renewalCfg.enrollCredential = ""
+	renewalCfg.otpProvider = nil
+	b.renewal = &agentRuntimeRenewal{store: baseAgentStateStore(store), hub: *cfg.hub, cfg: &renewalCfg}
+}
+
+// liveSessionAssignment returns the placement a session exchange should use. It
+// renews through the Hub when the lease has expired or is close enough that the
+// admission would be worthless, then applies the tamper check against the same
+// placement it just published. Renewal, republication, and that check all happen
+// under one lock so concurrent knocks on a shared binding cannot observe a
+// half-updated snapshot.
+//
+// Renewal ahead of expiry is best effort: while the current lease is still live,
+// a Hub failure returns that live placement instead of an error, so a transient
+// outage never takes down a working agent. Only an already-expired lease turns a
+// renewal failure into a failed exchange.
+func (b *AgentRuntimeBinding) liveSessionAssignment(ctx context.Context, deviceStaticPrivateKey []byte, now time.Time) (*AgentAssignment, error) {
+	if b.renewal == nil {
+		return b.checkedAssignment(b.assignment())
+	}
+	b.renewal.mu.Lock()
+	defer b.renewal.mu.Unlock()
+	current := b.livePlacement()
+	if current == nil || !now.Add(sessionLeaseRenewalLead).Before(current.LeaseExpiresAt) {
+		expired := current == nil || current.LeaseExpired(now)
+		fresh, err := b.renewal.cfg.renewSessionAssignment(ctx, b.renewal.hub, b.renewal.store, b.AgentID, deviceStaticPrivateKey, now)
+		switch {
+		case err == nil:
+			b.adoptRenewedAssignmentLocked(fresh)
+			current = b.livePlacement()
+		case expired:
+			return nil, err
+		}
+	}
+	return b.checkedAssignment(current)
+}
+
+// checkedAssignment rejects edited exported assignment fields, so tampering with
+// them still cannot retarget an exchange. It compares them against
+// authoritativeAssignment, which is fixed at construction exactly like the
+// exported fields are; a renewal lands in renewedAssignment instead, so the two
+// can never drift apart and no caller has to keep a second copy in step.
+func (b *AgentRuntimeBinding) checkedAssignment(assignment *AgentAssignment) (*AgentAssignment, error) {
+	if assignment == nil {
+		return nil, fmt.Errorf("%w: runtime binding has no authoritative assignment", ErrInvalidNativeKnockInput)
+	}
+	origin := b.authoritativeAssignment
+	if origin == nil || b.CellID != origin.CellID ||
+		b.AssignmentGeneration != origin.AssignmentGeneration ||
+		b.EndpointRevision != origin.EndpointRevision ||
+		b.NHPUDPEndpoint != origin.Endpoint {
+		return nil, fmt.Errorf("%w: runtime binding does not match its authoritative assignment", ErrInvalidNativeKnockInput)
+	}
+	return assignment.clone(), nil
+}
+
+// adoptRenewedAssignmentLocked stores a renewed placement without touching the
+// exported fields. Those are written once, at construction, so a caller may read
+// them from any goroutine at any time without racing a renewal. Assignment is
+// the live view.
+func (b *AgentRuntimeBinding) adoptRenewedAssignmentLocked(fresh *AgentAssignment) {
+	b.renewedAssignment = fresh.clone()
+}
+
+// livePlacement is the placement an exchange should actually use: the most
+// recent renewal if one has happened, otherwise the construction-time authority.
+func (b *AgentRuntimeBinding) livePlacement() *AgentAssignment {
+	if b.renewedAssignment != nil {
+		return b.renewedAssignment
 	}
 	return b.authoritativeAssignment
 }

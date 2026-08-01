@@ -1017,7 +1017,7 @@ func provePacketCancellation(ctx context.Context, t *testing.T, httpTrap *lifecy
 	registerCtx, cancelRegister := context.WithCancel(ctx)
 	registerTimer := time.AfterFunc(cancelAfterFirst, cancelRegister)
 	started := time.Now()
-	client, binding, err := qurl.RegisterAgentRuntime(registerCtx, nonSecretFaultCredential, store,
+	client, binding, err := qurl.RegisterAgentRuntime(registerCtx, nonSecretFaultCredential, store, //nolint:staticcheck // deliberately exercises the deprecated wrapper: ConnectAgentRuntime supersedes it, but the compatibility path must keep working.
 		qurl.WithAgentRuntimeHub(hub),
 		qurl.WithAgentRuntimeIdentity(agentID),
 		qurl.WithAgentRuntimeHeadlessEnrollment(),
@@ -1631,7 +1631,7 @@ func provePacketLoss(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTPT
 		Port:               standardNHPUDPPort,
 		ServerPublicKeyB64: base64.StdEncoding.EncodeToString(serverPub),
 	}
-	client, binding, err := qurl.RegisterAgentRuntime(ctx, nonSecretFaultCredential, store,
+	client, binding, err := qurl.RegisterAgentRuntime(ctx, nonSecretFaultCredential, store, //nolint:staticcheck // deliberately exercises the deprecated wrapper: ConnectAgentRuntime supersedes it, but the compatibility path must keep working.
 		qurl.WithAgentRuntimeHub(hub),
 		qurl.WithAgentRuntimeIdentity(agentID),
 		qurl.WithAgentRuntimeHeadlessEnrollment(),
@@ -1836,7 +1836,7 @@ func provePacketReplay(ctx context.Context, t *testing.T, httpTrap *lifecycleHTT
 		Port:               standardNHPUDPPort,
 		ServerPublicKeyB64: base64.StdEncoding.EncodeToString(reflectEP.ServerStaticPub),
 	}
-	client, binding, err := qurl.RegisterAgentRuntime(ctx, nonSecretFaultCredential, store,
+	client, binding, err := qurl.RegisterAgentRuntime(ctx, nonSecretFaultCredential, store, //nolint:staticcheck // deliberately exercises the deprecated wrapper: ConnectAgentRuntime supersedes it, but the compatibility path must keep working.
 		qurl.WithAgentRuntimeHub(hub),
 		qurl.WithAgentRuntimeIdentity(agentID),
 		qurl.WithAgentRuntimeHeadlessEnrollment(),
@@ -2095,7 +2095,7 @@ func provePublicResourceAndKnockResourceIDWireDistinction(ctx context.Context, t
 	}))
 	defer api.Close()
 
-	client, binding, err := qurl.OpenRegisteredAgentRuntime(ctx, store,
+	client, binding, err := qurl.OpenRegisteredAgentRuntime(ctx, store, //nolint:staticcheck // deliberately exercises the deprecated wrapper: ConnectAgentRuntime supersedes it, but the compatibility path must keep working.
 		qurl.WithAgentClientBaseURL(api.URL),
 		qurl.WithAgentClientHTTPClient(api.Client()),
 	)
@@ -2418,7 +2418,7 @@ func hubAssignmentMatrix(t *testing.T, agentID, cellHost string, cellPort int) (
 func seedFaultAgentIdentity(ctx context.Context, t *testing.T, store qurl.AgentStateStore, agentID string, httpTrap *lifecycleHTTPTrap) []byte {
 	t.Helper()
 	_, serverPub := mustNHPKeypair(t)
-	client, binding, err := qurl.RegisterAgentRuntime(ctx, nonSecretFaultCredential, store,
+	client, binding, err := qurl.RegisterAgentRuntime(ctx, nonSecretFaultCredential, store, //nolint:staticcheck // deliberately exercises the deprecated wrapper: ConnectAgentRuntime supersedes it, but the compatibility path must keep working.
 		qurl.WithAgentRuntimeHub(qurl.HubBootstrap{
 			Host:               "identity-seed-proof.nhp.layerv.ai",
 			Port:               standardNHPUDPPort,
@@ -2574,7 +2574,7 @@ func proveAuthenticatedInvalidAssignmentMatrix(ctx context.Context, t *testing.T
 		netip.AddrPortFrom(hubAddress, standardNHPUDPPort).String():  net.JoinHostPort("127.0.0.1", strconv.Itoa(hubExchange.endpoint.Port)),
 		netip.AddrPortFrom(cellAddress, standardNHPUDPPort).String(): net.JoinHostPort("127.0.0.1", strconv.Itoa(cellEP.Port)),
 	}}
-	client, binding, err := qurl.RegisterAgentRuntime(ctx, nonSecretFaultCredential, store,
+	client, binding, err := qurl.RegisterAgentRuntime(ctx, nonSecretFaultCredential, store, //nolint:staticcheck // deliberately exercises the deprecated wrapper: ConnectAgentRuntime supersedes it, but the compatibility path must keep working.
 		qurl.WithAgentRuntimeHub(qurl.HubBootstrap{
 			Host:               hubHost,
 			Port:               standardNHPUDPPort,

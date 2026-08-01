@@ -268,3 +268,45 @@ func readOneTimeCodeFromMailbox(ctx context.Context, challenge qurl.AgentOTPChal
 	return "12345678", nil
 }
 func recoveryCredentialFromOperator() string { return "configured-qurl-agent-recovery-credential" }
+
+func ExampleConnectAgentRuntime() {
+	// One call on every start. It enrolls the first time, resumes an interrupted
+	// enrollment, and afterwards returns the existing registration — renewing an
+	// expired lease and following any relocation without being asked.
+	ctx := context.Background()
+	store, err := qurl.OpenFileAgentState("/var/lib/layerv/qurl/agent-state.json")
+	if err != nil {
+		panic(err)
+	}
+	defer store.Close()
+	// Enrollment defaults to the emailed one-time code, so a runtime that can
+	// reach its mailbox supplies a provider. Later starts never use either.
+	client, binding, err := qurl.ConnectAgentRuntime(ctx, store,
+		qurl.WithAgentRuntimeEnrollmentCredential(enrollmentCredentialFromInstaller()),
+		qurl.WithAgentRuntimeOTPProvider(readOneTimeCodeFromMailbox),
+		qurl.WithAgentRuntimeMetadata("connector-host", "1.0.0"),
+	)
+	if err != nil {
+		panic(err)
+	}
+	defer binding.Destroy()
+	devicePrivateKey := binding.TakeDeviceStaticPrivateKey()
+	defer clear(devicePrivateKey)
+
+	connector, err := client.EnsureConnectorResource(ctx, "prod-dashboard")
+	if err != nil {
+		panic(err)
+	}
+	runID, err := qurl.NewCycleRunID()
+	if err != nil {
+		panic(err)
+	}
+	admission, err := qurl.KnockRegisteredAgent(ctx, binding, devicePrivateKey,
+		connector.Resource.KnockResourceID,
+		qurl.NativeKnockOptions{RunID: runID},
+	)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(admission.ResourceHost)
+}

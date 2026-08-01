@@ -176,7 +176,7 @@ func proveSandboxKMSCredentiallessWarmRestart(
 			t.Fatalf("credentialless restart retained credential source %s", name)
 		}
 	}
-	client, binding, err := qurl.OpenRegisteredAgentRuntime(ctx, store,
+	client, binding, err := qurl.OpenRegisteredAgentRuntime(ctx, store, //nolint:staticcheck // deliberately exercises the deprecated wrapper: ConnectAgentRuntime supersedes it, but the compatibility path must keep working.
 		qurl.WithAgentClientBaseURL("http://127.0.0.1:1"),
 		qurl.WithAgentClientHTTPClient(httpTrap),
 	)

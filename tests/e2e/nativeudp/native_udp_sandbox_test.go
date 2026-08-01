@@ -424,7 +424,7 @@ func TestSandboxNativeUDPLifecycle(t *testing.T) {
 	// dialer wrapper changes no destination or timeout; it records only encrypted
 	// packet metadata for the controller-bound runtime artifact.
 	if !runTypedEvidenceScenario(t, "account_otp_send", "otp.send", []string{"otp_flow_observation"}, func(t *testing.T) {
-		client, binding, err := qurl.RegisterAgentRuntime(ctx, cfg.enrollment, store,
+		client, binding, err := qurl.RegisterAgentRuntime(ctx, cfg.enrollment, store, //nolint:staticcheck // deliberately exercises the deprecated wrapper: ConnectAgentRuntime supersedes it, but the compatibility path must keep working.
 			qurl.WithAgentRuntimeHub(hub),
 			qurl.WithAgentRuntimeIdentity(cfg.agentID),
 			qurl.WithAgentRuntimeMetadata("qurl-go-sandbox", cfg.buildSHA),
@@ -500,7 +500,7 @@ func TestSandboxNativeUDPLifecycle(t *testing.T) {
 	}
 
 	if !runTypedEvidenceScenario(t, "persisted_runtime_warm_open", "state.persisted_runtime_warm_open", []string{"state_observation"}, func(t *testing.T) {
-		client, binding, err := qurl.OpenRegisteredAgentRuntime(ctx, store,
+		client, binding, err := qurl.OpenRegisteredAgentRuntime(ctx, store, //nolint:staticcheck // deliberately exercises the deprecated wrapper: ConnectAgentRuntime supersedes it, but the compatibility path must keep working.
 			qurl.WithAgentClientBaseURL("http://127.0.0.1:1"),
 			qurl.WithAgentClientHTTPClient(httpTrap),
 		)
@@ -579,7 +579,10 @@ func TestSandboxNativeUDPLifecycle(t *testing.T) {
 	var reassigned *qurl.AgentRuntimeBinding
 	var reassignedPrivateKey []byte
 	reassignmentPassed := runTypedEvidenceScenario(t, "cell0_to_cell1_reassignment", "reassignment.cell0_to_cell1", []string{"assignment_transition"}, func(t *testing.T) {
+		// The pinned opt-out is the only way a move still surfaces as an error, and
+		// it must leave the persisted placement untouched.
 		rejectedClient, rejectedBinding, err := qurl.RefreshAgentRuntime(ctx, hub, store,
+			qurl.WithAgentRuntimePinnedAssignment(),
 			qurl.WithAgentClientBaseURL("http://127.0.0.1:1"),
 			qurl.WithAgentClientHTTPClient(httpTrap),
 		)
@@ -588,27 +591,28 @@ func TestSandboxNativeUDPLifecycle(t *testing.T) {
 		}
 		if rejectedClient != nil || rejectedBinding != nil || !errors.Is(err, qurl.ErrAssignmentReassignmentRequired) {
 			t.Fatalf(
-				"implicit reassignment = client_non_nil:%t binding_non_nil:%t err:%v; want explicit-adoption rejection",
+				"pinned reassignment = client_non_nil:%t binding_non_nil:%t err:%v; want pinned rejection",
 				rejectedClient != nil,
 				rejectedBinding != nil,
 				err,
 			)
 		}
-		persistedClient, persistedBinding, err := qurl.OpenRegisteredAgentRuntime(ctx, store,
+		persistedClient, persistedBinding, err := qurl.OpenRegisteredAgentRuntime(ctx, store, //nolint:staticcheck // deliberately exercises the deprecated wrapper: ConnectAgentRuntime supersedes it, but the compatibility path must keep working.
 			qurl.WithAgentClientBaseURL("http://127.0.0.1:1"),
 			qurl.WithAgentClientHTTPClient(httpTrap),
 		)
 		if err != nil || persistedClient == nil || persistedBinding == nil {
-			t.Fatalf("open after rejected implicit reassignment = client:%v binding:%v err:%v", persistedClient, persistedBinding, err)
+			t.Fatalf("open after pinned reassignment rejection = client:%v binding:%v err:%v", persistedClient, persistedBinding, err)
 		}
 		persistedEvidence := assertAssignedCell(t, cfg, persistedBinding, "warm_open")
 		persistedBinding.Destroy()
 		if !sameSandboxAssignmentBinding(persistedEvidence, cellEvidence[1]) {
-			t.Fatalf("rejected implicit reassignment changed persisted placement: persisted=%+v warm=%+v", persistedEvidence, cellEvidence[1])
+			t.Fatalf("pinned reassignment rejection changed persisted placement: persisted=%+v warm=%+v", persistedEvidence, cellEvidence[1])
 		}
 
+		// An ordinary refresh carries no reassignment handling at all: a customer
+		// renewing a lease follows the cell0 -> cell1 move without knowing it moved.
 		client, binding, err := qurl.RefreshAgentRuntime(ctx, hub, store,
-			qurl.WithAgentRuntimeReassignmentAdoption(),
 			qurl.WithAgentClientBaseURL("http://127.0.0.1:1"),
 			qurl.WithAgentClientHTTPClient(httpTrap),
 		)
@@ -716,7 +720,12 @@ func TestSandboxNativeUDPLifecycle(t *testing.T) {
 
 	var leaseRefreshed *qurl.AgentRuntimeBinding
 	leaseRefreshPassed := runTypedEvidenceScenario(t, "expired_lease_refresh", "assignment.lease_expiry_refresh", []string{"assignment_response"}, func(t *testing.T) {
-		client, binding, err := qurl.OpenRegisteredAgentRuntime(ctx, store,
+		// A plain warm open renews an expired lease through the deployment's Hub.
+		// This proof drives a sandbox Hub passed explicitly rather than through
+		// QURL_DEPLOYMENT, so it exercises the offline opt-out here and performs
+		// the renewal itself below; the auto-renew path is covered by unit tests.
+		client, binding, err := qurl.OpenRegisteredAgentRuntime(ctx, store, //nolint:staticcheck // deliberately exercises the deprecated wrapper: ConnectAgentRuntime supersedes it, but the compatibility path must keep working.
+			qurl.WithAgentRuntimeOfflineOpen(),
 			qurl.WithAgentClientBaseURL("http://127.0.0.1:1"),
 			qurl.WithAgentClientHTTPClient(httpTrap),
 		)
@@ -724,11 +733,10 @@ func TestSandboxNativeUDPLifecycle(t *testing.T) {
 			if binding != nil {
 				binding.Destroy()
 			}
-			t.Fatalf("open expired assignment = client_non_nil:%t binding_non_nil:%t err:%v; want ErrAssignmentLeaseExpired", client != nil, binding != nil, err)
+			t.Fatalf("offline open of expired assignment = client_non_nil:%t binding_non_nil:%t err:%v; want ErrAssignmentLeaseExpired", client != nil, binding != nil, err)
 		}
 
 		client, binding, err = qurl.RefreshAgentRuntime(ctx, hub, store,
-			qurl.WithAgentRuntimeReassignmentAdoption(),
 			qurl.WithAgentClientBaseURL("http://127.0.0.1:1"),
 			qurl.WithAgentClientHTTPClient(httpTrap),
 		)
@@ -746,7 +754,7 @@ func TestSandboxNativeUDPLifecycle(t *testing.T) {
 			t.Fatalf("expired-lease refresh lost the exact controller generation: refresh=%+v move=%+v", refreshedEvidence, assignmentReceipt.Move.Result)
 		}
 		assertNoLifecycleHTTP(t, httpTrap)
-		t.Log("EVIDENCE expired persisted assignment rejected before cell I/O and renewed only through authenticated Hub refresh with explicit adoption")
+		t.Log("EVIDENCE expired persisted assignment held offline before cell I/O and renewed only through authenticated Hub refresh")
 	})
 	if leaseRefreshed != nil {
 		leaseRefreshed.Destroy()
@@ -780,7 +788,7 @@ func TestSandboxNativeUDPLifecycle(t *testing.T) {
 	}
 
 	if !runTypedEvidenceScenario(t, "two_cell_completion_refresh_recovery", "recovery.two_cell_completion_refresh", []string{"recovery_transition"}, func(t *testing.T) {
-		client, recovered, err := qurl.OpenRegisteredAgentRuntime(ctx, store,
+		client, recovered, err := qurl.OpenRegisteredAgentRuntime(ctx, store, //nolint:staticcheck // deliberately exercises the deprecated wrapper: ConnectAgentRuntime supersedes it, but the compatibility path must keep working.
 			qurl.WithAgentClientBaseURL("http://127.0.0.1:1"),
 			qurl.WithAgentClientHTTPClient(httpTrap),
 		)
@@ -1429,7 +1437,7 @@ func proveHubDNSFailure(ctx context.Context, t *testing.T, hub qurl.HubBootstrap
 	store := faultStateStore(t)
 	resolver := &failureResolver{}
 	dialer := &redirectingDialer{}
-	client, binding, err := qurl.RegisterAgentRuntime(ctx, nonSecretFaultCredential, store,
+	client, binding, err := qurl.RegisterAgentRuntime(ctx, nonSecretFaultCredential, store, //nolint:staticcheck // deliberately exercises the deprecated wrapper: ConnectAgentRuntime supersedes it, but the compatibility path must keep working.
 		qurl.WithAgentRuntimeHub(hub),
 		qurl.WithAgentRuntimeIdentity(agentID),
 		qurl.WithAgentRuntimeHeadlessEnrollment(),
@@ -1483,7 +1491,7 @@ func provePacketTimeout(ctx context.Context, t *testing.T, hub qurl.HubBootstrap
 	timeoutHub := hub
 	timeoutHub.Host = "timeout-proof.nhp.layerv.ai"
 	started := time.Now()
-	client, binding, err := qurl.RegisterAgentRuntime(ctx, nonSecretFaultCredential, store,
+	client, binding, err := qurl.RegisterAgentRuntime(ctx, nonSecretFaultCredential, store, //nolint:staticcheck // deliberately exercises the deprecated wrapper: ConnectAgentRuntime supersedes it, but the compatibility path must keep working.
 		qurl.WithAgentRuntimeHub(timeoutHub),
 		qurl.WithAgentRuntimeIdentity(agentID),
 		qurl.WithAgentRuntimeHeadlessEnrollment(),

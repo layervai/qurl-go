@@ -24,16 +24,53 @@ import (
 // The setup lock spans every incomplete-state transition. After RAK the SDK
 // durably persists one pending device-secret candidate before sending completion,
 // so a crash or lost LRT reuses the same candidate and cannot mint a second
-// credential. A completed warm open should normally call
-// OpenRegisteredAgentRuntime, which performs no network I/O. Both warm-open
-// paths require a live assignment lease; after expiry, call RefreshAgentRuntime
-// instead of expecting RegisterAgentRuntime to return the completed binding.
+// credential. Re-running this call on an already-registered agent returns that
+// registration rather than enrolling again, renewing an expired lease and
+// following any relocation on the way, so it is safe on every start.
 // enrollmentCredential must be a server-minted encoded token whose total string
 // length, including any prefix, is at least 32 bytes; user-chosen passwords are
 // not valid enrollment credentials. The SDK enforces syntax and this length
 // floor, while the minting authority must guarantee cryptographic randomness.
+//
+// Deprecated: use ConnectAgentRuntime with
+// WithAgentRuntimeEnrollmentCredential. It does the same thing and is the single
+// call a service needs on every start.
 func RegisterAgentRuntime(ctx context.Context, enrollmentCredential string, store AgentStateStore, opts ...AgentRuntimeRegistrationOption) (*Client, *AgentRuntimeBinding, error) {
 	return registerNativeAgentRuntime(ctx, enrollmentCredential, store, opts)
+}
+
+// ConnectAgentRuntime is the single call a service makes on every start. It
+// enrolls when there is nothing registered yet and an enrollment credential is
+// available, resumes an interrupted enrollment, and otherwise returns the
+// existing registration — renewing an expired lease and following any relocation
+// on the way. A process does not need to know which of those happened.
+//
+// Supply the credential with WithAgentRuntimeEnrollmentCredential when this
+// process is the one that enrolls. Omit it when enrollment happens elsewhere,
+// such as an installer: without a credential this call can renew and serve an
+// existing registration but can never create one, which is the property a
+// service that deliberately holds no enrollment secret wants.
+//
+// It supersedes RegisterAgentRuntime and OpenRegisteredAgentRuntime, which
+// remain for compatibility.
+func ConnectAgentRuntime(ctx context.Context, store AgentStateStore, opts ...AgentRuntimeRegistrationOption) (*Client, *AgentRuntimeBinding, error) {
+	return registerNativeAgentRuntime(ctx, "", store, opts)
+}
+
+// WithAgentRuntimeEnrollmentCredential supplies the credential LayerV issued for
+// first-time enrollment. It is used only when nothing is registered yet; a start
+// that finds an existing registration ignores it and sends no credential to the
+// Hub.
+// The credential is deliberately not validated here. A start that finds an
+// existing registration never looks at it, exactly as the positional argument on
+// RegisterAgentRuntime was never looked at, so a service that keeps calling with
+// a credential that has since rotated or expired must keep starting cleanly.
+// Validation happens where the credential is actually used.
+func WithAgentRuntimeEnrollmentCredential(credential string) AgentRuntimeRegistrationOption {
+	return nativeRuntimeOptionFunc(func(c *nativeAgentRuntimeConfig) error {
+		c.enrollCredential = credential
+		return nil
+	})
 }
 
 func validateAgentRuntimeMetadata(state *AgentState, now time.Time, errKind error) error {
@@ -125,6 +162,7 @@ func (p *storeCredentialProvider) Authorize(ctx context.Context, req *http.Reque
 type AgentResourceClientOption interface {
 	ClientOption
 	AgentRuntimeLifecycleOption
+	AgentRuntimeOpenOption
 }
 
 // RegistrationKeyKind is the credential class reported by an authenticated Hub
@@ -187,6 +225,10 @@ func (o agentClientBaseURLOption) applyAgentRuntimeOption(cfg *nativeAgentRuntim
 	return nil
 }
 
+func (o agentClientBaseURLOption) applyAgentRuntimeOpenOption(cfg *agentRuntimeOpenConfig) error {
+	return o.applyClientOption(&cfg.client)
+}
+
 func (agentClientBaseURLOption) isAgentRuntimeRegistrationOption() {}
 func (agentClientBaseURLOption) isAgentRuntimeRefreshOption()      {}
 func (agentClientBaseURLOption) isAgentRuntimeRecoveryOption()     {}
@@ -218,6 +260,10 @@ func (o agentClientHTTPClientOption) applyAgentRuntimeOption(cfg *nativeAgentRun
 	}
 	cfg.httpClient = o.client
 	return nil
+}
+
+func (o agentClientHTTPClientOption) applyAgentRuntimeOpenOption(cfg *agentRuntimeOpenConfig) error {
+	return o.applyClientOption(&cfg.client)
 }
 
 func (agentClientHTTPClientOption) isAgentRuntimeRegistrationOption() {}
