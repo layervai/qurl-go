@@ -4476,3 +4476,36 @@ func TestConnectAgentRuntime_StaleCredentialIgnoredOnceRegistered(t *testing.T) 
 		t.Fatalf("stale-credential start reached the network: Hub/cell=%d/%d", len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot()))
 	}
 }
+
+// A binding outlives the call that produced it, so it must not carry that call's
+// secrets for the life of the process. Renewal sends no credential at all.
+func TestBinding_RenewalStateHoldsNoCredential(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	f := newRuntimeFixture(t,
+		[]runtimeUDPStep{
+			{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: contract.InitialAssignment.Result.BodyJSON},
+		},
+		[]runtimeUDPStep{
+			{requestType: relayknock.TypeRegister, replyType: relayknock.TypeRegisterAck, replyBody: contract.AssignedCellRegistration.Result.BodyJSON},
+			{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: contract.RegistrationCompletion.Result.BodyJSON},
+		},
+	)
+	_, binding, err := ConnectAgentRuntime(context.Background(), f.store,
+		f.options(WithAgentRuntimeEnrollmentCredential(conformance.AgentAssignmentBootstrapCredentialFixture))...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer binding.Destroy()
+	if binding.renewal == nil {
+		t.Fatal("expected a renewal-capable binding")
+	}
+	if got := binding.renewal.cfg.enrollCredential; got != "" {
+		t.Errorf("binding retained the enrollment credential: %q", got)
+	}
+	if got := binding.renewal.cfg.deviceCredential; got != "" {
+		t.Errorf("binding retained the device credential: %q", got)
+	}
+	if binding.renewal.cfg.otpProvider != nil {
+		t.Error("binding retained the OTP provider")
+	}
+}

@@ -467,8 +467,9 @@ func (b *AgentRuntimeBinding) attachRenewal(store AgentStateStore, cfg *nativeAg
 	// A later renewal retains its own store capability instead.
 	renewalCfg.continuityStore = nil
 	// Renewal sends no credential, so the binding must not hold one for the life
-	// of the process just because the lifecycle call had one injected.
+	// of the process just because the lifecycle call was given one.
 	renewalCfg.deviceCredential = ""
+	renewalCfg.enrollCredential = ""
 	renewalCfg.otpProvider = nil
 	b.renewal = &agentRuntimeRenewal{store: baseAgentStateStore(store), hub: *cfg.hub, cfg: &renewalCfg}
 }
