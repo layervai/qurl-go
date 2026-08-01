@@ -1,7 +1,10 @@
 package qurl
 
 import (
+	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -145,5 +148,66 @@ func TestResolveCredentialsUsesConnectorInstallerPath(t *testing.T) {
 	fp, ok := got.(fileCredentialProvider)
 	if !ok || fp.path != want {
 		t.Fatalf("per-user connector token not used: %#v", got)
+	}
+}
+
+// OpenClient is the entry point every issuing customer actually calls, and it
+// had ZERO coverage: the tests above exercise resolveCredentials directly, so
+// nothing proved the public API is wired to it. A regression that broke the
+// wiring — rather than the resolver — would have passed the whole suite.
+
+func TestOpenClientUsesAPIKeyFromEnvironment(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"data":[]}`))
+	}))
+	defer srv.Close()
+
+	t.Setenv(EnvAPIKey, "tok-from-env")
+	t.Setenv(EnvAPIKeyFile, "")
+	t.Setenv("HOME", t.TempDir())
+
+	client, err := OpenClient(
+		WithBaseURL(srv.URL),
+		WithHTTPClient(srv.Client()),
+	)
+	if err != nil {
+		t.Fatalf("OpenClient with QURL_API_KEY set: %v", err)
+	}
+	if client == nil {
+		t.Fatal("OpenClient returned no client and no error")
+	}
+	// The startup check authorizes a synthetic request that is never sent, so
+	// assert the credential reached the request builder rather than the wire.
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL, nil)
+	if err != nil {
+		t.Fatalf("build probe request: %v", err)
+	}
+	if err := client.credentials.Authorize(context.Background(), req); err != nil {
+		t.Fatalf("authorize: %v", err)
+	}
+	if got := req.Header.Get("Authorization"); got != "Bearer tok-from-env" {
+		t.Fatalf("Authorization = %q, want the env credential", got)
+	}
+	_ = gotAuth
+}
+
+// With nothing configured anywhere, OpenClient must fail with an actionable
+// error rather than succeeding and failing later on the first real call.
+func TestOpenClientWithNoCredentialFailsActionably(t *testing.T) {
+	t.Setenv(EnvAPIKey, "")
+	t.Setenv(EnvAPIKeyFile, "")
+	t.Setenv("HOME", t.TempDir())
+
+	// Point the machine-wide path somewhere empty so the test never depends on
+	// whether the host running it happens to have a real credential installed.
+	_, err := OpenClient(WithIssuerStatePath(filepath.Join(t.TempDir(), "absent.json")))
+	if err == nil {
+		t.Fatal("OpenClient succeeded with no credential available")
+	}
+	if !errors.Is(err, ErrCredentialStateNotFound) && !errors.Is(err, ErrInvalidClientConfig) {
+		t.Fatalf("error = %v; want a named credential error a customer can act on", err)
 	}
 }
