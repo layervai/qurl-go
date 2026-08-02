@@ -29,6 +29,9 @@ type nativeUDPProofFixture struct {
 func TestNativeUDPSandboxWorkflowIsAttendedStrictAndEvidenceBearing(t *testing.T) {
 	workflow := readWorkflow(t, "native-udp-sandbox.yml")
 
+	// The evidence download crosses a repository boundary, so its pin is
+	// resolved rather than restated: absent, repeated, or mutable all fail.
+	requirePin(t, workflow, "actions/download-artifact")
 	requireContains(t, workflow,
 		"run-name: UDP proof [corr:${{ inputs.dispatch_correlation_id }}]",
 		"workflow_dispatch:",
@@ -97,7 +100,6 @@ func TestNativeUDPSandboxWorkflowIsAttendedStrictAndEvidenceBearing(t *testing.T
 		"pre_removal|post_removal",
 		"Verify exact proof inputs",
 		"Download authenticated deployment-producer evidence",
-		"actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1",
 		"artifact-ids: ${{ inputs.deployment_artifact_id }}",
 		"repository: layervai/nhp",
 		"run-id: ${{ inputs.deployment_producer_run_id }}",
