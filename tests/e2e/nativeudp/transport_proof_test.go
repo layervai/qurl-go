@@ -110,8 +110,8 @@ type transportProofCheckpoint struct {
 	CaptureSHA256        string   `json:"capture_sha256"`
 	CaptureTargetsSHA256 string   `json:"capture_targets_sha256"`
 	CapturedPacketCount  int      `json:"captured_packet_count"`
-	UDP62206Outbound     int      `json:"udp_62206_outbound"`
-	UDP62206Inbound      int      `json:"udp_62206_inbound"`
+	UDP443Outbound       int      `json:"udp_443_outbound"`
+	UDP443Inbound        int      `json:"udp_443_inbound"`
 	HTTPTrapCalls        int64    `json:"http_trap_calls"`
 	ObservedCellIDs      []string `json:"observed_cell_ids"`
 	NHPUDPLifecycleOK    bool     `json:"nhp_udp_lifecycle_success"`
@@ -200,8 +200,8 @@ func completeTransportProof(
 		CaptureSHA256:        observation.RawSHA256,
 		CaptureTargetsSHA256: observation.TargetsSHA256,
 		CapturedPacketCount:  observation.PacketCount,
-		UDP62206Outbound:     observation.UDPOutbound,
-		UDP62206Inbound:      observation.UDPInbound,
+		UDP443Outbound:       observation.UDPOutbound,
+		UDP443Inbound:        observation.UDPInbound,
 		HTTPTrapCalls:        calls,
 		ObservedCellIDs:      cellIDs,
 		NHPUDPLifecycleOK:    true,
@@ -259,7 +259,7 @@ func completeTransportProof(
 		t.Fatal("transport counter observation is outside the bounded post-capture interval")
 	}
 	t.Logf(
-		"EVIDENCE transport_capture_sha256=%s packets=%d udp_62206_outbound=%d udp_62206_inbound=%d qurl_service_legacy_routes=0 relay_routes=0",
+		"EVIDENCE transport_capture_sha256=%s packets=%d udp_443_outbound=%d udp_443_inbound=%d qurl_service_legacy_routes=0 relay_routes=0",
 		observation.RawSHA256,
 		observation.PacketCount,
 		observation.UDPOutbound,
@@ -526,8 +526,8 @@ func waitForTransportReceipt(
 func TestValidateTransportCaptureRejectsHTTPAndWrongUDPPort(t *testing.T) {
 	allowed := map[netip.Addr]struct{}{netip.MustParseAddr("203.0.113.10"): {}}
 	valid := []byte(
-		"1.000000 eth0 Out IP 10.0.0.5.49152 > 203.0.113.10.62206: UDP, length 100\n" +
-			"1.100000 eth0 In IP 203.0.113.10.62206 > 10.0.0.5.49152: UDP, length 120\n",
+		"1.000000 eth0 Out IP 10.0.0.5.49152 > 203.0.113.10.443: UDP, length 100\n" +
+			"1.100000 eth0 In IP 203.0.113.10.443 > 10.0.0.5.49152: UDP, length 120\n",
 	)
 	if packets, outbound, inbound, err := validateTransportCapture(valid, allowed); err != nil ||
 		packets != 2 || outbound != 1 || inbound != 1 {
@@ -535,8 +535,8 @@ func TestValidateTransportCaptureRejectsHTTPAndWrongUDPPort(t *testing.T) {
 	}
 	for name, raw := range map[string][]byte{
 		"tcp":        []byte("1.000000 eth0 Out IP 10.0.0.5.49152 > 203.0.113.10.443: Flags [S], length 0\n"),
-		"wrong port": []byte("1.000000 eth0 Out IP 10.0.0.5.49152 > 203.0.113.10.53: UDP, length 10\n"),
-		"foreign":    []byte("1.000000 eth0 Out IP 10.0.0.5.49152 > 198.51.100.10.62206: UDP, length 10\n"),
+		"wrong port": []byte("1.000000 eth0 Out IP 10.0.0.5.49152 > 203.0.113.10.62206: UDP, length 10\n"),
+		"foreign":    []byte("1.000000 eth0 Out IP 10.0.0.5.49152 > 198.51.100.10.443: UDP, length 10\n"),
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, _, _, err := validateTransportCapture(raw, allowed); err == nil {

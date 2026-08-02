@@ -1936,12 +1936,12 @@ func deploymentManifestBytes(t *testing.T, phase, qurlGoSHA string) []byte {
 		},
 		"hub": map[string]any{
 			"host":                     "hub.nhp.layerv.ai",
-			"port":                     62206,
+			"port":                     443,
 			"server_public_key_sha256": sha256Hex(nativeUDPProofHubKey()),
 		},
 		"cells": []any{
-			map[string]any{"cell_id": "cell0", "host": "cell0.nhp.layerv.ai", "port": 62206, "server_public_key_sha256": sha256Hex(bytes.Repeat([]byte{0x11}, 32))},
-			map[string]any{"cell_id": "cell1", "host": "cell1.nhp.layerv.ai", "port": 62206, "server_public_key_sha256": sha256Hex(bytes.Repeat([]byte{0x22}, 32))},
+			map[string]any{"cell_id": "cell0", "host": "cell0.nhp.layerv.ai", "port": 443, "server_public_key_sha256": sha256Hex(bytes.Repeat([]byte{0x11}, 32))},
+			map[string]any{"cell_id": "cell1", "host": "cell1.nhp.layerv.ai", "port": 443, "server_public_key_sha256": sha256Hex(bytes.Repeat([]byte{0x22}, 32))},
 		},
 	}
 	encoded, err := json.Marshal(manifest)
@@ -2092,7 +2092,7 @@ func proofProvenanceValue(buildSHA, agentID, deploymentManifestSHA, typedEvidenc
 		"typed_evidence_contract_sha256": typedEvidenceContractSHA,
 		"hub": map[string]any{
 			"host":                     "hub.nhp.layerv.ai",
-			"port":                     62206,
+			"port":                     443,
 			"server_public_key_sha256": sha256Hex(nativeUDPProofHubKey()),
 		},
 		"assigned_cells": []any{
@@ -2112,7 +2112,7 @@ func proofCell(phase, cellID, host, key string, generation, revision int) map[st
 		"endpoint_revision":        revision,
 		"lease_expires_at":         "2026-07-22T12:00:00Z",
 		"host":                     host,
-		"port":                     62206,
+		"port":                     443,
 		"server_public_key_sha256": key,
 	}
 }

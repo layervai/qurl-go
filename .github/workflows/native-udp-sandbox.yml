@@ -323,7 +323,7 @@ jobs:
                 all(.[]; type == "string" and test("^sha256:[0-9a-f]{64}$"))) and
               (.hub | type == "object" and
                 (keys | sort) == ["host", "port", "server_public_key_sha256"] and
-                (.host | valid_host) and .port == 62206 and
+                (.host | valid_host) and .port == 443 and
                 (.server_public_key_sha256 | test("^[0-9a-f]{64}$"))) and
               (.cells | type == "array" and length == 2 and
                 [.[].cell_id] == ["cell0", "cell1"] and
@@ -335,7 +335,7 @@ jobs:
                 all(.[];
                   type == "object" and
                   (keys | sort) == ["cell_id", "host", "port", "server_public_key_sha256"] and
-                  (.cell_id | valid_cell_id) and (.host | valid_host) and .port == 62206 and
+                  (.cell_id | valid_cell_id) and (.host | valid_host) and .port == 443 and
                   (.server_public_key_sha256 | test("^[0-9a-f]{64}$"))))
             ' "${manifest}" >/dev/null
           }
@@ -359,7 +359,7 @@ jobs:
                 (.key_arn | test("^arn:aws:kms:us-east-2:[0-9]{12}:key/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"))) and
               (.hub | type == "object" and
                 (keys | sort) == ["host", "port", "server_public_key_b64"] and
-                (.host | valid_host) and .port == 62206 and
+                (.host | valid_host) and .port == 443 and
                 (.server_public_key_b64 | valid_key) and
                 .host == $deployed.hub.host and .port == $deployed.hub.port) and
               (.cells | type == "array" and length == 2 and
@@ -367,7 +367,7 @@ jobs:
                 all(.[];
                   type == "object" and
                   (keys | sort) == ["cell_id", "host", "port", "server_public_key_b64"] and
-                  (.host | valid_host) and .port == 62206 and
+                  (.host | valid_host) and .port == 443 and
                   (.server_public_key_b64 | valid_key)) and
                 all(.[];
                   . as $runtime_cell |

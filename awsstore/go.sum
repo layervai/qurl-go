@@ -32,8 +32,8 @@ github.com/aws/aws-sdk-go-v2/service/sts v1.41.2 h1:a5UTtD4mHBU3t0o6aHQZFJTNKVfx
 github.com/aws/aws-sdk-go-v2/service/sts v1.41.2/go.mod h1:6TxbXoDSgBQ225Qd8Q+MbxUxUh6TtNKwbRt/EPS9xso=
 github.com/aws/smithy-go v1.27.5 h1:d1ro7KpYOYwP6m73YFa+Kc/A130VsAdX68SpsJwARMM=
 github.com/aws/smithy-go v1.27.5/go.mod h1:YE2RhdIuDbA5E5bTdciG9KrW3+TiEONeUWCqxX9i1Fc=
-github.com/layervai/qurl-conformance v0.9.0 h1:UWLlKwMJS+h8xXlV1XebZkJE6lFNYrFXprM7+Sl/GS8=
-github.com/layervai/qurl-conformance v0.9.0/go.mod h1:oSr+quGs6eVCB7Zs63L9/Y6+s4W0XpLQep+j+XESndY=
+github.com/layervai/qurl-conformance v0.11.0 h1:BWNzeQj0vNAwWOnOBGABuVA4jrs01tW7fHBAKC7/bsI=
+github.com/layervai/qurl-conformance v0.11.0/go.mod h1:oSr+quGs6eVCB7Zs63L9/Y6+s4W0XpLQep+j+XESndY=
 golang.org/x/crypto v0.54.0 h1:YLIA59K4fiNzHzjnZt2tUJQjQtUWfWbeHBqKtk3eScw=
 golang.org/x/crypto v0.54.0/go.mod h1:KWL8ny2AZdGR2cWmzeHrp2azQPGogOv+HeQaVEXC2dk=
 golang.org/x/sys v0.47.0 h1:o7XGOvZQCADBQQ4Y7VNq2dRWQR7JmOUW8Kxx4ZsNgWs=

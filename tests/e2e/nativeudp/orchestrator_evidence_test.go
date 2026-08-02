@@ -1075,7 +1075,7 @@ func TestValidateOrchestratorProofEvidenceFailsClosed(t *testing.T) {
 				WorkloadObservationsSHA256: strings.Repeat("4", 64),
 				Hub: orchestratorTopologyEndpoint{
 					Host:                  "hub.nhp.layerv.ai",
-					Port:                  62206,
+					Port:                  443,
 					ServerPublicKeySHA256: strings.Repeat("5", 64),
 				},
 				Cells: []orchestratorTopologyCell{
@@ -1083,7 +1083,7 @@ func TestValidateOrchestratorProofEvidenceFailsClosed(t *testing.T) {
 						CellID: "cell0",
 						orchestratorTopologyEndpoint: orchestratorTopologyEndpoint{
 							Host:                  "cell0.nhp.layerv.ai",
-							Port:                  62206,
+							Port:                  443,
 							ServerPublicKeySHA256: strings.Repeat("6", 64),
 						},
 					},
@@ -1091,7 +1091,7 @@ func TestValidateOrchestratorProofEvidenceFailsClosed(t *testing.T) {
 						CellID: "cell1",
 						orchestratorTopologyEndpoint: orchestratorTopologyEndpoint{
 							Host:                  "cell1.nhp.layerv.ai",
-							Port:                  62206,
+							Port:                  443,
 							ServerPublicKeySHA256: strings.Repeat("7", 64),
 						},
 					},
