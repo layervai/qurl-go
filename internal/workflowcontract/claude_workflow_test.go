@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	claudeAction   = "anthropics/claude-code-action@fa7e2f0a29a126f0b81cdcf360561b36e44cf608 # v1.0.180"
+	claudeAction   = "anthropics/claude-code-action@be7b93b1907a4abad570368f3c74b6fe3807510b # v1.0.183"
 	checkoutAction = "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0"
 )
 
