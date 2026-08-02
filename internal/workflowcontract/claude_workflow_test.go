@@ -370,7 +370,7 @@ func TestTerminalVerifiersRejectUnsafeCurrentState(t *testing.T) {
 
 func TestExistingLintContextRunsActionlint(t *testing.T) {
 	workflow := readWorkflow(t, "ci.yml")
-	requirePin(t, workflow, "reviewdog/action-actionlint")
+	requireUniquePin(t, workflow, "reviewdog/action-actionlint")
 	requireContains(t, workflow,
 		"name: golangci-lint",
 		"name: actionlint",

@@ -82,16 +82,25 @@ func workflowPins(contents string) []workflowPin {
 	return pins
 }
 
-// uniquePin returns the immutable pin that every reference to action in
-// contents shares. Two references to the same action at different SHAs is the
-// drift a half-applied bump leaves behind, so it fails rather than picking one.
-func uniquePin(contents, action string) (workflowPin, error) {
+// pinsFor selects the `uses:` references naming action. Every count in this
+// file goes through it: a raw substring count would also match the action
+// named inside a prompt or a comment, and the Claude workflows carry prompts
+// long enough for that to eventually happen.
+func pinsFor(contents, action string) []workflowPin {
 	var found []workflowPin
 	for _, pin := range workflowPins(contents) {
 		if pin.action() == action {
 			found = append(found, pin)
 		}
 	}
+	return found
+}
+
+// uniquePin returns the immutable pin that every reference to action in
+// contents shares. Two references to the same action at different SHAs is the
+// drift a half-applied bump leaves behind, so it fails rather than picking one.
+func uniquePin(contents, action string) (workflowPin, error) {
+	found := pinsFor(contents, action)
 	if len(found) == 0 {
 		return workflowPin{}, fmt.Errorf("%s: no uses: reference", action)
 	}
@@ -108,21 +117,24 @@ func uniquePin(contents, action string) (workflowPin, error) {
 	return found[0], nil
 }
 
-// solePin is uniquePin plus the requirement that action is used exactly once,
-// for the ordered single-step assertions in the Claude workflow contract.
+// solePin is uniquePin plus the requirement that action runs as exactly one
+// step. It backs the ordering assertions, which need a unique anchor, and the
+// steps where a second invocation would itself deserve review: another
+// checkout inside a workflow that deliberately fetches one snapshot with
+// persist-credentials disabled, or a second Claude run past the trust gate.
 func solePin(contents, action string) (workflowPin, error) {
 	pin, err := uniquePin(contents, action)
 	if err != nil {
 		return workflowPin{}, err
 	}
-	if count := strings.Count(contents, action+"@"); count != 1 {
+	if count := len(pinsFor(contents, action)); count != 1 {
 		return workflowPin{}, fmt.Errorf("%s: used %d times, want exactly once", action, count)
 	}
 	return pin, nil
 }
 
-// requirePin resolves the single immutable pin for action and returns its
-// source text, suitable for the ordering assertions. Resolving is itself the
+// requirePin resolves the sole immutable pin for action and returns its source
+// text, suitable for the ordering assertions. Resolving is itself the
 // assertion: an absent, duplicated, or mutable reference fails here.
 func requirePin(t *testing.T, contents, action string) string {
 	t.Helper()
@@ -131,6 +143,16 @@ func requirePin(t *testing.T, contents, action string) string {
 		t.Fatalf("resolve pin: %v", err)
 	}
 	return pin.text
+}
+
+// requireUniquePin asserts action is present and immutably pinned without
+// constraining how many steps use it, for the pins that replaced a bare
+// presence check and carry no ordering or single-step meaning.
+func requireUniquePin(t *testing.T, contents, action string) {
+	t.Helper()
+	if _, err := uniquePin(contents, action); err != nil {
+		t.Fatalf("resolve pin: %v", err)
+	}
 }
 
 // TestEveryWorkflowActionIsImmutablyPinned holds the property the removed
@@ -276,6 +298,23 @@ func TestPinResolutionFailsClosed(t *testing.T) {
 		}
 		if _, err := solePin(workflow, claudeAction); err == nil {
 			t.Fatal("solePin on duplicates succeeded, want error")
+		}
+	})
+
+	t.Run("action named in a prompt is not a use", func(t *testing.T) {
+		// The Claude workflows pass multi-page prompts. Counting raw
+		// occurrences instead of parsed uses: lines would let prose about an
+		// action fail the workflow that merely describes it.
+		workflow := "      - uses: anthropics/claude-code-action@" + sha + " # v1.0.183\n" +
+			"        with:\n" +
+			"          prompt: |\n" +
+			"            Do not add anthropics/claude-code-action@" + other + " to any workflow.\n"
+		pin, err := solePin(workflow, claudeAction)
+		if err != nil {
+			t.Fatalf("solePin = %v, want the prompt mention ignored", err)
+		}
+		if !strings.Contains(pin.reference, sha) {
+			t.Fatalf("pin reference = %q, want the uses: pin %q", pin.reference, sha)
 		}
 	})
 

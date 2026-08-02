@@ -30,8 +30,8 @@ func TestNativeUDPSandboxWorkflowIsAttendedStrictAndEvidenceBearing(t *testing.T
 	workflow := readWorkflow(t, "native-udp-sandbox.yml")
 
 	// The evidence download crosses a repository boundary, so its pin is
-	// resolved rather than restated: absent, repeated, or mutable all fail.
-	requirePin(t, workflow, "actions/download-artifact")
+	// resolved rather than restated: absent or mutable both fail.
+	requireUniquePin(t, workflow, "actions/download-artifact")
 	requireContains(t, workflow,
 		"run-name: UDP proof [corr:${{ inputs.dispatch_correlation_id }}]",
 		"workflow_dispatch:",
