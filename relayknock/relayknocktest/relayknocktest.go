@@ -60,6 +60,27 @@ func BuildReplyWithFlags(headerType int, flags uint16, inp *relayknock.KnockInpu
 	}
 }
 
+// BuildUnknownReplyForTest builds an authenticated server-originated packet
+// whose header type is deliberately outside every NHP message type qurl-go
+// speaks. It exists only in this responder/test-support package so fail-closed
+// client tests can distinguish an authenticated unknown type from random
+// unauthenticated bytes without adding an unknown-message builder to the
+// production initiator API.
+func BuildUnknownReplyForTest(headerType int, inp *relayknock.KnockInputs) ([]byte, error) {
+	if headerType < 0 || headerType > 0xffff {
+		return nil, fmt.Errorf("unknown reply header type %d is outside the 16-bit wire field", headerType)
+	}
+	switch headerType {
+	case relayknock.TypeKnock, relayknock.TypeACK, relayknock.TypeListRequest,
+		relayknock.TypeListResult, relayknock.TypeCookieChallenge,
+		relayknock.TypeReknock, relayknock.TypeOTP, relayknock.TypeRegister,
+		relayknock.TypeRegisterAck, relayknock.TypeExit:
+		return nil, fmt.Errorf("header type %d is a known NHP message type", headerType)
+	default:
+		return nhpwire.BuildMessage(headerType, inp.WireInputs())
+	}
+}
+
 // OpenInitiatorMessage decrypts and authenticates an initiator packet in the
 // responder role. It accepts NHP_KNK, NHP_LST, NHP_OTP, NHP_REG, and NHP_EXT:
 // the open a server (or test double) performs on an agent packet. It mirrors

@@ -123,20 +123,22 @@ func ExampleNewClient() {
 }
 
 func ExampleRegisterAgentRuntime() {
-	// The installer supplies one pinned Hub trust root. Assignment, optional OTP,
-	// REG/RAK, and completion then travel only over authenticated NHP UDP.
-	// The default policy accepts pre-issued/headless key kinds, including the
-	// durable qurl:agent kind, and rejects account enrollment.
+	// Assignment, OTP, REG/RAK, and completion travel only over authenticated
+	// NHP UDP. Enrollment defaults to a one-time code emailed to the credential's
+	// address: whatever reads that mailbox — a service account, an agent with its
+	// own address, an operator — returns the code through the provider.
 	ctx := context.Background()
-	store := qurl.FileAgentState("/var/lib/layerv/qurl/agent-state.json")
-	hub := qurl.HubBootstrap{
-		Host:               "hub.nhp.layerv.ai",
-		Port:               62206,
-		ServerPublicKeyB64: configuredHubPublicKeyB64(),
+	store, err := qurl.OpenFileAgentState("/var/lib/layerv/qurl/agent-state.json")
+	if err != nil {
+		panic(err)
 	}
+	defer store.Close()
+	// No hub wiring: the SDK ships the trust root for the deployment it was
+	// built to talk to. WithAgentRuntimeHub still overrides it when an operator
+	// runs their own.
 	client, binding, err := qurl.RegisterAgentRuntime(ctx, enrollmentCredentialFromInstaller(), store,
-		qurl.WithAgentRuntimeHub(hub),
 		qurl.WithAgentRuntimeMetadata("connector-host", "1.0.0"),
+		qurl.WithAgentRuntimeOTPProvider(readOneTimeCodeFromMailbox),
 	)
 	if err != nil {
 		panic(err)
@@ -163,6 +165,52 @@ func ExampleRegisterAgentRuntime() {
 	fmt.Println(admission.ResourceHost)
 }
 
+// ExampleWithAgentRuntimeHeadlessEnrollment shows the escape hatch: a runtime
+// with no mailbox at all, enrolling with a pre-issued credential and no code.
+// Prefer the default OTP path whenever some address can receive the code.
+func ExampleWithAgentRuntimeHeadlessEnrollment() {
+	ctx := context.Background()
+	store, err := qurl.OpenFileAgentState("/var/lib/layerv/qurl/agent-state.json")
+	if err != nil {
+		panic(err)
+	}
+	defer store.Close()
+	client, binding, err := qurl.RegisterAgentRuntime(ctx, enrollmentCredentialFromInstaller(), store,
+		qurl.WithAgentRuntimeMetadata("connector-host", "1.0.0"),
+		qurl.WithAgentRuntimeHeadlessEnrollment(),
+	)
+	if err != nil {
+		panic(err)
+	}
+	defer binding.Destroy()
+	_, _ = client, binding
+}
+
+func ExampleRecoverAgentRuntime() {
+	// Recovery is an explicit operator action after the current device API key
+	// has been deliberately revoked. Both lifecycle legs use authenticated NHP
+	// UDP; the returned Client alone uses HTTPS for later resource CRUD.
+	ctx := context.Background()
+	store, err := qurl.OpenFileAgentState("/var/lib/layerv/qurl/agent-state.json")
+	if err != nil {
+		panic(err)
+	}
+	defer store.Close()
+	hub := qurl.HubBootstrap{
+		Host:               "hub.nhp.layerv.ai",
+		Port:               443,
+		ServerPublicKeyB64: configuredHubPublicKeyB64(),
+	}
+	client, binding, err := qurl.RecoverAgentRuntime(ctx, recoveryCredentialFromOperator(), store,
+		qurl.WithAgentRuntimeRecoveryHub(hub),
+	)
+	if err != nil {
+		panic(err)
+	}
+	defer binding.Destroy()
+	_, _ = client, binding
+}
+
 func ExampleNewSealedFileAgentState() {
 	// Production wrappers call a KMS/HSM/attested release API and authenticate
 	// every binding field as provider encryption context. They wrap only the
@@ -176,11 +224,13 @@ func ExampleNewSealedFileAgentState() {
 	if err != nil {
 		panic(err)
 	}
+	defer store.Close()
 	_, binding, _ := qurl.RegisterAgentRuntime(context.Background(), "lv_enrollment_AAECAwQFBgcICQoLDA0ODxAREhMUFRYX", store,
 		qurl.WithAgentRuntimeHub(qurl.HubBootstrap{
-			Host: "hub.nhp.layerv.ai", Port: 62206,
+			Host: "hub.nhp.layerv.ai", Port: 443,
 			ServerPublicKeyB64: configuredHubPublicKeyB64(),
 		}),
+		qurl.WithAgentRuntimeOTPProvider(readOneTimeCodeFromMailbox),
 	)
 	if binding != nil {
 		binding.Destroy()
@@ -210,3 +260,53 @@ func callKMSUnwrap(qurl.WrappedAgentStateKey, qurl.AgentStateKeyBinding) ([]byte
 
 func configuredHubPublicKeyB64() string         { return "configured-padded-base64-x25519-key" }
 func enrollmentCredentialFromInstaller() string { return "configured-enrollment-credential" }
+
+// readOneTimeCodeFromMailbox stands in for whatever reads the mailbox the code
+// was sent to. The challenge carries only bounded, non-secret context.
+func readOneTimeCodeFromMailbox(ctx context.Context, challenge qurl.AgentOTPChallenge) (string, error) {
+	_, _ = ctx, challenge
+	return "12345678", nil
+}
+func recoveryCredentialFromOperator() string { return "configured-qurl-agent-recovery-credential" }
+
+func ExampleConnectAgentRuntime() {
+	// One call on every start. It enrolls the first time, resumes an interrupted
+	// enrollment, and afterwards returns the existing registration — renewing an
+	// expired lease and following any relocation without being asked.
+	ctx := context.Background()
+	store, err := qurl.OpenFileAgentState("/var/lib/layerv/qurl/agent-state.json")
+	if err != nil {
+		panic(err)
+	}
+	defer store.Close()
+	// Enrollment defaults to the emailed one-time code, so a runtime that can
+	// reach its mailbox supplies a provider. Later starts never use either.
+	client, binding, err := qurl.ConnectAgentRuntime(ctx, store,
+		qurl.WithAgentRuntimeEnrollmentCredential(enrollmentCredentialFromInstaller()),
+		qurl.WithAgentRuntimeOTPProvider(readOneTimeCodeFromMailbox),
+		qurl.WithAgentRuntimeMetadata("connector-host", "1.0.0"),
+	)
+	if err != nil {
+		panic(err)
+	}
+	defer binding.Destroy()
+	devicePrivateKey := binding.TakeDeviceStaticPrivateKey()
+	defer clear(devicePrivateKey)
+
+	connector, err := client.EnsureConnectorResource(ctx, "prod-dashboard")
+	if err != nil {
+		panic(err)
+	}
+	runID, err := qurl.NewCycleRunID()
+	if err != nil {
+		panic(err)
+	}
+	admission, err := qurl.KnockRegisteredAgent(ctx, binding, devicePrivateKey,
+		connector.Resource.KnockResourceID,
+		qurl.NativeKnockOptions{RunID: runID},
+	)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(admission.ResourceHost)
+}

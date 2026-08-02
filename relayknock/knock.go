@@ -27,6 +27,7 @@ type KnockInputs struct {
 	Preamble         uint32 // HeaderCommon obfuscation preamble
 	Body             []byte // serialized, uncompressed application knock body
 	Cookie           []byte // exact 32-byte COK cookie for NHP_RKN; empty otherwise
+	Compress         bool   // zlib-compress Body and set NHP_FLAG_COMPRESS
 }
 
 // WireInputs converts the public KnockInputs into the nhpwire codec's Inputs. It
@@ -46,6 +47,7 @@ func (k *KnockInputs) WireInputs() *nhpwire.Inputs {
 		Preamble:         k.Preamble,
 		Body:             k.Body,
 		Cookie:           k.Cookie,
+		Compress:         k.Compress,
 	}
 }
 
@@ -65,10 +67,9 @@ func BuildKnock(inp *KnockInputs) ([]byte, error) {
 //
 // BuildMessage is for callers that carry the packet themselves — deterministic
 // construction (golden vectors, conformance tooling) or a custom transport.
-// Typical relay callers use Knock, Exchange, or Send, which mint the per-message
-// randomness and speak the relay HTTP contract. Those HTTP helpers deliberately
-// do not transport TypeListRequest; native assignment carries it directly over
-// UDP.
+// Typical browser-relay callers use Knock, which mints per-message randomness
+// and speaks the HTTP NHP_KNK contract. Native agent lifecycle callers use
+// relayknock/nativeudp.
 func BuildMessage(headerType int, inp *KnockInputs) ([]byte, error) {
 	switch headerType {
 	case TypeKnock, TypeListRequest, TypeReknock, TypeOTP, TypeRegister, TypeExit:
@@ -79,15 +80,15 @@ func BuildMessage(headerType int, inp *KnockInputs) ([]byte, error) {
 }
 
 // Exported NHP initiator header-type values — the message types an agent can
-// originate with BuildMessage. The HTTP relay helpers intentionally support a
-// narrower transport subset (Exchange: KNK/REG; Send: OTP). Every other type is
-// server-originated and is rejected by the exported builders.
+// originate with BuildMessage. The typed HTTP Knock path intentionally supports
+// only NHP_KNK; nativeudp uses the remaining agent lifecycle types. Every other
+// type is server-originated and rejected by the exported builders.
 //
 // Adding a message type deliberately considers three sites, which encode three
 // DIFFERENT predicates and are kept inline rather than force-unified: this block
-// plus BuildMessage's initiator set (what an agent may build), Exchange's HTTP
-// round-trip set (what that transport carries), and replyTypeAllowed's HTTP
-// request→reply pairing. A buildable type need not belong to the HTTP subset.
+// plus BuildMessage's initiator set (what an agent may build), Knock's fixed HTTP
+// profile, and nativeudp's request→reply pairing. A buildable type need not
+// belong to the typed HTTP path.
 const (
 	// TypeKnock is NHP_KNK: the initial knock requesting admission; the server
 	// answers with an NHP_ACK (or an NHP_COK under overload).
@@ -103,14 +104,14 @@ const (
 	TypeReknock = nhpwire.TypeRKN
 	// TypeOTP is NHP_OTP: the one-way registration-bootstrap message (the NHP
 	// spec's agent one-time-password request). The server does not reply to OTP
-	// messages; a conforming relay acknowledges dispatch at the HTTP layer
-	// instead (see Send).
+	// messages; nativeudp.SendOTP dispatches it directly to the assigned cell.
 	TypeOTP = nhpwire.TypeOTP
 	// TypeRegister is NHP_REG: the agent registration message; the server
 	// answers with an NHP_RAK.
 	TypeRegister = nhpwire.TypeREG
-	// TypeExit is NHP_EXT: a clean exit for an admitted native UDP session. The
-	// server answers it with an NHP_ACK and never an NHP_COK.
+	// TypeExit is NHP_EXT: a clean exit for an admitted session. Native UDP carries
+	// it directly; browser relay callers can carry a built packet with RelayPost.
+	// The server answers it with an NHP_ACK and never an NHP_COK.
 	TypeExit = nhpwire.TypeEXT
 )
 
@@ -186,7 +187,7 @@ func (r *Reply) IsRegisterAck() bool { return r.Type == nhpwire.TypeRAK }
 // may receive COK is transport/profile policy. In particular, generic NHP_LST
 // accepts only NHP_LRT. The native Hub-assignment transport has
 // a dedicated, bounded LST/COK/proof-LST profile above this shared decrypt gate.
-// Exchange performs the corresponding checks for its HTTP KNK/REG subset.
+// Knock performs the corresponding checks for its HTTP KNK profile.
 func DecryptReply(devicePriv, expectedServerStaticPub, packet []byte) (*Reply, error) {
 	msg, err := nhpwire.DecryptReplyMessage(devicePriv, expectedServerStaticPub, packet)
 	if err != nil {

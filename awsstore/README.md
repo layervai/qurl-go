@@ -17,6 +17,7 @@ go get github.com/layervai/qurl-go/awsstore@latest
 
 | Store | Backing | Reach for it when |
 | --- | --- | --- |
+| `qurl.SealedFileAgentStateStore` + `KMSAgentStateKeyWrapper` | Local AES-256-GCM envelope; DEK wrapped directly by KMS | You need local crash-safe state without durably persisting the agent private key or device credential in plaintext. |
 | `SecretsManagerStore` | Secrets Manager `SecretString` | The agent identity is a first-class secret you want rotation hooks, resource policies, and CloudTrail **data events** on. |
 | `ParameterStore` | SSM Parameter Store `SecureString` | You want a lighter-weight, lower-cost option that is still KMS-encrypted at rest. |
 | `qurl.FileAgentState` (root module) | Local file, `0600` | Single host, or **shared storage via EFS** — see the EFS recipe below. |
@@ -25,6 +26,41 @@ go get github.com/layervai/qurl-go/awsstore@latest
 > `DeviceAPIKey`, the bearer token the returned `Client` authorizes with. Encrypt
 > it with a customer-managed KMS key (`WithKMSKeyID`), scope IAM to the single
 > resource, and keep it out of logs.
+
+## KMS-sealed local file
+
+```go
+cfg, err := config.LoadDefaultConfig(ctx)
+if err != nil {
+	return err
+}
+wrapper, err := awsstore.NewKMSAgentStateKeyWrapper(
+	kms.NewFromConfig(cfg),
+	"alias/qurl-agent-state",
+)
+if err != nil {
+	return err
+}
+store, err := qurl.NewSealedFileAgentState(
+	"/var/lib/layerv/qurl/agent-state.sealed.json",
+	"aws-kms",
+	wrapper,
+	qurl.WithExpectedSealedAgentID("connector-prod-1"),
+)
+```
+
+The root SDK generates a fresh 32-byte AES-256 data key for each save. The
+wrapper sends only that data key to KMS and binds it to all four
+`AgentStateKeyBinding` fields with the exact encryption-context keys
+`qurl_purpose`, `qurl_envelope_version`, `qurl_provider_id`, and
+`qurl_agent_id`. The persisted metadata records the exact key ARN returned by
+KMS, so a later alias retarget does not silently move existing state.
+
+Grant the workload `kms:Encrypt`, `kms:Decrypt`, and optionally
+`kms:DescribeKey` on one exact CMK. Bind Encrypt/Decrypt in IAM to the four
+context keys and the intended agent-id namespace. A save intentionally performs
+Encrypt followed by Decrypt verification before committing the envelope; a warm
+open needs Decrypt only.
 
 ## Secrets Manager
 
@@ -53,14 +89,13 @@ func newStore(ctx context.Context) (qurl.AgentStateStore, error) {
 }
 ```
 
-Then hand the store to the native UDP runtime exactly as you would
-`qurl.FileAgentState`:
+Then hand the store in exactly as you would `qurl.FileAgentState`:
 
 ```go
 store, err := newStore(ctx)
 // ...
-client, binding, err := qurl.RegisterAgentRuntime(ctx, setupKey, store,
-	qurl.WithAgentRuntimeHub(hub),
+client, binding, err := qurl.RegisterAgentRuntime(ctx, enrollmentCredential, store,
+	qurl.WithAgentRuntimeOTPProvider(readOneTimeCode),
 )
 ```
 

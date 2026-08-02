@@ -21,7 +21,7 @@ func keyPair(t *testing.T, seed byte) (priv, pub []byte) {
 
 // TestDecryptMessage_RejectsTamperedReply covers the crypto-rejection paths of
 // DecryptMessage — the guards the exported relayknock.DecryptReply and the
-// Exchange resolve path both inherit. A valid NHP_ACK is built server→agent (the
+// Knock resolve path both inherit. A valid NHP_ACK is built server→agent (the
 // golden-ack direction: the server is the reply's Noise initiator, the agent the
 // responder, so DecryptMessage(devicePriv, serverPub, …) opens it), then each
 // subcase tampers one field minimally to trip exactly one guard: the two length

@@ -35,7 +35,7 @@ func unreachableCellCatalog(t *testing.T, cellKeyB64 string) *CellCatalog {
 		ServerPublicKeyB64: cellKeyB64,
 		CellID:             "test-cell",
 		Host:               "127.0.0.1",
-		Port:               9,
+		Port:               standardNHPUDPPort,
 	}})
 	if err != nil {
 		t.Fatalf("build cell catalog: %v", err)
@@ -210,13 +210,44 @@ func TestEnterPortal_CellProviderErrorFailsClosed(t *testing.T) {
 func TestNewCellCatalogRejectsDuplicateKeys(t *testing.T) {
 	key := vectorCellKeyB64(t)
 	_, err := NewCellCatalog([]CellEntry{
-		{ServerPublicKeyB64: key, CellID: "cell-a", Host: "a.example.com", Port: 62206},
-		{ServerPublicKeyB64: key, CellID: "cell-b", Host: "b.example.com", Port: 62206},
+		{ServerPublicKeyB64: key, CellID: "cell-a", Host: "a.example.com", Port: standardNHPUDPPort},
+		{ServerPublicKeyB64: key, CellID: "cell-b", Host: "b.example.com", Port: standardNHPUDPPort},
 	})
 	if err == nil {
 		t.Fatal("duplicate cell keys were silently collapsed")
 	}
 	if !strings.Contains(err.Error(), "cell-a") || !strings.Contains(err.Error(), "cell-b") {
 		t.Fatalf("error does not name both colliding cells: %v", err)
+	}
+}
+
+// Fail-closed guards on the guest open path. Both were uncovered, and both are
+// what stop a misconfigured build from opening a link it cannot verify or
+// cannot route safely. A guard that is never exercised is a guard nobody knows
+// still works.
+
+func TestEnterPortalWith_NoTrustStoreRefusesBeforeParsing(t *testing.T) {
+	// Deliberately a syntactically valid-looking link: the point is that the
+	// refusal comes from the missing trust store, not from link parsing, so a
+	// build shipping no issuer keys can never open anything.
+	_, err := EnterPortalWith(context.Background(),
+		"https://qurl.link/#qv2.eyJ2IjoyfQ.c2VjcmV0.c2ln",
+		Config{})
+	if !errors.Is(err, ErrNotConfigured) {
+		t.Fatalf("EnterPortalWith with no TrustStore = %v, want ErrNotConfigured", err)
+	}
+}
+
+func TestEnterPortalWith_UnknownCellWithNoRelayAllowlistRefuses(t *testing.T) {
+	// A trust store but no transport at all: no cell catalog to knock directly,
+	// and no relay allowlist to fall back through. Opening anyway would mean
+	// acting on a relay URL the build never vetted.
+	// A REAL trust store, so the refusal can only come from the absent
+	// transport. Skipping here instead would leave the guard unexercised.
+	_, err := EnterPortalWith(context.Background(),
+		"https://qurl.link/#qv2.eyJ2IjoyfQ.c2VjcmV0.c2ln",
+		Config{TrustStore: freshTrustStore(t)})
+	if err == nil {
+		t.Fatal("open succeeded with neither a cell catalog nor a relay allowlist")
 	}
 }

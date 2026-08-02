@@ -5,15 +5,13 @@
 //
 // It is a dependency-light, clean-room Go implementation of the generic NHP
 // wire profile: NHP Noise messages (X25519 / AES-256-GCM / BLAKE2s) plus the
-// browser-relay transport that carries selected messages as a binary POST to
-// {relayBaseURL}/relay/{serverId}. The relay forwards them to a now-private NHP
-// server. The package speaks three initiator messages over that HTTP transport:
-// a knock (NHP_KNK) the server answers with an NHP_ACK — authorizing, opening
-// access for the caller IP, and returning a reply body the caller decrypts; a
-// one-way OTP (NHP_OTP) fire-and-forget dispatch the server never replies to (a
-// conforming relay acknowledges it at the HTTP layer); and a registration
-// (NHP_REG) round trip the server answers with an NHP_RAK. A round trip under
-// overload comes back as an NHP_COK cookie-challenge ("retry later") instead.
+// browser-relay transport that carries the browser knock family as a binary POST
+// to {relayBaseURL}/relay/{serverId}. The relay forwards them to a now-private NHP
+// server. Knock sends NHP_KNK, which the server answers with NHP_ACK or, under
+// overload, NHP_COK. Advanced callers can combine BuildMessage with
+// RelayPost for the other browser relay types NHP_RKN and NHP_EXT. Agent
+// lifecycle messages NHP_OTP, NHP_REG, and NHP_LST use native UDP through the
+// relayknock/nativeudp package and never the browser HTTP relay.
 //
 // The wire format is fenced byte-for-byte by the golden vectors in
 // knock_golden_test.go, which are shared with the other NHP implementations. If this
@@ -34,10 +32,11 @@
 // body itself. Single messages only: its transport-neutral builder emits the
 // initiator types NHP_KNK (knock), NHP_LST (list/query), NHP_RKN (re-knock),
 // NHP_REG (register), NHP_EXT (clean exit), and the one-way NHP_OTP. Its decoder
-// admits the reply types NHP_ACK, NHP_LRT, NHP_COK, and NHP_RAK. The HTTP helpers
-// intentionally do not transport NHP_LST/NHP_LRT, NHP_RKN, or NHP_EXT; native UDP
-// carries assignment and registered-agent session control directly with the Hub
-// or assigned cell.
+// admits the reply types NHP_ACK, NHP_LRT, NHP_COK, and NHP_RAK. The typed Knock
+// path transports only NHP_KNK/NHP_ACK/NHP_COK; raw RelayPost remains
+// available for caller-built NHP_RKN and NHP_EXT packets. Native UDP carries
+// assignment and registered-agent lifecycle directly with the Hub or assigned
+// cell.
 //
 // # Egress-IP invariant
 //

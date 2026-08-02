@@ -94,7 +94,9 @@ var ErrCredentialRecoveryRequired = errors.New("qurl: agent credential recovery 
 var ErrRegistrationKeyKindDisallowed = errors.New("qurl: registration key kind disallowed")
 
 // RegistrationKeyKindDisallowedError carries the rejected kind and the
-// caller's accepted kinds. It is returned before OTP dispatch or REG.
+// caller's accepted kinds. It is returned before OTP dispatch or REG. The
+// common cause is a pre-issued credential presented under the default OTP
+// policy: pass WithAgentRuntimeHeadlessEnrollment to accept it.
 type RegistrationKeyKindDisallowedError struct {
 	Kind    RegistrationKeyKind
 	Allowed []RegistrationKeyKind
@@ -115,6 +117,9 @@ func (e *RegistrationKeyKindDisallowedError) Unwrap() error {
 func validatePersistedNativeDeviceCredential(state *AgentState, errKind error) error {
 	if state == nil {
 		return &NativeCredentialRecoveryRequiredError{Cause: fmt.Errorf("%w: native agent state is nil", errKind)}
+	}
+	if state.PendingCredentialRecovery != nil || state.PendingCredentialRecoveryIssue != nil {
+		return &NativeCredentialRecoveryRequiredError{AgentID: state.AgentID, Cause: ErrCredentialRecoveryRequired}
 	}
 	if state.DeviceAPIKey == "" {
 		return &NativeCredentialRecoveryRequiredError{AgentID: state.AgentID, Cause: ErrDeviceCredentialMissing}
@@ -143,11 +148,11 @@ func validatePersistedCredentialForState(state *AgentState, errKind error) error
 }
 
 func isNativeAgentRuntimeState(state *AgentState) bool {
-	return state != nil && (state.Assignment != nil || state.PendingActivation != nil || state.PendingCompletion != nil || state.DeviceAPIKeyID != "")
+	return state != nil && (state.Assignment != nil || state.PendingActivation != nil || state.PendingCompletion != nil || state.PendingCredentialRecovery != nil || state.PendingCredentialRecoveryIssue != nil || state.DeviceAPIKeyID != "")
 }
 
-// NativeCredentialRecoveryRequiredError reports a missing or malformed native
-// device id-and-secret pair. No HTTP recovery API exists.
+// NativeCredentialRecoveryRequiredError reports a missing, malformed, or
+// explicitly-being-replaced native device id-and-secret pair.
 type NativeCredentialRecoveryRequiredError struct {
 	AgentID string
 	Cause   error
@@ -158,7 +163,7 @@ func (e *NativeCredentialRecoveryRequiredError) Error() string {
 	if e != nil {
 		agentID = e.AgentID
 	}
-	message := fmt.Sprintf("qurl: native device credential for agent %q is missing or malformed; explicit NHP-native recovery or reprovisioning is required before reopening this runtime, and this SDK version does not yet provide that operation", agentID)
+	message := fmt.Sprintf("qurl: native device credential for agent %q is missing, malformed, or undergoing replacement; call qurl.RecoverAgentRuntime explicitly with a live qurl:agent credential, or reprovision if the X25519 identity was lost", agentID)
 	if e == nil {
 		return message
 	}
@@ -168,6 +173,9 @@ func (e *NativeCredentialRecoveryRequiredError) Error() string {
 func (e *NativeCredentialRecoveryRequiredError) Unwrap() []error {
 	if e == nil {
 		return []error{ErrCredentialRecoveryRequired, ErrDeviceCredentialMissing}
+	}
+	if errors.Is(e.Cause, ErrCredentialRecoveryRequired) && !errors.Is(e.Cause, ErrDeviceCredentialMissing) {
+		return []error{e.Cause}
 	}
 	return unwrapWithCause(e.Cause, ErrCredentialRecoveryRequired, ErrDeviceCredentialMissing)
 }

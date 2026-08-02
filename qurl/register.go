@@ -9,24 +9,68 @@ import (
 )
 
 // RegisterAgentRuntime performs the qURL Connector's UDP-only enrollment
-// lifecycle: Hub assignment, optional assigned-cell OTP, assigned-cell REG/RAK,
-// and assigned-cell completion LST/LRT. It never calls a public enrollment,
-// assignment, or completion HTTP endpoint. WithAgentRuntimeHub is required;
-// only options explicitly documented for this runtime are accepted.
+// lifecycle: Hub assignment, assigned-cell OTP, assigned-cell REG/RAK, and
+// assigned-cell completion LST/LRT. It never calls a public enrollment,
+// assignment, or completion HTTP endpoint. Only options explicitly documented
+// for this runtime are accepted.
+//
+// Enrollment defaults to the one-time code, so a plain call installs
+// WithAgentRuntimeOTPProvider. The OTP leg is skipped only for a runtime that
+// declares it cannot receive a code with WithAgentRuntimeHeadlessEnrollment.
+// WithAgentRuntimeHub is optional: without it the SDK uses the trust root this
+// build ships, which is what every caller wants unless they run their own
+// LayerV deployment.
 //
 // The setup lock spans every incomplete-state transition. After RAK the SDK
 // durably persists one pending device-secret candidate before sending completion,
 // so a crash or lost LRT reuses the same candidate and cannot mint a second
-// credential. A completed warm open should normally call
-// OpenRegisteredAgentRuntime, which performs no network I/O. Both warm-open
-// paths require a live assignment lease; after expiry, call RefreshAgentRuntime
-// instead of expecting RegisterAgentRuntime to return the completed binding.
+// credential. Re-running this call on an already-registered agent returns that
+// registration rather than enrolling again, renewing an expired lease and
+// following any relocation on the way, so it is safe on every start.
 // enrollmentCredential must be a server-minted encoded token whose total string
 // length, including any prefix, is at least 32 bytes; user-chosen passwords are
 // not valid enrollment credentials. The SDK enforces syntax and this length
 // floor, while the minting authority must guarantee cryptographic randomness.
+//
+// Deprecated: use ConnectAgentRuntime with
+// WithAgentRuntimeEnrollmentCredential. It does the same thing and is the single
+// call a service needs on every start.
 func RegisterAgentRuntime(ctx context.Context, enrollmentCredential string, store AgentStateStore, opts ...AgentRuntimeRegistrationOption) (*Client, *AgentRuntimeBinding, error) {
 	return registerNativeAgentRuntime(ctx, enrollmentCredential, store, opts)
+}
+
+// ConnectAgentRuntime is the single call a service makes on every start. It
+// enrolls when there is nothing registered yet and an enrollment credential is
+// available, resumes an interrupted enrollment, and otherwise returns the
+// existing registration — renewing an expired lease and following any relocation
+// on the way. A process does not need to know which of those happened.
+//
+// Supply the credential with WithAgentRuntimeEnrollmentCredential when this
+// process is the one that enrolls. Omit it when enrollment happens elsewhere,
+// such as an installer: without a credential this call can renew and serve an
+// existing registration but can never create one, which is the property a
+// service that deliberately holds no enrollment secret wants.
+//
+// It supersedes RegisterAgentRuntime and OpenRegisteredAgentRuntime, which
+// remain for compatibility.
+func ConnectAgentRuntime(ctx context.Context, store AgentStateStore, opts ...AgentRuntimeRegistrationOption) (*Client, *AgentRuntimeBinding, error) {
+	return registerNativeAgentRuntime(ctx, "", store, opts)
+}
+
+// WithAgentRuntimeEnrollmentCredential supplies the credential LayerV issued for
+// first-time enrollment. It is used only when nothing is registered yet; a start
+// that finds an existing registration ignores it and sends no credential to the
+// Hub.
+// The credential is deliberately not validated here. A start that finds an
+// existing registration never looks at it, exactly as the positional argument on
+// RegisterAgentRuntime was never looked at, so a service that keeps calling with
+// a credential that has since rotated or expired must keep starting cleanly.
+// Validation happens where the credential is actually used.
+func WithAgentRuntimeEnrollmentCredential(credential string) AgentRuntimeRegistrationOption {
+	return nativeRuntimeOptionFunc(func(c *nativeAgentRuntimeConfig) error {
+		c.enrollCredential = credential
+		return nil
+	})
 }
 
 func validateAgentRuntimeMetadata(state *AgentState, now time.Time, errKind error) error {
@@ -39,31 +83,24 @@ func validateAgentRuntimeMetadata(state *AgentState, now time.Time, errKind erro
 	return nil
 }
 
-// newStoreBackedClient returns a Client authorized by the device API key
-// persisted in store. Construction makes no qURL API calls; loading a
-// network-backed store can still perform I/O on the first resource request.
-func newStoreBackedClient(store AgentStateStore, baseURL string, httpClient HTTPDoer) *Client {
-	return newStoreBackedClientWithCredential(store, baseURL, httpClient, "", time.Now)
-}
-
 // newPrimedStoreBackedClient is deliberately infallible after callers validate
 // the exact credential as part of their pre-commit state/completion contract.
 // Keeping construction infallible prevents a committed lifecycle mutation from
 // acquiring a new post-commit error tail merely while materializing its Client.
-func newPrimedStoreBackedClient(store AgentStateStore, baseURL string, httpClient HTTPDoer, validatedDeviceAPIKey string, now func() time.Time) *Client {
-	return newStoreBackedClientWithCredential(store, baseURL, httpClient, validatedDeviceAPIKey, now)
+func newPrimedStoreBackedClient(store AgentStateStore, baseURL string, httpClient HTTPDoer, validatedDeviceAPIKey, expectedAgentID string, now func() time.Time) *Client {
+	return newStoreBackedClientWithCredential(store, baseURL, httpClient, validatedDeviceAPIKey, expectedAgentID, now)
 }
 
 // newStoreBackedClientWithCredential optionally primes the one-minute cache from
 // an already validated AgentState so a combined runtime open does not unseal or
 // reload the same store on its first resource request. The wrapped store provider
 // remains authoritative after the cache expires.
-func newStoreBackedClientWithCredential(store AgentStateStore, baseURL string, httpClient HTTPDoer, deviceAPIKey string, now func() time.Time) *Client {
+func newStoreBackedClientWithCredential(store AgentStateStore, baseURL string, httpClient HTTPDoer, deviceAPIKey, expectedAgentID string, now func() time.Time) *Client {
 	if now == nil {
 		now = time.Now
 	}
 	provider := &cachedCredentialProvider{
-		provider: &storeCredentialProvider{store: store},
+		provider: &storeCredentialProvider{store: store, expectedAgentID: expectedAgentID},
 		ttl:      storeCredentialCacheTTL,
 		now:      now,
 	}
@@ -87,7 +124,8 @@ const storeCredentialCacheTTL = time.Minute
 // completed device credential in AgentStateStore. It is not an enrollment,
 // assignment, completion, refresh, or knock transport.
 type storeCredentialProvider struct {
-	store AgentStateStore
+	store           AgentStateStore
+	expectedAgentID string
 }
 
 func (p *storeCredentialProvider) Authorize(ctx context.Context, req *http.Request) error {
@@ -98,6 +136,9 @@ func (p *storeCredentialProvider) Authorize(ctx context.Context, req *http.Reque
 		return err
 	}
 	state, err := p.store.LoadAgentState(ctx)
+	if state != nil {
+		defer clearOwnedAgentState(state)
+	}
 	if err != nil {
 		return fmt.Errorf("qurl: load device credential for authorization: %w", err)
 	}
@@ -107,37 +148,49 @@ func (p *storeCredentialProvider) Authorize(ctx context.Context, req *http.Reque
 	if err := validatePersistedCredentialForState(state, ErrInvalidClientConfig); err != nil {
 		return err
 	}
+	if state.AgentID != p.expectedAgentID {
+		return fmt.Errorf("%w: agent state identity changed after client open", ErrInvalidClientConfig)
+	}
 	req.Header.Set("Authorization", "Bearer "+state.DeviceAPIKey)
 	return nil
 }
 
 // AgentResourceClientOption configures the steady-state HTTPS resource Client
-// returned by native registration/refresh or opened from completed state. These
-// options never configure Hub, assigned-cell, enrollment, or relay transport.
+// returned by native registration, refresh, explicit credential recovery, or
+// opened from completed state. These options never configure Hub, assigned-cell,
+// enrollment, recovery, or relay lifecycle transport.
 type AgentResourceClientOption interface {
 	ClientOption
 	AgentRuntimeLifecycleOption
+	AgentRuntimeOpenOption
 }
 
 // RegistrationKeyKind is the credential class reported by an authenticated Hub
 // assignment. Callers can restrict enrollment before OTP dispatch or REG.
+// RegistrationKeyKindAccount is the default; the pre-issued kinds below are
+// reached through WithAgentRuntimeHeadlessEnrollment.
 type RegistrationKeyKind string
 
 const (
-	// RegistrationKeyKindBootstrap is a pre-issued headless enrollment key.
+	// RegistrationKeyKindBootstrap is a pre-issued headless enrollment key. It
+	// carries its own proof and needs no one-time code.
 	RegistrationKeyKindBootstrap RegistrationKeyKind = keyKindBootstrap
 	// RegistrationKeyKindConnectorBootstrap is a Connector-specific pre-issued
 	// headless enrollment key.
 	RegistrationKeyKindConnectorBootstrap RegistrationKeyKind = assignmentKeyKindConnectorBootstrap
 	// RegistrationKeyKindAgent is a durable qurl:agent-scoped enrollment key.
 	RegistrationKeyKindAgent RegistrationKeyKind = assignmentKeyKindAgent
-	// RegistrationKeyKindAccount is an account API key requiring assigned-cell OTP.
+	// RegistrationKeyKindAccount enrolls with an assigned-cell one-time code sent
+	// to the credential's address. It is the default enrollment kind, and it is
+	// not specific to a human enrolling: any runtime that can read a mailbox uses
+	// it.
 	RegistrationKeyKindAccount RegistrationKeyKind = keyKindAccount
 )
 
 // WithAgentClientBaseURL points only the completed agent's steady-state resource
 // Client at a non-default API origin. It is accepted by OpenRegisteredAgent,
-// OpenRegisteredAgentRuntime, RegisterAgentRuntime, and RefreshAgentRuntime.
+// OpenRegisteredAgentWithIdentity, OpenRegisteredAgentRuntime,
+// RegisterAgentRuntime, RefreshAgentRuntime, and RecoverAgentRuntime.
 func WithAgentClientBaseURL(rawURL string) AgentResourceClientOption {
 	return agentClientBaseURLOption(rawURL)
 }
@@ -172,8 +225,13 @@ func (o agentClientBaseURLOption) applyAgentRuntimeOption(cfg *nativeAgentRuntim
 	return nil
 }
 
+func (o agentClientBaseURLOption) applyAgentRuntimeOpenOption(cfg *agentRuntimeOpenConfig) error {
+	return o.applyClientOption(&cfg.client)
+}
+
 func (agentClientBaseURLOption) isAgentRuntimeRegistrationOption() {}
 func (agentClientBaseURLOption) isAgentRuntimeRefreshOption()      {}
+func (agentClientBaseURLOption) isAgentRuntimeRecoveryOption()     {}
 
 // WithAgentClientHTTPClient injects only the completed agent's steady-state
 // resource Client transport. Native lifecycle UDP never uses this HTTP client.
@@ -204,5 +262,10 @@ func (o agentClientHTTPClientOption) applyAgentRuntimeOption(cfg *nativeAgentRun
 	return nil
 }
 
+func (o agentClientHTTPClientOption) applyAgentRuntimeOpenOption(cfg *agentRuntimeOpenConfig) error {
+	return o.applyClientOption(&cfg.client)
+}
+
 func (agentClientHTTPClientOption) isAgentRuntimeRegistrationOption() {}
 func (agentClientHTTPClientOption) isAgentRuntimeRefreshOption()      {}
+func (agentClientHTTPClientOption) isAgentRuntimeRecoveryOption()     {}

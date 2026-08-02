@@ -34,6 +34,12 @@ const (
 	// multi-address DNS name without turning a dead endpoint into an unbounded
 	// loop.
 	DefaultMaxAddresses = 3
+
+	// maxUnfragmentedPayload is below the IPv6 minimum-MTU UDP payload
+	// ceiling (1232 bytes) and therefore also safe on ordinary 1500-byte IPv4
+	// paths. Registration tickets are intentionally self-contained and can
+	// otherwise push OTP and REG across the fragmentation boundary.
+	maxUnfragmentedPayload = 1200
 )
 
 // Typed transport errors. They follow the qurl-go sentinel convention: match a
@@ -819,6 +825,8 @@ func buildPacketMaterial(headerType int, serverStaticPub, devicePriv, body, cook
 	fresh.timestampNanos = uint64(time.Now().UnixNano())
 	preamble := binary.BigEndian.Uint32(random[x25519key.Size+8:])
 
+	compress := (headerType == relayknock.TypeOTP || headerType == relayknock.TypeRegister) &&
+		nhpwire.HeaderSize+16+len(body) > maxUnfragmentedPayload
 	packet, err = relayknock.BuildMessage(headerType, &relayknock.KnockInputs{
 		DeviceStaticPriv: devicePriv,
 		ServerStaticPub:  serverStaticPub,
@@ -828,11 +836,15 @@ func buildPacketMaterial(headerType int, serverStaticPub, devicePriv, body, cook
 		Preamble:         preamble,
 		Body:             body,
 		Cookie:           cookie,
+		Compress:         compress,
 	})
 	if err != nil {
 		// BuildMessage errors never quote key or body plaintext (they report only
 		// sizes and the header type), so wrapping is safe.
 		return nil, packetFreshness{}, fmt.Errorf("%w: build packet: %w", ErrInvalidRequest, err)
+	}
+	if compress && len(packet) > maxUnfragmentedPayload {
+		return nil, packetFreshness{}, fmt.Errorf("%w: compressed packet of %d bytes exceeds the %d-byte unfragmented UDP ceiling", ErrInvalidRequest, len(packet), maxUnfragmentedPayload)
 	}
 	return packet, fresh, nil
 }

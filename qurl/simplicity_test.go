@@ -4,8 +4,11 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"net/http"
 	"path/filepath"
 	"testing"
+
+	"github.com/layervai/qurl-go/qurl"
 )
 
 // Friction budget for the basic scenarios.
@@ -21,13 +24,60 @@ import (
 //
 // Raising a budget is a product decision. If a change cannot fit, the correct
 // fix is nearly always to move the work into the SDK, not to raise the number.
+// Every scenario a customer performs is budgeted. Leaving one untracked is how
+// the opener silently grew to ~115 lines: nothing measured it, so nothing failed
+// when it got worse. A new exported entry point that a customer is expected to
+// call belongs here on the same commit that adds it.
 var frictionBudget = map[string]int{
+	// --- Opening -------------------------------------------------------------
 	// Verify a link and get a reachable URL. One call. No setup, no trust
 	// wiring, no transport selection — the SDK ships what it knows about the
 	// deployment it talks to.
 	"ExampleEnterPortal": 2,
+
+	// --- Issuing -------------------------------------------------------------
 	// Protect a URL and mint a link: open client, protect, create.
-	"ExampleOpenClient": 3,
+	"ExampleOpenClient":                     3,
+	"ExampleClient_ProtectURL":              3,
+	"ExampleClient_EnsureConnectorResource": 3,
+	"ExampleClient_CreatePortal":            4,
+	"ExampleNewClient":                      5,
+	// The package overview: open a client, protect, create, print.
+	"Example": 4,
+
+	// ExampleRecoverAgentRuntime is budgeted on the branch that introduces
+	// credential recovery; it does not exist here, and a budget naming a
+	// missing example fails loudly by design.
+
+	// --- Agent runtime -------------------------------------------------------
+	// Registration is the highest-friction scenario in the SDK and the one an
+	// integrator hits first. It was 12; removing the hand-assembled Hub trust
+	// root (the SDK now ships it, exactly as it ships issuer keys and cells)
+	// brought it to 11.
+	//
+	// 11 is the honest floor, not a concession. What remains is:
+	//   open agent state / register / take the device key / ensure the resource
+	//   / mint a cycle run ID / knock — plus the three defers that release the
+	//   store, the binding, and the key material.
+	//
+	// Two of those look removable and are not:
+	//   - The device static private key is taken and cleared explicitly. Hiding
+	//     that inside the SDK would keep key material live longer than the
+	//     caller can see or control.
+	//   - The cycle RunID is caller-owned by frozen contract (issue #66): it is
+	//     generated once per knock/service cycle and REUSED across every retry
+	//     and reconnect. An SDK-generated ID would mint a fresh value per call
+	//     and silently break retry correlation.
+	// Lower this only by moving real work into the SDK, never by weakening
+	// either of those.
+	// ConnectAgentRuntime is the single entry point a service calls on every
+	// start. It is budgeted at the same 11 as the registration call it
+	// supersedes: the credential moved from a positional argument into an
+	// option, which is a wash on statement count and removes the need to decide
+	// between two entry points at all.
+	"ExampleConnectAgentRuntime":     11,
+	"ExampleRegisterAgentRuntime":    11,
+	"ExampleNewSealedFileAgentState": 5,
 }
 
 // countBudgetedStatements counts top-level statements in fn, skipping the
@@ -95,6 +145,55 @@ func TestBasicScenariosStayWithinFrictionBudget(t *testing.T) {
 	for name := range frictionBudget {
 		if !seen[name] {
 			t.Errorf("budgeted example %s is missing; a basic scenario is no longer demonstrated", name)
+		}
+	}
+}
+
+// Option sets in this SDK are closed on purpose: each entry point accepts only
+// the options that mean something to it, and the compiler is what enforces that.
+// The rule is easy to erode one convenient interface embed at a time, so assert
+// the boundaries rather than trusting review to catch it.
+func TestOptionSetsStayClosed(t *testing.T) {
+	openOnly := qurl.WithAgentRuntimeOfflineOpen()
+	// The whole point of the closed open set: an option that means nothing to a
+	// plain resource Client must not be silently accepted by one.
+	if _, isClient := openOnly.(qurl.ClientOption); isClient {
+		t.Error("WithAgentRuntimeOfflineOpen must not satisfy ClientOption; NewClient and OpenRegisteredAgent would accept and ignore it")
+	}
+
+	// Agent resource-client options are valid at the runtime open, because they
+	// configure the Client it returns.
+	for name, opt := range map[string]any{
+		"WithAgentClientBaseURL":    qurl.WithAgentClientBaseURL("https://example.test"),
+		"WithAgentClientHTTPClient": qurl.WithAgentClientHTTPClient(http.DefaultClient),
+	} {
+		if _, ok := opt.(qurl.AgentRuntimeOpenOption); !ok {
+			t.Errorf("%s must satisfy AgentRuntimeOpenOption", name)
+		}
+	}
+
+	// Generic client options are not. OpenRegisteredAgentRuntime is a lifecycle
+	// entry point like RegisterAgentRuntime, and rejecting these at compile time
+	// is what replaced the old run-time WithIssuerStatePath check.
+	for name, opt := range map[string]any{
+		"WithBaseURL":         qurl.WithBaseURL("https://example.test"),
+		"WithHTTPClient":      qurl.WithHTTPClient(http.DefaultClient),
+		"WithIssuerStatePath": qurl.WithIssuerStatePath("/tmp/x"),
+	} {
+		if _, ok := opt.(qurl.AgentRuntimeOpenOption); ok {
+			t.Errorf("%s must not satisfy AgentRuntimeOpenOption", name)
+		}
+	}
+
+	// The knock set stays the narrowest: no assignment or resource-client option
+	// may alter a single UDP exchange.
+	for name, opt := range map[string]any{
+		"WithAgentClientBaseURL":       qurl.WithAgentClientBaseURL("https://example.test"),
+		"WithAgentRuntimeOfflineOpen":  openOnly,
+		"WithAgentRuntimePinnedAssign": qurl.WithAgentRuntimePinnedAssignment(),
+	} {
+		if _, ok := opt.(qurl.AgentRuntimeUDPOption); ok {
+			t.Errorf("%s must not satisfy AgentRuntimeUDPOption", name)
 		}
 	}
 }

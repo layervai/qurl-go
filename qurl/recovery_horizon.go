@@ -236,7 +236,7 @@ func validatePendingCompletionRecoveryDeadline(pending *PendingAgentCompletion, 
 }
 
 func validateRecoveryDeadlineFields(anchor, deadline time.Time, schemaVersion int, phase AgentRecoveryPhase) error {
-	if schemaVersion < agentStateSchemaVersion {
+	if schemaVersion < registrationRecoveryStateSchemaVersion {
 		if !anchor.IsZero() || !deadline.IsZero() {
 			return fmt.Errorf("%w: legacy pending %s contains forward recovery fields", ErrInvalidAgentState, phase)
 		}
