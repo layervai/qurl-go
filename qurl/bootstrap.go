@@ -8,7 +8,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -72,9 +74,10 @@ type AgentState struct {
 	PublicKeyB64  string     `json:"public_key_b64"`
 	RegisteredAt  *time.Time `json:"registered_at,omitempty"`
 
-	// SchemaVersion is the AgentState schema version. RegisterAgentRuntime writes
-	// agentStateSchemaVersion; pending schema-v5 state must not populate schema-v6
-	// recovery fields.
+	// SchemaVersion is the AgentState schema version. RegisterAgentRuntime and
+	// RecoverAgentRuntime write agentStateSchemaVersion (currently v7). Legacy
+	// schema-v5 state must not populate v6 finite-registration-recovery or v7
+	// credential-recovery fields.
 	SchemaVersion int `json:"schema_version,omitempty"`
 	// DeviceAPIKey is the device REST bearer credential minted at registration
 	// completion. Its presence alongside RegisteredAt marks a state ready to back
@@ -108,6 +111,22 @@ type AgentState struct {
 	// exact candidate before the same schema-v6 recovery deadline; generating a
 	// replacement could mint a second credential.
 	PendingCompletion *PendingAgentCompletion `json:"pending_completion,omitempty"`
+
+	// PendingCredentialRecovery is the crash-safe explicit same-agent device
+	// credential replacement. It owns the Authority-issued grant, one SDK-
+	// generated replacement candidate, and the exact assigned-cell trust binding.
+	// The recovery credential is never persisted. While this field exists,
+	// ordinary open/register/refresh paths fail closed even if the old device key
+	// remains in state.
+	PendingCredentialRecovery *PendingAgentCredentialRecovery `json:"pending_credential_recovery,omitempty"`
+
+	// PendingCredentialRecoveryIssue is durable intent for one exact Hub
+	// IssueCredentialRecovery logical operation. It is saved before the first
+	// datagram so a lost response or process crash reuses the same request nonce
+	// and semantic credential identity. It never contains the raw recovery
+	// credential. During grant renewal it coexists only with a rejected pending
+	// grant whose immutable episode anchor remains authoritative.
+	PendingCredentialRecoveryIssue *PendingAgentCredentialRecoveryIssue `json:"pending_credential_recovery_issue,omitempty"`
 }
 
 type agentStateJSON AgentState
@@ -183,6 +202,46 @@ type PendingAgentActivation struct {
 	EnrollmentCredentialFingerprintB64 string                 `json:"enrollment_credential_fingerprint_b64"`
 }
 
+// PendingAgentCredentialRecovery is one explicit operator-started credential
+// replacement episode. RecoveryGrant and DeviceAPIKey are secrets and receive
+// the same custody as AgentState. Assignment duplicates AgentState.Assignment so
+// a custom store cannot retarget the assigned-cell completion. The first
+// authenticated grant expiry is the immutable episode anchor; later grants may
+// replace only the current grant/times and assignment, never the candidate,
+// anchor, or recovery deadline.
+type PendingAgentCredentialRecovery struct {
+	RecoveryGrant                string          `json:"recovery_grant"`
+	RecoveryGrantIssuedAt        time.Time       `json:"recovery_grant_issued_at"`
+	RecoveryGrantExpiresAt       time.Time       `json:"recovery_grant_expires_at"`
+	RecoveryAnchorGrantExpiresAt time.Time       `json:"recovery_anchor_grant_expires_at"`
+	RecoveryExpiresAt            time.Time       `json:"recovery_expires_at"`
+	DeviceAPIKey                 string          `json:"device_api_key"`
+	Assignment                   AgentAssignment `json:"assignment"`
+	// NeedsFreshGrant is set only after an authenticated 52411. The next
+	// explicit call asks Hub for a new grant but reuses the same candidate and
+	// immutable episode anchor. Transport ambiguity never sets it.
+	NeedsFreshGrant bool `json:"needs_fresh_grant,omitempty"`
+}
+
+// PendingAgentCredentialRecoveryIssue is the secret-free replay identity for
+// an in-flight Hub IssueCredentialRecovery call. RecoveryCredentialFingerprintB64
+// is a domain-separated SHA-256 equality tag for a server-minted, high-entropy
+// bearer credential; it is not a password verifier.
+type PendingAgentCredentialRecoveryIssue struct {
+	RequestNonce string `json:"request_nonce"`
+	// ReplayNotAfter is a local conservative cutoff persisted before the first
+	// authenticated Authority grant expiry is known. It bounds exact Issue replay
+	// to less than the released Authority horizon; once a result is persisted, the
+	// Authority-derived RecoveryExpiresAt replaces it as the write boundary.
+	ReplayNotAfter                   time.Time `json:"replay_not_after"`
+	RecoveryCredentialFingerprintB64 string    `json:"recovery_credential_fingerprint_b64"`
+	AgentID                          string    `json:"agent_id"`
+	AgentPublicKeyB64                string    `json:"agent_public_key_b64"`
+	HubHost                          string    `json:"hub_host"`
+	HubPort                          int       `json:"hub_port"`
+	HubServerPublicKeyB64            string    `json:"hub_server_public_key_b64"`
+}
+
 // validateLoadedAgentAssignment checks persisted trust-boundary structure but
 // deliberately permits an expired lease so the caller can refresh it. Concrete
 // stores call it directly; lifecycle loaders repeat it for custom stores.
@@ -203,8 +262,8 @@ func validateLoadedAgentAssignment(state *AgentState) error {
 	// canonical wire form. Never let a later lifecycle call manufacture or
 	// normalize a different identity around those authority-bound fields.
 	if isNativeAgentRuntimeState(state) {
-		if err := validateAssignmentAgentID(state.AgentID); err != nil {
-			return fmt.Errorf("%w: persisted native agent id is missing or non-canonical", ErrInvalidAgentState)
+		if err := validatePersistedNativeAgentID(state.AgentID); err != nil {
+			return err
 		}
 	}
 	if state.Assignment != nil {
@@ -238,6 +297,50 @@ func validateLoadedAgentAssignment(state *AgentState) error {
 			return fmt.Errorf("%w: pending completion cannot coexist with a completed device credential", ErrInvalidAgentState)
 		}
 	}
+	if state.PendingCredentialRecoveryIssue != nil {
+		if state.PendingActivation != nil || state.PendingCompletion != nil {
+			return fmt.Errorf("%w: credential recovery issue cannot coexist with registration recovery", ErrInvalidAgentState)
+		}
+		if state.SchemaVersion < credentialRecoveryStateSchemaVersion || state.RegisteredAt == nil || state.Assignment == nil {
+			return fmt.Errorf("%w: credential recovery issue requires current completed state", ErrInvalidAgentState)
+		}
+		if err := validatePendingCredentialRecoveryIssue(state.PendingCredentialRecoveryIssue); err != nil {
+			return err
+		}
+		if state.PendingCredentialRecoveryIssue.AgentID != state.AgentID || state.PendingCredentialRecoveryIssue.AgentPublicKeyB64 != state.PublicKeyB64 {
+			return fmt.Errorf("%w: credential recovery issue identity does not match state", ErrInvalidAgentState)
+		}
+		if state.PendingCredentialRecovery != nil && !state.PendingCredentialRecovery.NeedsFreshGrant {
+			return fmt.Errorf("%w: credential recovery issue may coexist only with a rejected grant", ErrInvalidAgentState)
+		}
+		if state.PendingCredentialRecovery != nil && state.PendingCredentialRecoveryIssue.ReplayNotAfter.After(state.PendingCredentialRecovery.RecoveryExpiresAt) {
+			return fmt.Errorf("%w: credential recovery issue cutoff exceeds its Authority episode", ErrInvalidAgentState)
+		}
+	}
+	if state.PendingCredentialRecovery != nil {
+		if state.PendingActivation != nil || state.PendingCompletion != nil {
+			return fmt.Errorf("%w: credential recovery cannot coexist with registration recovery", ErrInvalidAgentState)
+		}
+		if state.SchemaVersion < credentialRecoveryStateSchemaVersion {
+			return fmt.Errorf("%w: legacy state contains credential recovery fields", ErrInvalidAgentState)
+		}
+		if state.RegisteredAt == nil {
+			return fmt.Errorf("%w: credential recovery requires a completed agent identity", ErrInvalidAgentState)
+		}
+		if state.DeviceAPIKey != "" || state.DeviceAPIKeyID != "" {
+			return fmt.Errorf("%w: pending credential recovery must not retain the revoked device credential", ErrInvalidAgentState)
+		}
+		if err := validatePendingAgentCredentialRecovery(state.PendingCredentialRecovery, state); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validatePersistedNativeAgentID(agentID string) error {
+	if err := validateAssignmentAgentID(agentID); err != nil {
+		return fmt.Errorf("%w: persisted native agent id is missing or non-canonical", ErrInvalidAgentState)
+	}
 	return nil
 }
 
@@ -266,11 +369,24 @@ func (s *AgentState) clone() *AgentState {
 		pending := *s.PendingCompletion
 		cloned.PendingCompletion = &pending
 	}
+	if s.PendingCredentialRecovery != nil {
+		pending := *s.PendingCredentialRecovery
+		pending.Assignment = *s.PendingCredentialRecovery.Assignment.clone()
+		cloned.PendingCredentialRecovery = &pending
+	}
+	if s.PendingCredentialRecoveryIssue != nil {
+		pending := *s.PendingCredentialRecoveryIssue
+		cloned.PendingCredentialRecoveryIssue = &pending
+	}
 	return &cloned
 }
 
 // agentStateSchemaVersion is the current native AgentState schema version.
-const agentStateSchemaVersion = 6
+const (
+	agentStateSchemaVersion                = 7
+	registrationRecoveryStateSchemaVersion = 6
+	credentialRecoveryStateSchemaVersion   = 7
+)
 
 // AgentStateStore loads and saves the bootstrapped local identity. The
 // file-backed store writes plaintext JSON protected by filesystem permissions;
@@ -291,27 +407,143 @@ type AgentStateStore interface {
 	SaveAgentState(context.Context, *AgentState) error
 }
 
+// OpenFileAgentState pins the complete no-follow path to a trusted 0700
+// state directory and returns a plaintext local store whose state and mandatory
+// setup lock are always accessed relative to that retained directory capability.
+// The caller owns the returned handle and must Close it after every Client and
+// native lifecycle operation that can use the store has finished.
+//
+// Linux and Darwin are supported, excluding Android and iOS. Mobile and other
+// platforms fail before filesystem mutation until they have reviewed ACL,
+// locking, and durability primitives.
+func OpenFileAgentState(path string) (*FileAgentStateStore, error) {
+	dir, name, err := openPinnedStatePath(path, "agent state")
+	if err != nil {
+		return nil, err
+	}
+	store := &FileAgentStateStore{dir: dir, name: name, path: path}
+	cleanup := runtime.AddCleanup(store, closePinnedStateDir, dir)
+	store.cleanup = &cleanup
+	return store, nil
+}
+
 // FileAgentState stores bootstrap state in a local plaintext JSON file written
-// 0600. Local filesystem I/O is synchronous; the context passed to LoadAgentState
-// or SaveAgentState cannot interrupt a read or write once it has started.
+// 0600. It is retained for source compatibility with early SDK releases.
+// New process-lifetime integrations such as qURL Connector must use
+// OpenFileAgentState so construction errors and Close ownership are explicit.
+//
+// This compatibility constructor still pins immediately. If construction fails,
+// it returns a store whose operations deterministically return that error; it
+// never falls back to pathname I/O. Its dynamic value implements io.Closer and
+// should be closed after its last use; a runtime cleanup is only a leak-safety
+// fallback for legacy callers whose static AgentStateStore value hides Close.
 func FileAgentState(path string) AgentStateStore {
-	return fileAgentStateStore{fileSetupLock: fileSetupLock{path: path, lockFile: lockFileExclusive}}
+	store, err := OpenFileAgentState(path)
+	if err != nil {
+		return &FileAgentStateStore{initErr: err}
+	}
+	return store
 }
 
-type fileAgentStateStore struct {
-	fileSetupLock
+// FileAgentStateStore is an SDK-owned pinned plaintext AgentState store.
+// Do not copy it; retain the constructor-returned pointer and Close it once.
+type FileAgentStateStore struct {
+	dir     *pinnedStateDir
+	name    string
+	path    string
+	initErr error
+	closeMu sync.Mutex
+	cleanup *runtime.Cleanup
 }
 
-func (s fileAgentStateStore) LoadAgentState(ctx context.Context) (*AgentState, error) {
+func closePinnedStateDir(dir *pinnedStateDir) { _ = dir.close() }
+
+func (s *FileAgentStateStore) operationalError() error {
+	if s == nil {
+		return fmt.Errorf("%w: plaintext agent state store is nil", ErrAgentStateContinuity)
+	}
+	return s.initErr
+}
+
+// Close releases the retained state-directory capability. It is idempotent and
+// waits for an in-flight store or setup-lock operation to release its reference.
+func (s *FileAgentStateStore) Close() (resultErr error) {
+	if err := s.operationalError(); err != nil {
+		return err
+	}
+	s.closeMu.Lock()
+	if s.cleanup != nil {
+		s.cleanup.Stop()
+		s.cleanup = nil
+	}
+	s.closeMu.Unlock()
+	resultErr = s.dir.close()
+	runtime.KeepAlive(s)
+	return resultErr
+}
+
+// ValidateContinuity proves that the configured path still resolves through
+// no-follow traversal to the directory retained by OpenFileAgentState.
+func (s *FileAgentStateStore) ValidateContinuity() (resultErr error) {
+	if err := s.operationalError(); err != nil {
+		return err
+	}
+	resultErr = s.dir.validate()
+	runtime.KeepAlive(s)
+	return resultErr
+}
+
+func (s *FileAgentStateStore) retainContinuity() (AgentStateStore, func() error, error) {
+	if err := s.operationalError(); err != nil {
+		return nil, nil, err
+	}
+	retained, release, err := s.dir.retainOperation(s)
+	runtime.KeepAlive(s)
+	return retained, release, err
+}
+
+func (s *FileAgentStateStore) acquireSetupLock(ctx context.Context) (setupLock, error) {
+	if err := s.operationalError(); err != nil {
+		return nil, err
+	}
+	lock, err := s.dir.lock(ctx, s.name+agentSetupLockSuffix)
+	runtime.KeepAlive(s)
+	if err != nil {
+		return nil, fmt.Errorf("%w: acquire pinned setup lock: %w", ErrAgentSetupLock, err)
+	}
+	return lock, nil
+}
+
+// LoadAgentState loads and validates a fresh caller-owned state snapshot from
+// the pinned plaintext file.
+func (s *FileAgentStateStore) LoadAgentState(ctx context.Context) (state *AgentState, resultErr error) {
+	if err := validateContext(ctx, ErrInvalidBootstrapConfig); err != nil {
+		return nil, err
+	}
+	state, resultErr = withAgentStoreContinuity(s, func(*AgentState) {}, func(retained AgentStateStore) (*AgentState, error) {
+		return retained.LoadAgentState(ctx)
+	})
+	runtime.KeepAlive(s)
+	return state, resultErr
+}
+
+func (s *FileAgentStateStore) loadAgentStateRetained(ctx context.Context, op *pinnedStateOperation) (*AgentState, error) {
+	if err := s.operationalError(); err != nil {
+		return nil, err
+	}
 	if err := validateContext(ctx, ErrInvalidBootstrapConfig); err != nil {
 		return nil, err
 	}
 	// Corrupt-content faults use the store-neutral ErrInvalidAgentState class;
 	// lifecycle front doors re-wrap it in their own config-error class.
-	raw, err := readPrivateStateFileBounded(s.path, "agent state", maxAgentStateBytes, privateStateDirExact0700, ErrAgentStateNotFound, ErrInvalidAgentState, ErrInsecureAgentStatePermissions)
+	raw, err := op.load(ctx, s.name, "agent state", maxAgentStateBytes, ErrAgentStateNotFound)
 	if err != nil {
 		return nil, err
 	}
+	return decodePlaintextAgentState(raw)
+}
+
+func decodePlaintextAgentState(raw []byte) (*AgentState, error) {
 	var state AgentState
 	if err := strictDecodeJSON(raw, &state); err != nil {
 		// The decoder's detail can contain producer-controlled field names or
@@ -324,9 +556,27 @@ func (s fileAgentStateStore) LoadAgentState(ctx context.Context) (*AgentState, e
 	return &state, nil
 }
 
-func (s fileAgentStateStore) SaveAgentState(ctx context.Context, state *AgentState) error {
-	if strings.TrimSpace(s.path) == "" {
-		return fmt.Errorf("%w: state path must not be empty", ErrInvalidBootstrapConfig)
+// SaveAgentState atomically replaces the pinned plaintext file after continuity
+// and descriptor-to-entry validation.
+func (s *FileAgentStateStore) SaveAgentState(ctx context.Context, state *AgentState) (resultErr error) {
+	if err := validateContext(ctx, ErrInvalidBootstrapConfig); err != nil {
+		return err
+	}
+	if err := rejectSetupLockReentry(ctx, s); err != nil {
+		return err
+	}
+	_, resultErr = withAgentStoreContinuity(s, func(struct{}) {}, func(retained AgentStateStore) (struct{}, error) {
+		return withAgentSetupLock(ctx, retained, func(struct{}) {}, func(lockedCtx context.Context, locked AgentStateStore) (struct{}, error) {
+			return struct{}{}, locked.SaveAgentState(lockedCtx, state)
+		})
+	})
+	runtime.KeepAlive(s)
+	return resultErr
+}
+
+func (s *FileAgentStateStore) saveAgentStateRetained(ctx context.Context, state *AgentState, op *pinnedStateOperation, setup *pinnedSetupLockToken) error {
+	if err := s.operationalError(); err != nil {
+		return err
 	}
 	if state == nil {
 		return fmt.Errorf("%w: state must not be nil", ErrInvalidBootstrapConfig)
@@ -342,7 +592,7 @@ func (s fileAgentStateStore) SaveAgentState(ctx context.Context, state *AgentSta
 	if len(raw) > maxAgentStateBytes {
 		return fmt.Errorf("%w: encoded agent state exceeds %d bytes", ErrInvalidBootstrapConfig, maxAgentStateBytes)
 	}
-	return writePrivateStateFileAtomic(ctx, s.path, "agent state", ".qurl-agent-state-*", raw, defaultPrivateStateFileOps)
+	return op.save(ctx, setup, s.name, "agent state", ".qurl-agent-state-", raw)
 }
 
 // validateCompletedAgentIdentity checks the durable identity fields required by

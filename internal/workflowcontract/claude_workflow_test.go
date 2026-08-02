@@ -14,11 +14,6 @@ import (
 	"testing"
 )
 
-const (
-	claudeAction   = "anthropics/claude-code-action@fa7e2f0a29a126f0b81cdcf360561b36e44cf608 # v1.0.180"
-	checkoutAction = "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0"
-)
-
 func TestAutomaticClaudeWorkflowUsesTrustedReadOnlySnapshots(t *testing.T) {
 	workflow := readWorkflow(t, "claude-code-review.yml")
 
@@ -59,7 +54,7 @@ func TestAutomaticClaudeWorkflowUsesTrustedReadOnlySnapshots(t *testing.T) {
 	)
 	requireBefore(t, workflow,
 		"Prepare credential-free review origin",
-		claudeAction,
+		requirePin(t, workflow, claudeAction),
 		"Verify reviewed pull request snapshots",
 	)
 }
@@ -102,9 +97,9 @@ func TestInteractiveClaudeWorkflowUsesDefaultBranchCommentPath(t *testing.T) {
 	requireBefore(t, workflow,
 		"Validate Claude trigger actor permission",
 		"Resolve Claude pull request context",
-		checkoutAction,
+		requirePin(t, workflow, checkoutAction),
 		"Prepare credential-free Claude origin",
-		claudeAction,
+		requirePin(t, workflow, claudeAction),
 		"Verify reviewed pull request snapshots",
 	)
 }
@@ -373,28 +368,12 @@ func TestTerminalVerifiersRejectUnsafeCurrentState(t *testing.T) {
 	}
 }
 
-func TestEveryWorkflowPinsCheckout(t *testing.T) {
-	entries, err := os.ReadDir(workflowDir(t))
-	if err != nil {
-		t.Fatalf("read workflow directory: %v", err)
-	}
-	for _, entry := range entries {
-		if entry.IsDir() || (filepath.Ext(entry.Name()) != ".yml" && filepath.Ext(entry.Name()) != ".yaml") {
-			continue
-		}
-		workflow := readWorkflow(t, entry.Name())
-		if got, want := strings.Count(workflow, checkoutAction), strings.Count(workflow, "actions/checkout@"); got != want {
-			t.Errorf("%s has %d checkout uses but %d exact pins", entry.Name(), want, got)
-		}
-	}
-}
-
 func TestExistingLintContextRunsActionlint(t *testing.T) {
 	workflow := readWorkflow(t, "ci.yml")
+	requireUniquePin(t, workflow, "reviewdog/action-actionlint")
 	requireContains(t, workflow,
 		"name: golangci-lint",
 		"name: actionlint",
-		"reviewdog/action-actionlint@6fb7acc99f4a1008869fa8a0f09cfca740837d9d # v1.72.0",
 	)
 	actionlint := strings.Index(workflow, "name: actionlint")
 	golangciAction := strings.Index(workflow, "golangci/golangci-lint-action@")
@@ -405,9 +384,11 @@ func TestExistingLintContextRunsActionlint(t *testing.T) {
 
 func requireReadOnlyActionContract(t *testing.T, workflow string) {
 	t.Helper()
+	// Resolving each pin is the assertion: an absent, repeated, or mutable
+	// reference fails inside requirePin.
+	requirePin(t, workflow, claudeAction)
+	requirePin(t, workflow, checkoutAction)
 	requireContains(t, workflow,
-		claudeAction,
-		checkoutAction,
 		"github_token: ${{ github.token }}",
 		"contents: read",
 		"pull-requests: write",

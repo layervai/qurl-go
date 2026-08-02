@@ -68,6 +68,106 @@ type testAgentStateKeyWrapper struct {
 	wrappedMetadataSize int
 }
 
+type blockingAgentStateKeyWrapper struct {
+	delegate AgentStateKeyWrapper
+
+	wrapStarted   chan struct{}
+	wrapRelease   <-chan struct{}
+	wrapStartOnce sync.Once
+
+	unwrapStarted   chan struct{}
+	unwrapRelease   <-chan struct{}
+	unwrapStartOnce sync.Once
+}
+
+type reentrantAgentStateKeyWrapper struct {
+	delegate AgentStateKeyWrapper
+	store    *SealedFileAgentStateStore
+	state    *AgentState
+	once     sync.Once
+	err      error
+}
+
+type serialAgentStateKeyWrapper struct {
+	delegate AgentStateKeyWrapper
+	mu       sync.Mutex
+	calls    int
+
+	firstStarted  chan struct{}
+	firstRelease  <-chan struct{}
+	secondStarted chan struct{}
+}
+
+func (w *serialAgentStateKeyWrapper) WrapKey(ctx context.Context, plaintextKey []byte, binding AgentStateKeyBinding) (WrappedAgentStateKey, error) {
+	w.mu.Lock()
+	w.calls++
+	call := w.calls
+	w.mu.Unlock()
+	switch call {
+	case 1:
+		close(w.firstStarted)
+		select {
+		case <-w.firstRelease:
+		case <-ctx.Done():
+			return WrappedAgentStateKey{}, ctx.Err()
+		}
+	case 2:
+		close(w.secondStarted)
+	}
+	return w.delegate.WrapKey(ctx, plaintextKey, binding)
+}
+
+func (w *serialAgentStateKeyWrapper) UnwrapKey(ctx context.Context, record WrappedAgentStateKey, binding AgentStateKeyBinding) ([]byte, error) {
+	return w.delegate.UnwrapKey(ctx, record, binding)
+}
+
+func (w *reentrantAgentStateKeyWrapper) WrapKey(ctx context.Context, plaintextKey []byte, binding AgentStateKeyBinding) (WrappedAgentStateKey, error) {
+	w.once.Do(func() {
+		w.err = w.store.SaveAgentState(ctx, w.state)
+	})
+	return w.delegate.WrapKey(ctx, plaintextKey, binding)
+}
+
+func (w *reentrantAgentStateKeyWrapper) UnwrapKey(ctx context.Context, record WrappedAgentStateKey, binding AgentStateKeyBinding) ([]byte, error) {
+	return w.delegate.UnwrapKey(ctx, record, binding)
+}
+
+func (w *blockingAgentStateKeyWrapper) WrapKey(ctx context.Context, plaintextKey []byte, binding AgentStateKeyBinding) (WrappedAgentStateKey, error) {
+	if err := waitForBlockingWrapper(ctx, w.wrapStarted, w.wrapRelease, &w.wrapStartOnce); err != nil {
+		return WrappedAgentStateKey{}, err
+	}
+	return w.delegate.WrapKey(ctx, plaintextKey, binding)
+}
+
+func (w *blockingAgentStateKeyWrapper) UnwrapKey(ctx context.Context, record WrappedAgentStateKey, binding AgentStateKeyBinding) ([]byte, error) {
+	if err := waitForBlockingWrapper(ctx, w.unwrapStarted, w.unwrapRelease, &w.unwrapStartOnce); err != nil {
+		return nil, err
+	}
+	return w.delegate.UnwrapKey(ctx, record, binding)
+}
+
+func waitForBlockingWrapper(ctx context.Context, started chan struct{}, release <-chan struct{}, once *sync.Once) error {
+	if started == nil {
+		return nil
+	}
+	once.Do(func() { close(started) })
+	select {
+	case <-release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func waitForTestSignal(t *testing.T, signal <-chan struct{}, label string) {
+	t.Helper()
+	select {
+	case <-signal:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for %s", label)
+	}
+}
+
 func (w *testAgentStateKeyWrapper) WrapKey(_ context.Context, plaintextKey []byte, binding AgentStateKeyBinding) (WrappedAgentStateKey, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -472,9 +572,11 @@ func TestNewSealedFileAgentState_ValidatesConfiguration(t *testing.T) {
 }
 
 func TestNewSealedFileAgentState_AcceptsCanonicalProviderID(t *testing.T) {
-	if _, err := NewSealedFileAgentState("state", "aws.kms-v2", &testAgentStateKeyWrapper{}); err != nil {
+	store, err := NewSealedFileAgentState(filepath.Join(secureAgentStateTestDir(t), "state"), "aws.kms-v2", &testAgentStateKeyWrapper{})
+	if err != nil {
 		t.Fatalf("NewSealedFileAgentState: %v", err)
 	}
+	t.Cleanup(func() { _ = store.Close() })
 }
 
 func TestValidateWrappedAgentStateKey_RejectsZeroVersion(t *testing.T) {
@@ -820,106 +922,247 @@ func TestSealedFileAgentState_RandomnessFailuresDoNotCommit(t *testing.T) {
 	}
 }
 
-type faultTempFile struct {
-	*os.File
-	fault    string
-	sentinel error
-}
-
-func (f *faultTempFile) Write(p []byte) (int, error) {
-	if f.fault == "write" {
-		return 0, f.sentinel
-	}
-	return f.File.Write(p)
-}
-
-func (f *faultTempFile) Chmod(mode os.FileMode) error {
-	if f.fault == "chmod" {
-		return f.sentinel
-	}
-	return f.File.Chmod(mode)
-}
-
-func (f *faultTempFile) Sync() error {
-	if f.fault == "sync" {
-		return f.sentinel
-	}
-	return f.File.Sync()
-}
-
-func (f *faultTempFile) Close() error {
-	err := f.File.Close()
-	if f.fault == "close" {
-		return f.sentinel
-	}
-	return err
-}
-
-func TestSealedFileAgentState_AtomicFailureInjection(t *testing.T) {
+func TestSealedFileAgentState_PostRenameDirectorySyncFailureIsRecoverable(t *testing.T) {
 	sentinel := errors.New("injected file failure")
-	faults := []string{"create", "write", "chmod", "sync", "close", "rename", "sync-dir"}
-	for _, fault := range faults {
-		t.Run(fault, func(t *testing.T) {
-			store := testSealedStore(t, &testAgentStateKeyWrapper{})
-			original := testAgentState(t)
-			if err := store.SaveAgentState(context.Background(), original); err != nil {
+	store := testSealedStore(t, &testAgentStateKeyWrapper{})
+	original := testAgentState(t)
+	if err := store.SaveAgentState(context.Background(), original); err != nil {
+		t.Fatal(err)
+	}
+	updated := *original
+	updated.DeviceAPIKey = "lv_device_updated"
+	originalSync := store.dir.impl.hooks.syncFD
+	syncCalls := 0
+	store.dir.impl.hooks.syncFD = func(fd int) error {
+		syncCalls++
+		if syncCalls == 2 {
+			return sentinel
+		}
+		return originalSync(fd)
+	}
+	err := store.SaveAgentState(context.Background(), &updated)
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("save = %v, want injected error", err)
+	}
+	store.dir.impl.hooks.syncFD = originalSync
+	temps, err := filepath.Glob(filepath.Join(filepath.Dir(store.path), ".qurl-sealed-agent-state-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(temps) != 0 {
+		t.Fatalf("failed save left temporary files: %v", temps)
+	}
+	loaded, err := store.LoadAgentState(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.DeviceAPIKey != updated.DeviceAPIKey {
+		t.Fatalf("post-rename sync failure visible state = %q, want committed %q", loaded.DeviceAPIKey, updated.DeviceAPIKey)
+	}
+}
+
+func TestSealedFileAgentState_CloseWaitsForWholeUnwrapOperation(t *testing.T) {
+	operations := []struct {
+		name string
+		run  func(context.Context, AgentStateStore) error
+	}{
+		{"load", func(ctx context.Context, store AgentStateStore) error {
+			_, err := store.LoadAgentState(ctx)
+			return err
+		}},
+		{"open registered agent", func(ctx context.Context, store AgentStateStore) error {
+			_, err := OpenRegisteredAgent(ctx, store)
+			return err
+		}},
+	}
+	for _, operation := range operations {
+		t.Run(operation.name, func(t *testing.T) {
+			delegate := &testAgentStateKeyWrapper{}
+			store := testSealedStore(t, delegate)
+			if err := store.SaveAgentState(context.Background(), testAgentState(t)); err != nil {
 				t.Fatal(err)
 			}
-			ops := defaultPrivateStateFileOps
-			if fault == "create" {
-				ops.createTemp = func(string, string) (atomicTempFile, error) { return nil, sentinel }
-			} else {
-				ops.createTemp = func(dir, pattern string) (atomicTempFile, error) {
-					file, err := os.CreateTemp(dir, pattern)
-					if err != nil {
-						return nil, err
-					}
-					return &faultTempFile{File: file, fault: fault, sentinel: sentinel}, nil
-				}
+			started := make(chan struct{})
+			release := make(chan struct{})
+			store.wrapper = &blockingAgentStateKeyWrapper{
+				delegate:      delegate,
+				unwrapStarted: started,
+				unwrapRelease: release,
 			}
-			if fault == "rename" {
-				ops.rename = func(string, string) error { return sentinel }
+			operationDone := make(chan error, 1)
+			go func() { operationDone <- operation.run(context.Background(), store) }()
+			waitForTestSignal(t, started, "blocked UnwrapKey")
+			closeDone := make(chan error, 1)
+			go func() { closeDone <- store.Close() }()
+			select {
+			case err := <-closeDone:
+				t.Fatalf("Close returned while UnwrapKey was in flight: %v", err)
+			case <-time.After(50 * time.Millisecond):
 			}
-			if fault == "sync-dir" {
-				ops.syncDir = func(string, string) error { return sentinel }
+			close(release)
+			if err := <-operationDone; err != nil {
+				t.Fatalf("operation after unblocking wrapper: %v", err)
 			}
-			store.fileOps = ops
-			updated := *original
-			updated.DeviceAPIKey = "lv_device_updated"
-			err := store.SaveAgentState(context.Background(), &updated)
-			if !errors.Is(err, sentinel) {
-				t.Fatalf("save = %v, want injected error", err)
-			}
-			temps, err := filepath.Glob(filepath.Join(filepath.Dir(store.path), ".qurl-sealed-agent-state-*"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(temps) != 0 {
-				t.Fatalf("failed save left temporary files: %v", temps)
-			}
-			if fault == "sync-dir" {
-				// Rename committed before the directory durability acknowledgement
-				// failed. Reload must inspect that visible state rather than assuming
-				// the save error means the prior value survived.
-				store.fileOps = defaultPrivateStateFileOps
-				loaded, err := store.LoadAgentState(context.Background())
-				if err != nil {
-					t.Fatal(err)
-				}
-				if loaded.DeviceAPIKey != updated.DeviceAPIKey {
-					t.Fatalf("post-rename sync failure visible state = %q, want committed %q", loaded.DeviceAPIKey, updated.DeviceAPIKey)
-				}
-				return
-			}
-			store.fileOps = defaultPrivateStateFileOps
-			loaded, err := store.LoadAgentState(context.Background())
-			if err != nil {
-				t.Fatal(err)
-			}
-			if loaded.DeviceAPIKey != original.DeviceAPIKey {
-				t.Fatalf("failed atomic save replaced prior state: got %q", loaded.DeviceAPIKey)
+			if err := <-closeDone; err != nil {
+				t.Fatalf("Close after whole operation completed: %v", err)
 			}
 		})
+	}
+}
+
+func TestSealedFileAgentState_CloseWaitsForWholeWrapAndCommitOperation(t *testing.T) {
+	delegate := &testAgentStateKeyWrapper{}
+	store := testSealedStore(t, delegate)
+	original := testAgentState(t)
+	if err := store.SaveAgentState(context.Background(), original); err != nil {
+		t.Fatal(err)
+	}
+	updated := original.clone()
+	updated.DeviceAPIKey = "lv_device_close_serialized"
+	started := make(chan struct{})
+	release := make(chan struct{})
+	store.wrapper = &blockingAgentStateKeyWrapper{
+		delegate:    delegate,
+		wrapStarted: started,
+		wrapRelease: release,
+	}
+	saveDone := make(chan error, 1)
+	go func() { saveDone <- store.SaveAgentState(context.Background(), updated) }()
+	waitForTestSignal(t, started, "blocked WrapKey")
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- store.Close() }()
+	select {
+	case err := <-closeDone:
+		t.Fatalf("Close returned while WrapKey was in flight: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	if err := <-saveDone; err != nil {
+		t.Fatalf("SaveAgentState after unblocking wrapper: %v", err)
+	}
+	if err := <-closeDone; err != nil {
+		t.Fatalf("Close after whole save completed: %v", err)
+	}
+}
+
+func TestSealedFileAgentState_SaveCannotBypassHeldLifecycleLock(t *testing.T) {
+	delegate := &testAgentStateKeyWrapper{}
+	store := testSealedStore(t, delegate)
+	defer func() { _ = store.Close() }()
+	original := testAgentState(t)
+	if err := store.SaveAgentState(context.Background(), original); err != nil {
+		t.Fatal(err)
+	}
+	updated := original.clone()
+	updated.DeviceAPIKey = "lv_device_serialized_update"
+	wrapStarted := make(chan struct{})
+	wrapRelease := make(chan struct{})
+	store.wrapper = &blockingAgentStateKeyWrapper{
+		delegate:    delegate,
+		wrapStarted: wrapStarted,
+		wrapRelease: wrapRelease,
+	}
+	lockedLoaded := make(chan struct{})
+	releaseLifecycle := make(chan struct{})
+	lifecycleDone := make(chan error, 1)
+	go func() {
+		_, err := withAgentSetupLock(context.Background(), store, func(struct{}) {}, func(lockedCtx context.Context, locked AgentStateStore) (struct{}, error) {
+			loaded, err := locked.LoadAgentState(lockedCtx)
+			if err != nil {
+				return struct{}{}, err
+			}
+			if loaded.DeviceAPIKey != original.DeviceAPIKey {
+				return struct{}{}, fmt.Errorf("locked load observed %q, want original %q", loaded.DeviceAPIKey, original.DeviceAPIKey)
+			}
+			close(lockedLoaded)
+			<-releaseLifecycle
+			return struct{}{}, nil
+		})
+		lifecycleDone <- err
+	}()
+	waitForTestSignal(t, lockedLoaded, "lifecycle lock and load")
+	saveDone := make(chan error, 1)
+	go func() { saveDone <- store.SaveAgentState(context.Background(), updated) }()
+	select {
+	case <-wrapStarted:
+		t.Fatal("concurrent SaveAgentState entered WrapKey before acquiring the held lifecycle lock")
+	case <-time.After(75 * time.Millisecond):
+	}
+	close(releaseLifecycle)
+	if err := <-lifecycleDone; err != nil {
+		t.Fatalf("locked lifecycle: %v", err)
+	}
+	waitForTestSignal(t, wrapStarted, "serialized SaveAgentState wrapper")
+	close(wrapRelease)
+	if err := <-saveDone; err != nil {
+		t.Fatalf("serialized SaveAgentState: %v", err)
+	}
+	loaded, err := store.LoadAgentState(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.DeviceAPIKey != updated.DeviceAPIKey {
+		t.Fatalf("final serialized state = %q, want %q", loaded.DeviceAPIKey, updated.DeviceAPIKey)
+	}
+}
+
+func TestSealedFileAgentState_WrapperReentrantSaveFailsPromptly(t *testing.T) {
+	delegate := &testAgentStateKeyWrapper{}
+	store := testSealedStore(t, delegate)
+	defer func() { _ = store.Close() }()
+	state := testAgentState(t)
+	reentrant := &reentrantAgentStateKeyWrapper{
+		delegate: delegate,
+		store:    store,
+		state:    state.clone(),
+	}
+	store.wrapper = reentrant
+
+	start := time.Now()
+	if err := store.SaveAgentState(context.Background(), state); err != nil {
+		t.Fatalf("outer SaveAgentState: %v", err)
+	}
+	if !errors.Is(reentrant.err, ErrAgentSetupLock) {
+		t.Fatalf("reentrant SaveAgentState = %v, want ErrAgentSetupLock", reentrant.err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("reentrant SaveAgentState took %v; want prompt failure", elapsed)
+	}
+}
+
+func TestSealedFileAgentState_ConcurrentSavesSerializeBeforeWrapKey(t *testing.T) {
+	delegate := &testAgentStateKeyWrapper{}
+	store := testSealedStore(t, delegate)
+	defer func() { _ = store.Close() }()
+	firstRelease := make(chan struct{})
+	wrapper := &serialAgentStateKeyWrapper{
+		delegate:      delegate,
+		firstStarted:  make(chan struct{}),
+		firstRelease:  firstRelease,
+		secondStarted: make(chan struct{}),
+	}
+	store.wrapper = wrapper
+	first := testAgentState(t)
+	second := first.clone()
+	second.DeviceAPIKey = "lv_device_second_serial_save"
+
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- store.SaveAgentState(context.Background(), first) }()
+	waitForTestSignal(t, wrapper.firstStarted, "first SaveAgentState WrapKey")
+	secondDone := make(chan error, 1)
+	go func() { secondDone <- store.SaveAgentState(context.Background(), second) }()
+	select {
+	case <-wrapper.secondStarted:
+		t.Fatal("second SaveAgentState entered WrapKey while the first save held the setup lock")
+	case <-time.After(75 * time.Millisecond):
+	}
+	close(firstRelease)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first SaveAgentState: %v", err)
+	}
+	waitForTestSignal(t, wrapper.secondStarted, "second SaveAgentState WrapKey")
+	if err := <-secondDone; err != nil {
+		t.Fatalf("second SaveAgentState: %v", err)
 	}
 }
 
@@ -951,12 +1194,8 @@ func TestSealedFileAgentState_RejectsInsecureDirectoryAndOversizeFile(t *testing
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
-	store, err := NewSealedFileAgentState(filepath.Join(dir, "state.json"), "test", wrapper)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.SaveAgentState(context.Background(), testAgentState(t)); !errors.Is(err, ErrInsecureAgentStatePermissions) {
-		t.Fatalf("save in 0750 dir = %v", err)
+	if _, err := NewSealedFileAgentState(filepath.Join(dir, "state.json"), "test", wrapper); !errors.Is(err, ErrInsecureAgentStatePermissions) {
+		t.Fatalf("open in 0750 dir = %v", err)
 	}
 
 	dir2 := t.TempDir()
@@ -1090,22 +1329,20 @@ func TestSealedFileAgentState_MetadataIsEnvelopeAuthenticated(t *testing.T) {
 	})
 }
 
-type testSetupLock struct{ closeErr error }
-
-func (l testSetupLock) Close() error { return l.closeErr }
-
 func TestSealedFileAgentState_SetupLockFailuresFailClosed(t *testing.T) {
 	store := testSealedStore(t, &testAgentStateKeyWrapper{})
 	state := testAgentState(t)
 	if err := store.SaveAgentState(context.Background(), state); err != nil {
 		t.Fatal(err)
 	}
-
-	lockCalls := 0
-	store.lockFile = func(context.Context, string) (setupLock, error) {
-		lockCalls++
-		return nil, errors.New("lock unavailable")
+	originalSync := store.dir.impl.hooks.syncFD
+	lockSyncCalls := 0
+	lockFailure := errors.New("lock directory sync unavailable")
+	store.dir.impl.hooks.syncFD = func(int) error {
+		lockSyncCalls++
+		return lockFailure
 	}
+
 	networkCalls := 0
 	refusing := doerFunc(func(*http.Request) (*http.Response, error) {
 		networkCalls++
@@ -1119,9 +1356,13 @@ func TestSealedFileAgentState_SetupLockFailuresFailClosed(t *testing.T) {
 		t.Fatalf("completed runtime fast path must not acquire setup lock: client %v, binding %v, error %v", client, binding, err)
 	}
 	binding.Destroy()
-	if lockCalls != 0 || networkCalls != 0 {
-		t.Fatalf("completed runtime fast path lock/network calls = %d/%d, want 0/0", lockCalls, networkCalls)
+	if lockSyncCalls != 0 {
+		t.Fatalf("completed runtime fast path setup-lock sync calls = %d, want 0", lockSyncCalls)
 	}
+	if networkCalls != 0 {
+		t.Fatalf("completed runtime fast path network calls = %d, want 0", networkCalls)
+	}
+	store.dir.impl.hooks.syncFD = originalSync
 
 	incomplete, err := newAgentState()
 	if err != nil {
@@ -1132,18 +1373,11 @@ func TestSealedFileAgentState_SetupLockFailuresFailClosed(t *testing.T) {
 	if err := store.SaveAgentState(context.Background(), incomplete); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := RegisterAgentRuntime(context.Background(), "enrollment-key", store, WithAgentRuntimeHub(runtimeTestHub())); !errors.Is(err, ErrAgentSetupLock) {
+	store.dir.impl.hooks.syncFD = func(int) error { return lockFailure }
+	if _, _, err := RegisterAgentRuntime(context.Background(), "enrollment-key", store, WithAgentRuntimeHub(runtimeTestHub())); !errors.Is(err, ErrAgentSetupLock) || !errors.Is(err, lockFailure) {
 		t.Fatalf("acquire failure = %v, want ErrAgentSetupLock", err)
 	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	store.lockFile = func(context.Context, string) (setupLock, error) {
-		cancel() // force the post-acquire reload to fail before any network call
-		return testSetupLock{closeErr: errors.New("unlock failed")}, nil
-	}
-	if _, _, err := RegisterAgentRuntime(ctx, "enrollment-key", store, WithAgentRuntimeHub(runtimeTestHub())); !errors.Is(err, ErrAgentSetupLock) || !errors.Is(err, context.Canceled) {
-		t.Fatalf("release failure = %v, want joined ErrAgentSetupLock + context.Canceled", err)
-	}
+	store.dir.impl.hooks.syncFD = originalSync
 }
 
 func TestSealedFileAgentState_RejectsInnerOuterAgentMismatch(t *testing.T) {
@@ -1261,7 +1495,7 @@ func TestSealedFileAgentState_ErrorMessagesDoNotLeakSecrets(t *testing.T) {
 }
 
 func TestSealedFileAgentState_RejectsSymlink(t *testing.T) {
-	dir := t.TempDir()
+	dir := secureAgentStateTestDir(t)
 	target := filepath.Join(dir, "target")
 	if err := os.WriteFile(target, []byte(`{}`), 0o600); err != nil {
 		t.Fatal(err)
@@ -1271,11 +1505,11 @@ func TestSealedFileAgentState_RejectsSymlink(t *testing.T) {
 		t.Skip(err)
 	}
 	store, err := NewSealedFileAgentState(link, "test", &testAgentStateKeyWrapper{})
-	if err != nil {
-		t.Fatal(err)
+	if !errors.Is(err, ErrInvalidAgentState) || !errors.Is(err, ErrAgentStateContinuity) {
+		t.Fatalf("symlink open = %v, want invalid-state continuity error", err)
 	}
-	if _, err := store.LoadAgentState(context.Background()); !errors.Is(err, ErrInvalidAgentState) {
-		t.Fatalf("symlink load = %v, want ErrInvalidAgentState", err)
+	if store != nil {
+		t.Fatal("symlink open returned a store")
 	}
 }
 

@@ -175,9 +175,9 @@ var _ = RelayError(relayknock.RelayError{})
 // normalizeRelayError maps a relayknock transport/reply error into the qURL
 // taxonomy. An HTTP-transport fault (*relayknock.RelayError) becomes the public
 // *RelayError view. A malformed-reply fault (relayknock.ErrMalformedReply — a
-// counter/type-mismatch reply Exchange refused above the crypto) is re-wrapped
+// counter/type-mismatch reply Knock refused above the crypto) is re-wrapped
 // under malformedClass, the caller's front-door malformed-reply sentinel
-// (ErrMalformedReply for the portal, ErrRegisterReplyMalformed for enrollment),
+// (for example, ErrMalformedReply for the portal),
 // so a byzantine-relay reply surfaces as a taxonomy error rather than a raw
 // string. Anything else passes through unchanged.
 func normalizeRelayError(err error, malformedClass error) error {

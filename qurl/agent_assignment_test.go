@@ -433,7 +433,7 @@ func TestRunNativeExchangeWipesDecryptedReply(t *testing.T) {
 			var decrypted []byte
 			parseErr := errors.New("parse failed")
 			_, err = runNativeExchange(
-				context.Background(), cfg, endpoint, []byte(`{}`), transport,
+				context.Background(), cfg, endpoint, []byte(`{}`), transport, nil,
 				nativeudp.List,
 				assignmentRetryInfo, newAssignmentRecovery,
 				func(reply []byte, _ time.Time) (*struct{}, error) {
@@ -451,6 +451,39 @@ func TestRunNativeExchangeWipesDecryptedReply(t *testing.T) {
 				t.Fatalf("decrypted reply was not wiped: %q", decrypted)
 			}
 		})
+	}
+}
+
+func TestRunNativeExchangeChecksContinuityBeforeEveryAttempt(t *testing.T) {
+	var slept []time.Duration
+	cfg, err := newAssignmentConfig(deterministicAssignmentOptions(&slept, 3))
+	if err != nil {
+		t.Fatal(err)
+	}
+	continuityErr := errors.New("state continuity lost")
+	transportErr := errors.New("ambiguous transport")
+	beforeCalls := 0
+	exchangeCalls := 0
+	before := func() error {
+		beforeCalls++
+		if beforeCalls == 2 {
+			return continuityErr
+		}
+		return nil
+	}
+	exchange := func(context.Context, nativeudp.Endpoint, []byte, nativeudp.Options) (*relayknock.Reply, error) {
+		exchangeCalls++
+		return nil, transportErr
+	}
+	_, err = runNativeExchange(
+		context.Background(), cfg, nativeudp.Endpoint{}, nil, nativeudp.Options{}, before,
+		exchange,
+		func(error) (time.Duration, bool) { return 0, true },
+		newAssignmentRecovery,
+		func([]byte, time.Time) (*struct{}, error) { return &struct{}{}, nil },
+	)
+	if !errors.Is(err, continuityErr) || beforeCalls != 2 || exchangeCalls != 1 {
+		t.Fatalf("result = %v, before/exchange calls = %d/%d, want continuity failure before retry 2", err, beforeCalls, exchangeCalls)
 	}
 }
 
@@ -908,7 +941,10 @@ func TestHubAssignmentRejectsInvalidInputsBeforeIO(t *testing.T) {
 		{name: "missing hub", agentID: "agent-conform", credential: "valid", transport: validTransport},
 		{name: "IP hub", hub: HubBootstrap{Host: "203.0.113.1", Port: standardNHPUDPPort, ServerPublicKeyB64: validHub.ServerPublicKeyB64}, agentID: "agent-conform", credential: "valid", transport: validTransport},
 		{name: "AWS hub", hub: HubBootstrap{Host: "internal-hub.elb.amazonaws.com", Port: standardNHPUDPPort, ServerPublicKeyB64: validHub.ServerPublicKeyB64}, agentID: "agent-conform", credential: "valid", transport: validTransport},
-		{name: "unsupported port", hub: HubBootstrap{Host: validHub.Host, Port: 443, ServerPublicKeyB64: validHub.ServerPublicKeyB64}, agentID: "agent-conform", credential: "valid", transport: validTransport},
+		// 62206 was the original NHP port. It has to stay rejected: an agent that
+		// still reaches the old port is exactly the stale-config case the pin exists
+		// to catch, and 443 is now the only accepted value.
+		{name: "unsupported port", hub: HubBootstrap{Host: validHub.Host, Port: 62206, ServerPublicKeyB64: validHub.ServerPublicKeyB64}, agentID: "agent-conform", credential: "valid", transport: validTransport},
 		{name: "low-order key", hub: HubBootstrap{Host: validHub.Host, Port: standardNHPUDPPort, ServerPublicKeyB64: lowOrderTestNHPServerPublicKeyB64}, agentID: "agent-conform", credential: "valid", transport: validTransport},
 		{name: "invalid agent id", hub: validHub, agentID: "Bad_ID", credential: "valid", transport: validTransport},
 		{name: "invalid credential", hub: validHub, agentID: "agent-conform", credential: " secret ", transport: validTransport},
@@ -1040,7 +1076,7 @@ func TestSameAgentAssignmentComparesLeaseInstant(t *testing.T) {
 		CellID: "cell0", AssignmentGeneration: 1, EndpointRevision: 2,
 		LeaseExpiresAt: assignmentFixtureNow,
 		Endpoint: NHPUDPEndpoint{
-			Host: "cell0.nhp.layerv.ai", Port: 62206,
+			Host: "cell0.nhp.layerv.ai", Port: standardNHPUDPPort,
 			ServerPublicKeyB64: validTestNHPServerPublicKeyB64,
 		},
 	}
@@ -1326,5 +1362,48 @@ func TestAssignmentTicketMatchesReleasedConformanceBoundary(t *testing.T) {
 				t.Fatalf("non-printable-ASCII ticket %q accepted", ticket)
 			}
 		})
+	}
+}
+
+// A Hub that says "a move is in flight" is describing a transient condition, so
+// the bounded operation waits it out instead of making every caller hand-write
+// the retry. Terminal policy results must stay terminal.
+func TestAssignmentRetryClasses(t *testing.T) {
+	tests := []struct {
+		name      string
+		err       error
+		retryable bool
+	}{
+		{name: "transport", err: nativeudp.ErrTransport, retryable: true},
+		{name: "resolve", err: nativeudp.ErrResolve, retryable: true},
+		{name: "unavailable 52200", err: &AssignmentError{Code: "52200", kind: ErrAssignmentUnavailable}, retryable: true},
+		{name: "rate limited 52204", err: &AssignmentError{Code: "52204", RetryAfter: time.Second, kind: ErrAssignmentRateLimited}, retryable: true},
+		{name: "reassignment in progress 52202", err: &AssignmentError{Code: "52202", kind: ErrAssignmentReassignmentRequired}, retryable: true},
+		{name: "identity rejected 52201", err: &AssignmentError{Code: "52201", kind: ErrAssignmentIdentityRejected}},
+		{name: "quota exceeded 52203", err: &AssignmentError{Code: "52203", kind: ErrAssignmentQuotaExceeded}},
+		{name: "request rejected 52205", err: &AssignmentError{Code: "52205", kind: ErrAssignmentRequestRejected}},
+		{name: "unauthenticated server", err: nativeudp.ErrServerUnauthenticated},
+		{name: "authenticated malformed", err: ErrAssignmentInvalidResponse},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			if _, retryable := assignmentRetryInfo(testCase.err); retryable != testCase.retryable {
+				t.Fatalf("retryable = %t, want %t", retryable, testCase.retryable)
+			}
+		})
+	}
+}
+
+// 52202 stays retryable without loosening its wire grammar: a producer that
+// sends retryAfterSeconds on it is still a contract violation.
+func TestAssignmentReassignmentRetryKeepsWireGrammar(t *testing.T) {
+	body := []byte(`{"errCode":"52202","retryAfterSeconds":5}`)
+	_, err := parseAssignmentEnvelope(body, false)
+	if !errors.Is(err, ErrAssignmentInvalidResponse) {
+		t.Fatalf("52202 with retryAfterSeconds = %v, want ErrAssignmentInvalidResponse", err)
+	}
+	valid, err := parseAssignmentEnvelope([]byte(`{"errCode":"52202"}`), false)
+	if valid != nil || !errors.Is(err, ErrAssignmentReassignmentRequired) {
+		t.Fatalf("bare 52202 = %v/%v, want ErrAssignmentReassignmentRequired", valid, err)
 	}
 }

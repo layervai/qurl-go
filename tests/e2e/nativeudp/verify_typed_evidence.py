@@ -30,6 +30,14 @@ SECRET_VALUE_PATTERNS = (
 MAX_CANONICAL_OBSERVATION_BYTES = 4096
 MAX_DEPTH = 5
 MAX_NODES = 128
+STATIC_NHP_SCENARIOS = frozenset(
+    {
+        "orchestrator.real_hub_authority_and_two_cells",
+        "retirement.generated_artifact_parity",
+        "retirement.nhp_registrar_surface_state",
+        "retirement.terraform_saved_plan_and_live_state",
+    }
+)
 
 
 def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -119,7 +127,9 @@ def validate_sanitized_observation(observation: Any) -> bytes:
     return encoded
 
 
-def validate_contract(inventory: Any, contract: Any) -> tuple[list[str], dict[str, list[str]]]:
+def validate_contract(
+    inventory: Any, contract: Any
+) -> tuple[list[str], dict[str, list[str]], dict[str, dict[str, Any]]]:
     if not isinstance(inventory, dict) or not isinstance(inventory.get("scenarios"), list):
         raise ValueError("inventory has no scenario array")
     if not isinstance(contract, dict) or set(contract) != {
@@ -146,14 +156,14 @@ def validate_contract(inventory: Any, contract: Any) -> tuple[list[str], dict[st
             not isinstance(kind, str)
             or IDENTIFIER_PATTERN.fullmatch(kind) is None
             or not isinstance(kind_contract, dict)
-            or set(kind_contract) != {"exact_observation"}
-            or kind_contract["exact_observation"] != {"verified": True}
+            or kind_contract != {"observation_schema": "owner_bound_v1"}
         ):
             raise ValueError(f"typed evidence kind schema is invalid for {kind!r}")
         kind_contracts[kind] = kind_contract
 
     keys: list[str] = []
     seen: set[str] = set()
+    inventory_rows: dict[str, dict[str, Any]] = {}
     for row in inventory["scenarios"]:
         if not isinstance(row, dict) or not isinstance(row.get(key_field), str):
             raise ValueError("inventory scenario key is invalid")
@@ -162,6 +172,7 @@ def validate_contract(inventory: Any, contract: Any) -> tuple[list[str], dict[st
             raise ValueError(f"duplicate inventory scenario key: {scenario_key}")
         seen.add(scenario_key)
         keys.append(scenario_key)
+        inventory_rows[scenario_key] = row
     if set(contract["scenarios"]) != seen:
         missing = sorted(seen - set(contract["scenarios"]))
         extra = sorted(set(contract["scenarios"]) - seen)
@@ -183,18 +194,74 @@ def validate_contract(inventory: Any, contract: Any) -> tuple[list[str], dict[st
     used_kinds = {kind for kinds in required.values() for kind in kinds}
     if set(kind_contracts) != used_kinds:
         raise ValueError("typed evidence kind schemas must exactly cover the required kinds")
-    return sorted(keys), required
+    return sorted(keys), required, inventory_rows
+
+
+def expected_observation(
+    *,
+    inventory_row: dict[str, Any],
+    scenario_key: str,
+    kind: str,
+    observation: Any,
+) -> dict[str, Any]:
+    owner = inventory_row.get("owner")
+    if owner == "qurl-go":
+        expected = {
+            "evidence_kind": kind,
+            "outcome": "pass",
+            "producer": "layervai/qurl-go",
+            "scenario_key": scenario_key,
+            "test_name": inventory_row.get("test_name"),
+            "verified": True,
+        }
+        if observation != expected:
+            raise ValueError(
+                f"qurl-go observation is not bound to {scenario_key}/{kind}"
+            )
+        return expected
+
+    if owner == "nhp-orchestrator":
+        if (
+            not isinstance(observation, dict)
+            or set(observation)
+            != {
+                "evidence_kind",
+                "producer",
+                "producer_run_id",
+                "row_sha256",
+                "scenario_key",
+                "source_sha",
+                "verified",
+            }
+            or observation.get("evidence_kind") != kind
+            or observation.get("producer") != "layervai/nhp"
+            or observation.get("scenario_key") != scenario_key
+            or observation.get("verified") is not True
+            or type(observation.get("producer_run_id")) is not int
+            or observation["producer_run_id"] < 1
+            or not isinstance(observation.get("row_sha256"), str)
+            or re.fullmatch(r"[0-9a-f]{64}", observation["row_sha256"]) is None
+            or not isinstance(observation.get("source_sha"), str)
+            or re.fullmatch(r"[0-9a-f]{40}", observation["source_sha"]) is None
+        ):
+            raise ValueError(
+                f"NHP observation is not bound to {scenario_key}/{kind}"
+            )
+        return observation
+
+    raise ValueError(
+        f"typed evidence producer for owner {owner!r} is not accepted by qurl-go"
+    )
 
 
 def verify(
     inventory_path: Path,
     contract_path: Path,
     observations_path: Path,
-) -> tuple[bool, list[dict[str, Any]]]:
+) -> tuple[bool, bool, list[dict[str, Any]]]:
     inventory = load_document(inventory_path)
     contract = load_document(contract_path)
-    scenario_keys, required = validate_contract(inventory, contract)
-    kind_contracts = contract["evidence_kinds"]
+    scenario_keys, required, inventory_rows = validate_contract(inventory, contract)
     observed: dict[str, dict[str, dict[str, Any]]] = {key: {} for key in scenario_keys}
 
     if observations_path.exists():
@@ -221,9 +288,12 @@ def verify(
             if kind in observed[scenario_key]:
                 raise ValueError(f"duplicate typed evidence kind {kind!r} for {scenario_key}")
             canonical_observation = validate_sanitized_observation(record["observation"])
-            exact_observation = kind_contracts[kind]["exact_observation"]
-            if record["observation"] != exact_observation:
-                raise ValueError(f"typed evidence observation does not prove success for {scenario_key}/{kind}")
+            expected_observation(
+                inventory_row=inventory_rows[scenario_key],
+                scenario_key=scenario_key,
+                kind=kind,
+                observation=record["observation"],
+            )
             expected_digest = hashlib.sha256(canonical_observation).hexdigest()
             if not isinstance(digest, str) or digest != expected_digest:
                 raise ValueError(f"typed evidence digest mismatch for {scenario_key}/{kind}")
@@ -234,18 +304,27 @@ def verify(
             }
 
     result: list[dict[str, Any]] = []
-    complete = True
+    producer_complete = True
+    aggregate_complete = True
     for scenario_key in scenario_keys:
         kinds = observed[scenario_key]
-        if sorted(kinds) != required[scenario_key]:
-            complete = False
+        owner = inventory_rows[scenario_key].get("owner")
+        expected_kinds = (
+            required[scenario_key]
+            if owner == "qurl-go" or scenario_key in STATIC_NHP_SCENARIOS
+            else []
+        )
+        if owner == "qurl-go" and sorted(kinds) != required[scenario_key]:
+            producer_complete = False
+        if sorted(kinds) != expected_kinds:
+            aggregate_complete = False
         result.append(
             {
                 "evidence": [kinds[kind] for kind in sorted(kinds)],
                 "scenario_key": scenario_key,
             }
         )
-    return complete, result
+    return producer_complete, producer_complete and aggregate_complete, result
 
 
 def main() -> int:
@@ -257,10 +336,20 @@ def main() -> int:
     parser.add_argument("--allow-incomplete", action="store_true")
     args = parser.parse_args()
     try:
-        complete, scenarios = verify(args.inventory, args.contract, args.observations)
-        args.output.write_bytes(canonical_json({"complete": complete, "scenarios": scenarios}))
-        if not complete and not args.allow_incomplete:
-            raise ValueError("typed evidence is incomplete")
+        producer_complete, aggregate_complete, scenarios = verify(
+            args.inventory, args.contract, args.observations
+        )
+        args.output.write_bytes(
+            canonical_json(
+                {
+                    "aggregate_complete": aggregate_complete,
+                    "producer_complete": producer_complete,
+                    "scenarios": scenarios,
+                }
+            )
+        )
+        if not producer_complete and not args.allow_incomplete:
+            raise ValueError("producer-owned typed evidence is incomplete")
     except (OSError, ValueError, TypeError, json.JSONDecodeError) as error:
         print(f"typed evidence verification failed: {error}", file=sys.stderr)
         return 1

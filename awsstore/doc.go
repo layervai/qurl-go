@@ -11,6 +11,9 @@
 //
 // # Stores
 //
+//   - [KMSAgentStateKeyWrapper] wraps the data-encryption key used by
+//     [qurl.SealedFileAgentStateStore] directly with one AWS KMS key. The local
+//     state file remains an authenticated ciphertext envelope.
 //   - [SecretsManagerStore] persists the state as the SecretString of an AWS
 //     Secrets Manager secret. Best when the agent identity is a first-class
 //     secret you want rotation hooks, resource policies, and CloudTrail data

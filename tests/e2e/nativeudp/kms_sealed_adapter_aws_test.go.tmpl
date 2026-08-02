@@ -1,0 +1,28 @@
+//go:build qurl_sandbox_kms
+
+package nativeudp_test
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/kms"
+
+	"github.com/layervai/qurl-go/awsstore"
+	"github.com/layervai/qurl-go/qurl"
+)
+
+func init() {
+	sandboxKMSWrapperFactory = func(ctx context.Context, keyID string) (qurl.AgentStateKeyWrapper, error) {
+		cfg, err := config.LoadDefaultConfig(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("load AWS configuration: %w", err)
+		}
+		wrapper, err := awsstore.NewKMSAgentStateKeyWrapper(kms.NewFromConfig(cfg), keyID)
+		if err != nil {
+			return nil, err
+		}
+		return wrapper, nil
+	}
+}

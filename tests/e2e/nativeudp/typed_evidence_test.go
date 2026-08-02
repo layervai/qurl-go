@@ -16,11 +16,16 @@ import (
 )
 
 var approvedArtifactUploadPaths = []string{
+	"${{ runner.temp }}/deployment-runtime-inputs.json",
 	"${{ runner.temp }}/native-udp-sandbox.evidence.json",
+	"${{ runner.temp }}/runtime-probe-observations.json",
 	"${{ runner.temp }}/sandbox-deployment-manifest.json",
 	"${{ runner.temp }}/pre_retirement_scenarios.json",
 	"${{ runner.temp }}/retired_lifecycle_surface.json",
+	"${{ runner.temp }}/typed_evidence_contract.json",
 }
+
+const reviewedTypedEvidenceContractRawSHA256 = "f4b37aceb2dd55f2c1cf6d7ec4e955cfeb69297ff6151b565935d03d01f65d08"
 
 func canonicalTypedEvidenceJSON(t *testing.T, value any) []byte {
 	t.Helper()
@@ -46,6 +51,17 @@ func wireTraceRecord(t *testing.T, observation map[string]any) map[string]any {
 	}
 }
 
+func alphaBoundObservation() map[string]any {
+	return map[string]any{
+		"evidence_kind": "wire_trace",
+		"outcome":       "pass",
+		"producer":      "layervai/qurl-go",
+		"scenario_key":  "alpha",
+		"test_name":     "TestAlpha",
+		"verified":      true,
+	}
+}
+
 func runTypedEvidenceVerifier(t *testing.T, observations []byte, allowIncomplete bool) ([]byte, error) {
 	t.Helper()
 	root := t.TempDir()
@@ -53,10 +69,10 @@ func runTypedEvidenceVerifier(t *testing.T, observations []byte, allowIncomplete
 	contract := filepath.Join(root, "contract.json")
 	observationPath := filepath.Join(root, "observations.jsonl")
 	output := filepath.Join(root, "output.json")
-	if err := os.WriteFile(inventory, []byte(`{"gate":"test_gate","scenarios":[{"id":"alpha"}]}`), 0o600); err != nil {
+	if err := os.WriteFile(inventory, []byte(`{"gate":"test_gate","scenarios":[{"id":"alpha","owner":"qurl-go","test_name":"TestAlpha"}]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(contract, []byte(`{"evidence_kinds":{"wire_trace":{"exact_observation":{"verified":true}}},"gate":"test_gate","scenario_key_field":"id","scenarios":{"alpha":["wire_trace"]},"schema_version":1}`), 0o600); err != nil {
+	if err := os.WriteFile(contract, []byte(`{"evidence_kinds":{"wire_trace":{"observation_schema":"owner_bound_v1"}},"gate":"test_gate","scenario_key_field":"id","scenarios":{"alpha":["wire_trace"]},"schema_version":1}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if observations != nil {
@@ -89,7 +105,7 @@ func runTypedEvidenceVerifier(t *testing.T, observations []byte, allowIncomplete
 
 func validTypedEvidenceRecord(t *testing.T) []byte {
 	t.Helper()
-	return canonicalTypedEvidenceJSON(t, wireTraceRecord(t, map[string]any{"verified": true}))
+	return canonicalTypedEvidenceJSON(t, wireTraceRecord(t, alphaBoundObservation()))
 }
 
 func TestTypedEvidenceVerifierAcceptsExactCanonicalEvidence(t *testing.T) {
@@ -98,8 +114,9 @@ func TestTypedEvidenceVerifierAcceptsExactCanonicalEvidence(t *testing.T) {
 		t.Fatalf("verifier rejected valid evidence: %v: %s", err, raw)
 	}
 	var result struct {
-		Complete  bool `json:"complete"`
-		Scenarios []struct {
+		AggregateComplete bool `json:"aggregate_complete"`
+		ProducerComplete  bool `json:"producer_complete"`
+		Scenarios         []struct {
 			Evidence []struct {
 				Observation       map[string]any `json:"observation"`
 				ObservationSHA256 string         `json:"observation_sha256"`
@@ -109,7 +126,8 @@ func TestTypedEvidenceVerifierAcceptsExactCanonicalEvidence(t *testing.T) {
 	if err := json.Unmarshal(raw, &result); err != nil {
 		t.Fatal(err)
 	}
-	if !result.Complete || len(result.Scenarios) != 1 || len(result.Scenarios[0].Evidence) != 1 {
+	if !result.AggregateComplete || !result.ProducerComplete ||
+		len(result.Scenarios) != 1 || len(result.Scenarios[0].Evidence) != 1 {
 		t.Fatalf("unexpected typed evidence result: %s", raw)
 	}
 	if result.Scenarios[0].Evidence[0].ObservationSHA256 == "" || result.Scenarios[0].Evidence[0].Observation["verified"] != true {
@@ -166,17 +184,25 @@ func TestTypedEvidenceVerifierAllowsHonestIncompleteArtifact(t *testing.T) {
 		t.Fatalf("allow-incomplete rejected missing evidence: %v: %s", err, raw)
 	}
 	var result struct {
-		Complete bool `json:"complete"`
+		AggregateComplete bool `json:"aggregate_complete"`
+		ProducerComplete  bool `json:"producer_complete"`
 	}
 	if err := json.Unmarshal(raw, &result); err != nil {
 		t.Fatal(err)
 	}
-	if result.Complete {
+	if result.AggregateComplete || result.ProducerComplete {
 		t.Fatalf("missing typed evidence was marked complete: %s", raw)
 	}
 }
 
 func TestRepositoryTypedEvidenceContractCoversEveryScenario(t *testing.T) {
+	contractRaw, err := os.ReadFile("typed_evidence_contract.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := typedEvidenceDigest(contractRaw); got != reviewedTypedEvidenceContractRawSHA256 {
+		t.Fatalf("typed evidence contract raw SHA-256 = %s, want reviewed %s", got, reviewedTypedEvidenceContractRawSHA256)
+	}
 	output := filepath.Join(t.TempDir(), "typed-evidence.json")
 	command := exec.CommandContext(
 		t.Context(),
@@ -192,8 +218,9 @@ func TestRepositoryTypedEvidenceContractCoversEveryScenario(t *testing.T) {
 		t.Fatalf("repository typed evidence contract is invalid: %v: %s", err, combined)
 	}
 	var result struct {
-		Complete  bool             `json:"complete"`
-		Scenarios []map[string]any `json:"scenarios"`
+		AggregateComplete bool             `json:"aggregate_complete"`
+		ProducerComplete  bool             `json:"producer_complete"`
+		Scenarios         []map[string]any `json:"scenarios"`
 	}
 	raw, err := os.ReadFile(output)
 	if err != nil {
@@ -202,9 +229,195 @@ func TestRepositoryTypedEvidenceContractCoversEveryScenario(t *testing.T) {
 	if err := json.Unmarshal(raw, &result); err != nil {
 		t.Fatal(err)
 	}
-	if result.Complete || len(result.Scenarios) != 68 {
-		t.Fatalf("repository typed evidence coverage = complete %t, scenarios %d, want false/68", result.Complete, len(result.Scenarios))
+	if result.AggregateComplete || result.ProducerComplete || len(result.Scenarios) != 68 {
+		t.Fatalf("repository typed evidence coverage = producer_complete %t, scenarios %d, want false/68", result.ProducerComplete, len(result.Scenarios))
 	}
+}
+
+func TestRepositoryTypedEvidenceSeparates46Owned4Static18Unobserved(t *testing.T) {
+	var inventory scenarioInventory
+	raw, err := os.ReadFile("pre_retirement_scenarios.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &inventory); err != nil {
+		t.Fatal(err)
+	}
+	var contract struct {
+		Scenarios map[string][]string `json:"scenarios"`
+	}
+	raw, err = os.ReadFile("typed_evidence_contract.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &contract); err != nil {
+		t.Fatal(err)
+	}
+
+	staticNHP := map[string]struct{}{
+		"orchestrator.real_hub_authority_and_two_cells":  {},
+		"retirement.generated_artifact_parity":           {},
+		"retirement.nhp_registrar_surface_state":         {},
+		"retirement.terraform_saved_plan_and_live_state": {},
+	}
+	var observations bytes.Buffer
+	appendRecord := func(scenario scenarioInventoryRow, observation map[string]any) {
+		t.Helper()
+		kinds := contract.Scenarios[scenario.ID]
+		if len(kinds) != 1 {
+			t.Fatalf("scenario %q evidence kinds = %q, want exactly one", scenario.ID, kinds)
+		}
+		observationRaw := canonicalTypedEvidenceJSON(t, observation)
+		record := map[string]any{
+			"kind":               kinds[0],
+			"observation":        observation,
+			"observation_sha256": typedEvidenceDigest(observationRaw),
+			"scenario_key":       scenario.ID,
+		}
+		observations.Write(canonicalTypedEvidenceJSON(t, record))
+		observations.WriteByte('\n')
+	}
+
+	var connectorRow scenarioInventoryRow
+	for _, scenario := range inventory.Scenarios {
+		kind := contract.Scenarios[scenario.ID][0]
+		switch scenario.Owner {
+		case "qurl-go":
+			appendRecord(scenario, map[string]any{
+				"evidence_kind": kind,
+				"outcome":       "pass",
+				"producer":      "layervai/qurl-go",
+				"scenario_key":  scenario.ID,
+				"test_name":     scenario.TestName,
+				"verified":      true,
+			})
+		case "nhp-orchestrator":
+			if _, ok := staticNHP[scenario.ID]; ok {
+				appendRecord(scenario, map[string]any{
+					"evidence_kind":   kind,
+					"producer":        "layervai/nhp",
+					"producer_run_id": 999,
+					"row_sha256":      strings.Repeat("d", 64),
+					"scenario_key":    scenario.ID,
+					"source_sha":      strings.Repeat("b", 40),
+					"verified":        true,
+				})
+			}
+		case "qurl-connector":
+			if connectorRow.ID == "" {
+				connectorRow = scenario
+			}
+		}
+	}
+
+	result := runRepositoryTypedEvidenceVerifier(t, observations.Bytes(), true)
+	if !result.AggregateComplete || !result.ProducerComplete || len(result.Scenarios) != 68 {
+		t.Fatalf("aggregate shape = aggregate_complete %t, producer_complete %t, rows %d",
+			result.AggregateComplete, result.ProducerComplete, len(result.Scenarios))
+	}
+	owned, externalStatic, empty := 0, 0, 0
+	for _, row := range result.Scenarios {
+		switch len(row.Evidence) {
+		case 0:
+			empty++
+		case 1:
+			if _, ok := staticNHP[row.ScenarioKey]; ok {
+				externalStatic++
+			} else {
+				owned++
+			}
+		default:
+			t.Fatalf("scenario %q emitted %d evidence items", row.ScenarioKey, len(row.Evidence))
+		}
+	}
+	if owned != 46 || externalStatic != 4 || empty != 18 {
+		t.Fatalf("typed evidence partition = %d owned/%d static/%d empty, want 46/4/18", owned, externalStatic, empty)
+	}
+
+	lines := bytes.Split(bytes.TrimSpace(observations.Bytes()), []byte{'\n'})
+	missingStatic := make([][]byte, 0, len(lines)-1)
+	removedStatic := false
+	for _, line := range lines {
+		if !removedStatic && bytes.Contains(line, []byte(`"scenario_key":"orchestrator.real_hub_authority_and_two_cells"`)) {
+			removedStatic = true
+			continue
+		}
+		missingStatic = append(missingStatic, line)
+	}
+	if !removedStatic {
+		t.Fatal("did not find static NHP observation to remove")
+	}
+	incomplete := runRepositoryTypedEvidenceVerifier(
+		t,
+		append(bytes.Join(missingStatic, []byte{'\n'}), '\n'),
+		true,
+	)
+	if !incomplete.ProducerComplete || incomplete.AggregateComplete {
+		t.Fatalf("missing static NHP evidence = aggregate %t producer %t, want false/true",
+			incomplete.AggregateComplete, incomplete.ProducerComplete)
+	}
+
+	kind := contract.Scenarios[connectorRow.ID][0]
+	appendRecord(connectorRow, map[string]any{
+		"evidence_kind": kind,
+		"outcome":       "pass",
+		"producer":      "layervai/qurl-go",
+		"scenario_key":  connectorRow.ID,
+		"test_name":     connectorRow.TestName,
+		"verified":      true,
+	})
+	runRepositoryTypedEvidenceVerifier(t, observations.Bytes(), false)
+}
+
+type repositoryTypedEvidenceResult struct {
+	AggregateComplete bool `json:"aggregate_complete"`
+	ProducerComplete  bool `json:"producer_complete"`
+	Scenarios         []struct {
+		ScenarioKey string           `json:"scenario_key"`
+		Evidence    []map[string]any `json:"evidence"`
+	} `json:"scenarios"`
+}
+
+func runRepositoryTypedEvidenceVerifier(
+	t *testing.T,
+	observations []byte,
+	wantSuccess bool,
+) repositoryTypedEvidenceResult {
+	t.Helper()
+	observationPath := filepath.Join(t.TempDir(), "observations.jsonl")
+	output := filepath.Join(t.TempDir(), "typed-evidence.json")
+	if err := os.WriteFile(observationPath, observations, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.CommandContext(
+		t.Context(),
+		"python3", "verify_typed_evidence.py",
+		"--inventory", "pre_retirement_scenarios.json",
+		"--contract", "typed_evidence_contract.json",
+		"--observations", observationPath,
+		"--output", output,
+		"--allow-incomplete",
+	)
+	command.Dir = "."
+	combined, err := command.CombinedOutput()
+	if !wantSuccess {
+		if err == nil {
+			t.Fatalf("repository typed evidence verifier accepted forbidden Connector evidence: %s", combined)
+		}
+		return repositoryTypedEvidenceResult{}
+	}
+	if err != nil {
+		t.Fatalf("repository typed evidence verifier failed: %v: %s", err, combined)
+	}
+	raw, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result repositoryTypedEvidenceResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatal(err)
+	}
+	return result
 }
 
 func TestWorkflowMakesTypedEvidenceARequiredGateInput(t *testing.T) {
@@ -223,6 +436,14 @@ func TestWorkflowMakesTypedEvidenceARequiredGateInput(t *testing.T) {
 	for _, snippet := range required {
 		if !bytes.Contains(workflow, snippet) {
 			t.Errorf("workflow does not bind typed evidence with %q", snippet)
+		}
+	}
+	for _, obsolete := range [][]byte{
+		[]byte(`.observation == {"verified": true}`),
+		[]byte("348f299cf43d57826c76c5ef7c8ccc37668b45161b857d4ef09f7125f3381be9"),
+	} {
+		if bytes.Contains(workflow, obsolete) {
+			t.Errorf("workflow retains placeholder-only typed evidence contract %q", obsolete)
 		}
 	}
 	if err := validateArtifactUploadPaths(workflow); err != nil {
