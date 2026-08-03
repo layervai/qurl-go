@@ -10,6 +10,7 @@ import (
 	"io"
 	"math"
 	"net"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -243,6 +244,71 @@ func (e *AssignmentError) Unwrap() error {
 	return e.kind
 }
 
+// ErrEndpointNoReply marks a bounded exchange in which the host resolved and
+// every datagram was written successfully, but no reply of any kind ever came
+// back before the budget ran out.
+//
+// It names an observation, not a cause. Exactly two conditions produce it and
+// the client cannot tell them apart: the server is not running, or the network
+// path drops the datagrams silently — a source-fenced security group, a
+// corporate egress filter, a NAT that never saw a reply to map back. A DROP
+// yields no ICMP and no RST, so on the wire those are identical. Any diagnosis
+// beyond "nothing answered" has to come from the operator's side.
+//
+// It is distinct from nativeudp.ErrResolve (DNS never produced an address),
+// from nativeudp.ErrServerUnauthenticated (a datagram did come back and failed
+// trust), and from ErrInvalidAssignmentConfig (rejected before any I/O).
+var ErrEndpointNoReply = errors.New("qurl: endpoint never replied")
+
+// EndpointNoReplyError reports which logical destination stayed silent, how
+// many attempts were spent, and the final transport cause.
+//
+// When the caller's own context ended the wait, that context error is preserved
+// in the chain: errors.Is(err, context.DeadlineExceeded) still reports true, so
+// existing cancellation handling keeps working. Previously that case returned a
+// bare context.DeadlineExceeded and the destination, the attempt count, and the
+// transport cause were all discarded — a hang indistinguishable from any other
+// timeout in the program.
+type EndpointNoReplyError struct {
+	// Endpoint is the logical destination as configured, e.g.
+	// "hub.nhp.layerv.xyz:443". It is deliberately the DNS name rather than a
+	// resolved address: the name is what the operator has to check.
+	Endpoint string
+	Attempts int
+	Elapsed  time.Duration
+	// Last is the final transport cause, which wraps nativeudp.ErrNoReply.
+	Last error
+	// deadline is the caller's context error when the caller's own deadline or
+	// cancellation ended the wait, and nil when the SDK's internal budget did.
+	deadline error
+}
+
+func (e *EndpointNoReplyError) Error() string {
+	if e == nil {
+		return ErrEndpointNoReply.Error()
+	}
+	return fmt.Sprintf(
+		"qurl: no reply from %s after %d attempt(s) over %s; the host resolved and every datagram was sent, "+
+			"but nothing answered. Either the server is not running or the network path drops UDP to it silently "+
+			"(a source-fenced security group or egress firewall drops without ICMP, which looks identical from here). "+
+			"Verify your source address is permitted to reach %s: %v",
+		e.Endpoint, e.Attempts, e.Elapsed, e.Endpoint, e.Last)
+}
+
+func (e *EndpointNoReplyError) Unwrap() []error {
+	if e == nil {
+		return []error{ErrEndpointNoReply}
+	}
+	unwrapped := []error{ErrEndpointNoReply}
+	if e.Last != nil {
+		unwrapped = append(unwrapped, e.Last)
+	}
+	if e.deadline != nil {
+		unwrapped = append(unwrapped, e.deadline)
+	}
+	return unwrapped
+}
+
 // AssignmentRecoveryRequiredError carries the final failed attempt without
 // losing its typed cause. Callers surface recovery instead of starting an
 // unbounded loop. In particular, a Last cause matching
@@ -472,6 +538,15 @@ func runNativeExchange[T any](ctx context.Context, c *assignmentConfig, endpoint
 	start := c.clock()
 	transactionCtx, cancel := context.WithTimeout(ctx, c.budget)
 	defer cancel()
+	// Reporting a silent endpoint takes two things: at least one attempt that
+	// completed a full send-and-wait with nothing back (lastSilent), and no
+	// attempt that contradicted it (silence). A dial fault, an authenticated
+	// reply, or a rejected datagram all clear silence, because then the endpoint
+	// is demonstrably not just swallowing traffic and the ordinary recovery error
+	// is the honest report.
+	silence := true
+	var lastSilent error
+	observedSilence := func() bool { return silence && lastSilent != nil }
 	for attempt := 1; ; attempt++ {
 		if beforeExchange != nil {
 			if err := beforeExchange(); err != nil {
@@ -488,6 +563,16 @@ func runNativeExchange[T any](ctx context.Context, c *assignmentConfig, endpoint
 			}
 			err = parseErr
 		}
+		switch {
+		case errors.Is(err, nativeudp.ErrNoReply):
+			lastSilent = err
+		case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+			// A deadline firing mid-attempt is the absence of evidence, not
+			// evidence the endpoint would have answered. It must not clear a
+			// silence observation that earlier completed attempts established.
+		default:
+			silence = false
+		}
 		retryAfter, retryable := retryInfo(err)
 		if replyAuthenticated && !retryable {
 			// A parsed authenticated terminal result wins over a retry-budget
@@ -501,9 +586,17 @@ func runNativeExchange[T any](ctx context.Context, c *assignmentConfig, endpoint
 		// accepts or falls through from this rejected datagram.
 		if transactionCtx.Err() != nil {
 			if ctx.Err() != nil {
+				// The caller's own deadline or cancellation ended the wait. Returning
+				// a bare ctx.Err() here discarded the destination, the attempt count,
+				// and the transport cause, so a caller whose deadline matched the
+				// internal budget saw only "context deadline exceeded". Keep the
+				// context error in the chain and name what stayed silent.
+				if observedSilence() {
+					return nil, c.noReply(endpoint, attempt, start, lastSilent, ctx.Err())
+				}
 				return nil, ctx.Err()
 			}
-			return nil, c.recoveryRequired(newRecovery, attempt, start, errors.Join(err, transactionCtx.Err()))
+			return nil, c.recoveryRequired(newRecovery, attempt, start, c.withSilence(endpoint, attempt, start, observedSilence(), errors.Join(err, transactionCtx.Err())))
 		}
 		if !retryable {
 			return nil, err
@@ -513,25 +606,51 @@ func runNativeExchange[T any](ctx context.Context, c *assignmentConfig, endpoint
 		// test clock can therefore report zero. recoveryRequired clamps separately
 		// only when the real transaction deadline proves the budget was exhausted.
 		if attempt == c.maxAttempts || elapsed >= c.budget {
-			return nil, newRecovery(attempt, elapsed, err)
+			return nil, newRecovery(attempt, elapsed, c.withSilence(endpoint, attempt, start, observedSilence(), err))
 		}
 		delay, backoffErr := c.backoff(attempt, retryAfter)
 		if backoffErr != nil {
 			return nil, newRecovery(attempt, elapsed, errors.Join(err, backoffErr))
 		}
 		if delay > c.budget-elapsed {
-			return nil, newRecovery(attempt, elapsed, err)
+			return nil, newRecovery(attempt, elapsed, c.withSilence(endpoint, attempt, start, observedSilence(), err))
 		}
 		if sleepErr := c.sleep(transactionCtx, delay); sleepErr != nil {
 			if ctx.Err() != nil {
+				if observedSilence() {
+					return nil, c.noReply(endpoint, attempt, start, lastSilent, ctx.Err())
+				}
 				return nil, ctx.Err()
 			}
 			if transactionCtx.Err() != nil {
-				return nil, c.recoveryRequired(newRecovery, attempt, start, errors.Join(err, transactionCtx.Err()))
+				return nil, c.recoveryRequired(newRecovery, attempt, start, c.withSilence(endpoint, attempt, start, observedSilence(), errors.Join(err, transactionCtx.Err())))
 			}
 			return nil, sleepErr
 		}
 	}
+}
+
+// noReply builds the typed silent-endpoint error for an exchange in which every
+// attempt was written successfully and none were answered.
+func (c *assignmentConfig) noReply(endpoint nativeudp.Endpoint, attempts int, start time.Time, last, deadline error) error {
+	return &EndpointNoReplyError{
+		Endpoint: net.JoinHostPort(endpoint.Host, strconv.Itoa(endpoint.Port)),
+		Attempts: attempts,
+		Elapsed:  c.elapsedSince(start),
+		Last:     last,
+		deadline: deadline,
+	}
+}
+
+// withSilence enriches a budget-exhaustion cause when the whole exchange was
+// silence. The phase's public recovery type still wraps it, so the existing
+// recovery taxonomy is unchanged and callers additionally gain
+// ErrEndpointNoReply and the destination that stayed quiet.
+func (c *assignmentConfig) withSilence(endpoint nativeudp.Endpoint, attempts int, start time.Time, silence bool, cause error) error {
+	if !silence {
+		return cause
+	}
+	return c.noReply(endpoint, attempts, start, cause, nil)
 }
 
 func (c *assignmentConfig) recoveryRequired(newRecovery recoveryFunc, attempts int, start time.Time, last error) error {
