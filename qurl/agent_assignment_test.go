@@ -584,8 +584,17 @@ func TestHubAssignmentTerminalResultWinsElapsedBudget(t *testing.T) {
 	if !errors.Is(err, ErrAssignmentIdentityRejected) || errors.Is(err, ErrAssignmentRecoveryRequired) {
 		t.Fatalf("concurrent terminal result = %#v, want terminal identity rejection only", err)
 	}
-	if len(server.requestBodies()) != 1 {
-		t.Fatalf("requests = %d, want 1", len(server.requestBodies()))
+	// The client stops at its own retry budget, which can expire before the
+	// server goroutine has recorded the datagram it already received. Poll for
+	// the record rather than reading once: the assertion is that exactly one
+	// request was sent, not that the responder's bookkeeping won the race. The
+	// elapsed bound above is measured before this wait, so it stays honest.
+	deadline := time.Now().Add(2 * time.Second)
+	for len(server.requestBodies()) < 1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := server.requestBodies(); len(got) != 1 {
+		t.Fatalf("requests = %d, want 1", len(got))
 	}
 }
 

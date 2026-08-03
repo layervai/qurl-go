@@ -337,3 +337,36 @@ func topLevelJSONKeyCounts(t *testing.T, body []byte) map[string]int {
 	}
 	return counts
 }
+
+// TestEmptyBodyReplyTypeConfusionIsInert pins the containment argument for the
+// one residual gap in protocol 1.1's header binding. A reply carrying no body
+// performs no body seal, so nothing folds HeaderCommon into an AEAD and an
+// on-path attacker holding the agent's static public key can strip an
+// authenticated reply's sealed body, set any header type, and re-stamp the
+// unkeyed digest. That is only contained while every consumer of an admissible
+// reply type refuses to act on an empty body, so assert it rather than trust it:
+// each type either fails closed or is already refused by the type gate.
+func TestEmptyBodyReplyTypeConfusionIsInert(t *testing.T) {
+	for _, replyType := range []int{
+		relayknock.TypeACK,
+		relayknock.TypeListResult,
+		relayknock.TypeRegisterAck,
+	} {
+		result, err := interpretNativeAgentKnockReply(&relayknock.Reply{Type: replyType}, "res_conform")
+		if result != nil || err == nil {
+			t.Fatalf("empty-body type %d = %#v/%v, want nil result and a rejection", replyType, result, err)
+		}
+		if !errors.Is(err, ErrMalformedReply) {
+			t.Fatalf("empty-body type %d error = %v, want ErrMalformedReply", replyType, err)
+		}
+	}
+
+	// COK is admissible for a knock and short-circuits before the body is read,
+	// so an empty one degrades to the retry-later signal rather than admission.
+	// That is a denial an on-path attacker already has by dropping the datagram,
+	// not an escalation — but it must never read as a successful knock.
+	result, err := interpretNativeAgentKnockReply(&relayknock.Reply{Type: relayknock.TypeCookieChallenge}, "res_conform")
+	if result != nil || !errors.Is(err, ErrServerOverloaded) {
+		t.Fatalf("empty-body COK = %#v/%v, want nil result and ErrServerOverloaded", result, err)
+	}
+}

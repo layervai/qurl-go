@@ -117,6 +117,16 @@ func buildMessage(headerType int, flags uint16, inp *Inputs) ([]byte, error) {
 }
 
 func buildMessageUnchecked(headerType int, flags uint16, inp *Inputs) ([]byte, error) {
+	return buildMessageWithVersion(headerType, flags, protocolVersionMajor, protocolVersionMinor, inp)
+}
+
+// buildMessageWithVersion is buildMessageUnchecked with the stamped HeaderCommon
+// version supplied by the caller. Every production path goes through
+// buildMessageUnchecked; the parameters exist so in-package tests can drive the
+// receive-side version gate with a packet whose version differs from the codec's
+// own. The version bytes are inside the folded HeaderCommon, so a packet built
+// here is self-consistent — the gate rejects it on the version, not on a tag.
+func buildMessageWithVersion(headerType int, flags uint16, major, minor byte, inp *Inputs) ([]byte, error) {
 	if len(inp.ServerStaticPub) != PublicKeySize {
 		return nil, fmt.Errorf("server static pub must be %d bytes, got %d", PublicKeySize, len(inp.ServerStaticPub))
 	}
@@ -176,9 +186,9 @@ func buildMessageUnchecked(headerType int, flags uint16, inp *Inputs) ([]byte, e
 	copy(header[offTimestamp:offTimestamp+timestampSize+gcmTagSize], sealedTs)
 	chainHash.Write(sealedTs)
 
-	// Body AAD = ChainHash3; body key derives from the ts ciphertext (terminal
-	// derivation — evolved chain key discarded).
-	bodyAad := chainHash.Sum(nil)
+	// Body key derives from the ts ciphertext (terminal derivation — evolved
+	// chain key discarded). The AAD is deliberately NOT taken yet: the chain hash
+	// still has to absorb the finalized HeaderCommon below.
 	_, aeadKey = keyGen2(chainKey, sealedTs)
 	body := inp.Body
 	if len(body) > 0 && flags&nhpFlagCompress != 0 {
@@ -194,22 +204,38 @@ func buildMessageUnchecked(headerType int, flags uint16, inp *Inputs) ([]byte, e
 		}
 		body = compressed.Bytes()
 	}
+	// An empty body seals nothing and declares size 0, matching Go encryptBody.
+	payloadSize := 0
+	if len(body) > 0 {
+		payloadSize = len(body) + gcmTagSize
+	}
+	if payloadSize > maxSealedBodySize {
+		return nil, fmt.Errorf("knock body too large: sealed %d bytes exceeds %d", payloadSize, maxSealedBodySize)
+	}
+
+	// HeaderCommon — set everything before both the fold below and the digest,
+	// which covers header[0:208]. The payload size is only known here, after
+	// compression, which is why the header cannot be finalized any earlier.
+	setVersion(header, major, minor)
+	setCounter(header, inp.Counter)
+	setFlag(header, flags)
+	setTypeAndPayloadSize(header, headerType, payloadSize, inp.Preamble)
+
+	// ChainHash3 -> ChainHash4: fold the serialized HeaderCommon so the body tag
+	// authenticates preamble, type, payload size, version, flags and counter. The
+	// body seal is the first AEAD that can carry them, and the fold uses the bytes
+	// as written (setFlag masks its input), so the responder — which folds what it
+	// received — reproduces this AAD exactly.
+	chainHash.Write(header[:headerCommonSize])
+	bodyAad := chainHash.Sum(nil)
+
 	var sealedBody []byte
-	if len(body) > 0 { // empty body ⇒ no seal, size 0 (matches Go encryptBody)
+	if payloadSize > 0 {
 		sealedBody, err = aeadSeal(aeadKey, nonce, body, bodyAad)
 		if err != nil {
 			return nil, fmt.Errorf("seal body: %w", err)
 		}
 	}
-	if len(sealedBody) > maxSealedBodySize {
-		return nil, fmt.Errorf("knock body too large: sealed %d bytes exceeds %d", len(sealedBody), maxSealedBodySize)
-	}
-
-	// HeaderCommon — set everything before the digest, which covers header[0:208].
-	setVersion(header, protocolVersionMajor, protocolVersionMinor)
-	setCounter(header, inp.Counter)
-	setFlag(header, flags)
-	setTypeAndPayloadSize(header, headerType, len(sealedBody), inp.Preamble)
 	copy(header[offDigest:offDigest+hashSize], headerDigest(inp.ServerStaticPub, header, inp.Cookie))
 
 	packet := make([]byte, HeaderSize+len(sealedBody))
@@ -252,21 +278,19 @@ func DecryptReplyMessage(devicePriv, expectedServerStaticPub, packet []byte) (*M
 // Everything outside {0, nhpFlagCompress} is refused, in particular
 // hubLSTCookieProofFlag: that bit is initiator-only and must never ride a reply.
 //
-// This gate restricts an UNAUTHENTICATED field. The flag word is covered only by
-// the unkeyed header digest, which anyone holding the agent's static public key
-// can recompute, so narrowing the admitted set shrinks what a tampered flag word
-// can reach but does not authenticate it. Authenticating it requires folding the
-// header into the AEAD AAD — a coordinated wire change across the NHP server and
-// the conformance vectors, tracked separately.
+// Since protocol 1.1 the flag word is AUTHENTICATED: HeaderCommon is folded into
+// the body AAD, so a tampered flag word fails the body open before this gate ever
+// runs. The gate is therefore a policy fence, not an integrity one — it bounds
+// what a legitimately-keyed responder is allowed to say, and it remains the only
+// check on a reply whose body is empty, where no AEAD covers the header at all.
 //
-// The assignment path's stricter flags-must-be-zero pin stays in nativeudp: it
-// sees a profile this shared gate cannot. The two also report different classes,
-// so the pin is not redundant with this gate. A rejection HERE is a decrypt-stage
+// The assignment path's stricter flags-must-be-zero pin stays in nativeudp and is
+// not redundant with this gate: it applies to one profile this shared gate cannot
+// see, and the two report different classes. A rejection HERE is a decrypt-stage
 // failure, which nativeudp folds into ErrServerUnauthenticated — its documented
-// class for a datagram that opened but is not a usable reply, already covering a
-// non-reply header type rejected just above. Its own gate reports
-// ErrMalformedReply. Neither class is retried, so the split is naming, not
-// behavior.
+// class for a datagram that opened but is not a usable reply, already covering the
+// non-reply header type rejected just above. Its own pin reports ErrMalformedReply.
+// Neither class is retried, so the split is naming, not behavior.
 func acceptReplyMessage(msg *Message) (*Message, error) {
 	if msg == nil {
 		return nil, fmt.Errorf("%w: decrypted message is nil", ErrMalformedReply)
@@ -327,11 +351,15 @@ func decryptMessage(devicePriv, expectedServerStaticPub, cookie, packet []byte) 
 	if len(packet) > PacketBufferSize {
 		return nil, fmt.Errorf("reply too long: %d bytes > %d-byte buffer", len(packet), PacketBufferSize)
 	}
-	// The version rides in the clear, so this is a framing gate, not an integrity
-	// one: it refuses a packet whose layout this codec cannot claim to parse
-	// before any key agreement runs. Only major is gated — see getVersion.
-	if major, _ := getVersion(packet); major != protocolVersionMajor {
-		return nil, fmt.Errorf("unsupported NHP protocol major version %d, want %d", major, protocolVersionMajor)
+	// Framing gate ahead of any key agreement: it refuses a packet whose layout
+	// or transcript this codec cannot claim to parse. Minor is floored, not
+	// pinned — a sender below minProtocolVersionMinor folds a shorter body AAD,
+	// so its tag can never verify here, and saying so beats the opaque "open
+	// body" failure it would otherwise produce. Newer minors are still admitted;
+	// see getVersion.
+	if major, minor := getVersion(packet); major != protocolVersionMajor || minor < minProtocolVersionMinor {
+		return nil, fmt.Errorf("unsupported NHP protocol version %d.%d, want %d.%d or a later minor",
+			major, minor, protocolVersionMajor, minProtocolVersionMinor)
 	}
 	header := packet[0:HeaderSize]
 	sealedBody := packet[HeaderSize:]
@@ -389,7 +417,11 @@ func decryptMessage(devicePriv, expectedServerStaticPub, cookie, packet []byte) 
 	}
 	chainHash.Write(tsField)
 
-	// Body AAD = ChainHash3; body key from the ts ciphertext.
+	// ChainHash3 -> ChainHash4: fold the HeaderCommon exactly as received, so the
+	// body tag verifies only against the header the sender sealed under. Any
+	// in-flight edit to preamble, type, payload size, version, flags or counter
+	// changes this AAD and fails the open below.
+	chainHash.Write(header[:headerCommonSize])
 	bodyAad := chainHash.Sum(nil)
 	_, bodyKey := keyGen2(chainKey, tsField)
 	var body []byte
@@ -410,9 +442,18 @@ func decryptMessage(devicePriv, expectedServerStaticPub, cookie, packet []byte) 
 	// ignored: the body AEAD opened above already fences the actual sealedBody
 	// bytes, so the header's self-described size is not load-bearing for integrity
 	// and needs no cross-check against len(sealedBody).
-	// This generic codec does NOT gate the header type — the type rides outside
-	// the AEAD, so a garbage type decrypts fine. DecryptReplyMessage applies the
-	// single reply policy; responder/test code owns the initiator policy.
+	//
+	// The type below is authenticated for any message with a body — it is inside
+	// the folded HeaderCommon — but this codec still applies no type POLICY: an
+	// authentic sender may legitimately send a type this caller does not want.
+	// DecryptReplyMessage applies the single reply policy; responder/test code
+	// owns the initiator policy. Those gates also remain the only header check on
+	// an EMPTY-body message: with no body there is no AEAD to carry the AAD, so
+	// its header is still covered only by the unkeyed digest. That residual gap
+	// is contained rather than exploitable — the compress bit is inert with no
+	// body to inflate, the counter is bound as the GCM nonce, and the type is
+	// confined by the caller's allowlist — and closing it needs a header-only
+	// AEAD, i.e. another wire change.
 	typ, _ := getTypeAndPayloadSize(header)
 	return &Message{
 		Type:           typ,

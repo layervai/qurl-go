@@ -40,8 +40,18 @@ const (
 	nhpFlagCompress       = 1 << 1
 	hubLSTCookieProofFlag = 1 << 2
 
+	// protocolVersionMinor 1 is the transcript that folds the serialized
+	// HeaderCommon into the chain hash before the body AAD. Under 1.0 those bytes
+	// were covered only by the unkeyed header digest, which anyone holding the
+	// peer's static PUBLIC key can recompute.
 	protocolVersionMajor = 1
-	protocolVersionMinor = 0
+	protocolVersionMinor = 1
+
+	// minProtocolVersionMinor is the oldest minor whose body AAD this codec can
+	// reproduce. Raise it in lockstep with any further AAD change; a sender below
+	// it must be refused on the version, because its body tag would otherwise
+	// fail as an unexplained AEAD error mid-rollout.
+	minProtocolVersionMinor = 1
 )
 
 // Compile-time equality fence: if the codec's framing changes, update the
@@ -107,10 +117,13 @@ func PacketType(packet []byte) (int, error) {
 
 func setVersion(header []byte, major, minor byte) { header[8], header[9] = major, minor }
 
-// getVersion decodes HeaderCommon[8:10]. Receivers gate on major alone: a major
-// bump is a wire break, while a minor bump is a compatible extension the
-// reference server may ship before a deployed client is updated, so gating on
-// minor would strand clients on an ordinary coordinated server release.
+// getVersion decodes HeaderCommon[8:10]. Receivers pin major and floor minor at
+// minProtocolVersionMinor: a major bump is a wire break, an OLDER minor is a
+// transcript this codec cannot open, and a NEWER minor stays admissible because
+// the reference server may ship a compatible extension before a deployed client
+// is updated — gating that direction would strand clients on an ordinary
+// coordinated release. Both bytes are folded into the body AAD, so a receiver
+// that accepts a newer minor still authenticates the exact value it read.
 func getVersion(header []byte) (major, minor byte) { return header[8], header[9] }
 
 // setFlag writes HeaderCommon[10:12] after stripping EXTENDEDLENGTH and masking
