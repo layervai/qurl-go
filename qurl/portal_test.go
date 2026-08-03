@@ -326,3 +326,45 @@ func TestInterpretReply_UnexpectedType(t *testing.T) {
 		t.Fatalf("unexpected type: error should name the cause, got %v", err)
 	}
 }
+
+// TestNotConfiguredMessagesNameTheRightEntryPoint pins the rendered text, which
+// is the entire point of the ErrNotConfigured split: the sentinel used to name
+// EnterPortal, so an agent that called ConnectAgentRuntime was told to go read
+// the link-opening docs. errors.Is cannot catch that regressing, because the
+// sentinel identity is what stayed the same.
+func TestNotConfiguredMessagesNameTheRightEntryPoint(t *testing.T) {
+	if got := ErrNotConfigured.Error(); strings.Contains(got, "EnterPortal") {
+		t.Fatalf("bare sentinel names an entry point: %q", got)
+	}
+
+	// The agent-runtime path must not mention EnterPortal at all.
+	agentErr := ErrNoDeploymentHub
+	if !errors.Is(agentErr, ErrNotConfigured) {
+		t.Fatalf("agent hub error no longer wraps ErrNotConfigured: %v", agentErr)
+	}
+	if strings.Contains(agentErr.Error(), "EnterPortal") {
+		t.Fatalf("agent hub error names EnterPortal: %q", agentErr)
+	}
+	if !strings.Contains(agentErr.Error(), "WithAgentRuntimeHub") {
+		t.Fatalf("agent hub error dropped its actionable remedy: %q", agentErr)
+	}
+
+	// The opener path must still say which call needs configuring. Use the
+	// missing-trust-store gate: EnterPortal with no deployment at all fails
+	// earlier, in the deployment loader, which supplies its own context.
+	_, openErr := EnterPortalWith(context.Background(), "https://example.test/#x", Config{})
+	if !errors.Is(openErr, ErrNotConfigured) {
+		t.Fatalf("EnterPortalWith error = %v, want ErrNotConfigured", openErr)
+	}
+	if !strings.Contains(openErr.Error(), "EnterPortal requires qURL opener config") {
+		t.Fatalf("opener error no longer names its entry point: %q", openErr)
+	}
+
+	// Every ErrNotConfigured a caller can reach must carry some context beyond
+	// the bare sentinel, or the split has regressed back to an unhelpful message.
+	var nilStatic *StaticProvider
+	_, _, staticErr := nilStatic.Resolve(context.Background())
+	if got := staticErr.Error(); got == ErrNotConfigured.Error() {
+		t.Fatalf("nil StaticProvider returns the bare sentinel with no context: %q", got)
+	}
+}
