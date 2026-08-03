@@ -18,6 +18,8 @@ import (
 
 	conformance "github.com/layervai/qurl-conformance"
 
+	"github.com/layervai/qurl-go/internal/nhpcontract"
+	"github.com/layervai/qurl-go/internal/udpfence"
 	"github.com/layervai/qurl-go/relayknock"
 	"github.com/layervai/qurl-go/relayknock/nativeudp"
 	"github.com/layervai/qurl-go/relayknock/relayknocktest"
@@ -54,7 +56,11 @@ type fakeServer struct {
 	agentPub   []byte
 	behavior   behavior
 	replyBody  []byte
-	done       chan struct{}
+	// echoRequestBody answers with the initiator's own body instead of the fixed
+	// replyBody, so a caller running several exchanges at once can prove the reply
+	// it received belongs to the request it sent.
+	echoRequestBody bool
+	done            chan struct{}
 
 	mu       sync.Mutex
 	received int
@@ -63,11 +69,23 @@ type fakeServer struct {
 	bodies   [][]byte
 }
 
-func newFakeServer(t *testing.T, serverPriv, agentPub []byte, b behavior) *fakeServer {
+func newFakeServer(t *testing.T, serverPriv, agentPub []byte, b behavior, configure ...func(*fakeServer)) *fakeServer {
 	t.Helper()
-	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	return newFakeServerOn(t, "udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0}, serverPriv, agentPub, b, configure...)
+}
+
+// withBodyEcho makes the responder answer with the initiator's own body. It is a
+// constructor option rather than a settable field because the serve goroutine
+// reads it: configuring after construction would be a data race under -race.
+func withBodyEcho(s *fakeServer) { s.echoRequestBody = true }
+
+// newFakeServerOn binds the responder to an explicit network/address so a test
+// can drive a real udp6 socket; newFakeServer keeps the udp4 loopback default.
+func newFakeServerOn(t *testing.T, network string, laddr *net.UDPAddr, serverPriv, agentPub []byte, b behavior, configure ...func(*fakeServer)) *fakeServer {
+	t.Helper()
+	conn, err := net.ListenUDP(network, laddr)
 	if err != nil {
-		t.Fatalf("listen udp: %v", err)
+		t.Fatalf("listen %s: %v", network, err)
 	}
 	s := &fakeServer{
 		t:          t,
@@ -78,6 +96,9 @@ func newFakeServer(t *testing.T, serverPriv, agentPub []byte, b behavior) *fakeS
 		behavior:   b,
 		replyBody:  []byte(`{"ok":true}`),
 		done:       make(chan struct{}),
+	}
+	for _, apply := range configure {
+		apply(s)
 	}
 	go func() {
 		defer close(s.done)
@@ -159,6 +180,10 @@ func (s *fakeServer) serve() {
 
 func (s *fakeServer) buildResponse(msg *relayknock.Reply) []byte {
 	normalType := replyTypeFor(msg.Type)
+	body := s.replyBody
+	if s.echoRequestBody {
+		body = msg.Body
+	}
 	switch s.behavior {
 	case behaviorSilent:
 		return nil
@@ -171,28 +196,28 @@ func (s *fakeServer) buildResponse(msg *relayknock.Reply) []byte {
 	case behaviorOversize:
 		return mustRand(s.t, 5000)
 	case behaviorWrongKey:
-		return s.buildReply(normalType, s.altPriv, msg.Counter)
+		return s.buildReply(normalType, s.altPriv, msg.Counter, body)
 	case behaviorWrongCounter:
-		return s.buildReply(normalType, s.serverPriv, msg.Counter+1)
+		return s.buildReply(normalType, s.serverPriv, msg.Counter+1, body)
 	case behaviorWrongType:
 		other := relayknock.TypeRegisterAck
 		if msg.Type == relayknock.TypeRegister {
 			other = relayknock.TypeACK
 		}
-		return s.buildReply(other, s.serverPriv, msg.Counter)
+		return s.buildReply(other, s.serverPriv, msg.Counter, body)
 	case behaviorCookie:
-		return s.buildReply(relayknock.TypeCookieChallenge, s.serverPriv, msg.Counter)
+		return s.buildReply(relayknock.TypeCookieChallenge, s.serverPriv, msg.Counter, body)
 	case behaviorCookieWrongCounter:
-		return s.buildReply(relayknock.TypeCookieChallenge, s.serverPriv, msg.Counter+1)
+		return s.buildReply(relayknock.TypeCookieChallenge, s.serverPriv, msg.Counter+1, body)
 	default: // behaviorNormal
-		return s.buildReply(normalType, s.serverPriv, msg.Counter)
+		return s.buildReply(normalType, s.serverPriv, msg.Counter, body)
 	}
 }
 
 // buildReply builds a server-originated reply of replyType, signed by serverPriv,
 // echoing counter. Roles are swapped relative to a knock: DeviceStaticPriv is the
 // server static private key and ServerStaticPub is the agent static public key.
-func (s *fakeServer) buildReply(replyType int, serverPriv []byte, counter uint64) []byte {
+func (s *fakeServer) buildReply(replyType int, serverPriv []byte, counter uint64, body []byte) []byte {
 	packet, err := relayknocktest.BuildReply(replyType, &relayknock.KnockInputs{
 		DeviceStaticPriv: serverPriv,
 		ServerStaticPub:  s.agentPub,
@@ -200,7 +225,7 @@ func (s *fakeServer) buildReply(replyType int, serverPriv []byte, counter uint64
 		TimestampNanos:   uint64(time.Now().UnixNano()),
 		Counter:          counter,
 		Preamble:         mustPreamble(s.t),
-		Body:             s.replyBody,
+		Body:             body,
 	})
 	if err != nil {
 		s.t.Errorf("build reply: %v", err)
@@ -418,22 +443,347 @@ func TestRegistrationPacketsAvoidIPFragmentation(t *testing.T) {
 
 func TestRegistrationPacketRejectsUncompressibleFragment(t *testing.T) {
 	t.Parallel()
+	// Both compressing header types share the ceiling, so both must refuse to put
+	// a fragmenting datagram on the wire rather than truncating or sending it.
+	for _, tc := range []struct {
+		name string
+		send func(context.Context, nativeudp.Endpoint, []byte, nativeudp.Options) error
+	}{
+		{name: "otp", send: nativeudp.SendOTP},
+		{
+			name: "register",
+			send: func(ctx context.Context, ep nativeudp.Endpoint, body []byte, opts nativeudp.Options) error {
+				_, err := nativeudp.Register(ctx, ep, body, opts)
+				return err
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			serverPriv, serverPub := mustKeypair(t)
+			devicePriv := mustPriv(t)
+			server := newFakeServer(t, serverPriv, pubOf(t, devicePriv), behaviorSilent)
+			body := mustRand(t, 1300)
+			opts := nativeudp.Options{
+				DeviceStaticPriv: devicePriv,
+				Resolver:         resolverReturning([]netip.Addr{netip.MustParseAddr("8.8.8.8")}),
+				Dialer:           &countingLoopbackDialer{target: server.conn.LocalAddr().String()},
+			}
+			ep := nativeudp.Endpoint{Host: "cell0.nhp.test", Port: server.port(), ServerStaticPub: serverPub}
+			err := tc.send(context.Background(), ep, body, opts)
+			if err == nil || !errors.Is(err, nativeudp.ErrInvalidRequest) {
+				t.Fatalf("%s uncompressible fragment error = %v, want ErrInvalidRequest", tc.name, err)
+			}
+			if server.receivedCount() != 0 {
+				t.Fatalf("server received %d datagrams after fragmentation reject, want 0", server.receivedCount())
+			}
+		})
+	}
+}
+
+// TestPayloadStraddlesUnfragmentedCeiling pins the exact boundary at which OTP and
+// REG switch to compression. The at-ceiling body is incompressible, so if the
+// transport compressed one byte too eagerly the packet would grow past the
+// ceiling and be rejected instead of sent; the one-byte-over body is compressible,
+// so failing to compress it would put an oversize datagram on the wire.
+func TestPayloadStraddlesUnfragmentedCeiling(t *testing.T) {
+	t.Parallel()
+	// maxUnfragmentedPayload (1200) less the 240-byte NHP header and the body's
+	// 16-byte AEAD tag: the largest body that still fits uncompressed.
+	const largestUncompressedBody = 1200 - 240 - 16
+	for _, send := range []struct {
+		name string
+		send func(context.Context, nativeudp.Endpoint, []byte, nativeudp.Options) error
+	}{
+		{name: "otp", send: nativeudp.SendOTP},
+		{
+			name: "register",
+			send: func(ctx context.Context, ep nativeudp.Endpoint, body []byte, opts nativeudp.Options) error {
+				_, err := nativeudp.Register(ctx, ep, body, opts)
+				return err
+			},
+		},
+	} {
+		for _, tc := range []struct {
+			name     string
+			body     []byte
+			wantSize int // 0 means "at most the ceiling"
+		}{
+			{
+				name:     "at the ceiling, sent uncompressed",
+				body:     mustRand(t, largestUncompressedBody),
+				wantSize: 1200,
+			},
+			{
+				name: "one byte over the ceiling, compressed under it",
+				body: bytes.Repeat([]byte{'a'}, largestUncompressedBody+1),
+			},
+			{
+				// The whole legal body range stays inside the ceiling as long as it
+				// compresses: the plaintext ceiling is not itself a send limit.
+				name: "plaintext ceiling, compressed under the fragmentation ceiling",
+				body: bytes.Repeat([]byte{'a'}, nhpcontract.MaxApplicationBodySize),
+			},
+		} {
+			t.Run(send.name+"/"+tc.name, func(t *testing.T) {
+				t.Parallel()
+				serverPriv, serverPub := mustKeypair(t)
+				devicePriv := mustPriv(t)
+				server := newFakeServer(t, serverPriv, pubOf(t, devicePriv), behaviorNormal)
+				opts := nativeudp.Options{
+					DeviceStaticPriv: devicePriv,
+					Resolver:         resolverReturning([]netip.Addr{netip.MustParseAddr("8.8.8.8")}),
+					Dialer:           &countingLoopbackDialer{target: server.conn.LocalAddr().String()},
+					Timeout:          2 * time.Second,
+				}
+				ep := nativeudp.Endpoint{Host: "cell0.nhp.test", Port: server.port(), ServerStaticPub: serverPub}
+				if err := send.send(context.Background(), ep, tc.body, opts); err != nil {
+					t.Fatalf("send %d-byte body: %v", len(tc.body), err)
+				}
+				deadline := time.Now().Add(2 * time.Second)
+				for len(server.receivedBodies()) == 0 && time.Now().Before(deadline) {
+					time.Sleep(time.Millisecond)
+				}
+				sizes := server.receivedSizes()
+				bodies := server.receivedBodies()
+				if len(sizes) != 1 {
+					t.Fatalf("packet sizes = %v, want exactly one datagram", sizes)
+				}
+				switch {
+				case tc.wantSize != 0 && sizes[0] != tc.wantSize:
+					t.Fatalf("packet size = %d, want exactly %d (header+body+tag, uncompressed)", sizes[0], tc.wantSize)
+				case sizes[0] > 1200:
+					t.Fatalf("packet size = %d, want at most the 1200-byte unfragmented ceiling", sizes[0])
+				}
+				if len(bodies) != 1 || !bytes.Equal(bodies[0], tc.body) {
+					t.Fatalf("server recovered %d bytes, want the exact %d-byte body", len(bodies[0]), len(tc.body))
+				}
+			})
+		}
+	}
+}
+
+// TestSendOTP_RejectsBeforeAnyDatagram covers the pre-I/O gates on the
+// fire-and-forget path. Each rejection must happen before the single OTP
+// datagram is dispatched: an OTP that reached the cell would have already
+// triggered an email whose code a retry then invalidates.
+func TestSendOTP_RejectsBeforeAnyDatagram(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		body   []byte
+		mutate func(*nativeudp.Endpoint, *nativeudp.Options)
+		want   error
+	}{
+		{
+			name:   "blank host",
+			mutate: func(ep *nativeudp.Endpoint, _ *nativeudp.Options) { ep.Host = "" },
+			want:   nativeudp.ErrInvalidEndpoint,
+		},
+		{
+			name:   "port out of range",
+			mutate: func(ep *nativeudp.Endpoint, _ *nativeudp.Options) { ep.Port = 70000 },
+			want:   nativeudp.ErrInvalidEndpoint,
+		},
+		{
+			name:   "server key wrong length",
+			mutate: func(ep *nativeudp.Endpoint, _ *nativeudp.Options) { ep.ServerStaticPub = make([]byte, 16) },
+			want:   nativeudp.ErrInvalidEndpoint,
+		},
+		{
+			name:   "server key low order",
+			mutate: func(ep *nativeudp.Endpoint, _ *nativeudp.Options) { ep.ServerStaticPub = make([]byte, 32) },
+			want:   nativeudp.ErrInvalidEndpoint,
+		},
+		{
+			name:   "device key wrong length",
+			mutate: func(_ *nativeudp.Endpoint, opts *nativeudp.Options) { opts.DeviceStaticPriv = make([]byte, 31) },
+			want:   nativeudp.ErrInvalidRequest,
+		},
+		{
+			name: "body over the plaintext ceiling",
+			body: make([]byte, nhpcontract.MaxApplicationBodySize+1),
+			want: nativeudp.ErrInvalidRequest,
+		},
+		{
+			// A body at the plaintext ceiling is always compressed, and zlib expands
+			// incompressible input: the sealed result no longer fits the NHP
+			// plaintext ceiling, so packet construction rejects it before the socket.
+			name: "largest legal body, incompressible",
+			body: mustRand(t, nhpcontract.MaxApplicationBodySize),
+			want: nativeudp.ErrInvalidRequest,
+		},
+		{
+			name: "resolution failure",
+			mutate: func(_ *nativeudp.Endpoint, opts *nativeudp.Options) {
+				opts.Resolver = resolverFuncExternal(func(context.Context, string, string) ([]netip.Addr, error) {
+					return nil, errors.New("nxdomain")
+				})
+			},
+			want: nativeudp.ErrResolve,
+		},
+		{
+			name: "no public address",
+			mutate: func(_ *nativeudp.Endpoint, opts *nativeudp.Options) {
+				opts.Resolver = resolverReturning([]netip.Addr{netip.MustParseAddr("127.0.0.1")})
+			},
+			want: nativeudp.ErrResolve,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			serverPriv, serverPub := mustKeypair(t)
+			devicePriv := mustPriv(t)
+			server := newFakeServer(t, serverPriv, pubOf(t, devicePriv), behaviorSilent)
+			dialer := &countingLoopbackDialer{target: server.conn.LocalAddr().String()}
+			ep := nativeudp.Endpoint{Host: "cell0.nhp.test", Port: server.port(), ServerStaticPub: serverPub}
+			opts := nativeudp.Options{
+				DeviceStaticPriv: devicePriv,
+				Resolver:         resolverReturning([]netip.Addr{netip.MustParseAddr("8.8.8.8")}),
+				Dialer:           dialer,
+			}
+			if tc.mutate != nil {
+				tc.mutate(&ep, &opts)
+			}
+
+			if err := nativeudp.SendOTP(context.Background(), ep, tc.body, opts); !errors.Is(err, tc.want) {
+				t.Fatalf("SendOTP error = %v, want errors.Is %v", err, tc.want)
+			}
+			if dialer.count() != 0 || server.receivedCount() != 0 {
+				t.Fatalf("rejected OTP still dialed/sent %d/%d times, want 0/0", dialer.count(), server.receivedCount())
+			}
+		})
+	}
+}
+
+func TestSendOTP_NilOrCancelledContext(t *testing.T) {
+	t.Parallel()
 	serverPriv, serverPub := mustKeypair(t)
 	devicePriv := mustPriv(t)
 	server := newFakeServer(t, serverPriv, pubOf(t, devicePriv), behaviorSilent)
-	body := mustRand(t, 1300)
+	dialer := &countingLoopbackDialer{target: server.conn.LocalAddr().String()}
+	ep := nativeudp.Endpoint{Host: "cell0.nhp.test", Port: server.port(), ServerStaticPub: serverPub}
 	opts := nativeudp.Options{
 		DeviceStaticPriv: devicePriv,
 		Resolver:         resolverReturning([]netip.Addr{netip.MustParseAddr("8.8.8.8")}),
-		Dialer:           &countingLoopbackDialer{target: server.conn.LocalAddr().String()},
+		Dialer:           dialer,
 	}
-	ep := nativeudp.Endpoint{Host: "cell0.nhp.test", Port: server.port(), ServerStaticPub: serverPub}
-	err := nativeudp.SendOTP(context.Background(), ep, body, opts)
-	if err == nil || !errors.Is(err, nativeudp.ErrInvalidRequest) {
-		t.Fatalf("SendOTP uncompressible fragment error = %v, want ErrInvalidRequest", err)
+
+	//nolint:staticcheck // deliberately passing a nil context to prove it fails closed.
+	if err := nativeudp.SendOTP(nil, ep, nil, opts); !errors.Is(err, nativeudp.ErrInvalidRequest) {
+		t.Fatalf("nil-context error = %v, want ErrInvalidRequest", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := nativeudp.SendOTP(ctx, ep, nil, opts); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled-context error = %v, want context.Canceled", err)
+	}
+	if dialer.count() != 0 || server.receivedCount() != 0 {
+		t.Fatalf("dead context still dialed/sent %d/%d times, want 0/0", dialer.count(), server.receivedCount())
+	}
+}
+
+// TestSendOTP_TransportFailureIsNeitherRetriedNorFannedOut pins the documented
+// one-datagram rule: a failed OTP write is reported, never re-driven against
+// another resolved address, because the first copy may already have been
+// delivered and emailed.
+func TestSendOTP_TransportFailureIsNeitherRetriedNorFannedOut(t *testing.T) {
+	t.Parallel()
+	serverPriv, serverPub := mustKeypair(t)
+	devicePriv := mustPriv(t)
+	server := newFakeServer(t, serverPriv, pubOf(t, devicePriv), behaviorSilent)
+
+	dead := netip.MustParseAddr("9.9.9.9")
+	live := netip.MustParseAddr("149.112.112.112")
+	const assignedPort = 443
+	// Only the second address has a route: a transport that fanned out would find
+	// the live responder, and one that retried would dial twice.
+	dialer := &addressRoutingDialer{routes: map[string]string{
+		netip.AddrPortFrom(live, assignedPort).String(): server.conn.LocalAddr().String(),
+	}}
+	ep := nativeudp.Endpoint{Host: "cell0.nhp.test", Port: assignedPort, ServerStaticPub: serverPub}
+	opts := nativeudp.Options{
+		DeviceStaticPriv: devicePriv,
+		Resolver:         resolverReturning([]netip.Addr{dead, live}),
+		Dialer:           dialer,
+		MaxAddresses:     2,
+	}
+
+	if err := nativeudp.SendOTP(context.Background(), ep, []byte(`{"otp":true}`), opts); !errors.Is(err, nativeudp.ErrTransport) {
+		t.Fatalf("SendOTP error = %v, want ErrTransport", err)
 	}
 	if server.receivedCount() != 0 {
-		t.Fatalf("server received %d datagrams after fragmentation reject, want 0", server.receivedCount())
+		t.Fatalf("OTP reached the second address %d times; it must never fan out", server.receivedCount())
+	}
+}
+
+// lifecycleAuthorityError stands in for qurl's typed recovery-authority error.
+type lifecycleAuthorityError struct{ reason string }
+
+func (e *lifecycleAuthorityError) Error() string { return "qurl: not authorized: " + e.reason }
+
+// TestFenceRejectionSurvivesTheTransportBoundary is the reason udpfence exists:
+// the lifecycle's typed authority error must reach the caller of a public entry
+// point as the identical value — not reclassified as ErrTransport — and no
+// datagram may leave while the fence is closed.
+func TestFenceRejectionSurvivesTheTransportBoundary(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		call func(context.Context, nativeudp.Endpoint, nativeudp.Options) error
+	}{
+		{
+			name: "SendOTP",
+			call: func(ctx context.Context, ep nativeudp.Endpoint, opts nativeudp.Options) error {
+				return nativeudp.SendOTP(ctx, ep, nil, opts)
+			},
+		},
+		{
+			name: "Knock",
+			call: func(ctx context.Context, ep nativeudp.Endpoint, opts nativeudp.Options) error {
+				_, err := nativeudp.Knock(ctx, ep, nil, opts)
+				return err
+			},
+		},
+		{
+			name: "KnockWithReknock",
+			call: func(ctx context.Context, ep nativeudp.Endpoint, opts nativeudp.Options) error {
+				_, err := nativeudp.KnockWithReknock(ctx, ep, nil, nil, opts)
+				return err
+			},
+		},
+		{
+			name: "AssignmentList",
+			call: func(ctx context.Context, ep nativeudp.Endpoint, opts nativeudp.Options) error {
+				_, err := nativeudp.AssignmentList(ctx, ep, nil, opts)
+				return err
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			server, ep, opts := newLoopbackExchange(t, behaviorNormal)
+			authority := &lifecycleAuthorityError{reason: "assignment lease revoked"}
+			ctx := udpfence.With(context.Background(), func() error { return authority })
+
+			err := tc.call(ctx, ep, opts)
+			// Identity, not errors.Is: errors.Is would also accept a wrapped or
+			// reclassified error, which is precisely what must not happen here.
+			//nolint:errorlint // identity comparison is the assertion.
+			if err != error(authority) {
+				t.Fatalf("error = %#v, want the lifecycle's own authority error unchanged", err)
+			}
+			var typed *lifecycleAuthorityError
+			if !errors.As(err, &typed) || typed != authority {
+				t.Fatalf("errors.As recovered %#v, want the original typed error", typed)
+			}
+			if errors.Is(err, nativeudp.ErrTransport) {
+				t.Fatalf("fence rejection was reclassified as a transport fault: %v", err)
+			}
+			if server.receivedCount() != 0 {
+				t.Fatalf("server received %d datagrams behind a closed fence, want 0", server.receivedCount())
+			}
+		})
 	}
 }
 

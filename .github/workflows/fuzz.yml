@@ -38,21 +38,31 @@ jobs:
           go-version-file: go.mod
           check-latest: true
 
-      # Targets are auto-discovered by `make fuzz` (go test -list), so a new
-      # FuzzXxx is picked up without editing this workflow. The dispatch input is
-      # passed through an env var rather than interpolated into the run script, to
-      # avoid shell injection from the workflow_dispatch field.
-      - name: Fuzz qv2 (soak)
+      # `make fuzz` walks every package in both workspace modules and soaks each
+      # discovered FuzzXxx, so a new target anywhere in the repo is picked up
+      # without editing this workflow. The dispatch input is passed through an
+      # env var rather than interpolated into the run script, to avoid shell
+      # injection from the workflow_dispatch field.
+      - name: Fuzz soak (all discovered targets)
         env:
           FUZZTIME: ${{ inputs.fuzztime || '5m' }}
         run: make fuzz FUZZTIME="$FUZZTIME"
 
-      # On a crash, Go writes the offending input under testdata/fuzz/<target>/.
-      # Upload it so the maintainer can commit it as a regression seed.
+      # The upload below is repo-wide, so it necessarily carries the committed
+      # seed corpus too. Name the untracked entries in the log so the maintainer
+      # knows which file in the artifact is the new crasher.
+      - name: Name new corpus entries
+        if: failure()
+        run: git status --porcelain -- '*/testdata/fuzz/*'
+
+      # On a crash, Go writes the offending input under the OWNING package's
+      # testdata/fuzz/<target>/ — which is wherever the target lives, not a
+      # single known directory. The glob must therefore stay repo-wide, or a
+      # crasher found outside internal/qv2 is discovered and then thrown away.
       - name: Upload new crashers
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: fuzz-crashers
-          path: internal/qv2/testdata/fuzz/
+          path: "**/testdata/fuzz/**"
           if-no-files-found: ignore

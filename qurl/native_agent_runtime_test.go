@@ -4509,3 +4509,669 @@ func TestBinding_RenewalStateHoldsNoCredential(t *testing.T) {
 		t.Error("binding retained the OTP provider")
 	}
 }
+
+// seedExpiredSessionLease seeds a placement that is live against the fixture
+// clock a warm open uses and expired against the wall clock a knock judges the
+// lease with, so the binding opens offline and the renewal decision lands on the
+// knock. It returns the seeded placement.
+func seedExpiredSessionLease(t *testing.T, f *runtimeFixture, assignment *AgentAssignment) *AgentAssignment {
+	t.Helper()
+	seeded := assignment.clone()
+	seeded.LeaseExpiresAt = time.Now().Add(-time.Minute)
+	seedCompletedRuntimeAssignment(t, f, seeded)
+	return seeded
+}
+
+func openSessionBinding(t *testing.T, f *runtimeFixture, refreshOpts ...AgentRuntimeRefreshOption) (*AgentRuntimeBinding, []byte) {
+	t.Helper()
+	_, binding, err := openRegisteredAgentRuntime(context.Background(), f.store, openFixtureClock(), f.hub, f.refreshOptions(refreshOpts...))
+	if err != nil {
+		t.Fatalf("open session binding: %v", err)
+	}
+	t.Cleanup(binding.Destroy)
+	key := binding.TakeDeviceStaticPrivateKey()
+	t.Cleanup(func() { wipeBytes(key) })
+	return binding, key
+}
+
+// assertSessionPlacementUnchanged proves a failed renewal changed nothing a
+// later call could act on: not the live placement and not the durable record.
+func assertSessionPlacementUnchanged(t *testing.T, f *runtimeFixture, binding *AgentRuntimeBinding, want *AgentAssignment) {
+	t.Helper()
+	if live := binding.Assignment(); !sameAgentAssignment(&live, want) {
+		t.Fatalf("failed renewal moved the live placement: %#v, want %#v", live, want)
+	}
+	persisted, err := f.store.LoadAgentState(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameAgentAssignment(persisted.Assignment, want) {
+		t.Fatalf("failed renewal persisted a placement: %#v, want %#v", persisted.Assignment, want)
+	}
+}
+
+// The single failure mode PR #126 kept: best effort stops at the expiry
+// boundary, so a lease that has actually run out and a Hub that cannot renew it
+// must fail the exchange carrying the renewal's own error class. Knocking the
+// stale placement anyway would send an admission request to a cell that no
+// longer holds this agent's lease.
+func TestKnockRegisteredAgent_ExpiredLeaseFailsWhenRenewalFails(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	for _, test := range []struct {
+		name      string
+		hubSteps  []runtimeUDPStep
+		wantClass error
+	}{
+		{name: "Hub outage", wantClass: ErrAssignmentRecoveryRequired},
+		{
+			name: "authenticated Hub denial",
+			hubSteps: []runtimeUDPStep{{
+				requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult,
+				replyBody: `{"errCode":"52201","errMsg":"identity rejected"}`,
+			}},
+			wantClass: ErrAssignmentIdentityRejected,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newRuntimeFixture(t, test.hubSteps, []runtimeUDPStep{sessionKnockStep()})
+			initial, err := parseInitialAssignmentReply([]byte(contract.InitialAssignment.Result.BodyJSON), "agent-conform", assignmentFixtureNow)
+			if err != nil {
+				t.Fatal(err)
+			}
+			seeded := seedExpiredSessionLease(t, f, &initial.Assignment)
+			binding, key := openSessionBinding(t, f)
+
+			result, err := f.knock(t, binding, key)
+			if result != nil || !errors.Is(err, test.wantClass) {
+				t.Fatalf("knock on an unrenewable expired lease = %#v, %v; want %v", result, err, test.wantClass)
+			}
+			if len(f.cellUDP.snapshot()) != 0 {
+				t.Fatalf("failed renewal still knocked the stale cell %d times", len(f.cellUDP.snapshot()))
+			}
+			assertSessionPlacementUnchanged(t, f, binding, seeded)
+		})
+	}
+}
+
+// Anti-rollback is the property that makes automatic adoption safe, and PR #126
+// made renewal automatic on the knock path. A replayed or stale Hub LRT must be
+// rejected here exactly as it is for an explicit RefreshAgentRuntime.
+func TestKnockRegisteredAgent_RenewalRejectsRolledBackAssignment(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	for _, test := range []struct {
+		name      string
+		seeded    func(*testing.T) *AgentAssignment
+		hubReply  func(*testing.T) *AgentAssignment
+		wantClass error
+	}{
+		{
+			// A same-or-lower generation cannot carry the agent into another cell.
+			name: "generation rollback into another cell",
+			seeded: func(t *testing.T) *AgentAssignment {
+				return newReassignmentTarget(t, contract, "cell1", 3, "", time.Time{})
+			},
+			hubReply: func(t *testing.T) *AgentAssignment {
+				return newReassignmentTarget(t, contract, "cell0", 1, "", time.Time{})
+			},
+			wantClass: ErrAssignmentInvalidResponse,
+		},
+		{
+			// Within one generation the endpoint revision is the ordering, so a
+			// regression is a replayed reply rather than a move.
+			name: "endpoint revision regression inside one generation",
+			seeded: func(t *testing.T) *AgentAssignment {
+				seeded := newReassignmentTarget(t, contract, "cell0", 1, "", time.Time{})
+				seeded.EndpointRevision = 3
+				return seeded
+			},
+			hubReply: func(t *testing.T) *AgentAssignment {
+				return newReassignmentTarget(t, contract, "cell0", 1, "", time.Time{})
+			},
+			wantClass: ErrAssignmentEndpointContinuity,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newRuntimeFixture(t,
+				[]runtimeUDPStep{{
+					requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult,
+					replyBody: rewriteRefreshAssignment(t, contract, test.hubReply(t)),
+				}},
+				[]runtimeUDPStep{sessionKnockStep()},
+			)
+			seeded := seedExpiredSessionLease(t, f, test.seeded(t))
+			binding, key := openSessionBinding(t, f)
+
+			result, err := f.knock(t, binding, key)
+			if result != nil || !errors.Is(err, test.wantClass) {
+				t.Fatalf("knock adopting a rolled-back placement = %#v, %v; want %v", result, err, test.wantClass)
+			}
+			if len(f.cellUDP.snapshot()) != 0 {
+				t.Fatalf("rejected rollback still reached a cell %d times", len(f.cellUDP.snapshot()))
+			}
+			assertSessionPlacementUnchanged(t, f, binding, seeded)
+		})
+	}
+}
+
+// WithAgentRuntimePinnedAssignment travels into the binding through attachRenewal,
+// so a relocation LayerV makes mid-session must be refused on the knock path too.
+// Placement that feeds an egress allowlist cannot move because a knock happened.
+func TestKnockRegisteredAgent_PinnedAssignmentRefusesMidSessionRelocation(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	initialOf := func(t *testing.T) *AgentAssignment {
+		t.Helper()
+		initial, err := parseInitialAssignmentReply([]byte(contract.InitialAssignment.Result.BodyJSON), "agent-conform", assignmentFixtureNow)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &initial.Assignment
+	}
+
+	t.Run("expired lease fails closed", func(t *testing.T) {
+		f := newRuntimeFixture(t,
+			[]runtimeUDPStep{{
+				requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult,
+				replyBody: rewriteRefreshAssignment(t, contract, newReassignmentTarget(t, contract, "cell1", 2, "", time.Time{})),
+			}},
+			[]runtimeUDPStep{sessionKnockStep()},
+		)
+		seeded := seedExpiredSessionLease(t, f, initialOf(t))
+		binding, key := openSessionBinding(t, f, WithAgentRuntimePinnedAssignment())
+
+		result, err := f.knock(t, binding, key)
+		var changed *AgentAssignmentChangedError
+		if result != nil || !errors.As(err, &changed) || !errors.Is(err, ErrAssignmentReassignmentRequired) {
+			t.Fatalf("pinned knock across a relocation = %#v, %v; want *AgentAssignmentChangedError", result, err)
+		}
+		if len(f.cellUDP.snapshot()) != 0 {
+			t.Fatalf("pinned knock reached a cell %d times", len(f.cellUDP.snapshot()))
+		}
+		assertSessionPlacementUnchanged(t, f, binding, seeded)
+	})
+
+	t.Run("live lease keeps knocking the pinned cell", func(t *testing.T) {
+		f := newRuntimeFixture(t,
+			[]runtimeUDPStep{{
+				requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult,
+				replyBody: rewriteRefreshAssignment(t, contract, newReassignmentTarget(t, contract, "cell1", 2, "", time.Time{})),
+			}},
+			[]runtimeUDPStep{sessionKnockStep()},
+		)
+		// Inside the renewal lead but not expired, so the refused move is
+		// best effort and must not take down a working agent.
+		seeded := initialOf(t).clone()
+		seeded.LeaseExpiresAt = time.Now().Add(time.Minute)
+		seedCompletedRuntimeAssignment(t, f, seeded)
+		binding, key := openSessionBinding(t, f, WithAgentRuntimePinnedAssignment())
+
+		result, err := f.knock(t, binding, key)
+		if err != nil || result == nil || result.ACToken != "ac-session" {
+			t.Fatalf("pinned knock inside the renewal window = %#v, %v; want the pinned cell to answer", result, err)
+		}
+		if len(f.cellUDP.snapshot()) != 1 {
+			t.Fatalf("pinned knock reached the original cell %d times, want 1", len(f.cellUDP.snapshot()))
+		}
+		assertSessionPlacementUnchanged(t, f, binding, seeded)
+	})
+}
+
+// The renewal runs under the setup lock against freshly loaded state, so every
+// guard between taking that lock and trusting the loaded placement has to fail
+// closed rather than renew against state the binding was not built from.
+func TestKnockRegisteredAgent_RenewalGuardsFailClosed(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	for _, test := range []struct {
+		name        string
+		corrupt     func(*AgentState)
+		wantClass   error
+		wantMessage string
+	}{
+		{
+			name:        "state stopped loading as a completed registration",
+			corrupt:     func(s *AgentState) { s.RegisteredAt = nil },
+			wantClass:   ErrInvalidRegisterConfig,
+			wantMessage: "missing registration time",
+		},
+		{
+			name:        "persisted agent id changed under the held binding",
+			corrupt:     func(s *AgentState) { s.AgentID = "agent-replaced" },
+			wantClass:   ErrInvalidRegisterConfig,
+			wantMessage: "persisted agent id changed under a held binding",
+		},
+		{
+			name:        "completed state lost its assignment",
+			corrupt:     func(s *AgentState) { s.Assignment = nil },
+			wantClass:   ErrInvalidRegisterConfig,
+			wantMessage: "completed state has no assignment",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newRuntimeFixture(t,
+				[]runtimeUDPStep{{
+					requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult,
+					replyBody: rewriteRefreshAssignment(t, contract, newReassignmentTarget(t, contract, "cell0", 1, "", time.Time{})),
+				}},
+				[]runtimeUDPStep{sessionKnockStep()},
+			)
+			initial, err := parseInitialAssignmentReply([]byte(contract.InitialAssignment.Result.BodyJSON), "agent-conform", assignmentFixtureNow)
+			if err != nil {
+				t.Fatal(err)
+			}
+			seedExpiredSessionLease(t, f, &initial.Assignment)
+			binding, key := openSessionBinding(t, f)
+
+			// The binding is already built; only what the renewal reloads changes.
+			state, err := f.store.LoadAgentState(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			test.corrupt(state)
+			if err := f.store.SaveAgentState(context.Background(), state); err != nil {
+				t.Fatalf("persist the diverged state: %v", err)
+			}
+
+			result, err := f.knock(t, binding, key)
+			if result != nil || !errors.Is(err, test.wantClass) || !strings.Contains(err.Error(), test.wantMessage) {
+				t.Fatalf("knock renewing against diverged state = %#v, %v; want %v containing %q", result, err, test.wantClass, test.wantMessage)
+			}
+			if len(f.hubUDP.snapshot()) != 0 || len(f.cellUDP.snapshot()) != 0 {
+				t.Fatalf("a guard that must fail before I/O sent Hub/cell packets: %d/%d", len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot()))
+			}
+		})
+	}
+}
+
+// The documented shared-state-file pattern: a sibling process holding the same
+// store already renewed. Adopting that result is what keeps N processes from
+// spending N Hub exchanges for one lease.
+func TestKnockRegisteredAgent_AdoptsRenewalAnotherProcessAlreadyPersisted(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	f := newRuntimeFixture(t,
+		[]runtimeUDPStep{{
+			requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult,
+			replyBody: rewriteRefreshAssignment(t, contract, newReassignmentTarget(t, contract, "cell0", 1, "", time.Time{})),
+		}},
+		[]runtimeUDPStep{sessionKnockStep()},
+	)
+	initial, err := parseInitialAssignmentReply([]byte(contract.InitialAssignment.Result.BodyJSON), "agent-conform", assignmentFixtureNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedExpiredSessionLease(t, f, &initial.Assignment)
+	binding, key := openSessionBinding(t, f)
+
+	sibling := initial.Assignment.clone()
+	sibling.LeaseExpiresAt = reassignmentFixtureLeaseExpiresAt
+	sibling.EndpointRevision = 2
+	seedCompletedRuntimeAssignment(t, f, sibling)
+	savesBeforeKnock := len(f.store.snapshots())
+
+	result, err := f.knock(t, binding, key)
+	if err != nil || result == nil || result.ACToken != "ac-session" {
+		t.Fatalf("knock after a sibling renewal = %#v, %v", result, err)
+	}
+	// The Hub reply this fixture holds would also renew successfully, so a Hub
+	// exchange here means the fast path was skipped rather than unavailable.
+	if len(f.hubUDP.snapshot()) != 0 {
+		t.Fatalf("adopted renewal still spent %d Hub exchanges", len(f.hubUDP.snapshot()))
+	}
+	if live := binding.Assignment(); !sameAgentAssignment(&live, sibling) {
+		t.Fatalf("binding did not adopt the sibling renewal: %#v, want %#v", live, sibling)
+	}
+	if got := len(f.store.snapshots()); got != savesBeforeKnock {
+		t.Fatalf("adopted renewal rewrote the shared state file: saves %d, want %d", got, savesBeforeKnock)
+	}
+}
+
+// unpersistableAgentStateStore refuses saves once armed. It deliberately does
+// not implement agentStateStoreDecorator: attachRenewal keeps only
+// baseAgentStateStore(store), so a decorator's fault injection is invisible to a
+// session renewal and the failure has to live in the base store instead.
+type unpersistableAgentStateStore struct {
+	inner AgentStateStore
+	armed atomic.Bool
+}
+
+func (s *unpersistableAgentStateStore) LoadAgentState(ctx context.Context) (*AgentState, error) {
+	return s.inner.LoadAgentState(ctx)
+}
+
+func (s *unpersistableAgentStateStore) SaveAgentState(ctx context.Context, state *AgentState) error {
+	if s.armed.Load() {
+		return errors.New("injected renewed-assignment save failure")
+	}
+	return s.inner.SaveAgentState(ctx, state)
+}
+
+func (s *unpersistableAgentStateStore) acquireSetupLock(ctx context.Context) (setupLock, error) {
+	locker, ok := s.inner.(setupLockingAgentStateStore)
+	if !ok {
+		return nil, errors.New("unpersistable test store lost its setup-lock capability")
+	}
+	return locker.acquireSetupLock(ctx)
+}
+
+// A renewed placement that cannot be proven durable must not be knocked with.
+// The next process to load this file would otherwise disagree with the binding
+// about where this agent lives.
+func TestKnockRegisteredAgent_UnpersistableRenewalFailsTheKnock(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	f := newRuntimeFixture(t,
+		[]runtimeUDPStep{{
+			requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult,
+			replyBody: rewriteRefreshAssignment(t, contract, newReassignmentTarget(t, contract, "cell0", 1, "", time.Time{})),
+		}},
+		[]runtimeUDPStep{sessionKnockStep()},
+	)
+	unpersistable := &unpersistableAgentStateStore{inner: f.store.inner}
+	f.store.inner = unpersistable
+	initial, err := parseInitialAssignmentReply([]byte(contract.InitialAssignment.Result.BodyJSON), "agent-conform", assignmentFixtureNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seeded := seedExpiredSessionLease(t, f, &initial.Assignment)
+	binding, key := openSessionBinding(t, f)
+	unpersistable.armed.Store(true)
+
+	result, err := f.knock(t, binding, key)
+	if result != nil || !errors.Is(err, ErrAgentBindingPersistence) {
+		t.Fatalf("knock whose renewal could not be saved = %#v, %v; want ErrAgentBindingPersistence", result, err)
+	}
+	if len(f.hubUDP.snapshot()) != 1 {
+		t.Fatalf("renewal Hub exchanges = %d, want 1", len(f.hubUDP.snapshot()))
+	}
+	if len(f.cellUDP.snapshot()) != 0 {
+		t.Fatalf("unpersisted renewal still knocked a cell %d times", len(f.cellUDP.snapshot()))
+	}
+	assertSessionPlacementUnchanged(t, f, binding, seeded)
+}
+
+// WithAgentRuntimeOfflineOpen promises the binding does not renew itself. The
+// open-time half of that is already tested; this is the half a caller meets
+// later, when the lease it chose to manage itself has run out.
+func TestKnockRegisteredAgent_OfflineOpenBindingNeverRenews(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	f := newRuntimeFixture(t,
+		[]runtimeUDPStep{{
+			requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult,
+			replyBody: rewriteRefreshAssignment(t, contract, newReassignmentTarget(t, contract, "cell0", 1, "", time.Time{})),
+		}},
+		[]runtimeUDPStep{sessionKnockStep()},
+	)
+	initial, err := parseInitialAssignmentReply([]byte(contract.InitialAssignment.Result.BodyJSON), "agent-conform", assignmentFixtureNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seeded := seedExpiredSessionLease(t, f, &initial.Assignment)
+
+	_, binding, err := openRegisteredAgentRuntime(context.Background(), f.store, openFixtureClock(), f.hub, f.refreshOptions(),
+		WithAgentRuntimeOfflineOpen())
+	if err != nil {
+		t.Fatalf("offline open with a fixture-live lease: %v", err)
+	}
+	defer binding.Destroy()
+	if binding.renewal != nil {
+		t.Fatal("offline open returned a self-renewing binding")
+	}
+	key := binding.TakeDeviceStaticPrivateKey()
+	defer wipeBytes(key)
+
+	result, err := f.knock(t, binding, key)
+	if result != nil || !errors.Is(err, ErrInvalidNativeKnockInput) || !errors.Is(err, ErrAssignmentLeaseExpired) {
+		t.Fatalf("offline-open knock past the lease = %#v, %v; want ErrInvalidNativeKnockInput and ErrAssignmentLeaseExpired", result, err)
+	}
+	// A Hub that would happily renew stayed untouched, which is the whole point
+	// of the option.
+	if len(f.hubUDP.snapshot()) != 0 || len(f.cellUDP.snapshot()) != 0 {
+		t.Fatalf("offline-open knock performed I/O: Hub/cell=%d/%d", len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot()))
+	}
+	assertSessionPlacementUnchanged(t, f, binding, seeded)
+}
+
+// Renewal is once per lease, and the lead is what decides "once". Existing
+// coverage brackets this boundary from a minute away on each side; an off-by-one
+// in the comparison would silently move renewal by a whole lead.
+func TestLiveSessionAssignment_RenewalLeadBoundary(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	lease := time.Now().Add(24 * time.Hour)
+	for _, test := range []struct {
+		name        string
+		now         time.Time
+		wantRenewal bool
+	}{
+		{name: "one nanosecond before the lead", now: lease.Add(-sessionLeaseRenewalLead - time.Nanosecond)},
+		{name: "exactly at the lead", now: lease.Add(-sessionLeaseRenewalLead), wantRenewal: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			// A Hub with no steps: the renewal attempt is observable as a recorded
+			// request, and its failure is best effort while the lease is still live.
+			f := newRuntimeFixture(t, nil, nil)
+			seedSessionLease(t, f, contract, lease)
+			binding, key := openSessionBinding(t, f)
+
+			if _, err := binding.liveSessionAssignment(context.Background(), key, test.now); err != nil {
+				t.Fatalf("liveSessionAssignment at the lead boundary: %v", err)
+			}
+			attempts := len(f.hubUDP.snapshot())
+			if test.wantRenewal != (attempts > 0) {
+				t.Fatalf("Hub renewal attempts = %d, want renewal=%t", attempts, test.wantRenewal)
+			}
+		})
+	}
+}
+
+// KnockRegisteredAgent and ExitRegisteredAgentSession share one no-I/O admission
+// gate, so every rejection below has to hold for both. A short or mistyped key
+// must be refused on length before any curve operation.
+func TestRegisteredAgentSessionControl_RejectsInvalidArgumentsBeforeIO(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	// The existing identity-drift tests all use correct-length wrong keys, so
+	// only a length check reaches this branch before the curve rejects anything.
+	sameKey := func(valid []byte) []byte { return valid }
+	// Each case names the message of the branch it must land on. The key-length
+	// cases in particular would otherwise be indistinguishable from the curve
+	// rejecting the same bytes a few lines later.
+	for _, test := range []struct {
+		name          string
+		nilBinding    bool
+		key           func([]byte) []byte
+		transportOpts []AgentRuntimeUDPOption
+		wantMessage   string
+	}{
+		{name: "nil binding", nilBinding: true, key: sameKey, wantMessage: "runtime binding must not be nil"},
+		{name: "short key", key: func([]byte) []byte { return make([]byte, x25519key.Size-1) }, wantMessage: "device static private key must be 32 bytes"},
+		{name: "long key", key: func([]byte) []byte { return make([]byte, x25519key.Size+1) }, wantMessage: "device static private key must be 32 bytes"},
+		{name: "empty key", key: func([]byte) []byte { return nil }, wantMessage: "device static private key must be 32 bytes"},
+		{name: "nil transport option", key: sameKey, transportOpts: []AgentRuntimeUDPOption{nil}, wantMessage: "nil native UDP transport option"},
+		{
+			name: "rejected transport option", key: sameKey,
+			transportOpts: []AgentRuntimeUDPOption{WithAgentRuntimeUDPBounds(0, 0)},
+			wantMessage:   "native UDP transport option",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newRuntimeFixture(t, nil, []runtimeUDPStep{sessionKnockStep()})
+			seedSessionLease(t, f, contract, time.Now().Add(12*time.Hour))
+			binding, key := openSessionBinding(t, f)
+			key = test.key(key)
+			if test.nilBinding {
+				binding = nil
+			}
+			opts := append([]AgentRuntimeUDPOption{
+				WithAgentRuntimeUDPResolver(f.resolver), WithAgentRuntimeUDPDialer(f.dialer),
+			}, test.transportOpts...)
+
+			_, knockErr := KnockRegisteredAgent(context.Background(), binding, key, "resource-public-key",
+				NativeKnockOptions{RunID: "0123456789abcdef"}, opts...)
+			exitErr := ExitRegisteredAgentSession(context.Background(), binding, key, "resource-public-key",
+				NativeKnockOptions{RunID: "0123456789abcdef"}, opts...)
+			for entryPoint, err := range map[string]error{"knock": knockErr, "exit": exitErr} {
+				if !errors.Is(err, ErrInvalidNativeKnockInput) || !strings.Contains(err.Error(), test.wantMessage) {
+					t.Fatalf("%s = %v, want ErrInvalidNativeKnockInput containing %q", entryPoint, err, test.wantMessage)
+				}
+			}
+			if len(f.cellUDP.snapshot()) != 0 {
+				t.Fatalf("rejected session control reached a cell %d times", len(f.cellUDP.snapshot()))
+			}
+		})
+	}
+}
+
+// A clean exit is the documented end of every cycle, so its own failures have to
+// stay classified: a rejected body must not look like a transport fault, and a
+// transport fault must arrive in the same normalized class a knock would report.
+func TestExitRegisteredAgentSession_ClassifiesBodyAndTransportFailures(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+
+	t.Run("rejected session body sends nothing", func(t *testing.T) {
+		f := newRuntimeFixture(t, nil, []runtimeUDPStep{sessionKnockStep()})
+		seedSessionLease(t, f, contract, time.Now().Add(12*time.Hour))
+		binding, key := openSessionBinding(t, f)
+
+		for name, opts := range map[string]NativeKnockOptions{
+			"missing run id":   {},
+			"malformed run id": {RunID: "not-a-run-id"},
+		} {
+			t.Run(name, func(t *testing.T) {
+				err := ExitRegisteredAgentSession(context.Background(), binding, key, "resource-public-key", opts,
+					WithAgentRuntimeUDPResolver(f.resolver), WithAgentRuntimeUDPDialer(f.dialer))
+				if !errors.Is(err, ErrInvalidNativeKnockInput) {
+					t.Fatalf("exit with a rejected body = %v, want ErrInvalidNativeKnockInput", err)
+				}
+			})
+		}
+		if len(f.cellUDP.snapshot()) != 0 {
+			t.Fatalf("rejected exit body reached a cell %d times", len(f.cellUDP.snapshot()))
+		}
+	})
+
+	t.Run("silent cell normalizes the transport failure", func(t *testing.T) {
+		f := newRuntimeFixture(t, nil, []runtimeUDPStep{{requestType: relayknock.TypeExit, noReply: true}})
+		seedSessionLease(t, f, contract, time.Now().Add(12*time.Hour))
+		binding, key := openSessionBinding(t, f)
+
+		err := ExitRegisteredAgentSession(context.Background(), binding, key, "resource-public-key",
+			NativeKnockOptions{RunID: "0123456789abcdef"},
+			WithAgentRuntimeUDPResolver(f.resolver), WithAgentRuntimeUDPDialer(f.dialer),
+			WithAgentRuntimeUDPBounds(200*time.Millisecond, 1))
+		if err == nil || errors.Is(err, ErrInvalidNativeKnockInput) {
+			t.Fatalf("exit against a silent cell = %v, want a transport failure", err)
+		}
+		if !errors.Is(err, nativeudp.ErrTransport) {
+			t.Fatalf("exit transport failure = %v, want nativeudp.ErrTransport", err)
+		}
+		if got := len(f.cellUDP.snapshot()); got != 1 {
+			t.Fatalf("exit reached the cell %d times, want 1", got)
+		}
+	})
+}
+
+// The SDK-generated agent id is what a caller who never passes
+// WithAgentRuntimeIdentity depends on, and its documented promise is that the id
+// exists and is durable before anything is sent.
+func TestRegisterAgentRuntime_GeneratesAndPersistsAgentIdentityBeforeIO(t *testing.T) {
+	// newRuntimeFixture seeds a persisted agent id, which is exactly the branch
+	// this test must avoid; an unidentified state is the fresh-install shape.
+	newUnidentifiedFixture := func(t *testing.T, hubSteps []runtimeUDPStep) *runtimeFixture {
+		t.Helper()
+		f := newRuntimeFixture(t, hubSteps, nil)
+		state, err := f.store.LoadAgentState(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		state.AgentID = ""
+		if err := f.store.SaveAgentState(context.Background(), state); err != nil {
+			t.Fatal(err)
+		}
+		return f
+	}
+	// The same wiring the other fixtures use, minus WithAgentRuntimeIdentity:
+	// every existing fixture pins the id, which is why this branch has no cover.
+	registerOptions := func(f *runtimeFixture) []AgentRuntimeRegistrationOption {
+		return []AgentRuntimeRegistrationOption{
+			WithAgentRuntimeHeadlessEnrollment(),
+			WithAgentRuntimeHub(f.hub),
+			WithAgentRuntimeUDPResolver(f.resolver),
+			WithAgentRuntimeUDPDialer(f.dialer),
+			WithAgentRuntimeUDPBounds(100*time.Millisecond, 1),
+			WithAgentRuntimeAssignmentRetryBudget(1, time.Second),
+			withAgentRuntimeClock(func() time.Time { return assignmentFixtureNow }),
+			withTestAgentRuntimeAssignmentNonce(conformance.AgentAssignmentInitialRequestNonceFixture),
+			withAgentRuntimeDeviceCredential(canonicalNativeDeviceCredential),
+			WithAgentRuntimeMetadata("conformance-host", "0.0.0-conformance"),
+		}
+	}
+
+	t.Run("identity is generated, canonical, and durable before any packet", func(t *testing.T) {
+		// A Hub with no steps: enrollment cannot get past the first exchange, so
+		// anything durable at that point was written before the SDK sent anything.
+		f := newUnidentifiedFixture(t, nil)
+		_, _, err := RegisterAgentRuntime(context.Background(), conformance.AgentAssignmentBootstrapCredentialFixture, f.store, registerOptions(f)...)
+		if err == nil {
+			t.Fatal("enrollment against a silent Hub succeeded")
+		}
+		persisted, err := f.store.LoadAgentState(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if persisted.AgentID == "" {
+			t.Fatal("no agent id was persisted before the Hub exchange")
+		}
+		if validateErr := validateAssignmentAgentID(persisted.AgentID); validateErr != nil {
+			t.Fatalf("generated agent id %q is not a valid assignment identity: %v", persisted.AgentID, validateErr)
+		}
+		if !strings.HasPrefix(persisted.AgentID, "agent-") || len(persisted.AgentID) != len("agent-")+32 {
+			t.Fatalf("generated agent id %q is not the documented agent-<128 bits hex> shape", persisted.AgentID)
+		}
+
+		// Restart: the saved id is reused rather than a second one minted, which
+		// is what keeps one install from enrolling twice.
+		before := persisted.AgentID
+		_, _, err = RegisterAgentRuntime(context.Background(), conformance.AgentAssignmentBootstrapCredentialFixture, f.store, registerOptions(f)...)
+		if err == nil {
+			t.Fatal("second enrollment against a silent Hub succeeded")
+		}
+		restarted, err := f.store.LoadAgentState(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if restarted.AgentID != before {
+			t.Fatalf("restart changed the generated agent id: %q, want %q", restarted.AgentID, before)
+		}
+	})
+
+	t.Run("an unsavable identity stops before the Hub is contacted", func(t *testing.T) {
+		f := newUnidentifiedFixture(t, []runtimeUDPStep{{
+			requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult,
+			replyBody: loadAssignmentFixture(t).InitialAssignment.Result.BodyJSON,
+		}})
+		f.store.fail = len(f.store.snapshots()) + 1
+
+		_, _, err := RegisterAgentRuntime(context.Background(), conformance.AgentAssignmentBootstrapCredentialFixture, f.store, registerOptions(f)...)
+		if !errors.Is(err, ErrAgentBindingPersistence) {
+			t.Fatalf("unsavable generated identity = %v, want ErrAgentBindingPersistence", err)
+		}
+		if len(f.hubUDP.snapshot()) != 0 {
+			t.Fatalf("identity save failure still contacted the Hub %d times", len(f.hubUDP.snapshot()))
+		}
+	})
+}
+
+// Two distinct generated ids must not collide, or one install could adopt
+// another's identity on a shared authority.
+func TestGenerateDeviceID_IsCanonicalAndUnique(t *testing.T) {
+	seen := make(map[string]bool, 64)
+	for range 64 {
+		id, err := generateDeviceID()
+		if err != nil {
+			t.Fatalf("generateDeviceID: %v", err)
+		}
+		if err := validateAssignmentAgentID(id); err != nil {
+			t.Fatalf("generated id %q is not a valid assignment identity: %v", id, err)
+		}
+		if seen[id] {
+			t.Fatalf("generated id %q repeated", id)
+		}
+		seen[id] = true
+	}
+}

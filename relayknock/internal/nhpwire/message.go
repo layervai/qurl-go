@@ -3,6 +3,7 @@ package nhpwire
 import (
 	"bytes"
 	"compress/zlib"
+	"crypto/subtle"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -239,17 +240,48 @@ func DecryptReplyMessage(devicePriv, expectedServerStaticPub, packet []byte) (*M
 	return acceptReplyMessage(msg)
 }
 
+// acceptReplyMessage applies the shared reply profile: the admitted header types,
+// and the flag words a conforming responder can emit on them.
+//
+// Both flag values are live on the wire, so neither may be blanket-rejected. The
+// reference server builds NHP_ACK, NHP_RAK, NHP_LRT and the KNK overload NHP_COK
+// with compression enabled unconditionally — there is no size threshold — so
+// those always arrive as nhpFlagCompress, and the pinned relay-knock golden
+// NHP_ACK carries 0x0002. The Hub assignment NHP_COK and its NHP_LRT are the
+// uncompressed exceptions, which is why the frozen assignment vectors show 0x0000.
+// Everything outside {0, nhpFlagCompress} is refused, in particular
+// hubLSTCookieProofFlag: that bit is initiator-only and must never ride a reply.
+//
+// This gate restricts an UNAUTHENTICATED field. The flag word is covered only by
+// the unkeyed header digest, which anyone holding the agent's static public key
+// can recompute, so narrowing the admitted set shrinks what a tampered flag word
+// can reach but does not authenticate it. Authenticating it requires folding the
+// header into the AEAD AAD — a coordinated wire change across the NHP server and
+// the conformance vectors, tracked separately.
+//
+// The assignment path's stricter flags-must-be-zero pin stays in nativeudp: it
+// sees a profile this shared gate cannot. The two also report different classes,
+// so the pin is not redundant with this gate. A rejection HERE is a decrypt-stage
+// failure, which nativeudp folds into ErrServerUnauthenticated — its documented
+// class for a datagram that opened but is not a usable reply, already covering a
+// non-reply header type rejected just above. Its own gate reports
+// ErrMalformedReply. Neither class is retried, so the split is naming, not
+// behavior.
 func acceptReplyMessage(msg *Message) (*Message, error) {
 	if msg == nil {
 		return nil, fmt.Errorf("%w: decrypted message is nil", ErrMalformedReply)
 	}
 	switch msg.Type {
 	case TypeACK, TypeLRT, TypeCOK, TypeRAK:
-		return msg, nil
 	default:
 		cryptoutil.Wipe(msg.Body)
 		return nil, fmt.Errorf("%w: header type %d is not a server reply", ErrMalformedReply, msg.Type)
 	}
+	if msg.Flags != 0 && msg.Flags != nhpFlagCompress {
+		cryptoutil.Wipe(msg.Body)
+		return nil, fmt.Errorf("%w: reply type %d flags %#04x are outside the reply profile", ErrMalformedReply, msg.Type, msg.Flags)
+	}
+	return msg, nil
 }
 
 // DecryptReknockMessage opens an NHP_RKN request using the exact decoded COK
@@ -295,6 +327,12 @@ func decryptMessage(devicePriv, expectedServerStaticPub, cookie, packet []byte) 
 	if len(packet) > PacketBufferSize {
 		return nil, fmt.Errorf("reply too long: %d bytes > %d-byte buffer", len(packet), PacketBufferSize)
 	}
+	// The version rides in the clear, so this is a framing gate, not an integrity
+	// one: it refuses a packet whose layout this codec cannot claim to parse
+	// before any key agreement runs. Only major is gated — see getVersion.
+	if major, _ := getVersion(packet); major != protocolVersionMajor {
+		return nil, fmt.Errorf("unsupported NHP protocol major version %d, want %d", major, protocolVersionMajor)
+	}
 	header := packet[0:HeaderSize]
 	sealedBody := packet[HeaderSize:]
 
@@ -302,7 +340,10 @@ func decryptMessage(devicePriv, expectedServerStaticPub, cookie, packet []byte) 
 	if err != nil {
 		return nil, fmt.Errorf("derive agent pub: %w", err)
 	}
-	if !bytes.Equal(headerDigest(agentPub, header, cookie), header[offDigest:offDigest+hashSize]) {
+	// Constant-time: for RKN and the Hub LST proof this digest folds the secret
+	// 32-byte cookie, so a byte-at-a-time compare would leak how far a guessed
+	// digest matched and let a caller search for a valid proof without the cookie.
+	if subtle.ConstantTimeCompare(headerDigest(agentPub, header, cookie), header[offDigest:offDigest+hashSize]) != 1 {
 		return nil, errors.New("reply header digest mismatch (tampered, or wrong device key)")
 	}
 

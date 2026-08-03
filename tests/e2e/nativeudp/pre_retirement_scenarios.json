@@ -16,7 +16,7 @@
       "owner": "qurl-go",
       "status": "implemented",
       "test_name": "TestSandboxNativeUDPLifecycle/exact_qurl_go_93_candidate",
-      "requirement": "Prove the tested GITHUB_SHA is the current head of open same-repository layervai/qurl-go PR #93 targeting main, and that GitHub reports that exact lowercase commit SHA as cryptographically verified."
+      "requirement": "Prove the tested GITHUB_SHA is either the current head of the dispatched open same-repository layervai/qurl-go pull request targeting main, or contained in layervai/qurl-go main (the authenticated comparison reports it as the merge base with zero commits ahead), and that GitHub reports that exact lowercase commit SHA as cryptographically verified."
     },
     {
       "id": "registration.public_api_lifecycle_success",

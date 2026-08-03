@@ -14,9 +14,28 @@ retirement state, the qurl-go SHA under test, and the exact existence of every
 directly consumed repository SHA at its explicitly mapped GitHub repository.
 External deployment SHAs remain authenticated by the signed NHP producer
 artifact and are joined by the final NHP controller.
-It also requires the tested SHA to be the current head of open, same-repository
-qurl-go PR #93 targeting `main`, and requires GitHub to report that exact
-commit as cryptographically verified.
+It also binds the run to exactly one GitHub-verified commit of this repository
+at the exact `GITHUB_SHA` being built, in one of two accepted candidate shapes
+and nothing else. The optional `candidate_pull_request_number` dispatch input
+selects which:
+
+- empty (the default, and what the NHP controller sends): the tested SHA must
+  be **contained in `main`**. Containment is proven with the compare API — with
+  `main` as the base, the comparison must report `identical` or `behind`, zero
+  commits ahead, and the merge base equal to the tested SHA, and its `url` must
+  echo exactly this repository, the `main` base ref, and that SHA. Resolving the
+  commit object alone is deliberately not sufficient: a fork tip, an abandoned
+  branch, or any unmerged commit also resolves.
+- a positive pull request number: that pull request must be open in this same
+  repository, target `main`, and have the tested SHA as its **current** head, so
+  a merged, closed, force-pushed, or cross-repository head is rejected.
+
+Either way GitHub must report that exact commit as cryptographically verified.
+The candidate kind and both authenticated payloads are published to the strict
+test, which re-derives the property from the recorded payload rather than
+trusting the label, and fails closed on an unknown kind. Never hardcode a pull
+request number in the workflow: the previous gate pinned PR #93 and became
+undispatchable the moment that pull request merged.
 It records all supplied image digests, validates the public Hub trust root, and
 requires exactly the ordered `cell0` and `cell1` endpoints with distinct names
 and server identities;
@@ -83,7 +102,7 @@ Git build SHA, Hub trust root, deployment/inventory/proof-harness digests, and
 every authenticated assigned-cell tuple in a 30-day allowlisted JSON evidence
 manifest. The full normalized inventory mapping and checked-in exact retired
 lifecycle surface have separately reviewed literal SHA-256 values
-(`f7eb7d7dd840dec15aacf929331657738c07ef6f2cdd00cb9046288d13e46bd4`
+(`869e3a4f6cd6fbbb1fb786b9dc26a2778406dcd814bf226cdddc13f66f4b1e2d`
 and `3fe8872c3da9913c28d763f5561d82b67805aae5a6962c6dc403c7d6305da00c`,
 respectively); both are carried in evidence and must match across phases. The
 latter enumerates the
@@ -155,6 +174,22 @@ LST/COK/cookie-bound proof-LST/LRT, assigned-cell REG/RAK and completion
 LST/LRT, and KNK/ACK/EXT/ACK sequences remain separate blocking
 `wire.*` inventory rows until the sandbox orchestrator supplies packet/log
 evidence tied to the ephemeral agent and session.
+
+None of that is left as a silent skip. Every one of the 22 non-implemented rows
+carries a reviewed blocker naming the repository that must produce it and the
+exact artifact this repository is waiting on, and
+`TestExternalDependencyRowsHaveReviewedBlockers` runs in ordinary CI so an
+unexplained `external_dependency`, or a status flipped to `implemented` without
+a verifier, fails on the pull request that introduces it. Four orchestrator rows
+already have producer evidence and are verified here by `TestSandboxTopology`
+from the authenticated NHP artifact. The other seven orchestrator rows — the
+four `wire.*`/`negative.wrong_*` attribution rows and the three the NHP
+controller can only observe after this client run — are reported by
+`TestSandboxTopology` and `TestSandboxWireEvidence` as individually named
+skipped subtests stating their blocker, rather than one blanket skip that named
+only half of them. The twelve `connector.*` rows are proven by the Connector's
+own attended run; `TestSandboxConnectorUDP` is deliberately not defined here and
+is not in this workflow's `-run` filter.
 
 The versioned 68-row inventory is the complete pre-removal and post-removal
 release gate. It also tracks OTP behavior, authenticated-invalid-assignment and

@@ -2,12 +2,15 @@ package qurl
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/layervai/qurl-go/internal/x25519key"
 )
 
 func TestFileAgentState_NativeRoundTrip(t *testing.T) {
@@ -101,6 +104,54 @@ func TestFileAgentState_RejectsSymlinkAndOversize(t *testing.T) {
 		}
 		if _, err := FileAgentState(path).LoadAgentState(context.Background()); !errors.Is(err, ErrInvalidAgentState) {
 			t.Fatalf("oversize error = %v, want ErrInvalidAgentState", err)
+		}
+	})
+}
+
+// A keypair loaded from a store the SDK did not write is the one place the
+// device identity can be split: signing with one private key while every
+// authenticated exchange claims the persisted public key. Every branch below has
+// to fail closed rather than normalize the state into agreement.
+func TestEnsureKeypair_FailsClosedOnAMismatchedIdentity(t *testing.T) {
+	valid, err := newAgentState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := newAgentState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if valid.PublicKeyB64 == other.PublicKeyB64 {
+		t.Fatal("two generated keypairs collided")
+	}
+	for name, state := range map[string]*AgentState{
+		"public key belongs to another private key": {PrivateKeyB64: valid.PrivateKeyB64, PublicKeyB64: other.PublicKeyB64},
+		"private key is not X25519":                 {PrivateKeyB64: base64.StdEncoding.EncodeToString(make([]byte, x25519key.Size-1)), PublicKeyB64: valid.PublicKeyB64},
+		"private key is not base64":                 {PrivateKeyB64: "!!!not base64!!!", PublicKeyB64: valid.PublicKeyB64},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := state.ensureKeypair(ErrInvalidClientConfig); !errors.Is(err, ErrInvalidClientConfig) {
+				t.Fatalf("ensureKeypair = %v, want ErrInvalidClientConfig", err)
+			}
+		})
+	}
+
+	t.Run("nil state", func(t *testing.T) {
+		var absent *AgentState
+		if err := absent.ensureKeypair(ErrInvalidClientConfig); !errors.Is(err, ErrInvalidClientConfig) {
+			t.Fatalf("nil state ensureKeypair = %v, want ErrInvalidClientConfig", err)
+		}
+	})
+
+	// An absent public key is derived rather than rejected: it is the one shape
+	// that carries no contradictory claim about who this device is.
+	t.Run("absent public key is derived from the private key", func(t *testing.T) {
+		derived := &AgentState{PrivateKeyB64: valid.PrivateKeyB64}
+		if err := derived.ensureKeypair(ErrInvalidClientConfig); err != nil {
+			t.Fatalf("ensureKeypair with an absent public key: %v", err)
+		}
+		if derived.PublicKeyB64 != valid.PublicKeyB64 {
+			t.Fatalf("derived public key = %q, want %q", derived.PublicKeyB64, valid.PublicKeyB64)
 		}
 	})
 }

@@ -51,6 +51,11 @@ jobs:
         run: go vet ./...
 
       - name: go test -race + coverage
+        # QURL_GO_REQUIRE_IPV6 makes the real-udp6 transport tests fail instead of
+        # skip. GitHub's ubuntu runners provide ::1; if that ever stops being true,
+        # this surfaces it rather than letting IPv6 coverage vanish into a green run.
+        env:
+          QURL_GO_REQUIRE_IPV6: "1"
         run: go test -race -covermode=atomic -coverprofile=coverage.txt ./...
 
       - name: Coverage summary
@@ -62,6 +67,91 @@ jobs:
           name: coverage
           path: coverage.txt
           if-no-files-found: error
+
+  # Additional operating systems for the parts of the SDK whose behaviour is
+  # actually OS-dependent. This is a SEPARATE job on purpose: the required
+  # context is the literal string "vet + test -race", so matrixing that job
+  # would rename its rendered check and orphan main's branch protection.
+  #
+  # Why it exists: the SDK's core is a CONNECTED UDP socket
+  # (relayknock/nativeudp dials with net.Dialer.DialContext(ctx, "udp", …) and
+  # reads from the connected conn), and the kernel's handling of an ICMP port
+  # unreachable on such a socket is not portable — Linux surfaces ECONNREFUSED
+  # on the following read, Windows surfaces WSAECONNRESET, and the BSD/darwin
+  # path differs again. A Linux-only gate cannot see a regression there.
+  #
+  # The package scope is narrower than ./... per OS, and deliberately expressed
+  # as an EXCLUSION so a newly added package is covered automatically:
+  #   * macOS drops internal/workflowcontract. Those tests execute fragments of
+  #     the Linux-only proof workflows through bash (`mapfile -d`, GNU coreutils
+  #     flags); running them on macOS would assert things about the runner image
+  #     rather than about this SDK.
+  #   * Windows additionally drops ./qurl and ./tests/e2e/nativeudp. The pinned
+  #     local agent-state store is deliberately UNIMPLEMENTED off unix
+  #     (qurl/pinned_state_dir_other.go returns ErrAgentStateContinuity +
+  #     "unsupported on this platform"), so every constructor those suites need
+  #     fails by design. Widening this requires the real Windows
+  #     CreateFile/LockFileEx/ACL/FlushFileBuffers backend — never a skip or a
+  #     relaxed assertion in the tests.
+  #
+  # Not a required check: it is additive signal, and it must not be able to
+  # block a merge on a runner-image change.
+  cross-os:
+    name: vet + test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Report every OS on a failure rather than cancelling the siblings — the
+      # whole point is comparing behaviour across them.
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            # -race is verified to pass here on the full macOS scope.
+            race: "-race"
+            exclude_packages: "/internal/workflowcontract$"
+          - os: windows-latest
+            # No -race: the Windows race detector needs the runner's bundled C
+            # toolchain, and the OS-specific behaviour this job exists to cover
+            # is socket semantics, which the Linux and macOS jobs already
+            # race-check. Add "-race" here once a green run confirms the
+            # toolchain is present.
+            race: ""
+            exclude_packages: "/internal/workflowcontract$|/qurl$|/tests/e2e/"
+    defaults:
+      run:
+        # One shell on both runners so the package-scoping pipeline below is not
+        # written twice; windows-latest ships bash.
+        shell: bash
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      # The matrix value is a regex, so it is passed through the environment
+      # rather than interpolated into the script body.
+      - name: Resolve OS-supported packages
+        id: packages
+        env:
+          EXCLUDE_PACKAGES: ${{ matrix.exclude_packages }}
+        run: |
+          set -euo pipefail
+          packages="$(go list ./... | grep -Ev "$EXCLUDE_PACKAGES" | tr '\n' ' ')"
+          if [ -z "$packages" ]; then
+            echo "::error::package scoping excluded every package"
+            exit 1
+          fi
+          echo "packages=$packages" >> "$GITHUB_OUTPUT"
+
+      - name: go vet
+        run: go vet ${{ steps.packages.outputs.packages }}
+
+      - name: go test
+        run: go test ${{ matrix.race }} -count=1 ${{ steps.packages.outputs.packages }}
 
   lint:
     name: golangci-lint
@@ -186,7 +276,7 @@ jobs:
   # one-line edit to `needs:` + `gates:` here — no aggregation if-chain.
   notify:
     name: Notify
-    needs: [test, lint, vuln, awsstore]
+    needs: [test, cross-os, lint, vuln, awsstore]
     # `!cancelled()` rather than `always()`: this repo sets
     # concurrency.cancel-in-progress, so a newer push to main cancels the
     # in-flight run. `always()` would still post a yellow "cancelled" card
@@ -198,6 +288,6 @@ jobs:
     uses: layervai/ops-routines-workflows/.github/workflows/notify.yml@47f516254213f3e250caa0eef43900dac548e208 # v0.10.0
     with:
       header: "qURL Go SDK Build"
-      gates: '{"Tests": "${{ needs.test.result }}", "Lint": "${{ needs.lint.result }}", "Vuln": "${{ needs.vuln.result }}", "awsstore": "${{ needs.awsstore.result }}"}'
+      gates: '{"Tests": "${{ needs.test.result }}", "macOS + Windows": "${{ needs[''cross-os''].result }}", "Lint": "${{ needs.lint.result }}", "Vuln": "${{ needs.vuln.result }}", "awsstore": "${{ needs.awsstore.result }}"}'
     secrets:
       SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

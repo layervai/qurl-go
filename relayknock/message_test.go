@@ -321,6 +321,74 @@ func TestRelayPost_RejectsAgentLifecyclePacketsBeforeHTTP(t *testing.T) {
 	}
 }
 
+// TestRelayPost_NonOKStatusIsRelayError pins the public transport-fault contract:
+// RelayPost's calling contract is 200 with reply packet bytes, so every other
+// status is a *RelayError carrying the numeric status. A consumer branches on
+// that concrete type to separate "the relay could not deliver this" from an
+// authenticated server deny riding inside a decryptable reply, so the type and
+// the Status field are both load-bearing API. The relay's response body is
+// appended as detail only when it carries one — an empty body must not leave a
+// dangling separator in the message.
+func TestRelayPost_NonOKStatusIsRelayError(t *testing.T) {
+	devicePriv, _ := testKeyPair(t, 0x11)
+	_, serverPub := testKeyPair(t, 0x22)
+
+	packet, err := relayknock.BuildMessage(relayknock.TypeKnock, &relayknock.KnockInputs{
+		DeviceStaticPriv: devicePriv,
+		ServerStaticPub:  serverPub,
+		EphemeralPriv:    bytes.Repeat([]byte{0x33}, 32),
+		TimestampNanos:   1700000000123456789,
+		Counter:          42,
+		Preamble:         0x01020304,
+		Body:             []byte("knock body"),
+	})
+	if err != nil {
+		t.Fatalf("BuildMessage(TypeKnock): %v", err)
+	}
+
+	tests := []struct {
+		name    string
+		status  int
+		body    string
+		wantSub string
+	}{
+		{name: "unknown server", status: http.StatusNotFound, body: "unknown server id", wantSub: "unknown server id"},
+		{name: "forward failure", status: http.StatusBadGateway, body: "forward failed", wantSub: "forward failed"},
+		{name: "shutting down", status: http.StatusServiceUnavailable, body: "", wantSub: "-> 503"},
+		{name: "unexpected redirect body", status: http.StatusNoContent, body: "", wantSub: "-> 204"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tt.status)
+				_, _ = io.WriteString(w, tt.body)
+			}))
+			defer srv.Close()
+
+			reply, err := relayknock.RelayPost(context.Background(), nil, srv.URL, "cell-key-fingerprint", packet)
+			if err == nil {
+				t.Fatalf("RelayPost accepted status %d and returned %d reply bytes", tt.status, len(reply))
+			}
+			if reply != nil {
+				t.Errorf("RelayPost returned reply bytes alongside the error: %x", reply)
+			}
+			var relayErr *relayknock.RelayError
+			if !errors.As(err, &relayErr) {
+				t.Fatalf("error %q is not *relayknock.RelayError; a consumer cannot branch on the transport fault", err)
+			}
+			if relayErr.Status != tt.status {
+				t.Errorf("RelayError.Status = %d, want %d", relayErr.Status, tt.status)
+			}
+			if !strings.Contains(relayErr.Error(), tt.wantSub) {
+				t.Errorf("RelayError.Error() = %q, does not contain %q", relayErr.Error(), tt.wantSub)
+			}
+			if tt.body == "" && strings.HasSuffix(relayErr.Error(), ": ") {
+				t.Errorf("RelayError.Error() = %q, has a dangling detail separator for an empty relay body", relayErr.Error())
+			}
+		})
+	}
+}
+
 func TestRelayPost_RejectsMalformedPacketBeforeHTTP(t *testing.T) {
 	requests := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {

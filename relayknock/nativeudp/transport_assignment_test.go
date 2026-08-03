@@ -289,7 +289,11 @@ func TestAssignmentList_ChallengeRejectsAreTerminal(t *testing.T) {
 		{name: "untrusted Hub", behavior: assignmentCookieWrongKey, want: nativeudp.ErrServerUnauthenticated, flights: 1},
 		{name: "result before proof", behavior: assignmentCookieDirectResult, want: relayknock.ErrMalformedReply, flights: 1},
 		{name: "compressed COK", behavior: assignmentCookieCompressed, want: relayknock.ErrMalformedReply, flights: 1},
-		{name: "unknown COK flag", behavior: assignmentCookieUnknownFlag, want: relayknock.ErrMalformedReply, flights: 1},
+		// 0x0008 is outside the reply flag profile, so the shared nhpwire gate
+		// refuses it during decryption rather than letting it reach the
+		// assignment-only flag check below. That is the same class as a non-reply
+		// header type, which Exchange already documents as unauthenticated.
+		{name: "unknown COK flag", behavior: assignmentCookieUnknownFlag, want: nativeudp.ErrServerUnauthenticated, flights: 1},
 		{name: "second COK", behavior: assignmentCookieSecondChallenge, want: relayknock.ErrMalformedReply, flights: 2},
 		{name: "wrong LRT counter", behavior: assignmentCookieWrongResultCounter, want: relayknock.ErrMalformedReply, flights: 2},
 		{name: "wrong proof reply type", behavior: assignmentCookieWrongResultType, want: relayknock.ErrMalformedReply, flights: 2},

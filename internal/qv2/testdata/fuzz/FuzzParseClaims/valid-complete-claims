@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("{\"v\":2,\"iss\":\"qurl-service\",\"kid\":\"qurl-issuer-2026-01\",\"iat\":1767225600,\"nbf\":1767225600,\"exp\":1767229200,\"jti\":\"01JQ0000000000000000000000\",\"cell_public_key_b64\":\"QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl8\",\"cell_id\":\"cell0\",\"relay_url\":\"https://relay.qurl.link\",\"resource_public_key_b64\":\"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAExseDx4vuFrlRO-QyRqD5w5LzMrFUbIipAelBuBZQp53b5bhuXHtB-5eo4-mJcX-4wjnwyVqLZ6o3TF1tQxVChw\",\"qurl_user_public_key_b64\":\"gIGCg4SFhoeIiYqLjI2Oj5CRkpOUlZaXmJmam5ydnp8\"}")

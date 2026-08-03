@@ -63,6 +63,18 @@ on:
         description: Required for post_removal; successful paired pre_removal workflow run id
         required: false
         type: string
+      # Optional so the NHP controller's existing dispatch payload keeps working
+      # unchanged: empty selects the main-containment candidate shape, which is
+      # what a controller dispatching at a merged commit needs. Supply a number
+      # only to prove a not-yet-merged head, and it must be an open
+      # same-repository pull request targeting main whose head is this exact
+      # GITHUB_SHA. Never hardcode a number here — a merged pull request makes
+      # the whole proof undispatchable.
+      candidate_pull_request_number:
+        description: Optional open qurl-go pull request number whose current head is the tested SHA; empty proves containment in main instead
+        required: false
+        default: ""
+        type: string
 
 concurrency:
   group: native-udp-sandbox-proof
@@ -100,6 +112,7 @@ jobs:
       QURL_GO_SANDBOX_DEPLOYMENT_ARTIFACT_ID: ${{ inputs.deployment_artifact_id }}
       QURL_GO_SANDBOX_DEPLOYMENT_ARTIFACT_DIGEST: ${{ inputs.deployment_artifact_digest }}
       QURL_GO_SANDBOX_PRE_REMOVAL_RUN_ID: ${{ inputs.pre_removal_run_id }}
+      QURL_GO_SANDBOX_CANDIDATE_PULL_REQUEST_NUMBER: ${{ inputs.candidate_pull_request_number }}
       QURL_GO_SANDBOX_ASSIGNMENT_HANDSHAKE_B64: ${{ inputs.assignment_handshake_b64 }}
       QURL_GO_SANDBOX_CLIENT_RUN_ID: ${{ github.run_id }}
       QURL_GO_SANDBOX_OTP_MAILBOX_QUEUE_URL: https://sqs.us-east-2.amazonaws.com/767397897469/layerv-nhp-sandbox-udp-proof-otp-mailbox
@@ -537,19 +550,65 @@ jobs:
           mv "${runtime_candidate}" "${runtime}"
           mv "${retirement_targets_candidate}" "${retirement_targets}"
           verify_repository_commits "${manifest}"
-          candidate_pr="${RUNNER_TEMP}/qurl-go-pr-93.json"
-          gh api "repos/${GITHUB_REPOSITORY}/pulls/93" > "${candidate_pr}"
-          jq -e --arg repository "${GITHUB_REPOSITORY}" --arg sha "${GITHUB_SHA}" '
-            .number == 93 and .state == "open" and
-            .head.repo.full_name == $repository and .base.repo.full_name == $repository and
-            .base.ref == "main" and .head.sha == $sha
-          ' "${candidate_pr}" >/dev/null
-          candidate_commit="${RUNNER_TEMP}/qurl-go-pr-93-commit.json"
+          # Candidate acceptance. The proof binds to exactly one commit of THIS
+          # repository — the GITHUB_SHA this job is running — in one of two
+          # shapes and nothing else. Both are resolved through the authenticated
+          # API, and every failure path here is fatal: `set -e` plus `jq -e`
+          # means an unreachable API, an unexpected payload, or a false
+          # predicate stops the run before any credential is minted.
+          [[ "${GITHUB_SHA}" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::error::invalid candidate build SHA"
+            exit 1
+          }
+          candidate="${RUNNER_TEMP}/qurl-go-candidate.json"
+          candidate_kind="main_contained"
+          if [[ -n "${QURL_GO_SANDBOX_CANDIDATE_PULL_REQUEST_NUMBER}" ]]; then
+            [[ "${QURL_GO_SANDBOX_CANDIDATE_PULL_REQUEST_NUMBER}" =~ ^[1-9][0-9]{0,9}$ ]] || {
+              echo "::error::invalid candidate pull request number"
+              exit 1
+            }
+            candidate_kind="open_pull_request"
+          fi
+          if [[ "${candidate_kind}" == "open_pull_request" ]]; then
+            # Pre-merge shape: the operator named a pull request, so that pull
+            # request must still be open in this repository, target main, and
+            # have this exact commit as its CURRENT head. A stale or force-pushed
+            # head no longer matches GITHUB_SHA and is rejected.
+            gh api \
+              "repos/${GITHUB_REPOSITORY}/pulls/${QURL_GO_SANDBOX_CANDIDATE_PULL_REQUEST_NUMBER}" \
+              > "${candidate}"
+            jq -e \
+              --arg repository "${GITHUB_REPOSITORY}" \
+              --arg sha "${GITHUB_SHA}" \
+              --argjson number "${QURL_GO_SANDBOX_CANDIDATE_PULL_REQUEST_NUMBER}" '
+              .number == $number and .state == "open" and
+              .head.repo.full_name == $repository and .base.repo.full_name == $repository and
+              .base.ref == "main" and .head.sha == $sha
+            ' "${candidate}" >/dev/null
+          else
+            # Merged shape: prove CONTAINMENT in main, not mere existence. The
+            # commit API answers "this object exists somewhere in the repository
+            # network", which a fork tip or an abandoned branch also satisfies.
+            # The compare API answers the question that matters: with main as the
+            # base, the merge base of main and GITHUB_SHA must be GITHUB_SHA
+            # itself and nothing may be ahead of it, which holds only when the
+            # commit is main's head or an ancestor of it. `.url` echoes the exact
+            # requested repository and base...head pair, so the payload itself
+            # binds the repository and the base ref rather than the request alone.
+            gh api "repos/${GITHUB_REPOSITORY}/compare/main...${GITHUB_SHA}" > "${candidate}"
+            jq -e --arg repository "${GITHUB_REPOSITORY}" --arg sha "${GITHUB_SHA}" '
+              .url == "https://api.github.com/repos/" + $repository + "/compare/main..." + $sha and
+              (.status == "identical" or .status == "behind") and
+              .ahead_by == 0 and .merge_base_commit.sha == $sha and
+              (.base_commit.sha | type == "string" and test("^[0-9a-f]{40}$"))
+            ' "${candidate}" >/dev/null
+          fi
+          candidate_commit="${RUNNER_TEMP}/qurl-go-candidate-commit.json"
           gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}" > "${candidate_commit}"
           jq -e --arg sha "${GITHUB_SHA}" '
             .sha == $sha and .commit.verification.verified == true
           ' "${candidate_commit}" >/dev/null
-          chmod 0444 "${candidate_pr}" "${candidate_commit}"
+          chmod 0444 "${candidate}" "${candidate_commit}"
           canonicalize_json "${inventory}" "${inventory_snapshot}"
           canonicalize_json "${retired_surface}" "${retired_surface_snapshot}"
           cp -- "${typed_evidence_contract}" "${typed_evidence_contract_snapshot}"
@@ -561,7 +620,7 @@ jobs:
           retirement_probe_targets_sha256="$(sha256sum "${retirement_targets}" | cut -d' ' -f1)"
           inventory_sha256="$(sha256sum "${inventory_snapshot}" | cut -d' ' -f1)"
           inventory_mapping_sha256="$(jq -cS -j '{schema_version, gate, proof_phases, all_scenarios_required, scenarios: ([.scenarios[] | {id, owner, status, test_name, requirement}] | sort_by(.id))}' "${inventory}" | sha256sum | cut -d' ' -f1)"
-          test "${inventory_mapping_sha256}" = "f7eb7d7dd840dec15aacf929331657738c07ef6f2cdd00cb9046288d13e46bd4"
+          test "${inventory_mapping_sha256}" = "869e3a4f6cd6fbbb1fb786b9dc26a2778406dcd814bf226cdddc13f66f4b1e2d"
           scenario_contract_sha256="$(jq -cS '{schema_version, gate, proof_phases, all_scenarios_required, scenarios: ([.scenarios[] | {id, owner, test_name, requirement}] | sort_by(.id))}' "${inventory}" | sha256sum | cut -d' ' -f1)"
           typed_evidence_contract_sha256="$(sha256sum "${typed_evidence_contract_snapshot}" | cut -d' ' -f1)"
           test "${typed_evidence_contract_sha256}" = "f4b37aceb2dd55f2c1cf6d7ec4e955cfeb69297ff6151b565935d03d01f65d08"
@@ -586,7 +645,8 @@ jobs:
             echo "QURL_GO_SANDBOX_INVENTORY_MAPPING_SHA256=${inventory_mapping_sha256}"
             echo "QURL_GO_SANDBOX_SCENARIO_CONTRACT_SHA256=${scenario_contract_sha256}"
             echo "QURL_GO_SANDBOX_TYPED_EVIDENCE_CONTRACT_SHA256=${typed_evidence_contract_sha256}"
-            echo "QURL_GO_SANDBOX_CANDIDATE_PR_PATH=${candidate_pr}"
+            echo "QURL_GO_SANDBOX_CANDIDATE_KIND=${candidate_kind}"
+            echo "QURL_GO_SANDBOX_CANDIDATE_PATH=${candidate}"
             echo "QURL_GO_SANDBOX_CANDIDATE_COMMIT_PATH=${candidate_commit}"
             echo "QURL_GO_SANDBOX_RETIRED_LIFECYCLE_SURFACE_PATH=${retired_surface_snapshot}"
             echo "QURL_GO_SANDBOX_RETIRED_LIFECYCLE_SURFACE_SHA256=${retired_lifecycle_surface_sha256}"
@@ -852,7 +912,7 @@ jobs:
           test "$(jq -r '.inventory_sha256' "${pre_evidence}")" = "${pre_inventory_sha256}"
           test "${pre_inventory_sha256}" = "${inventory_sha256}"
           test "${pre_inventory_mapping_sha256}" = "${inventory_mapping_sha256}"
-          test "${pre_inventory_mapping_sha256}" = "f7eb7d7dd840dec15aacf929331657738c07ef6f2cdd00cb9046288d13e46bd4"
+          test "${pre_inventory_mapping_sha256}" = "869e3a4f6cd6fbbb1fb786b9dc26a2778406dcd814bf226cdddc13f66f4b1e2d"
           test "${pre_retired_lifecycle_surface_sha256}" = "${retired_lifecycle_surface_sha256}"
           test "${pre_retired_lifecycle_surface_sha256}" = "3fe8872c3da9913c28d763f5561d82b67805aae5a6962c6dc403c7d6305da00c"
           test "$(jq -r '.typed_evidence_contract_sha256' "${pre_evidence}")" = "${pre_typed_evidence_contract_sha256}"
@@ -1221,7 +1281,7 @@ jobs:
           test "$(sha256sum "${QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_PATH}" | cut -d' ' -f1)" = "${QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_SHA256}"
           test "$(compute_proof_harness_sha256)" = "${QURL_GO_SANDBOX_PROOF_HARNESS_SHA256}"
           test "$(jq -cS -j '{schema_version, gate, proof_phases, all_scenarios_required, scenarios: ([.scenarios[] | {id, owner, status, test_name, requirement}] | sort_by(.id))}' "${inventory}" | sha256sum | cut -d' ' -f1)" = "${QURL_GO_SANDBOX_INVENTORY_MAPPING_SHA256}"
-          test "${QURL_GO_SANDBOX_INVENTORY_MAPPING_SHA256}" = "f7eb7d7dd840dec15aacf929331657738c07ef6f2cdd00cb9046288d13e46bd4"
+          test "${QURL_GO_SANDBOX_INVENTORY_MAPPING_SHA256}" = "869e3a4f6cd6fbbb1fb786b9dc26a2778406dcd814bf226cdddc13f66f4b1e2d"
           test "$(jq -cS '{schema_version, gate, proof_phases, all_scenarios_required, scenarios: ([.scenarios[] | {id, owner, test_name, requirement}] | sort_by(.id))}' "${inventory}" | sha256sum | cut -d' ' -f1)" = "${QURL_GO_SANDBOX_SCENARIO_CONTRACT_SHA256}"
           test "$(jq -cS -j . "${retired_surface_source}" | sha256sum | cut -d' ' -f1)" = "${QURL_GO_SANDBOX_RETIRED_LIFECYCLE_SURFACE_SHA256}"
           test "$(sha256sum "${retired_surface}" | cut -d' ' -f1)" = "${QURL_GO_SANDBOX_RETIRED_LIFECYCLE_SURFACE_SHA256}"
@@ -1321,7 +1381,7 @@ jobs:
             [[ "$(sha256sum "${orchestrator_evidence_path}" | cut -d' ' -f1)" == "${QURL_GO_SANDBOX_ORCHESTRATOR_EVIDENCE_SHA256}" ]] &&
             [[ "$(compute_proof_harness_sha256)" == "${QURL_GO_SANDBOX_PROOF_HARNESS_SHA256}" ]] &&
             [[ "$(jq -cS -j '{schema_version, gate, proof_phases, all_scenarios_required, scenarios: ([.scenarios[] | {id, owner, status, test_name, requirement}] | sort_by(.id))}' "${inventory}" | sha256sum | cut -d' ' -f1)" == "${QURL_GO_SANDBOX_INVENTORY_MAPPING_SHA256}" ]] &&
-            [[ "${QURL_GO_SANDBOX_INVENTORY_MAPPING_SHA256}" == "f7eb7d7dd840dec15aacf929331657738c07ef6f2cdd00cb9046288d13e46bd4" ]] &&
+            [[ "${QURL_GO_SANDBOX_INVENTORY_MAPPING_SHA256}" == "869e3a4f6cd6fbbb1fb786b9dc26a2778406dcd814bf226cdddc13f66f4b1e2d" ]] &&
             [[ "$(jq -cS -j . "${retired_surface_source}" | sha256sum | cut -d' ' -f1)" == "${QURL_GO_SANDBOX_RETIRED_LIFECYCLE_SURFACE_SHA256}" ]] &&
             [[ "$(sha256sum "${retired_surface}" | cut -d' ' -f1)" == "${QURL_GO_SANDBOX_RETIRED_LIFECYCLE_SURFACE_SHA256}" ]] &&
             [[ "${QURL_GO_SANDBOX_RETIRED_LIFECYCLE_SURFACE_SHA256}" == "3fe8872c3da9913c28d763f5561d82b67805aae5a6962c6dc403c7d6305da00c" ]] &&
