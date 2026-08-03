@@ -60,8 +60,12 @@ type ResourceHandle struct {
 	OpenSeconds uint32
 }
 
-// ErrNotConfigured is returned by EnterPortal when opener config is missing.
-var ErrNotConfigured = errors.New("qurl: EnterPortal requires qURL opener config")
+// ErrNotConfigured reports that a required piece of qURL configuration is
+// absent. The message deliberately names no entry point: the same sentinel is
+// wrapped by the agent-runtime path, where naming EnterPortal sent operators
+// looking at a function they never called. Each return site adds its own
+// context.
+var ErrNotConfigured = errors.New("qurl: not configured")
 
 // EnterPortal opens a qURL link using the process-wide default Provider
 // (SetDefaultProvider). Applications install opener config once at startup, then
@@ -83,7 +87,7 @@ func EnterPortal(ctx context.Context, qurlLink string) (*ResourceHandle, error) 
 func EnterPortalWith(ctx context.Context, qurlLink string, cfg Config) (*ResourceHandle, error) {
 	// A trust store is always required: nothing below runs on unverified claims.
 	if cfg.TrustStore == nil {
-		return nil, ErrNotConfigured
+		return nil, fmt.Errorf("%w: EnterPortal requires qURL opener config", ErrNotConfigured)
 	}
 	// With neither a cell catalog nor a relay allowlist there is no transport this
 	// open could ever use. That is a configuration fault, not a link fault, so it
@@ -91,7 +95,7 @@ func EnterPortalWith(ctx context.Context, qurlLink string, cfg Config) (*Resourc
 	// Which of the two is actually needed depends on the cell the claims name, so
 	// that check necessarily happens after verification.
 	if cfg.Cells == nil && cfg.RelayAllowlist == nil {
-		return nil, ErrNotConfigured
+		return nil, fmt.Errorf("%w: EnterPortal requires qURL opener config", ErrNotConfigured)
 	}
 
 	// 1+2. Parse the fragment and verify the issuer signature. FragmentFromLinkAndVerify
@@ -121,7 +125,7 @@ func EnterPortalWith(ctx context.Context, qurlLink string, cfg Config) (*Resourc
 	cellEndpoint, useNativeUDP := cfg.Cells.lookup(cellPub)
 	if !useNativeUDP {
 		if cfg.RelayAllowlist == nil {
-			return nil, ErrNotConfigured
+			return nil, fmt.Errorf("%w: EnterPortal requires qURL opener config", ErrNotConfigured)
 		}
 		if err := qv2.ValidateRelayURL(claims.RelayURL, cfg.RelayAllowlist.core()); err != nil {
 			return nil, err

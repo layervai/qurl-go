@@ -271,7 +271,7 @@ func NewDiscoveryProvider(cfg DiscoveryConfig) (*DiscoveryProvider, error) {
 // has.
 func (p *DiscoveryProvider) Resolve(ctx context.Context) (*TrustStore, *RelayAllowlist, error) {
 	if p == nil {
-		return nil, nil, ErrNotConfigured
+		return nil, nil, fmt.Errorf("%w: no discovery provider is installed", ErrNotConfigured)
 	}
 	raw, err := p.cfg.Fetcher.Fetch(ctx)
 	if err != nil {

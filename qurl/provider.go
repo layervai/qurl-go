@@ -3,6 +3,7 @@ package qurl
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 )
 
@@ -63,7 +64,7 @@ func NewStaticProvider(ts *TrustStore, allow *RelayAllowlist) (*StaticProvider, 
 // fails closed with ErrNotConfigured rather than panicking on the field read.
 func (p *StaticProvider) Resolve(context.Context) (*TrustStore, *RelayAllowlist, error) {
 	if p == nil {
-		return nil, nil, ErrNotConfigured
+		return nil, nil, fmt.Errorf("%w: nil opener provider installed", ErrNotConfigured)
 	}
 	return p.trustStore, p.allowlist, nil
 }
