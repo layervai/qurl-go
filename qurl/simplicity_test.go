@@ -45,10 +45,6 @@ var frictionBudget = map[string]int{
 	// The package overview: open a client, protect, create, print.
 	"Example": 4,
 
-	// ExampleRecoverAgentRuntime is budgeted on the branch that introduces
-	// credential recovery; it does not exist here, and a budget naming a
-	// missing example fails loudly by design.
-
 	// --- Agent runtime -------------------------------------------------------
 	// Registration is the highest-friction scenario in the SDK and the one an
 	// integrator hits first. It was 12; removing the hand-assembled Hub trust
@@ -78,6 +74,19 @@ var frictionBudget = map[string]int{
 	"ExampleConnectAgentRuntime":     11,
 	"ExampleRegisterAgentRuntime":    11,
 	"ExampleNewSealedFileAgentState": 5,
+
+	// Headless enrollment is the escape hatch for a runtime with no mailbox, so
+	// it must stay cheaper than the default OTP path it opts out of: open agent
+	// state / register / two defers that close the store and the binding — plus
+	// the ctx and the discard the example needs to compile.
+	"ExampleWithAgentRuntimeHeadlessEnrollment": 6,
+
+	// Recovery is one deliberate operator action, and the extra statement over
+	// headless enrollment is the Hub trust root: RecoverAgentRuntime rejects a
+	// call without WithAgentRuntimeRecoveryHub, so unlike registration it cannot
+	// fall back to the root the SDK ships. Teaching recovery that fallback is the
+	// one honest way to get this to 6.
+	"ExampleRecoverAgentRuntime": 7,
 }
 
 // countBudgetedStatements counts top-level statements in fn, skipping the
