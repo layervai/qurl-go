@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"os"
 	"strconv"
 	"time"
 
@@ -67,6 +68,17 @@ var (
 	// constructing the packet, dial/write/read failure, or a socket deadline with
 	// no reply. A retried exchange re-resolves the host first.
 	ErrTransport = errors.New("nativeudp: udp exchange failed")
+
+	// ErrNoReply marks the specific transport miss in which the datagram was
+	// written to the address successfully but no reply arrived before the socket
+	// deadline. It always accompanies ErrTransport and is retried identically;
+	// it exists only so a caller can tell "nothing answered" apart from a dial or
+	// write fault. It is the on-the-wire signature of both a stopped server and a
+	// silently dropping network path (a source-fenced security group, an egress
+	// firewall). Those two are byte-for-byte identical from the client — a DROP
+	// returns no ICMP and no RST — so this sentinel deliberately names the
+	// observation, not a cause.
+	ErrNoReply = errors.New("nativeudp: no reply before deadline")
 
 	// ErrServerUnauthenticated marks a datagram that was received but is not an
 	// authenticated reply from the pinned server public key: a wrong server key,
@@ -605,9 +617,26 @@ func sendOne(ctx context.Context, dialer Dialer, address string, packet []byte, 
 	// the caller classifies the received datagram as unauthenticated instead
 	// of treating it as a transport miss and falling through to another IP.
 	if n <= nhpwire.PacketBufferSize && err != nil {
+		if isSocketTimeout(err) {
+			// The write succeeded and the deadline expired with nothing back. Tag
+			// the observation so the bounded retry driver can report "nothing ever
+			// answered" instead of a generic transport miss. ErrTransport is still
+			// applied by sendToAddresses, so retry classification is unchanged.
+			return nil, fmt.Errorf("%w: read from %s: %w", ErrNoReply, address, err)
+		}
 		return nil, fmt.Errorf("read from %s: %w", address, err)
 	}
 	return replyBuffer[:n], nil
+}
+
+// isSocketTimeout reports whether err is a socket deadline expiry, whether it
+// surfaces as os.ErrDeadlineExceeded or as a net.Error reporting Timeout.
+func isSocketTimeout(err error) bool {
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
 func sendDatagram(ctx context.Context, addr netip.Addr, port int, packet []byte, opts Options) error {

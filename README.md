@@ -240,6 +240,9 @@ fails closed rather than opening a link it cannot verify.
 - [Register an agent](docs/register-an-agent.md)
 - [Issue links](docs/issuing-links.md)
 - [Open links](docs/opening-links.md)
+- [Testing against NHP](docs/testing-against-nhp.md) — loopback suites for most
+  work, live sandbox for interop
+  ([ADR 0001](docs/decisions/0001-sandbox-nhp-access.md))
 
 ## Error handling
 
@@ -250,6 +253,7 @@ Match errors by type or sentinel, not message text:
 | `qurl.ErrInvalidClientConfig` | Resource-client credentials or options are malformed |
 | `qurl.ErrInvalidRegisterConfig` | Native lifecycle inputs are malformed |
 | `qurl.ErrAssignmentRecoveryRequired` | Registration ran out of retries; start recovery |
+| `qurl.ErrEndpointNoReply` | The host resolved and every datagram was sent, but nothing answered: the server is down or the network path drops UDP to it silently. `*qurl.EndpointNoReplyError` carries the destination and attempt count |
 | `qurl.ErrAgentBindingPersistence` | A state save failed or its acknowledgement was lost; reload before retry because the refreshed assignment may already be durable |
 | `qurl.ErrCompletionRecoveryRequired` | Resume the exact persisted completion candidate |
 | `qurl.ErrAgentRecoveryExpired` | This registration is older than 90 days and can no longer be resumed; enroll again |

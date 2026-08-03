@@ -44,6 +44,16 @@ the same pinned tools at the same versions. Run it before opening a PR.
 Dev tools (`golangci-lint`, `govulncheck`) are version-pinned in the
 [`Makefile`](Makefile) and installed on demand into a git-ignored `./.tools`.
 
+### Testing against a live deployment
+
+You rarely need one. The loopback suites cover the full lifecycle plus a fault
+matrix the live deployment cannot produce on demand, and they need no
+credentials or network. The sandbox NHP deployment is open on UDP 443 to
+everyone when you do want live interop — you only need a server-minted
+enrollment credential. See [Testing against NHP](docs/testing-against-nhp.md)
+for both paths, and [ADR 0001](docs/decisions/0001-sandbox-nhp-access.md) for
+the access decision.
+
 ## Runnable examples
 
 The customer-facing documentation examples live as compile-checked `Example` functions
