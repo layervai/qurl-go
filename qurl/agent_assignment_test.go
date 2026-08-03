@@ -1123,7 +1123,10 @@ func TestPersistedAgentAssignmentTrustFieldsValidatedOnLoad(t *testing.T) {
 		"zero generation":   func(a *AgentAssignment) { a.AssignmentGeneration = 0 },
 		"zero endpoint rev": func(a *AgentAssignment) { a.EndpointRevision = 0 },
 		"zero port":         func(a *AgentAssignment) { a.Endpoint.Port = 0 },
-		"zero lease":        func(a *AgentAssignment) { a.LeaseExpiresAt = time.Time{} },
+		// In range and therefore invisible to a range check, but retired by PR #124
+		// and dropped by the egress filters the pin exists to stay inside of.
+		"retired port": func(a *AgentAssignment) { a.Endpoint.Port = 62206 },
+		"zero lease":   func(a *AgentAssignment) { a.LeaseExpiresAt = time.Time{} },
 	}
 	for _, factory := range localAgentStateStoreFactories() {
 		storeName := factory.name
@@ -1158,6 +1161,93 @@ func TestPersistedAgentAssignmentTrustFieldsValidatedOnLoad(t *testing.T) {
 			}
 			if err := loaded.Assignment.Validate(assignmentFixtureNow); !errors.Is(err, ErrAssignmentInvalidResponse) {
 				t.Fatalf("expired assignment Validate = %v, want ErrAssignmentInvalidResponse", err)
+			}
+		})
+	}
+}
+
+// The assigned-cell endpoint port is pinned to 443, not range-checked, and this
+// is the input that pin exists for: the port arrives inside an authenticated Hub
+// LRT, so a deployment misconfiguration reaches the agent already signed. A
+// range check would accept every port below, and 62206 -- the retired NHP port
+// PR #124 removed -- is the one a stale deployment file would actually carry.
+// The zero-port case elsewhere in this file cannot distinguish a pin from a
+// range check, because it fails both.
+func TestAssignmentRejectsInRangeNonStandardEndpointPort(t *testing.T) {
+	fixture := loadAssignmentFixture(t)
+	// Both fixture bodies carry the pinned port exactly once, in the endpoint. A
+	// second occurrence would mean this rewrite no longer targets what it names.
+	for name, body := range map[string]string{
+		"initial": fixture.InitialAssignment.Result.BodyJSON,
+		"refresh": fixture.RefreshAssignment.Result.BodyJSON,
+	} {
+		if got := strings.Count(body, `"port":443`); got != 1 {
+			t.Fatalf("%s fixture contains %d pinned ports, want exactly 1", name, got)
+		}
+	}
+	for _, port := range []int{62206, 80, 8443, 65535} {
+		t.Run(strconv.Itoa(port), func(t *testing.T) {
+			rewrite := func(body string) []byte {
+				return []byte(strings.Replace(body, `"port":443`, fmt.Sprintf(`"port":%d`, port), 1))
+			}
+			_, err := parseInitialAssignmentReply(rewrite(fixture.InitialAssignment.Result.BodyJSON), "agent-conform", assignmentFixtureNow)
+			if !errors.Is(err, ErrAssignmentInvalidResponse) {
+				t.Fatalf("initial LRT on port %d = %v, want ErrAssignmentInvalidResponse", port, err)
+			}
+			_, err = parseRefreshAssignmentReply(rewrite(fixture.RefreshAssignment.Result.BodyJSON), "agent-conform", assignmentFixtureNow)
+			if !errors.Is(err, ErrAssignmentInvalidResponse) {
+				t.Fatalf("refresh LRT on port %d = %v, want ErrAssignmentInvalidResponse", port, err)
+			}
+		})
+	}
+}
+
+// Both suffixes are one release-gated allowlist. Dropping either would brick a
+// whole deployment -- .xyz is the sandbox every integration is proved against --
+// while every hermetic test that only ever names .ai stayed green.
+func TestAssignmentEndpointHostAllowsBothLayerVApexes(t *testing.T) {
+	for _, host := range []string{
+		"cell0.nhp.layerv.ai",
+		"hub.nhp.layerv.ai",
+		"cell0.nhp.layerv.xyz",
+		"hub.nhp.layerv.xyz",
+	} {
+		t.Run(host, func(t *testing.T) {
+			if err := validateAssignmentEndpointHost(host, "assignment endpoint", ErrAssignmentInvalidResponse); err != nil {
+				t.Fatalf("LayerV-owned host rejected: %v", err)
+			}
+		})
+	}
+	// A suffix match must not admit an apex an attacker can register: the
+	// allowlisted string has to begin a label, not end an arbitrary one.
+	for _, host := range []string{
+		"attacker.example.com",
+		"cell0.nhp.layerv.com",
+		"cell0.nhp.layerv.ai.attacker.example",
+		"notlayerv.ai",
+		"notlayerv.xyz",
+	} {
+		t.Run(host, func(t *testing.T) {
+			if err := validateAssignmentEndpointHost(host, "assignment endpoint", ErrAssignmentInvalidResponse); !errors.Is(err, ErrAssignmentInvalidResponse) {
+				t.Fatalf("host outside the LayerV apexes = %v, want ErrAssignmentInvalidResponse", err)
+			}
+		})
+	}
+	// Being under a LayerV apex is not enough on its own. A non-canonical
+	// spelling has to be rejected before it can be resolved, because the resolver
+	// and the allowlist would not agree on what it names.
+	for name, host := range map[string]string{
+		"uppercase label":  "CELL0.nhp.layerv.ai",
+		"leading hyphen":   "-cell0.nhp.layerv.ai",
+		"trailing hyphen":  "cell0-.nhp.layerv.ai",
+		"empty label":      "cell0..nhp.layerv.ai",
+		"underscore label": "cell_0.nhp.layerv.ai",
+		"trailing dot":     "cell0.nhp.layerv.ai.",
+		"literal IP":       "203.0.113.1",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := validateAssignmentEndpointHost(host, "assignment endpoint", ErrAssignmentInvalidResponse); !errors.Is(err, ErrAssignmentInvalidResponse) {
+				t.Fatalf("non-canonical host %q = %v, want ErrAssignmentInvalidResponse", host, err)
 			}
 		})
 	}

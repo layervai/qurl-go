@@ -869,6 +869,9 @@ func logOrchestratorEvidence(t *testing.T, evidence orchestratorProofEvidence) {
 // named by the attended workflow's -run filter and by the inventory's
 // nhp-orchestrator adapter namespace.
 func TestSandboxTopology(t *testing.T) {
+	// Derived first so the namespace's ownership and status are asserted even
+	// though only four of its rows have a verifier here.
+	namespaceRows := externalRowsForAdapter(t, sandboxTopologyAdapter)
 	evidence, _ := requireOrchestratorProofInputs(t)
 	logOrchestratorEvidence(t, evidence)
 
@@ -925,24 +928,276 @@ func TestSandboxTopology(t *testing.T) {
 			t.Logf("EVIDENCE scenario=%s row_sha256=%s", scenario.id, rowSHA256)
 		})
 	}
+
+	// The remaining rows in this namespace are ones the NHP controller can only
+	// observe after this client run, so the pre-run producer artifact cannot
+	// carry them. Report each by name with its blocker rather than leaving it
+	// absent from the run entirely, which is indistinguishable from an oversight.
+	var unverified []scenarioInventoryRow
+	for _, row := range namespaceRows {
+		if !slices.Contains(orchestratorProducedRows, row.ID) {
+			unverified = append(unverified, row)
+		}
+	}
+	reportUnprovableExternalRows(t, evidence, unverified)
 }
 
 // TestSandboxWireEvidence is the orchestrator wire-attribution proof top level.
-// layervai/nhp does not yet produce either wire_trace row, so this currently
-// has no provable subtest; the top level exists so the attended workflow's
-// -run filter resolves and the rows are finishable without reassigning owners.
+// Every row in its namespace is blocked on a producer in another repository, so
+// this adapter cannot prove any of them. What it CAN do — and does — is refuse
+// to let that be invisible: it derives its rows from the inventory, asserts each
+// is still externally owned, asserts the authenticated producer is not claiming
+// one it cannot verify, and reports each row as its own skipped subtest naming
+// the exact missing artifact. A blanket top-level skip hid three facts: which
+// rows are affected (four, not the two the old message named), who owes them,
+// and what is actually missing.
 func TestSandboxWireEvidence(t *testing.T) {
+	rows := externalRowsForAdapter(t, sandboxWireEvidenceAdapter)
 	evidence, _ := requireOrchestratorProofInputs(t)
 	logOrchestratorEvidence(t, evidence)
-	for _, id := range []string{
-		"wire.registration_lst_lrt_reg_rak_completion",
-		"wire.session_knk_ack_ext_ack",
-	} {
-		if slices.Contains(evidence.ProducedRows, id) {
-			t.Fatalf("orchestrator evidence claims %s but this adapter has no verifier for it", id)
+	reportUnprovableExternalRows(t, evidence, rows)
+}
+
+const (
+	sandboxWireEvidenceAdapter = "TestSandboxWireEvidence/"
+	sandboxTopologyAdapter     = "TestSandboxTopology/"
+)
+
+// externalRowBlocker records why one inventory row cannot be proven here. It is
+// not commentary: a row with no reviewed blocker is a row nobody has accounted
+// for, and TestExternalDependencyRowsHaveReviewedBlockers fails on it.
+type externalRowBlocker struct {
+	// producer is the repository and artifact that must supply the row.
+	producer string
+	// missing is the exact thing this repository is waiting on.
+	missing string
+	// verifiedHere is the subtest that checks the row once the producer supplies
+	// it, or "" when this repository has no verifier for it at all. The
+	// distinction is the honest answer to "blocked externally" versus "never
+	// written": both buckets are external, but only the first has code here.
+	verifiedHere string
+}
+
+const (
+	nhpProducerArtifact  = "layervai/nhp udp-proof-deployment-manifest.yml orchestrator-evidence.json"
+	nhpControllerJoin    = "layervai/nhp attended controller (rows joined after this client run)"
+	connectorProofRun    = "layervai/qurl-connector attended Connector proof workflow"
+	wireTraceObservation = "wire_trace rows tied to the ephemeral agent id and session"
+)
+
+// externalDependencyBlockers is the reviewed reason for every non-implemented
+// inventory row. Four are already produced by the trusted-main NHP producer and
+// ARE verified here from that artifact; the rest have no verifier in this
+// repository because the evidence is generated, and must be generated, by
+// another repository's proof run. None of them is qurl-go work left undone —
+// TestExternalDependencyRowsHaveReviewedBlockers keeps that claim honest by
+// failing if the inventory and this map ever disagree.
+var externalDependencyBlockers = map[string]externalRowBlocker{
+	// Produced today by the pre-run NHP producer artifact and verified here.
+	"orchestrator.real_hub_authority_and_two_cells": {
+		producer: nhpProducerArtifact, missing: "", verifiedHere: sandboxTopologyAdapter + "real_hub_authority_and_two_cells",
+	},
+	"retirement.generated_artifact_parity": {
+		producer: nhpProducerArtifact, missing: "", verifiedHere: sandboxTopologyAdapter + "generated_artifact_parity",
+	},
+	"retirement.nhp_registrar_surface_state": {
+		producer: nhpProducerArtifact, missing: "", verifiedHere: sandboxTopologyAdapter + "nhp_registrar_surface_state",
+	},
+	"retirement.terraform_saved_plan_and_live_state": {
+		producer: nhpProducerArtifact, missing: "", verifiedHere: sandboxTopologyAdapter + "terraform_saved_plan_and_live_state",
+	},
+
+	// Rows the NHP controller can only observe AFTER this client run, so the
+	// pre-run producer artifact must never carry them (orchestratorProducedRows).
+	"orchestrator.dedicated_linux_fault_runner": {
+		producer: nhpControllerJoin, missing: "the fault-runner identity row, observable only once this run's runner is bound",
+	},
+	"retirement.http_lifecycle_surface_state": {
+		producer: nhpControllerJoin, missing: "the live-route probe row for the deployed HTTP/OpenAPI surface",
+	},
+	"retirement.relay_rejects_native_lifecycle_messages": {
+		producer: nhpControllerJoin, missing: "the runtime rejection row for OTP/REG/LST/LRT on the retained relay",
+	},
+
+	// Wire attribution: no orchestrator wire_trace row exists in any phase yet.
+	"wire.registration_lst_lrt_reg_rak_completion": {
+		producer: nhpControllerJoin, missing: wireTraceObservation + " for Hub LST/COK/proof-LST/LRT and cell REG/RAK completion",
+	},
+	"wire.session_knk_ack_ext_ack": {
+		producer: nhpControllerJoin, missing: wireTraceObservation + " for the KNK/ACK/EXT/ACK sequence",
+	},
+	"negative.wrong_source": {
+		producer: nhpControllerJoin, missing: wireTraceObservation + " showing a response from an unexpected source address",
+	},
+	"negative.wrong_caller": {
+		producer: nhpControllerJoin, missing: wireTraceObservation + " showing an unexpected authenticated caller",
+	},
+
+	// Connector rows. TestSandboxConnectorUDP is deliberately not defined in
+	// this repository and is not in the attended workflow's -run filter: the
+	// Connector proves these in its own hardened run and the NHP controller
+	// joins the two artifacts.
+	"connector.hardened_linux_container":                    {producer: connectorProofRun, missing: "the hardened-container attestation"},
+	"connector.frp_authenticated_login_before_proxy":        {producer: connectorProofRun, missing: "the FRP authenticated-login-before-proxy observation"},
+	"connector.real_backend_traffic":                        {producer: connectorProofRun, missing: "the real-backend traffic observation"},
+	"connector.resource_id_distinct_from_knock_resource_id": {producer: connectorProofRun, missing: "the resource-versus-knock identity observation"},
+	"connector.provision_journal_crash_consistency":         {producer: connectorProofRun, missing: "the provision-journal crash-consistency observation"},
+	"connector.remove_journal_crash_consistency":            {producer: connectorProofRun, missing: "the remove-journal crash-consistency observation"},
+	"connector.sealed_restart_without_setup_mount":          {producer: connectorProofRun, missing: "the sealed-restart-without-setup-mount observation"},
+	"connector.zero_http_network_capture":                   {producer: connectorProofRun, missing: "the zero-lifecycle-HTTP packet capture"},
+	"connector.exact_artifact_manifest":                     {producer: connectorProofRun, missing: "the exact artifact manifest"},
+	"connector.dns_key_destination_source_observations":     {producer: connectorProofRun, missing: "the DNS/key/destination/source network observations"},
+	"connector.complete_strict_evidence_attestation":        {producer: connectorProofRun, missing: "the complete strict evidence attestation"},
+}
+
+// TestUnprovableExternalRowsAreReportableWithoutAnAttendedRun exercises, in
+// ordinary CI, the precondition reportUnprovableExternalRows enforces during an
+// attended run: every row it would report must have a reviewed blocker and no
+// verifier here. Without this the check only runs on the expensive attended
+// path, where discovering it is far too late.
+func TestUnprovableExternalRowsAreReportableWithoutAnAttendedRun(t *testing.T) {
+	reported := 0
+	for _, adapter := range []string{sandboxTopologyAdapter, sandboxWireEvidenceAdapter} {
+		for _, row := range externalRowsForAdapter(t, adapter) {
+			if slices.Contains(orchestratorProducedRows, row.ID) {
+				continue
+			}
+			blocker, reviewed := externalDependencyBlockers[row.ID]
+			if !reviewed || blocker.verifiedHere != "" || blocker.missing == "" || blocker.producer == "" {
+				t.Errorf("row %q would be reported with no usable blocker: %+v", row.ID, blocker)
+				continue
+			}
+			if name := strings.TrimPrefix(row.TestName, adapterPrefix(row.TestName)); name == "" || strings.Contains(name, "/") {
+				t.Errorf("row %q yields subtest name %q", row.ID, name)
+			}
+			reported++
 		}
 	}
-	t.Skip("no orchestrator wire_trace row is produced yet; both wire rows remain external_dependency")
+	// Seven rows sit in the two orchestrator namespaces with no verifier here:
+	// the four wire-attribution rows and the three the NHP controller can only
+	// join after this client run. Changing that number is a contract change.
+	if reported != 7 {
+		t.Fatalf("reportable orchestrator rows = %d, want 7", reported)
+	}
+}
+
+func TestAdapterPrefix(t *testing.T) {
+	for input, want := range map[string]string{
+		"TestSandboxTopology/x":     "TestSandboxTopology/",
+		"TestSandboxWireEvidence/y": "TestSandboxWireEvidence/",
+		"TestSandboxTopology":       "",
+	} {
+		if got := adapterPrefix(input); got != want {
+			t.Errorf("adapterPrefix(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+// externalRowsForAdapter returns the inventory rows whose exact test name lives
+// under one proof top level, and asserts they are all still externally owned.
+// Deriving from the inventory rather than a hardcoded list is what makes the
+// reporting complete: flipping a row to "implemented" without writing a
+// verifier now fails here instead of silently disappearing into a blanket skip.
+func externalRowsForAdapter(t *testing.T, adapter string) []scenarioInventoryRow {
+	t.Helper()
+	inventory := readInventoryForOrchestratorAdapter(t)
+	var rows []scenarioInventoryRow
+	for _, row := range inventory.Scenarios {
+		if !strings.HasPrefix(row.TestName, adapter) {
+			continue
+		}
+		if row.Owner == "qurl-go" {
+			t.Fatalf("row %q is qurl-go-owned but sits in the %s adapter namespace", row.ID, adapter)
+		}
+		if row.Status != "external_dependency" {
+			t.Fatalf("row %q under %s has status %q but this adapter has no verifier for it", row.ID, adapter, row.Status)
+		}
+		rows = append(rows, row)
+	}
+	if len(rows) == 0 {
+		t.Fatalf("no inventory row uses the %s adapter namespace", adapter)
+	}
+	return rows
+}
+
+// reportUnprovableExternalRows emits one named skipped subtest per row, so the
+// run states exactly which rows are outstanding and why, and fails closed if
+// the authenticated producer claims a row this adapter cannot verify.
+func reportUnprovableExternalRows(t *testing.T, evidence orchestratorProofEvidence, rows []scenarioInventoryRow) {
+	t.Helper()
+	for _, row := range rows {
+		blocker, reviewed := externalDependencyBlockers[row.ID]
+		if !reviewed || blocker.verifiedHere != "" {
+			t.Fatalf("row %q has no reviewed external blocker for an adapter with no verifier", row.ID)
+		}
+		if slices.Contains(evidence.ProducedRows, row.ID) {
+			t.Fatalf("orchestrator evidence claims %s but this adapter has no verifier for it", row.ID)
+		}
+		t.Run(strings.TrimPrefix(row.TestName, adapterPrefix(row.TestName)), func(t *testing.T) {
+			t.Skipf("external_dependency: %s must supply %s; qurl-go has no verifier for this row", blocker.producer, blocker.missing)
+		})
+	}
+}
+
+func adapterPrefix(testName string) string {
+	if index := strings.Index(testName, "/"); index >= 0 {
+		return testName[:index+1]
+	}
+	return ""
+}
+
+// TestExternalDependencyRowsHaveReviewedBlockers is the honesty gate for the
+// non-implemented half of the inventory. It runs in ordinary CI, so a status or
+// ownership change that would quietly turn "nobody wrote it" into an unexplained
+// "external_dependency" fails on the pull request that makes it.
+func TestExternalDependencyRowsHaveReviewedBlockers(t *testing.T) {
+	inventory := readInventoryForOrchestratorAdapter(t)
+	outstanding := make(map[string]struct{})
+	for _, row := range inventory.Scenarios {
+		if row.Status == "implemented" {
+			if _, claimed := externalDependencyBlockers[row.ID]; claimed {
+				t.Errorf("implemented row %q still carries an external blocker", row.ID)
+			}
+			continue
+		}
+		if row.Status != "external_dependency" || row.Owner == "qurl-go" {
+			t.Errorf("row %q is %s-owned with status %q: qurl-go work must be implemented, not deferred", row.ID, row.Owner, row.Status)
+			continue
+		}
+		outstanding[row.ID] = struct{}{}
+		blocker, reviewed := externalDependencyBlockers[row.ID]
+		if !reviewed {
+			t.Errorf("row %q is external_dependency with no reviewed blocker: name the producer and the missing artifact", row.ID)
+			continue
+		}
+		if blocker.producer == "" {
+			t.Errorf("row %q has no named external producer", row.ID)
+		}
+		switch {
+		case blocker.verifiedHere != "":
+			// A row with a verifier here must name the verifier the inventory
+			// names, and must not also claim something is missing.
+			if blocker.verifiedHere != row.TestName {
+				t.Errorf("row %q verifier = %q, want the inventory's %q", row.ID, blocker.verifiedHere, row.TestName)
+			}
+			if blocker.missing != "" {
+				t.Errorf("row %q is verified here but also claims a missing artifact", row.ID)
+			}
+			if !slices.Contains(orchestratorProducedRows, row.ID) {
+				t.Errorf("row %q claims a verifier here but is not a produced orchestrator row", row.ID)
+			}
+		case blocker.missing == "":
+			t.Errorf("row %q has no verifier here and does not say what is missing", row.ID)
+		}
+	}
+	for id := range externalDependencyBlockers {
+		if _, still := outstanding[id]; !still {
+			t.Errorf("blocker for %q no longer matches a non-implemented inventory row", id)
+		}
+	}
+	if len(outstanding) != len(externalDependencyBlockers) {
+		t.Fatalf("outstanding rows = %d, reviewed blockers = %d", len(outstanding), len(externalDependencyBlockers))
+	}
 }
 
 func TestDecodeOrchestratorProofEvidenceRejectsAmbiguousJSON(t *testing.T) {

@@ -22,7 +22,8 @@ const (
 	provenancePathEnv        = "QURL_GO_SANDBOX_PROVENANCE_PATH"
 	deploymentManifestSHAEnv = "QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_SHA256"
 	typedContractSHAEnv      = "QURL_GO_SANDBOX_TYPED_EVIDENCE_CONTRACT_SHA256"
-	candidatePRPathEnv       = "QURL_GO_SANDBOX_CANDIDATE_PR_PATH"
+	candidateKindEnv         = "QURL_GO_SANDBOX_CANDIDATE_KIND"
+	candidatePathEnv         = "QURL_GO_SANDBOX_CANDIDATE_PATH"
 	candidateCommitPathEnv   = "QURL_GO_SANDBOX_CANDIDATE_COMMIT_PATH"
 	knockResourceIDEnv       = "QURL_GO_SANDBOX_KNOCK_RESOURCE_ID"
 	expectedCellIDEnv        = "QURL_GO_SANDBOX_EXPECTED_CELL_ID"
@@ -49,7 +50,8 @@ type sandboxConfig struct {
 	provenancePath       string
 	deploymentSHA        string
 	typedContractSHA     string
-	candidatePRPath      string
+	candidateKind        string
+	candidatePath        string
 	candidateCommit      string
 	knockResourceID      string
 	expectedCellID       string
@@ -85,7 +87,8 @@ func loadSandboxConfig(lookup func(string) string) (sandboxConfig, bool, error) 
 		provenancePathEnv,
 		deploymentManifestSHAEnv,
 		typedContractSHAEnv,
-		candidatePRPathEnv,
+		candidateKindEnv,
+		candidatePathEnv,
 		candidateCommitPathEnv,
 		knockResourceIDEnv,
 		sandboxKMSKeyIDEnv,
@@ -123,7 +126,8 @@ func loadSandboxConfig(lookup func(string) string) (sandboxConfig, bool, error) 
 		provenancePath:       lookup(provenancePathEnv),
 		deploymentSHA:        lookup(deploymentManifestSHAEnv),
 		typedContractSHA:     lookup(typedContractSHAEnv),
-		candidatePRPath:      lookup(candidatePRPathEnv),
+		candidateKind:        lookup(candidateKindEnv),
+		candidatePath:        lookup(candidatePathEnv),
 		candidateCommit:      lookup(candidateCommitPathEnv),
 		knockResourceID:      lookup(knockResourceIDEnv),
 		expectedCellID:       lookup(expectedCellIDEnv),
@@ -150,7 +154,8 @@ func loadSandboxConfig(lookup func(string) string) (sandboxConfig, bool, error) 
 		provenancePathEnv:        cfg.provenancePath,
 		deploymentManifestSHAEnv: cfg.deploymentSHA,
 		typedContractSHAEnv:      cfg.typedContractSHA,
-		candidatePRPathEnv:       cfg.candidatePRPath,
+		candidateKindEnv:         cfg.candidateKind,
+		candidatePathEnv:         cfg.candidatePath,
 		candidateCommitPathEnv:   cfg.candidateCommit,
 		knockResourceIDEnv:       cfg.knockResourceID,
 		expectedCellIDEnv:        cfg.expectedCellID,
@@ -198,14 +203,20 @@ func loadSandboxConfig(lookup func(string) string) (sandboxConfig, bool, error) 
 	if !filepath.IsAbs(cfg.provenancePath) {
 		return sandboxConfig{}, true, fmt.Errorf("%s must be an absolute path", provenancePathEnv)
 	}
-	if !filepath.IsAbs(cfg.candidatePRPath) {
-		return sandboxConfig{}, true, fmt.Errorf("%s must be an absolute path", candidatePRPathEnv)
+	// Only the two exact candidate shapes the workflow can resolve. An unknown
+	// or absent kind fails here rather than reaching a proof that would have to
+	// guess which authenticated document it is holding.
+	if cfg.candidateKind != candidateKindOpenPullRequest && cfg.candidateKind != candidateKindMainContained {
+		return sandboxConfig{}, true, fmt.Errorf("%s must be %s or %s", candidateKindEnv, candidateKindOpenPullRequest, candidateKindMainContained)
+	}
+	if !filepath.IsAbs(cfg.candidatePath) {
+		return sandboxConfig{}, true, fmt.Errorf("%s must be an absolute path", candidatePathEnv)
 	}
 	if !filepath.IsAbs(cfg.candidateCommit) {
 		return sandboxConfig{}, true, fmt.Errorf("%s must be an absolute path", candidateCommitPathEnv)
 	}
-	if filepath.Clean(cfg.candidatePRPath) == filepath.Clean(cfg.candidateCommit) {
-		return sandboxConfig{}, true, fmt.Errorf("%s and %s must resolve to distinct paths", candidatePRPathEnv, candidateCommitPathEnv)
+	if filepath.Clean(cfg.candidatePath) == filepath.Clean(cfg.candidateCommit) {
+		return sandboxConfig{}, true, fmt.Errorf("%s and %s must resolve to distinct paths", candidatePathEnv, candidateCommitPathEnv)
 	}
 	if !canonicalLowerHex(cfg.deploymentSHA, 64) {
 		return sandboxConfig{}, true, fmt.Errorf("%s must be an exact lowercase SHA-256 digest", deploymentManifestSHAEnv)
@@ -275,8 +286,9 @@ func TestSandboxConfigStrictMode(t *testing.T) {
 		provenancePathEnv:        filepath.Join(t.TempDir(), "provenance.json"),
 		deploymentManifestSHAEnv: strings.Repeat("d", 64),
 		typedContractSHAEnv:      strings.Repeat("e", 64),
-		candidatePRPathEnv:       filepath.Join(t.TempDir(), "qurl-go-pr-93.json"),
-		candidateCommitPathEnv:   filepath.Join(t.TempDir(), "qurl-go-pr-93-commit.json"),
+		candidateKindEnv:         candidateKindMainContained,
+		candidatePathEnv:         filepath.Join(t.TempDir(), "qurl-go-candidate.json"),
+		candidateCommitPathEnv:   filepath.Join(t.TempDir(), "qurl-go-candidate-commit.json"),
 		knockResourceIDEnv:       "knock-resource-id",
 		sandboxKMSKeyIDEnv:       sandboxKMSKeyID,
 		assignmentHandshakeEnv:   base64.StdEncoding.EncodeToString([]byte(`{"arm":{"result":{"agent_id":"qurl-go-sandbox-123-1","grant_correlation_id":"nhp-123-1-qurl_go-pre_removal-0123456789abcdef0123456789abcdef","lease_seconds":2100,"mutated_at":"2026-07-28T20:00:00Z","mutation":"arm","pinned_cell_id":"cell0","target_cell_id":"cell1"},"version":1},"descriptor":{"agent_id":"qurl-go-sandbox-123-1","arm_request_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bucket":"layerv-nhp-sandbox-udp-proof-handshake-767397897469","ca_pm_alias_arn":"arn:aws:lambda:us-east-2:767397897469:function:layerv-nhp-sandbox-ca-pm:blue","channel_id":"0123456789abcdef0123456789abcdef","checkpoint_key":"handshake/v1/123/1/0123456789abcdef0123456789abcdef/checkpoint.json","client":"qurl_go","controller_run_attempt":"1","controller_run_id":"123","correlation_id":"nhp-123-1-qurl_go-pre_removal-0123456789abcdef0123456789abcdef","expire_request_id":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","kms_key_arn":"arn:aws:kms:us-east-2:767397897469:key/01234567-89ab-cdef-0123-456789abcdef","arm_lease_seconds":2100,"expire_lease_seconds":30,"move_request_id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","pinned_cell_id":"cell0","proof_phase":"pre_removal","receipt_key":"handshake/v1/123/1/0123456789abcdef0123456789abcdef/receipt.json","target_cell_id":"cell1","version":1}}`)),
@@ -306,6 +318,34 @@ func TestSandboxConfigStrictMode(t *testing.T) {
 		}
 	})
 
+	for _, kind := range []string{candidateKindOpenPullRequest, candidateKindMainContained} {
+		t.Run("strict accepts candidate kind "+kind, func(t *testing.T) {
+			values := make(map[string]string, len(valid))
+			for key, value := range valid {
+				values[key] = value
+			}
+			values[candidateKindEnv] = kind
+			cfg, enabled, err := loadSandboxConfig(lookup(values))
+			if !enabled || err != nil || cfg.candidateKind != kind {
+				t.Fatalf("candidate kind config = %#v, %t, %v", cfg, enabled, err)
+			}
+		})
+	}
+
+	for _, kind := range []string{"pull_request", "MAIN_CONTAINED", "any", "open_pull_request "} {
+		t.Run("strict rejects candidate kind "+strconv.Quote(kind), func(t *testing.T) {
+			values := make(map[string]string, len(valid))
+			for key, value := range valid {
+				values[key] = value
+			}
+			values[candidateKindEnv] = kind
+			cfg, enabled, err := loadSandboxConfig(lookup(values))
+			if !enabled || err == nil || cfg != (sandboxConfig{}) || !strings.Contains(err.Error(), candidateKindEnv) {
+				t.Fatalf("unknown candidate kind config = %#v, %t, %v", cfg, enabled, err)
+			}
+		})
+	}
+
 	for _, name := range []string{deploymentManifestSHAEnv, typedContractSHAEnv} {
 		t.Run("strict rejects noncanonical "+name, func(t *testing.T) {
 			values := make(map[string]string, len(valid))
@@ -325,7 +365,7 @@ func TestSandboxConfigStrictMode(t *testing.T) {
 		if !enabled || err == nil || cfg != (sandboxConfig{}) {
 			t.Fatalf("missing config = %#v, %t, %v; want enabled failure", cfg, enabled, err)
 		}
-		for _, name := range []string{buildSHAEnv, hubHostEnv, hubPortEnv, hubServerKeyEnv, enrollmentEnv, agentIDEnv, statePathEnv, provenancePathEnv, deploymentManifestSHAEnv, typedContractSHAEnv, candidatePRPathEnv, candidateCommitPathEnv, knockResourceIDEnv, sandboxKMSKeyIDEnv, assignmentHandshakeEnv, controllerRunIDEnv, controllerRunAttemptEnv, clientRunIDEnv} {
+		for _, name := range []string{buildSHAEnv, hubHostEnv, hubPortEnv, hubServerKeyEnv, enrollmentEnv, agentIDEnv, statePathEnv, provenancePathEnv, deploymentManifestSHAEnv, typedContractSHAEnv, candidateKindEnv, candidatePathEnv, candidateCommitPathEnv, knockResourceIDEnv, sandboxKMSKeyIDEnv, assignmentHandshakeEnv, controllerRunIDEnv, controllerRunAttemptEnv, clientRunIDEnv} {
 			if !strings.Contains(err.Error(), name) {
 				t.Errorf("missing-config error %q omits %s", err, name)
 			}

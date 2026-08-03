@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -477,6 +478,28 @@ func TestOpenRegisteredAgent_RevalidatesCustomStoreAssignment(t *testing.T) {
 	client, err := OpenRegisteredAgent(context.Background(), store)
 	if client != nil || !errors.Is(err, ErrInvalidClientConfig) || !errors.Is(err, ErrInvalidAgentState) {
 		t.Fatalf("custom-store assignment error = client %v, error %v; want ErrInvalidClientConfig and ErrInvalidAgentState", client, err)
+	}
+}
+
+// WithIssuerStatePath belongs to link issuing, which is a different trust path
+// from a registered agent. The runtime-open entry point excludes it in the type
+// system; the resource-only open still accepts every ClientOption, so it has to
+// reject this one at run time instead of silently opening against issuer state.
+func TestOpenRegisteredAgent_RejectsIssuerStatePath(t *testing.T) {
+	store := &memoryAgentStateStore{state: completedNativeTestState(t)}
+	client, err := OpenRegisteredAgent(context.Background(), store,
+		WithIssuerStatePath(filepath.Join(t.TempDir(), "issuer-state.json")))
+	if client != nil || !errors.Is(err, ErrInvalidClientConfig) {
+		t.Fatalf("issuer-state open = client %v, error %v; want nil and ErrInvalidClientConfig", client, err)
+	}
+	if !strings.Contains(err.Error(), "WithIssuerStatePath") {
+		t.Fatalf("rejection does not name the option: %v", err)
+	}
+	// Same option, same store, through the identity-returning variant.
+	client, agentID, err := OpenRegisteredAgentWithIdentity(context.Background(), store,
+		WithIssuerStatePath(filepath.Join(t.TempDir(), "issuer-state.json")))
+	if client != nil || agentID != "" || !errors.Is(err, ErrInvalidClientConfig) {
+		t.Fatalf("issuer-state open with identity = client %v, agent %q, error %v", client, agentID, err)
 	}
 }
 

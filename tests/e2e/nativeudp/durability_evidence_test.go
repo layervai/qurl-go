@@ -17,8 +17,16 @@ import (
 
 const (
 	qurlGoRepository       = "layervai/qurl-go"
+	qurlGoCandidateBaseRef = "main"
 	maxCandidateJSONBytes  = 1024 * 1024
 	maxProductionTestBytes = 4 * 1024 * 1024
+
+	// The only two candidate shapes the proof accepts. The workflow resolves
+	// exactly one of them through the authenticated API and names it here; the
+	// assertions below re-derive the property from the recorded payload, so a
+	// mislabelled document fails instead of picking the weaker branch.
+	candidateKindOpenPullRequest = "open_pull_request"
+	candidateKindMainContained   = "main_contained"
 )
 
 type nativeDurabilityProofAdapter struct {
@@ -111,6 +119,23 @@ type candidatePRProof struct {
 	} `json:"base"`
 }
 
+// candidateComparisonProof is the authenticated compare payload for
+// `main...<build sha>`. Containment in main is not "the commit object exists"
+// — a fork tip or an abandoned branch satisfies that. It is "the merge base of
+// main and this commit is this commit, and nothing is ahead of it", which holds
+// only for main's head or an ancestor of it.
+type candidateComparisonProof struct {
+	URL             string `json:"url"`
+	Status          string `json:"status"`
+	AheadBy         int    `json:"ahead_by"`
+	MergeBaseCommit struct {
+		SHA string `json:"sha"`
+	} `json:"merge_base_commit"`
+	BaseCommit struct {
+		SHA string `json:"sha"`
+	} `json:"base_commit"`
+}
+
 type candidateCommitProof struct {
 	SHA    string `json:"sha"`
 	Commit struct {
@@ -120,24 +145,96 @@ type candidateCommitProof struct {
 	} `json:"commit"`
 }
 
-func proveExactQURLGo93Candidate(t *testing.T, cfg sandboxConfig) {
+// verifyCandidatePullRequest accepts only an open pull request of this exact
+// repository, targeting main, whose CURRENT head is the running build. A
+// cross-repository head, a closed or merged pull request, and a head that has
+// moved on since dispatch are all rejected. The pull request number itself is
+// operator-supplied and carries no integrity weight, so it is only required to
+// be a real positive number — the binding that matters is head SHA plus
+// repository plus base ref.
+func verifyCandidatePullRequest(pull candidatePRProof, buildSHA string) error {
+	switch {
+	case pull.Number < 1:
+		return fmt.Errorf("candidate pull request number %d is not a positive pull request", pull.Number)
+	case pull.State != "open":
+		return fmt.Errorf("candidate pull request state is %q, want open", pull.State)
+	case pull.Head.Repo.FullName != qurlGoRepository:
+		return fmt.Errorf("candidate pull request head repository is %q, want %s", pull.Head.Repo.FullName, qurlGoRepository)
+	case pull.Base.Repo.FullName != qurlGoRepository:
+		return fmt.Errorf("candidate pull request base repository is %q, want %s", pull.Base.Repo.FullName, qurlGoRepository)
+	case pull.Base.Ref != qurlGoCandidateBaseRef:
+		return fmt.Errorf("candidate pull request base ref is %q, want %s", pull.Base.Ref, qurlGoCandidateBaseRef)
+	case pull.Head.SHA != buildSHA:
+		return fmt.Errorf("candidate pull request head is %q, want the exact running build %s", pull.Head.SHA, buildSHA)
+	}
+	return nil
+}
+
+// verifyCandidateMainContainment accepts only a compare payload proving the
+// running build is contained in this repository's main. The URL is asserted
+// verbatim so the payload itself — not merely the request that produced it —
+// names the repository, the base ref, and the head SHA.
+func verifyCandidateMainContainment(compare candidateComparisonProof, buildSHA string) error {
+	wantURL := "https://api.github.com/repos/" + qurlGoRepository +
+		"/compare/" + qurlGoCandidateBaseRef + "..." + buildSHA
+	switch {
+	case compare.URL != wantURL:
+		return fmt.Errorf("candidate comparison url is %q, want %q", compare.URL, wantURL)
+	case compare.Status != "identical" && compare.Status != "behind":
+		return fmt.Errorf("candidate comparison status is %q, want identical or behind", compare.Status)
+	case compare.AheadBy != 0:
+		return fmt.Errorf("candidate comparison reports %d commits ahead of %s, want 0", compare.AheadBy, qurlGoCandidateBaseRef)
+	case compare.MergeBaseCommit.SHA != buildSHA:
+		return fmt.Errorf("candidate comparison merge base is %q, want the exact running build %s", compare.MergeBaseCommit.SHA, buildSHA)
+	case !canonicalLowerHex(compare.BaseCommit.SHA, 40):
+		return fmt.Errorf("candidate comparison base commit %q is not an exact lowercase commit SHA", compare.BaseCommit.SHA)
+	}
+	return nil
+}
+
+func verifyCandidateCommit(commit candidateCommitProof, buildSHA string) error {
+	if commit.SHA != buildSHA {
+		return fmt.Errorf("candidate commit is %q, want the exact running build %s", commit.SHA, buildSHA)
+	}
+	if !commit.Commit.Verification.Verified {
+		return fmt.Errorf("GitHub does not report candidate commit %s as cryptographically verified", buildSHA)
+	}
+	return nil
+}
+
+// proveExactQURLGoCandidate binds this run to one GitHub-verified commit of
+// this repository at the exact running SHA. Every branch is fail-closed: an
+// unknown candidate kind, a payload that does not satisfy its declared shape,
+// and an unverified commit all abort the proof.
+func proveExactQURLGoCandidate(t *testing.T, cfg sandboxConfig) {
 	t.Helper()
 	assertBuildProvenance(t, cfg.buildSHA)
 
-	var pull candidatePRProof
-	readBoundedCandidateJSON(t, cfg.candidatePRPath, &pull)
-	if pull.Number != 93 || pull.State != "open" ||
-		pull.Head.SHA != cfg.buildSHA || pull.Head.Repo.FullName != qurlGoRepository ||
-		pull.Base.Ref != "main" || pull.Base.Repo.FullName != qurlGoRepository {
-		t.Fatalf("authenticated PR candidate does not identify open %s#93 at exact build %s targeting main", qurlGoRepository, cfg.buildSHA)
+	switch cfg.candidateKind {
+	case candidateKindOpenPullRequest:
+		var pull candidatePRProof
+		readBoundedCandidateJSON(t, cfg.candidatePath, &pull)
+		if err := verifyCandidatePullRequest(pull, cfg.buildSHA); err != nil {
+			t.Fatalf("authenticated candidate is not an open %s pull request at exact build %s: %v", qurlGoRepository, cfg.buildSHA, err)
+		}
+		t.Logf("EVIDENCE repository=%s candidate_kind=%s pull_request=%d base=%s", qurlGoRepository, cfg.candidateKind, pull.Number, qurlGoCandidateBaseRef)
+	case candidateKindMainContained:
+		var compare candidateComparisonProof
+		readBoundedCandidateJSON(t, cfg.candidatePath, &compare)
+		if err := verifyCandidateMainContainment(compare, cfg.buildSHA); err != nil {
+			t.Fatalf("authenticated candidate is not contained in %s %s at exact build %s: %v", qurlGoRepository, qurlGoCandidateBaseRef, cfg.buildSHA, err)
+		}
+		t.Logf("EVIDENCE repository=%s candidate_kind=%s base=%s base_head_sha=%s comparison_status=%s", qurlGoRepository, cfg.candidateKind, qurlGoCandidateBaseRef, compare.BaseCommit.SHA, compare.Status)
+	default:
+		t.Fatalf("candidate kind %q is neither %s nor %s", cfg.candidateKind, candidateKindOpenPullRequest, candidateKindMainContained)
 	}
 
 	var commit candidateCommitProof
 	readBoundedCandidateJSON(t, cfg.candidateCommit, &commit)
-	if commit.SHA != cfg.buildSHA || !commit.Commit.Verification.Verified {
-		t.Fatalf("authenticated candidate commit does not report exact verified build %s", cfg.buildSHA)
+	if err := verifyCandidateCommit(commit, cfg.buildSHA); err != nil {
+		t.Fatalf("authenticated candidate commit rejected: %v", err)
 	}
-	t.Logf("EVIDENCE repository=%s pull_request=93 base=main build_sha=%s github_verified=true", qurlGoRepository, cfg.buildSHA)
+	t.Logf("EVIDENCE repository=%s candidate_kind=%s base=%s build_sha=%s github_verified=true", qurlGoRepository, cfg.candidateKind, qurlGoCandidateBaseRef, cfg.buildSHA)
 }
 
 func readBoundedCandidateJSON(t *testing.T, path string, target any) {
@@ -304,6 +401,162 @@ func TestValidateProductionProofEventsFailsClosed(t *testing.T) {
 		t.Run(label, func(t *testing.T) {
 			if err := validateProductionProofEvents(raw, []string{name}); err == nil {
 				t.Fatal("invalid production proof events passed")
+			}
+		})
+	}
+}
+
+// candidateBuildSHAFixture is a stand-in for the running GITHUB_SHA in the
+// forged-candidate tests below. It is deliberately not any real commit.
+const candidateBuildSHAFixture = "0123456789abcdef0123456789abcdef01234567"
+
+func exactCandidatePullRequestFixture(buildSHA string) candidatePRProof {
+	var pull candidatePRProof
+	pull.Number = 128
+	pull.State = "open"
+	pull.Head.SHA = buildSHA
+	pull.Head.Repo.FullName = qurlGoRepository
+	pull.Base.Ref = qurlGoCandidateBaseRef
+	pull.Base.Repo.FullName = qurlGoRepository
+	return pull
+}
+
+func exactCandidateComparisonFixture(buildSHA string) candidateComparisonProof {
+	var compare candidateComparisonProof
+	compare.URL = "https://api.github.com/repos/" + qurlGoRepository +
+		"/compare/" + qurlGoCandidateBaseRef + "..." + buildSHA
+	compare.Status = "behind"
+	compare.AheadBy = 0
+	compare.MergeBaseCommit.SHA = buildSHA
+	compare.BaseCommit.SHA = strings.Repeat("b", 40)
+	return compare
+}
+
+func TestVerifyCandidatePullRequestFailsClosed(t *testing.T) {
+	if err := verifyCandidatePullRequest(exactCandidatePullRequestFixture(candidateBuildSHAFixture), candidateBuildSHAFixture); err != nil {
+		t.Fatalf("exact open pull request candidate rejected: %v", err)
+	}
+	for label, forge := range map[string]func(*candidatePRProof){
+		"absent pull request": func(p *candidatePRProof) { p.Number = 0 },
+		"negative number":     func(p *candidatePRProof) { p.Number = -1 },
+		"closed":              func(p *candidatePRProof) { p.State = "closed" },
+		"merged":              func(p *candidatePRProof) { p.State = "merged" },
+		"fork head":           func(p *candidatePRProof) { p.Head.Repo.FullName = "someone/qurl-go" },
+		"foreign base":        func(p *candidatePRProof) { p.Base.Repo.FullName = "someone/qurl-go" },
+		"non-main base":       func(p *candidatePRProof) { p.Base.Ref = "release" },
+		"head moved on":       func(p *candidatePRProof) { p.Head.SHA = strings.Repeat("f", 40) },
+		"empty head":          func(p *candidatePRProof) { p.Head.SHA = "" },
+		"empty document":      func(p *candidatePRProof) { *p = candidatePRProof{} },
+	} {
+		t.Run(label, func(t *testing.T) {
+			pull := exactCandidatePullRequestFixture(candidateBuildSHAFixture)
+			forge(&pull)
+			if err := verifyCandidatePullRequest(pull, candidateBuildSHAFixture); err == nil {
+				t.Fatal("forged pull request candidate accepted")
+			}
+		})
+	}
+}
+
+func TestVerifyCandidateMainContainmentFailsClosed(t *testing.T) {
+	for _, status := range []string{"identical", "behind"} {
+		t.Run("accepts "+status, func(t *testing.T) {
+			compare := exactCandidateComparisonFixture(candidateBuildSHAFixture)
+			compare.Status = status
+			if err := verifyCandidateMainContainment(compare, candidateBuildSHAFixture); err != nil {
+				t.Fatalf("exact %s containment candidate rejected: %v", status, err)
+			}
+		})
+	}
+	for label, forge := range map[string]func(*candidateComparisonProof){
+		// "ahead" and "diverged" are exactly the shapes a commit that only
+		// exists — an unmerged branch or a fork tip — produces.
+		"unmerged branch":  func(c *candidateComparisonProof) { c.Status = "ahead"; c.AheadBy = 1 },
+		"diverged history": func(c *candidateComparisonProof) { c.Status = "diverged"; c.AheadBy = 2 },
+		"status without ancestry": func(c *candidateComparisonProof) {
+			c.Status = "behind"
+			c.MergeBaseCommit.SHA = strings.Repeat("e", 40)
+		},
+		"commits ahead of main": func(c *candidateComparisonProof) { c.AheadBy = 1 },
+		"foreign repository": func(c *candidateComparisonProof) {
+			c.URL = "https://api.github.com/repos/someone/qurl-go/compare/main..." + candidateBuildSHAFixture
+		},
+		"another base ref": func(c *candidateComparisonProof) {
+			c.URL = "https://api.github.com/repos/" + qurlGoRepository + "/compare/release..." + candidateBuildSHAFixture
+		},
+		"another head sha": func(c *candidateComparisonProof) {
+			c.URL = "https://api.github.com/repos/" + qurlGoRepository +
+				"/compare/" + qurlGoCandidateBaseRef + "..." + strings.Repeat("f", 40)
+		},
+		"two-dot comparison": func(c *candidateComparisonProof) {
+			c.URL = "https://api.github.com/repos/" + qurlGoRepository +
+				"/compare/" + qurlGoCandidateBaseRef + ".." + candidateBuildSHAFixture
+		},
+		"absent base head":       func(c *candidateComparisonProof) { c.BaseCommit.SHA = "" },
+		"noncanonical base head": func(c *candidateComparisonProof) { c.BaseCommit.SHA = strings.ToUpper(strings.Repeat("b", 40)) },
+		"empty document":         func(c *candidateComparisonProof) { *c = candidateComparisonProof{} },
+	} {
+		t.Run(label, func(t *testing.T) {
+			compare := exactCandidateComparisonFixture(candidateBuildSHAFixture)
+			forge(&compare)
+			if err := verifyCandidateMainContainment(compare, candidateBuildSHAFixture); err == nil {
+				t.Fatal("forged containment candidate accepted")
+			}
+		})
+	}
+}
+
+// TestCandidateShapesDoNotSubstituteForEachOther proves the two accepted shapes
+// cannot be swapped: a pull request payload decoded as a comparison, and a
+// comparison payload decoded as a pull request, both fail. That is what keeps
+// the workflow-declared candidate kind from selecting a weaker check.
+func TestCandidateShapesDoNotSubstituteForEachOther(t *testing.T) {
+	pullBytes, err := json.Marshal(exactCandidatePullRequestFixture(candidateBuildSHAFixture))
+	if err != nil {
+		t.Fatal(err)
+	}
+	compareBytes, err := json.Marshal(exactCandidateComparisonFixture(candidateBuildSHAFixture))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var comparisonFromPull candidateComparisonProof
+	if err := json.Unmarshal(pullBytes, &comparisonFromPull); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyCandidateMainContainment(comparisonFromPull, candidateBuildSHAFixture); err == nil {
+		t.Fatal("pull request payload accepted as main containment")
+	}
+
+	var pullFromComparison candidatePRProof
+	if err := json.Unmarshal(compareBytes, &pullFromComparison); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyCandidatePullRequest(pullFromComparison, candidateBuildSHAFixture); err == nil {
+		t.Fatal("comparison payload accepted as an open pull request")
+	}
+}
+
+func TestVerifyCandidateCommitFailsClosed(t *testing.T) {
+	exact := func() candidateCommitProof {
+		var commit candidateCommitProof
+		commit.SHA = candidateBuildSHAFixture
+		commit.Commit.Verification.Verified = true
+		return commit
+	}
+	if err := verifyCandidateCommit(exact(), candidateBuildSHAFixture); err != nil {
+		t.Fatalf("exact verified candidate commit rejected: %v", err)
+	}
+	for label, forge := range map[string]func(*candidateCommitProof){
+		"another commit":    func(c *candidateCommitProof) { c.SHA = strings.Repeat("f", 40) },
+		"absent commit":     func(c *candidateCommitProof) { c.SHA = "" },
+		"unverified commit": func(c *candidateCommitProof) { c.Commit.Verification.Verified = false },
+	} {
+		t.Run(label, func(t *testing.T) {
+			commit := exact()
+			forge(&commit)
+			if err := verifyCandidateCommit(commit, candidateBuildSHAFixture); err == nil {
+				t.Fatal("forged candidate commit accepted")
 			}
 		})
 	}

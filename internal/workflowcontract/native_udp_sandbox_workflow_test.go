@@ -17,7 +17,7 @@ import (
 
 const (
 	nativeUDPWorkflowID                   = "4242"
-	reviewedInventoryMappingSHA256Fixture = "f7eb7d7dd840dec15aacf929331657738c07ef6f2cdd00cb9046288d13e46bd4"
+	reviewedInventoryMappingSHA256Fixture = "869e3a4f6cd6fbbb1fb786b9dc26a2778406dcd814bf226cdddc13f66f4b1e2d"
 )
 
 type nativeUDPProofFixture struct {
@@ -48,6 +48,11 @@ func TestNativeUDPSandboxWorkflowIsAttendedStrictAndEvidenceBearing(t *testing.T
 		"nhp_controller_run_id:",
 		"nhp_controller_run_attempt:",
 		"pre_removal_run_id:",
+		// Optional with an empty default, so the layervai/nhp controller's
+		// existing authenticated dispatch payload keeps working unchanged.
+		"candidate_pull_request_number:\n        description:",
+		"        required: false\n        default: \"\"\n        type: string",
+		"QURL_GO_SANDBOX_CANDIDATE_PULL_REQUEST_NUMBER: ${{ inputs.candidate_pull_request_number }}",
 		"- pre_removal",
 		"- post_removal",
 		"environment: sandbox",
@@ -84,11 +89,23 @@ func TestNativeUDPSandboxWorkflowIsAttendedStrictAndEvidenceBearing(t *testing.T
 		`.frp == $root.repositories.frp`,
 		`actual_sha="$(gh api "repos/layervai/${repository}/commits/${expected_sha}" --jq '.sha')"`,
 		"website\twebsite",
-		`gh api "repos/${GITHUB_REPOSITORY}/pulls/93"`,
+		// Both candidate shapes and nothing else. The compare predicate is
+		// pinned in full because it is the containment proof: merely resolving
+		// the commit object would also accept a fork tip or an unmerged branch.
+		`"repos/${GITHUB_REPOSITORY}/pulls/${QURL_GO_SANDBOX_CANDIDATE_PULL_REQUEST_NUMBER}"`,
+		`--argjson number "${QURL_GO_SANDBOX_CANDIDATE_PULL_REQUEST_NUMBER}"`,
+		`.number == $number and .state == "open"`,
+		`gh api "repos/${GITHUB_REPOSITORY}/compare/main...${GITHUB_SHA}" > "${candidate}"`,
+		`.url == "https://api.github.com/repos/" + $repository + "/compare/main..." + $sha and`,
+		`(.status == "identical" or .status == "behind") and`,
+		`.ahead_by == 0 and .merge_base_commit.sha == $sha and`,
 		`.head.sha == $sha`,
 		`.base.ref == "main"`,
 		`.commit.verification.verified == true`,
-		"QURL_GO_SANDBOX_CANDIDATE_PR_PATH=${candidate_pr}",
+		`[[ "${QURL_GO_SANDBOX_CANDIDATE_PULL_REQUEST_NUMBER}" =~ ^[1-9][0-9]{0,9}$ ]]`,
+		`[[ "${GITHUB_SHA}" =~ ^[0-9a-f]{40}$ ]]`,
+		"QURL_GO_SANDBOX_CANDIDATE_KIND=${candidate_kind}",
+		"QURL_GO_SANDBOX_CANDIDATE_PATH=${candidate}",
 		"QURL_GO_SANDBOX_CANDIDATE_COMMIT_PATH=${candidate_commit}",
 		"QURL_GO_SANDBOX_INVENTORY_MAPPING_SHA256",
 		"QURL_GO_SANDBOX_RETIRED_LIFECYCLE_SURFACE_SHA256",
@@ -210,6 +227,11 @@ func TestNativeUDPSandboxWorkflowIsAttendedStrictAndEvidenceBearing(t *testing.T
 		" | tee ",
 		"test \"${pre_head_sha}\" = \"${GITHUB_SHA}\"",
 		"pre_protected=\"$(jq -cS '{repositories: {frp: .repositories.frp, qurl_connector: .repositories.qurl_connector, qurl_go:",
+		// A hardcoded pull request number makes the gate undispatchable the
+		// moment that pull request merges. The candidate number is an optional
+		// dispatch input or nothing at all.
+		"/pulls/93",
+		".number == 93",
 	)
 	requireBefore(t, workflow,
 		"Mint read-only proof-attestation token",
@@ -740,17 +762,89 @@ func TestNativeUDPSandboxRejectsMissingConnectorModuleCommit(t *testing.T) {
 	)
 }
 
-func TestNativeUDPSandboxRejectsWrongOrUnverifiedPR93Candidate(t *testing.T) {
+// TestNativeUDPSandboxAcceptsBothCandidateShapes proves the gate is dispatchable
+// in both accepted shapes: with no candidate pull request number (the default
+// the NHP controller sends, which must prove containment in main) and with an
+// open pull request whose head is the exact build. The candidate kind published
+// to the strict test is asserted, because it selects which proof runs.
+func TestNativeUDPSandboxAcceptsBothCandidateShapes(t *testing.T) {
 	fixture := newNativeUDPProofFixture(t)
 	manifest := deploymentManifestBytes(t, "pre_removal", fixture.postSHA)
+	for name, expected := range map[string]struct {
+		extra map[string]string
+		kind  string
+	}{
+		"main containment by default": {extra: nil, kind: "main_contained"},
+		"explicit open pull request": {
+			extra: map[string]string{"QURL_GO_SANDBOX_CANDIDATE_PULL_REQUEST_NUMBER": "204"},
+			kind:  "open_pull_request",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			outputs := verifyNativeUDPManifest(
+				t, fixture, fixture.postSHA, t.TempDir(), "pre_removal", "",
+				manifest, expected.extra, true,
+			)
+			if got := outputs["QURL_GO_SANDBOX_CANDIDATE_KIND"]; got != expected.kind {
+				t.Fatalf("published candidate kind = %q, want %q", got, expected.kind)
+			}
+			if outputs["QURL_GO_SANDBOX_CANDIDATE_PATH"] == outputs["QURL_GO_SANDBOX_CANDIDATE_COMMIT_PATH"] {
+				t.Fatal("candidate and candidate-commit evidence share a path")
+			}
+		})
+	}
+}
+
+// TestNativeUDPSandboxRejectsWrongOrUnverifiedCandidate covers every rejection
+// reason for both accepted shapes. The containment cases matter most: "ahead"
+// and "diverged" are exactly what a commit that merely EXISTS produces, and a
+// merge base that is not the build SHA is what a rewritten or unrelated history
+// produces.
+func TestNativeUDPSandboxRejectsWrongOrUnverifiedCandidate(t *testing.T) {
+	fixture := newNativeUDPProofFixture(t)
+	manifest := deploymentManifestBytes(t, "pre_removal", fixture.postSHA)
+	const openPR = "204"
 	for name, extra := range map[string]map[string]string{
-		"wrong PR number":       {"MOCK_CANDIDATE_NUMBER": "94"},
-		"closed PR":             {"MOCK_CANDIDATE_STATE": "closed"},
-		"fork head":             {"MOCK_CANDIDATE_HEAD_REPO": "someone/qurl-go"},
-		"wrong base repository": {"MOCK_CANDIDATE_BASE_REPO": "someone/qurl-go"},
-		"wrong base branch":     {"MOCK_CANDIDATE_BASE_REF": "release"},
-		"wrong current head":    {"MOCK_CANDIDATE_HEAD_SHA": strings.Repeat("f", 40)},
-		"unverified commit":     {"MOCK_CANDIDATE_VERIFIED": "false"},
+		"pull request number is not a number": {"QURL_GO_SANDBOX_CANDIDATE_PULL_REQUEST_NUMBER": "93; echo pwned"},
+		"pull request number is zero":         {"QURL_GO_SANDBOX_CANDIDATE_PULL_REQUEST_NUMBER": "0"},
+		"pull request number is padded":       {"QURL_GO_SANDBOX_CANDIDATE_PULL_REQUEST_NUMBER": "0093"},
+		"another pull request answered": {
+			"QURL_GO_SANDBOX_CANDIDATE_PULL_REQUEST_NUMBER": openPR,
+			"MOCK_CANDIDATE_NUMBER":                         "94",
+		},
+		"closed pull request": {
+			"QURL_GO_SANDBOX_CANDIDATE_PULL_REQUEST_NUMBER": openPR,
+			"MOCK_CANDIDATE_STATE":                          "closed",
+		},
+		"fork head": {
+			"QURL_GO_SANDBOX_CANDIDATE_PULL_REQUEST_NUMBER": openPR,
+			"MOCK_CANDIDATE_HEAD_REPO":                      "someone/qurl-go",
+		},
+		"wrong base repository": {
+			"QURL_GO_SANDBOX_CANDIDATE_PULL_REQUEST_NUMBER": openPR,
+			"MOCK_CANDIDATE_BASE_REPO":                      "someone/qurl-go",
+		},
+		"wrong base branch": {
+			"QURL_GO_SANDBOX_CANDIDATE_PULL_REQUEST_NUMBER": openPR,
+			"MOCK_CANDIDATE_BASE_REF":                       "release",
+		},
+		"wrong current head": {
+			"QURL_GO_SANDBOX_CANDIDATE_PULL_REQUEST_NUMBER": openPR,
+			"MOCK_CANDIDATE_HEAD_SHA":                       strings.Repeat("f", 40),
+		},
+		"unmerged branch ahead of main":  {"MOCK_COMPARE_STATUS": "ahead", "MOCK_COMPARE_AHEAD_BY": "1"},
+		"diverged history":               {"MOCK_COMPARE_STATUS": "diverged", "MOCK_COMPARE_AHEAD_BY": "2"},
+		"commits ahead of main":          {"MOCK_COMPARE_AHEAD_BY": "1"},
+		"commit is not the merge base":   {"MOCK_COMPARE_MERGE_BASE_SHA": strings.Repeat("e", 40)},
+		"noncanonical main head":         {"MOCK_COMPARE_BASE_SHA": "not-a-sha"},
+		"comparison against another ref": {"MOCK_COMPARE_PATH": "layervai/qurl-go/compare/release..." + fixture.postSHA},
+		"comparison in another repository": {
+			"MOCK_COMPARE_PATH": "someone/qurl-go/compare/main..." + fixture.postSHA,
+		},
+		"comparison of another commit": {
+			"MOCK_COMPARE_PATH": "layervai/qurl-go/compare/main..." + strings.Repeat("f", 40),
+		},
+		"unverified commit": {"MOCK_CANDIDATE_VERIFIED": "false"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			verifyNativeUDPManifest(
@@ -1774,11 +1868,14 @@ func verifyNativeUDPManifest(
 		"QURL_GO_SANDBOX_DEPLOYMENT_ARTIFACT_ID":          "7654321",
 		"QURL_GO_SANDBOX_DEPLOYMENT_ARTIFACT_DIGEST":      "sha256:" + strings.Repeat("d", 64),
 		"QURL_GO_SANDBOX_PRE_REMOVAL_RUN_ID":              preRemovalRunID,
-		"MOCK_PRODUCER_RUN_ID":                            "987654",
-		"MOCK_PRODUCER_RUN_ATTEMPT":                       "1",
-		"MOCK_PRODUCER_HEAD_SHA":                          strings.Repeat("c", 40),
-		"MOCK_PRODUCER_ARTIFACT_ID":                       "7654321",
-		"MOCK_PRODUCER_ARTIFACT_DIGEST":                   "sha256:" + strings.Repeat("d", 64),
+		// Empty is the default the NHP controller sends, so every case that
+		// does not override it exercises the main-containment shape.
+		"QURL_GO_SANDBOX_CANDIDATE_PULL_REQUEST_NUMBER": "",
+		"MOCK_PRODUCER_RUN_ID":                          "987654",
+		"MOCK_PRODUCER_RUN_ATTEMPT":                     "1",
+		"MOCK_PRODUCER_HEAD_SHA":                        strings.Repeat("c", 40),
+		"MOCK_PRODUCER_ARTIFACT_ID":                     "7654321",
+		"MOCK_PRODUCER_ARTIFACT_DIGEST":                 "sha256:" + strings.Repeat("d", 64),
 	}
 	for key, value := range extra {
 		environment[key] = value
@@ -1830,10 +1927,16 @@ case "$2" in
       "${MOCK_PRODUCER_ARTIFACT_ID}" "${MOCK_PRODUCER_RUN_ID}" "${MOCK_PRODUCER_RUN_ATTEMPT}" \
       "${MOCK_PRODUCER_ARTIFACT_DIGEST}" "${MOCK_PRODUCER_RUN_ID}" "${MOCK_PRODUCER_HEAD_SHA}"
     ;;
-  repos/layervai/qurl-go/pulls/93)
+  repos/layervai/qurl-go/pulls/*)
     printf '{"number":%s,"state":"%s","head":{"sha":"%s","repo":{"full_name":"%s"}},"base":{"ref":"%s","repo":{"full_name":"%s"}}}\n' \
-      "${MOCK_CANDIDATE_NUMBER:-93}" "${MOCK_CANDIDATE_STATE:-open}" "${MOCK_CANDIDATE_HEAD_SHA:-${GITHUB_SHA}}" \
+      "${MOCK_CANDIDATE_NUMBER:-${2##*/}}" "${MOCK_CANDIDATE_STATE:-open}" "${MOCK_CANDIDATE_HEAD_SHA:-${GITHUB_SHA}}" \
       "${MOCK_CANDIDATE_HEAD_REPO:-layervai/qurl-go}" "${MOCK_CANDIDATE_BASE_REF:-main}" "${MOCK_CANDIDATE_BASE_REPO:-layervai/qurl-go}"
+    ;;
+  repos/layervai/qurl-go/compare/*)
+    printf '{"url":"https://api.github.com/repos/%s","status":"%s","ahead_by":%s,"behind_by":3,"total_commits":0,"base_commit":{"sha":"%s"},"merge_base_commit":{"sha":"%s"}}\n' \
+      "${MOCK_COMPARE_PATH:-${2#repos/}}" "${MOCK_COMPARE_STATUS:-behind}" "${MOCK_COMPARE_AHEAD_BY:-0}" \
+      "${MOCK_COMPARE_BASE_SHA:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}" \
+      "${MOCK_COMPARE_MERGE_BASE_SHA:-${GITHUB_SHA}}"
     ;;
   repos/layervai/*/commits/*)
     repository="${2#repos/layervai/}"
@@ -2123,10 +2226,17 @@ func writeNativeUDPGHMock(t *testing.T) string {
 	script := `#!/usr/bin/env bash
 set -euo pipefail
 if [[ "$1" == "api" ]]; then
-  if [[ "$2" == "repos/layervai/qurl-go/pulls/93" ]]; then
+  if [[ "$2" == repos/layervai/qurl-go/pulls/* ]]; then
     printf '{"number":%s,"state":"%s","head":{"sha":"%s","repo":{"full_name":"%s"}},"base":{"ref":"%s","repo":{"full_name":"%s"}}}\n' \
-      "${MOCK_CANDIDATE_NUMBER:-93}" "${MOCK_CANDIDATE_STATE:-open}" "${MOCK_CANDIDATE_HEAD_SHA:-${GITHUB_SHA}}" \
+      "${MOCK_CANDIDATE_NUMBER:-${2##*/}}" "${MOCK_CANDIDATE_STATE:-open}" "${MOCK_CANDIDATE_HEAD_SHA:-${GITHUB_SHA}}" \
       "${MOCK_CANDIDATE_HEAD_REPO:-layervai/qurl-go}" "${MOCK_CANDIDATE_BASE_REF:-main}" "${MOCK_CANDIDATE_BASE_REPO:-layervai/qurl-go}"
+    exit 0
+  fi
+  if [[ "$2" == repos/layervai/qurl-go/compare/* ]]; then
+    printf '{"url":"https://api.github.com/repos/%s","status":"%s","ahead_by":%s,"behind_by":3,"total_commits":0,"base_commit":{"sha":"%s"},"merge_base_commit":{"sha":"%s"}}\n' \
+      "${MOCK_COMPARE_PATH:-${2#repos/}}" "${MOCK_COMPARE_STATUS:-behind}" "${MOCK_COMPARE_AHEAD_BY:-0}" \
+      "${MOCK_COMPARE_BASE_SHA:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}" \
+      "${MOCK_COMPARE_MERGE_BASE_SHA:-${GITHUB_SHA}}"
     exit 0
   fi
   if [[ "$2" == repos/layervai/*/commits/* ]]; then

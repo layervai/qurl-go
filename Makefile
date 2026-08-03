@@ -53,14 +53,27 @@ vet: ## Run go vet
 vuln: $(GOVULN) ## Scan for known vulnerabilities in called code
 	$(GOVULN) ./...
 
+# Discovery is per package, not per repo, because `go test -fuzz` accepts
+# exactly one target in exactly one package: a repo-wide `-list` cannot say
+# which package a FuzzXxx came from. Both modules in the workspace are walked,
+# so a new target anywhere — qurl, relayknock/internal/nhpwire, awsstore — is
+# soaked with no edit here and none in fuzz.yml. A package that fails to list
+# is fatal rather than silently skipped, and zero targets repo-wide is fatal
+# too: that only happens if discovery itself broke.
 .PHONY: fuzz
-fuzz: ## Run every qv2 fuzz target for $(FUZZTIME) each (targets auto-discovered)
-	@targets=$$($(GO) test -list '^Fuzz' ./internal/qv2 | grep '^Fuzz'); \
-	if [ -z "$$targets" ]; then echo "no fuzz targets found"; exit 1; fi; \
-	for t in $$targets; do \
-		echo ">> $$t"; \
-		$(GO) test -run='^$$' -fuzz="^$$t$$" -fuzztime=$(FUZZTIME) ./internal/qv2 || exit 1; \
-	done
+fuzz: ## Run every fuzz target in the workspace for $(FUZZTIME) each (auto-discovered)
+	@found=0; \
+	for pkg in $$($(GO) list ./... ./awsstore/...); do \
+		if ! listing=$$($(GO) test -list '^Fuzz' $$pkg); then \
+			echo "cannot list fuzz targets in $$pkg"; exit 1; \
+		fi; \
+		for t in $$(printf '%s\n' "$$listing" | grep '^Fuzz' || true); do \
+			found=1; \
+			echo ">> $$pkg $$t"; \
+			$(GO) test -run='^$$' -fuzz="^$$t$$" -fuzztime=$(FUZZTIME) $$pkg || exit 1; \
+		done; \
+	done; \
+	if [ "$$found" != "1" ]; then echo "no fuzz targets found"; exit 1; fi
 
 # awsstore is a SEPARATE module (github.com/layervai/qurl-go/awsstore) that
 # isolates the AWS SDK v2 dependency, so the root `./...` targets above never

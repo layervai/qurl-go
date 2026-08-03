@@ -107,6 +107,12 @@ func PacketType(packet []byte) (int, error) {
 
 func setVersion(header []byte, major, minor byte) { header[8], header[9] = major, minor }
 
+// getVersion decodes HeaderCommon[8:10]. Receivers gate on major alone: a major
+// bump is a wire break, while a minor bump is a compatible extension the
+// reference server may ship before a deployed client is updated, so gating on
+// minor would strand clients on an ordinary coordinated server release.
+func getVersion(header []byte) (major, minor byte) { return header[8], header[9] }
+
 // setFlag writes HeaderCommon[10:12] after stripping EXTENDEDLENGTH and masking
 // to 12 bits (Go SetFlag).
 func setFlag(header []byte, flag uint16) {

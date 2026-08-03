@@ -264,8 +264,13 @@ func TestSandboxNativeUDPLifecycle(t *testing.T) {
 		return
 	}
 
+	// The scenario id and subtest name still carry "93" from the retired
+	// hardcoded-pull-request contract. They are frozen deliberately: both are
+	// cross-repository identifiers the NHP controller joins on, and the
+	// requirement text in the inventory — not the id — is what states the
+	// contract. Rename them only in a coordinated cut with layervai/nhp.
 	if !runTypedEvidenceScenario(t, "exact_qurl_go_93_candidate", "provenance.exact_qurl_go_93_candidate", []string{"build_provenance"}, func(t *testing.T) {
-		proveExactQURLGo93Candidate(t, cfg)
+		proveExactQURLGoCandidate(t, cfg)
 	}) {
 		return
 	}
