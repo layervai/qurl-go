@@ -2,6 +2,7 @@ package nhpwire
 
 import (
 	"bytes"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -92,7 +93,7 @@ func TestDecryptMessage_RejectsTamperedReply(t *testing.T) {
 				copy(pkt[offDigest:offDigest+hashSize], headerDigest(devicePub, pkt[:HeaderSize], nil))
 			}),
 			serverPub: serverPub,
-			wantSub:   "unsupported NHP protocol major version",
+			wantSub:   "unsupported NHP protocol version",
 		},
 		{
 			name: "header digest mismatch",
@@ -148,18 +149,20 @@ func TestDecryptMessage_RejectsTamperedReply(t *testing.T) {
 			wantSub:   "open body",
 		},
 		{
-			// The compress bit rides outside the AEAD and can be SET by an
-			// off-path attacker as cheaply as it can be cleared. This direction
-			// fails closed on its own: the authenticated plaintext is not a zlib
-			// stream, so the inflate rejects it. (The cleared direction does not
-			// fail closed — see TestReplyCompressFlagIsUnauthenticated.)
+			// Setting the compress bit on an uncompressed reply. Under 1.0 this
+			// direction reached the inflate, which rejected the non-zlib
+			// plaintext; since 1.1 the flag is inside the folded HeaderCommon, so
+			// the body Open refuses it first and no plaintext is ever produced.
+			// Both directions of this bit are now fenced — the cleared one by
+			// TestReplyHeaderFlagsAreAuthenticated. inflateZlib's own failure
+			// modes stay covered directly by message_internal_test.go.
 			name: "compress flag set on a body that is not a zlib stream",
 			packet: tamperedCopy(func(pkt []byte) {
 				setFlag(pkt[:HeaderSize], nhpFlagCompress)
 				copy(pkt[offDigest:offDigest+hashSize], headerDigest(devicePub, pkt[:HeaderSize], nil))
 			}),
 			serverPub: serverPub,
-			wantSub:   "inflate body",
+			wantSub:   "open body",
 		},
 	}
 	for _, tt := range tests {
@@ -174,16 +177,23 @@ func TestDecryptMessage_RejectsTamperedReply(t *testing.T) {
 }
 
 // TestDecryptMessage_AcceptsMinorVersionBump pins the deliberate asymmetry in the
-// version gate: major is refused, minor is not. The server can ship a compatible
-// minor bump before a deployed agent is updated, so gating on minor would strand
-// clients on an ordinary coordinated release. The counterpart rejection subcase
-// lives in TestDecryptMessage_RejectsTamperedReply.
+// version gate: the major is pinned and the minor is FLOORED, not pinned. A
+// server can ship a compatible minor bump before a deployed agent is updated, so
+// refusing a newer minor would strand clients on an ordinary coordinated release.
+//
+// The newer-minor packet is BUILT at that version rather than re-stamped after
+// the fact: since 1.1 the version bytes are inside the folded HeaderCommon, so a
+// post-hoc edit is tampering and must fail the body open — which is what
+// TestHeaderCommonFieldsAreBoundIntoBodyAAD asserts. The counterpart rejections
+// live in TestDecryptMessage_RejectsTamperedReply (major) and
+// TestDecryptMessage_RejectsPreBindingMinorVersion (older minor).
 func TestDecryptMessage_AcceptsMinorVersionBump(t *testing.T) {
 	devicePriv, devicePub := keyPair(t, 0x11)
 	serverPriv, serverPub := keyPair(t, 0x22)
 	body := []byte("admission body from a newer minor")
+	const newerMinor = protocolVersionMinor + 7
 
-	packet, err := BuildMessage(TypeACK, &Inputs{
+	packet, err := buildMessageWithVersion(TypeACK, 0, protocolVersionMajor, newerMinor, &Inputs{
 		DeviceStaticPriv: serverPriv,
 		ServerStaticPub:  devicePub,
 		EphemeralPriv:    bytes.Repeat([]byte{0x44}, PublicKeySize),
@@ -195,12 +205,9 @@ func TestDecryptMessage_AcceptsMinorVersionBump(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build NHP_ACK: %v", err)
 	}
-	if major, minor := getVersion(packet); major != protocolVersionMajor || minor != protocolVersionMinor {
-		t.Fatalf("builder stamped version %d.%d, want %d.%d", major, minor, protocolVersionMajor, protocolVersionMinor)
+	if major, minor := getVersion(packet); major != protocolVersionMajor || minor != newerMinor {
+		t.Fatalf("builder stamped version %d.%d, want %d.%d", major, minor, protocolVersionMajor, newerMinor)
 	}
-
-	packet[9] = protocolVersionMinor + 7
-	copy(packet[offDigest:offDigest+hashSize], headerDigest(devicePub, packet[:HeaderSize], nil))
 
 	msg, err := DecryptMessage(devicePriv, serverPub, packet)
 	if err != nil {
@@ -208,6 +215,42 @@ func TestDecryptMessage_AcceptsMinorVersionBump(t *testing.T) {
 	}
 	if !bytes.Equal(msg.Body, body) {
 		t.Fatalf("Body = %q, want %q", msg.Body, body)
+	}
+}
+
+// TestDecryptMessage_RejectsPreBindingMinorVersion is the rollout-diagnosability
+// fence. A peer still speaking 1.0 folds a shorter transcript into its body AAD,
+// so its tag can never verify here. Without the floor the operator would see
+// "open body: cipher: message authentication failed" — indistinguishable from a
+// wrong key, a corrupted datagram, or an attack — instead of a statement that the
+// two ends disagree on the protocol version. The gate must therefore run BEFORE
+// any key agreement, which is what the error substring below pins.
+func TestDecryptMessage_RejectsPreBindingMinorVersion(t *testing.T) {
+	devicePriv, devicePub := keyPair(t, 0x11)
+	serverPriv, serverPub := keyPair(t, 0x22)
+
+	for minor := byte(0); minor < minProtocolVersionMinor; minor++ {
+		packet, err := buildMessageWithVersion(TypeACK, 0, protocolVersionMajor, minor, &Inputs{
+			DeviceStaticPriv: serverPriv,
+			ServerStaticPub:  devicePub,
+			EphemeralPriv:    bytes.Repeat([]byte{0x44}, PublicKeySize),
+			TimestampNanos:   1700000000123456789,
+			Counter:          0x1234,
+			Preamble:         0xa1b2c3d4,
+			Body:             []byte(`{"errCode":"0"}`),
+		})
+		if err != nil {
+			t.Fatalf("build NHP_ACK at 1.%d: %v", minor, err)
+		}
+
+		msg, err := DecryptMessage(devicePriv, serverPub, packet)
+		if err == nil || msg != nil {
+			t.Fatalf("1.%d packet accepted: %#v, %v", minor, msg, err)
+		}
+		want := fmt.Sprintf("unsupported NHP protocol version %d.%d", protocolVersionMajor, minor)
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("1.%d rejected as %q, want an explicit version error containing %q", minor, err, want)
+		}
 	}
 }
 
