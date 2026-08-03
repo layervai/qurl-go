@@ -275,6 +275,19 @@ Match errors by type or sentinel, not message text:
 
 ### Unreleased
 
+- **Breaking, and it requires action: you must upgrade to keep connecting.** The
+  NHP wire protocol moves to 1.1, which authenticates the packet header inside
+  the AEAD. 1.0 and 1.1 do not interoperate in either direction and there is no
+  compatibility mode, so once LayerV's servers move to 1.1, an agent built
+  against v0.2.0 or earlier fails every request with an explicit version error.
+  Rebuild against this release and redeploy. Nothing about your code changes —
+  no API moved — but a binary that is not rebuilt will not reconnect on its own.
+
+  This closes a real defect rather than tidying the wire: under 1.0 the header's
+  flag word was covered only by an unkeyed digest, so anyone who knew an agent's
+  static public key and sat on the network path could alter how a reply was
+  decoded and hand the caller bytes the server never sent. Authenticating the
+  header is the fix, and it cannot be done compatibly.
 - **Breaking:** enrollment now defaults to the emailed one-time code, for any
   runtime that can read a mailbox rather than humans specifically. A runtime with
   no address in reach opts out with the new
