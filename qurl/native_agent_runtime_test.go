@@ -1635,28 +1635,57 @@ func TestConsumeNativeAgentKnockReply_WipesBearerBody(t *testing.T) {
 }
 
 func TestInterpretNativeAgentKnockReply_ErrCodePresenceAndDenyPrecedence(t *testing.T) {
+	// A non-empty wantDenyCode expects *ServerDenyError carrying exactly that
+	// code; an empty one expects ErrMalformedReply. Every canonical non-success
+	// errCode is an authenticated deny — the vocabulary is the producer's, so no
+	// digit code is "unknown enough" to become malformed. Malformed stays
+	// reserved for genuinely malformed replies: a missing/null errCode or a
+	// value outside the producer's decimal-digit code grammar (surrounding
+	// whitespace, free-form text), which also keeps producer-controlled text out
+	// of ServerDenyError's public rendering.
 	tests := map[string]struct {
-		body     string
-		wantDeny bool
+		body         string
+		wantDenyCode string
 	}{
-		"deny needs no success fields": {body: `{"errCode":"52004"}`, wantDeny: true},
-		"missing errCode":              {body: `{"errMsg":"denied"}`},
-		"null errCode":                 {body: `{"errCode":null}`},
-		"noncanonical errCode":         {body: `{"errCode":" 52101"}`},
-		"success needs success fields": {body: `{"errCode":"0"}`},
+		"deny needs no success fields":     {body: `{"errCode":"52004"}`, wantDenyCode: "52004"},
+		"deny resource not found":          {body: `{"errCode":"52004","errMsg":"failed to find resource"}`, wantDenyCode: "52004"},
+		"deny knock server not found":      {body: `{"errCode":"51002","errMsg":"failed to find knock server"}`, wantDenyCode: "51002"},
+		"deny ac operation failed":         {body: `{"errCode":"52005","errMsg":"server ac operation failed"}`, wantDenyCode: "52005"},
+		"deny asp not found":               {body: `{"errCode":"52002","errMsg":"failed to find auth service provider"}`, wantDenyCode: "52002"},
+		"deny code outside pinned vectors": {body: `{"errCode":"59999"}`, wantDenyCode: "59999"},
+		"missing errCode":                  {body: `{"errMsg":"denied"}`},
+		"null errCode":                     {body: `{"errCode":null}`},
+		"noncanonical errCode":             {body: `{"errCode":" 52101"}`},
+		"noncanonical success errCode":     {body: `{"errCode":"  0  "}`},
+		"free-form errCode":                {body: `{"errCode":"lv_live_not_a_code"}`},
+		"success needs success fields":     {body: `{"errCode":"0"}`},
 	}
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
 			_, err := interpretNativeAgentKnockReply(&relayknock.Reply{Type: relayknock.TypeACK, Body: []byte(test.body)}, "resource-public-key")
 			var deny *ServerDenyError
-			if test.wantDeny {
-				if !errors.As(err, &deny) || errors.Is(err, ErrMalformedReply) {
-					t.Fatalf("deny precedence error = %T: %v", err, err)
+			if test.wantDenyCode != "" {
+				if !errors.As(err, &deny) || deny.ErrCode != test.wantDenyCode || errors.Is(err, ErrMalformedReply) {
+					t.Fatalf("deny classification error = %T: %v, want ServerDenyError(%s)", err, err, test.wantDenyCode)
 				}
 				return
 			}
 			if !errors.Is(err, ErrMalformedReply) || errors.As(err, &deny) {
 				t.Fatalf("presence error = %T: %v, want ErrMalformedReply", err, err)
+			}
+		})
+	}
+}
+
+func TestInterpretNativeAgentKnockReply_SuccessErrCodeVocabulary(t *testing.T) {
+	// The knock ACK success vocabulary is {"", "0"}, matching the portal path's
+	// isSuccess predicate and the conformance ack_success_empty_err_code vector.
+	for name, errCode := range map[string]string{"zero": "0", "empty string": ""} {
+		t.Run(name, func(t *testing.T) {
+			body := []byte(`{"errCode":"` + errCode + `","resHost":{"resource-public-key":"frps.cell0.example:7000"},"opnTime":900,"agentAddr":"203.0.113.9:49152","acTokens":{"resource-public-key":"ac-secret"}}`)
+			result, err := interpretNativeAgentKnockReply(&relayknock.Reply{Type: relayknock.TypeACK, Body: body}, "resource-public-key")
+			if err != nil || result == nil || result.ACToken != "ac-secret" || result.ResourceHost != "frps.cell0.example:7000" {
+				t.Fatalf("success reply = %#v, %v", result, err)
 			}
 		})
 	}

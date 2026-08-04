@@ -40,10 +40,7 @@ const (
 	// and must stay far below a lease lifetime so renewal happens about once per
 	// lease rather than on every knock. Renewing inside this window is best
 	// effort: the current lease is still valid, so a Hub failure is not fatal.
-	sessionLeaseRenewalLead = 5 * time.Minute
-	// qurl-conformance v1 freezes this as the native Connector knock deny. Other
-	// values are producer-contract violations, not open-ended diagnostic text.
-	nativeKnockResourceNotFoundCode  = "52004"
+	sessionLeaseRenewalLead          = 5 * time.Minute
 	nativeRegisterTicketInvalidCode  = "52110"
 	nativeRegisterTicketExpiredCode  = "52111"
 	nativeRegisterQuotaExceededCode  = "52112"
@@ -2113,11 +2110,22 @@ func interpretNativeAgentKnockReply(reply *relayknock.Reply, knockResourceID str
 	if ack.ErrCode.Value != strings.TrimSpace(ack.ErrCode.Value) {
 		return nil, fmt.Errorf("%w: native knock ACK errCode is not canonical", ErrMalformedReply)
 	}
-	if ack.ErrCode.Value == nativeKnockResourceNotFoundCode {
+	if !isSuccessErrCode(ack.ErrCode.Value) {
+		// Any canonical non-success errCode is an authenticated server deny and
+		// must reach the caller carrying its code. The deny vocabulary belongs to
+		// the producer and may grow (qurl-conformance pins the server-legal codes
+		// in its agent-knock deny vectors), so there is no client-side allowlist:
+		// reclassifying an unrecognized deny as malformed would strip the only
+		// actionable diagnostic from a legitimate, authenticated denial. Canonical
+		// means the producer's decimal-digit code grammar: ServerDenyError renders
+		// its code into public error text, and the digit gate is what keeps a
+		// buggy authenticated producer from reflecting credentials through that
+		// channel, so free-form values stay behind the redacting malformed
+		// classification below.
+		if !isCanonicalKnockDenyCode(ack.ErrCode.Value) {
+			return nil, invalidNativeProducerReply(ErrMalformedReply, "native knock ACK errCode")
+		}
 		return nil, &ServerDenyError{ErrCode: ack.ErrCode.Value}
-	}
-	if ack.ErrCode.Value != errSuccess {
-		return nil, invalidNativeProducerReply(ErrMalformedReply, "native knock ACK errCode")
 	}
 	for _, required := range []struct {
 		name    string
@@ -2141,6 +2149,23 @@ func interpretNativeAgentKnockReply(reply *relayknock.Reply, knockResourceID str
 		return nil, fmt.Errorf("%w: success ACK missing canonical token or resource host for requested resource", ErrMalformedReply)
 	}
 	return &NativeKnockResult{ACToken: token, ResourceHost: host, OpenTime: ack.OpenTime.Value, AgentAddr: ack.AgentAddr.Value}, nil
+}
+
+// isCanonicalKnockDenyCode reports whether a non-success knock-ACK errCode is
+// in the producer's decimal-digit code grammar. Every legal NHP deny code is a
+// digit string, and digit strings cannot embed reflected credentials, so this
+// is a grammar gate, not an allowlist: codes the SDK has never seen still
+// classify as authenticated denies.
+func isCanonicalKnockDenyCode(code string) bool {
+	if code == "" {
+		return false
+	}
+	for i := 0; i < len(code); i++ {
+		if code[i] < '0' || code[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func consumeNativeAgentKnockReply(reply *relayknock.Reply, knockResourceID string) (*NativeKnockResult, error) {
