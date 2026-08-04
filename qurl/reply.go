@@ -44,7 +44,14 @@ type serverKnockAckMsg struct {
 // success (common.IsSuccessErrCode).
 const errSuccess = "0"
 
-func (m *serverKnockAckMsg) isSuccess() bool { return m.ErrCode == "" || m.ErrCode == errSuccess }
+// isSuccessErrCode is the knock-ACK success predicate shared by the portal and
+// native reply interpreters. Every other canonical errCode on a knock ACK is an
+// authenticated server deny, never a malformed reply. (The registration RAK
+// contract is deliberately stricter and requires a nonempty errCode; it does
+// not use this predicate.)
+func isSuccessErrCode(code string) bool { return code == "" || code == errSuccess }
+
+func (m *serverKnockAckMsg) isSuccess() bool { return isSuccessErrCode(m.ErrCode) }
 
 // parseAck decodes the decrypted ACK body. An empty body is treated as a
 // zero-value ACK (no errCode, no resource URL) so the caller surfaces the
