@@ -317,10 +317,12 @@ func WithAgentRuntimeOTPProvider(provider func(context.Context, AgentOTPChalleng
 
 // WithAgentRuntimeHeadlessEnrollment opts out of OTP enrollment for a runtime
 // that has no mailbox to receive a code in — the escape hatch, not the norm.
-// It accepts exactly the pre-issued key kinds that carry their own proof:
-// connector_bootstrap, bootstrap, and agent. An account credential is rejected
+// It accepts exactly the one-shot enrollment token kinds that carry their own
+// proof: connector_bootstrap and bootstrap. An account credential is rejected
 // under this policy, because honoring it would require a code this runtime has
-// already said it cannot obtain.
+// already said it cannot obtain. The retired durable agent kind is not
+// admitted here either; a legacy qurl:agent-scoped key needs the explicit
+// WithAgentRuntimeAllowedRegistrationKeyKinds.
 //
 // It contradicts WithAgentRuntimeOTPProvider and cannot be combined with it:
 // one says no code can be read, the other says how to read one. Passing both
@@ -337,20 +339,21 @@ func WithAgentRuntimeHeadlessEnrollment() AgentRuntimeRegistrationOption {
 	})
 }
 
-// headlessRegistrationKeyKinds is the set of pre-issued kinds that enroll with
-// no one-time code.
+// headlessRegistrationKeyKinds is the set of one-shot enrollment token kinds
+// that enroll with no one-time code.
 func headlessRegistrationKeyKinds() map[RegistrationKeyKind]struct{} {
 	return map[RegistrationKeyKind]struct{}{
 		RegistrationKeyKindConnectorBootstrap: {},
 		RegistrationKeyKindBootstrap:          {},
-		RegistrationKeyKindAgent:              {},
 	}
 }
 
 // WithAgentRuntimeAllowedRegistrationKeyKinds restricts the authenticated Hub
 // assignment key kinds accepted by RegisterAgentRuntime. It is the low-level
 // form of the same policy WithAgentRuntimeHeadlessEnrollment sets; reach for it
-// when one binary must accept both an OTP credential and a pre-issued one.
+// when one binary must accept both an OTP credential and a pre-issued one. It
+// is also the only policy that still admits the retired agent kind, for a
+// caller holding a legacy durable qurl:agent-scoped key.
 //
 // The native default is account alone, so OTP enrollment is what a plain
 // RegisterAgentRuntime call performs. Policy and provider must agree in both
@@ -484,11 +487,20 @@ func defaultNativeAgentRuntimeConfig() *nativeAgentRuntimeConfig {
 
 func newNativeAgentRuntimeConfig(opts []AgentRuntimeRegistrationOption) (*nativeAgentRuntimeConfig, error) {
 	c := defaultNativeAgentRuntimeConfig()
-	// OTP is the default enrollment path. Anything that can be reached at an
-	// address can answer a code, which is most of what enrolls here; the
-	// pre-issued kinds are the exception and say so with
-	// WithAgentRuntimeHeadlessEnrollment.
-	c.allowedKeyKinds = map[RegistrationKeyKind]struct{}{RegistrationKeyKindAccount: {}}
+	// OTP is the default enrollment path: a durable API key (the account kind)
+	// enrolls by answering an emailed one-time code. The one-shot enrollment
+	// tokens (bootstrap, connector_bootstrap) stay out because minting them IS
+	// the authorization — the token is its own proof, so demanding a code as
+	// well buys nothing; they say so with WithAgentRuntimeHeadlessEnrollment.
+	//
+	// The durable agent kind is retired: the platform no longer mints keys
+	// that classify as it, so no default path admits it. Its wire token stays
+	// reserved (see RegistrationKeyKindAgent), and a caller holding a legacy
+	// key can still admit it explicitly with
+	// WithAgentRuntimeAllowedRegistrationKeyKinds.
+	c.allowedKeyKinds = map[RegistrationKeyKind]struct{}{
+		RegistrationKeyKindAccount: {},
+	}
 	for _, opt := range opts {
 		if opt == nil {
 			return nil, fmt.Errorf("%w: nil runtime option", ErrInvalidRegisterConfig)

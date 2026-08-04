@@ -94,9 +94,10 @@ var ErrCredentialRecoveryRequired = errors.New("qurl: agent credential recovery 
 var ErrRegistrationKeyKindDisallowed = errors.New("qurl: registration key kind disallowed")
 
 // RegistrationKeyKindDisallowedError carries the rejected kind and the
-// caller's accepted kinds. It is returned before OTP dispatch or REG. The
-// common cause is a pre-issued credential presented under the default OTP
-// policy: pass WithAgentRuntimeHeadlessEnrollment to accept it.
+// caller's accepted kinds. It is returned before OTP dispatch or REG, and its
+// message names the remedy for the rejected kind: one-shot enrollment tokens
+// enroll headlessly, account keys enroll over the default OTP path, and the
+// retired durable agent kind no longer enrolls at all.
 type RegistrationKeyKindDisallowedError struct {
 	Kind    RegistrationKeyKind
 	Allowed []RegistrationKeyKind
@@ -104,10 +105,51 @@ type RegistrationKeyKindDisallowedError struct {
 
 func (e *RegistrationKeyKindDisallowedError) Error() string {
 	allowed := make([]string, len(e.Allowed))
+	accepts := map[RegistrationKeyKind]bool{}
 	for i, kind := range e.Allowed {
 		allowed[i] = string(kind)
+		accepts[kind] = true
 	}
-	return fmt.Sprintf("qurl: registration key kind %q is disallowed; accepted kinds: %s", e.Kind, strings.Join(allowed, ", "))
+	msg := fmt.Sprintf(
+		"qurl: registration key kind %q is disallowed; accepted kinds: %s",
+		e.Kind, strings.Join(allowed, ", "),
+	)
+	if remedy := e.remedy(accepts); remedy != "" {
+		msg += " (" + remedy + ")"
+	}
+	return msg
+}
+
+// remedy names the fix for each refusal shape, so the operator is not left to
+// infer it. Refusals of this class were hit while onboarding against a live
+// deployment and cost real time; the package doc already carried the answer,
+// which is exactly the wrong place for it.
+func (e *RegistrationKeyKindDisallowedError) remedy(accepts map[RegistrationKeyKind]bool) string {
+	switch {
+	// The durable agent kind is retired: the platform no longer mints keys
+	// that classify as it, and no enrollment path admits it by default. The
+	// wire token stays reserved, so a legacy key still lands here with
+	// guidance instead of an unknown-kind error.
+	case e.Kind == RegistrationKeyKindAgent:
+		return "durable agent-scoped keys no longer enroll; mint a one-shot " +
+			"enrollment token (key_type=agent_bootstrap today) and pass " +
+			"WithAgentRuntimeHeadlessEnrollment"
+	// A one-shot enrollment token under the default OTP policy. The token was
+	// minted for a single enrollment and is its own proof, so demanding an
+	// emailed code as well buys nothing.
+	case accepts[RegistrationKeyKindAccount] &&
+		(e.Kind == RegistrationKeyKindBootstrap ||
+			e.Kind == RegistrationKeyKindConnectorBootstrap):
+		return "this is a one-shot enrollment token that carries its own proof, so " +
+			"it does not use the OTP path; pass WithAgentRuntimeHeadlessEnrollment"
+	// An account credential under an explicitly headless policy.
+	case e.Kind == RegistrationKeyKindAccount && !accepts[RegistrationKeyKindAccount]:
+		return "an account key enrolls with an emailed one-time code on the default " +
+			"path; drop WithAgentRuntimeHeadlessEnrollment and install " +
+			"WithAgentRuntimeOTPProvider"
+	default:
+		return ""
+	}
 }
 
 func (e *RegistrationKeyKindDisallowedError) Unwrap() error {
