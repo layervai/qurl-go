@@ -259,10 +259,21 @@ if errors.Is(err, qurl.ErrInvalidAgentState) { /* corrupt stored state */ }
 `awsstore` is a submodule that `require`s the parent `qurl` module. Tag in two
 steps so the submodule's `require` resolves to a published parent tag:
 
-1. Tag the **root** module first: `v0.1.0`.
-2. Then tag the **submodule**: `awsstore/v0.1.0`.
+1. Tag the **root** module first: `v0.4.0`.
+2. Bump `awsstore/go.mod` to `require github.com/layervai/qurl-go v0.4.0` and
+   run `go mod tidy` in `./awsstore`. Land that on `main`.
+3. Then tag the **submodule**: `awsstore/v0.4.0`.
 
-During local development the parent is resolved from the in-tree copy via the
-repo-root `go.work` (and the `replace github.com/layervai/qurl-go => ../` in
-`awsstore/go.mod`), so no tag is required to build. A tagged release drops the
-placeholder `require github.com/layervai/qurl-go v0.0.0` for the real root tag.
+`awsstore/go.mod` holds the parent at its published root tag with **no**
+`replace => ../`. That is what makes an external
+`go get github.com/layervai/qurl-go/awsstore@<tag>` resolve, and the
+`awsstore release guard` workflow fails any `awsstore/v*` tag that reintroduces
+a placeholder `v0.0.0` require or a local-path parent replace.
+
+During local development the parent is still resolved from the in-tree copy:
+the repo-root `go.work` lists both modules and a workspace overrides the
+`require`, so PR CI vets and tests `awsstore` against the working-tree parent,
+not the published tag. Only a `GOWORK=off` build — or an external consumer —
+resolves the tag. Historically this was achieved with a placeholder
+`require github.com/layervai/qurl-go v0.0.0` plus `replace => ../`; that shape
+was release-hostile and `go.work` alone covers the same ground.
