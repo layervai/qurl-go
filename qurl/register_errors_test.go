@@ -21,13 +21,13 @@ func TestRegistrationKeyKindDisallowedError_NamesTheRemedy(t *testing.T) {
 			name:    "pre-issued credential under the default OTP policy",
 			kind:    RegistrationKeyKindAgent,
 			allowed: []RegistrationKeyKind{RegistrationKeyKindAccount},
-			want:    []string{"WithAgentRuntimeHeadlessEnrollment", "qurl:agent scope"},
+			want:    []string{"WithAgentRuntimeAllowedRegistrationKeyKinds", "WithAgentRuntimeHeadlessEnrollment", "qurl:agent scope"},
 		},
 		{
 			name:    "bootstrap credential under the default OTP policy",
 			kind:    RegistrationKeyKindBootstrap,
 			allowed: []RegistrationKeyKind{RegistrationKeyKindAccount},
-			want:    []string{"WithAgentRuntimeHeadlessEnrollment"},
+			want:    []string{"WithAgentRuntimeAllowedRegistrationKeyKinds", "WithAgentRuntimeHeadlessEnrollment"},
 		},
 		{
 			name:    "account credential under an explicitly headless policy",
