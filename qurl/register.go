@@ -182,8 +182,8 @@ const (
 	// enrollment key kind. The platform no longer mints keys that classify as
 	// it, and no default enrollment path admits it; the wire token stays
 	// reserved so retirement is reversible without a protocol change. New
-	// integrations mint a one-shot enrollment token (key_type=agent_bootstrap
-	// today) and enroll with WithAgentRuntimeHeadlessEnrollment. A legacy key
+	// integrations mint a one-shot enrollment token and enroll with
+	// WithAgentRuntimeHeadlessEnrollment. A legacy key
 	// can still be admitted explicitly through
 	// WithAgentRuntimeAllowedRegistrationKeyKinds.
 	RegistrationKeyKindAgent RegistrationKeyKind = assignmentKeyKindAgent

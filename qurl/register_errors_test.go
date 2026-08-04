@@ -42,13 +42,13 @@ func TestRegistrationKeyKindDisallowedError_NamesTheRemedy(t *testing.T) {
 			name:    "retired agent kind under the default OTP policy",
 			kind:    RegistrationKeyKindAgent,
 			allowed: []RegistrationKeyKind{RegistrationKeyKindAccount},
-			want:    []string{"no longer enroll", "agent_bootstrap", "WithAgentRuntimeHeadlessEnrollment"},
+			want:    []string{"no longer enroll", "enrollment token", "WithAgentRuntimeHeadlessEnrollment"},
 		},
 		{
 			name:    "retired agent kind under a headless policy",
 			kind:    RegistrationKeyKindAgent,
 			allowed: []RegistrationKeyKind{RegistrationKeyKindBootstrap, RegistrationKeyKindConnectorBootstrap},
-			want:    []string{"no longer enroll", "agent_bootstrap", "WithAgentRuntimeHeadlessEnrollment"},
+			want:    []string{"no longer enroll", "enrollment token", "WithAgentRuntimeHeadlessEnrollment"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

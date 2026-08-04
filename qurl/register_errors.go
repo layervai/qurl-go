@@ -132,8 +132,7 @@ func (e *RegistrationKeyKindDisallowedError) remedy(accepts map[RegistrationKeyK
 	// guidance instead of an unknown-kind error.
 	case e.Kind == RegistrationKeyKindAgent:
 		return "durable agent-scoped keys no longer enroll; mint a one-shot " +
-			"enrollment token (key_type=agent_bootstrap today) and pass " +
-			"WithAgentRuntimeHeadlessEnrollment"
+			"enrollment token and pass WithAgentRuntimeHeadlessEnrollment"
 	// A one-shot enrollment token under the default OTP policy. The token was
 	// minted for a single enrollment and is its own proof, so demanding an
 	// emailed code as well buys nothing.
