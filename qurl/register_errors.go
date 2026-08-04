@@ -104,10 +104,46 @@ type RegistrationKeyKindDisallowedError struct {
 
 func (e *RegistrationKeyKindDisallowedError) Error() string {
 	allowed := make([]string, len(e.Allowed))
+	accepts := map[RegistrationKeyKind]bool{}
 	for i, kind := range e.Allowed {
 		allowed[i] = string(kind)
+		accepts[kind] = true
 	}
-	return fmt.Sprintf("qurl: registration key kind %q is disallowed; accepted kinds: %s", e.Kind, strings.Join(allowed, ", "))
+	msg := fmt.Sprintf(
+		"qurl: registration key kind %q is disallowed; accepted kinds: %s",
+		e.Kind, strings.Join(allowed, ", "),
+	)
+	if remedy := e.remedy(accepts); remedy != "" {
+		msg += " (" + remedy + ")"
+	}
+	return msg
+}
+
+// remedy names the fix for the two shapes that actually occur, so the operator
+// is not left to infer it. Both were hit while onboarding against a live
+// deployment and cost real time; the package doc already carried the answer,
+// which is exactly the wrong place for it.
+func (e *RegistrationKeyKindDisallowedError) remedy(accepts map[RegistrationKeyKind]bool) string {
+	switch {
+	// A pre-issued credential under the default OTP policy. OTP proves a human
+	// is present via an emailed code, which a pre-issued key cannot do, so the
+	// caller must opt into the headless path instead.
+	case accepts[RegistrationKeyKindAccount] && len(accepts) == 1 &&
+		(e.Kind == RegistrationKeyKindBootstrap ||
+			e.Kind == RegistrationKeyKindConnectorBootstrap ||
+			e.Kind == RegistrationKeyKindAgent):
+		return "this is a pre-issued credential and the default enrollment path is OTP; " +
+			"pass WithAgentRuntimeHeadlessEnrollment to accept it. An ordinary API key " +
+			"classifies as \"agent\" rather than \"account\" whenever it carries the " +
+			"qurl:agent scope, so dropping that scope also makes it usable on the OTP path"
+	// An account credential under an explicitly headless policy.
+	case e.Kind == RegistrationKeyKindAccount && !accepts[RegistrationKeyKindAccount]:
+		return "an account credential must prove liveness, so it cannot use headless " +
+			"enrollment; supply WithAgentRuntimeOTPProvider instead, or present a " +
+			"pre-issued bootstrap credential"
+	default:
+		return ""
+	}
 }
 
 func (e *RegistrationKeyKindDisallowedError) Unwrap() error {
