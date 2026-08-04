@@ -128,17 +128,12 @@ func (e *RegistrationKeyKindDisallowedError) remedy(accepts map[RegistrationKeyK
 	// A pre-issued credential under the default OTP policy. OTP proves a human
 	// is present via an emailed code, which a pre-issued key cannot do, so the
 	// caller must opt into the headless path instead.
-	case accepts[RegistrationKeyKindAccount] && len(accepts) == 1 &&
+	case accepts[RegistrationKeyKindAccount] &&
 		(e.Kind == RegistrationKeyKindBootstrap ||
-			e.Kind == RegistrationKeyKindConnectorBootstrap ||
-			e.Kind == RegistrationKeyKindAgent):
-		return "the default enrollment policy accepts only the account kind, and an " +
-			"ordinary API key classifies as \"agent\" the moment it carries the " +
-			"qurl:agent scope. This is caller-side POLICY, not a protocol limit: to " +
-			"keep OTP, widen it with WithAgentRuntimeAllowedRegistrationKeyKinds(" +
-			"RegistrationKeyKindAccount, <this kind>) alongside " +
-			"WithAgentRuntimeOTPProvider; to skip OTP because this runtime cannot " +
-			"receive a code, pass WithAgentRuntimeHeadlessEnrollment instead"
+			e.Kind == RegistrationKeyKindConnectorBootstrap):
+		return "this is a one-shot credential minted for a single enrollment, so it " +
+			"does not use the OTP path; pass WithAgentRuntimeHeadlessEnrollment. " +
+			"Durable credentials (account, agent) enroll over OTP by default"
 	// An account credential under an explicitly headless policy.
 	case e.Kind == RegistrationKeyKindAccount && !accepts[RegistrationKeyKindAccount]:
 		return "an account credential must prove liveness, so it cannot use headless " +

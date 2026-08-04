@@ -621,19 +621,30 @@ func TestAgentRuntimeRegistrationKeyKindPolicy_AllNativeKinds(t *testing.T) {
 	if err := cfg.requireAllowedRegistrationKeyKind(string(RegistrationKeyKindAccount)); err != nil {
 		t.Fatalf("default policy rejected account enrollment: %v", err)
 	}
-	wantAllowed := []RegistrationKeyKind{RegistrationKeyKindAccount}
+	// agent is a DURABLE credential owned by an account with an address, so it
+	// can answer a code exactly like account can. Splitting the two by "is it
+	// durable" made ticking the qurl:agent scope silently remove access to the
+	// default enrollment path; the property that matters for OTP is "can it be
+	// reached at an address".
+	if err := cfg.requireAllowedRegistrationKeyKind(string(RegistrationKeyKindAgent)); err != nil {
+		t.Fatalf("default policy rejected agent enrollment: %v", err)
+	}
+	wantAllowed := []RegistrationKeyKind{RegistrationKeyKindAccount, RegistrationKeyKindAgent}
+	// Only the ONE-SHOT pre-issued kinds stay out: minting them is itself the
+	// authorization, so demanding a code as well buys nothing.
 	for _, kind := range []RegistrationKeyKind{
 		RegistrationKeyKindConnectorBootstrap,
 		RegistrationKeyKindBootstrap,
-		RegistrationKeyKindAgent,
 	} {
 		headlessErr := cfg.requireAllowedRegistrationKeyKind(string(kind))
 		var disallowed *RegistrationKeyKindDisallowedError
 		if !errors.As(headlessErr, &disallowed) || !errors.Is(headlessErr, ErrRegistrationKeyKindDisallowed) {
 			t.Fatalf("default policy error for %q = %v, want typed disallowed error", kind, headlessErr)
 		}
-		if !slices.Equal(disallowed.Allowed, wantAllowed) {
-			t.Fatalf("default allowed kinds = %v, want %v", disallowed.Allowed, wantAllowed)
+		got := append([]RegistrationKeyKind(nil), disallowed.Allowed...)
+		slices.Sort(got)
+		if !slices.Equal(got, wantAllowed) {
+			t.Fatalf("default allowed kinds = %v, want %v", got, wantAllowed)
 		}
 	}
 

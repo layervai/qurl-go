@@ -486,9 +486,26 @@ func newNativeAgentRuntimeConfig(opts []AgentRuntimeRegistrationOption) (*native
 	c := defaultNativeAgentRuntimeConfig()
 	// OTP is the default enrollment path. Anything that can be reached at an
 	// address can answer a code, which is most of what enrolls here; the
-	// pre-issued kinds are the exception and say so with
+	// pre-issued ONE-SHOT kinds are the exception and say so with
 	// WithAgentRuntimeHeadlessEnrollment.
-	c.allowedKeyKinds = map[RegistrationKeyKind]struct{}{RegistrationKeyKindAccount: {}}
+	//
+	// account and agent are both durable credentials owned by an account with an
+	// address, so both can answer a code. The default used to be account alone,
+	// which split the two by "is it durable" when the property that actually
+	// matters for OTP is "can it be reached at an address". The practical effect
+	// was backwards: an ordinary API key classifies as agent the moment it
+	// carries the qurl:agent scope, so ticking the one scope whose description is
+	// "mint native UDP Connector enrollment credentials" silently removed access
+	// to the default enrollment path and failed with a kind error that named no
+	// remedy.
+	//
+	// bootstrap and connector_bootstrap stay out: they are one-shot, minted for a
+	// single enrollment, and minting them IS the authorization, so demanding a
+	// code as well buys nothing.
+	c.allowedKeyKinds = map[RegistrationKeyKind]struct{}{
+		RegistrationKeyKindAccount: {},
+		RegistrationKeyKindAgent:   {},
+	}
 	for _, opt := range opts {
 		if opt == nil {
 			return nil, fmt.Errorf("%w: nil runtime option", ErrInvalidRegisterConfig)
