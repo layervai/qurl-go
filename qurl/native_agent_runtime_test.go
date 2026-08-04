@@ -609,8 +609,8 @@ func withTestAgentRuntimeAssignmentNonce(encoded string) AgentRuntimeLifecycleOp
 func testOTPProvider(context.Context, AgentOTPChallenge) (string, error) { return "12345678", nil }
 
 func TestAgentRuntimeRegistrationKeyKindPolicy_AllNativeKinds(t *testing.T) {
-	// The default policy is OTP alone. Every pre-issued kind is rejected until
-	// the caller says the runtime cannot receive a code.
+	// The default policy is OTP alone: exactly the account kind. Every other
+	// kind is rejected until the caller opts into another path.
 	cfg, err := newNativeAgentRuntimeConfig([]AgentRuntimeRegistrationOption{
 		WithAgentRuntimeHub(runtimeTestHub()),
 		WithAgentRuntimeOTPProvider(testOTPProvider),
@@ -621,35 +621,29 @@ func TestAgentRuntimeRegistrationKeyKindPolicy_AllNativeKinds(t *testing.T) {
 	if err := cfg.requireAllowedRegistrationKeyKind(string(RegistrationKeyKindAccount)); err != nil {
 		t.Fatalf("default policy rejected account enrollment: %v", err)
 	}
-	// agent is a DURABLE credential owned by an account with an address, so it
-	// can answer a code exactly like account can. Splitting the two by "is it
-	// durable" made ticking the qurl:agent scope silently remove access to the
-	// default enrollment path; the property that matters for OTP is "can it be
-	// reached at an address".
-	if err := cfg.requireAllowedRegistrationKeyKind(string(RegistrationKeyKindAgent)); err != nil {
-		t.Fatalf("default policy rejected agent enrollment: %v", err)
-	}
-	wantAllowed := []RegistrationKeyKind{RegistrationKeyKindAccount, RegistrationKeyKindAgent}
-	// Only the ONE-SHOT pre-issued kinds stay out: minting them is itself the
-	// authorization, so demanding a code as well buys nothing.
+	wantAllowed := []RegistrationKeyKind{RegistrationKeyKindAccount}
+	// The one-shot kinds stay out because minting them is itself the
+	// authorization; the durable agent kind stays out because it is retired
+	// and the platform no longer mints keys that classify as it.
 	for _, kind := range []RegistrationKeyKind{
 		RegistrationKeyKindConnectorBootstrap,
 		RegistrationKeyKindBootstrap,
+		RegistrationKeyKindAgent,
 	} {
-		headlessErr := cfg.requireAllowedRegistrationKeyKind(string(kind))
+		refusal := cfg.requireAllowedRegistrationKeyKind(string(kind))
 		var disallowed *RegistrationKeyKindDisallowedError
-		if !errors.As(headlessErr, &disallowed) || !errors.Is(headlessErr, ErrRegistrationKeyKindDisallowed) {
-			t.Fatalf("default policy error for %q = %v, want typed disallowed error", kind, headlessErr)
+		if !errors.As(refusal, &disallowed) || !errors.Is(refusal, ErrRegistrationKeyKindDisallowed) {
+			t.Fatalf("default policy error for %q = %v, want typed disallowed error", kind, refusal)
 		}
-		got := append([]RegistrationKeyKind(nil), disallowed.Allowed...)
-		slices.Sort(got)
-		if !slices.Equal(got, wantAllowed) {
-			t.Fatalf("default allowed kinds = %v, want %v", got, wantAllowed)
+		if !slices.Equal(disallowed.Allowed, wantAllowed) {
+			t.Fatalf("default allowed kinds = %v, want %v", disallowed.Allowed, wantAllowed)
 		}
 	}
 
-	// The escape hatch is the exact inverse: the three pre-issued kinds, and no
-	// account kind, because this runtime just said it cannot answer a code.
+	// The escape hatch admits exactly the one-shot enrollment token kinds. The
+	// account kind is out because this runtime just said it cannot answer a
+	// code, and the retired agent kind is admitted by no path at all without
+	// the explicit option.
 	headlessCfg, err := newNativeAgentRuntimeConfig([]AgentRuntimeRegistrationOption{
 		WithAgentRuntimeHub(runtimeTestHub()),
 		WithAgentRuntimeHeadlessEnrollment(),
@@ -660,24 +654,37 @@ func TestAgentRuntimeRegistrationKeyKindPolicy_AllNativeKinds(t *testing.T) {
 	for _, kind := range []RegistrationKeyKind{
 		RegistrationKeyKindConnectorBootstrap,
 		RegistrationKeyKindBootstrap,
-		RegistrationKeyKindAgent,
 	} {
 		if err := headlessCfg.requireAllowedRegistrationKeyKind(string(kind)); err != nil {
 			t.Errorf("headless policy rejected %q: %v", kind, err)
 		}
 	}
-	accountErr := headlessCfg.requireAllowedRegistrationKeyKind(string(RegistrationKeyKindAccount))
-	var disallowed *RegistrationKeyKindDisallowedError
-	if !errors.As(accountErr, &disallowed) || !errors.Is(accountErr, ErrRegistrationKeyKindDisallowed) {
-		t.Fatalf("headless account policy error = %v, want typed disallowed error", accountErr)
-	}
 	wantHeadless := []RegistrationKeyKind{
-		RegistrationKeyKindAgent,
 		RegistrationKeyKindBootstrap,
 		RegistrationKeyKindConnectorBootstrap,
 	}
-	if !slices.Equal(disallowed.Allowed, wantHeadless) {
-		t.Fatalf("headless allowed kinds = %v, want %v", disallowed.Allowed, wantHeadless)
+	for _, kind := range []RegistrationKeyKind{RegistrationKeyKindAccount, RegistrationKeyKindAgent} {
+		refusal := headlessCfg.requireAllowedRegistrationKeyKind(string(kind))
+		var disallowed *RegistrationKeyKindDisallowedError
+		if !errors.As(refusal, &disallowed) || !errors.Is(refusal, ErrRegistrationKeyKindDisallowed) {
+			t.Fatalf("headless policy error for %q = %v, want typed disallowed error", kind, refusal)
+		}
+		if !slices.Equal(disallowed.Allowed, wantHeadless) {
+			t.Fatalf("headless allowed kinds = %v, want %v", disallowed.Allowed, wantHeadless)
+		}
+	}
+
+	// The explicit option remains the one path that can admit the retired
+	// agent kind, for a caller holding a legacy durable key.
+	legacyCfg, err := newNativeAgentRuntimeConfig([]AgentRuntimeRegistrationOption{
+		WithAgentRuntimeHub(runtimeTestHub()),
+		WithAgentRuntimeAllowedRegistrationKeyKinds(RegistrationKeyKindAgent),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := legacyCfg.requireAllowedRegistrationKeyKind(string(RegistrationKeyKindAgent)); err != nil {
+		t.Errorf("explicit legacy policy rejected the agent kind: %v", err)
 	}
 
 	// The last policy option wins, so one binary can still widen to both.
@@ -850,8 +857,9 @@ func TestAgentRuntimeOTPProviderRequiredBeforeNetworkIO(t *testing.T) {
 }
 
 // TestRegisterAgentRuntime_HeadlessKeyPolicy_AllFourKinds covers the escape
-// hatch end to end: the three pre-issued kinds reach REG, and an account kind
-// is refused before any cell I/O or OTP callback.
+// hatch end to end: the two one-shot enrollment token kinds reach REG, while
+// the account kind and the retired agent kind are refused before any cell I/O
+// or OTP callback.
 func TestRegisterAgentRuntime_HeadlessKeyPolicy_AllFourKinds(t *testing.T) {
 	contract := loadAssignmentFixture(t)
 	for _, kind := range []RegistrationKeyKind{
@@ -860,6 +868,7 @@ func TestRegisterAgentRuntime_HeadlessKeyPolicy_AllFourKinds(t *testing.T) {
 		RegistrationKeyKindAgent,
 		RegistrationKeyKindAccount,
 	} {
+		refused := kind == RegistrationKeyKindAccount || kind == RegistrationKeyKindAgent
 		t.Run(string(kind), func(t *testing.T) {
 			assignmentResult := strings.Replace(
 				contract.InitialAssignment.Result.BodyJSON,
@@ -868,7 +877,7 @@ func TestRegisterAgentRuntime_HeadlessKeyPolicy_AllFourKinds(t *testing.T) {
 				1,
 			)
 			cellSteps := []runtimeUDPStep(nil)
-			if kind != RegistrationKeyKindAccount {
+			if !refused {
 				cellSteps = []runtimeUDPStep{{
 					requestType: relayknock.TypeRegister,
 					replyType:   relayknock.TypeRegisterAck,
@@ -884,13 +893,13 @@ func TestRegisterAgentRuntime_HeadlessKeyPolicy_AllFourKinds(t *testing.T) {
 			// guarantee than watching a callback that never fires.
 			_, _, err := RegisterAgentRuntime(context.Background(), conformance.AgentAssignmentBootstrapCredentialFixture, f.store,
 				f.options()...)
-			if kind == RegistrationKeyKindAccount {
+			if refused {
 				var disallowed *RegistrationKeyKindDisallowedError
-				if !errors.As(err, &disallowed) || disallowed.Kind != RegistrationKeyKindAccount {
-					t.Fatalf("headless account policy error = %v, want typed account rejection", err)
+				if !errors.As(err, &disallowed) || disallowed.Kind != kind {
+					t.Fatalf("headless policy error for %q = %v, want typed %q rejection", kind, err, kind)
 				}
 				if len(f.cellUDP.snapshot()) != 0 {
-					t.Fatalf("account policy rejection cell requests = %d, want 0", len(f.cellUDP.snapshot()))
+					t.Fatalf("policy rejection for %q cell requests = %d, want 0", kind, len(f.cellUDP.snapshot()))
 				}
 				state, loadErr := f.store.LoadAgentState(context.Background())
 				if loadErr != nil {

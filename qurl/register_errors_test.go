@@ -7,10 +7,12 @@ import (
 	"testing"
 )
 
-// The message an operator actually sees must name the fix. Both shapes below
-// were hit while onboarding against a live deployment: the answer existed only
-// in the package doc, which is exactly where an operator staring at a terminal
-// will not look.
+// The message an operator actually sees must name the fix. Shapes of this
+// refusal were hit while onboarding against a live deployment: the answer
+// existed only in the package doc, which is exactly where an operator staring
+// at a terminal will not look. The retired agent kind gets its own remedy on
+// every path, because the fix (mint a one-shot enrollment token) is not
+// discoverable from the accepted-kinds list alone.
 func TestRegistrationKeyKindDisallowedError_NamesTheRemedy(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -19,22 +21,34 @@ func TestRegistrationKeyKindDisallowedError_NamesTheRemedy(t *testing.T) {
 		want    []string
 	}{
 		{
-			name:    "one-shot credential under the default OTP policy",
+			name:    "one-shot token under the default OTP policy",
 			kind:    RegistrationKeyKindConnectorBootstrap,
-			allowed: []RegistrationKeyKind{RegistrationKeyKindAccount, RegistrationKeyKindAgent},
+			allowed: []RegistrationKeyKind{RegistrationKeyKindAccount},
 			want:    []string{"one-shot", "WithAgentRuntimeHeadlessEnrollment"},
 		},
 		{
-			name:    "bootstrap credential under the default OTP policy",
+			name:    "bootstrap token under the default OTP policy",
 			kind:    RegistrationKeyKindBootstrap,
-			allowed: []RegistrationKeyKind{RegistrationKeyKindAccount, RegistrationKeyKindAgent},
+			allowed: []RegistrationKeyKind{RegistrationKeyKindAccount},
 			want:    []string{"one-shot", "WithAgentRuntimeHeadlessEnrollment"},
 		},
 		{
 			name:    "account credential under an explicitly headless policy",
 			kind:    RegistrationKeyKindAccount,
-			allowed: []RegistrationKeyKind{RegistrationKeyKindBootstrap, RegistrationKeyKindAgent},
-			want:    []string{"WithAgentRuntimeOTPProvider"},
+			allowed: []RegistrationKeyKind{RegistrationKeyKindBootstrap, RegistrationKeyKindConnectorBootstrap},
+			want:    []string{"one-time code", "drop WithAgentRuntimeHeadlessEnrollment", "WithAgentRuntimeOTPProvider"},
+		},
+		{
+			name:    "retired agent kind under the default OTP policy",
+			kind:    RegistrationKeyKindAgent,
+			allowed: []RegistrationKeyKind{RegistrationKeyKindAccount},
+			want:    []string{"no longer enroll", "agent_bootstrap", "WithAgentRuntimeHeadlessEnrollment"},
+		},
+		{
+			name:    "retired agent kind under a headless policy",
+			kind:    RegistrationKeyKindAgent,
+			allowed: []RegistrationKeyKind{RegistrationKeyKindBootstrap, RegistrationKeyKindConnectorBootstrap},
+			want:    []string{"no longer enroll", "agent_bootstrap", "WithAgentRuntimeHeadlessEnrollment"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -70,11 +84,13 @@ func TestRegistrationKeyKindDisallowedError_SilentWhenUnrecognised(t *testing.T)
 // The enrollment matrix, pinned. Every (credential kind x enrollment path)
 // admission decision in one table.
 //
-// This is the coverage whose absence let a real onboarding trap ship: nothing
-// asserted which kinds the DEFAULT policy admits, so narrowing it to account
-// alone looked harmless and silently removed the frictionless path from every
-// key carrying the qurl:agent scope. A table that fails loudly when a cell
-// changes is the fence.
+// The model: a durable API key (wire kind account) enrolls with an emailed
+// one-time code on the default path; a one-shot enrollment token (bootstrap,
+// connector_bootstrap) is its own proof and enrolls headlessly; and the
+// durable agent kind is retired — the platform no longer mints keys that
+// classify as it, so NO path admits it by default, while its wire token stays
+// reserved so retirement is reversible without a protocol change. A table
+// that fails loudly when a cell changes is the fence.
 func TestEnrollmentPolicyMatrix(t *testing.T) {
 	hub := runtimeTestHub()
 	otp := func(context.Context, AgentOTPChallenge) (string, error) { return "12345678", nil }
@@ -91,10 +107,10 @@ func TestEnrollmentPolicyMatrix(t *testing.T) {
 				WithAgentRuntimeHub(hub), WithAgentRuntimeOTPProvider(otp),
 			},
 			admits: map[RegistrationKeyKind]bool{
-				// Durable credentials owned by an account with an address: both
-				// can answer a code, so both enroll frictionlessly.
+				// The durable API key: it can answer an emailed code.
 				RegistrationKeyKindAccount: true,
-				RegistrationKeyKindAgent:   true,
+				// Retired: no longer minted, admitted by no default path.
+				RegistrationKeyKindAgent: false,
 				// One-shot kinds: minting IS the authorization.
 				RegistrationKeyKindBootstrap:          false,
 				RegistrationKeyKindConnectorBootstrap: false,
@@ -106,10 +122,11 @@ func TestEnrollmentPolicyMatrix(t *testing.T) {
 				WithAgentRuntimeHub(hub), WithAgentRuntimeHeadlessEnrollment(),
 			},
 			admits: map[RegistrationKeyKind]bool{
-				// The exact inverse: this runtime just said it cannot answer a
-				// code, so a credential that REQUIRES one is refused.
-				RegistrationKeyKindAccount:            false,
-				RegistrationKeyKindAgent:              true,
+				// This runtime just said it cannot answer a code, so a
+				// credential that REQUIRES one is refused.
+				RegistrationKeyKindAccount: false,
+				// Retired here too: headless admits only the one-shot kinds.
+				RegistrationKeyKindAgent:              false,
 				RegistrationKeyKindBootstrap:          true,
 				RegistrationKeyKindConnectorBootstrap: true,
 			},
@@ -139,6 +156,11 @@ func TestEnrollmentPolicyMatrix(t *testing.T) {
 						// whole area kept reproducing.
 						if !strings.Contains(err.Error(), "WithAgentRuntime") {
 							t.Fatalf("refusal for %q names no remedy: %q", kind, err.Error())
+						}
+						// The retired kind must be refused with the retirement
+						// remedy on every path, not a generic policy message.
+						if kind == RegistrationKeyKindAgent && !strings.Contains(err.Error(), "no longer enroll") {
+							t.Fatalf("agent refusal lacks the retirement remedy: %q", err.Error())
 						}
 					}
 				})
