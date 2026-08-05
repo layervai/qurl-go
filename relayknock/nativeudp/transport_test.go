@@ -431,8 +431,8 @@ func TestRegistrationPacketsAvoidIPFragmentation(t *testing.T) {
 			}
 			sizes := server.receivedSizes()
 			bodies := server.receivedBodies()
-			if len(sizes) != 1 || sizes[0] > 1200 {
-				t.Fatalf("%s packet sizes = %v, want one packet at most 1200 bytes", tc.name, sizes)
+			if len(sizes) != 1 || sizes[0] > 1232 {
+				t.Fatalf("%s packet sizes = %v, want one packet at most 1232 bytes", tc.name, sizes)
 			}
 			if len(bodies) != 1 || !bytes.Equal(bodies[0], body) {
 				t.Fatalf("%s server did not recover the exact compressed body", tc.name)
@@ -488,9 +488,10 @@ func TestRegistrationPacketRejectsUncompressibleFragment(t *testing.T) {
 // so failing to compress it would put an oversize datagram on the wire.
 func TestPayloadStraddlesUnfragmentedCeiling(t *testing.T) {
 	t.Parallel()
-	// maxUnfragmentedPayload (1200) less the 240-byte NHP header and the body's
-	// 16-byte AEAD tag: the largest body that still fits uncompressed.
-	const largestUncompressedBody = 1200 - 240 - 16
+	// maxUnfragmentedPayload (1232, the IPv6 minimum-MTU UDP payload ceiling)
+	// less the 240-byte NHP header and the body's 16-byte AEAD tag: the largest
+	// body that still fits uncompressed.
+	const largestUncompressedBody = 1232 - 240 - 16
 	for _, send := range []struct {
 		name string
 		send func(context.Context, nativeudp.Endpoint, []byte, nativeudp.Options) error
@@ -512,7 +513,7 @@ func TestPayloadStraddlesUnfragmentedCeiling(t *testing.T) {
 			{
 				name:     "at the ceiling, sent uncompressed",
 				body:     mustRand(t, largestUncompressedBody),
-				wantSize: 1200,
+				wantSize: 1232,
 			},
 			{
 				name: "one byte over the ceiling, compressed under it",
@@ -552,8 +553,8 @@ func TestPayloadStraddlesUnfragmentedCeiling(t *testing.T) {
 				switch {
 				case tc.wantSize != 0 && sizes[0] != tc.wantSize:
 					t.Fatalf("packet size = %d, want exactly %d (header+body+tag, uncompressed)", sizes[0], tc.wantSize)
-				case sizes[0] > 1200:
-					t.Fatalf("packet size = %d, want at most the 1200-byte unfragmented ceiling", sizes[0])
+				case sizes[0] > 1232:
+					t.Fatalf("packet size = %d, want at most the 1232-byte unfragmented ceiling", sizes[0])
 				}
 				if len(bodies) != 1 || !bytes.Equal(bodies[0], tc.body) {
 					t.Fatalf("server recovered %d bytes, want the exact %d-byte body", len(bodies[0]), len(tc.body))
