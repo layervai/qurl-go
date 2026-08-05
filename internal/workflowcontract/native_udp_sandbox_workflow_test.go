@@ -69,12 +69,20 @@ func TestNativeUDPSandboxWorkflowIsAttendedStrictAndEvidenceBearing(t *testing.T
 		"aws secretsmanager delete-secret",
 		"--force-delete-without-recovery",
 		"export QURL_GO_SANDBOX_ENROLLMENT_CREDENTIAL=\"${credential}\"",
-		"Mint read-only proof-attestation token",
-		"actions/create-github-app-token@",
-		"permission-actions: read",
-		"permission-contents: read",
-		"permission-pull-requests: read",
-		"            frp\n            nhp\n            qurl-go\n            qurl-integrations\n            qurl-mcp\n            qurl-python\n            qurl-reverse-tunnel-server\n            qurl-service\n            qurl-typescript\n            website",
+		// The read-only proof-attestation token is BROKERED, not minted here.
+		// This repo is public and cannot read the OPS_ROUTINES org secrets
+		// (visibility=private), so create-github-app-token always got an empty
+		// app-id and every run of this workflow failed at that step. The
+		// private NHP controller now mints it with the same repository and
+		// permission set and hands it over on the Secrets Manager channel that
+		// already carries the JIT config and proof-account credential
+		// (layervai/nhp#3728). The scope assertions moved there with it; what
+		// this workflow must still guarantee is that it reads the brokered
+		// value, refuses an empty one, and never puts it in a log.
+		"Read the brokered read-only proof-attestation token",
+		"ATTESTATION_TOKEN_SECRET: layerv-nhp-sandbox/udp-proof/jit/attestation-token/${{ inputs.nhp_controller_run_id }}/${{ inputs.nhp_controller_run_attempt }}",
+		"the NHP controller did not broker a proof-attestation token",
+		"echo \"::add-mask::$token\"",
 		"test \"$(git rev-parse HEAD)\" = \"${QURL_GO_SANDBOX_EXPECTED_SHA}\"",
 		"test -z \"$(git status --short)\"",
 		`[[ ! "${QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ID}" =~ ^[1-9][0-9]{0,19}$ ]]`,
@@ -234,7 +242,7 @@ func TestNativeUDPSandboxWorkflowIsAttendedStrictAndEvidenceBearing(t *testing.T
 		".number == 93",
 	)
 	requireBefore(t, workflow,
-		"Mint read-only proof-attestation token",
+		"Read the brokered read-only proof-attestation token",
 		"Verify exact proof inputs",
 		"Download authenticated deployment-producer evidence",
 		"Materialize authenticated orchestrator evidence",
