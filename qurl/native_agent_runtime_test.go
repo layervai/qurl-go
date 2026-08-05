@@ -3736,6 +3736,14 @@ func TestNative521xxGuidanceNamesNativeRecoveryActions(t *testing.T) {
 	if !strings.Contains(assignmentErr, "WithAgentRuntimeIdentity") {
 		t.Fatalf("native Hub 52109 guidance = %q", assignmentErr)
 	}
+	consumed := &AssignmentError{Code: "52108", kind: ErrAssignmentBootstrapConsumed}
+	if !errors.Is(consumed, ErrAssignmentBootstrapConsumed) {
+		t.Fatalf("52108 assignment error does not unwrap to ErrAssignmentBootstrapConsumed: %v", consumed)
+	}
+	if consumedErr := consumed.Error(); !strings.Contains(consumedErr, "mint a new enrollment token") ||
+		!strings.Contains(consumedErr, "single-use") {
+		t.Fatalf("native Hub 52108 guidance = %q, want the typed remedy naming a new enrollment token and single-use, not a bare code", consumedErr)
+	}
 	completionErr := (&CompletionError{Code: "52303", kind: ErrCompletionCredentialConflict}).Error()
 	if !strings.Contains(completionErr, "NHP-native credential recovery or reprovisioning") ||
 		!strings.Contains(completionErr, "do not delete the persisted candidate") {
