@@ -208,8 +208,10 @@ var (
 	ErrAssignmentKeyRejected = errors.New("qurl: assignment enrollment key rejected")
 	// ErrAssignmentRegistrationDisabled marks initial-credential result 52107.
 	ErrAssignmentRegistrationDisabled = errors.New("qurl: agent registration disabled")
-	// ErrAssignmentBootstrapConsumed marks initial-credential result 52108.
-	ErrAssignmentBootstrapConsumed = errors.New("qurl: assignment bootstrap credential consumed")
+	// ErrAssignmentBootstrapConsumed marks initial-credential result 52108. The
+	// message names the remedy: one-shot enrollment tokens are single-use, so a
+	// consumed token cannot be reused after a successful enrollment.
+	ErrAssignmentBootstrapConsumed = errors.New("qurl: enrollment token already consumed; one-shot enrollment tokens are single-use, so mint a new enrollment token and retry")
 )
 
 // AssignmentError is a valid authenticated application error from the closed
@@ -233,6 +235,9 @@ func (e *AssignmentError) Error() string {
 	}
 	if e.Code == "52109" {
 		return "qurl: native Hub assignment request rejected (52109); correct WithAgentRuntimeIdentity or the Hub request contract before retrying"
+	}
+	if e.Code == "52108" {
+		return ErrAssignmentBootstrapConsumed.Error()
 	}
 	return "qurl: assignment error " + e.Code
 }
