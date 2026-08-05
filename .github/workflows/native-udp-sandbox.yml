@@ -147,6 +147,11 @@ jobs:
         id: proof-token
         env:
           ATTESTATION_TOKEN_SECRET: layerv-nhp-sandbox/udp-proof/jit/attestation-token/${{ inputs.nhp_controller_run_id }}/${{ inputs.nhp_controller_run_attempt }}
+        # Every other step on this self-hosted runner declares `shell: bash`.
+        # Omitting it resolved a different shell whose PATH does not carry the
+        # AWS CLI, so this step died with exit 127 (command not found) before it
+        # could read the secret -- see run 31038180926.
+        shell: bash
         run: |
           set -euo pipefail
           token="$(
