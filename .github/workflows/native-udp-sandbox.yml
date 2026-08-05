@@ -130,27 +130,39 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Mint read-only proof-attestation token
+      # This repo is PUBLIC, so it cannot read the OPS_ROUTINES org secrets --
+      # they are visibility=private, which on GitHub means private repos only.
+      # create-github-app-token therefore received an empty app-id and failed
+      # on every run this workflow has ever had; the token was never minted
+      # once, and the qurl-go leg of the attended proof could not start.
+      #
+      # The NHP controller is private, already holds the App credentials, and
+      # already brokers run-bound material to this job through Secrets Manager
+      # (the JIT config and the proof-account credential arrive the same way).
+      # It now mints this read-only token with the identical repository and
+      # permission set and hands it over on that channel, so only a
+      # short-lived installation token crosses into a public repo -- never the
+      # App private key -- and no org secret visibility has to change.
+      - name: Read the brokered read-only proof-attestation token
         id: proof-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          app-id: ${{ secrets.OPS_ROUTINES_APP_ID }}
-          private-key: ${{ secrets.OPS_ROUTINES_APP_PRIVATE_KEY }}
-          owner: layervai
-          repositories: |
-            frp
-            nhp
-            qurl-go
-            qurl-integrations
-            qurl-mcp
-            qurl-python
-            qurl-reverse-tunnel-server
-            qurl-service
-            qurl-typescript
-            website
-          permission-actions: read
-          permission-contents: read
-          permission-pull-requests: read
+        env:
+          ATTESTATION_TOKEN_SECRET: layerv-nhp-sandbox/udp-proof/jit/attestation-token/${{ inputs.nhp_controller_run_id }}/${{ inputs.nhp_controller_run_attempt }}
+        run: |
+          set -euo pipefail
+          token="$(
+            aws secretsmanager get-secret-value \
+              --secret-id "$ATTESTATION_TOKEN_SECRET" \
+              --query SecretString --output text --region "$AWS_REGION"
+          )"
+          # Fail loudly rather than continuing with an empty token: an empty
+          # value is exactly the state that made create-github-app-token fail
+          # deep inside a later step instead of here.
+          if [[ -z "$token" || "$token" == "None" ]]; then
+            echo "::error::the NHP controller did not broker a proof-attestation token" >&2
+            exit 1
+          fi
+          echo "::add-mask::$token"
+          echo "token=$token" >> "$GITHUB_OUTPUT"
 
       - name: Verify exact proof inputs
         env:
