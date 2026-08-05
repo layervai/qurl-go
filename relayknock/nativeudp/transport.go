@@ -36,11 +36,29 @@ const (
 	// loop.
 	DefaultMaxAddresses = 3
 
-	// maxUnfragmentedPayload is below the IPv6 minimum-MTU UDP payload
-	// ceiling (1232 bytes) and therefore also safe on ordinary 1500-byte IPv4
-	// paths. Registration tickets are intentionally self-contained and can
-	// otherwise push OTP and REG across the fragmentation boundary.
-	maxUnfragmentedPayload = 1200
+	// maxUnfragmentedPayload IS the IPv6 minimum-MTU UDP payload ceiling:
+	// 1280 (RFC 8200 minimum link MTU) - 40 (IPv6 header) - 8 (UDP header).
+	// A datagram at or under it is never fragmented on a conformant IPv6 path,
+	// and is comfortably clear of an ordinary 1500-byte IPv4 path.
+	//
+	// This was 1200 -- unexplained margin below the real boundary, and it
+	// rejected live traffic. Registration tickets are intentionally
+	// self-contained, so a REG whose ticket pushed it to 1202 bytes AFTER
+	// compression failed outright:
+	//
+	//	compressed packet of 1202 bytes exceeds the 1200-byte unfragmented
+	//	UDP ceiling
+	//
+	// Compression had already run (it engages the moment the uncompressed
+	// packet would exceed this value), so there was no lever left below it --
+	// the transport refused a packet the network would have carried intact.
+	//
+	// Deliberately exact, not another round number: the only paths that now
+	// fragment are ones that also shrink the effective MTU below the IPv6
+	// minimum (an encapsulating tunnel, say). Those cannot be served by any
+	// constant chosen here, and a ticket that outgrows this ceiling needs the
+	// ticket to shrink rather than a further bump.
+	maxUnfragmentedPayload = 1232
 )
 
 // Typed transport errors. They follow the qurl-go sentinel convention: match a
