@@ -143,6 +143,35 @@ jobs:
       # permission set and hands it over on that channel, so only a
       # short-lived installation token crosses into a public repo -- never the
       # App private key -- and no org secret visibility has to change.
+      # The ephemeral JIT proof runner is a bare image with NO AWS CLI. Every
+      # `aws` call in this job has always died with `aws: command not found`
+      # (exit 127) at the FIRST one -- which is why the later
+      # `aws secretsmanager` calls further down have never actually executed.
+      # They are not evidence that the CLI is present; nothing here has ever
+      # reached them.
+      #
+      # Install it once, before anything needs it. Pinned to v2 and verified,
+      # so a silent install failure surfaces here rather than as another 127
+      # deep in the proof.
+      - name: Ensure the AWS CLI is present on the JIT runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v aws >/dev/null 2>&1; then
+            echo "aws already present: $(aws --version 2>&1)"
+            exit 0
+          fi
+          tmp="$(mktemp -d)"
+          curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" \
+            -o "$tmp/awscliv2.zip"
+          unzip -q "$tmp/awscliv2.zip" -d "$tmp"
+          # --install-dir/--bin-dir under $HOME: the runner user may not have
+          # write access to /usr/local.
+          "$tmp/aws/install" --install-dir "$HOME/.aws-cli" --bin-dir "$HOME/.local/bin" >/dev/null
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/aws" --version
+          rm -rf "$tmp"
+
       - name: Read the brokered read-only proof-attestation token
         id: proof-token
         env:
