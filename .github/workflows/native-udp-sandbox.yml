@@ -147,15 +147,30 @@ jobs:
         id: proof-token
         env:
           ATTESTATION_TOKEN_SECRET: layerv-nhp-sandbox/udp-proof/jit/attestation-token/${{ inputs.nhp_controller_run_id }}/${{ inputs.nhp_controller_run_attempt }}
-        # Every other step on this self-hosted runner declares `shell: bash`.
-        # Omitting it resolved a different shell whose PATH does not carry the
-        # AWS CLI, so this step died with exit 127 (command not found) before it
-        # could read the secret -- see run 31038180926.
         shell: bash
         run: |
           set -euo pipefail
+          # This step died with exit 127 -- `aws` not found -- while the same
+          # binary is used successfully later in THIS SAME job. Two guesses at
+          # why were wrong: it is not the shell (adding `shell: bash` in #146
+          # changed nothing) and it is not a job boundary (there is only one
+          # job, `prove`). So resolve the binary explicitly rather than guess
+          # again, and if it genuinely is not there, say so with the PATH
+          # attached so the next run answers the question instead of repeating
+          # it.
+          aws_bin="$(command -v aws || true)"
+          if [[ -z "$aws_bin" ]]; then
+            for candidate in /usr/local/bin/aws /usr/bin/aws /snap/bin/aws \
+                             /opt/actions-runner/bin/aws "$HOME/.local/bin/aws"; do
+              [[ -x "$candidate" ]] && { aws_bin="$candidate"; break; }
+            done
+          fi
+          if [[ -z "$aws_bin" ]]; then
+            echo "::error::AWS CLI not found on this runner. PATH=$PATH" >&2
+            exit 1
+          fi
           token="$(
-            aws secretsmanager get-secret-value \
+            "$aws_bin" secretsmanager get-secret-value \
               --secret-id "$ATTESTATION_TOKEN_SECRET" \
               --query SecretString --output text --region "$AWS_REGION"
           )"
