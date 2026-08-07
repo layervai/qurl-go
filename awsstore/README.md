@@ -13,6 +13,9 @@ file-backed store or a custom store pull in no AWS code.
 go get github.com/layervai/qurl-go/awsstore@latest
 ```
 
+Run that from inside your own module — `go get` reports `go.mod file not found`
+otherwise, and there is no binary here to `go install`.
+
 ## When to use which store
 
 | Store | Backing | Reach for it when |

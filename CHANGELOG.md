@@ -1,0 +1,112 @@
+# Changelog
+
+All notable changes to the `qurl` module. The `awsstore` module versions
+independently under `awsstore/vX.Y.Z` tags.
+
+Pre-1.0 semantic versioning: breaking changes land in minor versions (v0.N.0)
+and are marked **Breaking** with what to change.
+
+## Unreleased
+
+- README overhaul: architecture diagram and glossary, credential setup via the
+  [LayerV dashboard](https://layerv.ai/qurl/dashboard/keys), network
+  requirements (outbound-only, NHP over UDP 443), and module/versioning notes.
+  The changelog moved from the README to this file.
+- Dependency bumps and CI fixes for the JIT proof runner.
+
+## v0.5.1 — 2026-08-05
+
+- One-shot enrollment now names the remedy when the enrollment token was
+  already consumed, instead of surfacing a bare deny. (#145)
+
+## v0.5.0 — 2026-08-04
+
+- **Breaking:** retired durable agent-kind enrollment; the default acceptance
+  policy is account-only. Enrollments that relied on the durable agent kind
+  must re-enroll under an account credential. (#139)
+- Native knock denies are now classified and surfaced as `*ServerDenyError`
+  instead of being rejected as malformed replies. (#140)
+- qurl-conformance pinned at v0.12.2. (#141)
+
+## v0.4.0 — 2026-08-04
+
+- qurl-conformance pinned at v0.12.1, adopting the released conformance
+  boundary for the 1.1 wire protocol. (#137)
+
+## v0.3.0 — 2026-08-03
+
+- **Breaking, and it requires action: you must upgrade to keep connecting.**
+  The NHP wire protocol moves to 1.1, which authenticates the packet header
+  inside the AEAD. 1.0 and 1.1 do not interoperate in either direction and
+  there is no compatibility mode, so once LayerV's servers move to 1.1, an
+  agent built against v0.2.0 or earlier fails every request with an explicit
+  version error. Rebuild against this release and redeploy. Nothing about your
+  code changes — no API moved — but a binary that is not rebuilt will not
+  reconnect on its own.
+
+  This closes a real defect rather than tidying the wire: under 1.0 the
+  header's flag word was covered only by an unkeyed digest, so anyone who knew
+  an agent's static public key and sat on the network path could alter how a
+  reply was decoded and hand the caller bytes the server never sent.
+  Authenticating the header is the fix, and it cannot be done compatibly.
+  (#130)
+- **Breaking:** enrollment now defaults to the emailed one-time code, for any
+  runtime that can read a mailbox rather than humans specifically. A runtime
+  with no address in reach opts out with the new
+  `WithAgentRuntimeHeadlessEnrollment`; callers that previously enrolled with a
+  pre-issued credential and no options must add it. Policy and provider must
+  now agree in both directions: accepting the OTP kind without
+  `WithAgentRuntimeOTPProvider` fails with `ErrAgentOTPRequired` before any
+  network I/O, and installing a provider while excluding that kind is rejected
+  as contradictory with `ErrInvalidRegisterConfig`.
+- **Breaking:** `OpenRegisteredAgentRuntime` now takes the closed
+  `AgentRuntimeOpenOption` set instead of `ClientOption`, matching the other
+  lifecycle entry points. `WithAgentClientBaseURL` and
+  `WithAgentClientHTTPClient` are unchanged there; generic `WithBaseURL`,
+  `WithHTTPClient`, and `WithIssuerStatePath` are now rejected at compile time
+  rather than at run time. The resource-only `OpenRegisteredAgent` still takes
+  `ClientOption`.
+- Added `ConnectAgentRuntime`, the single call a service makes on every start.
+  It enrolls when nothing is registered yet (supply the credential with
+  `WithAgentRuntimeEnrollmentCredential`), resumes an interrupted enrollment,
+  and otherwise returns the existing registration. `RegisterAgentRuntime` and
+  `OpenRegisteredAgentRuntime` are deprecated in its favor and unchanged.
+- Added the native UDP connection lifecycle for services and agents:
+  enrollment, emailed one-time codes, direct connections, strict conformance,
+  and crash-safe activation/completion.
+- Leases and relocation are now handled for you. Warm open renews an expired
+  lease, a held binding renews itself as expiry approaches, re-running the
+  connect call is safe on every start, and an authority-directed move is
+  followed rather than surfaced. Placement is still only ever taken from an
+  authenticated Hub result whose assignment generation advances.
+  `WithAgentRuntimeReassignmentAdoption` is now a no-op and deprecated; opt out
+  with `WithAgentRuntimeOfflineOpen` or `WithAgentRuntimePinnedAssignment`.
+- `AgentRuntimeBinding`'s exported assignment fields are now written once, at
+  construction, and never mutated by a renewal. They are safe to read from any
+  goroutine; `binding.Assignment()` reports live placement.
+- An interrupted registration now finishes at the placement its candidate is
+  bound to before placement is reconciled, so a resume recovers a registration
+  that was already recorded instead of losing it.
+- Registration retries are budgeted per step, so a single call can span
+  several of them before giving up. Use an outer context deadline when a
+  smaller aggregate wall-clock ceiling is required.
+
+## v0.2.0 — 2026-07-19
+
+- Bounded native registration recovery to 90 days after the first
+  authenticated assignment-ticket expiry, with a per-datagram deadline fence,
+  immutable replacement anchor, and fail-closed pre-v6 pending-state
+  migration.
+
+## v0.1.1 — 2026-07-18
+
+- Destroy the runtime result when setup unlock fails, so no key material
+  outlives a failed open. (#88)
+
+## v0.1.0 — 2026-07-17
+
+- Initial tagged release.
+- Removed the superseded public HTTP agent assignment/registration lifecycle.
+  Everyday resource calls still use HTTPS, and browser behavior is unchanged.
+- Added sealed full-`AgentState` storage and AWS-backed `AgentState` stores
+  (the `awsstore` module).
