@@ -243,11 +243,11 @@ Most recipients open qURL links directly in a browser and do not use this SDK.
 Programmatic recipients call:
 
 ```go
-portal, err := qurl.EnterPortal(ctx, link)
+handle, err := qurl.EnterPortal(ctx, link)
 if err != nil {
 	return err
 }
-resp, err := httpClient.Get(portal.ResourceURL)
+resp, err := httpClient.Get(handle.ResourceURL) // httpClient is your own *http.Client
 ```
 
 That is the whole integration, and it needs no LayerV credentials. `EnterPortal`
@@ -256,14 +256,17 @@ UDP connection. Browsers cannot send UDP, so links opened in a browser go
 through an HTTPS path instead; the SDK picks whichever works and you do not
 configure either one.
 
-The SDK ships the deployment it was built to talk to — the issuer keys to
-trust, the cells to reach, and the Hub trust root for registration. To point it
-at a different deployment (self-hosted, or the sandbox), set `QURL_DEPLOYMENT`
-to a deployment JSON file; for full programmatic control, install a `Provider`
-with `SetDefaultProvider`. `QURL_DEPLOYMENT` governs link verification and the
-agent Hub trust root; the issuer HTTPS endpoint is configured separately with
-`WithBaseURL`. A build that ships no issuer keys fails closed rather than
-opening a link it cannot verify.
+The trust configuration — which issuer keys to verify links against, which
+cells to reach, and the Hub trust root for registration — comes from a
+deployment, resolved most specific first: a `Provider` installed with
+`SetDefaultProvider`, then a JSON file named by `QURL_DEPLOYMENT`, then the
+deployment embedded in the build ([qurl/deployment.json](qurl/deployment.json)).
+Current releases embed an empty deployment, so native opens and agent
+registration need a deployment file from LayerV setup until a populated one
+ships in the SDK. `QURL_DEPLOYMENT` governs link verification and the agent Hub
+trust root; the issuer HTTPS endpoint is configured separately with
+`WithBaseURL`. A build with no issuer keys configured fails closed
+(`ErrNotConfigured`) rather than open a link it cannot verify.
 
 ## Error handling
 
