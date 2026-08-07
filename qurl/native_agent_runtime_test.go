@@ -446,6 +446,15 @@ const (
 // deadline), so a generous timeout under a tight budget would let the whole
 // transaction expire inside the first attempt, and a multi-attempt test would
 // never reach its second attempt.
+//
+// The timeout cannot simply be raised. Cases that script several silent
+// attempts pin their own budget at a second and assert the attempt count they
+// reach within it, so maxAttempts*timeout plus backoff has to stay under that
+// second: at 500ms, TestRegisterAgentRuntime_AmbiguousREGUsesBoundedExactRetries
+// loses its second attempt to the transaction deadline. A mixed script that
+// replies and then goes silent therefore runs its replying exchanges under
+// these bounds too, since WithAgentRuntimeUDPBounds applies per call rather
+// than per step.
 const (
 	runtimeSilenceTimeout = 100 * time.Millisecond
 	runtimeSilenceBudget  = time.Second
@@ -4683,11 +4692,15 @@ func assertSessionPlacementUnchanged(t *testing.T, f *runtimeFixture, binding *A
 func TestKnockRegisteredAgent_ExpiredLeaseFailsWhenRenewalFails(t *testing.T) {
 	contract := loadAssignmentFixture(t)
 	for _, test := range []struct {
-		name      string
+		name string
+		// silentHub says the renewal gets no answer and waits out its bounds,
+		// which the script alone cannot express: a Hub goes silent by running out
+		// of steps as readily as by withholding a reply.
+		silentHub bool
 		hubSteps  []runtimeUDPStep
 		wantClass error
 	}{
-		{name: "Hub outage", wantClass: ErrAssignmentRecoveryRequired},
+		{name: "Hub outage", silentHub: true, wantClass: ErrAssignmentRecoveryRequired},
 		{
 			name: "authenticated Hub denial",
 			hubSteps: []runtimeUDPStep{{
@@ -4699,8 +4712,7 @@ func TestKnockRegisteredAgent_ExpiredLeaseFailsWhenRenewalFails(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			f := newRuntimeFixture(t, test.hubSteps, []runtimeUDPStep{sessionKnockStep()})
-			if len(test.hubSteps) == 0 {
-				// The outage case has nothing to answer it and waits out its bounds.
+			if test.silentHub {
 				f.expectSilence()
 			}
 			initial, err := parseInitialAssignmentReply([]byte(contract.InitialAssignment.Result.BodyJSON), "agent-conform", assignmentFixtureNow)
