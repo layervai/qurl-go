@@ -79,7 +79,7 @@ func newRuntimeUDPServer(t *testing.T, serverPriv, agentPub []byte, steps ...run
 		_ = conn.Close()
 		select {
 		case <-server.done:
-		case <-time.After(2 * time.Second):
+		case <-time.After(runtimeReplyTimeout):
 			t.Error("runtime UDP server did not stop")
 		}
 	})
@@ -200,9 +200,12 @@ func (s *runtimeUDPServer) snapshot() []runtimeUDPRequest {
 	return result
 }
 
+// waitRuntimeUDPRequests waits for requests the caller expects to arrive, so its
+// deadline is patience rather than an assertion: it only has to outlast a
+// scheduler stall.
 func waitRuntimeUDPRequests(t *testing.T, server *runtimeUDPServer, count int) []runtimeUDPRequest {
 	t.Helper()
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(runtimeReplyTimeout)
 	for {
 		requests := server.snapshot()
 		if len(requests) >= count {
@@ -420,6 +423,43 @@ func TestRuntimeRecordingStorePreservesPinnedSetupCapability(t *testing.T) {
 	}
 }
 
+// Transport patience for the fixtures. A scripted exchange against the
+// in-process fake hub answers in microseconds, so for a script whose steps all
+// reply these bounds are never actually waited on: their only job is to outlast
+// a scheduler stall on a loaded CI runner. They are therefore generous, and
+// track the production nativeudp default rather than racing it.
+//
+// Raising the attempt count is deliberately not the lever here. runtimeUDPServer
+// selects its step by the count of datagrams it has received, so a retry
+// consumes the *next* scripted step and shows up in snapshot(); patience has to
+// come from the bounds instead.
+const (
+	runtimeReplyTimeout = 5 * time.Second
+	runtimeReplyBudget  = 30 * time.Second
+)
+
+// Transport patience for a script that deliberately leaves a request
+// unanswered. Such a test spends real time waiting out these bounds and asserts
+// on the exhaustion that follows, so they stay tight.
+//
+// Both must tighten together. The socket deadline is min(timeout, transaction
+// deadline), so a generous timeout under a tight budget would let the whole
+// transaction expire inside the first attempt, and a multi-attempt test would
+// never reach its second attempt.
+//
+// The timeout cannot simply be raised. Cases that script several silent
+// attempts pin their own budget at a second and assert the attempt count they
+// reach within it, so maxAttempts*timeout plus backoff has to stay under that
+// second: at 500ms, TestRegisterAgentRuntime_AmbiguousREGUsesBoundedExactRetries
+// loses its second attempt to the transaction deadline. A mixed script that
+// replies and then goes silent therefore runs its replying exchanges under
+// these bounds too, since WithAgentRuntimeUDPBounds applies per call rather
+// than per step.
+const (
+	runtimeSilenceTimeout = 100 * time.Millisecond
+	runtimeSilenceBudget  = time.Second
+)
+
 type runtimeFixture struct {
 	contract *conformance.AgentAssignmentFile
 	store    *runtimeRecordingStore
@@ -428,6 +468,21 @@ type runtimeFixture struct {
 	dialer   runtimeRouteDialer
 	hubUDP   *runtimeUDPServer
 	cellUDP  *runtimeUDPServer
+	// silent records that the script withholds a reply, so the fixture keeps the
+	// tight bounds a silence assertion depends on.
+	silent bool
+}
+
+// scriptsSilence reports whether any scripted step withholds its reply.
+func scriptsSilence(scripts ...[]runtimeUDPStep) bool {
+	for _, script := range scripts {
+		for _, step := range script {
+			if step.noReply {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func newRuntimeFixture(t *testing.T, hubSteps, cellSteps []runtimeUDPStep) *runtimeFixture {
@@ -457,7 +512,26 @@ func newRuntimeFixture(t *testing.T, hubSteps, cellSteps []runtimeUDPStep) *runt
 		resolver: runtimeRouteResolver{hosts: map[string]netip.Addr{"hub.nhp.layerv.ai": hubAddress, "cell0.nhp.layerv.ai": cellAddress}},
 		dialer:   runtimeRouteDialer{targets: map[string]string{hubAddress.String(): hubUDP.conn.LocalAddr().String(), cellAddress.String(): cellUDP.conn.LocalAddr().String()}},
 		hubUDP:   hubUDP, cellUDP: cellUDP,
+		silent: scriptsSilence(hubSteps, cellSteps),
 	}
+}
+
+// expectSilence keeps the tight bounds for a fixture whose silence comes from a
+// script that runs out of steps rather than from an explicit noReply step. The
+// server answers only while its step list lasts, so an unscripted or short
+// script is a silent endpoint too, and scriptsSilence cannot see that coming.
+func (f *runtimeFixture) expectSilence() *runtimeFixture {
+	f.silent = true
+	return f
+}
+
+// transportBounds returns the per-datagram timeout and whole-transaction budget
+// this fixture's script calls for.
+func (f *runtimeFixture) transportBounds() (timeout, budget time.Duration) {
+	if f.silent {
+		return runtimeSilenceTimeout, runtimeSilenceBudget
+	}
+	return runtimeReplyTimeout, runtimeReplyBudget
 }
 
 func (f *runtimeFixture) options(extra ...AgentRuntimeRegistrationOption) []AgentRuntimeRegistrationOption {
@@ -484,14 +558,15 @@ func (f *runtimeFixture) optionsWithMetadata(include bool, extra ...AgentRuntime
 }
 
 func (f *runtimeFixture) baseOptions(includeMetadata bool, policy ...AgentRuntimeRegistrationOption) []AgentRuntimeRegistrationOption {
+	timeout, budget := f.transportBounds()
 	opts := append([]AgentRuntimeRegistrationOption{}, policy...)
 	opts = append(opts,
 		WithAgentRuntimeHub(f.hub),
 		WithAgentRuntimeIdentity("agent-conform"),
 		WithAgentRuntimeUDPResolver(f.resolver),
 		WithAgentRuntimeUDPDialer(f.dialer),
-		WithAgentRuntimeUDPBounds(100*time.Millisecond, 1),
-		WithAgentRuntimeAssignmentRetryBudget(1, time.Second),
+		WithAgentRuntimeUDPBounds(timeout, 1),
+		WithAgentRuntimeAssignmentRetryBudget(1, budget),
 		withAgentRuntimeClock(func() time.Time { return assignmentFixtureNow }),
 		withTestAgentRuntimeAssignmentNonce(conformance.AgentAssignmentInitialRequestNonceFixture),
 		withAgentRuntimeDeviceCredential(canonicalNativeDeviceCredential),
@@ -503,11 +578,12 @@ func (f *runtimeFixture) baseOptions(includeMetadata bool, policy ...AgentRuntim
 }
 
 func (f *runtimeFixture) refreshOptions(extra ...AgentRuntimeRefreshOption) []AgentRuntimeRefreshOption {
+	timeout, budget := f.transportBounds()
 	opts := []AgentRuntimeRefreshOption{
 		WithAgentRuntimeUDPResolver(f.resolver),
 		WithAgentRuntimeUDPDialer(f.dialer),
-		WithAgentRuntimeUDPBounds(time.Second, 1),
-		WithAgentRuntimeAssignmentRetryBudget(1, time.Second),
+		WithAgentRuntimeUDPBounds(timeout, 1),
+		WithAgentRuntimeAssignmentRetryBudget(1, budget),
 		withAgentRuntimeClock(func() time.Time { return assignmentFixtureNow }),
 		withTestAgentRuntimeAssignmentNonce(conformance.AgentAssignmentRefreshRequestNonceFixture),
 	}
@@ -1353,7 +1429,7 @@ func TestRegisterAgentRuntime_ReturnedPrivateKeyKnocksImmediately(t *testing.T) 
 		t.Fatalf("fresh runtime returned private key length = %d, want %d", len(privateKey), x25519key.Size)
 	}
 	knock, err := KnockRegisteredAgent(context.Background(), binding, privateKey, "resource-public-key", NativeKnockOptions{RunID: "0123456789abcdef"},
-		WithAgentRuntimeUDPResolver(f.resolver), WithAgentRuntimeUDPDialer(f.dialer), WithAgentRuntimeUDPBounds(time.Second, 1))
+		WithAgentRuntimeUDPResolver(f.resolver), WithAgentRuntimeUDPDialer(f.dialer), WithAgentRuntimeUDPBounds(runtimeReplyTimeout, 1))
 	if err != nil || knock == nil || knock.ACToken != "ac-fresh" {
 		t.Fatalf("fresh returned-key knock = %#v, %v", knock, err)
 	}
@@ -1380,7 +1456,7 @@ func TestKnockRegisteredAgent_UsesAuthoritativeAssignedCell(t *testing.T) {
 	privateKey := assignmentHex(t, contract.Keys.Agent.StaticPrivHex)
 	defer wipeBytes(privateKey)
 	result, err := KnockRegisteredAgent(context.Background(), binding, privateKey, "resource-public-key", NativeKnockOptions{RunID: "0123456789abcdef"},
-		WithAgentRuntimeUDPResolver(f.resolver), WithAgentRuntimeUDPDialer(f.dialer), WithAgentRuntimeUDPBounds(time.Second, 1))
+		WithAgentRuntimeUDPResolver(f.resolver), WithAgentRuntimeUDPDialer(f.dialer), WithAgentRuntimeUDPBounds(runtimeReplyTimeout, 1))
 	if err != nil {
 		t.Fatalf("KnockRegisteredAgent: %v", err)
 	}
@@ -1445,7 +1521,7 @@ func TestKnockRegisteredAgent_CookieChallengeReResolvesForOneBoundReknock(t *tes
 	privateKey := assignmentHex(t, contract.Keys.Agent.StaticPrivHex)
 	defer wipeBytes(privateKey)
 	if _, err := KnockRegisteredAgent(context.Background(), binding, privateKey, "resource-public-key", NativeKnockOptions{RunID: "0123456789abcdef"},
-		WithAgentRuntimeUDPResolver(resolver), WithAgentRuntimeUDPDialer(dialer), WithAgentRuntimeUDPBounds(time.Second, 1)); err != nil {
+		WithAgentRuntimeUDPResolver(resolver), WithAgentRuntimeUDPDialer(dialer), WithAgentRuntimeUDPBounds(runtimeReplyTimeout, 1)); err != nil {
 		t.Fatalf("KnockRegisteredAgent COK→RKN: %v", err)
 	}
 	if resolveCalls.Load() != 2 {
@@ -1488,7 +1564,7 @@ func TestKnockRegisteredAgent_MalformedCookieChallengeFailsWithoutReknock(t *tes
 	privateKey := assignmentHex(t, contract.Keys.Agent.StaticPrivHex)
 	defer wipeBytes(privateKey)
 	_, err := KnockRegisteredAgent(context.Background(), binding, privateKey, "resource-public-key", NativeKnockOptions{RunID: "0123456789abcdef"},
-		WithAgentRuntimeUDPResolver(f.resolver), WithAgentRuntimeUDPDialer(f.dialer), WithAgentRuntimeUDPBounds(time.Second, 1))
+		WithAgentRuntimeUDPResolver(f.resolver), WithAgentRuntimeUDPDialer(f.dialer), WithAgentRuntimeUDPBounds(runtimeReplyTimeout, 1))
 	if !errors.Is(err, ErrMalformedReply) {
 		t.Fatalf("malformed COK error = %v, want ErrMalformedReply", err)
 	}
@@ -1515,7 +1591,7 @@ func TestExitRegisteredAgentSession_UsesEXTAndDoesNotChangeBinding(t *testing.T)
 	privateKey := assignmentHex(t, contract.Keys.Agent.StaticPrivHex)
 	defer wipeBytes(privateKey)
 	if err := ExitRegisteredAgentSession(context.Background(), binding, privateKey, "resource-public-key", NativeKnockOptions{RunID: "0123456789abcdef"},
-		WithAgentRuntimeUDPResolver(f.resolver), WithAgentRuntimeUDPDialer(f.dialer), WithAgentRuntimeUDPBounds(time.Second, 1)); err != nil {
+		WithAgentRuntimeUDPResolver(f.resolver), WithAgentRuntimeUDPDialer(f.dialer), WithAgentRuntimeUDPBounds(runtimeReplyTimeout, 1)); err != nil {
 		t.Fatalf("ExitRegisteredAgentSession: %v", err)
 	}
 	requests := f.cellUDP.snapshot()
@@ -3171,7 +3247,7 @@ func TestRefreshAgentRuntime_PersistsRevisionedEndpointAndKeyRotationForNextKnoc
 	seedCompletedRuntimeAssignment(t, f, &initial.Assignment)
 
 	_, binding, err := RefreshAgentRuntime(context.Background(), f.hub, f.store,
-		WithAgentRuntimeUDPResolver(f.resolver), WithAgentRuntimeUDPDialer(f.dialer), WithAgentRuntimeUDPBounds(time.Second, 1),
+		WithAgentRuntimeUDPResolver(f.resolver), WithAgentRuntimeUDPDialer(f.dialer), WithAgentRuntimeUDPBounds(runtimeReplyTimeout, 1),
 		withAgentRuntimeClock(func() time.Time { return assignmentFixtureNow }))
 	if err != nil || binding == nil {
 		t.Fatalf("rotated assignment refresh = %v, %v", binding, err)
@@ -3193,7 +3269,7 @@ func TestRefreshAgentRuntime_PersistsRevisionedEndpointAndKeyRotationForNextKnoc
 		t.Fatalf("refreshed runtime returned private key length = %d, want %d", len(agentPrivate), x25519key.Size)
 	}
 	result, err := KnockRegisteredAgent(context.Background(), binding, agentPrivate, "resource-public-key", NativeKnockOptions{RunID: "0123456789abcdef"},
-		WithAgentRuntimeUDPResolver(f.resolver), WithAgentRuntimeUDPDialer(f.dialer), WithAgentRuntimeUDPBounds(time.Second, 1))
+		WithAgentRuntimeUDPResolver(f.resolver), WithAgentRuntimeUDPDialer(f.dialer), WithAgentRuntimeUDPBounds(runtimeReplyTimeout, 1))
 	if err != nil || result == nil || result.ACToken != "ac-rotated" || result.ResourceHost != "frps.cell0-r2.example:7000" {
 		t.Fatalf("knock after endpoint/key rotation = %#v, %v", result, err)
 	}
@@ -3332,7 +3408,7 @@ func TestRefreshAgentRuntime_AdoptsAuthenticatedReassignmentForNextKnock(t *test
 	agentPrivate := binding.TakeDeviceStaticPrivateKey()
 	defer wipeBytes(agentPrivate)
 	result, err := KnockRegisteredAgent(context.Background(), binding, agentPrivate, "resource-public-key", NativeKnockOptions{RunID: "0123456789abcdef"},
-		WithAgentRuntimeUDPResolver(f.resolver), WithAgentRuntimeUDPDialer(f.dialer), WithAgentRuntimeUDPBounds(time.Second, 1))
+		WithAgentRuntimeUDPResolver(f.resolver), WithAgentRuntimeUDPDialer(f.dialer), WithAgentRuntimeUDPBounds(runtimeReplyTimeout, 1))
 	if err != nil || result == nil || result.ACToken != "ac-cell1" || result.ResourceHost != "frps.cell1.example:7000" {
 		t.Fatalf("knock after reassignment = %#v, %v", result, err)
 	}
@@ -4103,7 +4179,7 @@ func (f *runtimeFixture) knock(t *testing.T, binding *AgentRuntimeBinding, key [
 	t.Helper()
 	return KnockRegisteredAgent(context.Background(), binding, key, "resource-public-key",
 		NativeKnockOptions{RunID: "0123456789abcdef"},
-		WithAgentRuntimeUDPResolver(f.resolver), WithAgentRuntimeUDPDialer(f.dialer), WithAgentRuntimeUDPBounds(time.Second, 1))
+		WithAgentRuntimeUDPResolver(f.resolver), WithAgentRuntimeUDPDialer(f.dialer), WithAgentRuntimeUDPBounds(runtimeReplyTimeout, 1))
 }
 
 // The steady state an enterprise lives in: register once, hold one binding, keep
@@ -4245,7 +4321,8 @@ func TestKnockRegisteredAgent_LiveLeaseDoesNotRenew(t *testing.T) {
 // valid must not take down an agent that is working perfectly well.
 func TestKnockRegisteredAgent_HubOutageInRenewalWindowKeepsWorking(t *testing.T) {
 	contract := loadAssignmentFixture(t)
-	f := newRuntimeFixture(t, nil, []runtimeUDPStep{sessionKnockStep()})
+	// The outage is the Hub having no steps, so the renewal waits out its bounds.
+	f := newRuntimeFixture(t, nil, []runtimeUDPStep{sessionKnockStep()}).expectSilence()
 	seeded := seedSessionLease(t, f, contract, time.Now().Add(time.Minute))
 
 	_, binding, err := openRegisteredAgentRuntime(context.Background(), f.store, openFixtureClock(), f.hub, f.refreshOptions())
@@ -4615,11 +4692,15 @@ func assertSessionPlacementUnchanged(t *testing.T, f *runtimeFixture, binding *A
 func TestKnockRegisteredAgent_ExpiredLeaseFailsWhenRenewalFails(t *testing.T) {
 	contract := loadAssignmentFixture(t)
 	for _, test := range []struct {
-		name      string
+		name string
+		// silentHub says the renewal gets no answer and waits out its bounds,
+		// which the script alone cannot express: a Hub goes silent by running out
+		// of steps as readily as by withholding a reply.
+		silentHub bool
 		hubSteps  []runtimeUDPStep
 		wantClass error
 	}{
-		{name: "Hub outage", wantClass: ErrAssignmentRecoveryRequired},
+		{name: "Hub outage", silentHub: true, wantClass: ErrAssignmentRecoveryRequired},
 		{
 			name: "authenticated Hub denial",
 			hubSteps: []runtimeUDPStep{{
@@ -4631,6 +4712,9 @@ func TestKnockRegisteredAgent_ExpiredLeaseFailsWhenRenewalFails(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			f := newRuntimeFixture(t, test.hubSteps, []runtimeUDPStep{sessionKnockStep()})
+			if test.silentHub {
+				f.expectSilence()
+			}
 			initial, err := parseInitialAssignmentReply([]byte(contract.InitialAssignment.Result.BodyJSON), "agent-conform", assignmentFixtureNow)
 			if err != nil {
 				t.Fatal(err)
@@ -5002,7 +5086,7 @@ func TestLiveSessionAssignment_RenewalLeadBoundary(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			// A Hub with no steps: the renewal attempt is observable as a recorded
 			// request, and its failure is best effort while the lease is still live.
-			f := newRuntimeFixture(t, nil, nil)
+			f := newRuntimeFixture(t, nil, nil).expectSilence()
 			seedSessionLease(t, f, contract, lease)
 			binding, key := openSessionBinding(t, f)
 
@@ -5145,13 +5229,14 @@ func TestRegisterAgentRuntime_GeneratesAndPersistsAgentIdentityBeforeIO(t *testi
 	// The same wiring the other fixtures use, minus WithAgentRuntimeIdentity:
 	// every existing fixture pins the id, which is why this branch has no cover.
 	registerOptions := func(f *runtimeFixture) []AgentRuntimeRegistrationOption {
+		timeout, budget := f.transportBounds()
 		return []AgentRuntimeRegistrationOption{
 			WithAgentRuntimeHeadlessEnrollment(),
 			WithAgentRuntimeHub(f.hub),
 			WithAgentRuntimeUDPResolver(f.resolver),
 			WithAgentRuntimeUDPDialer(f.dialer),
-			WithAgentRuntimeUDPBounds(100*time.Millisecond, 1),
-			WithAgentRuntimeAssignmentRetryBudget(1, time.Second),
+			WithAgentRuntimeUDPBounds(timeout, 1),
+			WithAgentRuntimeAssignmentRetryBudget(1, budget),
 			withAgentRuntimeClock(func() time.Time { return assignmentFixtureNow }),
 			withTestAgentRuntimeAssignmentNonce(conformance.AgentAssignmentInitialRequestNonceFixture),
 			withAgentRuntimeDeviceCredential(canonicalNativeDeviceCredential),
@@ -5162,7 +5247,7 @@ func TestRegisterAgentRuntime_GeneratesAndPersistsAgentIdentityBeforeIO(t *testi
 	t.Run("identity is generated, canonical, and durable before any packet", func(t *testing.T) {
 		// A Hub with no steps: enrollment cannot get past the first exchange, so
 		// anything durable at that point was written before the SDK sent anything.
-		f := newUnidentifiedFixture(t, nil)
+		f := newUnidentifiedFixture(t, nil).expectSilence()
 		_, _, err := RegisterAgentRuntime(context.Background(), conformance.AgentAssignmentBootstrapCredentialFixture, f.store, registerOptions(f)...)
 		if err == nil {
 			t.Fatal("enrollment against a silent Hub succeeded")
