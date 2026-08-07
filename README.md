@@ -12,58 +12,142 @@ URLs or creates portals.
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/layervai/qurl-go/qurl.svg)](https://pkg.go.dev/github.com/layervai/qurl-go/qurl)
 [![CI](https://github.com/layervai/qurl-go/actions/workflows/ci.yml/badge.svg)](https://github.com/layervai/qurl-go/actions/workflows/ci.yml)
-[![Go 1.26+](https://img.shields.io/badge/go-1.26%2B-00ADD8)](go.mod)
+[![Go 1.26.5+](https://img.shields.io/badge/go-1.26.5%2B-00ADD8)](go.mod)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 ## Why qURL
 
 Agents and services increasingly need to reach private MCP servers, APIs, and
 internal tools. Every standing public endpoint becomes inventory for scanners,
-fingerprinting, credential attacks, and AI-assisted probing before a legitimate
-user or agent ever arrives.
+fingerprinting, and credential attacks before a legitimate user or agent ever
+arrives. VPNs and identity-aware proxies authenticate that inventory; they do
+not remove it — the listener is still there to find, probe, and exploit.
 
-qURL is an invisibility primitive for authenticated access. A portal is
-cryptographic, just-in-time permission for one actor to reach one private
-resource without turning that resource into public inventory.
+qURL removes the inventory. A protected service holds only an outbound
+connection, so there is no open port, no public DNS, and nothing for a scanner
+to enumerate. A portal is cryptographic, just-in-time permission for one actor
+to reach one private resource, and it expires on the schedule you set.
+
+## How it fits together
+
+```
+┌─────────────┐  1. ProtectURL / CreatePortal (HTTPS)  ┌──────────────────┐
+│ your Go app │ ──────────────────────────────────────▶│                  │
+│ (this SDK)  │ ◀───────────── portal link ────────────│   LayerV qURL    │
+└─────────────┘                                        │    Platform      │
+┌─────────────┐  3. open the link                      │  (hub + cells)   │
+│  recipient  │ ──────────────────────────────────────▶│                  │
+└─────────────┘  browser: HTTPS (*.qurl.site)          └────────▲─────────┘
+                 program: EnterPortal (native UDP)              │
+                                                                │ 2. outbound-only
+                                                                │    NHP, UDP 443
+┌───────────────────────────────────────────────┐               │
+│ your private network                          │               │
+│   private service ◀─── qURL Connector or ─────┼───────────────┘
+│                        your own agent runtime │
+└───────────────────────────────────────────────┘
+```
+
+Three roles, three sections of this README:
+
+1. **Issue** — your app calls `ProtectURL` and `CreatePortal` over HTTPS and
+   gets back a link. ([Quickstart](#quickstart))
+2. **Serve** — the private service sits behind
+   [qURL Connector](https://github.com/layervai/qurl-connector) or your own
+   agent built with this SDK. Either way it dials *out* to LayerV and holds
+   that connection; nothing listens. ([Connect a service or agent](#connect-a-service-or-agent))
+3. **Open** — the recipient opens the link in a browser, or a program calls
+   `EnterPortal`. LayerV verifies the portal and stitches recipient ↔ agent ↔
+   service for the portal's lifetime. ([Opening links](#opening-links))
+
+| Term | Meaning |
+| --- | --- |
+| **Resource** | A private URL LayerV protects. Identified by a stable resource id, never by a public address. |
+| **Portal** | A short-lived signed link granting one actor access to one resource. |
+| **Issuer** | Software holding LayerV credentials that protects URLs and creates portals. |
+| **Connector** | LayerV's ready-made agent that publishes services from inside your network. |
+| **Agent runtime** | Your own service enrolled directly with `ConnectAgentRuntime`. |
+| **Hub** | The LayerV endpoint an agent registers against; it assigns the agent to a cell. |
+| **Cell** | A LayerV endpoint that terminates portal traffic and agent connections (NHP over UDP 443). |
 
 ## Install
+
+qurl-go is a library — there is no binary to `go install`. From inside your
+module:
 
 ```sh
 go get github.com/layervai/qurl-go/qurl@latest
 ```
 
-Requires Go 1.26+.
+Requires Go 1.26.5+. Not in a module yet? Run `go mod init example.com/myapp`
+first: `go get` outside a module fails with `go.mod file not found`, and
+`go install .../qurl@latest` fails with `is not a main package` because nothing
+here builds a command.
+
+| Module | Purpose |
+| --- | --- |
+| `github.com/layervai/qurl-go/qurl` | The SDK. Zero AWS dependencies. |
+| `github.com/layervai/qurl-go/awsstore` | AWS-backed agent state (Secrets Manager, SSM, KMS sealing). A [separate module](awsstore/README.md) so the AWS SDK never leaks into `qurl`. |
+
+## Get a credential
+
+Create an API key in the [LayerV dashboard](https://layerv.ai/qurl/dashboard/keys)
+with the `qurl:write` scope. No credit card — the free tier includes 500 qURLs
+a month.
+
+`OpenClient` resolves credentials in this order, most specific first:
+
+1. An explicit `qurl.WithIssuerStatePath(...)` option
+2. `QURL_API_KEY` — the key itself, for containers and CI
+3. `QURL_API_KEY_FILE` — a path, for mounted secrets that should stay on disk
+4. `~/.config/qurl/token` — what the qURL Connector installer already wrote
+5. `/var/lib/layerv/qurl/issuer-state.json` — the machine-wide default
+
+For credentials held in KMS or a secret manager, implement
+`qurl.CredentialProvider` and pass it to `qurl.NewClient` instead.
 
 ## Quickstart
+
+```sh
+export QURL_API_KEY="<key from https://layerv.ai/qurl/dashboard/keys>"
+```
 
 ```go
 package main
 
 import (
 	"context"
+	"fmt"
+	"log"
 	"time"
 
 	"github.com/layervai/qurl-go/qurl"
 )
 
-func issuePortal(ctx context.Context) (string, error) {
+func main() {
+	ctx := context.Background()
+
 	client, err := qurl.OpenClient()
 	if err != nil {
-		return "", err
+		log.Fatal(err)
 	}
 
 	resource, err := client.ProtectURL(ctx, "https://internal.example.com/dashboard")
 	if err != nil {
-		return "", err
+		log.Fatal(err)
 	}
 
 	portal, err := resource.CreatePortal(ctx, qurl.ValidFor(5*time.Minute))
 	if err != nil {
-		return "", err
+		log.Fatal(err)
 	}
-	return portal.Link, nil
+
+	fmt.Println(portal.Link) // share this; it expires in 5 minutes
 }
 ```
+
+`ProtectURL` is idempotent: it returns the existing resource when the same URL
+is already registered for your account.
 
 If qURL Connector already protects the service, use its immutable connector
 slug:
@@ -84,21 +168,15 @@ resource := client.ResourceByID(resourceID)
 portal, err := resource.CreatePortal(ctx, qurl.ValidFor(time.Hour))
 ```
 
-## Connect to LayerV
-
-Only software that protects URLs or creates portals needs LayerV credentials. A
-user or agent that only receives and opens a qURL link does not set up anything.
-
-Application issuers normally run the LayerV setup flow once, then use:
-
-```go
-client, err := qurl.OpenClient()
-```
-
-For protected external credential storage, implement `qurl.CredentialProvider`
-and pass it to `qurl.NewClient`.
+Next: [Protect a private service](docs/secure-a-private-service.md) ·
+[Issue links](docs/issuing-links.md)
 
 ## Connect a service or agent
+
+The easiest way to put a service behind qURL is
+[qURL Connector](https://github.com/layervai/qurl-connector) — install it next
+to the service and skip this section. Use this SDK's agent runtime when you
+want the service itself to hold the connection, with no sidecar.
 
 Your service registers once, then keeps serving. Registration happens over an
 authenticated UDP channel — no inbound ports, no public endpoint, nothing for a
@@ -122,127 +200,70 @@ if err != nil {
 defer binding.Destroy()
 ```
 
-That is the whole enrollment. You supply the credential you were issued, a file
-to keep state in, and a way to read the one-time code; the SDK already knows how
-to reach LayerV.
-
-`readOneTimeCode` is a function you write. That call **blocks** while LayerV
-emails a code to the address on your credential and waits for your callback to
-return it — [The one-time code](#the-one-time-code) below shows one.
-
-**Then it stays connected on its own.** Run that on every start, under a
-supervisor, and stop thinking about the lifecycle:
+That is the whole enrollment. Run it on every start, under a supervisor, and
+stop thinking about the lifecycle:
 
 - Restarts are safe — it enrolls only when nothing is registered yet.
 - Crashes and dropped replies resume the same registration, for up to 90 days.
 - Leases renew themselves, at startup and mid-run.
-- Relocations are followed by that same renewal.
+- Relocations are followed automatically, and only ever to a placement named in
+  an authenticated Hub reply — never a guessed or config-supplied address.
 
-A process restarting after a weekend outage runs the same code as one restarting
-after thirty seconds. If your service should not hold an enrollment credential at
-runtime, drop the credential option: the same call then renews and serves an
-existing registration but can never create one. See
-[Connect a service or agent](docs/register-an-agent.md).
+Keep the state file across restarts, and keep the metadata stable: the file is
+what makes a resume possible, and the hostname and version become part of the
+saved registration.
 
-**Keep the state file and keep the metadata stable.** The file is what makes a
-resume possible, and the hostname and version you pass become part of the saved
-registration.
+**The one-time code.** Enrollment defaults to emailing a code to the address on
+your credential; `readOneTimeCode` is the callback you write to return it —
+poll a mailbox, page an operator, your call. It should return exactly 8 decimal
+digits and honor its context. Runtimes with no mailbox in reach (sealed
+appliances, air-gapped builders) enroll with a pre-issued credential plus
+`WithAgentRuntimeHeadlessEnrollment()` instead — an explicit opt-out, mutually
+exclusive with an OTP provider. Not sure which credential kind you hold? Run
+the default and read the error; a wrong first guess costs nothing and the retry
+reuses the same agent identity. The
+[decision table](docs/register-an-agent.md) has every path, including renewing
+without holding an enrollment credential at runtime and
+[taking manual control](docs/register-an-agent.md#taking-manual-control) of
+renewal.
 
-### The one-time code
+**Credentials are LayerV-minted tokens** of at least 32 characters. Passwords
+and hand-picked strings are rejected before anything is saved or sent.
 
-Enrollment sends a one-time code to the address on your credential, and your
-callback returns it. That is the default path.
+> **Network requirements.** Everything the SDK dials is outbound: HTTPS to
+> `api.layerv.ai` for issuing, and NHP over **UDP 443** to LayerV hosts under
+> `layerv.ai` for registration and native opens. No inbound ports, no
+> listeners. If registration fails with `ErrEndpointNoReply`, the usual cause
+> is an egress firewall silently dropping UDP 443 — the error names the exact
+> host to allow.
 
-It is not a "human" path. Agents increasingly have their own mailboxes, and a
-service account or a shared operations alias works just as well. All that
-matters is that *something* can read the address the code went to:
+## Opening links
 
-```go
-func readOneTimeCode(ctx context.Context, challenge qurl.AgentOTPChallenge) (string, error) {
-	return pollMailboxForCode(ctx) // your inbox, your operator, your call
-}
-```
-
-Return exactly 8 decimal digits, and honor the `ctx` — it is already bounded by
-the assignment ticket. The `challenge` is for logging and correlation only: it
-carries no credential and nothing replayable. LayerV sends at most one code per
-attempt, and the SDK never retries behind your back or writes the code to disk.
-
-**If nothing can read a mailbox** — a sealed appliance, an air-gapped build
-agent — enroll with a pre-issued credential and say so explicitly:
-
-```go
-client, binding, err := qurl.ConnectAgentRuntime(ctx, store,
-	qurl.WithAgentRuntimeEnrollmentCredential(credential),
-	qurl.WithAgentRuntimeMetadata(hostname, version),
-	qurl.WithAgentRuntimeHeadlessEnrollment(),
-)
-```
-
-That is the escape hatch, not the shortcut. Use it only when no address in reach
-can receive the code — and note it cannot be combined with an OTP provider, since
-one option says no code can be read and the other says how to read one.
-
-**Not sure which you have?** The token will not tell you — credentials carry no
-kind you can parse, and LayerV reports it on the first authenticated call. Go by
-how you got it: issued against an address means the code path, pre-issued for a
-machine means headless. Or just run the default and read the error, which names
-the kind LayerV actually reported:
-
-```
-qurl: registration key kind "bootstrap" is disallowed; accepted kinds: account
-```
-
-A wrong first guess costs you nothing — nothing is registered, and the retry
-reuses the same agent identity rather than enrolling a second one.
-[Connect a service or agent](docs/register-an-agent.md) has the full decision
-table.
-
-### Credentials
-
-Pass the credential LayerV issued you. Credentials must be LayerV-minted tokens
-of at least 32 characters. Passwords and hand-picked strings are rejected before
-anything is saved or sent.
-
-### Taking manual control
-
-Renewal and relocation are automatic, and following a relocation means going
-where LayerV said to go in an authenticated reply — never a guessed or
-config-supplied address. To renew at a moment you choose, or to opt out of the
-automatic behavior entirely, see
-[Taking manual control](docs/register-an-agent.md#taking-manual-control).
-
-## Opening Links
-
-Most recipients open qURL links directly and do not use this SDK. Programmatic
-recipients call:
+Most recipients open qURL links directly in a browser and do not use this SDK.
+Programmatic recipients call:
 
 ```go
 portal, err := qurl.EnterPortal(ctx, link)
+if err != nil {
+	return err
+}
+resp, err := httpClient.Get(portal.ResourceURL)
 ```
 
-That is the whole integration. The SDK ships the issuer keys it trusts and the
-cells it can reach, so there is no trust configuration to assemble first.
-
-`EnterPortal` checks that the link was really issued by LayerV, then opens it over
-a direct UDP connection. Browsers cannot send UDP, so links opened in a browser
-go through an HTTPS path instead; the SDK picks whichever works and you do not
+That is the whole integration, and it needs no LayerV credentials. `EnterPortal`
+checks that the link was really issued by LayerV, then opens it over a direct
+UDP connection. Browsers cannot send UDP, so links opened in a browser go
+through an HTTPS path instead; the SDK picks whichever works and you do not
 configure either one.
 
-To point the SDK at a different deployment (self-hosted, or a sandbox), set
-`QURL_DEPLOYMENT` to a deployment JSON file; to take full programmatic control,
-install a `Provider` with `SetDefaultProvider`. A build that ships no issuer keys
-fails closed rather than opening a link it cannot verify.
-
-## Guides
-
-- [Protect a private service](docs/secure-a-private-service.md)
-- [Register an agent](docs/register-an-agent.md)
-- [Issue links](docs/issuing-links.md)
-- [Open links](docs/opening-links.md)
-- [Testing against NHP](docs/testing-against-nhp.md) — loopback suites for most
-  work, live sandbox for interop
-  ([ADR 0001](docs/decisions/0001-sandbox-nhp-access.md))
+The SDK ships the deployment it was built to talk to — the issuer keys to
+trust, the cells to reach, and the Hub trust root for registration. To point it
+at a different deployment (self-hosted, or the sandbox), set `QURL_DEPLOYMENT`
+to a deployment JSON file; for full programmatic control, install a `Provider`
+with `SetDefaultProvider`. `QURL_DEPLOYMENT` governs link verification and the
+agent Hub trust root; the issuer HTTPS endpoint is configured separately with
+`WithBaseURL`. A build that ships no issuer keys fails closed rather than
+opening a link it cannot verify.
 
 ## Error handling
 
@@ -265,80 +286,40 @@ Match errors by type or sentinel, not message text:
 
 ## Security notes
 
-- Treat LayerV credentials, agent state, and qURL links like credentials. Do not
-  log them.
+- Treat LayerV credentials, agent state, and qURL links like credentials. Do
+  not log them.
 - Never guess or construct LayerV addresses yourself; use what the SDK ships.
 - Keep saved registration state across an unclear reply, and keep the exact
   pending completion candidate across ambiguous completion delivery.
-- Wipe the private-key bytes taken from `AgentRuntimeBinding` once you are done with them.
+- Call `binding.Destroy()` when done. If you took key ownership with
+  `binding.TakeDeviceStaticPrivateKey()`, zero the returned slice yourself once
+  the knocker no longer needs it.
 - Keep issuer credentials in protected state, KMS, a secret manager, or another
-  protected store.
-- Links opened in a browser and services connected over UDP are separate trust paths.
+  protected store — see [awsstore](awsstore/README.md) for AWS-backed options.
+- Links opened in a browser (HTTPS) and services connected natively (UDP) are
+  separate trust paths; neither configures the other.
 
-## Changes
+## Guides
 
-### Unreleased
+- [Protect a private service](docs/secure-a-private-service.md)
+- [Register an agent](docs/register-an-agent.md)
+- [Manage qURL Connector resources](docs/connector-resources.md)
+- [Issue links](docs/issuing-links.md)
+- [Open links](docs/opening-links.md)
+- [Testing against NHP](docs/testing-against-nhp.md) — loopback suites for most
+  work, live sandbox for interop
+  ([ADR 0001](docs/decisions/0001-sandbox-nhp-access.md))
 
-- **Breaking, and it requires action: you must upgrade to keep connecting.** The
-  NHP wire protocol moves to 1.1, which authenticates the packet header inside
-  the AEAD. 1.0 and 1.1 do not interoperate in either direction and there is no
-  compatibility mode, so once LayerV's servers move to 1.1, an agent built
-  against v0.2.0 or earlier fails every request with an explicit version error.
-  Rebuild against this release and redeploy. Nothing about your code changes —
-  no API moved — but a binary that is not rebuilt will not reconnect on its own.
+Platform docs, the API reference, and the playground live at
+[layerv.ai/start](https://layerv.ai/start).
 
-  This closes a real defect rather than tidying the wire: under 1.0 the header's
-  flag word was covered only by an unkeyed digest, so anyone who knew an agent's
-  static public key and sat on the network path could alter how a reply was
-  decoded and hand the caller bytes the server never sent. Authenticating the
-  header is the fix, and it cannot be done compatibly.
-- **Breaking:** enrollment now defaults to the emailed one-time code, for any
-  runtime that can read a mailbox rather than humans specifically. A runtime with
-  no address in reach opts out with the new
-  `WithAgentRuntimeHeadlessEnrollment`; callers that previously enrolled with a
-  pre-issued credential and no options must add it. Policy and provider must now
-  agree in both directions: accepting the OTP kind without
-  `WithAgentRuntimeOTPProvider` fails with `ErrAgentOTPRequired` before any
-  network I/O, and installing a provider while excluding that kind is rejected
-  as contradictory with `ErrInvalidRegisterConfig`.
-- Added the native UDP connection lifecycle for services and agents: enrollment,
-  emailed one-time codes, direct connections, strict conformance, and
-  crash-safe activation/completion.
-- Leases and relocation are now handled for you. Warm open renews an expired
-  lease, a held binding renews itself as expiry approaches, re-running the
-  connect call is safe on every start, and an authority-directed move is followed
-  rather than surfaced. Placement is still only ever taken from an authenticated
-  Hub result whose assignment generation advances.
-  `WithAgentRuntimeReassignmentAdoption` is now a no-op and deprecated; opt out
-  with `WithAgentRuntimeOfflineOpen` or `WithAgentRuntimePinnedAssignment`.
-- Added `ConnectAgentRuntime`, the single call a service makes on every start. It
-  enrolls when nothing is registered yet (supply the credential with
-  `WithAgentRuntimeEnrollmentCredential`), resumes an interrupted enrollment, and
-  otherwise returns the existing registration. `RegisterAgentRuntime` and
-  `OpenRegisteredAgentRuntime` are deprecated in its favor and unchanged.
-- `AgentRuntimeBinding`'s exported assignment fields are now written once, at
-  construction, and never mutated by a renewal. They are safe to read from any
-  goroutine; `binding.Assignment()` reports live placement.
-- **Breaking:** `OpenRegisteredAgentRuntime` now takes the closed
-  `AgentRuntimeOpenOption` set instead of `ClientOption`, matching the other
-  lifecycle entry points. `WithAgentClientBaseURL` and
-  `WithAgentClientHTTPClient` are unchanged there; generic `WithBaseURL`,
-  `WithHTTPClient`, and `WithIssuerStatePath` are now rejected at compile time
-  rather than at run time. The resource-only `OpenRegisteredAgent` still takes
-  `ClientOption`.
-- An interrupted registration now finishes at the placement its candidate is
-  bound to before placement is reconciled, so a resume recovers a registration
-  that was already recorded instead of losing it.
-- Bounded native registration recovery to 90 days after the first authenticated
-  assignment-ticket expiry, with a per-datagram deadline fence, immutable
-  replacement anchor, and fail-closed pre-v6 pending-state migration.
-- Registration retries are budgeted per step, so a single call can span several
-  of them before giving up. Use an outer
-  context deadline when a smaller aggregate wall-clock ceiling is required.
-- Removed the superseded public HTTP agent assignment/registration lifecycle.
-  Everyday resource calls still use HTTPS, and browser behavior is
-  unchanged.
-- Added sealed full-AgentState storage and AWS-backed AgentState stores.
+## Versioning
+
+Pre-1.0 semantic versioning: breaking changes land in minor versions (v0.N.0)
+and are flagged in the [changelog](CHANGELOG.md) with what to change. Wire
+compatibility is pinned by authenticated golden vectors from
+[qurl-conformance](https://github.com/layervai/qurl-conformance); releases that
+move the wire protocol say so loudly and name the flag day.
 
 ## License
 
