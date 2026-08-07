@@ -490,7 +490,7 @@ func TestRegisterAgentRuntime_ResumedCompletionDoesNotRequireLiveLease(t *testin
 	f := newRuntimeFixture(t,
 		nil, // no Hub steps at all
 		[]runtimeUDPStep{{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: contract.RegistrationCompletion.Result.BodyJSON}},
-	)
+	).expectSilence()
 	state := seedRecoveryRuntimePendingActivation(t, f)
 	cfg := defaultNativeAgentRuntimeConfig()
 	cfg.deviceCredential = canonicalNativeDeviceCredential

@@ -91,12 +91,13 @@ func recoveryTestOption(f func(*nativeAgentRuntimeConfig) error) AgentRuntimeRec
 
 func recoveryOptions(t *testing.T, f *runtimeFixture, fixture *conformance.AgentCredentialRecoveryFile, now func() time.Time, extra ...AgentRuntimeRecoveryOption) []AgentRuntimeRecoveryOption {
 	t.Helper()
+	timeout, budget := f.transportBounds()
 	opts := []AgentRuntimeRecoveryOption{
 		WithAgentRuntimeRecoveryHub(f.hub),
 		WithAgentRuntimeUDPResolver(f.resolver),
 		WithAgentRuntimeUDPDialer(f.dialer),
-		WithAgentRuntimeUDPBounds(100*time.Millisecond, 1),
-		WithAgentRuntimeAssignmentRetryBudget(1, time.Second),
+		WithAgentRuntimeUDPBounds(timeout, 1),
+		WithAgentRuntimeAssignmentRetryBudget(1, budget),
 		withAgentRuntimeClock(now),
 		withTestAgentRuntimeAssignmentNonce(fixture.Fixtures.RequestNonce),
 		recoveryTestOption(func(c *nativeAgentRuntimeConfig) error {

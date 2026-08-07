@@ -734,7 +734,9 @@ func TestHubAssignmentParentCancellation(t *testing.T) {
 			select {
 			case <-server.requestSeen:
 				cancel()
-			case <-time.After(time.Second):
+			case <-time.After(runtimeReplyTimeout):
+				// The request is expected to arrive, so this arm only has to
+				// outlast a scheduler stall before it reports a real failure.
 				timedOut <- struct{}{}
 				cancel()
 			}
