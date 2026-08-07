@@ -505,8 +505,21 @@ jobs:
             local manifest_key repository expected_sha actual_sha
             while IFS=$'\t' read -r manifest_key repository; do
               expected_sha="$(jq -r --arg key "${manifest_key}" '.repositories[$key]' "${manifest}")"
-              actual_sha="$(gh api "repos/layervai/${repository}/commits/${expected_sha}" --jq '.sha')"
-              test "${actual_sha}" = "${expected_sha}"
+              # Name the repository on failure. A bare `gh: Not Found (HTTP 404)`
+              # here says nothing about WHICH of the ten repositories the token
+              # cannot read, and every guess costs a full proof cycle. Each of
+              # these commits resolves fine with an ordinary org token, so a 404
+              # means the brokered app installation does not cover that repo --
+              # the surviving consequence of dropping the explicit repository
+              # list in nhp#3734.
+              if ! actual_sha="$(gh api "repos/layervai/${repository}/commits/${expected_sha}" --jq '.sha' 2>/dev/null)"; then
+                echo "::error::cannot read layervai/${repository}@${expected_sha} with the brokered token; the app installation likely does not cover ${repository}" >&2
+                return 1
+              fi
+              if [[ "${actual_sha}" != "${expected_sha}" ]]; then
+                echo "::error::layervai/${repository} resolved ${actual_sha}, expected ${expected_sha}" >&2
+                return 1
+              fi
             done <<'REPOSITORIES'
           frp	frp
           nhp	nhp
