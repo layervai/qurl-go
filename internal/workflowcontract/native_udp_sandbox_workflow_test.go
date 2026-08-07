@@ -100,7 +100,11 @@ func TestNativeUDPSandboxWorkflowIsAttendedStrictAndEvidenceBearing(t *testing.T
 		"is not an ancestor of",
 		`(keys | sort) == ["frp", "qurl_go"]`,
 		`.frp == $root.repositories.frp`,
-		`actual_sha="$(gh api "repos/layervai/${repository}/commits/${expected_sha}" --jq '.sha')"`,
+		// Wrapped in a failure branch that NAMES the repository: a bare
+		// "gh: Not Found (HTTP 404)" does not say which of the ten repos the
+		// brokered token cannot read, and each guess costs a full proof cycle.
+		`gh api "repos/layervai/${repository}/commits/${expected_sha}" --jq '.sha'`,
+		"the app installation likely does not cover",
 		"website\twebsite",
 		// Both candidate shapes and nothing else. The compare predicate is
 		// pinned in full because it is the containment proof: merely resolving
