@@ -380,6 +380,22 @@ jobs:
             local phase="$2"
             local retirement_state="$3"
             local qurl_go_sha="$4"
+            # The deployed artifact must be built from a commit ON the
+            # history of this run -- an ancestor, not necessarily the same commit.
+            # Anything else means proving against a tree the deployment never
+            # came from, which is still refused.
+            local manifest_qurl_go_sha compare_status
+            manifest_qurl_go_sha="$(jq -r '.repositories.qurl_go' "${manifest}")"
+            if [[ "${manifest_qurl_go_sha}" != "${qurl_go_sha}" ]]; then
+              compare_status="$(
+                gh api "repos/${GITHUB_REPOSITORY}/compare/${manifest_qurl_go_sha}...${qurl_go_sha}" \
+                  --jq '.status'
+              )"
+              if [[ "${compare_status}" != "ahead" ]]; then
+                echo "::error::deployed qurl-go artifact was built from ${manifest_qurl_go_sha}, which is not an ancestor of ${qurl_go_sha} (${compare_status})" >&2
+                return 1
+              fi
+            fi
             jq -e \
               --arg phase "${phase}" \
               --arg retirement_state "${retirement_state}" \
@@ -396,7 +412,13 @@ jobs:
               (.repositories | type == "object" and
                 (keys | sort) == ["frp", "nhp", "qurl_connector", "qurl_go", "qurl_integrations", "qurl_mcp", "qurl_python", "qurl_reverse_tunnel_server", "qurl_service", "qurl_typescript", "website"] and
                 all(.[]; type == "string" and test("^[0-9a-f]{40}$")) and
-                .qurl_go == $qurl_go_sha) and
+                # NOT `== $qurl_go_sha`. The manifest records the qurl-go
+                # commit the DEPLOYED artifact was built from, while
+                # $qurl_go_sha is GITHUB_SHA, the tip of main at dispatch. They
+                # diverge the moment anything merges in between. Ancestry is
+                # asserted in shell below, where an API call is possible.
+                # Same defect and same fix as qurl-connector#565.
+                true) and
               (.connector_modules | type == "object" and
                 (keys | sort) == ["frp", "qurl_go"] and
                 all(.[]; type == "string" and test("^[0-9a-f]{40}$")) and

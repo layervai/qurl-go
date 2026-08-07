@@ -92,7 +92,12 @@ func TestNativeUDPSandboxWorkflowIsAttendedStrictAndEvidenceBearing(t *testing.T
 		"-qurl_go-${QURL_GO_SANDBOX_PROOF_PHASE}-[0-9a-f]{32}$",
 		"canonicalize_json()",
 		"reject_duplicate_keys",
-		".qurl_go == $qurl_go_sha",
+		// Ancestry, not equality: the manifest records the commit the DEPLOYED
+		// artifact was built from, while $qurl_go_sha is this run's GITHUB_SHA.
+		// They diverge whenever anything merges between build and dispatch.
+		// Same fix as qurl-connector#565.
+		"compare/${manifest_qurl_go_sha}...${qurl_go_sha}",
+		"is not an ancestor of",
 		`(keys | sort) == ["frp", "qurl_go"]`,
 		`.frp == $root.repositories.frp`,
 		`actual_sha="$(gh api "repos/layervai/${repository}/commits/${expected_sha}" --jq '.sha')"`,
