@@ -35,7 +35,7 @@ to reach one private resource, and it expires on the schedule you set.
 │ your Go app │ ──────────────────────────────────────▶│                  │
 │ (this SDK)  │ ◀───────────── portal link ────────────│   LayerV qURL    │
 └─────────────┘                                        │    Platform      │
-┌─────────────┐  3. open the link                      │  (hub + cells)   │
+┌─────────────┐  3. open the link                      │                  │
 │  recipient  │ ──────────────────────────────────────▶│                  │
 └─────────────┘  browser: HTTPS (*.qurl.site)          └────────▲─────────┘
                  program: EnterPortal (native UDP)              │
@@ -67,8 +67,6 @@ Three roles, three sections of this README:
 | **Issuer** | Software holding LayerV credentials that protects URLs and creates portals. |
 | **Connector** | LayerV's ready-made agent that publishes services from inside your network. |
 | **Agent runtime** | Your own service enrolled directly with `ConnectAgentRuntime`. |
-| **Hub** | The LayerV endpoint an agent registers against; it assigns the agent to a cell. |
-| **Cell** | A LayerV endpoint that terminates portal traffic and agent connections (NHP over UDP 443). |
 
 ## Install
 
@@ -235,7 +233,10 @@ and hand-picked strings are rejected before anything is saved or sent.
 > `layerv.ai` for registration and native opens. No inbound ports, no
 > listeners. If registration fails with `ErrEndpointNoReply`, the usual cause
 > is an egress firewall silently dropping UDP 443 — the error names the exact
-> host to allow.
+> host to allow. Two LayerV-internal names appear in those errors and in
+> deployment files, never in code you write: the **hub** is where an agent
+> registers, and it assigns the agent a **cell**, which carries its portal
+> traffic from then on.
 
 ## Opening links
 
