@@ -516,9 +516,16 @@ jobs:
             echo "::error::invalid deployment producer provenance"
             exit 1
           fi
+          # post_removal may run PAIRED or UNPAIRED. The NHP controller already
+          # admits the unpaired form, so requiring a lineage here made this
+          # client reject exactly the dispatch the controller is allowed to
+          # send. Identical to the connector-side fix in qurl-connector#559.
+          #
+          # A lineage that IS supplied must still be well-formed: absence is
+          # admitted, garbage is not.
           if [[ "${QURL_GO_SANDBOX_PROOF_PHASE}" == "pre_removal" ]]; then
             test -z "${QURL_GO_SANDBOX_PRE_REMOVAL_RUN_ID}"
-          else
+          elif [[ -n "${QURL_GO_SANDBOX_PRE_REMOVAL_RUN_ID}" ]]; then
             [[ "${QURL_GO_SANDBOX_PRE_REMOVAL_RUN_ID}" =~ ^[1-9][0-9]{0,19}$ ]] || {
               echo "::error::invalid pre-removal qurl-go proof lineage"
               exit 1
@@ -716,6 +723,14 @@ jobs:
 
           if [[ "${QURL_GO_SANDBOX_PROOF_PHASE}" == "pre_removal" ]]; then
             test -z "${QURL_GO_SANDBOX_PRE_REMOVAL_RUN_ID}"
+            exit 0
+          fi
+
+          # Unpaired post_removal: everything below is a PAIRWISE differential
+          # against a pre_removal run, so with no lineage there is nothing to
+          # diff. End the step here -- `exit 0` ends the STEP, not the job, so
+          # the sandbox scenarios still run and still produce their evidence.
+          if [[ -z "${QURL_GO_SANDBOX_PRE_REMOVAL_RUN_ID}" ]]; then
             exit 0
           fi
 
