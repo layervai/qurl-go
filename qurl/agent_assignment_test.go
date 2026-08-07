@@ -32,6 +32,34 @@ import (
 
 var assignmentFixtureNow = time.Date(2026, 7, 15, 23, 0, 0, 0, time.UTC)
 
+// assignmentBudgetFloor is the smallest retry budget an assignment test can set
+// before it starts racing the machine it runs on. The budget becomes a real
+// context.WithTimeout over the whole transaction, so it does not just bound the
+// wait for a reply: it also has to cover the resolve, the packet build and the
+// dial that precede conn.Write. That preamble costs microseconds on an idle
+// machine and tens of milliseconds on a loaded runner under -race.
+//
+// At 50ms the margin was too thin, and the failure was silent in the worst way.
+// When the budget expires before the datagram is written, the exchange still
+// reports one attempt and recoveryRequired still clamps Elapsed up to the
+// budget, so every taxonomy assertion passes and only the request count
+// notices -- "requests = 0, want 1" from a hub that was never asked anything
+// (macOS runner of run 31203570841). Tests that must *not* reach their budget
+// fail differently, by losing a terminal reply to a recovery error.
+//
+// Measured under GOMAXPROCS=1 against 64 spinners, harsher than the CI runner:
+// 50ms failed 20/100 runs, 100ms 22/120, 250ms and 500ms 0/100.
+//
+// The bounds below belong to the one test that proves the budget, rather than
+// the socket deadline, ends an in-flight receive. The ceiling has to clear the
+// budget plus scheduling slop and stay well under the socket timeout, which is
+// what that receive would run to if the budget ever stopped bounding it.
+const (
+	assignmentBudgetFloor    = 500 * time.Millisecond
+	assignmentBoundedCeiling = 3 * time.Second
+	assignmentSocketTimeout  = 10 * time.Second
+)
+
 func loadAssignmentFixture(t *testing.T) *conformance.AgentAssignmentFile {
 	t.Helper()
 	fixture, err := conformance.AgentAssignmentGolden()
@@ -228,6 +256,25 @@ func (s *assignmentTestServer) requestBodies() [][]byte {
 		result[i] = append([]byte(nil), s.requests[i]...)
 	}
 	return result
+}
+
+// awaitAssignmentRequests waits for the test hub to have recorded want
+// datagrams and returns what it recorded. A client that stops on its own retry
+// budget can return before the server goroutine has recorded the datagram it
+// already received, so reading the count once races the responder's
+// bookkeeping. The assertion is that the datagrams were sent, not that the
+// recording won that race; a caller's wall-clock bound must therefore be
+// measured before this wait so it stays honest.
+func awaitAssignmentRequests(t *testing.T, server *assignmentTestServer, want int) int {
+	t.Helper()
+	deadline := time.Now().Add(runtimeReplyTimeout)
+	for {
+		got := len(server.requestBodies())
+		if got >= want || !time.Now().Before(deadline) {
+			return got
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 func assignmentTestSetup(t *testing.T, replies ...string) (HubBootstrap, nativeudp.Options, *assignmentTestServer) {
@@ -570,9 +617,13 @@ func TestHubAssignmentRetryDelayCannotExceedRemainingBudget(t *testing.T) {
 func TestHubAssignmentTerminalResultWinsElapsedBudget(t *testing.T) {
 	hub, transport, server := assignmentTestSetup(t, `{"errCode":"52201","errMsg":"identity rejected"}`)
 	clockCalls := 0
+	// The clock jump is what exhausts the budget here, so the budget has to stay
+	// under it while still leaving a loaded runner enough real time to complete
+	// the round trip. Miss that second requirement and the real deadline fires
+	// first, turning the terminal rejection this pins into a recovery error.
 	_, err := RefreshAgentAssignment(
 		context.Background(), hub, "agent-conform", transport,
-		WithAssignmentRetryBudget(4, 100*time.Millisecond),
+		WithAssignmentRetryBudget(4, assignmentBudgetFloor),
 		withAssignmentClock(func() time.Time {
 			clockCalls++
 			if clockCalls == 2 {
@@ -584,17 +635,8 @@ func TestHubAssignmentTerminalResultWinsElapsedBudget(t *testing.T) {
 	if !errors.Is(err, ErrAssignmentIdentityRejected) || errors.Is(err, ErrAssignmentRecoveryRequired) {
 		t.Fatalf("concurrent terminal result = %#v, want terminal identity rejection only", err)
 	}
-	// The client stops at its own retry budget, which can expire before the
-	// server goroutine has recorded the datagram it already received. Poll for
-	// the record rather than reading once: the assertion is that exactly one
-	// request was sent, not that the responder's bookkeeping won the race. The
-	// elapsed bound above is measured before this wait, so it stays honest.
-	deadline := time.Now().Add(2 * time.Second)
-	for len(server.requestBodies()) < 1 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
-	if got := server.requestBodies(); len(got) != 1 {
-		t.Fatalf("requests = %d, want 1", len(got))
+	if got := awaitAssignmentRequests(t, server, 1); got != 1 {
+		t.Fatalf("requests = %d, want 1", got)
 	}
 }
 
@@ -704,21 +746,22 @@ func TestHubAssignmentRejectsInvalidNonceSourcesBeforeNetworkIO(t *testing.T) {
 
 func TestHubAssignmentRetryBudgetBoundsInFlightUDP(t *testing.T) {
 	hub, transport, server := assignmentTestSetup(t)
-	transport.Timeout = 2 * time.Second
+	transport.Timeout = assignmentSocketTimeout
 	started := time.Now()
 	_, err := RefreshAgentAssignment(
 		context.Background(), hub, "agent-conform", transport,
-		WithAssignmentRetryBudget(4, 50*time.Millisecond),
+		WithAssignmentRetryBudget(4, assignmentBudgetFloor),
 	)
+	elapsed := time.Since(started)
 	var recovery *AssignmentRecoveryRequiredError
-	if !errors.As(err, &recovery) || !errors.Is(err, ErrAssignmentRecoveryRequired) || recovery.Attempts != 1 || recovery.Elapsed < 50*time.Millisecond {
+	if !errors.As(err, &recovery) || !errors.Is(err, ErrAssignmentRecoveryRequired) || recovery.Attempts != 1 || recovery.Elapsed < assignmentBudgetFloor {
 		t.Fatalf("error = %#v, want one-attempt recovery-required", err)
 	}
-	if elapsed := time.Since(started); elapsed >= time.Second {
+	if elapsed >= assignmentBoundedCeiling {
 		t.Fatalf("transaction took %s; retry budget did not bound the UDP receive", elapsed)
 	}
-	if len(server.requestBodies()) != 1 {
-		t.Fatalf("requests = %d, want 1", len(server.requestBodies()))
+	if got := awaitAssignmentRequests(t, server, 1); got != 1 {
+		t.Fatalf("requests = %d, want 1", got)
 	}
 }
 
@@ -786,22 +829,30 @@ func TestHubAssignmentParentCancellation(t *testing.T) {
 func TestHubAssignmentSleepFailures(t *testing.T) {
 	t.Run("logical operation budget", func(t *testing.T) {
 		hub, transport, server := assignmentTestSetup(t, `{"errCode":"52200","errMsg":"temporary"}`)
+		sleeps := 0
 		_, err := RefreshAgentAssignment(
 			context.Background(), hub, "agent-conform", transport,
-			WithAssignmentRetryBudget(4, 50*time.Millisecond),
+			WithAssignmentRetryBudget(4, assignmentBudgetFloor),
 			fixedAssignmentClock(),
 			zeroAssignmentJitter(),
 			withAssignmentSleep(func(sleepCtx context.Context, _ time.Duration) error {
+				sleeps++
 				<-sleepCtx.Done()
 				return sleepCtx.Err()
 			}),
 		)
 		var recovery *AssignmentRecoveryRequiredError
-		if !errors.As(err, &recovery) || !errors.Is(err, context.DeadlineExceeded) || recovery.Attempts != 1 || recovery.Elapsed < 50*time.Millisecond {
+		if !errors.As(err, &recovery) || !errors.Is(err, context.DeadlineExceeded) || recovery.Attempts != 1 || recovery.Elapsed < assignmentBudgetFloor {
 			t.Fatalf("transaction-budget sleep error = %#v, want one-attempt recovery with deadline", err)
 		}
-		if len(server.requestBodies()) != 1 {
-			t.Fatalf("requests = %d, want 1", len(server.requestBodies()))
+		// The budget has to run out inside the backoff sleep for this case to be
+		// about the sleep at all, and every assertion above also holds when it runs
+		// out during the exchange instead, so pin the sleep that was waited out.
+		if sleeps != 1 {
+			t.Fatalf("backoff sleeps = %d, want the transaction budget to expire inside one sleep", sleeps)
+		}
+		if got := awaitAssignmentRequests(t, server, 1); got != 1 {
+			t.Fatalf("requests = %d, want 1", got)
 		}
 	})
 
