@@ -205,7 +205,7 @@ stop thinking about the lifecycle:
 - Crashes and dropped replies resume the same registration, for up to 90 days.
 - Leases renew themselves, at startup and mid-run.
 - Relocations are followed automatically, and only ever to a placement named in
-  an authenticated Hub reply — never a guessed or config-supplied address.
+  an authenticated LayerV reply — never a guessed or config-supplied address.
 
 Keep the state file across restarts, and keep the metadata stable: the file is
 what makes a resume possible, and the hostname and version become part of the
