@@ -221,7 +221,17 @@ jobs:
           QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ATTEMPT: ${{ inputs.nhp_controller_run_attempt }}
         shell: bash
         run: |
-          set -euo pipefail
+          set -Eeuo pipefail
+          # Report WHICH line failed. This step has died with a bare
+          # "Process completed with exit code 1" and no annotation at all --
+          # not even a command echo -- which costs a full ~35-minute proof
+          # cycle per guess. qurl-connector's equivalent step already carries
+          # this trap; qurl-go's did not.
+          #
+          # -E so the trap survives into functions, which is where the failure
+          # almost certainly is: the script opens with function definitions and
+          # produced no output before dying.
+          trap 'status=$?; echo "::error::verify-inputs failed at line ${LINENO} (exit ${status})" >&2' ERR
 
           compute_proof_harness_sha256() {
             local proof_file
