@@ -12,7 +12,7 @@ URLs or creates portals.
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/layervai/qurl-go/qurl.svg)](https://pkg.go.dev/github.com/layervai/qurl-go/qurl)
 [![CI](https://github.com/layervai/qurl-go/actions/workflows/ci.yml/badge.svg)](https://github.com/layervai/qurl-go/actions/workflows/ci.yml)
-[![Go 1.26.5+](https://img.shields.io/badge/go-1.26.5%2B-00ADD8)](go.mod)
+[![Go 1.26.4+](https://img.shields.io/badge/go-1.26.4%2B-00ADD8)](go.mod)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 ## Why qURL
@@ -77,7 +77,7 @@ module:
 go get github.com/layervai/qurl-go/qurl@latest
 ```
 
-Requires Go 1.26.5+. Not in a module yet? Run `go mod init example.com/myapp`
+Requires Go 1.26.4+. Not in a module yet? Run `go mod init example.com/myapp`
 first: `go get` outside a module fails with `go.mod file not found`, and
 `go install .../qurl@latest` fails with `is not a main package` because nothing
 here builds a command.
