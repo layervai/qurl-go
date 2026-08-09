@@ -216,6 +216,19 @@ jobs:
       - name: Verify exact proof inputs
         env:
           GH_TOKEN: ${{ steps.proof-token.outputs.token }}
+          # Cross-repository manifest-pin reads only -- see
+          # verify_repository_commits. The brokered token above scopes to
+          # whatever the OPS_ROUTINES installation happens to grant, because
+          # nhp#3734 dropped the explicit repository list from the mint. That
+          # installation does not carry layervai/website, so the pin loop reads
+          # nine repositories and 404s on the tenth. UDP_PROOF_FAST_GH_TOKEN
+          # exists in both proof repositories for exactly this cross-repository
+          # read; qurl-connector's identical step already runs on it.
+          #
+          # Deliberately NOT the step-wide token: every other read here is
+          # layervai/nhp or this repository, which the brokered token covers and
+          # should keep covering -- it is short-lived and least-privilege.
+          MANIFEST_READ_GH_TOKEN: ${{ secrets.UDP_PROOF_FAST_GH_TOKEN }}
           QURL_GO_SANDBOX_DISPATCH_CORRELATION_ID: ${{ inputs.dispatch_correlation_id }}
           QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ID: ${{ inputs.nhp_controller_run_id }}
           QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ATTEMPT: ${{ inputs.nhp_controller_run_attempt }}
@@ -503,17 +516,26 @@ jobs:
           verify_repository_commits() {
             local manifest="$1"
             local manifest_key repository expected_sha actual_sha
+            # Read the pinned manifest commits with the ordinary org token, not
+            # the brokered app token. These reads span the whole release surface
+            # -- ten repositories that this proof does not deploy from and has no
+            # other reason to be installed against -- so gating them on the
+            # OPS_ROUTINES installation's repository coverage made manifest
+            # verification fail for a reason that has nothing to do with the
+            # manifest: nhp#3734 dropped the explicit list from the mint, and the
+            # installation does not carry layervai/website. Nine repositories
+            # passed, website 404'd, and the proof died before it started.
+            if [[ -z "${MANIFEST_READ_GH_TOKEN}" ]]; then
+              echo "::error::UDP_PROOF_FAST_GH_TOKEN is empty; cannot verify cross-repository manifest pins" >&2
+              return 1
+            fi
             while IFS=$'\t' read -r manifest_key repository; do
               expected_sha="$(jq -r --arg key "${manifest_key}" '.repositories[$key]' "${manifest}")"
               # Name the repository on failure. A bare `gh: Not Found (HTTP 404)`
-              # here says nothing about WHICH of the ten repositories the token
-              # cannot read, and every guess costs a full proof cycle. Each of
-              # these commits resolves fine with an ordinary org token, so a 404
-              # means the brokered app installation does not cover that repo --
-              # the surviving consequence of dropping the explicit repository
-              # list in nhp#3734.
-              if ! actual_sha="$(gh api "repos/layervai/${repository}/commits/${expected_sha}" --jq '.sha' 2>/dev/null)"; then
-                echo "::error::cannot read layervai/${repository}@${expected_sha} with the brokered token; the app installation likely does not cover ${repository}" >&2
+              # here says nothing about WHICH of the ten repositories could not be
+              # read, and every guess costs a full proof cycle.
+              if ! actual_sha="$(GH_TOKEN="${MANIFEST_READ_GH_TOKEN}" gh api "repos/layervai/${repository}/commits/${expected_sha}" --jq '.sha' 2>/dev/null)"; then
+                echo "::error::cannot read layervai/${repository}@${expected_sha}" >&2
                 return 1
               fi
               if [[ "${actual_sha}" != "${expected_sha}" ]]; then
@@ -533,7 +555,7 @@ jobs:
           website	website
           REPOSITORIES
             expected_sha="$(jq -r '.connector_modules.qurl_go' "${manifest}")"
-            actual_sha="$(gh api "repos/layervai/qurl-go/commits/${expected_sha}" --jq '.sha')"
+            actual_sha="$(GH_TOKEN="${MANIFEST_READ_GH_TOKEN}" gh api "repos/layervai/qurl-go/commits/${expected_sha}" --jq '.sha')"
             test "${actual_sha}" = "${expected_sha}"
           }
 
