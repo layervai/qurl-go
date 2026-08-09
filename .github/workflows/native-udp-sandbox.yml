@@ -1100,17 +1100,32 @@ jobs:
           import sys
 
           root = sys.argv[1]
-          expected = {
+          # REQUIRED, not EXACT. These are the four files this workflow actually
+          # consumes below: two are cmp'd against the locally rebuilt copies,
+          # one is hashed into the environment, one is size-bounded and pinned.
+          #
+          # An exact-set assertion makes every ADDITIVE producer change a
+          # cross-repo breakage: the nhp producer began publishing
+          # retirement-probe-targets.json, and this step failed with
+          # "artifact file set drift" even though all four consumed files were
+          # present and byte-identical. The proof leg had no way to pass until
+          # a qurl-go change landed, for a file it never reads.
+          #
+          # A missing required file is still fatal -- that is the property worth
+          # keeping. The regular-file check below still covers EVERY entry, so an
+          # extra file cannot smuggle in a symlink.
+          required = {
               "deployment-manifest.json",
               "deployment-provenance.json",
               "deployment-runtime-inputs.json",
               "orchestrator-evidence.json",
           }
           entries = {entry.name: entry for entry in os.scandir(root)}
-          if set(entries) != expected:
+          missing = required - set(entries)
+          if missing:
               raise SystemExit(
-                  f"deployment producer artifact file set drift: "
-                  f"got {sorted(entries)}, want {sorted(expected)}"
+                  f"deployment producer artifact is missing required files: "
+                  f"{sorted(missing)}; got {sorted(entries)}"
               )
           for name, entry in entries.items():
               mode = entry.stat(follow_symlinks=False).st_mode
