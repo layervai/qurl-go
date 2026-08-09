@@ -101,10 +101,10 @@ func TestNativeUDPSandboxWorkflowIsAttendedStrictAndEvidenceBearing(t *testing.T
 		`(keys | sort) == ["frp", "qurl_go"]`,
 		`.frp == $root.repositories.frp`,
 		// Wrapped in a failure branch that NAMES the repository: a bare
-		// "gh: Not Found (HTTP 404)" does not say which of the ten repos the
-		// brokered token cannot read, and each guess costs a full proof cycle.
+		// "gh: Not Found (HTTP 404)" does not say which of the ten repos could
+		// not be read, and each guess costs a full proof cycle.
 		`gh api "repos/layervai/${repository}/commits/${expected_sha}" --jq '.sha'`,
-		"the app installation likely does not cover",
+		"::error::cannot read layervai/${repository}@${expected_sha}",
 		"website\twebsite",
 		// Both candidate shapes and nothing else. The compare predicate is
 		// pinned in full because it is the containment proof: merely resolving
@@ -133,6 +133,13 @@ func TestNativeUDPSandboxWorkflowIsAttendedStrictAndEvidenceBearing(t *testing.T
 		"QURL_GO_SANDBOX_PROOF_HARNESS_SHA256",
 		"pre_removal|post_removal",
 		"Verify exact proof inputs",
+		// The manifest pin loop must not run on the brokered app token. That
+		// token scopes to whatever the OPS_ROUTINES installation grants, which
+		// does not carry every repository the manifest pins -- website 404'd and
+		// took the whole proof with it.
+		"MANIFEST_READ_GH_TOKEN: ${{ secrets.UDP_PROOF_FAST_GH_TOKEN }}",
+		`GH_TOKEN="${MANIFEST_READ_GH_TOKEN}" gh api "repos/layervai/${repository}/commits/${expected_sha}"`,
+		`GH_TOKEN="${MANIFEST_READ_GH_TOKEN}" gh api "repos/layervai/qurl-go/commits/${expected_sha}"`,
 		"Download authenticated deployment-producer evidence",
 		"artifact-ids: ${{ inputs.deployment_artifact_id }}",
 		"repository: layervai/nhp",
@@ -759,6 +766,27 @@ func TestNativeUDPSandboxRejectsMissingRepositoryCommit(t *testing.T) {
 		"",
 		manifest,
 		map[string]string{"MOCK_MISSING_REPOSITORY": "website"},
+		false,
+	)
+}
+
+// TestNativeUDPSandboxRejectsEmptyManifestReadToken proves the pin loop refuses
+// to run unauthenticated. An empty UDP_PROOF_FAST_GH_TOKEN would otherwise send
+// every read out anonymously, where the private repositories in the manifest
+// 404 exactly as an uncovered installation does -- a missing secret would read
+// as a bad pin.
+func TestNativeUDPSandboxRejectsEmptyManifestReadToken(t *testing.T) {
+	fixture := newNativeUDPProofFixture(t)
+	manifest := deploymentManifestBytes(t, "pre_removal", fixture.postSHA)
+	verifyNativeUDPManifest(
+		t,
+		fixture,
+		fixture.postSHA,
+		t.TempDir(),
+		"pre_removal",
+		"",
+		manifest,
+		map[string]string{"MANIFEST_READ_GH_TOKEN": ""},
 		false,
 	)
 }
@@ -1866,6 +1894,11 @@ func verifyNativeUDPManifest(
 		"GITHUB_SHA":                   buildSHA,
 		"QURL_GO_SANDBOX_EXPECTED_SHA": buildSHA,
 		"QURL_GO_SANDBOX_PROOF_PHASE":  phase,
+		// The cross-repository manifest-pin reads run on this token rather than
+		// the brokered app token, which does not cover every repository the
+		// manifest pins. The mock ignores its value; it only has to be set,
+		// because the step refuses to verify pins with an empty one.
+		"MANIFEST_READ_GH_TOKEN": "manifest-read-test-token",
 		"QURL_GO_SANDBOX_DISPATCH_CORRELATION_ID": nativeUDPDispatchCorrelation(
 			"qurl_go",
 			phase,
