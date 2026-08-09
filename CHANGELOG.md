@@ -8,6 +8,27 @@ and are marked **Breaking** with what to change.
 
 ## Unreleased
 
+- `ErrInsecureAgentStatePermissions` now names the exact path and the exact
+  command. Pointing a store at a path inside a directory that already exists at
+  `0755` — a working directory, `$HOME`, anything `mkdir` made under the usual
+  umask — failed with `state directory mode is 755, want 700` and left the
+  operator to work out both which directory and what to run. It now ends
+  `run: chmod 700 <dir>`, and the file-mode and writable-ancestor variants carry
+  their own remedies; the ancestor case names the offending ancestor, which no
+  `chmod` on the state directory could have fixed. Behavior is unchanged: the
+  SDK still fails closed and still creates a missing state directory `0700`
+  itself, rather than tightening a directory the caller already uses.
+- An OTP enrollment that runs out its assignment ticket no longer blames the
+  caller's callback. The assigned-cell OTP dispatch carries no acknowledgement,
+  so "your provider was too slow" and "LayerV never sent the code" are the same
+  observation at the client; the error now names both and says to check the
+  credential's mailbox before debugging the callback.
+- Corrected the headless enrollment guide, which listed the retired durable
+  `agent` kind among the kinds `WithAgentRuntimeHeadlessEnrollment` accepts. It
+  accepts `connector_bootstrap` and `bootstrap` only; a legacy `qurl:agent`
+  key needs `WithAgentRuntimeAllowedRegistrationKeyKinds`. The option is also
+  now documented as replacing the OTP provider and nothing else — every other
+  option, `WithAgentRuntimeMetadata` included, stays.
 - README overhaul: architecture diagram and glossary, credential setup via the
   [LayerV dashboard](https://layerv.ai/qurl/dashboard/keys), network
   requirements (outbound-only, NHP over UDP 443), and module/versioning notes.

@@ -672,6 +672,93 @@ func TestPinnedAgentState_PlaintextAndSealedShareContinuityContract(t *testing.T
 	}
 }
 
+// TestInsecureAgentStatePermissions_NameThePathAndTheRemedy pins the first thing
+// every integrator hits. Pointing a store at a path inside a directory that
+// already exists at 0755 — a working directory, $HOME, anything `mkdir` made
+// under the default umask — fails closed, and it should, because tightening a
+// directory the caller uses for other things is not the SDK's call to make. But
+// "state directory mode is 755, want 700" left an operator to work out both
+// which directory and what to run. The message now carries the exact command.
+func TestInsecureAgentStatePermissions_NameThePathAndTheRemedy(t *testing.T) {
+	t.Run("existing directory left group- and world-readable", func(t *testing.T) {
+		dir := filepath.Join(secureAgentStateTestDir(t), "project")
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		_, err := OpenFileAgentState(filepath.Join(dir, "agent-state.json"))
+		if !errors.Is(err, ErrInsecureAgentStatePermissions) {
+			t.Fatalf("open in 0755 directory = %v, want ErrInsecureAgentStatePermissions", err)
+		}
+		if want := "chmod 700 " + canonicalPinnedStatePath(dir); !strings.Contains(err.Error(), want) {
+			t.Fatalf("guidance = %q, want the exact remedy %q", err, want)
+		}
+	})
+
+	t.Run("existing state file left readable", func(t *testing.T) {
+		dir := secureAgentStateTestDir(t)
+		path := filepath.Join(dir, "agent-state.json")
+		if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_, err := OpenFileAgentState(path)
+		if !errors.Is(err, ErrInsecureAgentStatePermissions) {
+			t.Fatalf("open with 0644 state file = %v, want ErrInsecureAgentStatePermissions", err)
+		}
+		if want := "chmod 600 " + canonicalPinnedStatePath(path); !strings.Contains(err.Error(), want) {
+			t.Fatalf("guidance = %q, want the exact remedy %q", err, want)
+		}
+	})
+
+	// A writable ancestor is the one case chmod on the state directory cannot
+	// fix, so the message has to name the offending ancestor rather than the
+	// path the caller passed.
+	t.Run("writable non-sticky ancestor names itself", func(t *testing.T) {
+		ancestor := filepath.Join(secureAgentStateTestDir(t), "shared")
+		if err := os.Mkdir(ancestor, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(ancestor, 0o777); err != nil {
+			t.Fatal(err)
+		}
+		_, err := OpenFileAgentState(filepath.Join(ancestor, "state", "agent-state.json"))
+		if !errors.Is(err, ErrInsecureAgentStatePermissions) {
+			t.Fatalf("open below a 0777 ancestor = %v, want ErrInsecureAgentStatePermissions", err)
+		}
+		canonical := canonicalPinnedStatePath(ancestor)
+		if !strings.Contains(err.Error(), canonical) || !strings.Contains(err.Error(), "chmod go-w "+canonical) {
+			t.Fatalf("guidance = %q, want it to name ancestor %q and its remedy", err, canonical)
+		}
+	})
+
+	// The remedy is guidance, not something the SDK applies behind the caller's
+	// back: a rejected open must leave the directory exactly as it found it.
+	t.Run("rejection changes nothing on disk", func(t *testing.T) {
+		dir := filepath.Join(secureAgentStateTestDir(t), "project")
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := OpenFileAgentState(filepath.Join(dir, "agent-state.json")); err == nil {
+			t.Fatal("open in 0755 directory succeeded, want a closed failure")
+		}
+		info, err := os.Stat(dir)
+		if err != nil || info.Mode().Perm() != 0o755 {
+			t.Fatalf("directory mode = %v (err %v), want an untouched 0755", info.Mode().Perm(), err)
+		}
+		if _, err := os.Lstat(filepath.Join(dir, "agent-state.json")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("rejected open created state: %v", err)
+		}
+	})
+}
+
 func TestWithAgentSetupLock_FinalContinuityFailureOverridesSuccess(t *testing.T) {
 	dir := filepath.Join(secureAgentStateTestDir(t), "state")
 	store, err := OpenFileAgentState(filepath.Join(dir, "agent.json"))

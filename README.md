@@ -223,11 +223,13 @@ saved registration.
 your credential; `readOneTimeCode` is the callback you write to return it —
 poll a mailbox, page an operator, your call. It should return exactly 8 decimal
 digits and honor its context. Runtimes with no mailbox in reach (sealed
-appliances, air-gapped builders) enroll with a pre-issued credential plus
-`WithAgentRuntimeHeadlessEnrollment()` instead — an explicit opt-out, mutually
-exclusive with an OTP provider. Not sure which credential kind you hold? Run
-the default and read the error; a wrong first guess costs nothing and the retry
-reuses the same agent identity. The
+appliances, air-gapped builders) enroll with a pre-issued credential and swap
+`WithAgentRuntimeOTPProvider` — that line only — for
+`WithAgentRuntimeHeadlessEnrollment()`: an explicit opt-out, mutually exclusive
+with an OTP provider, and not a shorter form of the call. Every other option
+stays, `WithAgentRuntimeMetadata` included. Not sure which credential kind you
+hold? Run the default and read the error; a wrong first guess costs nothing and
+the retry reuses the same agent identity. The
 [decision table](docs/register-an-agent.md) has every path, including renewing
 without holding an enrollment credential at runtime and
 [taking manual control](docs/register-an-agent.md#taking-manual-control) of
@@ -285,6 +287,7 @@ Match errors by type or sentinel, not message text:
 | --- | --- |
 | `qurl.ErrInvalidClientConfig` | Resource-client credentials or options are malformed |
 | `qurl.ErrInvalidRegisterConfig` | Native lifecycle inputs are malformed |
+| `qurl.ErrInsecureAgentStatePermissions` | The state directory or file is readable beyond its owner. The message names the exact `chmod` to run; the SDK never widens or tightens a path you already own |
 | `qurl.ErrAssignmentRecoveryRequired` | Registration ran out of retries; start recovery |
 | `qurl.ErrEndpointNoReply` | The host resolved and every datagram was sent, but nothing answered: the server is down or the network path drops UDP to it silently. `*qurl.EndpointNoReplyError` carries the destination and attempt count |
 | `qurl.ErrAgentBindingPersistence` | A state save failed or its acknowledgement was lost; reload before retry because the refreshed assignment may already be durable |
