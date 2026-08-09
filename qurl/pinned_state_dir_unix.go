@@ -95,7 +95,7 @@ func openPinnedStateDir(path, label string, mode pinnedStateDirOpenMode) (*pinne
 	if err := unix.Fstat(rootFD, &rootStat); err != nil {
 		return nil, fmt.Errorf("%w: stat filesystem root: %w", ErrAgentStateContinuity, err)
 	}
-	if err := validateTrustedAncestorStat(&rootStat, "filesystem root"); err != nil {
+	if err := validateTrustedAncestorStat(&rootStat, "filesystem root", string(filepath.Separator)); err != nil {
 		return nil, err
 	}
 
@@ -104,10 +104,14 @@ func openPinnedStateDir(path, label string, mode pinnedStateDirOpenMode) (*pinne
 	if clean == string(filepath.Separator) {
 		components = nil
 	}
+	// Accumulate the traversed prefix so a rejected ancestor names itself. The
+	// operator otherwise has to guess which component of a long path failed.
+	traversed := string(filepath.Separator)
 	for _, component := range components {
 		if component == "" || component == "." || component == ".." {
 			return nil, fmt.Errorf("%w: invalid %s directory component", ErrInvalidBootstrapConfig, label)
 		}
+		traversed = filepath.Join(traversed, component)
 		nextFD, openErr := unix.Openat(currentFD, component, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
 		created := false
 		if errors.Is(openErr, unix.ENOENT) && mode == pinnedStateDirWritable {
@@ -134,7 +138,7 @@ func openPinnedStateDir(path, label string, mode pinnedStateDirOpenMode) (*pinne
 			_ = unix.Close(nextFD)
 			return nil, fmt.Errorf("%w: stat %s directory component: %w", ErrAgentStateContinuity, label, err)
 		}
-		if err := validateTrustedAncestorStat(&nextStat, label+" directory component"); err != nil {
+		if err := validateTrustedAncestorStat(&nextStat, label+" directory component", traversed); err != nil {
 			_ = unix.Close(nextFD)
 			return nil, err
 		}
@@ -169,7 +173,7 @@ func openPinnedStateDir(path, label string, mode pinnedStateDirOpenMode) (*pinne
 	if err := unix.Fstat(currentFD, &stat); err != nil {
 		return nil, fmt.Errorf("%w: stat pinned %s directory: %w", ErrAgentStateContinuity, label, err)
 	}
-	if err := validatePinnedDirStat(&stat); err != nil {
+	if err := validatePinnedDirStat(&stat, clean); err != nil {
 		return nil, err
 	}
 	rootOpen = false
@@ -181,27 +185,32 @@ func openPinnedStateDir(path, label string, mode pinnedStateDirOpenMode) (*pinne
 	}, nil
 }
 
-func validatePinnedDirStat(stat *unix.Stat_t) error {
+func validatePinnedDirStat(stat *unix.Stat_t, path string) error {
 	if stat == nil || stat.Mode&unix.S_IFMT != unix.S_IFDIR {
 		return fmt.Errorf("%w: pinned state path is not a directory", ErrAgentStateContinuity)
 	}
 	if stat.Mode&0o777 != 0o700 {
-		return fmt.Errorf("%w: %w: state directory mode is %03o, want 700", ErrAgentStateContinuity, ErrInsecureAgentStatePermissions, stat.Mode&0o777)
+		// The SDK creates a missing state directory 0700 itself, so this only
+		// fires on a directory that already existed — most often a working
+		// directory or $HOME left 0755 by the default umask. Tightening it here
+		// would silently narrow a directory the caller uses for other things, so
+		// name the exact remedy instead of applying it.
+		return fmt.Errorf("%w: %w: state directory mode is %03o, want 700; run: chmod 700 %s", ErrAgentStateContinuity, ErrInsecureAgentStatePermissions, stat.Mode&0o777, path)
 	}
 	if int64(stat.Uid) != int64(unix.Geteuid()) {
-		return fmt.Errorf("%w: state directory is not owned by the effective user", ErrAgentStateContinuity)
+		return fmt.Errorf("%w: state directory %s is not owned by the effective user", ErrAgentStateContinuity, path)
 	}
 	return nil
 }
 
-func validateTrustedAncestorStat(stat *unix.Stat_t, label string) error {
+func validateTrustedAncestorStat(stat *unix.Stat_t, label, path string) error {
 	if stat == nil || stat.Mode&unix.S_IFMT != unix.S_IFDIR {
-		return fmt.Errorf("%w: %s is not a directory", ErrAgentStateContinuity, label)
+		return fmt.Errorf("%w: %s %s is not a directory", ErrAgentStateContinuity, label, path)
 	}
 	uid := int64(stat.Uid)
 	euid := int64(unix.Geteuid())
 	if uid != 0 && uid != euid {
-		return fmt.Errorf("%w: %s is not owned by root or the effective user", ErrAgentStateContinuity, label)
+		return fmt.Errorf("%w: %s %s is not owned by root or the effective user", ErrAgentStateContinuity, label, path)
 	}
 	if stat.Mode&0o022 == 0 {
 		return nil
@@ -212,7 +221,7 @@ func validateTrustedAncestorStat(stat *unix.Stat_t, label string) error {
 	if uid == 0 && stat.Mode&unix.S_ISVTX != 0 {
 		return nil
 	}
-	return fmt.Errorf("%w: %w: %s mode is %04o; writable ancestors must be root-owned and sticky", ErrAgentStateContinuity, ErrInsecureAgentStatePermissions, label, stat.Mode&0o7777)
+	return fmt.Errorf("%w: %w: %s mode is %04o; every ancestor must be closed to group and other unless it is root-owned and sticky; run: chmod go-w %s, or choose a state path whose parents you control", ErrAgentStateContinuity, ErrInsecureAgentStatePermissions, path, stat.Mode&0o7777, path)
 }
 
 func (d *pinnedStateDirImpl) close() error {
@@ -229,7 +238,7 @@ func (d *pinnedStateDirImpl) validateContinuity() error {
 	if err := unix.Fstat(d.fd, &held); err != nil {
 		return fmt.Errorf("%w: stat retained directory: %w", ErrAgentStateContinuity, err)
 	}
-	if err := validatePinnedDirStat(&held); err != nil {
+	if err := validatePinnedDirStat(&held, d.path); err != nil {
 		return err
 	}
 	if held.Dev != d.stat.Dev || held.Ino != d.stat.Ino {
@@ -247,7 +256,7 @@ func (d *pinnedStateDirImpl) validateContinuity() error {
 	if current.Dev != d.stat.Dev || current.Ino != d.stat.Ino {
 		return fmt.Errorf("%w: state directory namespace was replaced", ErrAgentStateContinuity)
 	}
-	if err := validatePinnedDirStat(&current); err != nil {
+	if err := validatePinnedDirStat(&current, d.path); err != nil {
 		return err
 	}
 	d.mu.Lock()
@@ -285,7 +294,7 @@ func openExistingDirNoFollow(path string) (int, error) {
 		_ = unix.Close(rootFD)
 		return -1, err
 	}
-	if err := validateTrustedAncestorStat(&rootStat, "filesystem root"); err != nil {
+	if err := validateTrustedAncestorStat(&rootStat, "filesystem root", string(filepath.Separator)); err != nil {
 		_ = unix.Close(rootFD)
 		return -1, err
 	}
@@ -293,7 +302,9 @@ func openExistingDirNoFollow(path string) (int, error) {
 	if filepath.Clean(path) == string(filepath.Separator) {
 		components = nil
 	}
+	traversed := string(filepath.Separator)
 	for _, component := range components {
+		traversed = filepath.Join(traversed, component)
 		nextFD, err := unix.Openat(currentFD, component, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
 		if err != nil {
 			if currentFD != rootFD {
@@ -311,7 +322,7 @@ func openExistingDirNoFollow(path string) (int, error) {
 			_ = unix.Close(rootFD)
 			return -1, err
 		}
-		if err := validateTrustedAncestorStat(&nextStat, "state directory ancestor"); err != nil {
+		if err := validateTrustedAncestorStat(&nextStat, "state directory ancestor", traversed); err != nil {
 			_ = unix.Close(nextFD)
 			if currentFD != rootFD {
 				_ = unix.Close(currentFD)
@@ -330,12 +341,15 @@ func openExistingDirNoFollow(path string) (int, error) {
 	return currentFD, nil
 }
 
-func validatePinnedRegularStat(stat *unix.Stat_t, label string) error {
+func validatePinnedRegularStat(stat *unix.Stat_t, label, path string) error {
 	if stat == nil || stat.Mode&unix.S_IFMT != unix.S_IFREG {
 		return fmt.Errorf("%w: %s must be a regular file", ErrAgentStateContinuity, label)
 	}
 	if stat.Mode&0o777 != 0o600 {
-		return fmt.Errorf("%w: %w: %s mode is %03o, want 600", ErrAgentStateContinuity, ErrInsecureAgentStatePermissions, label, stat.Mode&0o777)
+		// Every file this store writes is created 0600, so a wider mode means an
+		// existing file was restored, copied, or edited by something else. It is a
+		// credential file, so widen nothing automatically.
+		return fmt.Errorf("%w: %w: %s mode is %03o, want 600; run: chmod 600 %s", ErrAgentStateContinuity, ErrInsecureAgentStatePermissions, label, stat.Mode&0o777, path)
 	}
 	if int64(stat.Uid) != int64(unix.Geteuid()) {
 		return fmt.Errorf("%w: %s is not owned by the effective user", ErrAgentStateContinuity, label)
@@ -347,17 +361,18 @@ func validatePinnedRegularStat(stat *unix.Stat_t, label string) error {
 }
 
 func (d *pinnedStateDirImpl) validateOpenEntry(fd int, name, label string) error {
+	entryPath := filepath.Join(d.path, name)
 	var opened, entry unix.Stat_t
 	if err := unix.Fstat(fd, &opened); err != nil {
 		return fmt.Errorf("%w: stat opened %s: %w", ErrAgentStateContinuity, label, err)
 	}
-	if err := validatePinnedRegularStat(&opened, label); err != nil {
+	if err := validatePinnedRegularStat(&opened, label, entryPath); err != nil {
 		return err
 	}
 	if err := unix.Fstatat(d.fd, name, &entry, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 		return fmt.Errorf("%w: stat %s directory entry: %w", ErrAgentStateContinuity, label, err)
 	}
-	if err := validatePinnedRegularStat(&entry, label); err != nil {
+	if err := validatePinnedRegularStat(&entry, label, entryPath); err != nil {
 		return err
 	}
 	if opened.Dev != entry.Dev || opened.Ino != entry.Ino {

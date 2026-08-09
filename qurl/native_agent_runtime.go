@@ -1358,7 +1358,11 @@ func (c *nativeAgentRuntimeConfig) registrationCredential(ctx context.Context, s
 				return "", ctx.Err()
 			}
 			if providerCtx.Err() != nil {
-				return "", fmt.Errorf("%w: OTP provider did not supply a code before the assignment ticket's safe registration window closed: %w", ErrAssignmentTicketExpired, err)
+				// Name both causes. The assigned-cell OTP dispatch is one-way — it
+				// carries no acknowledgement — so a code LayerV never sent and a
+				// callback that never returned one are the same observation here, and
+				// blaming the callback alone sends integrators to debug working code.
+				return "", fmt.Errorf("%w: no one-time code arrived before the assignment ticket's safe registration window closed. Either the OTP provider did not return one in time, or LayerV never delivered a code to the address on this credential; the OTP dispatch is one-way, so the SDK cannot tell those apart. Check that address before assuming the callback is at fault: %w", ErrAssignmentTicketExpired, err)
 			}
 			return "", fmt.Errorf("qurl: OTP provider: %w", err)
 		}

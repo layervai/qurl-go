@@ -154,11 +154,27 @@ client, binding, err := qurl.ConnectAgentRuntime(ctx, store,
 )
 ```
 
-This is the escape hatch, not the shortcut. It accepts exactly the pre-issued
-kinds that carry their own proof (`connector_bootstrap`, `bootstrap`, `agent`)
-and refuses an OTP credential, since honoring one would need the code this
-runtime just said it cannot get. Reach for it only when no address — the
-runtime's own, an operator's, or a shared alias — can receive the code.
+This is the escape hatch, not the shortcut. It accepts exactly the two one-shot
+enrollment token kinds that carry their own proof (`connector_bootstrap` and
+`bootstrap`) and refuses an OTP credential, since honoring one would need the
+code this runtime just said it cannot get. The retired durable `agent` kind is
+not admitted here either; a legacy `qurl:agent`-scoped key needs the explicit
+[`WithAgentRuntimeAllowedRegistrationKeyKinds`](#accepting-either-kind). Reach
+for this only when no address — the runtime's own, an operator's, or a shared
+alias — can receive the code.
+
+**`WithAgentRuntimeHeadlessEnrollment` replaces the OTP provider and nothing
+else.** Keep every other option, `WithAgentRuntimeMetadata` included — it is not
+a shorter form of the call. If registration comes back rejecting the input, the
+error names the options to look at:
+
+```
+qurl: native assigned-cell registration input rejected (errCode="52109");
+correct WithAgentRuntimeIdentity, WithAgentRuntimeMetadata, or the producer
+contract before retrying
+```
+
+Match it with `errors.Is(err, qurl.ErrRegistrationInvalidInput)`.
 
 **It cannot be combined with an OTP provider.** One option says no code can be
 read; the other says how to read one. Passing both is a contradiction, not a
@@ -265,6 +281,36 @@ the property a service holding no enrollment secret wants.
 
 Whichever you choose, the file must survive restarts. Losing it means losing the
 ability to resume, and you will need to enroll again.
+
+### Point it at a directory the SDK can create
+
+State is a credential file, so the SDK requires its directory to be `0700` and
+the file itself `0600`, and it refuses to run rather than widen anything.
+
+When the directory does **not** exist yet the SDK creates it `0700` and you
+never think about this — which is why the `/var/lib/layerv/qurl/` paths above
+just work. The failure everyone hits is pointing it at a directory that already
+exists: `mkdir` under the usual `umask 022` leaves `0755`, and so do most
+working directories and `$HOME`.
+
+```go
+// The parent already exists at 0755, so this fails closed.
+store, err := qurl.OpenFileAgentState("./agent-state.json")
+```
+
+```
+qurl: agent state namespace continuity lost: qurl: insecure agent state
+permissions: state directory mode is 755, want 700; run: chmod 700 /srv/myapp
+```
+
+Run the `chmod` the error names, or give the SDK a subdirectory it can create
+itself (`./state/agent-state.json`). The SDK will not tighten a directory you
+already use for other things, and it never loosens one.
+
+Match it with `errors.Is(err, qurl.ErrInsecureAgentStatePermissions)`. The same
+error covers a state file left readable (`chmod 600`) and an ancestor directory
+that is group- or world-writable — that last one names the offending ancestor,
+because no `chmod` on the state directory can fix it.
 
 ## Taking manual control
 
