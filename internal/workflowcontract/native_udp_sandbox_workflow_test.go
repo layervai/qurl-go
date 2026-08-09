@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -1726,6 +1727,46 @@ func publishedProofEnvironment(runnerTemp string) map[string]string {
 		"RUNNER_TEMP":                              runnerTemp,
 		"QURL_GO_SANDBOX_INVENTORY_PATH":           filepath.Join(runnerTemp, "pre_retirement_scenarios.json"),
 		"QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_PATH": filepath.Join(runnerTemp, "sandbox-deployment-manifest.json"),
+	}
+}
+
+// The precondition loop only protects a gate if it names every proof-produced
+// value that gate goes on to dereference: `set -u` fires on the FIRST unguarded
+// one, and any name the loop misses is a `${...}: unbound variable` waiting for
+// the next partial export. Nothing in bash enforces that superset, so pin it --
+// adding a dereference without adding it to the loop must fail here, not in a
+// 35-minute proof cycle.
+func TestNativeUDPSandboxAlwaysGuardedGatesGuardEveryValueTheyDereference(t *testing.T) {
+	workflow := readWorkflow(t, "native-udp-sandbox.yml")
+	guardList := regexp.MustCompile(`(?s)for proof_input in \\\n(.*?); do`)
+	// Bare only: `${NAME:-...}` already survives `set -u` by itself, and the
+	// loop's own `${!proof_input:-}` is an indirection, not a dereference.
+	dereference := regexp.MustCompile(`\$\{(QURL_GO_SANDBOX_[A-Za-z0-9_]+)\}`)
+	for _, step := range []string{
+		"Enforce qurl-go scenario evidence",
+		"Require complete qurl-go proof publication",
+	} {
+		t.Run(step, func(t *testing.T) {
+			script := stepRun(t, workflow, step)
+			listed := guardList.FindStringSubmatch(script)
+			if listed == nil {
+				t.Fatalf("step %q has no unreached-proof precondition loop", step)
+			}
+			guarded := make(map[string]bool)
+			for _, field := range strings.Fields(strings.ReplaceAll(listed[1], `\`, " ")) {
+				guarded[field] = true
+			}
+			if len(guarded) == 0 {
+				t.Fatalf("step %q guards no proof inputs at all", step)
+			}
+			for _, match := range dereference.FindAllStringSubmatch(script, -1) {
+				if !guarded[match[1]] {
+					t.Errorf("step %q dereferences %s bare but does not guard it; "+
+						"an upstream failure will kill the step on `unbound variable` again",
+						step, match[1])
+				}
+			}
+		})
 	}
 }
 
