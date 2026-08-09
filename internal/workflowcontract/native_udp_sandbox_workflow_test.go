@@ -153,7 +153,7 @@ func TestNativeUDPSandboxWorkflowIsAttendedStrictAndEvidenceBearing(t *testing.T
 		`"deployment-provenance.json"`,
 		`"deployment-runtime-inputs.json"`,
 		`"orchestrator-evidence.json"`,
-		"deployment producer artifact file set drift",
+		"deployment producer artifact is missing required files",
 		`cmp -- "${producer_dir}/deployment-manifest.json" "${RUNNER_TEMP}/sandbox-deployment-manifest.json"`,
 		`cmp -- "${producer_dir}/deployment-runtime-inputs.json" "${RUNNER_TEMP}/deployment-runtime-inputs.json"`,
 		"QURL_GO_SANDBOX_ORCHESTRATOR_EVIDENCE_PATH",
@@ -376,8 +376,16 @@ func TestNativeUDPOrchestratorEvidenceMaterializationFailsClosed(t *testing.T) {
 				t.Fatal(err)
 			}
 		},
-		"extra file": func(t *testing.T, producerDir string) {
-			if err := os.WriteFile(filepath.Join(producerDir, "unexpected.json"), []byte("{}"), 0o600); err != nil {
+		// An extra REGULAR file is tolerated (see the "extra regular file" case
+		// below) because the producer may publish artifacts this leg does not
+		// read. An extra SYMLINK is still fatal: tolerating additions must not
+		// become a way to smuggle a link into the artifact directory.
+		"extra symlink": func(t *testing.T, producerDir string) {
+			target := filepath.Join(t.TempDir(), "smuggled.json")
+			if err := os.WriteFile(target, []byte("{}"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, filepath.Join(producerDir, "unexpected.json")); err != nil {
 				t.Fatal(err)
 			}
 		},
@@ -424,6 +432,26 @@ func TestNativeUDPOrchestratorEvidenceMaterializationFailsClosed(t *testing.T) {
 			}, false)
 		})
 	}
+
+	// The step requires the four files this leg consumes; it does not pin the
+	// directory to exactly those four. The nhp producer publishes
+	// retirement-probe-targets.json, which this workflow never reads, and an
+	// exact-set assertion turned that additive change into a cross-repo
+	// breakage the proof could not clear from this side.
+	t.Run("extra regular file", func(t *testing.T) {
+		runnerTemp, producerDir := createArtifact(t)
+		if err := os.WriteFile(
+			filepath.Join(producerDir, "retirement-probe-targets.json"),
+			[]byte("{}"),
+			0o600,
+		); err != nil {
+			t.Fatal(err)
+		}
+		runScript(t, t.TempDir(), script, map[string]string{
+			"RUNNER_TEMP": runnerTemp,
+			"GITHUB_ENV":  filepath.Join(runnerTemp, "github.env"),
+		}, true)
+	})
 }
 
 func TestNativeUDPSandboxRejectsMalformedNHPControllerRunIdentity(t *testing.T) {
