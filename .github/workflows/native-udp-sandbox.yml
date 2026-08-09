@@ -1392,6 +1392,33 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # `if: always()` means this gate also runs on a proof that already
+          # died upstream -- and every value it checks is exported by "Verify
+          # exact proof inputs". Under `set -u` the first dereference then
+          # killed the step with `QURL_GO_SANDBOX_INVENTORY_PATH: unbound
+          # variable`, stacking a meaningless red step on top of the one real
+          # failure: exactly the cost #152 and #155 removed elsewhere. Say what
+          # happened instead. Still exit 1 -- a proof that never produced its
+          # inputs has proven nothing -- and leave every assertion below
+          # untouched, so a proof that DID run still fails here on genuinely
+          # missing evidence.
+          missing_proof_inputs=""
+          for proof_input in \
+            QURL_GO_SANDBOX_INVENTORY_PATH \
+            QURL_GO_SANDBOX_INVENTORY_SHA256 \
+            QURL_GO_SANDBOX_INVENTORY_MAPPING_SHA256 \
+            QURL_GO_SANDBOX_SCENARIO_CONTRACT_SHA256 \
+            QURL_GO_SANDBOX_RETIRED_LIFECYCLE_SURFACE_PATH \
+            QURL_GO_SANDBOX_RETIRED_LIFECYCLE_SURFACE_SHA256 \
+            QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_PATH \
+            QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_SHA256 \
+            QURL_GO_SANDBOX_PROOF_HARNESS_SHA256; do
+            [[ -n "${!proof_input:-}" ]] || missing_proof_inputs="${missing_proof_inputs} ${proof_input}"
+          done
+          if [[ -n "${missing_proof_inputs}" ]]; then
+            echo "::error title=Proof inputs were never produced::the proof did not reach \"Enforce qurl-go scenario evidence\"; \"Verify exact proof inputs\" never exported${missing_proof_inputs}. See the earlier failed step for the real cause." >&2
+            exit 1
+          fi
           compute_proof_harness_sha256() {
             local proof_file
             local -a proof_files
@@ -1735,8 +1762,37 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Same `if: always()` hazard as "Enforce qurl-go scenario evidence":
+          # on a proof that died upstream none of these files were ever written,
+          # and the bare `test -s` that used to open this step reported that as
+          # an unannotated "Process completed with exit code 1" -- a second
+          # misleading red step above the real cause. Separate the two ways this
+          # gate can find nothing to publish and name both. Neither one passes:
+          # an unpublished proof is not a proven one, and a proof that DID run
+          # still fails here when its evidence is incomplete.
+          missing_proof_inputs=""
+          for proof_input in \
+            QURL_GO_SANDBOX_INVENTORY_PATH \
+            QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_PATH; do
+            [[ -n "${!proof_input:-}" ]] || missing_proof_inputs="${missing_proof_inputs} ${proof_input}"
+          done
+          if [[ -n "${missing_proof_inputs}" ]]; then
+            echo "::error title=Proof inputs were never produced::the proof did not reach \"Require complete qurl-go proof publication\"; \"Verify exact proof inputs\" never exported${missing_proof_inputs}. See the earlier failed step for the real cause." >&2
+            exit 1
+          fi
+          missing_published=""
+          for published in \
+            native-udp-sandbox.evidence.json \
+            runtime-probe-observations.json \
+            pre_retirement_scenarios.json \
+            sandbox-deployment-manifest.json; do
+            [[ -s "${RUNNER_TEMP}/${published}" ]] || missing_published="${missing_published} ${published}"
+          done
+          if [[ -n "${missing_published}" ]]; then
+            echo "::error title=Incomplete proof publication::the proof produced its inputs but did not publish${missing_published}. See the earlier failed step -- usually \"Run strict direct UDP proof\" -- for the real cause." >&2
+            exit 1
+          fi
           evidence="${RUNNER_TEMP}/native-udp-sandbox.evidence.json"
-          test -s "${RUNNER_TEMP}/runtime-probe-observations.json"
           jq -e \
             --slurpfile inventory "${RUNNER_TEMP}/pre_retirement_scenarios.json" \
             --slurpfile deployment "${RUNNER_TEMP}/sandbox-deployment-manifest.json" '

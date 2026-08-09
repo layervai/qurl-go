@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -194,6 +195,20 @@ func TestNativeUDPSandboxWorkflowIsAttendedStrictAndEvidenceBearing(t *testing.T
 		"STRICT_OUTCOME: ${{ steps.strict.outcome }}",
 		"TestSandboxNativeUDPLifecycle|TestSandboxWireEvidence|TestSandboxTopology",
 		"Enforce qurl-go scenario evidence",
+		// Both always()-guarded gates read values that only "Verify exact proof
+		// inputs" exports. Under `set -u` an upstream failure therefore killed
+		// them on `QURL_GO_SANDBOX_INVENTORY_PATH: unbound variable`, burying
+		// the one real cause under two meaningless red steps. They now name the
+		// unreached proof -- and still exit 1.
+		`[[ -n "${!proof_input:-}" ]] || missing_proof_inputs="${missing_proof_inputs} ${proof_input}"`,
+		"::error title=Proof inputs were never produced::",
+		`the proof did not reach \"Enforce qurl-go scenario evidence\"`,
+		`the proof did not reach \"Require complete qurl-go proof publication\"`,
+		`\"Verify exact proof inputs\" never exported${missing_proof_inputs}`,
+		"See the earlier failed step for the real cause.",
+		"::error title=Incomplete proof publication::",
+		"the proof produced its inputs but did not publish${missing_published}",
+		`usually \"Run strict direct UDP proof\"`,
 		"pre_retirement_scenarios.json",
 		".all_scenarios_required",
 		"select(.status == \"implemented\")",
@@ -257,18 +272,36 @@ func TestNativeUDPSandboxWorkflowIsAttendedStrictAndEvidenceBearing(t *testing.T
 		"/pulls/93",
 		".number == 93",
 	)
+	// Anchored on the step headers, not on bare step names: the always()-guarded
+	// gates now quote the steps they depend on inside their own diagnostics, so
+	// a bare name is no longer a once-per-workflow fragment.
 	requireBefore(t, workflow,
-		"Read the brokered read-only proof-attestation token",
-		"Verify exact proof inputs",
-		"Download authenticated deployment-producer evidence",
-		"Materialize authenticated orchestrator evidence",
-		"Validate exact retirement inventory",
-		"Run strict direct UDP proof",
-		"Enforce qurl-go scenario evidence",
-		"Build allowlisted evidence manifest",
-		"Upload non-secret JSON evidence",
-		"Require complete qurl-go proof publication",
-		"Remove credential state",
+		"- name: Read the brokered read-only proof-attestation token",
+		"- name: Verify exact proof inputs",
+		"- name: Download authenticated deployment-producer evidence",
+		"- name: Materialize authenticated orchestrator evidence",
+		"- name: Validate exact retirement inventory",
+		"- name: Run strict direct UDP proof",
+		"- name: Enforce qurl-go scenario evidence",
+		"- name: Build allowlisted evidence manifest",
+		"- name: Upload non-secret JSON evidence",
+		"- name: Require complete qurl-go proof publication",
+		"- name: Remove credential state",
+	)
+	// Within each gate the unreached-proof check must come BEFORE the first
+	// dereference of anything the proof was supposed to produce; otherwise
+	// `set -u` wins the race again and the diagnostic never prints.
+	requireBefore(t, stepRun(t, workflow, "Enforce qurl-go scenario evidence"),
+		`missing_proof_inputs=""`,
+		"::error title=Proof inputs were never produced::",
+		`inventory="${QURL_GO_SANDBOX_INVENTORY_PATH}"`,
+	)
+	requireBefore(t, stepRun(t, workflow, "Require complete qurl-go proof publication"),
+		`missing_proof_inputs=""`,
+		"::error title=Proof inputs were never produced::",
+		`missing_published=""`,
+		"::error title=Incomplete proof publication::",
+		`evidence="${RUNNER_TEMP}/native-udp-sandbox.evidence.json"`,
 	)
 	if got := strings.Count(workflow, "def valid_counter:"); got != 2 {
 		t.Fatalf("valid_counter definition count = %d, want 2", got)
@@ -1709,9 +1742,161 @@ func TestNativeUDPSandboxRequiresCompletePublishedProof(t *testing.T) {
 				t.Fatal(err)
 			}
 			runScript(t, t.TempDir(), stepRun(t, readWorkflow(t, "native-udp-sandbox.yml"), "Require complete qurl-go proof publication"),
-				map[string]string{"RUNNER_TEMP": runnerTemp}, test.wantSuccess)
+				publishedProofEnvironment(runnerTemp), test.wantSuccess)
 		})
 	}
+}
+
+// publishedProofEnvironment is what a proof that actually reached publication
+// leaves behind: the two "Verify exact proof inputs" exports naming the files
+// this gate slurps, both under RUNNER_TEMP exactly as that step writes them.
+func publishedProofEnvironment(runnerTemp string) map[string]string {
+	return map[string]string{
+		"RUNNER_TEMP":                              runnerTemp,
+		"QURL_GO_SANDBOX_INVENTORY_PATH":           filepath.Join(runnerTemp, "pre_retirement_scenarios.json"),
+		"QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_PATH": filepath.Join(runnerTemp, "sandbox-deployment-manifest.json"),
+	}
+}
+
+// The precondition loop only protects a gate if it names every proof-produced
+// value that gate goes on to dereference: `set -u` fires on the FIRST unguarded
+// one, and any name the loop misses is a `${...}: unbound variable` waiting for
+// the next partial export. Nothing in bash enforces that superset, so pin it --
+// adding a dereference without adding it to the loop must fail here, not in a
+// 35-minute proof cycle.
+func TestNativeUDPSandboxAlwaysGuardedGatesGuardEveryValueTheyDereference(t *testing.T) {
+	workflow := readWorkflow(t, "native-udp-sandbox.yml")
+	guardList := regexp.MustCompile(`(?s)for proof_input in \\\n(.*?); do`)
+	// Both spellings: an unbraced `$QURL_GO_SANDBOX_FOO` trips `set -u` exactly
+	// like `${QURL_GO_SANDBOX_FOO}` does, so pinning only the brace form would
+	// leave the cheaper-to-typo one free to reopen this. Undefaulted only --
+	// `${NAME:-...}` already survives `set -u` by itself, and the loop's own
+	// `${!proof_input:-}` is an indirection, not a dereference.
+	dereference := regexp.MustCompile(
+		`\$\{(QURL_GO_SANDBOX_[A-Za-z0-9_]+)\}|\$(QURL_GO_SANDBOX_[A-Za-z0-9_]+)`)
+	for _, step := range []string{
+		"Enforce qurl-go scenario evidence",
+		"Require complete qurl-go proof publication",
+	} {
+		t.Run(step, func(t *testing.T) {
+			script := stepRun(t, workflow, step)
+			listed := guardList.FindStringSubmatch(script)
+			if listed == nil {
+				t.Fatalf("step %q has no unreached-proof precondition loop", step)
+			}
+			guarded := make(map[string]bool)
+			for _, field := range strings.Fields(strings.ReplaceAll(listed[1], `\`, " ")) {
+				guarded[field] = true
+			}
+			if len(guarded) == 0 {
+				t.Fatalf("step %q guards no proof inputs at all", step)
+			}
+			for _, match := range dereference.FindAllStringSubmatch(script, -1) {
+				name := match[1]
+				if name == "" {
+					name = match[2]
+				}
+				if !guarded[name] {
+					t.Errorf("step %q dereferences %s bare but does not guard it; "+
+						"an upstream failure will kill the step on `unbound variable` again",
+						step, name)
+				}
+			}
+		})
+	}
+}
+
+// A proof that dies before "Verify exact proof inputs" exports anything used to
+// produce three red steps: the real failure, then two always()-guarded gates
+// dying on `QURL_GO_SANDBOX_INVENTORY_PATH: unbound variable`. Both gates still
+// fail -- they are gates -- but each now says which proof never reached it.
+func TestNativeUDPSandboxAlwaysGuardedGatesReportAnUnreachedProof(t *testing.T) {
+	workflow := readWorkflow(t, "native-udp-sandbox.yml")
+	for _, step := range []string{
+		"Enforce qurl-go scenario evidence",
+		"Require complete qurl-go proof publication",
+	} {
+		t.Run(step, func(t *testing.T) {
+			output := runScriptOutput(t, t.TempDir(), stepRun(t, workflow, step),
+				map[string]string{"RUNNER_TEMP": t.TempDir()}, false)
+			if strings.Contains(output, "unbound variable") {
+				t.Fatalf("gate died on `set -u` instead of naming the unreached proof:\n%s", output)
+			}
+			for _, want := range []string{
+				`the proof did not reach "` + step + `"`,
+				`"Verify exact proof inputs" never exported`,
+				"QURL_GO_SANDBOX_INVENTORY_PATH",
+				"See the earlier failed step for the real cause.",
+			} {
+				if !strings.Contains(output, want) {
+					t.Errorf("gate output is missing %q:\n%s", want, output)
+				}
+			}
+		})
+	}
+}
+
+// The diagnostic must not become an escape hatch: once the proof HAS produced
+// its inputs, both gates go right back to failing on missing evidence, and
+// neither one blames an unreached proof for it.
+func TestNativeUDPSandboxAlwaysGuardedGatesStillFailAReachedProof(t *testing.T) {
+	workflow := readWorkflow(t, "native-udp-sandbox.yml")
+
+	t.Run("Enforce qurl-go scenario evidence", func(t *testing.T) {
+		runnerTemp := t.TempDir()
+		environment := map[string]string{"RUNNER_TEMP": runnerTemp}
+		for _, name := range []string{
+			"QURL_GO_SANDBOX_INVENTORY_PATH",
+			"QURL_GO_SANDBOX_INVENTORY_SHA256",
+			"QURL_GO_SANDBOX_INVENTORY_MAPPING_SHA256",
+			"QURL_GO_SANDBOX_SCENARIO_CONTRACT_SHA256",
+			"QURL_GO_SANDBOX_RETIRED_LIFECYCLE_SURFACE_PATH",
+			"QURL_GO_SANDBOX_RETIRED_LIFECYCLE_SURFACE_SHA256",
+			"QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_PATH",
+			"QURL_GO_SANDBOX_DEPLOYMENT_MANIFEST_SHA256",
+			"QURL_GO_SANDBOX_PROOF_HARNESS_SHA256",
+		} {
+			environment[name] = filepath.Join(runnerTemp, "exported-but-never-written")
+		}
+		output := runScriptOutput(t, t.TempDir(), stepRun(t, workflow, "Enforce qurl-go scenario evidence"),
+			environment, false)
+		if strings.Contains(output, "the proof did not reach") {
+			t.Fatalf("exported inputs were misreported as an unreached proof:\n%s", output)
+		}
+	})
+
+	t.Run("Require complete qurl-go proof publication", func(t *testing.T) {
+		for _, withheld := range []string{
+			"native-udp-sandbox.evidence.json",
+			"runtime-probe-observations.json",
+			"pre_retirement_scenarios.json",
+			"sandbox-deployment-manifest.json",
+		} {
+			t.Run(withheld, func(t *testing.T) {
+				runnerTemp := t.TempDir()
+				for _, published := range []string{
+					"native-udp-sandbox.evidence.json",
+					"runtime-probe-observations.json",
+					"pre_retirement_scenarios.json",
+					"sandbox-deployment-manifest.json",
+				} {
+					if published == withheld {
+						continue
+					}
+					writeJSONFile(t, filepath.Join(runnerTemp, published), map[string]any{"schema_version": 1})
+				}
+				output := runScriptOutput(t, t.TempDir(),
+					stepRun(t, workflow, "Require complete qurl-go proof publication"),
+					publishedProofEnvironment(runnerTemp), false)
+				if strings.Contains(output, "the proof did not reach") {
+					t.Fatalf("exported inputs were misreported as an unreached proof:\n%s", output)
+				}
+				if !strings.Contains(output, "did not publish "+withheld+".") {
+					t.Fatalf("gate did not name the withheld %s:\n%s", withheld, output)
+				}
+			})
+		}
+	})
 }
 
 func cloneJSONMap(t *testing.T, value map[string]any) map[string]any {
