@@ -1739,9 +1739,13 @@ func publishedProofEnvironment(runnerTemp string) map[string]string {
 func TestNativeUDPSandboxAlwaysGuardedGatesGuardEveryValueTheyDereference(t *testing.T) {
 	workflow := readWorkflow(t, "native-udp-sandbox.yml")
 	guardList := regexp.MustCompile(`(?s)for proof_input in \\\n(.*?); do`)
-	// Bare only: `${NAME:-...}` already survives `set -u` by itself, and the
-	// loop's own `${!proof_input:-}` is an indirection, not a dereference.
-	dereference := regexp.MustCompile(`\$\{(QURL_GO_SANDBOX_[A-Za-z0-9_]+)\}`)
+	// Both spellings: an unbraced `$QURL_GO_SANDBOX_FOO` trips `set -u` exactly
+	// like `${QURL_GO_SANDBOX_FOO}` does, so pinning only the brace form would
+	// leave the cheaper-to-typo one free to reopen this. Undefaulted only --
+	// `${NAME:-...}` already survives `set -u` by itself, and the loop's own
+	// `${!proof_input:-}` is an indirection, not a dereference.
+	dereference := regexp.MustCompile(
+		`\$\{(QURL_GO_SANDBOX_[A-Za-z0-9_]+)\}|\$(QURL_GO_SANDBOX_[A-Za-z0-9_]+)`)
 	for _, step := range []string{
 		"Enforce qurl-go scenario evidence",
 		"Require complete qurl-go proof publication",
@@ -1760,10 +1764,14 @@ func TestNativeUDPSandboxAlwaysGuardedGatesGuardEveryValueTheyDereference(t *tes
 				t.Fatalf("step %q guards no proof inputs at all", step)
 			}
 			for _, match := range dereference.FindAllStringSubmatch(script, -1) {
-				if !guarded[match[1]] {
+				name := match[1]
+				if name == "" {
+					name = match[2]
+				}
+				if !guarded[name] {
 					t.Errorf("step %q dereferences %s bare but does not guard it; "+
 						"an upstream failure will kill the step on `unbound variable` again",
-						step, match[1])
+						step, name)
 				}
 			}
 		})
