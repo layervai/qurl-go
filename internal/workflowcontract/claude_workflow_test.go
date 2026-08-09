@@ -551,6 +551,13 @@ func cloneEnvironment(environment map[string]string) map[string]string {
 
 func runScript(t *testing.T, directory, script string, environment map[string]string, wantSuccess bool) {
 	t.Helper()
+	runScriptOutput(t, directory, script, environment, wantSuccess)
+}
+
+// runScriptOutput is runScript for callers that assert on what a step SAID, not
+// only on whether it failed -- the whole point of a diagnosability gate.
+func runScriptOutput(t *testing.T, directory, script string, environment map[string]string, wantSuccess bool) string {
+	t.Helper()
 	command := exec.CommandContext(t.Context(), "bash", "-c", script)
 	command.Dir = directory
 	controlled := map[string]string{
@@ -583,6 +590,7 @@ func runScript(t *testing.T, directory, script string, environment map[string]st
 	if !wantSuccess && err == nil {
 		t.Fatalf("script succeeded unexpectedly:\n%s", output)
 	}
+	return string(output)
 }
 
 func TestRunScriptDoesNotInheritWorkflowControlVariables(t *testing.T) {
