@@ -77,8 +77,16 @@ module:
 go get github.com/layervai/qurl-go/qurl@latest
 ```
 
-Requires Go 1.26.5+. Not in a module yet? Run `go mod init example.com/myapp`
-first: `go get` outside a module fails with `go.mod file not found`, and
+Requires Go 1.26.5+ — a security floor, not a preference for the newest
+toolchain. It is the earliest patch release on the 1.26 line without the
+standard-library vulnerabilities this SDK's code paths reach (GO-2026-5856 in
+`crypto/tls` and GO-2026-4970 in `os`); CI runs `govulncheck` at exactly this
+version. Both are also fixed in 1.25.12, so a lower floor is possible and
+planned — it is currently held up by a test-only dependency. See the comment
+above the `go` directive in [go.mod](go.mod) for the full rationale.
+
+Not in a module yet? Run `go mod init example.com/myapp` first: `go get`
+outside a module fails with `go.mod file not found`, and
 `go install .../qurl@latest` fails with `is not a main package` because nothing
 here builds a command.
 
