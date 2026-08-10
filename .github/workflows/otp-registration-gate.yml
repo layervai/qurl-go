@@ -1,0 +1,105 @@
+# Per-PR OTP registration gate.
+#
+# Proves, on every PR targeting main, that a verification code which actually
+# travelled through SES into a real mailbox completes SDK registration — and
+# that calling register again is idempotent rather than a second enrollment.
+#
+# An OTP is only valid against the authority that minted it, so this loop
+# cannot be faked hermetically: issuance, email delivery, and registration all
+# have to meet in one place. That is why the gate talks to a live sandbox.
+#
+# WHAT IT IS NOT: the attended UDP proof this repo used to carry ran
+# post-merge, behind a dispatch workflow requiring an NHP controller run id,
+# with an evidence collector and signed manifests. It never once went green.
+# None of that is here. This is one registration against a hosted runner.
+#
+# PUBLIC REPOSITORY. Every environment-specific value — hostnames, the role ARN
+# (which embeds an account id), queue URL, bucket, recipient, credentials —
+# comes from secrets. Nothing identifying may be committed to this file.
+name: OTP Registration Gate
+
+on:
+  pull_request:
+    branches: [main]
+
+concurrency:
+  # Serialized per ref, not cancelled: a half-finished run may have already
+  # consumed a real OTP, and cancelling it mid-flight leaves that code
+  # unconsumed in the mailbox for the next run to trip over.
+  group: "otp-registration-gate-${{ github.ref }}"
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  otp-registration:
+    name: OTP Registration (sandbox)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # No `environment:` binding — see the equivalent note in qurl-service's
+    # email gate. The role below is trusted directly on the pull_request OIDC
+    # subject and can do nothing but drain the CI mailbox queue and read its
+    # messages.
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      # Fork PRs get no OIDC token. Fail loudly rather than skipping: a skipped
+      # required check counts as satisfied, which would turn the gate into a
+      # merge bypass for exactly the PRs it can least vouch for.
+      - name: Guard fork pull requests
+        if: github.event.pull_request.head.repo.full_name != github.repository
+        run: |
+          echo "::error::the OTP registration gate cannot run on a fork PR (no OIDC token). Re-open from a branch in ${{ github.repository }}."
+          exit 1
+
+      # A missing secret must not become a silent skip. The test's strict mode
+      # covers its own inputs, but the role ARN is consumed by the AWS step
+      # before the test runs, so it is checked here.
+      - name: Require gate configuration
+        env:
+          ROLE_ARN: ${{ secrets.OTP_E2E_ROLE_ARN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ROLE_ARN}" ]; then
+            echo "::error::OTP_E2E_ROLE_ARN is not set; the gate cannot authenticate and must not report success"
+            exit 1
+          fi
+
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@f503a1870408dcf2c35d5c2b8a68e69211042c7d # v4.1.0
+        with:
+          role-to-assume: ${{ secrets.OTP_E2E_ROLE_ARN }}
+          aws-region: ${{ secrets.OTP_E2E_MAILBOX_REGION }}
+          role-session-name: qurl-go-otp-gate-${{ github.run_id }}
+
+      # -count=1 defeats the test cache: a cached PASS would mean no
+      # registration happened, which is the one outcome this must never report
+      # as green. QURL_OTP_E2E_STRICT turns a missing prerequisite into a
+      # failure instead of a skip, for the same reason.
+      - name: Register with an emailed OTP and assert idempotency
+        env:
+          QURL_OTP_E2E_STRICT: "1"
+          QURL_OTP_E2E_HUB_HOST: ${{ secrets.OTP_E2E_HUB_HOST }}
+          QURL_OTP_E2E_HUB_PORT: ${{ secrets.OTP_E2E_HUB_PORT }}
+          QURL_OTP_E2E_HUB_SERVER_KEY: ${{ secrets.OTP_E2E_HUB_SERVER_KEY }}
+          QURL_OTP_E2E_ENROLLMENT: ${{ secrets.OTP_E2E_ENROLLMENT }}
+          QURL_OTP_E2E_AGENT_ID: ${{ secrets.OTP_E2E_AGENT_ID }}
+          QURL_OTP_E2E_MAILBOX_QUEUE_URL: ${{ secrets.OTP_E2E_MAILBOX_QUEUE_URL }}
+          QURL_OTP_E2E_MAILBOX_BUCKET: ${{ secrets.OTP_E2E_MAILBOX_BUCKET }}
+          QURL_OTP_E2E_MAILBOX_RECIPIENT: ${{ secrets.OTP_E2E_MAILBOX_RECIPIENT }}
+          QURL_OTP_E2E_MAILBOX_REGION: ${{ secrets.OTP_E2E_MAILBOX_REGION }}
+        run: |
+          go test -v -count=1 ./tests/e2e/nativeudp/ \
+            -run 'TestEmailedOTPCompletesIdempotentSDKRegistration' \
+            -timeout 15m
