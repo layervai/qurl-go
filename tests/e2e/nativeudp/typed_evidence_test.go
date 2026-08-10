@@ -420,37 +420,6 @@ func runRepositoryTypedEvidenceVerifier(
 	return result
 }
 
-func TestWorkflowMakesTypedEvidenceARequiredGateInput(t *testing.T) {
-	workflow, err := os.ReadFile("../../../.github/workflows/native-udp-sandbox.yml")
-	if err != nil {
-		t.Fatal(err)
-	}
-	required := [][]byte{
-		[]byte("QURL_GO_SANDBOX_TYPED_EVIDENCE_PATH:"),
-		[]byte("python3 tests/e2e/nativeudp/verify_typed_evidence.py"),
-		[]byte(`"${typed_evidence_complete}" == "true"`),
-		[]byte("--argjson typed_evidence_complete"),
-		[]byte("--argjson typed_evidence"),
-		[]byte(".typed_evidence_complete == true"),
-	}
-	for _, snippet := range required {
-		if !bytes.Contains(workflow, snippet) {
-			t.Errorf("workflow does not bind typed evidence with %q", snippet)
-		}
-	}
-	for _, obsolete := range [][]byte{
-		[]byte(`.observation == {"verified": true}`),
-		[]byte("348f299cf43d57826c76c5ef7c8ccc37668b45161b857d4ef09f7125f3381be9"),
-	} {
-		if bytes.Contains(workflow, obsolete) {
-			t.Errorf("workflow retains placeholder-only typed evidence contract %q", obsolete)
-		}
-	}
-	if err := validateArtifactUploadPaths(workflow); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestArtifactUploadPathsRejectsBroadGlobWhenPathPrecedesUses(t *testing.T) {
 	workflow := []byte(`steps:
   - name: Upload proof

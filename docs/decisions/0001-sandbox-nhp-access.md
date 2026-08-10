@@ -7,6 +7,14 @@
 - **Implementation:** `layervai/nhp` (Terraform); this repository carries the SDK
   and developer-facing side
 
+> **Status note (2026-08-10):** the decision itself still holds — sandbox NHP is
+> still open to developers on UDP 443. What changed is the release-evidence
+> mechanism this ADR refers to: the attended `Native UDP sandbox proof` workflow
+> was retired from this repository, after `layervai/nhp` removed the controller
+> that dispatched it. The consequence below that describes the proof as
+> "unchanged" is therefore historical. This ADR is kept as the record of why
+> sandbox access was opened; it is not reopened by the proof's removal.
+
 ## Context
 
 Developers could not reach the sandbox NHP hub (`hub.nhp.layerv.xyz`) from
@@ -132,7 +140,8 @@ These are real and are being accepted deliberately, not overlooked:
   cover fault paths sandbox cannot produce on demand. Live sandbox is for
   interop against the deployed server build.
 - The attended `Native UDP sandbox proof` workflow continues unchanged for
-  release evidence. See [Native UDP sandbox proof](../native-udp-sandbox-proof.md).
+  release evidence. *(Superseded — see the status note at the top of this ADR;
+  that proof and its reference doc were removed in August 2026.)*
 - The environment-level Terraform guards are **not deleted** — they are repinned
   to the new intended value, so accidental drift still fails a plan. The
   module-level rule still rejects every broad CIDR except the exact, greppable

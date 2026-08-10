@@ -151,8 +151,13 @@ so existing cancellation handling keeps working.
 
 ## Release evidence
 
-Interoperability evidence for a release comes from the attended `Native UDP
-sandbox proof` workflow, which runs a full authenticated lifecycle on a fresh
-server-minted credential and publishes an evidence manifest. Ad-hoc developer
-testing against sandbox is not a substitute. See
-[Native UDP sandbox proof](native-udp-sandbox-proof.md).
+Interoperability evidence for a release used to come from the attended `Native
+UDP sandbox proof` workflow, which ran a full authenticated lifecycle on a fresh
+server-minted credential and published an evidence manifest. That proof was
+retired in August 2026 along with the NHP-side controller that dispatched it, so
+there is currently no automated release-evidence gate; ad-hoc developer testing
+against sandbox is the remaining option and its limits above still apply.
+
+The loopback fault-path suite (`TestNativeUDPClientFaultPaths` in
+`tests/e2e/nativeudp`) is unaffected and still runs in ordinary CI — it covers
+the failure modes sandbox cannot produce on demand.
