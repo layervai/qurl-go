@@ -7,6 +7,14 @@
 - **Implementation:** `layervai/nhp` (Terraform); this repository carries the SDK
   and developer-facing side
 
+> **Status note (2026-08-10):** the decision itself still holds — sandbox NHP is
+> still open to developers on UDP 443. What changed is the release-evidence
+> mechanism this ADR refers to: the attended `Native UDP sandbox proof` workflow
+> was retired from this repository, after `layervai/nhp` removed the controller
+> that dispatched it. The consequence below that describes the proof as
+> "unchanged" is therefore historical. This ADR is kept as the record of why
+> sandbox access was opened; it is not reopened by the proof's removal.
+
 ## Context
 
 Developers could not reach the sandbox NHP hub (`hub.nhp.layerv.xyz`) from
@@ -28,20 +36,22 @@ reachability.
 
 ### What the fencing was
 
-Verified live on 2026-08-03 (`layerv` profile, account `767397897469`,
-`us-east-2`). All three public UDP edges carried exactly one security group,
-every rule UDP 443:
+Verified live on 2026-08-03 in the sandbox account, `us-east-2`. All three
+public UDP edges carried exactly one security group, every rule UDP 443:
 
-| Edge | NLB | Security group | Permitted ingress |
-| --- | --- | --- | --- |
-| Hub | `layerv-nhp-sandbox-hub-edge` | `sg-0940da08701f7e10d` | `3.141.109.76/32` only |
-| cell0 | `layerv-nhp-sandbox-edge` | `sg-059ad63c19c752eb3` | `3.141.109.76/32` + 7 managed AC EIPs |
-| cell1 | `layerv-nhp-sandbox-cell1-edge` | `sg-09cc57657c8e6243c` | `3.141.109.76/32` only |
+| Edge | Permitted ingress |
+| --- | --- |
+| Hub | the proof runner's egress `/32` only |
+| cell0 | the proof runner's egress `/32` + 7 managed AC EIPs |
+| cell1 | the proof runner's egress `/32` only |
 
-`3.141.109.76` is the UDP proof runner's egress EIP, tagged
-`layerv-nhp-sandbox-udp-proof-source`. The seven extra cell0 addresses are the
-managed AC EIP pool needed for registration — infrastructure, not developer
-access.
+The single permitted source was the UDP proof runner's egress EIP. The seven
+extra cell0 addresses are the managed AC EIP pool needed for registration —
+infrastructure, not developer access.
+
+(The account, NLB names, security-group ids, and addresses this section
+originally quoted are deliberately not reproduced: this repository is public.
+They are in `layervai/nhp`, which is not.)
 
 Critically, **the cells were fenced identically to the hub**, so hub access
 alone would have bought nothing: assignment would succeed and registration
@@ -67,7 +77,7 @@ One clarification, because it was cited as evidence for the fence being
 inviolable and does not say that: the validation in
 `terraform/environments/sandbox-hub-dns/variables.tf` whose message reads
 "Sandbox proof DNS must target exactly the source-fenced Hub NLB" only pins the
-**NLB name** the DNS record aliases (`var.hub_nlb_name == "layerv-nhp-sandbox-hub-edge"`).
+**NLB name** the DNS record aliases (an equality check on `var.hub_nlb_name`).
 It prevents the record being repointed at a different load balancer; it does not
 enforce the fencing. The ingress-CIDR validations did that.
 
@@ -130,7 +140,8 @@ These are real and are being accepted deliberately, not overlooked:
   cover fault paths sandbox cannot produce on demand. Live sandbox is for
   interop against the deployed server build.
 - The attended `Native UDP sandbox proof` workflow continues unchanged for
-  release evidence. See [Native UDP sandbox proof](../native-udp-sandbox-proof.md).
+  release evidence. *(Superseded — see the status note at the top of this ADR;
+  that proof and its reference doc were removed in August 2026.)*
 - The environment-level Terraform guards are **not deleted** — they are repinned
   to the new intended value, so accidental drift still fails a plan. The
   module-level rule still rejects every broad CIDR except the exact, greppable
