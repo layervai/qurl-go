@@ -226,12 +226,7 @@ func TestEmailedOTPCompletesIdempotentSDKRegistration(t *testing.T) {
 	// The mailbox harness binds each delivered message to this agent id (it
 	// matches the Connector ID rendered in the email body), so concurrent gate
 	// runs cannot consume one another's codes.
-	mailbox := newSandboxOTPMailbox(sandboxConfig{
-		otpQueueURL:  cfg.mailboxQueueURL,
-		otpBucket:    cfg.mailboxBucket,
-		otpRecipient: cfg.mailboxRecipient,
-		otpRegion:    cfg.mailboxRegion,
-	})
+	mailbox := newOTPMailbox(cfg)
 
 	//nolint:staticcheck // RegisterAgentRuntime is the exact call this gate must protect.
 	client, binding, err := qurl.RegisterAgentRuntime(ctx, cfg.enrollment, store,
