@@ -98,7 +98,17 @@ jobs:
       QURL_GO_SANDBOX_AGENT_ID: qurl-go-sandbox-${{ inputs.nhp_controller_run_id }}-${{ inputs.nhp_controller_run_attempt }}
       QURL_GO_SANDBOX_KNOCK_RESOURCE_ID: ${{ vars.QURL_GO_SANDBOX_KNOCK_RESOURCE_ID }}
       QURL_GO_SANDBOX_EXPECTED_CELL_ID: ${{ vars.QURL_GO_SANDBOX_EXPECTED_CELL_ID }}
-      QURL_GO_SANDBOX_KMS_KEY_ID: alias/layerv-nhp-sandbox-udp-proof-agent-seal
+      # This repository is PUBLIC -- and so are this workflow's run logs -- so
+      # no proof resource is named here. The account, bucket, queue, mailbox
+      # recipient, keys, and Secrets Manager prefix arrive as `sandbox`
+      # environment SECRETS rather than variables, which is the difference that
+      # matters here: Actions masks a secret's value everywhere it appears in a
+      # log, including inside an AWS CLI error someone else's step printed.
+      # Variables are not masked, which is why KNOCK_RESOURCE_ID and
+      # EXPECTED_CELL_ID stay variables and these do not. "Require the proof
+      # estate configuration" below fails the run if any is unset, rather than
+      # letting an empty value reach an AWS call.
+      QURL_GO_SANDBOX_KMS_KEY_ID: ${{ secrets.QURL_GO_SANDBOX_KMS_KEY_ID }}
       QURL_GO_SANDBOX_DISPATCH_CORRELATION_ID: ${{ inputs.dispatch_correlation_id }}
       QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ID: ${{ inputs.nhp_controller_run_id }}
       QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ATTEMPT: ${{ inputs.nhp_controller_run_attempt }}
@@ -115,20 +125,103 @@ jobs:
       QURL_GO_SANDBOX_CANDIDATE_PULL_REQUEST_NUMBER: ${{ inputs.candidate_pull_request_number }}
       QURL_GO_SANDBOX_ASSIGNMENT_HANDSHAKE_B64: ${{ inputs.assignment_handshake_b64 }}
       QURL_GO_SANDBOX_CLIENT_RUN_ID: ${{ github.run_id }}
-      QURL_GO_SANDBOX_OTP_MAILBOX_QUEUE_URL: https://sqs.us-east-2.amazonaws.com/767397897469/layerv-nhp-sandbox-udp-proof-otp-mailbox
-      QURL_GO_SANDBOX_OTP_MAILBOX_BUCKET: layerv-nhp-sandbox-udp-proof-otp-mailbox
-      QURL_GO_SANDBOX_OTP_MAILBOX_RECIPIENT: qurl-go@proof.notify.layerv.xyz
+      QURL_GO_SANDBOX_OTP_MAILBOX_QUEUE_URL: ${{ secrets.QURL_GO_SANDBOX_OTP_MAILBOX_QUEUE_URL }}
+      QURL_GO_SANDBOX_OTP_MAILBOX_BUCKET: ${{ secrets.QURL_GO_SANDBOX_OTP_MAILBOX_BUCKET }}
+      QURL_GO_SANDBOX_OTP_MAILBOX_RECIPIENT: ${{ secrets.QURL_GO_SANDBOX_OTP_MAILBOX_RECIPIENT }}
       QURL_GO_SANDBOX_OTP_MAILBOX_REGION: us-east-2
-      PROOF_ACCOUNT_RUN_SECRET: layerv-nhp-sandbox/udp-proof/jit/credential/${{ inputs.nhp_controller_run_id }}/${{ inputs.nhp_controller_run_attempt }}
-      QURL_GO_SANDBOX_RECOVERY_REQUEST_SECRET: layerv-nhp-sandbox/udp-proof/recovery/request/${{ inputs.nhp_controller_run_id }}/${{ inputs.nhp_controller_run_attempt }}
-      QURL_GO_SANDBOX_RECOVERY_RESPONSE_SECRET: layerv-nhp-sandbox/udp-proof/recovery/response/${{ inputs.nhp_controller_run_id }}/${{ inputs.nhp_controller_run_attempt }}
-      QURL_GO_SANDBOX_RECOVERY_KMS_KEY_ARN: arn:aws:kms:us-east-2:767397897469:key/2dc8590c-cf7e-4427-bf48-ea442a3f79d6
+      QURL_GO_SANDBOX_PROOF_SECRET_PREFIX: ${{ secrets.QURL_GO_SANDBOX_PROOF_SECRET_PREFIX }}
+      PROOF_ACCOUNT_RUN_SECRET: ${{ secrets.QURL_GO_SANDBOX_PROOF_SECRET_PREFIX }}/jit/credential/${{ inputs.nhp_controller_run_id }}/${{ inputs.nhp_controller_run_attempt }}
+      QURL_GO_SANDBOX_RECOVERY_REQUEST_SECRET: ${{ secrets.QURL_GO_SANDBOX_PROOF_SECRET_PREFIX }}/recovery/request/${{ inputs.nhp_controller_run_id }}/${{ inputs.nhp_controller_run_attempt }}
+      QURL_GO_SANDBOX_RECOVERY_RESPONSE_SECRET: ${{ secrets.QURL_GO_SANDBOX_PROOF_SECRET_PREFIX }}/recovery/response/${{ inputs.nhp_controller_run_id }}/${{ inputs.nhp_controller_run_attempt }}
+      QURL_GO_SANDBOX_RECOVERY_KMS_KEY_ARN: ${{ secrets.QURL_GO_SANDBOX_RECOVERY_KMS_KEY_ARN }}
+      QURL_GO_SANDBOX_PROOF_SOURCE_IP: ${{ secrets.QURL_GO_SANDBOX_PROOF_SOURCE_IP }}
       AWS_REGION: us-east-2
     steps:
       - name: Checkout exact build
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      # The proof estate is configured, not committed. An unset environment
+      # secret interpolates to the empty string, which would otherwise surface
+      # as a malformed secret id or a bare "/jit/credential/" path several
+      # steps and one AWS round trip later. Name the missing one here instead
+      # -- and only the NAME: this run log is public, so no value is ever
+      # echoed. Every entry below is spelled exactly as the environment secret
+      # is spelled, so the error names something the operator can actually go
+      # and set.
+      - name: Require the proof estate configuration
+        env:
+          REQUIRED_SECRETS: >-
+            QURL_GO_SANDBOX_KMS_KEY_ID
+            QURL_GO_SANDBOX_OTP_MAILBOX_QUEUE_URL
+            QURL_GO_SANDBOX_OTP_MAILBOX_BUCKET
+            QURL_GO_SANDBOX_OTP_MAILBOX_RECIPIENT
+            QURL_GO_SANDBOX_RECOVERY_KMS_KEY_ARN
+            QURL_GO_SANDBOX_PROOF_SECRET_PREFIX
+            QURL_GO_SANDBOX_PROOF_SOURCE_IP
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in ${REQUIRED_SECRETS}; do
+            if [[ -z "${!name:-}" ]]; then
+              missing+=("$name")
+            fi
+          done
+          if (( ${#missing[@]} > 0 )); then
+            echo "::error::the sandbox environment is missing proof estate configuration: ${missing[*]}" >&2
+            echo "::error::set these as environment SECRETS on the 'sandbox' environment -- not variables. Actions masks secrets in this public repository's run logs and does not mask variables, which is the whole reason they are stored this way." >&2
+            exit 1
+          fi
+
+      # Belt and braces for the public run log. Actions masks a secret's exact
+      # value, but not a substring of it: the account number inside the queue
+      # URL is not masked on its own, and the handshake bucket, wrapping key,
+      # and CA-PM alias come from the dispatch input rather than from a secret,
+      # so they are not masked at all. Register them explicitly. This closes
+      # the paths redaction cannot reach -- an AWS CLI error echoing a bucket
+      # or key ARN, or a Go test failure printing one -- because a mask applies
+      # to every line the runner emits, whoever emitted it.
+      - name: Mask derived estate identifiers in the public log
+        env:
+          QUEUE_URL: ${{ secrets.QURL_GO_SANDBOX_OTP_MAILBOX_QUEUE_URL }}
+          ASSIGNMENT_HANDSHAKE_B64: ${{ inputs.assignment_handshake_b64 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mask() {
+            # Never mask the empty string: "::add-mask::" with no value makes
+            # Actions mask nothing and warns, and a short accidental value
+            # would redact unrelated log text. `if` rather than `[[ ]] &&` so a
+            # false guard returns 0 -- under `set -e` the && form would kill
+            # this step on exactly the absent-value case it exists to tolerate.
+            if [[ -n "${1:-}" && ${#1} -ge 6 ]]; then
+              echo "::add-mask::$1"
+            fi
+          }
+          # us-east-2/<account>/<queue>: the account is the substring the
+          # secret's own mask does not cover.
+          account="$(printf '%s' "${QUEUE_URL}" | sed -n 's#^https://sqs\.[a-z0-9-]*\.amazonaws\.com/\([0-9]\{12\}\)/.*$#\1#p')"
+          mask "${account}"
+          # Deliberately NOT jq. This job runs on the ephemeral JIT proof
+          # runner, a bare image documented below as lacking even the AWS CLI,
+          # so jq cannot be assumed -- and a missing jq behind `|| true` would
+          # silently skip these masks, failing OPEN on exactly the values this
+          # step exists to hide. grep and sed are in any base image.
+          descriptor="$(printf '%s' "${ASSIGNMENT_HANDSHAKE_B64}" | base64 --decode 2>/dev/null || true)"
+          if [[ -n "${descriptor}" ]]; then
+            # Every occurrence, not the first: bucket and kms_key_arn appear in
+            # both the assignment and transport descriptors.
+            while IFS= read -r value; do
+              mask "${value}"
+            done < <(
+              printf '%s' "${descriptor}" \
+                | grep -oE '"(bucket|kms_key_arn|ca_pm_alias_arn)"[[:space:]]*:[[:space:]]*"[^"]*"' \
+                | sed -E 's/^.*:[[:space:]]*"//; s/"$//' \
+                | sort -u
+            )
+          fi
 
       # This repo is PUBLIC, so it cannot read the OPS_ROUTINES org secrets --
       # they are visibility=private, which on GitHub means private repos only.
@@ -175,7 +268,7 @@ jobs:
       - name: Read the brokered read-only proof-attestation token
         id: proof-token
         env:
-          ATTESTATION_TOKEN_SECRET: layerv-nhp-sandbox/udp-proof/jit/attestation-token/${{ inputs.nhp_controller_run_id }}/${{ inputs.nhp_controller_run_attempt }}
+          ATTESTATION_TOKEN_SECRET: ${{ secrets.QURL_GO_SANDBOX_PROOF_SECRET_PREFIX }}/jit/attestation-token/${{ inputs.nhp_controller_run_id }}/${{ inputs.nhp_controller_run_attempt }}
         shell: bash
         run: |
           set -euo pipefail

@@ -9,19 +9,13 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
 
 	"github.com/layervai/qurl-go/qurl"
 )
 
-const (
-	sandboxKMSKeyIDEnv = "QURL_GO_SANDBOX_KMS_KEY_ID"
-	sandboxKMSKeyID    = "alias/layerv-nhp-sandbox-udp-proof-agent-seal"
-)
-
-var sandboxKMSKeyARNPattern = regexp.MustCompile(`^arn:aws:kms:us-east-2:767397897469:key/(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|mrk-[0-9a-f]{32})$`)
+const sandboxKMSKeyIDEnv = "QURL_GO_SANDBOX_KMS_KEY_ID"
 
 type sandboxKMSWrapperFactoryFunc func(context.Context, string) (qurl.AgentStateKeyWrapper, error)
 
@@ -97,7 +91,7 @@ func proveSandboxKMSColdState(ctx context.Context, t testFataler, cfg sandboxCon
 		envelope.AgentID != cfg.agentID || envelope.ProviderID != "aws-kms" ||
 		envelope.WrappedKey.Version != 1 || len(envelope.WrappedKey.Ciphertext) == 0 ||
 		len(envelope.Nonce) != 12 || len(envelope.Ciphertext) == 0 ||
-		!isExactSandboxKMSKeyARN(envelope.WrappedKey.Metadata.KeyID) {
+		!isExactSandboxKMSKeyARN(envelope.WrappedKey.Metadata.KeyID, cfg.awsAccount) {
 		t.Fatal("KMS-sealed state is missing its exact authenticated envelope or key binding")
 	}
 	info, err := os.Lstat(cfg.statePath)
@@ -110,36 +104,58 @@ func proveSandboxKMSColdState(ctx context.Context, t testFataler, cfg sandboxCon
 	return envelope.WrappedKey.Metadata.KeyID
 }
 
-func isExactSandboxKMSKeyARN(value string) bool {
-	return sandboxKMSKeyARNPattern.MatchString(value)
+// isExactSandboxKMSKeyARN reports whether the envelope's recorded key binding
+// is a real KMS key ARN in the proof account. The account is not committed --
+// it is the one the run's own queue URL named -- so this still refuses a key
+// belonging to any other estate.
+func isExactSandboxKMSKeyARN(value, account string) bool {
+	return isKMSKeyARNInAccount(value, account)
 }
 
 func TestExactSandboxKMSKeyARN(t *testing.T) {
+	const otherAccount = "111122223333"
 	for name, testCase := range map[string]struct {
 		value string
 		want  bool
 	}{
 		"uuid": {
-			value: "arn:aws:kms:us-east-2:767397897469:key/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+			value: "arn:aws:kms:us-east-2:" + fixtureAWSAccount + ":key/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
 			want:  true,
 		},
 		"multi-region": {
-			value: "arn:aws:kms:us-east-2:767397897469:key/mrk-0123456789abcdef0123456789abcdef",
+			value: "arn:aws:kms:us-east-2:" + fixtureAWSAccount + ":key/mrk-0123456789abcdef0123456789abcdef",
 			want:  true,
 		},
 		"arbitrary key resource": {
-			value: "arn:aws:kms:us-east-2:767397897469:key/not-a-real-key-id",
+			value: "arn:aws:kms:us-east-2:" + fixtureAWSAccount + ":key/not-a-real-key-id",
 		},
 		"wrong account": {
-			value: "arn:aws:kms:us-east-2:111122223333:key/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+			value: "arn:aws:kms:us-east-2:" + otherAccount + ":key/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+		},
+		// An alias ARN names a pointer, not the key that did the wrapping, so
+		// it can be repointed after the fact and must not satisfy the binding.
+		"alias arn": {
+			value: "arn:aws:kms:us-east-2:" + fixtureAWSAccount + ":alias/qurl-go-proof-agent-seal",
+		},
+		"bare alias": {
+			value: fixtureKMSAlias,
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if got := isExactSandboxKMSKeyARN(testCase.value); got != testCase.want {
+			if got := isExactSandboxKMSKeyARN(testCase.value, fixtureAWSAccount); got != testCase.want {
 				t.Fatalf("isExactSandboxKMSKeyARN(%q) = %t, want %t", testCase.value, got, testCase.want)
 			}
 		})
 	}
+
+	// An unset account must never validate anything: that is the failure mode
+	// where the binding silently degrades to a shape check.
+	t.Run("empty account binds nothing", func(t *testing.T) {
+		value := "arn:aws:kms:us-east-2:" + fixtureAWSAccount + ":key/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+		if isExactSandboxKMSKeyARN(value, "") {
+			t.Fatal("empty proof account accepted a key ARN")
+		}
+	})
 }
 
 func removeSandboxSetupCredential(t testFataler, cfg *sandboxConfig) {

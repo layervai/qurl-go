@@ -29,7 +29,6 @@ const (
 	transportCaptureDoneEnv    = "QURL_GO_SANDBOX_TRANSPORT_CAPTURE_DONE_PATH"
 	transportCaptureStartEnv   = "QURL_GO_SANDBOX_TRANSPORT_CAPTURE_STARTED_AT"
 	transportCaptureTargetsEnv = "QURL_GO_SANDBOX_TRANSPORT_CAPTURE_TARGETS_B64"
-	transportProofSourceIP     = "3.141.109.76"
 	transportMaxCaptureBytes   = 4 * 1024 * 1024
 )
 
@@ -153,7 +152,7 @@ func validateTransportProofDescriptor(
 		transport.KMSKeyARN != assignment.KMSKeyARN ||
 		transport.CheckpointKey != prefix+"/transport-checkpoint.json" ||
 		transport.ReceiptKey != prefix+"/transport-receipt.json" ||
-		transport.ProofSourceIP != transportProofSourceIP ||
+		transport.ProofSourceIP != cfg.proofSourceIP ||
 		transport.RelayLogGroup != "/layerv/nhp/sandbox/relay" ||
 		!slices.Equal(transport.LifecycleHTTPHosts, transportHTTPHosts) ||
 		!slices.Equal(transport.QURLServiceLogGroups, transportQURLLogGroups) ||

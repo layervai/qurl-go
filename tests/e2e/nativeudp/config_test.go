@@ -35,6 +35,7 @@ const (
 	otpMailboxBucketEnv      = "QURL_GO_SANDBOX_OTP_MAILBOX_BUCKET"
 	otpMailboxRecipientEnv   = "QURL_GO_SANDBOX_OTP_MAILBOX_RECIPIENT"
 	otpMailboxRegionEnv      = "QURL_GO_SANDBOX_OTP_MAILBOX_REGION"
+	proofSourceIPEnv         = "QURL_GO_SANDBOX_PROOF_SOURCE_IP"
 	standardNHPUDPPort       = 443
 	x25519PublicKeyLength    = 32
 )
@@ -64,6 +65,13 @@ type sandboxConfig struct {
 	otpBucket            string
 	otpRecipient         string
 	otpRegion            string
+	// awsAccount is read out of the operator-supplied queue URL rather than
+	// committed. Every other proof ARN must repeat it.
+	awsAccount string
+	// proofSourceIP is the runner egress address the transport capture must
+	// show. It is configured rather than committed, so the transport
+	// descriptor can be compared against it instead of merely shape-checked.
+	proofSourceIP string
 }
 
 func loadSandboxConfig(lookup func(string) string) (sandboxConfig, bool, error) {
@@ -100,6 +108,7 @@ func loadSandboxConfig(lookup func(string) string) (sandboxConfig, bool, error) 
 		otpMailboxBucketEnv,
 		otpMailboxRecipientEnv,
 		otpMailboxRegionEnv,
+		proofSourceIPEnv,
 	}
 	missing := make([]string, 0, len(required))
 	for _, name := range required {
@@ -140,6 +149,7 @@ func loadSandboxConfig(lookup func(string) string) (sandboxConfig, bool, error) 
 		otpBucket:            lookup(otpMailboxBucketEnv),
 		otpRecipient:         lookup(otpMailboxRecipientEnv),
 		otpRegion:            lookup(otpMailboxRegionEnv),
+		proofSourceIP:        lookup(proofSourceIPEnv),
 	}
 
 	if !canonicalLowerHex(cfg.buildSHA, 40) {
@@ -168,6 +178,7 @@ func loadSandboxConfig(lookup func(string) string) (sandboxConfig, bool, error) 
 		otpMailboxBucketEnv:      cfg.otpBucket,
 		otpMailboxRecipientEnv:   cfg.otpRecipient,
 		otpMailboxRegionEnv:      cfg.otpRegion,
+		proofSourceIPEnv:         cfg.proofSourceIP,
 	} {
 		if value != strings.TrimSpace(value) || strings.IndexFunc(value, unicode.IsControl) >= 0 {
 			return sandboxConfig{}, true, fmt.Errorf("%s must be canonical and contain no control characters", name)
@@ -179,20 +190,39 @@ func loadSandboxConfig(lookup func(string) string) (sandboxConfig, bool, error) 
 	if !assignmentRunRE.MatchString(cfg.clientRunID) {
 		return sandboxConfig{}, true, fmt.Errorf("%s must be a positive workflow run ID", clientRunIDEnv)
 	}
-	if cfg.kmsKeyID != sandboxKMSKeyID {
-		return sandboxConfig{}, true, fmt.Errorf("%s must be the Terraform-owned sandbox proof alias %q", sandboxKMSKeyIDEnv, sandboxKMSKeyID)
+	// The proof resources are not named by committed literals -- this
+	// repository is public. Each identifier is instead checked for its own
+	// shape and for agreement with the others this run was handed, so a
+	// malformed, mismatched, or foreign-estate prerequisite still fails here
+	// rather than reaching a proof that would act on it.
+	if !isCustomerManagedKMSAlias(cfg.kmsKeyID) {
+		return sandboxConfig{}, true, fmt.Errorf("%s must be a customer-managed KMS alias, not a bare key id, ARN, or AWS-managed key", sandboxKMSKeyIDEnv)
 	}
-	if cfg.otpRegion != "us-east-2" {
-		return sandboxConfig{}, true, fmt.Errorf("%s must be us-east-2", otpMailboxRegionEnv)
+	if !awsRegionPattern.MatchString(cfg.otpRegion) {
+		return sandboxConfig{}, true, fmt.Errorf("%s must be a well-formed AWS region", otpMailboxRegionEnv)
 	}
-	if cfg.otpBucket != "layerv-nhp-sandbox-udp-proof-otp-mailbox" {
-		return sandboxConfig{}, true, fmt.Errorf("%s must name the exact private proof mailbox", otpMailboxBucketEnv)
+	if !s3BucketPattern.MatchString(cfg.otpBucket) {
+		return sandboxConfig{}, true, fmt.Errorf("%s must be a well-formed private proof mailbox bucket name", otpMailboxBucketEnv)
 	}
-	if cfg.otpRecipient != "qurl-go@proof.notify.layerv.xyz" {
-		return sandboxConfig{}, true, fmt.Errorf("%s must name the exact private proof recipient", otpMailboxRecipientEnv)
+	if !proofRecipientPattern.MatchString(cfg.otpRecipient) {
+		return sandboxConfig{}, true, fmt.Errorf("%s must be one bare addr-spec with no display name or angle brackets", otpMailboxRecipientEnv)
 	}
-	if cfg.otpQueueURL != "https://sqs.us-east-2.amazonaws.com/767397897469/layerv-nhp-sandbox-udp-proof-otp-mailbox" {
-		return sandboxConfig{}, true, fmt.Errorf("%s must name the exact private proof queue", otpMailboxQueueURLEnv)
+	queueRegion, queueAccount, queueName, ok := parseSQSQueueURL(cfg.otpQueueURL)
+	if !ok {
+		return sandboxConfig{}, true, fmt.Errorf("%s must be a well-formed SQS queue URL", otpMailboxQueueURLEnv)
+	}
+	if queueRegion != cfg.otpRegion {
+		return sandboxConfig{}, true, fmt.Errorf("%s must name a queue in %s=%s", otpMailboxQueueURLEnv, otpMailboxRegionEnv, cfg.otpRegion)
+	}
+	// The queue is the delivery notification for the bucket, so the two must
+	// be the same mailbox. Two separately valid identifiers that name
+	// different mailboxes would wait forever for an OTP that landed elsewhere.
+	if queueName != cfg.otpBucket {
+		return sandboxConfig{}, true, fmt.Errorf("%s and %s must name the same proof mailbox", otpMailboxQueueURLEnv, otpMailboxBucketEnv)
+	}
+	cfg.awsAccount = queueAccount
+	if !isPublicUnicastIPv4(cfg.proofSourceIP) {
+		return sandboxConfig{}, true, fmt.Errorf("%s must be the runner's public unicast IPv4 egress address", proofSourceIPEnv)
 	}
 	if err := validateSandboxAgentID(cfg.agentID); err != nil {
 		return sandboxConfig{}, true, fmt.Errorf("%s: %w", agentIDEnv, err)
@@ -290,15 +320,16 @@ func TestSandboxConfigStrictMode(t *testing.T) {
 		candidatePathEnv:         filepath.Join(t.TempDir(), "qurl-go-candidate.json"),
 		candidateCommitPathEnv:   filepath.Join(t.TempDir(), "qurl-go-candidate-commit.json"),
 		knockResourceIDEnv:       "knock-resource-id",
-		sandboxKMSKeyIDEnv:       sandboxKMSKeyID,
-		assignmentHandshakeEnv:   base64.StdEncoding.EncodeToString([]byte(`{"arm":{"result":{"agent_id":"qurl-go-sandbox-123-1","grant_correlation_id":"nhp-123-1-qurl_go-pre_removal-0123456789abcdef0123456789abcdef","lease_seconds":2100,"mutated_at":"2026-07-28T20:00:00Z","mutation":"arm","pinned_cell_id":"cell0","target_cell_id":"cell1"},"version":1},"descriptor":{"agent_id":"qurl-go-sandbox-123-1","arm_request_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bucket":"layerv-nhp-sandbox-udp-proof-handshake-767397897469","ca_pm_alias_arn":"arn:aws:lambda:us-east-2:767397897469:function:layerv-nhp-sandbox-ca-pm:blue","channel_id":"0123456789abcdef0123456789abcdef","checkpoint_key":"handshake/v1/123/1/0123456789abcdef0123456789abcdef/checkpoint.json","client":"qurl_go","controller_run_attempt":"1","controller_run_id":"123","correlation_id":"nhp-123-1-qurl_go-pre_removal-0123456789abcdef0123456789abcdef","expire_request_id":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","kms_key_arn":"arn:aws:kms:us-east-2:767397897469:key/01234567-89ab-cdef-0123-456789abcdef","arm_lease_seconds":2100,"expire_lease_seconds":30,"move_request_id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","pinned_cell_id":"cell0","proof_phase":"pre_removal","receipt_key":"handshake/v1/123/1/0123456789abcdef0123456789abcdef/receipt.json","target_cell_id":"cell1","version":1}}`)),
+		sandboxKMSKeyIDEnv:       fixtureKMSAlias,
+		assignmentHandshakeEnv:   base64.StdEncoding.EncodeToString([]byte(`{"arm":{"result":{"agent_id":"qurl-go-sandbox-123-1","grant_correlation_id":"nhp-123-1-qurl_go-pre_removal-0123456789abcdef0123456789abcdef","lease_seconds":2100,"mutated_at":"2026-07-28T20:00:00Z","mutation":"arm","pinned_cell_id":"cell0","target_cell_id":"cell1"},"version":1},"descriptor":{"agent_id":"qurl-go-sandbox-123-1","arm_request_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bucket":"qurl-go-proof-handshake-` + fixtureAWSAccount + `","ca_pm_alias_arn":"arn:aws:lambda:us-east-2:` + fixtureAWSAccount + `:function:qurl-go-proof-ca-pm:blue","channel_id":"0123456789abcdef0123456789abcdef","checkpoint_key":"handshake/v1/123/1/0123456789abcdef0123456789abcdef/checkpoint.json","client":"qurl_go","controller_run_attempt":"1","controller_run_id":"123","correlation_id":"nhp-123-1-qurl_go-pre_removal-0123456789abcdef0123456789abcdef","expire_request_id":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","kms_key_arn":"arn:aws:kms:us-east-2:` + fixtureAWSAccount + `:key/01234567-89ab-cdef-0123-456789abcdef","arm_lease_seconds":2100,"expire_lease_seconds":30,"move_request_id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","pinned_cell_id":"cell0","proof_phase":"pre_removal","receipt_key":"handshake/v1/123/1/0123456789abcdef0123456789abcdef/receipt.json","target_cell_id":"cell1","version":1}}`)),
 		controllerRunIDEnv:       "123",
 		controllerRunAttemptEnv:  "1",
 		clientRunIDEnv:           "456",
-		otpMailboxQueueURLEnv:    "https://sqs.us-east-2.amazonaws.com/767397897469/layerv-nhp-sandbox-udp-proof-otp-mailbox",
-		otpMailboxBucketEnv:      "layerv-nhp-sandbox-udp-proof-otp-mailbox",
-		otpMailboxRecipientEnv:   "qurl-go@proof.notify.layerv.xyz",
+		otpMailboxQueueURLEnv:    "https://sqs.us-east-2.amazonaws.com/" + fixtureAWSAccount + "/" + fixtureOTPMailbox,
+		otpMailboxBucketEnv:      fixtureOTPMailbox,
+		otpMailboxRecipientEnv:   fixtureOTPRecipient,
 		otpMailboxRegionEnv:      "us-east-2",
+		proofSourceIPEnv:         fixtureProofSourceIP,
 	}
 	lookup := func(values map[string]string) func(string) string {
 		return func(name string) string { return values[name] }
@@ -360,12 +391,111 @@ func TestSandboxConfigStrictMode(t *testing.T) {
 		})
 	}
 
+	// The proof resources are no longer pinned by committed literals, so these
+	// cases carry what the literals used to: a malformed identifier, or a
+	// well-formed one that disagrees with the rest of the run's inputs, must
+	// still fail closed here.
+	t.Run("strict rejects malformed AWS prerequisites", func(t *testing.T) {
+		queueURL := func(account, queue string) string {
+			return "https://sqs.us-east-2.amazonaws.com/" + account + "/" + queue
+		}
+		for name, tt := range map[string]struct {
+			overrides map[string]string
+			wantEnv   string
+		}{
+			"kms bare key id": {
+				overrides: map[string]string{sandboxKMSKeyIDEnv: "01234567-89ab-cdef-0123-456789abcdef"},
+				wantEnv:   sandboxKMSKeyIDEnv,
+			},
+			"kms key arn instead of alias": {
+				overrides: map[string]string{sandboxKMSKeyIDEnv: "arn:aws:kms:us-east-2:" + fixtureAWSAccount + ":key/01234567-89ab-cdef-0123-456789abcdef"},
+				wantEnv:   sandboxKMSKeyIDEnv,
+			},
+			"aws-managed kms alias": {
+				overrides: map[string]string{sandboxKMSKeyIDEnv: "alias/aws/s3"},
+				wantEnv:   sandboxKMSKeyIDEnv,
+			},
+			"region is not a region": {
+				overrides: map[string]string{otpMailboxRegionEnv: "US-EAST-2"},
+				wantEnv:   otpMailboxRegionEnv,
+			},
+			"bucket carries uppercase": {
+				overrides: map[string]string{otpMailboxBucketEnv: "Qurl-Go-Proof-Otp-Mailbox"},
+				wantEnv:   otpMailboxBucketEnv,
+			},
+			"bucket carries an underscore": {
+				overrides: map[string]string{otpMailboxBucketEnv: "qurl_go_proof_otp_mailbox"},
+				wantEnv:   otpMailboxBucketEnv,
+			},
+			"recipient carries a display name": {
+				overrides: map[string]string{otpMailboxRecipientEnv: "qURL <" + fixtureOTPRecipient + ">"},
+				wantEnv:   otpMailboxRecipientEnv,
+			},
+			"recipient is not an address": {
+				overrides: map[string]string{otpMailboxRecipientEnv: "qurl-go-proof-mailbox"},
+				wantEnv:   otpMailboxRecipientEnv,
+			},
+			"queue url is not an sqs url": {
+				overrides: map[string]string{otpMailboxQueueURLEnv: "https://example.test/" + fixtureOTPMailbox},
+				wantEnv:   otpMailboxQueueURLEnv,
+			},
+			"queue url account is not an account": {
+				overrides: map[string]string{otpMailboxQueueURLEnv: queueURL("12345", fixtureOTPMailbox)},
+				wantEnv:   otpMailboxQueueURLEnv,
+			},
+			"queue url region contradicts the region": {
+				overrides: map[string]string{
+					otpMailboxQueueURLEnv: "https://sqs.eu-west-1.amazonaws.com/" + fixtureAWSAccount + "/" + fixtureOTPMailbox,
+				},
+				wantEnv: otpMailboxQueueURLEnv,
+			},
+			"proof source is a private address": {
+				overrides: map[string]string{proofSourceIPEnv: "10.0.0.4"},
+				wantEnv:   proofSourceIPEnv,
+			},
+			"proof source is not an address": {
+				overrides: map[string]string{proofSourceIPEnv: "not-an-address"},
+				wantEnv:   proofSourceIPEnv,
+			},
+			"queue names a different mailbox than the bucket": {
+				overrides: map[string]string{otpMailboxQueueURLEnv: queueURL(fixtureAWSAccount, "some-other-mailbox")},
+				wantEnv:   otpMailboxQueueURLEnv,
+			},
+		} {
+			t.Run(name, func(t *testing.T) {
+				values := make(map[string]string, len(valid))
+				for key, value := range valid {
+					values[key] = value
+				}
+				for key, value := range tt.overrides {
+					values[key] = value
+				}
+				cfg, enabled, err := loadSandboxConfig(lookup(values))
+				if !enabled || err == nil || cfg != (sandboxConfig{}) || !strings.Contains(err.Error(), tt.wantEnv) {
+					t.Fatalf("malformed prerequisite config = %#v, %t, %v; want enabled failure naming %s", cfg, enabled, err, tt.wantEnv)
+				}
+			})
+		}
+	})
+
+	// The account is derived, not committed, so the derivation itself is the
+	// thing under test: everything downstream binds against it.
+	t.Run("strict derives the proof account from the queue url", func(t *testing.T) {
+		cfg, enabled, err := loadSandboxConfig(lookup(valid))
+		if !enabled || err != nil {
+			t.Fatalf("strict config = %#v, %t, %v", cfg, enabled, err)
+		}
+		if cfg.awsAccount != fixtureAWSAccount {
+			t.Fatalf("derived proof account = %q, want %q", cfg.awsAccount, fixtureAWSAccount)
+		}
+	})
+
 	t.Run("strict reports every missing prerequisite", func(t *testing.T) {
 		cfg, enabled, err := loadSandboxConfig(lookup(map[string]string{strictEnv: "1"}))
 		if !enabled || err == nil || cfg != (sandboxConfig{}) {
 			t.Fatalf("missing config = %#v, %t, %v; want enabled failure", cfg, enabled, err)
 		}
-		for _, name := range []string{buildSHAEnv, hubHostEnv, hubPortEnv, hubServerKeyEnv, enrollmentEnv, agentIDEnv, statePathEnv, provenancePathEnv, deploymentManifestSHAEnv, typedContractSHAEnv, candidateKindEnv, candidatePathEnv, candidateCommitPathEnv, knockResourceIDEnv, sandboxKMSKeyIDEnv, assignmentHandshakeEnv, controllerRunIDEnv, controllerRunAttemptEnv, clientRunIDEnv} {
+		for _, name := range []string{buildSHAEnv, hubHostEnv, hubPortEnv, hubServerKeyEnv, enrollmentEnv, agentIDEnv, statePathEnv, provenancePathEnv, deploymentManifestSHAEnv, typedContractSHAEnv, candidateKindEnv, candidatePathEnv, candidateCommitPathEnv, knockResourceIDEnv, sandboxKMSKeyIDEnv, assignmentHandshakeEnv, controllerRunIDEnv, controllerRunAttemptEnv, clientRunIDEnv, proofSourceIPEnv} {
 			if !strings.Contains(err.Error(), name) {
 				t.Errorf("missing-config error %q omits %s", err, name)
 			}

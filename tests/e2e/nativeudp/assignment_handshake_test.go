@@ -18,16 +18,10 @@ import (
 	"time"
 )
 
-const (
-	assignmentHandshakeBucket = "layerv-nhp-sandbox-udp-proof-handshake-767397897469"
-)
-
 var (
 	assignmentRunRE   = regexp.MustCompile(`^[1-9][0-9]{0,19}$`)
 	assignmentHex32RE = regexp.MustCompile(`^[0-9a-f]{32}$`)
 	assignmentHex64RE = regexp.MustCompile(`^[0-9a-f]{64}$`)
-	assignmentKMSRE   = regexp.MustCompile(`^arn:aws:kms:us-east-2:767397897469:key/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
-	assignmentAliasRE = regexp.MustCompile(`^arn:aws:lambda:us-east-2:767397897469:function:layerv-nhp-sandbox-ca-pm:(blue|green)$`)
 	assignmentTimeRE  = regexp.MustCompile(`^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]Z$`)
 )
 
@@ -239,11 +233,16 @@ func loadAssignmentHandshake(t *testing.T, cfg sandboxConfig) assignmentHandshak
 		!assignmentHex32RE.MatchString(descriptor.ChannelID) ||
 		descriptor.CorrelationID != "nhp-"+cfg.controllerRunID+"-"+cfg.controllerRunAttempt+"-qurl_go-"+descriptor.ProofPhase+"-"+descriptor.ChannelID ||
 		descriptor.AgentID != cfg.agentID ||
-		descriptor.Bucket != assignmentHandshakeBucket ||
-		!assignmentKMSRE.MatchString(descriptor.KMSKeyARN) ||
+		// The handshake bucket, its wrapping key, and the controller function
+		// must all sit in the same account the operator pointed the OTP
+		// mailbox at. That binding is what a committed literal used to give,
+		// and it is what stops a well-formed descriptor from steering this
+		// proof at another estate's resources.
+		!isProofBucketInAccount(descriptor.Bucket, cfg.awsAccount) ||
+		!isKMSKeyARNInAccount(descriptor.KMSKeyARN, cfg.awsAccount) ||
 		descriptor.CheckpointKey != prefix+"/checkpoint.json" ||
 		descriptor.ReceiptKey != prefix+"/receipt.json" ||
-		!assignmentAliasRE.MatchString(descriptor.CAPMAliasARN) ||
+		!isQualifiedLambdaARNInAccount(descriptor.CAPMAliasARN, cfg.awsAccount) ||
 		descriptor.PinnedCellID != "cell0" ||
 		descriptor.TargetCellID != "cell1" ||
 		descriptor.ArmLeaseSeconds != 2100 ||
@@ -369,8 +368,45 @@ func runAWS(ctx context.Context, t *testing.T, arguments ...string) {
 	command := exec.CommandContext(ctx, "aws", arguments...)
 	output, err := command.CombinedOutput()
 	if err != nil {
-		t.Fatalf("aws %s: %v: %s", strings.Join(arguments, " "), err, boundedOutput(output))
+		t.Fatalf("aws %s: %v: %s", redactedAWSArguments(arguments), err, boundedOutput(output))
 	}
+}
+
+// redactedAWSArguments renders an aws argv for a failure message without its
+// operands. This proof runs in a PUBLIC workflow log and its operands are
+// bucket names, key ARNs, and object keys -- the estate identifiers this
+// repository deliberately does not name. The service, the operation, and the
+// flag names survive, which is what actually identifies a failing call; no
+// value does.
+//
+// Only the first two tokens are kept, rather than everything up to the first
+// flag: a flagless form such as `aws s3 cp s3://bucket/key dest` carries its
+// operands positionally, and keeping "everything before the first flag" would
+// pass those straight through. `--flag=value` is split so the flag name
+// survives and the value does not.
+func redactedAWSArguments(arguments []string) string {
+	const redacted = "<redacted>"
+	rendered := make([]string, 0, len(arguments))
+	operands := 0
+	for _, argument := range arguments {
+		if strings.HasPrefix(argument, "-") {
+			if name, _, found := strings.Cut(argument, "="); found {
+				rendered = append(rendered, name+"="+redacted)
+				continue
+			}
+			rendered = append(rendered, argument)
+			continue
+		}
+		// The first two non-flag tokens are the service and operation names
+		// ("s3api", "put-object"). Every later one is a value.
+		if operands < 2 {
+			operands++
+			rendered = append(rendered, argument)
+			continue
+		}
+		rendered = append(rendered, redacted)
+	}
+	return strings.Join(rendered, " ")
 }
 
 func boundedOutput(raw []byte) string {

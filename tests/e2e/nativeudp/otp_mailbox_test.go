@@ -355,23 +355,23 @@ func strictJSON(raw []byte, target any) error {
 }
 
 func TestExtractProofOTP(t *testing.T) {
-	raw := []byte("To: qurl-go@proof.notify.layerv.xyz\r\n" +
+	raw := []byte("To: " + fixtureOTPRecipient + "\r\n" +
 		"Subject: qURL Connector verification code\r\n" +
 		"Content-Type: text/plain; charset=UTF-8\r\n\r\n" +
 		"Your qURL Connector verification code is: 12345678\r\n" +
 		"Connector ID:  \"qurl-go-sandbox-123-1\"\r\n")
-	code, matches, err := extractProofOTP(raw, "qurl-go@proof.notify.layerv.xyz", "qurl-go-sandbox-123-1")
+	code, matches, err := extractProofOTP(raw, fixtureOTPRecipient, "qurl-go-sandbox-123-1")
 	if err != nil || !matches || code != "12345678" {
 		t.Fatalf("extract valid proof OTP = %q, %t, %v", code, matches, err)
 	}
 
 	for name, changed := range map[string][]byte{
 		"wrong agent":     bytes.ReplaceAll(raw, []byte("qurl-go-sandbox-123-1"), []byte("qurl-go-sandbox-other")),
-		"wrong recipient": bytes.ReplaceAll(raw, []byte("qurl-go@proof.notify.layerv.xyz"), []byte("other@example.com")),
+		"wrong recipient": bytes.ReplaceAll(raw, []byte(fixtureOTPRecipient), []byte("other@example.test")),
 		"wrong subject":   bytes.ReplaceAll(raw, []byte(proofOTPEmailSubject), []byte("Other subject")),
 	} {
 		t.Run(name, func(t *testing.T) {
-			code, matches, err := extractProofOTP(changed, "qurl-go@proof.notify.layerv.xyz", "qurl-go-sandbox-123-1")
+			code, matches, err := extractProofOTP(changed, fixtureOTPRecipient, "qurl-go-sandbox-123-1")
 			if err != nil || matches || code != "" {
 				t.Fatalf("stale message = %q, %t, %v", code, matches, err)
 			}
@@ -379,7 +379,7 @@ func TestExtractProofOTP(t *testing.T) {
 	}
 
 	ambiguous := append(append([]byte(nil), raw...), []byte("\r\nYour qURL Connector verification code is: 87654321\r\n")...)
-	if _, _, err := extractProofOTP(ambiguous, "qurl-go@proof.notify.layerv.xyz", "qurl-go-sandbox-123-1"); err == nil ||
+	if _, _, err := extractProofOTP(ambiguous, fixtureOTPRecipient, "qurl-go-sandbox-123-1"); err == nil ||
 		strings.Contains(err.Error(), "12345678") || strings.Contains(err.Error(), "87654321") {
 		t.Fatalf("ambiguous code error was absent or disclosed a code: %v", err)
 	}
