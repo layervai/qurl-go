@@ -64,8 +64,42 @@ func TestNativeUDPSandboxWorkflowIsAttendedStrictAndEvidenceBearing(t *testing.T
 		"QURL_GO_SANDBOX_DISPATCH_CORRELATION_ID: ${{ inputs.dispatch_correlation_id }}",
 		"QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ID: ${{ inputs.nhp_controller_run_id }}",
 		"QURL_GO_SANDBOX_NHP_CONTROLLER_RUN_ATTEMPT: ${{ inputs.nhp_controller_run_attempt }}",
-		"PROOF_ACCOUNT_RUN_SECRET: layerv-nhp-sandbox/udp-proof/jit/credential/${{ inputs.nhp_controller_run_id }}/${{ inputs.nhp_controller_run_attempt }}",
-		"QURL_GO_SANDBOX_OTP_MAILBOX_RECIPIENT: qurl-go@proof.notify.layerv.xyz",
+		// This repository is public, so the proof estate is configured rather
+		// than committed. What the workflow must still guarantee is the
+		// WIRING: every estate identifier comes from an environment SECRET
+		// (Actions masks those in this repository's public run logs), and
+		// the run-bound secret paths keep the controller run id and attempt
+		// that scope them to exactly one dispatch.
+		"QURL_GO_SANDBOX_PROOF_SECRET_PREFIX: ${{ secrets.QURL_GO_SANDBOX_PROOF_SECRET_PREFIX }}",
+		"QURL_GO_SANDBOX_PROOF_SOURCE_IP: ${{ secrets.QURL_GO_SANDBOX_PROOF_SOURCE_IP }}",
+		"PROOF_ACCOUNT_RUN_SECRET: ${{ secrets.QURL_GO_SANDBOX_PROOF_SECRET_PREFIX }}/jit/credential/${{ inputs.nhp_controller_run_id }}/${{ inputs.nhp_controller_run_attempt }}",
+		"QURL_GO_SANDBOX_RECOVERY_REQUEST_SECRET: ${{ secrets.QURL_GO_SANDBOX_PROOF_SECRET_PREFIX }}/recovery/request/${{ inputs.nhp_controller_run_id }}/${{ inputs.nhp_controller_run_attempt }}",
+		"QURL_GO_SANDBOX_RECOVERY_RESPONSE_SECRET: ${{ secrets.QURL_GO_SANDBOX_PROOF_SECRET_PREFIX }}/recovery/response/${{ inputs.nhp_controller_run_id }}/${{ inputs.nhp_controller_run_attempt }}",
+		"QURL_GO_SANDBOX_KMS_KEY_ID: ${{ secrets.QURL_GO_SANDBOX_KMS_KEY_ID }}",
+		"QURL_GO_SANDBOX_RECOVERY_KMS_KEY_ARN: ${{ secrets.QURL_GO_SANDBOX_RECOVERY_KMS_KEY_ARN }}",
+		"QURL_GO_SANDBOX_OTP_MAILBOX_QUEUE_URL: ${{ secrets.QURL_GO_SANDBOX_OTP_MAILBOX_QUEUE_URL }}",
+		"QURL_GO_SANDBOX_OTP_MAILBOX_BUCKET: ${{ secrets.QURL_GO_SANDBOX_OTP_MAILBOX_BUCKET }}",
+		"QURL_GO_SANDBOX_OTP_MAILBOX_RECIPIENT: ${{ secrets.QURL_GO_SANDBOX_OTP_MAILBOX_RECIPIENT }}",
+		// An unset variable interpolates to empty, so the guard that turns
+		// that into a named failure is part of the contract, not a nicety.
+		"Require the proof estate configuration",
+		"the sandbox environment is missing proof estate configuration",
+		// The remediation must name environment SECRETS. An operator who
+		// followed a "variables" hint would leave every secrets.* empty, so
+		// the preflight could never go green and the value would land in the
+		// unmasked store this whole change exists to avoid.
+		"set these as environment SECRETS on the 'sandbox' environment -- not variables",
+		// Actions masks a secret's exact value but not a substring of it, and
+		// does not mask dispatch inputs at all. Without this step the account
+		// number still reaches the public log through an AWS CLI error.
+		"Mask derived estate identifiers in the public log",
+		"::add-mask::",
+		// All three dispatch-derived identifiers, bucket included: dropping one
+		// from the mask loop is a silent re-leak, so the contract names each.
+		`"(bucket|kms_key_arn|ca_pm_alias_arn)"`,
+		// This job runs on the bare JIT proof runner, so the mask step must not
+		// depend on jq -- a missing jq would fail open on these very values.
+		"Deliberately NOT jq",
 		"aws secretsmanager get-secret-value",
 		"aws secretsmanager delete-secret",
 		"--force-delete-without-recovery",
@@ -81,7 +115,7 @@ func TestNativeUDPSandboxWorkflowIsAttendedStrictAndEvidenceBearing(t *testing.T
 		// this workflow must still guarantee is that it reads the brokered
 		// value, refuses an empty one, and never puts it in a log.
 		"Read the brokered read-only proof-attestation token",
-		"ATTESTATION_TOKEN_SECRET: layerv-nhp-sandbox/udp-proof/jit/attestation-token/${{ inputs.nhp_controller_run_id }}/${{ inputs.nhp_controller_run_attempt }}",
+		"ATTESTATION_TOKEN_SECRET: ${{ secrets.QURL_GO_SANDBOX_PROOF_SECRET_PREFIX }}/jit/attestation-token/${{ inputs.nhp_controller_run_id }}/${{ inputs.nhp_controller_run_attempt }}",
 		"the NHP controller did not broker a proof-attestation token",
 		"echo \"::add-mask::$token\"",
 		"test \"$(git rev-parse HEAD)\" = \"${QURL_GO_SANDBOX_EXPECTED_SHA}\"",

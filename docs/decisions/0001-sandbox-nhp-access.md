@@ -28,20 +28,22 @@ reachability.
 
 ### What the fencing was
 
-Verified live on 2026-08-03 (`layerv` profile, account `767397897469`,
-`us-east-2`). All three public UDP edges carried exactly one security group,
-every rule UDP 443:
+Verified live on 2026-08-03 in the sandbox account, `us-east-2`. All three
+public UDP edges carried exactly one security group, every rule UDP 443:
 
-| Edge | NLB | Security group | Permitted ingress |
-| --- | --- | --- | --- |
-| Hub | `layerv-nhp-sandbox-hub-edge` | `sg-0940da08701f7e10d` | `3.141.109.76/32` only |
-| cell0 | `layerv-nhp-sandbox-edge` | `sg-059ad63c19c752eb3` | `3.141.109.76/32` + 7 managed AC EIPs |
-| cell1 | `layerv-nhp-sandbox-cell1-edge` | `sg-09cc57657c8e6243c` | `3.141.109.76/32` only |
+| Edge | Permitted ingress |
+| --- | --- |
+| Hub | the proof runner's egress `/32` only |
+| cell0 | the proof runner's egress `/32` + 7 managed AC EIPs |
+| cell1 | the proof runner's egress `/32` only |
 
-`3.141.109.76` is the UDP proof runner's egress EIP, tagged
-`layerv-nhp-sandbox-udp-proof-source`. The seven extra cell0 addresses are the
-managed AC EIP pool needed for registration — infrastructure, not developer
-access.
+The single permitted source was the UDP proof runner's egress EIP. The seven
+extra cell0 addresses are the managed AC EIP pool needed for registration —
+infrastructure, not developer access.
+
+(The account, NLB names, security-group ids, and addresses this section
+originally quoted are deliberately not reproduced: this repository is public.
+They are in `layervai/nhp`, which is not.)
 
 Critically, **the cells were fenced identically to the hub**, so hub access
 alone would have bought nothing: assignment would succeed and registration
@@ -67,7 +69,7 @@ One clarification, because it was cited as evidence for the fence being
 inviolable and does not say that: the validation in
 `terraform/environments/sandbox-hub-dns/variables.tf` whose message reads
 "Sandbox proof DNS must target exactly the source-fenced Hub NLB" only pins the
-**NLB name** the DNS record aliases (`var.hub_nlb_name == "layerv-nhp-sandbox-hub-edge"`).
+**NLB name** the DNS record aliases (an equality check on `var.hub_nlb_name`).
 It prevents the record being repointed at a different load balancer; it does not
 enforce the fencing. The ingress-CIDR validations did that.
 
