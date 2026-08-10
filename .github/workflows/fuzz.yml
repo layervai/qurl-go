@@ -32,10 +32,25 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # go.work, NOT go.mod. This job is the one place that genuinely needs the
+      # workspace loaded — `make fuzz` walks `./... ./awsstore/...` so awsstore
+      # fuzzes against the in-tree parent — and a loaded workspace enforces
+      # go.work's directive, which must be >= every module it lists. awsstore
+      # requires the PUBLISHED parent module, so it sits a release ahead of the
+      # root floor; installing from ./go.mod would hand this job a toolchain
+      # older than go.work demands and fail before a single target ran:
+      #
+      #   go: go.work requires go >= 1.26.5 (running go 1.25.12; GOTOOLCHAIN=local)
+      #
+      # There is no GOTOOLCHAIN=auto rescue here — setup-go pins GOTOOLCHAIN to
+      # `local`, so nothing silently upgrades. go.work is >= both modules by
+      # construction, which makes it the correct source for a workspace job.
+      # The root-only jobs in ci.yml take the opposite route (GOWORK=off) so
+      # they still exercise the floor consumers actually get.
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: go.mod
+          go-version-file: go.work
           check-latest: true
 
       # `make fuzz` walks every package in both workspace modules and soaks each

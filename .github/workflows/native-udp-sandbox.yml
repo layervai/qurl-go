@@ -1150,7 +1150,19 @@ jobs:
           go-version-file: go.mod
           check-latest: true
 
+      # GOWORK=off for the same reason as ci.yml's root jobs: the toolchain
+      # above comes from ./go.mod, and a loaded workspace would enforce
+      # go.work's directive, which must be >= awsstore — a module that requires
+      # the PUBLISHED parent and so sits a release ahead of the root floor.
+      # Without this the step fails before running anything:
+      #
+      #   go: go.work requires go >= 1.26.5 (running go 1.25.12; GOTOOLCHAIN=local)
+      #
+      # This step only exercises a root-module package, so dropping the
+      # workspace costs nothing here.
       - name: Validate exact retirement inventory
+        env:
+          GOWORK: "off"
         run: go test -count=1 ./tests/e2e/nativeudp -run '^(TestPreRetirementScenarioInventory|TestRetiredLifecycleSurfaceContract)$'
 
       - name: Run strict direct UDP proof
