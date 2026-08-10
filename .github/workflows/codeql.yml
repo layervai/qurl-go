@@ -52,6 +52,13 @@ jobs:
       # skips this step.
       - name: Build
         if: matrix.language == 'go'
+        env:
+          # Same reason as ci.yml's root jobs: the toolchain comes from
+          # ./go.mod, and go.work must satisfy every module it lists —
+          # including awsstore, which requires the published parent tag and so
+          # lags the root module's floor by one release. Analysing the
+          # published-dependency graph is also what consumers resolve.
+          GOWORK: "off"
         run: go build ./...
 
       - name: Perform CodeQL Analysis
