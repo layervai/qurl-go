@@ -23,6 +23,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -124,12 +125,58 @@ func loadOTPE2EConfig(lookup func(string) string) (otpE2EConfig, bool, error) {
 			ServerPublicKeyB64: strings.TrimSpace(lookup(otpE2EHubKeyEnv)),
 		},
 		enrollment:       strings.TrimSpace(lookup(otpE2EEnrollmentEnv)),
-		agentID:          strings.TrimSpace(lookup(otpE2EAgentIDEnv)),
+		agentID:          runScopedAgentID(strings.TrimSpace(lookup(otpE2EAgentIDEnv)), lookup),
 		mailboxQueueURL:  strings.TrimSpace(lookup(otpE2EMailboxQueueURLEnv)),
 		mailboxBucket:    strings.TrimSpace(lookup(otpE2EMailboxBucketEnv)),
 		mailboxRecipient: strings.TrimSpace(lookup(otpE2EMailboxRecipientEnv)),
 		mailboxRegion:    strings.TrimSpace(lookup(otpE2EMailboxRegionEnv)),
 	}, false, nil
+}
+
+// runScopedAgentID appends a per-run suffix to the configured agent id.
+//
+// The reader binds a delivered code to the Connector ID rendered in the email
+// body. With a constant agent id, an OTP email from an EARLIER run satisfies
+// that filter just as well as this run's, and the reader hands back a stale
+// code the authority rejects as 52100 "one-time code incorrect" -- a failure
+// that reads like a broken OTP path rather than a dirty mailbox.
+//
+// Draining the queue first is not sufficient on its own: SQS short polling
+// samples a subset of servers and can report empty while messages exist, so a
+// stale message can survive the drain and then be long-polled afterwards. A
+// unique id per run makes those messages unmatchable instead of merely
+// unlikely, which is the property actually wanted. It also mirrors the
+// retired proof harness, whose agent ids embedded the controller run id.
+//
+// Falls back to a random suffix off CI. Agent ids permit only lowercase
+// letters, digits, and hyphens, and must be 2-64 characters.
+func runScopedAgentID(base string, lookup func(string) string) string {
+	suffix := strings.ToLower(strings.TrimSpace(lookup("GITHUB_RUN_ID")))
+	attempt := strings.ToLower(strings.TrimSpace(lookup("GITHUB_RUN_ATTEMPT")))
+	if suffix != "" && attempt != "" {
+		suffix = suffix + "-" + attempt
+	}
+	if suffix == "" {
+		raw := make([]byte, 6)
+		if _, err := rand.Read(raw); err == nil {
+			suffix = hex.EncodeToString(raw)
+		}
+	}
+	suffix = strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			return r
+		}
+		return '-'
+	}, suffix)
+	suffix = strings.Trim(suffix, "-")
+	if base == "" || suffix == "" {
+		return base
+	}
+	scoped := base + "-" + suffix
+	if len(scoped) > 64 {
+		scoped = strings.Trim(scoped[:64], "-")
+	}
+	return scoped
 }
 
 // ephemeralStateKeyWrapper is a valid AgentStateKeyWrapper backed by a random

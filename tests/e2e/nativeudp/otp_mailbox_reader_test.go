@@ -185,9 +185,12 @@ func (m *otpMailbox) drain(ctx context.Context) (int, error) {
 			"sqs", "receive-message",
 			"--queue-url", m.queueURL,
 			"--max-number-of-messages", "10",
-			// Short poll: an empty response means empty, and waiting would just
-			// add ten seconds per empty round to every run.
-			"--wait-time-seconds", "0",
+			// LONG poll. Short polling samples a subset of SQS servers and can
+			// report empty while messages exist, so it cannot establish "the
+			// queue is clean" -- which is the entire job here. The run-scoped
+			// agent id is the real defence against stale codes; this drain is
+			// belt to that braces, and a drain that lies is worse than none.
+			"--wait-time-seconds", "5",
 			"--visibility-timeout", "30",
 			"--region", m.region,
 			"--output", "json",
