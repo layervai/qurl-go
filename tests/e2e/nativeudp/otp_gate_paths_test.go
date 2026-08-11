@@ -43,7 +43,9 @@ const modulePrefix = "github.com/layervai/qurl-go/"
 func compiledPackageDirs(t *testing.T) []string {
 	t.Helper()
 
-	out, err := exec.Command("go", "list", "-deps", "-test", gatePackage).Output()
+	// t.Context() rather than a bare Command: the run is bounded by the test's
+	// own lifetime, so a wedged `go list` cannot outlive it.
+	out, err := exec.CommandContext(t.Context(), "go", "list", "-deps", "-test", gatePackage).Output()
 	if err != nil {
 		t.Fatalf("go list -deps -test %s: %v", gatePackage, err)
 	}
