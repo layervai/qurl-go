@@ -21,6 +21,42 @@ name: OTP Registration Gate
 on:
   pull_request:
     branches: [main]
+    # Scoped deliberately. Every run of this gate performs a real enrolment and
+    # consumes one registration-OTP issuance, and that budget is small: 5/hour
+    # per credential and 10/hour per owner (qurl-service
+    # RegistrationOTPRateLimitWindow). A dependency bump to an unrelated GitHub
+    # Action cannot break SDK registration, so running there spends budget a
+    # real PR may need and reddens PRs that gain nothing from the answer.
+    #
+    # The list must cover every top-level directory the gate's test COMPILES,
+    # which is not the same as the SDK's public surface. `qurl` is only the
+    # facade: registration actually executes in `internal/qv2` (crypto core),
+    # `internal/udpfence`, `internal/nhpcontract` and `relayknock` (the NHP
+    # transport and its wire codec). Those are packages of the ROOT module, so
+    # changing them moves neither go.mod nor go.sum -- listing `qurl/**` alone
+    # would let precisely the registration-breaking changes skip this gate.
+    #
+    # Deliberately whole-directory globs rather than the exact package list: a
+    # new internal package is then covered the day it is added, instead of
+    # opening this hole again silently. TestGatePathsCoverTheCompiledClosure
+    # derives the closure with `go list` and fails if this list stops covering
+    # it.
+    #
+    # IF THIS EVER BECOMES A REQUIRED CHECK, revisit. A required check that is
+    # path-filtered never reports on a non-matching PR, and GitHub treats a
+    # never-reported required check as perpetually pending, which blocks the
+    # merge forever. Either drop the filter at that point or pair it with a
+    # merge queue.
+    paths:
+      - 'qurl/**'
+      - 'internal/**'
+      - 'relayknock/**'
+      - 'tests/e2e/nativeudp/**'
+      - '.github/workflows/otp-registration-gate.yml'
+      - 'go.mod'
+      - 'go.sum'
+      - 'go.work'
+      - 'go.work.sum'
 
 concurrency:
   # Serialized per ref, not cancelled: a half-finished run may have already
@@ -93,7 +129,11 @@ jobs:
           QURL_OTP_E2E_HUB_HOST: ${{ secrets.OTP_E2E_HUB_HOST }}
           QURL_OTP_E2E_HUB_PORT: ${{ secrets.OTP_E2E_HUB_PORT }}
           QURL_OTP_E2E_HUB_SERVER_KEY: ${{ secrets.OTP_E2E_HUB_SERVER_KEY }}
-          QURL_OTP_E2E_ENROLLMENT: ${{ secrets.OTP_E2E_ENROLLMENT }}
+          # A pool of credentials, one per DISTINCT owner, one per line. OTP
+          # issuance is capped at 5/hour per credential and 10/hour per owner,
+          # so a single owner would cap this gate at ten runs an hour. The test
+          # picks a slot from the run id and attempt; see selectEnrollment.
+          QURL_OTP_E2E_ENROLLMENT_POOL: ${{ secrets.OTP_E2E_ENROLLMENT_POOL }}
           QURL_OTP_E2E_AGENT_ID: ${{ secrets.OTP_E2E_AGENT_ID }}
           QURL_OTP_E2E_MAILBOX_QUEUE_URL: ${{ secrets.OTP_E2E_MAILBOX_QUEUE_URL }}
           QURL_OTP_E2E_MAILBOX_BUCKET: ${{ secrets.OTP_E2E_MAILBOX_BUCKET }}
