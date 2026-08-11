@@ -32,6 +32,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/layervai/qurl-go/qurl"
 )
@@ -55,6 +56,10 @@ type otpMailbox struct {
 	bucket    string
 	recipient string
 	region    string
+	// notBefore discards notifications for mail that arrived before this run
+	// began. S3 stamps each record with an eventTime, so staleness is decided
+	// on the delivery itself rather than on queue hygiene.
+	notBefore time.Time
 	runAWS    func(context.Context, ...string) ([]byte, error)
 
 	mu        sync.Mutex
@@ -63,12 +68,13 @@ type otpMailbox struct {
 	callCount int
 }
 
-func newOTPMailbox(cfg otpE2EConfig) *otpMailbox {
+func newOTPMailbox(cfg otpE2EConfig, notBefore time.Time) *otpMailbox {
 	return &otpMailbox{
 		queueURL:  cfg.mailboxQueueURL,
 		bucket:    cfg.mailboxBucket,
 		recipient: cfg.mailboxRecipient,
 		region:    cfg.mailboxRegion,
+		notBefore: notBefore,
 		runAWS:    runAWSCLI,
 	}
 }
@@ -104,7 +110,8 @@ type sqsReceiveOutput struct {
 type s3Notification struct {
 	Event   string `json:"Event"`
 	Records []struct {
-		S3 struct {
+		EventTime string `json:"eventTime"`
+		S3        struct {
 			Bucket struct {
 				Name string `json:"name"`
 			} `json:"bucket"`
@@ -278,6 +285,16 @@ func (m *otpMailbox) receive(ctx context.Context, agentID string) (string, error
 			return "", errors.New("mailbox notification did not describe exactly one object")
 		}
 		record := notification.Records[0]
+		// Discard anything delivered before this run started, without reading
+		// it. This is what makes a leftover code unusable rather than merely
+		// unlikely.
+		if delivered, err := time.Parse(time.RFC3339, record.EventTime); err == nil &&
+			delivered.Before(m.notBefore) {
+			if err := m.deleteMessage(ctx, dir, message.ReceiptHandle); err != nil {
+				return "", err
+			}
+			continue
+		}
 		key, err := url.QueryUnescape(record.S3.Object.Key)
 		if err != nil || record.S3.Bucket.Name != m.bucket || !strings.HasPrefix(key, "otp/") {
 			return "", errors.New("mailbox notification escaped its expected bucket or prefix")
