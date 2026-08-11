@@ -174,65 +174,6 @@ func (m *otpMailbox) snapshot() (calls int, fresh bool) {
 	return m.callCount, m.fresh
 }
 
-// drain discards every message already queued, returning how many it removed.
-//
-// This is required for correctness, not tidiness. Every run enrolls the same
-// agent id, so an OTP email from an earlier attempt satisfies the same
-// Connector-ID filter as the fresh one -- the reader would hand back a stale
-// code and the authority would reject it as `52100: one-time code incorrect`.
-// Anything sitting in the queue before registration starts is by definition
-// from a previous run, so it is consumed up front and the only message that can
-// arrive afterwards is the one this run caused.
-func (m *otpMailbox) drain(ctx context.Context) (int, error) {
-	dir, err := os.MkdirTemp("", "qurl-otp-drain-")
-	if err != nil {
-		return 0, errors.New("create mailbox drain directory")
-	}
-	defer os.RemoveAll(dir)
-
-	discarded := 0
-	for {
-		if err := ctx.Err(); err != nil {
-			return discarded, errors.New("mailbox drain deadline elapsed")
-		}
-		raw, err := m.runAWS(ctx,
-			"sqs", "receive-message",
-			"--queue-url", m.queueURL,
-			"--max-number-of-messages", "10",
-			// LONG poll. Short polling samples a subset of SQS servers and can
-			// report empty while messages exist, so it cannot establish "the
-			// queue is clean" -- which is the entire job here. The run-scoped
-			// agent id is the real defence against stale codes; this drain is
-			// belt to that braces, and a drain that lies is worse than none.
-			"--wait-time-seconds", "5",
-			"--visibility-timeout", "30",
-			"--region", m.region,
-			"--output", "json",
-		)
-		if err != nil {
-			return discarded, err
-		}
-		var received sqsReceiveOutput
-		if len(bytes.TrimSpace(raw)) > 0 {
-			if err := json.Unmarshal(raw, &received); err != nil {
-				return discarded, errors.New("mailbox drain returned malformed JSON")
-			}
-		}
-		if len(received.Messages) == 0 {
-			return discarded, nil
-		}
-		for _, message := range received.Messages {
-			if message.ReceiptHandle == "" {
-				continue
-			}
-			if err := m.deleteMessage(ctx, dir, message.ReceiptHandle); err != nil {
-				return discarded, err
-			}
-			discarded++
-		}
-	}
-}
-
 // receive long-polls until a message addressed to this agent arrives, or ctx
 // expires. Messages that are not ours are deleted and skipped so a stale one
 // cannot wedge the queue for later runs.
@@ -308,11 +249,20 @@ func (m *otpMailbox) receive(ctx context.Context, agentID string) (string, error
 			return "", errors.New("mailbox notification did not describe exactly one object")
 		}
 		record := notification.Records[0]
-		// Discard anything delivered before this run started, without reading
-		// it. This is what makes a leftover code unusable rather than merely
-		// unlikely.
-		if delivered, err := time.Parse(time.RFC3339, record.EventTime); err == nil &&
-			delivered.Before(m.notBefore) {
+		// Deliveries from before this run started are nobody's: every run that
+		// wanted them has finished. Delete those.
+		//
+		// Anything NEWER is potentially a concurrent run's, because the queue,
+		// bucket, and recipient come from shared repo secrets and the workflow's
+		// concurrency group only serialises the same ref. Releasing rather than
+		// deleting is what actually upholds "concurrent runs cannot consume one
+		// another's messages" -- the agent-id binding alone only stops a run
+		// READING a foreign code, not destroying it.
+		//
+		// An unparseable eventTime is treated as not-stale and released, so a
+		// malformed timestamp can never cause a delete.
+		delivered, err := time.Parse(time.RFC3339, record.EventTime)
+		if err == nil && delivered.Before(m.notBefore) {
 			if err := m.deleteMessage(ctx, dir, message.ReceiptHandle); err != nil {
 				return "", err
 			}
@@ -338,19 +288,36 @@ func (m *otpMailbox) receive(ctx context.Context, agentID string) (string, error
 		if err != nil {
 			return "", err
 		}
-		// Delete the QUEUE message either way -- an unmatched message must not
-		// be left to wedge the queue for the next run -- but deliberately do NOT
-		// delete the S3 object. The gate role is read-only on the bucket by
-		// design, and the mailbox already expires objects after a day, so
-		// consuming the notification is sufficient and asking for
-		// s3:DeleteObject would widen the role for no benefit.
-		if err := m.deleteMessage(ctx, dir, message.ReceiptHandle); err != nil {
-			return "", err
-		}
 		if matched {
+			// Ours: consume it. The S3 object is deliberately left alone -- the
+			// gate role is read-only on the bucket and the mailbox expires
+			// objects after a day, so asking for s3:DeleteObject would widen the
+			// role for no benefit.
+			if err := m.deleteMessage(ctx, dir, message.ReceiptHandle); err != nil {
+				return "", err
+			}
 			return code, nil
 		}
+		// Not ours, and recent enough to belong to a concurrent run. Release it
+		// so its owner can still receive it, rather than deleting it and turning
+		// their run red. The short delay keeps this loop from immediately
+		// re-receiving the same message and spinning on it.
+		if err := m.releaseMessage(ctx, message.ReceiptHandle); err != nil {
+			return "", err
+		}
 	}
+}
+
+// releaseMessage returns a message to the queue for another run to receive.
+func (m *otpMailbox) releaseMessage(ctx context.Context, receiptHandle string) error {
+	_, err := m.runAWS(ctx,
+		"sqs", "change-message-visibility",
+		"--queue-url", m.queueURL,
+		"--receipt-handle", receiptHandle,
+		"--visibility-timeout", "10",
+		"--region", m.region,
+	)
+	return err
 }
 
 func (m *otpMailbox) deleteMessage(ctx context.Context, dir, receiptHandle string) error {
@@ -482,10 +449,10 @@ func newBase64Reader(body io.Reader) io.Reader {
 
 type newlineStrippingReader struct{ inner io.Reader }
 
-// Read never returns (0, nil): a chunk that is entirely CR/LF would otherwise
-// produce the discouraged zero-count/nil-error pair, which only happens to be
-// safe here because base64.NewDecoder reads through io.ReadFull. Loop instead
-// of relying on that.
+// Read never returns (0, nil), including when the inner reader does. The
+// discouraged zero-count/nil-error pair only happens to be safe here because
+// base64.NewDecoder reads through io.ReadFull, and depending on a consumer's
+// implementation detail is not a property worth keeping. Loop instead.
 func (r *newlineStrippingReader) Read(p []byte) (int, error) {
 	for {
 		n, err := r.inner.Read(p)
@@ -503,6 +470,9 @@ func (r *newlineStrippingReader) Read(p []byte) (int, error) {
 				continue // stripped everything; go back for real bytes
 			}
 			return 0, err
+		}
+		if err == nil {
+			continue // inner reader returned (0, nil); do not propagate it
 		}
 		return 0, err
 	}
