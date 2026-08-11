@@ -225,3 +225,5 @@ and the existing qURL Connector resource/bootstrap test fixtures. This SDK
 change does not claim that the backend is deployed or that a qurl-go release
 has been tagged. Mutable rollout state and cross-repository handoff gates live
 in issue 421 rather than this SDK contract reference.
+
+<!-- scratch: verifying the OTP gate reports on a docs-only PR; this PR will be closed, never merged -->
