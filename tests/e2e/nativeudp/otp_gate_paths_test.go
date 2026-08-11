@@ -221,6 +221,33 @@ func TestGatePathsCoverTheCompiledClosure(t *testing.T) {
 	}
 }
 
+// TestGateScopeConsidersDeletionsAndRenames guards a fail-open that is easy to
+// reintroduce because the wrong version looks tidier.
+//
+// The scope step decides relevance from the PR's changed files. Judging that on
+// non-removed files only -- which is right for a check asking "does this file
+// now exist?", and is where this was borrowed from -- is wrong here: deleting a
+// file from internal/qv2 changes registration as surely as editing one, and a
+// pure-deletion PR would then report success without ever enrolling. Renames
+// are the same shape, since .filename is the NEW path, so a file moved OUT of a
+// gated directory is invisible without .previous_filename.
+//
+// Widening this can only add matches -- deleting docs/foo.md still matches no
+// glob -- so there is no cost to weigh against the hole.
+func TestGateScopeConsidersDeletionsAndRenames(t *testing.T) {
+	workflow := readGateWorkflow(t)
+
+	if !strings.Contains(workflow, ".previous_filename") {
+		t.Error("the scope step does not read .previous_filename; a file renamed OUT of a " +
+			"gated directory would not be seen, and the gate would report success without enrolling")
+	}
+	if strings.Contains(workflow, `.status != "removed"`) {
+		t.Error(`the scope step filters out removed files (.status != "removed"); a PR that ` +
+			"only DELETES registration code would then match no glob and report success " +
+			"without enrolling. Match on every changed path regardless of status.")
+	}
+}
+
 // TestGatePathsCoverTheModuleGraph pins the non-source triggers separately.
 // These carry no Go package, so the closure check above cannot see them, and a
 // dependency bump genuinely can change registration behavior.

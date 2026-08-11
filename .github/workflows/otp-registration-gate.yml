@@ -112,8 +112,22 @@ jobs:
           # honest answer is "unknown", and for a gate the safe reading of
           # unknown is to spend an OTP -- never to report green without having
           # looked.
+          # Every changed path, whatever happened to it, INCLUDING deletions and
+          # both ends of a rename:
+          #
+          #   deletion  -- removing a file from internal/qv2 changes registration
+          #                as surely as editing one. Filtering removals out (the
+          #                shape this was first written with, borrowed from a
+          #                check that asks "does this file now exist?") let a
+          #                pure-deletion PR report green without enrolling.
+          #   rename     -- .filename is the NEW path, so moving a file OUT of a
+          #                gated directory would otherwise be invisible;
+          #                .previous_filename is what makes that shrink visible.
+          #
+          # Widening this can only ever add matches: deleting docs/foo.md still
+          # matches no glob. So there is nothing to trade off against.
           if ! files=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" \
-                --paginate --jq '.[] | select(.status != "removed") | .filename'); then
+                --paginate --jq '.[] | .filename, .previous_filename | select(. != null)'); then
             echo "::warning::could not list the PR's files; running the gate rather than assuming it is unnecessary"
             echo "relevant=true" >> "$GITHUB_OUTPUT"
             exit 0
