@@ -159,10 +159,10 @@ func loadOTPE2EConfig(lookup func(string) string) (otpE2EConfig, bool, error) {
 		enrollmentSlot:     slot,
 		enrollmentPoolSize: len(pool),
 		agentID:            runScopedAgentID(strings.TrimSpace(lookup(otpE2EAgentIDEnv)), lookup),
-		mailboxQueueURL:  strings.TrimSpace(lookup(otpE2EMailboxQueueURLEnv)),
-		mailboxBucket:    strings.TrimSpace(lookup(otpE2EMailboxBucketEnv)),
-		mailboxRecipient: strings.TrimSpace(lookup(otpE2EMailboxRecipientEnv)),
-		mailboxRegion:    strings.TrimSpace(lookup(otpE2EMailboxRegionEnv)),
+		mailboxQueueURL:    strings.TrimSpace(lookup(otpE2EMailboxQueueURLEnv)),
+		mailboxBucket:      strings.TrimSpace(lookup(otpE2EMailboxBucketEnv)),
+		mailboxRecipient:   strings.TrimSpace(lookup(otpE2EMailboxRecipientEnv)),
+		mailboxRegion:      strings.TrimSpace(lookup(otpE2EMailboxRegionEnv)),
 	}, false, nil
 }
 
