@@ -21,6 +21,29 @@ name: OTP Registration Gate
 on:
   pull_request:
     branches: [main]
+    # Scoped deliberately. Every run of this gate performs a real enrolment and
+    # consumes one registration-OTP issuance, and that budget is small: 5/hour
+    # per credential and 10/hour per owner (qurl-service
+    # RegistrationOTPRateLimitWindow). A dependency bump to an unrelated GitHub
+    # Action cannot break SDK registration, so running there spends budget a
+    # real PR may need and reddens PRs that gain nothing from the answer.
+    #
+    # The list covers everything that CAN break the registration path: the SDK
+    # itself, this gate's own code, this workflow, and the module graph.
+    #
+    # IF THIS EVER BECOMES A REQUIRED CHECK, revisit. A required check that is
+    # path-filtered never reports on a non-matching PR, and GitHub treats a
+    # never-reported required check as perpetually pending, which blocks the
+    # merge forever. Either drop the filter at that point or pair it with a
+    # merge queue.
+    paths:
+      - 'qurl/**'
+      - 'tests/e2e/nativeudp/**'
+      - '.github/workflows/otp-registration-gate.yml'
+      - 'go.mod'
+      - 'go.sum'
+      - 'go.work'
+      - 'go.work.sum'
 
 concurrency:
   # Serialized per ref, not cancelled: a half-finished run may have already
