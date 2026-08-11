@@ -95,7 +95,7 @@ func coveredByGlob(glob, dir string) bool {
 // gateFilterPaths returns the globs in the workflow's GATE_PATHS block scalar.
 //
 // The list lives in a job-level env var rather than a trigger `paths:` filter
-// because the gate is a REQUIRED check -- see gateWorkflowLacksTriggerFilter.
+// because the gate is a REQUIRED check -- see TestGateWorkflowHasNoTriggerPathFilter.
 //
 // Scanned rather than YAML-parsed on purpose: the root module keeps a
 // deliberately tiny dependency graph -- it is a public SDK -- and a test-only
