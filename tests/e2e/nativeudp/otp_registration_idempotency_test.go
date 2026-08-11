@@ -338,6 +338,14 @@ func TestEmailedOTPCompletesIdempotentSDKRegistration(t *testing.T) {
 	// No second code was requested. The provider would have errored on a
 	// fresh challenge, but assert the count too so a future provider that
 	// tolerates repeats cannot quietly weaken this.
+	//
+	// Note the coupling this creates, deliberately: the reader's
+	// PendingActivationRecovery branch replays the original code and is dead in
+	// this flow, because a warm open does not re-challenge. If the SDK ever
+	// starts re-challenging with PendingActivationRecovery=true on warm open,
+	// callCount becomes 2 and this assertion FAILS rather than passing through
+	// the replay branch. That is the intended direction -- a silent change in
+	// warm-open behaviour should break this test, not be absorbed by it.
 	if calls, fresh := mailbox.snapshot(); calls != 1 || !fresh {
 		t.Fatalf("OTP provider calls = %d after re-registration; want the original one and no second code", calls)
 	}

@@ -285,9 +285,9 @@ func (m *otpMailbox) receive(ctx context.Context, agentID string) (string, error
 			"--bucket", m.bucket, "--key", key, path, "--region", m.region); err != nil {
 			return "", err
 		}
-		body, err := os.ReadFile(path)
+		body, err := readBoundedFile(path)
 		if err != nil {
-			return "", errors.New("read fetched mailbox message")
+			return "", err
 		}
 		_ = os.Remove(path)
 
@@ -426,7 +426,7 @@ func decodeTransferEncoding(encoding string, body io.Reader) (io.Reader, error) 
 	case "base64":
 		return newBase64Reader(body), nil
 	default:
-		return nil, fmt.Errorf("mailbox message uses an unsupported transfer encoding")
+		return nil, errors.New("mailbox message uses an unsupported transfer encoding")
 	}
 }
 
@@ -439,16 +439,50 @@ func newBase64Reader(body io.Reader) io.Reader {
 
 type newlineStrippingReader struct{ inner io.Reader }
 
+// Read never returns (0, nil): a chunk that is entirely CR/LF would otherwise
+// produce the discouraged zero-count/nil-error pair, which only happens to be
+// safe here because base64.NewDecoder reads through io.ReadFull. Loop instead
+// of relying on that.
 func (r *newlineStrippingReader) Read(p []byte) (int, error) {
-	n, err := r.inner.Read(p)
-	if n > 0 {
-		filtered := p[:0]
-		for _, b := range p[:n] {
-			if b != '\r' && b != '\n' {
-				filtered = append(filtered, b)
+	for {
+		n, err := r.inner.Read(p)
+		if n > 0 {
+			filtered := p[:0]
+			for _, b := range p[:n] {
+				if b != '\r' && b != '\n' {
+					filtered = append(filtered, b)
+				}
 			}
+			if len(filtered) > 0 {
+				return len(filtered), err
+			}
+			if err == nil {
+				continue // stripped everything; go back for real bytes
+			}
+			return 0, err
 		}
-		n = len(filtered)
+		return 0, err
 	}
-	return n, err
+}
+
+// readBoundedFile reads a fetched message under maxMailBytes.
+//
+// The cap previously bound only the decoded MIME part, so an oversized object
+// was buffered whole before decoding ever ran -- the guarantee the maxMailBytes
+// comment states was not actually enforced at the fetch. Low impact given the
+// source is our own SES pipeline, but the bound should be where the claim is.
+func readBoundedFile(path string) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, errors.New("open fetched mailbox message")
+	}
+	defer file.Close()
+	body, err := io.ReadAll(io.LimitReader(file, maxMailBytes+1))
+	if err != nil {
+		return nil, errors.New("read fetched mailbox message")
+	}
+	if len(body) > maxMailBytes {
+		return nil, errors.New("fetched mailbox message exceeded its size bound")
+	}
+	return body, nil
 }
