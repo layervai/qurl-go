@@ -23,6 +23,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -129,12 +130,54 @@ func loadOTPE2EConfig(lookup func(string) string) (otpE2EConfig, bool, error) {
 			ServerPublicKeyB64: strings.TrimSpace(lookup(otpE2EHubKeyEnv)),
 		},
 		enrollment:       strings.TrimSpace(lookup(otpE2EEnrollmentEnv)),
-		agentID:          strings.TrimSpace(lookup(otpE2EAgentIDEnv)),
+		agentID:          runScopedAgentID(strings.TrimSpace(lookup(otpE2EAgentIDEnv)), lookup),
 		mailboxQueueURL:  strings.TrimSpace(lookup(otpE2EMailboxQueueURLEnv)),
 		mailboxBucket:    strings.TrimSpace(lookup(otpE2EMailboxBucketEnv)),
 		mailboxRecipient: strings.TrimSpace(lookup(otpE2EMailboxRecipientEnv)),
 		mailboxRegion:    strings.TrimSpace(lookup(otpE2EMailboxRegionEnv)),
 	}, false, nil
+}
+
+// runScopedAgentID appends a per-run suffix to the configured agent id.
+//
+// An agent that has already COMPLETED enrolment cannot enrol again from a new
+// device key: the authority holds a COMPLETION record binding that agent to the
+// original device credential, and a fresh registration then fails its OTP check
+// with 52100 "one-time code incorrect" even though the delivered code is
+// correct. Verified by isolation -- same credential, agent with a completion
+// record fails, fresh agent passes.
+//
+// This test creates a new state directory, and therefore a new device key, on
+// every run, so it needs a new agent identity to match. The retired proof
+// harness embedded the controller run id in its agent ids for the same reason.
+//
+// Falls back to random off CI. Agent ids allow only lowercase letters, digits
+// and hyphens, must be 2-64 characters, and must start and end alphanumeric.
+func runScopedAgentID(base string, lookup func(string) string) string {
+	suffix := strings.ToLower(strings.TrimSpace(lookup("GITHUB_RUN_ID")))
+	if attempt := strings.TrimSpace(lookup("GITHUB_RUN_ATTEMPT")); suffix != "" && attempt != "" {
+		suffix += "-" + strings.ToLower(attempt)
+	}
+	if suffix == "" {
+		raw := make([]byte, 6)
+		if _, err := rand.Read(raw); err == nil {
+			suffix = hex.EncodeToString(raw)
+		}
+	}
+	suffix = strings.Trim(strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			return r
+		}
+		return '-'
+	}, suffix), "-")
+	if base == "" || suffix == "" {
+		return base
+	}
+	scoped := base + "-" + suffix
+	if len(scoped) > 64 {
+		scoped = strings.Trim(scoped[:64], "-")
+	}
+	return scoped
 }
 
 // ephemeralStateKeyWrapper is a valid AgentStateKeyWrapper backed by a random
