@@ -76,9 +76,20 @@ func newOTPMailbox(cfg otpE2EConfig) *otpMailbox {
 func runAWSCLI(ctx context.Context, args ...string) ([]byte, error) {
 	out, err := exec.CommandContext(ctx, "aws", args...).Output()
 	if err != nil {
-		// Deliberately does not echo stderr: AWS errors can carry request
-		// context, and this runs in a public repository's CI logs.
-		return nil, errors.New("mailbox AWS operation failed")
+		// Names the operation but not the AWS stderr, which can carry request
+		// context and identifiers this public repository's CI logs should not
+		// hold. Suppressing everything made a permissions failure read as a
+		// generic outage and cost a diagnosis cycle; the verb is the part that
+		// actually localises the fault.
+		operation := "aws"
+		if len(args) >= 2 {
+			operation = args[0] + " " + args[1]
+		}
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return nil, fmt.Errorf("mailbox AWS operation %q failed (exit %d)", operation, exitErr.ExitCode())
+		}
+		return nil, fmt.Errorf("mailbox AWS operation %q failed", operation)
 	}
 	return out, nil
 }
@@ -228,12 +239,12 @@ func (m *otpMailbox) receive(ctx context.Context, agentID string) (string, error
 		if err != nil {
 			return "", err
 		}
-		// Consume it either way: an unmatched message is not ours and must not
-		// be left to wedge the queue for the next run.
-		if _, err := m.runAWS(ctx, "s3api", "delete-object",
-			"--bucket", m.bucket, "--key", key, "--region", m.region); err != nil {
-			return "", err
-		}
+		// Delete the QUEUE message either way -- an unmatched message must not
+		// be left to wedge the queue for the next run -- but deliberately do NOT
+		// delete the S3 object. The gate role is read-only on the bucket by
+		// design, and the mailbox already expires objects after a day, so
+		// consuming the notification is sufficient and asking for
+		// s3:DeleteObject would widen the role for no benefit.
 		if err := m.deleteMessage(ctx, dir, message.ReceiptHandle); err != nil {
 			return "", err
 		}
