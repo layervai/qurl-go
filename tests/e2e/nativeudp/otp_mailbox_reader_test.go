@@ -174,6 +174,22 @@ func (m *otpMailbox) snapshot() (calls int, fresh bool) {
 	return m.callCount, m.fresh
 }
 
+// timedOut explains a mailbox wait that produced nothing.
+//
+// Registration OTP issuance is rate limited per credential (5/hour) and per
+// owner (10/hour) in qurl-service. Once that budget is spent the authority
+// refuses to issue and NO email is ever sent, which from here is
+// indistinguishable from a delivery problem -- so name it rather than let the
+// reader look broken. Re-running the gate while debugging is the fastest way
+// to reach it.
+func (m *otpMailbox) timedOut() error {
+	return errors.New(
+		"no OTP email arrived for this run. If the gate has run several times within " +
+			"the hour, the per-credential OTP issuance rate limit is the likely cause and " +
+			"no email was ever sent; check the ca-iro-cell* log group for an Outcome other " +
+			"than success before suspecting delivery")
+}
+
 // receive long-polls until a message addressed to this agent arrives, or ctx
 // expires. Messages that are not ours are deleted and skipped so a stale one
 // cannot wedge the queue for later runs.
@@ -194,19 +210,8 @@ func (m *otpMailbox) receive(ctx context.Context, agentID string) (string, error
 	defer os.RemoveAll(dir)
 
 	for {
-		if err := ctx.Err(); err != nil {
-			// Name the most likely cause. Registration OTP issuance is rate
-			// limited per credential over a one-hour window
-			// (RegistrationOTPRateLimitWindow in qurl-service), and once that
-			// budget is spent the authority refuses to issue and NO email is
-			// ever sent -- which is indistinguishable, from here, from a
-			// delivery problem. Re-running the gate repeatedly while debugging
-			// is the fastest way to hit it.
-			return "", errors.New(
-				"no OTP email arrived for this run. If the gate has run several times " +
-					"within the hour, the per-credential OTP issuance rate limit is the " +
-					"likely cause and no email was ever sent; check the ca-iro-cell* log " +
-					"group for an Outcome other than success before suspecting delivery")
+		if ctx.Err() != nil {
+			return "", m.timedOut()
 		}
 		raw, err := m.runAWS(ctx,
 			"sqs", "receive-message",
@@ -218,6 +223,13 @@ func (m *otpMailbox) receive(ctx context.Context, agentID string) (string, error
 			"--output", "json",
 		)
 		if err != nil {
+			// exec.CommandContext kills the CLI when the budget expires, which
+			// surfaces as a generic non-zero exit. That is a timeout, and
+			// reporting it as an AWS failure sent me hunting through IAM once
+			// already.
+			if ctx.Err() != nil {
+				return "", m.timedOut()
+			}
 			return "", err
 		}
 		var received sqsReceiveOutput
