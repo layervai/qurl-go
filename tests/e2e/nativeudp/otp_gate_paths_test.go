@@ -92,55 +92,108 @@ func coveredByGlob(glob, dir string) bool {
 	return glob == dir
 }
 
-// gateFilterPaths returns the globs listed under the workflow's `paths:` key.
+// gateFilterPaths returns the globs in the workflow's GATE_PATHS block scalar.
+//
+// The list lives in a job-level env var rather than a trigger `paths:` filter
+// because the gate is a REQUIRED check -- see TestGateWorkflowHasNoTriggerPathFilter.
 //
 // Scanned rather than YAML-parsed on purpose: the root module keeps a
 // deliberately tiny dependency graph -- it is a public SDK -- and a test-only
-// YAML library would still land in go.mod. The block is a fixed, flat list of
-// quoted scalars, so scanning is sufficient and adds nothing to the graph.
+// YAML library would still land in go.mod. A `|` block scalar is a flat list of
+// more-indented lines, so scanning is sufficient and adds nothing to the graph.
 func gateFilterPaths(t *testing.T) []string {
 	t.Helper()
-
-	raw, err := os.ReadFile(gateWorkflowPath)
-	if err != nil {
-		t.Fatalf("read gate workflow: %v", err)
-	}
 
 	var (
 		paths   []string
 		inBlock bool
 		indent  int
 	)
-	for _, line := range strings.Split(string(raw), "\n") {
+	for _, line := range strings.Split(readGateWorkflow(t), "\n") {
 		trimmed := strings.TrimSpace(line)
 		if !inBlock {
-			if trimmed == "paths:" {
+			if trimmed == "GATE_PATHS: |" {
 				inBlock = true
 				indent = len(line) - len(strings.TrimLeft(line, " "))
 			}
 			continue
 		}
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+		if trimmed == "" {
 			continue
 		}
-		// A line at or left of `paths:` own indentation ends the block.
+		// A line at or left of the key's own indentation ends the scalar.
 		if len(line)-len(strings.TrimLeft(line, " ")) <= indent {
 			break
 		}
-		if !strings.HasPrefix(trimmed, "- ") {
-			break
-		}
-		paths = append(paths, strings.Trim(strings.TrimPrefix(trimmed, "- "), `'"`))
+		// Inside a literal block scalar every line is content -- a leading '#'
+		// is a path beginning with '#', not a comment -- so nothing is skipped.
+		paths = append(paths, trimmed)
 	}
 
 	if !inBlock {
-		t.Fatalf("no `paths:` block in %s; the filter may have been removed, "+
-			"which is safe for coverage but makes this fence meaningless", gateWorkflowPath)
+		t.Fatalf("no `GATE_PATHS: |` block in %s; if the scope list moved, this "+
+			"fence stopped guarding anything", gateWorkflowPath)
 	}
 	if len(paths) == 0 {
-		t.Fatal("found an empty `paths:` block; refusing to pass vacuously")
+		t.Fatal("found an empty GATE_PATHS block; refusing to pass vacuously")
 	}
 	return paths
+}
+
+func readGateWorkflow(t *testing.T) string {
+	t.Helper()
+	raw, err := os.ReadFile(gateWorkflowPath)
+	if err != nil {
+		t.Fatalf("read gate workflow: %v", err)
+	}
+	return string(raw)
+}
+
+// TestGateWorkflowHasNoTriggerPathFilter is the fence that keeps the required
+// check merge-able.
+//
+// GitHub creates NO check run for a workflow skipped by a trigger-level path
+// filter, and a required check that never reports stays "Expected — Waiting for
+// status" indefinitely: every PR missing the filter becomes permanently
+// unmergeable. The scoping this gate needs is real, but it has to happen inside
+// the job (GATE_PATHS) so the check still reports on every PR.
+//
+// This is the single most expensive mistake available in this file -- it wedges
+// the whole repository rather than just weakening the gate -- and it is an
+// entirely reasonable-looking "optimisation" to make. Hence a test.
+func TestGateWorkflowHasNoTriggerPathFilter(t *testing.T) {
+	var (
+		inTrigger bool
+		indent    int
+	)
+	for _, line := range strings.Split(readGateWorkflow(t), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		lineIndent := len(line) - len(strings.TrimLeft(line, " "))
+
+		if !inTrigger {
+			if trimmed == "pull_request:" {
+				inTrigger = true
+				indent = lineIndent
+			}
+			continue
+		}
+		if lineIndent <= indent {
+			break // left the pull_request block
+		}
+		if strings.HasPrefix(trimmed, "paths:") || strings.HasPrefix(trimmed, "paths-ignore:") {
+			t.Fatalf("%s filters the pull_request trigger on %q.\n"+
+				"This gate is a REQUIRED check: a workflow skipped by a trigger path filter "+
+				"creates no check run, and a required check that never reports blocks the PR "+
+				"forever. Scope inside the job with GATE_PATHS instead.",
+				gateWorkflowPath, trimmed)
+		}
+	}
+	if !inTrigger {
+		t.Fatalf("no `pull_request:` trigger found in %s", gateWorkflowPath)
+	}
 }
 
 // TestGatePathsCoverTheCompiledClosure is the fence.
@@ -165,6 +218,33 @@ func TestGatePathsCoverTheCompiledClosure(t *testing.T) {
 				"Add '%s/**' to paths: in %s.\nCurrent filter: %v",
 				dir, top, gateWorkflowPath, filter)
 		}
+	}
+}
+
+// TestGateScopeConsidersDeletionsAndRenames guards a fail-open that is easy to
+// reintroduce because the wrong version looks tidier.
+//
+// The scope step decides relevance from the PR's changed files. Judging that on
+// non-removed files only -- which is right for a check asking "does this file
+// now exist?", and is where this was borrowed from -- is wrong here: deleting a
+// file from internal/qv2 changes registration as surely as editing one, and a
+// pure-deletion PR would then report success without ever enrolling. Renames
+// are the same shape, since .filename is the NEW path, so a file moved OUT of a
+// gated directory is invisible without .previous_filename.
+//
+// Widening this can only add matches -- deleting docs/foo.md still matches no
+// glob -- so there is no cost to weigh against the hole.
+func TestGateScopeConsidersDeletionsAndRenames(t *testing.T) {
+	workflow := readGateWorkflow(t)
+
+	if !strings.Contains(workflow, ".previous_filename") {
+		t.Error("the scope step does not read .previous_filename; a file renamed OUT of a " +
+			"gated directory would not be seen, and the gate would report success without enrolling")
+	}
+	if strings.Contains(workflow, `.status != "removed"`) {
+		t.Error(`the scope step filters out removed files (.status != "removed"); a PR that ` +
+			"only DELETES registration code would then match no glob and report success " +
+			"without enrolling. Match on every changed path regardless of status.")
 	}
 }
 

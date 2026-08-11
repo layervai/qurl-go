@@ -21,42 +21,20 @@ name: OTP Registration Gate
 on:
   pull_request:
     branches: [main]
-    # Scoped deliberately. Every run of this gate performs a real enrolment and
-    # consumes one registration-OTP issuance, and that budget is small: 5/hour
-    # per credential and 10/hour per owner (qurl-service
-    # RegistrationOTPRateLimitWindow). A dependency bump to an unrelated GitHub
-    # Action cannot break SDK registration, so running there spends budget a
-    # real PR may need and reddens PRs that gain nothing from the answer.
+    # DELIBERATELY NO `paths:` FILTER HERE, and it must stay that way.
     #
-    # The list must cover every top-level directory the gate's test COMPILES,
-    # which is not the same as the SDK's public surface. `qurl` is only the
-    # facade: registration actually executes in `internal/qv2` (crypto core),
-    # `internal/udpfence`, `internal/nhpcontract` and `relayknock` (the NHP
-    # transport and its wire codec). Those are packages of the ROOT module, so
-    # changing them moves neither go.mod nor go.sum -- listing `qurl/**` alone
-    # would let precisely the registration-breaking changes skip this gate.
+    # This is a REQUIRED status check. When a workflow is skipped by a
+    # trigger-level path filter, GitHub creates no check run at all, and a
+    # required check that never reports sits "Expected — Waiting for status"
+    # forever: every PR that misses the filter becomes permanently unmergeable.
+    # A job skipped by an `if:` is a different thing and does report, but this
+    # workflow does not rely on that distinction -- the job below always runs
+    # and always reports a real conclusion.
     #
-    # Deliberately whole-directory globs rather than the exact package list: a
-    # new internal package is then covered the day it is added, instead of
-    # opening this hole again silently. TestGatePathsCoverTheCompiledClosure
-    # derives the closure with `go list` and fails if this list stops covering
-    # it.
-    #
-    # IF THIS EVER BECOMES A REQUIRED CHECK, revisit. A required check that is
-    # path-filtered never reports on a non-matching PR, and GitHub treats a
-    # never-reported required check as perpetually pending, which blocks the
-    # merge forever. Either drop the filter at that point or pair it with a
-    # merge queue.
-    paths:
-      - 'qurl/**'
-      - 'internal/**'
-      - 'relayknock/**'
-      - 'tests/e2e/nativeudp/**'
-      - '.github/workflows/otp-registration-gate.yml'
-      - 'go.mod'
-      - 'go.sum'
-      - 'go.work'
-      - 'go.work.sum'
+    # Scoping still happens, just one level down: the `scope` step decides
+    # whether this PR can affect registration, and only then is an OTP spent.
+    # See GATE_PATHS. TestGateWorkflowHasNoTriggerPathFilter fails if a
+    # `paths:` filter is ever added back here.
 
 concurrency:
   # Serialized per ref, not cancelled: a half-finished run may have already
@@ -67,6 +45,42 @@ concurrency:
 
 permissions:
   contents: read
+
+env:
+  # Paths whose change can affect SDK registration. Every run that matches
+  # performs a real enrolment and spends one registration-OTP issuance, and
+  # that budget is finite: 5/hour per credential and 10/hour per owner
+  # (qurl-service RegistrationOTPRateLimitWindow), which the credential pool
+  # multiplies by the number of distinct owners rather than removing. A
+  # dependency bump to an unrelated GitHub Action cannot break registration, so
+  # enrolling there would spend budget a real PR may need.
+  #
+  # The list must cover every top-level directory the gate's test COMPILES,
+  # which is not the same as the SDK's public surface. `qurl` is only the
+  # facade: registration actually executes in `internal/qv2` (crypto core),
+  # `internal/udpfence`, `internal/nhpcontract` and `relayknock` (the NHP
+  # transport and its wire codec). Those are packages of the ROOT module, so
+  # changing them moves neither go.mod nor go.sum -- listing `qurl/**` alone
+  # would let precisely the registration-breaking changes skip this gate.
+  #
+  # Deliberately whole-directory globs rather than the exact package list: a
+  # new internal package is then covered the day it is added, instead of
+  # opening this hole again silently. TestGatePathsCoverTheCompiledClosure
+  # derives the closure with `go list` and fails if this list stops covering
+  # it.
+  #
+  # Only two glob shapes are honoured, matching coveredByGlob in that test:
+  # `X/**` is any path under X/, anything else is an exact path.
+  GATE_PATHS: |
+    qurl/**
+    internal/**
+    relayknock/**
+    tests/e2e/nativeudp/**
+    .github/workflows/otp-registration-gate.yml
+    go.mod
+    go.sum
+    go.work
+    go.work.sum
 
 jobs:
   otp-registration:
@@ -80,12 +94,98 @@ jobs:
     permissions:
       id-token: write
       contents: read
+      pull-requests: read
     steps:
+      # Runs first, and unconditionally. Everything below is conditioned on its
+      # answer, including the fork guard: a docs-only PR from a fork has no way
+      # to break registration, and failing it would make this required check an
+      # unmergeable wall for changes it has no opinion about.
+      - name: Decide whether this PR can affect registration
+        id: scope
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          # Fail TOWARDS running. If the changed-file list cannot be read, the
+          # honest answer is "unknown", and for a gate the safe reading of
+          # unknown is to spend an OTP -- never to report green without having
+          # looked.
+          # Every changed path, whatever happened to it, INCLUDING deletions and
+          # both ends of a rename:
+          #
+          #   deletion  -- removing a file from internal/qv2 changes registration
+          #                as surely as editing one. Filtering removals out (the
+          #                shape this was first written with, borrowed from a
+          #                check that asks "does this file now exist?") let a
+          #                pure-deletion PR report green without enrolling.
+          #   rename     -- .filename is the NEW path, so moving a file OUT of a
+          #                gated directory would otherwise be invisible;
+          #                .previous_filename is what makes that shrink visible.
+          #
+          # Widening this can only ever add matches: deleting docs/foo.md still
+          # matches no glob. So there is nothing to trade off against.
+          # One line per changed FILE, its paths tab-separated, so the
+          # truncation check below counts entries rather than paths -- a rename
+          # carries two paths and would otherwise inflate the count.
+          if ! entries=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" \
+                --paginate --jq '.[] | [.filename, .previous_filename // empty] | @tsv'); then
+            echo "::warning::could not list the PR's files; running the gate rather than assuming it is unnecessary"
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # The PR files API stops at 3000 entries, so on a PR that large the
+          # list is silently incomplete and a registration-relevant change can
+          # sit past the cap -- a corner the old trigger-level filter did not
+          # have, because GitHub evaluated that against the whole diff. Treat a
+          # capped list as what it is, unknown, and enrol.
+          if [ "$(printf '%s\n' "${entries}" | grep -c .)" -ge 3000 ]; then
+            echo "::warning::the PR touches at least 3000 files, the point where the files API truncates; running the gate rather than trusting a partial list"
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Split back to one path per line for matching: both ends of a rename
+          # are compared, even though the file counted once above.
+          files=$(printf '%s\n' "${entries}" | tr '\t' '\n')
+
+          relevant=false
+          while IFS= read -r changed; do
+            if [ -z "$changed" ]; then continue; fi
+            while IFS= read -r glob; do
+              if [ -z "$glob" ]; then continue; fi
+              case "$glob" in
+                */'**')
+                  if [[ "$changed" == "${glob%/**}"/* ]]; then relevant=true; fi
+                  ;;
+                *)
+                  if [[ "$changed" == "$glob" ]]; then relevant=true; fi
+                  ;;
+              esac
+              if [ "$relevant" = true ]; then break; fi
+            done <<< "${GATE_PATHS}"
+            if [ "$relevant" = true ]; then
+              echo "matched: ${changed}"
+              break
+            fi
+          done <<< "${files}"
+
+          echo "relevant=${relevant}" >> "$GITHUB_OUTPUT"
+          if [ "$relevant" = true ]; then
+            echo "This PR touches registration-relevant paths; enrolling for real."
+          else
+            echo "No registration-relevant paths changed; the gate will report without enrolling."
+          fi
+
       # Fork PRs get no OIDC token. Fail loudly rather than skipping: a skipped
       # required check counts as satisfied, which would turn the gate into a
       # merge bypass for exactly the PRs it can least vouch for.
       - name: Guard fork pull requests
-        if: github.event.pull_request.head.repo.full_name != github.repository
+        if: >-
+          steps.scope.outputs.relevant == 'true' &&
+          github.event.pull_request.head.repo.full_name != github.repository
         run: |
           echo "::error::the OTP registration gate cannot run on a fork PR (no OIDC token). Re-open from a branch in ${{ github.repository }}."
           exit 1
@@ -94,6 +194,7 @@ jobs:
       # covers its own inputs, but the role ARN is consumed by the AWS step
       # before the test runs, so it is checked here.
       - name: Require gate configuration
+        if: steps.scope.outputs.relevant == 'true'
         env:
           ROLE_ARN: ${{ secrets.OTP_E2E_ROLE_ARN }}
         run: |
@@ -104,15 +205,18 @@ jobs:
           fi
 
       - name: Checkout code
+        if: steps.scope.outputs.relevant == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Go
+        if: steps.scope.outputs.relevant == 'true'
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.work
           cache: true
 
       - name: Configure AWS credentials
+        if: steps.scope.outputs.relevant == 'true'
         uses: aws-actions/configure-aws-credentials@f503a1870408dcf2c35d5c2b8a68e69211042c7d # v4.1.0
         with:
           role-to-assume: ${{ secrets.OTP_E2E_ROLE_ARN }}
@@ -124,6 +228,7 @@ jobs:
       # as green. QURL_OTP_E2E_STRICT turns a missing prerequisite into a
       # failure instead of a skip, for the same reason.
       - name: Register with an emailed OTP and assert idempotency
+        if: steps.scope.outputs.relevant == 'true'
         env:
           QURL_OTP_E2E_STRICT: "1"
           QURL_OTP_E2E_HUB_HOST: ${{ secrets.OTP_E2E_HUB_HOST }}
@@ -143,3 +248,13 @@ jobs:
           go test -v -count=1 ./tests/e2e/nativeudp/ \
             -run 'TestEmailedOTPCompletesIdempotentSDKRegistration' \
             -timeout 15m
+
+      # The job must reach a real conclusion on every PR, including ones it
+      # deliberately did not exercise. This step is what makes "not relevant"
+      # report success instead of leaving a required check unresolved.
+      - name: Report a gate that was not exercised
+        if: steps.scope.outputs.relevant != 'true'
+        run: |
+          echo "No registration-relevant paths changed, so no OTP was spent."
+          echo "Scope is GATE_PATHS in this workflow; the compiled closure it must"
+          echo "cover is asserted by TestGatePathsCoverTheCompiledClosure."
