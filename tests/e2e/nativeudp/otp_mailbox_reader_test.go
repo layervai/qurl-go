@@ -184,15 +184,18 @@ func (m *otpMailbox) snapshot() (calls int, fresh bool) {
 // to reach it.
 func (m *otpMailbox) timedOut() error {
 	return errors.New(
-		"no OTP email arrived for this run. If the gate has run several times within " +
-			"the hour, the per-credential OTP issuance rate limit is the likely cause and " +
-			"no email was ever sent; check the ca-iro-cell* log group for an Outcome other " +
-			"than success before suspecting delivery")
+		"no OTP email arrived for this run. The likely cause is that no email was ever " +
+			"sent: issuance is rate limited at 5/hour per credential and 10/hour per " +
+			"owner, and while the credential pool spreads runs across owners to stay " +
+			"under both, enough runs within the hour will still exhaust the slot this " +
+			"run drew. Check the ca-iro-cell* log group for an Outcome other than " +
+			"success before suspecting delivery")
 }
 
 // receive long-polls until a message addressed to this agent arrives, or ctx
-// expires. Messages that are not ours are deleted and skipped so a stale one
-// cannot wedge the queue for later runs.
+// expires. A message that is not ours is deleted only when it predates this run
+// -- anything newer is released back, because a concurrent run is still waiting
+// for it.
 func (m *otpMailbox) receive(ctx context.Context, agentID string) (string, error) {
 	if m.waitBudget > 0 {
 		var cancel context.CancelFunc

@@ -23,10 +23,12 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"os"
 	"path/filepath"
@@ -52,7 +54,10 @@ const (
 	otpE2EHubPortEnv    = "QURL_OTP_E2E_HUB_PORT"
 	otpE2EHubKeyEnv     = "QURL_OTP_E2E_HUB_SERVER_KEY"
 	otpE2EEnrollmentEnv = "QURL_OTP_E2E_ENROLLMENT"
-	otpE2EAgentIDEnv    = "QURL_OTP_E2E_AGENT_ID"
+	// otpE2EEnrollmentPoolEnv holds several credentials, one per line. See
+	// selectEnrollment for why the pool exists and why it is keyed on owners.
+	otpE2EEnrollmentPoolEnv = "QURL_OTP_E2E_ENROLLMENT_POOL"
+	otpE2EAgentIDEnv        = "QURL_OTP_E2E_AGENT_ID"
 
 	otpE2EMailboxQueueURLEnv  = "QURL_OTP_E2E_MAILBOX_QUEUE_URL"
 	otpE2EMailboxBucketEnv    = "QURL_OTP_E2E_MAILBOX_BUCKET"
@@ -82,6 +87,12 @@ type otpE2EConfig struct {
 	enrollment string
 	agentID    string
 
+	// enrollmentSlot and enrollmentPoolSize are evidence, not inputs: a run
+	// that fails on the issuance rate limit needs to say WHICH credential it
+	// spent, and the pool is secret so the value itself can never be logged.
+	enrollmentSlot     int
+	enrollmentPoolSize int
+
 	mailboxQueueURL  string
 	mailboxBucket    string
 	mailboxRecipient string
@@ -94,7 +105,7 @@ type otpE2EConfig struct {
 func loadOTPE2EConfig(lookup func(string) string) (otpE2EConfig, bool, error) {
 	required := []string{
 		otpE2EHubHostEnv, otpE2EHubPortEnv, otpE2EHubKeyEnv,
-		otpE2EEnrollmentEnv, otpE2EAgentIDEnv,
+		otpE2EAgentIDEnv,
 		otpE2EMailboxQueueURLEnv, otpE2EMailboxBucketEnv,
 		otpE2EMailboxRecipientEnv, otpE2EMailboxRegionEnv,
 	}
@@ -104,6 +115,19 @@ func loadOTPE2EConfig(lookup func(string) string) (otpE2EConfig, bool, error) {
 			missing = append(missing, name)
 		}
 	}
+
+	// The credential arrives as a pool or as a single value, so neither name
+	// belongs in `required` on its own -- either one alone satisfies this.
+	pool := parseEnrollmentPool(lookup(otpE2EEnrollmentPoolEnv))
+	if len(pool) == 0 {
+		if single := strings.TrimSpace(lookup(otpE2EEnrollmentEnv)); single != "" {
+			pool = []string{single}
+		}
+	}
+	if len(pool) == 0 {
+		missing = append(missing, otpE2EEnrollmentPoolEnv+" (or "+otpE2EEnrollmentEnv+")")
+	}
+
 	strict := strings.TrimSpace(lookup(otpE2EStrictEnv)) != ""
 	if len(missing) > 0 {
 		if strict {
@@ -119,6 +143,8 @@ func loadOTPE2EConfig(lookup func(string) string) (otpE2EConfig, bool, error) {
 		return otpE2EConfig{}, false, fmt.Errorf("%s must be a valid UDP port", otpE2EHubPortEnv)
 	}
 
+	enrollment, slot := selectEnrollment(pool, lookup)
+
 	return otpE2EConfig{
 		hub: qurl.HubBootstrap{
 			Host: strings.TrimSpace(lookup(otpE2EHubHostEnv)),
@@ -129,13 +155,79 @@ func loadOTPE2EConfig(lookup func(string) string) (otpE2EConfig, bool, error) {
 			Port:               port,
 			ServerPublicKeyB64: strings.TrimSpace(lookup(otpE2EHubKeyEnv)),
 		},
-		enrollment:       strings.TrimSpace(lookup(otpE2EEnrollmentEnv)),
-		agentID:          runScopedAgentID(strings.TrimSpace(lookup(otpE2EAgentIDEnv)), lookup),
+		enrollment:         enrollment,
+		enrollmentSlot:     slot,
+		enrollmentPoolSize: len(pool),
+		agentID:            runScopedAgentID(strings.TrimSpace(lookup(otpE2EAgentIDEnv)), lookup),
 		mailboxQueueURL:  strings.TrimSpace(lookup(otpE2EMailboxQueueURLEnv)),
 		mailboxBucket:    strings.TrimSpace(lookup(otpE2EMailboxBucketEnv)),
 		mailboxRecipient: strings.TrimSpace(lookup(otpE2EMailboxRecipientEnv)),
 		mailboxRegion:    strings.TrimSpace(lookup(otpE2EMailboxRegionEnv)),
 	}, false, nil
+}
+
+// parseEnrollmentPool splits the pool secret into credentials.
+//
+// Newline is the natural separator for a multi-line GitHub secret; comma is
+// accepted so the same value can be passed on a command line. Blank entries are
+// dropped rather than becoming an empty credential that fails obscurely later.
+func parseEnrollmentPool(raw string) []string {
+	var pool []string
+	for _, field := range strings.FieldsFunc(raw, func(r rune) bool {
+		return r == '\n' || r == '\r' || r == ','
+	}) {
+		if trimmed := strings.TrimSpace(field); trimmed != "" {
+			pool = append(pool, trimmed)
+		}
+	}
+	return pool
+}
+
+// selectEnrollment picks this run's credential and reports which slot it used.
+//
+// Registration OTP issuance is rate limited on four dimensions, and only two of
+// them can bind this gate: 5/hour per credential and 10/hour per owner. (Per
+// peer is 5/hour but every run generates a fresh device key, and per source is
+// 60/hour across runner IPs that vary.) So a single owner caps the gate at ten
+// runs an hour and a single credential at five -- which a busy afternoon on a
+// REQUIRED check exhausts, turning the gate red for reasons that have nothing
+// to do with the change under test. That is not hypothetical; it is what
+// happened while building this.
+//
+// The pool is therefore one credential per DISTINCT owner. That is the only
+// dimension that scales: piling more credentials onto one owner still tops out
+// at that owner's ten.
+//
+// Selection is keyed on run id AND attempt so a rerun lands on a different
+// slot. Reruns are the case that actually exhausted the budget in practice, and
+// keying on the run alone would send every attempt back to the same credential
+// -- the one whose budget the previous attempt just spent.
+func selectEnrollment(pool []string, lookup func(string) string) (string, int) {
+	switch len(pool) {
+	case 0:
+		return "", -1
+	case 1:
+		return pool[0], 0
+	}
+
+	runID := strings.TrimSpace(lookup("GITHUB_RUN_ID"))
+	attempt := strings.TrimSpace(lookup("GITHUB_RUN_ATTEMPT"))
+
+	// Off CI there is no run identity to spread on, so choose at random:
+	// repeated local runs are just as capable of exhausting one credential.
+	if runID == "" && attempt == "" {
+		raw := make([]byte, 4)
+		if _, err := rand.Read(raw); err != nil {
+			return pool[0], 0
+		}
+		slot := int(binary.BigEndian.Uint32(raw) % uint32(len(pool)))
+		return pool[slot], slot
+	}
+
+	digest := fnv.New32a()
+	_, _ = digest.Write([]byte(runID + "-" + attempt))
+	slot := int(digest.Sum32() % uint32(len(pool)))
+	return pool[slot], slot
 }
 
 // runScopedAgentID appends a per-run suffix to the configured agent id.
@@ -324,8 +416,9 @@ func TestEmailedOTPCompletesIdempotentSDKRegistration(t *testing.T) {
 	if binding.DeviceAPIKeyID == "" {
 		t.Fatal("registration produced no device API key id")
 	}
-	t.Logf("EVIDENCE emailed OTP completed registration: agent=%s cell=%s generation=%d",
-		binding.AgentID, binding.CellID, binding.AssignmentGeneration)
+	t.Logf("EVIDENCE emailed OTP completed registration: agent=%s cell=%s generation=%d credential=slot %d of %d",
+		binding.AgentID, binding.CellID, binding.AssignmentGeneration,
+		cfg.enrollmentSlot, cfg.enrollmentPoolSize)
 
 	// ── Idempotency ──
 	//
