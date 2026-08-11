@@ -58,6 +58,13 @@ const (
 	otpE2EMailboxRecipientEnv = "QURL_OTP_E2E_MAILBOX_RECIPIENT"
 	otpE2EMailboxRegionEnv    = "QURL_OTP_E2E_MAILBOX_REGION"
 
+	// otpE2EHostname and otpE2EVersion are the bounded audit fields assigned-cell
+	// REG carries. They are required -- omitting them is rejected as 52109
+	// "registration input invalid" -- and they surface in the OTP email body, so
+	// they name this gate rather than a generic placeholder.
+	otpE2EHostname = "otp-gate.ci.qurl-go"
+	otpE2EVersion  = "otp-registration-gate"
+
 	// otpE2EDeadline bounds the whole exchange. Most of it is waiting for SES
 	// to deliver: issuance, delivery, S3 write, and the SQS notification are
 	// each fast, but the sum is not instant.
@@ -240,6 +247,11 @@ func TestEmailedOTPCompletesIdempotentSDKRegistration(t *testing.T) {
 	client, binding, err := qurl.RegisterAgentRuntime(ctx, cfg.enrollment, store,
 		qurl.WithAgentRuntimeHub(cfg.hub),
 		qurl.WithAgentRuntimeIdentity(cfg.agentID),
+		// Assigned-cell REG carries these audit fields, and the authority
+		// rejects the registration input without them (52109). They are also
+		// what the OTP email renders as Hostname, so supplying real-looking
+		// values keeps the delivered message representative.
+		qurl.WithAgentRuntimeMetadata(otpE2EHostname, otpE2EVersion),
 		qurl.WithAgentRuntimeAllowedRegistrationKeyKinds(qurl.RegistrationKeyKindAccount),
 		qurl.WithAgentRuntimeOTPProvider(mailbox.provide),
 	)
