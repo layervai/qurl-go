@@ -160,6 +160,62 @@ func (m *otpMailbox) snapshot() (calls int, fresh bool) {
 	return m.callCount, m.fresh
 }
 
+// drain discards every message already queued, returning how many it removed.
+//
+// This is required for correctness, not tidiness. Every run enrolls the same
+// agent id, so an OTP email from an earlier attempt satisfies the same
+// Connector-ID filter as the fresh one -- the reader would hand back a stale
+// code and the authority would reject it as `52100: one-time code incorrect`.
+// Anything sitting in the queue before registration starts is by definition
+// from a previous run, so it is consumed up front and the only message that can
+// arrive afterwards is the one this run caused.
+func (m *otpMailbox) drain(ctx context.Context) (int, error) {
+	dir, err := os.MkdirTemp("", "qurl-otp-drain-")
+	if err != nil {
+		return 0, errors.New("create mailbox drain directory")
+	}
+	defer os.RemoveAll(dir)
+
+	discarded := 0
+	for {
+		if err := ctx.Err(); err != nil {
+			return discarded, errors.New("mailbox drain deadline elapsed")
+		}
+		raw, err := m.runAWS(ctx,
+			"sqs", "receive-message",
+			"--queue-url", m.queueURL,
+			"--max-number-of-messages", "10",
+			// Short poll: an empty response means empty, and waiting would just
+			// add ten seconds per empty round to every run.
+			"--wait-time-seconds", "0",
+			"--visibility-timeout", "30",
+			"--region", m.region,
+			"--output", "json",
+		)
+		if err != nil {
+			return discarded, err
+		}
+		var received sqsReceiveOutput
+		if len(bytes.TrimSpace(raw)) > 0 {
+			if err := json.Unmarshal(raw, &received); err != nil {
+				return discarded, errors.New("mailbox drain returned malformed JSON")
+			}
+		}
+		if len(received.Messages) == 0 {
+			return discarded, nil
+		}
+		for _, message := range received.Messages {
+			if message.ReceiptHandle == "" {
+				continue
+			}
+			if err := m.deleteMessage(ctx, dir, message.ReceiptHandle); err != nil {
+				return discarded, err
+			}
+			discarded++
+		}
+	}
+}
+
 // receive long-polls until a message addressed to this agent arrives, or ctx
 // expires. Messages that are not ours are deleted and skipped so a stale one
 // cannot wedge the queue for later runs.

@@ -243,6 +243,17 @@ func TestEmailedOTPCompletesIdempotentSDKRegistration(t *testing.T) {
 	// runs cannot consume one another's codes.
 	mailbox := newOTPMailbox(cfg)
 
+	// Discard anything queued before this run starts. Every run enrolls the
+	// same agent id, so a leftover OTP email matches the same filter as the
+	// fresh one and the reader would return a stale code -- which the authority
+	// rejects as 52100 "one-time code incorrect", a failure that looks like a
+	// broken OTP path rather than a dirty queue.
+	if discarded, err := mailbox.drain(ctx); err != nil {
+		t.Fatalf("drain the mailbox before registering: %v", err)
+	} else if discarded > 0 {
+		t.Logf("discarded %d stale mailbox message(s) before registering", discarded)
+	}
+
 	//nolint:staticcheck // RegisterAgentRuntime is the exact call this gate must protect.
 	client, binding, err := qurl.RegisterAgentRuntime(ctx, cfg.enrollment, store,
 		qurl.WithAgentRuntimeHub(cfg.hub),
