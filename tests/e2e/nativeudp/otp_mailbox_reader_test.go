@@ -60,7 +60,13 @@ type otpMailbox struct {
 	// began. S3 stamps each record with an eventTime, so staleness is decided
 	// on the delivery itself rather than on queue hygiene.
 	notBefore time.Time
-	runAWS    func(context.Context, ...string) ([]byte, error)
+	// waitBudget is deliberately SHORTER than the caller's registration
+	// deadline. The SDK discards this reader's error and returns the bare
+	// ctx.Err() whenever the outer context is already done, so a mailbox
+	// timeout that races the outer deadline surfaces as an opaque
+	// "context deadline exceeded". Finishing first keeps the diagnosis.
+	waitBudget time.Duration
+	runAWS     func(context.Context, ...string) ([]byte, error)
 
 	mu        sync.Mutex
 	code      string
@@ -68,14 +74,15 @@ type otpMailbox struct {
 	callCount int
 }
 
-func newOTPMailbox(cfg otpE2EConfig, notBefore time.Time) *otpMailbox {
+func newOTPMailbox(cfg otpE2EConfig, notBefore time.Time, waitBudget time.Duration) *otpMailbox {
 	return &otpMailbox{
-		queueURL:  cfg.mailboxQueueURL,
-		bucket:    cfg.mailboxBucket,
-		recipient: cfg.mailboxRecipient,
-		region:    cfg.mailboxRegion,
-		notBefore: notBefore,
-		runAWS:    runAWSCLI,
+		queueURL:   cfg.mailboxQueueURL,
+		bucket:     cfg.mailboxBucket,
+		recipient:  cfg.mailboxRecipient,
+		region:     cfg.mailboxRegion,
+		notBefore:  notBefore,
+		waitBudget: waitBudget,
+		runAWS:     runAWSCLI,
 	}
 }
 
@@ -230,6 +237,11 @@ func (m *otpMailbox) drain(ctx context.Context) (int, error) {
 // expires. Messages that are not ours are deleted and skipped so a stale one
 // cannot wedge the queue for later runs.
 func (m *otpMailbox) receive(ctx context.Context, agentID string) (string, error) {
+	if m.waitBudget > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, m.waitBudget)
+		defer cancel()
+	}
 	dir, err := os.MkdirTemp("", "qurl-otp-mailbox-")
 	if err != nil {
 		return "", errors.New("create mailbox scratch directory")
@@ -242,7 +254,18 @@ func (m *otpMailbox) receive(ctx context.Context, agentID string) (string, error
 
 	for {
 		if err := ctx.Err(); err != nil {
-			return "", errors.New("no OTP email arrived before the deadline")
+			// Name the most likely cause. Registration OTP issuance is rate
+			// limited per credential over a one-hour window
+			// (RegistrationOTPRateLimitWindow in qurl-service), and once that
+			// budget is spent the authority refuses to issue and NO email is
+			// ever sent -- which is indistinguishable, from here, from a
+			// delivery problem. Re-running the gate repeatedly while debugging
+			// is the fastest way to hit it.
+			return "", errors.New(
+				"no OTP email arrived for this run. If the gate has run several times " +
+					"within the hour, the per-credential OTP issuance rate limit is the " +
+					"likely cause and no email was ever sent; check the ca-iro-cell* log " +
+					"group for an Outcome other than success before suspecting delivery")
 		}
 		raw, err := m.runAWS(ctx,
 			"sqs", "receive-message",

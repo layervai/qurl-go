@@ -65,6 +65,11 @@ const (
 	otpE2EHostname = "otp-gate.ci.qurl-go"
 	otpE2EVersion  = "otp-registration-gate"
 
+	// otpE2EMailboxWait is the mailbox's own budget, kept below otpE2EDeadline
+	// so a mailbox timeout reports ITS reason rather than being overwritten by
+	// the SDK with a bare context deadline.
+	otpE2EMailboxWait = 4 * time.Minute
+
 	// otpE2EDeadline bounds the whole exchange. Most of it is waiting for SES
 	// to deliver: issuance, delivery, S3 write, and the SQS notification are
 	// each fast, but the sum is not instant.
@@ -248,7 +253,7 @@ func TestEmailedOTPCompletesIdempotentSDKRegistration(t *testing.T) {
 	// rather than a dirty mailbox. Draining first is not sufficient on its own:
 	// SQS short polling samples a subset of servers, so a stale message can
 	// survive a drain and be long-polled afterwards.
-	mailbox := newOTPMailbox(cfg, time.Now().UTC())
+	mailbox := newOTPMailbox(cfg, time.Now().UTC(), otpE2EMailboxWait)
 
 	// Discard anything queued before this run starts. Every run enrolls the
 	// same agent id, so a leftover OTP email matches the same filter as the
