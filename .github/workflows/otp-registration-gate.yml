@@ -126,8 +126,11 @@ jobs:
           #
           # Widening this can only ever add matches: deleting docs/foo.md still
           # matches no glob. So there is nothing to trade off against.
-          if ! files=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" \
-                --paginate --jq '.[] | .filename, .previous_filename | select(. != null)'); then
+          # One line per changed FILE, its paths tab-separated, so the
+          # truncation check below counts entries rather than paths -- a rename
+          # carries two paths and would otherwise inflate the count.
+          if ! entries=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" \
+                --paginate --jq '.[] | [.filename, .previous_filename // empty] | @tsv'); then
             echo "::warning::could not list the PR's files; running the gate rather than assuming it is unnecessary"
             echo "relevant=true" >> "$GITHUB_OUTPUT"
             exit 0
@@ -138,11 +141,15 @@ jobs:
           # sit past the cap -- a corner the old trigger-level filter did not
           # have, because GitHub evaluated that against the whole diff. Treat a
           # capped list as what it is, unknown, and enrol.
-          if [ "$(printf '%s\n' "${files}" | grep -c .)" -ge 3000 ]; then
+          if [ "$(printf '%s\n' "${entries}" | grep -c .)" -ge 3000 ]; then
             echo "::warning::the PR touches at least 3000 files, the point where the files API truncates; running the gate rather than trusting a partial list"
             echo "relevant=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+
+          # Split back to one path per line for matching: both ends of a rename
+          # are compared, even though the file counted once above.
+          files=$(printf '%s\n' "${entries}" | tr '\t' '\n')
 
           relevant=false
           while IFS= read -r changed; do
