@@ -28,9 +28,13 @@ module github.com/layervai/qurl-go
 // Anything below 1.25.12 reintroduces both CVEs. Before changing this line,
 // run `make vuln` at the candidate version.
 //
-// Note ./awsstore stays on a higher floor until the next root tag: it requires
-// the PUBLISHED parent module, so it can only follow a release, never lead one.
-// That is why the root CI jobs set GOWORK=off — see .github/workflows/ci.yml.
+// ./awsstore and go.work sit at this same floor as of awsstore/v0.5.2, but do
+// not read that as permanent. awsstore requires the PUBLISHED parent module, so
+// it can only follow a root release, never lead one: the next time this line
+// moves, awsstore is stranded on the old floor until a root tag ships and the
+// lockstep bump lands. That window is why the root CI jobs set GOWORK=off — see
+// .github/workflows/ci.yml. Keep it even while the floors agree; it is what
+// makes the next reduction possible without breaking every root job.
 go 1.25.12
 
 require (
