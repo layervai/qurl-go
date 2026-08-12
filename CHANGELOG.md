@@ -6,8 +6,18 @@ independently under `awsstore/vX.Y.Z` tags.
 Pre-1.0 semantic versioning: breaking changes land in minor versions (v0.N.0)
 and are marked **Breaking** with what to change.
 
-## Unreleased
+## v0.5.2 — 2026-08-10
 
+- **The minimum Go version is now 1.25.12, down from 1.26.5.** This widens
+  support to the whole Go 1.25 line, which matters most if you build on pinned
+  or air-gapped CI (`GOTOOLCHAIN=local`) that cannot fetch a 1.26 toolchain.
+  The floor remains a *security* floor rather than a preference for the newest
+  release: 1.25.12 is the earliest version without the two standard-library
+  vulnerabilities this SDK's code paths reach — GO-2026-5856 in `crypto/tls`
+  and GO-2026-4970 in `os`, both fixed in 1.25.12 and 1.26.5 — and CI runs
+  `govulncheck` at exactly the declared floor. Nothing that built against
+  v0.5.1 stops building; this only removes a requirement that was stricter
+  than anything in the module graph needed.
 - `ErrInsecureAgentStatePermissions` now names the exact path and the exact
   command. Pointing a store at a path inside a directory that already exists at
   `0755` — a working directory, `$HOME`, anything `mkdir` made under the usual
