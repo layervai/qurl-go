@@ -98,6 +98,13 @@ type ConnectorResource struct {
 	// encoding, DER structure, key type, curve, and point. It is distinct from
 	// ConnectorRoutingID and KnockResourceID.
 	ResourceID string `json:"resource_id"`
+	// CRID is the Cryptographic Resource ID derived from ResourceID's public
+	// key, when the producer returns it. Optional by presence: producers that
+	// predate CRID omit it, so unlike the identity fields above it is carried
+	// verbatim with no wire-format gate — the producer is authoritative for
+	// its own derivation, and the client-side trust rule is the crid
+	// package's delivered-key match, not a format check here.
+	CRID string `json:"crid,omitempty"`
 	// ConnectorRoutingID is the opaque routing label returned by the producer.
 	// qURL Connector uses it verbatim and never derives it from ResourceID.
 	ConnectorRoutingID string `json:"connector_routing_id"`
@@ -141,6 +148,7 @@ type ensureConnectorResourceRequest struct {
 // is validated here and intentionally omitted from the exported SDK entity.
 type connectorResourceWire struct {
 	ResourceID         string  `json:"resource_id"`
+	CRID               string  `json:"crid"`
 	ConnectorRoutingID string  `json:"connector_routing_id"`
 	KnockResourceID    string  `json:"knock_resource_id"`
 	Type               string  `json:"type"`
@@ -376,6 +384,7 @@ func (r connectorResourceWire) connectorResource(client *Client, expect connecto
 	return &ConnectorResource{
 		client:             client,
 		ResourceID:         r.ResourceID,
+		CRID:               r.CRID,
 		ConnectorRoutingID: r.ConnectorRoutingID,
 		KnockResourceID:    r.KnockResourceID,
 		Slug:               r.Slug,

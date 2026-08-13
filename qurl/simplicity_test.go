@@ -41,7 +41,11 @@ var frictionBudget = map[string]int{
 	"ExampleClient_ProtectURL":              3,
 	"ExampleClient_EnsureConnectorResource": 3,
 	"ExampleClient_CreatePortal":            4,
-	"ExampleNewClient":                      5,
+	// Mint a fresh access link for a stored identifier (either form): open
+	// client, resolve, print. The CRID trust story stays one optional call
+	// (ResolvedAccess.VerifyCRID), not setup.
+	"ExampleClient_ResolveResource": 3,
+	"ExampleNewClient":              5,
 	// The package overview: open a client, protect, create, print.
 	"Example": 4,
 

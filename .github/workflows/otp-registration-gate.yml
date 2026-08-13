@@ -73,6 +73,7 @@ env:
   # `X/**` is any path under X/, anything else is an exact path.
   GATE_PATHS: |
     qurl/**
+    crid/**
     internal/**
     relayknock/**
     tests/e2e/nativeudp/**

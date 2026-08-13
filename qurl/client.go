@@ -576,6 +576,11 @@ type Resource struct {
 	// legacy Resource surface treats the value as opaque and does not validate
 	// that format. ConnectorResource provides the strictly validated identity.
 	ID string `json:"resource_id"`
+	// CRID is the Cryptographic Resource ID derived from the resource public
+	// key, when returned by LayerV. Optional by presence: older servers and
+	// keyless resources omit it. The SDK carries it verbatim; the crid
+	// package provides local validation and the delivered-key match rule.
+	CRID string `json:"crid,omitempty"`
 	// TargetURL is the private URL protected by this resource.
 	TargetURL string `json:"target_url"`
 	// Status is the resource lifecycle status returned by LayerV.
@@ -700,7 +705,7 @@ func (c *Client) ProtectURL(ctx context.Context, targetURL string, opts ...Resou
 	}
 
 	var env apiEnvelope[createResourceResponse]
-	if err := c.doJSON(ctx, http.MethodPost, "/v1/resources", reqBody, &env); err != nil {
+	if err := c.postJSON(ctx, "/v1/resources", reqBody, &env); err != nil {
 		return nil, err
 	}
 	resource, err := env.Data.resource()
@@ -840,7 +845,7 @@ func (c *Client) CreatePortal(ctx context.Context, resource *Resource, opts ...P
 
 	path := "/v1/resources/" + url.PathEscape(resource.ID) + "/qurls"
 	var env apiEnvelope[createPortalResponse]
-	if err := c.doJSON(ctx, http.MethodPost, path, reqBody, &env); err != nil {
+	if err := c.postJSON(ctx, path, reqBody, &env); err != nil {
 		return nil, err
 	}
 	return env.Data.portal()
@@ -875,7 +880,7 @@ func (c *Client) CreatePortalForURL(ctx context.Context, targetURL string, opts 
 	}
 
 	var env apiEnvelope[createPortalResponse]
-	if err := c.doJSON(ctx, http.MethodPost, "/v1/qurls", reqBody, &env); err != nil {
+	if err := c.postJSON(ctx, "/v1/qurls", reqBody, &env); err != nil {
 		return nil, nil, err
 	}
 	portal, err := env.Data.portal()
@@ -900,6 +905,7 @@ type createResourceRequest struct {
 
 type createResourceResponse struct {
 	ID           string     `json:"resource_id"`
+	CRID         string     `json:"crid"`
 	TargetURL    string     `json:"target_url"`
 	Status       string     `json:"status"`
 	Description  string     `json:"description"`
@@ -917,6 +923,7 @@ func (r createResourceResponse) resource() (*Resource, error) {
 	}
 	return &Resource{
 		ID:           r.ID,
+		CRID:         r.CRID,
 		TargetURL:    r.TargetURL,
 		Status:       r.Status,
 		Description:  r.Description,
@@ -1069,8 +1076,12 @@ func isLoopbackHost(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-func (c *Client) doJSON(ctx context.Context, method, path string, body, out any) error {
-	return doAuthorizedJSON(ctx, c.httpClient, c.baseURL, c.credentials.Authorize, method, path, body, out)
+// postJSON sends a JSON POST with the SDK's generic success contract: any 2xx
+// status is accepted, and the body is decoded into out when it is non-nil.
+// Every generic-surface endpoint is a POST; endpoints whose documented status
+// or empty body is part of their contract use doRequest instead.
+func (c *Client) postJSON(ctx context.Context, path string, body, out any) error {
+	return doAuthorizedJSON(ctx, c.httpClient, c.baseURL, c.credentials.Authorize, http.MethodPost, path, body, out)
 }
 
 func (c *Client) doRequest(ctx context.Context, method, path string, body any, contract apiResponseContract) error {
