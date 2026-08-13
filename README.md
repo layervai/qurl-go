@@ -92,6 +92,7 @@ here builds a command.
 | Module | Purpose |
 | --- | --- |
 | `github.com/layervai/qurl-go/qurl` | The SDK. Zero AWS dependencies. |
+| `github.com/layervai/qurl-go/crid` | The Cryptographic Resource ID codec: strict local validation, environment reporting, and the delivered-key match rule. No dependencies beyond the standard library. |
 | `github.com/layervai/qurl-go/awsstore` | AWS-backed agent state (Secrets Manager, SSM, KMS sealing). A [separate module](awsstore/README.md) so the AWS SDK never leaks into `qurl`. |
 
 ## Get a credential

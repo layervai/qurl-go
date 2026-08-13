@@ -85,6 +85,22 @@ func ExampleClient_EnsureConnectorResource() {
 	)
 }
 
+func ExampleClient_ResolveResource() {
+	client, err := qurl.OpenClient()
+	if err != nil {
+		panic(err)
+	}
+
+	// Either identifier form works: the public-key resource id or the
+	// resource's CRID. Open the minted link with EnterPortal.
+	access, err := client.ResolveResource(context.Background(), exampleResourcePublicKey, nil)
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Println(access.QURL)
+}
+
 func ExampleOpenClient() {
 	client, err := qurl.OpenClient()
 	if err != nil {

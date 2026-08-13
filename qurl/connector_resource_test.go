@@ -65,7 +65,7 @@ func TestConnectorResourcePublicShape(t *testing.T) {
 			got = append(got, field.Name)
 		}
 	}
-	want := []string{"ResourceID", "ConnectorRoutingID", "KnockResourceID", "Slug", "Alias"}
+	want := []string{"ResourceID", "CRID", "ConnectorRoutingID", "KnockResourceID", "Slug", "Alias"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("ConnectorResource exported fields = %v, want %v; cycle RunID and producer type/status are not resource fields", got, want)
 	}
@@ -246,6 +246,46 @@ func TestClient_GetConnectorResourceDetailEnvelope(t *testing.T) {
 	}
 	if resource.ResourceID != testConnectorID || resource.ConnectorRoutingID != testConnectorRoutingID || resource.KnockResourceID != testKnockID || resource.Slug != testConnectorSlug || resource.Alias != nil {
 		t.Fatalf("resource = %#v", resource)
+	}
+}
+
+// TestClient_ConnectorResourceCarriesOptionalCRID pins the additive crid
+// field on the shared producer serializer: a producer that returns it is
+// carried verbatim (presence-only — the producer is authoritative for its
+// own derivation, and the client-side trust rule is the crid package's
+// delivered-key match, not a wire gate here), and a producer that predates
+// the field yields an empty CRID rather than an invalid-response error.
+func TestClient_ConnectorResourceCarriesOptionalCRID(t *testing.T) {
+	t.Parallel()
+
+	heldCRID, _, _ := cridKeyMatchFixture(t)
+	for _, tt := range []struct {
+		name     string
+		cridJSON string // raw JSON fragment appended after resource_id
+		wantCRID string
+	}{
+		{name: "producer returns crid", cridJSON: fmt.Sprintf(`"crid":%q,`, heldCRID), wantCRID: heldCRID},
+		{name: "producer predates crid", cridJSON: "", wantCRID: ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				assertConnectorAuthorization(t, r)
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprintf(w, `{"data":{"resource":{"resource_id":%q,%s"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q,"alias":null},"qurls":[]},"meta":{"request_id":"req-crid"}}`,
+					testConnectorID, tt.cridJSON, testConnectorRoutingID, testKnockID, testConnectorSlug)
+			}))
+			defer api.Close()
+
+			resource, err := newConnectorTestClient(t, api.URL).GetConnectorResource(context.Background(), testConnectorID)
+			if err != nil {
+				t.Fatalf("GetConnectorResource: %v", err)
+			}
+			if resource.CRID != tt.wantCRID {
+				t.Fatalf("resource CRID = %q, want %q", resource.CRID, tt.wantCRID)
+			}
+		})
 	}
 }
 
