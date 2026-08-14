@@ -6,6 +6,14 @@ independently under `awsstore/vX.Y.Z` tags.
 Pre-1.0 semantic versioning: breaking changes land in minor versions (v0.N.0)
 and are marked **Breaking** with what to change.
 
+## Unreleased
+
+- Raised the minimum Go version from 1.25.12 to 1.25.13. This is a security
+  patch-floor update: Go 1.25.13 fixes four newly reported standard-library
+  vulnerabilities reachable from the root module, including path-resolution,
+  TLS post-handshake, ASN.1 recursion, and HTTP hostname-validation issues.
+  The root module, `awsstore`, and the development workspace remain aligned.
+
 ## v0.5.2 — 2026-08-10
 
 - **The minimum Go version is now 1.25.12, down from 1.26.5.** This widens

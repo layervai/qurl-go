@@ -8,34 +8,28 @@ module github.com/layervai/qurl-go
 // setup-go takes its toolchain from this line, so govulncheck runs at exactly
 // this version and fails the build if the floor drifts below a fix.
 //
-// 1.25.12 is the oldest release that qualifies. It is the fix release on the
-// 1.25 line for both vulnerabilities govulncheck reports as reachable from
-// here:
+// 1.25.13 is the oldest release that qualifies. It fixes the standard-library
+// vulnerabilities govulncheck reports as reachable from here:
 //
-//   - GO-2026-5856, crypto/tls Encrypted Client Hello privacy leak, reached via
-//     qurl.HTTPFetcher.Fetch -> http.Client.Do -> tls.Conn.HandshakeContext
-//   - GO-2026-4970, os root escape via symlink plus trailing slash, reached via
-//     qurl.readPrivateStateFileBounded -> os.OpenInRoot
+//   - GO-2026-6218, quadratic path resolution in net/url
+//   - GO-2026-6090, unbounded post-handshake messages in crypto/tls
+//   - GO-2026-5972, unbounded recursion in encoding/asn1
+//   - GO-2026-5026, invalid Punycode-label acceptance through net/http
 //
-// Both are fixed in 1.25.12 and 1.26.5. This line was 1.26.5 until
-// qurl-conformance v0.12.3 relaxed its own directive to 1.25.12: conformance is
-// a TEST-ONLY dependency here (no package of it appears in any build graph —
-// see `go list -deps ./qurl`), but `go mod tidy` folds a test dependency's
-// directive into ours regardless, so its floor was ours. Verified at 1.25.12
-// before the change: build, vet, `go test -race ./...` and `make vuln` all
-// clean, govulncheck reporting 0 reachable vulnerabilities.
+// The first three are reached through HTTP/TLS and certificate parsing; the
+// fourth is reached through HTTP. 1.25.13 also retains the fixes that made
+// 1.25.12 the previous floor (GO-2026-5856 and GO-2026-4970).
 //
-// Anything below 1.25.12 reintroduces both CVEs. Before changing this line,
-// run `make vuln` at the candidate version.
+// Anything below 1.25.13 reintroduces a reachable vulnerability. Before
+// changing this line, run `make vuln` at the candidate version.
 //
-// ./awsstore and go.work sit at this same floor as of awsstore/v0.5.2, but do
-// not read that as permanent. awsstore requires the PUBLISHED parent module, so
-// it can only follow a root release, never lead one: the next time this line
-// moves, awsstore is stranded on the old floor until a root tag ships and the
-// lockstep bump lands. That window is why the root CI jobs set GOWORK=off — see
-// .github/workflows/ci.yml. Keep it even while the floors agree; it is what
-// makes the next reduction possible without breaking every root job.
-go 1.25.12
+// ./awsstore and go.work sit at this same floor, but do not read that as
+// permanent. awsstore requires the PUBLISHED parent module, so a future floor
+// reduction cannot reach awsstore until a root tag ships and its parent pin can
+// follow. That window is why the root CI jobs set GOWORK=off — see
+// .github/workflows/ci.yml. Keep it even while the floors agree; it makes a
+// future reduction possible without breaking every root job.
+go 1.25.13
 
 require (
 	github.com/layervai/qurl-conformance v0.12.5
