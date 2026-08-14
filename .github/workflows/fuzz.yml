@@ -36,9 +36,10 @@ jobs:
       # workspace loaded — `make fuzz` walks `./... ./awsstore/...` so awsstore
       # fuzzes against the in-tree parent — and a loaded workspace enforces
       # go.work's directive, which must be >= every module it lists. awsstore
-      # requires the PUBLISHED parent module, so it sits a release ahead of the
-      # root floor; installing from ./go.mod would hand this job a toolchain
-      # older than go.work demands and fail before a single target ran:
+      # requires the PUBLISHED parent module, so after a root floor reduction it
+      # can temporarily retain the previous, higher floor; installing from
+      # ./go.mod would then hand this job a toolchain older than go.work demands
+      # and fail before a single target ran:
       #
       #   go: go.work requires go >= 1.26.5 (running go 1.25.12; GOTOOLCHAIN=local)
       #

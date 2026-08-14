@@ -28,11 +28,10 @@ jobs:
       # This job's toolchain comes from ./go.mod, so it runs at the floor the
       # module advertises. With the workspace loaded, go.work's own directive
       # is enforced against that toolchain — and go.work must be >= every
-      # module it lists, including awsstore. awsstore requires the PUBLISHED
-      # parent tag, so it necessarily lags the root module's floor by one
-      # release; letting it back into this job's resolution would pin the root
-      # floor to whatever awsstore is stuck at and make any floor reduction
-      # impossible.
+      # module it lists, including awsstore. Because awsstore requires the
+      # PUBLISHED parent tag, it can temporarily retain the previous, higher
+      # floor while the root lowers its own; letting it back into this job's
+      # resolution would then make that floor reduction impossible.
       #
       # No fidelity is lost: no root package imports awsstore, so the workspace
       # changes nothing else here — it only removes a constraint consumers
@@ -119,8 +118,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       # Same reason as the `test` job: this job's toolchain comes from ./go.mod,
-      # so keep go.work — and through it awsstore's lagging floor — out of
-      # resolution.
+      # so keep go.work — and a possible transient higher awsstore floor — out
+      # of resolution.
       GOWORK: "off"
     strategy:
       # Report every OS on a failure rather than cancelling the siblings — the
@@ -181,8 +180,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       # Same reason as the `test` job: this job's toolchain comes from ./go.mod,
-      # so keep go.work — and through it awsstore's lagging floor — out of
-      # resolution.
+      # so keep go.work — and a possible transient higher awsstore floor — out
+      # of resolution.
       GOWORK: "off"
     steps:
       - name: Checkout code
