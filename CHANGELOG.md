@@ -6,13 +6,31 @@ independently under `awsstore/vX.Y.Z` tags.
 Pre-1.0 semantic versioning: breaking changes land in minor versions (v0.N.0)
 and are marked **Breaking** with what to change.
 
-## Unreleased
+## v0.5.3 — 2026-08-14
 
 - Raised the minimum Go version from 1.25.12 to 1.25.13. This is a security
   patch-floor update: Go 1.25.13 fixes four newly reported standard-library
   vulnerabilities reachable from the root module, including path-resolution,
   TLS post-handshake, ASN.1 recursion, and HTTP hostname-validation issues.
-  The root module, `awsstore`, and the development workspace remain aligned.
+  Builders pinned to 1.25.12 must update their toolchain before upgrading. The
+  root module, `awsstore`, and the development workspace remain aligned, and
+  CI runs `govulncheck` at exactly the declared floor.
+- Added the public `crid` package for Cryptographic Resource IDs. It provides
+  strict `Parse` and `Validate` gates, a cheap `MatchesShape` dispatch check,
+  typed rejection sentinels, version and environment reporting, and
+  constant-time `KeyMatches` verification. The implementation is pinned to
+  the released `qurl-crid-v1-vectors` conformance contract and fails closed
+  when a delivered resource key does not match the CRID a caller already
+  holds.
+- `Resource` and `ConnectorResource` now carry the server-provided CRID when
+  one exists. The field is optional, so older servers and keyless resources
+  remain compatible.
+- Added `Client.ResolveResource`, which exchanges either permanent identifier
+  form for a fresh temporary access link, and `ResolvedAccess.VerifyCRID`,
+  which binds that response to a caller-held resource key before use. A dark
+  environment reports the new `ErrTemporaryAccessLinksDisabled` sentinel while
+  preserving the underlying `*APIError` for inspection.
+- Dependency and CI maintenance.
 
 ## v0.5.2 — 2026-08-10
 
