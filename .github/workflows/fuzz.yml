@@ -39,9 +39,8 @@ jobs:
       # requires the PUBLISHED parent module, so after a root floor reduction it
       # can temporarily retain the previous, higher floor; installing from
       # ./go.mod would then hand this job a toolchain older than go.work demands
-      # and fail before a single target ran:
-      #
-      #   go: go.work requires go >= 1.26.5 (running go 1.25.12; GOTOOLCHAIN=local)
+      # and fail before a single target ran with go.work requiring the higher
+      # workspace floor while GOTOOLCHAIN=local holds the root toolchain lower.
       #
       # There is no GOTOOLCHAIN=auto rescue here — setup-go pins GOTOOLCHAIN to
       # `local`, so nothing silently upgrades. go.work is >= both modules by
