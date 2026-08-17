@@ -32,10 +32,10 @@ github.com/aws/aws-sdk-go-v2/service/sts v1.45.4 h1:w/AryDYMjSUANSQ2uoZxJovUsMTw
 github.com/aws/aws-sdk-go-v2/service/sts v1.45.4/go.mod h1:WeBiAa67azG7Su9Vf+ChGDBLiAozJCXzdjXiPBUwtbc=
 github.com/aws/smithy-go v1.27.6 h1:0zjT8jgK3jbrTT7JJ3EE6JsMhX8JTrZ+f1sEndYDXrA=
 github.com/aws/smithy-go v1.27.6/go.mod h1:YE2RhdIuDbA5E5bTdciG9KrW3+TiEONeUWCqxX9i1Fc=
-github.com/layervai/qurl-conformance v0.12.3 h1:ruCvfnAEzgzBelnh/ujNk445a7ph6S5hxfSfM0mnjTg=
-github.com/layervai/qurl-conformance v0.12.3/go.mod h1:NHtczZdj7SRFqLj9iS4dCGyYZSZKfpILnBRhC53W7WA=
-github.com/layervai/qurl-go v0.5.2 h1:rQ5+1N2XOkZcpikIuzvgiNsM9o23w5YKTRDwBdVkGIA=
-github.com/layervai/qurl-go v0.5.2/go.mod h1:4Jh+/cCsLue/wjN+CrK3HaSGtUnOWgIKB1QPiMXSZjA=
+github.com/layervai/qurl-conformance v0.12.5 h1:xqlvEriWnVWuFczir1DNs34efnM+nPo+VVJPT4qJAWY=
+github.com/layervai/qurl-conformance v0.12.5/go.mod h1:NHtczZdj7SRFqLj9iS4dCGyYZSZKfpILnBRhC53W7WA=
+github.com/layervai/qurl-go v0.5.3 h1:j5NruZYgZz6sDd7COaflDoG/YH3Ke/ie0FKuM348Qys=
+github.com/layervai/qurl-go v0.5.3/go.mod h1:6NrtVAx0fI5yv44TloEH7IIv0saAS216HLNirLgEunQ=
 golang.org/x/crypto v0.54.0 h1:YLIA59K4fiNzHzjnZt2tUJQjQtUWfWbeHBqKtk3eScw=
 golang.org/x/crypto v0.54.0/go.mod h1:KWL8ny2AZdGR2cWmzeHrp2azQPGogOv+HeQaVEXC2dk=
 golang.org/x/sys v0.47.0 h1:o7XGOvZQCADBQQ4Y7VNq2dRWQR7JmOUW8Kxx4ZsNgWs=
