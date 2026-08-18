@@ -935,21 +935,29 @@ func (c *Client) CreatePortalForURL(ctx context.Context, targetURL string, opts 
 	return portal, resource, nil
 }
 
-// RevokePortal immediately revokes one minted qURL link: the portal returned
-// by CreatePortal or CreatePortalForURL. Pass the create response's
-// Portal.ResourceID and Portal.QURLID. Like the other resource methods,
-// resourceID accepts either identifier form the platform serves — the
-// public-key resource id or the resource's CRID — and both ids are validated
-// for presence only: the server is authoritative for which identifiers
-// resolve. The credential needs the qurl:write scope. The 204 response has no
-// JSON body; other successful portal methods retain the SDK's fail-closed
-// response decoding.
+// RevokePortal immediately revokes one minted qURL link. It is the single
+// revoke entry point for every link this client mints, because the platform
+// mints one kind of qURL however you ask for it:
 //
-// Revocation is not idempotent. The first call returns nil and the link stops
-// working; revoking the same portal again fails because the qURL is no longer
-// active, with an error matching ErrPortalRevoked. A caller that only needs
-// the link dead can treat errors.Is(err, ErrPortalRevoked) as settled; other
-// API failures surface as *APIError exactly like the rest of the client.
+//   - CreatePortal / CreatePortalForURL — pass Portal.ResourceID and
+//     Portal.QURLID.
+//   - ResolveResource — pass the resource id you resolved and
+//     ResolvedAccess.QURLID.
+//
+// Like the other resource methods, resourceID accepts either identifier form
+// the platform serves — the public-key resource id or the resource's CRID —
+// and both ids are validated for presence only: the server is authoritative
+// for which identifiers resolve. The credential needs the qurl:write scope.
+// The 204 response has no JSON body; other successful portal methods retain
+// the SDK's fail-closed response decoding.
+//
+// Revocation is scoped to the one link the qurlID names — the resource and
+// its other live links are untouched — and is not idempotent. The first call
+// returns nil and the link stops working; revoking the same link again fails
+// because the qURL is no longer active, with an error matching
+// ErrPortalRevoked. A caller that only needs the link dead can treat
+// errors.Is(err, ErrPortalRevoked) as settled; other API failures surface as
+// *APIError exactly like the rest of the client.
 func (c *Client) RevokePortal(ctx context.Context, resourceID, qurlID string) error {
 	if c == nil {
 		return fmt.Errorf("%w: nil client", ErrInvalidClientConfig)

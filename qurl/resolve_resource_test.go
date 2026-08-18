@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -68,7 +69,7 @@ func TestClient_ResolveResource(t *testing.T) {
 		}
 		assertJSONField(t, body, "ttl_seconds", float64(90))
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"data":{"qurl":"https://qurl.link/at_demo123#qv2.c.s.g","crid":%q,"type":"qv2","expires_at":"2026-08-13T20:10:00Z","expires_in_seconds":600,"single_use":true}}`, heldCRID)
+		fmt.Fprintf(w, `{"data":{"qurl":"https://qurl.link/at_demo123#qv2.c.s.g","qurl_id":"q_a1b2c3d4e5f","crid":%q,"type":"qv2","expires_at":"2026-08-13T20:10:00Z","expires_in_seconds":600,"single_use":true}}`, heldCRID)
 	}))
 	defer api.Close()
 
@@ -83,6 +84,11 @@ func TestClient_ResolveResource(t *testing.T) {
 	if access.Link != "https://qurl.link/at_demo123#qv2.c.s.g" || access.CRID != heldCRID || access.Type != "qv2" {
 		t.Fatalf("access = %#v", access)
 	}
+	// The revocation handle for this one link — without it the link is
+	// unrevocable, since it is never retrievable again.
+	if access.QURLID != "q_a1b2c3d4e5f" {
+		t.Fatalf("QURLID = %q, want the minted link's id", access.QURLID)
+	}
 	if want := time.Date(2026, 8, 13, 20, 10, 0, 0, time.UTC); !access.ExpiresAt.Equal(want) {
 		t.Fatalf("ExpiresAt = %s, want %s", access.ExpiresAt, want)
 	}
@@ -90,6 +96,82 @@ func TestClient_ResolveResource(t *testing.T) {
 	// echo of the requested 90s TTL.
 	if access.ExpiresInSeconds != 600 || !access.SingleUse {
 		t.Fatalf("access lifetime = %#v", access)
+	}
+}
+
+// TestClient_ResolveResourceQURLIDRevokesTheMintedLink proves the composition
+// the qurl_id field exists for: resolve mints a link and hands back its id,
+// and that id spends verbatim at RevokePortal — the same revoke call a
+// CreatePortal link uses, because the platform mints one kind of qURL. Before
+// the id was on the wire a resolve-minted link had no individual revocation
+// handle at all (the link is shown once), so deleting the whole resource was
+// the only lever.
+func TestClient_ResolveResourceQURLIDRevokesTheMintedLink(t *testing.T) {
+	var revokes atomic.Int32
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/resources/r_demo1234567/resolve":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"data":{"qurl":"https://qurl.link/at_demo123#qv2.c.s.g","qurl_id":"q_a1b2c3d4e5f","type":"qv2","expires_in_seconds":300,"single_use":false}}`)
+		case r.Method == http.MethodDelete:
+			revokes.Add(1)
+			// The resolved id lands in the qURL segment unaltered, under the
+			// resource the caller resolved.
+			if want := "/v1/resources/r_demo1234567/qurls/q_a1b2c3d4e5f"; r.URL.Path != want {
+				t.Errorf("revoke path = %q, want %q", r.URL.Path, want)
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}))
+	defer api.Close()
+
+	client, err := NewClient(BearerToken("lv_test_123"), WithBaseURL(api.URL))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	access, err := client.ResolveResource(context.Background(), "r_demo1234567", nil)
+	if err != nil {
+		t.Fatalf("ResolveResource: %v", err)
+	}
+	if access.QURLID == "" {
+		t.Fatal("resolve returned no QURLID — the minted link would be unrevocable")
+	}
+	if err := client.RevokePortal(context.Background(), "r_demo1234567", access.QURLID); err != nil {
+		t.Fatalf("RevokePortal with the resolved id: %v", err)
+	}
+	if revokes.Load() != 1 {
+		t.Fatalf("revoke requests = %d, want 1", revokes.Load())
+	}
+}
+
+// TestClient_ResolveResourceOmittedQURLIDIsEmpty pins the older-server
+// posture: qurl_id is absent from servers predating the field, and that is an
+// empty QURLID rather than a failed resolve. The field follows crid's
+// additive posture, not qurl's fail-closed one — a caller that can still use
+// the link should still get it, and only loses the revocation handle.
+func TestClient_ResolveResourceOmittedQURLIDIsEmpty(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"data":{"qurl":"https://qurl.link/at_old","type":"qv2","expires_in_seconds":300,"single_use":false}}`)
+	}))
+	defer api.Close()
+
+	client, err := NewClient(BearerToken("lv_test_123"), WithBaseURL(api.URL))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	access, err := client.ResolveResource(context.Background(), "r_demo1234567", nil)
+	if err != nil {
+		t.Fatalf("ResolveResource against a server without qurl_id: %v", err)
+	}
+	if access.QURLID != "" {
+		t.Fatalf("QURLID = %q, want empty when the API omits qurl_id", access.QURLID)
+	}
+	if access.Link != "https://qurl.link/at_old" {
+		t.Fatalf("Link = %q, want the resolve to still succeed", access.Link)
 	}
 }
 

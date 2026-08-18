@@ -117,7 +117,10 @@ func ExampleClient_ResolveResource() {
 		panic(err)
 	}
 
-	fmt.Println(access.Link)
+	// Keep QURLID to revoke this one link later, without disturbing the
+	// resource's others: client.RevokePortal(ctx, resourceID, access.QURLID).
+	// Like Link, it is not retrievable after this call.
+	fmt.Println(access.Link, access.QURLID)
 }
 
 func ExampleOpenClient() {

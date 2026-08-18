@@ -86,10 +86,10 @@ if err != nil && !errors.Is(err, qurl.ErrPortalRevoked) {
 }
 ```
 
-Only portals minted by `CreatePortal` and `CreatePortalForURL` carry the
-`QURLID` to revoke by. A link minted by `ResolveResource` does not — its
-response has no qurl id yet — so revoking the whole resource is the only
-lever for those links.
+`RevokePortal` is the revoke call for every link the client mints, not just
+these. A link minted by `ResolveResource` carries its own `QURLID` too — pass
+it with the resource id you resolved; see
+[Resolve a resource and verify its CRID](resolve-and-crid.md#revoke-one-minted-link).
 
 ## qURL Connector-Protected Services
 
