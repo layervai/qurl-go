@@ -189,6 +189,7 @@ func TestAutomaticOriginRejectsClosedOrDefaultHead(t *testing.T) {
 }
 
 func TestLivePRResolversRejectUnsafeCurrentState(t *testing.T) {
+	skipWithoutGNUTimeout(t)
 	tests := []struct {
 		name     string
 		workflow string
@@ -258,6 +259,7 @@ func TestLivePRResolversRejectUnsafeCurrentState(t *testing.T) {
 }
 
 func TestTerminalVerifiersRejectUnsafeCurrentState(t *testing.T) {
+	skipWithoutGNUTimeout(t)
 	tests := []struct {
 		name        string
 		workflow    string
@@ -549,6 +551,17 @@ func cloneEnvironment(environment map[string]string) map[string]string {
 	return clone
 }
 
+// skipWithoutGNUTimeout guards tests whose extracted workflow scripts wrap gh
+// calls in `timeout 30s`. GitHub runners always ship the coreutils binary;
+// contributor machines may not (stock macOS has none), so the truthful
+// condition is the binary lookup, not the operating system.
+func skipWithoutGNUTimeout(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("timeout"); err != nil {
+		t.Skipf("workflow step scripts need the GNU timeout binary, which is not on PATH; on macOS install it with Homebrew coreutils (brew install coreutils)")
+	}
+}
+
 func runScript(t *testing.T, directory, script string, environment map[string]string, wantSuccess bool) {
 	t.Helper()
 	runScriptOutput(t, directory, script, environment, wantSuccess)
@@ -609,6 +622,14 @@ func runGit(t *testing.T, directory string, args ...string) string {
 	t.Helper()
 	command := exec.CommandContext(t.Context(), "git", args...)
 	command.Dir = directory
+	// Contributor git customization (commit.gpgsign, templates, hooks) must
+	// not leak into fixture repositories; the identity the fixtures need is
+	// written to repo-local config, which still applies.
+	command.Env = append(os.Environ(),
+		"GIT_CONFIG_GLOBAL="+os.DevNull,
+		"GIT_CONFIG_SYSTEM="+os.DevNull,
+		"GIT_CONFIG_NOSYSTEM=1",
+	)
 	output, err := command.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, output)
