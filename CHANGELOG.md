@@ -6,6 +6,78 @@ independently under `awsstore/vX.Y.Z` tags.
 Pre-1.0 semantic versioning: breaking changes land in minor versions (v0.N.0)
 and are marked **Breaking** with what to change.
 
+## Unreleased
+
+- **Breaking:** the deprecated `RegisterAgentRuntime` and
+  `OpenRegisteredAgentRuntime` entry points are gone, along with the no-op
+  `WithAgentRuntimeReassignmentAdoption` and the `AgentRuntimeOpenOption` set
+  that existed only for the removed open call. `ConnectAgentRuntime` is the
+  single call on every start: pass the credential with
+  `WithAgentRuntimeEnrollmentCredential` where you used to pass it
+  positionally, and drop the adoption option — following a relocation has been
+  the default since v0.3.0. Two error classes shift with the migration: a warm
+  open's config faults now classify as `ErrInvalidRegisterConfig` where the
+  removed open call used `ErrInvalidClientConfig`, and an option-free call on
+  an empty store fails with an error wrapping `ErrAgentStateNotFound` and
+  `ErrInvalidRegisterConfig` saying nothing is registered, naming the real
+  remedies: enroll out of band (an installer) and reuse its store, or pass
+  `WithAgentRuntimeEnrollmentCredential` — with `WithAgentRuntimeOTPProvider`
+  for the default account one-time-code enrollment. Once a provider or
+  credential is supplied, the usual enrollment-attempt classification applies
+  instead.
+- **Breaking:** `WithAgentRuntimeOfflineOpen` now returns
+  `AgentRuntimeRegistrationOption` and belongs to `ConnectAgentRuntime` alone.
+  Combining it with `WithAgentRuntimeEnrollmentCredential` or
+  `WithAgentRuntimeOTPProvider` is a contradiction — enrollment needs the
+  network an offline open forbids — and fails with `ErrInvalidRegisterConfig`.
+- **Breaking:** `WithAgentRuntimePinnedAssignment` now returns the new
+  `AgentRuntimeRenewalOption`, accepted by both entry points that renew an
+  assignment — `ConnectAgentRuntime`, `RefreshAgentRuntime` — and a binding
+  either returns applies the same policy to its own lease renewals.
+- **Breaking:** `NewStaticProvider` takes a third argument: the cell entries
+  the provider serves (pass `nil` to keep the relay-only shape).
+  `StaticProvider` now implements `CellProvider`, and the transport rule is
+  explicit: a provider without cells serves every open over the HTTPS relay;
+  cells plus an allowlist knock catalog cells natively and fall back to the
+  relay for the rest; cells alone is native-UDP-only, refusing a link outside
+  the catalog with the new `ErrCellNotInCatalog` instead of silently
+  downgrading. `DiscoveryProvider` remains relay-only — its manifest format
+  carries no cells. **Breaking** reclassification on the pre-existing
+  cells-without-allowlist paths too: `EnterPortalWith` with a `Config` carrying
+  cells and no allowlist, and a deployment file with cells and no
+  `relay_allowlist`, now refuse an out-of-catalog link with
+  `ErrCellNotInCatalog` where they previously reported `ErrNotConfigured` —
+  update any `errors.Is(err, ErrNotConfigured)` match there.
+- **Breaking:** `ResolveResourceOptions.TTLSeconds int` is now
+  `TTL time.Duration`, and `ResolvedAccess.QURL` is renamed `Link`. Zero still
+  requests the server default lifetime; the wire carries whole seconds, so a
+  nonzero TTL with a sub-second remainder is rejected rather than rounded.
+- The Hub trust root is now resolved lazily, exactly where a Hub exchange
+  becomes necessary. Opening completed state — warm or offline — no longer
+  demands a trust root it would not use; enrollment and expired-lease renewal
+  still require one, from `WithAgentRuntimeHub` or the deployment named by
+  `QURL_DEPLOYMENT`, and fail with `ErrNoDeploymentHub` when neither is
+  available. A fresh enrollment checks the trust root before persisting its
+  minted identity, so a hub-less misconfiguration leaves the state store
+  untouched. Only the no-hub class defers this way: a `QURL_DEPLOYMENT` file
+  that cannot be read or parsed now fails every start at config time with
+  `ErrInvalidRegisterConfig`, where a warm start previously succeeded silently
+  and returned a binding that could never renew its own lease.
+- `FileCredentials` — and with it `QURL_API_KEY_FILE`, explicit issuer-state
+  paths, and `~/.config/qurl/token` — now accepts a file holding the raw
+  bearer token, the form the Connector installer writes, alongside the
+  existing JSON object with `"bearer_token"` or `"authorization"`. Empty or
+  undecodable files now name the accepted formats instead of a bare decode
+  error, every malformed credential-file shape — undecodable JSON included —
+  now wraps `ErrInvalidClientConfig`, and a UTF-8 byte order mark ahead of a
+  JSON envelope no longer misreads the file as a raw token.
+- Tests are hermetic on contributor macOS machines: workflow-contract tests
+  that need the GNU `timeout` binary skip with an install hint when it is not
+  on PATH, and fixture repositories no longer read the contributor's global or
+  system git config.
+- Test renames follow the entry point: `TestRegisterAgentRuntime_*` and the
+  runtime-open tests are now `TestConnectAgentRuntime_*`.
+
 ## v0.5.3 — 2026-08-14
 
 - Raised the minimum Go version from 1.25.12 to 1.25.13. This is a security
@@ -14,22 +86,24 @@ and are marked **Breaking** with what to change.
   TLS post-handshake, ASN.1 recursion, and HTTP hostname-validation issues.
   Builders pinned to 1.25.12 must update their toolchain before upgrading. The
   root module, `awsstore`, and the development workspace remain aligned, and
-  CI runs `govulncheck` at exactly the declared floor.
+  CI runs `govulncheck` at exactly the declared floor. (#175)
 - Added the public `crid` package for Cryptographic Resource IDs. It provides
   strict `Parse` and `Validate` gates, a cheap `MatchesShape` dispatch check,
   typed rejection sentinels, version and environment reporting, and
   constant-time `KeyMatches` verification. The implementation is pinned to
   the released `qurl-crid-v1-vectors` conformance contract and fails closed
   when a delivered resource key does not match the CRID a caller already
-  holds.
+  holds. (#174)
 - `Resource` and `ConnectorResource` now carry the server-provided CRID when
   one exists. The field is optional, so older servers and keyless resources
-  remain compatible.
+  remain compatible. (#174)
 - Added `Client.ResolveResource`, which exchanges either permanent identifier
   form for a fresh temporary access link, and `ResolvedAccess.VerifyCRID`,
   which binds that response to a caller-held resource key before use. A dark
   environment reports the new `ErrTemporaryAccessLinksDisabled` sentinel while
-  preserving the underlying `*APIError` for inspection.
+  preserving the underlying `*APIError` for inspection. (#174)
+- qurl-conformance pinned at v0.12.5, up from v0.12.3, adopting the released
+  `qurl-crid-v1-vectors` contract the new `crid` package is pinned to. (#174)
 - Dependency and CI maintenance.
 
 ## v0.5.2 — 2026-08-10
@@ -43,7 +117,7 @@ and are marked **Breaking** with what to change.
   and GO-2026-4970 in `os`, both fixed in 1.25.12 and 1.26.5 — and CI runs
   `govulncheck` at exactly the declared floor. Nothing that built against
   v0.5.1 stops building; this only removes a requirement that was stricter
-  than anything in the module graph needed.
+  than anything in the module graph needed. (#162)
 - `ErrInsecureAgentStatePermissions` now names the exact path and the exact
   command. Pointing a store at a path inside a directory that already exists at
   `0755` — a working directory, `$HOME`, anything `mkdir` made under the usual
@@ -53,22 +127,25 @@ and are marked **Breaking** with what to change.
   their own remedies; the ancestor case names the offending ancestor, which no
   `chmod` on the state directory could have fixed. Behavior is unchanged: the
   SDK still fails closed and still creates a missing state directory `0700`
-  itself, rather than tightening a directory the caller already uses.
+  itself, rather than tightening a directory the caller already uses. (#159)
 - An OTP enrollment that runs out its assignment ticket no longer blames the
   caller's callback. The assigned-cell OTP dispatch carries no acknowledgement,
   so "your provider was too slow" and "LayerV never sent the code" are the same
   observation at the client; the error now names both and says to check the
-  credential's mailbox before debugging the callback.
+  credential's mailbox before debugging the callback. (#159)
 - Corrected the headless enrollment guide, which listed the retired durable
   `agent` kind among the kinds `WithAgentRuntimeHeadlessEnrollment` accepts. It
   accepts `connector_bootstrap` and `bootstrap` only; a legacy `qurl:agent`
   key needs `WithAgentRuntimeAllowedRegistrationKeyKinds`. The option is also
   now documented as replacing the OTP provider and nothing else — every other
-  option, `WithAgentRuntimeMetadata` included, stays.
+  option, `WithAgentRuntimeMetadata` included, stays. (#159)
 - README overhaul: architecture diagram and glossary, credential setup via the
   [LayerV dashboard](https://layerv.ai/qurl/dashboard/keys), network
   requirements (outbound-only, NHP over UDP 443), and module/versioning notes.
-  The changelog moved from the README to this file.
+  The changelog moved from the README to this file. (#150)
+- qurl-conformance pinned at v0.12.3, up from v0.12.2. v0.12.3 relaxes its
+  own Go directive to 1.25.12, which the floor change above required —
+  conformance is test-only, but its directive folds into the root's. (#162)
 - Dependency bumps and CI fixes for the JIT proof runner.
 
 ## v0.5.1 — 2026-08-05
