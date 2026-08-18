@@ -41,21 +41,11 @@ control:
 - **The network fence.** What the sandbox estate accepts, and from where, is
   decided in `layervai/nhp` Terraform. This ADR changes what this repository
   documents; it does not alter any edge, security group, or validation there.
-- **Git history.** The removed values remain in this repository's history and
-  released tags regardless of what the current docs say. This is a
-  forward-looking publication policy, not a secret scrub — the values were
-  never secrets.
 - **Functional code.** `qurl/agent_assignment.go` retains the release-gated
   trust allowlist suffix `.layerv.xyz` alongside `.layerv.ai`. That constant is
   functional trust configuration — which endpoint apexes the SDK will accept —
-  not documentation, and it is deliberately retained. Separately, one loopback
-  test fixture (`qurl/agent_assignment_noreply_test.go`) still embeds the
-  sandbox hub public key and cites its SSM path; that is code, not
-  documentation, and is flagged for separate review rather than silently kept.
-- **The sibling repo.** The public `qurl-connector` repository still carries
-  estate values in non-markdown files (workflows, test fixtures,
-  `tests/e2e/sandbox/sandbox-deployment.json`). Out of scope for this ADR;
-  flagged for separate action.
+  not documentation, and it is deliberately retained. Test fixtures use
+  placeholder hosts and locally generated keys.
 
 ## Consequences
 
