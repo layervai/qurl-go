@@ -223,14 +223,6 @@ func (nativeRuntimeLifecycleOptionFunc) isAgentRuntimeRegistrationOption() {}
 func (nativeRuntimeLifecycleOptionFunc) isAgentRuntimeRefreshOption()      {}
 func (nativeRuntimeLifecycleOptionFunc) isAgentRuntimeRecoveryOption()     {}
 
-type nativeRuntimeRefreshOptionFunc func(*nativeAgentRuntimeConfig) error
-
-func (f nativeRuntimeRefreshOptionFunc) applyAgentRuntimeOption(c *nativeAgentRuntimeConfig) error {
-	return f(c)
-}
-
-func (nativeRuntimeRefreshOptionFunc) isAgentRuntimeRefreshOption() {}
-
 type nativeRuntimeRenewalOptionFunc func(*nativeAgentRuntimeConfig) error
 
 func (f nativeRuntimeRenewalOptionFunc) applyAgentRuntimeOption(c *nativeAgentRuntimeConfig) error {

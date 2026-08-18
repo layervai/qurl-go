@@ -185,8 +185,8 @@ func TestOptionSetsStayClosed(t *testing.T) {
 	// Compile-time proof of where the two renewal-policy options are accepted:
 	// offline open belongs to ConnectAgentRuntime alone, pinned assignment to
 	// both entry points that renew an assignment.
-	var openOnly qurl.AgentRuntimeRegistrationOption = qurl.WithAgentRuntimeOfflineOpen()
-	var pinned qurl.AgentRuntimeRenewalOption = qurl.WithAgentRuntimePinnedAssignment()
+	openOnly := qurl.WithAgentRuntimeOfflineOpen()
+	pinned := qurl.WithAgentRuntimePinnedAssignment()
 
 	// The whole point of the closed sets: an option that means nothing to a
 	// plain resource Client must not be silently accepted by one.

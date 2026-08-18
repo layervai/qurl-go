@@ -308,6 +308,8 @@ func (p *cachedCredentialProvider) finishRefresh(authorization string, ok bool) 
 
 // credentialStateFormats names the accepted credential file formats in errors.
 // Diagnostics must name the formats without echoing file contents or the token.
+//
+//nolint:gosec // G101: describes the accepted formats; contains no credential.
 const credentialStateFormats = `a raw bearer token or a JSON object with "bearer_token" or "authorization"`
 
 func (p fileCredentialProvider) Authorize(ctx context.Context, req *http.Request) error {
