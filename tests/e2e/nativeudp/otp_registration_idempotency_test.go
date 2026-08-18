@@ -390,8 +390,8 @@ func TestEmailedOTPCompletesIdempotentSDKRegistration(t *testing.T) {
 	// survive a drain and be long-polled afterwards.
 	mailbox := newOTPMailbox(cfg, time.Now().UTC(), otpE2EMailboxWait)
 
-	//nolint:staticcheck // RegisterAgentRuntime is the exact call this gate must protect.
-	client, binding, err := qurl.RegisterAgentRuntime(ctx, cfg.enrollment, store,
+	client, binding, err := qurl.ConnectAgentRuntime(ctx, store,
+		qurl.WithAgentRuntimeEnrollmentCredential(cfg.enrollment),
 		qurl.WithAgentRuntimeHub(cfg.hub),
 		qurl.WithAgentRuntimeIdentity(cfg.agentID),
 		// Assigned-cell REG carries these audit fields, and the authority
@@ -403,10 +403,10 @@ func TestEmailedOTPCompletesIdempotentSDKRegistration(t *testing.T) {
 		qurl.WithAgentRuntimeOTPProvider(mailbox.provide),
 	)
 	if err != nil {
-		t.Fatalf("RegisterAgentRuntime with an emailed OTP: %v", err)
+		t.Fatalf("ConnectAgentRuntime with an emailed OTP: %v", err)
 	}
 	if client == nil || binding == nil {
-		t.Fatal("RegisterAgentRuntime returned a nil client or binding")
+		t.Fatal("ConnectAgentRuntime returned a nil client or binding")
 	}
 	t.Cleanup(binding.Destroy)
 
@@ -435,8 +435,8 @@ func TestEmailedOTPCompletesIdempotentSDKRegistration(t *testing.T) {
 		t.Fatalf("assignment lease already expired (%s); cannot assert warm-open idempotency", remaining)
 	}
 
-	//nolint:staticcheck // second call is the assertion.
-	replayClient, replayBinding, err := qurl.RegisterAgentRuntime(ctx, cfg.enrollment, store,
+	replayClient, replayBinding, err := qurl.ConnectAgentRuntime(ctx, store,
+		qurl.WithAgentRuntimeEnrollmentCredential(cfg.enrollment),
 		qurl.WithAgentRuntimeHub(cfg.hub),
 		qurl.WithAgentRuntimeIdentity(cfg.agentID),
 		qurl.WithAgentRuntimeAllowedRegistrationKeyKinds(qurl.RegistrationKeyKindAccount),
@@ -447,10 +447,10 @@ func TestEmailedOTPCompletesIdempotentSDKRegistration(t *testing.T) {
 		qurl.WithAgentRuntimeOTPProvider(mailbox.provide),
 	)
 	if err != nil {
-		t.Fatalf("second RegisterAgentRuntime must warm-open, got: %v", err)
+		t.Fatalf("second ConnectAgentRuntime must warm-open, got: %v", err)
 	}
 	if replayClient == nil || replayBinding == nil {
-		t.Fatal("second RegisterAgentRuntime returned a nil client or binding")
+		t.Fatal("second ConnectAgentRuntime returned a nil client or binding")
 	}
 	t.Cleanup(replayBinding.Destroy)
 
