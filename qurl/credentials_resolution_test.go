@@ -194,6 +194,41 @@ func TestOpenClientUsesAPIKeyFromEnvironment(t *testing.T) {
 	_ = gotAuth
 }
 
+// The Connector reads QURL_API_KEY_FILE as the token itself, and its installer
+// writes that same raw form with --token. Pointing the SDK at such a file must
+// authenticate real requests rather than failing to decode a JSON envelope the
+// file never contained.
+func TestOpenClientUsesRawTokenFileFromEnvironment(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(path, []byte("tok-raw-from-file\n"), 0o600); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got, want := r.Header.Get("Authorization"), "Bearer tok-raw-from-file"; got != want {
+			t.Fatalf("Authorization = %q, want %q", got, want)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"resource_id":"r_rawtoken123","target_url":"https://example.com","status":"active"}}`))
+	}))
+	defer srv.Close()
+
+	t.Setenv(EnvAPIKey, "")
+	t.Setenv(EnvAPIKeyFile, path)
+	t.Setenv("HOME", t.TempDir())
+
+	client, err := OpenClient(
+		WithBaseURL(srv.URL),
+		WithHTTPClient(srv.Client()),
+	)
+	if err != nil {
+		t.Fatalf("OpenClient with a raw token file: %v", err)
+	}
+	if _, err := client.ProtectURL(context.Background(), "https://example.com"); err != nil {
+		t.Fatalf("ProtectURL: %v", err)
+	}
+}
+
 // With nothing configured anywhere, OpenClient must fail with an actionable
 // error rather than succeeding and failing later on the first real call.
 func TestOpenClientWithNoCredentialFailsActionably(t *testing.T) {

@@ -183,9 +183,14 @@ type fileCredentialProvider struct {
 // custom runtime path. High-throughput callers that rarely rotate credentials
 // can wrap it with CachedCredentials. The default favors hot-reload
 // correctness over syscall minimization. The context passed to Authorize cannot
-// interrupt local filesystem I/O after it has started. If the state file
-// contains an "authorization" field, its value is trusted as the raw
-// Authorization header.
+// interrupt local filesystem I/O after it has started. The file holds either a
+// raw bearer token (surrounding whitespace is ignored) or, when its content
+// begins with "{", a JSON object with a "bearer_token" or "authorization"
+// field. If the state file contains an "authorization" field, its value is
+// trusted as the raw Authorization header. Raw acceptance has a cost: any
+// single-line content that does not begin with "{" becomes the bearer token
+// verbatim, so a wrong-but-header-clean file surfaces as an API auth failure
+// rather than a local parse error.
 func FileCredentials(path string) CredentialProvider {
 	return fileCredentialProvider{path: path}
 }
@@ -301,6 +306,10 @@ func (p *cachedCredentialProvider) finishRefresh(authorization string, ok bool) 
 	}
 }
 
+// credentialStateFormats names the accepted credential file formats in errors.
+// Diagnostics must name the formats without echoing file contents or the token.
+const credentialStateFormats = `a raw bearer token or a JSON object with "bearer_token" or "authorization"`
+
 func (p fileCredentialProvider) Authorize(ctx context.Context, req *http.Request) error {
 	if err := validateContext(ctx, ErrInvalidClientConfig); err != nil {
 		return err
@@ -309,9 +318,27 @@ func (p fileCredentialProvider) Authorize(ctx context.Context, req *http.Request
 	if err != nil {
 		return err
 	}
+	// Strip a UTF-8 byte order mark before the "{" sniff below. Editors and
+	// Windows tooling prepend one silently, and it is not unicode whitespace, so
+	// without this a BOM-prefixed JSON envelope would be read as a raw token.
+	trimmed := bytes.TrimSpace(bytes.TrimPrefix(raw, []byte("\xef\xbb\xbf")))
+	if len(trimmed) == 0 {
+		return fmt.Errorf("%w: credential state file is empty, want %s", ErrInvalidClientConfig, credentialStateFormats)
+	}
+	if trimmed[0] != '{' {
+		// A file that is not a JSON object holds the bearer token itself — the
+		// form the Connector installer writes with --token and the usual shape
+		// of a mounted QURL_API_KEY_FILE secret. setBearer serves non-file
+		// callers too, so the file-specific "what may this file contain" help is
+		// appended here rather than inside it.
+		if err := setBearer(req, string(trimmed)); err != nil {
+			return fmt.Errorf("%w, want %s", err, credentialStateFormats)
+		}
+		return nil
+	}
 	var state credentialState
-	if err := json.Unmarshal(raw, &state); err != nil {
-		return fmt.Errorf("qurl: decode credential state: %w", err)
+	if err := json.Unmarshal(trimmed, &state); err != nil {
+		return fmt.Errorf("%w: decode credential state: %w, want %s", ErrInvalidClientConfig, err, credentialStateFormats)
 	}
 	return state.authorize(req)
 }
@@ -336,7 +363,7 @@ func (s credentialState) authorize(req *http.Request) error {
 	case bearer != "":
 		return setBearer(req, bearer)
 	default:
-		return fmt.Errorf("%w: credential state cannot authorize requests", ErrInvalidClientConfig)
+		return fmt.Errorf("%w: credential state cannot authorize requests, want %s", ErrInvalidClientConfig, credentialStateFormats)
 	}
 }
 
@@ -760,8 +787,11 @@ type portalOptions struct {
 // least one minute as a client-side guardrail; the LayerV API remains the
 // source of truth for account limits. There is intentionally no SDK-side maximum
 // because an account may allow longer-lived portals. If omitted, the API applies
-// its default lifetime. Values are serialized with hours as the largest unit so
-// all API duration fields use the same h/m/s grammar.
+// its default lifetime, which is governed server-side by the LayerV API and
+// account settings rather than by the SDK. Values are serialized with hours as
+// the largest unit so both portal duration fields — this one and
+// WithSessionDuration's — use the same h/m/s grammar. (ResolveResource's
+// ttl_seconds is an integer wire field and does not share it.)
 func ValidFor(d time.Duration) PortalOption {
 	return portalOptionFunc(func(o *portalOptions) error {
 		expiresIn, err := formatAPIDuration(d, time.Minute)
@@ -811,8 +841,8 @@ func MaxSessions(n int) PortalOption {
 // Durations must be at least one second and whole seconds. Omit this option to
 // use the server default; zero is rejected rather than treated as default. The
 // LayerV API remains the source of truth for account limits. Values are
-// serialized with hours as the largest unit, so all API duration fields use the
-// same h/m/s grammar.
+// serialized with hours as the largest unit, so both portal duration fields —
+// this one and ValidFor's — use the same h/m/s grammar.
 func WithSessionDuration(d time.Duration) PortalOption {
 	return portalOptionFunc(func(o *portalOptions) error {
 		sessionDuration, err := formatAPIDuration(d, time.Second)

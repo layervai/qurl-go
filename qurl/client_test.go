@@ -435,6 +435,109 @@ func TestClient_FileCredentials(t *testing.T) {
 	}
 }
 
+// The Connector installer's --token file and mounted QURL_API_KEY_FILE secrets
+// hold the bearer token itself, while LayerV setup writes the JSON state
+// envelope. FileCredentials must authorize from both spellings of the same
+// credential, and must trim surrounding whitespace from the raw form so the
+// trailing newline every editor and echo appends is not sent as token bytes.
+func TestClient_FileCredentialsAcceptsRawTokenAndJSONState(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{name: "raw token", content: "lv_raw_123", want: "Bearer lv_raw_123"},
+		{name: "raw token with trailing newline", content: "lv_raw_123\n", want: "Bearer lv_raw_123"},
+		{name: "raw token with surrounding whitespace", content: " \t lv_raw_123 \r\n", want: "Bearer lv_raw_123"},
+		{name: "json bearer token", content: `{"bearer_token":"lv_json_123"}`, want: "Bearer lv_json_123"},
+		{name: "json authorization", content: `{"authorization":"Bearer lv_json_456"}`, want: "Bearer lv_json_456"},
+		{name: "json with surrounding whitespace", content: "\n\t {\"bearer_token\":\"lv_json_789\"}\n", want: "Bearer lv_json_789"},
+		// Editors and Windows tooling prepend a UTF-8 BOM silently; it is not
+		// unicode whitespace, so without explicit stripping this envelope would
+		// be misread as a raw token.
+		{name: "json with utf-8 BOM", content: "\xef\xbb\xbf{\"bearer_token\":\"lv_json_bom\"}", want: "Bearer lv_json_bom"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "token")
+			if err := os.WriteFile(path, []byte(tc.content), 0o600); err != nil {
+				t.Fatalf("write credential state: %v", err)
+			}
+			req := newCredentialTestRequest(t)
+			if err := FileCredentials(path).Authorize(context.Background(), req); err != nil {
+				t.Fatalf("Authorize: %v", err)
+			}
+			if got := req.Header.Get("Authorization"); got != tc.want {
+				t.Fatalf("Authorization = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// A credential file that cannot authorize anything must say what the file may
+// contain: an operator holding only the error text has to be able to fix the
+// file. The message must never echo file contents or the token.
+func assertNamesCredentialStateFormats(t *testing.T, err error) {
+	t.Helper()
+	msg := err.Error()
+	if !strings.HasPrefix(msg, "qurl: ") {
+		t.Fatalf("error %q does not use the qurl: prefix", msg)
+	}
+	for _, want := range []string{"bearer token", `"bearer_token"`, `"authorization"`} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("error %q does not name accepted format %q", msg, want)
+		}
+	}
+}
+
+func TestClient_FileCredentialsRejectsEmptyFile(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		content string
+	}{
+		{name: "empty", content: ""},
+		{name: "whitespace only", content: " \n\t\r\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "token")
+			if err := os.WriteFile(path, []byte(tc.content), 0o600); err != nil {
+				t.Fatalf("write credential state: %v", err)
+			}
+			err := FileCredentials(path).Authorize(context.Background(), newCredentialTestRequest(t))
+			if !errors.Is(err, ErrInvalidClientConfig) {
+				t.Fatalf("empty state file: want ErrInvalidClientConfig, got %v", err)
+			}
+			assertNamesCredentialStateFormats(t, err)
+		})
+	}
+}
+
+// Every malformed credential-file shape shares one error class, so a caller
+// can match ErrInvalidClientConfig without caring which way the file is wrong,
+// and every message says what the file may contain.
+func TestClient_FileCredentialsMalformedShapesShareErrorClass(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		content string
+	}{
+		{name: "malformed json", content: "{\"bearer_token\":\n"},
+		{name: "json with neither field", content: `{}`},
+		{name: "json with blank fields", content: `{"bearer_token":"  ","authorization":""}`},
+		{name: "raw token with invalid header bytes", content: "lv_raw_\x01token"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "token")
+			if err := os.WriteFile(path, []byte(tc.content), 0o600); err != nil {
+				t.Fatalf("write credential state: %v", err)
+			}
+			err := FileCredentials(path).Authorize(context.Background(), newCredentialTestRequest(t))
+			if !errors.Is(err, ErrInvalidClientConfig) {
+				t.Fatalf("%s: want ErrInvalidClientConfig, got %v", tc.name, err)
+			}
+			assertNamesCredentialStateFormats(t, err)
+		})
+	}
+}
+
 func TestClient_FileCredentialsErrors(t *testing.T) {
 	client, err := NewClient(FileCredentials(filepath.Join(t.TempDir(), "missing.json")), WithBaseURL("https://api.example.com"))
 	if err != nil {
