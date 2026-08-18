@@ -46,6 +46,51 @@ The lifetime fields on the response report the server's grant, never an echo
 of the request: `ExpiresAt` is zero when the API omits it, and `SingleUse`
 reports whether the link expires on first successful use.
 
+### Revoke one minted link
+
+Every resolve mints a new link, and each one is revocable on its own.
+`ResolvedAccess.QURLID` is the handle; `RevokePortal` is the call, taking the
+same `resourceID` you resolved:
+
+```go
+access, err := client.ResolveResource(ctx, resourceID, nil)
+if err != nil {
+	return err
+}
+
+// … hand access.Link to the recipient, then withdraw it …
+
+if err := client.RevokePortal(ctx, resourceID, access.QURLID); err != nil {
+	return err
+}
+```
+
+Only that link stops working; the resource and any other links minted from it
+are untouched. Capture `QURLID` when you resolve — like `Link`, it is not
+retrievable afterwards, and it is empty when the API omits it (a server
+predating the field), which is the one case where a resolve-minted link has no
+individual revocation handle.
+
+Revocation is not idempotent: the second call fails with
+`qurl.ErrPortalRevoked` because the qURL is no longer active. A caller that
+only needs the link dead can treat that as settled.
+
+```go
+err := client.RevokePortal(ctx, resourceID, access.QURLID)
+switch {
+case err == nil:
+	// The link is dead.
+case errors.Is(err, qurl.ErrPortalRevoked):
+	// Already revoked — the outcome the caller wanted, reached earlier.
+default:
+	return err
+}
+```
+
+`RevokePortal` needs the `qurl:write` scope, and it is the same call that
+revokes a `CreatePortal` link — the platform mints one kind of qURL however
+you ask for it. See [Issue links](issuing-links.md) for the create side.
+
 ## Resolve, verify, open
 
 `ResolveResource` deliberately does not parse, verify, or open the link.
@@ -114,6 +159,7 @@ default:
 | `qurl.ErrTemporaryAccessLinksDisabled` | The API answered 503: the environment is not currently serving temporary access links — the surface is dark or administratively disabled. A service posture, not anything wrong with the request; the underlying `*qurl.APIError` remains matchable with `errors.As`. |
 | `qurl.ErrNoCRID` | `VerifyCRID` had no CRID to verify against: the server omitted the field (older server or keyless resource). Fails closed — absence is not a mismatch, but it is not a pass either. |
 | `qurl.ErrCRIDMismatch` | The supplied resource key does not derive the held CRID. This is the substitution the identifier exists to detect: fail closed and do not use the key. |
+| `qurl.ErrPortalRevoked` | `RevokePortal` found the qURL no longer active: this link was already revoked, so a repeat revoke had nothing to do. The underlying `*qurl.APIError` stays matchable. |
 
 Other API failures surface as `*qurl.APIError` exactly like the rest of the
 client. When the held CRID itself fails the local validation gate,

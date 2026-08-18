@@ -51,6 +51,13 @@ type ResolvedAccess struct {
 	// Link is the access link. When it is qv2-shaped, open it with
 	// EnterPortal; ResolveResource deliberately does not parse or verify it.
 	Link string
+	// QURLID identifies this specific minted link. Pass it to RevokePortal —
+	// with the same resource id you resolved — to revoke this one link while
+	// the resource's other links keep working. Empty when the API omits it
+	// (a server predating the field), which is the only case where a
+	// resolve-minted link has no individual revocation handle. Capture it
+	// alongside Link: neither is retrievable after this response.
+	QURLID string
 	// CRID is the resource's Cryptographic Resource ID, when returned by the
 	// API (older servers and keyless resources omit it). Tie it to a key you
 	// hold with VerifyCRID.
@@ -71,6 +78,7 @@ type resolveResourceRequest struct {
 
 type resolveResourceResponse struct {
 	QURL             string     `json:"qurl"`
+	QURLID           string     `json:"qurl_id"`
 	CRID             string     `json:"crid"`
 	Type             string     `json:"type"`
 	ExpiresAt        *time.Time `json:"expires_at"`
@@ -84,6 +92,7 @@ func (r resolveResourceResponse) resolvedAccess() (*ResolvedAccess, error) {
 	}
 	access := &ResolvedAccess{
 		Link:             r.QURL,
+		QURLID:           r.QURLID,
 		CRID:             r.CRID,
 		Type:             r.Type,
 		ExpiresInSeconds: r.ExpiresInSeconds,
@@ -111,6 +120,11 @@ func (r resolveResourceResponse) resolvedAccess() (*ResolvedAccess, error) {
 // credentialed API, and EnterPortal is the verifying opener. To bind the
 // response to a resource key you already hold, call
 // ResolvedAccess.VerifyCRID before trusting a delivered key.
+//
+// The minted link is revocable on its own: keep ResolvedAccess.QURLID and
+// pass it to RevokePortal with the same resourceID to kill that one link
+// without disturbing the resource's others. Like Link, it is not retrievable
+// after this call returns.
 //
 // A 503 from this endpoint means the environment is not serving temporary
 // access links and surfaces as ErrTemporaryAccessLinksDisabled; other API
