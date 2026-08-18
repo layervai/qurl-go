@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ecdh"
 	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"net"
 	"net/netip"
@@ -28,17 +29,23 @@ func newSilentUDPEndpoint(t *testing.T) string {
 	return conn.LocalAddr().String()
 }
 
-// sandboxHubPublicKey is the live sandbox Hub's X25519 public key, published at
-// SSM /sandbox/nhp/control/hub/identity/public-key. It is non-secret and used
-// here only so the fixture is the exact endpoint developers try to reach.
-const sandboxHubPublicKey = "UhVQcrKoJ2LhQlRtuIItBjxXR2wA/VvZvTmqnzT+GS8="
+// silentHubHost is a synthetic destination below the LayerV apex, which the
+// SDK's endpoint allowlist requires. The resolver below never performs real
+// DNS and the dialer redirects every datagram to the local silent endpoint, so
+// the hostname is purely a logical label and the hub key is a freshly
+// generated fixture — no live estate value is involved.
+const silentHubHost = "hub.noreply-fixture.layerv.ai"
 
 func silentAssignmentHub(t *testing.T) qurl.HubBootstrap {
 	t.Helper()
+	priv, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate hub X25519 key: %v", err)
+	}
 	return qurl.HubBootstrap{
-		Host:               "hub.nhp.layerv.xyz",
+		Host:               silentHubHost,
 		Port:               443,
-		ServerPublicKeyB64: sandboxHubPublicKey,
+		ServerPublicKeyB64: base64.StdEncoding.EncodeToString(priv.PublicKey().Bytes()),
 	}
 }
 
@@ -128,7 +135,7 @@ func TestSilentHubIsDiagnosableWhenCallerDeadlineEndsTheWait(t *testing.T) {
 		t.Error("silent hub misreported an invalid assignment config")
 	}
 
-	if silent.Endpoint != "hub.nhp.layerv.xyz:443" {
+	if silent.Endpoint != silentHubHost+":443" {
 		t.Errorf("silent.Endpoint = %q; want the configured logical destination", silent.Endpoint)
 	}
 	if silent.Attempts < 1 {
@@ -139,7 +146,7 @@ func TestSilentHubIsDiagnosableWhenCallerDeadlineEndsTheWait(t *testing.T) {
 	}
 	// The message has to name the destination, or an operator reading a log line
 	// still cannot act on it.
-	if !strings.Contains(err.Error(), "hub.nhp.layerv.xyz:443") {
+	if !strings.Contains(err.Error(), silentHubHost+":443") {
 		t.Errorf("silent hub message does not name the destination: %v", err)
 	}
 	if strings.Contains(err.Error(), "enrollment-credential-value") {
@@ -188,7 +195,7 @@ func TestSilentHubIsDiagnosableWhenBudgetExpiresFirst(t *testing.T) {
 	if !errors.Is(err, qurl.ErrEndpointNoReply) {
 		t.Error("recovery error does not match ErrEndpointNoReply")
 	}
-	if silent.Endpoint != "hub.nhp.layerv.xyz:443" {
+	if silent.Endpoint != silentHubHost+":443" {
 		t.Errorf("silent.Endpoint = %q; want the configured logical destination", silent.Endpoint)
 	}
 	if strings.Contains(err.Error(), "enrollment-credential-value") {
