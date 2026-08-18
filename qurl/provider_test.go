@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -58,13 +59,14 @@ func installCapturingTransport(t *testing.T) *capturingTransport {
 	return ct
 }
 
-// installStaticProvider builds a StaticProvider from ts+allow (failing the test on a
-// construction error) and installs it as the process-wide default for the test. It
-// folds the construct → error-check → install prologue the one-arg EnterPortal tests
-// share, leaving each test's distinct ts/allow pairing visible at the call site.
+// installStaticProvider builds a relay-only StaticProvider from ts+allow (failing the
+// test on a construction error) and installs it as the process-wide default for the
+// test. It folds the construct → error-check → install prologue the one-arg
+// EnterPortal tests share, leaving each test's distinct ts/allow pairing visible at
+// the call site. Tests that pin cells construct their StaticProvider explicitly.
 func installStaticProvider(t *testing.T, ts *TrustStore, allow *RelayAllowlist) {
 	t.Helper()
-	sp, err := NewStaticProvider(ts, allow)
+	sp, err := NewStaticProvider(ts, allow, nil)
 	if err != nil {
 		t.Fatalf("new static provider: %v", err)
 	}
@@ -73,29 +75,76 @@ func installStaticProvider(t *testing.T, ts *TrustStore, allow *RelayAllowlist) 
 
 // --- StaticProvider construction -------------------------------------------
 
-func TestNewStaticProvider_NilHalvesRejected(t *testing.T) {
+func TestNewStaticProvider_ConstructionRules(t *testing.T) {
+	_, ts, _ := vendoredAcceptLink(t)
+	allow := relayExampleAllowlist()
+	cells := []CellEntry{{
+		ServerPublicKeyB64: vectorCellKeyB64(t),
+		CellID:             "test-cell",
+		Host:               "cell.example.com",
+		Port:               standardNHPUDPPort,
+	}}
+
+	if _, err := NewStaticProvider(nil, allow, cells); err == nil {
+		t.Fatal("nil trust store: want error, got nil")
+	}
+	// Neither transport: no allowlist and no cells means no open could ever be
+	// carried, which must be a construction error rather than a later surprise.
+	if _, err := NewStaticProvider(ts, nil, nil); err == nil {
+		t.Fatal("no transport (nil allowlist, no cells): want error, got nil")
+	}
+	if _, err := NewStaticProvider(ts, allow, nil); err != nil {
+		t.Fatalf("valid relay-only static provider: %v", err)
+	}
+	if _, err := NewStaticProvider(ts, nil, cells); err != nil {
+		t.Fatalf("valid cells-only static provider: %v", err)
+	}
+	if _, err := NewStaticProvider(ts, allow, cells); err != nil {
+		t.Fatalf("valid cells+relay static provider: %v", err)
+	}
+}
+
+// TestNewStaticProvider_InvalidCellEntriesPropagate proves a bad pinned cell is
+// a loud construction failure: NewStaticProvider validates its entries through
+// NewCellCatalog, so the same missing-key/bad-port faults a deployment file
+// would reject surface here rather than degrading that cell to the relay.
+func TestNewStaticProvider_InvalidCellEntriesPropagate(t *testing.T) {
 	_, ts, _ := vendoredAcceptLink(t)
 	allow := relayExampleAllowlist()
 
-	if _, err := NewStaticProvider(nil, allow); err == nil {
-		t.Fatal("nil trust store: want error, got nil")
-	}
-	if _, err := NewStaticProvider(ts, nil); err == nil {
-		t.Fatal("nil allowlist: want error, got nil")
-	}
-	if _, err := NewStaticProvider(ts, allow); err != nil {
-		t.Fatalf("valid static provider: %v", err)
+	for _, tc := range []struct {
+		name  string
+		entry CellEntry
+		want  string
+	}{
+		{"missing key", CellEntry{CellID: "c", Host: "cell.example.com", Port: standardNHPUDPPort}, "has no server public key"},
+		{"bad port", CellEntry{CellID: "c", Host: "cell.example.com", Port: 62206, ServerPublicKeyB64: vectorCellKeyB64(t)}, "unsupported UDP port"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := NewStaticProvider(ts, allow, []CellEntry{tc.entry})
+			if err == nil {
+				t.Fatal("invalid cell entry was accepted; its links would degrade to the relay silently")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("got %q, want it to contain %q", err, tc.want)
+			}
+		})
 	}
 }
 
 // TestStaticProvider_NilReceiver_FailsClosed proves a caller that ignored
 // NewStaticProvider's construction error and installed the nil *StaticProvider fails
-// closed with ErrNotConfigured rather than panicking on the field read.
+// closed with ErrNotConfigured rather than panicking on the field read — on both
+// halves of the CellProvider contract.
 func TestStaticProvider_NilReceiver_FailsClosed(t *testing.T) {
-	var sp *StaticProvider // typed nil, e.g. from `sp, _ := NewStaticProvider(nil, allow)`
+	var sp *StaticProvider // typed nil, e.g. from `sp, _ := NewStaticProvider(nil, allow, nil)`
 	_, _, err := sp.Resolve(context.Background())
 	if !errors.Is(err, ErrNotConfigured) {
 		t.Fatalf("nil StaticProvider receiver: want ErrNotConfigured, got %v", err)
+	}
+	_, err = sp.ResolveCells(context.Background())
+	if !errors.Is(err, ErrNotConfigured) {
+		t.Fatalf("nil StaticProvider ResolveCells: want ErrNotConfigured, got %v", err)
 	}
 }
 

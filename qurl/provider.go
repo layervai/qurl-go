@@ -27,8 +27,14 @@ import (
 // returns an error rather than a partial or stale result, so EnterPortal refuses
 // rather than trusting unverifiable config.
 //
-// Both returned values must be non-nil on success; incomplete opener trust config
-// makes EnterPortalWith return ErrNotConfigured.
+// The trust store must be non-nil on success. The allowlist gates the HTTPS
+// relay transport and may be nil only when the provider also supplies cell
+// endpoints through CellProvider; config carrying neither transport makes
+// EnterPortalWith return ErrNotConfigured.
+//
+// A Provider alone yields RELAY-ONLY opener config: every open it serves uses
+// the HTTPS relay transport. Native UDP requires the provider to also supply
+// cell endpoints via the CellProvider extension.
 type Provider interface {
 	Resolve(ctx context.Context) (*TrustStore, *RelayAllowlist, error)
 }
@@ -36,7 +42,15 @@ type Provider interface {
 // StaticProvider is a Provider backed by fixed, in-process opener config. It is
 // the simplest concrete provider for tests and manually pinned config. It performs
 // no I/O and never changes after construction, so it is safe for concurrent
-// Resolve calls.
+// Resolve and ResolveCells calls.
+//
+// A StaticProvider implements CellProvider, and the cells its construction
+// supplied decide the transport EnterPortal uses (see CellProvider for the
+// rule). With cells and an allowlist, catalog cells are knocked directly over
+// native UDP and unknown cells fall back to the relay. With cells alone the
+// opener is native-UDP-only: a link naming a cell outside the catalog fails
+// with ErrCellNotInCatalog instead of quietly using the relay. With an
+// allowlist alone every open uses the HTTPS relay transport.
 //
 // Rotation with a StaticProvider is a process-level operation: build a new
 // StaticProvider whose trust store carries the overlap set (old + new kid) and swap
@@ -45,23 +59,36 @@ type Provider interface {
 type StaticProvider struct {
 	trustStore *TrustStore
 	allowlist  *RelayAllowlist
+	cells      *CellCatalog
 }
 
 // NewStaticProvider builds a StaticProvider from already-constructed opener
-// config. Both values are REQUIRED and must be non-nil.
-func NewStaticProvider(ts *TrustStore, allow *RelayAllowlist) (*StaticProvider, error) {
+// config. The trust store is REQUIRED and must be non-nil. The allowlist and
+// cells are each optional, but at least one must be supplied — with neither
+// there is no transport an open could ever use. Cells take the same shape a
+// deployment file's cells do and are validated by NewCellCatalog: one bad
+// entry fails construction rather than silently dropping a cell.
+func NewStaticProvider(ts *TrustStore, allow *RelayAllowlist, cells []CellEntry) (*StaticProvider, error) {
 	if ts == nil {
 		return nil, errors.New("qurl: static provider requires a non-nil trust store")
 	}
-	if allow == nil {
-		return nil, errors.New("qurl: static provider requires a non-nil platform endpoint allowlist")
+	var catalog *CellCatalog
+	if len(cells) > 0 {
+		var err error
+		catalog, err = NewCellCatalog(cells)
+		if err != nil {
+			return nil, err
+		}
 	}
-	return &StaticProvider{trustStore: ts, allowlist: allow}, nil
+	if allow == nil && catalog == nil {
+		return nil, errors.New("qurl: static provider requires a platform endpoint allowlist, cell endpoints, or both")
+	}
+	return &StaticProvider{trustStore: ts, allowlist: allow, cells: catalog}, nil
 }
 
 // Resolve returns the fixed opener config. A nil receiver (a caller that
 // ignored NewStaticProvider's construction error and installed the nil *StaticProvider)
-// fails closed with ErrNotConfigured rather than panicking on the field read.
+// fails closed, returning ErrNotConfigured rather than panicking on the field read.
 func (p *StaticProvider) Resolve(context.Context) (*TrustStore, *RelayAllowlist, error) {
 	if p == nil {
 		return nil, nil, fmt.Errorf("%w: nil opener provider installed", ErrNotConfigured)
@@ -69,14 +96,31 @@ func (p *StaticProvider) Resolve(context.Context) (*TrustStore, *RelayAllowlist,
 	return p.trustStore, p.allowlist, nil
 }
 
+// ResolveCells returns the fixed cell catalog, or nil when construction
+// supplied no cells — the relay-only shape. A nil receiver fails closed exactly
+// as Resolve does.
+func (p *StaticProvider) ResolveCells(context.Context) (*CellCatalog, error) {
+	if p == nil {
+		return nil, fmt.Errorf("%w: nil opener provider installed", ErrNotConfigured)
+	}
+	return p.cells, nil
+}
+
+// Compile-time guard: StaticProvider must keep supplying cells through the
+// CellProvider extension, or the documented pinning path silently loses its
+// native UDP transport.
+var _ CellProvider = (*StaticProvider)(nil)
+
 // defaultProvider is the process-wide provider the one-argument EnterPortal resolves
 // through. It is settable (SetDefaultProvider) so an application can install qURL
 // opener config once at startup and then call EnterPortal(ctx, link) everywhere
 // with no per-call config.
 //
-// It is nil by default, so an unconfigured process MUST fail closed with
-// ErrNotConfigured rather than trust anything. Installing a provider is what
-// lights up the one-arg verb. Guarded by defaultProviderMu for race-free
+// It is nil by default, and nil is the common case, not a failure: EnterPortal
+// then resolves opener config from the deployment (QURL_DEPLOYMENT, then the
+// embedded one), and only a deployment carrying no issuer keys refuses with
+// ErrNoDeployment (which wraps ErrNotConfigured). Installing a provider
+// overrides that fallback. Guarded by defaultProviderMu for race-free
 // concurrent get/set.
 var (
 	defaultProviderMu sync.RWMutex

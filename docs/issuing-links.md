@@ -61,6 +61,36 @@ portal, err := resource.CreatePortal(ctx,
 )
 ```
 
+## Revoke a Portal
+
+A portal normally just expires. When a link must die sooner — it leaked, or
+the task it granted is done — revoke it with the two ids the create call
+returned. The same `qurl:write` credential that minted the portal revokes it:
+
+```go
+err := client.RevokePortal(ctx, portal.ResourceID, portal.QURLID)
+if err != nil {
+	return err
+}
+```
+
+Revocation is immediate and not idempotent: the first call returns nil and
+the link stops working, and revoking the same portal again fails with
+`qurl.ErrPortalRevoked` because the qURL is no longer active. A caller that
+only needs the link dead can treat that error as settled:
+
+```go
+err := client.RevokePortal(ctx, portal.ResourceID, portal.QURLID)
+if err != nil && !errors.Is(err, qurl.ErrPortalRevoked) {
+	return err
+}
+```
+
+Only portals minted by `CreatePortal` and `CreatePortalForURL` carry the
+`QURLID` to revoke by. A link minted by `ResolveResource` does not — its
+response has no qurl id yet — so revoking the whole resource is the only
+lever for those links.
+
 ## qURL Connector-Protected Services
 
 If qURL Connector already protects the service, skip `ProtectURL`. Use the
@@ -116,20 +146,22 @@ identity matters to your application.
 Credentials are for software that protects URLs or creates portals. If your code
 only opens received portal links, skip this section.
 
-Before deploying code that creates portals, run the LayerV setup flow once for
-that service identity. The setup flow consumes the temporary bootstrap key,
-registers the service with your LayerV account, and stores the runtime issuer
-credential in protected state for the process. After that, application code
-starts with:
+Create an API key with the `qurl:write` scope in the
+[LayerV dashboard](https://layerv.ai/qurl/dashboard/keys) and hand it to the
+process the way you deploy any secret. Application code starts with:
 
 ```go
 client, err := qurl.OpenClient()
 ```
 
-That is the normal application code. You do not paste bootstrap keys into your
-app, read `LAYERV_API_KEY`, or ask portal recipients to hold credentials. LayerV
-setup turns the one-time key into runtime issuer state; `OpenClient` uses that
-state.
+`OpenClient` resolves the credential most specific first: an explicit
+`qurl.WithIssuerStatePath(...)` option, then `QURL_API_KEY` (the key itself,
+for containers and CI), then `QURL_API_KEY_FILE` (a path, for mounted secrets
+that should stay on disk), then `~/.config/qurl/token` — what the qURL
+Connector installer already wrote — then the machine-wide
+`/var/lib/layerv/qurl/issuer-state.json`. A key file holds either the raw
+bearer token or a JSON envelope with a `bearer_token` or `authorization`
+field. Portal recipients never hold credentials.
 
 If your runtime stores LayerV credentials in KMS, a secret manager, or another
 custom store, implement `qurl.CredentialProvider` and pass it to

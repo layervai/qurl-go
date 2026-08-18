@@ -54,7 +54,7 @@ func (e *AgentCompletionCandidatePersistenceError) Unwrap() []error {
 }
 
 // ErrOTPIncorrect and ErrOTPExpired classify assigned-cell account OTP
-// rejection. Invoke RegisterAgentRuntime again explicitly for a fresh attempt.
+// rejection. Invoke ConnectAgentRuntime again explicitly for a fresh attempt.
 var (
 	ErrOTPIncorrect = errors.New("qurl: one-time code incorrect")
 	ErrOTPExpired   = errors.New("qurl: one-time code expired")

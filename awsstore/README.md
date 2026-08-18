@@ -97,7 +97,8 @@ Then hand the store in exactly as you would `qurl.FileAgentState`:
 ```go
 store, err := newStore(ctx)
 // ...
-client, binding, err := qurl.RegisterAgentRuntime(ctx, enrollmentCredential, store,
+client, binding, err := qurl.ConnectAgentRuntime(ctx, store,
+	qurl.WithAgentRuntimeEnrollmentCredential(enrollmentCredential),
 	qurl.WithAgentRuntimeOTPProvider(readOneTimeCode),
 )
 ```
@@ -239,8 +240,8 @@ lock; non-cooperating writers are outside the contract.
 ## The implementor contract
 
 Both stores honor the `qurl.AgentStateStore` contract that
-`RegisterAgentRuntime`, `OpenRegisteredAgentRuntime`, and
-`RefreshAgentRuntime` rely on:
+`ConnectAgentRuntime`, `OpenRegisteredAgent`, `RefreshAgentRuntime`, and
+`RecoverAgentRuntime` rely on:
 
 - `LoadAgentState` returns `qurl.ErrAgentStateNotFound` (via `errors.Is`) when no
   state exists yet → the caller starts a fresh enrollment.

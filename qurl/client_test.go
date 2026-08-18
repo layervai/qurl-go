@@ -345,6 +345,201 @@ func TestClient_CreatePortalSendsExplicitZeroMaxSessions(t *testing.T) {
 	}
 }
 
+func TestClient_RevokePortal(t *testing.T) {
+	var requests atomic.Int32
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		if got, want := r.Header.Get("Authorization"), "Bearer lv_test_123"; got != want {
+			t.Errorf("Authorization = %q, want %q", got, want)
+		}
+		if r.Method != http.MethodDelete || r.URL.Path != "/v1/resources/r_demo1234567/qurls/q_demo1234567" || r.URL.RawQuery != "" {
+			t.Errorf("request = %s %s?%s, want DELETE /v1/resources/r_demo1234567/qurls/q_demo1234567", r.Method, r.URL.Path, r.URL.RawQuery)
+		}
+		if got := r.Header.Get("Content-Type"); got != "" {
+			t.Errorf("DELETE Content-Type = %q, want empty", got)
+		}
+		if body, err := io.ReadAll(r.Body); err != nil || len(body) != 0 {
+			t.Errorf("DELETE body = %q (read err %v), want empty", body, err)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer api.Close()
+
+	client, err := NewClient(BearerToken("lv_test_123"), WithBaseURL(api.URL))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	if err := client.RevokePortal(context.Background(), "r_demo1234567", "q_demo1234567"); err != nil {
+		t.Fatalf("RevokePortal: %v", err)
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("request count = %d, want 1", requests.Load())
+	}
+}
+
+// TestClient_RevokePortalEscapesBothIDs pins that each id travels as exactly
+// one escaped path segment: an id cannot splice extra path segments, start a
+// query, or open a fragment in the revoke URL.
+func TestClient_RevokePortalEscapesBothIDs(t *testing.T) {
+	const wantPath = "/v1/resources/r%3F%2F%231/qurls/q%3F%2F%232"
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete || r.URL.EscapedPath() != wantPath || r.URL.RawQuery != "" {
+			t.Errorf("request = %s %s?%s, want DELETE %s", r.Method, r.URL.EscapedPath(), r.URL.RawQuery, wantPath)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer api.Close()
+
+	client, err := NewClient(BearerToken("lv_test_123"), WithBaseURL(api.URL))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	if err := client.RevokePortal(context.Background(), "r?/#1", "q?/#2"); err != nil {
+		t.Fatalf("RevokePortal: %v", err)
+	}
+}
+
+// TestClient_RevokePortalAlreadyRevoked pins the endpoint's one typed mapping:
+// revocation is not idempotent, and the exact 409 "revoked" answer — the qURL
+// is not active — surfaces as a branchable sentinel without losing the
+// *APIError.
+func TestClient_RevokePortalAlreadyRevoked(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusConflict)
+		fmt.Fprint(w, `{"error":{"code":"revoked","title":"Conflict","detail":"qURL is not active"}}`)
+	}))
+	defer api.Close()
+
+	client, err := NewClient(BearerToken("lv_test"), WithBaseURL(api.URL))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	err = client.RevokePortal(context.Background(), "r_demo1234567", "q_demo1234567")
+	if !errors.Is(err, ErrPortalRevoked) {
+		t.Fatalf("want ErrPortalRevoked, got %v", err)
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("already-revoked error must keep the *APIError, got %v", err)
+	}
+	if apiErr.StatusCode != http.StatusConflict || apiErr.Code != "revoked" {
+		t.Fatalf("api error = %#v", apiErr)
+	}
+	if !strings.Contains(err.Error(), "portal already revoked") || !strings.Contains(err.Error(), "qURL is not active") {
+		t.Fatalf("error = %q, want the sentinel's diagnosis and the server detail", err)
+	}
+}
+
+// TestClient_RevokePortalAPIErrorPassthrough pins that only the exact 409
+// "revoked" answer maps to the sentinel: a 404 (unknown resource, unknown or
+// malformed qurl id, or not owned) and a 409 with any other code stay raw
+// *APIError values, exactly like the rest of the client.
+func TestClient_RevokePortalAPIErrorPassthrough(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		code   string
+	}{
+		{name: "not found", status: http.StatusNotFound, code: "not_found"},
+		{name: "409 wrong code remains raw", status: http.StatusConflict, code: "conflict"},
+		{name: "revoked code on wrong status remains raw", status: http.StatusNotFound, code: "revoked"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/problem+json")
+				w.WriteHeader(tt.status)
+				fmt.Fprintf(w, `{"error":{"code":%q,"detail":"contract test"}}`, tt.code)
+			}))
+			defer api.Close()
+
+			client, err := NewClient(BearerToken("lv_test"), WithBaseURL(api.URL))
+			if err != nil {
+				t.Fatalf("NewClient: %v", err)
+			}
+			err = client.RevokePortal(context.Background(), "r_demo1234567", "q_demo1234567")
+			var apiErr *APIError
+			if !errors.As(err, &apiErr) || apiErr.StatusCode != tt.status || apiErr.Code != tt.code {
+				t.Fatalf("error lost *APIError: %v", err)
+			}
+			if errors.Is(err, ErrPortalRevoked) {
+				t.Fatalf("%d %s must not read as the already-revoked sentinel: %v", tt.status, tt.code, err)
+			}
+		})
+	}
+}
+
+// TestClient_RevokePortalRequiresExactEmpty204 pins the documented status and
+// byte-empty body as the revoke success contract: any other nominal success is
+// response ambiguity, not a benign alternate success.
+func TestClient_RevokePortalRequiresExactEmpty204(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{name: "200", status: http.StatusOK},
+		{name: "202", status: http.StatusAccepted},
+		{name: "nonempty 204", status: http.StatusNoContent, body: `{}`},
+		{name: "whitespace-only 204", status: http.StatusNoContent, body: "\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client, err := NewClient(BearerToken("lv_test"), WithBaseURL("http://localhost"))
+			if err != nil {
+				t.Fatalf("NewClient: %v", err)
+			}
+			client.httpClient = doerFunc(func(r *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: tt.status,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader(tt.body)),
+					Request:    r,
+				}, nil
+			})
+			err = client.RevokePortal(context.Background(), "r_demo1234567", "q_demo1234567")
+			if !errors.Is(err, ErrInvalidAPIResponse) {
+				t.Fatalf("error = %v, want ErrInvalidAPIResponse", err)
+			}
+			if errors.Is(err, ErrPortalRevoked) {
+				t.Fatalf("invalid success must not read as already revoked: %v", err)
+			}
+		})
+	}
+}
+
+func TestClient_RevokePortalValidation(t *testing.T) {
+	var calls atomic.Int32
+	client, err := NewClient(BearerToken("lv_test"), WithBaseURL("https://api.example.com"))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	client.httpClient = doerFunc(func(*http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return nil, errors.New("unexpected request")
+	})
+	if err := client.RevokePortal(context.Background(), "", "q_demo1234567"); !errors.Is(err, ErrInvalidPortalRequest) {
+		t.Fatalf("empty resource id: want ErrInvalidPortalRequest, got %v", err)
+	}
+	if err := client.RevokePortal(context.Background(), "   ", "q_demo1234567"); !errors.Is(err, ErrInvalidPortalRequest) {
+		t.Fatalf("whitespace resource id: want ErrInvalidPortalRequest, got %v", err)
+	}
+	if err := client.RevokePortal(context.Background(), "r_demo1234567", ""); !errors.Is(err, ErrInvalidPortalRequest) {
+		t.Fatalf("empty qurl id: want ErrInvalidPortalRequest, got %v", err)
+	}
+	if err := client.RevokePortal(context.Background(), "r_demo1234567", "   "); !errors.Is(err, ErrInvalidPortalRequest) {
+		t.Fatalf("whitespace qurl id: want ErrInvalidPortalRequest, got %v", err)
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("network calls = %d, want 0", calls.Load())
+	}
+	var nilClient *Client
+	if err := nilClient.RevokePortal(context.Background(), "r_demo1234567", "q_demo1234567"); !errors.Is(err, ErrInvalidClientConfig) {
+		t.Fatalf("nil client: want ErrInvalidClientConfig, got %v", err)
+	}
+}
+
 func TestClient_CredentialProvider(t *testing.T) {
 	var calls atomic.Int32
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -432,6 +627,109 @@ func TestClient_FileCredentials(t *testing.T) {
 	}
 	if _, err := client.ProtectURL(context.Background(), "https://example.com"); err != nil {
 		t.Fatalf("ProtectURL: %v", err)
+	}
+}
+
+// The Connector installer's --token file and mounted QURL_API_KEY_FILE secrets
+// hold the bearer token itself, while LayerV setup writes the JSON state
+// envelope. FileCredentials must authorize from both spellings of the same
+// credential, and must trim surrounding whitespace from the raw form so the
+// trailing newline every editor and echo appends is not sent as token bytes.
+func TestClient_FileCredentialsAcceptsRawTokenAndJSONState(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{name: "raw token", content: "lv_raw_123", want: "Bearer lv_raw_123"},
+		{name: "raw token with trailing newline", content: "lv_raw_123\n", want: "Bearer lv_raw_123"},
+		{name: "raw token with surrounding whitespace", content: " \t lv_raw_123 \r\n", want: "Bearer lv_raw_123"},
+		{name: "json bearer token", content: `{"bearer_token":"lv_json_123"}`, want: "Bearer lv_json_123"},
+		{name: "json authorization", content: `{"authorization":"Bearer lv_json_456"}`, want: "Bearer lv_json_456"},
+		{name: "json with surrounding whitespace", content: "\n\t {\"bearer_token\":\"lv_json_789\"}\n", want: "Bearer lv_json_789"},
+		// Editors and Windows tooling prepend a UTF-8 BOM silently; it is not
+		// unicode whitespace, so without explicit stripping this envelope would
+		// be misread as a raw token.
+		{name: "json with utf-8 BOM", content: "\xef\xbb\xbf{\"bearer_token\":\"lv_json_bom\"}", want: "Bearer lv_json_bom"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "token")
+			if err := os.WriteFile(path, []byte(tc.content), 0o600); err != nil {
+				t.Fatalf("write credential state: %v", err)
+			}
+			req := newCredentialTestRequest(t)
+			if err := FileCredentials(path).Authorize(context.Background(), req); err != nil {
+				t.Fatalf("Authorize: %v", err)
+			}
+			if got := req.Header.Get("Authorization"); got != tc.want {
+				t.Fatalf("Authorization = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// A credential file that cannot authorize anything must say what the file may
+// contain: an operator holding only the error text has to be able to fix the
+// file. The message must never echo file contents or the token.
+func assertNamesCredentialStateFormats(t *testing.T, err error) {
+	t.Helper()
+	msg := err.Error()
+	if !strings.HasPrefix(msg, "qurl: ") {
+		t.Fatalf("error %q does not use the qurl: prefix", msg)
+	}
+	for _, want := range []string{"bearer token", `"bearer_token"`, `"authorization"`} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("error %q does not name accepted format %q", msg, want)
+		}
+	}
+}
+
+func TestClient_FileCredentialsRejectsEmptyFile(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		content string
+	}{
+		{name: "empty", content: ""},
+		{name: "whitespace only", content: " \n\t\r\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "token")
+			if err := os.WriteFile(path, []byte(tc.content), 0o600); err != nil {
+				t.Fatalf("write credential state: %v", err)
+			}
+			err := FileCredentials(path).Authorize(context.Background(), newCredentialTestRequest(t))
+			if !errors.Is(err, ErrInvalidClientConfig) {
+				t.Fatalf("empty state file: want ErrInvalidClientConfig, got %v", err)
+			}
+			assertNamesCredentialStateFormats(t, err)
+		})
+	}
+}
+
+// Every malformed credential-file shape shares one error class, so a caller
+// can match ErrInvalidClientConfig without caring which way the file is wrong,
+// and every message says what the file may contain.
+func TestClient_FileCredentialsMalformedShapesShareErrorClass(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		content string
+	}{
+		{name: "malformed json", content: "{\"bearer_token\":\n"},
+		{name: "json with neither field", content: `{}`},
+		{name: "json with blank fields", content: `{"bearer_token":"  ","authorization":""}`},
+		{name: "raw token with invalid header bytes", content: "lv_raw_\x01token"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "token")
+			if err := os.WriteFile(path, []byte(tc.content), 0o600); err != nil {
+				t.Fatalf("write credential state: %v", err)
+			}
+			err := FileCredentials(path).Authorize(context.Background(), newCredentialTestRequest(t))
+			if !errors.Is(err, ErrInvalidClientConfig) {
+				t.Fatalf("%s: want ErrInvalidClientConfig, got %v", tc.name, err)
+			}
+			assertNamesCredentialStateFormats(t, err)
+		})
 	}
 }
 

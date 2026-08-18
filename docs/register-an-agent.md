@@ -78,7 +78,8 @@ anything you configure:
 | How you got the credential | Path | What you pass |
 |---|---|---|
 | Issued against an address — your account, a service account, a team alias | One-time code | `WithAgentRuntimeOTPProvider` (the default) |
-| Pre-issued for a machine — a connector bootstrap key, an agent key baked into an image or installer | No code | `WithAgentRuntimeHeadlessEnrollment` |
+| Pre-issued one-shot for a machine — a connector bootstrap or bootstrap key baked into an image or installer | No code | `WithAgentRuntimeHeadlessEnrollment` |
+| A retired durable agent key — a legacy `qurl:agent`-scoped credential | No code | `WithAgentRuntimeAllowedRegistrationKeyKinds(qurl.RegistrationKeyKindAgent)` — the headless option does not admit this kind |
 
 **The token itself will not tell you.** Credentials carry no kind you can parse;
 the SDK checks only shape and length, and LayerV reports the kind on the first
@@ -89,7 +90,7 @@ installed the default assumes the one-time code, and when that is wrong the
 error names the kind LayerV actually reported:
 
 ```
-qurl: registration key kind "bootstrap" is disallowed; accepted kinds: account
+qurl: registration key kind "bootstrap" is disallowed; accepted kinds: account (this is a one-shot enrollment token that carries its own proof, so it does not use the OTP path; pass WithAgentRuntimeHeadlessEnrollment)
 ```
 
 That is a `*qurl.RegistrationKeyKindDisallowedError`, and its `Kind` field
@@ -210,8 +211,9 @@ about the lifecycle. Specifically:
 
 - **Restart as often as you like.** `ConnectAgentRuntime` is the only call you
   need, on every start. It enrolls when nothing is registered yet, and otherwise
-  returns your existing registration without contacting LayerV or touching your
-  OTP callback. Your process never has to work out whether this is the first
+  returns your existing registration — without contacting LayerV or touching
+  your OTP callback while its lease is live; an expired lease renews through
+  the Hub first. Your process never has to work out whether this is the first
   boot.
 - **Crashes and dropped replies resume.** State is saved before anything
   irreversible happens, so an interrupted enrollment continues rather than
@@ -322,17 +324,19 @@ Rarely needed. The defaults above suit almost every deployment.
 client, binding, err := qurl.RefreshAgentRuntime(ctx, qurl.HubBootstrap{}, store)
 ```
 
-The empty `qurl.HubBootstrap{}` means "use the trust root this build ships"; you
-only fill it in if you run your own LayerV deployment. Renewal everywhere else
-uses that same trust root, so a self-hosted deployment should point
-`QURL_DEPLOYMENT` at its deployment file.
+The empty `qurl.HubBootstrap{}` means "use the deployment's trust root" — the
+file named by `QURL_DEPLOYMENT` today, embedded in GA builds later; you only
+fill it in if you run your own LayerV deployment and want to pin the Hub in
+code. Renewal everywhere else resolves the trust root the same way, so a
+self-hosted deployment usually just points `QURL_DEPLOYMENT` at its deployment
+file.
 
 **Turn off automatic behavior:**
 
 | Option | Effect |
 |---|---|
-| `qurl.WithAgentRuntimeOfflineOpen()` | `OpenRegisteredAgentRuntime` makes no network call, and its binding does not renew itself. An expired lease returns `ErrAssignmentLeaseExpired`. For a process that must start without reaching LayerV, or that renews on its own schedule. |
-| `qurl.WithAgentRuntimePinnedAssignment()` | `RefreshAgentRuntime` refuses to follow a relocation, returning `*qurl.AgentAssignmentChangedError` and changing nothing on disk. For placement that feeds an egress allowlist or a change-control process. |
+| `qurl.WithAgentRuntimeOfflineOpen()` | `ConnectAgentRuntime` makes no network call: it serves only an existing completed registration, an expired lease returns `ErrAssignmentLeaseExpired` instead of renewing, and the binding it returns does not renew itself either. For a process that must start without reaching LayerV, or that renews on its own schedule — recover with an explicit `RefreshAgentRuntime`. Enrollment needs the network this option forbids, so combining it with `WithAgentRuntimeEnrollmentCredential` or `WithAgentRuntimeOTPProvider` fails with `ErrInvalidRegisterConfig`. |
+| `qurl.WithAgentRuntimePinnedAssignment()` | `ConnectAgentRuntime` and `RefreshAgentRuntime` refuse to follow a relocation, returning `*qurl.AgentAssignmentChangedError` and changing nothing on disk; a binding either call returns applies the same policy when renewing its own lease. For placement that feeds an egress allowlist or a change-control process. |
 
 ## When something goes wrong
 

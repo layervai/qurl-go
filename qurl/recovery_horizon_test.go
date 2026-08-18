@@ -125,7 +125,7 @@ func TestAgentRegistrationRecoveryHorizonContract(t *testing.T) {
 	}
 }
 
-func TestRegisterAgentRuntime_SchemaV6PendingRecoveryRemainsResumable(t *testing.T) {
+func TestConnectAgentRuntime_SchemaV6PendingRecoveryRemainsResumable(t *testing.T) {
 	contract := loadAssignmentFixture(t)
 	for _, phase := range []AgentRecoveryPhase{AgentRecoveryPhaseActivation, AgentRecoveryPhaseCompletion} {
 		t.Run(string(phase), func(t *testing.T) {
@@ -153,7 +153,7 @@ func TestRegisterAgentRuntime_SchemaV6PendingRecoveryRemainsResumable(t *testing
 			if phase == AgentRecoveryPhaseActivation {
 				credential = conformance.AgentAssignmentBootstrapCredentialFixture
 			}
-			client, binding, err := RegisterAgentRuntime(context.Background(), credential, f.store, f.options()...)
+			client, binding, err := connectWithEnrollment(context.Background(), credential, f.store, f.options()...)
 			if err != nil || client == nil || binding == nil {
 				t.Fatalf("schema-v6 %s resume = %v/%v/%v", phase, client, binding, err)
 			}
@@ -166,7 +166,7 @@ func TestRegisterAgentRuntime_SchemaV6PendingRecoveryRemainsResumable(t *testing
 	}
 }
 
-func TestRegisterAgentRuntime_ReplacementKeepsFirstRecoveryAnchorAcrossInvocations(t *testing.T) {
+func TestConnectAgentRuntime_ReplacementKeepsFirstRecoveryAnchorAcrossInvocations(t *testing.T) {
 	contract := loadAssignmentFixture(t)
 	firstExpiry := assignmentFixtureNow.Add(5 * time.Minute)
 	secondExpiry := assignmentFixtureNow.Add(10 * time.Minute)
@@ -190,7 +190,7 @@ func TestRegisterAgentRuntime_ReplacementKeepsFirstRecoveryAnchorAcrossInvocatio
 	)
 
 	for invocation := 1; invocation <= 2; invocation++ {
-		_, _, err := RegisterAgentRuntime(context.Background(), conformance.AgentAssignmentBootstrapCredentialFixture, f.store, f.options()...)
+		_, _, err := connectWithEnrollment(context.Background(), conformance.AgentAssignmentBootstrapCredentialFixture, f.store, f.options()...)
 		if !errors.Is(err, ErrAssignmentTicketExpired) {
 			t.Fatalf("invocation %d replacement verdict = %v, want ErrAssignmentTicketExpired", invocation, err)
 		}
@@ -210,7 +210,7 @@ func TestRegisterAgentRuntime_ReplacementKeepsFirstRecoveryAnchorAcrossInvocatio
 	}
 }
 
-func TestRegisterAgentRuntime_MigratesLegacyActivationThenExpiresWithoutUDP(t *testing.T) {
+func TestConnectAgentRuntime_MigratesLegacyActivationThenExpiresWithoutUDP(t *testing.T) {
 	state, initial := recoveryTestPendingActivation(t)
 	state.SchemaVersion = 5 // v0.1.1
 	state.PendingActivation.RecoveryAnchorTicketExpiresAt = time.Time{}
@@ -221,7 +221,7 @@ func TestRegisterAgentRuntime_MigratesLegacyActivationThenExpiresWithoutUDP(t *t
 	}
 	wantDeadline := initial.AssignmentTicketExpiresAt.Add(AgentRegistrationRecoveryHorizon)
 
-	_, _, err := RegisterAgentRuntime(
+	_, _, err := connectWithEnrollment(
 		context.Background(), conformance.AgentAssignmentBootstrapCredentialFixture, f.store,
 		f.options(withAgentRuntimeClock(func() time.Time { return wantDeadline }))...,
 	)
@@ -242,7 +242,7 @@ func TestRegisterAgentRuntime_MigratesLegacyActivationThenExpiresWithoutUDP(t *t
 	}
 }
 
-func TestRegisterAgentRuntime_RejectsSubsecondLegacyActivationMigrationBeforeSaveOrUDP(t *testing.T) {
+func TestConnectAgentRuntime_RejectsSubsecondLegacyActivationMigrationBeforeSaveOrUDP(t *testing.T) {
 	state, _ := recoveryTestPendingActivation(t)
 	state.SchemaVersion = 5 // v0.1.1
 	state.PendingActivation.AssignmentTicketExpiresAt = state.PendingActivation.AssignmentTicketExpiresAt.Add(500 * time.Millisecond)
@@ -254,7 +254,7 @@ func TestRegisterAgentRuntime_RejectsSubsecondLegacyActivationMigrationBeforeSav
 	}
 	beforeSaves := len(f.store.snapshots())
 
-	_, _, err := RegisterAgentRuntime(
+	_, _, err := connectWithEnrollment(
 		context.Background(), conformance.AgentAssignmentBootstrapCredentialFixture, f.store,
 		f.options()...,
 	)
@@ -274,7 +274,7 @@ func TestRegisterAgentRuntime_RejectsSubsecondLegacyActivationMigrationBeforeSav
 	}
 }
 
-func TestRegisterAgentRuntime_LegacyActivationMigrationMustPersistBeforeUDP(t *testing.T) {
+func TestConnectAgentRuntime_LegacyActivationMigrationMustPersistBeforeUDP(t *testing.T) {
 	state, _ := recoveryTestPendingActivation(t)
 	state.SchemaVersion = 5 // v0.1.1
 	state.PendingActivation.RecoveryAnchorTicketExpiresAt = time.Time{}
@@ -285,7 +285,7 @@ func TestRegisterAgentRuntime_LegacyActivationMigrationMustPersistBeforeUDP(t *t
 	}
 	f.store.fail = 2 // fixture save succeeds; migration save fails
 
-	_, _, err := RegisterAgentRuntime(
+	_, _, err := connectWithEnrollment(
 		context.Background(), conformance.AgentAssignmentBootstrapCredentialFixture, f.store,
 		f.options()...,
 	)
@@ -302,7 +302,7 @@ func TestRegisterAgentRuntime_LegacyActivationMigrationMustPersistBeforeUDP(t *t
 	}
 }
 
-func TestRegisterAgentRuntime_LegacyCompletionRequiresExplicitMigrationWithoutUDP(t *testing.T) {
+func TestConnectAgentRuntime_LegacyCompletionRequiresExplicitMigrationWithoutUDP(t *testing.T) {
 	state, _ := recoveryTestPendingActivation(t)
 	state.SchemaVersion = 5 // v0.1.1
 	state.PendingActivation = nil
@@ -316,7 +316,7 @@ func TestRegisterAgentRuntime_LegacyCompletionRequiresExplicitMigrationWithoutUD
 		t.Fatal(err)
 	}
 
-	_, _, err := RegisterAgentRuntime(context.Background(), "", f.store, f.options()...)
+	_, _, err := connectWithEnrollment(context.Background(), "", f.store, f.options()...)
 	var migration *AgentRecoveryMigrationRequiredError
 	if !errors.Is(err, ErrAgentRecoveryMigrationRequired) || !errors.As(err, &migration) ||
 		migration.Phase != AgentRecoveryPhaseCompletion || migration.SchemaVersion != 5 {
@@ -333,7 +333,7 @@ func TestRegisterAgentRuntime_LegacyCompletionRequiresExplicitMigrationWithoutUD
 	}
 }
 
-func TestRegisterAgentRuntime_RejectsSchemaV5ForwardRecoveryFields(t *testing.T) {
+func TestConnectAgentRuntime_RejectsSchemaV5ForwardRecoveryFields(t *testing.T) {
 	for _, phase := range []AgentRecoveryPhase{AgentRecoveryPhaseActivation, AgentRecoveryPhaseCompletion} {
 		for _, fields := range []string{"anchor", "deadline", "anchor and deadline"} {
 			t.Run(string(phase)+"/"+fields, func(t *testing.T) {
@@ -376,7 +376,7 @@ func TestRegisterAgentRuntime_RejectsSchemaV5ForwardRecoveryFields(t *testing.T)
 				if phase == AgentRecoveryPhaseActivation {
 					credential = conformance.AgentAssignmentBootstrapCredentialFixture
 				}
-				_, _, err := RegisterAgentRuntime(context.Background(), credential, f.store, f.options()...)
+				_, _, err := connectWithEnrollment(context.Background(), credential, f.store, f.options()...)
 				if !errors.Is(err, ErrInvalidAgentState) || !errors.Is(err, ErrInvalidRegisterConfig) {
 					t.Fatalf("schema-v5 forward fields = %v, want invalid state", err)
 				}
@@ -388,7 +388,7 @@ func TestRegisterAgentRuntime_RejectsSchemaV5ForwardRecoveryFields(t *testing.T)
 	}
 }
 
-func TestRegisterAgentRuntime_RejectsUnsupportedSchemaVersionsBeforeNetworkIO(t *testing.T) {
+func TestConnectAgentRuntime_RejectsUnsupportedSchemaVersionsBeforeNetworkIO(t *testing.T) {
 	for _, version := range []int{-1, agentStateSchemaVersion + 1} {
 		t.Run(fmt.Sprintf("version_%d", version), func(t *testing.T) {
 			f := newRuntimeFixture(t, nil, nil)
@@ -403,7 +403,7 @@ func TestRegisterAgentRuntime_RejectsUnsupportedSchemaVersionsBeforeNetworkIO(t 
 			resolver := &noIONativeResolver{}
 			dialer := &noIONativeDialer{}
 
-			_, _, err = RegisterAgentRuntime(
+			_, _, err = connectWithEnrollment(
 				context.Background(), conformance.AgentAssignmentBootstrapCredentialFixture, f.store,
 				f.options(WithAgentRuntimeUDPResolver(resolver), WithAgentRuntimeUDPDialer(dialer))...,
 			)
@@ -419,7 +419,7 @@ func TestRegisterAgentRuntime_RejectsUnsupportedSchemaVersionsBeforeNetworkIO(t 
 	}
 }
 
-func TestRegisterAgentRuntime_DeadlineDoesNotMaskPostRAKPersistenceAmbiguity(t *testing.T) {
+func TestConnectAgentRuntime_DeadlineDoesNotMaskPostRAKPersistenceAmbiguity(t *testing.T) {
 	contract := loadAssignmentFixture(t)
 	f := newRuntimeFixture(t, nil, []runtimeUDPStep{{
 		requestType: relayknock.TypeRegister,
@@ -438,7 +438,7 @@ func TestRegisterAgentRuntime_DeadlineDoesNotMaskPostRAKPersistenceAmbiguity(t *
 	f.store.waitForContextAfterCommit = 3
 	f.store.failAfterCommit = 3
 
-	_, _, err := RegisterAgentRuntime(
+	_, _, err := connectWithEnrollment(
 		context.Background(), conformance.AgentAssignmentBootstrapCredentialFixture, f.store,
 		f.options(withAgentRuntimeClock(func() time.Time { return now }))...,
 	)
@@ -451,7 +451,7 @@ func TestRegisterAgentRuntime_DeadlineDoesNotMaskPostRAKPersistenceAmbiguity(t *
 	}
 }
 
-func TestRegisterAgentRuntime_DeadlineDoesNotMaskReplacementPersistenceAmbiguity(t *testing.T) {
+func TestConnectAgentRuntime_DeadlineDoesNotMaskReplacementPersistenceAmbiguity(t *testing.T) {
 	contract := loadAssignmentFixture(t)
 	f := newRuntimeFixture(t,
 		[]runtimeUDPStep{{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: bootstrapAssignmentResult(contract, "conformance-assignment-ticket-0002")}},
@@ -467,7 +467,7 @@ func TestRegisterAgentRuntime_DeadlineDoesNotMaskReplacementPersistenceAmbiguity
 	f.store.waitForContextAfterCommit = 3
 	f.store.failAfterCommit = 3
 
-	_, _, err := RegisterAgentRuntime(
+	_, _, err := connectWithEnrollment(
 		context.Background(), conformance.AgentAssignmentBootstrapCredentialFixture, f.store,
 		f.options(withAgentRuntimeClock(func() time.Time { return now }))...,
 	)
@@ -485,7 +485,7 @@ func TestRegisterAgentRuntime_DeadlineDoesNotMaskReplacementPersistenceAmbiguity
 // candidate is 90-day-lived while a lease lasts hours, so requiring a live lease
 // here used to strand ordinary resumes. The Hub is unreachable in this fixture:
 // if completion still needed a refresh first, this could not succeed.
-func TestRegisterAgentRuntime_ResumedCompletionDoesNotRequireLiveLease(t *testing.T) {
+func TestConnectAgentRuntime_ResumedCompletionDoesNotRequireLiveLease(t *testing.T) {
 	contract := loadAssignmentFixture(t)
 	f := newRuntimeFixture(t,
 		nil, // no Hub steps at all
@@ -503,7 +503,7 @@ func TestRegisterAgentRuntime_ResumedCompletionDoesNotRequireLiveLease(t *testin
 		t.Fatal(err)
 	}
 
-	_, binding, err := RegisterAgentRuntime(context.Background(), "", f.store,
+	_, binding, err := connectWithEnrollment(context.Background(), "", f.store,
 		f.options(withAgentRuntimeClock(func() time.Time { return assignmentFixtureNow }))...)
 	if binding != nil {
 		defer binding.Destroy()
@@ -523,7 +523,7 @@ func TestRegisterAgentRuntime_ResumedCompletionDoesNotRequireLiveLease(t *testin
 	}
 }
 
-func TestRegisterAgentRuntime_DeadlineDoesNotMaskFinalPromotionPersistenceAmbiguity(t *testing.T) {
+func TestConnectAgentRuntime_DeadlineDoesNotMaskFinalPromotionPersistenceAmbiguity(t *testing.T) {
 	contract := loadAssignmentFixture(t)
 	f := newRuntimeFixture(t, nil, []runtimeUDPStep{{
 		requestType: relayknock.TypeListRequest,
@@ -545,7 +545,7 @@ func TestRegisterAgentRuntime_DeadlineDoesNotMaskFinalPromotionPersistenceAmbigu
 	f.store.waitForContextAfterCommit = 4
 	f.store.failAfterCommit = 4
 
-	_, _, err := RegisterAgentRuntime(context.Background(), "", f.store,
+	_, _, err := connectWithEnrollment(context.Background(), "", f.store,
 		f.options(withAgentRuntimeClock(func() time.Time { return now }))...)
 	if !errors.Is(err, ErrAgentBindingPersistence) || errors.Is(err, ErrAgentRecoveryExpired) {
 		t.Fatalf("deadline-racing final promotion = %v, want reload-first binding persistence only", err)
@@ -556,7 +556,7 @@ func TestRegisterAgentRuntime_DeadlineDoesNotMaskFinalPromotionPersistenceAmbigu
 	}
 }
 
-func TestRegisterAgentRuntime_AuthenticatedCompletionCrossingHorizonIsPromoted(t *testing.T) {
+func TestConnectAgentRuntime_AuthenticatedCompletionCrossingHorizonIsPromoted(t *testing.T) {
 	contract := loadAssignmentFixture(t)
 	f := newRuntimeFixture(t, nil, []runtimeUDPStep{{
 		requestType: relayknock.TypeListRequest,
@@ -581,7 +581,7 @@ func TestRegisterAgentRuntime_AuthenticatedCompletionCrossingHorizonIsPromoted(t
 		return deadline
 	}
 
-	client, binding, err := RegisterAgentRuntime(
+	client, binding, err := connectWithEnrollment(
 		context.Background(), "", f.store,
 		f.options(withAgentRuntimeClock(clock))...,
 	)
@@ -602,7 +602,7 @@ func TestRegisterAgentRuntime_AuthenticatedCompletionCrossingHorizonIsPromoted(t
 	}
 }
 
-func TestRegisterAgentRuntime_ExpiredCompletionPreservesStateWithoutUDP(t *testing.T) {
+func TestConnectAgentRuntime_ExpiredCompletionPreservesStateWithoutUDP(t *testing.T) {
 	state, _ := recoveryTestPendingActivation(t)
 	deadline := state.PendingActivation.RecoveryExpiresAt
 	recoveryAnchor := state.PendingActivation.RecoveryAnchorTicketExpiresAt
@@ -619,7 +619,7 @@ func TestRegisterAgentRuntime_ExpiredCompletionPreservesStateWithoutUDP(t *testi
 		t.Fatal(err)
 	}
 
-	_, _, err := RegisterAgentRuntime(
+	_, _, err := connectWithEnrollment(
 		context.Background(), "", f.store,
 		f.options(withAgentRuntimeClock(func() time.Time { return deadline }))...,
 	)
@@ -639,7 +639,7 @@ func TestRegisterAgentRuntime_ExpiredCompletionPreservesStateWithoutUDP(t *testi
 	}
 }
 
-func TestRegisterAgentRuntime_RejectsTamperedRecoveryAuthorityBeforeUDP(t *testing.T) {
+func TestConnectAgentRuntime_RejectsTamperedRecoveryAuthorityBeforeUDP(t *testing.T) {
 	activation, _ := recoveryTestPendingActivation(t)
 	completion := activation.clone()
 	completion.PendingActivation = nil
@@ -692,7 +692,7 @@ func TestRegisterAgentRuntime_RejectsTamperedRecoveryAuthorityBeforeUDP(t *testi
 				t.Fatal(err)
 			}
 
-			_, _, err := RegisterAgentRuntime(context.Background(), test.credential, f.store, f.options()...)
+			_, _, err := connectWithEnrollment(context.Background(), test.credential, f.store, f.options()...)
 			if !errors.Is(err, ErrInvalidAgentState) || !errors.Is(err, ErrInvalidRegisterConfig) {
 				t.Fatalf("tampered %s = %v, want invalid persisted state", test.name, err)
 			}
@@ -772,7 +772,7 @@ func TestAgentRecoveryBoundary_MapErrorFailsClosedWhenRealTimeoutPrecedesInjecte
 	}
 }
 
-func TestRegisterAgentRuntime_RecoveryDNSCannotCrossDeadline(t *testing.T) {
+func TestConnectAgentRuntime_RecoveryDNSCannotCrossDeadline(t *testing.T) {
 	f := newRuntimeFixture(t, nil, nil)
 	state := seedRecoveryRuntimePendingActivation(t, f)
 	deadline := time.Now().UTC().Truncate(time.Second).Add(time.Second)
@@ -786,7 +786,7 @@ func TestRegisterAgentRuntime_RecoveryDNSCannotCrossDeadline(t *testing.T) {
 		return nil, ctx.Err()
 	})
 
-	_, _, err := RegisterAgentRuntime(
+	_, _, err := connectWithEnrollment(
 		context.Background(), conformance.AgentAssignmentBootstrapCredentialFixture, f.store,
 		f.options(withAgentRuntimeClock(time.Now), WithAgentRuntimeUDPResolver(resolver))...,
 	)
@@ -799,13 +799,13 @@ func TestRegisterAgentRuntime_RecoveryDNSCannotCrossDeadline(t *testing.T) {
 	}
 }
 
-func TestRegisterAgentRuntime_RecoveryBackoffCannotDispatchAtDeadline(t *testing.T) {
+func TestConnectAgentRuntime_RecoveryBackoffCannotDispatchAtDeadline(t *testing.T) {
 	f := newRuntimeFixture(t, nil, []runtimeUDPStep{{requestType: relayknock.TypeRegister, noReply: true}})
 	state := seedRecoveryRuntimePendingActivation(t, f)
 	deadline := state.PendingActivation.RecoveryExpiresAt
 	now := deadline.Add(-time.Hour)
 
-	_, _, err := RegisterAgentRuntime(
+	_, _, err := connectWithEnrollment(
 		context.Background(), conformance.AgentAssignmentBootstrapCredentialFixture, f.store,
 		f.options(
 			withAgentRuntimeClock(func() time.Time { return now }),
@@ -827,7 +827,7 @@ func TestRegisterAgentRuntime_RecoveryBackoffCannotDispatchAtDeadline(t *testing
 // The recovery deadline still fences the completion datagram itself. Completion
 // is now the first network step of a resume, so this is where the horizon has to
 // hold: nothing may be sent at or after it, and the candidate must survive.
-func TestRegisterAgentRuntime_PendingCompletionCannotCrossDeadline(t *testing.T) {
+func TestConnectAgentRuntime_PendingCompletionCannotCrossDeadline(t *testing.T) {
 	f := newRuntimeFixture(t, nil, nil)
 	state := seedRecoveryRuntimePendingActivation(t, f)
 	cfg := defaultNativeAgentRuntimeConfig()
@@ -845,7 +845,7 @@ func TestRegisterAgentRuntime_PendingCompletionCannotCrossDeadline(t *testing.T)
 		return f.resolver.LookupNetIP(ctx, network, host)
 	})
 
-	_, _, err := RegisterAgentRuntime(
+	_, _, err := connectWithEnrollment(
 		context.Background(), "", f.store,
 		f.options(withAgentRuntimeClock(func() time.Time { return now }), WithAgentRuntimeUDPResolver(resolver))...,
 	)
@@ -862,7 +862,7 @@ func TestRegisterAgentRuntime_PendingCompletionCannotCrossDeadline(t *testing.T)
 	}
 }
 
-func TestRegisterAgentRuntime_ReplacementHubCannotCrossOriginalDeadline(t *testing.T) {
+func TestConnectAgentRuntime_ReplacementHubCannotCrossOriginalDeadline(t *testing.T) {
 	verdict := `{"errCode":"52111","errMsg":"expired","aspId":"agent"}`
 	f := newRuntimeFixture(t, nil, []runtimeUDPStep{
 		{requestType: relayknock.TypeRegister, replyType: relayknock.TypeRegisterAck, replyBody: verdict},
@@ -877,7 +877,7 @@ func TestRegisterAgentRuntime_ReplacementHubCannotCrossOriginalDeadline(t *testi
 		return f.resolver.LookupNetIP(ctx, network, host)
 	})
 
-	_, _, err := RegisterAgentRuntime(
+	_, _, err := connectWithEnrollment(
 		context.Background(), conformance.AgentAssignmentBootstrapCredentialFixture, f.store,
 		f.options(withAgentRuntimeClock(func() time.Time { return now }), WithAgentRuntimeUDPResolver(resolver))...,
 	)
@@ -894,7 +894,7 @@ func TestRegisterAgentRuntime_ReplacementHubCannotCrossOriginalDeadline(t *testi
 	}
 }
 
-func TestRegisterAgentRuntime_ReplacementBoundarySetupExpiryReturnsWithoutPanic(t *testing.T) {
+func TestConnectAgentRuntime_ReplacementBoundarySetupExpiryReturnsWithoutPanic(t *testing.T) {
 	contract := loadAssignmentFixture(t)
 	f := newRuntimeFixture(t,
 		[]runtimeUDPStep{{
@@ -924,7 +924,7 @@ func TestRegisterAgentRuntime_ReplacementBoundarySetupExpiryReturnsWithoutPanic(
 		return deadline
 	}
 
-	_, _, err := RegisterAgentRuntime(
+	_, _, err := connectWithEnrollment(
 		context.Background(), conformance.AgentAssignmentBootstrapCredentialFixture, f.store,
 		f.options(withAgentRuntimeClock(clock))...,
 	)
@@ -947,7 +947,7 @@ func TestRegisterAgentRuntime_ReplacementBoundarySetupExpiryReturnsWithoutPanic(
 	}
 }
 
-func TestRegisterAgentRuntime_ReplacementOTPCannotCrossOriginalDeadline(t *testing.T) {
+func TestConnectAgentRuntime_ReplacementOTPCannotCrossOriginalDeadline(t *testing.T) {
 	contract := loadAssignmentFixture(t)
 	first := accountAssignmentResult(contract, "conformance-account-assignment-ticket-0001")
 	second := accountAssignmentResult(contract, "conformance-account-assignment-ticket-0002")
@@ -980,7 +980,7 @@ func TestRegisterAgentRuntime_ReplacementOTPCannotCrossOriginalDeadline(t *testi
 		return code, nil
 	}
 
-	_, _, err := RegisterAgentRuntime(
+	_, _, err := connectWithEnrollment(
 		context.Background(), conformance.AgentAssignmentAccountCredentialFixture, f.store,
 		f.options(
 			withAgentRuntimeClock(func() time.Time { return now }),
@@ -1001,7 +1001,7 @@ func TestRegisterAgentRuntime_ReplacementOTPCannotCrossOriginalDeadline(t *testi
 	}
 }
 
-func TestRegisterAgentRuntime_PendingAccountOTPProviderCannotOutliveDeadline(t *testing.T) {
+func TestConnectAgentRuntime_PendingAccountOTPProviderCannotOutliveDeadline(t *testing.T) {
 	contract := loadAssignmentFixture(t)
 	f := newRuntimeFixture(t,
 		[]runtimeUDPStep{{
@@ -1017,7 +1017,7 @@ func TestRegisterAgentRuntime_PendingAccountOTPProviderCannotOutliveDeadline(t *
 	firstProvider := func(context.Context, AgentOTPChallenge) (string, error) {
 		return "12345678", nil
 	}
-	_, _, err := RegisterAgentRuntime(
+	_, _, err := connectWithEnrollment(
 		context.Background(), conformance.AgentAssignmentAccountCredentialFixture, f.store,
 		f.options(
 			WithAgentRuntimeAllowedRegistrationKeyKinds(RegistrationKeyKindAccount),
@@ -1044,7 +1044,7 @@ func TestRegisterAgentRuntime_PendingAccountOTPProviderCannotOutliveDeadline(t *
 	}
 
 	started := time.Now()
-	_, _, err = RegisterAgentRuntime(
+	_, _, err = connectWithEnrollment(
 		context.Background(), conformance.AgentAssignmentAccountCredentialFixture, f.store,
 		f.options(
 			withAgentRuntimeClock(time.Now),
@@ -1072,7 +1072,7 @@ func TestRegisterAgentRuntime_PendingAccountOTPProviderCannotOutliveDeadline(t *
 // after RAK, resumed once its lease had expired, while LayerV had relocated the
 // agent in between. Completion now lands at the cell that minted the candidate,
 // and only then does placement reconcile onto the new cell.
-func TestRegisterAgentRuntime_ResumesInterruptedRegistrationAcrossRelocation(t *testing.T) {
+func TestConnectAgentRuntime_ResumesInterruptedRegistrationAcrossRelocation(t *testing.T) {
 	contract := loadAssignmentFixture(t)
 	moved := newReassignmentTarget(t, contract, "cell1", 2, "", time.Time{})
 	f := newRuntimeFixture(t,
@@ -1091,7 +1091,7 @@ func TestRegisterAgentRuntime_ResumesInterruptedRegistrationAcrossRelocation(t *
 		t.Fatal(err)
 	}
 
-	client, binding, err := RegisterAgentRuntime(context.Background(), "", f.store,
+	client, binding, err := connectWithEnrollment(context.Background(), "", f.store,
 		f.options(withAgentRuntimeClock(func() time.Time { return assignmentFixtureNow }))...)
 	if err != nil || client == nil || binding == nil {
 		t.Fatalf("resume across relocation = client %v, binding %v, err %v", client, binding, err)

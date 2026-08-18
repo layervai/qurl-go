@@ -34,17 +34,23 @@ var ErrCRIDMismatch = errors.New("qurl: resource key does not derive the held cr
 // ResolveResourceOptions customizes ResolveResource. The zero value (or a
 // nil pointer) requests the server defaults.
 type ResolveResourceOptions struct {
-	// TTLSeconds asks for how long the minted access link should stay valid.
-	// Zero omits the field so the server default applies; the LayerV API
-	// remains the source of truth for account limits.
-	TTLSeconds int
+	// TTL asks for how long the minted access link should stay valid. If
+	// omitted (zero), the field is not sent and the API applies its default
+	// lifetime; the LayerV API remains the source of truth for account
+	// limits. The wire carries whole integer seconds, so nonzero durations
+	// must be whole seconds — sub-second remainders are rejected rather
+	// than rounded.
+	TTL time.Duration
 }
 
 // ResolvedAccess is a freshly minted access link for a protected resource.
+// It is the counterpart of Portal — both are minted access links, but
+// ResolveResource is the path addressed by resource id or CRID and
+// verifiable with VerifyCRID.
 type ResolvedAccess struct {
-	// QURL is the access link. When it is qv2-shaped, open it with
+	// Link is the access link. When it is qv2-shaped, open it with
 	// EnterPortal; ResolveResource deliberately does not parse or verify it.
-	QURL string
+	Link string
 	// CRID is the resource's Cryptographic Resource ID, when returned by the
 	// API (older servers and keyless resources omit it). Tie it to a key you
 	// hold with VerifyCRID.
@@ -60,7 +66,7 @@ type ResolvedAccess struct {
 }
 
 type resolveResourceRequest struct {
-	TTLSeconds int `json:"ttl_seconds,omitempty"`
+	TTLSeconds int64 `json:"ttl_seconds,omitempty"`
 }
 
 type resolveResourceResponse struct {
@@ -77,7 +83,7 @@ func (r resolveResourceResponse) resolvedAccess() (*ResolvedAccess, error) {
 		return nil, fmt.Errorf("%w: missing qurl", ErrInvalidAPIResponse)
 	}
 	access := &ResolvedAccess{
-		QURL:             r.QURL,
+		Link:             r.QURL,
 		CRID:             r.CRID,
 		Type:             r.Type,
 		ExpiresInSeconds: r.ExpiresInSeconds,
@@ -96,8 +102,11 @@ func (r resolveResourceResponse) resolvedAccess() (*ResolvedAccess, error) {
 // authoritative for which identifiers resolve, so the SDK does not pre-judge
 // the form locally.
 //
+// opts may be nil. If TTL is omitted (zero), the API applies its default
+// lifetime; the LayerV API remains the source of truth for account limits.
+//
 // The returned link is not opened, parsed, or verified here. When
-// ResolvedAccess.QURL is qv2-shaped, the composition is
+// ResolvedAccess.Link is qv2-shaped, the composition is
 // ResolveResource → EnterPortal: resolve mints the link over the
 // credentialed API, and EnterPortal is the verifying opener. To bind the
 // response to a resource key you already hold, call
@@ -115,10 +124,13 @@ func (c *Client) ResolveResource(ctx context.Context, resourceID string, opts *R
 	}
 	var reqBody resolveResourceRequest
 	if opts != nil {
-		if opts.TTLSeconds < 0 {
-			return nil, fmt.Errorf("%w: ttl seconds must not be negative", ErrInvalidResourceRequest)
+		if opts.TTL < 0 {
+			return nil, fmt.Errorf("%w: ttl must not be negative", ErrInvalidResourceRequest)
 		}
-		reqBody.TTLSeconds = opts.TTLSeconds
+		if opts.TTL%time.Second != 0 {
+			return nil, fmt.Errorf("%w: ttl duration must be whole seconds", ErrInvalidResourceRequest)
+		}
+		reqBody.TTLSeconds = int64(opts.TTL / time.Second)
 	}
 
 	path := "/v1/resources/" + url.PathEscape(resourceID) + "/resolve"

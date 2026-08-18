@@ -32,7 +32,10 @@ type Config struct {
 	// Cells maps cell id to native NHP UDP endpoint. When the verified link names
 	// a cell in this catalog the knock goes straight there over UDP and the relay
 	// is never contacted, so RelayAllowlist and HTTPClient are unused for that
-	// open. Optional; nil routes every open through the relay.
+	// open. Optional; nil routes every open through the relay. A link naming a
+	// cell OUTSIDE the catalog falls back to the relay when RelayAllowlist is
+	// set, and fails with ErrCellNotInCatalog when it is not — cells without an
+	// allowlist is the native-UDP-only shape.
 	Cells *CellCatalog
 	// RelayAllowlist is the qURL platform access endpoint allowlist. REQUIRED
 	// unless Cells covers every link this opener will see — it gates the relay
@@ -67,12 +70,31 @@ type ResourceHandle struct {
 // context.
 var ErrNotConfigured = errors.New("qurl: not configured")
 
+// ErrCellNotInCatalog reports that a verified link names a cell the configured
+// CellCatalog has no endpoint for, while no relay transport is configured to
+// fall back through. It is the loud half of the transport rule: a cells-only
+// opener (Config.Cells set, Config.RelayAllowlist nil — e.g. a StaticProvider
+// built without an allowlist) has declared that every open goes over native
+// UDP, so a link outside its catalog is refused rather than silently
+// downgraded to the HTTPS relay. Openers that configure a relay allowlist
+// never see this error; their unknown-cell opens use the relay by design.
+var ErrCellNotInCatalog = errors.New("qurl: link names a cell with no native UDP endpoint in the catalog, and no relay transport is configured")
+
 // EnterPortal opens a qURL link using the process-wide default Provider
 // (SetDefaultProvider). Applications install opener config once at startup, then
 // open links with no per-call config.
 //
-// Without an installed provider, EnterPortal fails closed with ErrNotConfigured.
-// Tests and advanced integrations can inject config with StaticProvider,
+// The resolved config decides the transport: a link naming a cell in the cell
+// catalog (a CellProvider's cells, or the deployment's) is knocked directly
+// over native UDP; any other link uses the HTTPS relay when a relay allowlist
+// is configured and fails with ErrCellNotInCatalog when none is. A provider
+// without cells therefore serves relay-only opens — see CellProvider.
+//
+// Without an installed provider, EnterPortal falls back to the deployment: the
+// file named by QURL_DEPLOYMENT, then the one embedded in the build. When that
+// deployment carries no issuer keys, it fails with ErrNoDeployment (which wraps
+// ErrNotConfigured) rather than open a link it cannot verify. Tests and
+// advanced integrations can inject config with StaticProvider,
 // DiscoveryProvider, or EnterPortalWith.
 func EnterPortal(ctx context.Context, qurlLink string) (*ResourceHandle, error) {
 	cfg, err := resolveDefaultConfig(ctx)
@@ -125,7 +147,12 @@ func EnterPortalWith(ctx context.Context, qurlLink string, cfg Config) (*Resourc
 	cellEndpoint, useNativeUDP := cfg.Cells.lookup(cellPub)
 	if !useNativeUDP {
 		if cfg.RelayAllowlist == nil {
-			return nil, fmt.Errorf("%w: EnterPortal requires qURL opener config", ErrNotConfigured)
+			// Reachable only with a catalog configured (the no-transport case
+			// already failed before parsing): this opener is native-UDP-only by
+			// configuration, and the verified link names a cell outside its
+			// catalog. Refuse loudly with the cell's identity rather than treat a
+			// deliberate cells-only config as a configuration fault.
+			return nil, fmt.Errorf("%w (cell fingerprint %s)", ErrCellNotInCatalog, relayknock.PubKeyFingerprint(cellPub))
 		}
 		if err := qv2.ValidateRelayURL(claims.RelayURL, cfg.RelayAllowlist.core()); err != nil {
 			return nil, err
@@ -249,7 +276,8 @@ func interpretReply(reply *relayknock.Reply) (*ResourceHandle, error) {
 }
 
 // resolveDefaultConfig builds the EnterPortal Config from the process-wide default
-// provider. With no provider installed it fails closed with ErrNotConfigured. With
+// provider, falling back to the deployment (QURL_DEPLOYMENT, then embedded) when
+// none is installed; a deployment with no issuer keys yields ErrNoDeployment. With
 // a provider installed it resolves opener config; a provider that itself fails
 // closed propagates that error unchanged so EnterPortal refuses for the provider's
 // stated reason.
@@ -270,8 +298,12 @@ func resolveDefaultConfig(ctx context.Context) (Config, error) {
 	}
 	cfg := Config{TrustStore: ts, RelayAllowlist: allow}
 	// A provider that also knows the deployment's cells opts into native UDP by
-	// implementing CellProvider. Providers that predate cells keep working
-	// unchanged and simply route through the relay.
+	// implementing CellProvider. A provider without cells — no CellProvider, or
+	// a ResolveCells that returns nil — yields relay-only config on purpose:
+	// the HTTPS relay is that provider's declared transport (see CellProvider),
+	// not a quiet downgrade. StaticProvider carries whatever cells its
+	// constructor was given; DiscoveryProvider is relay-only because its
+	// manifest wire format has no cells.
 	if cp, ok := p.(CellProvider); ok {
 		cells, err := cp.ResolveCells(ctx)
 		if err != nil {
@@ -284,8 +316,16 @@ func resolveDefaultConfig(ctx context.Context) (Config, error) {
 
 // CellProvider is an optional Provider extension that also supplies the
 // deployment's native UDP cell catalog. A Provider that implements it lets
-// EnterPortal knock cells directly instead of through the relay; one that does
-// not is unaffected.
+// EnterPortal knock catalog cells directly instead of through the relay.
+//
+// The transport rule is explicit: a provider WITHOUT cells — one that does not
+// implement CellProvider, or whose ResolveCells returns a nil catalog — serves
+// every open over the HTTPS relay transport. That is the right shape for
+// relay-based deployments (browsers can only deliver a knock over HTTPS, and
+// the discovery manifest format carries no cells); it is never the right shape
+// for a pinned native-UDP opener, which supplies cells and can omit the relay
+// allowlist entirely so an open that cannot go over native UDP fails with
+// ErrCellNotInCatalog instead of quietly using the relay.
 type CellProvider interface {
 	Provider
 	ResolveCells(ctx context.Context) (*CellCatalog, error)

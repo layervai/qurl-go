@@ -7,6 +7,13 @@
 - **Implementation:** `layervai/nhp` (Terraform); this repository carries the SDK
   and developer-facing side
 
+> **Status note (2026-08-17):** superseded in part by
+> [ADR 0002](0002-sandbox-docs-internal-only.md) as to public documentation of
+> estate values. This repository no longer documents the sandbox estate's
+> concrete connection details, so the host, key, and endpoint values quoted in
+> the body below are historical and no longer maintained here. The body is
+> otherwise retained unchanged as the record of the access decision.
+
 > **Status note (2026-08-10):** the decision itself still holds — sandbox NHP is
 > still open to developers on UDP 443. What changed is the release-evidence
 > mechanism this ADR refers to: the attended `Native UDP sandbox proof` workflow

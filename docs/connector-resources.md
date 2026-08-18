@@ -5,9 +5,6 @@ that credential for steady-state qURL Connector resource management. The
 enrollment key is not a resource CRUD credential and should not remain in this
 path.
 
-This lifecycle is tracked under
-[`layervai/qurl-connector#421`](https://github.com/layervai/qurl-connector/issues/421).
-
 ## Ensure a qURL Connector resource
 
 ```go
@@ -146,6 +143,11 @@ Delete expects the API's `204 No Content` response. Other SDK methods still
 require a non-empty JSON response, so supporting delete does not weaken the
 generic JSON decoder.
 
+Delete operates on the whole resource. To revoke a single minted portal and
+leave the resource active, use `Client.RevokePortal` with the portal's
+resource and qURL ids instead — see
+[Issue links](issuing-links.md#revoke-a-portal).
+
 ## Error handling
 
 The lifecycle methods provide matchable qURL Connector resource errors while
@@ -218,10 +220,5 @@ matches `ErrInvalidConnectorResourceResponse`. Check the more specific
 `ErrConnectorResourceAmbiguous` before a generic invalid-response branch.
 
 The wire shapes are fenced against qurl-service's `/v1/resources` and
-`/v1/resources/{id}` OpenAPI contracts, including the explicit
-`connector_routing_id` producer in
-[`layervai/qurl-service#1225`](https://github.com/layervai/qurl-service/pull/1225),
-and the existing qURL Connector resource/bootstrap test fixtures. This SDK
-change does not claim that the backend is deployed or that a qurl-go release
-has been tagged. Mutable rollout state and cross-repository handoff gates live
-in issue 421 rather than this SDK contract reference.
+`/v1/resources/{id}` OpenAPI contracts and the existing qURL Connector
+resource/bootstrap test fixtures.

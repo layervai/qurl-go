@@ -20,7 +20,7 @@ var ErrInvalidBootstrapConfig = errors.New("qurl: invalid bootstrap config")
 
 // ErrAgentStateNotFound is returned when an AgentStateStore has no saved state.
 // It is part of the AgentStateStore implementor contract: LoadAgentState returns
-// it when no state has been persisted, allowing RegisterAgentRuntime to start a
+// it when no state has been persisted, allowing ConnectAgentRuntime to start a
 // fresh native enrollment.
 var ErrAgentStateNotFound = errors.New("qurl: agent state not found")
 
@@ -42,10 +42,10 @@ var ErrInsecureAgentStatePermissions = errors.New("qurl: insecure agent state pe
 // be acquired or released. Registration fails closed because continuing could
 // mint competing identities against the same durable state path. A release
 // failure can occur after a successful durable save; load the stored state
-// before retrying. Open completed native state with OpenRegisteredAgentRuntime;
-// resume durable PendingActivation through RegisterAgentRuntime with the same
-// enrollment credential, or PendingCompletion without one. OpenRegisteredAgent
-// is the resource-client-only path.
+// before retrying. ConnectAgentRuntime opens completed native state and resumes
+// durable PendingActivation (with the same enrollment credential, via
+// WithAgentRuntimeEnrollmentCredential) or PendingCompletion (no credential).
+// OpenRegisteredAgent is the resource-client-only path.
 var ErrAgentSetupLock = errors.New("qurl: agent state setup lock failed")
 
 // ErrBootstrapSetupKeyConsumed is returned when an incomplete local bootstrap
@@ -74,7 +74,7 @@ type AgentState struct {
 	PublicKeyB64  string     `json:"public_key_b64"`
 	RegisteredAt  *time.Time `json:"registered_at,omitempty"`
 
-	// SchemaVersion is the AgentState schema version. RegisterAgentRuntime and
+	// SchemaVersion is the AgentState schema version. ConnectAgentRuntime and
 	// RecoverAgentRuntime write agentStateSchemaVersion (currently v7). Legacy
 	// schema-v5 state must not populate v6 finite-registration-recovery or v7
 	// credential-recovery fields.
@@ -175,7 +175,7 @@ type PendingAgentCompletion struct {
 // EnrollmentCredentialFingerprintB64 is a domain-separated SHA-256 identity of
 // the high-entropy caller-supplied enrollment credential. It permits only that
 // same credential to resume the record without retaining the bearer value.
-// RegisterAgentRuntime enforces an encoded-token total-length floor; the
+// ConnectAgentRuntime enforces an encoded-token total-length floor; the
 // producer remains responsible for cryptographically random minting. This
 // fingerprint is an equality tag for a server-minted secret, never a password
 // verifier.

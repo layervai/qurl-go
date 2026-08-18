@@ -221,14 +221,14 @@ func TestAgentStateClone_IsolatesEveryMutableField(t *testing.T) {
 	}
 }
 
-func TestOpenRegisteredAgentRuntime_OneLoadThroughFirstAuthorization(t *testing.T) {
+func TestConnectAgentRuntime_OneLoadThroughFirstAuthorization(t *testing.T) {
 	store := &memoryAgentStateStore{state: completedNativeTestState(t)}
 	counting := &countingAgentStateStore{inner: store}
-	client, binding, err := OpenRegisteredAgentRuntime(context.Background(), counting,
+	client, binding, err := ConnectAgentRuntime(context.Background(), counting,
 		WithAgentClientBaseURL("https://resources.example.test"),
 	)
 	if err != nil {
-		t.Fatalf("OpenRegisteredAgentRuntime: %v", err)
+		t.Fatalf("ConnectAgentRuntime: %v", err)
 	}
 	defer binding.Destroy()
 	if counting.loads.Load() != 1 {
@@ -370,7 +370,7 @@ func TestNativeRuntimeClients_RejectPostTTLIdentityChange(t *testing.T) {
 		{
 			name: "warm runtime open",
 			open: func(store *sequenceAgentStateStore, now func() time.Time) (*Client, func(), error) {
-				client, binding, err := openRegisteredAgentRuntime(context.Background(), store, now, HubBootstrap{}, nil)
+				client, binding, err := ConnectAgentRuntime(context.Background(), store, withAgentRuntimeClock(now))
 				if err != nil {
 					return nil, func() {}, err
 				}

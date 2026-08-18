@@ -37,7 +37,7 @@ to reach one private resource, and it expires on the schedule you set.
 └─────────────┘                                        │    Platform      │
 ┌─────────────┐  3. open the link                      │                  │
 │  recipient  │ ──────────────────────────────────────▶│                  │
-└─────────────┘  browser: HTTPS (*.qurl.site)          └────────▲─────────┘
+└─────────────┘  browser: HTTPS (qurl.link)            └────────▲─────────┘
                  program: EnterPortal (native UDP)              │
                                                                 │ 2. outbound-only
                                                                 │    NHP, UDP 443
@@ -68,6 +68,18 @@ Three roles, three sections of this README:
 | **Connector** | LayerV's ready-made agent that publishes services from inside your network. |
 | **Agent runtime** | Your own service enrolled directly with `ConnectAgentRuntime`. |
 
+And every entry point in one place:
+
+| Entry point | When to use it | Returns |
+| --- | --- | --- |
+| `OpenClient` / `OpenClientContext` | Issue links with the default credential chain ([Get a credential](#get-a-credential)); the context form bounds the eager startup check | `*Client` |
+| `NewClient` | Issue links with your own `CredentialProvider` (KMS, a secret manager) | `*Client` |
+| `ConnectAgentRuntime` | Run your own agent: one call on every start that enrolls, resumes, or reopens as needed | `*Client`, `*AgentRuntimeBinding` |
+| `OpenRegisteredAgent` / `OpenRegisteredAgentWithIdentity` | Resource-only client from completed agent state — one store load, no lifecycle network I/O, no knockable binding | `*Client` (`WithIdentity` adds the agent id) |
+| `RefreshAgentRuntime` | Renew a completed assignment through the Hub at a moment you choose | `*Client`, `*AgentRuntimeBinding` |
+| `RecoverAgentRuntime` | Operator-driven replacement of a revoked or lost device credential | `*Client`, `*AgentRuntimeBinding` |
+| `EnterPortal` | Open a received qURL link programmatically; needs no LayerV credentials | `*ResourceHandle` |
+
 ## Install
 
 qurl-go is a library — there is no binary to `go install`. From inside your
@@ -92,7 +104,7 @@ here builds a command.
 | Module | Purpose |
 | --- | --- |
 | `github.com/layervai/qurl-go/qurl` | The SDK. Zero AWS dependencies. |
-| `github.com/layervai/qurl-go/crid` | The Cryptographic Resource ID codec: strict local validation, environment reporting, and the delivered-key match rule. No dependencies beyond the standard library. |
+| `github.com/layervai/qurl-go/crid` | The Cryptographic Resource ID codec: strict local validation, environment reporting (`production`, `test`, or `unknown`), and the delivered-key match rule. No dependencies beyond the standard library. |
 | `github.com/layervai/qurl-go/awsstore` | AWS-backed agent state (Secrets Manager, SSM, KMS sealing). A [separate module](awsstore/README.md) so the AWS SDK never leaks into `qurl`. |
 
 ## Get a credential
@@ -108,6 +120,11 @@ a month.
 3. `QURL_API_KEY_FILE` — a path, for mounted secrets that should stay on disk
 4. `~/.config/qurl/token` — what the qURL Connector installer already wrote
 5. `/var/lib/layerv/qurl/issuer-state.json` — the machine-wide default
+
+A credential file — whichever source names it — holds either the raw bearer
+token itself (the form the Connector installer writes) or a JSON object with a
+`"bearer_token"` or `"authorization"` field; both are accepted everywhere a
+file is read.
 
 For credentials held in KMS or a secret manager, implement
 `qurl.CredentialProvider` and pass it to `qurl.NewClient` instead.
@@ -174,6 +191,14 @@ resource := client.ResourceByID(resourceID)
 portal, err := resource.CreatePortal(ctx, qurl.ValidFor(time.Hour))
 ```
 
+`CreatePortal` and `Client.ResolveResource` both mint an access link.
+`CreatePortal` is the portal-options path on a resource handle;
+`ResolveResource` is the stored-identifier path — it accepts the resource id or
+the resource's CRID and returns a `ResolvedAccess` whose CRID you can verify
+against a key you already hold (`VerifyCRID`). Both leave the link lifetime to
+the server default unless you ask (`ValidFor` on a portal,
+`ResolveResourceOptions.TTL` on a resolve).
+
 Next: [Protect a private service](docs/secure-a-private-service.md) ·
 [Issue links](docs/issuing-links.md)
 
@@ -188,6 +213,16 @@ Your service registers once, then keeps serving. Registration happens over an
 authenticated UDP channel — no inbound ports, no public endpoint, nothing for a
 scanner to find.
 
+Enrollment authenticates against the Hub trust root in your deployment file, so
+point `QURL_DEPLOYMENT` at the file from LayerV setup (or pass
+`WithAgentRuntimeHub`); GA builds will ship the trust root baked into the SDK,
+at which point this step disappears. A completed registration whose lease is
+live reopens without it.
+
+```sh
+export QURL_DEPLOYMENT=/etc/layerv/qurl/deployment.json
+```
+
 ```go
 store, err := qurl.OpenFileAgentState("/var/lib/layerv/qurl/agent-state.json")
 if err != nil {
@@ -197,8 +232,8 @@ defer store.Close()
 
 client, binding, err := qurl.ConnectAgentRuntime(ctx, store,
 	qurl.WithAgentRuntimeEnrollmentCredential(enrollmentCredential),
-	qurl.WithAgentRuntimeMetadata(hostname, version),
 	qurl.WithAgentRuntimeOTPProvider(readOneTimeCode),
+	qurl.WithAgentRuntimeMetadata(hostname, version),
 )
 if err != nil {
 	return err
@@ -206,8 +241,8 @@ if err != nil {
 defer binding.Destroy()
 ```
 
-That is the whole enrollment. Run it on every start, under a supervisor, and
-stop thinking about the lifecycle:
+That — plus the deployment file — is the whole enrollment. Run it on every
+start, under a supervisor, and stop thinking about the lifecycle:
 
 - Restarts are safe — it enrolls only when nothing is registered yet.
 - Crashes and dropped replies resume the same registration, for up to 90 days.
@@ -230,8 +265,8 @@ with an OTP provider, and not a shorter form of the call. Every other option
 stays, `WithAgentRuntimeMetadata` included. Not sure which credential kind you
 hold? Run the default and read the error; a wrong first guess costs nothing and
 the retry reuses the same agent identity. The
-[decision table](docs/register-an-agent.md) has every path, including renewing
-without holding an enrollment credential at runtime and
+[Connect a service or agent](docs/register-an-agent.md) guide has every path,
+including renewing without holding an enrollment credential at runtime and
 [taking manual control](docs/register-an-agent.md#taking-manual-control) of
 renewal.
 
@@ -244,9 +279,10 @@ and hand-picked strings are rejected before anything is saved or sent.
 > listeners. If registration fails with `ErrEndpointNoReply`, the usual cause
 > is an egress firewall silently dropping UDP 443 — the error names the exact
 > host to allow. Two LayerV-internal names appear in those errors and in
-> deployment files, never in code you write: the **hub** is where an agent
-> registers, and it assigns the agent a **cell**, which carries its portal
-> traffic from then on.
+> deployment files, and rarely in code you write — pinned openers
+> (`CellEntry`) and self-hosted deployments (`HubBootstrap`) are the
+> exceptions: the **hub** is where an agent registers, and it assigns the
+> agent a **cell**, which carries its portal traffic from then on.
 
 ## Opening links
 
@@ -264,29 +300,60 @@ resp, err := httpClient.Get(handle.ResourceURL) // httpClient is your own *http.
 That is the whole integration, and it needs no LayerV credentials. `EnterPortal`
 checks that the link was really issued by LayerV, then opens it over a direct
 UDP connection. Browsers cannot send UDP, so links opened in a browser go
-through an HTTPS path instead; the SDK picks whichever works and you do not
-configure either one.
+through an HTTPS path instead. In this SDK the resolved config decides the
+transport: a link naming a cell the config lists is knocked directly over UDP,
+anything else uses the HTTPS relay when a relay allowlist is configured — and a
+cells-only config refuses such a link with `ErrCellNotInCatalog` rather than
+silently downgrading (see
+[docs/opening-links.md](docs/opening-links.md#pinning-the-opener-trust-config)).
 
-The trust configuration — which issuer keys to verify links against, which
-cells to reach, and the Hub trust root for registration — comes from a
-deployment, resolved most specific first: a `Provider` installed with
-`SetDefaultProvider`, then a JSON file named by `QURL_DEPLOYMENT`, then the
-deployment embedded in the build ([qurl/deployment.json](qurl/deployment.json)).
-Current releases embed an empty deployment, so native opens and agent
-registration need a deployment file from LayerV setup until a populated one
-ships in the SDK. `QURL_DEPLOYMENT` governs link verification and the agent Hub
-trust root; the issuer HTTPS endpoint is configured separately with
-`WithBaseURL`. A build with no issuer keys configured fails closed
-(`ErrNotConfigured`) rather than open a link it cannot verify.
+The opener trust configuration — which issuer keys to verify links against and
+which cells to reach — resolves most specific first: a `Provider` installed
+with `SetDefaultProvider`, then a JSON file named by `QURL_DEPLOYMENT`, then
+the deployment embedded in the build
+([qurl/deployment.json](qurl/deployment.json)). The Hub trust root for agent
+registration is not provider-supplied: it comes only from `QURL_DEPLOYMENT`,
+the embedded deployment, or an explicit `WithAgentRuntimeHub`
+(`RefreshAgentRuntime` takes a `HubBootstrap` argument) — an installed
+`Provider` affects opener config only. Current releases embed an empty
+deployment, so native opens and agent registration need a deployment file from
+LayerV setup until a populated one ships in the SDK. The issuer HTTPS endpoint
+is configured separately with `WithBaseURL`. A resolved deployment with no
+issuer keys fails closed (`ErrNotConfigured`) rather than open a link it
+cannot verify.
 
 ## Error handling
 
-Match errors by type or sentinel, not message text:
+Match errors by type or sentinel, not message text. Grouped by the scenario
+that raises them:
+
+**Issuing — credentials and the HTTPS resource API**
 
 | Error | Meaning |
 | --- | --- |
 | `qurl.ErrInvalidClientConfig` | Resource-client credentials or options are malformed |
+| `qurl.ErrInvalidPortalRequest` | A portal input is invalid; rejected before any API request is sent |
+| `qurl.ErrPortalRevoked` | `RevokePortal` found the qURL no longer active: the portal was already revoked, so a repeat revoke had nothing to do. The underlying `*APIError` stays matchable |
+| `*qurl.APIError` | LayerV returned a non-2xx steady-state resource response |
+
+**Opening links**
+
+| Error | Meaning |
+| --- | --- |
+| `qurl.ErrNotConfigured` | A required piece of opener or deployment configuration is absent; the SDK fails closed rather than open a link it cannot verify |
+| `qurl.ErrNoDeployment` | The resolved deployment carries no issuer keys — this build ships none and `QURL_DEPLOYMENT` is unset, or the named deployment file has empty `issuers`. Wraps `ErrNotConfigured` |
+| `qurl.ErrSignature` | The link's issuer signature does not verify: forged, tampered, or signed by a key that is not the trust store's value for that kid |
+| `qurl.ErrUnknownKID` | The link's kid is not in the trust store |
+| `qurl.ErrCellNotInCatalog` | A verified link names a cell the cell catalog has no endpoint for, and no relay allowlist is configured. A cells-only opener refuses the open rather than silently downgrading to the HTTPS relay |
+| `*qurl.ServerDenyError` | An authenticated platform deny: the reply verified, but access was refused — an expired, revoked, or consumed qURL, or a server-side access check. Also raised by the registered-agent knock path (`KnockRegisteredAgent`) when the assigned cell denies an admission |
+
+**Agent lifecycle — `ConnectAgentRuntime`, refresh, recovery, knock**
+
+| Error | Meaning |
+| --- | --- |
 | `qurl.ErrInvalidRegisterConfig` | Native lifecycle inputs are malformed |
+| `qurl.ErrNoDeploymentHub` | No Hub trust root is available: set `QURL_DEPLOYMENT` to a deployment file with a `"hub"`; `ConnectAgentRuntime` also accepts `WithAgentRuntimeHub`, and `RefreshAgentRuntime` takes a `HubBootstrap` argument. Wraps `ErrNotConfigured`; raised only by a start that actually needs a Hub exchange |
+| `qurl.ErrAgentOTPRequired` | OTP enrollment — the default — was attempted without an OTP callback; install `WithAgentRuntimeOTPProvider`, or pass `WithAgentRuntimeHeadlessEnrollment` if this runtime cannot receive a code |
 | `qurl.ErrInsecureAgentStatePermissions` | The state directory or file is readable beyond its owner. The message names the exact `chmod` to run; the SDK never widens or tightens a path you already own |
 | `qurl.ErrAssignmentRecoveryRequired` | Registration ran out of retries; start recovery |
 | `qurl.ErrEndpointNoReply` | The host resolved and every datagram was sent, but nothing answered: the server is down or the network path drops UDP to it silently. `*qurl.EndpointNoReplyError` carries the destination and attempt count |
@@ -295,15 +362,22 @@ Match errors by type or sentinel, not message text:
 | `qurl.ErrAgentRecoveryExpired` | This registration is older than 90 days and can no longer be resumed; enroll again |
 | `qurl.ErrAgentRecoveryMigrationRequired` | Saved state predates the current format; keep the file and enroll again |
 | `*qurl.NativeCredentialRecoveryRequiredError` | Completed native credential state is absent or malformed; explicit native recovery or reprovisioning is required |
-| `*qurl.AgentAssignmentChangedError` | A refresh pinned with `WithAgentRuntimePinnedAssignment` found that LayerV moved your service; drop the option to follow the move |
-| `*qurl.APIError` | LayerV returned a non-2xx steady-state resource response |
-| `*qurl.ServerDenyError` | LayerV refused the request |
+| `*qurl.AgentAssignmentChangedError` | A renewal pinned with `WithAgentRuntimePinnedAssignment` — in `ConnectAgentRuntime` or `RefreshAgentRuntime`, or a binding either returned — found that LayerV moved your service; drop the option to follow the move |
+
+**Resolve and CRID**
+
+| Error | Meaning |
+| --- | --- |
+| `qurl.ErrTemporaryAccessLinksDisabled` | `ResolveResource` got a 503: the environment is not serving temporary access links. The underlying `*APIError` stays matchable |
+| `qurl.ErrNoCRID` | `VerifyCRID` had no CRID to check against — the server omitted it (older server or keyless resource). Fails closed: absence is not a mismatch, but it is not a pass |
+| `qurl.ErrCRIDMismatch` | The supplied resource key does not derive the held CRID — the substitution the identifier exists to detect. Do not use the key |
 
 ## Security notes
 
 - Treat LayerV credentials, agent state, and qURL links like credentials. Do
   not log them.
-- Never guess or construct LayerV addresses yourself; use what the SDK ships.
+- Never guess or construct LayerV addresses yourself; use what the SDK
+  resolves from your deployment and from authenticated LayerV replies.
 - Keep saved registration state across an unclear reply, and keep the exact
   pending completion candidate across ambiguous completion delivery.
 - Call `binding.Destroy()` when done. If you took key ownership with
@@ -314,12 +388,24 @@ Match errors by type or sentinel, not message text:
 - Links opened in a browser (HTTPS) and services connected natively (UDP) are
   separate trust paths; neither configures the other.
 
+Revocation covers portals now, with one gap left. `RevokePortal` revokes a
+single minted link immediately — pass the `Portal.ResourceID` and
+`Portal.QURLID` the create call returned; revoking a portal that is no longer
+active fails with `ErrPortalRevoked` rather than reporting success it did not
+cause. `DeleteConnectorResource` revokes an entire connector resource (see
+[Manage qURL Connector resources](docs/connector-resources.md)). The gap is
+`ResolveResource`: its response carries no qurl id yet, so a resolve-minted
+link cannot be individually revoked — deleting the resource is the only lever
+there, and a short `ResolveResourceOptions.TTL` remains the control you have
+at mint time.
+
 ## Guides
 
 - [Protect a private service](docs/secure-a-private-service.md)
-- [Register an agent](docs/register-an-agent.md)
+- [Connect a service or agent](docs/register-an-agent.md)
 - [Manage qURL Connector resources](docs/connector-resources.md)
 - [Issue links](docs/issuing-links.md)
+- [Resolve a resource and verify its CRID](docs/resolve-and-crid.md)
 - [Open links](docs/opening-links.md)
 - [Testing against NHP](docs/testing-against-nhp.md) — loopback suites for most
   work, live sandbox for interop
