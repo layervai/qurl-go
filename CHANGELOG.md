@@ -52,6 +52,13 @@ and are marked **Breaking** with what to change.
   `TTL time.Duration`, and `ResolvedAccess.QURL` is renamed `Link`. Zero still
   requests the server default lifetime; the wire carries whole seconds, so a
   nonzero TTL with a sub-second remainder is rejected rather than rounded.
+- Added `Client.RevokePortal`: revoke one minted portal immediately by the
+  `Portal.ResourceID` and `Portal.QURLID` the create call returned, with the
+  same `qurl:write` credential that minted it. Revocation is deliberately not
+  idempotent — a repeat revoke fails with the new `ErrPortalRevoked` sentinel
+  while keeping the underlying `*APIError` matchable. Links minted by
+  `ResolveResource` carry no qurl id yet and still cannot be individually
+  revoked; deleting the resource remains the lever there.
 - The Hub trust root is now resolved lazily, exactly where a Hub exchange
   becomes necessary. Opening completed state — warm or offline — no longer
   demands a trust root it would not use; enrollment and expired-lease renewal

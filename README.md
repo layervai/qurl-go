@@ -333,6 +333,7 @@ that raises them:
 | --- | --- |
 | `qurl.ErrInvalidClientConfig` | Resource-client credentials or options are malformed |
 | `qurl.ErrInvalidPortalRequest` | A portal input is invalid; rejected before any API request is sent |
+| `qurl.ErrPortalRevoked` | `RevokePortal` found the qURL no longer active: the portal was already revoked, so a repeat revoke had nothing to do. The underlying `*APIError` stays matchable |
 | `*qurl.APIError` | LayerV returned a non-2xx steady-state resource response |
 
 **Opening links**
@@ -387,12 +388,16 @@ that raises them:
 - Links opened in a browser (HTTPS) and services connected natively (UDP) are
   separate trust paths; neither configures the other.
 
-Revocation today is asymmetric. `DeleteConnectorResource` revokes a connector
-resource immediately (see
-[Manage qURL Connector resources](docs/connector-resources.md)); portals and
-qURLs have no SDK revoke call yet, so a minted link stays valid until it
-expires. Pick lifetimes accordingly — `ValidFor` and `OneTimeUse` are the
-controls you have at mint time.
+Revocation covers portals now, with one gap left. `RevokePortal` revokes a
+single minted link immediately — pass the `Portal.ResourceID` and
+`Portal.QURLID` the create call returned; revoking a portal that is no longer
+active fails with `ErrPortalRevoked` rather than reporting success it did not
+cause. `DeleteConnectorResource` revokes an entire connector resource (see
+[Manage qURL Connector resources](docs/connector-resources.md)). The gap is
+`ResolveResource`: its response carries no qurl id yet, so a resolve-minted
+link cannot be individually revoked — deleting the resource is the only lever
+there, and a short `ResolveResourceOptions.TTL` remains the control you have
+at mint time.
 
 ## Guides
 

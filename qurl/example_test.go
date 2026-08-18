@@ -66,6 +66,25 @@ func ExampleClient_CreatePortal() {
 	fmt.Println(portal.Link)
 }
 
+func ExampleClient_RevokePortal() {
+	client, err := qurl.OpenClient()
+	if err != nil {
+		panic(err)
+	}
+
+	portal, err := client.ResourceByID(exampleResourcePublicKey).CreatePortal(context.Background(), qurl.ValidFor(time.Hour))
+	if err != nil {
+		panic(err)
+	}
+
+	// Revoke by the two ids the create call returned. Revoking a portal that
+	// is no longer active fails with ErrPortalRevoked.
+	err = client.RevokePortal(context.Background(), portal.ResourceID, portal.QURLID)
+	if err != nil {
+		panic(err)
+	}
+}
+
 func ExampleClient_EnsureConnectorResource() {
 	client, err := qurl.OpenClient()
 	if err != nil {

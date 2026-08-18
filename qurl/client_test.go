@@ -345,6 +345,201 @@ func TestClient_CreatePortalSendsExplicitZeroMaxSessions(t *testing.T) {
 	}
 }
 
+func TestClient_RevokePortal(t *testing.T) {
+	var requests atomic.Int32
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		if got, want := r.Header.Get("Authorization"), "Bearer lv_test_123"; got != want {
+			t.Errorf("Authorization = %q, want %q", got, want)
+		}
+		if r.Method != http.MethodDelete || r.URL.Path != "/v1/resources/r_demo1234567/qurls/q_demo1234567" || r.URL.RawQuery != "" {
+			t.Errorf("request = %s %s?%s, want DELETE /v1/resources/r_demo1234567/qurls/q_demo1234567", r.Method, r.URL.Path, r.URL.RawQuery)
+		}
+		if got := r.Header.Get("Content-Type"); got != "" {
+			t.Errorf("DELETE Content-Type = %q, want empty", got)
+		}
+		if body, err := io.ReadAll(r.Body); err != nil || len(body) != 0 {
+			t.Errorf("DELETE body = %q (read err %v), want empty", body, err)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer api.Close()
+
+	client, err := NewClient(BearerToken("lv_test_123"), WithBaseURL(api.URL))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	if err := client.RevokePortal(context.Background(), "r_demo1234567", "q_demo1234567"); err != nil {
+		t.Fatalf("RevokePortal: %v", err)
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("request count = %d, want 1", requests.Load())
+	}
+}
+
+// TestClient_RevokePortalEscapesBothIDs pins that each id travels as exactly
+// one escaped path segment: an id cannot splice extra path segments, start a
+// query, or open a fragment in the revoke URL.
+func TestClient_RevokePortalEscapesBothIDs(t *testing.T) {
+	const wantPath = "/v1/resources/r%3F%2F%231/qurls/q%3F%2F%232"
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete || r.URL.EscapedPath() != wantPath || r.URL.RawQuery != "" {
+			t.Errorf("request = %s %s?%s, want DELETE %s", r.Method, r.URL.EscapedPath(), r.URL.RawQuery, wantPath)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer api.Close()
+
+	client, err := NewClient(BearerToken("lv_test_123"), WithBaseURL(api.URL))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	if err := client.RevokePortal(context.Background(), "r?/#1", "q?/#2"); err != nil {
+		t.Fatalf("RevokePortal: %v", err)
+	}
+}
+
+// TestClient_RevokePortalAlreadyRevoked pins the endpoint's one typed mapping:
+// revocation is not idempotent, and the exact 409 "revoked" answer — the qURL
+// is not active — surfaces as a branchable sentinel without losing the
+// *APIError.
+func TestClient_RevokePortalAlreadyRevoked(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusConflict)
+		fmt.Fprint(w, `{"error":{"code":"revoked","title":"Conflict","detail":"qURL is not active"}}`)
+	}))
+	defer api.Close()
+
+	client, err := NewClient(BearerToken("lv_test"), WithBaseURL(api.URL))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	err = client.RevokePortal(context.Background(), "r_demo1234567", "q_demo1234567")
+	if !errors.Is(err, ErrPortalRevoked) {
+		t.Fatalf("want ErrPortalRevoked, got %v", err)
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("already-revoked error must keep the *APIError, got %v", err)
+	}
+	if apiErr.StatusCode != http.StatusConflict || apiErr.Code != "revoked" {
+		t.Fatalf("api error = %#v", apiErr)
+	}
+	if !strings.Contains(err.Error(), "portal already revoked") || !strings.Contains(err.Error(), "qURL is not active") {
+		t.Fatalf("error = %q, want the sentinel's diagnosis and the server detail", err)
+	}
+}
+
+// TestClient_RevokePortalAPIErrorPassthrough pins that only the exact 409
+// "revoked" answer maps to the sentinel: a 404 (unknown resource, unknown or
+// malformed qurl id, or not owned) and a 409 with any other code stay raw
+// *APIError values, exactly like the rest of the client.
+func TestClient_RevokePortalAPIErrorPassthrough(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		code   string
+	}{
+		{name: "not found", status: http.StatusNotFound, code: "not_found"},
+		{name: "409 wrong code remains raw", status: http.StatusConflict, code: "conflict"},
+		{name: "revoked code on wrong status remains raw", status: http.StatusNotFound, code: "revoked"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/problem+json")
+				w.WriteHeader(tt.status)
+				fmt.Fprintf(w, `{"error":{"code":%q,"detail":"contract test"}}`, tt.code)
+			}))
+			defer api.Close()
+
+			client, err := NewClient(BearerToken("lv_test"), WithBaseURL(api.URL))
+			if err != nil {
+				t.Fatalf("NewClient: %v", err)
+			}
+			err = client.RevokePortal(context.Background(), "r_demo1234567", "q_demo1234567")
+			var apiErr *APIError
+			if !errors.As(err, &apiErr) || apiErr.StatusCode != tt.status || apiErr.Code != tt.code {
+				t.Fatalf("error lost *APIError: %v", err)
+			}
+			if errors.Is(err, ErrPortalRevoked) {
+				t.Fatalf("%d %s must not read as the already-revoked sentinel: %v", tt.status, tt.code, err)
+			}
+		})
+	}
+}
+
+// TestClient_RevokePortalRequiresExactEmpty204 pins the documented status and
+// byte-empty body as the revoke success contract: any other nominal success is
+// response ambiguity, not a benign alternate success.
+func TestClient_RevokePortalRequiresExactEmpty204(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{name: "200", status: http.StatusOK},
+		{name: "202", status: http.StatusAccepted},
+		{name: "nonempty 204", status: http.StatusNoContent, body: `{}`},
+		{name: "whitespace-only 204", status: http.StatusNoContent, body: "\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client, err := NewClient(BearerToken("lv_test"), WithBaseURL("http://localhost"))
+			if err != nil {
+				t.Fatalf("NewClient: %v", err)
+			}
+			client.httpClient = doerFunc(func(r *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: tt.status,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader(tt.body)),
+					Request:    r,
+				}, nil
+			})
+			err = client.RevokePortal(context.Background(), "r_demo1234567", "q_demo1234567")
+			if !errors.Is(err, ErrInvalidAPIResponse) {
+				t.Fatalf("error = %v, want ErrInvalidAPIResponse", err)
+			}
+			if errors.Is(err, ErrPortalRevoked) {
+				t.Fatalf("invalid success must not read as already revoked: %v", err)
+			}
+		})
+	}
+}
+
+func TestClient_RevokePortalValidation(t *testing.T) {
+	var calls atomic.Int32
+	client, err := NewClient(BearerToken("lv_test"), WithBaseURL("https://api.example.com"))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	client.httpClient = doerFunc(func(*http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return nil, errors.New("unexpected request")
+	})
+	if err := client.RevokePortal(context.Background(), "", "q_demo1234567"); !errors.Is(err, ErrInvalidPortalRequest) {
+		t.Fatalf("empty resource id: want ErrInvalidPortalRequest, got %v", err)
+	}
+	if err := client.RevokePortal(context.Background(), "   ", "q_demo1234567"); !errors.Is(err, ErrInvalidPortalRequest) {
+		t.Fatalf("whitespace resource id: want ErrInvalidPortalRequest, got %v", err)
+	}
+	if err := client.RevokePortal(context.Background(), "r_demo1234567", ""); !errors.Is(err, ErrInvalidPortalRequest) {
+		t.Fatalf("empty qurl id: want ErrInvalidPortalRequest, got %v", err)
+	}
+	if err := client.RevokePortal(context.Background(), "r_demo1234567", "   "); !errors.Is(err, ErrInvalidPortalRequest) {
+		t.Fatalf("whitespace qurl id: want ErrInvalidPortalRequest, got %v", err)
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("network calls = %d, want 0", calls.Load())
+	}
+	var nilClient *Client
+	if err := nilClient.RevokePortal(context.Background(), "r_demo1234567", "q_demo1234567"); !errors.Is(err, ErrInvalidClientConfig) {
+		t.Fatalf("nil client: want ErrInvalidClientConfig, got %v", err)
+	}
+}
+
 func TestClient_CredentialProvider(t *testing.T) {
 	var calls atomic.Int32
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

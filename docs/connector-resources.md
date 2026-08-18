@@ -143,6 +143,11 @@ Delete expects the API's `204 No Content` response. Other SDK methods still
 require a non-empty JSON response, so supporting delete does not weaken the
 generic JSON decoder.
 
+Delete operates on the whole resource. To revoke a single minted portal and
+leave the resource active, use `Client.RevokePortal` with the portal's
+resource and qURL ids instead — see
+[Issue links](issuing-links.md#revoke-a-portal).
+
 ## Error handling
 
 The lifecycle methods provide matchable qURL Connector resource errors while

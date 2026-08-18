@@ -41,6 +41,8 @@ var frictionBudget = map[string]int{
 	"ExampleClient_ProtectURL":              3,
 	"ExampleClient_EnsureConnectorResource": 3,
 	"ExampleClient_CreatePortal":            4,
+	// Kill one minted link before it expires: open client, mint, revoke.
+	"ExampleClient_RevokePortal": 3,
 	// Mint a fresh access link for a stored identifier (either form): open
 	// client, resolve, print. The CRID trust story stays one optional call
 	// (ResolvedAccess.VerifyCRID), not setup.

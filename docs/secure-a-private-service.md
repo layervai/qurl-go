@@ -88,6 +88,23 @@ deployment embedded in the build, a JSON file named by `QURL_DEPLOYMENT`, or a
 provider installed with `qurl.SetDefaultProvider`; see
 [Open links](opening-links.md) for a complete pinned-provider setup example.
 
+## 5. Revoke a Portal
+
+Portals expire on their own. To kill one sooner, revoke it with the ids the
+create call returned:
+
+```go
+if err := client.RevokePortal(ctx, portal.ResourceID, portal.QURLID); err != nil {
+	return err
+}
+```
+
+Revocation is immediate and not idempotent: revoking the same portal again
+fails with `qurl.ErrPortalRevoked`, which a caller that only needs the link
+dead can treat as settled. See
+[Issue links](issuing-links.md#revoke-a-portal) for the details, including
+the one link kind this cannot revoke.
+
 ## Errors
 
 Use `errors.Is` and `errors.As`:

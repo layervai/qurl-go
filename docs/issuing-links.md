@@ -61,6 +61,36 @@ portal, err := resource.CreatePortal(ctx,
 )
 ```
 
+## Revoke a Portal
+
+A portal normally just expires. When a link must die sooner — it leaked, or
+the task it granted is done — revoke it with the two ids the create call
+returned. The same `qurl:write` credential that minted the portal revokes it:
+
+```go
+err := client.RevokePortal(ctx, portal.ResourceID, portal.QURLID)
+if err != nil {
+	return err
+}
+```
+
+Revocation is immediate and not idempotent: the first call returns nil and
+the link stops working, and revoking the same portal again fails with
+`qurl.ErrPortalRevoked` because the qURL is no longer active. A caller that
+only needs the link dead can treat that error as settled:
+
+```go
+err := client.RevokePortal(ctx, portal.ResourceID, portal.QURLID)
+if err != nil && !errors.Is(err, qurl.ErrPortalRevoked) {
+	return err
+}
+```
+
+Only portals minted by `CreatePortal` and `CreatePortalForURL` carry the
+`QURLID` to revoke by. A link minted by `ResolveResource` does not — its
+response has no qurl id yet — so revoking the whole resource is the only
+lever for those links.
+
 ## qURL Connector-Protected Services
 
 If qURL Connector already protects the service, skip `ProtectURL`. Use the

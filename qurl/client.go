@@ -127,6 +127,14 @@ var ErrInvalidAPIResponse = errors.New("qurl: invalid API response")
 // is invalid.
 var ErrInvalidPortalRequest = errors.New("qurl: invalid portal request")
 
+// ErrPortalRevoked is returned by RevokePortal when LayerV answers with the
+// exact 409 "revoked" conflict: the qURL is no longer active, so there was
+// nothing left to revoke. Revocation is deliberately not idempotent — the
+// first revoke returns nil and every repeat surfaces this sentinel — so a
+// caller that only needs the link dead can branch with errors.Is; the
+// underlying *APIError remains matchable with errors.As.
+var ErrPortalRevoked = errors.New("qurl: portal already revoked")
+
 // ErrCredentialStateNotFound is returned when FileCredentials cannot find the
 // LayerV credential file.
 var ErrCredentialStateNotFound = errors.New("qurl: credential state not found")
@@ -925,6 +933,42 @@ func (c *Client) CreatePortalForURL(ctx context.Context, targetURL string, opts 
 		TargetURL: targetURL,
 	}
 	return portal, resource, nil
+}
+
+// RevokePortal immediately revokes one minted qURL link: the portal returned
+// by CreatePortal or CreatePortalForURL. Pass the create response's
+// Portal.ResourceID and Portal.QURLID. Like the other resource methods,
+// resourceID accepts either identifier form the platform serves — the
+// public-key resource id or the resource's CRID — and both ids are validated
+// for presence only: the server is authoritative for which identifiers
+// resolve. The credential needs the qurl:write scope. The 204 response has no
+// JSON body; other successful portal methods retain the SDK's fail-closed
+// response decoding.
+//
+// Revocation is not idempotent. The first call returns nil and the link stops
+// working; revoking the same portal again fails because the qURL is no longer
+// active, with an error matching ErrPortalRevoked. A caller that only needs
+// the link dead can treat errors.Is(err, ErrPortalRevoked) as settled; other
+// API failures surface as *APIError exactly like the rest of the client.
+func (c *Client) RevokePortal(ctx context.Context, resourceID, qurlID string) error {
+	if c == nil {
+		return fmt.Errorf("%w: nil client", ErrInvalidClientConfig)
+	}
+	if strings.TrimSpace(resourceID) == "" {
+		return fmt.Errorf("%w: resource id must not be empty", ErrInvalidPortalRequest)
+	}
+	if strings.TrimSpace(qurlID) == "" {
+		return fmt.Errorf("%w: qurl id must not be empty", ErrInvalidPortalRequest)
+	}
+	path := "/v1/resources/" + url.PathEscape(resourceID) + "/qurls/" + url.PathEscape(qurlID)
+	if err := c.doNoContent(ctx, http.MethodDelete, path, http.StatusNoContent); err != nil {
+		var apiErr *APIError
+		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusConflict && apiErr.Code == "revoked" {
+			return fmt.Errorf("%w: %w", ErrPortalRevoked, err)
+		}
+		return err
+	}
+	return nil
 }
 
 type createResourceRequest struct {
