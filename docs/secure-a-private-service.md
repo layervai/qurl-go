@@ -9,10 +9,10 @@ resource.
 
 ## 1. Connect to LayerV
 
-Before this service creates portals, run the LayerV setup flow once for this
-service identity. The setup flow consumes the temporary bootstrap key, registers
-the service with your LayerV account, and stores the runtime issuer credential in
-protected state for the process. After that, application code starts with:
+Only this issuing service needs a credential; the person or agent opening a
+portal link never holds one. Create an API key with the `qurl:write` scope in
+the [LayerV dashboard](https://layerv.ai/qurl/dashboard/keys), hand it to the
+process the way you deploy any secret, and start with:
 
 ```go
 client, err := qurl.OpenClient()
@@ -21,10 +21,14 @@ if err != nil {
 }
 ```
 
-That is the normal application code. You do not paste bootstrap keys into your
-app, read `LAYERV_API_KEY`, or ask portal recipients to hold credentials. LayerV
-setup turns the one-time key into runtime issuer state; `OpenClient` uses that
-state.
+`OpenClient` resolves the credential most specific first: an explicit
+`qurl.WithIssuerStatePath(...)` option, then `QURL_API_KEY` (the key itself,
+for containers and CI), then `QURL_API_KEY_FILE` (a path, for mounted secrets
+that should stay on disk), then `~/.config/qurl/token` — what the qURL
+Connector installer already wrote — then the machine-wide
+`/var/lib/layerv/qurl/issuer-state.json`. A key file holds either the raw
+bearer token or a JSON envelope with a `bearer_token` or `authorization`
+field.
 
 ## 2. Protect the URL
 
@@ -59,20 +63,29 @@ and session controls.
 ## 4. Open a Link Programmatically
 
 Most users can open the qURL link directly and need no keypair state. If you are
-building an agent or service that opens received qURL links in code, install the
-opener trust config once during startup, then call `EnterPortal`:
+building an agent or service that opens received qURL links in code, call
+`EnterPortal`:
 
 ```go
-opened, err := qurl.EnterPortal(ctx, portal.Link)
+handle, err := qurl.EnterPortal(ctx, portal.Link)
 if err != nil {
 	return err
 }
 
-resp, err := http.Get(opened.ResourceURL)
+resp, err := httpClient.Get(handle.ResourceURL) // httpClient is your own *http.Client
+if err != nil {
+	return err
+}
+defer resp.Body.Close()
 ```
 
-`EnterPortal` verifies the link before asking qURL for access. If no opener
-provider is installed, it fails closed with `qurl.ErrNotConfigured`. See
+`handle.OpenSeconds` reports how long access stays open, as reported by qURL
+(0 when not provided). `EnterPortal` verifies the link before asking qURL for
+access, and it fails closed when no issuer keys are configured
+(`qurl.ErrNoDeployment`, which matches `errors.Is(err, qurl.ErrNotConfigured)`)
+rather than open a link it cannot verify. The trust config comes from the
+deployment embedded in the build, a JSON file named by `QURL_DEPLOYMENT`, or a
+provider installed with `qurl.SetDefaultProvider`; see
 [Open links](opening-links.md) for a complete pinned-provider setup example.
 
 ## Errors

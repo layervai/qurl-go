@@ -116,20 +116,22 @@ identity matters to your application.
 Credentials are for software that protects URLs or creates portals. If your code
 only opens received portal links, skip this section.
 
-Before deploying code that creates portals, run the LayerV setup flow once for
-that service identity. The setup flow consumes the temporary bootstrap key,
-registers the service with your LayerV account, and stores the runtime issuer
-credential in protected state for the process. After that, application code
-starts with:
+Create an API key with the `qurl:write` scope in the
+[LayerV dashboard](https://layerv.ai/qurl/dashboard/keys) and hand it to the
+process the way you deploy any secret. Application code starts with:
 
 ```go
 client, err := qurl.OpenClient()
 ```
 
-That is the normal application code. You do not paste bootstrap keys into your
-app, read `LAYERV_API_KEY`, or ask portal recipients to hold credentials. LayerV
-setup turns the one-time key into runtime issuer state; `OpenClient` uses that
-state.
+`OpenClient` resolves the credential most specific first: an explicit
+`qurl.WithIssuerStatePath(...)` option, then `QURL_API_KEY` (the key itself,
+for containers and CI), then `QURL_API_KEY_FILE` (a path, for mounted secrets
+that should stay on disk), then `~/.config/qurl/token` — what the qURL
+Connector installer already wrote — then the machine-wide
+`/var/lib/layerv/qurl/issuer-state.json`. A key file holds either the raw
+bearer token or a JSON envelope with a `bearer_token` or `authorization`
+field. Portal recipients never hold credentials.
 
 If your runtime stores LayerV credentials in KMS, a secret manager, or another
 custom store, implement `qurl.CredentialProvider` and pass it to
