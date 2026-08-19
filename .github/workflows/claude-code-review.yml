@@ -232,7 +232,7 @@ jobs:
         if: steps.review_origin.outputs.ready == 'true'
         # v1.0.183 fails when the SDK returns `is_error: true` and is the last
         # audited release whose API-signing path leaves origin credential-free.
-        uses: anthropics/claude-code-action@be7b93b1907a4abad570368f3c74b6fe3807510b # v1.0.183
+        uses: anthropics/claude-code-action@9d7150bc8a3dae8149739a88019d192b579ad90c # v1.0.193
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ github.token }}
