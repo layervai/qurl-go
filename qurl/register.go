@@ -84,12 +84,19 @@ type AgentEnrollmentCredentialRequest struct {
 	// an ambiguous outcome. The provider must recover the exact credential used
 	// for that activation, for example by replaying the original idempotent mint;
 	// returning a newly minted credential fails the persisted fingerprint check.
+	// False means only that the SDK has no pending REG: an earlier provider mint
+	// may still have committed before its result reached the SDK.
 	PendingActivationRecovery bool
 }
 
 // AgentEnrollmentCredentialProvider lazily returns a first-time enrollment
-// credential for a durable agent identity. The callback must honor ctx and must
-// make recovery idempotent when PendingActivationRecovery is true.
+// credential for a durable agent identity. The callback must honor ctx and make
+// every mint idempotent against its own durable or deterministically derived,
+// non-secret transaction identity.
+// A process or provider failure can happen after the authority commits a mint
+// but before the SDK creates pending activation, so PendingActivationRecovery
+// being false does not authorize a fresh mint. When it is true, replay must also
+// return the exact credential whose fingerprint is already persisted.
 type AgentEnrollmentCredentialProvider func(context.Context, AgentEnrollmentCredentialRequest) (string, error)
 
 // WithAgentRuntimeEnrollmentCredentialProvider supplies enrollment capability
@@ -103,6 +110,9 @@ type AgentEnrollmentCredentialProvider func(context.Context, AgentEnrollmentCred
 // credential. The provider must therefore replay the original idempotent mint
 // and return the same credential during recovery. The returned credential is
 // attempt-scoped and is not retained by the binding used for later renewals.
+// Persist or deterministically derive the non-secret mint identity before
+// contacting its authority, and reuse it on every callback until enrollment is
+// known complete; never persist the raw credential in AgentStateStore.
 //
 // This option cannot be combined with WithAgentRuntimeEnrollmentCredential,
 // WithAgentRuntimeOTPProvider, or WithAgentRuntimeOfflineOpen. A provider for a

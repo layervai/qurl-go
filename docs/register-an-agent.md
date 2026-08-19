@@ -181,12 +181,16 @@ client, binding, err := qurl.ConnectAgentRuntime(ctx, store,
 
 The SDK generates and saves `request.AgentID` before calling the provider, and
 holds the setup lock across the callback and enrollment. A concurrent start
-therefore waits, reloads the completed state, and does not mint again. If
-`PendingActivationRecovery` is true, replay the original idempotent mint and
-return the exact same token: qurl stores only its fingerprint and rejects a new
-token. Never persist the raw token. The callback is not called for completed
-state, pending completion, lease renewal, or offline open, and it is not retained
-by the returned binding.
+therefore waits, reloads the completed state, and does not mint again. Before
+contacting the mint authority, persist or deterministically derive a non-secret
+idempotency transaction identity from the stable agent id, then replay that
+transaction on every callback until enrollment is known complete.
+`PendingActivationRecovery == false` means only that qurl has no pending REG; a
+prior provider mint may still have committed before its result reached the SDK.
+If the field is true, replay must return the exact same token: qurl stores only
+its fingerprint and rejects a new token. Never persist the raw token. The
+callback is not called for completed state, pending completion, lease renewal,
+or offline open, and it is not retained by the returned binding.
 
 The lazy provider cannot be combined with an eager enrollment credential, an
 OTP provider, or offline open; each contradiction fails with
