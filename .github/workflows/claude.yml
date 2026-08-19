@@ -241,12 +241,14 @@ jobs:
         if: steps.local_origin.outputs.ready == 'true'
         # This is a review-only command surface. Claude proposes simplifications
         # and findings; a maintainer applies, signs, and pushes accepted edits.
-        uses: anthropics/claude-code-action@1623c36729ac1cd5895198cded705a287de7db79 # v1.0.187
+        # v1.0.183 is the last audited release whose API-signing path leaves the
+        # exact-snapshot local origin untouched and credential-free.
+        uses: anthropics/claude-code-action@be7b93b1907a4abad570368f3c74b6fe3807510b # v1.0.183
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ github.token }}
-          # Agent mode otherwise rewrites origin with this token. API-signing
-          # mode skips that Git auth path; repository-write tools remain denied.
+          # Agent mode otherwise rewrites origin with this token. At the audited
+          # pin, API-signing skips that path; repository-write tools remain denied.
           use_commit_signing: true
           classify_inline_comments: false
           prompt: |
