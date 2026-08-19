@@ -8,6 +8,15 @@ and are marked **Breaking** with what to change.
 
 ## Unreleased
 
+- Added `WithAgentRuntimeEnrollmentCredentialProvider` for callers that mint a
+  one-shot enrollment token lazily from the durable agent id. The callback runs
+  exactly once under the setup lock only for fresh enrollment or pending-
+  activation recovery; the SDK saves the agent id before calling it, requires
+  exact-token replay for recovery, never retains the raw token in state, and
+  clears the callback from the returned binding's renewal configuration.
+  Completed state, pending completion, renewal, and offline open never invoke
+  it. Combining it with an eager enrollment credential, an OTP provider, or
+  offline open fails with `ErrInvalidRegisterConfig`.
 - **Breaking:** the deprecated `RegisterAgentRuntime` and
   `OpenRegisteredAgentRuntime` entry points are gone, along with the no-op
   `WithAgentRuntimeReassignmentAdoption` and the `AgentRuntimeOpenOption` set

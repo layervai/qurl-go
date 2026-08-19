@@ -15,11 +15,13 @@ import (
 // on the way. A process does not need to know which of those happened.
 //
 // Supply the credential with WithAgentRuntimeEnrollmentCredential when this
-// process is the one that enrolls. Omit it when enrollment happens elsewhere,
-// such as an installer: without a credential this call can renew and serve an
-// existing registration but can never create one, which is the property a
-// service that deliberately holds no enrollment secret wants. Pass
-// WithAgentRuntimeOfflineOpen to additionally forbid renewal, so the call
+// process is the one that enrolls, or use
+// WithAgentRuntimeEnrollmentCredentialProvider when the credential must be
+// minted lazily for the durable agent identity. Omit both when enrollment
+// happens elsewhere, such as an installer: without a credential this call can
+// renew and serve an existing registration but can never create one, which is
+// the property a service that deliberately holds no enrollment secret wants.
+// Pass WithAgentRuntimeOfflineOpen to additionally forbid renewal, so the call
 // performs no network I/O at all.
 //
 // The lifecycle is UDP-only: Hub assignment, assigned-cell OTP, assigned-cell
@@ -67,6 +69,51 @@ func ConnectAgentRuntime(ctx context.Context, store AgentStateStore, opts ...Age
 func WithAgentRuntimeEnrollmentCredential(credential string) AgentRuntimeRegistrationOption {
 	return nativeRuntimeOptionFunc(func(c *nativeAgentRuntimeConfig) error {
 		c.enrollCredential = credential
+		c.enrollCredentialSet = true
+		return nil
+	})
+}
+
+// AgentEnrollmentCredentialRequest is the bounded, non-secret context passed
+// to an AgentEnrollmentCredentialProvider. AgentID is already durable in the
+// AgentStateStore before the provider is called, so it is safe to use as the
+// stable target of an idempotent enrollment-token mint.
+type AgentEnrollmentCredentialRequest struct {
+	AgentID string
+	// PendingActivationRecovery is true when an earlier assigned-cell REG has
+	// an ambiguous outcome. The provider must recover the exact credential used
+	// for that activation, for example by replaying the original idempotent mint;
+	// returning a newly minted credential fails the persisted fingerprint check.
+	PendingActivationRecovery bool
+}
+
+// AgentEnrollmentCredentialProvider lazily returns a first-time enrollment
+// credential for a durable agent identity. The callback must honor ctx and must
+// make recovery idempotent when PendingActivationRecovery is true.
+type AgentEnrollmentCredentialProvider func(context.Context, AgentEnrollmentCredentialRequest) (string, error)
+
+// WithAgentRuntimeEnrollmentCredentialProvider supplies enrollment capability
+// lazily. ConnectAgentRuntime calls provider exactly once while holding the
+// AgentStateStore setup lock, and only for a fresh enrollment or pending-
+// activation recovery that has no explicit credential. It first generates and
+// durably saves AgentEnrollmentCredentialRequest.AgentID. Completed state,
+// pending completion, lease renewal, and offline open never invoke it.
+//
+// A pending activation stores only the credential fingerprint, never the raw
+// credential. The provider must therefore replay the original idempotent mint
+// and return the same credential during recovery. The returned credential is
+// attempt-scoped and is not retained by the binding used for later renewals.
+//
+// This option cannot be combined with WithAgentRuntimeEnrollmentCredential,
+// WithAgentRuntimeOTPProvider, or WithAgentRuntimeOfflineOpen. A provider for a
+// one-shot bootstrap token normally pairs this option with
+// WithAgentRuntimeHeadlessEnrollment.
+func WithAgentRuntimeEnrollmentCredentialProvider(provider AgentEnrollmentCredentialProvider) AgentRuntimeRegistrationOption {
+	return nativeRuntimeOptionFunc(func(c *nativeAgentRuntimeConfig) error {
+		if provider == nil {
+			return fmt.Errorf("%w: enrollment credential provider must not be nil", ErrInvalidRegisterConfig)
+		}
+		c.enrollCredentialProvider = provider
 		return nil
 	})
 }
