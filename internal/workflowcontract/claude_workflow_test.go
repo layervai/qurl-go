@@ -416,6 +416,7 @@ func requireReadOnlyActionContract(t *testing.T, workflow string) {
 	requirePin(t, workflow, checkoutAction)
 	requireContains(t, workflow,
 		"github_token: ${{ github.token }}",
+		"use_commit_signing: true",
 		"contents: read",
 		"pull-requests: write",
 		"mcp__github__add_issue_comment",
