@@ -16,7 +16,9 @@ and are marked **Breaking** with what to change.
   clears the callback from the returned binding's renewal configuration.
   Completed state, pending completion, renewal, and offline open never invoke
   it. Combining it with an eager enrollment credential, an OTP provider, or
-  offline open fails with `ErrInvalidRegisterConfig`.
+  offline open fails with `ErrInvalidRegisterConfig`. An explicitly empty eager
+  credential is now treated as configured too, so it fails the same
+  contradiction checks instead of being silently treated as absent.
 - **Breaking:** the deprecated `RegisterAgentRuntime` and
   `OpenRegisteredAgentRuntime` entry points are gone, along with the no-op
   `WithAgentRuntimeReassignmentAdoption` and the `AgentRuntimeOpenOption` set

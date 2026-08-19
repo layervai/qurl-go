@@ -1086,21 +1086,20 @@ func TestConnectAgentRuntime_EnrollmentCredentialProviderFreshIdentityAndLock(t 
 	}
 }
 
-func TestConnectAgentRuntime_EnrollmentCredentialProviderErrorPreservesCauseAndIdentity(t *testing.T) {
+func TestConnectAgentRuntime_EnrollmentCredentialProviderErrorPreservesCauseAndStableIdentity(t *testing.T) {
 	f := newRuntimeFixture(t, nil, nil)
 	clearRuntimeFixtureAgentID(t, f)
 	providerCause := errors.New("mint transaction unavailable")
 	var calls atomic.Int32
-	var request AgentEnrollmentCredentialRequest
+	var requests []AgentEnrollmentCredentialRequest
+	provider := func(_ context.Context, got AgentEnrollmentCredentialRequest) (string, error) {
+		calls.Add(1)
+		requests = append(requests, got)
+		return "", providerCause
+	}
+	opts := f.generatedIdentityOptions(WithAgentRuntimeEnrollmentCredentialProvider(provider))
 
-	client, binding, err := ConnectAgentRuntime(context.Background(), f.store,
-		f.generatedIdentityOptions(WithAgentRuntimeEnrollmentCredentialProvider(
-			func(_ context.Context, got AgentEnrollmentCredentialRequest) (string, error) {
-				calls.Add(1)
-				request = got
-				return "", providerCause
-			},
-		))...)
+	client, binding, err := ConnectAgentRuntime(context.Background(), f.store, opts...)
 	if binding != nil {
 		binding.Destroy()
 	}
@@ -1108,15 +1107,37 @@ func TestConnectAgentRuntime_EnrollmentCredentialProviderErrorPreservesCauseAndI
 		!strings.Contains(err.Error(), "enrollment credential provider") {
 		t.Fatalf("provider failure = client %v, binding %v, err %v; want wrapped provider cause", client, binding, err)
 	}
-	if calls.Load() != 1 || request.AgentID == "" || request.PendingActivationRecovery {
-		t.Fatalf("provider calls/request = %d/%#v, want one fresh request", calls.Load(), request)
+	if calls.Load() != 1 || len(requests) != 1 || requests[0].AgentID == "" || requests[0].PendingActivationRecovery {
+		t.Fatalf("provider calls/requests = %d/%#v, want one fresh request", calls.Load(), requests)
 	}
 	persisted, loadErr := f.store.LoadAgentState(context.Background())
 	if loadErr != nil {
 		t.Fatal(loadErr)
 	}
-	if persisted.AgentID != request.AgentID || persisted.Assignment != nil || persisted.PendingActivation != nil {
+	if persisted.AgentID != requests[0].AgentID || persisted.Assignment != nil || persisted.PendingActivation != nil {
 		t.Fatalf("provider failure did not preserve only the stable identity: %#v", persisted)
+	}
+
+	// A failed mint can have committed at its authority even though the SDK has
+	// no pending activation yet. A later start must therefore reuse the durable
+	// identity and repeat the same idempotent transaction, never generate a new
+	// identity or claim pending-activation recovery.
+	client, binding, err = ConnectAgentRuntime(context.Background(), f.store, opts...)
+	if binding != nil {
+		binding.Destroy()
+	}
+	if client != nil || binding != nil || !errors.Is(err, providerCause) {
+		t.Fatalf("provider retry = client %v, binding %v, err %v; want wrapped provider cause", client, binding, err)
+	}
+	if calls.Load() != 2 || len(requests) != 2 || requests[1].AgentID != requests[0].AgentID || requests[1].PendingActivationRecovery {
+		t.Fatalf("provider retry calls/requests = %d/%#v, want the same identity with no pending activation", calls.Load(), requests)
+	}
+	retried, loadErr := f.store.LoadAgentState(context.Background())
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if retried.AgentID != persisted.AgentID || retried.Assignment != nil || retried.PendingActivation != nil {
+		t.Fatalf("provider retry changed the stable pre-activation identity: %#v", retried)
 	}
 	if len(f.hubUDP.snapshot()) != 0 || len(f.cellUDP.snapshot()) != 0 {
 		t.Fatalf("provider failure reached UDP: Hub/cell=%d/%d", len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot()))
