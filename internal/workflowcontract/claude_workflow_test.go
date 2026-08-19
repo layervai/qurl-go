@@ -14,6 +14,30 @@ import (
 	"testing"
 )
 
+const (
+	credentialFreeClaudeActionRef     = "anthropics/claude-code-action@be7b93b1907a4abad570368f3c74b6fe3807510b"
+	credentialFreeClaudeActionVersion = "v1.0.183"
+)
+
+// TestClaudeWorkflowsUseAuditedCredentialFreeAction makes the action's Git
+// behavior part of the secret-bearing workflow contract. Upstream v1.0.187
+// began replacing origin with a token-bearing network URL even when
+// use_commit_signing is true. An immutable, consistent pin is not sufficient:
+// every new pin must be audited to leave the exact-snapshot local origin alone.
+func TestClaudeWorkflowsUseAuditedCredentialFreeAction(t *testing.T) {
+	for _, name := range []string{"claude-code-review.yml", "claude.yml"} {
+		t.Run(name, func(t *testing.T) {
+			pin, err := solePin(readWorkflow(t, name), claudeAction)
+			if err != nil {
+				t.Fatalf("resolve Claude action pin: %v", err)
+			}
+			if pin.reference != credentialFreeClaudeActionRef || pin.version != credentialFreeClaudeActionVersion {
+				t.Errorf("Claude action pin %q # %s is not audited for a credential-free origin", pin.reference, pin.version)
+			}
+		})
+	}
+}
+
 func TestAutomaticClaudeWorkflowUsesTrustedReadOnlySnapshots(t *testing.T) {
 	workflow := readWorkflow(t, "claude-code-review.yml")
 
@@ -392,6 +416,7 @@ func requireReadOnlyActionContract(t *testing.T, workflow string) {
 	requirePin(t, workflow, checkoutAction)
 	requireContains(t, workflow,
 		"github_token: ${{ github.token }}",
+		"use_commit_signing: true",
 		"contents: read",
 		"pull-requests: write",
 		"mcp__github__add_issue_comment",
