@@ -159,6 +159,7 @@ func TestIsCredentialLink_ClassifiesWithoutTreatingShapeAsVerification(t *testin
 	}{
 		"valid-looking":              {"https://qurl.link/#qv2t1.1.1.1.AQ.AQ.AQ", true},
 		"malformed but declared":     {"https://qurl.link/portal#qv2t1.not-valid", true},
+		"oversized but declared":     {"https://qurl.link/#qv2t1." + strings.Repeat("A", transportFragmentMaxLength+1), true},
 		"custom scheme fails closed": {"custom://open#qv2t1.not-valid", true},
 		"legacy transport":           {"https://qurl.link/#qv2.AQ.AQ.AQ", false},
 		"bare prefix":                {"https://qurl.link/#qv2t1", false},

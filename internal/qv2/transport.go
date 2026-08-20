@@ -28,6 +28,9 @@ const (
 
 	canonicalFragmentMaxLength = len(FragmentPrefix) + 3 +
 		transportMaxClaimsLength + transportMaxSecretLength + transportMaxSigLength
+	// The decimal count-token widths are coupled to the maximum chunk counts
+	// above. TestTransportProtocolConstantsMatchConformance pins both values so
+	// a future cap change cannot silently make this maximum stale.
 	transportFragmentMaxLength = len(TransportPrefix) + len("26") + len("3") + len("1") +
 		3 + transportMaxChunks + transportMaxClaimsLength + transportMaxSecretLength + transportMaxSigLength
 )
@@ -142,6 +145,10 @@ func DecodeTransportFragment(fragment string) (string, error) {
 // malformed qv2t1 link must still be routed to the fail-closed opener instead
 // of being mistaken for an ordinary URL that is safe to fetch directly.
 func IsCredentialLink(link string) bool {
+	// Do not apply the decoder's length limit at this routing boundary. An
+	// oversized declared credential must still take the fail-closed opener path;
+	// classifying it as an ordinary URL would turn a resource bound into a
+	// credential-handling bypass.
 	if _, err := url.Parse(link); err != nil {
 		return false
 	}
