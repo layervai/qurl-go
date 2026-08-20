@@ -403,13 +403,13 @@ it did not cause. Capture the qurl id when you mint: like the link itself, it
 is not retrievable afterwards, and a server predating the field omits it. A
 short `ResolveResourceOptions.TTL` remains the complementary control at mint
 time. `DeleteConnectorResource` revokes an entire connector resource (see
-[Manage qURL Connector resources](docs/connector-resources.md)).
+[Resolve and manage qURL Connector resources](docs/connector-resources.md)).
 
 ## Guides
 
 - [Protect a private service](docs/secure-a-private-service.md)
 - [Connect a service or agent](docs/register-an-agent.md)
-- [Manage qURL Connector resources](docs/connector-resources.md)
+- [Resolve and manage qURL Connector resources](docs/connector-resources.md)
 - [Issue links](docs/issuing-links.md)
 - [Resolve a resource and verify its CRID](docs/resolve-and-crid.md)
 - [Open links](docs/opening-links.md)

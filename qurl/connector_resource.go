@@ -176,6 +176,8 @@ type connectorResourceExpectation struct {
 
 // EnsureConnectorResource finds or creates the active qURL Connector resource
 // for slug. The private wire request includes qurl-service's resource type.
+// This is an explicit HTTPS management operation; registered-agent connector
+// runtimes must use ResolveRegisteredAgentConnectorResource over NHP instead.
 // FoundExisting reports whether the service returned an already-active row.
 // The SDK does not retry a 409 slug conflict automatically; see
 // ErrConnectorResourceSlugConflict for the bounded caller retry contract.

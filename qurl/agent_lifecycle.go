@@ -196,6 +196,26 @@ type agentRuntimePrivateKey struct {
 	cleanup *runtime.Cleanup
 }
 
+// withBorrow keeps the private key owned by the binding while fn performs one
+// synchronous operation. The mutex deliberately remains held across network
+// I/O: Take and Destroy must wait for fn to return so a caller cannot transfer
+// or wipe the key underneath an in-flight native exchange. The borrowed slice
+// must not escape fn.
+func (k *agentRuntimePrivateKey) withBorrow(errKind error, fn func([]byte) error) error {
+	if errKind == nil {
+		errKind = ErrInvalidNativeKnockInput
+	}
+	if k == nil || fn == nil {
+		return fmt.Errorf("%w: runtime binding does not own a device key", errKind)
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if len(k.value) == 0 {
+		return fmt.Errorf("%w: runtime binding device key was already transferred or destroyed", errKind)
+	}
+	return fn(k.value)
+}
+
 func newAgentRuntimePrivateKey(value []byte) *agentRuntimePrivateKey {
 	key := &agentRuntimePrivateKey{value: value}
 	// The cleanup argument references only the separate byte-slice backing array,
