@@ -127,17 +127,21 @@ func TestVerify_WrongIssuerKey(t *testing.T) {
 	}
 }
 
-// TestFragmentFromLink_StripsScheme proves a full qURL link (scheme/host + #qv2…)
-// is accepted and routed to the parser, and that a link with no fragment is a
-// fragment-shape error.
-func TestFragmentFromLink_StripsScheme(t *testing.T) {
+// TestFragmentFromLink_DecodesTransport proves a full qURL link (scheme/host +
+// #qv2t1…) is decoded and routed to the canonical parser, and that missing and
+// legacy fragments fail closed.
+func TestFragmentFromLink_DecodesTransport(t *testing.T) {
 	signer := newTestSigner(t)
 	claimsB64, rawSig := signer.signClaims(t, baselineClaims(t))
 	body, err := BuildFragment(claimsB64, mintSecretB64(t), rawSig)
 	if err != nil {
 		t.Fatalf("BuildFragment: %v", err)
 	}
-	link := "https://qurl.link/#" + body
+	transport, err := EncodeTransportFragment(body)
+	if err != nil {
+		t.Fatalf("EncodeTransportFragment: %v", err)
+	}
+	link := "https://qurl.link/?source=test#" + transport
 
 	frag, err := FragmentFromLinkAndVerify(link, signer.trustStore(t))
 	if err != nil {
@@ -149,6 +153,9 @@ func TestFragmentFromLink_StripsScheme(t *testing.T) {
 
 	if _, err := FragmentFromLink("https://qurl.link/no-fragment"); !errors.Is(err, ErrFragment) {
 		t.Fatalf("link without fragment: want ErrFragment, got %v", err)
+	}
+	if _, err := FragmentFromLink("https://qurl.link/#" + body); !errors.Is(err, ErrFragment) {
+		t.Fatalf("legacy qv2 transport: want ErrFragment, got %v", err)
 	}
 }
 

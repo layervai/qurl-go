@@ -50,6 +50,12 @@ if err != nil {
 fmt.Println(portal.Link)
 ```
 
+The returned URL uses the `qv2t1` share-safe fragment transport. The signed qv2
+claims, per-link private credential, and signature remain after `#`, so browsers
+do not send them to the link origin. The transport adds only deterministic
+240-character chunk boundaries; it does not change or reserialize the signed
+claims.
+
 Portal options apply to the link you are minting now:
 
 ```go

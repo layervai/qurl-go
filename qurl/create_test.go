@@ -106,8 +106,8 @@ func TestCreatePortal_EnterPortalSymmetry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreatePortal: %v", err)
 	}
-	if !strings.HasPrefix(link, LinkBaseURL+"#qv2.") {
-		t.Fatalf("link is not a qv2 qURL link: %q", link)
+	if !strings.HasPrefix(link, LinkBaseURL+"#qv2t1.") {
+		t.Fatalf("link does not use qv2t1 transport: %q", link)
 	}
 
 	doer := &capturingDoer{}
@@ -167,6 +167,28 @@ func TestCreatePortal_VerifierRoundTrip(t *testing.T) {
 	}
 	if b64url.EncodeToString(derived.PublicKey().Bytes()) != c.QurlUserPublicKeyB64 {
 		t.Fatal("secret private key does not derive the public key bound in the claims")
+	}
+}
+
+func TestLegacyFullLinkTransportRejectedByPublicReaders(t *testing.T) {
+	signer, ts := mintSigner(t)
+	link, err := CreatePortalWithParams(context.Background(), signer, validCreateParams(t))
+	if err != nil {
+		t.Fatalf("CreatePortal: %v", err)
+	}
+
+	canonical, err := qv2.DecodeTransportFragment(link[strings.IndexByte(link, '#')+1:])
+	if err != nil {
+		t.Fatalf("DecodeTransportFragment: %v", err)
+	}
+	legacyLink := LinkBaseURL + "#" + canonical
+
+	if _, err := VerifyLink(legacyLink, ts); !errors.Is(err, ErrFragment) {
+		t.Fatalf("VerifyLink legacy transport: want ErrFragment, got %v", err)
+	}
+	cfg := Config{TrustStore: ts, RelayAllowlist: relayExampleAllowlist(), HTTPClient: &capturingDoer{}}
+	if _, err := EnterPortalWith(context.Background(), legacyLink, cfg); !errors.Is(err, ErrFragment) {
+		t.Fatalf("EnterPortalWith legacy transport: want ErrFragment, got %v", err)
 	}
 }
 
@@ -239,7 +261,11 @@ func TestCreatePortal_TamperRejected(t *testing.T) {
 // longer match the signature.
 func tamperJTI(t *testing.T, link string) string {
 	t.Helper()
-	frag, err := qv2.ParseFragment(link[strings.IndexByte(link, '#')+1:])
+	canonical, err := qv2.DecodeTransportFragment(link[strings.IndexByte(link, '#')+1:])
+	if err != nil {
+		t.Fatalf("DecodeTransportFragment(minted): %v", err)
+	}
+	frag, err := qv2.ParseFragment(canonical)
 	if err != nil {
 		t.Fatalf("ParseFragment(minted): %v", err)
 	}
@@ -253,7 +279,11 @@ func tamperJTI(t *testing.T, link string) string {
 	if err != nil {
 		t.Fatalf("BuildFragment(tampered): %v", err)
 	}
-	return LinkBaseURL + "#" + body
+	transport, err := qv2.EncodeTransportFragment(body)
+	if err != nil {
+		t.Fatalf("EncodeTransportFragment(tampered): %v", err)
+	}
+	return LinkBaseURL + "#" + transport
 }
 
 // mustJSON marshals v to JSON, matching the canonical claims encoding the mint

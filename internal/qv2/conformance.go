@@ -40,6 +40,8 @@ const (
 	rejectClassKeyLength = "key_length"
 	// rejectClassFragment is a fragment wire-shape rejection.
 	rejectClassFragment = "fragment"
+	// rejectClassTransport is a qv2t1 outer transport framing rejection.
+	rejectClassTransport = "transport"
 	// rejectClassRelayURL is a relay_url HTTPS/allowlist rejection.
 	rejectClassRelayURL = "relay_url"
 	// rejectClassTamper is the signature-class payload-tamper rejection: a valid
@@ -64,15 +66,43 @@ const (
 	tamperTransformFlipFirstB64 = "flip_first_base64url_char_A_B"
 )
 
+const conformanceSchemaVersion = 2
+
 // ConformanceFile is the top-level conformance artifact document.
 type ConformanceFile struct {
-	Artifact       string                      `json:"artifact"`
-	SchemaVersion  int                         `json:"schema_version"`
-	Description    string                      `json:"description"`
-	SourceOfTruth  string                      `json:"source_of_truth"`
-	Notes          []string                    `json:"notes"`
-	SignatureClass ConformanceSignatureClass   `json:"signature_class"`
-	Classes        map[string]ConformanceClass `json:"classes"`
+	Artifact          string                       `json:"artifact"`
+	SchemaVersion     int                          `json:"schema_version"`
+	Description       string                       `json:"description"`
+	SourceOfTruth     string                       `json:"source_of_truth"`
+	Notes             []string                     `json:"notes"`
+	TransportContract ConformanceTransportContract `json:"transport_contract"`
+	SignatureClass    ConformanceSignatureClass    `json:"signature_class"`
+	Classes           map[string]ConformanceClass  `json:"classes"`
+}
+
+// ConformanceTransportContract is the normative qv2t1 envelope and its fixed
+// framing limits. It is present beginning with conformance schema v2.
+type ConformanceTransportContract struct {
+	Prefix             string                     `json:"prefix"`
+	CanonicalPrefix    string                     `json:"canonical_prefix"`
+	ComponentMax       int                        `json:"component_max"`
+	MaxTransportLength int                        `json:"max_transport_length"`
+	Fields             ConformanceTransportFields `json:"fields"`
+}
+
+// ConformanceTransportFields keeps the three positional transport fields
+// closed under DisallowUnknownFields.
+type ConformanceTransportFields struct {
+	Claims    ConformanceTransportField `json:"claims"`
+	Secret    ConformanceTransportField `json:"secret"`
+	Signature ConformanceTransportField `json:"signature"`
+}
+
+// ConformanceTransportField is one reconstructed field's encoded-size and
+// chunk-count bound.
+type ConformanceTransportField struct {
+	MaxEncodedLength int `json:"max_encoded_length"`
+	MaxChunks        int `json:"max_chunks"`
 }
 
 // ConformanceSignatureClass records that the signature class is composed from a
@@ -134,6 +164,11 @@ type ConformanceVector struct {
 	// fragment: a full fragment body.
 	Fragment string `json:"fragment"`
 
+	// transport: a qv2t1 outer body and, for accepts, its exact reconstructed
+	// canonical qv2 body.
+	TransportFragment string `json:"transport_fragment"`
+	CanonicalFragment string `json:"canonical_fragment"`
+
 	// relay_allowlist: the allowlist entries and the URL to validate.
 	Entries []string `json:"entries"`
 	URL     string   `json:"url"`
@@ -154,11 +189,43 @@ func LoadConformanceBytes(data []byte) (*ConformanceFile, error) {
 	if err := dec.Decode(&cf); err != nil {
 		return nil, fmt.Errorf("qurl: parse conformance file: %w", err)
 	}
-	if cf.SchemaVersion == 0 {
-		return nil, errors.New("qurl: conformance file missing schema_version")
+	if cf.SchemaVersion != conformanceSchemaVersion {
+		return nil, fmt.Errorf("qurl: conformance file has schema_version %d, want %d", cf.SchemaVersion, conformanceSchemaVersion)
 	}
 	if len(cf.Classes) == 0 {
 		return nil, errors.New("qurl: conformance file has no classes")
 	}
+	if err := validateConformanceTransportContract(cf.TransportContract); err != nil {
+		return nil, err
+	}
+	transportClass, ok := cf.Classes["transport"]
+	if !ok || transportClass.Input != "transport_fragment" || len(transportClass.Vectors) == 0 {
+		return nil, errors.New("qurl: conformance file has no valid transport class")
+	}
 	return &cf, nil
+}
+
+func validateConformanceTransportContract(contract ConformanceTransportContract) error {
+	if contract.Prefix != TransportPrefix || contract.CanonicalPrefix != FragmentPrefix ||
+		contract.ComponentMax != transportChunkLength || contract.MaxTransportLength != transportFragmentMaxLength {
+		return errors.New("qurl: conformance transport constants do not match implementation")
+	}
+	want := ConformanceTransportFields{
+		Claims: ConformanceTransportField{
+			MaxEncodedLength: transportMaxClaimsLength,
+			MaxChunks:        transportMaxClaimsChunks,
+		},
+		Secret: ConformanceTransportField{
+			MaxEncodedLength: transportMaxSecretLength,
+			MaxChunks:        transportMaxSecretChunks,
+		},
+		Signature: ConformanceTransportField{
+			MaxEncodedLength: transportMaxSigLength,
+			MaxChunks:        transportMaxSigChunks,
+		},
+	}
+	if contract.Fields != want {
+		return errors.New("qurl: conformance transport field bounds do not match implementation")
+	}
+	return nil
 }

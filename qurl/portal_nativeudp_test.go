@@ -344,7 +344,7 @@ func TestEnterPortalWith_NoTrustStoreRefusesBeforeParsing(t *testing.T) {
 	// refusal comes from the missing trust store, not from link parsing, so a
 	// build shipping no issuer keys can never open anything.
 	_, err := EnterPortalWith(context.Background(),
-		"https://qurl.link/#qv2.eyJ2IjoyfQ.c2VjcmV0.c2ln",
+		"https://qurl.link/#qv2t1.1.1.1.AQ.AQ.AQ",
 		Config{})
 	if !errors.Is(err, ErrNotConfigured) {
 		t.Fatalf("EnterPortalWith with no TrustStore = %v, want ErrNotConfigured", err)
@@ -358,7 +358,7 @@ func TestEnterPortalWith_UnknownCellWithNoRelayAllowlistRefuses(t *testing.T) {
 	// A REAL trust store, so the refusal can only come from the absent
 	// transport. Skipping here instead would leave the guard unexercised.
 	_, err := EnterPortalWith(context.Background(),
-		"https://qurl.link/#qv2.eyJ2IjoyfQ.c2VjcmV0.c2ln",
+		"https://qurl.link/#qv2t1.1.1.1.AQ.AQ.AQ",
 		Config{TrustStore: freshTrustStore(t)})
 	if err == nil {
 		t.Fatal("open succeeded with neither a cell catalog nor a relay allowlist")
