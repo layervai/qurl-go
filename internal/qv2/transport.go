@@ -145,6 +145,8 @@ func DecodeTransportFragment(fragment string) (string, error) {
 // fragment transport. It is intentionally a classifier, not a verifier: a
 // malformed qv2t1 link must still be routed to the fail-closed opener instead
 // of being mistaken for an ordinary URL that is safe to fetch directly.
+// The retired pre-release qv2 transport is deliberately excluded: URL
+// fragments are not sent by HTTP, and every current qURL reader rejects it.
 func IsCredentialLink(link string) bool {
 	// Do not apply the decoder's length limit at this routing boundary. An
 	// oversized declared credential must still take the fail-closed opener path;
@@ -190,9 +192,6 @@ func parseTransportCount(encoded string, maxCount int, fieldName string) (int, e
 		if count > maxCount {
 			return 0, fmt.Errorf("%w: %s chunk count exceeds maximum", ErrFragment, fieldName)
 		}
-	}
-	if count == 0 {
-		return 0, fmt.Errorf("%w: %s chunk count must be positive", ErrFragment, fieldName)
 	}
 	return count, nil
 }

@@ -215,6 +215,8 @@ func NewRelayAllowlist(entries []string) *RelayAllowlist {
 // fragment transport. It does not parse or verify the credential. Use it only
 // for routing decisions where malformed credential links must still take the
 // fail-closed qURL opener path instead of an ordinary HTTP fetch.
+// It deliberately excludes the retired pre-release qv2 transport, which
+// current qURL readers reject and which HTTP never transmits as a fragment.
 func IsCredentialLink(link string) bool {
 	return qv2.IsCredentialLink(link)
 }
