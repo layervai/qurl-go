@@ -6,7 +6,7 @@ independently under `awsstore/vX.Y.Z` tags.
 Pre-1.0 semantic versioning: breaking changes land in minor versions (v0.N.0)
 and are marked **Breaking** with what to change.
 
-## Unreleased
+## v0.6.0 — 2026-08-19
 
 - Added `WithAgentRuntimeEnrollmentCredentialProvider` for callers that mint a
   one-shot enrollment token lazily from the durable agent id. The callback runs
@@ -18,7 +18,7 @@ and are marked **Breaking** with what to change.
   it. Combining it with an eager enrollment credential, an OTP provider, or
   offline open fails with `ErrInvalidRegisterConfig`. An explicitly empty eager
   credential is now treated as configured too, so it fails the same
-  contradiction checks instead of being silently treated as absent.
+  contradiction checks instead of being silently treated as absent. (#186)
 - **Breaking:** the deprecated `RegisterAgentRuntime` and
   `OpenRegisteredAgentRuntime` entry points are gone, along with the no-op
   `WithAgentRuntimeReassignmentAdoption` and the `AgentRuntimeOpenOption` set
@@ -35,16 +35,17 @@ and are marked **Breaking** with what to change.
   `WithAgentRuntimeEnrollmentCredential` — with `WithAgentRuntimeOTPProvider`
   for the default account one-time-code enrollment. Once a provider or
   credential is supplied, the usual enrollment-attempt classification applies
-  instead.
+  instead. (#184)
 - **Breaking:** `WithAgentRuntimeOfflineOpen` now returns
   `AgentRuntimeRegistrationOption` and belongs to `ConnectAgentRuntime` alone.
   Combining it with `WithAgentRuntimeEnrollmentCredential` or
   `WithAgentRuntimeOTPProvider` is a contradiction — enrollment needs the
-  network an offline open forbids — and fails with `ErrInvalidRegisterConfig`.
+  network an offline open forbids — and fails with
+  `ErrInvalidRegisterConfig`. (#184)
 - **Breaking:** `WithAgentRuntimePinnedAssignment` now returns the new
   `AgentRuntimeRenewalOption`, accepted by both entry points that renew an
   assignment — `ConnectAgentRuntime`, `RefreshAgentRuntime` — and a binding
-  either returns applies the same policy to its own lease renewals.
+  either returns applies the same policy to its own lease renewals. (#184)
 - **Breaking:** `NewStaticProvider` takes a third argument: the cell entries
   the provider serves (pass `nil` to keep the relay-only shape).
   `StaticProvider` now implements `CellProvider`, and the transport rule is
@@ -58,11 +59,11 @@ and are marked **Breaking** with what to change.
   cells and no allowlist, and a deployment file with cells and no
   `relay_allowlist`, now refuse an out-of-catalog link with
   `ErrCellNotInCatalog` where they previously reported `ErrNotConfigured` —
-  update any `errors.Is(err, ErrNotConfigured)` match there.
+  update any `errors.Is(err, ErrNotConfigured)` match there. (#184)
 - **Breaking:** `ResolveResourceOptions.TTLSeconds int` is now
-  `TTL time.Duration`, and `ResolvedAccess.QURL` is renamed `Link`. Zero still
-  requests the server default lifetime; the wire carries whole seconds, so a
-  nonzero TTL with a sub-second remainder is rejected rather than rounded.
+  `TTL time.Duration`, and `ResolvedAccess.QURL` is renamed `Link`. (#184) Zero
+  still requests the server default lifetime; the wire carries whole seconds.
+  A nonzero TTL with a sub-second remainder is rejected rather than rounded.
 - Added `Client.RevokePortal`: revoke one minted link immediately, with the
   same `qurl:write` credential that minted it. It is the single revoke entry
   point for every link the client mints — pass `Portal.ResourceID` and
@@ -71,13 +72,13 @@ and are marked **Breaking** with what to change.
   the resource and its other live links keep working. Revocation is
   deliberately not idempotent — a repeat revoke fails with the new
   `ErrPortalRevoked` sentinel while keeping the underlying `*APIError`
-  matchable.
+  matchable. (#184)
 - Added `ResolvedAccess.QURLID`, the revocation handle for a resolve-minted
   link. Capture it alongside `Link`: neither is retrievable after the resolve
   response. It reads the `qurl_id` field the resolve endpoint now returns, so
   it is empty against a server predating that field — the one case where a
   resolve-minted link still has no individual revocation handle, and deleting
-  the resource remains the lever.
+  the resource remains the lever. (#185)
 - The Hub trust root is now resolved lazily, exactly where a Hub exchange
   becomes necessary. Opening completed state — warm or offline — no longer
   demands a trust root it would not use; enrollment and expired-lease renewal
@@ -88,7 +89,7 @@ and are marked **Breaking** with what to change.
   untouched. Only the no-hub class defers this way: a `QURL_DEPLOYMENT` file
   that cannot be read or parsed now fails every start at config time with
   `ErrInvalidRegisterConfig`, where a warm start previously succeeded silently
-  and returned a binding that could never renew its own lease.
+  and returned a binding that could never renew its own lease. (#184)
 - `FileCredentials` — and with it `QURL_API_KEY_FILE`, explicit issuer-state
   paths, and `~/.config/qurl/token` — now accepts a file holding the raw
   bearer token, the form the Connector installer writes, alongside the
@@ -96,13 +97,16 @@ and are marked **Breaking** with what to change.
   undecodable files now name the accepted formats instead of a bare decode
   error, every malformed credential-file shape — undecodable JSON included —
   now wraps `ErrInvalidClientConfig`, and a UTF-8 byte order mark ahead of a
-  JSON envelope no longer misreads the file as a raw token.
+  JSON envelope no longer misreads the file as a raw token. (#184)
 - Tests are hermetic on contributor macOS machines: workflow-contract tests
   that need the GNU `timeout` binary skip with an install hint when it is not
   on PATH, and fixture repositories no longer read the contributor's global or
-  system git config.
+  system git config. (#184)
 - Test renames follow the entry point: `TestRegisterAgentRuntime_*` and the
-  runtime-open tests are now `TestConnectAgentRuntime_*`.
+  runtime-open tests are now `TestConnectAgentRuntime_*`. (#184)
+- CI maintenance: restored the credential-free review origin after the pinned
+  review action runs, so the workflow's post-review trust guard remains
+  meaningful instead of failing on the action's authenticated URL. (#187)
 
 ## v0.5.3 — 2026-08-14
 
