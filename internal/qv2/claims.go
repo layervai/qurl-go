@@ -7,14 +7,15 @@
 // It implements the qURL keyed-identity wire format and issuer-signature crypto per
 // the public qURL keyed-identity design.
 //
-// This is the security core for a qURL link (#qv2.<claims>.<secret>.<sig>): a
-// strict allowlist parser, the issuer signing input + raw r||s low-S signature
-// verification, a published-key trust store, post-verify relay_url validation, and
-// the matching mint side (sign.go: the Signer seam + SignClaims) that signs the
-// EXACT bytes the verifier checks. It is a dependency-light Go implementation that
-// agrees byte-for-byte with the published qURL v2 conformance vectors; it imports
-// only the standard library — the issuer signing key is reached through the Signer
-// interface, never a baked-in KMS client.
+// This is the security core for the canonical qv2.<claims>.<secret>.<sig>
+// cryptographic fragment carried inside a full link's qv2t1 transport: a strict
+// allowlist parser, the issuer signing input + raw r||s low-S signature
+// verification, a published-key trust store, post-verify relay_url validation,
+// and the matching mint side (sign.go: the Signer seam + SignClaims) that signs
+// the EXACT bytes the verifier checks. It is a dependency-light Go
+// implementation that agrees byte-for-byte with the published qURL v2
+// conformance vectors; it imports only the standard library — the issuer signing
+// key is reached through the Signer interface, never a baked-in KMS client.
 //
 // Design invariants enforced here:
 //   - The issuer signature is computed/verified over the EXACT base64url bytes of

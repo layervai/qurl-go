@@ -11,7 +11,7 @@ import (
 // and it is not simplified for documentation: if opening a link needs more than
 // this, this example must grow, and simplicity_test.go fails the build.
 func ExampleEnterPortal() {
-	handle, err := qurl.EnterPortal(context.Background(), "https://qurl.link/#qv2.…")
+	handle, err := qurl.EnterPortal(context.Background(), "https://qurl.link/#qv2t1.1.1.1.…")
 	if err != nil {
 		return
 	}

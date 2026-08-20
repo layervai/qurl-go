@@ -39,7 +39,11 @@ func (s *testSigner) mintLink(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("BuildFragment: %v", err)
 	}
-	return "https://qurl.link/#" + body
+	transport, err := EncodeTransportFragment(body)
+	if err != nil {
+		t.Fatalf("EncodeTransportFragment: %v", err)
+	}
+	return "https://qurl.link/#" + transport
 }
 
 // TestTrustAnchorRotation_OverlapVerifies covers the rotation done-criterion from

@@ -6,6 +6,18 @@ independently under `awsstore/vX.Y.Z` tags.
 Pre-1.0 semantic versioning: breaking changes land in minor versions (v0.N.0)
 and are marked **Breaking** with what to change.
 
+## Unreleased
+
+- **Breaking:** full qURL links now use the share-safe `qv2t1` fragment
+  transport, which chunks all encoded qv2 fields at deterministic
+  240-character boundaries. `VerifyLink` and `EnterPortal` reject the
+  pre-release `#qv2.<claims>.<secret>.<signature>` full-link transport. The
+  canonical qv2 cryptographic fragment and its exact signed claims bytes are
+  unchanged. `IsCredentialLink` is the public shape classifier for callers
+  that must route credential links to the fail-closed opener instead of a plain
+  HTTP fetch. The SDK pins and runs the schema-v2 qURL conformance transport
+  vectors at its real decoder boundary.
+
 ## v0.6.0 — 2026-08-19
 
 - Added `WithAgentRuntimeEnrollmentCredentialProvider` for callers that mint a

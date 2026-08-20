@@ -180,7 +180,7 @@ func TestEnterPortal_StaticProvider_VerifiesAndRoutes(t *testing.T) {
 // guarding the production posture independently of test ordering.
 func TestEnterPortal_NoProvider_FailsClosed(t *testing.T) {
 	installDefaultProvider(t, nil)
-	_, err := EnterPortal(context.Background(), "https://qurl.link/#qv2.a.b.c")
+	_, err := EnterPortal(context.Background(), "https://qurl.link/#qv2t1.1.1.1.AQ.AQ.AQ")
 	if !errors.Is(err, ErrNotConfigured) {
 		t.Fatalf("no provider: want ErrNotConfigured, got %v", err)
 	}
@@ -223,7 +223,7 @@ func TestEnterPortal_ProviderError_Propagates(t *testing.T) {
 		return nil, nil, sentinel
 	}))
 
-	_, err := EnterPortal(context.Background(), "https://qurl.link/#qv2.a.b.c")
+	_, err := EnterPortal(context.Background(), "https://qurl.link/#qv2t1.1.1.1.AQ.AQ.AQ")
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("provider error: want the provider's sentinel, got %v", err)
 	}

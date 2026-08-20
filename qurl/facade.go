@@ -211,6 +211,14 @@ func NewRelayAllowlist(entries []string) *RelayAllowlist {
 
 // --- verification ---
 
+// IsCredentialLink reports whether link declares the credential-bearing qv2t1
+// fragment transport. It does not parse or verify the credential. Use it only
+// for routing decisions where malformed credential links must still take the
+// fail-closed qURL opener path instead of an ordinary HTTP fetch.
+func IsCredentialLink(link string) bool {
+	return qv2.IsCredentialLink(link)
+}
+
 // VerifyLink parses a qURL link and verifies its issuer signature against the trust
 // store, returning the verified Fragment. It is the one-call way to validate a link
 // without opening it; EnterPortal performs this same check as its first step. A

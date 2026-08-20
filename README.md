@@ -199,6 +199,11 @@ against a key you already hold (`VerifyCRID`). Both leave the link lifetime to
 the server default unless you ask (`ValidFor` on a portal,
 `ResolveResourceOptions.TTL` on a resolve).
 
+Minted links use the share-safe `#qv2t1...` fragment transport. It keeps every
+dot-separated component at 240 characters or fewer so messaging clients retain
+the full click target, while preserving the exact signed qv2 bytes and keeping
+the per-link private credential out of HTTP requests.
+
 Next: [Protect a private service](docs/secure-a-private-service.md) ·
 [Issue links](docs/issuing-links.md)
 
