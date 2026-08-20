@@ -90,7 +90,9 @@ var ErrInvalidCreateParams = errors.New("qurl: invalid CreatePortal params")
 // qurl.VerifyLink / EnterPortalWith against a trust store holding the signer's
 // public key. CreatePortalWithParams validates the claims through the same strict
 // parser those verifiers use BEFORE signing, so a mint that would not verify
-// fails here instead of emitting a bad link.
+// fails here instead of emitting a bad link. Claims whose encoded transport
+// exceeds the released protocol bound fail with an error wrapping ErrFragment;
+// the mint never emits a link that readers must reject for size.
 func CreatePortalWithParams(ctx context.Context, signer Signer, p CreateParams) (string, error) {
 	if signer == nil {
 		return "", fmt.Errorf("%w: signer must not be nil", ErrInvalidCreateParams)

@@ -29,8 +29,9 @@ const (
 	canonicalFragmentMaxLength = len(FragmentPrefix) + 3 +
 		transportMaxClaimsLength + transportMaxSecretLength + transportMaxSigLength
 	// The decimal count-token widths are coupled to the maximum chunk counts
-	// above. TestTransportProtocolConstantsMatchConformance pins both values so
-	// a future cap change cannot silently make this maximum stale.
+	// above. validateConformanceTransportContract pins the resulting maximum and
+	// chunk counts to the released contract, so a future cap change cannot
+	// silently make this maximum stale.
 	transportFragmentMaxLength = len(TransportPrefix) + len("26") + len("3") + len("1") +
 		3 + transportMaxChunks + transportMaxClaimsLength + transportMaxSecretLength + transportMaxSigLength
 )
