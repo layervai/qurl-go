@@ -61,9 +61,9 @@ and are marked **Breaking** with what to change.
   `ErrCellNotInCatalog` where they previously reported `ErrNotConfigured` —
   update any `errors.Is(err, ErrNotConfigured)` match there. (#184)
 - **Breaking:** `ResolveResourceOptions.TTLSeconds int` is now
-  `TTL time.Duration`, and `ResolvedAccess.QURL` is renamed `Link`. (#184) Zero
-  still requests the server default lifetime; the wire carries whole seconds.
-  A nonzero TTL with a sub-second remainder is rejected rather than rounded.
+  `TTL time.Duration`, and `ResolvedAccess.QURL` is renamed `Link`. Zero still
+  requests the server default lifetime. The wire carries whole seconds; a
+  nonzero TTL with a sub-second remainder is rejected, not rounded. (#184)
 - Added `Client.RevokePortal`: revoke one minted link immediately, with the
   same `qurl:write` credential that minted it. It is the single revoke entry
   point for every link the client mints — pass `Portal.ResourceID` and
