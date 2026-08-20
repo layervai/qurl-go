@@ -37,10 +37,9 @@ var frictionBudget = map[string]int{
 
 	// --- Issuing -------------------------------------------------------------
 	// Protect a URL and mint a link: open client, protect, create.
-	"ExampleOpenClient":                     3,
-	"ExampleClient_ProtectURL":              3,
-	"ExampleClient_EnsureConnectorResource": 3,
-	"ExampleClient_CreatePortal":            4,
+	"ExampleOpenClient":          3,
+	"ExampleClient_ProtectURL":   3,
+	"ExampleClient_CreatePortal": 4,
 	// Kill one minted link before it expires: open client, mint, revoke.
 	"ExampleClient_RevokePortal": 3,
 	// Mint a fresh access link for a stored identifier (either form): open
@@ -48,6 +47,10 @@ var frictionBudget = map[string]int{
 	// (ResolvedAccess.VerifyCRID), not setup.
 	"ExampleClient_ResolveResource": 3,
 	"ExampleNewClient":              5,
+	// Resolve a Connector binding through its already-registered assigned-cell
+	// session: open state, reopen the binding, create one replayable request,
+	// resolve, and print. The two defers are deterministic key/store cleanup.
+	"ExampleResolveRegisteredAgentConnectorResource": 8,
 	// The package overview: open a client, protect, create, print.
 	"Example": 4,
 
@@ -57,8 +60,9 @@ var frictionBudget = map[string]int{
 	// root an optional override — it now resolves from the deployment, via
 	// QURL_DEPLOYMENT until GA builds embed it — brought it to 11.
 	//
-	// 11 is the honest floor, not a concession. What remains is:
-	//   open agent state / register / take the device key / ensure the resource
+	// 12 is the honest floor, not a concession. What remains is:
+	//   open agent state / register / create the replay request / resolve the
+	//   resource / take the device key
 	//   / mint a cycle run ID / knock — plus the three defers that release the
 	//   store, the binding, and the key material.
 	//
@@ -75,7 +79,7 @@ var frictionBudget = map[string]int{
 	// ConnectAgentRuntime is the single entry point a service calls on every
 	// start: the credential is an option rather than a positional argument, so
 	// one call shape covers enrolling, resuming, and reopening.
-	"ExampleConnectAgentRuntime":     11,
+	"ExampleConnectAgentRuntime":     12,
 	"ExampleNewSealedFileAgentState": 5,
 
 	// Headless enrollment is the escape hatch for a runtime with no mailbox, so

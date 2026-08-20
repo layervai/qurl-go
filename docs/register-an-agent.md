@@ -14,7 +14,7 @@ if err != nil {
 }
 defer store.Close()
 
-client, binding, err := qurl.ConnectAgentRuntime(ctx, store,
+_, binding, err := qurl.ConnectAgentRuntime(ctx, store,
 	qurl.WithAgentRuntimeEnrollmentCredential(enrollmentCredential),
 	qurl.WithAgentRuntimeOTPProvider(readOneTimeCode),
 	qurl.WithAgentRuntimeMetadata(hostname, version),
@@ -24,13 +24,17 @@ if err != nil {
 }
 defer binding.Destroy()
 
-privateKey := binding.TakeDeviceStaticPrivateKey()
-defer clear(privateKey)
-
-connector, err := client.EnsureConnectorResource(ctx, "prod-dashboard")
+request, err := qurl.NewNativeConnectorResourceRequest("prod-dashboard", "")
 if err != nil {
 	return err
 }
+connector, err := qurl.ResolveRegisteredAgentConnectorResource(ctx, binding, request)
+if err != nil {
+	return err
+}
+
+privateKey := binding.TakeDeviceStaticPrivateKey()
+defer clear(privateKey)
 
 runID, err := qurl.NewCycleRunID()
 if err != nil {
@@ -55,12 +59,21 @@ for your callback, so give the context a deadline if nothing may be watching the
 mailbox. [The one-time code](#the-one-time-code) shows one. Later starts never
 call it.
 
-Two things come back:
+Two things come back from registration:
 
-- **`client`** — creates and manages protected resources, like any other qURL
-  client.
+- **`client`** — performs explicit management actions such as removing a
+  resource. Resource setup for the running Connector does not use it.
 - **`binding`** — proof of who this machine is. Hold it for the life of the
   process and `Destroy()` it on the way out.
+
+Resource setup is a registered-agent `NHP_LST`/`NHP_LRT` exchange sent directly
+to the assigned cell. It does not call the qURL HTTPS API. In production,
+persist `request.RequestNonce` before the first exchange and reuse the exact
+request after an uncertain response; changing any request field under the same
+nonce is rejected. Once a resource is known, pass its exact `ResourceID` as the
+second argument to `NewNativeConnectorResourceRequest` on later starts. That is
+a read-only continuity assertion: LayerV returns that exact active resource or
+fails instead of creating or adopting a replacement.
 
 And two rules for the serving loop:
 
