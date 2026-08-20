@@ -6,7 +6,7 @@ independently under `awsstore/vX.Y.Z` tags.
 Pre-1.0 semantic versioning: breaking changes land in minor versions (v0.N.0)
 and are marked **Breaking** with what to change.
 
-## Unreleased
+## v0.7.0 — 2026-08-20
 
 - **Breaking:** full qURL links now use the share-safe `qv2t1` fragment
   transport, which chunks all encoded qv2 fields at deterministic
