@@ -171,27 +171,29 @@ type nativeAgentRuntimeConfig struct {
 	// hubErr records why no Hub trust root is available when hub is nil. It is
 	// surfaced only by requireHub, so a call that needs no Hub exchange — a warm
 	// or offline open of completed state — still succeeds without one.
-	hubErr            error
-	agentID           string
-	recoveryAgentID   string
-	hostname          string
-	version           string
-	pinAssignment     bool
-	offlineOpen       bool
-	baseURL           string
-	httpClient        HTTPDoer
-	resolver          nativeudp.Resolver
-	dialer            nativeudp.Dialer
-	timeout           time.Duration
-	maxAddresses      int
-	assignmentOptions []AssignmentOption
-	allowedKeyKinds   map[RegistrationKeyKind]struct{}
-	otpProvider       func(context.Context, AgentOTPChallenge) (string, error)
-	clock             func() time.Time
-	random            io.Reader
-	deviceCredential  string
-	enrollCredential  string
-	continuityStore   AgentStateStore
+	hubErr                   error
+	agentID                  string
+	recoveryAgentID          string
+	hostname                 string
+	version                  string
+	pinAssignment            bool
+	offlineOpen              bool
+	baseURL                  string
+	httpClient               HTTPDoer
+	resolver                 nativeudp.Resolver
+	dialer                   nativeudp.Dialer
+	timeout                  time.Duration
+	maxAddresses             int
+	assignmentOptions        []AssignmentOption
+	allowedKeyKinds          map[RegistrationKeyKind]struct{}
+	otpProvider              func(context.Context, AgentOTPChallenge) (string, error)
+	clock                    func() time.Time
+	random                   io.Reader
+	deviceCredential         string
+	enrollCredential         string
+	enrollCredentialSet      bool
+	enrollCredentialProvider AgentEnrollmentCredentialProvider
+	continuityStore          AgentStateStore
 }
 
 type nativeRuntimeOptionFunc func(*nativeAgentRuntimeConfig) error
@@ -517,6 +519,9 @@ func newNativeAgentRuntimeConfig(opts []AgentRuntimeRegistrationOption) (*native
 			return nil, err
 		}
 	}
+	if err := c.validateEnrollmentCredentialOptions(); err != nil {
+		return nil, err
+	}
 	if err := c.validateEnrollmentPolicyOptions(); err != nil {
 		return nil, err
 	}
@@ -555,6 +560,23 @@ func newNativeAgentRuntimeConfig(opts []AgentRuntimeRegistrationOption) (*native
 	return c, nil
 }
 
+// validateEnrollmentCredentialOptions keeps the eager, lazy, and OTP callback
+// paths mutually exclusive. Treat an explicitly supplied empty credential as
+// eager configuration too: option ordering must not silently make a
+// contradictory provider configuration valid.
+func (c *nativeAgentRuntimeConfig) validateEnrollmentCredentialOptions() error {
+	if c.enrollCredentialProvider == nil {
+		return nil
+	}
+	if c.enrollCredentialSet {
+		return fmt.Errorf("%w: WithAgentRuntimeEnrollmentCredentialProvider contradicts WithAgentRuntimeEnrollmentCredential; pass one enrollment credential source", ErrInvalidRegisterConfig)
+	}
+	if c.otpProvider != nil {
+		return fmt.Errorf("%w: WithAgentRuntimeEnrollmentCredentialProvider contradicts WithAgentRuntimeOTPProvider; a lazy one-shot credential provider cannot use the account OTP path", ErrInvalidRegisterConfig)
+	}
+	return nil
+}
+
 // requireHub returns the pinned Hub trust root, or the recorded resolution
 // failure for a config that has none. Callers invoke it exactly where a Hub
 // exchange becomes necessary, so opening completed state never demands a trust
@@ -577,8 +599,11 @@ func (c *nativeAgentRuntimeConfig) validateOfflineOpenOptions() error {
 	if !c.offlineOpen {
 		return nil
 	}
-	if c.enrollCredential != "" {
+	if c.enrollCredentialSet {
 		return fmt.Errorf("%w: WithAgentRuntimeOfflineOpen contradicts WithAgentRuntimeEnrollmentCredential; enrollment needs the network an offline open forbids, so pass one or the other", ErrInvalidRegisterConfig)
+	}
+	if c.enrollCredentialProvider != nil {
+		return fmt.Errorf("%w: WithAgentRuntimeOfflineOpen contradicts WithAgentRuntimeEnrollmentCredentialProvider; enrollment needs the network an offline open forbids, so pass one or the other", ErrInvalidRegisterConfig)
 	}
 	if c.otpProvider != nil {
 		return fmt.Errorf("%w: WithAgentRuntimeOfflineOpen contradicts WithAgentRuntimeOTPProvider; OTP enrollment needs the network an offline open forbids, so pass one or the other", ErrInvalidRegisterConfig)
@@ -787,8 +812,8 @@ func (c *nativeAgentRuntimeConfig) registerLocked(ctx context.Context, store Age
 	// registration, so the missing piece is the registration itself, not the
 	// callback. Name what is actually absent and every real way to supply it.
 	if state.PendingActivation == nil && state.PendingCompletion == nil &&
-		c.enrollCredential == "" && c.otpProvider == nil {
-		return nil, fmt.Errorf("%w: nothing is registered in this state store and no enrollment credential or OTP provider is configured; enroll out of band (an installer) and reuse its store, or pass WithAgentRuntimeEnrollmentCredential — with WithAgentRuntimeOTPProvider for the default account one-time-code enrollment: %w", ErrInvalidRegisterConfig, ErrAgentStateNotFound)
+		!c.enrollCredentialSet && c.enrollCredentialProvider == nil && c.otpProvider == nil {
+		return nil, fmt.Errorf("%w: nothing is registered in this state store and no enrollment credential or OTP provider is configured; enroll out of band (an installer) and reuse its store, or pass WithAgentRuntimeEnrollmentCredential or WithAgentRuntimeEnrollmentCredentialProvider — with WithAgentRuntimeOTPProvider for the default account one-time-code enrollment: %w", ErrInvalidRegisterConfig, ErrAgentStateNotFound)
 	}
 	// Only an attempt that will actually enroll needs the provider, so a completed
 	// state still reopens with no options. Checking here keeps the failure ahead
@@ -861,8 +886,15 @@ func (c *nativeAgentRuntimeConfig) registerLocked(ctx context.Context, store Age
 	// native marker, so the save block below is skipped) requires the same
 	// credential to corroborate its durable fingerprint; a transaction with no
 	// pending activation needs it to obtain a fresh Hub assignment.
-	if err := validateRecoverableEnrollmentCredential(enrollmentCredential); err != nil {
-		return nil, err
+	//
+	// Validate an explicit credential before any fresh identity save, preserving
+	// the eager option's fail-before-mutation contract. A provider is different:
+	// its request needs the stable agent id, so that id is saved first and its
+	// result is validated immediately after the one callback.
+	if c.enrollCredentialProvider == nil {
+		if err := validateRecoverableEnrollmentCredential(enrollmentCredential); err != nil {
+			return nil, err
+		}
 	}
 	// With no pending activation to resume, the very next step after the save
 	// below is a fresh Hub assignment. Require the trust root now, while nothing
@@ -882,6 +914,19 @@ func (c *nativeAgentRuntimeConfig) registerLocked(ctx context.Context, store Age
 		state.SchemaVersion = agentStateSchemaVersion
 		if err := store.SaveAgentState(ctx, state); err != nil {
 			return nil, fmt.Errorf("%w: save initial native identity: %w", ErrAgentBindingPersistence, err)
+		}
+	}
+	if c.enrollCredentialProvider != nil {
+		request := AgentEnrollmentCredentialRequest{
+			AgentID:                   state.AgentID,
+			PendingActivationRecovery: state.PendingActivation != nil,
+		}
+		enrollmentCredential, err = c.enrollCredentialProvider(ctx, request)
+		if err != nil {
+			return nil, fmt.Errorf("qurl: enrollment credential provider: %w", err)
+		}
+		if err := validateRecoverableEnrollmentCredential(enrollmentCredential); err != nil {
+			return nil, err
 		}
 	}
 

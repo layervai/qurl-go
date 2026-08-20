@@ -79,8 +79,9 @@ func openRegisteredAgentWithIdentity(ctx context.Context, store AgentStateStore,
 // recover with an explicit RefreshAgentRuntime.
 //
 // Enrollment needs the network this option forbids, so combining it with
-// WithAgentRuntimeEnrollmentCredential or WithAgentRuntimeOTPProvider fails
-// with ErrInvalidRegisterConfig.
+// WithAgentRuntimeEnrollmentCredential,
+// WithAgentRuntimeEnrollmentCredentialProvider, or
+// WithAgentRuntimeOTPProvider fails with ErrInvalidRegisterConfig.
 //
 // It is deliberately not a ClientOption: it means nothing to the resource-only
 // OpenRegisteredAgent or to NewClient, so those must not silently accept it. It
@@ -344,6 +345,8 @@ func (b *AgentRuntimeBinding) attachRenewal(store AgentStateStore, cfg *nativeAg
 	// of the process just because the lifecycle call was given one.
 	renewalCfg.deviceCredential = ""
 	renewalCfg.enrollCredential = ""
+	renewalCfg.enrollCredentialSet = false
+	renewalCfg.enrollCredentialProvider = nil
 	renewalCfg.otpProvider = nil
 	b.renewal = &agentRuntimeRenewal{store: baseAgentStateStore(store), hub: *cfg.hub, cfg: &renewalCfg}
 }
