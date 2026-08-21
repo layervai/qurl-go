@@ -1,0 +1,346 @@
+# Attended schema-v2 registration canary. This workflow is deliberately
+# main-only and deliberately does not inspect or mutate qurl-service storage.
+# The protected Environment reviewer authenticates the private cross-repository
+# receipts supplied at dispatch; github.token cannot read those sibling repos.
+name: OTP schema-v2 registration canary
+
+run-name: OTP schema-v2 canary (attended)
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_qurl_go_main_sha:
+        description: Exact current qurl-go main commit (40 lowercase hex)
+        required: true
+        type: string
+      authority_image_digest:
+        description: Final Authority writer digest published before convergence
+        required: true
+        type: string
+      nhp_writer_convergence_run_url:
+        description: Reviewed NHP convergence run completed before reset
+        required: true
+        type: string
+      nhp_writer_convergence_main_sha:
+        description: Exact NHP main commit for that run (40 lowercase hex)
+        required: true
+        type: string
+      reset_inventory_pass_run_url:
+        description: Reviewed post-convergence reset inventory PASS run URL
+        required: true
+        type: string
+      reset_manifest_sha256:
+        description: Reviewed post-convergence reset manifest SHA-256
+        required: true
+        type: string
+      receipts_reviewed:
+        description: I reviewed the private PASS/convergence receipts above
+        required: true
+        default: false
+        type: boolean
+
+concurrency:
+  # Serialize designated qurl-go canaries and never cancel after a one-time code
+  # may have been issued or a registration may have committed. Other sanctioned
+  # sandbox writers can still race. The protected server-side verifier binds
+  # this run's linked commitment instead of claiming an uncontended aggregate
+  # delta.
+  group: otp-schema-v2-canary
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  authorize:
+    name: Review receipts and authorize current main
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # This job is the only Environment deployment. It receives neither OIDC
+    # permission nor secrets; approval authenticates the private sibling-repo
+    # receipts, then this job binds them to the still-current qurl-go main.
+    environment: otp-schema-v2-canary
+    permissions:
+      contents: read
+    outputs:
+      main_sha: ${{ steps.bind.outputs.main_sha }}
+    steps:
+      - name: Checkout dispatched commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate receipts and bind current main
+        id: bind
+        env:
+          EXPECTED_MAIN_SHA: ${{ inputs.expected_qurl_go_main_sha }}
+          RESET_INVENTORY_RUN_URL: ${{ inputs.reset_inventory_pass_run_url }}
+          RESET_MANIFEST_SHA256: ${{ inputs.reset_manifest_sha256 }}
+          NHP_CONVERGENCE_RUN_URL: ${{ inputs.nhp_writer_convergence_run_url }}
+          NHP_CONVERGENCE_MAIN_SHA: ${{ inputs.nhp_writer_convergence_main_sha }}
+          AUTHORITY_IMAGE_DIGEST: ${{ inputs.authority_image_digest }}
+          RECEIPTS_REVIEWED: ${{ inputs.receipts_reviewed }}
+        run: |
+          set -euo pipefail
+
+          if [ "${GITHUB_REPOSITORY}" != "layervai/qurl-go" ] || [ "${GITHUB_REF}" != "refs/heads/main" ]; then
+            echo "::error::this attended canary may be dispatched only from layervai/qurl-go main"
+            exit 1
+          fi
+          if [ "${RECEIPTS_REVIEWED}" != "true" ]; then
+            echo "::error::receipts_reviewed must be true before protected approval"
+            exit 1
+          fi
+          if [[ ! "${EXPECTED_MAIN_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::expected_qurl_go_main_sha must be exactly 40 lowercase hex characters"
+            exit 1
+          fi
+          if [[ ! "${RESET_INVENTORY_RUN_URL}" =~ ^https://github\.com/layervai/qurl-service/actions/runs/[1-9][0-9]*$ ]]; then
+            echo "::error::reset_inventory_pass_run_url must name one qurl-service Actions run"
+            exit 1
+          fi
+          if [[ ! "${RESET_MANIFEST_SHA256}" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::reset_manifest_sha256 must be exactly 64 lowercase hex characters"
+            exit 1
+          fi
+          if [[ ! "${NHP_CONVERGENCE_RUN_URL}" =~ ^https://github\.com/layervai/nhp/actions/runs/[1-9][0-9]*$ ]]; then
+            echo "::error::nhp_writer_convergence_run_url must name one NHP Actions run"
+            exit 1
+          fi
+          if [[ ! "${NHP_CONVERGENCE_MAIN_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::nhp_writer_convergence_main_sha must be exactly 40 lowercase hex characters"
+            exit 1
+          fi
+          if [[ ! "${AUTHORITY_IMAGE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::authority_image_digest must be one immutable sha256 digest"
+            exit 1
+          fi
+
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          checked_out_sha="$(git rev-parse HEAD)"
+          current_main_sha="$(git rev-parse refs/remotes/origin/main)"
+          if [ "${GITHUB_SHA}" != "${EXPECTED_MAIN_SHA}" ] || \
+             [ "${checked_out_sha}" != "${EXPECTED_MAIN_SHA}" ] || \
+             [ "${current_main_sha}" != "${EXPECTED_MAIN_SHA}" ]; then
+            echo "::error::dispatch SHA, checked-out SHA, reviewed SHA, and current origin/main must be identical"
+            exit 1
+          fi
+          echo "main_sha=${current_main_sha}" >> "${GITHUB_OUTPUT}"
+
+      - name: Record the credential-free authorization
+        env:
+          MAIN_SHA: ${{ steps.bind.outputs.main_sha }}
+          RESET_INVENTORY_RUN_URL: ${{ inputs.reset_inventory_pass_run_url }}
+          RESET_MANIFEST_SHA256: ${{ inputs.reset_manifest_sha256 }}
+          NHP_CONVERGENCE_RUN_URL: ${{ inputs.nhp_writer_convergence_run_url }}
+          NHP_CONVERGENCE_MAIN_SHA: ${{ inputs.nhp_writer_convergence_main_sha }}
+          AUTHORITY_IMAGE_DIGEST: ${{ inputs.authority_image_digest }}
+        run: |
+          {
+            echo "## Credential-free canary authorization"
+            echo
+            echo "- qurl-go main: \`${MAIN_SHA}\`"
+            echo "- final Authority writer image: \`${AUTHORITY_IMAGE_DIGEST}\`"
+            echo "- reviewed NHP writer convergence: ${NHP_CONVERGENCE_RUN_URL}"
+            echo "- NHP main: \`${NHP_CONVERGENCE_MAIN_SHA}\`"
+            echo "- reviewed post-convergence reset inventory PASS: ${RESET_INVENTORY_RUN_URL}"
+            echo "- post-convergence reset manifest SHA-256: \`${RESET_MANIFEST_SHA256}\`"
+            echo
+            echo "The protected reviewer, not this repository token, authenticated"
+            echo "the private sibling-repository conclusions and commit provenance."
+            echo "This Environment job had no id-token permission and received no secrets."
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  canary:
+    name: Register one schema-v2 agent and warm-open it
+    needs: authorize
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Deliberately no Environment here. GitHub OIDC changes `sub` to an
+    # environment subject when a job declares one. Keeping the registration
+    # job outside the Environment preserves the narrowly reviewed qurl-go main
+    # OIDC subject while `needs: authorize` carries the human approval result.
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout the authorized commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.authorize.outputs.main_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Main can advance after the credential-free authorization job exits and
+      # before this runner starts. Re-fetch again before OIDC, secrets, or any
+      # registration so approved stale code cannot mutate sandbox.
+      - name: Re-fetch and require the authorized current main before credentials
+        env:
+          AUTHORIZED_MAIN_SHA: ${{ needs.authorize.outputs.main_sha }}
+          EXPECTED_MAIN_SHA: ${{ inputs.expected_qurl_go_main_sha }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          checked_out_sha="$(git rev-parse HEAD)"
+          current_main_sha="$(git rev-parse refs/remotes/origin/main)"
+          if [ "${GITHUB_REF}" != "refs/heads/main" ] || \
+             [ "${GITHUB_SHA}" != "${AUTHORIZED_MAIN_SHA}" ] || \
+             [ "${EXPECTED_MAIN_SHA}" != "${AUTHORIZED_MAIN_SHA}" ] || \
+             [ "${checked_out_sha}" != "${AUTHORIZED_MAIN_SHA}" ] || \
+             [ "${current_main_sha}" != "${AUTHORIZED_MAIN_SHA}" ]; then
+            echo "::error::qurl-go main advanced or the approved run no longer matches authorization; dispatch a fresh run"
+            exit 1
+          fi
+
+      - name: Require protected canary configuration
+        env:
+          ROLE_ARN: ${{ secrets.OTP_E2E_ROLE_ARN }}
+          HUB_HOST: ${{ secrets.OTP_E2E_HUB_HOST }}
+          HUB_PORT: ${{ secrets.OTP_E2E_HUB_PORT }}
+          HUB_KEY: ${{ secrets.OTP_E2E_HUB_SERVER_KEY }}
+          ENROLLMENT_POOL: ${{ secrets.OTP_E2E_ENROLLMENT_POOL }}
+          AGENT_ID: ${{ secrets.OTP_E2E_AGENT_ID }}
+          MAILBOX_QUEUE_URL: ${{ secrets.OTP_E2E_MAILBOX_QUEUE_URL }}
+          MAILBOX_BUCKET: ${{ secrets.OTP_E2E_MAILBOX_BUCKET }}
+          MAILBOX_RECIPIENT: ${{ secrets.OTP_E2E_MAILBOX_RECIPIENT }}
+          MAILBOX_REGION: ${{ secrets.OTP_E2E_MAILBOX_REGION }}
+        run: |
+          set -euo pipefail
+          for name in ROLE_ARN HUB_HOST HUB_PORT HUB_KEY ENROLLMENT_POOL AGENT_ID \
+                      MAILBOX_QUEUE_URL MAILBOX_BUCKET MAILBOX_RECIPIENT MAILBOX_REGION; do
+            if [ -z "${!name}" ]; then
+              echo "::error::required canary configuration ${name} is absent"
+              exit 1
+            fi
+          done
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.work
+          cache: true
+
+      - name: Configure ephemeral mailbox credentials
+        uses: aws-actions/configure-aws-credentials@f503a1870408dcf2c35d5c2b8a68e69211042c7d # v4.1.0
+        with:
+          role-to-assume: ${{ secrets.OTP_E2E_ROLE_ARN }}
+          aws-region: ${{ secrets.OTP_E2E_MAILBOX_REGION }}
+          role-session-name: qurl-go-otp-schema-v2-${{ github.run_id }}
+          mask-aws-account-id: true
+
+      # No -v: successful tests print no agent identity or live topology. The
+      # test itself asserts a non-empty device API key id, then reopens the same
+      # sealed temp state and proves the credential id, agent id, key,
+      # timestamp, and OTP count are unchanged. Only after that warm open does
+      # it write one linked, non-secret binding commitment. The raw binding
+      # fields never enter a runner file. AllowedRegistrationKeyKinds(Account)
+      # keeps this on the real ConnectAgentRuntime account-credential writer.
+      - name: Register with emailed OTP and assert device credential warm-open
+        env:
+          QURL_OTP_E2E_STRICT: "1"
+          QURL_OTP_E2E_HUB_HOST: ${{ secrets.OTP_E2E_HUB_HOST }}
+          QURL_OTP_E2E_HUB_PORT: ${{ secrets.OTP_E2E_HUB_PORT }}
+          QURL_OTP_E2E_HUB_SERVER_KEY: ${{ secrets.OTP_E2E_HUB_SERVER_KEY }}
+          QURL_OTP_E2E_ENROLLMENT_POOL: ${{ secrets.OTP_E2E_ENROLLMENT_POOL }}
+          QURL_OTP_E2E_AGENT_ID: ${{ secrets.OTP_E2E_AGENT_ID }}
+          QURL_OTP_E2E_MAILBOX_QUEUE_URL: ${{ secrets.OTP_E2E_MAILBOX_QUEUE_URL }}
+          QURL_OTP_E2E_MAILBOX_BUCKET: ${{ secrets.OTP_E2E_MAILBOX_BUCKET }}
+          QURL_OTP_E2E_MAILBOX_RECIPIENT: ${{ secrets.OTP_E2E_MAILBOX_RECIPIENT }}
+          QURL_OTP_E2E_MAILBOX_REGION: ${{ secrets.OTP_E2E_MAILBOX_REGION }}
+          QURL_OTP_E2E_CANARY_COMMITMENT_PATH: ${{ runner.temp }}/canary-binding-commitment.json
+        run: |
+          umask 077
+          go test -count=1 ./tests/e2e/nativeudp/ \
+            -run '^TestEmailedOTPCompletesIdempotentSDKRegistration$' \
+            -timeout 15m
+
+      - name: Verify the canonical non-secret commitment
+        id: commitment
+        env:
+          COMMITMENT_PATH: ${{ runner.temp }}/canary-binding-commitment.json
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import stat
+
+          path = os.environ["COMMITMENT_PATH"]
+          flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+          fd = os.open(path, flags)
+          try:
+              info = os.fstat(fd)
+              if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600:
+                  raise SystemExit("commitment must be a regular mode-0600 file")
+              with os.fdopen(fd, "rb", closefd=False) as receipt:
+                  raw = receipt.read()
+          finally:
+              os.close(fd)
+
+          def exact_object(pairs):
+              keys = [key for key, _ in pairs]
+              expected = ["schema_version", "binding_sha256", "github_run_id", "github_run_attempt"]
+              if keys != expected:
+                  raise SystemExit("commitment keys, order, or uniqueness are invalid")
+              return dict(pairs)
+
+          try:
+              value = json.loads(raw.decode("utf-8"), object_pairs_hook=exact_object)
+          except (UnicodeDecodeError, json.JSONDecodeError) as error:
+              raise SystemExit("commitment is not strict UTF-8 JSON") from error
+
+          if type(value["schema_version"]) is not int or value["schema_version"] != 1:
+              raise SystemExit("commitment schema_version must be numeric 1")
+          if not isinstance(value["binding_sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", value["binding_sha256"]):
+              raise SystemExit("commitment binding_sha256 must be 64 lowercase hex characters")
+          for key, environment in (("github_run_id", "GITHUB_RUN_ID"), ("github_run_attempt", "GITHUB_RUN_ATTEMPT")):
+              if type(value[key]) is not int or value[key] <= 0 or value[key] != int(os.environ[environment]):
+                  raise SystemExit(f"commitment {key} does not match this workflow run")
+          canonical = (json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+          if raw != canonical:
+              raise SystemExit("commitment is not canonical compact JSON plus LF")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"binding_sha256={value['binding_sha256']}\n")
+          print(f"verified binding commitment {value['binding_sha256']} for run {value['github_run_id']} attempt {value['github_run_attempt']}")
+          PY
+
+      - name: Publish the linked binding commitment
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: otp-schema-v2-canary-commitment-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/canary-binding-commitment.json
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: false
+
+      - name: Record the non-secret canary receipt
+        env:
+          BINDING_SHA256: ${{ steps.commitment.outputs.binding_sha256 }}
+        run: |
+          {
+            echo "## OTP schema-v2 canary"
+            echo
+            echo "- schema version: \`1\`"
+            echo "- binding SHA-256: \`${BINDING_SHA256}\`"
+            echo "- qurl-go run id: \`${GITHUB_RUN_ID}\`"
+            echo "- qurl-go run attempt: \`${GITHUB_RUN_ATTEMPT}\`"
+            echo
+            echo "The linked commitment contains no raw agent id, public key, or device API key id."
+            echo "The separately protected qurl-service verifier must authenticate this run and match exactly one linked server-side binding before rollout."
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Remove the runner-local commitment
+        if: always()
+        env:
+          COMMITMENT_PATH: ${{ runner.temp }}/canary-binding-commitment.json
+        run: |
+          rm -f -- "${COMMITMENT_PATH}"
+          if [ -e "${COMMITMENT_PATH}" ] || [ -L "${COMMITMENT_PATH}" ]; then
+            echo "::error::runner-local canary commitment cleanup failed"
+            exit 1
+          fi
