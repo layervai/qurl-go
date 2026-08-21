@@ -376,7 +376,11 @@ func TestEmailedOTPCompletesIdempotentSDKRegistration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open sealed agent state: %v", err)
 	}
-	t.Cleanup(func() { _ = store.Close() })
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("close sealed agent state: %v", err)
+		}
+	})
 
 	// The mailbox harness binds each delivered message to this agent id (it
 	// matches the Connector ID rendered in the email body), so concurrent gate
@@ -416,8 +420,7 @@ func TestEmailedOTPCompletesIdempotentSDKRegistration(t *testing.T) {
 	if binding.DeviceAPIKeyID == "" {
 		t.Fatal("registration produced no device API key id")
 	}
-	t.Logf("EVIDENCE emailed OTP completed registration: agent=%s cell=%s generation=%d credential=slot %d of %d",
-		binding.AgentID, binding.CellID, binding.AssignmentGeneration,
+	t.Logf("EVIDENCE emailed OTP completed registration with credential slot %d of %d",
 		cfg.enrollmentSlot, cfg.enrollmentPoolSize)
 
 	// ── Idempotency ──
@@ -458,11 +461,10 @@ func TestEmailedOTPCompletesIdempotentSDKRegistration(t *testing.T) {
 	// mint a new device API key. Everything else could plausibly match while
 	// a duplicate credential was created behind it.
 	if replayBinding.DeviceAPIKeyID != binding.DeviceAPIKeyID {
-		t.Fatalf("device API key id changed across re-registration: %q -> %q; a second credential was minted",
-			binding.DeviceAPIKeyID, replayBinding.DeviceAPIKeyID)
+		t.Fatal("device API key id changed across re-registration; a second credential was minted")
 	}
 	if replayBinding.AgentID != binding.AgentID {
-		t.Fatalf("agent id changed across re-registration: %q -> %q", binding.AgentID, replayBinding.AgentID)
+		t.Fatal("agent id changed across re-registration")
 	}
 	if replayBinding.PublicKeyB64 != binding.PublicKeyB64 {
 		t.Fatal("device public key changed across re-registration; the runtime re-keyed instead of warm-opening")
@@ -485,6 +487,12 @@ func TestEmailedOTPCompletesIdempotentSDKRegistration(t *testing.T) {
 	// warm-open behaviour should break this test, not be absorbed by it.
 	if calls, fresh := mailbox.snapshot(); calls != 1 || !fresh {
 		t.Fatalf("OTP provider calls = %d after re-registration; want the original one and no second code", calls)
+	}
+	if path := os.Getenv(otpE2ECanaryCommitmentPathEnv); path != "" {
+		if err := writeOTPE2ECanaryCommitment(path, binding,
+			os.Getenv("GITHUB_RUN_ID"), os.Getenv("GITHUB_RUN_ATTEMPT")); err != nil {
+			t.Fatalf("write OTP canary binding commitment: %v", err)
+		}
 	}
 	t.Log("EVIDENCE re-registration warm-opened the same credential with no second OTP")
 }

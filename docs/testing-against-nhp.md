@@ -225,9 +225,21 @@ so existing cancellation handling keeps working.
 Interoperability evidence for a release used to come from the attended `Native
 UDP sandbox proof` workflow, which ran a full authenticated lifecycle on a fresh
 server-minted credential and published an evidence manifest. That proof was
-retired in August 2026 along with the NHP-side controller that dispatched it, so
-there is currently no automated release-evidence gate; ad-hoc developer testing
-against sandbox is the remaining option and its limits above still apply.
+retired in August 2026 along with the NHP-side controller that dispatched it.
+
+There is now one narrower attended rollout canary:
+[`otp-schema-v2-canary.yml`](../.github/workflows/otp-schema-v2-canary.yml)
+registers exactly one SDK agent with a real emailed code and asserts warm-open
+idempotency. It is main-only, protected by a dedicated reviewed Environment,
+and ordered after a separately governed qurl-service reset/PASS receipt. It does
+not grant qurl-go storage authority. Instead, after warm-open it emits one
+short-lived linked binding commitment with no raw identifiers; a separately
+protected qurl-service read-only verifier must authenticate the exact run,
+match the complete server-side triple, and issue PASS. The canary is not a
+replacement for the retired general proof and not an automated release gate.
+See [OTP schema-v2 registration canary](otp-schema-v2-canary.md) for its exact
+scope, verifier contract, blocker, and rollout order. Ad-hoc developer testing
+against sandbox remains available, with the limits above still applying.
 
 The loopback fault-path suite (`TestNativeUDPClientFaultPaths` in
 `tests/e2e/nativeudp`) is unaffected and still runs in ordinary CI — it covers
