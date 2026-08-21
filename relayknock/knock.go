@@ -72,7 +72,15 @@ func BuildKnock(inp *KnockInputs) ([]byte, error) {
 // relayknock/nativeudp.
 func BuildMessage(headerType int, inp *KnockInputs) ([]byte, error) {
 	switch headerType {
-	case TypeKnock, TypeListRequest, TypeReknock, TypeOTP, TypeRegister, TypeExit:
+	case TypeExit:
+		if inp == nil {
+			return nil, fmt.Errorf("message inputs must not be nil")
+		}
+		if len(inp.Body) != 0 || inp.Compress {
+			return nil, fmt.Errorf("NHP_EXT must have an empty, uncompressed body")
+		}
+		return nhpwire.BuildMessage(headerType, inp.WireInputs())
+	case TypeKnock, TypeListRequest, TypeReknock, TypeOTP, TypeRegister:
 		return nhpwire.BuildMessage(headerType, inp.WireInputs())
 	default:
 		return nil, fmt.Errorf("unsupported initiator header type %d (want TypeKnock, TypeListRequest, TypeReknock, TypeOTP, TypeRegister, or TypeExit)", headerType)
@@ -109,17 +117,17 @@ const (
 	// TypeRegister is NHP_REG: the agent registration message; the server
 	// answers with an NHP_RAK.
 	TypeRegister = nhpwire.TypeREG
-	// TypeExit is NHP_EXT: a clean exit for an admitted session. Native UDP carries
-	// it directly; browser relay callers can carry a built packet with RelayPost.
-	// The server answers it with an NHP_ACK and never an NHP_COK.
+	// TypeExit is NHP_EXT: a bodyless, one-way clean exit for every active access
+	// session owned by the authenticated agent. It is reserved for whole-agent
+	// shutdown; the server sends no reply.
 	TypeExit = nhpwire.TypeEXT
 )
 
 // Exported NHP reply header-type values, so a consumer can construct or assert a
 // Reply.Type (e.g. in tests) without importing the internal wire constants. These
-// are the only reply types the initiator messages above can elicit: KNK is
-// answered with ACK or COK, LST with LRT, RKN and EXT with ACK, REG with RAK,
-// and OTP is never answered at all.
+// are the only reply types the round-trip initiator messages above can elicit:
+// KNK is answered with ACK or COK, LST with LRT, RKN with ACK, and REG with RAK.
+// OTP and EXT are one-way and never receive a protocol response.
 const (
 	// TypeACK is NHP_ACK: an authorized-admission reply carrying the application
 	// payload in Body.

@@ -75,11 +75,11 @@
       "requirement": "Force assigned-cell COK and prove the SDK's RKN receives the authenticated ACK."
     },
     {
-      "id": "session.public_api_exit_success",
+      "id": "session.public_api_global_exit_dispatch",
       "owner": "qurl-go",
       "status": "implemented",
-      "test_name": "TestSandboxNativeUDPLifecycle/assigned_cell_clean_exit",
-      "requirement": "Call ExitRegisteredAgentSession with the exact public session identity and receive SDK success."
+      "test_name": "TestSandboxNativeUDPLifecycle/assigned_cell_global_exit_dispatch",
+      "requirement": "Call ExitRegisteredAgentSessions only at whole-agent shutdown and observe one bodyless NHP_EXT dispatch with no protocol response."
     },
     {
       "id": "assignment.authenticated_refresh",
@@ -341,11 +341,11 @@
       "requirement": "Attribute the exact Hub LST/COK/cookie-bound proof-LST/LRT, assigned-cell REG/RAK, and completion LST/LRT packet sequence to the ephemeral agent."
     },
     {
-      "id": "wire.session_knk_ack_ext_ack",
+      "id": "wire.session_knk_ack_global_ext",
       "owner": "nhp-orchestrator",
       "status": "external_dependency",
-      "test_name": "TestSandboxWireEvidence/session_knk_ack_ext_ack",
-      "requirement": "Attribute the exact assigned-cell KNK/COK/RKN/ACK and EXT/ACK sequence to one ephemeral session, prove the same RunID is preserved across KNK, any RKN, and EXT, then prove the next session cycle rotates to a different RunID."
+      "test_name": "TestSandboxWireEvidence/session_knk_ack_global_ext",
+      "requirement": "Attribute the assigned-cell KNK/COK/RKN/ACK session and the separate bodyless one-way NHP_EXT to the authenticated agent, confirm EXT has no RunID or ACK, and confirm a replacement session is not retired with EXT."
     },
     {
       "id": "identity.public_resource_id_distinct_from_knock_resource_id",

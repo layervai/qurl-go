@@ -154,74 +154,74 @@ func TestNativeUDPClientFaultPaths(t *testing.T) {
 	}
 	httpTrap := installLifecycleHTTPTrap(t)
 	t.Run("hub_dns_failure", func(t *testing.T) {
-		proveHubDNSFailure(t.Context(), t, hub, httpTrap)
+		validateHubDNSFailure(t.Context(), t, hub, httpTrap)
 	})
 	t.Run("packet_timeout", func(t *testing.T) {
-		provePacketTimeout(t.Context(), t, hub, httpTrap)
+		validatePacketTimeout(t.Context(), t, hub, httpTrap)
 	})
 	t.Run("wrong_hub_key", func(t *testing.T) {
-		proveWrongHubKey(t.Context(), t, httpTrap)
+		validateWrongHubKey(t.Context(), t, httpTrap)
 	})
 	t.Run("wrong_cell_key", func(t *testing.T) {
-		proveWrongCellKey(t.Context(), t, httpTrap)
+		validateWrongCellKey(t.Context(), t, httpTrap)
 	})
 	t.Run("oversize_packet", func(t *testing.T) {
-		provePacketOversize(t.Context(), t, httpTrap)
+		validatePacketOversize(t.Context(), t, httpTrap)
 	})
 	t.Run("cell_dns_failure", func(t *testing.T) {
-		proveCellDNSFailure(t.Context(), t, httpTrap)
+		validateCellDNSFailure(t.Context(), t, httpTrap)
 	})
 	t.Run("remaining_phase_timeouts", func(t *testing.T) {
-		provePacketRemainingPhaseTimeouts(t.Context(), t, httpTrap)
+		validatePacketRemainingPhaseTimeouts(t.Context(), t, httpTrap)
 	})
 	t.Run("malformed_packet", func(t *testing.T) {
-		provePacketMalformed(t.Context(), t, httpTrap)
+		validatePacketMalformed(t.Context(), t, httpTrap)
 	})
 	t.Run("packet_duplicate", func(t *testing.T) {
-		provePacketDuplicate(t.Context(), t, httpTrap)
+		validatePacketDuplicate(t.Context(), t, httpTrap)
 	})
 	t.Run("hub_dns_address_refresh", func(t *testing.T) {
-		proveHubDNSAddressRefresh(t.Context(), t, httpTrap)
+		validateHubDNSAddressRefresh(t.Context(), t, httpTrap)
 	})
 	t.Run("cell_dns_address_refresh", func(t *testing.T) {
-		proveCellDNSAddressRefresh(t.Context(), t, httpTrap)
+		validateCellDNSAddressRefresh(t.Context(), t, httpTrap)
 	})
 	t.Run("multi_address_ipv4_ipv6_bounds", func(t *testing.T) {
-		proveMultiAddressBounds(t.Context(), t, httpTrap)
+		validateMultiAddressBounds(t.Context(), t, httpTrap)
 	})
 	t.Run("packet_cancellation", func(t *testing.T) {
-		provePacketCancellation(t.Context(), t, httpTrap)
+		validatePacketCancellation(t.Context(), t, httpTrap)
 	})
 	t.Run("packet_loss", func(t *testing.T) {
-		provePacketLoss(t.Context(), t, httpTrap)
+		validatePacketLoss(t.Context(), t, httpTrap)
 	})
 	t.Run("packet_delay", func(t *testing.T) {
-		provePacketDelay(t.Context(), t, httpTrap)
+		validatePacketDelay(t.Context(), t, httpTrap)
 	})
 	t.Run("packet_replay", func(t *testing.T) {
-		provePacketReplay(t.Context(), t, httpTrap)
+		validatePacketReplay(t.Context(), t, httpTrap)
 	})
 	t.Run("packet_reorder", func(t *testing.T) {
-		provePacketReorder(t.Context(), t, httpTrap)
+		validatePacketReorder(t.Context(), t, httpTrap)
 	})
 	t.Run("unknown_message", func(t *testing.T) {
-		provePacketUnknownMessage(t.Context(), t, httpTrap)
+		validatePacketUnknownMessage(t.Context(), t, httpTrap)
 	})
 	t.Run("public_resource_and_knock_resource_id_wire_distinction", func(t *testing.T) {
-		provePublicResourceAndKnockResourceIDWireDistinction(t.Context(), t, httpTrap)
+		validatePublicResourceAndKnockResourceIDWireDistinction(t.Context(), t, httpTrap)
 	})
 	t.Run("hub_cookie_proof_lst_return_routability", func(t *testing.T) {
-		proveHubCookieProofRoutability(t.Context(), t, httpTrap)
+		validateHubCookieProofRoutability(t.Context(), t, httpTrap)
 	})
 	t.Run("assigned_cell_cookie_reknock_return_routability", func(t *testing.T) {
-		proveCellCookieReknockRoutability(t.Context(), t, httpTrap)
+		validateCellCookieReknockRoutability(t.Context(), t, httpTrap)
 	})
 	t.Run("authenticated_invalid_assignment_matrix", func(t *testing.T) {
-		proveAuthenticatedInvalidAssignmentMatrix(t.Context(), t, httpTrap)
+		validateAuthenticatedInvalidAssignmentMatrix(t.Context(), t, httpTrap)
 	})
 }
 
-func proveHubDNSFailure(ctx context.Context, t *testing.T, hub qurl.HubBootstrap, httpTrap *lifecycleHTTPTrap) {
+func validateHubDNSFailure(ctx context.Context, t *testing.T, hub qurl.HubBootstrap, httpTrap *lifecycleHTTPTrap) {
 	t.Helper()
 	const agentID = "qurl-go-fault-proof-dns"
 	store := faultStateStore(t)
@@ -269,7 +269,7 @@ func proveHubDNSFailure(ctx context.Context, t *testing.T, hub qurl.HubBootstrap
 	t.Log("EVIDENCE hub_dns_failure attempts=1 resolver_calls=1 dial_calls=0 lifecycle_http_calls=0")
 }
 
-func provePacketTimeout(ctx context.Context, t *testing.T, hub qurl.HubBootstrap, httpTrap *lifecycleHTTPTrap) {
+func validatePacketTimeout(ctx context.Context, t *testing.T, hub qurl.HubBootstrap, httpTrap *lifecycleHTTPTrap) {
 	t.Helper()
 	const (
 		agentID        = "qurl-go-fault-proof-timeout"

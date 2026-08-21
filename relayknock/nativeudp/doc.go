@@ -13,11 +13,11 @@
 // Round-trip initiator messages are NHP_LST (answered by NHP_LRT; the dedicated
 // Hub assignment profile first requires one NHP_COK→fresh proof NHP_LST),
 // NHP_KNK (answered directly by NHP_ACK or, once, by NHP_COK→NHP_RKN→NHP_ACK),
-// NHP_REG (answered exactly by NHP_RAK), and NHP_EXT (answered exactly by
-// NHP_ACK). Generic LST and REG never accept a cookie challenge. Only
+// and NHP_REG (answered exactly by NHP_RAK). Bodyless NHP_EXT and NHP_OTP are
+// one-way messages and never receive a protocol response. Generic LST and REG never accept a cookie challenge. Only
 // AssignmentList accepts the Hub's return-routability COK and sends one proof
 // LST with the exact body, fresh packet material, exclusive proof flag, and raw
-// cookie mixed into the digest. RKN and EXT accept only an echoed-counter ACK. An
+// cookie mixed into the digest. RKN accepts only an echoed-counter ACK. An
 // authenticated KNK→COK signal is classified before the ordinary counter gate
 // because its wire counter is deliberately unconstrained; the decrypted COK
 // body must instead carry the original KNK transaction id. The exact decoded

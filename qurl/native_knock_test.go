@@ -37,7 +37,6 @@ func TestMarshalNativeSessionApplicationBody_ConformanceSessionVectors(t *testin
 	}{
 		{name: "knock", headerType: nhpKNKHeaderType, packet: vectors.OverloadReknock.KnockRequest},
 		{name: "reknock", headerType: nhpRKNHeaderType, packet: vectors.OverloadReknock.ReknockRequest},
-		{name: "exit", headerType: nhpEXTHeaderType, packet: vectors.CleanExit.Request},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var fields nativeAgentKnockBody
@@ -56,6 +55,9 @@ func TestMarshalNativeSessionApplicationBody_ConformanceSessionVectors(t *testin
 			}
 		})
 	}
+	if _, err := marshalNativeSessionApplicationBody("agent-01", "connector-01", NativeKnockOptions{RunID: "0123456789abcdef"}, nhpEXTHeaderType); !errors.Is(err, ErrInvalidNativeKnockInput) {
+		t.Fatalf("EXT body error = %v, want ErrInvalidNativeKnockInput", err)
+	}
 	if _, err := marshalNativeSessionApplicationBody("agent-01", "connector-01", NativeKnockOptions{RunID: "0123456789abcdef"}, 7); !errors.Is(err, ErrInvalidNativeKnockInput) {
 		t.Fatalf("unsupported session header error = %v, want ErrInvalidNativeKnockInput", err)
 	}
@@ -72,7 +74,6 @@ func TestInterpretNativeAgentKnockReply_ConformanceSessionACKs(t *testing.T) {
 		ack     conformance.AgentSessionPacket
 	}{
 		{name: "reknock", request: vectors.OverloadReknock.ReknockRequest, ack: vectors.OverloadReknock.ACK},
-		{name: "exit", request: vectors.CleanExit.Request, ack: vectors.CleanExit.ACK},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var request nativeAgentKnockBody

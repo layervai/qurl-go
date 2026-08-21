@@ -274,7 +274,6 @@ func TestCorrelateDecryptedReply_AgentSessionTransitions(t *testing.T) {
 		ack         conformance.AgentSessionPacket
 	}{
 		{name: "reknock", requestType: relayknock.TypeReknock, request: f.OverloadReknock.ReknockRequest, ack: f.OverloadReknock.ACK},
-		{name: "exit", requestType: relayknock.TypeExit, request: f.CleanExit.Request, ack: f.CleanExit.ACK},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			counter, err := strconv.ParseUint(tc.request.Counter, 10, 64)
@@ -298,7 +297,7 @@ func TestCorrelateDecryptedReply_AgentSessionTransitions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, requestType := range []int{relayknock.TypeReknock, relayknock.TypeExit} {
+	for _, requestType := range []int{relayknock.TypeReknock} {
 		if _, err := decryptAndCorrelate(agentPriv, cellPub, requestType, counter, cokPacket); !errors.Is(err, relayknock.ErrMalformedReply) {
 			t.Fatalf("type %d accepted COK: %v", requestType, err)
 		}
@@ -373,6 +372,13 @@ func TestExchange_ValidatesBeforeIO(t *testing.T) {
 			name:    "one-way header type (OTP)",
 			ep:      Endpoint{Host: "cell0.nhp.test", Port: 62206, ServerStaticPub: goodPub},
 			ht:      relayknock.TypeOTP,
+			opts:    Options{DeviceStaticPriv: goodPriv, Resolver: failResolver},
+			wantErr: ErrInvalidRequest,
+		},
+		{
+			name:    "one-way header type (EXT)",
+			ep:      Endpoint{Host: "cell0.nhp.test", Port: 62206, ServerStaticPub: goodPub},
+			ht:      relayknock.TypeExit,
 			opts:    Options{DeviceStaticPriv: goodPriv, Resolver: failResolver},
 			wantErr: ErrInvalidRequest,
 		},

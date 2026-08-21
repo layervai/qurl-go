@@ -25,7 +25,7 @@ var approvedArtifactUploadPaths = []string{
 	"${{ runner.temp }}/typed_evidence_contract.json",
 }
 
-const reviewedTypedEvidenceContractRawSHA256 = "f4b37aceb2dd55f2c1cf6d7ec4e955cfeb69297ff6151b565935d03d01f65d08"
+const reviewedTypedEvidenceContractRawSHA256 = "c73f2a0cbdc25bdd7b5cfa138aa4509e3a05055f5d033a1eea36e671fe1089e9"
 
 func canonicalTypedEvidenceJSON(t *testing.T, value any) []byte {
 	t.Helper()
