@@ -102,7 +102,7 @@ type AssignmentRegistration struct {
 
 // InitialAgentAssignment is the validated initial hub result. Registration,
 // AssignmentTicket, and AssignmentTicketExpiresAt are ephemeral at this
-// transport boundary; RegisterAgentRuntime persists their exact values into
+// transport boundary; ConnectAgentRuntime persists their exact values into
 // PendingAgentActivation before REG so an ambiguous/lost RAK can replay the
 // same one-shot authorization. This transport slice treats the ticket as
 // 1-2304 opaque printable non-space ASCII bytes (0x21-0x7e); assigned-cell

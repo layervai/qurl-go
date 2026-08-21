@@ -1348,7 +1348,7 @@ func TestSealedFileAgentState_SetupLockFailuresFailClosed(t *testing.T) {
 		networkCalls++
 		return nil, errors.New("network must not be used on completed runtime fast path")
 	})
-	client, binding, err := RegisterAgentRuntime(context.Background(), "unused-on-runtime-fast-path", store,
+	client, binding, err := connectWithEnrollment(context.Background(), "unused-on-runtime-fast-path", store,
 		WithAgentRuntimeHub(runtimeTestHub()),
 		WithAgentClientHTTPClient(refusing),
 	)
@@ -1374,7 +1374,7 @@ func TestSealedFileAgentState_SetupLockFailuresFailClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 	store.dir.impl.hooks.syncFD = func(int) error { return lockFailure }
-	if _, _, err := RegisterAgentRuntime(context.Background(), "enrollment-key", store, WithAgentRuntimeHub(runtimeTestHub())); !errors.Is(err, ErrAgentSetupLock) || !errors.Is(err, lockFailure) {
+	if _, _, err := connectWithEnrollment(context.Background(), "enrollment-key", store, WithAgentRuntimeHub(runtimeTestHub())); !errors.Is(err, ErrAgentSetupLock) || !errors.Is(err, lockFailure) {
 		t.Fatalf("acquire failure = %v, want ErrAgentSetupLock", err)
 	}
 	store.dir.impl.hooks.syncFD = originalSync

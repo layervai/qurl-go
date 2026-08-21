@@ -230,14 +230,14 @@ jobs:
       - name: Run Claude Code Review
         id: claude_review
         if: steps.review_origin.outputs.ready == 'true'
-        # v1.0.180 fails when the SDK returns `is_error: true`; older action
-        # versions could report that provider failure as a green review.
-        uses: anthropics/claude-code-action@1623c36729ac1cd5895198cded705a287de7db79 # v1.0.187
+        # v1.0.183 fails when the SDK returns `is_error: true` and is the last
+        # audited release whose API-signing path leaves origin credential-free.
+        uses: anthropics/claude-code-action@be7b93b1907a4abad570368f3c74b6fe3807510b # v1.0.183
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ github.token }}
-          # Agent mode otherwise rewrites origin with this token. API-signing
-          # mode skips that Git auth path; repository-write tools remain denied.
+          # Agent mode otherwise rewrites origin with this token. At the audited
+          # pin, API-signing skips that path; repository-write tools remain denied.
           use_commit_signing: true
           classify_inline_comments: false
           prompt: |

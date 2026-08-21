@@ -23,7 +23,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/secretsmanager v1.44.4
 	github.com/aws/aws-sdk-go-v2/service/ssm v1.73.4
 	github.com/aws/smithy-go v1.27.6 // indirect
-	github.com/layervai/qurl-go v0.5.2
+	github.com/layervai/qurl-go v0.5.3
 )
 
 require (

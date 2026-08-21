@@ -4,29 +4,65 @@ Most recipients do not need this SDK. They open the qURL link directly.
 
 Opening a portal does not require LayerV credentials or issuer setup.
 
+## Link Transport
+
+Full qURL links use the share-safe `qv2t1` fragment transport. It splits each
+encoded qv2 field into deterministic chunks no longer than 240 characters, so
+messaging clients can recognize the entire capability as one link:
+
+```text
+#qv2t1.<claims-count>.<secret-count>.<signature-count>.<claims-chunks...>.<secret-chunks...>.<signature-chunks...>
+```
+
+The SDK reconstructs the exact signed qv2 bytes before verification; it never
+decodes and reserializes claims. The fragment still carries the private
+credential and is not included in HTTP requests to the link origin. Full links
+using the pre-release `#qv2.<claims>.<secret>.<signature>` transport are rejected.
+
+Use `qurl.IsCredentialLink(link)` only when deciding whether a URL must go
+through the qURL opener instead of a plain HTTP fetch. It intentionally returns
+true for malformed links that declare `qv2t1`, so they fail closed in
+`VerifyLink` or `EnterPortal` rather than falling through to an unsafe fetch.
+
 ## Programmatic Opening
 
 Use this SDK only when your Go service or agent needs to open received qURL links
-in code. Install opener trust config once at startup, then call `EnterPortal`
-anywhere you receive a link:
+in code. Call `EnterPortal` anywhere you receive a link:
 
 ```go
-portal, err := qurl.EnterPortal(ctx, link)
+handle, err := qurl.EnterPortal(ctx, link)
 if err != nil {
 	return err
 }
 
-fmt.Println(portal.ResourceURL)
+fmt.Println(handle.ResourceURL)
 ```
 
-The opener trust config is not an issuer credential. It cannot protect URLs or
+Opener trust config is not an issuer credential. It cannot protect URLs or
 create portals; it only tells the SDK which LayerV-issued qURL links and
-platform access endpoints this process should trust.
+platform access endpoints this process should trust. With no provider installed
+— the common case — `EnterPortal` resolves that config from the JSON deployment
+file named by `QURL_DEPLOYMENT`, falling back to the deployment embedded in the
+build.
 
-For pinned opener trust config, install a `StaticProvider` during startup:
+## Pinning the Opener Trust Config
+
+To pin the trust config in code instead, install a `StaticProvider` during
+startup. What you hand `NewStaticProvider` decides the transport every open
+uses:
+
+- **Cells, no allowlist** — native UDP only. A cell in the catalog is knocked
+  directly over UDP; a verified link naming a cell outside the catalog fails
+  with `qurl.ErrCellNotInCatalog` rather than quietly downgrading to the HTTPS
+  relay.
+- **Cells and an allowlist** — native UDP for cataloged cells, HTTPS relay
+  fallback for any other cell, gated by the allowlist.
+- **Allowlist, no cells** — every open uses the HTTPS relay.
+
+The strict pinned form supplies issuer keys and cells, and no allowlist:
 
 ```go
-func installPinnedOpener(issuerKID string, issuerPublicKeyDER []byte, platformHosts []string) error {
+func installPinnedOpener(issuerKID string, issuerPublicKeyDER []byte, cells []qurl.CellEntry) error {
 	trustStore, err := qurl.NewTrustStoreFromDER(map[string][]byte{
 		issuerKID: issuerPublicKeyDER,
 	})
@@ -34,10 +70,8 @@ func installPinnedOpener(issuerKID string, issuerPublicKeyDER []byte, platformHo
 		return err
 	}
 
-	provider, err := qurl.NewStaticProvider(
-		trustStore,
-		qurl.NewRelayAllowlist(platformHosts),
-	)
+	// A nil allowlist declares native UDP the only transport this opener uses.
+	provider, err := qurl.NewStaticProvider(trustStore, nil, cells)
 	if err != nil {
 		return err
 	}
@@ -47,18 +81,46 @@ func installPinnedOpener(issuerKID string, issuerPublicKeyDER []byte, platformHo
 }
 ```
 
-LayerV opener setup gives you the issuer key id, issuer public key, and allowed
-platform hosts for the links this process is allowed to open.
+Each `CellEntry` mirrors one row of your deployment catalog: the cell's label,
+its LayerV-owned DNS name, the standard NHP UDP port, and its 32-byte X25519
+server key in base64:
+
+```go
+cells := []qurl.CellEntry{{
+	CellID:             "cell-1",
+	Host:               cellHost, // from your deployment catalog
+	Port:               443,
+	ServerPublicKeyB64: cellServerKeyB64,
+}}
+```
+
+To keep the relay as a fallback for cells outside the catalog, pass an
+allowlist as well:
+
+```go
+provider, err := qurl.NewStaticProvider(
+	trustStore,
+	qurl.NewRelayAllowlist(platformHosts),
+	cells,
+)
+```
+
+LayerV opener setup gives you the issuer key id, issuer public key, cell
+catalog entries, and allowed platform hosts for the links this process is
+allowed to open.
 
 ## Errors
 
 ```go
-portal, err := qurl.EnterPortal(ctx, link)
+handle, err := qurl.EnterPortal(ctx, link)
 switch {
 case err == nil:
-	use(portal.ResourceURL)
+	use(handle.ResourceURL)
 case errors.Is(err, qurl.ErrNotConfigured):
 	reportMissingOpenerTrustConfig()
+case errors.Is(err, qurl.ErrCellNotInCatalog):
+	// Native-UDP-only opener; the verified link names a cell outside its catalog.
+	reject()
 case errors.Is(err, qurl.ErrSignature), errors.Is(err, qurl.ErrUnknownKID):
 	reject()
 default:
@@ -71,5 +133,8 @@ default:
 }
 ```
 
-`EnterPortal` fails closed when no provider is installed or the link cannot be
-verified.
+`EnterPortal` fails closed when the resolved deployment carries no issuer keys
+— a build that ships an empty deployment and has no `QURL_DEPLOYMENT` override
+or installed provider, and equally a `QURL_DEPLOYMENT` file whose `issuers`
+list is empty, returns `qurl.ErrNoDeployment`, which matches
+`errors.Is(err, qurl.ErrNotConfigured)` — and when the link cannot be verified.

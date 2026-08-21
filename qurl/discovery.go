@@ -199,6 +199,12 @@ var (
 // error (fail closed) rather than serving stale config. Concurrent Resolve calls
 // are safe.
 //
+// TRANSPORT — relay-only. The manifest wire format carries issuer keys and a
+// relay allowlist but NO cell endpoints, so a DiscoveryProvider does not
+// implement CellProvider and every open it serves uses the HTTPS relay
+// transport (see CellProvider for the rule). Pinning native UDP cells belongs
+// to a StaticProvider, a deployment file, or an explicit Config.Cells.
+//
 // NO CACHING — operational cost. Because every Resolve does a fresh HTTPS GET +
 // authenticate, EnterPortal pays a network round-trip to the manifest endpoint on
 // EVERY link open, and a down/slow manifest endpoint fails every open even while a
@@ -266,9 +272,9 @@ func NewDiscoveryProvider(cfg DiscoveryConfig) (*DiscoveryProvider, error) {
 // the caller fetch the current manifest.
 //
 // A nil receiver (a caller that ignored NewDiscoveryProvider's construction error and
-// installed the nil *DiscoveryProvider) fails closed with ErrNotConfigured rather than
-// panicking on the p.cfg field read — the same fail-closed footgun guard StaticProvider
-// has.
+// installed the nil *DiscoveryProvider) fails closed, returning ErrNotConfigured rather
+// than panicking on the p.cfg field read — the same fail-closed footgun guard
+// StaticProvider has.
 func (p *DiscoveryProvider) Resolve(ctx context.Context) (*TrustStore, *RelayAllowlist, error) {
 	if p == nil {
 		return nil, nil, fmt.Errorf("%w: no discovery provider is installed", ErrNotConfigured)

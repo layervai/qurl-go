@@ -87,17 +87,22 @@ func ParseFragment(fragment string) (*Fragment, error) {
 	return frag, nil
 }
 
-// FragmentFromLink extracts the fragment body from a full qURL link
-// (https://qurl.link/#qv2.<claims>.<secret>.<sig>) and parses it. It splits on
-// the first "#" so a URL with query parameters before the fragment is handled
-// correctly; a link with no "#" is rejected as a fragment-shape error. The
-// signature is NOT verified here — call Verify / ParseAndVerify.
+// FragmentFromLink extracts the qv2t1 transport fragment from a full qURL link,
+// reconstructs the exact canonical qv2 fragment, and parses it. It splits on the
+// first "#" so a URL with query parameters before the fragment is handled
+// correctly. Legacy #qv2 full-link transport is intentionally rejected; callers
+// that work directly with canonical cryptographic fragments use ParseFragment.
+// The signature is NOT verified here — call Verify / ParseAndVerify.
 func FragmentFromLink(qurlLink string) (*Fragment, error) {
 	hash := strings.IndexByte(qurlLink, '#')
 	if hash < 0 {
-		return nil, fmt.Errorf("%w: qURL link has no '#qv2.…' fragment", ErrFragment)
+		return nil, fmt.Errorf("%w: qURL link has no credential fragment", ErrFragment)
 	}
-	return ParseFragment(qurlLink[hash+1:])
+	canonical, err := DecodeTransportFragment(qurlLink[hash+1:])
+	if err != nil {
+		return nil, err
+	}
+	return ParseFragment(canonical)
 }
 
 // Verify checks the issuer signature against the trust store. It resolves the

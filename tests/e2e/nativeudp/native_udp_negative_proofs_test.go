@@ -11,14 +11,11 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"net/http"
-	"net/http/httptest"
 	"net/netip"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -98,6 +95,10 @@ type loopbackFaultConfig struct {
 	// replyBody replaces the default {"ok":true} body for the one identity
 	// binding proof that drives the public registered-agent admission parser.
 	replyBody []byte
+
+	// replyBodies selects an application body by NHP reply type when one proof
+	// drives multiple phases through the same assigned-cell endpoint.
+	replyBodies map[int][]byte
 }
 
 // loopbackNHPServer is a loopback NHP responder. It opens the agent's initiator
@@ -131,6 +132,13 @@ func newLoopbackNHPServer(t *testing.T, serverPriv, agentPub []byte, behavior nh
 		t.Fatalf("listen udp: %v", err)
 	}
 	fault.replyBody = bytes.Clone(fault.replyBody)
+	if fault.replyBodies != nil {
+		cloned := make(map[int][]byte, len(fault.replyBodies))
+		for replyType, body := range fault.replyBodies {
+			cloned[replyType] = bytes.Clone(body)
+		}
+		fault.replyBodies = cloned
+	}
 	s := &loopbackNHPServer{
 		t:              t,
 		conn:           conn,
@@ -332,6 +340,9 @@ func (s *loopbackNHPServer) buildResponse(msg *relayknock.Reply) []byte {
 // agent static public key.
 func (s *loopbackNHPServer) buildReply(replyType int, serverPriv []byte, counter uint64) []byte {
 	body := s.fault.replyBody
+	if selected, ok := s.fault.replyBodies[replyType]; ok {
+		body = selected
+	}
 	if len(body) == 0 {
 		body = []byte(`{"ok":true}`)
 	}
@@ -1017,7 +1028,8 @@ func provePacketCancellation(ctx context.Context, t *testing.T, httpTrap *lifecy
 	registerCtx, cancelRegister := context.WithCancel(ctx)
 	registerTimer := time.AfterFunc(cancelAfterFirst, cancelRegister)
 	started := time.Now()
-	client, binding, err := qurl.RegisterAgentRuntime(registerCtx, nonSecretFaultCredential, store, //nolint:staticcheck // deliberately exercises the deprecated wrapper: ConnectAgentRuntime supersedes it, but the compatibility path must keep working.
+	client, binding, err := qurl.ConnectAgentRuntime(registerCtx, store,
+		qurl.WithAgentRuntimeEnrollmentCredential(nonSecretFaultCredential),
 		qurl.WithAgentRuntimeHub(hub),
 		qurl.WithAgentRuntimeIdentity(agentID),
 		qurl.WithAgentRuntimeHeadlessEnrollment(),
@@ -1631,7 +1643,8 @@ func provePacketLoss(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTPT
 		Port:               standardNHPUDPPort,
 		ServerPublicKeyB64: base64.StdEncoding.EncodeToString(serverPub),
 	}
-	client, binding, err := qurl.RegisterAgentRuntime(ctx, nonSecretFaultCredential, store, //nolint:staticcheck // deliberately exercises the deprecated wrapper: ConnectAgentRuntime supersedes it, but the compatibility path must keep working.
+	client, binding, err := qurl.ConnectAgentRuntime(ctx, store,
+		qurl.WithAgentRuntimeEnrollmentCredential(nonSecretFaultCredential),
 		qurl.WithAgentRuntimeHub(hub),
 		qurl.WithAgentRuntimeIdentity(agentID),
 		qurl.WithAgentRuntimeHeadlessEnrollment(),
@@ -1836,7 +1849,8 @@ func provePacketReplay(ctx context.Context, t *testing.T, httpTrap *lifecycleHTT
 		Port:               standardNHPUDPPort,
 		ServerPublicKeyB64: base64.StdEncoding.EncodeToString(reflectEP.ServerStaticPub),
 	}
-	client, binding, err := qurl.RegisterAgentRuntime(ctx, nonSecretFaultCredential, store, //nolint:staticcheck // deliberately exercises the deprecated wrapper: ConnectAgentRuntime supersedes it, but the compatibility path must keep working.
+	client, binding, err := qurl.ConnectAgentRuntime(ctx, store,
+		qurl.WithAgentRuntimeEnrollmentCredential(nonSecretFaultCredential),
 		qurl.WithAgentRuntimeHub(hub),
 		qurl.WithAgentRuntimeIdentity(agentID),
 		qurl.WithAgentRuntimeHeadlessEnrollment(),
@@ -2013,12 +2027,11 @@ func provePacketUnknownMessage(ctx context.Context, t *testing.T, httpTrap *life
 		unknownRejected, phaseInvalidRejected)
 }
 
-// provePublicResourceAndKnockResourceIDWireDistinction binds a producer-shaped
-// canonical P-256 public resource ID through EnsureConnectorResource, then uses
-// that returned resource's separate placement-only KnockResourceID in the public
-// registered-agent UDP API. The management call is completed and counted before
-// the zero-HTTP lifecycle interval begins; the decrypted NHP_KNK body proves the
-// public identity was not substituted into resId or copied elsewhere on wire.
+// provePublicResourceAndKnockResourceIDWireDistinction resolves a producer-shaped
+// canonical P-256 public resource ID through the assigned-cell NHP_LST, then uses
+// its distinct KnockResourceID in the subsequent NHP_KNK. Decrypting both packets
+// proves the whole binding-to-admission interval is native UDP and the public
+// identity is never substituted into KNK resId or copied elsewhere on that wire.
 func provePublicResourceAndKnockResourceIDWireDistinction(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTPTrap) {
 	t.Helper()
 	const (
@@ -2042,6 +2055,17 @@ func provePublicResourceAndKnockResourceIDWireDistinction(ctx context.Context, t
 
 	agentPriv, agentPub := mustNHPKeypair(t)
 	cellPriv, cellPub := mustNHPKeypair(t)
+	resourceBody := []byte(fmt.Sprintf(
+		`{"errCode":"0","list":{"query":"connector_resource","version":1,"agent_id":"qurl-go-identity-wire-proof","connector_id":%q,"resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"found_existing":false}}`,
+		resourceSlug, publicResourceID, routingID, knockResourceID))
+	ackBody := []byte(fmt.Sprintf(
+		`{"errCode":"0","resHost":{%q:"frps.cell0.example:7000"},"opnTime":900,"agentAddr":"203.0.113.9:49152","acTokens":{%q:"proof-token"},"preActions":{%q:null}}`,
+		knockResourceID, knockResourceID, knockResourceID))
+	server := newLoopbackNHPServer(t, cellPriv, agentPub, respondCorrectly, malformedHeaderReplyBytes,
+		loopbackFaultConfig{replyBodies: map[int][]byte{
+			relayknock.TypeListResult: resourceBody,
+			relayknock.TypeACK:        ackBody,
+		}})
 	registeredAt := time.Now().UTC()
 	store := faultStateStore(t)
 	if err := store.SaveAgentState(ctx, &qurl.AgentState{
@@ -2067,45 +2091,30 @@ func provePublicResourceAndKnockResourceIDWireDistinction(ctx context.Context, t
 		t.Fatalf("seed completed registered-agent state: %v", err)
 	}
 
-	var managementCalls atomic.Int32
-	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		managementCalls.Add(1)
-		if r.Method != http.MethodPost || r.URL.Path != "/v1/resources" || r.URL.RawQuery != "" {
-			http.Error(w, "unexpected request", http.StatusBadRequest)
-			return
-		}
-		if r.Header.Get("Authorization") != "Bearer "+deviceCredential {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-		var request struct {
-			Type         string `json:"type"`
-			Slug         string `json:"slug"`
-			FindOrCreate bool   `json:"find_or_create"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&request); err != nil ||
-			request.Type != "tunnel" || request.Slug != resourceSlug || !request.FindOrCreate {
-			http.Error(w, "invalid request", http.StatusBadRequest)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusCreated)
-		_, _ = fmt.Fprintf(w, `{"data":{"resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q},"meta":{"found_existing":false}}`,
-			publicResourceID, routingID, knockResourceID, resourceSlug)
-	}))
-	defer api.Close()
-
-	client, binding, err := qurl.OpenRegisteredAgentRuntime(ctx, store, //nolint:staticcheck // deliberately exercises the deprecated wrapper: ConnectAgentRuntime supersedes it, but the compatibility path must keep working.
-		qurl.WithAgentClientBaseURL(api.URL),
-		qurl.WithAgentClientHTTPClient(api.Client()),
-	)
+	client, binding, err := qurl.ConnectAgentRuntime(ctx, store, qurl.WithAgentClientHTTPClient(httpTrap))
 	if err != nil {
 		t.Fatalf("open completed registered-agent runtime: %v", err)
 	}
+	if client == nil {
+		t.Fatal("open completed registered-agent runtime returned nil client")
+	}
 	defer binding.Destroy()
-	resourceResult, err := client.EnsureConnectorResource(ctx, resourceSlug)
+	resolver := &scriptedResolver{answers: [][]netip.Addr{
+		{netip.MustParseAddr("8.8.8.8")},
+		{netip.MustParseAddr("8.8.8.8")},
+	}}
+	dialer := &addressRecordingDialer{port: server.port()}
+	request, err := qurl.NewNativeConnectorResourceRequest(resourceSlug, "")
 	if err != nil {
-		t.Fatalf("EnsureConnectorResource: %v", err)
+		t.Fatalf("new native Connector-resource request: %v", err)
+	}
+	resourceResult, err := qurl.ResolveRegisteredAgentConnectorResource(ctx, binding, request,
+		qurl.WithAgentRuntimeUDPResolver(resolver),
+		qurl.WithAgentRuntimeUDPDialer(dialer),
+		qurl.WithAgentRuntimeUDPBounds(2*time.Second, 1),
+	)
+	if err != nil {
+		t.Fatalf("ResolveRegisteredAgentConnectorResource: %v", err)
 	}
 	if resourceResult == nil || resourceResult.Resource == nil ||
 		resourceResult.Resource.ResourceID != publicResourceID ||
@@ -2113,18 +2122,8 @@ func provePublicResourceAndKnockResourceIDWireDistinction(ctx context.Context, t
 		resourceResult.Resource.ResourceID == resourceResult.Resource.KnockResourceID {
 		t.Fatalf("producer resource identity/admission binding = %#v", resourceResult)
 	}
-	if got := managementCalls.Load(); got != 1 {
-		t.Fatalf("management-plane resource calls = %d, want exactly 1 before native lifecycle proof", got)
-	}
 	assertNoLifecycleHTTP(t, httpTrap)
 
-	ackBody := []byte(fmt.Sprintf(
-		`{"errCode":"0","resHost":{%q:"frps.cell0.example:7000"},"opnTime":900,"agentAddr":"203.0.113.9:49152","acTokens":{%q:"proof-token"},"preActions":{%q:null}}`,
-		knockResourceID, knockResourceID, knockResourceID))
-	server := newLoopbackNHPServer(t, cellPriv, agentPub, respondCorrectly, malformedHeaderReplyBytes,
-		loopbackFaultConfig{replyBody: ackBody})
-	resolver := &scriptedResolver{answers: [][]netip.Addr{{netip.MustParseAddr("8.8.8.8")}}}
-	dialer := &addressRecordingDialer{port: server.port()}
 	privateKey := binding.TakeDeviceStaticPrivateKey()
 	defer wipe(privateKey)
 	result, err := qurl.KnockRegisteredAgent(ctx, binding, privateKey, resourceResult.Resource.KnockResourceID,
@@ -2140,10 +2139,37 @@ func provePublicResourceAndKnockResourceIDWireDistinction(ctx context.Context, t
 		t.Fatalf("native admission result = %v, want exact knock-resource admission", result)
 	}
 	packets := server.receivedPackets()
-	if len(packets) != 1 {
-		t.Fatalf("identity distinction emitted %d KNK packets, want exactly 1", len(packets))
+	if len(packets) != 2 {
+		t.Fatalf("identity distinction emitted %d packets, want one LST and one KNK", len(packets))
 	}
-	opened, err := relayknocktest.OpenInitiatorMessage(cellPriv, agentPub, packets[0])
+	openedLST, err := relayknocktest.OpenInitiatorMessage(cellPriv, agentPub, packets[0])
+	if err != nil {
+		t.Fatalf("open identity-distinction LST: %v", err)
+	}
+	if openedLST.Type != relayknock.TypeListRequest {
+		t.Fatalf("resource discovery packet type = %d, want NHP_LST", openedLST.Type)
+	}
+	var lstBody struct {
+		UserID        string `json:"usrId"`
+		DeviceID      string `json:"devId"`
+		AuthServiceID string `json:"aspId"`
+		UserData      struct {
+			Query        string `json:"query"`
+			Version      int    `json:"version"`
+			RequestNonce string `json:"request_nonce"`
+			ConnectorID  string `json:"connector_id"`
+		} `json:"usrData"`
+	}
+	if err := json.Unmarshal(openedLST.Body, &lstBody); err != nil {
+		t.Fatalf("decode identity-distinction LST body: %v", err)
+	}
+	if lstBody.UserID != "qurl-go-identity-wire-proof" || lstBody.DeviceID != lstBody.UserID ||
+		lstBody.AuthServiceID != "agent" || lstBody.UserData.Query != "connector_resource" ||
+		lstBody.UserData.Version != 1 || lstBody.UserData.RequestNonce == "" || lstBody.UserData.ConnectorID != resourceSlug ||
+		bytes.Contains(openedLST.Body, []byte(publicResourceID)) {
+		t.Fatalf("resource-discovery LST body = %s", openedLST.Body)
+	}
+	opened, err := relayknocktest.OpenInitiatorMessage(cellPriv, agentPub, packets[1])
 	if err != nil {
 		t.Fatalf("open identity-distinction KNK: %v", err)
 	}
@@ -2168,11 +2194,8 @@ func provePublicResourceAndKnockResourceIDWireDistinction(ctx context.Context, t
 		bytes.Contains(opened.Body, []byte(publicResourceID)) {
 		t.Fatalf("identity-distinction KNK body cross-wired public identity: fields=%d body=%s", len(wireFields), opened.Body)
 	}
-	if got := managementCalls.Load(); got != 1 {
-		t.Fatalf("native lifecycle made a management-plane HTTP call: total=%d", got)
-	}
 	assertNoLifecycleHTTP(t, httpTrap)
-	t.Log("EVIDENCE public_resource_and_knock_resource_id_wire_distinction public_resource_id_shape=canonical_P256_DER_SPKI producer_binding=accepted distinct_values=true nhp_resId=knock_resource_id public_resource_id_on_nhp_wire=0 management_http_calls_before_lifecycle=1 lifecycle_http_calls=0")
+	t.Log("EVIDENCE public_resource_and_knock_resource_id_wire_distinction public_resource_id_shape=canonical_P256_DER_SPKI producer_binding=accepted discovery=NHP_LST admission=NHP_KNK distinct_values=true nhp_resId=knock_resource_id public_resource_id_on_knk_wire=0 resource_http_calls=0 lifecycle_http_calls=0")
 }
 
 // proveHubCookieProofRoutability proves the Hub assignment return-routability
@@ -2418,7 +2441,8 @@ func hubAssignmentMatrix(t *testing.T, agentID, cellHost string, cellPort int) (
 func seedFaultAgentIdentity(ctx context.Context, t *testing.T, store qurl.AgentStateStore, agentID string, httpTrap *lifecycleHTTPTrap) []byte {
 	t.Helper()
 	_, serverPub := mustNHPKeypair(t)
-	client, binding, err := qurl.RegisterAgentRuntime(ctx, nonSecretFaultCredential, store, //nolint:staticcheck // deliberately exercises the deprecated wrapper: ConnectAgentRuntime supersedes it, but the compatibility path must keep working.
+	client, binding, err := qurl.ConnectAgentRuntime(ctx, store,
+		qurl.WithAgentRuntimeEnrollmentCredential(nonSecretFaultCredential),
 		qurl.WithAgentRuntimeHub(qurl.HubBootstrap{
 			Host:               "identity-seed-proof.nhp.layerv.ai",
 			Port:               standardNHPUDPPort,
@@ -2574,7 +2598,8 @@ func proveAuthenticatedInvalidAssignmentMatrix(ctx context.Context, t *testing.T
 		netip.AddrPortFrom(hubAddress, standardNHPUDPPort).String():  net.JoinHostPort("127.0.0.1", strconv.Itoa(hubExchange.endpoint.Port)),
 		netip.AddrPortFrom(cellAddress, standardNHPUDPPort).String(): net.JoinHostPort("127.0.0.1", strconv.Itoa(cellEP.Port)),
 	}}
-	client, binding, err := qurl.RegisterAgentRuntime(ctx, nonSecretFaultCredential, store, //nolint:staticcheck // deliberately exercises the deprecated wrapper: ConnectAgentRuntime supersedes it, but the compatibility path must keep working.
+	client, binding, err := qurl.ConnectAgentRuntime(ctx, store,
+		qurl.WithAgentRuntimeEnrollmentCredential(nonSecretFaultCredential),
 		qurl.WithAgentRuntimeHub(qurl.HubBootstrap{
 			Host:               hubHost,
 			Port:               standardNHPUDPPort,

@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	conformance "github.com/layervai/qurl-conformance"
@@ -41,13 +42,14 @@ func TestConformanceVectors(t *testing.T) {
 	// Every class named in the task must be present; a renamed/dropped class is a
 	// silent coverage loss, so assert the taxonomy up front.
 	for _, want := range []string{
-		"claims_parse", "secret_parse", "strict_base64",
+		"transport", "claims_parse", "secret_parse", "strict_base64",
 		"fragment", "relay_allowlist", "server_id",
 	} {
 		if _, ok := cf.Classes[want]; !ok {
 			t.Fatalf("conformance artifact missing required class %q", want)
 		}
 	}
+	assertTransportContract(t, cf.TransportContract)
 
 	// The reject_class field is the fixed cross-language vocabulary qurl-go and the
 	// js-agent share. Assert every reject vector declares a class from its own
@@ -60,8 +62,28 @@ func TestConformanceVectors(t *testing.T) {
 	t.Run("secret_parse", func(t *testing.T) { runSecretParseClass(t, cf.Classes["secret_parse"]) })
 	t.Run("strict_base64", func(t *testing.T) { runStrictBase64Class(t, cf.Classes["strict_base64"]) })
 	t.Run("fragment", func(t *testing.T) { runFragmentClass(t, cf.Classes["fragment"]) })
+	t.Run("transport", func(t *testing.T) { runTransportClass(t, cf.Classes["transport"]) })
 	t.Run("relay_allowlist", func(t *testing.T) { runRelayAllowlistClass(t, cf.Classes["relay_allowlist"]) })
 	t.Run("server_id", func(t *testing.T) { runServerIDClass(t, cf.Classes["server_id"]) })
+}
+
+func TestLoadConformanceBytesRejectsTransportContractDrift(t *testing.T) {
+	raw := conformance.QV2Vectors()
+	mutated := bytes.Replace(raw, []byte(`"component_max": 240`), []byte(`"component_max": 241`), 1)
+	if bytes.Equal(mutated, raw) {
+		t.Fatal("fixture mutation did not find component_max")
+	}
+	_, err := LoadConformanceBytes(mutated)
+	if err == nil || !strings.Contains(err.Error(), "transport constants") {
+		t.Fatalf("transport contract drift: want loader rejection, got %v", err)
+	}
+}
+
+func assertTransportContract(t *testing.T, contract ConformanceTransportContract) {
+	t.Helper()
+	if err := validateConformanceTransportContract(contract); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // runSignatureClass proves the signature class is COMPOSED, not duplicated: it
@@ -330,6 +352,33 @@ func runFragmentClass(t *testing.T, class ConformanceClass) {
 	}
 }
 
+// runTransportClass drives every normative qv2t1 envelope through the real
+// framing decoder. Accept vectors must reconstruct the exact presented qv2
+// bytes; reject vectors must preserve the public ErrFragment taxonomy.
+func runTransportClass(t *testing.T, class ConformanceClass) {
+	requireNonEmpty(t, "transport", class)
+	for _, v := range class.Vectors {
+		t.Run(v.Name, func(t *testing.T) {
+			canonical, err := DecodeTransportFragment(v.TransportFragment)
+			switch v.Expect {
+			case ExpectAccept:
+				if err != nil {
+					t.Fatalf("accept transport vector failed to decode: %v", err)
+				}
+				if canonical != v.CanonicalFragment {
+					t.Fatal("accept transport vector did not reconstruct exact canonical bytes")
+				}
+			case ExpectReject:
+				if !errors.Is(err, ErrFragment) {
+					t.Fatalf("reject transport vector must return ErrFragment, got %v", err)
+				}
+			default:
+				t.Fatalf("unknown expect %q", v.Expect)
+			}
+		})
+	}
+}
+
 // runRelayAllowlistClass builds the allowlist from each vector's entries and runs
 // ValidateRelayURL. Rejects must wrap ErrRelayURL.
 func runRelayAllowlistClass(t *testing.T, class ConformanceClass) {
@@ -419,6 +468,7 @@ func assertParseOutcome(t *testing.T, v ConformanceVector, err error) {
 // assertRejectClassVocabulary. The signature class is composed and stored in the
 // separate signature fixture, so it is not listed here.
 var allowedRejectClasses = map[string]map[string]struct{}{
+	"transport":       {rejectClassTransport: {}},
 	"claims_parse":    {rejectClassParse: {}},
 	"secret_parse":    {rejectClassParse: {}, rejectClassKeyLength: {}},
 	"strict_base64":   {rejectClassEncoding: {}},

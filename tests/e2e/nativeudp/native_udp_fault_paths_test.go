@@ -227,7 +227,8 @@ func proveHubDNSFailure(ctx context.Context, t *testing.T, hub qurl.HubBootstrap
 	store := faultStateStore(t)
 	resolver := &failureResolver{}
 	dialer := &redirectingDialer{}
-	client, binding, err := qurl.RegisterAgentRuntime(ctx, nonSecretFaultCredential, store, //nolint:staticcheck // deliberately exercises the deprecated wrapper: ConnectAgentRuntime supersedes it, but the compatibility path must keep working.
+	client, binding, err := qurl.ConnectAgentRuntime(ctx, store,
+		qurl.WithAgentRuntimeEnrollmentCredential(nonSecretFaultCredential),
 		qurl.WithAgentRuntimeHub(hub),
 		qurl.WithAgentRuntimeIdentity(agentID),
 		qurl.WithAgentRuntimeHeadlessEnrollment(),
@@ -281,7 +282,8 @@ func provePacketTimeout(ctx context.Context, t *testing.T, hub qurl.HubBootstrap
 	timeoutHub := hub
 	timeoutHub.Host = "timeout-proof.nhp.layerv.ai"
 	started := time.Now()
-	client, binding, err := qurl.RegisterAgentRuntime(ctx, nonSecretFaultCredential, store, //nolint:staticcheck // deliberately exercises the deprecated wrapper: ConnectAgentRuntime supersedes it, but the compatibility path must keep working.
+	client, binding, err := qurl.ConnectAgentRuntime(ctx, store,
+		qurl.WithAgentRuntimeEnrollmentCredential(nonSecretFaultCredential),
 		qurl.WithAgentRuntimeHub(timeoutHub),
 		qurl.WithAgentRuntimeIdentity(agentID),
 		qurl.WithAgentRuntimeHeadlessEnrollment(),

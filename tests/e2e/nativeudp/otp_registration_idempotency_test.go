@@ -376,7 +376,11 @@ func TestEmailedOTPCompletesIdempotentSDKRegistration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open sealed agent state: %v", err)
 	}
-	t.Cleanup(func() { _ = store.Close() })
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("close sealed agent state: %v", err)
+		}
+	})
 
 	// The mailbox harness binds each delivered message to this agent id (it
 	// matches the Connector ID rendered in the email body), so concurrent gate
@@ -390,8 +394,8 @@ func TestEmailedOTPCompletesIdempotentSDKRegistration(t *testing.T) {
 	// survive a drain and be long-polled afterwards.
 	mailbox := newOTPMailbox(cfg, time.Now().UTC(), otpE2EMailboxWait)
 
-	//nolint:staticcheck // RegisterAgentRuntime is the exact call this gate must protect.
-	client, binding, err := qurl.RegisterAgentRuntime(ctx, cfg.enrollment, store,
+	client, binding, err := qurl.ConnectAgentRuntime(ctx, store,
+		qurl.WithAgentRuntimeEnrollmentCredential(cfg.enrollment),
 		qurl.WithAgentRuntimeHub(cfg.hub),
 		qurl.WithAgentRuntimeIdentity(cfg.agentID),
 		// Assigned-cell REG carries these audit fields, and the authority
@@ -403,10 +407,10 @@ func TestEmailedOTPCompletesIdempotentSDKRegistration(t *testing.T) {
 		qurl.WithAgentRuntimeOTPProvider(mailbox.provide),
 	)
 	if err != nil {
-		t.Fatalf("RegisterAgentRuntime with an emailed OTP: %v", err)
+		t.Fatalf("ConnectAgentRuntime with an emailed OTP: %v", err)
 	}
 	if client == nil || binding == nil {
-		t.Fatal("RegisterAgentRuntime returned a nil client or binding")
+		t.Fatal("ConnectAgentRuntime returned a nil client or binding")
 	}
 	t.Cleanup(binding.Destroy)
 
@@ -416,8 +420,7 @@ func TestEmailedOTPCompletesIdempotentSDKRegistration(t *testing.T) {
 	if binding.DeviceAPIKeyID == "" {
 		t.Fatal("registration produced no device API key id")
 	}
-	t.Logf("EVIDENCE emailed OTP completed registration: agent=%s cell=%s generation=%d credential=slot %d of %d",
-		binding.AgentID, binding.CellID, binding.AssignmentGeneration,
+	t.Logf("EVIDENCE emailed OTP completed registration with credential slot %d of %d",
 		cfg.enrollmentSlot, cfg.enrollmentPoolSize)
 
 	// ── Idempotency ──
@@ -435,8 +438,8 @@ func TestEmailedOTPCompletesIdempotentSDKRegistration(t *testing.T) {
 		t.Fatalf("assignment lease already expired (%s); cannot assert warm-open idempotency", remaining)
 	}
 
-	//nolint:staticcheck // second call is the assertion.
-	replayClient, replayBinding, err := qurl.RegisterAgentRuntime(ctx, cfg.enrollment, store,
+	replayClient, replayBinding, err := qurl.ConnectAgentRuntime(ctx, store,
+		qurl.WithAgentRuntimeEnrollmentCredential(cfg.enrollment),
 		qurl.WithAgentRuntimeHub(cfg.hub),
 		qurl.WithAgentRuntimeIdentity(cfg.agentID),
 		qurl.WithAgentRuntimeAllowedRegistrationKeyKinds(qurl.RegistrationKeyKindAccount),
@@ -447,10 +450,10 @@ func TestEmailedOTPCompletesIdempotentSDKRegistration(t *testing.T) {
 		qurl.WithAgentRuntimeOTPProvider(mailbox.provide),
 	)
 	if err != nil {
-		t.Fatalf("second RegisterAgentRuntime must warm-open, got: %v", err)
+		t.Fatalf("second ConnectAgentRuntime must warm-open, got: %v", err)
 	}
 	if replayClient == nil || replayBinding == nil {
-		t.Fatal("second RegisterAgentRuntime returned a nil client or binding")
+		t.Fatal("second ConnectAgentRuntime returned a nil client or binding")
 	}
 	t.Cleanup(replayBinding.Destroy)
 
@@ -458,11 +461,10 @@ func TestEmailedOTPCompletesIdempotentSDKRegistration(t *testing.T) {
 	// mint a new device API key. Everything else could plausibly match while
 	// a duplicate credential was created behind it.
 	if replayBinding.DeviceAPIKeyID != binding.DeviceAPIKeyID {
-		t.Fatalf("device API key id changed across re-registration: %q -> %q; a second credential was minted",
-			binding.DeviceAPIKeyID, replayBinding.DeviceAPIKeyID)
+		t.Fatal("device API key id changed across re-registration; a second credential was minted")
 	}
 	if replayBinding.AgentID != binding.AgentID {
-		t.Fatalf("agent id changed across re-registration: %q -> %q", binding.AgentID, replayBinding.AgentID)
+		t.Fatal("agent id changed across re-registration")
 	}
 	if replayBinding.PublicKeyB64 != binding.PublicKeyB64 {
 		t.Fatal("device public key changed across re-registration; the runtime re-keyed instead of warm-opening")
@@ -485,6 +487,12 @@ func TestEmailedOTPCompletesIdempotentSDKRegistration(t *testing.T) {
 	// warm-open behaviour should break this test, not be absorbed by it.
 	if calls, fresh := mailbox.snapshot(); calls != 1 || !fresh {
 		t.Fatalf("OTP provider calls = %d after re-registration; want the original one and no second code", calls)
+	}
+	if path := os.Getenv(otpE2ECanaryCommitmentPathEnv); path != "" {
+		if err := writeOTPE2ECanaryCommitment(path, binding,
+			os.Getenv("GITHUB_RUN_ID"), os.Getenv("GITHUB_RUN_ATTEMPT")); err != nil {
+			t.Fatalf("write OTP canary binding commitment: %v", err)
+		}
 	}
 	t.Log("EVIDENCE re-registration warm-opened the same credential with no second OTP")
 }

@@ -61,7 +61,8 @@ type Deployment struct {
 	Hub *HubBootstrap `json:"hub,omitempty"`
 }
 
-// deploymentHub returns the shipped Hub trust root, if this build has one.
+// deploymentHub returns the resolved deployment's Hub trust root, if it has
+// one (the QURL_DEPLOYMENT file when set, the shipped deployment otherwise).
 //
 // Registration used to demand that every caller hand-assemble HubBootstrap from
 // a host, a port, and a base64 X25519 key it had to source out of band. That is
@@ -80,10 +81,10 @@ func deploymentHub() (*HubBootstrap, error) {
 	return &hub, nil
 }
 
-// ErrNoDeploymentHub reports that neither an explicit WithAgentRuntimeHub nor a
-// shipped deployment hub was available.
+// ErrNoDeploymentHub reports that neither an explicit caller-supplied Hub trust
+// root nor a deployment hub was available.
 var ErrNoDeploymentHub = fmt.Errorf(
-	"%w: no Hub trust root is configured (pass WithAgentRuntimeHub, or set %s to a deployment file with a \"hub\")",
+	"%w: no Hub trust root is configured (set %s to a deployment file with a \"hub\"; ConnectAgentRuntime also accepts WithAgentRuntimeHub, and RefreshAgentRuntime takes a HubBootstrap argument)",
 	ErrNotConfigured, EnvDeploymentPath,
 )
 
@@ -173,8 +174,6 @@ func (d *Deployment) config() (Config, error) {
 	return cfg, nil
 }
 
-// defaultDeploymentConfig resolves opener config from the environment override
-// or the shipped deployment, in that order.
 // resolveDeployment applies the deployment precedence exactly once: an explicit
 // QURL_DEPLOYMENT file if set, otherwise whatever this build shipped. Both the
 // opener config and the agent hub read through it so the two can never disagree
@@ -186,6 +185,8 @@ func resolveDeployment() (*Deployment, error) {
 	return parseDeployment(shippedDeploymentJSON, "(shipped)")
 }
 
+// defaultDeploymentConfig resolves opener config from the environment override
+// or the shipped deployment, in that order.
 func defaultDeploymentConfig() (Config, error) {
 	d, err := resolveDeployment()
 	if err != nil {

@@ -37,26 +37,32 @@ var frictionBudget = map[string]int{
 
 	// --- Issuing -------------------------------------------------------------
 	// Protect a URL and mint a link: open client, protect, create.
-	"ExampleOpenClient":                     3,
-	"ExampleClient_ProtectURL":              3,
-	"ExampleClient_EnsureConnectorResource": 3,
-	"ExampleClient_CreatePortal":            4,
+	"ExampleOpenClient":          3,
+	"ExampleClient_ProtectURL":   3,
+	"ExampleClient_CreatePortal": 4,
+	// Kill one minted link before it expires: open client, mint, revoke.
+	"ExampleClient_RevokePortal": 3,
 	// Mint a fresh access link for a stored identifier (either form): open
 	// client, resolve, print. The CRID trust story stays one optional call
 	// (ResolvedAccess.VerifyCRID), not setup.
 	"ExampleClient_ResolveResource": 3,
 	"ExampleNewClient":              5,
+	// Resolve a Connector binding through its already-registered assigned-cell
+	// session: open state, reopen the binding, create one replayable request,
+	// resolve, and print. The two defers are deterministic key/store cleanup.
+	"ExampleResolveRegisteredAgentConnectorResource": 8,
 	// The package overview: open a client, protect, create, print.
 	"Example": 4,
 
 	// --- Agent runtime -------------------------------------------------------
 	// Registration is the highest-friction scenario in the SDK and the one an
-	// integrator hits first. It was 12; removing the hand-assembled Hub trust
-	// root (the SDK now ships it, exactly as it ships issuer keys and cells)
-	// brought it to 11.
+	// integrator hits first. It was 12; making the hand-assembled Hub trust
+	// root an optional override — it now resolves from the deployment, via
+	// QURL_DEPLOYMENT until GA builds embed it — brought it to 11.
 	//
-	// 11 is the honest floor, not a concession. What remains is:
-	//   open agent state / register / take the device key / ensure the resource
+	// 12 is the honest floor, not a concession. What remains is:
+	//   open agent state / register / create the replay request / resolve the
+	//   resource / take the device key
 	//   / mint a cycle run ID / knock — plus the three defers that release the
 	//   store, the binding, and the key material.
 	//
@@ -71,12 +77,9 @@ var frictionBudget = map[string]int{
 	// Lower this only by moving real work into the SDK, never by weakening
 	// either of those.
 	// ConnectAgentRuntime is the single entry point a service calls on every
-	// start. It is budgeted at the same 11 as the registration call it
-	// supersedes: the credential moved from a positional argument into an
-	// option, which is a wash on statement count and removes the need to decide
-	// between two entry points at all.
-	"ExampleConnectAgentRuntime":     11,
-	"ExampleRegisterAgentRuntime":    11,
+	// start: the credential is an option rather than a positional argument, so
+	// one call shape covers enrolling, resuming, and reopening.
+	"ExampleConnectAgentRuntime":     12,
 	"ExampleNewSealedFileAgentState": 5,
 
 	// Headless enrollment is the escape hatch for a runtime with no mailbox, so
@@ -88,7 +91,7 @@ var frictionBudget = map[string]int{
 	// Recovery is one deliberate operator action, and the extra statement over
 	// headless enrollment is the Hub trust root: RecoverAgentRuntime rejects a
 	// call without WithAgentRuntimeRecoveryHub, so unlike registration it cannot
-	// fall back to the root the SDK ships. Teaching recovery that fallback is the
+	// fall back to the deployment's hub. Teaching recovery that fallback is the
 	// one honest way to get this to 6.
 	"ExampleRecoverAgentRuntime": 7,
 }
@@ -162,39 +165,67 @@ func TestBasicScenariosStayWithinFrictionBudget(t *testing.T) {
 	}
 }
 
+// The positive half of the closed-set rule, compile-enforced: the two
+// resource-client options are accepted by every lifecycle entry point — plain
+// client construction included — because the steady-state Client they configure
+// is built on all of them. Losing one of these acceptances would strand a
+// documented option, so pin the intent here next to the negative assertions.
+var (
+	_ qurl.ClientOption                   = qurl.WithAgentClientBaseURL("")
+	_ qurl.AgentRuntimeRegistrationOption = qurl.WithAgentClientBaseURL("")
+	_ qurl.AgentRuntimeRefreshOption      = qurl.WithAgentClientBaseURL("")
+	_ qurl.AgentRuntimeRecoveryOption     = qurl.WithAgentClientBaseURL("")
+	_ qurl.AgentRuntimeLifecycleOption    = qurl.WithAgentClientBaseURL("")
+	_ qurl.ClientOption                   = qurl.WithAgentClientHTTPClient(nil)
+	_ qurl.AgentRuntimeRegistrationOption = qurl.WithAgentClientHTTPClient(nil)
+	_ qurl.AgentRuntimeRefreshOption      = qurl.WithAgentClientHTTPClient(nil)
+	_ qurl.AgentRuntimeRecoveryOption     = qurl.WithAgentClientHTTPClient(nil)
+	_ qurl.AgentRuntimeLifecycleOption    = qurl.WithAgentClientHTTPClient(nil)
+)
+
 // Option sets in this SDK are closed on purpose: each entry point accepts only
 // the options that mean something to it, and the compiler is what enforces that.
 // The rule is easy to erode one convenient interface embed at a time, so assert
 // the boundaries rather than trusting review to catch it.
 func TestOptionSetsStayClosed(t *testing.T) {
+	// Compile-time proof of where the two renewal-policy options are accepted:
+	// offline open belongs to ConnectAgentRuntime alone, pinned assignment to
+	// both entry points that renew an assignment.
 	openOnly := qurl.WithAgentRuntimeOfflineOpen()
-	// The whole point of the closed open set: an option that means nothing to a
+	pinned := qurl.WithAgentRuntimePinnedAssignment()
+
+	// The whole point of the closed sets: an option that means nothing to a
 	// plain resource Client must not be silently accepted by one.
 	if _, isClient := openOnly.(qurl.ClientOption); isClient {
 		t.Error("WithAgentRuntimeOfflineOpen must not satisfy ClientOption; NewClient and OpenRegisteredAgent would accept and ignore it")
 	}
-
-	// Agent resource-client options are valid at the runtime open, because they
-	// configure the Client it returns.
-	for name, opt := range map[string]any{
-		"WithAgentClientBaseURL":    qurl.WithAgentClientBaseURL("https://example.test"),
-		"WithAgentClientHTTPClient": qurl.WithAgentClientHTTPClient(http.DefaultClient),
-	} {
-		if _, ok := opt.(qurl.AgentRuntimeOpenOption); !ok {
-			t.Errorf("%s must satisfy AgentRuntimeOpenOption", name)
-		}
+	if _, isClient := pinned.(qurl.ClientOption); isClient {
+		t.Error("WithAgentRuntimePinnedAssignment must not satisfy ClientOption; NewClient and OpenRegisteredAgent would accept and ignore it")
 	}
 
-	// Generic client options are not. OpenRegisteredAgentRuntime is a lifecycle
-	// entry point like RegisterAgentRuntime, and rejecting these at compile time
-	// is what replaced the old run-time WithIssuerStatePath check.
+	// Refresh and recovery exist to perform a network exchange, so the option
+	// that forbids one must not reach them; recovery exists to adopt the Hub
+	// placement, so the option that refuses adoption must not reach it either.
+	if _, ok := any(openOnly).(qurl.AgentRuntimeRefreshOption); ok {
+		t.Error("WithAgentRuntimeOfflineOpen must not satisfy AgentRuntimeRefreshOption; RefreshAgentRuntime is a network exchange")
+	}
+	if _, ok := any(openOnly).(qurl.AgentRuntimeRecoveryOption); ok {
+		t.Error("WithAgentRuntimeOfflineOpen must not satisfy AgentRuntimeRecoveryOption; RecoverAgentRuntime is a network exchange")
+	}
+	if _, ok := any(pinned).(qurl.AgentRuntimeRecoveryOption); ok {
+		t.Error("WithAgentRuntimePinnedAssignment must not satisfy AgentRuntimeRecoveryOption; recovery exists to adopt the Hub placement")
+	}
+
+	// Generic client options must not reach the lifecycle entry points.
+	// Rejecting these at compile time is what replaced the old run-time
+	// WithIssuerStatePath check.
 	for name, opt := range map[string]any{
 		"WithBaseURL":         qurl.WithBaseURL("https://example.test"),
 		"WithHTTPClient":      qurl.WithHTTPClient(http.DefaultClient),
 		"WithIssuerStatePath": qurl.WithIssuerStatePath("/tmp/x"),
 	} {
-		if _, ok := opt.(qurl.AgentRuntimeOpenOption); ok {
-			t.Errorf("%s must not satisfy AgentRuntimeOpenOption", name)
+		if _, ok := opt.(qurl.AgentRuntimeRegistrationOption); ok {
+			t.Errorf("%s must not satisfy AgentRuntimeRegistrationOption", name)
 		}
 	}
 
@@ -203,7 +234,7 @@ func TestOptionSetsStayClosed(t *testing.T) {
 	for name, opt := range map[string]any{
 		"WithAgentClientBaseURL":       qurl.WithAgentClientBaseURL("https://example.test"),
 		"WithAgentRuntimeOfflineOpen":  openOnly,
-		"WithAgentRuntimePinnedAssign": qurl.WithAgentRuntimePinnedAssignment(),
+		"WithAgentRuntimePinnedAssign": pinned,
 	} {
 		if _, ok := opt.(qurl.AgentRuntimeUDPOption); ok {
 			t.Errorf("%s must not satisfy AgentRuntimeUDPOption", name)

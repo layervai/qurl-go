@@ -66,13 +66,42 @@ func ExampleClient_CreatePortal() {
 	fmt.Println(portal.Link)
 }
 
-func ExampleClient_EnsureConnectorResource() {
+func ExampleClient_RevokePortal() {
 	client, err := qurl.OpenClient()
 	if err != nil {
 		panic(err)
 	}
 
-	result, err := client.EnsureConnectorResource(context.Background(), "prod-dashboard")
+	portal, err := client.ResourceByID(exampleResourcePublicKey).CreatePortal(context.Background(), qurl.ValidFor(time.Hour))
+	if err != nil {
+		panic(err)
+	}
+
+	// Revoke by the two ids the create call returned. Revoking a portal that
+	// is no longer active fails with ErrPortalRevoked.
+	err = client.RevokePortal(context.Background(), portal.ResourceID, portal.QURLID)
+	if err != nil {
+		panic(err)
+	}
+}
+
+func ExampleResolveRegisteredAgentConnectorResource() {
+	ctx := context.Background()
+	store, err := qurl.OpenFileAgentState("/var/lib/layerv/qurl/agent-state.json")
+	if err != nil {
+		panic(err)
+	}
+	defer store.Close()
+	_, binding, err := qurl.ConnectAgentRuntime(ctx, store, qurl.WithAgentRuntimeOfflineOpen())
+	if err != nil {
+		panic(err)
+	}
+	defer binding.Destroy()
+	request, err := qurl.NewNativeConnectorResourceRequest("prod-dashboard", "")
+	if err != nil {
+		panic(err)
+	}
+	result, err := qurl.ResolveRegisteredAgentConnectorResource(ctx, binding, request)
 	if err != nil {
 		panic(err)
 	}
@@ -98,7 +127,10 @@ func ExampleClient_ResolveResource() {
 		panic(err)
 	}
 
-	fmt.Println(access.QURL)
+	// Keep QURLID to revoke this one link later, without disturbing the
+	// resource's others: client.RevokePortal(ctx, resourceID, access.QURLID).
+	// Like Link, it is not retrievable after this call.
+	fmt.Println(access.Link, access.QURLID)
 }
 
 func ExampleOpenClient() {
@@ -138,49 +170,6 @@ func ExampleNewClient() {
 	}
 }
 
-func ExampleRegisterAgentRuntime() {
-	// Assignment, OTP, REG/RAK, and completion travel only over authenticated
-	// NHP UDP. Enrollment defaults to a one-time code emailed to the credential's
-	// address: whatever reads that mailbox — a service account, an agent with its
-	// own address, an operator — returns the code through the provider.
-	ctx := context.Background()
-	store, err := qurl.OpenFileAgentState("/var/lib/layerv/qurl/agent-state.json")
-	if err != nil {
-		panic(err)
-	}
-	defer store.Close()
-	// No hub wiring: the SDK ships the trust root for the deployment it was
-	// built to talk to. WithAgentRuntimeHub still overrides it when an operator
-	// runs their own.
-	client, binding, err := qurl.RegisterAgentRuntime(ctx, enrollmentCredentialFromInstaller(), store,
-		qurl.WithAgentRuntimeMetadata("connector-host", "1.0.0"),
-		qurl.WithAgentRuntimeOTPProvider(readOneTimeCodeFromMailbox),
-	)
-	if err != nil {
-		panic(err)
-	}
-	defer binding.Destroy()
-	devicePrivateKey := binding.TakeDeviceStaticPrivateKey()
-	defer clear(devicePrivateKey)
-
-	connector, err := client.EnsureConnectorResource(ctx, "prod-dashboard")
-	if err != nil {
-		panic(err)
-	}
-	runID, err := qurl.NewCycleRunID()
-	if err != nil {
-		panic(err)
-	}
-	admission, err := qurl.KnockRegisteredAgent(ctx, binding, devicePrivateKey,
-		connector.Resource.KnockResourceID,
-		qurl.NativeKnockOptions{RunID: runID},
-	)
-	if err != nil {
-		panic(err)
-	}
-	fmt.Println(admission.ResourceHost)
-}
-
 // ExampleWithAgentRuntimeHeadlessEnrollment shows the escape hatch: a runtime
 // with no mailbox at all, enrolling with a pre-issued credential and no code.
 // Prefer the default OTP path whenever some address can receive the code.
@@ -191,7 +180,8 @@ func ExampleWithAgentRuntimeHeadlessEnrollment() {
 		panic(err)
 	}
 	defer store.Close()
-	client, binding, err := qurl.RegisterAgentRuntime(ctx, enrollmentCredentialFromInstaller(), store,
+	_, binding, err := qurl.ConnectAgentRuntime(ctx, store,
+		qurl.WithAgentRuntimeEnrollmentCredential(enrollmentCredentialFromInstaller()),
 		qurl.WithAgentRuntimeMetadata("connector-host", "1.0.0"),
 		qurl.WithAgentRuntimeHeadlessEnrollment(),
 	)
@@ -199,7 +189,6 @@ func ExampleWithAgentRuntimeHeadlessEnrollment() {
 		panic(err)
 	}
 	defer binding.Destroy()
-	_, _ = client, binding
 }
 
 func ExampleRecoverAgentRuntime() {
@@ -241,7 +230,8 @@ func ExampleNewSealedFileAgentState() {
 		panic(err)
 	}
 	defer store.Close()
-	_, binding, _ := qurl.RegisterAgentRuntime(context.Background(), "lv_enrollment_AAECAwQFBgcICQoLDA0ODxAREhMUFRYX", store,
+	_, binding, _ := qurl.ConnectAgentRuntime(context.Background(), store,
+		qurl.WithAgentRuntimeEnrollmentCredential("lv_enrollment_AAECAwQFBgcICQoLDA0ODxAREhMUFRYX"),
 		qurl.WithAgentRuntimeHub(qurl.HubBootstrap{
 			Host: "hub.nhp.layerv.ai", Port: 443,
 			ServerPublicKeyB64: configuredHubPublicKeyB64(),
@@ -289,6 +279,12 @@ func ExampleConnectAgentRuntime() {
 	// One call on every start. It enrolls the first time, resumes an interrupted
 	// enrollment, and afterwards returns the existing registration — renewing an
 	// expired lease and following any relocation without being asked.
+	//
+	// Enrollment and lease renewal authenticate against the Hub trust root,
+	// which comes from your deployment file: set QURL_DEPLOYMENT to the file
+	// from LayerV setup, or pass WithAgentRuntimeHub. GA builds will ship the
+	// trust root embedded. A completed registration with a live lease reopens
+	// without one.
 	ctx := context.Background()
 	store, err := qurl.OpenFileAgentState("/var/lib/layerv/qurl/agent-state.json")
 	if err != nil {
@@ -297,7 +293,7 @@ func ExampleConnectAgentRuntime() {
 	defer store.Close()
 	// Enrollment defaults to the emailed one-time code, so a runtime that can
 	// reach its mailbox supplies a provider. Later starts never use either.
-	client, binding, err := qurl.ConnectAgentRuntime(ctx, store,
+	_, binding, err := qurl.ConnectAgentRuntime(ctx, store,
 		qurl.WithAgentRuntimeEnrollmentCredential(enrollmentCredentialFromInstaller()),
 		qurl.WithAgentRuntimeOTPProvider(readOneTimeCodeFromMailbox),
 		qurl.WithAgentRuntimeMetadata("connector-host", "1.0.0"),
@@ -306,13 +302,16 @@ func ExampleConnectAgentRuntime() {
 		panic(err)
 	}
 	defer binding.Destroy()
-	devicePrivateKey := binding.TakeDeviceStaticPrivateKey()
-	defer clear(devicePrivateKey)
-
-	connector, err := client.EnsureConnectorResource(ctx, "prod-dashboard")
+	request, err := qurl.NewNativeConnectorResourceRequest("prod-dashboard", "")
 	if err != nil {
 		panic(err)
 	}
+	connector, err := qurl.ResolveRegisteredAgentConnectorResource(ctx, binding, request)
+	if err != nil {
+		panic(err)
+	}
+	devicePrivateKey := binding.TakeDeviceStaticPrivateKey()
+	defer clear(devicePrivateKey)
 	runID, err := qurl.NewCycleRunID()
 	if err != nil {
 		panic(err)
