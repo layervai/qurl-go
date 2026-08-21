@@ -4,6 +4,26 @@ Most recipients do not need this SDK. They open the qURL link directly.
 
 Opening a portal does not require LayerV credentials or issuer setup.
 
+## Link Transport
+
+Full qURL links use the share-safe `qv2t1` fragment transport. It splits each
+encoded qv2 field into deterministic chunks no longer than 240 characters, so
+messaging clients can recognize the entire capability as one link:
+
+```text
+#qv2t1.<claims-count>.<secret-count>.<signature-count>.<claims-chunks...>.<secret-chunks...>.<signature-chunks...>
+```
+
+The SDK reconstructs the exact signed qv2 bytes before verification; it never
+decodes and reserializes claims. The fragment still carries the private
+credential and is not included in HTTP requests to the link origin. Full links
+using the pre-release `#qv2.<claims>.<secret>.<signature>` transport are rejected.
+
+Use `qurl.IsCredentialLink(link)` only when deciding whether a URL must go
+through the qURL opener instead of a plain HTTP fetch. It intentionally returns
+true for malformed links that declare `qv2t1`, so they fail closed in
+`VerifyLink` or `EnterPortal` rather than falling through to an unsafe fetch.
+
 ## Programmatic Opening
 
 Use this SDK only when your Go service or agent needs to open received qURL links

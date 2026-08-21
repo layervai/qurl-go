@@ -69,7 +69,7 @@ func TestClient_ResolveResource(t *testing.T) {
 		}
 		assertJSONField(t, body, "ttl_seconds", float64(90))
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"data":{"qurl":"https://qurl.link/at_demo123#qv2.c.s.g","qurl_id":"q_a1b2c3d4e5f","crid":%q,"type":"qv2","expires_at":"2026-08-13T20:10:00Z","expires_in_seconds":600,"single_use":true}}`, heldCRID)
+		fmt.Fprintf(w, `{"data":{"qurl":"https://qurl.link/at_demo123#qv2t1.1.1.1.AQ.AQ.AQ","qurl_id":"q_a1b2c3d4e5f","crid":%q,"type":"qv2","expires_at":"2026-08-13T20:10:00Z","expires_in_seconds":600,"single_use":true}}`, heldCRID)
 	}))
 	defer api.Close()
 
@@ -81,7 +81,7 @@ func TestClient_ResolveResource(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveResource: %v", err)
 	}
-	if access.Link != "https://qurl.link/at_demo123#qv2.c.s.g" || access.CRID != heldCRID || access.Type != "qv2" {
+	if access.Link != "https://qurl.link/at_demo123#qv2t1.1.1.1.AQ.AQ.AQ" || access.CRID != heldCRID || access.Type != "qv2" {
 		t.Fatalf("access = %#v", access)
 	}
 	// The revocation handle for this one link — without it the link is
@@ -112,7 +112,7 @@ func TestClient_ResolveResourceQURLIDRevokesTheMintedLink(t *testing.T) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/resources/r_demo1234567/resolve":
 			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprint(w, `{"data":{"qurl":"https://qurl.link/at_demo123#qv2.c.s.g","qurl_id":"q_a1b2c3d4e5f","type":"qv2","expires_in_seconds":300,"single_use":false}}`)
+			fmt.Fprint(w, `{"data":{"qurl":"https://qurl.link/at_demo123#qv2t1.1.1.1.AQ.AQ.AQ","qurl_id":"q_a1b2c3d4e5f","type":"qv2","expires_in_seconds":300,"single_use":false}}`)
 		case r.Method == http.MethodDelete:
 			revokes.Add(1)
 			// The resolved id lands in the qURL segment unaltered, under the

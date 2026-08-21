@@ -14,7 +14,7 @@ if err != nil {
 }
 defer store.Close()
 
-client, binding, err := qurl.ConnectAgentRuntime(ctx, store,
+_, binding, err := qurl.ConnectAgentRuntime(ctx, store,
 	qurl.WithAgentRuntimeEnrollmentCredential(enrollmentCredential),
 	qurl.WithAgentRuntimeOTPProvider(readOneTimeCode),
 	qurl.WithAgentRuntimeMetadata(hostname, version),
@@ -24,13 +24,17 @@ if err != nil {
 }
 defer binding.Destroy()
 
-privateKey := binding.TakeDeviceStaticPrivateKey()
-defer clear(privateKey)
-
-connector, err := client.EnsureConnectorResource(ctx, "prod-dashboard")
+request, err := qurl.NewNativeConnectorResourceRequest("prod-dashboard", "")
 if err != nil {
 	return err
 }
+connector, err := qurl.ResolveRegisteredAgentConnectorResource(ctx, binding, request)
+if err != nil {
+	return err
+}
+
+privateKey := binding.TakeDeviceStaticPrivateKey()
+defer clear(privateKey)
 
 runID, err := qurl.NewCycleRunID()
 if err != nil {
@@ -55,12 +59,21 @@ for your callback, so give the context a deadline if nothing may be watching the
 mailbox. [The one-time code](#the-one-time-code) shows one. Later starts never
 call it.
 
-Two things come back:
+Two things come back from registration:
 
-- **`client`** — creates and manages protected resources, like any other qURL
-  client.
+- **`client`** — performs explicit management actions such as removing a
+  resource. Resource setup for the running Connector does not use it.
 - **`binding`** — proof of who this machine is. Hold it for the life of the
   process and `Destroy()` it on the way out.
+
+Resource setup is a registered-agent `NHP_LST`/`NHP_LRT` exchange sent directly
+to the assigned cell. It does not call the qURL HTTPS API. In production,
+persist `request.RequestNonce` before the first exchange and reuse the exact
+request after an uncertain response; changing any request field under the same
+nonce is rejected. Once a resource is known, pass its exact `ResourceID` as the
+second argument to `NewNativeConnectorResourceRequest` on later starts. That is
+a read-only continuity assertion: LayerV returns that exact active resource or
+fails instead of creating or adopting a replacement.
 
 And two rules for the serving loop:
 
@@ -163,6 +176,38 @@ not admitted here either; a legacy `qurl:agent`-scoped key needs the explicit
 [`WithAgentRuntimeAllowedRegistrationKeyKinds`](#accepting-either-kind). Reach
 for this only when no address — the runtime's own, an operator's, or a shared
 alias — can receive the code.
+
+If the one-shot token must be minted for the agent identity at first use, supply
+it lazily instead of minting it before `ConnectAgentRuntime` knows that identity:
+
+```go
+credentialProvider := func(ctx context.Context, request qurl.AgentEnrollmentCredentialRequest) (string, error) {
+	return mintOrReplayEnrollmentToken(ctx, request.AgentID, request.PendingActivationRecovery)
+}
+
+client, binding, err := qurl.ConnectAgentRuntime(ctx, store,
+	qurl.WithAgentRuntimeEnrollmentCredentialProvider(credentialProvider),
+	qurl.WithAgentRuntimeMetadata(hostname, version),
+	qurl.WithAgentRuntimeHeadlessEnrollment(),
+)
+```
+
+The SDK generates and saves `request.AgentID` before calling the provider, and
+holds the setup lock across the callback and enrollment. A concurrent start
+therefore waits, reloads the completed state, and does not mint again. Before
+contacting the mint authority, persist or deterministically derive a non-secret
+idempotency transaction identity from the stable agent id, then replay that
+transaction on every callback until enrollment is known complete.
+`PendingActivationRecovery == false` means only that qurl has no pending REG; a
+prior provider mint may still have committed before its result reached the SDK.
+If the field is true, replay must return the exact same token: qurl stores only
+its fingerprint and rejects a new token. Never persist the raw token. The
+callback is not called for completed state, pending completion, lease renewal,
+or offline open, and it is not retained by the returned binding.
+
+The lazy provider cannot be combined with an eager enrollment credential, an
+OTP provider, or offline open; each contradiction fails with
+`qurl.ErrInvalidRegisterConfig` before the callback or network is reached.
 
 **`WithAgentRuntimeHeadlessEnrollment` replaces the OTP provider and nothing
 else.** Keep every other option, `WithAgentRuntimeMetadata` included — it is not
@@ -335,7 +380,7 @@ file.
 
 | Option | Effect |
 |---|---|
-| `qurl.WithAgentRuntimeOfflineOpen()` | `ConnectAgentRuntime` makes no network call: it serves only an existing completed registration, an expired lease returns `ErrAssignmentLeaseExpired` instead of renewing, and the binding it returns does not renew itself either. For a process that must start without reaching LayerV, or that renews on its own schedule — recover with an explicit `RefreshAgentRuntime`. Enrollment needs the network this option forbids, so combining it with `WithAgentRuntimeEnrollmentCredential` or `WithAgentRuntimeOTPProvider` fails with `ErrInvalidRegisterConfig`. |
+| `qurl.WithAgentRuntimeOfflineOpen()` | `ConnectAgentRuntime` makes no network call: it serves only an existing completed registration, an expired lease returns `ErrAssignmentLeaseExpired` instead of renewing, and the binding it returns does not renew itself either. For a process that must start without reaching LayerV, or that renews on its own schedule — recover with an explicit `RefreshAgentRuntime`. Enrollment needs the network this option forbids, so combining it with `WithAgentRuntimeEnrollmentCredential`, `WithAgentRuntimeEnrollmentCredentialProvider`, or `WithAgentRuntimeOTPProvider` fails with `ErrInvalidRegisterConfig`. |
 | `qurl.WithAgentRuntimePinnedAssignment()` | `ConnectAgentRuntime` and `RefreshAgentRuntime` refuse to follow a relocation, returning `*qurl.AgentAssignmentChangedError` and changing nothing on disk; a binding either call returns applies the same policy when renewing its own lease. For placement that feeds an egress allowlist or a change-control process. |
 
 ## When something goes wrong

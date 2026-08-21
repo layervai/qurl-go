@@ -37,6 +37,23 @@ func fragmentSeeds(tb testing.TB) []string {
 	return seeds
 }
 
+// transportSeeds makes every normative qv2t1 accept and reject frame part of
+// the framing decoder's baseline fuzz corpus.
+func transportSeeds(tb testing.TB) []string {
+	tb.Helper()
+	cf, err := LoadConformanceBytes(conformance.QV2Vectors())
+	if err != nil {
+		tb.Fatalf("load conformance seeds: %v", err)
+	}
+	var seeds []string
+	for _, v := range cf.Classes["transport"].Vectors {
+		if v.TransportFragment != "" {
+			seeds = append(seeds, v.TransportFragment)
+		}
+	}
+	return seeds
+}
+
 // FuzzParseFragment drives the full fragment entry point. The only invariant a
 // fuzzer can assert without a signing oracle is total: ParseFragment must return
 // — never panic — for any input, and a successful parse must round-trip its

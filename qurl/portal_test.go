@@ -75,7 +75,11 @@ func vendoredAcceptLink(t *testing.T) (link string, ts *TrustStore, cellFingerpr
 	if err != nil {
 		t.Fatalf("BuildFragment: %v", err)
 	}
-	link = "https://qurl.link/#" + body
+	transport, err := qv2.EncodeTransportFragment(body)
+	if err != nil {
+		t.Fatalf("EncodeTransportFragment: %v", err)
+	}
+	link = "https://qurl.link/#" + transport
 
 	// The accept vector's cell key is 32 bytes of 0x44 (fingerprint uzkUFcBeOdc);
 	// recompute it rather than hardcode so the expected route stays derived.
@@ -137,7 +141,7 @@ func relayExampleAllowlist() *RelayAllowlist {
 // --- Bucket A: gates -------------------------------------------------------
 
 func TestEnterPortal_EmptyConfig_FailsClosed(t *testing.T) {
-	_, err := EnterPortal(context.Background(), "https://qurl.link/#qv2.a.b.c")
+	_, err := EnterPortal(context.Background(), "https://qurl.link/#qv2t1.1.1.1.AQ.AQ.AQ")
 	if !errors.Is(err, ErrNotConfigured) {
 		t.Fatalf("empty default config: want ErrNotConfigured, got %v", err)
 	}
@@ -145,7 +149,7 @@ func TestEnterPortal_EmptyConfig_FailsClosed(t *testing.T) {
 
 func TestEnterPortalWith_MissingAllowlist_FailsClosed(t *testing.T) {
 	_, ts, _ := vendoredAcceptLink(t)
-	_, err := EnterPortalWith(context.Background(), "https://qurl.link/#qv2.a.b.c", Config{TrustStore: ts})
+	_, err := EnterPortalWith(context.Background(), "https://qurl.link/#qv2t1.1.1.1.AQ.AQ.AQ", Config{TrustStore: ts})
 	if !errors.Is(err, ErrNotConfigured) {
 		t.Fatalf("missing allowlist: want ErrNotConfigured, got %v", err)
 	}

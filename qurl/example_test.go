@@ -85,13 +85,23 @@ func ExampleClient_RevokePortal() {
 	}
 }
 
-func ExampleClient_EnsureConnectorResource() {
-	client, err := qurl.OpenClient()
+func ExampleResolveRegisteredAgentConnectorResource() {
+	ctx := context.Background()
+	store, err := qurl.OpenFileAgentState("/var/lib/layerv/qurl/agent-state.json")
 	if err != nil {
 		panic(err)
 	}
-
-	result, err := client.EnsureConnectorResource(context.Background(), "prod-dashboard")
+	defer store.Close()
+	_, binding, err := qurl.ConnectAgentRuntime(ctx, store, qurl.WithAgentRuntimeOfflineOpen())
+	if err != nil {
+		panic(err)
+	}
+	defer binding.Destroy()
+	request, err := qurl.NewNativeConnectorResourceRequest("prod-dashboard", "")
+	if err != nil {
+		panic(err)
+	}
+	result, err := qurl.ResolveRegisteredAgentConnectorResource(ctx, binding, request)
 	if err != nil {
 		panic(err)
 	}
@@ -170,7 +180,7 @@ func ExampleWithAgentRuntimeHeadlessEnrollment() {
 		panic(err)
 	}
 	defer store.Close()
-	client, binding, err := qurl.ConnectAgentRuntime(ctx, store,
+	_, binding, err := qurl.ConnectAgentRuntime(ctx, store,
 		qurl.WithAgentRuntimeEnrollmentCredential(enrollmentCredentialFromInstaller()),
 		qurl.WithAgentRuntimeMetadata("connector-host", "1.0.0"),
 		qurl.WithAgentRuntimeHeadlessEnrollment(),
@@ -179,7 +189,6 @@ func ExampleWithAgentRuntimeHeadlessEnrollment() {
 		panic(err)
 	}
 	defer binding.Destroy()
-	_, _ = client, binding
 }
 
 func ExampleRecoverAgentRuntime() {
@@ -284,7 +293,7 @@ func ExampleConnectAgentRuntime() {
 	defer store.Close()
 	// Enrollment defaults to the emailed one-time code, so a runtime that can
 	// reach its mailbox supplies a provider. Later starts never use either.
-	client, binding, err := qurl.ConnectAgentRuntime(ctx, store,
+	_, binding, err := qurl.ConnectAgentRuntime(ctx, store,
 		qurl.WithAgentRuntimeEnrollmentCredential(enrollmentCredentialFromInstaller()),
 		qurl.WithAgentRuntimeOTPProvider(readOneTimeCodeFromMailbox),
 		qurl.WithAgentRuntimeMetadata("connector-host", "1.0.0"),
@@ -293,13 +302,16 @@ func ExampleConnectAgentRuntime() {
 		panic(err)
 	}
 	defer binding.Destroy()
-	devicePrivateKey := binding.TakeDeviceStaticPrivateKey()
-	defer clear(devicePrivateKey)
-
-	connector, err := client.EnsureConnectorResource(ctx, "prod-dashboard")
+	request, err := qurl.NewNativeConnectorResourceRequest("prod-dashboard", "")
 	if err != nil {
 		panic(err)
 	}
+	connector, err := qurl.ResolveRegisteredAgentConnectorResource(ctx, binding, request)
+	if err != nil {
+		panic(err)
+	}
+	devicePrivateKey := binding.TakeDeviceStaticPrivateKey()
+	defer clear(devicePrivateKey)
 	runID, err := qurl.NewCycleRunID()
 	if err != nil {
 		panic(err)

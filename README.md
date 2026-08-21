@@ -199,6 +199,11 @@ against a key you already hold (`VerifyCRID`). Both leave the link lifetime to
 the server default unless you ask (`ValidFor` on a portal,
 `ResolveResourceOptions.TTL` on a resolve).
 
+Minted links use the share-safe `#qv2t1...` fragment transport. It keeps every
+dot-separated component at 240 characters or fewer so messaging clients retain
+the full click target, while preserving the exact signed qv2 bytes and keeping
+the per-link private credential out of HTTP requests.
+
 Next: [Protect a private service](docs/secure-a-private-service.md) ·
 [Issue links](docs/issuing-links.md)
 
@@ -398,13 +403,13 @@ it did not cause. Capture the qurl id when you mint: like the link itself, it
 is not retrievable afterwards, and a server predating the field omits it. A
 short `ResolveResourceOptions.TTL` remains the complementary control at mint
 time. `DeleteConnectorResource` revokes an entire connector resource (see
-[Manage qURL Connector resources](docs/connector-resources.md)).
+[Resolve and manage qURL Connector resources](docs/connector-resources.md)).
 
 ## Guides
 
 - [Protect a private service](docs/secure-a-private-service.md)
 - [Connect a service or agent](docs/register-an-agent.md)
-- [Manage qURL Connector resources](docs/connector-resources.md)
+- [Resolve and manage qURL Connector resources](docs/connector-resources.md)
 - [Issue links](docs/issuing-links.md)
 - [Resolve a resource and verify its CRID](docs/resolve-and-crid.md)
 - [Open links](docs/opening-links.md)

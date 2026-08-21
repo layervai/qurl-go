@@ -79,8 +79,9 @@ func openRegisteredAgentWithIdentity(ctx context.Context, store AgentStateStore,
 // recover with an explicit RefreshAgentRuntime.
 //
 // Enrollment needs the network this option forbids, so combining it with
-// WithAgentRuntimeEnrollmentCredential or WithAgentRuntimeOTPProvider fails
-// with ErrInvalidRegisterConfig.
+// WithAgentRuntimeEnrollmentCredential,
+// WithAgentRuntimeEnrollmentCredentialProvider, or
+// WithAgentRuntimeOTPProvider fails with ErrInvalidRegisterConfig.
 //
 // It is deliberately not a ClientOption: it means nothing to the resource-only
 // OpenRegisteredAgent or to NewClient, so those must not silently accept it. It
@@ -193,6 +194,26 @@ type agentRuntimePrivateKey struct {
 	mu      sync.Mutex
 	value   []byte
 	cleanup *runtime.Cleanup
+}
+
+// withBorrow keeps the private key owned by the binding while fn performs one
+// synchronous operation. The mutex deliberately remains held across network
+// I/O: Take and Destroy must wait for fn to return so a caller cannot transfer
+// or wipe the key underneath an in-flight native exchange. The borrowed slice
+// must not escape fn.
+func (k *agentRuntimePrivateKey) withBorrow(errKind error, fn func([]byte) error) error {
+	if errKind == nil {
+		errKind = ErrInvalidNativeKnockInput
+	}
+	if k == nil || fn == nil {
+		return fmt.Errorf("%w: runtime binding does not own a device key", errKind)
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if len(k.value) == 0 {
+		return fmt.Errorf("%w: runtime binding device key was already transferred or destroyed", errKind)
+	}
+	return fn(k.value)
 }
 
 func newAgentRuntimePrivateKey(value []byte) *agentRuntimePrivateKey {
@@ -344,6 +365,8 @@ func (b *AgentRuntimeBinding) attachRenewal(store AgentStateStore, cfg *nativeAg
 	// of the process just because the lifecycle call was given one.
 	renewalCfg.deviceCredential = ""
 	renewalCfg.enrollCredential = ""
+	renewalCfg.enrollCredentialSet = false
+	renewalCfg.enrollCredentialProvider = nil
 	renewalCfg.otpProvider = nil
 	b.renewal = &agentRuntimeRenewal{store: baseAgentStateStore(store), hub: *cfg.hub, cfg: &renewalCfg}
 }

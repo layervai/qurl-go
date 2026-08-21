@@ -78,6 +78,15 @@ func TestRelayErrorString(t *testing.T) {
 	}
 }
 
+func TestIsCredentialLinkPublicClassifier(t *testing.T) {
+	if !qurl.IsCredentialLink("https://qurl.link/#qv2t1.malformed") {
+		t.Fatal("qv2t1 declaration must route to the fail-closed credential opener")
+	}
+	if qurl.IsCredentialLink("https://qurl.link/#qv2.legacy.parts") {
+		t.Fatal("legacy qv2 transport must not be classified as a supported credential link")
+	}
+}
+
 // TestFragmentExportedFieldsMirrorCore guards wrapFragment, which hand-copies the
 // exported fields of the internal fragment. If the core fragment gains an exported
 // field, this parity check fails loudly rather than the public Fragment silently
