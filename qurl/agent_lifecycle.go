@@ -126,7 +126,7 @@ func validateRegisteredAgentOpenInputs(ctx context.Context, store AgentStateStor
 // a substitute for deterministic Destroy.
 //
 // A binding keeps its own assignment lease current. KnockRegisteredAgent and
-// ExitRegisteredAgentSession renew it through the Hub as it approaches expiry, so
+// ExitRegisteredAgentSessions renew it through the Hub as it approaches expiry, so
 // a process may hold one binding indefinitely without tracking leases.
 //
 // The exported assignment fields are written once, when the binding is created,

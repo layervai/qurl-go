@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -37,7 +38,6 @@ func TestMarshalNativeSessionApplicationBody_ConformanceSessionVectors(t *testin
 	}{
 		{name: "knock", headerType: nhpKNKHeaderType, packet: vectors.OverloadReknock.KnockRequest},
 		{name: "reknock", headerType: nhpRKNHeaderType, packet: vectors.OverloadReknock.ReknockRequest},
-		{name: "exit", headerType: nhpEXTHeaderType, packet: vectors.CleanExit.Request},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var fields nativeAgentKnockBody
@@ -56,6 +56,9 @@ func TestMarshalNativeSessionApplicationBody_ConformanceSessionVectors(t *testin
 			}
 		})
 	}
+	if _, err := marshalNativeSessionApplicationBody("agent-01", "connector-01", NativeKnockOptions{RunID: "0123456789abcdef"}, nhpEXTHeaderType); !errors.Is(err, ErrInvalidNativeKnockInput) {
+		t.Fatalf("EXT body error = %v, want ErrInvalidNativeKnockInput", err)
+	}
 	if _, err := marshalNativeSessionApplicationBody("agent-01", "connector-01", NativeKnockOptions{RunID: "0123456789abcdef"}, 7); !errors.Is(err, ErrInvalidNativeKnockInput) {
 		t.Fatalf("unsupported session header error = %v, want ErrInvalidNativeKnockInput", err)
 	}
@@ -72,7 +75,6 @@ func TestInterpretNativeAgentKnockReply_ConformanceSessionACKs(t *testing.T) {
 		ack     conformance.AgentSessionPacket
 	}{
 		{name: "reknock", request: vectors.OverloadReknock.ReknockRequest, ack: vectors.OverloadReknock.ACK},
-		{name: "exit", request: vectors.CleanExit.Request, ack: vectors.CleanExit.ACK},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var request nativeAgentKnockBody
@@ -85,6 +87,9 @@ func TestInterpretNativeAgentKnockReply_ConformanceSessionACKs(t *testing.T) {
 			}
 			if result == nil || result.ACToken == "" || result.ResourceHost == "" {
 				t.Fatalf("conformance ACK did not contain a full admission envelope: %#v", result)
+			}
+			if result.SessionID == 0 || result.OpenTime != 900 {
+				t.Fatalf("conformance ACK session/lifetime = %d/%d, want nonzero/900", result.SessionID, result.OpenTime)
 			}
 		})
 	}
@@ -219,8 +224,13 @@ func TestNativeKnockApplicationConformance(t *testing.T) {
 			result, err := interpretNativeAgentKnockReply(&relayknock.Reply{Type: vector.ReplyType, Body: []byte(vector.BodyJSON)}, fields.KnockResourceID)
 			switch vector.Outcome {
 			case conformance.AgentKnockOutcomeSuccess:
-				if err != nil || result == nil || result.ACToken != vector.ExpectedACToken || result.ResourceHost != vector.ExpectedResourceHost {
-					t.Fatalf("success reply = %#v, %v; want token=%q host=%q", result, err, vector.ExpectedACToken, vector.ExpectedResourceHost)
+				wantSessionID, parseErr := strconv.ParseUint(vector.ExpectedSessionID, 10, 64)
+				if parseErr != nil {
+					t.Fatalf("expected_session_id: %v", parseErr)
+				}
+				if err != nil || result == nil || result.ACToken != vector.ExpectedACToken || result.ResourceHost != vector.ExpectedResourceHost ||
+					result.SessionID != wantSessionID || result.OpenTime != vector.ExpectedOpenTime {
+					t.Fatalf("success reply = %#v, %v; want token=%q host=%q session=%d open=%d", result, err, vector.ExpectedACToken, vector.ExpectedResourceHost, wantSessionID, vector.ExpectedOpenTime)
 				}
 			case conformance.AgentKnockOutcomeDeny:
 				var deny *ServerDenyError

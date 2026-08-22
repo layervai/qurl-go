@@ -70,7 +70,6 @@ func TestDecryptReply_AgentSessionControlGolden(t *testing.T) {
 	}{
 		{name: "cookie", packet: f.OverloadReknock.CookieReply},
 		{name: "reknock ack", packet: f.OverloadReknock.ACK},
-		{name: "exit ack", packet: f.CleanExit.ACK},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			reply, err := DecryptReply(
@@ -143,5 +142,9 @@ func TestBuildMessage_AgentSessionCookieContract(t *testing.T) {
 	copyInputs.Cookie = make([]byte, nhpwire.CookieSize)
 	if _, err := BuildMessage(TypeExit, &copyInputs); err == nil {
 		t.Fatal("BuildMessage(TypeExit) accepted an RKN cookie")
+	}
+	copyInputs.Cookie = nil
+	if _, err := BuildMessage(TypeExit, &copyInputs); err == nil {
+		t.Fatal("BuildMessage(TypeExit) accepted a nonempty body")
 	}
 }

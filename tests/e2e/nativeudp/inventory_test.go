@@ -15,7 +15,7 @@ import (
 	"testing"
 )
 
-const reviewedInventoryMappingSHA256 = "869e3a4f6cd6fbbb1fb786b9dc26a2778406dcd814bf226cdddc13f66f4b1e2d"
+const reviewedInventoryMappingSHA256 = "4fb842c8c4e706640452c888eda625c3f8ace59689e5636263a1d1e292e7c56b"
 
 type scenarioInventory struct {
 	SchemaVersion        int                    `json:"schema_version"`
@@ -156,7 +156,7 @@ func validateScenarioInventory(t *testing.T, inventory scenarioInventory) {
 		"retirement.relay_rejects_native_lifecycle_messages",
 		"retirement.terraform_saved_plan_and_live_state",
 		"session.cell_cookie_reknock_return_routability",
-		"session.public_api_exit_success",
+		"session.public_api_global_exit_dispatch",
 		"session.public_api_knock_success",
 		"state.persisted_runtime_warm_open",
 		"state.sealed_cold_start",
@@ -164,7 +164,7 @@ func validateScenarioInventory(t *testing.T, inventory scenarioInventory) {
 		"transport.zero_http_injected_trap",
 		"transport.zero_http_packet_capture_and_route_counters",
 		"wire.registration_lst_lrt_reg_rak_completion",
-		"wire.session_knk_ack_ext_ack",
+		"wire.session_knk_ack_global_ext",
 	}
 
 	idPattern := regexp.MustCompile(`^[a-z0-9]+(?:[._-][a-z0-9]+)*$`)

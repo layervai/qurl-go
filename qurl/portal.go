@@ -61,6 +61,8 @@ type ResourceHandle struct {
 	// OpenSeconds is how long access stays open, as reported by qURL (0 when not
 	// provided).
 	OpenSeconds uint32
+	// SessionID is the nonzero server-assigned NHP access-session identity.
+	SessionID uint64
 }
 
 // ErrNotConfigured reports that a required piece of qURL configuration is
@@ -265,14 +267,29 @@ func interpretReply(reply *relayknock.Reply) (*ResourceHandle, error) {
 		return nil, err
 	}
 	if !ack.isSuccess() {
+		if ack.SessionID.Present {
+			return nil, fmt.Errorf("%w: deny ACK carried an NHP session id", ErrMalformedReply)
+		}
+		if !ack.OpenTime.Present || ack.OpenTime.Value != 0 {
+			return nil, fmt.Errorf("%w: deny ACK carried a missing or nonzero open time", ErrMalformedReply)
+		}
+		if !isCanonicalKnockDenyCode(ack.ErrCode) {
+			return nil, fmt.Errorf("%w: deny ACK carried a noncanonical error code", ErrMalformedReply)
+		}
 		return nil, &ServerDenyError{ErrCode: ack.ErrCode}
+	}
+	if !ack.SessionID.Present || ack.SessionID.Value == 0 {
+		return nil, fmt.Errorf("%w: success ACK carried no NHP session id", ErrMalformedReply)
+	}
+	if !ack.OpenTime.Present || ack.OpenTime.Value == 0 {
+		return nil, fmt.Errorf("%w: success ACK carried an invalid open time", ErrMalformedReply)
 	}
 	// A success ACK that carries no resource URL is not actionable — the caller has
 	// nothing to reach. Fail closed rather than hand back an empty handle.
 	if ack.RedirectURL == "" {
 		return nil, fmt.Errorf("%w: success ACK carried no resource URL (errCode=%q)", ErrMalformedReply, ack.ErrCode)
 	}
-	return &ResourceHandle{ResourceURL: ack.RedirectURL, OpenSeconds: ack.OpenTime}, nil
+	return &ResourceHandle{ResourceURL: ack.RedirectURL, OpenSeconds: ack.OpenTime.Value, SessionID: ack.SessionID.Value}, nil
 }
 
 // resolveDefaultConfig builds the EnterPortal Config from the process-wide default

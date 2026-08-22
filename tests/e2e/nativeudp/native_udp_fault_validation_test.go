@@ -480,15 +480,14 @@ func hubAndCellExchanges() []nhpExchange {
 		{name: "assigned_cell_completion_lst", call: nativeudp.List, singleReplyCompletes: true},
 		{name: "assigned_cell_knock", call: nativeudp.Knock, singleReplyCompletes: true},
 		{name: "assigned_cell_register", call: nativeudp.Register, singleReplyCompletes: true},
-		{name: "assigned_cell_exit", call: nativeudp.Exit, singleReplyCompletes: true},
 	}
 }
 
-// proveWrongHubKey proves the SDK rejects a Hub assignment reply that cannot
+// validateWrongHubKey proves the SDK rejects a Hub assignment reply that cannot
 // authenticate to the configured Hub public key: it is a definitive
 // ErrServerUnauthenticated rejection, never a retried transport miss, never a
 // malformed-reply correlation error, and it triggers no HTTP.
-func proveWrongHubKey(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTPTrap) {
+func validateWrongHubKey(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTPTrap) {
 	t.Helper()
 	server, ep, opts := newLoopbackNHPExchange(t, respondWrongKey)
 	reply, err := nativeudp.AssignmentList(ctx, ep, nil, opts)
@@ -497,9 +496,9 @@ func proveWrongHubKey(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTP
 	t.Log("EVIDENCE wrong_hub_key rejection=ErrServerUnauthenticated received_datagrams=1 fallback=0 lifecycle_http_calls=0")
 }
 
-// proveWrongCellKey proves the same fail-closed authentication class for an
+// validateWrongCellKey proves the same fail-closed authentication class for an
 // assigned-cell KNK reply signed under the wrong cell public key.
-func proveWrongCellKey(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTPTrap) {
+func validateWrongCellKey(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTPTrap) {
 	t.Helper()
 	server, ep, opts := newLoopbackNHPExchange(t, respondWrongKey)
 	reply, err := nativeudp.Knock(ctx, ep, nil, opts)
@@ -508,12 +507,12 @@ func proveWrongCellKey(ctx context.Context, t *testing.T, httpTrap *lifecycleHTT
 	t.Log("EVIDENCE wrong_cell_key rejection=ErrServerUnauthenticated received_datagrams=1 fallback=0 lifecycle_http_calls=0")
 }
 
-// provePacketOversize proves the 4096-byte NHP packet boundary fails closed on
+// validatePacketOversize proves the 4096-byte NHP packet boundary fails closed on
 // both the receive and the send path, across every exported Hub and assigned-cell
 // exchange. An over-limit reply is a definitive ErrServerUnauthenticated
 // rejection; an over-limit request is rejected as ErrInvalidRequest before any
 // datagram leaves the client.
-func provePacketOversize(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTPTrap) {
+func validatePacketOversize(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTPTrap) {
 	t.Helper()
 	for _, exchange := range hubAndCellExchanges() {
 		server, ep, opts := newLoopbackNHPExchange(t, respondOversize)
@@ -539,11 +538,11 @@ func provePacketOversize(ctx context.Context, t *testing.T, httpTrap *lifecycleH
 	t.Log("EVIDENCE oversize_packet reply_boundary=ErrServerUnauthenticated request_boundary=ErrInvalidRequest request_datagrams=0 lifecycle_http_calls=0")
 }
 
-// proveCellDNSFailure proves an assigned-cell UDP exchange fails closed on DNS
+// validateCellDNSFailure proves an assigned-cell UDP exchange fails closed on DNS
 // resolution failure: a typed ErrResolve with no datagram dialed, no
 // cross-endpoint fallback, and no HTTP. It is the assigned-cell mirror of the
 // implemented hub_dns_failure proof.
-func proveCellDNSFailure(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTPTrap) {
+func validateCellDNSFailure(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTPTrap) {
 	t.Helper()
 	const cellHost = "cell1.nhp.test"
 	_, serverPub := mustNHPKeypair(t)
@@ -578,14 +577,14 @@ func proveCellDNSFailure(ctx context.Context, t *testing.T, httpTrap *lifecycleH
 	t.Log("EVIDENCE cell_dns_failure rejection=ErrResolve resolver_calls=1 dial_calls=0 lifecycle_http_calls=0")
 }
 
-// provePacketRemainingPhaseTimeouts generalizes the implemented Hub first-LST
+// validatePacketRemainingPhaseTimeouts generalizes the implemented Hub first-LST
 // timeout across every remaining exported Hub and assigned-cell round-trip. Each
 // phase drives a real connected UDP socket at a blackhole that never answers and
 // must land in the same bounded taxonomy: a retryable ErrTransport that is also a
 // net.Error timeout, never the definitive resolve/authentication/correlation
 // classes, exactly one DNS lookup and one dial for one bounded address attempt,
 // exactly one emitted datagram, and no HTTP.
-func provePacketRemainingPhaseTimeouts(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTPTrap) {
+func validatePacketRemainingPhaseTimeouts(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTPTrap) {
 	t.Helper()
 	const attemptTimeout = 250 * time.Millisecond
 	_, serverPub := mustNHPKeypair(t)
@@ -638,7 +637,7 @@ func provePacketRemainingPhaseTimeouts(ctx context.Context, t *testing.T, httpTr
 		len(hubAndCellExchanges()), totalDatagrams)
 }
 
-// provePacketMalformed proves every response-accepting exported phase fails
+// validatePacketMalformed proves every response-accepting exported phase fails
 // closed on malformed reply material, and that the SDK keeps the two rejection
 // classes distinct. A datagram that cannot open against the pinned key at all is
 // the opaque ErrServerUnauthenticated class (never ErrMalformedReply). A fully
@@ -646,7 +645,7 @@ func provePacketRemainingPhaseTimeouts(ctx context.Context, t *testing.T, httpTr
 // NHP_COK whose application body is not a cookie challenge — is the generic
 // ErrMalformedReply class (never ErrServerUnauthenticated). Neither is ever
 // recast as a retryable transport miss, and neither triggers a second datagram.
-func provePacketMalformed(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTPTrap) {
+func validatePacketMalformed(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTPTrap) {
 	t.Helper()
 	// Unauthenticated garbage at every exported Hub and assigned-cell phase.
 	for _, exchange := range hubAndCellExchanges() {
@@ -682,7 +681,7 @@ func provePacketMalformed(ctx context.Context, t *testing.T, httpTrap *lifecycle
 		len(hubAndCellExchanges()))
 }
 
-// provePacketDuplicate proves a duplicated reply datagram cannot produce a second
+// validatePacketDuplicate proves a duplicated reply datagram cannot produce a second
 // logical operation at any exported phase, and that the client itself never
 // duplicates a request. The responder writes the same authenticated reply twice —
 // proven delivered by its own reply count — while the client still emits exactly
@@ -690,7 +689,7 @@ func provePacketMalformed(ctx context.Context, t *testing.T, httpTrap *lifecycle
 // forget NHP_OTP path is included because duplicating a possibly delivered OTP is
 // the one duplicate the SDK must never emit, even when DNS offers more addresses
 // than the exchange may use.
-func provePacketDuplicate(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTPTrap) {
+func validatePacketDuplicate(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTPTrap) {
 	t.Helper()
 	for _, exchange := range hubAndCellExchanges() {
 		server, ep, opts := newLoopbackNHPExchange(t, respondDuplicate)
@@ -738,11 +737,11 @@ func provePacketDuplicate(ctx context.Context, t *testing.T, httpTrap *lifecycle
 		len(hubAndCellExchanges()))
 }
 
-// proveHubDNSAddressRefresh drives two complete assignment return-routability
+// validateHubDNSAddressRefresh drives two complete assignment return-routability
 // exchanges through the same authoritative Hub name while its scripted DNS
 // answer changes. Both the first and proof LST of each exchange resolve the
 // hostname; no address survives into the next exchange.
-func proveHubDNSAddressRefresh(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTPTrap) {
+func validateHubDNSAddressRefresh(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTPTrap) {
 	t.Helper()
 	firstAddress := netip.MustParseAddr("8.8.8.8")
 	secondAddress := netip.MustParseAddr("9.9.9.9")
@@ -785,10 +784,10 @@ func proveHubDNSAddressRefresh(ctx context.Context, t *testing.T, httpTrap *life
 		exchange.endpoint.Host)
 }
 
-// proveCellDNSAddressRefresh is the assigned-cell mirror: two KNK exchanges
+// validateCellDNSAddressRefresh is the assigned-cell mirror: two KNK exchanges
 // retain the authenticated endpoint name and pinned key while independently
 // resolving two successive authoritative addresses.
-func proveCellDNSAddressRefresh(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTPTrap) {
+func validateCellDNSAddressRefresh(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTPTrap) {
 	t.Helper()
 	firstAddress := netip.MustParseAddr("8.8.8.8")
 	secondAddress := netip.MustParseAddr("9.9.9.9")
@@ -822,14 +821,14 @@ func proveCellDNSAddressRefresh(ctx context.Context, t *testing.T, httpTrap *lif
 		endpoint.Host)
 }
 
-// proveMultiAddressBounds proves the mixed IPv4/IPv6 resolution contract through
+// validateMultiAddressBounds proves the mixed IPv4/IPv6 resolution contract through
 // the exported transport: non-public answers of either family are filtered before
 // any dial, a transport fault against a public IPv6 answer falls through to the
 // next public IPv4 answer, MaxAddresses caps how many addresses one exchange may
 // try, an answer with no public address is a definitive ErrResolve with zero
 // dials, and every exchange re-resolves — a changed DNS answer is used
 // immediately, so no resolved IP is carried over.
-func proveMultiAddressBounds(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTPTrap) {
+func validateMultiAddressBounds(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTPTrap) {
 	t.Helper()
 	nonPublic := []netip.Addr{
 		netip.MustParseAddr("127.0.0.1"),   // loopback
@@ -933,14 +932,14 @@ func proveMultiAddressBounds(ctx context.Context, t *testing.T, httpTrap *lifecy
 		len(nonPublic), len(allPublic))
 }
 
-// provePacketCancellation proves the context boundary is honored at every
+// validatePacketCancellation proves the context boundary is honored at every
 // exported Hub and assigned-cell phase. A cancellation after the datagram is in
 // flight unblocks the socket read promptly and surfaces as context.Canceled —
 // never recast as a retryable transport miss — with no datagram emitted after the
 // boundary. A context already cancelled at the boundary performs no DNS lookup,
 // no dial, and no I/O at all. The public registration driver is included so the
 // same boundary is proven not to mutate durable state.
-func provePacketCancellation(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTPTrap) {
+func validatePacketCancellation(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTPTrap) {
 	t.Helper()
 	const (
 		attemptTimeout = 10 * time.Second
@@ -1536,7 +1535,7 @@ func (b *recordingUDPBlackhole) awaitPackets(want int) [][]byte {
 	return packets
 }
 
-// provePacketLoss proves the SDK's response to a dropped flight is bounded
+// validatePacketLoss proves the SDK's response to a dropped flight is bounded
 // recovery that never invents a second logical operation. A lost reply is
 // recovered by the serial address budget, and the retried flight is the very
 // same packet — address fallback deliberately resends, so a server that already
@@ -1546,7 +1545,7 @@ func (b *recordingUDPBlackhole) awaitPackets(want int) [][]byte {
 // rejection. A lost request behaves identically. Above that, the bounded outer
 // retry in the public registration driver mints a genuinely fresh packet per
 // attempt and still advances no durable state.
-func provePacketLoss(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTPTrap) {
+func validatePacketLoss(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTPTrap) {
 	t.Helper()
 	const attemptTimeout = 250 * time.Millisecond
 
@@ -1684,7 +1683,7 @@ func provePacketLoss(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTPT
 		len(assignedCellExchanges()), len(hubAndCellExchanges()), len(assignedCellExchanges()), outerAttempts)
 }
 
-// provePacketDelay proves the SDK's latency contract is a deadline rather than a
+// validatePacketDelay proves the SDK's latency contract is a deadline rather than a
 // wait. A reply later than the attempt bound is a bounded retryable miss at every
 // exported phase and the client returns at its own deadline instead of waiting
 // for the slow path; the identical responder inside the bound completes the
@@ -1692,7 +1691,7 @@ func provePacketLoss(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTPT
 // serial address budget the worst case stays at MaxAddresses × Timeout, and a
 // reply that lands after the client gave up can never be adopted by the next
 // exchange.
-func provePacketDelay(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTPTrap) {
+func validatePacketDelay(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTPTrap) {
 	t.Helper()
 	const (
 		attemptTimeout = 200 * time.Millisecond
@@ -1781,7 +1780,7 @@ func provePacketDelay(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTP
 		len(hubAndCellExchanges()), len(assignedCellExchanges()), attemptTimeout, lateReply)
 }
 
-// provePacketReplay proves captured, genuinely server-signed material cannot be
+// validatePacketReplay proves captured, genuinely server-signed material cannot be
 // re-used to advance the client. A replayed authenticated reply is rejected by
 // the correlation gate at every assigned-cell phase — it is never conflated with
 // the unauthenticated class and never recast as a retryable miss. A spent Hub
@@ -1790,7 +1789,7 @@ func provePacketDelay(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTP
 // of the agent's own initiator datagram — the replay an on-path attacker can
 // mount holding no key at all — is rejected as unauthenticated and leaves durable
 // state at initial identity only.
-func provePacketReplay(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTPTrap) {
+func validatePacketReplay(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTPTrap) {
 	t.Helper()
 	const attemptTimeout = 250 * time.Millisecond
 
@@ -1883,12 +1882,12 @@ func provePacketReplay(ctx context.Context, t *testing.T, httpTrap *lifecycleHTT
 		len(assignedCellExchanges()), len(hubAndCellExchanges()))
 }
 
-// provePacketReorder puts a stale authenticated reply immediately before the
+// validatePacketReorder puts a stale authenticated reply immediately before the
 // correct reply at every distinct transport boundary. The SDK reads and
 // evaluates the first datagram, returns a terminal correlation rejection, and
 // never skips ahead to the later packet. Tagged assignment requests repeat the
 // same Hub proof-LST behavior at initial, refresh, and recovery call sites.
-func provePacketReorder(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTPTrap) {
+func validatePacketReorder(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTPTrap) {
 	t.Helper()
 	rejected := 0
 
@@ -1954,13 +1953,13 @@ func provePacketReorder(ctx context.Context, t *testing.T, httpTrap *lifecycleHT
 		rejected, len(assignedCellExchanges()))
 }
 
-// provePacketUnknownMessage sends authenticated packets with a genuinely
+// validatePacketUnknownMessage sends authenticated packets with a genuinely
 // unknown header type and known-but-phase-invalid reply types. Unknown types
 // deliberately collapse into the opaque server-authentication class at the
 // public boundary; phase-invalid known replies reach correlation and return the
 // terminal malformed-reply class. Neither class falls through to another
 // address or advances a two-leg profile.
-func provePacketUnknownMessage(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTPTrap) {
+func validatePacketUnknownMessage(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTPTrap) {
 	t.Helper()
 	unknownRejected := 0
 	phaseInvalidRejected := 0
@@ -2027,12 +2026,12 @@ func provePacketUnknownMessage(ctx context.Context, t *testing.T, httpTrap *life
 		unknownRejected, phaseInvalidRejected)
 }
 
-// provePublicResourceAndKnockResourceIDWireDistinction resolves a producer-shaped
+// validatePublicResourceAndKnockResourceIDWireDistinction resolves a producer-shaped
 // canonical P-256 public resource ID through the assigned-cell NHP_LST, then uses
 // its distinct KnockResourceID in the subsequent NHP_KNK. Decrypting both packets
 // proves the whole binding-to-admission interval is native UDP and the public
 // identity is never substituted into KNK resId or copied elsewhere on that wire.
-func provePublicResourceAndKnockResourceIDWireDistinction(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTPTrap) {
+func validatePublicResourceAndKnockResourceIDWireDistinction(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTPTrap) {
 	t.Helper()
 	const (
 		publicResourceID = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE2cTVv5_3eeYCcLLq5ROYCqcmY50HiKZ9ATglIkPnCji1E_S63UMtXba1moR8-Q6EV7oM6zwwh9_j2CDujzXvLA"
@@ -2059,7 +2058,7 @@ func provePublicResourceAndKnockResourceIDWireDistinction(ctx context.Context, t
 		`{"errCode":"0","list":{"query":"connector_resource","version":1,"agent_id":"qurl-go-identity-wire-proof","connector_id":%q,"resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"found_existing":false}}`,
 		resourceSlug, publicResourceID, routingID, knockResourceID))
 	ackBody := []byte(fmt.Sprintf(
-		`{"errCode":"0","resHost":{%q:"frps.cell0.example:7000"},"opnTime":900,"agentAddr":"203.0.113.9:49152","acTokens":{%q:"proof-token"},"preActions":{%q:null}}`,
+		`{"errCode":"0","sessId":123,"resHost":{%q:"frps.cell0.example:7000"},"opnTime":900,"agentAddr":"203.0.113.9:49152","acTokens":{%q:"proof-token"},"preActions":{%q:null}}`,
 		knockResourceID, knockResourceID, knockResourceID))
 	server := newLoopbackNHPServer(t, cellPriv, agentPub, respondCorrectly, malformedHeaderReplyBytes,
 		loopbackFaultConfig{replyBodies: map[int][]byte{
@@ -2198,7 +2197,7 @@ func provePublicResourceAndKnockResourceIDWireDistinction(ctx context.Context, t
 	t.Log("EVIDENCE public_resource_and_knock_resource_id_wire_distinction public_resource_id_shape=canonical_P256_DER_SPKI producer_binding=accepted discovery=NHP_LST admission=NHP_KNK distinct_values=true nhp_resId=knock_resource_id public_resource_id_on_knk_wire=0 resource_http_calls=0 lifecycle_http_calls=0")
 }
 
-// proveHubCookieProofRoutability proves the Hub assignment return-routability
+// validateHubCookieProofRoutability proves the Hub assignment return-routability
 // profile end to end through the exported transport: an ordinary first NHP_LST
 // is answered only with an authenticated NHP_COK, and the SDK then sends exactly
 // one cookie-bound proof NHP_LST to the same public Hub address that receives the
@@ -2206,7 +2205,7 @@ func provePublicResourceAndKnockResourceIDWireDistinction(ctx context.Context, t
 // does not open as an ordinary initiator message and does not open under a
 // different cookie — while carrying a byte-identical application body under fresh
 // per-message randomness. There is no third flight and no HTTP.
-func proveHubCookieProofRoutability(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTPTrap) {
+func validateHubCookieProofRoutability(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTPTrap) {
 	t.Helper()
 	exchange := newCookieRoutabilityExchange(t, hubAssignmentRoutability, cookieRoutabilityConfig{})
 	body := []byte(`{"query":"cell_assignment","request_nonce":"hub-cookie-proof-routability"}`)
@@ -2253,14 +2252,14 @@ func proveHubCookieProofRoutability(ctx context.Context, t *testing.T, httpTrap 
 	t.Log("EVIDENCE hub_cookie_proof_lst_return_routability flights=2 challenge=NHP_COK proof_flight=cookie_bound_NHP_LST result=NHP_LRT ordinary_initiator_open=rejected wrong_cookie_open=rejected body_identical=true fresh_proof_randomness=true resolver_calls=2 dial_calls=2 lifecycle_http_calls=0")
 }
 
-// proveCellCookieReknockRoutability proves the assigned-cell registered-agent
+// validateCellCookieReknockRoutability proves the assigned-cell registered-agent
 // admission sequence end to end: an authenticated NHP_COK for the initial
 // NHP_KNK is strictly decoded and its exact cookie mixed into one fresh NHP_RKN,
 // whose only accepted reply is an echoed-counter NHP_ACK. The re-knock flight is
 // observed to be cookie-bound rather than a re-sent knock, each leg carries its
 // own caller-supplied application body unrewritten by the transport, and the
 // direct-ACK path is proven to complete in a single flight with no re-knock.
-func proveCellCookieReknockRoutability(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTPTrap) {
+func validateCellCookieReknockRoutability(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTPTrap) {
 	t.Helper()
 	exchange := newCookieRoutabilityExchange(t, cellReknockRoutability, cookieRoutabilityConfig{})
 	knockBody := []byte(`{"phase":"knock","resource":"cell-cookie-reknock"}`)
@@ -2498,7 +2497,7 @@ func (r *hostRoutedResolver) LookupNetIP(_ context.Context, _, host string) ([]n
 	return []netip.Addr{addr}, nil
 }
 
-// proveAuthenticatedInvalidAssignmentMatrix proves the SDK refuses every
+// validateAuthenticatedInvalidAssignmentMatrix proves the SDK refuses every
 // authenticated-but-invalid Hub assignment. Each case is delivered by a Hub that
 // completes the full two-leg return-routability profile and signs the final
 // NHP_LRT with the pinned key, so nothing about the transport or the
@@ -2508,7 +2507,7 @@ func (r *hostRoutedResolver) LookupNetIP(_ context.Context, _, host string) ([]n
 // the control, so the matrix cannot pass vacuously. Finally the public
 // registration driver is driven with an invalid assignment and must persist
 // nothing and send no assigned-cell datagram.
-func proveAuthenticatedInvalidAssignmentMatrix(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTPTrap) {
+func validateAuthenticatedInvalidAssignmentMatrix(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTPTrap) {
 	t.Helper()
 	const (
 		agentID  = "qurl-go-fault-proof-assignment-matrix"

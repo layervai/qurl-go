@@ -2026,11 +2026,12 @@ type NativeKnockResult struct {
 	ACToken      string
 	ResourceHost string
 	OpenTime     uint32
+	SessionID    uint64
 	AgentAddr    string
 }
 
 func (r NativeKnockResult) String() string {
-	return fmt.Sprintf("qurl.NativeKnockResult{ACToken:[REDACTED], ResourceHost:%q, OpenTime:%d, AgentAddr:%q}", r.ResourceHost, r.OpenTime, r.AgentAddr)
+	return fmt.Sprintf("qurl.NativeKnockResult{ACToken:[REDACTED], ResourceHost:%q, OpenTime:%d, SessionID:%d, AgentAddr:%q}", r.ResourceHost, r.OpenTime, r.SessionID, r.AgentAddr)
 }
 
 // GoString provides the same token redaction for %#v formatting.
@@ -2071,35 +2072,26 @@ func KnockRegisteredAgent(ctx context.Context, binding *AgentRuntimeBinding, dev
 	return consumeNativeAgentKnockReply(reply, knockResourceID)
 }
 
-// ExitRegisteredAgentSession sends one clean NHP_EXT for the caller-owned
-// registered-agent session. It uses the same validation and pinned assigned-cell
-// endpoint as KnockRegisteredAgent, never contacts the Hub or any HTTP surface,
-// and accepts only the authenticated EXT-correlated ACK. The v0.6 EXT ACK uses
-// the same resource-admission envelope as KNK/RKN. Its decrypted body buffer is
-// wiped after strict validation and the parsed result is discarded; clean exit
-// never changes durable enrollment or assignment state.
-func ExitRegisteredAgentSession(ctx context.Context, binding *AgentRuntimeBinding, deviceStaticPrivateKey []byte, knockResourceID string, opts NativeKnockOptions, transportOpts ...AgentRuntimeUDPOption) error {
+// ExitRegisteredAgentSessions sends one bodyless, one-way NHP_EXT for every
+// active access session owned by the authenticated registered agent. It is
+// reserved for whole-agent shutdown and must not be used to stop one resource,
+// retire a replacement session, or clean up one FRP cycle. A nil error confirms
+// local UDP dispatch only because a conforming server sends no response. Durable
+// enrollment and assignment state are unchanged.
+func ExitRegisteredAgentSessions(ctx context.Context, binding *AgentRuntimeBinding, deviceStaticPrivateKey []byte, transportOpts ...AgentRuntimeUDPOption) error {
 	cfg, endpoint, err := registeredAgentSessionEndpoint(ctx, binding, deviceStaticPrivateKey, transportOpts)
 	if err != nil {
 		return err
 	}
-	body, err := marshalNativeSessionApplicationBody(binding.AgentID, knockResourceID, opts, nhpEXTHeaderType)
-	if err != nil {
-		return err
-	}
-	defer wipeBytes(body)
-	reply, err := nativeudp.Exit(ctx, endpoint, body, cfg.udpOptions(deviceStaticPrivateKey))
+	err = nativeudp.Exit(ctx, endpoint, cfg.udpOptions(deviceStaticPrivateKey))
 	if err != nil {
 		return normalizeRelayError(err, ErrMalformedReply)
 	}
-	// v0.6 EXT ACK is the full, non-empty resource-admission envelope. Reuse
-	// strict parsing so authenticated replies without the required token/host fail.
-	_, err = consumeNativeAgentKnockReply(reply, knockResourceID)
-	return err
+	return nil
 }
 
 // registeredAgentSessionEndpoint is the common no-I/O admission gate for
-// native KNK/RKN and EXT. It intentionally validates the binding snapshot
+// native KNK/RKN and global EXT. It intentionally validates the binding snapshot
 // before body construction, DNS, or socket creation so every session-control
 // operation has the same trust and placement boundary.
 func registeredAgentSessionEndpoint(ctx context.Context, binding *AgentRuntimeBinding, deviceStaticPrivateKey []byte, transportOpts []AgentRuntimeUDPOption) (*nativeAgentRuntimeConfig, nativeudp.Endpoint, error) {
@@ -2162,9 +2154,10 @@ func validateRuntimeBindingIdentity(binding *AgentRuntimeBinding, deviceStaticPr
 
 type nativeAgentKnockACK struct {
 	ErrCode          nativeJSONValue[string] `json:"errCode"`
+	SessionID        nhpSessionIDJSON        `json:"sessId"`
 	ErrMsg           nativeJSONValue[string] `json:"errMsg"`
 	ResourceHost     nativeJSONStringMap     `json:"resHost"`
-	OpenTime         nativeJSONValue[uint32] `json:"opnTime"`
+	OpenTime         nhpOpenTimeJSON         `json:"opnTime"`
 	ASPToken         nativeJSONValue[string] `json:"aspToken"`
 	AgentAddr        nativeJSONValue[string] `json:"agentAddr"`
 	ACTokens         nativeJSONStringMap     `json:"acTokens"`
@@ -2264,6 +2257,12 @@ func interpretNativeAgentKnockReply(reply *relayknock.Reply, knockResourceID str
 		return nil, fmt.Errorf("%w: native knock ACK errCode is not canonical", ErrMalformedReply)
 	}
 	if !isSuccessErrCode(ack.ErrCode.Value) {
+		if ack.SessionID.Present {
+			return nil, invalidNativeProducerReply(ErrMalformedReply, "native knock deny ACK session id")
+		}
+		if !ack.OpenTime.Present || ack.OpenTime.Value != 0 {
+			return nil, invalidNativeProducerReply(ErrMalformedReply, "native knock deny ACK open time")
+		}
 		// Any canonical non-success errCode is an authenticated server deny and
 		// must reach the caller carrying its code. The deny vocabulary belongs to
 		// the producer and may grow (qurl-conformance pins the server-legal codes
@@ -2285,6 +2284,7 @@ func interpretNativeAgentKnockReply(reply *relayknock.Reply, knockResourceID str
 		present bool
 	}{
 		{"resHost", ack.ResourceHost.Present},
+		{"sessId", ack.SessionID.Present},
 		{"opnTime", ack.OpenTime.Present},
 		{"agentAddr", ack.AgentAddr.Present},
 		{"acTokens", ack.ACTokens.Present},
@@ -2292,6 +2292,12 @@ func interpretNativeAgentKnockReply(reply *relayknock.Reply, knockResourceID str
 		if !required.present {
 			return nil, fmt.Errorf("%w: native knock ACK field %s is missing", ErrMalformedReply, required.name)
 		}
+	}
+	if ack.SessionID.Value == 0 {
+		return nil, fmt.Errorf("%w: success ACK carried a zero NHP session id", ErrMalformedReply)
+	}
+	if ack.OpenTime.Value == 0 {
+		return nil, fmt.Errorf("%w: success ACK carried an invalid open time", ErrMalformedReply)
 	}
 	if ack.PreAccessActions.RequiresAction {
 		return nil, fmt.Errorf("%w: native knock ACK requires an unsupported pre-access action", ErrMalformedReply)
@@ -2301,7 +2307,7 @@ func interpretNativeAgentKnockReply(reply *relayknock.Reply, knockResourceID str
 	if token == "" || host == "" || token != strings.TrimSpace(token) || host != strings.TrimSpace(host) {
 		return nil, fmt.Errorf("%w: success ACK missing canonical token or resource host for requested resource", ErrMalformedReply)
 	}
-	return &NativeKnockResult{ACToken: token, ResourceHost: host, OpenTime: ack.OpenTime.Value, AgentAddr: ack.AgentAddr.Value}, nil
+	return &NativeKnockResult{ACToken: token, ResourceHost: host, OpenTime: ack.OpenTime.Value, SessionID: ack.SessionID.Value, AgentAddr: ack.AgentAddr.Value}, nil
 }
 
 // isCanonicalKnockDenyCode reports whether a non-success knock-ACK errCode is

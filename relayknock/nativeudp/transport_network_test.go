@@ -348,7 +348,6 @@ func TestExchange_ConcurrentClientsShareNoReplyBufferAcrossHelpers(t *testing.T)
 		{name: "knock", reqType: relayknock.TypeKnock, accept: (*relayknock.Reply).IsACK},
 		{name: "list", reqType: relayknock.TypeListRequest, accept: (*relayknock.Reply).IsListResult},
 		{name: "register", reqType: relayknock.TypeRegister, accept: (*relayknock.Reply).IsRegisterAck},
-		{name: "exit", reqType: relayknock.TypeExit, accept: (*relayknock.Reply).IsACK},
 	}
 	var wg sync.WaitGroup
 	failures := make(chan error, len(helpers)*4)
