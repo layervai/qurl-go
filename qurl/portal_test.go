@@ -6,6 +6,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -336,6 +337,34 @@ func TestInterpretReply_ServerDeny(t *testing.T) {
 	}
 	if deny.ErrCode != "52024" {
 		t.Fatalf("deny ErrCode = %q, want 52024", deny.ErrCode)
+	}
+}
+
+func TestInterpretReply_ServerDenyRequiresCanonicalErrorCode(t *testing.T) {
+	for name, code := range map[string]string{
+		"leading space":  ` 52024`,
+		"trailing space": `52024 `,
+		"newline":        `52024\nsecret`,
+		"free form":      `access denied`,
+		"sign":           `-52024`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			body, err := json.Marshal(map[string]any{
+				"errCode": code,
+				"opnTime": 0,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = interpretReply(&relayknock.Reply{Type: relayknock.TypeACK, Body: body})
+			if !errors.Is(err, ErrMalformedReply) {
+				t.Fatalf("deny with errCode %q error = %v, want ErrMalformedReply", code, err)
+			}
+			var deny *ServerDenyError
+			if errors.As(err, &deny) {
+				t.Fatalf("deny with errCode %q reflected as ServerDenyError", code)
+			}
+		})
 	}
 }
 

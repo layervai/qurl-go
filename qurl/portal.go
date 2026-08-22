@@ -273,6 +273,9 @@ func interpretReply(reply *relayknock.Reply) (*ResourceHandle, error) {
 		if !ack.OpenTime.Present || ack.OpenTime.Value != 0 {
 			return nil, fmt.Errorf("%w: deny ACK carried a missing or nonzero open time", ErrMalformedReply)
 		}
+		if !isCanonicalKnockDenyCode(ack.ErrCode) {
+			return nil, fmt.Errorf("%w: deny ACK carried a noncanonical error code", ErrMalformedReply)
+		}
 		return nil, &ServerDenyError{ErrCode: ack.ErrCode}
 	}
 	if !ack.SessionID.Present || ack.SessionID.Value == 0 {
