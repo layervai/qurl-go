@@ -38,7 +38,7 @@ func (e *ServerDenyError) Error() string {
 type serverKnockAckMsg struct {
 	ErrCode     string           `json:"errCode"`
 	SessionID   nhpSessionIDJSON `json:"sessId"`
-	OpenTime    uint32           `json:"opnTime"`
+	OpenTime    nhpOpenTimeJSON  `json:"opnTime"`
 	RedirectURL string           `json:"redirectUrl"`
 }
 
@@ -67,6 +67,32 @@ func (v *nhpSessionIDJSON) UnmarshalJSON(data []byte) error {
 		return fmt.Errorf("NHP session id: %w", err)
 	}
 	v.Value = value
+	return nil
+}
+
+// nhpOpenTimeJSON preserves presence and accepts only the canonical NHP wire
+// shape: an unsigned decimal JSON integer that fits uint32. A success ACK must
+// carry a positive lifetime; a denied ACK must carry the explicit value zero.
+type nhpOpenTimeJSON struct {
+	Value   uint32
+	Present bool
+}
+
+func (v *nhpOpenTimeJSON) UnmarshalJSON(data []byte) error {
+	v.Present = true
+	if len(data) == 0 {
+		return errors.New("NHP open time must be an unsigned decimal JSON integer")
+	}
+	for _, b := range data {
+		if b < '0' || b > '9' {
+			return errors.New("NHP open time must be an unsigned decimal JSON integer")
+		}
+	}
+	value, err := strconv.ParseUint(string(data), 10, 32)
+	if err != nil {
+		return fmt.Errorf("NHP open time: %w", err)
+	}
+	v.Value = uint32(value)
 	return nil
 }
 

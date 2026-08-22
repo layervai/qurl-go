@@ -327,7 +327,7 @@ func TestInterpretReply_AcceptsMaxUint32OpenTime(t *testing.T) {
 func TestInterpretReply_ServerDeny(t *testing.T) {
 	reply := &relayknock.Reply{
 		Type: relayknock.TypeACK,
-		Body: []byte(`{"errCode":"52024"}`), // qURL session-expired deny
+		Body: []byte(`{"errCode":"52024","opnTime":0}`), // qURL session-expired deny
 	}
 	_, err := interpretReply(reply)
 	var deny *ServerDenyError
@@ -341,12 +341,12 @@ func TestInterpretReply_ServerDeny(t *testing.T) {
 
 func TestInterpretReply_ServerDenyRequiresSessionIDOmission(t *testing.T) {
 	for name, body := range map[string]string{
-		"nonzero":   `{"errCode":"52024","sessId":123}`,
-		"zero":      `{"errCode":"52024","sessId":0}`,
-		"null":      `{"errCode":"52024","sessId":null}`,
-		"string":    `{"errCode":"52024","sessId":"123"}`,
-		"duplicate": `{"errCode":"52024","sessId":0,"sessId":0}`,
-		"omitted":   `{"errCode":"52024"}`,
+		"nonzero":   `{"errCode":"52024","sessId":123,"opnTime":0}`,
+		"zero":      `{"errCode":"52024","sessId":0,"opnTime":0}`,
+		"null":      `{"errCode":"52024","sessId":null,"opnTime":0}`,
+		"string":    `{"errCode":"52024","sessId":"123","opnTime":0}`,
+		"duplicate": `{"errCode":"52024","sessId":0,"sessId":0,"opnTime":0}`,
+		"omitted":   `{"errCode":"52024","opnTime":0}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := interpretReply(&relayknock.Reply{Type: relayknock.TypeACK, Body: []byte(body)})
@@ -359,6 +359,33 @@ func TestInterpretReply_ServerDenyRequiresSessionIDOmission(t *testing.T) {
 			var deny *ServerDenyError
 			if !errors.As(err, &deny) || deny.ErrCode != "52024" {
 				t.Fatalf("deny with omitted session = %v, want ServerDenyError", err)
+			}
+		})
+	}
+}
+
+func TestInterpretReply_ServerDenyRequiresCanonicalZeroOpenTime(t *testing.T) {
+	for name, body := range map[string]string{
+		"missing":   `{"errCode":"52024"}`,
+		"nonzero":   `{"errCode":"52024","opnTime":1}`,
+		"null":      `{"errCode":"52024","opnTime":null}`,
+		"string":    `{"errCode":"52024","opnTime":"0"}`,
+		"fraction":  `{"errCode":"52024","opnTime":0.0}`,
+		"overflow":  `{"errCode":"52024","opnTime":4294967296}`,
+		"duplicate": `{"errCode":"52024","opnTime":0,"opnTime":0}`,
+		"zero":      `{"errCode":"52024","opnTime":0}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := interpretReply(&relayknock.Reply{Type: relayknock.TypeACK, Body: []byte(body)})
+			if name != "zero" {
+				if !errors.Is(err, ErrMalformedReply) {
+					t.Fatalf("deny with invalid open time error = %v, want ErrMalformedReply", err)
+				}
+				return
+			}
+			var deny *ServerDenyError
+			if !errors.As(err, &deny) || deny.ErrCode != "52024" {
+				t.Fatalf("deny with canonical zero open time = %v, want ServerDenyError", err)
 			}
 		})
 	}

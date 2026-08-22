@@ -2157,7 +2157,7 @@ type nativeAgentKnockACK struct {
 	SessionID        nhpSessionIDJSON        `json:"sessId"`
 	ErrMsg           nativeJSONValue[string] `json:"errMsg"`
 	ResourceHost     nativeJSONStringMap     `json:"resHost"`
-	OpenTime         nativeJSONValue[uint32] `json:"opnTime"`
+	OpenTime         nhpOpenTimeJSON         `json:"opnTime"`
 	ASPToken         nativeJSONValue[string] `json:"aspToken"`
 	AgentAddr        nativeJSONValue[string] `json:"agentAddr"`
 	ACTokens         nativeJSONStringMap     `json:"acTokens"`
@@ -2259,6 +2259,9 @@ func interpretNativeAgentKnockReply(reply *relayknock.Reply, knockResourceID str
 	if !isSuccessErrCode(ack.ErrCode.Value) {
 		if ack.SessionID.Present {
 			return nil, invalidNativeProducerReply(ErrMalformedReply, "native knock deny ACK session id")
+		}
+		if !ack.OpenTime.Present || ack.OpenTime.Value != 0 {
+			return nil, invalidNativeProducerReply(ErrMalformedReply, "native knock deny ACK open time")
 		}
 		// Any canonical non-success errCode is an authenticated server deny and
 		// must reach the caller carrying its code. The deny vocabulary belongs to

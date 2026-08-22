@@ -2021,7 +2021,7 @@ func TestConsumeNativeAgentKnockReply_WipesBearerBody(t *testing.T) {
 	}
 	assertWiped(t, malformedBody)
 
-	denyBody := []byte(`{"errCode":"52004","errMsg":"denied"}`)
+	denyBody := []byte(`{"errCode":"52004","errMsg":"denied","opnTime":0}`)
 	_, err = consumeNativeAgentKnockReply(&relayknock.Reply{Type: relayknock.TypeACK, Body: denyBody}, "resource-public-key")
 	var deny *ServerDenyError
 	if !errors.As(err, &deny) || deny.ErrCode != "52004" || errors.Is(err, ErrMalformedReply) {
@@ -2043,12 +2043,12 @@ func TestInterpretNativeAgentKnockReply_ErrCodePresenceAndDenyPrecedence(t *test
 		body         string
 		wantDenyCode string
 	}{
-		"deny needs no success fields":     {body: `{"errCode":"52004"}`, wantDenyCode: "52004"},
-		"deny resource not found":          {body: `{"errCode":"52004","errMsg":"failed to find resource"}`, wantDenyCode: "52004"},
-		"deny knock server not found":      {body: `{"errCode":"51002","errMsg":"failed to find knock server"}`, wantDenyCode: "51002"},
-		"deny ac operation failed":         {body: `{"errCode":"52005","errMsg":"server ac operation failed"}`, wantDenyCode: "52005"},
-		"deny asp not found":               {body: `{"errCode":"52002","errMsg":"failed to find auth service provider"}`, wantDenyCode: "52002"},
-		"deny code outside pinned vectors": {body: `{"errCode":"59999"}`, wantDenyCode: "59999"},
+		"deny needs no success fields":     {body: `{"errCode":"52004","opnTime":0}`, wantDenyCode: "52004"},
+		"deny resource not found":          {body: `{"errCode":"52004","errMsg":"failed to find resource","opnTime":0}`, wantDenyCode: "52004"},
+		"deny knock server not found":      {body: `{"errCode":"51002","errMsg":"failed to find knock server","opnTime":0}`, wantDenyCode: "51002"},
+		"deny ac operation failed":         {body: `{"errCode":"52005","errMsg":"server ac operation failed","opnTime":0}`, wantDenyCode: "52005"},
+		"deny asp not found":               {body: `{"errCode":"52002","errMsg":"failed to find auth service provider","opnTime":0}`, wantDenyCode: "52002"},
+		"deny code outside pinned vectors": {body: `{"errCode":"59999","opnTime":0}`, wantDenyCode: "59999"},
 		"missing errCode":                  {body: `{"errMsg":"denied"}`},
 		"null errCode":                     {body: `{"errCode":null}`},
 		"noncanonical errCode":             {body: `{"errCode":" 52101"}`},
@@ -2114,12 +2114,12 @@ func TestInterpretNativeAgentKnockReply_RejectsInvalidSessionEnvelope(t *testing
 
 func TestInterpretNativeAgentKnockReply_DenyRequiresSessionIDOmission(t *testing.T) {
 	for name, body := range map[string]string{
-		"nonzero":   `{"errCode":"52004","sessId":123}`,
-		"zero":      `{"errCode":"52004","sessId":0}`,
-		"null":      `{"errCode":"52004","sessId":null}`,
-		"string":    `{"errCode":"52004","sessId":"123"}`,
-		"duplicate": `{"errCode":"52004","sessId":0,"sessId":0}`,
-		"omitted":   `{"errCode":"52004"}`,
+		"nonzero":   `{"errCode":"52004","sessId":123,"opnTime":0}`,
+		"zero":      `{"errCode":"52004","sessId":0,"opnTime":0}`,
+		"null":      `{"errCode":"52004","sessId":null,"opnTime":0}`,
+		"string":    `{"errCode":"52004","sessId":"123","opnTime":0}`,
+		"duplicate": `{"errCode":"52004","sessId":0,"sessId":0,"opnTime":0}`,
+		"omitted":   `{"errCode":"52004","opnTime":0}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := interpretNativeAgentKnockReply(&relayknock.Reply{Type: relayknock.TypeACK, Body: []byte(body)}, "resource-public-key")
@@ -2132,6 +2132,33 @@ func TestInterpretNativeAgentKnockReply_DenyRequiresSessionIDOmission(t *testing
 			var deny *ServerDenyError
 			if !errors.As(err, &deny) || deny.ErrCode != "52004" {
 				t.Fatalf("deny with omitted session = %v, want ServerDenyError", err)
+			}
+		})
+	}
+}
+
+func TestInterpretNativeAgentKnockReply_DenyRequiresCanonicalZeroOpenTime(t *testing.T) {
+	for name, body := range map[string]string{
+		"missing":   `{"errCode":"52004"}`,
+		"nonzero":   `{"errCode":"52004","opnTime":1}`,
+		"null":      `{"errCode":"52004","opnTime":null}`,
+		"string":    `{"errCode":"52004","opnTime":"0"}`,
+		"fraction":  `{"errCode":"52004","opnTime":0.0}`,
+		"overflow":  `{"errCode":"52004","opnTime":4294967296}`,
+		"duplicate": `{"errCode":"52004","opnTime":0,"opnTime":0}`,
+		"zero":      `{"errCode":"52004","opnTime":0}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := interpretNativeAgentKnockReply(&relayknock.Reply{Type: relayknock.TypeACK, Body: []byte(body)}, "resource-public-key")
+			if name != "zero" {
+				if !errors.Is(err, ErrMalformedReply) {
+					t.Fatalf("deny with invalid open time error = %v, want ErrMalformedReply", err)
+				}
+				return
+			}
+			var deny *ServerDenyError
+			if !errors.As(err, &deny) || deny.ErrCode != "52004" {
+				t.Fatalf("deny with canonical zero open time = %v, want ServerDenyError", err)
 			}
 		})
 	}
