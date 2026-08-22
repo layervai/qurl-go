@@ -312,7 +312,7 @@ func TestDecryptAndCorrelate_RejectsMalformedDatagram(t *testing.T) {
 		pkt  []byte
 	}{
 		{name: "too short", pkt: make([]byte, 100)},
-		{name: "garbage header-sized", pkt: mustRandom(t, 240)},
+		{name: "garbage header-sized", pkt: mustRandom(t, nhpwire.HeaderSize)},
 		{name: "garbage with body", pkt: mustRandom(t, 400)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -619,7 +619,7 @@ func TestCorrelateDecryptedReply_CookieChallengeBeforeCounterCheck(t *testing.T)
 }
 
 func TestCorrelateAssignmentReplyRejectsAndWipesFlaggedChallenge(t *testing.T) {
-	for _, flags := range []uint16{0x0002, 0x0008} {
+	for _, flags := range []uint16{0x0001, 0x0004} {
 		body := []byte("decrypted-cookie-secret")
 		msg := &nhpwire.Message{Type: relayknock.TypeCookieChallenge, Flags: flags, Body: body}
 		if got, err := correlateAssignmentReply(msg, 41); got != nil || !errors.Is(err, relayknock.ErrMalformedReply) {

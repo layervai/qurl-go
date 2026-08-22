@@ -17,9 +17,10 @@ import (
 //
 // The relay HTTP contract (the reference NHP relay's handleRelay endpoint): POST
 // the raw packet as application/octet-stream to {relayBaseURL}/relay/{serverId}.
-// Browser knock-family requests return 200 with the server's reply packet bytes.
-// Anything else is a transport fault (RelayError), distinct from an authenticated
-// server deny carried inside a decryptable reply packet. Agent lifecycle messages
+// Browser KNK/RKN requests return 200 with the server's reply packet bytes.
+// Bodyless NHP_EXT is one-way and returns exactly 204 with no body. Anything
+// else is a transport fault (RelayError), distinct from an authenticated server
+// deny carried inside a decryptable reply packet. Agent lifecycle messages
 // (NHP_OTP, NHP_REG, NHP_LST) use native UDP, never this HTTP transport.
 
 // HTTPDoer is the subset of *http.Client the relay transport needs. Narrowing to
@@ -33,8 +34,8 @@ type HTTPDoer interface {
 // RelayError is a relay POST that failed at the HTTP layer: a transport fault
 // (unknown server, malformed/oversize packet, forward failure, shutdown,
 // timeout), or a relay response outside the calling contract. RelayPost expects
-// 200 with reply packet bytes. Status is the HTTP status, or 0 for a
-// transport-level failure with no HTTP response.
+// 200 plus reply bytes for KNK/RKN or 204 plus an empty body for EXT. Status is
+// the HTTP status, or 0 for a transport-level failure with no HTTP response.
 type RelayError struct {
 	Status int
 	Msg    string
@@ -67,8 +68,9 @@ var ErrMalformedReply = nhpwire.ErrMalformedReply
 // RelayPost delivers a caller-built browser knock-family packet to the relay and
 // returns the server's reply packet bytes. Callers must use NHP_KNK, NHP_RKN, or
 // NHP_EXT. It validates the cleartext packet type before any HTTP request; the
-// relay independently enforces the same allowlist. 200 returns reply bytes; any
-// other status returns *RelayError.
+// relay independently enforces the same allowlist. KNK/RKN require 200 and
+// return reply bytes. One-way EXT requires 204 with an empty body and returns a
+// nil reply. Any other response returns *RelayError.
 func RelayPost(ctx context.Context, httpClient HTTPDoer, relayBaseURL, serverID string, packet []byte) ([]byte, error) {
 	headerType, err := nhpwire.PacketType(packet)
 	if err != nil {
@@ -82,15 +84,25 @@ func RelayPost(ctx context.Context, httpClient HTTPDoer, relayBaseURL, serverID 
 	if err != nil {
 		return nil, err
 	}
-	if status != http.StatusOK {
-		detail := strings.TrimSpace(string(body))
-		m := fmt.Sprintf("relay POST %s -> %d", url, status)
-		if detail != "" {
-			m += ": " + detail
+	if headerType == nhpwire.TypeEXT {
+		if status == http.StatusNoContent && len(body) == 0 {
+			return nil, nil
 		}
-		return nil, &RelayError{Status: status, Msg: m}
+		return nil, relayResponseError(url, status, body)
+	}
+	if status != http.StatusOK {
+		return nil, relayResponseError(url, status, body)
 	}
 	return body, nil
+}
+
+func relayResponseError(url string, status int, body []byte) *RelayError {
+	detail := strings.TrimSpace(string(body))
+	m := fmt.Sprintf("relay POST %s -> %d", url, status)
+	if detail != "" {
+		m += ": " + detail
+	}
+	return &RelayError{Status: status, Msg: m}
 }
 
 func browserRelayTypeAllowed(headerType int) bool {
@@ -104,9 +116,9 @@ func browserRelayTypeAllowed(headerType int) bool {
 
 // relayDo delivers one packet to {relayBaseURL}/relay/{serverID} and returns
 // the HTTP status and the bounded response body. RelayPost interprets that
-// response as 200 + reply bytes. Transport-level failures (request build,
-// connection, body read) come back as *RelayError; url is returned so callers
-// compose errors around the one URL actually posted.
+// response according to the cleartext request type. Transport-level failures
+// (request build, connection, body read) come back as *RelayError; url is
+// returned so callers compose errors around the one URL actually posted.
 func relayDo(ctx context.Context, httpClient HTTPDoer, relayBaseURL, serverID string, packet []byte) (status int, body []byte, url string, err error) {
 	if httpClient == nil {
 		httpClient = http.DefaultClient
@@ -161,11 +173,11 @@ type KnockOptions struct {
 // The caller's egress IP is the address the NHP server opens access for, so
 // a subsequent resource request must share that egress IP (see the package doc).
 //
-// The reply header's type and counter ride outside the AEAD (the transcript
-// authenticates the server, not those fields), so Knock enforces what the crypto
-// cannot: the reply must echo this request's counter and carry NHP_ACK or NHP_COK.
-// Anything else fails closed. The caller branches the success and overload
-// outcomes with IsACK versus IsCookieChallenge.
+// The protocol 1.2 header MAC authenticates the reply type and counter. Knock
+// additionally enforces their request-level semantics: the reply must echo this
+// request's counter and carry NHP_ACK or NHP_COK. Anything else fails closed.
+// The caller branches the success and overload outcomes with IsACK versus
+// IsCookieChallenge.
 func Knock(ctx context.Context, relayBaseURL string, serverStaticPub, body []byte, opts KnockOptions) (*Reply, error) {
 	packet, devicePriv, counter, err := buildKnockOutbound(serverStaticPub, body, opts)
 	if err != nil {
@@ -287,7 +299,7 @@ func buildKnockOutbound(serverStaticPub, body []byte, opts KnockOptions) (packet
 		DeviceStaticPriv: devicePriv,
 		ServerStaticPub:  serverStaticPub,
 		EphemeralPriv:    ephemeralPriv,
-		TimestampNanos:   nowUnixNano(),
+		TimestampMillis:  nowUnixMilli(),
 		Counter:          counter,
 		Preamble:         preamble,
 		Body:             body,

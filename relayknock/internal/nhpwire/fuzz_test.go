@@ -47,7 +47,7 @@ func fuzzSeedPackets(tb testing.TB) [][]byte {
 			DeviceStaticPriv: serverPriv, // role-swapped: the server initiates a reply
 			ServerStaticPub:  agentPub,
 			EphemeralPriv:    bytes.Repeat([]byte{0x44}, PublicKeySize),
-			TimestampNanos:   1700000000123456789,
+			TimestampMillis:  1700000000123,
 			Counter:          0x1122334455667788,
 			Preamble:         0xa1b2c3d4,
 			Body:             body,
@@ -55,13 +55,6 @@ func fuzzSeedPackets(tb testing.TB) [][]byte {
 		if err != nil {
 			tb.Fatalf("build fuzz seed (type %d flags %#04x): %v", headerType, flags, err)
 		}
-		return packet
-	}
-
-	// restamp re-signs the unkeyed header digest so a header mutation reaches the
-	// guard under test instead of stopping at the digest compare.
-	restamp := func(packet []byte) []byte {
-		copy(packet[offDigest:offDigest+hashSize], headerDigest(agentPub, packet[:HeaderSize], nil))
 		return packet
 	}
 
@@ -79,14 +72,14 @@ func fuzzSeedPackets(tb testing.TB) [][]byte {
 		build(99, 0, []byte("unknown type")),
 
 		// Mutations of an opening packet, each aimed at one guard.
-		restamp(func() []byte { p := bytes.Clone(ack); p[8] = protocolVersionMajor + 1; return p }()),
-		restamp(func() []byte { p := bytes.Clone(ack); setFlag(p[:HeaderSize], 1<<3); return p }()),
-		restamp(func() []byte { p := bytes.Clone(ack); setFlag(p[:HeaderSize], hubLSTCookieProofFlag); return p }()),
-		restamp(func() []byte { p := bytes.Clone(plainACK); setFlag(p[:HeaderSize], nhpFlagCompress); return p }()),
-		restamp(func() []byte { p := bytes.Clone(ack); clear(p[offEphemeral : offEphemeral+PublicKeySize]); return p }()),
-		restamp(func() []byte { p := bytes.Clone(ack); p[offStatic] ^= 0xff; return p }()),
+		func() []byte { p := bytes.Clone(ack); p[8] = protocolVersionMajor + 1; return p }(),
+		func() []byte { p := bytes.Clone(ack); setFlag(p[:HeaderSize], 1<<3); return p }(),
+		func() []byte { p := bytes.Clone(ack); setFlag(p[:HeaderSize], hubLSTCookieProofFlag); return p }(),
+		func() []byte { p := bytes.Clone(plainACK); setFlag(p[:HeaderSize], nhpFlagCompress); return p }(),
+		func() []byte { p := bytes.Clone(ack); clear(p[offEphemeral : offEphemeral+PublicKeySize]); return p }(),
+		func() []byte { p := bytes.Clone(ack); p[offStatic] ^= 0xff; return p }(),
 		func() []byte { p := bytes.Clone(ack); p[len(p)-1] ^= 0xff; return p }(),
-		func() []byte { p := bytes.Clone(ack); p[offDigest] ^= 0xff; return p }(),
+		func() []byte { p := bytes.Clone(ack); p[offHeaderMAC] ^= 0xff; return p }(),
 	}
 
 	// The pinned cross-language goldens, loaded from the conformance module so the

@@ -208,8 +208,8 @@ func KnockWithReknock(ctx context.Context, ep Endpoint, knockBody, reknockBody [
 // authenticated flag-zero COK whose strict body.trxId matches that LST counter;
 // an LRT before proof is terminal. AssignmentList then sends exactly one fresh
 // proof LST: the application body is byte-identical, the ephemeral
-// key/counter/timestamp are fresh, flag 0x0004 is exclusive, and the raw 32-byte
-// cookie is mixed into the header digest. Only that proof flight may receive the
+// key/counter/timestamp are fresh, flag 0x0002 is exclusive, and the raw 32-byte
+// cookie is mixed into the header MAC. Only that proof flight may receive the
 // final LRT.
 //
 // A malformed or untrusted challenge, a wrong reply type/counter, or a second
@@ -787,10 +787,10 @@ func decryptAuthenticatedReply(devicePriv, serverStaticPub, reply []byte) (*nhpw
 
 func replyFromWire(msg *nhpwire.Message) *relayknock.Reply {
 	return &relayknock.Reply{
-		Type:           msg.Type,
-		Counter:        msg.Counter,
-		TimestampNanos: msg.TimestampNanos,
-		Body:           msg.Body,
+		Type:            msg.Type,
+		Counter:         msg.Counter,
+		TimestampMillis: msg.TimestampMillis,
+		Body:            msg.Body,
 	}
 }
 
@@ -844,9 +844,9 @@ func replyTypeAllowed(requestType, replyType int) bool {
 // ephemeral private key is wiped before returning; the device static private key
 // belongs to the caller and is not wiped here.
 type packetFreshness struct {
-	ephemeralPub   []byte
-	counter        uint64
-	timestampNanos uint64
+	ephemeralPub    []byte
+	counter         uint64
+	timestampMillis uint64
 }
 
 func buildPacket(headerType int, serverStaticPub, devicePriv, body, cookie []byte) (packet []byte, counter uint64, err error) {
@@ -875,7 +875,7 @@ func buildPacketMaterial(headerType int, serverStaticPub, devicePriv, body, cook
 		}
 	}
 	fresh.counter = binary.BigEndian.Uint64(random[x25519key.Size : x25519key.Size+8])
-	fresh.timestampNanos = uint64(time.Now().UnixNano())
+	fresh.timestampMillis = uint64(time.Now().UnixMilli())
 	preamble := binary.BigEndian.Uint32(random[x25519key.Size+8:])
 
 	compress := (headerType == relayknock.TypeOTP || headerType == relayknock.TypeRegister) &&
@@ -884,7 +884,7 @@ func buildPacketMaterial(headerType int, serverStaticPub, devicePriv, body, cook
 		DeviceStaticPriv: devicePriv,
 		ServerStaticPub:  serverStaticPub,
 		EphemeralPriv:    ephemeralPriv,
-		TimestampNanos:   fresh.timestampNanos,
+		TimestampMillis:  fresh.timestampMillis,
 		Counter:          fresh.counter,
 		Preamble:         preamble,
 		Body:             body,
@@ -917,19 +917,19 @@ func buildHubAssignmentProofPacket(serverStaticPub, devicePriv, body, cookie []b
 	if counter == first.counter || bytes.Equal(ephemeralPub, first.ephemeralPub) {
 		return nil, packetFreshness{}, fmt.Errorf("%w: proof packet randomness repeated first-flight material", ErrTransport)
 	}
-	timestamp := uint64(time.Now().UnixNano())
-	if timestamp <= first.timestampNanos {
-		if first.timestampNanos == ^uint64(0) {
+	timestamp := uint64(time.Now().UnixMilli())
+	if timestamp <= first.timestampMillis {
+		if first.timestampMillis == ^uint64(0) {
 			return nil, packetFreshness{}, fmt.Errorf("%w: first assignment timestamp cannot be advanced", ErrTransport)
 		}
-		timestamp = first.timestampNanos + 1
+		timestamp = first.timestampMillis + 1
 	}
-	fresh = packetFreshness{ephemeralPub: ephemeralPub, counter: counter, timestampNanos: timestamp}
+	fresh = packetFreshness{ephemeralPub: ephemeralPub, counter: counter, timestampMillis: timestamp}
 	packet, err = nhpwire.BuildHubLSTCookieProof(&nhpwire.Inputs{
 		DeviceStaticPriv: devicePriv,
 		ServerStaticPub:  serverStaticPub,
 		EphemeralPriv:    ephemeralPriv,
-		TimestampNanos:   timestamp,
+		TimestampMillis:  timestamp,
 		Counter:          counter,
 		Preamble:         binary.BigEndian.Uint32(random[x25519key.Size+8:]),
 		Body:             body,

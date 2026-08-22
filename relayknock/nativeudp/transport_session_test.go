@@ -131,7 +131,7 @@ func (s *sessionServer) serve() {
 
 // open accepts an ordinary initiator packet, falling back to the cookie-bound
 // NHP_RKN open. A re-knock that opens under a cookie this server never issued
-// would mean the header digest is not actually bound to the challenge.
+// would mean the header MAC is not actually bound to the challenge.
 func (s *sessionServer) open(packet []byte) (*relayknock.Reply, error) {
 	if request, err := relayknocktest.OpenInitiatorMessage(s.serverPriv, s.agentPub, packet); err == nil {
 		return request, nil
@@ -141,7 +141,7 @@ func (s *sessionServer) open(packet []byte) (*relayknock.Reply, error) {
 		return nil, err
 	}
 	if _, err := relayknocktest.OpenReknockMessage(s.serverPriv, s.agentPub, sessionOtherCookie, packet); err == nil {
-		s.t.Error("NHP_RKN opened under a cookie this server never issued: the header digest is not cookie-bound")
+		s.t.Error("NHP_RKN opened under a cookie this server never issued: the header MAC is not cookie-bound")
 	}
 	return request, nil
 }
@@ -196,7 +196,7 @@ func (s *sessionServer) build(replyType int, serverPriv []byte, counter uint64, 
 		DeviceStaticPriv: serverPriv,
 		ServerStaticPub:  s.agentPub,
 		EphemeralPriv:    mustRand(s.t, 32),
-		TimestampNanos:   uint64(time.Now().UnixNano()),
+		TimestampMillis:  uint64(time.Now().UnixMilli()),
 		Counter:          counter,
 		Preamble:         mustPreamble(s.t),
 		Body:             body,

@@ -2,9 +2,35 @@ package nhpwire
 
 import (
 	"bytes"
+	"encoding/binary"
 	"strings"
 	"testing"
 )
+
+func TestStandardHeaderLayout(t *testing.T) {
+	if HeaderSize != 160 {
+		t.Fatalf("HeaderSize = %d, want 160", HeaderSize)
+	}
+	fields := []struct {
+		name        string
+		offset, end int
+		wantOffset  int
+		wantEnd     int
+	}{
+		{name: "common", offset: 0, end: headerCommonSize, wantOffset: 0, wantEnd: 24},
+		{name: "ephemeral", offset: offEphemeral, end: offEphemeral + PublicKeySize, wantOffset: 24, wantEnd: 56},
+		{name: "static", offset: offStatic, end: offStatic + PublicKeySize + gcmTagSize, wantOffset: 56, wantEnd: 104},
+		{name: "timestamp", offset: offTimestamp, end: offTimestamp + timestampSize + gcmTagSize, wantOffset: 104, wantEnd: 128},
+		{name: "header MAC", offset: offHeaderMAC, end: offHeaderMAC + hashSize, wantOffset: 128, wantEnd: 160},
+	}
+	for _, field := range fields {
+		t.Run(field.name, func(t *testing.T) {
+			if field.offset != field.wantOffset || field.end != field.wantEnd {
+				t.Fatalf("field = [%d:%d], want [%d:%d]", field.offset, field.end, field.wantOffset, field.wantEnd)
+			}
+		})
+	}
+}
 
 // framingFixture builds one valid initiator packet whose declared payload size
 // matches its trailing bytes, so each PacketType subcase can perturb exactly one
@@ -17,7 +43,7 @@ func framingFixture(t *testing.T, body []byte) []byte {
 		DeviceStaticPriv: devicePriv,
 		ServerStaticPub:  serverPub,
 		EphemeralPriv:    bytes.Repeat([]byte{0x33}, PublicKeySize),
-		TimestampNanos:   1700000000123456789,
+		TimestampMillis:  1700000000123,
 		Counter:          42,
 		Preamble:         0x01020304,
 		Body:             body,
@@ -55,6 +81,13 @@ func TestPacketType_ValidatesFraming(t *testing.T) {
 		{name: "shorter than the header", packet: make([]byte, HeaderSize-1), wantSub: "packet too short"},
 		{name: "empty", packet: nil, wantSub: "packet too short"},
 		{name: "past the receive buffer", packet: make([]byte, PacketBufferSize+1), wantSub: "packet too long"},
+		{name: "reserved bit 2", packet: func() []byte { p := bytes.Clone(valid); binary.BigEndian.PutUint16(p[10:12], 1<<2); return p }(), wantSub: "flags"},
+		{name: "reserved high flag", packet: func() []byte { p := bytes.Clone(valid); binary.BigEndian.PutUint16(p[10:12], 1<<15); return p }(), wantSub: "flags"},
+		{name: "Hub proof flag on knock", packet: func() []byte {
+			p := bytes.Clone(valid)
+			binary.BigEndian.PutUint16(p[10:12], hubLSTCookieProofFlag)
+			return p
+		}(), wantSub: "invalid on packet type"},
 		{
 			name:    "more trailing bytes than declared",
 			packet:  append(bytes.Clone(valid), 0x00),

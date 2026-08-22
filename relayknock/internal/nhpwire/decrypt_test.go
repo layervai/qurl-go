@@ -2,6 +2,7 @@ package nhpwire
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"strings"
 	"testing"
@@ -25,17 +26,8 @@ func keyPair(t *testing.T, seed byte) (priv, pub []byte) {
 // Knock resolve path both inherit. A valid NHP_ACK is built server→agent (the
 // golden-ack direction: the server is the reply's Noise initiator, the agent the
 // responder, so DecryptMessage(devicePriv, serverPub, …) opens it), then each
-// subcase tampers one field minimally to trip exactly one guard: the two length
-// bounds, the protocol version, the header digest, the es DH, the es-keyed static
-// open, the static-key match (opened against the wrong server key), the ss-keyed
-// timestamp open (server authentication), the body open, and the inflate. The
-// digest covers header[0:offDigest], so every subcase that mutates a header byte
-// re-stamps it — that way the digest gate passes and the intended guard is the
-// one that fails, not the digest. Re-stamping needs only the agent's PUBLIC key,
-// which is why the digest cannot stand in for authentication of header fields.
-//
-// Every guard here is reachable pre-authentication, from a datagram an off-path
-// attacker can synthesize: they all run before the ss-keyed opens complete.
+// subcase changes one field minimally to pin the rejection stage: length,
+// version, static-field processing, expected identity, or the keyed header MAC.
 func TestDecryptMessage_RejectsTamperedReply(t *testing.T) {
 	devicePriv, devicePub := keyPair(t, 0x11)
 	serverPriv, serverPub := keyPair(t, 0x22)
@@ -45,7 +37,7 @@ func TestDecryptMessage_RejectsTamperedReply(t *testing.T) {
 		DeviceStaticPriv: serverPriv, // role-swapped: the server initiates the reply
 		ServerStaticPub:  devicePub,
 		EphemeralPriv:    bytes.Repeat([]byte{0x44}, 32),
-		TimestampNanos:   1700000000123456789,
+		TimestampMillis:  1700000000123,
 		Counter:          0x1234,
 		Preamble:         0xa1b2c3d4,
 		Body:             []byte("authorized admission body"),
@@ -88,28 +80,23 @@ func TestDecryptMessage_RejectsTamperedReply(t *testing.T) {
 		{
 			name: "unsupported protocol major version",
 			packet: tamperedCopy(func(pkt []byte) {
-				pkt[8] = protocolVersionMajor + 1 // bump the major...
-				// ...and re-stamp, so the version gate is the only guard left.
-				copy(pkt[offDigest:offDigest+hashSize], headerDigest(devicePub, pkt[:HeaderSize], nil))
+				pkt[8] = protocolVersionMajor + 1
 			}),
 			serverPub: serverPub,
 			wantSub:   "unsupported NHP protocol version",
 		},
 		{
-			name: "header digest mismatch",
+			name: "header MAC mismatch",
 			packet: tamperedCopy(func(pkt []byte) {
-				pkt[offDigest] ^= 0xff // corrupt the stored header digest
+				pkt[offHeaderMAC] ^= 0xff
 			}),
 			serverPub: serverPub,
-			wantSub:   "digest mismatch",
+			wantSub:   "HMAC mismatch",
 		},
 		{
 			name: "es DH fails on a low-order server ephemeral",
 			packet: tamperedCopy(func(pkt []byte) {
-				// An all-zero peer point drives X25519 to the all-zero shared
-				// secret, which curve25519 refuses.
 				clear(pkt[offEphemeral : offEphemeral+PublicKeySize])
-				copy(pkt[offDigest:offDigest+hashSize], headerDigest(devicePub, pkt[:HeaderSize], nil))
 			}),
 			serverPub: serverPub,
 			wantSub:   "es DH",
@@ -117,8 +104,7 @@ func TestDecryptMessage_RejectsTamperedReply(t *testing.T) {
 		{
 			name: "sealed server static open fails",
 			packet: tamperedCopy(func(pkt []byte) {
-				pkt[offStatic] ^= 0xff // corrupt the es-sealed static field
-				copy(pkt[offDigest:offDigest+hashSize], headerDigest(devicePub, pkt[:HeaderSize], nil))
+				pkt[offStatic] ^= 0xff
 			}),
 			serverPub: serverPub,
 			wantSub:   "open server static",
@@ -130,39 +116,28 @@ func TestDecryptMessage_RejectsTamperedReply(t *testing.T) {
 			wantSub:   "unexpected server",
 		},
 		{
-			name: "server authentication (timestamp open) fails",
+			name: "timestamp ciphertext rejected by header MAC",
 			packet: tamperedCopy(func(pkt []byte) {
-				pkt[offTimestamp] ^= 0xff // corrupt the sealed timestamp...
-				// ...then re-stamp the digest so the digest gate passes and the
-				// ss-keyed timestamp open is the guard that trips.
-				copy(pkt[offDigest:offDigest+hashSize], headerDigest(devicePub, pkt[:HeaderSize], nil))
+				pkt[offTimestamp] ^= 0xff
 			}),
 			serverPub: serverPub,
-			wantSub:   "server authentication failed",
+			wantSub:   "HMAC mismatch",
 		},
 		{
-			name: "body open fails",
+			name: "body ciphertext rejected by header MAC",
 			packet: tamperedCopy(func(pkt []byte) {
-				pkt[HeaderSize] ^= 0xff // corrupt the sealed body (outside the digest)
+				pkt[HeaderSize] ^= 0xff // corrupt payload ciphertext covered by the MAC
 			}),
 			serverPub: serverPub,
-			wantSub:   "open body",
+			wantSub:   "HMAC mismatch",
 		},
 		{
-			// Setting the compress bit on an uncompressed reply. Under 1.0 this
-			// direction reached the inflate, which rejected the non-zlib
-			// plaintext; since 1.1 the flag is inside the folded HeaderCommon, so
-			// the body Open refuses it first and no plaintext is ever produced.
-			// Both directions of this bit are now fenced — the cleared one by
-			// TestReplyHeaderFlagsAreAuthenticated. inflateZlib's own failure
-			// modes stay covered directly by message_internal_test.go.
 			name: "compress flag set on a body that is not a zlib stream",
 			packet: tamperedCopy(func(pkt []byte) {
 				setFlag(pkt[:HeaderSize], nhpFlagCompress)
-				copy(pkt[offDigest:offDigest+hashSize], headerDigest(devicePub, pkt[:HeaderSize], nil))
 			}),
 			serverPub: serverPub,
-			wantSub:   "open body",
+			wantSub:   "HMAC mismatch",
 		},
 	}
 	for _, tt := range tests {
@@ -176,15 +151,129 @@ func TestDecryptMessage_RejectsTamperedReply(t *testing.T) {
 	}
 }
 
+func TestDecryptMessage_RejectsBodylessHeaderTamper(t *testing.T) {
+	agentPriv, agentPub := keyPair(t, 0x11)
+	serverPriv, serverPub := keyPair(t, 0x22)
+	packet, err := BuildMessage(TypeEXT, &Inputs{
+		DeviceStaticPriv: agentPriv,
+		ServerStaticPub:  serverPub,
+		EphemeralPriv:    bytes.Repeat([]byte{0x44}, PublicKeySize),
+		TimestampMillis:  1700000000123,
+		Counter:          0x1234,
+		Preamble:         0xa1b2c3d4,
+	})
+	if err != nil {
+		t.Fatalf("build bodyless EXT: %v", err)
+	}
+	if len(packet) != HeaderSize {
+		t.Fatalf("bodyless packet length = %d, want %d", len(packet), HeaderSize)
+	}
+	if _, err := DecryptMessage(serverPriv, agentPub, packet); err != nil {
+		t.Fatalf("bodyless EXT did not open: %v", err)
+	}
+
+	tampered := bytes.Clone(packet)
+	setTypeAndPayloadSize(tampered, TypeKNK, 0, binary.BigEndian.Uint32(tampered[:4]))
+	if _, err := DecryptMessage(serverPriv, agentPub, tampered); err == nil || !strings.Contains(err.Error(), "HMAC mismatch") {
+		t.Fatalf("bodyless header tamper error = %v, want header HMAC rejection", err)
+	}
+}
+
+func TestDecryptMessage_RejectsNoncanonicalFramingBeforeDH(t *testing.T) {
+	agentPriv, agentPub := keyPair(t, 0x11)
+	serverPriv, serverPub := keyPair(t, 0x22)
+	build := func(body []byte) []byte {
+		t.Helper()
+		packet, err := BuildMessage(TypeACK, &Inputs{
+			DeviceStaticPriv: serverPriv,
+			ServerStaticPub:  agentPub,
+			EphemeralPriv:    bytes.Repeat([]byte{0x44}, PublicKeySize),
+			TimestampMillis:  1700000000123,
+			Counter:          0x1234,
+			Preamble:         0xa1b2c3d4,
+			Body:             body,
+		})
+		if err != nil {
+			t.Fatalf("build packet: %v", err)
+		}
+		return packet
+	}
+	bodyful := build([]byte(`{"errCode":"0","opnTime":120,"sessId":1}`))
+	bodyless := build(nil)
+	_, bodyfulSize := getTypeAndPayloadSize(bodyful)
+
+	tests := []struct {
+		name    string
+		packet  []byte
+		mutate  func([]byte)
+		wantSub string
+	}{
+		{
+			name:   "bodyful declared size below trailing bytes",
+			packet: bodyful,
+			mutate: func(packet []byte) {
+				setTypeAndPayloadSize(packet, TypeACK, bodyfulSize-1, 0xa1b2c3d4)
+			},
+			wantSub: "declared payload size",
+		},
+		{
+			name:   "bodyful declared size above trailing bytes",
+			packet: bodyful,
+			mutate: func(packet []byte) {
+				setTypeAndPayloadSize(packet, TypeACK, bodyfulSize+1, 0xa1b2c3d4)
+			},
+			wantSub: "declared payload size",
+		},
+		{
+			name:   "bodyless declared nonzero",
+			packet: bodyless,
+			mutate: func(packet []byte) {
+				setTypeAndPayloadSize(packet, TypeACK, 1, 0xa1b2c3d4)
+			},
+			wantSub: "declared payload size",
+		},
+		{
+			name:    "reserved header bytes",
+			packet:  bodyful,
+			mutate:  func(packet []byte) { packet[12] = 1 },
+			wantSub: "reserved header bytes",
+		},
+		{
+			name:    "reserved bit 2",
+			packet:  bodyful,
+			mutate:  func(packet []byte) { binary.BigEndian.PutUint16(packet[10:12], 1<<2) },
+			wantSub: "flags",
+		},
+		{
+			name:    "reserved high flag",
+			packet:  bodyful,
+			mutate:  func(packet []byte) { binary.BigEndian.PutUint16(packet[10:12], 1<<15) },
+			wantSub: "flags",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			packet := bytes.Clone(tc.packet)
+			tc.mutate(packet)
+			// A low-order ephemeral would fail DH if the structural gate did not run
+			// first. The exact error below pins the pre-DH ordering.
+			clear(packet[offEphemeral : offEphemeral+PublicKeySize])
+			if msg, err := DecryptMessage(agentPriv, serverPub, packet); err == nil || msg != nil || !strings.Contains(err.Error(), tc.wantSub) {
+				t.Fatalf("DecryptMessage = %#v, %v; want pre-DH %q rejection", msg, err, tc.wantSub)
+			}
+		})
+	}
+}
+
 // TestDecryptMessage_AcceptsMinorVersionBump pins the deliberate asymmetry in the
 // version gate: the major is pinned and the minor is FLOORED, not pinned. A
 // server can ship a compatible minor bump before a deployed agent is updated, so
 // refusing a newer minor would strand clients on an ordinary coordinated release.
 //
-// The newer-minor packet is BUILT at that version rather than re-stamped after
-// the fact: since 1.1 the version bytes are inside the folded HeaderCommon, so a
-// post-hoc edit is tampering and must fail the body open — which is what
-// TestHeaderCommonFieldsAreBoundIntoBodyAAD asserts. The counterpart rejections
+// The newer-minor packet is built at that version rather than edited after
+// construction: protocol 1.2 authenticates the version with the header MAC, so
+// a post-construction edit must fail the MAC check — which is what
+// TestHeaderCommonFieldsAreBoundIntoHeaderMAC asserts. The counterpart rejections
 // live in TestDecryptMessage_RejectsTamperedReply (major) and
 // TestDecryptMessage_RejectsPreBindingMinorVersion (older minor).
 func TestDecryptMessage_AcceptsMinorVersionBump(t *testing.T) {
@@ -197,7 +286,7 @@ func TestDecryptMessage_AcceptsMinorVersionBump(t *testing.T) {
 		DeviceStaticPriv: serverPriv,
 		ServerStaticPub:  devicePub,
 		EphemeralPriv:    bytes.Repeat([]byte{0x44}, PublicKeySize),
-		TimestampNanos:   1700000000123456789,
+		TimestampMillis:  1700000000123,
 		Counter:          0x1234,
 		Preamble:         0xa1b2c3d4,
 		Body:             body,
@@ -219,12 +308,9 @@ func TestDecryptMessage_AcceptsMinorVersionBump(t *testing.T) {
 }
 
 // TestDecryptMessage_RejectsPreBindingMinorVersion is the rollout-diagnosability
-// fence. A peer still speaking 1.0 folds a shorter transcript into its body AAD,
-// so its tag can never verify here. Without the floor the operator would see
-// "open body: cipher: message authentication failed" — indistinguishable from a
-// wrong key, a corrupted datagram, or an attack — instead of a statement that the
-// two ends disagree on the protocol version. The gate must therefore run BEFORE
-// any key agreement, which is what the error substring below pins.
+// fence. A peer still speaking 1.1 does not produce the keyed header MAC, so its
+// framing cannot authenticate under protocol 1.2. The gate must therefore run
+// before key agreement, which is what the error substring below pins.
 func TestDecryptMessage_RejectsPreBindingMinorVersion(t *testing.T) {
 	devicePriv, devicePub := keyPair(t, 0x11)
 	serverPriv, serverPub := keyPair(t, 0x22)
@@ -234,7 +320,7 @@ func TestDecryptMessage_RejectsPreBindingMinorVersion(t *testing.T) {
 			DeviceStaticPriv: serverPriv,
 			ServerStaticPub:  devicePub,
 			EphemeralPriv:    bytes.Repeat([]byte{0x44}, PublicKeySize),
-			TimestampNanos:   1700000000123456789,
+			TimestampMillis:  1700000000123,
 			Counter:          0x1234,
 			Preamble:         0xa1b2c3d4,
 			Body:             []byte(`{"errCode":"0"}`),

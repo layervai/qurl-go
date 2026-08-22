@@ -29,7 +29,7 @@ func buildAgentSessionPacket(t *testing.T, f *conformance.AgentSessionControlFil
 		DeviceStaticPriv: mustHex(t, f.Keys.Agent.StaticPrivateHex),
 		ServerStaticPub:  mustHex(t, f.Keys.AssignedCell.StaticPublicHex),
 		EphemeralPriv:    mustHex(t, p.EphemeralPrivateHex),
-		TimestampNanos:   mustDecimalU64(t, p.TimestampNanos),
+		TimestampMillis:  mustDecimalU64(t, p.TimestampMillis),
 		Counter:          mustDecimalU64(t, p.Counter),
 		Preamble:         mustHexU32(t, p.PreambleHex),
 		Body:             mustHex(t, p.BodyHex),
@@ -81,9 +81,9 @@ func TestDecryptReply_AgentSessionControlGolden(t *testing.T) {
 				t.Fatalf("DecryptReply: %v", err)
 			}
 			if reply.Type != tc.packet.HeaderType || reply.Counter != mustDecimalU64(t, tc.packet.Counter) ||
-				reply.TimestampNanos != mustDecimalU64(t, tc.packet.TimestampNanos) ||
+				reply.TimestampMillis != mustDecimalU64(t, tc.packet.TimestampMillis) ||
 				!bytes.Equal(reply.Body, mustHex(t, tc.packet.BodyHex)) {
-				t.Fatalf("opened reply = type:%d counter:%d timestamp:%d body:%x", reply.Type, reply.Counter, reply.TimestampNanos, reply.Body)
+				t.Fatalf("opened reply = type:%d counter:%d timestamp:%d body:%x", reply.Type, reply.Counter, reply.TimestampMillis, reply.Body)
 			}
 		})
 	}
@@ -126,7 +126,7 @@ func TestBuildMessage_AgentSessionCookieContract(t *testing.T) {
 		DeviceStaticPriv: mustHex(t, f.Keys.Agent.StaticPrivateHex),
 		ServerStaticPub:  mustHex(t, f.Keys.AssignedCell.StaticPublicHex),
 		EphemeralPriv:    mustHex(t, p.EphemeralPrivateHex),
-		TimestampNanos:   mustDecimalU64(t, p.TimestampNanos),
+		TimestampMillis:  mustDecimalU64(t, p.TimestampMillis),
 		Counter:          mustDecimalU64(t, p.Counter),
 		Preamble:         mustHexU32(t, p.PreambleHex),
 		Body:             mustHex(t, p.BodyHex),

@@ -20,7 +20,7 @@ import (
 	"github.com/layervai/qurl-go/relayknock/internal/nhpwire"
 )
 
-// BuildReply builds a complete server-originated NHP reply packet (240-byte
+// BuildReply builds a complete server-originated NHP reply packet (160-byte standard
 // header ‖ sealed body) for a supported reply type. Those types are
 // relayknock.TypeACK, relayknock.TypeListResult, relayknock.TypeCookieChallenge,
 // and relayknock.TypeRegisterAck. It is the responder-role mirror of
@@ -98,12 +98,19 @@ func OpenInitiatorMessage(serverPriv, expectedDevicePub, packet []byte) (*relayk
 		return nil, err
 	}
 	switch msg.Type {
-	case relayknock.TypeKnock, relayknock.TypeListRequest, relayknock.TypeOTP, relayknock.TypeRegister, relayknock.TypeExit:
+	case relayknock.TypeExit:
+		if msg.Flags != 0 || len(msg.Body) != 0 {
+			return nil, fmt.Errorf("NHP_EXT must be empty and uncompressed")
+		}
 		return &relayknock.Reply{
-			Type:           msg.Type,
-			Counter:        msg.Counter,
-			TimestampNanos: msg.TimestampNanos,
-			Body:           msg.Body,
+			Type: msg.Type, Counter: msg.Counter, TimestampMillis: msg.TimestampMillis,
+		}, nil
+	case relayknock.TypeKnock, relayknock.TypeListRequest, relayknock.TypeOTP, relayknock.TypeRegister:
+		return &relayknock.Reply{
+			Type:            msg.Type,
+			Counter:         msg.Counter,
+			TimestampMillis: msg.TimestampMillis,
+			Body:            msg.Body,
 		}, nil
 	default:
 		return nil, fmt.Errorf("not an initiator message: header type %d is not an initiator type", msg.Type)
@@ -112,7 +119,7 @@ func OpenInitiatorMessage(serverPriv, expectedDevicePub, packet []byte) (*relayk
 
 // OpenReknockMessage decrypts and authenticates an NHP_RKN initiator packet in
 // the responder role. cookie is the exact decoded 32-byte value previously sent
-// in NHP_COK; a wrong cookie fails the header-digest gate before body opening.
+// in NHP_COK; a wrong cookie fails the header-MAC gate before body opening.
 func OpenReknockMessage(serverPriv, expectedDevicePub, cookie, packet []byte) (*relayknock.Reply, error) {
 	msg, err := nhpwire.DecryptReknockMessage(serverPriv, expectedDevicePub, cookie, packet)
 	if err != nil {
@@ -122,16 +129,16 @@ func OpenReknockMessage(serverPriv, expectedDevicePub, cookie, packet []byte) (*
 		return nil, fmt.Errorf("not a re-knock message: header type %d is not TypeReknock", msg.Type)
 	}
 	return &relayknock.Reply{
-		Type:           msg.Type,
-		Counter:        msg.Counter,
-		TimestampNanos: msg.TimestampNanos,
-		Body:           msg.Body,
+		Type:            msg.Type,
+		Counter:         msg.Counter,
+		TimestampMillis: msg.TimestampMillis,
+		Body:            msg.Body,
 	}, nil
 }
 
 // OpenHubLSTCookieProofMessage decrypts the assignment-only proof LST using the
 // exact cookie the test Hub returned in its authenticated COK. It rejects an
-// ordinary LST, any non-exclusive flag combination, or a digest built with a
+// ordinary LST, any non-exclusive flag combination, or a header MAC built with a
 // different cookie.
 func OpenHubLSTCookieProofMessage(serverPriv, expectedDevicePub, cookie, packet []byte) (*relayknock.Reply, error) {
 	msg, err := nhpwire.DecryptHubLSTCookieProofMessage(serverPriv, expectedDevicePub, cookie, packet)
@@ -139,9 +146,9 @@ func OpenHubLSTCookieProofMessage(serverPriv, expectedDevicePub, cookie, packet 
 		return nil, err
 	}
 	return &relayknock.Reply{
-		Type:           msg.Type,
-		Counter:        msg.Counter,
-		TimestampNanos: msg.TimestampNanos,
-		Body:           msg.Body,
+		Type:            msg.Type,
+		Counter:         msg.Counter,
+		TimestampMillis: msg.TimestampMillis,
+		Body:            msg.Body,
 	}, nil
 }

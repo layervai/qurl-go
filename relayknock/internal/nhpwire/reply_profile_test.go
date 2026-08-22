@@ -77,8 +77,8 @@ func TestAcceptReplyMessage_FlagProfile(t *testing.T) {
 // TestDecryptReplyMessage_RejectsOutOfProfileFlagsEndToEnd drives the same gate
 // through a real authenticated packet rather than a hand-built Message, so the
 // flag word actually travels on the wire and is read back by getFlag. An
-// out-of-profile flag word survives the AEAD chain untouched (it is not folded
-// into any AAD), so only this gate stops it.
+// known-but-out-of-profile flags reach the authenticated reply policy gate;
+// reserved flags fail earlier at the standard-header structural gate.
 func TestDecryptReplyMessage_RejectsOutOfProfileFlagsEndToEnd(t *testing.T) {
 	agentPriv, agentPub := keyPair(t, 0x11)
 	serverPriv, serverPub := keyPair(t, 0x22)
@@ -89,7 +89,7 @@ func TestDecryptReplyMessage_RejectsOutOfProfileFlagsEndToEnd(t *testing.T) {
 			DeviceStaticPriv: serverPriv, // role-swapped: the server initiates the reply
 			ServerStaticPub:  agentPub,
 			EphemeralPriv:    bytes.Repeat([]byte{0x44}, PublicKeySize),
-			TimestampNanos:   1700000000123456789,
+			TimestampMillis:  1700000000123,
 			Counter:          0x1234,
 			Preamble:         0xa1b2c3d4,
 			Body:             []byte(`{"errCode":"0"}`),
@@ -113,8 +113,8 @@ func TestDecryptReplyMessage_RejectsOutOfProfileFlagsEndToEnd(t *testing.T) {
 		if err == nil || msg != nil {
 			t.Fatalf("DecryptReplyMessage(flags %#04x) = %#v, %v; want rejection", flags, msg, err)
 		}
-		if !errors.Is(err, ErrMalformedReply) {
-			t.Errorf("flags %#04x rejected as %q, want ErrMalformedReply", flags, err)
+		if flags == 1<<3 && !strings.Contains(err.Error(), "unsupported") {
+			t.Errorf("flags %#04x rejected as %q, want unsupported-profile error", flags, err)
 		}
 	}
 }
@@ -172,24 +172,8 @@ func TestDecryptCookieMessages_RejectWrongCookieLength(t *testing.T) {
 	}
 }
 
-// TestReplyHeaderFlagsAreAuthenticated is the regression fence for the protocol
-// 1.1 HeaderCommon AAD binding, and the exact probe that demonstrated the 1.0
-// defect it closes.
-//
-// Under 1.0 the flag word rode outside the AEAD chain: the seal folded
-// initialHash ‖ peerStaticPub ‖ ephemeralPub ‖ sealedStatic ‖ sealedTs and never
-// the header, so the only thing covering the flags was the UNKEYED BLAKE2s
-// header digest, whose inputs are all public. An off-path attacker holding the
-// agent's static PUBLIC key could clear the compress bit on a legitimately
-// compressed reply, re-stamp the digest, and have the packet still open — the
-// agent then surfaced the raw zlib stream as the application body, and a JSON
-// consumer failed on bytes the server never sent. No secret was needed and the
-// AEAD tags never moved.
-//
-// Since 1.1 the serialized HeaderCommon is folded into the chain hash before the
-// body AAD, so the identical probe changes the AAD and the body Open fails. The
-// probe is kept verbatim rather than deleted: it is the only thing that proves
-// the binding is load-bearing rather than incidental.
+// TestReplyHeaderFlagsAreAuthenticated pins keyed-MAC coverage of the flag word
+// before reply-profile dispatch.
 func TestReplyHeaderFlagsAreAuthenticated(t *testing.T) {
 	agentPriv, agentPub := keyPair(t, 0x11)
 	serverPriv, serverPub := keyPair(t, 0x22)
@@ -199,7 +183,7 @@ func TestReplyHeaderFlagsAreAuthenticated(t *testing.T) {
 		DeviceStaticPriv: serverPriv, // role-swapped: the server initiates the reply
 		ServerStaticPub:  agentPub,
 		EphemeralPriv:    bytes.Repeat([]byte{0x44}, PublicKeySize),
-		TimestampNanos:   1700000000123456789,
+		TimestampMillis:  1700000000123,
 		Counter:          0x1122334455667788,
 		Preamble:         0xa1b2c3d4,
 		Body:             plaintext,
@@ -222,41 +206,26 @@ func TestReplyHeaderFlagsAreAuthenticated(t *testing.T) {
 		t.Fatalf("honest body = %q, want %q", opened.Body, plaintext)
 	}
 
-	// The probe: clear the compress bit and re-stamp the digest using ONLY the
-	// agent's public key. Nothing else in the packet is touched.
 	tampered := bytes.Clone(honest)
 	setFlag(tampered[:HeaderSize], 0)
-	copy(tampered[offDigest:offDigest+hashSize], headerDigest(agentPub, tampered[:HeaderSize], nil))
 	if getFlag(tampered) != 0 {
 		t.Fatalf("tampered flags = %#04x, want 0", getFlag(tampered))
 	}
-	// The digest gate must NOT be what rejects this — re-stamping defeats it. The
-	// rejection has to come from the body AEAD, which is the whole point.
-	if !bytes.Equal(headerDigest(agentPub, tampered[:HeaderSize], nil), tampered[offDigest:offDigest+hashSize]) {
-		t.Fatal("probe left a stale header digest; it would be rejected by the digest gate, not the AAD")
-	}
-
 	tamperedMsg, err := DecryptReplyMessage(agentPriv, serverPub, tampered)
 	if err == nil {
-		t.Fatalf("tampered reply opened to %q; the flag word is not bound into the body AAD", tamperedMsg.Body)
+		t.Fatalf("tampered reply opened to %q; the flag word is not covered by the header MAC", tamperedMsg.Body)
 	}
 	if tamperedMsg != nil {
 		t.Fatalf("rejected reply returned a message alongside the error: %#v", tamperedMsg)
 	}
-	// Specifically the body Open, not the digest, the version, or the reply
-	// profile — those would each mean the probe stopped reaching the binding.
-	if !strings.Contains(err.Error(), "open body") {
-		t.Fatalf("tampered reply rejected as %q, want the body AEAD open to fail", err)
+	if !strings.Contains(err.Error(), "HMAC mismatch") {
+		t.Fatalf("tampered reply rejected as %q, want the header MAC check to fail", err)
 	}
 }
 
-// TestHeaderCommonFieldsAreBoundIntoBodyAAD extends the flag-word fence above to
-// the rest of HeaderCommon. Under 1.0 every one of these fields was forgeable in
-// flight by anyone holding the agent's static public key; the header type in
-// particular decided which consumer parsed the body. Each subcase edits exactly
-// one field of a valid reply and re-stamps the digest, so the unkeyed digest
-// gate is defeated on purpose and the body AEAD is the only guard left.
-func TestHeaderCommonFieldsAreBoundIntoBodyAAD(t *testing.T) {
+// TestHeaderCommonFieldsAreBoundIntoHeaderMAC extends the flag-word fence above
+// across every serialized HeaderCommon field.
+func TestHeaderCommonFieldsAreBoundIntoHeaderMAC(t *testing.T) {
 	agentPriv, agentPub := keyPair(t, 0x11)
 	serverPriv, serverPub := keyPair(t, 0x22)
 	plaintext := []byte(`{"errCode":"0","opnTime":120}`)
@@ -269,7 +238,7 @@ func TestHeaderCommonFieldsAreBoundIntoBodyAAD(t *testing.T) {
 		DeviceStaticPriv: serverPriv, // role-swapped: the server initiates the reply
 		ServerStaticPub:  agentPub,
 		EphemeralPriv:    bytes.Repeat([]byte{0x44}, PublicKeySize),
-		TimestampNanos:   1700000000123456789,
+		TimestampMillis:  1700000000123,
 		Counter:          fixtureCounter,
 		Preamble:         fixturePreamble,
 		Body:             plaintext,
@@ -288,35 +257,35 @@ func TestHeaderCommonFieldsAreBoundIntoBodyAAD(t *testing.T) {
 	tests := []struct {
 		name    string
 		tamper  func(pkt []byte)
-		wantSub string // which guard must reject it; "open body" ⇒ the new binding
+		wantSub string
 	}{
 		{
 			// NHP_ACK -> NHP_LRT: the type selects which consumer parses the
 			// authenticated body, so forging it redirected a real reply.
 			name:    "header type",
 			tamper:  func(pkt []byte) { setTypeAndPayloadSize(pkt, TypeLRT, honestSize, fixturePreamble) },
-			wantSub: "open body",
+			wantSub: "HMAC mismatch",
 		},
 		{
-			// The declared size is what a responder frames on; decryptMessage
-			// deliberately does not cross-check it, so only the AAD covers it.
+			// The declared size is a structural framing boundary and is checked
+			// against the exact trailing byte count before key agreement.
 			name:    "declared payload size",
 			tamper:  func(pkt []byte) { setTypeAndPayloadSize(pkt, TypeACK, honestSize-1, fixturePreamble) },
-			wantSub: "open body",
+			wantSub: "declared payload size",
 		},
 		{
 			// Re-obfuscate under a different preamble, leaving the decoded type
 			// and size identical — only the two literal words change.
 			name:    "preamble",
 			tamper:  func(pkt []byte) { setTypeAndPayloadSize(pkt, TypeACK, honestSize, fixturePreamble^0xffffffff) },
-			wantSub: "open body",
+			wantSub: "HMAC mismatch",
 		},
 		{
-			// A minor ABOVE the floor clears the version gate, so the AAD is what
-			// catches it. The gate itself is fenced by the version tests.
+			// A minor above the floor is reserved for transcript-compatible changes.
+			// The exact version byte is still authenticated by the header MAC.
 			name:    "protocol version minor",
 			tamper:  func(pkt []byte) { setVersion(pkt, protocolVersionMajor, minProtocolVersionMinor+7) },
-			wantSub: "open body",
+			wantSub: "HMAC mismatch",
 		},
 		{
 			// The counter is the one HeaderCommon field that was never forgeable:
@@ -336,16 +305,12 @@ func TestHeaderCommonFieldsAreBoundIntoBodyAAD(t *testing.T) {
 			if bytes.Equal(tampered[:headerCommonSize], honest[:headerCommonSize]) {
 				t.Fatal("tamper left HeaderCommon unchanged; the subcase proves nothing")
 			}
-			// Re-stamp so the unkeyed digest gate passes, exactly as an off-path
-			// attacker holding only the agent's public key would.
-			copy(tampered[offDigest:offDigest+hashSize], headerDigest(agentPub, tampered[:HeaderSize], nil))
-
 			msg, err := DecryptReplyMessage(agentPriv, serverPub, tampered)
 			if err == nil || msg != nil {
 				t.Fatalf("tampered %s accepted: %#v, %v", tt.name, msg, err)
 			}
 			if !strings.Contains(err.Error(), tt.wantSub) {
-				t.Fatalf("tampered %s rejected as %q, want an AEAD failure containing %q", tt.name, err, tt.wantSub)
+				t.Fatalf("tampered %s rejected as %q, want failure containing %q", tt.name, err, tt.wantSub)
 			}
 		})
 	}

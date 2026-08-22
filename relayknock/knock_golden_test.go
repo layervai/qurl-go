@@ -41,7 +41,7 @@ func mustHex(t *testing.T, s string) []byte {
 	return b
 }
 
-// mustDecimalU64 parses a base-10 uint64 field (timestamp_nanos, knock counter),
+// mustDecimalU64 parses a base-10 uint64 field (timestamp_millis, knock counter),
 // which the conformance artifact carries as a decimal string because the values
 // exceed 2^53.
 func mustDecimalU64(t *testing.T, s string) uint64 {
@@ -88,7 +88,7 @@ func loadRelayKnockGolden(t *testing.T) *conformance.RelayKnockFile {
 
 // TestBuildKnock_GoldenVector reproduces the relay-knock packet vector
 // byte-for-byte from the conformance golden inputs, proving the handshake seal
-// chain, header framing, and digest match the reference server.
+// chain, header framing, and keyed MAC match the reference server.
 func TestBuildKnock_GoldenVector(t *testing.T) {
 	knock := loadRelayKnockGolden(t).Knock
 
@@ -99,7 +99,7 @@ func TestBuildKnock_GoldenVector(t *testing.T) {
 	serverPriv := mustHex(t, knock.ServerStaticPrivHex)
 	devicePriv := mustHex(t, knock.DeviceStaticPrivHex)
 	ephemeralPriv := mustHex(t, knock.EphemeralPrivHex)
-	timestampNanos := mustDecimalU64(t, knock.TimestampNanos)
+	timestampMillis := mustDecimalU64(t, knock.TimestampMillis)
 	counter := mustDecimalU64(t, knock.Counter)
 	preamble := mustHexU32(t, knock.PreambleHex)
 
@@ -122,7 +122,7 @@ func TestBuildKnock_GoldenVector(t *testing.T) {
 		DeviceStaticPriv: devicePriv,
 		ServerStaticPub:  serverPub,
 		EphemeralPriv:    ephemeralPriv,
-		TimestampNanos:   timestampNanos,
+		TimestampMillis:  timestampMillis,
 		Counter:          counter,
 		Preamble:         preamble,
 		Body:             mustHex(t, knock.BodyHex),
@@ -143,7 +143,7 @@ func TestDecryptReply_GoldenVector(t *testing.T) {
 
 	serverPubHex := ack.ServerStaticPubHex
 	agentPrivHex := ack.AgentStaticPrivHex
-	timestampNanos := mustDecimalU64(t, ack.TimestampNanos)
+	timestampMillis := mustDecimalU64(t, ack.TimestampMillis)
 	wantCounter := mustHexU64(t, ack.CounterHex)
 	bodyHex := ack.BodyHex
 	ackPacketHex := ack.PacketHex
@@ -158,8 +158,8 @@ func TestDecryptReply_GoldenVector(t *testing.T) {
 	if reply.Counter != wantCounter {
 		t.Errorf("counter = %#x, want %#x", reply.Counter, wantCounter)
 	}
-	if reply.TimestampNanos != timestampNanos {
-		t.Errorf("timestampNanos = %d, want %d", reply.TimestampNanos, timestampNanos)
+	if reply.TimestampMillis != timestampMillis {
+		t.Errorf("timestampMillis = %d, want %d", reply.TimestampMillis, timestampMillis)
 	}
 	if got := hex.EncodeToString(reply.Body); got != bodyHex {
 		t.Fatalf("body mismatch:\n got=%s\nwant=%s", got, bodyHex)

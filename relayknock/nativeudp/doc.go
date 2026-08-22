@@ -17,11 +17,11 @@
 // one-way messages and never receive a protocol response. Generic LST and REG never accept a cookie challenge. Only
 // AssignmentList accepts the Hub's return-routability COK and sends one proof
 // LST with the exact body, fresh packet material, exclusive proof flag, and raw
-// cookie mixed into the digest. RKN accepts only an echoed-counter ACK. An
+// cookie authenticated by the header MAC. RKN accepts only an echoed-counter ACK. An
 // authenticated KNK→COK signal is classified before the ordinary counter gate
 // because its wire counter is deliberately unconstrained; the decrypted COK
 // body must instead carry the original KNK transaction id. The exact decoded
-// cookie is mixed into only the following RKN header digest.
+// cookie is mixed into only the following RKN header MAC.
 // The application body is opaque — a caller supplies already-serialized bytes
 // and interprets the decrypted authenticated reply body itself.
 //
@@ -29,8 +29,9 @@
 //
 // A reply is accepted only when the NHP handshake authenticates the endpoint's
 // pinned server public key: DecryptReply pins the recovered server static key
-// to the expected key and completes authentication at the ss-keyed AEAD open, so
-// only the holder of that server static private key can produce an accepted reply.
+// to the expected key and completes authentication at the ss-derived keyed
+// header MAC, so only the holder of that server static private key can produce
+// an accepted reply.
 // DNS agreement and the datagram's source address are NOT a substitute for this
 // server-key authentication — a datagram that does not open as an authenticated
 // reply from the pinned key is rejected (ErrServerUnauthenticated), and the source
@@ -49,5 +50,5 @@
 // shared relayknock wire codec and public reply model; it adds only UDP socket
 // handling, DNS resolution, deadlines, packet-size bounds, request/reply
 // correlation, the bounded cookie transitions, cancellation, and secret
-// scrubbing. NHP_EXT is the matching one-round-trip clean-exit primitive.
+// scrubbing. NHP_EXT is the matching one-way, one-datagram clean-exit primitive.
 package nativeudp

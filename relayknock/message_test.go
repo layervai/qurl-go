@@ -15,6 +15,10 @@ import (
 	"github.com/layervai/qurl-go/relayknock/relayknocktest"
 )
 
+type relayHTTPDoerFunc func(*http.Request) (*http.Response, error)
+
+func (f relayHTTPDoerFunc) Do(req *http.Request) (*http.Response, error) { return f(req) }
+
 // Tests for the list/query and registration message types (NHP_LST / NHP_LRT /
 // NHP_OTP / NHP_REG / NHP_RAK), their transport-neutral codec plumbing, and the
 // browser-only HTTP Knock/RelayPost boundary. The wire format itself is
@@ -62,7 +66,7 @@ func TestBuildMessage_SymmetricRoundTrip(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			const (
 				counter   = uint64(0xfeedfacecafebeef)
-				timestamp = uint64(1700000000123456789)
+				timestamp = uint64(1700000000123)
 			)
 			body := []byte("opaque application bytes: " + tt.name)
 
@@ -70,7 +74,7 @@ func TestBuildMessage_SymmetricRoundTrip(t *testing.T) {
 				DeviceStaticPriv: devicePriv,
 				ServerStaticPub:  serverPub,
 				EphemeralPriv:    bytes.Repeat([]byte{0x33}, 32),
-				TimestampNanos:   timestamp,
+				TimestampMillis:  timestamp,
 				Counter:          counter,
 				Preamble:         0xdeadbeef,
 				Body:             body,
@@ -94,8 +98,8 @@ func TestBuildMessage_SymmetricRoundTrip(t *testing.T) {
 			if got.Counter != counter {
 				t.Errorf("Counter = %#x, want %#x", got.Counter, counter)
 			}
-			if got.TimestampNanos != timestamp {
-				t.Errorf("TimestampNanos = %d, want %d", got.TimestampNanos, timestamp)
+			if got.TimestampMillis != timestamp {
+				t.Errorf("TimestampMillis = %d, want %d", got.TimestampMillis, timestamp)
 			}
 		})
 	}
@@ -115,7 +119,7 @@ func TestListRequestResult_PreservesCorrelationMetadata(t *testing.T) {
 		DeviceStaticPriv: agentPriv,
 		ServerStaticPub:  serverPub,
 		EphemeralPriv:    bytes.Repeat([]byte{0x31}, 32),
-		TimestampNanos:   1700000000123456789,
+		TimestampMillis:  1700000000123,
 		Counter:          requestCounter,
 		Preamble:         0x11223344,
 		Body:             []byte("opaque list/query request"),
@@ -135,7 +139,7 @@ func TestListRequestResult_PreservesCorrelationMetadata(t *testing.T) {
 		DeviceStaticPriv: serverPriv,
 		ServerStaticPub:  agentPub,
 		EphemeralPriv:    bytes.Repeat([]byte{0x32}, 32),
-		TimestampNanos:   1700000000123457789,
+		TimestampMillis:  1700000000124,
 		Counter:          openedRequest.Counter,
 		Preamble:         0x55667788,
 		Body:             []byte("opaque list/query result"),
@@ -171,7 +175,7 @@ func TestBuildMessage_KnockMatchesBuildKnock(t *testing.T) {
 		DeviceStaticPriv: devicePriv,
 		ServerStaticPub:  serverPub,
 		EphemeralPriv:    bytes.Repeat([]byte{0x33}, 32),
-		TimestampNanos:   1700000000123456789,
+		TimestampMillis:  1700000000123,
 		Counter:          42,
 		Preamble:         0x01020304,
 		Body:             []byte("knock body"),
@@ -200,7 +204,7 @@ func TestBuildMessage_RejectsNonInitiatorTypes(t *testing.T) {
 		DeviceStaticPriv: devicePriv,
 		ServerStaticPub:  serverPub,
 		EphemeralPriv:    bytes.Repeat([]byte{0x33}, 32),
-		TimestampNanos:   1,
+		TimestampMillis:  1,
 		Counter:          1,
 		Preamble:         1,
 		Body:             []byte("x"),
@@ -238,7 +242,7 @@ func TestRelayPost_CarriesBrowserControlPackets(t *testing.T) {
 				DeviceStaticPriv: devicePriv,
 				ServerStaticPub:  serverPub,
 				EphemeralPriv:    bytes.Repeat([]byte{0x33}, 32),
-				TimestampNanos:   1700000000123456789,
+				TimestampMillis:  1700000000123,
 				Counter:          42,
 				Preamble:         0x01020304,
 				Body:             tt.body,
@@ -265,6 +269,10 @@ func TestRelayPost_CarriesBrowserControlPackets(t *testing.T) {
 				if !bytes.Equal(gotPacket, packet) {
 					t.Error("RelayPost changed the caller-built browser control packet")
 				}
+				if tt.headerType == relayknock.TypeExit {
+					w.WriteHeader(http.StatusNoContent)
+					return
+				}
 				w.WriteHeader(http.StatusOK)
 				_, _ = w.Write(wantReply)
 			}))
@@ -274,8 +282,87 @@ func TestRelayPost_CarriesBrowserControlPackets(t *testing.T) {
 			if err != nil {
 				t.Fatalf("RelayPost: %v", err)
 			}
-			if !bytes.Equal(gotReply, wantReply) {
+			if tt.headerType == relayknock.TypeExit && gotReply != nil {
+				t.Fatalf("RelayPost EXT reply = %x, want nil one-way result", gotReply)
+			}
+			if tt.headerType != relayknock.TypeExit && !bytes.Equal(gotReply, wantReply) {
 				t.Fatalf("RelayPost reply = %x, want %x", gotReply, wantReply)
+			}
+		})
+	}
+}
+
+func TestRelayPost_EnforcesTypeSpecificResponseShape(t *testing.T) {
+	devicePriv, _ := testKeyPair(t, 0x11)
+	_, serverPub := testKeyPair(t, 0x22)
+	build := func(t *testing.T, typ int, body []byte) []byte {
+		t.Helper()
+		packet, err := relayknock.BuildMessage(typ, &relayknock.KnockInputs{
+			DeviceStaticPriv: devicePriv, ServerStaticPub: serverPub,
+			EphemeralPriv: bytes.Repeat([]byte{0x33}, 32), TimestampMillis: 1,
+			Counter: 2, Preamble: 3, Body: body,
+		})
+		if err != nil {
+			t.Fatalf("BuildMessage(%d): %v", typ, err)
+		}
+		return packet
+	}
+	ext := build(t, relayknock.TypeExit, nil)
+	knock := build(t, relayknock.TypeKnock, []byte("knock"))
+	for _, tc := range []struct {
+		name   string
+		packet []byte
+		status int
+		body   string
+	}{
+		{name: "exit 200 reply", packet: ext, status: http.StatusOK, body: "reply"},
+		{name: "exit 200 empty", packet: ext, status: http.StatusOK},
+		{name: "round trip 204", packet: knock, status: http.StatusNoContent},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer srv.Close()
+			if reply, err := relayknock.RelayPost(context.Background(), nil, srv.URL, "server", tc.packet); err == nil || reply != nil {
+				t.Fatalf("RelayPost response = %x, %v; want type-specific transport rejection", reply, err)
+			}
+		})
+	}
+	doer := relayHTTPDoerFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusNoContent,
+			Body:       io.NopCloser(strings.NewReader("unexpected reply")),
+		}, nil
+	})
+	if reply, err := relayknock.RelayPost(context.Background(), doer, "https://relay.example", "server", ext); err == nil || reply != nil {
+		t.Fatalf("RelayPost accepted 204 response bytes for EXT: reply=%x err=%v", reply, err)
+	}
+}
+
+func TestOpenInitiatorMessage_RejectsBodyfulOrCompressedEXT(t *testing.T) {
+	serverPriv, serverPub := testKeyPair(t, 0x22)
+	devicePriv, devicePub := testKeyPair(t, 0x11)
+	for _, tc := range []struct {
+		name  string
+		flags uint16
+		body  []byte
+	}{
+		{name: "bodyful", body: []byte("not bodyless")},
+		{name: "compress flag", flags: 1 << 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			packet, err := nhpwire.BuildInitiatorWithFlagsForTest(nhpwire.TypeEXT, tc.flags, &nhpwire.Inputs{
+				DeviceStaticPriv: devicePriv, ServerStaticPub: serverPub,
+				EphemeralPriv: bytes.Repeat([]byte{0x33}, 32), TimestampMillis: 1,
+				Counter: 2, Preamble: 3, Body: tc.body,
+			})
+			if err != nil {
+				t.Fatalf("build EXT fixture: %v", err)
+			}
+			if _, err := relayknocktest.OpenInitiatorMessage(serverPriv, devicePub, packet); err == nil || !strings.Contains(err.Error(), "empty and uncompressed") {
+				t.Fatalf("OpenInitiatorMessage error = %v, want EXT shape rejection", err)
 			}
 		})
 	}
@@ -304,7 +391,7 @@ func TestRelayPost_RejectsAgentLifecyclePacketsBeforeHTTP(t *testing.T) {
 				DeviceStaticPriv: devicePriv,
 				ServerStaticPub:  serverPub,
 				EphemeralPriv:    bytes.Repeat([]byte{0x33}, 32),
-				TimestampNanos:   1700000000123456789,
+				TimestampMillis:  1700000000123,
 				Counter:          42,
 				Preamble:         0x01020304,
 				Body:             []byte("native UDP only"),
@@ -338,7 +425,7 @@ func TestRelayPost_NonOKStatusIsRelayError(t *testing.T) {
 		DeviceStaticPriv: devicePriv,
 		ServerStaticPub:  serverPub,
 		EphemeralPriv:    bytes.Repeat([]byte{0x33}, 32),
-		TimestampNanos:   1700000000123456789,
+		TimestampMillis:  1700000000123,
 		Counter:          42,
 		Preamble:         0x01020304,
 		Body:             []byte("knock body"),
@@ -417,7 +504,7 @@ func fabricateRAK(serverPriv, devicePub []byte, counter uint64, body []byte) ([]
 		DeviceStaticPriv: serverPriv,
 		ServerStaticPub:  devicePub,
 		EphemeralPriv:    bytes.Repeat([]byte{0x44}, 32),
-		TimestampNanos:   1700000000987654321,
+		TimestampMillis:  1700000000987,
 		Counter:          counter,
 		Preamble:         0xa1b2c3d4,
 		Body:             body,
@@ -490,7 +577,7 @@ func TestKnock_RejectsMismatchedReply(t *testing.T) {
 					DeviceStaticPriv: serverPriv,
 					ServerStaticPub:  devicePub,
 					EphemeralPriv:    bytes.Repeat([]byte{0x45}, 32),
-					TimestampNanos:   1700000000987654321,
+					TimestampMillis:  1700000000987,
 					Counter:          req.Counter + tt.counterOff,
 					Preamble:         0xa1b2c3d4,
 					Body:             []byte("mismatched reply"),
@@ -551,7 +638,7 @@ func TestKnock_RoundTrip(t *testing.T) {
 				DeviceStaticPriv: serverPriv,
 				ServerStaticPub:  devicePub,
 				EphemeralPriv:    bytes.Repeat([]byte{0x53}, 32),
-				TimestampNanos:   1700000000123456789,
+				TimestampMillis:  1700000000123,
 				Counter:          req.Counter + counterOffset,
 				Preamble:         0xa1b2c3d4,
 				Body:             []byte(admission),
@@ -624,7 +711,7 @@ func TestKnock_CookieChallengeBeforeCounterCheck(t *testing.T) {
 			DeviceStaticPriv: serverPriv,
 			ServerStaticPub:  devicePub,
 			EphemeralPriv:    bytes.Repeat([]byte{0x48}, 32),
-			TimestampNanos:   1700000000987654321,
+			TimestampMillis:  1700000000987,
 			Counter:          req.Counter + 1,
 			Preamble:         0xa1b2c3d4,
 			Body:             nil,
@@ -664,7 +751,7 @@ func TestDecryptReply_UnknownType(t *testing.T) {
 		DeviceStaticPriv: serverPriv,
 		ServerStaticPub:  devicePub,
 		EphemeralPriv:    bytes.Repeat([]byte{0x46}, 32),
-		TimestampNanos:   1700000000987654321,
+		TimestampMillis:  1700000000987,
 		Counter:          5,
 		Preamble:         0xa1b2c3d4,
 		Body:             []byte("type 99"),
@@ -690,7 +777,7 @@ func TestBuildReply_RejectsInitiatorTypes(t *testing.T) {
 		DeviceStaticPriv: serverPriv,
 		ServerStaticPub:  devicePub,
 		EphemeralPriv:    bytes.Repeat([]byte{0x33}, 32),
-		TimestampNanos:   1,
+		TimestampMillis:  1,
 		Counter:          1,
 		Preamble:         1,
 		Body:             []byte("x"),
@@ -747,7 +834,7 @@ func TestDecryptReply_RejectsInitiatorTypes(t *testing.T) {
 				DeviceStaticPriv: devicePriv,
 				ServerStaticPub:  serverPub,
 				EphemeralPriv:    bytes.Repeat([]byte{0x55}, 32),
-				TimestampNanos:   1700000000123456789,
+				TimestampMillis:  1700000000123,
 				Counter:          9,
 				Preamble:         0x0a0b0c0d,
 				Body:             []byte("initiator body"),
@@ -794,7 +881,7 @@ func TestBuildReply_RoundTripsUnderDecryptReply(t *testing.T) {
 				DeviceStaticPriv: serverPriv,
 				ServerStaticPub:  devicePub,
 				EphemeralPriv:    bytes.Repeat([]byte{0x77}, 32),
-				TimestampNanos:   1700000000111111111,
+				TimestampMillis:  1700000000111,
 				Counter:          counter,
 				Preamble:         0x0badf00d,
 				Body:             body,

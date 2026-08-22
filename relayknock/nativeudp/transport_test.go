@@ -21,6 +21,7 @@ import (
 	"github.com/layervai/qurl-go/internal/nhpcontract"
 	"github.com/layervai/qurl-go/internal/udpfence"
 	"github.com/layervai/qurl-go/relayknock"
+	"github.com/layervai/qurl-go/relayknock/internal/nhpwire"
 	"github.com/layervai/qurl-go/relayknock/nativeudp"
 	"github.com/layervai/qurl-go/relayknock/relayknocktest"
 )
@@ -222,7 +223,7 @@ func (s *fakeServer) buildReply(replyType int, serverPriv []byte, counter uint64
 		DeviceStaticPriv: serverPriv,
 		ServerStaticPub:  s.agentPub,
 		EphemeralPriv:    mustRand(s.t, 32),
-		TimestampNanos:   uint64(time.Now().UnixNano()),
+		TimestampMillis:  uint64(time.Now().UnixMilli()),
 		Counter:          counter,
 		Preamble:         mustPreamble(s.t),
 		Body:             body,
@@ -410,11 +411,12 @@ func TestRegistrationPacketsAvoidIPFragmentation(t *testing.T) {
 				t.Fatalf("load QAT1 fixture: %v", err)
 			}
 			body := []byte(fmt.Sprintf(
-				`{"usrId":"key_123456789012","devId":"qurl-go-production-ticket-proof","aspId":"agent","pass":"lv_test_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","usrData":{"query":"agent_registration_otp","version":1,"assignment_ticket":%q}}`,
-				ticket.Golden.Token,
+				`{"usrId":"key_123456789012","devId":"qurl-go-production-ticket-proof","aspId":"agent","pass":"lv_test_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","usrData":{"query":"agent_registration_otp","version":1,"assignment_ticket":%q,"padding":%q}}`,
+				ticket.Golden.Token, strings.Repeat("A", 128),
 			))
-			if len(body)+240+16 <= 1472 {
-				t.Fatalf("QAT1 registration packet fixture is only %d bytes; test no longer crosses IPv4 MTU", len(body)+240+16)
+			packetBytes := len(body) + nhpwire.HeaderSize + 16
+			if packetBytes <= 1472 {
+				t.Fatalf("QAT1 registration packet fixture is only %d bytes; test no longer crosses IPv4 MTU", packetBytes)
 			}
 			opts := nativeudp.Options{
 				DeviceStaticPriv: devicePriv,
@@ -489,9 +491,9 @@ func TestRegistrationPacketRejectsUncompressibleFragment(t *testing.T) {
 func TestPayloadStraddlesUnfragmentedCeiling(t *testing.T) {
 	t.Parallel()
 	// maxUnfragmentedPayload (1232, the IPv6 minimum-MTU UDP payload ceiling)
-	// less the 240-byte NHP header and the body's 16-byte AEAD tag: the largest
+	// less the 160-byte standard NHP header and the body's 16-byte AEAD tag: the largest
 	// body that still fits uncompressed.
-	const largestUncompressedBody = 1232 - 240 - 16
+	const largestUncompressedBody = 1232 - nhpwire.HeaderSize - 16
 	for _, send := range []struct {
 		name string
 		send func(context.Context, nativeudp.Endpoint, []byte, nativeudp.Options) error
