@@ -142,7 +142,7 @@ func (s *assignmentCookieServer) challenge(counter uint64) []byte {
 	case assignmentCookieWrongKey:
 		serverPriv = s.altPriv
 	case assignmentCookieCompressed:
-		flags = 0x0002
+		flags = 0x0001
 		var compressed bytes.Buffer
 		writer := zlib.NewWriter(&compressed)
 		if _, err := writer.Write(body); err != nil {
@@ -187,7 +187,7 @@ func (s *assignmentCookieServer) buildReplyWithFlags(replyType int, flags uint16
 		DeviceStaticPriv: serverPriv,
 		ServerStaticPub:  s.agentPub,
 		EphemeralPriv:    mustRand(s.t, 32),
-		TimestampNanos:   uint64(time.Now().UnixNano()),
+		TimestampMillis:  uint64(time.Now().UnixMilli()),
 		Counter:          counter,
 		Preamble:         mustPreamble(s.t),
 		Body:             body,
@@ -260,8 +260,8 @@ func TestAssignmentList_CookieProofRoundTrip(t *testing.T) {
 	if !bytes.Equal(requests[0].Body, body) || !bytes.Equal(requests[1].Body, body) {
 		t.Fatalf("assignment bodies changed: %q / %q", requests[0].Body, requests[1].Body)
 	}
-	if requests[0].Counter == requests[1].Counter || requests[1].TimestampNanos <= requests[0].TimestampNanos || bytes.Equal(packets[0], packets[1]) {
-		t.Fatalf("proof packet was not fresh: counters %d/%d timestamps %d/%d", requests[0].Counter, requests[1].Counter, requests[0].TimestampNanos, requests[1].TimestampNanos)
+	if requests[0].Counter == requests[1].Counter || requests[1].TimestampMillis <= requests[0].TimestampMillis || bytes.Equal(packets[0], packets[1]) {
+		t.Fatalf("proof packet was not fresh: counters %d/%d timestamps %d/%d", requests[0].Counter, requests[1].Counter, requests[0].TimestampMillis, requests[1].TimestampMillis)
 	}
 }
 

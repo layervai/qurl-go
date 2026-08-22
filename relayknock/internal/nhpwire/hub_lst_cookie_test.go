@@ -18,21 +18,21 @@ func hubCookieHex(t *testing.T, value string) []byte {
 	return decoded
 }
 
-func TestHubLSTCookieProofDigestKAT(t *testing.T) {
-	fixture, err := conformance.ConnectorHubLSTCookie()
-	if err != nil {
-		t.Fatal(err)
+func TestHeaderMACKnownAnswer(t *testing.T) {
+	header := make([]byte, HeaderSize)
+	for i := range header {
+		header[i] = byte(i)
 	}
-	kat := fixture.ProofDigestKAT
-	prefix := hubCookieHex(t, kat.HeaderPrefixHex)
-	hubPublic := hubCookieHex(t, kat.HubServerStaticPublicKeyHex)
-	cookie := hubCookieHex(t, kat.RawCookieHex)
-	got := headerDigest(hubPublic, prefix, cookie)
-	if hex.EncodeToString(got) != kat.ExpectedDigestHex {
-		t.Fatalf("proof digest = %x, want %s", got, kat.ExpectedDigestHex)
+	chainKey := make([]byte, hashSize)
+	for i := range chainKey {
+		chainKey[i] = byte(0xa0 + i)
 	}
-	if getFlag(prefix) != conformance.ConnectorHubLSTCookieProofFlag {
-		t.Fatalf("proof flag = %#04x, want %#04x", getFlag(prefix), conformance.ConnectorHubLSTCookieProofFlag)
+	payload := []byte{0xde, 0xad, 0xbe, 0xef, 1, 2, 3}
+	cookie := bytes.Repeat([]byte{0x5c}, CookieSize)
+	got := headerMAC(deriveHeaderMACKey(chainKey), header[:offHeaderMAC], payload, cookie)
+	const want = "199691cefc6b02e78b56142f27ba3158889557c1d307c450aa85e14a8ca6fb3d"
+	if hex.EncodeToString(got) != want {
+		t.Fatalf("header MAC = %x, want %s", got, want)
 	}
 }
 
@@ -73,7 +73,7 @@ func TestBuildHubLSTCookieProofConsumesAssignmentFlows(t *testing.T) {
 				DeviceStaticPriv: agentPrivate,
 				ServerStaticPub:  hubPublic,
 				EphemeralPriv:    bytes.Repeat([]byte{byte(0x40 + index)}, PublicKeySize),
-				TimestampNanos:   1700000000000001000 + uint64(index),
+				TimestampMillis:  1700000000001 + uint64(index),
 				Counter:          unprovenCounter,
 				Preamble:         uint32(0x8192a3b4 + index),
 				Body:             []byte(flow.UnprovenBodyJSON),
@@ -95,7 +95,7 @@ func TestBuildHubLSTCookieProofConsumesAssignmentFlows(t *testing.T) {
 				DeviceStaticPriv: agentPrivate,
 				ServerStaticPub:  hubPublic,
 				EphemeralPriv:    bytes.Repeat([]byte{byte(0x60 + index)}, PublicKeySize),
-				TimestampNanos:   1700000000000003000 + uint64(index),
+				TimestampMillis:  1700000000003 + uint64(index),
 				Counter:          counter,
 				Preamble:         uint32(0xa1b2c3d4 + index),
 				Body:             []byte(flow.ProofBodyJSON),
@@ -154,7 +154,7 @@ func TestBuildHubLSTCookieProofConsumesCredentialRecoveryGolden(t *testing.T) {
 	cookie := hubCookieHex(t, base.CookieKATs[0].CookieHex)
 	unprovenPacket, err := BuildMessage(TypeLST, &Inputs{
 		DeviceStaticPriv: agentPrivate, ServerStaticPub: hubPublic,
-		EphemeralPriv: bytes.Repeat([]byte{0x71}, PublicKeySize), TimestampNanos: 1700000000000007000,
+		EphemeralPriv: bytes.Repeat([]byte{0x71}, PublicKeySize), TimestampMillis: 1700000000007,
 		Counter: unprovenCounter, Preamble: 0x718293a4, Body: []byte(flow.UnprovenBodyJSON),
 	})
 	if err != nil {
@@ -162,7 +162,7 @@ func TestBuildHubLSTCookieProofConsumesCredentialRecoveryGolden(t *testing.T) {
 	}
 	proofPacket, err := BuildHubLSTCookieProof(&Inputs{
 		DeviceStaticPriv: agentPrivate, ServerStaticPub: hubPublic,
-		EphemeralPriv: bytes.Repeat([]byte{0x72}, PublicKeySize), TimestampNanos: 1700000000000008000,
+		EphemeralPriv: bytes.Repeat([]byte{0x72}, PublicKeySize), TimestampMillis: 1700000000008,
 		Counter: proofCounter, Preamble: 0x728394a5, Body: []byte(flow.ProofBodyJSON), Cookie: cookie,
 	})
 	if err != nil {
@@ -194,7 +194,7 @@ func TestHubLSTCookieProofBuilderIsNarrow(t *testing.T) {
 		DeviceStaticPriv: devicePrivate,
 		ServerStaticPub:  serverPublic,
 		EphemeralPriv:    bytes.Repeat([]byte{0x33}, PublicKeySize),
-		TimestampNanos:   1,
+		TimestampMillis:  1,
 		Counter:          2,
 		Preamble:         3,
 		Body:             []byte("assignment"),

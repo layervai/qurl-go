@@ -50,12 +50,12 @@ const (
 	respondPhaseInvalid                        // authenticated known reply that is invalid for the request phase
 )
 
-// The respondMalformed garbage-datagram sizes straddle the fixed 240-byte NHP
+// The respondMalformed garbage-datagram sizes straddle the fixed 160-byte NHP
 // header: below one header, exactly one header, and one header plus a body.
 // None can open as an authenticated reply from the pinned server key.
 const (
 	malformedShortReplyBytes      = 100
-	malformedHeaderReplyBytes     = 240
+	malformedHeaderReplyBytes     = 160
 	malformedHeaderBodyReplyBytes = 400
 	unknownReplyHeaderType        = 0x7ffe
 )
@@ -2231,7 +2231,7 @@ func validateHubCookieProofRoutability(ctx context.Context, t *testing.T, httpTr
 		t.Fatal("hub cookie-proof flight opened as an ordinary initiator LST; the cookie-bound profile is not exclusive")
 	}
 	if wrongCookieErr == nil {
-		t.Fatal("hub cookie-proof flight opened under a different cookie; the header digest is not cookie-bound")
+		t.Fatal("hub cookie-proof flight opened under a different cookie; the header MAC is not cookie-bound")
 	}
 	if !bytes.Equal(first[0].Body, body) || !bytes.Equal(proof[0].Body, body) {
 		t.Fatalf("hub cookie-proof bodies = %q / %q, want the caller's body byte-identical on both flights", first[0].Body, proof[0].Body)
@@ -2284,7 +2284,7 @@ func validateCellCookieReknockRoutability(ctx context.Context, t *testing.T, htt
 		t.Fatal("re-knock flight opened as an ordinary initiator message; NHP_RKN is not cookie-bound")
 	}
 	if wrongCookieErr == nil {
-		t.Fatal("re-knock flight opened under a different cookie; the header digest is not cookie-bound")
+		t.Fatal("re-knock flight opened under a different cookie; the header MAC is not cookie-bound")
 	}
 	// Each leg carries its own caller-supplied body: the transport does not
 	// rewrite an authenticated application body across the transition.

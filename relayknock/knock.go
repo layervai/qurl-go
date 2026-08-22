@@ -22,7 +22,7 @@ type KnockInputs struct {
 	DeviceStaticPriv []byte // initiator (agent) static private key, 32 bytes
 	ServerStaticPub  []byte // responder (server) static public key, 32 bytes (rs)
 	EphemeralPriv    []byte // per-knock ephemeral private key, 32 bytes
-	TimestampNanos   uint64 // send time (time.Now().UnixNano())
+	TimestampMillis  uint64 // send time (time.Now().UnixMilli())
 	Counter          uint64 // transaction id
 	Preamble         uint32 // HeaderCommon obfuscation preamble
 	Body             []byte // serialized, uncompressed application knock body
@@ -42,7 +42,7 @@ func (k *KnockInputs) WireInputs() *nhpwire.Inputs {
 		DeviceStaticPriv: k.DeviceStaticPriv,
 		ServerStaticPub:  k.ServerStaticPub,
 		EphemeralPriv:    k.EphemeralPriv,
-		TimestampNanos:   k.TimestampNanos,
+		TimestampMillis:  k.TimestampMillis,
 		Counter:          k.Counter,
 		Preamble:         k.Preamble,
 		Body:             k.Body,
@@ -51,14 +51,14 @@ func (k *KnockInputs) WireInputs() *nhpwire.Inputs {
 	}
 }
 
-// BuildKnock builds a complete NHP_KNK packet (240-byte header ‖ sealed body)
+// BuildKnock builds a complete NHP_KNK packet (160-byte standard header ‖ sealed body)
 // that the reference NHP relay responder decrypts. It is BuildMessage fixed to
 // TypeKnock.
 func BuildKnock(inp *KnockInputs) ([]byte, error) {
 	return nhpwire.BuildMessage(nhpwire.TypeKNK, inp.WireInputs())
 }
 
-// BuildMessage builds a complete NHP packet (240-byte header ‖ sealed body) of
+// BuildMessage builds a complete NHP packet (160-byte standard header ‖ sealed body) of
 // the given initiator header type: TypeKnock, TypeListRequest, TypeReknock,
 // TypeOTP, TypeRegister, or TypeExit. Any other type fails closed. In
 // particular, an agent never builds server-originated reply types, so rejecting
@@ -108,7 +108,7 @@ const (
 	TypeListRequest = nhpwire.TypeLST
 	// TypeReknock is NHP_RKN: the answer to an authenticated overload cookie
 	// challenge. It carries the original knock application identity and mixes the
-	// decoded COK cookie into its header digest.
+	// decoded COK cookie into its header MAC.
 	TypeReknock = nhpwire.TypeRKN
 	// TypeOTP is NHP_OTP: the one-way registration-bootstrap message (the NHP
 	// spec's agent one-time-password request). The server does not reply to OTP
@@ -149,10 +149,10 @@ type Reply struct {
 	// Type is the NHP header type (TypeACK / TypeListResult /
 	// TypeCookieChallenge / TypeRegisterAck). Prefer the Is* methods for intent;
 	// the exported constants exist so a consumer can also assert a specific type.
-	Type           int
-	Counter        uint64
-	TimestampNanos uint64
-	Body           []byte
+	Type            int
+	Counter         uint64
+	TimestampMillis uint64
+	Body            []byte
 }
 
 // IsACK reports whether the reply is an NHP_ACK (the authorized-admission reply
@@ -206,9 +206,9 @@ func DecryptReply(devicePriv, expectedServerStaticPub, packet []byte) (*Reply, e
 
 func replyFromWire(msg *nhpwire.Message) *Reply {
 	return &Reply{
-		Type:           msg.Type,
-		Counter:        msg.Counter,
-		TimestampNanos: msg.TimestampNanos,
-		Body:           msg.Body,
+		Type:            msg.Type,
+		Counter:         msg.Counter,
+		TimestampMillis: msg.TimestampMillis,
+		Body:            msg.Body,
 	}
 }

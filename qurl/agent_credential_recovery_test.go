@@ -79,7 +79,7 @@ func loadCredentialRecoveryFixture(t *testing.T) *conformance.AgentCredentialRec
 	if err != nil {
 		t.Fatalf("load credential recovery conformance: %v", err)
 	}
-	if fixture.Artifact != conformance.AgentCredentialRecoveryArtifactID || fixture.SchemaVersion != 1 {
+	if fixture.Artifact != conformance.AgentCredentialRecoveryArtifactID || fixture.SchemaVersion != 2 {
 		t.Fatalf("recovery fixture identity = %q/v%d", fixture.Artifact, fixture.SchemaVersion)
 	}
 	return fixture

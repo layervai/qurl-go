@@ -56,7 +56,7 @@ func buildFromInitiatorVector(t *testing.T, v conformance.AgentRegistrationCase,
 		DeviceStaticPriv: mustHex(t, v.DeviceStaticPrivHex),
 		ServerStaticPub:  mustHex(t, v.ServerStaticPubHex),
 		EphemeralPriv:    mustHex(t, v.EphemeralPrivHex),
-		TimestampNanos:   mustDecimalU64(t, v.TimestampNanos),
+		TimestampMillis:  mustDecimalU64(t, v.TimestampMillis),
 		Counter:          mustDecimalU64(t, v.Counter),
 		Preamble:         mustHexU32(t, v.PreambleHex),
 		Body:             mustHex(t, v.BodyHex),
@@ -134,8 +134,8 @@ func TestDecryptReply_AgentRegistrationGolden(t *testing.T) {
 			if wantReg := mustDecimalU64(t, g.RegEmailed.Counter); reply.Counter != wantReg {
 				t.Errorf("counter = %#x, want reg_emailed.counter %#x (matched-counter pair)", reply.Counter, wantReg)
 			}
-			if wantTS := mustDecimalU64(t, tc.vec.TimestampNanos); reply.TimestampNanos != wantTS {
-				t.Errorf("timestampNanos = %d, want %d", reply.TimestampNanos, wantTS)
+			if wantTS := mustDecimalU64(t, tc.vec.TimestampMillis); reply.TimestampMillis != wantTS {
+				t.Errorf("timestampMillis = %d, want %d", reply.TimestampMillis, wantTS)
 			}
 			// The decrypted body must equal the vector's plaintext body_hex
 			// (frozen decrypt-only cross-check): proves the AEAD open recovered the

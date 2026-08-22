@@ -4,7 +4,7 @@
 package nhpcontract
 
 // MaxApplicationBodySize is the largest plaintext application body that fits
-// in NHP's fixed 4096-byte receive buffer after its 240-byte header and the
+// in NHP's fixed 4096-byte receive buffer after its 160-byte standard header and the
 // body's 16-byte AEAD tag. Keep this formula aligned with
 // relayknock/internal/nhpwire; its compile-time equality fence rejects drift.
-const MaxApplicationBodySize = 4096 - 240 - 16
+const MaxApplicationBodySize = 4096 - 160 - 16

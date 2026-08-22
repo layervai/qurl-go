@@ -27,7 +27,7 @@ type Inputs struct {
 	DeviceStaticPriv []byte // initiator static private key, 32 bytes
 	ServerStaticPub  []byte // responder static public key, 32 bytes (rs)
 	EphemeralPriv    []byte // per-message ephemeral private key, 32 bytes
-	TimestampNanos   uint64 // send time (time.Now().UnixNano())
+	TimestampMillis  uint64 // send time (time.Now().UnixMilli())
 	Counter          uint64 // transaction id
 	Preamble         uint32 // HeaderCommon obfuscation preamble
 	Body             []byte // serialized, uncompressed application body
@@ -39,11 +39,11 @@ type Inputs struct {
 // type (one of the declared NHP header-type constants); the wrapping packages
 // interpret it.
 type Message struct {
-	Type           int
-	Flags          uint16
-	Counter        uint64
-	TimestampNanos uint64
-	Body           []byte
+	Type            int
+	Flags           uint16
+	Counter         uint64
+	TimestampMillis uint64
+	Body            []byte
 }
 
 // ErrMalformedReply marks an authenticated message whose header type is not a
@@ -52,11 +52,11 @@ type Message struct {
 // while the shared type gate remains next to the private wire metadata.
 var ErrMalformedReply = errors.New("relayknock: malformed reply")
 
-// BuildMessage builds a complete single-message NHP packet (240-byte header ‖
+// BuildMessage builds a complete single-message NHP packet (160-byte standard header ‖
 // sealed body) of the given header type. It folds material into the chain
 // hash/key in the exact order the responder expects, so every AEAD opens. For
 // ordinary messages only the obfuscated type field in HeaderCommon[0:8]
-// differs. RKN additionally mixes its exact COK cookie into the header digest;
+// differs. RKN additionally mixes its exact COK cookie into the header MAC;
 // the dedicated session-control vectors fence that variant. Hub assignment LST
 // proof is built only through BuildHubLSTCookieProof. BuildMessage enforces the
 // ordinary/RKN cookie invariant but applies no initiator/reply type allowlist;
@@ -66,7 +66,7 @@ func BuildMessage(headerType int, inp *Inputs) ([]byte, error) {
 }
 
 // BuildHubLSTCookieProof builds the one dedicated assignment-proof NHP_LST.
-// The raw 32-byte Hub cookie is mixed into the header digest and the proof bit
+// The raw 32-byte Hub cookie is mixed into the header MAC and the proof bit
 // is set exclusively. Keeping this separate from BuildMessage prevents generic
 // LST, REG, and KNK callers from acquiring the proof capability accidentally.
 func BuildHubLSTCookieProof(inp *Inputs) ([]byte, error) {
@@ -88,6 +88,23 @@ func BuildReplyWithFlagsForTest(headerType int, flags uint16, inp *Inputs) ([]by
 	}
 	if len(inp.Cookie) != 0 {
 		return nil, fmt.Errorf("reply header type %d must not carry a cookie", headerType)
+	}
+	return buildMessageUnchecked(headerType, flags, inp)
+}
+
+// BuildInitiatorWithFlagsForTest constructs authenticated out-of-profile
+// initiator packets so responder contract tests can pin semantic rejection.
+func BuildInitiatorWithFlagsForTest(headerType int, flags uint16, inp *Inputs) ([]byte, error) {
+	if inp == nil {
+		return nil, errors.New("message inputs must not be nil")
+	}
+	switch headerType {
+	case TypeKNK, TypeLST, TypeOTP, TypeREG, TypeEXT:
+	default:
+		return nil, fmt.Errorf("header type %d is not an initiator message", headerType)
+	}
+	if len(inp.Cookie) != 0 {
+		return nil, fmt.Errorf("test initiator header type %d must not carry a cookie", headerType)
 	}
 	return buildMessageUnchecked(headerType, flags, inp)
 }
@@ -124,14 +141,18 @@ func buildMessageUnchecked(headerType int, flags uint16, inp *Inputs) ([]byte, e
 // version supplied by the caller. Every production path goes through
 // buildMessageUnchecked; the parameters exist so in-package tests can drive the
 // receive-side version gate with a packet whose version differs from the codec's
-// own. The version bytes are inside the folded HeaderCommon, so a packet built
-// here is self-consistent — the gate rejects it on the version, not on a tag.
+// own. The version bytes are covered by both the body AAD and NHP 1.2 header MAC,
+// so a packet built here is internally consistent and rejects at the version
+// gate rather than later authentication.
 func buildMessageWithVersion(headerType int, flags uint16, major, minor byte, inp *Inputs) ([]byte, error) {
 	if len(inp.ServerStaticPub) != PublicKeySize {
 		return nil, fmt.Errorf("server static pub must be %d bytes, got %d", PublicKeySize, len(inp.ServerStaticPub))
 	}
 	if len(inp.Body) > maxApplicationBodySize {
 		return nil, fmt.Errorf("knock body too large: %d bytes exceeds %d", len(inp.Body), maxApplicationBodySize)
+	}
+	if inp.TimestampMillis > maxWireTimestampMillis {
+		return nil, fmt.Errorf("timestamp milliseconds %d exceed the supported Unix time range", inp.TimestampMillis)
 	}
 	nonce := nonceForCounter(inp.Counter)
 
@@ -151,11 +172,14 @@ func buildMessageWithVersion(headerType int, flags uint16, major, minor byte, in
 	chainHash := newBlake2s()
 	chainHash.Write(initialHash)
 	chainKey := mixKey(chainHash.Sum(nil), initialChainKey)
+	defer func() { cryptoutil.Wipe(chainKey) }()
 
 	// Fold rs and e: ChainHash0->1, ChainKey0->1.
 	chainHash.Write(inp.ServerStaticPub)
 	chainHash.Write(ephemeralPub)
-	chainKey = mixKey(chainKey, ephemeralPub)
+	nextChainKey := mixKey(chainKey, ephemeralPub)
+	cryptoutil.Wipe(chainKey)
+	chainKey = nextChainKey
 
 	// es = DH(e, rs): seal the device static pub (AAD = ChainHash1).
 	ess, err := x25519Shared(inp.EphemeralPriv, inp.ServerStaticPub)
@@ -163,8 +187,13 @@ func buildMessageWithVersion(headerType int, flags uint16, major, minor byte, in
 		return nil, fmt.Errorf("es DH: %w", err)
 	}
 	var aeadKey []byte
-	chainKey, aeadKey = keyGen2(chainKey, ess)
+	defer func() { cryptoutil.Wipe(aeadKey) }()
+	nextChainKey, aeadKey = keyGen2(chainKey, ess)
+	cryptoutil.Wipe(chainKey)
+	chainKey = nextChainKey
+	cryptoutil.Wipe(ess)
 	sealedStatic, err := aeadSeal(aeadKey, nonce, deviceStaticPub, chainHash.Sum(nil))
+	cryptoutil.Wipe(aeadKey)
 	if err != nil {
 		return nil, fmt.Errorf("seal static: %w", err)
 	}
@@ -176,10 +205,17 @@ func buildMessageWithVersion(headerType int, flags uint16, major, minor byte, in
 	if err != nil {
 		return nil, fmt.Errorf("ss DH: %w", err)
 	}
-	chainKey, aeadKey = keyGen2(chainKey, ss)
+	nextChainKey, aeadKey = keyGen2(chainKey, ss)
+	cryptoutil.Wipe(chainKey)
+	chainKey = nextChainKey
+	cryptoutil.Wipe(ss)
+	headerMACKey := deriveHeaderMACKey(chainKey)
+	defer cryptoutil.Wipe(headerMACKey)
 	tsBytes := make([]byte, timestampSize)
-	binary.BigEndian.PutUint64(tsBytes, inp.TimestampNanos)
+	binary.BigEndian.PutUint64(tsBytes, inp.TimestampMillis)
 	sealedTs, err := aeadSeal(aeadKey, nonce, tsBytes, chainHash.Sum(nil))
+	cryptoutil.Wipe(aeadKey)
+	cryptoutil.Wipe(tsBytes)
 	if err != nil {
 		return nil, fmt.Errorf("seal timestamp: %w", err)
 	}
@@ -189,7 +225,8 @@ func buildMessageWithVersion(headerType int, flags uint16, major, minor byte, in
 	// Body key derives from the ts ciphertext (terminal derivation — evolved
 	// chain key discarded). The AAD is deliberately NOT taken yet: the chain hash
 	// still has to absorb the finalized HeaderCommon below.
-	_, aeadKey = keyGen2(chainKey, sealedTs)
+	discardedChainKey, aeadKey := keyGen2(chainKey, sealedTs)
+	cryptoutil.Wipe(discardedChainKey)
 	body := inp.Body
 	if len(body) > 0 && flags&nhpFlagCompress != 0 {
 		var compressed bytes.Buffer
@@ -213,8 +250,8 @@ func buildMessageWithVersion(headerType int, flags uint16, major, minor byte, in
 		return nil, fmt.Errorf("knock body too large: sealed %d bytes exceeds %d", payloadSize, maxSealedBodySize)
 	}
 
-	// HeaderCommon — set everything before both the fold below and the digest,
-	// which covers header[0:208]. The payload size is only known here, after
+	// HeaderCommon — set everything before both the fold below and the MAC,
+	// which covers header[0:128]. The payload size is only known here, after
 	// compression, which is why the header cannot be finalized any earlier.
 	setVersion(header, major, minor)
 	setCounter(header, inp.Counter)
@@ -236,7 +273,12 @@ func buildMessageWithVersion(headerType int, flags uint16, major, minor byte, in
 			return nil, fmt.Errorf("seal body: %w", err)
 		}
 	}
-	copy(header[offDigest:offDigest+hashSize], headerDigest(inp.ServerStaticPub, header, inp.Cookie))
+	computedHeaderMAC := headerMAC(headerMACKey, header[:offHeaderMAC], sealedBody, inp.Cookie)
+	copy(header[offHeaderMAC:offHeaderMAC+hashSize], computedHeaderMAC)
+	cryptoutil.Wipe(computedHeaderMAC)
+	cryptoutil.Wipe(headerMACKey)
+	cryptoutil.Wipe(aeadKey)
+	cryptoutil.Wipe(chainKey)
 
 	packet := make([]byte, HeaderSize+len(sealedBody))
 	copy(packet, header)
@@ -248,8 +290,8 @@ func buildMessageWithVersion(headerType int, flags uint16, major, minor byte, in
 // against the sender's static key, admitting both reply and initiator types.
 // DecryptReplyMessage applies the shared reply gate; responder/test code applies
 // the corresponding initiator gate after calling this generic codec.
-// Authentication completes at the ss-keyed opens: only the real sender's static
-// private key yields a valid tag there.
+// Authentication completes at the ss-derived header MAC: only the real
+// sender's static private key yields a valid authenticator.
 func DecryptMessage(devicePriv, expectedServerStaticPub, packet []byte) (*Message, error) {
 	return decryptMessage(devicePriv, expectedServerStaticPub, nil, packet)
 }
@@ -273,16 +315,14 @@ func DecryptReplyMessage(devicePriv, expectedServerStaticPub, packet []byte) (*M
 // reference server builds NHP_ACK, NHP_RAK, NHP_LRT and the KNK overload NHP_COK
 // with compression enabled unconditionally — there is no size threshold — so
 // those always arrive as nhpFlagCompress, and the pinned relay-knock golden
-// NHP_ACK carries 0x0002. The Hub assignment NHP_COK and its NHP_LRT are the
+// NHP_ACK carries 0x0001. The Hub assignment NHP_COK and its NHP_LRT are the
 // uncompressed exceptions, which is why the frozen assignment vectors show 0x0000.
 // Everything outside {0, nhpFlagCompress} is refused, in particular
 // hubLSTCookieProofFlag: that bit is initiator-only and must never ride a reply.
 //
-// Since protocol 1.1 the flag word is AUTHENTICATED: HeaderCommon is folded into
-// the body AAD, so a tampered flag word fails the body open before this gate ever
-// runs. The gate is therefore a policy fence, not an integrity one — it bounds
-// what a legitimately-keyed responder is allowed to say, and it remains the only
-// check on a reply whose body is empty, where no AEAD covers the header at all.
+// Since protocol 1.2 the flag word is authenticated by the keyed header MAC for
+// bodyful and bodyless messages. This gate remains a policy fence over what an
+// authenticated responder is allowed to say.
 //
 // The assignment path's stricter flags-must-be-zero pin stays in nativeudp and is
 // not redundant with this gate: it applies to one profile this shared gate cannot
@@ -309,7 +349,7 @@ func acceptReplyMessage(msg *Message) (*Message, error) {
 }
 
 // DecryptReknockMessage opens an NHP_RKN request using the exact decoded COK
-// cookie that the initiator mixed into the header digest. The authenticated
+// cookie that the initiator mixed into the header MAC. The authenticated
 // message type is still returned to the caller for an explicit RKN gate.
 func DecryptReknockMessage(devicePriv, expectedServerStaticPub, cookie, packet []byte) (*Message, error) {
 	if len(cookie) != CookieSize {
@@ -353,9 +393,8 @@ func decryptMessage(devicePriv, expectedServerStaticPub, cookie, packet []byte) 
 	}
 	// Framing gate ahead of any key agreement: it refuses a packet whose layout
 	// or transcript this codec cannot claim to parse. Minor is floored, not
-	// pinned — a sender below minProtocolVersionMinor folds a shorter body AAD,
-	// so its tag can never verify here, and saying so beats the opaque "open
-	// body" failure it would otherwise produce. Newer minors are still admitted;
+	// pinned — a sender below minProtocolVersionMinor does not produce the keyed
+	// header MAC required by this transcript. Newer minors are still admitted;
 	// see getVersion.
 	if major, minor := getVersion(packet); major != protocolVersionMajor || minor < minProtocolVersionMinor {
 		return nil, fmt.Errorf("unsupported NHP protocol version %d.%d, want %d.%d or a later minor",
@@ -363,18 +402,23 @@ func decryptMessage(devicePriv, expectedServerStaticPub, cookie, packet []byte) 
 	}
 	header := packet[0:HeaderSize]
 	sealedBody := packet[HeaderSize:]
+	_, declaredPayloadSize := getTypeAndPayloadSize(header)
+	if declaredPayloadSize != len(sealedBody) {
+		return nil, fmt.Errorf("reply declared payload size %d does not match %d trailing bytes", declaredPayloadSize, len(sealedBody))
+	}
+	if !allZero(header[12:16]) {
+		return nil, errors.New("reply reserved header bytes must be zero")
+	}
+	if flag := getFlag(header); flag&^supportedHeaderFlags != 0 {
+		return nil, fmt.Errorf("reply flags %#04x are unsupported by the standard header profile", flag)
+	} else if typ, _ := getTypeAndPayloadSize(header); flag&hubLSTCookieProofFlag != 0 && typ != TypeLST {
+		return nil, fmt.Errorf("Hub LST cookie proof flag is invalid on reply type %d", typ)
+	}
 
 	agentPub, err := X25519Public(devicePriv)
 	if err != nil {
 		return nil, fmt.Errorf("derive agent pub: %w", err)
 	}
-	// Constant-time: for RKN and the Hub LST proof this digest folds the secret
-	// 32-byte cookie, so a byte-at-a-time compare would leak how far a guessed
-	// digest matched and let a caller search for a valid proof without the cookie.
-	if subtle.ConstantTimeCompare(headerDigest(agentPub, header, cookie), header[offDigest:offDigest+hashSize]) != 1 {
-		return nil, errors.New("reply header digest mismatch (tampered, or wrong device key)")
-	}
-
 	counter := getCounter(header)
 	nonce := nonceForCounter(counter)
 	serverEph := header[offEphemeral : offEphemeral+PublicKeySize]
@@ -384,9 +428,12 @@ func decryptMessage(devicePriv, expectedServerStaticPub, cookie, packet []byte) 
 	chainHash := newBlake2s()
 	chainHash.Write(initialHash)
 	chainKey := mixKey(chainHash.Sum(nil), initialChainKey)
+	defer func() { cryptoutil.Wipe(chainKey) }()
 	chainHash.Write(agentPub)
 	chainHash.Write(serverEph)
-	chainKey = mixKey(chainKey, serverEph)
+	nextChainKey := mixKey(chainKey, serverEph)
+	cryptoutil.Wipe(chainKey)
+	chainKey = nextChainKey
 
 	// es = DH(agentPriv, serverEph): open the server static key (AAD = ChainHash1).
 	es, err := x25519Shared(devicePriv, serverEph)
@@ -394,8 +441,13 @@ func decryptMessage(devicePriv, expectedServerStaticPub, cookie, packet []byte) 
 		return nil, fmt.Errorf("es DH: %w", err)
 	}
 	var aeadKey []byte
-	chainKey, aeadKey = keyGen2(chainKey, es)
+	defer func() { cryptoutil.Wipe(aeadKey) }()
+	nextChainKey, aeadKey = keyGen2(chainKey, es)
+	cryptoutil.Wipe(chainKey)
+	chainKey = nextChainKey
+	cryptoutil.Wipe(es)
 	serverStaticPub, err := aeadOpen(aeadKey, nonce, staticField, chainHash.Sum(nil))
+	cryptoutil.Wipe(aeadKey)
 	if err != nil {
 		return nil, fmt.Errorf("open server static: %w", err)
 	}
@@ -410,9 +462,28 @@ func decryptMessage(devicePriv, expectedServerStaticPub, cookie, packet []byte) 
 	if err != nil {
 		return nil, fmt.Errorf("ss DH: %w", err)
 	}
-	chainKey, aeadKey = keyGen2(chainKey, ss)
+	nextChainKey, aeadKey = keyGen2(chainKey, ss)
+	cryptoutil.Wipe(chainKey)
+	chainKey = nextChainKey
+	cryptoutil.Wipe(ss)
+	headerMACKey := deriveHeaderMACKey(chainKey)
+	defer cryptoutil.Wipe(headerMACKey)
+	computedHeaderMAC := headerMAC(headerMACKey, header[:offHeaderMAC], sealedBody, cookie)
+	macMatches := subtle.ConstantTimeCompare(
+		computedHeaderMAC,
+		header[offHeaderMAC:offHeaderMAC+hashSize],
+	) == 1
+	cryptoutil.Wipe(computedHeaderMAC)
+	cryptoutil.Wipe(headerMACKey)
+	if !macMatches {
+		cryptoutil.Wipe(aeadKey)
+		cryptoutil.Wipe(chainKey)
+		return nil, errors.New("reply header HMAC mismatch")
+	}
 	tsBytes, err := aeadOpen(aeadKey, nonce, tsField, chainHash.Sum(nil))
+	cryptoutil.Wipe(aeadKey)
 	if err != nil {
+		cryptoutil.Wipe(chainKey)
 		return nil, fmt.Errorf("open timestamp (server authentication failed): %w", err)
 	}
 	chainHash.Write(tsField)
@@ -423,7 +494,10 @@ func decryptMessage(devicePriv, expectedServerStaticPub, cookie, packet []byte) 
 	// changes this AAD and fails the open below.
 	chainHash.Write(header[:headerCommonSize])
 	bodyAad := chainHash.Sum(nil)
-	_, bodyKey := keyGen2(chainKey, tsField)
+	discardedChainKey, bodyKey := keyGen2(chainKey, tsField)
+	cryptoutil.Wipe(discardedChainKey)
+	cryptoutil.Wipe(chainKey)
+	defer cryptoutil.Wipe(bodyKey)
 	var body []byte
 	if len(sealedBody) > 0 {
 		body, err = aeadOpen(bodyKey, nonce, sealedBody, bodyAad)
@@ -438,30 +512,29 @@ func decryptMessage(devicePriv, expectedServerStaticPub, cookie, packet []byte) 
 		}
 	}
 
-	// The decoded payload size (the discarded second return) is intentionally
-	// ignored: the body AEAD opened above already fences the actual sealedBody
-	// bytes, so the header's self-described size is not load-bearing for integrity
-	// and needs no cross-check against len(sealedBody).
-	//
-	// The type below is authenticated for any message with a body — it is inside
-	// the folded HeaderCommon — but this codec still applies no type POLICY: an
+	// The type below is authenticated by the header MAC, but this codec still
+	// applies no type policy: an
 	// authentic sender may legitimately send a type this caller does not want.
 	// DecryptReplyMessage applies the single reply policy; responder/test code
-	// owns the initiator policy. Those gates also remain the only header check on
-	// an EMPTY-body message: with no body there is no AEAD to carry the AAD, so
-	// its header is still covered only by the unkeyed digest. That residual gap
-	// is contained rather than exploitable — the compress bit is inert with no
-	// body to inflate, the counter is bound as the GCM nonce, and the type is
-	// confined by the caller's allowlist — and closing it needs a header-only
-	// AEAD, i.e. another wire change.
+	// owns the initiator policy. Empty-body framing receives the same MAC coverage
+	// even though no body AEAD tag is present.
 	typ, _ := getTypeAndPayloadSize(header)
 	return &Message{
-		Type:           typ,
-		Flags:          getFlag(header),
-		Counter:        counter,
-		TimestampNanos: binary.BigEndian.Uint64(tsBytes),
-		Body:           body,
+		Type:            typ,
+		Flags:           getFlag(header),
+		Counter:         counter,
+		TimestampMillis: binary.BigEndian.Uint64(tsBytes),
+		Body:            body,
 	}, nil
+}
+
+func allZero(value []byte) bool {
+	for _, b := range value {
+		if b != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // inflateZlib inflates a Go compress/zlib (RFC 1950) stream. Input is bounded by

@@ -8,23 +8,23 @@ import (
 )
 
 // NHP packet header framing (from the reference NHP relay implementation). The
-// HeaderCurve is a fixed 240-byte big-endian structure; each sealed field is
-// plaintext + a 16-byte GCM tag.
+// HeaderCurve is the fixed 160-byte standard PKI/Curve structure; each sealed
+// field is plaintext plus a 16-byte GCM tag. This codec does not serialize the
+// specification table's IBC Identity field or implement the separate domestic
+// cryptography profile.
 
 const (
 	headerCommonSize = 24
-	maxIdentitySize  = 64
 
-	// Field offsets within the 240-byte HeaderCurve.
-	offEphemeral = headerCommonSize                           // 24  (32-byte e)
-	offIdentity  = offEphemeral + PublicKeySize               // 56  (64+16, left zero)
-	offStatic    = offIdentity + maxIdentitySize + gcmTagSize // 136 (32+16 sealed device pub)
-	offTimestamp = offStatic + PublicKeySize + gcmTagSize     // 184 (8+16 sealed timestamp)
-	offDigest    = offTimestamp + timestampSize + gcmTagSize  // 208 (32 BLAKE2s header digest)
+	// Field offsets within the 160-byte standard HeaderCurve.
+	offEphemeral = headerCommonSize                          // 24  (32-byte e)
+	offStatic    = offEphemeral + PublicKeySize              // 56  (32+16 sealed device pub)
+	offTimestamp = offStatic + PublicKeySize + gcmTagSize    // 104 (8+16 sealed timestamp)
+	offHeaderMAC = offTimestamp + timestampSize + gcmTagSize // 128 (32-byte keyed HMAC)
 
-	// HeaderSize is the fixed 240-byte NHP header length. Exported because the
+	// HeaderSize is the fixed 160-byte standard NHP header length. Exported because the
 	// wrapping packages length-check reply packets against it.
-	HeaderSize = offDigest + hashSize // 240
+	HeaderSize = offHeaderMAC + hashSize // 160
 
 	// PacketBufferSize is the fixed buffer the reference server reads into; the
 	// wrapping packages bound packet sizes by it.
@@ -33,25 +33,30 @@ const (
 	// fixed header and the body's AEAD tag are added.
 	maxApplicationBodySize = nhpcontract.MaxApplicationBodySize
 	maxSealedBodySize      = maxApplicationBodySize + gcmTagSize
+	// The server converts the unsigned wire milliseconds to its signed Unix-
+	// nanosecond internal clock after authentication. Values above this bound
+	// cannot be represented without overflow and are never emitted by this SDK.
+	maxWireTimestampMillis = uint64(^uint64(0)>>1) / 1_000_000
 
 	// Header flags (reference NHP relay common). Ordinary initiator bodies are
-	// uncompressed. The dedicated Hub assignment proof builder is the sole SDK
-	// path that sets bit 2; it always sets that bit exclusively.
-	nhpFlagCompress       = 1 << 1
-	hubLSTCookieProofFlag = 1 << 2
+	// uncompressed. Compression is the standard profile's bit 0. The dedicated
+	// Hub assignment proof builder is the sole SDK path that sets the LayerV bit
+	// 1 extension; it always sets that bit exclusively.
+	nhpFlagCompress       = 1 << 0
+	hubLSTCookieProofFlag = 1 << 1
+	supportedHeaderFlags  = nhpFlagCompress | hubLSTCookieProofFlag
 
-	// protocolVersionMinor 1 is the transcript that folds the serialized
-	// HeaderCommon into the chain hash before the body AAD. Under 1.0 those bytes
-	// were covered only by the unkeyed header digest, which anyone holding the
-	// peer's static PUBLIC key can recompute.
+	// protocolVersionMinor 2 authenticates the header prefix and payload
+	// ciphertext with a key derived from ck3.
 	protocolVersionMajor = 1
-	protocolVersionMinor = 1
+	protocolVersionMinor = 2
 
-	// minProtocolVersionMinor is the oldest minor whose body AAD this codec can
-	// reproduce. Raise it in lockstep with any further AAD change; a sender below
-	// it must be refused on the version, because its body tag would otherwise
-	// fail as an unexplained AEAD error mid-rollout.
-	minProtocolVersionMinor = 1
+	// minProtocolVersionMinor is the oldest minor whose keyed header-MAC framing
+	// this codec can reproduce. Later minors are allowed only for transcript-
+	// compatible extensions. Any framing, KDF, MAC, or AEAD-transcript change
+	// requires a new major because deployed floor-based receivers would otherwise
+	// admit it. A sender below the floor is refused before key agreement.
+	minProtocolVersionMinor = 2
 )
 
 // Compile-time equality fence: if the codec's framing changes, update the
@@ -79,7 +84,7 @@ const (
 	TypeEXT = 16 // NHP_EXT: clean session exit
 
 	// CookieSize is the exact decoded NHP_COK cookie length mixed into an
-	// NHP_RKN header digest.
+	// NHP_RKN header MAC.
 	CookieSize = 32
 )
 
@@ -109,6 +114,11 @@ func PacketType(packet []byte) (int, error) {
 		return 0, fmt.Errorf("packet too long: %d bytes > %d-byte buffer", len(packet), PacketBufferSize)
 	}
 	typ, payloadSize := getTypeAndPayloadSize(packet)
+	if flag := getFlag(packet); flag&^supportedHeaderFlags != 0 {
+		return 0, fmt.Errorf("packet flags %#04x are unsupported by the standard header profile", flag)
+	} else if flag&hubLSTCookieProofFlag != 0 && typ != TypeLST {
+		return 0, fmt.Errorf("Hub LST cookie proof flag is invalid on packet type %d", typ)
+	}
 	if payloadSize != len(packet)-HeaderSize {
 		return 0, fmt.Errorf("packet payload size %d does not match %d trailing bytes", payloadSize, len(packet)-HeaderSize)
 	}
@@ -122,14 +132,15 @@ func setVersion(header []byte, major, minor byte) { header[8], header[9] = major
 // transcript this codec cannot open, and a NEWER minor stays admissible because
 // the reference server may ship a compatible extension before a deployed client
 // is updated — gating that direction would strand clients on an ordinary
-// coordinated release. Both bytes are folded into the body AAD, so a receiver
-// that accepts a newer minor still authenticates the exact value it read.
+// coordinated release. Both bytes are covered by the keyed header MAC, so a
+// receiver that accepts a newer, transcript-compatible minor still authenticates
+// the exact value it read. Authenticated-transcript changes require a new major;
+// raising only the floor cannot make already-deployed receivers reject them.
 func getVersion(header []byte) (major, minor byte) { return header[8], header[9] }
 
-// setFlag writes HeaderCommon[10:12] after stripping EXTENDEDLENGTH and masking
-// to 12 bits (Go SetFlag).
+// setFlag writes HeaderCommon[10:12] after masking to 12 bits (Go SetFlag).
 func setFlag(header []byte, flag uint16) {
-	binary.BigEndian.PutUint16(header[10:12], flag&^(1<<0)&0x0fff)
+	binary.BigEndian.PutUint16(header[10:12], flag&0x0fff)
 }
 
 func getFlag(header []byte) uint16       { return binary.BigEndian.Uint16(header[10:12]) }
@@ -143,13 +154,4 @@ func nonceForCounter(counter uint64) []byte {
 	nonce := make([]byte, gcmNonceSize)
 	binary.BigEndian.PutUint64(nonce[4:12], counter)
 	return nonce
-}
-
-// headerDigest is BLAKE2s(INITIAL_HASH ‖ peerStaticPub ‖ header[0:offDigest] ‖
-// cookie). cookie is empty for every message except RKN, where it is the exact
-// decoded 32-byte COK cookie. The ordinary digest is unkeyed integrity over
-// public inputs; the RKN cookie additionally proves possession of the
-// server-issued secret.
-func headerDigest(peerStaticPub, header, cookie []byte) []byte {
-	return blake2sHash(initialHash, peerStaticPub, header[0:offDigest], cookie)
 }

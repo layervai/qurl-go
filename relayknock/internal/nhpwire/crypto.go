@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"hash"
 
+	"github.com/layervai/qurl-go/internal/cryptoutil"
+
 	"golang.org/x/crypto/blake2s"
 	"golang.org/x/crypto/curve25519"
 )
@@ -51,6 +53,10 @@ var (
 	kdfTag1 = []byte{0x01}
 	kdfTag2 = []byte{0x02}
 )
+
+// headerMACKeyDomain is immutable protocol domain separation. Keep the exact
+// bytes in lockstep with OpenNHP and the browser codec.
+const headerMACKeyDomain = "nhp-header-mac-v1\x00"
 
 // newBlake2s returns a fresh BLAKE2s-256 hash. The nil-key form never errors.
 func newBlake2s() hash.Hash {
@@ -86,11 +92,13 @@ func mac(key []byte, inputs ...[]byte) []byte {
 // HMAC(prk, prev ‖ counter) with counter bytes 0x01/0x02.
 func keyGen1(key, input []byte) []byte {
 	prk := mac(key, input)
+	defer cryptoutil.Wipe(prk)
 	return mac(prk, kdfTag1)
 }
 
 func keyGen2(key, input []byte) (dst0, dst1 []byte) {
 	prk := mac(key, input)
+	defer cryptoutil.Wipe(prk)
 	dst0 = mac(prk, kdfTag1)
 	dst1 = mac(prk, dst0, kdfTag2)
 	return dst0, dst1
@@ -98,6 +106,14 @@ func keyGen2(key, input []byte) (dst0, dst1 []byte) {
 
 // mixKey is KeyGen1 (Go NoiseFactory.MixKey).
 func mixKey(key, input []byte) []byte { return keyGen1(key, input) }
+
+func deriveHeaderMACKey(chainKey []byte) []byte {
+	return mac(chainKey, []byte(headerMACKeyDomain))
+}
+
+func headerMAC(key, headerPrefix, payloadCiphertext, cookie []byte) []byte {
+	return mac(key, headerPrefix, payloadCiphertext, cookie)
+}
 
 // X25519Public derives the X25519 public key: X25519(priv, basepoint). Matches
 // the js-agent (@noble) and Go curve25519 — scalar clamping is internal.
