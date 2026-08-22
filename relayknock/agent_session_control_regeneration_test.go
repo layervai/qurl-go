@@ -77,6 +77,14 @@ func TestRegenerateAgentSessionControlVectors(t *testing.T) {
 	root["schema_version"] = float64(3)
 	root["producer_revision"] = producerRevision
 	root["description"] = "Deterministic NHP 1.1 overload re-knock and resource-scoped clean-exit request/ACK vectors"
+	root["notes"] = []string{
+		"Every packet was sealed by the exact producer revision with fixed synthetic key, ephemeral, timestamp, counter, preamble, body, and cookie inputs; independent consumers must rebuild initiator packets and authenticate-open replies.",
+		"The producer intentionally echoes the NHP_KNK counter in NHP_COK for relay compatibility, as frozen here, but native UDP consumers must treat the authenticated COK wire counter as unconstrained and correlate only when decrypted trxId equals the originating NHP_KNK counter. The accept_cok_wire_counter_unconstrained flow mutation pins that consumer rule. Every NHP_ACK counter must echo its request.",
+		"The NHP_RKN header digest mixes the exact decoded 32-byte cookie after the ordinary header prefix. Resource-scoped NHP_EXT uses the ordinary no-cookie digest and carries the exact protected-resource session identity in its authenticated body.",
+		"Every successful NHP_ACK carries a nonzero server-assigned uint64 sessId and its resHost, acTokens, and preActions maps contain exactly one entry keyed by the session resId.",
+		"NHP_EXT closes only the exact authenticated resource and RunID named by its body and receives a counter-echoing NHP_ACK. It is not an agent-global or one-way operation on the current NHP 1.1 envelope.",
+		"All identities, hosts, keys, cookies, counters, and tokens are synthetic conformance data.",
+	}
 	protocol := requiredVectorObject(t, root, "protocol")
 	protocol["exit_body"] = "protected_resource_session_identity"
 	protocol["exit_response"] = "counter_echoing_ack"
@@ -97,6 +105,7 @@ func TestRegenerateAgentSessionControlVectors(t *testing.T) {
 	for _, destination := range []string{
 		path,
 		filepath.Join(conformanceRoot, "npm", "vectors", "agent_session_control_vectors.json"),
+		filepath.Join(conformanceRoot, "python", "qurl_conformance", "_data", "agent_session_control_vectors.json"),
 	} {
 		if err := os.WriteFile(destination, updated, 0o644); err != nil {
 			t.Fatalf("write %s: %v", destination, err)
