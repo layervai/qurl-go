@@ -228,9 +228,8 @@ func TestRelayPost_CarriesBrowserControlPackets(t *testing.T) {
 		name       string
 		headerType int
 		cookie     []byte
-		body       []byte
 	}{
-		{name: "reknock", headerType: relayknock.TypeReknock, cookie: bytes.Repeat([]byte{0x44}, 32), body: []byte("browser control")},
+		{name: "reknock", headerType: relayknock.TypeReknock, cookie: bytes.Repeat([]byte{0x44}, 32)},
 		{name: "exit", headerType: relayknock.TypeExit},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -241,7 +240,7 @@ func TestRelayPost_CarriesBrowserControlPackets(t *testing.T) {
 				TimestampNanos:   1700000000123456789,
 				Counter:          42,
 				Preamble:         0x01020304,
-				Body:             tt.body,
+				Body:             []byte("browser control"),
 				Cookie:           tt.cookie,
 			})
 			if err != nil {

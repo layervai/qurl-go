@@ -80,10 +80,8 @@ And two rules for the serving loop:
 - **One run ID per cycle.** Do not regenerate it between steps or retries — that
   single ID is what lets LayerV correlate a retry with the attempt that started
   it.
-- **Retire one cycle locally.** Stop its FRP proxy without sending NHP_EXT; EXT
-  would close sibling and replacement sessions too. Wipe key material only when
-  its owner is finished. When the whole agent shuts down with no shares left,
-  call `qurl.ExitRegisteredAgentSessions` once for global teardown.
+- **Wipe the key** when the cycle ends, and call
+  `qurl.ExitRegisteredAgentSession` to close out cleanly.
 
 ## Which enrollment path?
 

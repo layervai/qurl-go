@@ -2072,26 +2072,36 @@ func KnockRegisteredAgent(ctx context.Context, binding *AgentRuntimeBinding, dev
 	return consumeNativeAgentKnockReply(reply, knockResourceID)
 }
 
-// ExitRegisteredAgentSessions sends one bodyless, one-way NHP_EXT for every
-// active access session owned by the authenticated registered agent. It is
-// reserved for whole-agent shutdown and must not be used to stop one resource,
-// retire a replacement session, or clean up one FRP cycle. A nil error confirms
-// local UDP dispatch only because a conforming server sends no response. Durable
-// enrollment and assignment state are unchanged.
-func ExitRegisteredAgentSessions(ctx context.Context, binding *AgentRuntimeBinding, deviceStaticPrivateKey []byte, transportOpts ...AgentRuntimeUDPOption) error {
+// ExitRegisteredAgentSession sends one clean NHP_EXT for the caller-owned
+// registered-agent session. It uses the same validation and pinned assigned-cell
+// endpoint as KnockRegisteredAgent, never contacts the Hub or any HTTP surface,
+// and accepts only the authenticated EXT-correlated ACK. The v0.6 EXT ACK uses
+// the same resource-admission envelope as KNK/RKN. Its decrypted body buffer is
+// wiped after strict validation and the parsed result is discarded; clean exit
+// never changes durable enrollment or assignment state.
+func ExitRegisteredAgentSession(ctx context.Context, binding *AgentRuntimeBinding, deviceStaticPrivateKey []byte, knockResourceID string, opts NativeKnockOptions, transportOpts ...AgentRuntimeUDPOption) error {
 	cfg, endpoint, err := registeredAgentSessionEndpoint(ctx, binding, deviceStaticPrivateKey, transportOpts)
 	if err != nil {
 		return err
 	}
-	err = nativeudp.Exit(ctx, endpoint, cfg.udpOptions(deviceStaticPrivateKey))
+	body, err := marshalNativeSessionApplicationBody(binding.AgentID, knockResourceID, opts, nhpEXTHeaderType)
+	if err != nil {
+		return err
+	}
+	defer wipeBytes(body)
+	reply, err := nativeudp.Exit(ctx, endpoint, body, cfg.udpOptions(deviceStaticPrivateKey))
 	if err != nil {
 		return normalizeRelayError(err, ErrMalformedReply)
 	}
-	return nil
+	// NHP 1.1 leaves the clear header type outside the authenticated transcript.
+	// Reuse strict ACK parsing so the protected body remains the session and
+	// resource authority for this resource-scoped close.
+	_, err = consumeNativeAgentKnockReply(reply, knockResourceID)
+	return err
 }
 
 // registeredAgentSessionEndpoint is the common no-I/O admission gate for
-// native KNK/RKN and global EXT. It intentionally validates the binding snapshot
+// native KNK/RKN and EXT. It intentionally validates the binding snapshot
 // before body construction, DNS, or socket creation so every session-control
 // operation has the same trust and placement boundary.
 func registeredAgentSessionEndpoint(ctx context.Context, binding *AgentRuntimeBinding, deviceStaticPrivateKey []byte, transportOpts []AgentRuntimeUDPOption) (*nativeAgentRuntimeConfig, nativeudp.Endpoint, error) {

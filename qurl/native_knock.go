@@ -60,13 +60,12 @@ func marshalNativeKnockApplicationBody(agentID, knockResourceID string, opts Nat
 // marshalNativeSessionApplicationBody produces the protected application body
 // for exactly one registered-agent session-control packet. Its headerType is
 // part of the peer-authentication contract, not a cosmetic duplicate of the
-// outer packet type: a server rejects an RKN whose body says KNK. NHP_EXT is
-// deliberately absent because the base protocol requires it to be bodyless.
-// The narrow allowlist means an internal caller cannot accidentally emit a body
-// for an unsupported initiator message.
+// outer packet type: a server rejects an RKN or EXT whose body says KNK. The
+// narrow allowlist means an internal caller cannot accidentally emit a body for
+// an unsupported initiator message.
 func marshalNativeSessionApplicationBody(agentID, knockResourceID string, opts NativeKnockOptions, headerType int) ([]byte, error) {
 	switch headerType {
-	case nhpKNKHeaderType, nhpRKNHeaderType:
+	case nhpKNKHeaderType, nhpRKNHeaderType, nhpEXTHeaderType:
 	default:
 		return nil, fmt.Errorf("%w: unsupported native session header type", ErrInvalidNativeKnockInput)
 	}

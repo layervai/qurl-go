@@ -272,12 +272,11 @@ func Register(ctx context.Context, ep Endpoint, body []byte, opts Options) (*rel
 	return Exchange(ctx, ep, relayknock.TypeRegister, body, opts)
 }
 
-// Exit sends one bodyless, one-way NHP_EXT to the first public address returned
-// for the assigned endpoint. EXT applies to every active access session owned by
-// the authenticated agent and is reserved for whole-agent shutdown. A nil error
-// confirms only local UDP dispatch: the server sends no ACK or COK.
-func Exit(ctx context.Context, ep Endpoint, opts Options) error {
-	return sendOneWay(ctx, ep, relayknock.TypeExit, nil, opts)
+// Exit sends one NHP_EXT clean-exit transaction to the assigned endpoint. It
+// accepts only an authenticated NHP_ACK whose counter echoes EXT; NHP_COK is not
+// valid for this transition.
+func Exit(ctx context.Context, ep Endpoint, body []byte, opts Options) (*relayknock.Reply, error) {
+	return Exchange(ctx, ep, relayknock.TypeExit, body, opts)
 }
 
 // SendOTP sends exactly one fire-and-forget NHP_OTP datagram to the first
@@ -288,10 +287,6 @@ func Exit(ctx context.Context, ep Endpoint, opts Options) error {
 // invalidate the first emailed code. A caller that wants another attempt must
 // start a new enrollment transaction and obtain a fresh assignment ticket.
 func SendOTP(ctx context.Context, ep Endpoint, body []byte, opts Options) error {
-	return sendOneWay(ctx, ep, relayknock.TypeOTP, body, opts)
-}
-
-func sendOneWay(ctx context.Context, ep Endpoint, headerType int, body []byte, opts Options) error {
 	if err := ctxErr(ctx); err != nil {
 		return err
 	}
@@ -308,7 +303,7 @@ func sendOneWay(ctx context.Context, ep Endpoint, headerType int, body []byte, o
 		return fmt.Errorf("%w: application body of %d bytes exceeds the %d-byte NHP maximum", ErrInvalidRequest, len(body), nhpcontract.MaxApplicationBodySize)
 	}
 
-	packet, _, err := buildPacket(headerType, ep.ServerStaticPub, opts.DeviceStaticPriv, body, nil)
+	packet, _, err := buildPacket(relayknock.TypeOTP, ep.ServerStaticPub, opts.DeviceStaticPriv, body, nil)
 	if err != nil {
 		return err
 	}
@@ -320,15 +315,14 @@ func sendOneWay(ctx context.Context, ep Endpoint, headerType int, body []byte, o
 		return err
 	}
 	// resolveAddresses returns ErrResolve rather than an empty successful slice.
-	// One-way messages intentionally use exactly that first public address and
-	// never fan out: a successful write gives no evidence that a retry is safe.
+	// OTP intentionally uses exactly that first public address and never fans out.
 	return sendDatagram(ctx, addrs[0], ep.Port, packet, opts)
 }
 
 // Exchange performs one native-UDP NHP request/reply round trip: it builds a
 // packet of the given public round-trip initiator header type
-// (relayknock.TypeKnock, relayknock.TypeListRequest, or relayknock.TypeRegister)
-// for body with fresh per-message randomness, resolves the
+// (relayknock.TypeKnock, relayknock.TypeListRequest, relayknock.TypeRegister, or
+// relayknock.TypeExit) for body with fresh per-message randomness, resolves the
 // endpoint host, sends the datagram to the assigned host/port, and decrypts and
 // authenticates the reply against ep.ServerStaticPub. Cookie-bearing NHP_RKN is
 // intentionally not a public Exchange operation; KnockWithReknock owns that
@@ -820,14 +814,14 @@ func correlateDecryptedReply(dr *relayknock.Reply, requestType int, counter uint
 
 // replyTypeAllowed reports whether an authenticated reply's header type is one the
 // given round-trip request type can legitimately elicit. It restates
-// native request→reply pairing (LST→LRT, KNK→ACK/COK, RKN→ACK, and
+// native request→reply pairing (LST→LRT, KNK→ACK/COK, RKN/EXT→ACK, and
 // REG→RAK) so the type field — which rides outside the AEAD — cannot be
 // presented as a different reply kind.
 func replyTypeAllowed(requestType, replyType int) bool {
 	switch requestType {
 	case relayknock.TypeKnock:
 		return replyType == relayknock.TypeACK || replyType == relayknock.TypeCookieChallenge
-	case relayknock.TypeReknock:
+	case relayknock.TypeReknock, relayknock.TypeExit:
 		return replyType == relayknock.TypeACK
 	case relayknock.TypeListRequest:
 		return replyType == relayknock.TypeListResult
@@ -1077,7 +1071,7 @@ func publicRoutableAddress(addr netip.Addr) bool {
 
 func validateHeaderType(headerType int) error {
 	switch headerType {
-	case relayknock.TypeKnock, relayknock.TypeListRequest, relayknock.TypeReknock, relayknock.TypeRegister:
+	case relayknock.TypeKnock, relayknock.TypeListRequest, relayknock.TypeReknock, relayknock.TypeRegister, relayknock.TypeExit:
 		return nil
 	default:
 		return fmt.Errorf("%w: header type %d is not a native-UDP round-trip type", ErrInvalidRequest, headerType)

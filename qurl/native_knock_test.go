@@ -56,8 +56,16 @@ func TestMarshalNativeSessionApplicationBody_ConformanceSessionVectors(t *testin
 			}
 		})
 	}
-	if _, err := marshalNativeSessionApplicationBody("agent-01", "connector-01", NativeKnockOptions{RunID: "0123456789abcdef"}, nhpEXTHeaderType); !errors.Is(err, ErrInvalidNativeKnockInput) {
-		t.Fatalf("EXT body error = %v, want ErrInvalidNativeKnockInput", err)
+	exitBody, err := marshalNativeSessionApplicationBody("agent-01", "connector-01", NativeKnockOptions{RunID: "0123456789abcdef"}, nhpEXTHeaderType)
+	if err != nil {
+		t.Fatalf("marshal EXT session body: %v", err)
+	}
+	var exitFields nativeAgentKnockBody
+	if err := json.Unmarshal(exitBody, &exitFields); err != nil {
+		t.Fatalf("decode EXT session body: %v", err)
+	}
+	if exitFields.HeaderType != nhpEXTHeaderType || exitFields.KnockResourceID != "connector-01" || exitFields.RunID != "0123456789abcdef" {
+		t.Fatalf("EXT session authority = %#v, want exact resource and run binding", exitFields)
 	}
 	if _, err := marshalNativeSessionApplicationBody("agent-01", "connector-01", NativeKnockOptions{RunID: "0123456789abcdef"}, 7); !errors.Is(err, ErrInvalidNativeKnockInput) {
 		t.Fatalf("unsupported session header error = %v, want ErrInvalidNativeKnockInput", err)

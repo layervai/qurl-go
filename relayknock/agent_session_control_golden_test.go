@@ -143,8 +143,4 @@ func TestBuildMessage_AgentSessionCookieContract(t *testing.T) {
 	if _, err := BuildMessage(TypeExit, &copyInputs); err == nil {
 		t.Fatal("BuildMessage(TypeExit) accepted an RKN cookie")
 	}
-	copyInputs.Cookie = nil
-	if _, err := BuildMessage(TypeExit, &copyInputs); err == nil {
-		t.Fatal("BuildMessage(TypeExit) accepted a nonempty body")
-	}
 }

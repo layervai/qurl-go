@@ -88,7 +88,7 @@
     "retirement.relay_rejects_native_lifecycle_messages": ["surface_inventory"],
     "retirement.terraform_saved_plan_and_live_state": ["surface_inventory"],
     "session.cell_cookie_reknock_return_routability": ["lifecycle_exchange"],
-    "session.public_api_global_exit_dispatch": ["lifecycle_exchange"],
+    "session.public_api_exit_success": ["lifecycle_exchange"],
     "session.public_api_knock_success": ["lifecycle_exchange"],
     "state.persisted_runtime_warm_open": ["state_observation"],
     "state.sealed_cold_start": ["state_observation"],
@@ -96,6 +96,6 @@
     "transport.zero_http_injected_trap": ["transport_capture"],
     "transport.zero_http_packet_capture_and_route_counters": ["transport_capture"],
     "wire.registration_lst_lrt_reg_rak_completion": ["wire_trace"],
-    "wire.session_knk_ack_global_ext": ["wire_trace"]
+    "wire.session_knk_ack_ext_ack": ["wire_trace"]
   }
 }

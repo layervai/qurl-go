@@ -1899,9 +1899,10 @@ func TestKnockRegisteredAgent_MalformedCookieChallengeFailsWithoutReknock(t *tes
 	}
 }
 
-func TestExitRegisteredAgentSessions_UsesBodylessEXTAndDoesNotChangeBinding(t *testing.T) {
+func TestExitRegisteredAgentSession_UsesEXTAndDoesNotChangeBinding(t *testing.T) {
 	contract := loadAssignmentFixture(t)
-	f := newRuntimeFixture(t, nil, []runtimeUDPStep{{requestType: relayknock.TypeExit, noReply: true}})
+	ackBody := `{"errCode":"0","sessId":123,"resHost":{"resource-public-key":"frps.cell0.example:7000"},"opnTime":1,"agentAddr":"203.0.113.9:49152","acTokens":{"resource-public-key":"ac-secret"},"preActions":{"resource-public-key":null}}`
+	f := newRuntimeFixture(t, nil, []runtimeUDPStep{{requestType: relayknock.TypeExit, replyType: relayknock.TypeACK, replyBody: ackBody}})
 	assignment := &AgentAssignment{
 		CellID: "cell0", AssignmentGeneration: 1, EndpointRevision: 1, LeaseExpiresAt: time.Now().Add(time.Hour),
 		Endpoint: NHPUDPEndpoint{Host: "cell0.nhp.layerv.ai", Port: standardNHPUDPPort, ServerPublicKeyB64: base64.StdEncoding.EncodeToString(assignmentHex(t, contract.Keys.AssignedCell.StaticPubHex))},
@@ -1914,16 +1915,20 @@ func TestExitRegisteredAgentSessions_UsesBodylessEXTAndDoesNotChangeBinding(t *t
 	}
 	privateKey := assignmentHex(t, contract.Keys.Agent.StaticPrivHex)
 	defer wipeBytes(privateKey)
-	if err := ExitRegisteredAgentSessions(context.Background(), binding, privateKey,
+	if err := ExitRegisteredAgentSession(context.Background(), binding, privateKey, "resource-public-key", NativeKnockOptions{RunID: "0123456789abcdef"},
 		WithAgentRuntimeUDPResolver(f.resolver), WithAgentRuntimeUDPDialer(f.dialer), WithAgentRuntimeUDPBounds(runtimeReplyTimeout, 1)); err != nil {
-		t.Fatalf("ExitRegisteredAgentSessions: %v", err)
+		t.Fatalf("ExitRegisteredAgentSession: %v", err)
 	}
-	requests := waitRuntimeUDPRequests(t, f.cellUDP, 1)
+	requests := f.cellUDP.snapshot()
 	if len(requests) != 1 || requests[0].typeID != relayknock.TypeExit {
 		t.Fatalf("exit packet types = %#v, want one EXT", requests)
 	}
-	if len(requests[0].body) != 0 {
-		t.Fatalf("EXT body = %q, want empty", requests[0].body)
+	var ext nativeAgentKnockBody
+	if err := json.Unmarshal(requests[0].body, &ext); err != nil {
+		t.Fatalf("decode EXT body: %v", err)
+	}
+	if ext.HeaderType != nhpEXTHeaderType || ext.RunID != "0123456789abcdef" {
+		t.Fatalf("EXT body = %#v, want header type %d and caller RunID", ext, nhpEXTHeaderType)
 	}
 	if binding.assignment() == nil || binding.CellID != "cell0" || binding.AssignmentGeneration != 1 || binding.EndpointRevision != 1 {
 		t.Fatalf("clean exit mutated durable binding: %#v", binding)
@@ -5821,7 +5826,7 @@ func TestLiveSessionAssignment_RenewalLeadBoundary(t *testing.T) {
 	}
 }
 
-// KnockRegisteredAgent and ExitRegisteredAgentSessions share one no-I/O admission
+// KnockRegisteredAgent and ExitRegisteredAgentSession share one no-I/O admission
 // gate, so every rejection below has to hold for both. A short or mistyped key
 // must be refused on length before any curve operation.
 func TestRegisteredAgentSessionControl_RejectsInvalidArgumentsBeforeIO(t *testing.T) {
@@ -5864,7 +5869,8 @@ func TestRegisteredAgentSessionControl_RejectsInvalidArgumentsBeforeIO(t *testin
 
 			_, knockErr := KnockRegisteredAgent(context.Background(), binding, key, "resource-public-key",
 				NativeKnockOptions{RunID: "0123456789abcdef"}, opts...)
-			exitErr := ExitRegisteredAgentSessions(context.Background(), binding, key, opts...)
+			exitErr := ExitRegisteredAgentSession(context.Background(), binding, key, "resource-public-key",
+				NativeKnockOptions{RunID: "0123456789abcdef"}, opts...)
 			for entryPoint, err := range map[string]error{"knock": knockErr, "exit": exitErr} {
 				if !errors.Is(err, ErrInvalidNativeKnockInput) || !strings.Contains(err.Error(), test.wantMessage) {
 					t.Fatalf("%s = %v, want ErrInvalidNativeKnockInput containing %q", entryPoint, err, test.wantMessage)
@@ -5877,23 +5883,44 @@ func TestRegisteredAgentSessionControl_RejectsInvalidArgumentsBeforeIO(t *testin
 	}
 }
 
-// Global exit is one-way, but local DNS/dial/write failures still arrive in the
-// same normalized transport class a knock would report.
-func TestExitRegisteredAgentSessions_ClassifiesLocalTransportFailure(t *testing.T) {
+// A clean exit remains resource-scoped on the current NHP 1.1 envelope. Its
+// protected body validation and reply wait use the same error taxonomy as KNK.
+func TestExitRegisteredAgentSession_ClassifiesBodyAndTransportFailures(t *testing.T) {
 	contract := loadAssignmentFixture(t)
-	f := newRuntimeFixture(t, nil, nil).expectSilence()
-	seedSessionLease(t, f, contract, time.Now().Add(12*time.Hour))
-	binding, key := openSessionBinding(t, f)
-	dialer := &noIONativeDialer{}
-	err := ExitRegisteredAgentSessions(context.Background(), binding, key,
-		WithAgentRuntimeUDPResolver(f.resolver), WithAgentRuntimeUDPDialer(dialer),
-		WithAgentRuntimeUDPBounds(200*time.Millisecond, 1))
-	if err == nil || errors.Is(err, ErrInvalidNativeKnockInput) || !errors.Is(err, nativeudp.ErrTransport) {
-		t.Fatalf("exit local transport failure = %v, want nativeudp.ErrTransport", err)
-	}
-	if dialer.calls.Load() != 1 || len(f.cellUDP.snapshot()) != 0 {
-		t.Fatalf("exit local attempts/cell requests = %d/%d, want 1/0", dialer.calls.Load(), len(f.cellUDP.snapshot()))
-	}
+	t.Run("rejected session body sends nothing", func(t *testing.T) {
+		f := newRuntimeFixture(t, nil, []runtimeUDPStep{sessionKnockStep()})
+		seedSessionLease(t, f, contract, time.Now().Add(12*time.Hour))
+		binding, key := openSessionBinding(t, f)
+		for name, opts := range map[string]NativeKnockOptions{
+			"missing run id": {}, "malformed run id": {RunID: "not-a-run-id"},
+		} {
+			t.Run(name, func(t *testing.T) {
+				err := ExitRegisteredAgentSession(context.Background(), binding, key, "resource-public-key", opts,
+					WithAgentRuntimeUDPResolver(f.resolver), WithAgentRuntimeUDPDialer(f.dialer))
+				if !errors.Is(err, ErrInvalidNativeKnockInput) {
+					t.Fatalf("exit with a rejected body = %v, want ErrInvalidNativeKnockInput", err)
+				}
+			})
+		}
+		if len(f.cellUDP.snapshot()) != 0 {
+			t.Fatalf("rejected exit body reached a cell %d times", len(f.cellUDP.snapshot()))
+		}
+	})
+	t.Run("silent cell normalizes the transport failure", func(t *testing.T) {
+		f := newRuntimeFixture(t, nil, []runtimeUDPStep{{requestType: relayknock.TypeExit, noReply: true}})
+		seedSessionLease(t, f, contract, time.Now().Add(12*time.Hour))
+		binding, key := openSessionBinding(t, f)
+		err := ExitRegisteredAgentSession(context.Background(), binding, key, "resource-public-key",
+			NativeKnockOptions{RunID: "0123456789abcdef"},
+			WithAgentRuntimeUDPResolver(f.resolver), WithAgentRuntimeUDPDialer(f.dialer),
+			WithAgentRuntimeUDPBounds(200*time.Millisecond, 1))
+		if err == nil || errors.Is(err, ErrInvalidNativeKnockInput) || !errors.Is(err, nativeudp.ErrTransport) {
+			t.Fatalf("exit transport failure = %v, want nativeudp.ErrTransport", err)
+		}
+		if got := len(f.cellUDP.snapshot()); got != 1 {
+			t.Fatalf("exit reached the cell %d times, want 1", got)
+		}
+	})
 }
 
 // The SDK-generated agent id is what a caller who never passes

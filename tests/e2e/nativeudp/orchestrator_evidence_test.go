@@ -1023,8 +1023,8 @@ var externalDependencyBlockers = map[string]externalRowBlocker{
 	"wire.registration_lst_lrt_reg_rak_completion": {
 		producer: nhpControllerJoin, missing: wireTraceObservation + " for Hub LST/COK/proof-LST/LRT and cell REG/RAK completion",
 	},
-	"wire.session_knk_ack_global_ext": {
-		producer: nhpControllerJoin, missing: wireTraceObservation + " for the KNK/ACK and bodyless one-way global EXT sequence",
+	"wire.session_knk_ack_ext_ack": {
+		producer: nhpControllerJoin, missing: wireTraceObservation + " for the KNK/ACK/EXT/ACK sequence",
 	},
 	"negative.wrong_source": {
 		producer: nhpControllerJoin, missing: wireTraceObservation + " showing a response from an unexpected source address",
@@ -1497,10 +1497,10 @@ func TestValidateOrchestratorProofEvidenceFailsClosed(t *testing.T) {
 		},
 		"no rows": func(v *orchestratorProofEvidence) { v.Rows = nil },
 		"widened produced rows": func(v *orchestratorProofEvidence) {
-			v.ProducedRows = append(v.ProducedRows, "wire.session_knk_ack_global_ext")
+			v.ProducedRows = append(v.ProducedRows, "wire.session_knk_ack_ext_ack")
 		},
 		"rows disagree with produced_rows": func(v *orchestratorProofEvidence) {
-			v.Rows["wire.session_knk_ack_global_ext"] = json.RawMessage(`{}`)
+			v.Rows["wire.session_knk_ack_ext_ack"] = json.RawMessage(`{}`)
 		},
 		"row phase drift": func(v *orchestratorProofEvidence) {
 			var row orchestratorRegistrarSurfaceRow
@@ -1647,7 +1647,7 @@ func TestLegacyNHPProducerFixtureIsRejected(t *testing.T) {
 func TestOrchestratorAdapterNamespacesMatchInventory(t *testing.T) {
 	for _, row := range []scenarioInventoryRow{
 		{Owner: "nhp-orchestrator", TestName: "TestSandboxTopology/nhp_registrar_surface_state"},
-		{Owner: "nhp-orchestrator", TestName: "TestSandboxWireEvidence/session_knk_ack_global_ext"},
+		{Owner: "nhp-orchestrator", TestName: "TestSandboxWireEvidence/session_knk_ack_ext_ack"},
 	} {
 		if err := validateScenarioAdapterNamespace(row); err != nil {
 			t.Fatalf("orchestrator adapter %q rejected by the inventory namespace rule: %v", row.TestName, err)

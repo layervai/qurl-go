@@ -461,40 +461,44 @@ func TestKnockWithReknock_ValidatesBothLegsBeforeIO(t *testing.T) {
 	}
 }
 
-func TestExit_SendsOneBodylessDatagramWithoutWaitingForReply(t *testing.T) {
+func TestExit_AcceptsOnlyCounterEchoingACK(t *testing.T) {
 	t.Parallel()
-	server, endpoint, options, dialer, resolver := sessionSetup(t, sessionDirectACK)
-	options.Timeout = 5 * time.Second
-	started := time.Now()
-	if err := nativeudp.Exit(context.Background(), endpoint, options); err != nil {
-		t.Fatalf("Exit: %v", err)
-	}
-	if elapsed := time.Since(started); elapsed >= options.Timeout {
-		t.Fatalf("Exit waited %v for a response despite one-way semantics", elapsed)
-	}
-	deadline := time.Now().Add(time.Second)
-	for {
-		types, bodies, _ := server.snapshot()
-		if len(types) == 1 {
-			if types[0] != relayknock.TypeExit || len(bodies[0]) != 0 {
-				t.Fatalf("received type/body = %v/%q, want one bodyless NHP_EXT", types, bodies)
+	for _, test := range []struct {
+		name     string
+		behavior behavior
+		want     error
+	}{
+		{name: "counter-echoing ACK", behavior: behaviorNormal},
+		{name: "cookie challenge", behavior: behaviorCookie, want: relayknock.ErrMalformedReply},
+		{name: "cookie challenge on another counter", behavior: behaviorCookieWrongCounter, want: relayknock.ErrMalformedReply},
+		{name: "ACK counter mismatch", behavior: behaviorWrongCounter, want: relayknock.ErrMalformedReply},
+		{name: "wrong reply type", behavior: behaviorWrongType, want: relayknock.ErrMalformedReply},
+		{name: "unpinned server key", behavior: behaviorWrongKey, want: nativeudp.ErrServerUnauthenticated},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			server, endpoint, options := newLoopbackExchange(t, test.behavior)
+			reply, err := nativeudp.Exit(context.Background(), endpoint, []byte(`{"reason":"clean"}`), options)
+			if test.want == nil {
+				if err != nil || !reply.IsACK() || string(reply.Body) != `{"ok":true}` {
+					t.Fatalf("Exit reply/error = %#v/%v, want an ACK", reply, err)
+				}
+			} else if reply != nil || !errors.Is(err, test.want) {
+				t.Fatalf("Exit reply/error = %#v/%v, want nil/errors.Is(%v)", reply, err, test.want)
 			}
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("server received types = %v, want one NHP_EXT", types)
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	if resolver.count() != 1 || dialer.count() != 1 {
-		t.Fatalf("lookups/dials = %d/%d, want one dispatch", resolver.count(), dialer.count())
+			if got := server.receivedTypes(); len(got) != 1 || got[0] != relayknock.TypeExit {
+				t.Fatalf("received types = %v, want [%d] (NHP_EXT)", got, relayknock.TypeExit)
+			}
+		})
 	}
 }
 
-func TestExit_SilentResponderStillConfirmsLocalDispatch(t *testing.T) {
+func TestExit_SilentResponderIsTransportFailure(t *testing.T) {
 	t.Parallel()
 	_, endpoint, options := newLoopbackExchange(t, behaviorSilent)
-	if err := nativeudp.Exit(context.Background(), endpoint, options); err != nil {
-		t.Fatalf("one-way Exit rejected a successful local dispatch: %v", err)
+	options.Timeout = 150 * time.Millisecond
+	reply, err := nativeudp.Exit(context.Background(), endpoint, nil, options)
+	if reply != nil || !errors.Is(err, nativeudp.ErrTransport) {
+		t.Fatalf("silent exit reply/error = %#v/%v, want nil/ErrTransport", reply, err)
 	}
 }
