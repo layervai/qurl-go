@@ -43,7 +43,15 @@ if err != nil {
 
 admission, err := qurl.KnockRegisteredAgent(ctx, binding, privateKey,
 	connector.Resource.KnockResourceID,
-	qurl.NativeKnockOptions{RunID: runID},
+	qurl.NativeKnockOptions{RunID: runID, RunAttempt: 1},
+)
+if err != nil {
+	return err
+}
+
+// After the corresponding serving session has stopped and drained:
+_, err = qurl.RetireRegisteredAgentSession(ctx, binding, privateKey,
+	admission.SessionReceipt,
 )
 if err != nil {
 	return err
@@ -77,11 +85,13 @@ fails instead of creating or adopting a replacement.
 
 And two rules for the serving loop:
 
-- **One run ID per cycle.** Do not regenerate it between steps or retries — that
-  single ID is what lets LayerV correlate a retry with the attempt that started
-  it.
+- **One run ID and positive attempt number per cycle attempt.** Do not change
+  either between retries. Increment the attempt only when starting a new
+  serving attempt under the same run.
 - **Wipe the key** when the cycle ends, and call
-  `qurl.ExitRegisteredAgentSession` to close out cleanly.
+  `qurl.RetireRegisteredAgentSession` with the exact `SessionReceipt` returned
+  by admission after that serving session has stopped and drained. Retirement
+  closes only that admission; it cannot retire a sibling or replacement.
 
 ## Which enrollment path?
 

@@ -79,7 +79,7 @@
       "owner": "qurl-go",
       "status": "implemented",
       "test_name": "TestSandboxNativeUDPLifecycle/assigned_cell_clean_exit",
-      "requirement": "Call ExitRegisteredAgentSession with the exact public session identity and receive SDK success."
+      "requirement": "Call RetireRegisteredAgentSession with the immutable receipt returned by admission and receive the exact durable close event without affecting a sibling session."
     },
     {
       "id": "assignment.authenticated_refresh",
