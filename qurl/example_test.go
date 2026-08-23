@@ -318,10 +318,18 @@ func ExampleConnectAgentRuntime() {
 	}
 	admission, err := qurl.KnockRegisteredAgent(ctx, binding, devicePrivateKey,
 		connector.Resource.KnockResourceID,
-		qurl.NativeKnockOptions{RunID: runID},
+		qurl.NativeKnockOptions{RunID: runID, RunAttempt: 1},
 	)
 	if err != nil {
 		panic(err)
 	}
 	fmt.Println(admission.ResourceHost)
+
+	// After this exact serving session has stopped and drained, retire it while
+	// the device key and opaque in-memory receipt are still available. Retry an
+	// ambiguous retirement with the same receipt; defer clears the key only
+	// after this lifecycle operation finishes.
+	if _, err := qurl.RetireRegisteredAgentSession(ctx, binding, devicePrivateKey, admission.SessionReceipt); err != nil {
+		panic(err)
+	}
 }

@@ -6,6 +6,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -265,7 +266,7 @@ func TestNormalizeRelayError_MalformedReplyMapsToClass(t *testing.T) {
 func TestInterpretReply_SuccessACK(t *testing.T) {
 	reply := &relayknock.Reply{
 		Type: relayknock.TypeACK,
-		Body: []byte(`{"errCode":"0","opnTime":900,"redirectUrl":"https://r_x.qurl.site/path"}`),
+		Body: []byte(`{"errCode":"0","sessId":123,"opnTime":900,"redirectUrl":"https://r_x.qurl.site/path"}`),
 	}
 	h, err := interpretReply(reply)
 	if err != nil {
@@ -277,12 +278,57 @@ func TestInterpretReply_SuccessACK(t *testing.T) {
 	if h.OpenSeconds != 900 {
 		t.Fatalf("OpenSeconds = %d, want 900", h.OpenSeconds)
 	}
+	if h.SessionID != 123 {
+		t.Fatalf("SessionID = %d, want 123", h.SessionID)
+	}
+}
+
+func TestInterpretReply_RejectsMissingOrZeroSessionID(t *testing.T) {
+	for name, body := range map[string]string{
+		"missing": `{"errCode":"0","opnTime":900,"redirectUrl":"https://r_x.qurl.site/path"}`,
+		"zero":    `{"errCode":"0","sessId":0,"opnTime":900,"redirectUrl":"https://r_x.qurl.site/path"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			handle, err := interpretReply(&relayknock.Reply{Type: relayknock.TypeACK, Body: []byte(body)})
+			if handle != nil || !errors.Is(err, ErrMalformedReply) {
+				t.Fatalf("interpretReply = %#v, %v; want ErrMalformedReply", handle, err)
+			}
+		})
+	}
+}
+
+func TestInterpretReply_RejectsInvalidSessionAndLifetimeShapes(t *testing.T) {
+	tests := map[string]string{
+		"null session":      `{"errCode":"0","sessId":null,"opnTime":900,"redirectUrl":"https://r_x.qurl.site/path"}`,
+		"negative session":  `{"errCode":"0","sessId":-1,"opnTime":900,"redirectUrl":"https://r_x.qurl.site/path"}`,
+		"string session":    `{"errCode":"0","sessId":"123","opnTime":900,"redirectUrl":"https://r_x.qurl.site/path"}`,
+		"fraction session":  `{"errCode":"0","sessId":1.5,"opnTime":900,"redirectUrl":"https://r_x.qurl.site/path"}`,
+		"exponent session":  `{"errCode":"0","sessId":1e2,"opnTime":900,"redirectUrl":"https://r_x.qurl.site/path"}`,
+		"session overflow":  `{"errCode":"0","sessId":18446744073709551616,"opnTime":900,"redirectUrl":"https://r_x.qurl.site/path"}`,
+		"duplicate session": `{"errCode":"0","sessId":123,"sessId":124,"opnTime":900,"redirectUrl":"https://r_x.qurl.site/path"}`,
+		"zero open time":    `{"errCode":"0","sessId":123,"opnTime":0,"redirectUrl":"https://r_x.qurl.site/path"}`,
+	}
+	for name, body := range tests {
+		t.Run(name, func(t *testing.T) {
+			handle, err := interpretReply(&relayknock.Reply{Type: relayknock.TypeACK, Body: []byte(body)})
+			if handle != nil || !errors.Is(err, ErrMalformedReply) {
+				t.Fatalf("interpretReply = %#v, %v; want ErrMalformedReply", handle, err)
+			}
+		})
+	}
+}
+
+func TestInterpretReply_AcceptsMaxUint32OpenTime(t *testing.T) {
+	handle, err := interpretReply(&relayknock.Reply{Type: relayknock.TypeACK, Body: []byte(`{"errCode":"0","sessId":123,"opnTime":4294967295,"redirectUrl":"https://r_x.qurl.site/path"}`)})
+	if err != nil || handle == nil || handle.OpenSeconds != ^uint32(0) {
+		t.Fatalf("max uint32 open time = %#v, %v; want accepted", handle, err)
+	}
 }
 
 func TestInterpretReply_ServerDeny(t *testing.T) {
 	reply := &relayknock.Reply{
 		Type: relayknock.TypeACK,
-		Body: []byte(`{"errCode":"52024"}`), // qURL session-expired deny
+		Body: []byte(`{"errCode":"52024","opnTime":0}`), // qURL session-expired deny
 	}
 	_, err := interpretReply(reply)
 	var deny *ServerDenyError
@@ -291,6 +337,86 @@ func TestInterpretReply_ServerDeny(t *testing.T) {
 	}
 	if deny.ErrCode != "52024" {
 		t.Fatalf("deny ErrCode = %q, want 52024", deny.ErrCode)
+	}
+}
+
+func TestInterpretReply_ServerDenyRequiresCanonicalErrorCode(t *testing.T) {
+	for name, code := range map[string]string{
+		"leading space":  ` 52024`,
+		"trailing space": `52024 `,
+		"newline":        `52024\nsecret`,
+		"free form":      `access denied`,
+		"sign":           `-52024`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			body, err := json.Marshal(map[string]any{
+				"errCode": code,
+				"opnTime": 0,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = interpretReply(&relayknock.Reply{Type: relayknock.TypeACK, Body: body})
+			if !errors.Is(err, ErrMalformedReply) {
+				t.Fatalf("deny with errCode %q error = %v, want ErrMalformedReply", code, err)
+			}
+			var deny *ServerDenyError
+			if errors.As(err, &deny) {
+				t.Fatalf("deny with errCode %q reflected as ServerDenyError", code)
+			}
+		})
+	}
+}
+
+func TestInterpretReply_ServerDenyRequiresSessionIDOmission(t *testing.T) {
+	for name, body := range map[string]string{
+		"nonzero":   `{"errCode":"52024","sessId":123,"opnTime":0}`,
+		"zero":      `{"errCode":"52024","sessId":0,"opnTime":0}`,
+		"null":      `{"errCode":"52024","sessId":null,"opnTime":0}`,
+		"string":    `{"errCode":"52024","sessId":"123","opnTime":0}`,
+		"duplicate": `{"errCode":"52024","sessId":0,"sessId":0,"opnTime":0}`,
+		"omitted":   `{"errCode":"52024","opnTime":0}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := interpretReply(&relayknock.Reply{Type: relayknock.TypeACK, Body: []byte(body)})
+			if name != "omitted" {
+				if !errors.Is(err, ErrMalformedReply) {
+					t.Fatalf("deny with session error = %v, want ErrMalformedReply", err)
+				}
+				return
+			}
+			var deny *ServerDenyError
+			if !errors.As(err, &deny) || deny.ErrCode != "52024" {
+				t.Fatalf("deny with omitted session = %v, want ServerDenyError", err)
+			}
+		})
+	}
+}
+
+func TestInterpretReply_ServerDenyRequiresCanonicalZeroOpenTime(t *testing.T) {
+	for name, body := range map[string]string{
+		"missing":   `{"errCode":"52024"}`,
+		"nonzero":   `{"errCode":"52024","opnTime":1}`,
+		"null":      `{"errCode":"52024","opnTime":null}`,
+		"string":    `{"errCode":"52024","opnTime":"0"}`,
+		"fraction":  `{"errCode":"52024","opnTime":0.0}`,
+		"overflow":  `{"errCode":"52024","opnTime":4294967296}`,
+		"duplicate": `{"errCode":"52024","opnTime":0,"opnTime":0}`,
+		"zero":      `{"errCode":"52024","opnTime":0}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := interpretReply(&relayknock.Reply{Type: relayknock.TypeACK, Body: []byte(body)})
+			if name != "zero" {
+				if !errors.Is(err, ErrMalformedReply) {
+					t.Fatalf("deny with invalid open time error = %v, want ErrMalformedReply", err)
+				}
+				return
+			}
+			var deny *ServerDenyError
+			if !errors.As(err, &deny) || deny.ErrCode != "52024" {
+				t.Fatalf("deny with canonical zero open time = %v, want ServerDenyError", err)
+			}
+		})
 	}
 }
 

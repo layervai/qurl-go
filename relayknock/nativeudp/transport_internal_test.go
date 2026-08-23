@@ -274,7 +274,6 @@ func TestCorrelateDecryptedReply_AgentSessionTransitions(t *testing.T) {
 		ack         conformance.AgentSessionPacket
 	}{
 		{name: "reknock", requestType: relayknock.TypeReknock, request: f.OverloadReknock.ReknockRequest, ack: f.OverloadReknock.ACK},
-		{name: "exit", requestType: relayknock.TypeExit, request: f.CleanExit.Request, ack: f.CleanExit.ACK},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			counter, err := strconv.ParseUint(tc.request.Counter, 10, 64)

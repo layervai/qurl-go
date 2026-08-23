@@ -461,15 +461,12 @@ func TestKnockWithReknock_ValidatesBothLegsBeforeIO(t *testing.T) {
 	}
 }
 
-// TestExit_AcceptsOnlyCounterEchoingACK pins the clean-exit transition: NHP_EXT
-// takes an authenticated ACK that echoes its counter and nothing else — notably
-// not NHP_COK, which is valid only as an answer to NHP_KNK.
 func TestExit_AcceptsOnlyCounterEchoingACK(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct {
 		name     string
 		behavior behavior
-		want     error // nil means the exit must be accepted
+		want     error
 	}{
 		{name: "counter-echoing ACK", behavior: behaviorNormal},
 		{name: "cookie challenge", behavior: behaviorCookie, want: relayknock.ErrMalformedReply},
@@ -481,7 +478,6 @@ func TestExit_AcceptsOnlyCounterEchoingACK(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 			server, endpoint, options := newLoopbackExchange(t, test.behavior)
-
 			reply, err := nativeudp.Exit(context.Background(), endpoint, []byte(`{"reason":"clean"}`), options)
 			if test.want == nil {
 				if err != nil || !reply.IsACK() || string(reply.Body) != `{"ok":true}` {
@@ -490,8 +486,6 @@ func TestExit_AcceptsOnlyCounterEchoingACK(t *testing.T) {
 			} else if reply != nil || !errors.Is(err, test.want) {
 				t.Fatalf("Exit reply/error = %#v/%v, want nil/errors.Is(%v)", reply, err, test.want)
 			}
-			// Whatever the outcome, Exit must put NHP_EXT on the wire: a helper that
-			// sent some other initiator type would be admitted by the same ACK.
 			if got := server.receivedTypes(); len(got) != 1 || got[0] != relayknock.TypeExit {
 				t.Fatalf("received types = %v, want [%d] (NHP_EXT)", got, relayknock.TypeExit)
 			}
@@ -503,7 +497,6 @@ func TestExit_SilentResponderIsTransportFailure(t *testing.T) {
 	t.Parallel()
 	_, endpoint, options := newLoopbackExchange(t, behaviorSilent)
 	options.Timeout = 150 * time.Millisecond
-
 	reply, err := nativeudp.Exit(context.Background(), endpoint, nil, options)
 	if reply != nil || !errors.Is(err, nativeudp.ErrTransport) {
 		t.Fatalf("silent exit reply/error = %#v/%v, want nil/ErrTransport", reply, err)

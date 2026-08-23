@@ -10,7 +10,7 @@ import (
 	"github.com/layervai/qurl-go/relayknock/internal/nhpwire"
 )
 
-// This file consumes the immutable qurl-conformance v0.6 session-control
+// This file consumes the immutable qurl-conformance session-control
 // artifact through the shipping codec. It never copies the vectors into this
 // repository: go.mod/go.sum pin the exact public module bytes.
 
@@ -51,7 +51,7 @@ func TestBuildMessage_AgentSessionControlGolden(t *testing.T) {
 	}{
 		{name: "knock", packet: f.OverloadReknock.KnockRequest},
 		{name: "reknock", packet: f.OverloadReknock.ReknockRequest, cookie: cookie},
-		{name: "exit", packet: f.CleanExit.Request},
+		{name: "exact session exit", packet: f.ExactSessionExit.Request},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			packet := buildAgentSessionPacket(t, f, tc.packet, tc.cookie)
@@ -70,7 +70,9 @@ func TestDecryptReply_AgentSessionControlGolden(t *testing.T) {
 	}{
 		{name: "cookie", packet: f.OverloadReknock.CookieReply},
 		{name: "reknock ack", packet: f.OverloadReknock.ACK},
-		{name: "exit ack", packet: f.CleanExit.ACK},
+		{name: "exact session exit ack", packet: f.ExactSessionExit.ACK},
+		{name: "knock denial ack", packet: f.DenialACKs.Knock},
+		{name: "exit denial ack", packet: f.DenialACKs.Exit},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			reply, err := DecryptReply(

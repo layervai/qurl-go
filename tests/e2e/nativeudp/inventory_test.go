@@ -15,7 +15,7 @@ import (
 	"testing"
 )
 
-const reviewedInventoryMappingSHA256 = "869e3a4f6cd6fbbb1fb786b9dc26a2778406dcd814bf226cdddc13f66f4b1e2d"
+const reviewedInventoryMappingSHA256 = "4438db31a169cdc15590a818abd2b31d8e89295f1a33bb4a6b4af410d4c38821"
 
 type scenarioInventory struct {
 	SchemaVersion        int                    `json:"schema_version"`

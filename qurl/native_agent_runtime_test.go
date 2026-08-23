@@ -1734,7 +1734,7 @@ func TestConnectAgentRuntime_ReturnedPrivateKeyKnocksImmediately(t *testing.T) {
 		`"lease_expires_at":"`+time.Now().UTC().Add(time.Hour).Truncate(time.Second).Format(time.RFC3339)+`"`,
 		1,
 	)
-	knockBody := `{"errCode":"0","resHost":{"resource-public-key":"frps.cell0.example:7000"},"opnTime":900,"agentAddr":"203.0.113.9:49152","acTokens":{"resource-public-key":"ac-fresh"},"preActions":{"resource-public-key":null}}`
+	knockBody := `{"errCode":"0","sessId":123,"cellId":"cell0","sessIssuedAtMillis":1800000000000,"runId":"0123456789abcdef","runAttempt":1,"resHost":{"resource-public-key":"frps.cell0.example:7000"},"opnTime":900,"agentAddr":"203.0.113.9:49152","acTokens":{"resource-public-key":"ac-fresh"},"preActions":{"resource-public-key":null}}`
 	f := newRuntimeFixture(t,
 		[]runtimeUDPStep{{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: initialResult}},
 		[]runtimeUDPStep{
@@ -1753,7 +1753,7 @@ func TestConnectAgentRuntime_ReturnedPrivateKeyKnocksImmediately(t *testing.T) {
 	if len(privateKey) != x25519key.Size {
 		t.Fatalf("fresh runtime returned private key length = %d, want %d", len(privateKey), x25519key.Size)
 	}
-	knock, err := KnockRegisteredAgent(context.Background(), binding, privateKey, "resource-public-key", NativeKnockOptions{RunID: "0123456789abcdef"},
+	knock, err := KnockRegisteredAgent(context.Background(), binding, privateKey, "resource-public-key", NativeKnockOptions{RunID: "0123456789abcdef", RunAttempt: 1},
 		WithAgentRuntimeUDPResolver(f.resolver), WithAgentRuntimeUDPDialer(f.dialer), WithAgentRuntimeUDPBounds(runtimeReplyTimeout, 1))
 	if err != nil || knock == nil || knock.ACToken != "ac-fresh" {
 		t.Fatalf("fresh returned-key knock = %#v, %v", knock, err)
@@ -1766,7 +1766,7 @@ func TestConnectAgentRuntime_ReturnedPrivateKeyKnocksImmediately(t *testing.T) {
 
 func TestKnockRegisteredAgent_UsesAuthoritativeAssignedCell(t *testing.T) {
 	contract := loadAssignmentFixture(t)
-	knockBody := `{"errCode":"0","resHost":{"resource-public-key":"frps.cell0.example:7000"},"opnTime":900,"agentAddr":"203.0.113.9:49152","acTokens":{"resource-public-key":"ac-secret"},"preActions":{"resource-public-key":null}}`
+	knockBody := `{"errCode":"0","sessId":123,"cellId":"cell0","sessIssuedAtMillis":1800000000000,"runId":"0123456789abcdef","runAttempt":1,"resHost":{"resource-public-key":"frps.cell0.example:7000"},"opnTime":900,"agentAddr":"203.0.113.9:49152","acTokens":{"resource-public-key":"ac-secret"},"preActions":{"resource-public-key":null}}`
 	f := newRuntimeFixture(t, nil, []runtimeUDPStep{{requestType: relayknock.TypeKnock, replyType: relayknock.TypeACK, replyBody: knockBody}})
 	assignment := &AgentAssignment{
 		CellID: "cell0", AssignmentGeneration: 1, EndpointRevision: 1, LeaseExpiresAt: time.Now().Add(time.Hour),
@@ -1780,7 +1780,7 @@ func TestKnockRegisteredAgent_UsesAuthoritativeAssignedCell(t *testing.T) {
 	}
 	privateKey := assignmentHex(t, contract.Keys.Agent.StaticPrivHex)
 	defer wipeBytes(privateKey)
-	result, err := KnockRegisteredAgent(context.Background(), binding, privateKey, "resource-public-key", NativeKnockOptions{RunID: "0123456789abcdef"},
+	result, err := KnockRegisteredAgent(context.Background(), binding, privateKey, "resource-public-key", NativeKnockOptions{RunID: "0123456789abcdef", RunAttempt: 1},
 		WithAgentRuntimeUDPResolver(f.resolver), WithAgentRuntimeUDPDialer(f.dialer), WithAgentRuntimeUDPBounds(runtimeReplyTimeout, 1))
 	if err != nil {
 		t.Fatalf("KnockRegisteredAgent: %v", err)
@@ -1800,7 +1800,7 @@ func TestKnockRegisteredAgent_UsesAuthoritativeAssignedCell(t *testing.T) {
 func TestKnockRegisteredAgent_CookieChallengeReResolvesForOneBoundReknock(t *testing.T) {
 	contract := loadAssignmentFixture(t)
 	cookie := bytes.Repeat([]byte{0x7a}, 32)
-	knockBody := `{"errCode":"0","resHost":{"resource-public-key":"frps.cell0.example:7000"},"opnTime":900,"agentAddr":"203.0.113.9:49152","acTokens":{"resource-public-key":"ac-secret"},"preActions":{"resource-public-key":null}}`
+	knockBody := `{"errCode":"0","sessId":123,"cellId":"cell0","sessIssuedAtMillis":1800000000000,"runId":"0123456789abcdef","runAttempt":1,"resHost":{"resource-public-key":"frps.cell0.example:7000"},"opnTime":900,"agentAddr":"203.0.113.9:49152","acTokens":{"resource-public-key":"ac-secret"},"preActions":{"resource-public-key":null}}`
 	f := newRuntimeFixture(t, nil, []runtimeUDPStep{{
 		requestType: relayknock.TypeKnock, replyType: relayknock.TypeCookieChallenge, reknockCookie: cookie, replyCounterDelta: 1,
 	}})
@@ -1845,7 +1845,7 @@ func TestKnockRegisteredAgent_CookieChallengeReResolvesForOneBoundReknock(t *tes
 	}
 	privateKey := assignmentHex(t, contract.Keys.Agent.StaticPrivHex)
 	defer wipeBytes(privateKey)
-	if _, err := KnockRegisteredAgent(context.Background(), binding, privateKey, "resource-public-key", NativeKnockOptions{RunID: "0123456789abcdef"},
+	if _, err := KnockRegisteredAgent(context.Background(), binding, privateKey, "resource-public-key", NativeKnockOptions{RunID: "0123456789abcdef", RunAttempt: 1},
 		WithAgentRuntimeUDPResolver(resolver), WithAgentRuntimeUDPDialer(dialer), WithAgentRuntimeUDPBounds(runtimeReplyTimeout, 1)); err != nil {
 		t.Fatalf("KnockRegisteredAgent COK→RKN: %v", err)
 	}
@@ -1888,7 +1888,7 @@ func TestKnockRegisteredAgent_MalformedCookieChallengeFailsWithoutReknock(t *tes
 	}
 	privateKey := assignmentHex(t, contract.Keys.Agent.StaticPrivHex)
 	defer wipeBytes(privateKey)
-	_, err := KnockRegisteredAgent(context.Background(), binding, privateKey, "resource-public-key", NativeKnockOptions{RunID: "0123456789abcdef"},
+	_, err := KnockRegisteredAgent(context.Background(), binding, privateKey, "resource-public-key", NativeKnockOptions{RunID: "0123456789abcdef", RunAttempt: 1},
 		WithAgentRuntimeUDPResolver(f.resolver), WithAgentRuntimeUDPDialer(f.dialer), WithAgentRuntimeUDPBounds(runtimeReplyTimeout, 1))
 	if !errors.Is(err, ErrMalformedReply) {
 		t.Fatalf("malformed COK error = %v, want ErrMalformedReply", err)
@@ -1899,10 +1899,16 @@ func TestKnockRegisteredAgent_MalformedCookieChallengeFailsWithoutReknock(t *tes
 	}
 }
 
-func TestExitRegisteredAgentSession_UsesEXTAndDoesNotChangeBinding(t *testing.T) {
+func TestRetireRegisteredAgentSession_UsesExactReceiptOriginalEndpointAndRetriesIdempotently(t *testing.T) {
 	contract := loadAssignmentFixture(t)
-	ackBody := `{"errCode":"0","resHost":{"resource-public-key":"frps.cell0.example:7000"},"opnTime":1,"agentAddr":"203.0.113.9:49152","acTokens":{"resource-public-key":"ac-secret"},"preActions":{"resource-public-key":null}}`
-	f := newRuntimeFixture(t, nil, []runtimeUDPStep{{requestType: relayknock.TypeExit, replyType: relayknock.TypeACK, replyBody: ackBody}})
+	knockACK := `{"errCode":"0","sessId":123,"cellId":"cell0","sessIssuedAtMillis":1800000000000,"runId":"0123456789abcdef","runAttempt":1,"resHost":{"resource-public-key":"frps.cell0.example:7000"},"opnTime":900,"agentAddr":"203.0.113.9:49152","acTokens":{"resource-public-key":"ac-secret"},"preActions":{"resource-public-key":null}}`
+	closeACK := `{"errCode":"0","cellId":"cell0","sessId":123,"sessIssuedAtMillis":1800000000000,"runId":"0123456789abcdef","runAttempt":1,"closeEventId":"0123456789abcdef0123456789abcdef","state":"closing"}`
+	replayedCloseACK := strings.Replace(closeACK, `"state":"closing"`, `"state":"closed"`, 1)
+	f := newRuntimeFixture(t, nil, []runtimeUDPStep{
+		{requestType: relayknock.TypeKnock, replyType: relayknock.TypeACK, replyBody: knockACK},
+		{requestType: relayknock.TypeExit, replyType: relayknock.TypeACK, replyBody: closeACK},
+		{requestType: relayknock.TypeExit, replyType: relayknock.TypeACK, replyBody: replayedCloseACK},
+	})
 	assignment := &AgentAssignment{
 		CellID: "cell0", AssignmentGeneration: 1, EndpointRevision: 1, LeaseExpiresAt: time.Now().Add(time.Hour),
 		Endpoint: NHPUDPEndpoint{Host: "cell0.nhp.layerv.ai", Port: standardNHPUDPPort, ServerPublicKeyB64: base64.StdEncoding.EncodeToString(assignmentHex(t, contract.Keys.AssignedCell.StaticPubHex))},
@@ -1915,23 +1921,106 @@ func TestExitRegisteredAgentSession_UsesEXTAndDoesNotChangeBinding(t *testing.T)
 	}
 	privateKey := assignmentHex(t, contract.Keys.Agent.StaticPrivHex)
 	defer wipeBytes(privateKey)
-	if err := ExitRegisteredAgentSession(context.Background(), binding, privateKey, "resource-public-key", NativeKnockOptions{RunID: "0123456789abcdef"},
-		WithAgentRuntimeUDPResolver(f.resolver), WithAgentRuntimeUDPDialer(f.dialer), WithAgentRuntimeUDPBounds(runtimeReplyTimeout, 1)); err != nil {
-		t.Fatalf("ExitRegisteredAgentSession: %v", err)
+	knock, err := KnockRegisteredAgent(context.Background(), binding, privateKey, "resource-public-key",
+		NativeKnockOptions{RunID: "0123456789abcdef", RunAttempt: 1},
+		WithAgentRuntimeUDPResolver(f.resolver), WithAgentRuntimeUDPDialer(f.dialer), WithAgentRuntimeUDPBounds(runtimeReplyTimeout, 1))
+	if err != nil {
+		t.Fatalf("KnockRegisteredAgent: %v", err)
+	}
+	moved := assignment.clone()
+	moved.CellID = "cell1"
+	moved.AssignmentGeneration = 2
+	moved.EndpointRevision = 1
+	moved.Endpoint.Host = "cell1.nhp.layerv.ai"
+	binding.adoptRenewedAssignmentLocked(moved)
+	retired, err := RetireRegisteredAgentSession(context.Background(), binding, privateKey, knock.SessionReceipt,
+		WithAgentRuntimeUDPResolver(f.resolver), WithAgentRuntimeUDPDialer(f.dialer), WithAgentRuntimeUDPBounds(runtimeReplyTimeout, 1))
+	if err != nil || retired == nil || retired.SessionReceipt.SessionID != 123 ||
+		retired.CloseEventID != "0123456789abcdef0123456789abcdef" || retired.State != "closing" {
+		t.Fatalf("RetireRegisteredAgentSession = %#v, %v", retired, err)
+	}
+	replayed, err := RetireRegisteredAgentSession(context.Background(), binding, privateKey, knock.SessionReceipt,
+		WithAgentRuntimeUDPResolver(f.resolver), WithAgentRuntimeUDPDialer(f.dialer), WithAgentRuntimeUDPBounds(runtimeReplyTimeout, 1))
+	if err != nil || replayed == nil || replayed.SessionReceipt.CellID != retired.SessionReceipt.CellID ||
+		replayed.SessionReceipt.SessionID != retired.SessionReceipt.SessionID ||
+		replayed.SessionReceipt.SessionIssuedAtMillis != retired.SessionReceipt.SessionIssuedAtMillis ||
+		replayed.SessionReceipt.RunID != retired.SessionReceipt.RunID ||
+		replayed.SessionReceipt.RunAttempt != retired.SessionReceipt.RunAttempt ||
+		replayed.CloseEventID != retired.CloseEventID || replayed.State != "closed" {
+		t.Fatalf("second RetireRegisteredAgentSession = %#v, %v; first=%#v", replayed, err, retired)
 	}
 	requests := f.cellUDP.snapshot()
-	if len(requests) != 1 || requests[0].typeID != relayknock.TypeExit {
-		t.Fatalf("exit packet types = %#v, want one EXT", requests)
+	if len(requests) != 3 || requests[0].typeID != relayknock.TypeKnock ||
+		requests[1].typeID != relayknock.TypeExit || requests[2].typeID != relayknock.TypeExit {
+		t.Fatalf("session packet types = %#v, want KNK then two exact EXT requests", requests)
 	}
-	var ext nativeAgentKnockBody
-	if err := json.Unmarshal(requests[0].body, &ext); err != nil {
+	if !bytes.Equal(requests[1].body, requests[2].body) {
+		t.Fatalf("second exact EXT body drifted:\nfirst=%s\nsecond=%s", requests[1].body, requests[2].body)
+	}
+	var ext nativeExactSessionCloseBody
+	if err := json.Unmarshal(requests[1].body, &ext); err != nil {
 		t.Fatalf("decode EXT body: %v", err)
 	}
-	if ext.HeaderType != nhpEXTHeaderType || ext.RunID != "0123456789abcdef" {
-		t.Fatalf("EXT body = %#v, want header type %d and caller RunID", ext, nhpEXTHeaderType)
+	if ext.HeaderType != nhpEXTHeaderType || ext.AuthServiceID != agentAspID || ext.CellID != "cell0" ||
+		ext.SessionID != 123 || ext.SessionIssuedAtMillis != 1800000000000 ||
+		ext.RunID != "0123456789abcdef" || ext.RunAttempt != 1 {
+		t.Fatalf("EXT body = %#v, want the exact immutable receipt", ext)
 	}
-	if binding.assignment() == nil || binding.CellID != "cell0" || binding.AssignmentGeneration != 1 || binding.EndpointRevision != 1 {
+	if binding.assignment() == nil || binding.Assignment().CellID != "cell1" || binding.CellID != "cell0" ||
+		binding.AssignmentGeneration != 1 || binding.EndpointRevision != 1 {
 		t.Fatalf("clean exit mutated durable binding: %#v", binding)
+	}
+}
+
+func TestConsumeNativeExactSessionCloseReply_StrictAuthority(t *testing.T) {
+	receipt := NativeSessionReceipt{
+		CellID: "cell0", SessionID: 123, SessionIssuedAtMillis: 1_800_000_000_000,
+		RunID: "0123456789abcdef", RunAttempt: 1,
+	}
+	valid := `{"errCode":"0","cellId":"cell0","sessId":123,"sessIssuedAtMillis":1800000000000,"runId":"0123456789abcdef","runAttempt":1,"closeEventId":"0123456789abcdef0123456789abcdef","state":"closing"}`
+	retired, err := consumeNativeExactSessionCloseReply(
+		&relayknock.Reply{Type: relayknock.TypeACK, Body: []byte(valid)}, receipt,
+	)
+	if err != nil || retired == nil || retired.SessionReceipt.CellID != receipt.CellID ||
+		retired.SessionReceipt.SessionID != receipt.SessionID || retired.State != "closing" {
+		t.Fatalf("strict exact-close success = %#v, %v", retired, err)
+	}
+
+	for name, body := range map[string]string{
+		"missing cell":          `{"errCode":"0","sessId":123,"sessIssuedAtMillis":1800000000000,"runId":"0123456789abcdef","runAttempt":1,"closeEventId":"0123456789abcdef0123456789abcdef","state":"closing"}`,
+		"wrong cell":            strings.Replace(valid, `"cell0"`, `"cell1"`, 1),
+		"wrong session":         strings.Replace(valid, `"sessId":123`, `"sessId":124`, 1),
+		"wrong issuance":        strings.Replace(valid, `1800000000000`, `1800000000001`, 1),
+		"wrong run":             strings.Replace(valid, `0123456789abcdef`, `fedcba9876543210`, 1),
+		"wrong attempt":         strings.Replace(valid, `"runAttempt":1`, `"runAttempt":2`, 1),
+		"invalid event":         strings.Replace(valid, `0123456789abcdef0123456789abcdef`, `ABC`, 1),
+		"invalid state":         strings.Replace(valid, `"closing"`, `"ready"`, 1),
+		"unknown field":         strings.TrimSuffix(valid, "}") + `,"extra":true}`,
+		"duplicate field":       strings.Replace(valid, `"state":"closing"`, `"state":"closing","state":"closed"`, 1),
+		"trailing object":       valid + `{}`,
+		"null event":            strings.Replace(valid, `"closeEventId":"0123456789abcdef0123456789abcdef"`, `"closeEventId":null`, 1),
+		"empty success code":    strings.Replace(valid, `"errCode":"0"`, `"errCode":""`, 1),
+		"success error message": strings.Replace(valid, `"cellId":"cell0"`, `"errMsg":"unexpected","cellId":"cell0"`, 1),
+		"deny carries receipt":  `{"errCode":"52005","cellId":"cell0"}`,
+		"deny missing message":  `{"errCode":"52005"}`,
+		"deny empty message":    `{"errCode":"52005","errMsg":""}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			result, err := consumeNativeExactSessionCloseReply(
+				&relayknock.Reply{Type: relayknock.TypeACK, Body: []byte(body)}, receipt,
+			)
+			if result != nil || !errors.Is(err, ErrMalformedReply) {
+				t.Fatalf("strict close ACK = %#v, %v; want malformed", result, err)
+			}
+		})
+	}
+
+	_, err = consumeNativeExactSessionCloseReply(&relayknock.Reply{
+		Type: relayknock.TypeACK, Body: []byte(`{"errCode":"52005","errMsg":"denied"}`),
+	}, receipt)
+	var deny *ServerDenyError
+	if !errors.As(err, &deny) || deny.ErrCode != "52005" || errors.Is(err, ErrMalformedReply) {
+		t.Fatalf("strict close denial = %T %v", err, err)
 	}
 }
 
@@ -1989,7 +2078,7 @@ func TestKnockRegisteredAgent_RejectsIdentityDriftBeforeIO(t *testing.T) {
 			resolver := &noIONativeResolver{}
 			dialer := &noIONativeDialer{}
 			_, err := KnockRegisteredAgent(context.Background(), binding, mutate(binding), "resource-public-key",
-				NativeKnockOptions{RunID: "0123456789abcdef"},
+				NativeKnockOptions{RunID: "0123456789abcdef", RunAttempt: 1},
 				WithAgentRuntimeUDPResolver(resolver), WithAgentRuntimeUDPDialer(dialer))
 			if !errors.Is(err, ErrInvalidNativeKnockInput) {
 				t.Fatalf("identity drift error = %v, want ErrInvalidNativeKnockInput", err)
@@ -2010,9 +2099,9 @@ func TestConsumeNativeAgentKnockReply_WipesBearerBody(t *testing.T) {
 			}
 		}
 	}
-	successBody := []byte(`{"errCode":"0","resHost":{"resource-public-key":"frps.cell0.example:7000"},"opnTime":900,"agentAddr":"203.0.113.9:49152","acTokens":{"resource-public-key":"ac-secret"}}`)
+	successBody := []byte(`{"errCode":"0","sessId":123,"cellId":"cell0","sessIssuedAtMillis":1800000000000,"runId":"0123456789abcdef","runAttempt":1,"resHost":{"resource-public-key":"frps.cell0.example:7000"},"opnTime":900,"agentAddr":"203.0.113.9:49152","acTokens":{"resource-public-key":"ac-secret"}}`)
 	result, err := consumeNativeAgentKnockReply(&relayknock.Reply{Type: relayknock.TypeACK, Body: successBody}, "resource-public-key")
-	if err != nil || result == nil || result.ACToken != "ac-secret" {
+	if err != nil || result == nil || result.ACToken != "ac-secret" || result.SessionID != 123 || result.OpenTime != 900 {
 		t.Fatalf("consume success = %#v, %v", result, err)
 	}
 	assertWiped(t, successBody)
@@ -2026,7 +2115,7 @@ func TestConsumeNativeAgentKnockReply_WipesBearerBody(t *testing.T) {
 	}
 	assertWiped(t, malformedBody)
 
-	denyBody := []byte(`{"errCode":"52004","errMsg":"denied"}`)
+	denyBody := []byte(`{"errCode":"52004","errMsg":"denied","opnTime":0}`)
 	_, err = consumeNativeAgentKnockReply(&relayknock.Reply{Type: relayknock.TypeACK, Body: denyBody}, "resource-public-key")
 	var deny *ServerDenyError
 	if !errors.As(err, &deny) || deny.ErrCode != "52004" || errors.Is(err, ErrMalformedReply) {
@@ -2048,12 +2137,12 @@ func TestInterpretNativeAgentKnockReply_ErrCodePresenceAndDenyPrecedence(t *test
 		body         string
 		wantDenyCode string
 	}{
-		"deny needs no success fields":     {body: `{"errCode":"52004"}`, wantDenyCode: "52004"},
-		"deny resource not found":          {body: `{"errCode":"52004","errMsg":"failed to find resource"}`, wantDenyCode: "52004"},
-		"deny knock server not found":      {body: `{"errCode":"51002","errMsg":"failed to find knock server"}`, wantDenyCode: "51002"},
-		"deny ac operation failed":         {body: `{"errCode":"52005","errMsg":"server ac operation failed"}`, wantDenyCode: "52005"},
-		"deny asp not found":               {body: `{"errCode":"52002","errMsg":"failed to find auth service provider"}`, wantDenyCode: "52002"},
-		"deny code outside pinned vectors": {body: `{"errCode":"59999"}`, wantDenyCode: "59999"},
+		"deny needs no success fields":     {body: `{"errCode":"52004","opnTime":0}`, wantDenyCode: "52004"},
+		"deny resource not found":          {body: `{"errCode":"52004","errMsg":"failed to find resource","opnTime":0}`, wantDenyCode: "52004"},
+		"deny knock server not found":      {body: `{"errCode":"51002","errMsg":"failed to find knock server","opnTime":0}`, wantDenyCode: "51002"},
+		"deny ac operation failed":         {body: `{"errCode":"52005","errMsg":"server ac operation failed","opnTime":0}`, wantDenyCode: "52005"},
+		"deny asp not found":               {body: `{"errCode":"52002","errMsg":"failed to find auth service provider","opnTime":0}`, wantDenyCode: "52002"},
+		"deny code outside pinned vectors": {body: `{"errCode":"59999","opnTime":0}`, wantDenyCode: "59999"},
 		"missing errCode":                  {body: `{"errMsg":"denied"}`},
 		"null errCode":                     {body: `{"errCode":null}`},
 		"noncanonical errCode":             {body: `{"errCode":" 52101"}`},
@@ -2083,12 +2172,188 @@ func TestInterpretNativeAgentKnockReply_SuccessErrCodeVocabulary(t *testing.T) {
 	// isSuccess predicate and the conformance ack_success_empty_err_code vector.
 	for name, errCode := range map[string]string{"zero": "0", "empty string": ""} {
 		t.Run(name, func(t *testing.T) {
-			body := []byte(`{"errCode":"` + errCode + `","resHost":{"resource-public-key":"frps.cell0.example:7000"},"opnTime":900,"agentAddr":"203.0.113.9:49152","acTokens":{"resource-public-key":"ac-secret"}}`)
+			body := []byte(`{"errCode":"` + errCode + `","sessId":123,"cellId":"cell0","sessIssuedAtMillis":1800000000000,"runId":"0123456789abcdef","runAttempt":1,"resHost":{"resource-public-key":"frps.cell0.example:7000"},"opnTime":900,"agentAddr":"203.0.113.9:49152","acTokens":{"resource-public-key":"ac-secret"}}`)
 			result, err := interpretNativeAgentKnockReply(&relayknock.Reply{Type: relayknock.TypeACK, Body: body}, "resource-public-key")
-			if err != nil || result == nil || result.ACToken != "ac-secret" || result.ResourceHost != "frps.cell0.example:7000" {
+			if err != nil || result == nil || result.ACToken != "ac-secret" || result.ResourceHost != "frps.cell0.example:7000" || result.SessionID != 123 || result.OpenTime != 900 {
 				t.Fatalf("success reply = %#v, %v", result, err)
 			}
 		})
+	}
+}
+
+func TestInterpretNativeAgentKnockReply_RegisteredAgentExactUnion(t *testing.T) {
+	expectation := nativeAgentKnockExpectation{
+		CellID: "cell0", RunID: "0123456789abcdef", RunAttempt: 1,
+	}
+	const success = `{"errCode":"0","sessId":123,"cellId":"cell0","sessIssuedAtMillis":1800000000000,"runId":"0123456789abcdef","runAttempt":1,"resHost":{"resource-public-key":"frps.cell0.example:7000"},"opnTime":900,"agentAddr":"203.0.113.9:49152","acTokens":{"resource-public-key":"ac-secret"}}`
+	result, err := interpretNativeAgentKnockReply(
+		&relayknock.Reply{Type: relayknock.TypeACK, Body: []byte(success)},
+		"resource-public-key", expectation,
+	)
+	if err != nil || result == nil || result.SessionReceipt.CellID != expectation.CellID ||
+		result.SessionReceipt.SessionID != 123 || result.SessionReceipt.RunID != expectation.RunID ||
+		result.SessionReceipt.RunAttempt != expectation.RunAttempt {
+		t.Fatalf("exact registered-agent success = %#v, %v", result, err)
+	}
+	withOptionalSuccessFields := strings.TrimSuffix(success, "}") +
+		`,"aspToken":"provider-token","preActions":{"resource-public-key":null},"redirectUrl":"https://example.com/next"}`
+	if result, err := interpretNativeAgentKnockReply(
+		&relayknock.Reply{Type: relayknock.TypeACK, Body: []byte(withOptionalSuccessFields)},
+		"resource-public-key", expectation,
+	); err != nil || result == nil {
+		t.Fatalf("registered-agent success with documented optional fields = %#v, %v", result, err)
+	}
+
+	agentSessionVectors, err := conformance.AgentSessionControl()
+	if err != nil {
+		t.Fatalf("load merged agent-session conformance: %v", err)
+	}
+	denial := agentSessionVectors.DenialACKs.Knock.BodyJSON
+	result, err = interpretNativeAgentKnockReply(
+		&relayknock.Reply{Type: relayknock.TypeACK, Body: []byte(denial)},
+		"resource-public-key", expectation,
+	)
+	var deny *ServerDenyError
+	if result != nil || !errors.As(err, &deny) || deny.ErrCode != "52004" || errors.Is(err, ErrMalformedReply) {
+		t.Fatalf("exact registered-agent denial = %#v, %T %v", result, err, err)
+	}
+
+	denialWith := func(field string) string {
+		return strings.TrimSuffix(denial, "}") + "," + field + "}"
+	}
+	for name, body := range map[string]string{
+		"empty success code":         strings.Replace(success, `"errCode":"0"`, `"errCode":""`, 1),
+		"success error message":      strings.Replace(success, `"sessId":123`, `"errMsg":"unexpected","sessId":123`, 1),
+		"success missing host map":   strings.Replace(success, `"resHost":{"resource-public-key":"frps.cell0.example:7000"},`, "", 1),
+		"success invalid agent addr": strings.Replace(success, `"203.0.113.9:49152"`, `"not-an-address"`, 1),
+		"denial missing message":     strings.Replace(denial, `,"errMsg":"denied"`, "", 1),
+		"denial empty message":       strings.Replace(denial, `"errMsg":"denied"`, `"errMsg":""`, 1),
+		"denial null message":        strings.Replace(denial, `"errMsg":"denied"`, `"errMsg":null`, 1),
+		"denial whitespace message":  strings.Replace(denial, `"errMsg":"denied"`, `"errMsg":" "`, 1),
+		"denial padded message":      strings.Replace(denial, `"errMsg":"denied"`, `"errMsg":" denied "`, 1),
+		"denial missing open time":   strings.Replace(denial, `,"opnTime":0`, "", 1),
+		"denial nonzero open time":   strings.Replace(denial, `"opnTime":0`, `"opnTime":1`, 1),
+		"denial carries cell":        denialWith(`"cellId":"cell0"`),
+		"denial carries session":     denialWith(`"sessId":123`),
+		"denial carries issuance":    denialWith(`"sessIssuedAtMillis":1800000000000`),
+		"denial carries run":         denialWith(`"runId":"0123456789abcdef"`),
+		"denial carries attempt":     denialWith(`"runAttempt":1`),
+		"denial carries host map":    denialWith(`"resHost":null`),
+		"denial carries agent addr":  denialWith(`"agentAddr":"203.0.113.9:49152"`),
+		"denial carries token map":   denialWith(`"acTokens":null`),
+		"denial carries ASP token":   denialWith(`"aspToken":"provider-token"`),
+		"denial carries pre-actions": denialWith(`"preActions":{}`),
+		"denial carries redirect":    denialWith(`"redirectUrl":"https://example.com"`),
+		"denial leading-zero code":   strings.Replace(denial, `"52004"`, `"052004"`, 1),
+		"denial whitespace code":     strings.Replace(denial, `"52004"`, `" 52004 "`, 1),
+		"denial nondigit code":       strings.Replace(denial, `"52004"`, `"denied"`, 1),
+		"unknown field":              strings.TrimSuffix(success, "}") + `,"extra":true}`,
+		"duplicate field":            strings.Replace(success, `"errCode":"0"`, `"errCode":"0","errCode":"0"`, 1),
+		"trailing object":            success + `{}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			result, err := interpretNativeAgentKnockReply(
+				&relayknock.Reply{Type: relayknock.TypeACK, Body: []byte(body)},
+				"resource-public-key", expectation,
+			)
+			if result != nil || !errors.Is(err, ErrMalformedReply) {
+				t.Fatalf("strict registered-agent ACK = %#v, %v; want malformed", result, err)
+			}
+		})
+	}
+}
+
+func TestInterpretNativeAgentKnockReply_RejectsInvalidSessionEnvelope(t *testing.T) {
+	base := `"resHost":{"resource-public-key":"frps.cell0.example:7000"},"agentAddr":"203.0.113.9:49152","acTokens":{"resource-public-key":"ac-secret"}`
+	tests := map[string]string{
+		"missing session id":    `{"errCode":"0","opnTime":900,` + base + `}`,
+		"zero session id":       `{"errCode":"0","sessId":0,"opnTime":900,` + base + `}`,
+		"null session id":       `{"errCode":"0","sessId":null,"opnTime":900,` + base + `}`,
+		"negative session id":   `{"errCode":"0","sessId":-1,"opnTime":900,` + base + `}`,
+		"string session id":     `{"errCode":"0","sessId":"123","opnTime":900,` + base + `}`,
+		"fraction session id":   `{"errCode":"0","sessId":1.5,"opnTime":900,` + base + `}`,
+		"exponent session id":   `{"errCode":"0","sessId":1e2,"opnTime":900,` + base + `}`,
+		"session id overflow":   `{"errCode":"0","sessId":18446744073709551616,"opnTime":900,` + base + `}`,
+		"duplicate session id":  `{"errCode":"0","sessId":123,"sessId":124,"opnTime":900,` + base + `}`,
+		"zero open time":        `{"errCode":"0","sessId":123,"opnTime":0,` + base + `}`,
+		"open time over uint32": `{"errCode":"0","sessId":123,"opnTime":4294967296,` + base + `}`,
+	}
+	for name, body := range tests {
+		t.Run(name, func(t *testing.T) {
+			result, err := interpretNativeAgentKnockReply(&relayknock.Reply{Type: relayknock.TypeACK, Body: []byte(body)}, "resource-public-key")
+			if result != nil || !errors.Is(err, ErrMalformedReply) {
+				t.Fatalf("invalid session envelope = %#v, %v; want ErrMalformedReply", result, err)
+			}
+		})
+	}
+}
+
+func TestInterpretNativeAgentKnockReply_DenyRequiresSessionIDOmission(t *testing.T) {
+	for name, body := range map[string]string{
+		"nonzero":   `{"errCode":"52004","sessId":123,"opnTime":0}`,
+		"zero":      `{"errCode":"52004","sessId":0,"opnTime":0}`,
+		"null":      `{"errCode":"52004","sessId":null,"opnTime":0}`,
+		"string":    `{"errCode":"52004","sessId":"123","opnTime":0}`,
+		"duplicate": `{"errCode":"52004","sessId":0,"sessId":0,"opnTime":0}`,
+		"omitted":   `{"errCode":"52004","opnTime":0}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := interpretNativeAgentKnockReply(&relayknock.Reply{Type: relayknock.TypeACK, Body: []byte(body)}, "resource-public-key")
+			if name != "omitted" {
+				if !errors.Is(err, ErrMalformedReply) {
+					t.Fatalf("deny with session error = %v, want ErrMalformedReply", err)
+				}
+				return
+			}
+			var deny *ServerDenyError
+			if !errors.As(err, &deny) || deny.ErrCode != "52004" {
+				t.Fatalf("deny with omitted session = %v, want ServerDenyError", err)
+			}
+		})
+	}
+}
+
+func TestInterpretNativeAgentKnockReply_DenyRequiresCanonicalZeroOpenTime(t *testing.T) {
+	for name, body := range map[string]string{
+		"missing":   `{"errCode":"52004"}`,
+		"nonzero":   `{"errCode":"52004","opnTime":1}`,
+		"null":      `{"errCode":"52004","opnTime":null}`,
+		"string":    `{"errCode":"52004","opnTime":"0"}`,
+		"fraction":  `{"errCode":"52004","opnTime":0.0}`,
+		"overflow":  `{"errCode":"52004","opnTime":4294967296}`,
+		"duplicate": `{"errCode":"52004","opnTime":0,"opnTime":0}`,
+		"zero":      `{"errCode":"52004","opnTime":0}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := interpretNativeAgentKnockReply(&relayknock.Reply{Type: relayknock.TypeACK, Body: []byte(body)}, "resource-public-key")
+			if name != "zero" {
+				if !errors.Is(err, ErrMalformedReply) {
+					t.Fatalf("deny with invalid open time error = %v, want ErrMalformedReply", err)
+				}
+				return
+			}
+			var deny *ServerDenyError
+			if !errors.As(err, &deny) || deny.ErrCode != "52004" {
+				t.Fatalf("deny with canonical zero open time = %v, want ServerDenyError", err)
+			}
+		})
+	}
+}
+
+func TestInterpretNativeAgentKnockReply_AcceptsMaxUint32OpenTime(t *testing.T) {
+	body := []byte(`{"errCode":"0","sessId":123,"opnTime":4294967295,"resHost":{"resource-public-key":"frps.cell0.example:7000"},"agentAddr":"203.0.113.9:49152","acTokens":{"resource-public-key":"ac-secret"}}`)
+	result, err := interpretNativeAgentKnockReply(&relayknock.Reply{Type: relayknock.TypeACK, Body: body}, "resource-public-key")
+	if err != nil || result == nil || result.OpenTime != ^uint32(0) {
+		t.Fatalf("max uint32 open time = %#v, %v; want accepted", result, err)
+	}
+}
+
+func TestNativeKnockResultFormattingRedactsToken(t *testing.T) {
+	result := NativeKnockResult{ACToken: "ac-secret", ResourceHost: "frps.example:7000", OpenTime: 120, SessionID: 123, AgentAddr: "203.0.113.9:49152"}
+	for _, formatted := range []string{fmt.Sprint(result), fmt.Sprintf("%#v", result)} {
+		if strings.Contains(formatted, result.ACToken) || !strings.Contains(formatted, "SessionID:123") {
+			t.Fatalf("formatted result = %q, want redacted token and visible session id", formatted)
+		}
 	}
 }
 
@@ -3586,7 +3851,7 @@ func TestRefreshAgentRuntime_PersistsRevisionedEndpointAndKeyRotationForNextKnoc
 		[]runtimeUDPStep{{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: refreshResult}},
 		nil,
 	)
-	knockBody := `{"errCode":"0","resHost":{"resource-public-key":"frps.cell0-r2.example:7000"},"opnTime":900,"agentAddr":"203.0.113.9:49152","acTokens":{"resource-public-key":"ac-rotated"},"preActions":{"resource-public-key":null}}`
+	knockBody := `{"errCode":"0","sessId":123,"cellId":"cell0","sessIssuedAtMillis":1800000000000,"runId":"0123456789abcdef","runAttempt":1,"resHost":{"resource-public-key":"frps.cell0-r2.example:7000"},"opnTime":900,"agentAddr":"203.0.113.9:49152","acTokens":{"resource-public-key":"ac-rotated"},"preActions":{"resource-public-key":null}}`
 	rotatedCell := newRuntimeUDPServer(t, rotatedPrivateBytes, assignmentHex(t, contract.Keys.Agent.StaticPubHex),
 		runtimeUDPStep{requestType: relayknock.TypeKnock, replyType: relayknock.TypeACK, replyBody: knockBody})
 	rotatedAddress := netip.MustParseAddr("11.11.11.11")
@@ -3621,7 +3886,7 @@ func TestRefreshAgentRuntime_PersistsRevisionedEndpointAndKeyRotationForNextKnoc
 	if len(agentPrivate) != x25519key.Size {
 		t.Fatalf("refreshed runtime returned private key length = %d, want %d", len(agentPrivate), x25519key.Size)
 	}
-	result, err := KnockRegisteredAgent(context.Background(), binding, agentPrivate, "resource-public-key", NativeKnockOptions{RunID: "0123456789abcdef"},
+	result, err := KnockRegisteredAgent(context.Background(), binding, agentPrivate, "resource-public-key", NativeKnockOptions{RunID: "0123456789abcdef", RunAttempt: 1},
 		WithAgentRuntimeUDPResolver(f.resolver), WithAgentRuntimeUDPDialer(f.dialer), WithAgentRuntimeUDPBounds(runtimeReplyTimeout, 1))
 	if err != nil || result == nil || result.ACToken != "ac-rotated" || result.ResourceHost != "frps.cell0-r2.example:7000" {
 		t.Fatalf("knock after endpoint/key rotation = %#v, %v", result, err)
@@ -3720,7 +3985,7 @@ func TestRefreshAgentRuntime_AdoptsAuthenticatedReassignmentForNextKnock(t *test
 		[]runtimeUDPStep{{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: rewriteRefreshAssignment(t, contract, target)}},
 		nil,
 	)
-	knockBody := `{"errCode":"0","resHost":{"resource-public-key":"frps.cell1.example:7000"},"opnTime":900,"agentAddr":"203.0.113.9:49152","acTokens":{"resource-public-key":"ac-cell1"},"preActions":{"resource-public-key":null}}`
+	knockBody := `{"errCode":"0","sessId":123,"cellId":"cell1","sessIssuedAtMillis":1800000000000,"runId":"0123456789abcdef","runAttempt":1,"resHost":{"resource-public-key":"frps.cell1.example:7000"},"opnTime":900,"agentAddr":"203.0.113.9:49152","acTokens":{"resource-public-key":"ac-cell1"},"preActions":{"resource-public-key":null}}`
 	cell1 := newRuntimeUDPServer(t, cell1PrivateBytes, assignmentHex(t, contract.Keys.Agent.StaticPubHex),
 		runtimeUDPStep{requestType: relayknock.TypeKnock, replyType: relayknock.TypeACK, replyBody: knockBody})
 	cell1Address := netip.MustParseAddr("11.11.11.11")
@@ -3760,7 +4025,7 @@ func TestRefreshAgentRuntime_AdoptsAuthenticatedReassignmentForNextKnock(t *test
 
 	agentPrivate := binding.TakeDeviceStaticPrivateKey()
 	defer wipeBytes(agentPrivate)
-	result, err := KnockRegisteredAgent(context.Background(), binding, agentPrivate, "resource-public-key", NativeKnockOptions{RunID: "0123456789abcdef"},
+	result, err := KnockRegisteredAgent(context.Background(), binding, agentPrivate, "resource-public-key", NativeKnockOptions{RunID: "0123456789abcdef", RunAttempt: 1},
 		WithAgentRuntimeUDPResolver(f.resolver), WithAgentRuntimeUDPDialer(f.dialer), WithAgentRuntimeUDPBounds(runtimeReplyTimeout, 1))
 	if err != nil || result == nil || result.ACToken != "ac-cell1" || result.ResourceHost != "frps.cell1.example:7000" {
 		t.Fatalf("knock after reassignment = %#v, %v", result, err)
@@ -4103,12 +4368,12 @@ func TestNativeRuntimeContractViolationErrorsRedactAllProducerTextChannels(t *te
 		assertRedacted(name, err, ErrRegisterReplyMalformed)
 	}
 
-	knockSuccess := `{"errCode":"0","resHost":{"resource-public-key":"frps.cell0.example:7000"},"opnTime":900,"agentAddr":"203.0.113.9:49152","acTokens":{"resource-public-key":"ac-secret"},"preActions":{"resource-public-key":null}}`
+	knockSuccess := `{"errCode":"0","sessId":123,"cellId":"cell0","sessIssuedAtMillis":1800000000000,"runId":"0123456789abcdef","runAttempt":1,"resHost":{"resource-public-key":"frps.cell0.example:7000"},"opnTime":900,"agentAddr":"203.0.113.9:49152","acTokens":{"resource-public-key":"ac-secret"},"preActions":{"resource-public-key":null}}`
 	for name, body := range map[string]string{
 		"knock arbitrary errCode":    fmt.Sprintf(`{"errCode":%q}`, enrollmentSecret),
 		"knock unknown field name":   fmt.Sprintf(`{%q:true,%s`, deviceSecret, knockSuccess[1:]),
 		"knock duplicate field name": fmt.Sprintf(`{%q:1,%q:2,%s`, ticketSecret, ticketSecret, knockSuccess[1:]),
-		"knock map entry key":        fmt.Sprintf(`{"errCode":"0","resHost":{},"opnTime":1,"agentAddr":"203.0.113.9:49152","acTokens":{%q:{}},"preActions":{}}`, enrollmentSecret),
+		"knock map entry key":        fmt.Sprintf(`{"errCode":"0","sessId":123,"cellId":"cell0","sessIssuedAtMillis":1800000000000,"runId":"0123456789abcdef","runAttempt":1,"resHost":{},"opnTime":1,"agentAddr":"203.0.113.9:49152","acTokens":{%q:{}},"preActions":{}}`, enrollmentSecret),
 	} {
 		_, err := interpretNativeAgentKnockReply(&relayknock.Reply{Type: relayknock.TypeACK, Body: []byte(body)}, "resource-public-key")
 		assertRedacted(name, err, ErrMalformedReply)
@@ -4589,14 +4854,14 @@ func seedSessionLease(t *testing.T, f *runtimeFixture, contract *conformance.Age
 func sessionKnockStep() runtimeUDPStep {
 	return runtimeUDPStep{
 		requestType: relayknock.TypeKnock, replyType: relayknock.TypeACK,
-		replyBody: `{"errCode":"0","resHost":{"resource-public-key":"frps.cell0.example:7000"},"opnTime":900,"agentAddr":"203.0.113.9:49152","acTokens":{"resource-public-key":"ac-session"},"preActions":{"resource-public-key":null}}`,
+		replyBody: `{"errCode":"0","sessId":123,"cellId":"cell0","sessIssuedAtMillis":1800000000000,"runId":"0123456789abcdef","runAttempt":1,"resHost":{"resource-public-key":"frps.cell0.example:7000"},"opnTime":900,"agentAddr":"203.0.113.9:49152","acTokens":{"resource-public-key":"ac-session"},"preActions":{"resource-public-key":null}}`,
 	}
 }
 
 func (f *runtimeFixture) knock(t *testing.T, binding *AgentRuntimeBinding, key []byte) (*NativeKnockResult, error) {
 	t.Helper()
 	return KnockRegisteredAgent(context.Background(), binding, key, "resource-public-key",
-		NativeKnockOptions{RunID: "0123456789abcdef"},
+		NativeKnockOptions{RunID: "0123456789abcdef", RunAttempt: 1},
 		WithAgentRuntimeUDPResolver(f.resolver), WithAgentRuntimeUDPDialer(f.dialer), WithAgentRuntimeUDPBounds(runtimeReplyTimeout, 1))
 }
 
@@ -4688,7 +4953,7 @@ func TestKnockRegisteredAgent_FollowsRelocationMidSession(t *testing.T) {
 	cell1 := newRuntimeUDPServer(t, cell1PrivateBytes, assignmentHex(t, contract.Keys.Agent.StaticPubHex),
 		runtimeUDPStep{
 			requestType: relayknock.TypeKnock, replyType: relayknock.TypeACK,
-			replyBody: `{"errCode":"0","resHost":{"resource-public-key":"frps.cell1.example:7000"},"opnTime":900,"agentAddr":"203.0.113.9:49152","acTokens":{"resource-public-key":"ac-cell1"},"preActions":{"resource-public-key":null}}`,
+			replyBody: `{"errCode":"0","sessId":123,"cellId":"cell1","sessIssuedAtMillis":1800000000000,"runId":"0123456789abcdef","runAttempt":1,"resHost":{"resource-public-key":"frps.cell1.example:7000"},"opnTime":900,"agentAddr":"203.0.113.9:49152","acTokens":{"resource-public-key":"ac-cell1"},"preActions":{"resource-public-key":null}}`,
 		})
 	cell1Address := netip.MustParseAddr("11.11.11.11")
 	f.resolver.hosts[target.Endpoint.Host] = cell1Address
@@ -5774,9 +6039,20 @@ func TestRegisteredAgentSessionControl_RejectsInvalidArgumentsBeforeIO(t *testin
 			}, test.transportOpts...)
 
 			_, knockErr := KnockRegisteredAgent(context.Background(), binding, key, "resource-public-key",
-				NativeKnockOptions{RunID: "0123456789abcdef"}, opts...)
-			exitErr := ExitRegisteredAgentSession(context.Background(), binding, key, "resource-public-key",
-				NativeKnockOptions{RunID: "0123456789abcdef"}, opts...)
+				NativeKnockOptions{RunID: "0123456789abcdef", RunAttempt: 1}, opts...)
+			receipt := NativeSessionReceipt{}
+			if binding != nil {
+				endpoint, endpointErr := assignmentNativeEndpoint(binding.assignment())
+				if endpointErr != nil {
+					t.Fatal(endpointErr)
+				}
+				receipt = NativeSessionReceipt{
+					CellID: "cell0", SessionID: 123, SessionIssuedAtMillis: 1_800_000_000_000,
+					RunID: "0123456789abcdef", RunAttempt: 1,
+					agentID: binding.authoritativeAgentID, endpoint: endpoint,
+				}
+			}
+			_, exitErr := RetireRegisteredAgentSession(context.Background(), binding, key, receipt, opts...)
 			for entryPoint, err := range map[string]error{"knock": knockErr, "exit": exitErr} {
 				if !errors.Is(err, ErrInvalidNativeKnockInput) || !strings.Contains(err.Error(), test.wantMessage) {
 					t.Fatalf("%s = %v, want ErrInvalidNativeKnockInput containing %q", entryPoint, err, test.wantMessage)
@@ -5789,26 +6065,37 @@ func TestRegisteredAgentSessionControl_RejectsInvalidArgumentsBeforeIO(t *testin
 	}
 }
 
-// A clean exit is the documented end of every cycle, so its own failures have to
-// stay classified: a rejected body must not look like a transport fault, and a
-// transport fault must arrive in the same normalized class a knock would report.
-func TestExitRegisteredAgentSession_ClassifiesBodyAndTransportFailures(t *testing.T) {
+func TestRetireRegisteredAgentSession_ClassifiesReceiptAndTransportFailures(t *testing.T) {
 	contract := loadAssignmentFixture(t)
-
-	t.Run("rejected session body sends nothing", func(t *testing.T) {
+	validReceipt := func(t *testing.T, binding *AgentRuntimeBinding) NativeSessionReceipt {
+		t.Helper()
+		endpoint, err := assignmentNativeEndpoint(binding.assignment())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return NativeSessionReceipt{
+			CellID: "cell0", SessionID: 123, SessionIssuedAtMillis: 1_800_000_000_000,
+			RunID: "0123456789abcdef", RunAttempt: 1,
+			agentID: binding.authoritativeAgentID, endpoint: endpoint,
+		}
+	}
+	t.Run("rejected session receipt sends nothing", func(t *testing.T) {
 		f := newRuntimeFixture(t, nil, []runtimeUDPStep{sessionKnockStep()})
 		seedSessionLease(t, f, contract, time.Now().Add(12*time.Hour))
 		binding, key := openSessionBinding(t, f)
-
-		for name, opts := range map[string]NativeKnockOptions{
-			"missing run id":   {},
-			"malformed run id": {RunID: "not-a-run-id"},
+		for name, mutate := range map[string]func(*NativeSessionReceipt){
+			"missing run id":           func(receipt *NativeSessionReceipt) { receipt.RunID = "" },
+			"malformed run id":         func(receipt *NativeSessionReceipt) { receipt.RunID = "not-a-run-id" },
+			"missing run attempt":      func(receipt *NativeSessionReceipt) { receipt.RunAttempt = 0 },
+			"missing routing snapshot": func(receipt *NativeSessionReceipt) { receipt.endpoint = nativeudp.Endpoint{} },
 		} {
 			t.Run(name, func(t *testing.T) {
-				err := ExitRegisteredAgentSession(context.Background(), binding, key, "resource-public-key", opts,
+				receipt := validReceipt(t, binding)
+				mutate(&receipt)
+				_, err := RetireRegisteredAgentSession(context.Background(), binding, key, receipt,
 					WithAgentRuntimeUDPResolver(f.resolver), WithAgentRuntimeUDPDialer(f.dialer))
 				if !errors.Is(err, ErrInvalidNativeKnockInput) {
-					t.Fatalf("exit with a rejected body = %v, want ErrInvalidNativeKnockInput", err)
+					t.Fatalf("retire with a rejected receipt = %v, want ErrInvalidNativeKnockInput", err)
 				}
 			})
 		}
@@ -5816,20 +6103,14 @@ func TestExitRegisteredAgentSession_ClassifiesBodyAndTransportFailures(t *testin
 			t.Fatalf("rejected exit body reached a cell %d times", len(f.cellUDP.snapshot()))
 		}
 	})
-
 	t.Run("silent cell normalizes the transport failure", func(t *testing.T) {
 		f := newRuntimeFixture(t, nil, []runtimeUDPStep{{requestType: relayknock.TypeExit, noReply: true}})
 		seedSessionLease(t, f, contract, time.Now().Add(12*time.Hour))
 		binding, key := openSessionBinding(t, f)
-
-		err := ExitRegisteredAgentSession(context.Background(), binding, key, "resource-public-key",
-			NativeKnockOptions{RunID: "0123456789abcdef"},
+		_, err := RetireRegisteredAgentSession(context.Background(), binding, key, validReceipt(t, binding),
 			WithAgentRuntimeUDPResolver(f.resolver), WithAgentRuntimeUDPDialer(f.dialer),
 			WithAgentRuntimeUDPBounds(200*time.Millisecond, 1))
-		if err == nil || errors.Is(err, ErrInvalidNativeKnockInput) {
-			t.Fatalf("exit against a silent cell = %v, want a transport failure", err)
-		}
-		if !errors.Is(err, nativeudp.ErrTransport) {
+		if err == nil || errors.Is(err, ErrInvalidNativeKnockInput) || !errors.Is(err, nativeudp.ErrTransport) {
 			t.Fatalf("exit transport failure = %v, want nativeudp.ErrTransport", err)
 		}
 		if got := len(f.cellUDP.snapshot()); got != 1 {
