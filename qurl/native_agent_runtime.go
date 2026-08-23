@@ -1,6 +1,7 @@
 package qurl
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdh"
 	"crypto/rand"
@@ -2023,11 +2024,12 @@ func ensureRefreshAssignmentContinuity(previous, current *AgentAssignment, adopt
 // String and GoString; callers remain responsible for explicit field access or
 // serialization.
 type NativeKnockResult struct {
-	ACToken      string
-	ResourceHost string
-	OpenTime     uint32
-	SessionID    uint64
-	AgentAddr    string
+	ACToken        string
+	ResourceHost   string
+	OpenTime       uint32
+	SessionID      uint64
+	SessionReceipt NativeSessionReceipt
+	AgentAddr      string
 }
 
 func (r NativeKnockResult) String() string {
@@ -2036,6 +2038,30 @@ func (r NativeKnockResult) String() string {
 
 // GoString provides the same token redaction for %#v formatting.
 func (r NativeKnockResult) GoString() string { return r.String() }
+
+// NativeSessionReceipt is the immutable server-owned authority for retiring
+// exactly one admitted session. The routing snapshot is intentionally private:
+// retirement returns to the server identity that issued the receipt even if a
+// later Hub refresh moves the binding to another cell.
+type NativeSessionReceipt struct {
+	CellID                string
+	SessionID             uint64
+	SessionIssuedAtMillis int64
+	RunID                 string
+	RunAttempt            uint64
+
+	agentID  string
+	endpoint nativeudp.Endpoint
+}
+
+// NativeSessionRetirement reports the durable close accepted by the server.
+// State is "closing" while AC cleanup is in progress and "closed" after the
+// replay-safe terminal transition.
+type NativeSessionRetirement struct {
+	SessionReceipt NativeSessionReceipt
+	CloseEventID   string
+	State          string
+}
 
 // KnockRegisteredAgent sends one caller-correlated NHP_KNK directly to the
 // binding's assigned cell and returns only the requested resource's admission.
@@ -2048,7 +2074,7 @@ func (r NativeKnockResult) GoString() string { return r.String() }
 // the pinned server key plus COK cookie/trxId continuity keeps a cross-replica
 // RKN bound to the initiating KNK.
 func KnockRegisteredAgent(ctx context.Context, binding *AgentRuntimeBinding, deviceStaticPrivateKey []byte, knockResourceID string, opts NativeKnockOptions, transportOpts ...AgentRuntimeUDPOption) (*NativeKnockResult, error) {
-	cfg, endpoint, err := registeredAgentSessionEndpoint(ctx, binding, deviceStaticPrivateKey, transportOpts)
+	cfg, endpoint, assignment, err := registeredAgentSessionEndpointWithAssignment(ctx, binding, deviceStaticPrivateKey, transportOpts)
 	if err != nil {
 		return nil, err
 	}
@@ -2069,42 +2095,55 @@ func KnockRegisteredAgent(ctx context.Context, binding *AgentRuntimeBinding, dev
 	if err != nil {
 		return nil, normalizeRelayError(err, ErrMalformedReply)
 	}
-	return consumeNativeAgentKnockReply(reply, knockResourceID)
+	result, err := consumeNativeAgentKnockReply(reply, knockResourceID, nativeAgentKnockExpectation{
+		CellID: assignment.CellID, RunID: opts.RunID, RunAttempt: opts.RunAttempt,
+	})
+	if err != nil {
+		return nil, err
+	}
+	result.SessionReceipt.agentID = binding.authoritativeAgentID
+	result.SessionReceipt.endpoint = cloneNativeUDPEndpoint(endpoint)
+	return result, nil
 }
 
-// ExitRegisteredAgentSession sends one clean NHP_EXT for the caller-owned
-// registered-agent session. It uses the same validation and pinned assigned-cell
-// endpoint as KnockRegisteredAgent, never contacts the Hub or any HTTP surface,
-// and accepts only the authenticated EXT-correlated ACK. The v0.6 EXT ACK uses
-// the same resource-admission envelope as KNK/RKN. Its decrypted body buffer is
-// wiped after strict validation and the parsed result is discarded; clean exit
-// never changes durable enrollment or assignment state.
-func ExitRegisteredAgentSession(ctx context.Context, binding *AgentRuntimeBinding, deviceStaticPrivateKey []byte, knockResourceID string, opts NativeKnockOptions, transportOpts ...AgentRuntimeUDPOption) error {
-	cfg, endpoint, err := registeredAgentSessionEndpoint(ctx, binding, deviceStaticPrivateKey, transportOpts)
+// RetireRegisteredAgentSession sends one authenticated exact-session NHP_EXT
+// using the immutable receipt returned by KnockRegisteredAgent. It never opens
+// a replacement admission and never follows a later assignment to another cell.
+func RetireRegisteredAgentSession(ctx context.Context, binding *AgentRuntimeBinding, deviceStaticPrivateKey []byte,
+	receipt NativeSessionReceipt, transportOpts ...AgentRuntimeUDPOption,
+) (*NativeSessionRetirement, error) {
+	cfg, endpoint, err := registeredAgentRetirementEndpoint(binding, deviceStaticPrivateKey, receipt, transportOpts)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	body, err := marshalNativeSessionApplicationBody(binding.AgentID, knockResourceID, opts, nhpEXTHeaderType)
+	body, err := marshalNativeExactSessionCloseBody(receipt)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer wipeBytes(body)
 	reply, err := nativeudp.Exit(ctx, endpoint, body, cfg.udpOptions(deviceStaticPrivateKey))
 	if err != nil {
-		return normalizeRelayError(err, ErrMalformedReply)
+		return nil, normalizeRelayError(err, ErrMalformedReply)
 	}
-	// NHP 1.1 leaves the clear header type outside the authenticated transcript.
-	// Reuse strict ACK parsing so the protected body remains the session and
-	// resource authority for this resource-scoped close.
-	_, err = consumeNativeAgentKnockReply(reply, knockResourceID)
-	return err
+	return consumeNativeExactSessionCloseReply(reply, receipt)
 }
 
-// registeredAgentSessionEndpoint is the common no-I/O admission gate for
-// native KNK/RKN and EXT. It intentionally validates the binding snapshot
-// before body construction, DNS, or socket creation so every session-control
-// operation has the same trust and placement boundary.
-func registeredAgentSessionEndpoint(ctx context.Context, binding *AgentRuntimeBinding, deviceStaticPrivateKey []byte, transportOpts []AgentRuntimeUDPOption) (*nativeAgentRuntimeConfig, nativeudp.Endpoint, error) {
+func cloneNativeUDPEndpoint(endpoint nativeudp.Endpoint) nativeudp.Endpoint {
+	return nativeudp.Endpoint{Host: endpoint.Host, Port: endpoint.Port, ServerStaticPub: bytes.Clone(endpoint.ServerStaticPub)}
+}
+
+func validateNativeSessionReceipt(receipt NativeSessionReceipt) error {
+	if receipt.CellID == "" || receipt.SessionID == 0 || receipt.SessionIssuedAtMillis <= 0 ||
+		receipt.RunAttempt == 0 || ValidateCycleRunID(receipt.RunID) != nil || receipt.agentID == "" ||
+		receipt.endpoint.Host == "" || receipt.endpoint.Port <= 0 || len(receipt.endpoint.ServerStaticPub) != x25519key.Size {
+		return fmt.Errorf("%w: invalid immutable session receipt", ErrInvalidNativeKnockInput)
+	}
+	return nil
+}
+
+func registeredAgentRetirementEndpoint(binding *AgentRuntimeBinding, deviceStaticPrivateKey []byte,
+	receipt NativeSessionReceipt, transportOpts []AgentRuntimeUDPOption,
+) (*nativeAgentRuntimeConfig, nativeudp.Endpoint, error) {
 	if binding == nil {
 		return nil, nativeudp.Endpoint{}, fmt.Errorf("%w: runtime binding must not be nil", ErrInvalidNativeKnockInput)
 	}
@@ -2113,6 +2152,12 @@ func registeredAgentSessionEndpoint(ctx context.Context, binding *AgentRuntimeBi
 	}
 	if err := validateRuntimeBindingIdentity(binding, deviceStaticPrivateKey); err != nil {
 		return nil, nativeudp.Endpoint{}, err
+	}
+	if err := validateNativeSessionReceipt(receipt); err != nil {
+		return nil, nativeudp.Endpoint{}, err
+	}
+	if receipt.agentID != binding.authoritativeAgentID {
+		return nil, nativeudp.Endpoint{}, fmt.Errorf("%w: session receipt belongs to another agent", ErrInvalidNativeKnockInput)
 	}
 	cfg := defaultNativeAgentRuntimeConfig()
 	for _, opt := range transportOpts {
@@ -2123,21 +2168,54 @@ func registeredAgentSessionEndpoint(ctx context.Context, binding *AgentRuntimeBi
 			return nil, nativeudp.Endpoint{}, fmt.Errorf("%w: native UDP transport option: %w", ErrInvalidNativeKnockInput, err)
 		}
 	}
+	return cfg, cloneNativeUDPEndpoint(receipt.endpoint), nil
+}
+
+// registeredAgentSessionEndpoint is the common no-I/O admission gate for
+// native KNK/RKN and EXT. It intentionally validates the binding snapshot
+// before body construction, DNS, or socket creation so every session-control
+// operation has the same trust and placement boundary.
+func registeredAgentSessionEndpoint(ctx context.Context, binding *AgentRuntimeBinding, deviceStaticPrivateKey []byte, transportOpts []AgentRuntimeUDPOption) (*nativeAgentRuntimeConfig, nativeudp.Endpoint, error) {
+	cfg, endpoint, _, err := registeredAgentSessionEndpointWithAssignment(ctx, binding, deviceStaticPrivateKey, transportOpts)
+	return cfg, endpoint, err
+}
+
+func registeredAgentSessionEndpointWithAssignment(ctx context.Context, binding *AgentRuntimeBinding, deviceStaticPrivateKey []byte,
+	transportOpts []AgentRuntimeUDPOption,
+) (*nativeAgentRuntimeConfig, nativeudp.Endpoint, *AgentAssignment, error) {
+	if binding == nil {
+		return nil, nativeudp.Endpoint{}, nil, fmt.Errorf("%w: runtime binding must not be nil", ErrInvalidNativeKnockInput)
+	}
+	if len(deviceStaticPrivateKey) != x25519key.Size {
+		return nil, nativeudp.Endpoint{}, nil, fmt.Errorf("%w: device static private key must be %d bytes", ErrInvalidNativeKnockInput, x25519key.Size)
+	}
+	if err := validateRuntimeBindingIdentity(binding, deviceStaticPrivateKey); err != nil {
+		return nil, nativeudp.Endpoint{}, nil, err
+	}
+	cfg := defaultNativeAgentRuntimeConfig()
+	for _, opt := range transportOpts {
+		if opt == nil {
+			return nil, nativeudp.Endpoint{}, nil, fmt.Errorf("%w: nil native UDP transport option", ErrInvalidNativeKnockInput)
+		}
+		if err := opt.applyAgentRuntimeOption(cfg); err != nil {
+			return nil, nativeudp.Endpoint{}, nil, fmt.Errorf("%w: native UDP transport option: %w", ErrInvalidNativeKnockInput, err)
+		}
+	}
 	// Renewal and the tamper check happen together against one placement. A
 	// caller holding a single binding for weeks never has to think about the
 	// lease; only an expired lease the Hub could not renew fails the exchange.
 	assignment, err := binding.liveSessionAssignment(ctx, deviceStaticPrivateKey, cfg.clock())
 	if err != nil {
-		return nil, nativeudp.Endpoint{}, err
+		return nil, nativeudp.Endpoint{}, nil, err
 	}
 	if err := assignment.Validate(cfg.clock()); err != nil {
-		return nil, nativeudp.Endpoint{}, fmt.Errorf("%w: runtime assignment: %w", ErrInvalidNativeKnockInput, err)
+		return nil, nativeudp.Endpoint{}, nil, fmt.Errorf("%w: runtime assignment: %w", ErrInvalidNativeKnockInput, err)
 	}
 	endpoint, err := assignmentNativeEndpoint(assignment)
 	if err != nil {
-		return nil, nativeudp.Endpoint{}, err
+		return nil, nativeudp.Endpoint{}, nil, err
 	}
-	return cfg, endpoint, nil
+	return cfg, endpoint, assignment, nil
 }
 
 func validateRuntimeBindingIdentity(binding *AgentRuntimeBinding, deviceStaticPrivateKey []byte) error {
@@ -2163,16 +2241,38 @@ func validateRuntimeBindingIdentity(binding *AgentRuntimeBinding, deviceStaticPr
 }
 
 type nativeAgentKnockACK struct {
-	ErrCode          nativeJSONValue[string] `json:"errCode"`
-	SessionID        nhpSessionIDJSON        `json:"sessId"`
-	ErrMsg           nativeJSONValue[string] `json:"errMsg"`
-	ResourceHost     nativeJSONStringMap     `json:"resHost"`
-	OpenTime         nhpOpenTimeJSON         `json:"opnTime"`
-	ASPToken         nativeJSONValue[string] `json:"aspToken"`
-	AgentAddr        nativeJSONValue[string] `json:"agentAddr"`
-	ACTokens         nativeJSONStringMap     `json:"acTokens"`
-	PreAccessActions nativePreAccessActions  `json:"preActions"`
-	RedirectURL      nativeJSONValue[string] `json:"redirectUrl"`
+	ErrCode               nativeJSONValue[string] `json:"errCode"`
+	SessionID             nhpSessionIDJSON        `json:"sessId"`
+	CellID                nativeJSONValue[string] `json:"cellId"`
+	SessionIssuedAtMillis nativeJSONValue[int64]  `json:"sessIssuedAtMillis"`
+	RunID                 nativeJSONValue[string] `json:"runId"`
+	RunAttempt            nhpSessionIDJSON        `json:"runAttempt"`
+	ErrMsg                nativeJSONValue[string] `json:"errMsg"`
+	ResourceHost          nativeJSONStringMap     `json:"resHost"`
+	OpenTime              nhpOpenTimeJSON         `json:"opnTime"`
+	ASPToken              nativeJSONValue[string] `json:"aspToken"`
+	AgentAddr             nativeJSONValue[string] `json:"agentAddr"`
+	ACTokens              nativeJSONStringMap     `json:"acTokens"`
+	PreAccessActions      nativePreAccessActions  `json:"preActions"`
+	RedirectURL           nativeJSONValue[string] `json:"redirectUrl"`
+}
+
+type nativeAgentKnockExpectation struct {
+	CellID     string
+	RunID      string
+	RunAttempt uint64
+}
+
+type nativeExactSessionCloseACK struct {
+	ErrCode               nativeJSONValue[string] `json:"errCode"`
+	ErrMsg                nativeJSONValue[string] `json:"errMsg"`
+	CellID                nativeJSONValue[string] `json:"cellId"`
+	SessionID             nhpSessionIDJSON        `json:"sessId"`
+	SessionIssuedAtMillis nativeJSONValue[int64]  `json:"sessIssuedAtMillis"`
+	RunID                 nativeJSONValue[string] `json:"runId"`
+	RunAttempt            nhpSessionIDJSON        `json:"runAttempt"`
+	CloseEventID          nativeJSONValue[string] `json:"closeEventId"`
+	State                 nativeJSONValue[string] `json:"state"`
 }
 
 type nativeJSONValue[T any] struct {
@@ -2240,7 +2340,9 @@ func (v *nativePreAccessActions) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-func interpretNativeAgentKnockReply(reply *relayknock.Reply, knockResourceID string) (*NativeKnockResult, error) {
+func interpretNativeAgentKnockReply(reply *relayknock.Reply, knockResourceID string,
+	expectations ...nativeAgentKnockExpectation,
+) (*NativeKnockResult, error) {
 	if reply == nil {
 		return nil, fmt.Errorf("%w: native knock reply is nil", ErrMalformedReply)
 	}
@@ -2267,7 +2369,8 @@ func interpretNativeAgentKnockReply(reply *relayknock.Reply, knockResourceID str
 		return nil, fmt.Errorf("%w: native knock ACK errCode is not canonical", ErrMalformedReply)
 	}
 	if !isSuccessErrCode(ack.ErrCode.Value) {
-		if ack.SessionID.Present {
+		if ack.SessionID.Present || ack.CellID.Present || ack.SessionIssuedAtMillis.Present ||
+			ack.RunID.Present || ack.RunAttempt.Present {
 			return nil, invalidNativeProducerReply(ErrMalformedReply, "native knock deny ACK session id")
 		}
 		if !ack.OpenTime.Present || ack.OpenTime.Value != 0 {
@@ -2317,7 +2420,24 @@ func interpretNativeAgentKnockReply(reply *relayknock.Reply, knockResourceID str
 	if token == "" || host == "" || token != strings.TrimSpace(token) || host != strings.TrimSpace(host) {
 		return nil, fmt.Errorf("%w: success ACK missing canonical token or resource host for requested resource", ErrMalformedReply)
 	}
-	return &NativeKnockResult{ACToken: token, ResourceHost: host, OpenTime: ack.OpenTime.Value, SessionID: ack.SessionID.Value, AgentAddr: ack.AgentAddr.Value}, nil
+	result := &NativeKnockResult{ACToken: token, ResourceHost: host, OpenTime: ack.OpenTime.Value, SessionID: ack.SessionID.Value, AgentAddr: ack.AgentAddr.Value}
+	if len(expectations) > 1 {
+		return nil, fmt.Errorf("%w: multiple native knock expectations", ErrMalformedReply)
+	}
+	if len(expectations) == 1 {
+		expected := expectations[0]
+		if !ack.CellID.Present || !ack.SessionIssuedAtMillis.Present || !ack.RunID.Present || !ack.RunAttempt.Present ||
+			ack.CellID.Value != expected.CellID || ack.CellID.Value == "" || ack.SessionIssuedAtMillis.Value <= 0 ||
+			ack.RunID.Value != expected.RunID || ack.RunAttempt.Value != expected.RunAttempt || expected.RunAttempt == 0 {
+			return nil, invalidNativeProducerReply(ErrMalformedReply, "native knock ACK session receipt")
+		}
+		result.SessionReceipt = NativeSessionReceipt{
+			CellID: ack.CellID.Value, SessionID: ack.SessionID.Value,
+			SessionIssuedAtMillis: ack.SessionIssuedAtMillis.Value,
+			RunID:                 ack.RunID.Value, RunAttempt: ack.RunAttempt.Value,
+		}
+	}
+	return result, nil
 }
 
 // isCanonicalKnockDenyCode reports whether a non-success knock-ACK errCode is
@@ -2337,11 +2457,60 @@ func isCanonicalKnockDenyCode(code string) bool {
 	return true
 }
 
-func consumeNativeAgentKnockReply(reply *relayknock.Reply, knockResourceID string) (*NativeKnockResult, error) {
+func consumeNativeAgentKnockReply(reply *relayknock.Reply, knockResourceID string,
+	expectations ...nativeAgentKnockExpectation,
+) (*NativeKnockResult, error) {
 	if reply != nil {
 		defer wipeBytes(reply.Body)
 	}
-	return interpretNativeAgentKnockReply(reply, knockResourceID)
+	return interpretNativeAgentKnockReply(reply, knockResourceID, expectations...)
+}
+
+func consumeNativeExactSessionCloseReply(reply *relayknock.Reply,
+	receipt NativeSessionReceipt,
+) (*NativeSessionRetirement, error) {
+	if reply != nil {
+		defer wipeBytes(reply.Body)
+	}
+	if reply == nil || !reply.IsACK() {
+		return nil, fmt.Errorf("%w: missing exact session retirement ACK", ErrMalformedReply)
+	}
+	if err := rejectDuplicateJSONFields(reply.Body); err != nil {
+		return nil, invalidNativeProducerReply(ErrMalformedReply, "exact session retirement ACK")
+	}
+	var ack *nativeExactSessionCloseACK
+	if err := strictDecodeJSON(reply.Body, &ack); err != nil || ack == nil || !ack.ErrCode.Present {
+		return nil, invalidNativeProducerReply(ErrMalformedReply, "exact session retirement ACK")
+	}
+	if !isSuccessErrCode(ack.ErrCode.Value) {
+		if ack.CellID.Present || ack.SessionID.Present || ack.SessionIssuedAtMillis.Present ||
+			ack.RunID.Present || ack.RunAttempt.Present || ack.CloseEventID.Present || ack.State.Present ||
+			!isCanonicalKnockDenyCode(ack.ErrCode.Value) {
+			return nil, invalidNativeProducerReply(ErrMalformedReply, "exact session retirement deny ACK")
+		}
+		return nil, &ServerDenyError{ErrCode: ack.ErrCode.Value}
+	}
+	if !ack.CellID.Present || !ack.SessionID.Present || !ack.SessionIssuedAtMillis.Present ||
+		!ack.RunID.Present || !ack.RunAttempt.Present || !ack.CloseEventID.Present || !ack.State.Present ||
+		ack.CellID.Value != receipt.CellID || ack.SessionID.Value != receipt.SessionID ||
+		ack.SessionIssuedAtMillis.Value != receipt.SessionIssuedAtMillis || ack.RunID.Value != receipt.RunID ||
+		ack.RunAttempt.Value != receipt.RunAttempt || !validNativeCloseEventID(ack.CloseEventID.Value) ||
+		(ack.State.Value != "closing" && ack.State.Value != "closed") {
+		return nil, invalidNativeProducerReply(ErrMalformedReply, "exact session retirement success ACK")
+	}
+	return &NativeSessionRetirement{SessionReceipt: receipt, CloseEventID: ack.CloseEventID.Value, State: ack.State.Value}, nil
+}
+
+func validNativeCloseEventID(value string) bool {
+	if len(value) != 32 {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		if (value[i] < '0' || value[i] > '9') && (value[i] < 'a' || value[i] > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // RefreshAgentRuntime refreshes a completed binding only through the pinned Hub

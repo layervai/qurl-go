@@ -2058,7 +2058,7 @@ func validatePublicResourceAndKnockResourceIDWireDistinction(ctx context.Context
 		`{"errCode":"0","list":{"query":"connector_resource","version":1,"agent_id":"qurl-go-identity-wire-proof","connector_id":%q,"resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"found_existing":false}}`,
 		resourceSlug, publicResourceID, routingID, knockResourceID))
 	ackBody := []byte(fmt.Sprintf(
-		`{"errCode":"0","sessId":123,"resHost":{%q:"frps.cell0.example:7000"},"opnTime":900,"agentAddr":"203.0.113.9:49152","acTokens":{%q:"proof-token"},"preActions":{%q:null}}`,
+		`{"errCode":"0","sessId":123,"cellId":"cell0","sessIssuedAtMillis":1800000000000,"runId":"0123456789abcdef","runAttempt":1,"resHost":{%q:"frps.cell0.example:7000"},"opnTime":900,"agentAddr":"203.0.113.9:49152","acTokens":{%q:"proof-token"},"preActions":{%q:null}}`,
 		knockResourceID, knockResourceID, knockResourceID))
 	server := newLoopbackNHPServer(t, cellPriv, agentPub, respondCorrectly, malformedHeaderReplyBytes,
 		loopbackFaultConfig{replyBodies: map[int][]byte{
@@ -2126,7 +2126,7 @@ func validatePublicResourceAndKnockResourceIDWireDistinction(ctx context.Context
 	privateKey := binding.TakeDeviceStaticPrivateKey()
 	defer wipe(privateKey)
 	result, err := qurl.KnockRegisteredAgent(ctx, binding, privateKey, resourceResult.Resource.KnockResourceID,
-		qurl.NativeKnockOptions{RunID: "0123456789abcdef"},
+		qurl.NativeKnockOptions{RunID: "0123456789abcdef", RunAttempt: 1},
 		qurl.WithAgentRuntimeUDPResolver(resolver),
 		qurl.WithAgentRuntimeUDPDialer(dialer),
 		qurl.WithAgentRuntimeUDPBounds(2*time.Second, 1),
@@ -2179,6 +2179,7 @@ func validatePublicResourceAndKnockResourceIDWireDistinction(ctx context.Context
 		AuthServiceID   string `json:"aspId"`
 		KnockResourceID string `json:"resId"`
 		RunID           string `json:"runId"`
+		RunAttempt      uint64 `json:"runAttempt"`
 	}
 	var wireFields map[string]json.RawMessage
 	if err := json.Unmarshal(opened.Body, &wireBody); err != nil {
@@ -2187,7 +2188,7 @@ func validatePublicResourceAndKnockResourceIDWireDistinction(ctx context.Context
 	if err := json.Unmarshal(opened.Body, &wireFields); err != nil {
 		t.Fatalf("decode identity-distinction KNK fields: %v", err)
 	}
-	if len(wireFields) != 6 || wireBody.HeaderType != relayknock.TypeKnock ||
+	if len(wireFields) != 7 || wireBody.HeaderType != relayknock.TypeKnock || wireBody.RunAttempt != 1 ||
 		wireBody.KnockResourceID != knockResourceID ||
 		wireBody.KnockResourceID == publicResourceID ||
 		bytes.Contains(opened.Body, []byte(publicResourceID)) {

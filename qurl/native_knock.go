@@ -29,7 +29,8 @@ var ErrInvalidNativeKnockInput = errors.New("qurl: invalid native knock input")
 // reconnect in that cycle. The native knock runtime validates and carries the
 // value but never generates or normalizes one implicitly.
 type NativeKnockOptions struct {
-	RunID string
+	RunID      string
+	RunAttempt uint64
 }
 
 // nativeAgentKnockBody is the AEAD-protected NHP_KNK application body for a
@@ -47,6 +48,17 @@ type nativeAgentKnockBody struct {
 	AuthServiceID   string `json:"aspId"`
 	KnockResourceID string `json:"resId"`
 	RunID           string `json:"runId"`
+	RunAttempt      uint64 `json:"runAttempt"`
+}
+
+type nativeExactSessionCloseBody struct {
+	HeaderType            int    `json:"headerType"`
+	AuthServiceID         string `json:"aspId"`
+	CellID                string `json:"cellId"`
+	SessionID             uint64 `json:"sessId"`
+	SessionIssuedAtMillis int64  `json:"sessIssuedAtMillis"`
+	RunID                 string `json:"runId"`
+	RunAttempt            uint64 `json:"runAttempt"`
 }
 
 // marshalNativeKnockApplicationBody is the single producer for the registered-
@@ -65,7 +77,7 @@ func marshalNativeKnockApplicationBody(agentID, knockResourceID string, opts Nat
 // an unsupported initiator message.
 func marshalNativeSessionApplicationBody(agentID, knockResourceID string, opts NativeKnockOptions, headerType int) ([]byte, error) {
 	switch headerType {
-	case nhpKNKHeaderType, nhpRKNHeaderType, nhpEXTHeaderType:
+	case nhpKNKHeaderType, nhpRKNHeaderType:
 	default:
 		return nil, fmt.Errorf("%w: unsupported native session header type", ErrInvalidNativeKnockInput)
 	}
@@ -74,6 +86,9 @@ func marshalNativeSessionApplicationBody(agentID, knockResourceID string, opts N
 	// error. ValidateCycleRunID reports only the violated shape.
 	if err := ValidateCycleRunID(opts.RunID); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrInvalidNativeKnockInput, err)
+	}
+	if opts.RunAttempt == 0 {
+		return nil, fmt.Errorf("%w: run attempt must be positive", ErrInvalidNativeKnockInput)
 	}
 	if err := validateNativeKnockIdentity("agent id", agentID); err != nil {
 		return nil, err
@@ -91,9 +106,29 @@ func marshalNativeSessionApplicationBody(agentID, knockResourceID string, opts N
 		AuthServiceID:   agentAspID,
 		KnockResourceID: knockResourceID,
 		RunID:           opts.RunID,
+		RunAttempt:      opts.RunAttempt,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("qurl: encode native knock body: %w", err)
+	}
+	if len(body) > nhpcontract.MaxApplicationBodySize {
+		return nil, fmt.Errorf("%w: encoded body exceeds NHP maximum of %d bytes", ErrInvalidNativeKnockInput, nhpcontract.MaxApplicationBodySize)
+	}
+	return body, nil
+}
+
+func marshalNativeExactSessionCloseBody(receipt NativeSessionReceipt) ([]byte, error) {
+	if err := validateNativeSessionReceipt(receipt); err != nil {
+		return nil, err
+	}
+	body, err := json.Marshal(nativeExactSessionCloseBody{
+		HeaderType: nhpEXTHeaderType, AuthServiceID: agentAspID,
+		CellID: receipt.CellID, SessionID: receipt.SessionID,
+		SessionIssuedAtMillis: receipt.SessionIssuedAtMillis,
+		RunID:                 receipt.RunID, RunAttempt: receipt.RunAttempt,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("qurl: encode exact native session close body: %w", err)
 	}
 	if len(body) > nhpcontract.MaxApplicationBodySize {
 		return nil, fmt.Errorf("%w: encoded body exceeds NHP maximum of %d bytes", ErrInvalidNativeKnockInput, nhpcontract.MaxApplicationBodySize)

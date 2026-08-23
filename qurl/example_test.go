@@ -318,7 +318,7 @@ func ExampleConnectAgentRuntime() {
 	}
 	admission, err := qurl.KnockRegisteredAgent(ctx, binding, devicePrivateKey,
 		connector.Resource.KnockResourceID,
-		qurl.NativeKnockOptions{RunID: runID},
+		qurl.NativeKnockOptions{RunID: runID, RunAttempt: 1},
 	)
 	if err != nil {
 		panic(err)

@@ -12,15 +12,16 @@ import (
 
 	"github.com/layervai/qurl-go/internal/nhpcontract"
 	"github.com/layervai/qurl-go/relayknock"
+	"github.com/layervai/qurl-go/relayknock/nativeudp"
 )
 
 func TestMarshalNativeKnockApplicationBody(t *testing.T) {
 	const runID = "0123456789abcdef"
-	got, err := marshalNativeKnockApplicationBody("agent-01", "connector-01", NativeKnockOptions{RunID: runID})
+	got, err := marshalNativeKnockApplicationBody("agent-01", "connector-01", NativeKnockOptions{RunID: runID, RunAttempt: 1})
 	if err != nil {
 		t.Fatalf("marshalNativeKnockApplicationBody: %v", err)
 	}
-	const want = `{"headerType":1,"usrId":"agent-01","devId":"agent-01","aspId":"agent","resId":"connector-01","runId":"0123456789abcdef"}`
+	const want = `{"headerType":1,"usrId":"agent-01","devId":"agent-01","aspId":"agent","resId":"connector-01","runId":"0123456789abcdef","runAttempt":1}`
 	if string(got) != want {
 		t.Fatalf("native knock body = %s, want %s", got, want)
 	}
@@ -44,30 +45,37 @@ func TestMarshalNativeSessionApplicationBody_ConformanceSessionVectors(t *testin
 			if err := json.Unmarshal([]byte(tc.packet.BodyJSON), &fields); err != nil {
 				t.Fatalf("decode conformance body: %v", err)
 			}
-			got, err := marshalNativeSessionApplicationBody(fields.DeviceID, fields.KnockResourceID, NativeKnockOptions{RunID: fields.RunID}, tc.headerType)
+			got, err := marshalNativeSessionApplicationBody(fields.DeviceID, fields.KnockResourceID, NativeKnockOptions{RunID: fields.RunID, RunAttempt: 1}, tc.headerType)
 			if err != nil {
 				t.Fatalf("marshal session body: %v", err)
 			}
-			if !bytes.Equal(got, []byte(tc.packet.BodyJSON)) {
-				t.Fatalf("session body mismatch:\n got=%s\nwant=%s", got, tc.packet.BodyJSON)
+			want := strings.TrimSuffix(tc.packet.BodyJSON, "}") + `,"runAttempt":1}`
+			if !bytes.Equal(got, []byte(want)) {
+				t.Fatalf("session body mismatch:\n got=%s\nwant=%s", got, want)
 			}
 			if fields.HeaderType != tc.headerType || fields.UserID != fields.DeviceID || fields.AuthServiceID != agentAspID {
 				t.Fatalf("conformance session fields drifted: %#v", fields)
 			}
 		})
 	}
-	exitBody, err := marshalNativeSessionApplicationBody("agent-01", "connector-01", NativeKnockOptions{RunID: "0123456789abcdef"}, nhpEXTHeaderType)
+	exitBody, err := marshalNativeExactSessionCloseBody(NativeSessionReceipt{
+		CellID: "cell0", SessionID: 123, SessionIssuedAtMillis: 1_800_000_000_000,
+		RunID: "0123456789abcdef", RunAttempt: 1, agentID: "agent-01",
+		endpoint: nativeudp.Endpoint{Host: "cell0.nhp.layerv.ai", Port: 62206, ServerStaticPub: make([]byte, 32)},
+	})
 	if err != nil {
 		t.Fatalf("marshal EXT session body: %v", err)
 	}
-	var exitFields nativeAgentKnockBody
+	var exitFields nativeExactSessionCloseBody
 	if err := json.Unmarshal(exitBody, &exitFields); err != nil {
 		t.Fatalf("decode EXT session body: %v", err)
 	}
-	if exitFields.HeaderType != nhpEXTHeaderType || exitFields.KnockResourceID != "connector-01" || exitFields.RunID != "0123456789abcdef" {
-		t.Fatalf("EXT session authority = %#v, want exact resource and run binding", exitFields)
+	if exitFields.HeaderType != nhpEXTHeaderType || exitFields.AuthServiceID != agentAspID ||
+		exitFields.CellID != "cell0" || exitFields.SessionID != 123 || exitFields.RunID != "0123456789abcdef" ||
+		exitFields.RunAttempt != 1 {
+		t.Fatalf("EXT session authority = %#v, want exact immutable receipt", exitFields)
 	}
-	if _, err := marshalNativeSessionApplicationBody("agent-01", "connector-01", NativeKnockOptions{RunID: "0123456789abcdef"}, 7); !errors.Is(err, ErrInvalidNativeKnockInput) {
+	if _, err := marshalNativeSessionApplicationBody("agent-01", "connector-01", NativeKnockOptions{RunID: "0123456789abcdef", RunAttempt: 1}, 7); !errors.Is(err, ErrInvalidNativeKnockInput) {
 		t.Fatalf("unsupported session header error = %v, want ErrInvalidNativeKnockInput", err)
 	}
 }
@@ -105,7 +113,7 @@ func TestInterpretNativeAgentKnockReply_ConformanceSessionACKs(t *testing.T) {
 
 func TestMarshalNativeKnockApplicationBody_RejectsRunIDBeforeOtherInputs(t *testing.T) {
 	secretShapedRunID := "SECRET-UPPERCASE"
-	_, err := marshalNativeKnockApplicationBody("", "", NativeKnockOptions{RunID: secretShapedRunID})
+	_, err := marshalNativeKnockApplicationBody("", "", NativeKnockOptions{RunID: secretShapedRunID, RunAttempt: 1})
 	if !errors.Is(err, ErrInvalidNativeKnockInput) || !errors.Is(err, ErrInvalidCycleRunID) {
 		t.Fatalf("invalid RunID error = %v, want ErrInvalidNativeKnockInput + ErrInvalidCycleRunID", err)
 	}
@@ -139,7 +147,7 @@ func TestMarshalNativeKnockApplicationBody_ValidatesIdentities(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := marshalNativeKnockApplicationBody(tt.agentID, tt.knockResourceID, NativeKnockOptions{RunID: "0123456789abcdef"})
+			_, err := marshalNativeKnockApplicationBody(tt.agentID, tt.knockResourceID, NativeKnockOptions{RunID: "0123456789abcdef", RunAttempt: 1})
 			if !errors.Is(err, ErrInvalidNativeKnockInput) {
 				t.Fatalf("error = %v, want ErrInvalidNativeKnockInput", err)
 			}
@@ -157,11 +165,11 @@ func TestMarshalNativeKnockApplicationBody_AllowsPrintableInternalWhitespace(t *
 	const printableUnicodeSpace = "\u00a0"
 	agentID := "agent " + printableUnicodeSpace + "01"
 	knockResourceID := "connector " + printableUnicodeSpace + "01"
-	got, err := marshalNativeKnockApplicationBody(agentID, knockResourceID, NativeKnockOptions{RunID: "0123456789abcdef"})
+	got, err := marshalNativeKnockApplicationBody(agentID, knockResourceID, NativeKnockOptions{RunID: "0123456789abcdef", RunAttempt: 1})
 	if err != nil {
 		t.Fatalf("marshalNativeKnockApplicationBody: %v", err)
 	}
-	want := `{"headerType":1,"usrId":"` + agentID + `","devId":"` + agentID + `","aspId":"agent","resId":"` + knockResourceID + `","runId":"0123456789abcdef"}`
+	want := `{"headerType":1,"usrId":"` + agentID + `","devId":"` + agentID + `","aspId":"agent","resId":"` + knockResourceID + `","runId":"0123456789abcdef","runAttempt":1}`
 	if string(got) != want {
 		t.Fatalf("native knock body = %s, want %s", got, want)
 	}
@@ -169,12 +177,12 @@ func TestMarshalNativeKnockApplicationBody_AllowsPrintableInternalWhitespace(t *
 
 func TestMarshalNativeKnockApplicationBody_RejectsOversizedEncodedBody(t *testing.T) {
 	const runID = "0123456789abcdef"
-	base, err := marshalNativeKnockApplicationBody("a", "r", NativeKnockOptions{RunID: runID})
+	base, err := marshalNativeKnockApplicationBody("a", "r", NativeKnockOptions{RunID: runID, RunAttempt: 1})
 	if err != nil {
 		t.Fatalf("marshal base body: %v", err)
 	}
 	resourceAtLimit := strings.Repeat("r", nhpcontract.MaxApplicationBodySize-len(base)+1)
-	atLimit, err := marshalNativeKnockApplicationBody("a", resourceAtLimit, NativeKnockOptions{RunID: runID})
+	atLimit, err := marshalNativeKnockApplicationBody("a", resourceAtLimit, NativeKnockOptions{RunID: runID, RunAttempt: 1})
 	if err != nil {
 		t.Fatalf("marshal body at NHP maximum: %v", err)
 	}
@@ -184,7 +192,7 @@ func TestMarshalNativeKnockApplicationBody_RejectsOversizedEncodedBody(t *testin
 
 	// One more valid identity byte exercises the aggregate serialized-body
 	// boundary directly.
-	_, err = marshalNativeKnockApplicationBody("a", resourceAtLimit+"r", NativeKnockOptions{RunID: runID})
+	_, err = marshalNativeKnockApplicationBody("a", resourceAtLimit+"r", NativeKnockOptions{RunID: runID, RunAttempt: 1})
 	if !errors.Is(err, ErrInvalidNativeKnockInput) {
 		t.Fatalf("oversized body error = %v, want ErrInvalidNativeKnockInput", err)
 	}
@@ -203,12 +211,13 @@ func TestNativeKnockApplicationConformance(t *testing.T) {
 		t.Fatalf("registered-agent vector user_id = %q, device_id = %q; the native SDK derives both from persisted agent_id", fields.UserID, fields.DeviceID)
 	}
 
-	canonical, err := marshalNativeKnockApplicationBody(fields.DeviceID, fields.KnockResourceID, NativeKnockOptions{RunID: fields.RunID})
+	canonical, err := marshalNativeKnockApplicationBody(fields.DeviceID, fields.KnockResourceID, NativeKnockOptions{RunID: fields.RunID, RunAttempt: 1})
 	if err != nil {
 		t.Fatalf("marshal canonical native knock body: %v", err)
 	}
-	if !bytes.Equal(canonical, []byte(vectors.Request.BodyJSON)) {
-		t.Fatalf("canonical native knock body mismatch:\n got=%s\nwant=%s", canonical, vectors.Request.BodyJSON)
+	wantCanonical := strings.TrimSuffix(vectors.Request.BodyJSON, "}") + `,"runAttempt":1}`
+	if !bytes.Equal(canonical, []byte(wantCanonical)) {
+		t.Fatalf("canonical native knock body mismatch:\n got=%s\nwant=%s", canonical, wantCanonical)
 	}
 	if vectors.Request.WireType != nhpKNKHeaderType || fields.HeaderType != nhpKNKHeaderType || fields.AuthServiceID != agentAspID {
 		t.Fatalf("agent-knock vector constants drifted: wire=%d header=%d asp=%q", vectors.Request.WireType, fields.HeaderType, fields.AuthServiceID)
@@ -276,18 +285,19 @@ func assertNativeKnockRequestVector(
 		if want.ParsedRunID == nil {
 			t.Fatal("accept vector has no parsed_run_id")
 		}
-		got, err := marshalNativeKnockApplicationBody(fields.DeviceID, fields.KnockResourceID, NativeKnockOptions{RunID: *want.ParsedRunID})
+		got, err := marshalNativeKnockApplicationBody(fields.DeviceID, fields.KnockResourceID, NativeKnockOptions{RunID: *want.ParsedRunID, RunAttempt: 1})
 		if err != nil {
 			t.Fatalf("accepted RunID rejected: %v", err)
 		}
-		if !bytes.Equal(got, []byte(vector.BodyJSON)) {
-			t.Fatalf("accepted body mismatch:\n got=%s\nwant=%s", got, vector.BodyJSON)
+		wantBody := strings.TrimSuffix(vector.BodyJSON, "}") + `,"runAttempt":1}`
+		if !bytes.Equal(got, []byte(wantBody)) {
+			t.Fatalf("accepted body mismatch:\n got=%s\nwant=%s", got, wantBody)
 		}
 	case conformance.ExpectReject:
 		switch want.RejectClass {
 		case conformance.AgentKnockRejectMissingRunID, conformance.AgentKnockRejectInvalidRunID:
 			runID := runIDFromSingleCanonicalField(t, []byte(vector.BodyJSON))
-			_, err := marshalNativeKnockApplicationBody(fields.DeviceID, fields.KnockResourceID, NativeKnockOptions{RunID: runID})
+			_, err := marshalNativeKnockApplicationBody(fields.DeviceID, fields.KnockResourceID, NativeKnockOptions{RunID: runID, RunAttempt: 1})
 			if !errors.Is(err, ErrInvalidNativeKnockInput) || !errors.Is(err, ErrInvalidCycleRunID) {
 				t.Fatalf("rejected RunID error = %v, want native input + cycle RunID sentinels", err)
 			}
