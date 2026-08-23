@@ -89,12 +89,12 @@ func TestRegenerateAgentSessionControlVectors(t *testing.T) {
 	root["producer_revision"] = producerRevision
 	root["description"] = "Deterministic NHP 1.1 overload re-knock and strict exact-session retirement request/ACK vectors"
 	root["notes"] = []string{
-		"Every packet was sealed by the exact signed producer checkpoint with fixed synthetic key, ephemeral, timestamp, counter, preamble, body, and cookie inputs; independent consumers must rebuild initiator packets and authenticate-open replies.",
+		"Every packet was sealed by the exact producer revision with fixed synthetic key, ephemeral, timestamp, counter, preamble, body, and cookie inputs; independent consumers must rebuild initiator packets and authenticate-open replies.",
 		"The producer intentionally echoes the NHP_KNK counter in NHP_COK for relay compatibility, as frozen here, but native UDP consumers must treat the authenticated COK wire counter as unconstrained and correlate only when decrypted trxId equals the originating NHP_KNK counter. Every NHP_ACK counter must echo its request.",
 		"KNK and RKN carry the same canonical RunID and positive uint64 runAttempt. A successful knock ACK returns the immutable exact receipt cellId, sessId, sessIssuedAtMillis, runId, and runAttempt.",
 		"NHP_RKN mixes the exact decoded 32-byte cookie into the ordinary NHP 1.1 header digest. NHP_EXT uses the ordinary no-cookie digest and carries the exact immutable receipt, never resource-scoped or bodyless exit authority.",
 		"A successful exact-retirement ACK repeats the exact receipt and adds a canonical 32-lowercase-hex closeEventId plus state closing or closed. Authenticated denials omit every session receipt and close-event field.",
-		"The producer revision is a signed, pushed, unmerged qurl-go checkpoint. Re-pin every producer reference to the final merged producer SHA before release.",
+		"The producer revision is the signed qurl-go main commit whose deterministic regeneration gate reproduces every committed body and packet byte.",
 		"All identities, hosts, keys, cookies, counters, tokens, receipts, and event IDs are synthetic conformance data.",
 	}
 	protocol := requiredVectorObject(t, root, "protocol")
