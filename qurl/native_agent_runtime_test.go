@@ -1971,19 +1971,23 @@ func TestConsumeNativeExactSessionCloseReply_StrictAuthority(t *testing.T) {
 	}
 
 	for name, body := range map[string]string{
-		"missing cell":         `{"errCode":"0","sessId":123,"sessIssuedAtMillis":1800000000000,"runId":"0123456789abcdef","runAttempt":1,"closeEventId":"0123456789abcdef0123456789abcdef","state":"closing"}`,
-		"wrong cell":           strings.Replace(valid, `"cell0"`, `"cell1"`, 1),
-		"wrong session":        strings.Replace(valid, `"sessId":123`, `"sessId":124`, 1),
-		"wrong issuance":       strings.Replace(valid, `1800000000000`, `1800000000001`, 1),
-		"wrong run":            strings.Replace(valid, `0123456789abcdef`, `fedcba9876543210`, 1),
-		"wrong attempt":        strings.Replace(valid, `"runAttempt":1`, `"runAttempt":2`, 1),
-		"invalid event":        strings.Replace(valid, `0123456789abcdef0123456789abcdef`, `ABC`, 1),
-		"invalid state":        strings.Replace(valid, `"closing"`, `"ready"`, 1),
-		"unknown field":        strings.TrimSuffix(valid, "}") + `,"extra":true}`,
-		"duplicate field":      strings.Replace(valid, `"state":"closing"`, `"state":"closing","state":"closed"`, 1),
-		"trailing object":      valid + `{}`,
-		"null event":           strings.Replace(valid, `"closeEventId":"0123456789abcdef0123456789abcdef"`, `"closeEventId":null`, 1),
-		"deny carries receipt": `{"errCode":"52005","cellId":"cell0"}`,
+		"missing cell":          `{"errCode":"0","sessId":123,"sessIssuedAtMillis":1800000000000,"runId":"0123456789abcdef","runAttempt":1,"closeEventId":"0123456789abcdef0123456789abcdef","state":"closing"}`,
+		"wrong cell":            strings.Replace(valid, `"cell0"`, `"cell1"`, 1),
+		"wrong session":         strings.Replace(valid, `"sessId":123`, `"sessId":124`, 1),
+		"wrong issuance":        strings.Replace(valid, `1800000000000`, `1800000000001`, 1),
+		"wrong run":             strings.Replace(valid, `0123456789abcdef`, `fedcba9876543210`, 1),
+		"wrong attempt":         strings.Replace(valid, `"runAttempt":1`, `"runAttempt":2`, 1),
+		"invalid event":         strings.Replace(valid, `0123456789abcdef0123456789abcdef`, `ABC`, 1),
+		"invalid state":         strings.Replace(valid, `"closing"`, `"ready"`, 1),
+		"unknown field":         strings.TrimSuffix(valid, "}") + `,"extra":true}`,
+		"duplicate field":       strings.Replace(valid, `"state":"closing"`, `"state":"closing","state":"closed"`, 1),
+		"trailing object":       valid + `{}`,
+		"null event":            strings.Replace(valid, `"closeEventId":"0123456789abcdef0123456789abcdef"`, `"closeEventId":null`, 1),
+		"empty success code":    strings.Replace(valid, `"errCode":"0"`, `"errCode":""`, 1),
+		"success error message": strings.Replace(valid, `"cellId":"cell0"`, `"errMsg":"unexpected","cellId":"cell0"`, 1),
+		"deny carries receipt":  `{"errCode":"52005","cellId":"cell0"}`,
+		"deny missing message":  `{"errCode":"52005"}`,
+		"deny empty message":    `{"errCode":"52005","errMsg":""}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			result, err := consumeNativeExactSessionCloseReply(

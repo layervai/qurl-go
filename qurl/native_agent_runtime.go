@@ -2482,15 +2482,19 @@ func consumeNativeExactSessionCloseReply(reply *relayknock.Reply,
 	if err := strictDecodeJSON(reply.Body, &ack); err != nil || ack == nil || !ack.ErrCode.Present {
 		return nil, invalidNativeProducerReply(ErrMalformedReply, "exact session retirement ACK")
 	}
-	if !isSuccessErrCode(ack.ErrCode.Value) {
+	if ack.ErrCode.Value != strings.TrimSpace(ack.ErrCode.Value) {
+		return nil, invalidNativeProducerReply(ErrMalformedReply, "exact session retirement ACK errCode")
+	}
+	if ack.ErrCode.Value != errSuccess {
 		if ack.CellID.Present || ack.SessionID.Present || ack.SessionIssuedAtMillis.Present ||
 			ack.RunID.Present || ack.RunAttempt.Present || ack.CloseEventID.Present || ack.State.Present ||
+			!ack.ErrMsg.Present || ack.ErrMsg.Value == "" || ack.ErrMsg.Value != strings.TrimSpace(ack.ErrMsg.Value) ||
 			!isCanonicalKnockDenyCode(ack.ErrCode.Value) {
 			return nil, invalidNativeProducerReply(ErrMalformedReply, "exact session retirement deny ACK")
 		}
 		return nil, &ServerDenyError{ErrCode: ack.ErrCode.Value}
 	}
-	if !ack.CellID.Present || !ack.SessionID.Present || !ack.SessionIssuedAtMillis.Present ||
+	if ack.ErrMsg.Present || !ack.CellID.Present || !ack.SessionID.Present || !ack.SessionIssuedAtMillis.Present ||
 		!ack.RunID.Present || !ack.RunAttempt.Present || !ack.CloseEventID.Present || !ack.State.Present ||
 		ack.CellID.Value != receipt.CellID || ack.SessionID.Value != receipt.SessionID ||
 		ack.SessionIssuedAtMillis.Value != receipt.SessionIssuedAtMillis || ack.RunID.Value != receipt.RunID ||
