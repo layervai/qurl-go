@@ -45,13 +45,12 @@ func TestMarshalNativeSessionApplicationBody_ConformanceSessionVectors(t *testin
 			if err := json.Unmarshal([]byte(tc.packet.BodyJSON), &fields); err != nil {
 				t.Fatalf("decode conformance body: %v", err)
 			}
-			got, err := marshalNativeSessionApplicationBody(fields.DeviceID, fields.KnockResourceID, NativeKnockOptions{RunID: fields.RunID, RunAttempt: 1}, tc.headerType)
+			got, err := marshalNativeSessionApplicationBody(fields.DeviceID, fields.KnockResourceID, NativeKnockOptions{RunID: fields.RunID, RunAttempt: fields.RunAttempt}, tc.headerType)
 			if err != nil {
 				t.Fatalf("marshal session body: %v", err)
 			}
-			want := strings.TrimSuffix(tc.packet.BodyJSON, "}") + `,"runAttempt":1}`
-			if !bytes.Equal(got, []byte(want)) {
-				t.Fatalf("session body mismatch:\n got=%s\nwant=%s", got, want)
+			if !bytes.Equal(got, []byte(tc.packet.BodyJSON)) {
+				t.Fatalf("session body mismatch:\n got=%s\nwant=%s", got, tc.packet.BodyJSON)
 			}
 			if fields.HeaderType != tc.headerType || fields.UserID != fields.DeviceID || fields.AuthServiceID != agentAspID {
 				t.Fatalf("conformance session fields drifted: %#v", fields)
@@ -210,12 +209,26 @@ func TestNativeKnockApplicationConformance(t *testing.T) {
 	if fields.UserID != fields.DeviceID {
 		t.Fatalf("registered-agent vector user_id = %q, device_id = %q; the native SDK derives both from persisted agent_id", fields.UserID, fields.DeviceID)
 	}
+	sessionVectors, err := conformance.AgentSessionControl()
+	if err != nil {
+		t.Fatalf("load qurl-conformance agent-session vectors: %v", err)
+	}
+	var sessionRequest nativeAgentKnockBody
+	if err := json.Unmarshal([]byte(sessionVectors.OverloadReknock.KnockRequest.BodyJSON), &sessionRequest); err != nil {
+		t.Fatalf("decode canonical session request: %v", err)
+	}
+	if sessionRequest.HeaderType != fields.HeaderType || sessionRequest.UserID != fields.UserID ||
+		sessionRequest.DeviceID != fields.DeviceID || sessionRequest.AuthServiceID != fields.AuthServiceID ||
+		sessionRequest.KnockResourceID != fields.KnockResourceID || sessionRequest.RunID != fields.RunID ||
+		sessionRequest.RunAttempt == 0 {
+		t.Fatalf("agent-knock and session-control canonical inputs drifted: app=%#v session=%#v", fields, sessionRequest)
+	}
 
-	canonical, err := marshalNativeKnockApplicationBody(fields.DeviceID, fields.KnockResourceID, NativeKnockOptions{RunID: fields.RunID, RunAttempt: 1})
+	canonical, err := marshalNativeKnockApplicationBody(fields.DeviceID, fields.KnockResourceID, NativeKnockOptions{RunID: fields.RunID, RunAttempt: sessionRequest.RunAttempt})
 	if err != nil {
 		t.Fatalf("marshal canonical native knock body: %v", err)
 	}
-	wantCanonical := strings.TrimSuffix(vectors.Request.BodyJSON, "}") + `,"runAttempt":1}`
+	wantCanonical := sessionVectors.OverloadReknock.KnockRequest.BodyJSON
 	if !bytes.Equal(canonical, []byte(wantCanonical)) {
 		t.Fatalf("canonical native knock body mismatch:\n got=%s\nwant=%s", canonical, wantCanonical)
 	}
@@ -225,7 +238,7 @@ func TestNativeKnockApplicationConformance(t *testing.T) {
 
 	for _, vector := range vectors.RequestCases {
 		t.Run(vector.Name, func(t *testing.T) {
-			assertNativeKnockRequestVector(t, fields, canonical, vector)
+			assertNativeKnockRequestVector(t, fields, sessionRequest.RunAttempt, canonical, []byte(wantCanonical), vector)
 		})
 	}
 
@@ -275,7 +288,9 @@ func TestNativeKnockApplicationConformance(t *testing.T) {
 func assertNativeKnockRequestVector(
 	t *testing.T,
 	fields conformance.AgentKnockApplicationRequestFields,
+	runAttempt uint64,
 	canonical []byte,
+	wantCanonical []byte,
 	vector conformance.AgentKnockRequestCase,
 ) {
 	t.Helper()
@@ -285,13 +300,12 @@ func assertNativeKnockRequestVector(
 		if want.ParsedRunID == nil {
 			t.Fatal("accept vector has no parsed_run_id")
 		}
-		got, err := marshalNativeKnockApplicationBody(fields.DeviceID, fields.KnockResourceID, NativeKnockOptions{RunID: *want.ParsedRunID, RunAttempt: 1})
+		got, err := marshalNativeKnockApplicationBody(fields.DeviceID, fields.KnockResourceID, NativeKnockOptions{RunID: *want.ParsedRunID, RunAttempt: runAttempt})
 		if err != nil {
 			t.Fatalf("accepted RunID rejected: %v", err)
 		}
-		wantBody := strings.TrimSuffix(vector.BodyJSON, "}") + `,"runAttempt":1}`
-		if !bytes.Equal(got, []byte(wantBody)) {
-			t.Fatalf("accepted body mismatch:\n got=%s\nwant=%s", got, wantBody)
+		if !bytes.Equal(got, wantCanonical) {
+			t.Fatalf("accepted body mismatch:\n got=%s\nwant=%s", got, wantCanonical)
 		}
 	case conformance.ExpectReject:
 		switch want.RejectClass {
