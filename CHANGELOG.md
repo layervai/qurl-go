@@ -6,6 +6,27 @@ independently under `awsstore/vX.Y.Z` tags.
 Pre-1.0 semantic versioning: breaking changes land in minor versions (v0.N.0)
 and are marked **Breaking** with what to change.
 
+## v0.8.0 — 2026-08-23
+
+- **Breaking:** registered-agent native knocks now require a positive,
+  caller-owned `NativeKnockOptions.RunAttempt` in addition to `RunID`.
+  Successful admissions return a nonzero durable `SessionID` and an opaque
+  `NativeSessionReceipt` that is bound to the issuing cell, server key,
+  issuance time, run id, and attempt. Keep the complete receipt in memory;
+  field-only JSON serialization intentionally omits its private route and
+  cannot be used for retirement.
+- **Breaking:** retire a registered-agent admission with
+  `RetireRegisteredAgentSession` only after its resource traffic has stopped
+  and drained. Retry the same receipt on ambiguous transport failures until the
+  server returns the same durable close event in `closing` or `closed` state,
+  then wipe the device private key. The former resource/run-id exit contract is
+  removed because it could not identify one admission without affecting a
+  replacement or sibling session.
+- Registered-agent ACKs now enforce the exact session-receipt success/denial
+  union from qurl-conformance v0.13.0. Receipt, resource, address, error, and
+  canonical-number drift is rejected before authority is retained; portal and
+  generic knock envelopes remain unchanged.
+
 ## v0.7.0 — 2026-08-20
 
 - **Breaking:** full qURL links now use the share-safe `qv2t1` fragment
