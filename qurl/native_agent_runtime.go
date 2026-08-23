@@ -2301,9 +2301,10 @@ type nativeJSONStringMap struct {
 func (v *nativeJSONStringMap) UnmarshalJSON(data []byte) error {
 	v.Present = true
 	if isJSONNull(data) {
-		// Keep the producer's explicit null distinguishable from an omitted field.
-		// Success authority rejects nil maps during its exact-key lookup; the
-		// registered-agent denial union requires the server's explicit null maps.
+		// Keep explicit null distinguishable from an omitted field. Success
+		// authority rejects nil maps during its exact-key lookup, and the strict
+		// registered-agent denial union rejects every present success-only field,
+		// including an explicit null map.
 		v.Value = nil
 		return nil
 	}
@@ -2405,9 +2406,8 @@ func interpretNativeAgentKnockReply(reply *relayknock.Reply, knockResourceID str
 			return nil, invalidNativeProducerReply(ErrMalformedReply, "native knock ACK errCode")
 		}
 		if strictRegisteredAgentACK && (!ack.ErrMsg.Present || ack.ErrMsg.Value == "" ||
-			!ack.ResourceHost.Present || ack.ResourceHost.Value != nil ||
-			!ack.AgentAddr.Present || !validNativeAgentACKAddress(ack.AgentAddr.Value) ||
-			!ack.ACTokens.Present || ack.ACTokens.Value != nil || ack.ASPToken.Present ||
+			ack.ErrMsg.Value != strings.TrimSpace(ack.ErrMsg.Value) ||
+			ack.ResourceHost.Present || ack.AgentAddr.Present || ack.ACTokens.Present || ack.ASPToken.Present ||
 			ack.PreAccessActions.Present || ack.RedirectURL.Present) {
 			return nil, invalidNativeProducerReply(ErrMalformedReply, "native knock deny ACK field set")
 		}

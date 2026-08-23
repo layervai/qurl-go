@@ -1899,13 +1899,15 @@ func TestKnockRegisteredAgent_MalformedCookieChallengeFailsWithoutReknock(t *tes
 	}
 }
 
-func TestRetireRegisteredAgentSession_UsesExactReceiptAndOriginalEndpoint(t *testing.T) {
+func TestRetireRegisteredAgentSession_UsesExactReceiptOriginalEndpointAndRetriesIdempotently(t *testing.T) {
 	contract := loadAssignmentFixture(t)
 	knockACK := `{"errCode":"0","sessId":123,"cellId":"cell0","sessIssuedAtMillis":1800000000000,"runId":"0123456789abcdef","runAttempt":1,"resHost":{"resource-public-key":"frps.cell0.example:7000"},"opnTime":900,"agentAddr":"203.0.113.9:49152","acTokens":{"resource-public-key":"ac-secret"},"preActions":{"resource-public-key":null}}`
 	closeACK := `{"errCode":"0","cellId":"cell0","sessId":123,"sessIssuedAtMillis":1800000000000,"runId":"0123456789abcdef","runAttempt":1,"closeEventId":"0123456789abcdef0123456789abcdef","state":"closing"}`
+	replayedCloseACK := strings.Replace(closeACK, `"state":"closing"`, `"state":"closed"`, 1)
 	f := newRuntimeFixture(t, nil, []runtimeUDPStep{
 		{requestType: relayknock.TypeKnock, replyType: relayknock.TypeACK, replyBody: knockACK},
 		{requestType: relayknock.TypeExit, replyType: relayknock.TypeACK, replyBody: closeACK},
+		{requestType: relayknock.TypeExit, replyType: relayknock.TypeACK, replyBody: replayedCloseACK},
 	})
 	assignment := &AgentAssignment{
 		CellID: "cell0", AssignmentGeneration: 1, EndpointRevision: 1, LeaseExpiresAt: time.Now().Add(time.Hour),
@@ -1937,9 +1939,23 @@ func TestRetireRegisteredAgentSession_UsesExactReceiptAndOriginalEndpoint(t *tes
 		retired.CloseEventID != "0123456789abcdef0123456789abcdef" || retired.State != "closing" {
 		t.Fatalf("RetireRegisteredAgentSession = %#v, %v", retired, err)
 	}
+	replayed, err := RetireRegisteredAgentSession(context.Background(), binding, privateKey, knock.SessionReceipt,
+		WithAgentRuntimeUDPResolver(f.resolver), WithAgentRuntimeUDPDialer(f.dialer), WithAgentRuntimeUDPBounds(runtimeReplyTimeout, 1))
+	if err != nil || replayed == nil || replayed.SessionReceipt.CellID != retired.SessionReceipt.CellID ||
+		replayed.SessionReceipt.SessionID != retired.SessionReceipt.SessionID ||
+		replayed.SessionReceipt.SessionIssuedAtMillis != retired.SessionReceipt.SessionIssuedAtMillis ||
+		replayed.SessionReceipt.RunID != retired.SessionReceipt.RunID ||
+		replayed.SessionReceipt.RunAttempt != retired.SessionReceipt.RunAttempt ||
+		replayed.CloseEventID != retired.CloseEventID || replayed.State != "closed" {
+		t.Fatalf("second RetireRegisteredAgentSession = %#v, %v; first=%#v", replayed, err, retired)
+	}
 	requests := f.cellUDP.snapshot()
-	if len(requests) != 2 || requests[0].typeID != relayknock.TypeKnock || requests[1].typeID != relayknock.TypeExit {
-		t.Fatalf("session packet types = %#v, want KNK then EXT", requests)
+	if len(requests) != 3 || requests[0].typeID != relayknock.TypeKnock ||
+		requests[1].typeID != relayknock.TypeExit || requests[2].typeID != relayknock.TypeExit {
+		t.Fatalf("session packet types = %#v, want KNK then two exact EXT requests", requests)
+	}
+	if !bytes.Equal(requests[1].body, requests[2].body) {
+		t.Fatalf("second exact EXT body drifted:\nfirst=%s\nsecond=%s", requests[1].body, requests[2].body)
 	}
 	var ext nativeExactSessionCloseBody
 	if err := json.Unmarshal(requests[1].body, &ext); err != nil {
@@ -2188,7 +2204,11 @@ func TestInterpretNativeAgentKnockReply_RegisteredAgentExactUnion(t *testing.T) 
 		t.Fatalf("registered-agent success with documented optional fields = %#v, %v", result, err)
 	}
 
-	const denial = `{"errCode":"52004","errMsg":"denied","resHost":null,"opnTime":0,"agentAddr":"203.0.113.9:49152","acTokens":null}`
+	agentSessionVectors, err := conformance.AgentSessionControl()
+	if err != nil {
+		t.Fatalf("load merged agent-session conformance: %v", err)
+	}
+	denial := agentSessionVectors.DenialACKs.Knock.BodyJSON
 	result, err = interpretNativeAgentKnockReply(
 		&relayknock.Reply{Type: relayknock.TypeACK, Body: []byte(denial)},
 		"resource-public-key", expectation,
@@ -2198,21 +2218,35 @@ func TestInterpretNativeAgentKnockReply_RegisteredAgentExactUnion(t *testing.T) 
 		t.Fatalf("exact registered-agent denial = %#v, %T %v", result, err, err)
 	}
 
+	denialWith := func(field string) string {
+		return strings.TrimSuffix(denial, "}") + "," + field + "}"
+	}
 	for name, body := range map[string]string{
 		"empty success code":         strings.Replace(success, `"errCode":"0"`, `"errCode":""`, 1),
 		"success error message":      strings.Replace(success, `"sessId":123`, `"errMsg":"unexpected","sessId":123`, 1),
 		"success missing host map":   strings.Replace(success, `"resHost":{"resource-public-key":"frps.cell0.example:7000"},`, "", 1),
 		"success invalid agent addr": strings.Replace(success, `"203.0.113.9:49152"`, `"not-an-address"`, 1),
-		"denial missing message":     strings.Replace(denial, `"errMsg":"denied",`, "", 1),
+		"denial missing message":     strings.Replace(denial, `,"errMsg":"denied"`, "", 1),
 		"denial empty message":       strings.Replace(denial, `"errMsg":"denied"`, `"errMsg":""`, 1),
-		"denial missing host map":    strings.Replace(denial, `"resHost":null,`, "", 1),
-		"denial missing open time":   strings.Replace(denial, `"opnTime":0,`, "", 1),
-		"denial missing agent addr":  strings.Replace(denial, `"agentAddr":"203.0.113.9:49152",`, "", 1),
-		"denial missing token map":   strings.Replace(denial, `,"acTokens":null`, "", 1),
-		"denial nonnull host map":    strings.Replace(denial, `"resHost":null`, `"resHost":{}`, 1),
-		"denial carries receipt":     strings.Replace(denial, `"errMsg":"denied"`, `"errMsg":"denied","sessId":123`, 1),
-		"denial carries optional":    strings.Replace(denial, `"errMsg":"denied"`, `"errMsg":"denied","redirectUrl":"https://example.com"`, 1),
+		"denial null message":        strings.Replace(denial, `"errMsg":"denied"`, `"errMsg":null`, 1),
+		"denial whitespace message":  strings.Replace(denial, `"errMsg":"denied"`, `"errMsg":" "`, 1),
+		"denial padded message":      strings.Replace(denial, `"errMsg":"denied"`, `"errMsg":" denied "`, 1),
+		"denial missing open time":   strings.Replace(denial, `,"opnTime":0`, "", 1),
+		"denial nonzero open time":   strings.Replace(denial, `"opnTime":0`, `"opnTime":1`, 1),
+		"denial carries cell":        denialWith(`"cellId":"cell0"`),
+		"denial carries session":     denialWith(`"sessId":123`),
+		"denial carries issuance":    denialWith(`"sessIssuedAtMillis":1800000000000`),
+		"denial carries run":         denialWith(`"runId":"0123456789abcdef"`),
+		"denial carries attempt":     denialWith(`"runAttempt":1`),
+		"denial carries host map":    denialWith(`"resHost":null`),
+		"denial carries agent addr":  denialWith(`"agentAddr":"203.0.113.9:49152"`),
+		"denial carries token map":   denialWith(`"acTokens":null`),
+		"denial carries ASP token":   denialWith(`"aspToken":"provider-token"`),
+		"denial carries pre-actions": denialWith(`"preActions":{}`),
+		"denial carries redirect":    denialWith(`"redirectUrl":"https://example.com"`),
 		"denial leading-zero code":   strings.Replace(denial, `"52004"`, `"052004"`, 1),
+		"denial whitespace code":     strings.Replace(denial, `"52004"`, `" 52004 "`, 1),
+		"denial nondigit code":       strings.Replace(denial, `"52004"`, `"denied"`, 1),
 		"unknown field":              strings.TrimSuffix(success, "}") + `,"extra":true}`,
 		"duplicate field":            strings.Replace(success, `"errCode":"0"`, `"errCode":"0","errCode":"0"`, 1),
 		"trailing object":            success + `{}`,
