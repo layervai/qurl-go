@@ -13,7 +13,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -2042,7 +2044,10 @@ func (r NativeKnockResult) GoString() string { return r.String() }
 // NativeSessionReceipt is the immutable server-owned authority for retiring
 // exactly one admitted session. The routing snapshot is intentionally private:
 // retirement returns to the server identity that issued the receipt even if a
-// later Hub refresh moves the binding to another cell.
+// later Hub refresh moves the binding to another cell. Treat the receipt as an
+// opaque, in-memory capability: copying the complete Go value is safe, but JSON
+// or other field-only serialization omits its private routing snapshot and the
+// reconstructed value cannot be used for retirement.
 type NativeSessionReceipt struct {
 	CellID                string
 	SessionID             uint64
@@ -2296,9 +2301,9 @@ type nativeJSONStringMap struct {
 func (v *nativeJSONStringMap) UnmarshalJSON(data []byte) error {
 	v.Present = true
 	if isJSONNull(data) {
-		// Keep null distinguishable from an omitted field, but normalize it to an
-		// empty map. The downstream exact-key lookup then rejects it as malformed;
-		// null is never accepted as resource authorization data.
+		// Keep the producer's explicit null distinguishable from an omitted field.
+		// Success authority rejects nil maps during its exact-key lookup; the
+		// registered-agent denial union requires the server's explicit null maps.
 		v.Value = nil
 		return nil
 	}
@@ -2318,10 +2323,12 @@ func (v *nativeJSONStringMap) UnmarshalJSON(data []byte) error {
 }
 
 type nativePreAccessActions struct {
+	Present        bool
 	RequiresAction bool
 }
 
 func (v *nativePreAccessActions) UnmarshalJSON(data []byte) error {
+	v.Present = true
 	if isJSONNull(data) {
 		return errors.New("must be a JSON object, not null")
 	}
@@ -2343,6 +2350,9 @@ func (v *nativePreAccessActions) UnmarshalJSON(data []byte) error {
 func interpretNativeAgentKnockReply(reply *relayknock.Reply, knockResourceID string,
 	expectations ...nativeAgentKnockExpectation,
 ) (*NativeKnockResult, error) {
+	if len(expectations) > 1 {
+		return nil, fmt.Errorf("%w: multiple native knock expectations", ErrMalformedReply)
+	}
 	if reply == nil {
 		return nil, fmt.Errorf("%w: native knock reply is nil", ErrMalformedReply)
 	}
@@ -2368,6 +2378,10 @@ func interpretNativeAgentKnockReply(reply *relayknock.Reply, knockResourceID str
 	if ack.ErrCode.Value != strings.TrimSpace(ack.ErrCode.Value) {
 		return nil, fmt.Errorf("%w: native knock ACK errCode is not canonical", ErrMalformedReply)
 	}
+	strictRegisteredAgentACK := len(expectations) == 1
+	if strictRegisteredAgentACK && ack.ErrCode.Value == "" {
+		return nil, invalidNativeProducerReply(ErrMalformedReply, "native knock ACK errCode")
+	}
 	if !isSuccessErrCode(ack.ErrCode.Value) {
 		if ack.SessionID.Present || ack.CellID.Present || ack.SessionIssuedAtMillis.Present ||
 			ack.RunID.Present || ack.RunAttempt.Present {
@@ -2390,7 +2404,17 @@ func interpretNativeAgentKnockReply(reply *relayknock.Reply, knockResourceID str
 		if !isCanonicalKnockDenyCode(ack.ErrCode.Value) {
 			return nil, invalidNativeProducerReply(ErrMalformedReply, "native knock ACK errCode")
 		}
+		if strictRegisteredAgentACK && (!ack.ErrMsg.Present || ack.ErrMsg.Value == "" ||
+			!ack.ResourceHost.Present || ack.ResourceHost.Value != nil ||
+			!ack.AgentAddr.Present || !validNativeAgentACKAddress(ack.AgentAddr.Value) ||
+			!ack.ACTokens.Present || ack.ACTokens.Value != nil || ack.ASPToken.Present ||
+			ack.PreAccessActions.Present || ack.RedirectURL.Present) {
+			return nil, invalidNativeProducerReply(ErrMalformedReply, "native knock deny ACK field set")
+		}
 		return nil, &ServerDenyError{ErrCode: ack.ErrCode.Value}
+	}
+	if strictRegisteredAgentACK && ack.ErrCode.Value != errSuccess {
+		return nil, invalidNativeProducerReply(ErrMalformedReply, "native knock ACK errCode")
 	}
 	for _, required := range []struct {
 		name    string
@@ -2412,6 +2436,9 @@ func interpretNativeAgentKnockReply(reply *relayknock.Reply, knockResourceID str
 	if ack.OpenTime.Value == 0 {
 		return nil, fmt.Errorf("%w: success ACK carried an invalid open time", ErrMalformedReply)
 	}
+	if strictRegisteredAgentACK && (ack.ErrMsg.Present || !validNativeAgentACKAddress(ack.AgentAddr.Value)) {
+		return nil, invalidNativeProducerReply(ErrMalformedReply, "native knock success ACK field set")
+	}
 	if ack.PreAccessActions.RequiresAction {
 		return nil, fmt.Errorf("%w: native knock ACK requires an unsupported pre-access action", ErrMalformedReply)
 	}
@@ -2421,9 +2448,6 @@ func interpretNativeAgentKnockReply(reply *relayknock.Reply, knockResourceID str
 		return nil, fmt.Errorf("%w: success ACK missing canonical token or resource host for requested resource", ErrMalformedReply)
 	}
 	result := &NativeKnockResult{ACToken: token, ResourceHost: host, OpenTime: ack.OpenTime.Value, SessionID: ack.SessionID.Value, AgentAddr: ack.AgentAddr.Value}
-	if len(expectations) > 1 {
-		return nil, fmt.Errorf("%w: multiple native knock expectations", ErrMalformedReply)
-	}
 	if len(expectations) == 1 {
 		expected := expectations[0]
 		if !ack.CellID.Present || !ack.SessionIssuedAtMillis.Present || !ack.RunID.Present || !ack.RunAttempt.Present ||
@@ -2446,7 +2470,7 @@ func interpretNativeAgentKnockReply(reply *relayknock.Reply, knockResourceID str
 // is a grammar gate, not an allowlist: codes the SDK has never seen still
 // classify as authenticated denies.
 func isCanonicalKnockDenyCode(code string) bool {
-	if code == "" {
+	if code == "" || (len(code) > 1 && code[0] == '0') {
 		return false
 	}
 	for i := 0; i < len(code); i++ {
@@ -2455,6 +2479,15 @@ func isCanonicalKnockDenyCode(code string) bool {
 		}
 	}
 	return true
+}
+
+func validNativeAgentACKAddress(value string) bool {
+	host, port, err := net.SplitHostPort(value)
+	if err != nil || net.ParseIP(host) == nil {
+		return false
+	}
+	parsedPort, err := strconv.Atoi(port)
+	return err == nil && parsedPort > 0 && parsedPort <= 65535
 }
 
 func consumeNativeAgentKnockReply(reply *relayknock.Reply, knockResourceID string,

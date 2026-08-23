@@ -324,4 +324,12 @@ func ExampleConnectAgentRuntime() {
 		panic(err)
 	}
 	fmt.Println(admission.ResourceHost)
+
+	// After this exact serving session has stopped and drained, retire it while
+	// the device key and opaque in-memory receipt are still available. Retry an
+	// ambiguous retirement with the same receipt; defer clears the key only
+	// after this lifecycle operation finishes.
+	if _, err := qurl.RetireRegisteredAgentSession(ctx, binding, devicePrivateKey, admission.SessionReceipt); err != nil {
+		panic(err)
+	}
 }

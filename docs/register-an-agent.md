@@ -88,10 +88,17 @@ And two rules for the serving loop:
 - **One run ID and positive attempt number per cycle attempt.** Do not change
   either between retries. Increment the attempt only when starting a new
   serving attempt under the same run.
-- **Wipe the key** when the cycle ends, and call
-  `qurl.RetireRegisteredAgentSession` with the exact `SessionReceipt` returned
-  by admission after that serving session has stopped and drained. Retirement
-  closes only that admission; it cannot retire a sibling or replacement.
+- **Retire before wiping the key.** After the serving session has stopped and
+  drained, call `qurl.RetireRegisteredAgentSession` with the exact
+  `SessionReceipt` returned by admission. Retry an ambiguous result with that
+  same receipt, then wipe the device key when the lifecycle operation ends.
+  Retirement closes only that admission; it cannot retire a sibling or
+  replacement.
+- **Keep the receipt opaque and in memory.** Copying the complete Go value is
+  safe, but do not JSON-marshal or reconstruct it from its exported fields: its
+  private routing snapshot returns retirement to the original cell and is not
+  serialized. Server-side recovery closes sessions left behind by a process
+  crash.
 
 ## Which enrollment path?
 

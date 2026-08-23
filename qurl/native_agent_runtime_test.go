@@ -2165,6 +2165,70 @@ func TestInterpretNativeAgentKnockReply_SuccessErrCodeVocabulary(t *testing.T) {
 	}
 }
 
+func TestInterpretNativeAgentKnockReply_RegisteredAgentExactUnion(t *testing.T) {
+	expectation := nativeAgentKnockExpectation{
+		CellID: "cell0", RunID: "0123456789abcdef", RunAttempt: 1,
+	}
+	const success = `{"errCode":"0","sessId":123,"cellId":"cell0","sessIssuedAtMillis":1800000000000,"runId":"0123456789abcdef","runAttempt":1,"resHost":{"resource-public-key":"frps.cell0.example:7000"},"opnTime":900,"agentAddr":"203.0.113.9:49152","acTokens":{"resource-public-key":"ac-secret"}}`
+	result, err := interpretNativeAgentKnockReply(
+		&relayknock.Reply{Type: relayknock.TypeACK, Body: []byte(success)},
+		"resource-public-key", expectation,
+	)
+	if err != nil || result == nil || result.SessionReceipt.CellID != expectation.CellID ||
+		result.SessionReceipt.SessionID != 123 || result.SessionReceipt.RunID != expectation.RunID ||
+		result.SessionReceipt.RunAttempt != expectation.RunAttempt {
+		t.Fatalf("exact registered-agent success = %#v, %v", result, err)
+	}
+	withOptionalSuccessFields := strings.TrimSuffix(success, "}") +
+		`,"aspToken":"provider-token","preActions":{"resource-public-key":null},"redirectUrl":"https://example.com/next"}`
+	if result, err := interpretNativeAgentKnockReply(
+		&relayknock.Reply{Type: relayknock.TypeACK, Body: []byte(withOptionalSuccessFields)},
+		"resource-public-key", expectation,
+	); err != nil || result == nil {
+		t.Fatalf("registered-agent success with documented optional fields = %#v, %v", result, err)
+	}
+
+	const denial = `{"errCode":"52004","errMsg":"denied","resHost":null,"opnTime":0,"agentAddr":"203.0.113.9:49152","acTokens":null}`
+	result, err = interpretNativeAgentKnockReply(
+		&relayknock.Reply{Type: relayknock.TypeACK, Body: []byte(denial)},
+		"resource-public-key", expectation,
+	)
+	var deny *ServerDenyError
+	if result != nil || !errors.As(err, &deny) || deny.ErrCode != "52004" || errors.Is(err, ErrMalformedReply) {
+		t.Fatalf("exact registered-agent denial = %#v, %T %v", result, err, err)
+	}
+
+	for name, body := range map[string]string{
+		"empty success code":         strings.Replace(success, `"errCode":"0"`, `"errCode":""`, 1),
+		"success error message":      strings.Replace(success, `"sessId":123`, `"errMsg":"unexpected","sessId":123`, 1),
+		"success missing host map":   strings.Replace(success, `"resHost":{"resource-public-key":"frps.cell0.example:7000"},`, "", 1),
+		"success invalid agent addr": strings.Replace(success, `"203.0.113.9:49152"`, `"not-an-address"`, 1),
+		"denial missing message":     strings.Replace(denial, `"errMsg":"denied",`, "", 1),
+		"denial empty message":       strings.Replace(denial, `"errMsg":"denied"`, `"errMsg":""`, 1),
+		"denial missing host map":    strings.Replace(denial, `"resHost":null,`, "", 1),
+		"denial missing open time":   strings.Replace(denial, `"opnTime":0,`, "", 1),
+		"denial missing agent addr":  strings.Replace(denial, `"agentAddr":"203.0.113.9:49152",`, "", 1),
+		"denial missing token map":   strings.Replace(denial, `,"acTokens":null`, "", 1),
+		"denial nonnull host map":    strings.Replace(denial, `"resHost":null`, `"resHost":{}`, 1),
+		"denial carries receipt":     strings.Replace(denial, `"errMsg":"denied"`, `"errMsg":"denied","sessId":123`, 1),
+		"denial carries optional":    strings.Replace(denial, `"errMsg":"denied"`, `"errMsg":"denied","redirectUrl":"https://example.com"`, 1),
+		"denial leading-zero code":   strings.Replace(denial, `"52004"`, `"052004"`, 1),
+		"unknown field":              strings.TrimSuffix(success, "}") + `,"extra":true}`,
+		"duplicate field":            strings.Replace(success, `"errCode":"0"`, `"errCode":"0","errCode":"0"`, 1),
+		"trailing object":            success + `{}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			result, err := interpretNativeAgentKnockReply(
+				&relayknock.Reply{Type: relayknock.TypeACK, Body: []byte(body)},
+				"resource-public-key", expectation,
+			)
+			if result != nil || !errors.Is(err, ErrMalformedReply) {
+				t.Fatalf("strict registered-agent ACK = %#v, %v; want malformed", result, err)
+			}
+		})
+	}
+}
+
 func TestInterpretNativeAgentKnockReply_RejectsInvalidSessionEnvelope(t *testing.T) {
 	base := `"resHost":{"resource-public-key":"frps.cell0.example:7000"},"agentAddr":"203.0.113.9:49152","acTokens":{"resource-public-key":"ac-secret"}`
 	tests := map[string]string{
