@@ -2106,8 +2106,15 @@ func KnockRegisteredAgent(ctx context.Context, binding *AgentRuntimeBinding, dev
 		return nil, err
 	}
 	defer wipeBytes(reknockBody)
+	started := time.Now()
 	reply, err := nativeudp.KnockWithReknock(ctx, endpoint, body, reknockBody, cfg.udpOptions(deviceStaticPrivateKey))
 	if err != nil {
+		if nativeudp.IsInitialKnockNoReply(err) {
+			return nil, &EndpointNoReplyError{
+				Endpoint: net.JoinHostPort(endpoint.Host, strconv.Itoa(endpoint.Port)),
+				Attempts: 1, Elapsed: time.Since(started), Last: err, deadline: ctx.Err(),
+			}
+		}
 		return nil, normalizeRelayError(err, ErrMalformedReply)
 	}
 	result, err := consumeNativeAgentKnockReply(reply, knockResourceID, nativeAgentKnockExpectation{

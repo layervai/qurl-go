@@ -98,6 +98,12 @@ var (
 	// observation, not a cause.
 	ErrNoReply = errors.New("nativeudp: no reply before deadline")
 
+	// ErrInitialKnockNoReply marks silence on the first NHP_KNK flight of a
+	// registered-agent KNK/COK/RKN exchange. It is never applied to the RKN
+	// flight: receiving an authenticated COK means the endpoint did reply and
+	// must not be reported as a closed first-flight path.
+	ErrInitialKnockNoReply = errors.New("nativeudp: initial knock received no reply")
+
 	// ErrServerUnauthenticated marks a datagram that was received but is not an
 	// authenticated reply from the pinned server public key: a wrong server key,
 	// a failed handshake authentication, a malformed/oversize datagram, or a
@@ -111,6 +117,48 @@ var (
 	// single fail-closed authentication class.
 	ErrServerUnauthenticated = errors.New("nativeudp: reply failed server authentication")
 )
+
+// allAddressesNoReplyError is installed only from sendToAddresses' structured
+// sendOne result after every selected address completed a datagram write and
+// then timed out while reading. Keeping that provenance out of an arbitrary
+// error chain prevents a Resolver or Dialer from spoofing ErrNoReply by
+// returning an error that wraps the exported sentinel.
+type allAddressesNoReplyError struct {
+	last error
+}
+
+func (e *allAddressesNoReplyError) Error() string {
+	return fmt.Sprintf("%v: %v: %v", ErrTransport, ErrNoReply, e.last)
+}
+
+func (e *allAddressesNoReplyError) Unwrap() []error {
+	return []error{ErrTransport, ErrNoReply, e.last}
+}
+
+// initialKnockNoReplyError is an exact top-level phase marker. It is created
+// only when the first KNK exchange returns allAddressesNoReplyError directly;
+// errors nested inside caller-provided Resolver or Dialer failures cannot
+// produce it.
+type initialKnockNoReplyError struct {
+	last error
+}
+
+func (e *initialKnockNoReplyError) Error() string {
+	return fmt.Sprintf("%v: %v", ErrInitialKnockNoReply, e.last)
+}
+
+func (e *initialKnockNoReplyError) Unwrap() []error {
+	return []error{ErrInitialKnockNoReply, e.last}
+}
+
+// IsInitialKnockNoReply reports provenance-bearing silence on the first KNK
+// flight. It intentionally checks the exact top-level transport result instead
+// of walking an error chain that caller-supplied transports can influence.
+func IsInitialKnockNoReply(err error) bool {
+	//nolint:errorlint // Exact top-level identity is the anti-spoofing boundary.
+	_, ok := err.(*initialKnockNoReplyError)
+	return ok
+}
 
 // Resolver resolves an endpoint host to IP addresses. *net.Resolver satisfies it,
 // so net.DefaultResolver is the production default; tests inject a deterministic
@@ -188,6 +236,10 @@ func Knock(ctx context.Context, ep Endpoint, body []byte, opts Options) (*relayk
 func KnockWithReknock(ctx context.Context, ep Endpoint, knockBody, reknockBody []byte, opts Options) (*relayknock.Reply, error) {
 	reply, knockCounter, err := exchange(ctx, ep, relayknock.TypeKnock, knockBody, nil, opts)
 	if err != nil {
+		//nolint:errorlint // A wrapped or replayed cause is not transport provenance.
+		if _, ok := err.(*allAddressesNoReplyError); ok {
+			return nil, &initialKnockNoReplyError{last: err}
+		}
 		return nil, err
 	}
 	if !reply.IsCookieChallenge() {
@@ -567,6 +619,7 @@ func sendToAddresses(ctx context.Context, addrs []netip.Addr, port int, packet [
 	// concurrent/pipelined fallback must instead allocate one buffer per attempt.
 	replyBuffer := make([]byte, nhpwire.PacketBufferSize+1)
 	var lastErr error
+	var lastLocalErr error
 	for _, addr := range addrs {
 		if err := ctxErr(ctx); err != nil {
 			return nil, err
@@ -576,7 +629,7 @@ func sendToAddresses(ctx context.Context, addrs []netip.Addr, port int, packet [
 		}
 		// net.JoinHostPort brackets IPv6 and avoids a bounds-unchecked uint16(port)
 		// conversion; port is already validated to 1..65535 by validateEndpoint.
-		reply, err := sendOne(ctx, dialer, net.JoinHostPort(addr.String(), portStr), packet, timeout, replyBuffer)
+		reply, wroteAndTimedOut, err := sendOne(ctx, dialer, net.JoinHostPort(addr.String(), portStr), packet, timeout, replyBuffer)
 		if err == nil {
 			return reply, nil
 		}
@@ -589,38 +642,48 @@ func sendToAddresses(ctx context.Context, addrs []netip.Addr, port int, packet [
 			return nil, cerr
 		}
 		lastErr = err
+		if !wroteAndTimedOut {
+			lastLocalErr = err
+		}
 	}
 	if lastErr == nil {
 		// resolveAddresses guarantees at least one address, so this is unreachable;
 		// keep it explicit so a future change cannot silently return (nil, nil).
 		lastErr = errors.New("no address produced a reply")
 	}
-	return nil, fmt.Errorf("%w: %w", ErrTransport, lastErr)
+	// ErrNoReply is an authority-bearing observation only when every resolved
+	// address reached a successful datagram write and then stayed silent. A
+	// dial/write/local failure on any address makes the whole exchange a mixed
+	// transport failure, even if a later address times out after its write.
+	if lastLocalErr != nil {
+		return nil, fmt.Errorf("%w: %w", ErrTransport, lastLocalErr)
+	}
+	return nil, &allAddressesNoReplyError{last: lastErr}
 }
 
 // sendOne dials one address, writes the packet, and reads a single reply datagram
 // under a socket deadline. It reads into a buffer one byte larger than the NHP
 // buffer so an oversize datagram is detected rather than silently truncated.
-func sendOne(ctx context.Context, dialer Dialer, address string, packet []byte, timeout time.Duration, replyBuffer []byte) (reply []byte, err error) {
+func sendOne(ctx context.Context, dialer Dialer, address string, packet []byte, timeout time.Duration, replyBuffer []byte) (reply []byte, wroteAndTimedOut bool, err error) {
 	conn, stopCancellation, err := dialWithDeadline(ctx, dialer, address, timeout)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer func() { _ = conn.Close() }()
 	defer stopCancellation()
 
 	if err := ctxErr(ctx); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if err := udpfence.Check(ctx); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	n, err := conn.Write(packet)
 	if err != nil {
-		return nil, fmt.Errorf("write to %s: %w", address, err)
+		return nil, false, fmt.Errorf("write to %s: %w", address, err)
 	}
 	if n != len(packet) {
-		return nil, fmt.Errorf("write to %s: short datagram write: wrote %d of %d bytes", address, n, len(packet))
+		return nil, false, fmt.Errorf("write to %s: short datagram write: wrote %d of %d bytes", address, n, len(packet))
 	}
 
 	// Read one byte past the NHP buffer so an oversize datagram is detectable
@@ -636,15 +699,14 @@ func sendOne(ctx context.Context, dialer Dialer, address string, packet []byte, 
 	// of treating it as a transport miss and falling through to another IP.
 	if n <= nhpwire.PacketBufferSize && err != nil {
 		if isSocketTimeout(err) {
-			// The write succeeded and the deadline expired with nothing back. Tag
-			// the observation so the bounded retry driver can report "nothing ever
-			// answered" instead of a generic transport miss. ErrTransport is still
-			// applied by sendToAddresses, so retry classification is unchanged.
-			return nil, fmt.Errorf("%w: read from %s: %w", ErrNoReply, address, err)
+			// Return provenance out of band. The caller installs the public marker
+			// only after every selected address reports this exact structured
+			// outcome; an injected error chain cannot imitate it.
+			return nil, true, fmt.Errorf("read from %s: %w", address, err)
 		}
-		return nil, fmt.Errorf("read from %s: %w", address, err)
+		return nil, false, fmt.Errorf("read from %s: %w", address, err)
 	}
-	return replyBuffer[:n], nil
+	return replyBuffer[:n], false, nil
 }
 
 // isSocketTimeout reports whether err is a socket deadline expiry, whether it

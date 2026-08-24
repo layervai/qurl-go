@@ -308,6 +308,17 @@ func TestKnockWithReknock_CookieBoundSequence(t *testing.T) {
 	}
 }
 
+func TestKnockWithReknock_InitialSilenceIsDistinctFromReknockSilence(t *testing.T) {
+	t.Parallel()
+	_, endpoint, options := newLoopbackExchange(t, behaviorSilent)
+	options.Timeout = 100 * time.Millisecond
+
+	reply, err := nativeudp.KnockWithReknock(context.Background(), endpoint, []byte(`{"leg":"knock"}`), []byte(`{"leg":"reknock"}`), options)
+	if reply != nil || !errors.Is(err, nativeudp.ErrInitialKnockNoReply) || !errors.Is(err, nativeudp.ErrNoReply) {
+		t.Fatalf("initial silence reply/error = %#v/%v, want initial-knock no-reply", reply, err)
+	}
+}
+
 func TestKnockWithReknock_DirectACKSkipsReknock(t *testing.T) {
 	t.Parallel()
 	server, endpoint, options, dialer, resolver := sessionSetup(t, sessionDirectACK)
@@ -437,6 +448,9 @@ func TestKnockWithReknock_SilentReknockIsTransportFailure(t *testing.T) {
 	reply, err := nativeudp.KnockWithReknock(context.Background(), endpoint, []byte(`{"leg":"knock"}`), []byte(`{"leg":"reknock"}`), options)
 	if reply != nil || !errors.Is(err, nativeudp.ErrTransport) {
 		t.Fatalf("silent reknock reply/error = %#v/%v, want nil/ErrTransport", reply, err)
+	}
+	if errors.Is(err, nativeudp.ErrInitialKnockNoReply) {
+		t.Fatalf("silent RKN was mislabeled as initial KNK silence: %v", err)
 	}
 	types, _, _ := server.snapshot()
 	if len(types) != 2 || types[1] != relayknock.TypeReknock {

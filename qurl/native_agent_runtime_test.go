@@ -1797,6 +1797,102 @@ func TestKnockRegisteredAgent_UsesAuthoritativeAssignedCell(t *testing.T) {
 	}
 }
 
+func TestKnockRegisteredAgent_InitialNoReplyBindsExactSelectedEndpoint(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	for _, test := range []struct {
+		name string
+		host string
+	}{
+		{name: "direct candidate", host: "direct-candidate.sandbox.layerv.xyz"},
+		{name: "relay candidate", host: "relay-candidate.sandbox.layerv.xyz"},
+		{name: "source-fenced recovery", host: "blue-recovery.sandbox.layerv.xyz"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newRuntimeFixture(t, nil, nil).expectSilence()
+			assignment := &AgentAssignment{
+				CellID: "cell0", AssignmentGeneration: 1, EndpointRevision: 1,
+				LeaseExpiresAt: time.Now().Add(time.Hour), Endpoint: NHPUDPEndpoint{
+					Host: test.host, Port: standardNHPUDPPort,
+					ServerPublicKeyB64: base64.StdEncoding.EncodeToString(assignmentHex(t, contract.Keys.AssignedCell.StaticPubHex)),
+				},
+			}
+			binding := &AgentRuntimeBinding{
+				AgentID:      "agent-conform",
+				PublicKeyB64: base64.StdEncoding.EncodeToString(assignmentHex(t, contract.Keys.Agent.StaticPubHex)),
+				CellID:       assignment.CellID, AssignmentGeneration: assignment.AssignmentGeneration, EndpointRevision: assignment.EndpointRevision,
+				LeaseExpiresAt: assignment.LeaseExpiresAt, NHPUDPEndpoint: assignment.Endpoint, authoritativeAgentID: "agent-conform",
+				authoritativePublicKeyB64: base64.StdEncoding.EncodeToString(assignmentHex(t, contract.Keys.Agent.StaticPubHex)),
+				authoritativeAssignment:   assignment.clone(),
+			}
+			privateKey := assignmentHex(t, contract.Keys.Agent.StaticPrivHex)
+			defer wipeBytes(privateKey)
+			resolver := runtimeResolverFunc(func(_ context.Context, network, host string) ([]netip.Addr, error) {
+				if network != "ip" || host != test.host {
+					return nil, fmt.Errorf("unexpected resolution %q %q", network, host)
+				}
+				return []netip.Addr{netip.MustParseAddr("9.9.9.9")}, nil
+			})
+
+			result, err := KnockRegisteredAgent(context.Background(), binding, privateKey, "resource-public-key",
+				NativeKnockOptions{RunID: "0123456789abcdef", RunAttempt: 1}, WithAgentRuntimeUDPResolver(resolver),
+				WithAgentRuntimeUDPDialer(f.dialer), WithAgentRuntimeUDPBounds(runtimeSilenceTimeout, 1))
+			var noReply *EndpointNoReplyError
+			if result != nil || !errors.Is(err, ErrEndpointNoReply) || !errors.As(err, &noReply) || noReply == nil ||
+				noReply.Endpoint != net.JoinHostPort(test.host, "443") || noReply.Attempts != 1 || noReply.Elapsed <= 0 ||
+				!errors.Is(noReply.Last, nativeudp.ErrInitialKnockNoReply) || !errors.Is(noReply.Last, nativeudp.ErrNoReply) {
+				t.Fatalf("selected endpoint no-reply = %#v/%#v/%v", result, noReply, err)
+			}
+		})
+	}
+}
+
+func TestKnockRegisteredAgent_LocalFailuresNeverBecomeEndpointNoReply(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	f := newRuntimeFixture(t, nil, nil)
+	assignment := &AgentAssignment{
+		CellID: "cell0", AssignmentGeneration: 1, EndpointRevision: 1,
+		LeaseExpiresAt: time.Now().Add(time.Hour), Endpoint: NHPUDPEndpoint{
+			Host: "cell0.nhp.layerv.ai", Port: standardNHPUDPPort,
+			ServerPublicKeyB64: base64.StdEncoding.EncodeToString(assignmentHex(t, contract.Keys.AssignedCell.StaticPubHex)),
+		},
+	}
+	binding := &AgentRuntimeBinding{
+		AgentID:      "agent-conform",
+		PublicKeyB64: base64.StdEncoding.EncodeToString(assignmentHex(t, contract.Keys.Agent.StaticPubHex)),
+		CellID:       assignment.CellID, AssignmentGeneration: assignment.AssignmentGeneration, EndpointRevision: assignment.EndpointRevision,
+		LeaseExpiresAt: assignment.LeaseExpiresAt, NHPUDPEndpoint: assignment.Endpoint, authoritativeAgentID: "agent-conform",
+		authoritativePublicKeyB64: base64.StdEncoding.EncodeToString(assignmentHex(t, contract.Keys.Agent.StaticPubHex)),
+		authoritativeAssignment:   assignment.clone(),
+	}
+	privateKey := assignmentHex(t, contract.Keys.Agent.StaticPrivHex)
+	defer wipeBytes(privateKey)
+	resolveFailure := runtimeResolverFunc(func(context.Context, string, string) ([]netip.Addr, error) {
+		return nil, errors.New("injected DNS failure")
+	})
+	for _, test := range []struct {
+		name    string
+		key     []byte
+		options []AgentRuntimeUDPOption
+		want    error
+	}{
+		{name: "DNS", key: privateKey, options: []AgentRuntimeUDPOption{WithAgentRuntimeUDPResolver(resolveFailure)}, want: nativeudp.ErrResolve},
+		{name: "dial", key: privateKey, options: []AgentRuntimeUDPOption{
+			WithAgentRuntimeUDPResolver(f.resolver),
+			WithAgentRuntimeUDPDialer(&noIONativeDialer{}),
+		}, want: nativeudp.ErrTransport},
+		{name: "local input", key: []byte("short"), want: ErrInvalidNativeKnockInput},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			result, err := KnockRegisteredAgent(context.Background(), binding, test.key, "resource-public-key",
+				NativeKnockOptions{RunID: "0123456789abcdef", RunAttempt: 1}, test.options...)
+			var noReply *EndpointNoReplyError
+			if result != nil || !errors.Is(err, test.want) || errors.Is(err, ErrEndpointNoReply) || errors.As(err, &noReply) {
+				t.Fatalf("local failure = %#v/%T/%v, want %v without endpoint no-reply", result, err, err, test.want)
+			}
+		})
+	}
+}
+
 func TestKnockRegisteredAgent_CookieChallengeReResolvesForOneBoundReknock(t *testing.T) {
 	contract := loadAssignmentFixture(t)
 	cookie := bytes.Repeat([]byte{0x7a}, 32)
