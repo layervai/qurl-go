@@ -31,6 +31,10 @@ var ErrInvalidNativeKnockInput = errors.New("qurl: invalid native knock input")
 type NativeKnockOptions struct {
 	RunID      string
 	RunAttempt uint64
+	// Operation is an offline-prepared durable session operation. The caller
+	// must persist its exact JSON before this knock. Nil preserves the released
+	// legacy registered-agent wire bytes.
+	Operation *NativeSessionOperation
 }
 
 // nativeAgentKnockBody is the AEAD-protected NHP_KNK application body for a
@@ -49,6 +53,11 @@ type nativeAgentKnockBody struct {
 	KnockResourceID string `json:"resId"`
 	RunID           string `json:"runId"`
 	RunAttempt      uint64 `json:"runAttempt"`
+	OperationID     string `json:"operation_id,omitempty"`
+	BindingSHA256   string `json:"binding_sha256,omitempty"`
+	OwnerID         string `json:"owner_id,omitempty"`
+	PreparedAtMS    int64  `json:"prepared_at_ms,omitempty"`
+	ExpiresAtMS     int64  `json:"expires_at_ms,omitempty"`
 }
 
 type nativeExactSessionCloseBody struct {
@@ -99,7 +108,7 @@ func marshalNativeSessionApplicationBody(agentID, knockResourceID string, opts N
 
 	// This scalar-only struct cannot currently make json.Marshal fail. Keep the
 	// error path explicit so adding a fallible field cannot silently weaken it.
-	body, err := json.Marshal(nativeAgentKnockBody{
+	wire := nativeAgentKnockBody{
 		HeaderType:      headerType,
 		UserID:          agentID,
 		DeviceID:        agentID,
@@ -107,7 +116,21 @@ func marshalNativeSessionApplicationBody(agentID, knockResourceID string, opts N
 		KnockResourceID: knockResourceID,
 		RunID:           opts.RunID,
 		RunAttempt:      opts.RunAttempt,
-	})
+	}
+	if opts.Operation != nil {
+		operation := *opts.Operation
+		if validateNativeSessionOperation(operation) != nil || operation.AgentID != agentID ||
+			operation.ResourceID != knockResourceID || operation.RunID != opts.RunID ||
+			operation.RunAttempt != opts.RunAttempt {
+			return nil, ErrInvalidNativeSessionOperation
+		}
+		wire.OperationID = operation.OperationID
+		wire.BindingSHA256 = operation.BindingSHA256
+		wire.OwnerID = operation.OwnerID
+		wire.PreparedAtMS = operation.PreparedAtMillis
+		wire.ExpiresAtMS = operation.ExpiresAtMillis
+	}
+	body, err := json.Marshal(wire)
 	if err != nil {
 		return nil, fmt.Errorf("qurl: encode native knock body: %w", err)
 	}
