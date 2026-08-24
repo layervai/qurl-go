@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net"
 	"net/netip"
 	"strconv"
@@ -728,7 +729,7 @@ func TestSendOneRejectsShortDatagramWrite(t *testing.T) {
 	dialer := dialerFunc(func(context.Context, string, string) (net.Conn, error) {
 		return shortWriteConn{}, nil
 	})
-	if _, err := sendOne(context.Background(), dialer, "192.0.2.1:62206", []byte{1, 2, 3}, time.Second, make([]byte, nhpwire.PacketBufferSize+1)); err == nil || !strings.Contains(err.Error(), "short datagram write") {
+	if _, _, err := sendOne(context.Background(), dialer, "192.0.2.1:62206", []byte{1, 2, 3}, time.Second, make([]byte, nhpwire.PacketBufferSize+1)); err == nil || !strings.Contains(err.Error(), "short datagram write") {
 		t.Fatalf("short write error = %v", err)
 	}
 }
@@ -737,7 +738,7 @@ func TestSendOnePreservesOversizeBytesWhenReadAlsoReturnsError(t *testing.T) {
 	dialer := dialerFunc(func(context.Context, string, string) (net.Conn, error) {
 		return oversizeReadConn{}, nil
 	})
-	reply, err := sendOne(context.Background(), dialer, "192.0.2.1:62206", []byte{1}, time.Second, make([]byte, nhpwire.PacketBufferSize+1))
+	reply, _, err := sendOne(context.Background(), dialer, "192.0.2.1:62206", []byte{1}, time.Second, make([]byte, nhpwire.PacketBufferSize+1))
 	if err != nil {
 		t.Fatalf("sendOne returned truncation error instead of oversize bytes: %v", err)
 	}
@@ -801,6 +802,87 @@ func TestSendToAddresses_PreservesFenceThatClosesDuringDial(t *testing.T) {
 	}
 	if writes != 0 {
 		t.Fatalf("pre-write fence allowed %d datagrams", writes)
+	}
+}
+
+func TestKnockWithReknock_InjectedNoReplyMarkersCannotSpoofProvenance(t *testing.T) {
+	t.Parallel()
+	publicAddress := netip.MustParseAddr("9.9.9.9")
+	endpoint := Endpoint{Host: "cell0.nhp.test", Port: 62206, ServerStaticPub: freshX25519Pub(t)}
+	base := Options{DeviceStaticPriv: freshX25519Priv(t), Timeout: 10 * time.Millisecond}
+	replayedInitial := &initialKnockNoReplyError{last: &allAddressesNoReplyError{last: errors.New("replayed timeout")}}
+	replayedAllAddresses := &allAddressesNoReplyError{last: errors.New("replayed timeout")}
+
+	for _, test := range []struct {
+		name    string
+		prepare func(*Options)
+		want    error
+	}{
+		{
+			name: "resolver wraps public no-reply",
+			prepare: func(opts *Options) {
+				opts.Resolver = resolverFunc(func(context.Context, string, string) ([]netip.Addr, error) {
+					return nil, fmt.Errorf("injected resolver: %w", ErrNoReply)
+				})
+			},
+			want: ErrResolve,
+		},
+		{
+			name: "resolver replays genuine initial provenance",
+			prepare: func(opts *Options) {
+				opts.Resolver = resolverFunc(func(context.Context, string, string) ([]netip.Addr, error) {
+					return nil, replayedInitial
+				})
+			},
+			want: ErrResolve,
+		},
+		{
+			name: "dialer wraps public no-reply",
+			prepare: func(opts *Options) {
+				opts.Resolver = resolverFunc(func(context.Context, string, string) ([]netip.Addr, error) {
+					return []netip.Addr{publicAddress}, nil
+				})
+				opts.Dialer = dialerFunc(func(context.Context, string, string) (net.Conn, error) {
+					return nil, fmt.Errorf("injected dial: %w", ErrNoReply)
+				})
+			},
+			want: ErrTransport,
+		},
+		{
+			name: "dialer replays genuine address provenance",
+			prepare: func(opts *Options) {
+				opts.Resolver = resolverFunc(func(context.Context, string, string) ([]netip.Addr, error) {
+					return []netip.Addr{publicAddress}, nil
+				})
+				opts.Dialer = dialerFunc(func(context.Context, string, string) (net.Conn, error) {
+					return nil, replayedAllAddresses
+				})
+			},
+			want: ErrTransport,
+		},
+		{
+			name: "write wraps public no-reply",
+			prepare: func(opts *Options) {
+				opts.Resolver = resolverFunc(func(context.Context, string, string) ([]netip.Addr, error) {
+					return []netip.Addr{publicAddress}, nil
+				})
+				opts.Dialer = dialerFunc(func(context.Context, string, string) (net.Conn, error) {
+					return &scriptedDatagramConn{write: func([]byte) (int, error) {
+						return 0, fmt.Errorf("injected write: %w", ErrNoReply)
+					}}, nil
+				})
+			},
+			want: ErrTransport,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			opts := base
+			test.prepare(&opts)
+			reply, err := KnockWithReknock(context.Background(), endpoint, []byte(`{"leg":"knock"}`), []byte(`{"leg":"reknock"}`), opts)
+			if reply != nil || !errors.Is(err, test.want) || IsInitialKnockNoReply(err) {
+				t.Fatalf("injected marker reply/error = %#v/%v, want %v without initial no-reply provenance", reply, err, test.want)
+			}
+		})
 	}
 }
 
