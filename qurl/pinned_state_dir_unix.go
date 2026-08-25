@@ -169,6 +169,10 @@ func openPinnedStateDir(path, label string, mode pinnedStateDirOpenMode) (*pinne
 	if deniedAt == "" {
 		return nil, err
 	}
+	// One recovery, not a loop: this handles a single contiguous unreachable
+	// band, which is the shape App Sandbox produces (denied ancestors, container
+	// openable below them). A second, non-contiguous denied band below the
+	// anchor is intentionally out of scope and fails closed.
 	anchor, anchorErr := openPinnedWalkAnchor(filepath.Clean(path), deniedAt, label)
 	if anchorErr != nil {
 		// A band this process merely cannot reach is not a finding: report the
