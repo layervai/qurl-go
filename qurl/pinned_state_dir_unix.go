@@ -82,7 +82,11 @@ type pinnedFileIdentity struct {
 func pinnedBandComponent(path, label string) error {
 	var stat unix.Stat_t
 	if err := unix.Lstat(path, &stat); err != nil {
-		return fmt.Errorf("%w: inspect %s band component: %w", ErrAgentStateContinuity, label, err)
+		// Cannot inspect it, so cannot vouch for it -- but that is a
+		// reachability limit, not a finding about the component. Keep it on the
+		// unreachable side so the caller reports the walk's own denial.
+		return fmt.Errorf("%w: %w: inspect %s band component %s: %w",
+			ErrAgentStateContinuity, errPinnedBandUnreachable, label, path, err)
 	}
 	if stat.Mode&unix.S_IFMT == unix.S_IFLNK {
 		return fmt.Errorf("%w: %s band component is a symlink", ErrAgentStateContinuity, label)
@@ -112,7 +116,7 @@ func openPinnedWalkAnchor(cleanPath, denied, label string) (string, error) {
 	rel := strings.TrimPrefix(cleanPath, denied)
 	rel = strings.TrimPrefix(rel, string(filepath.Separator))
 	if rel == "" {
-		return "", fmt.Errorf("%w: no reachable %s namespace below %s", ErrAgentStateContinuity, label, denied)
+		return "", fmt.Errorf("%w: %w: %s below %s", ErrAgentStateContinuity, errPinnedBandUnreachable, label, denied)
 	}
 	// Re-check the denied component itself. It was rejected before any
 	// validation ran, so the recovery must not assume anything about it.
@@ -137,8 +141,13 @@ func openPinnedWalkAnchor(cleanPath, denied, label string) (string, error) {
 		_ = unix.Close(fd)
 		return current, nil
 	}
-	return "", fmt.Errorf("%w: no reachable %s namespace below %s", ErrAgentStateContinuity, label, denied)
+	return "", fmt.Errorf("%w: %w: %s below %s", ErrAgentStateContinuity, errPinnedBandUnreachable, label, denied)
 }
+
+// errPinnedBandUnreachable marks a recovery that declined because nothing below
+// the denied ancestor could be opened -- as opposed to declining because the
+// band itself is unsafe, which is a finding worth reporting on its own.
+var errPinnedBandUnreachable = errors.New("no reachable namespace below the denied ancestor")
 
 // pinnedWalkConfined reports a component failure that the anchor fallback can
 // recover from: the process was refused a handle it may simply not hold.
@@ -162,8 +171,14 @@ func openPinnedStateDir(path, label string, mode pinnedStateDirOpenMode) (*pinne
 	}
 	anchor, anchorErr := openPinnedWalkAnchor(filepath.Clean(path), deniedAt, label)
 	if anchorErr != nil {
-		// Surface why the walk actually failed, not why recovery declined.
-		return nil, err
+		// A band this process merely cannot reach is not a finding: report the
+		// benign permission error the walk already produced. A band that is
+		// unsafe IS the finding, and names what an operator has to fix, so it
+		// must not be swallowed by the generic denial.
+		if errors.Is(anchorErr, errPinnedBandUnreachable) {
+			return nil, err
+		}
+		return nil, anchorErr
 	}
 	dir, _, retryErr := openPinnedStateDirFrom(anchor, path, label, mode)
 	if retryErr != nil {
@@ -400,7 +415,10 @@ func openExistingDirNoFollow(path string) (int, error) {
 	}
 	anchor, anchorErr := openPinnedWalkAnchor(filepath.Clean(path), deniedAt, "state directory")
 	if anchorErr != nil {
-		return -1, err
+		if errors.Is(anchorErr, errPinnedBandUnreachable) {
+			return -1, err
+		}
+		return -1, anchorErr
 	}
 	fd, _, retryErr := openExistingDirNoFollowFrom(anchor, path)
 	if retryErr != nil {

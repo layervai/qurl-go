@@ -3,6 +3,7 @@
 package qurl
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -150,6 +151,11 @@ func TestPinnedStateDirRejectsWritableComponentInTheConfinedBand(t *testing.T) {
 	if err == nil {
 		_ = dir.close()
 		t.Fatal("openPinnedStateDir resumed below a world-writable band component")
+	}
+	// The permission denial that triggered recovery is the benign half. What an
+	// operator has to fix is the mode, so that has to be the error they see.
+	if !errors.Is(err, ErrInsecureAgentStatePermissions) {
+		t.Fatalf("error = %v, want the unsafe-mode finding, not the generic denial", err)
 	}
 }
 
