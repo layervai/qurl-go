@@ -6,6 +6,21 @@ independently under `awsstore/vX.Y.Z` tags.
 Pre-1.0 semantic versioning: breaking changes land in minor versions (v0.N.0)
 and are marked **Breaking** with what to change.
 
+## v0.8.1 — 2026-08-25
+
+- Fixed sealed agent state failing to initialize under the macOS App Sandbox.
+  Both directory walks in the pinned state path opened a handle for every
+  component starting at the filesystem root, which a sandboxed process can
+  never do: the sandbox resolves paths *through* ancestors it refuses to open,
+  so an app reaches its own container while `openat` on `/Users` is denied.
+  A confined process now resumes the walk at the shallowest prefix it can open
+  and validates the components in between by absolute path. Recovery engages
+  only on a permission denial, so a walk that already succeeds is unchanged and
+  no unconfined deployment is affected. Symlinks are still refused by
+  `O_NOFOLLOW`, and the skipped region must still be root/euid-owned and closed
+  to group and other. An unsafe region now reports itself rather than the
+  generic denial that exposed it. (#202)
+
 ## v0.8.0 — 2026-08-23
 
 - **Breaking:** registered-agent native knocks now require a positive,
