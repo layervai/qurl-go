@@ -69,6 +69,83 @@ type pinnedFileIdentity struct {
 	exists bool
 }
 
+// pinnedBandComponent validates one component of the unreachable band -- the
+// stretch between an ancestor this process may not open and the anchor the walk
+// resumes at. Those components can never be opened as directory handles, which
+// is what put the walk here, so they are checked by absolute path instead.
+//
+// Weaker than the pinned walk, and deliberately so: it proves what the
+// component is now, not that it cannot change afterwards. It exists because
+// opening the anchor by absolute path resolves whatever it is handed, so
+// without this a symlink planted in the band would be traversed silently --
+// the opposite of how O_NOFOLLOW treats one everywhere else here.
+func pinnedBandComponent(path, label string) error {
+	var stat unix.Stat_t
+	if err := unix.Lstat(path, &stat); err != nil {
+		return fmt.Errorf("%w: inspect %s band component: %w", ErrAgentStateContinuity, label, err)
+	}
+	if stat.Mode&unix.S_IFMT == unix.S_IFLNK {
+		return fmt.Errorf("%w: %s band component is a symlink", ErrAgentStateContinuity, label)
+	}
+	if stat.Mode&unix.S_IFMT != unix.S_IFDIR {
+		return fmt.Errorf("%w: %s band component is not a directory", ErrAgentStateContinuity, label)
+	}
+	return validateTrustedAncestorStat(&stat, label+" band component", path)
+}
+
+// openPinnedWalkAnchor resumes a walk that the filesystem root cannot reach.
+//
+// A process may be confined so that it can resolve paths *through* an ancestor
+// while being refused a directory handle on it. macOS App Sandbox is the case
+// that matters: a sandboxed app reaches its own container fine, but openat on
+// /Users is denied outright, so insisting on a handle for every component from
+// / can never succeed.
+//
+// Resume at the shallowest prefix of cleanPath this process can open, so the
+// largest reachable part of the path stays under the full walk, and validate
+// every component in between by absolute path. An ancestor the kernel refuses
+// to open cannot be validated -- and cannot be attacked through either, since
+// the same denial is what confines the process below it.
+//
+// Returns the anchor path; the caller reopens it to start the walk.
+func openPinnedWalkAnchor(cleanPath, denied, label string) (string, error) {
+	rel := strings.TrimPrefix(cleanPath, denied)
+	rel = strings.TrimPrefix(rel, string(filepath.Separator))
+	if rel == "" {
+		return "", fmt.Errorf("%w: no reachable %s namespace below %s", ErrAgentStateContinuity, label, denied)
+	}
+	// Re-check the denied component itself. It was rejected before any
+	// validation ran, so the recovery must not assume anything about it.
+	if err := pinnedBandComponent(denied, label); err != nil {
+		return "", err
+	}
+	current := denied
+	for _, component := range strings.Split(rel, string(filepath.Separator)) {
+		current = filepath.Join(current, component)
+		if err := pinnedBandComponent(current, label); err != nil {
+			return "", err
+		}
+		fd, err := unix.Open(current, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
+		if err != nil {
+			// Only a permission denial means "still inside the band". Anything
+			// else is a real failure on something Lstat just called a directory.
+			if pinnedWalkConfined(err) {
+				continue
+			}
+			return "", fmt.Errorf("%w: open %s walk anchor %s: %w", ErrAgentStateContinuity, label, current, err)
+		}
+		_ = unix.Close(fd)
+		return current, nil
+	}
+	return "", fmt.Errorf("%w: no reachable %s namespace below %s", ErrAgentStateContinuity, label, denied)
+}
+
+// pinnedWalkConfined reports a component failure that the anchor fallback can
+// recover from: the process was refused a handle it may simply not hold.
+func pinnedWalkConfined(err error) bool {
+	return errors.Is(err, unix.EPERM) || errors.Is(err, unix.EACCES)
+}
+
 func openPinnedStateDir(path, label string, mode pinnedStateDirOpenMode) (*pinnedStateDirImpl, error) {
 	if !filepath.IsAbs(path) {
 		return nil, fmt.Errorf("%w: %s directory must resolve to an absolute path", ErrInvalidBootstrapConfig, label)
@@ -76,9 +153,33 @@ func openPinnedStateDir(path, label string, mode pinnedStateDirOpenMode) (*pinne
 	if mode != pinnedStateDirWritable && mode != pinnedStateDirReadOnly {
 		return nil, fmt.Errorf("%w: invalid %s directory open mode", ErrInvalidBootstrapConfig, label)
 	}
-	rootFD, err := unix.Open(string(filepath.Separator), unix.O_RDONLY|unix.O_CLOEXEC|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
+	dir, deniedAt, err := openPinnedStateDirFrom(string(filepath.Separator), path, label, mode)
+	if err == nil {
+		return dir, nil
+	}
+	if deniedAt == "" {
+		return nil, err
+	}
+	anchor, anchorErr := openPinnedWalkAnchor(filepath.Clean(path), deniedAt, label)
+	if anchorErr != nil {
+		// Surface why the walk actually failed, not why recovery declined.
+		return nil, err
+	}
+	dir, _, retryErr := openPinnedStateDirFrom(anchor, path, label, mode)
+	if retryErr != nil {
+		return nil, retryErr
+	}
+	return dir, nil
+}
+
+// openPinnedStateDirFrom runs the component walk with anchorPath as its
+// starting namespace. anchorPath is the filesystem root unless a confinement
+// put it lower -- see openPinnedWalkAnchor. deniedAt names the component that
+// refused a handle, so the caller can decide whether to retry from an anchor.
+func openPinnedStateDirFrom(anchorPath, path, label string, mode pinnedStateDirOpenMode) (_ *pinnedStateDirImpl, deniedAt string, _ error) {
+	rootFD, err := unix.Open(anchorPath, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
 	if err != nil {
-		return nil, fmt.Errorf("%w: open filesystem root: %w", ErrAgentStateContinuity, err)
+		return nil, "", fmt.Errorf("%w: open pinned walk anchor %s: %w", ErrAgentStateContinuity, anchorPath, err)
 	}
 	currentFD := rootFD
 	rootOpen := true
@@ -93,23 +194,25 @@ func openPinnedStateDir(path, label string, mode pinnedStateDirOpenMode) (*pinne
 	}()
 	var rootStat unix.Stat_t
 	if err := unix.Fstat(rootFD, &rootStat); err != nil {
-		return nil, fmt.Errorf("%w: stat filesystem root: %w", ErrAgentStateContinuity, err)
+		return nil, "", fmt.Errorf("%w: stat pinned walk anchor %s: %w", ErrAgentStateContinuity, anchorPath, err)
 	}
-	if err := validateTrustedAncestorStat(&rootStat, "filesystem root", string(filepath.Separator)); err != nil {
-		return nil, err
+	if err := validateTrustedAncestorStat(&rootStat, "pinned walk anchor", anchorPath); err != nil {
+		return nil, "", err
 	}
 
 	clean := filepath.Clean(path)
-	components := strings.Split(strings.TrimPrefix(clean, string(filepath.Separator)), string(filepath.Separator))
-	if clean == string(filepath.Separator) {
+	relative := strings.TrimPrefix(clean, anchorPath)
+	relative = strings.TrimPrefix(relative, string(filepath.Separator))
+	components := strings.Split(relative, string(filepath.Separator))
+	if relative == "" {
 		components = nil
 	}
 	// Accumulate the traversed prefix so a rejected ancestor names itself. The
 	// operator otherwise has to guess which component of a long path failed.
-	traversed := string(filepath.Separator)
+	traversed := anchorPath
 	for _, component := range components {
 		if component == "" || component == "." || component == ".." {
-			return nil, fmt.Errorf("%w: invalid %s directory component", ErrInvalidBootstrapConfig, label)
+			return nil, "", fmt.Errorf("%w: invalid %s directory component", ErrInvalidBootstrapConfig, label)
 		}
 		traversed = filepath.Join(traversed, component)
 		nextFD, openErr := unix.Openat(currentFD, component, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
@@ -117,7 +220,7 @@ func openPinnedStateDir(path, label string, mode pinnedStateDirOpenMode) (*pinne
 		if errors.Is(openErr, unix.ENOENT) && mode == pinnedStateDirWritable {
 			if err := unix.Mkdirat(currentFD, component, 0o700); err != nil {
 				if !errors.Is(err, unix.EEXIST) {
-					return nil, fmt.Errorf("%w: create %s directory component: %w", ErrAgentStateContinuity, label, err)
+					return nil, "", fmt.Errorf("%w: create %s directory component: %w", ErrAgentStateContinuity, label, err)
 				}
 			} else {
 				created = true
@@ -125,22 +228,26 @@ func openPinnedStateDir(path, label string, mode pinnedStateDirOpenMode) (*pinne
 			nextFD, openErr = unix.Openat(currentFD, component, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
 		}
 		if openErr != nil {
-			return nil, fmt.Errorf("%w: open %s directory component without following links: %w", ErrAgentStateContinuity, label, openErr)
+			denied := ""
+			if pinnedWalkConfined(openErr) {
+				denied = traversed
+			}
+			return nil, denied, fmt.Errorf("%w: open %s directory component without following links: %w", ErrAgentStateContinuity, label, openErr)
 		}
 		if created {
 			if err := unix.Fchmod(nextFD, 0o700); err != nil {
 				_ = unix.Close(nextFD)
-				return nil, fmt.Errorf("%w: chmod created %s directory component: %w", ErrAgentStateContinuity, label, err)
+				return nil, "", fmt.Errorf("%w: chmod created %s directory component: %w", ErrAgentStateContinuity, label, err)
 			}
 		}
 		var nextStat unix.Stat_t
 		if err := unix.Fstat(nextFD, &nextStat); err != nil {
 			_ = unix.Close(nextFD)
-			return nil, fmt.Errorf("%w: stat %s directory component: %w", ErrAgentStateContinuity, label, err)
+			return nil, "", fmt.Errorf("%w: stat %s directory component: %w", ErrAgentStateContinuity, label, err)
 		}
 		if err := validateTrustedAncestorStat(&nextStat, label+" directory component", traversed); err != nil {
 			_ = unix.Close(nextFD)
-			return nil, err
+			return nil, "", err
 		}
 		if mode == pinnedStateDirWritable {
 			// Persist the created directory's own mode metadata before publishing
@@ -149,14 +256,14 @@ func openPinnedStateDir(path, label string, mode pinnedStateDirOpenMode) (*pinne
 			// the sync.
 			if err := unix.Fsync(nextFD); err != nil {
 				_ = unix.Close(nextFD)
-				return nil, fmt.Errorf("%w: sync %s directory component: %w", ErrAgentStateContinuity, label, err)
+				return nil, "", fmt.Errorf("%w: sync %s directory component: %w", ErrAgentStateContinuity, label, err)
 			}
 			// Sync every traversed parent edge, not only the process that observed
 			// a successful mkdir. If a previous process crashed after mkdir but
 			// before fsync, its retry still closes the durability gap.
 			if err := defaultPinnedStateDirHooks.syncFD(currentFD); err != nil {
 				_ = unix.Close(nextFD)
-				return nil, fmt.Errorf("%w: sync %s parent edge: %w", ErrAgentStateContinuity, label, err)
+				return nil, "", fmt.Errorf("%w: sync %s parent edge: %w", ErrAgentStateContinuity, label, err)
 			}
 		}
 		if currentFD != rootFD {
@@ -171,10 +278,10 @@ func openPinnedStateDir(path, label string, mode pinnedStateDirOpenMode) (*pinne
 	}
 	var stat unix.Stat_t
 	if err := unix.Fstat(currentFD, &stat); err != nil {
-		return nil, fmt.Errorf("%w: stat pinned %s directory: %w", ErrAgentStateContinuity, label, err)
+		return nil, "", fmt.Errorf("%w: stat pinned %s directory: %w", ErrAgentStateContinuity, label, err)
 	}
 	if err := validatePinnedDirStat(&stat, clean); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	rootOpen = false
 	closeCurrent = false
@@ -182,7 +289,7 @@ func openPinnedStateDir(path, label string, mode pinnedStateDirOpenMode) (*pinne
 		fd: currentFD, path: clean, stat: stat,
 		hooks:        defaultPinnedStateDirHooks,
 		activeLockFD: -1,
-	}, nil
+	}, "", nil
 }
 
 func validatePinnedDirStat(stat *unix.Stat_t, path string) error {
@@ -284,25 +391,52 @@ func (d *pinnedStateDirImpl) validateContinuity() error {
 }
 
 func openExistingDirNoFollow(path string) (int, error) {
-	rootFD, err := unix.Open(string(filepath.Separator), unix.O_RDONLY|unix.O_CLOEXEC|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
-	if err != nil {
+	fd, deniedAt, err := openExistingDirNoFollowFrom(string(filepath.Separator), path)
+	if err == nil {
+		return fd, nil
+	}
+	if deniedAt == "" {
 		return -1, err
+	}
+	anchor, anchorErr := openPinnedWalkAnchor(filepath.Clean(path), deniedAt, "state directory")
+	if anchorErr != nil {
+		return -1, err
+	}
+	fd, _, retryErr := openExistingDirNoFollowFrom(anchor, path)
+	if retryErr != nil {
+		return -1, retryErr
+	}
+	return fd, nil
+}
+
+// openExistingDirNoFollowFrom reopens path with anchorPath as the starting
+// namespace, reporting which component refused a handle so the caller can
+// retry from a reachable anchor. Continuity revalidation runs through here, so
+// it has to tolerate the same confinement the initial open does -- otherwise a
+// sandboxed process opens its state directory once and then fails every check
+// afterwards.
+func openExistingDirNoFollowFrom(anchorPath, path string) (_ int, deniedAt string, _ error) {
+	rootFD, err := unix.Open(anchorPath, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return -1, "", err
 	}
 	currentFD := rootFD
 	var rootStat unix.Stat_t
 	if err := unix.Fstat(rootFD, &rootStat); err != nil {
 		_ = unix.Close(rootFD)
-		return -1, err
+		return -1, "", err
 	}
 	if err := validateTrustedAncestorStat(&rootStat, "filesystem root", string(filepath.Separator)); err != nil {
 		_ = unix.Close(rootFD)
-		return -1, err
+		return -1, "", err
 	}
-	components := strings.Split(strings.TrimPrefix(filepath.Clean(path), string(filepath.Separator)), string(filepath.Separator))
-	if filepath.Clean(path) == string(filepath.Separator) {
+	relative := strings.TrimPrefix(filepath.Clean(path), anchorPath)
+	relative = strings.TrimPrefix(relative, string(filepath.Separator))
+	components := strings.Split(relative, string(filepath.Separator))
+	if relative == "" {
 		components = nil
 	}
-	traversed := string(filepath.Separator)
+	traversed := anchorPath
 	for _, component := range components {
 		traversed = filepath.Join(traversed, component)
 		nextFD, err := unix.Openat(currentFD, component, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
@@ -311,7 +445,11 @@ func openExistingDirNoFollow(path string) (int, error) {
 				_ = unix.Close(currentFD)
 			}
 			_ = unix.Close(rootFD)
-			return -1, err
+			denied := ""
+			if pinnedWalkConfined(err) {
+				denied = traversed
+			}
+			return -1, denied, err
 		}
 		var nextStat unix.Stat_t
 		if err := unix.Fstat(nextFD, &nextStat); err != nil {
@@ -320,7 +458,7 @@ func openExistingDirNoFollow(path string) (int, error) {
 				_ = unix.Close(currentFD)
 			}
 			_ = unix.Close(rootFD)
-			return -1, err
+			return -1, "", err
 		}
 		if err := validateTrustedAncestorStat(&nextStat, "state directory ancestor", traversed); err != nil {
 			_ = unix.Close(nextFD)
@@ -328,7 +466,7 @@ func openExistingDirNoFollow(path string) (int, error) {
 				_ = unix.Close(currentFD)
 			}
 			_ = unix.Close(rootFD)
-			return -1, err
+			return -1, "", err
 		}
 		if currentFD != rootFD {
 			_ = unix.Close(currentFD)
@@ -338,7 +476,7 @@ func openExistingDirNoFollow(path string) (int, error) {
 	if currentFD != rootFD {
 		_ = unix.Close(rootFD)
 	}
-	return currentFD, nil
+	return currentFD, "", nil
 }
 
 func validatePinnedRegularStat(stat *unix.Stat_t, label, path string) error {
