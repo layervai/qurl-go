@@ -99,8 +99,8 @@ func TestPinnedStateDirCreatesBeneathAnUnopenableAncestor(t *testing.T) {
 func TestPinnedStateDirRejectsSymlinkInsideTheConfinedBand(t *testing.T) {
 	requireNonRootConfinement(t)
 	root := secureAgentStateTestDir(t)
-	real := filepath.Join(root, "real", "state")
-	if err := os.MkdirAll(real, 0o700); err != nil {
+	targetTree := filepath.Join(root, "real", "state")
+	if err := os.MkdirAll(targetTree, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	confined := filepath.Join(root, "confined")
