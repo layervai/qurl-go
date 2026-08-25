@@ -426,7 +426,7 @@ func openExistingDirNoFollowFrom(anchorPath, path string) (_ int, deniedAt strin
 		_ = unix.Close(rootFD)
 		return -1, "", err
 	}
-	if err := validateTrustedAncestorStat(&rootStat, "filesystem root", string(filepath.Separator)); err != nil {
+	if err := validateTrustedAncestorStat(&rootStat, "pinned walk anchor", anchorPath); err != nil {
 		_ = unix.Close(rootFD)
 		return -1, "", err
 	}
