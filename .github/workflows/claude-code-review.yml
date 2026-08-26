@@ -263,7 +263,7 @@ jobs:
             add_issue_comment and end it with REVIEW MARKER on its own last
             line. Do not publish the marker anywhere else.
           claude_args: >-
-            --model claude-opus-4-8
+            --model claude-opus-5
             --disallowed-tools
             "Bash,Read,Glob,Grep,LS,Task,Edit,Write,MultiEdit,NotebookEdit,WebFetch,WebSearch,mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files,mcp__github__create_or_update_file,mcp__github__push_files,mcp__github__delete_file"
             --allowed-tools
