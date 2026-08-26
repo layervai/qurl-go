@@ -20,8 +20,8 @@ import (
 )
 
 const (
-	nativeSessionOperationSchema                = 1
-	nativeSessionOperationBindingSchema         = 1
+	nativeSessionOperationSchema                = 2
+	nativeSessionOperationBindingSchema         = 2
 	nativeSessionOperationAgentKeySchema        = 2
 	nativeSessionOperationCredentialKind        = "account"
 	nativeSessionOperationConnectorIDClaim      = ""
@@ -43,8 +43,10 @@ var ErrInvalidNativeSessionOperation = errors.New("qurl: invalid native session 
 
 // NativeSessionOperationInput is the caller-owned, non-secret authority used
 // to prepare one durable session operation before any network request. CellID
-// must match the exact completed AgentRuntimeBinding snapshot. The two table
-// names and AWS identity are signed deployment authority, not wire fields.
+// must match the exact completed AgentRuntimeBinding snapshot. ResourceID is
+// the placement-neutral knock/catalog key; ProtectedResourceID is the distinct
+// canonical CRID public-resource identity. The two table names and AWS identity
+// are signed deployment authority, not wire fields.
 type NativeSessionOperationInput struct {
 	AWSAccountID        string
 	AWSRegion           string
@@ -52,6 +54,7 @@ type NativeSessionOperationInput struct {
 	ExpiresAtMillis     int64
 	OwnerID             string
 	PreparedAtMillis    int64
+	ProtectedResourceID string
 	QURLAgentKeysTable  string
 	ResourceID          string
 	RunAttempt          uint64
@@ -79,6 +82,7 @@ type NativeSessionOperation struct {
 	OperationID         string `json:"operation_id"`
 	OwnerID             string `json:"owner_id"`
 	PreparedAtMillis    int64  `json:"prepared_at_ms"`
+	ProtectedResourceID string `json:"protected_resource_id"`
 	QURLAgentKeysTable  string `json:"qurl_agent_keys_table"`
 	ResourceID          string `json:"resource_id"`
 	RunAttempt          uint64 `json:"run_attempt"`
@@ -102,6 +106,7 @@ type nativeSessionOperationCanonicalBinding struct {
 	OperationID         string `json:"operation_id"`
 	OwnerID             string `json:"owner_id"`
 	PreparedAtMillis    int64  `json:"prepared_at_ms"`
+	ProtectedResourceID string `json:"protected_resource_id"`
 	QURLAgentKeysTable  string `json:"qurl_agent_keys_table"`
 	ResourceID          string `json:"resource_id"`
 	RunAttempt          uint64 `json:"run_attempt"`
@@ -154,14 +159,14 @@ func (o *NativeSessionOperation) UnmarshalJSON(raw []byte) error {
 }
 
 func exactNativeSessionOperationKeys(fields map[string]json.RawMessage) bool {
-	if len(fields) != 21 {
+	if len(fields) != 22 {
 		return false
 	}
 	for _, key := range []string{
 		"agent_id", "agent_key_schema_version", "agent_public_key_b64", "auth_service_id",
 		"aws_account_id", "aws_region", "binding_schema", "binding_sha256", "cell_id",
 		"connector_id_claim", "enrollment_credential_kind", "expires_at_ms", "operation_id",
-		"owner_id", "prepared_at_ms", "qurl_agent_keys_table", "resource_id", "run_attempt",
+		"owner_id", "prepared_at_ms", "protected_resource_id", "qurl_agent_keys_table", "resource_id", "run_attempt",
 		"run_id", "schema", "session_control_table",
 	} {
 		if _, ok := fields[key]; !ok {
@@ -192,7 +197,8 @@ func PrepareNativeSessionOperation(binding *AgentRuntimeBinding, deviceStaticPri
 		ConnectorIDClaim: nativeSessionOperationConnectorIDClaim,
 		CredentialKind:   nativeSessionOperationCredentialKind, ExpiresAtMillis: input.ExpiresAtMillis,
 		OwnerID: input.OwnerID, PreparedAtMillis: input.PreparedAtMillis,
-		QURLAgentKeysTable: input.QURLAgentKeysTable, ResourceID: input.ResourceID,
+		ProtectedResourceID: input.ProtectedResourceID,
+		QURLAgentKeysTable:  input.QURLAgentKeysTable, ResourceID: input.ResourceID,
 		RunAttempt: input.RunAttempt, RunID: input.RunID, Schema: nativeSessionOperationSchema,
 		SessionControlTable: input.SessionControlTable,
 	}
@@ -241,7 +247,8 @@ func nativeSessionOperationBindingSHA256(operation NativeSessionOperation) (stri
 		ConnectorIDClaim: operation.ConnectorIDClaim, CredentialKind: operation.CredentialKind,
 		ExpiresAtMillis: operation.ExpiresAtMillis, OperationID: operation.OperationID,
 		OwnerID: operation.OwnerID, PreparedAtMillis: operation.PreparedAtMillis,
-		QURLAgentKeysTable: operation.QURLAgentKeysTable, ResourceID: operation.ResourceID,
+		ProtectedResourceID: operation.ProtectedResourceID,
+		QURLAgentKeysTable:  operation.QURLAgentKeysTable, ResourceID: operation.ResourceID,
 		RunAttempt: operation.RunAttempt, RunID: operation.RunID,
 		SessionControlTable: operation.SessionControlTable,
 	}
@@ -262,6 +269,8 @@ func validateNativeSessionOperation(operation NativeSessionOperation) error {
 		operation.AuthServiceID != agentAspID || !validNativeSessionOperationIdentity(operation.AgentID) ||
 		!validNativeSessionOperationIdentity(operation.OwnerID) ||
 		!validNativeSessionOperationIdentity(operation.ResourceID) ||
+		validateConnectorResourceID(operation.ProtectedResourceID) != nil ||
+		operation.ProtectedResourceID == operation.ResourceID ||
 		!validNativeSessionOperationIdentity(operation.CellID) ||
 		!validNativeSessionOperationTable(operation.SessionControlTable) ||
 		!validNativeSessionOperationTable(operation.QURLAgentKeysTable) ||
@@ -382,18 +391,19 @@ func nativeSessionOperationAbsentRecoveryDeadline(operation NativeSessionOperati
 }
 
 type nativeSessionOperationRecoveryBody struct {
-	HeaderType    int    `json:"headerType"`
-	UserID        string `json:"usrId"`
-	DeviceID      string `json:"devId"`
-	AuthServiceID string `json:"aspId"`
-	ResourceID    string `json:"resId"`
-	RunID         string `json:"runId"`
-	RunAttempt    uint64 `json:"runAttempt"`
-	OperationID   string `json:"operation_id"`
-	BindingSHA256 string `json:"binding_sha256"`
-	OwnerID       string `json:"owner_id"`
-	PreparedAtMS  int64  `json:"prepared_at_ms"`
-	ExpiresAtMS   int64  `json:"expires_at_ms"`
+	HeaderType          int    `json:"headerType"`
+	UserID              string `json:"usrId"`
+	DeviceID            string `json:"devId"`
+	AuthServiceID       string `json:"aspId"`
+	ResourceID          string `json:"resId"`
+	RunID               string `json:"runId"`
+	RunAttempt          uint64 `json:"runAttempt"`
+	OperationID         string `json:"operation_id"`
+	BindingSHA256       string `json:"binding_sha256"`
+	OwnerID             string `json:"owner_id"`
+	PreparedAtMS        int64  `json:"prepared_at_ms"`
+	ExpiresAtMS         int64  `json:"expires_at_ms"`
+	ProtectedResourceID string `json:"protected_resource_id"`
 }
 
 type nativeSessionOperationRecoveryACK struct {
@@ -441,6 +451,7 @@ func RecoverNativeSessionOperation(ctx context.Context, binding *AgentRuntimeBin
 		RunID: operation.RunID, RunAttempt: operation.RunAttempt, OperationID: operation.OperationID,
 		BindingSHA256: operation.BindingSHA256, OwnerID: operation.OwnerID,
 		PreparedAtMS: operation.PreparedAtMillis, ExpiresAtMS: operation.ExpiresAtMillis,
+		ProtectedResourceID: operation.ProtectedResourceID,
 	})
 	if err != nil {
 		return nil, ErrInvalidNativeSessionOperation

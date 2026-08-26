@@ -31,9 +31,12 @@ var ErrInvalidNativeKnockInput = errors.New("qurl: invalid native knock input")
 type NativeKnockOptions struct {
 	RunID      string
 	RunAttempt uint64
+	// ProtectedResourceID is the canonical public CRID resource. It is
+	// authenticated separately from the placement-neutral knock resource ID.
+	ProtectedResourceID string
 	// Operation is an offline-prepared durable session operation. The caller
-	// must persist its exact JSON before this knock. Nil preserves the released
-	// legacy registered-agent wire bytes.
+	// must persist its exact JSON before this knock. Nil selects an operation-free
+	// knock; it does not make ProtectedResourceID optional.
 	Operation *NativeSessionOperation
 }
 
@@ -46,18 +49,19 @@ type NativeKnockOptions struct {
 // values use normal JSON semantics: encoders may escape equivalent characters
 // differently without changing the identity the server parses.
 type nativeAgentKnockBody struct {
-	HeaderType      int    `json:"headerType"`
-	UserID          string `json:"usrId"`
-	DeviceID        string `json:"devId"`
-	AuthServiceID   string `json:"aspId"`
-	KnockResourceID string `json:"resId"`
-	RunID           string `json:"runId"`
-	RunAttempt      uint64 `json:"runAttempt"`
-	OperationID     string `json:"operation_id,omitempty"`
-	BindingSHA256   string `json:"binding_sha256,omitempty"`
-	OwnerID         string `json:"owner_id,omitempty"`
-	PreparedAtMS    int64  `json:"prepared_at_ms,omitempty"`
-	ExpiresAtMS     int64  `json:"expires_at_ms,omitempty"`
+	HeaderType          int    `json:"headerType"`
+	UserID              string `json:"usrId"`
+	DeviceID            string `json:"devId"`
+	AuthServiceID       string `json:"aspId"`
+	KnockResourceID     string `json:"resId"`
+	RunID               string `json:"runId"`
+	RunAttempt          uint64 `json:"runAttempt"`
+	ProtectedResourceID string `json:"protected_resource_id,omitempty"`
+	OperationID         string `json:"operation_id,omitempty"`
+	BindingSHA256       string `json:"binding_sha256,omitempty"`
+	OwnerID             string `json:"owner_id,omitempty"`
+	PreparedAtMS        int64  `json:"prepared_at_ms,omitempty"`
+	ExpiresAtMS         int64  `json:"expires_at_ms,omitempty"`
 }
 
 type nativeExactSessionCloseBody struct {
@@ -74,6 +78,8 @@ type nativeExactSessionCloseBody struct {
 // agent NHP_KNK body. The eventual UDP exchange calls this before resolving the
 // assignment host or constructing any packet, preserving the mandatory
 // caller-owned RunID boundary independently of transport retries.
+// KnockRegisteredAgent requires ProtectedResourceID before calling this helper;
+// the empty internal form remains only for historical packet-vector decoding.
 func marshalNativeKnockApplicationBody(agentID, knockResourceID string, opts NativeKnockOptions) ([]byte, error) {
 	return marshalNativeSessionApplicationBody(agentID, knockResourceID, opts, nhpKNKHeaderType)
 }
@@ -109,19 +115,20 @@ func marshalNativeSessionApplicationBody(agentID, knockResourceID string, opts N
 	// This scalar-only struct cannot currently make json.Marshal fail. Keep the
 	// error path explicit so adding a fallible field cannot silently weaken it.
 	wire := nativeAgentKnockBody{
-		HeaderType:      headerType,
-		UserID:          agentID,
-		DeviceID:        agentID,
-		AuthServiceID:   agentAspID,
-		KnockResourceID: knockResourceID,
-		RunID:           opts.RunID,
-		RunAttempt:      opts.RunAttempt,
+		HeaderType:          headerType,
+		UserID:              agentID,
+		DeviceID:            agentID,
+		AuthServiceID:       agentAspID,
+		KnockResourceID:     knockResourceID,
+		RunID:               opts.RunID,
+		RunAttempt:          opts.RunAttempt,
+		ProtectedResourceID: opts.ProtectedResourceID,
 	}
 	if opts.Operation != nil {
 		operation := *opts.Operation
 		if validateNativeSessionOperation(operation) != nil || operation.AgentID != agentID ||
 			operation.ResourceID != knockResourceID || operation.RunID != opts.RunID ||
-			operation.RunAttempt != opts.RunAttempt {
+			operation.RunAttempt != opts.RunAttempt || operation.ProtectedResourceID != opts.ProtectedResourceID {
 			return nil, ErrInvalidNativeSessionOperation
 		}
 		wire.OperationID = operation.OperationID

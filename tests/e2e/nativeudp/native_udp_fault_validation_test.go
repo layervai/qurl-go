@@ -2029,8 +2029,9 @@ func validatePacketUnknownMessage(ctx context.Context, t *testing.T, httpTrap *l
 // validatePublicResourceAndKnockResourceIDWireDistinction resolves a producer-shaped
 // canonical P-256 public resource ID through the assigned-cell NHP_LST, then uses
 // its distinct KnockResourceID in the subsequent NHP_KNK. Decrypting both packets
-// proves the whole binding-to-admission interval is native UDP and the public
-// identity is never substituted into KNK resId or copied elsewhere on that wire.
+// proves the whole binding-to-admission interval is native UDP. The public
+// identity is authenticated in its dedicated field and is never substituted
+// into the placement-neutral KNK resId.
 func validatePublicResourceAndKnockResourceIDWireDistinction(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTPTrap) {
 	t.Helper()
 	const (
@@ -2126,7 +2127,7 @@ func validatePublicResourceAndKnockResourceIDWireDistinction(ctx context.Context
 	privateKey := binding.TakeDeviceStaticPrivateKey()
 	defer wipe(privateKey)
 	result, err := qurl.KnockRegisteredAgent(ctx, binding, privateKey, resourceResult.Resource.KnockResourceID,
-		qurl.NativeKnockOptions{RunID: "0123456789abcdef", RunAttempt: 1},
+		qurl.NativeKnockOptions{ProtectedResourceID: publicResourceID, RunID: "0123456789abcdef", RunAttempt: 1},
 		qurl.WithAgentRuntimeUDPResolver(resolver),
 		qurl.WithAgentRuntimeUDPDialer(dialer),
 		qurl.WithAgentRuntimeUDPBounds(2*time.Second, 1),
@@ -2173,13 +2174,14 @@ func validatePublicResourceAndKnockResourceIDWireDistinction(ctx context.Context
 		t.Fatalf("open identity-distinction KNK: %v", err)
 	}
 	var wireBody struct {
-		HeaderType      int    `json:"headerType"`
-		UserID          string `json:"usrId"`
-		DeviceID        string `json:"devId"`
-		AuthServiceID   string `json:"aspId"`
-		KnockResourceID string `json:"resId"`
-		RunID           string `json:"runId"`
-		RunAttempt      uint64 `json:"runAttempt"`
+		HeaderType          int    `json:"headerType"`
+		UserID              string `json:"usrId"`
+		DeviceID            string `json:"devId"`
+		AuthServiceID       string `json:"aspId"`
+		KnockResourceID     string `json:"resId"`
+		RunID               string `json:"runId"`
+		RunAttempt          uint64 `json:"runAttempt"`
+		ProtectedResourceID string `json:"protected_resource_id"`
 	}
 	var wireFields map[string]json.RawMessage
 	if err := json.Unmarshal(opened.Body, &wireBody); err != nil {
@@ -2188,14 +2190,14 @@ func validatePublicResourceAndKnockResourceIDWireDistinction(ctx context.Context
 	if err := json.Unmarshal(opened.Body, &wireFields); err != nil {
 		t.Fatalf("decode identity-distinction KNK fields: %v", err)
 	}
-	if len(wireFields) != 7 || wireBody.HeaderType != relayknock.TypeKnock || wireBody.RunAttempt != 1 ||
+	if len(wireFields) != 8 || wireBody.HeaderType != relayknock.TypeKnock || wireBody.RunAttempt != 1 ||
 		wireBody.KnockResourceID != knockResourceID ||
 		wireBody.KnockResourceID == publicResourceID ||
-		bytes.Contains(opened.Body, []byte(publicResourceID)) {
+		wireBody.ProtectedResourceID != publicResourceID {
 		t.Fatalf("identity-distinction KNK body cross-wired public identity: fields=%d body=%s", len(wireFields), opened.Body)
 	}
 	assertNoLifecycleHTTP(t, httpTrap)
-	t.Log("EVIDENCE public_resource_and_knock_resource_id_wire_distinction public_resource_id_shape=canonical_P256_DER_SPKI producer_binding=accepted discovery=NHP_LST admission=NHP_KNK distinct_values=true nhp_resId=knock_resource_id public_resource_id_on_knk_wire=0 resource_http_calls=0 lifecycle_http_calls=0")
+	t.Log("EVIDENCE public_resource_and_knock_resource_id_wire_distinction public_resource_id_shape=canonical_P256_DER_SPKI producer_binding=accepted discovery=NHP_LST admission=NHP_KNK distinct_values=true nhp_resId=knock_resource_id protected_resource_id=public_resource_id resource_http_calls=0 lifecycle_http_calls=0")
 }
 
 // validateHubCookieProofRoutability proves the Hub assignment return-routability
