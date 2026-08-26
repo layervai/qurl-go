@@ -2079,6 +2079,9 @@ type NativeSessionRetirement struct {
 // the pinned server key plus COK cookie/trxId continuity keeps a cross-replica
 // RKN bound to the initiating KNK.
 func KnockRegisteredAgent(ctx context.Context, binding *AgentRuntimeBinding, deviceStaticPrivateKey []byte, knockResourceID string, opts NativeKnockOptions, transportOpts ...AgentRuntimeUDPOption) (*NativeKnockResult, error) {
+	if validateConnectorResourceID(opts.ProtectedResourceID) != nil || opts.ProtectedResourceID == knockResourceID {
+		return nil, fmt.Errorf("%w: protected resource id must be canonical and distinct from the knock resource id", ErrInvalidNativeKnockInput)
+	}
 	if opts.Operation != nil {
 		if err := validateNativeSessionOperationBinding(*opts.Operation, binding); err != nil {
 			return nil, err

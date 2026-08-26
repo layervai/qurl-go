@@ -14,6 +14,8 @@ import (
 	"github.com/layervai/qurl-go/relayknock"
 )
 
+const nativeOperationProtectedResourceID = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEcOtuxu2qhc3gt1E7BiEU0CLqEDlXDwzZq0JnESgMAwERX6y_XXF5Cn5SKITWIZQmUhCZ0pHHlVn7SmFUTAnTGQ"
+
 func testNativeSessionOperationBinding(t *testing.T) (*AgentRuntimeBinding, []byte, NativeSessionOperationInput) {
 	t.Helper()
 	contract := loadAssignmentFixture(t)
@@ -44,7 +46,8 @@ func testNativeSessionOperationBinding(t *testing.T) (*AgentRuntimeBinding, []by
 		AWSAccountID: "111122223333", AWSRegion: "us-east-2", CellID: "cell-01",
 		PreparedAtMillis: now.Add(-time.Second).UnixMilli(), ExpiresAtMillis: now.Add(20 * time.Minute).UnixMilli(),
 		OwnerID: "auth0|canary-owner", QURLAgentKeysTable: "control-agent-keys",
-		ResourceID: "resource-a", RunAttempt: 7, RunID: "0123456789abcdef",
+		ProtectedResourceID: nativeOperationProtectedResourceID, ResourceID: "resource-a",
+		RunAttempt: 7, RunID: "0123456789abcdef",
 		SessionControlTable: "sandbox-session-control",
 	}
 }
@@ -63,11 +66,12 @@ func TestNativeSessionOperationNHPContractFixture(t *testing.T) {
 	publicKey := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x42}, 32))
 	operation := NativeSessionOperation{
 		AgentID: "agent-a", AgentKeySchema: 2, AgentPublicKeyB64: publicKey, AuthServiceID: "agent",
-		AWSAccountID: "111122223333", AWSRegion: "us-east-2", BindingSchema: 1,
+		AWSAccountID: "111122223333", AWSRegion: "us-east-2", BindingSchema: 2,
 		CellID: "cell-01", ConnectorIDClaim: "", CredentialKind: "account",
 		ExpiresAtMillis: 1_800_001_210_000, OwnerID: "auth0|canary-owner",
-		PreparedAtMillis: 1_800_000_009_000, QURLAgentKeysTable: "control-agent-keys",
-		ResourceID: "resource-a", RunAttempt: 7, RunID: "0123456789abcdef", Schema: 1,
+		PreparedAtMillis: 1_800_000_009_000, ProtectedResourceID: nativeOperationProtectedResourceID,
+		QURLAgentKeysTable: "control-agent-keys", ResourceID: "resource-a",
+		RunAttempt: 7, RunID: "0123456789abcdef", Schema: 2,
 		SessionControlTable: "sandbox-session-control",
 	}
 	var err error
@@ -80,7 +84,7 @@ func TestNativeSessionOperationNHPContractFixture(t *testing.T) {
 		t.Fatal(err)
 	}
 	if operation.OperationID != "3b2a3a9eabea3af78d8c317ea710e7f0601580163e25c98d50d5e2e17b68f3cc" ||
-		operation.BindingSHA256 != "73add3ded83c588697131214c3e362ecc651512afa9c2ff4bad7d790a43593d8" {
+		operation.BindingSHA256 != "8cde8a58630c4e6739b4f0663da3069fccedf5a2d90e3d4d65d802044fc2c551" {
 		t.Fatalf("NHP operation fixture drifted: %s/%s", operation.OperationID, operation.BindingSHA256)
 	}
 }
@@ -114,7 +118,7 @@ func TestPrepareNativeSessionOperationIsOfflineAndClosed(t *testing.T) {
 
 	mutations := map[string][]byte{
 		"unknown":       append(bytes.TrimSuffix(bytes.Clone(raw), []byte("}")), []byte(`,"unknown":1}`)...),
-		"duplicate":     bytes.Replace(raw, []byte(`"schema":1`), []byte(`"schema":1,"schema":1`), 1),
+		"duplicate":     bytes.Replace(raw, []byte(`"schema":2`), []byte(`"schema":2,"schema":2`), 1),
 		"trailing":      append(bytes.Clone(raw), []byte(`{}`)...),
 		"missing":       bytes.Replace(raw, []byte(`,"owner_id":"auth0|canary-owner"`), nil, 1),
 		"binding drift": bytes.Replace(raw, []byte(`"owner_id":"auth0|canary-owner"`), []byte(`"owner_id":"auth0|other"`), 1),
@@ -155,7 +159,7 @@ func TestPrepareNativeSessionOperationIsOfflineAndClosed(t *testing.T) {
 func TestNativeSessionOperationWireProjectionIsExactAndLegacyUnchanged(t *testing.T) {
 	_, _, operation := testNativeSessionOperation(t)
 	legacy, err := marshalNativeKnockApplicationBody(operation.AgentID, operation.ResourceID,
-		NativeKnockOptions{RunID: operation.RunID, RunAttempt: operation.RunAttempt})
+		NativeKnockOptions{ProtectedResourceID: operation.ProtectedResourceID, RunID: operation.RunID, RunAttempt: operation.RunAttempt})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,11 +167,12 @@ func TestNativeSessionOperationWireProjectionIsExactAndLegacyUnchanged(t *testin
 		t.Fatalf("legacy wire grew operation fields: %s", legacy)
 	}
 	body, err := marshalNativeKnockApplicationBody(operation.AgentID, operation.ResourceID,
-		NativeKnockOptions{RunID: operation.RunID, RunAttempt: operation.RunAttempt, Operation: &operation})
+		NativeKnockOptions{ProtectedResourceID: operation.ProtectedResourceID, RunID: operation.RunID, RunAttempt: operation.RunAttempt, Operation: &operation})
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `{"headerType":1,"usrId":"agent-a","devId":"agent-a","aspId":"agent","resId":"resource-a","runId":"0123456789abcdef","runAttempt":7,"operation_id":"` +
+	want := `{"headerType":1,"usrId":"agent-a","devId":"agent-a","aspId":"agent","resId":"resource-a","runId":"0123456789abcdef","runAttempt":7,"protected_resource_id":"` +
+		operation.ProtectedResourceID + `","operation_id":"` +
 		operation.OperationID + `","binding_sha256":"` + operation.BindingSHA256 +
 		`","owner_id":"auth0|canary-owner","prepared_at_ms":` +
 		jsonNumber(operation.PreparedAtMillis) + `,"expires_at_ms":` + jsonNumber(operation.ExpiresAtMillis) + `}`
@@ -177,7 +182,7 @@ func TestNativeSessionOperationWireProjectionIsExactAndLegacyUnchanged(t *testin
 	drifted := operation
 	drifted.OwnerID = "auth0|other"
 	if _, err := marshalNativeKnockApplicationBody(operation.AgentID, operation.ResourceID,
-		NativeKnockOptions{RunID: operation.RunID, RunAttempt: operation.RunAttempt, Operation: &drifted}); !errors.Is(err, ErrInvalidNativeSessionOperation) {
+		NativeKnockOptions{ProtectedResourceID: operation.ProtectedResourceID, RunID: operation.RunID, RunAttempt: operation.RunAttempt, Operation: &drifted}); !errors.Is(err, ErrInvalidNativeSessionOperation) {
 		t.Fatalf("drifted wire = %v", err)
 	}
 }
@@ -212,7 +217,8 @@ func TestRecoverNativeSessionOperationUsesExactEndpointAndBody(t *testing.T) {
 	want := `{"headerType":16,"usrId":"agent-a","devId":"agent-a","aspId":"agent","resId":"resource-a","runId":"0123456789abcdef","runAttempt":7,"operation_id":"` +
 		operation.OperationID + `","binding_sha256":"` + operation.BindingSHA256 +
 		`","owner_id":"auth0|canary-owner","prepared_at_ms":` + jsonNumber(operation.PreparedAtMillis) +
-		`,"expires_at_ms":` + jsonNumber(operation.ExpiresAtMillis) + `}`
+		`,"expires_at_ms":` + jsonNumber(operation.ExpiresAtMillis) +
+		`,"protected_resource_id":"` + operation.ProtectedResourceID + `"}`
 	if string(requests[0].body) != want {
 		t.Fatalf("recovery body = %s\nwant = %s", requests[0].body, want)
 	}

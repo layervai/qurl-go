@@ -27,6 +27,19 @@ func TestMarshalNativeKnockApplicationBody(t *testing.T) {
 	}
 }
 
+func TestMarshalNativeKnockApplicationBodyCarriesProtectedResource(t *testing.T) {
+	got, err := marshalNativeKnockApplicationBody("agent-01", "connector-01", NativeKnockOptions{
+		RunID: "0123456789abcdef", RunAttempt: 1, ProtectedResourceID: nativeOperationProtectedResourceID,
+	})
+	if err != nil {
+		t.Fatalf("marshalNativeKnockApplicationBody: %v", err)
+	}
+	want := `{"headerType":1,"usrId":"agent-01","devId":"agent-01","aspId":"agent","resId":"connector-01","runId":"0123456789abcdef","runAttempt":1,"protected_resource_id":"` + nativeOperationProtectedResourceID + `"}`
+	if string(got) != want {
+		t.Fatalf("native knock body = %s, want %s", got, want)
+	}
+}
+
 func TestMarshalNativeSessionApplicationBody_ConformanceSessionVectors(t *testing.T) {
 	vectors, err := conformance.AgentSessionControl()
 	if err != nil {

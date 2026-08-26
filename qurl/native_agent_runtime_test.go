@@ -1753,7 +1753,7 @@ func TestConnectAgentRuntime_ReturnedPrivateKeyKnocksImmediately(t *testing.T) {
 	if len(privateKey) != x25519key.Size {
 		t.Fatalf("fresh runtime returned private key length = %d, want %d", len(privateKey), x25519key.Size)
 	}
-	knock, err := KnockRegisteredAgent(context.Background(), binding, privateKey, "resource-public-key", NativeKnockOptions{RunID: "0123456789abcdef", RunAttempt: 1},
+	knock, err := KnockRegisteredAgent(context.Background(), binding, privateKey, "resource-public-key", NativeKnockOptions{ProtectedResourceID: testConnectorID, RunID: "0123456789abcdef", RunAttempt: 1},
 		WithAgentRuntimeUDPResolver(f.resolver), WithAgentRuntimeUDPDialer(f.dialer), WithAgentRuntimeUDPBounds(runtimeReplyTimeout, 1))
 	if err != nil || knock == nil || knock.ACToken != "ac-fresh" {
 		t.Fatalf("fresh returned-key knock = %#v, %v", knock, err)
@@ -1780,7 +1780,7 @@ func TestKnockRegisteredAgent_UsesAuthoritativeAssignedCell(t *testing.T) {
 	}
 	privateKey := assignmentHex(t, contract.Keys.Agent.StaticPrivHex)
 	defer wipeBytes(privateKey)
-	result, err := KnockRegisteredAgent(context.Background(), binding, privateKey, "resource-public-key", NativeKnockOptions{RunID: "0123456789abcdef", RunAttempt: 1},
+	result, err := KnockRegisteredAgent(context.Background(), binding, privateKey, "resource-public-key", NativeKnockOptions{ProtectedResourceID: testConnectorID, RunID: "0123456789abcdef", RunAttempt: 1},
 		WithAgentRuntimeUDPResolver(f.resolver), WithAgentRuntimeUDPDialer(f.dialer), WithAgentRuntimeUDPBounds(runtimeReplyTimeout, 1))
 	if err != nil {
 		t.Fatalf("KnockRegisteredAgent: %v", err)
@@ -1834,7 +1834,7 @@ func TestKnockRegisteredAgent_InitialNoReplyBindsExactSelectedEndpoint(t *testin
 			})
 
 			result, err := KnockRegisteredAgent(context.Background(), binding, privateKey, "resource-public-key",
-				NativeKnockOptions{RunID: "0123456789abcdef", RunAttempt: 1}, WithAgentRuntimeUDPResolver(resolver),
+				NativeKnockOptions{ProtectedResourceID: testConnectorID, RunID: "0123456789abcdef", RunAttempt: 1}, WithAgentRuntimeUDPResolver(resolver),
 				WithAgentRuntimeUDPDialer(f.dialer), WithAgentRuntimeUDPBounds(runtimeSilenceTimeout, 1))
 			var noReply *EndpointNoReplyError
 			if result != nil || !errors.Is(err, ErrEndpointNoReply) || !errors.As(err, &noReply) || noReply == nil ||
@@ -1884,7 +1884,7 @@ func TestKnockRegisteredAgent_LocalFailuresNeverBecomeEndpointNoReply(t *testing
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			result, err := KnockRegisteredAgent(context.Background(), binding, test.key, "resource-public-key",
-				NativeKnockOptions{RunID: "0123456789abcdef", RunAttempt: 1}, test.options...)
+				NativeKnockOptions{ProtectedResourceID: testConnectorID, RunID: "0123456789abcdef", RunAttempt: 1}, test.options...)
 			var noReply *EndpointNoReplyError
 			if result != nil || !errors.Is(err, test.want) || errors.Is(err, ErrEndpointNoReply) || errors.As(err, &noReply) {
 				t.Fatalf("local failure = %#v/%T/%v, want %v without endpoint no-reply", result, err, err, test.want)
@@ -1941,7 +1941,7 @@ func TestKnockRegisteredAgent_CookieChallengeReResolvesForOneBoundReknock(t *tes
 	}
 	privateKey := assignmentHex(t, contract.Keys.Agent.StaticPrivHex)
 	defer wipeBytes(privateKey)
-	if _, err := KnockRegisteredAgent(context.Background(), binding, privateKey, "resource-public-key", NativeKnockOptions{RunID: "0123456789abcdef", RunAttempt: 1},
+	if _, err := KnockRegisteredAgent(context.Background(), binding, privateKey, "resource-public-key", NativeKnockOptions{ProtectedResourceID: testConnectorID, RunID: "0123456789abcdef", RunAttempt: 1},
 		WithAgentRuntimeUDPResolver(resolver), WithAgentRuntimeUDPDialer(dialer), WithAgentRuntimeUDPBounds(runtimeReplyTimeout, 1)); err != nil {
 		t.Fatalf("KnockRegisteredAgent COK→RKN: %v", err)
 	}
@@ -1984,7 +1984,7 @@ func TestKnockRegisteredAgent_MalformedCookieChallengeFailsWithoutReknock(t *tes
 	}
 	privateKey := assignmentHex(t, contract.Keys.Agent.StaticPrivHex)
 	defer wipeBytes(privateKey)
-	_, err := KnockRegisteredAgent(context.Background(), binding, privateKey, "resource-public-key", NativeKnockOptions{RunID: "0123456789abcdef", RunAttempt: 1},
+	_, err := KnockRegisteredAgent(context.Background(), binding, privateKey, "resource-public-key", NativeKnockOptions{ProtectedResourceID: testConnectorID, RunID: "0123456789abcdef", RunAttempt: 1},
 		WithAgentRuntimeUDPResolver(f.resolver), WithAgentRuntimeUDPDialer(f.dialer), WithAgentRuntimeUDPBounds(runtimeReplyTimeout, 1))
 	if !errors.Is(err, ErrMalformedReply) {
 		t.Fatalf("malformed COK error = %v, want ErrMalformedReply", err)
@@ -2018,7 +2018,7 @@ func TestRetireRegisteredAgentSession_UsesExactReceiptOriginalEndpointAndRetries
 	privateKey := assignmentHex(t, contract.Keys.Agent.StaticPrivHex)
 	defer wipeBytes(privateKey)
 	knock, err := KnockRegisteredAgent(context.Background(), binding, privateKey, "resource-public-key",
-		NativeKnockOptions{RunID: "0123456789abcdef", RunAttempt: 1},
+		NativeKnockOptions{ProtectedResourceID: testConnectorID, RunID: "0123456789abcdef", RunAttempt: 1},
 		WithAgentRuntimeUDPResolver(f.resolver), WithAgentRuntimeUDPDialer(f.dialer), WithAgentRuntimeUDPBounds(runtimeReplyTimeout, 1))
 	if err != nil {
 		t.Fatalf("KnockRegisteredAgent: %v", err)
@@ -2120,6 +2120,23 @@ func TestConsumeNativeExactSessionCloseReply_StrictAuthority(t *testing.T) {
 	}
 }
 
+func TestKnockRegisteredAgent_RejectsProtectedResourceBeforeIO(t *testing.T) {
+	for name, protected := range map[string]string{
+		"missing":     "",
+		"malformed":   "not-a-crid-resource",
+		"cross-wired": "qurl-tunnel-server",
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := KnockRegisteredAgent(context.Background(), nil, nil, "qurl-tunnel-server", NativeKnockOptions{
+				ProtectedResourceID: protected, RunID: "0123456789abcdef", RunAttempt: 1,
+			})
+			if !errors.Is(err, ErrInvalidNativeKnockInput) {
+				t.Fatalf("KnockRegisteredAgent() = %v, want ErrInvalidNativeKnockInput", err)
+			}
+		})
+	}
+}
+
 func TestKnockRegisteredAgent_RejectsIdentityDriftBeforeIO(t *testing.T) {
 	contract := loadAssignmentFixture(t)
 	agentPublic := base64.StdEncoding.EncodeToString(assignmentHex(t, contract.Keys.Agent.StaticPubHex))
@@ -2174,7 +2191,7 @@ func TestKnockRegisteredAgent_RejectsIdentityDriftBeforeIO(t *testing.T) {
 			resolver := &noIONativeResolver{}
 			dialer := &noIONativeDialer{}
 			_, err := KnockRegisteredAgent(context.Background(), binding, mutate(binding), "resource-public-key",
-				NativeKnockOptions{RunID: "0123456789abcdef", RunAttempt: 1},
+				NativeKnockOptions{ProtectedResourceID: testConnectorID, RunID: "0123456789abcdef", RunAttempt: 1},
 				WithAgentRuntimeUDPResolver(resolver), WithAgentRuntimeUDPDialer(dialer))
 			if !errors.Is(err, ErrInvalidNativeKnockInput) {
 				t.Fatalf("identity drift error = %v, want ErrInvalidNativeKnockInput", err)
@@ -3982,7 +3999,7 @@ func TestRefreshAgentRuntime_PersistsRevisionedEndpointAndKeyRotationForNextKnoc
 	if len(agentPrivate) != x25519key.Size {
 		t.Fatalf("refreshed runtime returned private key length = %d, want %d", len(agentPrivate), x25519key.Size)
 	}
-	result, err := KnockRegisteredAgent(context.Background(), binding, agentPrivate, "resource-public-key", NativeKnockOptions{RunID: "0123456789abcdef", RunAttempt: 1},
+	result, err := KnockRegisteredAgent(context.Background(), binding, agentPrivate, "resource-public-key", NativeKnockOptions{ProtectedResourceID: testConnectorID, RunID: "0123456789abcdef", RunAttempt: 1},
 		WithAgentRuntimeUDPResolver(f.resolver), WithAgentRuntimeUDPDialer(f.dialer), WithAgentRuntimeUDPBounds(runtimeReplyTimeout, 1))
 	if err != nil || result == nil || result.ACToken != "ac-rotated" || result.ResourceHost != "frps.cell0-r2.example:7000" {
 		t.Fatalf("knock after endpoint/key rotation = %#v, %v", result, err)
@@ -4121,7 +4138,7 @@ func TestRefreshAgentRuntime_AdoptsAuthenticatedReassignmentForNextKnock(t *test
 
 	agentPrivate := binding.TakeDeviceStaticPrivateKey()
 	defer wipeBytes(agentPrivate)
-	result, err := KnockRegisteredAgent(context.Background(), binding, agentPrivate, "resource-public-key", NativeKnockOptions{RunID: "0123456789abcdef", RunAttempt: 1},
+	result, err := KnockRegisteredAgent(context.Background(), binding, agentPrivate, "resource-public-key", NativeKnockOptions{ProtectedResourceID: testConnectorID, RunID: "0123456789abcdef", RunAttempt: 1},
 		WithAgentRuntimeUDPResolver(f.resolver), WithAgentRuntimeUDPDialer(f.dialer), WithAgentRuntimeUDPBounds(runtimeReplyTimeout, 1))
 	if err != nil || result == nil || result.ACToken != "ac-cell1" || result.ResourceHost != "frps.cell1.example:7000" {
 		t.Fatalf("knock after reassignment = %#v, %v", result, err)
@@ -4957,7 +4974,7 @@ func sessionKnockStep() runtimeUDPStep {
 func (f *runtimeFixture) knock(t *testing.T, binding *AgentRuntimeBinding, key []byte) (*NativeKnockResult, error) {
 	t.Helper()
 	return KnockRegisteredAgent(context.Background(), binding, key, "resource-public-key",
-		NativeKnockOptions{RunID: "0123456789abcdef", RunAttempt: 1},
+		NativeKnockOptions{ProtectedResourceID: testConnectorID, RunID: "0123456789abcdef", RunAttempt: 1},
 		WithAgentRuntimeUDPResolver(f.resolver), WithAgentRuntimeUDPDialer(f.dialer), WithAgentRuntimeUDPBounds(runtimeReplyTimeout, 1))
 }
 
@@ -6135,7 +6152,7 @@ func TestRegisteredAgentSessionControl_RejectsInvalidArgumentsBeforeIO(t *testin
 			}, test.transportOpts...)
 
 			_, knockErr := KnockRegisteredAgent(context.Background(), binding, key, "resource-public-key",
-				NativeKnockOptions{RunID: "0123456789abcdef", RunAttempt: 1}, opts...)
+				NativeKnockOptions{ProtectedResourceID: testConnectorID, RunID: "0123456789abcdef", RunAttempt: 1}, opts...)
 			receipt := NativeSessionReceipt{}
 			if binding != nil {
 				endpoint, endpointErr := assignmentNativeEndpoint(binding.assignment())
