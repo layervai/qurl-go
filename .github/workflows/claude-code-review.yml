@@ -25,10 +25,10 @@ jobs:
       github.event.pull_request.base.ref == github.event.repository.default_branch &&
       github.event.pull_request.head.ref != github.event.repository.default_branch
     runs-on: ubuntu-24.04
-    # search_code adds a few turns; delegation was tried and removed after a
-    # 20-minute review was killed at the cap. Reviews run 2-6 minutes, so this
-    # is headroom, not a target — a review this slow is a problem to look at,
-    # not to give more time to.
+    # Reviews here run 2-6 minutes; search_code adds a few turns. This is
+    # headroom, not a target. Delegation was tried fleet-wide and removed
+    # after one review elsewhere ran past a 20-minute cap and published
+    # nothing — a review this slow is a problem to look at, not to fund.
     timeout-minutes: 12
     permissions:
       contents: read
@@ -236,6 +236,11 @@ jobs:
         if: steps.review_origin.outputs.ready == 'true'
         # v1.0.183 fails when the SDK returns `is_error: true` and is the last
         # audited release whose API-signing path leaves origin credential-free.
+        # Under the job cap on purpose: an overrun fails this step and leaves
+        # the job alive to report it. A kill at the JOB cap cancels every later
+        # step, so the verify step never runs and the PR gets a bare
+        # `cancelled` check with no comment and nothing saying why.
+        timeout-minutes: 10
         uses: anthropics/claude-code-action@be7b93b1907a4abad570368f3c74b6fe3807510b # v1.0.183
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
