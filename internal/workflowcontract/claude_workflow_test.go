@@ -420,7 +420,7 @@ func requireReadOnlyActionContract(t *testing.T, workflow string) {
 		"contents: read",
 		"pull-requests: write",
 		"mcp__github__add_issue_comment",
-		"Bash,Read,Glob,Grep,LS,Task,Edit,Write,MultiEdit,NotebookEdit,WebFetch,WebSearch",
+		"Bash,Read,Glob,Grep,LS,Edit,Write,MultiEdit,NotebookEdit,WebFetch,WebSearch",
 		"mcp__github_file_ops__commit_files",
 		"mcp__github__create_or_update_file",
 	)
