@@ -165,6 +165,35 @@ func TestPrepareLiveNativeSessionOperationReturnsExactRecoveryEndpoint(t *testin
 	}
 }
 
+func TestPrepareLiveNativeSessionOperationFeedsSameBindingKnock(t *testing.T) {
+	binding, privateKey, input := testNativeSessionOperationBinding(t)
+	input.CellID = ""
+	successACK := `{"errCode":"0","sessId":123,"cellId":"cell-01","sessIssuedAtMillis":1800000000000,"runId":"0123456789abcdef","runAttempt":7,"resHost":{"resource-a":"frps.cell.example:7000"},"opnTime":900,"agentAddr":"203.0.113.9:49152","acTokens":{"resource-a":"ac-secret"},"preActions":{"resource-a":null}}`
+	f := newRuntimeFixture(t, nil, []runtimeUDPStep{{
+		requestType: relayknock.TypeKnock, replyType: relayknock.TypeACK, replyBody: successACK,
+	}})
+	operation, endpoint, err := PrepareLiveNativeSessionOperation(context.Background(), binding, privateKey, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := KnockRegisteredAgent(context.Background(), binding, privateKey, operation.ResourceID,
+		NativeKnockOptions{
+			ProtectedResourceID: operation.ProtectedResourceID,
+			RunID:               operation.RunID, RunAttempt: operation.RunAttempt, Operation: operation,
+		},
+		WithAgentRuntimeUDPResolver(f.resolver), WithAgentRuntimeUDPDialer(f.dialer),
+		WithAgentRuntimeUDPBounds(runtimeReplyTimeout, 1))
+	if err != nil || result == nil || result.SessionReceipt.CellID != operation.CellID ||
+		result.SessionReceipt.RunID != operation.RunID || endpoint != binding.Assignment().Endpoint {
+		t.Fatalf("prepared live knock = %#v, endpoint=%#v, err=%v", result, endpoint, err)
+	}
+	requests := f.cellUDP.snapshot()
+	if len(requests) != 1 || !bytes.Contains(requests[0].body, []byte(operation.OperationID)) ||
+		!bytes.Contains(requests[0].body, []byte(operation.BindingSHA256)) {
+		t.Fatalf("prepared live knock body = %#v", requests)
+	}
+}
+
 func TestPrepareLiveNativeSessionOperationRejectsInvalidArguments(t *testing.T) {
 	binding, privateKey, input := testNativeSessionOperationBinding(t)
 	input.CellID = ""
@@ -209,7 +238,7 @@ func TestPrepareLiveNativeSessionOperationRejectsInputBeforeHubIO(t *testing.T) 
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			f := newRuntimeFixture(t, nil, nil).expectSilence()
-			seedSessionLease(t, f, contract, time.Now().Add(sessionLeaseRenewalLead+nativeSessionOperationJournalMargin/2))
+			seedSessionLease(t, f, contract, time.Now().Add(sessionLeaseRenewalLead+NativeSessionOperationJournalMargin/2))
 			binding, privateKey := openSessionBinding(t, f)
 			now := time.Now().UTC()
 			input := NativeSessionOperationInput{
@@ -270,7 +299,7 @@ func TestPrepareLiveNativeSessionOperationRenewsBeforeJournalMargin(t *testing.T
 			requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult,
 			replyBody: rewriteRefreshAssignment(t, contract, renewed),
 		}}, nil)
-	lease := time.Now().Add(sessionLeaseRenewalLead + nativeSessionOperationJournalMargin/2)
+	lease := time.Now().Add(sessionLeaseRenewalLead + NativeSessionOperationJournalMargin/2)
 	seedSessionLease(t, f, contract, lease)
 	binding, privateKey := openSessionBinding(t, f)
 	original := binding.Assignment()
@@ -304,7 +333,7 @@ func TestPrepareLiveNativeSessionOperationRejectsShortSuccessfulRenewal(t *testi
 			requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult,
 			replyBody: rewriteRefreshAssignment(t, contract, renewed),
 		}}, nil)
-	seedSessionLease(t, f, contract, time.Now().Add(nativeSessionOperationJournalMargin))
+	seedSessionLease(t, f, contract, time.Now().Add(NativeSessionOperationJournalMargin))
 	binding, privateKey := openSessionBinding(t, f)
 	now := time.Now().UTC()
 	operation, endpoint, err := PrepareLiveNativeSessionOperation(context.Background(), binding, privateKey,
@@ -331,7 +360,7 @@ func TestReleasedAssignmentLeaseHasNativeSessionOperationHeadroom(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	required := nativeSessionOperationJournalMargin + sessionLeaseRenewalLead
+	required := NativeSessionOperationJournalMargin + sessionLeaseRenewalLead
 	if !assignmentFixtureNow.Add(required).Before(initial.Assignment.LeaseExpiresAt) {
 		t.Fatalf("released assignment lease does not exceed native session operation headroom %s: %#v", required, initial.Assignment)
 	}
@@ -360,9 +389,9 @@ func TestLiveSessionAssignmentStrictRejectsOfflineMarginRequirement(t *testing.T
 	contract := loadAssignmentFixture(t)
 	f := newRuntimeFixture(t, nil, nil).expectSilence()
 	seedSessionLease(t, f, contract,
-		time.Now().Add(sessionLeaseRenewalLead+nativeSessionOperationJournalMargin/2))
+		time.Now().Add(sessionLeaseRenewalLead+NativeSessionOperationJournalMargin/2))
 	binding, privateKey := openSessionBinding(t, f, WithAgentRuntimeOfflineOpen())
-	decisionAt := time.Now().UTC().Add(nativeSessionOperationJournalMargin)
+	decisionAt := time.Now().UTC().Add(NativeSessionOperationJournalMargin)
 	assignment, err := binding.liveSessionAssignmentStrict(context.Background(), privateKey, decisionAt)
 	if assignment != nil || !errors.Is(err, errAgentRuntimeRenewalUnavailable) {
 		t.Fatalf("strict offline assignment = %#v, %v", assignment, err)
@@ -419,8 +448,8 @@ func TestPrepareLiveNativeSessionOperationFailsWithoutSafeLeaseMargin(t *testing
 		name      string
 		remaining time.Duration
 	}{
-		{name: "lease remains live at shifted clock", remaining: sessionLeaseRenewalLead + nativeSessionOperationJournalMargin/2},
-		{name: "lease expires before shifted clock", remaining: nativeSessionOperationJournalMargin / 2},
+		{name: "lease remains live at shifted clock", remaining: sessionLeaseRenewalLead + NativeSessionOperationJournalMargin/2},
+		{name: "lease expires before shifted clock", remaining: NativeSessionOperationJournalMargin / 2},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			f := newRuntimeFixture(t, nil, nil).expectSilence()
@@ -477,6 +506,21 @@ func TestNativeSessionOperationWireProjectionIsExactAndLegacyUnchanged(t *testin
 	}
 }
 
+func TestMarshalNativeSessionRecoveryRequiresOperationAndSupportedHeader(t *testing.T) {
+	_, _, operation := testNativeSessionOperation(t)
+	base := NativeKnockOptions{
+		ProtectedResourceID: operation.ProtectedResourceID,
+		RunID:               operation.RunID, RunAttempt: operation.RunAttempt, recovery: true,
+	}
+	if body, err := marshalNativeSessionApplicationBody(operation.AgentID, operation.ResourceID, base, nhpKNKHeaderType); body != nil || !errors.Is(err, ErrInvalidNativeSessionOperation) {
+		t.Fatalf("recovery without operation = %q, %v", body, err)
+	}
+	base.Operation = &operation
+	if body, err := marshalNativeSessionApplicationBody(operation.AgentID, operation.ResourceID, base, nhpEXTHeaderType); body != nil || !errors.Is(err, ErrInvalidNativeKnockInput) {
+		t.Fatalf("recovery with unsupported header = %q, %v", body, err)
+	}
+}
+
 func jsonNumber(value int64) string {
 	raw, _ := json.Marshal(value)
 	return string(raw)
@@ -513,6 +557,54 @@ func TestRecoverNativeSessionOperationUsesExactEndpointAndBody(t *testing.T) {
 	}
 }
 
+func TestRecoverNativeSessionOperationReknockKeepsRecoveryMarker(t *testing.T) {
+	binding, privateKey, operation := testNativeSessionOperation(t)
+	contract := loadAssignmentFixture(t)
+	cookie := bytes.Repeat([]byte{0x7a}, 32)
+	completeACK := `{"errCode":"52030","errMsg":"native session operation recovery complete","opnTime":0}`
+	f := newRuntimeFixture(t, nil, []runtimeUDPStep{
+		{requestType: relayknock.TypeKnock, replyType: relayknock.TypeCookieChallenge, reknockCookie: cookie, replyCounterDelta: 1},
+		{requestType: relayknock.TypeReknock, replyType: relayknock.TypeACK, replyBody: completeACK, reknockCookie: cookie},
+	})
+	endpoint := NHPUDPEndpoint{
+		Host: "cell0.nhp.layerv.ai", Port: standardNHPUDPPort,
+		ServerPublicKeyB64: base64.StdEncoding.EncodeToString(assignmentHex(t, contract.Keys.AssignedCell.StaticPubHex)),
+	}
+	result, err := RecoverNativeSessionOperation(context.Background(), binding, privateKey, operation, endpoint,
+		WithAgentRuntimeUDPResolver(f.resolver), WithAgentRuntimeUDPDialer(f.dialer),
+		WithAgentRuntimeUDPBounds(runtimeReplyTimeout, 1))
+	if err != nil || result == nil || !result.Complete {
+		t.Fatalf("recovery reknock = %#v, %v", result, err)
+	}
+	requests := f.cellUDP.snapshot()
+	if len(requests) != 2 || requests[1].typeID != relayknock.TypeReknock ||
+		!bytes.Contains(requests[1].body, []byte(`"headerType":8`)) ||
+		!bytes.Contains(requests[1].body, []byte(`"native_session_operation_action":"recover"`)) {
+		t.Fatalf("recovery RKN packets = %#v", requests)
+	}
+}
+
+func TestRecoverNativeSessionOperationPreservesUnexpectedAdmissionReceipt(t *testing.T) {
+	binding, privateKey, operation := testNativeSessionOperation(t)
+	contract := loadAssignmentFixture(t)
+	successACK := `{"errCode":"0","resHost":{"resource-a":"frps.cell.example:7000"},"opnTime":1,"agentAddr":"203.0.113.1:49152","acTokens":{"resource-a":"secret"},"sessId":91,"cellId":"cell-01","sessIssuedAtMillis":1800000000000,"runId":"0123456789abcdef","runAttempt":7}`
+	f := newRuntimeFixture(t, nil, []runtimeUDPStep{{
+		requestType: relayknock.TypeKnock, replyType: relayknock.TypeACK, replyBody: successACK,
+	}})
+	endpoint := NHPUDPEndpoint{
+		Host: "cell0.nhp.layerv.ai", Port: standardNHPUDPPort,
+		ServerPublicKeyB64: base64.StdEncoding.EncodeToString(assignmentHex(t, contract.Keys.AssignedCell.StaticPubHex)),
+	}
+	result, err := RecoverNativeSessionOperation(context.Background(), binding, privateKey, operation, endpoint,
+		WithAgentRuntimeUDPResolver(f.resolver), WithAgentRuntimeUDPDialer(f.dialer),
+		WithAgentRuntimeUDPBounds(runtimeReplyTimeout, 1))
+	var unexpected *NativeSessionOperationUnexpectedAdmissionError
+	if result != nil || !errors.As(err, &unexpected) || !errors.Is(err, ErrMalformedReply) ||
+		unexpected.SessionReceipt.SessionID != 91 || validateNativeSessionReceipt(unexpected.SessionReceipt) != nil {
+		t.Fatalf("unexpected recovery admission = %#v, %T, %v", result, err, err)
+	}
+}
+
 func TestConsumeNativeSessionOperationRecoveryReplyStrictDenialUnion(t *testing.T) {
 	_, _, operation := testNativeSessionOperation(t)
 	complete := `{"errCode":"52030","errMsg":"native session operation recovery complete","opnTime":0}`
@@ -528,13 +620,21 @@ func TestConsumeNativeSessionOperationRecoveryReplyStrictDenialUnion(t *testing.
 	}, operation); err != nil || result == nil || result.Complete {
 		t.Fatalf("pending recovery = %#v, %v", result, err)
 	}
+	unexpectedSuccess := `{"errCode":"0","resHost":{"resource-a":"frps.cell.example:7000"},"opnTime":1,"agentAddr":"203.0.113.1:49152","acTokens":{"resource-a":"secret"},"sessId":1,"cellId":"cell-01","sessIssuedAtMillis":1,"runId":"0123456789abcdef","runAttempt":7}`
+	result, err = consumeNativeSessionOperationRecoveryReply(&relayknock.Reply{
+		Type: relayknock.TypeACK, Body: []byte(unexpectedSuccess),
+	}, operation)
+	var unexpected *NativeSessionOperationUnexpectedAdmissionError
+	if result != nil || !errors.As(err, &unexpected) || !errors.Is(err, ErrMalformedReply) ||
+		unexpected.SessionReceipt.SessionID != 1 || unexpected.SessionReceipt.RunID != operation.RunID {
+		t.Fatalf("unexpected recovery admission = %#v, %T, %v", result, err, err)
+	}
 	for name, body := range map[string]string{
 		"unknown":       strings.TrimSuffix(complete, "}") + `,"extra":1}`,
 		"duplicate":     strings.Replace(complete, `"errCode":"52030"`, `"errCode":"52030","errCode":"52030"`, 1),
 		"missing open":  `{"errCode":"52030","errMsg":"native session operation recovery complete"}`,
 		"positive open": `{"errCode":"52030","errMsg":"native session operation recovery complete","opnTime":1}`,
 		"authority":     `{"errCode":"52030","errMsg":"native session operation recovery complete","opnTime":0,"sessId":123}`,
-		"success":       `{"errCode":"0","resHost":{},"opnTime":1,"agentAddr":"203.0.113.1:1","acTokens":{},"sessId":1,"cellId":"cell-01","sessIssuedAtMillis":1,"runId":"0123456789abcdef","runAttempt":7}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			got, err := consumeNativeSessionOperationRecoveryReply(&relayknock.Reply{

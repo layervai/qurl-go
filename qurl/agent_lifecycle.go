@@ -426,7 +426,17 @@ func (b *AgentRuntimeBinding) liveSessionAssignmentWithPolicy(ctx context.Contex
 			return nil, err
 		}
 	}
-	return b.checkedAssignment(current)
+	current, err := b.checkedAssignment(current)
+	if err != nil {
+		return nil, err
+	}
+	// A successful Hub exchange is not enough for strict callers: the returned
+	// lease must itself provide the requested margin. Keep this invariant here so
+	// future callers cannot accidentally depend only on an outer re-check.
+	if requireRenewal && !renewalDecisionAt.Add(sessionLeaseRenewalLead).Before(current.LeaseExpiresAt) {
+		return nil, errAgentRuntimeRenewalUnavailable
+	}
+	return current, nil
 }
 
 // checkedAssignment rejects edited exported assignment fields, so tampering with

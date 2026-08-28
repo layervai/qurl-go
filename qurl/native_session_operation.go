@@ -30,13 +30,18 @@ const (
 	nativeSessionOperationMaxCreationWindow    = 30 * time.Minute
 	nativeSessionOperationMaxClockSkew         = 30 * time.Second
 	nativeSessionOperationResumeHorizon        = 24 * time.Hour
-	nativeSessionOperationJournalMargin        = 125 * time.Second
 	nativeSessionOperationAbsentRecoveryMargin = 125 * time.Second
 	nativeSessionOperationRecoveryRequiredCode = "52029"
 	nativeSessionOperationRecoveryCompleteCode = "52030"
 	nativeSessionOperationRecoveryUserDataKey  = "native_session_operation_action"
 	nativeSessionOperationRecoveryAction       = "recover"
 )
+
+// NativeSessionOperationJournalMargin is the maximum time a caller may spend
+// durably committing a prepared live operation before it sends the related
+// KnockRegisteredAgent request. The preparation, commit, and knock must remain
+// one serialized critical section for a shared binding.
+const NativeSessionOperationJournalMargin = 125 * time.Second
 
 // ErrInvalidNativeSessionOperation marks an operation that fails before DNS,
 // socket, or packet work. Error text never includes an operation identity or
@@ -50,6 +55,21 @@ var ErrInvalidNativeSessionOperation = errors.New("qurl: invalid native session 
 // has already expired.
 var ErrNativeSessionOperationLeaseMargin = errors.New("qurl: native session operation lease margin unavailable")
 
+// NativeSessionOperationUnexpectedAdmissionError reports a server contract
+// violation in which a recovery KNK admitted a session instead of returning a
+// recovery denial ACK. SessionReceipt lets the durable caller record that
+// exact admission as MAPPED and recover it through the same operation authority;
+// it must not start a replacement operation first.
+type NativeSessionOperationUnexpectedAdmissionError struct {
+	SessionReceipt NativeSessionReceipt
+}
+
+func (e *NativeSessionOperationUnexpectedAdmissionError) Error() string {
+	return "qurl: native session operation recovery returned admission authority"
+}
+
+func (e *NativeSessionOperationUnexpectedAdmissionError) Unwrap() error { return ErrMalformedReply }
+
 // NativeSessionOperationInput contains only the authenticated resource and run
 // facts required to prepare one durable session operation before any network
 // request. CellID must match the exact completed AgentRuntimeBinding snapshot.
@@ -58,6 +78,8 @@ var ErrNativeSessionOperationLeaseMargin = errors.New("qurl: native session oper
 // regions, and storage names are private server configuration and never enter
 // this public contract.
 type NativeSessionOperationInput struct {
+	// CellID is required by PrepareNativeSessionOperation and must be empty for
+	// PrepareLiveNativeSessionOperation, which derives placement from the binding.
 	CellID              string
 	ExpiresAtMillis     int64
 	OwnerID             string
@@ -224,7 +246,7 @@ func prepareNativeSessionOperationForAssignment(binding *AgentRuntimeBinding, de
 // Hub when renewal is due. It never contacts the assigned cell. CellID must be
 // empty because the live binding, not the caller, owns placement. Callers must
 // durably persist both returned values and send the knock within
-// nativeSessionOperationJournalMargin (currently 125 seconds) of this function
+// NativeSessionOperationJournalMargin (currently 125 seconds) of this function
 // returning. Callers that share one binding must serialize this preparation,
 // its durable commit, and KnockRegisteredAgent as one critical section because
 // a concurrent renewal can move the binding before admission.
@@ -251,7 +273,7 @@ func PrepareLiveNativeSessionOperation(ctx context.Context, binding *AgentRuntim
 	// the caller time to fsync the operation before KnockRegisteredAgent samples
 	// the lease. This operation does not exist yet; the exported contract requires
 	// callers to exclude sibling preparation and knock work on the same binding.
-	assignment, err := binding.liveSessionAssignmentStrict(ctx, deviceStaticPrivateKey, decisionAt.Add(nativeSessionOperationJournalMargin))
+	assignment, err := binding.liveSessionAssignmentStrict(ctx, deviceStaticPrivateKey, decisionAt.Add(NativeSessionOperationJournalMargin))
 	if err != nil {
 		if expiredAtDecision {
 			return nil, NHPUDPEndpoint{}, fmt.Errorf("%w: live assignment expired before Hub renewal: %w: %w",
@@ -266,7 +288,7 @@ func PrepareLiveNativeSessionOperation(ctx context.Context, binding *AgentRuntim
 	if err := assignment.Validate(preparedAt); err != nil {
 		return nil, NHPUDPEndpoint{}, fmt.Errorf("%w: live assignment: %w", ErrInvalidNativeSessionOperation, err)
 	}
-	if !preparedAt.Add(nativeSessionOperationJournalMargin + sessionLeaseRenewalLead).Before(assignment.LeaseExpiresAt) {
+	if !preparedAt.Add(NativeSessionOperationJournalMargin + sessionLeaseRenewalLead).Before(assignment.LeaseExpiresAt) {
 		return nil, NHPUDPEndpoint{}, fmt.Errorf("%w: renewed assignment has insufficient journal margin",
 			ErrNativeSessionOperationLeaseMargin)
 	}
@@ -465,19 +487,25 @@ func RecoverNativeSessionOperation(ctx context.Context, binding *AgentRuntimeBin
 	if err != nil {
 		return nil, normalizeRelayError(err, ErrMalformedReply)
 	}
-	return consumeNativeSessionOperationRecoveryReply(reply, operation)
+	recovery, err := consumeNativeSessionOperationRecoveryReply(reply, operation)
+	var unexpected *NativeSessionOperationUnexpectedAdmissionError
+	if errors.As(err, &unexpected) {
+		unexpected.SessionReceipt.agentID = binding.authoritativeAgentID
+		unexpected.SessionReceipt.endpoint = cloneNativeUDPEndpoint(endpoint)
+	}
+	return recovery, err
 }
 
 func consumeNativeSessionOperationRecoveryReply(reply *relayknock.Reply,
 	operation NativeSessionOperation,
 ) (*NativeSessionOperationRecovery, error) {
-	_, err := consumeNativeAgentKnockReply(reply, operation.ResourceID, nativeAgentKnockExpectation{
+	result, err := consumeNativeAgentKnockReply(reply, operation.ResourceID, nativeAgentKnockExpectation{
 		CellID: operation.CellID, RunID: operation.RunID, RunAttempt: operation.RunAttempt,
 	})
 	var denied *ServerDenyError
 	if !errors.As(err, &denied) {
 		if err == nil {
-			return nil, invalidNativeProducerReply(ErrMalformedReply, "native session recovery returned admission authority")
+			return nil, &NativeSessionOperationUnexpectedAdmissionError{SessionReceipt: result.SessionReceipt}
 		}
 		return nil, err
 	}
