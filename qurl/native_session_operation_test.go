@@ -556,10 +556,15 @@ func jsonNumber(value int64) string {
 	return string(raw)
 }
 
+func nativeOperationRecoveryACK(operation NativeSessionOperation, code, message string) string {
+	return `{"errCode":"` + code + `","errMsg":"` + message + `","opnTime":0,"operation_id":"` +
+		operation.OperationID + `","binding_sha256":"` + operation.BindingSHA256 + `"}`
+}
+
 func TestRecoverNativeSessionOperationUsesExactEndpointAndBody(t *testing.T) {
 	binding, privateKey, operation := testNativeSessionOperation(t)
 	contract := loadAssignmentFixture(t)
-	completeACK := `{"errCode":"52030","errMsg":"native session operation recovery complete","opnTime":0}`
+	completeACK := nativeOperationRecoveryACK(operation, "52030", "native session operation recovery complete")
 	f := newRuntimeFixture(t, nil, []runtimeUDPStep{{
 		requestType: relayknock.TypeKnock, replyType: relayknock.TypeACK, replyBody: completeACK,
 	}})
@@ -591,7 +596,7 @@ func TestRecoverNativeSessionOperationReknockKeepsRecoveryMarker(t *testing.T) {
 	binding, privateKey, operation := testNativeSessionOperation(t)
 	contract := loadAssignmentFixture(t)
 	cookie := bytes.Repeat([]byte{0x7a}, 32)
-	completeACK := `{"errCode":"52030","errMsg":"native session operation recovery complete","opnTime":0}`
+	completeACK := nativeOperationRecoveryACK(operation, "52030", "native session operation recovery complete")
 	f := newRuntimeFixture(t, nil, []runtimeUDPStep{
 		{requestType: relayknock.TypeKnock, replyType: relayknock.TypeCookieChallenge, reknockCookie: cookie, replyCounterDelta: 1},
 		{requestType: relayknock.TypeReknock, replyType: relayknock.TypeACK, replyBody: completeACK, reknockCookie: cookie},
@@ -629,22 +634,23 @@ func TestRecoverNativeSessionOperationPreservesUnexpectedAdmissionReceipt(t *tes
 		WithAgentRuntimeUDPResolver(f.resolver), WithAgentRuntimeUDPDialer(f.dialer),
 		WithAgentRuntimeUDPBounds(runtimeReplyTimeout, 1))
 	var unexpected *NativeSessionOperationUnexpectedAdmissionError
-	if result != nil || !errors.As(err, &unexpected) || !errors.Is(err, ErrMalformedReply) ||
-		unexpected.SessionReceipt.SessionID != 91 || validateNativeSessionReceipt(unexpected.SessionReceipt) != nil {
+	if result == nil || result.UnexpectedAdmission == nil || !errors.As(err, &unexpected) ||
+		!errors.Is(err, ErrMalformedReply) || unexpected.SessionReceipt.SessionID != 91 ||
+		result.UnexpectedAdmission.SessionID != 91 || validateNativeSessionReceipt(unexpected.SessionReceipt) != nil {
 		t.Fatalf("unexpected recovery admission = %#v, %T, %v", result, err, err)
 	}
 }
 
 func TestConsumeNativeSessionOperationRecoveryReplyStrictDenialUnion(t *testing.T) {
 	_, _, operation := testNativeSessionOperation(t)
-	complete := `{"errCode":"52030","errMsg":"native session operation recovery complete","opnTime":0}`
+	complete := nativeOperationRecoveryACK(operation, "52030", "native session operation recovery complete")
 	result, err := consumeNativeSessionOperationRecoveryReply(&relayknock.Reply{
 		Type: relayknock.TypeACK, Body: []byte(complete),
 	}, operation)
 	if err != nil || result == nil || !result.Complete {
 		t.Fatalf("complete recovery = %#v, %v", result, err)
 	}
-	pending := `{"errCode":"52029","errMsg":"native session operation recovery required","opnTime":0}`
+	pending := nativeOperationRecoveryACK(operation, "52029", "native session operation recovery required")
 	if result, err := consumeNativeSessionOperationRecoveryReply(&relayknock.Reply{
 		Type: relayknock.TypeACK, Body: []byte(pending),
 	}, operation); err != nil || result == nil || result.Complete {
@@ -655,16 +661,21 @@ func TestConsumeNativeSessionOperationRecoveryReplyStrictDenialUnion(t *testing.
 		Type: relayknock.TypeACK, Body: []byte(unexpectedSuccess),
 	}, operation)
 	var unexpected *NativeSessionOperationUnexpectedAdmissionError
-	if result != nil || !errors.As(err, &unexpected) || !errors.Is(err, ErrMalformedReply) ||
-		unexpected.SessionReceipt.SessionID != 1 || unexpected.SessionReceipt.RunID != operation.RunID {
+	if result == nil || result.UnexpectedAdmission == nil || !errors.As(err, &unexpected) ||
+		!errors.Is(err, ErrMalformedReply) || unexpected.SessionReceipt.SessionID != 1 ||
+		result.UnexpectedAdmission.SessionID != 1 || unexpected.SessionReceipt.RunID != operation.RunID {
 		t.Fatalf("unexpected recovery admission = %#v, %T, %v", result, err, err)
 	}
 	for name, body := range map[string]string{
-		"unknown":       strings.TrimSuffix(complete, "}") + `,"extra":1}`,
-		"duplicate":     strings.Replace(complete, `"errCode":"52030"`, `"errCode":"52030","errCode":"52030"`, 1),
-		"missing open":  `{"errCode":"52030","errMsg":"native session operation recovery complete"}`,
-		"positive open": `{"errCode":"52030","errMsg":"native session operation recovery complete","opnTime":1}`,
-		"authority":     `{"errCode":"52030","errMsg":"native session operation recovery complete","opnTime":0,"sessId":123}`,
+		"unknown":           strings.TrimSuffix(complete, "}") + `,"extra":1}`,
+		"duplicate":         strings.Replace(complete, `"errCode":"52030"`, `"errCode":"52030","errCode":"52030"`, 1),
+		"missing open":      `{"errCode":"52030","errMsg":"native session operation recovery complete"}`,
+		"positive open":     strings.Replace(complete, `"opnTime":0`, `"opnTime":1`, 1),
+		"authority":         strings.TrimSuffix(complete, "}") + `,"sessId":123}`,
+		"missing operation": strings.Replace(complete, `,"operation_id":"`+operation.OperationID+`"`, "", 1),
+		"wrong operation":   strings.Replace(complete, operation.OperationID, strings.Repeat("f", 64), 1),
+		"missing binding":   strings.Replace(complete, `,"binding_sha256":"`+operation.BindingSHA256+`"`, "", 1),
+		"wrong binding":     strings.Replace(complete, operation.BindingSHA256, strings.Repeat("e", 64), 1),
 	} {
 		t.Run(name, func(t *testing.T) {
 			got, err := consumeNativeSessionOperationRecoveryReply(&relayknock.Reply{

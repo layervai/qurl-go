@@ -188,7 +188,10 @@ func ExamplePrepareLiveNativeSessionOperation() {
 
 	// Atomically persist recordJSON before passing operation to
 	// KnockRegisteredAgent. Restore its recovery endpoint and pass the decoded
-	// endpoint to RecoverNativeSessionOperation after an ambiguous result.
+	// endpoint to RecoverNativeSessionOperation after an ambiguous result. If
+	// recovery returns NativeSessionOperationUnexpectedAdmissionError, its
+	// nonnil result carries UnexpectedAdmission; persist that receipt as MAPPED
+	// before retrying recovery.
 	_ = recordJSON
 }
 

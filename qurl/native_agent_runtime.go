@@ -2122,9 +2122,14 @@ func KnockRegisteredAgent(ctx context.Context, binding *AgentRuntimeBinding, dev
 		}
 		return nil, normalizeRelayError(err, ErrMalformedReply)
 	}
-	result, err := consumeNativeAgentKnockReply(reply, knockResourceID, nativeAgentKnockExpectation{
+	expectation := nativeAgentKnockExpectation{
 		CellID: assignment.CellID, RunID: opts.RunID, RunAttempt: opts.RunAttempt,
-	})
+	}
+	if opts.Operation != nil {
+		expectation.OperationID = opts.Operation.OperationID
+		expectation.BindingSHA256 = opts.Operation.BindingSHA256
+	}
+	result, err := consumeNativeAgentKnockReply(reply, knockResourceID, expectation)
 	if err != nil {
 		return nil, err
 	}
@@ -2269,6 +2274,8 @@ func validateRuntimeBindingIdentity(binding *AgentRuntimeBinding, deviceStaticPr
 
 type nativeAgentKnockACK struct {
 	ErrCode               nativeJSONValue[string] `json:"errCode"`
+	OperationID           nativeJSONValue[string] `json:"operation_id"`
+	BindingSHA256         nativeJSONValue[string] `json:"binding_sha256"`
 	SessionID             nhpSessionIDJSON        `json:"sessId"`
 	CellID                nativeJSONValue[string] `json:"cellId"`
 	SessionIssuedAtMillis nativeJSONValue[int64]  `json:"sessIssuedAtMillis"`
@@ -2285,9 +2292,11 @@ type nativeAgentKnockACK struct {
 }
 
 type nativeAgentKnockExpectation struct {
-	CellID     string
-	RunID      string
-	RunAttempt uint64
+	CellID        string
+	RunID         string
+	RunAttempt    uint64
+	OperationID   string
+	BindingSHA256 string
 }
 
 type nativeExactSessionCloseACK struct {
@@ -2433,6 +2442,18 @@ func interpretNativeAgentKnockReply(reply *relayknock.Reply, knockResourceID str
 			ack.PreAccessActions.Present || ack.RedirectURL.Present) {
 			return nil, invalidNativeProducerReply(ErrMalformedReply, "native knock deny ACK field set")
 		}
+		recoveryCode := ack.ErrCode.Value == nativeSessionOperationRecoveryRequiredCode ||
+			ack.ErrCode.Value == nativeSessionOperationRecoveryCompleteCode
+		if recoveryCode {
+			if len(expectations) != 1 || expectations[0].OperationID == "" || expectations[0].BindingSHA256 == "" ||
+				!ack.OperationID.Present || !ack.BindingSHA256.Present ||
+				ack.OperationID.Value != expectations[0].OperationID ||
+				ack.BindingSHA256.Value != expectations[0].BindingSHA256 {
+				return nil, invalidNativeProducerReply(ErrMalformedReply, "native operation recovery deny ACK binding")
+			}
+		} else if ack.OperationID.Present || ack.BindingSHA256.Present {
+			return nil, invalidNativeProducerReply(ErrMalformedReply, "native knock deny ACK operation binding")
+		}
 		return nil, &ServerDenyError{ErrCode: ack.ErrCode.Value}
 	}
 	if strictRegisteredAgentACK && ack.ErrCode.Value != errSuccess {
@@ -2458,7 +2479,8 @@ func interpretNativeAgentKnockReply(reply *relayknock.Reply, knockResourceID str
 	if ack.OpenTime.Value == 0 {
 		return nil, fmt.Errorf("%w: success ACK carried an invalid open time", ErrMalformedReply)
 	}
-	if strictRegisteredAgentACK && (ack.ErrMsg.Present || !validNativeAgentACKAddress(ack.AgentAddr.Value)) {
+	if strictRegisteredAgentACK && (ack.ErrMsg.Present || ack.OperationID.Present || ack.BindingSHA256.Present ||
+		!validNativeAgentACKAddress(ack.AgentAddr.Value)) {
 		return nil, invalidNativeProducerReply(ErrMalformedReply, "native knock success ACK field set")
 	}
 	if ack.PreAccessActions.RequiresAction {

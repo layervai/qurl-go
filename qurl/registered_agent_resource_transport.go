@@ -56,6 +56,9 @@ func (d *registeredAgentResourceHTTPDoer) Do(req *http.Request) (*http.Response,
 	// Request field may become a way to read the durable device credential.
 	wire := req.Clone(ctx)
 	wire.Header = req.Header.Clone()
+	if wire.Header == nil {
+		wire.Header = make(http.Header)
+	}
 	wire.Header.Del("Authorization")
 	if err := d.client.credentials.Authorize(ctx, wire); err != nil {
 		return nil, err
@@ -70,6 +73,9 @@ func (d *registeredAgentResourceHTTPDoer) Do(req *http.Request) (*http.Response,
 	public := *resp
 	publicReq := req.Clone(ctx)
 	publicReq.Header = req.Header.Clone()
+	if publicReq.Header == nil {
+		publicReq.Header = make(http.Header)
+	}
 	publicReq.Header.Del("Authorization")
 	public.Request = publicReq
 	return &public, nil

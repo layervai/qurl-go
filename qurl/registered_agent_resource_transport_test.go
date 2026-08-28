@@ -163,3 +163,30 @@ func TestRegisteredAgentResourceHTTPDoer_RejectsOrdinaryClient(t *testing.T) {
 		t.Fatalf("ordinary client bridge = %T, %v; want nil invalid config", doer, err)
 	}
 }
+
+func TestRegisteredAgentResourceHTTPDoer_AllowsNilHeader(t *testing.T) {
+	state := completedNativeTestState(t)
+	capture := &registeredAgentResourceCapture{want: state.DeviceAPIKey}
+	client, err := OpenRegisteredAgent(context.Background(), &memoryAgentStateStore{state: state},
+		WithAgentClientBaseURL("https://api.example.test"), WithAgentClientHTTPClient(capture))
+	if err != nil {
+		t.Fatal(err)
+	}
+	doer, err := client.RegisteredAgentResourceHTTPDoer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := &http.Request{
+		Method: http.MethodGet, URL: mustParseURL(t, "https://api.example.test/v1/me"),
+		Body: http.NoBody,
+	}
+	resp, err := doer.Do(req.WithContext(context.Background()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if req.Header != nil || resp.Request == nil || resp.Request.Header == nil ||
+		resp.Request.Header.Get("Authorization") != "" {
+		t.Fatalf("nil caller header changed or credential leaked: caller=%v response=%v", req.Header, resp.Request)
+	}
+}

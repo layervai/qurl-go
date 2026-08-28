@@ -136,9 +136,12 @@ type nativeSessionOperationCanonicalBinding struct {
 
 // NativeSessionOperationRecovery is the authenticated result of recovery.
 // Complete is true only after the server reports the exact operation terminal.
-// No receipt or bearer material is replayed on this control path.
+// UnexpectedAdmission is set only when an incompatible server admits the
+// recovery packet. The caller must durably record that receipt as MAPPED before
+// any retry. No bearer material is replayed on this control path.
 type NativeSessionOperationRecovery struct {
-	Complete bool
+	Complete            bool
+	UnexpectedAdmission *NativeSessionReceipt
 }
 
 // UnmarshalJSON rejects every unknown, duplicate, missing, or noncanonical
@@ -502,6 +505,10 @@ func RecoverNativeSessionOperation(ctx context.Context, binding *AgentRuntimeBin
 	if errors.As(err, &unexpected) {
 		unexpected.SessionReceipt.agentID = binding.authoritativeAgentID
 		unexpected.SessionReceipt.endpoint = cloneNativeUDPEndpoint(endpoint)
+		if recovery != nil && recovery.UnexpectedAdmission != nil {
+			receipt := unexpected.SessionReceipt
+			recovery.UnexpectedAdmission = &receipt
+		}
 	}
 	return recovery, err
 }
@@ -511,11 +518,14 @@ func consumeNativeSessionOperationRecoveryReply(reply *relayknock.Reply,
 ) (*NativeSessionOperationRecovery, error) {
 	result, err := consumeNativeAgentKnockReply(reply, operation.ResourceID, nativeAgentKnockExpectation{
 		CellID: operation.CellID, RunID: operation.RunID, RunAttempt: operation.RunAttempt,
+		OperationID: operation.OperationID, BindingSHA256: operation.BindingSHA256,
 	})
 	var denied *ServerDenyError
 	if !errors.As(err, &denied) {
 		if err == nil {
-			return nil, &NativeSessionOperationUnexpectedAdmissionError{SessionReceipt: result.SessionReceipt}
+			receipt := result.SessionReceipt
+			return &NativeSessionOperationRecovery{UnexpectedAdmission: &receipt},
+				&NativeSessionOperationUnexpectedAdmissionError{SessionReceipt: receipt}
 		}
 		return nil, err
 	}
@@ -542,8 +552,10 @@ func NativeSessionOperationAbsentRecoveryDeadline(operation NativeSessionOperati
 }
 
 // NativeSessionOperationRecoveryRequired reports the exact authenticated
-// server denial that tells the caller to recover this operation before it makes
-// a replacement admission attempt.
+// denial returned by KnockRegisteredAgent that tells the caller to recover the
+// operation before it makes a replacement admission attempt. Recovery itself
+// returns a non-complete NativeSessionOperationRecovery with a nil error while
+// the server is still closing the operation.
 func NativeSessionOperationRecoveryRequired(err error) bool {
 	var denied *ServerDenyError
 	return errors.As(err, &denied) && denied.ErrCode == nativeSessionOperationRecoveryRequiredCode
