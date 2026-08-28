@@ -59,7 +59,7 @@ var ErrNativeSessionOperationLeaseMargin = errors.New("qurl: native session oper
 // violation in which a recovery KNK admitted a session instead of returning a
 // recovery denial ACK. SessionReceipt lets the durable caller record that
 // exact admission as MAPPED and recover it through the same operation authority;
-// it must not start a replacement operation first.
+// it must not retry the recovery KNK or start a replacement operation first.
 type NativeSessionOperationUnexpectedAdmissionError struct {
 	SessionReceipt NativeSessionReceipt
 }
@@ -275,6 +275,13 @@ func PrepareLiveNativeSessionOperation(ctx context.Context, binding *AgentRuntim
 	// callers to exclude sibling preparation and knock work on the same binding.
 	assignment, err := binding.liveSessionAssignmentStrict(ctx, deviceStaticPrivateKey, decisionAt.Add(NativeSessionOperationJournalMargin))
 	if err != nil {
+		// On an online binding this private sentinel means the Hub exchange
+		// succeeded but returned a lease that is still too short. Do not relabel
+		// that successful renewal as an expired pre-renewal assignment.
+		if binding.renewal != nil && errors.Is(err, errAgentRuntimeRenewalUnavailable) {
+			return nil, NHPUDPEndpoint{}, fmt.Errorf("%w: renewed assignment has insufficient journal margin: %w",
+				ErrNativeSessionOperationLeaseMargin, err)
+		}
 		if expiredAtDecision {
 			return nil, NHPUDPEndpoint{}, fmt.Errorf("%w: live assignment expired before Hub renewal: %w: %w",
 				ErrInvalidNativeSessionOperation, ErrAssignmentLeaseExpired, err)
@@ -444,9 +451,12 @@ func nativeSessionOperationAbsentRecoveryDeadline(operation NativeSessionOperati
 
 // RecoverNativeSessionOperation sends the recovery action through the standard
 // NHP_KNK to NHP_ACK exchange at the separately persisted source-fenced
-// endpoint. It never follows the binding's current assignment and never opens
-// a replacement admission. A normal strict denial ACK carries only whether the
-// durable operation is terminal or still closing.
+// endpoint. It never follows the binding's current assignment or intentionally
+// opens a replacement admission. A normal strict denial ACK carries only
+// whether the durable operation is terminal or still closing. An incompatible
+// server admission returns NativeSessionOperationUnexpectedAdmissionError; the
+// caller must persist its exact receipt as MAPPED before recovery and must not
+// retry this packet directly.
 func RecoverNativeSessionOperation(ctx context.Context, binding *AgentRuntimeBinding, deviceStaticPrivateKey []byte,
 	operation NativeSessionOperation, recoveryEndpoint NHPUDPEndpoint, transportOpts ...AgentRuntimeUDPOption,
 ) (*NativeSessionOperationRecovery, error) {

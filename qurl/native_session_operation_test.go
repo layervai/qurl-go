@@ -327,7 +327,7 @@ func TestPrepareLiveNativeSessionOperationRenewsBeforeJournalMargin(t *testing.T
 
 func TestPrepareLiveNativeSessionOperationRejectsShortSuccessfulRenewal(t *testing.T) {
 	contract := loadAssignmentFixture(t)
-	renewed := newReassignmentTarget(t, contract, "cell0", 1, "", time.Now().Add(3*time.Minute))
+	renewed := newReassignmentTarget(t, contract, "cell0", 1, "", time.Now().UTC().Add(3*time.Minute))
 	f := newRuntimeFixture(t,
 		[]runtimeUDPStep{{
 			requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult,
@@ -349,6 +349,36 @@ func TestPrepareLiveNativeSessionOperationRejectsShortSuccessfulRenewal(t *testi
 	}
 	if len(f.hubUDP.snapshot()) != 1 || len(f.cellUDP.snapshot()) != 0 {
 		t.Fatalf("short renewed lease I/O Hub/cell = %d/%d", len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot()))
+	}
+}
+
+func TestPrepareLiveNativeSessionOperationClassifiesExpiredShortSuccessfulRenewalAsMargin(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	renewed := newReassignmentTarget(t, contract, "cell0", 1, "", time.Now().UTC().Add(3*time.Minute))
+	f := newRuntimeFixture(t,
+		[]runtimeUDPStep{{
+			requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult,
+			replyBody: rewriteRefreshAssignment(t, contract, renewed),
+		}}, nil)
+	seedSessionLease(t, f, contract, time.Now().Add(-time.Minute))
+	binding, privateKey := openSessionBinding(t, f)
+	now := time.Now().UTC()
+	operation, endpoint, err := PrepareLiveNativeSessionOperation(context.Background(), binding, privateKey,
+		NativeSessionOperationInput{
+			PreparedAtMillis: now.UnixMilli(), ExpiresAtMillis: now.Add(20 * time.Minute).UnixMilli(),
+			OwnerID:             "auth0|canary-owner",
+			ProtectedResourceID: nativeOperationProtectedResourceID, ResourceID: "resource-a",
+			RunAttempt: 1, RunID: "0123456789abcdef",
+		})
+	if operation != nil || endpoint != (NHPUDPEndpoint{}) ||
+		!errors.Is(err, ErrNativeSessionOperationLeaseMargin) ||
+		errors.Is(err, ErrAssignmentLeaseExpired) || errors.Is(err, ErrInvalidNativeSessionOperation) {
+		t.Fatalf("expired short renewed lease = %#v, %#v, %v", operation, endpoint, err)
+	}
+	if len(f.hubUDP.snapshot()) != 1 || len(f.cellUDP.snapshot()) != 0 ||
+		!binding.Assignment().LeaseExpiresAt.Equal(renewed.LeaseExpiresAt.Truncate(time.Second)) {
+		t.Fatalf("expired short renewal I/O Hub/cell=%d/%d assignment=%#v",
+			len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot()), binding.Assignment())
 	}
 }
 
