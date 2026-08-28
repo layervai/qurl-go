@@ -18,6 +18,16 @@ func secureAgentStateTestDirPlatform(t *testing.T, dir string) {
 	setWindowsTestACL(t, dir, false)
 }
 
+func makePrivateStateFileInsecurePlatform(t *testing.T, path string) {
+	t.Helper()
+	setWindowsTestACL(t, path, true)
+}
+
+func makePrivateStateDirInsecurePlatform(t *testing.T, path string) {
+	t.Helper()
+	setWindowsTestACL(t, path, true)
+}
+
 func setWindowsTestACL(t *testing.T, path string, includeWorld bool) {
 	t.Helper()
 	currentSID, _, err := currentWindowsStateSecurity()

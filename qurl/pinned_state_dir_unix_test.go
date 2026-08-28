@@ -18,6 +18,20 @@ import (
 
 func secureAgentStateTestDirPlatform(*testing.T, string) {}
 
+func makePrivateStateFileInsecurePlatform(t *testing.T, path string) {
+	t.Helper()
+	if err := os.Chmod(path, 0o640); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func makePrivateStateDirInsecurePlatform(t *testing.T, path string) {
+	t.Helper()
+	if err := os.Chmod(path, 0o750); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPinnedAgentState_NestedDirectoryFsyncFailureRetriesDurably(t *testing.T) {
 	root := secureAgentStateTestDir(t)
 	stateDir := filepath.Join(root, "nested", "private")

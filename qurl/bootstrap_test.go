@@ -60,9 +60,7 @@ func TestFileAgentState_RejectsInsecurePermissions(t *testing.T) {
 	if err := store.SaveAgentState(context.Background(), completedNativeTestState(t)); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(path, 0o640); err != nil {
-		t.Fatal(err)
-	}
+	makePrivateStateFileInsecurePlatform(t, path)
 	if _, err := store.LoadAgentState(context.Background()); !errors.Is(err, ErrInsecureAgentStatePermissions) {
 		t.Fatalf("group-readable file error = %v, want ErrInsecureAgentStatePermissions", err)
 	}
@@ -70,9 +68,7 @@ func TestFileAgentState_RejectsInsecurePermissions(t *testing.T) {
 	if err := os.Chmod(path, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(dir, 0o750); err != nil {
-		t.Fatal(err)
-	}
+	makePrivateStateDirInsecurePlatform(t, dir)
 	if _, err := store.LoadAgentState(context.Background()); !errors.Is(err, ErrInsecureAgentStatePermissions) {
 		t.Fatalf("insecure directory load error = %v, want ErrInsecureAgentStatePermissions", err)
 	}

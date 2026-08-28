@@ -1212,9 +1212,7 @@ func TestSealedFileAgentState_LoadWrapperOperationalVsInvalid(t *testing.T) {
 func TestSealedFileAgentState_RejectsInsecureDirectoryAndOversizeFile(t *testing.T) {
 	wrapper := &testAgentStateKeyWrapper{}
 	dir := t.TempDir()
-	if err := os.Chmod(dir, 0o750); err != nil {
-		t.Fatal(err)
-	}
+	makePrivateStateDirInsecurePlatform(t, dir)
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
 	if _, err := NewSealedFileAgentState(filepath.Join(dir, "state.json"), "test", wrapper); !errors.Is(err, ErrInsecureAgentStatePermissions) {
 		t.Fatalf("open in 0750 dir = %v", err)
