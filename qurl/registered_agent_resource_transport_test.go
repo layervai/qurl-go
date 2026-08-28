@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -125,9 +126,32 @@ func TestRegisteredAgentResourceHTTPDoer_DeniesBeforeCredentialOrNetwork(t *test
 			t.Errorf("denied request gained Authorization: %s %s", test.method, test.target)
 		}
 	}
+	mutated := []*http.Request{
+		{Method: http.MethodGet, URL: mustParseURL(t, "https://api.example.test/prefix/v1/me"), Host: "other.example.test", Header: make(http.Header)},
+		{Method: http.MethodGet, URL: mustParseURL(t, "https://api.example.test/prefix/v1/me"), Header: make(http.Header)},
+	}
+	mutated[1].URL.Opaque = "/prefix/v1/api-keys"
+	for _, req := range mutated {
+		resp, requestErr := doer.Do(req.WithContext(context.Background()))
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+		if !errors.Is(requestErr, ErrRegisteredAgentResourceRequestDenied) {
+			t.Errorf("mutated authority request = %v, want request denied", requestErr)
+		}
+	}
 	if capture.calls != 0 {
 		t.Fatalf("denied requests reached network %d times", capture.calls)
 	}
+}
+
+func mustParseURL(t *testing.T, value string) *url.URL {
+	t.Helper()
+	parsed, err := url.Parse(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return parsed
 }
 
 func TestRegisteredAgentResourceHTTPDoer_RejectsOrdinaryClient(t *testing.T) {

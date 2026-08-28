@@ -79,7 +79,7 @@ func validateRegisteredAgentResourceRequest(base *url.URL, req *http.Request) er
 	if base == nil || req == nil || req.URL == nil {
 		return fmt.Errorf("%w: request URL is missing", ErrRegisteredAgentResourceRequestDenied)
 	}
-	if req.URL.User != nil || req.URL.Fragment != "" || req.URL.RawFragment != "" || req.URL.RawPath != "" {
+	if req.URL.User != nil || req.URL.Fragment != "" || req.URL.RawFragment != "" || req.URL.RawPath != "" || req.URL.Opaque != "" || (req.Host != "" && !strings.EqualFold(req.Host, base.Host)) {
 		return fmt.Errorf("%w: request URL has unsupported authority or encoding", ErrRegisteredAgentResourceRequestDenied)
 	}
 	if !strings.EqualFold(req.URL.Scheme, base.Scheme) || !strings.EqualFold(req.URL.Host, base.Host) {

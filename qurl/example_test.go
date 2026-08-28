@@ -115,6 +115,32 @@ func ExampleResolveRegisteredAgentConnectorResource() {
 	)
 }
 
+func ExampleClient_RegisteredAgentResourceHTTPDoer() {
+	ctx := context.Background()
+	store, err := qurl.OpenFileAgentState("/var/lib/layerv/qurl/agent-state.json")
+	if err != nil {
+		panic(err)
+	}
+	defer store.Close()
+	client, err := qurl.OpenRegisteredAgent(ctx, store)
+	if err != nil {
+		panic(err)
+	}
+	doer, err := client.RegisteredAgentResourceHTTPDoer()
+	if err != nil {
+		panic(err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.layerv.ai/v1/resources", nil)
+	if err != nil {
+		panic(err)
+	}
+	resp, err := doer.Do(req)
+	if err != nil {
+		panic(err)
+	}
+	defer resp.Body.Close()
+}
+
 func ExamplePrepareLiveNativeSessionOperation() {
 	ctx := context.Background()
 	store, err := qurl.OpenFileAgentState("/var/lib/layerv/qurl/agent-state.json")

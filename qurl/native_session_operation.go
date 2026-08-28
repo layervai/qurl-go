@@ -20,6 +20,12 @@ import (
 	"github.com/layervai/qurl-go/relayknock/nativeudp"
 )
 
+// NativeSessionOperationJournalMargin is the maximum time a caller may spend
+// durably committing a prepared live operation before it sends the related
+// KnockRegisteredAgent request. The preparation, commit, and knock must remain
+// one serialized critical section for a shared binding.
+const NativeSessionOperationJournalMargin = 125 * time.Second
+
 const (
 	nativeSessionOperationSchema               = 2
 	nativeSessionOperationBindingSchema        = 2
@@ -30,18 +36,12 @@ const (
 	nativeSessionOperationMaxCreationWindow    = 30 * time.Minute
 	nativeSessionOperationMaxClockSkew         = 30 * time.Second
 	nativeSessionOperationResumeHorizon        = 24 * time.Hour
-	nativeSessionOperationAbsentRecoveryMargin = 125 * time.Second
+	nativeSessionOperationAbsentRecoveryMargin = NativeSessionOperationJournalMargin
 	nativeSessionOperationRecoveryRequiredCode = "52029"
 	nativeSessionOperationRecoveryCompleteCode = "52030"
 	nativeSessionOperationRecoveryUserDataKey  = "native_session_operation_action"
 	nativeSessionOperationRecoveryAction       = "recover"
 )
-
-// NativeSessionOperationJournalMargin is the maximum time a caller may spend
-// durably committing a prepared live operation before it sends the related
-// KnockRegisteredAgent request. The preparation, commit, and knock must remain
-// one serialized critical section for a shared binding.
-const NativeSessionOperationJournalMargin = 125 * time.Second
 
 // ErrInvalidNativeSessionOperation marks an operation that fails before DNS,
 // socket, or packet work. Error text never includes an operation identity or

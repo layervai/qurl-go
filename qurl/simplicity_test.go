@@ -51,6 +51,9 @@ var frictionBudget = map[string]int{
 	// session: open state, reopen the binding, create one replayable request,
 	// resolve, and print. The two defers are deterministic key/store cleanup.
 	"ExampleResolveRegisteredAgentConnectorResource": 8,
+	// Open a persisted registered device and use its narrow resource-only HTTP
+	// bridge. The defers release the state pin and response body.
+	"ExampleClient_RegisteredAgentResourceHTTPDoer": 8,
 	// The package overview: open a client, protect, create, print.
 	"Example": 4,
 
