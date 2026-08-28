@@ -2330,6 +2330,15 @@ func TestInterpretNativeAgentKnockReply_RegisteredAgentExactUnion(t *testing.T) 
 	if result != nil || !errors.As(err, &deny) || deny.ErrCode != "52004" || errors.Is(err, ErrMalformedReply) {
 		t.Fatalf("exact registered-agent denial = %#v, %T %v", result, err, err)
 	}
+	operationFreeRecovery := `{"errCode":"52029","errMsg":"native session operation recovery required","opnTime":0,"operation_id":"` +
+		strings.Repeat("a", 64) + `","binding_sha256":"` + strings.Repeat("b", 64) + `"}`
+	result, err = interpretNativeAgentKnockReply(
+		&relayknock.Reply{Type: relayknock.TypeACK, Body: []byte(operationFreeRecovery)},
+		"resource-public-key", expectation,
+	)
+	if result != nil || !errors.Is(err, ErrMalformedReply) || NativeSessionOperationRecoveryRequired(err) {
+		t.Fatalf("operation-free recovery denial = %#v, %T %v", result, err, err)
+	}
 
 	denialWith := func(field string) string {
 		return strings.TrimSuffix(denial, "}") + "," + field + "}"

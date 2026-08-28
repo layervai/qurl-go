@@ -2292,11 +2292,12 @@ type nativeAgentKnockACK struct {
 }
 
 type nativeAgentKnockExpectation struct {
-	CellID        string
-	RunID         string
-	RunAttempt    uint64
-	OperationID   string
-	BindingSHA256 string
+	CellID                    string
+	RunID                     string
+	RunAttempt                uint64
+	OperationID               string
+	BindingSHA256             string
+	AllowSuccessOperationEcho bool
 }
 
 type nativeExactSessionCloseACK struct {
@@ -2479,7 +2480,14 @@ func interpretNativeAgentKnockReply(reply *relayknock.Reply, knockResourceID str
 	if ack.OpenTime.Value == 0 {
 		return nil, fmt.Errorf("%w: success ACK carried an invalid open time", ErrMalformedReply)
 	}
-	if strictRegisteredAgentACK && (ack.ErrMsg.Present || ack.OperationID.Present || ack.BindingSHA256.Present ||
+	successOperationEchoValid := !ack.OperationID.Present && !ack.BindingSHA256.Present
+	if strictRegisteredAgentACK && expectations[0].AllowSuccessOperationEcho &&
+		ack.OperationID.Present && ack.BindingSHA256.Present &&
+		ack.OperationID.Value == expectations[0].OperationID &&
+		ack.BindingSHA256.Value == expectations[0].BindingSHA256 {
+		successOperationEchoValid = true
+	}
+	if strictRegisteredAgentACK && (ack.ErrMsg.Present || !successOperationEchoValid ||
 		!validNativeAgentACKAddress(ack.AgentAddr.Value)) {
 		return nil, invalidNativeProducerReply(ErrMalformedReply, "native knock success ACK field set")
 	}

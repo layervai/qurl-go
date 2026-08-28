@@ -165,6 +165,26 @@ func TestPrepareLiveNativeSessionOperationReturnsExactRecoveryEndpoint(t *testin
 	}
 }
 
+func TestPrepareLiveNativeSessionOperationFeedsReturnedEndpointToRecovery(t *testing.T) {
+	binding, privateKey, input := testNativeSessionOperationBinding(t)
+	input.CellID = ""
+	operation, endpoint, err := PrepareLiveNativeSessionOperation(context.Background(), binding, privateKey, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completeACK := nativeOperationRecoveryACK(*operation, nativeSessionOperationRecoveryCompleteCode,
+		"native session operation recovery complete")
+	f := newRuntimeFixture(t, nil, []runtimeUDPStep{{
+		requestType: relayknock.TypeKnock, replyType: relayknock.TypeACK, replyBody: completeACK,
+	}})
+	recovery, err := RecoverNativeSessionOperation(context.Background(), binding, privateKey, *operation, endpoint,
+		WithAgentRuntimeUDPResolver(f.resolver), WithAgentRuntimeUDPDialer(f.dialer),
+		WithAgentRuntimeUDPBounds(runtimeReplyTimeout, 1))
+	if err != nil || recovery == nil || !recovery.Complete {
+		t.Fatalf("prepared endpoint recovery = %#v, %v", recovery, err)
+	}
+}
+
 func TestPrepareLiveNativeSessionOperationFeedsSameBindingKnock(t *testing.T) {
 	binding, privateKey, input := testNativeSessionOperationBinding(t)
 	input.CellID = ""
@@ -428,6 +448,27 @@ func TestLiveSessionAssignmentStrictRejectsOfflineMarginRequirement(t *testing.T
 	}
 }
 
+func TestPrepareLiveNativeSessionOperationReportsOfflineMarginWithoutHubClaim(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	f := newRuntimeFixture(t, nil, nil).expectSilence()
+	seedSessionLease(t, f, contract,
+		time.Now().Add(sessionLeaseRenewalLead+NativeSessionOperationJournalMargin/2))
+	binding, privateKey := openSessionBinding(t, f, WithAgentRuntimeOfflineOpen())
+	now := time.Now().UTC()
+	operation, endpoint, err := PrepareLiveNativeSessionOperation(context.Background(), binding, privateKey,
+		NativeSessionOperationInput{
+			PreparedAtMillis: now.UnixMilli(), ExpiresAtMillis: now.Add(20 * time.Minute).UnixMilli(),
+			OwnerID:             "auth0|canary-owner",
+			ProtectedResourceID: nativeOperationProtectedResourceID, ResourceID: "resource-a",
+			RunAttempt: 1, RunID: "0123456789abcdef",
+		})
+	if operation != nil || endpoint != (NHPUDPEndpoint{}) ||
+		!errors.Is(err, ErrNativeSessionOperationLeaseMargin) ||
+		strings.Contains(err.Error(), "Hub renewal") {
+		t.Fatalf("offline margin = %#v, %#v, %v", operation, endpoint, err)
+	}
+}
+
 func TestPrepareLiveNativeSessionOperationClassifiesExpiredOnlineBindingWhenHubIsUnavailable(t *testing.T) {
 	contract := loadAssignmentFixture(t)
 	f := newRuntimeFixture(t, nil, nil).expectSilence()
@@ -622,7 +663,8 @@ func TestRecoverNativeSessionOperationReknockKeepsRecoveryMarker(t *testing.T) {
 func TestRecoverNativeSessionOperationPreservesUnexpectedAdmissionReceipt(t *testing.T) {
 	binding, privateKey, operation := testNativeSessionOperation(t)
 	contract := loadAssignmentFixture(t)
-	successACK := `{"errCode":"0","resHost":{"resource-a":"frps.cell.example:7000"},"opnTime":1,"agentAddr":"203.0.113.1:49152","acTokens":{"resource-a":"secret"},"sessId":91,"cellId":"cell-01","sessIssuedAtMillis":1800000000000,"runId":"0123456789abcdef","runAttempt":7}`
+	successACK := `{"errCode":"0","resHost":{"resource-a":"frps.cell.example:7000"},"opnTime":1,"agentAddr":"203.0.113.1:49152","acTokens":{"resource-a":"secret"},"sessId":91,"cellId":"cell-01","sessIssuedAtMillis":1800000000000,"runId":"0123456789abcdef","runAttempt":7,"operation_id":"` +
+		operation.OperationID + `","binding_sha256":"` + operation.BindingSHA256 + `"}`
 	f := newRuntimeFixture(t, nil, []runtimeUDPStep{{
 		requestType: relayknock.TypeKnock, replyType: relayknock.TypeACK, replyBody: successACK,
 	}})
@@ -656,7 +698,8 @@ func TestConsumeNativeSessionOperationRecoveryReplyStrictDenialUnion(t *testing.
 	}, operation); err != nil || result == nil || result.Complete {
 		t.Fatalf("pending recovery = %#v, %v", result, err)
 	}
-	unexpectedSuccess := `{"errCode":"0","resHost":{"resource-a":"frps.cell.example:7000"},"opnTime":1,"agentAddr":"203.0.113.1:49152","acTokens":{"resource-a":"secret"},"sessId":1,"cellId":"cell-01","sessIssuedAtMillis":1,"runId":"0123456789abcdef","runAttempt":7}`
+	unexpectedSuccess := `{"errCode":"0","resHost":{"resource-a":"frps.cell.example:7000"},"opnTime":1,"agentAddr":"203.0.113.1:49152","acTokens":{"resource-a":"secret"},"sessId":1,"cellId":"cell-01","sessIssuedAtMillis":1,"runId":"0123456789abcdef","runAttempt":7,"operation_id":"` +
+		operation.OperationID + `","binding_sha256":"` + operation.BindingSHA256 + `"}`
 	result, err = consumeNativeSessionOperationRecoveryReply(&relayknock.Reply{
 		Type: relayknock.TypeACK, Body: []byte(unexpectedSuccess),
 	}, operation)

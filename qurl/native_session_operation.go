@@ -27,7 +27,10 @@ import (
 const NativeSessionOperationJournalMargin = 125 * time.Second
 
 const (
-	nativeSessionOperationSchema               = 2
+	nativeSessionOperationSchema = 2
+	// The binding schema remains 2 because this contract has not been released.
+	// This coordinated v2 cutover replaces the earlier v2 canonical field set;
+	// no compatibility decoder is retained.
 	nativeSessionOperationBindingSchema        = 2
 	nativeSessionOperationAgentKeySchema       = 2
 	nativeSessionOperationCredentialKind       = "account"
@@ -281,9 +284,15 @@ func PrepareLiveNativeSessionOperation(ctx context.Context, binding *AgentRuntim
 		// On an online binding this private sentinel means the Hub exchange
 		// succeeded but returned a lease that is still too short. Do not relabel
 		// that successful renewal as an expired pre-renewal assignment.
-		if binding.renewal != nil && errors.Is(err, errAgentRuntimeRenewalUnavailable) {
-			return nil, NHPUDPEndpoint{}, fmt.Errorf("%w: renewed assignment has insufficient journal margin: %w",
-				ErrNativeSessionOperationLeaseMargin, err)
+		if errors.Is(err, errAgentRuntimeRenewalUnavailable) {
+			if binding.renewal != nil {
+				return nil, NHPUDPEndpoint{}, fmt.Errorf("%w: renewed assignment has insufficient journal margin: %w",
+					ErrNativeSessionOperationLeaseMargin, err)
+			}
+			if !expiredAtDecision {
+				return nil, NHPUDPEndpoint{}, fmt.Errorf("%w: assignment has insufficient journal margin: %w",
+					ErrNativeSessionOperationLeaseMargin, err)
+			}
 		}
 		if expiredAtDecision {
 			return nil, NHPUDPEndpoint{}, fmt.Errorf("%w: live assignment expired before Hub renewal: %w: %w",
@@ -519,6 +528,7 @@ func consumeNativeSessionOperationRecoveryReply(reply *relayknock.Reply,
 	result, err := consumeNativeAgentKnockReply(reply, operation.ResourceID, nativeAgentKnockExpectation{
 		CellID: operation.CellID, RunID: operation.RunID, RunAttempt: operation.RunAttempt,
 		OperationID: operation.OperationID, BindingSHA256: operation.BindingSHA256,
+		AllowSuccessOperationEcho: true,
 	})
 	var denied *ServerDenyError
 	if !errors.As(err, &denied) {
@@ -551,11 +561,13 @@ func NativeSessionOperationAbsentRecoveryDeadline(operation NativeSessionOperati
 	return time.UnixMilli(millis).UTC(), nil
 }
 
-// NativeSessionOperationRecoveryRequired reports the exact authenticated
-// denial returned by KnockRegisteredAgent that tells the caller to recover the
-// operation before it makes a replacement admission attempt. Recovery itself
-// returns a non-complete NativeSessionOperationRecovery with a nil error while
-// the server is still closing the operation.
+// NativeSessionOperationRecoveryRequired reports the exact authenticated,
+// operation-bound denial returned by KnockRegisteredAgent that tells the
+// caller to recover the supplied operation before it makes a replacement
+// admission attempt. An operation-free knock cannot receive this result under
+// the v2 contract. Recovery itself returns a non-complete
+// NativeSessionOperationRecovery with a nil error while the server is still
+// closing the operation.
 func NativeSessionOperationRecoveryRequired(err error) bool {
 	var denied *ServerDenyError
 	return errors.As(err, &denied) && denied.ErrCode == nativeSessionOperationRecoveryRequiredCode
