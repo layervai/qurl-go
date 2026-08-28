@@ -18,6 +18,34 @@ func secureAgentStateTestDirPlatform(t *testing.T, dir string) {
 	setWindowsTestACL(t, dir, false)
 }
 
+func securePrivateStateFilePlatform(t *testing.T, path string) {
+	t.Helper()
+	setWindowsTestACL(t, path, false)
+}
+
+func assertPrivateStatePermissionsPlatform(t *testing.T, file, dir string) {
+	t.Helper()
+	for _, entry := range []struct {
+		path      string
+		directory bool
+	}{
+		{path: file},
+		{path: dir, directory: true},
+	} {
+		handle, err := openWindowsPrivateStatePath(entry.path, entry.directory)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := validateWindowsPrivateStateACL(handle, entry.path, ErrInsecureAgentStatePermissions, false); err != nil {
+			_ = windows.CloseHandle(handle)
+			t.Fatal(err)
+		}
+		if err := windows.CloseHandle(handle); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func makePrivateStateFileInsecurePlatform(t *testing.T, path string) {
 	t.Helper()
 	setWindowsTestACL(t, path, true)

@@ -12,6 +12,31 @@ import (
 
 func secureAgentStateTestDirPlatform(*testing.T, string) {}
 
+func securePrivateStateFilePlatform(t *testing.T, path string) {
+	t.Helper()
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertPrivateStatePermissionsPlatform(t *testing.T, file, dir string) {
+	t.Helper()
+	info, err := os.Stat(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("file mode = %o, want 0600", info.Mode().Perm())
+	}
+	dirInfo, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dirInfo.Mode().Perm() != 0o700 {
+		t.Fatalf("dir mode = %o, want 0700", dirInfo.Mode().Perm())
+	}
+}
+
 func makePrivateStateFileInsecurePlatform(t *testing.T, path string) {
 	t.Helper()
 	if err := os.Chmod(path, 0o640); err != nil {

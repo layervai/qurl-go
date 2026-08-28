@@ -335,20 +335,7 @@ func TestSealedFileAgentState_RoundTripFreshEnvelopeAndZeroization(t *testing.T)
 		t.Fatal("successive saves reused nonce, DEK, or ciphertext")
 	}
 
-	info, err := os.Stat(store.path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Mode().Perm() != 0o600 {
-		t.Fatalf("file mode = %o, want 0600", info.Mode().Perm())
-	}
-	dirInfo, err := os.Stat(filepath.Dir(store.path))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if dirInfo.Mode().Perm() != 0o700 {
-		t.Fatalf("dir mode = %o, want 0700", dirInfo.Mode().Perm())
-	}
+	assertPrivateStatePermissionsPlatform(t, store.path, filepath.Dir(store.path))
 
 	wrapper.mu.Lock()
 	defer wrapper.mu.Unlock()
@@ -1227,6 +1214,7 @@ func TestSealedFileAgentState_RejectsInsecureDirectoryAndOversizeFile(t *testing
 	if err := os.WriteFile(store2.path, bytes.Repeat([]byte{'x'}, maxSealedAgentStateEnvelope+1), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	securePrivateStateFilePlatform(t, store2.path)
 	if _, err := store2.LoadAgentState(context.Background()); !errors.Is(err, ErrInvalidAgentState) {
 		t.Fatalf("oversized load = %v, want ErrInvalidAgentState", err)
 	}

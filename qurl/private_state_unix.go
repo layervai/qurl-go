@@ -7,7 +7,7 @@ import (
 	"os"
 )
 
-func validatePrivateStateFilePermissions(path, label string, info os.FileInfo, insecurePermissions error) error {
+func validatePrivateStateFilePermissions(path, _ string, info os.FileInfo, insecurePermissions error) error {
 	if info.Mode().Perm()&0o077 != 0 {
 		return fmt.Errorf("%w: %s has mode %o, want 0600 or stricter", insecurePermissions, path, info.Mode().Perm())
 	}

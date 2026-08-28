@@ -44,6 +44,7 @@ func TestFileAgentState_RejectsUnknownOrTrailingJSON(t *testing.T) {
 			if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
 				t.Fatal(err)
 			}
+			securePrivateStateFilePlatform(t, path)
 			if _, err := FileAgentState(path).LoadAgentState(context.Background()); !errors.Is(err, ErrInvalidAgentState) {
 				t.Fatalf("load error = %v, want ErrInvalidAgentState", err)
 			} else if strings.Contains(err.Error(), untrustedField) {
@@ -65,9 +66,7 @@ func TestFileAgentState_RejectsInsecurePermissions(t *testing.T) {
 		t.Fatalf("group-readable file error = %v, want ErrInsecureAgentStatePermissions", err)
 	}
 
-	if err := os.Chmod(path, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	securePrivateStateFilePlatform(t, path)
 	makePrivateStateDirInsecurePlatform(t, dir)
 	if _, err := store.LoadAgentState(context.Background()); !errors.Is(err, ErrInsecureAgentStatePermissions) {
 		t.Fatalf("insecure directory load error = %v, want ErrInsecureAgentStatePermissions", err)
@@ -98,6 +97,7 @@ func TestFileAgentState_RejectsSymlinkAndOversize(t *testing.T) {
 		if err := os.WriteFile(path, []byte(strings.Repeat("x", maxAgentStateBytes+1)), 0o600); err != nil {
 			t.Fatal(err)
 		}
+		securePrivateStateFilePlatform(t, path)
 		if _, err := FileAgentState(path).LoadAgentState(context.Background()); !errors.Is(err, ErrInvalidAgentState) {
 			t.Fatalf("oversize error = %v, want ErrInvalidAgentState", err)
 		}

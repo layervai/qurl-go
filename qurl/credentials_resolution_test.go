@@ -139,6 +139,7 @@ func TestResolveCredentialsUsesConnectorInstallerPath(t *testing.T) {
 	t.Setenv(EnvAPIKey, "")
 	t.Setenv(EnvAPIKeyFile, "")
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	want := writeTokenFile(t, home, UserIssuerStatePath)
 
 	got, err := resolveCredentials("")
