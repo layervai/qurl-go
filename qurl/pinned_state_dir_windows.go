@@ -130,6 +130,13 @@ func windowsRelativeName(name string) error {
 func ntOpenWindowsObject(root windows.Handle, name string, access uint32, disposition uint32,
 	options uint32, sd *windows.SECURITY_DESCRIPTOR,
 ) (windows.Handle, bool, error) {
+	return ntOpenWindowsObjectWithShare(root, name, access, disposition, options, sd,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE)
+}
+
+func ntOpenWindowsObjectWithShare(root windows.Handle, name string, access uint32, disposition uint32,
+	options uint32, sd *windows.SECURITY_DESCRIPTOR, share uint32,
+) (windows.Handle, bool, error) {
 	if root != 0 {
 		if err := windowsRelativeName(name); err != nil {
 			return windows.InvalidHandle, false, err
@@ -149,7 +156,7 @@ func ntOpenWindowsObject(root windows.Handle, name string, access uint32, dispos
 	var iosb windows.IO_STATUS_BLOCK
 	allocation := int64(0)
 	err = windows.NtCreateFile(&handle, access, oa, &iosb, &allocation,
-		windows.FILE_ATTRIBUTE_NORMAL, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE,
+		windows.FILE_ATTRIBUTE_NORMAL, share,
 		disposition, options|windows.FILE_SYNCHRONOUS_IO_NONALERT|windows.FILE_OPEN_REPARSE_POINT,
 		0, 0)
 	if err != nil {
@@ -265,7 +272,8 @@ func (d *pinnedStateDirImpl) validateWindowsFileHandle(handle windows.Handle, la
 	}
 	if info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0 ||
 		info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-		return pinnedFileIdentity{}, fmt.Errorf("%w: %s must be a non-reparse regular file", ErrAgentStateContinuity, label)
+		return pinnedFileIdentity{}, errors.Join(ErrInvalidAgentState,
+			fmt.Errorf("%w: %s must be a non-reparse regular file", ErrAgentStateContinuity, label))
 	}
 	if info.NumberOfLinks != 1 {
 		return pinnedFileIdentity{}, fmt.Errorf("%w: %s link count is %d, want 1",
@@ -519,13 +527,20 @@ func (d *pinnedStateDirImpl) openFile(name string, access, disposition uint32,
 	return ntOpenWindowsObject(d.handle, name, access, disposition, windows.FILE_NON_DIRECTORY_FILE, sd)
 }
 
+func (d *pinnedStateDirImpl) reopenFileForValidation(name string) (windows.Handle, error) {
+	handle, _, err := ntOpenWindowsObjectWithShare(d.handle, name,
+		windows.FILE_GENERIC_READ|windows.READ_CONTROL|windows.SYNCHRONIZE,
+		windows.FILE_OPEN, windows.FILE_NON_DIRECTORY_FILE, nil,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE)
+	return handle, err
+}
+
 func (d *pinnedStateDirImpl) validateOpenEntry(handle windows.Handle, name, label string) error {
 	opened, err := d.validateWindowsFileHandle(handle, label)
 	if err != nil {
 		return err
 	}
-	reopened, _, err := d.openFile(name, windows.FILE_GENERIC_READ|windows.READ_CONTROL|windows.SYNCHRONIZE,
-		windows.FILE_OPEN, nil)
+	reopened, err := d.reopenFileForValidation(name)
 	if err != nil {
 		return fmt.Errorf("%w: reopen %s directory entry: %w", ErrAgentStateContinuity, label, err)
 	}
