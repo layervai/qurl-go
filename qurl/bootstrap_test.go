@@ -45,7 +45,8 @@ func TestFileAgentState_RejectsUnknownOrTrailingJSON(t *testing.T) {
 				t.Fatal(err)
 			}
 			securePrivateStateFilePlatform(t, path)
-			if _, err := FileAgentState(path).LoadAgentState(context.Background()); !errors.Is(err, ErrInvalidAgentState) {
+			store := testFileAgentState(t, path)
+			if _, err := store.LoadAgentState(context.Background()); !errors.Is(err, ErrInvalidAgentState) {
 				t.Fatalf("load error = %v, want ErrInvalidAgentState", err)
 			} else if strings.Contains(err.Error(), untrustedField) {
 				t.Fatalf("load error reflected untrusted credential-file content: %v", err)
@@ -98,7 +99,8 @@ func TestFileAgentState_RejectsSymlinkAndOversize(t *testing.T) {
 			t.Fatal(err)
 		}
 		securePrivateStateFilePlatform(t, path)
-		if _, err := FileAgentState(path).LoadAgentState(context.Background()); !errors.Is(err, ErrInvalidAgentState) {
+		store := testFileAgentState(t, path)
+		if _, err := store.LoadAgentState(context.Background()); !errors.Is(err, ErrInvalidAgentState) {
 			t.Fatalf("oversize error = %v, want ErrInvalidAgentState", err)
 		}
 	})
