@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"strings"
 	"time"
@@ -19,21 +20,30 @@ import (
 	"github.com/layervai/qurl-go/relayknock/nativeudp"
 )
 
+// NativeSessionOperationJournalMargin is the maximum time a caller may spend
+// durably committing a prepared live operation before it sends the related
+// KnockRegisteredAgent request. The preparation, commit, and knock must remain
+// one serialized critical section for a shared binding.
+const NativeSessionOperationJournalMargin = 125 * time.Second
+
 const (
-	nativeSessionOperationSchema                = 2
-	nativeSessionOperationBindingSchema         = 2
-	nativeSessionOperationAgentKeySchema        = 2
-	nativeSessionOperationCredentialKind        = "account"
-	nativeSessionOperationConnectorIDClaim      = ""
-	nativeSessionOperationSelectorDomain        = "layerv/native-session-operation/v1\x00"
-	nativeSessionOperationMaxCreationWindow     = 30 * time.Minute
-	nativeSessionOperationMaxClockSkew          = 30 * time.Second
-	nativeSessionOperationResumeHorizon         = 24 * time.Hour
-	nativeSessionOperationPacketMargin          = 125 * time.Second
-	nativeSessionOperationRecoveryStateCanceled = "CANCELED"
-	nativeSessionOperationRecoveryStateClosing  = "CLOSING"
-	nativeSessionOperationRecoveryStateClosed   = "CLOSED"
-	nativeSessionOperationRecoveryRequiredCode  = "52029"
+	nativeSessionOperationSchema = 2
+	// The binding schema remains 2 because this contract has not been released.
+	// This coordinated v2 cutover replaces the earlier v2 canonical field set;
+	// no compatibility decoder is retained.
+	nativeSessionOperationBindingSchema        = 2
+	nativeSessionOperationAgentKeySchema       = 2
+	nativeSessionOperationCredentialKind       = "account"
+	nativeSessionOperationConnectorIDClaim     = ""
+	nativeSessionOperationSelectorDomain       = "layerv/native-session-operation/v1\x00"
+	nativeSessionOperationMaxCreationWindow    = 30 * time.Minute
+	nativeSessionOperationMaxClockSkew         = 30 * time.Second
+	nativeSessionOperationResumeHorizon        = 24 * time.Hour
+	nativeSessionOperationAbsentRecoveryMargin = NativeSessionOperationJournalMargin
+	nativeSessionOperationRecoveryRequiredCode = "52029"
+	nativeSessionOperationRecoveryCompleteCode = "52030"
+	nativeSessionOperationRecoveryUserDataKey  = "native_session_operation_action"
+	nativeSessionOperationRecoveryAction       = "recover"
 )
 
 // ErrInvalidNativeSessionOperation marks an operation that fails before DNS,
@@ -41,25 +51,46 @@ const (
 // owner value.
 var ErrInvalidNativeSessionOperation = errors.New("qurl: invalid native session operation")
 
-// NativeSessionOperationInput is the caller-owned, non-secret authority used
-// to prepare one durable session operation before any network request. CellID
-// must match the exact completed AgentRuntimeBinding snapshot. ResourceID is
-// the placement-neutral knock/catalog key; ProtectedResourceID is the distinct
-// canonical CRID public-resource identity. The two table names and AWS identity
-// are signed deployment authority, not wire fields.
+// ErrNativeSessionOperationLeaseMargin means no operation was created because
+// the binding could not establish enough live lease for the caller to commit a
+// durable journal record and send the following admission packet. The error
+// keeps any Hub renewal cause in its chain. It does not mean the current lease
+// has already expired.
+var ErrNativeSessionOperationLeaseMargin = errors.New("qurl: native session operation lease margin unavailable")
+
+// NativeSessionOperationUnexpectedAdmissionError reports a server contract
+// violation in which a recovery KNK admitted a session instead of returning a
+// recovery denial ACK. SessionReceipt lets the durable caller record that
+// exact admission as MAPPED and recover it through the same operation authority;
+// it must not retry the recovery KNK or start a replacement operation first.
+type NativeSessionOperationUnexpectedAdmissionError struct {
+	SessionReceipt NativeSessionReceipt
+}
+
+func (e *NativeSessionOperationUnexpectedAdmissionError) Error() string {
+	return "qurl: native session operation recovery returned admission authority"
+}
+
+func (e *NativeSessionOperationUnexpectedAdmissionError) Unwrap() error { return ErrMalformedReply }
+
+// NativeSessionOperationInput contains only the authenticated resource and run
+// facts required to prepare one durable session operation before any network
+// request. CellID must match the exact completed AgentRuntimeBinding snapshot.
+// ResourceID is the placement-neutral knock/catalog key; ProtectedResourceID
+// is the distinct canonical CRID public-resource identity. AWS accounts,
+// regions, and storage names are private server configuration and never enter
+// this public contract.
 type NativeSessionOperationInput struct {
-	AWSAccountID        string
-	AWSRegion           string
+	// CellID is required by PrepareNativeSessionOperation and must be empty for
+	// PrepareLiveNativeSessionOperation, which derives placement from the binding.
 	CellID              string
 	ExpiresAtMillis     int64
 	OwnerID             string
 	PreparedAtMillis    int64
 	ProtectedResourceID string
-	QURLAgentKeysTable  string
 	ResourceID          string
 	RunAttempt          uint64
 	RunID               string
-	SessionControlTable string
 }
 
 // NativeSessionOperation is a complete, strict, serializable operation intent.
@@ -71,8 +102,6 @@ type NativeSessionOperation struct {
 	AgentKeySchema      int    `json:"agent_key_schema_version"`
 	AgentPublicKeyB64   string `json:"agent_public_key_b64"`
 	AuthServiceID       string `json:"auth_service_id"`
-	AWSAccountID        string `json:"aws_account_id"`
-	AWSRegion           string `json:"aws_region"`
 	BindingSchema       int    `json:"binding_schema"`
 	BindingSHA256       string `json:"binding_sha256"`
 	CellID              string `json:"cell_id"`
@@ -83,12 +112,10 @@ type NativeSessionOperation struct {
 	OwnerID             string `json:"owner_id"`
 	PreparedAtMillis    int64  `json:"prepared_at_ms"`
 	ProtectedResourceID string `json:"protected_resource_id"`
-	QURLAgentKeysTable  string `json:"qurl_agent_keys_table"`
 	ResourceID          string `json:"resource_id"`
 	RunAttempt          uint64 `json:"run_attempt"`
 	RunID               string `json:"run_id"`
 	Schema              int    `json:"schema"`
-	SessionControlTable string `json:"session_control_table"`
 }
 
 type nativeSessionOperationCanonicalBinding struct {
@@ -96,8 +123,6 @@ type nativeSessionOperationCanonicalBinding struct {
 	AgentKeySchema      int    `json:"agent_key_schema_version"`
 	AgentPublicKeyB64   string `json:"agent_public_key_b64"`
 	AuthServiceID       string `json:"auth_service_id"`
-	AWSAccountID        string `json:"aws_account_id"`
-	AWSRegion           string `json:"aws_region"`
 	BindingSchema       int    `json:"binding_schema"`
 	CellID              string `json:"cell_id"`
 	ConnectorIDClaim    string `json:"connector_id_claim"`
@@ -107,27 +132,19 @@ type nativeSessionOperationCanonicalBinding struct {
 	OwnerID             string `json:"owner_id"`
 	PreparedAtMillis    int64  `json:"prepared_at_ms"`
 	ProtectedResourceID string `json:"protected_resource_id"`
-	QURLAgentKeysTable  string `json:"qurl_agent_keys_table"`
 	ResourceID          string `json:"resource_id"`
 	RunAttempt          uint64 `json:"run_attempt"`
 	RunID               string `json:"run_id"`
-	SessionControlTable string `json:"session_control_table"`
 }
 
-// NativeSessionOperationRecovery is the authenticated result of recovery. A
-// CANCELED or CLOSED state is terminal. CLOSING is durable but not terminal;
-// the caller must replay the same operation until CLOSED before it moves the
-// source-fenced recovery route or starts a replacement operation.
+// NativeSessionOperationRecovery is the authenticated result of recovery.
+// Complete is true only after the server reports the exact operation terminal.
+// UnexpectedAdmission is set only when an incompatible server admits the
+// recovery packet. The caller must durably record that receipt as MAPPED before
+// any retry. No bearer material is replayed on this control path.
 type NativeSessionOperationRecovery struct {
-	BindingSHA256         string
-	CellID                string
-	CloseEventID          string
-	OperationID           string
-	RunAttempt            uint64
-	RunID                 string
-	SessionID             uint64
-	SessionIssuedAtMillis int64
-	State                 string
+	Complete            bool
+	UnexpectedAdmission *NativeSessionReceipt
 }
 
 // UnmarshalJSON rejects every unknown, duplicate, missing, or noncanonical
@@ -159,15 +176,15 @@ func (o *NativeSessionOperation) UnmarshalJSON(raw []byte) error {
 }
 
 func exactNativeSessionOperationKeys(fields map[string]json.RawMessage) bool {
-	if len(fields) != 22 {
+	if len(fields) != 18 {
 		return false
 	}
 	for _, key := range []string{
 		"agent_id", "agent_key_schema_version", "agent_public_key_b64", "auth_service_id",
-		"aws_account_id", "aws_region", "binding_schema", "binding_sha256", "cell_id",
+		"binding_schema", "binding_sha256", "cell_id",
 		"connector_id_claim", "enrollment_credential_kind", "expires_at_ms", "operation_id",
-		"owner_id", "prepared_at_ms", "protected_resource_id", "qurl_agent_keys_table", "resource_id", "run_attempt",
-		"run_id", "schema", "session_control_table",
+		"owner_id", "prepared_at_ms", "protected_resource_id", "resource_id", "run_attempt",
+		"run_id", "schema",
 	} {
 		if _, ok := fields[key]; !ok {
 			return false
@@ -186,21 +203,29 @@ func PrepareNativeSessionOperation(binding *AgentRuntimeBinding, deviceStaticPri
 		return nil, ErrInvalidNativeSessionOperation
 	}
 	assignment := binding.Assignment()
-	if assignment.CellID == "" || assignment.CellID != input.CellID {
+	return prepareNativeSessionOperationForAssignment(binding, deviceStaticPrivateKey, assignment, input)
+}
+
+func prepareNativeSessionOperationForAssignment(binding *AgentRuntimeBinding, deviceStaticPrivateKey []byte,
+	assignment AgentAssignment, input NativeSessionOperationInput,
+) (*NativeSessionOperation, error) {
+	if binding == nil || validateRuntimeBindingIdentity(binding, deviceStaticPrivateKey) != nil {
+		return nil, ErrInvalidNativeSessionOperation
+	}
+	if assignment.CellID == "" || assignment.CellID != input.CellID ||
+		validateNativeSessionOperationInput(input, true) != nil {
 		return nil, ErrInvalidNativeSessionOperation
 	}
 	operation := NativeSessionOperation{
 		AgentID: binding.authoritativeAgentID, AgentKeySchema: nativeSessionOperationAgentKeySchema,
 		AgentPublicKeyB64: binding.authoritativePublicKeyB64, AuthServiceID: agentAspID,
-		AWSAccountID: input.AWSAccountID, AWSRegion: input.AWSRegion,
 		BindingSchema: nativeSessionOperationBindingSchema, CellID: input.CellID,
 		ConnectorIDClaim: nativeSessionOperationConnectorIDClaim,
 		CredentialKind:   nativeSessionOperationCredentialKind, ExpiresAtMillis: input.ExpiresAtMillis,
 		OwnerID: input.OwnerID, PreparedAtMillis: input.PreparedAtMillis,
 		ProtectedResourceID: input.ProtectedResourceID,
-		QURLAgentKeysTable:  input.QURLAgentKeysTable, ResourceID: input.ResourceID,
-		RunAttempt: input.RunAttempt, RunID: input.RunID, Schema: nativeSessionOperationSchema,
-		SessionControlTable: input.SessionControlTable,
+		ResourceID:          input.ResourceID,
+		RunAttempt:          input.RunAttempt, RunID: input.RunID, Schema: nativeSessionOperationSchema,
 	}
 	operationID, err := nativeSessionOperationID(operation.AgentPublicKeyB64, operation.RunID, operation.RunAttempt)
 	if err != nil {
@@ -216,6 +241,85 @@ func PrepareNativeSessionOperation(binding *AgentRuntimeBinding, deviceStaticPri
 		return nil, err
 	}
 	return &operation, nil
+}
+
+// PrepareLiveNativeSessionOperation renews the held binding only when its lease
+// is close enough that the following durable journal commit could cross the
+// ordinary session-renewal boundary. It then prepares an operation against the
+// exact live assignment and returns that source endpoint for recovery.
+//
+// Unlike PrepareNativeSessionOperation, this function may contact the pinned
+// Hub when renewal is due. It never contacts the assigned cell. CellID must be
+// empty because the live binding, not the caller, owns placement. Callers must
+// durably persist both returned values and send the knock within
+// NativeSessionOperationJournalMargin (currently 125 seconds) of this function
+// returning. Callers that share one binding must serialize this preparation,
+// its durable commit, and KnockRegisteredAgent as one critical section because
+// a concurrent renewal can move the binding before admission.
+func PrepareLiveNativeSessionOperation(ctx context.Context, binding *AgentRuntimeBinding,
+	deviceStaticPrivateKey []byte, input NativeSessionOperationInput,
+) (*NativeSessionOperation, NHPUDPEndpoint, error) {
+	if binding == nil || len(deviceStaticPrivateKey) != x25519key.Size || input.CellID != "" ||
+		validateRuntimeBindingIdentity(binding, deviceStaticPrivateKey) != nil {
+		return nil, NHPUDPEndpoint{}, ErrInvalidNativeSessionOperation
+	}
+	if _, err := binding.checkedAssignment(binding.authoritativeAssignment); err != nil {
+		return nil, NHPUDPEndpoint{}, fmt.Errorf("%w: runtime binding assignment: %w", ErrInvalidNativeSessionOperation, err)
+	}
+	if err := validateContext(ctx, ErrInvalidNativeSessionOperation); err != nil {
+		return nil, NHPUDPEndpoint{}, err
+	}
+	if err := validateNativeSessionOperationInput(input, false); err != nil {
+		return nil, NHPUDPEndpoint{}, err
+	}
+	decisionAt := time.Now().UTC()
+	liveAtDecision := binding.Assignment()
+	expiredAtDecision := liveAtDecision.LeaseExpired(decisionAt)
+	// The packet margin is longer than one bounded native exchange and gives
+	// the caller time to fsync the operation before KnockRegisteredAgent samples
+	// the lease. This operation does not exist yet; the exported contract requires
+	// callers to exclude sibling preparation and knock work on the same binding.
+	assignment, err := binding.liveSessionAssignmentStrict(ctx, deviceStaticPrivateKey, decisionAt.Add(NativeSessionOperationJournalMargin))
+	if err != nil {
+		// On an online binding this private sentinel means the Hub exchange
+		// succeeded but returned a lease that is still too short. Do not relabel
+		// that successful renewal as an expired pre-renewal assignment.
+		if errors.Is(err, errAgentRuntimeRenewalUnavailable) {
+			if binding.renewal != nil {
+				return nil, NHPUDPEndpoint{}, fmt.Errorf("%w: renewed assignment has insufficient journal margin: %w",
+					ErrNativeSessionOperationLeaseMargin, err)
+			}
+			if !expiredAtDecision {
+				return nil, NHPUDPEndpoint{}, fmt.Errorf("%w: assignment has insufficient journal margin: %w",
+					ErrNativeSessionOperationLeaseMargin, err)
+			}
+		}
+		if expiredAtDecision {
+			return nil, NHPUDPEndpoint{}, fmt.Errorf("%w: live assignment expired before Hub renewal: %w: %w",
+				ErrInvalidNativeSessionOperation, ErrAssignmentLeaseExpired, err)
+		}
+		return nil, NHPUDPEndpoint{}, fmt.Errorf("%w: Hub renewal could not establish journal margin: %w",
+			ErrNativeSessionOperationLeaseMargin, err)
+	}
+	// Re-sample after the Hub exchange. The returned margin starts when this
+	// function delivers the operation, not when a possibly slow renewal began.
+	preparedAt := time.Now().UTC()
+	if err := assignment.Validate(preparedAt); err != nil {
+		return nil, NHPUDPEndpoint{}, fmt.Errorf("%w: live assignment: %w", ErrInvalidNativeSessionOperation, err)
+	}
+	if !preparedAt.Add(NativeSessionOperationJournalMargin + sessionLeaseRenewalLead).Before(assignment.LeaseExpiresAt) {
+		return nil, NHPUDPEndpoint{}, fmt.Errorf("%w: renewed assignment has insufficient journal margin",
+			ErrNativeSessionOperationLeaseMargin)
+	}
+	if _, err := assignmentNativeEndpoint(assignment); err != nil {
+		return nil, NHPUDPEndpoint{}, fmt.Errorf("%w: live assignment endpoint: %w", ErrInvalidNativeSessionOperation, err)
+	}
+	input.CellID = assignment.CellID
+	operation, err := prepareNativeSessionOperationForAssignment(binding, deviceStaticPrivateKey, *assignment, input)
+	if err != nil {
+		return nil, NHPUDPEndpoint{}, err
+	}
+	return operation, assignment.Endpoint, nil
 }
 
 func nativeSessionOperationID(publicKeyB64, runID string, runAttempt uint64) (string, error) {
@@ -242,15 +346,13 @@ func nativeSessionOperationBindingSHA256(operation NativeSessionOperation) (stri
 	canonical := nativeSessionOperationCanonicalBinding{
 		AgentID: operation.AgentID, AgentKeySchema: operation.AgentKeySchema,
 		AgentPublicKeyB64: operation.AgentPublicKeyB64, AuthServiceID: operation.AuthServiceID,
-		AWSAccountID: operation.AWSAccountID, AWSRegion: operation.AWSRegion,
 		BindingSchema: operation.BindingSchema, CellID: operation.CellID,
 		ConnectorIDClaim: operation.ConnectorIDClaim, CredentialKind: operation.CredentialKind,
 		ExpiresAtMillis: operation.ExpiresAtMillis, OperationID: operation.OperationID,
 		OwnerID: operation.OwnerID, PreparedAtMillis: operation.PreparedAtMillis,
 		ProtectedResourceID: operation.ProtectedResourceID,
-		QURLAgentKeysTable:  operation.QURLAgentKeysTable, ResourceID: operation.ResourceID,
-		RunAttempt: operation.RunAttempt, RunID: operation.RunID,
-		SessionControlTable: operation.SessionControlTable,
+		ResourceID:          operation.ResourceID,
+		RunAttempt:          operation.RunAttempt, RunID: operation.RunID,
 	}
 	body, err := json.Marshal(canonical)
 	if err != nil {
@@ -267,22 +369,35 @@ func validateNativeSessionOperation(operation NativeSessionOperation) error {
 		operation.CredentialKind != nativeSessionOperationCredentialKind ||
 		operation.ConnectorIDClaim != nativeSessionOperationConnectorIDClaim ||
 		operation.AuthServiceID != agentAspID || !validNativeSessionOperationIdentity(operation.AgentID) ||
-		!validNativeSessionOperationIdentity(operation.OwnerID) ||
-		!validNativeSessionOperationIdentity(operation.ResourceID) ||
-		validateConnectorResourceID(operation.ProtectedResourceID) != nil ||
-		operation.ProtectedResourceID == operation.ResourceID ||
-		!validNativeSessionOperationIdentity(operation.CellID) ||
-		!validNativeSessionOperationTable(operation.SessionControlTable) ||
-		!validNativeSessionOperationTable(operation.QURLAgentKeysTable) ||
-		!validNativeSessionOperationAWS(operation.AWSAccountID, operation.AWSRegion) ||
-		operation.PreparedAtMillis <= 0 || operation.ExpiresAtMillis <= operation.PreparedAtMillis ||
-		operation.ExpiresAtMillis-operation.PreparedAtMillis > nativeSessionOperationMaxCreationWindow.Milliseconds() ||
+		validateNativeSessionOperationInput(NativeSessionOperationInput{
+			CellID:          operation.CellID,
+			ExpiresAtMillis: operation.ExpiresAtMillis, OwnerID: operation.OwnerID,
+			PreparedAtMillis: operation.PreparedAtMillis, ProtectedResourceID: operation.ProtectedResourceID,
+			ResourceID: operation.ResourceID, RunAttempt: operation.RunAttempt, RunID: operation.RunID,
+		}, true) != nil ||
 		!validLowerHex(operation.OperationID, sha256.Size*2) ||
 		!validLowerHex(operation.BindingSHA256, sha256.Size*2) {
 		return ErrInvalidNativeSessionOperation
 	}
 	want, err := nativeSessionOperationBindingSHA256(operation)
 	if err != nil || want != operation.BindingSHA256 {
+		return ErrInvalidNativeSessionOperation
+	}
+	return nil
+}
+
+func validateNativeSessionOperationInput(input NativeSessionOperationInput, requireCell bool) error {
+	cellValid := input.CellID == ""
+	if requireCell {
+		cellValid = validNativeSessionOperationIdentity(input.CellID)
+	}
+	if !cellValid || !validNativeSessionOperationIdentity(input.OwnerID) ||
+		!validNativeSessionOperationIdentity(input.ResourceID) ||
+		validateConnectorResourceID(input.ProtectedResourceID) != nil ||
+		input.ProtectedResourceID == input.ResourceID ||
+		input.PreparedAtMillis <= 0 || input.ExpiresAtMillis <= input.PreparedAtMillis ||
+		input.ExpiresAtMillis-input.PreparedAtMillis > nativeSessionOperationMaxCreationWindow.Milliseconds() ||
+		ValidateCycleRunID(input.RunID) != nil || input.RunAttempt == 0 {
 		return ErrInvalidNativeSessionOperation
 	}
 	return nil
@@ -317,50 +432,6 @@ func validNativeSessionOperationIdentity(value string) bool {
 		!strings.ContainsFunc(value, func(r rune) bool { return r < 0x20 || r == 0x7f })
 }
 
-func validNativeSessionOperationTable(value string) bool {
-	if len(value) < 3 || len(value) > 255 {
-		return false
-	}
-	for i := 0; i < len(value); i++ {
-		if strings.IndexByte("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-.", value[i]) < 0 {
-			return false
-		}
-	}
-	return true
-}
-
-func validNativeSessionOperationAWS(accountID, region string) bool {
-	if len(accountID) != 12 || !validNativeSessionOperationAWSRegion(region) {
-		return false
-	}
-	for i := 0; i < len(accountID); i++ {
-		if accountID[i] < '0' || accountID[i] > '9' {
-			return false
-		}
-	}
-	return true
-}
-
-func validNativeSessionOperationAWSRegion(region string) bool {
-	parts := strings.Split(region, "-")
-	if len(parts) != 3 || len(parts[0]) != 2 || parts[1] == "" || parts[2] == "" || parts[2][0] == '0' {
-		return false
-	}
-	for _, value := range parts[:2] {
-		for index := 0; index < len(value); index++ {
-			if value[index] < 'a' || value[index] > 'z' {
-				return false
-			}
-		}
-	}
-	for index := 0; index < len(parts[2]); index++ {
-		if parts[2][index] < '0' || parts[2][index] > '9' {
-			return false
-		}
-	}
-	return true
-}
-
 func validLowerHex(value string, length int) bool {
 	if len(value) != length {
 		return false
@@ -378,7 +449,7 @@ func nativeSessionOperationAbsentRecoveryDeadline(operation NativeSessionOperati
 		return 0, err
 	}
 	resumeMillis := nativeSessionOperationResumeHorizon.Milliseconds()
-	marginMillis := nativeSessionOperationPacketMargin.Milliseconds()
+	marginMillis := nativeSessionOperationAbsentRecoveryMargin.Milliseconds()
 	if operation.PreparedAtMillis > math.MaxInt64-resumeMillis || operation.ExpiresAtMillis > math.MaxInt64-marginMillis {
 		return 0, ErrInvalidNativeSessionOperation
 	}
@@ -390,39 +461,14 @@ func nativeSessionOperationAbsentRecoveryDeadline(operation NativeSessionOperati
 	return preparedDeadline, nil
 }
 
-type nativeSessionOperationRecoveryBody struct {
-	HeaderType          int    `json:"headerType"`
-	UserID              string `json:"usrId"`
-	DeviceID            string `json:"devId"`
-	AuthServiceID       string `json:"aspId"`
-	ResourceID          string `json:"resId"`
-	RunID               string `json:"runId"`
-	RunAttempt          uint64 `json:"runAttempt"`
-	OperationID         string `json:"operation_id"`
-	BindingSHA256       string `json:"binding_sha256"`
-	OwnerID             string `json:"owner_id"`
-	PreparedAtMS        int64  `json:"prepared_at_ms"`
-	ExpiresAtMS         int64  `json:"expires_at_ms"`
-	ProtectedResourceID string `json:"protected_resource_id"`
-}
-
-type nativeSessionOperationRecoveryACK struct {
-	ErrCode               nativeJSONValue[string] `json:"errCode"`
-	ErrMsg                nativeJSONValue[string] `json:"errMsg"`
-	OperationID           nativeJSONValue[string] `json:"operation_id"`
-	BindingSHA256         nativeJSONValue[string] `json:"binding_sha256"`
-	State                 nativeJSONValue[string] `json:"state"`
-	CellID                nativeJSONValue[string] `json:"cellId"`
-	SessionID             nhpSessionIDJSON        `json:"sessId"`
-	SessionIssuedAtMillis nativeJSONValue[int64]  `json:"sessIssuedAtMillis"`
-	RunID                 nativeJSONValue[string] `json:"runId"`
-	RunAttempt            nhpSessionIDJSON        `json:"runAttempt"`
-	CloseEventID          nativeJSONValue[string] `json:"closeEventId"`
-}
-
-// RecoverNativeSessionOperation sends the strict authenticated recovery EXT to
-// the separately persisted source-fenced endpoint. It never follows the
-// binding's current assignment and never opens a replacement admission.
+// RecoverNativeSessionOperation sends the recovery action through the standard
+// NHP_KNK to NHP_ACK exchange at the separately persisted source-fenced
+// endpoint. It never follows the binding's current assignment or intentionally
+// opens a replacement admission. A normal strict denial ACK carries only
+// whether the durable operation is terminal or still closing. An incompatible
+// server admission returns NativeSessionOperationUnexpectedAdmissionError; the
+// caller must persist its exact receipt as MAPPED before recovery and must not
+// retry this packet directly.
 func RecoverNativeSessionOperation(ctx context.Context, binding *AgentRuntimeBinding, deviceStaticPrivateKey []byte,
 	operation NativeSessionOperation, recoveryEndpoint NHPUDPEndpoint, transportOpts ...AgentRuntimeUDPOption,
 ) (*NativeSessionOperationRecovery, error) {
@@ -445,86 +491,62 @@ func RecoverNativeSessionOperation(ctx context.Context, binding *AgentRuntimeBin
 			return nil, ErrInvalidNativeSessionOperation
 		}
 	}
-	body, err := json.Marshal(nativeSessionOperationRecoveryBody{
-		HeaderType: nhpEXTHeaderType, UserID: operation.AgentID, DeviceID: operation.AgentID,
-		AuthServiceID: operation.AuthServiceID, ResourceID: operation.ResourceID,
-		RunID: operation.RunID, RunAttempt: operation.RunAttempt, OperationID: operation.OperationID,
-		BindingSHA256: operation.BindingSHA256, OwnerID: operation.OwnerID,
-		PreparedAtMS: operation.PreparedAtMillis, ExpiresAtMS: operation.ExpiresAtMillis,
-		ProtectedResourceID: operation.ProtectedResourceID,
-	})
+	opts := NativeKnockOptions{
+		RunID: operation.RunID, RunAttempt: operation.RunAttempt,
+		ProtectedResourceID: operation.ProtectedResourceID, Operation: &operation, recovery: true,
+	}
+	body, err := marshalNativeSessionApplicationBody(operation.AgentID, operation.ResourceID, opts, nhpKNKHeaderType)
 	if err != nil {
 		return nil, ErrInvalidNativeSessionOperation
 	}
 	defer wipeBytes(body)
-	reply, err := nativeudp.Exit(ctx, endpoint, body, cfg.udpOptions(deviceStaticPrivateKey))
+	reknockBody, err := marshalNativeSessionApplicationBody(operation.AgentID, operation.ResourceID, opts, nhpRKNHeaderType)
+	if err != nil {
+		return nil, ErrInvalidNativeSessionOperation
+	}
+	defer wipeBytes(reknockBody)
+	reply, err := nativeudp.KnockWithReknock(ctx, endpoint, body, reknockBody, cfg.udpOptions(deviceStaticPrivateKey))
 	if err != nil {
 		return nil, normalizeRelayError(err, ErrMalformedReply)
 	}
-	return consumeNativeSessionOperationRecoveryReply(reply, operation)
+	recovery, err := consumeNativeSessionOperationRecoveryReply(reply, operation)
+	var unexpected *NativeSessionOperationUnexpectedAdmissionError
+	if errors.As(err, &unexpected) {
+		unexpected.SessionReceipt.agentID = binding.authoritativeAgentID
+		unexpected.SessionReceipt.endpoint = cloneNativeUDPEndpoint(endpoint)
+		if recovery != nil && recovery.UnexpectedAdmission != nil {
+			receipt := unexpected.SessionReceipt
+			recovery.UnexpectedAdmission = &receipt
+		}
+	}
+	return recovery, err
 }
 
 func consumeNativeSessionOperationRecoveryReply(reply *relayknock.Reply,
 	operation NativeSessionOperation,
 ) (*NativeSessionOperationRecovery, error) {
-	if reply != nil {
-		defer wipeBytes(reply.Body)
-	}
-	if reply == nil || !reply.IsACK() || rejectDuplicateJSONFields(reply.Body) != nil {
-		return nil, invalidNativeProducerReply(ErrMalformedReply, "native session operation recovery ACK")
-	}
-	var ack *nativeSessionOperationRecoveryACK
-	if strictDecodeJSON(reply.Body, &ack) != nil || ack == nil || !ack.ErrCode.Present ||
-		ack.ErrCode.Value != strings.TrimSpace(ack.ErrCode.Value) {
-		return nil, invalidNativeProducerReply(ErrMalformedReply, "native session operation recovery ACK")
-	}
-	if ack.ErrCode.Value != errSuccess {
-		if !ack.ErrMsg.Present || ack.ErrMsg.Value == "" || ack.ErrMsg.Value != strings.TrimSpace(ack.ErrMsg.Value) ||
-			!isCanonicalKnockDenyCode(ack.ErrCode.Value) || nativeSessionOperationRecoveryACKHasAuthority(ack) {
-			return nil, invalidNativeProducerReply(ErrMalformedReply, "native session operation recovery deny ACK")
+	result, err := consumeNativeAgentKnockReply(reply, operation.ResourceID, nativeAgentKnockExpectation{
+		CellID: operation.CellID, RunID: operation.RunID, RunAttempt: operation.RunAttempt,
+		OperationID: operation.OperationID, BindingSHA256: operation.BindingSHA256,
+		AllowSuccessOperationEcho: true,
+	})
+	var denied *ServerDenyError
+	if !errors.As(err, &denied) {
+		if err == nil {
+			receipt := result.SessionReceipt
+			return &NativeSessionOperationRecovery{UnexpectedAdmission: &receipt},
+				&NativeSessionOperationUnexpectedAdmissionError{SessionReceipt: receipt}
 		}
-		return nil, &ServerDenyError{ErrCode: ack.ErrCode.Value}
+		return nil, err
 	}
-	if (ack.ErrMsg.Present && ack.ErrMsg.Value != "") || !ack.OperationID.Present || !ack.BindingSHA256.Present || !ack.State.Present ||
-		ack.OperationID.Value != operation.OperationID || ack.BindingSHA256.Value != operation.BindingSHA256 {
-		return nil, invalidNativeProducerReply(ErrMalformedReply, "native session operation recovery success ACK")
-	}
-	result := &NativeSessionOperationRecovery{
-		OperationID: ack.OperationID.Value, BindingSHA256: ack.BindingSHA256.Value, State: ack.State.Value,
-	}
-	switch ack.State.Value {
-	case nativeSessionOperationRecoveryStateCanceled:
-		if nativeSessionOperationRecoveryACKHasSession(ack) {
-			return nil, invalidNativeProducerReply(ErrMalformedReply, "native session operation canceled ACK")
-		}
-	case nativeSessionOperationRecoveryStateClosing, nativeSessionOperationRecoveryStateClosed:
-		if !ack.CellID.Present || !ack.SessionID.Present || !ack.SessionIssuedAtMillis.Present ||
-			!ack.RunID.Present || !ack.RunAttempt.Present || !ack.CloseEventID.Present ||
-			ack.CellID.Value != operation.CellID || ack.CellID.Value == "" || ack.SessionID.Value == 0 ||
-			ack.SessionIssuedAtMillis.Value <= 0 || ack.RunID.Value != operation.RunID ||
-			ack.RunAttempt.Value != operation.RunAttempt || !validNativeCloseEventID(ack.CloseEventID.Value) {
-			return nil, invalidNativeProducerReply(ErrMalformedReply, "native session operation terminal ACK")
-		}
-		result.CellID = ack.CellID.Value
-		result.SessionID = ack.SessionID.Value
-		result.SessionIssuedAtMillis = ack.SessionIssuedAtMillis.Value
-		result.RunID = ack.RunID.Value
-		result.RunAttempt = ack.RunAttempt.Value
-		result.CloseEventID = ack.CloseEventID.Value
+	switch denied.ErrCode {
+	case nativeSessionOperationRecoveryCompleteCode:
+		return &NativeSessionOperationRecovery{Complete: true}, nil
+	case nativeSessionOperationRecoveryRequiredCode:
+		return &NativeSessionOperationRecovery{}, nil
 	default:
-		return nil, invalidNativeProducerReply(ErrMalformedReply, "native session operation recovery state")
+		return nil, denied
 	}
-	return result, nil
-}
-
-func nativeSessionOperationRecoveryACKHasSession(ack *nativeSessionOperationRecoveryACK) bool {
-	return ack.CellID.Present || ack.SessionID.Present || ack.SessionIssuedAtMillis.Present || ack.RunID.Present ||
-		ack.RunAttempt.Present || ack.CloseEventID.Present
-}
-
-func nativeSessionOperationRecoveryACKHasAuthority(ack *nativeSessionOperationRecoveryACK) bool {
-	return ack.OperationID.Present || ack.BindingSHA256.Present || ack.State.Present ||
-		nativeSessionOperationRecoveryACKHasSession(ack)
 }
 
 // NativeSessionOperationAbsentRecoveryDeadline returns the exclusive time at
@@ -539,9 +561,13 @@ func NativeSessionOperationAbsentRecoveryDeadline(operation NativeSessionOperati
 	return time.UnixMilli(millis).UTC(), nil
 }
 
-// NativeSessionOperationRecoveryRequired reports the exact authenticated
-// server denial that tells the caller to recover this operation before it makes
-// a replacement admission attempt.
+// NativeSessionOperationRecoveryRequired reports the exact authenticated,
+// operation-bound denial returned by KnockRegisteredAgent that tells the
+// caller to recover the supplied operation before it makes a replacement
+// admission attempt. An operation-free knock cannot receive this result under
+// the v2 contract. Recovery itself returns a non-complete
+// NativeSessionOperationRecovery with a nil error while the server is still
+// closing the operation.
 func NativeSessionOperationRecoveryRequired(err error) bool {
 	var denied *ServerDenyError
 	return errors.As(err, &denied) && denied.ErrCode == nativeSessionOperationRecoveryRequiredCode

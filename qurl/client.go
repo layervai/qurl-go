@@ -428,6 +428,7 @@ type Client struct {
 	credentials CredentialProvider
 	baseURL     string
 	httpClient  HTTPDoer
+	registered  bool
 }
 
 // ClientOption customizes a Client.

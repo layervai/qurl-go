@@ -51,6 +51,9 @@ var frictionBudget = map[string]int{
 	// session: open state, reopen the binding, create one replayable request,
 	// resolve, and print. The two defers are deterministic key/store cleanup.
 	"ExampleResolveRegisteredAgentConnectorResource": 8,
+	// Open a persisted registered device and use its narrow resource-only HTTP
+	// bridge. The defers release the state pin and response body.
+	"ExampleClient_RegisteredAgentResourceHTTPDoer": 8,
 	// The package overview: open a client, protect, create, print.
 	"Example": 4,
 
@@ -81,6 +84,11 @@ var frictionBudget = map[string]int{
 	// one call shape covers enrolling, resuming, and reopening.
 	"ExampleConnectAgentRuntime":     12,
 	"ExampleNewSealedFileAgentState": 5,
+	// Resolve the platform-issued knock identity, prepare a source-fenced
+	// operation from the binding's live assignment, serialize it, and retain the
+	// exact recovery route before the knock. The cycle RunID is caller-owned and
+	// unique, so generating it is required work.
+	"ExamplePrepareLiveNativeSessionOperation": 14,
 
 	// Headless enrollment is the escape hatch for a runtime with no mailbox, so
 	// it must stay cheaper than the default OTP path it opts out of: open agent

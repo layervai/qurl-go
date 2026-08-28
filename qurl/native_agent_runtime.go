@@ -750,9 +750,11 @@ func finishNativeRuntimeResult(store AgentStateStore, state *AgentState, cfg *na
 // completed registration and returns the fresh placement. It is the narrow
 // renewal a held binding performs; it deliberately builds no Client and reuses
 // the same locked, adoption-aware path as every other renewal.
-// now is the session clock that decided a renewal was due; freshness is judged
-// against that same instant here so one decision never straddles two clocks.
-func (c *nativeAgentRuntimeConfig) renewSessionAssignment(ctx context.Context, hub HubBootstrap, store AgentStateStore, agentID string, privateKey []byte, now time.Time) (*AgentAssignment, error) {
+// renewalDecisionAt is only the instant that decided a renewal was due;
+// authenticated reply validation and durable timestamps continue to use the
+// config's real clock. A caller that needs extra post-renewal margin may move
+// this decision instant forward without moving any protocol or state clock.
+func (c *nativeAgentRuntimeConfig) renewSessionAssignment(ctx context.Context, hub HubBootstrap, store AgentStateStore, agentID string, privateKey []byte, renewalDecisionAt time.Time) (*AgentAssignment, error) {
 	return withAgentSetupLock(ctx, store, func(*AgentAssignment) {}, func(lockedCtx context.Context, locked AgentStateStore) (*AgentAssignment, error) {
 		state, err := loadCompletedRegisteredState(lockedCtx, locked, ErrInvalidRegisterConfig)
 		if err != nil {
@@ -767,7 +769,7 @@ func (c *nativeAgentRuntimeConfig) renewSessionAssignment(ctx context.Context, h
 		}
 		// Another process may already have renewed this shared state file. Adopt
 		// that result rather than spending a redundant Hub exchange.
-		if now.Add(sessionLeaseRenewalLead).Before(state.Assignment.LeaseExpiresAt) {
+		if renewalDecisionAt.Add(sessionLeaseRenewalLead).Before(state.Assignment.LeaseExpiresAt) {
 			return state.Assignment.clone(), nil
 		}
 		fresh, err := c.refreshAssignmentLifecycle(lockedCtx, hub, state.AgentID, privateKey)
@@ -2120,9 +2122,14 @@ func KnockRegisteredAgent(ctx context.Context, binding *AgentRuntimeBinding, dev
 		}
 		return nil, normalizeRelayError(err, ErrMalformedReply)
 	}
-	result, err := consumeNativeAgentKnockReply(reply, knockResourceID, nativeAgentKnockExpectation{
+	expectation := nativeAgentKnockExpectation{
 		CellID: assignment.CellID, RunID: opts.RunID, RunAttempt: opts.RunAttempt,
-	})
+	}
+	if opts.Operation != nil {
+		expectation.OperationID = opts.Operation.OperationID
+		expectation.BindingSHA256 = opts.Operation.BindingSHA256
+	}
+	result, err := consumeNativeAgentKnockReply(reply, knockResourceID, expectation)
 	if err != nil {
 		return nil, err
 	}
@@ -2267,6 +2274,8 @@ func validateRuntimeBindingIdentity(binding *AgentRuntimeBinding, deviceStaticPr
 
 type nativeAgentKnockACK struct {
 	ErrCode               nativeJSONValue[string] `json:"errCode"`
+	OperationID           nativeJSONValue[string] `json:"operation_id"`
+	BindingSHA256         nativeJSONValue[string] `json:"binding_sha256"`
 	SessionID             nhpSessionIDJSON        `json:"sessId"`
 	CellID                nativeJSONValue[string] `json:"cellId"`
 	SessionIssuedAtMillis nativeJSONValue[int64]  `json:"sessIssuedAtMillis"`
@@ -2283,9 +2292,12 @@ type nativeAgentKnockACK struct {
 }
 
 type nativeAgentKnockExpectation struct {
-	CellID     string
-	RunID      string
-	RunAttempt uint64
+	CellID                    string
+	RunID                     string
+	RunAttempt                uint64
+	OperationID               string
+	BindingSHA256             string
+	AllowSuccessOperationEcho bool
 }
 
 type nativeExactSessionCloseACK struct {
@@ -2431,6 +2443,18 @@ func interpretNativeAgentKnockReply(reply *relayknock.Reply, knockResourceID str
 			ack.PreAccessActions.Present || ack.RedirectURL.Present) {
 			return nil, invalidNativeProducerReply(ErrMalformedReply, "native knock deny ACK field set")
 		}
+		recoveryCode := ack.ErrCode.Value == nativeSessionOperationRecoveryRequiredCode ||
+			ack.ErrCode.Value == nativeSessionOperationRecoveryCompleteCode
+		if recoveryCode {
+			if len(expectations) != 1 || expectations[0].OperationID == "" || expectations[0].BindingSHA256 == "" ||
+				!ack.OperationID.Present || !ack.BindingSHA256.Present ||
+				ack.OperationID.Value != expectations[0].OperationID ||
+				ack.BindingSHA256.Value != expectations[0].BindingSHA256 {
+				return nil, invalidNativeProducerReply(ErrMalformedReply, "native operation recovery deny ACK binding")
+			}
+		} else if ack.OperationID.Present || ack.BindingSHA256.Present {
+			return nil, invalidNativeProducerReply(ErrMalformedReply, "native knock deny ACK operation binding")
+		}
 		return nil, &ServerDenyError{ErrCode: ack.ErrCode.Value}
 	}
 	if strictRegisteredAgentACK && ack.ErrCode.Value != errSuccess {
@@ -2456,7 +2480,15 @@ func interpretNativeAgentKnockReply(reply *relayknock.Reply, knockResourceID str
 	if ack.OpenTime.Value == 0 {
 		return nil, fmt.Errorf("%w: success ACK carried an invalid open time", ErrMalformedReply)
 	}
-	if strictRegisteredAgentACK && (ack.ErrMsg.Present || !validNativeAgentACKAddress(ack.AgentAddr.Value)) {
+	successOperationEchoValid := !ack.OperationID.Present && !ack.BindingSHA256.Present
+	if strictRegisteredAgentACK && expectations[0].AllowSuccessOperationEcho &&
+		ack.OperationID.Present && ack.BindingSHA256.Present &&
+		ack.OperationID.Value == expectations[0].OperationID &&
+		ack.BindingSHA256.Value == expectations[0].BindingSHA256 {
+		successOperationEchoValid = true
+	}
+	if strictRegisteredAgentACK && (ack.ErrMsg.Present || !successOperationEchoValid ||
+		!validNativeAgentACKAddress(ack.AgentAddr.Value)) {
 		return nil, invalidNativeProducerReply(ErrMalformedReply, "native knock success ACK field set")
 	}
 	if ack.PreAccessActions.RequiresAction {
