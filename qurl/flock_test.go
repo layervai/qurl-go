@@ -22,7 +22,7 @@ func TestAcquireAgentSetupLock_SerializesSameFileStore(t *testing.T) {
 	}
 	dir := secureAgentStateTestDir(t)
 	path := filepath.Join(dir, "agent-state.json")
-	store := FileAgentState(path)
+	store := testFileAgentState(t, path)
 
 	// firstHeld closes once goroutine A holds the lock; firstReleasing records the
 	// moment A is about to release so we can assert B did not enter before it.
@@ -102,7 +102,7 @@ func TestAcquireAgentSetupLock_CanceledContextFailsClosed(t *testing.T) {
 	}
 	dir := secureAgentStateTestDir(t)
 	path := filepath.Join(dir, "agent-state.json")
-	store := FileAgentState(path)
+	store := testFileAgentState(t, path)
 
 	// Hold the lock in a first acquire so a second, with a canceled context, cannot
 	// get it and must fall back to a no-op release.

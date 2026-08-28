@@ -1053,7 +1053,7 @@ func TestAgentAssignmentStatePersistsOnlyDurableBinding(t *testing.T) {
 	}
 	dir := secureAgentStateTestDir(t)
 	path := filepath.Join(dir, "agent-state.json")
-	store := FileAgentState(path)
+	store := testFileAgentState(t, path)
 	state := &AgentState{
 		AgentID: "agent-conform", PrivateKeyB64: base64.StdEncoding.EncodeToString(assignmentHex(t, fixture.Keys.Agent.StaticPrivHex)),
 		PublicKeyB64:  base64.StdEncoding.EncodeToString(assignmentHex(t, fixture.Keys.Agent.StaticPubHex)),

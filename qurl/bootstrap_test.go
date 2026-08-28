@@ -15,7 +15,7 @@ import (
 
 func TestFileAgentState_NativeRoundTrip(t *testing.T) {
 	path := filepath.Join(secureAgentStateTestDir(t), "agent-state.json")
-	store := FileAgentState(path)
+	store := testFileAgentState(t, path)
 	want := completedNativeTestState(t)
 	expected := want.clone()
 	if err := store.SaveAgentState(context.Background(), want); err != nil {
@@ -56,7 +56,7 @@ func TestFileAgentState_RejectsUnknownOrTrailingJSON(t *testing.T) {
 func TestFileAgentState_RejectsInsecurePermissions(t *testing.T) {
 	dir := secureAgentStateTestDir(t)
 	path := filepath.Join(dir, "agent-state.json")
-	store := FileAgentState(path)
+	store := testFileAgentState(t, path)
 	if err := store.SaveAgentState(context.Background(), completedNativeTestState(t)); err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +157,7 @@ func TestEnsureKeypair_FailsClosedOnAMismatchedIdentity(t *testing.T) {
 }
 
 func TestFileAgentState_RespectsCanceledContext(t *testing.T) {
-	store := FileAgentState(filepath.Join(secureAgentStateTestDir(t), "agent-state.json"))
+	store := testFileAgentState(t, filepath.Join(secureAgentStateTestDir(t), "agent-state.json"))
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if _, err := store.LoadAgentState(ctx); !errors.Is(err, context.Canceled) {
