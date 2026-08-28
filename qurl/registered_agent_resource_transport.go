@@ -19,11 +19,13 @@ var ErrRegisteredAgentResourceRequestDenied = errors.New("qurl: registered-agent
 // lifecycle APIs.
 //
 // The bridge accepts only the owner-scoped resource, sharing, resolve, portal
-// creation, and identity-echo routes used by a registered qURL client. Account,
-// billing, key-management, enrollment, and session-control routes fail closed.
-// It also requires the Client's exact API origin and path prefix. The caller's
-// request is never mutated, and the device Authorization header is removed from
-// the returned response metadata.
+// creation, Connector-enrollment-token mint, and identity-echo routes used by
+// a registered qURL client. The service independently restricts a device key's
+// POST /v1/api-keys authority to a Connector-target one-shot token. Account,
+// billing, other key-management, and session-control routes fail closed. It
+// also requires the Client's exact API origin and path prefix. The caller's
+// request is never mutated, and the device Authorization header is removed
+// from the returned response metadata.
 func (c *Client) RegisteredAgentResourceHTTPDoer() (HTTPDoer, error) {
 	if c == nil || !c.registered || c.credentials == nil || c.httpClient == nil {
 		return nil, fmt.Errorf("%w: client is not a registered agent resource client", ErrInvalidClientConfig)
@@ -109,6 +111,8 @@ func registeredAgentResourceRouteAllowed(method, path string) bool {
 	switch path {
 	case "/v1/resources":
 		return method == http.MethodGet || method == http.MethodPost
+	case "/v1/api-keys":
+		return method == http.MethodPost
 	case "/v1/qurls":
 		return method == http.MethodPost
 	case "/v1/me":

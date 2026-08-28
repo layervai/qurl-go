@@ -45,6 +45,7 @@ func TestRegisteredAgentResourceHTTPDoer_ExactSurfaceAndCredentialCustody(t *tes
 	}
 
 	allowed := []struct{ method, path string }{
+		{http.MethodPost, "/v1/api-keys"},
 		{http.MethodGet, "/v1/resources?limit=20&cursor=next"},
 		{http.MethodPost, "/v1/resources"},
 		{http.MethodGet, "/v1/resources/qcrid"},
@@ -101,7 +102,7 @@ func TestRegisteredAgentResourceHTTPDoer_DeniesBeforeCredentialOrNetwork(t *test
 	denied := []struct{ method, target string }{
 		{http.MethodGet, "https://other.example.test/prefix/v1/resources"},
 		{http.MethodGet, "https://api.example.test/v1/resources"},
-		{http.MethodPost, "https://api.example.test/prefix/v1/api-keys"},
+		{http.MethodGet, "https://api.example.test/prefix/v1/api-keys"},
 		{http.MethodGet, "https://api.example.test/prefix/v1/customer"},
 		{http.MethodGet, "https://api.example.test/prefix/v1/resources/qcrid/qurls"},
 		{http.MethodDelete, "https://api.example.test/prefix/v1/resources/qcrid/sharing"},
