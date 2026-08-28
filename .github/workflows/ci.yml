@@ -103,13 +103,9 @@ jobs:
   #     the Linux-only proof workflows through bash (`mapfile -d`, GNU coreutils
   #     flags); running them on macOS would assert things about the runner image
   #     rather than about this SDK.
-  #   * Windows additionally drops ./qurl and ./tests/e2e/nativeudp. The pinned
-  #     local agent-state store is deliberately UNIMPLEMENTED off unix
-  #     (qurl/pinned_state_dir_other.go returns ErrAgentStateContinuity +
-  #     "unsupported on this platform"), so every constructor those suites need
-  #     fails by design. Widening this requires the real Windows
-  #     CreateFile/LockFileEx/ACL/FlushFileBuffers backend — never a skip or a
-  #     relaxed assertion in the tests.
+  #   * Windows runs the same SDK and native-UDP suites through the native
+  #     CreateFile/LockFileEx/ACL/FlushFileBuffers state backend. Only the
+  #     Linux-workflow contract package is excluded.
   #
   # Not a required check: it is additive signal, and it must not be able to
   # block a merge on a runner-image change.
@@ -138,7 +134,7 @@ jobs:
             # race-check. Add "-race" here once a green run confirms the
             # toolchain is present.
             race: ""
-            exclude_packages: "/internal/workflowcontract$|/qurl$|/tests/e2e/"
+            exclude_packages: "/internal/workflowcontract$"
     defaults:
       run:
         # One shell on both runners so the package-scoping pipeline below is not

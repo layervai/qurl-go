@@ -1,4 +1,4 @@
-//go:build (!linux || android) && (!darwin || ios)
+//go:build (!linux || android) && (!darwin || ios) && !windows
 
 package qurl
 
@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"testing"
 )
+
+func secureAgentStateTestDirPlatform(*testing.T, string) {}
 
 func TestPinnedAgentState_UnsupportedPlatformFailsBeforeMutation(t *testing.T) {
 	root := t.TempDir()

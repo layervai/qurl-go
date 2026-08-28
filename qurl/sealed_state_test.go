@@ -29,6 +29,7 @@ func secureAgentStateTestDir(t *testing.T) string {
 	if err := os.Chmod(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	secureAgentStateTestDirPlatform(t, dir)
 	return dir
 }
 
@@ -232,10 +233,7 @@ func testWrapperMetadata(binding AgentStateKeyBinding) json.RawMessage {
 
 func testSealedStore(t *testing.T, wrapper *testAgentStateKeyWrapper) *SealedFileAgentStateStore {
 	t.Helper()
-	root := t.TempDir()
-	if err := os.Chmod(root, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	root := secureAgentStateTestDir(t)
 	store, err := NewSealedFileAgentState(filepath.Join(root, "agent_state.sealed.json"), "test-wrapper", wrapper)
 	if err != nil {
 		t.Fatal(err)

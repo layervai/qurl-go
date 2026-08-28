@@ -16,6 +16,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+func secureAgentStateTestDirPlatform(*testing.T, string) {}
+
 func TestPinnedAgentState_NestedDirectoryFsyncFailureRetriesDurably(t *testing.T) {
 	root := secureAgentStateTestDir(t)
 	stateDir := filepath.Join(root, "nested", "private")
