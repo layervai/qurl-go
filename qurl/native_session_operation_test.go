@@ -156,6 +156,312 @@ func TestPrepareNativeSessionOperationIsOfflineAndClosed(t *testing.T) {
 	}
 }
 
+func TestPrepareLiveNativeSessionOperationReturnsExactRecoveryEndpoint(t *testing.T) {
+	binding, privateKey, input := testNativeSessionOperationBinding(t)
+	input.CellID = ""
+	operation, recoveryEndpoint, err := PrepareLiveNativeSessionOperation(context.Background(), binding, privateKey, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if operation.CellID != binding.Assignment().CellID || recoveryEndpoint != binding.Assignment().Endpoint {
+		t.Fatalf("live operation = %#v, recovery endpoint = %#v", operation, recoveryEndpoint)
+	}
+	input.CellID = operation.CellID
+	if operation, endpoint, err := PrepareLiveNativeSessionOperation(context.Background(), binding, privateKey, input); operation != nil || endpoint != (NHPUDPEndpoint{}) || !errors.Is(err, ErrInvalidNativeSessionOperation) {
+		t.Fatalf("caller-selected live cell = %#v, %#v, %v", operation, endpoint, err)
+	}
+}
+
+func TestPrepareLiveNativeSessionOperationRejectsInvalidArguments(t *testing.T) {
+	binding, privateKey, input := testNativeSessionOperationBinding(t)
+	input.CellID = ""
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	tests := []struct {
+		name    string
+		ctx     context.Context
+		binding *AgentRuntimeBinding
+		key     []byte
+		input   NativeSessionOperationInput
+		wantErr error
+	}{
+		{name: "nil context", binding: binding, key: privateKey, input: input, wantErr: ErrInvalidNativeSessionOperation},
+		{name: "canceled context", ctx: canceled, binding: binding, key: privateKey, input: input, wantErr: context.Canceled},
+		{name: "nil binding", ctx: context.Background(), key: privateKey, input: input, wantErr: ErrInvalidNativeSessionOperation},
+		{name: "short key", ctx: context.Background(), binding: binding, key: privateKey[:31], input: input, wantErr: ErrInvalidNativeSessionOperation},
+		{
+			name: "caller cell", ctx: context.Background(), binding: binding, key: privateKey,
+			input:   func() NativeSessionOperationInput { changed := input; changed.CellID = "cell-01"; return changed }(),
+			wantErr: ErrInvalidNativeSessionOperation,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			operation, endpoint, err := PrepareLiveNativeSessionOperation(test.ctx, test.binding, test.key, test.input)
+			if operation != nil || endpoint != (NHPUDPEndpoint{}) || !errors.Is(err, test.wantErr) {
+				t.Fatalf("invalid preparation = %#v, %#v, %v", operation, endpoint, err)
+			}
+		})
+	}
+}
+
+func TestPrepareLiveNativeSessionOperationRejectsInputBeforeHubIO(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	for _, test := range []struct {
+		name string
+		edit func(*NativeSessionOperationInput)
+	}{
+		{name: "run attempt", edit: func(input *NativeSessionOperationInput) { input.RunAttempt = 0 }},
+		{name: "AWS region", edit: func(input *NativeSessionOperationInput) { input.AWSRegion = "sandbox" }},
+		{name: "creation window", edit: func(input *NativeSessionOperationInput) { input.ExpiresAtMillis = input.PreparedAtMillis }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newRuntimeFixture(t, nil, nil).expectSilence()
+			seedSessionLease(t, f, contract, time.Now().Add(sessionLeaseRenewalLead+nativeSessionOperationJournalMargin/2))
+			binding, privateKey := openSessionBinding(t, f)
+			now := time.Now().UTC()
+			input := NativeSessionOperationInput{
+				AWSAccountID: "111122223333", AWSRegion: "us-east-2",
+				PreparedAtMillis: now.UnixMilli(), ExpiresAtMillis: now.Add(20 * time.Minute).UnixMilli(),
+				OwnerID: "auth0|canary-owner", QURLAgentKeysTable: "control-agent-keys",
+				ProtectedResourceID: nativeOperationProtectedResourceID, ResourceID: "resource-a",
+				RunAttempt: 1, RunID: "0123456789abcdef", SessionControlTable: "sandbox-session-control",
+			}
+			test.edit(&input)
+			operation, endpoint, err := PrepareLiveNativeSessionOperation(context.Background(), binding, privateKey, input)
+			if operation != nil || endpoint != (NHPUDPEndpoint{}) || !errors.Is(err, ErrInvalidNativeSessionOperation) {
+				t.Fatalf("invalid input preparation = %#v, %#v, %v", operation, endpoint, err)
+			}
+			if len(f.hubUDP.snapshot()) != 0 || len(f.cellUDP.snapshot()) != 0 {
+				t.Fatalf("invalid input I/O Hub/cell = %d/%d", len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot()))
+			}
+		})
+	}
+}
+
+func TestPrepareLiveNativeSessionOperationSkipsRenewalWithSafeMargin(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	f := newRuntimeFixture(t, nil, nil).expectSilence()
+	seedSessionLease(t, f, contract, time.Now().Add(12*time.Hour))
+	binding, privateKey := openSessionBinding(t, f)
+	now := time.Now().UTC()
+	operation, recoveryEndpoint, err := PrepareLiveNativeSessionOperation(context.Background(), binding, privateKey,
+		NativeSessionOperationInput{
+			AWSAccountID: "111122223333", AWSRegion: "us-east-2",
+			PreparedAtMillis: now.UnixMilli(), ExpiresAtMillis: now.Add(20 * time.Minute).UnixMilli(),
+			OwnerID: "auth0|canary-owner", QURLAgentKeysTable: "control-agent-keys",
+			ProtectedResourceID: nativeOperationProtectedResourceID, ResourceID: "resource-a",
+			RunAttempt: 1, RunID: "0123456789abcdef", SessionControlTable: "sandbox-session-control",
+		})
+	if err != nil || operation == nil || recoveryEndpoint.Host == "" {
+		t.Fatalf("safe-margin preparation = %#v, %#v, %v", operation, recoveryEndpoint, err)
+	}
+	if len(f.hubUDP.snapshot()) != 0 || len(f.cellUDP.snapshot()) != 0 {
+		t.Fatalf("safe-margin preparation I/O Hub/cell = %d/%d", len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot()))
+	}
+}
+
+func TestPrepareLiveNativeSessionOperationDoesNotMislabelTamperAsLeaseExpiry(t *testing.T) {
+	binding, privateKey, input := testNativeSessionOperationBinding(t)
+	input.CellID = ""
+	binding.CellID = "tampered-cell"
+	operation, endpoint, err := PrepareLiveNativeSessionOperation(context.Background(), binding, privateKey, input)
+	if operation != nil || endpoint != (NHPUDPEndpoint{}) || !errors.Is(err, ErrInvalidNativeSessionOperation) ||
+		!errors.Is(err, ErrInvalidNativeKnockInput) || errors.Is(err, ErrAssignmentLeaseExpired) {
+		t.Fatalf("tampered preparation = %#v, %#v, %v", operation, endpoint, err)
+	}
+}
+
+func TestPrepareLiveNativeSessionOperationRenewsBeforeJournalMargin(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	renewed := newReassignmentTarget(t, contract, "cell1", 2, "", time.Time{})
+	f := newRuntimeFixture(t,
+		[]runtimeUDPStep{{
+			requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult,
+			replyBody: rewriteRefreshAssignment(t, contract, renewed),
+		}}, nil)
+	lease := time.Now().Add(sessionLeaseRenewalLead + nativeSessionOperationJournalMargin/2)
+	seedSessionLease(t, f, contract, lease)
+	binding, privateKey := openSessionBinding(t, f)
+	original := binding.Assignment()
+	now := time.Now().UTC()
+	operation, recoveryEndpoint, err := PrepareLiveNativeSessionOperation(context.Background(), binding, privateKey,
+		NativeSessionOperationInput{
+			AWSAccountID: "111122223333", AWSRegion: "us-east-2",
+			PreparedAtMillis: now.UnixMilli(), ExpiresAtMillis: now.Add(20 * time.Minute).UnixMilli(),
+			OwnerID: "auth0|canary-owner", QURLAgentKeysTable: "control-agent-keys",
+			ProtectedResourceID: nativeOperationProtectedResourceID, ResourceID: "resource-a",
+			RunAttempt: 1, RunID: "0123456789abcdef", SessionControlTable: "sandbox-session-control",
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(f.hubUDP.snapshot()) != 1 {
+		t.Fatalf("preparation Hub renewals = %d, want 1", len(f.hubUDP.snapshot()))
+	}
+	if operation.CellID != renewed.CellID || recoveryEndpoint != renewed.Endpoint ||
+		operation.CellID == original.CellID || recoveryEndpoint == original.Endpoint ||
+		binding.Assignment().CellID != renewed.CellID || binding.Assignment().Endpoint != renewed.Endpoint ||
+		!binding.Assignment().LeaseExpiresAt.After(lease) {
+		t.Fatalf("renewed operation = %#v, recovery endpoint = %#v", operation, recoveryEndpoint)
+	}
+}
+
+func TestPrepareLiveNativeSessionOperationRejectsShortSuccessfulRenewal(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	renewed := newReassignmentTarget(t, contract, "cell0", 1, "", time.Now().Add(3*time.Minute))
+	f := newRuntimeFixture(t,
+		[]runtimeUDPStep{{
+			requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult,
+			replyBody: rewriteRefreshAssignment(t, contract, renewed),
+		}}, nil)
+	seedSessionLease(t, f, contract, time.Now().Add(nativeSessionOperationJournalMargin))
+	binding, privateKey := openSessionBinding(t, f)
+	now := time.Now().UTC()
+	operation, endpoint, err := PrepareLiveNativeSessionOperation(context.Background(), binding, privateKey,
+		NativeSessionOperationInput{
+			AWSAccountID: "111122223333", AWSRegion: "us-east-2",
+			PreparedAtMillis: now.UnixMilli(), ExpiresAtMillis: now.Add(20 * time.Minute).UnixMilli(),
+			OwnerID: "auth0|canary-owner", QURLAgentKeysTable: "control-agent-keys",
+			ProtectedResourceID: nativeOperationProtectedResourceID, ResourceID: "resource-a",
+			RunAttempt: 1, RunID: "0123456789abcdef", SessionControlTable: "sandbox-session-control",
+		})
+	if operation != nil || endpoint != (NHPUDPEndpoint{}) ||
+		!errors.Is(err, ErrNativeSessionOperationLeaseMargin) || errors.Is(err, ErrAssignmentLeaseExpired) {
+		t.Fatalf("short renewed lease = %#v, %#v, %v", operation, endpoint, err)
+	}
+	if len(f.hubUDP.snapshot()) != 1 || len(f.cellUDP.snapshot()) != 0 {
+		t.Fatalf("short renewed lease I/O Hub/cell = %d/%d", len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot()))
+	}
+}
+
+func TestReleasedAssignmentLeaseHasNativeSessionOperationHeadroom(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	initial, err := parseInitialAssignmentReply(
+		[]byte(contract.InitialAssignment.Result.BodyJSON), "agent-conform", assignmentFixtureNow,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	required := nativeSessionOperationJournalMargin + sessionLeaseRenewalLead
+	if !assignmentFixtureNow.Add(required).Before(initial.Assignment.LeaseExpiresAt) {
+		t.Fatalf("released assignment lease does not exceed native session operation headroom %s: %#v", required, initial.Assignment)
+	}
+}
+
+func TestPrepareLiveNativeSessionOperationClassifiesExpiredOfflineBinding(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	f := newRuntimeFixture(t, nil, nil).expectSilence()
+	seedSessionLease(t, f, contract, time.Now().Add(-time.Minute))
+	binding, privateKey := openSessionBinding(t, f, WithAgentRuntimeOfflineOpen())
+	now := time.Now().UTC()
+	operation, endpoint, err := PrepareLiveNativeSessionOperation(context.Background(), binding, privateKey,
+		NativeSessionOperationInput{
+			AWSAccountID: "111122223333", AWSRegion: "us-east-2",
+			PreparedAtMillis: now.UnixMilli(), ExpiresAtMillis: now.Add(20 * time.Minute).UnixMilli(),
+			OwnerID: "auth0|canary-owner", QURLAgentKeysTable: "control-agent-keys",
+			ProtectedResourceID: nativeOperationProtectedResourceID, ResourceID: "resource-a",
+			RunAttempt: 1, RunID: "0123456789abcdef", SessionControlTable: "sandbox-session-control",
+		})
+	if operation != nil || endpoint != (NHPUDPEndpoint{}) || !errors.Is(err, ErrInvalidNativeSessionOperation) ||
+		!errors.Is(err, ErrAssignmentLeaseExpired) || errors.Is(err, ErrNativeSessionOperationLeaseMargin) {
+		t.Fatalf("expired offline binding = %#v, %#v, %v", operation, endpoint, err)
+	}
+}
+
+func TestLiveSessionAssignmentStrictRejectsOfflineMarginRequirement(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	f := newRuntimeFixture(t, nil, nil).expectSilence()
+	seedSessionLease(t, f, contract,
+		time.Now().Add(sessionLeaseRenewalLead+nativeSessionOperationJournalMargin/2))
+	binding, privateKey := openSessionBinding(t, f, WithAgentRuntimeOfflineOpen())
+	decisionAt := time.Now().UTC().Add(nativeSessionOperationJournalMargin)
+	assignment, err := binding.liveSessionAssignmentStrict(context.Background(), privateKey, decisionAt)
+	if assignment != nil || !errors.Is(err, errAgentRuntimeRenewalUnavailable) {
+		t.Fatalf("strict offline assignment = %#v, %v", assignment, err)
+	}
+}
+
+func TestPrepareLiveNativeSessionOperationClassifiesExpiredOnlineBindingWhenHubIsUnavailable(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	f := newRuntimeFixture(t, nil, nil).expectSilence()
+	seedSessionLease(t, f, contract, time.Now().Add(-time.Minute))
+	binding, privateKey := openSessionBinding(t, f)
+	now := time.Now().UTC()
+	operation, endpoint, err := PrepareLiveNativeSessionOperation(context.Background(), binding, privateKey,
+		NativeSessionOperationInput{
+			AWSAccountID: "111122223333", AWSRegion: "us-east-2",
+			PreparedAtMillis: now.UnixMilli(), ExpiresAtMillis: now.Add(20 * time.Minute).UnixMilli(),
+			OwnerID: "auth0|canary-owner", QURLAgentKeysTable: "control-agent-keys",
+			ProtectedResourceID: nativeOperationProtectedResourceID, ResourceID: "resource-a",
+			RunAttempt: 1, RunID: "0123456789abcdef", SessionControlTable: "sandbox-session-control",
+		})
+	if operation != nil || endpoint != (NHPUDPEndpoint{}) || !errors.Is(err, ErrInvalidNativeSessionOperation) ||
+		!errors.Is(err, ErrAssignmentLeaseExpired) || errors.Is(err, ErrNativeSessionOperationLeaseMargin) {
+		t.Fatalf("expired online binding = %#v, %#v, %v", operation, endpoint, err)
+	}
+	if len(f.hubUDP.snapshot()) == 0 || len(f.cellUDP.snapshot()) != 0 {
+		t.Fatalf("expired online binding I/O Hub/cell = %d/%d", len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot()))
+	}
+}
+
+func TestPrepareLiveNativeSessionOperationRejectsInvalidLiveEndpoint(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	f := newRuntimeFixture(t, nil, nil).expectSilence()
+	seedSessionLease(t, f, contract, time.Now().Add(12*time.Hour))
+	binding, privateKey := openSessionBinding(t, f)
+	live := binding.Assignment()
+	binding.renewedAssignment = live.clone()
+	binding.renewedAssignment.Endpoint.Host = "192.0.2.1"
+	now := time.Now().UTC()
+	operation, endpoint, err := PrepareLiveNativeSessionOperation(context.Background(), binding, privateKey,
+		NativeSessionOperationInput{
+			AWSAccountID: "111122223333", AWSRegion: "us-east-2",
+			PreparedAtMillis: now.UnixMilli(), ExpiresAtMillis: now.Add(20 * time.Minute).UnixMilli(),
+			OwnerID: "auth0|canary-owner", QURLAgentKeysTable: "control-agent-keys",
+			ProtectedResourceID: nativeOperationProtectedResourceID, ResourceID: "resource-a",
+			RunAttempt: 1, RunID: "0123456789abcdef", SessionControlTable: "sandbox-session-control",
+		})
+	if operation != nil || endpoint != (NHPUDPEndpoint{}) || !errors.Is(err, ErrInvalidNativeSessionOperation) ||
+		errors.Is(err, ErrNativeSessionOperationLeaseMargin) {
+		t.Fatalf("invalid live endpoint = %#v, %#v, %v", operation, endpoint, err)
+	}
+}
+
+func TestPrepareLiveNativeSessionOperationFailsWithoutSafeLeaseMargin(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	for _, test := range []struct {
+		name      string
+		remaining time.Duration
+	}{
+		{name: "lease remains live at shifted clock", remaining: sessionLeaseRenewalLead + nativeSessionOperationJournalMargin/2},
+		{name: "lease expires before shifted clock", remaining: nativeSessionOperationJournalMargin / 2},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newRuntimeFixture(t, nil, nil).expectSilence()
+			seedSessionLease(t, f, contract, time.Now().Add(test.remaining))
+			binding, privateKey := openSessionBinding(t, f)
+			now := time.Now().UTC()
+			operation, endpoint, err := PrepareLiveNativeSessionOperation(context.Background(), binding, privateKey,
+				NativeSessionOperationInput{
+					AWSAccountID: "111122223333", AWSRegion: "us-east-2",
+					PreparedAtMillis: now.UnixMilli(), ExpiresAtMillis: now.Add(20 * time.Minute).UnixMilli(),
+					OwnerID: "auth0|canary-owner", QURLAgentKeysTable: "control-agent-keys",
+					ProtectedResourceID: nativeOperationProtectedResourceID, ResourceID: "resource-a",
+					RunAttempt: 1, RunID: "0123456789abcdef", SessionControlTable: "sandbox-session-control",
+				})
+			if operation != nil || endpoint != (NHPUDPEndpoint{}) ||
+				!errors.Is(err, ErrNativeSessionOperationLeaseMargin) ||
+				errors.Is(err, ErrInvalidNativeSessionOperation) || errors.Is(err, ErrAssignmentLeaseExpired) {
+				t.Fatalf("unsafe lease preparation = %#v, %#v, %v", operation, endpoint, err)
+			}
+			if len(f.hubUDP.snapshot()) == 0 || len(f.cellUDP.snapshot()) != 0 {
+				t.Fatalf("unsafe lease I/O Hub/cell = %d/%d", len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot()))
+			}
+		})
+	}
+}
+
 func TestNativeSessionOperationWireProjectionIsExactAndLegacyUnchanged(t *testing.T) {
 	_, _, operation := testNativeSessionOperation(t)
 	legacy, err := marshalNativeKnockApplicationBody(operation.AgentID, operation.ResourceID,

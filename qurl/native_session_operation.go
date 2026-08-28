@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"strings"
 	"time"
@@ -29,7 +30,8 @@ const (
 	nativeSessionOperationMaxCreationWindow     = 30 * time.Minute
 	nativeSessionOperationMaxClockSkew          = 30 * time.Second
 	nativeSessionOperationResumeHorizon         = 24 * time.Hour
-	nativeSessionOperationPacketMargin          = 125 * time.Second
+	nativeSessionOperationJournalMargin         = 125 * time.Second
+	nativeSessionOperationAbsentRecoveryMargin  = 125 * time.Second
 	nativeSessionOperationRecoveryStateCanceled = "CANCELED"
 	nativeSessionOperationRecoveryStateClosing  = "CLOSING"
 	nativeSessionOperationRecoveryStateClosed   = "CLOSED"
@@ -40,6 +42,13 @@ const (
 // socket, or packet work. Error text never includes an operation identity or
 // owner value.
 var ErrInvalidNativeSessionOperation = errors.New("qurl: invalid native session operation")
+
+// ErrNativeSessionOperationLeaseMargin means no operation was created because
+// the binding could not establish enough live lease for the caller to commit a
+// durable journal record and send the following admission packet. The error
+// keeps any Hub renewal cause in its chain. It does not mean the current lease
+// has already expired.
+var ErrNativeSessionOperationLeaseMargin = errors.New("qurl: native session operation lease margin unavailable")
 
 // NativeSessionOperationInput is the caller-owned, non-secret authority used
 // to prepare one durable session operation before any network request. CellID
@@ -186,7 +195,17 @@ func PrepareNativeSessionOperation(binding *AgentRuntimeBinding, deviceStaticPri
 		return nil, ErrInvalidNativeSessionOperation
 	}
 	assignment := binding.Assignment()
-	if assignment.CellID == "" || assignment.CellID != input.CellID {
+	return prepareNativeSessionOperationForAssignment(binding, deviceStaticPrivateKey, assignment, input)
+}
+
+func prepareNativeSessionOperationForAssignment(binding *AgentRuntimeBinding, deviceStaticPrivateKey []byte,
+	assignment AgentAssignment, input NativeSessionOperationInput,
+) (*NativeSessionOperation, error) {
+	if binding == nil || validateRuntimeBindingIdentity(binding, deviceStaticPrivateKey) != nil {
+		return nil, ErrInvalidNativeSessionOperation
+	}
+	if assignment.CellID == "" || assignment.CellID != input.CellID ||
+		validateNativeSessionOperationInput(input, true) != nil {
 		return nil, ErrInvalidNativeSessionOperation
 	}
 	operation := NativeSessionOperation{
@@ -216,6 +235,72 @@ func PrepareNativeSessionOperation(binding *AgentRuntimeBinding, deviceStaticPri
 		return nil, err
 	}
 	return &operation, nil
+}
+
+// PrepareLiveNativeSessionOperation renews the held binding only when its lease
+// is close enough that the following durable journal commit could cross the
+// ordinary session-renewal boundary. It then prepares an operation against the
+// exact live assignment and returns that source endpoint for recovery.
+//
+// Unlike PrepareNativeSessionOperation, this function may contact the pinned
+// Hub when renewal is due. It never contacts the assigned cell. CellID must be
+// empty because the live binding, not the caller, owns placement. Callers must
+// durably persist both returned values and send the knock within
+// nativeSessionOperationJournalMargin (currently 125 seconds) of this function
+// returning. Callers that share one binding must serialize this preparation,
+// its durable commit, and KnockRegisteredAgent as one critical section because
+// a concurrent renewal can move the binding before admission.
+func PrepareLiveNativeSessionOperation(ctx context.Context, binding *AgentRuntimeBinding,
+	deviceStaticPrivateKey []byte, input NativeSessionOperationInput,
+) (*NativeSessionOperation, NHPUDPEndpoint, error) {
+	if binding == nil || len(deviceStaticPrivateKey) != x25519key.Size || input.CellID != "" ||
+		validateRuntimeBindingIdentity(binding, deviceStaticPrivateKey) != nil {
+		return nil, NHPUDPEndpoint{}, ErrInvalidNativeSessionOperation
+	}
+	if _, err := binding.checkedAssignment(binding.authoritativeAssignment); err != nil {
+		return nil, NHPUDPEndpoint{}, fmt.Errorf("%w: runtime binding assignment: %w", ErrInvalidNativeSessionOperation, err)
+	}
+	if err := validateContext(ctx, ErrInvalidNativeSessionOperation); err != nil {
+		return nil, NHPUDPEndpoint{}, err
+	}
+	if err := validateNativeSessionOperationInput(input, false); err != nil {
+		return nil, NHPUDPEndpoint{}, err
+	}
+	decisionAt := time.Now().UTC()
+	liveAtDecision := binding.Assignment()
+	expiredAtDecision := liveAtDecision.LeaseExpired(decisionAt)
+	// The packet margin is longer than one bounded native exchange and gives
+	// the caller time to fsync the operation before KnockRegisteredAgent samples
+	// the lease. This operation does not exist yet; the exported contract requires
+	// callers to exclude sibling preparation and knock work on the same binding.
+	assignment, err := binding.liveSessionAssignmentStrict(ctx, deviceStaticPrivateKey, decisionAt.Add(nativeSessionOperationJournalMargin))
+	if err != nil {
+		if expiredAtDecision {
+			return nil, NHPUDPEndpoint{}, fmt.Errorf("%w: live assignment expired before Hub renewal: %w: %w",
+				ErrInvalidNativeSessionOperation, ErrAssignmentLeaseExpired, err)
+		}
+		return nil, NHPUDPEndpoint{}, fmt.Errorf("%w: Hub renewal could not establish journal margin: %w",
+			ErrNativeSessionOperationLeaseMargin, err)
+	}
+	// Re-sample after the Hub exchange. The returned margin starts when this
+	// function delivers the operation, not when a possibly slow renewal began.
+	preparedAt := time.Now().UTC()
+	if err := assignment.Validate(preparedAt); err != nil {
+		return nil, NHPUDPEndpoint{}, fmt.Errorf("%w: live assignment: %w", ErrInvalidNativeSessionOperation, err)
+	}
+	if !preparedAt.Add(nativeSessionOperationJournalMargin + sessionLeaseRenewalLead).Before(assignment.LeaseExpiresAt) {
+		return nil, NHPUDPEndpoint{}, fmt.Errorf("%w: renewed assignment has insufficient journal margin",
+			ErrNativeSessionOperationLeaseMargin)
+	}
+	if _, err := assignmentNativeEndpoint(assignment); err != nil {
+		return nil, NHPUDPEndpoint{}, fmt.Errorf("%w: live assignment endpoint: %w", ErrInvalidNativeSessionOperation, err)
+	}
+	input.CellID = assignment.CellID
+	operation, err := prepareNativeSessionOperationForAssignment(binding, deviceStaticPrivateKey, *assignment, input)
+	if err != nil {
+		return nil, NHPUDPEndpoint{}, err
+	}
+	return operation, assignment.Endpoint, nil
 }
 
 func nativeSessionOperationID(publicKeyB64, runID string, runAttempt uint64) (string, error) {
@@ -267,22 +352,39 @@ func validateNativeSessionOperation(operation NativeSessionOperation) error {
 		operation.CredentialKind != nativeSessionOperationCredentialKind ||
 		operation.ConnectorIDClaim != nativeSessionOperationConnectorIDClaim ||
 		operation.AuthServiceID != agentAspID || !validNativeSessionOperationIdentity(operation.AgentID) ||
-		!validNativeSessionOperationIdentity(operation.OwnerID) ||
-		!validNativeSessionOperationIdentity(operation.ResourceID) ||
-		validateConnectorResourceID(operation.ProtectedResourceID) != nil ||
-		operation.ProtectedResourceID == operation.ResourceID ||
-		!validNativeSessionOperationIdentity(operation.CellID) ||
-		!validNativeSessionOperationTable(operation.SessionControlTable) ||
-		!validNativeSessionOperationTable(operation.QURLAgentKeysTable) ||
-		!validNativeSessionOperationAWS(operation.AWSAccountID, operation.AWSRegion) ||
-		operation.PreparedAtMillis <= 0 || operation.ExpiresAtMillis <= operation.PreparedAtMillis ||
-		operation.ExpiresAtMillis-operation.PreparedAtMillis > nativeSessionOperationMaxCreationWindow.Milliseconds() ||
+		validateNativeSessionOperationInput(NativeSessionOperationInput{
+			AWSAccountID: operation.AWSAccountID, AWSRegion: operation.AWSRegion, CellID: operation.CellID,
+			ExpiresAtMillis: operation.ExpiresAtMillis, OwnerID: operation.OwnerID,
+			PreparedAtMillis: operation.PreparedAtMillis, ProtectedResourceID: operation.ProtectedResourceID,
+			QURLAgentKeysTable: operation.QURLAgentKeysTable, ResourceID: operation.ResourceID,
+			RunAttempt: operation.RunAttempt, RunID: operation.RunID, SessionControlTable: operation.SessionControlTable,
+		}, true) != nil ||
 		!validLowerHex(operation.OperationID, sha256.Size*2) ||
 		!validLowerHex(operation.BindingSHA256, sha256.Size*2) {
 		return ErrInvalidNativeSessionOperation
 	}
 	want, err := nativeSessionOperationBindingSHA256(operation)
 	if err != nil || want != operation.BindingSHA256 {
+		return ErrInvalidNativeSessionOperation
+	}
+	return nil
+}
+
+func validateNativeSessionOperationInput(input NativeSessionOperationInput, requireCell bool) error {
+	cellValid := input.CellID == ""
+	if requireCell {
+		cellValid = validNativeSessionOperationIdentity(input.CellID)
+	}
+	if !cellValid || !validNativeSessionOperationIdentity(input.OwnerID) ||
+		!validNativeSessionOperationIdentity(input.ResourceID) ||
+		validateConnectorResourceID(input.ProtectedResourceID) != nil ||
+		input.ProtectedResourceID == input.ResourceID ||
+		!validNativeSessionOperationTable(input.SessionControlTable) ||
+		!validNativeSessionOperationTable(input.QURLAgentKeysTable) ||
+		!validNativeSessionOperationAWS(input.AWSAccountID, input.AWSRegion) ||
+		input.PreparedAtMillis <= 0 || input.ExpiresAtMillis <= input.PreparedAtMillis ||
+		input.ExpiresAtMillis-input.PreparedAtMillis > nativeSessionOperationMaxCreationWindow.Milliseconds() ||
+		ValidateCycleRunID(input.RunID) != nil || input.RunAttempt == 0 {
 		return ErrInvalidNativeSessionOperation
 	}
 	return nil
@@ -378,7 +480,7 @@ func nativeSessionOperationAbsentRecoveryDeadline(operation NativeSessionOperati
 		return 0, err
 	}
 	resumeMillis := nativeSessionOperationResumeHorizon.Milliseconds()
-	marginMillis := nativeSessionOperationPacketMargin.Milliseconds()
+	marginMillis := nativeSessionOperationAbsentRecoveryMargin.Milliseconds()
 	if operation.PreparedAtMillis > math.MaxInt64-resumeMillis || operation.ExpiresAtMillis > math.MaxInt64-marginMillis {
 		return 0, ErrInvalidNativeSessionOperation
 	}

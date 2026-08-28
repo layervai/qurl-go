@@ -750,9 +750,11 @@ func finishNativeRuntimeResult(store AgentStateStore, state *AgentState, cfg *na
 // completed registration and returns the fresh placement. It is the narrow
 // renewal a held binding performs; it deliberately builds no Client and reuses
 // the same locked, adoption-aware path as every other renewal.
-// now is the session clock that decided a renewal was due; freshness is judged
-// against that same instant here so one decision never straddles two clocks.
-func (c *nativeAgentRuntimeConfig) renewSessionAssignment(ctx context.Context, hub HubBootstrap, store AgentStateStore, agentID string, privateKey []byte, now time.Time) (*AgentAssignment, error) {
+// renewalDecisionAt is only the instant that decided a renewal was due;
+// authenticated reply validation and durable timestamps continue to use the
+// config's real clock. A caller that needs extra post-renewal margin may move
+// this decision instant forward without moving any protocol or state clock.
+func (c *nativeAgentRuntimeConfig) renewSessionAssignment(ctx context.Context, hub HubBootstrap, store AgentStateStore, agentID string, privateKey []byte, renewalDecisionAt time.Time) (*AgentAssignment, error) {
 	return withAgentSetupLock(ctx, store, func(*AgentAssignment) {}, func(lockedCtx context.Context, locked AgentStateStore) (*AgentAssignment, error) {
 		state, err := loadCompletedRegisteredState(lockedCtx, locked, ErrInvalidRegisterConfig)
 		if err != nil {
@@ -767,7 +769,7 @@ func (c *nativeAgentRuntimeConfig) renewSessionAssignment(ctx context.Context, h
 		}
 		// Another process may already have renewed this shared state file. Adopt
 		// that result rather than spending a redundant Hub exchange.
-		if now.Add(sessionLeaseRenewalLead).Before(state.Assignment.LeaseExpiresAt) {
+		if renewalDecisionAt.Add(sessionLeaseRenewalLead).Before(state.Assignment.LeaseExpiresAt) {
 			return state.Assignment.clone(), nil
 		}
 		fresh, err := c.refreshAssignmentLifecycle(lockedCtx, hub, state.AgentID, privateKey)

@@ -2,6 +2,7 @@ package qurl_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -112,6 +113,58 @@ func ExampleResolveRegisteredAgentConnectorResource() {
 		result.Resource.KnockResourceID,
 		result.FoundExisting,
 	)
+}
+
+func ExamplePrepareLiveNativeSessionOperation() {
+	ctx := context.Background()
+	store, err := qurl.OpenFileAgentState("/var/lib/layerv/qurl/agent-state.json")
+	if err != nil {
+		panic(err)
+	}
+	defer store.Close()
+	_, binding, err := qurl.ConnectAgentRuntime(ctx, store)
+	if err != nil {
+		panic(err)
+	}
+	defer binding.Destroy()
+	privateKey := binding.TakeDeviceStaticPrivateKey()
+	defer clear(privateKey)
+	request, err := qurl.NewNativeConnectorResourceRequest("prod-dashboard", "")
+	if err != nil {
+		panic(err)
+	}
+	connector, err := qurl.ResolveRegisteredAgentConnectorResource(ctx, binding, request)
+	if err != nil {
+		panic(err)
+	}
+	runID, err := qurl.NewCycleRunID()
+	if err != nil {
+		panic(err)
+	}
+	now := time.Now().UTC()
+	operation, recoveryEndpoint, err := qurl.PrepareLiveNativeSessionOperation(ctx, binding, privateKey,
+		qurl.NativeSessionOperationInput{
+			AWSAccountID: "111122223333", AWSRegion: "us-east-2",
+			PreparedAtMillis: now.UnixMilli(), ExpiresAtMillis: now.Add(20 * time.Minute).UnixMilli(),
+			OwnerID: "account-owner", QURLAgentKeysTable: "prod-agent-keys",
+			ProtectedResourceID: connector.Resource.ResourceID, ResourceID: connector.Resource.KnockResourceID,
+			RunAttempt: 1, RunID: runID, SessionControlTable: "prod-session-control",
+		})
+	if err != nil {
+		panic(err)
+	}
+	recordJSON, err := json.Marshal(struct {
+		Operation        *qurl.NativeSessionOperation `json:"operation"`
+		RecoveryEndpoint qurl.NHPUDPEndpoint          `json:"recovery_endpoint"`
+	}{Operation: operation, RecoveryEndpoint: recoveryEndpoint})
+	if err != nil {
+		panic(err)
+	}
+
+	// Atomically persist recordJSON before passing operation to
+	// KnockRegisteredAgent. Restore its recovery endpoint and pass the decoded
+	// endpoint to RecoverNativeSessionOperation after an ambiguous result.
+	_ = recordJSON
 }
 
 func ExampleClient_ResolveResource() {

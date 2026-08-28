@@ -34,9 +34,9 @@ type NativeKnockOptions struct {
 	// ProtectedResourceID is the canonical public CRID resource. It is
 	// authenticated separately from the placement-neutral knock resource ID.
 	ProtectedResourceID string
-	// Operation is an offline-prepared durable session operation. The caller
-	// must persist its exact JSON before this knock. Nil selects an operation-free
-	// knock; it does not make ProtectedResourceID optional.
+	// Operation is a prepared durable session operation. The caller must persist
+	// its exact JSON before this knock. Nil selects an operation-free knock; it
+	// does not make ProtectedResourceID optional.
 	Operation *NativeSessionOperation
 }
 

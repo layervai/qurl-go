@@ -81,6 +81,11 @@ var frictionBudget = map[string]int{
 	// one call shape covers enrolling, resuming, and reopening.
 	"ExampleConnectAgentRuntime":     12,
 	"ExampleNewSealedFileAgentState": 5,
+	// Resolve the platform-issued knock identity, prepare a source-fenced
+	// operation from the binding's live assignment, serialize it, and retain the
+	// exact recovery route before the knock. The cycle RunID is caller-owned and
+	// unique, so generating it is required work.
+	"ExamplePrepareLiveNativeSessionOperation": 14,
 
 	// Headless enrollment is the escape hatch for a runtime with no mailbox, so
 	// it must stay cheaper than the default OTP path it opts out of: open agent
