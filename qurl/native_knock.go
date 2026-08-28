@@ -38,6 +38,11 @@ type NativeKnockOptions struct {
 	// its exact JSON before this knock. Nil selects an operation-free knock; it
 	// does not make ProtectedResourceID optional.
 	Operation *NativeSessionOperation
+
+	// recovery selects the durable-operation recovery action inside the
+	// encrypted KNK body. It is package-private so ordinary callers cannot turn
+	// an admission API into a control operation.
+	recovery bool
 }
 
 // nativeAgentKnockBody is the AEAD-protected NHP_KNK application body for a
@@ -49,19 +54,20 @@ type NativeKnockOptions struct {
 // values use normal JSON semantics: encoders may escape equivalent characters
 // differently without changing the identity the server parses.
 type nativeAgentKnockBody struct {
-	HeaderType          int    `json:"headerType"`
-	UserID              string `json:"usrId"`
-	DeviceID            string `json:"devId"`
-	AuthServiceID       string `json:"aspId"`
-	KnockResourceID     string `json:"resId"`
-	RunID               string `json:"runId"`
-	RunAttempt          uint64 `json:"runAttempt"`
-	ProtectedResourceID string `json:"protected_resource_id,omitempty"`
-	OperationID         string `json:"operation_id,omitempty"`
-	BindingSHA256       string `json:"binding_sha256,omitempty"`
-	OwnerID             string `json:"owner_id,omitempty"`
-	PreparedAtMS        int64  `json:"prepared_at_ms,omitempty"`
-	ExpiresAtMS         int64  `json:"expires_at_ms,omitempty"`
+	HeaderType          int               `json:"headerType"`
+	UserID              string            `json:"usrId"`
+	DeviceID            string            `json:"devId"`
+	AuthServiceID       string            `json:"aspId"`
+	KnockResourceID     string            `json:"resId"`
+	RunID               string            `json:"runId"`
+	RunAttempt          uint64            `json:"runAttempt"`
+	ProtectedResourceID string            `json:"protected_resource_id,omitempty"`
+	OperationID         string            `json:"operation_id,omitempty"`
+	BindingSHA256       string            `json:"binding_sha256,omitempty"`
+	OwnerID             string            `json:"owner_id,omitempty"`
+	PreparedAtMS        int64             `json:"prepared_at_ms,omitempty"`
+	ExpiresAtMS         int64             `json:"expires_at_ms,omitempty"`
+	UserData            map[string]string `json:"usrData,omitempty"`
 }
 
 type nativeExactSessionCloseBody struct {
@@ -136,6 +142,13 @@ func marshalNativeSessionApplicationBody(agentID, knockResourceID string, opts N
 		wire.OwnerID = operation.OwnerID
 		wire.PreparedAtMS = operation.PreparedAtMillis
 		wire.ExpiresAtMS = operation.ExpiresAtMillis
+		if opts.recovery {
+			wire.UserData = map[string]string{
+				nativeSessionOperationRecoveryUserDataKey: nativeSessionOperationRecoveryAction,
+			}
+		}
+	} else if opts.recovery {
+		return nil, ErrInvalidNativeSessionOperation
 	}
 	body, err := json.Marshal(wire)
 	if err != nil {

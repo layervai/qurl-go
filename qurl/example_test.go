@@ -144,11 +144,10 @@ func ExamplePrepareLiveNativeSessionOperation() {
 	now := time.Now().UTC()
 	operation, recoveryEndpoint, err := qurl.PrepareLiveNativeSessionOperation(ctx, binding, privateKey,
 		qurl.NativeSessionOperationInput{
-			AWSAccountID: "111122223333", AWSRegion: "us-east-2",
 			PreparedAtMillis: now.UnixMilli(), ExpiresAtMillis: now.Add(20 * time.Minute).UnixMilli(),
-			OwnerID: "account-owner", QURLAgentKeysTable: "prod-agent-keys",
+			OwnerID:             "account-owner",
 			ProtectedResourceID: connector.Resource.ResourceID, ResourceID: connector.Resource.KnockResourceID,
-			RunAttempt: 1, RunID: runID, SessionControlTable: "prod-session-control",
+			RunAttempt: 1, RunID: runID,
 		})
 	if err != nil {
 		panic(err)

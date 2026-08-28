@@ -43,12 +43,11 @@ func testNativeSessionOperationBinding(t *testing.T) (*AgentRuntimeBinding, []by
 	}
 	now := time.Now().UTC()
 	return binding, privateBytes, NativeSessionOperationInput{
-		AWSAccountID: "111122223333", AWSRegion: "us-east-2", CellID: "cell-01",
+		CellID:           "cell-01",
 		PreparedAtMillis: now.Add(-time.Second).UnixMilli(), ExpiresAtMillis: now.Add(20 * time.Minute).UnixMilli(),
-		OwnerID: "auth0|canary-owner", QURLAgentKeysTable: "control-agent-keys",
+		OwnerID:             "auth0|canary-owner",
 		ProtectedResourceID: nativeOperationProtectedResourceID, ResourceID: "resource-a",
 		RunAttempt: 7, RunID: "0123456789abcdef",
-		SessionControlTable: "sandbox-session-control",
 	}
 }
 
@@ -66,13 +65,12 @@ func TestNativeSessionOperationNHPContractFixture(t *testing.T) {
 	publicKey := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x42}, 32))
 	operation := NativeSessionOperation{
 		AgentID: "agent-a", AgentKeySchema: 2, AgentPublicKeyB64: publicKey, AuthServiceID: "agent",
-		AWSAccountID: "111122223333", AWSRegion: "us-east-2", BindingSchema: 2,
-		CellID: "cell-01", ConnectorIDClaim: "", CredentialKind: "account",
+		BindingSchema: 2,
+		CellID:        "cell-01", ConnectorIDClaim: "", CredentialKind: "account",
 		ExpiresAtMillis: 1_800_001_210_000, OwnerID: "auth0|canary-owner",
 		PreparedAtMillis: 1_800_000_009_000, ProtectedResourceID: nativeOperationProtectedResourceID,
-		QURLAgentKeysTable: "control-agent-keys", ResourceID: "resource-a",
+		ResourceID: "resource-a",
 		RunAttempt: 7, RunID: "0123456789abcdef", Schema: 2,
-		SessionControlTable: "sandbox-session-control",
 	}
 	var err error
 	operation.OperationID, err = nativeSessionOperationID(publicKey, operation.RunID, operation.RunAttempt)
@@ -84,7 +82,7 @@ func TestNativeSessionOperationNHPContractFixture(t *testing.T) {
 		t.Fatal(err)
 	}
 	if operation.OperationID != "3b2a3a9eabea3af78d8c317ea710e7f0601580163e25c98d50d5e2e17b68f3cc" ||
-		operation.BindingSHA256 != "8cde8a58630c4e6739b4f0663da3069fccedf5a2d90e3d4d65d802044fc2c551" {
+		operation.BindingSHA256 != "c5cc2a2b0273d2bca546d484411d917cf6cf5d46a46137a2e5460a0db66d428f" {
 		t.Fatalf("NHP operation fixture drifted: %s/%s", operation.OperationID, operation.BindingSHA256)
 	}
 }
@@ -112,7 +110,7 @@ func TestPrepareNativeSessionOperationIsOfflineAndClosed(t *testing.T) {
 	if bytes.Contains(raw, privateKey) {
 		t.Fatal("serialized operation contains private key bytes")
 	}
-	if !bytes.HasPrefix(raw, []byte(`{"agent_id":`)) || !bytes.HasSuffix(raw, []byte(`"session_control_table":"sandbox-session-control"}`)) {
+	if !bytes.HasPrefix(raw, []byte(`{"agent_id":`)) || !bytes.HasSuffix(raw, []byte(`"schema":2}`)) {
 		t.Fatalf("operation JSON is not sorted canonical: %s", raw)
 	}
 
@@ -148,11 +146,6 @@ func TestPrepareNativeSessionOperationIsOfflineAndClosed(t *testing.T) {
 	invalidUTF8.OwnerID = string([]byte{'o', 0xff})
 	if _, err := PrepareNativeSessionOperation(binding, privateKey, invalidUTF8); !errors.Is(err, ErrInvalidNativeSessionOperation) {
 		t.Fatalf("invalid UTF-8 owner = %v", err)
-	}
-	wrongRegion := input
-	wrongRegion.AWSRegion = "sandbox"
-	if _, err := PrepareNativeSessionOperation(binding, privateKey, wrongRegion); !errors.Is(err, ErrInvalidNativeSessionOperation) {
-		t.Fatalf("wrong AWS region = %v", err)
 	}
 }
 
@@ -212,7 +205,6 @@ func TestPrepareLiveNativeSessionOperationRejectsInputBeforeHubIO(t *testing.T) 
 		edit func(*NativeSessionOperationInput)
 	}{
 		{name: "run attempt", edit: func(input *NativeSessionOperationInput) { input.RunAttempt = 0 }},
-		{name: "AWS region", edit: func(input *NativeSessionOperationInput) { input.AWSRegion = "sandbox" }},
 		{name: "creation window", edit: func(input *NativeSessionOperationInput) { input.ExpiresAtMillis = input.PreparedAtMillis }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -221,11 +213,10 @@ func TestPrepareLiveNativeSessionOperationRejectsInputBeforeHubIO(t *testing.T) 
 			binding, privateKey := openSessionBinding(t, f)
 			now := time.Now().UTC()
 			input := NativeSessionOperationInput{
-				AWSAccountID: "111122223333", AWSRegion: "us-east-2",
 				PreparedAtMillis: now.UnixMilli(), ExpiresAtMillis: now.Add(20 * time.Minute).UnixMilli(),
-				OwnerID: "auth0|canary-owner", QURLAgentKeysTable: "control-agent-keys",
+				OwnerID:             "auth0|canary-owner",
 				ProtectedResourceID: nativeOperationProtectedResourceID, ResourceID: "resource-a",
-				RunAttempt: 1, RunID: "0123456789abcdef", SessionControlTable: "sandbox-session-control",
+				RunAttempt: 1, RunID: "0123456789abcdef",
 			}
 			test.edit(&input)
 			operation, endpoint, err := PrepareLiveNativeSessionOperation(context.Background(), binding, privateKey, input)
@@ -247,11 +238,10 @@ func TestPrepareLiveNativeSessionOperationSkipsRenewalWithSafeMargin(t *testing.
 	now := time.Now().UTC()
 	operation, recoveryEndpoint, err := PrepareLiveNativeSessionOperation(context.Background(), binding, privateKey,
 		NativeSessionOperationInput{
-			AWSAccountID: "111122223333", AWSRegion: "us-east-2",
 			PreparedAtMillis: now.UnixMilli(), ExpiresAtMillis: now.Add(20 * time.Minute).UnixMilli(),
-			OwnerID: "auth0|canary-owner", QURLAgentKeysTable: "control-agent-keys",
+			OwnerID:             "auth0|canary-owner",
 			ProtectedResourceID: nativeOperationProtectedResourceID, ResourceID: "resource-a",
-			RunAttempt: 1, RunID: "0123456789abcdef", SessionControlTable: "sandbox-session-control",
+			RunAttempt: 1, RunID: "0123456789abcdef",
 		})
 	if err != nil || operation == nil || recoveryEndpoint.Host == "" {
 		t.Fatalf("safe-margin preparation = %#v, %#v, %v", operation, recoveryEndpoint, err)
@@ -287,11 +277,10 @@ func TestPrepareLiveNativeSessionOperationRenewsBeforeJournalMargin(t *testing.T
 	now := time.Now().UTC()
 	operation, recoveryEndpoint, err := PrepareLiveNativeSessionOperation(context.Background(), binding, privateKey,
 		NativeSessionOperationInput{
-			AWSAccountID: "111122223333", AWSRegion: "us-east-2",
 			PreparedAtMillis: now.UnixMilli(), ExpiresAtMillis: now.Add(20 * time.Minute).UnixMilli(),
-			OwnerID: "auth0|canary-owner", QURLAgentKeysTable: "control-agent-keys",
+			OwnerID:             "auth0|canary-owner",
 			ProtectedResourceID: nativeOperationProtectedResourceID, ResourceID: "resource-a",
-			RunAttempt: 1, RunID: "0123456789abcdef", SessionControlTable: "sandbox-session-control",
+			RunAttempt: 1, RunID: "0123456789abcdef",
 		})
 	if err != nil {
 		t.Fatal(err)
@@ -320,11 +309,10 @@ func TestPrepareLiveNativeSessionOperationRejectsShortSuccessfulRenewal(t *testi
 	now := time.Now().UTC()
 	operation, endpoint, err := PrepareLiveNativeSessionOperation(context.Background(), binding, privateKey,
 		NativeSessionOperationInput{
-			AWSAccountID: "111122223333", AWSRegion: "us-east-2",
 			PreparedAtMillis: now.UnixMilli(), ExpiresAtMillis: now.Add(20 * time.Minute).UnixMilli(),
-			OwnerID: "auth0|canary-owner", QURLAgentKeysTable: "control-agent-keys",
+			OwnerID:             "auth0|canary-owner",
 			ProtectedResourceID: nativeOperationProtectedResourceID, ResourceID: "resource-a",
-			RunAttempt: 1, RunID: "0123456789abcdef", SessionControlTable: "sandbox-session-control",
+			RunAttempt: 1, RunID: "0123456789abcdef",
 		})
 	if operation != nil || endpoint != (NHPUDPEndpoint{}) ||
 		!errors.Is(err, ErrNativeSessionOperationLeaseMargin) || errors.Is(err, ErrAssignmentLeaseExpired) {
@@ -357,11 +345,10 @@ func TestPrepareLiveNativeSessionOperationClassifiesExpiredOfflineBinding(t *tes
 	now := time.Now().UTC()
 	operation, endpoint, err := PrepareLiveNativeSessionOperation(context.Background(), binding, privateKey,
 		NativeSessionOperationInput{
-			AWSAccountID: "111122223333", AWSRegion: "us-east-2",
 			PreparedAtMillis: now.UnixMilli(), ExpiresAtMillis: now.Add(20 * time.Minute).UnixMilli(),
-			OwnerID: "auth0|canary-owner", QURLAgentKeysTable: "control-agent-keys",
+			OwnerID:             "auth0|canary-owner",
 			ProtectedResourceID: nativeOperationProtectedResourceID, ResourceID: "resource-a",
-			RunAttempt: 1, RunID: "0123456789abcdef", SessionControlTable: "sandbox-session-control",
+			RunAttempt: 1, RunID: "0123456789abcdef",
 		})
 	if operation != nil || endpoint != (NHPUDPEndpoint{}) || !errors.Is(err, ErrInvalidNativeSessionOperation) ||
 		!errors.Is(err, ErrAssignmentLeaseExpired) || errors.Is(err, ErrNativeSessionOperationLeaseMargin) {
@@ -390,11 +377,10 @@ func TestPrepareLiveNativeSessionOperationClassifiesExpiredOnlineBindingWhenHubI
 	now := time.Now().UTC()
 	operation, endpoint, err := PrepareLiveNativeSessionOperation(context.Background(), binding, privateKey,
 		NativeSessionOperationInput{
-			AWSAccountID: "111122223333", AWSRegion: "us-east-2",
 			PreparedAtMillis: now.UnixMilli(), ExpiresAtMillis: now.Add(20 * time.Minute).UnixMilli(),
-			OwnerID: "auth0|canary-owner", QURLAgentKeysTable: "control-agent-keys",
+			OwnerID:             "auth0|canary-owner",
 			ProtectedResourceID: nativeOperationProtectedResourceID, ResourceID: "resource-a",
-			RunAttempt: 1, RunID: "0123456789abcdef", SessionControlTable: "sandbox-session-control",
+			RunAttempt: 1, RunID: "0123456789abcdef",
 		})
 	if operation != nil || endpoint != (NHPUDPEndpoint{}) || !errors.Is(err, ErrInvalidNativeSessionOperation) ||
 		!errors.Is(err, ErrAssignmentLeaseExpired) || errors.Is(err, ErrNativeSessionOperationLeaseMargin) {
@@ -416,11 +402,10 @@ func TestPrepareLiveNativeSessionOperationRejectsInvalidLiveEndpoint(t *testing.
 	now := time.Now().UTC()
 	operation, endpoint, err := PrepareLiveNativeSessionOperation(context.Background(), binding, privateKey,
 		NativeSessionOperationInput{
-			AWSAccountID: "111122223333", AWSRegion: "us-east-2",
 			PreparedAtMillis: now.UnixMilli(), ExpiresAtMillis: now.Add(20 * time.Minute).UnixMilli(),
-			OwnerID: "auth0|canary-owner", QURLAgentKeysTable: "control-agent-keys",
+			OwnerID:             "auth0|canary-owner",
 			ProtectedResourceID: nativeOperationProtectedResourceID, ResourceID: "resource-a",
-			RunAttempt: 1, RunID: "0123456789abcdef", SessionControlTable: "sandbox-session-control",
+			RunAttempt: 1, RunID: "0123456789abcdef",
 		})
 	if operation != nil || endpoint != (NHPUDPEndpoint{}) || !errors.Is(err, ErrInvalidNativeSessionOperation) ||
 		errors.Is(err, ErrNativeSessionOperationLeaseMargin) {
@@ -444,11 +429,10 @@ func TestPrepareLiveNativeSessionOperationFailsWithoutSafeLeaseMargin(t *testing
 			now := time.Now().UTC()
 			operation, endpoint, err := PrepareLiveNativeSessionOperation(context.Background(), binding, privateKey,
 				NativeSessionOperationInput{
-					AWSAccountID: "111122223333", AWSRegion: "us-east-2",
 					PreparedAtMillis: now.UnixMilli(), ExpiresAtMillis: now.Add(20 * time.Minute).UnixMilli(),
-					OwnerID: "auth0|canary-owner", QURLAgentKeysTable: "control-agent-keys",
+					OwnerID:             "auth0|canary-owner",
 					ProtectedResourceID: nativeOperationProtectedResourceID, ResourceID: "resource-a",
-					RunAttempt: 1, RunID: "0123456789abcdef", SessionControlTable: "sandbox-session-control",
+					RunAttempt: 1, RunID: "0123456789abcdef",
 				})
 			if operation != nil || endpoint != (NHPUDPEndpoint{}) ||
 				!errors.Is(err, ErrNativeSessionOperationLeaseMargin) ||
@@ -501,10 +485,9 @@ func jsonNumber(value int64) string {
 func TestRecoverNativeSessionOperationUsesExactEndpointAndBody(t *testing.T) {
 	binding, privateKey, operation := testNativeSessionOperation(t)
 	contract := loadAssignmentFixture(t)
-	canceledACK := `{"errCode":"0","operation_id":"` + operation.OperationID +
-		`","binding_sha256":"` + operation.BindingSHA256 + `","state":"CANCELED"}`
+	completeACK := `{"errCode":"52030","errMsg":"native session operation recovery complete","opnTime":0}`
 	f := newRuntimeFixture(t, nil, []runtimeUDPStep{{
-		requestType: relayknock.TypeExit, replyType: relayknock.TypeACK, replyBody: canceledACK,
+		requestType: relayknock.TypeKnock, replyType: relayknock.TypeACK, replyBody: completeACK,
 	}})
 	endpoint := NHPUDPEndpoint{
 		Host: "cell0.nhp.layerv.ai", Port: standardNHPUDPPort,
@@ -513,53 +496,45 @@ func TestRecoverNativeSessionOperationUsesExactEndpointAndBody(t *testing.T) {
 	result, err := RecoverNativeSessionOperation(context.Background(), binding, privateKey, operation, endpoint,
 		WithAgentRuntimeUDPResolver(f.resolver), WithAgentRuntimeUDPDialer(f.dialer),
 		WithAgentRuntimeUDPBounds(runtimeReplyTimeout, 1))
-	if err != nil || result == nil || result.State != "CANCELED" || result.OperationID != operation.OperationID {
+	if err != nil || result == nil || !result.Complete {
 		t.Fatalf("recovery = %#v, %v", result, err)
 	}
 	requests := f.cellUDP.snapshot()
-	if len(requests) != 1 || requests[0].typeID != relayknock.TypeExit {
+	if len(requests) != 1 || requests[0].typeID != relayknock.TypeKnock {
 		t.Fatalf("recovery packets = %#v", requests)
 	}
-	want := `{"headerType":16,"usrId":"agent-a","devId":"agent-a","aspId":"agent","resId":"resource-a","runId":"0123456789abcdef","runAttempt":7,"operation_id":"` +
-		operation.OperationID + `","binding_sha256":"` + operation.BindingSHA256 +
-		`","owner_id":"auth0|canary-owner","prepared_at_ms":` + jsonNumber(operation.PreparedAtMillis) +
-		`,"expires_at_ms":` + jsonNumber(operation.ExpiresAtMillis) +
-		`,"protected_resource_id":"` + operation.ProtectedResourceID + `"}`
+	want := `{"headerType":1,"usrId":"agent-a","devId":"agent-a","aspId":"agent","resId":"resource-a","runId":"0123456789abcdef","runAttempt":7,"protected_resource_id":"` +
+		operation.ProtectedResourceID + `","operation_id":"` + operation.OperationID +
+		`","binding_sha256":"` + operation.BindingSHA256 + `","owner_id":"auth0|canary-owner","prepared_at_ms":` +
+		jsonNumber(operation.PreparedAtMillis) + `,"expires_at_ms":` + jsonNumber(operation.ExpiresAtMillis) +
+		`,"usrData":{"native_session_operation_action":"recover"}}`
 	if string(requests[0].body) != want {
 		t.Fatalf("recovery body = %s\nwant = %s", requests[0].body, want)
 	}
 }
 
-func TestConsumeNativeSessionOperationRecoveryReplyClosedUnion(t *testing.T) {
+func TestConsumeNativeSessionOperationRecoveryReplyStrictDenialUnion(t *testing.T) {
 	_, _, operation := testNativeSessionOperation(t)
-	closed := `{"errCode":"0","operation_id":"` + operation.OperationID +
-		`","binding_sha256":"` + operation.BindingSHA256 +
-		`","state":"CLOSED","cellId":"cell-01","sessId":123,"sessIssuedAtMillis":1800000000000,` +
-		`"runId":"0123456789abcdef","runAttempt":7,"closeEventId":"0123456789abcdef0123456789abcdef"}`
+	complete := `{"errCode":"52030","errMsg":"native session operation recovery complete","opnTime":0}`
 	result, err := consumeNativeSessionOperationRecoveryReply(&relayknock.Reply{
-		Type: relayknock.TypeACK, Body: []byte(closed),
+		Type: relayknock.TypeACK, Body: []byte(complete),
 	}, operation)
-	if err != nil || result == nil || result.State != "CLOSED" || result.SessionID != 123 ||
-		result.CloseEventID != "0123456789abcdef0123456789abcdef" {
-		t.Fatalf("closed recovery = %#v, %v", result, err)
+	if err != nil || result == nil || !result.Complete {
+		t.Fatalf("complete recovery = %#v, %v", result, err)
 	}
-	emptyMessage := strings.Replace(closed, `"errCode":"0"`, `"errCode":"0","errMsg":""`, 1)
+	pending := `{"errCode":"52029","errMsg":"native session operation recovery required","opnTime":0}`
 	if result, err := consumeNativeSessionOperationRecoveryReply(&relayknock.Reply{
-		Type: relayknock.TypeACK, Body: []byte(emptyMessage),
-	}, operation); err != nil || result == nil || result.State != "CLOSED" {
-		t.Fatalf("empty optional errMsg = %#v, %v", result, err)
+		Type: relayknock.TypeACK, Body: []byte(pending),
+	}, operation); err != nil || result == nil || result.Complete {
+		t.Fatalf("pending recovery = %#v, %v", result, err)
 	}
 	for name, body := range map[string]string{
-		"unknown":         strings.TrimSuffix(closed, "}") + `,"extra":1}`,
-		"duplicate":       strings.Replace(closed, `"state":"CLOSED"`, `"state":"CLOSED","state":"CLOSED"`, 1),
-		"wrong operation": strings.Replace(closed, operation.OperationID, strings.Repeat("a", 64), 1),
-		"wrong binding":   strings.Replace(closed, operation.BindingSHA256, strings.Repeat("b", 64), 1),
-		"wrong cell":      strings.Replace(closed, `"cell-01"`, `"cell-02"`, 1),
-		"bad state":       strings.Replace(closed, `"CLOSED"`, `"MAPPED"`, 1),
-		"nonempty errMsg": strings.Replace(closed, `"errCode":"0"`, `"errCode":"0","errMsg":"unexpected"`, 1),
-		"canceled session": `{"errCode":"0","operation_id":"` + operation.OperationID +
-			`","binding_sha256":"` + operation.BindingSHA256 + `","state":"CANCELED","sessId":123}`,
-		"deny authority": `{"errCode":"52029","errMsg":"recover","operation_id":"` + operation.OperationID + `"}`,
+		"unknown":       strings.TrimSuffix(complete, "}") + `,"extra":1}`,
+		"duplicate":     strings.Replace(complete, `"errCode":"52030"`, `"errCode":"52030","errCode":"52030"`, 1),
+		"missing open":  `{"errCode":"52030","errMsg":"native session operation recovery complete"}`,
+		"positive open": `{"errCode":"52030","errMsg":"native session operation recovery complete","opnTime":1}`,
+		"authority":     `{"errCode":"52030","errMsg":"native session operation recovery complete","opnTime":0,"sessId":123}`,
+		"success":       `{"errCode":"0","resHost":{},"opnTime":1,"agentAddr":"203.0.113.1:1","acTokens":{},"sessId":1,"cellId":"cell-01","sessIssuedAtMillis":1,"runId":"0123456789abcdef","runAttempt":7}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			got, err := consumeNativeSessionOperationRecoveryReply(&relayknock.Reply{
@@ -571,10 +546,10 @@ func TestConsumeNativeSessionOperationRecoveryReplyClosedUnion(t *testing.T) {
 		})
 	}
 	denial, err := consumeNativeSessionOperationRecoveryReply(&relayknock.Reply{
-		Type: relayknock.TypeACK, Body: []byte(`{"errCode":"52029","errMsg":"native session operation recovery required"}`),
+		Type: relayknock.TypeACK, Body: []byte(`{"errCode":"52031","errMsg":"unrelated","opnTime":0}`),
 	}, operation)
-	if denial != nil || !NativeSessionOperationRecoveryRequired(err) {
-		t.Fatalf("recovery required classification = %#v, %v", denial, err)
+	if denial != nil || err == nil || NativeSessionOperationRecoveryRequired(err) {
+		t.Fatalf("unrelated denial classification = %#v, %v", denial, err)
 	}
 }
 
