@@ -604,8 +604,11 @@ func (d *pinnedStateDirImpl) readFile(name, label string, maxBytes int, notFound
 }
 
 func (d *pinnedStateDirImpl) captureEntry(name, label string) (pinnedFileIdentity, error) {
-	handle, _, err := d.openFile(name, windows.FILE_GENERIC_READ|windows.READ_CONTROL|windows.SYNCHRONIZE,
-		windows.FILE_OPEN, nil)
+	// A just-committed replacement is still open with DELETE access until the
+	// atomic-write defer closes it. Share delete here so the post-commit
+	// continuity check can observe that exact entry without weakening the
+	// retained directory or setup-lock handles.
+	handle, err := d.reopenFileForValidation(name)
 	if err != nil {
 		if windowsNotFound(err) {
 			return pinnedFileIdentity{}, nil
