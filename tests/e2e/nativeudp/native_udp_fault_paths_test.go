@@ -397,6 +397,19 @@ func startUDPBlackhole(t *testing.T) *net.UDPConn {
 	return listener
 }
 
+func readOneUDPDatagram(t *testing.T, listener *net.UDPConn, timeout time.Duration, phase string) int {
+	t.Helper()
+	buffer := make([]byte, 64*1024)
+	if err := listener.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+		t.Fatalf("set %s UDP read deadline: %v", phase, err)
+	}
+	bytes, _, err := listener.ReadFromUDP(buffer)
+	if err != nil {
+		t.Fatalf("read %s UDP request: %v", phase, err)
+	}
+	return bytes
+}
+
 func drainUDPBlackhole(t *testing.T, listener *net.UDPConn) (int, int) {
 	t.Helper()
 	buffer := make([]byte, 64*1024)
