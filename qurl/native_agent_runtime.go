@@ -1213,6 +1213,10 @@ func (c *nativeAgentRuntimeConfig) transitionPendingActivation(ctx context.Conte
 		RecoveryAnchorTicketExpiresAt: state.PendingActivation.RecoveryAnchorTicketExpiresAt,
 		RecoveryExpiresAt:             state.PendingActivation.RecoveryExpiresAt,
 	}
+	// The authenticated RAK commits the exact registration scope. Preserve it
+	// before clearing PendingActivation so later durable session operations can
+	// prove the same owner-scoped row without guessing or re-reading authority.
+	next.EnrollmentCredentialKind = state.PendingActivation.Registration.KeyKind
 	next.PendingActivation = nil
 	next.SchemaVersion = agentStateSchemaVersion
 	if err := store.SaveAgentState(ctx, next); err != nil {

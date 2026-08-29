@@ -149,6 +149,7 @@ type AgentRuntimeBinding struct {
 
 	authoritativeAgentID      string
 	authoritativePublicKeyB64 string
+	enrollmentCredentialKind  string
 	authoritativeAssignment   *AgentAssignment
 	renewedAssignment         *AgentAssignment
 	deviceStaticPrivateKey    *agentRuntimePrivateKey
@@ -337,6 +338,7 @@ func newAgentRuntimeBinding(state *AgentState, privateKey []byte) *AgentRuntimeB
 		NHPUDPEndpoint:            state.Assignment.Endpoint,
 		authoritativeAgentID:      state.AgentID,
 		authoritativePublicKeyB64: state.PublicKeyB64,
+		enrollmentCredentialKind:  state.EnrollmentCredentialKind,
 		authoritativeAssignment:   state.Assignment.clone(),
 		deviceStaticPrivateKey:    newAgentRuntimePrivateKey(privateKey),
 	}

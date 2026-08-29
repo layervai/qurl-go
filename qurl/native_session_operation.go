@@ -33,7 +33,6 @@ const (
 	// no compatibility decoder is retained.
 	nativeSessionOperationBindingSchema        = 2
 	nativeSessionOperationAgentKeySchema       = 2
-	nativeSessionOperationCredentialKind       = "account"
 	nativeSessionOperationConnectorIDClaim     = ""
 	nativeSessionOperationSelectorDomain       = "layerv/native-session-operation/v1\x00"
 	nativeSessionOperationMaxCreationWindow    = 30 * time.Minute
@@ -221,7 +220,7 @@ func prepareNativeSessionOperationForAssignment(binding *AgentRuntimeBinding, de
 		AgentPublicKeyB64: binding.authoritativePublicKeyB64, AuthServiceID: agentAspID,
 		BindingSchema: nativeSessionOperationBindingSchema, CellID: input.CellID,
 		ConnectorIDClaim: nativeSessionOperationConnectorIDClaim,
-		CredentialKind:   nativeSessionOperationCredentialKind, ExpiresAtMillis: input.ExpiresAtMillis,
+		CredentialKind:   binding.enrollmentCredentialKind, ExpiresAtMillis: input.ExpiresAtMillis,
 		OwnerID: input.OwnerID, PreparedAtMillis: input.PreparedAtMillis,
 		ProtectedResourceID: input.ProtectedResourceID,
 		ResourceID:          input.ResourceID,
@@ -366,7 +365,7 @@ func validateNativeSessionOperation(operation NativeSessionOperation) error {
 	if operation.Schema != nativeSessionOperationSchema ||
 		operation.BindingSchema != nativeSessionOperationBindingSchema ||
 		operation.AgentKeySchema != nativeSessionOperationAgentKeySchema ||
-		operation.CredentialKind != nativeSessionOperationCredentialKind ||
+		!validNativeSessionOperationCredentialKind(operation.CredentialKind) ||
 		operation.ConnectorIDClaim != nativeSessionOperationConnectorIDClaim ||
 		operation.AuthServiceID != agentAspID || !validNativeSessionOperationIdentity(operation.AgentID) ||
 		validateNativeSessionOperationInput(NativeSessionOperationInput{
@@ -421,10 +420,15 @@ func validateNativeSessionOperationAdmission(operation NativeSessionOperation, b
 func validateNativeSessionOperationBinding(operation NativeSessionOperation, binding *AgentRuntimeBinding) error {
 	if err := validateNativeSessionOperation(operation); err != nil || binding == nil ||
 		operation.AgentID != binding.authoritativeAgentID ||
-		operation.AgentPublicKeyB64 != binding.authoritativePublicKeyB64 {
+		operation.AgentPublicKeyB64 != binding.authoritativePublicKeyB64 ||
+		operation.CredentialKind != binding.enrollmentCredentialKind {
 		return ErrInvalidNativeSessionOperation
 	}
 	return nil
+}
+
+func validNativeSessionOperationCredentialKind(kind string) bool {
+	return kind == keyKindAccount || kind == keyKindBootstrap
 }
 
 func validNativeSessionOperationIdentity(value string) bool {

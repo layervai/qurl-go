@@ -97,6 +97,11 @@ type AgentState struct {
 	// UDP completion. It is never a secret.
 	DeviceAPIKeyID string `json:"device_api_key_id,omitempty"`
 
+	// EnrollmentCredentialKind is the exact credential scope authenticated by
+	// the Hub and assigned cell during registration. Native session operations
+	// bind this value into their durable authority. It is not a credential.
+	EnrollmentCredentialKind string `json:"enrollment_credential_kind,omitempty"`
+
 	// PendingActivation is durably persisted through the configured
 	// AgentStateStore before the first assigned-cell REG. It retains the exact
 	// non-secret activation proof and placement needed to recover an
