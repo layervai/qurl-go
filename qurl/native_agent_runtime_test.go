@@ -657,6 +657,7 @@ func seedCompletedRuntimeAssignment(t *testing.T, f *runtimeFixture, assignment 
 	state.RegisteredAt = &registeredAt
 	state.DeviceAPIKey = canonicalNativeDeviceCredential
 	state.DeviceAPIKeyID = "key_DvK9mN2pQr7S"
+	state.EnrollmentCredentialKind = keyKindBootstrap
 	state.Assignment = assignment.clone()
 	if err := f.store.SaveAgentState(context.Background(), state); err != nil {
 		t.Fatal(err)
@@ -1681,7 +1682,9 @@ func TestConnectAgentRuntime_UDPOnlyGoldenLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if state.DeviceAPIKey != conformance.AgentAssignmentDeviceAPIKeyFixture || state.DeviceAPIKeyID != "key_DvK9mN2pQr7S" || state.PendingActivation != nil || state.PendingCompletion != nil || state.RegisteredAt == nil {
+	if state.DeviceAPIKey != conformance.AgentAssignmentDeviceAPIKeyFixture || state.DeviceAPIKeyID != "key_DvK9mN2pQr7S" ||
+		state.EnrollmentCredentialKind != keyKindBootstrap || state.PendingActivation != nil ||
+		state.PendingCompletion != nil || state.RegisteredAt == nil {
 		t.Fatalf("completed native state = %#v", state)
 	}
 	for i, snapshot := range f.store.snapshots() {

@@ -39,7 +39,8 @@ func testNativeSessionOperationBinding(t *testing.T) (*AgentRuntimeBinding, []by
 		EndpointRevision: assignment.EndpointRevision, LeaseExpiresAt: assignment.LeaseExpiresAt,
 		NHPUDPEndpoint:       assignment.Endpoint,
 		authoritativeAgentID: "agent-a", authoritativePublicKeyB64: publicB64,
-		authoritativeAssignment: assignment.clone(),
+		enrollmentCredentialKind: keyKindAccount,
+		authoritativeAssignment:  assignment.clone(),
 	}
 	now := time.Now().UTC()
 	return binding, privateBytes, NativeSessionOperationInput{
@@ -146,6 +147,29 @@ func TestPrepareNativeSessionOperationIsOfflineAndClosed(t *testing.T) {
 	invalidUTF8.OwnerID = string([]byte{'o', 0xff})
 	if _, err := PrepareNativeSessionOperation(binding, privateKey, invalidUTF8); !errors.Is(err, ErrInvalidNativeSessionOperation) {
 		t.Fatalf("invalid UTF-8 owner = %v", err)
+	}
+}
+
+func TestPrepareNativeSessionOperationAllowsOnlyOwnerScopedEnrollment(t *testing.T) {
+	for _, kind := range []string{keyKindAccount, keyKindBootstrap} {
+		t.Run(kind, func(t *testing.T) {
+			binding, privateKey, input := testNativeSessionOperationBinding(t)
+			binding.enrollmentCredentialKind = kind
+			operation, err := PrepareNativeSessionOperation(binding, privateKey, input)
+			if err != nil || operation == nil || operation.CredentialKind != kind || operation.ConnectorIDClaim != "" {
+				t.Fatalf("owner-scoped operation = %#v, %v", operation, err)
+			}
+		})
+	}
+	for _, kind := range []string{"", assignmentKeyKindConnectorBootstrap, assignmentKeyKindAgent, "future"} {
+		t.Run("reject_"+kind, func(t *testing.T) {
+			binding, privateKey, input := testNativeSessionOperationBinding(t)
+			binding.enrollmentCredentialKind = kind
+			operation, err := PrepareNativeSessionOperation(binding, privateKey, input)
+			if operation != nil || !errors.Is(err, ErrInvalidNativeSessionOperation) {
+				t.Fatalf("non-owner operation = %#v, %v", operation, err)
+			}
+		})
 	}
 }
 
