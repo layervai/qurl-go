@@ -137,6 +137,75 @@ func TestPinnedAgentState_WindowsRoundTripAndAtomicReplacement(t *testing.T) {
 	}
 }
 
+func TestPinnedAgentState_WindowsReplacementWithOpenReader(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "qurl", "connector")
+	path := filepath.Join(stateDir, "agent.json")
+	store, err := OpenFileAgentState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	first := testAgentState(t)
+	if err := store.SaveAgentState(context.Background(), first); err != nil {
+		t.Fatal(err)
+	}
+	path16, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader, err := windows.CreateFile(path16, windows.GENERIC_READ,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, nil, windows.OPEN_EXISTING,
+		windows.FILE_ATTRIBUTE_NORMAL, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = windows.CloseHandle(reader) }()
+	second := first.clone()
+	second.DeviceAPIKey = "lv_device_windows_open_reader"
+	if err := store.SaveAgentState(context.Background(), second); err != nil {
+		t.Fatalf("atomic replacement with an open reader: %v", err)
+	}
+	loaded, err := store.LoadAgentState(context.Background())
+	if err != nil || loaded.DeviceAPIKey != second.DeviceAPIKey {
+		t.Fatalf("replacement state = %+v, %v", loaded, err)
+	}
+}
+
+func TestPinnedAgentState_WindowsDoesNotPinAncestors(t *testing.T) {
+	base := t.TempDir()
+	ancestor := filepath.Join(base, "qurl")
+	path := filepath.Join(ancestor, "connector", "agent.json")
+	store, err := OpenFileAgentState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.SaveAgentState(context.Background(), testAgentState(t)); err != nil {
+		t.Fatal(err)
+	}
+	renamed := filepath.Join(base, "qurl-renamed")
+	if err := os.Rename(ancestor, renamed); err != nil {
+		t.Fatalf("retained state store pinned an ancestor against rename: %v", err)
+	}
+	if err := store.ValidateContinuity(); !errors.Is(err, ErrAgentStateContinuity) {
+		t.Fatalf("continuity after ancestor rename = %v, want failure", err)
+	}
+}
+
+func TestPinnedAgentState_WindowsRejectsUntrustedAncestorControl(t *testing.T) {
+	base := t.TempDir()
+	ancestor := filepath.Join(base, "qurl")
+	stateDir := filepath.Join(ancestor, "connector")
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	setWindowsTestACL(t, ancestor, true)
+	setWindowsTestACL(t, stateDir, false)
+	if _, err := OpenFileAgentState(filepath.Join(stateDir, "agent.json")); !errors.Is(err, ErrAgentStateContinuity) || !errors.Is(err, ErrInsecureAgentStatePermissions) {
+		t.Fatalf("untrusted ancestor open = %v, want insecure continuity failure", err)
+	}
+}
+
 func TestPinnedAgentState_WindowsLockSerializesAndCancels(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "qurl", "connector", "agent.json")
 	first, err := OpenFileAgentState(path)

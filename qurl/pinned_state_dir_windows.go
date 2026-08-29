@@ -24,6 +24,11 @@ const (
 	windowsLockRetryInterval  = 25 * time.Millisecond
 	windowsFileCreated        = uintptr(2)
 	windowsFileAllAccess      = windows.ACCESS_MASK(0x001f01ff)
+	// FileRenameInformationEx is available on the Windows versions supported
+	// by current Go releases and is required for POSIX replacement semantics.
+	windowsFileRenameInfoEx    = 65
+	windowsAncestorMutation    = windows.ACCESS_MASK(0x00010000 | 0x00040000 | 0x00080000 | 0x10000000 | 0x00000040)
+	windowsTrustedInstallerSID = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
 )
 
 type pinnedStateDirHooks struct {
@@ -131,7 +136,7 @@ func ntOpenWindowsObject(root windows.Handle, name string, access uint32, dispos
 	options uint32, sd *windows.SECURITY_DESCRIPTOR,
 ) (windows.Handle, bool, error) {
 	return ntOpenWindowsObjectWithShare(root, name, access, disposition, options, sd,
-		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE)
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE)
 }
 
 func ntOpenWindowsObjectWithShare(root windows.Handle, name string, access uint32, disposition uint32,
@@ -253,6 +258,56 @@ func (d *pinnedStateDirImpl) validateSecureACL(handle windows.Handle, label stri
 	return nil
 }
 
+func (d *pinnedStateDirImpl) validateTrustedAncestorACL(handle windows.Handle, label string) error {
+	sd, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil || sd == nil {
+		return fmt.Errorf("%w: read %s ACL: %w", ErrAgentStateContinuity, label, err)
+	}
+	adminSID, adminErr := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	systemSID, systemErr := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	installerSID, installerErr := windows.StringToSid(windowsTrustedInstallerSID)
+	if adminErr != nil || systemErr != nil || installerErr != nil {
+		return fmt.Errorf("%w: build trusted Windows ancestor identities", ErrAgentStateContinuity)
+	}
+	trusted := func(sid *windows.SID) bool {
+		return sid != nil && (sid.Equals(d.currentSID) || sid.Equals(adminSID) || sid.Equals(systemSID) || sid.Equals(installerSID))
+	}
+	owner, _, err := sd.Owner()
+	if err != nil || !trusted(owner) {
+		return fmt.Errorf("%w: %w: %s is not owned by a trusted Windows principal",
+			ErrAgentStateContinuity, ErrInsecureAgentStatePermissions, label)
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil || dacl == nil {
+		return fmt.Errorf("%w: %w: %s has no Windows DACL",
+			ErrAgentStateContinuity, ErrInsecureAgentStatePermissions, label)
+	}
+	header := (*windowsACLHeader)(unsafe.Pointer(dacl))
+	for index := uint32(0); index < uint32(header.ACECount); index++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, index, &ace); err != nil || ace == nil {
+			return fmt.Errorf("%w: inspect %s DACL entry %d: %w", ErrAgentStateContinuity, label, index, err)
+		}
+		if ace.Header.AceType == windows.ACCESS_DENIED_ACE_TYPE || ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0 {
+			continue
+		}
+		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE {
+			return fmt.Errorf("%w: %w: %s has an unsupported ancestor ACE",
+				ErrAgentStateContinuity, ErrInsecureAgentStatePermissions, label)
+		}
+		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+		if sid == nil || !sid.IsValid() {
+			return fmt.Errorf("%w: %s has an invalid ancestor DACL SID", ErrAgentStateContinuity, label)
+		}
+		if !trusted(sid) && ace.Mask&windowsAncestorMutation != 0 {
+			return fmt.Errorf("%w: %w: %s grants delete or ACL control to an untrusted Windows principal",
+				ErrAgentStateContinuity, ErrInsecureAgentStatePermissions, label)
+		}
+	}
+	return nil
+}
+
 func validateWindowsDirectoryHandle(handle windows.Handle, label string) (pinnedFileIdentity, error) {
 	identity, info, err := windowsHandleIdentity(handle)
 	if err != nil {
@@ -369,7 +424,11 @@ func openWindowsPinnedWalk(path string, mode pinnedStateDirOpenMode, currentSID 
 	cleanup := func(cause error) ([]windows.Handle, error) {
 		return nil, errors.Join(cause, closeWindowsHandles(handles))
 	}
+	probe := &pinnedStateDirImpl{currentSID: currentSID}
 	if _, err := validateWindowsDirectoryHandle(rootHandle, "Windows state volume root"); err != nil {
+		return cleanup(err)
+	}
+	if err := probe.validateTrustedAncestorACL(rootHandle, "Windows state volume root"); err != nil {
 		return cleanup(err)
 	}
 	for index, component := range components {
@@ -416,6 +475,12 @@ func openWindowsPinnedWalk(path string, mode pinnedStateDirOpenMode, currentSID 
 			_ = windows.CloseHandle(handle)
 			return cleanup(err)
 		}
+		if !last {
+			if err := probe.validateTrustedAncestorACL(handle, "Windows state directory ancestor"); err != nil {
+				_ = windows.CloseHandle(handle)
+				return cleanup(err)
+			}
+		}
 		if created {
 			if err := windows.FlushFileBuffers(parent); err != nil {
 				_ = windows.CloseHandle(handle)
@@ -428,11 +493,16 @@ func openWindowsPinnedWalk(path string, mode pinnedStateDirOpenMode, currentSID 
 	if len(handles) < 2 {
 		return cleanup(fmt.Errorf("%w: Windows state directory cannot be a volume root", ErrAgentStateContinuity))
 	}
-	probe := &pinnedStateDirImpl{currentSID: currentSID}
 	if err := probe.validateSecureACL(handles[len(handles)-1], "Windows state directory"); err != nil {
 		return cleanup(err)
 	}
-	return handles, nil
+	final := handles[len(handles)-1]
+	if err := closeWindowsHandles(handles[:len(handles)-1]); err != nil {
+		_ = windows.CloseHandle(final)
+		return nil, fmt.Errorf("%w: close Windows state ancestors after validation: %w",
+			ErrAgentStateContinuity, err)
+	}
+	return []windows.Handle{final}, nil
 }
 
 func openPinnedStateDir(path, label string, mode pinnedStateDirOpenMode) (*pinnedStateDirImpl, error) {
@@ -639,7 +709,7 @@ func renameWindowsHandle(handle, root windows.Handle, name string) error {
 	destination := unsafe.Slice(&info.FileName[0], nameLength/2)
 	copy(destination, nameUTF16[:len(nameUTF16)-1])
 	var iosb windows.IO_STATUS_BLOCK
-	return windows.NtSetInformationFile(handle, &iosb, &buffer[0], uint32(bufferSize), windows.FileRenameInformation)
+	return windows.NtSetInformationFile(handle, &iosb, &buffer[0], uint32(bufferSize), windowsFileRenameInfoEx)
 }
 
 func deleteWindowsHandleOnClose(handle windows.Handle) error {
@@ -848,18 +918,10 @@ func (d *pinnedStateDir) lockWithImpl(ctx context.Context, name string, impl *pi
 }
 
 func (d *pinnedStateDirImpl) openLock(name string) (windows.Handle, error) {
-	for range windowsPinnedOpenAttempts {
-		handle, _, err := d.openFile(name,
-			windows.FILE_GENERIC_READ|windows.FILE_GENERIC_WRITE|windows.READ_CONTROL|windows.SYNCHRONIZE,
-			windows.FILE_OPEN_IF, d.secureSD)
-		if err == nil {
-			return handle, nil
-		}
-		if !windowsNameCollision(err) {
-			return windows.InvalidHandle, err
-		}
-	}
-	return windows.InvalidHandle, fmt.Errorf("setup lock file changed during %d open attempts", windowsPinnedOpenAttempts)
+	handle, _, err := d.openFile(name,
+		windows.FILE_GENERIC_READ|windows.FILE_GENERIC_WRITE|windows.READ_CONTROL|windows.SYNCHRONIZE,
+		windows.FILE_OPEN_IF, d.secureSD)
+	return handle, err
 }
 
 func (d *pinnedStateDirImpl) acquireLock(ctx context.Context, name string,
