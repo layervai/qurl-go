@@ -413,9 +413,9 @@ type AgentStateStore interface {
 // The caller owns the returned handle and must Close it after every Client and
 // native lifecycle operation that can use the store has finished.
 //
-// Linux and Darwin are supported, excluding Android and iOS. Mobile and other
-// platforms fail before filesystem mutation until they have reviewed ACL,
-// locking, and durability primitives.
+// Linux, Darwin, and Windows are supported, excluding Android and iOS. Mobile
+// and other platforms fail before filesystem mutation until they have reviewed
+// ACL, locking, and durability primitives.
 func OpenFileAgentState(path string) (*FileAgentStateStore, error) {
 	dir, name, err := openPinnedStatePath(path, "agent state")
 	if err != nil {

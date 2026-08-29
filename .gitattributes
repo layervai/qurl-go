@@ -1,0 +1,2 @@
+tests/e2e/nativeudp/*.json text eol=lf
+tests/e2e/nativeudp/testdata/*.json text eol=lf

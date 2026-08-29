@@ -264,7 +264,7 @@ func TestRefreshAgentRuntimeAcceptsZeroHub(t *testing.T) {
 
 	// This build ships no hub, so the zero-value path must surface the
 	// actionable sentinel rather than a confusing endpoint-validation error.
-	store := FileAgentState(filepath.Join(t.TempDir(), "agent-state.json"))
+	store := testFileAgentState(t, filepath.Join(secureAgentStateTestDir(t), "agent-state.json"))
 	_, _, err := RefreshAgentRuntime(context.Background(), HubBootstrap{}, store)
 	if !errors.Is(err, ErrNoDeploymentHub) {
 		t.Fatalf("zero hub with no shipped hub = %v, want ErrNoDeploymentHub", err)

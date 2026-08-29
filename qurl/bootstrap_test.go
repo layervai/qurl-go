@@ -15,7 +15,7 @@ import (
 
 func TestFileAgentState_NativeRoundTrip(t *testing.T) {
 	path := filepath.Join(secureAgentStateTestDir(t), "agent-state.json")
-	store := FileAgentState(path)
+	store := testFileAgentState(t, path)
 	want := completedNativeTestState(t)
 	expected := want.clone()
 	if err := store.SaveAgentState(context.Background(), want); err != nil {
@@ -44,7 +44,9 @@ func TestFileAgentState_RejectsUnknownOrTrailingJSON(t *testing.T) {
 			if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := FileAgentState(path).LoadAgentState(context.Background()); !errors.Is(err, ErrInvalidAgentState) {
+			securePrivateStateFilePlatform(t, path)
+			store := testFileAgentState(t, path)
+			if _, err := store.LoadAgentState(context.Background()); !errors.Is(err, ErrInvalidAgentState) {
 				t.Fatalf("load error = %v, want ErrInvalidAgentState", err)
 			} else if strings.Contains(err.Error(), untrustedField) {
 				t.Fatalf("load error reflected untrusted credential-file content: %v", err)
@@ -56,23 +58,17 @@ func TestFileAgentState_RejectsUnknownOrTrailingJSON(t *testing.T) {
 func TestFileAgentState_RejectsInsecurePermissions(t *testing.T) {
 	dir := secureAgentStateTestDir(t)
 	path := filepath.Join(dir, "agent-state.json")
-	store := FileAgentState(path)
+	store := testFileAgentState(t, path)
 	if err := store.SaveAgentState(context.Background(), completedNativeTestState(t)); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(path, 0o640); err != nil {
-		t.Fatal(err)
-	}
+	makePrivateStateFileInsecurePlatform(t, path)
 	if _, err := store.LoadAgentState(context.Background()); !errors.Is(err, ErrInsecureAgentStatePermissions) {
 		t.Fatalf("group-readable file error = %v, want ErrInsecureAgentStatePermissions", err)
 	}
 
-	if err := os.Chmod(path, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(dir, 0o750); err != nil {
-		t.Fatal(err)
-	}
+	securePrivateStateFilePlatform(t, path)
+	makePrivateStateDirInsecurePlatform(t, dir)
 	if _, err := store.LoadAgentState(context.Background()); !errors.Is(err, ErrInsecureAgentStatePermissions) {
 		t.Fatalf("insecure directory load error = %v, want ErrInsecureAgentStatePermissions", err)
 	}
@@ -102,7 +98,9 @@ func TestFileAgentState_RejectsSymlinkAndOversize(t *testing.T) {
 		if err := os.WriteFile(path, []byte(strings.Repeat("x", maxAgentStateBytes+1)), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := FileAgentState(path).LoadAgentState(context.Background()); !errors.Is(err, ErrInvalidAgentState) {
+		securePrivateStateFilePlatform(t, path)
+		store := testFileAgentState(t, path)
+		if _, err := store.LoadAgentState(context.Background()); !errors.Is(err, ErrInvalidAgentState) {
 			t.Fatalf("oversize error = %v, want ErrInvalidAgentState", err)
 		}
 	})
@@ -157,7 +155,7 @@ func TestEnsureKeypair_FailsClosedOnAMismatchedIdentity(t *testing.T) {
 }
 
 func TestFileAgentState_RespectsCanceledContext(t *testing.T) {
-	store := FileAgentState(filepath.Join(secureAgentStateTestDir(t), "agent-state.json"))
+	store := testFileAgentState(t, filepath.Join(secureAgentStateTestDir(t), "agent-state.json"))
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if _, err := store.LoadAgentState(ctx); !errors.Is(err, context.Canceled) {

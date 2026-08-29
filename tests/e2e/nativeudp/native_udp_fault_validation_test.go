@@ -944,10 +944,10 @@ func validatePacketCancellation(ctx context.Context, t *testing.T, httpTrap *lif
 	const (
 		attemptTimeout = 10 * time.Second
 		promptUnblock  = 3 * time.Second
-		// Long enough that a loaded runner has certainly emitted the datagram
-		// before the boundary fires, and far short of attemptTimeout so a prompt
-		// unblock stays distinguishable from the ordinary socket deadline.
-		cancelAfterFirst = 250 * time.Millisecond
+		// Registration does not expose its transport call, so its cancellation
+		// remains timer-driven. Give a loaded Windows runner enough time to emit
+		// the first datagram while staying far below attemptTimeout.
+		cancelRegistration = time.Second
 	)
 	_, serverPub := mustNHPKeypair(t)
 
@@ -963,13 +963,28 @@ func validatePacketCancellation(ctx context.Context, t *testing.T, httpTrap *lif
 		}
 		ep := nativeudp.Endpoint{Host: "cancellation-proof.nhp.test", Port: standardNHPUDPPort, ServerStaticPub: serverPub}
 		exchangeCtx, cancel := context.WithCancel(ctx)
-		timer := time.AfterFunc(cancelAfterFirst, cancel)
+		type exchangeResult struct {
+			reply *relayknock.Reply
+			err   error
+		}
+		result := make(chan exchangeResult, 1)
+		go func() {
+			reply, err := exchange.call(exchangeCtx, ep, nil, opts)
+			result <- exchangeResult{reply: reply, err: err}
+		}()
 
-		started := time.Now()
-		reply, err := exchange.call(exchangeCtx, ep, nil, opts)
-		elapsed := time.Since(started)
-		timer.Stop()
+		readOneUDPDatagram(t, listener, promptUnblock, exchange.name+" in-flight cancellation")
+		cancelledAt := time.Now()
 		cancel()
+		var reply *relayknock.Reply
+		var err error
+		select {
+		case completed := <-result:
+			reply, err = completed.reply, completed.err
+		case <-time.After(promptUnblock):
+			t.Fatalf("%s did not unblock within %s after cancellation", exchange.name, promptUnblock)
+		}
+		elapsed := time.Since(cancelledAt)
 
 		classified := reply == nil && errors.Is(err, context.Canceled) &&
 			!errors.Is(err, nativeudp.ErrTransport) && !errors.Is(err, nativeudp.ErrResolve) &&
@@ -980,9 +995,7 @@ func validatePacketCancellation(ctx context.Context, t *testing.T, httpTrap *lif
 				errors.Is(err, nativeudp.ErrTransport), errors.Is(err, nativeudp.ErrResolve),
 				errors.Is(err, nativeudp.ErrServerUnauthenticated), elapsed, promptUnblock, attemptTimeout)
 		}
-		if datagrams, _ := drainUDPBlackhole(t, listener); datagrams != 1 {
-			t.Fatalf("%s in-flight cancellation emitted %d datagrams, want exactly 1 and none after the boundary", exchange.name, datagrams)
-		}
+		assertNoUDPDatagram(t, listener, exchange.name+" after in-flight cancellation")
 	}
 
 	// Cancellation at the boundary: nothing is resolved, dialed, or emitted.
@@ -1025,7 +1038,7 @@ func validatePacketCancellation(ctx context.Context, t *testing.T, httpTrap *lif
 		ServerPublicKeyB64: base64.StdEncoding.EncodeToString(serverPub),
 	}
 	registerCtx, cancelRegister := context.WithCancel(ctx)
-	registerTimer := time.AfterFunc(cancelAfterFirst, cancelRegister)
+	registerTimer := time.AfterFunc(cancelRegistration, cancelRegister)
 	started := time.Now()
 	client, binding, err := qurl.ConnectAgentRuntime(registerCtx, store,
 		qurl.WithAgentRuntimeEnrollmentCredential(nonSecretFaultCredential),

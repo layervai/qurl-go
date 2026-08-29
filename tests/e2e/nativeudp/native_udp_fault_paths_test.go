@@ -8,7 +8,6 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -343,11 +342,17 @@ func recoveryAttempts(recovery *qurl.AssignmentRecoveryRequiredError) int {
 
 func faultStateStore(t *testing.T) qurl.AgentStateStore {
 	t.Helper()
-	dir := t.TempDir()
-	if err := os.Chmod(dir, 0o700); err != nil {
-		t.Fatalf("secure fault-state directory: %v", err)
+	path := filepath.Join(t.TempDir(), "qurl-state", "agent-state.json")
+	store, err := qurl.OpenFileAgentState(path)
+	if err != nil {
+		t.Fatalf("open fault-state store: %v", err)
 	}
-	return qurl.FileAgentState(filepath.Join(dir, "agent-state.json"))
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("close fault-state store: %v", err)
+		}
+	})
+	return store
 }
 
 func assertInitialIdentityOnly(ctx context.Context, t *testing.T, store qurl.AgentStateStore, agentID, phase string) {
@@ -390,6 +395,19 @@ func startUDPBlackhole(t *testing.T) *net.UDPConn {
 	}
 	t.Cleanup(func() { _ = listener.Close() })
 	return listener
+}
+
+func readOneUDPDatagram(t *testing.T, listener *net.UDPConn, timeout time.Duration, phase string) int {
+	t.Helper()
+	buffer := make([]byte, 64*1024)
+	if err := listener.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+		t.Fatalf("set %s UDP read deadline: %v", phase, err)
+	}
+	bytes, _, err := listener.ReadFromUDP(buffer)
+	if err != nil {
+		t.Fatalf("read %s UDP request: %v", phase, err)
+	}
+	return bytes
 }
 
 func drainUDPBlackhole(t *testing.T, listener *net.UDPConn) (int, int) {

@@ -394,10 +394,7 @@ func (s *runtimeRecordingStore) snapshots() []*AgentState {
 }
 
 func TestRuntimeRecordingStorePreservesPinnedSetupCapability(t *testing.T) {
-	stateDir := t.TempDir()
-	if err := os.Chmod(stateDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	stateDir := secureAgentStateTestDir(t)
 	inner, err := OpenFileAgentState(filepath.Join(stateDir, "agent-state.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -493,11 +490,8 @@ func newRuntimeFixture(t *testing.T, hubSteps, cellSteps []runtimeUDPStep) *runt
 	contract := loadAssignmentFixture(t)
 	agentPriv := assignmentHex(t, contract.Keys.Agent.StaticPrivHex)
 	agentPub := assignmentHex(t, contract.Keys.Agent.StaticPubHex)
-	stateDir := t.TempDir()
-	if err := os.Chmod(stateDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	inner := FileAgentState(filepath.Join(stateDir, "agent-state.json"))
+	stateDir := secureAgentStateTestDir(t)
+	inner := testFileAgentState(t, filepath.Join(stateDir, "agent-state.json"))
 	if err := inner.SaveAgentState(context.Background(), &AgentState{
 		AgentID: "agent-conform", PrivateKeyB64: base64.StdEncoding.EncodeToString(agentPriv),
 		PublicKeyB64: base64.StdEncoding.EncodeToString(agentPub), SchemaVersion: agentStateSchemaVersion,
@@ -2636,11 +2630,8 @@ func TestConnectAgentRuntime_FreshEnrollmentRequiresCredentialBeforeMutationOrIO
 // the store dirty.
 func TestConnectAgentRuntime_FreshEnrollmentWithoutHubFailsBeforeMutation(t *testing.T) {
 	t.Setenv(EnvDeploymentPath, "")
-	stateDir := t.TempDir()
-	if err := os.Chmod(stateDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	store := &runtimeRecordingStore{inner: FileAgentState(filepath.Join(stateDir, "agent-state.json"))}
+	stateDir := secureAgentStateTestDir(t)
+	store := &runtimeRecordingStore{inner: testFileAgentState(t, filepath.Join(stateDir, "agent-state.json"))}
 	resolver := &noIONativeResolver{}
 	dialer := &noIONativeDialer{}
 	_, _, err := ConnectAgentRuntime(context.Background(), store,
@@ -5559,11 +5550,8 @@ func TestConnectAgentRuntime_MalformedDeploymentFailsWarmStart(t *testing.T) {
 // operator to install a callback that could never have helped.
 func TestConnectAgentRuntime_OptionFreeEmptyStoreSaysNothingIsRegistered(t *testing.T) {
 	t.Setenv(EnvDeploymentPath, "")
-	stateDir := t.TempDir()
-	if err := os.Chmod(stateDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	store := &runtimeRecordingStore{inner: FileAgentState(filepath.Join(stateDir, "agent-state.json"))}
+	stateDir := secureAgentStateTestDir(t)
+	store := &runtimeRecordingStore{inner: testFileAgentState(t, filepath.Join(stateDir, "agent-state.json"))}
 
 	client, binding, err := ConnectAgentRuntime(context.Background(), store)
 	if binding != nil {
