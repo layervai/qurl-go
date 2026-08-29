@@ -497,6 +497,10 @@ func openWindowsPinnedWalk(path string, mode pinnedStateDirOpenMode, currentSID 
 		return cleanup(err)
 	}
 	final := handles[len(handles)-1]
+	// Keep only the leaf capability, as the Unix backend does. Windows still
+	// prevents renaming an ancestor while a descendant handle is open; that is
+	// an unavoidable property of retaining the leaf identity, not a reason to
+	// retain a handle for every component as well.
 	if err := closeWindowsHandles(handles[:len(handles)-1]); err != nil {
 		_ = windows.CloseHandle(final)
 		return nil, fmt.Errorf("%w: close Windows state ancestors after validation: %w",
