@@ -43,10 +43,8 @@ const (
 	// tunnel-detection middlebox watches 53. Endpoints are pinned to it rather
 	// than range-checked, so a deployment file cannot quietly place a cell on a
 	// port the agent's network will drop.
-	standardNHPUDPPort       = 443
-	maxAssignmentTicketBytes = 2304
-	// Pinned by TestAssignmentTicketMatchesReleasedConformanceBoundary.
-	maxAssignmentTicketLifetime = 15 * time.Minute
+	standardNHPUDPPort          = 443
+	maxAssignmentTicketBytes    = 2304
 	maxAssignmentJSONDepth      = 64
 	assignmentRequestNonceBytes = 32
 
@@ -106,8 +104,9 @@ type AssignmentRegistration struct {
 // PendingAgentActivation before REG so an ambiguous/lost RAK can replay the
 // same one-shot authorization. This transport slice treats the ticket as
 // 1-2304 opaque printable non-space ASCII bytes (0x21-0x7e); assigned-cell
-// registration owns qat1 semantic validation. The authenticated response's
-// public expiry must be no more than the conformance maximum 900 seconds ahead.
+// registration owns qat1 semantic validation, including its maximum producer
+// lifetime. The public expiry is an authenticated deadline, but comparing it
+// with the client's independent wall clock cannot prove the producer lifetime.
 type InitialAgentAssignment struct {
 	Registration              AssignmentRegistration
 	Assignment                AgentAssignment
@@ -867,9 +866,6 @@ func parseInitialAssignmentReply(body []byte, wantAgentID string, now time.Time)
 	}
 	if !ticketExpiry.After(now) {
 		return nil, invalidAssignmentResponse("assignment_ticket_expires_at", errors.New("ticket is not in the future"))
-	}
-	if ticketExpiry.Sub(now) > maxAssignmentTicketLifetime {
-		return nil, invalidAssignmentResponse("assignment_ticket_expires_at", errors.New("ticket exceeds the conformance maximum lifetime"))
 	}
 	if !assignment.LeaseExpiresAt.After(ticketExpiry) {
 		return nil, invalidAssignmentResponse("initial assignment deadlines", errors.New("ticket must expire before lease"))
