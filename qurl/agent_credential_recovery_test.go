@@ -265,6 +265,41 @@ func TestRecoverAgentRuntimeWithCredentialProvider_PreservesProviderFailureWitho
 	}
 }
 
+func TestRecoverAgentRuntimeWithCredentialProvider_RejectsImpossibleIssueAndLiveGrantBeforeProvider(t *testing.T) {
+	fixture := loadCredentialRecoveryFixture(t)
+	f, _ := newCredentialRecoveryRuntimeFixture(t, nil, nil)
+	seedPendingCredentialRecovery(t, f, fixture, false)
+	state, err := f.store.LoadAgentState(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.PendingCredentialRecoveryIssue = &PendingAgentCredentialRecoveryIssue{
+		RequestNonce:                     fixture.Fixtures.RequestNonce,
+		ReplayNotAfter:                   credentialRecoveryFixtureNow.Add(time.Minute),
+		RecoveryCredentialFingerprintB64: credentialRecoveryCredentialFingerprint(fixture.Fixtures.RecoveryCredential),
+		AgentID:                          state.AgentID,
+		AgentPublicKeyB64:                state.PublicKeyB64,
+		HubHost:                          f.hub.Host,
+		HubPort:                          f.hub.Port,
+		HubServerPublicKeyB64:            f.hub.ServerPublicKeyB64,
+	}
+	if err := f.store.SaveAgentState(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+	beforeSaves := len(f.store.snapshots())
+	providerCalls := 0
+	client, binding, err := RecoverAgentRuntimeWithCredentialProvider(context.Background(), func(context.Context) (string, error) {
+		providerCalls++
+		return fixture.Fixtures.RecoveryCredential, nil
+	}, f.store, recoveryOptions(t, f, fixture, func() time.Time { return credentialRecoveryFixtureNow })...)
+	if client != nil || binding != nil || !errors.Is(err, ErrInvalidRegisterConfig) || !errors.Is(err, ErrInvalidAgentState) {
+		t.Fatalf("impossible recovery state = %v/%v/%v, want nil/nil/invalid state", client, binding, err)
+	}
+	if providerCalls != 0 || len(f.hubUDP.snapshot()) != 0 || len(f.cellUDP.snapshot()) != 0 || len(f.store.snapshots()) != beforeSaves {
+		t.Fatalf("impossible recovery state consumed authority: provider=%d Hub=%d cell=%d saves=%d/%d", providerCalls, len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot()), beforeSaves, len(f.store.snapshots()))
+	}
+}
+
 func TestRecoverAgentRuntime_ExpectedAgentIDOptionRejectsInvalidBeforeStateLoad(t *testing.T) {
 	for name, agentID := range map[string]string{
 		"missing":                "",
