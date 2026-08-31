@@ -2,6 +2,7 @@ package qurl_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -114,6 +115,86 @@ func ExampleResolveRegisteredAgentConnectorResource() {
 	)
 }
 
+func ExampleClient_RegisteredAgentResourceHTTPDoer() {
+	ctx := context.Background()
+	store, err := qurl.OpenFileAgentState("/var/lib/layerv/qurl/agent-state.json")
+	if err != nil {
+		panic(err)
+	}
+	defer store.Close()
+	client, err := qurl.OpenRegisteredAgent(ctx, store)
+	if err != nil {
+		panic(err)
+	}
+	doer, err := client.RegisteredAgentResourceHTTPDoer()
+	if err != nil {
+		panic(err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.layerv.ai/v1/resources", nil)
+	if err != nil {
+		panic(err)
+	}
+	resp, err := doer.Do(req)
+	if err != nil {
+		panic(err)
+	}
+	defer resp.Body.Close()
+}
+
+func ExamplePrepareLiveNativeSessionOperation() {
+	ctx := context.Background()
+	store, err := qurl.OpenFileAgentState("/var/lib/layerv/qurl/agent-state.json")
+	if err != nil {
+		panic(err)
+	}
+	defer store.Close()
+	_, binding, err := qurl.ConnectAgentRuntime(ctx, store)
+	if err != nil {
+		panic(err)
+	}
+	defer binding.Destroy()
+	privateKey := binding.TakeDeviceStaticPrivateKey()
+	defer clear(privateKey)
+	request, err := qurl.NewNativeConnectorResourceRequest("prod-dashboard", "")
+	if err != nil {
+		panic(err)
+	}
+	connector, err := qurl.ResolveRegisteredAgentConnectorResource(ctx, binding, request)
+	if err != nil {
+		panic(err)
+	}
+	runID, err := qurl.NewCycleRunID()
+	if err != nil {
+		panic(err)
+	}
+	now := time.Now().UTC()
+	operation, recoveryEndpoint, err := qurl.PrepareLiveNativeSessionOperation(ctx, binding, privateKey,
+		qurl.NativeSessionOperationInput{
+			PreparedAtMillis: now.UnixMilli(), ExpiresAtMillis: now.Add(20 * time.Minute).UnixMilli(),
+			OwnerID:             "account-owner",
+			ProtectedResourceID: connector.Resource.ResourceID, ResourceID: connector.Resource.KnockResourceID,
+			RunAttempt: 1, RunID: runID,
+		})
+	if err != nil {
+		panic(err)
+	}
+	recordJSON, err := json.Marshal(struct {
+		Operation        *qurl.NativeSessionOperation `json:"operation"`
+		RecoveryEndpoint qurl.NHPUDPEndpoint          `json:"recovery_endpoint"`
+	}{Operation: operation, RecoveryEndpoint: recoveryEndpoint})
+	if err != nil {
+		panic(err)
+	}
+
+	// Atomically persist recordJSON before passing operation to
+	// KnockRegisteredAgent. Restore its recovery endpoint and pass the decoded
+	// endpoint to RecoverNativeSessionOperation after an ambiguous result. If
+	// recovery returns NativeSessionOperationUnexpectedAdmissionError, its
+	// nonnil result carries UnexpectedAdmission; persist that receipt as MAPPED
+	// before retrying recovery.
+	_ = recordJSON
+}
+
 func ExampleClient_ResolveResource() {
 	client, err := qurl.OpenClient()
 	if err != nil {
@@ -214,6 +295,41 @@ func ExampleRecoverAgentRuntime() {
 	}
 	defer binding.Destroy()
 	_, _ = client, binding
+}
+
+func ExampleRecoverAgentRuntimeWithCredentialProvider() {
+	// Resolve account authority only when validated state needs the Hub. A pure
+	// cell resume or durable post-recovery assignment refresh does not ask the
+	// provider for a credential.
+	ctx := context.Background()
+	store, err := qurl.OpenFileAgentState("/var/lib/layerv/qurl/agent-state.json")
+	if err != nil {
+		panic(err)
+	}
+	defer store.Close()
+	hub := qurl.HubBootstrap{
+		Host:               "hub.nhp.layerv.ai",
+		Port:               443,
+		ServerPublicKeyB64: configuredHubPublicKeyB64(),
+	}
+	client, binding, err := qurl.RecoverAgentRuntimeWithCredentialProvider(ctx, func(context.Context) (string, error) {
+		return recoveryCredentialFromOperator(), nil
+	}, store, qurl.WithAgentRuntimeRecoveryHub(hub))
+	if err != nil {
+		panic(err)
+	}
+	defer binding.Destroy()
+	_, _ = client, binding
+}
+
+func ExampleCredentialRecoveredAssignmentRefreshRequiredError() {
+	err := &qurl.CredentialRecoveredAssignmentRefreshRequiredError{AgentID: "agent-example"}
+	if errors.Is(err, qurl.ErrCredentialRecoveredAssignmentRefreshRequired) {
+		// The replacement credential is already durable. Resume only the
+		// mandatory Hub assignment refresh with RefreshAgentRuntime.
+		fmt.Println("refresh required for", err.AgentID)
+	}
+	// Output: refresh required for agent-example
 }
 
 func ExampleNewSealedFileAgentState() {
@@ -318,10 +434,18 @@ func ExampleConnectAgentRuntime() {
 	}
 	admission, err := qurl.KnockRegisteredAgent(ctx, binding, devicePrivateKey,
 		connector.Resource.KnockResourceID,
-		qurl.NativeKnockOptions{RunID: runID},
+		qurl.NativeKnockOptions{ProtectedResourceID: exampleResourcePublicKey, RunID: runID, RunAttempt: 1},
 	)
 	if err != nil {
 		panic(err)
 	}
 	fmt.Println(admission.ResourceHost)
+
+	// After this exact serving session has stopped and drained, retire it while
+	// the device key and opaque in-memory receipt are still available. Retry an
+	// ambiguous retirement with the same receipt; defer clears the key only
+	// after this lifecycle operation finishes.
+	if _, err := qurl.RetireRegisteredAgentSession(ctx, binding, devicePrivateKey, admission.SessionReceipt); err != nil {
+		panic(err)
+	}
 }

@@ -363,14 +363,9 @@ func TestEmailedOTPCompletesIdempotentSDKRegistration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// t.TempDir() honours the process umask, which on a hosted runner yields
-	// 0755. The SDK refuses to open a state namespace that group/other can
-	// traverse -- the credential and the setup lock both live here -- so tighten
-	// it before constructing the store rather than letting the store reject it.
-	stateDir := t.TempDir()
-	if err := os.Chmod(stateDir, 0o700); err != nil {
-		t.Fatalf("restrict agent state directory: %v", err)
-	}
+	// Leave the nested state directory absent so the SDK creates it with the
+	// native owner-only ACL on every supported operating system.
+	stateDir := filepath.Join(t.TempDir(), "qurl-state")
 	statePath := filepath.Join(stateDir, "agent-state.sealed")
 	store, err := qurl.NewSealedFileAgentState(statePath, "otp-e2e-ephemeral", wrapper)
 	if err != nil {

@@ -170,7 +170,7 @@ func TestConnectAgentRuntime_ReplacementKeepsFirstRecoveryAnchorAcrossInvocation
 	contract := loadAssignmentFixture(t)
 	firstExpiry := assignmentFixtureNow.Add(5 * time.Minute)
 	secondExpiry := assignmentFixtureNow.Add(10 * time.Minute)
-	thirdExpiry := assignmentFixtureNow.Add(maxAssignmentTicketLifetime)
+	thirdExpiry := assignmentFixtureNow.Add(15 * time.Minute)
 	first := assignmentResultWithTicketExpiry(t, contract.InitialAssignment.Result.BodyJSON, "conformance-assignment-ticket-0001", firstExpiry)
 	second := assignmentResultWithTicketExpiry(t, contract.InitialAssignment.Result.BodyJSON, "conformance-assignment-ticket-0002", secondExpiry)
 	third := assignmentResultWithTicketExpiry(t, contract.InitialAssignment.Result.BodyJSON, "conformance-assignment-ticket-0003", thirdExpiry)
@@ -967,7 +967,7 @@ func TestConnectAgentRuntime_ReplacementOTPCannotCrossOriginalDeadline(t *testin
 		if host == "cell0.nhp.layerv.ai" {
 			cellResolutions++
 			if cellResolutions == 3 {
-				now = assignmentFixtureNow.Add(maxAssignmentTicketLifetime + AgentRegistrationRecoveryHorizon)
+				now = assignmentFixtureNow.Add(15*time.Minute + AgentRegistrationRecoveryHorizon)
 			}
 		}
 		return f.resolver.LookupNetIP(ctx, network, host)

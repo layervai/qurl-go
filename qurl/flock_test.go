@@ -3,7 +3,6 @@ package qurl
 import (
 	"context"
 	"errors"
-	"os"
 	"path/filepath"
 	"runtime"
 	"sync"
@@ -18,15 +17,12 @@ import (
 // first releases. Run under -race, the two goroutines' ordering is observable
 // through a shared counter guarded solely by the lock.
 func TestAcquireAgentSetupLock_SerializesSameFileStore(t *testing.T) {
-	if runtime.GOOS == "windows" || runtime.GOOS == "plan9" || runtime.GOOS == "js" {
-		t.Skipf("flock is unsupported on %s; local-file setup fails closed there", runtime.GOOS)
+	if runtime.GOOS == "plan9" || runtime.GOOS == "js" {
+		t.Skipf("pinned local-file setup is unsupported on %s", runtime.GOOS)
 	}
-	dir := t.TempDir()
-	if err := os.Chmod(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	dir := secureAgentStateTestDir(t)
 	path := filepath.Join(dir, "agent-state.json")
-	store := FileAgentState(path)
+	store := testFileAgentState(t, path)
 
 	// firstHeld closes once goroutine A holds the lock; firstReleasing records the
 	// moment A is about to release so we can assert B did not enter before it.
@@ -101,15 +97,12 @@ func TestAcquireAgentSetupLock_NonFileStoreIsNoop(t *testing.T) {
 // TestAcquireAgentSetupLock_CanceledContextFailsClosed confirms cancellation
 // aborts acquisition rather than allowing setup to continue unlocked.
 func TestAcquireAgentSetupLock_CanceledContextFailsClosed(t *testing.T) {
-	if runtime.GOOS == "windows" || runtime.GOOS == "plan9" || runtime.GOOS == "js" {
-		t.Skipf("flock is unsupported on %s", runtime.GOOS)
+	if runtime.GOOS == "plan9" || runtime.GOOS == "js" {
+		t.Skipf("pinned local-file setup is unsupported on %s", runtime.GOOS)
 	}
-	dir := t.TempDir()
-	if err := os.Chmod(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	dir := secureAgentStateTestDir(t)
 	path := filepath.Join(dir, "agent-state.json")
-	store := FileAgentState(path)
+	store := testFileAgentState(t, path)
 
 	// Hold the lock in a first acquire so a second, with a canceled context, cannot
 	// get it and must fall back to a no-op release.

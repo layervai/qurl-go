@@ -167,6 +167,7 @@ func newStoreBackedClientWithCredential(store AgentStateStore, baseURL string, h
 		credentials: provider,
 		baseURL:     baseURL,
 		httpClient:  httpClient,
+		registered:  true,
 	}
 }
 
