@@ -173,9 +173,21 @@ func loadOTPE2EConfig(lookup func(string) string) (otpE2EConfig, bool, error) {
 	strict := strings.TrimSpace(lookup(otpE2EStrictEnv)) != ""
 	if len(missing) > 0 {
 		if strict {
+			detail := strings.Join(missing, ", ")
+			// The counters are an independent fault, and this return is the one
+			// a pool that parsed to ZERO credentials takes -- the shape both
+			// workflows can actually produce, since they supply only the pool
+			// variable. The aggregated guard further down never runs on this
+			// branch, so without this the second fault costs another gate cycle
+			// to discover, which is the contract this function opens by stating.
+			if fromPool {
+				if blocked := blockedRotationCounters(lookup); len(blocked) > 0 {
+					detail += "; and " + strings.Join(blocked, " and ") +
+						" unusable, so selection could not have rotated either"
+				}
+			}
 			return otpE2EConfig{}, false, fmt.Errorf(
-				"strict OTP e2e run is missing %d prerequisite(s): %s",
-				len(missing), strings.Join(missing, ", "))
+				"strict OTP e2e run is missing %d prerequisite(s): %s", len(missing), detail)
 		}
 		return otpE2EConfig{}, true, nil
 	}
@@ -218,10 +230,13 @@ func loadOTPE2EConfig(lookup func(string) string) (otpE2EConfig, bool, error) {
 				otpE2EEnrollmentEnv, perCredentialHourlyBudget))
 		}
 
-		// Asked whenever a pool is INTENDED, not merely present: the supported
-		// single-credential setup has nothing to rotate and must not be failed,
-		// but a damaged pool still needs its counters reported alongside it.
-		if fromPool || len(pool) > 1 {
+		// Asked whenever a pool is INTENDED: the supported single-credential
+		// setup has nothing to rotate and must not be failed, but a damaged pool
+		// still needs its counters reported alongside it. fromPool is the whole
+		// condition -- a pool of more than one entry can only have come from the
+		// pool variable, so testing len(pool) as well would suggest a second
+		// path into this guard that does not exist.
+		if fromPool {
 			if blocked := blockedRotationCounters(lookup); len(blocked) > 0 {
 				degraded = append(degraded, fmt.Sprintf(
 					"%s unusable, so credential selection fell back to random and the pool "+
@@ -422,10 +437,9 @@ func selectEnrollment(pool []string, lookup func(string) string) (string, int, [
 	// run N onto N's slot, spending that one credential five times over the
 	// reruns -- which is the exact case that exhausted a credential before the
 	// pool existed. Treat it exactly as strictly as the run number.
-	runNumber, _ := rotationCounter(lookup, "GITHUB_RUN_NUMBER", 1)
-	attempt, _ := rotationCounter(lookup, "GITHUB_RUN_ATTEMPT", 1)
-	blocked := blockedRotationCounters(lookup)
-	if len(blocked) == 0 {
+	runNumber, haveRun := rotationCounter(lookup, "GITHUB_RUN_NUMBER", 1)
+	attempt, haveAttempt := rotationCounter(lookup, "GITHUB_RUN_ATTEMPT", 1)
+	if haveRun && haveAttempt {
 		// Reduce both terms before adding. A real run number never approaches
 		// MaxInt, but this reads an environment variable, and the sum of two
 		// unreduced values there would overflow to a negative slot and panic
@@ -434,6 +448,12 @@ func selectEnrollment(pool []string, lookup func(string) string) (string, int, [
 		slot := (runNumber%len(pool) + (attempt-1)%len(pool)) % len(pool)
 		return pool[slot], slot, nil
 	}
+
+	// Only now, on the path that failed, is it worth re-reading the variables to
+	// name which one did it. The helper is shared with loadOTPE2EConfig, which
+	// must be able to ask the same question when the pool is too small to
+	// rotate and this function has already short-circuited.
+	blocked := blockedRotationCounters(lookup)
 
 	raw := make([]byte, 4)
 	if _, err := rand.Read(raw); err != nil {

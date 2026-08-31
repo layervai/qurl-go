@@ -287,13 +287,16 @@ func TestSmallestFactorFlagsExactlyTheVulnerablePoolSizes(t *testing.T) {
 			t.Fatalf("smallestFactor(%d) = %d, want %d", tc.size, got, tc.want)
 		}
 	}
-	// The two sizes this actually turns on: today's pool is flagged, and the
-	// seventh owner is what silences it.
-	if smallestFactor(len(sixSlotPool)) == 0 {
-		t.Fatal("today's six-slot pool must be flagged; the residual is still open")
+	// The two sizes the seeding argument turns on. These pin ARITHMETIC for six
+	// and seven; they cannot observe the deployed pool, whose size is
+	// len(parseEnrollmentPool(secret)) at runtime, so they will read the same
+	// the day a seventh owner is seeded. The runtime half of that signal is the
+	// advisory the gate logs, which goes quiet when the live size becomes prime.
+	if smallestFactor(6) == 0 {
+		t.Fatal("six must be flagged: it is composite, which is the seeding argument")
 	}
-	if smallestFactor(len(sixSlotPool)+1) != 0 {
-		t.Fatal("a seventh owner must silence the note; that is how the fix is observed")
+	if smallestFactor(7) != 0 {
+		t.Fatal("seven must be silent: it is prime, which is what seeding buys")
 	}
 }
 
@@ -386,12 +389,15 @@ func TestPoolSizeAdvisorySpeaksAtEverySizeThatCosts(t *testing.T) {
 				"source is damaged and which is supported", got, name)
 		}
 	}
-	// Today's size, and the size the seventh owner buys.
-	if poolSizeAdvisory(len(sixSlotPool)) == "" {
-		t.Fatal("today's six-slot pool must warn; the residual is still open")
+	// Same limit as the smallestFactor table: this pins the WORDING at six and
+	// seven, not the deployed pool. What actually observes the seeding is the
+	// advisory the gate logs at the live size, which falls silent once that size
+	// is prime -- see the NOTE emitted beside the slot evidence.
+	if poolSizeAdvisory(6) == "" {
+		t.Fatal("six must warn: it is composite, which is the seeding argument")
 	}
-	if poolSizeAdvisory(len(sixSlotPool)+1) != "" {
-		t.Fatal("a seventh owner must silence the advisory; that is how the fix is observed")
+	if poolSizeAdvisory(7) != "" {
+		t.Fatal("seven must be silent: it is prime, which is what seeding buys")
 	}
 }
 
@@ -772,6 +778,27 @@ func TestLoadOTPE2EConfigAcceptsEitherCredentialSource(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "0 credentials") {
 			t.Fatalf("strict error %q reports the secret as absent; it is present", err)
+		}
+	})
+
+	// The ZERO-credential shape of the same aggregation. A pool that parses to
+	// nothing returns from the missing-prerequisite path, not the aggregated
+	// guard, and that is the branch both workflows can actually produce -- so
+	// the counter fault has to be named there too or it costs another cycle.
+	t.Run("strict run names the counters even when the pool yielded nothing", func(t *testing.T) {
+		_, _, err := loadOTPE2EConfig(envFrom(with(map[string]string{
+			otpE2EEnrollmentPoolEnv: "   \n  ", // present, parses to zero
+			otpE2EStrictEnv:         "1",
+			"GITHUB_RUN_ATTEMPT":    "1", // and the run number is absent
+		})))
+		if err == nil {
+			t.Fatal("strict run accepted a pool that yielded nothing")
+		}
+		for _, want := range []string{otpE2EEnrollmentPoolEnv, "GITHUB_RUN_NUMBER"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("strict error %q omits %s; the operator fixes one fault and "+
+					"spends another gate cycle finding the next", err, want)
+			}
 		}
 	})
 
