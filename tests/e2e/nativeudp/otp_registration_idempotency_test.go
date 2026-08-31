@@ -142,18 +142,18 @@ func loadOTPE2EConfig(lookup func(string) string) (otpE2EConfig, bool, error) {
 		return otpE2EConfig{}, false, fmt.Errorf("%s must be a valid UDP port", otpE2EHubPortEnv)
 	}
 
-	enrollment, slot, rotated := selectEnrollment(pool, lookup)
+	enrollment, slot, unrotatedBecause := selectEnrollment(pool, lookup)
 
 	// Every other prerequisite in this gate is loud (see otpE2EStrictEnv), and
 	// the rotation has to join them. A missing GITHUB_RUN_NUMBER falls back to
 	// random, which quietly reinstates the clustering the pool exists to avoid
 	// -- and the only symptom would be this gate going red again weeks later,
 	// for the same reason and with the same misleading evidence as last time.
-	if strict && !rotated {
+	if strict && unrotatedBecause != "" {
 		return otpE2EConfig{}, false, fmt.Errorf(
-			"strict OTP e2e run could not read a usable GITHUB_RUN_NUMBER, so credential "+
-				"selection fell back to random and the %d-slot pool would cluster rather "+
-				"than rotate", len(pool))
+			"strict OTP e2e run could not read a usable %s, so credential selection fell "+
+				"back to random and the %d-slot pool would cluster rather than rotate",
+			unrotatedBecause, len(pool))
 	}
 
 	return otpE2EConfig{
@@ -262,6 +262,65 @@ func parseEnrollmentPool(raw string) []string {
 //
 // Off CI there is no counter to rotate on, so fall back to random: repeated
 // local runs are just as capable of exhausting one credential.
+// The third return is the name of the counter that PREVENTED the rotation, or
+// "" when the run rotated (or had nothing to rotate). Callers report it: naming
+// the wrong variable is how the last diagnosis got expensive.
+func selectEnrollment(pool []string, lookup func(string) string) (string, int, string) {
+	switch len(pool) {
+	case 0:
+		return "", -1, ""
+	case 1:
+		// One credential is the whole pool, so there is nothing to rotate and
+		// nothing for a caller to warn about.
+		return pool[0], 0, ""
+	}
+
+	// BOTH counters must be usable, and an unreadable attempt is not the softer
+	// failure it looks like: defaulting it to 1 would resolve every attempt of
+	// run N onto N's slot, spending that one credential five times over the
+	// reruns -- which is the exact case that exhausted a credential before the
+	// pool existed. Treat it exactly as strictly as the run number.
+	runNumber, haveRun := rotationCounter(lookup, "GITHUB_RUN_NUMBER", 0)
+	attempt, haveAttempt := rotationCounter(lookup, "GITHUB_RUN_ATTEMPT", 1)
+	blocked := ""
+	switch {
+	case !haveRun:
+		blocked = "GITHUB_RUN_NUMBER"
+	case !haveAttempt:
+		blocked = "GITHUB_RUN_ATTEMPT"
+	}
+	if blocked == "" {
+		// Reduce both terms before adding. A real run number never approaches
+		// MaxInt, but this reads an environment variable, and the sum of two
+		// unreduced values there would overflow to a negative slot and panic
+		// the index below rather than fail some assertion.
+		slot := (runNumber%len(pool) + (attempt-1)%len(pool)) % len(pool)
+		return pool[slot], slot, ""
+	}
+
+	raw := make([]byte, 4)
+	if _, err := rand.Read(raw); err != nil {
+		return pool[0], 0, blocked
+	}
+	slot := int(binary.BigEndian.Uint32(raw) % uint32(len(pool)))
+	return pool[slot], slot, blocked
+}
+
+// smallestFactor returns the smallest non-trivial divisor of n, or 0 when n is
+// prime (or too small to matter). A composite pool size is what lets a strided
+// spending pattern collapse the rotation onto a subset of the pool.
+func smallestFactor(n int) int {
+	if n < 4 {
+		return 0
+	}
+	for d := 2; d*d <= n; d++ {
+		if n%d == 0 {
+			return d
+		}
+	}
+	return 0
+}
+
 // rotationCounter reads one of the two GitHub counters the rotation turns on,
 // reporting whether the value is usable rather than substituting a default.
 // Actions always exports both; anything else is a runner regression, and the
@@ -272,40 +331,6 @@ func rotationCounter(lookup func(string) string, name string, lowest int) (int, 
 		return 0, false
 	}
 	return parsed, true
-}
-
-func selectEnrollment(pool []string, lookup func(string) string) (string, int, bool) {
-	switch len(pool) {
-	case 0:
-		return "", -1, false
-	case 1:
-		// One credential is the whole pool, so there is nothing to rotate and
-		// nothing for a caller to warn about: report it as rotated.
-		return pool[0], 0, true
-	}
-
-	// BOTH counters must be usable, and an unreadable attempt is not the softer
-	// failure it looks like: defaulting it to 1 would resolve every attempt of
-	// run N onto N's slot, spending that one credential five times over the
-	// reruns -- which is the exact case that exhausted a credential before the
-	// pool existed. Treat it exactly as strictly as the run number.
-	runNumber, haveRun := rotationCounter(lookup, "GITHUB_RUN_NUMBER", 0)
-	attempt, haveAttempt := rotationCounter(lookup, "GITHUB_RUN_ATTEMPT", 1)
-	if haveRun && haveAttempt {
-		// Reduce both terms before adding. A real run number never approaches
-		// MaxInt, but this reads an environment variable, and the sum of two
-		// unreduced values there would overflow to a negative slot and panic
-		// the index below rather than fail some assertion.
-		slot := (runNumber%len(pool) + (attempt-1)%len(pool)) % len(pool)
-		return pool[slot], slot, true
-	}
-
-	raw := make([]byte, 4)
-	if _, err := rand.Read(raw); err != nil {
-		return pool[0], 0, false
-	}
-	slot := int(binary.BigEndian.Uint32(raw) % uint32(len(pool)))
-	return pool[slot], slot, false
 }
 
 // runScopedAgentID appends a per-run suffix to the configured agent id.
@@ -441,6 +466,16 @@ func TestEmailedOTPCompletesIdempotentSDKRegistration(t *testing.T) {
 	// diagnosis needs it. Every other failure in the exchange gets it too.
 	t.Logf("EVIDENCE this run drew credential slot %d of %d",
 		cfg.enrollmentSlot, cfg.enrollmentPoolSize)
+
+	// The pool's SIZE decides whether the rotation survives a strided spending
+	// pattern (see selectEnrollment). That size lives in a secret, so no test
+	// can assert it -- say it out loud on the runs that actually load it.
+	if factor := smallestFactor(cfg.enrollmentPoolSize); factor > 0 {
+		t.Logf("NOTE pool size %d is divisible by %d, so a spending stride of %d would "+
+			"collapse it onto %d slot(s); a PRIME size makes the rotation's guarantee "+
+			"arithmetic rather than empirical -- see selectEnrollment",
+			cfg.enrollmentPoolSize, factor, factor, cfg.enrollmentPoolSize/factor)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), otpE2EDeadline)
 	defer cancel()

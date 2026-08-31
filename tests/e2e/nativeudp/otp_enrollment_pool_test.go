@@ -198,6 +198,33 @@ func TestSelectEnrollmentNeverClustersWithinTheIssuanceBudget(t *testing.T) {
 	}
 }
 
+// TestSmallestFactorFlagsExactlyTheVulnerablePoolSizes covers the runtime half
+// of the stride guard: the gate logs a note when the LIVE pool size is
+// composite, and stays silent once it is prime. Silence is the signal that the
+// seventh-owner residual has been closed, so it has to be exact.
+func TestSmallestFactorFlagsExactlyTheVulnerablePoolSizes(t *testing.T) {
+	for _, tc := range []struct {
+		size int
+		want int
+	}{
+		{0, 0}, {1, 0}, {2, 0}, {3, 0}, // nothing to collapse onto
+		{4, 2}, {6, 2}, {8, 2}, {9, 3}, {10, 2}, // composite: flagged
+		{5, 0}, {7, 0}, {11, 0}, {13, 0}, // prime: silent
+	} {
+		if got := smallestFactor(tc.size); got != tc.want {
+			t.Fatalf("smallestFactor(%d) = %d, want %d", tc.size, got, tc.want)
+		}
+	}
+	// The two sizes this actually turns on: today's pool is flagged, and the
+	// seventh owner is what silences it.
+	if smallestFactor(len(sixSlotPool)) == 0 {
+		t.Fatal("today's six-slot pool must be flagged; the residual is still open")
+	}
+	if smallestFactor(len(sixSlotPool)+1) != 0 {
+		t.Fatal("a seventh owner must silence the note; that is how the fix is observed")
+	}
+}
+
 // TestSelectEnrollmentStridedTrafficNeedsACoprimePoolSize pins the residual the
 // rotation cannot fix on its own, and shows it is a POOL SIZE decision.
 //
@@ -209,9 +236,11 @@ func TestSelectEnrollmentNeverClustersWithinTheIssuanceBudget(t *testing.T) {
 // collapses six slots onto three and reproduces the outage this file exists to
 // document. A prime size is immune to every stride below it.
 //
-// This is asserted rather than written down because it is the argument for
-// seeding a SEVENTH owner, and because it stops someone "balancing" the pool to
-// an even size later.
+// This asserts the ARITHMETIC, and is the argument for seeding a seventh owner.
+// It cannot police the live pool: that size is len(parseEnrollmentPool(secret))
+// at runtime, so seeding the secret to eight would collapse under stride 2 with
+// this test still green. The run-time half of the guard is the note the gate
+// logs beside its slot evidence, where the real size lands.
 func TestSelectEnrollmentStridedTrafficNeedsACoprimePoolSize(t *testing.T) {
 	worstSlotUnderStride := func(pool []string, stride int) int {
 		used := map[int]int{}
@@ -239,10 +268,9 @@ func TestSelectEnrollmentStridedTrafficNeedsACoprimePoolSize(t *testing.T) {
 		}
 	}
 
-	// The other half: today's six-slot pool genuinely does degrade, so the
-	// comment on selectEnrollment is not being alarmist. If a future pool size
-	// makes this pass, the pool became coprime-safe and this assertion (and the
-	// seventh-owner argument) should be revisited rather than deleted.
+	// The other half: a size of six genuinely does degrade, so selectEnrollment's
+	// comment is not being alarmist. This pins the arithmetic for six, not the
+	// live pool -- seeding a seventh owner does not and should not change it.
 	if got := worstSlotUnderStride(sixSlotPool, 2); got <= perCredentialHourlyBudget {
 		t.Fatalf("six-slot pool under stride 2 put only %d on one slot; the size dependency "+
 			"this test documents no longer holds -- re-derive it before trusting the comment",
@@ -391,6 +419,12 @@ func TestLoadOTPE2EConfigAcceptsEitherCredentialSource(t *testing.T) {
 		})))
 		if err == nil {
 			t.Fatal("strict run accepted an unusable GITHUB_RUN_ATTEMPT; reruns would collide")
+		}
+		// Must name the counter that actually failed. Reporting the run number
+		// here would send an operator to inspect a variable that is correctly
+		// set -- the misdirection this whole change exists to stop.
+		if !strings.Contains(err.Error(), "GITHUB_RUN_ATTEMPT") {
+			t.Fatalf("strict error %q blames the wrong counter; the attempt is at fault", err)
 		}
 	})
 
