@@ -47,6 +47,11 @@ const (
 	// dropped secret or a renamed variable would silently convert the gate
 	// into a rubber stamp. CI sets this; a developer running locally without
 	// sandbox access still gets a clean skip.
+	//
+	// Strict now also requires a usable ROTATION, so running this against the
+	// real sandbox from a workstation means exporting GITHUB_RUN_NUMBER and
+	// GITHUB_RUN_ATTEMPT by hand (any values >= 1). Without strict set, a
+	// local run selects at random and needs neither.
 	otpE2EStrictEnv = "QURL_OTP_E2E_STRICT"
 
 	otpE2EHubHostEnv    = "QURL_OTP_E2E_HUB_HOST"
@@ -197,7 +202,7 @@ func loadOTPE2EConfig(lookup func(string) string) (otpE2EConfig, bool, error) {
 		return otpE2EConfig{}, false, fmt.Errorf("%s must be a valid UDP port", otpE2EHubPortEnv)
 	}
 
-	enrollment, slot, _ := selectEnrollment(pool, lookup)
+	enrollment, slot := selectEnrollment(pool, lookup)
 
 	// Every other prerequisite in this gate is loud (see otpE2EStrictEnv), and
 	// the rotation has to join them. A missing GITHUB_RUN_NUMBER falls back to
@@ -427,18 +432,18 @@ func parseEnrollmentPool(raw string) ([]string, int) {
 //
 // Off CI there is no counter to rotate on, so fall back to random: repeated
 // local runs are just as capable of exhausting one credential.
-// The third return names EVERY counter that prevented the rotation, empty when
-// the run rotated (or had nothing to rotate). Callers report them all, matching
-// loadOTPE2EConfig's rule for missing variables: naming the wrong one, or only
-// the first of two, costs a whole gate cycle per variable to discover.
-func selectEnrollment(pool []string, lookup func(string) string) (string, int, []string) {
+// Which counter BLOCKED a rotation is deliberately not returned here. Callers
+// that need it ask blockedRotationCounters, because they must be able to ask
+// even when the pool is too small to rotate -- the len<2 case below short
+// circuits before reading a counter at all, so a value returned from here would
+// be silent in exactly the situation that needs reporting.
+func selectEnrollment(pool []string, lookup func(string) string) (string, int) {
 	switch len(pool) {
 	case 0:
-		return "", -1, nil
+		return "", -1
 	case 1:
-		// One credential is the whole pool, so there is nothing to rotate and
-		// nothing for a caller to warn about.
-		return pool[0], 0, nil
+		// One credential is the whole pool, so there is nothing to rotate.
+		return pool[0], 0
 	}
 
 	// BOTH counters must be usable, and an unreadable attempt is not the softer
@@ -446,8 +451,8 @@ func selectEnrollment(pool []string, lookup func(string) string) (string, int, [
 	// run N onto N's slot, spending that one credential five times over the
 	// reruns -- which is the exact case that exhausted a credential before the
 	// pool existed. Treat it exactly as strictly as the run number.
-	runNumber, haveRun := rotationCounter(lookup, "GITHUB_RUN_NUMBER", 1)
-	attempt, haveAttempt := rotationCounter(lookup, "GITHUB_RUN_ATTEMPT", 1)
+	runNumber, haveRun := rotationCounter(lookup, "GITHUB_RUN_NUMBER")
+	attempt, haveAttempt := rotationCounter(lookup, "GITHUB_RUN_ATTEMPT")
 	if haveRun && haveAttempt {
 		// Reduce both terms before adding. A real run number never approaches
 		// MaxInt, but this reads an environment variable, and the sum of two
@@ -455,21 +460,15 @@ func selectEnrollment(pool []string, lookup func(string) string) (string, int, [
 		// the index below rather than fail some assertion. Both counters are
 		// >= 1 here, so attempt-1 cannot underflow either.
 		slot := (runNumber%len(pool) + (attempt-1)%len(pool)) % len(pool)
-		return pool[slot], slot, nil
+		return pool[slot], slot
 	}
-
-	// Only now, on the path that failed, is it worth re-reading the variables to
-	// name which one did it. The helper is shared with loadOTPE2EConfig, which
-	// must be able to ask the same question when the pool is too small to
-	// rotate and this function has already short-circuited.
-	blocked := blockedRotationCounters(lookup)
 
 	raw := make([]byte, 4)
 	if _, err := rand.Read(raw); err != nil {
-		return pool[0], 0, blocked
+		return pool[0], 0
 	}
 	slot := int(binary.BigEndian.Uint32(raw) % uint32(len(pool)))
-	return pool[slot], slot, blocked
+	return pool[slot], slot
 }
 
 // duplicateSuffix names dropped duplicates inside the truncation error. The
@@ -565,10 +564,10 @@ func smallestFactor(n int) int {
 // broken counter behind a damaged pool and cost a second gate cycle to find.
 func blockedRotationCounters(lookup func(string) string) []string {
 	var blocked []string
-	if _, ok := rotationCounter(lookup, "GITHUB_RUN_NUMBER", 1); !ok {
+	if _, ok := rotationCounter(lookup, "GITHUB_RUN_NUMBER"); !ok {
 		blocked = append(blocked, "GITHUB_RUN_NUMBER")
 	}
-	if _, ok := rotationCounter(lookup, "GITHUB_RUN_ATTEMPT", 1); !ok {
+	if _, ok := rotationCounter(lookup, "GITHUB_RUN_ATTEMPT"); !ok {
 		blocked = append(blocked, "GITHUB_RUN_ATTEMPT")
 	}
 	return blocked
@@ -591,7 +590,11 @@ func blockedRotationCounters(lookup func(string) string) []string {
 // GITHUB_RUN_NUMBER=6/GITHUB_RUN_ATTEMPT=0 row in
 // TestSelectEnrollmentAlwaysReturnsAPoolMember, which exists because the
 // obvious zero-zero row cannot reach it: the run-number floor blocks first.
-func rotationCounter(lookup func(string) string, name string, lowest int) (int, bool) {
+func rotationCounter(lookup func(string) string, name string) (int, bool) {
+	// Not a parameter. Every caller floors at 1 and the doc above argues it can
+	// never be anything else, so exposing it would invite exactly the
+	// relaxation that comment warns against.
+	const lowest = 1
 	parsed, err := strconv.Atoi(strings.TrimSpace(lookup(name)))
 	if err != nil || parsed < lowest {
 		return 0, false

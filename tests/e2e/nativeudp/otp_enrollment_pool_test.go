@@ -51,8 +51,9 @@ func ciEnv(runNumber, attempt int) func(string) string {
 // stops testing anything is the failure mode this whole file is about.
 func slotFor(t *testing.T, pool []string, runNumber, attempt int) int {
 	t.Helper()
-	_, slot, blocked := selectEnrollment(pool, ciEnv(runNumber, attempt))
-	if len(blocked) > 0 {
+	env := ciEnv(runNumber, attempt)
+	_, slot := selectEnrollment(pool, env)
+	if blocked := blockedRotationCounters(env); len(blocked) > 0 {
 		t.Fatalf("run %d attempt %d did not rotate (%v); these sweeps would be measuring "+
 			"the random fallback rather than the rotation", runNumber, attempt, blocked)
 	}
@@ -132,14 +133,14 @@ func TestSelectEnrollmentDegenerateCases(t *testing.T) {
 	lookup := ciEnv(100, 1)
 
 	t.Run("empty pool reports no slot", func(t *testing.T) {
-		got, slot, _ := selectEnrollment(nil, lookup)
+		got, slot := selectEnrollment(nil, lookup)
 		if got != "" || slot != -1 {
 			t.Fatalf("selectEnrollment(nil) = %q, %d; want \"\", -1", got, slot)
 		}
 	})
 
 	t.Run("single credential is always slot zero", func(t *testing.T) {
-		got, slot, _ := selectEnrollment([]string{"only"}, lookup)
+		got, slot := selectEnrollment([]string{"only"}, lookup)
 		if got != "only" || slot != 0 {
 			t.Fatalf("selectEnrollment = %q, %d; want \"only\", 0", got, slot)
 		}
@@ -150,9 +151,9 @@ func TestSelectEnrollmentIsDeterministicForOneAttempt(t *testing.T) {
 	pool := sixSlotPool
 	lookup := ciEnv(12345, 2)
 
-	first, firstSlot, _ := selectEnrollment(pool, lookup)
+	first, firstSlot := selectEnrollment(pool, lookup)
 	for i := 0; i < 32; i++ {
-		got, slot, _ := selectEnrollment(pool, lookup)
+		got, slot := selectEnrollment(pool, lookup)
 		if got != first || slot != firstSlot {
 			t.Fatalf("selection %d = %q/%d; want stable %q/%d", i, got, slot, first, firstSlot)
 		}
@@ -285,6 +286,12 @@ func TestSmallestFactorFlagsExactlyTheVulnerablePoolSizes(t *testing.T) {
 		{6, 2},
 		{8, 2},
 		{9, 3},
+		// 6 and 7 are the seeding argument, and these rows already assert it:
+		// six is composite so the gate warns, seven is prime so it goes
+		// silent, and that silence is how a seventh owner is observed.
+		// Re-asserting them at the end of this test would be prose in
+		// assertion form -- a second code path that can drift but cannot
+		// independently fail.
 		{10, 2}, // composite: flagged
 		{5, 0},
 		{7, 0},
@@ -294,17 +301,6 @@ func TestSmallestFactorFlagsExactlyTheVulnerablePoolSizes(t *testing.T) {
 		if got := smallestFactor(tc.size); got != tc.want {
 			t.Fatalf("smallestFactor(%d) = %d, want %d", tc.size, got, tc.want)
 		}
-	}
-	// The two sizes the seeding argument turns on. These pin ARITHMETIC for six
-	// and seven; they cannot observe the deployed pool, whose size is
-	// len(parseEnrollmentPool(secret)) at runtime, so they will read the same
-	// the day a seventh owner is seeded. The runtime half of that signal is the
-	// advisory the gate logs, which goes quiet when the live size becomes prime.
-	if smallestFactor(6) == 0 {
-		t.Fatal("six must be flagged: it is composite, which is the seeding argument")
-	}
-	if smallestFactor(7) != 0 {
-		t.Fatal("seven must be silent: it is prime, which is what seeding buys")
 	}
 }
 
@@ -396,16 +392,6 @@ func TestPoolSizeAdvisorySpeaksAtEverySizeThatCosts(t *testing.T) {
 			t.Fatalf("the size-1 advisory %q does not name %s; it cannot say which "+
 				"source is damaged and which is supported", got, name)
 		}
-	}
-	// Same limit as the smallestFactor table: this pins the WORDING at six and
-	// seven, not the deployed pool. What actually observes the seeding is the
-	// advisory the gate logs at the live size, which falls silent once that size
-	// is prime -- see the NOTE emitted beside the slot evidence.
-	if poolSizeAdvisory(6) == "" {
-		t.Fatal("six must warn: it is composite, which is the seeding argument")
-	}
-	if poolSizeAdvisory(7) != "" {
-		t.Fatal("seven must be silent: it is prime, which is what seeding buys")
 	}
 }
 
@@ -569,7 +555,7 @@ func TestSelectEnrollmentAlwaysReturnsAPoolMember(t *testing.T) {
 		// unreduced form, not a live wrap the current code can reach.
 		{"GITHUB_RUN_NUMBER": "9223372036854775807", "GITHUB_RUN_ATTEMPT": "9223372036854775807"},
 	} {
-		got, slot, _ := selectEnrollment(pool, envFrom(env))
+		got, slot := selectEnrollment(pool, envFrom(env))
 		if !member[got] {
 			t.Fatalf("env %v selected %q, which is not in the pool", env, got)
 		}
