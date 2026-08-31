@@ -241,8 +241,10 @@ func RecoverAgentRuntime(ctx context.Context, recoveryCredential string, store A
 type AgentRuntimeRecoveryCredentialProvider func(context.Context) (string, error)
 
 // RecoverAgentRuntimeWithCredentialProvider is RecoverAgentRuntime with lazy
-// account authority. It does not invoke provider for malformed or expired
-// state, or when an existing cell grant can complete recovery directly.
+// account authority. It is a separate entry point so a call cannot supply both
+// positional and provider authority. It does not invoke provider for malformed
+// or expired state, or when an existing cell grant can complete recovery
+// directly.
 func RecoverAgentRuntimeWithCredentialProvider(ctx context.Context, provider AgentRuntimeRecoveryCredentialProvider, store AgentStateStore, opts ...AgentRuntimeRecoveryOption) (*Client, *AgentRuntimeBinding, error) {
 	return recoverAgentRuntime(ctx, provider, store, opts...)
 }
@@ -342,7 +344,7 @@ func (c *nativeAgentRuntimeConfig) recoverAgentRuntimeLocked(ctx context.Context
 			return nil, err
 		}
 	}
-	if state.PendingCredentialRecovery == nil || state.PendingCredentialRecovery.NeedsFreshGrant || state.PendingCredentialRecoveryIssue != nil {
+	if state.PendingCredentialRecovery == nil || state.PendingCredentialRecovery.NeedsFreshGrant {
 		recoveryCredential, err := provider(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("resolve credential recovery authority: %w", err)
