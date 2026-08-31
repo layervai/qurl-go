@@ -299,7 +299,9 @@ func TestSmallestFactorFlagsExactlyTheVulnerablePoolSizes(t *testing.T) {
 		{13, 0}, // prime: silent
 	} {
 		if got := smallestFactor(tc.size); got != tc.want {
-			t.Fatalf("smallestFactor(%d) = %d, want %d", tc.size, got, tc.want)
+			// Errorf, not Fatalf: a table that stops at the first mismatch hides
+			// every row after it, and the point of a table is the whole set.
+			t.Errorf("smallestFactor(%d) = %d, want %d", tc.size, got, tc.want)
 		}
 	}
 }
@@ -376,6 +378,20 @@ func TestPoolSizeAdvisorySpeaksAtEverySizeThatCosts(t *testing.T) {
 			t.Fatalf("prime pool size %d should be silent, said %q", size, got)
 		}
 	}
+	// "Likely" is stride 2 throughout this change, so the advisory may only use
+	// that word where stride 2 actually collapses the pool -- even sizes. At an
+	// odd composite the smallest factor is 3 or more and stride 2 is coprime, so
+	// calling it likely would misname ordinary traffic and overstate the risk.
+	if got := poolSizeAdvisory(6); !strings.Contains(got, "likely") {
+		t.Fatalf("even composite advisory %q should name stride 2 as the likely one", got)
+	}
+	for _, odd := range []int{9, 15, 25} {
+		if got := poolSizeAdvisory(odd); strings.Contains(got, "likely") {
+			t.Fatalf("advisory for odd composite %d calls its smallest factor 'likely' (%q), "+
+				"but stride 2 is coprime to it and collapses nothing", odd, got)
+		}
+	}
+
 	// Two is the case the strict guard accepts and smallestFactor calls prime.
 	// Its warning must name the collapse, not merely exist.
 	if got := poolSizeAdvisory(2); !strings.Contains(got, "unpooled") {

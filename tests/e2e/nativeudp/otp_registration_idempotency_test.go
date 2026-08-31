@@ -528,18 +528,29 @@ func poolSizeAdvisory(size int) string {
 	if factor == 0 {
 		return ""
 	}
-	likely, worst := factor, size/factor
-	if likely == worst {
+	smallest, worst := factor, size/factor
+	if smallest == worst {
 		// A prime square (or 4): the two strides coincide, and naming them
 		// separately would read as a contradiction.
 		return fmt.Sprintf("pool size %d is composite: a spending stride of %d collapses it "+
 			"onto %d slot(s). A PRIME size makes the rotation's guarantee arithmetic rather "+
-			"than empirical; see selectEnrollment", size, likely, worst)
+			"than empirical; see selectEnrollment", size, smallest, worst)
 	}
-	return fmt.Sprintf("pool size %d is composite: a spending stride of %d (the likely one) "+
-		"collapses it onto %d slot(s), and a stride of %d onto %d -- the worst case. A PRIME "+
-		"size makes the rotation's guarantee arithmetic rather than empirical; see "+
-		"selectEnrollment", size, likely, worst, worst, likely)
+	// "smallest", not "likely". Everywhere else in this change likely means a
+	// stride of 2 -- relevant and irrelevant PRs alternating, which is ordinary
+	// traffic. That coincides with smallestFactor only when the size is EVEN: at
+	// 9, 15 or 25 the smallest factor is 3 or 5 while stride 2 is coprime and
+	// collapses nothing, so calling it likely there would both misname the
+	// traffic shape and overstate the risk from the one shape being reasoned
+	// about.
+	note := ""
+	if size%2 == 0 {
+		note = ", which is the likely one -- relevant and irrelevant PRs alternating"
+	}
+	return fmt.Sprintf("pool size %d is composite: a spending stride of %d%s collapses it "+
+		"onto %d slot(s), and a stride of %d onto %d -- the worst case. A PRIME size makes "+
+		"the rotation's guarantee arithmetic rather than empirical; see selectEnrollment",
+		size, smallest, note, worst, worst, smallest)
 }
 
 // smallestFactor returns the smallest non-trivial divisor of n, or 0 when n is

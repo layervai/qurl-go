@@ -49,16 +49,22 @@ permissions:
 env:
   # Paths whose change can affect SDK registration. Every run that matches
   # performs a real enrolment and spends one registration-OTP issuance, and
-  # that budget is finite: 5/hour per credential and 10/hour per owner
-  # (qurl-service registrationOTPPerCredentialRate and
-  # registrationOTPPerOwnerRate, over RegistrationOTPRateLimitWindow -- the
-  # window is the hour, not the rates). The pool carries one
-  # credential per distinct owner, so the credential's five is what binds: five
-  # runs an hour PER SLOT, and 5*len(pool) across the pool -- shared with
-  # otp-schema-v2-canary.yml, which spends the same secret. selectEnrollment
-  # carries the full derivation. The pool multiplies that budget; it does not
-  # remove it. A dependency bump to an unrelated GitHub Action cannot break
-  # registration, so enrolling there would spend budget a real PR may need.
+  # that budget is finite: 5/hour per credential (qurl-service
+  # registrationOTPPerCredentialRate; the per-owner rate is higher and, at one
+  # credential per owner, never binds).
+  #
+  # That is the ONLY place this file states the number, deliberately. What the
+  # rate implies -- the per-slot and pool-wide ceilings, why the credential rate
+  # is the binding one, and that otp-schema-v2-canary.yml spends the same pool
+  # -- all live in selectEnrollment, which can interpolate the constant. Spelling
+  # any of it again here would mean a retune fixes the line
+  # TestGateWorkflowCommentQuotesTheBudgetConstant checks and leaves its
+  # neighbours stating the old number: the misdirection this gate exists to
+  # avoid, reintroduced inside the guard against it.
+  #
+  # The pool multiplies that budget; it does not remove it. A dependency bump to
+  # an unrelated GitHub Action cannot break registration, so enrolling there
+  # would spend budget a real PR may need.
   #
   # The list must cover every top-level directory the gate's test COMPILES,
   # which is not the same as the SDK's public surface. `qurl` is only the
