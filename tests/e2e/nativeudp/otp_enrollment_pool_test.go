@@ -9,7 +9,6 @@ package nativeudp_test
 // test. That is expensive to diagnose from CI and nearly free to catch here.
 
 import (
-	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -207,6 +206,19 @@ func TestSelectEnrollmentSpreadsRuns(t *testing.T) {
 	}
 }
 
+// perCredentialHourlyBudget is qurl-service's registrationOTPPerCredentialRate
+// at the time of writing. It sets how far these tests look ahead, and every
+// message a runtime path INTERPOLATES the rate into reads it from here -- the
+// truncated-pool error, the pool-size advisory, and otpMailbox.timedOut, which
+// is the first thing an operator sees on this failure.
+//
+// It does NOT cover prose. The rate is also written out longhand in
+// selectEnrollment's derivation and in the gate workflow's GATE_PATHS comment,
+// where nothing can interpolate it; if the service retunes the rate, those are
+// the two places that must be edited by hand. Claiming otherwise would be the
+// same kind of overreach this file's history is made of.
+const perCredentialHourlyBudget = 5
+
 // TestSelectEnrollmentNeverClustersWithinTheIssuanceBudget pins the property
 // whose absence turned the gate red on 2026-08-31, and is the whole reason
 // selection rotates instead of hashing.
@@ -222,19 +234,6 @@ func TestSelectEnrollmentSpreadsRuns(t *testing.T) {
 // hour of perCredentialHourlyBudget*len(pool) runs still fits.
 //
 // Reverting selectEnrollment to a hash of the run id fails this test.
-// perCredentialHourlyBudget is qurl-service's registrationOTPPerCredentialRate
-// at the time of writing. It sets how far these tests look ahead, and every
-// message a runtime path INTERPOLATES the rate into reads it from here -- the
-// truncated-pool error, the pool-size advisory, and otpMailbox.timedOut, which
-// is the first thing an operator sees on this failure.
-//
-// It does NOT cover prose. The rate is also written out longhand in
-// selectEnrollment's derivation and in the gate workflow's GATE_PATHS comment,
-// where nothing can interpolate it; if the service retunes the rate, those are
-// the two places that must be edited by hand. Claiming otherwise would be the
-// same kind of overreach this file's history is made of.
-const perCredentialHourlyBudget = 5
-
 func TestSelectEnrollmentNeverClustersWithinTheIssuanceBudget(t *testing.T) {
 	pool := sixSlotPool
 	fullHour := perCredentialHourlyBudget * len(pool)
@@ -420,14 +419,29 @@ func TestPoolSizeAdvisorySpeaksAtEverySizeThatCosts(t *testing.T) {
 // otp_gate_paths_test.go -- so a stale rate there can be caught rather than
 // merely disclaimed. The prose in this package stays a hand-edit.
 func TestGateWorkflowCommentQuotesTheBudgetConstant(t *testing.T) {
-	raw, err := os.ReadFile(gateWorkflowPath)
-	if err != nil {
-		t.Fatalf("reading %s: %v", gateWorkflowPath, err)
-	}
+	raw := readGateWorkflow(t)
+
+	// EXACTLY once, not merely present. The comment claims that line is the only
+	// place the file states the number, and a Contains check would leave that
+	// invariant quietly false the day someone adds a second mention -- which is
+	// the drift this fence exists to catch, and which had already happened once:
+	// the paragraph used to spell the rate three ways, so a retune could fix the
+	// one line this test names and leave its neighbours stating the old number.
 	want := strconv.Itoa(perCredentialHourlyBudget) + "/hour per credential"
-	if !strings.Contains(string(raw), want) {
-		t.Fatalf("%s does not state %q; the rate was retuned in one place and the "+
-			"workflow comment now tells an operator the old number", gateWorkflowPath, want)
+	if n := strings.Count(raw, want); n != 1 {
+		t.Fatalf("%s states %q %d times, want exactly 1: at 0 a retune has left the "+
+			"comment stale, and above 1 the 'only place' claim is false and the extra "+
+			"mentions are outside this fence", gateWorkflowPath, want, n)
+	}
+
+	// The derived arithmetic belongs to selectEnrollment, which can interpolate
+	// the constant. Re-deriving it in the workflow is what produced the drift.
+	for _, forbidden := range []string{"len(pool)", "per slot", "PER SLOT"} {
+		if strings.Contains(raw, forbidden) {
+			t.Fatalf("%s contains %q: the pool arithmetic moved to selectEnrollment so a "+
+				"rate retune has one line to change here, not a paragraph",
+				gateWorkflowPath, forbidden)
+		}
 	}
 }
 
