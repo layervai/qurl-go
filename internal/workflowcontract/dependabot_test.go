@@ -175,15 +175,50 @@ func ignoredNames(rules []ignoreRule) []string {
 	return names
 }
 
-// unquoted strips the surrounding quotes YAML allows on a scalar.
+// unquoted returns the scalar a value position holds, without the quotes YAML
+// allows around it or a trailing comment. The comment matters because the entry
+// this reads is heavily commented: `- dependency-name: "x"  # audited pin` is a
+// plausible next edit, and a reader that kept the comment would report a
+// dependency nothing ignores and red a config that is correct.
 func unquoted(value string) string {
-	return strings.Trim(strings.TrimSpace(value), `"'`)
+	value = strings.TrimSpace(value)
+	if len(value) > 0 && (value[0] == '"' || value[0] == '\'') {
+		if end := strings.IndexByte(value[1:], value[0]); end >= 0 {
+			return value[1 : 1+end]
+		}
+	}
+	// Unquoted, a `#` opens a comment only where whitespace precedes it, so a
+	// `#` inside the scalar itself survives.
+	if comment := strings.Index(value, " #"); comment >= 0 {
+		value = strings.TrimSpace(value[:comment])
+	}
+	return value
 }
 
 // indentOf counts leading spaces. YAML forbids tabs for indentation, so spaces
 // are the whole story.
 func indentOf(line string) int {
 	return len(line) - len(strings.TrimLeft(line, " "))
+}
+
+func TestUnquotedReadsTheScalarWithoutItsComment(t *testing.T) {
+	for _, test := range []struct {
+		value string
+		want  string
+	}{
+		{value: ` "anthropics/claude-code-action"`, want: claudeAction},
+		{value: ` anthropics/claude-code-action`, want: claudeAction},
+		{value: ` "anthropics/claude-code-action"  # audited pin`, want: claudeAction},
+		{value: ` anthropics/claude-code-action # audited pin`, want: claudeAction},
+		{value: ` 'anthropics/claude-code-action'`, want: claudeAction},
+		{value: ` sharp#inside`, want: "sharp#inside"},
+	} {
+		t.Run(strings.TrimSpace(test.value), func(t *testing.T) {
+			if got := unquoted(test.value); got != test.want {
+				t.Errorf("unquoted(%q) = %q, want %q", test.value, got, test.want)
+			}
+		})
+	}
 }
 
 // twoEcosystems mirrors the shape of the real file: both ecosystems carry an
