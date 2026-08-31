@@ -299,7 +299,8 @@ func ExampleRecoverAgentRuntime() {
 
 func ExampleRecoverAgentRuntimeWithCredentialProvider() {
 	// Resolve account authority only when validated state needs the Hub. A pure
-	// cell resume does not ask the provider for a credential.
+	// cell resume or durable post-recovery assignment refresh does not ask the
+	// provider for a credential.
 	ctx := context.Background()
 	store, err := qurl.OpenFileAgentState("/var/lib/layerv/qurl/agent-state.json")
 	if err != nil {
@@ -319,6 +320,16 @@ func ExampleRecoverAgentRuntimeWithCredentialProvider() {
 	}
 	defer binding.Destroy()
 	_, _ = client, binding
+}
+
+func ExampleCredentialRecoveredAssignmentRefreshRequiredError() {
+	err := &qurl.CredentialRecoveredAssignmentRefreshRequiredError{AgentID: "agent-example"}
+	if errors.Is(err, qurl.ErrCredentialRecoveredAssignmentRefreshRequired) {
+		// The replacement credential is already durable. Resume only the
+		// mandatory Hub assignment refresh with RefreshAgentRuntime.
+		fmt.Println("refresh required for", err.AgentID)
+	}
+	// Output: refresh required for agent-example
 }
 
 func ExampleNewSealedFileAgentState() {

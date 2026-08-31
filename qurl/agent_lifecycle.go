@@ -19,10 +19,16 @@ var errAgentRuntimeRenewalUnavailable = errors.New("qurl: agent runtime assignme
 // still perform the store's own I/O, and loading a sealed store may call its key
 // wrapper or KMS.
 // The device credential is read from store behind a one-minute cache. Native
-// assignment absence, corruption, or expiry does not invalidate this resource
-// client; qURL Connector callers that will knock must instead use
+// assignment absence, corruption, or expiry does not normally invalidate this
+// resource client; qURL Connector callers that will knock must instead use
 // ConnectAgentRuntime, which validates the assignment and renews an expired
-// lease. The persisted agent id and X25519 keypair remain the durable device
+// lease. The exception is the durable post-credential-recovery refresh phase:
+// resource open also fails with ErrCredentialRecoveredAssignmentRefreshRequired
+// until RefreshAgentRuntime, or an exact RecoverAgentRuntime retry, successfully
+// completes an authenticated Hub assignment refresh and opens against that
+// authority. The refresh is mandatory even while the prior lease is live so
+// transient AgentKeys propagation cannot be mistaken for another recovery
+// episode. The persisted agent id and X25519 keypair remain the durable device
 // identity.
 //
 // WithAgentClientBaseURL and WithAgentClientHTTPClient can be reused across
@@ -489,6 +495,39 @@ func loadCompletedRegisteredState(ctx context.Context, store AgentStateStore, er
 		return nil, err
 	}
 	if err := validatePersistedCredentialForState(state, errKind); err != nil {
+		clearOwnedAgentState(state)
+		return nil, err
+	}
+	return state, nil
+}
+
+// loadCompletedRegisteredStateForRefresh is the only completed-state loader
+// that may admit a promoted credential whose assignment refresh/open is still
+// pending. It validates the credential material but leaves phase consumption to
+// the locked refresh transition.
+func loadCompletedRegisteredStateForRefresh(ctx context.Context, store AgentStateStore, errKind error) (*AgentState, error) {
+	state, err := loadExistingAgentState(ctx, store, errKind)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateCompletedAgentIdentity(state, errKind); err != nil {
+		clearOwnedAgentState(state)
+		return nil, err
+	}
+	if !isNativeAgentRuntimeState(state) {
+		agentID := state.AgentID
+		clearOwnedAgentState(state)
+		return nil, &NativeCredentialRecoveryRequiredError{
+			AgentID: agentID,
+			Cause:   fmt.Errorf("%w: completed state is not a native UDP runtime state", ErrInvalidAgentState),
+		}
+	}
+	if state.CredentialRecoveryRefreshRequired {
+		err = validatePersistedNativeDeviceCredentialMaterial(state, errKind)
+	} else {
+		err = validatePersistedNativeDeviceCredential(state, errKind)
+	}
+	if err != nil {
 		clearOwnedAgentState(state)
 		return nil, err
 	}

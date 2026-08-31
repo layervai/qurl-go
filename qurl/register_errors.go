@@ -159,8 +159,25 @@ func validatePersistedNativeDeviceCredential(state *AgentState, errKind error) e
 	if state == nil {
 		return &NativeCredentialRecoveryRequiredError{Cause: fmt.Errorf("%w: native agent state is nil", errKind)}
 	}
+	if state.CredentialRecoveryRefreshRequired {
+		return &CredentialRecoveredAssignmentRefreshRequiredError{
+			AgentID: state.AgentID,
+			Cause:   fmt.Errorf("%w: durable post-recovery assignment refresh is incomplete", errKind),
+		}
+	}
 	if state.PendingCredentialRecovery != nil || state.PendingCredentialRecoveryIssue != nil {
 		return &NativeCredentialRecoveryRequiredError{AgentID: state.AgentID, Cause: ErrCredentialRecoveryRequired}
+	}
+	return validatePersistedNativeDeviceCredentialMaterial(state, errKind)
+}
+
+// validatePersistedNativeDeviceCredentialMaterial validates the promoted
+// credential without interpreting lifecycle phase. It is reserved for the
+// refresh-only continuation that is allowed to consume the durable
+// CredentialRecoveryRefreshRequired authority.
+func validatePersistedNativeDeviceCredentialMaterial(state *AgentState, errKind error) error {
+	if state == nil {
+		return &NativeCredentialRecoveryRequiredError{Cause: fmt.Errorf("%w: native agent state is nil", errKind)}
 	}
 	if state.DeviceAPIKey == "" {
 		return &NativeCredentialRecoveryRequiredError{AgentID: state.AgentID, Cause: ErrDeviceCredentialMissing}
@@ -189,7 +206,7 @@ func validatePersistedCredentialForState(state *AgentState, errKind error) error
 }
 
 func isNativeAgentRuntimeState(state *AgentState) bool {
-	return state != nil && (state.Assignment != nil || state.PendingActivation != nil || state.PendingCompletion != nil || state.PendingCredentialRecovery != nil || state.PendingCredentialRecoveryIssue != nil || state.DeviceAPIKeyID != "")
+	return state != nil && (state.Assignment != nil || state.PendingActivation != nil || state.PendingCompletion != nil || state.PendingCredentialRecovery != nil || state.PendingCredentialRecoveryIssue != nil || state.CredentialRecoveryRefreshRequired || state.DeviceAPIKeyID != "")
 }
 
 // NativeCredentialRecoveryRequiredError reports a missing, malformed, or

@@ -799,6 +799,14 @@ func (c *nativeAgentRuntimeConfig) registerLocked(ctx context.Context, store Age
 		return nil, err
 	}
 	if state.RegisteredAt != nil {
+		if state.CredentialRecoveryRefreshRequired {
+			agentID := state.AgentID
+			clearOwnedAgentState(state)
+			return nil, &CredentialRecoveredAssignmentRefreshRequiredError{
+				AgentID: agentID,
+				Cause:   fmt.Errorf("%w: durable post-recovery assignment refresh is incomplete", ErrInvalidRegisterConfig),
+			}
+		}
 		// Renew only a structurally sound assignment whose lease ran out. Missing
 		// or malformed assignment state keeps its original terminal error from
 		// finishNativeRuntimeResult rather than reaching for the network.
@@ -2669,7 +2677,7 @@ func refreshAgentRuntimeLocked(ctx context.Context, hub HubBootstrap, store Agen
 	return withAgentSetupLock(ctx, store, destroyNativeRuntimeResult, func(lockedCtx context.Context, locked AgentStateStore) (*nativeRuntimeResult, error) {
 		cfg.continuityStore = locked
 		defer func() { cfg.continuityStore = nil }()
-		state, err := loadCompletedRegisteredState(lockedCtx, locked, ErrInvalidRegisterConfig)
+		state, err := loadCompletedRegisteredStateForRefresh(lockedCtx, locked, ErrInvalidRegisterConfig)
 		if err != nil {
 			return nil, err
 		}
@@ -2681,9 +2689,20 @@ func refreshAgentRuntimeLocked(ctx context.Context, hub HubBootstrap, store Agen
 // through the Hub and persists the result before finishing the runtime. It runs
 // only with the setup lock held. Every entry point that can meet an expired
 // lease on already-completed state routes through here — explicit refresh and
-// every online ConnectAgentRuntime start — so none of them can drift on trust
-// root, move adoption, or persistence ordering.
-func (c *nativeAgentRuntimeConfig) renewCompletedAssignment(ctx context.Context, hub HubBootstrap, locked AgentStateStore, state *AgentState) (*nativeRuntimeResult, error) {
+// every online ConnectAgentRuntime start except the explicit post-recovery
+// refresh-only phase — so none of them can drift on trust root, move adoption,
+// or persistence ordering.
+func (c *nativeAgentRuntimeConfig) renewCompletedAssignment(ctx context.Context, hub HubBootstrap, locked AgentStateStore, state *AgentState) (result *nativeRuntimeResult, err error) {
+	refreshRequired := state.CredentialRecoveryRefreshRequired
+	refreshRequiredAgentID := ""
+	if refreshRequired {
+		refreshRequiredAgentID = state.AgentID
+	}
+	defer func() {
+		if refreshRequired && err != nil && !errors.Is(err, ErrCredentialRecoveredAssignmentRefreshRequired) {
+			err = &CredentialRecoveredAssignmentRefreshRequiredError{AgentID: refreshRequiredAgentID, Cause: err}
+		}
+	}()
 	if state.Assignment == nil {
 		return nil, fmt.Errorf("%w: completed state has no assignment", ErrInvalidRegisterConfig)
 	}
@@ -2698,8 +2717,14 @@ func (c *nativeAgentRuntimeConfig) renewCompletedAssignment(ctx context.Context,
 	if err := reconcileNativeAgentIdentity(state, c.agentID); err != nil {
 		return nil, err
 	}
-	if err := validatePersistedNativeDeviceCredential(state, ErrInvalidRegisterConfig); err != nil {
-		return nil, err
+	var credentialErr error
+	if refreshRequired {
+		credentialErr = validatePersistedNativeDeviceCredentialMaterial(state, ErrInvalidRegisterConfig)
+	} else {
+		credentialErr = validatePersistedNativeDeviceCredential(state, ErrInvalidRegisterConfig)
+	}
+	if credentialErr != nil {
+		return nil, credentialErr
 	}
 	privateKey, err := decodeRuntimePrivateKey(state, ErrInvalidRegisterConfig)
 	if err != nil {
@@ -2720,6 +2745,9 @@ func (c *nativeAgentRuntimeConfig) renewCompletedAssignment(ctx context.Context,
 			return nil, fmt.Errorf("%w: save refreshed assignment: %w", ErrAgentBindingPersistence, err)
 		}
 		state = candidate
+	}
+	if refreshRequired {
+		return c.finishCredentialRecoveryRefresh(ctx, locked, state)
 	}
 	return finishNativeRuntimeResult(locked, state, c)
 }

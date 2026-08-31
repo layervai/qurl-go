@@ -142,6 +142,21 @@ func newCredentialRecoveryRuntimeFixture(t *testing.T, hubSteps, cellSteps []run
 	if err := f.store.SaveAgentState(context.Background(), state); err != nil {
 		t.Fatal(err)
 	}
+	contract := loadAssignmentFixture(t)
+	refreshBody := contract.RefreshAssignment.Result.BodyJSON
+	oldServerPublicKeyB64 := base64.StdEncoding.EncodeToString(assignmentHex(t, contract.Keys.AssignedCell.StaticPubHex))
+	// Every completed credential recovery must now cross one authenticated Hub
+	// assignment refresh before the refresh-only phase can clear. Tests may
+	// script a specific refresh response; otherwise this one-shot fallback echoes
+	// the currently persisted authoritative assignment, including any test-owned
+	// lease or generation change made after fixture construction.
+	f.hubUDP.setFallbackAssignmentReply(func() (string, bool) {
+		loaded, err := f.store.LoadAgentState(context.Background())
+		if err != nil || loaded == nil || loaded.Assignment == nil {
+			return "", false
+		}
+		return rewriteRefreshAssignmentBody(refreshBody, oldServerPublicKeyB64, loaded.Assignment), true
+	})
 	return f, fixture
 }
 
@@ -173,7 +188,8 @@ func TestRecoverAgentRuntime_ConformanceGoldenEndToEndAndZeroLifecycleHTTP(t *te
 	}
 	hubRequests := f.hubUDP.snapshot()
 	cellRequests := f.cellUDP.snapshot()
-	if len(hubRequests) != 1 || string(hubRequests[0].body) != fixture.PublicExchanges["hub_issue_recovery"].RequestBodyJSON {
+	if len(hubRequests) != 2 || string(hubRequests[0].body) != fixture.PublicExchanges["hub_issue_recovery"].RequestBodyJSON ||
+		!isHubAssignmentRequest(hubRequests[1].body) || bytes.Contains(hubRequests[1].body, []byte(credentialRecoveryQuery)) {
 		t.Fatalf("Hub recovery requests = %#v, want exact conformance body", hubRequests)
 	}
 	if len(cellRequests) != 1 || string(cellRequests[0].body) != fixture.PublicExchanges["assigned_cell_complete_recovery"].RequestBodyJSON {
@@ -190,7 +206,7 @@ func TestRecoverAgentRuntime_ConformanceGoldenEndToEndAndZeroLifecycleHTTP(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	if state.PendingCredentialRecovery != nil || state.DeviceAPIKey != fixture.Fixtures.DeviceAPIKeyCandidate || state.DeviceAPIKeyID != fixture.Fixtures.DeviceAPIKeyID ||
+	if state.PendingCredentialRecovery != nil || state.CredentialRecoveryRefreshRequired || state.DeviceAPIKey != fixture.Fixtures.DeviceAPIKeyCandidate || state.DeviceAPIKeyID != fixture.Fixtures.DeviceAPIKeyID ||
 		state.Assignment.CellID != fixture.Fixtures.CellID || state.Assignment.Endpoint.Host != fixture.Fixtures.NHPHost ||
 		binding.DeviceAPIKeyID != fixture.Fixtures.DeviceAPIKeyID || binding.NHPUDPEndpoint.Host != fixture.Fixtures.NHPHost {
 		t.Fatalf("recovered state/binding drifted: state=%#v binding=%s", state, binding)
@@ -213,7 +229,8 @@ func TestRecoverAgentRuntime_TestRecoveryCredentialGoldenPath(t *testing.T) {
 	hubRequests := f.hubUDP.snapshot()
 	wantBody := strings.Replace(fixture.PublicExchanges["hub_issue_recovery"].RequestBodyJSON,
 		fixture.Fixtures.RecoveryCredential, testCredential, 1)
-	if len(hubRequests) != 1 || string(hubRequests[0].body) != wantBody {
+	if len(hubRequests) != 2 || string(hubRequests[0].body) != wantBody ||
+		!isHubAssignmentRequest(hubRequests[1].body) || bytes.Contains(hubRequests[1].body, []byte(credentialRecoveryQuery)) {
 		t.Fatalf("Hub recovery requests = %#v, want exact lv_test_ body", hubRequests)
 	}
 }
@@ -392,8 +409,9 @@ func TestRecoverAgentRuntime_AuthenticatedCellSuccessCrossingHorizonIsPromoted(t
 		loaded.DeviceAPIKeyID != fixture.Fixtures.DeviceAPIKeyID || binding.DeviceAPIKeyID != fixture.Fixtures.DeviceAPIKeyID {
 		t.Fatalf("horizon-crossing success was not promoted: state=%#v binding=%v load=%v", loaded, binding, loadErr)
 	}
-	if len(f.hubUDP.snapshot()) != 0 || len(f.cellUDP.snapshot()) != 1 {
-		t.Fatalf("horizon-crossing success network = Hub %d cell %d, want 0/1", len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot()))
+	hubRequests := f.hubUDP.snapshot()
+	if len(hubRequests) != 1 || !isHubAssignmentRequest(hubRequests[0].body) || len(f.cellUDP.snapshot()) != 1 {
+		t.Fatalf("horizon-crossing success network = Hub %d cell %d, want one refresh and one recovery completion", len(hubRequests), len(f.cellUDP.snapshot()))
 	}
 }
 
@@ -423,15 +441,28 @@ func TestRecoverAgentRuntime_AuthenticatedCompletionIgnoresCallerCancellationFor
 		}
 		return deadline
 	}
-	client, binding, err := RecoverAgentRuntime(ctx, "", f.store, recoveryOptions(t, f, fixture, clock)...)
-	if err != nil || client == nil || binding == nil || !errors.Is(ctx.Err(), context.Canceled) {
+	opts := recoveryOptions(t, f, fixture, clock)
+	client, binding, err := RecoverAgentRuntime(ctx, "", f.store, opts...)
+	if client != nil || binding != nil || !errors.Is(err, ErrCredentialRecoveredAssignmentRefreshRequired) ||
+		!errors.Is(err, context.Canceled) || !errors.Is(ctx.Err(), context.Canceled) {
 		t.Fatalf("canceled post-auth promotion = %v/%v/%v; context=%v", client, binding, err, ctx.Err())
 	}
-	defer binding.Destroy()
 	loaded, loadErr := f.store.LoadAgentState(context.Background())
 	if loadErr != nil || loaded.PendingCredentialRecovery != nil || loaded.DeviceAPIKey != fixture.Fixtures.DeviceAPIKeyCandidate ||
-		loaded.DeviceAPIKeyID != fixture.Fixtures.DeviceAPIKeyID || len(f.hubUDP.snapshot()) != 0 || len(f.cellUDP.snapshot()) != 1 {
+		loaded.DeviceAPIKeyID != fixture.Fixtures.DeviceAPIKeyID || !loaded.CredentialRecoveryRefreshRequired ||
+		len(f.hubUDP.snapshot()) != 0 || len(f.cellUDP.snapshot()) != 1 {
 		t.Fatalf("canceled post-auth result was not durable: state=%#v load=%v Hub=%d cell=%d", loaded, loadErr, len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot()))
+	}
+	client, binding, err = RecoverAgentRuntime(context.Background(), "", f.store, opts...)
+	if err != nil || client == nil || binding == nil {
+		t.Fatalf("live-context refresh-only resume = %v/%v/%v", client, binding, err)
+	}
+	defer binding.Destroy()
+	loaded, loadErr = f.store.LoadAgentState(context.Background())
+	hubRequests := f.hubUDP.snapshot()
+	if loadErr != nil || loaded.CredentialRecoveryRefreshRequired || len(hubRequests) != 1 ||
+		!isHubAssignmentRequest(hubRequests[0].body) || len(f.cellUDP.snapshot()) != 1 {
+		t.Fatalf("live-context refresh-only completion = state %#v load %v Hub %v cell %d", loaded, loadErr, hubRequests, len(f.cellUDP.snapshot()))
 	}
 }
 
@@ -452,7 +483,7 @@ func TestRecoverAgentRuntime_DelayedCompletionRefreshesExpiredAssignment(t *test
 	}
 	defer binding.Destroy()
 	loaded, loadErr := f.store.LoadAgentState(context.Background())
-	if loadErr != nil || loaded.PendingCredentialRecovery != nil || loaded.DeviceAPIKeyID != fixture.Fixtures.DeviceAPIKeyID ||
+	if loadErr != nil || loaded.PendingCredentialRecovery != nil || loaded.CredentialRecoveryRefreshRequired || loaded.DeviceAPIKeyID != fixture.Fixtures.DeviceAPIKeyID ||
 		!loaded.Assignment.LeaseExpiresAt.Equal(fresh.LeaseExpiresAt) || !binding.LeaseExpiresAt.Equal(fresh.LeaseExpiresAt) {
 		t.Fatalf("post-completion refresh state/binding = %#v/%v/%v", loaded, binding, loadErr)
 	}
@@ -477,7 +508,8 @@ func TestRecoverAgentRuntime_DelayedCompletionRefreshFailureIsTypedAndRecoverabl
 	seedPendingCredentialRecovery(t, f, fixture, false)
 	_, _, err := RecoverAgentRuntime(context.Background(), "", f.store, recoveryOptions(t, f, fixture, func() time.Time { return now })...)
 	var refreshRequired *CredentialRecoveredAssignmentRefreshRequiredError
-	if !errors.As(err, &refreshRequired) || !errors.Is(err, ErrCredentialRecoveredAssignmentRefreshRequired) || !errors.Is(err, ErrAssignmentRecoveryRequired) {
+	if !errors.As(err, &refreshRequired) || refreshRequired.AgentID != fixture.Fixtures.AgentID ||
+		!errors.Is(err, ErrCredentialRecoveredAssignmentRefreshRequired) || !errors.Is(err, ErrAssignmentRecoveryRequired) {
 		t.Fatalf("post-recovery refresh failure = %v", err)
 	}
 	loaded, loadErr := f.store.LoadAgentState(context.Background())
@@ -490,8 +522,154 @@ func TestRecoverAgentRuntime_DelayedCompletionRefreshFailureIsTypedAndRecoverabl
 		t.Fatalf("explicit RefreshAgentRuntime recovery = %v/%v/%v", client, binding, err)
 	}
 	defer binding.Destroy()
+	loaded, loadErr = f.store.LoadAgentState(context.Background())
+	if loadErr != nil || loaded.CredentialRecoveryRefreshRequired {
+		t.Fatalf("explicit RefreshAgentRuntime did not durably clear refresh-only phase: %#v/%v", loaded, loadErr)
+	}
 	if len(f.cellUDP.snapshot()) != 1 || len(f.hubUDP.snapshot()) != 2 {
 		t.Fatalf("refresh recovery replayed credential completion: cell %d Hub %d", len(f.cellUDP.snapshot()), len(f.hubUDP.snapshot()))
+	}
+}
+
+func TestRefreshAgentRuntime_PostRecoveryPhasePreservesClassificationAndMarkerOnFailure(t *testing.T) {
+	fixture := loadCredentialRecoveryFixture(t)
+	now := time.Date(2026, 7, 20, 12, 1, 0, 0, time.UTC)
+	f, _ := newCredentialRecoveryRuntimeFixture(t,
+		[]runtimeUDPStep{{
+			requestType: relayknock.TypeListRequest,
+			replyType:   relayknock.TypeListResult,
+			replyBody:   `{"errCode":"52201","errMsg":"identity rejected"}`,
+		}},
+		nil,
+	)
+	state, err := f.store.LoadAgentState(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.Assignment = recoveryAssignmentFromFixture(t, fixture)
+	state.DeviceAPIKey = fixture.Fixtures.DeviceAPIKeyCandidate
+	state.DeviceAPIKeyID = fixture.Fixtures.DeviceAPIKeyID
+	state.CredentialRecoveryRefreshRequired = true
+	state.SchemaVersion = agentStateSchemaVersion
+	if err := f.store.SaveAgentState(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+
+	client, binding, err := RefreshAgentRuntime(context.Background(), f.hub, f.store,
+		f.refreshOptions(withAgentRuntimeClock(func() time.Time { return now }))...)
+	var refreshRequired *CredentialRecoveredAssignmentRefreshRequiredError
+	if client != nil || binding != nil || !errors.As(err, &refreshRequired) || refreshRequired.AgentID != fixture.Fixtures.AgentID ||
+		!errors.Is(err, ErrCredentialRecoveredAssignmentRefreshRequired) || !errors.Is(err, ErrAssignmentIdentityRejected) {
+		t.Fatalf("explicit post-recovery refresh failure = %v/%v/%v", client, binding, err)
+	}
+	state, loadErr := f.store.LoadAgentState(context.Background())
+	if loadErr != nil || !state.CredentialRecoveryRefreshRequired || len(f.hubUDP.snapshot()) != 1 || len(f.cellUDP.snapshot()) != 0 {
+		t.Fatalf("failed explicit refresh state/network = %#v/%v/%d/%d", state, loadErr, len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot()))
+	}
+}
+
+func TestRecoverAgentRuntime_PostRecoveryRefreshResumeNeverRestartsCredentialRecovery(t *testing.T) {
+	fixture := loadCredentialRecoveryFixture(t)
+	now := time.Date(2026, 7, 20, 12, 1, 0, 0, time.UTC)
+	fresh := recoveryAssignmentFromFixture(t, fixture)
+	fresh.LeaseExpiresAt = now.Add(time.Hour)
+	refreshBody := rewriteRefreshAssignment(t, loadAssignmentFixture(t), fresh)
+
+	tests := []struct {
+		name         string
+		firstHubStep runtimeUDPStep
+		wantCause    error
+		liveLease    bool
+	}{
+		{
+			name:         "expired assignment transport failure",
+			firstHubStep: runtimeUDPStep{requestType: relayknock.TypeListRequest, noReply: true},
+			wantCause:    ErrAssignmentRecoveryRequired,
+		},
+		{
+			name: "transient Hub AgentKeys propagation",
+			firstHubStep: runtimeUDPStep{
+				requestType: relayknock.TypeListRequest,
+				replyType:   relayknock.TypeListResult,
+				replyBody:   `{"errCode":"52201","errMsg":"identity rejected"}`,
+			},
+			wantCause: ErrAssignmentIdentityRejected,
+			liveLease: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			f, _ := newCredentialRecoveryRuntimeFixture(t,
+				[]runtimeUDPStep{
+					test.firstHubStep,
+					{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: refreshBody},
+				},
+				[]runtimeUDPStep{{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: fixture.PublicExchanges["assigned_cell_complete_recovery"].SuccessBodyJSON}},
+			)
+			seedPendingCredentialRecovery(t, f, fixture, false)
+			if test.liveLease {
+				state, err := f.store.LoadAgentState(context.Background())
+				if err != nil {
+					t.Fatal(err)
+				}
+				state.Assignment.LeaseExpiresAt = now.Add(time.Hour)
+				state.PendingCredentialRecovery.Assignment.LeaseExpiresAt = now.Add(time.Hour)
+				if err := f.store.SaveAgentState(context.Background(), state); err != nil {
+					t.Fatal(err)
+				}
+			}
+			providerCalls := 0
+			provider := func(context.Context) (string, error) {
+				providerCalls++
+				return "", errors.New("post-recovery refresh must not resolve recovery authority")
+			}
+			opts := recoveryOptions(t, f, fixture, func() time.Time { return now })
+
+			client, binding, err := RecoverAgentRuntimeWithCredentialProvider(context.Background(), provider, f.store, opts...)
+			if client != nil || binding != nil || !errors.Is(err, ErrCredentialRecoveredAssignmentRefreshRequired) || !errors.Is(err, test.wantCause) {
+				t.Fatalf("first post-recovery refresh = %v/%v/%v", client, binding, err)
+			}
+			state, loadErr := f.store.LoadAgentState(context.Background())
+			if loadErr != nil || !state.CredentialRecoveryRefreshRequired || state.PendingCredentialRecovery != nil || state.PendingCredentialRecoveryIssue != nil ||
+				state.DeviceAPIKey != fixture.Fixtures.DeviceAPIKeyCandidate || state.DeviceAPIKeyID != fixture.Fixtures.DeviceAPIKeyID {
+				t.Fatalf("durable post-recovery refresh phase = %#v/%v", state, loadErr)
+			}
+			if opened, openErr := OpenRegisteredAgent(context.Background(), f.store); opened != nil || !errors.Is(openErr, ErrCredentialRecoveredAssignmentRefreshRequired) {
+				t.Fatalf("ordinary open during refresh-only phase = %v/%v", opened, openErr)
+			}
+			connected, connectedBinding, connectErr := ConnectAgentRuntime(context.Background(), f.store,
+				f.connectOpenOptions(withAgentRuntimeClock(func() time.Time { return now }))...)
+			if connected != nil || connectedBinding != nil || !errors.Is(connectErr, ErrCredentialRecoveredAssignmentRefreshRequired) {
+				t.Fatalf("ordinary connect during refresh-only phase = %v/%v/%v", connected, connectedBinding, connectErr)
+			}
+
+			client, binding, err = RecoverAgentRuntimeWithCredentialProvider(context.Background(), provider, f.store, opts...)
+			if err != nil || client == nil || binding == nil {
+				t.Fatalf("second-invocation refresh-only resume = %v/%v/%v", client, binding, err)
+			}
+			defer binding.Destroy()
+			state, loadErr = f.store.LoadAgentState(context.Background())
+			if loadErr != nil || state.CredentialRecoveryRefreshRequired || !state.Assignment.LeaseExpiresAt.Equal(fresh.LeaseExpiresAt) {
+				t.Fatalf("completed post-recovery refresh phase = %#v/%v", state, loadErr)
+			}
+			if providerCalls != 0 {
+				t.Fatalf("post-recovery resume called recovery provider %d times", providerCalls)
+			}
+			hubRequests := f.hubUDP.snapshot()
+			cellRequests := f.cellUDP.snapshot()
+			if len(hubRequests) != 2 || len(cellRequests) != 1 {
+				t.Fatalf("post-recovery network = Hub %d cell %d, want two refreshes and one completed recovery", len(hubRequests), len(cellRequests))
+			}
+			for i, request := range hubRequests {
+				if !isHubAssignmentRequest(request.body) || bytes.Contains(request.body, []byte(credentialRecoveryQuery)) {
+					t.Fatalf("Hub request %d restarted credential recovery: %s", i, request.body)
+				}
+			}
+			if got := string(cellRequests[0].body); got != fixture.PublicExchanges["assigned_cell_complete_recovery"].RequestBodyJSON {
+				t.Fatalf("cell request restarted or changed credential recovery: %s", got)
+			}
+		})
 	}
 }
 
@@ -595,7 +773,8 @@ func TestRecoverAgentRuntime_StaleExactIssueReplayRenewsOnceBeforeCell(t *testin
 			defer binding.Destroy()
 			hub := f.hubUDP.snapshot()
 			cell := f.cellUDP.snapshot()
-			if len(hub) != 2 || bytes.Equal(hub[0].body, hub[1].body) || len(cell) != 1 || nonceDraws.Load() != 2 {
+			if len(hub) != 3 || bytes.Equal(hub[0].body, hub[1].body) || !isHubAssignmentRequest(hub[2].body) ||
+				len(cell) != 1 || nonceDraws.Load() != 3 {
 				t.Fatalf("renewal network/nonces = Hub %v cell %v draws %d", hub, cell, nonceDraws.Load())
 			}
 			var stale *AgentState
@@ -834,7 +1013,7 @@ func TestRecoverAgentRuntime_HubAssignmentReplacesOldCellWithoutFallback(t *test
 			t.Fatalf("recovery resolved the old cell: hosts=%v", gotHosts)
 		}
 	}
-	if strings.Join(gotHosts, ",") != "hub.nhp.layerv.ai,hub.nhp.layerv.ai,cell0.nhp.layerv.ai,cell0.nhp.layerv.ai" ||
+	if strings.Join(gotHosts, ",") != "hub.nhp.layerv.ai,hub.nhp.layerv.ai,cell0.nhp.layerv.ai,cell0.nhp.layerv.ai,hub.nhp.layerv.ai,hub.nhp.layerv.ai" ||
 		binding.CellID != fixture.Fixtures.CellID || binding.NHPUDPEndpoint.ServerPublicKeyB64 != fixture.Fixtures.ServerPublicKeyB64 {
 		t.Fatalf("Hub-authoritative placement = hosts %v binding %#v", gotHosts, binding)
 	}
@@ -972,7 +1151,7 @@ func TestRecoverAgentRuntime_TransportAmbiguityResumesCellWithoutHubOrCandidateR
 		t.Fatalf("exact pending resume = %v/%v/%v", client, binding, err)
 	}
 	defer binding.Destroy()
-	if providerCalls != 0 || len(f.hubUDP.snapshot()) != 1 || len(f.cellUDP.snapshot()) != 2 ||
+	if providerCalls != 0 || len(f.hubUDP.snapshot()) != 2 || !isHubAssignmentRequest(f.hubUDP.snapshot()[1].body) || len(f.cellUDP.snapshot()) != 2 ||
 		!bytes.Equal(f.cellUDP.snapshot()[0].body, f.cellUDP.snapshot()[1].body) {
 		t.Fatalf("resume provider/Hub/cell/body = %d/%d/%d/%v", providerCalls, len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot()), f.cellUDP.snapshot())
 	}
@@ -1025,7 +1204,8 @@ func TestRecoverAgentRuntime_LostHubReplyReusesDurableNonceAndExactBody(t *testi
 	}
 	defer binding.Destroy()
 	hub := f.hubUDP.snapshot()
-	if len(hub) != 2 || !bytes.Equal(hub[0].body, hub[1].body) || string(hub[0].body) != fixture.PublicExchanges["hub_issue_recovery"].RequestBodyJSON || nonceDraws.Load() != 1 {
+	if len(hub) != 3 || !bytes.Equal(hub[0].body, hub[1].body) || string(hub[0].body) != fixture.PublicExchanges["hub_issue_recovery"].RequestBodyJSON ||
+		!isHubAssignmentRequest(hub[2].body) || nonceDraws.Load() != 2 {
 		t.Fatalf("Hub replay body/draws = %v/%d", hub, nonceDraws.Load())
 	}
 }
@@ -1062,7 +1242,7 @@ func TestRecoverAgentRuntime_IssueResponsePersistenceFailureReplaysSameLogicalOp
 	}
 	defer binding.Destroy()
 	hub := f.hubUDP.snapshot()
-	if len(hub) != 2 || !bytes.Equal(hub[0].body, hub[1].body) {
+	if len(hub) != 3 || !bytes.Equal(hub[0].body, hub[1].body) || !isHubAssignmentRequest(hub[2].body) {
 		t.Fatalf("Issue result save replay changed logical operation: %v", hub)
 	}
 	var persistedPending *AgentState
@@ -1173,7 +1353,7 @@ func TestRecoverAgentRuntime_TerminalHubDenialClearsIntentForCorrectedAttempt(t 
 			}
 			defer binding.Destroy()
 			hub := f.hubUDP.snapshot()
-			if len(hub) != 2 || bytes.Equal(hub[0].body, hub[1].body) || draws.Load() != 2 {
+			if len(hub) != 3 || bytes.Equal(hub[0].body, hub[1].body) || !isHubAssignmentRequest(hub[2].body) || draws.Load() != 3 {
 				t.Fatalf("corrected attempt did not use a new Hub logical operation: %v/%d", hub, draws.Load())
 			}
 		})
@@ -1286,8 +1466,76 @@ func TestRecoverAgentRuntime_FinalPersistenceFailureReplaysCellOnly(t *testing.T
 	}
 	defer binding.Destroy()
 	cell := f.cellUDP.snapshot()
-	if len(f.hubUDP.snapshot()) != 1 || len(cell) != 2 || !bytes.Equal(cell[0].body, cell[1].body) {
+	if len(f.hubUDP.snapshot()) != 2 || !isHubAssignmentRequest(f.hubUDP.snapshot()[1].body) || len(cell) != 2 || !bytes.Equal(cell[0].body, cell[1].body) {
 		t.Fatalf("final save retry reminted network operation: Hub=%d cell=%v", len(f.hubUDP.snapshot()), cell)
+	}
+}
+
+func TestRecoverAgentRuntime_PostRecoveryRefreshClearFailureResumesWithExplicitRefresh(t *testing.T) {
+	fixture := loadCredentialRecoveryFixture(t)
+	now := credentialRecoveryFixtureNow
+	fresh := recoveryAssignmentFromFixture(t, fixture)
+	fresh.LeaseExpiresAt = now.Add(time.Hour)
+	refreshBody := rewriteRefreshAssignment(t, loadAssignmentFixture(t), fresh)
+	f, _ := newCredentialRecoveryRuntimeFixture(t,
+		[]runtimeUDPStep{
+			{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: fixture.PublicExchanges["hub_issue_recovery"].SuccessBodyJSON},
+			{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: refreshBody},
+		},
+		[]runtimeUDPStep{{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: fixture.PublicExchanges["assigned_cell_complete_recovery"].SuccessBodyJSON}},
+	)
+	f.store.fail = 6 // seed, Hub intent, candidate, promotion, refreshed assignment, then refresh-phase clear
+	opts := recoveryOptions(t, f, fixture, func() time.Time { return now })
+	client, binding, err := RecoverAgentRuntime(context.Background(), fixture.Fixtures.RecoveryCredential, f.store, opts...)
+	if client != nil || binding != nil || !errors.Is(err, ErrCredentialRecoveredAssignmentRefreshRequired) || !errors.Is(err, ErrAgentBindingPersistence) {
+		t.Fatalf("post-recovery refresh clear failure = %v/%v/%v", client, binding, err)
+	}
+	state, loadErr := f.store.LoadAgentState(context.Background())
+	if loadErr != nil || !state.CredentialRecoveryRefreshRequired || state.PendingCredentialRecovery != nil {
+		t.Fatalf("failed clear did not preserve refresh-only phase = %#v/%v", state, loadErr)
+	}
+
+	f.store.fail = 0
+	client, binding, err = RefreshAgentRuntime(context.Background(), f.hub, f.store,
+		f.refreshOptions(withAgentRuntimeClock(func() time.Time { return now }))...)
+	if err != nil || client == nil || binding == nil {
+		t.Fatalf("explicit post-recovery refresh clear resume = %v/%v/%v", client, binding, err)
+	}
+	defer binding.Destroy()
+	state, loadErr = f.store.LoadAgentState(context.Background())
+	if loadErr != nil || state.CredentialRecoveryRefreshRequired || !state.Assignment.LeaseExpiresAt.Equal(fresh.LeaseExpiresAt) || len(f.hubUDP.snapshot()) != 3 || len(f.cellUDP.snapshot()) != 1 {
+		t.Fatalf("explicit refresh-only clear resume state/network = %#v assignment=%#v want lease=%v/%v/%d/%d", state, state.Assignment, fresh.LeaseExpiresAt, loadErr, len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot()))
+	}
+}
+
+func TestCredentialRecoveryRefreshRequiredStateGrammar(t *testing.T) {
+	valid := completedNativeTestState(t)
+	valid.CredentialRecoveryRefreshRequired = true
+	if err := validateLoadedAgentAssignment(valid); err != nil {
+		t.Fatalf("valid post-recovery refresh state = %v", err)
+	}
+
+	tests := []struct {
+		name string
+		edit func(*AgentState)
+	}{
+		{name: "legacy schema", edit: func(state *AgentState) { state.SchemaVersion = credentialRecoveryRefreshStateSchemaVersion - 1 }},
+		{name: "missing registration", edit: func(state *AgentState) { state.RegisteredAt = nil }},
+		{name: "missing assignment", edit: func(state *AgentState) { state.Assignment = nil }},
+		{name: "missing credential", edit: func(state *AgentState) { state.DeviceAPIKey = "" }},
+		{name: "missing credential id", edit: func(state *AgentState) { state.DeviceAPIKeyID = "" }},
+		{name: "coexisting recovery intent", edit: func(state *AgentState) {
+			state.PendingCredentialRecoveryIssue = &PendingAgentCredentialRecoveryIssue{}
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			state := valid.clone()
+			test.edit(state)
+			if err := validateLoadedAgentAssignment(state); !errors.Is(err, ErrInvalidAgentState) {
+				t.Fatalf("invalid post-recovery refresh state = %v, want ErrInvalidAgentState", err)
+			}
+		})
 	}
 }
 
@@ -1300,6 +1548,7 @@ func TestRecoverAgentRuntime_PostCommitSaveErrorsReconcileWithoutExtraNetwork(t 
 		{name: "Hub intent", call: 2},
 		{name: "pending candidate", call: 3},
 		{name: "final promotion", call: 4},
+		{name: "post-recovery refresh clear", call: 5},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			f, _ := newCredentialRecoveryRuntimeFixture(t,
@@ -1313,8 +1562,8 @@ func TestRecoverAgentRuntime_PostCommitSaveErrorsReconcileWithoutExtraNetwork(t 
 			}
 			defer binding.Destroy()
 			state, err := f.store.LoadAgentState(context.Background())
-			if err != nil || state.PendingCredentialRecoveryIssue != nil || state.PendingCredentialRecovery != nil || state.DeviceAPIKey != fixture.Fixtures.DeviceAPIKeyCandidate ||
-				len(f.hubUDP.snapshot()) != 1 || len(f.cellUDP.snapshot()) != 1 {
+			if err != nil || state.PendingCredentialRecoveryIssue != nil || state.PendingCredentialRecovery != nil || state.CredentialRecoveryRefreshRequired || state.DeviceAPIKey != fixture.Fixtures.DeviceAPIKeyCandidate ||
+				len(f.hubUDP.snapshot()) != 2 || !isHubAssignmentRequest(f.hubUDP.snapshot()[1].body) || len(f.cellUDP.snapshot()) != 1 {
 				t.Fatalf("post-commit %s state/network = %#v/%v Hub=%d cell=%d", test.name, state, err, len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot()))
 			}
 		})
@@ -1457,7 +1706,7 @@ func TestRecoverAgentRuntime_RenewalResponsePersistenceFailureReusesNonceAndAnch
 	}
 	defer binding.Destroy()
 	hub := f.hubUDP.snapshot()
-	if len(hub) != 3 || !bytes.Equal(hub[1].body, hub[2].body) || renewalNonceDraws.Load() != 1 {
+	if len(hub) != 4 || !bytes.Equal(hub[1].body, hub[2].body) || !isHubAssignmentRequest(hub[3].body) || renewalNonceDraws.Load() != 2 {
 		t.Fatalf("renewal replay body/draws = %v/%d", hub, renewalNonceDraws.Load())
 	}
 	var renewed *AgentState
@@ -1508,7 +1757,7 @@ func TestRecoverAgentRuntime_PostCommitRenewalTransitionsReconcileInCall(t *test
 				t.Fatalf("post-commit %s = %v/%v/%v", test.name, client, binding, err)
 			}
 			defer binding.Destroy()
-			if len(f.hubUDP.snapshot()) != 2 || len(f.cellUDP.snapshot()) != 2 {
+			if len(f.hubUDP.snapshot()) != 3 || !isHubAssignmentRequest(f.hubUDP.snapshot()[2].body) || len(f.cellUDP.snapshot()) != 2 {
 				t.Fatalf("post-commit %s repeated network: Hub=%d cell=%d", test.name, len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot()))
 			}
 		})
@@ -1659,7 +1908,7 @@ func TestRecoverAgentRuntime_CommittedReplayAfterGrantExpiryUsesPersistedCellReq
 		t.Fatalf("committed replay after grant expiry = %v/%v/%v", client, binding, err)
 	}
 	defer binding.Destroy()
-	if len(f.hubUDP.snapshot()) != 0 || len(f.cellUDP.snapshot()) != 1 || string(f.cellUDP.snapshot()[0].body) != fixture.PublicExchanges["assigned_cell_complete_recovery"].RequestBodyJSON {
+	if len(f.hubUDP.snapshot()) != 1 || !isHubAssignmentRequest(f.hubUDP.snapshot()[0].body) || len(f.cellUDP.snapshot()) != 1 || string(f.cellUDP.snapshot()[0].body) != fixture.PublicExchanges["assigned_cell_complete_recovery"].RequestBodyJSON {
 		t.Fatalf("expired committed replay routing/body = Hub %d cell %v", len(f.hubUDP.snapshot()), f.cellUDP.snapshot())
 	}
 }

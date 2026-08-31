@@ -60,8 +60,10 @@ type runtimeUDPServer struct {
 	steps      []runtimeUDPStep
 	done       chan struct{}
 
-	mu       sync.Mutex
-	requests []runtimeUDPRequest
+	mu                      sync.Mutex
+	requests                []runtimeUDPRequest
+	fallbackAssignmentReply func() (string, bool)
+	fallbackAssignmentUsed  bool
 }
 
 func newRuntimeUDPServer(t *testing.T, serverPriv, agentPub []byte, steps ...runtimeUDPStep) *runtimeUDPServer {
@@ -133,6 +135,25 @@ func (s *runtimeUDPServer) serve() {
 		s.mu.Lock()
 		s.requests = append(s.requests, runtimeUDPRequest{typeID: opened.Type, body: bytes.Clone(opened.Body)})
 		s.mu.Unlock()
+		if index >= len(s.steps) && opened.Type == relayknock.TypeListRequest && isHubAssignmentRequest(opened.Body) {
+			s.mu.Lock()
+			fallback := s.fallbackAssignmentReply
+			if fallback != nil && !s.fallbackAssignmentUsed {
+				s.fallbackAssignmentUsed = true
+			} else {
+				fallback = nil
+			}
+			s.mu.Unlock()
+			if fallback != nil {
+				if replyBody, ok := fallback(); ok {
+					s.steps = append(s.steps, runtimeUDPStep{
+						requestType: relayknock.TypeListRequest,
+						replyType:   relayknock.TypeListResult,
+						replyBody:   replyBody,
+					})
+				}
+			}
+		}
 		if index >= len(s.steps) {
 			continue
 		}
@@ -162,6 +183,13 @@ func (s *runtimeUDPServer) serve() {
 			s.t.Logf("write runtime reply: %v", err)
 		}
 	}
+}
+
+func (s *runtimeUDPServer) setFallbackAssignmentReply(reply func() (string, bool)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.fallbackAssignmentReply = reply
+	s.fallbackAssignmentUsed = false
 }
 
 func isHubAssignmentRequest(body []byte) bool {
@@ -666,14 +694,19 @@ func seedCompletedRuntimeAssignment(t *testing.T, f *runtimeFixture, assignment 
 
 func rewriteRefreshAssignment(t *testing.T, contract *conformance.AgentAssignmentFile, assignment *AgentAssignment) string {
 	t.Helper()
+	oldServerPublicKeyB64 := base64.StdEncoding.EncodeToString(assignmentHex(t, contract.Keys.AssignedCell.StaticPubHex))
+	return rewriteRefreshAssignmentBody(contract.RefreshAssignment.Result.BodyJSON, oldServerPublicKeyB64, assignment)
+}
+
+func rewriteRefreshAssignmentBody(body, oldServerPublicKeyB64 string, assignment *AgentAssignment) string {
 	return strings.NewReplacer(
 		`"cell_id":"cell0"`, fmt.Sprintf(`"cell_id":%q`, assignment.CellID),
 		`"assignment_generation":1`, fmt.Sprintf(`"assignment_generation":%d`, assignment.AssignmentGeneration),
 		`"endpoint_revision":1`, fmt.Sprintf(`"endpoint_revision":%d`, assignment.EndpointRevision),
 		`"lease_expires_at":"2026-07-16T12:00:00Z"`, fmt.Sprintf(`"lease_expires_at":%q`, assignment.LeaseExpiresAt.Format(time.RFC3339)),
 		`"host":"cell0.nhp.layerv.ai"`, fmt.Sprintf(`"host":%q`, assignment.Endpoint.Host),
-		base64.StdEncoding.EncodeToString(assignmentHex(t, contract.Keys.AssignedCell.StaticPubHex)), assignment.Endpoint.ServerPublicKeyB64,
-	).Replace(contract.RefreshAssignment.Result.BodyJSON)
+		oldServerPublicKeyB64, assignment.Endpoint.ServerPublicKeyB64,
+	).Replace(body)
 }
 
 // refusingReassignmentHTTP returns an HTTP doer that refuses every request and a
