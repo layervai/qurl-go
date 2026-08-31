@@ -29,7 +29,20 @@ var ErrInvalidNativeKnockInput = errors.New("qurl: invalid native knock input")
 // reconnect in that cycle. The native knock runtime validates and carries the
 // value but never generates or normalizes one implicitly.
 type NativeKnockOptions struct {
-	RunID string
+	RunID      string
+	RunAttempt uint64
+	// ProtectedResourceID is the canonical public CRID resource. It is
+	// authenticated separately from the placement-neutral knock resource ID.
+	ProtectedResourceID string
+	// Operation is a prepared durable session operation. The caller must persist
+	// its exact JSON before this knock. Nil selects an operation-free knock; it
+	// does not make ProtectedResourceID optional.
+	Operation *NativeSessionOperation
+
+	// recovery selects the durable-operation recovery action inside the
+	// encrypted KNK body. It is package-private so ordinary callers cannot turn
+	// an admission API into a control operation.
+	recovery bool
 }
 
 // nativeAgentKnockBody is the AEAD-protected NHP_KNK application body for a
@@ -41,18 +54,38 @@ type NativeKnockOptions struct {
 // values use normal JSON semantics: encoders may escape equivalent characters
 // differently without changing the identity the server parses.
 type nativeAgentKnockBody struct {
-	HeaderType      int    `json:"headerType"`
-	UserID          string `json:"usrId"`
-	DeviceID        string `json:"devId"`
-	AuthServiceID   string `json:"aspId"`
-	KnockResourceID string `json:"resId"`
-	RunID           string `json:"runId"`
+	HeaderType          int               `json:"headerType"`
+	UserID              string            `json:"usrId"`
+	DeviceID            string            `json:"devId"`
+	AuthServiceID       string            `json:"aspId"`
+	KnockResourceID     string            `json:"resId"`
+	RunID               string            `json:"runId"`
+	RunAttempt          uint64            `json:"runAttempt"`
+	ProtectedResourceID string            `json:"protected_resource_id,omitempty"`
+	OperationID         string            `json:"operation_id,omitempty"`
+	BindingSHA256       string            `json:"binding_sha256,omitempty"`
+	OwnerID             string            `json:"owner_id,omitempty"`
+	PreparedAtMS        int64             `json:"prepared_at_ms,omitempty"`
+	ExpiresAtMS         int64             `json:"expires_at_ms,omitempty"`
+	UserData            map[string]string `json:"usrData,omitempty"`
+}
+
+type nativeExactSessionCloseBody struct {
+	HeaderType            int    `json:"headerType"`
+	AuthServiceID         string `json:"aspId"`
+	CellID                string `json:"cellId"`
+	SessionID             uint64 `json:"sessId"`
+	SessionIssuedAtMillis int64  `json:"sessIssuedAtMillis"`
+	RunID                 string `json:"runId"`
+	RunAttempt            uint64 `json:"runAttempt"`
 }
 
 // marshalNativeKnockApplicationBody is the single producer for the registered-
 // agent NHP_KNK body. The eventual UDP exchange calls this before resolving the
 // assignment host or constructing any packet, preserving the mandatory
 // caller-owned RunID boundary independently of transport retries.
+// KnockRegisteredAgent requires ProtectedResourceID before calling this helper;
+// the empty internal form remains only for historical packet-vector decoding.
 func marshalNativeKnockApplicationBody(agentID, knockResourceID string, opts NativeKnockOptions) ([]byte, error) {
 	return marshalNativeSessionApplicationBody(agentID, knockResourceID, opts, nhpKNKHeaderType)
 }
@@ -65,7 +98,7 @@ func marshalNativeKnockApplicationBody(agentID, knockResourceID string, opts Nat
 // an unsupported initiator message.
 func marshalNativeSessionApplicationBody(agentID, knockResourceID string, opts NativeKnockOptions, headerType int) ([]byte, error) {
 	switch headerType {
-	case nhpKNKHeaderType, nhpRKNHeaderType, nhpEXTHeaderType:
+	case nhpKNKHeaderType, nhpRKNHeaderType:
 	default:
 		return nil, fmt.Errorf("%w: unsupported native session header type", ErrInvalidNativeKnockInput)
 	}
@@ -74,6 +107,9 @@ func marshalNativeSessionApplicationBody(agentID, knockResourceID string, opts N
 	// error. ValidateCycleRunID reports only the violated shape.
 	if err := ValidateCycleRunID(opts.RunID); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrInvalidNativeKnockInput, err)
+	}
+	if opts.RunAttempt == 0 {
+		return nil, fmt.Errorf("%w: run attempt must be positive", ErrInvalidNativeKnockInput)
 	}
 	if err := validateNativeKnockIdentity("agent id", agentID); err != nil {
 		return nil, err
@@ -84,16 +120,58 @@ func marshalNativeSessionApplicationBody(agentID, knockResourceID string, opts N
 
 	// This scalar-only struct cannot currently make json.Marshal fail. Keep the
 	// error path explicit so adding a fallible field cannot silently weaken it.
-	body, err := json.Marshal(nativeAgentKnockBody{
-		HeaderType:      headerType,
-		UserID:          agentID,
-		DeviceID:        agentID,
-		AuthServiceID:   agentAspID,
-		KnockResourceID: knockResourceID,
-		RunID:           opts.RunID,
-	})
+	wire := nativeAgentKnockBody{
+		HeaderType:          headerType,
+		UserID:              agentID,
+		DeviceID:            agentID,
+		AuthServiceID:       agentAspID,
+		KnockResourceID:     knockResourceID,
+		RunID:               opts.RunID,
+		RunAttempt:          opts.RunAttempt,
+		ProtectedResourceID: opts.ProtectedResourceID,
+	}
+	if opts.Operation != nil {
+		operation := *opts.Operation
+		if validateNativeSessionOperation(operation) != nil || operation.AgentID != agentID ||
+			operation.ResourceID != knockResourceID || operation.RunID != opts.RunID ||
+			operation.RunAttempt != opts.RunAttempt || operation.ProtectedResourceID != opts.ProtectedResourceID {
+			return nil, ErrInvalidNativeSessionOperation
+		}
+		wire.OperationID = operation.OperationID
+		wire.BindingSHA256 = operation.BindingSHA256
+		wire.OwnerID = operation.OwnerID
+		wire.PreparedAtMS = operation.PreparedAtMillis
+		wire.ExpiresAtMS = operation.ExpiresAtMillis
+		if opts.recovery {
+			wire.UserData = map[string]string{
+				nativeSessionOperationRecoveryUserDataKey: nativeSessionOperationRecoveryAction,
+			}
+		}
+	} else if opts.recovery {
+		return nil, ErrInvalidNativeSessionOperation
+	}
+	body, err := json.Marshal(wire)
 	if err != nil {
 		return nil, fmt.Errorf("qurl: encode native knock body: %w", err)
+	}
+	if len(body) > nhpcontract.MaxApplicationBodySize {
+		return nil, fmt.Errorf("%w: encoded body exceeds NHP maximum of %d bytes", ErrInvalidNativeKnockInput, nhpcontract.MaxApplicationBodySize)
+	}
+	return body, nil
+}
+
+func marshalNativeExactSessionCloseBody(receipt NativeSessionReceipt) ([]byte, error) {
+	if err := validateNativeSessionReceipt(receipt); err != nil {
+		return nil, err
+	}
+	body, err := json.Marshal(nativeExactSessionCloseBody{
+		HeaderType: nhpEXTHeaderType, AuthServiceID: agentAspID,
+		CellID: receipt.CellID, SessionID: receipt.SessionID,
+		SessionIssuedAtMillis: receipt.SessionIssuedAtMillis,
+		RunID:                 receipt.RunID, RunAttempt: receipt.RunAttempt,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("qurl: encode exact native session close body: %w", err)
 	}
 	if len(body) > nhpcontract.MaxApplicationBodySize {
 		return nil, fmt.Errorf("%w: encoded body exceeds NHP maximum of %d bytes", ErrInvalidNativeKnockInput, nhpcontract.MaxApplicationBodySize)

@@ -928,6 +928,30 @@ func TestExchange_MultiAddressFallback(t *testing.T) {
 	}
 }
 
+func TestExchange_MixedLocalFailureAndSilenceIsNotNoReplyAuthority(t *testing.T) {
+	t.Parallel()
+	serverPriv, serverPub := mustKeypair(t)
+	devicePriv := mustPriv(t)
+	silent := newFakeServer(t, serverPriv, pubOf(t, devicePriv), behaviorSilent)
+	first := netip.MustParseAddr("9.9.9.9")
+	second := netip.MustParseAddr("149.112.112.112")
+	const assignedPort = 443
+	firstAddress := netip.AddrPortFrom(first, assignedPort).String()
+	dialer := &sequencedDialer{fail: map[string]bool{firstAddress: true}, real: &addressRoutingDialer{routes: map[string]string{
+		netip.AddrPortFrom(second, assignedPort).String(): silent.conn.LocalAddr().String(),
+	}}}
+	endpoint := nativeudp.Endpoint{Host: "cell0.nhp.test", Port: assignedPort, ServerStaticPub: serverPub}
+	options := nativeudp.Options{
+		DeviceStaticPriv: devicePriv, Resolver: resolverReturning([]netip.Addr{first, second}),
+		Dialer: dialer, Timeout: 100 * time.Millisecond, MaxAddresses: 2,
+	}
+
+	_, err := nativeudp.Knock(context.Background(), endpoint, nil, options)
+	if !errors.Is(err, nativeudp.ErrTransport) || errors.Is(err, nativeudp.ErrNoReply) {
+		t.Fatalf("mixed dial failure/silence = %v, want transport without no-reply authority", err)
+	}
+}
+
 // TestExchange_UnauthenticatedFirstAddressDoesNotFallThrough proves that a
 // received datagram is a definitive authentication result. A hostile first DNS
 // address must not be masked by retrying a second address that would answer with

@@ -1,4 +1,4 @@
-//go:build (!linux || android) && (!darwin || ios)
+//go:build (!linux || android) && (!darwin || ios) && !windows
 
 package qurl
 
@@ -23,9 +23,9 @@ type pinnedStateDirImpl struct {
 func canonicalPinnedStatePath(path string) string { return path }
 
 func openPinnedStateDir(_ string, _ string, _ pinnedStateDirOpenMode) (*pinnedStateDirImpl, error) {
-	// Fail before creating a directory, lock, temp, or state file. Windows needs
-	// a real CreateFile/LockFileEx/ACL/FlushFileBuffers implementation rather than
-	// a pathname approximation; other platforms need equivalent reviewed support.
+	// Fail before creating a directory, lock, temp, or state file. Each added
+	// platform needs equivalent reviewed handle, lock, permission, and durability
+	// support rather than a pathname approximation.
 	return nil, errors.Join(ErrAgentStateContinuity, errPinnedStateUnsupported)
 }
 

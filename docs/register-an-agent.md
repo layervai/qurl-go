@@ -43,7 +43,15 @@ if err != nil {
 
 admission, err := qurl.KnockRegisteredAgent(ctx, binding, privateKey,
 	connector.Resource.KnockResourceID,
-	qurl.NativeKnockOptions{RunID: runID},
+	qurl.NativeKnockOptions{RunID: runID, RunAttempt: 1},
+)
+if err != nil {
+	return err
+}
+
+// After the corresponding serving session has stopped and drained:
+_, err = qurl.RetireRegisteredAgentSession(ctx, binding, privateKey,
+	admission.SessionReceipt,
 )
 if err != nil {
 	return err
@@ -77,11 +85,20 @@ fails instead of creating or adopting a replacement.
 
 And two rules for the serving loop:
 
-- **One run ID per cycle.** Do not regenerate it between steps or retries — that
-  single ID is what lets LayerV correlate a retry with the attempt that started
-  it.
-- **Wipe the key** when the cycle ends, and call
-  `qurl.ExitRegisteredAgentSession` to close out cleanly.
+- **One run ID and positive attempt number per cycle attempt.** Do not change
+  either between retries. Increment the attempt only when starting a new
+  serving attempt under the same run.
+- **Retire before wiping the key.** After the serving session has stopped and
+  drained, call `qurl.RetireRegisteredAgentSession` with the exact
+  `SessionReceipt` returned by admission. Retry an ambiguous result with that
+  same receipt, then wipe the device key when the lifecycle operation ends.
+  Retirement closes only that admission; it cannot retire a sibling or
+  replacement.
+- **Keep the receipt opaque and in memory.** Copying the complete Go value is
+  safe, but do not JSON-marshal or reconstruct it from its exported fields: its
+  private routing snapshot returns retirement to the original cell and is not
+  serialized. Server-side recovery closes sessions left behind by a process
+  crash.
 
 ## Which enrollment path?
 

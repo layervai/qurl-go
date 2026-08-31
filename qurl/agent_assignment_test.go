@@ -1053,7 +1053,7 @@ func TestAgentAssignmentStatePersistsOnlyDurableBinding(t *testing.T) {
 	}
 	dir := secureAgentStateTestDir(t)
 	path := filepath.Join(dir, "agent-state.json")
-	store := FileAgentState(path)
+	store := testFileAgentState(t, path)
 	state := &AgentState{
 		AgentID: "agent-conform", PrivateKeyB64: base64.StdEncoding.EncodeToString(assignmentHex(t, fixture.Keys.Agent.StaticPrivHex)),
 		PublicKeyB64:  base64.StdEncoding.EncodeToString(assignmentHex(t, fixture.Keys.Agent.StaticPubHex)),
@@ -1375,7 +1375,7 @@ func TestInitialAssignmentDeadlineClocksAreIndependent(t *testing.T) {
 	}
 }
 
-func TestInitialAssignmentEnforcesConformanceTicketLifetime(t *testing.T) {
+func TestInitialAssignmentDoesNotInferOpaqueTicketLifetimeFromClientClock(t *testing.T) {
 	fixture := loadAssignmentFixture(t)
 	var envelope map[string]any
 	if err := json.Unmarshal([]byte(fixture.InitialAssignment.Result.BodyJSON), &envelope); err != nil {
@@ -1384,12 +1384,11 @@ func TestInitialAssignmentEnforcesConformanceTicketLifetime(t *testing.T) {
 	list := envelope["list"].(map[string]any)
 
 	for _, test := range []struct {
-		name    string
-		expiry  time.Time
-		wantErr bool
+		name   string
+		expiry time.Time
 	}{
-		{name: "exact maximum", expiry: assignmentFixtureNow.Add(maxAssignmentTicketLifetime)},
-		{name: "maximum plus one second", expiry: assignmentFixtureNow.Add(maxAssignmentTicketLifetime + time.Second), wantErr: true},
+		{name: "clocks aligned", expiry: assignmentFixtureNow.Add(15 * time.Minute)},
+		{name: "client two seconds behind producer", expiry: assignmentFixtureNow.Add(15*time.Minute + 2*time.Second)},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			candidate := maps.Clone(list)
@@ -1400,9 +1399,12 @@ func TestInitialAssignmentEnforcesConformanceTicketLifetime(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, err = parseInitialAssignmentReply(body, "agent-conform", assignmentFixtureNow)
-			if test.wantErr != errors.Is(err, ErrAssignmentInvalidResponse) {
-				t.Fatalf("ticket lifetime parse = %v, want invalid=%t", err, test.wantErr)
+			initial, err := parseInitialAssignmentReply(body, "agent-conform", assignmentFixtureNow)
+			if err != nil {
+				t.Fatalf("authenticated public expiry rejected: %v", err)
+			}
+			if !initial.AssignmentTicketExpiresAt.Equal(test.expiry) {
+				t.Fatalf("ticket expiry = %s, want %s", initial.AssignmentTicketExpiresAt, test.expiry)
 			}
 		})
 	}
@@ -1483,7 +1485,7 @@ func TestAssignmentErrorsNeverRetainOrRenderProducerControlledSecrets(t *testing
 	}
 }
 
-func TestAssignmentTicketMatchesReleasedConformanceBoundary(t *testing.T) {
+func TestAssignmentTicketSizeMatchesReleasedConformanceBoundary(t *testing.T) {
 	ticketArtifact, err := conformance.AssignmentTicket()
 	if err != nil {
 		t.Fatalf("load assignment-ticket conformance: %v", err)
@@ -1491,10 +1493,6 @@ func TestAssignmentTicketMatchesReleasedConformanceBoundary(t *testing.T) {
 	if maxAssignmentTicketBytes != ticketArtifact.Contract.MaxTicketASCIIBytes {
 		t.Fatalf("SDK ticket limit = %d, released conformance limit = %d", maxAssignmentTicketBytes, ticketArtifact.Contract.MaxTicketASCIIBytes)
 	}
-	if maxAssignmentTicketLifetime != time.Duration(ticketArtifact.Contract.MaxLifetimeSeconds)*time.Second {
-		t.Fatalf("SDK ticket lifetime = %s, released conformance limit = %ds", maxAssignmentTicketLifetime, ticketArtifact.Contract.MaxLifetimeSeconds)
-	}
-
 	maxTicket := "!" + strings.Repeat("~", maxAssignmentTicketBytes-1)
 	if err := validateOpaqueAssignmentTicket(maxTicket); err != nil {
 		t.Fatalf("exact-max printable ticket rejected: %v", err)

@@ -12,6 +12,8 @@ import (
 	"github.com/layervai/qurl-go/internal/x25519key"
 )
 
+var errAgentRuntimeRenewalUnavailable = errors.New("qurl: agent runtime assignment renewal unavailable")
+
 // OpenRegisteredAgent opens a Client from a completed AgentState without making
 // enrollment or resource API calls. Loading a custom network-backed store may
 // still perform the store's own I/O, and loading a sealed store may call its key
@@ -125,9 +127,10 @@ func validateRegisteredAgentOpenInputs(ctx context.Context, store AgentStateStor
 // after every accidental copy becomes unreachable; it is defense in depth, not
 // a substitute for deterministic Destroy.
 //
-// A binding keeps its own assignment lease current. KnockRegisteredAgent and
-// ExitRegisteredAgentSession renew it through the Hub as it approaches expiry, so
-// a process may hold one binding indefinitely without tracking leases.
+// A binding keeps its own assignment lease current. KnockRegisteredAgent
+// renews it through the Hub as it approaches expiry. Exact retirement instead
+// uses the immutable issuing endpoint captured in its session receipt, so a
+// later reassignment cannot strand an older session in another cell.
 //
 // The exported assignment fields are written once, when the binding is created,
 // and are never touched again. They are a stable record of the placement this
@@ -146,6 +149,7 @@ type AgentRuntimeBinding struct {
 
 	authoritativeAgentID      string
 	authoritativePublicKeyB64 string
+	enrollmentCredentialKind  string
 	authoritativeAssignment   *AgentAssignment
 	renewedAssignment         *AgentAssignment
 	deviceStaticPrivateKey    *agentRuntimePrivateKey
@@ -334,6 +338,7 @@ func newAgentRuntimeBinding(state *AgentState, privateKey []byte) *AgentRuntimeB
 		NHPUDPEndpoint:            state.Assignment.Endpoint,
 		authoritativeAgentID:      state.AgentID,
 		authoritativePublicKeyB64: state.PublicKeyB64,
+		enrollmentCredentialKind:  state.EnrollmentCredentialKind,
 		authoritativeAssignment:   state.Assignment.clone(),
 		deviceStaticPrivateKey:    newAgentRuntimePrivateKey(privateKey),
 	}
@@ -383,24 +388,57 @@ func (b *AgentRuntimeBinding) attachRenewal(store AgentStateStore, cfg *nativeAg
 // outage never takes down a working agent. Only an already-expired lease turns a
 // renewal failure into a failed exchange.
 func (b *AgentRuntimeBinding) liveSessionAssignment(ctx context.Context, deviceStaticPrivateKey []byte, now time.Time) (*AgentAssignment, error) {
+	return b.liveSessionAssignmentWithPolicy(ctx, deviceStaticPrivateKey, now, false)
+}
+
+// liveSessionAssignmentStrict uses the supplied renewal decision instant and
+// returns a renewal failure even while the current lease is still live. A
+// caller uses this only when its operation needs more lease margin than the
+// current placement provides and cannot safely fall back to that placement.
+func (b *AgentRuntimeBinding) liveSessionAssignmentStrict(ctx context.Context, deviceStaticPrivateKey []byte,
+	renewalDecisionAt time.Time,
+) (*AgentAssignment, error) {
+	return b.liveSessionAssignmentWithPolicy(ctx, deviceStaticPrivateKey, renewalDecisionAt, true)
+}
+
+func (b *AgentRuntimeBinding) liveSessionAssignmentWithPolicy(ctx context.Context, deviceStaticPrivateKey []byte,
+	renewalDecisionAt time.Time, requireRenewal bool,
+) (*AgentAssignment, error) {
 	if b.renewal == nil {
-		return b.checkedAssignment(b.assignment())
+		current, err := b.checkedAssignment(b.assignment())
+		if err != nil {
+			return nil, err
+		}
+		if requireRenewal && !renewalDecisionAt.Add(sessionLeaseRenewalLead).Before(current.LeaseExpiresAt) {
+			return nil, errAgentRuntimeRenewalUnavailable
+		}
+		return current, nil
 	}
 	b.renewal.mu.Lock()
 	defer b.renewal.mu.Unlock()
 	current := b.livePlacement()
-	if current == nil || !now.Add(sessionLeaseRenewalLead).Before(current.LeaseExpiresAt) {
-		expired := current == nil || current.LeaseExpired(now)
-		fresh, err := b.renewal.cfg.renewSessionAssignment(ctx, b.renewal.hub, b.renewal.store, b.AgentID, deviceStaticPrivateKey, now)
+	if current == nil || !renewalDecisionAt.Add(sessionLeaseRenewalLead).Before(current.LeaseExpiresAt) {
+		expired := current == nil || current.LeaseExpired(renewalDecisionAt)
+		fresh, err := b.renewal.cfg.renewSessionAssignment(ctx, b.renewal.hub, b.renewal.store, b.AgentID, deviceStaticPrivateKey, renewalDecisionAt)
 		switch {
 		case err == nil:
 			b.adoptRenewedAssignmentLocked(fresh)
 			current = b.livePlacement()
-		case expired:
+		case expired || requireRenewal:
 			return nil, err
 		}
 	}
-	return b.checkedAssignment(current)
+	current, err := b.checkedAssignment(current)
+	if err != nil {
+		return nil, err
+	}
+	// A successful Hub exchange is not enough for strict callers: the returned
+	// lease must itself provide the requested margin. Keep this invariant here so
+	// future callers cannot accidentally depend only on an outer re-check.
+	if requireRenewal && !renewalDecisionAt.Add(sessionLeaseRenewalLead).Before(current.LeaseExpiresAt) {
+		return nil, errAgentRuntimeRenewalUnavailable
+	}
+	return current, nil
 }
 
 // checkedAssignment rejects edited exported assignment fields, so tampering with

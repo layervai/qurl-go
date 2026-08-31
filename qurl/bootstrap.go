@@ -97,6 +97,11 @@ type AgentState struct {
 	// UDP completion. It is never a secret.
 	DeviceAPIKeyID string `json:"device_api_key_id,omitempty"`
 
+	// EnrollmentCredentialKind is the exact credential scope authenticated by
+	// the Hub and assigned cell during registration. Native session operations
+	// bind this value into their durable authority. It is not a credential.
+	EnrollmentCredentialKind string `json:"enrollment_credential_kind,omitempty"`
+
 	// PendingActivation is durably persisted through the configured
 	// AgentStateStore before the first assigned-cell REG. It retains the exact
 	// non-secret activation proof and placement needed to recover an
@@ -413,9 +418,9 @@ type AgentStateStore interface {
 // The caller owns the returned handle and must Close it after every Client and
 // native lifecycle operation that can use the store has finished.
 //
-// Linux and Darwin are supported, excluding Android and iOS. Mobile and other
-// platforms fail before filesystem mutation until they have reviewed ACL,
-// locking, and durability primitives.
+// Linux, Darwin, and Windows are supported, excluding Android and iOS. Mobile
+// and other platforms fail before filesystem mutation until they have reviewed
+// ACL, locking, and durability primitives.
 func OpenFileAgentState(path string) (*FileAgentStateStore, error) {
 	dir, name, err := openPinnedStatePath(path, "agent state")
 	if err != nil {

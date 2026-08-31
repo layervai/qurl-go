@@ -29,7 +29,32 @@ func secureAgentStateTestDir(t *testing.T) string {
 	if err := os.Chmod(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	secureAgentStateTestDirPlatform(t, dir)
 	return dir
+}
+
+func testFileAgentState(t *testing.T, path string) AgentStateStore {
+	t.Helper()
+	store := FileAgentState(path)
+	closer, ok := store.(io.Closer)
+	if !ok {
+		t.Fatalf("FileAgentState dynamic type %T does not implement io.Closer", store)
+	}
+	t.Cleanup(func() {
+		if err := closer.Close(); err != nil {
+			t.Errorf("close plaintext agent state: %v", err)
+		}
+	})
+	return store
+}
+
+func cleanupTestSealedAgentState(t *testing.T, store *SealedFileAgentStateStore) {
+	t.Helper()
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("close sealed agent state: %v", err)
+		}
+	})
 }
 
 type localAgentStateStoreFactory struct {
@@ -41,7 +66,7 @@ func localAgentStateStoreFactories() []localAgentStateStoreFactory {
 	return []localAgentStateStoreFactory{
 		{name: "plaintext", new: func(t *testing.T) (AgentStateStore, string) {
 			path := filepath.Join(secureAgentStateTestDir(t), "agent_state.json")
-			return FileAgentState(path), path
+			return testFileAgentState(t, path), path
 		}},
 		{name: "sealed", new: func(t *testing.T) (AgentStateStore, string) {
 			store := testSealedStore(t, &testAgentStateKeyWrapper{})
@@ -232,14 +257,12 @@ func testWrapperMetadata(binding AgentStateKeyBinding) json.RawMessage {
 
 func testSealedStore(t *testing.T, wrapper *testAgentStateKeyWrapper) *SealedFileAgentStateStore {
 	t.Helper()
-	root := t.TempDir()
-	if err := os.Chmod(root, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	root := secureAgentStateTestDir(t)
 	store, err := NewSealedFileAgentState(filepath.Join(root, "agent_state.sealed.json"), "test-wrapper", wrapper)
 	if err != nil {
 		t.Fatal(err)
 	}
+	cleanupTestSealedAgentState(t, store)
 	return store
 }
 
@@ -312,20 +335,7 @@ func TestSealedFileAgentState_RoundTripFreshEnvelopeAndZeroization(t *testing.T)
 		t.Fatal("successive saves reused nonce, DEK, or ciphertext")
 	}
 
-	info, err := os.Stat(store.path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Mode().Perm() != 0o600 {
-		t.Fatalf("file mode = %o, want 0600", info.Mode().Perm())
-	}
-	dirInfo, err := os.Stat(filepath.Dir(store.path))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if dirInfo.Mode().Perm() != 0o700 {
-		t.Fatalf("dir mode = %o, want 0700", dirInfo.Mode().Perm())
-	}
+	assertPrivateStatePermissionsPlatform(t, store.path, filepath.Dir(store.path))
 
 	wrapper.mu.Lock()
 	defer wrapper.mu.Unlock()
@@ -576,7 +586,7 @@ func TestNewSealedFileAgentState_AcceptsCanonicalProviderID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSealedFileAgentState: %v", err)
 	}
-	t.Cleanup(func() { _ = store.Close() })
+	cleanupTestSealedAgentState(t, store)
 }
 
 func TestValidateWrappedAgentStateKey_RejectsZeroVersion(t *testing.T) {
@@ -601,16 +611,14 @@ func TestSealedFileAgentState_ExpectedAgentID(t *testing.T) {
 		t.Fatalf("control-character expected id = %v, want ErrInvalidBootstrapConfig", err)
 	}
 
-	dir := t.TempDir()
-	if err := os.Chmod(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	dir := secureAgentStateTestDir(t)
 	path := filepath.Join(dir, "agent_state.sealed.json")
 	wrapper := &testAgentStateKeyWrapper{}
 	pinned, err := NewSealedFileAgentState(path, "test", wrapper, WithExpectedSealedAgentID(expectedID))
 	if err != nil {
 		t.Fatal(err)
 	}
+	cleanupTestSealedAgentState(t, pinned)
 	state := testAgentState(t)
 	state.AgentID = expectedID
 	if err := pinned.SaveAgentState(context.Background(), state); err != nil {
@@ -631,6 +639,7 @@ func TestSealedFileAgentState_ExpectedAgentID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	cleanupTestSealedAgentState(t, unpinned)
 	if err := unpinned.SaveAgentState(context.Background(), state); err != nil {
 		t.Fatalf("save other agent through unpinned store: %v", err)
 	}
@@ -1190,25 +1199,22 @@ func TestSealedFileAgentState_LoadWrapperOperationalVsInvalid(t *testing.T) {
 func TestSealedFileAgentState_RejectsInsecureDirectoryAndOversizeFile(t *testing.T) {
 	wrapper := &testAgentStateKeyWrapper{}
 	dir := t.TempDir()
-	if err := os.Chmod(dir, 0o750); err != nil {
-		t.Fatal(err)
-	}
+	makePrivateStateDirInsecurePlatform(t, dir)
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
 	if _, err := NewSealedFileAgentState(filepath.Join(dir, "state.json"), "test", wrapper); !errors.Is(err, ErrInsecureAgentStatePermissions) {
 		t.Fatalf("open in 0750 dir = %v", err)
 	}
 
-	dir2 := t.TempDir()
-	if err := os.Chmod(dir2, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	dir2 := secureAgentStateTestDir(t)
 	store2, err := NewSealedFileAgentState(filepath.Join(dir2, "state.json"), "test", wrapper)
 	if err != nil {
 		t.Fatal(err)
 	}
+	cleanupTestSealedAgentState(t, store2)
 	if err := os.WriteFile(store2.path, bytes.Repeat([]byte{'x'}, maxSealedAgentStateEnvelope+1), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	securePrivateStateFilePlatform(t, store2.path)
 	if _, err := store2.LoadAgentState(context.Background()); !errors.Is(err, ErrInvalidAgentState) {
 		t.Fatalf("oversized load = %v, want ErrInvalidAgentState", err)
 	}
