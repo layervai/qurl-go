@@ -467,7 +467,17 @@ func TestSelectEnrollmentAlwaysReturnsAPoolMember(t *testing.T) {
 		{"GITHUB_RUN_NUMBER": "not-a-number"},                   // unparseable
 		{"GITHUB_RUN_NUMBER": "-4", "GITHUB_RUN_ATTEMPT": "-1"}, // negative
 		{"GITHUB_RUN_NUMBER": "0", "GITHUB_RUN_ATTEMPT": "0"},   // zero
-		{"GITHUB_RUN_NUMBER": "99999999999999999999"},           // overflows int
+		// The attempt floor is ARITHMETIC, not merely semantic: Go's % keeps
+		// the sign, so attempt 0 makes (attempt-1)%n equal -1, and a run
+		// number divisible by the pool size then yields slot -1 and PANICS
+		// the index. The zero row above cannot catch a relaxed attempt floor
+		// because the RUN NUMBER floor blocks it first and diverts to the
+		// random path; these supply a valid run number so the attempt floor
+		// is the only thing standing between the suite and a panic on
+		// 1-in-len(pool) real runs.
+		{"GITHUB_RUN_NUMBER": "6", "GITHUB_RUN_ATTEMPT": "0"},
+		{"GITHUB_RUN_NUMBER": "12", "GITHUB_RUN_ATTEMPT": "-1"},
+		{"GITHUB_RUN_NUMBER": "99999999999999999999"}, // overflows int
 		// MaxInt64 in both: the sum must not wrap to a negative slot.
 		{"GITHUB_RUN_NUMBER": "9223372036854775807", "GITHUB_RUN_ATTEMPT": "9223372036854775807"},
 	} {
@@ -763,6 +773,29 @@ func TestLoadOTPE2EConfigAcceptsEitherCredentialSource(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "duplicate") {
 			t.Fatalf("strict error %q blames truncation; the secret was duplicated", err)
+		}
+	})
+
+	// BOTH faults at once. A damaged pool makes selectEnrollment short-circuit
+	// and report nothing blocked, so before the guards were aggregated the
+	// counter fault was not merely deferred to the next gate cycle -- it was
+	// invisible until the secret was fixed. Both must be named in one pass.
+	t.Run("strict run names the pool and the counters when both are broken", func(t *testing.T) {
+		_, _, err := loadOTPE2EConfig(envFrom(with(map[string]string{
+			otpE2EEnrollmentPoolEnv: "only-one", // damaged: a pool of one
+			otpE2EEnrollmentEnv:     "",         // nothing to backfill with
+			otpE2EStrictEnv:         "1",
+			"GITHUB_RUN_NUMBER":     "not-a-number", // and the counter is broken
+			"GITHUB_RUN_ATTEMPT":    "1",
+		})))
+		if err == nil {
+			t.Fatal("strict run accepted a damaged pool with an unusable counter")
+		}
+		for _, want := range []string{otpE2EEnrollmentPoolEnv, "GITHUB_RUN_NUMBER"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("strict error %q omits %s; fixing one fault would burn a gate "+
+					"cycle to discover the other", err, want)
+			}
 		}
 	})
 

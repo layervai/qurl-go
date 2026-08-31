@@ -177,31 +177,56 @@ func loadOTPE2EConfig(lookup func(string) string) (otpE2EConfig, bool, error) {
 		return otpE2EConfig{}, false, fmt.Errorf("%s must be a valid UDP port", otpE2EHubPortEnv)
 	}
 
-	enrollment, slot, unrotatedBecause := selectEnrollment(pool, lookup)
+	enrollment, slot, _ := selectEnrollment(pool, lookup)
 
 	// Every other prerequisite in this gate is loud (see otpE2EStrictEnv), and
 	// the rotation has to join them. A missing GITHUB_RUN_NUMBER falls back to
 	// random, which quietly reinstates the clustering the pool exists to avoid
 	// -- and the only symptom would be this gate going red again weeks later,
 	// for the same reason and with the same misleading evidence as last time.
-	// A pool that lost its slots degrades exactly as silently as a missing
-	// counter, and to the same place: one credential, 5 issuances an hour for
-	// the whole gate, which is the state the pool was built to leave. The only
-	// other signal is "slot 0 of 1" in a log the canary does not even print.
-	if strict && fromPool && len(pool) < 2 {
-		return otpE2EConfig{}, false, fmt.Errorf(
-			"strict OTP e2e run parsed %d credential(s)%s from %s: the pool is the "+
-				"multi-credential source (single credentials belong in %s), so this is a "+
-				"damaged secret and the gate would run unpooled at %d/hour",
-			fromPoolCount, duplicateSuffix(poolDuplicates),
-			otpE2EEnrollmentPoolEnv, otpE2EEnrollmentEnv, perCredentialHourlyBudget)
-	}
 
-	if strict && len(unrotatedBecause) > 0 {
-		return otpE2EConfig{}, false, fmt.Errorf(
-			"strict OTP e2e run could not read a usable %s, so credential selection fell "+
-				"back to random and the %d-slot pool would cluster rather than rotate",
-			strings.Join(unrotatedBecause, " and "), len(pool))
+	// ONE report, not one per gate cycle. loadOTPE2EConfig's contract is to
+	// collect every misconfiguration before returning, and these two are
+	// independent: a damaged pool secret and a runner that stopped exporting a
+	// counter can be true at once, and returning on the first would hide the
+	// second until the next run. That matters more here than for `missing`,
+	// because a damaged pool makes selectEnrollment short-circuit and report
+	// nothing blocked at all -- so the counter fault would not merely be
+	// deferred, it would be invisible until the secret was fixed.
+	if strict {
+		var degraded []string
+
+		// A pool that lost its slots degrades exactly as silently as a missing
+		// counter, and to the same place: one credential, and the whole gate on
+		// that credential's hourly budget, which is the state the pool exists to
+		// leave. The only other signal is "slot 0 of 1", in a log the canary
+		// does not print.
+		if fromPool && fromPoolCount < 2 {
+			degraded = append(degraded, fmt.Sprintf(
+				"%s parsed %d credential(s)%s: the pool is the multi-credential source "+
+					"(single credentials belong in %s), so this is a damaged secret and the "+
+					"gate would run unpooled at %d/hour",
+				otpE2EEnrollmentPoolEnv, fromPoolCount, duplicateSuffix(poolDuplicates),
+				otpE2EEnrollmentEnv, perCredentialHourlyBudget))
+		}
+
+		// Asked whenever a pool is INTENDED, not merely present: the supported
+		// single-credential setup has nothing to rotate and must not be failed,
+		// but a damaged pool still needs its counters reported alongside it.
+		if fromPool || len(pool) > 1 {
+			if blocked := blockedRotationCounters(lookup); len(blocked) > 0 {
+				degraded = append(degraded, fmt.Sprintf(
+					"%s unusable, so credential selection fell back to random and the pool "+
+						"would cluster rather than rotate",
+					strings.Join(blocked, " and ")))
+			}
+		}
+
+		if len(degraded) > 0 {
+			return otpE2EConfig{}, false, fmt.Errorf(
+				"strict OTP e2e run cannot rotate credentials: %s",
+				strings.Join(degraded, "; "))
+		}
 	}
 
 	return otpE2EConfig{
@@ -389,15 +414,9 @@ func selectEnrollment(pool []string, lookup func(string) string) (string, int, [
 	// run N onto N's slot, spending that one credential five times over the
 	// reruns -- which is the exact case that exhausted a credential before the
 	// pool existed. Treat it exactly as strictly as the run number.
-	runNumber, haveRun := rotationCounter(lookup, "GITHUB_RUN_NUMBER", 1)
-	attempt, haveAttempt := rotationCounter(lookup, "GITHUB_RUN_ATTEMPT", 1)
-	var blocked []string
-	if !haveRun {
-		blocked = append(blocked, "GITHUB_RUN_NUMBER")
-	}
-	if !haveAttempt {
-		blocked = append(blocked, "GITHUB_RUN_ATTEMPT")
-	}
+	runNumber, _ := rotationCounter(lookup, "GITHUB_RUN_NUMBER", 1)
+	attempt, _ := rotationCounter(lookup, "GITHUB_RUN_ATTEMPT", 1)
+	blocked := blockedRotationCounters(lookup)
 	if len(blocked) == 0 {
 		// Reduce both terms before adding. A real run number never approaches
 		// MaxInt, but this reads an environment variable, and the sum of two
@@ -501,6 +520,23 @@ func smallestFactor(n int) int {
 	return 0
 }
 
+// blockedRotationCounters names every counter that cannot carry a rotation.
+//
+// Separate from selectEnrollment so a caller can ask the question even when the
+// pool is too small to rotate: selectEnrollment short-circuits at one credential
+// and reports nothing blocked, which is right for selection but would hide a
+// broken counter behind a damaged pool and cost a second gate cycle to find.
+func blockedRotationCounters(lookup func(string) string) []string {
+	var blocked []string
+	if _, ok := rotationCounter(lookup, "GITHUB_RUN_NUMBER", 1); !ok {
+		blocked = append(blocked, "GITHUB_RUN_NUMBER")
+	}
+	if _, ok := rotationCounter(lookup, "GITHUB_RUN_ATTEMPT", 1); !ok {
+		blocked = append(blocked, "GITHUB_RUN_ATTEMPT")
+	}
+	return blocked
+}
+
 // rotationCounter reads one of the two GitHub counters the rotation turns on,
 // reporting whether the value is usable rather than substituting a default.
 // Actions always exports both; anything else is a runner regression, and the
@@ -510,6 +546,14 @@ func smallestFactor(n int) int {
 // zero is therefore already a runner regression and is refused rather than
 // rotated on -- the floor tracks the variable's semantics, not what happens to
 // be convenient for a caller.
+//
+// The ATTEMPT floor is also load-bearing arithmetic, and must not be relaxed on
+// the semantic argument alone. Go's % keeps the sign of its operand, so an
+// attempt of 0 makes (attempt-1)%n equal -1, and a run number divisible by the
+// pool size then yields slot -1 and panics the index. That is pinned by the
+// GITHUB_RUN_NUMBER=6/GITHUB_RUN_ATTEMPT=0 row in
+// TestSelectEnrollmentAlwaysReturnsAPoolMember, which exists because the
+// obvious zero-zero row cannot reach it: the run-number floor blocks first.
 func rotationCounter(lookup func(string) string, name string, lowest int) (int, bool) {
 	parsed, err := strconv.Atoi(strings.TrimSpace(lookup(name)))
 	if err != nil || parsed < lowest {
