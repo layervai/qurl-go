@@ -377,13 +377,14 @@ func parseEnrollmentPool(raw string) ([]string, int) {
 // arithmetically instead of empirically.
 // TestSelectEnrollmentStridedTrafficNeedsACoprimePoolSize pins both halves.
 //
-// THE SANDBOX POOL WAS SEVEN AS OF 2026-08-31, so this residual is closed
-// there: a seventh owner (layerv-nhp-sandbox-otp-gate-6) was seeded, the gate
-// now logs "slot N of 7", and the composite-size advisory below has gone
-// silent, which is exactly how that fix is meant to be observed. The size is a
-// seeding decision rather than a code one, so this stays written as a property
-// of len(pool) rather than of the number seven -- a pool resized to any
-// composite value reopens it, and the advisory says so at runtime.
+// THE SANDBOX POOL WAS PRIME AS OF 2026-08-31, so this residual is closed
+// there: a seventh owner was seeded, the gate's own evidence line reports seven
+// slots, and the composite-size advisory below has gone silent -- which is
+// exactly how that fix is meant to be observed, and why the observation lives
+// in the gate's log rather than in this comment. The size is a seeding decision
+// rather than a code one, so this stays written as a property of len(pool)
+// rather than of any particular number: a pool resized to a composite value
+// reopens it, and the advisory says so at runtime.
 //
 // Before the reseeding the guarantee was only empirical, and it did hold:
 // replaying the 135 issuances recorded under the six-slot pool at their real
