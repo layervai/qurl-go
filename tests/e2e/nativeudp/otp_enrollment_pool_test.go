@@ -62,8 +62,11 @@ func TestParseEnrollmentPoolSplitsAndCleans(t *testing.T) {
 		{"duplicate dropped and counted", "one\ntwo\none", []string{"one", "two"}, 1},
 		{"duplicate after trimming", "one\n  one  \ntwo", []string{"one", "two"}, 1},
 		{"every entry repeated", "a\nb\na\nb", []string{"a", "b"}, 2},
-		{"six owners with one repeat parses as six", "a\nb\nc\nd\ne\nf\nc",
-			[]string{"a", "b", "c", "d", "e", "f"}, 1},
+		{
+			"six owners with one repeat parses as six", "a\nb\nc\nd\ne\nf\nc",
+			[]string{"a", "b", "c", "d", "e", "f"},
+			1,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, dups := parseEnrollmentPool(tc.raw)
@@ -592,6 +595,46 @@ func TestLoadOTPE2EConfigAcceptsEitherCredentialSource(t *testing.T) {
 		// size of seven would have suppressed it.
 		if smallestFactor(cfg.enrollmentPoolSize) == 0 {
 			t.Fatal("a degraded pool reported a prime size; the stride warning is silenced")
+		}
+	})
+
+	// The crack the parse-result keying left open: a pool variable that yields
+	// NOTHING. Whitespace, or " , , ", parses to zero credentials, so keying
+	// fromPool on len(pool) would let the single-credential variable be adopted
+	// silently -- a worse version of the very mistake the guard catches at one
+	// entry, and invisible because no note or error would print.
+	t.Run("strict run refuses a pool variable that yielded nothing", func(t *testing.T) {
+		_, _, err := loadOTPE2EConfig(envFrom(with(map[string]string{
+			otpE2EEnrollmentPoolEnv: " , , ",
+			otpE2EEnrollmentEnv:     "solo", // present, and must NOT rescue it
+			otpE2EStrictEnv:         "1",
+			"GITHUB_RUN_NUMBER":     "41",
+			"GITHUB_RUN_ATTEMPT":    "1",
+		})))
+		if err == nil {
+			t.Fatal("strict run silently fell back to the single credential and ran unpooled")
+		}
+		if !strings.Contains(err.Error(), otpE2EEnrollmentPoolEnv) {
+			t.Fatalf("strict error %q does not name the damaged variable", err)
+		}
+	})
+
+	// A secret re-saved as the same credential twice collapses to one entry.
+	// That is a duplicate, not a truncation, and the duplicates NOTE lives in
+	// the test body -- past the t.Fatal this error causes -- so the message
+	// itself has to say which mistake was made.
+	t.Run("truncation error names duplicates when that is the cause", func(t *testing.T) {
+		_, _, err := loadOTPE2EConfig(envFrom(with(map[string]string{
+			otpE2EEnrollmentPoolEnv: "a\na",
+			otpE2EStrictEnv:         "1",
+			"GITHUB_RUN_NUMBER":     "41",
+			"GITHUB_RUN_ATTEMPT":    "1",
+		})))
+		if err == nil {
+			t.Fatal("strict run accepted a pool of one repeated credential")
+		}
+		if !strings.Contains(err.Error(), "duplicate") {
+			t.Fatalf("strict error %q blames truncation; the secret was duplicated", err)
 		}
 	})
 

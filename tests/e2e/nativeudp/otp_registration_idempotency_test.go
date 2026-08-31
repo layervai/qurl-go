@@ -122,10 +122,18 @@ func loadOTPE2EConfig(lookup func(string) string) (otpE2EConfig, bool, error) {
 	// The credential arrives as a pool or as a single value, so neither name
 	// belongs in `required` on its own -- either one alone satisfies this.
 	pool, poolDuplicates := parseEnrollmentPool(lookup(otpE2EEnrollmentPoolEnv))
-	// Whether the POOL variable is the source decides whether a one-entry
-	// result is a configuration or an accident: the single-credential setup has
-	// its own variable, so a pool that parsed to one credential is a truncation.
-	fromPool := len(pool) > 0
+	// Whether the POOL variable is the source decides whether a short result is
+	// a configuration or an accident: the single-credential setup has its own
+	// variable, so a pool that parsed to fewer than two credentials is damage.
+	//
+	// Keyed on the RAW variable, not on the parse result. The question is "did
+	// an operator intend a pool here", and only the raw value answers it: a
+	// secret re-saved to whitespace, or to " , , ", parses to nothing, and
+	// keying on len(pool) would make that MORE invisible than the single-entry
+	// case the guard already catches -- the pool source would go unnoticed, the
+	// single-credential variable would be adopted, and a strict run would
+	// proceed unpooled at 5/hour with neither an error nor a note.
+	fromPool := strings.TrimSpace(lookup(otpE2EEnrollmentPoolEnv)) != ""
 	if len(pool) == 0 {
 		if single := strings.TrimSpace(lookup(otpE2EEnrollmentEnv)); single != "" {
 			pool = []string{single}
@@ -163,10 +171,11 @@ func loadOTPE2EConfig(lookup func(string) string) (otpE2EConfig, bool, error) {
 	// other signal is "slot 0 of 1" in a log the canary does not even print.
 	if strict && fromPool && len(pool) < 2 {
 		return otpE2EConfig{}, false, fmt.Errorf(
-			"strict OTP e2e run parsed only %d credential from %s: the pool is the "+
-				"multi-credential source (single credentials belong in %s), so one entry "+
-				"means a truncated secret and the gate would run unpooled at %d/hour",
-			len(pool), otpE2EEnrollmentPoolEnv, otpE2EEnrollmentEnv, perCredentialHourlyBudget)
+			"strict OTP e2e run parsed only %d credential(s)%s from %s: the pool is the "+
+				"multi-credential source (single credentials belong in %s), so this is a "+
+				"damaged secret and the gate would run unpooled at %d/hour",
+			len(pool), duplicateSuffix(poolDuplicates),
+			otpE2EEnrollmentPoolEnv, otpE2EEnrollmentEnv, perCredentialHourlyBudget)
 	}
 
 	if strict && len(unrotatedBecause) > 0 {
@@ -363,6 +372,18 @@ func selectEnrollment(pool []string, lookup func(string) string) (string, int, [
 	}
 	slot := int(binary.BigEndian.Uint32(raw) % uint32(len(pool)))
 	return pool[slot], slot, blocked
+}
+
+// duplicateSuffix names dropped duplicates inside the truncation error. The
+// duplicates NOTE is logged by the test body, which never runs when this error
+// aborts the load -- so a secret re-saved as the same credential twice would
+// otherwise be reported as a truncation and send the operator hunting for a
+// missing line rather than a repeated one.
+func duplicateSuffix(duplicates int) string {
+	if duplicates == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" (after dropping %d duplicate(s))", duplicates)
 }
 
 // smallestFactor returns the smallest non-trivial divisor of n, or 0 when n is
