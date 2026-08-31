@@ -364,18 +364,27 @@ func parseEnrollmentPool(raw string) ([]string, int) {
 // KEEP len(pool) PRIME. The rotation runs over ALL gate runs, but only the ones
 // the scope step finds relevant spend an issuance, so spending runs are a
 // SUBSEQUENCE -- and a subsequence of stride d visits only len(pool)/gcd(d,
-// len(pool)) slots. Six is the worst size available for that: 6 = 2*3, so a
-// stretch where relevant and irrelevant PRs merely alternate (d=2) collapses
-// the pool onto three slots and reproduces the original outage with a different
-// traffic shape. At a prime size every stride up to len(pool) stays coprime and
-// the ceiling holds arithmetically instead of empirically.
+// len(pool)) slots. Six -- the size this gate ran at through the outage -- was
+// the worst available for that: 6 = 2*3, so a stretch where relevant and
+// irrelevant PRs merely alternate (d=2) collapses the pool onto three slots and
+// reproduces the original outage with a different traffic shape. At a PRIME
+// size every stride below len(pool) stays coprime and the ceiling holds
+// arithmetically instead of empirically.
 // TestSelectEnrollmentStridedTrafficNeedsACoprimePoolSize pins both halves.
-// Today's pool is six, which is a seeding decision rather than a code one: a
-// seventh owner would close this, and until then the guarantee is empirical.
-// It does hold empirically -- replaying the 135 recorded issuances at their
-// real run numbers, real skips included, the worst rolling hour puts 3 on a
-// slot against the hash's 5 -- but empirical is weaker than arithmetic, and
-// this is the residual to check first if the gate ever clusters again.
+//
+// THE SANDBOX POOL WAS SEVEN AS OF 2026-08-31, so this residual is closed
+// there: a seventh owner (layerv-nhp-sandbox-otp-gate-6) was seeded, the gate
+// now logs "slot N of 7", and the composite-size advisory below has gone
+// silent, which is exactly how that fix is meant to be observed. The size is a
+// seeding decision rather than a code one, so this stays written as a property
+// of len(pool) rather than of the number seven -- a pool resized to any
+// composite value reopens it, and the advisory says so at runtime.
+//
+// Before the reseeding the guarantee was only empirical, and it did hold:
+// replaying the 135 issuances recorded under the six-slot pool at their real
+// run numbers, real skips included, the worst rolling hour put 3 on a slot
+// against the hash's 5. Empirical is weaker than arithmetic, which is why the
+// size matters; check it first if the gate ever clusters again.
 //
 // The SECOND thing to check is relevance DENSITY, which is the residual a fixed
 // stride does not describe. Real skips are irregular rather than strided (there

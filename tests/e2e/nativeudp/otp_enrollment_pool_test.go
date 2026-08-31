@@ -9,6 +9,7 @@ package nativeudp_test
 // test. That is expensive to diagnose from CI and nearly free to catch here.
 
 import (
+	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -19,10 +20,17 @@ func envFrom(vars map[string]string) func(string) string {
 	return func(name string) string { return vars[name] }
 }
 
-// sixSlotPool is the pool's shape today: six credentials, one per distinct
-// owner. Selection only does anything above one slot, so the distribution tests
-// share it rather than restating it.
+// sixSlotPool is a SIX-slot fixture, named for its size because several tests
+// assert arithmetic that is specific to six (composite, 2*3, the size the gate
+// ran at through the outage). It is deliberately NOT "the current pool": the
+// live size lives in a secret and was seven as of 2026-08-31. Distribution
+// properties here hold at any size above one; the size-specific ones say so.
 var sixSlotPool = []string{"a", "b", "c", "d", "e", "f"}
+
+// sevenSlotPool is the prime-size counterpart, matching the sandbox pool after
+// a seventh owner was seeded. Used where the point is that a prime size is
+// immune to every stride below it.
+var sevenSlotPool = []string{"a", "b", "c", "d", "e", "f", "g"}
 
 // ciEnv builds the two variables selectEnrollment rotates on. Taking ints keeps
 // callers from respelling the variable names on every loop iteration.
@@ -401,6 +409,76 @@ func TestPoolSizeAdvisorySpeaksAtEverySizeThatCosts(t *testing.T) {
 	}
 }
 
+// TestGateWorkflowCommentQuotesTheBudgetConstant closes half the prose fence.
+//
+// perCredentialHourlyBudget's doc names two sites that must be hand-edited if
+// the service retunes the rate, because nothing can interpolate into a comment:
+// selectEnrollment's derivation and the workflow's GATE_PATHS comment. The
+// second is machine-readable -- the workflow file is already parsed by
+// otp_gate_paths_test.go -- so a stale rate there can be caught rather than
+// merely disclaimed. The prose in this package stays a hand-edit.
+func TestGateWorkflowCommentQuotesTheBudgetConstant(t *testing.T) {
+	raw, err := os.ReadFile(gateWorkflowPath)
+	if err != nil {
+		t.Fatalf("reading %s: %v", gateWorkflowPath, err)
+	}
+	want := strconv.Itoa(perCredentialHourlyBudget) + "/hour per credential"
+	if !strings.Contains(string(raw), want) {
+		t.Fatalf("%s does not state %q; the rate was retuned in one place and the "+
+			"workflow comment now tells an operator the old number", gateWorkflowPath, want)
+	}
+}
+
+// TestTimedOutQuotesTheBudgetConstant pins the last interpolating runtime
+// message that had no test. It is the FIRST thing an operator reads when the
+// issuance budget is spent, so a stale rate here misdirects at the worst
+// possible moment -- which is the defect this whole change is about.
+func TestTimedOutQuotesTheBudgetConstant(t *testing.T) {
+	err := (&otpMailbox{}).timedOut()
+	if err == nil {
+		t.Fatal("timedOut returned no error")
+	}
+	want := strconv.Itoa(perCredentialHourlyBudget) + "/hour per credential"
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("timedOut message %q does not quote %q from perCredentialHourlyBudget; "+
+			"a service-side retune would leave it stale", err, want)
+	}
+}
+
+// TestSelectEnrollmentHoldsAtThePrimeSize runs the same distribution properties
+// against seven, the size the sandbox pool was reseeded to.
+//
+// The sweeps above are written against a six-slot fixture because several of
+// their neighbours assert arithmetic specific to six. Nothing about the
+// rotation is six-shaped, and the size that matters operationally is whatever
+// the secret holds -- so the two properties that must survive a resize are
+// re-run here rather than left as an assumption.
+func TestSelectEnrollmentHoldsAtThePrimeSize(t *testing.T) {
+	pool := sevenSlotPool
+	fullHour := perCredentialHourlyBudget * len(pool)
+
+	for _, start := range sweepStarts(len(pool)) {
+		used := map[int]int{}
+		for i := range fullHour {
+			slot := slotFor(t, pool, start+i, 1)
+			used[slot]++
+			if ceiling := ceilDiv(i+1, len(pool)); used[slot] > ceiling {
+				t.Fatalf("%d consecutive runs from %d put %d on slot %d; a rotation allows %d",
+					i+1, start, used[slot], slot, ceiling)
+			}
+		}
+	}
+
+	seen := map[int]bool{}
+	for attempt := 1; attempt <= len(pool); attempt++ {
+		seen[slotFor(t, pool, 999, attempt)] = true
+	}
+	if len(seen) != len(pool) {
+		t.Fatalf("%d reruns used %d distinct slots; a rotation must visit every slot",
+			len(pool), len(seen))
+	}
+}
+
 // TestSelectEnrollmentStridedTrafficNeedsACoprimePoolSize pins the residual the
 // rotation cannot fix on its own, and shows it is a POOL SIZE decision.
 //
@@ -435,7 +513,7 @@ func TestSelectEnrollmentStridedTrafficNeedsACoprimePoolSize(t *testing.T) {
 	// Strides BELOW the size: for a prime p every d in [1,p) has gcd(d,p)=1.
 	// At d == p even a prime collapses onto one slot, which is arithmetic, not
 	// a property any pool size can buy off.
-	prime := []string{"a", "b", "c", "d", "e", "f", "g"}
+	prime := sevenSlotPool
 	for stride := 1; stride < len(prime); stride++ {
 		ideal := perCredentialHourlyBudget
 		if got := worstSlotUnderStride(prime, stride); got > ideal {
@@ -484,7 +562,11 @@ func TestSelectEnrollmentAlwaysReturnsAPoolMember(t *testing.T) {
 		{"GITHUB_RUN_NUMBER": "6", "GITHUB_RUN_ATTEMPT": "0"},
 		{"GITHUB_RUN_NUMBER": "12", "GITHUB_RUN_ATTEMPT": "-1"},
 		{"GITHUB_RUN_NUMBER": "99999999999999999999"}, // overflows int
-		// MaxInt64 in both: the sum must not wrap to a negative slot.
+		// MaxInt64 in both. On 64-bit this exercises the sum, which the
+		// reduce-before-add makes safe; on 32-bit Atoi range-errors and it
+		// exercises the random fallback instead. Either way it must return a
+		// pool member -- and it is a regression guard against reintroducing the
+		// unreduced form, not a live wrap the current code can reach.
 		{"GITHUB_RUN_NUMBER": "9223372036854775807", "GITHUB_RUN_ATTEMPT": "9223372036854775807"},
 	} {
 		got, slot, _ := selectEnrollment(pool, envFrom(env))

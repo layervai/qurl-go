@@ -50,7 +50,9 @@ env:
   # Paths whose change can affect SDK registration. Every run that matches
   # performs a real enrolment and spends one registration-OTP issuance, and
   # that budget is finite: 5/hour per credential and 10/hour per owner
-  # (qurl-service RegistrationOTPRateLimitWindow). The pool carries one
+  # (qurl-service registrationOTPPerCredentialRate and
+  # registrationOTPPerOwnerRate, over RegistrationOTPRateLimitWindow -- the
+  # window is the hour, not the rates). The pool carries one
   # credential per distinct owner, so the credential's five is what binds: five
   # runs an hour PER SLOT, and 5*len(pool) across the pool -- shared with
   # otp-schema-v2-canary.yml, which spends the same secret. selectEnrollment
