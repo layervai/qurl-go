@@ -495,6 +495,39 @@ func loadCompletedRegisteredState(ctx context.Context, store AgentStateStore, er
 	return state, nil
 }
 
+// loadCompletedRegisteredStateForRefresh is the only completed-state loader
+// that may admit a promoted credential whose assignment refresh/open is still
+// pending. It validates the credential material but leaves phase consumption to
+// the locked refresh transition.
+func loadCompletedRegisteredStateForRefresh(ctx context.Context, store AgentStateStore, errKind error) (*AgentState, error) {
+	state, err := loadExistingAgentState(ctx, store, errKind)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateCompletedAgentIdentity(state, errKind); err != nil {
+		clearOwnedAgentState(state)
+		return nil, err
+	}
+	if !isNativeAgentRuntimeState(state) {
+		agentID := state.AgentID
+		clearOwnedAgentState(state)
+		return nil, &NativeCredentialRecoveryRequiredError{
+			AgentID: agentID,
+			Cause:   fmt.Errorf("%w: completed state is not a native UDP runtime state", ErrInvalidAgentState),
+		}
+	}
+	if state.CredentialRecoveryRefreshRequired {
+		err = validatePersistedNativeDeviceCredentialMaterial(state, errKind)
+	} else {
+		err = validatePersistedNativeDeviceCredential(state, errKind)
+	}
+	if err != nil {
+		clearOwnedAgentState(state)
+		return nil, err
+	}
+	return state, nil
+}
+
 func loadExistingAgentState(ctx context.Context, store AgentStateStore, errKind error) (*AgentState, error) {
 	state, err := store.LoadAgentState(ctx)
 	if err != nil {

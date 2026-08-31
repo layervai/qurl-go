@@ -459,6 +459,16 @@ func TestNativeCredentialRecoveryRequiredError_PendingEpisodeDoesNotClaimMissing
 	}
 }
 
+func TestCredentialRecoveryRefreshRequiredDoesNotAuthorizeAnotherRecovery(t *testing.T) {
+	state := completedNativeTestState(t)
+	state.CredentialRecoveryRefreshRequired = true
+	err := validatePersistedNativeDeviceCredential(state, ErrInvalidAgentState)
+	var nativeRecovery *NativeCredentialRecoveryRequiredError
+	if !errors.Is(err, ErrCredentialRecoveredAssignmentRefreshRequired) || errors.Is(err, ErrCredentialRecoveryRequired) || errors.As(err, &nativeRecovery) {
+		t.Fatalf("post-recovery refresh classification = %T: %v", err, err)
+	}
+}
+
 func TestOpenRegisteredAgent_RejectsRetiredLifecycleState(t *testing.T) {
 	state := completedNativeTestState(t)
 	state.Assignment = nil

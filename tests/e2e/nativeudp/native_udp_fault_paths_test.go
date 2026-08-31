@@ -24,7 +24,7 @@ const (
 	// targeted any other port would pass for the wrong reason.
 	standardNHPUDPPort             = 443
 	faultUDPAttemptTimeout         = 5 * time.Second
-	currentAgentStateSchemaVersion = 7
+	currentAgentStateSchemaVersion = 8
 	nonSecretFaultCredential       = "not-server-minted-native-udp-proof-credential"
 )
 

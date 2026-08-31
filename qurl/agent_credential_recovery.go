@@ -193,7 +193,9 @@ func (e *CredentialRecoveryExpiredError) Unwrap() error { return ErrCredentialRe
 
 // CredentialRecoveredAssignmentRefreshRequiredError preserves the cause of a
 // failed post-recovery Hub refresh. At this point the replacement credential is
-// already durable; call RefreshAgentRuntime rather than RecoverAgentRuntime.
+// already durable. RefreshAgentRuntime is the ordinary continuation; an exact
+// RecoverAgentRuntime retry also consumes only this refresh phase and never
+// invokes recovery authority again.
 type CredentialRecoveredAssignmentRefreshRequiredError struct {
 	Cause error
 }
@@ -226,7 +228,8 @@ func (e *CredentialRecoveredAssignmentRefreshRequiredError) Unwrap() []error {
 //
 // recoveryCredential is required whenever recovery must issue or renew a Hub
 // grant. A pure resume of an already-persisted cell completion uses its durable
-// grant and candidate instead, so that path does not inspect the argument.
+// grant and candidate instead, and a completed recovery resumes only its durable
+// assignment-refresh phase. Neither path inspects the argument.
 func RecoverAgentRuntime(ctx context.Context, recoveryCredential string, store AgentStateStore, opts ...AgentRuntimeRecoveryOption) (*Client, *AgentRuntimeBinding, error) {
 	return recoverAgentRuntime(ctx, func(context.Context) (string, error) {
 		return recoveryCredential, nil
@@ -243,8 +246,8 @@ type AgentRuntimeRecoveryCredentialProvider func(context.Context) (string, error
 // RecoverAgentRuntimeWithCredentialProvider is RecoverAgentRuntime with lazy
 // account authority. It is a separate entry point so a call cannot supply both
 // positional and provider authority. It does not invoke provider for malformed
-// or expired state, or when an existing cell grant can complete recovery
-// directly.
+// or expired state, when an existing cell grant can complete recovery directly,
+// or when a completed recovery only needs its durable assignment refresh/open.
 func RecoverAgentRuntimeWithCredentialProvider(ctx context.Context, provider AgentRuntimeRecoveryCredentialProvider, store AgentStateStore, opts ...AgentRuntimeRecoveryOption) (*Client, *AgentRuntimeBinding, error) {
 	return recoverAgentRuntime(ctx, provider, store, opts...)
 }
@@ -333,6 +336,9 @@ func (c *nativeAgentRuntimeConfig) recoverAgentRuntimeLocked(ctx context.Context
 		return nil, err
 	}
 	defer wipeBytes(privateKey)
+	if state.CredentialRecoveryRefreshRequired {
+		return c.finishRecoveredRuntime(ctx, store, state, privateKey)
+	}
 
 	if state.PendingCredentialRecovery != nil && state.PendingCredentialRecovery.NeedsFreshGrant {
 		if err := c.requireCredentialRecoveryLive(state.PendingCredentialRecovery); err != nil {
@@ -388,6 +394,7 @@ func (c *nativeAgentRuntimeConfig) recoverAgentRuntimeLocked(ctx context.Context
 	next.Assignment = pending.Assignment.clone()
 	next.PendingCredentialRecovery = nil
 	next.PendingCredentialRecoveryIssue = nil
+	next.CredentialRecoveryRefreshRequired = true
 	next.SchemaVersion = agentStateSchemaVersion
 	// The authenticated cell may already have committed even if the caller is
 	// canceled as the LRT arrives. Persist that irreversible result under a small
@@ -402,10 +409,13 @@ func (c *nativeAgentRuntimeConfig) recoverAgentRuntimeLocked(ctx context.Context
 }
 
 func (c *nativeAgentRuntimeConfig) finishRecoveredRuntime(ctx context.Context, store AgentStateStore, state *AgentState, privateKey []byte) (*nativeRuntimeResult, error) {
-	if state == nil || state.Assignment == nil {
+	if state == nil || !state.CredentialRecoveryRefreshRequired || state.Assignment == nil {
 		return nil, &CredentialRecoveredAssignmentRefreshRequiredError{
-			Cause: fmt.Errorf("%w: recovered state has no assignment", ErrInvalidAgentState),
+			Cause: fmt.Errorf("%w: recovered state has no durable refresh authority or assignment", ErrInvalidAgentState),
 		}
+	}
+	if err := validatePersistedNativeDeviceCredentialMaterial(state, ErrInvalidRegisterConfig); err != nil {
+		return nil, &CredentialRecoveredAssignmentRefreshRequiredError{Cause: err}
 	}
 	if state.Assignment.LeaseExpired(c.clock()) {
 		fresh, err := c.refreshAssignmentLifecycle(ctx, *c.hub, state.AgentID, privateKey)
@@ -426,11 +436,32 @@ func (c *nativeAgentRuntimeConfig) finishRecoveredRuntime(ctx context.Context, s
 			}
 		}
 	}
-	result, err := finishNativeRuntimeResult(store, state, c)
-	if errors.Is(err, ErrAssignmentLeaseExpired) {
+	return c.finishCredentialRecoveryRefresh(ctx, store, state)
+}
+
+// finishCredentialRecoveryRefresh proves that the promoted credential and
+// authoritative assignment can open a runtime before it clears the durable
+// refresh-only phase. A failed or ambiguous clear destroys the candidate
+// runtime and leaves recovery resume fail closed.
+func (c *nativeAgentRuntimeConfig) finishCredentialRecoveryRefresh(ctx context.Context, store AgentStateStore, state *AgentState) (*nativeRuntimeResult, error) {
+	if state == nil || !state.CredentialRecoveryRefreshRequired {
+		return finishNativeRuntimeResult(store, state, c)
+	}
+	defer clearOwnedAgentState(state)
+	next := state.clone()
+	defer clearOwnedAgentState(next)
+	next.CredentialRecoveryRefreshRequired = false
+	result, err := finishNativeRuntimeResult(store, next.clone(), c)
+	if err != nil {
 		return nil, &CredentialRecoveredAssignmentRefreshRequiredError{Cause: err}
 	}
-	return result, err
+	persistCtx, cancelPersist := credentialRecoveryPersistenceContext(ctx)
+	defer cancelPersist()
+	if err := c.saveCredentialRecoveryState(persistCtx, store, state, next, ErrAgentBindingPersistence, "persist completed post-recovery assignment refresh"); err != nil {
+		destroyNativeRuntimeResult(result)
+		return nil, &CredentialRecoveredAssignmentRefreshRequiredError{Cause: err}
+	}
+	return result, nil
 }
 
 type credentialRecoveryIssue struct {
@@ -1254,6 +1285,7 @@ func (c *nativeAgentRuntimeConfig) reconcileCredentialRecoveryState(ctx context.
 func sameCredentialRecoveryState(left, right *AgentState) bool {
 	if left == nil || right == nil || left.AgentID != right.AgentID || left.PrivateKeyB64 != right.PrivateKeyB64 || left.PublicKeyB64 != right.PublicKeyB64 ||
 		left.SchemaVersion != right.SchemaVersion || left.DeviceAPIKey != right.DeviceAPIKey || left.DeviceAPIKeyID != right.DeviceAPIKeyID ||
+		left.CredentialRecoveryRefreshRequired != right.CredentialRecoveryRefreshRequired ||
 		!sameOptionalRecoveryTime(left.RegisteredAt, right.RegisteredAt) || !sameOptionalAgentAssignment(left.Assignment, right.Assignment) ||
 		(left.PendingActivation == nil) != (right.PendingActivation == nil) || (left.PendingCompletion == nil) != (right.PendingCompletion == nil) ||
 		(left.PendingCredentialRecovery == nil) != (right.PendingCredentialRecovery == nil) || (left.PendingCredentialRecoveryIssue == nil) != (right.PendingCredentialRecoveryIssue == nil) {

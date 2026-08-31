@@ -75,9 +75,9 @@ type AgentState struct {
 	RegisteredAt  *time.Time `json:"registered_at,omitempty"`
 
 	// SchemaVersion is the AgentState schema version. ConnectAgentRuntime and
-	// RecoverAgentRuntime write agentStateSchemaVersion (currently v7). Legacy
-	// schema-v5 state must not populate v6 finite-registration-recovery or v7
-	// credential-recovery fields.
+	// RecoverAgentRuntime write agentStateSchemaVersion (currently v8). Legacy
+	// schema-v5 state must not populate v6 finite-registration-recovery, v7
+	// credential-recovery, or v8 post-recovery refresh fields.
 	SchemaVersion int `json:"schema_version,omitempty"`
 	// DeviceAPIKey is the device REST bearer credential minted at registration
 	// completion. Its presence alongside RegisteredAt marks a state ready to back
@@ -132,6 +132,12 @@ type AgentState struct {
 	// credential. During grant renewal it coexists only with a rejected pending
 	// grant whose immutable episode anchor remains authoritative.
 	PendingCredentialRecoveryIssue *PendingAgentCredentialRecoveryIssue `json:"pending_credential_recovery_issue,omitempty"`
+
+	// CredentialRecoveryRefreshRequired is persisted atomically with promotion
+	// of a recovered device credential. While set, ordinary open/connect paths
+	// fail closed and another credential-recovery episode is forbidden. Only a
+	// successful assignment refresh/open may clear it.
+	CredentialRecoveryRefreshRequired bool `json:"credential_recovery_refresh_required,omitempty"`
 }
 
 type agentStateJSON AgentState
@@ -339,6 +345,23 @@ func validateLoadedAgentAssignment(state *AgentState) error {
 			return err
 		}
 	}
+	if state.CredentialRecoveryRefreshRequired {
+		if state.SchemaVersion < credentialRecoveryRefreshStateSchemaVersion {
+			return fmt.Errorf("%w: legacy state contains post-recovery refresh authority", ErrInvalidAgentState)
+		}
+		if state.PendingActivation != nil || state.PendingCompletion != nil || state.PendingCredentialRecovery != nil || state.PendingCredentialRecoveryIssue != nil {
+			return fmt.Errorf("%w: post-recovery refresh cannot coexist with another lifecycle transition", ErrInvalidAgentState)
+		}
+		if state.RegisteredAt == nil || state.Assignment == nil {
+			return fmt.Errorf("%w: post-recovery refresh requires current completed state", ErrInvalidAgentState)
+		}
+		if err := validateNativeDeviceCredential(state.DeviceAPIKey, "recovered device credential", ErrInvalidAgentState); err != nil {
+			return err
+		}
+		if err := validateAPIKeyID(state.DeviceAPIKeyID, "recovered device credential id", ErrInvalidAgentState); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -388,9 +411,10 @@ func (s *AgentState) clone() *AgentState {
 
 // agentStateSchemaVersion is the current native AgentState schema version.
 const (
-	agentStateSchemaVersion                = 7
-	registrationRecoveryStateSchemaVersion = 6
-	credentialRecoveryStateSchemaVersion   = 7
+	agentStateSchemaVersion                     = 8
+	registrationRecoveryStateSchemaVersion      = 6
+	credentialRecoveryStateSchemaVersion        = 7
+	credentialRecoveryRefreshStateSchemaVersion = 8
 )
 
 // AgentStateStore loads and saves the bootstrapped local identity. The
