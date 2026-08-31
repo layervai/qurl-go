@@ -223,7 +223,15 @@ jobs:
           cache: true
 
       - name: Configure ephemeral mailbox credentials
-        uses: aws-actions/configure-aws-credentials@12d377b18dd4953d7567a83256c49ac571f4d565 # v4.1.0
+        # Not a release pin: no upstream tag points at this commit. Upstream
+        # ships `chore: Update dist` commits on its default branch, and
+        # Dependabot has bumped this pin as a bare default-branch SHA with
+        # no version to name (#181). The comment carries the branch and the
+        # commit's date instead; a bump moves that date with the SHA.
+        # Keep it free of `@`: the shared age-check workflow in
+        # layervai/ops-routines-workflows takes the pinned SHA from this
+        # line's last `@`, and a second one becomes what it validates.
+        uses: aws-actions/configure-aws-credentials@12d377b18dd4953d7567a83256c49ac571f4d565 # main-2026-08-12
         with:
           role-to-assume: ${{ secrets.OTP_E2E_ROLE_ARN }}
           aws-region: ${{ secrets.OTP_E2E_MAILBOX_REGION }}
