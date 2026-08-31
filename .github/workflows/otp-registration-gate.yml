@@ -54,8 +54,8 @@ env:
   # credential per owner, never binds).
   #
   # That is the ONLY place this file states the number, deliberately. What the
-  # rate implies -- the per-slot and pool-wide ceilings, why the credential rate
-  # is the binding one, and that otp-schema-v2-canary.yml spends the same pool
+  # rate implies -- the ceilings it sets, why the credential rate is the
+  # binding one, and that otp-schema-v2-canary.yml spends the same pool
   # -- all live in selectEnrollment, which can interpolate the constant. Spelling
   # any of it again here would mean a retune fixes the line
   # TestGateWorkflowCommentQuotesTheBudgetConstant checks and leaves its

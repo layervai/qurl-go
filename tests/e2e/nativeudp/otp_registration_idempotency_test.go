@@ -176,64 +176,26 @@ func loadOTPE2EConfig(lookup func(string) string) (otpE2EConfig, bool, error) {
 	}
 
 	strict := strings.TrimSpace(lookup(otpE2EStrictEnv)) != ""
-	if len(missing) > 0 {
-		if strict {
-			// The counters are an independent fault, and this return is the one
-			// a pool that parsed to ZERO credentials takes -- the shape both
-			// workflows can actually produce, since they supply only the pool
-			// variable. The aggregated guard further down never runs on this
-			// branch, so without this the second fault costs another gate cycle
-			// to discover, which is the contract this function opens by stating.
-			//
-			// Appended to the LIST, not to the rendered string, so the count and
-			// the contents cannot disagree. Reporting "1 unmet prerequisite"
-			// while listing two is a small misdirection, but small misdirection
-			// in the first message an operator reads is this file's subject.
-			unmet := append([]string(nil), missing...)
-			if fromPool {
-				if blocked := blockedRotationCounters(lookup); len(blocked) > 0 {
-					unmet = append(unmet, strings.Join(blocked, " and ")+
-						" unusable, so selection could not have rotated either")
-				}
-			}
-			return otpE2EConfig{}, false, fmt.Errorf(
-				"strict OTP e2e run has %d unmet prerequisite(s): %s",
-				len(unmet), strings.Join(unmet, "; "))
-		}
-		return otpE2EConfig{}, true, nil
-	}
 
-	port, err := strconv.Atoi(strings.TrimSpace(lookup(otpE2EHubPortEnv)))
-	if err != nil || port <= 0 || port > 65535 {
-		return otpE2EConfig{}, false, fmt.Errorf("%s must be a valid UDP port", otpE2EHubPortEnv)
-	}
-
-	enrollment, slot := selectEnrollment(pool, lookup)
-
-	// Every other prerequisite in this gate is loud (see otpE2EStrictEnv), and
-	// the rotation has to join them. A missing GITHUB_RUN_NUMBER falls back to
-	// random, which quietly reinstates the clustering the pool exists to avoid
-	// -- and the only symptom would be this gate going red again weeks later,
-	// for the same reason and with the same misleading evidence as last time.
-
-	// ONE report, not one per gate cycle. loadOTPE2EConfig's contract is to
-	// collect every misconfiguration before returning, and these two are
-	// independent: a damaged pool secret and a runner that stopped exporting a
-	// counter can be true at once, and returning on the first would hide the
-	// second until the next run. That matters more here than for `missing`,
-	// because a damaged pool makes selectEnrollment short-circuit and report
-	// nothing blocked at all -- so the counter fault would not merely be
-	// deferred, it would be invisible until the secret was fixed.
+	// EVERY unmet prerequisite, in one pass. This function opens by promising
+	// that, and the three fault classes below are independent: an absent
+	// variable, a pool secret too small to rotate, and a runner that stopped
+	// exporting a counter can all be true at once. Reporting the first and
+	// returning would cost a gate cycle per fault to discover -- and worse for
+	// two of them, since a damaged pool makes selectEnrollment short-circuit
+	// and report nothing blocked, so the counter fault would not merely be
+	// deferred but invisible until the secret was fixed.
+	//
+	// Everything is appended to the LIST, never to the rendered string, so the
+	// count and the contents cannot disagree.
 	if strict {
-		var degraded []string
+		unmet := append([]string(nil), missing...)
 
-		// A pool that lost its slots degrades exactly as silently as a missing
-		// counter, and to the same place: one credential, and the whole gate on
-		// that credential's hourly budget, which is the state the pool exists to
-		// leave. The only other signal is "slot 0 of 1", in a log the canary
-		// does not print.
-		if fromPool && fromPoolCount < 2 {
-			degraded = append(degraded, fmt.Sprintf(
+		// Only when the pool variable yielded something: a pool that yielded
+		// NOTHING already contributed its own entry to `missing` above, and
+		// naming it twice would overstate the number of things to fix.
+		if fromPool && len(pool) > 0 && fromPoolCount < 2 {
+			unmet = append(unmet, fmt.Sprintf(
 				"%s parsed %d credential(s)%s: the pool is the multi-credential source "+
 					"(single credentials belong in %s), so this is a damaged secret and the "+
 					"gate would run unpooled at %d/hour",
@@ -242,26 +204,32 @@ func loadOTPE2EConfig(lookup func(string) string) (otpE2EConfig, bool, error) {
 		}
 
 		// Asked whenever a pool is INTENDED: the supported single-credential
-		// setup has nothing to rotate and must not be failed, but a damaged pool
-		// still needs its counters reported alongside it. fromPool is the whole
-		// condition -- a pool of more than one entry can only have come from the
-		// pool variable, so testing len(pool) as well would suggest a second
-		// path into this guard that does not exist.
+		// setup has nothing to rotate and must not be failed for it.
 		if fromPool {
 			if blocked := blockedRotationCounters(lookup); len(blocked) > 0 {
-				degraded = append(degraded, fmt.Sprintf(
-					"%s unusable, so credential selection fell back to random and the pool "+
-						"would cluster rather than rotate",
-					strings.Join(blocked, " and ")))
+				unmet = append(unmet, strings.Join(blocked, " and ")+
+					" unusable, so selection could not have rotated either")
 			}
 		}
 
-		if len(degraded) > 0 {
+		if len(unmet) > 0 {
 			return otpE2EConfig{}, false, fmt.Errorf(
-				"strict OTP e2e run cannot rotate credentials: %s",
-				strings.Join(degraded, "; "))
+				"strict OTP e2e run has %d unmet prerequisite(s): %s",
+				len(unmet), strings.Join(unmet, "; "))
 		}
+	} else if len(missing) > 0 {
+		return otpE2EConfig{}, true, nil
 	}
+
+	port, err := strconv.Atoi(strings.TrimSpace(lookup(otpE2EHubPortEnv)))
+	if err != nil || port <= 0 || port > 65535 {
+		return otpE2EConfig{}, false, fmt.Errorf("%s must be a valid UDP port", otpE2EHubPortEnv)
+	}
+
+	// Reached only once the strict block above has accepted the configuration,
+	// so on CI this always rotates; off CI, or non-strict, it may fall back to
+	// random, which is the documented local behaviour.
+	enrollment, slot := selectEnrollment(pool, lookup)
 
 	return otpE2EConfig{
 		hub: qurl.HubBootstrap{
@@ -535,23 +503,23 @@ func poolSizeAdvisory(size int) string {
 		return ""
 	}
 	smallest, worst := factor, size/factor
-	if smallest == worst {
-		// A prime square (or 4): the two strides coincide, and naming them
-		// separately would read as a contradiction.
-		return fmt.Sprintf("pool size %d is composite: a spending stride of %d collapses it "+
-			"onto %d slot(s). A PRIME size makes the rotation's guarantee arithmetic rather "+
-			"than empirical; see selectEnrollment", size, smallest, worst)
-	}
-	// "smallest", not "likely". Everywhere else in this change likely means a
-	// stride of 2 -- relevant and irrelevant PRs alternating, which is ordinary
-	// traffic. That coincides with smallestFactor only when the size is EVEN: at
-	// 9, 15 or 25 the smallest factor is 3 or 5 while stride 2 is coprime and
-	// collapses nothing, so calling it likely there would both misname the
-	// traffic shape and overstate the risk from the one shape being reasoned
-	// about.
+	// "likely" means a stride of 2 throughout this change -- relevant and
+	// irrelevant PRs alternating, which is ordinary traffic. It is earned only
+	// by EVEN sizes: at 9, 15 or 25 the smallest factor is 3 or 5 while stride 2
+	// is coprime and collapses nothing, so claiming it there would misname the
+	// traffic shape and overstate the risk. Built before the branch below, not
+	// inside it, because 4 is even AND a prime square -- it took the coincident
+	// branch and was the one even size that lost the framing.
 	note := ""
 	if size%2 == 0 {
 		note = ", which is the likely one -- relevant and irrelevant PRs alternating"
+	}
+	if smallest == worst {
+		// A prime square (or 4): the two strides coincide, and naming them
+		// separately would read as a contradiction.
+		return fmt.Sprintf("pool size %d is composite: a spending stride of %d%s collapses it "+
+			"onto %d slot(s). A PRIME size makes the rotation's guarantee arithmetic rather "+
+			"than empirical; see selectEnrollment", size, smallest, note, worst)
 	}
 	return fmt.Sprintf("pool size %d is composite: a spending stride of %d%s collapses it "+
 		"onto %d slot(s), and a stride of %d onto %d -- the worst case. A PRIME size makes "+

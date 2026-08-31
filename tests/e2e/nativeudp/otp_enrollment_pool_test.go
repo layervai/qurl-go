@@ -381,8 +381,12 @@ func TestPoolSizeAdvisorySpeaksAtEverySizeThatCosts(t *testing.T) {
 	// that word where stride 2 actually collapses the pool -- even sizes. At an
 	// odd composite the smallest factor is 3 or more and stride 2 is coprime, so
 	// calling it likely would misname ordinary traffic and overstate the risk.
-	if got := poolSizeAdvisory(6); !strings.Contains(got, "likely") {
-		t.Fatalf("even composite advisory %q should name stride 2 as the likely one", got)
+	for _, even := range []int{4, 6, 8, 10, 12} {
+		if got := poolSizeAdvisory(even); !strings.Contains(got, "likely") {
+			t.Fatalf("even composite advisory for %d (%q) should name stride 2 as the "+
+				"likely one; 4 is the case that took the prime-square branch and lost it",
+				even, got)
+		}
 	}
 	for _, odd := range []int{9, 15, 25} {
 		if got := poolSizeAdvisory(odd); strings.Contains(got, "likely") {
@@ -436,7 +440,11 @@ func TestGateWorkflowCommentQuotesTheBudgetConstant(t *testing.T) {
 
 	// The derived arithmetic belongs to selectEnrollment, which can interpolate
 	// the constant. Re-deriving it in the workflow is what produced the drift.
-	for _, forbidden := range []string{"len(pool)", "per slot", "PER SLOT"} {
+	// "per-slot" as well as "per slot": the workflow's own pointer sentence used
+	// the hyphenated form, which slipped past a fence whose comment claims to
+	// keep the derivation out. A future re-derivation written with a hyphen
+	// would have passed just as silently.
+	for _, forbidden := range []string{"len(pool)", "per slot", "per-slot", "PER SLOT", "PER-SLOT"} {
 		if strings.Contains(raw, forbidden) {
 			t.Fatalf("%s contains %q: the pool arithmetic moved to selectEnrollment so a "+
 				"rate retune has one line to change here, not a paragraph",
@@ -900,6 +908,32 @@ func TestLoadOTPE2EConfigAcceptsEitherCredentialSource(t *testing.T) {
 		}
 		// The COUNT must match what is listed. Reporting one unmet prerequisite
 		// while naming two reads as an addendum and undercounts the work ahead.
+		if !strings.Contains(err.Error(), "2 unmet prerequisite") {
+			t.Fatalf("strict error %q lists two faults but does not count two", err)
+		}
+	})
+
+	// A damaged pool alongside an UNRELATED absent variable. The pool guard used
+	// to sit below the missing-prerequisite return, so any other missing secret
+	// masked it entirely: the operator fixed the named variable and spent a
+	// second gate cycle discovering the pool was unpooled all along.
+	t.Run("strict run reports a damaged pool alongside an unrelated missing variable", func(t *testing.T) {
+		env := with(map[string]string{
+			otpE2EEnrollmentPoolEnv: "only-one", // damaged, but non-empty
+			otpE2EStrictEnv:         "1",
+			"GITHUB_RUN_NUMBER":     "41",
+			"GITHUB_RUN_ATTEMPT":    "1",
+		})
+		delete(env, otpE2EHubKeyEnv) // an unrelated prerequisite goes missing
+		_, _, err := loadOTPE2EConfig(envFrom(env))
+		if err == nil {
+			t.Fatal("strict run accepted a damaged pool and a missing hub key")
+		}
+		for _, want := range []string{otpE2EHubKeyEnv, otpE2EEnrollmentPoolEnv} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("strict error %q omits %s; one fault masked the other", err, want)
+			}
+		}
 		if !strings.Contains(err.Error(), "2 unmet prerequisite") {
 			t.Fatalf("strict error %q lists two faults but does not count two", err)
 		}
