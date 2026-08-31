@@ -118,6 +118,10 @@ func loadOTPE2EConfig(lookup func(string) string) (otpE2EConfig, bool, error) {
 	// The credential arrives as a pool or as a single value, so neither name
 	// belongs in `required` on its own -- either one alone satisfies this.
 	pool := parseEnrollmentPool(lookup(otpE2EEnrollmentPoolEnv))
+	// Whether the POOL variable is the source decides whether a one-entry
+	// result is a configuration or an accident: the single-credential setup has
+	// its own variable, so a pool that parsed to one credential is a truncation.
+	fromPool := len(pool) > 0
 	if len(pool) == 0 {
 		if single := strings.TrimSpace(lookup(otpE2EEnrollmentEnv)); single != "" {
 			pool = []string{single}
@@ -149,6 +153,18 @@ func loadOTPE2EConfig(lookup func(string) string) (otpE2EConfig, bool, error) {
 	// random, which quietly reinstates the clustering the pool exists to avoid
 	// -- and the only symptom would be this gate going red again weeks later,
 	// for the same reason and with the same misleading evidence as last time.
+	// A pool that lost its slots degrades exactly as silently as a missing
+	// counter, and to the same place: one credential, 5 issuances an hour for
+	// the whole gate, which is the state the pool was built to leave. The only
+	// other signal is "slot 0 of 1" in a log the canary does not even print.
+	if strict && fromPool && len(pool) < 2 {
+		return otpE2EConfig{}, false, fmt.Errorf(
+			"strict OTP e2e run parsed only %d credential from %s: the pool is the "+
+				"multi-credential source (single credentials belong in %s), so one entry "+
+				"means a truncated secret and the gate would run unpooled at %d/hour",
+			len(pool), otpE2EEnrollmentPoolEnv, otpE2EEnrollmentEnv, 5)
+	}
+
 	if strict && len(unrotatedBecause) > 0 {
 		return otpE2EConfig{}, false, fmt.Errorf(
 			"strict OTP e2e run could not read a usable %s, so credential selection fell "+

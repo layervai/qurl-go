@@ -262,6 +262,18 @@ func TestSelectEnrollmentBoundsInterleavedReruns(t *testing.T) {
 							runs, start, attemptsPerRun, n, slot, bound)
 					}
 				}
+				// The count bound above is NOT sensitive to the attempt term --
+				// an implementation that ignored the attempt entirely, sending
+				// every rerun back to its run's own slot, satisfies it exactly
+				// (7 runs x 3 attempts puts 6 on one slot against a bound of
+				// 6). This is the assertion that pins the aliasing: reruns must
+				// REACH further, so the runs spread over runs+attempts-1 slots
+				// rather than piling onto the runs alone.
+				if want := min(len(pool), runs+attemptsPerRun-1); len(used) != want {
+					t.Fatalf("%d runs from %d retried to attempt %d touched %d slots; a "+
+						"rotation that moves reruns touches %d (%v)",
+						runs, start, attemptsPerRun, len(used), want, used)
+				}
 			}
 		}
 	}
@@ -427,6 +439,9 @@ func TestLoadOTPE2EConfigAcceptsEitherCredentialSource(t *testing.T) {
 		_, _, err := loadOTPE2EConfig(envFrom(with(map[string]string{
 			otpE2EEnrollmentPoolEnv: "one\ntwo\nthree",
 			otpE2EStrictEnv:         "1",
+			// A VALID attempt, so this exercises the case it is named for
+			// rather than repeating the both-counters-missing case below.
+			"GITHUB_RUN_ATTEMPT": "1",
 		})))
 		if err == nil {
 			t.Fatal("strict run selected a credential at random; the pool would cluster")
@@ -486,6 +501,27 @@ func TestLoadOTPE2EConfigAcceptsEitherCredentialSource(t *testing.T) {
 				t.Fatalf("strict error %q omits %s; fixing one would burn a gate cycle "+
 					"to discover the other", err, name)
 			}
+		}
+	})
+
+	// A pool secret re-saved truncated -- one line kept, or six credentials
+	// pasted space-separated, which parseEnrollmentPool collapses to one entry
+	// since it splits only on newline, CR and comma -- silently returns the gate
+	// to 5 issuances an hour for everything, which is the pre-pool state this
+	// whole change exists to prevent. Strict mode is loud about the counters;
+	// it has to be loud about this too.
+	t.Run("strict run refuses a pool variable that yielded one credential", func(t *testing.T) {
+		_, _, err := loadOTPE2EConfig(envFrom(with(map[string]string{
+			otpE2EEnrollmentPoolEnv: "one two three", // spaces are not separators
+			otpE2EStrictEnv:         "1",
+			"GITHUB_RUN_NUMBER":     "41",
+			"GITHUB_RUN_ATTEMPT":    "1",
+		})))
+		if err == nil {
+			t.Fatal("strict run accepted a one-entry pool; the gate would run unpooled")
+		}
+		if !strings.Contains(err.Error(), otpE2EEnrollmentPoolEnv) {
+			t.Fatalf("strict error %q does not name the truncated variable", err)
 		}
 	})
 
