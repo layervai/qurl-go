@@ -147,7 +147,19 @@ func loadOTPE2EConfig(lookup func(string) string) (otpE2EConfig, bool, error) {
 		}
 	}
 	if len(pool) == 0 {
-		missing = append(missing, otpE2EEnrollmentPoolEnv+" (or "+otpE2EEnrollmentEnv+")")
+		// "Missing" is the wrong word when the variable is SET and simply
+		// yields nothing, and it is the wrong word on the branch production
+		// actually takes: both workflows supply only the pool variable, so a
+		// secret damaged to whitespace lands here rather than in the
+		// damaged-pool guard further down, which sits after this early return.
+		// Reporting it as absent sends the operator to Settings to find the
+		// secret sitting right where they left it.
+		if fromPool {
+			missing = append(missing, otpE2EEnrollmentPoolEnv+
+				" (present, but it parsed to 0 credentials -- a damaged or whitespace-only secret)")
+		} else {
+			missing = append(missing, otpE2EEnrollmentPoolEnv+" (or "+otpE2EEnrollmentEnv+")")
+		}
 	}
 
 	strict := strings.TrimSpace(lookup(otpE2EStrictEnv)) != ""

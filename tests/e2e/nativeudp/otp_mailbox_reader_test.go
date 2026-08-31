@@ -195,9 +195,9 @@ func (m *otpMailbox) timedOut() error {
 			"pool carries one credential per owner it is that limit which runs out first "+
 			"(the per-owner limit is higher and unreachable). Selection rotates across "+
 			"the pool, so this needs roughly %d times the pool size in an hour -- but "+
-			"count against the slot this run drew, which the run logs, not against the "+
-			"pool. Check the ca-iro-cell* log group for an Outcome other than success "+
-			"before suspecting delivery",
+			"issuances count against the slot this run drew, which the run logs, not "+
+			"against the pool as a whole. Check the ca-iro-cell* log group for an "+
+			"Outcome other than success before suspecting delivery",
 		perCredentialHourlyBudget, perCredentialHourlyBudget)
 }
 

@@ -42,19 +42,24 @@ func slotFor(pool []string, runNumber, attempt int) int {
 // ceilDiv is the per-slot ceiling a rotation guarantees over n runs.
 func ceilDiv(n, slots int) int { return (n + slots - 1) / slots }
 
-// sweepStarts returns every residue class mod size, plus a few arbitrary large
-// offsets. DERIVED from the size rather than listed: a literal list silently
-// loses coverage the day the pool changes size, and in the direction this repo
-// is heading -- {0, 1, 7, 41, 202, 1000} covers four of six residues today and
-// only THREE OF SEVEN at the prime size selectEnrollment argues for, while the
-// sweeps that use it would keep passing and still claim to start "from any
-// offset".
+// sweepStarts returns every residue class mod size, and nothing else.
+//
+// DERIVED from the size rather than listed: a literal list silently loses
+// coverage the day the pool changes size, and in the direction this repo is
+// heading -- {0, 1, 7, 41, 202, 1000} covers four of six residues today and only
+// THREE OF SEVEN at the prime size selectEnrollment argues for, while the sweeps
+// that use it would keep passing and still claim to start "from any offset".
+//
+// Residues are also ENOUGH. Every property these sweeps assert depends on start
+// only through start mod size, so large arbitrary offsets are duplicates of
+// starts already here (41, 202 and 1000 reduce to 5, 4 and 4 on a six-slot
+// pool) and buy iteration count rather than coverage.
 func sweepStarts(size int) []int {
-	starts := make([]int, 0, size+3)
+	starts := make([]int, 0, size)
 	for i := range size {
 		starts = append(starts, i)
 	}
-	return append(starts, 41, 202, 1000)
+	return starts
 }
 
 func TestParseEnrollmentPoolSplitsAndCleans(t *testing.T) {
@@ -702,6 +707,28 @@ func TestLoadOTPE2EConfigAcceptsEitherCredentialSource(t *testing.T) {
 		// operator after a pool truncated to one line when it holds none.
 		if !strings.Contains(err.Error(), "parsed 0 credential") {
 			t.Fatalf("strict error %q reports the backfilled count; the pool yielded none", err)
+		}
+	})
+
+	// THE BRANCH PRODUCTION TAKES. Both workflows supply only the pool
+	// variable, so a whitespace-damaged secret reaches the missing-prerequisite
+	// return, not the damaged-pool guard below it -- and "missing" is the wrong
+	// word for a variable that is set. The sibling subtest above only covers the
+	// branch where a stray single credential happens to backfill the length.
+	t.Run("a damaged pool with no single credential is not reported as absent", func(t *testing.T) {
+		_, _, err := loadOTPE2EConfig(envFrom(with(map[string]string{
+			otpE2EEnrollmentPoolEnv: " , , ", // present, yields nothing
+			otpE2EStrictEnv:         "1",
+			"GITHUB_RUN_NUMBER":     "41",
+			"GITHUB_RUN_ATTEMPT":    "1",
+		})))
+		if err == nil {
+			t.Fatal("strict run accepted a pool secret that yields no credentials")
+		}
+		if !strings.Contains(err.Error(), "0 credentials") {
+			t.Fatalf("strict error %q reports the secret as absent; it is present and "+
+				"damaged, and an operator told 'missing' will find it sitting in Settings",
+				err)
 		}
 	})
 
