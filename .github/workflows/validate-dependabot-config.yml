@@ -21,17 +21,20 @@ name: Validate Dependabot config
 # `.github/dependabot.yml` is the only spelling GitHub documents for this file;
 # there is no `.yaml` alternative to glob for, unlike the issue-form directory
 # the sibling validator walks.
+#
+# Fires on every PR with no path filter, following the convention
+# dependency-age-check-actions.yml states: a status check that always reports
+# can be required in branch protection, where a path-filtered one cannot --
+# its context is absent rather than green on the PRs it skips. Filtering to
+# the config would be cheaper and would still run on every edit that can break
+# it, but it would leave this advisory, and a gate whose whole subject is
+# silent failure should be able to block. Validating the committed file costs
+# a checkout and one pip install.
 on:
+  pull_request:
   push:
     branches: [main]
-    paths:
-      - ".github/dependabot.yml"
-      - ".github/workflows/validate-dependabot-config.yml"
-  pull_request:
-    branches: [main]
-    paths:
-      - ".github/dependabot.yml"
-      - ".github/workflows/validate-dependabot-config.yml"
+  workflow_dispatch:
 
 concurrency:
   group: "validate-dependabot-config-${{ github.ref }}"

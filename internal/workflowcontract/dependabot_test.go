@@ -58,11 +58,17 @@ func TestDependabotConfigIsSchemaChecked(t *testing.T) {
 		"check-jsonschema --builtin-schema vendor.dependabot "+dependabotConfig,
 		"if [[ ! -f "+dependabotConfig+" ]]; then",
 	)
-	// Once under push, once under pull_request.
-	if got := strings.Count(workflow, `      - "`+dependabotConfig+`"`); got != 2 {
-		t.Errorf("path filter names %s %d times, want 2 (push and pull_request)",
-			dependabotConfig, got)
-	}
+	// No path filter, so the context always reports and branch protection can
+	// require it -- a filtered check is absent, not green, on the PRs it skips.
+	requireNotContains(t, workflow, "paths:")
+
+	// Presence of the guard line is not the property; exiting non-zero is.
+	// `exit 0` in the guard, a trailing `|| true`, or continue-on-error each
+	// leave every fragment above intact while making the gate advisory. The
+	// first two are executable here: the missing-file branch returns before
+	// check-jsonschema is reached, so this runs with the tool absent.
+	runScript(t, t.TempDir(), stepRun(t, workflow, "Validate "+dependabotConfig), nil, false)
+	requireNotContains(t, workflow, "continue-on-error", "|| true")
 	// `validate` is already a required context on main, from pr-title.yml. A
 	// second job answering to that name is indistinguishable from it in branch
 	// protection.
