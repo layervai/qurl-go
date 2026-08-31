@@ -25,14 +25,20 @@ updates:
     # anthropics/claude-code-action is pinned by audit, not by version.
     # Upstream v1.0.187 began calling replaceCheckoutCredentials() on the
     # use_commit_signing path, rewriting origin to a token-bearing network
-    # URL. Both Claude workflows deliberately point origin at a local bare
+    # URL; both Claude workflows deliberately point origin at a local bare
     # repo holding an exact PR snapshot, so that rewrite destroys the
-    # credential-free and the exact-snapshot guarantees at once. Still
-    # present upstream as of v1.0.193, and
+    # credential-free and the exact-snapshot guarantees at once. It is still
+    # present upstream at v1.0.193, and
     # TestClaudeWorkflowsUseAuditedCredentialFreeAction fails any unaudited
     # pin, so every bump Dependabot proposes is red on arrival (#182).
-    # Moving the pin is a manual audit of the action's Git behavior; drop
-    # this entry once upstream leaves origin alone again.
+    #
+    # Ignore conditions filter security updates too, so an advisory against
+    # this action opens no PR either — watch the Dependabot alert, which is
+    # configured separately and still fires. Moving the pin means auditing
+    # the action's Git behavior by hand in any case; drop this entry once
+    # upstream leaves origin alone again.
+    #
+    # TestDependabotIgnoresTheAuditedClaudeAction asserts this entry.
     ignore:
       - dependency-name: "anthropics/claude-code-action"
     # Dependabot treats every subpath of an action repo as its own
