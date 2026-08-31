@@ -504,6 +504,52 @@ func TestLoadOTPE2EConfigAcceptsEitherCredentialSource(t *testing.T) {
 		}
 	})
 
+	// THE CONFIGURATION THE GATE ACTUALLY RUNS IN. Every other strict subtest
+	// here expects an error, so only the FIRING side of the two new guards was
+	// pinned -- nothing proved they stay silent on a real run. Without this,
+	// widening the truncation threshold to len(pool) < 3 leaves the whole suite
+	// green and hard-fails the next real PR on a REQUIRED check, with a message
+	// pointing away from the change under test: the exact failure this file
+	// exists to remove.
+	t.Run("strict run with a rotating pool is accepted", func(t *testing.T) {
+		cfg, skip, err := loadOTPE2EConfig(envFrom(with(map[string]string{
+			otpE2EEnrollmentPoolEnv: "one\ntwo\nthree",
+			otpE2EStrictEnv:         "1",
+			"GITHUB_RUN_NUMBER":     "41",
+			"GITHUB_RUN_ATTEMPT":    "1",
+		})))
+		if err != nil || skip {
+			t.Fatalf("the gate's own configuration was rejected: skip %t, err %v", skip, err)
+		}
+		// Observes end to end, through loadOTPE2EConfig, that the config the
+		// gate consumes carries the ROTATED slot rather than a random one.
+		if want := 41 % 3; cfg.enrollmentSlot != want {
+			t.Fatalf("slot = %d, want the rotation's %d", cfg.enrollmentSlot, want)
+		}
+		if cfg.enrollmentPoolSize != 3 {
+			t.Fatalf("pool size = %d, want 3", cfg.enrollmentPoolSize)
+		}
+	})
+
+	// The BOUNDARY of the truncation guard. Two credentials is the smallest
+	// genuinely-pooled configuration, so it must be accepted -- this is what
+	// pins the threshold at "< 2" specifically. A three-entry happy path alone
+	// does not: widening the guard to "< 3" would still leave it green.
+	t.Run("strict run accepts the smallest real pool", func(t *testing.T) {
+		cfg, _, err := loadOTPE2EConfig(envFrom(with(map[string]string{
+			otpE2EEnrollmentPoolEnv: "one\ntwo",
+			otpE2EStrictEnv:         "1",
+			"GITHUB_RUN_NUMBER":     "41",
+			"GITHUB_RUN_ATTEMPT":    "1",
+		})))
+		if err != nil {
+			t.Fatalf("a two-credential pool is a real pool and must rotate: %v", err)
+		}
+		if want := 41 % 2; cfg.enrollmentSlot != want {
+			t.Fatalf("slot = %d, want the rotation's %d", cfg.enrollmentSlot, want)
+		}
+	})
+
 	// A pool secret re-saved truncated -- one line kept, or six credentials
 	// pasted space-separated, which parseEnrollmentPool collapses to one entry
 	// since it splits only on newline, CR and comma -- silently returns the gate

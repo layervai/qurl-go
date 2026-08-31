@@ -499,10 +499,17 @@ func TestEmailedOTPCompletesIdempotentSDKRegistration(t *testing.T) {
 	// pattern (see selectEnrollment). That size lives in a secret, so no test
 	// can assert it -- say it out loud on the runs that actually load it.
 	if factor := smallestFactor(cfg.enrollmentPoolSize); factor > 0 {
-		t.Logf("NOTE pool size %d is divisible by %d, so a spending stride of %d would "+
-			"collapse it onto %d slot(s); a PRIME size makes the rotation's guarantee "+
-			"arithmetic rather than empirical -- see selectEnrollment",
-			cfg.enrollmentPoolSize, factor, factor, cfg.enrollmentPoolSize/factor)
+		// Two numbers, because one of them alone misleads. The LIKELY stride is
+		// the smallest factor (relevant and irrelevant PRs alternating), but it
+		// causes the mildest collapse; the WORST leaves only smallestFactor
+		// slots, via a stride of size/smallestFactor. Reporting just the likely
+		// one reads as a bound and would under-provision a replacement pool.
+		t.Logf("NOTE pool size %d is composite: a spending stride of %d (the likely one) "+
+			"collapses it onto %d slot(s), and a stride of %d onto %d -- the worst case. "+
+			"A PRIME size makes the rotation's guarantee arithmetic rather than "+
+			"empirical; see selectEnrollment",
+			cfg.enrollmentPoolSize, factor, cfg.enrollmentPoolSize/factor,
+			cfg.enrollmentPoolSize/factor, factor)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), otpE2EDeadline)
