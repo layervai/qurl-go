@@ -179,10 +179,11 @@ func (m *otpMailbox) snapshot() (calls int, fresh bool) {
 // Registration OTP issuance is rate limited per credential and per owner in
 // qurl-service; see selectEnrollment for which of the two actually bites, and
 // perCredentialHourlyBudget for the rate itself, which this message
-// interpolates rather than restates. Once that budget is spent the authority refuses to issue and
-// NO email is ever sent, which from here is indistinguishable from a delivery
-// problem -- so name it rather than let the reader look broken. Re-running the
-// gate while debugging is the fastest way to reach it.
+// interpolates rather than restates. Once that budget is spent the authority
+// refuses to issue and NO email is ever sent, which from here is
+// indistinguishable from a delivery problem -- so name it rather than let the
+// reader look broken. Re-running the gate while debugging is the fastest way
+// to reach it.
 func (m *otpMailbox) timedOut() error {
 	// The rate is interpolated, never spelled. This is the FIRST message an
 	// operator reads on the failure this whole mechanism exists for, so a stale

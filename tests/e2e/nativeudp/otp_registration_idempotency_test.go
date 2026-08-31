@@ -321,6 +321,22 @@ func parseEnrollmentPool(raw string) ([]string, int) {
 // but a gate that clustered again with a prime pool would be telling you the
 // density collapsed.
 //
+// THE SLOT IS NO LONGER RECOMPUTABLE OFFLINE, which is a real cost of this
+// change and the thing to know before auditing the pool again. The previous
+// selection was a pure function of GITHUB_RUN_ID and the attempt, and
+// runScopedAgentID bakes both into the agent credential's name
+// (agent:...-<runid>-<attempt>), so which slot a past run drew could be
+// recomputed from the sandbox record alone -- that is how the
+// one-credential-per-distinct-owner premise was proven over 136 registrations.
+// GITHUB_RUN_NUMBER is not in that name and is not derivable from the run id,
+// so the same audit now needs a join: `gh run list --workflow
+// otp-registration-gate.yml --json databaseId,number` maps run id to run
+// number, and the run history outlives the 30-day log retention that the
+// EVIDENCE line depends on. Recoverable, then, but no longer free. Putting the
+// run number into the agent id would restore the offline property at the cost
+// of changing a live registration input, which is not a trade worth making
+// inside a change about selection.
+//
 // A rerun aliases onto its neighbour by construction: (N, attempt 2) and
 // (N+1, attempt 1) resolve to the same slot, where the hash collided only one
 // time in len(pool). Any additive offset does this, and the cost is bounded at
@@ -398,7 +414,19 @@ func duplicateSuffix(duplicates int) string {
 // the size, so alternating relevant and irrelevant PRs put every issuance on
 // one credential. That is the same unpooled state the truncation guard hard
 // fails at one credential to prevent, and it must not arrive quietly.
+//
+// The line between two and three is plausibility, not arithmetic, and is worth
+// stating because it is the only judgement here. EVERY size collapses at a
+// stride equal to itself, three included; no size can buy that off. What makes
+// two different is that its self-collapsing stride is 2 -- the one shape this
+// file names as likely, since relevant and irrelevant PRs alternating is
+// ordinary traffic. A stride of exactly three is not, so three stays silent.
 func poolSizeAdvisory(size int) string {
+	if size < 2 {
+		return fmt.Sprintf("pool size %d is not a pool: every run spends the same "+
+			"credential, so the gate is worth %d/hour. Strict runs refuse this; a local "+
+			"run will simply exhaust it. See selectEnrollment", size, perCredentialHourlyBudget)
+	}
 	if size == 2 {
 		return fmt.Sprintf("pool size 2 is the smallest the strict guard accepts, and the "+
 			"likely spending stride of 2 EQUALS it: alternating relevant and irrelevant "+
@@ -595,10 +623,10 @@ func TestEmailedOTPCompletesIdempotentSDKRegistration(t *testing.T) {
 	if cfg.enrollmentPoolDuplicates > 0 {
 		t.Logf("NOTE the pool secret carried %d duplicate credential(s), so it holds %d "+
 			"distinct slots rather than %d: a repeated credential takes double traffic "+
-			"and spends its 5/hour early. Secrets are write-only, so check the value you "+
+			"and spends its %d/hour early. Secrets are write-only, so check the value you "+
 			"appended was not already present",
 			cfg.enrollmentPoolDuplicates, cfg.enrollmentPoolSize,
-			cfg.enrollmentPoolSize+cfg.enrollmentPoolDuplicates)
+			cfg.enrollmentPoolSize+cfg.enrollmentPoolDuplicates, perCredentialHourlyBudget)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), otpE2EDeadline)

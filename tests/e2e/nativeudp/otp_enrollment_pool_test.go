@@ -335,7 +335,9 @@ func TestSelectEnrollmentBoundsInterleavedReruns(t *testing.T) {
 // Silence is read as "the guarantee holds", so a size that degrades quietly is
 // worse than no advisory at all.
 func TestPoolSizeAdvisorySpeaksAtEverySizeThatCosts(t *testing.T) {
-	for _, size := range []int{2, 4, 6, 8, 9, 10, 12} {
+	// 0 and 1 are the unpooled state itself; 2 collapses under the likely
+	// stride; the rest are composite.
+	for _, size := range []int{0, 1, 2, 4, 6, 8, 9, 10, 12} {
 		if poolSizeAdvisory(size) == "" {
 			t.Fatalf("pool size %d degrades under a plausible stride but says nothing", size)
 		}
