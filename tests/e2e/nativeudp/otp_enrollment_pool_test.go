@@ -44,20 +44,32 @@ func ceilDiv(n, slots int) int { return (n + slots - 1) / slots }
 
 func TestParseEnrollmentPoolSplitsAndCleans(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		raw  string
-		want []string
+		name     string
+		raw      string
+		want     []string
+		wantDups int
 	}{
-		{"newline separated", "one\ntwo\nthree", []string{"one", "two", "three"}},
-		{"comma separated", "one,two,three", []string{"one", "two", "three"}},
-		{"crlf line endings", "one\r\ntwo", []string{"one", "two"}},
-		{"blank lines dropped", "one\n\n\ntwo\n", []string{"one", "two"}},
-		{"surrounding space trimmed", "  one  \n\ttwo\t", []string{"one", "two"}},
-		{"empty", "", nil},
-		{"only separators", "\n,\n , \n", nil},
+		{"newline separated", "one\ntwo\nthree", []string{"one", "two", "three"}, 0},
+		{"comma separated", "one,two,three", []string{"one", "two", "three"}, 0},
+		{"crlf line endings", "one\r\ntwo", []string{"one", "two"}, 0},
+		{"blank lines dropped", "one\n\n\ntwo\n", []string{"one", "two"}, 0},
+		{"surrounding space trimmed", "  one  \n\ttwo\t", []string{"one", "two"}, 0},
+		{"empty", "", nil, 0},
+		{"only separators", "\n,\n , \n", nil, 0},
+		// A duplicate must not inflate len(pool): it is the denominator of the
+		// hourly ceiling and the input to the composite-size warning, so a
+		// repeat would overstate capacity AND silence the warning at once.
+		{"duplicate dropped and counted", "one\ntwo\none", []string{"one", "two"}, 1},
+		{"duplicate after trimming", "one\n  one  \ntwo", []string{"one", "two"}, 1},
+		{"every entry repeated", "a\nb\na\nb", []string{"a", "b"}, 2},
+		{"six owners with one repeat parses as six", "a\nb\nc\nd\ne\nf\nc",
+			[]string{"a", "b", "c", "d", "e", "f"}, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := parseEnrollmentPool(tc.raw)
+			got, dups := parseEnrollmentPool(tc.raw)
+			if dups != tc.wantDups {
+				t.Fatalf("dropped %d duplicates, want %d", dups, tc.wantDups)
+			}
 			if len(got) != len(tc.want) {
 				t.Fatalf("parsed %d entries %q, want %d %q", len(got), got, len(tc.want), tc.want)
 			}
@@ -549,6 +561,37 @@ func TestLoadOTPE2EConfigAcceptsEitherCredentialSource(t *testing.T) {
 		}
 		if want := 41 % 2; cfg.enrollmentSlot != want {
 			t.Fatalf("slot = %d, want the rotation's %d", cfg.enrollmentSlot, want)
+		}
+	})
+
+	// The reviewer's scenario end to end: six distinct owners plus one repeated
+	// line. Without dedup this reports SEVEN slots -- overstating the ceiling,
+	// spending two of seven slots on one credential, and (because 7 is prime)
+	// silencing the composite-size warning at the exact moment the pool is
+	// degraded. Secrets are write-only, so whoever appends the seventh owner
+	// cannot look first; this is the failure that mistake produces.
+	t.Run("a duplicated credential does not inflate the pool size", func(t *testing.T) {
+		cfg, _, err := loadOTPE2EConfig(envFrom(with(map[string]string{
+			otpE2EEnrollmentPoolEnv: "a\nb\nc\nd\ne\nf\nc",
+			otpE2EStrictEnv:         "1",
+			"GITHUB_RUN_NUMBER":     "41",
+			"GITHUB_RUN_ATTEMPT":    "1",
+		})))
+		if err != nil {
+			t.Fatalf("a pool with a repeated line is usable, just smaller: %v", err)
+		}
+		if cfg.enrollmentPoolSize != 6 {
+			t.Fatalf("pool size = %d, want 6 distinct credentials from 7 lines",
+				cfg.enrollmentPoolSize)
+		}
+		if cfg.enrollmentPoolDuplicates != 1 {
+			t.Fatalf("duplicates = %d, want 1; the operator needs to be told",
+				cfg.enrollmentPoolDuplicates)
+		}
+		// Six is composite, so the stride warning must still fire. An inflated
+		// size of seven would have suppressed it.
+		if smallestFactor(cfg.enrollmentPoolSize) == 0 {
+			t.Fatal("a degraded pool reported a prime size; the stride warning is silenced")
 		}
 	})
 

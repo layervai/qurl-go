@@ -91,6 +91,10 @@ type otpE2EConfig struct {
 	// spent, and the pool is secret so the value itself can never be logged.
 	enrollmentSlot     int
 	enrollmentPoolSize int
+	// enrollmentPoolDuplicates is how many repeated credentials the secret
+	// carried. Non-zero means the pool is smaller than whoever seeded it
+	// believes, which is invisible from the secret itself.
+	enrollmentPoolDuplicates int
 
 	mailboxQueueURL  string
 	mailboxBucket    string
@@ -117,7 +121,7 @@ func loadOTPE2EConfig(lookup func(string) string) (otpE2EConfig, bool, error) {
 
 	// The credential arrives as a pool or as a single value, so neither name
 	// belongs in `required` on its own -- either one alone satisfies this.
-	pool := parseEnrollmentPool(lookup(otpE2EEnrollmentPoolEnv))
+	pool, poolDuplicates := parseEnrollmentPool(lookup(otpE2EEnrollmentPoolEnv))
 	// Whether the POOL variable is the source decides whether a one-entry
 	// result is a configuration or an accident: the single-credential setup has
 	// its own variable, so a pool that parsed to one credential is a truncation.
@@ -182,32 +186,59 @@ func loadOTPE2EConfig(lookup func(string) string) (otpE2EConfig, bool, error) {
 			Port:               port,
 			ServerPublicKeyB64: strings.TrimSpace(lookup(otpE2EHubKeyEnv)),
 		},
-		enrollment:         enrollment,
-		enrollmentSlot:     slot,
-		enrollmentPoolSize: len(pool),
-		agentID:            runScopedAgentID(strings.TrimSpace(lookup(otpE2EAgentIDEnv)), lookup),
-		mailboxQueueURL:    strings.TrimSpace(lookup(otpE2EMailboxQueueURLEnv)),
-		mailboxBucket:      strings.TrimSpace(lookup(otpE2EMailboxBucketEnv)),
-		mailboxRecipient:   strings.TrimSpace(lookup(otpE2EMailboxRecipientEnv)),
-		mailboxRegion:      strings.TrimSpace(lookup(otpE2EMailboxRegionEnv)),
+		enrollment:               enrollment,
+		enrollmentSlot:           slot,
+		enrollmentPoolSize:       len(pool),
+		enrollmentPoolDuplicates: poolDuplicates,
+		agentID:                  runScopedAgentID(strings.TrimSpace(lookup(otpE2EAgentIDEnv)), lookup),
+		mailboxQueueURL:          strings.TrimSpace(lookup(otpE2EMailboxQueueURLEnv)),
+		mailboxBucket:            strings.TrimSpace(lookup(otpE2EMailboxBucketEnv)),
+		mailboxRecipient:         strings.TrimSpace(lookup(otpE2EMailboxRecipientEnv)),
+		mailboxRegion:            strings.TrimSpace(lookup(otpE2EMailboxRegionEnv)),
 	}, false, nil
 }
 
-// parseEnrollmentPool splits the pool secret into credentials.
+// parseEnrollmentPool splits the pool secret into credentials, reporting how
+// many duplicate entries it dropped.
 //
 // Newline is the natural separator for a multi-line GitHub secret; comma is
 // accepted so the same value can be passed on a command line. Blank entries are
 // dropped rather than becoming an empty credential that fails obscurely later.
-func parseEnrollmentPool(raw string) []string {
+//
+// DEDUPLICATION IS LOAD-BEARING, not tidiness. len(pool) is the denominator of
+// the 5*len(pool) hourly ceiling, the pool size in this run's evidence, and the
+// input to smallestFactor -- the runtime half of the stride guard. A repeated
+// credential breaks all three at once and in the REASSURING direction: six
+// distinct owners plus one duplicated line parses to seven, the rotation spends
+// two of its seven slots on one credential so that credential takes double
+// traffic and hits its 5/hour cap early, and smallestFactor(7) is 0 so the gate
+// prints no composite-size warning -- reporting an arithmetic guarantee at the
+// exact moment the pool is degraded.
+//
+// That is reachable, not theoretical: GitHub secrets are write-only, so an
+// operator adding an owner cannot read the current value to check whether the
+// line is already there. Counting the drops rather than swallowing them tells
+// them which mistake they made -- a duplicate paste, or a seeding that never
+// landed -- since both otherwise present only as a pool smaller than expected.
+func parseEnrollmentPool(raw string) ([]string, int) {
 	var pool []string
+	seen := map[string]bool{}
+	duplicates := 0
 	for _, field := range strings.FieldsFunc(raw, func(r rune) bool {
 		return r == '\n' || r == '\r' || r == ','
 	}) {
-		if trimmed := strings.TrimSpace(field); trimmed != "" {
-			pool = append(pool, trimmed)
+		trimmed := strings.TrimSpace(field)
+		if trimmed == "" {
+			continue
 		}
+		if seen[trimmed] {
+			duplicates++
+			continue
+		}
+		seen[trimmed] = true
+		pool = append(pool, trimmed)
 	}
-	return pool
+	return pool, duplicates
 }
 
 // selectEnrollment picks this run's credential and reports which slot it used.
@@ -498,6 +529,15 @@ func TestEmailedOTPCompletesIdempotentSDKRegistration(t *testing.T) {
 	// The pool's SIZE decides whether the rotation survives a strided spending
 	// pattern (see selectEnrollment). That size lives in a secret, so no test
 	// can assert it -- say it out loud on the runs that actually load it.
+	if cfg.enrollmentPoolDuplicates > 0 {
+		t.Logf("NOTE the pool secret carried %d duplicate credential(s), so it holds %d "+
+			"distinct slots rather than %d: a repeated credential takes double traffic "+
+			"and spends its 5/hour early. Secrets are write-only, so check the value you "+
+			"appended was not already present",
+			cfg.enrollmentPoolDuplicates, cfg.enrollmentPoolSize,
+			cfg.enrollmentPoolSize+cfg.enrollmentPoolDuplicates)
+	}
+
 	if factor := smallestFactor(cfg.enrollmentPoolSize); factor > 0 {
 		// Two numbers, because one of them alone misleads. The LIKELY stride is
 		// the smallest factor (relevant and irrelevant PRs alternating), but it
