@@ -109,10 +109,16 @@ func TestOperatorGuidanceErrorMessages(t *testing.T) {
 			want:     "qurl: credential recovery horizon expired at 2026-10-13T12:00:00Z; persisted candidate was preserved",
 		},
 		{
-			name:     "credential recovered but assignment stale",
+			name:     "credential recovered but assignment stale with agent",
+			err:      &CredentialRecoveredAssignmentRefreshRequiredError{AgentID: "agent-test", Cause: errors.New("hub unreachable")},
+			sentinel: ErrCredentialRecoveredAssignmentRefreshRequired,
+			want:     `qurl: credential recovered; assignment refresh required for agent "agent-test"; call RefreshAgentRuntime before using the runtime`,
+		},
+		{
+			name:     "credential recovered but assignment stale without agent",
 			err:      &CredentialRecoveredAssignmentRefreshRequiredError{Cause: errors.New("hub unreachable")},
 			sentinel: ErrCredentialRecoveredAssignmentRefreshRequired,
-			want:     `qurl: credential recovered; assignment refresh required for agent ""; call RefreshAgentRuntime before using the runtime`,
+			want:     "qurl: credential recovered; assignment refresh required; call RefreshAgentRuntime before using the runtime",
 		},
 		{
 			name:     "assignment moved under a pin",

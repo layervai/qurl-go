@@ -208,7 +208,11 @@ func (e *CredentialRecoveredAssignmentRefreshRequiredError) Error() string {
 	if e != nil {
 		agentID = e.AgentID
 	}
-	return fmt.Sprintf("%s for agent %q; call RefreshAgentRuntime before using the runtime", ErrCredentialRecoveredAssignmentRefreshRequired, agentID)
+	message := ErrCredentialRecoveredAssignmentRefreshRequired.Error()
+	if agentID != "" {
+		message += fmt.Sprintf(" for agent %q", agentID)
+	}
+	return message + "; call RefreshAgentRuntime before using the runtime"
 }
 
 func (e *CredentialRecoveredAssignmentRefreshRequiredError) Unwrap() []error {
@@ -445,6 +449,8 @@ func (c *nativeAgentRuntimeConfig) finishRecoveredRuntime(ctx context.Context, s
 	if !sameAgentAssignment(state.Assignment, fresh) {
 		next := state.clone()
 		next.Assignment = fresh.clone()
+		// saveCredentialRecoveryState updates state in place after a successful or
+		// reconciled save, so the open and phase clear below use the refreshed bind.
 		if err := c.saveCredentialRecoveryState(ctx, store, state, next, ErrAgentBindingPersistence, "persist post-recovery assignment refresh"); err != nil {
 			return nil, &CredentialRecoveredAssignmentRefreshRequiredError{AgentID: state.AgentID, Cause: err}
 		}
