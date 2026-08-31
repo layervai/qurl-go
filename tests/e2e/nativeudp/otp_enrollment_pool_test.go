@@ -225,6 +225,48 @@ func TestSmallestFactorFlagsExactlyTheVulnerablePoolSizes(t *testing.T) {
 	}
 }
 
+// TestSelectEnrollmentBoundsInterleavedReruns covers the window shape the sweep
+// above cannot reach, despite looking like it does.
+//
+// slotFor reduces to (runNumber + attempt - 1) mod len(pool), so a window at a
+// FIXED attempt is bit-for-bit the same window at a different start: the sweep's
+// attempt loop widens which residues the starts cover, but every window in it
+// still holds the attempt constant, which is the case the rotation makes
+// trivially perfect. The distinct shape is attempts INTERLEAVED inside one
+// window -- a flaky stretch where runs retry -- which is where the aliasing
+// selectEnrollment documents ((N, attempt 2) onto (N+1, attempt 1)) shows up.
+//
+// The ideal ceiling does NOT survive interleaving and is not claimed to: three
+// runs each retried once put 6 issuances on 4 slots, two of them twice, against
+// a ceil(6/6)=1 ideal. The bound that does hold is ceil(runs/len(pool)) per
+// attempt level, i.e. reruns cost proportionally rather than collapsing the
+// pool -- which is the "bounded at one extra issuance on one slot" claim on
+// selectEnrollment, asserted here rather than left as prose.
+func TestSelectEnrollmentBoundsInterleavedReruns(t *testing.T) {
+	pool := sixSlotPool
+
+	for _, attemptsPerRun := range []int{2, 3} {
+		for _, start := range []int{0, 1, 7, 41, 202, 1000} {
+			for runs := 1; runs <= perCredentialHourlyBudget*len(pool); runs++ {
+				used := map[int]int{}
+				for i := 0; i < runs; i++ {
+					for attempt := 1; attempt <= attemptsPerRun; attempt++ {
+						used[slotFor(pool, start+i, attempt)]++
+					}
+				}
+				bound := ceilDiv(runs, len(pool)) * attemptsPerRun
+				for slot := range pool {
+					if n := used[slot]; n > bound {
+						t.Fatalf("%d runs from %d each retried to attempt %d put %d issuances "+
+							"on slot %d; interleaved reruns must stay within %d",
+							runs, start, attemptsPerRun, n, slot, bound)
+					}
+				}
+			}
+		}
+	}
+}
+
 // TestSelectEnrollmentStridedTrafficNeedsACoprimePoolSize pins the residual the
 // rotation cannot fix on its own, and shows it is a POOL SIZE decision.
 //
@@ -425,6 +467,25 @@ func TestLoadOTPE2EConfigAcceptsEitherCredentialSource(t *testing.T) {
 		// set -- the misdirection this whole change exists to stop.
 		if !strings.Contains(err.Error(), "GITHUB_RUN_ATTEMPT") {
 			t.Fatalf("strict error %q blames the wrong counter; the attempt is at fault", err)
+		}
+	})
+
+	// loadOTPE2EConfig's contract is to collect EVERY missing variable so a
+	// misconfiguration is fixed in one pass. The rotation guard has to obey it
+	// too, or a runner that dropped both counters costs two full gate cycles.
+	t.Run("strict run names both counters when both are unusable", func(t *testing.T) {
+		_, _, err := loadOTPE2EConfig(envFrom(with(map[string]string{
+			otpE2EEnrollmentPoolEnv: "one\ntwo\nthree",
+			otpE2EStrictEnv:         "1",
+		})))
+		if err == nil {
+			t.Fatal("strict run with neither counter selected at random")
+		}
+		for _, name := range []string{"GITHUB_RUN_NUMBER", "GITHUB_RUN_ATTEMPT"} {
+			if !strings.Contains(err.Error(), name) {
+				t.Fatalf("strict error %q omits %s; fixing one would burn a gate cycle "+
+					"to discover the other", err, name)
+			}
 		}
 	})
 

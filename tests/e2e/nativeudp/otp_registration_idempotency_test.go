@@ -149,11 +149,11 @@ func loadOTPE2EConfig(lookup func(string) string) (otpE2EConfig, bool, error) {
 	// random, which quietly reinstates the clustering the pool exists to avoid
 	// -- and the only symptom would be this gate going red again weeks later,
 	// for the same reason and with the same misleading evidence as last time.
-	if strict && unrotatedBecause != "" {
+	if strict && len(unrotatedBecause) > 0 {
 		return otpE2EConfig{}, false, fmt.Errorf(
 			"strict OTP e2e run could not read a usable %s, so credential selection fell "+
 				"back to random and the %d-slot pool would cluster rather than rotate",
-			unrotatedBecause, len(pool))
+			strings.Join(unrotatedBecause, " and "), len(pool))
 	}
 
 	return otpE2EConfig{
@@ -254,6 +254,17 @@ func parseEnrollmentPool(raw string) []string {
 // slot against the hash's 5 -- but empirical is weaker than arithmetic, and
 // this is the residual to check first if the gate ever clusters again.
 //
+// The SECOND thing to check is relevance DENSITY, which is the residual a fixed
+// stride does not describe. Real skips are irregular rather than strided (there
+// is no trigger-level paths: filter, so every PR takes a run number while only
+// GATE_PATHS spends), and irregular skips push runNumber mod len(pool) back
+// toward the independence a hash has. Rotation still wins for any plausible
+// traffic -- over M consecutive numbers at relevance density p, per-slot
+// variance is (Mp/n)(1-p) rotating against (Mp/n)((n-1)/n) hashing, so rotation
+// is strictly better whenever p > 1/n, and GATE_PATHS covers nearly the repo --
+// but a gate that clustered again with a prime pool would be telling you the
+// density collapsed.
+//
 // A rerun aliases onto its neighbour by construction: (N, attempt 2) and
 // (N+1, attempt 1) resolve to the same slot, where the hash collided only one
 // time in len(pool). Any additive offset does this, and the cost is bounded at
@@ -262,17 +273,18 @@ func parseEnrollmentPool(raw string) []string {
 //
 // Off CI there is no counter to rotate on, so fall back to random: repeated
 // local runs are just as capable of exhausting one credential.
-// The third return is the name of the counter that PREVENTED the rotation, or
-// "" when the run rotated (or had nothing to rotate). Callers report it: naming
-// the wrong variable is how the last diagnosis got expensive.
-func selectEnrollment(pool []string, lookup func(string) string) (string, int, string) {
+// The third return names EVERY counter that prevented the rotation, empty when
+// the run rotated (or had nothing to rotate). Callers report them all, matching
+// loadOTPE2EConfig's rule for missing variables: naming the wrong one, or only
+// the first of two, costs a whole gate cycle per variable to discover.
+func selectEnrollment(pool []string, lookup func(string) string) (string, int, []string) {
 	switch len(pool) {
 	case 0:
-		return "", -1, ""
+		return "", -1, nil
 	case 1:
 		// One credential is the whole pool, so there is nothing to rotate and
 		// nothing for a caller to warn about.
-		return pool[0], 0, ""
+		return pool[0], 0, nil
 	}
 
 	// BOTH counters must be usable, and an unreadable attempt is not the softer
@@ -282,20 +294,20 @@ func selectEnrollment(pool []string, lookup func(string) string) (string, int, s
 	// pool existed. Treat it exactly as strictly as the run number.
 	runNumber, haveRun := rotationCounter(lookup, "GITHUB_RUN_NUMBER", 0)
 	attempt, haveAttempt := rotationCounter(lookup, "GITHUB_RUN_ATTEMPT", 1)
-	blocked := ""
-	switch {
-	case !haveRun:
-		blocked = "GITHUB_RUN_NUMBER"
-	case !haveAttempt:
-		blocked = "GITHUB_RUN_ATTEMPT"
+	var blocked []string
+	if !haveRun {
+		blocked = append(blocked, "GITHUB_RUN_NUMBER")
 	}
-	if blocked == "" {
+	if !haveAttempt {
+		blocked = append(blocked, "GITHUB_RUN_ATTEMPT")
+	}
+	if len(blocked) == 0 {
 		// Reduce both terms before adding. A real run number never approaches
 		// MaxInt, but this reads an environment variable, and the sum of two
 		// unreduced values there would overflow to a negative slot and panic
 		// the index below rather than fail some assertion.
 		slot := (runNumber%len(pool) + (attempt-1)%len(pool)) % len(pool)
-		return pool[slot], slot, ""
+		return pool[slot], slot, nil
 	}
 
 	raw := make([]byte, 4)
