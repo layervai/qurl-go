@@ -354,6 +354,18 @@ func TestPoolSizeAdvisorySpeaksAtEverySizeThatCosts(t *testing.T) {
 	if got := poolSizeAdvisory(2); !strings.Contains(got, "unpooled") {
 		t.Fatalf("the size-2 advisory must say it reaches the unpooled state, said %q", got)
 	}
+	// Size 1 is reachable from BOTH credential sources, and strict judges them
+	// oppositely: it refuses a damaged pool and accepts the single-credential
+	// setup. An advisory that asserts a refusal would be printing "strict runs
+	// refuse this" from inside a strict run that was not refused, so it has to
+	// name both variables and attribute the refusal to the right one.
+	got := poolSizeAdvisory(1)
+	for _, name := range []string{otpE2EEnrollmentPoolEnv, otpE2EEnrollmentEnv} {
+		if !strings.Contains(got, name) {
+			t.Fatalf("the size-1 advisory %q does not name %s; it cannot say which "+
+				"source is damaged and which is supported", got, name)
+		}
+	}
 	// Today's size, and the size the seventh owner buys.
 	if poolSizeAdvisory(len(sixSlotPool)) == "" {
 		t.Fatal("today's six-slot pool must warn; the residual is still open")
@@ -683,6 +695,13 @@ func TestLoadOTPE2EConfigAcceptsEitherCredentialSource(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), otpE2EEnrollmentPoolEnv) {
 			t.Fatalf("strict error %q does not name the damaged variable", err)
+		}
+		// The COUNT must be the pool variable's own yield, which is zero. The
+		// single credential backfilled `pool` to one, and reporting that would
+		// attribute another variable's credential to this one -- sending the
+		// operator after a pool truncated to one line when it holds none.
+		if !strings.Contains(err.Error(), "parsed 0 credential") {
+			t.Fatalf("strict error %q reports the backfilled count; the pool yielded none", err)
 		}
 	})
 

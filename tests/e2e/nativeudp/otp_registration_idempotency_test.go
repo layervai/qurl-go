@@ -134,6 +134,13 @@ func loadOTPE2EConfig(lookup func(string) string) (otpE2EConfig, bool, error) {
 	// single-credential variable would be adopted, and a strict run would
 	// proceed unpooled at 5/hour with neither an error nor a note.
 	fromPool := strings.TrimSpace(lookup(otpE2EEnrollmentPoolEnv)) != ""
+	// The pool variable's OWN yield, captured before the single-credential
+	// backfill below can overwrite it. Reporting len(pool) after the backfill
+	// would attribute another variable's credential to this one: a pool of
+	// " , , " alongside a valid single credential yields zero here and one
+	// there, and the operator would be sent hunting for a pool truncated to one
+	// line when the pool in fact contains no credentials at all.
+	fromPoolCount := len(pool)
 	if len(pool) == 0 {
 		if single := strings.TrimSpace(lookup(otpE2EEnrollmentEnv)); single != "" {
 			pool = []string{single}
@@ -171,10 +178,10 @@ func loadOTPE2EConfig(lookup func(string) string) (otpE2EConfig, bool, error) {
 	// other signal is "slot 0 of 1" in a log the canary does not even print.
 	if strict && fromPool && len(pool) < 2 {
 		return otpE2EConfig{}, false, fmt.Errorf(
-			"strict OTP e2e run parsed only %d credential(s)%s from %s: the pool is the "+
+			"strict OTP e2e run parsed %d credential(s)%s from %s: the pool is the "+
 				"multi-credential source (single credentials belong in %s), so this is a "+
 				"damaged secret and the gate would run unpooled at %d/hour",
-			len(pool), duplicateSuffix(poolDuplicates),
+			fromPoolCount, duplicateSuffix(poolDuplicates),
 			otpE2EEnrollmentPoolEnv, otpE2EEnrollmentEnv, perCredentialHourlyBudget)
 	}
 
@@ -337,6 +344,12 @@ func parseEnrollmentPool(raw string) ([]string, int) {
 // of changing a live registration input, which is not a trade worth making
 // inside a change about selection.
 //
+// GITHUB_RUN_NUMBER restarts at 1 if this workflow file is ever renamed. That
+// only re-phases the rotation -- every property here is modular and holds from
+// any offset, which is what sweepStarts pins -- so it costs nothing. Noted
+// because a counter that jumps backwards looks like evidence during an
+// investigation, and it is not.
+//
 // A rerun aliases onto its neighbour by construction: (N, attempt 2) and
 // (N+1, attempt 1) resolve to the same slot, where the hash collided only one
 // time in len(pool). Any additive offset does this, and the cost is bounded at
@@ -423,9 +436,17 @@ func duplicateSuffix(duplicates int) string {
 // ordinary traffic. A stride of exactly three is not, so three stays silent.
 func poolSizeAdvisory(size int) string {
 	if size < 2 {
+		// Deliberately silent about which source this came from, because both
+		// reach here and they are judged differently: from the pool variable a
+		// strict run has already refused it, while from the single-credential
+		// variable it is the supported setup and strict accepts it. Saying
+		// "strict runs refuse this" would be false in the second case, printed
+		// from inside a strict run that was not refused.
 		return fmt.Sprintf("pool size %d is not a pool: every run spends the same "+
-			"credential, so the gate is worth %d/hour. Strict runs refuse this; a local "+
-			"run will simply exhaust it. See selectEnrollment", size, perCredentialHourlyBudget)
+			"credential, so the gate is worth %d/hour. From %s that is a damaged secret, "+
+			"which a strict run refuses; from %s it is the supported single-credential "+
+			"setup and this is just the ceiling. See selectEnrollment",
+			size, perCredentialHourlyBudget, otpE2EEnrollmentPoolEnv, otpE2EEnrollmentEnv)
 	}
 	if size == 2 {
 		return fmt.Sprintf("pool size 2 is the smallest the strict guard accepts, and the "+
