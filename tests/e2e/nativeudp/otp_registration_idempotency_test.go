@@ -142,7 +142,19 @@ func loadOTPE2EConfig(lookup func(string) string) (otpE2EConfig, bool, error) {
 		return otpE2EConfig{}, false, fmt.Errorf("%s must be a valid UDP port", otpE2EHubPortEnv)
 	}
 
-	enrollment, slot := selectEnrollment(pool, lookup)
+	enrollment, slot, rotated := selectEnrollment(pool, lookup)
+
+	// Every other prerequisite in this gate is loud (see otpE2EStrictEnv), and
+	// the rotation has to join them. A missing GITHUB_RUN_NUMBER falls back to
+	// random, which quietly reinstates the clustering the pool exists to avoid
+	// -- and the only symptom would be this gate going red again weeks later,
+	// for the same reason and with the same misleading evidence as last time.
+	if strict && !rotated {
+		return otpE2EConfig{}, false, fmt.Errorf(
+			"strict OTP e2e run could not read a usable GITHUB_RUN_NUMBER, so credential "+
+				"selection fell back to random and the %d-slot pool would cluster rather "+
+				"than rotate", len(pool))
+	}
 
 	return otpE2EConfig{
 		hub: qurl.HubBootstrap{
@@ -201,7 +213,12 @@ func parseEnrollmentPool(raw string) []string {
 // THE BINDING LIMIT IS THE CREDENTIAL'S FIVE, NOT THE OWNER'S TEN. With one
 // credential per owner the per-owner budget is unreachable -- a slot's own
 // credential refuses its sixth issuance while its owner is only halfway to ten
-// -- so this gate is worth 5/hour per slot and 5*len(pool) per hour overall.
+// -- so the POOL is worth 5/hour per slot and 5*len(pool) per hour in total.
+// That is the pool's ceiling, not this workflow's: otp-schema-v2-canary.yml
+// runs this same test against the same secret on its own run-number sequence,
+// so both workflows spend from these totals. Two rotations sum to within one of
+// ideal (two hashes would not), and the canary is attended dispatch, so this
+// composes today -- but the number belongs to the pool, not to either caller.
 //
 // SELECTION MUST ROTATE, NOT HASH. Both spread runs across the pool "evenly" in
 // the long run, but a hash spreads them INDEPENDENTLY: it is balls-in-bins, and
@@ -220,22 +237,38 @@ func parseEnrollmentPool(raw string) []string {
 // that actually exhausted a credential, since the previous attempt just spent
 // that slot's budget.
 //
-// The rotation is over ALL gate runs, but only the ones the scope step finds
-// relevant spend an issuance, so the spending runs are a subsequence and the
-// slots they take can skip. That degrades the guarantee from perfect
-// round-robin to something short of it; it does not degrade it to a hash,
-// because the skipped numbers are irregular rather than aligned to len(pool).
-// Replaying the 135 recorded issuances at their real run numbers -- real skips
-// included -- the worst rolling hour puts 3 on a slot, against the hash's 5.
+// KEEP len(pool) PRIME. The rotation runs over ALL gate runs, but only the ones
+// the scope step finds relevant spend an issuance, so spending runs are a
+// SUBSEQUENCE -- and a subsequence of stride d visits only len(pool)/gcd(d,
+// len(pool)) slots. Six is the worst size available for that: 6 = 2*3, so a
+// stretch where relevant and irrelevant PRs merely alternate (d=2) collapses
+// the pool onto three slots and reproduces the original outage with a different
+// traffic shape. At a prime size every stride up to len(pool) stays coprime and
+// the ceiling holds arithmetically instead of empirically.
+// TestSelectEnrollmentStridedTrafficNeedsACoprimePoolSize pins both halves.
+// Today's pool is six, which is a seeding decision rather than a code one: a
+// seventh owner would close this, and until then the guarantee is empirical.
+// It does hold empirically -- replaying the 135 recorded issuances at their
+// real run numbers, real skips included, the worst rolling hour puts 3 on a
+// slot against the hash's 5 -- but empirical is weaker than arithmetic, and
+// this is the residual to check first if the gate ever clusters again.
+//
+// A rerun aliases onto its neighbour by construction: (N, attempt 2) and
+// (N+1, attempt 1) resolve to the same slot, where the hash collided only one
+// time in len(pool). Any additive offset does this, and the cost is bounded at
+// one extra issuance on one slot rather than a cluster, so it is a deliberate
+// trade rather than an oversight.
 //
 // Off CI there is no counter to rotate on, so fall back to random: repeated
 // local runs are just as capable of exhausting one credential.
-func selectEnrollment(pool []string, lookup func(string) string) (string, int) {
+func selectEnrollment(pool []string, lookup func(string) string) (string, int, bool) {
 	switch len(pool) {
 	case 0:
-		return "", -1
+		return "", -1, false
 	case 1:
-		return pool[0], 0
+		// One credential is the whole pool, so there is nothing to rotate and
+		// nothing for a caller to warn about: report it as rotated.
+		return pool[0], 0, true
 	}
 
 	// Attempt defaults to 1 (its value on a first run) so a missing or unusable
@@ -251,15 +284,15 @@ func selectEnrollment(pool []string, lookup func(string) string) (string, int) {
 		// unreduced values there would overflow to a negative slot and panic
 		// the index below rather than fail some assertion.
 		slot := (runNumber%len(pool) + (attempt-1)%len(pool)) % len(pool)
-		return pool[slot], slot
+		return pool[slot], slot, true
 	}
 
 	raw := make([]byte, 4)
 	if _, err := rand.Read(raw); err != nil {
-		return pool[0], 0
+		return pool[0], 0, false
 	}
 	slot := int(binary.BigEndian.Uint32(raw) % uint32(len(pool)))
-	return pool[slot], slot
+	return pool[slot], slot, false
 }
 
 // runScopedAgentID appends a per-run suffix to the configured agent id.

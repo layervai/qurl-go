@@ -51,14 +51,12 @@ env:
   # performs a real enrolment and spends one registration-OTP issuance, and
   # that budget is finite: 5/hour per credential and 10/hour per owner
   # (qurl-service RegistrationOTPRateLimitWindow). The pool carries one
-  # credential per distinct owner, so the credential's five is what binds and
-  # the ceiling is five runs an hour PER SLOT -- thirty across today's six-slot
-  # pool, not sixty. Selection ROTATES on GITHUB_RUN_NUMBER (see
-  # selectEnrollment), which is what makes those thirty actually reachable: an
-  # earlier hash-based selection clustered runs and turned the gate red at nine.
-  # The pool multiplies that budget; it does not remove it. A dependency bump to
-  # an unrelated GitHub Action cannot break registration, so enrolling there
-  # would spend budget a real PR may need.
+  # credential per distinct owner, so the credential's five is what binds: five
+  # runs an hour PER SLOT, and 5*len(pool) across the pool -- shared with
+  # otp-schema-v2-canary.yml, which spends the same secret. selectEnrollment
+  # carries the full derivation. The pool multiplies that budget; it does not
+  # remove it. A dependency bump to an unrelated GitHub Action cannot break
+  # registration, so enrolling there would spend budget a real PR may need.
   #
   # The list must cover every top-level directory the gate's test COMPILES,
   # which is not the same as the SDK's public surface. `qurl` is only the
@@ -248,12 +246,11 @@ jobs:
           QURL_OTP_E2E_HUB_HOST: ${{ secrets.OTP_E2E_HUB_HOST }}
           QURL_OTP_E2E_HUB_PORT: ${{ secrets.OTP_E2E_HUB_PORT }}
           QURL_OTP_E2E_HUB_SERVER_KEY: ${{ secrets.OTP_E2E_HUB_SERVER_KEY }}
-          # A pool of credentials, one per DISTINCT owner, one per line. OTP
-          # issuance is capped at 5/hour per credential and 10/hour per owner;
-          # with one credential per owner the credential's five binds first, so
-          # each slot is worth five runs an hour and the pool five times its
-          # length. A single credential would cap this gate at five. The test
-          # picks a slot from the run id and attempt; see selectEnrollment.
+          # A pool of credentials, one per DISTINCT owner, one per line. The
+          # test rotates over it on the run NUMBER and attempt, and the pool's
+          # hourly ceiling and the reason its size wants to be prime both live
+          # with that rotation -- see selectEnrollment, which owns them for
+          # every workflow that spends this secret.
           QURL_OTP_E2E_ENROLLMENT_POOL: ${{ secrets.OTP_E2E_ENROLLMENT_POOL }}
           QURL_OTP_E2E_AGENT_ID: ${{ secrets.OTP_E2E_AGENT_ID }}
           QURL_OTP_E2E_MAILBOX_QUEUE_URL: ${{ secrets.OTP_E2E_MAILBOX_QUEUE_URL }}

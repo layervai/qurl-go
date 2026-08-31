@@ -9,7 +9,7 @@ package nativeudp_test
 // test. That is expensive to diagnose from CI and nearly free to catch here.
 
 import (
-	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -18,6 +18,29 @@ import (
 func envFrom(vars map[string]string) func(string) string {
 	return func(name string) string { return vars[name] }
 }
+
+// sixSlotPool is the pool's shape today: six credentials, one per distinct
+// owner. Selection only does anything above one slot, so the distribution tests
+// share it rather than restating it.
+var sixSlotPool = []string{"a", "b", "c", "d", "e", "f"}
+
+// ciEnv builds the two variables selectEnrollment rotates on. Taking ints keeps
+// callers from respelling the variable names on every loop iteration.
+func ciEnv(runNumber, attempt int) func(string) string {
+	return envFrom(map[string]string{
+		"GITHUB_RUN_NUMBER":  strconv.Itoa(runNumber),
+		"GITHUB_RUN_ATTEMPT": strconv.Itoa(attempt),
+	})
+}
+
+// slotFor is the tally step every distribution test below repeats.
+func slotFor(pool []string, runNumber, attempt int) int {
+	_, slot, _ := selectEnrollment(pool, ciEnv(runNumber, attempt))
+	return slot
+}
+
+// ceilDiv is the per-slot ceiling a rotation guarantees over n runs.
+func ceilDiv(n, slots int) int { return (n + slots - 1) / slots }
 
 func TestParseEnrollmentPoolSplitsAndCleans(t *testing.T) {
 	for _, tc := range []struct {
@@ -51,14 +74,14 @@ func TestSelectEnrollmentDegenerateCases(t *testing.T) {
 	lookup := envFrom(map[string]string{"GITHUB_RUN_NUMBER": "100", "GITHUB_RUN_ATTEMPT": "1"})
 
 	t.Run("empty pool reports no slot", func(t *testing.T) {
-		got, slot := selectEnrollment(nil, lookup)
+		got, slot, _ := selectEnrollment(nil, lookup)
 		if got != "" || slot != -1 {
 			t.Fatalf("selectEnrollment(nil) = %q, %d; want \"\", -1", got, slot)
 		}
 	})
 
 	t.Run("single credential is always slot zero", func(t *testing.T) {
-		got, slot := selectEnrollment([]string{"only"}, lookup)
+		got, slot, _ := selectEnrollment([]string{"only"}, lookup)
 		if got != "only" || slot != 0 {
 			t.Fatalf("selectEnrollment = %q, %d; want \"only\", 0", got, slot)
 		}
@@ -69,9 +92,9 @@ func TestSelectEnrollmentIsDeterministicForOneAttempt(t *testing.T) {
 	pool := []string{"a", "b", "c", "d", "e", "f"}
 	lookup := envFrom(map[string]string{"GITHUB_RUN_NUMBER": "12345", "GITHUB_RUN_ATTEMPT": "2"})
 
-	first, firstSlot := selectEnrollment(pool, lookup)
+	first, firstSlot, _ := selectEnrollment(pool, lookup)
 	for i := 0; i < 32; i++ {
-		got, slot := selectEnrollment(pool, lookup)
+		got, slot, _ := selectEnrollment(pool, lookup)
 		if got != first || slot != firstSlot {
 			t.Fatalf("selection %d = %q/%d; want stable %q/%d", i, got, slot, first, firstSlot)
 		}
@@ -87,15 +110,11 @@ func TestSelectEnrollmentIsDeterministicForOneAttempt(t *testing.T) {
 // because the attempt rotates rather than rehashes, they must move to a slot
 // nobody has used yet, which is the strongest form of "move".
 func TestSelectEnrollmentSpreadsReruns(t *testing.T) {
-	pool := []string{"a", "b", "c", "d", "e", "f"}
+	pool := sixSlotPool
 
 	seen := map[int]bool{}
 	for attempt := 1; attempt <= len(pool); attempt++ {
-		_, slot := selectEnrollment(pool, envFrom(map[string]string{
-			"GITHUB_RUN_NUMBER":  "999",
-			"GITHUB_RUN_ATTEMPT": fmt.Sprint(attempt),
-		}))
-		seen[slot] = true
+		seen[slotFor(pool, 999, attempt)] = true
 	}
 	if len(seen) != len(pool) {
 		t.Fatalf("%d reruns used only %d distinct slots (%v); a rotation must visit every slot before repeating",
@@ -110,24 +129,19 @@ func TestSelectEnrollmentSpreadsReruns(t *testing.T) {
 // one. A hash would only manage this on average, and "on average" is what the
 // per-credential budget punishes -- see the clustering test below.
 func TestSelectEnrollmentSpreadsRuns(t *testing.T) {
-	pool := []string{"a", "b", "c", "d", "e", "f"}
+	pool := sixSlotPool
 
 	const runs = 40
 	used := map[int]int{}
 	for run := 0; run < runs; run++ {
-		_, slot := selectEnrollment(pool, envFrom(map[string]string{
-			"GITHUB_RUN_NUMBER":  fmt.Sprint(1000 + run),
-			"GITHUB_RUN_ATTEMPT": "1",
-		}))
-		used[slot]++
+		used[slotFor(pool, 1000+run, 1)]++
 	}
-	if len(used) != len(pool) {
-		t.Fatalf("%d runs reached only %d of %d slots (%v); distribution is skewed",
-			runs, len(used), len(pool), used)
-	}
-	low, high := runs/len(pool), (runs+len(pool)-1)/len(pool)
-	for slot, n := range used {
-		if n < low || n > high {
+	// Ranging over the pool rather than over `used` is deliberate: a slot that
+	// took ZERO runs has no map entry, so ranging the map would skip exactly
+	// the starvation this lower bound exists to catch.
+	low, high := runs/len(pool), ceilDiv(runs, len(pool))
+	for slot := range pool {
+		if n := used[slot]; n < low || n > high {
 			t.Fatalf("slot %d took %d of %d runs; a rotation keeps every slot within [%d,%d] (%v)",
 				slot, n, runs, low, high, used)
 		}
@@ -149,35 +163,87 @@ func TestSelectEnrollmentSpreadsRuns(t *testing.T) {
 // hour of perCredentialHourlyBudget*len(pool) runs still fits.
 //
 // Reverting selectEnrollment to a hash of the run id fails this test.
+// perCredentialHourlyBudget is qurl-service's registrationOTPPerCredentialRate
+// at the time of writing. It only sets how far these tests look ahead, so
+// service-side retuning cannot invalidate the properties they assert.
+const perCredentialHourlyBudget = 5
+
 func TestSelectEnrollmentNeverClustersWithinTheIssuanceBudget(t *testing.T) {
-	// qurl-service registrationOTPPerCredentialRate at the time of writing. It
-	// only sets how far this test looks ahead, so service-side retuning cannot
-	// invalidate the property being asserted.
-	const perCredentialHourlyBudget = 5
-	pool := []string{"a", "b", "c", "d", "e", "f"}
+	pool := sixSlotPool
 	fullHour := perCredentialHourlyBudget * len(pool)
 
-	// A rotation has to hold from any offset: GITHUB_RUN_NUMBER is wherever
-	// this workflow's own history has reached, not a number this test chooses.
+	// A rotation has to hold from any offset, and at any attempt: run numbers
+	// are wherever this workflow's history has reached, not values a test may
+	// choose, and a hour of reruns is still an hour of issuances.
 	for _, start := range []int{0, 1, 7, 41, 202, 1000} {
-		for window := 1; window <= fullHour; window++ {
+		for _, attempt := range []int{1, 2, 3} {
+			// Counts accumulate: after run i the tallies ARE the window of
+			// i+1, so only the slot just incremented can have crossed its
+			// ceiling -- every other slot is unchanged from the previous
+			// window, where it already met a ceiling no larger than this one.
 			used := map[int]int{}
-			for i := 0; i < window; i++ {
-				_, slot := selectEnrollment(pool, envFrom(map[string]string{
-					"GITHUB_RUN_NUMBER":  fmt.Sprint(start + i),
-					"GITHUB_RUN_ATTEMPT": "1",
-				}))
+			for i := 0; i < fullHour; i++ {
+				slot := slotFor(pool, start+i, attempt)
 				used[slot]++
-			}
-			ceiling := (window + len(pool) - 1) / len(pool)
-			for slot, n := range used {
-				if n > ceiling {
-					t.Fatalf("%d consecutive runs from %d put %d issuances on slot %d; "+
-						"a rotation allows at most %d, and the credential budget is %d",
-						window, start, n, slot, ceiling, perCredentialHourlyBudget)
+				if ceiling := ceilDiv(i+1, len(pool)); used[slot] > ceiling {
+					t.Fatalf("%d consecutive runs from %d (attempt %d) put %d issuances on "+
+						"slot %d; a rotation allows at most %d, and the credential budget is %d",
+						i+1, start, attempt, used[slot], slot, ceiling, perCredentialHourlyBudget)
 				}
 			}
 		}
+	}
+}
+
+// TestSelectEnrollmentStridedTrafficNeedsACoprimePoolSize pins the residual the
+// rotation cannot fix on its own, and shows it is a POOL SIZE decision.
+//
+// Only scope-relevant runs spend an issuance, so spending runs are a
+// subsequence of the run numbers. A subsequence of stride d visits just
+// len(pool)/gcd(d, len(pool)) slots, so the guarantee survives a stride only
+// when it stays coprime to the pool size. Six is the worst size available: a
+// stretch where relevant and irrelevant PRs merely alternate is d=2, which
+// collapses six slots onto three and reproduces the outage this file exists to
+// document. A prime size is immune to every stride below it.
+//
+// This is asserted rather than written down because it is the argument for
+// seeding a SEVENTH owner, and because it stops someone "balancing" the pool to
+// an even size later.
+func TestSelectEnrollmentStridedTrafficNeedsACoprimePoolSize(t *testing.T) {
+	worstSlotUnderStride := func(pool []string, stride int) int {
+		used := map[int]int{}
+		for i := 0; i < perCredentialHourlyBudget*len(pool); i++ {
+			used[slotFor(pool, i*stride, 1)]++
+		}
+		worst := 0
+		for _, n := range used {
+			if n > worst {
+				worst = n
+			}
+		}
+		return worst
+	}
+
+	// Strides BELOW the size: for a prime p every d in [1,p) has gcd(d,p)=1.
+	// At d == p even a prime collapses onto one slot, which is arithmetic, not
+	// a property any pool size can buy off.
+	prime := []string{"a", "b", "c", "d", "e", "f", "g"}
+	for stride := 1; stride < len(prime); stride++ {
+		ideal := perCredentialHourlyBudget
+		if got := worstSlotUnderStride(prime, stride); got > ideal {
+			t.Fatalf("prime pool of %d under stride %d put %d on one slot; want at most %d",
+				len(prime), stride, got, ideal)
+		}
+	}
+
+	// The other half: today's six-slot pool genuinely does degrade, so the
+	// comment on selectEnrollment is not being alarmist. If a future pool size
+	// makes this pass, the pool became coprime-safe and this assertion (and the
+	// seventh-owner argument) should be revisited rather than deleted.
+	if got := worstSlotUnderStride(sixSlotPool, 2); got <= perCredentialHourlyBudget {
+		t.Fatalf("six-slot pool under stride 2 put only %d on one slot; the size dependency "+
+			"this test documents no longer holds -- re-derive it before trusting the comment",
+			got)
 	}
 }
 
@@ -204,7 +270,7 @@ func TestSelectEnrollmentAlwaysReturnsAPoolMember(t *testing.T) {
 		// MaxInt64 in both: the sum must not wrap to a negative slot.
 		{"GITHUB_RUN_NUMBER": "9223372036854775807", "GITHUB_RUN_ATTEMPT": "9223372036854775807"},
 	} {
-		got, slot := selectEnrollment(pool, envFrom(env))
+		got, slot, _ := selectEnrollment(pool, envFrom(env))
 		if !member[got] {
 			t.Fatalf("env %v selected %q, which is not in the pool", env, got)
 		}
@@ -277,6 +343,36 @@ func TestLoadOTPE2EConfigAcceptsEitherCredentialSource(t *testing.T) {
 		if cfg.enrollment == "solo" || cfg.enrollmentPoolSize != 2 {
 			t.Fatalf("credential = %q, pool size %d; want a pool member and size 2",
 				cfg.enrollment, cfg.enrollmentPoolSize)
+		}
+	})
+
+	// The rotation is a prerequisite, and strict mode is where prerequisites
+	// stop being silent. Without this, a runner that stopped exporting
+	// GITHUB_RUN_NUMBER would quietly go back to random selection and the only
+	// symptom would be the gate clustering red again weeks later.
+	t.Run("strict run without a run number refuses to fall back to random", func(t *testing.T) {
+		_, _, err := loadOTPE2EConfig(envFrom(with(map[string]string{
+			otpE2EEnrollmentPoolEnv: "one\ntwo\nthree",
+			otpE2EStrictEnv:         "1",
+		})))
+		if err == nil {
+			t.Fatal("strict run selected a credential at random; the pool would cluster")
+		}
+		if !strings.Contains(err.Error(), "GITHUB_RUN_NUMBER") {
+			t.Fatalf("strict error %q does not name the variable an operator must set", err)
+		}
+	})
+
+	// A one-entry pool has nothing to rotate, so strict mode must not treat it
+	// as a failed rotation -- that would break the single-credential setup the
+	// either-or rule above exists to support.
+	t.Run("strict run with a single credential is not a rotation failure", func(t *testing.T) {
+		_, _, err := loadOTPE2EConfig(envFrom(with(map[string]string{
+			otpE2EEnrollmentEnv: "solo",
+			otpE2EStrictEnv:     "1",
+		})))
+		if err != nil {
+			t.Fatalf("strict single-credential run failed: %v", err)
 		}
 	})
 
