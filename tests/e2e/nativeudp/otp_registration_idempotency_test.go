@@ -386,6 +386,44 @@ func duplicateSuffix(duplicates int) string {
 	return fmt.Sprintf(" (after dropping %d duplicate(s))", duplicates)
 }
 
+// poolSizeAdvisory reports what a given LIVE pool size costs, or "" when the
+// size carries no warning. Pure and separate from the test body so the wording
+// each size produces is itself asserted -- an advisory that goes quiet at the
+// wrong size is worse than none, because silence here is read as "the guarantee
+// holds".
+//
+// Two is the case that makes "silent" and "safe" come apart. It is prime, so
+// smallestFactor says nothing, and the strict guard deliberately accepts it as
+// the smallest real pool -- but the LIKELY spending stride is 2, which equals
+// the size, so alternating relevant and irrelevant PRs put every issuance on
+// one credential. That is the same unpooled state the truncation guard hard
+// fails at one credential to prevent, and it must not arrive quietly.
+func poolSizeAdvisory(size int) string {
+	if size == 2 {
+		return fmt.Sprintf("pool size 2 is the smallest the strict guard accepts, and the "+
+			"likely spending stride of 2 EQUALS it: alternating relevant and irrelevant "+
+			"PRs would put every issuance on one credential, i.e. %d/hour, which is the "+
+			"unpooled state. Seed more owners -- a PRIME size above two is what makes the "+
+			"rotation's guarantee arithmetic; see selectEnrollment", perCredentialHourlyBudget)
+	}
+	factor := smallestFactor(size)
+	if factor == 0 {
+		return ""
+	}
+	likely, worst := factor, size/factor
+	if likely == worst {
+		// A prime square (or 4): the two strides coincide, and naming them
+		// separately would read as a contradiction.
+		return fmt.Sprintf("pool size %d is composite: a spending stride of %d collapses it "+
+			"onto %d slot(s). A PRIME size makes the rotation's guarantee arithmetic rather "+
+			"than empirical; see selectEnrollment", size, likely, worst)
+	}
+	return fmt.Sprintf("pool size %d is composite: a spending stride of %d (the likely one) "+
+		"collapses it onto %d slot(s), and a stride of %d onto %d -- the worst case. A PRIME "+
+		"size makes the rotation's guarantee arithmetic rather than empirical; see "+
+		"selectEnrollment", size, likely, worst, worst, likely)
+}
+
 // smallestFactor returns the smallest non-trivial divisor of n, or 0 when n is
 // prime (or too small to matter). A composite pool size is what lets a strided
 // spending pattern collapse the rotation onto a subset of the pool.
@@ -550,6 +588,10 @@ func TestEmailedOTPCompletesIdempotentSDKRegistration(t *testing.T) {
 	// The pool's SIZE decides whether the rotation survives a strided spending
 	// pattern (see selectEnrollment). That size lives in a secret, so no test
 	// can assert it -- say it out loud on the runs that actually load it.
+	if advisory := poolSizeAdvisory(cfg.enrollmentPoolSize); advisory != "" {
+		t.Logf("NOTE %s", advisory)
+	}
+
 	if cfg.enrollmentPoolDuplicates > 0 {
 		t.Logf("NOTE the pool secret carried %d duplicate credential(s), so it holds %d "+
 			"distinct slots rather than %d: a repeated credential takes double traffic "+
@@ -557,29 +599,6 @@ func TestEmailedOTPCompletesIdempotentSDKRegistration(t *testing.T) {
 			"appended was not already present",
 			cfg.enrollmentPoolDuplicates, cfg.enrollmentPoolSize,
 			cfg.enrollmentPoolSize+cfg.enrollmentPoolDuplicates)
-	}
-
-	if factor := smallestFactor(cfg.enrollmentPoolSize); factor > 0 {
-		// Two numbers, because one of them alone misleads. The LIKELY stride is
-		// the smallest factor (relevant and irrelevant PRs alternating), but it
-		// causes the mildest collapse; the WORST leaves only smallestFactor
-		// slots, via a stride of size/smallestFactor. Reporting just the likely
-		// one reads as a bound and would under-provision a replacement pool.
-		likely, worst := factor, cfg.enrollmentPoolSize/factor
-		if likely == worst {
-			// A prime square (or 4): the two strides coincide, and naming them
-			// separately would read as a contradiction.
-			t.Logf("NOTE pool size %d is composite: a spending stride of %d collapses it "+
-				"onto %d slot(s). A PRIME size makes the rotation's guarantee arithmetic "+
-				"rather than empirical; see selectEnrollment",
-				cfg.enrollmentPoolSize, likely, worst)
-		} else {
-			t.Logf("NOTE pool size %d is composite: a spending stride of %d (the likely "+
-				"one) collapses it onto %d slot(s), and a stride of %d onto %d -- the "+
-				"worst case. A PRIME size makes the rotation's guarantee arithmetic "+
-				"rather than empirical; see selectEnrollment",
-				cfg.enrollmentPoolSize, likely, worst, worst, likely)
-		}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), otpE2EDeadline)

@@ -176,22 +176,28 @@ func (m *otpMailbox) snapshot() (calls int, fresh bool) {
 
 // timedOut explains a mailbox wait that produced nothing.
 //
-// Registration OTP issuance is rate limited per credential (5/hour) and per
-// owner (10/hour) in qurl-service; see selectEnrollment for which of the two
-// actually bites. Once that budget is spent the authority refuses to issue and
+// Registration OTP issuance is rate limited per credential and per owner in
+// qurl-service; see selectEnrollment for which of the two actually bites, and
+// perCredentialHourlyBudget for the rate itself, which this message
+// interpolates rather than restates. Once that budget is spent the authority refuses to issue and
 // NO email is ever sent, which from here is indistinguishable from a delivery
 // problem -- so name it rather than let the reader look broken. Re-running the
 // gate while debugging is the fastest way to reach it.
 func (m *otpMailbox) timedOut() error {
-	return errors.New(
-		"no OTP email arrived for this run. The likely cause is that no email was ever " +
-			"sent: issuance is rate limited at 5/hour per credential and 10/hour per " +
-			"owner, and because the pool carries one credential per owner it is the " +
-			"credential's five that runs out first. Selection rotates across the pool, " +
-			"so this needs roughly five times the pool size in an hour -- but count " +
-			"against the slot this run drew, which the run logs, not against the pool. " +
-			"Check the ca-iro-cell* log group for an Outcome other than success before " +
-			"suspecting delivery")
+	// The rate is interpolated, never spelled. This is the FIRST message an
+	// operator reads on the failure this whole mechanism exists for, so a stale
+	// number here misdirects at exactly the worst moment -- which is the defect
+	// this file's history is made of.
+	return fmt.Errorf(
+		"no OTP email arrived for this run. The likely cause is that no email was ever "+
+			"sent: issuance is rate limited at %d/hour per credential, and because the "+
+			"pool carries one credential per owner it is that limit which runs out first "+
+			"(the per-owner limit is higher and unreachable). Selection rotates across "+
+			"the pool, so this needs roughly %d times the pool size in an hour -- but "+
+			"count against the slot this run drew, which the run logs, not against the "+
+			"pool. Check the ca-iro-cell* log group for an Outcome other than success "+
+			"before suspecting delivery",
+		perCredentialHourlyBudget, perCredentialHourlyBudget)
 }
 
 // receive long-polls until a message addressed to this agent arrives, or ctx

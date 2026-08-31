@@ -42,6 +42,21 @@ func slotFor(pool []string, runNumber, attempt int) int {
 // ceilDiv is the per-slot ceiling a rotation guarantees over n runs.
 func ceilDiv(n, slots int) int { return (n + slots - 1) / slots }
 
+// sweepStarts returns every residue class mod size, plus a few arbitrary large
+// offsets. DERIVED from the size rather than listed: a literal list silently
+// loses coverage the day the pool changes size, and in the direction this repo
+// is heading -- {0, 1, 7, 41, 202, 1000} covers four of six residues today and
+// only THREE OF SEVEN at the prime size selectEnrollment argues for, while the
+// sweeps that use it would keep passing and still claim to start "from any
+// offset".
+func sweepStarts(size int) []int {
+	starts := make([]int, 0, size+3)
+	for i := range size {
+		starts = append(starts, i)
+	}
+	return append(starts, 41, 202, 1000)
+}
+
 func TestParseEnrollmentPoolSplitsAndCleans(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -179,23 +194,29 @@ func TestSelectEnrollmentSpreadsRuns(t *testing.T) {
 //
 // Reverting selectEnrollment to a hash of the run id fails this test.
 // perCredentialHourlyBudget is qurl-service's registrationOTPPerCredentialRate
-// at the time of writing. It sets how far these tests look ahead, and it is the
-// rate the truncated-pool error quotes -- one spelling of a service-side number
-// that lives in another repository, so the two cannot drift apart. Retuning it
-// service-side cannot invalidate the properties asserted here.
+// at the time of writing. It sets how far these tests look ahead, and every
+// message a runtime path INTERPOLATES the rate into reads it from here -- the
+// truncated-pool error, the pool-size advisory, and otpMailbox.timedOut, which
+// is the first thing an operator sees on this failure.
+//
+// It does NOT cover prose. The rate is also written out longhand in
+// selectEnrollment's derivation and in the gate workflow's GATE_PATHS comment,
+// where nothing can interpolate it; if the service retunes the rate, those are
+// the two places that must be edited by hand. Claiming otherwise would be the
+// same kind of overreach this file's history is made of.
 const perCredentialHourlyBudget = 5
 
 func TestSelectEnrollmentNeverClustersWithinTheIssuanceBudget(t *testing.T) {
 	pool := sixSlotPool
 	fullHour := perCredentialHourlyBudget * len(pool)
 
-	// Prefix windows from several offsets, at several attempts. Prefixes are
-	// enough because the rotation is translation-invariant mod len(pool): a
-	// window starting mid-sequence is a prefix from a different offset, which
-	// is what varying `start` covers. Run numbers are wherever this workflow's
-	// history has reached, not values a test may choose, and an hour of reruns
-	// is still an hour of issuances.
-	for _, start := range []int{0, 1, 7, 41, 202, 1000} {
+	// Prefix windows from every offset, at several attempts. Prefixes are enough
+	// because the rotation is translation-invariant mod len(pool): a window
+	// starting mid-sequence is a prefix from a different offset, and sweepStarts
+	// covers every residue class so that claim is actually true. Run numbers are
+	// wherever this workflow's history has reached, not values a test may
+	// choose, and an hour of reruns is still an hour of issuances.
+	for _, start := range sweepStarts(len(pool)) {
 		for _, attempt := range []int{1, 2, 3} {
 			// Counts accumulate: after run i the tallies ARE the window of
 			// i+1, so only the slot just incremented can have crossed its
@@ -224,9 +245,23 @@ func TestSmallestFactorFlagsExactlyTheVulnerablePoolSizes(t *testing.T) {
 		size int
 		want int
 	}{
-		{0, 0}, {1, 0}, {2, 0}, {3, 0}, // nothing to collapse onto
-		{4, 2}, {6, 2}, {8, 2}, {9, 3}, {10, 2}, // composite: flagged
-		{5, 0}, {7, 0}, {11, 0}, {13, 0}, // prime: silent
+		// 2 and 3 are prime, so smallestFactor is silent by construction. That
+		// is right ARITHMETICALLY but is not a safety claim: size 2 collapses
+		// under a stride of 2, which is why poolSizeAdvisory handles it
+		// separately. See TestPoolSizeAdvisorySpeaksAtEverySizeThatCosts.
+		{0, 0},
+		{1, 0},
+		{2, 0},
+		{3, 0},
+		{4, 2},
+		{6, 2},
+		{8, 2},
+		{9, 3},
+		{10, 2}, // composite: flagged
+		{5, 0},
+		{7, 0},
+		{11, 0},
+		{13, 0}, // prime: silent
 	} {
 		if got := smallestFactor(tc.size); got != tc.want {
 			t.Fatalf("smallestFactor(%d) = %d, want %d", tc.size, got, tc.want)
@@ -263,7 +298,7 @@ func TestSelectEnrollmentBoundsInterleavedReruns(t *testing.T) {
 	pool := sixSlotPool
 
 	for _, attemptsPerRun := range []int{2, 3} {
-		for _, start := range []int{0, 1, 7, 41, 202, 1000} {
+		for _, start := range sweepStarts(len(pool)) {
 			for runs := 1; runs <= perCredentialHourlyBudget*len(pool); runs++ {
 				used := map[int]int{}
 				for i := 0; i < runs; i++ {
@@ -293,6 +328,36 @@ func TestSelectEnrollmentBoundsInterleavedReruns(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// TestPoolSizeAdvisorySpeaksAtEverySizeThatCosts pins WHICH sizes get a warning.
+// Silence is read as "the guarantee holds", so a size that degrades quietly is
+// worse than no advisory at all.
+func TestPoolSizeAdvisorySpeaksAtEverySizeThatCosts(t *testing.T) {
+	for _, size := range []int{2, 4, 6, 8, 9, 10, 12} {
+		if poolSizeAdvisory(size) == "" {
+			t.Fatalf("pool size %d degrades under a plausible stride but says nothing", size)
+		}
+	}
+	// Primes above two: only a stride equal to the size collapses them, which
+	// no size can buy off, so silence here is honest.
+	for _, size := range []int{3, 5, 7, 11, 13} {
+		if got := poolSizeAdvisory(size); got != "" {
+			t.Fatalf("prime pool size %d should be silent, said %q", size, got)
+		}
+	}
+	// Two is the case the strict guard accepts and smallestFactor calls prime.
+	// Its warning must name the collapse, not merely exist.
+	if got := poolSizeAdvisory(2); !strings.Contains(got, "unpooled") {
+		t.Fatalf("the size-2 advisory must say it reaches the unpooled state, said %q", got)
+	}
+	// Today's size, and the size the seventh owner buys.
+	if poolSizeAdvisory(len(sixSlotPool)) == "" {
+		t.Fatal("today's six-slot pool must warn; the residual is still open")
+	}
+	if poolSizeAdvisory(len(sixSlotPool)+1) != "" {
+		t.Fatal("a seventh owner must silence the advisory; that is how the fix is observed")
 	}
 }
 
