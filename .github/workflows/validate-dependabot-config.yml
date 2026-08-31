@@ -76,10 +76,10 @@ jobs:
       - name: Validate .github/dependabot.yml
         run: |
           set -euo pipefail
-          # This workflow runs only when the file changes, so an absent file
-          # here means it was deleted rather than never added — which stops
-          # every update this repository receives. Fail loudly rather than
-          # hand check-jsonschema an empty argument list and pass.
+          # The config is committed on main, so an absent file here means it
+          # was deleted — which stops every update this repository receives.
+          # Fail loudly rather than hand check-jsonschema an empty argument
+          # list and let a deleted config pass.
           if [[ ! -f .github/dependabot.yml ]]; then
             echo "ERROR: .github/dependabot.yml not found." >&2
             echo "  Deleting it stops Dependabot for every ecosystem here." >&2

@@ -44,23 +44,32 @@ const (
 // reported only in this repository's Dependabot logs. validate-dependabot-config.yml
 // is what turns that into a red check, which makes the workflow itself the
 // boundary this file's other test warns about: a part carried by configuration
-// that fails nothing when it is deleted or quietly repointed. The path filter
-// is the subtle half. Naming only the workflow and not the config it guards
-// would leave it green forever while never running on the edit that matters.
+// that fails nothing when it is deleted or quietly repointed -- and repointing
+// need not touch a fragment: the guard's text survives `exit 1` becoming
+// `exit 0`, and the whole job goes advisory under one continue-on-error line.
+// So the assertions below run the guard rather than reading it, and hold the
+// triggers that decide whether it reports at all.
 //
-// The config's own header advertises this gate, so the claim is load-bearing
-// too: a reader who trusts that line after the workflow is gone is back to the
-// silence the gate exists to end. Assert it here, where `vet + test -race`
-// is a required check and the path-filtered workflow is not.
+// The config's own header advertises this gate, so that claim is load-bearing
+// too: a reader who trusts the line after the workflow is gone is back to the
+// silence the gate exists to end. Assert all of it here, under the required
+// `vet + test -race` context.
 func TestDependabotConfigIsSchemaChecked(t *testing.T) {
 	workflow := readWorkflow(t, dependabotWorkflow)
 	requireContains(t, workflow,
+		// Pinned, not floating: the frozen schema snapshot is what makes an
+		// unrecognized upstream key a red check instead of a moving verdict.
+		"check-jsonschema==",
 		"check-jsonschema --builtin-schema vendor.dependabot "+dependabotConfig,
 		"if [[ ! -f "+dependabotConfig+" ]]; then",
 	)
-	// No path filter, so the context always reports and branch protection can
-	// require it -- a filtered check is absent, not green, on the PRs it skips.
-	requireNotContains(t, workflow, "paths:")
+	// Reports on every pull request, so branch protection can require it: a
+	// filtered check is absent rather than green on the PRs it skips. Both
+	// halves matter -- without the positive trigger, an `on:` reduced to
+	// workflow_dispatch alone forbids nothing and checks nothing, and
+	// "paths-ignore:" does not contain "paths:".
+	requireContains(t, workflow, "\n  pull_request:\n")
+	requireNotContains(t, workflow, "paths:", "paths-ignore:")
 
 	// Presence of the guard line is not the property; exiting non-zero is.
 	// `exit 0` in the guard, a trailing `|| true`, or continue-on-error each
