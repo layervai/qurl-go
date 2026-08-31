@@ -1,0 +1,89 @@
+# Dependabot configuration schema validation.
+#
+# GitHub parses .github/dependabot.yml on its own servers, and a malformed
+# file stops updates for EVERY ecosystem it declares, not just the entry that
+# broke. That failure surfaces only in the repository's Dependabot logs — no
+# check turns red, and the symptom is silence, which reads exactly like a week
+# with no upstream releases.
+#
+# Nothing else here reads the file. actionlint is scoped to .github/workflows,
+# validate-issue-templates.yml to .github/ISSUE_TEMPLATE, and the reader behind
+# TestDependabotIgnoresTheAuditedClaudeAction bounds itself to one update entry
+# and scans it by indentation — so a tab or a misspelled key anywhere else in
+# the file leaves every existing assertion green.
+#
+# Same tool, version, and invocation shape as the issue-form validator this
+# mirrors (.github/workflows/validate-issue-templates.yml, via
+# layervai/ops-routines-workflows). Worth promoting into that reusable once a
+# second repository wants it; kept local while qurl-go is the only consumer.
+name: Validate Dependabot config
+
+# `.github/dependabot.yml` is the only spelling GitHub documents for this file;
+# there is no `.yaml` alternative to glob for, unlike the issue-form directory
+# the sibling validator walks.
+#
+# Fires on every PR with no path filter, following the convention
+# dependency-age-check-actions.yml states: a status check that always reports
+# can be required in branch protection, where a path-filtered one cannot --
+# its context is absent rather than green on the PRs it skips. Filtering to
+# the config would be cheaper and would still run on every edit that can break
+# it, but it would leave this advisory, and a gate whose whole subject is
+# silent failure should be able to block. Validating the committed file costs
+# a checkout and one pip install.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: "validate-dependabot-config-${{ github.ref }}"
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Deliberately not named `validate`. That context is already required on
+  # main and comes from pr-title.yml; a second check answering to the same
+  # name is indistinguishable from it in branch protection.
+  dependabot-config:
+    runs-on: ubuntu-latest
+    # The reusable this mirrors bounds its job the same way. Successful runs
+    # finish well inside a minute; the plausible hang is pip reaching PyPI, and
+    # the default would hold a runner for six hours before saying so.
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      # Bumped by hand, deliberately: Dependabot reads manifests, not `run:`
+      # blocks, so nothing proposes this. The vendored SchemaStore snapshot
+      # therefore freezes here, and a Dependabot key added upstream after this
+      # release is rejected until someone raises the version. That failure is
+      # loud and fail-closed -- a red check naming the key -- not silence.
+      - name: Install check-jsonschema
+        run: |
+          set -euo pipefail
+          python3 -m pip install --no-cache-dir "check-jsonschema==0.37.1"
+          check-jsonschema --version
+
+      - name: Validate .github/dependabot.yml
+        run: |
+          set -euo pipefail
+          # The config is committed on main, so an absent file here means it
+          # was deleted — which stops every update this repository receives.
+          # Fail loudly rather than hand check-jsonschema an empty argument
+          # list and let a deleted config pass.
+          if [[ ! -f .github/dependabot.yml ]]; then
+            echo "ERROR: .github/dependabot.yml not found." >&2
+            echo "  Deleting it stops Dependabot for every ecosystem here." >&2
+            echo "  If that is intended, remove this workflow in the same change." >&2
+            exit 1
+          fi
+          check-jsonschema --builtin-schema vendor.dependabot .github/dependabot.yml
