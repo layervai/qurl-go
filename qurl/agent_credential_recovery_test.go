@@ -218,6 +218,40 @@ func TestRecoverAgentRuntime_TestRecoveryCredentialGoldenPath(t *testing.T) {
 	}
 }
 
+func TestRecoverAgentRuntimeWithCredentialProvider_ResolvesAfterStateValidation(t *testing.T) {
+	fixture := loadCredentialRecoveryFixture(t)
+	f, _ := newCredentialRecoveryRuntimeFixture(t,
+		[]runtimeUDPStep{{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: fixture.PublicExchanges["hub_issue_recovery"].SuccessBodyJSON}},
+		[]runtimeUDPStep{{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: fixture.PublicExchanges["assigned_cell_complete_recovery"].SuccessBodyJSON}},
+	)
+	providerCalls := 0
+	client, binding, err := RecoverAgentRuntimeWithCredentialProvider(context.Background(), func(context.Context) (string, error) {
+		providerCalls++
+		return fixture.Fixtures.RecoveryCredential, nil
+	}, f.store, recoveryOptions(t, f, fixture, func() time.Time { return credentialRecoveryFixtureNow })...)
+	if err != nil || client == nil || binding == nil || providerCalls != 1 {
+		t.Fatalf("provider recovery = %v/%v/%v, provider calls=%d", client, binding, err, providerCalls)
+	}
+	defer binding.Destroy()
+}
+
+func TestRecoverAgentRuntimeWithCredentialProvider_PreservesProviderFailureWithoutIO(t *testing.T) {
+	fixture := loadCredentialRecoveryFixture(t)
+	f, _ := newCredentialRecoveryRuntimeFixture(t, nil, nil)
+	want := errors.New("account authority unavailable")
+	providerCalls := 0
+	client, binding, err := RecoverAgentRuntimeWithCredentialProvider(context.Background(), func(context.Context) (string, error) {
+		providerCalls++
+		return "", want
+	}, f.store, recoveryOptions(t, f, fixture, func() time.Time { return credentialRecoveryFixtureNow })...)
+	if client != nil || binding != nil || !errors.Is(err, want) || providerCalls != 1 {
+		t.Fatalf("provider failure = %v/%v/%v, provider calls=%d", client, binding, err, providerCalls)
+	}
+	if len(f.hubUDP.snapshot()) != 0 || len(f.cellUDP.snapshot()) != 0 {
+		t.Fatalf("provider failure did I/O: Hub=%d cell=%d", len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot()))
+	}
+}
+
 func TestRecoverAgentRuntime_ExpectedAgentIDOptionRejectsInvalidBeforeStateLoad(t *testing.T) {
 	for name, agentID := range map[string]string{
 		"missing":                "",
@@ -431,11 +465,15 @@ func TestRecoverAgentRuntime_UnanchoredIssueReplayExpiresWithoutAnotherDatagram(
 		t.Fatalf("unanchored Issue intent/cutoff = %#v/%v", loaded, loadErr)
 	}
 	beforeSaves := len(f.store.snapshots())
+	providerCalls := 0
 	for _, now := range []time.Time{loaded.PendingCredentialRecoveryIssue.ReplayNotAfter, authorityDeadline} {
 		opts := recoveryOptions(t, f, fixture, func() time.Time { return now })
-		_, _, err = RecoverAgentRuntime(context.Background(), "", f.store, opts...)
-		if !errors.Is(err, ErrCredentialRecoveryExpired) || len(f.hubUDP.snapshot()) != 1 || len(f.cellUDP.snapshot()) != 0 || len(f.store.snapshots()) != beforeSaves {
-			t.Fatalf("expired unanchored Issue at %s = %v, Hub %d cell %d saves %d/%d", now, err, len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot()), beforeSaves, len(f.store.snapshots()))
+		_, _, err = RecoverAgentRuntimeWithCredentialProvider(context.Background(), func(context.Context) (string, error) {
+			providerCalls++
+			return fixture.Fixtures.RecoveryCredential, nil
+		}, f.store, opts...)
+		if !errors.Is(err, ErrCredentialRecoveryExpired) || providerCalls != 0 || len(f.hubUDP.snapshot()) != 1 || len(f.cellUDP.snapshot()) != 0 || len(f.store.snapshots()) != beforeSaves {
+			t.Fatalf("expired unanchored Issue at %s = %v, provider calls=%d Hub %d cell %d saves %d/%d", now, err, providerCalls, len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot()), beforeSaves, len(f.store.snapshots()))
 		}
 	}
 }
@@ -1721,6 +1759,31 @@ func TestRecoverAgentRuntime_ExactHorizonFailsBeforeAnyNetwork(t *testing.T) {
 	}
 	if resolver.calls.Load() != 0 || dialer.calls.Load() != 0 || len(f.hubUDP.snapshot()) != 0 || len(f.cellUDP.snapshot()) != 0 {
 		t.Fatalf("expired recovery did I/O: resolver=%d dialer=%d hub=%d cell=%d", resolver.calls.Load(), dialer.calls.Load(), len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot()))
+	}
+}
+
+func TestRecoverAgentRuntimeWithCredentialProvider_ExpiredRenewalDoesNotConsumeAuthority(t *testing.T) {
+	fixture := loadCredentialRecoveryFixture(t)
+	f, _ := newCredentialRecoveryRuntimeFixture(t, nil, nil)
+	seedPendingCredentialRecovery(t, f, fixture, true)
+	state, err := f.store.LoadAgentState(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := state.PendingCredentialRecovery.RecoveryExpiresAt
+	providerCalls := 0
+	resolver := &noIONativeResolver{}
+	dialer := &noIONativeDialer{}
+	opts := recoveryOptions(t, f, fixture, func() time.Time { return deadline }, WithAgentRuntimeUDPResolver(resolver), WithAgentRuntimeUDPDialer(dialer))
+	_, _, err = RecoverAgentRuntimeWithCredentialProvider(context.Background(), func(context.Context) (string, error) {
+		providerCalls++
+		return fixture.Fixtures.RecoveryCredential, nil
+	}, f.store, opts...)
+	if !errors.Is(err, ErrCredentialRecoveryExpired) || providerCalls != 0 {
+		t.Fatalf("expired renewal = %v, provider calls=%d, want expired/0", err, providerCalls)
+	}
+	if resolver.calls.Load() != 0 || dialer.calls.Load() != 0 || len(f.hubUDP.snapshot()) != 0 || len(f.cellUDP.snapshot()) != 0 {
+		t.Fatalf("expired renewal did I/O: resolver=%d dialer=%d Hub=%d cell=%d", resolver.calls.Load(), dialer.calls.Load(), len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot()))
 	}
 }
 

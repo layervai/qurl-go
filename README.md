@@ -78,6 +78,7 @@ And every entry point in one place:
 | `OpenRegisteredAgent` / `OpenRegisteredAgentWithIdentity` | Resource-only client from completed agent state — one store load, no lifecycle network I/O, no knockable binding | `*Client` (`WithIdentity` adds the agent id) |
 | `RefreshAgentRuntime` | Renew a completed assignment through the Hub at a moment you choose | `*Client`, `*AgentRuntimeBinding` |
 | `RecoverAgentRuntime` | Operator-driven replacement of a revoked or lost device credential | `*Client`, `*AgentRuntimeBinding` |
+| `RecoverAgentRuntimeWithCredentialProvider` | The same recovery with account authority resolved only after durable state and expiry validation | `*Client`, `*AgentRuntimeBinding` |
 | `EnterPortal` | Open a received qURL link programmatically; needs no LayerV credentials | `*ResourceHandle` |
 
 ## Install
