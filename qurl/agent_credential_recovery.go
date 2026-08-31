@@ -89,8 +89,10 @@ var (
 	ErrCredentialRecoveryExpired = errors.New("qurl: credential recovery horizon expired")
 	// ErrCredentialRecoveredAssignmentRefreshRequired means the assigned cell
 	// committed the replacement credential and that result is durable, but the
-	// SDK could not also obtain and persist a live Hub assignment. The caller must
-	// refresh the runtime; it must not start another credential-recovery episode.
+	// SDK has not yet completed an authenticated Hub assignment refresh and
+	// persisted the opened runtime. This refresh is mandatory even while the old
+	// assignment lease is live. The caller must resume the refresh-only phase; it
+	// must not start another credential-recovery episode.
 	ErrCredentialRecoveredAssignmentRefreshRequired = errors.New("qurl: credential recovered; assignment refresh required")
 )
 
@@ -202,7 +204,11 @@ type CredentialRecoveredAssignmentRefreshRequiredError struct {
 }
 
 func (e *CredentialRecoveredAssignmentRefreshRequiredError) Error() string {
-	return ErrCredentialRecoveredAssignmentRefreshRequired.Error() + "; call RefreshAgentRuntime before using the runtime"
+	agentID := ""
+	if e != nil {
+		agentID = e.AgentID
+	}
+	return fmt.Sprintf("%s for agent %q; call RefreshAgentRuntime before using the runtime", ErrCredentialRecoveredAssignmentRefreshRequired, agentID)
 }
 
 func (e *CredentialRecoveredAssignmentRefreshRequiredError) Unwrap() []error {
@@ -423,23 +429,24 @@ func (c *nativeAgentRuntimeConfig) finishRecoveredRuntime(ctx context.Context, s
 	if err := validatePersistedNativeDeviceCredentialMaterial(state, ErrInvalidRegisterConfig); err != nil {
 		return nil, &CredentialRecoveredAssignmentRefreshRequiredError{AgentID: state.AgentID, Cause: err}
 	}
-	if state.Assignment.LeaseExpired(c.clock()) {
-		fresh, err := c.refreshAssignmentLifecycle(ctx, *c.hub, state.AgentID, privateKey)
-		if err != nil {
+	// The replacement device key may not yet be visible through the Authority's
+	// AgentKeys view even when the prior assignment lease remains live. Always
+	// require one authenticated Hub refresh before opening or clearing this phase.
+	fresh, err := c.refreshAssignmentLifecycle(ctx, *c.hub, state.AgentID, privateKey)
+	if err != nil {
+		return nil, &CredentialRecoveredAssignmentRefreshRequiredError{AgentID: state.AgentID, Cause: err}
+	}
+	// Recovery is already an explicit authority-directed transition. Accept a
+	// reassignment here only when the authenticated Hub advances generation;
+	// the ordinary standalone refresh API keeps its explicit adoption option.
+	if err := ensureRefreshAssignmentContinuity(state.Assignment, fresh, true); err != nil {
+		return nil, &CredentialRecoveredAssignmentRefreshRequiredError{AgentID: state.AgentID, Cause: err}
+	}
+	if !sameAgentAssignment(state.Assignment, fresh) {
+		next := state.clone()
+		next.Assignment = fresh.clone()
+		if err := c.saveCredentialRecoveryState(ctx, store, state, next, ErrAgentBindingPersistence, "persist post-recovery assignment refresh"); err != nil {
 			return nil, &CredentialRecoveredAssignmentRefreshRequiredError{AgentID: state.AgentID, Cause: err}
-		}
-		// Recovery is already an explicit authority-directed transition. Accept a
-		// reassignment here only when the authenticated Hub advances generation;
-		// the ordinary standalone refresh API keeps its explicit adoption option.
-		if err := ensureRefreshAssignmentContinuity(state.Assignment, fresh, true); err != nil {
-			return nil, &CredentialRecoveredAssignmentRefreshRequiredError{AgentID: state.AgentID, Cause: err}
-		}
-		if !sameAgentAssignment(state.Assignment, fresh) {
-			next := state.clone()
-			next.Assignment = fresh.clone()
-			if err := c.saveCredentialRecoveryState(ctx, store, state, next, ErrAgentBindingPersistence, "persist post-recovery assignment refresh"); err != nil {
-				return nil, &CredentialRecoveredAssignmentRefreshRequiredError{AgentID: state.AgentID, Cause: err}
-			}
 		}
 	}
 	return c.finishCredentialRecoveryRefresh(ctx, store, state)

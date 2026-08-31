@@ -800,7 +800,12 @@ func (c *nativeAgentRuntimeConfig) registerLocked(ctx context.Context, store Age
 	}
 	if state.RegisteredAt != nil {
 		if state.CredentialRecoveryRefreshRequired {
-			return finishNativeRuntimeResult(store, state, c)
+			agentID := state.AgentID
+			clearOwnedAgentState(state)
+			return nil, &CredentialRecoveredAssignmentRefreshRequiredError{
+				AgentID: agentID,
+				Cause:   fmt.Errorf("%w: durable post-recovery assignment refresh is incomplete", ErrInvalidRegisterConfig),
+			}
 		}
 		// Renew only a structurally sound assignment whose lease ran out. Missing
 		// or malformed assignment state keeps its original terminal error from
@@ -2688,7 +2693,7 @@ func refreshAgentRuntimeLocked(ctx context.Context, hub HubBootstrap, store Agen
 // refresh-only phase — so none of them can drift on trust root, move adoption,
 // or persistence ordering.
 func (c *nativeAgentRuntimeConfig) renewCompletedAssignment(ctx context.Context, hub HubBootstrap, locked AgentStateStore, state *AgentState) (result *nativeRuntimeResult, err error) {
-	refreshRequired := state != nil && state.CredentialRecoveryRefreshRequired
+	refreshRequired := state.CredentialRecoveryRefreshRequired
 	refreshRequiredAgentID := ""
 	if refreshRequired {
 		refreshRequiredAgentID = state.AgentID

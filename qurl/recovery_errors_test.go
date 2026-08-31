@@ -112,7 +112,7 @@ func TestOperatorGuidanceErrorMessages(t *testing.T) {
 			name:     "credential recovered but assignment stale",
 			err:      &CredentialRecoveredAssignmentRefreshRequiredError{Cause: errors.New("hub unreachable")},
 			sentinel: ErrCredentialRecoveredAssignmentRefreshRequired,
-			want:     "qurl: credential recovered; assignment refresh required; call RefreshAgentRuntime before using the runtime",
+			want:     `qurl: credential recovered; assignment refresh required for agent ""; call RefreshAgentRuntime before using the runtime`,
 		},
 		{
 			name:     "assignment moved under a pin",

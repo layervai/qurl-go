@@ -24,8 +24,12 @@ var errAgentRuntimeRenewalUnavailable = errors.New("qurl: agent runtime assignme
 // ConnectAgentRuntime, which validates the assignment and renews an expired
 // lease. The exception is the durable post-credential-recovery refresh phase:
 // resource open also fails with ErrCredentialRecoveredAssignmentRefreshRequired
-// until RefreshAgentRuntime confirms Authority has observed the replacement key.
-// The persisted agent id and X25519 keypair remain the durable device identity.
+// until RefreshAgentRuntime, or an exact RecoverAgentRuntime retry, successfully
+// completes an authenticated Hub assignment refresh and opens against that
+// authority. The refresh is mandatory even while the prior lease is live so
+// transient AgentKeys propagation cannot be mistaken for another recovery
+// episode. The persisted agent id and X25519 keypair remain the durable device
+// identity.
 //
 // WithAgentClientBaseURL and WithAgentClientHTTPClient can be reused across
 // native registration, refresh, and open. Ordinary WithBaseURL and
