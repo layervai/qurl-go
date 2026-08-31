@@ -160,7 +160,10 @@ func validatePersistedNativeDeviceCredential(state *AgentState, errKind error) e
 		return &NativeCredentialRecoveryRequiredError{Cause: fmt.Errorf("%w: native agent state is nil", errKind)}
 	}
 	if state.CredentialRecoveryRefreshRequired {
-		return &CredentialRecoveredAssignmentRefreshRequiredError{}
+		return &CredentialRecoveredAssignmentRefreshRequiredError{
+			AgentID: state.AgentID,
+			Cause:   fmt.Errorf("%w: durable post-recovery assignment refresh is incomplete", errKind),
+		}
 	}
 	if state.PendingCredentialRecovery != nil || state.PendingCredentialRecoveryIssue != nil {
 		return &NativeCredentialRecoveryRequiredError{AgentID: state.AgentID, Cause: ErrCredentialRecoveryRequired}

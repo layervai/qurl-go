@@ -197,7 +197,8 @@ func (e *CredentialRecoveryExpiredError) Unwrap() error { return ErrCredentialRe
 // RecoverAgentRuntime retry also consumes only this refresh phase and never
 // invokes recovery authority again.
 type CredentialRecoveredAssignmentRefreshRequiredError struct {
-	Cause error
+	AgentID string
+	Cause   error
 }
 
 func (e *CredentialRecoveredAssignmentRefreshRequiredError) Error() string {
@@ -410,29 +411,34 @@ func (c *nativeAgentRuntimeConfig) recoverAgentRuntimeLocked(ctx context.Context
 
 func (c *nativeAgentRuntimeConfig) finishRecoveredRuntime(ctx context.Context, store AgentStateStore, state *AgentState, privateKey []byte) (*nativeRuntimeResult, error) {
 	if state == nil || !state.CredentialRecoveryRefreshRequired || state.Assignment == nil {
+		agentID := ""
+		if state != nil {
+			agentID = state.AgentID
+		}
 		return nil, &CredentialRecoveredAssignmentRefreshRequiredError{
-			Cause: fmt.Errorf("%w: recovered state has no durable refresh authority or assignment", ErrInvalidAgentState),
+			AgentID: agentID,
+			Cause:   fmt.Errorf("%w: recovered state has no durable refresh authority or assignment", ErrInvalidAgentState),
 		}
 	}
 	if err := validatePersistedNativeDeviceCredentialMaterial(state, ErrInvalidRegisterConfig); err != nil {
-		return nil, &CredentialRecoveredAssignmentRefreshRequiredError{Cause: err}
+		return nil, &CredentialRecoveredAssignmentRefreshRequiredError{AgentID: state.AgentID, Cause: err}
 	}
 	if state.Assignment.LeaseExpired(c.clock()) {
 		fresh, err := c.refreshAssignmentLifecycle(ctx, *c.hub, state.AgentID, privateKey)
 		if err != nil {
-			return nil, &CredentialRecoveredAssignmentRefreshRequiredError{Cause: err}
+			return nil, &CredentialRecoveredAssignmentRefreshRequiredError{AgentID: state.AgentID, Cause: err}
 		}
 		// Recovery is already an explicit authority-directed transition. Accept a
 		// reassignment here only when the authenticated Hub advances generation;
 		// the ordinary standalone refresh API keeps its explicit adoption option.
 		if err := ensureRefreshAssignmentContinuity(state.Assignment, fresh, true); err != nil {
-			return nil, &CredentialRecoveredAssignmentRefreshRequiredError{Cause: err}
+			return nil, &CredentialRecoveredAssignmentRefreshRequiredError{AgentID: state.AgentID, Cause: err}
 		}
 		if !sameAgentAssignment(state.Assignment, fresh) {
 			next := state.clone()
 			next.Assignment = fresh.clone()
 			if err := c.saveCredentialRecoveryState(ctx, store, state, next, ErrAgentBindingPersistence, "persist post-recovery assignment refresh"); err != nil {
-				return nil, &CredentialRecoveredAssignmentRefreshRequiredError{Cause: err}
+				return nil, &CredentialRecoveredAssignmentRefreshRequiredError{AgentID: state.AgentID, Cause: err}
 			}
 		}
 	}
@@ -453,13 +459,13 @@ func (c *nativeAgentRuntimeConfig) finishCredentialRecoveryRefresh(ctx context.C
 	next.CredentialRecoveryRefreshRequired = false
 	result, err := finishNativeRuntimeResult(store, next.clone(), c)
 	if err != nil {
-		return nil, &CredentialRecoveredAssignmentRefreshRequiredError{Cause: err}
+		return nil, &CredentialRecoveredAssignmentRefreshRequiredError{AgentID: state.AgentID, Cause: err}
 	}
 	persistCtx, cancelPersist := credentialRecoveryPersistenceContext(ctx)
 	defer cancelPersist()
 	if err := c.saveCredentialRecoveryState(persistCtx, store, state, next, ErrAgentBindingPersistence, "persist completed post-recovery assignment refresh"); err != nil {
 		destroyNativeRuntimeResult(result)
-		return nil, &CredentialRecoveredAssignmentRefreshRequiredError{Cause: err}
+		return nil, &CredentialRecoveredAssignmentRefreshRequiredError{AgentID: state.AgentID, Cause: err}
 	}
 	return result, nil
 }

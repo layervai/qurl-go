@@ -464,7 +464,10 @@ func TestCredentialRecoveryRefreshRequiredDoesNotAuthorizeAnotherRecovery(t *tes
 	state.CredentialRecoveryRefreshRequired = true
 	err := validatePersistedNativeDeviceCredential(state, ErrInvalidAgentState)
 	var nativeRecovery *NativeCredentialRecoveryRequiredError
-	if !errors.Is(err, ErrCredentialRecoveredAssignmentRefreshRequired) || errors.Is(err, ErrCredentialRecoveryRequired) || errors.As(err, &nativeRecovery) {
+	var refreshRequired *CredentialRecoveredAssignmentRefreshRequiredError
+	if !errors.As(err, &refreshRequired) || refreshRequired.AgentID != state.AgentID ||
+		!errors.Is(err, ErrCredentialRecoveredAssignmentRefreshRequired) || !errors.Is(err, ErrInvalidAgentState) ||
+		errors.Is(err, ErrCredentialRecoveryRequired) || errors.As(err, &nativeRecovery) {
 		t.Fatalf("post-recovery refresh classification = %T: %v", err, err)
 	}
 }

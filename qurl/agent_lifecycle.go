@@ -19,11 +19,13 @@ var errAgentRuntimeRenewalUnavailable = errors.New("qurl: agent runtime assignme
 // still perform the store's own I/O, and loading a sealed store may call its key
 // wrapper or KMS.
 // The device credential is read from store behind a one-minute cache. Native
-// assignment absence, corruption, or expiry does not invalidate this resource
-// client; qURL Connector callers that will knock must instead use
+// assignment absence, corruption, or expiry does not normally invalidate this
+// resource client; qURL Connector callers that will knock must instead use
 // ConnectAgentRuntime, which validates the assignment and renews an expired
-// lease. The persisted agent id and X25519 keypair remain the durable device
-// identity.
+// lease. The exception is the durable post-credential-recovery refresh phase:
+// resource open also fails with ErrCredentialRecoveredAssignmentRefreshRequired
+// until RefreshAgentRuntime confirms Authority has observed the replacement key.
+// The persisted agent id and X25519 keypair remain the durable device identity.
 //
 // WithAgentClientBaseURL and WithAgentClientHTTPClient can be reused across
 // native registration, refresh, and open. Ordinary WithBaseURL and

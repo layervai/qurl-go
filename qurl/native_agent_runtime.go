@@ -2689,9 +2689,13 @@ func refreshAgentRuntimeLocked(ctx context.Context, hub HubBootstrap, store Agen
 // or persistence ordering.
 func (c *nativeAgentRuntimeConfig) renewCompletedAssignment(ctx context.Context, hub HubBootstrap, locked AgentStateStore, state *AgentState) (result *nativeRuntimeResult, err error) {
 	refreshRequired := state != nil && state.CredentialRecoveryRefreshRequired
+	refreshRequiredAgentID := ""
+	if refreshRequired {
+		refreshRequiredAgentID = state.AgentID
+	}
 	defer func() {
 		if refreshRequired && err != nil && !errors.Is(err, ErrCredentialRecoveredAssignmentRefreshRequired) {
-			err = &CredentialRecoveredAssignmentRefreshRequiredError{Cause: err}
+			err = &CredentialRecoveredAssignmentRefreshRequiredError{AgentID: refreshRequiredAgentID, Cause: err}
 		}
 	}()
 	if state.Assignment == nil {
