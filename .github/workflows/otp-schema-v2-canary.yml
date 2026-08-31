@@ -223,7 +223,7 @@ jobs:
           cache: true
 
       - name: Configure ephemeral mailbox credentials
-        uses: aws-actions/configure-aws-credentials@f503a1870408dcf2c35d5c2b8a68e69211042c7d # v4.1.0
+        uses: aws-actions/configure-aws-credentials@12d377b18dd4953d7567a83256c49ac571f4d565 # v4.1.0
         with:
           role-to-assume: ${{ secrets.OTP_E2E_ROLE_ARN }}
           aws-region: ${{ secrets.OTP_E2E_MAILBOX_REGION }}
