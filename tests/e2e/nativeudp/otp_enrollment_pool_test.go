@@ -34,8 +34,20 @@ func ciEnv(runNumber, attempt int) func(string) string {
 }
 
 // slotFor is the tally step every distribution test below repeats.
-func slotFor(pool []string, runNumber, attempt int) int {
-	_, slot, _ := selectEnrollment(pool, ciEnv(runNumber, attempt))
+//
+// It FAILS rather than discarding the blocked-counter report. Every property
+// these sweeps assert is a property of the rotation; if selection quietly fell
+// through to the random path -- which is what a tightened counter floor or a
+// renamed variable would do -- the sweeps would keep running and start
+// measuring a random distribution instead of failing. A test that silently
+// stops testing anything is the failure mode this whole file is about.
+func slotFor(t *testing.T, pool []string, runNumber, attempt int) int {
+	t.Helper()
+	_, slot, blocked := selectEnrollment(pool, ciEnv(runNumber, attempt))
+	if len(blocked) > 0 {
+		t.Fatalf("run %d attempt %d did not rotate (%v); these sweeps would be measuring "+
+			"the random fallback rather than the rotation", runNumber, attempt, blocked)
+	}
 	return slot
 }
 
@@ -57,7 +69,10 @@ func ceilDiv(n, slots int) int { return (n + slots - 1) / slots }
 func sweepStarts(size int) []int {
 	starts := make([]int, 0, size)
 	for i := range size {
-		starts = append(starts, i)
+		// 1..size, not 0..size-1: run numbers are 1-based, and size is congruent
+		// to 0, so this still covers every residue class without feeding
+		// selectEnrollment a value its contract says cannot occur.
+		starts = append(starts, i+1)
 	}
 	return starts
 }
@@ -149,7 +164,7 @@ func TestSelectEnrollmentSpreadsReruns(t *testing.T) {
 
 	seen := map[int]bool{}
 	for attempt := 1; attempt <= len(pool); attempt++ {
-		seen[slotFor(pool, 999, attempt)] = true
+		seen[slotFor(t, pool, 999, attempt)] = true
 	}
 	if len(seen) != len(pool) {
 		t.Fatalf("%d reruns used only %d distinct slots (%v); a rotation must visit every slot before repeating",
@@ -169,7 +184,7 @@ func TestSelectEnrollmentSpreadsRuns(t *testing.T) {
 	const runs = 40
 	used := map[int]int{}
 	for run := 0; run < runs; run++ {
-		used[slotFor(pool, 1000+run, 1)]++
+		used[slotFor(t, pool, 1000+run, 1)]++
 	}
 	// Ranging over the pool rather than over `used` is deliberate: a slot that
 	// took ZERO runs has no map entry, so ranging the map would skip exactly
@@ -229,7 +244,7 @@ func TestSelectEnrollmentNeverClustersWithinTheIssuanceBudget(t *testing.T) {
 			// window, where it already met a ceiling no larger than this one.
 			used := map[int]int{}
 			for i := 0; i < fullHour; i++ {
-				slot := slotFor(pool, start+i, attempt)
+				slot := slotFor(t, pool, start+i, attempt)
 				used[slot]++
 				if ceiling := ceilDiv(i+1, len(pool)); used[slot] > ceiling {
 					t.Fatalf("%d consecutive runs from %d (attempt %d) put %d issuances on "+
@@ -250,10 +265,10 @@ func TestSmallestFactorFlagsExactlyTheVulnerablePoolSizes(t *testing.T) {
 		size int
 		want int
 	}{
-		// 2 and 3 are prime, so smallestFactor is silent by construction. That
-		// is right ARITHMETICALLY but is not a safety claim: size 2 collapses
-		// under a stride of 2, which is why poolSizeAdvisory handles it
-		// separately. See TestPoolSizeAdvisorySpeaksAtEverySizeThatCosts.
+		// 0 and 1 are silent because n < 4 short-circuits; 2 and 3 because they
+		// are prime. Neither is a SAFETY claim -- sizes 0, 1 and 2 all degrade,
+		// which is why poolSizeAdvisory handles them separately. See
+		// TestPoolSizeAdvisorySpeaksAtEverySizeThatCosts.
 		{0, 0},
 		{1, 0},
 		{2, 0},
@@ -308,7 +323,7 @@ func TestSelectEnrollmentBoundsInterleavedReruns(t *testing.T) {
 				used := map[int]int{}
 				for i := 0; i < runs; i++ {
 					for attempt := 1; attempt <= attemptsPerRun; attempt++ {
-						used[slotFor(pool, start+i, attempt)]++
+						used[slotFor(t, pool, start+i, attempt)]++
 					}
 				}
 				bound := ceilDiv(runs, len(pool)) * attemptsPerRun
@@ -400,7 +415,7 @@ func TestSelectEnrollmentStridedTrafficNeedsACoprimePoolSize(t *testing.T) {
 	worstSlotUnderStride := func(pool []string, stride int) int {
 		used := map[int]int{}
 		for i := 0; i < perCredentialHourlyBudget*len(pool); i++ {
-			used[slotFor(pool, i*stride, 1)]++
+			used[slotFor(t, pool, 1+i*stride, 1)]++
 		}
 		worst := 0
 		for _, n := range used {

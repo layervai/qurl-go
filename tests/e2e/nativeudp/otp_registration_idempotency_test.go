@@ -389,7 +389,7 @@ func selectEnrollment(pool []string, lookup func(string) string) (string, int, [
 	// run N onto N's slot, spending that one credential five times over the
 	// reruns -- which is the exact case that exhausted a credential before the
 	// pool existed. Treat it exactly as strictly as the run number.
-	runNumber, haveRun := rotationCounter(lookup, "GITHUB_RUN_NUMBER", 0)
+	runNumber, haveRun := rotationCounter(lookup, "GITHUB_RUN_NUMBER", 1)
 	attempt, haveAttempt := rotationCounter(lookup, "GITHUB_RUN_ATTEMPT", 1)
 	var blocked []string
 	if !haveRun {
@@ -402,7 +402,8 @@ func selectEnrollment(pool []string, lookup func(string) string) (string, int, [
 		// Reduce both terms before adding. A real run number never approaches
 		// MaxInt, but this reads an environment variable, and the sum of two
 		// unreduced values there would overflow to a negative slot and panic
-		// the index below rather than fail some assertion.
+		// the index below rather than fail some assertion. Both counters are
+		// >= 1 here, so attempt-1 cannot underflow either.
 		slot := (runNumber%len(pool) + (attempt-1)%len(pool)) % len(pool)
 		return pool[slot], slot, nil
 	}
@@ -504,6 +505,11 @@ func smallestFactor(n int) int {
 // reporting whether the value is usable rather than substituting a default.
 // Actions always exports both; anything else is a runner regression, and the
 // caller's job is to make that loud instead of quietly selecting at random.
+//
+// Both floors are 1 because both counters are 1-based by GitHub's contract. A
+// zero is therefore already a runner regression and is refused rather than
+// rotated on -- the floor tracks the variable's semantics, not what happens to
+// be convenient for a caller.
 func rotationCounter(lookup func(string) string, name string, lowest int) (int, bool) {
 	parsed, err := strconv.Atoi(strings.TrimSpace(lookup(name)))
 	if err != nil || parsed < lowest {
