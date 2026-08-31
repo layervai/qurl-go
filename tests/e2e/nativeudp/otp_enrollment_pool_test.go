@@ -431,7 +431,11 @@ func TestGateWorkflowCommentQuotesTheBudgetConstant(t *testing.T) {
 	// the drift this fence exists to catch, and which had already happened once:
 	// the paragraph used to spell the rate three ways, so a retune could fix the
 	// one line this test names and leave its neighbours stating the old number.
-	want := strconv.Itoa(perCredentialHourlyBudget) + "/hour per credential"
+	// Leading space, deliberately. Unanchored, "5/hour per credential" is a
+	// SUBSTRING of "15/hour per credential" -- so a retune to 15 would leave the
+	// count at 1 and the fence green, on precisely the stale number it exists to
+	// catch.
+	want := " " + strconv.Itoa(perCredentialHourlyBudget) + "/hour per credential"
 	if n := strings.Count(raw, want); n != 1 {
 		t.Fatalf("%s states %q %d times, want exactly 1: at 0 a retune has left the "+
 			"comment stale, and above 1 the 'only place' claim is false and the extra "+
@@ -450,6 +454,26 @@ func TestGateWorkflowCommentQuotesTheBudgetConstant(t *testing.T) {
 				"rate retune has one line to change here, not a paragraph",
 				gateWorkflowPath, forbidden)
 		}
+	}
+}
+
+// TestPoolDuplicateAdvisoryCountsBothWays pins the arithmetic an operator uses
+// to tell two mistakes apart: a duplicate paste versus a seeding that never
+// landed. Both present as a pool smaller than expected, and only the counts
+// separate them.
+func TestPoolDuplicateAdvisoryCountsBothWays(t *testing.T) {
+	if got := poolDuplicateAdvisory(0, 7); got != "" {
+		t.Fatalf("a clean pool must say nothing, said %q", got)
+	}
+	got := poolDuplicateAdvisory(1, 6)
+	for _, want := range []string{"1 duplicate", "holds 6", "rather than 7"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("advisory %q omits %q; the operator cannot tell a duplicated paste "+
+				"from a seeding that never landed without both numbers", got, want)
+		}
+	}
+	if !strings.Contains(got, strconv.Itoa(perCredentialHourlyBudget)+"/hour") {
+		t.Fatalf("advisory %q does not quote the budget constant", got)
 	}
 }
 

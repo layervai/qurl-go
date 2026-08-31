@@ -208,7 +208,7 @@ func loadOTPE2EConfig(lookup func(string) string) (otpE2EConfig, bool, error) {
 		if fromPool {
 			if blocked := blockedRotationCounters(lookup); len(blocked) > 0 {
 				unmet = append(unmet, strings.Join(blocked, " and ")+
-					" unusable, so selection could not have rotated either")
+					" unusable, so credential selection could not rotate")
 			}
 		}
 
@@ -527,6 +527,20 @@ func poolSizeAdvisory(size int) string {
 		size, smallest, note, worst, worst, smallest)
 }
 
+// poolDuplicateAdvisory reports a pool secret carrying repeated credentials, or
+// "" when it carries none. Pure and separate from the test body so the wording
+// is asserted rather than assumed -- see poolSizeAdvisory for the same reason.
+func poolDuplicateAdvisory(duplicates, distinct int) string {
+	if duplicates <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("the pool secret carried %d duplicate credential(s), so it holds %d "+
+		"distinct slots rather than %d: a repeated credential takes double traffic and "+
+		"spends its %d/hour early. Secrets are write-only, so check the value you appended "+
+		"was not already present", duplicates, distinct, distinct+duplicates,
+		perCredentialHourlyBudget)
+}
+
 // smallestFactor returns the smallest non-trivial divisor of n, or 0 when n is
 // prime (or too small to matter). A composite pool size is what lets a strided
 // spending pattern collapse the rotation onto a subset of the pool.
@@ -729,13 +743,18 @@ func TestEmailedOTPCompletesIdempotentSDKRegistration(t *testing.T) {
 		t.Logf("NOTE %s", advisory)
 	}
 
-	if cfg.enrollmentPoolDuplicates > 0 {
-		t.Logf("NOTE the pool secret carried %d duplicate credential(s), so it holds %d "+
-			"distinct slots rather than %d: a repeated credential takes double traffic "+
-			"and spends its %d/hour early. Secrets are write-only, so check the value you "+
-			"appended was not already present",
-			cfg.enrollmentPoolDuplicates, cfg.enrollmentPoolSize,
-			cfg.enrollmentPoolSize+cfg.enrollmentPoolDuplicates, perCredentialHourlyBudget)
+	if advisory := poolDuplicateAdvisory(cfg.enrollmentPoolDuplicates, cfg.enrollmentPoolSize); advisory != "" {
+		t.Logf("NOTE %s", advisory)
+		// A duplicate is the last degradation here that does NOT fail closed: a
+		// missing counter and a one-entry pool both stop the run, but a repeated
+		// line merely shrinks the pool and the run goes green. A t.Logf on a
+		// passing test is the log nobody opens, and the canary runs without -v
+		// at all -- so on GitHub this also becomes an annotation, which shows on
+		// the check itself. Degradation with no loud symptom is what this whole
+		// change exists to remove; this was the one instance left.
+		if os.Getenv("GITHUB_ACTIONS") == "true" {
+			fmt.Printf("::warning title=OTP credential pool has duplicates::%s\n", advisory)
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), otpE2EDeadline)
