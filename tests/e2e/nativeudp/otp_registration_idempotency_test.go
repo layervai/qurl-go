@@ -203,9 +203,16 @@ func loadOTPE2EConfig(lookup func(string) string) (otpE2EConfig, bool, error) {
 				otpE2EEnrollmentEnv, perCredentialHourlyBudget))
 		}
 
-		// Asked whenever a pool is INTENDED: the supported single-credential
-		// setup has nothing to rotate and must not be failed for it.
-		if fromPool {
+		// Skipped ONLY for the supported single-credential setup, which genuinely
+		// has nothing to rotate. Everything else asks -- including the case where
+		// the pool secret is absent entirely: Actions renders a deleted secret as
+		// the empty string, so keying this on fromPool meant a deleted secret AND
+		// a stopped counter reported only the secret, and the counter cost
+		// another gate cycle. That is the exact charge this block is written to
+		// answer, so the condition has to be "is there nothing to rotate", not
+		// "was a pool asked for".
+		fromSingle := !fromPool && len(pool) == 1
+		if !fromSingle {
 			if blocked := blockedRotationCounters(lookup); len(blocked) > 0 {
 				unmet = append(unmet, strings.Join(blocked, " and ")+
 					" unusable, so credential selection could not rotate")

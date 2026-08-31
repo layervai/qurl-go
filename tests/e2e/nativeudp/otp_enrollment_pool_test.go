@@ -963,6 +963,26 @@ func TestLoadOTPE2EConfigAcceptsEitherCredentialSource(t *testing.T) {
 		}
 	})
 
+	// A DELETED pool secret plus a stopped counter. Actions renders an absent
+	// secret as the empty string, so fromPool is false here -- and keying the
+	// counter check on fromPool meant this branch reported only the secret. The
+	// operator restores it, re-runs, and only then learns the counter is broken:
+	// the gate cycle per fault this aggregation exists to prevent.
+	t.Run("strict run names the counters when the pool secret is absent entirely", func(t *testing.T) {
+		env := with(map[string]string{otpE2EStrictEnv: "1", "GITHUB_RUN_ATTEMPT": "1"})
+		// No pool variable, no single credential, no run number.
+		_, _, err := loadOTPE2EConfig(envFrom(env))
+		if err == nil {
+			t.Fatal("strict run accepted an absent credential source")
+		}
+		for _, want := range []string{otpE2EEnrollmentPoolEnv, "GITHUB_RUN_NUMBER"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("strict error %q omits %s; restoring the secret would only "+
+					"reveal the counter fault on the next run", err, want)
+			}
+		}
+	})
+
 	// A secret re-saved as the same credential twice collapses to one entry.
 	// That is a duplicate, not a truncation, and the duplicates NOTE lives in
 	// the test body -- past the t.Fatal this error causes -- so the message
