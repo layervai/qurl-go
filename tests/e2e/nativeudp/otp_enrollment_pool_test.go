@@ -164,8 +164,10 @@ func TestSelectEnrollmentSpreadsRuns(t *testing.T) {
 //
 // Reverting selectEnrollment to a hash of the run id fails this test.
 // perCredentialHourlyBudget is qurl-service's registrationOTPPerCredentialRate
-// at the time of writing. It only sets how far these tests look ahead, so
-// service-side retuning cannot invalidate the properties they assert.
+// at the time of writing. It sets how far these tests look ahead, and it is the
+// rate the truncated-pool error quotes -- one spelling of a service-side number
+// that lives in another repository, so the two cannot drift apart. Retuning it
+// service-side cannot invalidate the properties asserted here.
 const perCredentialHourlyBudget = 5
 
 func TestSelectEnrollmentNeverClustersWithinTheIssuanceBudget(t *testing.T) {

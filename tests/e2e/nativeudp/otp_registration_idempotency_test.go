@@ -162,7 +162,7 @@ func loadOTPE2EConfig(lookup func(string) string) (otpE2EConfig, bool, error) {
 			"strict OTP e2e run parsed only %d credential from %s: the pool is the "+
 				"multi-credential source (single credentials belong in %s), so one entry "+
 				"means a truncated secret and the gate would run unpooled at %d/hour",
-			len(pool), otpE2EEnrollmentPoolEnv, otpE2EEnrollmentEnv, 5)
+			len(pool), otpE2EEnrollmentPoolEnv, otpE2EEnrollmentEnv, perCredentialHourlyBudget)
 	}
 
 	if strict && len(unrotatedBecause) > 0 {
@@ -504,12 +504,21 @@ func TestEmailedOTPCompletesIdempotentSDKRegistration(t *testing.T) {
 		// causes the mildest collapse; the WORST leaves only smallestFactor
 		// slots, via a stride of size/smallestFactor. Reporting just the likely
 		// one reads as a bound and would under-provision a replacement pool.
-		t.Logf("NOTE pool size %d is composite: a spending stride of %d (the likely one) "+
-			"collapses it onto %d slot(s), and a stride of %d onto %d -- the worst case. "+
-			"A PRIME size makes the rotation's guarantee arithmetic rather than "+
-			"empirical; see selectEnrollment",
-			cfg.enrollmentPoolSize, factor, cfg.enrollmentPoolSize/factor,
-			cfg.enrollmentPoolSize/factor, factor)
+		likely, worst := factor, cfg.enrollmentPoolSize/factor
+		if likely == worst {
+			// A prime square (or 4): the two strides coincide, and naming them
+			// separately would read as a contradiction.
+			t.Logf("NOTE pool size %d is composite: a spending stride of %d collapses it "+
+				"onto %d slot(s). A PRIME size makes the rotation's guarantee arithmetic "+
+				"rather than empirical; see selectEnrollment",
+				cfg.enrollmentPoolSize, likely, worst)
+		} else {
+			t.Logf("NOTE pool size %d is composite: a spending stride of %d (the likely "+
+				"one) collapses it onto %d slot(s), and a stride of %d onto %d -- the "+
+				"worst case. A PRIME size makes the rotation's guarantee arithmetic "+
+				"rather than empirical; see selectEnrollment",
+				cfg.enrollmentPoolSize, likely, worst, worst, likely)
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), otpE2EDeadline)
