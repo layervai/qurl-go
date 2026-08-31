@@ -177,19 +177,22 @@ func (m *otpMailbox) snapshot() (calls int, fresh bool) {
 // timedOut explains a mailbox wait that produced nothing.
 //
 // Registration OTP issuance is rate limited per credential (5/hour) and per
-// owner (10/hour) in qurl-service. Once that budget is spent the authority
-// refuses to issue and NO email is ever sent, which from here is
-// indistinguishable from a delivery problem -- so name it rather than let the
-// reader look broken. Re-running the gate while debugging is the fastest way
-// to reach it.
+// owner (10/hour) in qurl-service. The pool holds one credential per owner, so
+// the credential's five is the one that bites; see selectEnrollment. Once that
+// budget is spent the authority refuses to issue and NO email is ever sent,
+// which from here is indistinguishable from a delivery problem -- so name it
+// rather than let the reader look broken. Re-running the gate while debugging
+// is the fastest way to reach it.
 func (m *otpMailbox) timedOut() error {
 	return errors.New(
 		"no OTP email arrived for this run. The likely cause is that no email was ever " +
 			"sent: issuance is rate limited at 5/hour per credential and 10/hour per " +
-			"owner, and while the credential pool spreads runs across owners to stay " +
-			"under both, enough runs within the hour will still exhaust the slot this " +
-			"run drew. Check the ca-iro-cell* log group for an Outcome other than " +
-			"success before suspecting delivery")
+			"owner, and because the pool carries one credential per owner it is the " +
+			"credential's five that runs out first. Selection rotates across the pool, " +
+			"so this needs roughly five times the pool size in an hour -- but count " +
+			"against the slot this run drew, which the run logs, not against the pool. " +
+			"Check the ca-iro-cell* log group for an Outcome other than success before " +
+			"suspecting delivery")
 }
 
 // receive long-polls until a message addressed to this agent arrives, or ctx

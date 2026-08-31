@@ -48,7 +48,7 @@ func TestParseEnrollmentPoolSplitsAndCleans(t *testing.T) {
 }
 
 func TestSelectEnrollmentDegenerateCases(t *testing.T) {
-	lookup := envFrom(map[string]string{"GITHUB_RUN_ID": "100", "GITHUB_RUN_ATTEMPT": "1"})
+	lookup := envFrom(map[string]string{"GITHUB_RUN_NUMBER": "100", "GITHUB_RUN_ATTEMPT": "1"})
 
 	t.Run("empty pool reports no slot", func(t *testing.T) {
 		got, slot := selectEnrollment(nil, lookup)
@@ -67,7 +67,7 @@ func TestSelectEnrollmentDegenerateCases(t *testing.T) {
 
 func TestSelectEnrollmentIsDeterministicForOneAttempt(t *testing.T) {
 	pool := []string{"a", "b", "c", "d", "e", "f"}
-	lookup := envFrom(map[string]string{"GITHUB_RUN_ID": "12345", "GITHUB_RUN_ATTEMPT": "2"})
+	lookup := envFrom(map[string]string{"GITHUB_RUN_NUMBER": "12345", "GITHUB_RUN_ATTEMPT": "2"})
 
 	first, firstSlot := selectEnrollment(pool, lookup)
 	for i := 0; i < 32; i++ {
@@ -80,44 +80,104 @@ func TestSelectEnrollmentIsDeterministicForOneAttempt(t *testing.T) {
 
 // TestSelectEnrollmentSpreadsReruns is the property the pool exists for.
 //
-// A rerun is the case that exhausted the budget in practice: same run id, a new
+// A rerun is the case that exhausted the budget in practice: same run, a new
 // attempt, another issuance. Keying selection on the run alone would send every
 // attempt back to the credential whose budget the previous attempt just spent,
-// so the pool would be present and useless. Successive attempts must move.
+// so the pool would be present and useless. Successive attempts must move -- and
+// because the attempt rotates rather than rehashes, they must move to a slot
+// nobody has used yet, which is the strongest form of "move".
 func TestSelectEnrollmentSpreadsReruns(t *testing.T) {
 	pool := []string{"a", "b", "c", "d", "e", "f"}
 
 	seen := map[int]bool{}
-	for attempt := 1; attempt <= 6; attempt++ {
+	for attempt := 1; attempt <= len(pool); attempt++ {
 		_, slot := selectEnrollment(pool, envFrom(map[string]string{
-			"GITHUB_RUN_ID":      "999",
+			"GITHUB_RUN_NUMBER":  "999",
 			"GITHUB_RUN_ATTEMPT": fmt.Sprint(attempt),
 		}))
 		seen[slot] = true
 	}
-	// Six attempts over six slots will collide sometimes; demanding a perfect
-	// permutation would be asserting a property of FNV rather than of this
-	// code. What must hold is that reruns genuinely move around.
-	if len(seen) < 3 {
-		t.Fatalf("six reruns used only %d distinct slots (%v); reruns are not spreading", len(seen), seen)
+	if len(seen) != len(pool) {
+		t.Fatalf("%d reruns used only %d distinct slots (%v); a rotation must visit every slot before repeating",
+			len(pool), len(seen), seen)
 	}
 }
 
 // TestSelectEnrollmentSpreadsRuns covers the ordinary case: distinct PRs.
+//
+// GITHUB_RUN_NUMBER increments by one per run of this workflow, so consecutive
+// runs must land on consecutive slots and the pool must stay balanced to within
+// one. A hash would only manage this on average, and "on average" is what the
+// per-credential budget punishes -- see the clustering test below.
 func TestSelectEnrollmentSpreadsRuns(t *testing.T) {
 	pool := []string{"a", "b", "c", "d", "e", "f"}
 
-	seen := map[int]bool{}
-	for run := 0; run < 40; run++ {
+	const runs = 40
+	used := map[int]int{}
+	for run := 0; run < runs; run++ {
 		_, slot := selectEnrollment(pool, envFrom(map[string]string{
-			"GITHUB_RUN_ID":      fmt.Sprintf("101%d", run),
+			"GITHUB_RUN_NUMBER":  fmt.Sprint(1000 + run),
 			"GITHUB_RUN_ATTEMPT": "1",
 		}))
-		seen[slot] = true
+		used[slot]++
 	}
-	if len(seen) != len(pool) {
-		t.Fatalf("40 runs reached only %d of %d slots (%v); distribution is skewed",
-			len(seen), len(pool), seen)
+	if len(used) != len(pool) {
+		t.Fatalf("%d runs reached only %d of %d slots (%v); distribution is skewed",
+			runs, len(used), len(pool), used)
+	}
+	low, high := runs/len(pool), (runs+len(pool)-1)/len(pool)
+	for slot, n := range used {
+		if n < low || n > high {
+			t.Fatalf("slot %d took %d of %d runs; a rotation keeps every slot within [%d,%d] (%v)",
+				slot, n, runs, low, high, used)
+		}
+	}
+}
+
+// TestSelectEnrollmentNeverClustersWithinTheIssuanceBudget pins the property
+// whose absence turned the gate red on 2026-08-31, and is the whole reason
+// selection rotates instead of hashing.
+//
+// Issuance is capped per CREDENTIAL, so the pool is only worth its advertised
+// perCredentialHourlyBudget*len(pool) an hour if runs land EVENLY. A hash
+// spreads them independently -- balls-in-bins -- and the gate goes red the
+// moment any single bin fills, however much of the pool is still untouched.
+// That is not a tail risk: nine real runs hashed into three slots, put five on
+// one of them, and refused the tenth with twenty-one of thirty issuances
+// unspent. A rotation makes it arithmetically impossible: across any N
+// consecutive runs no slot is used more than ceil(N/len(pool)) times, so a full
+// hour of perCredentialHourlyBudget*len(pool) runs still fits.
+//
+// Reverting selectEnrollment to a hash of the run id fails this test.
+func TestSelectEnrollmentNeverClustersWithinTheIssuanceBudget(t *testing.T) {
+	// qurl-service registrationOTPPerCredentialRate at the time of writing. It
+	// only sets how far this test looks ahead, so service-side retuning cannot
+	// invalidate the property being asserted.
+	const perCredentialHourlyBudget = 5
+	pool := []string{"a", "b", "c", "d", "e", "f"}
+	fullHour := perCredentialHourlyBudget * len(pool)
+
+	// A rotation has to hold from any offset: GITHUB_RUN_NUMBER is wherever
+	// this workflow's own history has reached, not a number this test chooses.
+	for _, start := range []int{0, 1, 7, 41, 202, 1000} {
+		for window := 1; window <= fullHour; window++ {
+			used := map[int]int{}
+			for i := 0; i < window; i++ {
+				_, slot := selectEnrollment(pool, envFrom(map[string]string{
+					"GITHUB_RUN_NUMBER":  fmt.Sprint(start + i),
+					"GITHUB_RUN_ATTEMPT": "1",
+				}))
+				used[slot]++
+			}
+			ceiling := (window + len(pool) - 1) / len(pool)
+			for slot, n := range used {
+				if n > ceiling {
+					t.Fatalf("%d consecutive runs from %d put %d issuances on slot %d; "+
+						"a rotation allows at most %d, and the credential budget is %d",
+						window, start, n, slot, ceiling, perCredentialHourlyBudget)
+				}
+			}
+		}
 	}
 }
 
@@ -132,11 +192,17 @@ func TestSelectEnrollmentAlwaysReturnsAPoolMember(t *testing.T) {
 	}
 
 	for _, env := range []map[string]string{
-		{"GITHUB_RUN_ID": "1", "GITHUB_RUN_ATTEMPT": "1"},
-		{"GITHUB_RUN_ID": "1"},      // attempt absent
-		{"GITHUB_RUN_ATTEMPT": "3"}, // run id absent
+		{"GITHUB_RUN_NUMBER": "1", "GITHUB_RUN_ATTEMPT": "1"},
+		{"GITHUB_RUN_NUMBER": "1"},  // attempt absent
+		{"GITHUB_RUN_ATTEMPT": "3"}, // run number absent -- random fallback
 		{},                          // off CI entirely
-		{"GITHUB_RUN_ID": "  ", "GITHUB_RUN_ATTEMPT": " "}, // whitespace only
+		{"GITHUB_RUN_NUMBER": "  ", "GITHUB_RUN_ATTEMPT": " "},  // whitespace only
+		{"GITHUB_RUN_NUMBER": "not-a-number"},                   // unparseable
+		{"GITHUB_RUN_NUMBER": "-4", "GITHUB_RUN_ATTEMPT": "-1"}, // negative
+		{"GITHUB_RUN_NUMBER": "0", "GITHUB_RUN_ATTEMPT": "0"},   // zero
+		{"GITHUB_RUN_NUMBER": "99999999999999999999"},           // overflows int
+		// MaxInt64 in both: the sum must not wrap to a negative slot.
+		{"GITHUB_RUN_NUMBER": "9223372036854775807", "GITHUB_RUN_ATTEMPT": "9223372036854775807"},
 	} {
 		got, slot := selectEnrollment(pool, envFrom(env))
 		if !member[got] {

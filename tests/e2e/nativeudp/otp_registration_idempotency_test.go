@@ -28,7 +28,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"hash/fnv"
 	"io"
 	"os"
 	"path/filepath"
@@ -188,20 +187,49 @@ func parseEnrollmentPool(raw string) []string {
 // Registration OTP issuance is rate limited on four dimensions, and only two of
 // them can bind this gate: 5/hour per credential and 10/hour per owner. (Per
 // peer is 5/hour but every run generates a fresh device key, and per source is
-// 60/hour across runner IPs that vary.) So a single owner caps the gate at ten
-// runs an hour and a single credential at five -- which a busy afternoon on a
-// REQUIRED check exhausts, turning the gate red for reasons that have nothing
-// to do with the change under test. That is not hypothetical; it is what
-// happened while building this.
+// 60/hour across runner IPs that vary.) So a single credential caps the gate at
+// five runs an hour -- which a busy afternoon on a REQUIRED check exhausts,
+// turning the gate red for reasons that have nothing to do with the change
+// under test. That is not hypothetical; it is what happened while building
+// this.
 //
-// The pool is therefore one credential per DISTINCT owner. That is the only
-// dimension that scales: piling more credentials onto one owner still tops out
-// at that owner's ten.
+// The pool is therefore one credential per DISTINCT owner, because owners are
+// the dimension that scales without bound: a SECOND credential on an owner
+// already in the pool buys five more runs an hour and then stops dead at that
+// owner's ten, while each new owner buys another five every time.
 //
-// Selection is keyed on run id AND attempt so a rerun lands on a different
-// slot. Reruns are the case that actually exhausted the budget in practice, and
-// keying on the run alone would send every attempt back to the same credential
-// -- the one whose budget the previous attempt just spent.
+// THE BINDING LIMIT IS THE CREDENTIAL'S FIVE, NOT THE OWNER'S TEN. With one
+// credential per owner the per-owner budget is unreachable -- a slot's own
+// credential refuses its sixth issuance while its owner is only halfway to ten
+// -- so this gate is worth 5/hour per slot and 5*len(pool) per hour overall.
+//
+// SELECTION MUST ROTATE, NOT HASH. Both spread runs across the pool "evenly" in
+// the long run, but a hash spreads them INDEPENDENTLY: it is balls-in-bins, and
+// the whole pool goes red as soon as any one bin reaches five, which happens far
+// below 5*len(pool). This is not a theoretical worry -- it is the outage that
+// prompted this comment. On 2026-08-31 nine issuances in the hour hashed into
+// slots {4:5, 0:3, 2:1}: three of six slots touched, slot 4 at its cap, and the
+// tenth run refused with twenty-one of the pool's thirty still unspent. Replayed
+// over the whole recorded history (135 issuances), hashing peaks at 5 in a
+// rolling hour -- exactly the cap -- while rotating peaks at 3.
+//
+// GITHUB_RUN_NUMBER is the rotation counter: unlike GITHUB_RUN_ID (a global
+// GitHub id whose irregular gaps make it hash-like), it increments by exactly
+// one per run OF THIS WORKFLOW, so consecutive runs take consecutive slots.
+// Adding the attempt rotates a rerun onto the next slot -- reruns are the case
+// that actually exhausted a credential, since the previous attempt just spent
+// that slot's budget.
+//
+// The rotation is over ALL gate runs, but only the ones the scope step finds
+// relevant spend an issuance, so the spending runs are a subsequence and the
+// slots they take can skip. That degrades the guarantee from perfect
+// round-robin to something short of it; it does not degrade it to a hash,
+// because the skipped numbers are irregular rather than aligned to len(pool).
+// Replaying the 135 recorded issuances at their real run numbers -- real skips
+// included -- the worst rolling hour puts 3 on a slot, against the hash's 5.
+//
+// Off CI there is no counter to rotate on, so fall back to random: repeated
+// local runs are just as capable of exhausting one credential.
 func selectEnrollment(pool []string, lookup func(string) string) (string, int) {
 	switch len(pool) {
 	case 0:
@@ -210,23 +238,27 @@ func selectEnrollment(pool []string, lookup func(string) string) (string, int) {
 		return pool[0], 0
 	}
 
-	runID := strings.TrimSpace(lookup("GITHUB_RUN_ID"))
-	attempt := strings.TrimSpace(lookup("GITHUB_RUN_ATTEMPT"))
+	// Attempt defaults to 1 (its value on a first run) so a missing or unusable
+	// attempt cannot shift the rotation off the run number it belongs to.
+	attempt := 1
+	if parsed, err := strconv.Atoi(strings.TrimSpace(lookup("GITHUB_RUN_ATTEMPT"))); err == nil && parsed > 0 {
+		attempt = parsed
+	}
 
-	// Off CI there is no run identity to spread on, so choose at random:
-	// repeated local runs are just as capable of exhausting one credential.
-	if runID == "" && attempt == "" {
-		raw := make([]byte, 4)
-		if _, err := rand.Read(raw); err != nil {
-			return pool[0], 0
-		}
-		slot := int(binary.BigEndian.Uint32(raw) % uint32(len(pool)))
+	if runNumber, err := strconv.Atoi(strings.TrimSpace(lookup("GITHUB_RUN_NUMBER"))); err == nil && runNumber >= 0 {
+		// Reduce both terms before adding. A real run number never approaches
+		// MaxInt, but this reads an environment variable, and the sum of two
+		// unreduced values there would overflow to a negative slot and panic
+		// the index below rather than fail some assertion.
+		slot := (runNumber%len(pool) + (attempt-1)%len(pool)) % len(pool)
 		return pool[slot], slot
 	}
 
-	digest := fnv.New32a()
-	_, _ = digest.Write([]byte(runID + "-" + attempt))
-	slot := int(digest.Sum32() % uint32(len(pool)))
+	raw := make([]byte, 4)
+	if _, err := rand.Read(raw); err != nil {
+		return pool[0], 0
+	}
+	slot := int(binary.BigEndian.Uint32(raw) % uint32(len(pool)))
 	return pool[slot], slot
 }
 
