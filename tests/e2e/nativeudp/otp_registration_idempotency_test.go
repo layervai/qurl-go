@@ -178,21 +178,27 @@ func loadOTPE2EConfig(lookup func(string) string) (otpE2EConfig, bool, error) {
 	strict := strings.TrimSpace(lookup(otpE2EStrictEnv)) != ""
 	if len(missing) > 0 {
 		if strict {
-			detail := strings.Join(missing, ", ")
 			// The counters are an independent fault, and this return is the one
 			// a pool that parsed to ZERO credentials takes -- the shape both
 			// workflows can actually produce, since they supply only the pool
 			// variable. The aggregated guard further down never runs on this
 			// branch, so without this the second fault costs another gate cycle
 			// to discover, which is the contract this function opens by stating.
+			//
+			// Appended to the LIST, not to the rendered string, so the count and
+			// the contents cannot disagree. Reporting "1 unmet prerequisite"
+			// while listing two is a small misdirection, but small misdirection
+			// in the first message an operator reads is this file's subject.
+			unmet := append([]string(nil), missing...)
 			if fromPool {
 				if blocked := blockedRotationCounters(lookup); len(blocked) > 0 {
-					detail += "; and " + strings.Join(blocked, " and ") +
-						" unusable, so selection could not have rotated either"
+					unmet = append(unmet, strings.Join(blocked, " and ")+
+						" unusable, so selection could not have rotated either")
 				}
 			}
 			return otpE2EConfig{}, false, fmt.Errorf(
-				"strict OTP e2e run is missing %d prerequisite(s): %s", len(missing), detail)
+				"strict OTP e2e run has %d unmet prerequisite(s): %s",
+				len(unmet), strings.Join(unmet, "; "))
 		}
 		return otpE2EConfig{}, true, nil
 	}

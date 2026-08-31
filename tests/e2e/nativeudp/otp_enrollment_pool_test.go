@@ -898,6 +898,11 @@ func TestLoadOTPE2EConfigAcceptsEitherCredentialSource(t *testing.T) {
 					"spends another gate cycle finding the next", err, want)
 			}
 		}
+		// The COUNT must match what is listed. Reporting one unmet prerequisite
+		// while naming two reads as an addendum and undercounts the work ahead.
+		if !strings.Contains(err.Error(), "2 unmet prerequisite") {
+			t.Fatalf("strict error %q lists two faults but does not count two", err)
+		}
 	})
 
 	// A secret re-saved as the same credential twice collapses to one entry.
