@@ -714,8 +714,8 @@ func TestLoadOTPE2EConfigAcceptsEitherCredentialSource(t *testing.T) {
 	// entry, and invisible because no note or error would print.
 	t.Run("strict run refuses a pool variable that yielded nothing", func(t *testing.T) {
 		_, _, err := loadOTPE2EConfig(envFrom(with(map[string]string{
-			otpE2EEnrollmentPoolEnv: " , , ",
-			otpE2EEnrollmentEnv:     "solo", // present, and must NOT rescue it
+			otpE2EEnrollmentPoolEnv: "   \n  ", // whitespace only: trims to empty
+			otpE2EEnrollmentEnv:     "solo",    // present, and must NOT rescue it
 			otpE2EStrictEnv:         "1",
 			"GITHUB_RUN_NUMBER":     "41",
 			"GITHUB_RUN_ATTEMPT":    "1",
@@ -742,7 +742,7 @@ func TestLoadOTPE2EConfigAcceptsEitherCredentialSource(t *testing.T) {
 	// branch where a stray single credential happens to backfill the length.
 	t.Run("a damaged pool with no single credential is not reported as absent", func(t *testing.T) {
 		_, _, err := loadOTPE2EConfig(envFrom(with(map[string]string{
-			otpE2EEnrollmentPoolEnv: " , , ", // present, yields nothing
+			otpE2EEnrollmentPoolEnv: "   \n\t\n  ", // present, yields nothing, and TRIMS TO EMPTY
 			otpE2EStrictEnv:         "1",
 			"GITHUB_RUN_NUMBER":     "41",
 			"GITHUB_RUN_ATTEMPT":    "1",
@@ -754,6 +754,24 @@ func TestLoadOTPE2EConfigAcceptsEitherCredentialSource(t *testing.T) {
 			t.Fatalf("strict error %q reports the secret as absent; it is present and "+
 				"damaged, and an operator told 'missing' will find it sitting in Settings",
 				err)
+		}
+	})
+
+	// The comma spelling of the same damage. Both this and the whitespace-only
+	// form parse to zero credentials, and they must take the SAME branch --
+	// keying fromPool on a trimmed value sent them to opposite ones.
+	t.Run("a separator-only pool is damaged, not absent", func(t *testing.T) {
+		_, _, err := loadOTPE2EConfig(envFrom(with(map[string]string{
+			otpE2EEnrollmentPoolEnv: " , , ",
+			otpE2EStrictEnv:         "1",
+			"GITHUB_RUN_NUMBER":     "41",
+			"GITHUB_RUN_ATTEMPT":    "1",
+		})))
+		if err == nil {
+			t.Fatal("strict run accepted a separator-only pool secret")
+		}
+		if !strings.Contains(err.Error(), "0 credentials") {
+			t.Fatalf("strict error %q reports the secret as absent; it is present", err)
 		}
 	})
 

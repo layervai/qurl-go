@@ -133,7 +133,15 @@ func loadOTPE2EConfig(lookup func(string) string) (otpE2EConfig, bool, error) {
 	// case the guard already catches -- the pool source would go unnoticed, the
 	// single-credential variable would be adopted, and a strict run would
 	// proceed unpooled at 5/hour with neither an error nor a note.
-	fromPool := strings.TrimSpace(lookup(otpE2EEnrollmentPoolEnv)) != ""
+	// NOT TrimSpace'd. Trimming answers "does this hold credentials", which the
+	// parse result already answers; the question here is "did an operator set
+	// this variable", and only the untouched value answers that. Trimming got
+	// it wrong for exactly one of the two damage shapes named above: " , , "
+	// survives a trim and a whitespace-only secret does not, so two values that
+	// both parse to zero credentials took opposite branches -- one correctly
+	// reported as damaged, the other reported as ABSENT, which is the
+	// misdirection the branch below exists to prevent.
+	fromPool := lookup(otpE2EEnrollmentPoolEnv) != ""
 	// The pool variable's OWN yield, captured before the single-credential
 	// backfill below can overwrite it. Reporting len(pool) after the backfill
 	// would attribute another variable's credential to this one: a pool of
