@@ -236,8 +236,8 @@ func RecoverAgentRuntime(ctx context.Context, recoveryCredential string, store A
 // AgentRuntimeRecoveryCredentialProvider returns a live qurl:agent account
 // credential when a validated recovery episode must issue or renew its Hub
 // grant. It is called at most once, under the agent setup lock, after durable
-// state and any recovery horizon have been validated. A provider must not read
-// or mutate the same AgentStateStore.
+// state and any recovery horizon have been validated. A provider must return
+// promptly, honor ctx, and not read or mutate the same AgentStateStore.
 type AgentRuntimeRecoveryCredentialProvider func(context.Context) (string, error)
 
 // RecoverAgentRuntimeWithCredentialProvider is RecoverAgentRuntime with lazy

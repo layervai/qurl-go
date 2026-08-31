@@ -218,7 +218,7 @@ func TestRecoverAgentRuntime_TestRecoveryCredentialGoldenPath(t *testing.T) {
 	}
 }
 
-func TestRecoverAgentRuntimeWithCredentialProvider_ResolvesAfterStateValidation(t *testing.T) {
+func TestRecoverAgentRuntimeWithCredentialProvider_GoldenPathResolvesOnce(t *testing.T) {
 	fixture := loadCredentialRecoveryFixture(t)
 	f, _ := newCredentialRecoveryRuntimeFixture(t,
 		[]runtimeUDPStep{{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: fixture.PublicExchanges["hub_issue_recovery"].SuccessBodyJSON}},
@@ -233,6 +233,19 @@ func TestRecoverAgentRuntimeWithCredentialProvider_ResolvesAfterStateValidation(
 		t.Fatalf("provider recovery = %v/%v/%v, provider calls=%d", client, binding, err, providerCalls)
 	}
 	defer binding.Destroy()
+}
+
+func TestRecoverAgentRuntimeWithCredentialProvider_NilProviderRejectsBeforeStateLoad(t *testing.T) {
+	store := &countingAgentStateStore{inner: &memoryAgentStateStore{}}
+	client, binding, err := RecoverAgentRuntimeWithCredentialProvider(context.Background(), nil, store,
+		WithAgentRuntimeRecoveryHub(runtimeTestHub()),
+	)
+	if client != nil || binding != nil || !errors.Is(err, ErrInvalidRegisterConfig) {
+		t.Fatalf("nil provider = %v/%v/%v, want nil/nil/ErrInvalidRegisterConfig", client, binding, err)
+	}
+	if store.loads.Load() != 0 {
+		t.Fatalf("nil provider loaded state %d times, want zero", store.loads.Load())
+	}
 }
 
 func TestRecoverAgentRuntimeWithCredentialProvider_PreservesProviderFailureWithoutIO(t *testing.T) {
@@ -912,14 +925,18 @@ func TestRecoverAgentRuntime_TransportAmbiguityResumesCellWithoutHubOrCandidateR
 	if state.PendingCredentialRecovery == nil || state.PendingCredentialRecovery.DeviceAPIKey != fixture.Fixtures.DeviceAPIKeyCandidate || state.PendingCredentialRecovery.NeedsFreshGrant {
 		t.Fatalf("ambiguous completion did not preserve exact pending candidate/grant: %#v", state.PendingCredentialRecovery)
 	}
-	client, binding, err := RecoverAgentRuntime(context.Background(), "", f.store, opts...)
+	providerCalls := 0
+	client, binding, err := RecoverAgentRuntimeWithCredentialProvider(context.Background(), func(context.Context) (string, error) {
+		providerCalls++
+		return "", errors.New("provider must not run for a pure cell resume")
+	}, f.store, opts...)
 	if err != nil || client == nil || binding == nil {
 		t.Fatalf("exact pending resume = %v/%v/%v", client, binding, err)
 	}
 	defer binding.Destroy()
-	if len(f.hubUDP.snapshot()) != 1 || len(f.cellUDP.snapshot()) != 2 ||
+	if providerCalls != 0 || len(f.hubUDP.snapshot()) != 1 || len(f.cellUDP.snapshot()) != 2 ||
 		!bytes.Equal(f.cellUDP.snapshot()[0].body, f.cellUDP.snapshot()[1].body) {
-		t.Fatalf("resume Hub/cell/body = %d/%d/%v", len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot()), f.cellUDP.snapshot())
+		t.Fatalf("resume provider/Hub/cell/body = %d/%d/%d/%v", providerCalls, len(f.hubUDP.snapshot()), len(f.cellUDP.snapshot()), f.cellUDP.snapshot())
 	}
 }
 
