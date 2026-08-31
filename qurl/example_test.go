@@ -297,6 +297,30 @@ func ExampleRecoverAgentRuntime() {
 	_, _ = client, binding
 }
 
+func ExampleRecoverAgentRuntimeWithCredentialProvider() {
+	// Resolve account authority only when validated state needs the Hub. A pure
+	// cell resume does not ask the provider for a credential.
+	ctx := context.Background()
+	store, err := qurl.OpenFileAgentState("/var/lib/layerv/qurl/agent-state.json")
+	if err != nil {
+		panic(err)
+	}
+	defer store.Close()
+	hub := qurl.HubBootstrap{
+		Host:               "hub.nhp.layerv.ai",
+		Port:               443,
+		ServerPublicKeyB64: configuredHubPublicKeyB64(),
+	}
+	client, binding, err := qurl.RecoverAgentRuntimeWithCredentialProvider(ctx, func(context.Context) (string, error) {
+		return recoveryCredentialFromOperator(), nil
+	}, store, qurl.WithAgentRuntimeRecoveryHub(hub))
+	if err != nil {
+		panic(err)
+	}
+	defer binding.Destroy()
+	_, _ = client, binding
+}
+
 func ExampleNewSealedFileAgentState() {
 	// Production wrappers call a KMS/HSM/attested release API and authenticate
 	// every binding field as provider encryption context. They wrap only the

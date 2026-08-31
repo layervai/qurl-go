@@ -101,7 +101,8 @@ var frictionBudget = map[string]int{
 	// call without WithAgentRuntimeRecoveryHub, so unlike registration it cannot
 	// fall back to the deployment's hub. Teaching recovery that fallback is the
 	// one honest way to get this to 6.
-	"ExampleRecoverAgentRuntime": 7,
+	"ExampleRecoverAgentRuntime":                       7,
+	"ExampleRecoverAgentRuntimeWithCredentialProvider": 7,
 }
 
 // countBudgetedStatements counts top-level statements in fn, skipping the

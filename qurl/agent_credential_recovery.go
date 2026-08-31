@@ -228,18 +228,43 @@ func (e *CredentialRecoveredAssignmentRefreshRequiredError) Unwrap() []error {
 // grant. A pure resume of an already-persisted cell completion uses its durable
 // grant and candidate instead, so that path does not inspect the argument.
 func RecoverAgentRuntime(ctx context.Context, recoveryCredential string, store AgentStateStore, opts ...AgentRuntimeRecoveryOption) (*Client, *AgentRuntimeBinding, error) {
+	return recoverAgentRuntime(ctx, func(context.Context) (string, error) {
+		return recoveryCredential, nil
+	}, store, opts...)
+}
+
+// AgentRuntimeRecoveryCredentialProvider returns a live qurl:agent account
+// credential when a validated recovery episode must issue or renew its Hub
+// grant. It is called at most once, under the agent setup lock, after durable
+// state and any recovery horizon have been validated. A provider must return
+// promptly, honor ctx, and not read or mutate the same AgentStateStore.
+type AgentRuntimeRecoveryCredentialProvider func(context.Context) (string, error)
+
+// RecoverAgentRuntimeWithCredentialProvider is RecoverAgentRuntime with lazy
+// account authority. It is a separate entry point so a call cannot supply both
+// positional and provider authority. It does not invoke provider for malformed
+// or expired state, or when an existing cell grant can complete recovery
+// directly.
+func RecoverAgentRuntimeWithCredentialProvider(ctx context.Context, provider AgentRuntimeRecoveryCredentialProvider, store AgentStateStore, opts ...AgentRuntimeRecoveryOption) (*Client, *AgentRuntimeBinding, error) {
+	return recoverAgentRuntime(ctx, provider, store, opts...)
+}
+
+func recoverAgentRuntime(ctx context.Context, provider AgentRuntimeRecoveryCredentialProvider, store AgentStateStore, opts ...AgentRuntimeRecoveryOption) (*Client, *AgentRuntimeBinding, error) {
 	if err := validateContext(ctx, ErrInvalidRegisterConfig); err != nil {
 		return nil, nil, err
 	}
 	if store == nil {
 		return nil, nil, fmt.Errorf("%w: state store must not be nil", ErrInvalidRegisterConfig)
 	}
+	if provider == nil {
+		return nil, nil, fmt.Errorf("%w: credential recovery provider must not be nil", ErrInvalidRegisterConfig)
+	}
 	cfg, err := newNativeAgentCredentialRecoveryConfig(opts)
 	if err != nil {
 		return nil, nil, err
 	}
 	result, err := withAgentSetupLock(ctx, store, destroyNativeRuntimeResult, func(lockedCtx context.Context, locked AgentStateStore) (*nativeRuntimeResult, error) {
-		return cfg.recoverAgentRuntimeLocked(lockedCtx, recoveryCredential, locked)
+		return cfg.recoverAgentRuntimeLocked(lockedCtx, provider, locked)
 	})
 	if err != nil {
 		return nil, nil, err
@@ -266,7 +291,7 @@ func newNativeAgentCredentialRecoveryConfig(opts []AgentRuntimeRecoveryOption) (
 	return c, nil
 }
 
-func (c *nativeAgentRuntimeConfig) recoverAgentRuntimeLocked(ctx context.Context, recoveryCredential string, store AgentStateStore) (*nativeRuntimeResult, error) {
+func (c *nativeAgentRuntimeConfig) recoverAgentRuntimeLocked(ctx context.Context, provider AgentRuntimeRecoveryCredentialProvider, store AgentStateStore) (*nativeRuntimeResult, error) {
 	c.continuityStore = store
 	defer func() { c.continuityStore = nil }()
 	state, err := store.LoadAgentState(ctx)
@@ -309,12 +334,21 @@ func (c *nativeAgentRuntimeConfig) recoverAgentRuntimeLocked(ctx context.Context
 	}
 	defer wipeBytes(privateKey)
 
+	if state.PendingCredentialRecovery != nil && state.PendingCredentialRecovery.NeedsFreshGrant {
+		if err := c.requireCredentialRecoveryLive(state.PendingCredentialRecovery); err != nil {
+			return nil, err
+		}
+	}
 	if state.PendingCredentialRecovery == nil && state.PendingCredentialRecoveryIssue != nil {
 		if err := c.requireCredentialRecoveryIssueLive(state.PendingCredentialRecoveryIssue); err != nil {
 			return nil, err
 		}
 	}
-	if state.PendingCredentialRecovery == nil || state.PendingCredentialRecovery.NeedsFreshGrant || state.PendingCredentialRecoveryIssue != nil {
+	if state.PendingCredentialRecovery == nil || state.PendingCredentialRecovery.NeedsFreshGrant {
+		recoveryCredential, err := provider(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("resolve credential recovery authority: %w", err)
+		}
 		usedNonce, err := c.issueAndPersistCredentialRecovery(ctx, recoveryCredential, store, state, privateKey, "")
 		if err != nil {
 			return nil, err

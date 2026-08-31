@@ -992,8 +992,10 @@ func (d *pinnedStateDirImpl) acquireLock(ctx context.Context, name string,
 			d.activeLockToken = token
 			d.activeEntries = make(map[string]pinnedFileIdentity)
 			d.mu.Unlock()
-			return &pinnedSetupLock{file: file, dir: d, name: name, lease: lease,
-				token: token, overlapped: overlapped}, nil
+			return &pinnedSetupLock{
+				file: file, dir: d, name: name, lease: lease,
+				token: token, overlapped: overlapped,
+			}, nil
 		}
 		if !errors.Is(err, windows.ERROR_LOCK_VIOLATION) && !errors.Is(err, windows.ERROR_IO_PENDING) {
 			return nil, fail(err)
