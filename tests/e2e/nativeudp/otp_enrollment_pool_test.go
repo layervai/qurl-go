@@ -71,7 +71,7 @@ func TestParseEnrollmentPoolSplitsAndCleans(t *testing.T) {
 }
 
 func TestSelectEnrollmentDegenerateCases(t *testing.T) {
-	lookup := envFrom(map[string]string{"GITHUB_RUN_NUMBER": "100", "GITHUB_RUN_ATTEMPT": "1"})
+	lookup := ciEnv(100, 1)
 
 	t.Run("empty pool reports no slot", func(t *testing.T) {
 		got, slot, _ := selectEnrollment(nil, lookup)
@@ -89,8 +89,8 @@ func TestSelectEnrollmentDegenerateCases(t *testing.T) {
 }
 
 func TestSelectEnrollmentIsDeterministicForOneAttempt(t *testing.T) {
-	pool := []string{"a", "b", "c", "d", "e", "f"}
-	lookup := envFrom(map[string]string{"GITHUB_RUN_NUMBER": "12345", "GITHUB_RUN_ATTEMPT": "2"})
+	pool := sixSlotPool
+	lookup := ciEnv(12345, 2)
 
 	first, firstSlot, _ := selectEnrollment(pool, lookup)
 	for i := 0; i < 32; i++ {
@@ -172,9 +172,12 @@ func TestSelectEnrollmentNeverClustersWithinTheIssuanceBudget(t *testing.T) {
 	pool := sixSlotPool
 	fullHour := perCredentialHourlyBudget * len(pool)
 
-	// A rotation has to hold from any offset, and at any attempt: run numbers
-	// are wherever this workflow's history has reached, not values a test may
-	// choose, and a hour of reruns is still an hour of issuances.
+	// Prefix windows from several offsets, at several attempts. Prefixes are
+	// enough because the rotation is translation-invariant mod len(pool): a
+	// window starting mid-sequence is a prefix from a different offset, which
+	// is what varying `start` covers. Run numbers are wherever this workflow's
+	// history has reached, not values a test may choose, and an hour of reruns
+	// is still an hour of issuances.
 	for _, start := range []int{0, 1, 7, 41, 202, 1000} {
 		for _, attempt := range []int{1, 2, 3} {
 			// Counts accumulate: after run i the tallies ARE the window of
@@ -251,7 +254,7 @@ func TestSelectEnrollmentStridedTrafficNeedsACoprimePoolSize(t *testing.T) {
 // An out-of-range slot would panic, and an off-CI path that returned "" would
 // send an empty credential to the authority and fail as an auth error.
 func TestSelectEnrollmentAlwaysReturnsAPoolMember(t *testing.T) {
-	pool := []string{"a", "b", "c", "d", "e", "f"}
+	pool := sixSlotPool
 	member := map[string]bool{}
 	for _, c := range pool {
 		member[c] = true
@@ -373,6 +376,21 @@ func TestLoadOTPE2EConfigAcceptsEitherCredentialSource(t *testing.T) {
 		})))
 		if err != nil {
 			t.Fatalf("strict single-credential run failed: %v", err)
+		}
+	})
+
+	// The attempt half of the same rule. Defaulting a broken attempt to 1 would
+	// send every rerun of a run back to that run's own slot -- five reruns, one
+	// credential, the original outage.
+	t.Run("strict run with an unusable attempt refuses to fall back to random", func(t *testing.T) {
+		_, _, err := loadOTPE2EConfig(envFrom(with(map[string]string{
+			otpE2EEnrollmentPoolEnv: "one\ntwo\nthree",
+			otpE2EStrictEnv:         "1",
+			"GITHUB_RUN_NUMBER":     "41",
+			"GITHUB_RUN_ATTEMPT":    "not-a-number",
+		})))
+		if err == nil {
+			t.Fatal("strict run accepted an unusable GITHUB_RUN_ATTEMPT; reruns would collide")
 		}
 	})
 

@@ -216,9 +216,10 @@ func parseEnrollmentPool(raw string) []string {
 // -- so the POOL is worth 5/hour per slot and 5*len(pool) per hour in total.
 // That is the pool's ceiling, not this workflow's: otp-schema-v2-canary.yml
 // runs this same test against the same secret on its own run-number sequence,
-// so both workflows spend from these totals. Two rotations sum to within one of
-// ideal (two hashes would not), and the canary is attended dispatch, so this
-// composes today -- but the number belongs to the pool, not to either caller.
+// so both workflows spend from these totals. Two independently phased rotations
+// each stay within one of ideal, so their per-slot sum stays within two (two
+// hashes would not), and the canary is attended dispatch, so this composes
+// today -- but the number belongs to the pool, not to either caller.
 //
 // SELECTION MUST ROTATE, NOT HASH. Both spread runs across the pool "evenly" in
 // the long run, but a hash spreads them INDEPENDENTLY: it is balls-in-bins, and
@@ -261,6 +262,18 @@ func parseEnrollmentPool(raw string) []string {
 //
 // Off CI there is no counter to rotate on, so fall back to random: repeated
 // local runs are just as capable of exhausting one credential.
+// rotationCounter reads one of the two GitHub counters the rotation turns on,
+// reporting whether the value is usable rather than substituting a default.
+// Actions always exports both; anything else is a runner regression, and the
+// caller's job is to make that loud instead of quietly selecting at random.
+func rotationCounter(lookup func(string) string, name string, lowest int) (int, bool) {
+	parsed, err := strconv.Atoi(strings.TrimSpace(lookup(name)))
+	if err != nil || parsed < lowest {
+		return 0, false
+	}
+	return parsed, true
+}
+
 func selectEnrollment(pool []string, lookup func(string) string) (string, int, bool) {
 	switch len(pool) {
 	case 0:
@@ -271,14 +284,14 @@ func selectEnrollment(pool []string, lookup func(string) string) (string, int, b
 		return pool[0], 0, true
 	}
 
-	// Attempt defaults to 1 (its value on a first run) so a missing or unusable
-	// attempt cannot shift the rotation off the run number it belongs to.
-	attempt := 1
-	if parsed, err := strconv.Atoi(strings.TrimSpace(lookup("GITHUB_RUN_ATTEMPT"))); err == nil && parsed > 0 {
-		attempt = parsed
-	}
-
-	if runNumber, err := strconv.Atoi(strings.TrimSpace(lookup("GITHUB_RUN_NUMBER"))); err == nil && runNumber >= 0 {
+	// BOTH counters must be usable, and an unreadable attempt is not the softer
+	// failure it looks like: defaulting it to 1 would resolve every attempt of
+	// run N onto N's slot, spending that one credential five times over the
+	// reruns -- which is the exact case that exhausted a credential before the
+	// pool existed. Treat it exactly as strictly as the run number.
+	runNumber, haveRun := rotationCounter(lookup, "GITHUB_RUN_NUMBER", 0)
+	attempt, haveAttempt := rotationCounter(lookup, "GITHUB_RUN_ATTEMPT", 1)
+	if haveRun && haveAttempt {
 		// Reduce both terms before adding. A real run number never approaches
 		// MaxInt, but this reads an environment variable, and the sum of two
 		// unreduced values there would overflow to a negative slot and panic
@@ -420,6 +433,14 @@ func TestEmailedOTPCompletesIdempotentSDKRegistration(t *testing.T) {
 	if skip {
 		t.Skipf("OTP e2e prerequisites absent; set %s to make this fatal", otpE2EStrictEnv)
 	}
+
+	// Logged HERE, before anything can fail, not beside the success assertion.
+	// The failure this evidence exists for -- a refused issuance, which arrives
+	// as a mailbox timeout -- kills the test inside ConnectAgentRuntime below,
+	// so a slot logged after that call is absent from precisely the run whose
+	// diagnosis needs it. Every other failure in the exchange gets it too.
+	t.Logf("EVIDENCE this run drew credential slot %d of %d",
+		cfg.enrollmentSlot, cfg.enrollmentPoolSize)
 
 	ctx, cancel := context.WithTimeout(context.Background(), otpE2EDeadline)
 	defer cancel()

@@ -179,10 +179,9 @@ func (m *otpMailbox) snapshot() (calls int, fresh bool) {
 // Registration OTP issuance is rate limited per credential (5/hour) and per
 // owner (10/hour) in qurl-service; see selectEnrollment for which of the two
 // actually bites. Once that budget is spent the authority refuses to issue and
-// NO email is ever sent,
-// which from here is indistinguishable from a delivery problem -- so name it
-// rather than let the reader look broken. Re-running the gate while debugging
-// is the fastest way to reach it.
+// NO email is ever sent, which from here is indistinguishable from a delivery
+// problem -- so name it rather than let the reader look broken. Re-running the
+// gate while debugging is the fastest way to reach it.
 func (m *otpMailbox) timedOut() error {
 	return errors.New(
 		"no OTP email arrived for this run. The likely cause is that no email was ever " +
