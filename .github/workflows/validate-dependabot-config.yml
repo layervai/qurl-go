@@ -18,6 +18,9 @@
 # second repository wants it; kept local while qurl-go is the only consumer.
 name: Validate Dependabot config
 
+# `.github/dependabot.yml` is the only spelling GitHub documents for this file;
+# there is no `.yaml` alternative to glob for, unlike the issue-form directory
+# the sibling validator walks.
 on:
   push:
     branches: [main]
@@ -43,6 +46,10 @@ jobs:
   # name is indistinguishable from it in branch protection.
   dependabot-config:
     runs-on: ubuntu-latest
+    # The reusable this mirrors bounds its job the same way. Successful runs
+    # finish well inside a minute; the plausible hang is pip reaching PyPI, and
+    # the default would hold a runner for six hours before saying so.
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -52,6 +59,11 @@ jobs:
         with:
           python-version: "3.12"
 
+      # Bumped by hand, deliberately: Dependabot reads manifests, not `run:`
+      # blocks, so nothing proposes this. The vendored SchemaStore snapshot
+      # therefore freezes here, and a Dependabot key added upstream after this
+      # release is rejected until someone raises the version. That failure is
+      # loud and fail-closed -- a red check naming the key -- not silence.
       - name: Install check-jsonschema
         run: |
           set -euo pipefail

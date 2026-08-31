@@ -34,6 +34,46 @@ import (
 	"testing"
 )
 
+const (
+	dependabotConfig   = ".github/dependabot.yml"
+	dependabotWorkflow = "validate-dependabot-config.yml"
+)
+
+// GitHub parses the Dependabot config on its own servers and answers a
+// malformed one with silence -- updates stop for every ecosystem it declares,
+// reported only in this repository's Dependabot logs. validate-dependabot-config.yml
+// is what turns that into a red check, which makes the workflow itself the
+// boundary this file's other test warns about: a part carried by configuration
+// that fails nothing when it is deleted or quietly repointed. The path filter
+// is the subtle half. Naming only the workflow and not the config it guards
+// would leave it green forever while never running on the edit that matters.
+//
+// The config's own header advertises this gate, so the claim is load-bearing
+// too: a reader who trusts that line after the workflow is gone is back to the
+// silence the gate exists to end. Assert it here, where `vet + test -race`
+// is a required check and the path-filtered workflow is not.
+func TestDependabotConfigIsSchemaChecked(t *testing.T) {
+	workflow := readWorkflow(t, dependabotWorkflow)
+	requireContains(t, workflow,
+		"check-jsonschema --builtin-schema vendor.dependabot "+dependabotConfig,
+		"if [[ ! -f "+dependabotConfig+" ]]; then",
+	)
+	// Once under push, once under pull_request.
+	if got := strings.Count(workflow, `      - "`+dependabotConfig+`"`); got != 2 {
+		t.Errorf("path filter names %s %d times, want 2 (push and pull_request)",
+			dependabotConfig, got)
+	}
+	// `validate` is already a required context on main, from pr-title.yml. A
+	// second job answering to that name is indistinguishable from it in branch
+	// protection.
+	requireNotContains(t, workflow, "\n  validate:\n")
+
+	if config := readDependabotConfig(t); !strings.Contains(config, dependabotWorkflow) {
+		t.Errorf("%s does not name %s; its header claims to be schema-checked by it",
+			dependabotConfig, dependabotWorkflow)
+	}
+}
+
 func TestDependabotIgnoresTheAuditedClaudeAction(t *testing.T) {
 	block, err := updateEntry(readDependabotConfig(t), "github-actions")
 	if err != nil {
