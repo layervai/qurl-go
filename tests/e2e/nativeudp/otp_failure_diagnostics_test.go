@@ -944,3 +944,52 @@ func TestUnboundedCallerWithABudgetNamesTheMissingDeadline(t *testing.T) {
 		t.Errorf("an unbounded caller is told how much of its deadline remains.\nError: %s", err)
 	}
 }
+
+// otpRegistrationTestPath is the gate test's own source, read as text. A test
+// binary runs with its package directory as the working directory.
+const otpRegistrationTestPath = "otp_registration_idempotency_test.go"
+
+// TestCredentialEvidenceHasExactlyOneEmissionSite is the fence for how this
+// file's own fix got undone.
+//
+// #221 moved the emission into loadOTPE2EGateConfig so the slot could not be
+// logged after the first thing that can fail. #225 independently added an early
+// t.Logf to the gate test body, solving the same problem in the other place.
+// Neither touched the other's lines, so git auto-merged BOTH without reporting
+// a conflict, and the gate then printed the fact twice, seven lines apart, in
+// two spellings:
+//
+//	EVIDENCE this run drew credential slot 2 (0-based) of 7
+//	EVIDENCE this run drew credential slot 2 of 7
+//
+// The second is the pre-fix wording, so the merge reinstated exactly the
+// ambiguity "(0-based)" was added to remove -- and left a reader at the tail of
+// a red log with two renderings and no way to know which is authoritative.
+//
+// TestGateConfigLoadEmitsTheCredentialEvidence could not catch it: it drives
+// loadOTPE2EGateConfig through a recordingTB and counts what the LOADER emits,
+// so it never observes the test body. Neither vet nor the linters see a
+// duplicate log line. This is the cheapest thing that does -- one count over
+// the source, not a walk of it.
+func TestCredentialEvidenceHasExactlyOneEmissionSite(t *testing.T) {
+	raw, err := os.ReadFile(otpRegistrationTestPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", otpRegistrationTestPath, err)
+	}
+	source := string(raw)
+
+	if n := strings.Count(source, "EVIDENCE this run drew"); n != 1 {
+		t.Errorf("%s emits the credential-slot evidence from %d places, want exactly 1.\n"+
+			"Two emissions means two renderings of one fact in the same job log, which is "+
+			"the ambiguity this evidence exists to remove. loadOTPE2EGateConfig is the one "+
+			"site; delete the others.", otpRegistrationTestPath, n)
+	}
+	// And one PHRASING. A second hand-rolled "%d of %d" is how the duplicate
+	// arrived, and it bypasses credentialEvidence -- whose whole justification
+	// is that one wording stays greppable across every path that emits it.
+	if n := strings.Count(source, "credential slot %d"); n != 1 {
+		t.Errorf("%s renders the credential slot %d different ways, want exactly 1 "+
+			"(credentialEvidence). A hand-rolled format here silently drops the (0-based) "+
+			"qualifier and breaks the shared wording.", otpRegistrationTestPath, n)
+	}
+}
