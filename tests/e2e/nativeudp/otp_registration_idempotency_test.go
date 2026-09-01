@@ -163,6 +163,16 @@ func loadOTPE2EGateConfig(t testing.TB, lookup func(string) string) otpE2EConfig
 		t.Skipf("OTP e2e prerequisites absent; set %s to make this fatal", otpE2EStrictEnv)
 	}
 	t.Logf("EVIDENCE this run drew %s", cfg.credentialEvidence())
+	// The pool's non-fatal degradations, emitted from the same call and for the
+	// same reason the evidence is. These used to sit as their own statements in
+	// the gate test, one error check further down, which is the arrangement the
+	// evidence line was just moved OUT of: a degraded pool is most interesting
+	// on a run that then fails, and a statement below the first Fatalf is
+	// absent from exactly those runs. Folding them in leaves no order to get
+	// wrong. TestGateConfigLoadEmitsThePoolAdvisories covers it.
+	for _, advisory := range poolAdvisories(cfg) {
+		noteDegradation(t, advisory.title, advisory.text)
+	}
 	return cfg
 }
 
@@ -253,17 +263,40 @@ func loadOTPE2EConfig(lookup func(string) string) (otpE2EConfig, bool, error) {
 		// Only when the pool variable yielded something: a pool that yielded
 		// NOTHING already contributed its own entry to `missing` above, and
 		// naming it twice would overstate the number of things to fix.
+		//
+		// THE remedy explanation; the fences that pin this wording point here
+		// rather than restating it.
+		//
+		// It names the POOL secret because that is the only credential source
+		// any workflow wires. An earlier wording sent the operator to the
+		// single-credential variable, which is a dead end twice over: no
+		// workflow maps it into the environment, and even wired it would not
+		// clear this error, because `fromPool` keys on the raw pool variable
+		// that CI always sets -- so the backfill above feeds a pool this guard
+		// still refuses on fromPoolCount. Both damage shapes (truncated to one
+		// line, or whitespace) still hard-fail with it set; setting it only
+		// moves the whitespace shape from the absent branch to this one,
+		// changing the diagnosis and not the outcome.
+		//
+		// A required check that prescribes a step which cannot work is the
+		// misdirection this file exists to remove, so the text states the fix
+		// that IS available from CI and marks the other path as local-only.
 		if fromPool && len(pool) > 0 && fromPoolCount < 2 {
 			unmet = append(unmet, fmt.Sprintf(
-				"%s parsed %d credential(s)%s: the pool is the multi-credential source "+
-					"(single credentials belong in %s), so this is a damaged secret and the "+
-					"gate would run unpooled at %d/hour",
+				"%s parsed %d credential(s)%s: the pool is the only credential source CI "+
+					"wires, so this is a damaged secret and the gate would run unpooled at "+
+					"%d/hour. Re-save the secret behind %s with another owner's credential "+
+					"appended, one per line (%s is a LOCAL-run convenience that no workflow "+
+					"maps in, so setting it does not clear this)",
 				otpE2EEnrollmentPoolEnv, fromPoolCount, duplicateSuffix(poolDuplicates),
-				otpE2EEnrollmentEnv, perCredentialHourlyBudget))
+				perCredentialHourlyBudget, otpE2EEnrollmentPoolEnv, otpE2EEnrollmentEnv))
 		}
 
-		// Skipped ONLY for the supported single-credential setup, which genuinely
-		// has nothing to rotate. Everything else asks -- including the case where
+		// Skipped ONLY for the single-credential setup, which genuinely has
+		// nothing to rotate. That setup is supported for LOCAL runs only -- no
+		// workflow wires the single-credential variable, and CI always sets the
+		// pool variable, so `fromPool` is true on every CI run and this branch
+		// is unreachable there. Everything else asks -- including the case where
 		// the pool secret is absent entirely: Actions renders a deleted secret as
 		// the empty string, so keying this on fromPool meant a deleted secret AND
 		// a stopped counter reported only the secret, and the counter cost
@@ -551,10 +584,17 @@ func poolSizeAdvisory(size int) string {
 		// variable it is the supported setup and strict accepts it. Saying
 		// "strict runs refuse this" would be false in the second case, printed
 		// from inside a strict run that was not refused.
+		//
+		// "Supported" is scoped to LOCAL runs, matching the strict guard's
+		// remedy: no workflow wires the single-credential variable, so on CI
+		// this branch is reachable only from a pool that strict already
+		// refused. Calling it supported without that scope would read as an
+		// offer CI cannot take.
 		return fmt.Sprintf("pool size %d is not a pool: every run spends the same "+
 			"credential, so the gate is worth %d/hour. From %s that is a damaged secret, "+
 			"which a strict run refuses; from %s it is the supported single-credential "+
-			"setup and this is just the ceiling. See selectEnrollment",
+			"setup for a LOCAL run -- no workflow wires it -- and this is just the "+
+			"ceiling. See selectEnrollment",
 			size, perCredentialHourlyBudget, otpE2EEnrollmentPoolEnv, otpE2EEnrollmentEnv)
 	}
 	if size == 2 {
@@ -605,6 +645,110 @@ func poolDuplicateAdvisory(duplicates, distinct int) string {
 		"spends its %d/hour early. Secrets are write-only, so check the value you appended "+
 		"was not already present", duplicates, distinct, distinct+duplicates,
 		perCredentialHourlyBudget)
+}
+
+// degradationAdvisory pairs an advisory with the annotation title it carries.
+type degradationAdvisory struct {
+	title string
+	text  string
+}
+
+// poolAdvisories returns every degradation advisory a loaded config carries, in
+// the order the gate reports them, or nothing when the pool is healthy.
+//
+// Pure and separate from the test body for the reason poolSizeAdvisory already
+// gives about its wording, applied one level up: the sandbox is unreachable
+// from a unit test, so while this mapping lived inline in the gate test NOTHING
+// outside CI could prove a given advisory was still reported -- see
+// noteDegradation for what that cost. Returning the set makes it assertable, so
+// dropping an advisory now fails a test rather than going quiet in the one
+// place quiet is indistinguishable from healthy.
+func poolAdvisories(cfg otpE2EConfig) []degradationAdvisory {
+	var out []degradationAdvisory
+	// The pool's SIZE decides whether the rotation survives a strided spending
+	// pattern (see selectEnrollment). That size lives in a secret, so no test
+	// can assert the LIVE one -- say it out loud on the runs that load it.
+	if text := poolSizeAdvisory(cfg.enrollmentPoolSize); text != "" {
+		out = append(out, degradationAdvisory{"OTP credential pool size is degraded", text})
+	}
+	if text := poolDuplicateAdvisory(cfg.enrollmentPoolDuplicates, cfg.enrollmentPoolSize); text != "" {
+		out = append(out, degradationAdvisory{"OTP credential pool has duplicates", text})
+	}
+	return out
+}
+
+// annotationSink receives the GitHub workflow command. It is a variable so a
+// test can observe the command without reassigning the process-wide os.Stdout:
+// that swap is global, would race the first time anything in this package calls
+// t.Parallel, and leaves every later test writing into a closed pipe if the
+// capture ever unwinds through a panic.
+var annotationSink io.Writer = os.Stdout
+
+// noteDegradation reports a pool degradation that does NOT fail closed: a
+// missing counter and a one-entry pool both stop the run, but a shrunken or
+// strided pool merely spends its budget faster and the run still goes green.
+//
+// Both advisories emit through here rather than each carrying its own copy.
+// The duplicate advisory was annotated first, on the claim that it was "the
+// one instance left"; poolSizeAdvisory had been sitting beside it at a bare
+// t.Logf the whole time, firing for a live pool of 0, 1, 2 or any composite
+// size. Sharing the emitter is what stops a third advisory arriving quieter
+// than these two.
+//
+// THREE channels, because no one of them reaches both workflows:
+//
+//   - t.Logf, for a developer reading a local run.
+//   - a ::warning annotation, which puts it on the check itself. Non-verbose
+//     `go test` buffers the test binary's stdout and stderr and discards both
+//     when the package PASSES, so this is visible only under -v: the gate runs
+//     verbose and gets it, the canary does not and never did.
+//   - the job summary, which is a FILE the runner hands us by path, so it is
+//     the only channel `go test` cannot swallow. It is what carries the
+//     canary, whose non-verbose invocation is fixed by a security fence
+//     (internal/workflowcontract forbids "go test -v" there as a logging
+//     surface), so the reporting had to come to the canary rather than the
+//     canary loosening to admit it.
+func noteDegradation(t testing.TB, title, advisory string) {
+	t.Helper()
+	t.Logf("NOTE %s", advisory)
+	if os.Getenv("GITHUB_ACTIONS") != "true" {
+		return
+	}
+	fmt.Fprintf(annotationSink, "::warning title=%s::%s\n", title, advisory)
+	appendJobSummary(t, title, advisory)
+}
+
+// appendJobSummary writes one advisory to the run's job summary.
+//
+// O_CREATE, deliberately. The runner normally pre-creates this file, but one
+// that exports only the PATH -- a self-hosted runner, or `act` -- would
+// otherwise ENOENT here, and on the canary that costs the report outright.
+//
+// A failed write is reported and swallowed rather than fatal: this is a
+// REPORTING channel, and failing a required check because a summary file was
+// unwritable would manufacture exactly the kind of red-for-no-reason the pool
+// exists to prevent. Be clear about what the swallow costs, though. On the
+// gate the t.Logf and the annotation both survive, so a failed write is
+// cosmetic; on the canary neither does (see noteDegradation), so a failed
+// write there IS total silence. O_CREATE is what makes that near-unreachable
+// rather than merely unlikely.
+func appendJobSummary(t testing.TB, title, advisory string) {
+	t.Helper()
+	path := os.Getenv("GITHUB_STEP_SUMMARY")
+	if path == "" {
+		return
+	}
+	// One error path, not two: an unopenable file and an unwritable one cost
+	// the operator exactly the same thing, so they read the same way.
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o644)
+	if err == nil {
+		_, err = fmt.Fprintf(file, "> [!WARNING]\n> **%s**\n> %s\n\n", title, advisory)
+		err = errors.Join(err, file.Close())
+	}
+	if err != nil {
+		t.Logf("NOTE job summary unavailable (%v), so on a non-verbose run this "+
+			"degradation has no surviving report: %s", err, advisory)
+	}
 }
 
 // smallestFactor returns the smallest non-trivial divisor of n, or 0 when n is
@@ -787,27 +931,6 @@ func (w *ephemeralStateKeyWrapper) UnwrapKey(
 // a real SDK client, and calling register again does not enroll a second time.
 func TestEmailedOTPCompletesIdempotentSDKRegistration(t *testing.T) {
 	cfg := loadOTPE2EGateConfig(t, os.Getenv)
-
-	// The pool's SIZE decides whether the rotation survives a strided spending
-	// pattern (see selectEnrollment). That size lives in a secret, so no test
-	// can assert it -- say it out loud on the runs that actually load it.
-	if advisory := poolSizeAdvisory(cfg.enrollmentPoolSize); advisory != "" {
-		t.Logf("NOTE %s", advisory)
-	}
-
-	if advisory := poolDuplicateAdvisory(cfg.enrollmentPoolDuplicates, cfg.enrollmentPoolSize); advisory != "" {
-		t.Logf("NOTE %s", advisory)
-		// A duplicate is the last degradation here that does NOT fail closed: a
-		// missing counter and a one-entry pool both stop the run, but a repeated
-		// line merely shrinks the pool and the run goes green. A t.Logf on a
-		// passing test is the log nobody opens, and the canary runs without -v
-		// at all -- so on GitHub this also becomes an annotation, which shows on
-		// the check itself. Degradation with no loud symptom is what this whole
-		// change exists to remove; this was the one instance left.
-		if os.Getenv("GITHUB_ACTIONS") == "true" {
-			fmt.Printf("::warning title=OTP credential pool has duplicates::%s\n", advisory)
-		}
-	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), otpE2EDeadline)
 	defer cancel()
