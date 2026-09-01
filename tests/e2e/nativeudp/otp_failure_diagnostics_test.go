@@ -20,6 +20,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"go/scanner"
+	"go/token"
 	"os"
 	"strconv"
 	"strings"
@@ -970,27 +972,48 @@ const otpRegistrationTestPath = "otp_registration_idempotency_test.go"
 // TestGateConfigLoadEmitsTheCredentialEvidence could not catch it: it drives
 // loadOTPE2EGateConfig through a recordingTB and counts what the LOADER emits,
 // so it never observes the test body. Neither vet nor the linters see a
-// duplicate log line. This file-local fence counts the exact executable call
-// fragments in the gate source; it does not count prose in comments.
+// duplicate log line. This file-local fence counts matching text in Go string
+// literals in the gate source; it does not count prose in comments.
 func TestCredentialEvidenceHasExactlyOneEmissionSite(t *testing.T) {
 	raw, err := os.ReadFile(otpRegistrationTestPath)
 	if err != nil {
 		t.Fatalf("read %s: %v", otpRegistrationTestPath, err)
 	}
-	source := string(raw)
 
-	if n := strings.Count(source, `t.Logf("EVIDENCE this run drew`); n != 1 {
-		t.Errorf("%s emits the credential-slot evidence from %d places, want exactly 1.\n"+
+	file := token.NewFileSet().AddFile(otpRegistrationTestPath, -1, len(raw))
+	var lexer scanner.Scanner
+	lexer.Init(file, raw, nil, 0)
+	var sourceStrings strings.Builder
+	for {
+		_, kind, literal := lexer.Scan()
+		if kind == token.EOF {
+			break
+		}
+		if kind != token.STRING {
+			continue
+		}
+		value, err := strconv.Unquote(literal)
+		if err != nil {
+			t.Fatalf("unquote string literal in %s: %v", otpRegistrationTestPath, err)
+		}
+		sourceStrings.WriteString(value)
+		sourceStrings.WriteByte('\n')
+	}
+	executableText := sourceStrings.String()
+
+	if n := strings.Count(executableText, "EVIDENCE this run drew"); n != 1 {
+		t.Errorf("%s contains %d credential-evidence emission prefixes, want exactly 1.\n"+
 			"Two emissions means two renderings of one fact in the same job log, which is "+
 			"the ambiguity this evidence exists to remove. loadOTPE2EGateConfig is the one "+
-			"site; delete the others.", otpRegistrationTestPath, n)
+			"site; remove duplicated emissions or update this file-local fence if that site "+
+			"deliberately moves.", otpRegistrationTestPath, n)
 	}
-	// And one PHRASING. A second hand-rolled "%d of %d" is how the duplicate
-	// arrived, and it bypasses credentialEvidence -- whose whole justification
-	// is that one wording stays greppable across every path that emits it.
-	if n := strings.Count(source, `fmt.Sprintf("credential slot %d`); n != 1 {
-		t.Errorf("%s renders the credential slot %d different ways, want exactly 1 "+
-			"(credentialEvidence). A hand-rolled format here silently drops the (0-based) "+
-			"qualifier and breaks the shared wording.", otpRegistrationTestPath, n)
+	// And one rendering template. The duplicate used t.Logf while the canonical
+	// renderer uses fmt.Sprintf, so count the template text independently of the
+	// function that owns its string literal.
+	if n := strings.Count(executableText, "credential slot %d"); n != 1 {
+		t.Errorf("%s contains %d credential-slot format templates, want exactly 1 "+
+			"(credentialEvidence). Remove hand-rolled renderings or update this file-local "+
+			"fence if the canonical renderer deliberately moves.", otpRegistrationTestPath, n)
 	}
 }
