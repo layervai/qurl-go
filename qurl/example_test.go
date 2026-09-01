@@ -32,6 +32,32 @@ func Example() {
 	fmt.Println(portal.Link)
 }
 
+func ExampleResourceHandle_AuthorizeContentRequest() {
+	ctx := context.Background()
+	handle, err := qurl.EnterPortal(ctx, "https://example.qurl.site/q/example")
+	if err != nil {
+		panic(err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, handle.ResourceURL, nil)
+	if err != nil {
+		panic(err)
+	}
+	if err := handle.AuthorizeContentRequest(req); err != nil {
+		panic(err)
+	}
+	client := &http.Client{
+		// Keep Jar nil so it cannot append a second qurl_vsession cookie after
+		// AuthorizeContentRequest runs.
+		CheckRedirect: handle.CheckContentRedirect,
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		panic(err)
+	}
+	defer resp.Body.Close()
+}
+
 func ExampleClient_ProtectURL() {
 	client, err := qurl.OpenClient()
 	if err != nil {

@@ -9,8 +9,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	conformance "github.com/layervai/qurl-conformance"
@@ -263,10 +267,12 @@ func TestNormalizeRelayError_MalformedReplyMapsToClass(t *testing.T) {
 
 // --- Bucket C: reply interpretation ----------------------------------------
 
+const testAuthProviderToken = "e30.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+
 func TestInterpretReply_SuccessACK(t *testing.T) {
 	reply := &relayknock.Reply{
 		Type: relayknock.TypeACK,
-		Body: []byte(`{"errCode":"0","sessId":123,"opnTime":900,"redirectUrl":"https://r_x.qurl.site/path"}`),
+		Body: []byte(`{"errCode":"0","sessId":123,"opnTime":900,"redirectUrl":"https://r_x.qurl.site/path","aspToken":"` + testAuthProviderToken + `"}`),
 	}
 	h, err := interpretReply(reply)
 	if err != nil {
@@ -280,6 +286,9 @@ func TestInterpretReply_SuccessACK(t *testing.T) {
 	}
 	if h.SessionID != 123 {
 		t.Fatalf("SessionID = %d, want 123", h.SessionID)
+	}
+	if h.authProviderToken != testAuthProviderToken {
+		t.Fatal("success ACK token was not retained in the resource handle")
 	}
 }
 
@@ -319,9 +328,367 @@ func TestInterpretReply_RejectsInvalidSessionAndLifetimeShapes(t *testing.T) {
 }
 
 func TestInterpretReply_AcceptsMaxUint32OpenTime(t *testing.T) {
-	handle, err := interpretReply(&relayknock.Reply{Type: relayknock.TypeACK, Body: []byte(`{"errCode":"0","sessId":123,"opnTime":4294967295,"redirectUrl":"https://r_x.qurl.site/path"}`)})
+	handle, err := interpretReply(&relayknock.Reply{Type: relayknock.TypeACK, Body: []byte(`{"errCode":"0","sessId":123,"opnTime":4294967295,"redirectUrl":"https://r_x.qurl.site/path","aspToken":"` + testAuthProviderToken + `"}`)})
 	if err != nil || handle == nil || handle.OpenSeconds != ^uint32(0) {
 		t.Fatalf("max uint32 open time = %#v, %v; want accepted", handle, err)
+	}
+}
+
+func TestInterpretReply_RequiresSafeAuthProviderToken(t *testing.T) {
+	for name, token := range map[string]string{
+		"missing":         "",
+		"leading space":   " " + testAuthProviderToken,
+		"embedded LF":     "e3\n0.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+		"embedded CR":     "e30.AAAAAAAAAAAAAAAAAAAAA\rAAAAAAAAAAAAAAAAAAAAAA",
+		"embedded CRLF":   "e30.AAAAAAAAAAAAAAAAAAAAA\r\nAAAAAAAAAAAAAAAAAAAAAA",
+		"bad base64":      "e30.not+base64",
+		"short signature": "e30.AA",
+		"three segments":  testAuthProviderToken + ".extra",
+		"too large":       "e30." + strings.Repeat("A", 4097),
+	} {
+		t.Run(name, func(t *testing.T) {
+			body, err := json.Marshal(map[string]any{
+				"errCode": "0", "sessId": 123, "opnTime": 900,
+				"redirectUrl": "https://r_x.qurl.site/path", "aspToken": token,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			handle, err := interpretReply(&relayknock.Reply{Type: relayknock.TypeACK, Body: body})
+			if handle != nil || !errors.Is(err, ErrMalformedReply) {
+				t.Fatalf("interpretReply = %#v, %v; want ErrMalformedReply", handle, err)
+			}
+			if token != "" && strings.Contains(err.Error(), token) {
+				t.Fatal("error exposed the auth provider token")
+			}
+		})
+	}
+}
+
+func TestInterpretReply_AcceptsMaximumLengthAuthProviderToken(t *testing.T) {
+	signature := strings.Split(testAuthProviderToken, ".")[1]
+	token := strings.Repeat("A", 4052) + "." + signature
+	if len(token) != 4096 {
+		t.Fatalf("test token length = %d, want 4096", len(token))
+	}
+	body, err := json.Marshal(map[string]any{
+		"errCode": "0", "sessId": 123, "opnTime": 900,
+		"redirectUrl": "https://r_x.qurl.site/path", "aspToken": token,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := interpretReply(&relayknock.Reply{Type: relayknock.TypeACK, Body: body})
+	if err != nil || handle == nil || handle.authProviderToken != token {
+		t.Fatalf("interpretReply = %#v, %v; want maximum-length token accepted", handle, err)
+	}
+}
+
+func TestInterpretReply_RejectsUnsafeResourceURL(t *testing.T) {
+	for name, resourceURL := range map[string]string{
+		"malformed":      "://",
+		"non HTTPS":      "http://r_x.qurl.site/path",
+		"hostless":       "https:///path",
+		"credentialed":   "https://user@r_x.qurl.site/path",
+		"malformed port": "https://r_x.qurl.site:bad/path",
+	} {
+		t.Run(name, func(t *testing.T) {
+			body, err := json.Marshal(map[string]any{
+				"errCode": "0", "sessId": 123, "opnTime": 900,
+				"redirectUrl": resourceURL, "aspToken": testAuthProviderToken,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			handle, err := interpretReply(&relayknock.Reply{Type: relayknock.TypeACK, Body: body})
+			if handle != nil || !errors.Is(err, ErrMalformedReply) {
+				t.Fatalf("interpretReply = %#v, %v; want ErrMalformedReply", handle, err)
+			}
+			if strings.Contains(err.Error(), resourceURL) {
+				t.Fatal("error exposed the invalid resource URL")
+			}
+		})
+	}
+}
+
+func TestResourceHandle_AuthorizeContentRequestExactHTTPSOrigin(t *testing.T) {
+	handle := &ResourceHandle{
+		ResourceURL: "https://r_x.qurl.site:8443/path", OpenSeconds: 900, SessionID: 123,
+		authProviderToken: testAuthProviderToken,
+	}
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://r_x.qurl.site:8443/report", http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := handle.AuthorizeContentRequest(req); err != nil {
+		t.Fatalf("AuthorizeContentRequest: %v", err)
+	}
+	cookie, err := req.Cookie("qurl_vsession")
+	if err != nil || cookie.Value != testAuthProviderToken {
+		t.Fatalf("qurl_vsession cookie = %#v, %v", cookie, err)
+	}
+
+	for _, target := range []string{
+		"https://other.qurl.site:8443/report",
+		"https://r_x.qurl.site/report",
+		"http://r_x.qurl.site:8443/report",
+	} {
+		t.Run(target, func(t *testing.T) {
+			wrong, err := http.NewRequestWithContext(t.Context(), http.MethodGet, target, http.NoBody)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := handle.AuthorizeContentRequest(wrong); !errors.Is(err, ErrInvalidContentRequest) {
+				t.Fatalf("error = %v, want ErrInvalidContentRequest", err)
+			}
+			if _, err := wrong.Cookie("qurl_vsession"); !errors.Is(err, http.ErrNoCookie) {
+				t.Fatal("wrong-origin request received the application token")
+			}
+		})
+	}
+}
+
+func TestResourceHandle_AuthorizeContentRequestNormalizesDefaultHTTPSPort(t *testing.T) {
+	for name, urls := range map[string][2]string{
+		"request has explicit port": {"https://r_x.qurl.site/path", "https://r_x.qurl.site:443/report"},
+		"grant has explicit port":   {"https://r_x.qurl.site:443/path", "https://r_x.qurl.site/report"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			handle := &ResourceHandle{ResourceURL: urls[0], authProviderToken: testAuthProviderToken}
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, urls[1], http.NoBody)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := handle.AuthorizeContentRequest(req); err != nil {
+				t.Fatalf("AuthorizeContentRequest: %v", err)
+			}
+		})
+	}
+}
+
+func TestResourceHandle_AuthorizeContentRequestRejectsInvalidInputs(t *testing.T) {
+	validHandle := &ResourceHandle{ResourceURL: "https://r_x.qurl.site/path", authProviderToken: testAuthProviderToken}
+	validRequest, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://r_x.qurl.site/report", http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := map[string]struct {
+		handle *ResourceHandle
+		req    *http.Request
+	}{
+		"nil handle":            {handle: nil, req: validRequest.Clone(t.Context())},
+		"nil request":           {handle: validHandle, req: nil},
+		"nil request URL":       {handle: validHandle, req: &http.Request{}},
+		"empty token":           {handle: &ResourceHandle{ResourceURL: validHandle.ResourceURL}, req: validRequest.Clone(t.Context())},
+		"invalid token":         {handle: &ResourceHandle{ResourceURL: validHandle.ResourceURL, authProviderToken: "invalid"}, req: validRequest.Clone(t.Context())},
+		"invalid grant URL":     {handle: &ResourceHandle{ResourceURL: "://", authProviderToken: testAuthProviderToken}, req: validRequest.Clone(t.Context())},
+		"non-HTTPS grant":       {handle: &ResourceHandle{ResourceURL: "http://r_x.qurl.site", authProviderToken: testAuthProviderToken}, req: validRequest.Clone(t.Context())},
+		"hostless grant":        {handle: &ResourceHandle{ResourceURL: "https:///path", authProviderToken: testAuthProviderToken}, req: validRequest.Clone(t.Context())},
+		"credentialed grant":    {handle: &ResourceHandle{ResourceURL: "https://user@r_x.qurl.site", authProviderToken: testAuthProviderToken}, req: validRequest.Clone(t.Context())},
+		"malformed request":     {handle: validHandle, req: &http.Request{URL: &url.URL{Scheme: "https", Host: "r_x.qurl.site:bad"}}},
+		"non-HTTPS request":     {handle: validHandle, req: &http.Request{URL: &url.URL{Scheme: "http", Host: "r_x.qurl.site"}}},
+		"hostless request":      {handle: validHandle, req: &http.Request{URL: &url.URL{Scheme: "https"}}},
+		"credentialed request":  {handle: validHandle, req: &http.Request{URL: &url.URL{Scheme: "https", Host: "r_x.qurl.site", User: url.User("user")}}},
+		"userinfo in authority": {handle: validHandle, req: &http.Request{URL: &url.URL{Scheme: "https", Host: "user@r_x.qurl.site:443"}}},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			err := test.handle.AuthorizeContentRequest(test.req)
+			if !errors.Is(err, ErrInvalidContentRequest) {
+				t.Fatalf("error = %v, want ErrInvalidContentRequest", err)
+			}
+			if test.req != nil && test.req.URL != nil {
+				if _, cookieErr := test.req.Cookie(qurlVsessionCookieName); !errors.Is(cookieErr, http.ErrNoCookie) {
+					t.Fatal("invalid request received the application token")
+				}
+			}
+		})
+	}
+}
+
+func TestResourceHandle_CheckContentRedirectReauthorizesSameOriginAndCapsRedirects(t *testing.T) {
+	var requests atomic.Int32
+	var server *httptest.Server
+	server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		requestNumber := requests.Add(1)
+		cookie, err := req.Cookie(qurlVsessionCookieName)
+		if err != nil || cookie.Value != testAuthProviderToken {
+			t.Errorf("redirect request %d cookie = %#v, %v", requestNumber, cookie, err)
+		}
+		http.Redirect(w, req, server.URL+"/again", http.StatusFound)
+	}))
+	t.Cleanup(server.Close)
+
+	handle := &ResourceHandle{ResourceURL: server.URL + "/start", authProviderToken: testAuthProviderToken}
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, handle.ResourceURL, http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := handle.AuthorizeContentRequest(req); err != nil {
+		t.Fatal(err)
+	}
+	client := server.Client()
+	client.CheckRedirect = handle.CheckContentRedirect
+	resp, err := client.Do(req)
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+	if !errors.Is(err, ErrTooManyContentRedirects) {
+		t.Fatalf("redirect loop error = %v, want ErrTooManyContentRedirects", err)
+	}
+	if got := requests.Load(); got != maxContentRedirects {
+		t.Fatalf("requests = %d, want bounded at %d", got, maxContentRedirects)
+	}
+}
+
+func TestResourceHandle_CheckContentRedirectRefusesCrossOriginWithoutSendingBearer(t *testing.T) {
+	var destinationRequests atomic.Int32
+	destination := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		destinationRequests.Add(1)
+	}))
+	t.Cleanup(destination.Close)
+	origin := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if _, err := req.Cookie(qurlVsessionCookieName); err != nil {
+			t.Error("origin did not receive the application token")
+		}
+		http.Redirect(w, req, destination.URL, http.StatusFound)
+	}))
+	t.Cleanup(origin.Close)
+
+	handle := &ResourceHandle{ResourceURL: origin.URL, authProviderToken: testAuthProviderToken}
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, handle.ResourceURL, http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := handle.AuthorizeContentRequest(req); err != nil {
+		t.Fatal(err)
+	}
+	client := origin.Client()
+	client.CheckRedirect = handle.CheckContentRedirect
+	resp, err := client.Do(req)
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+	if !errors.Is(err, ErrInvalidContentRequest) {
+		t.Fatalf("cross-origin redirect error = %v, want ErrInvalidContentRequest", err)
+	}
+	if got := destinationRequests.Load(); got != 0 {
+		t.Fatalf("cross-origin destination received %d requests", got)
+	}
+}
+
+func TestResourceHandle_CheckContentRedirectRefusesSubdomainWithoutSendingBearer(t *testing.T) {
+	var destinationRequests atomic.Int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if strings.HasPrefix(req.Host, "origin.example.com:") {
+			if _, err := req.Cookie(qurlVsessionCookieName); err != nil {
+				t.Error("origin did not receive the application token")
+			}
+			_, port, err := net.SplitHostPort(req.Host)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			http.Redirect(w, req, "https://child.origin.example.com:"+port+"/content", http.StatusFound)
+			return
+		}
+		destinationRequests.Add(1)
+	}))
+	t.Cleanup(server.Close)
+
+	_, port, err := net.SplitHostPort(server.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	originURL := "https://origin.example.com:" + port + "/start"
+	handle := &ResourceHandle{ResourceURL: originURL, authProviderToken: testAuthProviderToken}
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, originURL, http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := handle.AuthorizeContentRequest(req); err != nil {
+		t.Fatal(err)
+	}
+	transport := server.Client().Transport.(*http.Transport).Clone()
+	serverAddress := server.Listener.Addr().String()
+	transport.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, serverAddress)
+	}
+	client := &http.Client{Transport: transport, CheckRedirect: handle.CheckContentRedirect}
+	resp, err := client.Do(req)
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+	if !errors.Is(err, ErrInvalidContentRequest) {
+		t.Fatalf("subdomain redirect error = %v, want ErrInvalidContentRequest", err)
+	}
+	if got := destinationRequests.Load(); got != 0 {
+		t.Fatalf("subdomain destination received %d requests", got)
+	}
+}
+
+func TestResourceHandle_AuthorizeContentRequestIsIdempotent(t *testing.T) {
+	handle := &ResourceHandle{
+		ResourceURL: "https://r_x.qurl.site/path", OpenSeconds: 900, SessionID: 123,
+		authProviderToken: testAuthProviderToken,
+	}
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://r_x.qurl.site/report", http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.AddCookie(&http.Cookie{Name: "customer", Value: "preserved"})
+	req.AddCookie(&http.Cookie{Name: "qurl_vsession", Value: "stale"})
+
+	if err := handle.AuthorizeContentRequest(req); err != nil {
+		t.Fatal(err)
+	}
+	if err := handle.AuthorizeContentRequest(req); err != nil {
+		t.Fatal(err)
+	}
+
+	counts := map[string]int{}
+	values := map[string]string{}
+	for _, cookie := range req.Cookies() {
+		counts[cookie.Name]++
+		values[cookie.Name] = cookie.Value
+	}
+	if counts["qurl_vsession"] != 1 || values["qurl_vsession"] != testAuthProviderToken {
+		t.Fatalf("qurl_vsession cookies = %d, value %q", counts["qurl_vsession"], values["qurl_vsession"])
+	}
+	if counts["customer"] != 1 || values["customer"] != "preserved" {
+		t.Fatalf("customer cookies = %d, value %q", counts["customer"], values["customer"])
+	}
+	if got := len(req.Header.Values("Cookie")); got != 1 {
+		t.Fatalf("Cookie header lines = %d, want 1", got)
+	}
+}
+
+func TestResourceHandle_AuthorizeContentRequestInitializesHeader(t *testing.T) {
+	handle := &ResourceHandle{ResourceURL: "https://r_x.qurl.site/path", authProviderToken: testAuthProviderToken}
+	req := &http.Request{URL: &url.URL{Scheme: "https", Host: "r_x.qurl.site", Path: "/report"}}
+	if err := handle.AuthorizeContentRequest(req); err != nil {
+		t.Fatal(err)
+	}
+	if cookie, err := req.Cookie("qurl_vsession"); err != nil || cookie.Value != testAuthProviderToken {
+		t.Fatalf("qurl_vsession cookie = %#v, %v", cookie, err)
+	}
+}
+
+func TestResourceHandle_FormattingRedactsAuthProviderToken(t *testing.T) {
+	handle := ResourceHandle{ResourceURL: "https://r_x.qurl.site", OpenSeconds: 9, SessionID: 7, authProviderToken: testAuthProviderToken}
+	for _, rendered := range []string{fmt.Sprint(handle), fmt.Sprintf("%#v", handle)} {
+		if strings.Contains(rendered, testAuthProviderToken) || !strings.Contains(rendered, "[REDACTED]") {
+			t.Fatalf("formatted handle did not redact token: %s", rendered)
+		}
+	}
+}
+
+func TestInterpretReply_DenyRejectsAuthProviderToken(t *testing.T) {
+	body := []byte(`{"errCode":"52024","opnTime":0,"aspToken":"` + testAuthProviderToken + `"}`)
+	if _, err := interpretReply(&relayknock.Reply{Type: relayknock.TypeACK, Body: body}); !errors.Is(err, ErrMalformedReply) {
+		t.Fatalf("deny with aspToken error = %v, want ErrMalformedReply", err)
 	}
 }
 
