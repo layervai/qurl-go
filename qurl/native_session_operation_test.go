@@ -7,12 +7,16 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"net/netip"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/layervai/qurl-go/relayknock"
+	"github.com/layervai/qurl-go/relayknock/sessionrelay"
 )
 
 const nativeOperationProtectedResourceID = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEcOtuxu2qhc3gt1E7BiEU0CLqEDlXDwzZq0JnESgMAwERX6y_XXF5Cn5SKITWIZQmUhCZ0pHHlVn7SmFUTAnTGQ"
@@ -687,6 +691,32 @@ func TestRecoverNativeSessionOperationUsesSessionRelayWithoutUDP(t *testing.T) {
 	if len(requests) != 1 || requests[0].typeID != relayknock.TypeKnock ||
 		!bytes.Contains(requests[0].body, []byte(`"native_session_operation_action":"recover"`)) {
 		t.Fatalf("relay recovery packets = %#v", requests)
+	}
+}
+
+func TestRecoverNativeSessionOperationRelayFailureIsRedactedWithoutUDPFallback(t *testing.T) {
+	binding, privateKey, operation := testNativeSessionOperation(t)
+	contract := loadAssignmentFixture(t)
+	endpoint := NHPUDPEndpoint{
+		Host: "cell0.nhp.layerv.ai", Port: standardNHPUDPPort,
+		ServerPublicKeyB64: base64.StdEncoding.EncodeToString(assignmentHex(t, contract.Keys.AssignedCell.StaticPubHex)),
+	}
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "private relay failure", http.StatusBadGateway)
+	}))
+	defer server.Close()
+	var resolves atomic.Int32
+	resolver := runtimeResolverFunc(func(context.Context, string, string) ([]netip.Addr, error) {
+		resolves.Add(1)
+		return nil, errors.New("UDP must not be used")
+	})
+	result, err := RecoverNativeSessionOperation(context.Background(), binding, privateKey, operation, endpoint,
+		WithAgentRuntimeUDPResolver(resolver), WithAgentRuntimeSessionRelay(server.URL, server.Client()))
+	if result != nil || !errors.Is(err, sessionrelay.ErrTransport) || resolves.Load() != 0 {
+		t.Fatalf("relay recovery result/error/resolves = %#v/%v/%d", result, err, resolves.Load())
+	}
+	if strings.Contains(err.Error(), server.URL) || strings.Contains(err.Error(), "private relay failure") {
+		t.Fatalf("relay recovery error exposed detail: %v", err)
 	}
 }
 

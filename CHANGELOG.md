@@ -15,10 +15,14 @@ and are marked **Breaking** with what to change.
 - Added `WithAgentRuntimeSessionRelay` for registered-session `NHP_KNK` and the
   one possible cookie-bound `NHP_RKN` over one trusted HTTPS relay origin. The
   transport authenticates replies with the assigned cell key, refuses
-  redirects, sends no HTTP cookies, uses a bounded default timeout, and has no
-  retry, UDP fallback, or cross-cell fallback. Assignment, enrollment,
-  registration, resource discovery, and exact-session `NHP_EXT` remain native
-  UDP operations.
+  redirects, sends no HTTP cookies, bounds each HTTPS flight, and has no retry,
+  UDP fallback, or cross-cell fallback. A cookie challenge can cause two
+  flights; a caller context deadline supplies the aggregate bound. The relay
+  option takes precedence over UDP resolver, dialer, and bound options on session calls.
+  Durable `NativeSessionOperation` close/recovery uses this relay. Assignment,
+  enrollment, registration, resource discovery, and lower-level exact-session
+  `NHP_EXT` remain native UDP operations; without a durable operation or UDP
+  reachability, that lower-level admission remains until its server lease ends.
 
 ## v0.9.0 — 2026-09-01
 

@@ -165,8 +165,10 @@ type AgentRuntimeRenewalOption interface {
 
 // AgentRuntimeSessionOption is the closed option set for registered-session
 // admission and operation recovery. Native UDP injection options also satisfy
-// it for tests and custom socket control. The HTTPS session-relay option does
-// not satisfy any lifecycle or UDP option interface.
+// it for tests and custom socket control. If a session-relay option is present,
+// it selects HTTPS for the session call and the UDP resolver, dialer, and bounds
+// do not apply to that call. The HTTPS session-relay option does not satisfy any
+// lifecycle or UDP option interface.
 type AgentRuntimeSessionOption interface {
 	agentRuntimeOption
 	isAgentRuntimeSessionOption()
@@ -470,8 +472,17 @@ func WithAgentRuntimeUDPBounds(timeout time.Duration, maxAddresses int) AgentRun
 // fragment. client is cloned; nil uses the standard HTTP client. The relay POST
 // and later protected data-plane connection must use the same public egress IP.
 // If client uses a forward proxy, route the data-plane connection through the
-// same egress. The returned option cannot be passed to lifecycle, UDP discovery,
-// or retirement APIs.
+// same egress. The client's timeout bounds each HTTPS flight; a cookie challenge
+// can cause two flights, and ctx is the aggregate call bound. If this option is
+// present with UDP session options, it selects HTTPS and the UDP resolver,
+// dialer, and bounds do not apply to that session call.
+//
+// A durable NativeSessionOperation can close or reconcile an admission through
+// RecoverNativeSessionOperation with this same relay option. The lower-level
+// RetireRegisteredAgentSession exact-session EXT remains UDP-only. A caller that
+// opens without a durable operation and cannot reach the assigned cell over UDP
+// cannot send that explicit EXT; the server lease then owns cleanup. The returned
+// option cannot be passed to lifecycle, UDP discovery, or EXT retirement APIs.
 func WithAgentRuntimeSessionRelay(relayBaseURL string, client *http.Client) AgentRuntimeSessionOption {
 	return nativeRuntimeSessionOptionFunc(func(c *nativeAgentRuntimeConfig) error {
 		transport, err := sessionrelay.New(relayBaseURL, client)
@@ -2131,7 +2142,8 @@ type NativeSessionRetirement struct {
 // KnockRegisteredAgent sends one caller-correlated NHP_KNK to the binding's
 // assigned cell and returns only the requested resource's admission. The
 // default transport is native UDP. WithAgentRuntimeSessionRelay selects the
-// trusted HTTPS relay for this KNK and its one possible RKN only.
+// trusted HTTPS relay for this KNK and its one possible RKN only. When selected,
+// UDP resolver, dialer, and bounds options do not apply to this call.
 // An authenticated COK produces exactly one RKN using the same immutable
 // agent/resource/RunID session identity and a body headerType of RKN; there is
 // no retry loop, transport fallback, or cross-cell fallback. It validates the live

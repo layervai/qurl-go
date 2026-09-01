@@ -147,6 +147,105 @@ func TestKnockWithReknock_OneStrictCookieBoundRKN(t *testing.T) {
 	}
 }
 
+func TestKnockWithReknock_CanceledBetweenFlightsDoesNotSendRKN(t *testing.T) {
+	keys := newRelayKeys(t)
+	cookie := bytes.Repeat([]byte{0x5a}, 32)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var calls atomic.Int32
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if calls.Add(1) != 1 {
+			t.Error("sent an RKN after cancellation")
+			return nil, context.Canceled
+		}
+		packet, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Fatalf("read KNK: %v", err)
+		}
+		opened, err := relayknocktest.OpenInitiatorMessage(keys.serverPriv, keys.devicePub, packet)
+		if err != nil {
+			t.Fatalf("open KNK: %v", err)
+		}
+		body := []byte(fmt.Sprintf(`{"trxId":%d,"cookie":%q}`, opened.Counter, base64.StdEncoding.EncodeToString(cookie)))
+		response := buildReply(t, relayknock.TypeCookieChallenge, keys, opened.Counter, body)
+		cancel()
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(bytes.NewReader(response)),
+			Request:    req,
+		}, nil
+	})}
+	transport, err := sessionrelay.New("https://relay.example.test", client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = transport.KnockWithReknock(ctx, keys.serverPub, keys.devicePriv, []byte(`{"leg":"knock"}`), []byte(`{"leg":"reknock"}`))
+	if !errors.Is(err, context.Canceled) || calls.Load() != 1 {
+		t.Fatalf("error/calls = %v/%d", err, calls.Load())
+	}
+}
+
+func TestKnockWithReknock_RejectsInvalidSecondFlight(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		statusCode int
+		replyType  int
+		want       error
+	}{
+		{name: "second cookie challenge", statusCode: http.StatusOK, replyType: relayknock.TypeCookieChallenge, want: relayknock.ErrMalformedReply},
+		{name: "HTTP failure", statusCode: http.StatusBadGateway, want: sessionrelay.ErrTransport},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			keys := newRelayKeys(t)
+			cookie := bytes.Repeat([]byte{0x6b}, 32)
+			var calls atomic.Int32
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				packet, err := io.ReadAll(r.Body)
+				if err != nil {
+					t.Errorf("read request: %v", err)
+					return
+				}
+				switch calls.Add(1) {
+				case 1:
+					opened, err := relayknocktest.OpenInitiatorMessage(keys.serverPriv, keys.devicePub, packet)
+					if err != nil {
+						t.Errorf("open KNK: %v", err)
+						return
+					}
+					body := []byte(fmt.Sprintf(`{"trxId":%d,"cookie":%q}`, opened.Counter, base64.StdEncoding.EncodeToString(cookie)))
+					_, _ = w.Write(buildReply(t, relayknock.TypeCookieChallenge, keys, opened.Counter, body))
+				case 2:
+					opened, err := relayknocktest.OpenReknockMessage(keys.serverPriv, keys.devicePub, cookie, packet)
+					if err != nil {
+						t.Errorf("open RKN: %v", err)
+						return
+					}
+					if test.statusCode != http.StatusOK {
+						http.Error(w, "redacted internal detail", test.statusCode)
+						return
+					}
+					_, _ = w.Write(buildReply(t, test.replyType, keys, opened.Counter, nil))
+				default:
+					t.Error("unexpected third relay flight")
+				}
+			}))
+			defer server.Close()
+			transport, err := sessionrelay.New(server.URL, server.Client())
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = transport.KnockWithReknock(context.Background(), keys.serverPub, keys.devicePriv, nil, nil)
+			if !errors.Is(err, test.want) || calls.Load() != 2 {
+				t.Fatalf("error/calls = %v/%d, want %v/2", err, calls.Load(), test.want)
+			}
+			if strings.Contains(err.Error(), server.URL) || strings.Contains(err.Error(), "redacted internal detail") {
+				t.Fatalf("error exposed relay detail: %v", err)
+			}
+		})
+	}
+}
+
 func TestKnockWithReknock_RejectsUncorrelatedCOKWithoutRKN(t *testing.T) {
 	keys := newRelayKeys(t)
 	cookie := bytes.Repeat([]byte{0x5a}, 32)
@@ -321,6 +420,26 @@ func TestTransport_BoundsHangingFlightAndPreservesEarlierCallerDeadline(t *testi
 	}
 	if elapsed := time.Since(started); elapsed > time.Second {
 		t.Fatalf("caller deadline took %s, want less than one second", elapsed)
+	}
+
+	explicitClient := &http.Client{
+		Timeout: 40 * time.Millisecond,
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			<-req.Context().Done()
+			return nil, req.Context().Err()
+		}),
+	}
+	explicitTransport, err := sessionrelay.New("https://relay.example.test", explicitClient)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started = time.Now()
+	_, err = explicitTransport.KnockWithReknock(context.Background(), keys.serverPub, keys.devicePriv, nil, nil)
+	if !errors.Is(err, sessionrelay.ErrTransport) {
+		t.Fatalf("explicit-client-timeout error = %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("explicit client timeout took %s, want less than one second", elapsed)
 	}
 }
 

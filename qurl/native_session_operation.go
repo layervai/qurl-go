@@ -472,7 +472,9 @@ func nativeSessionOperationAbsentRecoveryDeadline(operation NativeSessionOperati
 // whether the durable operation is terminal or still closing. An incompatible
 // server admission returns NativeSessionOperationUnexpectedAdmissionError; the
 // caller must persist its exact receipt as MAPPED before recovery and must not
-// retry this packet directly.
+// retry this packet directly. WithAgentRuntimeSessionRelay carries this recovery
+// KNK and its one possible RKN over HTTPS; this is the relay-capable durable
+// close/reconciliation path and is separate from UDP-only exact-session EXT.
 func RecoverNativeSessionOperation(ctx context.Context, binding *AgentRuntimeBinding, deviceStaticPrivateKey []byte,
 	operation NativeSessionOperation, recoveryEndpoint NHPUDPEndpoint, transportOpts ...AgentRuntimeSessionOption,
 ) (*NativeSessionOperationRecovery, error) {

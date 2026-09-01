@@ -31,6 +31,10 @@ type Error struct {
 
 func (e *Error) Error() string { return "malformed cookie challenge (" + e.Class + "): " + e.Detail }
 
+// Unwrap keeps the shared malformed-reply taxonomy attached to the classified
+// error so a future transport cannot accidentally lose it.
+func (e *Error) Unwrap() error { return nhpwire.ErrMalformedReply }
+
 func reject(class, detail string) error { return &Error{Class: class, Detail: detail} }
 
 type challenge struct {

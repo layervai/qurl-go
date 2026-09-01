@@ -81,7 +81,9 @@ func New(baseURL string, client *http.Client) (*Transport, error) {
 
 // KnockWithReknock sends one KNK. An authenticated COK causes exactly one RKN
 // with the strict correlated cookie. Any other failure is terminal for this
-// call; the transport does not retry, use UDP, or select another cell.
+// call; the transport does not retry, use UDP, or select another cell. KNK and
+// RKN are separately bounded HTTPS flights, so a caller that needs one aggregate
+// deadline must set it on ctx.
 func (t *Transport) KnockWithReknock(ctx context.Context, serverStaticPub, deviceStaticPriv, knockBody, reknockBody []byte) (*relayknock.Reply, error) {
 	if err := validate(ctx, t, serverStaticPub, deviceStaticPriv, knockBody); err != nil {
 		return nil, err
@@ -128,6 +130,11 @@ func validate(ctx context.Context, transport *Transport, serverStaticPub, device
 }
 
 func (t *Transport) exchange(ctx context.Context, requestType int, serverStaticPub, deviceStaticPriv, body, cookie []byte) (*relayknock.Reply, uint64, error) {
+	// Re-check before each leg. In particular, do not draw entropy or mix the
+	// cookie into an RKN packet after the caller cancels between KNK and RKN.
+	if err := ctx.Err(); err != nil {
+		return nil, 0, err
+	}
 	packet, counter, err := buildPacket(requestType, serverStaticPub, deviceStaticPriv, body, cookie)
 	if err != nil {
 		return nil, 0, err
