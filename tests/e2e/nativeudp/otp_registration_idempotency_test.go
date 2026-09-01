@@ -171,7 +171,7 @@ func loadOTPE2EGateConfig(t testing.TB, lookup func(string) string) otpE2EConfig
 	// absent from exactly those runs. Folding them in leaves no order to get
 	// wrong. TestGateConfigLoadEmitsThePoolAdvisories covers it.
 	for _, advisory := range poolAdvisories(cfg) {
-		noteDegradation(t, advisory.title, advisory.text)
+		noteDegradation(t, lookup, advisory.title, advisory.text)
 	}
 	return cfg
 }
@@ -695,6 +695,16 @@ var annotationSink io.Writer = os.Stdout
 // size. Sharing the emitter is what stops a third advisory arriving quieter
 // than these two.
 //
+// Takes the LOOKUP its caller was handed, never os.Getenv. That is not
+// symmetry with loadOTPE2EConfig, it is the whole reason the parameter exists:
+// a test drives this with a deliberately degraded pool, and reading the process
+// environment meant every such test appended a FABRICATED degradation to the
+// real CI job summary -- on every PR and every push. The channel introduced to
+// make a real degraded pool visible would have arrived pre-filled with a fake
+// one, and a reader who has ignored that block on thirty green runs does not
+// read it on the red one. Threading the lookup makes "not on CI" describable
+// rather than global.
+//
 // THREE channels, because no one of them reaches both workflows:
 //
 //   - t.Logf, for a developer reading a local run.
@@ -708,14 +718,34 @@ var annotationSink io.Writer = os.Stdout
 //     (internal/workflowcontract forbids "go test -v" there as a logging
 //     surface), so the reporting had to come to the canary rather than the
 //     canary loosening to admit it.
-func noteDegradation(t testing.TB, title, advisory string) {
+func noteDegradation(t testing.TB, lookup func(string) string, title, advisory string) {
 	t.Helper()
 	t.Logf("NOTE %s", advisory)
-	if os.Getenv("GITHUB_ACTIONS") != "true" {
+	if lookup("GITHUB_ACTIONS") != "true" {
 		return
 	}
-	fmt.Fprintf(annotationSink, "::warning title=%s::%s\n", title, advisory)
-	appendJobSummary(t, title, advisory)
+	fmt.Fprintf(annotationSink, "::warning title=%s::%s\n",
+		encodeCommandProperty(title), encodeCommandData(advisory))
+	appendJobSummary(t, lookup, title, advisory)
+}
+
+// encodeCommandData escapes a workflow command's MESSAGE. GitHub parses these
+// commands line by line, so an unescaped newline truncates the annotation at
+// the break and a literal % can be read as the start of an escape -- the one
+// outcome an emitter built to be loud must not have. Both advisories are
+// single-line and %-free today; this is for the third one.
+//
+// The % rule runs first and is not re-scanned: strings.Replacer matches in a
+// single left-to-right pass, so the % it inserts is not itself re-encoded.
+func encodeCommandData(value string) string {
+	return strings.NewReplacer("%", "%25", "\r", "%0D", "\n", "%0A").Replace(value)
+}
+
+// encodeCommandProperty escapes a property value such as title=. Properties
+// additionally cannot carry the delimiters GitHub splits them on.
+func encodeCommandProperty(value string) string {
+	return strings.NewReplacer(
+		"%", "%25", "\r", "%0D", "\n", "%0A", ":", "%3A", ",", "%2C").Replace(value)
 }
 
 // appendJobSummary writes one advisory to the run's job summary.
@@ -732,9 +762,9 @@ func noteDegradation(t testing.TB, title, advisory string) {
 // cosmetic; on the canary neither does (see noteDegradation), so a failed
 // write there IS total silence. O_CREATE is what makes that near-unreachable
 // rather than merely unlikely.
-func appendJobSummary(t testing.TB, title, advisory string) {
+func appendJobSummary(t testing.TB, lookup func(string) string, title, advisory string) {
 	t.Helper()
-	path := os.Getenv("GITHUB_STEP_SUMMARY")
+	path := lookup("GITHUB_STEP_SUMMARY")
 	if path == "" {
 		return
 	}
@@ -742,7 +772,12 @@ func appendJobSummary(t testing.TB, title, advisory string) {
 	// the operator exactly the same thing, so they read the same way.
 	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o644)
 	if err == nil {
-		_, err = fmt.Fprintf(file, "> [!WARNING]\n> **%s**\n> %s\n\n", title, advisory)
+		// Every line carries the quote marker. A multi-line advisory would
+		// otherwise break out of the blockquote after its first line and the
+		// rest would render as body text, detached from the warning it belongs
+		// to -- again, for the advisory that has not been written yet.
+		quoted := "> " + strings.ReplaceAll(advisory, "\n", "\n> ")
+		_, err = fmt.Fprintf(file, "> [!WARNING]\n> **%s**\n%s\n\n", title, quoted)
 		err = errors.Join(err, file.Close())
 	}
 	if err != nil {

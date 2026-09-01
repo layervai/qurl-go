@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -32,39 +33,131 @@ import (
 var otpEnrollmentEnvPattern = regexp.MustCompile(
 	`otpE2EEnrollmentEnv\s*=\s*"([A-Z0-9_]+)"`)
 
-// otpRegistrationSourcePath is the file that owns both the constant and the
-// message making the claim. Reading across into tests/e2e is the same move
-// public_estate_identifiers_test.go already makes.
+// otpRegistrationSourcePath is the file that owns the constant, the message
+// making the claim, and the job-summary writer fenced below. Reading across
+// into tests/e2e is the same move public_estate_identifiers_test.go makes.
 const otpRegistrationSourcePath = "tests/e2e/nativeudp/otp_registration_idempotency_test.go"
 
 func TestNoWorkflowWiresTheSingleOTPCredentialVariable(t *testing.T) {
 	variable := singleCredentialVariableName(t)
+	name := regexp.QuoteMeta(variable)
 
-	// The POOL variable's name extends this one, so anchor on the character
-	// that follows: a workflow wires a variable either as a YAML mapping
-	// (`NAME: value`) or as a shell export appended to $GITHUB_ENV
-	// (`NAME=value`), and the pool spelling has `_` there instead. Checking
-	// only the mapping form left the fence green while a run block exported
-	// the variable -- the same misdirection with one extra step.
-	assignments := []string{variable + ":", variable + "="}
+	// ANCHORED, not a substring scan. claude.yml and claude-code-review.yml
+	// embed multi-page prompts as block scalars, and this package already
+	// rejects raw substring counting for that reason -- see actionpin_test.go's
+	// "action named in a prompt is not a use". A fence that reds a required
+	// check because prose mentions the variable is a new instance of the class
+	// this change removes, and its fix would be to edit a prompt.
+	//
+	// Three shapes, because a workflow can wire a variable three ways and only
+	// the first begins with the name:
+	//   env mapping   NAME: value   /   NAME : value   /   - NAME: value
+	//   shell export  export NAME=value
+	//   env-file      echo "NAME=value" >> "$GITHUB_ENV"
+	// The env-file form cannot be anchored, so it is narrowed by requiring
+	// GITHUB_ENV on the same line -- which is what makes it a wiring rather
+	// than a mention.
+	mapping := regexp.MustCompile(`^(?:-\s+)?` + name + `\s*:`)
+	export := regexp.MustCompile(`^export\s+` + name + `\s*=`)
+	envFile := regexp.MustCompile(name + `\s*=`)
 
-	for name, workflow := range allWorkflows(t) {
-		for _, line := range strings.Split(workflow, "\n") {
-			// Comments mention variable names legitimately; only a real
-			// assignment wires one.
-			if trimmed := strings.TrimSpace(line); strings.HasPrefix(trimmed, "#") {
+	for workflow, contents := range allWorkflows(t) {
+		for number, line := range strings.Split(contents, "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "#") {
 				continue
 			}
-			for _, assignment := range assignments {
-				if strings.Contains(line, assignment) {
-					t.Errorf("%s wires %s (%q on line %q), but the strict short-pool "+
-						"error in %s tells operators that setting it does not clear the "+
-						"failure -- update that message, or drop the wiring",
-						name, variable, assignment, strings.TrimSpace(line),
-						otpRegistrationSourcePath)
-				}
+			var wiring string
+			switch {
+			case mapping.MatchString(trimmed):
+				wiring = "an env mapping"
+			case export.MatchString(trimmed):
+				wiring = "a shell export"
+			case envFile.MatchString(trimmed) && strings.Contains(trimmed, "GITHUB_ENV"):
+				wiring = "a $GITHUB_ENV append"
+			default:
+				continue
 			}
+			t.Errorf("%s:%d wires %s as %s (%q), but the strict short-pool error in %s "+
+				"tells operators that setting it does not clear the failure -- update "+
+				"that message, or drop the wiring",
+				workflow, number+1, variable, wiring, trimmed, otpRegistrationSourcePath)
 		}
+	}
+}
+
+// TestOnlyTheFencedWriterPublishesToTheJobSummary keeps the degradation
+// reporter from becoming an unreviewed publication channel.
+//
+// The canary withholds -v so that a successful run prints no agent identity or
+// live topology, and TestOTPSchemaV2CanaryUsesOnlyTheSanctionedOTPHarness
+// enforces that. The job summary is deliberately the one channel that
+// suppression cannot reach -- which is what makes it useful for a degraded
+// pool, and what makes an unfenced writer a hole in the same policy.
+//
+// Nothing is exposed by the two advisories that exist: they carry pool sizes
+// and duplicate counts, the same kind of text the gate already annotates in
+// public. The risk is the THIRD one. noteDegradation is a generic emitter whose
+// stated purpose is that a new advisory cannot arrive quieter than these two,
+// so a new advisory is expected -- and its author currently gets no signal that
+// its text lands on a public run summary. Pinning both the writer and the
+// advisory set means adding one is a decision somebody makes on purpose.
+func TestOnlyTheFencedWriterPublishesToTheJobSummary(t *testing.T) {
+	// This fence names the variable in order to guard it, so it would otherwise
+	// match itself. Skipped BY PATH rather than by skipping the package, so a
+	// different workflowcontract file that started writing summaries is still
+	// caught.
+	const self = "internal/workflowcontract/otp_enrollment_wiring_test.go"
+
+	var sites []string
+	for _, path := range repoGoFiles(t) {
+		if path == self {
+			continue
+		}
+		contents, err := os.ReadFile(filepath.Join(repoRootDir(t), path))
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		if strings.Contains(string(contents), "GITHUB_STEP_SUMMARY") {
+			sites = append(sites, path)
+		}
+	}
+	slices.Sort(sites)
+	// Two sanctioned sites: appendJobSummary, and the test that drives it with a
+	// described environment. Naming the test as well as the writer is
+	// deliberate -- a test is exactly how a fabricated advisory reached the
+	// real summary once already, so it belongs inside the fence, not outside.
+	want := []string{
+		"tests/e2e/nativeudp/otp_enrollment_pool_test.go",
+		otpRegistrationSourcePath,
+	}
+	slices.Sort(want)
+	if !slices.Equal(sites, want) {
+		t.Errorf("Go sources naming GITHUB_STEP_SUMMARY = %v, want %v.\nThe job summary "+
+			"is the channel the canary's no--v policy cannot suppress, so a new site is a "+
+			"publication decision: confirm what it writes, then add it here", sites, want)
+	}
+
+	// The advisories that reporter may carry. A new one is fine -- it is the
+	// point -- but it arrives here first.
+	source, err := os.ReadFile(filepath.Join(repoRootDir(t), otpRegistrationSourcePath))
+	if err != nil {
+		t.Fatalf("read %s: %v", otpRegistrationSourcePath, err)
+	}
+	var titles []string
+	for _, match := range regexp.MustCompile(
+		`degradationAdvisory\{"([^"]+)"`).FindAllStringSubmatch(string(source), -1) {
+		titles = append(titles, match[1])
+	}
+	slices.Sort(titles)
+	wantTitles := []string{
+		"OTP credential pool has duplicates",
+		"OTP credential pool size is degraded",
+	}
+	if !slices.Equal(titles, wantTitles) {
+		t.Errorf("advisories published to the job summary = %v, want %v.\nEach one's text "+
+			"reaches a public run summary; confirm the new advisory carries no identity "+
+			"or topology, then add it here", titles, wantTitles)
 	}
 }
 
@@ -73,13 +166,7 @@ func TestNoWorkflowWiresTheSingleOTPCredentialVariable(t *testing.T) {
 // guards is not a passing fence, it is an absent one.
 func singleCredentialVariableName(t *testing.T) string {
 	t.Helper()
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("resolve workflow contract path")
-	}
-	path := filepath.Join(filepath.Dir(thisFile), "..", "..",
-		filepath.FromSlash(otpRegistrationSourcePath))
-	source, err := os.ReadFile(path)
+	source, err := os.ReadFile(filepath.Join(repoRootDir(t), otpRegistrationSourcePath))
 	if err != nil {
 		t.Fatalf("read %s: %v", otpRegistrationSourcePath, err)
 	}
@@ -90,4 +177,52 @@ func singleCredentialVariableName(t *testing.T) string {
 			otpRegistrationSourcePath)
 	}
 	return string(match[1])
+}
+
+// repoRootDir resolves the repository root from this file's own location, the
+// way workflowDir does for .github/workflows.
+func repoRootDir(t *testing.T) string {
+	t.Helper()
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("resolve workflow contract path")
+	}
+	return filepath.Join(filepath.Dir(thisFile), "..", "..")
+}
+
+// repoGoFiles lists every Go source in the repository as a slash-separated
+// path relative to the root, skipping directories that hold no first-party
+// code.
+func repoGoFiles(t *testing.T) []string {
+	t.Helper()
+	root := repoRootDir(t)
+	var found []string
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			switch entry.Name() {
+			case ".git", "vendor", "node_modules":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if filepath.Ext(entry.Name()) != ".go" {
+			return nil
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		found = append(found, filepath.ToSlash(relative))
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk repository: %v", err)
+	}
+	if len(found) == 0 {
+		t.Fatal("found no Go sources; this fence would pass vacuously")
+	}
+	return found
 }

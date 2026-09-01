@@ -1220,19 +1220,42 @@ func TestPoolAdvisoriesReportEveryDegradation(t *testing.T) {
 // on a PASSING test is the log nobody opens, so every non-fatal degradation
 // also has to reach a surface somebody sees.
 //
-// The job summary is asserted separately from the annotation because they do
-// not cover the same runs -- see noteDegradation for which channel reaches
-// which workflow.
+// Every case DESCRIBES its environment through a lookup rather than setting one
+// with t.Setenv. That is the property the emitter's lookup parameter buys: no
+// case here can touch the real runner's job summary, however degraded a pool it
+// asks for.
 func TestNoteDegradationReportsOnEveryChannel(t *testing.T) {
+	onCI := func(summaryPath string) func(string) string {
+		return envFrom(map[string]string{
+			"GITHUB_ACTIONS":      "true",
+			"GITHUB_STEP_SUMMARY": summaryPath,
+		})
+	}
+
 	t.Run("annotates on GitHub", func(t *testing.T) {
-		t.Setenv("GITHUB_ACTIONS", "true")
-		t.Setenv("GITHUB_STEP_SUMMARY", "")
 		got := captureAnnotations(t, func() {
-			noteDegradation(t, "a title", "an advisory")
+			noteDegradation(t, onCI(""), "a title", "an advisory")
 		})
 		if want := "::warning title=a title::an advisory\n"; got != want {
 			t.Fatalf("noteDegradation wrote %q, want %q; without the workflow command "+
 				"a degraded run shows nothing on the check", got, want)
+		}
+	})
+
+	t.Run("escapes what would truncate the annotation", func(t *testing.T) {
+		// A newline ends a workflow command, and a literal % opens an escape.
+		// Either one silently truncates the annotation -- the single outcome
+		// this emitter exists to prevent.
+		got := captureAnnotations(t, func() {
+			noteDegradation(t, onCI(""), "ti:tle", "line one\nline two 50% spent")
+		})
+		want := "::warning title=ti%3Atle::line one%0Aline two 50%25 spent\n"
+		if got != want {
+			t.Fatalf("noteDegradation wrote %q, want %q", got, want)
+		}
+		if strings.Count(got, "\n") != 1 {
+			t.Errorf("annotation %q spans more than one line, so GitHub reads only "+
+				"the first", got)
 		}
 	})
 
@@ -1241,12 +1264,11 @@ func TestNoteDegradationReportsOnEveryChannel(t *testing.T) {
 		if err := os.WriteFile(summary, []byte("earlier step output\n"), 0o644); err != nil {
 			t.Fatalf("seed summary: %v", err)
 		}
-		t.Setenv("GITHUB_ACTIONS", "true")
-		t.Setenv("GITHUB_STEP_SUMMARY", summary)
+		lookup := onCI(summary)
 
 		_ = captureAnnotations(t, func() {
-			noteDegradation(t, "first title", "first advisory")
-			noteDegradation(t, "second title", "second advisory")
+			noteDegradation(t, lookup, "first title", "first advisory")
+			noteDegradation(t, lookup, "second title", "second advisory")
 		})
 
 		raw, err := os.ReadFile(summary)
@@ -1268,17 +1290,29 @@ func TestNoteDegradationReportsOnEveryChannel(t *testing.T) {
 		}
 	})
 
+	t.Run("keeps a multi-line advisory inside the blockquote", func(t *testing.T) {
+		summary := filepath.Join(t.TempDir(), "summary.md")
+		_ = captureAnnotations(t, func() {
+			noteDegradation(t, onCI(summary), "a title", "first line\nsecond line")
+		})
+		raw, err := os.ReadFile(summary)
+		if err != nil {
+			t.Fatalf("read summary: %v", err)
+		}
+		if !strings.Contains(string(raw), "> second line") {
+			t.Fatalf("job summary %q dropped the quote marker on a continuation line, so "+
+				"the rest renders as body text detached from its warning", raw)
+		}
+	})
+
 	t.Run("creates the summary when the runner only exported the path", func(t *testing.T) {
 		// NOT pre-created, unlike the case above. The hosted runner makes this
 		// file itself, but a self-hosted runner or `act` may export only the
 		// path -- and without O_CREATE that ENOENTs, which on the canary means
 		// the degradation has no surviving report at all.
 		summary := filepath.Join(t.TempDir(), "summary.md")
-		t.Setenv("GITHUB_ACTIONS", "true")
-		t.Setenv("GITHUB_STEP_SUMMARY", summary)
-
 		_ = captureAnnotations(t, func() {
-			noteDegradation(t, "a title", "an advisory")
+			noteDegradation(t, onCI(summary), "a title", "an advisory")
 		})
 
 		raw, err := os.ReadFile(summary)
@@ -1293,10 +1327,9 @@ func TestNoteDegradationReportsOnEveryChannel(t *testing.T) {
 	})
 
 	t.Run("an unwritable summary does not fail the gate", func(t *testing.T) {
-		t.Setenv("GITHUB_ACTIONS", "true")
-		t.Setenv("GITHUB_STEP_SUMMARY", filepath.Join(t.TempDir(), "absent", "summary.md"))
+		unwritable := filepath.Join(t.TempDir(), "absent", "summary.md")
 		got := captureAnnotations(t, func() {
-			noteDegradation(t, "a title", "an advisory")
+			noteDegradation(t, onCI(unwritable), "a title", "an advisory")
 		})
 		// Still annotated. A reporting channel that cannot open must not turn a
 		// healthy registration into a red required check.
@@ -1307,15 +1340,14 @@ func TestNoteDegradationReportsOnEveryChannel(t *testing.T) {
 	})
 
 	t.Run("stays quiet off GitHub", func(t *testing.T) {
-		t.Setenv("GITHUB_ACTIONS", "")
 		summary := filepath.Join(t.TempDir(), "summary.md")
 		if err := os.WriteFile(summary, nil, 0o644); err != nil {
 			t.Fatalf("seed summary: %v", err)
 		}
-		t.Setenv("GITHUB_STEP_SUMMARY", summary)
+		offCI := envFrom(map[string]string{"GITHUB_STEP_SUMMARY": summary})
 
 		got := captureAnnotations(t, func() {
-			noteDegradation(t, "a title", "an advisory")
+			noteDegradation(t, offCI, "a title", "an advisory")
 		})
 		if got != "" {
 			t.Fatalf("noteDegradation wrote %q off CI; workflow commands are noise in a "+
