@@ -317,12 +317,19 @@ func (c instantDeadlineConn) Read([]byte) (int, error) { return 0, os.ErrDeadlin
 // stalledReadDialer holds the first read on connections to one address past the
 // per-datagram timeout, standing in for the scheduler stall a loaded runner
 // imposes on an exchange whose fake server is otherwise answering in
-// microseconds. The stall is applied once so a retried exchange proceeds
-// normally.
+// microseconds. The stall is applied once per connection so a retried exchange
+// proceeds normally.
+//
+// applied counts the reads actually delayed, because the address match is what
+// arms this: a listener that binds a different address representation, or a
+// future change to how the fixture rewrites routes, would silence the stall
+// while every assertion downstream of it still passed. A caller asserts on the
+// count so the stall cannot quietly stop engaging.
 type stalledReadDialer struct {
 	inner   nativeudp.Dialer
 	address string
 	stall   time.Duration
+	applied *atomic.Int32
 }
 
 func (d stalledReadDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
@@ -330,18 +337,22 @@ func (d stalledReadDialer) DialContext(ctx context.Context, network, address str
 	if err != nil || conn.RemoteAddr().String() != d.address {
 		return conn, err
 	}
-	return &stalledReadConn{Conn: conn, stall: d.stall}, nil
+	return &stalledReadConn{Conn: conn, stall: d.stall, applied: d.applied}, nil
 }
 
 type stalledReadConn struct {
 	net.Conn
 	stall   time.Duration
+	applied *atomic.Int32
 	stalled bool
 }
 
 func (c *stalledReadConn) Read(p []byte) (int, error) {
 	if !c.stalled {
 		c.stalled = true
+		if c.applied != nil {
+			c.applied.Add(1)
+		}
 		time.Sleep(c.stall)
 	}
 	return c.Conn.Read(p)
@@ -3302,17 +3313,25 @@ func TestConnectAgentRuntime_StalledHubDoesNotDivertREGBackoffCancellation(t *te
 		[]runtimeUDPStep{{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: contract.InitialAssignment.Result.BodyJSON}},
 		[]runtimeUDPStep{{requestType: relayknock.TypeRegister, noReply: true}},
 	)
-	var sleeps atomic.Int32
+	var sleeps, stallsApplied atomic.Int32
 	var pendingDurableAtCancel atomic.Bool
+	var probeErr error
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	options := append(f.instantCellSilence(),
+	// Build the transport here rather than through instantCellSilence: the cell
+	// still answers its silence instantly, but the Hub is wrapped on the way in,
+	// and composing that by overriding the helper's dialer would leave the whole
+	// point of this test resting on which WithAgentRuntimeUDPDialer was applied
+	// last.
+	options := []AgentRuntimeRegistrationOption{
 		WithAgentRuntimeUDPDialer(instantSilenceDialer{
 			inner: stalledReadDialer{
-				inner: f.dialer, address: f.hubUDP.conn.LocalAddr().String(), stall: 2 * runtimeSilenceTimeout,
+				inner: f.dialer, address: f.hubUDP.conn.LocalAddr().String(),
+				stall: 2 * runtimeSilenceTimeout, applied: &stallsApplied,
 			},
 			silent: f.cellUDP.conn.LocalAddr().String(),
 		}),
+		WithAgentRuntimeUDPBounds(runtimeReplyTimeout, 1),
 		WithAgentRuntimeAssignmentRetryBudget(3, runtimeReplyBudget),
 		withTestAgentRuntimeAssignmentSleep(func(ctx context.Context, _ time.Duration) error {
 			sleeps.Add(1)
@@ -3320,20 +3339,35 @@ func TestConnectAgentRuntime_StalledHubDoesNotDivertREGBackoffCancellation(t *te
 			// than from the cell's request log: the cell records its datagram on
 			// its own goroutine, but the REG is sent only after the pending
 			// activation has committed, so a durable record here is proof this is
-			// the REG backoff and not the Hub's.
+			// the REG backoff and not the Hub's. Read through the undecorated
+			// store so this probe stays invisible to the recorder's own counters,
+			// and keep a load failure distinct from an absent record -- reporting
+			// one as the other is the confident misdiagnosis this test exists to
+			// prevent.
 			state, loadErr := f.store.inner.LoadAgentState(ctx)
+			probeErr = loadErr
 			pendingDurableAtCancel.Store(loadErr == nil && state.PendingActivation != nil)
 			cancel()
 			<-ctx.Done()
 			return ctx.Err()
 		}),
-	)
+	}
 	_, _, err := connectWithEnrollment(ctx, conformance.AgentAssignmentBootstrapCredentialFixture, f.store, f.options(options...)...)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("stalled Hub REG backoff cancellation = %v, want context.Canceled", err)
 	}
+	// Without this the test passes vacuously: an address that stops matching
+	// leaves a Hub answering in microseconds, which every assertion below is
+	// happy with. The Hub exchange dials the challenge and the proof separately,
+	// so at least one read must have been held.
+	if got := stallsApplied.Load(); got < 1 {
+		t.Fatalf("stalled Hub reads = %d, want at least 1: the injected stall never engaged", got)
+	}
 	if got := sleeps.Load(); got != 1 {
-		t.Fatalf("bounded backoff sleeps = %d, want exactly 1: the stalled Hub round trip must not retry", got)
+		t.Fatalf("cancellation hook ran %d times, want exactly 1", got)
+	}
+	if probeErr != nil {
+		t.Fatalf("durable state unreadable at cancellation: %v", probeErr)
 	}
 	if !pendingDurableAtCancel.Load() {
 		t.Fatal("cancellation fired before the pending activation was durable: the stalled Hub exchange backed off, not the REG")
