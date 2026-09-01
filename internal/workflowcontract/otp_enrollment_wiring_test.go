@@ -152,24 +152,58 @@ func TestOnlyTheFencedWriterPublishesToTheJobSummary(t *testing.T) {
 
 	// The advisories that reporter may carry. A new one is fine -- it is the
 	// point -- but it arrives here first.
-	source, err := os.ReadFile(filepath.Join(repositoryRoot(t), otpRegistrationSourcePath))
-	if err != nil {
-		t.Fatalf("read %s: %v", otpRegistrationSourcePath, err)
-	}
-	var titles []string
-	for _, match := range regexp.MustCompile(
-		`degradationAdvisory\{"([^"]+)"`).FindAllStringSubmatch(string(source), -1) {
-		titles = append(titles, match[1])
-	}
-	slices.Sort(titles)
+	//
+	// COUNTED as well as named, and across the whole package rather than one
+	// file. Extracting titles alone only models an unkeyed literal whose first
+	// element is a string constant, so a third advisory written as
+	// `degradationAdvisory{title: …}` or with a named constant would leave the
+	// extracted set equal to the two pinned values and pass green -- the exact
+	// outcome this fence exists to make deliberate. The count trips on any
+	// shape; the titles then say which ones are sanctioned.
 	wantTitles := []string{
 		"OTP credential pool has duplicates",
 		"OTP credential pool size is degraded",
 	}
-	if !slices.Equal(titles, wantTitles) {
-		t.Errorf("advisories published to the job summary = %v, want %v.\nEach one's text "+
-			"reaches a public run summary; confirm the new advisory carries no identity "+
-			"or topology, then add it here", titles, wantTitles)
+	var titles []string
+	literals := 0
+	for _, path := range sites {
+		source, err := os.ReadFile(filepath.Join(repositoryRoot(t), path))
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		literals += len(regexp.MustCompile(
+			`degradationAdvisory\{`).FindAllString(string(source), -1))
+		for _, match := range regexp.MustCompile(
+			`degradationAdvisory\{"([^"]+)"`).FindAllStringSubmatch(string(source), -1) {
+			titles = append(titles, match[1])
+		}
+	}
+	slices.Sort(titles)
+	if literals != len(wantTitles) || !slices.Equal(titles, wantTitles) {
+		t.Errorf("advisories published to the job summary = %v across %d literal(s), want "+
+			"%v across %d.\nEach one's text reaches a public run summary; confirm the new "+
+			"advisory carries no identity or topology, then add it here",
+			titles, literals, wantTitles, len(wantTitles))
+	}
+
+	// And the production emission path stays single. noteDegradation is
+	// package-level, so a new advisory could reach the summary without adding a
+	// degradationAdvisory literal at all -- by calling the emitter directly.
+	// Pinning the one call site inside loadOTPE2EGateConfig forces a new
+	// advisory through poolAdvisories, and therefore through the list above.
+	// The declaration itself is excluded; the emitter's own tests drive it
+	// directly and live in the other fenced file.
+	source, err := os.ReadFile(filepath.Join(repositoryRoot(t), otpRegistrationSourcePath))
+	if err != nil {
+		t.Fatalf("read %s: %v", otpRegistrationSourcePath, err)
+	}
+	calls := regexp.MustCompile(`(?m)^\s*(?:for .*)?noteDegradation\(`).
+		FindAllString(string(source), -1)
+	if len(calls) != 1 {
+		t.Errorf("%s has %d noteDegradation call site(s), want exactly 1 -- the loop in "+
+			"loadOTPE2EGateConfig.\nA second one publishes to the run summary without "+
+			"passing through poolAdvisories, so the advisory list above stops being the "+
+			"full set", otpRegistrationSourcePath, len(calls))
 	}
 }
 
@@ -237,8 +271,18 @@ const nativeUDPTestDir = "tests/e2e/nativeudp"
 
 // gateEmitterProcessEnvPattern finds a call that hands the REAL process
 // environment to the degradation emitter, directly or through the loader.
+//
+// appendJobSummary is named alongside the other two: it is package-level, so it
+// can be called without going through noteDegradation at all.
+//
+// The window is same-line and bounded rather than `[^)]*`, which stopped at the
+// FIRST close paren and so missed `noteDegradation(t, f(), os.Getenv, …)`. A
+// nested-group pattern fixes that case and breaks `wrap(os.Getenv)` instead,
+// because it cannot stop inside a group. Every call of these three is written
+// on one line, so a bounded same-line scan covers all three shapes; a call
+// split across lines would evade it, which is the stated limit of this fence.
 var gateEmitterProcessEnvPattern = regexp.MustCompile(
-	`(?:loadOTPE2EGateConfig|noteDegradation)\([^)]*os\.Getenv`)
+	`(?:loadOTPE2EGateConfig|noteDegradation|appendJobSummary)\([^\n]{0,200}os\.Getenv`)
 
 // TestOnlyTheGateItselfEmitsFromTheProcessEnvironment fences the vector the
 // fabricated-advisory incident actually used.
