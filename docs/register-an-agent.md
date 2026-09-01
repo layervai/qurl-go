@@ -83,17 +83,47 @@ second argument to `NewNativeConnectorResourceRequest` on later starts. That is
 a read-only continuity assertion: LayerV returns that exact active resource or
 fails instead of creating or adopting a replacement.
 
+If a deployment needs registered-session admission over HTTPS, pass
+`WithAgentRuntimeSessionRelay` to `KnockRegisteredAgent` and to durable
+operation recovery. The option carries only session `NHP_KNK` and the one
+possible `NHP_RKN` through that relay. It does not move assignment, enrollment,
+registration, resource discovery, or exact-session retirement off native UDP,
+and it never falls back to another transport or cell.
+
+The Connector's durable session-operation journal closes or reconciles its
+admission with `RecoverNativeSessionOperation`; pass the same relay option to
+that call. This recovery is a KNK/RKN operation and works without UDP. The
+lower-level `RetireRegisteredAgentSession` API is different: it sends an exact
+`NHP_EXT` over UDP. If an application opens a session without a durable
+operation and cannot reach the assigned cell over UDP, it cannot send that
+explicit EXT, and the server lease owns cleanup.
+
+When the relay option is present, it selects HTTPS for session admission and
+operation recovery. UDP resolver, dialer, and bound options are ignored for
+those calls. The HTTP client's timeout bounds each HTTPS flight. A cookie
+challenge can cause two flights, so set a context deadline for one aggregate
+call bound.
+
+The relay POST and the later protected data-plane connection must use the same
+public egress IP. If the HTTP client uses a forward proxy, route the data-plane
+connection through that same egress. Otherwise the knock can return an
+authenticated success while the protected connection is refused because it
+arrives from a different source.
+
 And two rules for the serving loop:
 
 - **One run ID and positive attempt number per cycle attempt.** Do not change
   either between retries. Increment the attempt only when starting a new
   serving attempt under the same run.
 - **Retire before wiping the key.** After the serving session has stopped and
-  drained, call `qurl.RetireRegisteredAgentSession` with the exact
-  `SessionReceipt` returned by admission. Retry an ambiguous result with that
-  same receipt, then wipe the device key when the lifecycle operation ends.
-  Retirement closes only that admission; it cannot retire a sibling or
-  replacement.
+  drained, finish the same close path used when it opened. A Connector with a
+  durable session operation calls `RecoverNativeSessionOperation` with that
+  operation and its persisted recovery endpoint. A lower-level caller without
+  an operation calls `qurl.RetireRegisteredAgentSession` with the exact
+  `SessionReceipt` returned by admission, which requires UDP. Retry an ambiguous
+  result with the same durable identity, then wipe the device key when the
+  lifecycle operation ends. Retirement closes only that admission; it cannot
+  retire a sibling or replacement.
 - **Keep the receipt opaque and in memory.** Copying the complete Go value is
   safe, but do not JSON-marshal or reconstruct it from its exported fields: its
   private routing snapshot returns retirement to the original cell and is not

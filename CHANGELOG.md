@@ -6,6 +6,26 @@ independently under `awsstore/vX.Y.Z` tags.
 Pre-1.0 semantic versioning: breaking changes land in minor versions (v0.N.0)
 and are marked **Breaking** with what to change.
 
+## v0.10.0 — 2026-09-01
+
+- **Breaking:** `KnockRegisteredAgent` and `RecoverNativeSessionOperation` now
+  accept `AgentRuntimeSessionOption`. Existing `AgentRuntimeUDPOption` values
+  still satisfy that interface; update function values or wrappers that name
+  the old exact signature. A `[]AgentRuntimeUDPOption` slice does not convert as
+  a whole: allocate `[]AgentRuntimeSessionOption` and copy each option into it
+  before using `...`.
+- Added `WithAgentRuntimeSessionRelay` for registered-session `NHP_KNK` and the
+  one possible cookie-bound `NHP_RKN` over one trusted HTTPS relay origin. The
+  transport authenticates replies with the assigned cell key, refuses
+  redirects, sends no HTTP cookies, bounds each HTTPS flight, and has no retry,
+  UDP fallback, or cross-cell fallback. A cookie challenge can cause two
+  flights; a caller context deadline supplies the aggregate bound. The relay
+  option takes precedence over UDP resolver, dialer, and bound options on session calls.
+  Durable `NativeSessionOperation` close/recovery uses this relay. Assignment,
+  enrollment, registration, resource discovery, and lower-level exact-session
+  `NHP_EXT` remain native UDP operations; without a durable operation or UDP
+  reachability, that lower-level admission remains until its server lease ends.
+
 ## v0.9.0 — 2026-09-01
 
 - **Breaking:** successful qURL v2 portal opens now require the authenticated
