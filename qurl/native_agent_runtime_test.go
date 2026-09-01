@@ -339,6 +339,12 @@ func (c instantDeadlineConn) Read([]byte) (int, error) {
 // that was lost.
 var errBackoffBeforePendingActivation = errors.New("qurl test: assignment backoff fired before the pending activation was durable")
 
+// errPendingActivationProbeFailed keeps a store that would not answer distinct
+// from a store that answered with no pending activation. They mean opposite
+// things about where the backoff came from, and reporting the first as the
+// second is the confident misdiagnosis this pair of tests exists to prevent.
+var errPendingActivationProbeFailed = errors.New("qurl test: durable state was unreadable at the assignment backoff")
+
 // stalledReadDialer holds the first read on connections to one address past the
 // per-datagram timeout, standing in for the scheduler stall a loaded runner
 // imposes on an exchange whose fake server is otherwise answering in
@@ -3308,6 +3314,9 @@ func TestConnectAgentRuntime_AmbiguousREGCancellationDuringBackoffPreservesPendi
 		[]runtimeUDPStep{{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: contract.InitialAssignment.Result.BodyJSON}},
 		[]runtimeUDPStep{{requestType: relayknock.TypeRegister, noReply: true}},
 	)
+	// probeErr is written only by the sleep hook, which runs inline on this
+	// goroutine inside the exchange loop, and read after the call returns.
+	var probeErr error
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	// The sleep hook is installed on every bounded exchange this call makes, not
@@ -3330,7 +3339,12 @@ func TestConnectAgentRuntime_AmbiguousREGCancellationDuringBackoffPreservesPendi
 		f.options(append(f.instantCellSilence(t, f.dialer),
 			WithAgentRuntimeAssignmentRetryBudget(3, runtimeReplyBudget),
 			withTestAgentRuntimeAssignmentSleep(func(ctx context.Context, _ time.Duration) error {
-				if state, loadErr := f.store.inner.LoadAgentState(ctx); loadErr != nil || state.PendingActivation == nil {
+				state, loadErr := f.store.inner.LoadAgentState(ctx)
+				if loadErr != nil {
+					probeErr = loadErr
+					return errPendingActivationProbeFailed
+				}
+				if state.PendingActivation == nil {
 					return errBackoffBeforePendingActivation
 				}
 				cancel()
@@ -3338,6 +3352,9 @@ func TestConnectAgentRuntime_AmbiguousREGCancellationDuringBackoffPreservesPendi
 				return ctx.Err()
 			}),
 		)...)...)
+	if errors.Is(err, errPendingActivationProbeFailed) {
+		t.Fatalf("durable state unreadable at the assignment backoff, so which exchange backed off is unknown: %v", probeErr)
+	}
 	if errors.Is(err, errBackoffBeforePendingActivation) {
 		t.Fatalf("Hub exchange backed off before any REG, so this run never reached the cancellation under test: the runner outran the %v attempt timeout; durability is not implicated: %v", runtimeReplyTimeout, err)
 	}
