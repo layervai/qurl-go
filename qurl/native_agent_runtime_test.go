@@ -332,23 +332,27 @@ func (c instantDeadlineConn) Read([]byte) (int, error) {
 	return 0, os.ErrDeadlineExceeded
 }
 
-// errBackoffBeforePendingActivation refuses a cancellation the sleep hook is
-// asked for outside the REG backoff. A test that cancels on whichever bounded
-// exchange happens to back off first cannot tell a diverted Hub retry from its
-// own subject, and reports the pending activation that was never written as one
-// that was lost.
-var errBackoffBeforePendingActivation = errors.New("qurl test: assignment backoff fired before the pending activation was durable")
+// errRefuseBackoff aborts a call whose sleep hook was asked to cancel outside
+// the REG backoff. A test that cancels on whichever bounded exchange happens to
+// back off first cannot tell a diverted Hub retry from its own subject, and
+// reports the pending activation that was never written as one that was lost.
+//
+// It carries no attribution of its own: what the hook saw is recorded in the
+// caller's own variables and asserted from there. Recovering that through
+// errors.Is on the returned error would make the diagnosis depend on the
+// assignment loop never rewrapping a sleep failure -- and if it ever did, both
+// branches would stop firing silently and the test would degrade to exactly the
+// pre-fix message.
+var errRefuseBackoff = errors.New("qurl test: assignment backoff fired outside the REG backoff under test")
 
-// errPendingActivationProbeFailed keeps a store that would not answer distinct
-// from a store that answered with no pending activation. They mean opposite
-// things about where the backoff came from, and reporting the first as the
-// second is the confident misdiagnosis this pair of tests exists to prevent.
-var errPendingActivationProbeFailed = errors.New("qurl test: durable state was unreadable at the assignment backoff")
-
-// stalledReadDialer holds the first read on connections to one address past the
-// per-datagram timeout, standing in for the scheduler stall a loaded runner
-// imposes on an exchange whose fake server is otherwise answering in
-// microseconds. The stall is once per connection, and the transport dials afresh
+// stalledReadDialer holds the first read on connections to one address,
+// standing in for the scheduler stall a loaded runner imposes on an exchange
+// whose fake server is otherwise answering in microseconds. The sleep runs to
+// completion regardless of the deadline the transport set, so how long it holds
+// for is a two-sided choice rather than a socket expiry: long enough to outrun
+// the bound a caller is proving it no longer runs under, short enough to stay
+// inside the bound it does. requireStallWithinBounds states that rather than
+// leaving it to a comment. The stall is once per connection, and the transport dials afresh
 // for every attempt, so a retried exchange is stalled again rather than
 // proceeding normally -- and one logical Hub exchange stalls twice, since the
 // cookie challenge and the proof are separate dials.
@@ -363,6 +367,18 @@ type stalledReadDialer struct {
 	address string
 	stall   time.Duration
 	applied *atomic.Int32
+}
+
+// requireStallWithinBounds fails a test whose injected stall has drifted outside
+// the window that makes it meaningful. Below the lower bound it stops
+// reproducing the failure it stands in for; at or above the upper one the
+// attempt genuinely expires, and the run reds with a transport timeout instead
+// of whatever the test was written to say.
+func requireStallWithinBounds(t *testing.T, stall, mustOutrun, mustStayUnder time.Duration) {
+	t.Helper()
+	if stall <= mustOutrun || stall >= mustStayUnder {
+		t.Fatalf("injected stall %v must sit strictly between %v and %v", stall, mustOutrun, mustStayUnder)
+	}
 }
 
 func (d stalledReadDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
@@ -3337,9 +3353,10 @@ func TestConnectAgentRuntime_AmbiguousREGCancellationDuringBackoffPreservesPendi
 		[]runtimeUDPStep{{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: contract.InitialAssignment.Result.BodyJSON}},
 		[]runtimeUDPStep{{requestType: relayknock.TypeRegister, noReply: true}},
 	)
-	// probeErr is written only by the sleep hook, which runs inline on this
+	// Both are written only by the sleep hook, which runs inline on this
 	// goroutine inside the exchange loop, and read after the call returns.
 	var probeErr error
+	var refusedBeforePending bool
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	// The sleep hook is installed on every bounded exchange this call makes, not
@@ -3365,21 +3382,22 @@ func TestConnectAgentRuntime_AmbiguousREGCancellationDuringBackoffPreservesPendi
 				state, loadErr := f.store.inner.LoadAgentState(ctx)
 				if loadErr != nil {
 					probeErr = loadErr
-					return errPendingActivationProbeFailed
+					return errRefuseBackoff
 				}
 				if state.PendingActivation == nil {
-					return errBackoffBeforePendingActivation
+					refusedBeforePending = true
+					return errRefuseBackoff
 				}
 				cancel()
 				<-ctx.Done()
 				return ctx.Err()
 			}),
 		)...)...)
-	if errors.Is(err, errPendingActivationProbeFailed) {
+	if probeErr != nil {
 		t.Fatalf("durable state unreadable at the assignment backoff, so which exchange backed off is unknown: %v", probeErr)
 	}
-	if errors.Is(err, errBackoffBeforePendingActivation) {
-		t.Fatalf("Hub exchange backed off before any REG, so this run never reached the cancellation under test: the runner outran the %v attempt timeout; durability is not implicated: %v", runtimeReplyTimeout, err)
+	if refusedBeforePending {
+		t.Fatalf("Hub exchange backed off before any REG, so this run never reached the cancellation under test: the runner outran the %v attempt timeout; durability is not implicated (call returned %v)", runtimeReplyTimeout, err)
 	}
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("REG backoff cancellation = %v, want context.Canceled", err)
@@ -3431,9 +3449,13 @@ func TestConnectAgentRuntime_StalledHubDoesNotDivertREGBackoffCancellation(t *te
 	// Take the bounds from the same helper the guarded test uses, wrapping the
 	// Hub route on the way in, so this guard exercises that configuration rather
 	// than a private copy of it that could drift away from the real one.
+	// Outruns the silence timeout this test guards against regressing to, and
+	// stays well inside the reply timeout it runs under.
+	const hubStall = 2 * runtimeSilenceTimeout
+	requireStallWithinBounds(t, hubStall, runtimeSilenceTimeout, runtimeReplyTimeout)
 	options := append(f.instantCellSilence(t, stalledReadDialer{
 		inner: f.dialer, address: f.hubUDP.conn.LocalAddr().String(),
-		stall: 2 * runtimeSilenceTimeout, applied: &stallsApplied,
+		stall: hubStall, applied: &stallsApplied,
 	}),
 		WithAgentRuntimeAssignmentRetryBudget(3, runtimeReplyBudget),
 		withTestAgentRuntimeAssignmentSleep(func(ctx context.Context, _ time.Duration) error {
