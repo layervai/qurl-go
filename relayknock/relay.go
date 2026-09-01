@@ -108,13 +108,8 @@ func browserRelayTypeAllowed(headerType int) bool {
 // connection, body read) come back as *RelayError; url is returned so callers
 // compose errors around the one URL actually posted.
 //
-// This is the established public browser-relay contract: its caller owns the
-// HTTPDoer and redirect policy, and *RelayError deliberately carries the URL,
-// status, and response detail for browser diagnostics. Registered-agent session
-// traffic has a stricter credential-bearing boundary in sessionrelay, with a
-// cloned redirect-refusing client, no cookie jar, oversize detection, and
-// redacted errors. Keep those policies separate unless this public contract is
-// changed deliberately.
+// Security boundary: this transport is only for browser/qv2 portal traffic.
+// Registered-agent control traffic must use native UDP and must not reach it.
 func relayDo(ctx context.Context, httpClient HTTPDoer, relayBaseURL, serverID string, packet []byte) (status int, body []byte, url string, err error) {
 	if httpClient == nil {
 		httpClient = http.DefaultClient

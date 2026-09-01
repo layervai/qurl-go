@@ -8,10 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
-	"net/http/httptest"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -28,7 +26,6 @@ import (
 	"github.com/layervai/qurl-go/relayknock"
 	"github.com/layervai/qurl-go/relayknock/nativeudp"
 	"github.com/layervai/qurl-go/relayknock/relayknocktest"
-	"github.com/layervai/qurl-go/relayknock/sessionrelay"
 )
 
 const canonicalNativeDeviceCredential = "lv_live_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
@@ -227,88 +224,6 @@ func (s *runtimeUDPServer) snapshot() []runtimeUDPRequest {
 	result := make([]runtimeUDPRequest, len(s.requests))
 	for i := range s.requests {
 		result[i] = runtimeUDPRequest{typeID: s.requests[i].typeID, body: bytes.Clone(s.requests[i].body)}
-	}
-	return result
-}
-
-type runtimeRelayServer struct {
-	t          *testing.T
-	serverPriv []byte
-	agentPub   []byte
-	steps      []runtimeUDPStep
-	server     *httptest.Server
-
-	mu       sync.Mutex
-	requests []runtimeUDPRequest
-}
-
-func newRuntimeRelayServer(t *testing.T, serverPriv, agentPub []byte, steps ...runtimeUDPStep) *runtimeRelayServer {
-	t.Helper()
-	r := &runtimeRelayServer{t: t, serverPriv: bytes.Clone(serverPriv), agentPub: bytes.Clone(agentPub), steps: append([]runtimeUDPStep(nil), steps...)}
-	r.server = httptest.NewTLSServer(http.HandlerFunc(r.serveHTTP))
-	t.Cleanup(r.server.Close)
-	return r
-}
-
-func (r *runtimeRelayServer) serveHTTP(w http.ResponseWriter, req *http.Request) {
-	packet, err := io.ReadAll(io.LimitReader(req.Body, 4097))
-	if err != nil {
-		r.t.Errorf("read runtime relay packet: %v", err)
-		return
-	}
-	r.mu.Lock()
-	index := len(r.requests)
-	r.mu.Unlock()
-	if index >= len(r.steps) {
-		r.t.Errorf("unexpected runtime relay request %d", index)
-		http.Error(w, "unexpected", http.StatusBadRequest)
-		return
-	}
-	step := r.steps[index]
-	var opened *relayknock.Reply
-	if step.requestType == relayknock.TypeReknock {
-		opened, err = relayknocktest.OpenReknockMessage(r.serverPriv, r.agentPub, step.reknockCookie, packet)
-	} else {
-		opened, err = relayknocktest.OpenInitiatorMessage(r.serverPriv, r.agentPub, packet)
-	}
-	if err != nil || opened.Type != step.requestType {
-		r.t.Errorf("open runtime relay request %d = %#v, %v", index, opened, err)
-		http.Error(w, "rejected", http.StatusBadRequest)
-		return
-	}
-	r.mu.Lock()
-	r.requests = append(r.requests, runtimeUDPRequest{typeID: opened.Type, body: bytes.Clone(opened.Body)})
-	r.mu.Unlock()
-	replyBody := step.replyBody
-	if step.replyType == relayknock.TypeCookieChallenge {
-		replyBody = fmt.Sprintf(`{"trxId":%d,"cookie":%q}`, opened.Counter, base64.StdEncoding.EncodeToString(step.reknockCookie))
-	}
-	response, err := relayknocktest.BuildReply(step.replyType, &relayknock.KnockInputs{
-		DeviceStaticPriv: r.serverPriv,
-		ServerStaticPub:  r.agentPub,
-		EphemeralPriv:    bytes.Repeat([]byte{byte(0x70 + index)}, 32),
-		TimestampNanos:   uint64(time.Now().UnixNano()),
-		Counter:          opened.Counter + step.replyCounterDelta,
-		Preamble:         uint32(0x10203040 + index),
-		Body:             []byte(replyBody),
-	})
-	if err != nil {
-		r.t.Errorf("build runtime relay reply: %v", err)
-		return
-	}
-	_, _ = w.Write(response)
-}
-
-func (r *runtimeRelayServer) option() AgentRuntimeSessionOption {
-	return WithAgentRuntimeSessionRelay(r.server.URL, r.server.Client())
-}
-
-func (r *runtimeRelayServer) snapshot() []runtimeUDPRequest {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	result := make([]runtimeUDPRequest, len(r.requests))
-	for i := range r.requests {
-		result[i] = runtimeUDPRequest{typeID: r.requests[i].typeID, body: bytes.Clone(r.requests[i].body)}
 	}
 	return result
 }
@@ -2170,11 +2085,11 @@ func TestKnockRegisteredAgent_LocalFailuresNeverBecomeEndpointNoReply(t *testing
 	for _, test := range []struct {
 		name    string
 		key     []byte
-		options []AgentRuntimeSessionOption
+		options []AgentRuntimeUDPOption
 		want    error
 	}{
-		{name: "DNS", key: privateKey, options: []AgentRuntimeSessionOption{WithAgentRuntimeUDPResolver(resolveFailure)}, want: nativeudp.ErrResolve},
-		{name: "dial", key: privateKey, options: []AgentRuntimeSessionOption{
+		{name: "DNS", key: privateKey, options: []AgentRuntimeUDPOption{WithAgentRuntimeUDPResolver(resolveFailure)}, want: nativeudp.ErrResolve},
+		{name: "dial", key: privateKey, options: []AgentRuntimeUDPOption{
 			WithAgentRuntimeUDPResolver(f.resolver),
 			WithAgentRuntimeUDPDialer(&noIONativeDialer{}),
 		}, want: nativeudp.ErrTransport},
@@ -2260,106 +2175,6 @@ func TestKnockRegisteredAgent_CookieChallengeReResolvesForOneBoundReknock(t *tes
 	}
 	if knk.HeaderType != nhpKNKHeaderType || rkn.HeaderType != nhpRKNHeaderType || knk.UserID != rkn.UserID || knk.DeviceID != rkn.DeviceID || knk.AuthServiceID != rkn.AuthServiceID || knk.KnockResourceID != rkn.KnockResourceID || knk.RunID != rkn.RunID {
 		t.Fatalf("KNK/RKN session bodies drifted: knk=%#v rkn=%#v", knk, rkn)
-	}
-}
-
-func TestKnockRegisteredAgent_SessionRelayBypassesUDPWithoutFallback(t *testing.T) {
-	contract := loadAssignmentFixture(t)
-	f := newRuntimeFixture(t, nil, nil)
-	seedSessionLease(t, f, contract, time.Now().Add(12*time.Hour))
-	binding, privateKey := openSessionBinding(t, f)
-	relay := newRuntimeRelayServer(t, f.cellUDP.serverPriv, f.cellUDP.agentPub, sessionKnockStep())
-	resolver := runtimeResolverFunc(func(context.Context, string, string) ([]netip.Addr, error) {
-		return nil, errors.New("UDP must not be used")
-	})
-	result, err := KnockRegisteredAgent(context.Background(), binding, privateKey, "resource-public-key",
-		NativeKnockOptions{ProtectedResourceID: testConnectorID, RunID: "0123456789abcdef", RunAttempt: 1},
-		WithAgentRuntimeUDPResolver(resolver), relay.option())
-	if err != nil || result == nil || result.SessionID != 123 {
-		t.Fatalf("relayed admission = %#v, %v", result, err)
-	}
-	requests := relay.snapshot()
-	if len(requests) != 1 || requests[0].typeID != relayknock.TypeKnock || len(f.cellUDP.snapshot()) != 0 {
-		t.Fatalf("relay/UDP requests = %#v/%#v", requests, f.cellUDP.snapshot())
-	}
-}
-
-func TestKnockRegisteredAgent_SessionRelayCarriesRealCookieBoundRKN(t *testing.T) {
-	contract := loadAssignmentFixture(t)
-	f := newRuntimeFixture(t, nil, nil)
-	seedSessionLease(t, f, contract, time.Now().Add(12*time.Hour))
-	binding, privateKey := openSessionBinding(t, f)
-	cookie := bytes.Repeat([]byte{0x5a}, 32)
-	knock := sessionKnockStep()
-	knock.replyType = relayknock.TypeCookieChallenge
-	knock.replyBody = ""
-	knock.reknockCookie = cookie
-	reknock := sessionKnockStep()
-	reknock.requestType = relayknock.TypeReknock
-	reknock.reknockCookie = cookie
-	relay := newRuntimeRelayServer(t, f.cellUDP.serverPriv, f.cellUDP.agentPub, knock, reknock)
-
-	result, err := KnockRegisteredAgent(context.Background(), binding, privateKey, "resource-public-key",
-		NativeKnockOptions{ProtectedResourceID: testConnectorID, RunID: "0123456789abcdef", RunAttempt: 1}, relay.option())
-	if err != nil || result == nil || result.SessionID != 123 {
-		t.Fatalf("cookie-bound relayed admission = %#v, %v", result, err)
-	}
-	requests := relay.snapshot()
-	if len(requests) != 2 || requests[0].typeID != relayknock.TypeKnock || requests[1].typeID != relayknock.TypeReknock || len(f.cellUDP.snapshot()) != 0 {
-		t.Fatalf("relay/UDP requests = %#v/%#v", requests, f.cellUDP.snapshot())
-	}
-	var knk, rkn nativeAgentKnockBody
-	if err := json.Unmarshal(requests[0].body, &knk); err != nil {
-		t.Fatalf("decode relayed KNK body: %v", err)
-	}
-	if err := json.Unmarshal(requests[1].body, &rkn); err != nil {
-		t.Fatalf("decode relayed RKN body: %v", err)
-	}
-	if knk.HeaderType != nhpKNKHeaderType || rkn.HeaderType != nhpRKNHeaderType ||
-		knk.UserID != rkn.UserID || knk.DeviceID != rkn.DeviceID || knk.AuthServiceID != rkn.AuthServiceID ||
-		knk.KnockResourceID != rkn.KnockResourceID || knk.RunID != rkn.RunID {
-		t.Fatalf("relayed KNK/RKN session bodies drifted: knk=%#v rkn=%#v", knk, rkn)
-	}
-}
-
-func TestKnockRegisteredAgent_InvalidSessionRelayFailsBeforeIO(t *testing.T) {
-	contract := loadAssignmentFixture(t)
-	f := newRuntimeFixture(t, nil, nil)
-	seedSessionLease(t, f, contract, time.Now().Add(12*time.Hour))
-	binding, privateKey := openSessionBinding(t, f)
-
-	result, err := KnockRegisteredAgent(context.Background(), binding, privateKey, "resource-public-key",
-		NativeKnockOptions{ProtectedResourceID: testConnectorID, RunID: "0123456789abcdef", RunAttempt: 1},
-		WithAgentRuntimeSessionRelay("http://relay.example.test", nil))
-	if result != nil || !errors.Is(err, ErrInvalidNativeKnockInput) || !errors.Is(err, ErrInvalidRegisterConfig) ||
-		!errors.Is(err, sessionrelay.ErrInvalidConfig) ||
-		len(f.hubUDP.snapshot()) != 0 || len(f.cellUDP.snapshot()) != 0 {
-		t.Fatalf("invalid relay result/error/Hub/UDP = %#v/%v/%#v/%#v", result, err, f.hubUDP.snapshot(), f.cellUDP.snapshot())
-	}
-}
-
-func TestKnockRegisteredAgent_SessionRelayFailureDoesNotFallBackToUDP(t *testing.T) {
-	contract := loadAssignmentFixture(t)
-	f := newRuntimeFixture(t, nil, nil)
-	seedSessionLease(t, f, contract, time.Now().Add(12*time.Hour))
-	binding, privateKey := openSessionBinding(t, f)
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		http.Error(w, "internal detail", http.StatusBadGateway)
-	}))
-	defer server.Close()
-	var resolves atomic.Int32
-	resolver := runtimeResolverFunc(func(context.Context, string, string) ([]netip.Addr, error) {
-		resolves.Add(1)
-		return []netip.Addr{netip.MustParseAddr("9.9.9.9")}, nil
-	})
-	_, err := KnockRegisteredAgent(context.Background(), binding, privateKey, "resource-public-key",
-		NativeKnockOptions{ProtectedResourceID: testConnectorID, RunID: "0123456789abcdef", RunAttempt: 1},
-		WithAgentRuntimeUDPResolver(resolver), WithAgentRuntimeSessionRelay(server.URL, server.Client()))
-	if !errors.Is(err, sessionrelay.ErrTransport) || resolves.Load() != 0 || len(f.cellUDP.snapshot()) != 0 {
-		t.Fatalf("relay failure/resolves/UDP = %v/%d/%#v", err, resolves.Load(), f.cellUDP.snapshot())
-	}
-	if strings.Contains(err.Error(), server.URL) || strings.Contains(err.Error(), "internal detail") {
-		t.Fatalf("relay failure exposed detail: %v", err)
 	}
 }
 
@@ -6715,13 +6530,9 @@ func TestRegisteredAgentSessionControl_RejectsInvalidArgumentsBeforeIO(t *testin
 			opts := append([]AgentRuntimeUDPOption{
 				WithAgentRuntimeUDPResolver(f.resolver), WithAgentRuntimeUDPDialer(f.dialer),
 			}, test.transportOpts...)
-			sessionOpts := make([]AgentRuntimeSessionOption, len(opts))
-			for i, opt := range opts {
-				sessionOpts[i] = opt
-			}
 
 			_, knockErr := KnockRegisteredAgent(context.Background(), binding, key, "resource-public-key",
-				NativeKnockOptions{ProtectedResourceID: testConnectorID, RunID: "0123456789abcdef", RunAttempt: 1}, sessionOpts...)
+				NativeKnockOptions{ProtectedResourceID: testConnectorID, RunID: "0123456789abcdef", RunAttempt: 1}, opts...)
 			receipt := NativeSessionReceipt{}
 			if binding != nil {
 				endpoint, endpointErr := assignmentNativeEndpoint(binding.assignment())
@@ -6736,12 +6547,8 @@ func TestRegisteredAgentSessionControl_RejectsInvalidArgumentsBeforeIO(t *testin
 			}
 			_, exitErr := RetireRegisteredAgentSession(context.Background(), binding, key, receipt, opts...)
 			for entryPoint, err := range map[string]error{"knock": knockErr, "exit": exitErr} {
-				wantMessage := test.wantMessage
-				if entryPoint == "knock" {
-					wantMessage = strings.ReplaceAll(wantMessage, "native UDP transport", "native session transport")
-				}
-				if !errors.Is(err, ErrInvalidNativeKnockInput) || !strings.Contains(err.Error(), wantMessage) {
-					t.Fatalf("%s = %v, want ErrInvalidNativeKnockInput containing %q", entryPoint, err, wantMessage)
+				if !errors.Is(err, ErrInvalidNativeKnockInput) || !strings.Contains(err.Error(), test.wantMessage) {
+					t.Fatalf("%s = %v, want ErrInvalidNativeKnockInput containing %q", entryPoint, err, test.wantMessage)
 				}
 			}
 			if len(f.cellUDP.snapshot()) != 0 {

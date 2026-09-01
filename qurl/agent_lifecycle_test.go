@@ -611,20 +611,16 @@ func TestAgentRuntimeOptionSetsCompileForIntendedSurfaces(t *testing.T) {
 	acceptRecovery := func(AgentRuntimeRecoveryOption) {}
 	acceptLifecycle := func(AgentRuntimeLifecycleOption) {}
 	acceptUDP := func(AgentRuntimeUDPOption) {}
-	acceptSession := func(AgentRuntimeSessionOption) {}
 	acceptRegistration(WithAgentRuntimeHub(runtimeTestHub()))
 	acceptRecovery(WithAgentRuntimeRecoveryHub(runtimeTestHub()))
 	acceptRegistration(WithAgentRuntimeAllowedRegistrationKeyKinds(RegistrationKeyKindAgent))
 	acceptRegistration(WithAgentRuntimeUDPBounds(time.Second, 1))
 	acceptRefresh(WithAgentRuntimeUDPBounds(time.Second, 1))
-	acceptSession(WithAgentRuntimeUDPBounds(time.Second, 1))
-	sessionRelay := WithAgentRuntimeSessionRelay("https://relay.example.test", nil)
-	acceptSession(sessionRelay)
-	if _, ok := sessionRelay.(AgentRuntimeUDPOption); ok {
-		t.Error("session relay option must not satisfy AgentRuntimeUDPOption")
-	}
-	if _, ok := sessionRelay.(AgentRuntimeLifecycleOption); ok {
-		t.Error("session relay option must not satisfy AgentRuntimeLifecycleOption")
+	acceptUDP(WithAgentRuntimeUDPBounds(time.Second, 1))
+	assignmentRetry := WithAgentRuntimeAssignmentRetryBudget(2, time.Second)
+	acceptLifecycle(assignmentRetry)
+	if _, ok := assignmentRetry.(AgentRuntimeUDPOption); ok {
+		t.Error("assignment retry option must not satisfy AgentRuntimeUDPOption")
 	}
 	baseURL := WithAgentClientBaseURL("https://api.layerv.ai")
 	acceptClient(baseURL)

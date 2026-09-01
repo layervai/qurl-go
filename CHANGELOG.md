@@ -6,6 +6,18 @@ independently under `awsstore/vX.Y.Z` tags.
 Pre-1.0 semantic versioning: breaking changes land in minor versions (v0.N.0)
 and are marked **Breaking** with what to change.
 
+## v0.11.0 — 2026-09-01
+
+- **Breaking:** registered-agent session admission and durable operation
+  recovery now use native UDP only. `WithAgentRuntimeSessionRelay` and
+  `AgentRuntimeSessionOption` were removed. `KnockRegisteredAgent` and
+  `RecoverNativeSessionOperation` accept `AgentRuntimeUDPOption` again. Update
+  named function values and change any `[]AgentRuntimeSessionOption` wrapper to
+  `[]AgentRuntimeUDPOption`, and remove imports of the deleted
+  `relayknock/sessionrelay` package. HTTPS session admission has no replacement:
+  callers must reach the authenticated assigned cell over UDP 443. Durable
+  operation and NHP wire semantics are unchanged.
+
 ## v0.10.0 — 2026-09-01
 
 - **Breaking:** `KnockRegisteredAgent` and `RecoverNativeSessionOperation` now
