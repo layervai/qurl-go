@@ -348,8 +348,10 @@ var errPendingActivationProbeFailed = errors.New("qurl test: durable state was u
 // stalledReadDialer holds the first read on connections to one address past the
 // per-datagram timeout, standing in for the scheduler stall a loaded runner
 // imposes on an exchange whose fake server is otherwise answering in
-// microseconds. The stall is applied once per connection so a retried exchange
-// proceeds normally.
+// microseconds. The stall is once per connection, and the transport dials afresh
+// for every attempt, so a retried exchange is stalled again rather than
+// proceeding normally -- and one logical Hub exchange stalls twice, since the
+// cookie challenge and the proof are separate dials.
 //
 // applied counts the reads actually delayed, because the address match is what
 // arms this: a listener that binds a different address representation, or a
@@ -414,6 +416,14 @@ func (c *stalledReadConn) Read(p []byte) (int, error) {
 // 1 here as at every other call site in the package. Attempt counts are not set
 // here at all: they come from WithAgentRuntimeAssignmentRetryBudget, so a caller
 // counting retries sets its own budget and this helper does not constrain it.
+//
+// Replacing the fixture's own bounds depends on options applying last-wins, which
+// is load-bearing and unenforceable from here: cellSilenced would still count a
+// working dialer if only the bounds half stopped winning. What catches that is
+// TestConnectAgentRuntime_StalledHubDoesNotDivertREGBackoffCancellation, whose
+// stalled Hub outruns the silence timeout but not this one. Both scans below also
+// read the scripts as they stand before the call, so a step the Hub's assignment
+// fallback appends mid-call is outside what they can promise.
 func (f *runtimeFixture) instantCellSilence(t *testing.T, inner nativeudp.Dialer) []AgentRuntimeRegistrationOption {
 	t.Helper()
 	for i, step := range f.cellUDP.steps {
@@ -3453,6 +3463,18 @@ func TestConnectAgentRuntime_StalledHubDoesNotDivertREGBackoffCancellation(t *te
 	// leaves a Hub answering in microseconds, which every assertion below is
 	// happy with. The Hub exchange dials the challenge and the proof separately,
 	// so at least one read must have been held.
+	// Attribution first, mechanism second. A diverted cancellation aborts before
+	// the REG is sent, which leaves the cell counters at zero as a consequence,
+	// so asserting engagement first would answer "the silence never engaged" to a
+	// run whose actual complaint is that the Hub backed off. Order these the
+	// other way and this test blames the wrong thing in exactly the scenario it
+	// was written to catch.
+	if probeErr != nil {
+		t.Fatalf("durable state unreadable at cancellation, so which exchange backed off is unknown: %v", probeErr)
+	}
+	if !pendingDurableAtCancel {
+		t.Fatal("cancellation fired before the pending activation was durable: the stalled Hub exchange backed off, not the REG")
+	}
 	if got := stallsApplied.Load(); got < 1 {
 		t.Fatalf("stalled Hub reads = %d, want at least 1: the injected stall never engaged", got)
 	}
@@ -3461,12 +3483,6 @@ func TestConnectAgentRuntime_StalledHubDoesNotDivertREGBackoffCancellation(t *te
 	}
 	if sleeps != 1 {
 		t.Fatalf("cancellation hook ran %d times, want exactly 1", sleeps)
-	}
-	if probeErr != nil {
-		t.Fatalf("durable state unreadable at cancellation: %v", probeErr)
-	}
-	if !pendingDurableAtCancel {
-		t.Fatal("cancellation fired before the pending activation was durable: the stalled Hub exchange backed off, not the REG")
 	}
 	pending, loadErr := f.store.LoadAgentState(context.Background())
 	if loadErr != nil || pending.PendingActivation == nil || pending.PendingActivation.AssignmentTicket != "conformance-assignment-ticket-0001" {
