@@ -9,7 +9,7 @@ package nativeudp_test
 // test. That is expensive to diagnose from CI and nearly free to catch here.
 
 import (
-	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -19,22 +19,103 @@ func envFrom(vars map[string]string) func(string) string {
 	return func(name string) string { return vars[name] }
 }
 
+// sixSlotPool is a SIX-slot fixture, named for its size because several tests
+// assert arithmetic that is specific to six (composite, 2*3, the size the gate
+// ran at through the outage). It is deliberately NOT "the current pool": the
+// live size lives in a secret and was seven as of 2026-08-31. Distribution
+// properties here hold at any size above one; the size-specific ones say so.
+var sixSlotPool = []string{"a", "b", "c", "d", "e", "f"}
+
+// sevenSlotPool is the prime-size counterpart, matching the sandbox pool after
+// a seventh owner was seeded. Used where the point is that a prime size is
+// immune to every stride below it.
+var sevenSlotPool = []string{"a", "b", "c", "d", "e", "f", "g"}
+
+// ciEnv builds the two variables selectEnrollment rotates on. Taking ints keeps
+// callers from respelling the variable names on every loop iteration.
+func ciEnv(runNumber, attempt int) func(string) string {
+	return envFrom(map[string]string{
+		"GITHUB_RUN_NUMBER":  strconv.Itoa(runNumber),
+		"GITHUB_RUN_ATTEMPT": strconv.Itoa(attempt),
+	})
+}
+
+// slotFor is the tally step every distribution test below repeats.
+//
+// It FAILS rather than discarding the blocked-counter report. Every property
+// these sweeps assert is a property of the rotation; if selection quietly fell
+// through to the random path -- which is what a tightened counter floor or a
+// renamed variable would do -- the sweeps would keep running and start
+// measuring a random distribution instead of failing. A test that silently
+// stops testing anything is the failure mode this whole file is about.
+func slotFor(t *testing.T, pool []string, runNumber, attempt int) int {
+	t.Helper()
+	env := ciEnv(runNumber, attempt)
+	_, slot := selectEnrollment(pool, env)
+	if blocked := blockedRotationCounters(env); len(blocked) > 0 {
+		t.Fatalf("run %d attempt %d did not rotate (%v); these sweeps would be measuring "+
+			"the random fallback rather than the rotation", runNumber, attempt, blocked)
+	}
+	return slot
+}
+
+// ceilDiv is the per-slot ceiling a rotation guarantees over n runs.
+func ceilDiv(n, slots int) int { return (n + slots - 1) / slots }
+
+// sweepStarts returns every residue class mod size, and nothing else.
+//
+// DERIVED from the size rather than listed: a literal list silently loses
+// coverage the day the pool changes size, and in the direction this repo is
+// heading -- {0, 1, 7, 41, 202, 1000} covers four of six residues today and only
+// THREE OF SEVEN at the prime size selectEnrollment argues for, while the sweeps
+// that use it would keep passing and still claim to start "from any offset".
+//
+// Residues are also ENOUGH. Every property these sweeps assert depends on start
+// only through start mod size, so large arbitrary offsets are duplicates of
+// starts already here (41, 202 and 1000 reduce to 5, 4 and 4 on a six-slot
+// pool) and buy iteration count rather than coverage.
+func sweepStarts(size int) []int {
+	starts := make([]int, 0, size)
+	for i := range size {
+		// 1..size, not 0..size-1: run numbers are 1-based, and size is congruent
+		// to 0, so this still covers every residue class without feeding
+		// selectEnrollment a value its contract says cannot occur.
+		starts = append(starts, i+1)
+	}
+	return starts
+}
+
 func TestParseEnrollmentPoolSplitsAndCleans(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		raw  string
-		want []string
+		name     string
+		raw      string
+		want     []string
+		wantDups int
 	}{
-		{"newline separated", "one\ntwo\nthree", []string{"one", "two", "three"}},
-		{"comma separated", "one,two,three", []string{"one", "two", "three"}},
-		{"crlf line endings", "one\r\ntwo", []string{"one", "two"}},
-		{"blank lines dropped", "one\n\n\ntwo\n", []string{"one", "two"}},
-		{"surrounding space trimmed", "  one  \n\ttwo\t", []string{"one", "two"}},
-		{"empty", "", nil},
-		{"only separators", "\n,\n , \n", nil},
+		{"newline separated", "one\ntwo\nthree", []string{"one", "two", "three"}, 0},
+		{"comma separated", "one,two,three", []string{"one", "two", "three"}, 0},
+		{"crlf line endings", "one\r\ntwo", []string{"one", "two"}, 0},
+		{"blank lines dropped", "one\n\n\ntwo\n", []string{"one", "two"}, 0},
+		{"surrounding space trimmed", "  one  \n\ttwo\t", []string{"one", "two"}, 0},
+		{"empty", "", nil, 0},
+		{"only separators", "\n,\n , \n", nil, 0},
+		// A duplicate must not inflate len(pool): it is the denominator of the
+		// hourly ceiling and the input to the composite-size warning, so a
+		// repeat would overstate capacity AND silence the warning at once.
+		{"duplicate dropped and counted", "one\ntwo\none", []string{"one", "two"}, 1},
+		{"duplicate after trimming", "one\n  one  \ntwo", []string{"one", "two"}, 1},
+		{"every entry repeated", "a\nb\na\nb", []string{"a", "b"}, 2},
+		{
+			"six owners with one repeat parses as six", "a\nb\nc\nd\ne\nf\nc",
+			[]string{"a", "b", "c", "d", "e", "f"},
+			1,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := parseEnrollmentPool(tc.raw)
+			got, dups := parseEnrollmentPool(tc.raw)
+			if dups != tc.wantDups {
+				t.Fatalf("dropped %d duplicates, want %d", dups, tc.wantDups)
+			}
 			if len(got) != len(tc.want) {
 				t.Fatalf("parsed %d entries %q, want %d %q", len(got), got, len(tc.want), tc.want)
 			}
@@ -48,7 +129,7 @@ func TestParseEnrollmentPoolSplitsAndCleans(t *testing.T) {
 }
 
 func TestSelectEnrollmentDegenerateCases(t *testing.T) {
-	lookup := envFrom(map[string]string{"GITHUB_RUN_ID": "100", "GITHUB_RUN_ATTEMPT": "1"})
+	lookup := ciEnv(100, 1)
 
 	t.Run("empty pool reports no slot", func(t *testing.T) {
 		got, slot := selectEnrollment(nil, lookup)
@@ -66,8 +147,8 @@ func TestSelectEnrollmentDegenerateCases(t *testing.T) {
 }
 
 func TestSelectEnrollmentIsDeterministicForOneAttempt(t *testing.T) {
-	pool := []string{"a", "b", "c", "d", "e", "f"}
-	lookup := envFrom(map[string]string{"GITHUB_RUN_ID": "12345", "GITHUB_RUN_ATTEMPT": "2"})
+	pool := sixSlotPool
+	lookup := ciEnv(12345, 2)
 
 	first, firstSlot := selectEnrollment(pool, lookup)
 	for i := 0; i < 32; i++ {
@@ -80,44 +161,422 @@ func TestSelectEnrollmentIsDeterministicForOneAttempt(t *testing.T) {
 
 // TestSelectEnrollmentSpreadsReruns is the property the pool exists for.
 //
-// A rerun is the case that exhausted the budget in practice: same run id, a new
+// A rerun is the case that exhausted the budget in practice: same run, a new
 // attempt, another issuance. Keying selection on the run alone would send every
 // attempt back to the credential whose budget the previous attempt just spent,
-// so the pool would be present and useless. Successive attempts must move.
+// so the pool would be present and useless. Successive attempts must move -- and
+// because the attempt rotates rather than rehashes, they must move to a slot
+// nobody has used yet, which is the strongest form of "move".
 func TestSelectEnrollmentSpreadsReruns(t *testing.T) {
-	pool := []string{"a", "b", "c", "d", "e", "f"}
+	pool := sixSlotPool
 
 	seen := map[int]bool{}
-	for attempt := 1; attempt <= 6; attempt++ {
-		_, slot := selectEnrollment(pool, envFrom(map[string]string{
-			"GITHUB_RUN_ID":      "999",
-			"GITHUB_RUN_ATTEMPT": fmt.Sprint(attempt),
-		}))
-		seen[slot] = true
+	for attempt := 1; attempt <= len(pool); attempt++ {
+		seen[slotFor(t, pool, 999, attempt)] = true
 	}
-	// Six attempts over six slots will collide sometimes; demanding a perfect
-	// permutation would be asserting a property of FNV rather than of this
-	// code. What must hold is that reruns genuinely move around.
-	if len(seen) < 3 {
-		t.Fatalf("six reruns used only %d distinct slots (%v); reruns are not spreading", len(seen), seen)
+	if len(seen) != len(pool) {
+		t.Fatalf("%d reruns used only %d distinct slots (%v); a rotation must visit every slot before repeating",
+			len(pool), len(seen), seen)
 	}
 }
 
 // TestSelectEnrollmentSpreadsRuns covers the ordinary case: distinct PRs.
+//
+// GITHUB_RUN_NUMBER increments by one per run of this workflow, so consecutive
+// runs must land on consecutive slots and the pool must stay balanced to within
+// one. A hash would only manage this on average, and "on average" is what the
+// per-credential budget punishes -- see the clustering test below.
 func TestSelectEnrollmentSpreadsRuns(t *testing.T) {
-	pool := []string{"a", "b", "c", "d", "e", "f"}
+	pool := sixSlotPool
+
+	const runs = 40
+	used := map[int]int{}
+	for run := 0; run < runs; run++ {
+		used[slotFor(t, pool, 1000+run, 1)]++
+	}
+	// Ranging over the pool rather than over `used` is deliberate: a slot that
+	// took ZERO runs has no map entry, so ranging the map would skip exactly
+	// the starvation this lower bound exists to catch.
+	low, high := runs/len(pool), ceilDiv(runs, len(pool))
+	for slot := range pool {
+		if n := used[slot]; n < low || n > high {
+			t.Fatalf("slot %d took %d of %d runs; a rotation keeps every slot within [%d,%d] (%v)",
+				slot, n, runs, low, high, used)
+		}
+	}
+}
+
+// perCredentialHourlyBudget is qurl-service's registrationOTPPerCredentialRate
+// at the time of writing. It sets how far these tests look ahead, and every
+// message a runtime path INTERPOLATES the rate into reads it from here -- the
+// truncated-pool error, the pool-size advisory, and otpMailbox.timedOut, which
+// is the first thing an operator sees on this failure.
+//
+// It does NOT cover prose. The rate is also written out longhand in
+// selectEnrollment's derivation and in the gate workflow's GATE_PATHS comment,
+// where nothing can interpolate it; if the service retunes the rate, those are
+// the two places that must be edited by hand. Claiming otherwise would be the
+// same kind of overreach this file's history is made of.
+const perCredentialHourlyBudget = 5
+
+// TestSelectEnrollmentNeverClustersWithinTheIssuanceBudget pins the property
+// whose absence turned the gate red on 2026-08-31, and is the whole reason
+// selection rotates instead of hashing.
+//
+// Issuance is capped per CREDENTIAL, so the pool is only worth its advertised
+// perCredentialHourlyBudget*len(pool) an hour if runs land EVENLY. A hash
+// spreads them independently -- balls-in-bins -- and the gate goes red the
+// moment any single bin fills, however much of the pool is still untouched.
+// That is not a tail risk: nine real runs hashed into three slots, put five on
+// one of them, and refused the tenth with twenty-one of thirty issuances
+// unspent. A rotation makes it arithmetically impossible: across any N
+// consecutive runs no slot is used more than ceil(N/len(pool)) times, so a full
+// hour of perCredentialHourlyBudget*len(pool) runs still fits.
+//
+// Reverting selectEnrollment to a hash of the run id fails this test.
+func TestSelectEnrollmentNeverClustersWithinTheIssuanceBudget(t *testing.T) {
+	pool := sixSlotPool
+	fullHour := perCredentialHourlyBudget * len(pool)
+
+	// Prefix windows from every offset, at several attempts. Prefixes are enough
+	// because the rotation is translation-invariant mod len(pool): a window
+	// starting mid-sequence is a prefix from a different offset, and sweepStarts
+	// covers every residue class so that claim is actually true. Run numbers are
+	// wherever this workflow's history has reached, not values a test may
+	// choose, and an hour of reruns is still an hour of issuances.
+	for _, start := range sweepStarts(len(pool)) {
+		for _, attempt := range []int{1, 2, 3} {
+			// Counts accumulate: after run i the tallies ARE the window of
+			// i+1, so only the slot just incremented can have crossed its
+			// ceiling -- every other slot is unchanged from the previous
+			// window, where it already met a ceiling no larger than this one.
+			used := map[int]int{}
+			for i := 0; i < fullHour; i++ {
+				slot := slotFor(t, pool, start+i, attempt)
+				used[slot]++
+				if ceiling := ceilDiv(i+1, len(pool)); used[slot] > ceiling {
+					t.Fatalf("%d consecutive runs from %d (attempt %d) put %d issuances on "+
+						"slot %d; a rotation allows at most %d, and the credential budget is %d",
+						i+1, start, attempt, used[slot], slot, ceiling, perCredentialHourlyBudget)
+				}
+			}
+		}
+	}
+}
+
+// TestSmallestFactorFlagsExactlyTheVulnerablePoolSizes covers the runtime half
+// of the stride guard: the gate logs a note when the LIVE pool size is
+// composite, and stays silent once it is prime. Silence is the signal that the
+// seventh-owner residual has been closed, so it has to be exact.
+func TestSmallestFactorFlagsExactlyTheVulnerablePoolSizes(t *testing.T) {
+	for _, tc := range []struct {
+		size int
+		want int
+	}{
+		// 0 and 1 are silent because n < 4 short-circuits; 2 and 3 because they
+		// are prime. Neither is a SAFETY claim -- sizes 0, 1 and 2 all degrade,
+		// which is why poolSizeAdvisory handles them separately. See
+		// TestPoolSizeAdvisorySpeaksAtEverySizeThatCosts.
+		{0, 0},
+		{1, 0},
+		{2, 0},
+		{3, 0},
+		{4, 2},
+		{6, 2},
+		{8, 2},
+		{9, 3},
+		// 6 and 7 are the seeding argument, and these rows already assert it:
+		// six is composite so the gate warns, seven is prime so it goes
+		// silent, and that silence is how a seventh owner is observed.
+		// Re-asserting them at the end of this test would be prose in
+		// assertion form -- a second code path that can drift but cannot
+		// independently fail.
+		{10, 2}, // composite: flagged
+		{5, 0},
+		{7, 0},
+		{11, 0},
+		{13, 0}, // prime: silent
+	} {
+		if got := smallestFactor(tc.size); got != tc.want {
+			// Errorf, not Fatalf: a table that stops at the first mismatch hides
+			// every row after it, and the point of a table is the whole set.
+			t.Errorf("smallestFactor(%d) = %d, want %d", tc.size, got, tc.want)
+		}
+	}
+}
+
+// TestSelectEnrollmentBoundsInterleavedReruns covers the window shape the sweep
+// above cannot reach, despite looking like it does.
+//
+// slotFor reduces to (runNumber + attempt - 1) mod len(pool), so a window at a
+// FIXED attempt is bit-for-bit the same window at a different start: the sweep's
+// attempt loop widens which residues the starts cover, but every window in it
+// still holds the attempt constant, which is the case the rotation makes
+// trivially perfect. The distinct shape is attempts INTERLEAVED inside one
+// window -- a flaky stretch where runs retry -- which is where the aliasing
+// selectEnrollment documents ((N, attempt 2) onto (N+1, attempt 1)) shows up.
+//
+// The ideal ceiling does NOT survive interleaving and is not claimed to: three
+// runs each retried once put 6 issuances on 4 slots, two of them twice, against
+// a ceil(6/6)=1 ideal. The bound that does hold is ceil(runs/len(pool)) per
+// attempt level, i.e. reruns cost proportionally rather than collapsing the
+// pool -- which is the "bounded at one extra issuance on one slot" claim on
+// selectEnrollment, asserted here rather than left as prose.
+func TestSelectEnrollmentBoundsInterleavedReruns(t *testing.T) {
+	pool := sixSlotPool
+
+	for _, attemptsPerRun := range []int{2, 3} {
+		for _, start := range sweepStarts(len(pool)) {
+			for runs := 1; runs <= perCredentialHourlyBudget*len(pool); runs++ {
+				used := map[int]int{}
+				for i := 0; i < runs; i++ {
+					for attempt := 1; attempt <= attemptsPerRun; attempt++ {
+						used[slotFor(t, pool, start+i, attempt)]++
+					}
+				}
+				bound := ceilDiv(runs, len(pool)) * attemptsPerRun
+				for slot := range pool {
+					if n := used[slot]; n > bound {
+						t.Fatalf("%d runs from %d each retried to attempt %d put %d issuances "+
+							"on slot %d; interleaved reruns must stay within %d",
+							runs, start, attemptsPerRun, n, slot, bound)
+					}
+				}
+				// The count bound above is NOT sensitive to the attempt term --
+				// an implementation that ignored the attempt entirely, sending
+				// every rerun back to its run's own slot, satisfies it exactly
+				// (7 runs x 3 attempts puts 6 on one slot against a bound of
+				// 6). This is the assertion that pins the aliasing: reruns must
+				// REACH further, so the runs spread over runs+attempts-1 slots
+				// rather than piling onto the runs alone.
+				if want := min(len(pool), runs+attemptsPerRun-1); len(used) != want {
+					t.Fatalf("%d runs from %d retried to attempt %d touched %d slots; a "+
+						"rotation that moves reruns touches %d (%v)",
+						runs, start, attemptsPerRun, len(used), want, used)
+				}
+			}
+		}
+	}
+}
+
+// TestPoolSizeAdvisorySpeaksAtEverySizeThatCosts pins WHICH sizes get a warning.
+// Silence is read as "the guarantee holds", so a size that degrades quietly is
+// worse than no advisory at all.
+func TestPoolSizeAdvisorySpeaksAtEverySizeThatCosts(t *testing.T) {
+	// 0 and 1 are the unpooled state itself; 2 collapses under the likely
+	// stride; the rest are composite.
+	for _, size := range []int{0, 1, 2, 4, 6, 8, 9, 10, 12} {
+		if poolSizeAdvisory(size) == "" {
+			t.Fatalf("pool size %d degrades under a plausible stride but says nothing", size)
+		}
+	}
+	// Primes above two: only a stride equal to the size collapses them, which
+	// no size can buy off, so silence here is honest.
+	for _, size := range []int{3, 5, 7, 11, 13} {
+		if got := poolSizeAdvisory(size); got != "" {
+			t.Fatalf("prime pool size %d should be silent, said %q", size, got)
+		}
+	}
+	// "Likely" is stride 2 throughout this change, so the advisory may only use
+	// that word where stride 2 actually collapses the pool -- even sizes. At an
+	// odd composite the smallest factor is 3 or more and stride 2 is coprime, so
+	// calling it likely would misname ordinary traffic and overstate the risk.
+	for _, even := range []int{4, 6, 8, 10, 12} {
+		if got := poolSizeAdvisory(even); !strings.Contains(got, "likely") {
+			t.Fatalf("even composite advisory for %d (%q) should name stride 2 as the "+
+				"likely one; 4 is the case that took the prime-square branch and lost it",
+				even, got)
+		}
+	}
+	for _, odd := range []int{9, 15, 25} {
+		if got := poolSizeAdvisory(odd); strings.Contains(got, "likely") {
+			t.Fatalf("advisory for odd composite %d calls its smallest factor 'likely' (%q), "+
+				"but stride 2 is coprime to it and collapses nothing", odd, got)
+		}
+	}
+
+	// Two is the case the strict guard accepts and smallestFactor calls prime.
+	// Its warning must name the collapse, not merely exist.
+	if got := poolSizeAdvisory(2); !strings.Contains(got, "unpooled") {
+		t.Fatalf("the size-2 advisory must say it reaches the unpooled state, said %q", got)
+	}
+	// Size 1 is reachable from BOTH credential sources, and strict judges them
+	// oppositely: it refuses a damaged pool and accepts the single-credential
+	// setup. An advisory that asserts a refusal would be printing "strict runs
+	// refuse this" from inside a strict run that was not refused, so it has to
+	// name both variables and attribute the refusal to the right one.
+	got := poolSizeAdvisory(1)
+	for _, name := range []string{otpE2EEnrollmentPoolEnv, otpE2EEnrollmentEnv} {
+		if !strings.Contains(got, name) {
+			t.Fatalf("the size-1 advisory %q does not name %s; it cannot say which "+
+				"source is damaged and which is supported", got, name)
+		}
+	}
+}
+
+// TestGateWorkflowCommentQuotesTheBudgetConstant closes half the prose fence.
+//
+// perCredentialHourlyBudget's doc names two sites that must be hand-edited if
+// the service retunes the rate, because nothing can interpolate into a comment:
+// selectEnrollment's derivation and the workflow's GATE_PATHS comment. The
+// second is machine-readable -- the workflow file is already parsed by
+// otp_gate_paths_test.go -- so a stale rate there can be caught rather than
+// merely disclaimed. The prose in this package stays a hand-edit.
+func TestGateWorkflowCommentQuotesTheBudgetConstant(t *testing.T) {
+	raw := readGateWorkflow(t)
+
+	// EXACTLY once, not merely present. The comment claims that line is the only
+	// place the file states the number, and a Contains check would leave that
+	// invariant quietly false the day someone adds a second mention -- which is
+	// the drift this fence exists to catch, and which had already happened once:
+	// the paragraph used to spell the rate three ways, so a retune could fix the
+	// one line this test names and leave its neighbours stating the old number.
+	// Leading space, deliberately. Unanchored, "5/hour per credential" is a
+	// SUBSTRING of "15/hour per credential" -- so a retune to 15 would leave the
+	// count at 1 and the fence green, on precisely the stale number it exists to
+	// catch.
+	want := " " + strconv.Itoa(perCredentialHourlyBudget) + "/hour per credential"
+	if n := strings.Count(raw, want); n != 1 {
+		t.Fatalf("%s states %q %d times, want exactly 1: at 0 a retune has left the "+
+			"comment stale, and above 1 the 'only place' claim is false and the extra "+
+			"mentions are outside this fence", gateWorkflowPath, want, n)
+	}
+
+	// The derived arithmetic belongs to selectEnrollment, which can interpolate
+	// the constant. Re-deriving it in the workflow is what produced the drift.
+	// "per-slot" as well as "per slot": the workflow's own pointer sentence used
+	// the hyphenated form, which slipped past a fence whose comment claims to
+	// keep the derivation out. A future re-derivation written with a hyphen
+	// would have passed just as silently.
+	for _, forbidden := range []string{"len(pool)", "per slot", "per-slot", "PER SLOT", "PER-SLOT"} {
+		if strings.Contains(raw, forbidden) {
+			t.Fatalf("%s contains %q: the pool arithmetic moved to selectEnrollment so a "+
+				"rate retune has one line to change here, not a paragraph",
+				gateWorkflowPath, forbidden)
+		}
+	}
+}
+
+// TestPoolDuplicateAdvisoryCountsBothWays pins the arithmetic an operator uses
+// to tell two mistakes apart: a duplicate paste versus a seeding that never
+// landed. Both present as a pool smaller than expected, and only the counts
+// separate them.
+func TestPoolDuplicateAdvisoryCountsBothWays(t *testing.T) {
+	if got := poolDuplicateAdvisory(0, 7); got != "" {
+		t.Fatalf("a clean pool must say nothing, said %q", got)
+	}
+	got := poolDuplicateAdvisory(1, 6)
+	for _, want := range []string{"1 duplicate", "holds 6", "rather than 7"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("advisory %q omits %q; the operator cannot tell a duplicated paste "+
+				"from a seeding that never landed without both numbers", got, want)
+		}
+	}
+	if !strings.Contains(got, strconv.Itoa(perCredentialHourlyBudget)+"/hour") {
+		t.Fatalf("advisory %q does not quote the budget constant", got)
+	}
+}
+
+// TestTimedOutQuotesTheBudgetConstant pins the last interpolating runtime
+// message that had no test. It is the FIRST thing an operator reads when the
+// issuance budget is spent, so a stale rate here misdirects at the worst
+// possible moment -- which is the defect this whole change is about.
+func TestTimedOutQuotesTheBudgetConstant(t *testing.T) {
+	err := (&otpMailbox{}).timedOut()
+	if err == nil {
+		t.Fatal("timedOut returned no error")
+	}
+	want := strconv.Itoa(perCredentialHourlyBudget) + "/hour per credential"
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("timedOut message %q does not quote %q from perCredentialHourlyBudget; "+
+			"a service-side retune would leave it stale", err, want)
+	}
+}
+
+// TestSelectEnrollmentHoldsAtThePrimeSize runs the same distribution properties
+// against seven, the size the sandbox pool was reseeded to.
+//
+// The sweeps above are written against a six-slot fixture because several of
+// their neighbours assert arithmetic specific to six. Nothing about the
+// rotation is six-shaped, and the size that matters operationally is whatever
+// the secret holds -- so the two properties that must survive a resize are
+// re-run here rather than left as an assumption.
+func TestSelectEnrollmentHoldsAtThePrimeSize(t *testing.T) {
+	pool := sevenSlotPool
+	fullHour := perCredentialHourlyBudget * len(pool)
+
+	for _, start := range sweepStarts(len(pool)) {
+		used := map[int]int{}
+		for i := range fullHour {
+			slot := slotFor(t, pool, start+i, 1)
+			used[slot]++
+			if ceiling := ceilDiv(i+1, len(pool)); used[slot] > ceiling {
+				t.Fatalf("%d consecutive runs from %d put %d on slot %d; a rotation allows %d",
+					i+1, start, used[slot], slot, ceiling)
+			}
+		}
+	}
 
 	seen := map[int]bool{}
-	for run := 0; run < 40; run++ {
-		_, slot := selectEnrollment(pool, envFrom(map[string]string{
-			"GITHUB_RUN_ID":      fmt.Sprintf("101%d", run),
-			"GITHUB_RUN_ATTEMPT": "1",
-		}))
-		seen[slot] = true
+	for attempt := 1; attempt <= len(pool); attempt++ {
+		seen[slotFor(t, pool, 999, attempt)] = true
 	}
 	if len(seen) != len(pool) {
-		t.Fatalf("40 runs reached only %d of %d slots (%v); distribution is skewed",
-			len(seen), len(pool), seen)
+		t.Fatalf("%d reruns used %d distinct slots; a rotation must visit every slot",
+			len(pool), len(seen))
+	}
+}
+
+// TestSelectEnrollmentStridedTrafficNeedsACoprimePoolSize pins the residual the
+// rotation cannot fix on its own, and shows it is a POOL SIZE decision.
+//
+// Only scope-relevant runs spend an issuance, so spending runs are a
+// subsequence of the run numbers. A subsequence of stride d visits just
+// len(pool)/gcd(d, len(pool)) slots, so the guarantee survives a stride only
+// when it stays coprime to the pool size. Six is the worst size available: a
+// stretch where relevant and irrelevant PRs merely alternate is d=2, which
+// collapses six slots onto three and reproduces the outage this file exists to
+// document. A prime size is immune to every stride below it.
+//
+// This asserts the ARITHMETIC, and is the argument for seeding a seventh owner.
+// It cannot police the live pool: that size is len(parseEnrollmentPool(secret))
+// at runtime, so seeding the secret to eight would collapse under stride 2 with
+// this test still green. The run-time half of the guard is the note the gate
+// logs beside its slot evidence, where the real size lands.
+func TestSelectEnrollmentStridedTrafficNeedsACoprimePoolSize(t *testing.T) {
+	worstSlotUnderStride := func(pool []string, stride int) int {
+		used := map[int]int{}
+		for i := 0; i < perCredentialHourlyBudget*len(pool); i++ {
+			used[slotFor(t, pool, 1+i*stride, 1)]++
+		}
+		worst := 0
+		for _, n := range used {
+			if n > worst {
+				worst = n
+			}
+		}
+		return worst
+	}
+
+	// Strides BELOW the size: for a prime p every d in [1,p) has gcd(d,p)=1.
+	// At d == p even a prime collapses onto one slot, which is arithmetic, not
+	// a property any pool size can buy off.
+	prime := sevenSlotPool
+	for stride := 1; stride < len(prime); stride++ {
+		ideal := perCredentialHourlyBudget
+		if got := worstSlotUnderStride(prime, stride); got > ideal {
+			t.Fatalf("prime pool of %d under stride %d put %d on one slot; want at most %d",
+				len(prime), stride, got, ideal)
+		}
+	}
+
+	// The other half: a size of six genuinely does degrade, so selectEnrollment's
+	// comment is not being alarmist. This pins the arithmetic for six, not the
+	// live pool -- seeding a seventh owner does not and should not change it.
+	if got := worstSlotUnderStride(sixSlotPool, 2); got <= perCredentialHourlyBudget {
+		t.Fatalf("six-slot pool under stride 2 put only %d on one slot; the size dependency "+
+			"this test documents no longer holds -- re-derive it before trusting the comment",
+			got)
 	}
 }
 
@@ -125,18 +584,38 @@ func TestSelectEnrollmentSpreadsRuns(t *testing.T) {
 // An out-of-range slot would panic, and an off-CI path that returned "" would
 // send an empty credential to the authority and fail as an auth error.
 func TestSelectEnrollmentAlwaysReturnsAPoolMember(t *testing.T) {
-	pool := []string{"a", "b", "c", "d", "e", "f"}
+	pool := sixSlotPool
 	member := map[string]bool{}
 	for _, c := range pool {
 		member[c] = true
 	}
 
 	for _, env := range []map[string]string{
-		{"GITHUB_RUN_ID": "1", "GITHUB_RUN_ATTEMPT": "1"},
-		{"GITHUB_RUN_ID": "1"},      // attempt absent
-		{"GITHUB_RUN_ATTEMPT": "3"}, // run id absent
+		{"GITHUB_RUN_NUMBER": "1", "GITHUB_RUN_ATTEMPT": "1"},
+		{"GITHUB_RUN_NUMBER": "1"},  // attempt absent
+		{"GITHUB_RUN_ATTEMPT": "3"}, // run number absent -- random fallback
 		{},                          // off CI entirely
-		{"GITHUB_RUN_ID": "  ", "GITHUB_RUN_ATTEMPT": " "}, // whitespace only
+		{"GITHUB_RUN_NUMBER": "  ", "GITHUB_RUN_ATTEMPT": " "},  // whitespace only
+		{"GITHUB_RUN_NUMBER": "not-a-number"},                   // unparseable
+		{"GITHUB_RUN_NUMBER": "-4", "GITHUB_RUN_ATTEMPT": "-1"}, // negative
+		{"GITHUB_RUN_NUMBER": "0", "GITHUB_RUN_ATTEMPT": "0"},   // zero
+		// The attempt floor is ARITHMETIC, not merely semantic: Go's % keeps
+		// the sign, so attempt 0 makes (attempt-1)%n equal -1, and a run
+		// number divisible by the pool size then yields slot -1 and PANICS
+		// the index. The zero row above cannot catch a relaxed attempt floor
+		// because the RUN NUMBER floor blocks it first and diverts to the
+		// random path; these supply a valid run number so the attempt floor
+		// is the only thing standing between the suite and a panic on
+		// 1-in-len(pool) real runs.
+		{"GITHUB_RUN_NUMBER": "6", "GITHUB_RUN_ATTEMPT": "0"},
+		{"GITHUB_RUN_NUMBER": "12", "GITHUB_RUN_ATTEMPT": "-1"},
+		{"GITHUB_RUN_NUMBER": "99999999999999999999"}, // overflows int
+		// MaxInt64 in both. On 64-bit this exercises the sum, which the
+		// reduce-before-add makes safe; on 32-bit Atoi range-errors and it
+		// exercises the random fallback instead. Either way it must return a
+		// pool member -- and it is a regression guard against reintroducing the
+		// unreduced form, not a live wrap the current code can reach.
+		{"GITHUB_RUN_NUMBER": "9223372036854775807", "GITHUB_RUN_ATTEMPT": "9223372036854775807"},
 	} {
 		got, slot := selectEnrollment(pool, envFrom(env))
 		if !member[got] {
@@ -211,6 +690,359 @@ func TestLoadOTPE2EConfigAcceptsEitherCredentialSource(t *testing.T) {
 		if cfg.enrollment == "solo" || cfg.enrollmentPoolSize != 2 {
 			t.Fatalf("credential = %q, pool size %d; want a pool member and size 2",
 				cfg.enrollment, cfg.enrollmentPoolSize)
+		}
+	})
+
+	// The rotation is a prerequisite, and strict mode is where prerequisites
+	// stop being silent. Without this, a runner that stopped exporting
+	// GITHUB_RUN_NUMBER would quietly go back to random selection and the only
+	// symptom would be the gate clustering red again weeks later.
+	t.Run("strict run without a run number refuses to fall back to random", func(t *testing.T) {
+		_, _, err := loadOTPE2EConfig(envFrom(with(map[string]string{
+			otpE2EEnrollmentPoolEnv: "one\ntwo\nthree",
+			otpE2EStrictEnv:         "1",
+			// A VALID attempt, so this exercises the case it is named for
+			// rather than repeating the both-counters-missing case below.
+			"GITHUB_RUN_ATTEMPT": "1",
+		})))
+		if err == nil {
+			t.Fatal("strict run selected a credential at random; the pool would cluster")
+		}
+		if !strings.Contains(err.Error(), "GITHUB_RUN_NUMBER") {
+			t.Fatalf("strict error %q does not name the variable an operator must set", err)
+		}
+	})
+
+	// A one-entry pool has nothing to rotate, so strict mode must not treat it
+	// as a failed rotation -- that would break the single-credential setup the
+	// either-or rule above exists to support.
+	t.Run("strict run with a single credential is not a rotation failure", func(t *testing.T) {
+		_, _, err := loadOTPE2EConfig(envFrom(with(map[string]string{
+			otpE2EEnrollmentEnv: "solo",
+			otpE2EStrictEnv:     "1",
+		})))
+		if err != nil {
+			t.Fatalf("strict single-credential run failed: %v", err)
+		}
+	})
+
+	// The attempt half of the same rule. Defaulting a broken attempt to 1 would
+	// send every rerun of a run back to that run's own slot -- five reruns, one
+	// credential, the original outage.
+	t.Run("strict run with an unusable attempt refuses to fall back to random", func(t *testing.T) {
+		_, _, err := loadOTPE2EConfig(envFrom(with(map[string]string{
+			otpE2EEnrollmentPoolEnv: "one\ntwo\nthree",
+			otpE2EStrictEnv:         "1",
+			"GITHUB_RUN_NUMBER":     "41",
+			"GITHUB_RUN_ATTEMPT":    "not-a-number",
+		})))
+		if err == nil {
+			t.Fatal("strict run accepted an unusable GITHUB_RUN_ATTEMPT; reruns would collide")
+		}
+		// Must name the counter that actually failed. Reporting the run number
+		// here would send an operator to inspect a variable that is correctly
+		// set -- the misdirection this whole change exists to stop.
+		if !strings.Contains(err.Error(), "GITHUB_RUN_ATTEMPT") {
+			t.Fatalf("strict error %q blames the wrong counter; the attempt is at fault", err)
+		}
+	})
+
+	// loadOTPE2EConfig's contract is to collect EVERY missing variable so a
+	// misconfiguration is fixed in one pass. The rotation guard has to obey it
+	// too, or a runner that dropped both counters costs two full gate cycles.
+	t.Run("strict run names both counters when both are unusable", func(t *testing.T) {
+		_, _, err := loadOTPE2EConfig(envFrom(with(map[string]string{
+			otpE2EEnrollmentPoolEnv: "one\ntwo\nthree",
+			otpE2EStrictEnv:         "1",
+		})))
+		if err == nil {
+			t.Fatal("strict run with neither counter selected at random")
+		}
+		for _, name := range []string{"GITHUB_RUN_NUMBER", "GITHUB_RUN_ATTEMPT"} {
+			if !strings.Contains(err.Error(), name) {
+				t.Fatalf("strict error %q omits %s; fixing one would burn a gate cycle "+
+					"to discover the other", err, name)
+			}
+		}
+	})
+
+	// THE CONFIGURATION THE GATE ACTUALLY RUNS IN. Every other strict subtest
+	// here expects an error, so only the FIRING side of the two new guards was
+	// pinned -- nothing proved they stay silent on a real run. Without this,
+	// widening the truncation threshold to len(pool) < 3 leaves the whole suite
+	// green and hard-fails the next real PR on a REQUIRED check, with a message
+	// pointing away from the change under test: the exact failure this file
+	// exists to remove.
+	t.Run("strict run with a rotating pool is accepted", func(t *testing.T) {
+		cfg, skip, err := loadOTPE2EConfig(envFrom(with(map[string]string{
+			otpE2EEnrollmentPoolEnv: "one\ntwo\nthree",
+			otpE2EStrictEnv:         "1",
+			"GITHUB_RUN_NUMBER":     "41",
+			"GITHUB_RUN_ATTEMPT":    "1",
+		})))
+		if err != nil || skip {
+			t.Fatalf("the gate's own configuration was rejected: skip %t, err %v", skip, err)
+		}
+		// Observes end to end, through loadOTPE2EConfig, that the config the
+		// gate consumes carries the ROTATED slot rather than a random one.
+		if want := 41 % 3; cfg.enrollmentSlot != want {
+			t.Fatalf("slot = %d, want the rotation's %d", cfg.enrollmentSlot, want)
+		}
+		if cfg.enrollmentPoolSize != 3 {
+			t.Fatalf("pool size = %d, want 3", cfg.enrollmentPoolSize)
+		}
+	})
+
+	// The BOUNDARY of the truncation guard. Two credentials is the smallest
+	// genuinely-pooled configuration, so it must be accepted -- this is what
+	// pins the threshold at "< 2" specifically. A three-entry happy path alone
+	// does not: widening the guard to "< 3" would still leave it green.
+	t.Run("strict run accepts the smallest real pool", func(t *testing.T) {
+		cfg, _, err := loadOTPE2EConfig(envFrom(with(map[string]string{
+			otpE2EEnrollmentPoolEnv: "one\ntwo",
+			otpE2EStrictEnv:         "1",
+			"GITHUB_RUN_NUMBER":     "41",
+			"GITHUB_RUN_ATTEMPT":    "1",
+		})))
+		if err != nil {
+			t.Fatalf("a two-credential pool is a real pool and must rotate: %v", err)
+		}
+		if want := 41 % 2; cfg.enrollmentSlot != want {
+			t.Fatalf("slot = %d, want the rotation's %d", cfg.enrollmentSlot, want)
+		}
+	})
+
+	// The reviewer's scenario end to end: six distinct owners plus one repeated
+	// line. Without dedup this reports SEVEN slots -- overstating the ceiling,
+	// spending two of seven slots on one credential, and (because 7 is prime)
+	// silencing the composite-size warning at the exact moment the pool is
+	// degraded. Secrets are write-only, so whoever appends the seventh owner
+	// cannot look first; this is the failure that mistake produces.
+	t.Run("a duplicated credential does not inflate the pool size", func(t *testing.T) {
+		cfg, _, err := loadOTPE2EConfig(envFrom(with(map[string]string{
+			otpE2EEnrollmentPoolEnv: "a\nb\nc\nd\ne\nf\nc",
+			otpE2EStrictEnv:         "1",
+			"GITHUB_RUN_NUMBER":     "41",
+			"GITHUB_RUN_ATTEMPT":    "1",
+		})))
+		if err != nil {
+			t.Fatalf("a pool with a repeated line is usable, just smaller: %v", err)
+		}
+		if cfg.enrollmentPoolSize != 6 {
+			t.Fatalf("pool size = %d, want 6 distinct credentials from 7 lines",
+				cfg.enrollmentPoolSize)
+		}
+		if cfg.enrollmentPoolDuplicates != 1 {
+			t.Fatalf("duplicates = %d, want 1; the operator needs to be told",
+				cfg.enrollmentPoolDuplicates)
+		}
+		// Six is composite, so the stride warning must still fire. An inflated
+		// size of seven would have suppressed it.
+		if smallestFactor(cfg.enrollmentPoolSize) == 0 {
+			t.Fatal("a degraded pool reported a prime size; the stride warning is silenced")
+		}
+	})
+
+	// The crack the parse-result keying left open: a pool variable that yields
+	// NOTHING. Whitespace, or " , , ", parses to zero credentials, so keying
+	// fromPool on len(pool) would let the single-credential variable be adopted
+	// silently -- a worse version of the very mistake the guard catches at one
+	// entry, and invisible because no note or error would print.
+	t.Run("strict run refuses a pool variable that yielded nothing", func(t *testing.T) {
+		_, _, err := loadOTPE2EConfig(envFrom(with(map[string]string{
+			otpE2EEnrollmentPoolEnv: "   \n  ", // whitespace only: trims to empty
+			otpE2EEnrollmentEnv:     "solo",    // present, and must NOT rescue it
+			otpE2EStrictEnv:         "1",
+			"GITHUB_RUN_NUMBER":     "41",
+			"GITHUB_RUN_ATTEMPT":    "1",
+		})))
+		if err == nil {
+			t.Fatal("strict run silently fell back to the single credential and ran unpooled")
+		}
+		if !strings.Contains(err.Error(), otpE2EEnrollmentPoolEnv) {
+			t.Fatalf("strict error %q does not name the damaged variable", err)
+		}
+		// The COUNT must be the pool variable's own yield, which is zero. The
+		// single credential backfilled `pool` to one, and reporting that would
+		// attribute another variable's credential to this one -- sending the
+		// operator after a pool truncated to one line when it holds none.
+		if !strings.Contains(err.Error(), "parsed 0 credential") {
+			t.Fatalf("strict error %q reports the backfilled count; the pool yielded none", err)
+		}
+	})
+
+	// THE BRANCH PRODUCTION TAKES. Both workflows supply only the pool
+	// variable, so a whitespace-damaged secret reaches the missing-prerequisite
+	// return, not the damaged-pool guard below it -- and "missing" is the wrong
+	// word for a variable that is set. The sibling subtest above only covers the
+	// branch where a stray single credential happens to backfill the length.
+	t.Run("a damaged pool with no single credential is not reported as absent", func(t *testing.T) {
+		_, _, err := loadOTPE2EConfig(envFrom(with(map[string]string{
+			otpE2EEnrollmentPoolEnv: "   \n\t\n  ", // present, yields nothing, and TRIMS TO EMPTY
+			otpE2EStrictEnv:         "1",
+			"GITHUB_RUN_NUMBER":     "41",
+			"GITHUB_RUN_ATTEMPT":    "1",
+		})))
+		if err == nil {
+			t.Fatal("strict run accepted a pool secret that yields no credentials")
+		}
+		if !strings.Contains(err.Error(), "0 credentials") {
+			t.Fatalf("strict error %q reports the secret as absent; it is present and "+
+				"damaged, and an operator told 'missing' will find it sitting in Settings",
+				err)
+		}
+	})
+
+	// The comma spelling of the same damage. Both this and the whitespace-only
+	// form parse to zero credentials, and they must take the SAME branch --
+	// keying fromPool on a trimmed value sent them to opposite ones.
+	t.Run("a separator-only pool is damaged, not absent", func(t *testing.T) {
+		_, _, err := loadOTPE2EConfig(envFrom(with(map[string]string{
+			otpE2EEnrollmentPoolEnv: " , , ",
+			otpE2EStrictEnv:         "1",
+			"GITHUB_RUN_NUMBER":     "41",
+			"GITHUB_RUN_ATTEMPT":    "1",
+		})))
+		if err == nil {
+			t.Fatal("strict run accepted a separator-only pool secret")
+		}
+		if !strings.Contains(err.Error(), "0 credentials") {
+			t.Fatalf("strict error %q reports the secret as absent; it is present", err)
+		}
+	})
+
+	// The ZERO-credential shape of the same aggregation. A pool that parses to
+	// nothing returns from the missing-prerequisite path, not the aggregated
+	// guard, and that is the branch both workflows can actually produce -- so
+	// the counter fault has to be named there too or it costs another cycle.
+	t.Run("strict run names the counters even when the pool yielded nothing", func(t *testing.T) {
+		_, _, err := loadOTPE2EConfig(envFrom(with(map[string]string{
+			otpE2EEnrollmentPoolEnv: "   \n  ", // present, parses to zero
+			otpE2EStrictEnv:         "1",
+			"GITHUB_RUN_ATTEMPT":    "1", // and the run number is absent
+		})))
+		if err == nil {
+			t.Fatal("strict run accepted a pool that yielded nothing")
+		}
+		for _, want := range []string{otpE2EEnrollmentPoolEnv, "GITHUB_RUN_NUMBER"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("strict error %q omits %s; the operator fixes one fault and "+
+					"spends another gate cycle finding the next", err, want)
+			}
+		}
+		// The COUNT must match what is listed. Reporting one unmet prerequisite
+		// while naming two reads as an addendum and undercounts the work ahead.
+		if !strings.Contains(err.Error(), "2 unmet prerequisite") {
+			t.Fatalf("strict error %q lists two faults but does not count two", err)
+		}
+	})
+
+	// A damaged pool alongside an UNRELATED absent variable. The pool guard used
+	// to sit below the missing-prerequisite return, so any other missing secret
+	// masked it entirely: the operator fixed the named variable and spent a
+	// second gate cycle discovering the pool was unpooled all along.
+	t.Run("strict run reports a damaged pool alongside an unrelated missing variable", func(t *testing.T) {
+		env := with(map[string]string{
+			otpE2EEnrollmentPoolEnv: "only-one", // damaged, but non-empty
+			otpE2EStrictEnv:         "1",
+			"GITHUB_RUN_NUMBER":     "41",
+			"GITHUB_RUN_ATTEMPT":    "1",
+		})
+		delete(env, otpE2EHubKeyEnv) // an unrelated prerequisite goes missing
+		_, _, err := loadOTPE2EConfig(envFrom(env))
+		if err == nil {
+			t.Fatal("strict run accepted a damaged pool and a missing hub key")
+		}
+		for _, want := range []string{otpE2EHubKeyEnv, otpE2EEnrollmentPoolEnv} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("strict error %q omits %s; one fault masked the other", err, want)
+			}
+		}
+		if !strings.Contains(err.Error(), "2 unmet prerequisite") {
+			t.Fatalf("strict error %q lists two faults but does not count two", err)
+		}
+	})
+
+	// A DELETED pool secret plus a stopped counter. Actions renders an absent
+	// secret as the empty string, so fromPool is false here -- and keying the
+	// counter check on fromPool meant this branch reported only the secret. The
+	// operator restores it, re-runs, and only then learns the counter is broken:
+	// the gate cycle per fault this aggregation exists to prevent.
+	t.Run("strict run names the counters when the pool secret is absent entirely", func(t *testing.T) {
+		env := with(map[string]string{otpE2EStrictEnv: "1", "GITHUB_RUN_ATTEMPT": "1"})
+		// No pool variable, no single credential, no run number.
+		_, _, err := loadOTPE2EConfig(envFrom(env))
+		if err == nil {
+			t.Fatal("strict run accepted an absent credential source")
+		}
+		for _, want := range []string{otpE2EEnrollmentPoolEnv, "GITHUB_RUN_NUMBER"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("strict error %q omits %s; restoring the secret would only "+
+					"reveal the counter fault on the next run", err, want)
+			}
+		}
+	})
+
+	// A secret re-saved as the same credential twice collapses to one entry.
+	// That is a duplicate, not a truncation, and the duplicates NOTE lives in
+	// the test body -- past the t.Fatal this error causes -- so the message
+	// itself has to say which mistake was made.
+	t.Run("truncation error names duplicates when that is the cause", func(t *testing.T) {
+		_, _, err := loadOTPE2EConfig(envFrom(with(map[string]string{
+			otpE2EEnrollmentPoolEnv: "a\na",
+			otpE2EStrictEnv:         "1",
+			"GITHUB_RUN_NUMBER":     "41",
+			"GITHUB_RUN_ATTEMPT":    "1",
+		})))
+		if err == nil {
+			t.Fatal("strict run accepted a pool of one repeated credential")
+		}
+		if !strings.Contains(err.Error(), "duplicate") {
+			t.Fatalf("strict error %q blames truncation; the secret was duplicated", err)
+		}
+	})
+
+	// BOTH faults at once. A damaged pool makes selectEnrollment short-circuit
+	// and report nothing blocked, so before the guards were aggregated the
+	// counter fault was not merely deferred to the next gate cycle -- it was
+	// invisible until the secret was fixed. Both must be named in one pass.
+	t.Run("strict run names the pool and the counters when both are broken", func(t *testing.T) {
+		_, _, err := loadOTPE2EConfig(envFrom(with(map[string]string{
+			otpE2EEnrollmentPoolEnv: "only-one", // damaged: a pool of one
+			otpE2EEnrollmentEnv:     "",         // nothing to backfill with
+			otpE2EStrictEnv:         "1",
+			"GITHUB_RUN_NUMBER":     "not-a-number", // and the counter is broken
+			"GITHUB_RUN_ATTEMPT":    "1",
+		})))
+		if err == nil {
+			t.Fatal("strict run accepted a damaged pool with an unusable counter")
+		}
+		for _, want := range []string{otpE2EEnrollmentPoolEnv, "GITHUB_RUN_NUMBER"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("strict error %q omits %s; fixing one fault would burn a gate "+
+					"cycle to discover the other", err, want)
+			}
+		}
+	})
+
+	// A pool secret re-saved truncated -- one line kept, or six credentials
+	// pasted space-separated, which parseEnrollmentPool collapses to one entry
+	// since it splits only on newline, CR and comma -- silently returns the gate
+	// to 5 issuances an hour for everything, which is the pre-pool state this
+	// whole change exists to prevent. Strict mode is loud about the counters;
+	// it has to be loud about this too.
+	t.Run("strict run refuses a pool variable that yielded one credential", func(t *testing.T) {
+		_, _, err := loadOTPE2EConfig(envFrom(with(map[string]string{
+			otpE2EEnrollmentPoolEnv: "one two three", // spaces are not separators
+			otpE2EStrictEnv:         "1",
+			"GITHUB_RUN_NUMBER":     "41",
+			"GITHUB_RUN_ATTEMPT":    "1",
+		})))
+		if err == nil {
+			t.Fatal("strict run accepted a one-entry pool; the gate would run unpooled")
+		}
+		if !strings.Contains(err.Error(), otpE2EEnrollmentPoolEnv) {
+			t.Fatalf("strict error %q does not name the truncated variable", err)
 		}
 	})
 

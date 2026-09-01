@@ -28,7 +28,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"hash/fnv"
 	"io"
 	"os"
 	"path/filepath"
@@ -48,6 +47,11 @@ const (
 	// dropped secret or a renamed variable would silently convert the gate
 	// into a rubber stamp. CI sets this; a developer running locally without
 	// sandbox access still gets a clean skip.
+	//
+	// Strict now also requires a usable ROTATION, so running this against the
+	// real sandbox from a workstation means exporting GITHUB_RUN_NUMBER and
+	// GITHUB_RUN_ATTEMPT by hand (any values >= 1). Without strict set, a
+	// local run selects at random and needs neither.
 	otpE2EStrictEnv = "QURL_OTP_E2E_STRICT"
 
 	otpE2EHubHostEnv    = "QURL_OTP_E2E_HUB_HOST"
@@ -92,6 +96,10 @@ type otpE2EConfig struct {
 	// spent, and the pool is secret so the value itself can never be logged.
 	enrollmentSlot     int
 	enrollmentPoolSize int
+	// enrollmentPoolDuplicates is how many repeated credentials the secret
+	// carried. Non-zero means the pool is smaller than whoever seeded it
+	// believes, which is invisible from the secret itself.
+	enrollmentPoolDuplicates int
 
 	mailboxQueueURL  string
 	mailboxBucket    string
@@ -118,23 +126,105 @@ func loadOTPE2EConfig(lookup func(string) string) (otpE2EConfig, bool, error) {
 
 	// The credential arrives as a pool or as a single value, so neither name
 	// belongs in `required` on its own -- either one alone satisfies this.
-	pool := parseEnrollmentPool(lookup(otpE2EEnrollmentPoolEnv))
+	pool, poolDuplicates := parseEnrollmentPool(lookup(otpE2EEnrollmentPoolEnv))
+	// Whether the POOL variable is the source decides whether a short result is
+	// a configuration or an accident: the single-credential setup has its own
+	// variable, so a pool that parsed to fewer than two credentials is damage.
+	//
+	// Keyed on the RAW variable, not on the parse result. The question is "did
+	// an operator intend a pool here", and only the raw value answers it: a
+	// secret re-saved to whitespace, or to " , , ", parses to nothing, and
+	// keying on len(pool) would make that MORE invisible than the single-entry
+	// case the guard already catches -- the pool source would go unnoticed, the
+	// single-credential variable would be adopted, and a strict run would
+	// proceed unpooled at 5/hour with neither an error nor a note.
+	// NOT TrimSpace'd. Trimming answers "does this hold credentials", which the
+	// parse result already answers; the question here is "did an operator set
+	// this variable", and only the untouched value answers that. Trimming got
+	// it wrong for exactly one of the two damage shapes named above: " , , "
+	// survives a trim and a whitespace-only secret does not, so two values that
+	// both parse to zero credentials took opposite branches -- one correctly
+	// reported as damaged, the other reported as ABSENT, which is the
+	// misdirection the branch below exists to prevent.
+	fromPool := lookup(otpE2EEnrollmentPoolEnv) != ""
+	// The pool variable's OWN yield, captured before the single-credential
+	// backfill below can overwrite it. Reporting len(pool) after the backfill
+	// would attribute another variable's credential to this one: a pool of
+	// " , , " alongside a valid single credential yields zero here and one
+	// there, and the operator would be sent hunting for a pool truncated to one
+	// line when the pool in fact contains no credentials at all.
+	fromPoolCount := len(pool)
 	if len(pool) == 0 {
 		if single := strings.TrimSpace(lookup(otpE2EEnrollmentEnv)); single != "" {
 			pool = []string{single}
 		}
 	}
 	if len(pool) == 0 {
-		missing = append(missing, otpE2EEnrollmentPoolEnv+" (or "+otpE2EEnrollmentEnv+")")
+		// "Missing" is the wrong word when the variable is SET and simply
+		// yields nothing, and it is the wrong word on the branch production
+		// actually takes: both workflows supply only the pool variable, so a
+		// secret damaged to whitespace lands here rather than in the
+		// damaged-pool guard further down, which sits after this early return.
+		// Reporting it as absent sends the operator to Settings to find the
+		// secret sitting right where they left it.
+		if fromPool {
+			missing = append(missing, otpE2EEnrollmentPoolEnv+
+				" (present, but it parsed to 0 credentials -- a damaged or whitespace-only secret)")
+		} else {
+			missing = append(missing, otpE2EEnrollmentPoolEnv+" (or "+otpE2EEnrollmentEnv+")")
+		}
 	}
 
 	strict := strings.TrimSpace(lookup(otpE2EStrictEnv)) != ""
-	if len(missing) > 0 {
-		if strict {
-			return otpE2EConfig{}, false, fmt.Errorf(
-				"strict OTP e2e run is missing %d prerequisite(s): %s",
-				len(missing), strings.Join(missing, ", "))
+
+	// EVERY unmet prerequisite, in one pass. This function opens by promising
+	// that, and the three fault classes below are independent: an absent
+	// variable, a pool secret too small to rotate, and a runner that stopped
+	// exporting a counter can all be true at once. Reporting the first and
+	// returning would cost a gate cycle per fault to discover -- and worse for
+	// two of them, since a damaged pool makes selectEnrollment short-circuit
+	// and report nothing blocked, so the counter fault would not merely be
+	// deferred but invisible until the secret was fixed.
+	//
+	// Everything is appended to the LIST, never to the rendered string, so the
+	// count and the contents cannot disagree.
+	if strict {
+		unmet := append([]string(nil), missing...)
+
+		// Only when the pool variable yielded something: a pool that yielded
+		// NOTHING already contributed its own entry to `missing` above, and
+		// naming it twice would overstate the number of things to fix.
+		if fromPool && len(pool) > 0 && fromPoolCount < 2 {
+			unmet = append(unmet, fmt.Sprintf(
+				"%s parsed %d credential(s)%s: the pool is the multi-credential source "+
+					"(single credentials belong in %s), so this is a damaged secret and the "+
+					"gate would run unpooled at %d/hour",
+				otpE2EEnrollmentPoolEnv, fromPoolCount, duplicateSuffix(poolDuplicates),
+				otpE2EEnrollmentEnv, perCredentialHourlyBudget))
 		}
+
+		// Skipped ONLY for the supported single-credential setup, which genuinely
+		// has nothing to rotate. Everything else asks -- including the case where
+		// the pool secret is absent entirely: Actions renders a deleted secret as
+		// the empty string, so keying this on fromPool meant a deleted secret AND
+		// a stopped counter reported only the secret, and the counter cost
+		// another gate cycle. That is the exact charge this block is written to
+		// answer, so the condition has to be "is there nothing to rotate", not
+		// "was a pool asked for".
+		fromSingle := !fromPool && len(pool) == 1
+		if !fromSingle {
+			if blocked := blockedRotationCounters(lookup); len(blocked) > 0 {
+				unmet = append(unmet, strings.Join(blocked, " and ")+
+					" unusable, so credential selection could not rotate")
+			}
+		}
+
+		if len(unmet) > 0 {
+			return otpE2EConfig{}, false, fmt.Errorf(
+				"strict OTP e2e run has %d unmet prerequisite(s): %s",
+				len(unmet), strings.Join(unmet, "; "))
+		}
+	} else if len(missing) > 0 {
 		return otpE2EConfig{}, true, nil
 	}
 
@@ -143,6 +233,9 @@ func loadOTPE2EConfig(lookup func(string) string) (otpE2EConfig, bool, error) {
 		return otpE2EConfig{}, false, fmt.Errorf("%s must be a valid UDP port", otpE2EHubPortEnv)
 	}
 
+	// Reached only once the strict block above has accepted the configuration,
+	// so on CI this always rotates; off CI, or non-strict, it may fall back to
+	// random, which is the documented local behaviour.
 	enrollment, slot := selectEnrollment(pool, lookup)
 
 	return otpE2EConfig{
@@ -155,32 +248,59 @@ func loadOTPE2EConfig(lookup func(string) string) (otpE2EConfig, bool, error) {
 			Port:               port,
 			ServerPublicKeyB64: strings.TrimSpace(lookup(otpE2EHubKeyEnv)),
 		},
-		enrollment:         enrollment,
-		enrollmentSlot:     slot,
-		enrollmentPoolSize: len(pool),
-		agentID:            runScopedAgentID(strings.TrimSpace(lookup(otpE2EAgentIDEnv)), lookup),
-		mailboxQueueURL:    strings.TrimSpace(lookup(otpE2EMailboxQueueURLEnv)),
-		mailboxBucket:      strings.TrimSpace(lookup(otpE2EMailboxBucketEnv)),
-		mailboxRecipient:   strings.TrimSpace(lookup(otpE2EMailboxRecipientEnv)),
-		mailboxRegion:      strings.TrimSpace(lookup(otpE2EMailboxRegionEnv)),
+		enrollment:               enrollment,
+		enrollmentSlot:           slot,
+		enrollmentPoolSize:       len(pool),
+		enrollmentPoolDuplicates: poolDuplicates,
+		agentID:                  runScopedAgentID(strings.TrimSpace(lookup(otpE2EAgentIDEnv)), lookup),
+		mailboxQueueURL:          strings.TrimSpace(lookup(otpE2EMailboxQueueURLEnv)),
+		mailboxBucket:            strings.TrimSpace(lookup(otpE2EMailboxBucketEnv)),
+		mailboxRecipient:         strings.TrimSpace(lookup(otpE2EMailboxRecipientEnv)),
+		mailboxRegion:            strings.TrimSpace(lookup(otpE2EMailboxRegionEnv)),
 	}, false, nil
 }
 
-// parseEnrollmentPool splits the pool secret into credentials.
+// parseEnrollmentPool splits the pool secret into credentials, reporting how
+// many duplicate entries it dropped.
 //
 // Newline is the natural separator for a multi-line GitHub secret; comma is
 // accepted so the same value can be passed on a command line. Blank entries are
 // dropped rather than becoming an empty credential that fails obscurely later.
-func parseEnrollmentPool(raw string) []string {
+//
+// DEDUPLICATION IS LOAD-BEARING, not tidiness. len(pool) is the denominator of
+// the 5*len(pool) hourly ceiling, the pool size in this run's evidence, and the
+// input to smallestFactor -- the runtime half of the stride guard. A repeated
+// credential breaks all three at once and in the REASSURING direction: six
+// distinct owners plus one duplicated line parses to seven, the rotation spends
+// two of its seven slots on one credential so that credential takes double
+// traffic and hits its 5/hour cap early, and smallestFactor(7) is 0 so the gate
+// prints no composite-size warning -- reporting an arithmetic guarantee at the
+// exact moment the pool is degraded.
+//
+// That is reachable, not theoretical: GitHub secrets are write-only, so an
+// operator adding an owner cannot read the current value to check whether the
+// line is already there. Counting the drops rather than swallowing them tells
+// them which mistake they made -- a duplicate paste, or a seeding that never
+// landed -- since both otherwise present only as a pool smaller than expected.
+func parseEnrollmentPool(raw string) ([]string, int) {
 	var pool []string
+	seen := map[string]bool{}
+	duplicates := 0
 	for _, field := range strings.FieldsFunc(raw, func(r rune) bool {
 		return r == '\n' || r == '\r' || r == ','
 	}) {
-		if trimmed := strings.TrimSpace(field); trimmed != "" {
-			pool = append(pool, trimmed)
+		trimmed := strings.TrimSpace(field)
+		if trimmed == "" {
+			continue
 		}
+		if seen[trimmed] {
+			duplicates++
+			continue
+		}
+		seen[trimmed] = true
+		pool = append(pool, trimmed)
 	}
-	return pool
+	return pool, duplicates
 }
 
 // selectEnrollment picks this run's credential and reports which slot it used.
@@ -188,46 +308,305 @@ func parseEnrollmentPool(raw string) []string {
 // Registration OTP issuance is rate limited on four dimensions, and only two of
 // them can bind this gate: 5/hour per credential and 10/hour per owner. (Per
 // peer is 5/hour but every run generates a fresh device key, and per source is
-// 60/hour across runner IPs that vary.) So a single owner caps the gate at ten
-// runs an hour and a single credential at five -- which a busy afternoon on a
-// REQUIRED check exhausts, turning the gate red for reasons that have nothing
-// to do with the change under test. That is not hypothetical; it is what
-// happened while building this.
+// 60/hour across runner IPs that vary.) So a single credential caps the gate at
+// five runs an hour -- which a busy afternoon on a REQUIRED check exhausts,
+// turning the gate red for reasons that have nothing to do with the change
+// under test. That is not hypothetical; it is what happened while building
+// this.
 //
-// The pool is therefore one credential per DISTINCT owner. That is the only
-// dimension that scales: piling more credentials onto one owner still tops out
-// at that owner's ten.
+// The pool is therefore one credential per DISTINCT owner, because owners are
+// the dimension that scales without bound: a SECOND credential on an owner
+// already in the pool buys five more runs an hour and then stops dead at that
+// owner's ten, while each new owner buys another five every time.
 //
-// Selection is keyed on run id AND attempt so a rerun lands on a different
-// slot. Reruns are the case that actually exhausted the budget in practice, and
-// keying on the run alone would send every attempt back to the same credential
-// -- the one whose budget the previous attempt just spent.
+// THE BINDING LIMIT IS THE CREDENTIAL'S FIVE, NOT THE OWNER'S TEN. With one
+// credential per owner the per-owner budget is unreachable -- a slot's own
+// credential refuses its sixth issuance while its owner is only halfway to ten
+// -- so the POOL is worth 5/hour per slot and 5*len(pool) per hour in total.
+// That is the pool's ceiling, not this workflow's: otp-schema-v2-canary.yml
+// runs this same test against the same secret on its own run-number sequence,
+// so both workflows spend from these totals. Two independently phased rotations
+// each stay within one of ideal, so their per-slot sum stays within two (two
+// hashes would not), and the canary is attended dispatch, so this composes
+// today -- but the number belongs to the pool, not to either caller.
+//
+// SELECTION MUST ROTATE, NOT HASH. Both spread runs across the pool "evenly" in
+// the long run, but a hash spreads them INDEPENDENTLY: it is balls-in-bins, and
+// the whole pool goes red as soon as any one bin reaches five, which happens far
+// below 5*len(pool). This is not a theoretical worry -- it is the outage that
+// prompted this comment. On 2026-08-31 nine issuances in the hour hashed into
+// slots {4:5, 0:3, 2:1}: three of six slots touched, slot 4 at its cap, and the
+// tenth run refused with twenty-one of the pool's thirty still unspent. Replayed
+// over the whole recorded history (135 issuances), hashing peaks at 5 in a
+// rolling hour -- exactly the cap -- while rotating peaks at 3.
+//
+// GITHUB_RUN_NUMBER is the rotation counter: unlike GITHUB_RUN_ID (a global
+// GitHub id whose irregular gaps make it hash-like), it increments by exactly
+// one per run OF THIS WORKFLOW, so consecutive runs take consecutive slots.
+// Adding the attempt rotates a rerun onto the next slot -- reruns are the case
+// that actually exhausted a credential, since the previous attempt just spent
+// that slot's budget.
+//
+// KEEP len(pool) PRIME. The rotation runs over ALL gate runs, but only the ones
+// the scope step finds relevant spend an issuance, so spending runs are a
+// SUBSEQUENCE -- and a subsequence of stride d visits only len(pool)/gcd(d,
+// len(pool)) slots. Six -- the size this gate ran at through the outage -- was
+// the worst available for that: 6 = 2*3, so a stretch where relevant and
+// irrelevant PRs merely alternate (d=2) collapses the pool onto three slots and
+// reproduces the original outage with a different traffic shape. At a PRIME
+// size every stride below len(pool) stays coprime and the ceiling holds
+// arithmetically instead of empirically.
+// TestSelectEnrollmentStridedTrafficNeedsACoprimePoolSize pins both halves.
+//
+// THE SANDBOX POOL WAS PRIME AS OF 2026-08-31, so this residual is closed
+// there: a seventh owner was seeded, the gate's own evidence line reports seven
+// slots, and the composite-size advisory below has gone silent -- which is
+// exactly how that fix is meant to be observed, and why the observation lives
+// in the gate's log rather than in this comment. The size is a seeding decision
+// rather than a code one, so this stays written as a property of len(pool)
+// rather than of any particular number: a pool resized to a composite value
+// reopens it, and the advisory says so at runtime.
+//
+// Before the reseeding the guarantee was only empirical, and it did hold:
+// replaying the 135 issuances recorded under the six-slot pool at their real
+// run numbers, real skips included, the worst rolling hour put 3 on a slot
+// against the hash's 5. Empirical is weaker than arithmetic, which is why the
+// size matters; check it first if the gate ever clusters again.
+//
+// The SECOND thing to check is relevance DENSITY, which is the residual a fixed
+// stride does not describe. Real skips are irregular rather than strided (there
+// is no trigger-level paths: filter, so every PR takes a run number while only
+// GATE_PATHS spends), and irregular skips push runNumber mod len(pool) back
+// toward the independence a hash has. Rotation still wins for any plausible
+// traffic -- over M consecutive numbers at relevance density p, per-slot
+// variance is (Mp/n)(1-p) rotating against (Mp/n)((n-1)/n) hashing, so rotation
+// is strictly better whenever p > 1/n, and GATE_PATHS covers nearly the repo --
+// but a gate that clustered again with a prime pool would be telling you the
+// density collapsed.
+//
+// THE SLOT IS NO LONGER RECOMPUTABLE OFFLINE, which is a real cost of this
+// change and the thing to know before auditing the pool again. The previous
+// selection was a pure function of GITHUB_RUN_ID and the attempt, and
+// runScopedAgentID bakes both into the agent credential's name
+// (agent:...-<runid>-<attempt>), so which slot a past run drew could be
+// recomputed from the sandbox record alone -- that is how the
+// one-credential-per-distinct-owner premise was proven over 136 registrations.
+// GITHUB_RUN_NUMBER is not in that name and is not derivable from the run id,
+// so the same audit now needs a join: `gh run list --workflow
+// otp-registration-gate.yml --json databaseId,number` maps run id to run
+// number, and the run history outlives the 30-day log retention that the
+// EVIDENCE line depends on. Recoverable, then, but no longer free. Putting the
+// run number into the agent id would restore the offline property at the cost
+// of changing a live registration input, which is not a trade worth making
+// inside a change about selection.
+//
+// GITHUB_RUN_NUMBER restarts at 1 if this workflow file is ever renamed. That
+// only re-phases the rotation -- every property here is modular and holds from
+// any offset, which is what sweepStarts pins -- so it costs nothing. Noted
+// because a counter that jumps backwards looks like evidence during an
+// investigation, and it is not.
+//
+// A rerun aliases onto its neighbour by construction: (N, attempt 2) and
+// (N+1, attempt 1) resolve to the same slot, where the hash collided only one
+// time in len(pool). Any additive offset does this, and the cost is bounded at
+// one extra issuance on one slot rather than a cluster, so it is a deliberate
+// trade rather than an oversight.
+//
+// Off CI there is no counter to rotate on, so fall back to random: repeated
+// local runs are just as capable of exhausting one credential.
+// Which counter BLOCKED a rotation is deliberately not returned here. Callers
+// that need it ask blockedRotationCounters, because they must be able to ask
+// even when the pool is too small to rotate -- the len<2 case below short
+// circuits before reading a counter at all, so a value returned from here would
+// be silent in exactly the situation that needs reporting.
 func selectEnrollment(pool []string, lookup func(string) string) (string, int) {
 	switch len(pool) {
 	case 0:
 		return "", -1
 	case 1:
+		// One credential is the whole pool, so there is nothing to rotate.
 		return pool[0], 0
 	}
 
-	runID := strings.TrimSpace(lookup("GITHUB_RUN_ID"))
-	attempt := strings.TrimSpace(lookup("GITHUB_RUN_ATTEMPT"))
-
-	// Off CI there is no run identity to spread on, so choose at random:
-	// repeated local runs are just as capable of exhausting one credential.
-	if runID == "" && attempt == "" {
-		raw := make([]byte, 4)
-		if _, err := rand.Read(raw); err != nil {
-			return pool[0], 0
-		}
-		slot := int(binary.BigEndian.Uint32(raw) % uint32(len(pool)))
+	// BOTH counters must be usable, and an unreadable attempt is not the softer
+	// failure it looks like: defaulting it to 1 would resolve every attempt of
+	// run N onto N's slot, spending that one credential five times over the
+	// reruns -- which is the exact case that exhausted a credential before the
+	// pool existed. Treat it exactly as strictly as the run number.
+	runNumber, haveRun := rotationCounter(lookup, "GITHUB_RUN_NUMBER")
+	attempt, haveAttempt := rotationCounter(lookup, "GITHUB_RUN_ATTEMPT")
+	if haveRun && haveAttempt {
+		// Reduce both terms before adding. A real run number never approaches
+		// MaxInt, but this reads an environment variable, and the sum of two
+		// unreduced values there would overflow to a negative slot and panic
+		// the index below rather than fail some assertion. Both counters are
+		// >= 1 here, so attempt-1 cannot underflow either.
+		slot := (runNumber%len(pool) + (attempt-1)%len(pool)) % len(pool)
 		return pool[slot], slot
 	}
 
-	digest := fnv.New32a()
-	_, _ = digest.Write([]byte(runID + "-" + attempt))
-	slot := int(digest.Sum32() % uint32(len(pool)))
+	raw := make([]byte, 4)
+	if _, err := rand.Read(raw); err != nil {
+		return pool[0], 0
+	}
+	slot := int(binary.BigEndian.Uint32(raw) % uint32(len(pool)))
 	return pool[slot], slot
+}
+
+// duplicateSuffix names dropped duplicates inside the truncation error. The
+// duplicates NOTE is logged by the test body, which never runs when this error
+// aborts the load -- so a secret re-saved as the same credential twice would
+// otherwise be reported as a truncation and send the operator hunting for a
+// missing line rather than a repeated one.
+func duplicateSuffix(duplicates int) string {
+	if duplicates == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" (after dropping %d duplicate(s))", duplicates)
+}
+
+// poolSizeAdvisory reports what a given LIVE pool size costs, or "" when the
+// size carries no warning. Pure and separate from the test body so the wording
+// each size produces is itself asserted -- an advisory that goes quiet at the
+// wrong size is worse than none, because silence here is read as "the guarantee
+// holds".
+//
+// Two is the case that makes "silent" and "safe" come apart. It is prime, so
+// smallestFactor says nothing, and the strict guard deliberately accepts it as
+// the smallest real pool -- but the LIKELY spending stride is 2, which equals
+// the size, so alternating relevant and irrelevant PRs put every issuance on
+// one credential. That is the same unpooled state the truncation guard hard
+// fails at one credential to prevent, and it must not arrive quietly.
+//
+// The line between two and three is plausibility, not arithmetic, and is worth
+// stating because it is the only judgement here. EVERY size collapses at a
+// stride equal to itself, three included; no size can buy that off. What makes
+// two different is that its self-collapsing stride is 2 -- the one shape this
+// file names as likely, since relevant and irrelevant PRs alternating is
+// ordinary traffic. A stride of exactly three is not, so three stays silent.
+func poolSizeAdvisory(size int) string {
+	if size < 2 {
+		// Deliberately silent about which source this came from, because both
+		// reach here and they are judged differently: from the pool variable a
+		// strict run has already refused it, while from the single-credential
+		// variable it is the supported setup and strict accepts it. Saying
+		// "strict runs refuse this" would be false in the second case, printed
+		// from inside a strict run that was not refused.
+		return fmt.Sprintf("pool size %d is not a pool: every run spends the same "+
+			"credential, so the gate is worth %d/hour. From %s that is a damaged secret, "+
+			"which a strict run refuses; from %s it is the supported single-credential "+
+			"setup and this is just the ceiling. See selectEnrollment",
+			size, perCredentialHourlyBudget, otpE2EEnrollmentPoolEnv, otpE2EEnrollmentEnv)
+	}
+	if size == 2 {
+		return fmt.Sprintf("pool size 2 is the smallest the strict guard accepts, and the "+
+			"likely spending stride of 2 EQUALS it: alternating relevant and irrelevant "+
+			"PRs would put every issuance on one credential, i.e. %d/hour, which is the "+
+			"unpooled state. Seed more owners -- a PRIME size above two is what makes the "+
+			"rotation's guarantee arithmetic; see selectEnrollment", perCredentialHourlyBudget)
+	}
+	factor := smallestFactor(size)
+	if factor == 0 {
+		return ""
+	}
+	smallest, worst := factor, size/factor
+	// "likely" means a stride of 2 throughout this change -- relevant and
+	// irrelevant PRs alternating, which is ordinary traffic. It is earned only
+	// by EVEN sizes: at 9, 15 or 25 the smallest factor is 3 or 5 while stride 2
+	// is coprime and collapses nothing, so claiming it there would misname the
+	// traffic shape and overstate the risk. Built before the branch below, not
+	// inside it, because 4 is even AND a prime square -- it took the coincident
+	// branch and was the one even size that lost the framing.
+	note := ""
+	if size%2 == 0 {
+		note = ", which is the likely one -- relevant and irrelevant PRs alternating"
+	}
+	if smallest == worst {
+		// A prime square (or 4): the two strides coincide, and naming them
+		// separately would read as a contradiction.
+		return fmt.Sprintf("pool size %d is composite: a spending stride of %d%s collapses it "+
+			"onto %d slot(s). A PRIME size makes the rotation's guarantee arithmetic rather "+
+			"than empirical; see selectEnrollment", size, smallest, note, worst)
+	}
+	return fmt.Sprintf("pool size %d is composite: a spending stride of %d%s collapses it "+
+		"onto %d slot(s), and a stride of %d onto %d -- the worst case. A PRIME size makes "+
+		"the rotation's guarantee arithmetic rather than empirical; see selectEnrollment",
+		size, smallest, note, worst, worst, smallest)
+}
+
+// poolDuplicateAdvisory reports a pool secret carrying repeated credentials, or
+// "" when it carries none. Pure and separate from the test body so the wording
+// is asserted rather than assumed -- see poolSizeAdvisory for the same reason.
+func poolDuplicateAdvisory(duplicates, distinct int) string {
+	if duplicates <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("the pool secret carried %d duplicate credential(s), so it holds %d "+
+		"distinct slots rather than %d: a repeated credential takes double traffic and "+
+		"spends its %d/hour early. Secrets are write-only, so check the value you appended "+
+		"was not already present", duplicates, distinct, distinct+duplicates,
+		perCredentialHourlyBudget)
+}
+
+// smallestFactor returns the smallest non-trivial divisor of n, or 0 when n is
+// prime (or too small to matter). A composite pool size is what lets a strided
+// spending pattern collapse the rotation onto a subset of the pool.
+func smallestFactor(n int) int {
+	if n < 4 {
+		return 0
+	}
+	for d := 2; d*d <= n; d++ {
+		if n%d == 0 {
+			return d
+		}
+	}
+	return 0
+}
+
+// blockedRotationCounters names every counter that cannot carry a rotation.
+//
+// Separate from selectEnrollment so a caller can ask the question even when the
+// pool is too small to rotate: selectEnrollment short-circuits at one credential
+// and reports nothing blocked, which is right for selection but would hide a
+// broken counter behind a damaged pool and cost a second gate cycle to find.
+func blockedRotationCounters(lookup func(string) string) []string {
+	var blocked []string
+	if _, ok := rotationCounter(lookup, "GITHUB_RUN_NUMBER"); !ok {
+		blocked = append(blocked, "GITHUB_RUN_NUMBER")
+	}
+	if _, ok := rotationCounter(lookup, "GITHUB_RUN_ATTEMPT"); !ok {
+		blocked = append(blocked, "GITHUB_RUN_ATTEMPT")
+	}
+	return blocked
+}
+
+// rotationCounter reads one of the two GitHub counters the rotation turns on,
+// reporting whether the value is usable rather than substituting a default.
+// Actions always exports both; anything else is a runner regression, and the
+// caller's job is to make that loud instead of quietly selecting at random.
+//
+// Both floors are 1 because both counters are 1-based by GitHub's contract. A
+// zero is therefore already a runner regression and is refused rather than
+// rotated on -- the floor tracks the variable's semantics, not what happens to
+// be convenient for a caller.
+//
+// The ATTEMPT floor is also load-bearing arithmetic, and must not be relaxed on
+// the semantic argument alone. Go's % keeps the sign of its operand, so an
+// attempt of 0 makes (attempt-1)%n equal -1, and a run number divisible by the
+// pool size then yields slot -1 and panics the index. That is pinned by the
+// GITHUB_RUN_NUMBER=6/GITHUB_RUN_ATTEMPT=0 row in
+// TestSelectEnrollmentAlwaysReturnsAPoolMember, which exists because the
+// obvious zero-zero row cannot reach it: the run-number floor blocks first.
+func rotationCounter(lookup func(string) string, name string) (int, bool) {
+	// Not a parameter. Every caller floors at 1 and the doc above argues it can
+	// never be anything else, so exposing it would invite exactly the
+	// relaxation that comment warns against.
+	const lowest = 1
+	parsed, err := strconv.Atoi(strings.TrimSpace(lookup(name)))
+	if err != nil || parsed < lowest {
+		return 0, false
+	}
+	return parsed, true
 }
 
 // runScopedAgentID appends a per-run suffix to the configured agent id.
@@ -354,6 +733,35 @@ func TestEmailedOTPCompletesIdempotentSDKRegistration(t *testing.T) {
 	}
 	if skip {
 		t.Skipf("OTP e2e prerequisites absent; set %s to make this fatal", otpE2EStrictEnv)
+	}
+
+	// Logged HERE, before anything can fail, not beside the success assertion.
+	// The failure this evidence exists for -- a refused issuance, which arrives
+	// as a mailbox timeout -- kills the test inside ConnectAgentRuntime below,
+	// so a slot logged after that call is absent from precisely the run whose
+	// diagnosis needs it. Every other failure in the exchange gets it too.
+	t.Logf("EVIDENCE this run drew credential slot %d of %d",
+		cfg.enrollmentSlot, cfg.enrollmentPoolSize)
+
+	// The pool's SIZE decides whether the rotation survives a strided spending
+	// pattern (see selectEnrollment). That size lives in a secret, so no test
+	// can assert it -- say it out loud on the runs that actually load it.
+	if advisory := poolSizeAdvisory(cfg.enrollmentPoolSize); advisory != "" {
+		t.Logf("NOTE %s", advisory)
+	}
+
+	if advisory := poolDuplicateAdvisory(cfg.enrollmentPoolDuplicates, cfg.enrollmentPoolSize); advisory != "" {
+		t.Logf("NOTE %s", advisory)
+		// A duplicate is the last degradation here that does NOT fail closed: a
+		// missing counter and a one-entry pool both stop the run, but a repeated
+		// line merely shrinks the pool and the run goes green. A t.Logf on a
+		// passing test is the log nobody opens, and the canary runs without -v
+		// at all -- so on GitHub this also becomes an annotation, which shows on
+		// the check itself. Degradation with no loud symptom is what this whole
+		// change exists to remove; this was the one instance left.
+		if os.Getenv("GITHUB_ACTIONS") == "true" {
+			fmt.Printf("::warning title=OTP credential pool has duplicates::%s\n", advisory)
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), otpE2EDeadline)
