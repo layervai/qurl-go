@@ -650,11 +650,25 @@ func validatePersistedAgentID(state *AgentState, errKind error) error {
 // Built-in stores validate too, but public custom AgentStateStore implementations
 // are not trusted to do so before returning state.
 func prepareLoadedAgentState(state *AgentState, errKind error) error {
+	return prepareLoadedAgentStateWithValidation(state, errKind, nil)
+}
+
+// prepareLoadedAgentStateWithValidation lets a lifecycle assertion inspect the
+// structurally validated persisted record before the X25519 private key is
+// decoded or its public half is derived. Built-in stores already repeat the
+// structural check at their decode boundary; keeping it here protects custom
+// AgentStateStore implementations as well.
+func prepareLoadedAgentStateWithValidation(state *AgentState, errKind error, beforeKeypair func(*AgentState) error) error {
 	if state == nil {
 		return fmt.Errorf("%w: agent state store returned nil state", errKind)
 	}
 	if err := validateLoadedAgentAssignment(state); err != nil {
 		return fmt.Errorf("%w: %w", errKind, err)
+	}
+	if beforeKeypair != nil {
+		if err := beforeKeypair(state); err != nil {
+			return err
+		}
 	}
 	return state.ensureKeypair(errKind)
 }
@@ -662,11 +676,12 @@ func prepareLoadedAgentState(state *AgentState, errKind error) error {
 // loadOrCreateAgentState loads the persisted state (creating a fresh keypair when
 // none exists), validating a loaded keypair. The underlying store sentinel stays
 // matchable through the front-door error wrap.
-func loadOrCreateAgentState(ctx context.Context, store AgentStateStore, invalidConfigErr error) (*AgentState, error) {
+func loadOrCreateAgentState(ctx context.Context, store AgentStateStore, invalidConfigErr error, beforeKeypair func(*AgentState) error) (*AgentState, error) {
 	state, err := store.LoadAgentState(ctx)
 	switch {
 	case err == nil:
-		if err := prepareLoadedAgentState(state, invalidConfigErr); err != nil {
+		if err := prepareLoadedAgentStateWithValidation(state, invalidConfigErr, beforeKeypair); err != nil {
+			clearOwnedAgentState(state)
 			return nil, err
 		}
 		return state, nil

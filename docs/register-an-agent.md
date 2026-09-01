@@ -281,6 +281,38 @@ client, binding, err := qurl.ConnectAgentRuntime(ctx, store,
 Whichever kind LayerV reports, this call takes it: the code path runs only for
 the account kind, and the pre-issued kind never touches your callback.
 
+### Requiring one immutable lineage
+
+Most applications should use the ordinary OTP or headless policy above. An
+integration that owns a private state namespace and knows its enrollment token
+can require one exact authenticated kind instead:
+
+```go
+client, binding, err := qurl.ConnectAgentRuntime(ctx, store,
+	qurl.WithAgentRuntimeEnrollmentCredential(credential),
+	qurl.WithAgentRuntimeMetadata(hostname, version),
+	qurl.WithAgentRuntimeRequiredRegistrationKeyKind(
+		qurl.RegistrationKeyKindBootstrap,
+	),
+)
+```
+
+`WithAgentRuntimeRequiredRegistrationKeyKind` is a durable lineage assertion,
+not a broader enrollment admission policy. Fresh enrollment must report that
+exact kind. Later `ConnectAgentRuntime`, `RefreshAgentRuntime`, held-binding
+renewal, and `RecoverAgentRuntime` calls validate the same persisted provenance
+under the setup lock before mutation, credential-provider use, or lifecycle
+network I/O. Pass the option to every lifecycle entry point used by the
+integration.
+
+The comparison is byte-exact. Missing, whitespace-normalized, unknown, or
+phase-ambiguous persisted provenance fails closed as invalid state; a different
+known kind returns `*qurl.RegistrationKeyKindDisallowedError`. The option cannot
+be combined with `WithAgentRuntimeHeadlessEnrollment` or
+`WithAgentRuntimeAllowedRegistrationKeyKinds` in either order. That conflict is
+intentional: a singleton immutable assertion and a replaceable admission set
+must never silently override one another.
+
 ## Running in production
 
 **Enrollment is durable, and staying connected is automatic.** In practice that
@@ -424,6 +456,7 @@ file.
 |---|---|
 | `ErrAgentOTPRequired` | The account kind is accepted but no OTP callback was installed. Add `WithAgentRuntimeOTPProvider`, or use `WithAgentRuntimeHeadlessEnrollment` for a pre-issued credential. |
 | `*RegistrationKeyKindDisallowedError` | LayerV reported a credential kind your policy does not accept; `Kind` names it. Add `WithAgentRuntimeHeadlessEnrollment`, or widen with `WithAgentRuntimeAllowedRegistrationKeyKinds`. |
+| `ErrInvalidAgentState` together with `ErrInvalidRegisterConfig` while using `WithAgentRuntimeRequiredRegistrationKeyKind` | The persisted lifecycle phase cannot prove one canonical registration lineage. Keep the state for diagnosis; do not overwrite or silently re-enroll it. |
 | `ErrAssignmentKeyRejected` | LayerV did not accept this credential. Check you passed the right one and that it is not revoked. |
 | `*AgentAssignmentChangedError` | You pinned placement and LayerV moved your service. Drop `WithAgentRuntimePinnedAssignment` to follow the move. |
 | `ErrAssignmentLeaseExpired` | LayerV could not be reached to renew, or you passed `WithAgentRuntimeOfflineOpen`. Check connectivity; drop the option if you did not mean to manage renewal yourself. |

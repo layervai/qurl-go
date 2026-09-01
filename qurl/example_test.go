@@ -298,6 +298,27 @@ func ExampleWithAgentRuntimeHeadlessEnrollment() {
 	defer binding.Destroy()
 }
 
+// ExampleWithAgentRuntimeRequiredRegistrationKeyKind shows an integration that
+// owns an isolated state namespace and one exact enrollment-token lineage. The
+// assertion remains active on later opens, refreshes, and recovery calls.
+func ExampleWithAgentRuntimeRequiredRegistrationKeyKind() {
+	ctx := context.Background()
+	store, err := qurl.OpenFileAgentState("/var/lib/layerv/qurl/agent-state.json")
+	if err != nil {
+		panic(err)
+	}
+	defer store.Close()
+	_, binding, err := qurl.ConnectAgentRuntime(ctx, store,
+		qurl.WithAgentRuntimeEnrollmentCredential(enrollmentCredentialFromInstaller()),
+		qurl.WithAgentRuntimeMetadata("desktop-host", "1.0.0"),
+		qurl.WithAgentRuntimeRequiredRegistrationKeyKind(qurl.RegistrationKeyKindBootstrap),
+	)
+	if err != nil {
+		panic(err)
+	}
+	defer binding.Destroy()
+}
+
 func ExampleRecoverAgentRuntime() {
 	// Recovery is an explicit operator action after the current device API key
 	// has been deliberately revoked. Both lifecycle legs use authenticated NHP

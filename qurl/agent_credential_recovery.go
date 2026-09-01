@@ -327,7 +327,10 @@ func (c *nativeAgentRuntimeConfig) recoverAgentRuntimeLocked(ctx context.Context
 	// Keep the optional operator assertion ahead of the lifecycle's own full
 	// trust-state and X25519-key validation. A mismatched explicit identity must
 	// not advance far enough to resolve placement or emit a datagram.
-	if err := prepareLoadedAgentState(state, ErrInvalidRegisterConfig); err != nil {
+	if err := prepareLoadedAgentStateWithValidation(state, ErrInvalidRegisterConfig, func(state *AgentState) error {
+		return c.requirePersistedRegistrationKeyKind(state, ErrInvalidRegisterConfig)
+	}); err != nil {
+		clearOwnedAgentState(state)
 		return nil, err
 	}
 	if state.PendingActivation != nil || state.PendingCompletion != nil {

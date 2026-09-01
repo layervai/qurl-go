@@ -276,6 +276,15 @@ including renewing without holding an enrollment credential at runtime and
 [taking manual control](docs/register-an-agent.md#taking-manual-control) of
 renewal.
 
+An integration that owns both an isolated state namespace and one exact token
+minting path can replace the broad enrollment policy with
+`WithAgentRuntimeRequiredRegistrationKeyKind`. That option verifies the same
+authenticated kind on enrollment and on every later open, refresh, renewal, or
+credential-recovery transition; it is an immutable lineage assertion, not a
+list of kinds the first enrollment may accept. Do not combine it with
+`WithAgentRuntimeHeadlessEnrollment` or
+`WithAgentRuntimeAllowedRegistrationKeyKinds`.
+
 **Credentials are LayerV-minted tokens** of at least 32 characters. Passwords
 and hand-picked strings are rejected before anything is saved or sent.
 

@@ -1338,6 +1338,7 @@ func TestSealedFileAgentState_MetadataIsEnvelopeAuthenticated(t *testing.T) {
 func TestSealedFileAgentState_SetupLockFailuresFailClosed(t *testing.T) {
 	store := testSealedStore(t, &testAgentStateKeyWrapper{})
 	state := testAgentState(t)
+	state.EnrollmentCredentialKind = string(RegistrationKeyKindBootstrap)
 	if err := store.SaveAgentState(context.Background(), state); err != nil {
 		t.Fatal(err)
 	}
@@ -1367,6 +1368,36 @@ func TestSealedFileAgentState_SetupLockFailuresFailClosed(t *testing.T) {
 	}
 	if networkCalls != 0 {
 		t.Fatalf("completed runtime fast path network calls = %d, want 0", networkCalls)
+	}
+	client, binding, err = connectWithEnrollment(context.Background(), "", store,
+		WithAgentRuntimeHub(runtimeTestHub()),
+		WithAgentClientHTTPClient(refusing),
+		WithAgentRuntimeRequiredRegistrationKeyKind(RegistrationKeyKindBootstrap),
+	)
+	if client != nil || binding != nil || !errors.Is(err, ErrAgentSetupLock) || !errors.Is(err, lockFailure) {
+		t.Fatalf("required lineage warm open = %v/%v/%v, want setup-lock failure", client, binding, err)
+	}
+	if lockSyncCalls == 0 {
+		t.Fatal("required lineage warm open did not acquire the setup lock")
+	}
+	if networkCalls != 0 {
+		t.Fatalf("required lineage warm open network calls = %d, want 0", networkCalls)
+	}
+	strictOnlineLockCalls := lockSyncCalls
+	client, binding, err = connectWithEnrollment(context.Background(), "", store,
+		WithAgentRuntimeHub(runtimeTestHub()),
+		WithAgentClientHTTPClient(refusing),
+		WithAgentRuntimeOfflineOpen(),
+		WithAgentRuntimeRequiredRegistrationKeyKind(RegistrationKeyKindBootstrap),
+	)
+	if client != nil || binding != nil || !errors.Is(err, ErrAgentSetupLock) || !errors.Is(err, lockFailure) {
+		t.Fatalf("required lineage offline open = %v/%v/%v, want setup-lock failure", client, binding, err)
+	}
+	if lockSyncCalls <= strictOnlineLockCalls {
+		t.Fatal("required lineage offline open did not acquire the setup lock")
+	}
+	if networkCalls != 0 {
+		t.Fatalf("required lineage offline open network calls = %d, want 0", networkCalls)
 	}
 	store.dir.impl.hooks.syncFD = originalSync
 

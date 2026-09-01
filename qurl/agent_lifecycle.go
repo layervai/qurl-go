@@ -486,7 +486,11 @@ func (b *AgentRuntimeBinding) livePlacement() *AgentAssignment {
 // loadCompletedRegisteredState enforces the completed identity and intact
 // credential precondition shared by both registered-agent open APIs.
 func loadCompletedRegisteredState(ctx context.Context, store AgentStateStore, errKind error) (*AgentState, error) {
-	state, err := loadExistingAgentState(ctx, store, errKind)
+	return loadCompletedRegisteredStateWithValidation(ctx, store, errKind, nil)
+}
+
+func loadCompletedRegisteredStateWithValidation(ctx context.Context, store AgentStateStore, errKind error, beforeKeypair func(*AgentState) error) (*AgentState, error) {
+	state, err := loadExistingAgentStateWithValidation(ctx, store, errKind, beforeKeypair)
 	if err != nil {
 		return nil, err
 	}
@@ -505,8 +509,8 @@ func loadCompletedRegisteredState(ctx context.Context, store AgentStateStore, er
 // that may admit a promoted credential whose assignment refresh/open is still
 // pending. It validates the credential material but leaves phase consumption to
 // the locked refresh transition.
-func loadCompletedRegisteredStateForRefresh(ctx context.Context, store AgentStateStore, errKind error) (*AgentState, error) {
-	state, err := loadExistingAgentState(ctx, store, errKind)
+func loadCompletedRegisteredStateForRefreshWithValidation(ctx context.Context, store AgentStateStore, errKind error, beforeKeypair func(*AgentState) error) (*AgentState, error) {
+	state, err := loadExistingAgentStateWithValidation(ctx, store, errKind, beforeKeypair)
 	if err != nil {
 		return nil, err
 	}
@@ -534,13 +538,13 @@ func loadCompletedRegisteredStateForRefresh(ctx context.Context, store AgentStat
 	return state, nil
 }
 
-func loadExistingAgentState(ctx context.Context, store AgentStateStore, errKind error) (*AgentState, error) {
+func loadExistingAgentStateWithValidation(ctx context.Context, store AgentStateStore, errKind error, beforeKeypair func(*AgentState) error) (*AgentState, error) {
 	state, err := store.LoadAgentState(ctx)
 	if err != nil {
 		clearOwnedAgentState(state)
 		return nil, fmt.Errorf("%w: load agent state: %w", errKind, err)
 	}
-	if err := prepareLoadedAgentState(state, errKind); err != nil {
+	if err := prepareLoadedAgentStateWithValidation(state, errKind, beforeKeypair); err != nil {
 		clearOwnedAgentState(state)
 		return nil, err
 	}

@@ -134,9 +134,10 @@ type AgentRuntimeRefreshOption interface {
 
 // AgentRuntimeRecoveryOption is the closed option set for RecoverAgentRuntime.
 // It deliberately excludes caller-selected identity, enrollment metadata, OTP,
-// and registration-key policy: recovery preserves the persisted X25519 identity
-// and obtains placement only from the authenticated Hub result. Callers may
-// assert the expected persisted agent id, but cannot select or change it.
+// and enrollment admission policy: recovery preserves the persisted X25519
+// identity and obtains placement only from the authenticated Hub result. A
+// caller may assert the immutable registration lineage and expected persisted
+// agent id, but cannot select or change either one.
 type AgentRuntimeRecoveryOption interface {
 	agentRuntimeOption
 	isAgentRuntimeRecoveryOption()
@@ -174,29 +175,31 @@ type nativeAgentRuntimeConfig struct {
 	// hubErr records why no Hub trust root is available when hub is nil. It is
 	// surfaced only by requireHub, so a call that needs no Hub exchange — a warm
 	// or offline open of completed state — still succeeds without one.
-	hubErr                   error
-	agentID                  string
-	recoveryAgentID          string
-	hostname                 string
-	version                  string
-	pinAssignment            bool
-	offlineOpen              bool
-	baseURL                  string
-	httpClient               HTTPDoer
-	resolver                 nativeudp.Resolver
-	dialer                   nativeudp.Dialer
-	timeout                  time.Duration
-	maxAddresses             int
-	assignmentOptions        []AssignmentOption
-	allowedKeyKinds          map[RegistrationKeyKind]struct{}
-	otpProvider              func(context.Context, AgentOTPChallenge) (string, error)
-	clock                    func() time.Time
-	random                   io.Reader
-	deviceCredential         string
-	enrollCredential         string
-	enrollCredentialSet      bool
-	enrollCredentialProvider AgentEnrollmentCredentialProvider
-	continuityStore          AgentStateStore
+	hubErr                      error
+	agentID                     string
+	recoveryAgentID             string
+	hostname                    string
+	version                     string
+	pinAssignment               bool
+	offlineOpen                 bool
+	baseURL                     string
+	httpClient                  HTTPDoer
+	resolver                    nativeudp.Resolver
+	dialer                      nativeudp.Dialer
+	timeout                     time.Duration
+	maxAddresses                int
+	assignmentOptions           []AssignmentOption
+	allowedKeyKinds             map[RegistrationKeyKind]struct{}
+	requiredRegistrationKeyKind RegistrationKeyKind
+	explicitRegistrationPolicy  bool
+	otpProvider                 func(context.Context, AgentOTPChallenge) (string, error)
+	clock                       func() time.Time
+	random                      io.Reader
+	deviceCredential            string
+	enrollCredential            string
+	enrollCredentialSet         bool
+	enrollCredentialProvider    AgentEnrollmentCredentialProvider
+	continuityStore             AgentStateStore
 }
 
 type nativeRuntimeOptionFunc func(*nativeAgentRuntimeConfig) error
@@ -355,7 +358,11 @@ func WithAgentRuntimeOTPProvider(provider func(context.Context, AgentOTPChalleng
 // operator's, or a shared alias — can receive the code.
 func WithAgentRuntimeHeadlessEnrollment() AgentRuntimeRegistrationOption {
 	return nativeRuntimeOptionFunc(func(c *nativeAgentRuntimeConfig) error {
+		if c.requiredRegistrationKeyKind != "" {
+			return conflictingRequiredRegistrationKeyKindPolicy()
+		}
 		c.allowedKeyKinds = headlessRegistrationKeyKinds()
+		c.explicitRegistrationPolicy = true
 		return nil
 	})
 }
@@ -384,6 +391,9 @@ func headlessRegistrationKeyKinds() map[RegistrationKeyKind]struct{} {
 // overwrite earlier ones; the last policy option wins.
 func WithAgentRuntimeAllowedRegistrationKeyKinds(kinds ...RegistrationKeyKind) AgentRuntimeRegistrationOption {
 	return nativeRuntimeOptionFunc(func(c *nativeAgentRuntimeConfig) error {
+		if c.requiredRegistrationKeyKind != "" {
+			return conflictingRequiredRegistrationKeyKindPolicy()
+		}
 		if len(kinds) == 0 {
 			return fmt.Errorf("%w: at least one native registration key kind is required", ErrInvalidRegisterConfig)
 		}
@@ -397,8 +407,42 @@ func WithAgentRuntimeAllowedRegistrationKeyKinds(kinds ...RegistrationKeyKind) A
 			}
 		}
 		c.allowedKeyKinds = allowed
+		c.explicitRegistrationPolicy = true
 		return nil
 	})
+}
+
+// WithAgentRuntimeRequiredRegistrationKeyKind asserts one immutable native
+// registration lineage across enrollment, warm open, assignment refresh,
+// held-binding renewal, and explicit credential recovery. Unlike
+// WithAgentRuntimeAllowedRegistrationKeyKinds, it is not an admission set: an
+// existing state file must prove the exact same authenticated credential kind
+// that a fresh enrollment is allowed to use.
+//
+// The assertion is byte-exact. Unknown, missing, whitespace-normalized, or
+// ambiguous persisted values fail closed before state mutation, provider use,
+// or network I/O. A different known kind returns
+// RegistrationKeyKindDisallowedError. It cannot be combined with the broader
+// headless or allowed-kinds enrollment policies in either option order.
+func WithAgentRuntimeRequiredRegistrationKeyKind(kind RegistrationKeyKind) AgentRuntimeLifecycleOption {
+	return nativeRuntimeLifecycleOptionFunc(func(c *nativeAgentRuntimeConfig) error {
+		if _, ok := exactRegistrationKeyKind(string(kind)); !ok {
+			return fmt.Errorf("%w: required native registration key kind is invalid", ErrInvalidRegisterConfig)
+		}
+		if c.explicitRegistrationPolicy {
+			return conflictingRequiredRegistrationKeyKindPolicy()
+		}
+		if c.requiredRegistrationKeyKind != "" && c.requiredRegistrationKeyKind != kind {
+			return conflictingRequiredRegistrationKeyKindPolicy()
+		}
+		c.requiredRegistrationKeyKind = kind
+		c.allowedKeyKinds = map[RegistrationKeyKind]struct{}{kind: {}}
+		return nil
+	})
+}
+
+func conflictingRequiredRegistrationKeyKindPolicy() error {
+	return fmt.Errorf("%w: required registration lineage cannot be combined with another registration-key policy", ErrInvalidRegisterConfig)
 }
 
 // WithAgentRuntimeUDPResolver injects native endpoint DNS resolution.
@@ -650,7 +694,20 @@ func registerNativeAgentRuntime(ctx context.Context, store AgentStateStore, opts
 	}
 
 	result, err := withAgentStoreContinuity(store, destroyNativeRuntimeResult, func(retained AgentStateStore) (*nativeRuntimeResult, error) {
-		state, found, err := loadNativeAgentStateIfPresent(ctx, retained)
+		// A required lineage assertion is about the exact durable snapshot, not
+		// merely enrollment admission. Serialize and reload even a live warm or
+		// offline open so another process cannot swap lineage between validation
+		// and binding construction. The default path below intentionally retains
+		// its existing lock-free warm-open behavior.
+		if cfg.requiredRegistrationKeyKind != "" {
+			return withAgentSetupLock(ctx, retained, destroyNativeRuntimeResult, func(lockedCtx context.Context, locked AgentStateStore) (*nativeRuntimeResult, error) {
+				if cfg.offlineOpen {
+					return cfg.openRequiredOfflineLocked(lockedCtx, locked)
+				}
+				return cfg.registerLocked(lockedCtx, locked)
+			})
+		}
+		state, found, err := loadNativeAgentStateIfPresent(ctx, retained, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -713,6 +770,9 @@ func finishNativeRuntime(store AgentStateStore, state *AgentState, cfg *nativeAg
 	if err := validateCompletedAgentIdentity(state, ErrInvalidRegisterConfig); err != nil {
 		return nil, nil, err
 	}
+	if err := cfg.requirePersistedRegistrationKeyKind(state, ErrInvalidRegisterConfig); err != nil {
+		return nil, nil, err
+	}
 	if err := reconcileNativeAgentIdentity(state, cfg.agentID); err != nil {
 		return nil, nil, err
 	}
@@ -756,7 +816,9 @@ func finishNativeRuntimeResult(store AgentStateStore, state *AgentState, cfg *na
 // this decision instant forward without moving any protocol or state clock.
 func (c *nativeAgentRuntimeConfig) renewSessionAssignment(ctx context.Context, hub HubBootstrap, store AgentStateStore, agentID string, privateKey []byte, renewalDecisionAt time.Time) (*AgentAssignment, error) {
 	return withAgentSetupLock(ctx, store, func(*AgentAssignment) {}, func(lockedCtx context.Context, locked AgentStateStore) (*AgentAssignment, error) {
-		state, err := loadCompletedRegisteredState(lockedCtx, locked, ErrInvalidRegisterConfig)
+		state, err := loadCompletedRegisteredStateWithValidation(lockedCtx, locked, ErrInvalidRegisterConfig, func(state *AgentState) error {
+			return c.requirePersistedRegistrationKeyKind(state, ErrInvalidRegisterConfig)
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -794,7 +856,9 @@ func (c *nativeAgentRuntimeConfig) registerLocked(ctx context.Context, store Age
 	enrollmentCredential := c.enrollCredential
 	c.continuityStore = store
 	defer func() { c.continuityStore = nil }()
-	state, err := loadOrCreateAgentState(ctx, store, ErrInvalidRegisterConfig)
+	state, err := loadOrCreateAgentState(ctx, store, ErrInvalidRegisterConfig, func(state *AgentState) error {
+		return c.requirePersistedRegistrationKeyKind(state, ErrInvalidRegisterConfig)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -944,6 +1008,19 @@ func (c *nativeAgentRuntimeConfig) registerLocked(ctx context.Context, store Age
 	}
 
 	return c.activateAndComplete(ctx, enrollmentCredential, store, state, privateKey)
+}
+
+func (c *nativeAgentRuntimeConfig) openRequiredOfflineLocked(ctx context.Context, store AgentStateStore) (*nativeRuntimeResult, error) {
+	state, found, err := loadNativeAgentStateIfPresent(ctx, store, func(state *AgentState) error {
+		return c.requirePersistedRegistrationKeyKind(state, ErrInvalidRegisterConfig)
+	})
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, fmt.Errorf("%w: offline open requires an existing completed registration: %w", ErrInvalidRegisterConfig, ErrAgentStateNotFound)
+	}
+	return finishNativeRuntimeResult(store, state, c)
 }
 
 // preparePendingRecovery performs the only supported pre-v6 pending-state
@@ -1234,11 +1311,12 @@ func (c *nativeAgentRuntimeConfig) transitionPendingActivation(ctx context.Conte
 	return nil
 }
 
-func loadNativeAgentStateIfPresent(ctx context.Context, store AgentStateStore) (*AgentState, bool, error) {
+func loadNativeAgentStateIfPresent(ctx context.Context, store AgentStateStore, beforeKeypair func(*AgentState) error) (*AgentState, bool, error) {
 	state, err := store.LoadAgentState(ctx)
 	switch {
 	case err == nil:
-		if err := prepareLoadedAgentState(state, ErrInvalidRegisterConfig); err != nil {
+		if err := prepareLoadedAgentStateWithValidation(state, ErrInvalidRegisterConfig, beforeKeypair); err != nil {
+			clearOwnedAgentState(state)
 			return nil, false, err
 		}
 		return state, true, nil
@@ -1313,6 +1391,9 @@ func (c *nativeAgentRuntimeConfig) validateEnrollmentPolicyOptions() error {
 	if _, otpAllowed := c.allowedKeyKinds[RegistrationKeyKindAccount]; otpAllowed || c.otpProvider == nil {
 		return nil
 	}
+	if c.requiredRegistrationKeyKind != "" {
+		return fmt.Errorf("%w: WithAgentRuntimeOTPProvider contradicts a required registration lineage that does not use the account OTP path", ErrInvalidRegisterConfig)
+	}
 	return fmt.Errorf("%w: WithAgentRuntimeOTPProvider contradicts an enrollment policy that rejects the account kind; WithAgentRuntimeHeadlessEnrollment declares this runtime cannot receive a code, so pass one or the other", ErrInvalidRegisterConfig)
 }
 
@@ -1324,6 +1405,16 @@ func (c *nativeAgentRuntimeConfig) requireOTPProviderForPolicy() error {
 }
 
 func (c *nativeAgentRuntimeConfig) requireAllowedRegistrationKeyKind(raw string) error {
+	if c.requiredRegistrationKeyKind != "" {
+		kind, ok := exactRegistrationKeyKind(raw)
+		if !ok {
+			return fmt.Errorf("%w: unsupported registration key kind", ErrAssignmentInvalidResponse)
+		}
+		if kind == c.requiredRegistrationKeyKind {
+			return nil
+		}
+		return &RegistrationKeyKindDisallowedError{Kind: kind, Allowed: []RegistrationKeyKind{c.requiredRegistrationKeyKind}}
+	}
 	kind := RegistrationKeyKind(strings.TrimSpace(raw))
 	switch kind {
 	case RegistrationKeyKindConnectorBootstrap, RegistrationKeyKindBootstrap, RegistrationKeyKindAgent, RegistrationKeyKindAccount:
@@ -1339,6 +1430,64 @@ func (c *nativeAgentRuntimeConfig) requireAllowedRegistrationKeyKind(raw string)
 	}
 	slices.Sort(allowed)
 	return &RegistrationKeyKindDisallowedError{Kind: kind, Allowed: allowed}
+}
+
+func exactRegistrationKeyKind(raw string) (RegistrationKeyKind, bool) {
+	if !validPublicRegistrationKeyKind(raw) {
+		return "", false
+	}
+	return RegistrationKeyKind(raw), true
+}
+
+// requirePersistedRegistrationKeyKind validates the authority field for the
+// state's exact lifecycle phase. Pending activation has not promoted lineage
+// yet, so its authenticated registration record is authoritative and the
+// top-level field must be empty. Every later phase uses only the promoted
+// EnrollmentCredentialKind. A clean pre-enrollment identity has no lineage to
+// assert yet and is valid only while both locations remain empty.
+func (c *nativeAgentRuntimeConfig) requirePersistedRegistrationKeyKind(state *AgentState, errKind error) error {
+	if c == nil || c.requiredRegistrationKeyKind == "" {
+		return nil
+	}
+	if state == nil {
+		return invalidPersistedRegistrationLineage(errKind)
+	}
+
+	var raw string
+	switch {
+	case state.PendingActivation != nil:
+		if state.EnrollmentCredentialKind != "" {
+			return invalidPersistedRegistrationLineage(errKind)
+		}
+		raw = state.PendingActivation.Registration.KeyKind
+	case state.PendingCompletion != nil,
+		state.RegisteredAt != nil,
+		state.Assignment != nil,
+		state.DeviceAPIKey != "",
+		state.DeviceAPIKeyID != "",
+		state.PendingCredentialRecovery != nil,
+		state.PendingCredentialRecoveryIssue != nil,
+		state.CredentialRecoveryRefreshRequired:
+		raw = state.EnrollmentCredentialKind
+	default:
+		if state.EnrollmentCredentialKind != "" {
+			return invalidPersistedRegistrationLineage(errKind)
+		}
+		return nil
+	}
+
+	kind, ok := exactRegistrationKeyKind(raw)
+	if !ok {
+		return invalidPersistedRegistrationLineage(errKind)
+	}
+	if kind == c.requiredRegistrationKeyKind {
+		return nil
+	}
+	return &RegistrationKeyKindDisallowedError{Kind: kind, Allowed: []RegistrationKeyKind{c.requiredRegistrationKeyKind}}
+}
+
+func invalidPersistedRegistrationLineage(errKind error) error {
+	return fmt.Errorf("%w: persisted registration lineage is missing, non-canonical, or ambiguous: %w", errKind, ErrInvalidAgentState)
 }
 
 func validateIncompleteNativeState(state *AgentState) error {
@@ -2678,7 +2827,9 @@ func refreshAgentRuntimeLocked(ctx context.Context, hub HubBootstrap, store Agen
 	return withAgentSetupLock(ctx, store, destroyNativeRuntimeResult, func(lockedCtx context.Context, locked AgentStateStore) (*nativeRuntimeResult, error) {
 		cfg.continuityStore = locked
 		defer func() { cfg.continuityStore = nil }()
-		state, err := loadCompletedRegisteredStateForRefresh(lockedCtx, locked, ErrInvalidRegisterConfig)
+		state, err := loadCompletedRegisteredStateForRefreshWithValidation(lockedCtx, locked, ErrInvalidRegisterConfig, func(state *AgentState) error {
+			return cfg.requirePersistedRegistrationKeyKind(state, ErrInvalidRegisterConfig)
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -2694,6 +2845,10 @@ func refreshAgentRuntimeLocked(ctx context.Context, hub HubBootstrap, store Agen
 // refresh-only phase — so none of them can drift on trust root, move adoption,
 // or persistence ordering.
 func (c *nativeAgentRuntimeConfig) renewCompletedAssignment(ctx context.Context, hub HubBootstrap, locked AgentStateStore, state *AgentState) (result *nativeRuntimeResult, err error) {
+	if err := c.requirePersistedRegistrationKeyKind(state, ErrInvalidRegisterConfig); err != nil {
+		clearOwnedAgentState(state)
+		return nil, err
+	}
 	refreshRequired := state.CredentialRecoveryRefreshRequired
 	refreshRequiredAgentID := ""
 	if refreshRequired {

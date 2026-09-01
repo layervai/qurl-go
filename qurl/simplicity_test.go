@@ -95,6 +95,10 @@ var frictionBudget = map[string]int{
 	// state / register / two defers that close the store and the binding — plus
 	// the ctx and the discard the example needs to compile.
 	"ExampleWithAgentRuntimeHeadlessEnrollment": 6,
+	// An integration-owned state namespace adds one exact-lineage assertion in
+	// place of the broader headless policy; it does not add another lifecycle
+	// call or any caller-managed state.
+	"ExampleWithAgentRuntimeRequiredRegistrationKeyKind": 6,
 
 	// Recovery is one deliberate operator action, and the extra statement over
 	// headless enrollment is the Hub trust root: RecoverAgentRuntime rejects a
@@ -190,6 +194,10 @@ var (
 	_ qurl.AgentRuntimeRefreshOption      = qurl.WithAgentClientHTTPClient(nil)
 	_ qurl.AgentRuntimeRecoveryOption     = qurl.WithAgentClientHTTPClient(nil)
 	_ qurl.AgentRuntimeLifecycleOption    = qurl.WithAgentClientHTTPClient(nil)
+	_ qurl.AgentRuntimeRegistrationOption = qurl.WithAgentRuntimeRequiredRegistrationKeyKind(qurl.RegistrationKeyKindBootstrap)
+	_ qurl.AgentRuntimeRefreshOption      = qurl.WithAgentRuntimeRequiredRegistrationKeyKind(qurl.RegistrationKeyKindBootstrap)
+	_ qurl.AgentRuntimeRecoveryOption     = qurl.WithAgentRuntimeRequiredRegistrationKeyKind(qurl.RegistrationKeyKindBootstrap)
+	_ qurl.AgentRuntimeLifecycleOption    = qurl.WithAgentRuntimeRequiredRegistrationKeyKind(qurl.RegistrationKeyKindBootstrap)
 )
 
 // Option sets in this SDK are closed on purpose: each entry point accepts only
@@ -202,6 +210,8 @@ func TestOptionSetsStayClosed(t *testing.T) {
 	// both entry points that renew an assignment.
 	openOnly := qurl.WithAgentRuntimeOfflineOpen()
 	pinned := qurl.WithAgentRuntimePinnedAssignment()
+	requiredKind := qurl.WithAgentRuntimeRequiredRegistrationKeyKind(qurl.RegistrationKeyKindBootstrap)
+	allowedKinds := qurl.WithAgentRuntimeAllowedRegistrationKeyKinds(qurl.RegistrationKeyKindBootstrap)
 
 	// The whole point of the closed sets: an option that means nothing to a
 	// plain resource Client must not be silently accepted by one.
@@ -210,6 +220,9 @@ func TestOptionSetsStayClosed(t *testing.T) {
 	}
 	if _, isClient := pinned.(qurl.ClientOption); isClient {
 		t.Error("WithAgentRuntimePinnedAssignment must not satisfy ClientOption; NewClient and OpenRegisteredAgent would accept and ignore it")
+	}
+	if _, isClient := requiredKind.(qurl.ClientOption); isClient {
+		t.Error("WithAgentRuntimeRequiredRegistrationKeyKind must not satisfy ClientOption; plain clients do not own native registration lineage")
 	}
 
 	// Refresh and recovery exist to perform a network exchange, so the option
@@ -223,6 +236,12 @@ func TestOptionSetsStayClosed(t *testing.T) {
 	}
 	if _, ok := any(pinned).(qurl.AgentRuntimeRecoveryOption); ok {
 		t.Error("WithAgentRuntimePinnedAssignment must not satisfy AgentRuntimeRecoveryOption; recovery exists to adopt the Hub placement")
+	}
+	if _, ok := any(allowedKinds).(qurl.AgentRuntimeRefreshOption); ok {
+		t.Error("WithAgentRuntimeAllowedRegistrationKeyKinds must remain an enrollment-only admission policy")
+	}
+	if _, ok := any(allowedKinds).(qurl.AgentRuntimeRecoveryOption); ok {
+		t.Error("WithAgentRuntimeAllowedRegistrationKeyKinds must remain an enrollment-only admission policy")
 	}
 
 	// Generic client options must not reach the lifecycle entry points.
@@ -244,6 +263,7 @@ func TestOptionSetsStayClosed(t *testing.T) {
 		"WithAgentClientBaseURL":       qurl.WithAgentClientBaseURL("https://example.test"),
 		"WithAgentRuntimeOfflineOpen":  openOnly,
 		"WithAgentRuntimePinnedAssign": pinned,
+		"WithAgentRuntimeRequiredKind": requiredKind,
 	} {
 		if _, ok := opt.(qurl.AgentRuntimeUDPOption); ok {
 			t.Errorf("%s must not satisfy AgentRuntimeUDPOption", name)

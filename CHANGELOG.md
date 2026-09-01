@@ -6,6 +6,15 @@ independently under `awsstore/vX.Y.Z` tags.
 Pre-1.0 semantic versioning: breaking changes land in minor versions (v0.N.0)
 and are marked **Breaking** with what to change.
 
+## Unreleased
+
+- Added `WithAgentRuntimeRequiredRegistrationKeyKind` for integrations that own
+  an isolated native-agent state namespace and must bind it to one exact
+  authenticated enrollment lineage. The assertion applies to fresh enrollment,
+  warm and offline opens, refresh, held-binding renewal, and explicit credential
+  recovery. Missing, non-canonical, or ambiguous persisted lineage fails closed
+  before mutation, credential-provider use, or lifecycle network I/O.
+
 ## v0.11.0 — 2026-09-01
 
 - **Breaking:** registered-agent session admission and durable operation

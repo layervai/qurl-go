@@ -614,6 +614,24 @@ func TestAgentRuntimeOptionSetsCompileForIntendedSurfaces(t *testing.T) {
 	acceptRegistration(WithAgentRuntimeHub(runtimeTestHub()))
 	acceptRecovery(WithAgentRuntimeRecoveryHub(runtimeTestHub()))
 	acceptRegistration(WithAgentRuntimeAllowedRegistrationKeyKinds(RegistrationKeyKindAgent))
+	requiredKind := WithAgentRuntimeRequiredRegistrationKeyKind(RegistrationKeyKindAgent)
+	acceptRegistration(requiredKind)
+	acceptRefresh(requiredKind)
+	acceptRecovery(requiredKind)
+	acceptLifecycle(requiredKind)
+	if _, ok := requiredKind.(AgentRuntimeUDPOption); ok {
+		t.Error("required registration kind must not satisfy AgentRuntimeUDPOption")
+	}
+	if _, ok := requiredKind.(ClientOption); ok {
+		t.Error("required registration kind must not satisfy ClientOption")
+	}
+	allowedKinds := WithAgentRuntimeAllowedRegistrationKeyKinds(RegistrationKeyKindAgent)
+	if _, ok := allowedKinds.(AgentRuntimeRefreshOption); ok {
+		t.Error("allowed registration kinds must remain registration-only")
+	}
+	if _, ok := allowedKinds.(AgentRuntimeRecoveryOption); ok {
+		t.Error("allowed registration kinds must remain registration-only")
+	}
 	acceptRegistration(WithAgentRuntimeUDPBounds(time.Second, 1))
 	acceptRefresh(WithAgentRuntimeUDPBounds(time.Second, 1))
 	acceptUDP(WithAgentRuntimeUDPBounds(time.Second, 1))
