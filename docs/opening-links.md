@@ -35,8 +35,26 @@ if err != nil {
 	return err
 }
 
-fmt.Println(handle.ResourceURL)
+req, err := http.NewRequestWithContext(ctx, http.MethodGet, handle.ResourceURL, nil)
+if err != nil {
+	return err
+}
+if err := handle.AuthorizeContentRequest(req); err != nil {
+	return err
+}
+client := &http.Client{
+	// Re-authorize same-origin redirects, refuse every other origin, and keep
+	// the standard 10-request redirect limit.
+	CheckRedirect: handle.CheckContentRedirect,
+}
+resp, err := client.Do(req)
 ```
+
+`AuthorizeContentRequest` adds the short-lived application-session cookie only
+to the exact granted HTTPS origin. Call it again from `CheckRedirect` so it can
+approve a same-origin redirect and refuse a different origin. Use a client
+without a cookie jar, or ensure its jar does not append the reserved
+`qurl_vsession` cookie after this method runs.
 
 Opener trust config is not an issuer credential. It cannot protect URLs or
 create portals; it only tells the SDK which LayerV-issued qURL links and
@@ -132,6 +150,30 @@ default:
 	report(err)
 }
 ```
+
+Handle request-authorization errors at the protected-content request, not at
+`EnterPortal`:
+
+```go
+if err := handle.AuthorizeContentRequest(req); err != nil {
+	if errors.Is(err, qurl.ErrInvalidContentRequest) {
+		reject()
+	}
+	return err
+}
+resp, err := client.Do(req)
+if errors.Is(err, qurl.ErrInvalidContentRequest) {
+	// CheckContentRedirect refused a cross-origin redirect.
+	reject()
+}
+if errors.Is(err, qurl.ErrTooManyContentRedirects) {
+	// CheckContentRedirect stopped after the standard 10-request limit.
+	reject()
+}
+```
+
+`errors.Is` also finds both redirect sentinels when `http.Client` wraps a
+redirect-policy error in `*url.Error`.
 
 `EnterPortal` fails closed when the resolved deployment carries no issuer keys
 — a build that ships an empty deployment and has no `QURL_DEPLOYMENT` override

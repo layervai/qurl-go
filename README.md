@@ -300,7 +300,19 @@ handle, err := qurl.EnterPortal(ctx, link)
 if err != nil {
 	return err
 }
-resp, err := httpClient.Get(handle.ResourceURL) // httpClient is your own *http.Client
+req, err := http.NewRequestWithContext(ctx, http.MethodGet, handle.ResourceURL, nil)
+if err != nil {
+	return err
+}
+if err := handle.AuthorizeContentRequest(req); err != nil {
+	return err
+}
+httpClient := &http.Client{
+	// Re-authorize same-origin redirects, refuse every other origin, and keep
+	// the standard 10-request redirect limit.
+	CheckRedirect: handle.CheckContentRedirect,
+}
+resp, err := httpClient.Do(req)
 ```
 
 That is the whole integration, and it needs no LayerV credentials. `EnterPortal`
@@ -312,6 +324,8 @@ anything else uses the HTTPS relay when a relay allowlist is configured — and 
 cells-only config refuses such a link with `ErrCellNotInCatalog` rather than
 silently downgrading (see
 [docs/opening-links.md](docs/opening-links.md#pinning-the-opener-trust-config)).
+Use an HTTP client without a cookie jar, or ensure its jar does not add the
+reserved `qurl_vsession` cookie after `AuthorizeContentRequest` runs.
 
 The opener trust configuration — which issuer keys to verify links against and
 which cells to reach — resolves most specific first: a `Provider` installed

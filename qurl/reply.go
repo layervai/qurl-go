@@ -1,10 +1,12 @@
 package qurl
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 )
 
 // qURL platform reply interpretation. The lower transport authenticates the reply
@@ -36,10 +38,36 @@ func (e *ServerDenyError) Error() string {
 
 // serverKnockAckMsg is the subset of the qURL platform reply the resolve path reads.
 type serverKnockAckMsg struct {
-	ErrCode     string           `json:"errCode"`
-	SessionID   nhpSessionIDJSON `json:"sessId"`
-	OpenTime    nhpOpenTimeJSON  `json:"opnTime"`
-	RedirectURL string           `json:"redirectUrl"`
+	ErrCode           string           `json:"errCode"`
+	SessionID         nhpSessionIDJSON `json:"sessId"`
+	OpenTime          nhpOpenTimeJSON  `json:"opnTime"`
+	RedirectURL       string           `json:"redirectUrl"`
+	AuthProviderToken string           `json:"aspToken"`
+}
+
+func validAuthProviderToken(token string) bool {
+	if token == "" || len(token) > 4096 || strings.TrimSpace(token) != token {
+		return false
+	}
+	for i := 0; i < len(token); i++ {
+		switch token[i] {
+		case ' ', '\t', '\r', '\n', '\v', '\f':
+			return false
+		}
+	}
+	payload, signature, ok := strings.Cut(token, ".")
+	if !ok || payload == "" || signature == "" || strings.Contains(signature, ".") {
+		return false
+	}
+	strictBase64URL := base64.RawURLEncoding.Strict()
+	if _, err := strictBase64URL.DecodeString(payload); err != nil {
+		return false
+	}
+	sig, err := strictBase64URL.DecodeString(signature)
+	// qurl_vsession is the current HMAC-SHA256 signed-cookie contract. Keep the
+	// exact signature size fail-closed so truncated or algorithm-drifted tokens
+	// never reach a content request unnoticed.
+	return err == nil && len(sig) == 32
 }
 
 // nhpSessionIDJSON preserves field presence while accepting only the base NHP

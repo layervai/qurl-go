@@ -6,6 +6,22 @@ independently under `awsstore/vX.Y.Z` tags.
 Pre-1.0 semantic versioning: breaking changes land in minor versions (v0.N.0)
 and are marked **Breaking** with what to change.
 
+## v0.9.0 — 2026-09-01
+
+- **Breaking:** successful qURL v2 portal opens now require the authenticated
+  NHP reply to carry the signed application-session bearer. Use
+  `ResourceHandle.AuthorizeContentRequest` on each HTTPS content request; it
+  sends the bearer only to the exact granted origin and replaces stale or
+  duplicate bearer cookies. The qURL platform and NHP server must support this
+  reply field before clients update to v0.9.0. Set
+  `http.Client.CheckRedirect` to `ResourceHandle.CheckContentRedirect` so Go
+  does not copy the cookie to subdomains; the helper preserves the standard
+  10-request limit and now reports `ErrTooManyContentRedirects` at that limit.
+  `ResourceHandle.String` and `GoString` return a redacted representation and
+  no longer use Go's default struct formatting. Successful ACKs with an
+  invalid or non-HTTPS resource URL, or a noncanonical bearer encoding, now
+  fail at reply interpretation before a content handle is created.
+
 ## v0.8.0 — 2026-08-23
 
 - **Breaking:** registered-agent native knocks now require a positive,
