@@ -788,14 +788,6 @@ func (w *ephemeralStateKeyWrapper) UnwrapKey(
 func TestEmailedOTPCompletesIdempotentSDKRegistration(t *testing.T) {
 	cfg := loadOTPE2EGateConfig(t, os.Getenv)
 
-	// Logged HERE, before anything can fail, not beside the success assertion.
-	// The failure this evidence exists for -- a refused issuance, which arrives
-	// as a mailbox timeout -- kills the test inside ConnectAgentRuntime below,
-	// so a slot logged after that call is absent from precisely the run whose
-	// diagnosis needs it. Every other failure in the exchange gets it too.
-	t.Logf("EVIDENCE this run drew credential slot %d of %d",
-		cfg.enrollmentSlot, cfg.enrollmentPoolSize)
-
 	// The pool's SIZE decides whether the rotation survives a strided spending
 	// pattern (see selectEnrollment). That size lives in a secret, so no test
 	// can assert it -- say it out loud on the runs that actually load it.
