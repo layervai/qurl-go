@@ -93,7 +93,7 @@ func TestKnockWithReknock_DirectACKUsesOneHTTPSFlight(t *testing.T) {
 		_, _ = w.Write(buildReply(t, relayknock.TypeACK, keys, opened.Counter, []byte(`{"errCode":"0"}`)))
 	}))
 	defer server.Close()
-	transport, err := sessionrelay.New(server.URL, server.Client())
+	transport, err := sessionrelay.New(server.URL+"/", server.Client())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,6 +174,9 @@ func TestKnockWithReknock_RejectsUncorrelatedCOKWithoutRKN(t *testing.T) {
 	_, err = transport.KnockWithReknock(context.Background(), keys.serverPub, keys.devicePriv, nil, nil)
 	if !errors.Is(err, relayknock.ErrMalformedReply) || calls.Load() != 1 {
 		t.Fatalf("error/calls = %v/%d", err, calls.Load())
+	}
+	if !strings.Contains(err.Error(), "(counter)") || strings.Contains(err.Error(), base64.StdEncoding.EncodeToString(cookie)) {
+		t.Fatalf("error lost safe rejection class or exposed cookie: %v", err)
 	}
 }
 
@@ -323,7 +326,12 @@ func TestTransport_BoundsHangingFlightAndPreservesEarlierCallerDeadline(t *testi
 
 func TestTransport_RejectsInvalidConfigAndOversizeRequestBeforeIO(t *testing.T) {
 	keys := newRelayKeys(t)
-	for _, raw := range []string{"http://relay.example", "https://user@relay.example", "https://relay.example/path", "https://relay.example?q=1"} {
+	for _, raw := range []string{
+		"http://relay.example", "https://user@relay.example", "https://relay.example/path",
+		"https://relay.example?q=1", "https://relay.example?", "https://relay.example#",
+		"https://relay.example/?", "https://relay.example/#", "https://relay.example:",
+		"https://relay.example:/", "https://relay.example//", "https://relay.example ",
+	} {
 		if _, err := sessionrelay.New(raw, nil); !errors.Is(err, sessionrelay.ErrInvalidConfig) {
 			t.Fatalf("New(%q) error = %v", raw, err)
 		}

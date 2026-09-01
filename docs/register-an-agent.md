@@ -90,6 +90,12 @@ possible `NHP_RKN` through that relay. It does not move assignment, enrollment,
 registration, resource discovery, or exact-session retirement off native UDP,
 and it never falls back to another transport or cell.
 
+The relay POST and the later protected data-plane connection must use the same
+public egress IP. If the HTTP client uses a forward proxy, route the data-plane
+connection through that same egress. Otherwise the knock can return an
+authenticated success while the protected connection is refused because it
+arrives from a different source.
+
 And two rules for the serving loop:
 
 - **One run ID and positive attempt number per cycle attempt.** Do not change

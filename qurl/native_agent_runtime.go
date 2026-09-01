@@ -467,8 +467,11 @@ func WithAgentRuntimeUDPBounds(timeout time.Duration, maxAddresses int) AgentRun
 // flight, rejects redirects, and never falls back to UDP or another cell.
 //
 // relayBaseURL must be an HTTPS origin without credentials, a path, query, or
-// fragment. client is cloned; nil uses the standard HTTP client. The returned
-// option cannot be passed to lifecycle, UDP discovery, or retirement APIs.
+// fragment. client is cloned; nil uses the standard HTTP client. The relay POST
+// and later protected data-plane connection must use the same public egress IP.
+// If client uses a forward proxy, route the data-plane connection through the
+// same egress. The returned option cannot be passed to lifecycle, UDP discovery,
+// or retirement APIs.
 func WithAgentRuntimeSessionRelay(relayBaseURL string, client *http.Client) AgentRuntimeSessionOption {
 	return nativeRuntimeSessionOptionFunc(func(c *nativeAgentRuntimeConfig) error {
 		transport, err := sessionrelay.New(relayBaseURL, client)

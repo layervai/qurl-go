@@ -2101,6 +2101,59 @@ func TestKnockRegisteredAgent_SessionRelayBypassesUDPWithoutFallback(t *testing.
 	}
 }
 
+func TestKnockRegisteredAgent_SessionRelayCarriesRealCookieBoundRKN(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	f := newRuntimeFixture(t, nil, nil)
+	seedSessionLease(t, f, contract, time.Now().Add(12*time.Hour))
+	binding, privateKey := openSessionBinding(t, f)
+	cookie := bytes.Repeat([]byte{0x5a}, 32)
+	knock := sessionKnockStep()
+	knock.replyType = relayknock.TypeCookieChallenge
+	knock.replyBody = ""
+	knock.reknockCookie = cookie
+	reknock := sessionKnockStep()
+	reknock.requestType = relayknock.TypeReknock
+	reknock.reknockCookie = cookie
+	relay := newRuntimeRelayServer(t, f.cellUDP.serverPriv, f.cellUDP.agentPub, knock, reknock)
+
+	result, err := KnockRegisteredAgent(context.Background(), binding, privateKey, "resource-public-key",
+		NativeKnockOptions{ProtectedResourceID: testConnectorID, RunID: "0123456789abcdef", RunAttempt: 1}, relay.option())
+	if err != nil || result == nil || result.SessionID != 123 {
+		t.Fatalf("cookie-bound relayed admission = %#v, %v", result, err)
+	}
+	requests := relay.snapshot()
+	if len(requests) != 2 || requests[0].typeID != relayknock.TypeKnock || requests[1].typeID != relayknock.TypeReknock || len(f.cellUDP.snapshot()) != 0 {
+		t.Fatalf("relay/UDP requests = %#v/%#v", requests, f.cellUDP.snapshot())
+	}
+	var knk, rkn nativeAgentKnockBody
+	if err := json.Unmarshal(requests[0].body, &knk); err != nil {
+		t.Fatalf("decode relayed KNK body: %v", err)
+	}
+	if err := json.Unmarshal(requests[1].body, &rkn); err != nil {
+		t.Fatalf("decode relayed RKN body: %v", err)
+	}
+	if knk.HeaderType != nhpKNKHeaderType || rkn.HeaderType != nhpRKNHeaderType ||
+		knk.UserID != rkn.UserID || knk.DeviceID != rkn.DeviceID || knk.AuthServiceID != rkn.AuthServiceID ||
+		knk.KnockResourceID != rkn.KnockResourceID || knk.RunID != rkn.RunID {
+		t.Fatalf("relayed KNK/RKN session bodies drifted: knk=%#v rkn=%#v", knk, rkn)
+	}
+}
+
+func TestKnockRegisteredAgent_InvalidSessionRelayFailsBeforeIO(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	f := newRuntimeFixture(t, nil, nil)
+	seedSessionLease(t, f, contract, time.Now().Add(12*time.Hour))
+	binding, privateKey := openSessionBinding(t, f)
+
+	result, err := KnockRegisteredAgent(context.Background(), binding, privateKey, "resource-public-key",
+		NativeKnockOptions{ProtectedResourceID: testConnectorID, RunID: "0123456789abcdef", RunAttempt: 1},
+		WithAgentRuntimeSessionRelay("http://relay.example.test", nil))
+	if result != nil || !errors.Is(err, ErrInvalidNativeKnockInput) || !errors.Is(err, ErrInvalidRegisterConfig) ||
+		len(f.hubUDP.snapshot()) != 0 || len(f.cellUDP.snapshot()) != 0 {
+		t.Fatalf("invalid relay result/error/Hub/UDP = %#v/%v/%#v/%#v", result, err, f.hubUDP.snapshot(), f.cellUDP.snapshot())
+	}
+}
+
 func TestKnockRegisteredAgent_SessionRelayFailureDoesNotFallBackToUDP(t *testing.T) {
 	contract := loadAssignmentFixture(t)
 	f := newRuntimeFixture(t, nil, nil)

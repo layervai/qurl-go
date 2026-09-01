@@ -1,6 +1,9 @@
 // Package sessionrelay carries registered-agent NHP_KNK and the one possible
 // NHP_RKN through one trusted HTTPS relay. Agent assignment, enrollment, and
-// registration remain native UDP operations.
+// registration remain native UDP operations. The relay POST and the later
+// protected data-plane connection must use the same public egress IP. A caller
+// that supplies an HTTP client with a forward proxy must route the data-plane
+// connection through that same egress or admission will not serve it.
 package sessionrelay
 
 import (
@@ -28,8 +31,9 @@ var (
 	ErrInvalidConfig = errors.New("sessionrelay: invalid configuration")
 	// ErrInvalidRequest marks a packet that is unusable before HTTP I/O.
 	ErrInvalidRequest = errors.New("sessionrelay: invalid request")
-	// ErrTransport marks one failed HTTPS POST. It never includes the relay URL,
-	// server fingerprint, response body, or an underlying network error.
+	// ErrTransport marks an entropy failure or one failed HTTPS POST. It never
+	// includes the relay URL, server fingerprint, response body, or an
+	// underlying network error.
 	ErrTransport = errors.New("sessionrelay: HTTPS exchange failed")
 	// ErrServerUnauthenticated marks a response that is oversized or does not
 	// authenticate against the caller-pinned server static key.
@@ -52,9 +56,14 @@ type Transport struct {
 // nil client clones http.DefaultClient. The origin must not contain credentials,
 // a path, query, or fragment.
 func New(baseURL string, client *http.Client) (*Transport, error) {
+	if strings.TrimSpace(baseURL) != baseURL || strings.Contains(baseURL, "#") {
+		return nil, ErrInvalidConfig
+	}
 	parsed, err := url.Parse(baseURL)
-	if err != nil || !strings.EqualFold(parsed.Scheme, "https") || parsed.Host == "" || parsed.User != nil ||
-		(parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || parsed.Opaque != "" {
+	if err != nil || !strings.EqualFold(parsed.Scheme, "https") || parsed.Host == "" || parsed.Hostname() == "" ||
+		strings.HasSuffix(parsed.Host, ":") || parsed.User != nil ||
+		(parsed.Path != "" && parsed.Path != "/") || parsed.RawPath != "" || parsed.RawQuery != "" || parsed.ForceQuery ||
+		parsed.Fragment != "" || parsed.RawFragment != "" || parsed.Opaque != "" {
 		return nil, ErrInvalidConfig
 	}
 	if client == nil {
@@ -66,7 +75,8 @@ func New(baseURL string, client *http.Client) (*Transport, error) {
 	if clientCopy.Timeout <= 0 {
 		clientCopy.Timeout = DefaultTimeout
 	}
-	return &Transport{baseURL: strings.TrimRight(baseURL, "/"), client: &clientCopy}, nil
+	origin := (&url.URL{Scheme: "https", Host: parsed.Host}).String()
+	return &Transport{baseURL: origin, client: &clientCopy}, nil
 }
 
 // KnockWithReknock sends one KNK. An authenticated COK causes exactly one RKN
@@ -89,6 +99,10 @@ func (t *Transport) KnockWithReknock(ctx context.Context, serverStaticPub, devic
 	cookie, err := sessioncookie.Parse(reply.Body, counter)
 	cryptoutil.Wipe(reply.Body)
 	if err != nil {
+		var classified *sessioncookie.Error
+		if errors.As(err, &classified) {
+			return nil, fmt.Errorf("%w: %s", relayknock.ErrMalformedReply, classified.Error())
+		}
 		return nil, fmt.Errorf("%w: cookie challenge rejected", relayknock.ErrMalformedReply)
 	}
 	defer cryptoutil.Wipe(cookie)
@@ -97,6 +111,9 @@ func (t *Transport) KnockWithReknock(ctx context.Context, serverStaticPub, devic
 }
 
 func validate(ctx context.Context, transport *Transport, serverStaticPub, deviceStaticPriv, body []byte) error {
+	// Registration recovery installs udpfence only on lifecycle contexts whose
+	// operations remain native UDP. Registered-session admission and durable
+	// session-operation recovery do not install that lifecycle-only fence.
 	if ctx == nil || transport == nil || transport.client == nil || transport.baseURL == "" {
 		return ErrInvalidRequest
 	}
