@@ -92,7 +92,9 @@ The Connector's durable session-operation journal closes or reconciles an
 admission with `RecoverNativeSessionOperation` through the separately persisted
 source-fenced endpoint. The lower-level `RetireRegisteredAgentSession` sends an
 exact `NHP_EXT` using the immutable session receipt. Neither operation follows a
-later assignment to another cell.
+later assignment to another cell. If a lower-level caller cannot reach that
+cell over UDP, it cannot send the explicit `NHP_EXT`; the server lease then owns
+cleanup.
 
 And two rules for the serving loop:
 
