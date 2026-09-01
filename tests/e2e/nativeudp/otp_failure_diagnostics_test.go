@@ -10,10 +10,11 @@ package nativeudp_test
 // registration error, no credential slot, and a rate-limit theory that was not
 // what had happened.
 //
-// Everything here is EXECUTABLE. The one property that would need a meta-test
-// -- that the evidence is emitted before anything can fail -- is instead
-// structural: loadOTPE2EGateConfig emits it as part of loading, so there is no
-// statement order to police.
+// The diagnostic behavior here is executable. The ordering property -- that
+// the evidence is emitted before anything can fail -- is structural:
+// loadOTPE2EGateConfig emits it as part of loading, so there is no statement
+// order to police. One narrow source-level fence at the end of this file stops
+// the gate test from adding a second emission site again.
 
 import (
 	"context"
@@ -969,8 +970,8 @@ const otpRegistrationTestPath = "otp_registration_idempotency_test.go"
 // TestGateConfigLoadEmitsTheCredentialEvidence could not catch it: it drives
 // loadOTPE2EGateConfig through a recordingTB and counts what the LOADER emits,
 // so it never observes the test body. Neither vet nor the linters see a
-// duplicate log line. This is the cheapest thing that does -- one count over
-// the source, not a walk of it.
+// duplicate log line. This file-local fence counts the exact executable call
+// fragments in the gate source; it does not count prose in comments.
 func TestCredentialEvidenceHasExactlyOneEmissionSite(t *testing.T) {
 	raw, err := os.ReadFile(otpRegistrationTestPath)
 	if err != nil {
@@ -978,7 +979,7 @@ func TestCredentialEvidenceHasExactlyOneEmissionSite(t *testing.T) {
 	}
 	source := string(raw)
 
-	if n := strings.Count(source, "EVIDENCE this run drew"); n != 1 {
+	if n := strings.Count(source, `t.Logf("EVIDENCE this run drew`); n != 1 {
 		t.Errorf("%s emits the credential-slot evidence from %d places, want exactly 1.\n"+
 			"Two emissions means two renderings of one fact in the same job log, which is "+
 			"the ambiguity this evidence exists to remove. loadOTPE2EGateConfig is the one "+
@@ -987,7 +988,7 @@ func TestCredentialEvidenceHasExactlyOneEmissionSite(t *testing.T) {
 	// And one PHRASING. A second hand-rolled "%d of %d" is how the duplicate
 	// arrived, and it bypasses credentialEvidence -- whose whole justification
 	// is that one wording stays greppable across every path that emits it.
-	if n := strings.Count(source, "credential slot %d"); n != 1 {
+	if n := strings.Count(source, `fmt.Sprintf("credential slot %d`); n != 1 {
 		t.Errorf("%s renders the credential slot %d different ways, want exactly 1 "+
 			"(credentialEvidence). A hand-rolled format here silently drops the (0-based) "+
 			"qualifier and breaks the shared wording.", otpRegistrationTestPath, n)
