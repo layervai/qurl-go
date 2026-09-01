@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"net/netip"
 	"strings"
 	"testing"
 	"time"
@@ -654,6 +655,38 @@ func TestRecoverNativeSessionOperationUsesExactEndpointAndBody(t *testing.T) {
 		`,"usrData":{"native_session_operation_action":"recover"}}`
 	if string(requests[0].body) != want {
 		t.Fatalf("recovery body = %s\nwant = %s", requests[0].body, want)
+	}
+}
+
+func TestRecoverNativeSessionOperationUsesSessionRelayWithoutUDP(t *testing.T) {
+	binding, privateKey, operation := testNativeSessionOperation(t)
+	contract := loadAssignmentFixture(t)
+	serverPriv := assignmentHex(t, contract.Keys.AssignedCell.StaticPrivHex)
+	agentPrivate, err := ecdh.X25519().NewPrivateKey(privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completeACK := nativeOperationRecoveryACK(operation, nativeSessionOperationRecoveryCompleteCode,
+		"native session operation recovery complete")
+	relay := newRuntimeRelayServer(t, serverPriv, agentPrivate.PublicKey().Bytes(), runtimeUDPStep{
+		requestType: relayknock.TypeKnock, replyType: relayknock.TypeACK, replyBody: completeACK,
+	})
+	endpoint := NHPUDPEndpoint{
+		Host: "cell0.nhp.layerv.ai", Port: standardNHPUDPPort,
+		ServerPublicKeyB64: base64.StdEncoding.EncodeToString(assignmentHex(t, contract.Keys.AssignedCell.StaticPubHex)),
+	}
+	resolver := runtimeResolverFunc(func(context.Context, string, string) ([]netip.Addr, error) {
+		return nil, errors.New("UDP must not be used")
+	})
+	result, err := RecoverNativeSessionOperation(context.Background(), binding, privateKey, operation, endpoint,
+		WithAgentRuntimeUDPResolver(resolver), relay.option())
+	if err != nil || result == nil || !result.Complete {
+		t.Fatalf("relayed recovery = %#v, %v", result, err)
+	}
+	requests := relay.snapshot()
+	if len(requests) != 1 || requests[0].typeID != relayknock.TypeKnock ||
+		!bytes.Contains(requests[0].body, []byte(`"native_session_operation_action":"recover"`)) {
+		t.Fatalf("relay recovery packets = %#v", requests)
 	}
 }
 

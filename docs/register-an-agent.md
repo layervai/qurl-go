@@ -83,6 +83,13 @@ second argument to `NewNativeConnectorResourceRequest` on later starts. That is
 a read-only continuity assertion: LayerV returns that exact active resource or
 fails instead of creating or adopting a replacement.
 
+If a deployment needs registered-session admission over HTTPS, pass
+`WithAgentRuntimeSessionRelay` to `KnockRegisteredAgent` and to durable
+operation recovery. The option carries only session `NHP_KNK` and the one
+possible `NHP_RKN` through that relay. It does not move assignment, enrollment,
+registration, resource discovery, or exact-session retirement off native UDP,
+and it never falls back to another transport or cell.
+
 And two rules for the serving loop:
 
 - **One run ID and positive attempt number per cycle attempt.** Do not change

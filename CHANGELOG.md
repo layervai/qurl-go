@@ -6,6 +6,20 @@ independently under `awsstore/vX.Y.Z` tags.
 Pre-1.0 semantic versioning: breaking changes land in minor versions (v0.N.0)
 and are marked **Breaking** with what to change.
 
+## v0.10.0 — 2026-09-01
+
+- **Breaking:** `KnockRegisteredAgent` and `RecoverNativeSessionOperation` now
+  accept `AgentRuntimeSessionOption`. Existing `AgentRuntimeUDPOption` values
+  still satisfy that interface; update function values or wrappers that name
+  the old exact signature.
+- Added `WithAgentRuntimeSessionRelay` for registered-session `NHP_KNK` and the
+  one possible cookie-bound `NHP_RKN` over one trusted HTTPS relay origin. The
+  transport authenticates replies with the assigned cell key, refuses
+  redirects, sends no HTTP cookies, uses a bounded default timeout, and has no
+  retry, UDP fallback, or cross-cell fallback. Assignment, enrollment,
+  registration, resource discovery, and exact-session `NHP_EXT` remain native
+  UDP operations.
+
 ## v0.9.0 — 2026-09-01
 
 - **Breaking:** successful qURL v2 portal opens now require the authenticated

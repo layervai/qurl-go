@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"slices"
 	"strconv"
 	"strings"
@@ -25,6 +26,7 @@ import (
 	"github.com/layervai/qurl-go/internal/x25519key"
 	"github.com/layervai/qurl-go/relayknock"
 	"github.com/layervai/qurl-go/relayknock/nativeudp"
+	"github.com/layervai/qurl-go/relayknock/sessionrelay"
 )
 
 const (
@@ -161,11 +163,22 @@ type AgentRuntimeRenewalOption interface {
 	AgentRuntimeRefreshOption
 }
 
+// AgentRuntimeSessionOption is the closed option set for registered-session
+// admission and operation recovery. Native UDP injection options also satisfy
+// it for tests and custom socket control. The HTTPS session-relay option does
+// not satisfy any lifecycle or UDP option interface.
+type AgentRuntimeSessionOption interface {
+	agentRuntimeOption
+	isAgentRuntimeSessionOption()
+}
+
 // AgentRuntimeUDPOption is the closed subset of runtime options that can alter
-// one native UDP exchange. Assignment, enrollment, OTP, and resource-client
-// options cannot be passed to KnockRegisteredAgent.
+// native UDP exchanges. It also satisfies AgentRuntimeSessionOption so callers
+// can inject UDP resolution, dialing, and bounds into the default session path.
+// The HTTPS-only session relay does not satisfy this interface.
 type AgentRuntimeUDPOption interface {
 	AgentRuntimeLifecycleOption
+	AgentRuntimeSessionOption
 	isAgentRuntimeUDPOption()
 }
 
@@ -187,6 +200,7 @@ type nativeAgentRuntimeConfig struct {
 	dialer                   nativeudp.Dialer
 	timeout                  time.Duration
 	maxAddresses             int
+	sessionRelay             *sessionrelay.Transport
 	assignmentOptions        []AssignmentOption
 	allowedKeyKinds          map[RegistrationKeyKind]struct{}
 	otpProvider              func(context.Context, AgentOTPChallenge) (string, error)
@@ -217,6 +231,15 @@ func (nativeRuntimeUDPOptionFunc) isAgentRuntimeRegistrationOption() {}
 func (nativeRuntimeUDPOptionFunc) isAgentRuntimeRefreshOption()      {}
 func (nativeRuntimeUDPOptionFunc) isAgentRuntimeRecoveryOption()     {}
 func (nativeRuntimeUDPOptionFunc) isAgentRuntimeUDPOption()          {}
+func (nativeRuntimeUDPOptionFunc) isAgentRuntimeSessionOption()      {}
+
+type nativeRuntimeSessionOptionFunc func(*nativeAgentRuntimeConfig) error
+
+func (f nativeRuntimeSessionOptionFunc) applyAgentRuntimeOption(c *nativeAgentRuntimeConfig) error {
+	return f(c)
+}
+
+func (nativeRuntimeSessionOptionFunc) isAgentRuntimeSessionOption() {}
 
 type nativeRuntimeLifecycleOptionFunc func(*nativeAgentRuntimeConfig) error
 
@@ -433,6 +456,26 @@ func WithAgentRuntimeUDPBounds(timeout time.Duration, maxAddresses int) AgentRun
 			return fmt.Errorf("%w: UDP timeout and max addresses must be positive", ErrInvalidRegisterConfig)
 		}
 		c.timeout, c.maxAddresses = timeout, maxAddresses
+		return nil
+	})
+}
+
+// WithAgentRuntimeSessionRelay sends only registered-session admission KNK and
+// its one possible RKN through one trusted HTTPS relay origin. Assignment,
+// enrollment, registration, Connector-resource discovery, and exact-session EXT
+// remain native UDP operations. The transport makes one HTTP request per NHP
+// flight, rejects redirects, and never falls back to UDP or another cell.
+//
+// relayBaseURL must be an HTTPS origin without credentials, a path, query, or
+// fragment. client is cloned; nil uses the standard HTTP client. The returned
+// option cannot be passed to lifecycle, UDP discovery, or retirement APIs.
+func WithAgentRuntimeSessionRelay(relayBaseURL string, client *http.Client) AgentRuntimeSessionOption {
+	return nativeRuntimeSessionOptionFunc(func(c *nativeAgentRuntimeConfig) error {
+		transport, err := sessionrelay.New(relayBaseURL, client)
+		if err != nil {
+			return fmt.Errorf("%w: registered-session relay is invalid", ErrInvalidRegisterConfig)
+		}
+		c.sessionRelay = transport
 		return nil
 	})
 }
@@ -2082,17 +2125,19 @@ type NativeSessionRetirement struct {
 	State          string
 }
 
-// KnockRegisteredAgent sends one caller-correlated NHP_KNK directly to the
-// binding's assigned cell and returns only the requested resource's admission.
+// KnockRegisteredAgent sends one caller-correlated NHP_KNK to the binding's
+// assigned cell and returns only the requested resource's admission. The
+// default transport is native UDP. WithAgentRuntimeSessionRelay selects the
+// trusted HTTPS relay for this KNK and its one possible RKN only.
 // An authenticated COK produces exactly one RKN using the same immutable
 // agent/resource/RunID session identity and a body headerType of RKN; there is
-// no retry loop, HTTP fallback, or cross-cell fallback. It validates the live
+// no retry loop, transport fallback, or cross-cell fallback. It validates the live
 // authority-provided assignment before DNS or socket I/O and authenticates the
 // reply against that assignment's server public key. KNK and RKN each resolve
 // the assigned host, so cell replicas must share the stateless COK-signing key;
 // the pinned server key plus COK cookie/trxId continuity keeps a cross-replica
 // RKN bound to the initiating KNK.
-func KnockRegisteredAgent(ctx context.Context, binding *AgentRuntimeBinding, deviceStaticPrivateKey []byte, knockResourceID string, opts NativeKnockOptions, transportOpts ...AgentRuntimeUDPOption) (*NativeKnockResult, error) {
+func KnockRegisteredAgent(ctx context.Context, binding *AgentRuntimeBinding, deviceStaticPrivateKey []byte, knockResourceID string, opts NativeKnockOptions, transportOpts ...AgentRuntimeSessionOption) (*NativeKnockResult, error) {
 	if validateConnectorResourceID(opts.ProtectedResourceID) != nil || opts.ProtectedResourceID == knockResourceID {
 		return nil, fmt.Errorf("%w: protected resource id must be canonical and distinct from the knock resource id", ErrInvalidNativeKnockInput)
 	}
@@ -2124,7 +2169,12 @@ func KnockRegisteredAgent(ctx context.Context, binding *AgentRuntimeBinding, dev
 	}
 	defer wipeBytes(reknockBody)
 	started := time.Now()
-	reply, err := nativeudp.KnockWithReknock(ctx, endpoint, body, reknockBody, cfg.udpOptions(deviceStaticPrivateKey))
+	var reply *relayknock.Reply
+	if cfg.sessionRelay != nil {
+		reply, err = cfg.sessionRelay.KnockWithReknock(ctx, endpoint.ServerStaticPub, deviceStaticPrivateKey, body, reknockBody)
+	} else {
+		reply, err = nativeudp.KnockWithReknock(ctx, endpoint, body, reknockBody, cfg.udpOptions(deviceStaticPrivateKey))
+	}
 	if err != nil {
 		if nativeudp.IsInitialKnockNoReply(err) {
 			return nil, &EndpointNoReplyError{
@@ -2215,17 +2265,19 @@ func registeredAgentRetirementEndpoint(binding *AgentRuntimeBinding, deviceStati
 	return cfg, cloneNativeUDPEndpoint(receipt.endpoint), nil
 }
 
-// registeredAgentSessionEndpoint is the common no-I/O admission gate for
-// native KNK/RKN and EXT. It intentionally validates the binding snapshot
-// before body construction, DNS, or socket creation so every session-control
-// operation has the same trust and placement boundary.
+// registeredAgentSessionEndpoint adapts the UDP-only Connector discovery path
+// to the common no-I/O assigned-cell gate.
 func registeredAgentSessionEndpoint(ctx context.Context, binding *AgentRuntimeBinding, deviceStaticPrivateKey []byte, transportOpts []AgentRuntimeUDPOption) (*nativeAgentRuntimeConfig, nativeudp.Endpoint, error) {
-	cfg, endpoint, _, err := registeredAgentSessionEndpointWithAssignment(ctx, binding, deviceStaticPrivateKey, transportOpts)
+	sessionOpts := make([]AgentRuntimeSessionOption, len(transportOpts))
+	for i, opt := range transportOpts {
+		sessionOpts[i] = opt
+	}
+	cfg, endpoint, _, err := registeredAgentSessionEndpointWithAssignment(ctx, binding, deviceStaticPrivateKey, sessionOpts)
 	return cfg, endpoint, err
 }
 
 func registeredAgentSessionEndpointWithAssignment(ctx context.Context, binding *AgentRuntimeBinding, deviceStaticPrivateKey []byte,
-	transportOpts []AgentRuntimeUDPOption,
+	transportOpts []AgentRuntimeSessionOption,
 ) (*nativeAgentRuntimeConfig, nativeudp.Endpoint, *AgentAssignment, error) {
 	if binding == nil {
 		return nil, nativeudp.Endpoint{}, nil, fmt.Errorf("%w: runtime binding must not be nil", ErrInvalidNativeKnockInput)
@@ -2239,10 +2291,10 @@ func registeredAgentSessionEndpointWithAssignment(ctx context.Context, binding *
 	cfg := defaultNativeAgentRuntimeConfig()
 	for _, opt := range transportOpts {
 		if opt == nil {
-			return nil, nativeudp.Endpoint{}, nil, fmt.Errorf("%w: nil native UDP transport option", ErrInvalidNativeKnockInput)
+			return nil, nativeudp.Endpoint{}, nil, fmt.Errorf("%w: nil native session transport option", ErrInvalidNativeKnockInput)
 		}
 		if err := opt.applyAgentRuntimeOption(cfg); err != nil {
-			return nil, nativeudp.Endpoint{}, nil, fmt.Errorf("%w: native UDP transport option: %w", ErrInvalidNativeKnockInput, err)
+			return nil, nativeudp.Endpoint{}, nil, fmt.Errorf("%w: native session transport option: %w", ErrInvalidNativeKnockInput, err)
 		}
 	}
 	// Renewal and the tamper check happen together against one placement. A
