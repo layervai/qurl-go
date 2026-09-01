@@ -83,32 +83,16 @@ second argument to `NewNativeConnectorResourceRequest` on later starts. That is
 a read-only continuity assertion: LayerV returns that exact active resource or
 fails instead of creating or adopting a replacement.
 
-If a deployment needs registered-session admission over HTTPS, pass
-`WithAgentRuntimeSessionRelay` to `KnockRegisteredAgent` and to durable
-operation recovery. The option carries only session `NHP_KNK` and the one
-possible `NHP_RKN` through that relay. It does not move assignment, enrollment,
-registration, resource discovery, or exact-session retirement off native UDP,
-and it never falls back to another transport or cell.
+Registered-session admission, durable operation recovery, and exact retirement
+use native UDP. `WithAgentRuntimeUDPResolver`, `WithAgentRuntimeUDPDialer`, and
+`WithAgentRuntimeUDPBounds` configure those exchanges. Use a context deadline
+when the whole operation needs one aggregate bound.
 
-The Connector's durable session-operation journal closes or reconciles its
-admission with `RecoverNativeSessionOperation`; pass the same relay option to
-that call. This recovery is a KNK/RKN operation and works without UDP. The
-lower-level `RetireRegisteredAgentSession` API is different: it sends an exact
-`NHP_EXT` over UDP. If an application opens a session without a durable
-operation and cannot reach the assigned cell over UDP, it cannot send that
-explicit EXT, and the server lease owns cleanup.
-
-When the relay option is present, it selects HTTPS for session admission and
-operation recovery. UDP resolver, dialer, and bound options are ignored for
-those calls. The HTTP client's timeout bounds each HTTPS flight. A cookie
-challenge can cause two flights, so set a context deadline for one aggregate
-call bound.
-
-The relay POST and the later protected data-plane connection must use the same
-public egress IP. If the HTTP client uses a forward proxy, route the data-plane
-connection through that same egress. Otherwise the knock can return an
-authenticated success while the protected connection is refused because it
-arrives from a different source.
+The Connector's durable session-operation journal closes or reconciles an
+admission with `RecoverNativeSessionOperation` through the separately persisted
+source-fenced endpoint. The lower-level `RetireRegisteredAgentSession` sends an
+exact `NHP_EXT` using the immutable session receipt. Neither operation follows a
+later assignment to another cell.
 
 And two rules for the serving loop:
 

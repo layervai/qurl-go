@@ -221,40 +221,6 @@ func ExamplePrepareLiveNativeSessionOperation() {
 	_ = recordJSON
 }
 
-func ExampleWithAgentRuntimeSessionRelay() {
-	ctx := context.Background()
-	store, err := qurl.OpenFileAgentState("/var/lib/layerv/qurl/agent-state.json")
-	if err != nil {
-		panic(err)
-	}
-	defer store.Close()
-	_, binding, err := qurl.ConnectAgentRuntime(ctx, store, qurl.WithAgentRuntimeOfflineOpen())
-	if err != nil {
-		panic(err)
-	}
-	defer binding.Destroy()
-	privateKey := binding.TakeDeviceStaticPrivateKey()
-	defer clear(privateKey)
-
-	// The HTTPS relay and the protected data-plane connection must use the same
-	// public egress IP. Do not give this client a forward proxy unless the
-	// data-plane connection uses that same egress.
-	sessionRelay := qurl.WithAgentRuntimeSessionRelay("https://relay.example.com", &http.Client{
-		Timeout: 3 * time.Second,
-	})
-	_, err = qurl.KnockRegisteredAgent(ctx, binding, privateKey, "knock-resource-id",
-		qurl.NativeKnockOptions{
-			ProtectedResourceID: exampleResourcePublicKey,
-			RunID:               "0123456789abcdef",
-			RunAttempt:          1,
-		},
-		sessionRelay,
-	)
-	if err != nil {
-		panic(err)
-	}
-}
-
 func ExampleClient_ResolveResource() {
 	client, err := qurl.OpenClient()
 	if err != nil {

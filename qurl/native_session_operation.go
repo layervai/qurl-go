@@ -472,11 +472,9 @@ func nativeSessionOperationAbsentRecoveryDeadline(operation NativeSessionOperati
 // whether the durable operation is terminal or still closing. An incompatible
 // server admission returns NativeSessionOperationUnexpectedAdmissionError; the
 // caller must persist its exact receipt as MAPPED before recovery and must not
-// retry this packet directly. WithAgentRuntimeSessionRelay carries this recovery
-// KNK and its one possible RKN over HTTPS; this is the relay-capable durable
-// close/reconciliation path and is separate from UDP-only exact-session EXT.
+// retry this packet directly.
 func RecoverNativeSessionOperation(ctx context.Context, binding *AgentRuntimeBinding, deviceStaticPrivateKey []byte,
-	operation NativeSessionOperation, recoveryEndpoint NHPUDPEndpoint, transportOpts ...AgentRuntimeSessionOption,
+	operation NativeSessionOperation, recoveryEndpoint NHPUDPEndpoint, transportOpts ...AgentRuntimeUDPOption,
 ) (*NativeSessionOperationRecovery, error) {
 	if binding == nil || validateRuntimeBindingIdentity(binding, deviceStaticPrivateKey) != nil ||
 		validateNativeSessionOperationBinding(operation, binding) != nil {
@@ -511,12 +509,7 @@ func RecoverNativeSessionOperation(ctx context.Context, binding *AgentRuntimeBin
 		return nil, ErrInvalidNativeSessionOperation
 	}
 	defer wipeBytes(reknockBody)
-	var reply *relayknock.Reply
-	if cfg.sessionRelay != nil {
-		reply, err = cfg.sessionRelay.KnockWithReknock(ctx, endpoint.ServerStaticPub, deviceStaticPrivateKey, body, reknockBody)
-	} else {
-		reply, err = nativeudp.KnockWithReknock(ctx, endpoint, body, reknockBody, cfg.udpOptions(deviceStaticPrivateKey))
-	}
+	reply, err := nativeudp.KnockWithReknock(ctx, endpoint, body, reknockBody, cfg.udpOptions(deviceStaticPrivateKey))
 	if err != nil {
 		return nil, normalizeRelayError(err, ErrMalformedReply)
 	}
