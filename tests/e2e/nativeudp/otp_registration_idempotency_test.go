@@ -678,10 +678,18 @@ func poolAdvisories(cfg otpE2EConfig) []degradationAdvisory {
 }
 
 // annotationSink receives the GitHub workflow command. It is a variable so a
-// test can observe the command without reassigning the process-wide os.Stdout:
-// that swap is global, would race the first time anything in this package calls
-// t.Parallel, and leaves every later test writing into a closed pipe if the
-// capture ever unwinds through a panic.
+// test can observe the command without reassigning the process-wide os.Stdout,
+// which needed a pipe, a reader goroutine, and a hand-written defence against
+// unwinding through a panic -- one that still left every later test writing
+// into a closed pipe if it ever failed.
+//
+// It is NOT safer under concurrency, and an earlier version of this comment
+// claimed it was. This is a package-level variable that captureAnnotations
+// writes while noteDegradation reads, so a t.Parallel test in this package
+// would race on it exactly as it would on os.Stdout. What makes that safe today
+// is that nothing here calls t.Parallel and top-level tests run sequentially --
+// not the sink. Adding t.Parallel to this package needs a mutex or a writer
+// threaded through the call, the way the lookup already is.
 var annotationSink io.Writer = os.Stdout
 
 // noteDegradation reports a pool degradation that does NOT fail closed: a

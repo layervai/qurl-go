@@ -1410,11 +1410,12 @@ func TestGateConfigLoadEmitsThePoolAdvisories(t *testing.T) {
 
 // captureAnnotations collects what fn emits as GitHub workflow commands.
 //
-// It swaps the package's annotationSink rather than the process-wide os.Stdout.
-// The global swap needed a pipe, a goroutine and a hand-written defence against
-// unwinding through a panic, and would still have raced the first t.Parallel
-// added anywhere in this package; a sink variable needs none of that and leaves
-// the real stdout GitHub reads untouched.
+// It swaps the package's annotationSink rather than the process-wide os.Stdout,
+// which needed a pipe, a goroutine and a hand-written defence against unwinding
+// through a panic. The sink needs none of that and leaves the real stdout
+// GitHub reads untouched -- but it is no safer under t.Parallel, since it is a
+// package-level variable this writes and noteDegradation reads. See its
+// declaration.
 func captureAnnotations(t *testing.T, fn func()) string {
 	t.Helper()
 	original := annotationSink
