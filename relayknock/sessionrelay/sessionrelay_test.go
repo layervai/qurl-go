@@ -49,11 +49,10 @@ func newRelayKeys(t *testing.T) relayKeys {
 	return relayKeys{server.Bytes(), server.PublicKey().Bytes(), device.Bytes(), device.PublicKey().Bytes()}
 }
 
-func buildReply(t *testing.T, headerType int, keys relayKeys, counter uint64, body []byte) []byte {
-	t.Helper()
+func buildReply(headerType int, keys relayKeys, counter uint64, body []byte) ([]byte, error) {
 	ephemeral, err := ecdh.X25519().GenerateKey(rand.Reader)
 	if err != nil {
-		t.Fatal(err)
+		return nil, err
 	}
 	packet, err := relayknocktest.BuildReply(headerType, &relayknock.KnockInputs{
 		DeviceStaticPriv: keys.serverPriv,
@@ -64,10 +63,18 @@ func buildReply(t *testing.T, headerType int, keys relayKeys, counter uint64, bo
 		Preamble:         7,
 		Body:             body,
 	})
+	return packet, err
+}
+
+func writeReply(t *testing.T, w http.ResponseWriter, headerType int, keys relayKeys, counter uint64, body []byte) {
+	t.Helper()
+	packet, err := buildReply(headerType, keys, counter, body)
 	if err != nil {
-		t.Fatal(err)
+		t.Errorf("build relay reply: %v", err)
+		http.Error(w, "test reply build failed", http.StatusInternalServerError)
+		return
 	}
-	return packet
+	_, _ = w.Write(packet)
 }
 
 func TestKnockWithReknock_DirectACKUsesOneHTTPSFlight(t *testing.T) {
@@ -90,7 +97,7 @@ func TestKnockWithReknock_DirectACKUsesOneHTTPSFlight(t *testing.T) {
 			t.Errorf("open KNK = %#v, %v", opened, err)
 			return
 		}
-		_, _ = w.Write(buildReply(t, relayknock.TypeACK, keys, opened.Counter, []byte(`{"errCode":"0"}`)))
+		writeReply(t, w, relayknock.TypeACK, keys, opened.Counter, []byte(`{"errCode":"0"}`))
 	}))
 	defer server.Close()
 	transport, err := sessionrelay.New(server.URL+"/", server.Client())
@@ -122,14 +129,14 @@ func TestKnockWithReknock_OneStrictCookieBoundRKN(t *testing.T) {
 				return
 			}
 			body := []byte(fmt.Sprintf(`{"trxId":%d,"cookie":%q}`, opened.Counter, base64.StdEncoding.EncodeToString(cookie)))
-			_, _ = w.Write(buildReply(t, relayknock.TypeCookieChallenge, keys, opened.Counter+1, body))
+			writeReply(t, w, relayknock.TypeCookieChallenge, keys, opened.Counter+1, body)
 		case 2:
 			opened, err := relayknocktest.OpenReknockMessage(keys.serverPriv, keys.devicePub, cookie, packet)
 			if err != nil || opened.Type != relayknock.TypeReknock || string(opened.Body) != `{"leg":"reknock"}` {
 				t.Errorf("open RKN = %#v, %v", opened, err)
 				return
 			}
-			_, _ = w.Write(buildReply(t, relayknock.TypeACK, keys, opened.Counter, []byte(`{"errCode":"0"}`)))
+			writeReply(t, w, relayknock.TypeACK, keys, opened.Counter, []byte(`{"errCode":"0"}`))
 		default:
 			t.Error("unexpected third relay flight")
 			http.Error(w, "extra", http.StatusInternalServerError)
@@ -160,14 +167,17 @@ func TestKnockWithReknock_CanceledBetweenFlightsDoesNotSendRKN(t *testing.T) {
 		}
 		packet, err := io.ReadAll(req.Body)
 		if err != nil {
-			t.Fatalf("read KNK: %v", err)
+			return nil, fmt.Errorf("read KNK: %w", err)
 		}
 		opened, err := relayknocktest.OpenInitiatorMessage(keys.serverPriv, keys.devicePub, packet)
 		if err != nil {
-			t.Fatalf("open KNK: %v", err)
+			return nil, fmt.Errorf("open KNK: %w", err)
 		}
 		body := []byte(fmt.Sprintf(`{"trxId":%d,"cookie":%q}`, opened.Counter, base64.StdEncoding.EncodeToString(cookie)))
-		response := buildReply(t, relayknock.TypeCookieChallenge, keys, opened.Counter, body)
+		response, err := buildReply(relayknock.TypeCookieChallenge, keys, opened.Counter, body)
+		if err != nil {
+			return nil, fmt.Errorf("build cookie challenge: %w", err)
+		}
 		cancel()
 		return &http.Response{
 			StatusCode: http.StatusOK,
@@ -214,7 +224,7 @@ func TestKnockWithReknock_RejectsInvalidSecondFlight(t *testing.T) {
 						return
 					}
 					body := []byte(fmt.Sprintf(`{"trxId":%d,"cookie":%q}`, opened.Counter, base64.StdEncoding.EncodeToString(cookie)))
-					_, _ = w.Write(buildReply(t, relayknock.TypeCookieChallenge, keys, opened.Counter, body))
+					writeReply(t, w, relayknock.TypeCookieChallenge, keys, opened.Counter, body)
 				case 2:
 					opened, err := relayknocktest.OpenReknockMessage(keys.serverPriv, keys.devicePub, cookie, packet)
 					if err != nil {
@@ -225,7 +235,7 @@ func TestKnockWithReknock_RejectsInvalidSecondFlight(t *testing.T) {
 						http.Error(w, "redacted internal detail", test.statusCode)
 						return
 					}
-					_, _ = w.Write(buildReply(t, test.replyType, keys, opened.Counter, nil))
+					writeReply(t, w, test.replyType, keys, opened.Counter, nil)
 				default:
 					t.Error("unexpected third relay flight")
 				}
@@ -263,7 +273,7 @@ func TestKnockWithReknock_RejectsUncorrelatedCOKWithoutRKN(t *testing.T) {
 			return
 		}
 		body := []byte(fmt.Sprintf(`{"trxId":%d,"cookie":%q}`, opened.Counter+1, base64.StdEncoding.EncodeToString(cookie)))
-		_, _ = w.Write(buildReply(t, relayknock.TypeCookieChallenge, keys, opened.Counter, body))
+		writeReply(t, w, relayknock.TypeCookieChallenge, keys, opened.Counter, body)
 	}))
 	defer server.Close()
 	transport, err := sessionrelay.New(server.URL, server.Client())
@@ -295,7 +305,7 @@ func TestTransport_RejectsReplyFromUnpinnedServer(t *testing.T) {
 		}
 		forged := keys
 		forged.serverPriv = other.serverPriv
-		_, _ = w.Write(buildReply(t, relayknock.TypeACK, forged, opened.Counter, []byte(`{"errCode":"0"}`)))
+		writeReply(t, w, relayknock.TypeACK, forged, opened.Counter, []byte(`{"errCode":"0"}`))
 	}))
 	defer server.Close()
 	transport, err := sessionrelay.New(server.URL, server.Client())
@@ -394,6 +404,22 @@ func TestTransport_DoesNotSendCallerClientCookies(t *testing.T) {
 
 func TestTransport_BoundsHangingFlightAndPreservesEarlierCallerDeadline(t *testing.T) {
 	keys := newRelayKeys(t)
+	var defaultDeadline time.Time
+	defaultClient := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		defaultDeadline, _ = req.Context().Deadline()
+		return nil, errors.New("stop after observing default deadline")
+	})}
+	defaultTransport, err := sessionrelay.New("https://relay.example.test", defaultClient)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = defaultTransport.KnockWithReknock(context.Background(), keys.serverPub, keys.devicePriv, nil, nil)
+	remaining := time.Until(defaultDeadline)
+	if !errors.Is(err, sessionrelay.ErrTransport) || defaultDeadline.IsZero() ||
+		remaining < sessionrelay.DefaultTimeout-time.Second || remaining > sessionrelay.DefaultTimeout+time.Second {
+		t.Fatalf("default-timeout error/deadline = %v/%s (remaining %s)", err, defaultDeadline, remaining)
+	}
+
 	blockingClient := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		<-req.Context().Done()
 		return nil, req.Context().Err()
@@ -402,18 +428,9 @@ func TestTransport_BoundsHangingFlightAndPreservesEarlierCallerDeadline(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	started := time.Now()
-	_, err = transport.KnockWithReknock(context.Background(), keys.serverPub, keys.devicePriv, nil, nil)
-	if !errors.Is(err, sessionrelay.ErrTransport) {
-		t.Fatalf("default-timeout error = %v", err)
-	}
-	if elapsed := time.Since(started); elapsed > sessionrelay.DefaultTimeout+2*time.Second {
-		t.Fatalf("default timeout took %s, want at most %s", elapsed, sessionrelay.DefaultTimeout+2*time.Second)
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
 	defer cancel()
-	started = time.Now()
+	started := time.Now()
 	_, err = transport.KnockWithReknock(ctx, keys.serverPub, keys.devicePriv, nil, nil)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("caller-deadline error = %v", err)

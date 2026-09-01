@@ -2149,6 +2149,7 @@ func TestKnockRegisteredAgent_InvalidSessionRelayFailsBeforeIO(t *testing.T) {
 		NativeKnockOptions{ProtectedResourceID: testConnectorID, RunID: "0123456789abcdef", RunAttempt: 1},
 		WithAgentRuntimeSessionRelay("http://relay.example.test", nil))
 	if result != nil || !errors.Is(err, ErrInvalidNativeKnockInput) || !errors.Is(err, ErrInvalidRegisterConfig) ||
+		!errors.Is(err, sessionrelay.ErrInvalidConfig) ||
 		len(f.hubUDP.snapshot()) != 0 || len(f.cellUDP.snapshot()) != 0 {
 		t.Fatalf("invalid relay result/error/Hub/UDP = %#v/%v/%#v/%#v", result, err, f.hubUDP.snapshot(), f.cellUDP.snapshot())
 	}

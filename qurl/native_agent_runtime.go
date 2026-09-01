@@ -487,7 +487,7 @@ func WithAgentRuntimeSessionRelay(relayBaseURL string, client *http.Client) Agen
 	return nativeRuntimeSessionOptionFunc(func(c *nativeAgentRuntimeConfig) error {
 		transport, err := sessionrelay.New(relayBaseURL, client)
 		if err != nil {
-			return fmt.Errorf("%w: registered-session relay is invalid", ErrInvalidRegisterConfig)
+			return fmt.Errorf("%w: registered-session relay is invalid: %w", ErrInvalidRegisterConfig, err)
 		}
 		c.sessionRelay = transport
 		return nil

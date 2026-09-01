@@ -11,7 +11,9 @@ and are marked **Breaking** with what to change.
 - **Breaking:** `KnockRegisteredAgent` and `RecoverNativeSessionOperation` now
   accept `AgentRuntimeSessionOption`. Existing `AgentRuntimeUDPOption` values
   still satisfy that interface; update function values or wrappers that name
-  the old exact signature.
+  the old exact signature. A `[]AgentRuntimeUDPOption` slice does not convert as
+  a whole: allocate `[]AgentRuntimeSessionOption` and copy each option into it
+  before using `...`.
 - Added `WithAgentRuntimeSessionRelay` for registered-session `NHP_KNK` and the
   one possible cookie-bound `NHP_RKN` over one trusted HTTPS relay origin. The
   transport authenticates replies with the assigned cell key, refuses
