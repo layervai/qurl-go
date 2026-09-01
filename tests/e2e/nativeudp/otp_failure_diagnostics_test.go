@@ -140,9 +140,6 @@ func TestMailboxTimeoutNamesEveryCauseNotOnlyRateLimiting(t *testing.T) {
 		// Outcome at all to be other than anything -- so the value itself is
 		// what has to be here.
 		{`"Outcome":"rejected"`, "the value that means refused, as distinct from absent"},
-		// The correction. cell1 cannot be discussed through a glob, and its
-		// emptiness is the single most misreadable fact about this estate.
-		{"ca-iro-cell1", "the cell whose emptiness proves nothing, which needs naming to say so"},
 	} {
 		if !strings.Contains(message, want.fragment) {
 			missing = append(missing, fmt.Sprintf("%q (%s) -- exact casing, it is a log query",
@@ -165,12 +162,18 @@ func TestMailboxTimeoutNamesEveryCauseNotOnlyRateLimiting(t *testing.T) {
 			"Message: %s", len(missing), strings.Join(missing, "\n  "), message)
 	}
 
-	// Naming cell1 is not enough; the message has to say what its emptiness is
-	// worth. Unqualified, "check ca-iro-cell0 and ca-iro-cell1" reproduces the
-	// exact error this correction removes -- a reader finds cell1 empty, reads
-	// it as the never-invoked branch, and investigates a deploy that never
-	// happened. Windowed rather than sentence-parsed: the claim is that the
-	// disclaimer travels WITH the name, which is the property that matters.
+	// CONDITIONAL, and that is the whole design. Naming cell1 is not asserted --
+	// it is an estate coordinate, and ADR 0002 may want it gone, so requiring it
+	// would mean the correct redaction reds a REQUIRED check. That is the
+	// property the rest of this file is careful about and it applies here too.
+	//
+	// What IS asserted is that the name never appears WITHOUT its disclaimer.
+	// Unqualified, "check ca-iro-cell0 and ca-iro-cell1" reproduces the exact
+	// error this correction removes -- a reader finds cell1 empty, reads it as
+	// the never-invoked branch, and investigates a deploy that never happened.
+	// So: redact the name freely, but do not keep it and drop the qualifier.
+	// Windowed rather than sentence-parsed: the claim is that the disclaimer
+	// travels WITH the name, which is the property that matters.
 	if at := strings.Index(message, "ca-iro-cell1"); at >= 0 &&
 		!strings.Contains(lower[at:min(len(lower), at+260)], "never been invoked") {
 		t.Errorf("the mailbox timeout message names ca-iro-cell1 without saying it has never "+

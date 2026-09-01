@@ -269,6 +269,18 @@ func (m *otpMailbox) snapshot() (calls int, fresh bool) {
 // otp_failure_diagnostics_test.go deliberately asserts none of the estate
 // coordinates -- only the three-way rule and the signature owned by each branch
 // -- so redacting any of it later is one file and no red REQUIRED check.
+//
+// That claim is load-bearing, so it is worth saying how it survives contact
+// with the cell1 correction, which is the one piece of prose here that NEEDS a
+// coordinate to say anything at all. The fence does not require the name. It
+// requires that the name never appear WITHOUT its disclaimer: drop
+// "ca-iro-cell1" and the check silently stops applying, keep it and drop
+// "has never been invoked" and the check reds. So a redactor may delete this
+// sentence wholesale and stay green; what they may not do is leave the reader
+// a cell to check and no warning that finding it empty means nothing. An
+// earlier revision of this change asserted the name outright, which made the
+// correct redaction red a REQUIRED check while this comment claimed the
+// opposite -- caught by probing the redaction rather than by reading it.
 func (m *otpMailbox) timedOut() error {
 	return fmt.Errorf(
 		"no OTP email arrived for this run, so most likely none was ever sent. THREE "+
