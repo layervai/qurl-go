@@ -401,16 +401,29 @@ func (c *stalledReadConn) Read(p []byte) (int, error) {
 // defined once, for the test that relies on them and the test that guards them
 // alike.
 //
-// The cell script is checked rather than described: this transport swallows any
+// Both scripts are checked rather than described. This transport swallows any
 // assigned-cell reply, and a swallowed one would surface as an unexplained
-// ErrNoReply that reads like a transport bug instead of fixture misuse. Reading
-// the steps is unsynchronised on purpose -- the cell server appends to them only
-// through the Hub's assignment fallback, and no datagram has been sent yet.
+// ErrNoReply that reads like a transport bug instead of fixture misuse; and the
+// bounds it installs cover the whole call, so a Hub step that withholds its
+// reply would wait out runtimeReplyTimeout rather than the silence timeout its
+// own assertion was written against. Reading the steps is unsynchronised on
+// purpose -- the servers append to them only through the Hub's assignment
+// fallback, and no datagram has been sent yet.
+//
+// The bounds are the per-datagram timeout and the DNS address fan-out, which is
+// 1 here as at every other call site in the package. Attempt counts are not set
+// here at all: they come from WithAgentRuntimeAssignmentRetryBudget, so a caller
+// counting retries sets its own budget and this helper does not constrain it.
 func (f *runtimeFixture) instantCellSilence(t *testing.T, inner nativeudp.Dialer) []AgentRuntimeRegistrationOption {
 	t.Helper()
 	for i, step := range f.cellUDP.steps {
 		if !step.noReply {
 			t.Fatalf("instantCellSilence: assigned-cell step %d answers with type %d; this transport would swallow it", i, step.replyType)
+		}
+	}
+	for i, step := range f.hubUDP.steps {
+		if step.noReply {
+			t.Fatalf("instantCellSilence: Hub step %d withholds its reply; the bounds this installs would make that silence cost %v instead of %v", i, runtimeReplyTimeout, runtimeSilenceTimeout)
 		}
 	}
 	return []AgentRuntimeRegistrationOption{
