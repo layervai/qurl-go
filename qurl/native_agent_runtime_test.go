@@ -297,6 +297,12 @@ type instantSilenceDialer struct {
 	// compared against the dialed connection's own remote address so a route
 	// rewrite cannot silence the wrong endpoint.
 	silent string
+	// answered counts the reads answered instantly, for the same reason
+	// stalledReadDialer counts its stalls: the address match is what arms this,
+	// and an address that stopped matching would leave the endpoint waiting out
+	// the real timeout with every assertion downstream still passing. The helper
+	// would have silently stopped doing its job.
+	answered *atomic.Int32
 }
 
 func (d instantSilenceDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
@@ -304,7 +310,7 @@ func (d instantSilenceDialer) DialContext(ctx context.Context, network, address 
 	if err != nil || conn.RemoteAddr().String() != d.silent {
 		return conn, err
 	}
-	return instantDeadlineConn{Conn: conn}, nil
+	return instantDeadlineConn{Conn: conn, answered: d.answered}, nil
 }
 
 // instantDeadlineConn writes its datagram for real and then reports the same
@@ -314,9 +320,24 @@ func (d instantSilenceDialer) DialContext(ctx context.Context, network, address 
 // matches errors.Is against os.ErrDeadlineExceeded and net.Error.Timeout, both
 // of which hold for the bare sentinel. The attempt is therefore still
 // classified as written-and-unanswered rather than as a local fault.
-type instantDeadlineConn struct{ net.Conn }
+type instantDeadlineConn struct {
+	net.Conn
+	answered *atomic.Int32
+}
 
-func (c instantDeadlineConn) Read([]byte) (int, error) { return 0, os.ErrDeadlineExceeded }
+func (c instantDeadlineConn) Read([]byte) (int, error) {
+	if c.answered != nil {
+		c.answered.Add(1)
+	}
+	return 0, os.ErrDeadlineExceeded
+}
+
+// errBackoffBeforePendingActivation refuses a cancellation the sleep hook is
+// asked for outside the REG backoff. A test that cancels on whichever bounded
+// exchange happens to back off first cannot tell a diverted Hub retry from its
+// own subject, and reports the pending activation that was never written as one
+// that was lost.
+var errBackoffBeforePendingActivation = errors.New("qurl test: assignment backoff fired before the pending activation was durable")
 
 // stalledReadDialer holds the first read on connections to one address past the
 // per-datagram timeout, standing in for the scheduler stall a loaded runner
@@ -387,7 +408,9 @@ func (f *runtimeFixture) instantCellSilence(t *testing.T, inner nativeudp.Dialer
 		}
 	}
 	return []AgentRuntimeRegistrationOption{
-		WithAgentRuntimeUDPDialer(instantSilenceDialer{inner: inner, silent: f.cellUDP.conn.LocalAddr().String()}),
+		WithAgentRuntimeUDPDialer(instantSilenceDialer{
+			inner: inner, silent: f.cellUDP.conn.LocalAddr().String(), answered: &f.cellSilenced,
+		}),
 		WithAgentRuntimeUDPBounds(runtimeReplyTimeout, 1),
 	}
 }
@@ -610,6 +633,10 @@ type runtimeFixture struct {
 	// silent records that the script withholds a reply, so the fixture keeps the
 	// tight bounds a silence assertion depends on.
 	silent bool
+	// cellSilenced counts the assigned-cell reads instantCellSilence answered
+	// without waiting, so a caller can assert that transport actually engaged
+	// rather than trusting an address comparison to keep matching.
+	cellSilenced atomic.Int32
 }
 
 // scriptsSilence reports whether any scripted step withholds its reply.
@@ -3284,23 +3311,41 @@ func TestConnectAgentRuntime_AmbiguousREGCancellationDuringBackoffPreservesPendi
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	// The sleep hook is installed on every bounded exchange this call makes, not
-	// just the REG backoff under test, so the Hub exchange must never reach a
-	// backoff of its own: cancelling there would abort before the pending
-	// activation is even created, and this test would read a nil PendingActivation
-	// as lost durability. instantCellSilence buys that guarantee by taking the
-	// cell's silence out of the wall clock, which frees the Hub round trip from
-	// the tight silence timeout it would otherwise share with it.
+	// just the REG backoff under test, so cancelling on the first backoff to
+	// fire is what let a stalled Hub round trip abort before the pending
+	// activation existed and be reported as lost durability. Cancel only once
+	// the record is durable, which is true from the REG backoff onwards and
+	// false in the Hub's, and refuse the rest: a Hub that outruns its attempt
+	// timeout then fails saying so instead of impersonating this test's subject.
+	//
+	// Sleeping normally there is not the alternative. The fixture Hub answers
+	// the cookie challenge and then expects the proof, so it cannot serve a
+	// retried exchange -- letting the retry through trades this misreport for an
+	// equally puzzling digest mismatch.
+	//
+	// instantCellSilence keeps that path unreachable in the first place by
+	// taking the cell's silence out of the wall clock, which frees the Hub round
+	// trip from the tight silence timeout it would otherwise share with it.
 	_, _, err := connectWithEnrollment(ctx, conformance.AgentAssignmentBootstrapCredentialFixture, f.store,
 		f.options(append(f.instantCellSilence(t, f.dialer),
 			WithAgentRuntimeAssignmentRetryBudget(3, runtimeReplyBudget),
 			withTestAgentRuntimeAssignmentSleep(func(ctx context.Context, _ time.Duration) error {
+				if state, loadErr := f.store.inner.LoadAgentState(ctx); loadErr != nil || state.PendingActivation == nil {
+					return errBackoffBeforePendingActivation
+				}
 				cancel()
 				<-ctx.Done()
 				return ctx.Err()
 			}),
 		)...)...)
+	if errors.Is(err, errBackoffBeforePendingActivation) {
+		t.Fatalf("Hub exchange backed off before any REG, so this run never reached the cancellation under test: the runner outran the %v attempt timeout; durability is not implicated: %v", runtimeReplyTimeout, err)
+	}
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("REG backoff cancellation = %v, want context.Canceled", err)
+	}
+	if f.cellSilenced.Load() < 1 {
+		t.Fatal("assigned-cell silence never engaged: the REG waited out a real timeout instead")
 	}
 	pending, loadErr := f.store.LoadAgentState(context.Background())
 	if loadErr != nil || pending.PendingActivation == nil || pending.PendingActivation.AssignmentTicket != "conformance-assignment-ticket-0001" {
@@ -3380,6 +3425,9 @@ func TestConnectAgentRuntime_StalledHubDoesNotDivertREGBackoffCancellation(t *te
 	// so at least one read must have been held.
 	if got := stallsApplied.Load(); got < 1 {
 		t.Fatalf("stalled Hub reads = %d, want at least 1: the injected stall never engaged", got)
+	}
+	if got := f.cellSilenced.Load(); got < 1 {
+		t.Fatalf("instant cell silence engaged %d times, want at least 1", got)
 	}
 	if sleeps != 1 {
 		t.Fatalf("cancellation hook ran %d times, want exactly 1", sleeps)
