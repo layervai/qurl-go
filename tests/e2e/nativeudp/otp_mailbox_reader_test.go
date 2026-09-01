@@ -192,30 +192,61 @@ func (m *otpMailbox) snapshot() (calls int, fresh bool) {
 
 // timedOut explains a mailbox wait that produced nothing.
 //
-// timedOut explains a mailbox wait that produced nothing.
+// This reader cannot tell "no email was ever sent" from "the email was slow",
+// so it names the ways the authority produces no email at all. There are
+// THREE, and the mailbox wait cannot distinguish them: every one of them ends
+// this test at otpE2EMailboxWait, so a ~4.5-minute red run is a SYMPTOM and
+// this message's only job is to hand the reader the query that splits it.
 //
-// This reader cannot tell "no email was ever sent" from "the email was slow", so
-// it names the ways the authority produces no email at all. There are TWO, and
-// for a long time this message named only one:
+// TRIAGE ON Outcome, NOT ON INVOCATION. The message named two causes for most
+// of its life and split them on whether the issuer had been invoked at all --
+// "no invocation is (1), an Outcome other than success is (2)". That rule has
+// a hole, and a real run fell in it: gate run 56 (2026-08-19, 270s, the same
+// signature) logged
 //
-//  1. THE SANDBOX WAS MID-DEPLOY. Redeploying the issuer rolls Relay and the
-//     cells Blue-Green, and while that is in flight a registration request never
-//     reaches the issuer -- no invocation, no email, and no error anywhere this
-//     test can see. On 2026-08-30 a layervai/nhp "Build and Deploy NHP" run
-//     (33353630466) redeployed the OTP issuer lambdas at 03:46Z and turned this
-//     gate red on #181 while Relay and cell1 were still rolling.
+//	ERROR connector authority initialization failed failure_code=initialization_type_invalid
+//	INIT_REPORT Init Duration: ... Phase: init  Status: error  Error Type: Runtime.ExitError
+//	START RequestId: ...
+//	REPORT ... Status: error  Error Type: Runtime.ExitError
 //
-//  2. THE ISSUANCE BUDGET WAS SPENT. See selectEnrollment for which of the two
-//     documented limits actually bites, and perCredentialHourlyBudget for the
-//     rate, which this message INTERPOLATES rather than restates: it is the
-//     first thing an operator reads on this failure, so a stale number here
-//     misdirects at the worst possible moment.
+// -- invoked, so "cause 1 is out", and never refused, so not cause 2 either.
+// It belonged to neither branch. Outcome is the field that separates all
+// three, because it is written at the one moment the authority has actually
+// decided:
 //
-// Naming only (2) was actively harmful rather than merely incomplete: it is the
-// quantitative, plausible-sounding answer, so it reads as a diagnosis instead of
-// a hypothesis, and it cost a diagnosis cycle on #181 where the sandbox was
-// mid-deploy and load was nowhere near any limit. Hence (1) first, and hence the
-// log signature below, which separates the two in one look.
+//	no log line at all      -> never invoked          (1)
+//	START, but no Outcome   -> invoked, died on init  (2)
+//	Outcome: rejected       -> reached, and refused   (3)
+//
+// Every historical occurrence of the signature partitions cleanly: runs 9, 10
+// and 14 (2026-08-11) and run 192 (2026-08-31) are (3); run 56 is (2); runs
+// 118, 119 and 120 (2026-08-27) are (1). Nothing is left over, which is what
+// makes THREE the right number rather than merely a larger one.
+//
+// (1) has had more than one root cause, so the message stays at the altitude
+// that covers them: a layervai/nhp "Build and Deploy NHP" run (33353630466)
+// redeploying the issuer at 03:46Z turned this gate red on #181 while Relay
+// and the cells were still rolling, whereas 118-120 were a cutover that
+// authorised the new lambda slot at the cell endpoint before the server fleet
+// had moved to it. Both present identically here: no invocation, no email, and
+// no error anywhere this test can see.
+//
+// (3) IS THE PLAUSIBLE-SOUNDING ONE, hence its position last. It is the
+// quantitative answer, so it reads as a diagnosis rather than as one
+// hypothesis of three, and it cost a diagnosis cycle on #181 where the sandbox
+// was mid-deploy and load was nowhere near any limit. It interpolates
+// perCredentialHourlyBudget rather than restating it: this is the first thing
+// an operator reads on this failure, so a stale number misdirects at the worst
+// possible moment.
+//
+// (1) CARRIES A TRAP WORTH THE THREE LINES IT COSTS. It is diagnosed by the
+// ABSENCE of evidence, which is exactly when a reader reaches for a
+// corroborating signal -- and the nearest one lies. This gate's assignment leg
+// keeps succeeding all the way through a (1), because ca-ia is not cell-scoped
+// and sits outside the cell endpoint policy that a Blue-Green cutover rewrites.
+// Two investigations read that asymmetry as a transport fault and re-derived
+// the wrong answer; the message pre-empts it rather than leaving it to be
+// rediscovered.
 //
 // On what this message does and does not spell out.
 //
@@ -227,40 +258,73 @@ func (m *otpMailbox) snapshot() (calls int, fresh bool) {
 // against a real run: that log contains no occurrence of the region, only ***.
 //
 // The deployment prefix is omitted, so the message says how to LIST the groups
-// instead, and names them by GLOB rather than enumerating the cells: a count
-// goes stale the day the sandbox gains one, pointing a stuck reader at a
-// strictly incomplete set while looking authoritative.
+// instead. The cells are now named INDIVIDUALLY rather than by glob, which is
+// a deliberate reversal: the glob was chosen so a count could not go stale, but
+// it made the message unable to state the one fact a reader most needs about
+// them, that cell1 has never been invoked. A glob cannot say which member of
+// itself is always empty.
 //
-// The cell family and the workstation profile ARE named, which ADR 0002 may or
-// may not want here. The fence in otp_failure_diagnostics_test.go deliberately
-// asserts none of them, so redacting any of it later is one file and no red
-// REQUIRED check.
+// The cell family, the assignment authority and the workstation profile ARE
+// named, all by suffix, which ADR 0002 may or may not want here. The fence in
+// otp_failure_diagnostics_test.go deliberately asserts none of the estate
+// coordinates -- only the three-way rule and the signature owned by each branch
+// -- so redacting any of it later is one file and no red REQUIRED check.
+//
+// That claim is load-bearing, so it is worth saying how it survives contact
+// with the cell1 correction, which is the one piece of prose here that NEEDS a
+// coordinate to say anything at all. The fence does not require the name. It
+// requires that the name never appear WITHOUT its disclaimer: drop
+// "ca-iro-cell1" and the check silently stops applying, keep it and drop
+// "has never been invoked" and the check reds. So a redactor may delete this
+// sentence wholesale and stay green; what they may not do is leave the reader
+// a cell to check and no warning that finding it empty means nothing. An
+// earlier revision of this change asserted the name outright, which made the
+// correct redaction red a REQUIRED check while this comment claimed the
+// opposite -- caught by probing the redaction rather than by reading it.
 func (m *otpMailbox) timedOut() error {
 	return fmt.Errorf(
-		"no OTP email arrived for this run, so most likely none was ever sent. Two things "+
-			"produce that, and the issuer's own logs tell them apart -- look there before "+
-			"suspecting SES or this reader.\n"+
-			"  (1) THE NHP SANDBOX WAS MID-DEPLOY. While a layervai/nhp \"Build and Deploy NHP\" "+
-			"run rolls Relay and the cells Blue-Green, registration requests never reach the "+
-			"issuer at all. Its log group then shows Init/INIT_REPORT lines with NO matching "+
-			"\"START RequestId\": the issuer is being warmed and never invoked. Check that "+
-			"repository's recent deploy runs against this run's start time.\n"+
-			"  (2) THE ISSUANCE BUDGET WAS SPENT: %d/hour per credential, and because the pool "+
-			"carries one credential per owner it is that limit which runs out first -- the per "+
-			"owner limit is higher and unreachable. Selection rotates across the pool, so "+
-			"exhausting it takes roughly that many times the pool size in an hour; but "+
-			"issuances count against the SLOT this run drew, which the run logs, not against "+
-			"the pool as a whole.\n"+
-			"Issuer logs: the ca-iro-cell* lambda log groups under /aws/lambda/, EVERY one of "+
-			"them -- a registration reaches only its assigned cell, so silence in one proves "+
-			"nothing. List them rather than guessing; the deployment prefix is internal "+
-			"configuration and is deliberately not committed here. Use the region this gate's "+
-			"own credentials are already configured for (the OTP_E2E_MAILBOX_REGION secret; "+
-			"spelling it out here would print as ***, because Actions masks it in this very "+
-			"log), or AWS profile \"layerv\" on a maintainer workstation. A healthy "+
-			"invocation ends with {\"AuthorityOperation\":\"IssueRegistrationOTP\",...,"+
-			"\"Outcome\":\"success\"}. An Outcome other than success is (2); no invocation at "+
-			"all is (1). Suspect delivery only once the issuer shows a successful issuance",
+		"no OTP email arrived for this run, so most likely none was ever sent. THREE "+
+			"distinct faults end this wait identically, so the elapsed time tells you "+
+			"nothing about which one it was; the issuer's own logs separate all three. Go "+
+			"there before suspecting SES or this reader, and triage on the \"Outcome\" "+
+			"field, NOT on whether the authority was invoked:\n"+
+			"  (1) NO LOG LINE AT ALL, on any cell: never invoked, and the fault is "+
+			"upstream of the authority. A layervai/nhp \"Build and Deploy NHP\" run rolling "+
+			"Relay and the cells Blue-Green is the usual reason -- mid-deploy, a "+
+			"registration reaches no issuer at all -- so check that repository's recent "+
+			"deploy runs against this run's start time. BEWARE THE ASYMMETRY: this gate's "+
+			"assignment leg keeps succeeding right through a (1), logging "+
+			"{\"AuthorityOperation\":\"IssueAssignment\",...,\"Outcome\":\"success\"} a "+
+			"fraction of a second after the test starts, because ca-ia is not cell-scoped "+
+			"and sits outside the cell endpoint policy a cutover rewrites. A healthy "+
+			"assignment says NOTHING about issuance; reading it as one is how this has "+
+			"twice been misdiagnosed as a transport fault.\n"+
+			"  (2) \"START RequestId\" PRESENT, NO \"Outcome\": invoked, and died coming "+
+			"up. Beside it sits an INIT_REPORT with \"Status: error\" and \"Error Type: "+
+			"Runtime.ExitError\", and above that an ERROR line carrying the failure_code "+
+			"that names the fault. Not a rate limit: the authority never got as far as "+
+			"deciding. Not this repository's bug either.\n"+
+			"  (3) \"Outcome\":\"rejected\": reached, and refused. THE ISSUANCE BUDGET WAS "+
+			"SPENT: %d/hour per credential, and because the pool carries one credential "+
+			"per owner it is that limit which runs out first -- the per owner limit is "+
+			"higher and unreachable. Selection rotates across the pool, so exhausting it "+
+			"takes roughly that many times the pool size in an hour; but issuances count "+
+			"against the SLOT this run drew, which the run logs, not against the pool as a "+
+			"whole.\n"+
+			"Issuer logs: the ca-iro-cell0 and ca-iro-cell1 lambda log groups under "+
+			"/aws/lambda/. Sandbox issuance is cell0-ONLY today: ca-iro-cell1 has never "+
+			"been invoked, not once, so an empty cell1 is its normal state and is evidence "+
+			"of nothing -- do not read it as a (1). Check any further cells the estate has "+
+			"since grown, and list the groups rather than guessing, since the deployment "+
+			"prefix is internal configuration and is deliberately not committed here. Count "+
+			"invocations from the LOGS: get-metric-statistics on the bare FunctionName "+
+			"dimension under-reports these functions, which are invoked through Blue/Green "+
+			"aliases. Use the region this gate's own credentials are already configured for "+
+			"(the OTP_E2E_MAILBOX_REGION secret; spelling it out here would print as ***, "+
+			"because Actions masks it in this very log), or AWS profile \"layerv\" on a "+
+			"maintainer workstation. A healthy issuance ends with "+
+			"{\"AuthorityOperation\":\"IssueRegistrationOTP\",...,\"Outcome\":\"success\"} "+
+			"-- suspect delivery only once you have seen that line for THIS run",
 		perCredentialHourlyBudget)
 }
 

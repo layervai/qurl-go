@@ -33,7 +33,9 @@ import (
 // renders.
 //
 // The credential is secret and can never be logged, so the slot and the pool
-// size are the only things identifying which of the six owners a run spent.
+// size are the only things identifying which of the pool's owners a run spent
+// ("six" until #225 reseeded it to seven; the count belongs in the pool tests,
+// not in prose here, where it can only go stale).
 // Dropping either leaves a red run saying nothing useful while still looking
 // like it reported evidence; rendering the credential instead would publish a
 // secret to a public CI log, which is the reason the slot is carried at all.
@@ -64,19 +66,27 @@ func TestCredentialEvidenceNamesTheSlotAndNotTheCredential(t *testing.T) {
 	}
 }
 
-// TestMailboxTimeoutNamesMidDeployNotOnlyRateLimiting fences the other half of
+// TestMailboxTimeoutNamesEveryCauseNotOnlyRateLimiting fences the other half of
 // the same diagnosis failure.
 //
 // A timed-out mailbox used to assert one cause: "The likely cause is that no
 // email was ever sent: issuance is rate limited...". That is the quantitative,
 // plausible-sounding answer, so it reads as a diagnosis rather than as one
-// hypothesis of two -- and in the case that actually occurred it was wrong. The
-// NHP sandbox was mid-deploy, load was around two issuances in the prior hour,
-// and the message pointed the investigation at the rate limiter anyway.
+// hypothesis of several -- and in the case that actually occurred it was wrong.
+// The NHP sandbox was mid-deploy, load was around two issuances in the prior
+// hour, and the message pointed the investigation at the rate limiter anyway.
 //
-// So: both causes named, ordered cheapest-check-first, with the concrete log
-// coordinates and the signature that separates them.
-func TestMailboxTimeoutNamesMidDeployNotOnlyRateLimiting(t *testing.T) {
+// So: every cause named, the cheapest check leading, with the concrete log
+// coordinates and the signatures that separate them. WHICH cause owns which
+// signature is TestMailboxTimeoutTriagesOnOutcomeNotInvocation's property; this
+// test only asserts that none of the vocabulary a stuck reader greps for has
+// gone missing.
+//
+// Renamed from ...NamesMidDeployNotOnlyRateLimiting when the rule went from two
+// causes to three. The old name asserted a two-way split in its own title,
+// which is the "technically correct, still misleading" class this file exists
+// to remove.
+func TestMailboxTimeoutNamesEveryCauseNotOnlyRateLimiting(t *testing.T) {
 	message := (&otpMailbox{}).timedOut().Error()
 	lower := strings.ToLower(message)
 
@@ -91,38 +101,45 @@ func TestMailboxTimeoutNamesMidDeployNotOnlyRateLimiting(t *testing.T) {
 	// So assert the DIMENSIONS ("per credential", "per owner") and that both
 	// are rates, which is what a stuck reader needs, rather than the figures.
 	//
-	// IssueRegistrationOTP and Outcome are qurl-service's too and ARE pinned,
-	// which is a line worth stating rather than leaving as an inconsistency:
-	// they are identifiers its own log consumers key on, so renaming one is a
-	// breaking change made deliberately, whereas the limits are tuning values
-	// expected to move. Pinning the first costs nothing; pinning the second
-	// would red a REQUIRED check on somebody else's routine retune.
+	// The authority's own identifiers ARE pinned, which is a line worth stating
+	// rather than leaving as an inconsistency: they are strings its log
+	// consumers key on, so renaming one is a breaking change made deliberately,
+	// whereas the limits are tuning values expected to move. Pinning the first
+	// costs nothing; pinning the second would red a REQUIRED check on somebody
+	// else's routine retune.
 	//
-	// What must not rot is the diagnosis: both causes, and the signature that
-	// separates them.
+	// What must not rot is the diagnosis: every cause, and the signature that
+	// distinguishes it from the others.
 	//
 	// Collected and reported once. Echoing the whole message per missing
-	// fragment buries the answer in seven copies of the question -- which is
+	// fragment buries the answer in nine copies of the question -- which is
 	// the failure mode this entire file exists to stop.
 	//
-	// Split in two because half of these are identifiers and half are prose.
+	// Split in two because most of these are identifiers and the rest is prose.
 	var missing []string
 
-	// CASE-SENSITIVELY, against the raw message. These four are not prose: they
-	// are strings the reader pastes into grep, or into a CloudWatch Logs
-	// Insights `filter @message like`, both case-sensitive by default. The live
-	// cell0 log group emits them in exactly this casing -- checked against it
-	// while diagnosing a real red run of this gate. An editorial pass
-	// normalising "START RequestId" to "Start RequestId" would leave this test
-	// green while handing a stuck reader a query that returns zero rows, which
-	// is this file's own failure class. Same argument as the byte equality in
+	// CASE-SENSITIVELY, against the raw message. These are not prose: they are
+	// strings the reader pastes into grep, or into a CloudWatch Logs Insights
+	// `filter @message like`, both case-sensitive by default. The live cell0
+	// log group emits them in exactly this casing -- checked against it while
+	// diagnosing real red runs of this gate. An editorial pass normalising
+	// "START RequestId" to "Start RequestId" would leave this test green while
+	// handing a stuck reader a query that returns zero rows, which is this
+	// file's own failure class. Same argument as the byte equality in
 	// TestCredentialEvidenceNamesTheSlotAndNotTheCredential, and stronger here,
 	// because these are somebody else's identifiers.
 	for _, want := range []struct{ fragment, why string }{
-		{"START RequestId", "the line whose ABSENCE is the mid-deploy signature"},
-		{"INIT_REPORT", "the line whose presence without it completes that signature"},
+		{"Outcome", "the field the whole rule triages on"},
+		{"START RequestId", "the line that, without an Outcome beside it, is the init-crash branch"},
+		{"INIT_REPORT", "the line that corroborates that branch"},
+		{"Runtime.ExitError", "what that INIT_REPORT says, and the reader's confirmation"},
 		{"IssueRegistrationOTP", "the operation a healthy issuance logs"},
-		{"Outcome", "the field separating a refused issuance from a successful one"},
+		{"IssueAssignment", "the leg that keeps SUCCEEDING through a never-invoked run"},
+		// Quoted as the log writes it. "an Outcome other than success" was the
+		// old wording and covers the init-crash branch too, where there is no
+		// Outcome at all to be other than anything -- so the value itself is
+		// what has to be here.
+		{`"Outcome":"rejected"`, "the value that means refused, as distinct from absent"},
 	} {
 		if !strings.Contains(message, want.fragment) {
 			missing = append(missing, fmt.Sprintf("%q (%s) -- exact casing, it is a log query",
@@ -145,6 +162,25 @@ func TestMailboxTimeoutNamesMidDeployNotOnlyRateLimiting(t *testing.T) {
 			"Message: %s", len(missing), strings.Join(missing, "\n  "), message)
 	}
 
+	// CONDITIONAL, and that is the whole design. Naming cell1 is not asserted --
+	// it is an estate coordinate, and ADR 0002 may want it gone, so requiring it
+	// would mean the correct redaction reds a REQUIRED check. That is the
+	// property the rest of this file is careful about and it applies here too.
+	//
+	// What IS asserted is that the name never appears WITHOUT its disclaimer.
+	// Unqualified, "check ca-iro-cell0 and ca-iro-cell1" reproduces the exact
+	// error this correction removes -- a reader finds cell1 empty, reads it as
+	// the never-invoked branch, and investigates a deploy that never happened.
+	// So: redact the name freely, but do not keep it and drop the qualifier.
+	// Windowed rather than sentence-parsed: the claim is that the disclaimer
+	// travels WITH the name, which is the property that matters.
+	if at := strings.Index(message, "ca-iro-cell1"); at >= 0 &&
+		!strings.Contains(lower[at:min(len(lower), at+260)], "never been invoked") {
+		t.Errorf("the mailbox timeout message names ca-iro-cell1 without saying it has never "+
+			"been invoked, so a reader who finds it empty reads that as the never-invoked "+
+			"branch and chases a deploy that did not happen.\nMessage: %s", message)
+	}
+
 	// Rate-ness has to be bound to the dimension that BITES, not merely present
 	// somewhere in the message: a bare "hour" fragment is satisfied by unrelated
 	// prose, and would stay green on "5 per credential" -- a limit turned into a
@@ -164,13 +200,142 @@ func TestMailboxTimeoutNamesMidDeployNotOnlyRateLimiting(t *testing.T) {
 	}
 
 	// Order carries as much as content. Whichever cause is stated first is the
-	// one that gets investigated, and the rate limit is both the more expensive
-	// check and the one that was wrong, so mid-deploy has to lead.
+	// one that gets investigated, and the rate limit is both the most expensive
+	// check and the one that was wrong, so it goes last and the deploy case
+	// leads. (The per-branch version of this is asserted properly in
+	// TestMailboxTimeoutTriagesOnOutcomeNotInvocation; kept here because it is
+	// the specific inversion that cost a diagnosis cycle.)
 	deploy, limit := strings.Index(lower, "mid-deploy"), strings.Index(lower, "per credential")
 	if deploy >= 0 && limit >= 0 && deploy > limit {
 		t.Errorf("the mailbox timeout message states the issuance limit before the mid-deploy "+
 			"cause; the limit is the plausible-sounding answer and is read as a diagnosis.\n"+
 			"Message: %s", message)
+	}
+}
+
+// TestMailboxTimeoutTriagesOnOutcomeNotInvocation is the fence for the decision
+// RULE, as opposed to the vocabulary.
+//
+// The message named two causes for most of its life and split them on whether
+// the issuer had been invoked: "no invocation at all is (1); an Outcome other
+// than success is (2)". Both halves of that are reachable, so nothing about it
+// looked wrong -- and it had a hole a real run fell straight into. Gate run 56
+// (2026-08-19, 270s, the same signature as every other member of this family)
+// logged a START with no Outcome after the authority died in init. Invoked, so
+// not (1). Never refused, so not (2). The rule placed it in NEITHER branch and
+// the reader was left with a message that confidently offered two answers,
+// neither of which was true.
+//
+// A two-way split is therefore not merely incomplete here, it is the defect.
+// This test fences the three-way one, and it is the assertion that goes red if
+// the rule is reverted: every other fence in this file stayed GREEN across the
+// change from two causes to three, which is how a rule with a hole in it
+// survived in the first place.
+//
+// It asserts the branches STRUCTURALLY -- each enumerated branch owns its
+// discriminating signature -- rather than pinning the prose that explains them.
+// Wording is expected to be edited; what must not move is which log state sends
+// the reader where.
+func TestMailboxTimeoutTriagesOnOutcomeNotInvocation(t *testing.T) {
+	message := (&otpMailbox{}).timedOut().Error()
+
+	// Where the enumerated branches stop and the shared reference material
+	// starts. Prose, and deliberately the only prose this test pins: it is a
+	// structural landmark rather than an explanation, and something has to
+	// close the last branch.
+	const tailParagraph = "Issuer logs:"
+
+	// One row per fault that ends this wait, in the order the message must
+	// present them. `signature` is the log evidence that identifies THAT branch
+	// and no other -- which is the whole content of the rule, so binding each
+	// signature to its own branch is the property, not merely listing them.
+	//
+	// Verified partition, every historical occurrence of the ~4.5-minute
+	// signature: runs 118/119/120 (2026-08-27) are never-invoked, run 56
+	// (2026-08-19) is the init crash, runs 9/10/14 (2026-08-11) and run 192
+	// (2026-08-31) are refusals. Nothing is unclassified and nothing is double
+	// counted, which is what makes three the right number.
+	branches := []struct{ marker, signature, state, why string }{
+		{
+			"(1)", "IssueAssignment", "no log line at all",
+			"never invoked; the assignment leg keeps succeeding, so the message has to " +
+				"say so or the absence reads as a transport fault",
+		},
+		{
+			"(2)", "START RequestId", "START present, Outcome absent",
+			"invoked and died coming up -- the branch the old two-way rule had no room for",
+		},
+		{
+			"(3)", `"Outcome":"rejected"`, "Outcome says rejected",
+			"reached and refused; the budget, and the only branch the message used to " +
+				"state with any confidence",
+		},
+	}
+
+	// The markers first, and in order. A message that dropped to two branches
+	// fails here before any signature is looked at, which is the revert case.
+	at := make([]int, len(branches))
+	for i, b := range branches {
+		if at[i] = strings.Index(message, b.marker); at[i] < 0 {
+			t.Fatalf("the mailbox timeout message has no %s branch (%s -> %s).\n"+
+				"Every fault that ends this wait needs its own branch; one that is missing "+
+				"is one a reader will try to force into a neighbouring branch that does not "+
+				"fit it.\nMessage: %s", b.marker, b.state, b.why, message)
+		}
+		if i > 0 && at[i] < at[i-1] {
+			t.Fatalf("the mailbox timeout message states %s before %s. The order is the "+
+				"order the checks should be run in, cheapest first.\nMessage: %s",
+				b.marker, branches[i-1].marker, message)
+		}
+	}
+	// A fourth branch is not an error, but it is outside this fence, so say so
+	// rather than silently covering two thirds of the rule.
+	if strings.Contains(message, "(4)") {
+		t.Errorf("the mailbox timeout message has a (4) branch this test does not fence. " +
+			"Add it to the table above.")
+	}
+
+	// The branches are followed by a paragraph of shared reference material --
+	// where the log groups are, which region, what a healthy issuance looks
+	// like -- which belongs to no branch. It has to bound the LAST one, or that
+	// branch's span runs to the end of the message and is the only one whose
+	// signature could drift out of it undetected. That is the weakest place to
+	// leave a gap: (3) is the budget branch, the one most often edited.
+	tail := strings.Index(message, tailParagraph)
+	if tail < at[len(at)-1] {
+		t.Fatalf("the mailbox timeout message has no %q paragraph after its last branch. "+
+			"The branch table is bounded by it; without it the last branch is unfenced.\n"+
+			"Message: %s", tailParagraph, message)
+	}
+
+	// Each signature inside its OWN branch. This is the part that could not be
+	// expressed while the rule keyed on invocation: "START RequestId" appeared
+	// in the message the whole time, as the line whose ABSENCE meant mid-deploy.
+	// Same fragment, opposite meaning, and only its position says which.
+	for i, b := range branches {
+		end := tail
+		if i+1 < len(branches) {
+			end = at[i+1]
+		}
+		if !strings.Contains(message[at[i]:end], b.signature) {
+			t.Errorf("branch %s (%s) does not carry %q.\n%s\n"+
+				"A signature outside the branch it identifies is worse than a missing one: "+
+				"the reader matches it against whichever branch it is sitting in.\n"+
+				"Branch text: %s", b.marker, b.state, b.signature, b.why, message[at[i]:end])
+		}
+	}
+
+	// And the negative that names the old rule. "Invoked at all" is no longer a
+	// discriminator -- it is true of (2) and (3) alike -- so a message that
+	// still resolves the diagnosis on it has regressed however many branches it
+	// prints. The two clauses below are the old rule's own words.
+	lower := strings.ToLower(message)
+	for _, stale := range []string{"no invocation at all", "never invoked and never"} {
+		if strings.Contains(lower, stale) {
+			t.Errorf("the mailbox timeout message resolves the diagnosis on %q. Invocation "+
+				"does not separate the causes: run 56 was invoked and was neither a refusal "+
+				"nor a healthy issuance. Triage on Outcome.\nMessage: %s", stale, message)
+		}
 	}
 }
 
