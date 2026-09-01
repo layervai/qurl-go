@@ -307,9 +307,13 @@ func (d instantSilenceDialer) DialContext(ctx context.Context, network, address 
 	return instantDeadlineConn{Conn: conn}, nil
 }
 
-// instantDeadlineConn writes its datagram for real and then reports exactly the
-// error an expired socket deadline produces, so the transport still classifies
-// the attempt as written-and-unanswered rather than as a local fault.
+// instantDeadlineConn writes its datagram for real and then reports the same
+// deadline sentinel a socket returns when its own deadline expires. A real
+// expiry arrives wrapped in *net.OpError, so the two are distinguishable by a
+// type assertion, but not by anything the transport does: isSocketTimeout
+// matches errors.Is against os.ErrDeadlineExceeded and net.Error.Timeout, both
+// of which hold for the bare sentinel. The attempt is therefore still
+// classified as written-and-unanswered rather than as a local fault.
 type instantDeadlineConn struct{ net.Conn }
 
 func (c instantDeadlineConn) Read([]byte) (int, error) { return 0, os.ErrDeadlineExceeded }
@@ -362,12 +366,28 @@ func (c *stalledReadConn) Read(p []byte) (int, error) {
 // withheld reply is the assigned cell's: the cell's silence costs no wall clock,
 // so the call runs under the generous reply bounds instead of the tight silence
 // pair scriptsSilence would otherwise impose on its Hub exchange too. Callers
-// pass it to options, which appends it after the fixture's own bounds. Every
-// assigned-cell step in such a script must withhold its reply, since this
-// transport would swallow one that did not.
-func (f *runtimeFixture) instantCellSilence() []AgentRuntimeRegistrationOption {
+// pass it to options, which appends it after the fixture's own bounds.
+//
+// inner is the dialer to silence the cell on top of, so a caller that needs to
+// shape another route composes it here and still installs exactly one
+// WithAgentRuntimeUDPDialer. It also keeps the bounds this transport makes safe
+// defined once, for the test that relies on them and the test that guards them
+// alike.
+//
+// The cell script is checked rather than described: this transport swallows any
+// assigned-cell reply, and a swallowed one would surface as an unexplained
+// ErrNoReply that reads like a transport bug instead of fixture misuse. Reading
+// the steps is unsynchronised on purpose -- the cell server appends to them only
+// through the Hub's assignment fallback, and no datagram has been sent yet.
+func (f *runtimeFixture) instantCellSilence(t *testing.T, inner nativeudp.Dialer) []AgentRuntimeRegistrationOption {
+	t.Helper()
+	for i, step := range f.cellUDP.steps {
+		if !step.noReply {
+			t.Fatalf("instantCellSilence: assigned-cell step %d answers with type %d; this transport would swallow it", i, step.replyType)
+		}
+	}
 	return []AgentRuntimeRegistrationOption{
-		WithAgentRuntimeUDPDialer(instantSilenceDialer{inner: f.dialer, silent: f.cellUDP.conn.LocalAddr().String()}),
+		WithAgentRuntimeUDPDialer(instantSilenceDialer{inner: inner, silent: f.cellUDP.conn.LocalAddr().String()}),
 		WithAgentRuntimeUDPBounds(runtimeReplyTimeout, 1),
 	}
 }
@@ -3271,7 +3291,7 @@ func TestConnectAgentRuntime_AmbiguousREGCancellationDuringBackoffPreservesPendi
 	// cell's silence out of the wall clock, which frees the Hub round trip from
 	// the tight silence timeout it would otherwise share with it.
 	_, _, err := connectWithEnrollment(ctx, conformance.AgentAssignmentBootstrapCredentialFixture, f.store,
-		f.options(append(f.instantCellSilence(),
+		f.options(append(f.instantCellSilence(t, f.dialer),
 			WithAgentRuntimeAssignmentRetryBudget(3, runtimeReplyBudget),
 			withTestAgentRuntimeAssignmentSleep(func(ctx context.Context, _ time.Duration) error {
 				cancel()
@@ -3313,28 +3333,26 @@ func TestConnectAgentRuntime_StalledHubDoesNotDivertREGBackoffCancellation(t *te
 		[]runtimeUDPStep{{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: contract.InitialAssignment.Result.BodyJSON}},
 		[]runtimeUDPStep{{requestType: relayknock.TypeRegister, noReply: true}},
 	)
-	var sleeps, stallsApplied atomic.Int32
-	var pendingDurableAtCancel atomic.Bool
+	// stallsApplied is shared with the dialer, which cannot know its caller's
+	// threading, so it stays atomic. The rest is written only by the sleep hook,
+	// which runs inline on this goroutine inside the exchange loop, and is read
+	// after the call returns; -race across the suite is what keeps that honest.
+	var stallsApplied atomic.Int32
+	var sleeps int
+	var pendingDurableAtCancel bool
 	var probeErr error
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	// Build the transport here rather than through instantCellSilence: the cell
-	// still answers its silence instantly, but the Hub is wrapped on the way in,
-	// and composing that by overriding the helper's dialer would leave the whole
-	// point of this test resting on which WithAgentRuntimeUDPDialer was applied
-	// last.
-	options := []AgentRuntimeRegistrationOption{
-		WithAgentRuntimeUDPDialer(instantSilenceDialer{
-			inner: stalledReadDialer{
-				inner: f.dialer, address: f.hubUDP.conn.LocalAddr().String(),
-				stall: 2 * runtimeSilenceTimeout, applied: &stallsApplied,
-			},
-			silent: f.cellUDP.conn.LocalAddr().String(),
-		}),
-		WithAgentRuntimeUDPBounds(runtimeReplyTimeout, 1),
+	// Take the bounds from the same helper the guarded test uses, wrapping the
+	// Hub route on the way in, so this guard exercises that configuration rather
+	// than a private copy of it that could drift away from the real one.
+	options := append(f.instantCellSilence(t, stalledReadDialer{
+		inner: f.dialer, address: f.hubUDP.conn.LocalAddr().String(),
+		stall: 2 * runtimeSilenceTimeout, applied: &stallsApplied,
+	}),
 		WithAgentRuntimeAssignmentRetryBudget(3, runtimeReplyBudget),
 		withTestAgentRuntimeAssignmentSleep(func(ctx context.Context, _ time.Duration) error {
-			sleeps.Add(1)
+			sleeps++
 			// Which exchange backed off, read straight from durable state rather
 			// than from the cell's request log: the cell records its datagram on
 			// its own goroutine, but the REG is sent only after the pending
@@ -3346,12 +3364,12 @@ func TestConnectAgentRuntime_StalledHubDoesNotDivertREGBackoffCancellation(t *te
 			// prevent.
 			state, loadErr := f.store.inner.LoadAgentState(ctx)
 			probeErr = loadErr
-			pendingDurableAtCancel.Store(loadErr == nil && state.PendingActivation != nil)
+			pendingDurableAtCancel = loadErr == nil && state.PendingActivation != nil
 			cancel()
 			<-ctx.Done()
 			return ctx.Err()
 		}),
-	}
+	)
 	_, _, err := connectWithEnrollment(ctx, conformance.AgentAssignmentBootstrapCredentialFixture, f.store, f.options(options...)...)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("stalled Hub REG backoff cancellation = %v, want context.Canceled", err)
@@ -3363,13 +3381,13 @@ func TestConnectAgentRuntime_StalledHubDoesNotDivertREGBackoffCancellation(t *te
 	if got := stallsApplied.Load(); got < 1 {
 		t.Fatalf("stalled Hub reads = %d, want at least 1: the injected stall never engaged", got)
 	}
-	if got := sleeps.Load(); got != 1 {
-		t.Fatalf("cancellation hook ran %d times, want exactly 1", got)
+	if sleeps != 1 {
+		t.Fatalf("cancellation hook ran %d times, want exactly 1", sleeps)
 	}
 	if probeErr != nil {
 		t.Fatalf("durable state unreadable at cancellation: %v", probeErr)
 	}
-	if !pendingDurableAtCancel.Load() {
+	if !pendingDurableAtCancel {
 		t.Fatal("cancellation fired before the pending activation was durable: the stalled Hub exchange backed off, not the REG")
 	}
 	pending, loadErr := f.store.LoadAgentState(context.Background())
