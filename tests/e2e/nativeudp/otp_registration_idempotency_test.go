@@ -94,6 +94,10 @@ type otpE2EConfig struct {
 	// enrollmentSlot and enrollmentPoolSize are evidence, not inputs: a run
 	// that fails on the issuance rate limit needs to say WHICH credential it
 	// spent, and the pool is secret so the value itself can never be logged.
+	//
+	// Rendered by credentialEvidence, which loadOTPE2EGateConfig emits as part
+	// of loading -- see the note there for why "after a successful
+	// registration" is the one place this evidence is useless.
 	enrollmentSlot     int
 	enrollmentPoolSize int
 	// enrollmentPoolDuplicates is how many repeated credentials the secret
@@ -105,6 +109,61 @@ type otpE2EConfig struct {
 	mailboxBucket    string
 	mailboxRecipient string
 	mailboxRegion    string
+}
+
+// credentialEvidence renders which credential of the pool this run drew.
+//
+// One phrasing in one place because it is emitted on three different paths --
+// after load, inside the registration failure, and after success -- and three
+// drifting spellings of one fact is how grepping CI logs for it stops working.
+// The "credential slot" stem is therefore the one the success log already used.
+//
+// "(0-based)" is the one addition. selectEnrollment returns a zero-based slot,
+// so the values range over 0..n-1 while "slot 4 of 6" reads as a one-based
+// ordinal to almost everyone -- and a reader mapping the slot onto a line of
+// the pool secret is then off by one exactly half the time they think about
+// it. Documenting that only here would have left the artifact people actually
+// read at 4am still ambiguous, which is the same defect this file's other two
+// fixes address: technically correct, and misleading anyway.
+//
+// It sits directly after the slot rather than trailing both numbers, where it
+// would read as if the POOL SIZE were zero-based too -- an off-by-one reached
+// by a different route.
+func (c otpE2EConfig) credentialEvidence() string {
+	return fmt.Sprintf("credential slot %d (0-based) of %d", c.enrollmentSlot, c.enrollmentPoolSize)
+}
+
+// loadOTPE2EGateConfig loads the gate's config and reports which credential the
+// run drew, in ONE call.
+//
+// Emitting the evidence is part of loading, not a separate statement below it,
+// and that is the entire fix for the defect this file was changed for. The slot
+// exists to explain a run that FAILED -- "which credential did this spend" is
+// only asked when the issuance budget is the suspect -- and it used to be
+// rendered once, after a successful ConnectAgentRuntime, past the Fatalf that
+// any failure takes. On the single path the field was added for it printed
+// nothing, and two red runs of this gate on #181 produced no slot at all.
+//
+// Written this way rather than as a t.Logf the caller is trusted to keep above
+// its first error check: an ordering between two statements is a thing to get
+// wrong, and folding them into one call leaves no order to get wrong. `go test`
+// prints a failed test's buffered output, so the line lands with or without -v.
+// Takes a testing.TB and an explicit lookup rather than closing over *testing.T
+// and os.Getenv, so the emission itself is testable: folding load and emit
+// together removes the statement ORDER that caused the defect, but not the
+// possibility of deleting the t.Logf, and that one line is the whole fix.
+// TestGateConfigLoadEmitsTheCredentialEvidence covers it.
+func loadOTPE2EGateConfig(t testing.TB, lookup func(string) string) otpE2EConfig {
+	t.Helper()
+	cfg, skip, err := loadOTPE2EConfig(lookup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if skip {
+		t.Skipf("OTP e2e prerequisites absent; set %s to make this fatal", otpE2EStrictEnv)
+	}
+	t.Logf("EVIDENCE this run drew %s", cfg.credentialEvidence())
+	return cfg
 }
 
 // loadOTPE2EConfig reports (config, skip, error). It collects EVERY missing
@@ -727,13 +786,7 @@ func (w *ephemeralStateKeyWrapper) UnwrapKey(
 // gate: a code that actually travelled through SES to a real mailbox registers
 // a real SDK client, and calling register again does not enroll a second time.
 func TestEmailedOTPCompletesIdempotentSDKRegistration(t *testing.T) {
-	cfg, skip, err := loadOTPE2EConfig(os.Getenv)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if skip {
-		t.Skipf("OTP e2e prerequisites absent; set %s to make this fatal", otpE2EStrictEnv)
-	}
+	cfg := loadOTPE2EGateConfig(t, os.Getenv)
 
 	// Logged HERE, before anything can fail, not beside the success assertion.
 	// The failure this evidence exists for -- a refused issuance, which arrives
@@ -810,7 +863,18 @@ func TestEmailedOTPCompletesIdempotentSDKRegistration(t *testing.T) {
 		qurl.WithAgentRuntimeOTPProvider(mailbox.provide),
 	)
 	if err != nil {
-		t.Fatalf("ConnectAgentRuntime with an emailed OTP: %v", err)
+		// Repeated in the fatal rather than left to the log line above: this
+		// is the last line before FAIL, so it is what a reader sees at the
+		// tail of the job log without scrolling back, and the slot is the
+		// first thing to reach for when the cause turns out to be an
+		// exhausted issuance budget rather than the change under test.
+		//
+		// NOT because it becomes the check's annotation -- it does not. The
+		// gate runs a bare `go test`, with no reporter and no ::error::
+		// around it, so a failing step gets GitHub's generic "Process
+		// completed with exit code 1" and this text lives only in the log.
+		t.Fatalf("ConnectAgentRuntime with an emailed OTP (%s): %v",
+			cfg.credentialEvidence(), err)
 	}
 	if client == nil || binding == nil {
 		t.Fatal("ConnectAgentRuntime returned a nil client or binding")
@@ -823,8 +887,7 @@ func TestEmailedOTPCompletesIdempotentSDKRegistration(t *testing.T) {
 	if binding.DeviceAPIKeyID == "" {
 		t.Fatal("registration produced no device API key id")
 	}
-	t.Logf("EVIDENCE emailed OTP completed registration with credential slot %d of %d",
-		cfg.enrollmentSlot, cfg.enrollmentPoolSize)
+	t.Logf("EVIDENCE emailed OTP completed registration with %s", cfg.credentialEvidence())
 
 	// ── Idempotency ──
 	//

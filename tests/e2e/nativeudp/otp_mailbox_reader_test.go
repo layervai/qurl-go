@@ -47,6 +47,17 @@ const otpEmailSubject = "qURL Connector verification code"
 // elsewhere in the body from being mistaken for the code.
 var otpCodePattern = regexp.MustCompile(`Your qURL Connector verification code is:\s*([0-9]{8})\b`)
 
+// otpMailboxDeadlineMargin is how far ahead of the caller's deadline this
+// reader gives up, so its error is the one that survives rather than being
+// overwritten by a bare context deadline.
+//
+// Small on purpose. It only has to cover killing an in-flight `aws` call and
+// unwinding back to the caller, which is sub-second -- and the slack is NOT
+// free: it is time subtracted from POLLING. A 30s reserve would refuse to look
+// at a queue that may already hold the code whenever a run arrived with less
+// than that left, throwing away two long-polls to protect a sub-second unwind.
+const otpMailboxDeadlineMargin = 2 * time.Second
+
 // maxMailBytes bounds a decoded MIME part. A hostile or malformed message must
 // not be able to exhaust the runner.
 const maxMailBytes = 256 * 1024
@@ -65,6 +76,11 @@ type otpMailbox struct {
 	// ctx.Err() whenever the outer context is already done, so a mailbox
 	// timeout that races the outer deadline surfaces as an opaque
 	// "context deadline exceeded". Finishing first keeps the diagnosis.
+	//
+	// A constant alone does not buy that, which is why receive clamps it: the
+	// budget starts when the SDK first calls the provider, not when the caller
+	// created its context, so "4m < 5m" only holds if reaching the OTP
+	// challenge takes under a minute. See receive.
 	waitBudget time.Duration
 	runAWS     func(context.Context, ...string) ([]byte, error)
 
@@ -176,29 +192,270 @@ func (m *otpMailbox) snapshot() (calls int, fresh bool) {
 
 // timedOut explains a mailbox wait that produced nothing.
 //
-// Registration OTP issuance is rate limited per credential and per owner in
-// qurl-service; see selectEnrollment for which of the two actually bites, and
-// perCredentialHourlyBudget for the rate itself, which this message
-// interpolates rather than restates. Once that budget is spent the authority
-// refuses to issue and NO email is ever sent, which from here is
-// indistinguishable from a delivery problem -- so name it rather than let the
-// reader look broken. Re-running the gate while debugging is the fastest way
-// to reach it.
+// timedOut explains a mailbox wait that produced nothing.
+//
+// This reader cannot tell "no email was ever sent" from "the email was slow", so
+// it names the ways the authority produces no email at all. There are TWO, and
+// for a long time this message named only one:
+//
+//  1. THE SANDBOX WAS MID-DEPLOY. Redeploying the issuer rolls Relay and the
+//     cells Blue-Green, and while that is in flight a registration request never
+//     reaches the issuer -- no invocation, no email, and no error anywhere this
+//     test can see. On 2026-08-30 a layervai/nhp "Build and Deploy NHP" run
+//     (33353630466) redeployed the OTP issuer lambdas at 03:46Z and turned this
+//     gate red on #181 while Relay and cell1 were still rolling.
+//
+//  2. THE ISSUANCE BUDGET WAS SPENT. See selectEnrollment for which of the two
+//     documented limits actually bites, and perCredentialHourlyBudget for the
+//     rate, which this message INTERPOLATES rather than restates: it is the
+//     first thing an operator reads on this failure, so a stale number here
+//     misdirects at the worst possible moment.
+//
+// Naming only (2) was actively harmful rather than merely incomplete: it is the
+// quantitative, plausible-sounding answer, so it reads as a diagnosis instead of
+// a hypothesis, and it cost a diagnosis cycle on #181 where the sandbox was
+// mid-deploy and load was nowhere near any limit. Hence (1) first, and hence the
+// log signature below, which separates the two in one look.
+//
+// On what this message does and does not spell out.
+//
+// The region is named INDIRECTLY, and that is mechanical rather than editorial.
+// It is the value of the OTP_E2E_MAILBOX_REGION secret, and Actions redacts a
+// secret's value from log output wherever it appears -- a test's own error
+// string included. A committed literal would therefore render as *** in the OTP
+// gate's job log, which is the single venue this message exists for. Confirmed
+// against a real run: that log contains no occurrence of the region, only ***.
+//
+// The deployment prefix is omitted, so the message says how to LIST the groups
+// instead, and names them by GLOB rather than enumerating the cells: a count
+// goes stale the day the sandbox gains one, pointing a stuck reader at a
+// strictly incomplete set while looking authoritative.
+//
+// The cell family and the workstation profile ARE named, which ADR 0002 may or
+// may not want here. The fence in otp_failure_diagnostics_test.go deliberately
+// asserts none of them, so redacting any of it later is one file and no red
+// REQUIRED check.
 func (m *otpMailbox) timedOut() error {
-	// The rate is interpolated, never spelled. This is the FIRST message an
-	// operator reads on the failure this whole mechanism exists for, so a stale
-	// number here misdirects at exactly the worst moment -- which is the defect
-	// this file's history is made of.
 	return fmt.Errorf(
-		"no OTP email arrived for this run. The likely cause is that no email was ever "+
-			"sent: issuance is rate limited at %d/hour per credential, and because the "+
-			"pool carries one credential per owner it is that limit which runs out first "+
-			"(the per-owner limit is higher and unreachable). Selection rotates across "+
-			"the pool, so this needs roughly %d times the pool size in an hour -- but "+
-			"issuances count against the slot this run drew, which the run logs, not "+
-			"against the pool as a whole. Check the ca-iro-cell* log group for an "+
-			"Outcome other than success before suspecting delivery",
-		perCredentialHourlyBudget, perCredentialHourlyBudget)
+		"no OTP email arrived for this run, so most likely none was ever sent. Two things "+
+			"produce that, and the issuer's own logs tell them apart -- look there before "+
+			"suspecting SES or this reader.\n"+
+			"  (1) THE NHP SANDBOX WAS MID-DEPLOY. While a layervai/nhp \"Build and Deploy NHP\" "+
+			"run rolls Relay and the cells Blue-Green, registration requests never reach the "+
+			"issuer at all. Its log group then shows Init/INIT_REPORT lines with NO matching "+
+			"\"START RequestId\": the issuer is being warmed and never invoked. Check that "+
+			"repository's recent deploy runs against this run's start time.\n"+
+			"  (2) THE ISSUANCE BUDGET WAS SPENT: %d/hour per credential, and because the pool "+
+			"carries one credential per owner it is that limit which runs out first -- the per "+
+			"owner limit is higher and unreachable. Selection rotates across the pool, so "+
+			"exhausting it takes roughly that many times the pool size in an hour; but "+
+			"issuances count against the SLOT this run drew, which the run logs, not against "+
+			"the pool as a whole.\n"+
+			"Issuer logs: the ca-iro-cell* lambda log groups under /aws/lambda/, EVERY one of "+
+			"them -- a registration reaches only its assigned cell, so silence in one proves "+
+			"nothing. List them rather than guessing; the deployment prefix is internal "+
+			"configuration and is deliberately not committed here. Use the region this gate's "+
+			"own credentials are already configured for (the OTP_E2E_MAILBOX_REGION secret; "+
+			"spelling it out here would print as ***, because Actions masks it in this very "+
+			"log), or AWS profile \"layerv\" on a maintainer workstation. A healthy "+
+			"invocation ends with {\"AuthorityOperation\":\"IssueRegistrationOTP\",...,"+
+			"\"Outcome\":\"success\"}. An Outcome other than success is (2); no invocation at "+
+			"all is (1). Suspect delivery only once the issuer shows a successful issuance",
+		perCredentialHourlyBudget)
+}
+
+// spentBeforePolling explains a run whose deadline was gone before the mailbox
+// read anything at all.
+//
+// Distinct from timedOut, and that distinction is the point: nothing was
+// polled, so "no OTP email arrived, so most likely none was ever sent" would be
+// a claim this reader never checked. It would send someone to the issuer logs
+// to choose between mid-deploy and a spent budget, where they may well find a
+// healthy issuance -- and then to the closing advice, "suspect delivery only
+// once the issuer shows a successful issuance", which is also wrong here. The
+// message may be sitting in the queue, unread.
+//
+// Asserting a cause you did not observe is the exact defect this file exists to
+// remove. It does not get an exception for being our own message.
+func (m *otpMailbox) spentBeforePolling(remaining time.Duration) error {
+	// "-1.2s left" is the small version of what this whole change is about.
+	left := remaining.Round(time.Millisecond).String() + " left"
+	if remaining <= 0 {
+		left = "already expired by " + (-remaining).Round(time.Millisecond).String()
+	}
+	return fmt.Errorf(
+		"the registration deadline was spent before this mailbox was read even once: %s, "+
+			"under the %s held in reserve so a mailbox error outlives the caller's. "+
+			"Nothing was polled, so this says NOTHING about whether an OTP was issued or "+
+			"delivered -- the message may be in the queue, unread. What was too slow is the "+
+			"RUN-UP: the knock, LST and REG round-trips that precede the OTP challenge. A "+
+			"sandbox mid-deploy is the usual reason those crawl, and raising the deadline "+
+			"only helps if they finish at all",
+		left, otpMailboxDeadlineMargin)
+}
+
+// mailboxDeadlineError carries a diagnosis while still matching
+// errors.Is(err, context.DeadlineExceeded).
+//
+// The cancel path wraps context.Canceled, so leaving the deadline paths
+// unwrappable would make a timeout indistinguishable from a parse failure to
+// anything classifying by errors.Is. Error() stays the diagnosis alone, so the
+// prose a person reads leads.
+//
+// Safe because the SDK's discard is keyed on the caller's ctx.Err(), never on
+// this error's identity: native_agent_runtime.go reads `if ctx.Err() != nil`
+// then `if providerCtx.Err() != nil`, and classifies a provider error with
+// errors.Is nowhere. If that ever changes, wrapping this sentinel would cause
+// the very discard the clamp prevents -- check there before editing this.
+type mailboxDeadlineError struct{ diagnosis error }
+
+func (e mailboxDeadlineError) Error() string { return e.diagnosis.Error() }
+
+func (e mailboxDeadlineError) Unwrap() []error {
+	return []error{e.diagnosis, context.DeadlineExceeded}
+}
+
+// mailboxProgress records how far the read got. What this reader may honestly
+// claim depends entirely on that: a bool marking only "the queue was read"
+// makes every later failure say "no OTP email arrived", including one that
+// happens while fetching a delivery the queue has already announced.
+type mailboxProgress int
+
+const (
+	mailboxUnread        mailboxProgress = iota // nothing was read
+	mailboxPolled                               // the queue was read; no delivery for this run yet
+	mailboxDeliveryFound                        // a notification for an otp/ object is in hand
+)
+
+// expired reports the right error for a finished context, or nil.
+//
+// ONE rule wherever a deadline ends this read: wrap. The deadline this reader
+// runs under is its own, caller-minus-margin, and it did expire -- exempting
+// the "standing down early" case would leave the identical message classifiable
+// on one path and not the other, decided only by whether the run-up crossed the
+// margin before or after entering receive.
+//
+// The arms are ordered by what the reader has actually observed: cancellation
+// first (nothing timed out), then a delivery seen, then a queue read, then
+// nothing read at all -- and the last splits on whose clock ran out.
+func (m *otpMailbox) expired(
+	ctx context.Context, progress mailboxProgress, remaining time.Duration, bounded bool,
+) error {
+	if ctx.Err() == nil {
+		return nil
+	}
+	// Hoisted: the switch cannot bind, so testing m.cancelled(ctx) in a case
+	// and returning it in the body built the error twice and returned an
+	// object other than the one that was tested -- in the loop's per-iteration
+	// check.
+	if cancelled := m.cancelled(ctx); cancelled != nil {
+		return cancelled
+	}
+	switch {
+	case progress >= mailboxDeliveryFound:
+		return mailboxDeadlineError{m.deliveryNotFetched()}
+	case progress >= mailboxPolled:
+		return mailboxDeadlineError{m.timedOut()}
+	case bounded && remaining <= otpMailboxDeadlineMargin:
+		// The CALLER's clock is what ran out.
+		return mailboxDeadlineError{m.spentBeforePolling(remaining)}
+	default:
+		// Our own budget ran out while the caller still had time -- a
+		// different cause, and blaming the registration deadline here would
+		// print "59m59s left, under the 2s held in reserve" in one breath.
+		return mailboxDeadlineError{m.budgetSpentBeforePolling(remaining, bounded)}
+	}
+}
+
+// deliveryNotFetched explains a deadline that arrived while fetching an object
+// the queue had already announced.
+//
+// Careful about WHOSE. Ownership is not known until extractOTPCode has parsed
+// the body, and progress rises as soon as the bucket and otp/ prefix match --
+// which every concurrent run's and every rerun's delivery does, on a queue and
+// bucket that come from shared secrets. So this message must not say the
+// delivery was ours, and must not tell the reader the issuer logs are the wrong
+// place: run A can be killed fetching run B's object precisely because A's own
+// OTP was never issued, which is the mid-deploy case, and the issuer log is
+// exactly where A's answer is.
+//
+// It is the one message here that tells someone to STOP looking somewhere, so
+// it is the one that has to be most careful about what it actually knows.
+func (m *otpMailbox) deliveryNotFetched() error {
+	return errors.New(
+		"the deadline expired while fetching a delivery from the shared mailbox: the queue " +
+			"carried a notification for an otp/ object and it could not be read in time. " +
+			"WHOSE that object is was never established -- ownership is decided by parsing " +
+			"the body, which is what ran out of time -- so it may belong to a concurrent run " +
+			"or a rerun, and issuance for THIS run is confirmed neither way. What certainly " +
+			"ran out is this mailbox's budget against S3, so weigh the run-up cost and S3 " +
+			"latency, or give the registration deadline more room; and if no issuance for " +
+			"this run shows in the issuer logs, that is still the answer")
+}
+
+// cancelled reports a caller that stopped for a reason other than running out
+// of time, or nil.
+//
+// Shared with receive's early return, which is the only exit that does not pass
+// through expired(). Without it, a cancelled caller whose deadline happened to
+// be inside the margin was told "the registration deadline was spent" -- a
+// cause it did not observe, and one that made errors.Is report DeadlineExceeded
+// for a context that was Canceled, inverting exactly what
+// TestMailboxDeadlineErrorsAreClassifiable requires.
+func (m *otpMailbox) cancelled(ctx context.Context) error {
+	if err := ctx.Err(); err != nil && !errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("the mailbox wait was cancelled before any code arrived: %w", err)
+	}
+	return nil
+}
+
+// orExpired prefers the deadline diagnosis over a killed CLI's exit code.
+//
+// exec.CommandContext kills the aws CLI when the budget expires, and that
+// surfaces as a generic non-zero exit reported as "mailbox AWS operation ...
+// failed" -- the shape that, per runAWSCLI's own comment, sent someone hunting
+// through IAM once already. Only the receive-message call used to make this
+// choice; the get-object and delete/release calls returned the exit code raw,
+// and get-object runs LATE in a long wait, which is exactly the slow-run shape
+// this file is about. One helper so every site chooses the same way.
+func (m *otpMailbox) orExpired(
+	ctx context.Context, err error, progress mailboxProgress, remaining time.Duration, bounded bool,
+) error {
+	if expired := m.expired(ctx, progress, remaining, bounded); expired != nil {
+		// Joined, not substituted. The killed-CLI exit code is noise and must
+		// not LEAD -- that was the whole complaint -- but deleting it also
+		// deletes the genuine failures that can race a deadline here: an IAM
+		// error on release, or a local "write mailbox delete request". The
+		// diagnosis leads and the cause survives underneath it, which is the
+		// same trade every other message in this file makes.
+		return errors.Join(expired, err)
+	}
+	return err
+}
+
+// budgetSpentBeforePolling explains a wait whose OWN budget expired before the
+// queue could be read once, while the caller still had time to spare.
+//
+// Separate from spentBeforePolling because the cause is different and the
+// numbers give it away: that message reasons about the caller's deadline and
+// the reserve held against it, which is nonsense when there is an hour left. A
+// diagnostic contradicted by the figures it quotes is worse than a vague one.
+//
+// What it points at is different too. Nothing here is about issuance: the poll
+// itself neither answered nor exited, which is a network or credential problem
+// on the path to SQS, not something any issuer log will explain.
+func (m *otpMailbox) budgetSpentBeforePolling(remaining time.Duration, bounded bool) error {
+	left := "the caller set no deadline at all"
+	if bounded {
+		left = fmt.Sprintf("%s still left on the caller's", remaining.Round(time.Millisecond))
+	}
+	return fmt.Errorf(
+		"this mailbox's own %s budget expired before the queue could be read even once, with "+
+			"%s. Nothing was polled, so this says NOTHING about whether an OTP was issued or "+
+			"delivered. What failed to finish is the `aws sqs receive-message` call itself -- "+
+			"it neither answered nor exited, which points at the network path to SQS or at "+
+			"the gate's credentials, NOT at the issuer. No lambda log will explain this one",
+		m.waitBudget, left)
 }
 
 // receive long-polls until a message addressed to this agent arrives, or ctx
@@ -206,10 +463,61 @@ func (m *otpMailbox) timedOut() error {
 // -- anything newer is released back, because a concurrent run is still waiting
 // for it.
 func (m *otpMailbox) receive(ctx context.Context, agentID string) (string, error) {
-	if m.waitBudget > 0 {
+	// Bounded by what is actually LEFT of the caller's deadline, not just set
+	// to waitBudget.
+	//
+	// The two clocks do not start together. The caller's context begins at the
+	// top of the test; this budget begins when the SDK first calls the
+	// provider -- after the knock, the LST and the REG round-trips. So "4m is
+	// under the 5m deadline" only holds while reaching the OTP challenge takes
+	// under a minute, and that one minute was the entire margin. Exceed it and
+	// the OUTER deadline fires first, the SDK discards everything below and
+	// returns a bare "context deadline exceeded" -- deleting the whole
+	// diagnosis this file exists to produce, in precisely the situation that
+	// motivated it: a mid-deploy sandbox, where Relay rolling Blue-Green is
+	// exactly what makes the run-up slow. Lowering otpE2EDeadline or raising
+	// otpE2EMailboxWait would have deleted it silently too.
+	//
+	// Derived OUTSIDE any `waitBudget > 0` guard, so the guarantee is
+	// structural rather than conditional: a zero waitBudget would otherwise
+	// skip all of this and block on the caller's context, producing the very
+	// outcome the clamp prevents. TestMailboxTimeoutSurvivesTheCallersDeadline
+	// pins the clamp; TestUnboundedMailboxRefusesRatherThanHanging the refusal.
+	callerDeadline, bounded := ctx.Deadline()
+	budget := m.waitBudget
+	if bounded {
+		room := time.Until(callerDeadline) - otpMailboxDeadlineMargin
+		if room <= 0 {
+			if cancelled := m.cancelled(ctx); cancelled != nil {
+				return "", cancelled
+			}
+			return "", mailboxDeadlineError{m.spentBeforePolling(time.Until(callerDeadline))}
+		}
+		if budget <= 0 || room < budget {
+			budget = room
+		}
+	}
+	// remaining reports the CALLER's deadline, not the derived one below.
+	remaining := func() time.Duration {
+		if !bounded {
+			return 0
+		}
+		return time.Until(callerDeadline)
+	}
+	if budget > 0 {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, m.waitBudget)
+		ctx, cancel = context.WithTimeout(ctx, budget)
 		defer cancel()
+	} else if !bounded {
+		// Nothing bounds this at all: no budget, no caller deadline. The loop
+		// below would long-poll forever and never produce a diagnosis, which is
+		// the fail-OPEN the clamp exists to remove -- unreachable today only
+		// because newOTPMailbox always passes otpE2EMailboxWait and the gate
+		// always sets otpE2EDeadline. Refuse rather than rely on that.
+		return "", errors.New(
+			"the mailbox has neither a wait budget nor a caller deadline, so a missing OTP " +
+				"would hang instead of being reported; set otpE2EMailboxWait or give the " +
+				"caller's context a deadline")
 	}
 	dir, err := os.MkdirTemp("", "qurl-otp-mailbox-")
 	if err != nil {
@@ -221,9 +529,16 @@ func (m *otpMailbox) receive(ctx context.Context, agentID string) (string, error
 	}
 	defer os.RemoveAll(dir)
 
+	// progress records how far this read actually got. Arithmetic
+	// at entry is not enough: a budget of a second or two is positive, so the
+	// loop starts, and the aws CLI's own 0.5-1.5s startup is then killed before
+	// it reaches SQS. Claiming "no OTP email arrived" there would assert a
+	// cause this reader never observed -- the same defect spentBeforePolling
+	// exists to remove, surviving in the band just above the margin.
+	progress := mailboxUnread
 	for {
-		if ctx.Err() != nil {
-			return "", m.timedOut()
+		if err := m.expired(ctx, progress, remaining(), bounded); err != nil {
+			return "", err
 		}
 		raw, err := m.runAWS(ctx,
 			"sqs", "receive-message",
@@ -239,11 +554,10 @@ func (m *otpMailbox) receive(ctx context.Context, agentID string) (string, error
 			// surfaces as a generic non-zero exit. That is a timeout, and
 			// reporting it as an AWS failure sent me hunting through IAM once
 			// already.
-			if ctx.Err() != nil {
-				return "", m.timedOut()
-			}
-			return "", err
+			return "", m.orExpired(ctx, err, progress, remaining(), bounded)
 		}
+		// The queue was read. Anything from here on may honestly say so.
+		progress = mailboxPolled
 		var received sqsReceiveOutput
 		if len(bytes.TrimSpace(raw)) > 0 {
 			if err := json.Unmarshal(raw, &received); err != nil {
@@ -265,7 +579,7 @@ func (m *otpMailbox) receive(ctx context.Context, agentID string) (string, error
 		// S3 emits one of these when the notification configuration is created.
 		if notification.Event == "s3:TestEvent" {
 			if err := m.deleteMessage(ctx, dir, message.ReceiptHandle); err != nil {
-				return "", err
+				return "", m.orExpired(ctx, err, progress, remaining(), bounded)
 			}
 			continue
 		}
@@ -288,7 +602,7 @@ func (m *otpMailbox) receive(ctx context.Context, agentID string) (string, error
 		delivered, err := time.Parse(time.RFC3339, record.EventTime)
 		if err == nil && delivered.Before(m.notBefore) {
 			if err := m.deleteMessage(ctx, dir, message.ReceiptHandle); err != nil {
-				return "", err
+				return "", m.orExpired(ctx, err, progress, remaining(), bounded)
 			}
 			continue
 		}
@@ -297,10 +611,14 @@ func (m *otpMailbox) receive(ctx context.Context, agentID string) (string, error
 			return "", errors.New("mailbox notification escaped its expected bucket or prefix")
 		}
 
+		// A delivery for this run exists. From here a deadline is no longer
+		// about whether an email was sent.
+		progress = mailboxDeliveryFound
+
 		path := dir + "/message"
 		if _, err := m.runAWS(ctx, "s3api", "get-object",
 			"--bucket", m.bucket, "--key", key, path, "--region", m.region); err != nil {
-			return "", err
+			return "", m.orExpired(ctx, err, progress, remaining(), bounded)
 		}
 		body, err := readBoundedFile(path)
 		if err != nil {
@@ -318,16 +636,38 @@ func (m *otpMailbox) receive(ctx context.Context, agentID string) (string, error
 			// objects after a day, so asking for s3:DeleteObject would widen the
 			// role for no benefit.
 			if err := m.deleteMessage(ctx, dir, message.ReceiptHandle); err != nil {
-				return "", err
+				// The code is in hand. Discarding it because a CLEANUP call was
+				// killed is the wrong trade, and reporting a deadline here used
+				// to announce "no OTP email arrived" about an email just
+				// parsed -- contradicted by a variable in the same frame. An
+				// undeleted message becomes visible again and a later run
+				// removes it through the notBefore staleness path, so nothing
+				// leaks. A genuine failure (permissions, a bad handle) still
+				// surfaces: it says something real about the mailbox role.
+				if ctx.Err() == nil {
+					return "", err
+				}
 			}
 			return code, nil
 		}
 		// Not ours, and recent enough to belong to a concurrent run. Release it
 		// so its owner can still receive it, rather than deleting it and turning
 		// their run red. The short delay keeps this loop from immediately
-		// re-receiving the same message and spinning on it.
+		// re-receiving the same message and spinning on it (that delay is the
+		// --visibility-timeout on releaseMessage below, not anything local).
+		//
+		// Not ours after all, so it says nothing about whether an email was
+		// sent for THIS run -- stop letting it answer for one.
+		//
+		// progress is raised before extractOTPCode, which is right: until the
+		// body is parsed the delivery might be ours. It has to come back down
+		// here, because a concurrent run's email -- or a rerun's, since
+		// runScopedAgentID scopes on run id AND attempt -- would otherwise keep
+		// it high for the rest of the wait and let a foreign delivery answer
+		// for a later timeout.
+		progress = mailboxPolled
 		if err := m.releaseMessage(ctx, message.ReceiptHandle); err != nil {
-			return "", err
+			return "", m.orExpired(ctx, err, progress, remaining(), bounded)
 		}
 	}
 }
