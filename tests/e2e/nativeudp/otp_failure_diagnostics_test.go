@@ -81,8 +81,10 @@ func TestMailboxTimeoutNamesMidDeployNotOnlyRateLimiting(t *testing.T) {
 	lower := strings.ToLower(message)
 
 	// Deliberately NOT asserted here: the log group names, the region, the AWS
-	// profile, and the two rate-limit NUMBERS. Estate coordinates are an open
-	// question under ADR 0002; the numbers are qurl-service's
+	// profile, and the two rate-limit NUMBERS. The region is no longer an open
+	// question under ADR 0002 -- it stays a secret and stays unpublished, so
+	// pinning it here is the one thing this fence must never do; the log groups
+	// and profile remain unsettled. The numbers are qurl-service's
 	// RegistrationOTPRateLimitWindow and are owned outside this repository.
 	// Either way the argument is the same -- pinning a value this repo does not
 	// own means the day it legitimately changes, the correct edit to timedOut()

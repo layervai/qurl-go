@@ -639,7 +639,7 @@ func TestLoadOTPE2EConfigAcceptsEitherCredentialSource(t *testing.T) {
 		otpE2EMailboxQueueURLEnv:  "https://queue.example/q",
 		otpE2EMailboxBucketEnv:    "bucket",
 		otpE2EMailboxRecipientEnv: "otp@example",
-		otpE2EMailboxRegionEnv:    "us-east-2",
+		otpE2EMailboxRegionEnv:    "region-placeholder",
 	}
 	with := func(extra map[string]string) map[string]string {
 		merged := map[string]string{}
