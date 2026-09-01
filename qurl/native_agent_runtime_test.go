@@ -3357,6 +3357,7 @@ func TestConnectAgentRuntime_AmbiguousREGCancellationDuringBackoffPreservesPendi
 	// goroutine inside the exchange loop, and read after the call returns.
 	var probeErr error
 	var refusedBeforePending bool
+	var sleeps int
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	// The sleep hook is installed on every bounded exchange this call makes, not
@@ -3379,12 +3380,19 @@ func TestConnectAgentRuntime_AmbiguousREGCancellationDuringBackoffPreservesPendi
 		f.options(append(f.instantCellSilence(t, f.dialer),
 			WithAgentRuntimeAssignmentRetryBudget(3, runtimeReplyBudget),
 			withTestAgentRuntimeAssignmentSleep(func(ctx context.Context, _ time.Duration) error {
+				sleeps++
 				state, loadErr := f.store.inner.LoadAgentState(ctx)
-				if loadErr != nil {
+				switch {
+				case errors.Is(loadErr, ErrAgentStateNotFound):
+					// No state at all says the same thing about where this backoff
+					// came from as a state carrying no pending activation. Only a
+					// store that could not answer leaves that unknown.
+					refusedBeforePending = true
+					return errRefuseBackoff
+				case loadErr != nil:
 					probeErr = loadErr
 					return errRefuseBackoff
-				}
-				if state.PendingActivation == nil {
+				case state.PendingActivation == nil:
 					refusedBeforePending = true
 					return errRefuseBackoff
 				}
@@ -3395,6 +3403,14 @@ func TestConnectAgentRuntime_AmbiguousREGCancellationDuringBackoffPreservesPendi
 		)...)...)
 	if probeErr != nil {
 		t.Fatalf("durable state unreadable at the assignment backoff, so which exchange backed off is unknown: %v", probeErr)
+	}
+	// Before reading refusedBeforePending, pin what makes it meaningful: the
+	// refusal aborts the call. If a sleep-hook error were ever retried instead,
+	// the hook could refuse at the Hub and then cancel at the REG, leaving this
+	// flag set from the first and reporting a run that did reach its subject as
+	// one that never got there.
+	if sleeps != 1 {
+		t.Fatalf("cancellation hook ran %d times, want exactly 1: refusing a backoff must abort the call", sleeps)
 	}
 	if refusedBeforePending {
 		t.Fatalf("Hub exchange backed off before any REG, so this run never reached the cancellation under test: the runner outran the %v attempt timeout; durability is not implicated (call returned %v)", runtimeReplyTimeout, err)
@@ -3470,7 +3486,11 @@ func TestConnectAgentRuntime_StalledHubDoesNotDivertREGBackoffCancellation(t *te
 			// one as the other is the confident misdiagnosis this test exists to
 			// prevent.
 			state, loadErr := f.store.inner.LoadAgentState(ctx)
-			probeErr = loadErr
+			// A store with nothing saved yet is an absent record, not an
+			// unreadable one; only the latter leaves the attribution unknown.
+			if !errors.Is(loadErr, ErrAgentStateNotFound) {
+				probeErr = loadErr
+			}
 			pendingDurableAtCancel = loadErr == nil && state.PendingActivation != nil
 			cancel()
 			<-ctx.Done()
@@ -3497,8 +3517,12 @@ func TestConnectAgentRuntime_StalledHubDoesNotDivertREGBackoffCancellation(t *te
 	if !pendingDurableAtCancel {
 		t.Fatal("cancellation fired before the pending activation was durable: the stalled Hub exchange backed off, not the REG")
 	}
-	if got := stallsApplied.Load(); got < 1 {
-		t.Fatalf("stalled Hub reads = %d, want at least 1: the injected stall never engaged", got)
+	// One logical Hub exchange dials the challenge and the proof separately, so
+	// two stalled reads is what this script costs. Bounding both ends keeps the
+	// injected latency the assertion above sized from growing silently: what the
+	// call actually spends is this count times the stall.
+	if got := stallsApplied.Load(); got < 1 || got > 2 {
+		t.Fatalf("stalled Hub reads = %d, want 1 or 2: the injected stall never engaged, or the Hub exchange grew round trips this test's latency budget was not sized for", got)
 	}
 	if got := f.cellSilenced.Load(); got < 1 {
 		t.Fatalf("instant cell silence engaged %d times, want at least 1", got)
