@@ -236,6 +236,12 @@ func TestMailboxTimeoutNamesEveryCauseNotOnlyRateLimiting(t *testing.T) {
 func TestMailboxTimeoutTriagesOnOutcomeNotInvocation(t *testing.T) {
 	message := (&otpMailbox{}).timedOut().Error()
 
+	// Where the enumerated branches stop and the shared reference material
+	// starts. Prose, and deliberately the only prose this test pins: it is a
+	// structural landmark rather than an explanation, and something has to
+	// close the last branch.
+	const tailParagraph = "Issuer logs:"
+
 	// One row per fault that ends this wait, in the order the message must
 	// present them. `signature` is the log evidence that identifies THAT branch
 	// and no other -- which is the whole content of the rule, so binding each
@@ -286,12 +292,25 @@ func TestMailboxTimeoutTriagesOnOutcomeNotInvocation(t *testing.T) {
 			"Add it to the table above.")
 	}
 
+	// The branches are followed by a paragraph of shared reference material --
+	// where the log groups are, which region, what a healthy issuance looks
+	// like -- which belongs to no branch. It has to bound the LAST one, or that
+	// branch's span runs to the end of the message and is the only one whose
+	// signature could drift out of it undetected. That is the weakest place to
+	// leave a gap: (3) is the budget branch, the one most often edited.
+	tail := strings.Index(message, tailParagraph)
+	if tail < at[len(at)-1] {
+		t.Fatalf("the mailbox timeout message has no %q paragraph after its last branch. "+
+			"The branch table is bounded by it; without it the last branch is unfenced.\n"+
+			"Message: %s", tailParagraph, message)
+	}
+
 	// Each signature inside its OWN branch. This is the part that could not be
 	// expressed while the rule keyed on invocation: "START RequestId" appeared
 	// in the message the whole time, as the line whose ABSENCE meant mid-deploy.
 	// Same fragment, opposite meaning, and only its position says which.
 	for i, b := range branches {
-		end := len(message)
+		end := tail
 		if i+1 < len(branches) {
 			end = at[i+1]
 		}
