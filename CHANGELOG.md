@@ -13,8 +13,10 @@ and are marked **Breaking** with what to change.
   `AgentRuntimeSessionOption` were removed. `KnockRegisteredAgent` and
   `RecoverNativeSessionOperation` accept `AgentRuntimeUDPOption` again. Update
   named function values and change any `[]AgentRuntimeSessionOption` wrapper to
-  `[]AgentRuntimeUDPOption`. Durable operation and NHP wire semantics are
-  unchanged.
+  `[]AgentRuntimeUDPOption`, and remove imports of the deleted
+  `relayknock/sessionrelay` package. HTTPS session admission has no replacement:
+  callers must reach the authenticated assigned cell over UDP 443. Durable
+  operation and NHP wire semantics are unchanged.
 
 ## v0.10.0 — 2026-09-01
 

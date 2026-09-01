@@ -107,6 +107,9 @@ func browserRelayTypeAllowed(headerType int) bool {
 // response as 200 + reply bytes. Transport-level failures (request build,
 // connection, body read) come back as *RelayError; url is returned so callers
 // compose errors around the one URL actually posted.
+//
+// Security boundary: this transport is only for browser/qv2 portal traffic.
+// Registered-agent control traffic must use native UDP and must not reach it.
 func relayDo(ctx context.Context, httpClient HTTPDoer, relayBaseURL, serverID string, packet []byte) (status int, body []byte, url string, err error) {
 	if httpClient == nil {
 		httpClient = http.DefaultClient
