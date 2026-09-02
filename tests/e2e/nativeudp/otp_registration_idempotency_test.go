@@ -790,18 +790,28 @@ func appendJobSummary(t testing.TB, lookup func(string) string, title, advisory 
 	// the operator exactly the same thing, so they read the same way.
 	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o644)
 	if err == nil {
-		// Every line carries the quote marker. A multi-line advisory would
-		// otherwise break out of the blockquote after its first line and the
-		// rest would render as body text, detached from the warning it belongs
-		// to -- again, for the advisory that has not been written yet.
-		quoted := "> " + strings.ReplaceAll(advisory, "\n", "\n> ")
-		_, err = fmt.Fprintf(file, "> [!WARNING]\n> **%s**\n%s\n\n", title, quoted)
+		// Every line carries the quote marker, TITLE INCLUDED. A multi-line
+		// advisory would otherwise break out of the blockquote after its first
+		// line and the rest would render as body text, detached from the
+		// warning it belongs to -- again, for the advisory that has not been
+		// written yet. The title needs it for the same reason and was missed:
+		// the annotation path escapes the title (encodeCommandProperty) while
+		// this one interpolated it raw, so a newline in a title broke the
+		// blockquote in exactly the way the advisory handling prevents.
+		_, err = fmt.Fprintf(file, "> [!WARNING]\n> **%s**\n%s\n\n",
+			quoteContinuation(title), quoteContinuation(advisory))
 		err = errors.Join(err, file.Close())
 	}
 	if err != nil {
 		t.Logf("NOTE job summary unavailable (%v), so on a non-verbose run this "+
 			"degradation has no surviving report: %s", err, advisory)
 	}
+}
+
+// quoteContinuation re-prefixes every line after the first with the Markdown
+// blockquote marker, so a multi-line value stays inside the block it belongs to.
+func quoteContinuation(value string) string {
+	return strings.ReplaceAll(value, "\n", "\n> ")
 }
 
 // smallestFactor returns the smallest non-trivial divisor of n, or 0 when n is

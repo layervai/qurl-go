@@ -1309,6 +1309,23 @@ func TestNoteDegradationReportsOnEveryChannel(t *testing.T) {
 		}
 	})
 
+	t.Run("keeps a multi-line TITLE inside the blockquote", func(t *testing.T) {
+		// The annotation path escapes the title; this one interpolated it raw,
+		// so the hardening was advisory-only. Same third-advisory argument.
+		summary := filepath.Join(t.TempDir(), "summary.md")
+		_ = captureAnnotations(t, func() {
+			noteDegradation(t, onCI(summary), "first title\nsecond title", "an advisory")
+		})
+		raw, err := os.ReadFile(summary)
+		if err != nil {
+			t.Fatalf("read summary: %v", err)
+		}
+		if !strings.Contains(string(raw), "> second title") {
+			t.Fatalf("job summary %q dropped the quote marker inside the title, which "+
+				"breaks the blockquote the advisory handling protects", raw)
+		}
+	})
+
 	t.Run("creates the summary when the runner only exported the path", func(t *testing.T) {
 		// NOT pre-created, unlike the case above. The hosted runner makes this
 		// file itself, but a self-hosted runner or `act` may export only the

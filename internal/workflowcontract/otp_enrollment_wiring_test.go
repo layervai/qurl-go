@@ -14,6 +14,7 @@ package workflowcontract
 // universal claim.
 
 import (
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -143,6 +144,19 @@ func nativeUDPGoFiles(t *testing.T) []string {
 	return found
 }
 
+// summaryReadPattern matches a Go site that READS the job-summary path, not one
+// that merely names it.
+//
+// A bare strings.Contains was the method this file rejects a hundred lines
+// above, applied to itself: any doc comment saying "deliberately does not write
+// to GITHUB_STEP_SUMMARY" joined the site set and broke an exact-set assertion
+// that has no slack. The old self-exemption was the tell -- this fence had to
+// skip its own file because naming the variable is not using it. Matching the
+// lookup closes both, and needs no exemption: the pattern's own source spells
+// the parens escaped, so it does not match itself.
+var summaryReadPattern = regexp.MustCompile(
+	`(?:lookup|os\.Getenv)\("GITHUB_STEP_SUMMARY"\)`)
+
 // advisoryLiteralPattern counts degradationAdvisory composite literals of ANY
 // shape; advisoryTitlePattern extracts the title from the one shape that states
 // it inline. The pair is the point: the count catches an addition the title
@@ -171,37 +185,26 @@ var (
 // its text lands on a public run summary. Pinning both the writer and the
 // advisory set means adding one is a decision somebody makes on purpose.
 func TestOnlyTheFencedWriterPublishesToTheJobSummary(t *testing.T) {
-	// This fence names the variable in order to guard it, so it would otherwise
-	// match itself. Skipped BY PATH rather than by skipping the package, so a
-	// different workflowcontract file that started writing summaries is still
-	// caught.
-	const self = "internal/workflowcontract/otp_enrollment_wiring_test.go"
-
 	var sites []string
 	for _, path := range repoGoFiles(t) {
-		if path == self {
-			continue
-		}
 		contents, err := os.ReadFile(filepath.Join(repositoryRoot(t), path))
 		if err != nil {
 			t.Fatalf("read %s: %v", path, err)
 		}
-		if strings.Contains(string(contents), "GITHUB_STEP_SUMMARY") {
+		if summaryReadPattern.Match(contents) {
 			sites = append(sites, path)
 		}
 	}
 	slices.Sort(sites)
-	// Two sanctioned sites: appendJobSummary, and the test that drives it with a
-	// described environment. Naming the test as well as the writer is
-	// deliberate -- a test is exactly how a fabricated advisory reached the
-	// real summary once already, so it belongs inside the fence, not outside.
-	want := []string{
-		"tests/e2e/nativeudp/otp_enrollment_pool_test.go",
-		otpRegistrationSourcePath,
-	}
-	slices.Sort(want)
+	// ONE sanctioned site now that the scan matches reads rather than mentions:
+	// appendJobSummary. The emitter's tests supply the path through a described
+	// lookup instead of reading it, so they are no longer sites -- and the
+	// vector they represent (a test handing over the REAL environment) is
+	// fenced by TestOnlyTheGateItselfEmitsFromTheProcessEnvironment, which is
+	// where that property belongs.
+	want := []string{otpRegistrationSourcePath}
 	if !slices.Equal(sites, want) {
-		t.Errorf("Go sources naming GITHUB_STEP_SUMMARY = %v, want %v.\nThe job summary "+
+		t.Errorf("Go sources READING GITHUB_STEP_SUMMARY = %v, want %v.\nThe job summary "+
 			"is the channel the canary's no--v policy cannot suppress, so a new site is a "+
 			"publication decision: confirm what it writes, then add it here", sites, want)
 	}
@@ -239,11 +242,27 @@ func TestOnlyTheFencedWriterPublishesToTheJobSummary(t *testing.T) {
 		}
 	}
 	slices.Sort(titles)
-	if literals != len(wantTitles) || !slices.Equal(titles, wantTitles) {
-		t.Errorf("advisories published to the job summary = %v across %d literal(s), want "+
-			"%v across %d.\nEach one's text reaches a public run summary; confirm the new "+
-			"advisory carries no identity or topology, then add it here",
-			titles, literals, wantTitles, len(wantTitles))
+	// TWO checks, not one condition, because they have different remedies and a
+	// combined message prescribed a step that could not clear it: appending a
+	// keyed literal's title to wantTitles makes the count agree and then fails
+	// the title comparison instead, with nothing saying the real fix is to
+	// write the literal in unkeyed form. A required check whose own message
+	// cannot clear it is the defect this change exists to remove.
+	if literals != len(wantTitles) {
+		t.Errorf("found %d degradationAdvisory literal(s) in %s, want %d.\nThis counts "+
+			"literals of the TYPE, not published advisories, so a table-driven test that "+
+			"builds them trips it too -- in that case widen this fence rather than "+
+			"changing the test. If it IS a new advisory: its text reaches a public run "+
+			"summary, so confirm it carries no identity or topology, write it as an "+
+			"unkeyed literal with an inline string title (which is what the title check "+
+			"below can read), and add that title to wantTitles.",
+			literals, nativeUDPTestDir, len(wantTitles))
+	}
+	if !slices.Equal(titles, wantTitles) {
+		t.Errorf("advisory titles = %v, want %v.\nA title the scan cannot read means the "+
+			"literal is keyed or uses a named constant; rewrite it as an unkeyed literal "+
+			"with the title inline, so the set published to the run summary stays "+
+			"readable from source.", titles, wantTitles)
 	}
 
 	// And the production emission path stays single. noteDegradation is
@@ -379,14 +398,19 @@ func TestOnlyTheGateItselfEmitsFromTheProcessEnvironment(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read %s: %v", path, err)
 		}
-		for range gateEmitterProcessEnvPattern.FindAllString(string(contents), -1) {
-			sites = append(sites, filepath.Base(filepath.FromSlash(path)))
+		// Counted per file, then reported as one entry per file. Appending per
+		// MATCH named the same file twice for two call sites in it, which read
+		// as a set mismatch whose advice ("pass a described lookup") is wrong
+		// for a genuine second gate call.
+		if matches := len(gateEmitterProcessEnvPattern.FindAll(contents, -1)); matches > 0 {
+			sites = append(sites, fmt.Sprintf("%s (%d call site(s))",
+				filepath.Base(filepath.FromSlash(path)), matches))
 		}
 	}
 	slices.Sort(sites)
 
 	// One, in the gate test: the only caller that IS the runner.
-	want := []string{"otp_registration_idempotency_test.go"}
+	want := []string{"otp_registration_idempotency_test.go (1 call site(s))"}
 	if !slices.Equal(sites, want) {
 		t.Errorf("call sites handing os.Getenv to the gate loader or the degradation "+
 			"emitter = %v, want %v.\nA unit test that reads the real environment emits a "+
