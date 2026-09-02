@@ -1309,6 +1309,27 @@ func TestNoteDegradationReportsOnEveryChannel(t *testing.T) {
 		}
 	})
 
+	t.Run("quotes the advisory's FIRST line, not just its continuations", func(t *testing.T) {
+		// An advisory opening with a list marker is the case that separates a
+		// bare first line from a quoted one. A bare line of plain words is
+		// absorbed back into the blockquote by lazy continuation, so the two
+		// multi-line cases below cannot see this hole; a "- " line interrupts
+		// the paragraph and escapes the [!WARNING] alert entirely.
+		summary := filepath.Join(t.TempDir(), "summary.md")
+		_ = captureAnnotations(t, func() {
+			noteDegradation(t, onCI(summary), "a title", "- first line\n- second line")
+		})
+		raw, err := os.ReadFile(summary)
+		if err != nil {
+			t.Fatalf("read summary: %v", err)
+		}
+		if !strings.Contains(string(raw), "> - first line") {
+			t.Fatalf("job summary %q left the advisory's first line unquoted; an advisory "+
+				"opening with a list marker then escapes the alert instead of rendering "+
+				"inside it", raw)
+		}
+	})
+
 	t.Run("keeps a multi-line TITLE inside the blockquote", func(t *testing.T) {
 		// The annotation path escapes the title; this one interpolated it raw,
 		// so the hardening was advisory-only. Same third-advisory argument.

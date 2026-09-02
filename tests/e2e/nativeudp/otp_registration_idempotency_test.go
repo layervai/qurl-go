@@ -790,15 +790,20 @@ func appendJobSummary(t testing.TB, lookup func(string) string, title, advisory 
 	// the operator exactly the same thing, so they read the same way.
 	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o644)
 	if err == nil {
-		// Every line carries the quote marker, TITLE INCLUDED. A multi-line
-		// advisory would otherwise break out of the blockquote after its first
-		// line and the rest would render as body text, detached from the
-		// warning it belongs to -- again, for the advisory that has not been
-		// written yet. The title needs it for the same reason and was missed:
-		// the annotation path escapes the title (encodeCommandProperty) while
-		// this one interpolated it raw, so a newline in a title broke the
-		// blockquote in exactly the way the advisory handling prevents.
-		_, err = fmt.Fprintf(file, "> [!WARNING]\n> **%s**\n%s\n\n",
+		// Every line carries the quote marker, title and advisory alike, and the
+		// FIRST line of each gets it from this format string -- note the "> "
+		// before both verbs. quoteContinuation only re-prefixes lines after the
+		// first, so a bare verb here emits an unquoted opening line: it renders
+		// today only because lazy continuation absorbs it, and an advisory
+		// beginning with "- ", "1. ", "#", ">" or a blank line interrupts the
+		// paragraph instead and escapes the alert entirely. That is the exact
+		// failure this quoting exists to prevent, and it is the advisory that
+		// has not been written yet which would hit it.
+		//
+		// The title needed the same treatment for the same reason: the
+		// annotation path escapes it (encodeCommandProperty) while this one
+		// interpolated it raw.
+		_, err = fmt.Fprintf(file, "> [!WARNING]\n> **%s**\n> %s\n\n",
 			quoteContinuation(title), quoteContinuation(advisory))
 		err = errors.Join(err, file.Close())
 	}
