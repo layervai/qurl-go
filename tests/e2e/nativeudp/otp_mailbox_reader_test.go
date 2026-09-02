@@ -284,10 +284,33 @@ func (m *otpMailbox) snapshot() (calls int, fresh bool) {
 // itself is always empty.
 //
 // The cell family, the assignment authority and the workstation profile ARE
-// named, all by suffix, which ADR 0002 may or may not want here. The fence in
-// otp_failure_diagnostics_test.go deliberately asserts none of the estate
+// named, all by suffix. ADR 0002 was open on whether it wanted the first two
+// here; its 2026-09-01 amendment rules that it does, because a suffix names no
+// account, deployment prefix or endpoint and so reaches nothing on its own.
+// The workstation profile is NOT covered by that ruling: it was committed
+// before #235 and is not what #235 put to the ADR, so the amendment records it
+// as untouched rather than settled. Do not read this paragraph as blessing it.
+//
+// The fence in otp_failure_diagnostics_test.go still asserts none of those
 // coordinates -- only the three-way rule and the signature owned by each branch
-// -- so redacting any of it later is one file and no red REQUIRED check.
+// -- so redacting any of them later reds no REQUIRED check. Probed rather than
+// assumed, and over the whole package rather than a -run subset, which is what
+// the REQUIRED check actually executes: the three suffixes were removed from
+// the message together, then the workstation profile on its own, and
+// tests/e2e/nativeudp stayed green both times.
+//
+// It is no longer the ONE-file edit this comment used to promise. A complete
+// redaction is THREE files: this message, the ADR amendment that quotes the
+// names, and this fence, which carries "ca-iro-cell1" in its conditional, its
+// comment and its failure string. The fence stays green either way, which is
+// precisely why the count matters -- stop at two and it is left quoting a
+// string that exists nowhere, with nothing red to say so.
+//
+// The AuthorityOperation values are the exception, and are pinned outright:
+// they are the authority's log schema rather than a coordinate, so removing
+// one DOES red a REQUIRED check. Worth naming here rather than leaving inside
+// "the signature owned by each branch", since that phrasing is what let an
+// earlier revision believe the whole message was free to redact.
 //
 // That claim is load-bearing, so it is worth saying how it survives contact
 // with the cell1 correction, which is the one piece of prose here that NEEDS a
