@@ -244,6 +244,24 @@ func TestMailboxTimeoutNamesEveryCauseNotOnlyRateLimiting(t *testing.T) {
 // discriminating signature -- rather than pinning the prose that explains them.
 // Wording is expected to be edited; what must not move is which log state sends
 // the reader where.
+//
+// The same hole reopened one level down on 2026-09-02, which is the reason this
+// test now pins a LIST of signatures per branch. (1) was written as "no log
+// line at all", and gate run 33575847905 (#238) found cell0 holding an INFO
+// "connector authority initialized" and an INIT_REPORT with a healthy 550ms
+// Init Duration and no invocation of any kind -- no START, no END, no REPORT,
+// no Outcome -- during an nhp deploy that was still in_progress. Not silent, so
+// not (1) as written; no START and a SUCCESSFUL init, so not (2); no Outcome,
+// so not (3). Branchless, for the same reason run 56 was: a signature written
+// against the evidence one occurrence happened to leave rather than against the
+// state it stands for.
+//
+// The fix was to widen (1) to the state -- no INVOCATION record -- and NOT to
+// add a fourth branch, so this test still fences three. The reasoning belongs
+// with the message and is not repeated here; what this test has to say about it
+// is that a branch's signature list is now the place a widening gets pinned. If
+// (1) narrows back to silence-only, the "Init Duration" row goes red, which is
+// the assertion the 2026-09-02 run did not have.
 func TestMailboxTimeoutTriagesOnOutcomeNotInvocation(t *testing.T) {
 	message := (&otpMailbox{}).timedOut().Error()
 
@@ -254,42 +272,80 @@ func TestMailboxTimeoutTriagesOnOutcomeNotInvocation(t *testing.T) {
 	const tailParagraph = "Issuer logs:"
 
 	// One row per fault that ends this wait, in the order the message must
-	// present them. `signature` is the log evidence that identifies THAT branch
+	// present them. `signatures` is the log evidence that identifies THAT branch
 	// and no other -- which is the whole content of the rule, so binding each
 	// signature to its own branch is the property, not merely listing them.
 	//
+	// A LIST per branch rather than one string, since 2026-09-02. A branch can
+	// need more than one fragment to be pinned down, and (1) now does: it owns
+	// both the trap that makes its absence readable (the assignment leg) and the
+	// evidence that is NOT an invocation however much it looks like activity.
+	//
 	// Verified partition, every historical occurrence of the ~4.5-minute
-	// signature: runs 118/119/120 (2026-08-27) are never-invoked, run 56
-	// (2026-08-19) is the init crash, runs 9/10/14 (2026-08-11) and run 192
-	// (2026-08-31) are refusals. Nothing is unclassified and nothing is double
-	// counted, which is what makes three the right number.
-	branches := []struct{ marker, signature, state, why string }{
+	// signature: runs 118/119/120 (2026-08-27) and run 33575847905 (2026-09-02)
+	// are never-invoked, run 56 (2026-08-19) is the init crash, runs 9/10/14
+	// (2026-08-11) and run 192 (2026-08-31) are refusals. Nothing is
+	// unclassified and nothing is double counted, which is what makes three the
+	// right number -- and 2026-09-02 kept it at three by widening (1) rather
+	// than adding to it.
+	branches := []struct {
+		marker     string
+		signatures []string
+		state, why string
+	}{
 		{
-			"(1)", "IssueAssignment", "no log line at all",
+			"(1)",
+			[]string{"IssueAssignment", "healthy \"Init Duration\"", "SUCCESSFUL INITIALIZATION"},
+			"no invocation record, with a successful initialization or none",
 			"never invoked; the assignment leg keeps succeeding, so the message has to " +
-				"say so or the absence reads as a transport fault",
+				"say so or the absence reads as a transport fault -- and a healthy " +
+				"\"Init Duration\" is the OTHER thing that is not an invocation, the one " +
+				"run 33575847905 was left branchless by. HEALTHY is part of the signature, " +
+				"not decoration: a failed INIT_REPORT quotes an Init Duration too, so the " +
+				"bare field name would be unique to this branch only by accident of (2)'s " +
+				"wording. And SUCCESSFUL is the word the whole partition now turns on -- " +
+				"delete it from the headline and the failed-init case matches both branches " +
+				"again, with every other assertion here still green",
 		},
 		{
-			"(2)", "START RequestId", "START present, Outcome absent",
-			"invoked and died coming up -- the branch the old two-way rule had no room for",
+			"(2)",
+			[]string{"START RequestId", "Status: error"},
+			"START present, Outcome absent -- or a failed init with neither",
+			"invoked and died coming up -- the branch the old two-way rule had no room " +
+				"for; \"Status: error\" is what tells its INIT_REPORT from (1)'s, so it " +
+				"is pinned on this side of that line as well",
 		},
 		{
-			"(3)", `"Outcome":"rejected"`, "Outcome says rejected",
+			"(3)",
+			[]string{`"Outcome":"rejected"`},
+			"Outcome says rejected",
 			"reached and refused; the budget, and the only branch the message used to " +
 				"state with any confidence",
 		},
 	}
 
+	// Each branch opens on its own line, and the span search is anchored on THAT
+	// rather than on the bare marker. The difference is not cosmetic: with a
+	// bare `strings.Index(message, "(2)")`, a branch that mentions a later
+	// marker in its prose moves that marker's span start into itself, truncating
+	// the branch making the reference and silently dropping every signature past
+	// it -- the fence keeps passing while checking less. Anchoring on the header
+	// makes that mistake harmless instead of destructive. The style rule against
+	// forward references is still enforced below, but it is no longer the only
+	// thing standing between a stray marker and unchecked signatures.
+	const branchHeader = "\n  "
+
 	// The markers first, and in order. A message that dropped to two branches
 	// fails here before any signature is looked at, which is the revert case.
 	at := make([]int, len(branches))
 	for i, b := range branches {
-		if at[i] = strings.Index(message, b.marker); at[i] < 0 {
+		if at[i] = strings.Index(message, branchHeader+b.marker); at[i] < 0 {
 			t.Fatalf("the mailbox timeout message has no %s branch (%s -> %s).\n"+
 				"Every fault that ends this wait needs its own branch; one that is missing "+
 				"is one a reader will try to force into a neighbouring branch that does not "+
 				"fit it.\nMessage: %s", b.marker, b.state, b.why, message)
 		}
+		at[i] += len(branchHeader) // point at the marker, not at the newline
 		if i > 0 && at[i] < at[i-1] {
 			t.Fatalf("the mailbox timeout message states %s before %s. The order is the "+
 				"order the checks should be run in, cheapest first.\nMessage: %s",
@@ -297,10 +353,37 @@ func TestMailboxTimeoutTriagesOnOutcomeNotInvocation(t *testing.T) {
 		}
 	}
 	// A fourth branch is not an error, but it is outside this fence, so say so
-	// rather than silently covering two thirds of the rule.
+	// rather than silently covering two thirds of the rule. Note that widening
+	// an existing branch is the other way to close a hole and is usually the
+	// better one -- 2026-09-02 went that way -- so reaching this is a prompt to
+	// check which was meant, not only to extend the table.
 	if strings.Contains(message, "(4)") {
 		t.Errorf("the mailbox timeout message has a (4) branch this test does not fence. " +
-			"Add it to the table above.")
+			"Add it to the table above -- or check whether the case belongs inside an " +
+			"existing branch, which is how the 2026-09-02 hole was closed.")
+	}
+
+	// No FORWARD references by marker. Since the spans are header-anchored this
+	// no longer corrupts anything -- it is a readability rule, and it is kept
+	// deliberately rather than dropped as redundant: a branch that says "read
+	// (2)" is telling a reader to hold two branch numbers at once, at the moment
+	// they are least able to, and every earlier revision of this message that
+	// tried it read worse than the description it replaced.
+	//
+	// Not a count. Markers legitimately recur BACKWARDS -- (1) says the
+	// assignment leg succeeds "right through a (1)", the tail says an empty
+	// cell1 is not "a (1)" -- and those are the message doing its job. A later
+	// mention is harmless; an earlier one is the bug. Checking the header shape
+	// separates the two, where counting cannot.
+	for _, b := range branches {
+		if first := strings.Index(message, b.marker); first < len(branchHeader) ||
+			message[first-len(branchHeader):first] != branchHeader {
+			t.Errorf("the mailbox timeout message's first %s is not that branch's header, "+
+				"so a branch refers FORWARD to a later one by its marker. Refer to another "+
+				"branch by what it says instead -- a reader mid-triage should not have to "+
+				"hold two branch numbers at once. (A backward mention is fine and several "+
+				"are deliberate.)\nMessage: %s", b.marker, message)
+		}
 	}
 
 	// The branches are followed by a paragraph of shared reference material --
@@ -320,16 +403,75 @@ func TestMailboxTimeoutTriagesOnOutcomeNotInvocation(t *testing.T) {
 	// expressed while the rule keyed on invocation: "START RequestId" appeared
 	// in the message the whole time, as the line whose ABSENCE meant mid-deploy.
 	// Same fragment, opposite meaning, and only its position says which.
-	for i, b := range branches {
+	//
+	// That is not history any more -- (1) names "START RequestId" again, as the
+	// first of the three records whose absence defines it -- so the positional
+	// reading is load-bearing rather than merely defensible. Which is why each
+	// span runs from its own header to the next, and the last to the tail
+	// paragraph: a fragment is credited to exactly one branch, the one it sits
+	// in.
+	//
+	// A stray forward reference no longer moves those cuts -- the spans are
+	// anchored on branchHeader above, which is what makes that mistake harmless
+	// -- so the guard further up is a readability rule and nothing here depends
+	// on it. Said explicitly because the earlier revision of this comment
+	// described the bare-marker behaviour as if it were still live, which would
+	// have a reader believe that guard is load-bearing for correctness.
+	spans := make([]string, len(branches))
+	for i := range branches {
 		end := tail
 		if i+1 < len(branches) {
 			end = at[i+1]
 		}
-		if !strings.Contains(message[at[i]:end], b.signature) {
-			t.Errorf("branch %s (%s) does not carry %q.\n%s\n"+
-				"A signature outside the branch it identifies is worse than a missing one: "+
-				"the reader matches it against whichever branch it is sitting in.\n"+
-				"Branch text: %s", b.marker, b.state, b.signature, b.why, message[at[i]:end])
+		spans[i] = message[at[i]:end]
+	}
+	for i, b := range branches {
+		for _, signature := range b.signatures {
+			if !strings.Contains(spans[i], signature) {
+				t.Errorf("branch %s (%s) does not carry %q.\n%s\n"+
+					"A signature outside the branch it identifies is worse than a missing one: "+
+					"the reader matches it against whichever branch it is sitting in.\n"+
+					"Branch text: %s", b.marker, b.state, signature, b.why, spans[i])
+			}
+		}
+	}
+
+	// And the other half of that sentence, which went unasserted until it began
+	// to matter. "Identifies THAT branch and no other" is a claim about absence,
+	// and presence-within-span never checked it. It was harmless while every
+	// signature was unique; (1) naming "START RequestId" is the first time one is
+	// deliberately shared, and a rule that tolerates one overlap silently
+	// tolerates the next.
+	//
+	// Scoped to the BRANCH SPANS, not to the whole message: the tail paragraph
+	// belongs to no branch and is read after the reader has already been routed,
+	// so a fragment recurring there misleads nobody. That is a narrower claim
+	// than "appears once in the message" and it is the one being checked.
+	//
+	// So: exactly one branch, unless the sharing is written down here with its
+	// reason. An accidental second overlap reds; a deliberate one is a one-line
+	// edit that a reviewer sees.
+	sharedSignatures := map[string]string{
+		"START RequestId": "(1) names it as the record whose ABSENCE defines that branch, " +
+			"(2) as the one whose PRESENCE defines this one -- same fragment, opposite " +
+			"meaning, which is exactly why position has to decide it",
+	}
+	for _, b := range branches {
+		for _, signature := range b.signatures {
+			var carriers []string
+			for j := range branches {
+				if strings.Contains(spans[j], signature) {
+					carriers = append(carriers, branches[j].marker)
+				}
+			}
+			if len(carriers) > 1 && sharedSignatures[signature] == "" {
+				t.Errorf("%q is meant to identify branch %s, but it appears in %s. A "+
+					"signature in more than one branch identifies neither: the reader "+
+					"matches it against whichever branch they are already reading. Either "+
+					"reword so it is unique, or add it to sharedSignatures with the reason "+
+					"the overlap is intended.\nMessage: %s",
+					signature, b.marker, strings.Join(carriers, " and "), message)
+			}
 		}
 	}
 
