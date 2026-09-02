@@ -214,22 +214,60 @@ func (m *otpMailbox) snapshot() (calls int, fresh bool) {
 // three, because it is written at the one moment the authority has actually
 // decided:
 //
-//	no log line at all      -> never invoked          (1)
+//	no invocation record    -> never invoked          (1)
 //	START, but no Outcome   -> invoked, died on init  (2)
 //	Outcome: rejected       -> reached, and refused   (3)
 //
+// "No invocation record" is deliberately not "no log line". (1) was written
+// the tighter way and a real run fell through it exactly as run 56 fell
+// through the two-way rule: gate run 33575847905 (2026-09-02, #238) found
+// cell0 carrying an INFO "connector authority initialized" and an INIT_REPORT
+// with a healthy 550ms Init Duration, and NOTHING else -- no START, no END, no
+// REPORT, no Outcome -- while a layervai/nhp deploy that began 25 minutes
+// earlier was still in_progress and ca-ia logged its usual healthy
+// IssueAssignment one second in. Not (1) by the literal signature, since the
+// cell was not silent; not (2), which needs a START and whose INIT_REPORT says
+// "Status: error"; not (3), which needs an Outcome. Branchless again.
+//
+// It is (1) WIDENED, not a fourth branch, and that is the substantive call
+// here. An initialization is not an invocation: an execution environment can
+// be brought up around a Blue/Green version change and then never serve a
+// request, which is what those two lines are. The registration still reached
+// no issuer, the fault is still upstream of the authority, the remedy is still
+// to check nhp's deploy runs against this run's start time, and the ca-ia
+// asymmetry still lies in the same direction -- it did, here, precisely as the
+// message warns. A fourth branch would hand the reader a choice that changes
+// nothing they do, which is worse than the hole: it is one more way to pick
+// wrong. It would also triage on whether an init line happens to be present,
+// and triaging on incidental evidence rather than on Outcome is the axis this
+// message was moved OFF.
+//
 // Every historical occurrence of the signature partitions cleanly: runs 9, 10
 // and 14 (2026-08-11) and run 192 (2026-08-31) are (3); run 56 is (2); runs
-// 118, 119 and 120 (2026-08-27) are (1). Nothing is left over, which is what
-// makes THREE the right number rather than merely a larger one.
+// 118, 119 and 120 (2026-08-27) and run 33575847905 (2026-09-02) are (1).
+// Nothing is left over, which is what makes THREE the right number rather than
+// merely a larger one -- and the count survived the 2026-09-02 run, which
+// widened a branch instead of adding one.
 //
 // (1) has had more than one root cause, so the message stays at the altitude
 // that covers them: a layervai/nhp "Build and Deploy NHP" run (33353630466)
 // redeploying the issuer at 03:46Z turned this gate red on #181 while Relay
 // and the cells were still rolling, whereas 118-120 were a cutover that
 // authorised the new lambda slot at the cell endpoint before the server fleet
-// had moved to it. Both present identically here: no invocation, no email, and
-// no error anywhere this test can see.
+// had moved to it, and 2026-09-02 left an initialized-but-unused execution
+// environment behind. All three present identically here: no invocation, no
+// email, and no error anywhere this test can see. That altitude is why the
+// third one is a widening rather than a fourth branch -- the branch was
+// already carrying causes it does not name.
+//
+// The widening moves ONE case across the (1)/(2) line in the other direction,
+// which is worth stating because it is the adjacent hole. (2) is the branch
+// where the authority came up and DIED, and its decisive line is the failed
+// INIT_REPORT, not the START -- Lambda can initialize an environment ahead of
+// any invoke, so a "Status: error" init with no START beside it is (2) with a
+// piece missing, not a silent (1). Both branches now say so, because a reader
+// staring at an INIT_REPORT is exactly the reader this change is for and the
+// two branches are told apart by what that one line reports.
 //
 // (3) IS THE PLAUSIBLE-SOUNDING ONE, hence its position last. It is the
 // quantitative answer, so it reads as a diagnosis rather than as one
@@ -313,11 +351,18 @@ func (m *otpMailbox) snapshot() (calls int, fresh bool) {
 // The fence stays green under redaction either way, which is precisely why
 // this matters -- nothing reds to catch a half-finished job.
 //
-// The AuthorityOperation values are the exception, and are pinned outright:
-// they are the authority's log schema rather than a coordinate, so removing
-// one DOES red a REQUIRED check. Worth naming here rather than leaving inside
-// "the signature owned by each branch", since that phrasing is what let an
-// earlier revision believe the whole message was free to redact.
+// The LOG SCHEMA fragments are the exception, and are pinned outright: they
+// name what the authority and the Lambda runtime write rather than where the
+// estate is, so removing one DOES red a REQUIRED check. Worth enumerating here
+// rather than leaving inside "the signature owned by each branch", since that
+// phrasing is what let an earlier revision believe the whole message was free
+// to redact. The set is the AuthorityOperation values, "START RequestId",
+// "Status: error", and the phrase "healthy \"Init Duration\"" -- the last two
+// being the pair that tells (1)'s INIT_REPORT from (2)'s, so they are load
+// bearing rather than illustrative. Also pinned, and not a log fragment at all:
+// the word SUCCESSFUL in (1)'s headline, which is what keeps the two branches
+// from both matching a failed initialization. Keep this list in step with the
+// signatures table; it is the only place a redactor is told the difference.
 //
 // That claim is load-bearing, so it is worth saying how it survives contact
 // with the cell1 correction, which is the one piece of prose here that NEEDS a
@@ -337,21 +382,37 @@ func (m *otpMailbox) timedOut() error {
 			"nothing about which one it was; the issuer's own logs separate all three. Go "+
 			"there before suspecting SES or this reader, and triage on the \"Outcome\" "+
 			"field, NOT on whether the authority was invoked:\n"+
-			"  (1) NO LOG LINE AT ALL, on any cell: never invoked, and the fault is "+
-			"upstream of the authority. A layervai/nhp \"Build and Deploy NHP\" run rolling "+
-			"Relay and the cells Blue-Green is the usual reason -- mid-deploy, a "+
-			"registration reaches no issuer at all -- so check that repository's recent "+
-			"deploy runs against this run's start time. BEWARE THE ASYMMETRY: this gate's "+
-			"assignment leg keeps succeeding right through a (1), logging "+
+			"  (1) NO INVOCATION RECORD ON ANY CELL -- no \"START RequestId\", no "+
+			"\"REPORT\", no \"Outcome\" -- WHETHER OR NOT A SUCCESSFUL INITIALIZATION IS "+
+			"LOGGED BESIDE THEM: never invoked, and the fault is upstream of the authority. "+
+			"An initialization is NOT an invocation, and that is the part to read slowly. A "+
+			"cell can log \"connector authority initialized\" and an INIT_REPORT quoting a "+
+			"healthy \"Init Duration\", serve nothing at all, and log nothing further; that "+
+			"is an execution environment brought up around a Blue/Green version change and "+
+			"then discarded, and those two lines ALONE are still this branch. Do not read "+
+			"them as evidence the registration arrived -- only START, REPORT and Outcome are "+
+			"that. A FAILED initialization is the other branch even with no START beside it, "+
+			"which its own headline now says; the two are told apart by what that one line "+
+			"reports. A layervai/nhp \"Build and Deploy NHP\" run rolling Relay and the "+
+			"cells Blue-Green is the usual reason -- mid-deploy, a registration reaches no "+
+			"issuer at all -- so check that repository's recent deploy runs against this "+
+			"run's start time, and check it against the whole run rather than its "+
+			"conclusion: a deploy still in_progress is the case, not a deploy that has "+
+			"finished. BEWARE THE ASYMMETRY: this gate's assignment leg keeps succeeding "+
+			"right through a (1), logging "+
 			"{\"AuthorityOperation\":\"IssueAssignment\",...,\"Outcome\":\"success\"} a "+
 			"fraction of a second after the test starts, because ca-ia is not cell-scoped "+
 			"and sits outside the cell endpoint policy a cutover rewrites. A healthy "+
-			"assignment says NOTHING about issuance; reading it as one is how this has "+
-			"twice been misdiagnosed as a transport fault.\n"+
-			"  (2) \"START RequestId\" PRESENT, NO \"Outcome\": invoked, and died coming "+
-			"up. Beside it sits an INIT_REPORT with \"Status: error\" and \"Error Type: "+
+			"assignment says NOTHING about issuance; reading it as one is how this has twice "+
+			"been misdiagnosed as a transport fault.\n"+
+			"  (2) \"START RequestId\" PRESENT, NO \"Outcome\" -- OR AN INIT_REPORT "+
+			"REPORTING \"Status: error\" WITH NO START AT ALL: invoked, and died coming up. "+
+			"Beside a START sits an INIT_REPORT with \"Status: error\" and \"Error Type: "+
 			"Runtime.ExitError\", and above that an ERROR line carrying the failure_code "+
-			"that names the fault. Not a rate limit: the authority never got as far as "+
+			"that names the fault. That INIT_REPORT is the decisive line, not the START: an "+
+			"initialization can be logged ahead of any invoke, so a failed one on its own is "+
+			"this branch too, reached from the branch above. Not a rate limit: the authority "+
+			"never got as far as "+
 			"deciding. Not this repository's bug either.\n"+
 			"  (3) \"Outcome\":\"rejected\": reached, and refused. THE ISSUANCE BUDGET WAS "+
 			"SPENT: %d/hour per credential, and because the pool carries one credential "+
