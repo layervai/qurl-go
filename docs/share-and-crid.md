@@ -17,7 +17,7 @@ expires on its own; share again whenever you need a fresh one.
 ```go
 share, err := client.ShareResource(ctx, resourceID, nil)
 if err != nil {
-    return err
+	return err
 }
 
 fmt.Println(share.Link)
@@ -38,10 +38,10 @@ with `ErrInvalidResourceRequest` rather than rounded.
 
 ```go
 share, err := client.ShareResource(ctx, resourceID, &qurl.ShareResourceOptions{
-    TTL: 90 * time.Second,
+	TTL: 90 * time.Second,
 })
 if err != nil {
-    return err
+	return err
 }
 
 fmt.Println(share.ExpiresAt, share.ExpiresInSeconds, share.SingleUse)
@@ -60,13 +60,13 @@ Every share mints a new link, and each one is revocable on its own.
 ```go
 share, err := client.ShareResource(ctx, resourceID, nil)
 if err != nil {
-    return err
+	return err
 }
 
 // … hand share.Link to the recipient, then withdraw it …
 
 if err := client.RevokePortal(ctx, resourceID, share.QURLID); err != nil {
-    return err
+	return err
 }
 ```
 
@@ -84,11 +84,11 @@ only needs the link dead can treat that as settled.
 err := client.RevokePortal(ctx, resourceID, share.QURLID)
 switch {
 case err == nil:
-    // The link is dead.
+	// The link is dead.
 case errors.Is(err, qurl.ErrPortalRevoked):
-    // Already revoked — the outcome the caller wanted, reached earlier.
+	// Already revoked — the outcome the caller wanted, reached earlier.
 default:
-    return err
+	return err
 }
 ```
 
@@ -105,16 +105,16 @@ share → verify → `EnterPortal`:
 ```go
 share, err := client.ShareResource(ctx, resourceID, nil)
 if err != nil {
-    return err
+	return err
 }
 
 if err := share.VerifyCRID(resourceKeyDER); err != nil {
-    return err
+	return err
 }
 
 handle, err := qurl.EnterPortal(ctx, share.Link)
 if err != nil {
-    return err
+	return err
 }
 
 fmt.Println(handle.ResourceURL)
@@ -134,28 +134,28 @@ once at startup; see [Open links](opening-links.md).
 ```go
 share, err := client.ShareResource(ctx, resourceID, nil)
 if err == nil {
-    err = share.VerifyCRID(resourceKeyDER)
+	err = share.VerifyCRID(resourceKeyDER)
 }
 
 switch {
 case err == nil:
-    // Shared, and the response is bound to the held key.
+	// Shared, and the response is bound to the held key.
 case errors.Is(err, qurl.ErrTemporaryAccessLinksDisabled):
-    // The LayerV API answered 503: the environment is not currently
-    // serving temporary access links. Service posture, not a bad request —
-    // callers that treat sharing as optional can fall back here.
-    return err
+	// The LayerV API answered 503: the environment is not currently
+	// serving temporary access links. Service posture, not a bad request —
+	// callers that treat sharing as optional can fall back here.
+	return err
 case errors.Is(err, qurl.ErrNoCRID):
-    // The response carried no CRID to verify against (older server or
-    // keyless resource). Verification fails closed: absence is not a
-    // mismatch, but it is not a pass either.
-    return err
+	// The response carried no CRID to verify against (older server or
+	// keyless resource). Verification fails closed: absence is not a
+	// mismatch, but it is not a pass either.
+	return err
 case errors.Is(err, qurl.ErrCRIDMismatch):
-    // The supplied resource key does not derive the held CRID — the
-    // substitution the identifier exists to detect. Do not use the key.
-    return err
+	// The supplied resource key does not derive the held CRID — the
+	// substitution the identifier exists to detect. Do not use the key.
+	return err
 default:
-    return err
+	return err
 }
 ```
 
@@ -210,10 +210,10 @@ channel:
 ```go
 ok, err := crid.KeyMatches(heldCRID, deliveredKeyDER)
 if err != nil {
-    return err // the held CRID failed the local validation gate
+	return err // the held CRID failed the local validation gate
 }
 if !ok {
-    return fmt.Errorf("delivered key does not derive the held crid")
+	return fmt.Errorf("delivered key does not derive the held crid")
 }
 ```
 
@@ -240,16 +240,16 @@ than guessing from the environment bit:
 ```go
 c, err := crid.Parse(share.CRID)
 if err != nil {
-    return err
+	return err
 }
 
 switch c.Environment() {
 case crid.EnvironmentProduction:
-    // version byte registered for production
+	// version byte registered for production
 case crid.EnvironmentTest:
-    // version byte registered for test environments
+	// version byte registered for test environments
 case crid.EnvironmentUnknown:
-    // unregistered version: forward it to the server, never reject locally
+	// unregistered version: forward it to the server, never reject locally
 }
 ```
 
