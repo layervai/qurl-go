@@ -284,10 +284,40 @@ func (m *otpMailbox) snapshot() (calls int, fresh bool) {
 // itself is always empty.
 //
 // The cell family, the assignment authority and the workstation profile ARE
-// named, all by suffix, which ADR 0002 may or may not want here. The fence in
-// otp_failure_diagnostics_test.go deliberately asserts none of the estate
+// named, all by suffix. ADR 0002 was open on whether it wanted the first two
+// here; its 2026-09-01 amendment rules that it does, because a suffix names no
+// account, deployment prefix or endpoint and so reaches nothing on its own.
+// The workstation profile is NOT covered by that ruling: it was committed
+// before #235 and is not what #235 put to the ADR, so the amendment records it
+// as untouched rather than settled. Do not read this paragraph as blessing it.
+//
+// The fence in otp_failure_diagnostics_test.go still asserts none of those
 // coordinates -- only the three-way rule and the signature owned by each branch
-// -- so redacting any of it later is one file and no red REQUIRED check.
+// -- so redacting any of them later reds no REQUIRED check. Probed rather than
+// assumed, and over the whole package rather than a -run subset, which is what
+// the REQUIRED check actually executes: the three suffixes were removed from
+// the message together, then the workstation profile on its own, and
+// tests/e2e/nativeudp stayed green both times.
+//
+// It is no longer the ONE-file edit this comment used to promise. A complete
+// redaction spans THREE files: this one, the ADR amendment that quotes the
+// names, and otp_failure_diagnostics_test.go. Within them, GREP -- do not
+// work from a list. Successive review passes each found one more occurrence a
+// hand-written inventory had missed, including ones in the very paragraphs
+// doing the enumerating: this comment names ca-ia and ca-iro-cell1 in its own
+// prose, not just in the format string below. An inventory of sites is always
+// one occurrence behind, and reads as verified when it was merely reasoned,
+// which is the failure this paragraph warns about turned on itself. The file
+// count is worth stating because it is stable and checkable; the sites are
+// not, so the instruction is `grep -rn "ca-iro\|ca-ia" .` rather than a list.
+// The fence stays green under redaction either way, which is precisely why
+// this matters -- nothing reds to catch a half-finished job.
+//
+// The AuthorityOperation values are the exception, and are pinned outright:
+// they are the authority's log schema rather than a coordinate, so removing
+// one DOES red a REQUIRED check. Worth naming here rather than leaving inside
+// "the signature owned by each branch", since that phrasing is what let an
+// earlier revision believe the whole message was free to redact.
 //
 // That claim is load-bearing, so it is worth saying how it survives contact
 // with the cell1 correction, which is the one piece of prose here that NEEDS a

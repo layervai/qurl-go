@@ -1,6 +1,6 @@
 # ADR 0002: Sandbox estate documentation is internal-only
 
-- **Status:** Accepted
+- **Status:** Accepted; amended 2026-09-01 (scope clarification, below)
 - **Date:** 2026-08-17
 - **Applies to:** this repository's public documentation of the NHP sandbox
   estate's connection details
@@ -46,6 +46,96 @@ control:
   functional trust configuration — which endpoint apexes the SDK will accept —
   not documentation, and it is deliberately retained. Test fixtures use
   placeholder hosts and locally generated keys.
+
+## Amendment, 2026-09-01: component names, by suffix, are not estate coordinates
+
+Raised by [#235](https://github.com/layervai/qurl-go/pull/235), which added
+component names to the OTP registration gate's failure-diagnosis message and
+asked whether this ADR wanted them gone. **It does not.** Recorded here so
+the next change to name one does not re-argue it.
+
+**Permitted:** names of estate components carried by SUFFIX only — the
+issuer cells (`ca-iro-cell0`, `ca-iro-cell1`) and the assignment authority
+(`ca-ia`) — and the authority's `AuthorityOperation` values
+(`IssueRegistrationOTP`, `IssueAssignment`).
+
+Two separate reasons, because these are two different kinds of string:
+
+- **The component suffixes are not coordinates.** They are none of the four
+  things the Decision enumerates: not a hostname, an API origin, a public key,
+  or an SSM path. Nor do they function as coordinates in the sense the Context
+  means — a reader holding them still cannot reach or locate anything, because
+  the AWS account, the deployment prefix and credentials are each still
+  required, and none of those three is committed anywhere in this repository.
+  They are inert without internal access one already has.
+- **The operation values are not estate values at all.** They are the
+  authority's log schema — identifiers its consumers key on — not a
+  description of where anything is deployed. `IssueRegistrationOTP` has been
+  committed here since before this ADR without objection; `IssueAssignment` is
+  the same class of string and is ruled the same way.
+
+ADR 0001 is the qualifier on all of that, and it is worth being exact about
+how far it reaches. Its ingress table names `cell0` and `cell1` — the bare
+ordinals, as rows describing public UDP edges — and this ADR deliberately
+left that body intact as a historical record. So the ORDINALS have been
+named here since before this ADR existed and were never the part anyone
+treated as sensitive. The `ca-iro-` component prefix is genuinely new, and
+is permitted on the reasoning above rather than on this precedent, which
+does not cover it: the precedent is corroboration, not the load-bearing
+support.
+
+**Not ruled on:** the AWS profile name the same message already carries. It
+was committed before #235 and is not what #235 asked, so it is left as it
+was — untouched rather than settled.
+
+**Still out, and not reopened by this:** VPC endpoint ids, EC2 instance ids,
+account-scoped ARNs, and the deployment prefix. The AWS region is also out,
+and is now out without qualification:
+[#237](https://github.com/layervai/qurl-go/pull/237) removed the one literal
+ADR 0001 still carried, so no region appears anywhere in this repository's
+documentation. The mechanical reason it must stay that way is worth stating
+so it is not "fixed" later: it is supplied as the `OTP_E2E_MAILBOX_REGION`
+secret, and Actions masks a secret's value everywhere it appears in a log, a
+test's own error string included. A committed literal would render as `***`
+in the gate job log that is the only venue that message exists for,
+destroying the diagnostic it was added to provide.
+
+**Why the cost side was decisive.** The message uses the cell names to
+correct an actively wrong reading: sandbox issuance is cell0-only, so
+`ca-iro-cell1` has never been invoked and a reader who finds it empty must
+not take that as the never-invoked fault branch. That correction cannot be
+stated about the glob `ca-iro-cell*` this repository carried before — a glob
+cannot say which member of itself is always empty — and the asymmetry it
+guards against had already sent two investigations to the wrong conclusion.
+Redacting would have cost a live diagnostic to remove strings that grant no
+access.
+
+**If this is ever reversed,** the cost is bounded and known, because
+`tests/e2e/nativeudp/otp_failure_diagnostics_test.go` requires none of the
+three component suffixes: the `ca-iro-cell1` assertion is conditional,
+firing only if the name is present and then demanding its "never been
+invoked" qualifier nearby. Verified by probe rather than assumed, three of
+them, all run over the whole package: redacting the three suffixes together
+leaves `go test ./tests/e2e/nativeudp/` green; redacting the workstation
+profile on its own leaves it green; and keeping the name while dropping the
+qualifier reds it. Those probes run the whole package rather than a `-run`
+subset, because the whole package is what the REQUIRED check executes, and
+the narrower probe would not have covered the source-level fences at the end
+of the same file. The `AuthorityOperation` values are the exception: those
+two ARE pinned unconditionally, deliberately, as log identifiers rather than
+coordinates, so removing one reds a REQUIRED check.
+
+The rest of the cost is edit surface, and it spans THREE files: the message,
+this document, and `tests/e2e/nativeudp/otp_failure_diagnostics_test.go`.
+Within them, GREP rather than working from a list. Successive review passes
+of this amendment each found one more occurrence a hand-written inventory
+had missed — including occurrences inside the paragraphs doing the
+enumerating — because such a list is always one behind and reads as verified
+when it was only reasoned. The file count is stated because it is stable and
+checkable; the sites are not. The fence stays green under redaction, which
+is precisely why this matters: nothing reds to catch a half-finished
+redaction. Counting this document is intrinsic to reversing a recorded
+ruling rather than a reason not to record it.
 
 ## Consequences
 

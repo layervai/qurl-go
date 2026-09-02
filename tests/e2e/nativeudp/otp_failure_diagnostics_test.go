@@ -91,11 +91,15 @@ func TestMailboxTimeoutNamesEveryCauseNotOnlyRateLimiting(t *testing.T) {
 	lower := strings.ToLower(message)
 
 	// Deliberately NOT asserted here: the log group names, the region, the AWS
-	// profile, and the two rate-limit NUMBERS. The region is no longer an open
-	// question under ADR 0002 -- it stays a secret and stays unpublished, so
-	// pinning it here is the one thing this fence must never do; the log groups
-	// and profile remain unsettled. The numbers are qurl-service's
-	// RegistrationOTPRateLimitWindow and are owned outside this repository.
+	// profile, and the two rate-limit NUMBERS. Three different reasons now, and
+	// not one of them wants an assertion here. The region is settled and stays
+	// unpublished: it remains a secret, so pinning it here is the one thing this
+	// fence must never do. The log group names are settled the other way -- ADR
+	// 0002's 2026-09-01 amendment PERMITS them without requiring them, and
+	// leaving them unasserted is exactly what keeps a later redaction free. That
+	// amendment expressly declines to rule on the AWS profile, so it stays
+	// unsettled. The numbers are qurl-service's RegistrationOTPRateLimitWindow
+	// and are owned outside this repository.
 	// Either way the argument is the same -- pinning a value this repo does not
 	// own means the day it legitimately changes, the correct edit to timedOut()
 	// reds a REQUIRED check until someone also remembers to edit this file.
@@ -165,9 +169,11 @@ func TestMailboxTimeoutNamesEveryCauseNotOnlyRateLimiting(t *testing.T) {
 	}
 
 	// CONDITIONAL, and that is the whole design. Naming cell1 is not asserted --
-	// it is an estate coordinate, and ADR 0002 may want it gone, so requiring it
-	// would mean the correct redaction reds a REQUIRED check. That is the
-	// property the rest of this file is careful about and it applies here too.
+	// it is an estate coordinate, and while ADR 0002's 2026-09-01 amendment
+	// permits it, permitted is not required: a later ADR may still want it
+	// gone, and requiring it here would mean that correct redaction reds a
+	// REQUIRED check. That is the property the rest of this file is careful
+	// about and it applies here too.
 	//
 	// What IS asserted is that the name never appears WITHOUT its disclaimer.
 	// Unqualified, "check ca-iro-cell0 and ca-iro-cell1" reproduces the exact
