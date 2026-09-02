@@ -13,8 +13,10 @@ package nativeudp_test
 // The diagnostic behavior here is executable. The ordering property -- that
 // the evidence is emitted before anything can fail -- is structural:
 // loadOTPE2EGateConfig emits it as part of loading, so there is no statement
-// order to police. One narrow source-level fence at the end of this file stops
-// the gate test from adding a second emission site again.
+// order to police. Two source-level fences at the end of this file cover what
+// the executable tests structurally cannot: one stops the gate test from adding
+// a second credential-evidence emission site again, and one holds the estate
+// component names to the three files ADR 0002 records.
 
 import (
 	"context"
@@ -22,7 +24,9 @@ import (
 	"fmt"
 	"go/scanner"
 	"go/token"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -1331,4 +1335,210 @@ func TestCredentialEvidenceHasExactlyOneEmissionSite(t *testing.T) {
 			"(credentialEvidence). Remove hand-rolled renderings or update this file-local "+
 			"fence if the canonical renderer deliberately moves.", otpRegistrationTestPath, n)
 	}
+}
+
+// ADR 0002's 2026-09-01 amendment permits three estate component names by
+// SUFFIX, and records the surface a later redaction would have to cover as a
+// COUNT of files rather than as a list of sites. That choice is deliberate and
+// well argued -- successive review passes of the amendment each found one more
+// occurrence a hand-written inventory had missed, including occurrences inside
+// the paragraphs doing the enumerating -- but a count is only worth stating if
+// something checks it, and until this fence nothing did.
+const (
+	// estateComponentFenceSelf is this file, which always carries both
+	// suffixes: estateComponentSuffixes is where those literals are written.
+	estateComponentFenceSelf = "tests/e2e/nativeudp/otp_failure_diagnostics_test.go"
+	// estateComponentMessageSite carries the mailbox timeout message and the
+	// doc comment on otpMailbox.timedOut() that states the file count.
+	estateComponentMessageSite = "tests/e2e/nativeudp/otp_mailbox_reader_test.go"
+	// estateComponentADRSite is the amendment, which states the same count.
+	estateComponentADRSite = "docs/decisions/0002-sandbox-docs-internal-only.md"
+)
+
+// estateComponentSuffixes are matched literally and case-sensitively, so this
+// fence is exactly the `grep -rn "ca-iro\|ca-ia" .` the amendment tells a
+// redactor to run. Deliberately no broader: a fence that reds on something the
+// documented command would not have found sends the redactor hunting for a site
+// their own grep cannot show them.
+var estateComponentSuffixes = []string{"ca-iro", "ca-ia"}
+
+// estateComponentSites is the permitted set, as repository-relative
+// slash-separated paths. Slash-separated because Windows is a REQUIRED check
+// here and filepath.Rel yields backslashes there.
+var estateComponentSites = map[string]bool{
+	estateComponentFenceSelf:   true,
+	estateComponentMessageSite: true,
+	estateComponentADRSite:     true,
+}
+
+// repositoryRootFromPackage is relative to this package directory, as
+// gateWorkflowPath in otp_gate_paths_test.go already is: a test binary runs with
+// its package directory as the working directory.
+const repositoryRootFromPackage = "../../.."
+
+// TestEstateComponentNamesStayWithinTheRecordedFiles fences the one claim in
+// ADR 0002's 2026-09-01 amendment that nothing else checks.
+//
+// The amendment and the doc comment on otpMailbox.timedOut() both state that a
+// complete redaction of the permitted component suffixes spans THREE files, and
+// both defend stating a count rather than a list on the grounds that the file
+// count is stable and checkable while the sites are not. Checkable, but until
+// this fence unchecked -- so the count would go stale the first time a fourth
+// file named a suffix, and it would go stale silently.
+//
+// Silently is the operative word, and it is why this matters more here than a
+// drifting comment usually would. The cell1 assertion in
+// TestMailboxTimeoutNamesEveryCauseNotOnlyRateLimiting is CONDITIONAL by design:
+// removing the name makes that check inapplicable rather than red. That is the
+// property the amendment leans on when it promises a redactor a green run, and
+// the same property means nothing else in this package reds on a redaction that
+// was only half finished -- or on a fourth site that was never redacted at all.
+//
+// SUBSET rather than equality, and the direction is the whole point. Redacting
+// SHRINKS the set, so a redactor stays green all the way down to zero
+// occurrences, which is exactly what the amendment promises. A FOURTH site reds
+// immediately and names the file that introduced it.
+//
+// Rooted at the repository rather than at the two directories holding the
+// current three: a fourth site is likeliest somewhere else entirely -- a
+// workflow, a README, another package -- and a scan of only the directories
+// already known to carry the names is blind to precisely the case this exists
+// for.
+func TestEstateComponentNamesStayWithinTheRecordedFiles(t *testing.T) {
+	root, err := filepath.Abs(repositoryRootFromPackage)
+	if err != nil {
+		t.Fatalf("resolve repository root from %s: %v", repositoryRootFromPackage, err)
+	}
+
+	type occurrence struct {
+		path   string
+		line   int
+		suffix string
+	}
+	var found []occurrence
+
+	walkErr := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			// The root's own base name is not this rule's to judge. Skipping a
+			// dot-named root would skip the entire walk and pass the fence
+			// vacuously, and a dot-named root is the normal case here: this
+			// repository's agent worktrees live under .claude/worktrees/.
+			if path == root {
+				return nil
+			}
+			if skipEstateScanDir(entry.Name()) {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil || !info.Mode().IsRegular() || info.Size() > 4<<20 {
+			// The cap matches the repository walk in
+			// internal/workflowcontract/public_estate_identifiers_test.go. No
+			// tracked file is within an order of magnitude of it.
+			return nil //nolint:nilerr // an unreadable or oversized blob is not a committed literal
+		}
+		contents, err := os.ReadFile(path)
+		if err != nil {
+			return nil //nolint:nilerr // an unreadable file is not a committed literal
+		}
+		text := string(contents)
+		if strings.IndexByte(text, 0) >= 0 {
+			return nil // binary
+		}
+		relative, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			relative = path
+		}
+		relative = filepath.ToSlash(relative)
+		for _, suffix := range estateComponentSuffixes {
+			for offset := 0; offset < len(text); {
+				at := strings.Index(text[offset:], suffix)
+				if at < 0 {
+					break
+				}
+				at += offset
+				found = append(found, occurrence{
+					path:   relative,
+					line:   strings.Count(text[:at], "\n") + 1,
+					suffix: suffix,
+				})
+				offset = at + len(suffix)
+			}
+		}
+		return nil
+	})
+	if walkErr != nil {
+		t.Fatalf("walk repository root %s: %v", root, walkErr)
+	}
+
+	// Anti-vacuity, and not a formality: every failure mode of this fence
+	// -- a wrong root, a skip rule that swallowed the tree, a walk that
+	// errored into nothing -- shows up as an EMPTY result set, which is
+	// indistinguishable from a clean repository. This file always carries both
+	// suffixes because estateComponentSuffixes is where they are written, so
+	// their absence can only mean the walk never got here.
+	selfHits := map[string]bool{}
+	for _, hit := range found {
+		if hit.path == estateComponentFenceSelf {
+			selfHits[hit.suffix] = true
+		}
+	}
+	for _, suffix := range estateComponentSuffixes {
+		if !selfHits[suffix] {
+			t.Fatalf("the walk rooted at %s never found %q in %s, which always carries it: "+
+				"estateComponentSuffixes is where that literal is written. The walk did not "+
+				"reach this package, so the subset check below would have passed vacuously. "+
+				"Fix repositoryRootFromPackage or skipEstateScanDir rather than this assertion.",
+				root, suffix, estateComponentFenceSelf)
+		}
+	}
+
+	var sites []string
+	offendingFiles := map[string]bool{}
+	for _, hit := range found {
+		if estateComponentSites[hit.path] {
+			continue
+		}
+		offendingFiles[hit.path] = true
+		sites = append(sites, fmt.Sprintf("%s:%d names %q", hit.path, hit.line, hit.suffix))
+	}
+	if len(sites) == 0 {
+		return
+	}
+	t.Errorf("estate component suffixes appear in %d file(s) beyond the three ADR 0002 "+
+		"records, at %d site(s):\n  %s\n"+
+		"ADR 0002's 2026-09-01 amendment and the doc comment on otpMailbox.timedOut() in %s "+
+		"BOTH state that a complete redaction spans THREE files; a fourth file makes both "+
+		"statements wrong. Nothing else reds on it -- the cell1 assertion in this file is "+
+		"conditional, so it goes silently inapplicable under redaction rather than failing.\n"+
+		"Either redact the occurrence(s) listed above, or, if the new site is deliberate, add "+
+		"its path to estateComponentSites AND correct the count in BOTH places that state it: "+
+		"the \"it spans THREE files\" paragraph in %s, and the \"A complete redaction spans "+
+		"THREE files\" paragraph in the otpMailbox.timedOut() doc comment in %s.",
+		len(offendingFiles), len(sites), strings.Join(sites, "\n  "),
+		estateComponentMessageSite, estateComponentADRSite, estateComponentMessageSite)
+}
+
+// skipEstateScanDir reports whether a directory sits outside the tracked tree
+// this fence polices.
+//
+// Dot-directories go because .github is the only tracked one -- .git, .tools and
+// .claude are local tooling. .claude is the one that would actually bite: the
+// main checkout keeps roughly nine git worktrees under .claude/worktrees/, each
+// a second copy of this tree, and each would report the three recorded files at
+// paths estateComponentSites does not carry. An exact-set assertion over a
+// working-tree walk reds on a clean checkout for exactly that reason.
+func skipEstateScanDir(name string) bool {
+	switch name {
+	case "vendor", "node_modules":
+		return true
+	case ".github":
+		// Tracked, published, and as able to name a suffix as any Go file.
+		return false
+	}
+	return strings.HasPrefix(name, ".")
 }
