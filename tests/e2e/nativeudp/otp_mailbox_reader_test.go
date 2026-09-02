@@ -257,6 +257,25 @@ func (m *otpMailbox) snapshot() (calls int, fresh bool) {
 // gate's job log, which is the single venue this message exists for. Confirmed
 // against a real run: that log contains no occurrence of the region, only ***.
 //
+// This has been re-opened on review more than once, so the ruling is recorded
+// here rather than left to be re-derived: the fix is NOT to stop paying for the
+// masking by demoting OTP_E2E_MAILBOX_REGION to a plain value or an Actions
+// variable. This repository is public and so are its workflow run logs, and the
+// masking is not bought for this message -- it is bought for the AWS CLI and
+// SDK errors printed by steps that have no idea the value is an estate
+// coordinate. Actions does not mask variables. That is the same trade #166 made
+// when it moved every estate identifier out of the tree and into secrets, and
+// ADR 0002 is what settles which side of it a region sits on: this repository
+// does not publish the sandbox estate's concrete coordinates. So the indirection
+// stays, and the region's one committed literal (ADR 0001's, which ADR 0002 had
+// already declared historical) is gone rather than joined by a second.
+//
+// The cost is worth naming honestly: demoting the secret WOULD read better here
+// and would unmask `aws-region:` in the AWS step. It is declined because it also
+// requires unpicking the value from the schema-v2 canary, whose contract test
+// asserts the harness secret set with slices.Equal -- so the cheaper-looking
+// edit ends at loosening a green REQUIRED check to publish a coordinate.
+//
 // The deployment prefix is omitted, so the message says how to LIST the groups
 // instead. The cells are now named INDIVIDUALLY rather than by glob, which is
 // a deliberate reversal: the glob was chosen so a count could not go stale, but
