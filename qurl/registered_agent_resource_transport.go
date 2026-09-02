@@ -19,9 +19,9 @@ var ErrRegisteredAgentResourceRequestDenied = errors.New("qurl: registered-agent
 // lifecycle APIs.
 //
 // The bridge accepts only the owner-scoped resource, Connector sharing-state,
-// share-link mint (`/share`), portal
-// creation, Connector-enrollment-token mint, and identity-echo routes used by
-// a registered qURL client. The service independently restricts a device key's
+// share-link mint (POST /v1/resources/{id}/share), portal creation,
+// Connector-enrollment-token mint, and identity-echo routes used by a
+// registered qURL client. The service independently restricts a device key's
 // POST /v1/api-keys authority to a Connector-target one-shot token. Account,
 // billing, other key-management, and session-control routes fail closed. It
 // also requires the Client's exact API origin and path prefix. The caller's
