@@ -166,8 +166,14 @@ func TestOnlyTheFencedWriterPublishesToTheJobSummary(t *testing.T) {
 	}
 	var titles []string
 	literals := 0
-	for _, path := range sites {
-		source, err := os.ReadFile(filepath.Join(repositoryRoot(t), path))
+	// Over the whole nativeudp package, NOT over `sites`. `sites` is by
+	// construction only the files naming GITHUB_STEP_SUMMARY, and a third
+	// advisory need not live in one: poolAdvisories can append a helper's
+	// result, putting the literal in a file this fence would never open while
+	// the count stayed at two. Scanning the directory is what makes the claim
+	// above true, and matches how the process-env fence below reads the package.
+	for _, path := range nativeUDPGoFiles(t) {
+		source, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatalf("read %s: %v", path, err)
 		}
@@ -298,24 +304,39 @@ var gateEmitterProcessEnvPattern = regexp.MustCompile(
 // loadOTPE2EGateConfig, which has more callers than the gate. So the rule is
 // pinned rather than left to convention: exactly one call site may read the
 // real environment, and it is the one that is actually running on the runner.
-func TestOnlyTheGateItselfEmitsFromTheProcessEnvironment(t *testing.T) {
+// nativeUDPGoFiles lists every Go source in the gate's package, as absolute
+// paths. Both fences below read the package rather than a hand-listed subset,
+// so neither can be evaded by putting the new code in another file.
+func nativeUDPGoFiles(t *testing.T) []string {
+	t.Helper()
 	directory := filepath.Join(repositoryRoot(t), filepath.FromSlash(nativeUDPTestDir))
 	entries, err := os.ReadDir(directory)
 	if err != nil {
 		t.Fatalf("read %s: %v", nativeUDPTestDir, err)
 	}
-
-	var sites []string
+	var found []string
 	for _, entry := range entries {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".go" {
 			continue
 		}
-		contents, err := os.ReadFile(filepath.Join(directory, entry.Name()))
+		found = append(found, filepath.Join(directory, entry.Name()))
+	}
+	if len(found) == 0 {
+		t.Fatalf("found no Go sources under %s; this fence would pass vacuously",
+			nativeUDPTestDir)
+	}
+	return found
+}
+
+func TestOnlyTheGateItselfEmitsFromTheProcessEnvironment(t *testing.T) {
+	var sites []string
+	for _, path := range nativeUDPGoFiles(t) {
+		contents, err := os.ReadFile(path)
 		if err != nil {
-			t.Fatalf("read %s: %v", entry.Name(), err)
+			t.Fatalf("read %s: %v", path, err)
 		}
 		for range gateEmitterProcessEnvPattern.FindAllString(string(contents), -1) {
-			sites = append(sites, entry.Name())
+			sites = append(sites, filepath.Base(path))
 		}
 	}
 	slices.Sort(sites)

@@ -1116,11 +1116,15 @@ func TestShortPoolErrorPrescribesARemedyCICanTake(t *testing.T) {
 			"which is the only credential source any workflow wires", got)
 	}
 	// The single-credential variable must still be NAMED -- a local run needs to
-	// know it exists -- but only as the local path, never as the fix. Its NAME is
-	// asserted alongside the disclaiming phrases, so dropping the name while
-	// keeping the phrasing cannot pass.
-	if !strings.Contains(got, otpE2EEnrollmentEnv) ||
-		!strings.Contains(got, "LOCAL-run convenience") ||
+	// know it exists -- but only as the local path, never as the fix.
+	//
+	// The name is pinned TOGETHER WITH its disclaimer, in one substring. Testing
+	// for the bare name is vacuous here: the pool variable's name extends this
+	// one, so `Contains(got, otpE2EEnrollmentEnv)` is already satisfied by the
+	// remedy's mention of the pool, and deleting the single-credential name from
+	// the message entirely left this test green. Same prefix collision the
+	// workflow fence anchors around, one layer up.
+	if !strings.Contains(got, "("+otpE2EEnrollmentEnv+" is a LOCAL-run convenience") ||
 		!strings.Contains(got, "does not clear this") {
 		t.Fatalf("short-pool error %q does not name %s as a local-only path; an "+
 			"operator reading it from CI would set a variable nothing maps in",
