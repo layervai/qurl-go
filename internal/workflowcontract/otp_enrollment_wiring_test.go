@@ -98,6 +98,41 @@ func TestNoWorkflowWiresTheSingleOTPCredentialVariable(t *testing.T) {
 	}
 }
 
+// nativeUDPGoFiles lists every Go source in the gate's package, as absolute
+// paths. Both fences in this file read the package rather than a hand-listed
+// subset, so neither can be evaded by putting the new code in another file.
+func nativeUDPGoFiles(t *testing.T) []string {
+	t.Helper()
+	directory := filepath.Join(repositoryRoot(t), filepath.FromSlash(nativeUDPTestDir))
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		t.Fatalf("read %s: %v", nativeUDPTestDir, err)
+	}
+	var found []string
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".go" {
+			continue
+		}
+		found = append(found, filepath.Join(directory, entry.Name()))
+	}
+	if len(found) == 0 {
+		t.Fatalf("found no Go sources under %s; this fence would pass vacuously",
+			nativeUDPTestDir)
+	}
+	return found
+}
+
+// advisoryLiteralPattern counts degradationAdvisory composite literals of ANY
+// shape; advisoryTitlePattern extracts the title from the one shape that states
+// it inline. The pair is the point: the count catches an addition the title
+// scan cannot model (a keyed literal, or a named constant), and the titles then
+// say which advisories are sanctioned. Package-level, matching the two patterns
+// above, rather than recompiled per file inside the loop.
+var (
+	advisoryLiteralPattern = regexp.MustCompile(`degradationAdvisory\{`)
+	advisoryTitlePattern   = regexp.MustCompile(`degradationAdvisory\{"([^"]+)"`)
+)
+
 // TestOnlyTheFencedWriterPublishesToTheJobSummary keeps the degradation
 // reporter from becoming an unreviewed publication channel.
 //
@@ -177,10 +212,8 @@ func TestOnlyTheFencedWriterPublishesToTheJobSummary(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read %s: %v", path, err)
 		}
-		literals += len(regexp.MustCompile(
-			`degradationAdvisory\{`).FindAllString(string(source), -1))
-		for _, match := range regexp.MustCompile(
-			`degradationAdvisory\{"([^"]+)"`).FindAllStringSubmatch(string(source), -1) {
+		literals += len(advisoryLiteralPattern.FindAllString(string(source), -1))
+		for _, match := range advisoryTitlePattern.FindAllStringSubmatch(string(source), -1) {
 			titles = append(titles, match[1])
 		}
 	}
@@ -247,8 +280,23 @@ func repoGoFiles(t *testing.T) []string {
 			return err
 		}
 		if entry.IsDir() {
+			// Dot-directories as a CLASS, not just .git. This fence asserts
+			// exact set equality, which has no slack: a git worktree parked
+			// under .claude/worktrees/ is inside the repository root and holds
+			// a second copy of the whole Go tree, so the walk would report it
+			// and red the fence locally while CI's clean checkout stayed green.
+			// A local-only false red on a fence whose message says "add it
+			// here" is one that gets fixed by editing the want list. Nothing
+			// first-party lives in a dot-directory.
+			//
+			// The limit: a second copy parked at a NON-dot path is still seen.
+			// Deriving the list from `git ls-files` would close that too, at
+			// the cost of shelling out from a test.
+			if strings.HasPrefix(entry.Name(), ".") {
+				return fs.SkipDir
+			}
 			switch entry.Name() {
-			case ".git", "vendor", "node_modules":
+			case "vendor", "node_modules":
 				return fs.SkipDir
 			}
 			return nil
@@ -304,30 +352,6 @@ var gateEmitterProcessEnvPattern = regexp.MustCompile(
 // loadOTPE2EGateConfig, which has more callers than the gate. So the rule is
 // pinned rather than left to convention: exactly one call site may read the
 // real environment, and it is the one that is actually running on the runner.
-// nativeUDPGoFiles lists every Go source in the gate's package, as absolute
-// paths. Both fences below read the package rather than a hand-listed subset,
-// so neither can be evaded by putting the new code in another file.
-func nativeUDPGoFiles(t *testing.T) []string {
-	t.Helper()
-	directory := filepath.Join(repositoryRoot(t), filepath.FromSlash(nativeUDPTestDir))
-	entries, err := os.ReadDir(directory)
-	if err != nil {
-		t.Fatalf("read %s: %v", nativeUDPTestDir, err)
-	}
-	var found []string
-	for _, entry := range entries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".go" {
-			continue
-		}
-		found = append(found, filepath.Join(directory, entry.Name()))
-	}
-	if len(found) == 0 {
-		t.Fatalf("found no Go sources under %s; this fence would pass vacuously",
-			nativeUDPTestDir)
-	}
-	return found
-}
-
 func TestOnlyTheGateItselfEmitsFromTheProcessEnvironment(t *testing.T) {
 	var sites []string
 	for _, path := range nativeUDPGoFiles(t) {

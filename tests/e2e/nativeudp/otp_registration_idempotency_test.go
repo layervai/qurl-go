@@ -699,8 +699,10 @@ var annotationSink io.Writer = os.Stdout
 // Both advisories emit through here rather than each carrying its own copy.
 // The duplicate advisory was annotated first, on the claim that it was "the
 // one instance left"; poolSizeAdvisory had been sitting beside it at a bare
-// t.Logf the whole time, firing for a live pool of 0, 1, 2 or any composite
-// size. Sharing the emitter is what stops a third advisory arriving quieter
+// t.Logf the whole time, firing for a live pool of 1, 2 or any composite size
+// (and for 0, which poolSizeAdvisory covers but the loader cannot produce, since
+// a config that parsed no credentials never returns one). Sharing the emitter is
+// what stops a third advisory arriving quieter
 // than these two.
 //
 // Takes the LOOKUP its caller was handed, never os.Getenv. That is not
