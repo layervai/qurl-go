@@ -402,7 +402,19 @@ func TestOnlyTheGateItselfEmitsFromTheProcessEnvironment(t *testing.T) {
 		// MATCH named the same file twice for two call sites in it, which read
 		// as a set mismatch whose advice ("pass a described lookup") is wrong
 		// for a genuine second gate call.
-		if matches := len(gateEmitterProcessEnvPattern.FindAll(contents, -1)); matches > 0 {
+		// KNOWN GAP, left open deliberately: an alias (`env := os.Getenv`, then
+		// `loadOTPE2EGateConfig(t, env)`) reaches the real environment without
+		// naming it at the call this scans. Flagging every `= os.Getenv`
+		// binding was tried and rejected -- this package legitimately reads
+		// fourteen unrelated variables that way (orchestrator evidence SHA,
+		// proof phase, typed-evidence subprocess mode, the canary commitment
+		// path), so the rule reds a required check on code that has nothing to
+		// do with the emitter. That is the false-positive class this file
+		// rejects a hundred lines above, and it is a worse trade than the
+		// backstop is worth: the real fix is the lookup parameter, which is
+		// threaded, and this fence is only the second line.
+		matches := len(gateEmitterProcessEnvPattern.FindAll(contents, -1))
+		if matches > 0 {
 			sites = append(sites, fmt.Sprintf("%s (%d call site(s))",
 				filepath.Base(filepath.FromSlash(path)), matches))
 		}

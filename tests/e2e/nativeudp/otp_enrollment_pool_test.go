@@ -1160,9 +1160,15 @@ func TestSingleCredentialVariableCannotClearAShortPool(t *testing.T) {
 					"message tells operators it does not, so either the message or this "+
 					"rescue path is now wrong", otpE2EEnrollmentEnv, skip, err)
 			}
-			if !strings.Contains(err.Error(), otpE2EEnrollmentPoolEnv) {
+			// The GUARD's own opening, not just the variable's name. strict
+			// aggregates every unmet prerequisite into one error, and the
+			// missing-variable branch names this same variable -- so a fixture
+			// that stopped setting the pool at all would satisfy a bare name
+			// check while proving nothing about pooling. "<name> parsed " can
+			// only come from the short-pool guard.
+			if !strings.Contains(err.Error(), otpE2EEnrollmentPoolEnv+" parsed ") {
 				t.Fatalf("strict failed for the wrong reason (%v); this fence is only "+
-					"meaningful while the failure is about the POOL", err)
+					"meaningful while the SHORT-POOL guard is what refused it", err)
 			}
 		})
 	}
@@ -1195,6 +1201,9 @@ func TestPoolAdvisoriesReportEveryDegradation(t *testing.T) {
 		{"composite size speaks", 8, 0, []string{sizeTitle}},
 		{"size two speaks", 2, 0, []string{sizeTitle}},
 		{"a pool of one speaks", 1, 0, []string{sizeTitle}},
+		// Pins noteDegradation's doc claim that poolSizeAdvisory covers 0 even
+		// though the loader cannot produce it, rather than leaving it as prose.
+		{"an empty pool speaks", 0, 0, []string{sizeTitle}},
 		{"duplicates alone speak", 7, 2, []string{duplicateTitle}},
 		{"both degradations both speak", 8, 2, []string{sizeTitle, duplicateTitle}},
 	} {
@@ -1256,6 +1265,18 @@ func TestNoteDegradationReportsOnEveryChannel(t *testing.T) {
 		want := "::warning title=ti%3Atle::line one%0Aline two 50%25 spent\n"
 		if got != want {
 			t.Fatalf("noteDegradation wrote %q, want %q", got, want)
+		}
+
+		// The two PROPERTY-only rules, which the case above does not reach: a
+		// comma ends a property and a carriage return ends the command, so both
+		// truncate a title that carries them. Untested rules are the ones a
+		// future edit drops without failing anything.
+		got = captureAnnotations(t, func() {
+			noteDegradation(t, onCI(""), "a,b\rc", "an advisory")
+		})
+		if want := "::warning title=a%2Cb%0Dc::an advisory\n"; got != want {
+			t.Fatalf("noteDegradation wrote %q, want %q; a comma or a carriage return in "+
+				"a title truncates the annotation", got, want)
 		}
 		if strings.Count(got, "\n") != 1 {
 			t.Errorf("annotation %q spans more than one line, so GitHub reads only "+
