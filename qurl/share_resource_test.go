@@ -337,46 +337,6 @@ func TestClient_ShareResourceValidation(t *testing.T) {
 	}
 }
 
-// TestClient_ResolveResourceDeprecatedAliasDelegatesToShare pins the
-// compatibility shim for the one minor cycle it lives: the deprecated
-// ResolveResource name and its ResolveResourceOptions / ResolvedAccess types
-// are the share API under the old spelling, not a copy of it. A caller that
-// has not renamed yet compiles unchanged and sends POST
-// /v1/resources/{id}/share — never the retired /resolve suffix — so it needs
-// a qurl-service that serves the share route.
-func TestClient_ResolveResourceDeprecatedAliasDelegatesToShare(t *testing.T) {
-	var paths []string
-	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		paths = append(paths, r.Method+" "+r.URL.Path)
-		var body map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			t.Fatalf("decode share body: %v", err)
-		}
-		assertJSONField(t, body, "ttl_seconds", float64(90))
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"data":{"qurl":"https://qurl.link/at_alias","qurl_id":"q_alias1234567","type":"qv2","expires_in_seconds":300,"single_use":false}}`)
-	}))
-	defer api.Close()
-
-	client, err := NewClient(BearerToken("lv_test"), WithBaseURL(api.URL))
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
-	access, err := client.ResolveResource(context.Background(), "r_demo1234567", &ResolveResourceOptions{TTL: 90 * time.Second})
-	if err != nil {
-		t.Fatalf("ResolveResource (deprecated alias): %v", err)
-	}
-	if len(paths) != 1 || paths[0] != "POST /v1/resources/r_demo1234567/share" {
-		t.Fatalf("deprecated alias sent %v, want exactly [POST /v1/resources/r_demo1234567/share]", paths)
-	}
-	// The old result type is the share type under another name: it feeds the
-	// share-typed API directly, with no conversion.
-	shareTyped := func(l *ShareLink) string { return l.QURLID }
-	if got := shareTyped(access); got != "q_alias1234567" {
-		t.Fatalf("QURLID through the alias = %q, want q_alias1234567", got)
-	}
-}
-
 // TestShareLinkVerifyCRID drives the trust story end to end against the
 // conformance fixtures: the committed key verifies, a well-formed foreign key
 // is the detected substitution, and both no-CRID and locally invalid CRID

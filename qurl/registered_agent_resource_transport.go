@@ -19,7 +19,7 @@ var ErrRegisteredAgentResourceRequestDenied = errors.New("qurl: registered-agent
 // lifecycle APIs.
 //
 // The bridge accepts only the owner-scoped resource, Connector sharing-state,
-// share-link mint (`/share`, plus its deprecated `/resolve` alias), portal
+// share-link mint (`/share`), portal
 // creation, Connector-enrollment-token mint, and identity-echo routes used by
 // a registered qURL client. The service independently restricts a device key's
 // POST /v1/api-keys authority to a Connector-target one-shot token. Account,
@@ -134,10 +134,7 @@ func registeredAgentResourceRouteAllowed(method, path string) bool {
 		switch segments[1] {
 		case "sharing":
 			return method == http.MethodGet || method == http.MethodPut
-		case "share", "resolve", "qurls":
-			// "resolve" is the deprecated alias of "share" (the CRID share
-			// operator); it stays allowlisted for the transition window so an
-			// older caller of this bridge keeps working.
+		case "share", "qurls":
 			return method == http.MethodPost
 		}
 	case 3:

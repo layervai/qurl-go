@@ -8,19 +8,16 @@ and are marked **Breaking** with what to change.
 
 ## v0.12.0 — 2026-09-02
 
-- **Breaking:** the CRID share operator is renamed. `ShareResource`,
-  `ShareResourceOptions`, and `ShareLink` replace `ResolveResource`,
-  `ResolveResourceOptions`, and `ResolvedAccess`, and the guide moved to
-  [docs/share-and-crid.md](docs/share-and-crid.md). The old names remain as
-  `// Deprecated:` aliases — type aliases plus a thin wrapper method — for one
-  minor cycle, so existing code compiles unchanged; rename before v0.13.0.
-  What does change now: every call, the deprecated `ResolveResource` wrapper
-  included, sends `POST /v1/resources/{id}/share` instead of `/resolve`, so
-  the SDK needs a qurl-service that serves the share route (sandbox first).
-  The service keeps `/resolve` only as a deprecated alias for older SDK
-  builds.
+- **Breaking:** the CRID share operator is renamed, with no compatibility
+  aliases. `ShareResource`, `ShareResourceOptions`, and `ShareLink` replace
+  `ResolveResource`, `ResolveResourceOptions`, and `ResolvedAccess`, and the
+  guide moved to [docs/share-and-crid.md](docs/share-and-crid.md). Rename the
+  call and the two types; fields, options, errors, and `VerifyCRID` are
+  unchanged. On the wire the SDK now sends `POST /v1/resources/{id}/share`;
+  `/resolve` is gone from qurl-service in the same cutover, so pair this
+  version with a service that serves the share route (sandbox first).
 - `RegisteredAgentResourceHTTPDoer` allowlists `POST /v1/resources/{id}/share`
-  alongside the deprecated `/resolve` suffix for the transition window.
+  and rejects the retired `/resolve` suffix.
 
 ## v0.11.0 — 2026-09-01
 
