@@ -28,6 +28,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -1385,6 +1386,38 @@ var estateComponentSites = []string{
 	estateComponentADRSite,
 }
 
+// estateLineComment matches a Go line-comment marker only where a line starts,
+// so stripping it cannot touch a "//" inside prose -- a URL, or the
+// `grep -rn "ca-iro\|ca-ia" .` the amendment quotes.
+var estateLineComment = regexp.MustCompile(`(?m)^[ \t]*//`)
+
+// estateWhitespaceRun collapses a whitespace run, newlines included.
+var estateWhitespaceRun = regexp.MustCompile(`\s+`)
+
+// normalizeEstateProse renders a document as one whitespace-normalized line so a
+// phrase pinned in it survives a REFLOW.
+//
+// Both documents wrap by hand at roughly 76 columns, and both current count
+// sentences sit within a couple of words of a wrap boundary, so a phrase matched
+// literally would break the moment a paragraph is rewrapped -- and break with a
+// message blaming the count, which would be exactly wrong. Rewrapping hand-wrapped
+// prose is routine here and is not something gofumpt polices.
+func normalizeEstateProse(contents []byte) string {
+	return estateWhitespaceRun.ReplaceAllString(
+		string(estateLineComment.ReplaceAll(contents, nil)), " ")
+}
+
+// carriesAnEstateComponentSuffix reports whether a document still names any of
+// the permitted component suffixes.
+func carriesAnEstateComponentSuffix(contents []byte) bool {
+	for _, suffix := range estateComponentSuffixes {
+		if bytes.Contains(contents, []byte(suffix)) {
+			return true
+		}
+	}
+	return false
+}
+
 // estateComponentCountWord spells a file count the way both documents spell it.
 // A function rather than a package-level map for the same reason
 // estateComponentSites is a slice: no shared mutable seam for a lookup this
@@ -1603,21 +1636,46 @@ func TestStatedRedactionFileCountMatchesTheAllowlist(t *testing.T) {
 			"spelling for it. A redaction surface this size is a change to argue in ADR 0002 "+
 			"before extending that function.", len(estateComponentSites))
 	}
-	claim := []byte("spans " + countWord + " files")
+	claim := "spans " + countWord + " files"
 
 	for _, document := range []string{estateComponentADRSite, estateComponentMessageSite} {
 		contents, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(document)))
 		if err != nil {
 			t.Fatalf("read %s: %v", document, err)
 		}
-		if !bytes.Contains(contents, claim) {
-			t.Errorf("%s does not state that a complete redaction %q.\n"+
-				"estateComponentSites now carries %d path(s), so the count this document "+
-				"states is out of date. Adding a site to the allowlist is only half the "+
-				"edit; the spelled-out count in ADR 0002's amendment and in the "+
-				"otpMailbox.timedOut() doc comment is the other half, and it is the half "+
-				"that had nothing checking it before this fence.",
-				document, string(claim), len(estateComponentSites))
+		// CONDITIONAL on the document still naming a suffix, for exactly the
+		// reason the cell1 assertion earlier in this file is conditional:
+		// redaction must stay GREEN, and an unconditional check here would
+		// reverse the guarantee the rest of this change is built on.
+		//
+		// This is not hypothetical. In otpMailbox.timedOut()'s doc comment the
+		// count sentence and the suffix literals share ONE paragraph -- the
+		// amendment's own `grep -rn "ca-iro\|ca-ia" .` lands a redactor inside
+		// it, and deleting the literals alone leaves sentences that no longer
+		// parse ("this comment names and in its own prose"), so the realistic
+		// edit rewrites or removes the paragraph and takes the count sentence
+		// with it. Unconditional, this fence would red on a CORRECT redaction
+		// and blame a stale count, which is a misdiagnosis at the exact moment
+		// someone is reversing a recorded ruling.
+		//
+		// Keyed this way, both fences guard the same fact: while the names are
+		// here, the count that describes them must be right; once they are
+		// gone, neither fence has anything left to say.
+		if !carriesAnEstateComponentSuffix(contents) {
+			continue
+		}
+		if !strings.Contains(normalizeEstateProse(contents), claim) {
+			t.Errorf("%s still names an estate component suffix but does not state that a "+
+				"complete redaction %q.\n"+
+				"estateComponentSites carries %d path(s), so that is the count this document "+
+				"has to state. Adding a site to the allowlist is only half the edit; the "+
+				"spelled-out count in ADR 0002's amendment and in the otpMailbox.timedOut() "+
+				"doc comment is the other half, and it is the half that had nothing checking "+
+				"it before this fence.\n"+
+				"Matched against whitespace-normalized prose, so a reflow is not what broke "+
+				"this; redacting the suffixes from this document would drop the requirement "+
+				"entirely rather than red.",
+				document, claim, len(estateComponentSites))
 		}
 	}
 }
