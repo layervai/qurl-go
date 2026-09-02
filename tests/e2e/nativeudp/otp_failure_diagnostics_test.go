@@ -1385,17 +1385,42 @@ var estateComponentSites = []string{
 	estateComponentADRSite,
 }
 
-// estateComponentCountWords spells the file count the way both documents spell
-// it. Deliberately short: a redaction surface growing past this is not a change
-// anyone should be making without reading the amendment first.
-var estateComponentCountWords = map[int]string{
-	1: "ONE", 2: "TWO", 3: "THREE", 4: "FOUR", 5: "FIVE",
+// estateComponentCountWord spells a file count the way both documents spell it.
+// A function rather than a package-level map for the same reason
+// estateComponentSites is a slice: no shared mutable seam for a lookup this
+// small. Deliberately short-range -- a redaction surface growing past this is
+// not a change anyone should make without reading the amendment first.
+func estateComponentCountWord(n int) (string, bool) {
+	switch n {
+	case 1:
+		return "ONE", true
+	case 2:
+		return "TWO", true
+	case 3:
+		return "THREE", true
+	case 4:
+		return "FOUR", true
+	case 5:
+		return "FIVE", true
+	}
+	return "", false
 }
 
 // repositoryRootFromPackage is relative to this package directory, as
 // gateWorkflowPath in otp_gate_paths_test.go already is: a test binary runs with
 // its package directory as the working directory.
 const repositoryRootFromPackage = "../../.."
+
+// statedRedactionCountWord renders the count for prose, falling back to digits
+// so a message can never be less useful than the number it is describing.
+// TestStatedRedactionFileCountMatchesTheAllowlist is what actually reds on an
+// unspellable count.
+func statedRedactionCountWord() string {
+	if word, ok := estateComponentCountWord(len(estateComponentSites)); ok {
+		return word
+	}
+	return strconv.Itoa(len(estateComponentSites))
+}
 
 func estateScanRoot(t *testing.T) string {
 	t.Helper()
@@ -1464,8 +1489,11 @@ func TestEstateComponentNamesStayWithinTheRecordedFiles(t *testing.T) {
 		info, err := entry.Info()
 		if err != nil || !info.Mode().IsRegular() || info.Size() > 4<<20 {
 			// The cap matches the repository walk in
-			// internal/workflowcontract/public_estate_identifiers_test.go. No
-			// tracked file is within an order of magnitude of it.
+			// internal/workflowcontract/public_estate_identifiers_test.go. It
+			// exists to keep a stray large blob out of memory, not to bound the
+			// tracked tree -- deliberately not phrased as a claim about how big
+			// the largest tracked file is, which is the sort of unchecked fact
+			// this file exists to stop relying on.
 			return nil //nolint:nilerr // an unreadable or oversized blob is not a committed literal
 		}
 		contents, err := os.ReadFile(path)
@@ -1550,7 +1578,7 @@ func TestEstateComponentNamesStayWithinTheRecordedFiles(t *testing.T) {
 		"TestStatedRedactionFileCountMatchesTheAllowlist until you correct the spelled-out "+
 		"count in BOTH %s and the otpMailbox.timedOut() doc comment in %s.",
 		len(offendingFiles), len(estateComponentSites), len(sites), strings.Join(sites, "\n  "),
-		estateComponentMessageSite, estateComponentCountWords[len(estateComponentSites)],
+		estateComponentMessageSite, statedRedactionCountWord(),
 		estateComponentADRSite, estateComponentMessageSite)
 }
 
@@ -1569,11 +1597,11 @@ func TestEstateComponentNamesStayWithinTheRecordedFiles(t *testing.T) {
 func TestStatedRedactionFileCountMatchesTheAllowlist(t *testing.T) {
 	root := estateScanRoot(t)
 
-	countWord, ok := estateComponentCountWords[len(estateComponentSites)]
+	countWord, ok := estateComponentCountWord(len(estateComponentSites))
 	if !ok {
-		t.Fatalf("estateComponentSites carries %d path(s) and estateComponentCountWords has no "+
+		t.Fatalf("estateComponentSites carries %d path(s) and estateComponentCountWord has no "+
 			"spelling for it. A redaction surface this size is a change to argue in ADR 0002 "+
-			"before extending this map.", len(estateComponentSites))
+			"before extending that function.", len(estateComponentSites))
 	}
 	claim := []byte("spans " + countWord + " files")
 
