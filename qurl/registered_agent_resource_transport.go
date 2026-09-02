@@ -18,9 +18,10 @@ var ErrRegisteredAgentResourceRequestDenied = errors.New("qurl: registered-agent
 // available only on a Client opened or returned by the registered-agent
 // lifecycle APIs.
 //
-// The bridge accepts only the owner-scoped resource, sharing, resolve, portal
-// creation, Connector-enrollment-token mint, and identity-echo routes used by
-// a registered qURL client. The service independently restricts a device key's
+// The bridge accepts only the owner-scoped resource, Connector sharing-state,
+// share-link mint (POST /v1/resources/{id}/share), portal creation,
+// Connector-enrollment-token mint, and identity-echo routes used by a
+// registered qURL client. The service independently restricts a device key's
 // POST /v1/api-keys authority to a Connector-target one-shot token. Account,
 // billing, other key-management, and session-control routes fail closed. It
 // also requires the Client's exact API origin and path prefix. The caller's
@@ -133,7 +134,7 @@ func registeredAgentResourceRouteAllowed(method, path string) bool {
 		switch segments[1] {
 		case "sharing":
 			return method == http.MethodGet || method == http.MethodPut
-		case "resolve", "qurls":
+		case "share", "qurls":
 			return method == http.MethodPost
 		}
 	case 3:

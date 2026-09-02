@@ -6,6 +6,19 @@ independently under `awsstore/vX.Y.Z` tags.
 Pre-1.0 semantic versioning: breaking changes land in minor versions (v0.N.0)
 and are marked **Breaking** with what to change.
 
+## v0.12.0 — 2026-09-02
+
+- **Breaking:** the CRID share operator is renamed, with no compatibility
+  aliases. `ShareResource`, `ShareResourceOptions`, and `ShareLink` replace
+  `ResolveResource`, `ResolveResourceOptions`, and `ResolvedAccess`, and the
+  guide moved to [docs/share-and-crid.md](docs/share-and-crid.md). Rename the
+  call and the two types; fields, options, errors, and `VerifyCRID` are
+  unchanged. On the wire the SDK now sends `POST /v1/resources/{id}/share`;
+  `/resolve` is gone from qurl-service in the same cutover, so pair this
+  version with a service that serves the share route (sandbox first).
+- `RegisteredAgentResourceHTTPDoer` allowlists `POST /v1/resources/{id}/share`
+  and rejects the retired `/resolve` suffix.
+
 ## v0.11.0 — 2026-09-01
 
 - **Breaking:** registered-agent session admission and durable operation

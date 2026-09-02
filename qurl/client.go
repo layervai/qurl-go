@@ -801,8 +801,8 @@ type portalOptions struct {
 // its default lifetime, which is governed server-side by the LayerV API and
 // account settings rather than by the SDK. Values are serialized with hours as
 // the largest unit so both portal duration fields — this one and
-// WithSessionDuration's — use the same h/m/s grammar. (ResolveResource's
-// ttl_seconds is an integer wire field and does not share it.)
+// WithSessionDuration's — use the same h/m/s grammar. (ShareResource's
+// ttl_seconds is an integer wire field and does not use that grammar.)
 func ValidFor(d time.Duration) PortalOption {
 	return portalOptionFunc(func(o *portalOptions) error {
 		expiresIn, err := formatAPIDuration(d, time.Minute)
@@ -942,13 +942,12 @@ func (c *Client) CreatePortalForURL(ctx context.Context, targetURL string, opts 
 //
 //   - CreatePortal / CreatePortalForURL — pass Portal.ResourceID and
 //     Portal.QURLID.
-//   - ResolveResource — pass the resource id you resolved and
-//     ResolvedAccess.QURLID.
+//   - ShareResource — pass the resource id you shared and ShareLink.QURLID.
 //
 // Like the other resource methods, resourceID accepts either identifier form
 // the platform serves — the public-key resource id or the resource's CRID —
 // and both ids are validated for presence only: the server is authoritative
-// for which identifiers resolve. The credential needs the qurl:write scope.
+// for which identifiers it accepts. The credential needs the qurl:write scope.
 // The 204 response has no JSON body; other successful portal methods retain
 // the SDK's fail-closed response decoding.
 //

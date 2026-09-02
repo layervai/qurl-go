@@ -42,11 +42,11 @@ var frictionBudget = map[string]int{
 	"ExampleClient_CreatePortal": 4,
 	// Kill one minted link before it expires: open client, mint, revoke.
 	"ExampleClient_RevokePortal": 3,
-	// Mint a fresh access link for a stored identifier (either form): open
-	// client, resolve, print. The CRID trust story stays one optional call
-	// (ResolvedAccess.VerifyCRID), not setup.
-	"ExampleClient_ResolveResource": 3,
-	"ExampleNewClient":              5,
+	// Mint a share link for a stored identifier (either form): open client,
+	// share, print. The CRID trust story stays one optional call
+	// (ShareLink.VerifyCRID), not setup.
+	"ExampleClient_ShareResource": 3,
+	"ExampleNewClient":            5,
 	// Resolve a Connector binding through its already-registered assigned-cell
 	// session: open state, reopen the binding, create one replayable request,
 	// resolve, and print. The two defers are deterministic key/store cleanup.

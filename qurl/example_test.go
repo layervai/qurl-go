@@ -221,23 +221,24 @@ func ExamplePrepareLiveNativeSessionOperation() {
 	_ = recordJSON
 }
 
-func ExampleClient_ResolveResource() {
+func ExampleClient_ShareResource() {
 	client, err := qurl.OpenClient()
 	if err != nil {
 		panic(err)
 	}
 
 	// Either identifier form works: the public-key resource id or the
-	// resource's CRID. Open the minted link with EnterPortal.
-	access, err := client.ResolveResource(context.Background(), exampleResourcePublicKey, nil)
+	// resource's CRID. The CRID is safe to paste anywhere; the share link is
+	// the secret. Open it with EnterPortal.
+	share, err := client.ShareResource(context.Background(), exampleResourcePublicKey, nil)
 	if err != nil {
 		panic(err)
 	}
 
 	// Keep QURLID to revoke this one link later, without disturbing the
-	// resource's others: client.RevokePortal(ctx, resourceID, access.QURLID).
+	// resource's others: client.RevokePortal(ctx, resourceID, share.QURLID).
 	// Like Link, it is not retrievable after this call.
-	fmt.Println(access.Link, access.QURLID)
+	fmt.Println(share.Link, share.QURLID)
 }
 
 func ExampleOpenClient() {
