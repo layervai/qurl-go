@@ -89,9 +89,10 @@ was — untouched rather than settled.
 
 **Still out, and not reopened by this:** VPC endpoint ids, EC2 instance ids,
 account-scoped ARNs, and the deployment prefix. The AWS region is also out,
-and is now out without qualification: [#237](https://github.com/layervai/qurl-go/pull/237)
-removed the one literal ADR 0001 still carried, so no region appears anywhere
-in this repository's documentation. The mechanical reason it must stay that
+and is now out without qualification:
+[#237](https://github.com/layervai/qurl-go/pull/237) removed the one literal
+ADR 0001 still carried, so no region appears anywhere in this repository's
+documentation. The mechanical reason it must stay that
 way is worth stating so it is not "fixed" later: it is supplied as the
 `OTP_E2E_MAILBOX_REGION` secret, and Actions masks a secret's value everywhere
 it appears in a log, a test's own error string included. A committed literal
@@ -111,9 +112,11 @@ cost a live diagnostic to remove strings that grant no access.
 `tests/e2e/nativeudp/otp_failure_diagnostics_test.go` requires none of the
 three component suffixes: the `ca-iro-cell1` assertion is conditional, firing
 only if the name is present and then demanding its "never been invoked"
-qualifier nearby. Verified in both directions rather than assumed — redacting
-all three suffixes leaves `go test ./tests/e2e/nativeudp/` green, and keeping
-the name while dropping the qualifier reds it. That probe runs the whole
+qualifier nearby. Verified by probe rather than assumed, three of them, all
+run over the whole package: redacting the three suffixes together leaves `go
+test ./tests/e2e/nativeudp/` green; redacting the workstation profile on its
+own leaves it green; and keeping the name while dropping the qualifier reds
+it. Those probes run the whole
 package rather than a `-run` subset, because the whole package is what the
 REQUIRED check executes, and the narrower probe would not have covered the
 source-level fences at the end of the same file. The `AuthorityOperation`
@@ -124,11 +127,12 @@ check.
 The rest of the cost is edit surface, and it is THREE files rather than the
 one an earlier version of this note claimed. The message carries the literals;
 this document quotes all five in the Permitted list above; and the fence
-carries `ca-iro-cell1` a third time, in its conditional, its comment and its
-failure string. The fence stays green under redaction — that is the property
-verified above — but green is not the same as edited: a redactor who stops at
-two files leaves it quoting a string that exists nowhere, with nothing red to
-say so. Counting this document is intrinsic to reversing a recorded ruling
+carries them a third time — `ca-iro-cell1` in its conditional and its failure
+string, and BOTH cells in the comment above them, which quotes the unqualified
+phrasing it exists to forbid. The fence stays green under redaction — that is
+the property verified above — but green is not the same as edited: a redactor
+who stops short leaves it quoting a string that exists nowhere, with nothing
+red to say so. Counting this document is intrinsic to reversing a recorded ruling
 rather than a reason not to record it; counting the fence is simply the
 correct count, and it is stated here because a future redactor arrives at this
 ADR before they arrive at a comment in a test file.

@@ -301,8 +301,12 @@ func (m *otpMailbox) snapshot() (calls int, fresh bool) {
 //
 // It is no longer the ONE-file edit this comment used to promise. A complete
 // redaction is THREE files: this message, the ADR amendment that quotes the
-// names, and this fence, which carries "ca-iro-cell1" in its conditional, its
-// comment and its failure string. The fence stays green either way, which is
+// names, and this fence -- which carries "ca-iro-cell1" in its conditional and
+// its failure string, and BOTH cells in the comment above them, since that
+// comment quotes the unqualified phrasing it exists to forbid. Enumerated to
+// the SITE rather than the file, because a redactor who deletes only the
+// cell1 sites leaves cell0 behind in that comment, which is this paragraph's
+// own warning applied one level down. The fence stays green either way, which is
 // precisely why the count matters -- stop at two and it is left quoting a
 // string that exists nowhere, with nothing red to say so.
 //
