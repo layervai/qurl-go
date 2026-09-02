@@ -69,7 +69,24 @@ func TestNoWorkflowWiresTheSingleOTPCredentialVariable(t *testing.T) {
 	// workflow here, so anchoring alone keeps the false-positive property
 	// without the co-occurrence rule. The echo form still needs that rule,
 	// because there the name is not at the start of the line.
-	mapping := regexp.MustCompile(`^(?:-\s+)?` + name + `\s*:`)
+	//
+	// That premise is true today rather than structurally: it holds because of
+	// what the prompts in claude.yml and claude-code-review.yml happen to say,
+	// and prompts get edited. A prompt line documenting local setup as
+	// `NAME=...` at the start of a line would red a required check whose fix is
+	// to edit a prompt -- the failure actionpin_test.go's "action named in a
+	// prompt is not a use" exists to avoid. The trade is still right, because
+	// the false NEGATIVE it replaces let the claim go silently false; but the
+	// false-positive side is the side that decays, so revisit this before
+	// widening the pattern further.
+	// `["']?` and the flow-mapping alternative: YAML allows a quoted key, and
+	// allows the mapping inline (`env: {NAME: value}`), where the name is not at
+	// the start of the line. Every workflow here uses unquoted block mappings,
+	// so this is defence in depth -- but the message being fenced makes a claim
+	// about EVERY workflow, and these are the shapes where it would quietly
+	// stop being universal.
+	mapping := regexp.MustCompile(`^(?:-\s+)?["']?` + name + `["']?\s*:`)
+	flowMapping := regexp.MustCompile(`[{,]\s*["']?` + name + `["']?\s*:`)
 	assignment := regexp.MustCompile(`^(?:export\s+|env\s+)?` + name + `\s*=`)
 	inlineEnvFile := regexp.MustCompile(name + `\s*=`)
 
@@ -83,6 +100,8 @@ func TestNoWorkflowWiresTheSingleOTPCredentialVariable(t *testing.T) {
 			switch {
 			case mapping.MatchString(trimmed):
 				wiring = "an env mapping"
+			case flowMapping.MatchString(trimmed):
+				wiring = "an inline env mapping"
 			case assignment.MatchString(trimmed):
 				wiring = "a shell assignment"
 			case inlineEnvFile.MatchString(trimmed) && strings.Contains(trimmed, "GITHUB_ENV"):
@@ -98,9 +117,11 @@ func TestNoWorkflowWiresTheSingleOTPCredentialVariable(t *testing.T) {
 	}
 }
 
-// nativeUDPGoFiles lists every Go source in the gate's package, as absolute
-// paths. Both fences in this file read the package rather than a hand-listed
-// subset, so neither can be evaded by putting the new code in another file.
+// nativeUDPGoFiles lists every Go source in the gate's package, slash-separated
+// and relative to the repository root -- the same convention as repoGoFiles, so
+// a caller joining one with repositoryRoot joins both. Both fences in this file
+// read the package rather than a hand-listed subset, so neither can be evaded
+// by putting the new code in another file.
 func nativeUDPGoFiles(t *testing.T) []string {
 	t.Helper()
 	directory := filepath.Join(repositoryRoot(t), filepath.FromSlash(nativeUDPTestDir))
@@ -113,7 +134,7 @@ func nativeUDPGoFiles(t *testing.T) []string {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".go" {
 			continue
 		}
-		found = append(found, filepath.Join(directory, entry.Name()))
+		found = append(found, nativeUDPTestDir+"/"+entry.Name())
 	}
 	if len(found) == 0 {
 		t.Fatalf("found no Go sources under %s; this fence would pass vacuously",
@@ -208,7 +229,7 @@ func TestOnlyTheFencedWriterPublishesToTheJobSummary(t *testing.T) {
 	// the count stayed at two. Scanning the directory is what makes the claim
 	// above true, and matches how the process-env fence below reads the package.
 	for _, path := range nativeUDPGoFiles(t) {
-		source, err := os.ReadFile(path)
+		source, err := os.ReadFile(filepath.Join(repositoryRoot(t), filepath.FromSlash(path)))
 		if err != nil {
 			t.Fatalf("read %s: %v", path, err)
 		}
@@ -236,8 +257,7 @@ func TestOnlyTheFencedWriterPublishesToTheJobSummary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read %s: %v", otpRegistrationSourcePath, err)
 	}
-	calls := regexp.MustCompile(`(?m)^\s*(?:for .*)?noteDegradation\(`).
-		FindAllString(string(source), -1)
+	calls := regexp.MustCompile(`(?m)^\s*noteDegradation\(`).FindAllString(string(source), -1)
 	if len(calls) != 1 {
 		t.Errorf("%s has %d noteDegradation call site(s), want exactly 1 -- the loop in "+
 			"loadOTPE2EGateConfig.\nA second one publishes to the run summary without "+
@@ -355,12 +375,12 @@ var gateEmitterProcessEnvPattern = regexp.MustCompile(
 func TestOnlyTheGateItselfEmitsFromTheProcessEnvironment(t *testing.T) {
 	var sites []string
 	for _, path := range nativeUDPGoFiles(t) {
-		contents, err := os.ReadFile(path)
+		contents, err := os.ReadFile(filepath.Join(repositoryRoot(t), filepath.FromSlash(path)))
 		if err != nil {
 			t.Fatalf("read %s: %v", path, err)
 		}
 		for range gateEmitterProcessEnvPattern.FindAllString(string(contents), -1) {
-			sites = append(sites, filepath.Base(path))
+			sites = append(sites, filepath.Base(filepath.FromSlash(path)))
 		}
 	}
 	slices.Sort(sites)
