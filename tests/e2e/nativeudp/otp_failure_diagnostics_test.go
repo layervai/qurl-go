@@ -96,8 +96,8 @@ func TestMailboxTimeoutNamesEveryCauseNotOnlyRateLimiting(t *testing.T) {
 	// unpublished: it remains a secret, so pinning it here is the one thing this
 	// fence must never do. The log group names are settled the other way -- ADR
 	// 0002's 2026-09-01 amendment PERMITS them without requiring them, and
-	// leaving them unasserted is exactly what keeps a later redaction free. The
-	// AWS profile that amendment expressly declines to rule on, so it stays
+	// leaving them unasserted is exactly what keeps a later redaction free. That
+	// amendment expressly declines to rule on the AWS profile, so it stays
 	// unsettled. The numbers are qurl-service's RegistrationOTPRateLimitWindow
 	// and are owned outside this repository.
 	// Either way the argument is the same -- pinning a value this repo does not
