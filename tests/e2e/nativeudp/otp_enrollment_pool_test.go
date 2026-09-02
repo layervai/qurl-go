@@ -1330,6 +1330,29 @@ func TestNoteDegradationReportsOnEveryChannel(t *testing.T) {
 		}
 	})
 
+	t.Run("reports when no summary path was exported", func(t *testing.T) {
+		// On CI with no summary channel at all -- `act`, some self-hosted
+		// runners. Every other delivery failure logs a NOTE; this one used to
+		// return silently, so the run could not tell a skipped channel from a
+		// working one.
+		var logged strings.Builder
+		recorder := &recordingTB{}
+		got := captureAnnotations(t, func() {
+			noteDegradation(recorder, onCI(""), "a title", "an advisory")
+		})
+		for _, line := range recorder.logs {
+			logged.WriteString(line)
+		}
+		if !strings.Contains(logged.String(), "no job summary path was exported") {
+			t.Fatalf("noteDegradation logged %q with no summary path; an absent channel "+
+				"must say so, like every other delivery failure here", recorder.logs)
+		}
+		// The annotation is unaffected -- it does not depend on the summary.
+		if !strings.Contains(got, "::warning title=a title::") {
+			t.Errorf("annotation missing with no summary path: %q", got)
+		}
+	})
+
 	t.Run("an unwritable summary does not fail the gate", func(t *testing.T) {
 		unwritable := filepath.Join(t.TempDir(), "absent", "summary.md")
 		got := captureAnnotations(t, func() {

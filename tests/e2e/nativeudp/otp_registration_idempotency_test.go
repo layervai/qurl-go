@@ -774,8 +774,16 @@ func encodeCommandProperty(value string) string {
 // rather than merely unlikely.
 func appendJobSummary(t testing.TB, lookup func(string) string, title, advisory string) {
 	t.Helper()
+	// Reported, not silent. Every other way this channel fails to deliver logs
+	// a NOTE, and an unset path used to be the one that did not -- so a run
+	// could not tell "the summary was skipped" from "the summary worked". That
+	// is the same distinction O_CREATE above exists to protect, reopened for
+	// the same non-hosted runners its rationale invokes: a hosted runner always
+	// exports this, `act` and some self-hosted ones do not.
 	path := lookup("GITHUB_STEP_SUMMARY")
 	if path == "" {
+		t.Logf("NOTE no job summary path was exported, so on a non-verbose run this "+
+			"degradation has no surviving report: %s", advisory)
 		return
 	}
 	// One error path, not two: an unopenable file and an unwritable one cost
