@@ -19,6 +19,7 @@ package nativeudp_test
 // component names to the three files ADR 0002 records.
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -27,6 +28,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -1343,7 +1345,7 @@ func TestCredentialEvidenceHasExactlyOneEmissionSite(t *testing.T) {
 // well argued -- successive review passes of the amendment each found one more
 // occurrence a hand-written inventory had missed, including occurrences inside
 // the paragraphs doing the enumerating -- but a count is only worth stating if
-// something checks it, and until this fence nothing did.
+// something checks it, and until these fences nothing did.
 const (
 	// estateComponentFenceSelf is this file, which always carries both
 	// suffixes: estateComponentSuffixes is where those literals are written.
@@ -1356,19 +1358,38 @@ const (
 )
 
 // estateComponentSuffixes are matched literally and case-sensitively, so this
-// fence is exactly the `grep -rn "ca-iro\|ca-ia" .` the amendment tells a
-// redactor to run. Deliberately no broader: a fence that reds on something the
-// documented command would not have found sends the redactor hunting for a site
-// their own grep cannot show them.
+// fence applies the same MATCHING rule as the `grep -rn "ca-iro\|ca-ia" .` the
+// amendment tells a redactor to run. No broader on purpose: a fence that reds
+// on something that grep would not find sends the redactor hunting for a site
+// their own command cannot show them.
+//
+// The FILE SET is narrower than that command's, and the difference is worth
+// stating rather than glossing. skipEstateScanDir drops dot-directories other
+// than .github, plus vendor, node_modules, binaries, and anything past the size
+// cap. Green here is therefore not the same claim as clean under that command
+// run from the repository root, and is not meant to be.
 var estateComponentSuffixes = []string{"ca-iro", "ca-ia"}
 
 // estateComponentSites is the permitted set, as repository-relative
-// slash-separated paths. Slash-separated because Windows is a REQUIRED check
-// here and filepath.Rel yields backslashes there.
-var estateComponentSites = map[string]bool{
-	estateComponentFenceSelf:   true,
-	estateComponentMessageSite: true,
-	estateComponentADRSite:     true,
+// slash-separated paths. Slash-separated because ci.yml's cross-os job runs
+// this package on windows-latest -- it excludes only internal/workflowcontract
+// -- and filepath.Rel yields backslashes there. (cross-os is additive signal
+// rather than a required context, so the normalization is what keeps that job
+// honest, not what unblocks a merge.)
+//
+// A slice rather than a map: three entries lookup fine linearly, and a
+// package-level mutable map is a shared seam this package does not need.
+var estateComponentSites = []string{
+	estateComponentFenceSelf,
+	estateComponentMessageSite,
+	estateComponentADRSite,
+}
+
+// estateComponentCountWords spells the file count the way both documents spell
+// it. Deliberately short: a redaction surface growing past this is not a change
+// anyone should be making without reading the amendment first.
+var estateComponentCountWords = map[int]string{
+	1: "ONE", 2: "TWO", 3: "THREE", 4: "FOUR", 5: "FIVE",
 }
 
 // repositoryRootFromPackage is relative to this package directory, as
@@ -1376,15 +1397,24 @@ var estateComponentSites = map[string]bool{
 // its package directory as the working directory.
 const repositoryRootFromPackage = "../../.."
 
+func estateScanRoot(t *testing.T) string {
+	t.Helper()
+	root, err := filepath.Abs(repositoryRootFromPackage)
+	if err != nil {
+		t.Fatalf("resolve repository root from %s: %v", repositoryRootFromPackage, err)
+	}
+	return root
+}
+
 // TestEstateComponentNamesStayWithinTheRecordedFiles fences the one claim in
 // ADR 0002's 2026-09-01 amendment that nothing else checks.
 //
 // The amendment and the doc comment on otpMailbox.timedOut() both state that a
-// complete redaction of the permitted component suffixes spans THREE files, and
-// both defend stating a count rather than a list on the grounds that the file
-// count is stable and checkable while the sites are not. Checkable, but until
-// this fence unchecked -- so the count would go stale the first time a fourth
-// file named a suffix, and it would go stale silently.
+// complete redaction of the permitted component suffixes spans a fixed number of
+// files, and both defend stating a COUNT rather than a list on the grounds that
+// the file count is stable and checkable while the sites are not. Checkable, but
+// until this fence unchecked -- so the count would go stale the first time a
+// fourth file named a suffix, and it would go stale silently.
 //
 // Silently is the operative word, and it is why this matters more here than a
 // drifting comment usually would. The cell1 assertion in
@@ -1405,10 +1435,7 @@ const repositoryRootFromPackage = "../../.."
 // already known to carry the names is blind to precisely the case this exists
 // for.
 func TestEstateComponentNamesStayWithinTheRecordedFiles(t *testing.T) {
-	root, err := filepath.Abs(repositoryRootFromPackage)
-	if err != nil {
-		t.Fatalf("resolve repository root from %s: %v", repositoryRootFromPackage, err)
-	}
+	root := estateScanRoot(t)
 
 	type occurrence struct {
 		path   string
@@ -1445,8 +1472,8 @@ func TestEstateComponentNamesStayWithinTheRecordedFiles(t *testing.T) {
 		if err != nil {
 			return nil //nolint:nilerr // an unreadable file is not a committed literal
 		}
-		text := string(contents)
-		if strings.IndexByte(text, 0) >= 0 {
+		// Before any copy of the bytes, as the prior art cited above does.
+		if bytes.IndexByte(contents, 0) >= 0 {
 			return nil // binary
 		}
 		relative, relErr := filepath.Rel(root, path)
@@ -1455,18 +1482,19 @@ func TestEstateComponentNamesStayWithinTheRecordedFiles(t *testing.T) {
 		}
 		relative = filepath.ToSlash(relative)
 		for _, suffix := range estateComponentSuffixes {
-			for offset := 0; offset < len(text); {
-				at := strings.Index(text[offset:], suffix)
+			needle := []byte(suffix)
+			for offset := 0; offset < len(contents); {
+				at := bytes.Index(contents[offset:], needle)
 				if at < 0 {
 					break
 				}
 				at += offset
 				found = append(found, occurrence{
 					path:   relative,
-					line:   strings.Count(text[:at], "\n") + 1,
+					line:   bytes.Count(contents[:at], []byte("\n")) + 1,
 					suffix: suffix,
 				})
-				offset = at + len(suffix)
+				offset = at + len(needle)
 			}
 		}
 		return nil
@@ -1480,7 +1508,9 @@ func TestEstateComponentNamesStayWithinTheRecordedFiles(t *testing.T) {
 	// errored into nothing -- shows up as an EMPTY result set, which is
 	// indistinguishable from a clean repository. This file always carries both
 	// suffixes because estateComponentSuffixes is where they are written, so
-	// their absence can only mean the walk never got here.
+	// their absence can only mean the walk never got here. Matched on the full
+	// repo-relative path rather than a basename, so every wrong-root variant
+	// fails it rather than only some.
 	selfHits := map[string]bool{}
 	for _, hit := range found {
 		if hit.path == estateComponentFenceSelf {
@@ -1500,7 +1530,7 @@ func TestEstateComponentNamesStayWithinTheRecordedFiles(t *testing.T) {
 	var sites []string
 	offendingFiles := map[string]bool{}
 	for _, hit := range found {
-		if estateComponentSites[hit.path] {
+		if slices.Contains(estateComponentSites, hit.path) {
 			continue
 		}
 		offendingFiles[hit.path] = true
@@ -1509,18 +1539,59 @@ func TestEstateComponentNamesStayWithinTheRecordedFiles(t *testing.T) {
 	if len(sites) == 0 {
 		return
 	}
-	t.Errorf("estate component suffixes appear in %d file(s) beyond the three ADR 0002 "+
-		"records, at %d site(s):\n  %s\n"+
+	t.Errorf("estate component suffixes appear in %d file(s) beyond the %d ADR 0002 records, "+
+		"at %d site(s):\n  %s\n"+
 		"ADR 0002's 2026-09-01 amendment and the doc comment on otpMailbox.timedOut() in %s "+
-		"BOTH state that a complete redaction spans THREE files; a fourth file makes both "+
+		"BOTH state that a complete redaction spans %s files; a further file makes both "+
 		"statements wrong. Nothing else reds on it -- the cell1 assertion in this file is "+
 		"conditional, so it goes silently inapplicable under redaction rather than failing.\n"+
 		"Either redact the occurrence(s) listed above, or, if the new site is deliberate, add "+
-		"its path to estateComponentSites AND correct the count in BOTH places that state it: "+
-		"the \"it spans THREE files\" paragraph in %s, and the \"A complete redaction spans "+
-		"THREE files\" paragraph in the otpMailbox.timedOut() doc comment in %s.",
-		len(offendingFiles), len(sites), strings.Join(sites, "\n  "),
-		estateComponentMessageSite, estateComponentADRSite, estateComponentMessageSite)
+		"its path to estateComponentSites -- which will then red "+
+		"TestStatedRedactionFileCountMatchesTheAllowlist until you correct the spelled-out "+
+		"count in BOTH %s and the otpMailbox.timedOut() doc comment in %s.",
+		len(offendingFiles), len(estateComponentSites), len(sites), strings.Join(sites, "\n  "),
+		estateComponentMessageSite, estateComponentCountWords[len(estateComponentSites)],
+		estateComponentADRSite, estateComponentMessageSite)
+}
+
+// TestStatedRedactionFileCountMatchesTheAllowlist closes the half of the edit
+// the allowlist alone does not cover.
+//
+// TestEstateComponentNamesStayWithinTheRecordedFiles turns "which files may name
+// a suffix" from prose into a checked allowlist, but it does not check the
+// NUMBER the two paragraphs state. Without this, a maintainer who adds a
+// deliberate fourth site, appends it to estateComponentSites, and updates only
+// one of the two paragraphs gets a green run with both documents still saying
+// THREE -- one of them now wrong, silently, which is the exact failure mode
+// these fences exist to remove. Pinning the spelled-out count against
+// len(estateComponentSites) makes the prose fail on the SAME edit that changes
+// the set, rather than on a later reader happening to notice.
+func TestStatedRedactionFileCountMatchesTheAllowlist(t *testing.T) {
+	root := estateScanRoot(t)
+
+	countWord, ok := estateComponentCountWords[len(estateComponentSites)]
+	if !ok {
+		t.Fatalf("estateComponentSites carries %d path(s) and estateComponentCountWords has no "+
+			"spelling for it. A redaction surface this size is a change to argue in ADR 0002 "+
+			"before extending this map.", len(estateComponentSites))
+	}
+	claim := []byte("spans " + countWord + " files")
+
+	for _, document := range []string{estateComponentADRSite, estateComponentMessageSite} {
+		contents, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(document)))
+		if err != nil {
+			t.Fatalf("read %s: %v", document, err)
+		}
+		if !bytes.Contains(contents, claim) {
+			t.Errorf("%s does not state that a complete redaction %q.\n"+
+				"estateComponentSites now carries %d path(s), so the count this document "+
+				"states is out of date. Adding a site to the allowlist is only half the "+
+				"edit; the spelled-out count in ADR 0002's amendment and in the "+
+				"otpMailbox.timedOut() doc comment is the other half, and it is the half "+
+				"that had nothing checking it before this fence.",
+				document, string(claim), len(estateComponentSites))
+		}
+	}
 }
 
 // skipEstateScanDir reports whether a directory sits outside the tracked tree
@@ -1532,6 +1603,12 @@ func TestEstateComponentNamesStayWithinTheRecordedFiles(t *testing.T) {
 // a second copy of this tree, and each would report the three recorded files at
 // paths estateComponentSites does not carry. An exact-set assertion over a
 // working-tree walk reds on a clean checkout for exactly that reason.
+//
+// Known limitation, stated because stating it is the honest option and checking
+// it would need a subprocess: ".github is the only tracked dot-directory" is
+// itself a stable-and-checkable fact with nothing checking it. A future tracked
+// .devcontainer/ or .config/ naming a suffix would be invisible here until
+// someone adds it below.
 func skipEstateScanDir(name string) bool {
 	switch name {
 	case "vendor", "node_modules":
