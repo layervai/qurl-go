@@ -1,27 +1,32 @@
-# Resolve a resource and verify its CRID
+# Share a resource and verify its CRID
 
-`ResolveResource` asks LayerV to mint a fresh access link for a resource that
-already exists. It is the counterpart of `CreatePortal`: both mint access
-links, but `CreatePortal` is the issuing flow on a `Resource` handle you
-protected or looked up, while `ResolveResource` is addressed by identifier —
-the public-key resource id or the resource's CRID — and its response can be
-tied to a resource key you already hold with `VerifyCRID`.
+`ShareResource` asks LayerV to mint a fresh share link — a short-lived qURL
+access link — for a resource that already exists. It is the counterpart of
+`CreatePortal`: both mint access links, but `CreatePortal` is the issuing flow
+on a `Resource` handle you protected or looked up, while `ShareResource` is
+addressed by identifier — the public-key resource id or the resource's CRID —
+and its response can be tied to a resource key you already hold with
+`VerifyCRID`.
 
-## Resolve an access link
+A CRID is safe to share: paste it anywhere. The share link is the secret, and
+`ShareResource` is what turns the identifier into access. Each share link
+expires on its own; share again whenever you need a fresh one.
+
+## Mint a share link
 
 ```go
-access, err := client.ResolveResource(ctx, resourceID, nil)
+share, err := client.ShareResource(ctx, resourceID, nil)
 if err != nil {
-	return err
+    return err
 }
 
-fmt.Println(access.Link)
+fmt.Println(share.Link)
 ```
 
 `resourceID` accepts either identifier form the platform serves: the
 public-key resource id (the `Resource.ID` you stored after `ProtectURL`) or
 the resource's CRID. The SDK validates presence only; the server is
-authoritative for which identifiers resolve.
+authoritative for which identifiers it accepts.
 
 ### Link lifetime
 
@@ -32,14 +37,14 @@ for account limits. The wire carries whole integer seconds, so a nonzero
 with `ErrInvalidResourceRequest` rather than rounded.
 
 ```go
-access, err := client.ResolveResource(ctx, resourceID, &qurl.ResolveResourceOptions{
-	TTL: 90 * time.Second,
+share, err := client.ShareResource(ctx, resourceID, &qurl.ShareResourceOptions{
+    TTL: 90 * time.Second,
 })
 if err != nil {
-	return err
+    return err
 }
 
-fmt.Println(access.ExpiresAt, access.ExpiresInSeconds, access.SingleUse)
+fmt.Println(share.ExpiresAt, share.ExpiresInSeconds, share.SingleUse)
 ```
 
 The lifetime fields on the response report the server's grant, never an echo
@@ -48,27 +53,27 @@ reports whether the link expires on first successful use.
 
 ### Revoke one minted link
 
-Every resolve mints a new link, and each one is revocable on its own.
-`ResolvedAccess.QURLID` is the handle; `RevokePortal` is the call, taking the
-same `resourceID` you resolved:
+Every share mints a new link, and each one is revocable on its own.
+`ShareLink.QURLID` is the handle; `RevokePortal` is the call, taking the same
+`resourceID` you shared:
 
 ```go
-access, err := client.ResolveResource(ctx, resourceID, nil)
+share, err := client.ShareResource(ctx, resourceID, nil)
 if err != nil {
-	return err
+    return err
 }
 
-// … hand access.Link to the recipient, then withdraw it …
+// … hand share.Link to the recipient, then withdraw it …
 
-if err := client.RevokePortal(ctx, resourceID, access.QURLID); err != nil {
-	return err
+if err := client.RevokePortal(ctx, resourceID, share.QURLID); err != nil {
+    return err
 }
 ```
 
 Only that link stops working; the resource and any other links minted from it
-are untouched. Capture `QURLID` when you resolve — like `Link`, it is not
+are untouched. Capture `QURLID` when you share — like `Link`, it is not
 retrievable afterwards, and it is empty when the API omits it (a server
-predating the field), which is the one case where a resolve-minted link has no
+predating the field), which is the one case where a share link has no
 individual revocation handle.
 
 Revocation is not idempotent: the second call fails with
@@ -76,14 +81,14 @@ Revocation is not idempotent: the second call fails with
 only needs the link dead can treat that as settled.
 
 ```go
-err := client.RevokePortal(ctx, resourceID, access.QURLID)
+err := client.RevokePortal(ctx, resourceID, share.QURLID)
 switch {
 case err == nil:
-	// The link is dead.
+    // The link is dead.
 case errors.Is(err, qurl.ErrPortalRevoked):
-	// Already revoked — the outcome the caller wanted, reached earlier.
+    // Already revoked — the outcome the caller wanted, reached earlier.
 default:
-	return err
+    return err
 }
 ```
 
@@ -91,25 +96,25 @@ default:
 revokes a `CreatePortal` link — the platform mints one kind of qURL however
 you ask for it. See [Issue links](issuing-links.md) for the create side.
 
-## Resolve, verify, open
+## Share, verify, open
 
-`ResolveResource` deliberately does not parse, verify, or open the link.
-When the link is qv2-shaped — `access.Type` reports `"qv2"` — the
-composition is resolve → verify → `EnterPortal`:
+`ShareResource` deliberately does not parse, verify, or open the link. When
+the link is qv2-shaped — `share.Type` reports `"qv2"` — the composition is
+share → verify → `EnterPortal`:
 
 ```go
-access, err := client.ResolveResource(ctx, resourceID, nil)
+share, err := client.ShareResource(ctx, resourceID, nil)
 if err != nil {
-	return err
+    return err
 }
 
-if err := access.VerifyCRID(resourceKeyDER); err != nil {
-	return err
+if err := share.VerifyCRID(resourceKeyDER); err != nil {
+    return err
 }
 
-handle, err := qurl.EnterPortal(ctx, access.Link)
+handle, err := qurl.EnterPortal(ctx, share.Link)
 if err != nil {
-	return err
+    return err
 }
 
 fmt.Println(handle.ResourceURL)
@@ -117,7 +122,7 @@ fmt.Println(handle.ResourceURL)
 
 `resourceKeyDER` is the resource public key you already hold, as DER
 SubjectPublicKeyInfo bytes exactly as delivered. `VerifyCRID` re-derives the
-CRID from those bytes and compares it to `access.CRID` in constant time: nil
+CRID from those bytes and compares it to `share.CRID` in constant time: nil
 means the key is the one the CRID commits to, and any non-nil error is a
 fail-closed "do not use this key on the strength of this response".
 
@@ -127,30 +132,30 @@ once at startup; see [Open links](opening-links.md).
 ## Errors
 
 ```go
-access, err := client.ResolveResource(ctx, resourceID, nil)
+share, err := client.ShareResource(ctx, resourceID, nil)
 if err == nil {
-	err = access.VerifyCRID(resourceKeyDER)
+    err = share.VerifyCRID(resourceKeyDER)
 }
 
 switch {
 case err == nil:
-	// Resolved, and the response is bound to the held key.
+    // Shared, and the response is bound to the held key.
 case errors.Is(err, qurl.ErrTemporaryAccessLinksDisabled):
-	// The LayerV API answered 503: the environment is not currently
-	// serving temporary access links. Service posture, not a bad request —
-	// callers that treat resolve as optional can fall back here.
-	return err
+    // The LayerV API answered 503: the environment is not currently
+    // serving temporary access links. Service posture, not a bad request —
+    // callers that treat sharing as optional can fall back here.
+    return err
 case errors.Is(err, qurl.ErrNoCRID):
-	// The response carried no CRID to verify against (older server or
-	// keyless resource). Verification fails closed: absence is not a
-	// mismatch, but it is not a pass either.
-	return err
+    // The response carried no CRID to verify against (older server or
+    // keyless resource). Verification fails closed: absence is not a
+    // mismatch, but it is not a pass either.
+    return err
 case errors.Is(err, qurl.ErrCRIDMismatch):
-	// The supplied resource key does not derive the held CRID — the
-	// substitution the identifier exists to detect. Do not use the key.
-	return err
+    // The supplied resource key does not derive the held CRID — the
+    // substitution the identifier exists to detect. Do not use the key.
+    return err
 default:
-	return err
+    return err
 }
 ```
 
@@ -197,7 +202,7 @@ mismatch the consumer fails closed — no fallback to the delivered key, no
 partial trust.
 
 In the flow above the rule is applied for you: `VerifyCRID` is `KeyMatches`
-against `access.CRID`, wrapped in the client's sentinels. Apply `KeyMatches`
+against `share.CRID`, wrapped in the client's sentinels. Apply `KeyMatches`
 directly when you hold a bare CRID — for example the `Resource.CRID` stored
 from a `ProtectURL` response — and a resource key arrives over any other
 channel:
@@ -205,10 +210,10 @@ channel:
 ```go
 ok, err := crid.KeyMatches(heldCRID, deliveredKeyDER)
 if err != nil {
-	return err // the held CRID failed the local validation gate
+    return err // the held CRID failed the local validation gate
 }
 if !ok {
-	return fmt.Errorf("delivered key does not derive the held crid")
+    return fmt.Errorf("delivered key does not derive the held crid")
 }
 ```
 
@@ -233,18 +238,18 @@ production, test, or unknown — unknown for unregistered version bytes, rather
 than guessing from the environment bit:
 
 ```go
-c, err := crid.Parse(access.CRID)
+c, err := crid.Parse(share.CRID)
 if err != nil {
-	return err
+    return err
 }
 
 switch c.Environment() {
 case crid.EnvironmentProduction:
-	// version byte registered for production
+    // version byte registered for production
 case crid.EnvironmentTest:
-	// version byte registered for test environments
+    // version byte registered for test environments
 case crid.EnvironmentUnknown:
-	// unregistered version: forward it to the server, never reject locally
+    // unregistered version: forward it to the server, never reject locally
 }
 ```
 

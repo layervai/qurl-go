@@ -192,13 +192,13 @@ resource := client.ResourceByID(resourceID)
 portal, err := resource.CreatePortal(ctx, qurl.ValidFor(time.Hour))
 ```
 
-`CreatePortal` and `Client.ResolveResource` both mint an access link.
+`CreatePortal` and `Client.ShareResource` both mint an access link.
 `CreatePortal` is the portal-options path on a resource handle;
-`ResolveResource` is the stored-identifier path — it accepts the resource id or
-the resource's CRID and returns a `ResolvedAccess` whose CRID you can verify
+`ShareResource` is the stored-identifier path — it accepts the resource id or
+the resource's CRID and returns a `ShareLink` whose CRID you can verify
 against a key you already hold (`VerifyCRID`). Both leave the link lifetime to
 the server default unless you ask (`ValidFor` on a portal,
-`ResolveResourceOptions.TTL` on a resolve).
+`ShareResourceOptions.TTL` on a share).
 
 Minted links use the share-safe `#qv2t1...` fragment transport. It keeps every
 dot-separated component at 240 characters or fewer so messaging clients retain
@@ -353,7 +353,7 @@ that raises them:
 | --- | --- |
 | `qurl.ErrInvalidClientConfig` | Resource-client credentials or options are malformed |
 | `qurl.ErrInvalidPortalRequest` | A portal input is invalid; rejected before any API request is sent |
-| `qurl.ErrPortalRevoked` | `RevokePortal` found the qURL no longer active: that link — created or resolve-minted — was already revoked, so a repeat revoke had nothing to do. The underlying `*APIError` stays matchable |
+| `qurl.ErrPortalRevoked` | `RevokePortal` found the qURL no longer active: that link — created or shared — was already revoked, so a repeat revoke had nothing to do. The underlying `*APIError` stays matchable |
 | `*qurl.APIError` | LayerV returned a non-2xx steady-state resource response |
 
 **Opening links**
@@ -384,11 +384,11 @@ that raises them:
 | `*qurl.NativeCredentialRecoveryRequiredError` | Completed native credential state is absent or malformed; explicit native recovery or reprovisioning is required |
 | `*qurl.AgentAssignmentChangedError` | A renewal pinned with `WithAgentRuntimePinnedAssignment` — in `ConnectAgentRuntime` or `RefreshAgentRuntime`, or a binding either returned — found that LayerV moved your service; drop the option to follow the move |
 
-**Resolve and CRID**
+**Share and CRID**
 
 | Error | Meaning |
 | --- | --- |
-| `qurl.ErrTemporaryAccessLinksDisabled` | `ResolveResource` got a 503: the environment is not serving temporary access links. The underlying `*APIError` stays matchable |
+| `qurl.ErrTemporaryAccessLinksDisabled` | `ShareResource` got a 503: the environment is not serving temporary access links. The underlying `*APIError` stays matchable |
 | `qurl.ErrNoCRID` | `VerifyCRID` had no CRID to check against — the server omitted it (older server or keyless resource). Fails closed: absence is not a mismatch, but it is not a pass |
 | `qurl.ErrCRIDMismatch` | The supplied resource key does not derive the held CRID — the substitution the identifier exists to detect. Do not use the key |
 
@@ -410,13 +410,13 @@ that raises them:
 
 Revocation covers every minted link. `RevokePortal` revokes a single link
 immediately, whichever call minted it: pass `Portal.ResourceID` and
-`Portal.QURLID` from a create, or the resource id you resolved and
-`ResolvedAccess.QURLID` from a `ResolveResource`. Only that link dies — the
+`Portal.QURLID` from a create, or the resource id you shared and
+`ShareLink.QURLID` from a `ShareResource`. Only that link dies — the
 resource and its other live links keep working — and revoking a link that is
 no longer active fails with `ErrPortalRevoked` rather than reporting success
 it did not cause. Capture the qurl id when you mint: like the link itself, it
 is not retrievable afterwards, and a server predating the field omits it. A
-short `ResolveResourceOptions.TTL` remains the complementary control at mint
+short `ShareResourceOptions.TTL` remains the complementary control at mint
 time. `DeleteConnectorResource` revokes an entire connector resource (see
 [Resolve and manage qURL Connector resources](docs/connector-resources.md)).
 
@@ -426,7 +426,7 @@ time. `DeleteConnectorResource` revokes an entire connector resource (see
 - [Connect a service or agent](docs/register-an-agent.md)
 - [Resolve and manage qURL Connector resources](docs/connector-resources.md)
 - [Issue links](docs/issuing-links.md)
-- [Resolve a resource and verify its CRID](docs/resolve-and-crid.md)
+- [Share a resource and verify its CRID](docs/share-and-crid.md)
 - [Open links](docs/opening-links.md)
 - [Testing against NHP](docs/testing-against-nhp.md) — loopback suites for most
   work, live sandbox for interop

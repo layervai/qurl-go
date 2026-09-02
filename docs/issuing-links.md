@@ -93,9 +93,9 @@ if err != nil && !errors.Is(err, qurl.ErrPortalRevoked) {
 ```
 
 `RevokePortal` is the revoke call for every link the client mints, not just
-these. A link minted by `ResolveResource` carries its own `QURLID` too — pass
-it with the resource id you resolved; see
-[Resolve a resource and verify its CRID](resolve-and-crid.md#revoke-one-minted-link).
+these. A share link minted by `ShareResource` carries its own `QURLID` too —
+pass it with the resource id you shared; see
+[Share a resource and verify its CRID](share-and-crid.md#revoke-one-minted-link).
 
 ## qURL Connector-Protected Services
 
