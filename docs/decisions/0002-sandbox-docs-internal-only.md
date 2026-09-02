@@ -125,19 +125,17 @@ of the same file. The `AuthorityOperation` values are the exception: those
 two ARE pinned unconditionally, deliberately, as log identifiers rather than
 coordinates, so removing one reds a REQUIRED check.
 
-The rest of the cost is edit surface, and it is THREE files rather than the
-one an earlier version of this note claimed. The message carries the
-literals; this document quotes all five in the Permitted list above; and the
-fence carries them a third time — `ca-iro-cell1` in its conditional and its
-failure string, and BOTH cells in the comment above them, which quotes the
-unqualified phrasing it exists to forbid. The fence stays green under
-redaction — that is the property verified above — but green is not the same
-as edited: a redactor who stops short leaves it quoting a string that exists
-nowhere, with nothing red to say so. Counting this document is intrinsic to
-reversing a recorded ruling rather than a reason not to record it; counting
-the fence is simply the correct count, and it is stated here because a
-future redactor arrives at this ADR before they arrive at a comment in a
-test file.
+The rest of the cost is edit surface, and it spans THREE files: the message,
+this document, and `tests/e2e/nativeudp/otp_failure_diagnostics_test.go`.
+Within them, GREP rather than working from a list. Successive review passes
+of this amendment each found one more occurrence a hand-written inventory
+had missed — including occurrences inside the paragraphs doing the
+enumerating — because such a list is always one behind and reads as verified
+when it was only reasoned. The file count is stated because it is stable and
+checkable; the sites are not. The fence stays green under redaction, which
+is precisely why this matters: nothing reds to catch a half-finished
+redaction. Counting this document is intrinsic to reversing a recorded
+ruling rather than a reason not to record it.
 
 ## Consequences
 

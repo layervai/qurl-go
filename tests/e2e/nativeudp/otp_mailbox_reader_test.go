@@ -300,15 +300,18 @@ func (m *otpMailbox) snapshot() (calls int, fresh bool) {
 // tests/e2e/nativeudp stayed green both times.
 //
 // It is no longer the ONE-file edit this comment used to promise. A complete
-// redaction is THREE files: this message, the ADR amendment that quotes the
-// names, and this fence -- which carries "ca-iro-cell1" in its conditional and
-// its failure string, and BOTH cells in the comment above them, since that
-// comment quotes the unqualified phrasing it exists to forbid. Enumerated to
-// the SITE rather than the file, because a redactor who deletes only the
-// cell1 sites leaves cell0 behind in that comment, which is this paragraph's
-// own warning applied one level down. The fence stays green either way, which is
-// precisely why the count matters -- stop at two and it is left quoting a
-// string that exists nowhere, with nothing red to say so.
+// redaction spans THREE files: this one, the ADR amendment that quotes the
+// names, and otp_failure_diagnostics_test.go. Within them, GREP -- do not
+// work from a list. Successive review passes each found one more occurrence a
+// hand-written inventory had missed, including ones in the very paragraphs
+// doing the enumerating: this comment names ca-ia and ca-iro-cell1 in its own
+// prose, not just in the format string below. An inventory of sites is always
+// one occurrence behind, and reads as verified when it was merely reasoned,
+// which is the failure this paragraph warns about turned on itself. The file
+// count is worth stating because it is stable and checkable; the sites are
+// not, so the instruction is `grep -rn "ca-iro\|ca-ia" .` rather than a list.
+// The fence stays green under redaction either way, which is precisely why
+// this matters -- nothing reds to catch a half-finished job.
 //
 // The AuthorityOperation values are the exception, and are pinned outright:
 // they are the authority's log schema rather than a coordinate, so removing
