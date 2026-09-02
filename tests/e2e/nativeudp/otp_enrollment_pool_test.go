@@ -9,6 +9,9 @@ package nativeudp_test
 // test. That is expensive to diagnose from CI and nearly free to catch here.
 
 import (
+	"maps"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -631,26 +634,8 @@ func TestSelectEnrollmentAlwaysReturnsAPoolMember(t *testing.T) {
 // the pool and the single value each satisfy the requirement alone, and the
 // skip path must still trip when neither is present.
 func TestLoadOTPE2EConfigAcceptsEitherCredentialSource(t *testing.T) {
-	base := map[string]string{
-		otpE2EHubHostEnv:          "hub.example",
-		otpE2EHubPortEnv:          "443",
-		otpE2EHubKeyEnv:           "key",
-		otpE2EAgentIDEnv:          "agent",
-		otpE2EMailboxQueueURLEnv:  "https://queue.example/q",
-		otpE2EMailboxBucketEnv:    "bucket",
-		otpE2EMailboxRecipientEnv: "otp@example",
-		otpE2EMailboxRegionEnv:    "region-placeholder",
-	}
-	with := func(extra map[string]string) map[string]string {
-		merged := map[string]string{}
-		for k, v := range base {
-			merged[k] = v
-		}
-		for k, v := range extra {
-			merged[k] = v
-		}
-		return merged
-	}
+	base := otpE2EBaseEnv(nil)
+	with := otpE2EBaseEnv
 
 	t.Run("pool alone suffices", func(t *testing.T) {
 		cfg, skip, err := loadOTPE2EConfig(envFrom(with(map[string]string{
@@ -1063,4 +1048,466 @@ func TestLoadOTPE2EConfigAcceptsEitherCredentialSource(t *testing.T) {
 			t.Fatalf("strict error %q names neither credential variable", err)
 		}
 	})
+}
+
+// otpE2EBaseEnv is every variable loadOTPE2EConfig lists as required, present
+// and valid, plus whatever the caller layers on top.
+//
+// ONE copy, shared with the credential-source test above, because these eight
+// are not a tuning knob -- they are the "nothing else is wrong" fixture, and
+// they mirror loadOTPE2EConfig's `required` slice exactly. A second copy that
+// drifted would not fail loudly: the fences below would start exercising the
+// missing-variable path while still reporting an error, so they would pass for
+// the wrong reason. The assertions below name the guard they expect for the
+// same reason.
+func otpE2EBaseEnv(extra map[string]string) map[string]string {
+	merged := map[string]string{
+		otpE2EHubHostEnv:          "hub.example",
+		otpE2EHubPortEnv:          "443",
+		otpE2EHubKeyEnv:           "key",
+		otpE2EAgentIDEnv:          "agent",
+		otpE2EMailboxQueueURLEnv:  "https://queue.example/q",
+		otpE2EMailboxBucketEnv:    "bucket",
+		otpE2EMailboxRecipientEnv: "otp@example",
+		// region-placeholder, not a real region: #237 settled the gate's region
+		// under ADR 0002 rather than unmasking it, and this fixture is the
+		// hoisted copy of the map that change edited.
+		otpE2EMailboxRegionEnv: "region-placeholder",
+	}
+	maps.Copy(merged, extra)
+	return merged
+}
+
+// strictOTPEnv is otpE2EBaseEnv with strict mode and a usable rotation counter,
+// so a caller varying only the credential source reaches the strict credential
+// guards rather than tripping the counter check on the way. (Named for OTP
+// because `strictEnv` is already the sandbox strictness variable next door.)
+func strictOTPEnv(extra map[string]string) map[string]string {
+	merged := otpE2EBaseEnv(map[string]string{
+		otpE2EStrictEnv:      "1",
+		"GITHUB_RUN_NUMBER":  "5",
+		"GITHUB_RUN_ATTEMPT": "1",
+	})
+	maps.Copy(merged, extra)
+	return merged
+}
+
+// TestShortPoolErrorPrescribesARemedyCICanTake pins the fix the hard-fail
+// message offers, because a REQUIRED check that prescribes an impossible step
+// costs more than one that says nothing: the operator does the step, sees no
+// change, and distrusts the message the next time it is right.
+//
+// Why the superseded wording was a dead end -- and why wiring the variable it
+// named would not have helped either -- is argued once, at the guard itself in
+// loadOTPE2EConfig. This pins the result.
+func TestShortPoolErrorPrescribesARemedyCICanTake(t *testing.T) {
+	env := strictOTPEnv(nil)
+	env[otpE2EEnrollmentPoolEnv] = "only-one"
+	_, _, err := loadOTPE2EConfig(envFrom(env))
+	if err == nil {
+		t.Fatal("strict run accepted a one-entry pool; the gate would run unpooled")
+	}
+	got := err.Error()
+
+	// The remedy has to name the source CI actually wires, and has to be an
+	// instruction rather than a diagnosis.
+	if !strings.Contains(got, "Re-save the secret behind "+otpE2EEnrollmentPoolEnv) {
+		t.Fatalf("short-pool error %q does not prescribe re-saving the pool secret, "+
+			"which is the only credential source any workflow wires", got)
+	}
+	// The single-credential variable must still be NAMED -- a local run needs to
+	// know it exists -- but only as the local path, never as the fix.
+	//
+	// The name is pinned TOGETHER WITH its disclaimer, in one substring. Testing
+	// for the bare name is vacuous here: the pool variable's name extends this
+	// one, so `Contains(got, otpE2EEnrollmentEnv)` is already satisfied by the
+	// remedy's mention of the pool, and deleting the single-credential name from
+	// the message entirely left this test green. Same prefix collision the
+	// workflow fence anchors around, one layer up.
+	if !strings.Contains(got, "("+otpE2EEnrollmentEnv+" is a LOCAL-run convenience") ||
+		!strings.Contains(got, "does not clear this") {
+		t.Fatalf("short-pool error %q does not name %s as a local-only path; an "+
+			"operator reading it from CI would set a variable nothing maps in",
+			got, otpE2EEnrollmentEnv)
+	}
+}
+
+// TestSingleCredentialVariableCannotClearAShortPool is the behavioural half of
+// the fence above: the message promises that setting the single-credential
+// variable does not clear the failure, and this holds it to that.
+//
+// It asserts strict still fails AND that it failed on the short-pool guard, not
+// merely that some error came back. Without the second half the test would keep
+// passing if the config grew a new required variable this fixture forgot to
+// set, reporting a missing variable while claiming to prove something about
+// pooling.
+func TestSingleCredentialVariableCannotClearAShortPool(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		pool string
+	}{
+		{"truncated to one line", "only-one"},
+		{"damaged to separators", "  ,  , "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := strictOTPEnv(nil)
+			env[otpE2EEnrollmentPoolEnv] = tc.pool
+			env[otpE2EEnrollmentEnv] = "a-rescue-credential"
+
+			_, skip, err := loadOTPE2EConfig(envFrom(env))
+			if err == nil || skip {
+				t.Fatalf("setting %s cleared a damaged pool (skip %t, err %v): the strict "+
+					"message tells operators it does not, so either the message or this "+
+					"rescue path is now wrong", otpE2EEnrollmentEnv, skip, err)
+			}
+			// The GUARD's own opening, not just the variable's name. strict
+			// aggregates every unmet prerequisite into one error, and the
+			// missing-variable branch names this same variable -- so a fixture
+			// that stopped setting the pool at all would satisfy a bare name
+			// check while proving nothing about pooling. "<name> parsed " can
+			// only come from the short-pool guard.
+			if !strings.Contains(err.Error(), otpE2EEnrollmentPoolEnv+" parsed ") {
+				t.Fatalf("strict failed for the wrong reason (%v); this fence is only "+
+					"meaningful while the SHORT-POOL guard is what refused it", err)
+			}
+		})
+	}
+}
+
+// TestPoolAdvisoriesReportEveryDegradation pins the SET of advisories a config
+// produces -- the assertion that was missing while the emission lived inline in
+// a test only the sandbox can run.
+//
+// Sizes are passed explicitly and never read from the live pool, which is a
+// secret and was seven -- prime, hence silent -- as of 2026-08-31. A fence that
+// read the live size would assert nothing on exactly the healthy pool.
+//
+// The per-size WORDING is TestPoolSizeAdvisorySpeaksAtEverySizeThatCosts's job;
+// what is unique here is the title each advisory carries, their order, and that
+// both can fire at once.
+func TestPoolAdvisoriesReportEveryDegradation(t *testing.T) {
+	const (
+		sizeTitle      = "OTP credential pool size is degraded"
+		duplicateTitle = "OTP credential pool has duplicates"
+	)
+
+	for _, tc := range []struct {
+		name       string
+		size       int
+		duplicates int
+		want       []string
+	}{
+		{"prime size, no duplicates, is silent", 7, 0, nil},
+		{"composite size speaks", 8, 0, []string{sizeTitle}},
+		{"size two speaks", 2, 0, []string{sizeTitle}},
+		{"a pool of one speaks", 1, 0, []string{sizeTitle}},
+		// Pins noteDegradation's doc claim that poolSizeAdvisory covers 0 even
+		// though the loader cannot produce it, rather than leaving it as prose.
+		{"an empty pool speaks", 0, 0, []string{sizeTitle}},
+		{"duplicates alone speak", 7, 2, []string{duplicateTitle}},
+		{"both degradations both speak", 8, 2, []string{sizeTitle, duplicateTitle}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := poolAdvisories(otpE2EConfig{
+				enrollmentPoolSize:       tc.size,
+				enrollmentPoolDuplicates: tc.duplicates,
+			})
+			if len(got) != len(tc.want) {
+				t.Fatalf("poolAdvisories(size %d, %d duplicate(s)) returned %d advisory(ies), "+
+					"want %d: %+v", tc.size, tc.duplicates, len(got), len(tc.want), got)
+			}
+			for i, title := range tc.want {
+				if got[i].title != title {
+					t.Errorf("advisory %d has title %q, want %q", i, got[i].title, title)
+				}
+				if strings.TrimSpace(got[i].text) == "" {
+					t.Errorf("advisory %d (%s) carries no text, so the annotation would be "+
+						"empty on the check", i, title)
+				}
+			}
+		})
+	}
+}
+
+// TestNoteDegradationReportsOnEveryChannel pins the escalation itself. A t.Logf
+// on a PASSING test is the log nobody opens, so every non-fatal degradation
+// also has to reach a surface somebody sees.
+//
+// Every case DESCRIBES its environment through a lookup rather than setting one
+// with t.Setenv. That is the property the emitter's lookup parameter buys: no
+// case here can touch the real runner's job summary, however degraded a pool it
+// asks for.
+func TestNoteDegradationReportsOnEveryChannel(t *testing.T) {
+	onCI := func(summaryPath string) func(string) string {
+		return envFrom(map[string]string{
+			"GITHUB_ACTIONS":      "true",
+			"GITHUB_STEP_SUMMARY": summaryPath,
+		})
+	}
+
+	t.Run("annotates on GitHub", func(t *testing.T) {
+		got := captureAnnotations(t, func() {
+			noteDegradation(t, onCI(""), "a title", "an advisory")
+		})
+		if want := "::warning title=a title::an advisory\n"; got != want {
+			t.Fatalf("noteDegradation wrote %q, want %q; without the workflow command "+
+				"a degraded run shows nothing on the check", got, want)
+		}
+	})
+
+	t.Run("escapes what would truncate the annotation", func(t *testing.T) {
+		// A newline ends a workflow command, and a literal % opens an escape.
+		// Either one silently truncates the annotation -- the single outcome
+		// this emitter exists to prevent.
+		got := captureAnnotations(t, func() {
+			noteDegradation(t, onCI(""), "ti:tle", "line one\nline two 50% spent")
+		})
+		want := "::warning title=ti%3Atle::line one%0Aline two 50%25 spent\n"
+		if got != want {
+			t.Fatalf("noteDegradation wrote %q, want %q", got, want)
+		}
+
+		// The two PROPERTY-only rules, which the case above does not reach: a
+		// comma ends a property and a carriage return ends the command, so both
+		// truncate a title that carries them. Untested rules are the ones a
+		// future edit drops without failing anything.
+		got = captureAnnotations(t, func() {
+			noteDegradation(t, onCI(""), "a,b\rc", "an advisory")
+		})
+		if want := "::warning title=a%2Cb%0Dc::an advisory\n"; got != want {
+			t.Fatalf("noteDegradation wrote %q, want %q; a comma or a carriage return in "+
+				"a title truncates the annotation", got, want)
+		}
+		if strings.Count(got, "\n") != 1 {
+			t.Errorf("annotation %q spans more than one line, so GitHub reads only "+
+				"the first", got)
+		}
+	})
+
+	t.Run("appends every advisory to the job summary", func(t *testing.T) {
+		summary := filepath.Join(t.TempDir(), "summary.md")
+		if err := os.WriteFile(summary, []byte("earlier step output\n"), 0o644); err != nil {
+			t.Fatalf("seed summary: %v", err)
+		}
+		lookup := onCI(summary)
+
+		_ = captureAnnotations(t, func() {
+			noteDegradation(t, lookup, "first title", "first advisory")
+			noteDegradation(t, lookup, "second title", "second advisory")
+		})
+
+		raw, err := os.ReadFile(summary)
+		if err != nil {
+			t.Fatalf("read summary: %v", err)
+		}
+		// Titles as well as texts, and the content the job wrote BEFORE this
+		// step: opening with O_TRUNC would drop the earlier advisory whenever
+		// two fire together, which is the pair most likely to fire together.
+		for _, want := range []string{
+			"earlier step output",
+			"first title", "first advisory",
+			"second title", "second advisory",
+		} {
+			if !strings.Contains(string(raw), want) {
+				t.Fatalf("job summary %q omits %q; the canary runs non-verbose, so this "+
+					"is the only channel a degraded-but-green run has left", raw, want)
+			}
+		}
+	})
+
+	t.Run("keeps a multi-line advisory inside the blockquote", func(t *testing.T) {
+		summary := filepath.Join(t.TempDir(), "summary.md")
+		_ = captureAnnotations(t, func() {
+			noteDegradation(t, onCI(summary), "a title", "first line\nsecond line")
+		})
+		raw, err := os.ReadFile(summary)
+		if err != nil {
+			t.Fatalf("read summary: %v", err)
+		}
+		if !strings.Contains(string(raw), "> second line") {
+			t.Fatalf("job summary %q dropped the quote marker on a continuation line, so "+
+				"the rest renders as body text detached from its warning", raw)
+		}
+	})
+
+	t.Run("quotes the advisory's FIRST line, not just its continuations", func(t *testing.T) {
+		// An advisory opening with a list marker is the case that separates a
+		// bare first line from a quoted one. A bare line of plain words is
+		// absorbed back into the blockquote by lazy continuation, so the two
+		// multi-line cases below cannot see this hole; a "- " line interrupts
+		// the paragraph and escapes the [!WARNING] alert entirely.
+		summary := filepath.Join(t.TempDir(), "summary.md")
+		_ = captureAnnotations(t, func() {
+			noteDegradation(t, onCI(summary), "a title", "- first line\n- second line")
+		})
+		raw, err := os.ReadFile(summary)
+		if err != nil {
+			t.Fatalf("read summary: %v", err)
+		}
+		if !strings.Contains(string(raw), "> - first line") {
+			t.Fatalf("job summary %q left the advisory's first line unquoted; an advisory "+
+				"opening with a list marker then escapes the alert instead of rendering "+
+				"inside it", raw)
+		}
+	})
+
+	t.Run("keeps a multi-line TITLE inside the blockquote", func(t *testing.T) {
+		// The annotation path escapes the title; this one interpolated it raw,
+		// so the hardening was advisory-only. Same third-advisory argument.
+		summary := filepath.Join(t.TempDir(), "summary.md")
+		_ = captureAnnotations(t, func() {
+			noteDegradation(t, onCI(summary), "first title\nsecond title", "an advisory")
+		})
+		raw, err := os.ReadFile(summary)
+		if err != nil {
+			t.Fatalf("read summary: %v", err)
+		}
+		if !strings.Contains(string(raw), "> second title") {
+			t.Fatalf("job summary %q dropped the quote marker inside the title, which "+
+				"breaks the blockquote the advisory handling protects", raw)
+		}
+	})
+
+	t.Run("creates the summary when the runner only exported the path", func(t *testing.T) {
+		// NOT pre-created, unlike the case above. The hosted runner makes this
+		// file itself, but a self-hosted runner or `act` may export only the
+		// path -- and without O_CREATE that ENOENTs, which on the canary means
+		// the degradation has no surviving report at all.
+		summary := filepath.Join(t.TempDir(), "summary.md")
+		_ = captureAnnotations(t, func() {
+			noteDegradation(t, onCI(summary), "a title", "an advisory")
+		})
+
+		raw, err := os.ReadFile(summary)
+		if err != nil {
+			t.Fatalf("summary was not created (%v); on the canary that is total silence, "+
+				"because a non-verbose passing run discards the annotation and the "+
+				"t.Logf fallback alike", err)
+		}
+		if !strings.Contains(string(raw), "an advisory") {
+			t.Fatalf("created summary %q omits the advisory", raw)
+		}
+	})
+
+	t.Run("reports when no summary path was exported", func(t *testing.T) {
+		// On CI with no summary channel at all -- `act`, some self-hosted
+		// runners. Every other delivery failure logs a NOTE; this one used to
+		// return silently, so the run could not tell a skipped channel from a
+		// working one.
+		var logged strings.Builder
+		recorder := &recordingTB{}
+		got := captureAnnotations(t, func() {
+			noteDegradation(recorder, onCI(""), "a title", "an advisory")
+		})
+		for _, line := range recorder.logs {
+			logged.WriteString(line)
+		}
+		if !strings.Contains(logged.String(), "no job summary path was exported") {
+			t.Fatalf("noteDegradation logged %q with no summary path; an absent channel "+
+				"must say so, like every other delivery failure here", recorder.logs)
+		}
+		// The annotation is unaffected -- it does not depend on the summary.
+		if !strings.Contains(got, "::warning title=a title::") {
+			t.Errorf("annotation missing with no summary path: %q", got)
+		}
+	})
+
+	t.Run("an unwritable summary does not fail the gate", func(t *testing.T) {
+		unwritable := filepath.Join(t.TempDir(), "absent", "summary.md")
+		got := captureAnnotations(t, func() {
+			noteDegradation(t, onCI(unwritable), "a title", "an advisory")
+		})
+		// Still annotated. A reporting channel that cannot open must not turn a
+		// healthy registration into a red required check.
+		if !strings.Contains(got, "::warning title=a title::") {
+			t.Fatalf("noteDegradation wrote %q with an unwritable summary; the annotation "+
+				"is independent of it", got)
+		}
+	})
+
+	t.Run("stays quiet off GitHub", func(t *testing.T) {
+		summary := filepath.Join(t.TempDir(), "summary.md")
+		if err := os.WriteFile(summary, nil, 0o644); err != nil {
+			t.Fatalf("seed summary: %v", err)
+		}
+		offCI := envFrom(map[string]string{"GITHUB_STEP_SUMMARY": summary})
+
+		got := captureAnnotations(t, func() {
+			noteDegradation(t, offCI, "a title", "an advisory")
+		})
+		if got != "" {
+			t.Fatalf("noteDegradation wrote %q off CI; workflow commands are noise in a "+
+				"local run", got)
+		}
+		if raw, err := os.ReadFile(summary); err != nil || len(raw) != 0 {
+			t.Fatalf("noteDegradation wrote %q to the summary off CI (err %v)", raw, err)
+		}
+	})
+}
+
+// TestGateConfigLoadEmitsThePoolAdvisories is the ordering fence for the
+// degradation advisories, mirroring TestGateConfigLoadEmitsTheCredentialEvidence
+// for the slot.
+//
+// Folding the emission into loadOTPE2EGateConfig removes the statement order
+// that would let a degraded-pool NOTE sit below the gate's first error check --
+// absent from exactly the failing runs where a spent budget is the suspect. It
+// does not stop anyone deleting the loop, and deleting it restores the original
+// defect: a green-or-red gate that says nothing about a collapsed pool.
+//
+// The pool here is composite ON PURPOSE. The live pool is prime and therefore
+// silent, so a fixture that mirrored it would assert nothing.
+func TestGateConfigLoadEmitsThePoolAdvisories(t *testing.T) {
+	recorder := &recordingTB{}
+	env := otpE2EBaseEnv(map[string]string{
+		// Four credentials: composite, so poolSizeAdvisory speaks; the repeat
+		// makes poolDuplicateAdvisory speak too, so one load must carry BOTH.
+		otpE2EEnrollmentPoolEnv: "one\ntwo\nthree\nfour\nfour",
+	})
+	cfg := loadOTPE2EGateConfig(recorder, envFrom(env))
+
+	if recorder.fatal != "" || recorder.skipped != "" {
+		t.Fatalf("loading a complete config failed or skipped: fatal=%q skip=%q",
+			recorder.fatal, recorder.skipped)
+	}
+
+	var notes []string
+	for _, line := range recorder.logs {
+		if strings.Contains(line, "NOTE") {
+			notes = append(notes, line)
+		}
+	}
+	want := poolAdvisories(cfg)
+	if len(want) != 2 {
+		t.Fatalf("fixture no longer produces both advisories (got %d); it is meant to be "+
+			"composite AND duplicated so this fence covers the pair", len(want))
+	}
+	if len(notes) != len(want) {
+		t.Fatalf("loading the gate config emitted %d NOTE line(s), want %d.\nA degraded pool "+
+			"that reports nothing during load is invisible on precisely the failing runs "+
+			"whose diagnosis needs it.\nLogs: %q", len(notes), len(want), recorder.logs)
+	}
+	for i, advisory := range want {
+		if !strings.Contains(notes[i], advisory.text) {
+			t.Errorf("NOTE %d was %q; want it to carry %q", i, notes[i], advisory.text)
+		}
+	}
+}
+
+// captureAnnotations collects what fn emits as GitHub workflow commands.
+//
+// It swaps the package's annotationSink rather than the process-wide os.Stdout,
+// which needed a pipe, a goroutine and a hand-written defence against unwinding
+// through a panic. The sink needs none of that and leaves the real stdout
+// GitHub reads untouched -- but it is no safer under t.Parallel, since it is a
+// package-level variable this writes and noteDegradation reads. See its
+// declaration.
+func captureAnnotations(t *testing.T, fn func()) string {
+	t.Helper()
+	original := annotationSink
+	var captured strings.Builder
+	annotationSink = &captured
+	defer func() { annotationSink = original }()
+	fn()
+	return captured.String()
 }
