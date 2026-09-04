@@ -63,6 +63,73 @@ platform access endpoints this process should trust. With no provider installed
 file named by `QURL_DEPLOYMENT`, falling back to the deployment embedded in the
 build.
 
+## Retry a Visit
+
+Each ordinary `EnterPortal` or `EnterPortalWith` call starts an independent
+visit. For retries after a lost reply or later renewal, build explicit trust
+and transport config and retain one `PortalSession`. Obtain the issuer's public
+DER key, its key ID, and the relay host from your trusted deployment config:
+
+```go
+trust, err := qurl.NewTrustStoreFromDER(map[string][]byte{
+	issuerKID: issuerPublicKeyDER,
+})
+if err != nil {
+	return err
+}
+visitCfg := qurl.Config{
+	TrustStore:     trust,
+	RelayAllowlist: qurl.NewRelayAllowlist([]string{relayHost}),
+	PortalSession:  &qurl.PortalSession{},
+}
+handle, err := qurl.EnterPortalWith(ctx, link, visitCfg)
+if err != nil {
+	return err
+}
+fmt.Println(handle.ResourceURL)
+// A later retry of this visit uses the same visitCfg and link.
+```
+
+For an already configured explicit opener, copy its `Config` per visit and set
+a fresh `PortalSession` on the copy. The default provider/deployment resolution
+belongs to `EnterPortal`; `EnterPortalWith` requires these inputs explicitly.
+This example uses HTTPS relay only. Supply `Cells` for native UDP as described
+below; retaining a session adds no HTTP request on either transport.
+
+The zero-value session creates a private random capability only after the link
+passes verification. It binds to that link and stays in memory. Reuse the same
+pointer for retries; use a separate session for each link and each visitor. The
+SDK rejects a session reused for another verified link before it sends a
+request. Nil `Config.PortalSession` starts a new visitor on every call. When
+server enforcement is enabled, a single-use link cannot give that new visitor
+the first visitor's live session through the verifier.
+`EnterPortal` always starts an independent visit. Its default-provider path has
+no retained session. Under server enforcement, a second open of a consumed
+single-use link is denied. Use the explicit config above when lost-reply
+recovery is required. No config or session is stored in a process-wide cache.
+
+The capability travels in the encrypted qURL ASP payload as
+`usrData.qurl_session_secret`: canonical unpadded base64url for 32 random bytes.
+NHP hashes the decoded bytes as a separate renewal proof. It does not bind or
+replace the application-session cookie, and does not grant NHP renewal from a
+new IP without the existing session's required identity. This is a qURL ASP
+extension, not a new NHP header field. It follows the ASP verification-data
+model in the CSA NHP specification, Appendix 2, NHP-KNK (pages 48–49), and its
+separate application token/cookie guidance for NAT (page 50). NHP packet types,
+Noise authentication, request counters, numeric session IDs, and overload
+cookies retain their existing meanings. The capability never enters the shared
+link or the application-session cookie. The `qv2t1` link structure, inner qv2
+fragment, signed claims, signature, CRID, and query parameters do not change.
+
+After server enforcement is enabled, an old IP-bound single-use session that
+was opened without a renewal proof cannot renew. Open a fresh link with a
+current client. A new client cannot recover a previous visitor's session from
+the shared link alone.
+
+Older servers can ignore the additional ASP field. A successful open against
+such a server does not confirm renewal-proof enforcement; deploy the companion
+service and NHP verifier changes before relying on that guarantee.
+
 ## Pinning the Opener Trust Config
 
 To pin the trust config in code instead, install a `StaticProvider` during

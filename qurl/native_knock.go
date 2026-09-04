@@ -47,9 +47,9 @@ type NativeKnockOptions struct {
 
 // nativeAgentKnockBody is the AEAD-protected NHP_KNK application body for a
 // registered agent. This is deliberately separate from buildKnockBody's
-// provisional qURL keyed-identity contract: that path uses a signed resource
-// public key, while this path uses the assignment's placement-neutral
-// knock_resource_id. Field order is wire-significant for the released
+// qURL keyed-identity contract: that path uses a signed resource public key,
+// while this path uses the assignment's placement-neutral knock_resource_id.
+// Field order is wire-significant for the released
 // byte-exact conformance vector. Outside that canonical vector, opaque identity
 // values use normal JSON semantics: encoders may escape equivalent characters
 // differently without changing the identity the server parses.

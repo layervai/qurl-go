@@ -49,6 +49,12 @@ type Config struct {
 	// default client. Advanced callers with fixed-egress requirements can supply
 	// their own client. Unused on the native UDP path.
 	HTTPClient HTTPDoer
+	// PortalSession retains this visitor's private capability across retries or
+	// renewals of one verified link, including an initial knock whose reply was
+	// lost. Optional; nil makes each EnterPortalWith call an independent visit.
+	// Copy a shared Config per visit and assign a separate zero-value session;
+	// retain that copy when retrying the same link for the same visitor.
+	PortalSession *PortalSession
 }
 
 // HTTPDoer is the subset of *http.Client EnterPortal needs, narrowed so a caller
@@ -224,6 +230,12 @@ var ErrCellNotInCatalog = errors.New("qurl: link names a cell with no native UDP
 // ErrNotConfigured) rather than open a link it cannot verify. Tests and
 // advanced integrations can inject config with StaticProvider,
 // DiscoveryProvider, or EnterPortalWith.
+//
+// Each call starts an independent visit. If a single-use visit is committed but
+// its reply is lost, another EnterPortal call cannot recover that visit. With
+// server renewal-proof enforcement, a second open of a consumed single-use link
+// is denied. Callers that need same-visitor retries or renewals must use
+// EnterPortalWith and retain one Config.PortalSession across those calls.
 func EnterPortal(ctx context.Context, qurlLink string) (*ResourceHandle, error) {
 	cfg, err := resolveDefaultConfig(ctx)
 	if err != nil {
@@ -234,6 +246,7 @@ func EnterPortal(ctx context.Context, qurlLink string) (*ResourceHandle, error) 
 
 // EnterPortalWith opens a qURL link using the supplied Config. It is the
 // injectable seam behind EnterPortal for tests and advanced callers.
+// Retain Config.PortalSession to retry one visit; nil starts a new visitor.
 func EnterPortalWith(ctx context.Context, qurlLink string, cfg Config) (*ResourceHandle, error) {
 	// A trust store is always required: nothing below runs on unverified claims.
 	if cfg.TrustStore == nil {
@@ -293,7 +306,15 @@ func EnterPortalWith(ctx context.Context, qurlLink string, cfg Config) (*Resourc
 	if err != nil {
 		return nil, fmt.Errorf("qurl: decode per-qURL private key: %w", err)
 	}
-	body, err := buildKnockBody(frag)
+	session := cfg.PortalSession
+	if session == nil {
+		session = &PortalSession{}
+	}
+	sessionSecret, err := session.secretFor(frag)
+	if err != nil {
+		return nil, err
+	}
+	body, err := buildKnockBody(frag, sessionSecret)
 	if err != nil {
 		return nil, err
 	}

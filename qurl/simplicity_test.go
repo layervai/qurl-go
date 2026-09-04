@@ -34,6 +34,10 @@ var frictionBudget = map[string]int{
 	// wiring, no transport selection — the SDK ships what it knows about the
 	// deployment it talks to.
 	"ExampleEnterPortal": 2,
+	// The explicit retry path reads a public issuer key, builds trust, retains
+	// relay/session config, opens, and prints. Count this setup honestly; unlike
+	// EnterPortal, EnterPortalWith does not resolve deployment config for us.
+	"ExamplePortalSession": 5,
 
 	// --- Issuing -------------------------------------------------------------
 	// Protect a URL and mint a link: open client, protect, create.
