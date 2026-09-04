@@ -12,11 +12,11 @@ import (
 	"github.com/layervai/qurl-go/crid"
 )
 
-// ErrTemporaryAccessLinksDisabled is returned by ResolveResource when the
+// ErrTemporaryAccessLinksDisabled is returned by ShareResource when the
 // LayerV API answers 503: the environment is not currently serving temporary
 // access links (the surface is dark or administratively disabled), which is a
 // service posture rather than anything wrong with the request. Callers that
-// treat resolve as optional can branch on this sentinel and fall back; the
+// treat sharing as optional can branch on this sentinel and fall back; the
 // underlying *APIError remains matchable with errors.As.
 var ErrTemporaryAccessLinksDisabled = errors.New("qurl: temporary access links are disabled")
 
@@ -31,10 +31,10 @@ var ErrNoCRID = errors.New("qurl: no crid to verify against")
 // exists to detect: fail closed and do not use the key.
 var ErrCRIDMismatch = errors.New("qurl: resource key does not derive the held crid")
 
-// ResolveResourceOptions customizes ResolveResource. The zero value (or a
-// nil pointer) requests the server defaults.
-type ResolveResourceOptions struct {
-	// TTL asks for how long the minted access link should stay valid. If
+// ShareResourceOptions customizes ShareResource. The zero value (or a nil
+// pointer) requests the server defaults.
+type ShareResourceOptions struct {
+	// TTL asks for how long the minted share link should stay valid. If
 	// omitted (zero), the field is not sent and the API applies its default
 	// lifetime; the LayerV API remains the source of truth for account
 	// limits. The wire carries whole integer seconds, so nonzero durations
@@ -43,20 +43,20 @@ type ResolveResourceOptions struct {
 	TTL time.Duration
 }
 
-// ResolvedAccess is a freshly minted access link for a protected resource.
-// It is the counterpart of Portal — both are minted access links, but
-// ResolveResource is the path addressed by resource id or CRID and
-// verifiable with VerifyCRID.
-type ResolvedAccess struct {
+// ShareLink is a freshly minted share link — a short-lived qURL access link
+// — for a protected resource. It is the counterpart of Portal: both are
+// minted access links, but ShareResource is the path addressed by resource
+// id or CRID and verifiable with VerifyCRID.
+type ShareLink struct {
 	// Link is the access link. When it is qv2-shaped, open it with
-	// EnterPortal; ResolveResource deliberately does not parse or verify it.
+	// EnterPortal; ShareResource deliberately does not parse or verify it.
 	Link string
 	// QURLID identifies this specific minted link. Pass it to RevokePortal —
-	// with the same resource id you resolved — to revoke this one link while
+	// with the same resource id you shared — to revoke this one link while
 	// the resource's other links keep working. Empty when the API omits it
-	// (a server predating the field), which is the only case where a
-	// resolve-minted link has no individual revocation handle. Capture it
-	// alongside Link: neither is retrievable after this response.
+	// (a server predating the field), which is the only case where a share
+	// link has no individual revocation handle. Capture it alongside Link:
+	// neither is retrievable after this response.
 	QURLID string
 	// CRID is the resource's Cryptographic Resource ID, when returned by the
 	// API (older servers and keyless resources omit it). Tie it to a key you
@@ -72,11 +72,11 @@ type ResolvedAccess struct {
 	SingleUse bool
 }
 
-type resolveResourceRequest struct {
+type shareResourceRequest struct {
 	TTLSeconds int64 `json:"ttl_seconds,omitempty"`
 }
 
-type resolveResourceResponse struct {
+type shareResourceResponse struct {
 	QURL             string     `json:"qurl"`
 	QURLID           string     `json:"qurl_id"`
 	CRID             string     `json:"crid"`
@@ -86,11 +86,11 @@ type resolveResourceResponse struct {
 	SingleUse        bool       `json:"single_use"`
 }
 
-func (r resolveResourceResponse) resolvedAccess() (*ResolvedAccess, error) {
+func (r shareResourceResponse) shareLink() (*ShareLink, error) {
 	if strings.TrimSpace(r.QURL) == "" {
 		return nil, fmt.Errorf("%w: missing qurl", ErrInvalidAPIResponse)
 	}
-	access := &ResolvedAccess{
+	link := &ShareLink{
 		Link:             r.QURL,
 		QURLID:           r.QURLID,
 		CRID:             r.CRID,
@@ -99,44 +99,48 @@ func (r resolveResourceResponse) resolvedAccess() (*ResolvedAccess, error) {
 		SingleUse:        r.SingleUse,
 	}
 	if r.ExpiresAt != nil {
-		access.ExpiresAt = *r.ExpiresAt
+		link.ExpiresAt = *r.ExpiresAt
 	}
-	return access, nil
+	return link, nil
 }
 
-// ResolveResource asks LayerV to mint a fresh access link for an existing
-// resource. resourceID accepts either identifier form the platform serves —
-// the public-key resource id or the resource's CRID — and, like the other
-// resource methods, is validated for presence only: the server is
-// authoritative for which identifiers resolve, so the SDK does not pre-judge
-// the form locally.
+// ShareResource asks LayerV to mint a fresh share link — a short-lived qURL
+// access link — for an existing resource. resourceID accepts either
+// identifier form the platform serves — the public-key resource id or the
+// resource's CRID — and, like the other resource methods, is validated for
+// presence only: the server is authoritative for which identifiers it
+// accepts, so the SDK does not pre-judge the form locally.
+//
+// The CRID is safe to paste anywhere; the share link is the secret, and
+// sharing is what turns the identifier into access. Each link expires on its
+// own — share again whenever you need a fresh one.
 //
 // opts may be nil. If TTL is omitted (zero), the API applies its default
 // lifetime; the LayerV API remains the source of truth for account limits.
 //
 // The returned link is not opened, parsed, or verified here. When
-// ResolvedAccess.Link is qv2-shaped, the composition is
-// ResolveResource → EnterPortal: resolve mints the link over the
-// credentialed API, and EnterPortal is the verifying opener. To bind the
-// response to a resource key you already hold, call
-// ResolvedAccess.VerifyCRID before trusting a delivered key.
+// ShareLink.Link is qv2-shaped, the composition is ShareResource →
+// EnterPortal: share mints the link over the credentialed API, and
+// EnterPortal is the verifying opener. To bind the response to a resource
+// key you already hold, call ShareLink.VerifyCRID before trusting a
+// delivered key.
 //
-// The minted link is revocable on its own: keep ResolvedAccess.QURLID and
-// pass it to RevokePortal with the same resourceID to kill that one link
-// without disturbing the resource's others. Like Link, it is not retrievable
-// after this call returns.
+// The minted link is revocable on its own: keep ShareLink.QURLID and pass it
+// to RevokePortal with the same resourceID to kill that one link without
+// disturbing the resource's others. Like Link, it is not retrievable after
+// this call returns.
 //
 // A 503 from this endpoint means the environment is not serving temporary
 // access links and surfaces as ErrTemporaryAccessLinksDisabled; other API
 // failures surface as *APIError exactly like the rest of the client.
-func (c *Client) ResolveResource(ctx context.Context, resourceID string, opts *ResolveResourceOptions) (*ResolvedAccess, error) {
+func (c *Client) ShareResource(ctx context.Context, resourceID string, opts *ShareResourceOptions) (*ShareLink, error) {
 	if c == nil {
 		return nil, fmt.Errorf("%w: nil client", ErrInvalidClientConfig)
 	}
 	if strings.TrimSpace(resourceID) == "" {
 		return nil, fmt.Errorf("%w: resource id must not be empty", ErrInvalidResourceRequest)
 	}
-	var reqBody resolveResourceRequest
+	var reqBody shareResourceRequest
 	if opts != nil {
 		if opts.TTL < 0 {
 			return nil, fmt.Errorf("%w: ttl must not be negative", ErrInvalidResourceRequest)
@@ -147,8 +151,8 @@ func (c *Client) ResolveResource(ctx context.Context, resourceID string, opts *R
 		reqBody.TTLSeconds = int64(opts.TTL / time.Second)
 	}
 
-	path := "/v1/resources/" + url.PathEscape(resourceID) + "/resolve"
-	var env apiEnvelope[resolveResourceResponse]
+	path := "/v1/resources/" + url.PathEscape(resourceID) + "/share"
+	var env apiEnvelope[shareResourceResponse]
 	if err := c.postJSON(ctx, path, reqBody, &env); err != nil {
 		var apiErr *APIError
 		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusServiceUnavailable {
@@ -156,28 +160,28 @@ func (c *Client) ResolveResource(ctx context.Context, resourceID string, opts *R
 		}
 		return nil, err
 	}
-	return env.Data.resolvedAccess()
+	return env.Data.shareLink()
 }
 
 // VerifyCRID is the CRID trust story in one call: it ties this response to a
 // resource public key the caller already holds by re-deriving the CRID from
 // derSPKI (the DER SubjectPublicKeyInfo bytes, exactly as delivered) and
-// comparing it to r.CRID in constant time. nil means the key is the one the
+// comparing it to l.CRID in constant time. nil means the key is the one the
 // CRID commits to. Any non-nil error is a fail-closed "do not use this key
 // on the strength of this response": ErrNoCRID when the response carried no
 // CRID, the crid package's typed sentinels when the held CRID fails the
 // local gate, and ErrCRIDMismatch when a well-formed key simply is not the
 // committed one — the substitution the identifier exists to detect.
-func (r *ResolvedAccess) VerifyCRID(derSPKI []byte) error {
-	if r == nil || r.CRID == "" {
-		return fmt.Errorf("%w: resolve response carried no crid (older server or keyless resource)", ErrNoCRID)
+func (l *ShareLink) VerifyCRID(derSPKI []byte) error {
+	if l == nil || l.CRID == "" {
+		return fmt.Errorf("%w: share response carried no crid (older server or keyless resource)", ErrNoCRID)
 	}
-	ok, err := crid.KeyMatches(r.CRID, derSPKI)
+	ok, err := crid.KeyMatches(l.CRID, derSPKI)
 	if err != nil {
 		return fmt.Errorf("qurl: verify crid: %w", err)
 	}
 	if !ok {
-		return fmt.Errorf("%w: crid %s", ErrCRIDMismatch, r.CRID)
+		return fmt.Errorf("%w: crid %s", ErrCRIDMismatch, l.CRID)
 	}
 	return nil
 }

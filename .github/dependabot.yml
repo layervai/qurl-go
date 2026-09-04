@@ -1,3 +1,7 @@
+# Schema-checked by .github/workflows/validate-dependabot-config.yml.
+# A malformed file stops updates for every ecosystem below it, and GitHub
+# reports that only in this repository's Dependabot logs — never as a
+# failing check, so the symptom is silence.
 version: 2
 updates:
   - package-ecosystem: gomod

@@ -43,7 +43,7 @@ reachability.
 
 ### What the fencing was
 
-Verified live on 2026-08-03 in the sandbox account, `us-east-2`. All three
+Verified live on 2026-08-03 in the sandbox account. All three
 public UDP edges carried exactly one security group, every rule UDP 443:
 
 | Edge | Permitted ingress |
@@ -56,9 +56,9 @@ The single permitted source was the UDP proof runner's egress EIP. The seven
 extra cell0 addresses are the managed AC EIP pool needed for registration —
 infrastructure, not developer access.
 
-(The account, NLB names, security-group ids, and addresses this section
-originally quoted are deliberately not reproduced: this repository is public.
-They are in `layervai/nhp`, which is not.)
+(The account, region, NLB names, security-group ids, and addresses this
+section originally quoted are deliberately not reproduced: this repository is
+public. They are in `layervai/nhp`, which is not.)
 
 Critically, **the cells were fenced identically to the hub**, so hub access
 alone would have bought nothing: assignment would succeed and registration

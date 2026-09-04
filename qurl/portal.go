@@ -16,7 +16,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
 
 	"github.com/layervai/qurl-go/internal/qv2"
 	"github.com/layervai/qurl-go/relayknock"
@@ -63,7 +67,120 @@ type ResourceHandle struct {
 	OpenSeconds uint32
 	// SessionID is the nonzero server-assigned NHP access-session identity.
 	SessionID uint64
+
+	// authProviderToken is the signed qurl_vsession value from the authenticated
+	// NHP ACK. Keep it private so ordinary formatting and JSON cannot expose it.
+	authProviderToken string
 }
+
+const qurlVsessionCookieName = "qurl_vsession"
+
+const maxContentRedirects = 10
+
+// AuthorizeContentRequest adds the application-session cookie to a request for
+// this handle's exact HTTPS origin. It authorizes this request only. A caller
+// that follows redirects must call AuthorizeContentRequest again from its
+// CheckRedirect function; the origin check then refuses a different host,
+// scheme, or port. Do not rely on http.Client's default redirect policy: it can
+// copy Cookie headers to subdomains. Set CheckRedirect to
+// ResourceHandle.CheckContentRedirect. The token never appears in the URL.
+// Repeated calls replace the qurl_vsession cookie and preserve other valid
+// request cookies.
+func (h *ResourceHandle) AuthorizeContentRequest(req *http.Request) error {
+	if h == nil || req == nil || req.URL == nil || !validAuthProviderToken(h.authProviderToken) {
+		return fmt.Errorf("%w: invalid content access handle", ErrInvalidContentRequest)
+	}
+	granted, err := url.Parse(h.ResourceURL)
+	if err != nil {
+		return fmt.Errorf("%w: invalid granted content origin", ErrInvalidContentRequest)
+	}
+	grantedHost, grantedPort, grantedOK := normalizedHTTPSOrigin(granted)
+	if !grantedOK {
+		return fmt.Errorf("%w: invalid granted content origin", ErrInvalidContentRequest)
+	}
+	requestHost, requestPort, requestOK := normalizedHTTPSOrigin(req.URL)
+	if !requestOK || requestHost != grantedHost || requestPort != grantedPort {
+		return fmt.Errorf("%w: content request does not match the granted origin", ErrInvalidContentRequest)
+	}
+
+	// Cookie response attributes such as Secure and HttpOnly are not serialized
+	// in a request Cookie header. The exact HTTPS-origin checks above are the
+	// enforcement boundary. Rebuild the valid request cookies so a retry cannot
+	// leave an old or duplicate qurl_vsession value in the request.
+	cookies := req.Cookies()
+	if req.Header == nil {
+		req.Header = make(http.Header)
+	}
+	req.Header.Del("Cookie")
+	for _, cookie := range cookies {
+		if cookie.Name != qurlVsessionCookieName {
+			req.AddCookie(cookie)
+		}
+	}
+	req.AddCookie(&http.Cookie{
+		Name:     qurlVsessionCookieName,
+		Value:    h.authProviderToken,
+		Secure:   true,
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+	})
+	return nil
+}
+
+// CheckContentRedirect is the safe http.Client.CheckRedirect policy for a
+// protected-content request. It preserves Go's default 10-request limit and
+// re-authorizes only redirects that remain on the granted HTTPS origin.
+func (h *ResourceHandle) CheckContentRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= maxContentRedirects {
+		return fmt.Errorf("%w: stopped after %d redirects", ErrTooManyContentRedirects, maxContentRedirects)
+	}
+	return h.AuthorizeContentRequest(req)
+}
+
+// normalizedHTTPSOrigin compares URL origins without treating the implicit
+// HTTPS port and :443 as different origins. It also rejects credentials and
+// malformed or nonnumeric explicit ports before a bearer can be attached.
+func normalizedHTTPSOrigin(u *url.URL) (host, port string, ok bool) {
+	if u == nil || !strings.EqualFold(u.Scheme, "https") || u.Host == "" || u.User != nil ||
+		u.Opaque != "" || strings.Contains(u.Host, "@") {
+		return "", "", false
+	}
+	host = strings.ToLower(u.Hostname())
+	if host == "" {
+		return "", "", false
+	}
+	port = u.Port()
+	if port == "" {
+		// Port returns an empty string for both an absent port and some malformed
+		// manually constructed authorities. Only the canonical host-only forms
+		// are valid here.
+		canonicalHost := host
+		if strings.Contains(host, ":") {
+			canonicalHost = "[" + host + "]"
+		}
+		if !strings.EqualFold(u.Host, canonicalHost) {
+			return "", "", false
+		}
+		return host, "443", true
+	}
+	portNumber, err := strconv.ParseUint(port, 10, 16)
+	if err != nil || portNumber == 0 {
+		return "", "", false
+	}
+	if !strings.EqualFold(u.Host, net.JoinHostPort(host, port)) {
+		return "", "", false
+	}
+	return host, strconv.FormatUint(portNumber, 10), true
+}
+
+// String returns a redacted representation that never includes the private
+// application-session bearer.
+func (h ResourceHandle) String() string {
+	return fmt.Sprintf("qurl.ResourceHandle{ResourceURL:%q, OpenSeconds:%d, SessionID:%d, AuthProviderToken:[REDACTED]}", h.ResourceURL, h.OpenSeconds, h.SessionID)
+}
+
+// GoString returns the same redacted representation as String.
+func (h ResourceHandle) GoString() string { return h.String() }
 
 // ErrNotConfigured reports that a required piece of qURL configuration is
 // absent. The message deliberately names no entry point: the same sentinel is
@@ -71,6 +188,15 @@ type ResourceHandle struct {
 // looking at a function they never called. Each return site adds its own
 // context.
 var ErrNotConfigured = errors.New("qurl: not configured")
+
+// ErrInvalidContentRequest reports that a request cannot safely receive the
+// application-session cookie from a ResourceHandle. It is a local caller or
+// handle-use error, not a malformed platform reply.
+var ErrInvalidContentRequest = errors.New("qurl: invalid content request")
+
+// ErrTooManyContentRedirects reports that CheckContentRedirect stopped a
+// protected-content request after the standard 10-request redirect limit.
+var ErrTooManyContentRedirects = errors.New("qurl: too many content redirects")
 
 // ErrCellNotInCatalog reports that a verified link names a cell the configured
 // CellCatalog has no endpoint for, while no relay transport is configured to
@@ -273,6 +399,9 @@ func interpretReply(reply *relayknock.Reply) (*ResourceHandle, error) {
 		if !ack.OpenTime.Present || ack.OpenTime.Value != 0 {
 			return nil, fmt.Errorf("%w: deny ACK carried a missing or nonzero open time", ErrMalformedReply)
 		}
+		if ack.AuthProviderToken != "" {
+			return nil, fmt.Errorf("%w: deny ACK carried an auth provider token", ErrMalformedReply)
+		}
 		if !isCanonicalKnockDenyCode(ack.ErrCode) {
 			return nil, fmt.Errorf("%w: deny ACK carried a noncanonical error code", ErrMalformedReply)
 		}
@@ -289,7 +418,20 @@ func interpretReply(reply *relayknock.Reply) (*ResourceHandle, error) {
 	if ack.RedirectURL == "" {
 		return nil, fmt.Errorf("%w: success ACK carried no resource URL (errCode=%q)", ErrMalformedReply, ack.ErrCode)
 	}
-	return &ResourceHandle{ResourceURL: ack.RedirectURL, OpenSeconds: ack.OpenTime.Value, SessionID: ack.SessionID.Value}, nil
+	granted, err := url.Parse(ack.RedirectURL)
+	if err != nil {
+		return nil, fmt.Errorf("%w: success ACK carried an invalid resource URL", ErrMalformedReply)
+	}
+	if _, _, ok := normalizedHTTPSOrigin(granted); !ok {
+		return nil, fmt.Errorf("%w: success ACK carried an invalid resource URL", ErrMalformedReply)
+	}
+	if !validAuthProviderToken(ack.AuthProviderToken) {
+		return nil, fmt.Errorf("%w: success ACK carried an invalid auth provider token", ErrMalformedReply)
+	}
+	return &ResourceHandle{
+		ResourceURL: ack.RedirectURL, OpenSeconds: ack.OpenTime.Value, SessionID: ack.SessionID.Value,
+		authProviderToken: ack.AuthProviderToken,
+	}, nil
 }
 
 // resolveDefaultConfig builds the EnterPortal Config from the process-wide default

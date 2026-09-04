@@ -2215,15 +2215,16 @@ func registeredAgentRetirementEndpoint(binding *AgentRuntimeBinding, deviceStati
 	return cfg, cloneNativeUDPEndpoint(receipt.endpoint), nil
 }
 
-// registeredAgentSessionEndpoint is the common no-I/O admission gate for
-// native KNK/RKN and EXT. It intentionally validates the binding snapshot
-// before body construction, DNS, or socket creation so every session-control
-// operation has the same trust and placement boundary.
+// registeredAgentSessionEndpoint returns the assigned UDP endpoint to callers
+// that do not need the validated assignment itself.
 func registeredAgentSessionEndpoint(ctx context.Context, binding *AgentRuntimeBinding, deviceStaticPrivateKey []byte, transportOpts []AgentRuntimeUDPOption) (*nativeAgentRuntimeConfig, nativeudp.Endpoint, error) {
 	cfg, endpoint, _, err := registeredAgentSessionEndpointWithAssignment(ctx, binding, deviceStaticPrivateKey, transportOpts)
 	return cfg, endpoint, err
 }
 
+// registeredAgentSessionEndpointWithAssignment is the common no-I/O admission
+// gate for native KNK/RKN. It validates the binding snapshot before body
+// construction, DNS, or socket creation.
 func registeredAgentSessionEndpointWithAssignment(ctx context.Context, binding *AgentRuntimeBinding, deviceStaticPrivateKey []byte,
 	transportOpts []AgentRuntimeUDPOption,
 ) (*nativeAgentRuntimeConfig, nativeudp.Endpoint, *AgentAssignment, error) {

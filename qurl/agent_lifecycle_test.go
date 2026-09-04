@@ -600,7 +600,7 @@ func TestAgentRuntimeBindingFormattingRedactsPrivateKey(t *testing.T) {
 	}
 }
 
-func TestAgentRuntimeOptionSetsCompileForIntendedSurfaces(_ *testing.T) {
+func TestAgentRuntimeOptionSetsCompileForIntendedSurfaces(t *testing.T) {
 	// Preserve the original public function signature; recovery has its own Hub
 	// option instead of widening this return type and breaking function values.
 	acceptRegistrationHubFactory := func(func(HubBootstrap) AgentRuntimeRegistrationOption) {}
@@ -616,6 +616,12 @@ func TestAgentRuntimeOptionSetsCompileForIntendedSurfaces(_ *testing.T) {
 	acceptRegistration(WithAgentRuntimeAllowedRegistrationKeyKinds(RegistrationKeyKindAgent))
 	acceptRegistration(WithAgentRuntimeUDPBounds(time.Second, 1))
 	acceptRefresh(WithAgentRuntimeUDPBounds(time.Second, 1))
+	acceptUDP(WithAgentRuntimeUDPBounds(time.Second, 1))
+	assignmentRetry := WithAgentRuntimeAssignmentRetryBudget(2, time.Second)
+	acceptLifecycle(assignmentRetry)
+	if _, ok := assignmentRetry.(AgentRuntimeUDPOption); ok {
+		t.Error("assignment retry option must not satisfy AgentRuntimeUDPOption")
+	}
 	baseURL := WithAgentClientBaseURL("https://api.layerv.ai")
 	acceptClient(baseURL)
 	acceptRegistration(baseURL)

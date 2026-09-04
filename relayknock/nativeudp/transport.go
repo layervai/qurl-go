@@ -3,12 +3,9 @@ package nativeudp
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/binary"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/netip"
 	"os"
@@ -21,6 +18,7 @@ import (
 	"github.com/layervai/qurl-go/internal/x25519key"
 	"github.com/layervai/qurl-go/relayknock"
 	"github.com/layervai/qurl-go/relayknock/internal/nhpwire"
+	"github.com/layervai/qurl-go/relayknock/internal/sessioncookie"
 )
 
 // Tunable defaults. All are overridable per call through Options.
@@ -474,17 +472,12 @@ func exchangeBuiltPacket(ctx context.Context, ep Endpoint, headerType int, count
 	return decryptAndCorrelate(opts.DeviceStaticPriv, ep.ServerStaticPub, headerType, counter, reply)
 }
 
-type cookieChallengeBody struct {
-	transactionID uint64
-	cookie        []byte
-}
-
 const (
-	cookieRejectBodyParse = "body_parse"
-	cookieRejectEncoding  = "cookie_encoding"
-	cookieRejectLength    = "cookie_length"
-	cookieRejectCanonical = "cookie_canonical"
-	cookieRejectCounter   = "counter"
+	cookieRejectBodyParse = sessioncookie.RejectBodyParse
+	cookieRejectEncoding  = sessioncookie.RejectEncoding
+	cookieRejectLength    = sessioncookie.RejectLength
+	cookieRejectCanonical = sessioncookie.RejectCanonical
+	cookieRejectCounter   = sessioncookie.RejectCounter
 )
 
 type cookieChallengeError struct {
@@ -507,94 +500,15 @@ func rejectCookieChallenge(class, detail string) error {
 // rejects duplicate/unknown keys, nulls, trailing values, non-canonical base64,
 // and transaction mismatch before RKN can be emitted.
 func parseCookieChallenge(body []byte, requestCounter uint64) ([]byte, error) {
-	dec := json.NewDecoder(bytes.NewReader(body))
-	first, err := dec.Token()
-	if err != nil || first != json.Delim('{') {
-		return nil, rejectCookieChallenge(cookieRejectBodyParse, "body must be one JSON object")
+	cookie, err := sessioncookie.Parse(body, requestCounter)
+	if err == nil {
+		return cookie, nil
 	}
-	var parsed cookieChallengeBody
-	defer func() { cryptoutil.Wipe(parsed.cookie) }()
-	seen := make(map[string]struct{}, 2)
-	for dec.More() {
-		token, err := dec.Token()
-		if err != nil {
-			return nil, rejectCookieChallenge(cookieRejectBodyParse, "invalid object key")
-		}
-		key, ok := token.(string)
-		if !ok {
-			return nil, rejectCookieChallenge(cookieRejectBodyParse, "object key is not a string")
-		}
-		if _, duplicate := seen[key]; duplicate {
-			return nil, rejectCookieChallenge(cookieRejectBodyParse, "duplicate field")
-		}
-		seen[key] = struct{}{}
-		var raw json.RawMessage
-		if err := dec.Decode(&raw); err != nil || bytes.Equal(raw, []byte("null")) {
-			return nil, rejectCookieChallenge(cookieRejectBodyParse, "field has an invalid value")
-		}
-		switch key {
-		case "trxId":
-			if err := json.Unmarshal(raw, &parsed.transactionID); err != nil {
-				return nil, rejectCookieChallenge(cookieRejectBodyParse, "trxId has an invalid type")
-			}
-		case "cookie":
-			parsed.cookie, err = decodeCookieChallenge(raw)
-			cryptoutil.Wipe(raw)
-			if err != nil {
-				return nil, err
-			}
-		default:
-			return nil, rejectCookieChallenge(cookieRejectBodyParse, "unknown field")
-		}
+	var classified *sessioncookie.Error
+	if errors.As(err, &classified) {
+		return nil, rejectCookieChallenge(classified.Class, classified.Detail)
 	}
-	if _, err := dec.Token(); err != nil {
-		return nil, rejectCookieChallenge(cookieRejectBodyParse, "object is incomplete")
-	}
-	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
-		return nil, rejectCookieChallenge(cookieRejectBodyParse, "trailing JSON")
-	}
-	if len(seen) != 2 {
-		return nil, rejectCookieChallenge(cookieRejectBodyParse, "missing required field")
-	}
-	if parsed.transactionID != requestCounter {
-		return nil, rejectCookieChallenge(cookieRejectCounter, "transaction does not match the request")
-	}
-	cookie := parsed.cookie
-	// Ownership transfers to the caller; the deferred local wipe becomes a no-op.
-	parsed.cookie = nil
-	return cookie, nil
-}
-
-// decodeCookieChallenge keeps decoded cookie bytes in caller-wiped byte slices.
-// The enclosing JSON decoder may retain short-lived encoded-text temporaries;
-// canonical base64 needs no escapes, so this function never materializes the
-// cookie as an immutable Go string.
-func decodeCookieChallenge(raw []byte) ([]byte, error) {
-	if len(raw) < 3 || raw[0] != '"' || raw[len(raw)-1] != '"' {
-		return nil, rejectCookieChallenge(cookieRejectBodyParse, "cookie has an invalid type")
-	}
-	encoded := raw[1 : len(raw)-1]
-	if bytes.IndexByte(encoded, '\\') >= 0 || bytes.ContainsAny(encoded, " \t\r\n") {
-		return nil, rejectCookieChallenge(cookieRejectEncoding, "cookie is not strict base64")
-	}
-	cookie := make([]byte, base64.StdEncoding.DecodedLen(len(encoded)))
-	n, err := base64.StdEncoding.Strict().Decode(cookie, encoded)
-	if err != nil {
-		cryptoutil.Wipe(cookie)
-		rawCookie := make([]byte, base64.RawStdEncoding.DecodedLen(len(encoded)))
-		defer cryptoutil.Wipe(rawCookie)
-		rawN, rawErr := base64.RawStdEncoding.Strict().Decode(rawCookie, encoded)
-		if rawErr == nil && rawN == nhpwire.CookieSize {
-			return nil, rejectCookieChallenge(cookieRejectCanonical, "cookie is not canonical padded base64")
-		}
-		return nil, rejectCookieChallenge(cookieRejectEncoding, "cookie is not strict base64")
-	}
-	cookie = cookie[:n]
-	if len(cookie) != nhpwire.CookieSize {
-		cryptoutil.Wipe(cookie)
-		return nil, rejectCookieChallenge(cookieRejectLength, "cookie has the wrong decoded length")
-	}
-	return cookie, nil
+	return nil, rejectCookieChallenge(cookieRejectBodyParse, "invalid challenge")
 }
 
 // sendToAddresses tries each resolved address in turn until one yields a datagram,

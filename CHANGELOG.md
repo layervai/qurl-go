@@ -6,6 +6,67 @@ independently under `awsstore/vX.Y.Z` tags.
 Pre-1.0 semantic versioning: breaking changes land in minor versions (v0.N.0)
 and are marked **Breaking** with what to change.
 
+## v0.12.0 — 2026-09-02
+
+- **Breaking:** the CRID share operator is renamed, with no compatibility
+  aliases. `ShareResource`, `ShareResourceOptions`, and `ShareLink` replace
+  `ResolveResource`, `ResolveResourceOptions`, and `ResolvedAccess`, and the
+  guide moved to [docs/share-and-crid.md](docs/share-and-crid.md). Rename the
+  call and the two types; fields, options, errors, and `VerifyCRID` are
+  unchanged. On the wire the SDK now sends `POST /v1/resources/{id}/share`;
+  `/resolve` is gone from qurl-service in the same cutover, so pair this
+  version with a service that serves the share route (sandbox first).
+- `RegisteredAgentResourceHTTPDoer` allowlists `POST /v1/resources/{id}/share`
+  and rejects the retired `/resolve` suffix.
+
+## v0.11.0 — 2026-09-01
+
+- **Breaking:** registered-agent session admission and durable operation
+  recovery now use native UDP only. `WithAgentRuntimeSessionRelay` and
+  `AgentRuntimeSessionOption` were removed. `KnockRegisteredAgent` and
+  `RecoverNativeSessionOperation` accept `AgentRuntimeUDPOption` again. Update
+  named function values and change any `[]AgentRuntimeSessionOption` wrapper to
+  `[]AgentRuntimeUDPOption`, and remove imports of the deleted
+  `relayknock/sessionrelay` package. HTTPS session admission has no replacement:
+  callers must reach the authenticated assigned cell over UDP 443. Durable
+  operation and NHP wire semantics are unchanged.
+
+## v0.10.0 — 2026-09-01
+
+- **Breaking:** `KnockRegisteredAgent` and `RecoverNativeSessionOperation` now
+  accept `AgentRuntimeSessionOption`. Existing `AgentRuntimeUDPOption` values
+  still satisfy that interface; update function values or wrappers that name
+  the old exact signature. A `[]AgentRuntimeUDPOption` slice does not convert as
+  a whole: allocate `[]AgentRuntimeSessionOption` and copy each option into it
+  before using `...`.
+- Added `WithAgentRuntimeSessionRelay` for registered-session `NHP_KNK` and the
+  one possible cookie-bound `NHP_RKN` over one trusted HTTPS relay origin. The
+  transport authenticates replies with the assigned cell key, refuses
+  redirects, sends no HTTP cookies, bounds each HTTPS flight, and has no retry,
+  UDP fallback, or cross-cell fallback. A cookie challenge can cause two
+  flights; a caller context deadline supplies the aggregate bound. The relay
+  option takes precedence over UDP resolver, dialer, and bound options on session calls.
+  Durable `NativeSessionOperation` close/recovery uses this relay. Assignment,
+  enrollment, registration, resource discovery, and lower-level exact-session
+  `NHP_EXT` remain native UDP operations; without a durable operation or UDP
+  reachability, that lower-level admission remains until its server lease ends.
+
+## v0.9.0 — 2026-09-01
+
+- **Breaking:** successful qURL v2 portal opens now require the authenticated
+  NHP reply to carry the signed application-session bearer. Use
+  `ResourceHandle.AuthorizeContentRequest` on each HTTPS content request; it
+  sends the bearer only to the exact granted origin and replaces stale or
+  duplicate bearer cookies. The qURL platform and NHP server must support this
+  reply field before clients update to v0.9.0. Set
+  `http.Client.CheckRedirect` to `ResourceHandle.CheckContentRedirect` so Go
+  does not copy the cookie to subdomains; the helper preserves the standard
+  10-request limit and now reports `ErrTooManyContentRedirects` at that limit.
+  `ResourceHandle.String` and `GoString` return a redacted representation and
+  no longer use Go's default struct formatting. Successful ACKs with an
+  invalid or non-HTTPS resource URL, or a noncanonical bearer encoding, now
+  fail at reply interpretation before a content handle is created.
+
 ## v0.8.0 — 2026-08-23
 
 - **Breaking:** registered-agent native knocks now require a positive,

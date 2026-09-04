@@ -83,17 +83,33 @@ second argument to `NewNativeConnectorResourceRequest` on later starts. That is
 a read-only continuity assertion: LayerV returns that exact active resource or
 fails instead of creating or adopting a replacement.
 
+Registered-session admission, durable operation recovery, and exact retirement
+use native UDP. `WithAgentRuntimeUDPResolver`, `WithAgentRuntimeUDPDialer`, and
+`WithAgentRuntimeUDPBounds` configure those exchanges. Use a context deadline
+when the whole operation needs one aggregate bound.
+
+The Connector's durable session-operation journal closes or reconciles an
+admission with `RecoverNativeSessionOperation` through the separately persisted
+source-fenced endpoint. The lower-level `RetireRegisteredAgentSession` sends an
+exact `NHP_EXT` using the immutable session receipt. Neither operation follows a
+later assignment to another cell. If a lower-level caller cannot reach that
+cell over UDP, it cannot send the explicit `NHP_EXT`; the server lease then owns
+cleanup.
+
 And two rules for the serving loop:
 
 - **One run ID and positive attempt number per cycle attempt.** Do not change
   either between retries. Increment the attempt only when starting a new
   serving attempt under the same run.
 - **Retire before wiping the key.** After the serving session has stopped and
-  drained, call `qurl.RetireRegisteredAgentSession` with the exact
-  `SessionReceipt` returned by admission. Retry an ambiguous result with that
-  same receipt, then wipe the device key when the lifecycle operation ends.
-  Retirement closes only that admission; it cannot retire a sibling or
-  replacement.
+  drained, finish the same close path used when it opened. A Connector with a
+  durable session operation calls `RecoverNativeSessionOperation` with that
+  operation and its persisted recovery endpoint. A lower-level caller without
+  an operation calls `qurl.RetireRegisteredAgentSession` with the exact
+  `SessionReceipt` returned by admission, which requires UDP. Retry an ambiguous
+  result with the same durable identity, then wipe the device key when the
+  lifecycle operation ends. Retirement closes only that admission; it cannot
+  retire a sibling or replacement.
 - **Keep the receipt opaque and in memory.** Copying the complete Go value is
   safe, but do not JSON-marshal or reconstruct it from its exported fields: its
   private routing snapshot returns retirement to the original cell and is not
