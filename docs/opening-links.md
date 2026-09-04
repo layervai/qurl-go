@@ -63,6 +63,41 @@ platform access endpoints this process should trust. With no provider installed
 file named by `QURL_DEPLOYMENT`, falling back to the deployment embedded in the
 build.
 
+## Retry a Visit
+
+Each ordinary `EnterPortal` or `EnterPortalWith` call starts an independent
+visit. For an explicit opener config, retain one `PortalSession` when a caller
+must retry the same visit after a lost reply or renew its access:
+
+```go
+cfg.PortalSession = &qurl.PortalSession{}
+handle, err := qurl.EnterPortalWith(ctx, link, cfg)
+// A later retry of this visit uses the same cfg and link.
+```
+
+The zero-value session creates a private random capability only after the link
+passes verification. It binds to that link and stays in memory. Reuse the same
+pointer for retries; use a separate session for each link and each visitor. The
+SDK rejects a session reused for another verified link before it sends a
+request. Nil `Config.PortalSession` starts a new visitor on every call. A
+single-use link cannot give that new visitor the first visitor's live session.
+
+The capability travels in the encrypted qURL ASP payload as
+`usrData.qurl_session_secret`: canonical unpadded base64url for 32 random bytes.
+NHP hashes the decoded bytes to identify the visitor. This is a qURL ASP
+extension, not a new NHP header field. It follows the ASP verification-data
+model in the CSA NHP specification, Appendix 2, NHP-KNK (pages 48–49), and its
+separate application token/cookie guidance for NAT (page 50). NHP packet types,
+Noise authentication, request counters, numeric session IDs, and overload
+cookies retain their existing meanings. The capability never enters the shared
+link or the application-session cookie. The `qv2t1` link structure, inner qv2
+fragment, signed claims, signature, CRID, and query parameters do not change.
+
+After server enforcement is enabled, an old single-use session that was opened
+without this visitor binding cannot renew. Open a fresh link with a current
+client. A new client cannot recover a previous visitor's session from the
+shared link alone.
+
 ## Pinning the Opener Trust Config
 
 To pin the trust config in code instead, install a `StaticProvider` during

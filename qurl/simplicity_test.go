@@ -34,6 +34,8 @@ var frictionBudget = map[string]int{
 	// wiring, no transport selection — the SDK ships what it knows about the
 	// deployment it talks to.
 	"ExampleEnterPortal": 2,
+	// Explicit same-visitor retries add one held Config with a zero-value session.
+	"ExamplePortalSession": 3,
 
 	// --- Issuing -------------------------------------------------------------
 	// Protect a URL and mint a link: open client, protect, create.

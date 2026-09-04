@@ -49,6 +49,11 @@ type Config struct {
 	// default client. Advanced callers with fixed-egress requirements can supply
 	// their own client. Unused on the native UDP path.
 	HTTPClient HTTPDoer
+	// PortalSession retains this visitor's private capability across retries or
+	// renewals of one verified link, including an initial knock whose reply was
+	// lost. Optional; nil makes each EnterPortalWith call an independent visit.
+	// Use a separate zero-value PortalSession for each received link.
+	PortalSession *PortalSession
 }
 
 // HTTPDoer is the subset of *http.Client EnterPortal needs, narrowed so a caller
@@ -293,7 +298,15 @@ func EnterPortalWith(ctx context.Context, qurlLink string, cfg Config) (*Resourc
 	if err != nil {
 		return nil, fmt.Errorf("qurl: decode per-qURL private key: %w", err)
 	}
-	body, err := buildKnockBody(frag)
+	session := cfg.PortalSession
+	if session == nil {
+		session = &PortalSession{}
+	}
+	sessionSecret, err := session.secretFor(frag)
+	if err != nil {
+		return nil, err
+	}
+	body, err := buildKnockBody(frag, sessionSecret)
 	if err != nil {
 		return nil, err
 	}

@@ -22,3 +22,16 @@ func ExampleEnterPortal() {
 
 	// Output:
 }
+
+func ExamplePortalSession() {
+	// Retain this config and session for retries of the same verified link.
+	// Supply the deployment's TrustStore and Cells or RelayAllowlist as usual.
+	cfg := qurl.Config{PortalSession: &qurl.PortalSession{}}
+	handle, err := qurl.EnterPortalWith(context.Background(), "https://qurl.link/#qv2t1.1.1.1.…", cfg)
+	if err != nil {
+		return
+	}
+	fmt.Println(handle.ResourceURL)
+
+	// Output:
+}

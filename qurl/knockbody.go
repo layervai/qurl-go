@@ -49,6 +49,9 @@ type agentKnockMsg struct {
 const (
 	claimsUserDataKey = "qurl_claims_b64"
 	sigUserDataKey    = "qurl_issuer_sig_b64"
+	// This per-visitor secret is independent of the shared link key. NHP hashes
+	// its decoded bytes before binding the service-side visitor session.
+	visitorCapabilityUserDataKey = "qurl_session_secret"
 )
 
 // Native session-control body header values must exactly match their outer NHP
@@ -63,7 +66,7 @@ const (
 // buildKnockBody serializes the provisional qURL knock body for a verified fragment:
 // resId = resource_public_key_b64, usrData = the signed claims + issuer signature,
 // taken verbatim from the wire so the server verifies the exact signed bytes.
-func buildKnockBody(frag *qv2.Fragment) ([]byte, error) {
+func buildKnockBody(frag *qv2.Fragment, sessionSecret string) ([]byte, error) {
 	if frag == nil || frag.Claims == nil {
 		return nil, fmt.Errorf("qurl: build knock body: fragment not parsed")
 	}
@@ -75,8 +78,9 @@ func buildKnockBody(frag *qv2.Fragment) ([]byte, error) {
 		AspID:      qurlAspID,
 		ResID:      frag.Claims.ResourcePublicKeyB64,
 		UsrData: map[string]string{
-			claimsUserDataKey: frag.ClaimsB64,
-			sigUserDataKey:    frag.SigB64,
+			claimsUserDataKey:            frag.ClaimsB64,
+			sigUserDataKey:               frag.SigB64,
+			visitorCapabilityUserDataKey: sessionSecret,
 		},
 	})
 }
