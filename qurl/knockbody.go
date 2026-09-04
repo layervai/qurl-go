@@ -10,27 +10,24 @@ import (
 
 // qURL knock-body construction.
 //
-// PROVISIONAL WIRE SHAPE. The qURL server admission contract (the qURL
-// keyed-identity design's "NHP Server Contract" section) is Proposed, not deployed,
-// and the encrypted knock-body field layout is not yet frozen.
-// This builder encodes what the design specifies for the CLIENT side of the knock
-// (section "Browser and Headless Flow", steps 5–6):
+// This builder puts qURL ASP verification data in the encrypted NHP knock:
 //
 //   - the NHP knock resource identity (resId) is the protected-resource public key
 //     (resource_public_key_b64);
 //   - the signed qURL claims travel in encrypted knock user data; the field names
 //     mirror the server contract's separate blobs qurl_claims_b64 /
 //     qurl_issuer_sig_b64 so a verifier reads exactly the signed bytes.
+//   - qurl_session_secret carries this visitor's independent capability; the
+//     NHP qURL ASP hashes it before service-side session matching.
 //
 // The per-qURL public key is NOT placed in the body: the server learns it as the
 // authenticated Noise initiator static key (IK handshake) and matches it to the
 // signed qurl_user_public_key_b64. relayknock seals this body into the knock with
 // the per-qURL private key as the agent identity, completing proof-of-possession.
 //
-// When the server contract freezes, only this one function changes — the verb,
-// the parse/verify, the relay routing, and the handshake stay put. The mismatch
-// surfaces as a server deny, not a silent wrong-resource open, because admission
-// re-verifies the signature and the cell/resource/key bindings.
+// These are qURL ASP user-data fields, not new NHP protocol fields. The qURL ASP
+// reads its named keys from the existing UserData map. Packet headers, handshake,
+// and the shared link's signed envelope keep their existing formats.
 
 // qurlAspID is the NHP authorization-service-provider id for the qURL path.
 const qurlAspID = "qurl"
@@ -63,7 +60,7 @@ const (
 	nhpEXTHeaderType = relayknock.TypeExit
 )
 
-// buildKnockBody serializes the provisional qURL knock body for a verified fragment:
+// buildKnockBody serializes the qURL knock body for a verified fragment:
 // resId = resource_public_key_b64, usrData = the signed claims + issuer signature,
 // taken verbatim from the wire so the server verifies the exact signed bytes.
 func buildKnockBody(frag *qv2.Fragment, sessionSecret string) ([]byte, error) {

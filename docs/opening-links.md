@@ -70,9 +70,10 @@ visit. For an explicit opener config, retain one `PortalSession` when a caller
 must retry the same visit after a lost reply or renew its access:
 
 ```go
-cfg.PortalSession = &qurl.PortalSession{}
-handle, err := qurl.EnterPortalWith(ctx, link, cfg)
-// A later retry of this visit uses the same cfg and link.
+visitCfg := cfg // Copy the shared deployment config for this visit.
+visitCfg.PortalSession = &qurl.PortalSession{}
+handle, err := qurl.EnterPortalWith(ctx, link, visitCfg)
+// A later retry of this visit uses the same visitCfg and link.
 ```
 
 The zero-value session creates a private random capability only after the link
@@ -81,6 +82,9 @@ pointer for retries; use a separate session for each link and each visitor. The
 SDK rejects a session reused for another verified link before it sends a
 request. Nil `Config.PortalSession` starts a new visitor on every call. A
 single-use link cannot give that new visitor the first visitor's live session.
+`EnterPortal` always starts an independent visit. Its default-provider path has
+no retained session; use the explicit config above when lost-reply recovery is
+required. No config or session is stored in a process-wide cache.
 
 The capability travels in the encrypted qURL ASP payload as
 `usrData.qurl_session_secret`: canonical unpadded base64url for 32 random bytes.
