@@ -21,7 +21,7 @@ var ErrPortalSessionLinkMismatch = errors.New("qurl: portal session belongs to a
 // single-use grant, even with the same link.
 //
 // The capability is generated after link verification and never comes from the
-// link's shared key. Keep this object in memory and do not copy it after use.
+// link's shared key. Keep this object in memory. Do not copy it; pass the pointer.
 // It is safe for concurrent calls. It has no JSON fields or public secret getter.
 type PortalSession struct {
 	mu    sync.Mutex

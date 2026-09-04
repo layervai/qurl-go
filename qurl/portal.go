@@ -232,9 +232,10 @@ var ErrCellNotInCatalog = errors.New("qurl: link names a cell with no native UDP
 // DiscoveryProvider, or EnterPortalWith.
 //
 // Each call starts an independent visit. If a single-use visit is committed but
-// its reply is lost, another EnterPortal call cannot recover that visit. Callers
-// that need same-visitor retries or renewals must use EnterPortalWith and retain
-// one Config.PortalSession across those calls.
+// its reply is lost, another EnterPortal call cannot recover that visit. With
+// server renewal-proof enforcement, a second open of a consumed single-use link
+// is denied. Callers that need same-visitor retries or renewals must use
+// EnterPortalWith and retain one Config.PortalSession across those calls.
 func EnterPortal(ctx context.Context, qurlLink string) (*ResourceHandle, error) {
 	cfg, err := resolveDefaultConfig(ctx)
 	if err != nil {

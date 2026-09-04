@@ -78,11 +78,15 @@ if err != nil {
 	return err
 }
 visitCfg := qurl.Config{
-	TrustStore: trust,
+	TrustStore:     trust,
 	RelayAllowlist: qurl.NewRelayAllowlist([]string{relayHost}),
-	PortalSession: &qurl.PortalSession{},
+	PortalSession:  &qurl.PortalSession{},
 }
 handle, err := qurl.EnterPortalWith(ctx, link, visitCfg)
+if err != nil {
+	return err
+}
+fmt.Println(handle.ResourceURL)
 // A later retry of this visit uses the same visitCfg and link.
 ```
 
@@ -100,8 +104,9 @@ request. Nil `Config.PortalSession` starts a new visitor on every call. When
 server enforcement is enabled, a single-use link cannot give that new visitor
 the first visitor's live session through the verifier.
 `EnterPortal` always starts an independent visit. Its default-provider path has
-no retained session; use the explicit config above when lost-reply recovery is
-required. No config or session is stored in a process-wide cache.
+no retained session. Under server enforcement, a second open of a consumed
+single-use link is denied. Use the explicit config above when lost-reply
+recovery is required. No config or session is stored in a process-wide cache.
 
 The capability travels in the encrypted qURL ASP payload as
 `usrData.qurl_session_secret`: canonical unpadded base64url for 32 random bytes.
