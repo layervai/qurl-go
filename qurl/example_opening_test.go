@@ -3,6 +3,7 @@ package qurl_test
 import (
 	"context"
 	"fmt"
+	"os"
 
 	"github.com/layervai/qurl-go/qurl"
 )
@@ -24,9 +25,22 @@ func ExampleEnterPortal() {
 }
 
 func ExamplePortalSession() {
+	// Explicit opener config requires a trusted public issuer key, its key ID,
+	// and the deployment's relay host. These are not issuer credentials.
+	issuerDER, err := os.ReadFile("/etc/layerv/qurl/issuer-public-key.der")
+	if err != nil {
+		return
+	}
+	trust, err := qurl.NewTrustStoreFromDER(map[string][]byte{"deployment-issuer": issuerDER})
+	if err != nil {
+		return
+	}
 	// Retain this config and session for retries of the same verified link.
-	// Supply the deployment's TrustStore and Cells or RelayAllowlist as usual.
-	cfg := qurl.Config{PortalSession: &qurl.PortalSession{}}
+	cfg := qurl.Config{
+		TrustStore:     trust,
+		RelayAllowlist: qurl.NewRelayAllowlist([]string{"relay.example.com:443"}),
+		PortalSession:  &qurl.PortalSession{},
+	}
 	handle, err := qurl.EnterPortalWith(context.Background(), "https://qurl.link/#qv2t1.1.1.1.…", cfg)
 	if err != nil {
 		return

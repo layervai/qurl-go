@@ -164,11 +164,12 @@ func (p *portalSessionPeer) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		p.t.Error(err)
 		return
 	}
-	secret := body.UsrData[visitorCapabilityUserDataKey]
+	// Pin the cross-repository ASP keys independently of the producer constants.
+	secret := body.UsrData["qurl_session_secret"]
 	raw, err := b64url.Strict().DecodeString(secret)
 	if err != nil || len(raw) != 32 || len(secret) != 43 || len(body.UsrData) != 3 ||
 		body.HeaderType != nhpKNKHeaderType || body.AspID != qurlAspID || body.ResID != p.fragment.Claims.ResourcePublicKeyB64 ||
-		body.UsrData[claimsUserDataKey] != p.fragment.ClaimsB64 || body.UsrData[sigUserDataKey] != p.fragment.SigB64 {
+		body.UsrData["qurl_claims_b64"] != p.fragment.ClaimsB64 || body.UsrData["qurl_issuer_sig_b64"] != p.fragment.SigB64 {
 		p.t.Error("NHP user data lost its verified envelope or private visitor capability")
 		http.Error(w, "invalid body", http.StatusBadRequest)
 		return

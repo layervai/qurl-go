@@ -18,7 +18,7 @@ import (
 //     mirror the server contract's separate blobs qurl_claims_b64 /
 //     qurl_issuer_sig_b64 so a verifier reads exactly the signed bytes.
 //   - qurl_session_secret carries this visitor's independent capability; the
-//     NHP qURL ASP hashes it before service-side session matching.
+//     NHP qURL ASP hashes it for service-side renewal matching.
 //
 // The per-qURL public key is NOT placed in the body: the server learns it as the
 // authenticated Noise initiator static key (IK handshake) and matches it to the
@@ -47,7 +47,7 @@ const (
 	claimsUserDataKey = "qurl_claims_b64"
 	sigUserDataKey    = "qurl_issuer_sig_b64"
 	// This per-visitor secret is independent of the shared link key. NHP hashes
-	// its decoded bytes before binding the service-side visitor session.
+	// its decoded bytes to bind the service-side renewal proof.
 	visitorCapabilityUserDataKey = "qurl_session_secret"
 )
 

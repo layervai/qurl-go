@@ -16,8 +16,9 @@ var ErrPortalSessionLinkMismatch = errors.New("qurl: portal session belongs to a
 
 // PortalSession holds the private visitor capability for one verified qURL.
 // Its zero value is ready for use. Retain the same pointer in Config.PortalSession
-// to retry after a lost reply or renew that visitor's access. A new session has
-// no access to a previous visitor's single-use grant, even with the same link.
+// to retry after a lost reply or renew that visitor's access. With server
+// renewal-proof enforcement, a new session cannot recover a previous visitor's
+// single-use grant, even with the same link.
 //
 // The capability is generated after link verification and never comes from the
 // link's shared key. Keep this object in memory and do not copy it after use.
