@@ -7,8 +7,8 @@ package nativeudp_test
 // the changes it was built to catch, while still reporting green everywhere
 // else. That is a hole nobody notices, because nothing fails.
 //
-// It is easy to get wrong by reading names. `qurl` is only the public facade;
-// registration executes in `internal/qv2`, `internal/udpfence` and `relayknock`
+// It is easy to get wrong by reading names. Registration executes in `qurl`,
+// `internal/udpfence` and `relayknock`
 // -- all packages of the ROOT module, so touching them moves neither go.mod nor
 // go.sum and matches no dependency path either. The first version of this
 // filter listed `qurl/**` alone and missed nine of the eleven packages the gate
@@ -227,7 +227,7 @@ func TestGatePathsCoverTheCompiledClosure(t *testing.T) {
 // The scope step decides relevance from the PR's changed files. Judging that on
 // non-removed files only -- which is right for a check asking "does this file
 // now exist?", and is where this was borrowed from -- is wrong here: deleting a
-// file from internal/qv2 changes registration as surely as editing one, and a
+// file from qurl changes registration as surely as editing one, and a
 // pure-deletion PR would then report success without ever enrolling. Renames
 // are the same shape, since .filename is the NEW path, so a file moved OUT of a
 // gated directory is invisible without .previous_filename.

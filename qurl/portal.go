@@ -22,10 +22,30 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/layervai/qurl-go/internal/qv2"
 	"github.com/layervai/qurl-go/relayknock"
 	"github.com/layervai/qurl-go/relayknock/nativeudp"
 )
+
+// RelayError is a network fault that occurred before an authenticated platform
+// decision.
+type RelayError struct {
+	Status int
+	Msg    string
+}
+
+func (e *RelayError) Error() string {
+	if e == nil || strings.TrimSpace(e.Msg) == "" {
+		return "qurl: platform access error"
+	}
+	return ensureQurlPrefix(e.Msg)
+}
+
+func ensureQurlPrefix(msg string) string {
+	if strings.HasPrefix(msg, "qurl: ") {
+		return msg
+	}
+	return "qurl: " + msg
+}
 
 // Config carries opener configuration for EnterPortalWith. Most applications
 // install a Provider once and call EnterPortal; Config is the explicit seam for
@@ -261,10 +281,10 @@ func EnterPortalWith(ctx context.Context, qurlLink string, cfg Config) (*Resourc
 		return nil, fmt.Errorf("%w: EnterPortal requires qURL opener config", ErrNotConfigured)
 	}
 
-	// 1+2. Parse the fragment and verify the issuer signature. FragmentFromLinkAndVerify
+	// 1+2. Parse the fragment and verify the issuer signature. VerifyLink
 	// strict-parses then checks the signature over the exact received claims bytes;
 	// nothing downstream runs until the signature is good.
-	frag, err := qv2.FragmentFromLinkAndVerify(qurlLink, cfg.TrustStore.core())
+	frag, err := VerifyLink(qurlLink, cfg.TrustStore)
 	if err != nil {
 		return nil, err
 	}
@@ -273,7 +293,7 @@ func EnterPortalWith(ctx context.Context, qurlLink string, cfg Config) (*Resourc
 	// 3. Decode the verified platform access key. It both encrypts the knock and
 	// identifies the cell — the relay routes by a fingerprint of this same key —
 	// so it must be in hand before a transport can be chosen.
-	cellPub, err := qv2.DecodeCellPublicKey(claims)
+	cellPub, err := decodeClaimsCellPublicKey(claims)
 	if err != nil {
 		// Unreachable in practice: a verified claim already passed the parser's
 		// 32-byte platform access key length check. Kept as defense in depth.
@@ -295,14 +315,14 @@ func EnterPortalWith(ctx context.Context, qurlLink string, cfg Config) (*Resourc
 			// deliberate cells-only config as a configuration fault.
 			return nil, fmt.Errorf("%w (cell fingerprint %s)", ErrCellNotInCatalog, relayknock.PubKeyFingerprint(cellPub))
 		}
-		if err := qv2.ValidateRelayURL(claims.RelayURL, cfg.RelayAllowlist.core()); err != nil {
+		if err := ValidateRelayURL(claims.RelayURL, cfg.RelayAllowlist); err != nil {
 			return nil, err
 		}
 	}
 
 	// 5. Build the platform access request from the link's per-qURL key, the
 	// LayerV-provided access key, the resource identity, and the signed claims.
-	devicePriv, err := qv2.DecodeQurlUserPrivateKey(frag.Secret)
+	devicePriv, err := decodeSecretQurlUserPrivateKey(frag.Secret)
 	if err != nil {
 		return nil, fmt.Errorf("qurl: decode per-qURL private key: %w", err)
 	}

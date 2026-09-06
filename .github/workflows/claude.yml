@@ -57,185 +57,38 @@ jobs:
           esac
           echo "authorized=true" >> "${GITHUB_OUTPUT}"
 
-      - name: Resolve Claude pull request context
-        id: claude_pr
-        if: steps.claude_actor.outputs.authorized == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.issue.number }}
-          TRUSTED_DEFAULT_REF: ${{ github.event.repository.default_branch }}
-          EXPECTED_TRUSTED_SHA: ${{ github.sha }}
-        run: |
-          set -euo pipefail
-
-          validate_sha() {
-            [[ "$1" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]
-          }
-          validate_ref() {
-            [[ "$1" != "@" ]] &&
-              [[ "$1" =~ ^[A-Za-z0-9@_][A-Za-z0-9/_.#+,@-]*$ ]] &&
-              git check-ref-format "refs/heads/$1" >/dev/null 2>&1
-          }
-
-          if [[ ! "${PR_NUMBER}" =~ ^[1-9][0-9]*$ ]] ||
-             ! validate_ref "${TRUSTED_DEFAULT_REF}" ||
-             ! pr="$(timeout 30s gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}")"; then
-            echo "::error::Unable to resolve the Claude PR context."
-            exit 1
-          fi
-
-          state="$(jq -r '.state // ""' <<<"${pr}")"
-          head_repo="$(jq -r '.head.repo.full_name // ""' <<<"${pr}")"
-          head_sha="$(jq -r '.head.sha // ""' <<<"${pr}")"
-          head_ref="$(jq -r '.head.ref // ""' <<<"${pr}")"
-          base_repo="$(jq -r '.base.repo.full_name // ""' <<<"${pr}")"
-          base_sha="$(jq -r '.base.sha // ""' <<<"${pr}")"
-          base_ref="$(jq -r '.base.ref // ""' <<<"${pr}")"
-          default_ref="$(jq -r '.base.repo.default_branch // ""' <<<"${pr}")"
-
-          if [[ "${state}" != "open" ||
-                "${head_repo}" != "${GITHUB_REPOSITORY}" ||
-                "${base_repo}" != "${GITHUB_REPOSITORY}" ]] ||
-             ! validate_sha "${head_sha}" ||
-             ! validate_sha "${base_sha}" ||
-             ! validate_sha "${EXPECTED_TRUSTED_SHA}" ||
-             ! validate_ref "${head_ref}" ||
-             ! validate_ref "${base_ref}" ||
-             ! validate_ref "${default_ref}" ||
-             [[ "${base_sha}" != "${EXPECTED_TRUSTED_SHA}" ||
-                "${default_ref}" != "${TRUSTED_DEFAULT_REF}" ||
-                "${base_ref}" != "${default_ref}" ||
-                "${head_ref}" == "${default_ref}" ]] ||
-             [[ "${head_ref}" == "${base_ref}" ||
-                "${head_ref}" == "${base_ref}/"* ||
-                "${base_ref}" == "${head_ref}/"* ]]; then
-            echo "::error::Claude commands require an open same-repository PR with a non-default head."
-            exit 1
-          fi
-
-          {
-            echo "number=${PR_NUMBER}"
-            echo "head_sha=${head_sha}"
-            echo "head_ref=${head_ref}"
-            echo "base_sha=${base_sha}"
-            echo "base_ref=${base_ref}"
-            echo "default_branch=${default_ref}"
-            echo "checkout_allowed=true"
-          } >> "${GITHUB_OUTPUT}"
-
       - name: Checkout trusted default branch history
         id: checkout
-        if: steps.claude_pr.outputs.checkout_allowed == 'true'
+        if: steps.claude_actor.outputs.authorized == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Resolve Claude pull request context
+        id: claude_pr
+        if: steps.claude_actor.outputs.authorized == 'true'
+        env:
+          CLAUDE_REVIEW_MODE: interactive
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+          TRUSTED_DEFAULT_REF: ${{ github.event.repository.default_branch }}
+          EXPECTED_TRUSTED_SHA: ${{ github.sha }}
+        run: bash .github/scripts/resolve-claude-pr.sh
+
       - name: Prepare credential-free Claude origin
         id: local_origin
         if: steps.checkout.outcome == 'success'
         env:
+          CLAUDE_REVIEW_MODE: interactive
           EXPECTED_HEAD_SHA: ${{ steps.claude_pr.outputs.head_sha }}
           EXPECTED_HEAD_REF: ${{ steps.claude_pr.outputs.head_ref }}
           EXPECTED_BASE_SHA: ${{ steps.claude_pr.outputs.base_sha }}
           EXPECTED_BASE_REF: ${{ steps.claude_pr.outputs.base_ref }}
           TRUSTED_DEFAULT_REF: ${{ steps.claude_pr.outputs.default_branch }}
           EXPECTED_TRUSTED_SHA: ${{ github.sha }}
-        run: |
-          set -euo pipefail
-
-          validate_sha() {
-            [[ "$1" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]
-          }
-          validate_ref() {
-            [[ "$1" != "@" ]] &&
-              [[ "$1" =~ ^[A-Za-z0-9@_][A-Za-z0-9/_.#+,@-]*$ ]] &&
-              git check-ref-format "refs/heads/$1" >/dev/null 2>&1
-          }
-
-          if ! validate_sha "${EXPECTED_HEAD_SHA}" ||
-             ! validate_sha "${EXPECTED_BASE_SHA}" ||
-             ! validate_sha "${EXPECTED_TRUSTED_SHA}" ||
-             ! validate_ref "${EXPECTED_HEAD_REF}" ||
-             ! validate_ref "${EXPECTED_BASE_REF}" ||
-             ! validate_ref "${TRUSTED_DEFAULT_REF}" ||
-             [[ "${EXPECTED_TRUSTED_SHA}" != "${EXPECTED_BASE_SHA}" ||
-                "${EXPECTED_BASE_REF}" != "${TRUSTED_DEFAULT_REF}" ||
-                "${EXPECTED_HEAD_REF}" == "${TRUSTED_DEFAULT_REF}" ]] ||
-             [[ "${EXPECTED_HEAD_REF}" == "${EXPECTED_BASE_REF}" ||
-                "${EXPECTED_HEAD_REF}" == "${EXPECTED_BASE_REF}/"* ||
-                "${EXPECTED_BASE_REF}" == "${EXPECTED_HEAD_REF}/"* ]]; then
-            echo "::error::Claude local origin received invalid PR metadata."
-            exit 1
-          fi
-
-          if ! trusted_sha="$(git rev-parse --verify HEAD 2>/dev/null)" ||
-             ! validate_sha "${trusted_sha}" ||
-             [[ "${trusted_sha}" != "${EXPECTED_TRUSTED_SHA}" ]] ||
-             ! git cat-file -e "${EXPECTED_HEAD_SHA}^{commit}" 2>/dev/null ||
-             ! git cat-file -e "${EXPECTED_BASE_SHA}^{commit}" 2>/dev/null; then
-            echo "::error::Claude snapshots are unavailable from the trusted checkout."
-            exit 1
-          fi
-          git checkout --detach --quiet "${trusted_sha}"
-
-          local_origin_parent="$(mktemp -d "${RUNNER_TEMP}/claude-origin.XXXXXX")"
-          local_origin="${local_origin_parent}/origin.git"
-          object_format="$(git rev-parse --show-object-format)"
-          git init --bare --quiet --object-format="${object_format}" "${local_origin}"
-          git push --quiet "${local_origin}" \
-            "${EXPECTED_HEAD_SHA}:refs/heads/${EXPECTED_HEAD_REF}" \
-            "${EXPECTED_BASE_SHA}:refs/heads/${EXPECTED_BASE_REF}"
-          git --git-dir="${local_origin}" symbolic-ref HEAD "refs/heads/${EXPECTED_BASE_REF}"
-          git remote set-url origin "${local_origin}"
-          git branch --force "${EXPECTED_HEAD_REF}" "${EXPECTED_HEAD_SHA}"
-          git branch --force "${EXPECTED_BASE_REF}" "${EXPECTED_BASE_SHA}"
-          git update-ref "refs/remotes/origin/${EXPECTED_HEAD_REF}" "${EXPECTED_HEAD_SHA}"
-          git update-ref "refs/remotes/origin/${EXPECTED_BASE_REF}" "${EXPECTED_BASE_SHA}"
-          git config --local fetch.recurseSubmodules false
-
-          remote_keys="$(git config --local --name-only --get-regexp '^remote\..*\.(url|pushurl)$' || true)"
-          if [[ "$(git remote)" != "origin" ||
-                "${remote_keys}" != "remote.origin.url" ||
-                "$(git remote get-url --all origin 2>/dev/null)" != "${local_origin}" ||
-                "$(git remote get-url --push --all origin 2>/dev/null)" != "${local_origin}" ||
-                "$(git config --local --get-all fetch.recurseSubmodules 2>/dev/null)" != "false" ]] ||
-             git config --local --get-regexp '^http\..*\.extraheader$' >/dev/null 2>&1 ||
-             git config --local --get-regexp '^credential(\..*)?\.helper$' >/dev/null 2>&1; then
-            echo "::error::Claude local origin retained a credential or unexpected remote."
-            exit 1
-          fi
-
-          # Agent mode reads through GitHub MCP, but v1.0.180 still fetches the
-          # trusted base while restoring startup configuration. Prove that fetch
-          # resolves only from the credential-free immutable local origin.
-          git fetch --quiet origin "${EXPECTED_BASE_REF}" --depth=1 --no-recurse-submodules
-          remote_keys="$(git config --local --name-only --get-regexp '^remote\..*\.(url|pushurl)$' || true)"
-          if [[ "$(git remote)" != "origin" ||
-                "${remote_keys}" != "remote.origin.url" ||
-                "$(git remote get-url --all origin 2>/dev/null)" != "${local_origin}" ||
-                "$(git remote get-url --push --all origin 2>/dev/null)" != "${local_origin}" ||
-                "$(git config --local --get-all fetch.recurseSubmodules 2>/dev/null)" != "false" ||
-                "$(git rev-parse --verify FETCH_HEAD 2>/dev/null)" != "${EXPECTED_BASE_SHA}" ||
-                "$(git rev-parse --verify "refs/heads/${EXPECTED_HEAD_REF}" 2>/dev/null)" != "${EXPECTED_HEAD_SHA}" ||
-                "$(git rev-parse --verify "refs/heads/${EXPECTED_BASE_REF}" 2>/dev/null)" != "${EXPECTED_BASE_SHA}" ||
-                "$(git rev-parse --verify "refs/remotes/origin/${EXPECTED_HEAD_REF}" 2>/dev/null)" != "${EXPECTED_HEAD_SHA}" ||
-                "$(git rev-parse --verify "refs/remotes/origin/${EXPECTED_BASE_REF}" 2>/dev/null)" != "${EXPECTED_BASE_SHA}" ||
-                "$(git --git-dir="${local_origin}" rev-parse --verify "refs/heads/${EXPECTED_HEAD_REF}" 2>/dev/null)" != "${EXPECTED_HEAD_SHA}" ||
-                "$(git --git-dir="${local_origin}" rev-parse --verify "refs/heads/${EXPECTED_BASE_REF}" 2>/dev/null)" != "${EXPECTED_BASE_SHA}" ]] ||
-             git config --local --get-regexp '^http\..*\.extraheader$' >/dev/null 2>&1 ||
-             git config --local --get-regexp '^credential(\..*)?\.helper$' >/dev/null 2>&1; then
-            echo "::error::Claude local origin did not preserve the authorized snapshots."
-            exit 1
-          fi
-
-          {
-            echo "path=${local_origin}"
-            echo "trusted_sha=${trusted_sha}"
-            echo "ready=true"
-          } >> "${GITHUB_OUTPUT}"
-
+        run: bash .github/scripts/prepare-claude-origin.sh
       - name: Run Claude Code
         id: claude
         if: steps.local_origin.outputs.ready == 'true'
@@ -281,6 +134,7 @@ jobs:
       - name: Verify reviewed pull request snapshots
         if: steps.claude.outcome == 'success'
         env:
+          CLAUDE_REVIEW_MODE: interactive
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ steps.claude_pr.outputs.number }}
           EXPECTED_HEAD_SHA: ${{ steps.claude_pr.outputs.head_sha }}
@@ -293,80 +147,4 @@ jobs:
           EXPECTED_TRIGGER_ACTOR: ${{ github.event.comment.user.login || github.actor }}
           EXPECTED_RESULT_MARKER: <!-- claude-command:${{ github.repository }}:pr-${{ steps.claude_pr.outputs.number }}:run-${{ github.run_id }}:attempt-${{ github.run_attempt }}:head-${{ steps.claude_pr.outputs.head_sha }} -->
           CLAUDE_EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
-        run: |
-          set -euo pipefail
-
-          if [[ -z "${CLAUDE_EXECUTION_FILE}" || ! -f "${CLAUDE_EXECUTION_FILE}" || ! -s "${CLAUDE_EXECUTION_FILE}" ]] ||
-             [[ -z "${EXPECTED_ORIGIN}" || -z "${EXPECTED_RESULT_MARKER}" || -z "${EXPECTED_TRIGGER_ACTOR}" ]]; then
-            echo "::error::Claude command did not produce a usable execution record."
-            exit 1
-          fi
-
-          remote_keys="$(git config --local --name-only --get-regexp '^remote\..*\.(url|pushurl)$' || true)"
-          if [[ "$(git remote)" != "origin" ||
-                "${remote_keys}" != "remote.origin.url" ||
-                "$(git remote get-url --all origin 2>/dev/null)" != "${EXPECTED_ORIGIN}" ||
-                "$(git remote get-url --push --all origin 2>/dev/null)" != "${EXPECTED_ORIGIN}" ||
-                "$(git config --local --get-all fetch.recurseSubmodules 2>/dev/null)" != "false" ||
-                "$(git rev-parse --verify HEAD 2>/dev/null)" != "${EXPECTED_LOCAL_SHA}" ||
-                "$(git --git-dir="${EXPECTED_ORIGIN}" rev-parse --verify "refs/heads/${EXPECTED_HEAD_REF}" 2>/dev/null)" != "${EXPECTED_HEAD_SHA}" ||
-                "$(git --git-dir="${EXPECTED_ORIGIN}" rev-parse --verify "refs/heads/${EXPECTED_BASE_REF}" 2>/dev/null)" != "${EXPECTED_BASE_SHA}" ||
-                "$(git rev-parse --verify "refs/heads/${EXPECTED_HEAD_REF}" 2>/dev/null)" != "${EXPECTED_HEAD_SHA}" ||
-                "$(git rev-parse --verify "refs/heads/${EXPECTED_BASE_REF}" 2>/dev/null)" != "${EXPECTED_BASE_SHA}" ||
-                "$(git rev-parse --verify "refs/remotes/origin/${EXPECTED_HEAD_REF}" 2>/dev/null)" != "${EXPECTED_HEAD_SHA}" ||
-                "$(git rev-parse --verify "refs/remotes/origin/${EXPECTED_BASE_REF}" 2>/dev/null)" != "${EXPECTED_BASE_SHA}" ]] ||
-             git config --local --get-regexp '^http\..*\.extraheader$' >/dev/null 2>&1 ||
-             git config --local --get-regexp '^credential(\..*)?\.helper$' >/dev/null 2>&1; then
-            echo "::error::Claude changed the credential-free command origin."
-            exit 1
-          fi
-
-          if ! current_pr="$(timeout 30s gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}")" ||
-             ! actor_permission="$(timeout 30s gh api \
-               "repos/${GITHUB_REPOSITORY}/collaborators/${EXPECTED_TRIGGER_ACTOR}/permission" \
-               --jq '.permission // ""')"; then
-            echo "::error::Unable to refresh the PR or trigger authorization."
-            exit 1
-          fi
-          case "${actor_permission}" in
-            admin|maintain|write) ;;
-            *)
-              echo "::error::Claude trigger actor lost repository write access."
-              exit 1
-              ;;
-          esac
-
-          current_default_ref="$(jq -r '.base.repo.default_branch // ""' <<<"${current_pr}")"
-          if [[ "$(jq -r '.state // ""' <<<"${current_pr}")" != "open" ||
-                "$(jq -r '.head.repo.full_name // ""' <<<"${current_pr}")" != "${GITHUB_REPOSITORY}" ||
-                "$(jq -r '.base.repo.full_name // ""' <<<"${current_pr}")" != "${GITHUB_REPOSITORY}" ||
-                "$(jq -r '.head.sha // ""' <<<"${current_pr}")" != "${EXPECTED_HEAD_SHA}" ||
-                "$(jq -r '.base.sha // ""' <<<"${current_pr}")" != "${EXPECTED_BASE_SHA}" ||
-                "$(jq -r '.head.ref // ""' <<<"${current_pr}")" != "${EXPECTED_HEAD_REF}" ||
-                "$(jq -r '.base.ref // ""' <<<"${current_pr}")" != "${EXPECTED_BASE_REF}" ||
-                "${current_default_ref}" != "${TRUSTED_DEFAULT_REF}" ||
-                "${EXPECTED_BASE_REF}" != "${current_default_ref}" ||
-                "${EXPECTED_HEAD_REF}" == "${current_default_ref}" ]]; then
-            echo "::error::Claude command is stale or the PR trust boundary changed."
-            exit 1
-          fi
-
-          if ! result_comments="$(timeout 30s gh api --paginate --slurp \
-            "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments?per_page=100")"; then
-            echo "::error::Unable to verify Claude command publication."
-            exit 1
-          fi
-          if ! jq -e --arg marker "${EXPECTED_RESULT_MARKER}" '
-            [
-              .[][]? |
-              select(.user.login == "github-actions[bot]") |
-              (.body // "" | sub("[\\r\\n]+$"; "")) as $body |
-              select(
-                ($body | endswith("\n" + $marker)) and
-                (($body | rtrimstr("\n" + $marker) | gsub("[[:space:]]"; "") | length) > 0)
-              )
-            ] | length == 1
-          ' <<<"${result_comments}" >/dev/null; then
-            echo "::error::Claude command did not publish exactly one substantive run-specific comment."
-            exit 1
-          fi
+        run: bash .github/scripts/verify-claude-review.sh

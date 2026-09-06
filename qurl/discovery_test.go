@@ -10,15 +10,13 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/layervai/qurl-go/internal/qv2"
 )
 
 // Discovery-provider fail-closed matrix.
 //
 // Every guard in discovery.go has its own sentinel so each fault can be asserted
 // independently and a removed guard reddens exactly one test. These exercise the
-// PIN trust path (qv2.ManifestDigest + a FetcherFunc returning the envelope) so no
+// PIN trust path (ManifestDigest + a FetcherFunc returning the envelope) so no
 // manifest signer is needed for the freshness/schema/pin cases; the signed-path
 // unknown-kid case is reachable with arbitrary signature bytes because the kid
 // lookup precedes signature verification.
@@ -26,7 +24,7 @@ import (
 // The signed-manifest ACCEPT path through Resolve (a valid signature under a known kid
 // -> authenticate -> verifyManifestSig success -> trust material built) is covered by
 // TestDiscoveryProvider_SignedManifest_Resolves below, which builds a real
-// manifest-domain signature with qv2.SignManifest + a LocalSigner. Its companion
+// manifest-domain signature with SignManifest + a LocalSigner. Its companion
 // TestDiscoveryProvider_SignedManifest_TamperedRejected serves the same signature over
 // MUTATED manifest bytes and asserts the provider rejects it as ErrManifestUnverified,
 // so the signed wiring goes red if a regression hands the wrong bytes to
@@ -74,7 +72,7 @@ func envelopeBytes(t *testing.T, m Manifest) (raw []byte, pin []byte) {
 	if err != nil {
 		t.Fatalf("marshal envelope: %v", err)
 	}
-	digest := qv2.ManifestDigest(manifestJSON)
+	digest := ManifestDigest(manifestJSON)
 	return raw, digest[:]
 }
 
@@ -189,7 +187,7 @@ func TestDiscoveryProvider_ConfigDefensivelyCopied(t *testing.T) {
 	})
 
 	t.Run("keys map mutation ignored", func(t *testing.T) {
-		signer, err := qv2.GenerateLocalSigner("manifest-signer-1")
+		signer, err := GenerateLocalSigner("manifest-signer-1")
 		if err != nil {
 			t.Fatalf("generate manifest signer: %v", err)
 		}
@@ -197,7 +195,7 @@ func TestDiscoveryProvider_ConfigDefensivelyCopied(t *testing.T) {
 		if err != nil {
 			t.Fatalf("signer public key DER: %v", err)
 		}
-		pub, err := qv2.ParseP256PublicKeyDER(der)
+		pub, err := ParseP256PublicKeyDER(der)
 		if err != nil {
 			t.Fatalf("parse signer public key: %v", err)
 		}
@@ -258,9 +256,9 @@ func TestDiscoveryProvider_PinnedManifest_Resolves(t *testing.T) {
 // by verifying the transmitted bytes with zero re-serialization. embedJSON is the
 // manifest body actually placed in manifest_b64 — passing a DIFFERENT value than the
 // signed bytes is how the tamper case drives a signature that no longer matches.
-func signedEnvelopeBytes(t *testing.T, signer *qv2.LocalSigner, signedJSON, embedJSON []byte) []byte {
+func signedEnvelopeBytes(t *testing.T, signer *LocalSigner, signedJSON, embedJSON []byte) []byte {
 	t.Helper()
-	sig, err := qv2.SignManifest(context.Background(), signer, signedJSON)
+	sig, err := SignManifest(context.Background(), signer, signedJSON)
 	if err != nil {
 		t.Fatalf("sign manifest: %v", err)
 	}
@@ -282,13 +280,13 @@ func signedEnvelopeBytes(t *testing.T, signer *qv2.LocalSigner, signedJSON, embe
 // the signed-accept wiring (a pin would short-circuit verification before
 // verifyManifestSig ran). The fetcher is injected so a test can drive a static body or
 // a stateful sequence (e.g. the downgrade-after-accept case).
-func signedProviderFromFetcher(t *testing.T, fetcher ManifestFetcher, signer *qv2.LocalSigner) *DiscoveryProvider {
+func signedProviderFromFetcher(t *testing.T, fetcher ManifestFetcher, signer *LocalSigner) *DiscoveryProvider {
 	t.Helper()
 	der, err := signer.PublicKeyDER()
 	if err != nil {
 		t.Fatalf("signer public key DER: %v", err)
 	}
-	pub, err := qv2.ParseP256PublicKeyDER(der)
+	pub, err := ParseP256PublicKeyDER(der)
 	if err != nil {
 		t.Fatalf("parse signer public key: %v", err)
 	}
@@ -305,7 +303,7 @@ func signedProviderFromFetcher(t *testing.T, fetcher ManifestFetcher, signer *qv
 
 // signedProvider is the static-body convenience: a signed provider whose fetcher always
 // returns raw.
-func signedProvider(t *testing.T, raw []byte, signer *qv2.LocalSigner) *DiscoveryProvider {
+func signedProvider(t *testing.T, raw []byte, signer *LocalSigner) *DiscoveryProvider {
 	t.Helper()
 	return signedProviderFromFetcher(t, FetcherFunc(func(context.Context) ([]byte, error) { return raw, nil }), signer)
 }
@@ -316,7 +314,7 @@ func signedProvider(t *testing.T, raw []byte, signer *qv2.LocalSigner) *Discover
 // allowlist. This exercises the provider's STRONGEST trust mode's happy-path wiring —
 // authenticate -> verifyManifestSig success -> buildTrustMaterial — end to end.
 func TestDiscoveryProvider_SignedManifest_Resolves(t *testing.T) {
-	signer, err := qv2.GenerateLocalSigner("manifest-signer-1")
+	signer, err := GenerateLocalSigner("manifest-signer-1")
 	if err != nil {
 		t.Fatalf("generate manifest signer: %v", err)
 	}
@@ -347,11 +345,11 @@ func TestDiscoveryProvider_SignedManifest_Resolves(t *testing.T) {
 // version), so the detached signature no longer matches the embedded bytes. With no pin
 // configured, the only thing that can reject this is the signed-path wiring — so this
 // asserts the signature is verified over the EXACT embedded bytes (not some other
-// copy). It fails closed as ErrManifestUnverified, wrapping qv2.ErrSignature. If a
+// copy). It fails closed as ErrManifestUnverified, wrapping ErrSignature. If a
 // regression handed verifyManifestSig the signed-over bytes instead of the embedded
 // bytes, this manifest would wrongly ACCEPT and this test would catch it.
 func TestDiscoveryProvider_SignedManifest_TamperedRejected(t *testing.T) {
-	signer, err := qv2.GenerateLocalSigner("manifest-signer-1")
+	signer, err := GenerateLocalSigner("manifest-signer-1")
 	if err != nil {
 		t.Fatalf("generate manifest signer: %v", err)
 	}
@@ -375,8 +373,8 @@ func TestDiscoveryProvider_SignedManifest_TamperedRejected(t *testing.T) {
 	if !errors.Is(err, ErrManifestUnverified) {
 		t.Fatalf("tampered signed manifest: want ErrManifestUnverified, got %v", err)
 	}
-	if !errors.Is(err, qv2.ErrSignature) {
-		t.Fatalf("tampered signed manifest: error should wrap qv2.ErrSignature, got %v", err)
+	if !errors.Is(err, ErrSignature) {
+		t.Fatalf("tampered signed manifest: error should wrap ErrSignature, got %v", err)
 	}
 }
 
@@ -475,7 +473,7 @@ func TestDiscoveryProvider_Downgrade_FailsClosed(t *testing.T) {
 // could not authenticate both the v8 and the v7 manifest. One signer signs both; a
 // stateful fetcher returns v8 first, then v7, against the SAME provider instance.
 func TestDiscoveryProvider_FloorAdvances_RejectsRollback(t *testing.T) {
-	signer, err := qv2.GenerateLocalSigner("manifest-signer-1")
+	signer, err := GenerateLocalSigner("manifest-signer-1")
 	if err != nil {
 		t.Fatalf("generate manifest signer: %v", err)
 	}
@@ -604,7 +602,7 @@ func TestDiscoveryProvider_UnknownKID_FailsClosed(t *testing.T) {
 	if !errors.Is(err, ErrManifestUnverified) {
 		t.Fatalf("unknown manifest kid: want ErrManifestUnverified, got %v", err)
 	}
-	if !errors.Is(err, qv2.ErrUnknownKID) {
+	if !errors.Is(err, ErrUnknownKID) {
 		t.Fatalf("unknown manifest kid: error should wrap ErrUnknownKID, got %v", err)
 	}
 }
@@ -689,7 +687,7 @@ func TestDiscoveryProvider_TrailingData_FailsClosed(t *testing.T) {
 		if err != nil {
 			t.Fatalf("marshal envelope: %v", err)
 		}
-		digest := qv2.ManifestDigest(manifestJSON)
+		digest := ManifestDigest(manifestJSON)
 		p := pinnedProvider(t, raw, digest[:], nil)
 		if _, _, err := p.Resolve(context.Background()); !errors.Is(err, ErrManifestSchema) {
 			t.Fatalf("manifest trailing data: want ErrManifestSchema, got %v", err)
@@ -709,7 +707,7 @@ func TestDiscoveryProvider_TrailingData_FailsClosed(t *testing.T) {
 		raw := append(append([]byte{}, envJSON...), []byte("{}")...) // trailing object after the envelope
 		// The envelope decoder rejects the trailing data before authentication, so a pin
 		// is configured only to build a valid provider; the schema guard fires first.
-		digest := qv2.ManifestDigest(manifestJSON)
+		digest := ManifestDigest(manifestJSON)
 		p := pinnedProvider(t, raw, digest[:], nil)
 		if _, _, err := p.Resolve(context.Background()); !errors.Is(err, ErrManifestSchema) {
 			t.Fatalf("envelope trailing data: want ErrManifestSchema, got %v", err)

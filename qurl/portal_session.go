@@ -6,8 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"sync"
-
-	"github.com/layervai/qurl-go/internal/qv2"
 )
 
 // ErrPortalSessionLinkMismatch means a PortalSession was reused for a different
@@ -42,7 +40,7 @@ func (s *PortalSession) GoString() string { return s.String() }
 // secretFor is called only after the signed claims and transport have passed
 // verification. Binding to the exact signed envelope prevents an accidental
 // shared Config from sending one visitor's capability for another link.
-func (s *PortalSession) secretFor(frag *qv2.Fragment) (string, error) {
+func (s *PortalSession) secretFor(frag *Fragment) (string, error) {
 	identity := sha256.Sum256([]byte(frag.ClaimsB64 + "." + frag.SigB64))
 	s.mu.Lock()
 	defer s.mu.Unlock()

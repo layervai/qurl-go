@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/layervai/qurl-go/internal/qv2"
 	"github.com/layervai/qurl-go/relayknock"
 )
 
@@ -63,7 +62,7 @@ const (
 // buildKnockBody serializes the qURL knock body for a verified fragment:
 // resId = resource_public_key_b64, usrData = the signed claims + issuer signature,
 // taken verbatim from the wire so the server verifies the exact signed bytes.
-func buildKnockBody(frag *qv2.Fragment, sessionSecret string) ([]byte, error) {
+func buildKnockBody(frag *Fragment, sessionSecret string) ([]byte, error) {
 	if frag == nil || frag.Claims == nil {
 		return nil, fmt.Errorf("qurl: build knock body: fragment not parsed")
 	}

@@ -58,6 +58,7 @@ const (
 	malformedHeaderReplyBytes     = 240
 	malformedHeaderBodyReplyBytes = 400
 	unknownReplyHeaderType        = 0x7ffe
+	x25519PublicKeyLength         = 32
 )
 
 // loopbackFaultConfig carries the wire-fault knobs the loss, delay, and replay

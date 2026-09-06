@@ -13,8 +13,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/layervai/qurl-go/internal/qv2"
 )
 
 // Discovery-manifest credential provider.
@@ -246,7 +244,7 @@ func NewDiscoveryProvider(cfg DiscoveryConfig) (*DiscoveryProvider, error) {
 	// guarded on a non-empty map because pin-only mode (no ManifestKeys) is legal and
 	// NewTrustStore rejects an empty map; the throwaway store is only used to validate.
 	if len(cfg.ManifestKeys) != 0 {
-		if _, err := qv2.NewTrustStore(cfg.ManifestKeys); err != nil {
+		if _, err := NewTrustStore(cfg.ManifestKeys); err != nil {
 			return nil, fmt.Errorf("%w: invalid ManifestKeys: %w", ErrDiscoveryConfig, err)
 		}
 	}
@@ -363,7 +361,7 @@ func (p *DiscoveryProvider) Resolve(ctx context.Context) (*TrustStore, *RelayAll
 func (p *DiscoveryProvider) authenticate(env *ManifestEnvelope, manifestBytes []byte) error {
 	pinned := false
 	if len(p.cfg.PinSHA256) != 0 {
-		got := qv2.ManifestDigest(manifestBytes)
+		got := ManifestDigest(manifestBytes)
 		// Both operands are non-secret public values (a content hash vs a configured
 		// pin), so there is no timing oracle to defend here; the constant-time compare
 		// is used purely for uniformity with the secret-comparison style elsewhere, not
@@ -402,20 +400,20 @@ func (p *DiscoveryProvider) authenticate(env *ManifestEnvelope, manifestBytes []
 // otherwise a pin-valid, freshly-signed manifest under a not-yet-distributed kid is
 // rejected here. This is a separate rotation from issuer-anchor (claims-signing) kid
 // rotation, which lives inside the manifest's issuer set and is covered by
-// internal/qv2/rotation_test.go.
+// qv2_rotation_test.go.
 func (p *DiscoveryProvider) verifyManifestSig(env *ManifestEnvelope, manifestBytes []byte) error {
 	if env.Kid == "" {
 		return fmt.Errorf("%w: signed manifest is missing its kid", ErrManifestSchema)
 	}
 	pub, ok := p.cfg.ManifestKeys[env.Kid]
 	if !ok {
-		return fmt.Errorf("%w: %w for manifest kid %q", ErrManifestUnverified, qv2.ErrUnknownKID, env.Kid)
+		return fmt.Errorf("%w: %w for manifest kid %q", ErrManifestUnverified, ErrUnknownKID, env.Kid)
 	}
 	sig, err := b64url.DecodeString(env.SigB64)
 	if err != nil {
 		return fmt.Errorf("%w: manifest sig is not valid base64url: %w", ErrManifestSchema, err)
 	}
-	if err := qv2.VerifyManifestSignature(pub, manifestBytes, sig); err != nil {
+	if err := VerifyManifestSignature(pub, manifestBytes, sig); err != nil {
 		return fmt.Errorf("%w: %w", ErrManifestUnverified, err)
 	}
 	return nil

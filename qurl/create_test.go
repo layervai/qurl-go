@@ -14,16 +14,15 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/layervai/qurl-go/internal/qv2"
 	"github.com/layervai/qurl-go/relayknock"
 )
 
 // CreatePortal is proved to be the INVERSE of EnterPortal: a link it mints is
 // driven back through EnterPortalWith (the locked enter verb) and through
-// qv2.FragmentFromLinkAndVerify (the verifier core) using a trust store holding
+// VerifyLink (the verifier core) using a trust store holding
 // the mint signer's public key. The round-trip exercises the real verify path, so
 // the two verbs are provably symmetric — not two parallel implementations. A
-// post-mint tamper is rejected with qv2.ErrSignature specifically, isolating the
+// post-mint tamper is rejected with ErrSignature specifically, isolating the
 // signature-binding property from parser/encoding faults.
 
 const createTestRelayURL = "https://relay.example.com"
@@ -36,10 +35,10 @@ var mintSignerSeq atomic.Uint64
 // mintSigner returns a fresh local issuer signer plus a trust store holding its
 // public key under its kid — the same DER load path production uses for KMS
 // GetPublicKey output.
-func mintSigner(t *testing.T) (*qv2.LocalSigner, *TrustStore) {
+func mintSigner(t *testing.T) (*LocalSigner, *TrustStore) {
 	t.Helper()
 	kid := fmt.Sprintf("qurl-issuer-key-create-test-%d", mintSignerSeq.Add(1))
-	signer, err := qv2.GenerateLocalSigner(kid)
+	signer, err := GenerateLocalSigner(kid)
 	if err != nil {
 		t.Fatalf("GenerateLocalSigner: %v", err)
 	}
@@ -140,12 +139,12 @@ func TestCreatePortal_VerifierRoundTrip(t *testing.T) {
 		t.Fatalf("CreatePortal: %v", err)
 	}
 
-	frag, err := qv2.FragmentFromLinkAndVerify(link, ts.core())
+	frag, err := VerifyLink(link, ts)
 	if err != nil {
-		t.Fatalf("FragmentFromLinkAndVerify of minted link: %v", err)
+		t.Fatalf("VerifyLink of minted link: %v", err)
 	}
 	c := frag.Claims
-	if c.V != qv2.Version || c.Iss != qv2.Issuer || c.Kid != signer.KID() {
+	if c.V != qv2Version || c.Iss != qv2Issuer || c.Kid != signer.KID() {
 		t.Fatalf("pinned/stamped claims wrong: v=%d iss=%q kid=%q", c.V, c.Iss, c.Kid)
 	}
 	if c.RelayURL != params.RelayURL || c.Jti != params.JTI || c.CellID != params.CellID {
@@ -157,7 +156,7 @@ func TestCreatePortal_VerifierRoundTrip(t *testing.T) {
 
 	// The secret's private key must derive the public key bound into the claims:
 	// proof the verb generated one consistent fresh keypair, not mismatched halves.
-	priv, err := qv2.DecodeQurlUserPrivateKey(frag.Secret)
+	priv, err := decodeSecretQurlUserPrivateKey(frag.Secret)
 	if err != nil {
 		t.Fatalf("decode secret private key: %v", err)
 	}
@@ -177,9 +176,9 @@ func TestLegacyFullLinkTransportRejectedByPublicReaders(t *testing.T) {
 		t.Fatalf("CreatePortal: %v", err)
 	}
 
-	canonical, err := qv2.DecodeTransportFragment(link[strings.IndexByte(link, '#')+1:])
+	canonical, err := decodeTransportFragment(link[strings.IndexByte(link, '#')+1:])
 	if err != nil {
-		t.Fatalf("DecodeTransportFragment: %v", err)
+		t.Fatalf("decodeTransportFragment: %v", err)
 	}
 	legacyLink := LinkBaseURL + "#" + canonical
 
@@ -211,11 +210,11 @@ func TestCreatePortal_FreshKeyPerCall(t *testing.T) {
 		t.Fatal("two mints with identical params produced identical links (key not fresh)")
 	}
 
-	fragA, err := qv2.FragmentFromLinkAndVerify(linkA, ts.core())
+	fragA, err := VerifyLink(linkA, ts)
 	if err != nil {
 		t.Fatalf("verify A: %v", err)
 	}
-	fragB, err := qv2.FragmentFromLinkAndVerify(linkB, ts.core())
+	fragB, err := VerifyLink(linkB, ts)
 	if err != nil {
 		t.Fatalf("verify B: %v", err)
 	}
@@ -245,12 +244,12 @@ func TestCreatePortal_TamperRejected(t *testing.T) {
 	}
 
 	// Through the verifier core.
-	if _, err := qv2.FragmentFromLinkAndVerify(tampered, ts.core()); !errors.Is(err, qv2.ErrSignature) {
+	if _, err := VerifyLink(tampered, ts); !errors.Is(err, ErrSignature) {
 		t.Fatalf("tampered claims via verifier: want ErrSignature, got %v", err)
 	}
 	// And through the locked enter verb — same fail-closed result.
 	cfg := Config{TrustStore: ts, RelayAllowlist: relayExampleAllowlist(), HTTPClient: &capturingDoer{}}
-	if _, err := EnterPortalWith(context.Background(), tampered, cfg); !errors.Is(err, qv2.ErrSignature) {
+	if _, err := EnterPortalWith(context.Background(), tampered, cfg); !errors.Is(err, ErrSignature) {
 		t.Fatalf("tampered claims via EnterPortalWith: want ErrSignature, got %v", err)
 	}
 }
@@ -261,13 +260,13 @@ func TestCreatePortal_TamperRejected(t *testing.T) {
 // longer match the signature.
 func tamperJTI(t *testing.T, link string) string {
 	t.Helper()
-	canonical, err := qv2.DecodeTransportFragment(link[strings.IndexByte(link, '#')+1:])
+	canonical, err := decodeTransportFragment(link[strings.IndexByte(link, '#')+1:])
 	if err != nil {
-		t.Fatalf("DecodeTransportFragment(minted): %v", err)
+		t.Fatalf("decodeTransportFragment(minted): %v", err)
 	}
-	frag, err := qv2.ParseFragment(canonical)
+	frag, err := parseFragment(canonical)
 	if err != nil {
-		t.Fatalf("ParseFragment(minted): %v", err)
+		t.Fatalf("parseFragment(minted): %v", err)
 	}
 	tamperedClaims := *frag.Claims
 	tamperedClaims.Jti = frag.Claims.Jti + "-tampered"
@@ -275,13 +274,13 @@ func tamperJTI(t *testing.T, link string) string {
 	claimsJSON := mustJSON(t, tamperedClaims)
 	claimsB64 := b64url.EncodeToString(claimsJSON)
 
-	body, err := qv2.BuildFragment(claimsB64, frag.SecretB64, mustDecode(t, frag.SigB64))
+	body, err := buildFragment(claimsB64, frag.SecretB64, mustDecode(t, frag.SigB64))
 	if err != nil {
-		t.Fatalf("BuildFragment(tampered): %v", err)
+		t.Fatalf("buildFragment(tampered): %v", err)
 	}
-	transport, err := qv2.EncodeTransportFragment(body)
+	transport, err := encodeTransportFragment(body)
 	if err != nil {
-		t.Fatalf("EncodeTransportFragment(tampered): %v", err)
+		t.Fatalf("encodeTransportFragment(tampered): %v", err)
 	}
 	return LinkBaseURL + "#" + transport
 }
@@ -308,7 +307,7 @@ func TestCreatePortal_UnknownIssuerRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreatePortal: %v", err)
 	}
-	if _, err := qv2.FragmentFromLinkAndVerify(link, otherTS.core()); !errors.Is(err, qv2.ErrUnknownKID) {
+	if _, err := VerifyLink(link, otherTS); !errors.Is(err, ErrUnknownKID) {
 		t.Fatalf("foreign trust store: want ErrUnknownKID, got %v", err)
 	}
 }
@@ -349,8 +348,8 @@ func TestCreatePortal_ParamValidation(t *testing.T) {
 		p := validCreateParams(t)
 		p.NotBefore = p.Expiry + 1
 		_, err := CreatePortalWithParams(context.Background(), signer, p)
-		if !errors.Is(err, qv2.ErrStrictParse) {
-			t.Fatalf("nbf>exp: want wrapped qv2.ErrStrictParse, got %v", err)
+		if !errors.Is(err, ErrStrictParse) {
+			t.Fatalf("nbf>exp: want wrapped ErrStrictParse, got %v", err)
 		}
 	})
 }
