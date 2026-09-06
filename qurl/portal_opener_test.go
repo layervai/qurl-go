@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/netip"
 	"net/url"
@@ -126,6 +127,77 @@ func TestPortalOpenerStartCachesHandleAndDoDoesNotOpen(t *testing.T) {
 	}
 	if got := requests.Load(); got != 8 {
 		t.Fatalf("protected requests = %d, want 8", got)
+	}
+}
+
+func TestPortalOpenerOptionsFailClosed(t *testing.T) {
+	link, cfg := portalOpenerFixture(t)
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var nilOption PortalOpenerOption
+	for name, testCase := range map[string]struct {
+		link    string
+		options []PortalOpenerOption
+	}{
+		"empty link":       {link: " \t"},
+		"nil option":       {link: link, options: []PortalOpenerOption{nilOption}},
+		"nil client":       {link: link, options: []PortalOpenerOption{WithPortalOpenerHTTPClient(nil)}},
+		"cookie jar":       {link: link, options: []PortalOpenerOption{WithPortalOpenerHTTPClient(&http.Client{Jar: jar})}},
+		"redirect policy":  {link: link, options: []PortalOpenerOption{WithPortalOpenerHTTPClient(&http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return nil }})}},
+		"zero timeout":     {link: link, options: []PortalOpenerOption{WithPortalOpenerOpenTimeout(0)}},
+		"negative timeout": {link: link, options: []PortalOpenerOption{WithPortalOpenerOpenTimeout(-time.Second)}},
+		"large timeout":    {link: link, options: []PortalOpenerOption{WithPortalOpenerOpenTimeout(portalOpenTimeoutMax + time.Nanosecond)}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := NewPortalOpener(testCase.link, testCase.options...)
+			if !errors.Is(err, ErrNotConfigured) {
+				t.Fatalf("NewPortalOpener error = %v, want ErrNotConfigured", err)
+			}
+		})
+	}
+
+	opener, err := NewPortalOpener(link, WithPortalOpenerConfig(cfg), WithPortalOpenerOpenTimeout(27*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { closePortalOpener(t, opener) })
+	if opener.openTimeout != 27*time.Second {
+		t.Fatalf("open timeout = %s, want 27s", opener.openTimeout)
+	}
+}
+
+func TestPortalOpenerStartRejectsMissingTrustAndIncompleteHandles(t *testing.T) {
+	link, cfg := portalOpenerFixture(t)
+	missingTrust := cfg
+	missingTrust.TrustStore = nil
+	opener, err := NewPortalOpener(link, WithPortalOpenerConfig(missingTrust))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := opener.Start(t.Context()); !errors.Is(err, ErrNotConfigured) {
+		t.Fatalf("missing trust Start error = %v, want ErrNotConfigured", err)
+	}
+	closePortalOpener(t, opener)
+
+	for name, handle := range map[string]*ResourceHandle{
+		"nil":           nil,
+		"zero lifetime": portalTestHandle("https://r_test.qurl.site/fixed", testAuthProviderToken, 0, 1),
+		"zero session":  portalTestHandle("https://r_test.qurl.site/fixed", testAuthProviderToken, 60, 0),
+		"bad token":     portalTestHandle("https://r_test.qurl.site/fixed", "bad token", 60, 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			opener, err := NewPortalOpener(link, WithPortalOpenerConfig(cfg))
+			if err != nil {
+				t.Fatal(err)
+			}
+			opener.open = func(context.Context, string, Config) (*ResourceHandle, error) { return handle, nil }
+			if err := opener.Start(t.Context()); !errors.Is(err, ErrMalformedReply) {
+				t.Fatalf("Start error = %v, want ErrMalformedReply", err)
+			}
+			closePortalOpener(t, opener)
+		})
 	}
 }
 
@@ -741,13 +813,22 @@ func TestPortalOpenerRedirectPolicies(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				if resp == nil {
+					t.Fatal("same-origin redirect returned no response")
+				}
 			case "reject all":
 				if !errors.Is(err, ErrPortalRedirect) {
 					t.Fatalf("redirect error = %v, want ErrPortalRedirect", err)
 				}
+				if resp != nil {
+					t.Fatal("rejected redirect returned a response with an error")
+				}
 			case "cross origin":
 				if !errors.Is(err, ErrInvalidContentRequest) {
 					t.Fatalf("cross-origin redirect error = %v, want ErrInvalidContentRequest", err)
+				}
+				if resp != nil {
+					t.Fatal("cross-origin redirect returned a response with an error")
 				}
 			}
 		})

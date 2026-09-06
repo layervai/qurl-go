@@ -17,10 +17,12 @@ and are marked **Breaking** with what to change.
   strict redirect rejection for signed requests. `Health` is secret-free, and
   `Close` cancels discovery and transport work, waits for shutdown, and clears
   retained state.
-- Portal opens now prove that the fragment's X25519 private key derives the
-  issuer-signed visitor public key. They also compare the full signed cell key
-  with the deployment catalog key after the compact fingerprint lookup. Both
-  mismatches fail before DNS or transport I/O.
+- **Breaking:** portal opens now prove that the fragment's X25519 private key
+  derives the issuer-signed visitor public key. They also compare the full
+  signed cell key with the deployment catalog key after the compact fingerprint
+  lookup. Both mismatches fail before DNS or transport I/O. Minters must derive
+  the signed `qurl_user_public_key_b64` claim from the matching fragment private
+  key.
 - Portal retries use a private visitor capability instead of retaining or
   serializing the qURL fragment secret. The capability stays process-local and
   is cleared with the portal state.

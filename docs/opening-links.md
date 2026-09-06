@@ -95,6 +95,10 @@ resp, err := opener.Do(ctx, func(target *url.URL) (*http.Request, error) {
 }, qurl.RejectPortalRedirects())
 ```
 
+Each open has a 15-second default deadline, including the synchronous first
+`Start`. Use `WithPortalOpenerOpenTimeout` to select a positive deadline of at
+most 60 seconds for slower private networks.
+
 The default provider or `QURL_DEPLOYMENT` must include the link's issuer and
 cell. A missing cell returns `ErrPortalNativeOnly` or `ErrCellNotInCatalog`; the
 opener never falls back to the HTTPS relay. A renewal that authenticates a
@@ -109,8 +113,8 @@ and wire Host are always the exact authenticated target. The builder cannot add
 a path, query, or alternate authority.
 
 Renewal starts before expiry and runs in one background goroutine. Each renewal
-has a fixed I/O timeout and a bounded retry count. When renewal cannot complete,
-the old handle remains usable only until its reported expiry. After that, `Do`
+has the configured I/O timeout and a bounded retry count. When renewal cannot
+complete, the old handle remains usable only until its reported expiry. After that, `Do`
 returns `ErrPortalOpenerNotReady` immediately. `Health` returns readiness, UTC
 times, a failure count, and a secret-free failure class. It does not return the
 qURL, target, session ID, cookie, or raw transport error. Lifecycle code can

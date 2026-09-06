@@ -13,6 +13,7 @@ import (
 
 const (
 	portalOpenTimeout       = 15 * time.Second
+	portalOpenTimeoutMax    = 60 * time.Second
 	portalRetryInitialDelay = 500 * time.Millisecond
 	portalRetryMaximumDelay = 2 * time.Second
 	portalRenewalAttempts   = 4
@@ -75,6 +76,7 @@ func (f portalOpenerOptionFunc) applyPortalOpenerOption(cfg *portalOpenerConfig)
 type portalOpenerConfig struct {
 	explicitConfig *Config
 	httpClient     *http.Client
+	openTimeout    time.Duration
 }
 
 // WithPortalOpenerConfig supplies explicit trust and cell configuration. When
@@ -92,7 +94,8 @@ func WithPortalOpenerConfig(cfg Config) PortalOpenerOption {
 // WithPortalOpenerHTTPClient supplies the protected-content HTTP client. Its
 // transport and timeout are retained. A CookieJar is rejected because the
 // opener installs the authenticated qurl_vsession cookie per request and must
-// not persist it outside the active handle.
+// not persist it outside the active handle. A caller redirect policy is also
+// rejected because Do installs the authenticated-handle policy per request.
 func WithPortalOpenerHTTPClient(client *http.Client) PortalOpenerOption {
 	return portalOpenerOptionFunc(func(opener *portalOpenerConfig) error {
 		if client == nil {
@@ -101,8 +104,24 @@ func WithPortalOpenerHTTPClient(client *http.Client) PortalOpenerOption {
 		if client.Jar != nil {
 			return fmt.Errorf("%w: protected-content HTTP client must not use a CookieJar", ErrNotConfigured)
 		}
+		if client.CheckRedirect != nil {
+			return fmt.Errorf("%w: protected-content HTTP client must not set CheckRedirect", ErrNotConfigured)
+		}
 		clientCopy := *client
 		opener.httpClient = &clientCopy
+		return nil
+	})
+}
+
+// WithPortalOpenerOpenTimeout sets the deadline for each native NHP open,
+// including the synchronous first Start and background renewal attempts. The
+// value must be positive and no more than 60 seconds. The default is 15 seconds.
+func WithPortalOpenerOpenTimeout(timeout time.Duration) PortalOpenerOption {
+	return portalOpenerOptionFunc(func(opener *portalOpenerConfig) error {
+		if timeout <= 0 || timeout > portalOpenTimeoutMax {
+			return fmt.Errorf("%w: portal open timeout must be from 1ns to %s", ErrNotConfigured, portalOpenTimeoutMax)
+		}
+		opener.openTimeout = timeout
 		return nil
 	})
 }
@@ -137,10 +156,26 @@ func RejectPortalRedirects() PortalRequestOption {
 	})
 }
 
+// PortalOpenerState is the public lifecycle state reported by Health.
+type PortalOpenerState string
+
+const (
+	// PortalOpenerStateNew means Start has not run.
+	PortalOpenerStateNew PortalOpenerState = "new"
+	// PortalOpenerStateStarting means the first open is in progress.
+	PortalOpenerStateStarting PortalOpenerState = "starting"
+	// PortalOpenerStateReady means an unexpired cached handle is usable.
+	PortalOpenerStateReady PortalOpenerState = "ready"
+	// PortalOpenerStateDegraded means no cached handle is ready or recovery failed.
+	PortalOpenerStateDegraded PortalOpenerState = "degraded"
+	// PortalOpenerStateClosed means Close completed or the receiver is nil.
+	PortalOpenerStateClosed PortalOpenerState = "closed"
+)
+
 // PortalOpenerHealth is a secret-free snapshot suitable for readiness and
 // diagnostics. It never includes the qURL, target URL, session ID, or cookie.
 type PortalOpenerHealth struct {
-	State               string
+	State               PortalOpenerState
 	Ready               bool
 	ExpiresAt           time.Time
 	RenewAt             time.Time
@@ -203,7 +238,7 @@ func NewPortalOpener(qurlLink string, options ...PortalOpenerOption) (*PortalOpe
 	if strings.TrimSpace(qurlLink) == "" {
 		return nil, fmt.Errorf("%w: empty qURL", ErrNotConfigured)
 	}
-	cfg := portalOpenerConfig{httpClient: &http.Client{}}
+	cfg := portalOpenerConfig{httpClient: &http.Client{}, openTimeout: portalOpenTimeout}
 	for _, option := range options {
 		if option == nil {
 			return nil, fmt.Errorf("%w: nil PortalOpenerOption", ErrNotConfigured)
@@ -224,7 +259,7 @@ func NewPortalOpener(qurlLink string, options ...PortalOpenerOption) (*PortalOpe
 		closeDone:        make(chan struct{}),
 		open:             EnterPortalWith,
 		now:              time.Now,
-		openTimeout:      portalOpenTimeout,
+		openTimeout:      cfg.openTimeout,
 		renewalLead:      defaultPortalRenewalLead,
 		retryInitial:     portalRetryInitialDelay,
 		retryMaximum:     portalRetryMaximumDelay,
@@ -233,7 +268,8 @@ func NewPortalOpener(qurlLink string, options ...PortalOpenerOption) (*PortalOpe
 }
 
 // Start synchronously obtains the first native NHP session and starts proactive
-// renewal. Concurrent calls share one initial open. A failed Start can be
+// renewal. Each open is bounded by the configured open timeout. Concurrent
+// calls share one initial open. A failed Start can be
 // retried. Start is idempotent while the cached handle is usable, and it is the
 // explicit single-flight recovery path after bounded renewal failures expire
 // that handle.
@@ -645,7 +681,13 @@ func (o *PortalOpener) Do(ctx context.Context, build PortalRequestBuilder, optio
 	} else {
 		client.CheckRedirect = handle.CheckContentRedirect
 	}
-	return client.Do(req)
+	response, err := client.Do(req)
+	if err != nil {
+		// net/http can return the previous response with a redirect-policy error.
+		// Its body is already closed; keep the PortalOpener error contract simple.
+		return nil, err
+	}
+	return response, nil
 }
 
 func closePortalRequestBody(req *http.Request) {
@@ -657,7 +699,7 @@ func closePortalRequestBody(req *http.Request) {
 // Health returns a secret-free, nonblocking lifecycle snapshot.
 func (o *PortalOpener) Health() PortalOpenerHealth {
 	if o == nil {
-		return PortalOpenerHealth{State: "closed"}
+		return PortalOpenerHealth{State: PortalOpenerStateClosed}
 	}
 	o.mu.RLock()
 	defer o.mu.RUnlock()
@@ -668,26 +710,26 @@ func (o *PortalOpener) Health() PortalOpenerHealth {
 	}
 	switch o.state {
 	case portalOpenerNew:
-		health.State = "new"
+		health.State = PortalOpenerStateNew
 	case portalOpenerStarting:
 		if o.startAttempt != nil && o.startAttempt.recovery {
-			health.State = "degraded"
+			health.State = PortalOpenerStateDegraded
 		} else {
-			health.State = "starting"
+			health.State = PortalOpenerStateStarting
 		}
 	case portalOpenerDegraded:
-		health.State = "degraded"
+		health.State = PortalOpenerStateDegraded
 	case portalOpenerClosed:
-		health.State = "closed"
+		health.State = PortalOpenerStateClosed
 	case portalOpenerRunning:
 		health.Ready = o.active != nil && o.now().Before(o.expiresAt)
 		if health.Ready {
-			health.State = "ready"
+			health.State = PortalOpenerStateReady
 		} else {
-			health.State = "degraded"
+			health.State = PortalOpenerStateDegraded
 		}
 	default:
-		health.State = "closed"
+		health.State = PortalOpenerStateClosed
 	}
 	return health
 }

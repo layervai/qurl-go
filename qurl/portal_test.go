@@ -37,8 +37,11 @@ import (
 //   - bucket B: orchestration up to the relay POST, asserting the derived route;
 //   - bucket C: reply interpretation, pure, via interpretReply.
 //
-// The two seams left to inspection are one-liners (in-link priv -> Knock; Knock's
-// reply -> interpretReply), both backed by the golden vectors for the crypto.
+// The external artifact has no matching fragment private key, so it pins parse,
+// issuer verification, and the pre-I/O key-binding rejection. Successful opens
+// use generated links to exercise the required private/public binding. The two
+// seams left to inspection are one-liners (in-link priv -> Knock; Knock's reply
+// -> interpretReply), both backed by the golden vectors for the crypto.
 
 // generatedAcceptLink builds a valid qURL link plus a matching trust store for
 // opener tests that need a full private/public X25519 binding. The separate
@@ -199,11 +202,15 @@ func TestEnterPortalWith_ExternalVectorReachesUserKeyBinding(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encode external fragment: %v", err)
 	}
+	noRelay := &refusingDoer{t: t}
 	_, err = EnterPortalWith(t.Context(), LinkBaseURL+"#"+transport, Config{
-		TrustStore: trust, RelayAllowlist: relayExampleAllowlist(),
+		TrustStore: trust, RelayAllowlist: relayExampleAllowlist(), HTTPClient: noRelay,
 	})
 	if !errors.Is(err, ErrQurlUserKeyMismatch) {
 		t.Fatalf("external vector = %v, want ErrQurlUserKeyMismatch before I/O", err)
+	}
+	if noRelay.called {
+		t.Fatal("external vector key mismatch contacted the relay")
 	}
 }
 
