@@ -162,14 +162,14 @@ func TestPortalOpenerRenewalIsProactiveSingleFlightAndBounded(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { closePortalOpener(t, opener) })
-	opener.renewalLead = func(time.Duration) time.Duration { return 1990 * time.Millisecond }
+	opener.renewalLead = func(time.Duration) time.Duration { return 9990 * time.Millisecond }
 	opener.retryInitial = 2 * time.Millisecond
 	opener.retryMaximum = 4 * time.Millisecond
 	opener.retryLimit = 3
 	var opens atomic.Int32
 	opener.open = func(context.Context, string, Config) (*ResourceHandle, error) {
 		if opens.Add(1) == 1 {
-			return portalTestHandle("https://r_test.qurl.site/fixed", testAuthProviderToken, 2, 12), nil
+			return portalTestHandle("https://r_test.qurl.site/fixed", testAuthProviderToken, 10, 12), nil
 		}
 		return nil, errors.New("scripted native renewal failure")
 	}
@@ -184,6 +184,51 @@ func TestPortalOpenerRenewalIsProactiveSingleFlightAndBounded(t *testing.T) {
 	health := opener.Health()
 	if health.ConsecutiveFailures != 3 || !health.Ready {
 		t.Fatalf("health during bounded renewal failure = %#v", health)
+	}
+}
+
+func TestPortalOpenerStartReturnsWhenLateRenewalRestoresReadiness(t *testing.T) {
+	link, cfg := portalOpenerFixture(t)
+	opener, err := NewPortalOpener(link, WithPortalOpenerConfig(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { closePortalOpener(t, opener) })
+
+	// Start renewal immediately, then keep its result under explicit channel
+	// control. This proves the lifecycle seam without wall-clock scheduling.
+	opener.renewalLead = func(time.Duration) time.Duration { return time.Minute }
+	renewalEntered := make(chan struct{})
+	releaseRenewal := make(chan struct{})
+	var opens atomic.Int32
+	opener.open = func(context.Context, string, Config) (*ResourceHandle, error) {
+		if opens.Add(1) == 1 {
+			return portalTestHandle("https://r_test.qurl.site/fixed", testAuthProviderToken, 60, 22), nil
+		}
+		close(renewalEntered)
+		<-releaseRenewal
+		return portalTestHandle("https://r_test.qurl.site/fixed", testAuthProviderToken, 3600, 23), nil
+	}
+	if err := opener.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	<-renewalEntered
+
+	// Model the exact reviewed state: the old handle expires while the final
+	// bounded renewal attempt is still in flight.
+	opener.mu.Lock()
+	opener.expiresAt = opener.now().Add(-time.Second)
+	opener.mu.Unlock()
+	startCtx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	startErr := make(chan error, 1)
+	go func() { startErr <- opener.Start(startCtx) }()
+	close(releaseRenewal)
+	if err := <-startErr; err != nil {
+		t.Fatalf("Start did not observe late renewal success: %v", err)
+	}
+	if health := opener.Health(); !health.Ready || health.State != "ready" {
+		t.Fatalf("late renewal health = %#v", health)
 	}
 }
 
@@ -304,7 +349,7 @@ func TestPortalOpenerSuccessfulRenewalAtomicallyReplacesCachedHandle(t *testing.
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { closePortalOpener(t, opener) })
-	opener.renewalLead = func(time.Duration) time.Duration { return 1990 * time.Millisecond }
+	opener.renewalLead = func(time.Duration) time.Duration { return 9990 * time.Millisecond }
 	var opens atomic.Int32
 	var sessionMu sync.Mutex
 	var sessions []*PortalSession
@@ -315,7 +360,7 @@ func TestPortalOpenerSuccessfulRenewalAtomicallyReplacesCachedHandle(t *testing.
 		sessionMu.Unlock()
 		count := opens.Add(1)
 		if count == 1 {
-			return portalTestHandle(target, testAuthProviderToken, 2, 18), nil
+			return portalTestHandle(target, testAuthProviderToken, 10, 18), nil
 		}
 		return portalTestHandle(target, renewedToken, 60, 19), nil
 	}

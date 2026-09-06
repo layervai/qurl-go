@@ -65,7 +65,8 @@ type portalOpenerConfig struct {
 
 // WithPortalOpenerConfig supplies explicit trust and cell configuration. When
 // omitted, Start resolves the default provider or QURL_DEPLOYMENT. Relay fields
-// are deliberately ignored: PortalOpener is native-only.
+// are deliberately ignored, and PortalSession is replaced with opener-owned
+// state: PortalOpener is native-only and owns one visitor lifecycle.
 func WithPortalOpenerConfig(cfg Config) PortalOpenerOption {
 	return portalOpenerOptionFunc(func(opener *portalOpenerConfig) error {
 		configCopy := cfg
@@ -164,7 +165,12 @@ type PortalOpener struct {
 	lifecycle context.Context
 	cancel    context.CancelFunc
 	loopDone  chan struct{}
-	closeDone chan struct{}
+	// readinessChanged is closed and replaced after each successful open. A
+	// Start caller that finds an expired handle can wait for either a late
+	// background recovery or the renewal loop to stop without waiting for the
+	// next full renewal cycle after recovery.
+	readinessChanged chan struct{}
+	closeDone        chan struct{}
 
 	open         portalOpenFunc
 	now          func() time.Time
@@ -192,20 +198,21 @@ func NewPortalOpener(qurlLink string, options ...PortalOpenerOption) (*PortalOpe
 	}
 	lifecycle, cancel := context.WithCancel(context.Background())
 	return &PortalOpener{
-		link:           qurlLink,
-		explicitConfig: cfg.explicitConfig,
-		httpClient:     *cfg.httpClient,
-		state:          portalOpenerNew,
-		lifecycle:      lifecycle,
-		cancel:         cancel,
-		closeDone:      make(chan struct{}),
-		open:           EnterPortalWith,
-		now:            time.Now,
-		openTimeout:    portalOpenTimeout,
-		renewalLead:    defaultPortalRenewalLead,
-		retryInitial:   portalRetryInitialDelay,
-		retryMaximum:   portalRetryMaximumDelay,
-		retryLimit:     portalRenewalAttempts,
+		link:             qurlLink,
+		explicitConfig:   cfg.explicitConfig,
+		httpClient:       *cfg.httpClient,
+		state:            portalOpenerNew,
+		lifecycle:        lifecycle,
+		cancel:           cancel,
+		readinessChanged: make(chan struct{}),
+		closeDone:        make(chan struct{}),
+		open:             EnterPortalWith,
+		now:              time.Now,
+		openTimeout:      portalOpenTimeout,
+		renewalLead:      defaultPortalRenewalLead,
+		retryInitial:     portalRetryInitialDelay,
+		retryMaximum:     portalRetryMaximumDelay,
+		retryLimit:       portalRenewalAttempts,
 	}, nil
 }
 
@@ -233,10 +240,13 @@ func (o *PortalOpener) Start(ctx context.Context) error {
 			// expires. Wait for that one background owner before starting an
 			// explicit recovery. This path is called by lifecycle code, never Do.
 			loopDone := o.loopDone
+			readinessChanged := o.readinessChanged
 			o.mu.Unlock()
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
+			case <-readinessChanged:
+				continue
 			case <-loopDone:
 				continue
 			}
@@ -411,6 +421,8 @@ func (o *PortalOpener) installLocked(opened *portalOpenResult) {
 	o.renewAt = opened.renewAt
 	o.lastSuccess = opened.openedAt
 	o.failures = 0
+	close(o.readinessChanged)
+	o.readinessChanged = make(chan struct{})
 }
 
 func clearPortalOpenResult(opened *portalOpenResult) {

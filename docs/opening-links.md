@@ -63,6 +63,13 @@ platform access endpoints this process should trust. With no provider installed
 file named by `QURL_DEPLOYMENT`, falling back to the deployment embedded in the
 build.
 
+Before any transport work, every opening path derives the X25519 public key
+from the fragment private key with the standard clamped X25519 basepoint
+operation. It requires that key to equal the public key in the signed qURL
+claims. Every qURL minter must create that public claim from the matching
+fragment private key. A mismatch fails closed with
+`ErrQurlUserKeyMismatch`; there is no compatibility fallback.
+
 ## Long-Lived Service Opener
 
 Use `PortalOpener` when a service repeatedly calls one protected target. It is
@@ -110,13 +117,9 @@ single-flight recovery open. This explicit recovery stays off the request path,
 and it must authenticate the same target as the first open. `Close` cancels
 renewal and releases the SDK's references to the qURL and session material. It
 does not cancel an HTTP request that `Do` already handed to the transport.
-
-Before any transport work, the opener derives the X25519 public key from the
-fragment private key with the standard clamped X25519 basepoint operation. It
-requires that key to equal the public key in the signed qURL claims. Every qURL
-minter must create that public claim from the matching fragment private key.
-A mismatch fails closed with `ErrQurlUserKeyMismatch`; there is no compatibility
-fallback.
+The opener pins the trust and cell config resolved by `Start` for all background
+renewals. Call `Start` after a bounded cycle ends if deployment trust or cell
+routing changed.
 
 ## Retry a Visit
 
