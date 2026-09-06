@@ -95,9 +95,11 @@ resp, err := opener.Do(ctx, func(target *url.URL) (*http.Request, error) {
 }, qurl.RejectPortalRedirects())
 ```
 
-Each open has a 15-second default deadline, including the synchronous first
-`Start`. Use `WithPortalOpenerOpenTimeout` to select a positive deadline of at
-most 60 seconds for slower private networks.
+Each native NHP open has a 15-second default deadline, including the open made
+by the synchronous first `Start`. Use `WithPortalOpenerOpenTimeout` to select a
+positive deadline of at most 60 seconds for slower private networks. When
+`Start` must resolve provider or deployment config first, that separate step is
+bounded by the caller context and the provider's I/O deadline.
 
 The default provider or `QURL_DEPLOYMENT` must include the link's issuer and
 cell. A missing cell returns `ErrPortalNativeOnly` or `ErrCellNotInCatalog`; the
