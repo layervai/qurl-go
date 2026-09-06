@@ -352,20 +352,20 @@ func TestPortalOpenerRenewalUsesFullWindowAndStopsAtExpiry(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { closePortalOpener(t, opener) })
-	opener.renewalLead = func(time.Duration) time.Duration { return 950 * time.Millisecond }
+	opener.renewalLead = func(time.Duration) time.Duration { return 2900 * time.Millisecond }
 	opener.retryInitial = 10 * time.Millisecond
 	opener.retryMaximum = 20 * time.Millisecond
 	var opens atomic.Int32
 	opener.open = func(context.Context, string, Config) (*ResourceHandle, error) {
 		if opens.Add(1) == 1 {
-			return portalTestHandle("https://r_test.qurl.site/fixed", testAuthProviderToken, 1, 12), nil
+			return portalTestHandle("https://r_test.qurl.site/fixed", testAuthProviderToken, 3, 12), nil
 		}
 		return nil, errors.New("scripted native renewal failure")
 	}
 	if err := opener.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	waitForPortalCondition(t, 500*time.Millisecond, func() bool { return opener.Health().ConsecutiveFailures >= 4 })
+	waitForPortalCondition(t, time.Second, func() bool { return opener.Health().ConsecutiveFailures >= 4 })
 	if health := opener.Health(); health.ConsecutiveFailures < 4 || health.LastFailureClass != PortalOpenerFailureOpen || !health.Ready {
 		t.Fatalf("health while renewal uses remaining headroom = %#v", health)
 	}
@@ -374,7 +374,7 @@ func TestPortalOpenerRenewalUsesFullWindowAndStopsAtExpiry(t *testing.T) {
 	opener.mu.RUnlock()
 	select {
 	case <-loopDone:
-	case <-time.After(2 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("renewal loop did not stop at handle expiry")
 	}
 	stoppedAt := opens.Load()
@@ -384,6 +384,12 @@ func TestPortalOpenerRenewalUsesFullWindowAndStopsAtExpiry(t *testing.T) {
 	}
 	if health := opener.Health(); health.State != PortalOpenerStateDegraded || health.Ready {
 		t.Fatalf("health after renewal window expired = %#v", health)
+	}
+	opener.mu.RLock()
+	active := opener.active
+	opener.mu.RUnlock()
+	if active != nil {
+		t.Fatal("expired renewal retained the active bearer handle")
 	}
 }
 
@@ -498,6 +504,12 @@ func TestPortalOpenerExpiredAfterBoundedRenewalCanRecoverWithStart(t *testing.T)
 	}
 	if health := opener.Health(); health.State != "degraded" || health.Ready {
 		t.Fatalf("failed explicit recovery left unstable state: %#v", health)
+	}
+	opener.mu.RLock()
+	active := opener.active
+	opener.mu.RUnlock()
+	if active != nil {
+		t.Fatal("failed explicit recovery retained an expired bearer handle")
 	}
 
 	const callers = 12

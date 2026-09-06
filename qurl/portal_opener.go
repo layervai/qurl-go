@@ -19,7 +19,8 @@ const (
 )
 
 var (
-	// ErrPortalOpenerNotStarted reports that Do was called before Start completed.
+	// ErrPortalOpenerNotStarted reports that Do was called before the first Start
+	// attempt completed. A failed Start moves the opener to not-ready instead.
 	ErrPortalOpenerNotStarted = errors.New("qurl: portal opener has not started")
 	// ErrPortalOpenerNotReady reports that no unexpired cached portal handle is
 	// available. Do never opens or waits for one.
@@ -357,6 +358,7 @@ func (o *PortalOpener) runStart(ctx context.Context, attempt *portalStartAttempt
 		clearPortalOpenResult(opened)
 	} else if err != nil {
 		o.state = portalOpenerDegraded
+		o.clearActiveLocked()
 		o.lastFailure = classifyPortalOpenerFailure(err)
 		o.failures++
 	} else {
@@ -487,9 +489,7 @@ func defaultPortalRenewalLead(lifetime time.Duration) time.Duration {
 }
 
 func (o *PortalOpener) installLocked(opened *portalOpenResult) {
-	if o.active != nil {
-		o.active.authProviderToken = ""
-	}
+	o.clearActiveLocked()
 	o.active = opened.handle
 	o.target = opened.target
 	o.expiresAt = opened.expiresAt
@@ -499,6 +499,13 @@ func (o *PortalOpener) installLocked(opened *portalOpenResult) {
 	o.failures = 0
 	close(o.readinessChanged)
 	o.readinessChanged = make(chan struct{})
+}
+
+func (o *PortalOpener) clearActiveLocked() {
+	if o.active != nil {
+		o.active.authProviderToken = ""
+	}
+	o.active = nil
 }
 
 func clearPortalOpenResult(opened *portalOpenResult) {
@@ -529,6 +536,7 @@ func (o *PortalOpener) renewLoop(lifecycle context.Context, done chan struct{}) 
 				o.mu.Lock()
 				if o.state == portalOpenerRunning && o.expiresAt.Equal(expiresAt) {
 					o.state = portalOpenerDegraded
+					o.clearActiveLocked()
 				}
 				o.mu.Unlock()
 				return
@@ -564,6 +572,7 @@ func (o *PortalOpener) renewLoop(lifecycle context.Context, done chan struct{}) 
 				o.mu.Lock()
 				if o.state == portalOpenerRunning && o.expiresAt.Equal(expiresAt) {
 					o.state = portalOpenerDegraded
+					o.clearActiveLocked()
 				}
 				o.mu.Unlock()
 				return
@@ -745,7 +754,9 @@ func (o *PortalOpener) Health() PortalOpenerHealth {
 }
 
 // Close cancels background renewal and waits for any active Start or renewal to
-// stop. It is idempotent.
+// stop. It does not wait for a concurrent Do that already copied the active
+// handle. Callers that require a strict outbound-request fence must stop and
+// drain their request handlers before Close. Close is idempotent.
 func (o *PortalOpener) Close() error {
 	if o == nil {
 		return nil
@@ -769,10 +780,7 @@ func (o *PortalOpener) Close() error {
 		<-loopDone
 	}
 	o.mu.Lock()
-	if o.active != nil {
-		o.active.authProviderToken = ""
-	}
-	o.active = nil
+	o.clearActiveLocked()
 	o.link = ""
 	o.target = ""
 	o.resolvedConfig = nil

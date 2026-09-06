@@ -123,7 +123,10 @@ Lifecycle code can call `Start` again after expiry to run one
 single-flight recovery open. This explicit recovery stays off the request path,
 and it must authenticate the same target as the first open. `Close` cancels
 renewal and releases the SDK's references to the qURL and session material. It
-does not cancel an HTTP request that `Do` already handed to the transport.
+does not wait for a concurrent `Do` that already copied the active handle, and
+it does not cancel a request already handed to the HTTP transport. Stop and
+drain application request handlers before `Close` when shutdown must guarantee
+that no later protected request leaves the process.
 The opener pins the trust and cell config resolved by `Start` for all background
 renewals. `Close` also cancels an in-progress provider or deployment resolution.
 Call `Start` after a bounded cycle ends if deployment trust or cell routing
