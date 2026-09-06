@@ -192,6 +192,47 @@ func TestPortalOpenerOpenTimeoutBoundsStart(t *testing.T) {
 	}
 }
 
+func TestPortalOpenerOpenTimeoutBoundsBackgroundRenewal(t *testing.T) {
+	link, cfg := portalOpenerFixture(t)
+	opener, err := NewPortalOpener(link,
+		WithPortalOpenerConfig(cfg), WithPortalOpenerOpenTimeout(10*time.Millisecond))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { closePortalOpener(t, opener) })
+	opener.renewalLead = func(time.Duration) time.Duration { return time.Minute }
+	opener.renewalMinimumGap = time.Millisecond
+	opener.retryInitial = time.Second
+	opener.retryMaximum = time.Second
+
+	renewalErr := make(chan error, 1)
+	renewalElapsed := make(chan time.Duration, 1)
+	var opens atomic.Int32
+	opener.open = func(ctx context.Context, _ string, _ Config) (*ResourceHandle, error) {
+		if opens.Add(1) == 1 {
+			return portalTestHandle("https://r_test.qurl.site/fixed", testAuthProviderToken, 60, 92), nil
+		}
+		started := time.Now()
+		<-ctx.Done()
+		renewalErr <- ctx.Err()
+		renewalElapsed <- time.Since(started)
+		return nil, ctx.Err()
+	}
+	if err := opener.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-renewalErr; !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("background renewal error = %v, want context deadline exceeded", err)
+	}
+	if elapsed := <-renewalElapsed; elapsed > time.Second {
+		t.Fatalf("background renewal ignored configured open timeout: %s", elapsed)
+	}
+	waitForPortalCondition(t, time.Second, func() bool { return opener.Health().ConsecutiveFailures == 1 })
+	if health := opener.Health(); !health.Ready || health.LastFailureClass != PortalOpenerFailureOpen {
+		t.Fatalf("health after timed-out background renewal = %#v", health)
+	}
+}
+
 func TestPortalOpenerStartRejectsMissingTrustAndIncompleteHandles(t *testing.T) {
 	link, cfg := portalOpenerFixture(t)
 	missingTrust := cfg
@@ -293,6 +334,47 @@ func TestPortalOpenerKeepsInternalDeadlinesMonotonic(t *testing.T) {
 	}
 }
 
+func TestPortalOpenerSuccessfulOpenCannotScheduleBackToBackRenewal(t *testing.T) {
+	startedAt := time.Now()
+	tests := map[string]struct {
+		openLatency time.Duration
+		wantRenewAt time.Time
+	}{
+		"short remaining window":  {openLatency: 14 * time.Second, wantRenewAt: startedAt.Add(19 * time.Second)},
+		"planned renewal elapsed": {openLatency: 16 * time.Second, wantRenewAt: startedAt.Add(20 * time.Second)},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			link, cfg := portalOpenerFixture(t)
+			opener, err := NewPortalOpener(link, WithPortalOpenerConfig(cfg))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { closePortalOpener(t, opener) })
+			openedAt := startedAt.Add(test.openLatency)
+			current := startedAt
+			opener.now = func() time.Time { return current }
+			opener.open = func(context.Context, string, Config) (*ResourceHandle, error) {
+				current = openedAt
+				return portalTestHandle("https://r_test.qurl.site/fixed", testAuthProviderToken, 20, 93), nil
+			}
+
+			opened, err := opener.openPortal(t.Context(), cfg, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantExpiry := startedAt.Add(20 * time.Second)
+			if !opened.openedAt.Equal(openedAt) || !opened.expiresAt.Equal(wantExpiry) || !opened.renewAt.Equal(test.wantRenewAt) {
+				t.Fatalf("delayed open times = %s/%s/%s, want %s/%s/%s",
+					opened.openedAt, opened.expiresAt, opened.renewAt, openedAt, wantExpiry, test.wantRenewAt)
+			}
+			if !opened.renewAt.After(opened.openedAt) {
+				t.Fatalf("renewal at %s is not after successful open at %s", opened.renewAt, opened.openedAt)
+			}
+		})
+	}
+}
+
 func TestPortalOpenerCloseCancelsBlockedConfigResolution(t *testing.T) {
 	provider := &blockingPortalProvider{entered: make(chan struct{})}
 	installDefaultProvider(t, provider)
@@ -373,6 +455,7 @@ func TestPortalOpenerRenewalUsesFullWindowAndStopsAtExpiry(t *testing.T) {
 	}
 	t.Cleanup(func() { closePortalOpener(t, opener) })
 	opener.renewalLead = func(time.Duration) time.Duration { return 2900 * time.Millisecond }
+	opener.renewalMinimumGap = time.Millisecond
 	opener.retryInitial = 10 * time.Millisecond
 	opener.retryMaximum = 20 * time.Millisecond
 	var opens atomic.Int32
@@ -424,6 +507,7 @@ func TestPortalOpenerStartReturnsWhenLateRenewalRestoresReadiness(t *testing.T) 
 	// Start renewal immediately, then keep its result under explicit channel
 	// control. This proves the lifecycle seam without wall-clock scheduling.
 	opener.renewalLead = func(time.Duration) time.Duration { return time.Minute }
+	opener.renewalMinimumGap = time.Millisecond
 	renewalEntered := make(chan struct{})
 	releaseRenewal := make(chan struct{})
 	var opens atomic.Int32
@@ -466,6 +550,7 @@ func TestPortalOpenerExpiredAfterBoundedRenewalCanRecoverWithStart(t *testing.T)
 	}
 	t.Cleanup(func() { closePortalOpener(t, opener) })
 	opener.renewalLead = func(time.Duration) time.Duration { return 1990 * time.Millisecond }
+	opener.renewalMinimumGap = time.Millisecond
 	opener.retryInitial = 100 * time.Millisecond
 	opener.retryMaximum = 200 * time.Millisecond
 	var opens atomic.Int32
@@ -588,6 +673,7 @@ func TestPortalOpenerSuccessfulRenewalAtomicallyReplacesCachedHandle(t *testing.
 	}
 	t.Cleanup(func() { closePortalOpener(t, opener) })
 	opener.renewalLead = func(time.Duration) time.Duration { return 9990 * time.Millisecond }
+	opener.renewalMinimumGap = time.Millisecond
 	var opens atomic.Int32
 	var sessionMu sync.Mutex
 	var sessions []*PortalSession
@@ -639,6 +725,7 @@ func TestPortalOpenerRenewalRefusesChangedAuthenticatedTarget(t *testing.T) {
 	}
 	t.Cleanup(func() { closePortalOpener(t, opener) })
 	opener.renewalLead = func(time.Duration) time.Duration { return 1990 * time.Millisecond }
+	opener.renewalMinimumGap = time.Millisecond
 	opener.retryInitial = time.Millisecond
 	opener.retryMaximum = time.Millisecond
 	var opens atomic.Int32
@@ -879,8 +966,11 @@ func TestPortalOpenerRedirectPolicies(t *testing.T) {
 					t.Fatal("rejected redirect returned a response with an error")
 				}
 			case "cross origin":
-				if !errors.Is(err, ErrInvalidContentRequest) {
-					t.Fatalf("cross-origin redirect error = %v, want ErrInvalidContentRequest", err)
+				if !errors.Is(err, ErrPortalRedirect) {
+					t.Fatalf("cross-origin redirect error = %v, want ErrPortalRedirect", err)
+				}
+				if errors.Is(err, ErrInvalidContentRequest) {
+					t.Fatalf("cross-origin redirect error = %v, must not report a caller error", err)
 				}
 				if resp != nil {
 					t.Fatal("cross-origin redirect returned a response with an error")

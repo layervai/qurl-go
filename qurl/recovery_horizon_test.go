@@ -85,6 +85,22 @@ func assignmentResultWithTicketExpiry(t *testing.T, body, ticket string, expiry 
 	return string(encoded)
 }
 
+func assignmentResultWithLeaseExpiry(t *testing.T, body string, expiry time.Time) string {
+	t.Helper()
+	var envelope map[string]any
+	if err := json.Unmarshal([]byte(body), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	list := envelope["list"].(map[string]any)
+	assignment := list["assignment"].(map[string]any)
+	assignment["lease_expires_at"] = expiry.UTC().Format(time.RFC3339)
+	encoded, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(encoded)
+}
+
 func setTestRecoveryDeadline(state *AgentState, deadline time.Time) {
 	anchor := deadline.Add(-AgentRegistrationRecoveryHorizon)
 	if state.PendingActivation != nil {
@@ -957,7 +973,9 @@ func TestConnectAgentRuntime_ReplacementOTPCannotCrossOriginalDeadline(t *testin
 		t.Fatal(err)
 	}
 	deadline := initial.AssignmentTicketExpiresAt.Add(AgentRegistrationRecoveryHorizon)
-	var replacementReplyPhase atomic.Int32
+	second = assignmentResultWithTicketExpiry(t, second, "conformance-account-assignment-ticket-0002", deadline.Add(time.Minute))
+	second = assignmentResultWithLeaseExpiry(t, second, deadline.Add(2*time.Minute))
+	var replacementReplyStarted atomic.Bool
 	f := newRuntimeFixture(t,
 		[]runtimeUDPStep{
 			{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: first},
@@ -966,7 +984,7 @@ func TestConnectAgentRuntime_ReplacementOTPCannotCrossOriginalDeadline(t *testin
 				// Move the test clock at the exact protocol boundary. A resolver-call
 				// count is transport-implementation-dependent and made this test
 				// intermittent on macOS under load.
-				beforeReply: func() { replacementReplyPhase.Store(1) },
+				beforeReply: func() { replacementReplyStarted.Store(true) },
 			},
 		},
 		[]runtimeUDPStep{
@@ -986,14 +1004,10 @@ func TestConnectAgentRuntime_ReplacementOTPCannotCrossOriginalDeadline(t *testin
 		context.Background(), conformance.AgentAssignmentAccountCredentialFixture, f.store,
 		f.options(
 			withAgentRuntimeClock(func() time.Time {
-				// The assignment parser gets the pre-deadline instant that was
-				// current when the Hub produced the reply. The next boundary check
-				// observes the original recovery deadline before it can send the
-				// replacement OTP.
-				if replacementReplyPhase.CompareAndSwap(1, 2) {
-					return assignmentFixtureNow
-				}
-				if replacementReplyPhase.Load() == 2 {
+				// Every clock read after the Hub begins the replacement reply sees
+				// the original recovery deadline. The replacement assignment stays
+				// parseable, but the recovery boundary blocks its OTP.
+				if replacementReplyStarted.Load() {
 					return deadline
 				}
 				return assignmentFixtureNow

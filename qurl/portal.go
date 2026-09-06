@@ -349,6 +349,10 @@ func EnterPortalWith(ctx context.Context, qurlLink string, cfg Config) (*Resourc
 		// defer above so this defensive rejection wipes it too.
 		return nil, fmt.Errorf("qurl: decode verified per-qURL public key: %w", err)
 	}
+	// NewPrivateKey makes a runtime-managed working copy. Go exposes no
+	// supported operation to erase that library-owned copy; keep its lifetime
+	// local to this open. The defer above wipes the decoded input buffer that
+	// this package owns.
 	deviceKey, err := ecdh.X25519().NewPrivateKey(devicePriv)
 	if err != nil {
 		return nil, fmt.Errorf("qurl: derive per-qURL public key: %w", err)

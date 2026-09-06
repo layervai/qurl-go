@@ -70,6 +70,10 @@ claims. Every qURL minter must create that public claim from the matching
 fragment private key. A mismatch fails closed with
 `ErrQurlUserKeyMismatch`; there is no compatibility fallback.
 
+After the open returns, the SDK wipes the decoded fragment private-key buffer
+that it owns. Go's cryptography APIs can make runtime-managed working copies
+and do not provide a supported operation to erase those copies explicitly.
+
 ## Long-Lived Service Opener
 
 Use `PortalOpener` when a service repeatedly calls one protected target. It is
@@ -109,6 +113,8 @@ different target does not replace the active handle. `Health` reports
 recovery `Start` returns `ErrPortalTargetChanged` if the target is still wrong.
 
 By default, `Do` follows only same-origin redirects and reauthorizes each one.
+An off-origin redirect fails with `ErrPortalRedirect` before the redirected
+request is sent.
 Use `RejectPortalRedirects` for signed POST or PATCH operations because a
 redirect can change the method or invalidate a signature. The first request URL
 and wire Host are always the exact authenticated target. The builder cannot add
@@ -118,11 +124,15 @@ Renewal starts before expiry and runs in one background goroutine. Each attempt
 has the configured I/O timeout. Failed attempts use capped backoff for the full
 remaining lifetime of the old handle. The retry window is time-bounded: it
 stops at the reported expiry and does not create a permanent background retry
-loop. After that, `Do` returns `ErrPortalOpenerNotReady` immediately. `Health`
-returns readiness, UTC times, a failure count, and a secret-free failure class.
+loop. After each successful open, another renewal cannot start for five seconds.
+If less time remains, the opener stops at expiry instead of reopening
+continuously. After that, `Do` returns `ErrPortalOpenerNotReady` immediately.
+`Health` returns readiness, UTC times, a failure count, and a secret-free
+failure class.
 It does not return the qURL, target, session ID, cookie, or raw transport error.
 Lifecycle code can call `Start` again after expiry to run one
 single-flight recovery open. This explicit recovery stays off the request path,
+because concurrent callers share the first caller's context and cancellation,
 and it must authenticate the same target as the first open. `Close` cancels
 renewal and releases the SDK's references to the qURL and session material. It
 does not wait for a concurrent `Do` that already copied the active handle, and

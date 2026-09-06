@@ -373,7 +373,7 @@ that raises them:
 | `qurl.ErrPortalOpenerNotReady` | The proactive opener has no unexpired cached handle. `Do` does not wait or open on the request path |
 | `qurl.ErrPortalOpenerClosed` | `PortalOpener` was used after `Close` |
 | `qurl.ErrPortalTargetChanged` | A proactive renewal authenticated a different target, so the opener kept the prior handle and failed closed |
-| `qurl.ErrPortalRedirect` | A request configured with `RejectPortalRedirects` received a redirect |
+| `qurl.ErrPortalRedirect` | A request configured with `RejectPortalRedirects` received a redirect, or a default-policy redirect changed origin |
 | `*qurl.ServerDenyError` | An authenticated platform deny: the reply verified, but access was refused — an expired, revoked, or consumed qURL, or a server-side access check. Also raised by the registered-agent knock path (`KnockRegisteredAgent`) when the assigned cell denies an admission |
 
 **Agent lifecycle — `ConnectAgentRuntime`, refresh, recovery, knock**

@@ -14,6 +14,7 @@ import (
 const (
 	portalOpenTimeout       = 15 * time.Second
 	portalOpenTimeoutMax    = 60 * time.Second
+	portalRenewalMinimumGap = 5 * time.Second
 	portalRetryInitialDelay = 500 * time.Millisecond
 	portalRetryMaximumDelay = 2 * time.Second
 )
@@ -30,8 +31,8 @@ var (
 	// ErrPortalTargetChanged reports that a renewal authenticated a different
 	// target. A long-lived opener is bound to the first authenticated ACK target.
 	ErrPortalTargetChanged = errors.New("qurl: portal renewal changed the authenticated target")
-	// ErrPortalRedirect reports that a caller selected RejectPortalRedirects and
-	// the protected target returned a redirect.
+	// ErrPortalRedirect reports that a redirect was rejected because the caller
+	// selected RejectPortalRedirects or the target changed origin.
 	ErrPortalRedirect = errors.New("qurl: protected request redirect refused")
 	// ErrPortalNativeOnly reports that the resolved deployment has no native cell
 	// entry. PortalOpener never falls back to the HTTPS relay.
@@ -223,12 +224,13 @@ type PortalOpener struct {
 	readinessChanged chan struct{}
 	closeDone        chan struct{}
 
-	open         portalOpenFunc
-	now          func() time.Time
-	openTimeout  time.Duration
-	renewalLead  func(time.Duration) time.Duration
-	retryInitial time.Duration
-	retryMaximum time.Duration
+	open              portalOpenFunc
+	now               func() time.Time
+	openTimeout       time.Duration
+	renewalLead       func(time.Duration) time.Duration
+	renewalMinimumGap time.Duration
+	retryInitial      time.Duration
+	retryMaximum      time.Duration
 }
 
 // NewPortalOpener constructs a native-only opener for one qURL. Construction
@@ -248,29 +250,31 @@ func NewPortalOpener(qurlLink string, options ...PortalOpenerOption) (*PortalOpe
 	}
 	lifecycle, cancel := context.WithCancel(context.Background())
 	return &PortalOpener{
-		link:             qurlLink,
-		explicitConfig:   cfg.explicitConfig,
-		httpClient:       *cfg.httpClient,
-		state:            portalOpenerNew,
-		lifecycle:        lifecycle,
-		cancel:           cancel,
-		readinessChanged: make(chan struct{}),
-		closeDone:        make(chan struct{}),
-		open:             EnterPortalWith,
-		now:              time.Now,
-		openTimeout:      cfg.openTimeout,
-		renewalLead:      defaultPortalRenewalLead,
-		retryInitial:     portalRetryInitialDelay,
-		retryMaximum:     portalRetryMaximumDelay,
+		link:              qurlLink,
+		explicitConfig:    cfg.explicitConfig,
+		httpClient:        *cfg.httpClient,
+		state:             portalOpenerNew,
+		lifecycle:         lifecycle,
+		cancel:            cancel,
+		readinessChanged:  make(chan struct{}),
+		closeDone:         make(chan struct{}),
+		open:              EnterPortalWith,
+		now:               time.Now,
+		openTimeout:       cfg.openTimeout,
+		renewalLead:       defaultPortalRenewalLead,
+		renewalMinimumGap: portalRenewalMinimumGap,
+		retryInitial:      portalRetryInitialDelay,
+		retryMaximum:      portalRetryMaximumDelay,
 	}, nil
 }
 
 // Start synchronously obtains the first native NHP session and starts proactive
 // renewal. Each open is bounded by the configured open timeout. Concurrent
-// calls share one initial open, which uses the first caller's context. A failed
-// Start can be retried. Start is idempotent while the cached handle is usable,
-// and it is the explicit single-flight recovery path after bounded renewal
-// failures expire that handle.
+// calls share one initial open and its first caller's context, so cancellation
+// of that context cancels the shared attempt. Call Start from service lifecycle
+// code, not a request-scoped goroutine. A failed Start can be retried. Start is
+// idempotent while the cached handle is usable, and it is the explicit
+// single-flight recovery path after bounded renewal failures expire that handle.
 func (o *PortalOpener) Start(ctx context.Context) error {
 	if o == nil {
 		return ErrPortalOpenerClosed
@@ -441,15 +445,23 @@ func (o *PortalOpener) openPortal(ctx context.Context, cfg Config, expectedTarge
 	}
 	lifetime := time.Duration(handle.OpenSeconds) * time.Second
 	expiresAt := startedAt.Add(lifetime)
-	if !o.now().Before(expiresAt) {
+	openedAt := o.now()
+	if !openedAt.Before(expiresAt) {
 		return nil, fmt.Errorf("%w: opener handle expired before installation", ErrMalformedReply)
 	}
 	renewAt := expiresAt.Add(-o.renewalLead(lifetime))
+	minimumRenewAt := openedAt.Add(o.renewalMinimumGap)
+	if renewAt.Before(minimumRenewAt) {
+		renewAt = minimumRenewAt
+		if renewAt.After(expiresAt) {
+			renewAt = expiresAt
+		}
+	}
 	handleCopy := *handle
 	handleCopy.ResourceURL = canonicalTarget
 	return &portalOpenResult{
 		handle: &handleCopy, target: canonicalTarget, expiresAt: expiresAt,
-		renewAt: renewAt, openedAt: o.now(),
+		renewAt: renewAt, openedAt: openedAt,
 	}, nil
 }
 
@@ -699,7 +711,13 @@ func (o *PortalOpener) Do(ctx context.Context, build PortalRequestBuilder, optio
 			return ErrPortalRedirect
 		}
 	} else {
-		client.CheckRedirect = handle.CheckContentRedirect
+		client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+			err := handle.CheckContentRedirect(req, via)
+			if errors.Is(err, ErrInvalidContentRequest) {
+				return fmt.Errorf("%w: %s", ErrPortalRedirect, err.Error())
+			}
+			return err
+		}
 	}
 	response, err := client.Do(req)
 	if err != nil {

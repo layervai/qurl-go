@@ -6,7 +6,7 @@ independently under `awsstore/vX.Y.Z` tags.
 Pre-1.0 semantic versioning: breaking changes land in minor versions (v0.N.0)
 and are marked **Breaking** with what to change.
 
-## v0.13.0 — 2026-09-05
+## v0.13.0 — 2026-09-06
 
 - Added `PortalOpener` for long-running services that call one NHP-protected
   target. `Start` opens and proactively renews one native UDP admission;
@@ -19,7 +19,8 @@ and are marked **Breaking** with what to change.
   stop, and clears retained state. Applications must drain concurrent `Do`
   calls before `Close` when shutdown needs a strict outbound-request fence.
   Background renewal retries with capped backoff for the full remaining
-  lifetime of the cached admission, then stops at expiry.
+  lifetime of the cached admission, then stops at expiry. Successful opens
+  have a five-second minimum gap before another renewal can start.
 - **Breaking:** portal opens now prove that the fragment's X25519 private key
   derives the issuer-signed visitor public key. They also compare the full
   signed cell key with the deployment catalog key after the compact fingerprint
