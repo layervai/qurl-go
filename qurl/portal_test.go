@@ -1,6 +1,7 @@
 package qurl
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -16,8 +17,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-
-	conformance "github.com/layervai/qurl-conformance"
 
 	"github.com/layervai/qurl-go/relayknock"
 )
@@ -39,57 +38,23 @@ import (
 // The two seams left to inspection are one-liners (in-link priv -> Knock; Knock's
 // reply -> interpretReply), both backed by the golden vectors for the crypto.
 
-// vendoredAcceptLink builds a valid qURL link plus a matching trust store from the
-// vendored issuer-signature vector's ACCEPT case. The signature is real (it is the
-// committed cross-language vector), so EnterPortal's parse+verify+route runs for
-// real without this test minting anything. The secret part is synthesized — PoP
-// matching is a server-side check EnterPortal does not perform — so a placeholder
-// 32-byte key is sufficient to satisfy the strict secret parser.
+// vendoredAcceptLink builds a valid qURL link plus a matching trust store. The
+// helper name is retained because it is shared across the older opener tests.
+// Its link now comes from the SDK mint path because the opener verifies the full
+// private/public X25519 binding before I/O; the old issuer-only vector does not
+// carry a corresponding private key.
 func vendoredAcceptLink(t *testing.T) (link string, ts *TrustStore, cellFingerprint string) {
 	t.Helper()
-	vf, err := conformance.SignatureVectors()
+	signer, ts := mintSigner(t)
+	params := validCreateParams(t)
+	params.CellPublicKey = bytes.Repeat([]byte{0x44}, 32)
+	link, err := CreatePortalWithParams(t.Context(), signer, params)
 	if err != nil {
-		t.Fatalf("load signature vectors: %v", err)
+		t.Fatalf("CreatePortalWithParams: %v", err)
 	}
-	var accept *conformance.SignatureVector
-	for i := range vf.Vectors {
-		if vf.Vectors[i].Expect == conformance.ExpectAccept {
-			accept = &vf.Vectors[i]
-			break
-		}
-	}
-	if accept == nil {
-		t.Fatal("no accept vector in the vendored signature file")
-	}
-
-	der, err := b64url.DecodeString(vf.Issuer.SPKIDERB64)
+	frag, err := VerifyLink(link, ts)
 	if err != nil {
-		t.Fatalf("decode issuer spki: %v", err)
-	}
-	ts, err = NewTrustStoreFromDER(map[string][]byte{vf.Issuer.KID: der})
-	if err != nil {
-		t.Fatalf("new trust store: %v", err)
-	}
-
-	// A synthesized secret: base64url of {"qurl_user_private_key_b64":"<32 bytes>"}.
-	secretJSON := `{"qurl_user_private_key_b64":"` + b64url.EncodeToString(make([]byte, 32)) + `"}`
-	secretB64 := b64url.EncodeToString([]byte(secretJSON))
-
-	body, err := buildFragment(accept.ClaimsB64, secretB64, mustDecode(t, accept.SigB64Raw))
-	if err != nil {
-		t.Fatalf("buildFragment: %v", err)
-	}
-	transport, err := encodeTransportFragment(body)
-	if err != nil {
-		t.Fatalf("encodeTransportFragment: %v", err)
-	}
-	link = "https://qurl.link/#" + transport
-
-	// The accept vector's cell key is 32 bytes of 0x44 (fingerprint uzkUFcBeOdc);
-	// recompute it rather than hardcode so the expected route stays derived.
-	frag, err := parseFragment(body)
-	if err != nil {
-		t.Fatalf("parseFragment: %v", err)
+		t.Fatalf("verify generated link: %v", err)
 	}
 	cellPub, err := decodeClaimsCellPublicKey(frag.Claims)
 	if err != nil {

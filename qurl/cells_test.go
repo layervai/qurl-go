@@ -7,6 +7,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/layervai/qurl-go/relayknock"
 )
 
 // Duplicate-key rejection is covered by TestNewCellCatalogRejectsDuplicateKeys
@@ -114,8 +116,8 @@ func TestCellCatalogAcceptsEveryBase64Spelling(t *testing.T) {
 			if err != nil {
 				t.Fatalf("spelling %s rejected: %v", name, err)
 			}
-			ep, ok := catalog.lookup(key)
-			if !ok {
+			ep, ok, err := catalog.lookup(key)
+			if err != nil || !ok {
 				t.Fatalf("spelling %s built a catalog that does not match its own key", name)
 			}
 			if ep.Host != "a.example" || ep.Port != standardNHPUDPPort || ep.CellID != "cell0" {
@@ -138,31 +140,47 @@ func TestCellCatalogLookup(t *testing.T) {
 		t.Fatalf("build catalog: %v", err)
 	}
 
-	if _, ok := catalog.lookup(known); !ok {
+	if _, ok, err := catalog.lookup(known); err != nil || !ok {
 		t.Fatal("known cell key did not match")
 	}
 	// An unknown cell is not an error: it is a cell this build predates, and it
 	// must route through the relay rather than fail.
-	if _, ok := catalog.lookup(other); ok {
+	if _, ok, err := catalog.lookup(other); err != nil || ok {
 		t.Fatal("unknown cell key matched; an open would be sent to the wrong cell")
 	}
-	if _, ok := catalog.lookup(nil); ok {
+	if _, ok, err := catalog.lookup(nil); err != nil || ok {
 		t.Fatal("nil key matched")
 	}
-	if _, ok := catalog.lookup([]byte{}); ok {
+	if _, ok, err := catalog.lookup([]byte{}); err != nil || ok {
 		t.Fatal("empty key matched")
 	}
 	// A truncated prefix of a known key must not match: matching on anything
 	// less than the whole key would let a partial value select a real cell.
-	if _, ok := catalog.lookup(known[:16]); ok {
+	if _, ok, err := catalog.lookup(known[:16]); err != nil || ok {
 		t.Fatal("truncated key matched a full cell key")
 	}
 
 	// A nil catalog is the "this build ships no cells" case and must report
 	// false rather than panic, because that is the relay-fallback path.
 	var nilCatalog *CellCatalog
-	if _, ok := nilCatalog.lookup(known); ok {
+	if _, ok, err := nilCatalog.lookup(known); err != nil || ok {
 		t.Fatal("nil catalog reported a match")
+	}
+}
+
+func TestCellCatalogRejectsFingerprintCollisionByFullKey(t *testing.T) {
+	signedKey := testCellKey(t, 0x31)
+	differentKey := testCellKey(t, 0x32)
+	var retainedDifferentKey [32]byte
+	copy(retainedDifferentKey[:], differentKey)
+	catalog := &CellCatalog{byFingerprint: map[string]catalogCell{
+		relayknock.PubKeyFingerprint(signedKey): {
+			endpoint:        CellEndpoint{CellID: "collision", Host: "must-not-resolve.example", Port: standardNHPUDPPort},
+			serverPublicKey: retainedDifferentKey,
+		},
+	}}
+	if endpoint, ok, err := catalog.lookup(signedKey); endpoint != (CellEndpoint{}) || ok || !errors.Is(err, ErrCellCatalogKeyMismatch) {
+		t.Fatalf("collision lookup = %#v, %t, %v; want full-key rejection", endpoint, ok, err)
 	}
 }
 
@@ -183,8 +201,8 @@ func TestCellCatalogIsIndependentOfCallerSlice(t *testing.T) {
 	entries[0].Host = "attacker.example"
 	entries[0].Port = 1
 
-	ep, ok := catalog.lookup(key)
-	if !ok {
+	ep, ok, err := catalog.lookup(key)
+	if err != nil || !ok {
 		t.Fatal("cell vanished after caller mutated its own slice")
 	}
 	if ep.Host != "a.example" || ep.Port != standardNHPUDPPort {

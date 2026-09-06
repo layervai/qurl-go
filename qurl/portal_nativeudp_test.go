@@ -4,11 +4,31 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"net"
 	"net/http"
+	"net/netip"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/layervai/qurl-go/relayknock"
+	"github.com/layervai/qurl-go/relayknock/nativeudp"
 )
+
+type portalNoIOResolver struct{ calls atomic.Int32 }
+
+func (r *portalNoIOResolver) LookupNetIP(context.Context, string, string) ([]netip.Addr, error) {
+	r.calls.Add(1)
+	return nil, errors.New("DNS must not run")
+}
+
+type portalNoIODialer struct{ calls atomic.Int32 }
+
+func (d *portalNoIODialer) DialContext(context.Context, string, string) (net.Conn, error) {
+	d.calls.Add(1)
+	return nil, errors.New("UDP must not run")
+}
 
 // refusingDoer fails the test if the relay is contacted at all. It is the whole
 // point of the native UDP path: not "HTTP was avoided when convenient" but "the
@@ -315,6 +335,82 @@ func TestEnterPortalWith_UnknownCellNoRelayRefusesWithCellIdentity(t *testing.T)
 	}
 	if !strings.Contains(err.Error(), cellFingerprint) {
 		t.Fatalf("refusal does not name the link cell's fingerprint %q: %v", cellFingerprint, err)
+	}
+}
+
+func TestEnterPortalWith_CellFingerprintCollisionRefusesBeforeIO(t *testing.T) {
+	link, trust, _ := vendoredAcceptLink(t)
+	frag, err := VerifyLink(link, trust)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signedKey, err := decodeClaimsCellPublicKey(frag.Claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var differentKey [32]byte
+	for i := range differentKey {
+		differentKey[i] = 0x19
+	}
+	catalog := &CellCatalog{byFingerprint: map[string]catalogCell{
+		relayknock.PubKeyFingerprint(signedKey): {
+			endpoint: CellEndpoint{
+				CellID: "collision", Host: "must-not-resolve.example", Port: standardNHPUDPPort,
+			},
+			serverPublicKey: differentKey,
+		},
+	}}
+	resolver := new(portalNoIOResolver)
+	dialer := new(portalNoIODialer)
+	relay := &refusingDoer{t: t}
+	_, err = EnterPortalWith(t.Context(), link, Config{
+		TrustStore: trust, Cells: catalog,
+		RelayAllowlist: NewRelayAllowlist([]string{"relay.example.com"}), HTTPClient: relay,
+		nativeUDPOptions: &nativeudp.Options{Resolver: resolver, Dialer: dialer},
+	})
+	if !errors.Is(err, ErrCellCatalogKeyMismatch) {
+		t.Fatalf("fingerprint collision error = %v, want ErrCellCatalogKeyMismatch", err)
+	}
+	if resolver.calls.Load() != 0 || dialer.calls.Load() != 0 || relay.called {
+		t.Fatal("fingerprint collision reached DNS, UDP, or relay I/O")
+	}
+}
+
+func TestEnterPortalWith_QurlPrivatePublicMismatchRefusesBeforeIO(t *testing.T) {
+	link, trust, _ := vendoredAcceptLink(t)
+	frag, err := VerifyLink(link, trust)
+	if err != nil {
+		t.Fatal(err)
+	}
+	differentPrivateKey := make([]byte, 32)
+	for i := range differentPrivateKey {
+		differentPrivateKey[i] = 0x77
+	}
+	secretJSON := `{"qurl_user_private_key_b64":"` + b64url.EncodeToString(differentPrivateKey) + `"}`
+	canonicalFragment, err := buildFragment(
+		frag.ClaimsB64, b64url.EncodeToString([]byte(secretJSON)), mustDecode(t, frag.SigB64),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport, err := encodeTransportFragment(canonicalFragment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mismatchedLink := LinkBaseURL + "#" + transport
+	resolver := new(portalNoIOResolver)
+	dialer := new(portalNoIODialer)
+	relay := &refusingDoer{t: t}
+	_, err = EnterPortalWith(t.Context(), mismatchedLink, Config{
+		TrustStore: trust, Cells: unreachableCellCatalog(t, vectorCellKeyB64(t)),
+		RelayAllowlist: NewRelayAllowlist([]string{"relay.example.com"}), HTTPClient: relay,
+		nativeUDPOptions: &nativeudp.Options{Resolver: resolver, Dialer: dialer},
+	})
+	if !errors.Is(err, ErrQurlUserKeyMismatch) {
+		t.Fatalf("private/public mismatch error = %v, want ErrQurlUserKeyMismatch", err)
+	}
+	if resolver.calls.Load() != 0 || dialer.calls.Load() != 0 || relay.called {
+		t.Fatal("private/public mismatch reached DNS, UDP, or relay I/O")
 	}
 }
 

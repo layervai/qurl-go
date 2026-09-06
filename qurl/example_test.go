@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/layervai/qurl-go/qurl"
@@ -52,6 +53,26 @@ func ExampleResourceHandle_AuthorizeContentRequest() {
 		CheckRedirect: handle.CheckContentRedirect,
 	}
 	resp, err := client.Do(req)
+	if err != nil {
+		panic(err)
+	}
+	defer resp.Body.Close()
+}
+
+func ExamplePortalOpener() {
+	ctx := context.Background()
+	opener, err := qurl.NewPortalOpener("https://qurl.link/#qv2t1.example")
+	if err != nil {
+		panic(err)
+	}
+	if err := opener.Start(ctx); err != nil {
+		panic(err)
+	}
+	defer opener.Close()
+
+	resp, err := opener.Do(ctx, func(target *url.URL) (*http.Request, error) {
+		return http.NewRequestWithContext(ctx, http.MethodPost, target.String(), http.NoBody)
+	}, qurl.RejectPortalRedirects())
 	if err != nil {
 		panic(err)
 	}

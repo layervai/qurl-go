@@ -58,3 +58,17 @@ func (s *PortalSession) secretFor(frag *Fragment) (string, error) {
 	s.state = &portalSessionState{identity: identity, secret: b64url.EncodeToString(secret[:])}
 	return s.state.secret, nil
 }
+
+// clear releases the in-memory visitor capability when its lifecycle owner
+// closes. Go strings cannot be reliably overwritten, but dropping every SDK
+// reference prevents later reuse and lets the runtime reclaim the storage.
+func (s *PortalSession) clear() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state == nil {
+		return
+	}
+	s.state.identity = [sha256.Size]byte{}
+	s.state.secret = ""
+	s.state = nil
+}

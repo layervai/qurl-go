@@ -14,6 +14,7 @@ package qurl
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"net"
@@ -22,6 +23,9 @@ import (
 	"strconv"
 	"strings"
 
+	"golang.org/x/crypto/curve25519"
+
+	"github.com/layervai/qurl-go/internal/cryptoutil"
 	"github.com/layervai/qurl-go/relayknock"
 	"github.com/layervai/qurl-go/relayknock/nativeudp"
 )
@@ -75,6 +79,11 @@ type Config struct {
 	// Copy a shared Config per visit and assign a separate zero-value session;
 	// retain that copy when retrying the same link for the same visitor.
 	PortalSession *PortalSession
+
+	// nativeUDPOptions is a package-private socket seam for real loopback tests.
+	// Production callers use nativeudp's validated defaults. Keeping this private
+	// prevents applications from weakening the native-only transport contract.
+	nativeUDPOptions *nativeudp.Options
 }
 
 // HTTPDoer is the subset of *http.Client EnterPortal needs, narrowed so a caller
@@ -220,6 +229,10 @@ var ErrNotConfigured = errors.New("qurl: not configured")
 // handle-use error, not a malformed platform reply.
 var ErrInvalidContentRequest = errors.New("qurl: invalid content request")
 
+// ErrQurlUserKeyMismatch reports that the fragment's private X25519 key does
+// not derive the public key in the issuer-signed claims. No transport is used.
+var ErrQurlUserKeyMismatch = errors.New("qurl: private qURL key does not match the signed public key")
+
 // ErrTooManyContentRedirects reports that CheckContentRedirect stopped a
 // protected-content request after the standard 10-request redirect limit.
 var ErrTooManyContentRedirects = errors.New("qurl: too many content redirects")
@@ -305,7 +318,10 @@ func EnterPortalWith(ctx context.Context, qurlLink string, cfg Config) (*Resourc
 	// A cell we know how to reach is knocked directly over UDP, dropping the
 	// relay and every HTTP dependency with it. Otherwise fall back to the relay,
 	// whose URL must clear the allowlist before it is acted on.
-	cellEndpoint, useNativeUDP := cfg.Cells.lookup(cellPub)
+	cellEndpoint, useNativeUDP, err := cfg.Cells.lookup(cellPub)
+	if err != nil {
+		return nil, err
+	}
 	if !useNativeUDP {
 		if cfg.RelayAllowlist == nil {
 			// Reachable only with a catalog configured (the no-transport case
@@ -325,6 +341,21 @@ func EnterPortalWith(ctx context.Context, qurlLink string, cfg Config) (*Resourc
 	devicePriv, err := decodeSecretQurlUserPrivateKey(frag.Secret)
 	if err != nil {
 		return nil, fmt.Errorf("qurl: decode per-qURL private key: %w", err)
+	}
+	defer cryptoutil.Wipe(devicePriv)
+	signedDevicePub, err := decodeClaimsQurlUserPublicKey(claims)
+	if err != nil {
+		// Unreachable in practice: verified claims already passed the strict
+		// 32-byte X25519 public-key parser. Keep the decoded private key under the
+		// defer above so this defensive rejection wipes it too.
+		return nil, fmt.Errorf("qurl: decode verified per-qURL public key: %w", err)
+	}
+	derivedDevicePub, err := curve25519.X25519(devicePriv, curve25519.Basepoint)
+	if err != nil {
+		return nil, fmt.Errorf("qurl: derive per-qURL public key: %w", err)
+	}
+	if subtle.ConstantTimeCompare(derivedDevicePub, signedDevicePub) != 1 {
+		return nil, ErrQurlUserKeyMismatch
 	}
 	session := cfg.PortalSession
 	if session == nil {
@@ -349,11 +380,21 @@ func EnterPortalWith(ctx context.Context, qurlLink string, cfg Config) (*Resourc
 	// substitute a resource URL, and neither can anything on the UDP path.
 	var reply *relayknock.Reply
 	if useNativeUDP {
+		options := nativeudp.Options{DeviceStaticPriv: devicePriv}
+		if cfg.nativeUDPOptions != nil {
+			// The per-link private key always comes from the verified qURL. Tests may
+			// route otherwise-public synthetic addresses to a real loopback socket,
+			// but cannot replace the cryptographic initiator identity.
+			options.Resolver = cfg.nativeUDPOptions.Resolver
+			options.Dialer = cfg.nativeUDPOptions.Dialer
+			options.Timeout = cfg.nativeUDPOptions.Timeout
+			options.MaxAddresses = cfg.nativeUDPOptions.MaxAddresses
+		}
 		reply, err = nativeudp.Knock(ctx, nativeudp.Endpoint{
 			Host:            cellEndpoint.Host,
 			Port:            cellEndpoint.Port,
 			ServerStaticPub: cellPub,
-		}, body, nativeudp.Options{DeviceStaticPriv: devicePriv})
+		}, body, options)
 	} else {
 		reply, err = relayknock.Knock(ctx, claims.RelayURL, cellPub, body, relayknock.KnockOptions{
 			HTTPClient:       cfg.HTTPClient,

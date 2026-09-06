@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -951,27 +952,28 @@ func TestConnectAgentRuntime_ReplacementOTPCannotCrossOriginalDeadline(t *testin
 	contract := loadAssignmentFixture(t)
 	first := accountAssignmentResult(contract, "conformance-account-assignment-ticket-0001")
 	second := accountAssignmentResult(contract, "conformance-account-assignment-ticket-0002")
+	initial, err := parseInitialAssignmentReply([]byte(first), "agent-conform", assignmentFixtureNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := initial.AssignmentTicketExpiresAt.Add(AgentRegistrationRecoveryHorizon)
+	var replacementReplyPhase atomic.Int32
 	f := newRuntimeFixture(t,
 		[]runtimeUDPStep{
 			{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: first},
-			{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: second},
+			{
+				requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: second,
+				// Move the test clock at the exact protocol boundary. A resolver-call
+				// count is transport-implementation-dependent and made this test
+				// intermittent on macOS under load.
+				beforeReply: func() { replacementReplyPhase.Store(1) },
+			},
 		},
 		[]runtimeUDPStep{
 			{requestType: relayknock.TypeOTP, noReply: true},
 			{requestType: relayknock.TypeRegister, replyType: relayknock.TypeRegisterAck, replyBody: `{"errCode":"52101","errMsg":"expired","aspId":"agent"}`},
 		},
 	)
-	now := assignmentFixtureNow
-	cellResolutions := 0
-	resolver := runtimeResolverFunc(func(ctx context.Context, network, host string) ([]netip.Addr, error) {
-		if host == "cell0.nhp.layerv.ai" {
-			cellResolutions++
-			if cellResolutions == 3 {
-				now = assignmentFixtureNow.Add(15*time.Minute + AgentRegistrationRecoveryHorizon)
-			}
-		}
-		return f.resolver.LookupNetIP(ctx, network, host)
-	})
 	codes := []string{"12345678", "87654321"}
 	callbacks := 0
 	provider := func(context.Context, AgentOTPChallenge) (string, error) {
@@ -980,11 +982,22 @@ func TestConnectAgentRuntime_ReplacementOTPCannotCrossOriginalDeadline(t *testin
 		return code, nil
 	}
 
-	_, _, err := connectWithEnrollment(
+	_, _, err = connectWithEnrollment(
 		context.Background(), conformance.AgentAssignmentAccountCredentialFixture, f.store,
 		f.options(
-			withAgentRuntimeClock(func() time.Time { return now }),
-			WithAgentRuntimeUDPResolver(resolver),
+			withAgentRuntimeClock(func() time.Time {
+				// The assignment parser gets the pre-deadline instant that was
+				// current when the Hub produced the reply. The next boundary check
+				// observes the original recovery deadline before it can send the
+				// replacement OTP.
+				if replacementReplyPhase.CompareAndSwap(1, 2) {
+					return assignmentFixtureNow
+				}
+				if replacementReplyPhase.Load() == 2 {
+					return deadline
+				}
+				return assignmentFixtureNow
+			}),
 			WithAgentRuntimeAllowedRegistrationKeyKinds(RegistrationKeyKindAccount),
 			WithAgentRuntimeOTPProvider(provider),
 		)...,

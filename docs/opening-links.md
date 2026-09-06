@@ -63,6 +63,61 @@ platform access endpoints this process should trust. With no provider installed
 file named by `QURL_DEPLOYMENT`, falling back to the deployment embedded in the
 build.
 
+## Long-Lived Service Opener
+
+Use `PortalOpener` when a service repeatedly calls one protected target. It is
+native-UDP-only and is bound to the exact target URL in the first authenticated
+NHP ACK. `Start` opens the visitor session and starts proactive renewal. `Do`
+uses only the cached handle. It does not open a portal, read deployment data,
+resolve a qURL, mint, list, retry, or sleep on the request path.
+
+```go
+opener, err := qurl.NewPortalOpener(link)
+if err != nil {
+	return err
+}
+if err := opener.Start(ctx); err != nil {
+	return err
+}
+defer opener.Close()
+
+resp, err := opener.Do(ctx, func(target *url.URL) (*http.Request, error) {
+	// Sign the method, target authority, and exact target path here. target is
+	// the authenticated ACK URL, not caller input.
+	return http.NewRequest(http.MethodPost, target.String(), body)
+}, qurl.RejectPortalRedirects())
+```
+
+The default provider or `QURL_DEPLOYMENT` must include the link's issuer and
+cell. A missing cell returns `ErrPortalNativeOnly` or `ErrCellNotInCatalog`; the
+opener never falls back to the HTTPS relay. A renewal that authenticates a
+different target returns `ErrPortalTargetChanged` and does not replace the
+active handle.
+
+By default, `Do` follows only same-origin redirects and reauthorizes each one.
+Use `RejectPortalRedirects` for signed POST or PATCH operations because a
+redirect can change the method or invalidate a signature. The first request URL
+and wire Host are always the exact authenticated target. The builder cannot add
+a path, query, or alternate authority.
+
+Renewal starts before expiry and runs in one background goroutine. Each renewal
+has a fixed I/O timeout and a bounded retry count. When renewal cannot complete,
+the old handle remains usable only until its reported expiry. After that, `Do`
+returns `ErrPortalOpenerNotReady` immediately. `Health` returns readiness,
+times, and a failure count. It does not return the qURL, target, session ID, or
+cookie. Lifecycle code can call `Start` again after expiry to run one
+single-flight recovery open. This explicit recovery stays off the request path,
+and it must authenticate the same target as the first open. `Close` cancels
+renewal and releases the SDK's references to the qURL and session material. It
+does not cancel an HTTP request that `Do` already handed to the transport.
+
+Before any transport work, the opener derives the X25519 public key from the
+fragment private key with the standard clamped X25519 basepoint operation. It
+requires that key to equal the public key in the signed qURL claims. Every qURL
+minter must create that public claim from the matching fragment private key.
+A mismatch fails closed with `ErrQurlUserKeyMismatch`; there is no compatibility
+fallback.
+
 ## Retry a Visit
 
 Each ordinary `EnterPortal` or `EnterPortalWith` call starts an independent

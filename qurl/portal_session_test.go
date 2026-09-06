@@ -97,16 +97,17 @@ func TestPortalSessionFailedVerificationDoesNotBind(t *testing.T) {
 // admission rule models the service's one-time visitor binding; service/NHP
 // integration tests own the actual repository and verifier enforcement.
 type portalSessionPeer struct {
-	t          *testing.T
-	server     *httptest.Server
-	serverKey  *ecdh.PrivateKey
-	devicePub  []byte
-	fragment   *Fragment
-	mu         sync.Mutex
-	bound      [sha256.Size]byte
-	boundSet   bool
-	dropReply  bool
-	capability []string
+	t           *testing.T
+	server      *httptest.Server
+	serverKey   *ecdh.PrivateKey
+	devicePub   []byte
+	fragment    *Fragment
+	mu          sync.Mutex
+	bound       [sha256.Size]byte
+	boundSet    bool
+	dropReply   bool
+	redirectURL string
+	capability  []string
 }
 
 func newPortalSessionPeer(t *testing.T, loseFirstReply bool) (*portalSessionPeer, string, Config) {
@@ -115,7 +116,10 @@ func newPortalSessionPeer(t *testing.T, loseFirstReply bool) (*portalSessionPeer
 	if err != nil {
 		t.Fatal(err)
 	}
-	peer := &portalSessionPeer{t: t, serverKey: serverKey, dropReply: loseFirstReply}
+	peer := &portalSessionPeer{
+		t: t, serverKey: serverKey, dropReply: loseFirstReply,
+		redirectURL: "https://resource.example.com/report",
+	}
 	peer.server = httptest.NewTLSServer(http.HandlerFunc(peer.serveHTTP))
 	t.Cleanup(peer.server.Close)
 	signer, trust := mintSigner(t)
@@ -182,6 +186,7 @@ func (p *portalSessionPeer) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	allowed := visitor == p.bound
 	drop := p.dropReply
 	p.dropReply = false
+	redirectURL := p.redirectURL
 	p.mu.Unlock()
 	if drop {
 		// The server committed the first visit, but its ACK never reached the
@@ -191,7 +196,7 @@ func (p *portalSessionPeer) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	ackBody := []byte(`{"errCode":"51004","opnTime":0}`)
 	if allowed {
-		ackBody = []byte(`{"errCode":"0","sessId":123,"opnTime":900,"redirectUrl":"https://resource.example.com/report","aspToken":"` + testAuthProviderToken + `"}`)
+		ackBody = []byte(`{"errCode":"0","sessId":123,"opnTime":900,"redirectUrl":"` + redirectURL + `","aspToken":"` + testAuthProviderToken + `"}`)
 	}
 	ephemeral, err := ecdh.X25519().GenerateKey(rand.Reader)
 	if err != nil {
