@@ -515,7 +515,19 @@ func clearPortalOpenResult(opened *portalOpenResult) {
 }
 
 func (o *PortalOpener) renewLoop(lifecycle context.Context, done chan struct{}) {
-	defer close(done)
+	defer func() {
+		// A renewal owner must never leave a running opener behind after it
+		// exits. Start waits on done when a running handle is expired; degrading
+		// here makes that wake-up a state transition instead of a possible
+		// closed-channel spin if a future return path misses its local cleanup.
+		o.mu.Lock()
+		if o.state == portalOpenerRunning && o.loopDone == done {
+			o.state = portalOpenerDegraded
+			o.clearActiveLocked()
+		}
+		o.mu.Unlock()
+		close(done)
+	}()
 	for {
 		o.mu.RLock()
 		renewAt := o.renewAt
@@ -783,6 +795,11 @@ func (o *PortalOpener) Close() error {
 	o.clearActiveLocked()
 	o.link = ""
 	o.target = ""
+	o.expiresAt = time.Time{}
+	o.renewAt = time.Time{}
+	o.lastSuccess = time.Time{}
+	o.lastFailure = PortalOpenerFailureNone
+	o.failures = 0
 	o.resolvedConfig = nil
 	o.explicitConfig = nil
 	o.session.clear()

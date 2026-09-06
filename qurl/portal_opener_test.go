@@ -1075,6 +1075,12 @@ func TestPortalOpenerCloseCancelsStartAndIsIdempotent(t *testing.T) {
 	if opener.link != "" || opener.target != "" || opener.active != nil || opener.session.state != nil {
 		t.Fatal("Close retained qURL or active session material")
 	}
+	health := opener.Health()
+	if health.State != PortalOpenerStateClosed || health.Ready || !health.ExpiresAt.IsZero() ||
+		!health.RenewAt.IsZero() || !health.LastOpenSucceededAt.IsZero() ||
+		health.LastFailureClass != PortalOpenerFailureNone || health.ConsecutiveFailures != 0 {
+		t.Fatalf("Health after Close retained lifecycle state: %+v", health)
+	}
 	resp, err := opener.Do(t.Context(), func(*url.URL) (*http.Request, error) {
 		return nil, errors.New("builder must not run after Close")
 	})
@@ -1083,6 +1089,65 @@ func TestPortalOpenerCloseCancelsStartAndIsIdempotent(t *testing.T) {
 	}
 	if !errors.Is(err, ErrPortalOpenerClosed) {
 		t.Fatalf("Do after Close = %v, want ErrPortalOpenerClosed", err)
+	}
+}
+
+func TestPortalOpenerCloseClearsHealthLifetime(t *testing.T) {
+	link, cfg := portalOpenerFixture(t)
+	opener, err := NewPortalOpener(link, WithPortalOpenerConfig(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	opener.open = func(context.Context, string, Config) (*ResourceHandle, error) {
+		return portalTestHandle("https://r_test.qurl.site/fixed", testAuthProviderToken, 60, 24), nil
+	}
+	if err := opener.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if health := opener.Health(); health.ExpiresAt.IsZero() || health.RenewAt.IsZero() || health.LastOpenSucceededAt.IsZero() {
+		t.Fatalf("started opener has incomplete health: %+v", health)
+	}
+	if err := opener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	health := opener.Health()
+	if health.State != PortalOpenerStateClosed || health.Ready || !health.ExpiresAt.IsZero() ||
+		!health.RenewAt.IsZero() || !health.LastOpenSucceededAt.IsZero() ||
+		health.LastFailureClass != PortalOpenerFailureNone || health.ConsecutiveFailures != 0 {
+		t.Fatalf("Health after successful Close retained lifecycle state: %+v", health)
+	}
+}
+
+func TestPortalOpenerRenewLoopUnexpectedExitDegrades(t *testing.T) {
+	link, cfg := portalOpenerFixture(t)
+	opener, err := NewPortalOpener(link, WithPortalOpenerConfig(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	opener.open = func(context.Context, string, Config) (*ResourceHandle, error) {
+		return portalTestHandle("https://r_test.qurl.site/fixed", testAuthProviderToken, 60, 23), nil
+	}
+	if err := opener.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { closePortalOpener(t, opener) })
+
+	opener.mu.RLock()
+	loopDone := opener.loopDone
+	opener.mu.RUnlock()
+	// Simulate a future renewal return path that stops its lifecycle without
+	// first changing opener state. The loop-level defer must fail closed.
+	opener.cancel()
+	select {
+	case <-loopDone:
+	case <-time.After(time.Second):
+		t.Fatal("renewal loop did not stop")
+	}
+	if health := opener.Health(); health.State != PortalOpenerStateDegraded || health.Ready {
+		t.Fatalf("unexpected renewal exit health = %+v, want degraded and not ready", health)
+	}
+	if opener.active != nil {
+		t.Fatal("unexpected renewal exit retained the active handle")
 	}
 }
 
