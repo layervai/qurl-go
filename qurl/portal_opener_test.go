@@ -268,6 +268,35 @@ func TestPortalOpenerRenewalIsProactiveSingleFlightAndBounded(t *testing.T) {
 	}
 }
 
+func TestPortalOpenerRenewalClampsInvalidRetryLimit(t *testing.T) {
+	link, cfg := portalOpenerFixture(t)
+	opener, err := NewPortalOpener(link, WithPortalOpenerConfig(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { closePortalOpener(t, opener) })
+	opener.renewalLead = func(time.Duration) time.Duration { return 9990 * time.Millisecond }
+	opener.retryLimit = 0
+	var opens atomic.Int32
+	opener.open = func(context.Context, string, Config) (*ResourceHandle, error) {
+		if opens.Add(1) == 1 {
+			return portalTestHandle("https://r_test.qurl.site/fixed", testAuthProviderToken, 10, 12), nil
+		}
+		return nil, errors.New("scripted native renewal failure")
+	}
+	if err := opener.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	waitForPortalCondition(t, time.Second, func() bool { return opens.Load() == 2 })
+	time.Sleep(20 * time.Millisecond)
+	if got := opens.Load(); got != 2 {
+		t.Fatalf("invalid retry limit caused %d renewal attempts, want one", got-1)
+	}
+	if health := opener.Health(); health.ConsecutiveFailures != 1 || !health.Ready {
+		t.Fatalf("health after clamped renewal failure = %#v", health)
+	}
+}
+
 func TestPortalOpenerStartReturnsWhenLateRenewalRestoresReadiness(t *testing.T) {
 	link, cfg := portalOpenerFixture(t)
 	opener, err := NewPortalOpener(link, WithPortalOpenerConfig(cfg))
@@ -613,6 +642,49 @@ func TestPortalOpenerDoPinsExactTargetAndWireHost(t *testing.T) {
 	}
 	if got := requests.Load(); got != 0 {
 		t.Fatalf("changed target sent %d requests", got)
+	}
+}
+
+func TestPortalOpenerDoClosesBuilderBodyWhenBuilderReturnsError(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		requests.Add(1)
+	}))
+	t.Cleanup(server.Close)
+	link, cfg := portalOpenerFixture(t)
+	opener, err := NewPortalOpener(link, WithPortalOpenerConfig(cfg), WithPortalOpenerHTTPClient(server.Client()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { closePortalOpener(t, opener) })
+	opener.open = func(context.Context, string, Config) (*ResourceHandle, error) {
+		return portalTestHandle(server.URL+"/fixed", testAuthProviderToken, 60, 15), nil
+	}
+	if err := opener.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+
+	body := &closeTrackingBody{Reader: bytes.NewReader([]byte("body"))}
+	wantErr := errors.New("request signing failed")
+	response, err := opener.Do(t.Context(), func(target *url.URL) (*http.Request, error) {
+		request, requestErr := http.NewRequestWithContext(t.Context(), http.MethodPost, target.String(), body)
+		if requestErr != nil {
+			return nil, requestErr
+		}
+		return request, wantErr
+	})
+	if response != nil {
+		_ = response.Body.Close()
+		t.Fatal("builder error returned a response")
+	}
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("Do error = %v, want %v", err, wantErr)
+	}
+	if !body.closed.Load() {
+		t.Fatal("builder-error request body was not closed")
+	}
+	if got := requests.Load(); got != 0 {
+		t.Fatalf("builder error sent %d requests", got)
 	}
 }
 

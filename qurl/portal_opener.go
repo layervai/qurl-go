@@ -194,7 +194,7 @@ type PortalOpener struct {
 	renewalLead  func(time.Duration) time.Duration
 	retryInitial time.Duration
 	retryMaximum time.Duration
-	retryLimit   int // positive invariant; tests may reduce it but never disable renewal
+	retryLimit   int // positive in production; renewLoop clamps internal violations
 }
 
 // NewPortalOpener constructs a native-only opener for one qURL. Construction
@@ -483,13 +483,19 @@ func (o *PortalOpener) renewLoop(done chan struct{}) {
 		expiresAt := o.expiresAt
 		target := o.target
 		cfg := *o.resolvedConfig
+		retryLimit := o.retryLimit
 		o.mu.RUnlock()
+		// Keep the loop bounded even if an in-package test or a future internal
+		// configuration path violates the positive retry-count invariant.
+		if retryLimit < 1 {
+			retryLimit = 1
+		}
 		if !o.waitUntil(renewAt) {
 			return
 		}
 
 		delay := o.retryInitial
-		for attempt := 1; attempt <= o.retryLimit; attempt++ {
+		for attempt := 1; attempt <= retryLimit; attempt++ {
 			opened, err := o.openPortal(o.lifecycle, cfg, target)
 			if err == nil {
 				o.mu.Lock()
@@ -510,7 +516,7 @@ func (o *PortalOpener) renewLoop(done chan struct{}) {
 			o.failures++
 			o.lastFailure = classifyPortalOpenerFailure(err)
 			o.mu.Unlock()
-			if attempt == o.retryLimit || !o.now().Add(delay).Before(expiresAt) {
+			if attempt == retryLimit || !o.now().Add(delay).Before(expiresAt) {
 				// Do not hot-loop after the bounded renewal attempts. Keep the old
 				// handle usable until expiry, then make Start the explicit recovery
 				// path. A successful recovery remains bound to the first target.
@@ -611,6 +617,7 @@ func (o *PortalOpener) Do(ctx context.Context, build PortalRequestBuilder, optio
 	builderTarget := *trustedTarget
 	req, err := build(&builderTarget)
 	if err != nil {
+		closePortalRequestBody(req)
 		return nil, err
 	}
 	if req == nil || req.URL == nil {
