@@ -744,7 +744,7 @@ func TestDiscoveryProvider_ProfileMismatch_FailsClosed(t *testing.T) {
 // ErrRelayURL — reached only after the signature verified, since an unverified link
 // would have failed on the kid first.
 func TestEnterPortal_DiscoveryProvider_RelayOffAllowlist_Rejected(t *testing.T) {
-	link, ts, _ := vendoredAcceptLink(t)
+	link, ts, _ := generatedAcceptLink(t)
 
 	// A discovery provider whose Resolve returns the vendored trust store (so the
 	// signature verifies) and an allowlist missing the link's relay host. Using a

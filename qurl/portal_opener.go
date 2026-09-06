@@ -47,6 +47,20 @@ const (
 	portalOpenerClosed
 )
 
+// PortalOpenerFailureClass is a secret-free class for the most recent failed
+// open. It lets operators distinguish a changed authenticated target from a
+// general open failure without exposing the target or transport error.
+type PortalOpenerFailureClass string
+
+const (
+	// PortalOpenerFailureNone means the latest open succeeded or no open failed.
+	PortalOpenerFailureNone PortalOpenerFailureClass = ""
+	// PortalOpenerFailureOpen means an open failed for a reason other than a changed target.
+	PortalOpenerFailureOpen PortalOpenerFailureClass = "open_failed"
+	// PortalOpenerFailureTargetChanged means a renewal authenticated another target.
+	PortalOpenerFailureTargetChanged PortalOpenerFailureClass = "target_changed"
+)
+
 // PortalOpenerOption configures NewPortalOpener.
 type PortalOpenerOption interface {
 	applyPortalOpenerOption(*portalOpenerConfig) error
@@ -131,6 +145,7 @@ type PortalOpenerHealth struct {
 	ExpiresAt           time.Time
 	RenewAt             time.Time
 	LastOpenSucceededAt time.Time
+	LastFailureClass    PortalOpenerFailureClass
 	ConsecutiveFailures uint32
 }
 
@@ -159,6 +174,7 @@ type PortalOpener struct {
 	expiresAt      time.Time
 	renewAt        time.Time
 	lastSuccess    time.Time
+	lastFailure    PortalOpenerFailureClass
 	failures       uint32
 	resolvedConfig *Config
 
@@ -278,13 +294,27 @@ func (o *PortalOpener) Start(ctx context.Context) error {
 }
 
 func (o *PortalOpener) runStart(ctx context.Context, attempt *portalStartAttempt) error {
+	startCtx, cancel := context.WithCancel(ctx)
+	bridgeDone := make(chan struct{})
+	go func() {
+		select {
+		case <-o.lifecycle.Done():
+			cancel()
+		case <-bridgeDone:
+		}
+	}()
+	defer func() {
+		close(bridgeDone)
+		cancel()
+	}()
+
 	o.mu.RLock()
 	expectedTarget := o.target
 	o.mu.RUnlock()
-	cfg, err := o.nativeConfig(ctx)
+	cfg, err := o.nativeConfig(startCtx)
 	var opened *portalOpenResult
 	if err == nil {
-		opened, err = o.openPortal(ctx, cfg, expectedTarget)
+		opened, err = o.openPortal(startCtx, cfg, expectedTarget)
 	}
 
 	o.mu.Lock()
@@ -298,6 +328,7 @@ func (o *PortalOpener) runStart(ctx context.Context, attempt *portalStartAttempt
 		} else {
 			o.state = portalOpenerNew
 		}
+		o.lastFailure = classifyPortalOpenerFailure(err)
 		o.failures++
 	} else {
 		o.installLocked(opened)
@@ -348,7 +379,9 @@ type portalOpenResult struct {
 }
 
 func (o *PortalOpener) openPortal(ctx context.Context, cfg Config, expectedTarget string) (*portalOpenResult, error) {
-	startedAt := o.now().UTC()
+	// Keep the monotonic reading for all internal lifetime comparisons. UTC is
+	// applied only to the outward health snapshot.
+	startedAt := o.now()
 	openCtx, cancel := context.WithTimeout(ctx, o.openTimeout)
 	bridgeDone := make(chan struct{})
 	go func() {
@@ -393,8 +426,18 @@ func (o *PortalOpener) openPortal(ctx context.Context, cfg Config, expectedTarge
 	handleCopy.ResourceURL = canonicalTarget
 	return &portalOpenResult{
 		handle: &handleCopy, target: canonicalTarget, expiresAt: expiresAt,
-		renewAt: renewAt, openedAt: o.now().UTC(),
+		renewAt: renewAt, openedAt: o.now(),
 	}, nil
+}
+
+func classifyPortalOpenerFailure(err error) PortalOpenerFailureClass {
+	if err == nil {
+		return PortalOpenerFailureNone
+	}
+	if errors.Is(err, ErrPortalTargetChanged) {
+		return PortalOpenerFailureTargetChanged
+	}
+	return PortalOpenerFailureOpen
 }
 
 func defaultPortalRenewalLead(lifetime time.Duration) time.Duration {
@@ -420,6 +463,7 @@ func (o *PortalOpener) installLocked(opened *portalOpenResult) {
 	o.expiresAt = opened.expiresAt
 	o.renewAt = opened.renewAt
 	o.lastSuccess = opened.openedAt
+	o.lastFailure = PortalOpenerFailureNone
 	o.failures = 0
 	close(o.readinessChanged)
 	o.readinessChanged = make(chan struct{})
@@ -464,6 +508,7 @@ func (o *PortalOpener) renewLoop(done chan struct{}) {
 				return
 			}
 			o.failures++
+			o.lastFailure = classifyPortalOpenerFailure(err)
 			o.mu.Unlock()
 			if attempt == o.retryLimit || !o.now().Add(delay).Before(expiresAt) {
 				// Do not hot-loop after the bounded renewal attempts. Keep the old
@@ -610,8 +655,9 @@ func (o *PortalOpener) Health() PortalOpenerHealth {
 	o.mu.RLock()
 	defer o.mu.RUnlock()
 	health := PortalOpenerHealth{
-		ExpiresAt: o.expiresAt, RenewAt: o.renewAt,
-		LastOpenSucceededAt: o.lastSuccess, ConsecutiveFailures: o.failures,
+		ExpiresAt: o.expiresAt.UTC(), RenewAt: o.renewAt.UTC(),
+		LastOpenSucceededAt: o.lastSuccess.UTC(), LastFailureClass: o.lastFailure,
+		ConsecutiveFailures: o.failures,
 	}
 	switch o.state {
 	case portalOpenerNew:

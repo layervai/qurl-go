@@ -118,7 +118,7 @@ func TestEnterPortal_ZeroSetupWithoutCellsUsesRelay(t *testing.T) {
 // refuses to open rather than trusting anything, and says what to set.
 func TestEnterPortal_NoDeploymentFailsClosed(t *testing.T) {
 	noDefaultProvider(t)
-	link, _, _ := vendoredAcceptLink(t)
+	link, _, _ := generatedAcceptLink(t)
 	t.Setenv(EnvDeploymentPath, "")
 
 	_, err := EnterPortal(context.Background(), link)

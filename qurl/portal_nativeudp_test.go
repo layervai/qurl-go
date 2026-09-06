@@ -95,7 +95,7 @@ func otherCellKeyB64(t *testing.T) string {
 // the relay is never contacted — no HTTP request, and no relay allowlist needed,
 // because there is no relay URL being acted on.
 func TestEnterPortalWith_KnownCellNeverContactsRelay(t *testing.T) {
-	link, trust, _ := vendoredAcceptLink(t)
+	link, trust, _ := generatedAcceptLink(t)
 	doer := &refusingDoer{t: t}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -130,7 +130,7 @@ func TestEnterPortalWith_KnownCellNeverContactsRelay(t *testing.T) {
 // a cell this build has never heard of still opens through the relay, so adding
 // a catalog never strands a link.
 func TestEnterPortalWith_UnknownCellFallsBackToRelay(t *testing.T) {
-	link, trust, _ := vendoredAcceptLink(t)
+	link, trust, _ := generatedAcceptLink(t)
 	doer := &refusingDoer{t: t}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -156,7 +156,7 @@ func TestEnterPortalWith_UnknownCellFallsBackToRelay(t *testing.T) {
 // than dragging the caller through a link-parse failure — the diagnostic that
 // tells an integrator they forgot setup, not that their link is bad.
 func TestEnterPortalWith_NoTransportConfiguredFailsBeforeParsing(t *testing.T) {
-	_, trust, _ := vendoredAcceptLink(t)
+	_, trust, _ := generatedAcceptLink(t)
 
 	_, err := EnterPortalWith(context.Background(), "not-even-a-link", Config{
 		TrustStore: trust,
@@ -189,7 +189,7 @@ func (p *cellAwareProvider) ResolveCells(context.Context) (*CellCatalog, error) 
 // extension actually reaches the transport: a provider that returns a catalog
 // covering the link's cell gets a native UDP open, not a relay one.
 func TestEnterPortal_CellProviderRoutesOverNativeUDP(t *testing.T) {
-	link, trust, _ := vendoredAcceptLink(t)
+	link, trust, _ := generatedAcceptLink(t)
 	provider := &cellAwareProvider{
 		trust: trust,
 		allow: NewRelayAllowlist([]string{"relay.example.com"}),
@@ -215,7 +215,7 @@ func TestEnterPortal_CellProviderRoutesOverNativeUDP(t *testing.T) {
 // resolve its cells refuses the open instead of quietly falling back to the
 // relay — a catalog that failed to load is unknown state, not "no cells".
 func TestEnterPortal_CellProviderErrorFailsClosed(t *testing.T) {
-	link, trust, _ := vendoredAcceptLink(t)
+	link, trust, _ := generatedAcceptLink(t)
 	provider := &cellAwareProvider{
 		trust:    trust,
 		allow:    NewRelayAllowlist([]string{"relay.example.com"}),
@@ -237,7 +237,7 @@ func TestEnterPortal_CellProviderErrorFailsClosed(t *testing.T) {
 // over native UDP and never contacts the relay — no more silent downgrade of
 // every pinned open to HTTPS.
 func TestEnterPortal_StaticProviderWithCellsRoutesOverNativeUDP(t *testing.T) {
-	link, trust, _ := vendoredAcceptLink(t)
+	link, trust, _ := generatedAcceptLink(t)
 	sp, err := NewStaticProvider(trust,
 		NewRelayAllowlist([]string{"relay.example.com"}),
 		unreachableCellEntries(vectorCellKeyB64(t)))
@@ -264,7 +264,7 @@ func TestEnterPortal_StaticProviderWithCellsRoutesOverNativeUDP(t *testing.T) {
 // not cover the link's cell, but which DOES carry a relay allowlist, opens
 // through the relay exactly as a relay-only provider would.
 func TestEnterPortal_StaticProviderUnknownCellFallsBackToRelay(t *testing.T) {
-	link, trust, cellFingerprint := vendoredAcceptLink(t)
+	link, trust, cellFingerprint := generatedAcceptLink(t)
 	sp, err := NewStaticProvider(trust,
 		NewRelayAllowlist([]string{"relay.example.com"}),
 		unreachableCellEntries(otherCellKeyB64(t)))
@@ -293,7 +293,7 @@ func TestEnterPortal_StaticProviderUnknownCellFallsBackToRelay(t *testing.T) {
 // catalog is refused with ErrCellNotInCatalog — not treated as a configuration
 // fault, and never downgraded to the relay.
 func TestEnterPortal_StaticProviderCellsOnly_UnknownCellRefuses(t *testing.T) {
-	link, trust, _ := vendoredAcceptLink(t)
+	link, trust, _ := generatedAcceptLink(t)
 	sp, err := NewStaticProvider(trust, nil, unreachableCellEntries(otherCellKeyB64(t)))
 	if err != nil {
 		t.Fatalf("new static provider: %v", err)
@@ -318,7 +318,7 @@ func TestEnterPortal_StaticProviderCellsOnly_UnknownCellRefuses(t *testing.T) {
 // link cell's fingerprint, so an operator can pin the missing cell rather than
 // guess which link was refused.
 func TestEnterPortalWith_UnknownCellNoRelayRefusesWithCellIdentity(t *testing.T) {
-	link, trust, cellFingerprint := vendoredAcceptLink(t)
+	link, trust, cellFingerprint := generatedAcceptLink(t)
 	doer := &refusingDoer{t: t}
 
 	_, err := EnterPortalWith(context.Background(), link, Config{
@@ -339,7 +339,7 @@ func TestEnterPortalWith_UnknownCellNoRelayRefusesWithCellIdentity(t *testing.T)
 }
 
 func TestEnterPortalWith_CellFingerprintCollisionRefusesBeforeIO(t *testing.T) {
-	link, trust, _ := vendoredAcceptLink(t)
+	link, trust, _ := generatedAcceptLink(t)
 	frag, err := VerifyLink(link, trust)
 	if err != nil {
 		t.Fatal(err)
@@ -377,7 +377,7 @@ func TestEnterPortalWith_CellFingerprintCollisionRefusesBeforeIO(t *testing.T) {
 }
 
 func TestEnterPortalWith_QurlPrivatePublicMismatchRefusesBeforeIO(t *testing.T) {
-	link, trust, _ := vendoredAcceptLink(t)
+	link, trust, _ := generatedAcceptLink(t)
 	frag, err := VerifyLink(link, trust)
 	if err != nil {
 		t.Fatal(err)

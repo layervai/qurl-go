@@ -26,7 +26,7 @@ import (
 )
 
 func TestPortalSessionConcurrentBindingAndRedaction(t *testing.T) {
-	link, trust, _ := vendoredAcceptLink(t)
+	link, trust, _ := generatedAcceptLink(t)
 	frag, err := VerifyLink(link, trust)
 	if err != nil {
 		t.Fatal(err)
@@ -74,7 +74,7 @@ func TestPortalSessionConcurrentBindingAndRedaction(t *testing.T) {
 }
 
 func TestPortalSessionFailedVerificationDoesNotBind(t *testing.T) {
-	link, trust, _ := vendoredAcceptLink(t)
+	link, trust, _ := generatedAcceptLink(t)
 	var session PortalSession
 	doer := &capturingDoer{}
 	cfg := Config{TrustStore: freshTrustStore(t), RelayAllowlist: relayExampleAllowlist(), HTTPClient: doer, PortalSession: &session}
@@ -263,7 +263,7 @@ func TestPortalSessionDifferentVerifiedLinkFailsBeforeIO(t *testing.T) {
 	if _, err := EnterPortalWith(t.Context(), link, cfg); err != nil {
 		t.Fatal(err)
 	}
-	otherLink, otherTrust, _ := vendoredAcceptLink(t)
+	otherLink, otherTrust, _ := generatedAcceptLink(t)
 	doer := &capturingDoer{}
 	cfg.TrustStore, cfg.RelayAllowlist, cfg.HTTPClient = otherTrust, relayExampleAllowlist(), doer
 	handle, err := EnterPortalWith(context.Background(), otherLink, cfg)

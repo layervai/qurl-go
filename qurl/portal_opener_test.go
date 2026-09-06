@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"net/url"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -24,7 +25,7 @@ import (
 
 func portalOpenerFixture(t *testing.T) (string, Config) {
 	t.Helper()
-	link, trust, _ := vendoredAcceptLink(t)
+	link, trust, _ := generatedAcceptLink(t)
 	return link, Config{
 		TrustStore: trust,
 		Cells:      unreachableCellCatalog(t, vectorCellKeyB64(t)),
@@ -54,6 +55,17 @@ func waitForPortalCondition(t *testing.T, timeout time.Duration, condition func(
 		}
 		time.Sleep(time.Millisecond)
 	}
+}
+
+type blockingPortalProvider struct {
+	entered chan struct{}
+	once    sync.Once
+}
+
+func (p *blockingPortalProvider) Resolve(ctx context.Context) (*TrustStore, *RelayAllowlist, error) {
+	p.once.Do(func() { close(p.entered) })
+	<-ctx.Done()
+	return nil, nil, ctx.Err()
 }
 
 func TestPortalOpenerStartCachesHandleAndDoDoesNotOpen(t *testing.T) {
@@ -114,6 +126,75 @@ func TestPortalOpenerStartCachesHandleAndDoDoesNotOpen(t *testing.T) {
 	}
 	if got := requests.Load(); got != 8 {
 		t.Fatalf("protected requests = %d, want 8", got)
+	}
+}
+
+func TestPortalOpenerKeepsInternalDeadlinesMonotonic(t *testing.T) {
+	link, cfg := portalOpenerFixture(t)
+	opener, err := NewPortalOpener(link, WithPortalOpenerConfig(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { closePortalOpener(t, opener) })
+	now := time.Now()
+	opener.now = func() time.Time { return now }
+	opener.open = func(context.Context, string, Config) (*ResourceHandle, error) {
+		return portalTestHandle("https://r_test.qurl.site/fixed", testAuthProviderToken, 60, 91), nil
+	}
+	if err := opener.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	opener.mu.RLock()
+	expiresAt, renewAt, lastSuccess := opener.expiresAt, opener.renewAt, opener.lastSuccess
+	opener.mu.RUnlock()
+	for name, value := range map[string]time.Time{
+		"expiry": expiresAt, "renewal": renewAt, "success": lastSuccess,
+	} {
+		if reflect.DeepEqual(value, value.Round(0)) {
+			t.Fatalf("internal %s time lost its monotonic reading", name)
+		}
+	}
+	health := opener.Health()
+	for name, value := range map[string]time.Time{
+		"expiry": health.ExpiresAt, "renewal": health.RenewAt, "success": health.LastOpenSucceededAt,
+	} {
+		if value.Location() != time.UTC || !reflect.DeepEqual(value, value.Round(0)) {
+			t.Fatalf("health %s time = %v, want UTC without an internal monotonic reading", name, value)
+		}
+	}
+}
+
+func TestPortalOpenerCloseCancelsBlockedConfigResolution(t *testing.T) {
+	provider := &blockingPortalProvider{entered: make(chan struct{})}
+	installDefaultProvider(t, provider)
+	opener, err := NewPortalOpener("https://qurl.link/#blocked-provider")
+	if err != nil {
+		t.Fatal(err)
+	}
+	startErr := make(chan error, 1)
+	go func() { startErr <- opener.Start(context.Background()) }()
+	select {
+	case <-provider.entered:
+	case <-time.After(time.Second):
+		t.Fatal("Start did not enter provider resolution")
+	}
+	closeErr := make(chan error, 1)
+	go func() { closeErr <- opener.Close() }()
+	select {
+	case err := <-closeErr:
+		if err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close blocked on provider resolution after lifecycle cancellation")
+	}
+	select {
+	case err := <-startErr:
+		if !errors.Is(err, ErrPortalOpenerClosed) {
+			t.Fatalf("Start after Close = %v, want ErrPortalOpenerClosed", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Start did not return after Close")
 	}
 }
 
@@ -182,7 +263,7 @@ func TestPortalOpenerRenewalIsProactiveSingleFlightAndBounded(t *testing.T) {
 		t.Fatalf("bounded renewal attempts = %d, want 3 after initial open", got-1)
 	}
 	health := opener.Health()
-	if health.ConsecutiveFailures != 3 || !health.Ready {
+	if health.ConsecutiveFailures != 3 || health.LastFailureClass != PortalOpenerFailureOpen || !health.Ready {
 		t.Fatalf("health during bounded renewal failure = %#v", health)
 	}
 }
@@ -415,8 +496,8 @@ func TestPortalOpenerRenewalRefusesChangedAuthenticatedTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitForPortalCondition(t, time.Second, func() bool { return opener.Health().ConsecutiveFailures == 1 })
-	if !opener.Health().Ready {
-		t.Fatal("changed renewal target replaced the still-active original handle")
+	if health := opener.Health(); !health.Ready || health.LastFailureClass != PortalOpenerFailureTargetChanged {
+		t.Fatalf("changed-target renewal health = %#v, want ready old handle and target_changed", health)
 	}
 	opener.mu.RLock()
 	failedLoopDone := opener.loopDone
@@ -429,7 +510,7 @@ func TestPortalOpenerRenewalRefusesChangedAuthenticatedTarget(t *testing.T) {
 	if err := opener.Start(t.Context()); !errors.Is(err, ErrPortalTargetChanged) {
 		t.Fatalf("recovery Start target-change error = %v", err)
 	}
-	if health := opener.Health(); health.State != "degraded" || health.Ready {
+	if health := opener.Health(); health.State != "degraded" || health.Ready || health.LastFailureClass != PortalOpenerFailureTargetChanged {
 		t.Fatalf("target-change recovery left unstable health = %#v", health)
 	}
 }
@@ -608,7 +689,7 @@ func TestPortalOpenerRedirectPolicies(t *testing.T) {
 }
 
 func TestPortalOpenerNativeOnlyRemovesRelayFallback(t *testing.T) {
-	link, trust, _ := vendoredAcceptLink(t)
+	link, trust, _ := generatedAcceptLink(t)
 	doer := &refusingDoer{t: t}
 	cfg := Config{
 		TrustStore: trust,
@@ -632,7 +713,7 @@ func TestPortalOpenerNativeOnlyRemovesRelayFallback(t *testing.T) {
 }
 
 func TestPortalOpenerRequiresNativeCatalogBeforeParsingLink(t *testing.T) {
-	_, trust, _ := vendoredAcceptLink(t)
+	_, trust, _ := generatedAcceptLink(t)
 	opener, err := NewPortalOpener("not-a-qurl", WithPortalOpenerConfig(Config{
 		TrustStore: trust, RelayAllowlist: relayExampleAllowlist(),
 	}))

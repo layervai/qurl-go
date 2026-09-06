@@ -98,8 +98,9 @@ resp, err := opener.Do(ctx, func(target *url.URL) (*http.Request, error) {
 The default provider or `QURL_DEPLOYMENT` must include the link's issuer and
 cell. A missing cell returns `ErrPortalNativeOnly` or `ErrCellNotInCatalog`; the
 opener never falls back to the HTTPS relay. A renewal that authenticates a
-different target returns `ErrPortalTargetChanged` and does not replace the
-active handle.
+different target does not replace the active handle. `Health` reports
+`LastFailureClass == PortalOpenerFailureTargetChanged`. A later explicit
+recovery `Start` returns `ErrPortalTargetChanged` if the target is still wrong.
 
 By default, `Do` follows only same-origin redirects and reauthorizes each one.
 Use `RejectPortalRedirects` for signed POST or PATCH operations because a
@@ -110,16 +111,18 @@ a path, query, or alternate authority.
 Renewal starts before expiry and runs in one background goroutine. Each renewal
 has a fixed I/O timeout and a bounded retry count. When renewal cannot complete,
 the old handle remains usable only until its reported expiry. After that, `Do`
-returns `ErrPortalOpenerNotReady` immediately. `Health` returns readiness,
-times, and a failure count. It does not return the qURL, target, session ID, or
-cookie. Lifecycle code can call `Start` again after expiry to run one
+returns `ErrPortalOpenerNotReady` immediately. `Health` returns readiness, UTC
+times, a failure count, and a secret-free failure class. It does not return the
+qURL, target, session ID, cookie, or raw transport error. Lifecycle code can
+call `Start` again after expiry to run one
 single-flight recovery open. This explicit recovery stays off the request path,
 and it must authenticate the same target as the first open. `Close` cancels
 renewal and releases the SDK's references to the qURL and session material. It
 does not cancel an HTTP request that `Do` already handed to the transport.
 The opener pins the trust and cell config resolved by `Start` for all background
-renewals. Call `Start` after a bounded cycle ends if deployment trust or cell
-routing changed.
+renewals. `Close` also cancels an in-progress provider or deployment resolution.
+Call `Start` after a bounded cycle ends if deployment trust or cell routing
+changed.
 
 ## Retry a Visit
 
