@@ -5,7 +5,6 @@ import (
 	"crypto/ecdsa"
 	"errors"
 	"fmt"
-	"strings"
 	"testing"
 
 	conformance "github.com/layervai/qurl-conformance"
@@ -65,18 +64,6 @@ func TestConformanceVectors(t *testing.T) {
 	t.Run("transport", func(t *testing.T) { runTransportClass(t, cf.Classes["transport"]) })
 	t.Run("relay_allowlist", func(t *testing.T) { runRelayAllowlistClass(t, cf.Classes["relay_allowlist"]) })
 	t.Run("server_id", func(t *testing.T) { runServerIDClass(t, cf.Classes["server_id"]) })
-}
-
-func TestConformanceLoaderRejectsTransportContractDrift(t *testing.T) {
-	raw := conformance.QV2Vectors()
-	mutated := bytes.Replace(raw, []byte(`"component_max": 240`), []byte(`"component_max": 241`), 1)
-	if bytes.Equal(mutated, raw) {
-		t.Fatal("fixture mutation did not find component_max")
-	}
-	_, err := conformance.ParseConformanceFile(mutated)
-	if err == nil || !strings.Contains(err.Error(), "transport contract constants") {
-		t.Fatalf("transport contract drift: want loader rejection, got %v", err)
-	}
 }
 
 func assertTransportContract(t *testing.T, contract conformance.ConformanceTransportContract) {

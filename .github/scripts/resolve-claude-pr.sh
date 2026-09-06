@@ -76,9 +76,4 @@ esac
   echo "base_sha=${base_sha}"
   echo "base_ref=${base_ref}"
   echo "default_branch=${default_ref}"
-  if [[ "${CLAUDE_REVIEW_MODE}" == "automatic" ]]; then
-    echo "ready=true"
-  else
-    echo "checkout_allowed=true"
-  fi
 } >> "${GITHUB_OUTPUT}"

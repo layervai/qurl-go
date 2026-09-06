@@ -29,8 +29,8 @@ func repoRoot(t *testing.T) string {
 	return root
 }
 
-// TestEmbeddedDeploymentStaysPreGAEmpty is tier 3: it pins
-// qurl/deployment.json — the deployment embedded in every build — to its
+// TestEmbeddedDeploymentStaysPreGAEmpty pins qurl/deployment.json — the
+// deployment embedded in every build — to its
 // exact pre-GA shape: "issuers", "cells", and "relay_allowlist" all present
 // and empty, and no other key, in particular NO "hub" trust root.
 //
