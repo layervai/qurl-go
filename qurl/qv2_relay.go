@@ -42,7 +42,7 @@ func NewRelayAllowlist(entries []string) *RelayAllowlist {
 // and the allowlist. It MUST be called only after the issuer signature has been
 // verified. It returns nil when the URL is acceptable, or a wrapped ErrRelayURL.
 func ValidateRelayURL(relayURL string, allow *RelayAllowlist) error {
-	if allow == nil {
+	if allow == nil || allow.hosts == nil {
 		return fmt.Errorf("%w: no allowlist configured", ErrRelayURL)
 	}
 	u, err := url.Parse(relayURL)

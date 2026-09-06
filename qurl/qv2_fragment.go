@@ -107,7 +107,7 @@ func fragmentFromLink(qurlLink string) (*Fragment, error) {
 // in-range wire contract. It must be called on a Fragment returned by
 // parseFragment.
 func (f *Fragment) verify(ts *TrustStore) error {
-	if ts == nil {
+	if ts == nil || ts.keys == nil {
 		return fmt.Errorf("%w: nil trust store", ErrSignature)
 	}
 	if f.Claims == nil {

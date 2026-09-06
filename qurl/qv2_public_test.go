@@ -7,6 +7,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
+	"errors"
 	"testing"
 
 	"github.com/layervai/qurl-go/qurl"
@@ -74,6 +75,20 @@ func TestIsCredentialLinkPublicClassifier(t *testing.T) {
 	}
 	if qurl.IsCredentialLink("https://qurl.link/#qv2.legacy.parts") {
 		t.Fatal("legacy qv2 transport must not be classified as a supported credential link")
+	}
+}
+
+func TestZeroValueCryptoConfigFailsClosed(t *testing.T) {
+	if err := qurl.ValidateRelayURL("https://relay.example.com", new(qurl.RelayAllowlist)); !errors.Is(err, qurl.ErrRelayURL) {
+		t.Fatalf("zero relay allowlist: want ErrRelayURL, got %v", err)
+	}
+
+	signer, err := qurl.GenerateLocalSigner("issuer-key-2026")
+	if err != nil {
+		t.Fatalf("generate signer: %v", err)
+	}
+	if _, err := qurl.VerifyLink(mintLink(signer), new(qurl.TrustStore)); !errors.Is(err, qurl.ErrSignature) {
+		t.Fatalf("zero trust store: want ErrSignature, got %v", err)
 	}
 }
 
