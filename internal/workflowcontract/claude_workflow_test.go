@@ -84,6 +84,8 @@ func TestAutomaticClaudeWorkflowUsesTrustedReadOnlySnapshots(t *testing.T) {
 		"id-token: write",
 	)
 	requireBefore(t, workflow,
+		requirePin(t, workflow, checkoutAction),
+		"Resolve live review context",
 		"Prepare credential-free review origin",
 		requirePin(t, workflow, claudeAction),
 		"Verify reviewed pull request snapshots",
@@ -134,8 +136,8 @@ func TestInteractiveClaudeWorkflowUsesDefaultBranchCommentPath(t *testing.T) {
 	)
 	requireBefore(t, workflow,
 		"Validate Claude trigger actor permission",
-		"Resolve Claude pull request context",
 		requirePin(t, workflow, checkoutAction),
+		"Resolve Claude pull request context",
 		"Prepare credential-free Claude origin",
 		requirePin(t, workflow, claudeAction),
 		"Verify reviewed pull request snapshots",

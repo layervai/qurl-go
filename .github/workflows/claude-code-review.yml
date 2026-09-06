@@ -36,6 +36,14 @@ jobs:
       pull-requests: write
 
     steps:
+      - name: Checkout trusted default branch history
+        id: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
       - name: Resolve live review context
         id: review_pr
         env:
@@ -53,14 +61,6 @@ jobs:
           TRUSTED_DEFAULT_REF: ${{ github.event.repository.default_branch }}
           EXPECTED_TRUSTED_SHA: ${{ github.sha }}
         run: bash .github/scripts/resolve-claude-pr.sh
-      - name: Checkout trusted default branch history
-        id: checkout
-        if: steps.review_pr.outputs.ready == 'true'
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.sha }}
-          fetch-depth: 0
-          persist-credentials: false
 
       - name: Prepare credential-free review origin
         id: review_origin
