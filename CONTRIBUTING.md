@@ -4,17 +4,13 @@ Thanks for helping improve the qURL Go SDK. This SDK is a security core, so the 
 is high — but the workflow is simple: one command runs everything CI runs.
 
 > **Public surface vs. internals.** Integrators import the single public package,
-> `qurl`. The cryptographic core lives in `internal/qv2` and the NHP transport in
-> `relayknock`; `qurl` re-exports exactly the surface callers need (see
-> [`qurl/facade.go`](qurl/facade.go)). New customer-facing API belongs on `qurl`.
+> `qurl`. Its cryptographic core is in the `qurl/qv2_*.go` files, and the NHP
+> transport is in `relayknock`. New customer-facing API belongs on `qurl`.
 
 ## Prerequisites
 
-Use the Go version declared in [`go.mod`](go.mod), and keep both `git` and
-`python3` available on `PATH`. The native UDP proof-contract tests inspect the
-current Git checkout and invoke the Python typed-evidence verifier, so
-`go test ./...` and `make check` intentionally fail closed when either tool is
-missing rather than silently skipping a release gate.
+Use the Go version declared in [`go.mod`](go.mod), and keep `git` available on
+`PATH`.
 
 ## The one quality gate
 
@@ -57,9 +53,9 @@ the access decision.
 ## Runnable examples
 
 The customer-facing documentation examples live as compile-checked `Example` functions
-in [`qurl/example_test.go`](qurl/example_test.go); the cryptographic core has its own
-tests under [`internal/qv2`](internal/qv2). The `qurl` examples run under `go test` and
-appear on [pkg.go.dev](https://pkg.go.dev/github.com/layervai/qurl-go/qurl), so they
+in [`qurl/example_test.go`](qurl/example_test.go), with core examples in the other
+`qurl/*_example_test.go` files. The examples run under `go test` and appear on
+[pkg.go.dev](https://pkg.go.dev/github.com/layervai/qurl-go/qurl), so they
 can never drift out of sync with the API. When you change public behavior, update (or
 add) an example and keep its `// Output:` accurate.
 
@@ -74,11 +70,10 @@ suppressions** — the crypto core passes `gosec` clean.
 
 ## Fuzzing
 
-The internal strict link parser ([`internal/qv2`](internal/qv2)) is the SDK's
-hostile-input surface, so it carries Go native fuzz targets
-([`internal/qv2/fuzz_test.go`](internal/qv2/fuzz_test.go)) for the fragment parser,
+The strict link parser in `qurl` is the SDK's hostile-input surface, so it carries
+Go native fuzz targets ([`qurl/qv2_fuzz_test.go`](qurl/qv2_fuzz_test.go)) for the fragment parser,
 the claims walker, and the canonical-base64url decoder. The committed seed corpus
-under `internal/qv2/testdata/fuzz` includes regression crashers (e.g. the embedded-newline
+under `qurl/testdata/fuzz` includes regression crashers (e.g. the embedded-newline
 base64 malleability case), which the normal `go test` run replays even without
 `-fuzz` — this corpus replay is the deterministic regression gate. Live fuzzing runs
 as a nightly soak ([`.github/workflows/fuzz.yml`](.github/workflows/fuzz.yml)) rather

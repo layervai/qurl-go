@@ -51,17 +51,24 @@ func TestAutomaticClaudeWorkflowUsesTrustedReadOnlySnapshots(t *testing.T) {
 		"github.event.pull_request.base.ref == github.event.repository.default_branch",
 		"github.event.pull_request.head.ref != github.event.repository.default_branch",
 		"Resolve live review context",
-		".base.repo.default_branch",
 		"ref: ${{ github.sha }}",
 		"fetch-depth: 0",
 		"persist-credentials: false",
 		"Prepare credential-free review origin",
-		"git init --bare --quiet",
-		"git config --local fetch.recurseSubmodules false",
+		"bash .github/scripts/resolve-claude-pr.sh",
+		"bash .github/scripts/prepare-claude-origin.sh",
+		"bash .github/scripts/verify-claude-review.sh",
 		"use_commit_signing: true",
 		"classify_inline_comments: false",
 		"Read CONTRIBUTING.md at AUTHORIZED BASE SHA",
 		"steps.claude_review.outputs.execution_file",
+	)
+	requireContains(t, readWorkflowScript(t, "resolve-claude-pr.sh"), ".base.repo.default_branch")
+	requireContains(t, readWorkflowScript(t, "prepare-claude-origin.sh"),
+		"git init --bare --quiet",
+		"git config --local fetch.recurseSubmodules false",
+	)
+	requireContains(t, readWorkflowScript(t, "verify-claude-review.sh"),
 		`current_state}" != "open"`,
 		`current_draft}" != "false"`,
 		`current_default_ref}" != "${TRUSTED_DEFAULT_REF}"`,
@@ -95,18 +102,25 @@ func TestInteractiveClaudeWorkflowUsesDefaultBranchCommentPath(t *testing.T) {
 		"github.event.comment.author_association == 'OWNER'",
 		"collaborators/${TRIGGER_ACTOR}/permission",
 		"admin|maintain|write",
+		"ref: ${{ github.sha }}",
+		"Prepare credential-free Claude origin",
+		"bash .github/scripts/resolve-claude-pr.sh",
+		"bash .github/scripts/prepare-claude-origin.sh",
+		"bash .github/scripts/verify-claude-review.sh",
+		"do not edit or commit files",
+		"steps.claude.outputs.execution_file",
+	)
+	requireContains(t, readWorkflowScript(t, "resolve-claude-pr.sh"),
+		".base.repo.default_branch",
 		`state}" != "open"`,
 		`head_repo}" != "${GITHUB_REPOSITORY}"`,
 		`base_repo}" != "${GITHUB_REPOSITORY}"`,
 		`default_ref}" != "${TRUSTED_DEFAULT_REF}"`,
 		`head_ref}" == "${default_ref}"`,
-		".base.repo.default_branch",
-		"ref: ${{ github.sha }}",
-		"Prepare credential-free Claude origin",
-		"do not edit or commit files",
-		"steps.claude.outputs.execution_file",
+	)
+	requireContains(t, readWorkflowScript(t, "verify-claude-review.sh"),
 		"Claude trigger actor lost repository write access",
-		"Claude command is stale or the PR trust boundary changed",
+		"Claude review is stale or the PR trust boundary changed",
 		"] | length == 1",
 	)
 	requireReadOnlyActionContract(t, workflow)
@@ -130,27 +144,28 @@ func TestInteractiveClaudeWorkflowUsesDefaultBranchCommentPath(t *testing.T) {
 
 func TestCredentialFreeOriginPreparationExecutes(t *testing.T) {
 	tests := []struct {
-		name     string
-		workflow string
-		step     string
-		extra    map[string]string
+		name  string
+		mode  string
+		extra map[string]string
 	}{
 		{
-			name: "automatic", workflow: "claude-code-review.yml", step: "Prepare credential-free review origin",
+			name: "automatic", mode: "automatic",
 			extra: map[string]string{
 				"EXPECTED_STATE": "open", "EXPECTED_DRAFT": "false",
 				"EXPECTED_HEAD_REPO": "layervai/qurl-go", "EXPECTED_BASE_REPO": "layervai/qurl-go",
 				"PR_NUMBER": "93", "RUN_ID": "123", "RUN_ATTEMPT": "1",
 			},
 		},
-		{name: "interactive", workflow: "claude.yml", step: "Prepare credential-free Claude origin"},
+		{name: "interactive", mode: "interactive"},
 	}
+	script := readWorkflowScript(t, "prepare-claude-origin.sh")
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newGitFixture(t)
 			runGit(t, fixture.repository, "checkout", "--detach", "--quiet", fixture.baseSHA)
 			env := map[string]string{
+				"CLAUDE_REVIEW_MODE":   test.mode,
 				"GITHUB_REPOSITORY":    "layervai/qurl-go",
 				"GITHUB_OUTPUT":        filepath.Join(t.TempDir(), "outputs"),
 				"RUNNER_TEMP":          t.TempDir(),
@@ -166,8 +181,8 @@ func TestCredentialFreeOriginPreparationExecutes(t *testing.T) {
 			}
 			wrongTrustedSHA := cloneEnvironment(env)
 			wrongTrustedSHA["EXPECTED_TRUSTED_SHA"] = fixture.headSHA
-			runScript(t, fixture.repository, stepRun(t, readWorkflow(t, test.workflow), test.step), wrongTrustedSHA, false)
-			runScript(t, fixture.repository, stepRun(t, readWorkflow(t, test.workflow), test.step), env, true)
+			runScript(t, fixture.repository, script, wrongTrustedSHA, false)
+			runScript(t, fixture.repository, script, env, true)
 			outputs, err := os.ReadFile(env["GITHUB_OUTPUT"])
 			if err != nil {
 				t.Fatalf("read workflow outputs: %v", err)
@@ -189,14 +204,14 @@ func TestAutomaticOriginRejectsClosedOrDefaultHead(t *testing.T) {
 		{name: "default head", env: map[string]string{"EXPECTED_HEAD_REF": "main"}},
 		{name: "fork", env: map[string]string{"EXPECTED_HEAD_REPO": "attacker/qurl-go"}},
 	}
-	workflow := readWorkflow(t, "claude-code-review.yml")
-	script := stepRun(t, workflow, "Prepare credential-free review origin")
+	script := readWorkflowScript(t, "prepare-claude-origin.sh")
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newGitFixture(t)
 			runGit(t, fixture.repository, "checkout", "--detach", "--quiet", fixture.baseSHA)
 			env := map[string]string{
-				"GITHUB_REPOSITORY": "layervai/qurl-go", "GITHUB_OUTPUT": filepath.Join(t.TempDir(), "outputs"),
+				"CLAUDE_REVIEW_MODE": "automatic",
+				"GITHUB_REPOSITORY":  "layervai/qurl-go", "GITHUB_OUTPUT": filepath.Join(t.TempDir(), "outputs"),
 				"RUNNER_TEMP": t.TempDir(), "EXPECTED_STATE": "open", "EXPECTED_DRAFT": "false",
 				"EXPECTED_HEAD_REPO": "layervai/qurl-go", "EXPECTED_BASE_REPO": "layervai/qurl-go",
 				"EXPECTED_HEAD_SHA": fixture.headSHA, "EXPECTED_HEAD_REF": fixture.headRef,
@@ -215,25 +230,24 @@ func TestAutomaticOriginRejectsClosedOrDefaultHead(t *testing.T) {
 func TestLivePRResolversRejectUnsafeCurrentState(t *testing.T) {
 	skipWithoutGNUTimeout(t)
 	tests := []struct {
-		name     string
-		workflow string
-		step     string
-		extra    func(gitFixture) map[string]string
+		name  string
+		mode  string
+		extra func(gitFixture) map[string]string
 	}{
 		{
-			name: "automatic", workflow: "claude-code-review.yml", step: "Resolve live review context",
+			name: "automatic", mode: "automatic",
 			extra: func(fixture gitFixture) map[string]string {
 				return map[string]string{
 					"EXPECTED_HEAD_REPO": "layervai/qurl-go", "EXPECTED_BASE_REPO": "layervai/qurl-go",
 					"EXPECTED_HEAD_SHA": fixture.headSHA, "EXPECTED_HEAD_REF": fixture.headRef,
 					"EXPECTED_BASE_SHA": fixture.baseSHA, "EXPECTED_BASE_REF": fixture.baseRef,
-					"TRUSTED_EVENT_DEFAULT_REF": fixture.baseRef,
-					"EXPECTED_TRUSTED_SHA":      fixture.baseSHA,
+					"EXPECTED_STATE": "open", "EXPECTED_DRAFT": "false",
+					"TRUSTED_DEFAULT_REF": fixture.baseRef, "EXPECTED_TRUSTED_SHA": fixture.baseSHA,
 				}
 			},
 		},
 		{
-			name: "interactive", workflow: "claude.yml", step: "Resolve Claude pull request context",
+			name: "interactive", mode: "interactive",
 			extra: func(fixture gitFixture) map[string]string {
 				return map[string]string{
 					"TRUSTED_DEFAULT_REF":  fixture.baseRef,
@@ -242,19 +256,20 @@ func TestLivePRResolversRejectUnsafeCurrentState(t *testing.T) {
 			},
 		},
 	}
+	script := readWorkflowScript(t, "resolve-claude-pr.sh")
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newGitFixture(t)
 			runGit(t, fixture.repository, "checkout", "--detach", "--quiet", fixture.baseSHA)
 			mockBin := writeGHMock(t)
-			script := stepRun(t, readWorkflow(t, test.workflow), test.step)
 			baseEnv := map[string]string{
-				"PATH":              mockBin + string(os.PathListSeparator) + os.Getenv("PATH"),
-				"GH_TOKEN":          "test-token",
-				"GITHUB_REPOSITORY": "layervai/qurl-go",
-				"GITHUB_OUTPUT":     filepath.Join(t.TempDir(), "outputs"),
-				"PR_NUMBER":         "100",
+				"CLAUDE_REVIEW_MODE": test.mode,
+				"PATH":               mockBin + string(os.PathListSeparator) + os.Getenv("PATH"),
+				"GH_TOKEN":           "test-token",
+				"GITHUB_REPOSITORY":  "layervai/qurl-go",
+				"GITHUB_OUTPUT":      filepath.Join(t.TempDir(), "outputs"),
+				"PR_NUMBER":          "100",
 			}
 			for key, value := range test.extra(fixture) {
 				baseEnv[key] = value
@@ -285,15 +300,12 @@ func TestLivePRResolversRejectUnsafeCurrentState(t *testing.T) {
 func TestTerminalVerifiersRejectUnsafeCurrentState(t *testing.T) {
 	skipWithoutGNUTimeout(t)
 	tests := []struct {
-		name        string
-		workflow    string
-		prepareStep string
-		verifyStep  string
-		extra       map[string]string
+		name  string
+		mode  string
+		extra map[string]string
 	}{
 		{
-			name: "automatic", workflow: "claude-code-review.yml",
-			prepareStep: "Prepare credential-free review origin", verifyStep: "Verify reviewed pull request snapshots",
+			name: "automatic", mode: "automatic",
 			extra: map[string]string{
 				"EXPECTED_STATE": "open", "EXPECTED_DRAFT": "false",
 				"EXPECTED_HEAD_REPO": "layervai/qurl-go", "EXPECTED_BASE_REPO": "layervai/qurl-go",
@@ -301,16 +313,18 @@ func TestTerminalVerifiersRejectUnsafeCurrentState(t *testing.T) {
 			},
 		},
 		{
-			name: "interactive", workflow: "claude.yml",
-			prepareStep: "Prepare credential-free Claude origin", verifyStep: "Verify reviewed pull request snapshots",
+			name: "interactive", mode: "interactive",
 		},
 	}
+	prepareScript := readWorkflowScript(t, "prepare-claude-origin.sh")
+	verifyScript := readWorkflowScript(t, "verify-claude-review.sh")
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newGitFixture(t)
 			outputFile := filepath.Join(t.TempDir(), "outputs")
 			prepareEnv := map[string]string{
+				"CLAUDE_REVIEW_MODE":   test.mode,
 				"GITHUB_REPOSITORY":    "layervai/qurl-go",
 				"GITHUB_OUTPUT":        outputFile,
 				"RUNNER_TEMP":          t.TempDir(),
@@ -324,7 +338,7 @@ func TestTerminalVerifiersRejectUnsafeCurrentState(t *testing.T) {
 			for key, value := range test.extra {
 				prepareEnv[key] = value
 			}
-			runScript(t, fixture.repository, stepRun(t, readWorkflow(t, test.workflow), test.prepareStep), prepareEnv, true)
+			runScript(t, fixture.repository, prepareScript, prepareEnv, true)
 			outputs := readStepOutputs(t, outputFile)
 
 			executionFile := filepath.Join(t.TempDir(), "execution.json")
@@ -345,6 +359,7 @@ func TestTerminalVerifiersRejectUnsafeCurrentState(t *testing.T) {
 
 			mockBin := writeGHMock(t)
 			verifyEnv := map[string]string{
+				"CLAUDE_REVIEW_MODE":    test.mode,
 				"PATH":                  mockBin + string(os.PathListSeparator) + os.Getenv("PATH"),
 				"GH_TOKEN":              "test-token",
 				"GITHUB_REPOSITORY":     "layervai/qurl-go",
@@ -366,8 +381,7 @@ func TestTerminalVerifiersRejectUnsafeCurrentState(t *testing.T) {
 				verifyEnv["EXPECTED_TRIGGER_ACTOR"] = "maintainer"
 				verifyEnv["EXPECTED_RESULT_MARKER"] = marker
 			}
-			verifier := stepRun(t, readWorkflow(t, test.workflow), test.verifyStep)
-			runScript(t, fixture.repository, verifier, verifyEnv, true)
+			runScript(t, fixture.repository, verifyScript, verifyEnv, true)
 
 			unsafePRs := []struct {
 				name       string
@@ -382,13 +396,13 @@ func TestTerminalVerifiersRejectUnsafeCurrentState(t *testing.T) {
 				t.Run(unsafe.name, func(t *testing.T) {
 					env := cloneEnvironment(verifyEnv)
 					env["MOCK_PR_JSON"] = mockPullRequestJSON(t, fixture, unsafe.state, false, unsafe.defaultRef)
-					runScript(t, fixture.repository, verifier, env, false)
+					runScript(t, fixture.repository, verifyScript, env, false)
 				})
 			}
 
 			t.Run("local HEAD changed", func(t *testing.T) {
 				runGit(t, fixture.repository, "checkout", "--detach", "--quiet", fixture.headSHA)
-				runScript(t, fixture.repository, verifier, verifyEnv, false)
+				runScript(t, fixture.repository, verifyScript, verifyEnv, false)
 			})
 		})
 	}
@@ -456,50 +470,6 @@ func newGitFixture(t *testing.T) gitFixture {
 	runGit(t, repository, "switch", "--quiet", "main")
 	runGit(t, repository, "remote", "add", "origin", filepath.Join(repository, ".git"))
 	return gitFixture{repository: repository, baseRef: "main", headRef: "feature/review", baseSHA: baseSHA, headSHA: headSHA}
-}
-
-func stepRun(t *testing.T, workflow, name string) string {
-	t.Helper()
-	lines := strings.Split(workflow, "\n")
-	stepStart := -1
-	for index, line := range lines {
-		if strings.TrimSpace(line) == "- name: "+name {
-			stepStart = index
-			break
-		}
-	}
-	if stepStart == -1 {
-		t.Fatalf("workflow is missing step %q", name)
-	}
-	runStart := -1
-	for index := stepStart + 1; index < len(lines); index++ {
-		if strings.HasPrefix(lines[index], "      - name:") {
-			break
-		}
-		if strings.TrimSpace(lines[index]) == "run: |" {
-			runStart = index + 1
-			break
-		}
-	}
-	if runStart == -1 {
-		t.Fatalf("step %q has no run block", name)
-	}
-	var script []string
-	for index := runStart; index < len(lines); index++ {
-		line := lines[index]
-		if strings.HasPrefix(line, "      - name:") {
-			break
-		}
-		if line == "" {
-			script = append(script, "")
-			continue
-		}
-		if !strings.HasPrefix(line, "          ") {
-			break
-		}
-		script = append(script, strings.TrimPrefix(line, "          "))
-	}
-	return strings.Join(script, "\n")
 }
 
 func mockPullRequestJSON(t *testing.T, fixture gitFixture, state string, draft bool, defaultRef string) string {
@@ -665,6 +635,15 @@ func runGit(t *testing.T, directory string, args ...string) string {
 func readWorkflow(t *testing.T, name string) string {
 	t.Helper()
 	contents, err := os.ReadFile(filepath.Join(workflowDir(t), name))
+	if err != nil {
+		t.Fatalf("read %s: %v", name, err)
+	}
+	return string(contents)
+}
+
+func readWorkflowScript(t *testing.T, name string) string {
+	t.Helper()
+	contents, err := os.ReadFile(filepath.Join(workflowDir(t), "..", "scripts", name))
 	if err != nil {
 		t.Fatalf("read %s: %v", name, err)
 	}

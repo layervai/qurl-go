@@ -12,8 +12,6 @@ import (
 	"time"
 
 	conformance "github.com/layervai/qurl-conformance"
-
-	"github.com/layervai/qurl-go/internal/qv2"
 )
 
 // writeVendoredDeployment writes a deployment file carrying the vendored issuer
@@ -21,7 +19,7 @@ import (
 // the exact file an operator ships: non-secret, no key material to generate.
 func writeVendoredDeployment(t *testing.T, withCells bool) string {
 	t.Helper()
-	vf, err := qv2.LoadVectorBytes(conformance.IssuerSignatureVectors())
+	vf, err := conformance.SignatureVectors()
 	if err != nil {
 		t.Fatalf("load signature vectors: %v", err)
 	}
@@ -147,7 +145,7 @@ func TestDeploymentRejectsBlankOnlyRelayAllowlist(t *testing.T) {
 	// The issuer key must be VALID. With a bogus key the config would fail in
 	// buildTrustMaterial before the blank-only branch is ever reached, and this
 	// test would pass even if that guard were deleted — proving nothing.
-	vf, err := qv2.LoadVectorBytes(conformance.IssuerSignatureVectors())
+	vf, err := conformance.SignatureVectors()
 	if err != nil {
 		t.Fatalf("load signature vectors: %v", err)
 	}

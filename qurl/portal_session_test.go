@@ -20,7 +20,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/layervai/qurl-go/internal/qv2"
 	"github.com/layervai/qurl-go/relayknock"
 	"github.com/layervai/qurl-go/relayknock/nativeudp"
 	"github.com/layervai/qurl-go/relayknock/relayknocktest"
@@ -28,7 +27,7 @@ import (
 
 func TestPortalSessionConcurrentBindingAndRedaction(t *testing.T) {
 	link, trust, _ := vendoredAcceptLink(t)
-	frag, err := qv2.FragmentFromLinkAndVerify(link, trust.core())
+	frag, err := VerifyLink(link, trust)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +101,7 @@ type portalSessionPeer struct {
 	server     *httptest.Server
 	serverKey  *ecdh.PrivateKey
 	devicePub  []byte
-	fragment   *qv2.Fragment
+	fragment   *Fragment
 	mu         sync.Mutex
 	bound      [sha256.Size]byte
 	boundSet   bool
@@ -127,7 +126,7 @@ func newPortalSessionPeer(t *testing.T, loseFirstReply bool) (*portalSessionPeer
 	if err != nil {
 		t.Fatal(err)
 	}
-	peer.fragment, err = qv2.FragmentFromLinkAndVerify(link, trust.core())
+	peer.fragment, err = VerifyLink(link, trust)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -301,7 +300,7 @@ func TestPortalSessionNativeUDPLostReplyAndIsolatedReplay(t *testing.T) {
 			}
 		}
 	}()
-	deviceKey, err := qv2.DecodeQurlUserPrivateKey(peer.fragment.Secret)
+	deviceKey, err := decodeSecretQurlUserPrivateKey(peer.fragment.Secret)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1080,8 +1080,7 @@ func otpE2EBaseEnv(extra map[string]string) map[string]string {
 
 // strictOTPEnv is otpE2EBaseEnv with strict mode and a usable rotation counter,
 // so a caller varying only the credential source reaches the strict credential
-// guards rather than tripping the counter check on the way. (Named for OTP
-// because `strictEnv` is already the sandbox strictness variable next door.)
+// guards rather than tripping the counter check on the way.
 func strictOTPEnv(extra map[string]string) map[string]string {
 	merged := otpE2EBaseEnv(map[string]string{
 		otpE2EStrictEnv:      "1",

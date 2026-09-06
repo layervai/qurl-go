@@ -19,7 +19,6 @@ import (
 
 	conformance "github.com/layervai/qurl-conformance"
 
-	"github.com/layervai/qurl-go/internal/qv2"
 	"github.com/layervai/qurl-go/relayknock"
 )
 
@@ -48,13 +47,13 @@ import (
 // 32-byte key is sufficient to satisfy the strict secret parser.
 func vendoredAcceptLink(t *testing.T) (link string, ts *TrustStore, cellFingerprint string) {
 	t.Helper()
-	vf, err := qv2.LoadVectorBytes(conformance.IssuerSignatureVectors())
+	vf, err := conformance.SignatureVectors()
 	if err != nil {
 		t.Fatalf("load signature vectors: %v", err)
 	}
-	var accept *qv2.SignatureVector
+	var accept *conformance.SignatureVector
 	for i := range vf.Vectors {
-		if vf.Vectors[i].Expect == qv2.ExpectAccept {
+		if vf.Vectors[i].Expect == conformance.ExpectAccept {
 			accept = &vf.Vectors[i]
 			break
 		}
@@ -76,23 +75,23 @@ func vendoredAcceptLink(t *testing.T) (link string, ts *TrustStore, cellFingerpr
 	secretJSON := `{"qurl_user_private_key_b64":"` + b64url.EncodeToString(make([]byte, 32)) + `"}`
 	secretB64 := b64url.EncodeToString([]byte(secretJSON))
 
-	body, err := qv2.BuildFragment(accept.ClaimsB64, secretB64, mustDecode(t, accept.SigB64Raw))
+	body, err := buildFragment(accept.ClaimsB64, secretB64, mustDecode(t, accept.SigB64Raw))
 	if err != nil {
-		t.Fatalf("BuildFragment: %v", err)
+		t.Fatalf("buildFragment: %v", err)
 	}
-	transport, err := qv2.EncodeTransportFragment(body)
+	transport, err := encodeTransportFragment(body)
 	if err != nil {
-		t.Fatalf("EncodeTransportFragment: %v", err)
+		t.Fatalf("encodeTransportFragment: %v", err)
 	}
 	link = "https://qurl.link/#" + transport
 
 	// The accept vector's cell key is 32 bytes of 0x44 (fingerprint uzkUFcBeOdc);
 	// recompute it rather than hardcode so the expected route stays derived.
-	frag, err := qv2.ParseFragment(body)
+	frag, err := parseFragment(body)
 	if err != nil {
-		t.Fatalf("ParseFragment: %v", err)
+		t.Fatalf("parseFragment: %v", err)
 	}
-	cellPub, err := qv2.DecodeCellPublicKey(frag.Claims)
+	cellPub, err := decodeClaimsCellPublicKey(frag.Claims)
 	if err != nil {
 		t.Fatalf("decode cell key: %v", err)
 	}
@@ -166,7 +165,7 @@ func TestEnterPortalWith_RelayOffAllowlist_Rejected(t *testing.T) {
 	// AFTER the signature verifies (proving the post-verify ordering).
 	cfg := Config{TrustStore: ts, RelayAllowlist: NewRelayAllowlist([]string{"not-the-relay.example.org"})}
 	_, err := EnterPortalWith(context.Background(), link, cfg)
-	if !errors.Is(err, qv2.ErrRelayURL) {
+	if !errors.Is(err, ErrRelayURL) {
 		t.Fatalf("relay off allowlist: want ErrRelayURL, got %v", err)
 	}
 }
@@ -178,7 +177,7 @@ func TestEnterPortalWith_UnknownKID_Rejected(t *testing.T) {
 	other := freshTrustStore(t)
 	cfg := Config{TrustStore: other, RelayAllowlist: relayExampleAllowlist()}
 	_, err := EnterPortalWith(context.Background(), link, cfg)
-	if !errors.Is(err, qv2.ErrUnknownKID) {
+	if !errors.Is(err, ErrUnknownKID) {
 		t.Fatalf("unknown kid: want ErrUnknownKID, got %v", err)
 	}
 }

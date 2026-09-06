@@ -67,9 +67,9 @@ env:
   # would spend budget a real PR may need.
   #
   # The list must cover every top-level directory the gate's test COMPILES,
-  # which is not the same as the SDK's public surface. `qurl` is only the
-  # facade: registration actually executes in `internal/qv2` (crypto core),
-  # `internal/udpfence`, `internal/nhpcontract` and `relayknock` (the NHP
+  # which is not the same as the SDK's public surface. Registration executes in
+  # `qurl` (including its crypto core), `internal/udpfence`,
+  # `internal/nhpcontract` and `relayknock` (the NHP
   # transport and its wire codec). Those are packages of the ROOT module, so
   # changing them moves neither go.mod nor go.sum -- listing `qurl/**` alone
   # would let precisely the registration-breaking changes skip this gate.
@@ -127,7 +127,7 @@ jobs:
           # Every changed path, whatever happened to it, INCLUDING deletions and
           # both ends of a rename:
           #
-          #   deletion  -- removing a file from internal/qv2 changes registration
+          #   deletion  -- removing a file from qurl changes registration
           #                as surely as editing one. Filtering removals out (the
           #                shape this was first written with, borrowed from a
           #                check that asks "does this file now exist?") let a

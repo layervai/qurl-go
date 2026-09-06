@@ -20,6 +20,15 @@ Rewrite the quickstart and guides for the newly embedded deployment first, then
 update this pin to the new shape. This failure is the drift gate working as
 designed — do not silence it by editing only this test.`
 
+func repoRoot(t *testing.T) string {
+	t.Helper()
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
 // TestEmbeddedDeploymentStaysPreGAEmpty is tier 3: it pins
 // qurl/deployment.json — the deployment embedded in every build — to its
 // exact pre-GA shape: "issuers", "cells", and "relay_allowlist" all present

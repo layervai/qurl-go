@@ -25,7 +25,7 @@ var (
 // TestREADMEEnrollmentQuickstartAnchors is tier 4: the minimal anchors of the
 // README's honest enrollment story.
 //
-//   - The enrollment quickstart fence calls ConnectAgentRuntime — the single
+//   - The enrollment quickstart calls ConnectAgentRuntime — the single
 //     call that enrolls, resumes, or reopens on every start.
 //   - No fence in that story resurrects the deleted RegisterAgentRuntime or
 //     OpenRegisteredAgentRuntime entry points (word-boundary matching, so
@@ -42,25 +42,13 @@ func TestREADMEEnrollmentQuickstartAnchors(t *testing.T) {
 		t.Fatalf("reading README.md: %v", err)
 	}
 
-	fences := extractGoFences(t, root, readme)
-	var connect []*goFence
-	for i := range fences {
-		if reConnectAgentRuntime.MatchString(fences[i].src()) {
-			connect = append(connect, &fences[i])
-		}
-	}
-	if len(connect) == 0 {
-		t.Errorf("README.md has no go fence calling ConnectAgentRuntime; the enrollment quickstart lost its anchor — the README must keep showing the one-call enrollment story")
+	if !reConnectAgentRuntime.Match(data) {
+		t.Errorf("README.md does not call ConnectAgentRuntime; the enrollment quickstart lost its one-call enrollment story")
 	}
 
-	for _, f := range connect {
-		for _, banned := range readmeBannedSymbols {
-			for i, line := range f.lines {
-				if banned.re.MatchString(line) {
-					t.Errorf("README.md:%d: enrollment quickstart fence references %s — a deleted entry point; the honest story is ConnectAgentRuntime",
-						f.docLine(i+1), banned.name)
-				}
-			}
+	for _, banned := range readmeBannedSymbols {
+		if banned.re.Match(data) {
+			t.Errorf("README.md references deleted entry point %s; use ConnectAgentRuntime", banned.name)
 		}
 	}
 

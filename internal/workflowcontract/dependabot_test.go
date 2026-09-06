@@ -60,8 +60,11 @@ func TestDependabotConfigIsSchemaChecked(t *testing.T) {
 		// Pinned, not floating: the frozen schema snapshot is what makes an
 		// unrecognized upstream key a red check instead of a moving verdict.
 		"check-jsonschema==",
-		"check-jsonschema --builtin-schema vendor.dependabot "+dependabotConfig,
+		"bash .github/scripts/validate-dependabot-config.sh",
+	)
+	requireContains(t, readWorkflowScript(t, "validate-dependabot-config.sh"),
 		"if [[ ! -f "+dependabotConfig+" ]]; then",
+		"check-jsonschema --builtin-schema vendor.dependabot "+dependabotConfig,
 	)
 	// Reports on every pull request, so branch protection can require it: a
 	// filtered check is absent rather than green on the PRs it skips. Both
@@ -76,7 +79,7 @@ func TestDependabotConfigIsSchemaChecked(t *testing.T) {
 	// leave every fragment above intact while making the gate advisory. The
 	// first two are executable here: the missing-file branch returns before
 	// check-jsonschema is reached, so this runs with the tool absent.
-	runScript(t, t.TempDir(), stepRun(t, workflow, "Validate "+dependabotConfig), nil, false)
+	runScript(t, t.TempDir(), readWorkflowScript(t, "validate-dependabot-config.sh"), nil, false)
 	requireNotContains(t, workflow, "continue-on-error", "|| true")
 	// `validate` is already a required context on main, from pr-title.yml. A
 	// second job answering to that name is indistinguishable from it in branch

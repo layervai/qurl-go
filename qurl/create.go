@@ -8,8 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-
-	"github.com/layervai/qurl-go/internal/qv2"
 )
 
 // CreatePortalWithParams is the low-level issuer-side mint verb. It signs a
@@ -32,11 +30,11 @@ const LinkBaseURL = "https://qurl.link/"
 // qURL link fragments use base64url because they live in URLs. The secret part
 // (Part 2) is assembled here with the stdlib encoder rather than widening the
 // public surface; RawURLEncoding's output is byte-identical to the core's internal
-// encoder. BuildFragment validates only the OUTER Part-2 envelope (it decodes the
+// encoder. buildFragment validates only the OUTER Part-2 envelope (it decodes the
 // base64url blob; it does not re-run the secret schema), so the inner
 // qurl_user_private_key_b64 field is kept symmetric with the verify side by the
 // shared Secret struct (the field name cannot drift without a compile break)
-// and by the create→verify round-trip test, not by a BuildFragment re-check.
+// and by the create→verify round-trip test, not by a buildFragment re-check.
 // Discovery also uses this RawURLEncoding decoder for published manifests; trust
 // is anchored on the decoded manifest bytes by pin/signature, and downstream DER
 // and signature validation still fail closed. The stricter non-canonical
@@ -109,9 +107,9 @@ func CreatePortalWithParams(ctx context.Context, signer Signer, p CreateParams) 
 		return "", fmt.Errorf("qurl: generate per-qURL key: %w", err)
 	}
 
-	claims := &qv2.Claims{
-		V:                    qv2.Version,
-		Iss:                  qv2.Issuer,
+	claims := &Claims{
+		V:                    qv2Version,
+		Iss:                  qv2Issuer,
 		Iat:                  p.IssuedAt,
 		Nbf:                  p.NotBefore,
 		Exp:                  p.Expiry,
@@ -123,15 +121,15 @@ func CreatePortalWithParams(ctx context.Context, signer Signer, p CreateParams) 
 		QurlUserPublicKeyB64: b64url.EncodeToString(userKey.PublicKey().Bytes()),
 	}
 
-	// Sign the EXACT marshaled claims bytes through the seam. SignClaims stamps the
+	// Sign the EXACT marshaled claims bytes through the seam. signClaims stamps the
 	// signer kid, strict-validates the bytes, and returns the canonical Part-1
 	// string alongside the raw 64-byte low-S signature.
 	//
-	// core errors from SignClaims and BuildFragment below are returned VERBATIM (no
+	// core errors from signClaims and buildFragment below are returned VERBATIM (no
 	// qurl: wrap) so callers keep matching the error sentinels directly —
 	// errors.Is(err, qurl.ErrStrictParse) for an invalid claim window/shape, etc. The
 	// keygen/secret errors above carry no such sentinel, so those are qurl:-wrapped.
-	claimsB64, rawSig, err := qv2.SignClaims(ctx, signer, claims)
+	claimsB64, rawSig, err := signClaims(ctx, signer, claims)
 	if err != nil {
 		return "", err
 	}
@@ -141,14 +139,14 @@ func CreatePortalWithParams(ctx context.Context, signer Signer, p CreateParams) 
 		return "", err
 	}
 
-	// BuildFragment takes claimsB64 verbatim as Part 1, so the transmitted bytes
+	// buildFragment takes claimsB64 verbatim as Part 1, so the transmitted bytes
 	// equal the signed bytes. It re-decodes the parts and re-validates the raw
-	// signature, so it can never emit a body ParseFragment would reject.
-	body, err := qv2.BuildFragment(claimsB64, secretB64, rawSig)
+	// signature, so it can never emit a body parseFragment would reject.
+	body, err := buildFragment(claimsB64, secretB64, rawSig)
 	if err != nil {
 		return "", err
 	}
-	transport, err := qv2.EncodeTransportFragment(body)
+	transport, err := encodeTransportFragment(body)
 	if err != nil {
 		return "", err
 	}
@@ -197,7 +195,7 @@ func (p CreateParams) validate() error {
 // not the raw key bytes, mirroring exactly what the verify path's secret parser
 // consumes.
 func buildSecretB64(privateKey []byte) (string, error) {
-	raw, err := json.Marshal(qv2.Secret{QurlUserPrivateKeyB64: b64url.EncodeToString(privateKey)})
+	raw, err := json.Marshal(Secret{QurlUserPrivateKeyB64: b64url.EncodeToString(privateKey)})
 	if err != nil {
 		return "", fmt.Errorf("qurl: marshal secret: %w", err)
 	}
