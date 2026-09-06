@@ -10,11 +10,13 @@ and are marked **Breaking** with what to change.
 
 - Added `PortalOpener` for long-running services that call one NHP-protected
   target. `Start` opens and proactively renews one native UDP admission;
-  request handling uses only the cached authenticated handle and never performs
-  discovery, DNS, a knock, or a retry wait. `Do` pins the exact authenticated
-  target and supports same-origin redirects or strict redirect rejection for
-  signed requests. `Health` is secret-free, and `Close` cancels discovery and
-  transport work, waits for shutdown, and clears retained state.
+  request handling uses only the cached authenticated handle and does not repeat
+  qURL verification, deployment discovery, cell DNS, an NHP knock, or a retry
+  wait. The HTTP client still owns the normal target connection and its DNS.
+  `Do` pins the exact authenticated target and supports same-origin redirects or
+  strict redirect rejection for signed requests. `Health` is secret-free, and
+  `Close` cancels discovery and transport work, waits for shutdown, and clears
+  retained state.
 - Portal opens now prove that the fragment's X25519 private key derives the
   issuer-signed visitor public key. They also compare the full signed cell key
   with the deployment catalog key after the compact fingerprint lookup. Both
