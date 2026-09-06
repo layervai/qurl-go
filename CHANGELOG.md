@@ -16,7 +16,8 @@ and are marked **Breaking** with what to change.
   `Do` pins the exact authenticated target and supports same-origin redirects or
   strict redirect rejection for signed requests. `Health` is secret-free, and
   `Close` cancels discovery and transport work, waits for shutdown, and clears
-  retained state.
+  retained state. Background renewal retries with capped backoff for the full
+  remaining lifetime of the cached admission, then stops at expiry.
 - **Breaking:** portal opens now prove that the fragment's X25519 private key
   derives the issuer-signed visitor public key. They also compare the full
   signed cell key with the deployment catalog key after the compact fingerprint

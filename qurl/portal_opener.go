@@ -16,7 +16,6 @@ const (
 	portalOpenTimeoutMax    = 60 * time.Second
 	portalRetryInitialDelay = 500 * time.Millisecond
 	portalRetryMaximumDelay = 2 * time.Second
-	portalRenewalAttempts   = 4
 )
 
 var (
@@ -229,7 +228,6 @@ type PortalOpener struct {
 	renewalLead  func(time.Duration) time.Duration
 	retryInitial time.Duration
 	retryMaximum time.Duration
-	retryLimit   int // positive in production; renewLoop clamps internal violations
 }
 
 // NewPortalOpener constructs a native-only opener for one qURL. Construction
@@ -263,7 +261,6 @@ func NewPortalOpener(qurlLink string, options ...PortalOpenerOption) (*PortalOpe
 		renewalLead:      defaultPortalRenewalLead,
 		retryInitial:     portalRetryInitialDelay,
 		retryMaximum:     portalRetryMaximumDelay,
-		retryLimit:       portalRenewalAttempts,
 	}, nil
 }
 
@@ -359,11 +356,7 @@ func (o *PortalOpener) runStart(ctx context.Context, attempt *portalStartAttempt
 		err = ErrPortalOpenerClosed
 		clearPortalOpenResult(opened)
 	} else if err != nil {
-		if attempt.recovery {
-			o.state = portalOpenerDegraded
-		} else {
-			o.state = portalOpenerNew
-		}
+		o.state = portalOpenerDegraded
 		o.lastFailure = classifyPortalOpenerFailure(err)
 		o.failures++
 	} else {
@@ -372,7 +365,10 @@ func (o *PortalOpener) runStart(ctx context.Context, attempt *portalStartAttempt
 		o.resolvedConfig = &configCopy
 		o.state = portalOpenerRunning
 		o.loopDone = make(chan struct{})
-		go o.renewLoop(o.loopDone)
+		// Renewal belongs to the opener lifecycle, not the caller's Start context.
+		// The Start context is canceled when this function returns.
+		//nolint:contextcheck // opener-owned background lifecycle is intentional
+		go o.renewLoop(o.lifecycle, o.loopDone)
 	}
 	attempt.err = err
 	close(attempt.done)
@@ -511,7 +507,7 @@ func clearPortalOpenResult(opened *portalOpenResult) {
 	}
 }
 
-func (o *PortalOpener) renewLoop(done chan struct{}) {
+func (o *PortalOpener) renewLoop(lifecycle context.Context, done chan struct{}) {
 	defer close(done)
 	for {
 		o.mu.RLock()
@@ -519,20 +515,27 @@ func (o *PortalOpener) renewLoop(done chan struct{}) {
 		expiresAt := o.expiresAt
 		target := o.target
 		cfg := *o.resolvedConfig
-		retryLimit := o.retryLimit
 		o.mu.RUnlock()
-		// Keep the loop bounded even if an in-package test or a future internal
-		// configuration path violates the positive retry-count invariant.
-		if retryLimit < 1 {
-			retryLimit = 1
-		}
 		if !o.waitUntil(renewAt) {
 			return
 		}
 
 		delay := o.retryInitial
-		for attempt := 1; attempt <= retryLimit; attempt++ {
-			opened, err := o.openPortal(o.lifecycle, cfg, target)
+		for {
+			// Retry only while the old handle remains usable. This uses the full
+			// proactive renewal window for transient failures without creating an
+			// unbounded background retry loop after admission expires.
+			if !o.now().Before(expiresAt) {
+				o.mu.Lock()
+				if o.state == portalOpenerRunning && o.expiresAt.Equal(expiresAt) {
+					o.state = portalOpenerDegraded
+				}
+				o.mu.Unlock()
+				return
+			}
+			attemptCtx, cancel := context.WithDeadline(lifecycle, expiresAt)
+			opened, err := o.openPortal(attemptCtx, cfg, target)
+			cancel()
 			if err == nil {
 				o.mu.Lock()
 				if o.state != portalOpenerRunning {
@@ -552,10 +555,9 @@ func (o *PortalOpener) renewLoop(done chan struct{}) {
 			o.failures++
 			o.lastFailure = classifyPortalOpenerFailure(err)
 			o.mu.Unlock()
-			if attempt == retryLimit || !o.now().Add(delay).Before(expiresAt) {
-				// Do not hot-loop after the bounded renewal attempts. Keep the old
-				// handle usable until expiry, then make Start the explicit recovery
-				// path. A successful recovery remains bound to the first target.
+			if errors.Is(err, ErrPortalTargetChanged) {
+				// A changed authenticated target is not transient. Keep the already
+				// authenticated handle until expiry, then require explicit recovery.
 				if !o.waitUntil(expiresAt) {
 					return
 				}
@@ -566,7 +568,15 @@ func (o *PortalOpener) renewLoop(done chan struct{}) {
 				o.mu.Unlock()
 				return
 			}
-			if !o.waitFor(delay) {
+			remaining := expiresAt.Sub(o.now())
+			if remaining <= 0 {
+				continue
+			}
+			wait := delay
+			if wait > remaining {
+				wait = remaining
+			}
+			if !o.waitFor(wait) {
 				return
 			}
 			delay *= 2

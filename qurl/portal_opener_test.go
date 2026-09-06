@@ -168,6 +168,30 @@ func TestPortalOpenerOptionsFailClosed(t *testing.T) {
 	}
 }
 
+func TestPortalOpenerOpenTimeoutBoundsStart(t *testing.T) {
+	link, cfg := portalOpenerFixture(t)
+	opener, err := NewPortalOpener(link,
+		WithPortalOpenerConfig(cfg), WithPortalOpenerOpenTimeout(10*time.Millisecond))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { closePortalOpener(t, opener) })
+	opener.open = func(ctx context.Context, _ string, _ Config) (*ResourceHandle, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	started := time.Now()
+	if err := opener.Start(context.Background()); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Start timeout error = %v, want context deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("Start ignored configured open timeout: %s", elapsed)
+	}
+	if health := opener.Health(); health.State != PortalOpenerStateDegraded || health.Ready || health.ConsecutiveFailures != 1 {
+		t.Fatalf("health after timed-out Start = %#v", health)
+	}
+}
+
 func TestPortalOpenerStartRejectsMissingTrustAndIncompleteHandles(t *testing.T) {
 	link, cfg := portalOpenerFixture(t)
 	missingTrust := cfg
@@ -178,6 +202,19 @@ func TestPortalOpenerStartRejectsMissingTrustAndIncompleteHandles(t *testing.T) 
 	}
 	if err := opener.Start(t.Context()); !errors.Is(err, ErrNotConfigured) {
 		t.Fatalf("missing trust Start error = %v, want ErrNotConfigured", err)
+	}
+	if health := opener.Health(); health.State != PortalOpenerStateDegraded || health.Ready || health.ConsecutiveFailures != 1 {
+		t.Fatalf("health after failed initial Start = %#v", health)
+	}
+	response, err := opener.Do(t.Context(), func(*url.URL) (*http.Request, error) {
+		t.Fatal("Do builder ran after failed initial Start")
+		return nil, errors.New("builder ran after failed initial Start")
+	})
+	if response != nil {
+		_ = response.Body.Close()
+	}
+	if !errors.Is(err, ErrPortalOpenerNotReady) {
+		t.Fatalf("Do after failed initial Start = %v, want ErrPortalOpenerNotReady", err)
 	}
 	closePortalOpener(t, opener)
 
@@ -308,64 +345,45 @@ func TestPortalOpenerConcurrentStartIsSingleFlight(t *testing.T) {
 	}
 }
 
-func TestPortalOpenerRenewalIsProactiveSingleFlightAndBounded(t *testing.T) {
+func TestPortalOpenerRenewalUsesFullWindowAndStopsAtExpiry(t *testing.T) {
 	link, cfg := portalOpenerFixture(t)
 	opener, err := NewPortalOpener(link, WithPortalOpenerConfig(cfg))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { closePortalOpener(t, opener) })
-	opener.renewalLead = func(time.Duration) time.Duration { return 9990 * time.Millisecond }
-	opener.retryInitial = 2 * time.Millisecond
-	opener.retryMaximum = 4 * time.Millisecond
-	opener.retryLimit = 3
+	opener.renewalLead = func(time.Duration) time.Duration { return 950 * time.Millisecond }
+	opener.retryInitial = 10 * time.Millisecond
+	opener.retryMaximum = 20 * time.Millisecond
 	var opens atomic.Int32
 	opener.open = func(context.Context, string, Config) (*ResourceHandle, error) {
 		if opens.Add(1) == 1 {
-			return portalTestHandle("https://r_test.qurl.site/fixed", testAuthProviderToken, 10, 12), nil
+			return portalTestHandle("https://r_test.qurl.site/fixed", testAuthProviderToken, 1, 12), nil
 		}
 		return nil, errors.New("scripted native renewal failure")
 	}
 	if err := opener.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	waitForPortalCondition(t, time.Second, func() bool { return opens.Load() == 4 })
-	time.Sleep(20 * time.Millisecond)
-	if got := opens.Load(); got != 4 {
-		t.Fatalf("bounded renewal attempts = %d, want 3 after initial open", got-1)
+	waitForPortalCondition(t, 500*time.Millisecond, func() bool { return opener.Health().ConsecutiveFailures >= 4 })
+	if health := opener.Health(); health.ConsecutiveFailures < 4 || health.LastFailureClass != PortalOpenerFailureOpen || !health.Ready {
+		t.Fatalf("health while renewal uses remaining headroom = %#v", health)
 	}
-	health := opener.Health()
-	if health.ConsecutiveFailures != 3 || health.LastFailureClass != PortalOpenerFailureOpen || !health.Ready {
-		t.Fatalf("health during bounded renewal failure = %#v", health)
+	opener.mu.RLock()
+	loopDone := opener.loopDone
+	opener.mu.RUnlock()
+	select {
+	case <-loopDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("renewal loop did not stop at handle expiry")
 	}
-}
-
-func TestPortalOpenerRenewalClampsInvalidRetryLimit(t *testing.T) {
-	link, cfg := portalOpenerFixture(t)
-	opener, err := NewPortalOpener(link, WithPortalOpenerConfig(cfg))
-	if err != nil {
-		t.Fatal(err)
+	stoppedAt := opens.Load()
+	time.Sleep(30 * time.Millisecond)
+	if got := opens.Load(); got != stoppedAt {
+		t.Fatalf("renewal continued after expiry: opens moved from %d to %d", stoppedAt, got)
 	}
-	t.Cleanup(func() { closePortalOpener(t, opener) })
-	opener.renewalLead = func(time.Duration) time.Duration { return 9990 * time.Millisecond }
-	opener.retryLimit = 0
-	var opens atomic.Int32
-	opener.open = func(context.Context, string, Config) (*ResourceHandle, error) {
-		if opens.Add(1) == 1 {
-			return portalTestHandle("https://r_test.qurl.site/fixed", testAuthProviderToken, 10, 12), nil
-		}
-		return nil, errors.New("scripted native renewal failure")
-	}
-	if err := opener.Start(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	waitForPortalCondition(t, time.Second, func() bool { return opens.Load() == 2 })
-	time.Sleep(20 * time.Millisecond)
-	if got := opens.Load(); got != 2 {
-		t.Fatalf("invalid retry limit caused %d renewal attempts, want one", got-1)
-	}
-	if health := opener.Health(); health.ConsecutiveFailures != 1 || !health.Ready {
-		t.Fatalf("health after clamped renewal failure = %#v", health)
+	if health := opener.Health(); health.State != PortalOpenerStateDegraded || health.Ready {
+		t.Fatalf("health after renewal window expired = %#v", health)
 	}
 }
 
@@ -422,22 +440,27 @@ func TestPortalOpenerExpiredAfterBoundedRenewalCanRecoverWithStart(t *testing.T)
 	}
 	t.Cleanup(func() { closePortalOpener(t, opener) })
 	opener.renewalLead = func(time.Duration) time.Duration { return 1990 * time.Millisecond }
-	opener.retryInitial = time.Millisecond
-	opener.retryMaximum = time.Millisecond
-	opener.retryLimit = 2
+	opener.retryInitial = 100 * time.Millisecond
+	opener.retryMaximum = 200 * time.Millisecond
 	var opens atomic.Int32
+	var recoveryPhase atomic.Int32
+	var explicitOpens atomic.Int32
 	recoveryEntered := make(chan struct{})
 	releaseRecovery := make(chan struct{})
 	recoveryErr := errors.New("scripted explicit recovery failure")
 	opener.open = func(context.Context, string, Config) (*ResourceHandle, error) {
-		switch opens.Add(1) {
-		case 1:
+		if opens.Add(1) == 1 {
 			return portalTestHandle("https://r_test.qurl.site/fixed", testAuthProviderToken, 2, 20), nil
-		case 2, 3:
+		}
+		switch recoveryPhase.Load() {
+		case 0:
 			return nil, errors.New("scripted bounded renewal failure")
-		case 4:
+		case 1:
+			explicitOpens.Add(1)
+			recoveryPhase.Store(2)
 			return nil, recoveryErr
-		case 5:
+		case 2:
+			explicitOpens.Add(1)
 			close(recoveryEntered)
 			<-releaseRecovery
 			return portalTestHandle("https://r_test.qurl.site/fixed", testAuthProviderToken, 60, 21), nil
@@ -456,6 +479,7 @@ func TestPortalOpenerExpiredAfterBoundedRenewalCanRecoverWithStart(t *testing.T)
 	case <-time.After(3 * time.Second):
 		t.Fatal("bounded renewal loop did not finish after handle expiry")
 	}
+	recoveryPhase.Store(1)
 	if health := opener.Health(); health.State != "degraded" || health.Ready {
 		t.Fatalf("health after bounded renewal expiry = %#v", health)
 	}
@@ -504,8 +528,8 @@ func TestPortalOpenerExpiredAfterBoundedRenewalCanRecoverWithStart(t *testing.T)
 			t.Fatalf("explicit Start recovery: %v", err)
 		}
 	}
-	if got := opens.Load(); got != 5 {
-		t.Fatalf("single-flight recovery opens = %d, want one failed and one successful explicit recovery", got-3)
+	if got := explicitOpens.Load(); got != 2 {
+		t.Fatalf("single-flight explicit recovery opens = %d, want one failed and one successful", got)
 	}
 	if health := opener.Health(); health.State != "ready" || !health.Ready || health.ConsecutiveFailures != 0 {
 		t.Fatalf("health after explicit recovery = %#v", health)
@@ -585,7 +609,6 @@ func TestPortalOpenerRenewalRefusesChangedAuthenticatedTarget(t *testing.T) {
 	opener.renewalLead = func(time.Duration) time.Duration { return 1990 * time.Millisecond }
 	opener.retryInitial = time.Millisecond
 	opener.retryMaximum = time.Millisecond
-	opener.retryLimit = 1
 	var opens atomic.Int32
 	opener.open = func(context.Context, string, Config) (*ResourceHandle, error) {
 		if opens.Add(1) == 1 {
@@ -881,18 +904,35 @@ func TestPortalOpenerRequiresNativeCatalogBeforeParsingLink(t *testing.T) {
 
 func TestPortalOpenerRealNativeLoopbackToProtectedHTTP(t *testing.T) {
 	var contentRequests atomic.Int32
+	var deniedRequests atomic.Int32
 	content := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		contentRequests.Add(1)
 		if req.Method != http.MethodPost || req.URL.Path != "/internal/v1/delegated-mint-capabilities" {
 			t.Errorf("content request = %s %s", req.Method, req.URL.Path)
 		}
 		cookie, err := req.Cookie(qurlVsessionCookieName)
 		if err != nil || cookie.Value != testAuthProviderToken {
-			t.Errorf("content cookie = %#v, %v", cookie, err)
+			deniedRequests.Add(1)
+			http.Error(w, "NHP admission required", http.StatusForbidden)
+			return
 		}
+		contentRequests.Add(1)
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	t.Cleanup(content.Close)
+	directRequest, err := http.NewRequestWithContext(t.Context(), http.MethodPost,
+		content.URL+"/internal/v1/delegated-mint-capabilities", strings.NewReader(`{"issue":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	directResponse, err := content.Client().Do(directRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = directResponse.Body.Close()
+	if directResponse.StatusCode != http.StatusForbidden || deniedRequests.Load() != 1 || contentRequests.Load() != 0 {
+		t.Fatalf("pre-knock request status=%d denied=%d admitted=%d, want 403/1/0",
+			directResponse.StatusCode, deniedRequests.Load(), contentRequests.Load())
+	}
 
 	peer, link, cfg := newPortalSessionPeer(t, false)
 	peer.mu.Lock()
@@ -960,6 +1000,9 @@ func TestPortalOpenerRealNativeLoopbackToProtectedHTTP(t *testing.T) {
 	_ = resp.Body.Close()
 	if contentRequests.Load() != 1 {
 		t.Fatalf("protected content requests = %d, want 1", contentRequests.Load())
+	}
+	if deniedRequests.Load() != 1 {
+		t.Fatalf("denied protected content requests = %d, want only the pre-knock request", deniedRequests.Load())
 	}
 	peer.mu.Lock()
 	knocks := len(peer.capability)

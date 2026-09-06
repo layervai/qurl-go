@@ -112,13 +112,14 @@ redirect can change the method or invalidate a signature. The first request URL
 and wire Host are always the exact authenticated target. The builder cannot add
 a path, query, or alternate authority.
 
-Renewal starts before expiry and runs in one background goroutine. Each renewal
-has the configured I/O timeout and a bounded retry count. When renewal cannot
-complete, the old handle remains usable only until its reported expiry. After that, `Do`
-returns `ErrPortalOpenerNotReady` immediately. `Health` returns readiness, UTC
-times, a failure count, and a secret-free failure class. It does not return the
-qURL, target, session ID, cookie, or raw transport error. Lifecycle code can
-call `Start` again after expiry to run one
+Renewal starts before expiry and runs in one background goroutine. Each attempt
+has the configured I/O timeout. Failed attempts use capped backoff for the full
+remaining lifetime of the old handle. The retry window is time-bounded: it
+stops at the reported expiry and does not create a permanent background retry
+loop. After that, `Do` returns `ErrPortalOpenerNotReady` immediately. `Health`
+returns readiness, UTC times, a failure count, and a secret-free failure class.
+It does not return the qURL, target, session ID, cookie, or raw transport error.
+Lifecycle code can call `Start` again after expiry to run one
 single-flight recovery open. This explicit recovery stays off the request path,
 and it must authenticate the same target as the first open. `Close` cancels
 renewal and releases the SDK's references to the qURL and session material. It
