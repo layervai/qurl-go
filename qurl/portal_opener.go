@@ -417,18 +417,7 @@ func (o *PortalOpener) openPortal(ctx context.Context, cfg Config, expectedTarge
 	// applied only to the outward health snapshot.
 	startedAt := o.now()
 	openCtx, cancel := context.WithTimeout(ctx, o.openTimeout)
-	bridgeDone := make(chan struct{})
-	go func() {
-		select {
-		case <-o.lifecycle.Done():
-			cancel()
-		case <-bridgeDone:
-		}
-	}()
-	defer func() {
-		close(bridgeDone)
-		cancel()
-	}()
+	defer cancel()
 	handle, err := o.open(openCtx, o.link, cfg)
 	if err != nil {
 		return nil, err
@@ -453,7 +442,7 @@ func (o *PortalOpener) openPortal(ctx context.Context, cfg Config, expectedTarge
 	lifetime := time.Duration(handle.OpenSeconds) * time.Second
 	expiresAt := startedAt.Add(lifetime)
 	if !o.now().Before(expiresAt) {
-		return nil, ErrPortalOpenerNotReady
+		return nil, fmt.Errorf("%w: opener handle expired before installation", ErrMalformedReply)
 	}
 	renewAt := expiresAt.Add(-o.renewalLead(lifetime))
 	handleCopy := *handle

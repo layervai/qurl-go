@@ -236,6 +236,26 @@ func TestPortalOpenerStartRejectsMissingTrustAndIncompleteHandles(t *testing.T) 
 			closePortalOpener(t, opener)
 		})
 	}
+
+	opener, err = NewPortalOpener(link, WithPortalOpenerConfig(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	var clockReads atomic.Int32
+	opener.now = func() time.Time {
+		if clockReads.Add(1) == 1 {
+			return now
+		}
+		return now.Add(time.Second)
+	}
+	opener.open = func(context.Context, string, Config) (*ResourceHandle, error) {
+		return portalTestHandle("https://r_test.qurl.site/fixed", testAuthProviderToken, 1, 1), nil
+	}
+	if err := opener.Start(t.Context()); !errors.Is(err, ErrMalformedReply) || errors.Is(err, ErrPortalOpenerNotReady) {
+		t.Fatalf("expired-during-open Start error = %v, want ErrMalformedReply only", err)
+	}
+	closePortalOpener(t, opener)
 }
 
 func TestPortalOpenerKeepsInternalDeadlinesMonotonic(t *testing.T) {

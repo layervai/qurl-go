@@ -19,7 +19,6 @@ import (
 	"testing"
 
 	conformance "github.com/layervai/qurl-conformance"
-	"golang.org/x/crypto/curve25519"
 
 	"github.com/layervai/qurl-go/relayknock"
 )
@@ -37,11 +36,10 @@ import (
 //   - bucket B: orchestration up to the relay POST, asserting the derived route;
 //   - bucket C: reply interpretation, pure, via interpretReply.
 //
-// The external artifact has no matching fragment private key, so it pins parse,
-// issuer verification, and the pre-I/O key-binding rejection. Successful opens
-// use generated links to exercise the required private/public binding. The two
-// seams left to inspection are one-liners (in-link priv -> Knock; Knock's reply
-// -> interpretReply), both backed by the golden vectors for the crypto.
+// The external artifact carries a matching fragment key pair, so it pins parse,
+// issuer verification, user-key binding, knock construction, and relay routing
+// through the public EnterPortalWith path. Generated links cover mint/open
+// symmetry separately.
 
 // generatedAcceptLink builds a valid qURL link plus a matching trust store for
 // opener tests that need a full private/public X25519 binding. The separate
@@ -151,66 +149,54 @@ func TestEnterPortalWith_UnknownKID_Rejected(t *testing.T) {
 	}
 }
 
-func TestEnterPortalWith_ExternalVectorReachesUserKeyBinding(t *testing.T) {
+func TestEnterPortalWith_ExternalVectorReachesRelay(t *testing.T) {
 	vf, err := conformance.SignatureVectors()
 	if err != nil {
 		t.Fatalf("load external signature vectors: %v", err)
-	}
-	var accept *conformance.SignatureVector
-	for i := range vf.Vectors {
-		if vf.Vectors[i].Expect == conformance.ExpectAccept {
-			accept = &vf.Vectors[i]
-			break
-		}
-	}
-	if accept == nil {
-		t.Fatal("external signature artifact has no accept vector")
 	}
 	issuerDER := mustDecode(t, vf.Issuer.SPKIDERB64)
 	trust, err := NewTrustStoreFromDER(map[string][]byte{vf.Issuer.KID: issuerDER})
 	if err != nil {
 		t.Fatalf("load external issuer: %v", err)
 	}
-	var claims struct {
-		QurlUserPublicKeyB64 string `json:"qurl_user_public_key_b64"`
-	}
-	if err := json.Unmarshal(mustDecode(t, accept.ClaimsB64), &claims); err != nil {
-		t.Fatalf("decode external claims: %v", err)
-	}
-	wantPublic := mustDecode(t, claims.QurlUserPublicKeyB64)
-	privateKey := bytes.Repeat([]byte{1}, curve25519.ScalarSize)
-	derivedPublic, err := curve25519.X25519(privateKey, curve25519.Basepoint)
+	cf, err := conformance.ConformanceVectors()
 	if err != nil {
-		t.Fatalf("derive test public key: %v", err)
+		t.Fatalf("load external qv2 vectors: %v", err)
 	}
-	if bytes.Equal(derivedPublic, wantPublic) {
-		privateKey = bytes.Repeat([]byte{2}, curve25519.ScalarSize)
-		derivedPublic, err = curve25519.X25519(privateKey, curve25519.Basepoint)
-		if err != nil || bytes.Equal(derivedPublic, wantPublic) {
-			t.Fatalf("could not construct a deterministic mismatched secret: %v", err)
+	var canonical string
+	for _, vector := range cf.Classes["fragment"].Vectors {
+		if vector.Expect == conformance.ExpectAccept && vector.Fragment != "" {
+			canonical = vector.Fragment
+			break
 		}
 	}
-	secretB64, err := buildSecretB64(privateKey)
-	if err != nil {
-		t.Fatalf("build mismatched secret: %v", err)
-	}
-	canonical, err := buildFragment(accept.ClaimsB64, secretB64, mustDecode(t, accept.SigB64Raw))
-	if err != nil {
-		t.Fatalf("build external fragment: %v", err)
+	if canonical == "" {
+		t.Fatal("external qv2 artifact has no fragment accept vector")
 	}
 	transport, err := encodeTransportFragment(canonical)
 	if err != nil {
 		t.Fatalf("encode external fragment: %v", err)
 	}
-	noRelay := &refusingDoer{t: t}
-	_, err = EnterPortalWith(t.Context(), LinkBaseURL+"#"+transport, Config{
-		TrustStore: trust, RelayAllowlist: relayExampleAllowlist(), HTTPClient: noRelay,
-	})
-	if !errors.Is(err, ErrQurlUserKeyMismatch) {
-		t.Fatalf("external vector = %v, want ErrQurlUserKeyMismatch before I/O", err)
+	link := LinkBaseURL + "#" + transport
+	fragment, err := VerifyLink(link, trust)
+	if err != nil {
+		t.Fatalf("verify external fragment: %v", err)
 	}
-	if noRelay.called {
-		t.Fatal("external vector key mismatch contacted the relay")
+	cellPublicKey, err := decodeClaimsCellPublicKey(fragment.Claims)
+	if err != nil {
+		t.Fatalf("decode external cell key: %v", err)
+	}
+	doer := &capturingDoer{}
+	_, err = EnterPortalWith(t.Context(), link, Config{
+		TrustStore: trust, RelayAllowlist: relayExampleAllowlist(), HTTPClient: doer,
+	})
+	var relayErr *RelayError
+	if !errors.As(err, &relayErr) {
+		t.Fatalf("external vector = %v, want RelayError after relay attempt", err)
+	}
+	wantURL := "https://relay.example.com/relay/" + relayknock.PubKeyFingerprint(cellPublicKey)
+	if doer.gotURL != wantURL {
+		t.Fatalf("external vector relay POST = %q, want %q", doer.gotURL, wantURL)
 	}
 }
 
