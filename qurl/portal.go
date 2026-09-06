@@ -14,6 +14,7 @@ package qurl
 
 import (
 	"context"
+	"crypto/ecdh"
 	"crypto/subtle"
 	"errors"
 	"fmt"
@@ -22,8 +23,6 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-
-	"golang.org/x/crypto/curve25519"
 
 	"github.com/layervai/qurl-go/internal/cryptoutil"
 	"github.com/layervai/qurl-go/relayknock"
@@ -350,11 +349,11 @@ func EnterPortalWith(ctx context.Context, qurlLink string, cfg Config) (*Resourc
 		// defer above so this defensive rejection wipes it too.
 		return nil, fmt.Errorf("qurl: decode verified per-qURL public key: %w", err)
 	}
-	derivedDevicePub, err := curve25519.X25519(devicePriv, curve25519.Basepoint)
+	deviceKey, err := ecdh.X25519().NewPrivateKey(devicePriv)
 	if err != nil {
 		return nil, fmt.Errorf("qurl: derive per-qURL public key: %w", err)
 	}
-	if subtle.ConstantTimeCompare(derivedDevicePub, signedDevicePub) != 1 {
+	if subtle.ConstantTimeCompare(deviceKey.PublicKey().Bytes(), signedDevicePub) != 1 {
 		return nil, ErrQurlUserKeyMismatch
 	}
 	session := cfg.PortalSession

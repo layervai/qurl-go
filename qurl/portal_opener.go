@@ -267,10 +267,10 @@ func NewPortalOpener(qurlLink string, options ...PortalOpenerOption) (*PortalOpe
 
 // Start synchronously obtains the first native NHP session and starts proactive
 // renewal. Each open is bounded by the configured open timeout. Concurrent
-// calls share one initial open. A failed Start can be
-// retried. Start is idempotent while the cached handle is usable, and it is the
-// explicit single-flight recovery path after bounded renewal failures expire
-// that handle.
+// calls share one initial open, which uses the first caller's context. A failed
+// Start can be retried. Start is idempotent while the cached handle is usable,
+// and it is the explicit single-flight recovery path after bounded renewal
+// failures expire that handle.
 func (o *PortalOpener) Start(ctx context.Context) error {
 	if o == nil {
 		return ErrPortalOpenerClosed
