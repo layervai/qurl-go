@@ -6,6 +6,23 @@ independently under `awsstore/vX.Y.Z` tags.
 Pre-1.0 semantic versioning: breaking changes land in minor versions (v0.N.0)
 and are marked **Breaking** with what to change.
 
+## v0.13.0 — 2026-09-05
+
+- Added `PortalOpener` for long-running services that call one NHP-protected
+  target. `Start` opens and proactively renews one native UDP admission;
+  request handling uses only the cached authenticated handle and never performs
+  discovery, DNS, a knock, or a retry wait. `Do` pins the exact authenticated
+  target and supports same-origin redirects or strict redirect rejection for
+  signed requests. `Health` is secret-free, and `Close` cancels discovery and
+  transport work, waits for shutdown, and clears retained state.
+- Portal opens now prove that the fragment's X25519 private key derives the
+  issuer-signed visitor public key. They also compare the full signed cell key
+  with the deployment catalog key after the compact fingerprint lookup. Both
+  mismatches fail before DNS or transport I/O.
+- Portal retries use a private visitor capability instead of retaining or
+  serializing the qURL fragment secret. The capability stays process-local and
+  is cleared with the portal state.
+
 ## v0.12.0 — 2026-09-02
 
 - **Breaking:** the CRID share operator is renamed, with no compatibility
