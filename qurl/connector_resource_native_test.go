@@ -96,7 +96,6 @@ func TestNativeConnectorResourceConformance(t *testing.T) {
 				t.Fatalf("generated request = %s\npublic vector     = %s", body, exchange.Request.BodyJSON)
 			}
 			resolution, err := parseNativeConnectorResourceResponse([]byte(exchange.Result.BodyJSON), fixture.Fixtures.AgentID, request)
-
 			if err != nil {
 				t.Fatal(err)
 			}
