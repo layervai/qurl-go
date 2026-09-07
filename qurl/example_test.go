@@ -70,7 +70,8 @@ func ExamplePortalOpener() {
 	}
 	defer opener.Close()
 
-	resp, err := opener.Do(ctx, func(target *url.URL) (*http.Request, error) {
+	// Pass raw path segments. DoDescendant escapes each segment before use.
+	resp, err := opener.DoDescendant(ctx, []string{"binding_123"}, func(target *url.URL) (*http.Request, error) {
 		return http.NewRequestWithContext(ctx, http.MethodPost, target.String(), http.NoBody)
 	}, qurl.RejectPortalRedirects())
 	if err != nil {
@@ -106,6 +107,7 @@ func ExampleClient_CreatePortal() {
 	portal, err := resource.CreatePortal(context.Background(),
 		qurl.ValidFor(time.Hour),
 		qurl.WithLabel("Alice"),
+		qurl.WithTargetPath("/api/detect"), // Existing tunnel resources only.
 	)
 	if err != nil {
 		panic(err)

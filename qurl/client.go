@@ -792,7 +792,10 @@ type portalOptions struct {
 	oneTimeUse      *bool
 	maxSessions     *int
 	sessionDuration string
+	targetPath      string
 }
+
+const maxTargetPathLength = 2048
 
 // ValidFor sets how long the qURL link should be valid. The SDK requires at
 // least one minute as a client-side guardrail; the LayerV API remains the
@@ -861,6 +864,23 @@ func WithSessionDuration(d time.Duration) PortalOption {
 			return err
 		}
 		o.sessionDuration = sessionDuration
+		return nil
+	})
+}
+
+// WithTargetPath scopes a qURL for an existing tunnel resource to one path and
+// its descendants. The SDK rejects only empty and overlong values; LayerV owns
+// the path grammar and the tunnel-only resource gate. CreatePortalForURL
+// rejects this option because that API does not address an existing resource.
+func WithTargetPath(targetPath string) PortalOption {
+	return portalOptionFunc(func(o *portalOptions) error {
+		if targetPath == "" {
+			return fmt.Errorf("%w: target path must not be empty", ErrInvalidPortalRequest)
+		}
+		if len(targetPath) > maxTargetPathLength {
+			return fmt.Errorf("%w: target path must be %d bytes or fewer", ErrInvalidPortalRequest, maxTargetPathLength)
+		}
+		o.targetPath = targetPath
 		return nil
 	})
 }
@@ -1026,6 +1046,7 @@ type createPortalRequest struct {
 	OneTimeUse      *bool  `json:"one_time_use,omitempty"`
 	MaxSessions     *int   `json:"max_sessions,omitempty"`
 	SessionDuration string `json:"session_duration,omitempty"`
+	TargetPath      string `json:"target_path,omitempty"`
 }
 
 type createPortalForURLRequest struct {
@@ -1074,6 +1095,7 @@ func buildCreatePortalRequest(opts []PortalOption) (createPortalRequest, error) 
 		OneTimeUse:      cfg.oneTimeUse,
 		MaxSessions:     cfg.maxSessions,
 		SessionDuration: cfg.sessionDuration,
+		TargetPath:      cfg.targetPath,
 	}, nil
 }
 
@@ -1081,6 +1103,9 @@ func buildCreatePortalForURLRequest(targetURL string, opts []PortalOption) (crea
 	req, err := buildCreatePortalRequest(opts)
 	if err != nil {
 		return createPortalForURLRequest{}, err
+	}
+	if req.TargetPath != "" {
+		return createPortalForURLRequest{}, fmt.Errorf("%w: target path requires an existing resource", ErrInvalidPortalRequest)
 	}
 	return createPortalForURLRequest{
 		TargetURL:           targetURL,

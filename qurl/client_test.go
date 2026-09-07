@@ -285,6 +285,11 @@ func TestClient_ResourceByIDCreatePortal(t *testing.T) {
 		if r.Method != http.MethodPost || r.URL.Path != "/v1/resources/r_stored12345/qurls" {
 			t.Fatalf("request = %s %s, want POST /v1/resources/r_stored12345/qurls", r.Method, r.URL.Path)
 		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode create portal body: %v", err)
+		}
+		assertJSONField(t, body, "target_path", "/api/detect")
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{"data":{"resource_id":"r_stored12345","qurl_link":"https://qurl.link/at_stored"}}`)
 	}))
@@ -296,7 +301,7 @@ func TestClient_ResourceByIDCreatePortal(t *testing.T) {
 	}
 
 	resource := client.ResourceByID("r_stored12345")
-	portal, err := resource.CreatePortal(context.Background(), ValidFor(5*time.Minute))
+	portal, err := resource.CreatePortal(context.Background(), ValidFor(5*time.Minute), WithTargetPath("/api/detect"))
 	if err != nil {
 		t.Fatalf("CreatePortal: %v", err)
 	}
@@ -1055,7 +1060,24 @@ func TestClient_Validation(t *testing.T) {
 	if _, err := client.CreatePortal(context.Background(), &Resource{ID: "r_demo1234567"}, WithSessionDuration(500*time.Millisecond)); !errors.Is(err, ErrInvalidPortalRequest) {
 		t.Fatalf("subsecond session duration: want ErrInvalidPortalRequest, got %v", err)
 	}
-	req, err := buildCreatePortalRequest([]PortalOption{WithSessionDuration(24 * time.Hour)})
+	if _, err := client.CreatePortal(context.Background(), &Resource{ID: "r_demo1234567"}, WithTargetPath("")); !errors.Is(err, ErrInvalidPortalRequest) {
+		t.Fatalf("empty target path: want ErrInvalidPortalRequest, got %v", err)
+	}
+	if _, err := client.CreatePortal(context.Background(), &Resource{ID: "r_demo1234567"}, WithTargetPath("/"+strings.Repeat("a", maxTargetPathLength))); !errors.Is(err, ErrInvalidPortalRequest) {
+		t.Fatalf("overlong target path: want ErrInvalidPortalRequest, got %v", err)
+	}
+	maxTargetPath := "/" + strings.Repeat("a", maxTargetPathLength-1)
+	req, err := buildCreatePortalRequest([]PortalOption{WithTargetPath(maxTargetPath)})
+	if err != nil {
+		t.Fatalf("maximum target path: %v", err)
+	}
+	if req.TargetPath != maxTargetPath {
+		t.Fatalf("maximum target path was not preserved")
+	}
+	if _, _, err := client.CreatePortalForURL(context.Background(), "https://example.com", WithTargetPath("/api/detect")); !errors.Is(err, ErrInvalidPortalRequest) {
+		t.Fatalf("target path on URL portal: want ErrInvalidPortalRequest, got %v", err)
+	}
+	req, err = buildCreatePortalRequest([]PortalOption{WithSessionDuration(24 * time.Hour)})
 	if err != nil {
 		t.Fatalf("WithSessionDuration 24h: %v", err)
 	}

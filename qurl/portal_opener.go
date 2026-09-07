@@ -133,9 +133,9 @@ func WithPortalOpenerOpenTimeout(timeout time.Duration) PortalOpenerOption {
 	})
 }
 
-// PortalRequestBuilder builds one request for the exact target authenticated by
-// the NHP ACK. The URL value is a fresh copy. Do rejects any returned request
-// whose URL or Host differs from that target.
+// PortalRequestBuilder builds one request for the target selected by Do or
+// DoDescendant. The URL value is a fresh copy. Both methods reject any returned
+// request whose URL or Host differs from that target.
 type PortalRequestBuilder func(target *url.URL) (*http.Request, error)
 
 // PortalRequestOption configures one PortalOpener.Do call.
@@ -201,8 +201,9 @@ type portalStartAttempt struct {
 type portalOpenFunc func(context.Context, string, Config) (*ResourceHandle, error)
 
 // PortalOpener owns one native-only, proactively renewed qURL visitor session.
-// Start performs the first NHP open. Do uses only the cached handle: it never
-// opens, resolves, mints, lists, retries, or sleeps on the request path.
+// Start performs the first NHP open. Do and DoDescendant use only the cached
+// handle: they never open, resolve, mint, list, retry, or sleep on the request
+// path.
 type PortalOpener struct {
 	mu sync.RWMutex
 
@@ -665,6 +666,20 @@ func (o *PortalOpener) waitFor(delay time.Duration) bool {
 // caller must close every returned response body; until then, the body retains
 // the request cancellation hook that lets Close abort body reads.
 func (o *PortalOpener) Do(ctx context.Context, build PortalRequestBuilder, options ...PortalRequestOption) (*http.Response, error) {
+	return o.do(ctx, nil, false, build, options...)
+}
+
+// DoDescendant sends one request to a descendant of the authenticated ACK
+// target with the cached session. Each caller value is one path segment; the
+// SDK encodes it before appending it. Empty segments, dot segments, and values
+// that can introduce an authority, path separator, query, fragment, or
+// backslash are rejected. Like Do, this method never performs an NHP open or
+// waits for renewal.
+func (o *PortalOpener) DoDescendant(ctx context.Context, pathSegments []string, build PortalRequestBuilder, options ...PortalRequestOption) (*http.Response, error) {
+	return o.do(ctx, pathSegments, true, build, options...)
+}
+
+func (o *PortalOpener) do(ctx context.Context, pathSegments []string, descendant bool, build PortalRequestBuilder, options ...PortalRequestOption) (*http.Response, error) {
 	if o == nil {
 		return nil, ErrPortalOpenerClosed
 	}
@@ -673,6 +688,11 @@ func (o *PortalOpener) Do(ctx context.Context, build PortalRequestBuilder, optio
 	}
 	if build == nil {
 		return nil, fmt.Errorf("%w: nil request builder", ErrInvalidContentRequest)
+	}
+	if descendant {
+		if err := validatePortalDescendantSegments(pathSegments); err != nil {
+			return nil, err
+		}
 	}
 	requestCfg := portalRequestConfig{}
 	for _, option := range options {
@@ -730,7 +750,12 @@ func (o *PortalOpener) Do(ctx context.Context, build PortalRequestBuilder, optio
 	if err != nil {
 		return nil, ErrPortalOpenerNotReady
 	}
-	builderTarget := *trustedTarget
+	requestTarget := trustedTarget
+	if descendant {
+		requestTarget = appendPortalDescendantSegments(trustedTarget, pathSegments)
+	}
+	requestTargetRaw := requestTarget.String()
+	builderTarget := *requestTarget
 	req, err := build(&builderTarget)
 	if err != nil {
 		closePortalRequestBody(req)
@@ -740,16 +765,16 @@ func (o *PortalOpener) Do(ctx context.Context, build PortalRequestBuilder, optio
 		closePortalRequestBody(req)
 		return nil, fmt.Errorf("%w: builder returned no request", ErrInvalidContentRequest)
 	}
-	if req.URL.String() != targetRaw || (req.Host != "" && req.Host != trustedTarget.Host) {
+	if req.URL.String() != requestTargetRaw || (req.Host != "" && req.Host != requestTarget.Host) {
 		closePortalRequestBody(req)
 		return nil, fmt.Errorf("%w: request changed the authenticated target", ErrInvalidContentRequest)
 	}
 	req = req.Clone(requestCtx)
-	targetCopy := *trustedTarget
+	targetCopy := *requestTarget
 	req.URL = &targetCopy
 	// Pin the wire Host to the authority signed by the caller after it received
 	// the authenticated target. A proxy-facing Host override cannot change it.
-	req.Host = trustedTarget.Host
+	req.Host = requestTarget.Host
 	if err := handle.AuthorizeContentRequest(req); err != nil {
 		closePortalRequestBody(req)
 		return nil, err
@@ -789,6 +814,40 @@ func (o *PortalOpener) Do(ctx context.Context, build PortalRequestBuilder, optio
 	response.Body = &portalResponseBody{ReadCloser: response.Body, release: releaseRequest}
 	releaseOnReturn = false
 	return response, nil
+}
+
+func validatePortalDescendantSegments(pathSegments []string) error {
+	if len(pathSegments) == 0 {
+		return fmt.Errorf("%w: at least one descendant path segment is required", ErrInvalidContentRequest)
+	}
+	for index, segment := range pathSegments {
+		if segment == "" {
+			return fmt.Errorf("%w: descendant path segment %d is empty", ErrInvalidContentRequest, index)
+		}
+		if segment == "." || segment == ".." {
+			return fmt.Errorf("%w: descendant path segment %d is a dot segment", ErrInvalidContentRequest, index)
+		}
+		if strings.ContainsAny(segment, "/\\?#") {
+			return fmt.Errorf("%w: descendant path segment %d contains a reserved delimiter", ErrInvalidContentRequest, index)
+		}
+	}
+	return nil
+}
+
+func appendPortalDescendantSegments(target *url.URL, pathSegments []string) *url.URL {
+	descendant := *target
+	baseEscapedPath := target.EscapedPath()
+	separator := "/"
+	if strings.HasSuffix(baseEscapedPath, "/") {
+		separator = ""
+	}
+	escapedSegments := make([]string, len(pathSegments))
+	for index, segment := range pathSegments {
+		escapedSegments[index] = url.PathEscape(segment)
+	}
+	descendant.Path += separator + strings.Join(pathSegments, "/")
+	descendant.RawPath = baseEscapedPath + separator + strings.Join(escapedSegments, "/")
+	return &descendant
 }
 
 type portalResponseBody struct {
