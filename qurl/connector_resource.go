@@ -134,7 +134,7 @@ func (r *ConnectorResource) CreatePortal(ctx context.Context, opts ...PortalOpti
 		return nil, fmt.Errorf("%w: qURL Connector resource is not bound to a client", ErrInvalidPortalRequest)
 	}
 	if err := validateConnectorCRID(r.CRID); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", ErrInvalidPortalRequest, err)
 	}
 	return r.client.CreatePortal(ctx, r.client.ResourceByID(r.CRID), opts...)
 }
