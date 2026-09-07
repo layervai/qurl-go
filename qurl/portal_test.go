@@ -1,6 +1,7 @@
 package qurl
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -32,64 +33,30 @@ import (
 // js-agent fixtures). So:
 //
 //   - bucket A: the security GATES (config, relay allowlist, signature/kid), pure;
-//   - bucket B: orchestration up to the relay POST, asserting the derived route,
-//     using the vendored signature vector so no new signing code is needed;
+//   - bucket B: orchestration up to the relay POST, asserting the derived route;
 //   - bucket C: reply interpretation, pure, via interpretReply.
 //
-// The two seams left to inspection are one-liners (in-link priv -> Knock; Knock's
-// reply -> interpretReply), both backed by the golden vectors for the crypto.
+// The external artifact carries a matching fragment key pair, so it pins parse,
+// issuer verification, user-key binding, knock construction, and relay routing
+// through the public EnterPortalWith path. Generated links cover mint/open
+// symmetry separately.
 
-// vendoredAcceptLink builds a valid qURL link plus a matching trust store from the
-// vendored issuer-signature vector's ACCEPT case. The signature is real (it is the
-// committed cross-language vector), so EnterPortal's parse+verify+route runs for
-// real without this test minting anything. The secret part is synthesized — PoP
-// matching is a server-side check EnterPortal does not perform — so a placeholder
-// 32-byte key is sufficient to satisfy the strict secret parser.
-func vendoredAcceptLink(t *testing.T) (link string, ts *TrustStore, cellFingerprint string) {
+// generatedAcceptLink builds a valid qURL link plus a matching trust store for
+// opener tests that need a full private/public X25519 binding. The separate
+// external-vector test keeps the qURL-level parse and issuer verification path
+// pinned to independently produced conformance bytes.
+func generatedAcceptLink(t *testing.T) (link string, ts *TrustStore, cellFingerprint string) {
 	t.Helper()
-	vf, err := conformance.SignatureVectors()
+	signer, ts := mintSigner(t)
+	params := validCreateParams(t)
+	params.CellPublicKey = bytes.Repeat([]byte{0x44}, 32)
+	link, err := CreatePortalWithParams(t.Context(), signer, params)
 	if err != nil {
-		t.Fatalf("load signature vectors: %v", err)
+		t.Fatalf("CreatePortalWithParams: %v", err)
 	}
-	var accept *conformance.SignatureVector
-	for i := range vf.Vectors {
-		if vf.Vectors[i].Expect == conformance.ExpectAccept {
-			accept = &vf.Vectors[i]
-			break
-		}
-	}
-	if accept == nil {
-		t.Fatal("no accept vector in the vendored signature file")
-	}
-
-	der, err := b64url.DecodeString(vf.Issuer.SPKIDERB64)
+	frag, err := VerifyLink(link, ts)
 	if err != nil {
-		t.Fatalf("decode issuer spki: %v", err)
-	}
-	ts, err = NewTrustStoreFromDER(map[string][]byte{vf.Issuer.KID: der})
-	if err != nil {
-		t.Fatalf("new trust store: %v", err)
-	}
-
-	// A synthesized secret: base64url of {"qurl_user_private_key_b64":"<32 bytes>"}.
-	secretJSON := `{"qurl_user_private_key_b64":"` + b64url.EncodeToString(make([]byte, 32)) + `"}`
-	secretB64 := b64url.EncodeToString([]byte(secretJSON))
-
-	body, err := buildFragment(accept.ClaimsB64, secretB64, mustDecode(t, accept.SigB64Raw))
-	if err != nil {
-		t.Fatalf("buildFragment: %v", err)
-	}
-	transport, err := encodeTransportFragment(body)
-	if err != nil {
-		t.Fatalf("encodeTransportFragment: %v", err)
-	}
-	link = "https://qurl.link/#" + transport
-
-	// The accept vector's cell key is 32 bytes of 0x44 (fingerprint uzkUFcBeOdc);
-	// recompute it rather than hardcode so the expected route stays derived.
-	frag, err := parseFragment(body)
-	if err != nil {
-		t.Fatalf("parseFragment: %v", err)
+		t.Fatalf("verify generated link: %v", err)
 	}
 	cellPub, err := decodeClaimsCellPublicKey(frag.Claims)
 	if err != nil {
@@ -152,7 +119,7 @@ func TestEnterPortal_EmptyConfig_FailsClosed(t *testing.T) {
 }
 
 func TestEnterPortalWith_MissingAllowlist_FailsClosed(t *testing.T) {
-	_, ts, _ := vendoredAcceptLink(t)
+	_, ts, _ := generatedAcceptLink(t)
 	_, err := EnterPortalWith(context.Background(), "https://qurl.link/#qv2t1.1.1.1.AQ.AQ.AQ", Config{TrustStore: ts})
 	if !errors.Is(err, ErrNotConfigured) {
 		t.Fatalf("missing allowlist: want ErrNotConfigured, got %v", err)
@@ -160,7 +127,7 @@ func TestEnterPortalWith_MissingAllowlist_FailsClosed(t *testing.T) {
 }
 
 func TestEnterPortalWith_RelayOffAllowlist_Rejected(t *testing.T) {
-	link, ts, _ := vendoredAcceptLink(t)
+	link, ts, _ := generatedAcceptLink(t)
 	// Allowlist a DIFFERENT host than the verified relay_url, so validation fails
 	// AFTER the signature verifies (proving the post-verify ordering).
 	cfg := Config{TrustStore: ts, RelayAllowlist: NewRelayAllowlist([]string{"not-the-relay.example.org"})}
@@ -171,7 +138,7 @@ func TestEnterPortalWith_RelayOffAllowlist_Rejected(t *testing.T) {
 }
 
 func TestEnterPortalWith_UnknownKID_Rejected(t *testing.T) {
-	link, _, _ := vendoredAcceptLink(t)
+	link, _, _ := generatedAcceptLink(t)
 	// A trust store that does NOT contain the vector's kid: build one from a
 	// freshly minted, unrelated issuer key under a different kid.
 	other := freshTrustStore(t)
@@ -179,6 +146,57 @@ func TestEnterPortalWith_UnknownKID_Rejected(t *testing.T) {
 	_, err := EnterPortalWith(context.Background(), link, cfg)
 	if !errors.Is(err, ErrUnknownKID) {
 		t.Fatalf("unknown kid: want ErrUnknownKID, got %v", err)
+	}
+}
+
+func TestEnterPortalWith_ExternalVectorReachesRelay(t *testing.T) {
+	vf, err := conformance.SignatureVectors()
+	if err != nil {
+		t.Fatalf("load external signature vectors: %v", err)
+	}
+	issuerDER := mustDecode(t, vf.Issuer.SPKIDERB64)
+	trust, err := NewTrustStoreFromDER(map[string][]byte{vf.Issuer.KID: issuerDER})
+	if err != nil {
+		t.Fatalf("load external issuer: %v", err)
+	}
+	cf, err := conformance.ConformanceVectors()
+	if err != nil {
+		t.Fatalf("load external qv2 vectors: %v", err)
+	}
+	var canonical string
+	for _, vector := range cf.Classes["fragment"].Vectors {
+		if vector.Expect == conformance.ExpectAccept && vector.Fragment != "" {
+			canonical = vector.Fragment
+			break
+		}
+	}
+	if canonical == "" {
+		t.Fatal("external qv2 artifact has no fragment accept vector")
+	}
+	transport, err := encodeTransportFragment(canonical)
+	if err != nil {
+		t.Fatalf("encode external fragment: %v", err)
+	}
+	link := LinkBaseURL + "#" + transport
+	fragment, err := VerifyLink(link, trust)
+	if err != nil {
+		t.Fatalf("verify external fragment: %v", err)
+	}
+	cellPublicKey, err := decodeClaimsCellPublicKey(fragment.Claims)
+	if err != nil {
+		t.Fatalf("decode external cell key: %v", err)
+	}
+	doer := &capturingDoer{}
+	_, err = EnterPortalWith(t.Context(), link, Config{
+		TrustStore: trust, RelayAllowlist: relayExampleAllowlist(), HTTPClient: doer,
+	})
+	var relayErr *RelayError
+	if !errors.As(err, &relayErr) {
+		t.Fatalf("external vector = %v, want RelayError after relay attempt", err)
+	}
+	wantURL := "https://relay.example.com/relay/" + relayknock.PubKeyFingerprint(cellPublicKey)
+	if doer.gotURL != wantURL {
+		t.Fatalf("external vector relay POST = %q, want %q", doer.gotURL, wantURL)
 	}
 }
 
@@ -197,7 +215,7 @@ func (d *capturingDoer) Do(req *http.Request) (*http.Response, error) {
 }
 
 func TestEnterPortalWith_RoutesToDerivedRelayURL(t *testing.T) {
-	link, ts, cellFingerprint := vendoredAcceptLink(t)
+	link, ts, cellFingerprint := generatedAcceptLink(t)
 	doer := &capturingDoer{}
 	cfg := Config{TrustStore: ts, RelayAllowlist: relayExampleAllowlist(), HTTPClient: doer}
 

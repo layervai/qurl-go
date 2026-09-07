@@ -1,6 +1,7 @@
 package qurl
 
 import (
+	"crypto/subtle"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -51,16 +52,28 @@ type CellEntry struct {
 	Port               int
 }
 
-// CellCatalog maps a cell's public-key fingerprint to its native UDP endpoint.
-// It is immutable after construction and safe for concurrent use.
+// CellCatalog maps a cell's public-key fingerprint to its native UDP endpoint
+// and retains the full key for a constant-time comparison after lookup. It is
+// immutable after construction and safe for concurrent use.
 type CellCatalog struct {
-	byFingerprint map[string]CellEndpoint
+	byFingerprint map[string]catalogCell
+}
+
+type catalogCell struct {
+	endpoint        CellEndpoint
+	serverPublicKey [32]byte
 }
 
 // ErrNoCellEndpoints is returned when a catalog would be built with no usable
 // entries. An empty catalog is indistinguishable from "no catalog" at open time,
 // so it is rejected at construction where the mistake is still diagnosable.
 var ErrNoCellEndpoints = errors.New("qurl: cell catalog has no endpoints")
+
+// ErrCellCatalogKeyMismatch reports that the compact lookup fingerprint found
+// a row whose full X25519 key differs from the signed link key. The SDK refuses
+// before DNS, UDP, or relay I/O. This can mean corrupt catalog state or a rare
+// 64-bit fingerprint collision.
+var ErrCellCatalogKeyMismatch = errors.New("qurl: cell catalog fingerprint matched a different full key")
 
 // NewCellCatalog builds a catalog from cell entries. Every entry must carry a
 // valid 32-byte key, a host, and the standard NHP UDP port; one bad entry fails the whole
@@ -71,7 +84,7 @@ func NewCellCatalog(entries []CellEntry) (*CellCatalog, error) {
 	if len(entries) == 0 {
 		return nil, ErrNoCellEndpoints
 	}
-	byFingerprint := make(map[string]CellEndpoint, len(entries))
+	byFingerprint := make(map[string]catalogCell, len(entries))
 	for _, entry := range entries {
 		label := strings.TrimSpace(entry.CellID)
 		if label == "" {
@@ -94,15 +107,22 @@ func NewCellCatalog(entries []CellEntry) (*CellCatalog, error) {
 		// or silently drop a cell so its links quietly fall back to the relay.
 		// buildTrustMaterial rejects duplicate issuer kids for the same reason.
 		if prior, dup := byFingerprint[fingerprint]; dup {
-			priorLabel := strings.TrimSpace(prior.CellID)
+			priorLabel := strings.TrimSpace(prior.endpoint.CellID)
 			if priorLabel == "" {
 				priorLabel = "(unlabelled cell)"
+			}
+			if subtle.ConstantTimeCompare(prior.serverPublicKey[:], key) != 1 {
+				return nil, fmt.Errorf(
+					"%w: cells %s and %s collide", ErrCellCatalogKeyMismatch, priorLabel, label)
 			}
 			return nil, fmt.Errorf(
 				"qurl: cells %s and %s share a server public key", priorLabel, label)
 		}
-		byFingerprint[fingerprint] = CellEndpoint{
-			CellID: entry.CellID, Host: host, Port: entry.Port,
+		var fullKey [32]byte
+		copy(fullKey[:], key)
+		byFingerprint[fingerprint] = catalogCell{
+			endpoint:        CellEndpoint{CellID: entry.CellID, Host: host, Port: entry.Port},
+			serverPublicKey: fullKey,
 		}
 	}
 	return &CellCatalog{byFingerprint: byFingerprint}, nil
@@ -110,14 +130,21 @@ func NewCellCatalog(entries []CellEntry) (*CellCatalog, error) {
 
 // lookup returns the endpoint for the cell holding cellPub, which the caller
 // must have taken from VERIFIED claims. A nil catalog or an unknown cell reports
-// false, routing that open through the relay — the correct behavior for a cell
-// this build predates.
-func (c *CellCatalog) lookup(cellPub []byte) (CellEndpoint, bool) {
+// false, routing an ordinary open through the relay. A matching 64-bit
+// fingerprint with a different full key returns ErrCellCatalogKeyMismatch. It
+// must never fall back or perform network I/O.
+func (c *CellCatalog) lookup(cellPub []byte) (CellEndpoint, bool, error) {
 	if c == nil || len(cellPub) == 0 {
-		return CellEndpoint{}, false
+		return CellEndpoint{}, false, nil
 	}
-	ep, ok := c.byFingerprint[relayknock.PubKeyFingerprint(cellPub)]
-	return ep, ok
+	cell, ok := c.byFingerprint[relayknock.PubKeyFingerprint(cellPub)]
+	if !ok {
+		return CellEndpoint{}, false, nil
+	}
+	if len(cellPub) != len(cell.serverPublicKey) || subtle.ConstantTimeCompare(cell.serverPublicKey[:], cellPub) != 1 {
+		return CellEndpoint{}, false, ErrCellCatalogKeyMismatch
+	}
+	return cell.endpoint, true, nil
 }
 
 // decodeCellPublicKey accepts a raw 32-byte X25519 key in any common base64

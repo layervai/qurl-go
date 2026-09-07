@@ -63,6 +63,87 @@ platform access endpoints this process should trust. With no provider installed
 file named by `QURL_DEPLOYMENT`, falling back to the deployment embedded in the
 build.
 
+Before any transport work, every opening path derives the X25519 public key
+from the fragment private key with the standard clamped X25519 basepoint
+operation. It requires that key to equal the public key in the signed qURL
+claims. Every qURL minter must create that public claim from the matching
+fragment private key. A mismatch fails closed with
+`ErrQurlUserKeyMismatch`; there is no compatibility fallback.
+
+After the open returns, the SDK wipes the decoded fragment private-key buffer
+that it owns. Go's cryptography APIs can make runtime-managed working copies
+and do not provide a supported operation to erase those copies explicitly.
+
+## Long-Lived Service Opener
+
+Use `PortalOpener` when a service repeatedly calls one protected target. It is
+native-UDP-only and is bound to the exact target URL in the first authenticated
+NHP ACK. `Start` opens the visitor session and starts proactive renewal. `Do`
+uses only the cached handle. It does not open a portal, read deployment data,
+resolve a qURL, mint, list, retry, or sleep on the request path.
+
+```go
+opener, err := qurl.NewPortalOpener(link)
+if err != nil {
+	return err
+}
+if err := opener.Start(ctx); err != nil {
+	return err
+}
+defer opener.Close()
+
+resp, err := opener.Do(ctx, func(target *url.URL) (*http.Request, error) {
+	// Sign the method, target authority, and exact target path here. target is
+	// the authenticated ACK URL, not caller input.
+	return http.NewRequest(http.MethodPost, target.String(), body)
+}, qurl.RejectPortalRedirects())
+```
+
+Each native NHP open has a 15-second default deadline, including the open made
+by the synchronous first `Start`. Use `WithPortalOpenerOpenTimeout` to select a
+positive deadline of at most 60 seconds for slower private networks. When
+`Start` must resolve provider or deployment config first, that separate step is
+bounded by the caller context and the provider's I/O deadline.
+
+The default provider or `QURL_DEPLOYMENT` must include the link's issuer and
+cell. A missing cell returns `ErrPortalNativeOnly` or `ErrCellNotInCatalog`; the
+opener never falls back to the HTTPS relay. A renewal that authenticates a
+different target does not replace the active handle. `Health` reports
+`LastFailureClass == PortalOpenerFailureTargetChanged`. A later explicit
+recovery `Start` returns `ErrPortalTargetChanged` if the target is still wrong.
+
+By default, `Do` follows only same-origin redirects and reauthorizes each one.
+An off-origin redirect fails with `ErrPortalRedirect` before the redirected
+request is sent.
+Use `RejectPortalRedirects` for signed POST or PATCH operations because a
+redirect can change the method or invalidate a signature. The first request URL
+and wire Host are always the exact authenticated target. The builder cannot add
+a path, query, or alternate authority.
+
+Renewal starts before expiry and runs in one background goroutine. Each attempt
+has the configured I/O timeout. Failed attempts use capped backoff for the full
+remaining lifetime of the old handle. The retry window is time-bounded: it
+stops at the reported expiry and does not create a permanent background retry
+loop. After each successful open, another renewal cannot start for five seconds.
+If less time remains, the opener stops at expiry instead of reopening
+continuously. After that, `Do` returns `ErrPortalOpenerNotReady` immediately.
+`Health` returns readiness, UTC times, a failure count, and a secret-free
+failure class.
+It does not return the qURL, target, session ID, cookie, or raw transport error.
+Lifecycle code can call `Start` again after expiry to run one
+single-flight recovery open. This explicit recovery stays off the request path,
+because concurrent callers share the first caller's context and cancellation,
+and it must authenticate the same target as the first open. `Close` cancels
+renewal and releases the SDK's references to the qURL and session material. It
+does not wait for a concurrent `Do` that already copied the active handle, and
+it does not cancel a request already handed to the HTTP transport. Stop and
+drain application request handlers before `Close` when shutdown must guarantee
+that no later protected request leaves the process.
+The opener pins the trust and cell config resolved by `Start` for all background
+renewals. `Close` also cancels an in-progress provider or deployment resolution.
+Call `Start` after a bounded cycle ends if deployment trust or cell routing
+changed.
+
 ## Retry a Visit
 
 Each ordinary `EnterPortal` or `EnterPortalWith` call starts an independent

@@ -1,6 +1,7 @@
 package qurl
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -14,28 +15,27 @@ import (
 	conformance "github.com/layervai/qurl-conformance"
 )
 
-// writeVendoredDeployment writes a deployment file carrying the vendored issuer
-// key and pointing "vector-cell" at an unreachable native UDP endpoint. It is
-// the exact file an operator ships: non-secret, no key material to generate.
-func writeVendoredDeployment(t *testing.T, withCells bool) string {
+// writeGeneratedDeployment writes a deployment and returns a link whose full
+// issuer, cell, and per-qURL key bindings match it.
+func writeGeneratedDeployment(t *testing.T, withCells bool) (string, string) {
 	t.Helper()
-	vf, err := conformance.SignatureVectors()
+	signer, _ := mintSigner(t)
+	issuerDER, err := signer.PublicKeyDER()
 	if err != nil {
-		t.Fatalf("load signature vectors: %v", err)
+		t.Fatalf("issuer public key: %v", err)
 	}
 	d := Deployment{
-		Issuers: []ManifestIssuer{{Kid: vf.Issuer.KID, SPKIDERB64: vf.Issuer.SPKIDERB64}},
+		Issuers: []ManifestIssuer{{
+			Kid: signer.KID(), SPKIDERB64: base64.RawURLEncoding.EncodeToString(issuerDER),
+		}},
 	}
+	cellKey := bytes.Repeat([]byte{0x44}, 32)
 	if withCells {
-		key := make([]byte, 32)
-		for i := range key {
-			key[i] = 0x44
-		}
 		d.Cells = []DeploymentCell{{
 			CellID:             "vector-cell",
 			Host:               "127.0.0.1",
 			Port:               standardNHPUDPPort,
-			ServerPublicKeyB64: base64.RawURLEncoding.EncodeToString(key),
+			ServerPublicKeyB64: base64.RawURLEncoding.EncodeToString(cellKey),
 		}}
 	} else {
 		d.RelayAllowlist = []string{"relay.example.com"}
@@ -48,7 +48,13 @@ func writeVendoredDeployment(t *testing.T, withCells bool) string {
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		t.Fatalf("write deployment: %v", err)
 	}
-	return path
+	params := validCreateParams(t)
+	params.CellPublicKey = cellKey
+	link, err := CreatePortalWithParams(t.Context(), signer, params)
+	if err != nil {
+		t.Fatalf("create deployment link: %v", err)
+	}
+	return link, path
 }
 
 // noDefaultProvider guarantees this test exercises the shipped/override path
@@ -65,8 +71,8 @@ func noDefaultProvider(t *testing.T) {
 // No trust store to assemble, no key decoding, no allowlist, no provider.
 func TestEnterPortal_ZeroSetupOpensOverNativeUDP(t *testing.T) {
 	noDefaultProvider(t)
-	link, _, _ := vendoredAcceptLink(t)
-	t.Setenv(EnvDeploymentPath, writeVendoredDeployment(t, true))
+	link, deploymentPath := writeGeneratedDeployment(t, true)
+	t.Setenv(EnvDeploymentPath, deploymentPath)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -90,8 +96,8 @@ func TestEnterPortal_ZeroSetupOpensOverNativeUDP(t *testing.T) {
 // works against a deployment that has not enabled direct UDP.
 func TestEnterPortal_ZeroSetupWithoutCellsUsesRelay(t *testing.T) {
 	noDefaultProvider(t)
-	link, _, _ := vendoredAcceptLink(t)
-	t.Setenv(EnvDeploymentPath, writeVendoredDeployment(t, false))
+	link, deploymentPath := writeGeneratedDeployment(t, false)
+	t.Setenv(EnvDeploymentPath, deploymentPath)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -112,7 +118,7 @@ func TestEnterPortal_ZeroSetupWithoutCellsUsesRelay(t *testing.T) {
 // refuses to open rather than trusting anything, and says what to set.
 func TestEnterPortal_NoDeploymentFailsClosed(t *testing.T) {
 	noDefaultProvider(t)
-	link, _, _ := vendoredAcceptLink(t)
+	link, _, _ := generatedAcceptLink(t)
 	t.Setenv(EnvDeploymentPath, "")
 
 	_, err := EnterPortal(context.Background(), link)

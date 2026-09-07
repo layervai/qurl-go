@@ -80,6 +80,7 @@ And every entry point in one place:
 | `RecoverAgentRuntime` | Operator-driven replacement of a revoked or lost device credential | `*Client`, `*AgentRuntimeBinding` |
 | `RecoverAgentRuntimeWithCredentialProvider` | The same recovery with account authority resolved only after durable state and expiry validation | `*Client`, `*AgentRuntimeBinding` |
 | `EnterPortal` | Open a received qURL link programmatically; needs no LayerV credentials | `*ResourceHandle` |
+| `NewPortalOpener` | Keep one native-only received qURL ready for repeated service calls with proactive renewal and no request-path open | `*PortalOpener` |
 
 ## Install
 
@@ -365,6 +366,14 @@ that raises them:
 | `qurl.ErrSignature` | The link's issuer signature does not verify: forged, tampered, or signed by a key that is not the trust store's value for that kid |
 | `qurl.ErrUnknownKID` | The link's kid is not in the trust store |
 | `qurl.ErrCellNotInCatalog` | A verified link names a cell the cell catalog has no endpoint for, and no relay allowlist is configured. A cells-only opener refuses the open rather than silently downgrading to the HTTPS relay |
+| `qurl.ErrCellCatalogKeyMismatch` | A compact cell fingerprint selected a catalog entry whose full key differs from the signed link key. The SDK refuses before network I/O |
+| `qurl.ErrQurlUserKeyMismatch` | The fragment private key does not derive the issuer-signed visitor public key. The SDK refuses before network I/O |
+| `qurl.ErrPortalNativeOnly` | `PortalOpener` has no native cell catalog and will not use the relay fallback |
+| `qurl.ErrPortalOpenerNotStarted` | `PortalOpener.Do` ran before the first `Start` attempt completed; a failed attempt changes this to not-ready |
+| `qurl.ErrPortalOpenerNotReady` | The proactive opener has no unexpired cached handle. `Do` does not wait or open on the request path |
+| `qurl.ErrPortalOpenerClosed` | `PortalOpener` was used after `Close` |
+| `qurl.ErrPortalTargetChanged` | A proactive renewal authenticated a different target, so the opener kept the prior handle and failed closed |
+| `qurl.ErrPortalRedirect` | A request configured with `RejectPortalRedirects` received a redirect, or a default-policy redirect changed origin |
 | `*qurl.ServerDenyError` | An authenticated platform deny: the reply verified, but access was refused — an expired, revoked, or consumed qURL, or a server-side access check. Also raised by the registered-agent knock path (`KnockRegisteredAgent`) when the assigned cell denies an admission |
 
 **Agent lifecycle — `ConnectAgentRuntime`, refresh, recovery, knock**

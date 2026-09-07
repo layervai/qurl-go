@@ -76,7 +76,7 @@ func installStaticProvider(t *testing.T, ts *TrustStore, allow *RelayAllowlist) 
 // --- StaticProvider construction -------------------------------------------
 
 func TestNewStaticProvider_ConstructionRules(t *testing.T) {
-	_, ts, _ := vendoredAcceptLink(t)
+	_, ts, _ := generatedAcceptLink(t)
 	allow := relayExampleAllowlist()
 	cells := []CellEntry{{
 		ServerPublicKeyB64: vectorCellKeyB64(t),
@@ -109,7 +109,7 @@ func TestNewStaticProvider_ConstructionRules(t *testing.T) {
 // NewCellCatalog, so the same missing-key/bad-port faults a deployment file
 // would reject surface here rather than degrading that cell to the relay.
 func TestNewStaticProvider_InvalidCellEntriesPropagate(t *testing.T) {
-	_, ts, _ := vendoredAcceptLink(t)
+	_, ts, _ := generatedAcceptLink(t)
 	allow := relayExampleAllowlist()
 
 	for _, tc := range []struct {
@@ -158,7 +158,7 @@ func TestStaticProvider_NilReceiver_FailsClosed(t *testing.T) {
 // parse → verify sig → validate relay_url → derive serverId → build knock with no
 // per-call config.
 func TestEnterPortal_StaticProvider_VerifiesAndRoutes(t *testing.T) {
-	link, ts, cellFingerprint := vendoredAcceptLink(t)
+	link, ts, cellFingerprint := generatedAcceptLink(t)
 	ct := installCapturingTransport(t)
 
 	installStaticProvider(t, ts, relayExampleAllowlist())
@@ -190,7 +190,7 @@ func TestEnterPortal_NoProvider_FailsClosed(t *testing.T) {
 // THROUGH the one-arg EnterPortal, so it exercises the real verify path (the provider
 // only supplies anchors; it does not itself check the kid).
 func TestEnterPortal_StaticProvider_UnknownKID_Rejected(t *testing.T) {
-	link, _, _ := vendoredAcceptLink(t)
+	link, _, _ := generatedAcceptLink(t)
 	// A provider whose trust store does NOT contain the vector's kid.
 	installStaticProvider(t, freshTrustStore(t), relayExampleAllowlist())
 
@@ -205,7 +205,7 @@ func TestEnterPortal_StaticProvider_UnknownKID_Rejected(t *testing.T) {
 // (so the signature verifies) but an allowlist that does NOT contain the verified
 // relay_url, proving the allowlist is enforced AFTER signature verification.
 func TestEnterPortal_StaticProvider_RelayOffAllowlist_Rejected(t *testing.T) {
-	link, ts, _ := vendoredAcceptLink(t)
+	link, ts, _ := generatedAcceptLink(t)
 	installStaticProvider(t, ts, NewRelayAllowlist([]string{"not-the-relay.example.org"}))
 
 	_, err := EnterPortal(context.Background(), link)

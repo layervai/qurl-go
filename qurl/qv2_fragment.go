@@ -146,6 +146,16 @@ func decodeClaimsCellPublicKey(c *Claims) ([]byte, error) {
 	return decodeX25519PublicKey(fieldCellPublicKeyB64, c.CellPublicKeyB64)
 }
 
+// decodeClaimsQurlUserPublicKey returns the raw 32-byte X25519 public key from
+// VERIFIED claims. Callers compare it with the public key derived from the
+// secret block before using that private key as a Noise identity.
+func decodeClaimsQurlUserPublicKey(c *Claims) ([]byte, error) {
+	if c == nil {
+		return nil, fmt.Errorf("%w: nil claims", ErrStrictParse)
+	}
+	return decodeX25519PublicKey(fieldQurlUserPublicKeyB64, c.QurlUserPublicKeyB64)
+}
+
 // decodeSecretQurlUserPrivateKey returns the raw 32-byte X25519 per-qURL private key
 // from the secret block, used as the Noise agent static identity for the knock.
 func decodeSecretQurlUserPrivateKey(s *Secret) ([]byte, error) {

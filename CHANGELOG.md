@@ -6,6 +6,34 @@ independently under `awsstore/vX.Y.Z` tags.
 Pre-1.0 semantic versioning: breaking changes land in minor versions (v0.N.0)
 and are marked **Breaking** with what to change.
 
+## v0.13.0 — 2026-09-06
+
+- Added `PortalOpener` for long-running services that call one NHP-protected
+  target. `Start` opens and proactively renews one native UDP admission;
+  request handling uses only the cached authenticated handle and does not repeat
+  qURL verification, deployment discovery, cell DNS, an NHP knock, or a retry
+  wait. The HTTP client still owns the normal target connection and its DNS.
+  `Do` pins the exact authenticated target and supports same-origin redirects or
+  strict redirect rejection for signed requests. `Health` is secret-free, and
+  `Close` cancels discovery and transport work, waits for Start and renewal to
+  stop, and clears retained state. Applications must drain concurrent `Do`
+  calls before `Close` when shutdown needs a strict outbound-request fence.
+  Background renewal retries with capped backoff for the full remaining
+  lifetime of the cached admission, then stops at expiry. Successful opens
+  have a five-second minimum gap before another renewal can start.
+- **Breaking:** portal opens now prove that the fragment's X25519 private key
+  derives the issuer-signed visitor public key. They also compare the full
+  signed cell key with the deployment catalog key after the compact fingerprint
+  lookup. Both mismatches fail before DNS or transport I/O. Minters must derive
+  the signed `qurl_user_public_key_b64` claim from the matching fragment private
+  key.
+- **Breaking:** `qurl.Config` now has private native-transport state. Use keyed
+  `qurl.Config` literals; downstream unkeyed composite literals no longer
+  compile.
+- Portal retries use a private visitor capability instead of retaining or
+  serializing the qURL fragment secret. The capability stays process-local and
+  is cleared with the portal state.
+
 ## v0.12.0 — 2026-09-02
 
 - **Breaking:** the CRID share operator is renamed, with no compatibility

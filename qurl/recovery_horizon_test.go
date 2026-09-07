@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -77,6 +78,22 @@ func assignmentResultWithTicketExpiry(t *testing.T, body, ticket string, expiry 
 	list := envelope["list"].(map[string]any)
 	list["assignment_ticket"] = ticket
 	list["assignment_ticket_expires_at"] = expiry.UTC().Format(time.RFC3339)
+	encoded, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(encoded)
+}
+
+func assignmentResultWithLeaseExpiry(t *testing.T, body string, expiry time.Time) string {
+	t.Helper()
+	var envelope map[string]any
+	if err := json.Unmarshal([]byte(body), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	list := envelope["list"].(map[string]any)
+	assignment := list["assignment"].(map[string]any)
+	assignment["lease_expires_at"] = expiry.UTC().Format(time.RFC3339)
 	encoded, err := json.Marshal(envelope)
 	if err != nil {
 		t.Fatal(err)
@@ -951,27 +968,30 @@ func TestConnectAgentRuntime_ReplacementOTPCannotCrossOriginalDeadline(t *testin
 	contract := loadAssignmentFixture(t)
 	first := accountAssignmentResult(contract, "conformance-account-assignment-ticket-0001")
 	second := accountAssignmentResult(contract, "conformance-account-assignment-ticket-0002")
+	initial, err := parseInitialAssignmentReply([]byte(first), "agent-conform", assignmentFixtureNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := initial.AssignmentTicketExpiresAt.Add(AgentRegistrationRecoveryHorizon)
+	second = assignmentResultWithTicketExpiry(t, second, "conformance-account-assignment-ticket-0002", deadline.Add(time.Minute))
+	second = assignmentResultWithLeaseExpiry(t, second, deadline.Add(2*time.Minute))
+	var replacementReplyStarted atomic.Bool
 	f := newRuntimeFixture(t,
 		[]runtimeUDPStep{
 			{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: first},
-			{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: second},
+			{
+				requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: second,
+				// Move the test clock at the exact protocol boundary. A resolver-call
+				// count is transport-implementation-dependent and made this test
+				// intermittent on macOS under load.
+				beforeReply: func() { replacementReplyStarted.Store(true) },
+			},
 		},
 		[]runtimeUDPStep{
 			{requestType: relayknock.TypeOTP, noReply: true},
 			{requestType: relayknock.TypeRegister, replyType: relayknock.TypeRegisterAck, replyBody: `{"errCode":"52101","errMsg":"expired","aspId":"agent"}`},
 		},
 	)
-	now := assignmentFixtureNow
-	cellResolutions := 0
-	resolver := runtimeResolverFunc(func(ctx context.Context, network, host string) ([]netip.Addr, error) {
-		if host == "cell0.nhp.layerv.ai" {
-			cellResolutions++
-			if cellResolutions == 3 {
-				now = assignmentFixtureNow.Add(15*time.Minute + AgentRegistrationRecoveryHorizon)
-			}
-		}
-		return f.resolver.LookupNetIP(ctx, network, host)
-	})
 	codes := []string{"12345678", "87654321"}
 	callbacks := 0
 	provider := func(context.Context, AgentOTPChallenge) (string, error) {
@@ -980,11 +1000,18 @@ func TestConnectAgentRuntime_ReplacementOTPCannotCrossOriginalDeadline(t *testin
 		return code, nil
 	}
 
-	_, _, err := connectWithEnrollment(
+	_, _, err = connectWithEnrollment(
 		context.Background(), conformance.AgentAssignmentAccountCredentialFixture, f.store,
 		f.options(
-			withAgentRuntimeClock(func() time.Time { return now }),
-			WithAgentRuntimeUDPResolver(resolver),
+			withAgentRuntimeClock(func() time.Time {
+				// Every clock read after the Hub begins the replacement reply sees
+				// the original recovery deadline. The replacement assignment stays
+				// parseable, but the recovery boundary blocks its OTP.
+				if replacementReplyStarted.Load() {
+					return deadline
+				}
+				return assignmentFixtureNow
+			}),
 			WithAgentRuntimeAllowedRegistrationKeyKinds(RegistrationKeyKindAccount),
 			WithAgentRuntimeOTPProvider(provider),
 		)...,

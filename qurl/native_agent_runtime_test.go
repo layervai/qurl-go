@@ -39,6 +39,7 @@ type runtimeUDPStep struct {
 	reknockCookie     []byte
 	replyCounterDelta uint64
 	noReply           bool
+	beforeReply       func()
 }
 
 type runtimeUDPRequest struct {
@@ -114,6 +115,9 @@ func (s *runtimeUDPServer) serve() {
 			if step.noReply {
 				continue
 			}
+			if step.beforeReply != nil {
+				step.beforeReply()
+			}
 			if err := s.writeReply(remote, step.replyType, opened.Counter+step.replyCounterDelta, []byte(step.replyBody), stepIndex*2+1); err != nil {
 				s.t.Logf("write runtime assignment result: %v", err)
 			}
@@ -174,6 +178,9 @@ func (s *runtimeUDPServer) serve() {
 		}
 		if step.noReply {
 			continue
+		}
+		if step.beforeReply != nil {
+			step.beforeReply()
 		}
 		replyBody := step.replyBody
 		if step.replyType == relayknock.TypeCookieChallenge && len(step.reknockCookie) != 0 {
