@@ -70,10 +70,12 @@ They are not a recovery fallback for Connector startup: if native continuity
 state is missing or the NHP exchange fails, stop and repair that state instead
 of adopting an HTTPS lookup result.
 
-Use the immutable resource id when it is available:
+Use the CRID for management requests. Public keys and private storage IDs are
+not accepted as request identifiers; there is no compatibility fallback. A
+management response must include a CRID that matches its returned public key:
 
 ```go
-resource, err := client.GetConnectorResource(ctx, cachedResourceID)
+resource, err := client.GetConnectorResource(ctx, cachedCRID)
 ```
 
 An attended management tool can also look up the active owner-scoped Connector
@@ -103,7 +105,7 @@ the broader `ErrInvalidConnectorResourceResponse` sentinel.
 ## Revoke a resource
 
 ```go
-err := client.DeleteConnectorResource(ctx, resource.ResourceID)
+err := client.DeleteConnectorResource(ctx, resource.CRID)
 ```
 
 Delete expects the API's `204 No Content` response. Other SDK methods still

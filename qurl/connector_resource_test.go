@@ -44,6 +44,7 @@ import (
 const (
 	// Real P-256 DER SPKI public keys from the fenced qurl-service OpenAPI
 	// examples keep lifecycle fixtures on the canonical public resource ID.
+	testConnectorCRID    = "ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a"
 	testConnectorID      = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE2cTVv5_3eeYCcLLq5ROYCqcmY50HiKZ9ATglIkPnCji1E_S63UMtXba1moR8-Q6EV7oM6zwwh9_j2CDujzXvLA"
 	testOtherConnectorID = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEoZLdT1C_J8lCh_mpQXJMoRzKi3Q_C5TnVQFYW0Cz5L5Jo83djulhze84U_rrhnUVQQRajXmUQKn-VQ8jR-qatA"
 	// Deliberately opaque rather than derived in this SDK test: the producer
@@ -174,7 +175,7 @@ func TestClient_EnsureConnectorResourceContract(t *testing.T) {
 				}
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusCreated)
-				fmt.Fprintf(w, `{"data":{"resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q,"alias":"dashboard-display"},"meta":{"request_id":"req-1","found_existing":%t}}`, testConnectorID, testConnectorRoutingID, testKnockID, testConnectorSlug, foundExisting)
+				fmt.Fprintf(w, `{"data":{"crid":"ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a","resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q,"alias":"dashboard-display"},"meta":{"request_id":"req-1","found_existing":%t}}`, testConnectorID, testConnectorRoutingID, testKnockID, testConnectorSlug, foundExisting)
 			}))
 			defer api.Close()
 
@@ -224,7 +225,7 @@ func TestClient_GetConnectorResourceDetailEnvelope(t *testing.T) {
 	t.Parallel()
 
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.URL.Path != "/v1/resources/"+testConnectorID || r.URL.RawQuery != "" {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/resources/"+testConnectorCRID || r.URL.RawQuery != "" {
 			t.Errorf("request = %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
 			http.Error(w, "unexpected request", http.StatusBadRequest)
 			return
@@ -236,11 +237,11 @@ func TestClient_GetConnectorResourceDetailEnvelope(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"data":{"resource":{"resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q,"alias":null},"qurls":[]},"meta":{"request_id":"req-2"}}`, testConnectorID, testConnectorRoutingID, testKnockID, testConnectorSlug)
+		fmt.Fprintf(w, `{"data":{"resource":{"crid":"ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a","resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q,"alias":null},"qurls":[]},"meta":{"request_id":"req-2"}}`, testConnectorID, testConnectorRoutingID, testKnockID, testConnectorSlug)
 	}))
 	defer api.Close()
 
-	resource, err := newConnectorTestClient(t, api.URL).GetConnectorResource(context.Background(), testConnectorID)
+	resource, err := newConnectorTestClient(t, api.URL).GetConnectorResource(context.Background(), testConnectorCRID)
 	if err != nil {
 		t.Fatalf("GetConnectorResource: %v", err)
 	}
@@ -249,41 +250,19 @@ func TestClient_GetConnectorResourceDetailEnvelope(t *testing.T) {
 	}
 }
 
-// TestClient_ConnectorResourceCarriesOptionalCRID pins the additive crid
-// field on the shared producer serializer: a producer that returns it is
-// carried verbatim (presence-only — the producer is authoritative for its
-// own derivation, and the client-side trust rule is the crid package's
-// delivered-key match, not a wire gate here), and a producer that predates
-// the field yields an empty CRID rather than an invalid-response error.
-func TestClient_ConnectorResourceCarriesOptionalCRID(t *testing.T) {
-	t.Parallel()
-
-	heldCRID, _, _ := cridKeyMatchFixture(t)
-	for _, tt := range []struct {
-		name     string
-		cridJSON string // raw JSON fragment appended after resource_id
-		wantCRID string
-	}{
-		{name: "producer returns crid", cridJSON: fmt.Sprintf(`"crid":%q,`, heldCRID), wantCRID: heldCRID},
-		{name: "producer predates crid", cridJSON: "", wantCRID: ""},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
+func TestClient_ConnectorResourceRequiresBoundCRID(t *testing.T) {
+	for _, value := range []string{"", "invalid", "ae4jqpd7eaoslq7jinmjv4yikgzmcxgpjfsuobiniqnko32lpw743ivbeyha"} {
+		t.Run(value, func(t *testing.T) {
 			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				assertConnectorAuthorization(t, r)
-				w.Header().Set("Content-Type", "application/json")
-				fmt.Fprintf(w, `{"data":{"resource":{"resource_id":%q,%s"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q,"alias":null},"qurls":[]},"meta":{"request_id":"req-crid"}}`,
-					testConnectorID, tt.cridJSON, testConnectorRoutingID, testKnockID, testConnectorSlug)
+				if r.URL.Path != "/v1/resources/"+testConnectorCRID {
+					t.Errorf("unexpected request path: %s", r.URL.Path)
+				}
+				fmt.Fprintf(w, `{"data":{"resource":{"resource_id":%q,"crid":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q}}}`, testConnectorID, value, testConnectorRoutingID, testKnockID, testConnectorSlug)
 			}))
 			defer api.Close()
-
-			resource, err := newConnectorTestClient(t, api.URL).GetConnectorResource(context.Background(), testConnectorID)
-			if err != nil {
-				t.Fatalf("GetConnectorResource: %v", err)
-			}
-			if resource.CRID != tt.wantCRID {
-				t.Fatalf("resource CRID = %q, want %q", resource.CRID, tt.wantCRID)
+			_, err := newConnectorTestClient(t, api.URL).GetConnectorResource(context.Background(), testConnectorCRID)
+			if !errors.Is(err, ErrInvalidConnectorResourceResponse) {
+				t.Fatalf("error = %v", err)
 			}
 		})
 	}
@@ -305,7 +284,7 @@ func TestClient_GetConnectorResourceBySlugDoesNotConflateAlias(t *testing.T) {
 		}
 		assertConnectorAuthorization(t, r)
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"data":[{"resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q,"alias":"renamed-display"}],"meta":{"request_id":"req-3"}}`, testConnectorID, testConnectorRoutingID, testKnockID, testConnectorSlug)
+		fmt.Fprintf(w, `{"data":[{"crid":"ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a","resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q,"alias":"renamed-display"}],"meta":{"request_id":"req-3"}}`, testConnectorID, testConnectorRoutingID, testKnockID, testConnectorSlug)
 	}))
 	defer api.Close()
 
@@ -322,7 +301,7 @@ func TestClient_DeleteConnectorResourceNoBody(t *testing.T) {
 	t.Parallel()
 
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodDelete || r.URL.Path != "/v1/resources/"+testConnectorID || r.URL.RawQuery != "" {
+		if r.Method != http.MethodDelete || r.URL.Path != "/v1/resources/"+testConnectorCRID || r.URL.RawQuery != "" {
 			t.Errorf("request = %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
 			http.Error(w, "unexpected request", http.StatusBadRequest)
 			return
@@ -337,7 +316,7 @@ func TestClient_DeleteConnectorResourceNoBody(t *testing.T) {
 	}))
 	defer api.Close()
 
-	if err := newConnectorTestClient(t, api.URL).DeleteConnectorResource(context.Background(), testConnectorID); err != nil {
+	if err := newConnectorTestClient(t, api.URL).DeleteConnectorResource(context.Background(), testConnectorCRID); err != nil {
 		t.Fatalf("DeleteConnectorResource: %v", err)
 	}
 }
@@ -360,7 +339,7 @@ func TestClient_DeleteConnectorResourceRequiresExactEmpty204(t *testing.T) {
 			t.Parallel()
 			client := newConnectorTestClient(t, "http://localhost")
 			client.httpClient = doerFunc(func(r *http.Request) (*http.Response, error) {
-				if r.Method != http.MethodDelete || r.URL.Path != "/v1/resources/"+testConnectorID {
+				if r.Method != http.MethodDelete || r.URL.Path != "/v1/resources/"+testConnectorCRID {
 					t.Fatalf("request = %s %s", r.Method, r.URL.Path)
 				}
 				assertConnectorAuthorization(t, r)
@@ -371,7 +350,7 @@ func TestClient_DeleteConnectorResourceRequiresExactEmpty204(t *testing.T) {
 					Request:    r,
 				}, nil
 			})
-			err := client.DeleteConnectorResource(context.Background(), testConnectorID)
+			err := client.DeleteConnectorResource(context.Background(), testConnectorCRID)
 			if !errors.Is(err, ErrInvalidAPIResponse) || !errors.Is(err, ErrInvalidConnectorResourceResponse) {
 				t.Fatalf("error = %v, want invalid API and connector response sentinels", err)
 			}
@@ -389,9 +368,9 @@ func TestClient_DeleteConnectorResourceRequiresExactEmpty204(t *testing.T) {
 func TestClient_ConnectorResourceRequiresExactJSONStatus(t *testing.T) {
 	t.Parallel()
 
-	ensureBody := fmt.Sprintf(`{"data":{"resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q},"meta":{"found_existing":false}}`, testConnectorID, testConnectorRoutingID, testKnockID, testConnectorSlug)
-	detailBody := fmt.Sprintf(`{"data":{"resource":{"resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q}}}`, testConnectorID, testConnectorRoutingID, testKnockID, testConnectorSlug)
-	listBody := fmt.Sprintf(`{"data":[{"resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q}]}`, testConnectorID, testConnectorRoutingID, testKnockID, testConnectorSlug)
+	ensureBody := fmt.Sprintf(`{"data":{"crid":"ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a","resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q},"meta":{"found_existing":false}}`, testConnectorID, testConnectorRoutingID, testKnockID, testConnectorSlug)
+	detailBody := fmt.Sprintf(`{"data":{"resource":{"crid":"ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a","resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q}}}`, testConnectorID, testConnectorRoutingID, testKnockID, testConnectorSlug)
+	listBody := fmt.Sprintf(`{"data":[{"crid":"ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a","resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q}]}`, testConnectorID, testConnectorRoutingID, testKnockID, testConnectorSlug)
 	tests := []struct {
 		name        string
 		status      int
@@ -440,17 +419,17 @@ func TestClient_ConnectorResourceCreatePortal(t *testing.T) {
 			name:        "by slug",
 			lookupPath:  "/v1/resources",
 			lookupQuery: "slug=" + testConnectorSlug,
-			lookupBody:  fmt.Sprintf(`{"data":[{"resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q}]}`, testConnectorID, testConnectorRoutingID, testKnockID, testConnectorSlug),
+			lookupBody:  fmt.Sprintf(`{"data":[{"crid":"ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a","resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q}]}`, testConnectorID, testConnectorRoutingID, testKnockID, testConnectorSlug),
 			lookupResource: func(client *Client) (*ConnectorResource, error) {
 				return client.GetConnectorResourceBySlug(context.Background(), testConnectorSlug)
 			},
 		},
 		{
 			name:       "by id",
-			lookupPath: "/v1/resources/" + testConnectorID,
-			lookupBody: fmt.Sprintf(`{"data":{"resource":{"resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q}}}`, testConnectorID, testConnectorRoutingID, testKnockID, testConnectorSlug),
+			lookupPath: "/v1/resources/" + testConnectorCRID,
+			lookupBody: fmt.Sprintf(`{"data":{"resource":{"crid":"ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a","resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q}}}`, testConnectorID, testConnectorRoutingID, testKnockID, testConnectorSlug),
 			lookupResource: func(client *Client) (*ConnectorResource, error) {
-				return client.GetConnectorResource(context.Background(), testConnectorID)
+				return client.GetConnectorResource(context.Background(), testConnectorCRID)
 			},
 		},
 	}
@@ -469,12 +448,12 @@ func TestClient_ConnectorResourceCreatePortal(t *testing.T) {
 					}
 					fmt.Fprint(w, tt.lookupBody)
 				case 2:
-					if r.Method != http.MethodPost || r.URL.Path != "/v1/resources/"+testConnectorID+"/qurls" {
+					if r.Method != http.MethodPost || r.URL.Path != "/v1/resources/"+testConnectorCRID+"/qurls" {
 						t.Errorf("portal request = %s %s", r.Method, r.URL.Path)
 						http.Error(w, "unexpected portal request", http.StatusBadRequest)
 						return
 					}
-					fmt.Fprintf(w, `{"data":{"resource_id":%q,"qurl_link":"https://qurl.link/at_connector"}}`, testConnectorID)
+					fmt.Fprintf(w, `{"data":{"crid":"ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a","resource_id":%q,"qurl_link":"https://qurl.link/at_connector"}}`, testConnectorID)
 				default:
 					t.Errorf("unexpected request %d", requests.Load())
 					http.Error(w, "unexpected request", http.StatusBadRequest)
@@ -503,6 +482,7 @@ func TestConnectorResourceCreatePortalRejectsNilOrUnbound(t *testing.T) {
 	bound := &ConnectorResource{
 		client:             &Client{},
 		ResourceID:         testConnectorID,
+		CRID:               testConnectorCRID,
 		ConnectorRoutingID: testConnectorRoutingID,
 		KnockResourceID:    testKnockID,
 		Slug:               testConnectorSlug,
@@ -617,7 +597,7 @@ func ensureConnectorResourceError(c *Client) error {
 }
 
 func getConnectorResourceError(c *Client) error {
-	_, err := c.GetConnectorResource(context.Background(), testConnectorID)
+	_, err := c.GetConnectorResource(context.Background(), testConnectorCRID)
 	return err
 }
 
@@ -627,7 +607,7 @@ func getConnectorResourceBySlugError(c *Client) error {
 }
 
 func deleteConnectorResourceError(c *Client) error {
-	return c.DeleteConnectorResource(context.Background(), testConnectorID)
+	return c.DeleteConnectorResource(context.Background(), testConnectorCRID)
 }
 
 func TestClient_ConnectorResourceMutationNon4xxOutcomeUnknown(t *testing.T) {
@@ -679,7 +659,7 @@ func TestClient_ConnectorResourceMutationNon4xxOutcomeUnknown(t *testing.T) {
 func TestClient_ConnectorResourceSuccessfulResponseValidation(t *testing.T) {
 	t.Parallel()
 
-	valid := fmt.Sprintf(`{"data":{"resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q},"meta":{"found_existing":false}}`, testConnectorID, testConnectorRoutingID, testKnockID, testConnectorSlug)
+	valid := fmt.Sprintf(`{"data":{"crid":"ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a","resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q},"meta":{"found_existing":false}}`, testConnectorID, testConnectorRoutingID, testKnockID, testConnectorSlug)
 	tests := []struct {
 		name         string
 		body         string
@@ -712,7 +692,7 @@ func TestClient_ConnectorResourceSuccessfulResponseValidation(t *testing.T) {
 		{name: "empty alias", body: strings.Replace(valid, `},"meta"`, `,"alias":""},"meta"`, 1), want: ErrInvalidConnectorResourceResponse},
 		{name: "missing found existing", body: strings.Replace(valid, `,"meta":{"found_existing":false}`, "", 1), want: ErrInvalidConnectorResourceResponse, outcomeKnown: true},
 		{name: "invalid resource and missing found existing reports resource first", body: strings.Replace(strings.Replace(valid, `"resource_id":"`+testConnectorID+`",`, "", 1), `,"meta":{"found_existing":false}`, "", 1), want: ErrInvalidConnectorResourceResponse, wantDetail: "missing or invalid resource_id"},
-		{name: "detail envelope on create", body: fmt.Sprintf(`{"data":{"resource":{"resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q}},"meta":{"found_existing":false}}`, testConnectorID, testConnectorRoutingID, testKnockID, testConnectorSlug), want: ErrInvalidConnectorResourceResponse},
+		{name: "detail envelope on create", body: fmt.Sprintf(`{"data":{"resource":{"crid":"ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a","resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q}},"meta":{"found_existing":false}}`, testConnectorID, testConnectorRoutingID, testKnockID, testConnectorSlug), want: ErrInvalidConnectorResourceResponse},
 		{name: "revoked success row", body: strings.Replace(valid, `"status":"active"`, `"status":"revoked"`, 1), want: ErrInvalidConnectorResourceResponse},
 	}
 	for _, tt := range tests {
@@ -761,6 +741,7 @@ func TestConnectorResourceWireAllowsControlPlaneValueEqualToSlug(t *testing.T) {
 			t.Parallel()
 			wire := connectorResourceWire{
 				ResourceID:         testConnectorID,
+				CRID:               testConnectorCRID,
 				ConnectorRoutingID: testConnectorRoutingID,
 				KnockResourceID:    testKnockID,
 				Type:               producerConnectorResourceType,
@@ -789,7 +770,7 @@ func TestClient_ConnectorResourceRevokedSuccessRows(t *testing.T) {
 		t.Helper()
 		client := newConnectorTestClient(t, "http://localhost")
 		client.httpClient = staticConnectorResponseDoer(http.StatusOK, body)
-		_, err := client.GetConnectorResource(context.Background(), testConnectorID)
+		_, err := client.GetConnectorResource(context.Background(), testConnectorCRID)
 		return err
 	}
 	getBySlug := func(t *testing.T, body string) error {
@@ -800,7 +781,7 @@ func TestClient_ConnectorResourceRevokedSuccessRows(t *testing.T) {
 		return err
 	}
 
-	detail := fmt.Sprintf(`{"data":{"resource":{"resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"revoked","slug":%q}}}`, testConnectorID, testConnectorRoutingID, testKnockID, testConnectorSlug)
+	detail := fmt.Sprintf(`{"data":{"resource":{"crid":"ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a","resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"revoked","slug":%q}}}`, testConnectorID, testConnectorRoutingID, testKnockID, testConnectorSlug)
 	if err := getByID(t, detail); !errors.Is(err, ErrConnectorResourceRevoked) || errors.Is(err, ErrConnectorResourceTombstoned) || errors.Is(err, ErrInvalidConnectorResourceResponse) {
 		t.Fatalf("detail revoked row = %v, want revoked", err)
 	}
@@ -823,7 +804,7 @@ func TestClient_ConnectorResourceRevokedSuccessRows(t *testing.T) {
 		})
 	}
 
-	list := fmt.Sprintf(`{"data":[{"resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"revoked","slug":%q}]}`, testConnectorID, testConnectorRoutingID, testKnockID, testConnectorSlug)
+	list := fmt.Sprintf(`{"data":[{"crid":"ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a","resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"revoked","slug":%q}]}`, testConnectorID, testConnectorRoutingID, testKnockID, testConnectorSlug)
 	if err := getBySlug(t, list); !errors.Is(err, ErrInvalidAPIResponse) || !errors.Is(err, ErrInvalidConnectorResourceResponse) || errors.Is(err, ErrConnectorResourceRevoked) || errors.Is(err, ErrConnectorResourceTombstoned) {
 		t.Fatalf("active-only slug revoked row = %v, want invalid response", err)
 	}
@@ -834,6 +815,7 @@ func TestConnectorResourceOpaqueKnockIDContract(t *testing.T) {
 
 	wire := connectorResourceWire{
 		ResourceID:         testConnectorID,
+		CRID:               testConnectorCRID,
 		ConnectorRoutingID: testConnectorRoutingID,
 		KnockResourceID:    "producer owned admission target",
 		Type:               producerConnectorResourceType,
@@ -899,7 +881,7 @@ func TestClient_GetConnectorResourceBySlugRejectsMissingData(t *testing.T) {
 func TestClient_GetConnectorResourceBySlugRejectsMismatchedSlug(t *testing.T) {
 	t.Parallel()
 
-	body := fmt.Sprintf(`{"data":[{"resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":"other-dashboard"}]}`, testConnectorID, testConnectorRoutingID, testKnockID)
+	body := fmt.Sprintf(`{"data":[{"crid":"ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a","resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":"other-dashboard"}]}`, testConnectorID, testConnectorRoutingID, testKnockID)
 	client := newConnectorTestClient(t, "http://localhost")
 	client.httpClient = staticConnectorResponseDoer(http.StatusOK, body)
 	_, err := client.GetConnectorResourceBySlug(context.Background(), testConnectorSlug)
@@ -919,11 +901,11 @@ func TestClient_GetConnectorResourceRejectsFlatOrMismatchedDetail(t *testing.T) 
 		{name: "null resource", body: `{"data":{"resource":null}}`},
 		{
 			name: "flat data",
-			body: fmt.Sprintf(`{"data":{"resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q}}`, testConnectorID, testConnectorRoutingID, testKnockID, testConnectorSlug),
+			body: fmt.Sprintf(`{"data":{"crid":"ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a","resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q}}`, testConnectorID, testConnectorRoutingID, testKnockID, testConnectorSlug),
 		},
 		{
 			name: "mismatched id",
-			body: fmt.Sprintf(`{"data":{"resource":{"resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q}}}`, testOtherConnectorID, testConnectorRoutingID, testKnockID, testConnectorSlug),
+			body: fmt.Sprintf(`{"data":{"resource":{"crid":"ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a","resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q}}}`, testOtherConnectorID, testConnectorRoutingID, testKnockID, testConnectorSlug),
 		},
 	}
 	for _, tt := range tests {
@@ -933,7 +915,7 @@ func TestClient_GetConnectorResourceRejectsFlatOrMismatchedDetail(t *testing.T) 
 				fmt.Fprint(w, tt.body)
 			}))
 			defer api.Close()
-			_, err := newConnectorTestClient(t, api.URL).GetConnectorResource(context.Background(), testConnectorID)
+			_, err := newConnectorTestClient(t, api.URL).GetConnectorResource(context.Background(), testConnectorCRID)
 			if !errors.Is(err, ErrInvalidAPIResponse) || !errors.Is(err, ErrInvalidConnectorResourceResponse) {
 				t.Fatalf("error = %v, want malformed detail", err)
 			}
@@ -984,7 +966,7 @@ func TestClient_ConnectorResourceMethodsRejectNilClient(t *testing.T) {
 			return err
 		}},
 		{name: "get by id", call: func() error {
-			_, err := client.GetConnectorResource(context.Background(), testConnectorID)
+			_, err := client.GetConnectorResource(context.Background(), testConnectorCRID)
 			return err
 		}},
 		{name: "get by slug", call: func() error {
@@ -992,7 +974,7 @@ func TestClient_ConnectorResourceMethodsRejectNilClient(t *testing.T) {
 			return err
 		}},
 		{name: "delete", call: func() error {
-			return client.DeleteConnectorResource(context.Background(), testConnectorID)
+			return client.DeleteConnectorResource(context.Background(), testConnectorCRID)
 		}},
 	}
 	for _, tt := range tests {
@@ -1314,5 +1296,21 @@ func assertConnectorAuthorization(t *testing.T, r *http.Request) {
 	t.Helper()
 	if got, want := r.Header.Get("Authorization"), "Bearer "+testDeviceToken; got != want {
 		t.Errorf("Authorization = %q, want %q", got, want)
+	}
+}
+
+func TestClient_ConnectorManagementRejectsPublicKeyAndStorageID(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		t.Error("invalid Connector identifier reached HTTP")
+	}))
+	defer api.Close()
+	client := newConnectorTestClient(t, api.URL)
+	for _, id := range []string{testConnectorID, "r_private", "", "at_secret", testConnectorCRID + "a"} {
+		if _, err := client.GetConnectorResource(context.Background(), id); !errors.Is(err, ErrInvalidResourceRequest) {
+			t.Fatalf("get error = %v", err)
+		}
+		if err := client.DeleteConnectorResource(context.Background(), id); !errors.Is(err, ErrInvalidResourceRequest) {
+			t.Fatalf("delete error = %v", err)
+		}
 	}
 }

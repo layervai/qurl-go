@@ -8,6 +8,12 @@ and are marked **Breaking** with what to change.
 
 ## Unreleased
 
+- **Breaking:** Connector management get/delete and handle-based portal minting
+  require CRIDs. Responses must bind the CRID to the returned public key.
+  Pass `resource.CRID`; public-key arguments and CRID-less management responses
+  are rejected without a compatibility fallback. Native NHP continuity still
+  uses its protocol-defined public-key pin.
+
 - **Breaking:** `PortalOpener.Close` now cancels active protected requests and
   response-body reads and blocks later redirect legs. A caller-canceled first
   `Start` returns the opener to `new` without recording a platform failure.
