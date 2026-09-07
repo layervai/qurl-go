@@ -105,11 +105,8 @@ func (r shareResourceResponse) shareLink() (*ShareLink, error) {
 }
 
 // ShareResource asks LayerV to mint a fresh share link — a short-lived qURL
-// access link — for an existing resource. resourceID accepts either
-// identifier form the platform serves — the public-key resource id or the
-// resource's CRID — and, like the other resource methods, is validated for
-// presence only: the server is authoritative for which identifiers it
-// accepts, so the SDK does not pre-judge the form locally.
+// access link — for an existing CRID. Public keys are verification data,
+// not resource locators.
 //
 // The CRID is safe to paste anywhere; the share link is the secret, and
 // sharing is what turns the identifier into access. Each link expires on its
@@ -137,8 +134,8 @@ func (c *Client) ShareResource(ctx context.Context, resourceID string, opts *Sha
 	if c == nil {
 		return nil, fmt.Errorf("%w: nil client", ErrInvalidClientConfig)
 	}
-	if strings.TrimSpace(resourceID) == "" {
-		return nil, fmt.Errorf("%w: resource id must not be empty", ErrInvalidResourceRequest)
+	if err := crid.Validate(resourceID); err != nil {
+		return nil, fmt.Errorf("%w: share requires a valid CRID", ErrInvalidResourceRequest)
 	}
 	var reqBody shareResourceRequest
 	if opts != nil {
@@ -159,6 +156,9 @@ func (c *Client) ShareResource(ctx context.Context, resourceID string, opts *Sha
 			return nil, fmt.Errorf("%w: %w", ErrTemporaryAccessLinksDisabled, err)
 		}
 		return nil, err
+	}
+	if env.Data.CRID != resourceID {
+		return nil, fmt.Errorf("%w: share response CRID does not match the requested CRID", ErrInvalidAPIResponse)
 	}
 	return env.Data.shareLink()
 }

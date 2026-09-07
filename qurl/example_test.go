@@ -157,7 +157,7 @@ func ExampleResolveRegisteredAgentConnectorResource() {
 	}
 
 	fmt.Println(
-		result.Resource.ResourceID,
+		result.Resource.CRID,
 		result.Resource.ConnectorRoutingID,
 		result.Resource.KnockResourceID,
 		result.FoundExisting,
@@ -221,7 +221,7 @@ func ExamplePrepareLiveNativeSessionOperation() {
 		qurl.NativeSessionOperationInput{
 			PreparedAtMillis: now.UnixMilli(), ExpiresAtMillis: now.Add(20 * time.Minute).UnixMilli(),
 			OwnerID:             "account-owner",
-			ProtectedResourceID: connector.Resource.ResourceID, ResourceID: connector.Resource.KnockResourceID,
+			ProtectedResourceID: connector.Resource.CRID, ResourceID: connector.Resource.KnockResourceID,
 			RunAttempt: 1, RunID: runID,
 		})
 	if err != nil {
