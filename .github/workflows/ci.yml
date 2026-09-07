@@ -194,7 +194,7 @@ jobs:
       # lint context so this hardening does not create a new branch-protection
       # check that could strand unrelated pull requests.
       - name: actionlint
-        uses: reviewdog/action-actionlint@dbe5299849118fd6f099ba563d263d770955a64a # v1.73.2
+        uses: reviewdog/action-actionlint@d290e336d5a743810aef4404f757dc862276d2ae # v1.73.4
 
       # Pinned action + pinned linter version, matching the Makefile's
       # GOLANGCI_LINT_VERSION, so local `make lint` and CI run the same analyzers.
