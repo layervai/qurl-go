@@ -97,6 +97,10 @@ resp, err := opener.Do(ctx, func(target *url.URL) (*http.Request, error) {
 	// the authenticated ACK URL, not caller input.
 	return http.NewRequest(http.MethodPost, target.String(), body)
 }, qurl.RejectPortalRedirects())
+if err != nil {
+	return err
+}
+defer resp.Body.Close()
 ```
 
 Each native NHP open has a 15-second default deadline, including the open made
@@ -142,9 +146,11 @@ response-body reads, then releases the SDK's references to the qURL and session
 material. It cannot retract bytes that a transport already sent, but no later
 redirect leg can start. A body read interrupted by `Close` returns its native
 request-context error, typically `context.Canceled`, not
-`ErrPortalOpenerClosed`. Callers must close every response body. If shutdown
-needs a strict guarantee that no new protected request can leave after the
-shutdown point, stop and drain request handlers before calling `Close`.
+`ErrPortalOpenerClosed`. Callers must close every response body. Until it is
+closed, the body retains the request cancellation hook that lets `Close` abort
+body reads. If shutdown needs a strict guarantee that no new protected request
+can leave after the shutdown point, stop and drain request handlers before
+calling `Close`.
 The opener pins the trust and cell config resolved by `Start` for all background
 renewals. `Close` also cancels an in-progress provider or deployment resolution.
 Call `Start` after a bounded cycle ends if deployment trust or cell routing

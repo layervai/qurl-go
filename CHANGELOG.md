@@ -8,11 +8,11 @@ and are marked **Breaking** with what to change.
 
 ## Unreleased
 
-- `PortalOpener.Close` now cancels active protected requests and response-body
-  reads and blocks later redirect legs. A caller-canceled first `Start` returns
-  the opener to `new` without recording a platform failure. Caller deadlines
-  have the same request-scoped behavior; SDK open timeouts remain platform
-  failures and are matchable with `ErrPortalOpenTimeout`.
+- **Breaking:** `PortalOpener.Close` now cancels active protected requests and
+  response-body reads and blocks later redirect legs. A caller-canceled first
+  `Start` returns the opener to `new` without recording a platform failure.
+  Caller deadlines have the same request-scoped behavior; SDK open timeouts
+  remain platform failures and are matchable with `ErrPortalOpenTimeout`.
 
 ## v0.13.0 — 2026-09-06
 

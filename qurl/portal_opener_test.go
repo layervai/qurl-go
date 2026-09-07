@@ -181,8 +181,13 @@ func TestPortalOpenerOpenTimeoutBoundsStart(t *testing.T) {
 		return nil, ctx.Err()
 	}
 	started := time.Now()
-	if err := opener.Start(context.Background()); !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, ErrPortalOpenTimeout) {
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	if err := opener.Start(ctx); !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, ErrPortalOpenTimeout) {
 		t.Fatalf("Start timeout error = %v, want context deadline exceeded", err)
+	}
+	if err := ctx.Err(); err != nil {
+		t.Fatalf("caller context ended before SDK timeout result: %v", err)
 	}
 	if elapsed := time.Since(started); elapsed > time.Second {
 		t.Fatalf("Start ignored configured open timeout: %s", elapsed)
@@ -238,8 +243,12 @@ func TestPortalOpenerCallerDeadlineDoesNotRecordPlatformFailure(t *testing.T) {
 	}
 	ctx, cancel := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
 	defer cancel()
-	if err := opener.Start(ctx); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("Start error = %v, want context deadline exceeded", err)
+	startErr := opener.Start(ctx)
+	if !errors.Is(startErr, context.DeadlineExceeded) {
+		t.Fatalf("Start error = %v, want context deadline exceeded", startErr)
+	}
+	if errors.Is(startErr, ErrPortalOpenTimeout) {
+		t.Fatalf("caller deadline error = %v, must not match ErrPortalOpenTimeout", startErr)
 	}
 	health := opener.Health()
 	if health.State != PortalOpenerStateNew || health.Ready ||
@@ -334,6 +343,40 @@ func TestPortalOpenerCallerDeadlineDoesNotMaskSDKTimeout(t *testing.T) {
 	if health := opener.Health(); health.State != PortalOpenerStateDegraded || health.Ready ||
 		health.LastFailureClass != PortalOpenerFailureOpen || health.ConsecutiveFailures != 1 {
 		t.Fatalf("SDK-timeout Start health = %+v", health)
+	}
+}
+
+func TestPortalOpenerRealNativeCallerDeadlineDoesNotRecordPlatformFailure(t *testing.T) {
+	link, cfg := portalOpenerFixture(t)
+	resolverEntered := make(chan struct{})
+	cfg.nativeUDPOptions = &nativeudp.Options{
+		Resolver: assignmentTestResolverFunc(func(ctx context.Context, _, _ string) ([]netip.Addr, error) {
+			close(resolverEntered)
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}),
+		Timeout: time.Second, MaxAddresses: 1,
+	}
+	opener, err := NewPortalOpener(link,
+		WithPortalOpenerConfig(cfg), WithPortalOpenerOpenTimeout(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { closePortalOpener(t, opener) })
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	startErr := opener.Start(ctx)
+	if !errors.Is(startErr, context.DeadlineExceeded) || errors.Is(startErr, ErrPortalOpenTimeout) {
+		t.Fatalf("native Start error = %v, want caller deadline only", startErr)
+	}
+	select {
+	case <-resolverEntered:
+	default:
+		t.Fatal("native Start did not reach the real UDP resolver path")
+	}
+	if health := opener.Health(); health.State != PortalOpenerStateNew || health.Ready ||
+		health.LastFailureClass != PortalOpenerFailureNone || health.ConsecutiveFailures != 0 {
+		t.Fatalf("native caller-deadline Start health = %+v", health)
 	}
 }
 

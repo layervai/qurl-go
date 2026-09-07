@@ -660,7 +660,10 @@ func (o *PortalOpener) waitFor(delay time.Duration) bool {
 // redirect legs. Close does not wait for Do and cannot retract bytes already
 // handed to a transport. A returned body read interrupted by Close reports its
 // native request-context error, typically context.Canceled, not
-// ErrPortalOpenerClosed. The caller must close every returned response body.
+// ErrPortalOpenerClosed. If request cancellation and Close happen together,
+// ErrPortalOpenerClosed takes precedence before a response is returned. The
+// caller must close every returned response body; until then, the body retains
+// the request cancellation hook that lets Close abort body reads.
 func (o *PortalOpener) Do(ctx context.Context, build PortalRequestBuilder, options ...PortalRequestOption) (*http.Response, error) {
 	if o == nil {
 		return nil, ErrPortalOpenerClosed
