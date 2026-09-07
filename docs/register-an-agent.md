@@ -78,7 +78,7 @@ Resource setup is a registered-agent `NHP_LST`/`NHP_LRT` exchange sent directly
 to the assigned cell. It does not call the qURL HTTPS API. In production,
 persist `request.RequestNonce` before the first exchange and reuse the exact
 request after an uncertain response; changing any request field under the same
-nonce is rejected. Once a resource is known, pass its exact `ResourceID` as the
+nonce is rejected. Once a resource is known, pass its exact `CRID` as the
 second argument to `NewNativeConnectorResourceRequest` on later starts. That is
 a read-only continuity assertion: LayerV returns that exact active resource or
 fails instead of creating or adopting a replacement.

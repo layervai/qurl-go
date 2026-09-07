@@ -907,8 +907,11 @@ func (c *Client) CreatePortal(ctx context.Context, resource *Resource, opts ...P
 	if err := c.postJSON(ctx, path, reqBody, &env); err != nil {
 		return nil, err
 	}
+	if env.Data.CRID == "" {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidAPIResponse, ErrNoCRID)
+	}
 	if env.Data.CRID != resource.CRID {
-		return nil, fmt.Errorf("%w: portal response CRID differs from request", ErrInvalidAPIResponse)
+		return nil, fmt.Errorf("%w: %w: portal response CRID differs from request", ErrInvalidAPIResponse, ErrCRIDMismatch)
 	}
 	return env.Data.portal()
 }

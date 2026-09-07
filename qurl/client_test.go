@@ -1490,7 +1490,31 @@ func TestClientCreateResponsesRejectMismatchedCRID(t *testing.T) {
 	if result, err := client.ProtectURL(context.Background(), "https://example.com"); result != nil || !errors.Is(err, ErrInvalidAPIResponse) {
 		t.Fatalf("mismatched resource accepted: %v", err)
 	}
-	if resource, portal, err := client.CreatePortalForURL(context.Background(), "https://example.com"); resource != nil || portal != nil || !errors.Is(err, ErrInvalidAPIResponse) {
+	if portal, resource, err := client.CreatePortalForURL(context.Background(), "https://example.com"); resource != nil || portal != nil || !errors.Is(err, ErrInvalidAPIResponse) {
 		t.Fatalf("mismatched portal accepted: %v", err)
+	}
+}
+
+func TestClientCreatePortalRequiresRequestedCRID(t *testing.T) {
+	for _, responseCRID := range []string{"", testConnectorCRID} {
+		t.Run(responseCRID, func(t *testing.T) {
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprintf(w, `{"data":{"resource_id":%q,"crid":%q,"qurl_link":"https://qurl.link/at_demo"}}`, testConnectorID, responseCRID)
+			}))
+			defer api.Close()
+			client, err := NewClient(BearerToken("lv_test"), WithBaseURL(api.URL))
+			if err != nil {
+				t.Fatal(err)
+			}
+			resource := client.ResourceByCRID("aeqq3ixwrzh6k32picwqxzdkc4dkzenxwozcpcw2fstb5uug22dn3akqpppq")
+			want := ErrCRIDMismatch
+			if responseCRID == "" {
+				want = ErrNoCRID
+			}
+			if portal, err := client.CreatePortal(context.Background(), resource); portal != nil || !errors.Is(err, ErrInvalidAPIResponse) || !errors.Is(err, want) {
+				t.Fatalf("unbound portal accepted: %v", err)
+			}
+		})
 	}
 }

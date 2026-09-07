@@ -20,13 +20,13 @@ import (
 // underlying *APIError remains matchable with errors.As.
 var ErrTemporaryAccessLinksDisabled = errors.New("qurl: temporary access links are disabled")
 
-// ErrNoCRID is returned when ShareResource receives no CRID or VerifyCRID
+// ErrNoCRID is returned when ShareResource or CreatePortal receives no CRID or VerifyCRID
 // has no CRID to verify in a manually constructed ShareLink.
 // Verification fails closed — absence is not a mismatch, but it is not a
 // pass either.
 var ErrNoCRID = errors.New("qurl: no crid to verify against")
 
-// ErrCRIDMismatch is returned when ShareResource receives a different CRID
+// ErrCRIDMismatch is returned when ShareResource or CreatePortal receives a different CRID
 // or VerifyCRID finds that the supplied key does not derive the held CRID.
 // Fail closed and do not use the returned link or mismatched key.
 var ErrCRIDMismatch = errors.New("qurl: resource CRID mismatch")

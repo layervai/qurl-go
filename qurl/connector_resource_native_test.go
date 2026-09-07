@@ -3,6 +3,7 @@ package qurl
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -45,6 +46,9 @@ func TestNativeConnectorResourceConformance(t *testing.T) {
 	raw, err := os.ReadFile("testdata/connector_resource_crid_vectors.json")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if got := fmt.Sprintf("%x", sha256.Sum256(raw)); got != "a73950b0d0edfc11ea88908f8660a3692ae8dc93a69264d976a7b94fc565fd46" {
+		t.Fatal("native vectors differ from the qurl-conformance v0.17.0 release")
 	}
 	if err := json.Unmarshal(raw, &fixture); err != nil {
 		t.Fatal(err)

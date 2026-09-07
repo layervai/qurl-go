@@ -8,14 +8,23 @@ and are marked **Breaking** with what to change.
 
 ## Unreleased
 
-- **Breaking:** Connector management get/delete and handle-based portal minting
-  require CRIDs. Responses must bind the CRID to the returned public key.
-  Pass `resource.CRID`; public-key arguments and CRID-less management responses
-  are rejected without a compatibility fallback. Native Connector discovery also
-  requires a key-bound CRID and rejects older CRID-less responses. Its public-key
-  continuity pin remains a cryptographic check. Ensure and slug lookup also require
-  key-bound CRIDs; a missing CRID after ensure is outcome-unknown, so a modern
-  CRID-producing service is required before upgrading.
+## v0.14.0 — 2026-09-07
+
+- **Breaking:** All resource locators use CRID. Replace `ResourceByID` with
+  `ResourceByCRID`, `Resource.ID` with `Resource.CRID`, and public-key metadata
+  fields on `Resource`, `Portal`, and `ConnectorResource` with
+  `ResourcePublicKey`. Persisted resource JSON now uses `crid` and
+  `resource_public_key`; old resource handles are not converted.
+- **Breaking:** Native continuity uses `ExpectedCRID` / `expected_crid`.
+  Results require `crid` and `resource_public_key`; old wire fields are rejected.
+  Pass the exact returned CRID on later starts. Keys remain verification data.
+- **Breaking:** Create and mint responses require canonical P-256 DER SPKI keys
+  bound to their CRIDs. Share and handle-based mint responses must retain the
+  requested CRID. Both report missing/substituted identities through `ErrNoCRID`
+  or `ErrCRIDMismatch`, wrapped with `ErrInvalidAPIResponse`.
+- Deploy matching CRID-producing service and NHP versions before upgrading
+  running clients. Preserve pending mutation nonces; there is no fallback or
+  automatic state conversion. Native vectors match released conformance v0.17.0.
 
 - **Breaking:** `PortalOpener.Close` now cancels active protected requests and
   response-body reads and blocks later redirect legs. A caller-canceled first

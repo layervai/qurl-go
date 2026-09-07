@@ -260,7 +260,7 @@ func ExampleClient_ShareResource() {
 	}
 
 	// Keep QURLID to revoke this one link later, without disturbing the
-	// resource's others: client.RevokePortal(ctx, resourceID, share.QURLID).
+	// resource's others: client.RevokePortal(ctx, resourceCRID, share.QURLID).
 	// Like Link, it is not retrievable after this call.
 	fmt.Println(share.Link, share.QURLID)
 }

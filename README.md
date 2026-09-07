@@ -398,8 +398,8 @@ that raises them:
 | Error | Meaning |
 | --- | --- |
 | `qurl.ErrTemporaryAccessLinksDisabled` | `ShareResource` got a 503: the environment is not serving temporary access links. The underlying `*APIError` stays matchable |
-| `qurl.ErrNoCRID` | The share response or manually constructed link has no CRID. Fails closed. |
-| `qurl.ErrCRIDMismatch` | The share response changed the requested CRID, or the supplied key does not derive the held CRID. Do not use the returned link or mismatched key. |
+| `qurl.ErrNoCRID` | The mint/share response or manually constructed link has no CRID. Fails closed. |
+| `qurl.ErrCRIDMismatch` | The mint/share response changed the requested CRID, or the supplied key does not derive the held CRID. Do not use the returned link or mismatched key. |
 
 ## Security notes
 

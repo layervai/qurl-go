@@ -4,8 +4,7 @@
 access link — for a resource that already exists. It is the counterpart of
 `CreatePortal`: both mint access links, but `CreatePortal` is the issuing flow
 on a `Resource` handle you protected or looked up, while `ShareResource` is
-addressed by CRID
-and its response can be tied to a resource key you already hold with
+addressed by CRID and its response can be tied to a resource key you already hold with
 `VerifyCRID`.
 
 A CRID is safe to share: paste it anywhere. The share link is the secret, and
@@ -157,8 +156,8 @@ default:
 | Error | Meaning |
 | --- | --- |
 | `qurl.ErrTemporaryAccessLinksDisabled` | The API answered 503: the environment is not currently serving temporary access links — the surface is dark or administratively disabled. A service posture, not anything wrong with the request; the underlying `*qurl.APIError` remains matchable with `errors.As`. |
-| `qurl.ErrNoCRID` | The share response or manually constructed link has no CRID. Fails closed. |
-| `qurl.ErrCRIDMismatch` | The share response changed the requested CRID, or the supplied key does not derive the held CRID. Do not use the returned link or mismatched key. |
+| `qurl.ErrNoCRID` | The mint/share response or manually constructed link has no CRID. Fails closed. |
+| `qurl.ErrCRIDMismatch` | The mint/share response changed the requested CRID, or the supplied key does not derive the held CRID. Do not use the returned link or mismatched key. |
 | `qurl.ErrPortalRevoked` | `RevokePortal` found the qURL no longer active: this link was already revoked, so a repeat revoke had nothing to do. The underlying `*qurl.APIError` stays matchable. |
 
 Other API failures surface as `*qurl.APIError` exactly like the rest of the
