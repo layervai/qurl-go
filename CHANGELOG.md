@@ -6,6 +6,17 @@ independently under `awsstore/vX.Y.Z` tags.
 Pre-1.0 semantic versioning: breaking changes land in minor versions (v0.N.0)
 and are marked **Breaking** with what to change.
 
+## Unreleased
+
+- **Breaking:** `PortalOpener.Close` now cancels active protected requests and
+  response-body reads and blocks later redirect legs. A caller-canceled first
+  `Start` returns the opener to `new` without recording a platform failure.
+  Caller deadlines have the same request-scoped behavior; SDK open timeouts
+  remain platform failures and are matchable with `ErrPortalOpenTimeout`. `Do`
+  wraps each returned response body to retain the shutdown fence. Treat it as
+  an `io.ReadCloser`, close it on every path, and drain request handlers before
+  `Close` when shutdown needs a strict outbound-request fence.
+
 ## v0.13.0 — 2026-09-06
 
 - Added `PortalOpener` for long-running services that call one NHP-protected

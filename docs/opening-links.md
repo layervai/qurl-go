@@ -97,13 +97,19 @@ resp, err := opener.Do(ctx, func(target *url.URL) (*http.Request, error) {
 	// the authenticated ACK URL, not caller input.
 	return http.NewRequest(http.MethodPost, target.String(), body)
 }, qurl.RejectPortalRedirects())
+if err != nil {
+	return err
+}
+defer resp.Body.Close()
 ```
 
 Each native NHP open has a 15-second default deadline, including the open made
 by the synchronous first `Start`. Use `WithPortalOpenerOpenTimeout` to select a
 positive deadline of at most 60 seconds for slower private networks. When
 `Start` must resolve provider or deployment config first, that separate step is
-bounded by the caller context and the provider's I/O deadline.
+bounded by the caller context and the provider's I/O deadline. An SDK open
+deadline returns `ErrPortalOpenTimeout`; a shorter caller deadline returns only
+the caller's context error and does not record a platform failure.
 
 The default provider or `QURL_DEPLOYMENT` must include the link's issuer and
 cell. A missing cell returns `ErrPortalNativeOnly` or `ErrCellNotInCatalog`; the
@@ -133,12 +139,18 @@ It does not return the qURL, target, session ID, cookie, or raw transport error.
 Lifecycle code can call `Start` again after expiry to run one
 single-flight recovery open. This explicit recovery stays off the request path,
 because concurrent callers share the first caller's context and cancellation,
-and it must authenticate the same target as the first open. `Close` cancels
-renewal and releases the SDK's references to the qURL and session material. It
-does not wait for a concurrent `Do` that already copied the active handle, and
-it does not cancel a request already handed to the HTTP transport. Stop and
-drain application request handlers before `Close` when shutdown must guarantee
-that no later protected request leaves the process.
+and it must authenticate the same target as the first open. A caller-canceled
+first `Start` leaves the opener in `new`; a platform failure leaves it
+`degraded`. `Close` cancels renewal, active request and redirect legs, and
+response-body reads, then releases the SDK's references to the qURL and session
+material. It cannot retract bytes that a transport already sent, but no later
+redirect leg can start. A body read interrupted by `Close` returns its native
+request-context error, typically `context.Canceled`, not
+`ErrPortalOpenerClosed`. Callers must close every response body. Until it is
+closed, the body retains the request cancellation hook that lets `Close` abort
+body reads. If shutdown needs a strict guarantee that no new protected request
+can leave after the shutdown point, stop and drain request handlers before
+calling `Close`.
 The opener pins the trust and cell config resolved by `Start` for all background
 renewals. `Close` also cancels an in-progress provider or deployment resolution.
 Call `Start` after a bounded cycle ends if deployment trust or cell routing
