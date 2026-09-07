@@ -225,6 +225,39 @@ func TestPortalOpenerCallerCanceledStartDoesNotRecordPlatformFailure(t *testing.
 	}
 }
 
+func TestPortalOpenerCallerDeadlineRecordsPlatformFailure(t *testing.T) {
+	link, cfg := portalOpenerFixture(t)
+	opener, err := NewPortalOpener(link, WithPortalOpenerConfig(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { closePortalOpener(t, opener) })
+	opener.open = func(ctx context.Context, _ string, _ Config) (*ResourceHandle, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	ctx, cancel := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+	defer cancel()
+	if err := opener.Start(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Start error = %v, want context deadline exceeded", err)
+	}
+	health := opener.Health()
+	if health.State != PortalOpenerStateDegraded || health.Ready ||
+		health.LastFailureClass != PortalOpenerFailureOpen || health.ConsecutiveFailures != 1 {
+		t.Fatalf("caller-deadline Start health = %+v", health)
+	}
+	response, err := opener.Do(t.Context(), func(*url.URL) (*http.Request, error) {
+		t.Fatal("Do builder ran after a caller-deadline first Start")
+		return nil, errors.New("builder ran")
+	})
+	if response != nil {
+		_ = response.Body.Close()
+	}
+	if response != nil || !errors.Is(err, ErrPortalOpenerNotReady) {
+		t.Fatalf("Do after caller-deadline first Start = %#v, %v", response, err)
+	}
+}
+
 func TestPortalOpenerCallerCanceledRecoveryPreservesFailureHealth(t *testing.T) {
 	link, cfg := portalOpenerFixture(t)
 	opener, err := NewPortalOpener(link, WithPortalOpenerConfig(cfg))

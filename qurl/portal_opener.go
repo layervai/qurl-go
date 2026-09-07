@@ -369,7 +369,7 @@ func (o *PortalOpener) runStart(ctx context.Context, attempt *portalStartAttempt
 	} else if err != nil {
 		clearPortalOpenResult(opened)
 		o.clearActiveLocked()
-		if callerErr != nil && errors.Is(err, callerErr) && !errors.Is(err, errPortalOpenTimeout) {
+		if errors.Is(callerErr, context.Canceled) && errors.Is(err, context.Canceled) {
 			if attempt.recovery {
 				o.state = portalOpenerDegraded
 			} else {
@@ -649,7 +649,9 @@ func (o *PortalOpener) waitFor(delay time.Duration) bool {
 // Do sends one request to the exact authenticated ACK target with the cached
 // session. It returns immediately with ErrPortalOpenerNotReady when no active
 // handle exists; it never performs an NHP open or waits for renewal. Close
-// cancels an active request and prevents later redirect legs.
+// cancels an active request and its response-body reads and prevents later
+// redirect legs. Close does not wait for Do and cannot retract bytes already
+// handed to a transport. The caller must close every returned response body.
 func (o *PortalOpener) Do(ctx context.Context, build PortalRequestBuilder, options ...PortalRequestOption) (*http.Response, error) {
 	if o == nil {
 		return nil, ErrPortalOpenerClosed
@@ -834,7 +836,8 @@ func (o *PortalOpener) Health() PortalOpenerHealth {
 }
 
 // Close cancels background renewal and any active Do, then waits for any active
-// Start or renewal to stop. Close is idempotent.
+// Start or renewal to stop. It does not wait for Do and cannot retract bytes
+// already handed to a transport. Close is idempotent.
 func (o *PortalOpener) Close() error {
 	if o == nil {
 		return nil
