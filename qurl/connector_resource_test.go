@@ -455,7 +455,7 @@ func TestClient_ConnectorResourceCreatePortal(t *testing.T) {
 						http.Error(w, "unexpected portal request", http.StatusBadRequest)
 						return
 					}
-					fmt.Fprintf(w, `{"data":{"crid":"ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a","resource_id":%q,"qurl_link":"https://qurl.link/at_connector"}}`, testConnectorID)
+					fmt.Fprintf(w, `{"data":{"crid":"ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a","resource_id":%q,"crid":"ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a","qurl_link":"https://qurl.link/at_connector"}}`, testConnectorID)
 				default:
 					t.Errorf("unexpected request %d", requests.Load())
 					http.Error(w, "unexpected request", http.StatusBadRequest)
@@ -471,8 +471,8 @@ func TestClient_ConnectorResourceCreatePortal(t *testing.T) {
 			if err != nil {
 				t.Fatalf("CreatePortal: %v", err)
 			}
-			if portal.ResourceID != testConnectorID {
-				t.Fatalf("portal resource_id = %q", portal.ResourceID)
+			if portal.CRID != testConnectorCRID {
+				t.Fatalf("portal resource_id = %q", portal.CRID)
 			}
 		})
 	}

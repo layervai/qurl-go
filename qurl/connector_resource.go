@@ -136,7 +136,7 @@ func (r *ConnectorResource) CreatePortal(ctx context.Context, opts ...PortalOpti
 	if err := validateConnectorCRID(r.CRID); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrInvalidPortalRequest, err)
 	}
-	return r.client.CreatePortal(ctx, r.client.ResourceByID(r.CRID), opts...)
+	return r.client.CreatePortal(ctx, r.client.ResourceByCRID(r.CRID), opts...)
 }
 
 type ensureConnectorResourceRequest struct {

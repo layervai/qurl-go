@@ -62,7 +62,7 @@ Three roles, three sections of this README:
 
 | Term | Meaning |
 | --- | --- |
-| **Resource** | A private URL LayerV protects. Identified by a stable resource id, never by a public address. |
+| **Resource** | A private URL LayerV protects. Identified by a stable CRID, never by a public address. |
 | **Portal** | A short-lived signed link granting one actor access to one resource. |
 | **Issuer** | Software holding LayerV credentials that protects URLs and creates portals. |
 | **Connector** | LayerV's ready-made agent that publishes services from inside your network. |
@@ -185,18 +185,17 @@ if err != nil {
 portal, err := resource.CreatePortal(ctx, qurl.ValidFor(5*time.Minute))
 ```
 
-If you persist the resource id, future calls can reconstruct the handle without
+If you persist the CRID, future calls can reconstruct the handle without
 another lookup:
 
 ```go
-resource := client.ResourceByID(resourceID)
+resource := client.ResourceByCRID(resourceCRID)
 portal, err := resource.CreatePortal(ctx, qurl.ValidFor(time.Hour))
 ```
 
 `CreatePortal` and `Client.ShareResource` both mint an access link.
 `CreatePortal` is the portal-options path on a resource handle;
-`ShareResource` is the stored-identifier path — it accepts the resource id or
-the resource's CRID and returns a `ShareLink` whose CRID you can verify
+`ShareResource` is the stored-identifier path — it accepts the resource's CRID and returns a `ShareLink` whose CRID you can verify
 against a key you already hold (`VerifyCRID`). Both leave the link lifetime to
 the server default unless you ask (`ValidFor` on a portal,
 `ShareResourceOptions.TTL` on a share).
@@ -399,7 +398,7 @@ that raises them:
 | Error | Meaning |
 | --- | --- |
 | `qurl.ErrTemporaryAccessLinksDisabled` | `ShareResource` got a 503: the environment is not serving temporary access links. The underlying `*APIError` stays matchable |
-| `qurl.ErrNoCRID` | `VerifyCRID` had no CRID to check against — the server omitted it (older server or keyless resource). Fails closed: absence is not a mismatch, but it is not a pass |
+| `qurl.ErrNoCRID` | `VerifyCRID` had no CRID to check against — a manually constructed link omitted it. Fails closed: absence is not a mismatch, but it is not a pass |
 | `qurl.ErrCRIDMismatch` | The supplied resource key does not derive the held CRID — the substitution the identifier exists to detect. Do not use the key |
 
 ## Security notes
@@ -419,8 +418,8 @@ that raises them:
   separate trust paths; neither configures the other.
 
 Revocation covers every minted link. `RevokePortal` revokes a single link
-immediately, whichever call minted it: pass `Portal.ResourceID` and
-`Portal.QURLID` from a create, or the resource id you shared and
+immediately, whichever call minted it: pass `Portal.CRID` and
+`Portal.QURLID` from a create, or the CRID you shared and
 `ShareLink.QURLID` from a `ShareResource`. Only that link dies — the
 resource and its other live links keep working — and revoking a link that is
 no longer active fails with `ErrPortalRevoked` rather than reporting success

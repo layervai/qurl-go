@@ -372,12 +372,9 @@ func TestShareLinkVerifyCRID(t *testing.T) {
 	}
 }
 
-// TestClient_ProtectURLCarriesOptionalCRID pins the additive Resource field:
-// a server that returns crid populates it, and one that predates the field
-// leaves it empty — with omitempty keeping persisted JSON byte-stable for
-// pre-CRID resources.
-func TestClient_ProtectURLCarriesOptionalCRID(t *testing.T) {
-	heldCRID, _, _ := cridKeyMatchFixture(t)
+// Resource responses require a CRID bound to the returned public key.
+func TestClient_ProtectURLRequiresCRID(t *testing.T) {
+	heldCRID, der, _ := cridKeyMatchFixture(t)
 	for _, tt := range []struct {
 		name     string
 		body     string
@@ -385,12 +382,12 @@ func TestClient_ProtectURLCarriesOptionalCRID(t *testing.T) {
 	}{
 		{
 			name:     "server returns crid",
-			body:     fmt.Sprintf(`{"data":{"resource_id":"r_demo1234567","crid":%q,"target_url":"https://internal.example.com/dashboard","status":"active"}}`, heldCRID),
+			body:     fmt.Sprintf(`{"data":{"resource_id":"`+base64.RawURLEncoding.EncodeToString(der)+`","crid":%q,"target_url":"https://internal.example.com/dashboard","status":"active"}}`, heldCRID),
 			wantCRID: heldCRID,
 		},
 		{
 			name:     "older server omits crid",
-			body:     `{"data":{"resource_id":"r_demo1234567","target_url":"https://internal.example.com/dashboard","status":"active"}}`,
+			body:     `{"data":{"resource_id":"` + base64.RawURLEncoding.EncodeToString(der) + `","target_url":"https://internal.example.com/dashboard","status":"active"}}`,
 			wantCRID: "",
 		},
 	} {
@@ -406,6 +403,12 @@ func TestClient_ProtectURLCarriesOptionalCRID(t *testing.T) {
 				t.Fatalf("NewClient: %v", err)
 			}
 			resource, err := client.ProtectURL(context.Background(), "https://internal.example.com/dashboard")
+			if tt.wantCRID == "" {
+				if !errors.Is(err, ErrInvalidAPIResponse) {
+					t.Fatalf("CRID-less response accepted: %v", err)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("ProtectURL: %v", err)
 			}

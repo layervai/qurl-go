@@ -145,10 +145,10 @@ func TestClient_ProtectURLThenPortal(t *testing.T) {
 			assertJSONField(t, body, "target_url", "https://internal.example.com/dashboard")
 			assertJSONField(t, body, "description", "Admin dashboard")
 			assertJSONField(t, body, "alias", "dev-dashboard")
-			fmt.Fprint(w, `{"data":{"resource_id":"r_demo1234567","target_url":"https://internal.example.com/dashboard","status":"active","description":"Admin dashboard","alias":"dev-dashboard","qurl_count":0,"created_at":"2026-06-28T20:00:00Z"}}`)
+			fmt.Fprint(w, `{"data":{"resource_id":"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE2cTVv5_3eeYCcLLq5ROYCqcmY50HiKZ9ATglIkPnCji1E_S63UMtXba1moR8-Q6EV7oM6zwwh9_j2CDujzXvLA","crid":"ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a","target_url":"https://internal.example.com/dashboard","status":"active","description":"Admin dashboard","alias":"dev-dashboard","qurl_count":0,"created_at":"2026-06-28T20:00:00Z"}}`)
 		case 2:
-			if r.Method != http.MethodPost || r.URL.Path != "/v1/resources/r_demo1234567/qurls" {
-				t.Fatalf("second request = %s %s, want POST /v1/resources/r_demo1234567/qurls", r.Method, r.URL.Path)
+			if r.Method != http.MethodPost || r.URL.Path != "/v1/resources/ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a/qurls" {
+				t.Fatalf("second request = %s %s, want POST /v1/resources/ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a/qurls", r.Method, r.URL.Path)
 			}
 			var body map[string]any
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -159,7 +159,7 @@ func TestClient_ProtectURLThenPortal(t *testing.T) {
 			assertJSONField(t, body, "one_time_use", true)
 			assertJSONField(t, body, "max_sessions", float64(2))
 			assertJSONField(t, body, "session_duration", "30s")
-			fmt.Fprint(w, `{"data":{"resource_id":"r_demo1234567","qurl_id":"q_demo1234567","qurl_link":"https://qurl.link/at_demo123","qurl_site":"https://r_demo1234567.qurl.site","expires_at":"2026-06-28T20:05:00Z","label":"Alice"}}`)
+			fmt.Fprint(w, `{"data":{"resource_id":"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE2cTVv5_3eeYCcLLq5ROYCqcmY50HiKZ9ATglIkPnCji1E_S63UMtXba1moR8-Q6EV7oM6zwwh9_j2CDujzXvLA","crid":"ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a","qurl_id":"q_demo1234567","qurl_link":"https://qurl.link/at_demo123","qurl_site":"https://ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a.qurl.site","expires_at":"2026-06-28T20:05:00Z","label":"Alice"}}`)
 		default:
 			t.Fatalf("unexpected request %d: %s %s", requestCount.Load(), r.Method, r.URL.Path)
 		}
@@ -179,7 +179,7 @@ func TestClient_ProtectURLThenPortal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProtectURL: %v", err)
 	}
-	if resource.ID != "r_demo1234567" || resource.TargetURL != "https://internal.example.com/dashboard" {
+	if resource.CRID != "ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a" || resource.TargetURL != "https://internal.example.com/dashboard" {
 		t.Fatalf("resource = %#v", resource)
 	}
 	if resource.Alias == nil || *resource.Alias != "dev-dashboard" {
@@ -196,7 +196,7 @@ func TestClient_ProtectURLThenPortal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreatePortal: %v", err)
 	}
-	if portal.ResourceID != resource.ID || portal.Link != "https://qurl.link/at_demo123" || portal.QURLID != "q_demo1234567" {
+	if portal.CRID != resource.CRID || portal.Link != "https://qurl.link/at_demo123" || portal.QURLID != "q_demo1234567" {
 		t.Fatalf("portal = %#v", portal)
 	}
 	if requestCount.Load() != 2 {
@@ -216,7 +216,7 @@ func TestClient_CreatePortalForURL(t *testing.T) {
 		assertJSONField(t, body, "target_url", "https://internal.example.com/report")
 		assertJSONField(t, body, "expires_in", "1h")
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"data":{"resource_id":"r_report12345","qurl_link":"https://qurl.link/at_report"}}`)
+		fmt.Fprint(w, `{"data":{"resource_id":"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE2cTVv5_3eeYCcLLq5ROYCqcmY50HiKZ9ATglIkPnCji1E_S63UMtXba1moR8-Q6EV7oM6zwwh9_j2CDujzXvLA","crid":"ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a","qurl_link":"https://qurl.link/at_report"}}`)
 	}))
 	defer api.Close()
 
@@ -229,10 +229,10 @@ func TestClient_CreatePortalForURL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreatePortalForURL: %v", err)
 	}
-	if portal.ResourceID != "r_report12345" || portal.Link != "https://qurl.link/at_report" {
+	if portal.CRID != "ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a" || portal.Link != "https://qurl.link/at_report" {
 		t.Fatalf("portal = %#v", portal)
 	}
-	if resource.ID != "r_report12345" || resource.TargetURL != "https://internal.example.com/report" {
+	if resource.CRID != "ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a" || resource.TargetURL != "https://internal.example.com/report" {
 		t.Fatalf("resource = %#v", resource)
 	}
 	if resource.client != client {
@@ -243,7 +243,7 @@ func TestClient_CreatePortalForURL(t *testing.T) {
 func TestResourceJSONUsesAPINames(t *testing.T) {
 	alias := "dev-dashboard"
 	resource := &Resource{
-		ID:        "r_demo1234567",
+		CRID:      "ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a",
 		TargetURL: "https://internal.example.com/dashboard",
 		Status:    "active",
 		Tags:      []string{"prod"},
@@ -260,7 +260,7 @@ func TestResourceJSONUsesAPINames(t *testing.T) {
 	if err := json.Unmarshal(raw, &body); err != nil {
 		t.Fatalf("Unmarshal Resource JSON: %v", err)
 	}
-	assertJSONField(t, body, "resource_id", "r_demo1234567")
+	assertJSONField(t, body, "crid", "ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a")
 	assertJSONField(t, body, "target_url", "https://internal.example.com/dashboard")
 	assertJSONField(t, body, "status", "active")
 	assertJSONField(t, body, "alias", "dev-dashboard")
@@ -280,10 +280,10 @@ func TestResourceJSONUsesAPINames(t *testing.T) {
 	assertJSONField(t, body, "qurl_count", float64(0))
 }
 
-func TestClient_ResourceByIDCreatePortal(t *testing.T) {
+func TestClient_ResourceByCRIDCreatePortal(t *testing.T) {
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/v1/resources/r_stored12345/qurls" {
-			t.Fatalf("request = %s %s, want POST /v1/resources/r_stored12345/qurls", r.Method, r.URL.Path)
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/resources/ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a/qurls" {
+			t.Fatalf("request = %s %s, want POST /v1/resources/ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a/qurls", r.Method, r.URL.Path)
 		}
 		var body map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -291,7 +291,7 @@ func TestClient_ResourceByIDCreatePortal(t *testing.T) {
 		}
 		assertJSONField(t, body, "target_path", "/api/detect")
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"data":{"resource_id":"r_stored12345","qurl_link":"https://qurl.link/at_stored"}}`)
+		fmt.Fprint(w, `{"data":{"resource_id":"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE2cTVv5_3eeYCcLLq5ROYCqcmY50HiKZ9ATglIkPnCji1E_S63UMtXba1moR8-Q6EV7oM6zwwh9_j2CDujzXvLA","crid":"ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a","qurl_link":"https://qurl.link/at_stored"}}`)
 	}))
 	defer api.Close()
 
@@ -300,7 +300,7 @@ func TestClient_ResourceByIDCreatePortal(t *testing.T) {
 		t.Fatalf("NewClient: %v", err)
 	}
 
-	resource := client.ResourceByID("r_stored12345")
+	resource := client.ResourceByCRID("ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a")
 	portal, err := resource.CreatePortal(context.Background(), ValidFor(5*time.Minute), WithTargetPath("/api/detect"))
 	if err != nil {
 		t.Fatalf("CreatePortal: %v", err)
@@ -320,7 +320,7 @@ func TestClient_CreatePortalRejectsResourceFromDifferentClient(t *testing.T) {
 		t.Fatalf("NewClient B: %v", err)
 	}
 
-	_, err = clientA.CreatePortal(context.Background(), clientB.ResourceByID("r_demo12345"))
+	_, err = clientA.CreatePortal(context.Background(), clientB.ResourceByCRID("ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a"))
 	if !errors.Is(err, ErrInvalidPortalRequest) {
 		t.Fatalf("CreatePortal with foreign resource: want ErrInvalidPortalRequest, got %v", err)
 	}
@@ -328,8 +328,8 @@ func TestClient_CreatePortalRejectsResourceFromDifferentClient(t *testing.T) {
 
 func TestClient_CreatePortalSendsExplicitZeroMaxSessions(t *testing.T) {
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/v1/resources/r_demo1234567/qurls" {
-			t.Fatalf("request = %s %s, want POST /v1/resources/r_demo1234567/qurls", r.Method, r.URL.Path)
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/resources/ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a/qurls" {
+			t.Fatalf("request = %s %s, want POST /v1/resources/ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a/qurls", r.Method, r.URL.Path)
 		}
 		var body map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -337,7 +337,7 @@ func TestClient_CreatePortalSendsExplicitZeroMaxSessions(t *testing.T) {
 		}
 		assertJSONField(t, body, "max_sessions", float64(0))
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"data":{"resource_id":"r_demo1234567","qurl_link":"https://qurl.link/at_zero"}}`)
+		fmt.Fprint(w, `{"data":{"resource_id":"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE2cTVv5_3eeYCcLLq5ROYCqcmY50HiKZ9ATglIkPnCji1E_S63UMtXba1moR8-Q6EV7oM6zwwh9_j2CDujzXvLA","crid":"ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a","qurl_link":"https://qurl.link/at_zero"}}`)
 	}))
 	defer api.Close()
 
@@ -345,7 +345,7 @@ func TestClient_CreatePortalSendsExplicitZeroMaxSessions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
-	if _, err := client.CreatePortal(context.Background(), &Resource{ID: "r_demo1234567"}, MaxSessions(0)); err != nil {
+	if _, err := client.CreatePortal(context.Background(), &Resource{CRID: "ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a"}, MaxSessions(0)); err != nil {
 		t.Fatalf("CreatePortal: %v", err)
 	}
 }
@@ -357,8 +357,8 @@ func TestClient_RevokePortal(t *testing.T) {
 		if got, want := r.Header.Get("Authorization"), "Bearer lv_test_123"; got != want {
 			t.Errorf("Authorization = %q, want %q", got, want)
 		}
-		if r.Method != http.MethodDelete || r.URL.Path != "/v1/resources/r_demo1234567/qurls/q_demo1234567" || r.URL.RawQuery != "" {
-			t.Errorf("request = %s %s?%s, want DELETE /v1/resources/r_demo1234567/qurls/q_demo1234567", r.Method, r.URL.Path, r.URL.RawQuery)
+		if r.Method != http.MethodDelete || r.URL.Path != "/v1/resources/ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a/qurls/q_demo1234567" || r.URL.RawQuery != "" {
+			t.Errorf("request = %s %s?%s, want DELETE /v1/resources/ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a/qurls/q_demo1234567", r.Method, r.URL.Path, r.URL.RawQuery)
 		}
 		if got := r.Header.Get("Content-Type"); got != "" {
 			t.Errorf("DELETE Content-Type = %q, want empty", got)
@@ -374,7 +374,7 @@ func TestClient_RevokePortal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
-	if err := client.RevokePortal(context.Background(), "r_demo1234567", "q_demo1234567"); err != nil {
+	if err := client.RevokePortal(context.Background(), "ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a", "q_demo1234567"); err != nil {
 		t.Fatalf("RevokePortal: %v", err)
 	}
 	if requests.Load() != 1 {
@@ -386,7 +386,7 @@ func TestClient_RevokePortal(t *testing.T) {
 // one escaped path segment: an id cannot splice extra path segments, start a
 // query, or open a fragment in the revoke URL.
 func TestClient_RevokePortalEscapesBothIDs(t *testing.T) {
-	const wantPath = "/v1/resources/r%3F%2F%231/qurls/q%3F%2F%232"
+	const wantPath = "/v1/resources/" + testConnectorCRID + "/qurls/q%3F%2F%232"
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodDelete || r.URL.EscapedPath() != wantPath || r.URL.RawQuery != "" {
 			t.Errorf("request = %s %s?%s, want DELETE %s", r.Method, r.URL.EscapedPath(), r.URL.RawQuery, wantPath)
@@ -399,7 +399,7 @@ func TestClient_RevokePortalEscapesBothIDs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
-	if err := client.RevokePortal(context.Background(), "r?/#1", "q?/#2"); err != nil {
+	if err := client.RevokePortal(context.Background(), testConnectorCRID, "q?/#2"); err != nil {
 		t.Fatalf("RevokePortal: %v", err)
 	}
 }
@@ -420,7 +420,7 @@ func TestClient_RevokePortalAlreadyRevoked(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
-	err = client.RevokePortal(context.Background(), "r_demo1234567", "q_demo1234567")
+	err = client.RevokePortal(context.Background(), "ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a", "q_demo1234567")
 	if !errors.Is(err, ErrPortalRevoked) {
 		t.Fatalf("want ErrPortalRevoked, got %v", err)
 	}
@@ -463,7 +463,7 @@ func TestClient_RevokePortalAPIErrorPassthrough(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewClient: %v", err)
 			}
-			err = client.RevokePortal(context.Background(), "r_demo1234567", "q_demo1234567")
+			err = client.RevokePortal(context.Background(), "ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a", "q_demo1234567")
 			var apiErr *APIError
 			if !errors.As(err, &apiErr) || apiErr.StatusCode != tt.status || apiErr.Code != tt.code {
 				t.Fatalf("error lost *APIError: %v", err)
@@ -503,7 +503,7 @@ func TestClient_RevokePortalRequiresExactEmpty204(t *testing.T) {
 					Request:    r,
 				}, nil
 			})
-			err = client.RevokePortal(context.Background(), "r_demo1234567", "q_demo1234567")
+			err = client.RevokePortal(context.Background(), "ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a", "q_demo1234567")
 			if !errors.Is(err, ErrInvalidAPIResponse) {
 				t.Fatalf("error = %v, want ErrInvalidAPIResponse", err)
 			}
@@ -530,17 +530,17 @@ func TestClient_RevokePortalValidation(t *testing.T) {
 	if err := client.RevokePortal(context.Background(), "   ", "q_demo1234567"); !errors.Is(err, ErrInvalidPortalRequest) {
 		t.Fatalf("whitespace resource id: want ErrInvalidPortalRequest, got %v", err)
 	}
-	if err := client.RevokePortal(context.Background(), "r_demo1234567", ""); !errors.Is(err, ErrInvalidPortalRequest) {
+	if err := client.RevokePortal(context.Background(), "ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a", ""); !errors.Is(err, ErrInvalidPortalRequest) {
 		t.Fatalf("empty qurl id: want ErrInvalidPortalRequest, got %v", err)
 	}
-	if err := client.RevokePortal(context.Background(), "r_demo1234567", "   "); !errors.Is(err, ErrInvalidPortalRequest) {
+	if err := client.RevokePortal(context.Background(), "ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a", "   "); !errors.Is(err, ErrInvalidPortalRequest) {
 		t.Fatalf("whitespace qurl id: want ErrInvalidPortalRequest, got %v", err)
 	}
 	if calls.Load() != 0 {
 		t.Fatalf("network calls = %d, want 0", calls.Load())
 	}
 	var nilClient *Client
-	if err := nilClient.RevokePortal(context.Background(), "r_demo1234567", "q_demo1234567"); !errors.Is(err, ErrInvalidClientConfig) {
+	if err := nilClient.RevokePortal(context.Background(), "ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a", "q_demo1234567"); !errors.Is(err, ErrInvalidClientConfig) {
 		t.Fatalf("nil client: want ErrInvalidClientConfig, got %v", err)
 	}
 }
@@ -552,7 +552,7 @@ func TestClient_CredentialProvider(t *testing.T) {
 			t.Fatalf("Authorization = %q, want %q", got, want)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"data":{"resource_id":"r_demo1234567","target_url":"https://example.com","status":"active"}}`)
+		fmt.Fprint(w, `{"data":{"resource_id":"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE2cTVv5_3eeYCcLLq5ROYCqcmY50HiKZ9ATglIkPnCji1E_S63UMtXba1moR8-Q6EV7oM6zwwh9_j2CDujzXvLA","crid":"ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a","target_url":"https://example.com","status":"active"}}`)
 	}))
 	defer api.Close()
 
@@ -622,7 +622,7 @@ func TestClient_FileCredentials(t *testing.T) {
 			t.Fatalf("Authorization = %q, want %q", got, want)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"data":{"resource_id":"r_state12345","target_url":"https://example.com","status":"active"}}`)
+		fmt.Fprint(w, `{"data":{"resource_id":"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE2cTVv5_3eeYCcLLq5ROYCqcmY50HiKZ9ATglIkPnCji1E_S63UMtXba1moR8-Q6EV7oM6zwwh9_j2CDujzXvLA","crid":"ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a","target_url":"https://example.com","status":"active"}}`)
 	}))
 	defer api.Close()
 
@@ -1057,13 +1057,13 @@ func TestClient_Validation(t *testing.T) {
 	if _, _, err := client.CreatePortalForURL(context.Background(), "https://example.com", ValidFor(30*time.Second)); !errors.Is(err, ErrInvalidPortalRequest) {
 		t.Fatalf("short expiry: want ErrInvalidPortalRequest, got %v", err)
 	}
-	if _, err := client.CreatePortal(context.Background(), &Resource{ID: "r_demo1234567"}, WithSessionDuration(500*time.Millisecond)); !errors.Is(err, ErrInvalidPortalRequest) {
+	if _, err := client.CreatePortal(context.Background(), &Resource{CRID: "ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a"}, WithSessionDuration(500*time.Millisecond)); !errors.Is(err, ErrInvalidPortalRequest) {
 		t.Fatalf("subsecond session duration: want ErrInvalidPortalRequest, got %v", err)
 	}
-	if _, err := client.CreatePortal(context.Background(), &Resource{ID: "r_demo1234567"}, WithTargetPath("")); !errors.Is(err, ErrInvalidPortalRequest) {
+	if _, err := client.CreatePortal(context.Background(), &Resource{CRID: "ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a"}, WithTargetPath("")); !errors.Is(err, ErrInvalidPortalRequest) {
 		t.Fatalf("empty target path: want ErrInvalidPortalRequest, got %v", err)
 	}
-	if _, err := client.CreatePortal(context.Background(), &Resource{ID: "r_demo1234567"}, WithTargetPath("/"+strings.Repeat("a", maxTargetPathLength))); !errors.Is(err, ErrInvalidPortalRequest) {
+	if _, err := client.CreatePortal(context.Background(), &Resource{CRID: "ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a"}, WithTargetPath("/"+strings.Repeat("a", maxTargetPathLength))); !errors.Is(err, ErrInvalidPortalRequest) {
 		t.Fatalf("overlong target path: want ErrInvalidPortalRequest, got %v", err)
 	}
 	maxTargetPath := "/" + strings.Repeat("a", maxTargetPathLength-1)
@@ -1097,10 +1097,10 @@ func TestClient_Validation(t *testing.T) {
 	if req.SessionDuration != "48h" {
 		t.Fatalf("WithSessionDuration 48h = %q, want 48h", req.SessionDuration)
 	}
-	if _, err := client.CreatePortal(context.Background(), &Resource{ID: "r_demo1234567"}, MaxSessions(-1)); !errors.Is(err, ErrInvalidPortalRequest) {
+	if _, err := client.CreatePortal(context.Background(), &Resource{CRID: "ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a"}, MaxSessions(-1)); !errors.Is(err, ErrInvalidPortalRequest) {
 		t.Fatalf("negative max sessions: want ErrInvalidPortalRequest, got %v", err)
 	}
-	if _, err := (&Resource{ID: "r_demo1234567"}).CreatePortal(context.Background()); !errors.Is(err, ErrInvalidPortalRequest) {
+	if _, err := (&Resource{CRID: "ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a"}).CreatePortal(context.Background()); !errors.Is(err, ErrInvalidPortalRequest) {
 		t.Fatalf("unbound resource: want ErrInvalidPortalRequest, got %v", err)
 	}
 }
@@ -1139,7 +1139,7 @@ func TestOpenClientContextValidatesIssuerStatePath(t *testing.T) {
 			t.Fatalf("Authorization = %q, want %q", got, want)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"data":{"resource_id":"r_state12345","target_url":"https://example.com","status":"active"}}`)
+		fmt.Fprint(w, `{"data":{"resource_id":"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE2cTVv5_3eeYCcLLq5ROYCqcmY50HiKZ9ATglIkPnCji1E_S63UMtXba1moR8-Q6EV7oM6zwwh9_j2CDujzXvLA","crid":"ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a","target_url":"https://example.com","status":"active"}}`)
 	}))
 	defer api.Close()
 
@@ -1358,8 +1358,8 @@ func TestClient_IncompleteResourceSuccessFailsClosed(t *testing.T) {
 		t.Fatalf("NewClient: %v", err)
 	}
 	_, err = client.ProtectURL(context.Background(), "https://example.com")
-	if !errors.Is(err, ErrInvalidAPIResponse) || !strings.Contains(err.Error(), "missing resource_id") {
-		t.Fatalf("ProtectURL incomplete response: want ErrInvalidAPIResponse and missing resource_id detail, got %v", err)
+	if !errors.Is(err, ErrInvalidAPIResponse) || !strings.Contains(err.Error(), "missing or invalid key-bound CRID") {
+		t.Fatalf("ProtectURL incomplete response: want ErrInvalidAPIResponse and missing or invalid key-bound CRID detail, got %v", err)
 	}
 }
 
@@ -1372,9 +1372,9 @@ func TestClient_IncompletePortalSuccessFailsClosed(t *testing.T) {
 	}{
 		{
 			name: "missing portal link",
-			body: `{"data":{"resource_id":"r_demo12345"}}`,
+			body: `{"data":{"resource_id":"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE2cTVv5_3eeYCcLLq5ROYCqcmY50HiKZ9ATglIkPnCji1E_S63UMtXba1moR8-Q6EV7oM6zwwh9_j2CDujzXvLA","crid":"ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a"}}`,
 			run: func(ctx context.Context, client *Client) error {
-				_, err := client.CreatePortal(ctx, &Resource{ID: "r_demo12345"}, ValidFor(5*time.Minute))
+				_, err := client.CreatePortal(ctx, &Resource{CRID: "ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a"}, ValidFor(5*time.Minute))
 				return err
 			},
 			want: "missing qurl_link",
@@ -1386,7 +1386,7 @@ func TestClient_IncompletePortalSuccessFailsClosed(t *testing.T) {
 				_, _, err := client.CreatePortalForURL(ctx, "https://example.com", ValidFor(5*time.Minute))
 				return err
 			},
-			want: "missing resource_id",
+			want: "missing or invalid key-bound CRID",
 		},
 	}
 	for _, tt := range tests {

@@ -12,6 +12,8 @@ import (
 	"github.com/layervai/qurl-go/qurl"
 )
 
+const exampleCRID = "ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a"
+
 const exampleResourcePublicKey = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE2cTVv5_3eeYCcLLq5ROYCqcmY50HiKZ9ATglIkPnCji1E_S63UMtXba1moR8-Q6EV7oM6zwwh9_j2CDujzXvLA"
 
 func Example() {
@@ -94,7 +96,7 @@ func ExampleClient_ProtectURL() {
 		panic(err)
 	}
 
-	fmt.Println(resource.ID)
+	fmt.Println(resource.CRID)
 }
 
 func ExampleClient_CreatePortal() {
@@ -103,7 +105,7 @@ func ExampleClient_CreatePortal() {
 		panic(err)
 	}
 
-	resource := client.ResourceByID(exampleResourcePublicKey)
+	resource := client.ResourceByCRID(exampleCRID)
 	portal, err := resource.CreatePortal(context.Background(),
 		qurl.ValidFor(time.Hour),
 		qurl.WithLabel("Alice"),
@@ -122,14 +124,14 @@ func ExampleClient_RevokePortal() {
 		panic(err)
 	}
 
-	portal, err := client.ResourceByID(exampleResourcePublicKey).CreatePortal(context.Background(), qurl.ValidFor(time.Hour))
+	portal, err := client.ResourceByCRID(exampleCRID).CreatePortal(context.Background(), qurl.ValidFor(time.Hour))
 	if err != nil {
 		panic(err)
 	}
 
 	// Revoke by the two ids the create call returned. Revoking a portal that
 	// is no longer active fails with ErrPortalRevoked.
-	err = client.RevokePortal(context.Background(), portal.ResourceID, portal.QURLID)
+	err = client.RevokePortal(context.Background(), portal.CRID, portal.QURLID)
 	if err != nil {
 		panic(err)
 	}
@@ -221,7 +223,7 @@ func ExamplePrepareLiveNativeSessionOperation() {
 		qurl.NativeSessionOperationInput{
 			PreparedAtMillis: now.UnixMilli(), ExpiresAtMillis: now.Add(20 * time.Minute).UnixMilli(),
 			OwnerID:             "account-owner",
-			ProtectedResourceID: connector.Resource.CRID, ResourceID: connector.Resource.KnockResourceID,
+			ProtectedResourceID: connector.Resource.ResourcePublicKey, ResourceID: connector.Resource.KnockResourceID,
 			RunAttempt: 1, RunID: runID,
 		})
 	if err != nil {
@@ -250,10 +252,9 @@ func ExampleClient_ShareResource() {
 		panic(err)
 	}
 
-	// Either identifier form works: the public-key resource id or the
-	// resource's CRID. The CRID is safe to paste anywhere; the share link is
+	// Address the resource by its CRID. The CRID is safe to paste anywhere; the share link is
 	// the secret. Open it with EnterPortal.
-	share, err := client.ShareResource(context.Background(), exampleResourcePublicKey, nil)
+	share, err := client.ShareResource(context.Background(), exampleCRID, nil)
 	if err != nil {
 		panic(err)
 	}
