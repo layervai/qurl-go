@@ -46,7 +46,7 @@ var (
 	// ErrConnectorResourceEntitlementDenied means the registered agent is not
 	// entitled to the requested Connector ID.
 	ErrConnectorResourceEntitlementDenied = errors.New("qurl: Connector resource entitlement denied")
-	// ErrConnectorResourceIdentityConflict means expected_resource_id did not
+	// ErrConnectorResourceIdentityConflict means expected_crid did not
 	// name the exact active resource. The SDK never adopts a replacement.
 	ErrConnectorResourceIdentityConflict = errors.New("qurl: Connector resource identity conflict")
 	// ErrConnectorResourceQuotaExceeded is an authenticated account quota denial.
@@ -67,18 +67,18 @@ var (
 // replay must survive a process restart. Reusing the nonce with changed fields
 // is a terminal server-side conflict.
 type NativeConnectorResourceRequest struct {
-	ConnectorID        string
-	ExpectedResourceID string
-	RequestNonce       string
+	ConnectorID  string
+	ExpectedCRID string
+	RequestNonce string
 }
 
 // NewNativeConnectorResourceRequest validates the customer Connector ID and
 // optional continuity assertion, then generates a canonical 32-byte request
 // nonce. It performs no network or state I/O.
-func NewNativeConnectorResourceRequest(connectorID, expectedResourceID string) (*NativeConnectorResourceRequest, error) {
+func NewNativeConnectorResourceRequest(connectorID, expectedCRID string) (*NativeConnectorResourceRequest, error) {
 	request := &NativeConnectorResourceRequest{
-		ConnectorID:        connectorID,
-		ExpectedResourceID: expectedResourceID,
+		ConnectorID:  connectorID,
+		ExpectedCRID: expectedCRID,
 	}
 	if err := validateNativeConnectorResourceRequest(request, false); err != nil {
 		return nil, err
@@ -179,11 +179,11 @@ type nativeConnectorResourceRequestEnvelope struct {
 }
 
 type nativeConnectorResourceRequestUserData struct {
-	Query              string  `json:"query"`
-	Version            int     `json:"version"`
-	RequestNonce       string  `json:"request_nonce"`
-	ConnectorID        string  `json:"connector_id"`
-	ExpectedResourceID *string `json:"expected_resource_id,omitempty"`
+	Query        string  `json:"query"`
+	Version      int     `json:"version"`
+	RequestNonce string  `json:"request_nonce"`
+	ConnectorID  string  `json:"connector_id"`
+	ExpectedCRID *string `json:"expected_crid,omitempty"`
 }
 
 func marshalNativeConnectorResourceRequest(agentID string, request *NativeConnectorResourceRequest) ([]byte, error) {
@@ -191,9 +191,9 @@ func marshalNativeConnectorResourceRequest(agentID string, request *NativeConnec
 		Query: connectorResourceLSTQuery, Version: connectorResourceLSTVersion,
 		RequestNonce: request.RequestNonce, ConnectorID: request.ConnectorID,
 	}
-	if request.ExpectedResourceID != "" {
-		expected := request.ExpectedResourceID
-		userData.ExpectedResourceID = &expected
+	if request.ExpectedCRID != "" {
+		expected := request.ExpectedCRID
+		userData.ExpectedCRID = &expected
 	}
 	body, err := json.Marshal(nativeConnectorResourceRequestEnvelope{
 		UsrID: agentID, DevID: agentID, AspID: agentAspID, UsrData: userData,
@@ -216,9 +216,9 @@ func validateNativeConnectorResourceRequest(request *NativeConnectorResourceRequ
 	if err := validateConnectorSlug(request.ConnectorID); err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalidNativeConnectorResourceRequest, err)
 	}
-	if request.ExpectedResourceID != "" {
-		if err := validateConnectorResourceID(request.ExpectedResourceID); err != nil {
-			return fmt.Errorf("%w: expected resource identity: %w", ErrInvalidNativeConnectorResourceRequest, err)
+	if request.ExpectedCRID != "" {
+		if err := validateConnectorCRID(request.ExpectedCRID); err != nil {
+			return fmt.Errorf("%w: expected CRID: %w", ErrInvalidNativeConnectorResourceRequest, err)
 		}
 	}
 	if !requireNonce && request.RequestNonce == "" {
@@ -237,7 +237,7 @@ type nativeConnectorResourceList struct {
 	Version            int    `json:"version"`
 	AgentID            string `json:"agent_id"`
 	ConnectorID        string `json:"connector_id"`
-	ResourceID         string `json:"resource_id"`
+	ResourcePublicKey  string `json:"resource_public_key"`
 	ConnectorRoutingID string `json:"connector_routing_id"`
 	KnockResourceID    string `json:"knock_resource_id"`
 	CRID               string `json:"crid"`
@@ -268,7 +268,7 @@ func parseNativeConnectorResourceResponse(body []byte, agentID string, request *
 func parseNativeConnectorResourceSuccess(raw json.RawMessage, agentID string, request *NativeConnectorResourceRequest) (*ConnectorResourceResolution, error) {
 	fields, err := exactObjectFields(raw)
 	if err != nil || !exactFieldNames(fields,
-		[]string{"query", "version", "agent_id", "connector_id", "resource_id", "connector_routing_id", "knock_resource_id", "found_existing", "crid"}) {
+		[]string{"query", "version", "agent_id", "connector_id", "resource_public_key", "connector_routing_id", "knock_resource_id", "found_existing", "crid"}) {
 		return nil, invalidNativeConnectorResourceResponse("success list fields")
 	}
 	if isJSONNull(fields["crid"]) {
@@ -282,14 +282,14 @@ func parseNativeConnectorResourceSuccess(raw json.RawMessage, agentID string, re
 		list.AgentID != agentID || list.ConnectorID != request.ConnectorID {
 		return nil, invalidNativeConnectorResourceResponse("success request binding")
 	}
-	if request.ExpectedResourceID != "" && list.ResourceID != request.ExpectedResourceID {
+	if request.ExpectedCRID != "" && list.CRID != request.ExpectedCRID {
 		return nil, invalidNativeConnectorResourceResponse("success continuity binding")
 	}
 	if !validateNativeConnectorKnockID(list.KnockResourceID) {
 		return nil, invalidNativeConnectorResourceResponse("knock resource identity")
 	}
 	wire := connectorResourceWire{
-		ResourceID: list.ResourceID, ConnectorRoutingID: list.ConnectorRoutingID,
+		ResourcePublicKey: list.ResourcePublicKey, ConnectorRoutingID: list.ConnectorRoutingID,
 		KnockResourceID: list.KnockResourceID, Type: producerConnectorResourceType,
 		Status: "active", Slug: list.ConnectorID, CRID: list.CRID,
 	}

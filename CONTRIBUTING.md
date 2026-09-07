@@ -94,6 +94,16 @@ body/RunID contract—plus the packet and signature golden files come from the p
 `go:embed` accessors. The bytes are pinned by the dependency version in `go.sum`, so
 adopting an updated artifact is a dependency bump.
 
+The native Connector CRID suite checks a pinned SHA-256 digest locally for
+a byte-identical copy of the public
+`qurl-conformance v0.17.0` artifact. Required CI compares it with that release commit
+(`11f62700972e196751b8ae6e8b7588e2c2d59499`), so the reference cannot move.
+The module retains v0.14.0 for unrelated credential-recovery fixtures removed
+from later public releases; upgrading it would introduce a private dependency
+into this public SDK. Neither version enables old Connector wire support. The additional CI comparison
+requires raw.githubusercontent.com to be reachable; local checksum validation
+works offline.
+
 ## Continuous integration
 
 CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs lint, race tests +

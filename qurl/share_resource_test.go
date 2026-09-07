@@ -60,8 +60,8 @@ func TestClient_ShareResource(t *testing.T) {
 		if got, want := r.Header.Get("Authorization"), "Bearer lv_test_123"; got != want {
 			t.Fatalf("Authorization = %q, want %q", got, want)
 		}
-		if r.Method != http.MethodPost || r.URL.Path != "/v1/resources/r_demo1234567/share" {
-			t.Fatalf("request = %s %s, want POST /v1/resources/r_demo1234567/share", r.Method, r.URL.Path)
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/resources/ae4jqpd7eaoslq7jinmjv4yikgzmcxgpjfsuobiniqnko32lpw743ivbeyha/share" {
+			t.Fatalf("request = %s %s, want POST /v1/resources/ae4jqpd7eaoslq7jinmjv4yikgzmcxgpjfsuobiniqnko32lpw743ivbeyha/share", r.Method, r.URL.Path)
 		}
 		var body map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -77,7 +77,7 @@ func TestClient_ShareResource(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
-	share, err := client.ShareResource(context.Background(), "r_demo1234567", &ShareResourceOptions{TTL: 90 * time.Second})
+	share, err := client.ShareResource(context.Background(), "ae4jqpd7eaoslq7jinmjv4yikgzmcxgpjfsuobiniqnko32lpw743ivbeyha", &ShareResourceOptions{TTL: 90 * time.Second})
 	if err != nil {
 		t.Fatalf("ShareResource: %v", err)
 	}
@@ -110,14 +110,14 @@ func TestClient_ShareResourceQURLIDRevokesTheMintedLink(t *testing.T) {
 	var revokes atomic.Int32
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/resources/r_demo1234567/share":
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/resources/ae4jqpd7eaoslq7jinmjv4yikgzmcxgpjfsuobiniqnko32lpw743ivbeyha/share":
 			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprint(w, `{"data":{"qurl":"https://qurl.link/at_demo123#qv2t1.1.1.1.AQ.AQ.AQ","qurl_id":"q_a1b2c3d4e5f","type":"qv2","expires_in_seconds":300,"single_use":false}}`)
+			fmt.Fprint(w, `{"data":{"crid":"ae4jqpd7eaoslq7jinmjv4yikgzmcxgpjfsuobiniqnko32lpw743ivbeyha","qurl":"https://qurl.link/at_demo123#qv2t1.1.1.1.AQ.AQ.AQ","qurl_id":"q_a1b2c3d4e5f","type":"qv2","expires_in_seconds":300,"single_use":false}}`)
 		case r.Method == http.MethodDelete:
 			revokes.Add(1)
 			// The share link's id lands in the qURL segment unaltered, under
 			// the resource the caller shared.
-			if want := "/v1/resources/r_demo1234567/qurls/q_a1b2c3d4e5f"; r.URL.Path != want {
+			if want := "/v1/resources/ae4jqpd7eaoslq7jinmjv4yikgzmcxgpjfsuobiniqnko32lpw743ivbeyha/qurls/q_a1b2c3d4e5f"; r.URL.Path != want {
 				t.Errorf("revoke path = %q, want %q", r.URL.Path, want)
 			}
 			w.WriteHeader(http.StatusNoContent)
@@ -132,14 +132,14 @@ func TestClient_ShareResourceQURLIDRevokesTheMintedLink(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
-	share, err := client.ShareResource(context.Background(), "r_demo1234567", nil)
+	share, err := client.ShareResource(context.Background(), "ae4jqpd7eaoslq7jinmjv4yikgzmcxgpjfsuobiniqnko32lpw743ivbeyha", nil)
 	if err != nil {
 		t.Fatalf("ShareResource: %v", err)
 	}
 	if share.QURLID == "" {
 		t.Fatal("share returned no QURLID — the minted link would be unrevocable")
 	}
-	if err := client.RevokePortal(context.Background(), "r_demo1234567", share.QURLID); err != nil {
+	if err := client.RevokePortal(context.Background(), "ae4jqpd7eaoslq7jinmjv4yikgzmcxgpjfsuobiniqnko32lpw743ivbeyha", share.QURLID); err != nil {
 		t.Fatalf("RevokePortal with the share link's id: %v", err)
 	}
 	if revokes.Load() != 1 {
@@ -147,15 +147,11 @@ func TestClient_ShareResourceQURLIDRevokesTheMintedLink(t *testing.T) {
 	}
 }
 
-// TestClient_ShareResourceOmittedQURLIDIsEmpty pins the older-server
-// posture: qurl_id is absent from servers predating the field, and that is an
-// empty QURLID rather than a failed share. The field follows crid's additive
-// posture, not qurl's fail-closed one — a caller that can still use the link
-// should still get it, and only loses the revocation handle.
+// An omitted optional qurl_id leaves no individual revocation handle.
 func TestClient_ShareResourceOmittedQURLIDIsEmpty(t *testing.T) {
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"data":{"qurl":"https://qurl.link/at_old","type":"qv2","expires_in_seconds":300,"single_use":false}}`)
+		fmt.Fprint(w, `{"data":{"crid":"ae4jqpd7eaoslq7jinmjv4yikgzmcxgpjfsuobiniqnko32lpw743ivbeyha","qurl":"https://qurl.link/at_old","type":"qv2","expires_in_seconds":300,"single_use":false}}`)
 	}))
 	defer api.Close()
 
@@ -163,7 +159,7 @@ func TestClient_ShareResourceOmittedQURLIDIsEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
-	share, err := client.ShareResource(context.Background(), "r_demo1234567", nil)
+	share, err := client.ShareResource(context.Background(), "ae4jqpd7eaoslq7jinmjv4yikgzmcxgpjfsuobiniqnko32lpw743ivbeyha", nil)
 	if err != nil {
 		t.Fatalf("ShareResource against a server without qurl_id: %v", err)
 	}
@@ -175,11 +171,7 @@ func TestClient_ShareResourceOmittedQURLIDIsEmpty(t *testing.T) {
 	}
 }
 
-// TestClient_ShareResourceAcceptsCRIDIdentifier proves the dual-accepted
-// addressing contract from the client side: a CRID travels the same {id}
-// path segment as a public-key resource id, verbatim, and a nil options
-// pointer sends an empty JSON body with no ttl_seconds key at all — zero is
-// "server default", never an explicit 0.
+// A CRID travels verbatim; nil options omit TTL and use the server default.
 func TestClient_ShareResourceAcceptsCRIDIdentifier(t *testing.T) {
 	heldCRID, _, _ := cridKeyMatchFixture(t)
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -227,7 +219,7 @@ func TestClient_ShareResourceZeroTTLOmitsField(t *testing.T) {
 			t.Fatalf("share body = %#v, want ttl_seconds omitted so the server default applies", body)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"data":{"qurl":"https://qurl.link/at_default","type":"qv2","expires_in_seconds":300,"single_use":false}}`)
+		fmt.Fprint(w, `{"data":{"crid":"ae4jqpd7eaoslq7jinmjv4yikgzmcxgpjfsuobiniqnko32lpw743ivbeyha","qurl":"https://qurl.link/at_default","type":"qv2","expires_in_seconds":300,"single_use":false}}`)
 	}))
 	defer api.Close()
 
@@ -235,7 +227,7 @@ func TestClient_ShareResourceZeroTTLOmitsField(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
-	if _, err := client.ShareResource(context.Background(), "r_demo1234567", &ShareResourceOptions{TTL: 0}); err != nil {
+	if _, err := client.ShareResource(context.Background(), "ae4jqpd7eaoslq7jinmjv4yikgzmcxgpjfsuobiniqnko32lpw743ivbeyha", &ShareResourceOptions{TTL: 0}); err != nil {
 		t.Fatalf("ShareResource with zero TTL: %v", err)
 	}
 }
@@ -252,7 +244,7 @@ func TestClient_ShareResourceAPIErrorPassthrough(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
-	_, err = client.ShareResource(context.Background(), "r_missing1234", nil)
+	_, err = client.ShareResource(context.Background(), testConnectorCRID, nil)
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) {
 		t.Fatalf("want *APIError, got %T: %v", err, err)
@@ -280,7 +272,7 @@ func TestClient_ShareResourceDarkEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
-	_, err = client.ShareResource(context.Background(), "r_demo1234567", nil)
+	_, err = client.ShareResource(context.Background(), "ae4jqpd7eaoslq7jinmjv4yikgzmcxgpjfsuobiniqnko32lpw743ivbeyha", nil)
 	if !errors.Is(err, ErrTemporaryAccessLinksDisabled) {
 		t.Fatalf("want ErrTemporaryAccessLinksDisabled, got %v", err)
 	}
@@ -305,7 +297,7 @@ func TestClient_ShareResourceMissingQURLFailsClosed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
-	_, err = client.ShareResource(context.Background(), "r_demo1234567", nil)
+	_, err = client.ShareResource(context.Background(), "ae4jqpd7eaoslq7jinmjv4yikgzmcxgpjfsuobiniqnko32lpw743ivbeyha", nil)
 	if !errors.Is(err, ErrInvalidAPIResponse) || !strings.Contains(err.Error(), "missing qurl") {
 		t.Fatalf("want ErrInvalidAPIResponse with missing qurl detail, got %v", err)
 	}
@@ -322,17 +314,17 @@ func TestClient_ShareResourceValidation(t *testing.T) {
 	if _, err := client.ShareResource(context.Background(), "   ", nil); !errors.Is(err, ErrInvalidResourceRequest) {
 		t.Fatalf("whitespace id: want ErrInvalidResourceRequest, got %v", err)
 	}
-	if _, err := client.ShareResource(context.Background(), "r_demo1234567", &ShareResourceOptions{TTL: -time.Second}); !errors.Is(err, ErrInvalidResourceRequest) {
+	if _, err := client.ShareResource(context.Background(), "ae4jqpd7eaoslq7jinmjv4yikgzmcxgpjfsuobiniqnko32lpw743ivbeyha", &ShareResourceOptions{TTL: -time.Second}); !errors.Is(err, ErrInvalidResourceRequest) {
 		t.Fatalf("negative ttl: want ErrInvalidResourceRequest, got %v", err)
 	}
-	if _, err := client.ShareResource(context.Background(), "r_demo1234567", &ShareResourceOptions{TTL: 500 * time.Millisecond}); !errors.Is(err, ErrInvalidResourceRequest) || !strings.Contains(err.Error(), "whole seconds") {
+	if _, err := client.ShareResource(context.Background(), "ae4jqpd7eaoslq7jinmjv4yikgzmcxgpjfsuobiniqnko32lpw743ivbeyha", &ShareResourceOptions{TTL: 500 * time.Millisecond}); !errors.Is(err, ErrInvalidResourceRequest) || !strings.Contains(err.Error(), "whole seconds") {
 		t.Fatalf("sub-second ttl: want whole-seconds ErrInvalidResourceRequest, got %v", err)
 	}
-	if _, err := client.ShareResource(context.Background(), "r_demo1234567", &ShareResourceOptions{TTL: 90*time.Second + 500*time.Millisecond}); !errors.Is(err, ErrInvalidResourceRequest) || !strings.Contains(err.Error(), "whole seconds") {
+	if _, err := client.ShareResource(context.Background(), "ae4jqpd7eaoslq7jinmjv4yikgzmcxgpjfsuobiniqnko32lpw743ivbeyha", &ShareResourceOptions{TTL: 90*time.Second + 500*time.Millisecond}); !errors.Is(err, ErrInvalidResourceRequest) || !strings.Contains(err.Error(), "whole seconds") {
 		t.Fatalf("fractional-second ttl: want whole-seconds ErrInvalidResourceRequest, got %v", err)
 	}
 	var nilClient *Client
-	if _, err := nilClient.ShareResource(context.Background(), "r_demo1234567", nil); !errors.Is(err, ErrInvalidClientConfig) {
+	if _, err := nilClient.ShareResource(context.Background(), "ae4jqpd7eaoslq7jinmjv4yikgzmcxgpjfsuobiniqnko32lpw743ivbeyha", nil); !errors.Is(err, ErrInvalidClientConfig) {
 		t.Fatalf("nil client: want ErrInvalidClientConfig, got %v", err)
 	}
 }
@@ -372,12 +364,9 @@ func TestShareLinkVerifyCRID(t *testing.T) {
 	}
 }
 
-// TestClient_ProtectURLCarriesOptionalCRID pins the additive Resource field:
-// a server that returns crid populates it, and one that predates the field
-// leaves it empty — with omitempty keeping persisted JSON byte-stable for
-// pre-CRID resources.
-func TestClient_ProtectURLCarriesOptionalCRID(t *testing.T) {
-	heldCRID, _, _ := cridKeyMatchFixture(t)
+// Resource responses require a CRID bound to the returned public key.
+func TestClient_ProtectURLRequiresCRID(t *testing.T) {
+	heldCRID, der, _ := cridKeyMatchFixture(t)
 	for _, tt := range []struct {
 		name     string
 		body     string
@@ -385,12 +374,12 @@ func TestClient_ProtectURLCarriesOptionalCRID(t *testing.T) {
 	}{
 		{
 			name:     "server returns crid",
-			body:     fmt.Sprintf(`{"data":{"resource_id":"r_demo1234567","crid":%q,"target_url":"https://internal.example.com/dashboard","status":"active"}}`, heldCRID),
+			body:     fmt.Sprintf(`{"data":{"resource_id":"`+base64.RawURLEncoding.EncodeToString(der)+`","crid":%q,"target_url":"https://internal.example.com/dashboard","status":"active"}}`, heldCRID),
 			wantCRID: heldCRID,
 		},
 		{
-			name:     "older server omits crid",
-			body:     `{"data":{"resource_id":"r_demo1234567","target_url":"https://internal.example.com/dashboard","status":"active"}}`,
+			name:     "missing CRID is rejected",
+			body:     `{"data":{"resource_id":"` + base64.RawURLEncoding.EncodeToString(der) + `","target_url":"https://internal.example.com/dashboard","status":"active"}}`,
 			wantCRID: "",
 		},
 	} {
@@ -406,6 +395,12 @@ func TestClient_ProtectURLCarriesOptionalCRID(t *testing.T) {
 				t.Fatalf("NewClient: %v", err)
 			}
 			resource, err := client.ProtectURL(context.Background(), "https://internal.example.com/dashboard")
+			if tt.wantCRID == "" {
+				if !errors.Is(err, ErrInvalidAPIResponse) {
+					t.Fatalf("CRID-less response accepted: %v", err)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("ProtectURL: %v", err)
 			}
@@ -421,12 +416,32 @@ func TestClient_ProtectURLCarriesOptionalCRID(t *testing.T) {
 			if err := json.Unmarshal(raw, &body); err != nil {
 				t.Fatalf("Unmarshal Resource JSON: %v", err)
 			}
-			if tt.wantCRID == "" {
-				if _, ok := body["crid"]; ok {
-					t.Fatalf("pre-CRID resource JSON grew a crid key: %s", raw)
-				}
-			} else {
-				assertJSONField(t, body, "crid", tt.wantCRID)
+			assertJSONField(t, body, "crid", tt.wantCRID)
+		})
+	}
+}
+
+func TestClientShareResourceIdentityErrors(t *testing.T) {
+	held, _, _ := cridKeyMatchFixture(t)
+	for _, tc := range []struct {
+		name, response string
+		want           error
+	}{
+		{"missing", "", ErrNoCRID}, {"different", "different", ErrCRIDMismatch},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprintf(w, `{"data":{"crid":%q,"qurl":"https://qurl.link/test"}}`, tc.response)
+			}))
+			defer server.Close()
+			client, err := NewClient(BearerToken("lv_test"), WithBaseURL(server.URL))
+			if err != nil {
+				t.Fatal(err)
+			}
+			link, err := client.ShareResource(context.Background(), held, nil)
+			if link != nil || !errors.Is(err, tc.want) || !errors.Is(err, ErrInvalidAPIResponse) {
+				t.Fatalf("link=%v error=%v, want invalid response and %v", link, err, tc.want)
 			}
 		})
 	}

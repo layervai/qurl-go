@@ -19,6 +19,8 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	"github.com/layervai/qurl-go/crid"
 )
 
 const (
@@ -602,23 +604,17 @@ func OpenClientContext(ctx context.Context, opts ...ClientOption) (*Client, erro
 }
 
 // Resource is a protected target registered in the LayerV qURL Platform. Fields
-// are exported for inspection and JSON persistence; CreatePortal reads ID at
+// are exported for inspection and JSON persistence; CreatePortal reads CRID at
 // call time, and JSON cannot preserve the unexported client binding. Use
-// ResourceByID for a new handle instead of mutating or round-tripping a bound
+// ResourceByCRID for a new handle instead of mutating or round-tripping a bound
 // one.
 type Resource struct {
 	client *Client
 
-	// ID is the protected-resource identifier returned by LayerV. Current
-	// producers use a canonical unpadded-base64url DER SPKI public key; the
-	// legacy Resource surface treats the value as opaque and does not validate
-	// that format. ConnectorResource provides the strictly validated identity.
-	ID string `json:"resource_id"`
-	// CRID is the Cryptographic Resource ID derived from the resource public
-	// key, when returned by LayerV. Optional by presence: older servers and
-	// keyless resources omit it. The SDK carries it verbatim; the crid
-	// package provides local validation and the delivered-key match rule.
-	CRID string `json:"crid,omitempty"`
+	// CRID is the public resource locator. Public keys are verification data.
+	CRID string `json:"crid"`
+	// ResourcePublicKey is canonical unpadded-base64url P-256 DER SPKI verification data.
+	ResourcePublicKey string `json:"resource_public_key"`
 	// TargetURL is the private URL protected by this resource.
 	TargetURL string `json:"target_url"`
 	// Status is the resource lifecycle status returned by LayerV.
@@ -639,10 +635,10 @@ type Resource struct {
 	ExpiresAt *time.Time `json:"expires_at,omitempty"`
 }
 
-// ResourceByID returns a resource handle bound to this client. Use it when you
-// stored a LayerV resource id and want to mint more portals for it.
-func (c *Client) ResourceByID(id string) *Resource {
-	return &Resource{client: c, ID: id}
+// ResourceByCRID returns a resource handle bound to this client. Use it when you
+// stored a LayerV CRID and want to mint more portals for it.
+func (c *Client) ResourceByCRID(id string) *Resource {
+	return &Resource{client: c, CRID: id}
 }
 
 // ResourceOption customizes ProtectURL and CreateResource.
@@ -761,8 +757,10 @@ func (c *Client) CreateResource(ctx context.Context, targetURL string, opts ...R
 
 // Portal is the qURL link returned by the LayerV qURL API.
 type Portal struct {
-	// ResourceID identifies the protected resource this link opens.
-	ResourceID string
+	// CRID identifies the protected resource this link opens.
+	CRID string
+	// ResourcePublicKey is the returned verification key.
+	ResourcePublicKey string
 	// Link is the shareable qURL link.
 	Link string
 	// Site is the qURL-hosted site for this resource, when returned by the API.
@@ -896,18 +894,24 @@ func (c *Client) CreatePortal(ctx context.Context, resource *Resource, opts ...P
 	if resource.client != nil && resource.client != c {
 		return nil, fmt.Errorf("%w: resource is bound to a different client", ErrInvalidPortalRequest)
 	}
-	if strings.TrimSpace(resource.ID) == "" {
-		return nil, fmt.Errorf("%w: resource id must not be empty", ErrInvalidPortalRequest)
+	if err := crid.Validate(resource.CRID); err != nil {
+		return nil, fmt.Errorf("%w: resource CRID must be valid: %w", ErrInvalidPortalRequest, err)
 	}
 	reqBody, err := buildCreatePortalRequest(opts)
 	if err != nil {
 		return nil, err
 	}
 
-	path := "/v1/resources/" + url.PathEscape(resource.ID) + "/qurls"
+	path := "/v1/resources/" + url.PathEscape(resource.CRID) + "/qurls"
 	var env apiEnvelope[createPortalResponse]
 	if err := c.postJSON(ctx, path, reqBody, &env); err != nil {
 		return nil, err
+	}
+	if env.Data.CRID == "" {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidAPIResponse, ErrNoCRID)
+	}
+	if env.Data.CRID != resource.CRID {
+		return nil, fmt.Errorf("%w: %w: portal response CRID differs from request", ErrInvalidAPIResponse, ErrCRIDMismatch)
 	}
 	return env.Data.portal()
 }
@@ -949,9 +953,10 @@ func (c *Client) CreatePortalForURL(ctx context.Context, targetURL string, opts 
 		return nil, nil, err
 	}
 	resource := &Resource{
-		client:    c,
-		ID:        portal.ResourceID,
-		TargetURL: targetURL,
+		client:            c,
+		CRID:              portal.CRID,
+		ResourcePublicKey: portal.ResourcePublicKey,
+		TargetURL:         targetURL,
 	}
 	return portal, resource, nil
 }
@@ -960,14 +965,11 @@ func (c *Client) CreatePortalForURL(ctx context.Context, targetURL string, opts 
 // revoke entry point for every link this client mints, because the platform
 // mints one kind of qURL however you ask for it:
 //
-//   - CreatePortal / CreatePortalForURL — pass Portal.ResourceID and
+//   - CreatePortal / CreatePortalForURL — pass Portal.CRID and
 //     Portal.QURLID.
-//   - ShareResource — pass the resource id you shared and ShareLink.QURLID.
+//   - ShareResource — pass the CRID you shared and ShareLink.QURLID.
 //
-// Like the other resource methods, resourceID accepts either identifier form
-// the platform serves — the public-key resource id or the resource's CRID —
-// and both ids are validated for presence only: the server is authoritative
-// for which identifiers it accepts. The credential needs the qurl:write scope.
+// The resource locator must be a valid CRID. The credential needs qurl:write.
 // The 204 response has no JSON body; other successful portal methods retain
 // the SDK's fail-closed response decoding.
 //
@@ -978,17 +980,17 @@ func (c *Client) CreatePortalForURL(ctx context.Context, targetURL string, opts 
 // ErrPortalRevoked. A caller that only needs the link dead can treat
 // errors.Is(err, ErrPortalRevoked) as settled; other API failures surface as
 // *APIError exactly like the rest of the client.
-func (c *Client) RevokePortal(ctx context.Context, resourceID, qurlID string) error {
+func (c *Client) RevokePortal(ctx context.Context, resourceCRID, qurlID string) error {
 	if c == nil {
 		return fmt.Errorf("%w: nil client", ErrInvalidClientConfig)
 	}
-	if strings.TrimSpace(resourceID) == "" {
-		return fmt.Errorf("%w: resource id must not be empty", ErrInvalidPortalRequest)
+	if err := crid.Validate(resourceCRID); err != nil {
+		return fmt.Errorf("%w: resource CRID must be valid: %w", ErrInvalidPortalRequest, err)
 	}
 	if strings.TrimSpace(qurlID) == "" {
 		return fmt.Errorf("%w: qurl id must not be empty", ErrInvalidPortalRequest)
 	}
-	path := "/v1/resources/" + url.PathEscape(resourceID) + "/qurls/" + url.PathEscape(qurlID)
+	path := "/v1/resources/" + url.PathEscape(resourceCRID) + "/qurls/" + url.PathEscape(qurlID)
 	if err := c.doNoContent(ctx, http.MethodDelete, path, http.StatusNoContent); err != nil {
 		var apiErr *APIError
 		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusConflict && apiErr.Code == "revoked" {
@@ -1022,21 +1024,24 @@ type createResourceResponse struct {
 }
 
 func (r createResourceResponse) resource() (*Resource, error) {
-	if strings.TrimSpace(r.ID) == "" {
-		return nil, fmt.Errorf("%w: missing resource_id", ErrInvalidAPIResponse)
+	if !isValidConnectorResourceID(r.ID) {
+		return nil, fmt.Errorf("%w: missing or invalid resource public key", ErrInvalidAPIResponse)
+	}
+	if !nativeConnectorCRIDMatches(r.CRID, r.ID) {
+		return nil, fmt.Errorf("%w: missing or invalid key-bound CRID", ErrInvalidAPIResponse)
 	}
 	return &Resource{
-		ID:           r.ID,
-		CRID:         r.CRID,
-		TargetURL:    r.TargetURL,
-		Status:       r.Status,
-		Description:  r.Description,
-		Tags:         slices.Clone(r.Tags),
-		CustomDomain: r.CustomDomain,
-		Alias:        r.Alias,
-		QURLCount:    r.QURLCount,
-		CreatedAt:    r.CreatedAt,
-		ExpiresAt:    r.ExpiresAt,
+		ResourcePublicKey: r.ID,
+		CRID:              r.CRID,
+		TargetURL:         r.TargetURL,
+		Status:            r.Status,
+		Description:       r.Description,
+		Tags:              slices.Clone(r.Tags),
+		CustomDomain:      r.CustomDomain,
+		Alias:             r.Alias,
+		QURLCount:         r.QURLCount,
+		CreatedAt:         r.CreatedAt,
+		ExpiresAt:         r.ExpiresAt,
 	}, nil
 }
 
@@ -1055,28 +1060,33 @@ type createPortalForURLRequest struct {
 }
 
 type createPortalResponse struct {
-	ResourceID string     `json:"resource_id"`
-	QURLLink   string     `json:"qurl_link"`
-	QURLSite   string     `json:"qurl_site"`
-	ExpiresAt  *time.Time `json:"expires_at"`
-	QURLID     string     `json:"qurl_id"`
-	Label      string     `json:"label"`
+	ResourcePublicKey string     `json:"resource_id"`
+	CRID              string     `json:"crid"`
+	QURLLink          string     `json:"qurl_link"`
+	QURLSite          string     `json:"qurl_site"`
+	ExpiresAt         *time.Time `json:"expires_at"`
+	QURLID            string     `json:"qurl_id"`
+	Label             string     `json:"label"`
 }
 
 func (r createPortalResponse) portal() (*Portal, error) {
-	if strings.TrimSpace(r.ResourceID) == "" {
-		return nil, fmt.Errorf("%w: missing resource_id", ErrInvalidAPIResponse)
+	if !isValidConnectorResourceID(r.ResourcePublicKey) {
+		return nil, fmt.Errorf("%w: missing or invalid resource public key", ErrInvalidAPIResponse)
+	}
+	if !nativeConnectorCRIDMatches(r.CRID, r.ResourcePublicKey) {
+		return nil, fmt.Errorf("%w: missing or invalid key-bound CRID", ErrInvalidAPIResponse)
 	}
 	if strings.TrimSpace(r.QURLLink) == "" {
 		return nil, fmt.Errorf("%w: missing qurl_link", ErrInvalidAPIResponse)
 	}
 	return &Portal{
-		ResourceID: r.ResourceID,
-		Link:       r.QURLLink,
-		Site:       r.QURLSite,
-		ExpiresAt:  r.ExpiresAt,
-		QURLID:     r.QURLID,
-		Label:      r.Label,
+		ResourcePublicKey: r.ResourcePublicKey,
+		CRID:              r.CRID,
+		Link:              r.QURLLink,
+		Site:              r.QURLSite,
+		ExpiresAt:         r.ExpiresAt,
+		QURLID:            r.QURLID,
+		Label:             r.Label,
 	}, nil
 }
 

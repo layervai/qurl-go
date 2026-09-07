@@ -20,16 +20,16 @@ import (
 // underlying *APIError remains matchable with errors.As.
 var ErrTemporaryAccessLinksDisabled = errors.New("qurl: temporary access links are disabled")
 
-// ErrNoCRID is returned by VerifyCRID when there is no CRID to verify
-// against: the server omitted the field (older server or keyless resource).
+// ErrNoCRID is returned when ShareResource or CreatePortal receives no CRID or VerifyCRID
+// has no CRID to verify in a manually constructed ShareLink.
 // Verification fails closed — absence is not a mismatch, but it is not a
 // pass either.
 var ErrNoCRID = errors.New("qurl: no crid to verify against")
 
-// ErrCRIDMismatch is returned by VerifyCRID when the supplied resource key
-// does not derive the held CRID. This is the substitution the identifier
-// exists to detect: fail closed and do not use the key.
-var ErrCRIDMismatch = errors.New("qurl: resource key does not derive the held crid")
+// ErrCRIDMismatch is returned when ShareResource or CreatePortal receives a different CRID
+// or VerifyCRID finds that the supplied key does not derive the held CRID.
+// Fail closed and do not use the returned link or mismatched key.
+var ErrCRIDMismatch = errors.New("qurl: resource CRID mismatch")
 
 // ShareResourceOptions customizes ShareResource. The zero value (or a nil
 // pointer) requests the server defaults.
@@ -45,22 +45,19 @@ type ShareResourceOptions struct {
 
 // ShareLink is a freshly minted share link — a short-lived qURL access link
 // — for a protected resource. It is the counterpart of Portal: both are
-// minted access links, but ShareResource is the path addressed by resource
-// id or CRID and verifiable with VerifyCRID.
+// minted access links, but ShareResource is the path addressed by CRID and verifiable with VerifyCRID.
 type ShareLink struct {
 	// Link is the access link. When it is qv2-shaped, open it with
 	// EnterPortal; ShareResource deliberately does not parse or verify it.
 	Link string
 	// QURLID identifies this specific minted link. Pass it to RevokePortal —
-	// with the same resource id you shared — to revoke this one link while
+	// with the same CRID you shared — to revoke this one link while
 	// the resource's other links keep working. Empty when the API omits it
-	// (a server predating the field), which is the only case where a share
-	// link has no individual revocation handle. Capture it alongside Link:
+	// and the link has no individual revocation handle. Capture it alongside Link:
 	// neither is retrievable after this response.
 	QURLID string
-	// CRID is the resource's Cryptographic Resource ID, when returned by the
-	// API (older servers and keyless resources omit it). Tie it to a key you
-	// hold with VerifyCRID.
+	// CRID is the resource's required Cryptographic Resource ID.
+	// Tie it to a key you hold with VerifyCRID.
 	CRID string
 	// Type is the link type reported by the API (for example "qv2").
 	Type string
@@ -105,11 +102,8 @@ func (r shareResourceResponse) shareLink() (*ShareLink, error) {
 }
 
 // ShareResource asks LayerV to mint a fresh share link — a short-lived qURL
-// access link — for an existing resource. resourceID accepts either
-// identifier form the platform serves — the public-key resource id or the
-// resource's CRID — and, like the other resource methods, is validated for
-// presence only: the server is authoritative for which identifiers it
-// accepts, so the SDK does not pre-judge the form locally.
+// access link — for an existing CRID. Public keys are verification data,
+// not resource locators.
 //
 // The CRID is safe to paste anywhere; the share link is the secret, and
 // sharing is what turns the identifier into access. Each link expires on its
@@ -126,19 +120,19 @@ func (r shareResourceResponse) shareLink() (*ShareLink, error) {
 // delivered key.
 //
 // The minted link is revocable on its own: keep ShareLink.QURLID and pass it
-// to RevokePortal with the same resourceID to kill that one link without
+// to RevokePortal with the same resourceCRID to kill that one link without
 // disturbing the resource's others. Like Link, it is not retrievable after
 // this call returns.
 //
 // A 503 from this endpoint means the environment is not serving temporary
 // access links and surfaces as ErrTemporaryAccessLinksDisabled; other API
 // failures surface as *APIError exactly like the rest of the client.
-func (c *Client) ShareResource(ctx context.Context, resourceID string, opts *ShareResourceOptions) (*ShareLink, error) {
+func (c *Client) ShareResource(ctx context.Context, resourceCRID string, opts *ShareResourceOptions) (*ShareLink, error) {
 	if c == nil {
 		return nil, fmt.Errorf("%w: nil client", ErrInvalidClientConfig)
 	}
-	if strings.TrimSpace(resourceID) == "" {
-		return nil, fmt.Errorf("%w: resource id must not be empty", ErrInvalidResourceRequest)
+	if err := crid.Validate(resourceCRID); err != nil {
+		return nil, fmt.Errorf("%w: share requires a valid CRID: %w", ErrInvalidResourceRequest, err)
 	}
 	var reqBody shareResourceRequest
 	if opts != nil {
@@ -151,7 +145,7 @@ func (c *Client) ShareResource(ctx context.Context, resourceID string, opts *Sha
 		reqBody.TTLSeconds = int64(opts.TTL / time.Second)
 	}
 
-	path := "/v1/resources/" + url.PathEscape(resourceID) + "/share"
+	path := "/v1/resources/" + url.PathEscape(resourceCRID) + "/share"
 	var env apiEnvelope[shareResourceResponse]
 	if err := c.postJSON(ctx, path, reqBody, &env); err != nil {
 		var apiErr *APIError
@@ -159,6 +153,12 @@ func (c *Client) ShareResource(ctx context.Context, resourceID string, opts *Sha
 			return nil, fmt.Errorf("%w: %w", ErrTemporaryAccessLinksDisabled, err)
 		}
 		return nil, err
+	}
+	if env.Data.CRID == "" {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidAPIResponse, ErrNoCRID)
+	}
+	if env.Data.CRID != resourceCRID {
+		return nil, fmt.Errorf("%w: %w: share response CRID does not match the requested CRID", ErrInvalidAPIResponse, ErrCRIDMismatch)
 	}
 	return env.Data.shareLink()
 }
@@ -174,7 +174,7 @@ func (c *Client) ShareResource(ctx context.Context, resourceID string, opts *Sha
 // committed one — the substitution the identifier exists to detect.
 func (l *ShareLink) VerifyCRID(derSPKI []byte) error {
 	if l == nil || l.CRID == "" {
-		return fmt.Errorf("%w: share response carried no crid (older server or keyless resource)", ErrNoCRID)
+		return fmt.Errorf("%w: share link has no crid", ErrNoCRID)
 	}
 	ok, err := crid.KeyMatches(l.CRID, derSPKI)
 	if err != nil {

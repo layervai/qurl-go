@@ -210,7 +210,7 @@ func TestOpenClientUsesRawTokenFileFromEnvironment(t *testing.T) {
 			t.Fatalf("Authorization = %q, want %q", got, want)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"data":{"resource_id":"r_rawtoken123","target_url":"https://example.com","status":"active"}}`))
+		_, _ = w.Write([]byte(`{"data":{"resource_id":"` + testConnectorID + `","crid":"` + testConnectorCRID + `","target_url":"https://example.com","status":"active"}}`))
 	}))
 	defer srv.Close()
 

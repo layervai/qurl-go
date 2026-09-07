@@ -66,7 +66,7 @@ func TestConnectorResourcePublicShape(t *testing.T) {
 			got = append(got, field.Name)
 		}
 	}
-	want := []string{"ResourceID", "CRID", "ConnectorRoutingID", "KnockResourceID", "Slug", "Alias"}
+	want := []string{"ResourcePublicKey", "CRID", "ConnectorRoutingID", "KnockResourceID", "Slug", "Alias"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("ConnectorResource exported fields = %v, want %v; cycle RunID and producer type/status are not resource fields", got, want)
 	}
@@ -185,7 +185,7 @@ func TestClient_EnsureConnectorResourceContract(t *testing.T) {
 				t.Fatalf("EnsureConnectorResource: %v", err)
 			}
 			resource := result.Resource
-			if resource.ResourceID != testConnectorID || resource.ConnectorRoutingID != testConnectorRoutingID || resource.KnockResourceID != testKnockID || resource.Slug != testConnectorSlug {
+			if resource.ResourcePublicKey != testConnectorID || resource.ConnectorRoutingID != testConnectorRoutingID || resource.KnockResourceID != testKnockID || resource.Slug != testConnectorSlug {
 				t.Fatalf("resource = %#v", resource)
 			}
 			if resource.Alias == nil || *resource.Alias != "dashboard-display" {
@@ -205,7 +205,7 @@ func TestClient_EnsureConnectorResourceContract(t *testing.T) {
 			if _, exposed := public["status"]; exposed {
 				t.Fatalf("ConnectorResource JSON exposes producer status: %s", encoded)
 			}
-			if got := public["resource_id"]; got != testConnectorID {
+			if got := public["resource_public_key"]; got != testConnectorID {
 				t.Fatalf("ConnectorResource JSON resource_id = %v", got)
 			}
 			if got := public["connector_routing_id"]; got != testConnectorRoutingID {
@@ -245,7 +245,7 @@ func TestClient_GetConnectorResourceDetailEnvelope(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetConnectorResource: %v", err)
 	}
-	if resource.ResourceID != testConnectorID || resource.ConnectorRoutingID != testConnectorRoutingID || resource.KnockResourceID != testKnockID || resource.Slug != testConnectorSlug || resource.Alias != nil {
+	if resource.ResourcePublicKey != testConnectorID || resource.ConnectorRoutingID != testConnectorRoutingID || resource.KnockResourceID != testKnockID || resource.Slug != testConnectorSlug || resource.Alias != nil {
 		t.Fatalf("resource = %#v", resource)
 	}
 }
@@ -294,7 +294,7 @@ func TestClient_GetConnectorResourceBySlugDoesNotConflateAlias(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetConnectorResourceBySlug: %v", err)
 	}
-	if resource.ResourceID != testConnectorID || resource.ConnectorRoutingID != testConnectorRoutingID || resource.KnockResourceID != testKnockID || resource.Slug != testConnectorSlug || resource.Alias == nil || *resource.Alias != "renamed-display" {
+	if resource.ResourcePublicKey != testConnectorID || resource.ConnectorRoutingID != testConnectorRoutingID || resource.KnockResourceID != testKnockID || resource.Slug != testConnectorSlug || resource.Alias == nil || *resource.Alias != "renamed-display" {
 		t.Fatalf("resource = %#v", resource)
 	}
 }
@@ -455,7 +455,7 @@ func TestClient_ConnectorResourceCreatePortal(t *testing.T) {
 						http.Error(w, "unexpected portal request", http.StatusBadRequest)
 						return
 					}
-					fmt.Fprintf(w, `{"data":{"crid":"ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a","resource_id":%q,"qurl_link":"https://qurl.link/at_connector"}}`, testConnectorID)
+					fmt.Fprintf(w, `{"data":{"resource_id":%q,"crid":"ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a","qurl_link":"https://qurl.link/at_connector"}}`, testConnectorID)
 				default:
 					t.Errorf("unexpected request %d", requests.Load())
 					http.Error(w, "unexpected request", http.StatusBadRequest)
@@ -471,8 +471,8 @@ func TestClient_ConnectorResourceCreatePortal(t *testing.T) {
 			if err != nil {
 				t.Fatalf("CreatePortal: %v", err)
 			}
-			if portal.ResourceID != testConnectorID {
-				t.Fatalf("portal resource_id = %q", portal.ResourceID)
+			if portal.CRID != testConnectorCRID {
+				t.Fatalf("portal resource_id = %q", portal.CRID)
 			}
 		})
 	}
@@ -483,7 +483,7 @@ func TestConnectorResourceCreatePortalRejectsNilOrUnbound(t *testing.T) {
 
 	bound := &ConnectorResource{
 		client:             &Client{},
-		ResourceID:         testConnectorID,
+		ResourcePublicKey:  testConnectorID,
 		CRID:               testConnectorCRID,
 		ConnectorRoutingID: testConnectorRoutingID,
 		KnockResourceID:    testKnockID,
@@ -497,8 +497,8 @@ func TestConnectorResourceCreatePortalRejectsNilOrUnbound(t *testing.T) {
 	if err := json.Unmarshal(encoded, &unbound); err != nil {
 		t.Fatalf("unmarshal ConnectorResource: %v", err)
 	}
-	if unbound.ResourceID != bound.ResourceID || unbound.client != nil {
-		t.Fatalf("JSON round trip = {resource_id:%q client:%p}, want preserved ID and nil client", unbound.ResourceID, unbound.client)
+	if unbound.ResourcePublicKey != bound.ResourcePublicKey || unbound.client != nil {
+		t.Fatalf("JSON round trip = {resource_id:%q client:%p}, want preserved ID and nil client", unbound.ResourcePublicKey, unbound.client)
 	}
 
 	tests := []struct {
@@ -744,7 +744,7 @@ func TestConnectorResourceWireAllowsControlPlaneValueEqualToSlug(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			wire := connectorResourceWire{
-				ResourceID:         testConnectorID,
+				ResourcePublicKey:  testConnectorID,
 				CRID:               testConnectorCRID,
 				ConnectorRoutingID: testConnectorRoutingID,
 				KnockResourceID:    testKnockID,
@@ -818,7 +818,7 @@ func TestConnectorResourceOpaqueKnockIDContract(t *testing.T) {
 	t.Parallel()
 
 	wire := connectorResourceWire{
-		ResourceID:         testConnectorID,
+		ResourcePublicKey:  testConnectorID,
 		CRID:               testConnectorCRID,
 		ConnectorRoutingID: testConnectorRoutingID,
 		KnockResourceID:    "producer owned admission target",

@@ -74,7 +74,7 @@ the task it granted is done — revoke it with the two ids the create call
 returned. The same `qurl:write` credential that minted the portal revokes it:
 
 ```go
-err := client.RevokePortal(ctx, portal.ResourceID, portal.QURLID)
+err := client.RevokePortal(ctx, portal.CRID, portal.QURLID)
 if err != nil {
 	return err
 }
@@ -86,7 +86,7 @@ the link stops working, and revoking the same portal again fails with
 only needs the link dead can treat that error as settled:
 
 ```go
-err := client.RevokePortal(ctx, portal.ResourceID, portal.QURLID)
+err := client.RevokePortal(ctx, portal.CRID, portal.QURLID)
 if err != nil && !errors.Is(err, qurl.ErrPortalRevoked) {
 	return err
 }
@@ -94,7 +94,7 @@ if err != nil && !errors.Is(err, qurl.ErrPortalRevoked) {
 
 `RevokePortal` is the revoke call for every link the client mints, not just
 these. A share link minted by `ShareResource` carries its own `QURLID` too —
-pass it with the resource id you shared; see
+pass it with the CRID you shared; see
 [Share a resource and verify its CRID](share-and-crid.md#revoke-one-minted-link).
 
 ## qURL Connector-Protected Services
@@ -119,14 +119,14 @@ that immutable slug. Your app only resolves it and mints portals. A resource
 alias is a separate, mutable display handle and is never used as qURL Connector
 identity.
 
-## Reuse a Stored Resource ID
+## Reuse a Stored CRID
 
-Most production apps protect the URL once, store the resource id, and mint
+Most production apps protect the URL once, store the CRID, and mint
 portals as needed:
 
 ```go
-resourceID := "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE2cTVv5_3eeYCcLLq5ROYCqcmY50HiKZ9ATglIkPnCji1E_S63UMtXba1moR8-Q6EV7oM6zwwh9_j2CDujzXvLA"
-resource := client.ResourceByID(resourceID)
+resourceCRID := "ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a"
+resource := client.ResourceByCRID(resourceCRID)
 
 portal, err := resource.CreatePortal(ctx, qurl.ValidFor(time.Hour))
 ```
@@ -140,7 +140,7 @@ portal, resource, err := client.CreatePortalForURL(ctx,
 	"https://internal.example.com/dashboard",
 	qurl.ValidFor(5*time.Minute),
 )
-fmt.Println(resource.ID, portal.Link)
+fmt.Println(resource.CRID, portal.Link)
 ```
 
 That asks LayerV to protect the URL and mint the portal in one API call. Use the

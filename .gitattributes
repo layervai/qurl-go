@@ -1,2 +1,3 @@
 tests/e2e/nativeudp/*.json text eol=lf
 tests/e2e/nativeudp/testdata/*.json text eol=lf
+qurl/testdata/connector_resource_crid_vectors.json text eol=lf

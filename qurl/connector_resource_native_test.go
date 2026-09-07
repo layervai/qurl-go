@@ -3,10 +3,13 @@ package qurl
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/netip"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -23,10 +26,34 @@ const testNativeConnectorNonce = "ERERERERERERERERERERERERERERERERERERERERERE"
 func TestNativeConnectorResourceConformance(t *testing.T) {
 	t.Parallel()
 
-	fixture, err := conformance.ConnectorResourceLSTV1()
-	if err != nil {
-		t.Fatalf("load Connector-resource LST conformance: %v", err)
+	var fixture struct {
+		Fixtures struct {
+			AgentID              string `json:"agent_id"`
+			ConnectorID          string `json:"connector_id"`
+			ResourcePublicKey    string `json:"resource_public_key"`
+			CRID                 string `json:"crid"`
+			ConnectorRoutingID   string `json:"connector_routing_id"`
+			KnockResourceID      string `json:"knock_resource_id"`
+			ExistingRequestNonce string `json:"existing_request_nonce"`
+		} `json:"fixtures"`
+		SuccessExchanges  []conformance.ConnectorResourceLSTV1Exchange  `json:"success_exchanges"`
+		ResultRejectCases []conformance.ConnectorResourceLSTV1BodyCase  `json:"result_reject_cases"`
+		ErrorCases        []conformance.ConnectorResourceLSTV1ErrorCase `json:"error_cases"`
+		ErrorRejectCases  []conformance.ConnectorResourceLSTV1BodyCase  `json:"error_reject_cases"`
+		SizeCases         []conformance.ConnectorResourceLSTV1SizeCase  `json:"size_cases"`
 	}
+	// CI compares these bytes with the released v0.17.0 public artifact.
+	raw, err := os.ReadFile("testdata/connector_resource_crid_vectors.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fmt.Sprintf("%x", sha256.Sum256(raw)); got != "a73950b0d0edfc11ea88908f8660a3692ae8dc93a69264d976a7b94fc565fd46" {
+		t.Fatal("native vectors differ from the qurl-conformance v0.17.0 release")
+	}
+	if err := json.Unmarshal(raw, &fixture); err != nil {
+		t.Fatal(err)
+	}
+
 	if connectorResourceLSTQuery != conformance.ConnectorResourceLSTV1Query ||
 		connectorResourceLSTVersion != conformance.ConnectorResourceLSTV1Version ||
 		agentAspID != conformance.ConnectorResourceLSTV1AspID ||
@@ -62,11 +89,11 @@ func TestNativeConnectorResourceConformance(t *testing.T) {
 		exchange := exchange
 		t.Run("success/"+exchange.Name, func(t *testing.T) {
 			t.Parallel()
-			publicRequest, err := conformance.ParseConnectorResourceLSTV1RequestBody([]byte(exchange.Request.BodyJSON), fixture.Fixtures.AgentID)
-			if err != nil {
+			var publicRequest nativeConnectorResourceRequestEnvelope
+			if err := json.Unmarshal([]byte(exchange.Request.BodyJSON), &publicRequest); err != nil {
 				t.Fatal(err)
 			}
-			request := nativeRequestFromConformance(publicRequest)
+			request := nativeRequestFromConformance(&publicRequest)
 			body, err := marshalNativeConnectorResourceRequest(fixture.Fixtures.AgentID, request)
 			if err != nil {
 				t.Fatal(err)
@@ -75,33 +102,46 @@ func TestNativeConnectorResourceConformance(t *testing.T) {
 				t.Fatalf("generated request = %s\npublic vector     = %s", body, exchange.Request.BodyJSON)
 			}
 			resolution, err := parseNativeConnectorResourceResponse([]byte(exchange.Result.BodyJSON), fixture.Fixtures.AgentID, request)
-			// The old wire fixture allowed CRID-less responses. This SDK
-			// intentionally rejects that compatibility case.
-			if exchange.Name == "existing_without_crid" {
-				if resolution != nil || !errors.Is(err, ErrInvalidNativeConnectorResourceResponse) {
-					t.Fatalf("CRID-less native response = %#v, %v", resolution, err)
-				}
-				return
-			}
-
 			if err != nil {
 				t.Fatal(err)
 			}
 			if resolution == nil || resolution.Resource == nil ||
 				resolution.FoundExisting != exchange.ExpectedFoundExisting ||
-				resolution.Resource.ResourceID != fixture.Fixtures.ResourceID ||
+				resolution.Resource.ResourcePublicKey != fixture.Fixtures.ResourcePublicKey ||
 				resolution.Resource.ConnectorRoutingID != fixture.Fixtures.ConnectorRoutingID ||
 				resolution.Resource.KnockResourceID != fixture.Fixtures.KnockResourceID {
 				t.Fatalf("resolution = %#v", resolution)
 			}
-			if publicRequest.UsrData.ExpectedResourceID != nil && resolution.Resource.ResourceID != *publicRequest.UsrData.ExpectedResourceID {
+			if publicRequest.UsrData.ExpectedCRID != nil && resolution.Resource.CRID != *publicRequest.UsrData.ExpectedCRID {
 				t.Fatal("continuity result did not retain the exact expected resource")
 			}
 		})
 	}
 
+	for _, testCase := range fixture.SizeCases {
+		if testCase.Direction != "result" {
+			continue
+		} // The SDK only receives result bodies.
+		t.Run("size/"+testCase.Name, func(t *testing.T) {
+			var envelope struct {
+				List struct {
+					AgentID     string `json:"agent_id"`
+					ConnectorID string `json:"connector_id"`
+				} `json:"list"`
+			}
+			if err := json.Unmarshal([]byte(testCase.BodyJSON), &envelope); err != nil {
+				t.Fatal(err)
+			}
+			request := &NativeConnectorResourceRequest{ConnectorID: envelope.List.ConnectorID, RequestNonce: testNativeConnectorNonce}
+			result, err := parseNativeConnectorResourceResponse([]byte(testCase.BodyJSON), envelope.List.AgentID, request)
+			if err != nil || result == nil {
+				t.Fatalf("maximum result rejected: %v", err)
+			}
+		})
+	}
+
 	continuityRequest := &NativeConnectorResourceRequest{
-		ConnectorID: fixture.Fixtures.ConnectorID, ExpectedResourceID: fixture.Fixtures.ResourceID,
+		ConnectorID: fixture.Fixtures.ConnectorID, ExpectedCRID: fixture.Fixtures.CRID,
 		RequestNonce: fixture.Fixtures.ExistingRequestNonce,
 	}
 	for _, testCase := range fixture.ResultRejectCases {
@@ -138,12 +178,12 @@ func TestNativeConnectorResourceConformance(t *testing.T) {
 	}
 }
 
-func nativeRequestFromConformance(request *conformance.ConnectorResourceLSTV1Request) *NativeConnectorResourceRequest {
+func nativeRequestFromConformance(request *nativeConnectorResourceRequestEnvelope) *NativeConnectorResourceRequest {
 	native := &NativeConnectorResourceRequest{
 		ConnectorID: request.UsrData.ConnectorID, RequestNonce: request.UsrData.RequestNonce,
 	}
-	if request.UsrData.ExpectedResourceID != nil {
-		native.ExpectedResourceID = *request.UsrData.ExpectedResourceID
+	if request.UsrData.ExpectedCRID != nil {
+		native.ExpectedCRID = *request.UsrData.ExpectedCRID
 	}
 	return native
 }
@@ -155,7 +195,7 @@ func TestNewNativeConnectorResourceRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := NewNativeConnectorResourceRequest(testConnectorSlug, testConnectorID)
+	second, err := NewNativeConnectorResourceRequest(testConnectorSlug, testConnectorCRID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,8 +208,8 @@ func TestNewNativeConnectorResourceRequest(t *testing.T) {
 	if first.RequestNonce == second.RequestNonce {
 		t.Fatal("independent Connector-resource requests reused a nonce")
 	}
-	if second.ExpectedResourceID != testConnectorID {
-		t.Fatalf("expected resource id = %q", second.ExpectedResourceID)
+	if second.ExpectedCRID != testConnectorCRID {
+		t.Fatalf("expected resource id = %q", second.ExpectedCRID)
 	}
 }
 
@@ -186,7 +226,7 @@ func TestNativeConnectorResourceRequestValidation(t *testing.T) {
 		{name: "missing nonce", request: &NativeConnectorResourceRequest{ConnectorID: testConnectorSlug}},
 		{name: "padded nonce", request: &NativeConnectorResourceRequest{ConnectorID: testConnectorSlug, RequestNonce: testNativeConnectorNonce + "="}},
 		{name: "short nonce", request: &NativeConnectorResourceRequest{ConnectorID: testConnectorSlug, RequestNonce: base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{1}, 31))}},
-		{name: "invalid expected id", request: &NativeConnectorResourceRequest{ConnectorID: testConnectorSlug, RequestNonce: testNativeConnectorNonce, ExpectedResourceID: "r_private"}},
+		{name: "invalid expected id", request: &NativeConnectorResourceRequest{ConnectorID: testConnectorSlug, RequestNonce: testNativeConnectorNonce, ExpectedCRID: "r_private"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -221,7 +261,7 @@ func TestResolveRegisteredAgentConnectorResource_EncryptedAssignedCellExchange(t
 		t.Fatalf("result = %#v, want newly-created complete binding", result)
 	}
 	resource := result.Resource
-	if resource.ResourceID != testConnectorID || resource.ConnectorRoutingID != testConnectorRoutingID ||
+	if resource.ResourcePublicKey != testConnectorID || resource.ConnectorRoutingID != testConnectorRoutingID ||
 		resource.KnockResourceID != testKnockID || resource.Slug != testConnectorSlug || resource.CRID != testConnectorCRID {
 		t.Fatalf("resource = %#v", resource)
 	}
@@ -249,7 +289,7 @@ func TestResolveRegisteredAgentConnectorResource_ExpectedIdentityIsSentAndPinned
 	t.Parallel()
 
 	request := &NativeConnectorResourceRequest{
-		ConnectorID: testConnectorSlug, ExpectedResourceID: testConnectorID, RequestNonce: testNativeConnectorNonce,
+		ConnectorID: testConnectorSlug, ExpectedCRID: testConnectorCRID, RequestNonce: testNativeConnectorNonce,
 	}
 	reply := nativeConnectorSuccessBody(testConnectorID, testConnectorRoutingID, testKnockID, testConnectorCRID, true)
 	binding, server, resolver, dialer := newNativeConnectorResourceTestRuntime(t, reply)
@@ -259,11 +299,11 @@ func TestResolveRegisteredAgentConnectorResource_ExpectedIdentityIsSentAndPinned
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result == nil || !result.FoundExisting || result.Resource.ResourceID != testConnectorID {
+	if result == nil || !result.FoundExisting || result.Resource.ResourcePublicKey != testConnectorID {
 		t.Fatalf("result = %#v", result)
 	}
 	requests := waitRuntimeUDPRequests(t, server, 1)
-	wantExpected := `"expected_resource_id":"` + testConnectorID + `"`
+	wantExpected := `"expected_crid":"` + testConnectorCRID + `"`
 	if !strings.Contains(string(requests[0].body), wantExpected) {
 		t.Fatalf("LST omitted continuity assertion: %s", requests[0].body)
 	}
@@ -422,11 +462,22 @@ func TestParseNativeConnectorResourcePinsExpectedIdentityAndCRID(t *testing.T) {
 	t.Parallel()
 
 	request := &NativeConnectorResourceRequest{
-		ConnectorID: testConnectorSlug, ExpectedResourceID: testConnectorID, RequestNonce: testNativeConnectorNonce,
+		ConnectorID: testConnectorSlug, ExpectedCRID: testConnectorCRID, RequestNonce: testNativeConnectorNonce,
 	}
 	wrongResource := nativeConnectorSuccessBody(testOtherConnectorID, testConnectorRoutingID, testKnockID, testConnectorCRID, true)
 	if result, err := parseNativeConnectorResourceResponse([]byte(wrongResource), "agent-conform", request); result != nil || !errors.Is(err, ErrInvalidNativeConnectorResourceResponse) {
 		t.Fatalf("continuity mismatch = %#v, %v", result, err)
+	}
+
+	// The response is key-bound, but belongs to a different resource.
+	otherCRID := "aeqq3ixwrzh6k32picwqxzdkc4dkzenxwozcpcw2fstb5uug22dn3akqpppq"
+	otherKey := "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEpDu9mdM6E96ncBm5qjKn16Rjv6sWoHRQQz2ElwKSg5YQDLCvofuEb7gmId2YBKv3YXcrdc3tmBaiRzYCH9Hp6Q"
+	if !nativeConnectorCRIDMatches(otherCRID, otherKey) {
+		t.Fatal("invalid test identity")
+	}
+	other := nativeConnectorSuccessBody(otherKey, testConnectorRoutingID, testKnockID, otherCRID, true)
+	if result, err := parseNativeConnectorResourceResponse([]byte(other), "agent-conform", request); result != nil || !errors.Is(err, ErrInvalidNativeConnectorResourceResponse) {
+		t.Fatalf("changed CRID = %#v, %v", result, err)
 	}
 
 	emptyCRID := ""
@@ -489,7 +540,7 @@ func TestAgentRuntimePrivateKeyBorrowSerializesTransfer(t *testing.T) {
 
 func nativeConnectorSuccessBody(resourceID, routingID, knockID string, resourceCRID string, foundExisting bool) string {
 	cridField := fmt.Sprintf(`,"crid":%q`, resourceCRID)
-	return fmt.Sprintf(`{"errCode":"0","list":{"query":"connector_resource","version":1,"agent_id":"agent-conform","connector_id":"prod-dashboard","resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q%s,"found_existing":%t}}`,
+	return fmt.Sprintf(`{"errCode":"0","list":{"query":"connector_resource","version":1,"agent_id":"agent-conform","connector_id":"prod-dashboard","resource_public_key":%q,"connector_routing_id":%q,"knock_resource_id":%q%s,"found_existing":%t}}`,
 		resourceID, routingID, knockID, cridField, foundExisting)
 }
 
@@ -527,4 +578,14 @@ func newNativeConnectorResourceTestRuntimeStep(t *testing.T, step runtimeUDPStep
 	resolver := runtimeRouteResolver{hosts: map[string]netip.Addr{endpoint.Host: cellIP}}
 	dialer := runtimeRouteDialer{targets: map[string]string{cellIP.String(): server.conn.LocalAddr().String()}}
 	return binding, server, resolver, dialer
+}
+
+func TestNativeConnectorRejectsResourceIDCompatibility(t *testing.T) {
+	request := &NativeConnectorResourceRequest{ConnectorID: testConnectorSlug, RequestNonce: testNativeConnectorNonce}
+	good := nativeConnectorSuccessBody(testConnectorID, testConnectorRoutingID, testKnockID, testConnectorCRID, true)
+	for _, body := range []string{strings.Replace(good, `"resource_public_key":`, `"resource_id":`, 1), strings.Replace(good, `,"crid":"`+testConnectorCRID+`"`, "", 1)} {
+		if _, err := parseNativeConnectorResourceResponse([]byte(body), "agent-conform", request); !errors.Is(err, ErrInvalidNativeConnectorResourceResponse) {
+			t.Fatalf("old response accepted: %v", err)
+		}
+	}
 }

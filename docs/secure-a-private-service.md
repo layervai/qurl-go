@@ -94,7 +94,7 @@ Portals expire on their own. To kill one sooner, revoke it with the ids the
 create call returned:
 
 ```go
-if err := client.RevokePortal(ctx, portal.ResourceID, portal.QURLID); err != nil {
+if err := client.RevokePortal(ctx, portal.CRID, portal.QURLID); err != nil {
 	return err
 }
 ```
