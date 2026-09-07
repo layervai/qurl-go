@@ -130,6 +130,117 @@ func TestPortalOpenerStartCachesHandleAndDoDoesNotOpen(t *testing.T) {
 	}
 }
 
+func TestPortalOpenerDoDescendantEncodesSegmentsWithoutOpening(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		requests.Add(1)
+		if got, want := req.URL.EscapedPath(), "/api/detect/eib_demo12345/team%20alpha%25beta/%252e%252e"; got != want {
+			t.Errorf("protected request path = %q, want %q", got, want)
+		}
+		if req.URL.RawQuery != "tenant=x" || req.URL.Fragment != "" {
+			t.Errorf("protected request query=%q fragment=%q, want tenant query and empty fragment", req.URL.RawQuery, req.URL.Fragment)
+		}
+		cookie, err := req.Cookie(qurlVsessionCookieName)
+		if err != nil || cookie.Value != testAuthProviderToken {
+			t.Errorf("protected request cookie = %#v, %v", cookie, err)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(server.Close)
+	link, cfg := portalOpenerFixture(t)
+	opener, err := NewPortalOpener(link,
+		WithPortalOpenerConfig(cfg),
+		WithPortalOpenerHTTPClient(server.Client()),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { closePortalOpener(t, opener) })
+	var opens atomic.Int32
+	opener.open = func(context.Context, string, Config) (*ResourceHandle, error) {
+		opens.Add(1)
+		return portalTestHandle(server.URL+"/api/detect/?tenant=x", testAuthProviderToken, 60, 10), nil
+	}
+	if err := opener.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	response, err := opener.DoDescendant(t.Context(), []string{"eib_demo12345", "team alpha%beta", "%2e%2e"}, func(target *url.URL) (*http.Request, error) {
+		return http.NewRequestWithContext(t.Context(), http.MethodPost, target.String(), http.NoBody)
+	}, RejectPortalRedirects())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if got := opens.Load(); got != 1 {
+		t.Fatalf("DoDescendant performed %d extra opens", got-1)
+	}
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("protected requests = %d, want 1", got)
+	}
+}
+
+func TestPortalOpenerDoDescendantRejectsUnsafeSegmentsAndBuilderChanges(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		requests.Add(1)
+	}))
+	t.Cleanup(server.Close)
+	link, cfg := portalOpenerFixture(t)
+	opener, err := NewPortalOpener(link,
+		WithPortalOpenerConfig(cfg),
+		WithPortalOpenerHTTPClient(server.Client()),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { closePortalOpener(t, opener) })
+	opener.open = func(context.Context, string, Config) (*ResourceHandle, error) {
+		return portalTestHandle(server.URL+"/api/detect", testAuthProviderToken, 60, 11), nil
+	}
+	if err := opener.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+
+	for name, segments := range map[string][]string{
+		"missing":        nil,
+		"empty":          {""},
+		"dot":            {"."},
+		"dot dot":        {".."},
+		"authority":      {"//evil.example"},
+		"absolute URL":   {"https://evil.example"},
+		"query":          {"binding?admin=true"},
+		"fragment":       {"binding#fragment"},
+		"backslash":      {`binding\admin`},
+		"path separator": {"binding/admin"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			response, err := opener.DoDescendant(t.Context(), segments, func(target *url.URL) (*http.Request, error) {
+				return http.NewRequestWithContext(t.Context(), http.MethodPost, target.String(), http.NoBody)
+			})
+			if response != nil {
+				_ = response.Body.Close()
+			}
+			if !errors.Is(err, ErrInvalidContentRequest) {
+				t.Fatalf("DoDescendant error = %v, want ErrInvalidContentRequest", err)
+			}
+		})
+	}
+
+	response, err := opener.DoDescendant(t.Context(), []string{"eib_demo12345"}, func(target *url.URL) (*http.Request, error) {
+		target.Path = "/api/detect/eib_other12345"
+		return http.NewRequestWithContext(t.Context(), http.MethodPost, target.String(), http.NoBody)
+	})
+	if response != nil {
+		_ = response.Body.Close()
+	}
+	if !errors.Is(err, ErrInvalidContentRequest) {
+		t.Fatalf("changed descendant target error = %v, want ErrInvalidContentRequest", err)
+	}
+	if got := requests.Load(); got != 0 {
+		t.Fatalf("unsafe descendant requests reached transport: %d", got)
+	}
+}
+
 func TestPortalOpenerOptionsFailClosed(t *testing.T) {
 	link, cfg := portalOpenerFixture(t)
 	jar, err := cookiejar.New(nil)
