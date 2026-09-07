@@ -181,7 +181,7 @@ func TestPortalOpenerOpenTimeoutBoundsStart(t *testing.T) {
 		return nil, ctx.Err()
 	}
 	started := time.Now()
-	if err := opener.Start(context.Background()); !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, errPortalOpenTimeout) {
+	if err := opener.Start(context.Background()); !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, ErrPortalOpenTimeout) {
 		t.Fatalf("Start timeout error = %v, want context deadline exceeded", err)
 	}
 	if elapsed := time.Since(started); elapsed > time.Second {
@@ -225,7 +225,7 @@ func TestPortalOpenerCallerCanceledStartDoesNotRecordPlatformFailure(t *testing.
 	}
 }
 
-func TestPortalOpenerCallerDeadlineRecordsPlatformFailure(t *testing.T) {
+func TestPortalOpenerCallerDeadlineDoesNotRecordPlatformFailure(t *testing.T) {
 	link, cfg := portalOpenerFixture(t)
 	opener, err := NewPortalOpener(link, WithPortalOpenerConfig(cfg))
 	if err != nil {
@@ -242,8 +242,8 @@ func TestPortalOpenerCallerDeadlineRecordsPlatformFailure(t *testing.T) {
 		t.Fatalf("Start error = %v, want context deadline exceeded", err)
 	}
 	health := opener.Health()
-	if health.State != PortalOpenerStateDegraded || health.Ready ||
-		health.LastFailureClass != PortalOpenerFailureOpen || health.ConsecutiveFailures != 1 {
+	if health.State != PortalOpenerStateNew || health.Ready ||
+		health.LastFailureClass != PortalOpenerFailureNone || health.ConsecutiveFailures != 0 {
 		t.Fatalf("caller-deadline Start health = %+v", health)
 	}
 	response, err := opener.Do(t.Context(), func(*url.URL) (*http.Request, error) {
@@ -253,7 +253,7 @@ func TestPortalOpenerCallerDeadlineRecordsPlatformFailure(t *testing.T) {
 	if response != nil {
 		_ = response.Body.Close()
 	}
-	if response != nil || !errors.Is(err, ErrPortalOpenerNotReady) {
+	if response != nil || !errors.Is(err, ErrPortalOpenerNotStarted) {
 		t.Fatalf("Do after caller-deadline first Start = %#v, %v", response, err)
 	}
 }
@@ -283,6 +283,57 @@ func TestPortalOpenerCallerCanceledRecoveryPreservesFailureHealth(t *testing.T) 
 	if health.State != PortalOpenerStateDegraded || health.Ready ||
 		health.LastFailureClass != PortalOpenerFailureOpen || health.ConsecutiveFailures != 1 {
 		t.Fatalf("caller-canceled recovery health = %+v", health)
+	}
+}
+
+func TestPortalOpenerCallerDeadlineRecoveryPreservesFailureHealth(t *testing.T) {
+	link, cfg := portalOpenerFixture(t)
+	opener, err := NewPortalOpener(link, WithPortalOpenerConfig(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { closePortalOpener(t, opener) })
+	platformErr := errors.New("platform unavailable")
+	opener.open = func(context.Context, string, Config) (*ResourceHandle, error) { return nil, platformErr }
+	if err := opener.Start(t.Context()); !errors.Is(err, platformErr) {
+		t.Fatalf("initial Start = %v, want platform failure", err)
+	}
+	opener.open = func(ctx context.Context, _ string, _ Config) (*ResourceHandle, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	ctx, cancel := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+	defer cancel()
+	if err := opener.Start(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("recovery Start = %v, want context deadline exceeded", err)
+	}
+	health := opener.Health()
+	if health.State != PortalOpenerStateDegraded || health.Ready ||
+		health.LastFailureClass != PortalOpenerFailureOpen || health.ConsecutiveFailures != 1 {
+		t.Fatalf("caller-deadline recovery health = %+v", health)
+	}
+}
+
+func TestPortalOpenerCallerDeadlineDoesNotMaskSDKTimeout(t *testing.T) {
+	link, cfg := portalOpenerFixture(t)
+	opener, err := NewPortalOpener(link, WithPortalOpenerConfig(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { closePortalOpener(t, opener) })
+	opener.open = func(ctx context.Context, _ string, _ Config) (*ResourceHandle, error) {
+		<-ctx.Done()
+		return nil, errors.Join(ErrPortalOpenTimeout, ctx.Err())
+	}
+	ctx, cancel := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+	defer cancel()
+	startErr := opener.Start(ctx)
+	if !errors.Is(startErr, ErrPortalOpenTimeout) || !errors.Is(startErr, context.DeadlineExceeded) {
+		t.Fatalf("Start error = %v, want ErrPortalOpenTimeout and context deadline exceeded", startErr)
+	}
+	if health := opener.Health(); health.State != PortalOpenerStateDegraded || health.Ready ||
+		health.LastFailureClass != PortalOpenerFailureOpen || health.ConsecutiveFailures != 1 {
+		t.Fatalf("SDK-timeout Start health = %+v", health)
 	}
 }
 
@@ -1257,41 +1308,54 @@ func TestPortalOpenerCloseRaceDiscardsSuccessfulTransportResponse(t *testing.T) 
 }
 
 func TestPortalOpenerCloseCancelsRequestBeforeRedirect(t *testing.T) {
-	transport := &closeIgnoringRedirectTransport{
-		firstLeg: make(chan struct{}), releaseFirstLeg: make(chan struct{}),
-	}
+	for _, testCase := range []struct {
+		name    string
+		options []PortalRequestOption
+	}{
+		{name: "follow same-origin redirects"},
+		{name: "reject redirects", options: []PortalRequestOption{RejectPortalRedirects()}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			transport := &closeIgnoringRedirectTransport{
+				firstLeg: make(chan struct{}), releaseFirstLeg: make(chan struct{}),
+			}
 
-	link, cfg := portalOpenerFixture(t)
-	opener, err := NewPortalOpener(link, WithPortalOpenerConfig(cfg), WithPortalOpenerHTTPClient(&http.Client{Transport: transport}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	opener.open = func(context.Context, string, Config) (*ResourceHandle, error) {
-		return portalTestHandle("https://portal.example/start", testAuthProviderToken, 60, 16), nil
-	}
-	if err := opener.Start(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	doErr := make(chan error, 1)
-	go func() {
-		response, requestErr := opener.Do(context.Background(), func(target *url.URL) (*http.Request, error) {
-			return http.NewRequestWithContext(context.Background(), http.MethodGet, target.String(), http.NoBody)
+			link, cfg := portalOpenerFixture(t)
+			opener, err := NewPortalOpener(link, WithPortalOpenerConfig(cfg), WithPortalOpenerHTTPClient(&http.Client{Transport: transport}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { closePortalOpener(t, opener) })
+			opener.open = func(context.Context, string, Config) (*ResourceHandle, error) {
+				return portalTestHandle("https://portal.example/start", testAuthProviderToken, 60, 16), nil
+			}
+			if err := opener.Start(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			doErr := make(chan error, 1)
+			go func() {
+				response, requestErr := opener.Do(context.Background(), func(target *url.URL) (*http.Request, error) {
+					return http.NewRequestWithContext(context.Background(), http.MethodGet, target.String(), http.NoBody)
+				}, testCase.options...)
+				if response != nil {
+					_ = response.Body.Close()
+				}
+				doErr <- requestErr
+			}()
+			<-transport.firstLeg
+			if err := opener.Close(); err != nil {
+				t.Fatal(err)
+			}
+			close(transport.releaseFirstLeg)
+			if err := <-doErr; !errors.Is(err, ErrPortalOpenerClosed) {
+				t.Fatalf("Do error = %v, want ErrPortalOpenerClosed", err)
+			} else if errors.Is(err, ErrPortalRedirect) {
+				t.Fatalf("Do error = %v, Close must take precedence over ErrPortalRedirect", err)
+			}
+			if transport.redirected.Load() != 0 {
+				t.Fatalf("redirect requests after Close = %d, want 0", transport.redirected.Load())
+			}
 		})
-		if response != nil {
-			_ = response.Body.Close()
-		}
-		doErr <- requestErr
-	}()
-	<-transport.firstLeg
-	if err := opener.Close(); err != nil {
-		t.Fatal(err)
-	}
-	close(transport.releaseFirstLeg)
-	if err := <-doErr; !errors.Is(err, ErrPortalOpenerClosed) {
-		t.Fatalf("Do error = %v, want ErrPortalOpenerClosed", err)
-	}
-	if transport.redirected.Load() != 0 {
-		t.Fatalf("redirect requests after Close = %d, want 0", transport.redirected.Load())
 	}
 }
 

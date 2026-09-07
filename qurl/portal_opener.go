@@ -21,11 +21,13 @@ const (
 )
 
 var (
-	errPortalOpenTimeout = errors.New("qurl: portal opener open timeout")
-
+	// ErrPortalOpenTimeout reports that the PortalOpener's configured NHP open
+	// timeout expired. An open stopped only by its caller deadline does not wrap
+	// this error.
+	ErrPortalOpenTimeout = errors.New("qurl: portal opener open timeout")
 	// ErrPortalOpenerNotStarted reports that Do was called before the first Start
-	// attempt completed. A caller-canceled first attempt returns to this state;
-	// a platform failure moves the opener to not-ready instead.
+	// attempt completed. A caller-canceled or caller-deadlined first attempt
+	// returns to this state; a platform failure moves the opener to not-ready.
 	ErrPortalOpenerNotStarted = errors.New("qurl: portal opener has not started")
 	// ErrPortalOpenerNotReady reports that no unexpired cached portal handle is
 	// available. Do never opens or waits for one.
@@ -166,7 +168,7 @@ type PortalOpenerState string
 
 const (
 	// PortalOpenerStateNew means Start has not completed a platform attempt. A
-	// caller-canceled first attempt returns to this state.
+	// caller-canceled or caller-deadlined first attempt returns to this state.
 	PortalOpenerStateNew PortalOpenerState = "new"
 	// PortalOpenerStateStarting means the first open is in progress.
 	PortalOpenerStateStarting PortalOpenerState = "starting"
@@ -274,12 +276,14 @@ func NewPortalOpener(qurlLink string, options ...PortalOpenerOption) (*PortalOpe
 }
 
 // Start synchronously obtains the first native NHP session and starts proactive
-// renewal. Each open is bounded by the configured open timeout. Concurrent
-// calls share one initial open and its first caller's context, so cancellation
-// of that context cancels the shared attempt. Call Start from service lifecycle
-// code, not a request-scoped goroutine. A failed Start can be retried. Start is
-// idempotent while the cached handle is usable, and it is the explicit
-// single-flight recovery path after bounded renewal failures expire that handle.
+// renewal. Each open is bounded by the configured open timeout and returns
+// ErrPortalOpenTimeout if that timeout expires. Concurrent calls share one
+// initial open and its first caller's context, so cancellation or expiration of
+// that context cancels the shared attempt without recording a platform failure.
+// Call Start from service lifecycle code, not a request-scoped goroutine. A
+// failed Start can be retried. Start is idempotent while the cached handle is
+// usable, and it is the explicit single-flight recovery path after bounded
+// renewal failures expire that handle.
 func (o *PortalOpener) Start(ctx context.Context) error {
 	if o == nil {
 		return ErrPortalOpenerClosed
@@ -369,7 +373,10 @@ func (o *PortalOpener) runStart(ctx context.Context, attempt *portalStartAttempt
 	} else if err != nil {
 		clearPortalOpenResult(opened)
 		o.clearActiveLocked()
-		if errors.Is(callerErr, context.Canceled) && errors.Is(err, context.Canceled) {
+		callerGaveUp := (errors.Is(callerErr, context.Canceled) && errors.Is(err, context.Canceled)) ||
+			(errors.Is(callerErr, context.DeadlineExceeded) && errors.Is(err, context.DeadlineExceeded) &&
+				!errors.Is(err, ErrPortalOpenTimeout))
+		if callerGaveUp {
 			if attempt.recovery {
 				o.state = portalOpenerDegraded
 			} else {
@@ -435,12 +442,12 @@ func (o *PortalOpener) openPortal(ctx context.Context, cfg Config, expectedTarge
 	// Keep the monotonic reading for all internal lifetime comparisons. UTC is
 	// applied only to the outward health snapshot.
 	startedAt := o.now()
-	openCtx, cancel := context.WithTimeoutCause(ctx, o.openTimeout, errPortalOpenTimeout)
+	openCtx, cancel := context.WithTimeoutCause(ctx, o.openTimeout, ErrPortalOpenTimeout)
 	defer cancel()
 	handle, err := o.open(openCtx, o.link, cfg)
 	if err != nil {
-		if errors.Is(context.Cause(openCtx), errPortalOpenTimeout) {
-			return nil, fmt.Errorf("%w: %w", errPortalOpenTimeout, err)
+		if errors.Is(context.Cause(openCtx), ErrPortalOpenTimeout) {
+			return nil, fmt.Errorf("%w: %w", ErrPortalOpenTimeout, err)
 		}
 		return nil, err
 	}
@@ -651,7 +658,9 @@ func (o *PortalOpener) waitFor(delay time.Duration) bool {
 // handle exists; it never performs an NHP open or waits for renewal. Close
 // cancels an active request and its response-body reads and prevents later
 // redirect legs. Close does not wait for Do and cannot retract bytes already
-// handed to a transport. The caller must close every returned response body.
+// handed to a transport. A returned body read interrupted by Close reports its
+// native request-context error, typically context.Canceled, not
+// ErrPortalOpenerClosed. The caller must close every returned response body.
 func (o *PortalOpener) Do(ctx context.Context, build PortalRequestBuilder, options ...PortalRequestOption) (*http.Response, error) {
 	if o == nil {
 		return nil, ErrPortalOpenerClosed
@@ -837,7 +846,9 @@ func (o *PortalOpener) Health() PortalOpenerHealth {
 
 // Close cancels background renewal and any active Do, then waits for any active
 // Start or renewal to stop. It does not wait for Do and cannot retract bytes
-// already handed to a transport. Close is idempotent.
+// already handed to a transport. Applications that require a strict outbound
+// request fence must stop and drain request handlers before Close. Close is
+// idempotent.
 func (o *PortalOpener) Close() error {
 	if o == nil {
 		return nil

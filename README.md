@@ -369,7 +369,8 @@ that raises them:
 | `qurl.ErrCellCatalogKeyMismatch` | A compact cell fingerprint selected a catalog entry whose full key differs from the signed link key. The SDK refuses before network I/O |
 | `qurl.ErrQurlUserKeyMismatch` | The fragment private key does not derive the issuer-signed visitor public key. The SDK refuses before network I/O |
 | `qurl.ErrPortalNativeOnly` | `PortalOpener` has no native cell catalog and will not use the relay fallback |
-| `qurl.ErrPortalOpenerNotStarted` | `PortalOpener.Do` ran before the first `Start` attempt completed; a failed attempt changes this to not-ready |
+| `qurl.ErrPortalOpenTimeout` | The configured `PortalOpener` NHP open timeout expired. A shorter caller deadline does not wrap this error |
+| `qurl.ErrPortalOpenerNotStarted` | `PortalOpener.Do` ran before the first `Start` attempt completed, or after a caller-canceled or caller-deadlined first attempt |
 | `qurl.ErrPortalOpenerNotReady` | The proactive opener has no unexpired cached handle. `Do` does not wait or open on the request path |
 | `qurl.ErrPortalOpenerClosed` | `PortalOpener` was used after `Close` |
 | `qurl.ErrPortalTargetChanged` | A proactive renewal authenticated a different target, so the opener kept the prior handle and failed closed |
