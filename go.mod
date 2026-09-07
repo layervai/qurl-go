@@ -29,11 +29,11 @@ module github.com/layervai/qurl-go
 // follow. That window is why the root CI jobs set GOWORK=off — see
 // .github/workflows/ci.yml. Keep it even while the floors agree; it makes a
 // future reduction possible without breaking every root job.
-go 1.25.13
+go 1.26.0
 
 require (
 	github.com/layervai/qurl-conformance v0.14.0
-	golang.org/x/crypto v0.55.0
+	golang.org/x/crypto v0.56.0
 )
 
 require golang.org/x/sys v0.47.0
