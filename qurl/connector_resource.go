@@ -83,7 +83,7 @@ var (
 	ErrConnectorResourceOutcomeUnknown = errors.New("qurl: qURL Connector resource mutation outcome unknown")
 )
 
-// ConnectorResource is a resource managed by qURL Connector. CRID and
+// ConnectorResource is a resource managed by qURL Connector. CRID, ResourcePublicKey, and
 // Slug are immutable identities. ConnectorRoutingID and KnockResourceID are
 // explicit control-plane values for reverse-connection routing and NHP
 // admission respectively; neither is an identity or derivable from another
@@ -100,9 +100,8 @@ type ConnectorResource struct {
 	// encoding, DER structure, key type, curve, and point. It is distinct from
 	// ConnectorRoutingID and KnockResourceID.
 	ResourcePublicKey string `json:"resource_public_key"`
-	// CRID is the required public identifier used for lookup, deletion, and
-	// portal minting. HTTP management handles verify the returned public key against it.
-	// Native NHP discovery also requires the same key-bound CRID.
+	// CRID is the required public identifier for lookup, deletion, and portal
+	// minting. Every Connector response binds it to the returned public key.
 	CRID string `json:"crid"`
 
 	// ConnectorRoutingID is the opaque routing label returned by the producer.
@@ -135,7 +134,7 @@ func (r *ConnectorResource) CreatePortal(ctx context.Context, opts ...PortalOpti
 		return nil, fmt.Errorf("%w: qURL Connector resource is not bound to a client", ErrInvalidPortalRequest)
 	}
 	if err := validateConnectorCRID(r.CRID); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", ErrInvalidPortalRequest, err)
 	}
 	return r.client.CreatePortal(ctx, r.client.ResourceByID(r.CRID), opts...)
 }
@@ -332,8 +331,6 @@ func (r connectorResourceWire) connectorResource(client *Client, expect connecto
 	if expect.crid != "" && r.CRID != expect.crid {
 		return nil, invalidConnectorResourceResponse("response crid does not match the request")
 	}
-	// HTTP management handles require CRIDs. Native NHP discovery has its own
-	// versioned optional-field contract and verifies any supplied CRID separately.
 	if !nativeConnectorCRIDMatches(r.CRID, r.ResourcePublicKey) {
 		return nil, invalidConnectorResourceResponse("missing, invalid, or public-key-mismatched crid")
 	}
@@ -409,11 +406,8 @@ func validateConnectorSlug(slug string) error {
 }
 
 func validateConnectorCRID(resourceCRID string) error {
-	if len(resourceCRID) != 47 && len(resourceCRID) != 60 {
-		return fmt.Errorf("%w: qURL Connector requires a valid CRID", ErrInvalidResourceRequest)
-	}
 	if err := crid.Validate(resourceCRID); err != nil {
-		return fmt.Errorf("%w: qURL Connector requires a valid CRID", ErrInvalidResourceRequest)
+		return fmt.Errorf("%w: qURL Connector requires a valid CRID: %w", ErrInvalidResourceRequest, err)
 	}
 	return nil
 }

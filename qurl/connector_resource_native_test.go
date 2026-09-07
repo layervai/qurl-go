@@ -96,6 +96,7 @@ func TestNativeConnectorResourceConformance(t *testing.T) {
 				t.Fatalf("generated request = %s\npublic vector     = %s", body, exchange.Request.BodyJSON)
 			}
 			resolution, err := parseNativeConnectorResourceResponse([]byte(exchange.Result.BodyJSON), fixture.Fixtures.AgentID, request)
+
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -217,7 +218,7 @@ func TestResolveRegisteredAgentConnectorResource_EncryptedAssignedCellExchange(t
 	t.Parallel()
 
 	request := &NativeConnectorResourceRequest{ConnectorID: testConnectorSlug, RequestNonce: testNativeConnectorNonce}
-	reply := nativeConnectorSuccessBody(testConnectorID, testConnectorRoutingID, testKnockID, nil, false)
+	reply := nativeConnectorSuccessBody(testConnectorID, testConnectorRoutingID, testKnockID, testConnectorCRID, false)
 	binding, server, resolver, dialer := newNativeConnectorResourceTestRuntime(t, reply)
 	defer binding.Destroy()
 
@@ -263,7 +264,7 @@ func TestResolveRegisteredAgentConnectorResource_ExpectedIdentityIsSentAndPinned
 	request := &NativeConnectorResourceRequest{
 		ConnectorID: testConnectorSlug, ExpectedCRID: testConnectorCRID, RequestNonce: testNativeConnectorNonce,
 	}
-	reply := nativeConnectorSuccessBody(testConnectorID, testConnectorRoutingID, testKnockID, nil, true)
+	reply := nativeConnectorSuccessBody(testConnectorID, testConnectorRoutingID, testKnockID, testConnectorCRID, true)
 	binding, server, resolver, dialer := newNativeConnectorResourceTestRuntime(t, reply)
 	defer binding.Destroy()
 	result, err := ResolveRegisteredAgentConnectorResource(context.Background(), binding, request,
@@ -325,7 +326,7 @@ func TestResolveRegisteredAgentConnectorResource_InvalidInputsPrecedeIO(t *testi
 
 	request := &NativeConnectorResourceRequest{ConnectorID: testConnectorSlug, RequestNonce: testNativeConnectorNonce}
 	binding, server, _, _ := newNativeConnectorResourceTestRuntime(t,
-		nativeConnectorSuccessBody(testConnectorID, testConnectorRoutingID, testKnockID, nil, true))
+		nativeConnectorSuccessBody(testConnectorID, testConnectorRoutingID, testKnockID, testConnectorCRID, true))
 	defer binding.Destroy()
 	resolver := new(noIONativeResolver)
 	dialer := new(noIONativeDialer)
@@ -386,7 +387,7 @@ func TestParseNativeConnectorResourceErrors(t *testing.T) {
 func TestParseNativeConnectorResourceRejectsContractDrift(t *testing.T) {
 	t.Parallel()
 
-	valid := nativeConnectorSuccessBody(testConnectorID, testConnectorRoutingID, testKnockID, nil, false)
+	valid := nativeConnectorSuccessBody(testConnectorID, testConnectorRoutingID, testKnockID, testConnectorCRID, false)
 	request := &NativeConnectorResourceRequest{ConnectorID: testConnectorSlug, RequestNonce: testNativeConnectorNonce}
 	cases := []struct {
 		name string
@@ -436,18 +437,18 @@ func TestParseNativeConnectorResourcePinsExpectedIdentityAndCRID(t *testing.T) {
 	request := &NativeConnectorResourceRequest{
 		ConnectorID: testConnectorSlug, ExpectedCRID: testConnectorCRID, RequestNonce: testNativeConnectorNonce,
 	}
-	wrongResource := nativeConnectorSuccessBody(testOtherConnectorID, testConnectorRoutingID, testKnockID, nil, true)
+	wrongResource := nativeConnectorSuccessBody(testOtherConnectorID, testConnectorRoutingID, testKnockID, testConnectorCRID, true)
 	if result, err := parseNativeConnectorResourceResponse([]byte(wrongResource), "agent-conform", request); result != nil || !errors.Is(err, ErrInvalidNativeConnectorResourceResponse) {
 		t.Fatalf("continuity mismatch = %#v, %v", result, err)
 	}
 
 	emptyCRID := ""
-	empty := nativeConnectorSuccessBody(testConnectorID, testConnectorRoutingID, testKnockID, &emptyCRID, true)
+	empty := nativeConnectorSuccessBody(testConnectorID, testConnectorRoutingID, testKnockID, emptyCRID, true)
 	if result, err := parseNativeConnectorResourceResponse([]byte(empty), "agent-conform", request); result != nil || !errors.Is(err, ErrInvalidNativeConnectorResourceResponse) {
 		t.Fatalf("empty CRID = %#v, %v", result, err)
 	}
 	foreignCRID := "a"
-	foreign := nativeConnectorSuccessBody(testConnectorID, testConnectorRoutingID, testKnockID, &foreignCRID, true)
+	foreign := nativeConnectorSuccessBody(testConnectorID, testConnectorRoutingID, testKnockID, foreignCRID, true)
 	if result, err := parseNativeConnectorResourceResponse([]byte(foreign), "agent-conform", request); result != nil || !errors.Is(err, ErrInvalidNativeConnectorResourceResponse) {
 		t.Fatalf("foreign CRID = %#v, %v", result, err)
 	}
@@ -499,11 +500,8 @@ func TestAgentRuntimePrivateKeyBorrowSerializesTransfer(t *testing.T) {
 	}
 }
 
-func nativeConnectorSuccessBody(resourceID, routingID, knockID string, resourceCRID *string, foundExisting bool) string {
-	cridField := fmt.Sprintf(`,"crid":%q`, testConnectorCRID)
-	if resourceCRID != nil {
-		cridField = fmt.Sprintf(`,"crid":%q`, *resourceCRID)
-	}
+func nativeConnectorSuccessBody(resourceID, routingID, knockID string, resourceCRID string, foundExisting bool) string {
+	cridField := fmt.Sprintf(`,"crid":%q`, resourceCRID)
 	return fmt.Sprintf(`{"errCode":"0","list":{"query":"connector_resource","version":1,"agent_id":"agent-conform","connector_id":"prod-dashboard","resource_public_key":%q,"connector_routing_id":%q,"knock_resource_id":%q%s,"found_existing":%t}}`,
 		resourceID, routingID, knockID, cridField, foundExisting)
 }
@@ -542,4 +540,14 @@ func newNativeConnectorResourceTestRuntimeStep(t *testing.T, step runtimeUDPStep
 	resolver := runtimeRouteResolver{hosts: map[string]netip.Addr{endpoint.Host: cellIP}}
 	dialer := runtimeRouteDialer{targets: map[string]string{cellIP.String(): server.conn.LocalAddr().String()}}
 	return binding, server, resolver, dialer
+}
+
+func TestNativeConnectorRejectsResourceIDCompatibility(t *testing.T) {
+	request := &NativeConnectorResourceRequest{ConnectorID: testConnectorSlug, RequestNonce: testNativeConnectorNonce}
+	good := nativeConnectorSuccessBody(testConnectorID, testConnectorRoutingID, testKnockID, testConnectorCRID, true)
+	for _, body := range []string{strings.Replace(good, `"resource_public_key":`, `"resource_id":`, 1), strings.Replace(good, `,"crid":"`+testConnectorCRID+`"`, "", 1)} {
+		if _, err := parseNativeConnectorResourceResponse([]byte(body), "agent-conform", request); !errors.Is(err, ErrInvalidNativeConnectorResourceResponse) {
+			t.Fatalf("old response accepted: %v", err)
+		}
+	}
 }
