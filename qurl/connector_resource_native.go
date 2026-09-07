@@ -296,11 +296,11 @@ func parseNativeConnectorResourceSuccess(raw json.RawMessage, agentID string, re
 	}
 	if list.CRID != nil {
 		wire.CRID = *list.CRID
-		if wire.CRID == "" || !nativeConnectorCRIDMatches(wire.CRID, wire.ResourceID) {
+		if wire.CRID == "" {
 			return nil, invalidNativeConnectorResourceResponse("crid binding")
 		}
 	}
-	resource, err := wire.connectorResource(nil, connectorResourceExpectation{slug: request.ConnectorID})
+	resource, err := wire.connectorResource(nil, connectorResourceExpectation{slug: request.ConnectorID, allowMissingCRID: true})
 	if err != nil {
 		return nil, invalidNativeConnectorResourceResponse("resource binding")
 	}

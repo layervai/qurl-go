@@ -70,6 +70,10 @@ They are not a recovery fallback for Connector startup: if native continuity
 state is missing or the NHP exchange fails, stop and repair that state instead
 of adopting an HTTPS lookup result.
 
+Native NHP v1 can return a binding without a CRID. Such a binding cannot be
+used directly for management get/delete. An attended tool must obtain a current
+management handle by immutable slug; the SDK does not fall back automatically.
+
 Use the CRID for management requests. Public keys and private storage IDs are
 not accepted as request identifiers; there is no compatibility fallback. A
 management response must include a CRID that matches its returned public key:
@@ -141,7 +145,7 @@ the underlying `*qurl.APIError` for status, problem code, and request diagnostic
 
 | Error | Meaning |
 | --- | --- |
-| `qurl.ErrConnectorResourceNotFound` | Resource id or owner-scoped slug was not found |
+| `qurl.ErrConnectorResourceNotFound` | CRID or owner-scoped slug was not found |
 | `qurl.ErrConnectorResourceRevoked` | A resource detail row has status revoked; its slug may be reusable after ordinary delete |
 | `qurl.ErrConnectorResourceTombstoned` | An exact `410 resource_tombstoned` closed the resource lifecycle; do not retry the slug as ordinary reuse |
 | `qurl.ErrConnectorResourceAmbiguous` | A slug lookup returned more than one resource |
@@ -157,7 +161,7 @@ The endpoint mappings are intentionally operation-specific:
 
 | Operation | Typed lifecycle mapping |
 | --- | --- |
-| Get by resource id | `404` maps to `ErrConnectorResourceNotFound`; `410 resource_tombstoned` maps to `ErrConnectorResourceTombstoned`; a valid `200` detail row with `status: "revoked"` maps to `ErrConnectorResourceRevoked` |
+| Get by CRID | `404` maps to `ErrConnectorResourceNotFound`; `410 resource_tombstoned` maps to `ErrConnectorResourceTombstoned`; a valid `200` detail row with `status: "revoked"` maps to `ErrConnectorResourceRevoked` |
 | Get by slug | Only an empty `200 data: []` maps to `ErrConnectorResourceNotFound`; route-level 404/409/410 remain raw `*APIError` values |
 | Delete | Only `404` maps to `ErrConnectorResourceNotFound` |
 

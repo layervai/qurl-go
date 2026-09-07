@@ -1314,3 +1314,32 @@ func TestClient_ConnectorManagementRejectsPublicKeyAndStorageID(t *testing.T) {
 		}
 	}
 }
+
+func TestClient_ConnectorManagementRequiresCRIDWithoutExpectedID(t *testing.T) {
+	t.Parallel()
+	for _, value := range []string{"", "invalid", "ae4jqpd7eaoslq7jinmjv4yikgzmcxgpjfsuobiniqnko32lpw743ivbeyha"} {
+		t.Run(value, func(t *testing.T) {
+			t.Parallel()
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				row := fmt.Sprintf(`{"resource_id":%q,"crid":%q,"connector_routing_id":%q,"knock_resource_id":%q,"type":"tunnel","status":"active","slug":%q}`, testConnectorID, value, testConnectorRoutingID, testKnockID, testConnectorSlug)
+				w.Header().Set("Content-Type", "application/json")
+				if r.Method == http.MethodPost {
+					w.WriteHeader(http.StatusCreated)
+					fmt.Fprintf(w, `{"data":%s,"meta":{"found_existing":false}}`, row)
+				} else {
+					fmt.Fprintf(w, `{"data":[%s]}`, row)
+				}
+			}))
+			defer api.Close()
+			client := newConnectorTestClient(t, api.URL)
+			_, err := client.GetConnectorResourceBySlug(context.Background(), testConnectorSlug)
+			if !errors.Is(err, ErrInvalidConnectorResourceResponse) || !strings.Contains(err.Error(), "public-key-mismatched crid") {
+				t.Fatalf("slug error = %v", err)
+			}
+			_, err = client.EnsureConnectorResource(context.Background(), testConnectorSlug)
+			if !errors.Is(err, ErrConnectorResourceOutcomeUnknown) || !strings.Contains(err.Error(), "public-key-mismatched crid") {
+				t.Fatalf("ensure error = %v", err)
+			}
+		})
+	}
+}
