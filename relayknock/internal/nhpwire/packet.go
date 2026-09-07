@@ -40,18 +40,16 @@ const (
 	nhpFlagCompress       = 1 << 1
 	hubLSTCookieProofFlag = 1 << 2
 
-	// protocolVersionMinor 1 is the transcript that folds the serialized
-	// HeaderCommon into the chain hash before the body AAD. Under 1.0 those bytes
-	// were covered only by the unkeyed header digest, which anyone holding the
-	// peer's static PUBLIC key can recompute.
-	protocolVersionMajor = 1
-	protocolVersionMinor = 1
+	// NHP 2.0 is the incompatible standard message-registry cutover. It retains
+	// the 1.1 transcript that folds HeaderCommon into the body AAD.
+	protocolVersionMajor = 2
+	protocolVersionMinor = 0
 
 	// minProtocolVersionMinor is the oldest minor whose body AAD this codec can
 	// reproduce. Raise it in lockstep with any further AAD change; a sender below
 	// it must be refused on the version, because its body tag would otherwise
 	// fail as an unexplained AEAD error mid-rollout.
-	minProtocolVersionMinor = 1
+	minProtocolVersionMinor = 0
 )
 
 // Compile-time equality fence: if the codec's framing changes, update the

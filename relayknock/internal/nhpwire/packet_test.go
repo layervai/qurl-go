@@ -101,9 +101,7 @@ func TestVersionHeaderRoundTrip(t *testing.T) {
 		t.Fatalf("getVersion = %d.%d, want 3.9", major, minor)
 	}
 
-	// Every packet this codec emits must carry the pinned version: the golden
-	// vectors across all header types show 01 01 since the HeaderCommon AAD
-	// binding landed.
+	// Every packet this codec emits must carry the pinned version.
 	packet := framingFixture(t, []byte("version fixture"))
 	if major, minor := getVersion(packet); major != protocolVersionMajor || minor != protocolVersionMinor {
 		t.Fatalf("built packet version = %d.%d, want %d.%d", major, minor, protocolVersionMajor, protocolVersionMinor)

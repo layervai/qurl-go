@@ -2,7 +2,6 @@ package nhpwire
 
 import (
 	"bytes"
-	"fmt"
 	"strings"
 	"testing"
 )
@@ -84,6 +83,15 @@ func TestDecryptMessage_RejectsTamperedReply(t *testing.T) {
 			packet:    make([]byte, PacketBufferSize+1),
 			serverPub: serverPub,
 			wantSub:   "reply too long",
+		},
+		{
+			name: "old protocol major version",
+			packet: tamperedCopy(func(pkt []byte) {
+				pkt[8] = protocolVersionMajor - 1
+				copy(pkt[offDigest:offDigest+hashSize], headerDigest(devicePub, pkt[:HeaderSize], nil))
+			}),
+			serverPub: serverPub,
+			wantSub:   "unsupported NHP protocol version",
 		},
 		{
 			name: "unsupported protocol major version",
@@ -215,42 +223,6 @@ func TestDecryptMessage_AcceptsMinorVersionBump(t *testing.T) {
 	}
 	if !bytes.Equal(msg.Body, body) {
 		t.Fatalf("Body = %q, want %q", msg.Body, body)
-	}
-}
-
-// TestDecryptMessage_RejectsPreBindingMinorVersion is the rollout-diagnosability
-// fence. A peer still speaking 1.0 folds a shorter transcript into its body AAD,
-// so its tag can never verify here. Without the floor the operator would see
-// "open body: cipher: message authentication failed" — indistinguishable from a
-// wrong key, a corrupted datagram, or an attack — instead of a statement that the
-// two ends disagree on the protocol version. The gate must therefore run BEFORE
-// any key agreement, which is what the error substring below pins.
-func TestDecryptMessage_RejectsPreBindingMinorVersion(t *testing.T) {
-	devicePriv, devicePub := keyPair(t, 0x11)
-	serverPriv, serverPub := keyPair(t, 0x22)
-
-	for minor := byte(0); minor < minProtocolVersionMinor; minor++ {
-		packet, err := buildMessageWithVersion(TypeACK, 0, protocolVersionMajor, minor, &Inputs{
-			DeviceStaticPriv: serverPriv,
-			ServerStaticPub:  devicePub,
-			EphemeralPriv:    bytes.Repeat([]byte{0x44}, PublicKeySize),
-			TimestampNanos:   1700000000123456789,
-			Counter:          0x1234,
-			Preamble:         0xa1b2c3d4,
-			Body:             []byte(`{"errCode":"0"}`),
-		})
-		if err != nil {
-			t.Fatalf("build NHP_ACK at 1.%d: %v", minor, err)
-		}
-
-		msg, err := DecryptMessage(devicePriv, serverPub, packet)
-		if err == nil || msg != nil {
-			t.Fatalf("1.%d packet accepted: %#v, %v", minor, msg, err)
-		}
-		want := fmt.Sprintf("unsupported NHP protocol version %d.%d", protocolVersionMajor, minor)
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("1.%d rejected as %q, want an explicit version error containing %q", minor, err, want)
-		}
 	}
 }
 
