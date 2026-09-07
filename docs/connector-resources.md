@@ -43,7 +43,7 @@ then use the returned `KnockResourceID` for `KnockRegisteredAgent`.
 canonical unpadded-base64url DER SPKI form. It is distinct from both
 `ConnectorRoutingID`, the opaque reverse-connection routing label, and
 `KnockResourceID`, the placement-neutral admission target. The SDK requires all
-three values to be present and mutually distinct. A present CRID must also
+three values to be present and mutually distinct. The required CRID must also
 cryptographically match the delivered resource key.
 
 `ConnectorRoutingID` has the exact producer-owned shape
@@ -58,7 +58,7 @@ it separately with `NewCycleRunID` once per admission cycle and reuse that exact
 value for the cycle's retries and reconnects.
 
 The native success is accepted only when the agent id, Connector id, public
-resource id, routing id, knock id, optional CRID, and continuity assertion form
+resource id, routing id, knock id, CRID, and continuity assertion form
 one internally consistent binding. Missing, malformed, contradictory, or
 cross-wired values fail closed with
 `ErrInvalidNativeConnectorResourceResponse`.
@@ -70,9 +70,8 @@ They are not a recovery fallback for Connector startup: if native continuity
 state is missing or the NHP exchange fails, stop and repair that state instead
 of adopting an HTTPS lookup result.
 
-Native NHP v1 can return a binding without a CRID. Such a binding cannot be
-used directly for management get/delete. An attended tool must obtain a current
-management handle by immutable slug; the SDK does not fall back automatically.
+Every native and management Connector response must include a CRID bound to
+its public key. CRID-less producers are rejected; there is no compatibility path.
 
 Use the CRID for management requests. Public keys and private storage IDs are
 not accepted as request identifiers; there is no compatibility fallback. A

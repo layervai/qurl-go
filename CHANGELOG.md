@@ -11,8 +11,9 @@ and are marked **Breaking** with what to change.
 - **Breaking:** Connector management get/delete and handle-based portal minting
   require CRIDs. Responses must bind the CRID to the returned public key.
   Pass `resource.CRID`; public-key arguments and CRID-less management responses
-  are rejected without a compatibility fallback. Native NHP continuity still
-  uses its protocol-defined public-key pin. Ensure and slug lookup also require
+  are rejected without a compatibility fallback. Native Connector discovery also
+  requires a key-bound CRID and rejects older CRID-less responses. Its public-key
+  continuity pin remains a cryptographic check. Ensure and slug lookup also require
   key-bound CRIDs; a missing CRID after ensure is outcome-unknown, so a modern
   CRID-producing service is required before upgrading.
 

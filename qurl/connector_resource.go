@@ -100,9 +100,8 @@ type ConnectorResource struct {
 	// encoding, DER structure, key type, curve, and point. It is distinct from
 	// ConnectorRoutingID and KnockResourceID.
 	ResourceID string `json:"resource_id"`
-	// CRID is required for HTTP management lookup, deletion, and portal minting.
-	// Management handles verify it against the returned public key. Native NHP
-	// discovery can omit it under its versioned wire contract.
+	// CRID is the required public identifier for lookup, deletion, and portal
+	// minting. Every Connector response binds it to the returned public key.
 	CRID string `json:"crid"`
 
 	// ConnectorRoutingID is the opaque routing label returned by the producer.
@@ -175,9 +174,6 @@ type connectorResourceExpectation struct {
 	slug         string
 	crid         string
 	allowRevoked bool
-	// Only native NHP v1 discovery permits an absent CRID. Any supplied CRID
-	// must still bind to the public key. HTTP callers use the fail-closed default.
-	allowMissingCRID bool
 }
 
 // EnsureConnectorResource finds or creates the active qURL Connector resource
@@ -335,7 +331,7 @@ func (r connectorResourceWire) connectorResource(client *Client, expect connecto
 	if expect.crid != "" && r.CRID != expect.crid {
 		return nil, invalidConnectorResourceResponse("response crid does not match the request")
 	}
-	if (!expect.allowMissingCRID || r.CRID != "") && !nativeConnectorCRIDMatches(r.CRID, r.ResourceID) {
+	if !nativeConnectorCRIDMatches(r.CRID, r.ResourceID) {
 		return nil, invalidConnectorResourceResponse("missing, invalid, or public-key-mismatched crid")
 	}
 

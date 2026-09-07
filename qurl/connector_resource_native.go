@@ -233,15 +233,15 @@ func validateNativeConnectorResourceRequest(request *NativeConnectorResourceRequ
 }
 
 type nativeConnectorResourceList struct {
-	Query              string  `json:"query"`
-	Version            int     `json:"version"`
-	AgentID            string  `json:"agent_id"`
-	ConnectorID        string  `json:"connector_id"`
-	ResourceID         string  `json:"resource_id"`
-	ConnectorRoutingID string  `json:"connector_routing_id"`
-	KnockResourceID    string  `json:"knock_resource_id"`
-	CRID               *string `json:"crid,omitempty"`
-	FoundExisting      *bool   `json:"found_existing"`
+	Query              string `json:"query"`
+	Version            int    `json:"version"`
+	AgentID            string `json:"agent_id"`
+	ConnectorID        string `json:"connector_id"`
+	ResourceID         string `json:"resource_id"`
+	ConnectorRoutingID string `json:"connector_routing_id"`
+	KnockResourceID    string `json:"knock_resource_id"`
+	CRID               string `json:"crid"`
+	FoundExisting      *bool  `json:"found_existing"`
 }
 
 func parseNativeConnectorResourceResponse(body []byte, agentID string, request *NativeConnectorResourceRequest) (*ConnectorResourceResolution, error) {
@@ -267,12 +267,11 @@ func parseNativeConnectorResourceResponse(body []byte, agentID string, request *
 
 func parseNativeConnectorResourceSuccess(raw json.RawMessage, agentID string, request *NativeConnectorResourceRequest) (*ConnectorResourceResolution, error) {
 	fields, err := exactObjectFields(raw)
-	if err != nil || !exactRequiredOptionalFields(fields,
-		[]string{"query", "version", "agent_id", "connector_id", "resource_id", "connector_routing_id", "knock_resource_id", "found_existing"},
-		[]string{"crid"}) {
+	if err != nil || !exactFieldNames(fields,
+		[]string{"query", "version", "agent_id", "connector_id", "resource_id", "connector_routing_id", "knock_resource_id", "found_existing", "crid"}) {
 		return nil, invalidNativeConnectorResourceResponse("success list fields")
 	}
-	if rawCRID, ok := fields["crid"]; ok && isJSONNull(rawCRID) {
+	if isJSONNull(fields["crid"]) {
 		return nil, invalidNativeConnectorResourceResponse("null crid")
 	}
 	var list nativeConnectorResourceList
@@ -292,15 +291,9 @@ func parseNativeConnectorResourceSuccess(raw json.RawMessage, agentID string, re
 	wire := connectorResourceWire{
 		ResourceID: list.ResourceID, ConnectorRoutingID: list.ConnectorRoutingID,
 		KnockResourceID: list.KnockResourceID, Type: producerConnectorResourceType,
-		Status: "active", Slug: list.ConnectorID,
+		Status: "active", Slug: list.ConnectorID, CRID: list.CRID,
 	}
-	if list.CRID != nil {
-		wire.CRID = *list.CRID
-		if wire.CRID == "" {
-			return nil, invalidNativeConnectorResourceResponse("crid binding")
-		}
-	}
-	resource, err := wire.connectorResource(nil, connectorResourceExpectation{slug: request.ConnectorID, allowMissingCRID: true})
+	resource, err := wire.connectorResource(nil, connectorResourceExpectation{slug: request.ConnectorID})
 	if err != nil {
 		return nil, invalidNativeConnectorResourceResponse("resource binding")
 	}
@@ -357,28 +350,6 @@ func nativeConnectorCRIDMatches(value, resourceID string) bool {
 
 func invalidNativeConnectorResourceResponse(reason string) error {
 	return fmt.Errorf("%w: native Connector resource LRT %s", ErrInvalidNativeConnectorResourceResponse, reason)
-}
-
-func exactRequiredOptionalFields(fields map[string]json.RawMessage, required, optional []string) bool {
-	if len(fields) < len(required) || len(fields) > len(required)+len(optional) {
-		return false
-	}
-	allowed := make(map[string]struct{}, len(required)+len(optional))
-	for _, name := range required {
-		allowed[name] = struct{}{}
-		if _, ok := fields[name]; !ok {
-			return false
-		}
-	}
-	for _, name := range optional {
-		allowed[name] = struct{}{}
-	}
-	for name := range fields {
-		if _, ok := allowed[name]; !ok {
-			return false
-		}
-	}
-	return true
 }
 
 func exactFieldNames(fields map[string]json.RawMessage, names []string) bool {
