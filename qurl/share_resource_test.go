@@ -175,11 +175,7 @@ func TestClient_ShareResourceOmittedQURLIDIsEmpty(t *testing.T) {
 	}
 }
 
-// TestClient_ShareResourceAcceptsCRIDIdentifier proves the dual-accepted
-// addressing contract from the client side: a CRID travels the same {id}
-// path segment as a public-key resource id, verbatim, and a nil options
-// pointer sends an empty JSON body with no ttl_seconds key at all — zero is
-// "server default", never an explicit 0.
+// A CRID travels verbatim; nil options omit TTL and use the server default.
 func TestClient_ShareResourceAcceptsCRIDIdentifier(t *testing.T) {
 	heldCRID, _, _ := cridKeyMatchFixture(t)
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -386,7 +382,7 @@ func TestClient_ProtectURLRequiresCRID(t *testing.T) {
 			wantCRID: heldCRID,
 		},
 		{
-			name:     "older server omits crid",
+			name:     "missing CRID is rejected",
 			body:     `{"data":{"resource_id":"` + base64.RawURLEncoding.EncodeToString(der) + `","target_url":"https://internal.example.com/dashboard","status":"active"}}`,
 			wantCRID: "",
 		},
@@ -424,12 +420,32 @@ func TestClient_ProtectURLRequiresCRID(t *testing.T) {
 			if err := json.Unmarshal(raw, &body); err != nil {
 				t.Fatalf("Unmarshal Resource JSON: %v", err)
 			}
-			if tt.wantCRID == "" {
-				if _, ok := body["crid"]; ok {
-					t.Fatalf("pre-CRID resource JSON grew a crid key: %s", raw)
-				}
-			} else {
-				assertJSONField(t, body, "crid", tt.wantCRID)
+			assertJSONField(t, body, "crid", tt.wantCRID)
+		})
+	}
+}
+
+func TestClientShareResourceIdentityErrors(t *testing.T) {
+	held, _, _ := cridKeyMatchFixture(t)
+	for _, tc := range []struct {
+		name, response string
+		want           error
+	}{
+		{"missing", "", ErrNoCRID}, {"different", "different", ErrCRIDMismatch},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprintf(w, `{"data":{"crid":%q,"qurl":"https://qurl.link/test"}}`, tc.response)
+			}))
+			defer server.Close()
+			client, err := NewClient(BearerToken("lv_test"), WithBaseURL(server.URL))
+			if err != nil {
+				t.Fatal(err)
+			}
+			link, err := client.ShareResource(context.Background(), held, nil)
+			if link != nil || !errors.Is(err, tc.want) || !errors.Is(err, ErrInvalidAPIResponse) {
+				t.Fatalf("link=%v error=%v, want invalid response and %v", link, err, tc.want)
 			}
 		})
 	}

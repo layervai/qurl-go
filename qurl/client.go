@@ -965,10 +965,7 @@ func (c *Client) CreatePortalForURL(ctx context.Context, targetURL string, opts 
 //     Portal.QURLID.
 //   - ShareResource — pass the CRID you shared and ShareLink.QURLID.
 //
-// Like the other resource methods, resourceID accepts either identifier form
-// the platform serves — the public-key resource id or the resource's CRID —
-// and both ids are validated for presence only: the server is authoritative
-// for which identifiers it accepts. The credential needs the qurl:write scope.
+// The resource locator must be a valid CRID. The credential needs qurl:write.
 // The 204 response has no JSON body; other successful portal methods retain
 // the SDK's fail-closed response decoding.
 //
@@ -979,17 +976,17 @@ func (c *Client) CreatePortalForURL(ctx context.Context, targetURL string, opts 
 // ErrPortalRevoked. A caller that only needs the link dead can treat
 // errors.Is(err, ErrPortalRevoked) as settled; other API failures surface as
 // *APIError exactly like the rest of the client.
-func (c *Client) RevokePortal(ctx context.Context, resourceID, qurlID string) error {
+func (c *Client) RevokePortal(ctx context.Context, resourceCRID, qurlID string) error {
 	if c == nil {
 		return fmt.Errorf("%w: nil client", ErrInvalidClientConfig)
 	}
-	if err := crid.Validate(resourceID); err != nil {
+	if err := crid.Validate(resourceCRID); err != nil {
 		return fmt.Errorf("%w: resource CRID must be valid: %w", ErrInvalidPortalRequest, err)
 	}
 	if strings.TrimSpace(qurlID) == "" {
 		return fmt.Errorf("%w: qurl id must not be empty", ErrInvalidPortalRequest)
 	}
-	path := "/v1/resources/" + url.PathEscape(resourceID) + "/qurls/" + url.PathEscape(qurlID)
+	path := "/v1/resources/" + url.PathEscape(resourceCRID) + "/qurls/" + url.PathEscape(qurlID)
 	if err := c.doNoContent(ctx, http.MethodDelete, path, http.StatusNoContent); err != nil {
 		var apiErr *APIError
 		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusConflict && apiErr.Code == "revoked" {

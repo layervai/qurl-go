@@ -382,10 +382,8 @@ func TestClient_RevokePortal(t *testing.T) {
 	}
 }
 
-// TestClient_RevokePortalEscapesBothIDs pins that each id travels as exactly
-// one escaped path segment: an id cannot splice extra path segments, start a
-// query, or open a fragment in the revoke URL.
-func TestClient_RevokePortalEscapesBothIDs(t *testing.T) {
+// A validated CRID addresses the resource and the child ID is escaped as one segment.
+func TestClient_RevokePortalEscapesChildID(t *testing.T) {
 	const wantPath = "/v1/resources/" + testConnectorCRID + "/qurls/q%3F%2F%232"
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodDelete || r.URL.EscapedPath() != wantPath || r.URL.RawQuery != "" {

@@ -4,7 +4,7 @@
 access link — for a resource that already exists. It is the counterpart of
 `CreatePortal`: both mint access links, but `CreatePortal` is the issuing flow
 on a `Resource` handle you protected or looked up, while `ShareResource` is
-addressed by identifier — the public-key resource id or the resource's CRID —
+addressed by CRID
 and its response can be tied to a resource key you already hold with
 `VerifyCRID`.
 
@@ -15,7 +15,7 @@ expires on its own; share again whenever you need a fresh one.
 ## Mint a share link
 
 ```go
-share, err := client.ShareResource(ctx, resourceID, nil)
+share, err := client.ShareResource(ctx, resourceCRID, nil)
 if err != nil {
 	return err
 }
@@ -23,10 +23,7 @@ if err != nil {
 fmt.Println(share.Link)
 ```
 
-`resourceID` accepts either identifier form the platform serves: the
-public-key resource id (the `Resource.ID` you stored after `ProtectURL`) or
-the resource's CRID. The SDK validates presence only; the server is
-authoritative for which identifiers it accepts.
+`resourceCRID` must be the CRID returned by the service. Public keys are verification data and are rejected as resource locators.
 
 ### Link lifetime
 
@@ -37,7 +34,7 @@ for account limits. The wire carries whole integer seconds, so a nonzero
 with `ErrInvalidResourceRequest` rather than rounded.
 
 ```go
-share, err := client.ShareResource(ctx, resourceID, &qurl.ShareResourceOptions{
+share, err := client.ShareResource(ctx, resourceCRID, &qurl.ShareResourceOptions{
 	TTL: 90 * time.Second,
 })
 if err != nil {
@@ -55,17 +52,17 @@ reports whether the link expires on first successful use.
 
 Every share mints a new link, and each one is revocable on its own.
 `ShareLink.QURLID` is the handle; `RevokePortal` is the call, taking the same
-`resourceID` you shared:
+`resourceCRID` you shared:
 
 ```go
-share, err := client.ShareResource(ctx, resourceID, nil)
+share, err := client.ShareResource(ctx, resourceCRID, nil)
 if err != nil {
 	return err
 }
 
 // … hand share.Link to the recipient, then withdraw it …
 
-if err := client.RevokePortal(ctx, resourceID, share.QURLID); err != nil {
+if err := client.RevokePortal(ctx, resourceCRID, share.QURLID); err != nil {
 	return err
 }
 ```
@@ -81,7 +78,7 @@ Revocation is not idempotent: the second call fails with
 only needs the link dead can treat that as settled.
 
 ```go
-err := client.RevokePortal(ctx, resourceID, share.QURLID)
+err := client.RevokePortal(ctx, resourceCRID, share.QURLID)
 switch {
 case err == nil:
 	// The link is dead.
@@ -103,7 +100,7 @@ the link is qv2-shaped — `share.Type` reports `"qv2"` — the composition is
 share → verify → `EnterPortal`:
 
 ```go
-share, err := client.ShareResource(ctx, resourceID, nil)
+share, err := client.ShareResource(ctx, resourceCRID, nil)
 if err != nil {
 	return err
 }
@@ -132,7 +129,7 @@ once at startup; see [Open links](opening-links.md).
 ## Errors
 
 ```go
-share, err := client.ShareResource(ctx, resourceID, nil)
+share, err := client.ShareResource(ctx, resourceCRID, nil)
 if err == nil {
 	err = share.VerifyCRID(resourceKeyDER)
 }
@@ -146,9 +143,7 @@ case errors.Is(err, qurl.ErrTemporaryAccessLinksDisabled):
 	// callers that treat sharing as optional can fall back here.
 	return err
 case errors.Is(err, qurl.ErrNoCRID):
-	// The response carried no CRID to verify against (older server or
-	// keyless resource). Verification fails closed: absence is not a
-	// mismatch, but it is not a pass either.
+	// A manually constructed ShareLink has no CRID.
 	return err
 case errors.Is(err, qurl.ErrCRIDMismatch):
 	// The supplied resource key does not derive the held CRID — the
@@ -162,7 +157,7 @@ default:
 | Error | Meaning |
 | --- | --- |
 | `qurl.ErrTemporaryAccessLinksDisabled` | The API answered 503: the environment is not currently serving temporary access links — the surface is dark or administratively disabled. A service posture, not anything wrong with the request; the underlying `*qurl.APIError` remains matchable with `errors.As`. |
-| `qurl.ErrNoCRID` | `VerifyCRID` had no CRID to verify against: the server omitted the field (older server or keyless resource). Fails closed — absence is not a mismatch, but it is not a pass either. |
+| `qurl.ErrNoCRID` | `VerifyCRID` had no CRID to verify against: a manually constructed link omitted it. Fails closed — absence is not a mismatch, but it is not a pass either. |
 | `qurl.ErrCRIDMismatch` | The supplied resource key does not derive the held CRID. This is the substitution the identifier exists to detect: fail closed and do not use the key. |
 | `qurl.ErrPortalRevoked` | `RevokePortal` found the qURL no longer active: this link was already revoked, so a repeat revoke had nothing to do. The underlying `*qurl.APIError` stays matchable. |
 
@@ -187,7 +182,7 @@ encoded with the RFC 4648 base32 alphabet in lowercase, unpadded. Because the
 identifier commits to the key bytes, any party that later receives the key
 can re-derive the identifier and detect substitution without trusting the
 channel that delivered the key. The trailing CRC32C is typo detection, not
-security. A CRID is a commitment, never an address: routing labels and
+security. A CRID is a commitment, never a network address: routing labels and
 placement identifiers are separate, server-issued values, and a client must
 not derive them from a CRID or from the key behind it.
 

@@ -155,8 +155,11 @@ func (c *Client) ShareResource(ctx context.Context, resourceID string, opts *Sha
 		}
 		return nil, err
 	}
+	if env.Data.CRID == "" {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidAPIResponse, ErrNoCRID)
+	}
 	if env.Data.CRID != resourceID {
-		return nil, fmt.Errorf("%w: share response CRID does not match the requested CRID", ErrInvalidAPIResponse)
+		return nil, fmt.Errorf("%w: %w: share response CRID does not match the requested CRID", ErrInvalidAPIResponse, ErrCRIDMismatch)
 	}
 	return env.Data.shareLink()
 }

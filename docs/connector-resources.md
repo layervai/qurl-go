@@ -6,7 +6,7 @@ and accepts only the matching `NHP_LRT`; it has no HTTP, Hub, generic-plugin, or
 cross-cell fallback.
 
 ```go
-request, err := qurl.NewNativeConnectorResourceRequest("prod-dashboard", cachedResourceID)
+request, err := qurl.NewNativeConnectorResourceRequest("prod-dashboard", cachedCRID)
 if err != nil {
 	return err
 }
@@ -15,15 +15,15 @@ if err != nil {
 	return err
 }
 
-fmt.Println(result.Resource.ResourceID)
+fmt.Println(result.Resource.CRID)
 fmt.Println(result.Resource.ConnectorRoutingID)
 fmt.Println(result.Resource.KnockResourceID)
 fmt.Println(result.FoundExisting)
 ```
 
-Use an empty `cachedResourceID` only for the first request. Once a binding is
-known, supply its exact public resource ID on every later start. That value
-becomes `expected_resource_id`, a read-only continuity assertion: the assigned
+Use an empty `cachedCRID` only for the first request. Once a binding is
+known, supply its exact CRID on every later start. That value
+becomes `expected_crid`, a read-only continuity assertion: the assigned
 cell returns that exact active resource or an identity-conflict error. It never
 creates, reclaims, or substitutes a resource while the assertion is present.
 
@@ -39,7 +39,7 @@ The binding keeps ownership of its device key during resource discovery. Call
 `TakeDeviceStaticPrivateKey` only after every resource exchange is complete,
 then use the returned `KnockResourceID` for `KnockRegisteredAgent`.
 
-`ConnectorResource.ResourceID` is the protected resource's P-256 public key in
+`ConnectorResource.ResourcePublicKey` is the protected resource's P-256 public key in
 canonical unpadded-base64url DER SPKI form. It is distinct from both
 `ConnectorRoutingID`, the opaque reverse-connection routing label, and
 `KnockResourceID`, the placement-neutral admission target. The SDK requires all
@@ -58,7 +58,7 @@ it separately with `NewCycleRunID` once per admission cycle and reuse that exact
 value for the cycle's retries and reconnects.
 
 The native success is accepted only when the agent id, Connector id, public
-resource id, routing id, knock id, CRID, and continuity assertion form
+resource key, routing id, knock id, CRID, and continuity assertion form
 one internally consistent binding. Missing, malformed, contradictory, or
 cross-wired values fail closed with
 `ErrInvalidNativeConnectorResourceResponse`.
