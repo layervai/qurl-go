@@ -67,7 +67,7 @@ jobs:
       - name: Verify released Connector CRID vectors
         run: |
           curl --fail --silent --show-error --retry 3 --max-time 30 \
-            https://raw.githubusercontent.com/layervai/qurl-conformance/v0.17.0/vectors/connector_resource_lst_v1_vectors.json \
+            https://raw.githubusercontent.com/layervai/qurl-conformance/11f62700972e196751b8ae6e8b7588e2c2d59499/vectors/connector_resource_lst_v1_vectors.json \
             -o /tmp/connector-resource-vectors.json
           cmp /tmp/connector-resource-vectors.json qurl/testdata/connector_resource_crid_vectors.json
 

@@ -612,7 +612,8 @@ type Resource struct {
 	client *Client
 
 	// CRID is the public resource locator. Public keys are verification data.
-	CRID              string `json:"crid"`
+	CRID string `json:"crid"`
+	// ResourcePublicKey is canonical unpadded-base64url P-256 DER SPKI verification data.
 	ResourcePublicKey string `json:"resource_public_key"`
 	// TargetURL is the private URL protected by this resource.
 	TargetURL string `json:"target_url"`

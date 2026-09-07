@@ -1476,3 +1476,21 @@ func newCredentialTestRequest(t *testing.T) *http.Request {
 	}
 	return req
 }
+
+func TestClientCreateResponsesRejectMismatchedCRID(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"data":{"resource_id":%q,"crid":%q,"qurl_link":"https://qurl.link/at_demo"}}`, testOtherConnectorID, testConnectorCRID)
+	}))
+	defer api.Close()
+	client, err := NewClient(BearerToken("lv_test"), WithBaseURL(api.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result, err := client.ProtectURL(context.Background(), "https://example.com"); result != nil || !errors.Is(err, ErrInvalidAPIResponse) {
+		t.Fatalf("mismatched resource accepted: %v", err)
+	}
+	if resource, portal, err := client.CreatePortalForURL(context.Background(), "https://example.com"); resource != nil || portal != nil || !errors.Is(err, ErrInvalidAPIResponse) {
+		t.Fatalf("mismatched portal accepted: %v", err)
+	}
+}
