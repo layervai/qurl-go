@@ -325,20 +325,25 @@ func TestPortalOpenerCallerDeadlineRecoveryPreservesFailureHealth(t *testing.T) 
 
 func TestPortalOpenerCallerDeadlineDoesNotMaskSDKTimeout(t *testing.T) {
 	link, cfg := portalOpenerFixture(t)
-	opener, err := NewPortalOpener(link, WithPortalOpenerConfig(cfg))
+	opener, err := NewPortalOpener(link,
+		WithPortalOpenerConfig(cfg), WithPortalOpenerOpenTimeout(10*time.Millisecond))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { closePortalOpener(t, opener) })
-	opener.open = func(ctx context.Context, _ string, _ Config) (*ResourceHandle, error) {
-		<-ctx.Done()
-		return nil, errors.Join(ErrPortalOpenTimeout, ctx.Err())
-	}
-	ctx, cancel := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+	callerCtx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
 	defer cancel()
-	startErr := opener.Start(ctx)
+	opener.open = func(openCtx context.Context, _ string, _ Config) (*ResourceHandle, error) {
+		<-openCtx.Done()
+		<-callerCtx.Done() // Make the caller deadline race with the completed SDK timeout.
+		return nil, openCtx.Err()
+	}
+	startErr := opener.Start(callerCtx)
 	if !errors.Is(startErr, ErrPortalOpenTimeout) || !errors.Is(startErr, context.DeadlineExceeded) {
 		t.Fatalf("Start error = %v, want ErrPortalOpenTimeout and context deadline exceeded", startErr)
+	}
+	if !errors.Is(callerCtx.Err(), context.DeadlineExceeded) {
+		t.Fatalf("caller context = %v, want deadline exceeded during open unwind", callerCtx.Err())
 	}
 	if health := opener.Health(); health.State != PortalOpenerStateDegraded || health.Ready ||
 		health.LastFailureClass != PortalOpenerFailureOpen || health.ConsecutiveFailures != 1 {
@@ -1286,6 +1291,7 @@ func TestPortalOpenerCloseCancelsResponseBodyRead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { closePortalOpener(t, opener) })
 	opener.open = func(context.Context, string, Config) (*ResourceHandle, error) {
 		return portalTestHandle("https://portal.example/content", testAuthProviderToken, 60, 19), nil
 	}
@@ -1321,6 +1327,7 @@ func TestPortalOpenerCloseRaceDiscardsSuccessfulTransportResponse(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { closePortalOpener(t, opener) })
 	opener.open = func(context.Context, string, Config) (*ResourceHandle, error) {
 		return portalTestHandle("https://portal.example/content", testAuthProviderToken, 60, 20), nil
 	}
