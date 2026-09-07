@@ -2049,6 +2049,7 @@ func validatePacketUnknownMessage(ctx context.Context, t *testing.T, httpTrap *l
 func validatePublicResourceAndKnockResourceIDWireDistinction(ctx context.Context, t *testing.T, httpTrap *lifecycleHTTPTrap) {
 	t.Helper()
 	const (
+		resourceCRID     = "ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a"
 		publicResourceID = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE2cTVv5_3eeYCcLLq5ROYCqcmY50HiKZ9ATglIkPnCji1E_S63UMtXba1moR8-Q6EV7oM6zwwh9_j2CDujzXvLA"
 		routingID        = "c-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 		knockResourceID  = "connector-cell-placement-proof"
@@ -2070,8 +2071,8 @@ func validatePublicResourceAndKnockResourceIDWireDistinction(ctx context.Context
 	agentPriv, agentPub := mustNHPKeypair(t)
 	cellPriv, cellPub := mustNHPKeypair(t)
 	resourceBody := []byte(fmt.Sprintf(
-		`{"errCode":"0","list":{"query":"connector_resource","version":1,"agent_id":"qurl-go-identity-wire-proof","connector_id":%q,"resource_id":%q,"connector_routing_id":%q,"knock_resource_id":%q,"found_existing":false}}`,
-		resourceSlug, publicResourceID, routingID, knockResourceID))
+		`{"errCode":"0","list":{"query":"connector_resource","version":1,"agent_id":"qurl-go-identity-wire-proof","connector_id":%q,"resource_id":%q,"crid":%q,"connector_routing_id":%q,"knock_resource_id":%q,"found_existing":false}}`,
+		resourceSlug, publicResourceID, resourceCRID, routingID, knockResourceID))
 	ackBody := []byte(fmt.Sprintf(
 		`{"errCode":"0","sessId":123,"cellId":"cell0","sessIssuedAtMillis":1800000000000,"runId":"0123456789abcdef","runAttempt":1,"resHost":{%q:"frps.cell0.example:7000"},"opnTime":900,"agentAddr":"203.0.113.9:49152","acTokens":{%q:"proof-token"},"preActions":{%q:null}}`,
 		knockResourceID, knockResourceID, knockResourceID))
@@ -2132,6 +2133,7 @@ func validatePublicResourceAndKnockResourceIDWireDistinction(ctx context.Context
 	}
 	if resourceResult == nil || resourceResult.Resource == nil ||
 		resourceResult.Resource.ResourceID != publicResourceID ||
+		resourceResult.Resource.CRID != resourceCRID ||
 		resourceResult.Resource.KnockResourceID != knockResourceID ||
 		resourceResult.Resource.ResourceID == resourceResult.Resource.KnockResourceID {
 		t.Fatalf("producer resource identity/admission binding = %#v", resourceResult)

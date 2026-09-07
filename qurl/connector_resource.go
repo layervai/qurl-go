@@ -12,6 +12,8 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
+
+	"github.com/layervai/qurl-go/crid"
 )
 
 // producerConnectorResourceType is the qurl-service discriminator for qURL
@@ -81,7 +83,7 @@ var (
 	ErrConnectorResourceOutcomeUnknown = errors.New("qurl: qURL Connector resource mutation outcome unknown")
 )
 
-// ConnectorResource is a resource managed by qURL Connector. ResourceID and
+// ConnectorResource is a resource managed by qURL Connector. CRID, ResourceID, and
 // Slug are immutable identities. ConnectorRoutingID and KnockResourceID are
 // explicit control-plane values for reverse-connection routing and NHP
 // admission respectively; neither is an identity or derivable from another
@@ -98,13 +100,10 @@ type ConnectorResource struct {
 	// encoding, DER structure, key type, curve, and point. It is distinct from
 	// ConnectorRoutingID and KnockResourceID.
 	ResourceID string `json:"resource_id"`
-	// CRID is the Cryptographic Resource ID derived from ResourceID's public
-	// key, when the producer returns it. Optional by presence: producers that
-	// predate CRID omit it, so unlike the identity fields above it is carried
-	// verbatim with no wire-format gate — the producer is authoritative for
-	// its own derivation, and the client-side trust rule is the crid
-	// package's delivered-key match, not a format check here.
-	CRID string `json:"crid,omitempty"`
+	// CRID is the required public identifier for lookup, deletion, and portal
+	// minting. Every Connector response binds it to the returned public key.
+	CRID string `json:"crid"`
+
 	// ConnectorRoutingID is the opaque routing label returned by the producer.
 	// qURL Connector uses it verbatim and never derives it from ResourceID.
 	ConnectorRoutingID string `json:"connector_routing_id"`
@@ -134,7 +133,10 @@ func (r *ConnectorResource) CreatePortal(ctx context.Context, opts ...PortalOpti
 	if r.client == nil {
 		return nil, fmt.Errorf("%w: qURL Connector resource is not bound to a client", ErrInvalidPortalRequest)
 	}
-	return r.client.CreatePortal(ctx, r.client.ResourceByID(r.ResourceID), opts...)
+	if err := validateConnectorCRID(r.CRID); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidPortalRequest, err)
+	}
+	return r.client.CreatePortal(ctx, r.client.ResourceByID(r.CRID), opts...)
 }
 
 type ensureConnectorResourceRequest struct {
@@ -170,7 +172,7 @@ type connectorResourceResponse struct {
 
 type connectorResourceExpectation struct {
 	slug         string
-	resourceID   string
+	crid         string
 	allowRevoked bool
 }
 
@@ -223,20 +225,19 @@ func (c *Client) EnsureConnectorResource(ctx context.Context, slug string) (*Ens
 	}, nil
 }
 
-// GetConnectorResource fetches a qURL Connector resource by immutable resource
-// id.
-func (c *Client) GetConnectorResource(ctx context.Context, resourceID string) (*ConnectorResource, error) {
+// GetConnectorResource fetches a qURL Connector resource by CRID.
+func (c *Client) GetConnectorResource(ctx context.Context, resourceCRID string) (*ConnectorResource, error) {
 	if c == nil {
 		return nil, fmt.Errorf("%w: nil client", ErrInvalidClientConfig)
 	}
-	if err := validateConnectorResourceID(resourceID); err != nil {
+	if err := validateConnectorCRID(resourceCRID); err != nil {
 		return nil, err
 	}
 
 	var response apiEnvelope[struct {
 		Resource *connectorResourceWire `json:"resource"`
 	}]
-	path := "/v1/resources/" + url.PathEscape(resourceID)
+	path := "/v1/resources/" + url.PathEscape(resourceCRID)
 	if err := c.doJSONStatus(ctx, http.MethodGet, path, nil, &response, http.StatusOK); err != nil {
 		return nil, classifyConnectorResourceError(connectorResourceOperationGetByID, err)
 	}
@@ -245,7 +246,7 @@ func (c *Client) GetConnectorResource(ctx context.Context, resourceID string) (*
 			invalidConnectorResourceResponse("resource detail has missing or null resource"))
 	}
 	resource, err := response.Data.Resource.connectorResource(c, connectorResourceExpectation{
-		resourceID:   resourceID,
+		crid:         resourceCRID,
 		allowRevoked: true,
 	})
 	if err != nil {
@@ -302,17 +303,17 @@ func (c *Client) GetConnectorResourceBySlug(ctx context.Context, slug string) (*
 	}
 }
 
-// DeleteConnectorResource revokes a qURL Connector resource by immutable resource id.
+// DeleteConnectorResource revokes a qURL Connector resource by CRID.
 // The 204 response has no JSON body; other successful resource methods retain
 // the SDK's fail-closed response decoding.
-func (c *Client) DeleteConnectorResource(ctx context.Context, resourceID string) error {
+func (c *Client) DeleteConnectorResource(ctx context.Context, resourceCRID string) error {
 	if c == nil {
 		return fmt.Errorf("%w: nil client", ErrInvalidClientConfig)
 	}
-	if err := validateConnectorResourceID(resourceID); err != nil {
+	if err := validateConnectorCRID(resourceCRID); err != nil {
 		return err
 	}
-	path := "/v1/resources/" + url.PathEscape(resourceID)
+	path := "/v1/resources/" + url.PathEscape(resourceCRID)
 	if err := c.doNoContent(ctx, http.MethodDelete, path, http.StatusNoContent); err != nil {
 		return classifyConnectorResourceError(connectorResourceOperationDelete, err)
 	}
@@ -324,13 +325,16 @@ func (r connectorResourceWire) connectorResource(client *Client, expect connecto
 	// shared create/detail/list serializer returns resource_id,
 	// connector_routing_id, knock_resource_id, type, and slug for both active and
 	// revoked Connector rows; an incomplete revoked row is producer drift.
-	if expect.resourceID != "" {
-		if r.ResourceID != expect.resourceID {
-			return nil, invalidConnectorResourceResponsef("requested resource_id %q returned %q", expect.resourceID, r.ResourceID)
-		}
-	} else if !isValidConnectorResourceID(r.ResourceID) {
+	if !isValidConnectorResourceID(r.ResourceID) {
 		return nil, invalidConnectorResourceResponse("missing or invalid resource_id")
 	}
+	if expect.crid != "" && r.CRID != expect.crid {
+		return nil, invalidConnectorResourceResponse("response crid does not match the request")
+	}
+	if !nativeConnectorCRIDMatches(r.CRID, r.ResourceID) {
+		return nil, invalidConnectorResourceResponse("missing, invalid, or public-key-mismatched crid")
+	}
+
 	if !isValidConnectorRoutingID(r.ConnectorRoutingID) {
 		return nil, invalidConnectorResourceResponsef("resource %q has missing or invalid connector_routing_id", r.ResourceID)
 	}
@@ -397,6 +401,13 @@ func (r connectorResourceWire) connectorResource(client *Client, expect connecto
 func validateConnectorSlug(slug string) error {
 	if !connectorSlugPattern.MatchString(slug) {
 		return fmt.Errorf("%w: qURL Connector slug must be 3-64 lowercase alphanumeric or hyphen characters, start with a letter, and end alphanumeric", ErrInvalidResourceRequest)
+	}
+	return nil
+}
+
+func validateConnectorCRID(resourceCRID string) error {
+	if err := crid.Validate(resourceCRID); err != nil {
+		return fmt.Errorf("%w: qURL Connector requires a valid CRID: %w", ErrInvalidResourceRequest, err)
 	}
 	return nil
 }

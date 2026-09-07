@@ -43,7 +43,7 @@ then use the returned `KnockResourceID` for `KnockRegisteredAgent`.
 canonical unpadded-base64url DER SPKI form. It is distinct from both
 `ConnectorRoutingID`, the opaque reverse-connection routing label, and
 `KnockResourceID`, the placement-neutral admission target. The SDK requires all
-three values to be present and mutually distinct. A present CRID must also
+three values to be present and mutually distinct. The required CRID must also
 cryptographically match the delivered resource key.
 
 `ConnectorRoutingID` has the exact producer-owned shape
@@ -58,7 +58,7 @@ it separately with `NewCycleRunID` once per admission cycle and reuse that exact
 value for the cycle's retries and reconnects.
 
 The native success is accepted only when the agent id, Connector id, public
-resource id, routing id, knock id, optional CRID, and continuity assertion form
+resource id, routing id, knock id, CRID, and continuity assertion form
 one internally consistent binding. Missing, malformed, contradictory, or
 cross-wired values fail closed with
 `ErrInvalidNativeConnectorResourceResponse`.
@@ -70,10 +70,15 @@ They are not a recovery fallback for Connector startup: if native continuity
 state is missing or the NHP exchange fails, stop and repair that state instead
 of adopting an HTTPS lookup result.
 
-Use the immutable resource id when it is available:
+Every native and management Connector response must include a CRID bound to
+its public key. CRID-less producers are rejected; there is no compatibility path.
+
+Use the CRID for management requests. Public keys and private storage IDs are
+not accepted as request identifiers; there is no compatibility fallback. A
+management response must include a CRID that matches its returned public key:
 
 ```go
-resource, err := client.GetConnectorResource(ctx, cachedResourceID)
+resource, err := client.GetConnectorResource(ctx, cachedCRID)
 ```
 
 An attended management tool can also look up the active owner-scoped Connector
@@ -103,7 +108,7 @@ the broader `ErrInvalidConnectorResourceResponse` sentinel.
 ## Revoke a resource
 
 ```go
-err := client.DeleteConnectorResource(ctx, resource.ResourceID)
+err := client.DeleteConnectorResource(ctx, resource.CRID)
 ```
 
 Delete expects the API's `204 No Content` response. Other SDK methods still
@@ -139,7 +144,7 @@ the underlying `*qurl.APIError` for status, problem code, and request diagnostic
 
 | Error | Meaning |
 | --- | --- |
-| `qurl.ErrConnectorResourceNotFound` | Resource id or owner-scoped slug was not found |
+| `qurl.ErrConnectorResourceNotFound` | CRID or owner-scoped slug was not found |
 | `qurl.ErrConnectorResourceRevoked` | A resource detail row has status revoked; its slug may be reusable after ordinary delete |
 | `qurl.ErrConnectorResourceTombstoned` | An exact `410 resource_tombstoned` closed the resource lifecycle; do not retry the slug as ordinary reuse |
 | `qurl.ErrConnectorResourceAmbiguous` | A slug lookup returned more than one resource |
@@ -155,7 +160,7 @@ The endpoint mappings are intentionally operation-specific:
 
 | Operation | Typed lifecycle mapping |
 | --- | --- |
-| Get by resource id | `404` maps to `ErrConnectorResourceNotFound`; `410 resource_tombstoned` maps to `ErrConnectorResourceTombstoned`; a valid `200` detail row with `status: "revoked"` maps to `ErrConnectorResourceRevoked` |
+| Get by CRID | `404` maps to `ErrConnectorResourceNotFound`; `410 resource_tombstoned` maps to `ErrConnectorResourceTombstoned`; a valid `200` detail row with `status: "revoked"` maps to `ErrConnectorResourceRevoked` |
 | Get by slug | Only an empty `200 data: []` maps to `ErrConnectorResourceNotFound`; route-level 404/409/410 remain raw `*APIError` values |
 | Delete | Only `404` maps to `ErrConnectorResourceNotFound` |
 
