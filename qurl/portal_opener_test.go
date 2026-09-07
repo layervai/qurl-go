@@ -181,7 +181,7 @@ func TestPortalOpenerOpenTimeoutBoundsStart(t *testing.T) {
 		return nil, ctx.Err()
 	}
 	started := time.Now()
-	if err := opener.Start(context.Background()); !errors.Is(err, context.DeadlineExceeded) {
+	if err := opener.Start(context.Background()); !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, errPortalOpenTimeout) {
 		t.Fatalf("Start timeout error = %v, want context deadline exceeded", err)
 	}
 	if elapsed := time.Since(started); elapsed > time.Second {
@@ -189,6 +189,67 @@ func TestPortalOpenerOpenTimeoutBoundsStart(t *testing.T) {
 	}
 	if health := opener.Health(); health.State != PortalOpenerStateDegraded || health.Ready || health.ConsecutiveFailures != 1 {
 		t.Fatalf("health after timed-out Start = %#v", health)
+	}
+}
+
+func TestPortalOpenerCallerCanceledStartDoesNotRecordPlatformFailure(t *testing.T) {
+	link, cfg := portalOpenerFixture(t)
+	opener, err := NewPortalOpener(link, WithPortalOpenerConfig(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { closePortalOpener(t, opener) })
+	opener.open = func(ctx context.Context, _ string, _ Config) (*ResourceHandle, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if err := opener.Start(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Start error = %v, want context canceled", err)
+	}
+	health := opener.Health()
+	if health.State != PortalOpenerStateNew || health.Ready ||
+		health.LastFailureClass != PortalOpenerFailureNone || health.ConsecutiveFailures != 0 {
+		t.Fatalf("caller-canceled Start health = %+v", health)
+	}
+	response, err := opener.Do(t.Context(), func(*url.URL) (*http.Request, error) {
+		t.Fatal("Do builder ran after a caller-canceled first Start")
+		return nil, errors.New("builder ran")
+	})
+	if response != nil {
+		_ = response.Body.Close()
+	}
+	if response != nil || !errors.Is(err, ErrPortalOpenerNotStarted) {
+		t.Fatalf("Do after caller-canceled first Start = %#v, %v", response, err)
+	}
+}
+
+func TestPortalOpenerCallerCanceledRecoveryPreservesFailureHealth(t *testing.T) {
+	link, cfg := portalOpenerFixture(t)
+	opener, err := NewPortalOpener(link, WithPortalOpenerConfig(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { closePortalOpener(t, opener) })
+	platformErr := errors.New("platform unavailable")
+	opener.open = func(context.Context, string, Config) (*ResourceHandle, error) { return nil, platformErr }
+	if err := opener.Start(t.Context()); !errors.Is(err, platformErr) {
+		t.Fatalf("initial Start = %v, want platform failure", err)
+	}
+	opener.open = func(ctx context.Context, _ string, _ Config) (*ResourceHandle, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if err := opener.Start(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("recovery Start = %v, want context canceled", err)
+	}
+	health := opener.Health()
+	if health.State != PortalOpenerStateDegraded || health.Ready ||
+		health.LastFailureClass != PortalOpenerFailureOpen || health.ConsecutiveFailures != 1 {
+		t.Fatalf("caller-canceled recovery health = %+v", health)
 	}
 }
 
@@ -983,6 +1044,221 @@ func TestPortalOpenerRedirectPolicies(t *testing.T) {
 	}
 	if crossOriginRequests.Load() != 0 {
 		t.Fatalf("cross-origin destination received %d requests", crossOriginRequests.Load())
+	}
+}
+
+type closeIgnoringRedirectTransport struct {
+	firstLeg        chan struct{}
+	releaseFirstLeg chan struct{}
+	redirected      atomic.Int32
+}
+
+func (transport *closeIgnoringRedirectTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.URL.Path == "/start" {
+		close(transport.firstLeg)
+		<-transport.releaseFirstLeg // Deliberately ignore request cancellation.
+		return &http.Response{
+			StatusCode: http.StatusTemporaryRedirect,
+			Header:     http.Header{"Location": []string{"https://portal.example/end"}},
+			Body:       io.NopCloser(strings.NewReader("redirect")),
+			Request:    req,
+		}, nil
+	}
+	transport.redirected.Add(1)
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader("ok")),
+		Request:    req,
+	}, nil
+}
+
+type portalContextBody struct {
+	ctx     context.Context
+	content chan string
+}
+
+func (body *portalContextBody) Read(destination []byte) (int, error) {
+	select {
+	case <-body.ctx.Done():
+		return 0, body.ctx.Err()
+	case content := <-body.content:
+		return copy(destination, content), io.EOF
+	}
+}
+
+func (*portalContextBody) Close() error { return nil }
+
+type portalContextBodyTransport struct {
+	body chan *portalContextBody
+}
+
+type closeIgnoringResponseTransport struct {
+	entered chan struct{}
+	release chan struct{}
+	body    *closeTrackingBody
+}
+
+func (transport *closeIgnoringResponseTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	close(transport.entered)
+	<-transport.release // Deliberately ignore request cancellation.
+	return &http.Response{
+		StatusCode: http.StatusOK, Header: make(http.Header), Request: req,
+		Body: transport.body,
+	}, nil
+}
+
+func (transport *portalContextBodyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	body := &portalContextBody{ctx: req.Context(), content: make(chan string, 1)}
+	transport.body <- body
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       body,
+		Request:    req,
+	}, nil
+}
+
+func TestPortalOpenerDoKeepsResponseBodyContextAlive(t *testing.T) {
+	transport := &portalContextBodyTransport{body: make(chan *portalContextBody, 1)}
+	link, cfg := portalOpenerFixture(t)
+	opener, err := NewPortalOpener(link, WithPortalOpenerConfig(cfg), WithPortalOpenerHTTPClient(&http.Client{Transport: transport}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	opener.open = func(context.Context, string, Config) (*ResourceHandle, error) {
+		return portalTestHandle("https://portal.example/content", testAuthProviderToken, 60, 18), nil
+	}
+	if err := opener.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { closePortalOpener(t, opener) })
+
+	response, err := opener.Do(t.Context(), func(target *url.URL) (*http.Request, error) {
+		return http.NewRequestWithContext(t.Context(), http.MethodGet, target.String(), http.NoBody)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := <-transport.body
+	body.content <- "ok"
+	content, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("read response body: %v", err)
+	}
+	if string(content) != "ok" {
+		t.Fatalf("response body = %q, want ok", content)
+	}
+	_ = response.Body.Close()
+}
+
+func TestPortalOpenerCloseCancelsResponseBodyRead(t *testing.T) {
+	transport := &portalContextBodyTransport{body: make(chan *portalContextBody, 1)}
+	link, cfg := portalOpenerFixture(t)
+	opener, err := NewPortalOpener(link, WithPortalOpenerConfig(cfg), WithPortalOpenerHTTPClient(&http.Client{Transport: transport}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	opener.open = func(context.Context, string, Config) (*ResourceHandle, error) {
+		return portalTestHandle("https://portal.example/content", testAuthProviderToken, 60, 19), nil
+	}
+	if err := opener.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+
+	response, err := opener.Do(context.Background(), func(target *url.URL) (*http.Request, error) { //nolint:bodyclose // closed after the cancellation assertion
+		return http.NewRequestWithContext(context.Background(), http.MethodGet, target.String(), http.NoBody)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	readErr := make(chan error, 1)
+	go func() {
+		_, requestErr := io.ReadAll(response.Body)
+		readErr <- requestErr
+	}()
+	if err := opener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-readErr; !errors.Is(err, context.Canceled) {
+		t.Fatalf("response body read after Close = %v, want context canceled", err)
+	}
+	_ = response.Body.Close()
+}
+
+func TestPortalOpenerCloseRaceDiscardsSuccessfulTransportResponse(t *testing.T) {
+	body := &closeTrackingBody{Reader: strings.NewReader("ok")}
+	transport := &closeIgnoringResponseTransport{entered: make(chan struct{}), release: make(chan struct{}), body: body}
+	link, cfg := portalOpenerFixture(t)
+	opener, err := NewPortalOpener(link, WithPortalOpenerConfig(cfg), WithPortalOpenerHTTPClient(&http.Client{Transport: transport}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	opener.open = func(context.Context, string, Config) (*ResourceHandle, error) {
+		return portalTestHandle("https://portal.example/content", testAuthProviderToken, 60, 20), nil
+	}
+	if err := opener.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	result := make(chan error, 1)
+	go func() {
+		response, requestErr := opener.Do(context.Background(), func(target *url.URL) (*http.Request, error) {
+			return http.NewRequestWithContext(context.Background(), http.MethodGet, target.String(), http.NoBody)
+		})
+		if response != nil {
+			_ = response.Body.Close()
+		}
+		result <- requestErr
+	}()
+	<-transport.entered
+	if err := opener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	close(transport.release)
+	if err := <-result; !errors.Is(err, ErrPortalOpenerClosed) {
+		t.Fatalf("Do close race = %v, want ErrPortalOpenerClosed", err)
+	}
+	if !body.closed.Load() {
+		t.Fatal("Do close race did not close the discarded response body")
+	}
+}
+
+func TestPortalOpenerCloseCancelsRequestBeforeRedirect(t *testing.T) {
+	transport := &closeIgnoringRedirectTransport{
+		firstLeg: make(chan struct{}), releaseFirstLeg: make(chan struct{}),
+	}
+
+	link, cfg := portalOpenerFixture(t)
+	opener, err := NewPortalOpener(link, WithPortalOpenerConfig(cfg), WithPortalOpenerHTTPClient(&http.Client{Transport: transport}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	opener.open = func(context.Context, string, Config) (*ResourceHandle, error) {
+		return portalTestHandle("https://portal.example/start", testAuthProviderToken, 60, 16), nil
+	}
+	if err := opener.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	doErr := make(chan error, 1)
+	go func() {
+		response, requestErr := opener.Do(context.Background(), func(target *url.URL) (*http.Request, error) {
+			return http.NewRequestWithContext(context.Background(), http.MethodGet, target.String(), http.NoBody)
+		})
+		if response != nil {
+			_ = response.Body.Close()
+		}
+		doErr <- requestErr
+	}()
+	<-transport.firstLeg
+	if err := opener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	close(transport.releaseFirstLeg)
+	if err := <-doErr; !errors.Is(err, ErrPortalOpenerClosed) {
+		t.Fatalf("Do error = %v, want ErrPortalOpenerClosed", err)
+	}
+	if transport.redirected.Load() != 0 {
+		t.Fatalf("redirect requests after Close = %d, want 0", transport.redirected.Load())
 	}
 }
 

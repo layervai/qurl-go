@@ -133,12 +133,12 @@ It does not return the qURL, target, session ID, cookie, or raw transport error.
 Lifecycle code can call `Start` again after expiry to run one
 single-flight recovery open. This explicit recovery stays off the request path,
 because concurrent callers share the first caller's context and cancellation,
-and it must authenticate the same target as the first open. `Close` cancels
-renewal and releases the SDK's references to the qURL and session material. It
-does not wait for a concurrent `Do` that already copied the active handle, and
-it does not cancel a request already handed to the HTTP transport. Stop and
-drain application request handlers before `Close` when shutdown must guarantee
-that no later protected request leaves the process.
+and it must authenticate the same target as the first open. A caller-canceled
+first `Start` leaves the opener in `new`; a platform failure leaves it
+`degraded`. `Close` cancels renewal, active request and redirect legs, and
+response-body reads, then releases the SDK's references to the qURL and session
+material. It cannot retract bytes that a transport already sent, but no later
+redirect leg can start. Callers must still close every response body.
 The opener pins the trust and cell config resolved by `Start` for all background
 renewals. `Close` also cancels an in-progress provider or deployment resolution.
 Call `Start` after a bounded cycle ends if deployment trust or cell routing

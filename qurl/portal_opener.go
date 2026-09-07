@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -20,8 +21,11 @@ const (
 )
 
 var (
+	errPortalOpenTimeout = errors.New("qurl: portal opener open timeout")
+
 	// ErrPortalOpenerNotStarted reports that Do was called before the first Start
-	// attempt completed. A failed Start moves the opener to not-ready instead.
+	// attempt completed. A caller-canceled first attempt returns to this state;
+	// a platform failure moves the opener to not-ready instead.
 	ErrPortalOpenerNotStarted = errors.New("qurl: portal opener has not started")
 	// ErrPortalOpenerNotReady reports that no unexpired cached portal handle is
 	// available. Do never opens or waits for one.
@@ -161,7 +165,8 @@ func RejectPortalRedirects() PortalRequestOption {
 type PortalOpenerState string
 
 const (
-	// PortalOpenerStateNew means Start has not run.
+	// PortalOpenerStateNew means Start has not completed a platform attempt. A
+	// caller-canceled first attempt returns to this state.
 	PortalOpenerStateNew PortalOpenerState = "new"
 	// PortalOpenerStateStarting means the first open is in progress.
 	PortalOpenerStateStarting PortalOpenerState = "starting"
@@ -354,6 +359,7 @@ func (o *PortalOpener) runStart(ctx context.Context, attempt *portalStartAttempt
 	if err == nil {
 		opened, err = o.openPortal(startCtx, cfg, expectedTarget)
 	}
+	callerErr := ctx.Err()
 
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -361,10 +367,19 @@ func (o *PortalOpener) runStart(ctx context.Context, attempt *portalStartAttempt
 		err = ErrPortalOpenerClosed
 		clearPortalOpenResult(opened)
 	} else if err != nil {
-		o.state = portalOpenerDegraded
+		clearPortalOpenResult(opened)
 		o.clearActiveLocked()
-		o.lastFailure = classifyPortalOpenerFailure(err)
-		o.failures++
+		if callerErr != nil && errors.Is(err, callerErr) && !errors.Is(err, errPortalOpenTimeout) {
+			if attempt.recovery {
+				o.state = portalOpenerDegraded
+			} else {
+				o.state = portalOpenerNew
+			}
+		} else {
+			o.state = portalOpenerDegraded
+			o.lastFailure = classifyPortalOpenerFailure(err)
+			o.failures++
+		}
 	} else {
 		o.installLocked(opened)
 		configCopy := cfg
@@ -420,10 +435,13 @@ func (o *PortalOpener) openPortal(ctx context.Context, cfg Config, expectedTarge
 	// Keep the monotonic reading for all internal lifetime comparisons. UTC is
 	// applied only to the outward health snapshot.
 	startedAt := o.now()
-	openCtx, cancel := context.WithTimeout(ctx, o.openTimeout)
+	openCtx, cancel := context.WithTimeoutCause(ctx, o.openTimeout, errPortalOpenTimeout)
 	defer cancel()
 	handle, err := o.open(openCtx, o.link, cfg)
 	if err != nil {
+		if errors.Is(context.Cause(openCtx), errPortalOpenTimeout) {
+			return nil, fmt.Errorf("%w: %w", errPortalOpenTimeout, err)
+		}
 		return nil, err
 	}
 	if handle != nil {
@@ -630,7 +648,8 @@ func (o *PortalOpener) waitFor(delay time.Duration) bool {
 
 // Do sends one request to the exact authenticated ACK target with the cached
 // session. It returns immediately with ErrPortalOpenerNotReady when no active
-// handle exists; it never performs an NHP open or waits for renewal.
+// handle exists; it never performs an NHP open or waits for renewal. Close
+// cancels an active request and prevents later redirect legs.
 func (o *PortalOpener) Do(ctx context.Context, build PortalRequestBuilder, options ...PortalRequestOption) (*http.Response, error) {
 	if o == nil {
 		return nil, ErrPortalOpenerClosed
@@ -678,6 +697,21 @@ func (o *PortalOpener) Do(ctx context.Context, build PortalRequestBuilder, optio
 	if !active || targetRaw == "" || !o.now().Before(expiresAt) {
 		return nil, ErrPortalOpenerNotReady
 	}
+	requestCtx, cancelRequest := context.WithCancel(ctx)
+	stopLifecycleCancel := context.AfterFunc(o.lifecycle, cancelRequest) //nolint:contextcheck // fuse caller and opener lifecycles
+	releaseRequest := func() {
+		stopLifecycleCancel()
+		cancelRequest()
+	}
+	releaseOnReturn := true
+	defer func() {
+		if releaseOnReturn {
+			releaseRequest()
+		}
+	}()
+	if o.lifecycle.Err() != nil {
+		return nil, ErrPortalOpenerClosed
+	}
 	trustedTarget, err := url.Parse(targetRaw)
 	if err != nil {
 		return nil, ErrPortalOpenerNotReady
@@ -696,7 +730,7 @@ func (o *PortalOpener) Do(ctx context.Context, build PortalRequestBuilder, optio
 		closePortalRequestBody(req)
 		return nil, fmt.Errorf("%w: request changed the authenticated target", ErrInvalidContentRequest)
 	}
-	req = req.Clone(ctx)
+	req = req.Clone(requestCtx)
 	targetCopy := *trustedTarget
 	req.URL = &targetCopy
 	// Pin the wire Host to the authority signed by the caller after it received
@@ -708,10 +742,16 @@ func (o *PortalOpener) Do(ctx context.Context, build PortalRequestBuilder, optio
 	}
 	if requestCfg.rejectRedirects {
 		client.CheckRedirect = func(*http.Request, []*http.Request) error {
+			if o.lifecycle.Err() != nil {
+				return ErrPortalOpenerClosed
+			}
 			return ErrPortalRedirect
 		}
 	} else {
 		client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+			if o.lifecycle.Err() != nil {
+				return ErrPortalOpenerClosed
+			}
 			err := handle.CheckContentRedirect(req, via)
 			if errors.Is(err, ErrInvalidContentRequest) {
 				return fmt.Errorf("%w: %s", ErrPortalRedirect, err.Error())
@@ -721,11 +761,32 @@ func (o *PortalOpener) Do(ctx context.Context, build PortalRequestBuilder, optio
 	}
 	response, err := client.Do(req)
 	if err != nil {
+		if o.lifecycle.Err() != nil {
+			return nil, ErrPortalOpenerClosed
+		}
 		// net/http can return the previous response with a redirect-policy error.
 		// Its body is already closed; keep the PortalOpener error contract simple.
 		return nil, err
 	}
+	if o.lifecycle.Err() != nil {
+		_ = response.Body.Close()
+		return nil, ErrPortalOpenerClosed
+	}
+	response.Body = &portalResponseBody{ReadCloser: response.Body, release: releaseRequest}
+	releaseOnReturn = false
 	return response, nil
+}
+
+type portalResponseBody struct {
+	io.ReadCloser
+	once    sync.Once
+	release func()
+}
+
+func (body *portalResponseBody) Close() error {
+	err := body.ReadCloser.Close()
+	body.once.Do(body.release)
+	return err
 }
 
 func closePortalRequestBody(req *http.Request) {
@@ -772,10 +833,8 @@ func (o *PortalOpener) Health() PortalOpenerHealth {
 	return health
 }
 
-// Close cancels background renewal and waits for any active Start or renewal to
-// stop. It does not wait for a concurrent Do that already copied the active
-// handle. Callers that require a strict outbound-request fence must stop and
-// drain their request handlers before Close. Close is idempotent.
+// Close cancels background renewal and any active Do, then waits for any active
+// Start or renewal to stop. Close is idempotent.
 func (o *PortalOpener) Close() error {
 	if o == nil {
 		return nil
