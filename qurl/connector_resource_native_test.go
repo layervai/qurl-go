@@ -39,7 +39,9 @@ func TestNativeConnectorResourceConformance(t *testing.T) {
 		ResultRejectCases []conformance.ConnectorResourceLSTV1BodyCase  `json:"result_reject_cases"`
 		ErrorCases        []conformance.ConnectorResourceLSTV1ErrorCase `json:"error_cases"`
 		ErrorRejectCases  []conformance.ConnectorResourceLSTV1BodyCase  `json:"error_reject_cases"`
+		SizeCases         []conformance.ConnectorResourceLSTV1SizeCase  `json:"size_cases"`
 	}
+	// CI compares these bytes with the released v0.17.0 public artifact.
 	raw, err := os.ReadFile("testdata/connector_resource_crid_vectors.json")
 	if err != nil {
 		t.Fatal(err)
@@ -108,6 +110,28 @@ func TestNativeConnectorResourceConformance(t *testing.T) {
 			}
 			if publicRequest.UsrData.ExpectedCRID != nil && resolution.Resource.CRID != *publicRequest.UsrData.ExpectedCRID {
 				t.Fatal("continuity result did not retain the exact expected resource")
+			}
+		})
+	}
+
+	for _, testCase := range fixture.SizeCases {
+		if testCase.Direction != "result" {
+			continue
+		} // The SDK only receives result bodies.
+		t.Run("size/"+testCase.Name, func(t *testing.T) {
+			var envelope struct {
+				List struct {
+					AgentID     string `json:"agent_id"`
+					ConnectorID string `json:"connector_id"`
+				} `json:"list"`
+			}
+			if err := json.Unmarshal([]byte(testCase.BodyJSON), &envelope); err != nil {
+				t.Fatal(err)
+			}
+			request := &NativeConnectorResourceRequest{ConnectorID: envelope.List.ConnectorID, RequestNonce: testNativeConnectorNonce}
+			result, err := parseNativeConnectorResourceResponse([]byte(testCase.BodyJSON), envelope.List.AgentID, request)
+			if err != nil || result == nil {
+				t.Fatalf("maximum result rejected: %v", err)
 			}
 		})
 	}
@@ -439,6 +463,17 @@ func TestParseNativeConnectorResourcePinsExpectedIdentityAndCRID(t *testing.T) {
 	wrongResource := nativeConnectorSuccessBody(testOtherConnectorID, testConnectorRoutingID, testKnockID, testConnectorCRID, true)
 	if result, err := parseNativeConnectorResourceResponse([]byte(wrongResource), "agent-conform", request); result != nil || !errors.Is(err, ErrInvalidNativeConnectorResourceResponse) {
 		t.Fatalf("continuity mismatch = %#v, %v", result, err)
+	}
+
+	// The response is key-bound, but belongs to a different resource.
+	otherCRID := "aeqq3ixwrzh6k32picwqxzdkc4dkzenxwozcpcw2fstb5uug22dn3akqpppq"
+	otherKey := "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEpDu9mdM6E96ncBm5qjKn16Rjv6sWoHRQQz2ElwKSg5YQDLCvofuEb7gmId2YBKv3YXcrdc3tmBaiRzYCH9Hp6Q"
+	if !nativeConnectorCRIDMatches(otherCRID, otherKey) {
+		t.Fatal("invalid test identity")
+	}
+	other := nativeConnectorSuccessBody(otherKey, testConnectorRoutingID, testKnockID, otherCRID, true)
+	if result, err := parseNativeConnectorResourceResponse([]byte(other), "agent-conform", request); result != nil || !errors.Is(err, ErrInvalidNativeConnectorResourceResponse) {
+		t.Fatalf("changed CRID = %#v, %v", result, err)
 	}
 
 	emptyCRID := ""

@@ -118,3 +118,9 @@ dependency graph.
 - Follow the [PR title convention](.github/PULL_REQUEST_TEMPLATE.md) (Conventional Commits).
 - Include or update tests, and an `Example` when you touch public behavior.
 - Make sure `make check` is green.
+
+The native Connector CRID suite uses a byte-identical copy of the public
+`qurl-conformance v0.17.0` artifact. Required CI compares it with that release.
+The module retains v0.14.0 for unrelated credential-recovery fixtures removed
+from later public releases; upgrading it would introduce a private dependency
+into this public SDK. Neither version enables old Connector wire support.

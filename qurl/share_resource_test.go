@@ -147,11 +147,7 @@ func TestClient_ShareResourceQURLIDRevokesTheMintedLink(t *testing.T) {
 	}
 }
 
-// TestClient_ShareResourceOmittedQURLIDIsEmpty pins the older-server
-// posture: qurl_id is absent from servers predating the field, and that is an
-// empty QURLID rather than a failed share. The field follows crid's additive
-// posture, not qurl's fail-closed one — a caller that can still use the link
-// should still get it, and only loses the revocation handle.
+// An omitted optional qurl_id leaves no individual revocation handle.
 func TestClient_ShareResourceOmittedQURLIDIsEmpty(t *testing.T) {
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

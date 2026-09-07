@@ -218,7 +218,7 @@ func validateNativeConnectorResourceRequest(request *NativeConnectorResourceRequ
 	}
 	if request.ExpectedCRID != "" {
 		if err := validateConnectorCRID(request.ExpectedCRID); err != nil {
-			return fmt.Errorf("%w: expected resource identity: %w", ErrInvalidNativeConnectorResourceRequest, err)
+			return fmt.Errorf("%w: expected CRID: %w", ErrInvalidNativeConnectorResourceRequest, err)
 		}
 	}
 	if !requireNonce && request.RequestNonce == "" {

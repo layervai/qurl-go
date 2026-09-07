@@ -1356,8 +1356,8 @@ func TestClient_IncompleteResourceSuccessFailsClosed(t *testing.T) {
 		t.Fatalf("NewClient: %v", err)
 	}
 	_, err = client.ProtectURL(context.Background(), "https://example.com")
-	if !errors.Is(err, ErrInvalidAPIResponse) || !strings.Contains(err.Error(), "missing or invalid key-bound CRID") {
-		t.Fatalf("ProtectURL incomplete response: want ErrInvalidAPIResponse and missing or invalid key-bound CRID detail, got %v", err)
+	if !errors.Is(err, ErrInvalidAPIResponse) || !strings.Contains(err.Error(), "missing or invalid resource public key") {
+		t.Fatalf("ProtectURL incomplete response: want ErrInvalidAPIResponse and missing or invalid resource public key detail, got %v", err)
 	}
 }
 
@@ -1378,13 +1378,13 @@ func TestClient_IncompletePortalSuccessFailsClosed(t *testing.T) {
 			want: "missing qurl_link",
 		},
 		{
-			name: "missing resource id",
+			name: "missing resource public key",
 			body: `{"data":{"qurl_link":"https://qurl.link/at_demo"}}`,
 			run: func(ctx context.Context, client *Client) error {
 				_, _, err := client.CreatePortalForURL(ctx, "https://example.com", ValidFor(5*time.Minute))
 				return err
 			},
-			want: "missing or invalid key-bound CRID",
+			want: "missing or invalid resource public key",
 		},
 	}
 	for _, tt := range tests {

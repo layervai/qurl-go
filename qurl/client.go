@@ -1020,7 +1020,10 @@ type createResourceResponse struct {
 }
 
 func (r createResourceResponse) resource() (*Resource, error) {
-	if !isValidConnectorResourceID(r.ID) || !nativeConnectorCRIDMatches(r.CRID, r.ID) {
+	if !isValidConnectorResourceID(r.ID) {
+		return nil, fmt.Errorf("%w: missing or invalid resource public key", ErrInvalidAPIResponse)
+	}
+	if !nativeConnectorCRIDMatches(r.CRID, r.ID) {
 		return nil, fmt.Errorf("%w: missing or invalid key-bound CRID", ErrInvalidAPIResponse)
 	}
 	return &Resource{
@@ -1063,7 +1066,10 @@ type createPortalResponse struct {
 }
 
 func (r createPortalResponse) portal() (*Portal, error) {
-	if !isValidConnectorResourceID(r.ResourcePublicKey) || !nativeConnectorCRIDMatches(r.CRID, r.ResourcePublicKey) {
+	if !isValidConnectorResourceID(r.ResourcePublicKey) {
+		return nil, fmt.Errorf("%w: missing or invalid resource public key", ErrInvalidAPIResponse)
+	}
+	if !nativeConnectorCRIDMatches(r.CRID, r.ResourcePublicKey) {
 		return nil, fmt.Errorf("%w: missing or invalid key-bound CRID", ErrInvalidAPIResponse)
 	}
 	if strings.TrimSpace(r.QURLLink) == "" {
