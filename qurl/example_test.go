@@ -253,9 +253,13 @@ func ExampleClient_ShareResource() {
 	}
 
 	// Address the resource by its CRID. The CRID is safe to paste anywhere; the share link is
-	// the secret. Open it with EnterPortal.
+	// the secret. Open it with EnterPortalForCRID and the same expected CRID.
 	share, err := client.ShareResource(context.Background(), exampleCRID, nil)
 	if err != nil {
+		panic(err)
+	}
+	// Verify the signed link against the independently held CRID before sharing.
+	if err := qurl.VerifyPortalLink(context.Background(), share.Link, exampleCRID); err != nil {
 		panic(err)
 	}
 
