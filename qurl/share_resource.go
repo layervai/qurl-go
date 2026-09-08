@@ -20,14 +20,15 @@ import (
 // underlying *APIError remains matchable with errors.As.
 var ErrTemporaryAccessLinksDisabled = errors.New("qurl: temporary access links are disabled")
 
-// ErrNoCRID is returned when ShareResource or CreatePortal receives no CRID or VerifyCRID
-// has no CRID to verify in a manually constructed ShareLink.
+// ErrNoCRID is returned when a CRID-addressed operation or explicit CRID
+// verifier receives no CRID, including a manually constructed ShareLink.
 // Verification fails closed — absence is not a mismatch, but it is not a
 // pass either.
 var ErrNoCRID = errors.New("qurl: no crid to verify against")
 
-// ErrCRIDMismatch is returned when ShareResource or CreatePortal receives a different CRID
-// or VerifyCRID finds that the supplied key does not derive the held CRID.
+// ErrCRIDMismatch is returned when a response has a different CRID, a supplied
+// or signed key does not derive the held CRID, or a link verifier receives a
+// malformed expected CRID (with the crid package's parse error also wrapped).
 // Fail closed and do not use the returned link or mismatched key.
 var ErrCRIDMismatch = errors.New("qurl: resource CRID mismatch")
 
@@ -166,8 +167,8 @@ func (c *Client) ShareResource(ctx context.Context, resourceCRID string, opts *S
 
 // VerifyCRID checks only the response CRID against the supplied key. It does
 // not inspect the link; use VerifyLinkForCRID to bind its signed resource key.
-// It ties this response to a
-// resource public key the caller already holds by re-deriving the CRID from
+// It ties this response to a resource public key the caller already holds by
+// re-deriving the CRID from
 // derSPKI (the DER SubjectPublicKeyInfo bytes, exactly as delivered) and
 // comparing it to l.CRID in constant time. nil means the key is the one the
 // CRID commits to. Any non-nil error is a fail-closed "do not use this key

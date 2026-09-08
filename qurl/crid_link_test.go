@@ -2,9 +2,12 @@ package qurl
 
 import (
 	"context"
+	"encoding/base32"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"hash/crc32"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -68,13 +71,12 @@ func TestVerifyLinkForCRIDRejectsEchoWithForeignSignedLink(t *testing.T) {
 	if _, err := VerifyLinkForCRID(shared.Link, held, trust); !errors.Is(err, ErrCRIDMismatch) {
 		t.Fatalf("binding error = %v", err)
 	}
-	if _, err := EnterPortalWith(context.Background(), shared.Link, Config{TrustStore: trust, ExpectedCRID: held, RelayAllowlist: NewRelayAllowlist([]string{"relay.example.com"})}); !errors.Is(err, ErrCRIDMismatch) {
+	doer := &capturingDoer{}
+	if _, err := EnterPortalWith(context.Background(), shared.Link, Config{TrustStore: trust, ExpectedCRID: held, RelayAllowlist: NewRelayAllowlist([]string{"relay.example.com"}), HTTPClient: doer}); !errors.Is(err, ErrCRIDMismatch) {
 		t.Fatalf("open must reject before network: %v", err)
 	}
-	for _, expected := range []string{"", "invalid", held[:59], "p44jqpd7eaoslq7jinmjv4yikgzmcxgpjfsuobiniqnko32lpw743out3lhq"} {
-		if _, err := VerifyLinkForCRID(link, expected, trust); err == nil {
-			t.Fatal("accepted invalid CRID")
-		}
+	if doer.gotURL != "" {
+		t.Fatal("mismatched CRID caused an access request")
 	}
 	matchingLink, err := CreatePortalWithParams(context.Background(), signer, CreateParams{
 		CellPublicKey: testkeys.X25519Public(), RelayURL: "https://relay.example.com",
@@ -86,6 +88,59 @@ func TestVerifyLinkForCRIDRejectsEchoWithForeignSignedLink(t *testing.T) {
 	}
 	if _, err := VerifyLinkForCRID(matchingLink, held, trust); err != nil {
 		t.Fatal(err)
+	}
+	// Keep the matching digest but change the version and recompute its checksum.
+	encoding := base32.NewEncoding("abcdefghijklmnopqrstuvwxyz234567").WithPadding(base32.NoPadding)
+	unknown, err := encoding.DecodeString(held)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unknown[0] = 0x7f
+	binary.BigEndian.PutUint32(unknown[len(unknown)-4:], crc32.Checksum(unknown[:len(unknown)-4], crc32.MakeTable(crc32.Castagnoli)))
+	for _, tc := range []struct {
+		name, value string
+		want        error
+	}{
+		{"empty", "", ErrNoCRID},
+		{"malformed", "invalid", crid.ErrLength},
+		{"truncated", held[:59], crid.ErrLength},
+		{"unsupported-matching-digest", encoding.EncodeToString(unknown), ErrUnsupportedCRIDVersion},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := VerifyLinkForCRID(matchingLink, tc.value, trust); !errors.Is(err, tc.want) {
+				t.Fatalf("got %v, want %v", err, tc.want)
+			}
+		})
+	}
+	installStaticProvider(t, trust, relayExampleAllowlist())
+	transport := installCapturingTransport(t)
+	if err := VerifyPortalLink(t.Context(), matchingLink, held); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyPortalLink(t.Context(), link, held); !errors.Is(err, ErrCRIDMismatch) {
+		t.Fatalf("default verifier accepted foreign key: %v", err)
+	}
+	if _, err := EnterPortalForCRID(t.Context(), link, held); !errors.Is(err, ErrCRIDMismatch) {
+		t.Fatalf("default opener accepted foreign key: %v", err)
+	}
+	if _, err := EnterPortalForCRID(t.Context(), matchingLink, ""); !errors.Is(err, ErrNoCRID) {
+		t.Fatalf("empty CRID must not disable binding: %v", err)
+	}
+	if err := VerifyPortalLink(t.Context(), matchingLink, ""); !errors.Is(err, ErrNoCRID) {
+		t.Fatalf("empty verifier CRID: %v", err)
+	}
+	if transport.gotURL != "" {
+		t.Fatal("default verifier or rejected opener sent an access request")
+	}
+	providerErr := errors.New("provider unavailable")
+	installDefaultProvider(t, providerFunc(func(context.Context) (*TrustStore, *RelayAllowlist, error) {
+		return nil, nil, providerErr
+	}))
+	if err := VerifyPortalLink(t.Context(), matchingLink, held); !errors.Is(err, providerErr) {
+		t.Fatalf("provider error lost: %v", err)
+	}
+	if _, err := EnterPortalForCRID(t.Context(), matchingLink, held); !errors.Is(err, providerErr) {
+		t.Fatalf("opener provider error lost: %v", err)
 	}
 	otherSigner, err := GenerateLocalSigner(signer.KID())
 	if err != nil {

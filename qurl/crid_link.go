@@ -2,10 +2,15 @@ package qurl
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/layervai/qurl-go/crid"
 )
+
+// ErrUnsupportedCRIDVersion means this SDK cannot verify the CRID's version.
+// Upgrade to a version that supports it; do not use the link without binding.
+var ErrUnsupportedCRIDVersion = errors.New("qurl: unsupported CRID version")
 
 // VerifyLinkForCRID verifies the issuer signature and binds the signed resource
 // key to an independently obtained CRID. It does not verify content or liveness.
@@ -23,7 +28,10 @@ func VerifyLinkForCRID(qurlLink, expectedCRID string, ts *TrustStore) (*Fragment
 		return nil, err
 	}
 	matched, err := crid.KeyMatches(expectedCRID, key)
-	if err != nil || !matched {
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrCRIDMismatch, err)
+	}
+	if !matched {
 		return nil, ErrCRIDMismatch
 	}
 	return fragment, nil
@@ -38,7 +46,7 @@ func validateExpectedCRID(value string) error {
 		return fmt.Errorf("%w: %w", ErrCRIDMismatch, err)
 	}
 	if !parsed.Known() {
-		return fmt.Errorf("%w: unsupported CRID version", ErrCRIDMismatch)
+		return ErrUnsupportedCRIDVersion
 	}
 	return nil
 }
@@ -60,6 +68,7 @@ func VerifyPortalLink(ctx context.Context, qurlLink, expectedCRID string) error 
 // EnterPortalForCRID opens a link only if its signed key matches the CRID held
 // by the caller. Deployment trust is resolved as for EnterPortal.
 func EnterPortalForCRID(ctx context.Context, qurlLink, expectedCRID string) (*ResourceHandle, error) {
+	// Empty Config.ExpectedCRID disables binding, so this guard is required.
 	if err := validateExpectedCRID(expectedCRID); err != nil {
 		return nil, err
 	}

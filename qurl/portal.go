@@ -56,6 +56,7 @@ func ensureQurlPrefix(msg string) string {
 type Config struct {
 	// ExpectedCRID pins an independently obtained resource identity. When set,
 	// a mismatched signed resource key is rejected before any access request.
+	// Empty disables CRID binding. Use EnterPortalForCRID to reject empty input.
 	ExpectedCRID string
 	// TrustStore resolves trusted issuer keys. REQUIRED.
 	TrustStore *TrustStore
