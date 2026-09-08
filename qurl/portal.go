@@ -54,6 +54,9 @@ func ensureQurlPrefix(msg string) string {
 // install a Provider once and call EnterPortal; Config is the explicit seam for
 // tests and advanced clients.
 type Config struct {
+	// ExpectedCRID pins an independently obtained resource identity. When set,
+	// a mismatched signed resource key is rejected before any access request.
+	ExpectedCRID string
 	// TrustStore resolves trusted issuer keys. REQUIRED.
 	TrustStore *TrustStore
 	// Cells maps cell id to native NHP UDP endpoint. When the verified link names
@@ -296,7 +299,13 @@ func EnterPortalWith(ctx context.Context, qurlLink string, cfg Config) (*Resourc
 	// 1+2. Parse the fragment and verify the issuer signature. VerifyLink
 	// strict-parses then checks the signature over the exact received claims bytes;
 	// nothing downstream runs until the signature is good.
-	frag, err := VerifyLink(qurlLink, cfg.TrustStore)
+	var frag *Fragment
+	var err error
+	if cfg.ExpectedCRID != "" {
+		frag, err = VerifyLinkForCRID(qurlLink, cfg.ExpectedCRID, cfg.TrustStore)
+	} else {
+		frag, err = VerifyLink(qurlLink, cfg.TrustStore)
+	}
 	if err != nil {
 		return nil, err
 	}

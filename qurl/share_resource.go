@@ -117,7 +117,8 @@ func (r shareResourceResponse) shareLink() (*ShareLink, error) {
 // EnterPortal: share mints the link over the credentialed API, and
 // EnterPortal is the verifying opener. To bind the response to a resource
 // key you already hold, call ShareLink.VerifyCRID before trusting a
-// delivered key.
+// delivered key. To bind the link itself, use EnterPortalForCRID or
+// VerifyLinkForCRID with the independently held CRID.
 //
 // The minted link is revocable on its own: keep ShareLink.QURLID and pass it
 // to RevokePortal with the same resourceCRID to kill that one link without
@@ -163,7 +164,9 @@ func (c *Client) ShareResource(ctx context.Context, resourceCRID string, opts *S
 	return env.Data.shareLink()
 }
 
-// VerifyCRID is the CRID trust story in one call: it ties this response to a
+// VerifyCRID checks only the response CRID against the supplied key. It does
+// not inspect the link; use VerifyLinkForCRID to bind its signed resource key.
+// It ties this response to a
 // resource public key the caller already holds by re-deriving the CRID from
 // derSPKI (the DER SubjectPublicKeyInfo bytes, exactly as delivered) and
 // comparing it to l.CRID in constant time. nil means the key is the one the

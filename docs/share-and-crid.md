@@ -94,36 +94,39 @@ you ask for it. See [Issue links](issuing-links.md) for the create side.
 
 ## Share, verify, open
 
-`ShareResource` deliberately does not parse, verify, or open the link. When
-the link is qv2-shaped — `share.Type` reports `"qv2"` — the composition is
-share → verify → `EnterPortal`:
+`ShareResource` returns an unverified link. Keep the advertised CRID from an
+independent source and pass it to the opener:
 
 ```go
 share, err := client.ShareResource(ctx, resourceCRID, nil)
 if err != nil {
-	return err
+    return err
 }
-
-if err := share.VerifyCRID(resourceKeyDER); err != nil {
-	return err
-}
-
-handle, err := qurl.EnterPortal(ctx, share.Link)
+handle, err := qurl.EnterPortalForCRID(ctx, share.Link, resourceCRID)
 if err != nil {
-	return err
+    return err
 }
-
 fmt.Println(handle.ResourceURL)
 ```
 
-`resourceKeyDER` is the resource public key you already hold, as DER
-SubjectPublicKeyInfo bytes exactly as delivered. `VerifyCRID` re-derives the
-CRID from those bytes and compares it to `share.CRID` in constant time: nil
-means the key is the one the CRID commits to, and any non-nil error is a
-fail-closed "do not use this key on the strength of this response".
+`EnterPortalForCRID` verifies the issuer signature over the exact received
+claims, then hashes the signed resource key and compares it with the held CRID.
+A missing, malformed, unsupported, or mismatched CRID fails before access.
+For explicit deployment settings, use `Config.ExpectedCRID` with
+`EnterPortalWith`. Omit it only for link-only access without an independently
+held resource identity.
 
-`EnterPortal` is the verifying opener. It needs opener trust config installed
-once at startup; see [Open links](opening-links.md).
+To verify without requesting access, call
+`VerifyLinkForCRID(link, expectedCRID, trustStore)` or
+`VerifyPortalLink(ctx, link, expectedCRID)` with configured deployment trust.
+These checks establish the signed resource identity, not content integrity,
+link liveness, or the trustworthiness of the outer browser URL. Do not obtain
+`expectedCRID` from the same response as the link. Open browser links only with
+a trusted frontend. See [Open links](opening-links.md) for deployment settings.
+
+`ShareLink.VerifyCRID(resourceKeyDER)` remains a key-fingerprint helper. It does
+not inspect the link or bind its signed resource key; use the APIs above for
+that purpose.
 
 ## Errors
 
