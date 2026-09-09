@@ -243,7 +243,7 @@ func TestClient_CreatePortalForURL(t *testing.T) {
 func TestClient_ProtectURLPreservesOptionalCount(t *testing.T) {
 	for _, field := range []string{"", `,"qurl_count":0`, `,"qurl_count":2`} {
 		t.Run(field, func(t *testing.T) {
-			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				fmt.Fprintf(w, `{"data":{"resource_id":%q,"crid":%q%s}}`, testConnectorID, testConnectorCRID, field)
 			}))
 			defer api.Close()
