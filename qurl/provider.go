@@ -46,11 +46,9 @@ type Provider interface {
 //
 // A StaticProvider implements CellProvider, and the cells its construction
 // supplied decide the transport EnterPortal uses (see CellProvider for the
-// rule). With cells and an allowlist, catalog cells are knocked directly over
-// native UDP and unknown cells fall back to the relay. With cells alone the
-// opener is native-UDP-only: a link naming a cell outside the catalog fails
-// with ErrCellNotInCatalog instead of quietly using the relay. With an
-// allowlist alone every open uses the HTTPS relay transport.
+// rule). With cells, catalog cells use native UDP and unknown cells fail
+// with ErrCellNotInCatalog, even with a relay allowlist. With an allowlist
+// alone every open uses the HTTPS relay transport.
 //
 // Rotation with a StaticProvider is a process-level operation: build a new
 // StaticProvider whose trust store carries the overlap set (old + new kid) and swap
@@ -67,7 +65,9 @@ type StaticProvider struct {
 // cells are each optional, but at least one must be supplied — with neither
 // there is no transport an open could ever use. Cells take the same shape a
 // deployment file's cells do and are validated by NewCellCatalog: one bad
-// entry fails construction rather than silently dropping a cell.
+// entry fails construction rather than silently dropping a cell. Supplying both
+// cells and an allowlist is accepted to preserve existing known-cell opens; the
+// allowlist is ignored, and unknown cells always fail closed.
 func NewStaticProvider(ts *TrustStore, allow *RelayAllowlist, cells []CellEntry) (*StaticProvider, error) {
 	if ts == nil {
 		return nil, errors.New("qurl: static provider requires a non-nil trust store")

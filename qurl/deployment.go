@@ -50,7 +50,7 @@ type Deployment struct {
 	Issuers []ManifestIssuer `json:"issuers"`
 	// Cells are the native UDP endpoints openers may knock directly.
 	Cells []DeploymentCell `json:"cells"`
-	// RelayAllowlist gates the relay fallback for cells absent from Cells.
+	// RelayAllowlist gates relay-only operation when Cells is absent.
 	RelayAllowlist []string `json:"relay_allowlist"`
 	// Hub is the single pinned Hub trust root an agent registers against. It is
 	// the same class of fact as Cells -- where a LayerV-operated endpoint lives

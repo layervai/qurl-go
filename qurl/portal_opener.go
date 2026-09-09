@@ -424,7 +424,7 @@ func (o *PortalOpener) nativeConfig(ctx context.Context) (Config, error) {
 		return Config{}, ErrPortalNativeOnly
 	}
 	// A PortalOpener is never allowed to downgrade to relay HTTP, even when its
-	// caller or deployment also configures a valid relay fallback.
+	// caller or deployment also configures a relay allowlist.
 	cfg.RelayAllowlist = nil
 	cfg.HTTPClient = nil
 	cfg.PortalSession = &o.session

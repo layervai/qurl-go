@@ -15,9 +15,8 @@ import (
 // in portal_nativeudp_test.go and is deliberately not repeated here.
 
 // The catalog decides which cell a verified link is allowed to be knocked at
-// directly, and every rejection path below degrades to the relay rather than to
-// an error if it is skipped. A silent degradation is the failure mode worth
-// testing: it looks like success.
+// directly. Invalid entries must fail at construction so configuration errors
+// cannot hide until a link is opened.
 
 func testCellKey(t *testing.T, seed byte) []byte {
 	t.Helper()
@@ -65,7 +64,7 @@ func TestNewCellCatalogRejectsMalformedEntries(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := NewCellCatalog([]CellEntry{tc.entry})
 			if err == nil {
-				t.Fatalf("entry was accepted; a bad cell would degrade to the relay silently")
+				t.Fatalf("entry was accepted; a bad cell would make its links unusable")
 			}
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("got %q, want it to contain %q", err, tc.want)
@@ -143,8 +142,7 @@ func TestCellCatalogLookup(t *testing.T) {
 	if _, ok, err := catalog.lookup(known); err != nil || !ok {
 		t.Fatal("known cell key did not match")
 	}
-	// An unknown cell is not an error: it is a cell this build predates, and it
-	// must route through the relay rather than fail.
+	// Lookup reports absence; the opener refuses unknown native cells.
 	if _, ok, err := catalog.lookup(other); err != nil || ok {
 		t.Fatal("unknown cell key matched; an open would be sent to the wrong cell")
 	}
@@ -161,7 +159,7 @@ func TestCellCatalogLookup(t *testing.T) {
 	}
 
 	// A nil catalog is the "this build ships no cells" case and must report
-	// false rather than panic, because that is the relay-fallback path.
+	// false rather than panic, allowing explicit relay-only configuration.
 	var nilCatalog *CellCatalog
 	if _, ok, err := nilCatalog.lookup(known); err != nil || ok {
 		t.Fatal("nil catalog reported a match")

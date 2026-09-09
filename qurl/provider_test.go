@@ -100,14 +100,14 @@ func TestNewStaticProvider_ConstructionRules(t *testing.T) {
 		t.Fatalf("valid cells-only static provider: %v", err)
 	}
 	if _, err := NewStaticProvider(ts, allow, cells); err != nil {
-		t.Fatalf("valid cells+relay static provider: %v", err)
+		t.Fatalf("native static provider with an accepted but unused allowlist: %v", err)
 	}
 }
 
 // TestNewStaticProvider_InvalidCellEntriesPropagate proves a bad pinned cell is
 // a loud construction failure: NewStaticProvider validates its entries through
 // NewCellCatalog, so the same missing-key/bad-port faults a deployment file
-// would reject surface here rather than degrading that cell to the relay.
+// would reject surface here rather than making that cell's links unusable.
 func TestNewStaticProvider_InvalidCellEntriesPropagate(t *testing.T) {
 	_, ts, _ := generatedAcceptLink(t)
 	allow := relayExampleAllowlist()
@@ -123,7 +123,7 @@ func TestNewStaticProvider_InvalidCellEntriesPropagate(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := NewStaticProvider(ts, allow, []CellEntry{tc.entry})
 			if err == nil {
-				t.Fatal("invalid cell entry was accepted; its links would degrade to the relay silently")
+				t.Fatal("invalid cell entry was accepted; its links would be unusable")
 			}
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("got %q, want it to contain %q", err, tc.want)

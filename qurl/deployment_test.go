@@ -114,6 +114,36 @@ func TestEnterPortal_ZeroSetupWithoutCellsUsesRelay(t *testing.T) {
 	}
 }
 
+// TestEnterPortal_DeploymentUnknownCellRefusesRelay checks the operator-facing
+// configuration path. It must stay serial: installCapturingTransport replaces
+// http.DefaultTransport to observe any relay request from EnterPortal.
+func TestEnterPortal_DeploymentUnknownCellRefusesRelay(t *testing.T) {
+	noDefaultProvider(t)
+	link, path := writeGeneratedDeployment(t, true)
+	deployment, err := LoadDeployment(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deployment.Cells[0].ServerPublicKeyB64 = otherCellKeyB64(t)
+	deployment.RelayAllowlist = []string{"relay.example.com"}
+	raw, err := json.Marshal(deployment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(EnvDeploymentPath, path)
+	relay := installCapturingTransport(t)
+	_, err = EnterPortal(t.Context(), link)
+	if !errors.Is(err, ErrCellNotInCatalog) {
+		t.Fatalf("want ErrCellNotInCatalog, got %v", err)
+	}
+	if relay.gotURL != "" {
+		t.Fatalf("unknown deployment cell contacted relay: %q", relay.gotURL)
+	}
+}
+
 // TestEnterPortal_NoDeploymentFailsClosed proves a build that ships no issuers
 // refuses to open rather than trusting anything, and says what to set.
 func TestEnterPortal_NoDeploymentFailsClosed(t *testing.T) {
