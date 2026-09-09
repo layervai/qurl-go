@@ -8,6 +8,12 @@ and are marked **Breaking** with what to change.
 
 ## Unreleased
 
+- **Breaking:** `Resource.QURLCount` is now `*int`. Check for nil before
+  dereferencing; nil means the service did not report a complete count.
+  Marshaled resource JSON omits `qurl_count` when unknown instead of inventing
+  zero. A known zero remains present. The count includes token rows awaiting
+  TTL cleanup, not only active links.
+
 ## v0.14.0 — 2026-09-07
 
 - **Breaking:** All resource locators use CRID. Replace `ResourceByID` with
