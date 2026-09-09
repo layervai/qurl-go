@@ -627,8 +627,9 @@ type Resource struct {
 	CustomDomain *string `json:"custom_domain,omitempty"`
 	// Alias is an optional owner-scoped handle for the resource.
 	Alias *string `json:"alias,omitempty"`
-	// QURLCount is the number of active qURL links LayerV reports for the resource.
-	QURLCount int `json:"qurl_count"`
+	// QURLCount is the reported token-row count, including rows awaiting TTL cleanup.
+	// Nil means unknown: the service can omit a count when its read budget is exceeded.
+	QURLCount *int `json:"qurl_count,omitempty"`
 	// CreatedAt is the server creation time, when returned by the API.
 	CreatedAt *time.Time `json:"created_at,omitempty"`
 	// ExpiresAt is the server expiration time, when returned by the API.
@@ -1018,7 +1019,7 @@ type createResourceResponse struct {
 	Tags         []string   `json:"tags"`
 	CustomDomain *string    `json:"custom_domain"`
 	Alias        *string    `json:"alias"`
-	QURLCount    int        `json:"qurl_count"`
+	QURLCount    *int       `json:"qurl_count"`
 	CreatedAt    *time.Time `json:"created_at"`
 	ExpiresAt    *time.Time `json:"expires_at"`
 }
