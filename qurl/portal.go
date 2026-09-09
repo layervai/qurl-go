@@ -60,17 +60,12 @@ type Config struct {
 	ExpectedCRID string
 	// TrustStore resolves trusted issuer keys. REQUIRED.
 	TrustStore *TrustStore
-	// Cells maps cell id to native NHP UDP endpoint. When the verified link names
-	// a cell in this catalog the knock goes straight there over UDP and the relay
-	// is never contacted, so RelayAllowlist and HTTPClient are unused for that
-	// open. Optional; nil routes every open through the relay. A link naming a
-	// cell OUTSIDE the catalog falls back to the relay when RelayAllowlist is
-	// set, and fails with ErrCellNotInCatalog when it is not — cells without an
-	// allowlist is the native-UDP-only shape.
+	// Cells selects native UDP when non-nil. Unknown cells fail with
+	// ErrCellNotInCatalog, even when RelayAllowlist is configured.
+	// Leave Cells nil and configure RelayAllowlist for relay-only operation.
 	Cells *CellCatalog
-	// RelayAllowlist is the qURL platform access endpoint allowlist. REQUIRED
-	// unless Cells covers every link this opener will see — it gates the relay
-	// path only, and there is no relay to gate on the native UDP path.
+	// RelayAllowlist gates relay-only operation. It never enables fallback
+	// from a configured native cell catalog.
 	RelayAllowlist *RelayAllowlist
 	// HTTPClient is the client used for the relay request. Optional; nil uses the
 	// default client. Advanced callers with fixed-egress requirements can supply
@@ -240,25 +235,17 @@ var ErrQurlUserKeyMismatch = errors.New("qurl: private qURL key does not match t
 // protected-content request after the standard 10-request redirect limit.
 var ErrTooManyContentRedirects = errors.New("qurl: too many content redirects")
 
-// ErrCellNotInCatalog reports that a verified link names a cell the configured
-// CellCatalog has no endpoint for, while no relay transport is configured to
-// fall back through. It is the loud half of the transport rule: a cells-only
-// opener (Config.Cells set, Config.RelayAllowlist nil — e.g. a StaticProvider
-// built without an allowlist) has declared that every open goes over native
-// UDP, so a link outside its catalog is refused rather than silently
-// downgraded to the HTTPS relay. Openers that configure a relay allowlist
-// never see this error; their unknown-cell opens use the relay by design.
-var ErrCellNotInCatalog = errors.New("qurl: link names a cell with no native UDP endpoint in the catalog, and no relay transport is configured")
+// ErrCellNotInCatalog reports that a verified link names a cell absent from
+// the configured native catalog. Relay allowlists never override this refusal.
+var ErrCellNotInCatalog = errors.New("qurl: link names a cell with no native UDP endpoint in the catalog")
 
 // EnterPortal opens a qURL link using the process-wide default Provider
 // (SetDefaultProvider). Applications install opener config once at startup, then
 // open links with no per-call config.
 //
-// The resolved config decides the transport: a link naming a cell in the cell
-// catalog (a CellProvider's cells, or the deployment's) is knocked directly
-// over native UDP; any other link uses the HTTPS relay when a relay allowlist
-// is configured and fails with ErrCellNotInCatalog when none is. A provider
-// without cells therefore serves relay-only opens — see CellProvider.
+// A configured cell catalog selects native UDP and refuses unknown cells.
+// A provider without a cell catalog selects relay-only operation when it
+// supplies a relay allowlist. Native opens never fall back to HTTPS relay.
 //
 // Without an installed provider, EnterPortal falls back to the deployment: the
 // file named by QURL_DEPLOYMENT, then the one embedded in the build. When that
@@ -322,22 +309,14 @@ func EnterPortalWith(ctx context.Context, qurlLink string, cfg Config) (*Resourc
 		return nil, fmt.Errorf("qurl: decode verified platform access key: %w", err)
 	}
 
-	// 4. Choose the transport. The knock is the same opaque NHP packet either
-	// way; the relay is a browser compatibility shim, not part of the protocol.
-	// A cell we know how to reach is knocked directly over UDP, dropping the
-	// relay and every HTTP dependency with it. Otherwise fall back to the relay,
-	// whose URL must clear the allowlist before it is acted on.
+	// 4. Select native UDP for a configured catalog; an unknown cell is a
+	// trust failure, not permission to change transport.
 	cellEndpoint, useNativeUDP, err := cfg.Cells.lookup(cellPub)
 	if err != nil {
 		return nil, err
 	}
 	if !useNativeUDP {
-		if cfg.RelayAllowlist == nil {
-			// Reachable only with a catalog configured (the no-transport case
-			// already failed before parsing): this opener is native-UDP-only by
-			// configuration, and the verified link names a cell outside its
-			// catalog. Refuse loudly with the cell's identity rather than treat a
-			// deliberate cells-only config as a configuration fault.
+		if cfg.Cells != nil || cfg.RelayAllowlist == nil {
 			return nil, fmt.Errorf("%w (cell fingerprint %s)", ErrCellNotInCatalog, relayknock.PubKeyFingerprint(cellPub))
 		}
 		if err := ValidateRelayURL(claims.RelayURL, cfg.RelayAllowlist); err != nil {
@@ -578,7 +557,7 @@ func resolveDefaultConfig(ctx context.Context) (Config, error) {
 // relay-based deployments (browsers can only deliver a knock over HTTPS, and
 // the discovery manifest format carries no cells); it is never the right shape
 // for a pinned native-UDP opener, which supplies cells and can omit the relay
-// allowlist entirely so an open that cannot go over native UDP fails with
+// allowlist entirely. An open outside that catalog always fails with
 // ErrCellNotInCatalog instead of quietly using the relay.
 type CellProvider interface {
 	Provider

@@ -104,7 +104,7 @@ func NewCellCatalog(entries []CellEntry) (*CellCatalog, error) {
 		fingerprint := relayknock.PubKeyFingerprint(key)
 		// Two entries for one cell key is a misconfiguration, not a preference:
 		// last-wins would silently pick an address the operator did not intend,
-		// or silently drop a cell so its links quietly fall back to the relay.
+		// or silently drop a cell and make its links unusable.
 		// buildTrustMaterial rejects duplicate issuer kids for the same reason.
 		if prior, dup := byFingerprint[fingerprint]; dup {
 			priorLabel := strings.TrimSpace(prior.endpoint.CellID)
@@ -130,7 +130,7 @@ func NewCellCatalog(entries []CellEntry) (*CellCatalog, error) {
 
 // lookup returns the endpoint for the cell holding cellPub, which the caller
 // must have taken from VERIFIED claims. A nil catalog or an unknown cell reports
-// false, routing an ordinary open through the relay. A matching 64-bit
+// false; the caller refuses unknown cells in a configured catalog. A matching 64-bit
 // fingerprint with a different full key returns ErrCellCatalogKeyMismatch. It
 // must never fall back or perform network I/O.
 func (c *CellCatalog) lookup(cellPub []byte) (CellEndpoint, bool, error) {

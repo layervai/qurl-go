@@ -46,11 +46,9 @@ type Provider interface {
 //
 // A StaticProvider implements CellProvider, and the cells its construction
 // supplied decide the transport EnterPortal uses (see CellProvider for the
-// rule). With cells and an allowlist, catalog cells are knocked directly over
-// native UDP and unknown cells fall back to the relay. With cells alone the
-// opener is native-UDP-only: a link naming a cell outside the catalog fails
-// with ErrCellNotInCatalog instead of quietly using the relay. With an
-// allowlist alone every open uses the HTTPS relay transport.
+// rule). With cells, catalog cells use native UDP and unknown cells fail
+// with ErrCellNotInCatalog, even with a relay allowlist. With an allowlist
+// alone every open uses the HTTPS relay transport.
 //
 // Rotation with a StaticProvider is a process-level operation: build a new
 // StaticProvider whose trust store carries the overlap set (old + new kid) and swap

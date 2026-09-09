@@ -126,10 +126,8 @@ func TestEnterPortalWith_KnownCellNeverContactsRelay(t *testing.T) {
 	}
 }
 
-// TestEnterPortalWith_UnknownCellFallsBackToRelay proves the fallback is intact:
-// a cell this build has never heard of still opens through the relay, so adding
-// a catalog never strands a link.
-func TestEnterPortalWith_UnknownCellFallsBackToRelay(t *testing.T) {
+// Unknown native cells must fail before any relay request.
+func TestEnterPortalWith_UnknownCellRefusesRelay(t *testing.T) {
 	link, trust, _ := generatedAcceptLink(t)
 	doer := &refusingDoer{t: t}
 
@@ -143,11 +141,11 @@ func TestEnterPortalWith_UnknownCellFallsBackToRelay(t *testing.T) {
 		HTTPClient:     doer,
 	})
 
-	if !doer.called {
-		t.Fatal("a cell outside the catalog did not fall back to the relay")
+	if doer.called {
+		t.Fatal("unknown native cell contacted the relay")
 	}
-	if err == nil {
-		t.Fatal("expected the refusing relay doer to surface an error")
+	if !errors.Is(err, ErrCellNotInCatalog) {
+		t.Fatalf("want ErrCellNotInCatalog, got %v", err)
 	}
 }
 
@@ -259,12 +257,9 @@ func TestEnterPortal_StaticProviderWithCellsRoutesOverNativeUDP(t *testing.T) {
 	}
 }
 
-// TestEnterPortal_StaticProviderUnknownCellFallsBackToRelay proves legitimate
-// relay use is intact on the new surface: a StaticProvider whose catalog does
-// not cover the link's cell, but which DOES carry a relay allowlist, opens
-// through the relay exactly as a relay-only provider would.
-func TestEnterPortal_StaticProviderUnknownCellFallsBackToRelay(t *testing.T) {
-	link, trust, cellFingerprint := generatedAcceptLink(t)
+// Static providers enforce the same fail-closed catalog boundary.
+func TestEnterPortal_StaticProviderUnknownCellRefusesRelay(t *testing.T) {
+	link, trust, _ := generatedAcceptLink(t)
 	sp, err := NewStaticProvider(trust,
 		NewRelayAllowlist([]string{"relay.example.com"}),
 		unreachableCellEntries(otherCellKeyB64(t)))
@@ -278,12 +273,11 @@ func TestEnterPortal_StaticProviderUnknownCellFallsBackToRelay(t *testing.T) {
 	defer cancel()
 
 	_, err = EnterPortal(ctx, link)
-	if err == nil {
-		t.Fatal("expected the capturing transport to fail the relay POST")
+	if !errors.Is(err, ErrCellNotInCatalog) {
+		t.Fatalf("want ErrCellNotInCatalog, got %v", err)
 	}
-	wantURL := "https://relay.example.com/relay/" + cellFingerprint
-	if ct.gotURL != wantURL {
-		t.Fatalf("relay fallback routed to %q, want %q", ct.gotURL, wantURL)
+	if ct.gotURL != "" {
+		t.Fatalf("unknown native cell contacted relay: %q", ct.gotURL)
 	}
 }
 

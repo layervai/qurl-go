@@ -143,8 +143,7 @@ func TestCellCatalogLookup(t *testing.T) {
 	if _, ok, err := catalog.lookup(known); err != nil || !ok {
 		t.Fatal("known cell key did not match")
 	}
-	// An unknown cell is not an error: it is a cell this build predates, and it
-	// must route through the relay rather than fail.
+	// Lookup reports absence; the opener refuses unknown native cells.
 	if _, ok, err := catalog.lookup(other); err != nil || ok {
 		t.Fatal("unknown cell key matched; an open would be sent to the wrong cell")
 	}
@@ -161,7 +160,7 @@ func TestCellCatalogLookup(t *testing.T) {
 	}
 
 	// A nil catalog is the "this build ships no cells" case and must report
-	// false rather than panic, because that is the relay-fallback path.
+	// false rather than panic, allowing explicit relay-only configuration.
 	var nilCatalog *CellCatalog
 	if _, ok, err := nilCatalog.lookup(known); err != nil || ok {
 		t.Fatal("nil catalog reported a match")

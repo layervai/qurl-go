@@ -455,3 +455,7 @@ move the wire protocol say so loudly and name the flag day.
 ## License
 
 [MIT](LICENSE) © LayerV AI
+
+Native cell catalogs fail closed: `EnterPortalWith` and provider-based opens return
+`ErrCellNotInCatalog` for unknown cells, even when a relay allowlist is configured.
+Relay-only operation requires a nil cell catalog and a relay allowlist. NHP remains 1.1.
