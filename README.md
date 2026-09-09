@@ -319,10 +319,9 @@ That is the whole integration, and it needs no LayerV credentials. `EnterPortal`
 checks that the link was really issued by LayerV, then opens it over a direct
 UDP connection. Browsers cannot send UDP, so links opened in a browser go
 through an HTTPS path instead. In this SDK the resolved config decides the
-transport: a link naming a cell the config lists is knocked directly over UDP,
-anything else uses the HTTPS relay when a relay allowlist is configured — and a
-cells-only config refuses such a link with `ErrCellNotInCatalog` rather than
-silently downgrading (see
+transport: a configured cell catalog selects native UDP. Unknown cells fail with
+`ErrCellNotInCatalog`, even when a relay allowlist is configured. Relay-only
+operation requires a nil cell catalog and a relay allowlist (see
 [docs/opening-links.md](docs/opening-links.md#pinning-the-opener-trust-config)).
 Use an HTTP client without a cookie jar, or ensure its jar does not add the
 reserved `qurl_vsession` cookie after `AuthorizeContentRequest` runs.
@@ -364,7 +363,7 @@ that raises them:
 | `qurl.ErrNoDeployment` | The resolved deployment carries no issuer keys — this build ships none and `QURL_DEPLOYMENT` is unset, or the named deployment file has empty `issuers`. Wraps `ErrNotConfigured` |
 | `qurl.ErrSignature` | The link's issuer signature does not verify: forged, tampered, or signed by a key that is not the trust store's value for that kid |
 | `qurl.ErrUnknownKID` | The link's kid is not in the trust store |
-| `qurl.ErrCellNotInCatalog` | A verified link names a cell the cell catalog has no endpoint for, and no relay allowlist is configured. A cells-only opener refuses the open rather than silently downgrading to the HTTPS relay |
+| `qurl.ErrCellNotInCatalog` | A verified link names a cell absent from the configured catalog. The opener refuses the open, even when a relay allowlist is configured |
 | `qurl.ErrCellCatalogKeyMismatch` | A compact cell fingerprint selected a catalog entry whose full key differs from the signed link key. The SDK refuses before network I/O |
 | `qurl.ErrQurlUserKeyMismatch` | The fragment private key does not derive the issuer-signed visitor public key. The SDK refuses before network I/O |
 | `qurl.ErrPortalNativeOnly` | `PortalOpener` has no native cell catalog and will not use the relay fallback |
@@ -455,7 +454,3 @@ move the wire protocol say so loudly and name the flag day.
 ## License
 
 [MIT](LICENSE) © LayerV AI
-
-Native cell catalogs fail closed: `EnterPortalWith` and provider-based opens return
-`ErrCellNotInCatalog` for unknown cells, even when a relay allowlist is configured.
-Relay-only operation requires a nil cell catalog and a relay allowlist. NHP remains 1.1.

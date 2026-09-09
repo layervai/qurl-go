@@ -316,7 +316,7 @@ func EnterPortalWith(ctx context.Context, qurlLink string, cfg Config) (*Resourc
 		return nil, err
 	}
 	if !useNativeUDP {
-		if cfg.Cells != nil || cfg.RelayAllowlist == nil {
+		if cfg.Cells != nil {
 			return nil, fmt.Errorf("%w (cell fingerprint %s)", ErrCellNotInCatalog, relayknock.PubKeyFingerprint(cellPub))
 		}
 		if err := ValidateRelayURL(claims.RelayURL, cfg.RelayAllowlist); err != nil {

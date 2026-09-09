@@ -65,7 +65,8 @@ type StaticProvider struct {
 // cells are each optional, but at least one must be supplied — with neither
 // there is no transport an open could ever use. Cells take the same shape a
 // deployment file's cells do and are validated by NewCellCatalog: one bad
-// entry fails construction rather than silently dropping a cell.
+// entry fails construction rather than silently dropping a cell. When cells
+// are supplied, the allowlist is ignored; unknown cells always fail closed.
 func NewStaticProvider(ts *TrustStore, allow *RelayAllowlist, cells []CellEntry) (*StaticProvider, error) {
 	if ts == nil {
 		return nil, errors.New("qurl: static provider requires a non-nil trust store")

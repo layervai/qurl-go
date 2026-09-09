@@ -233,8 +233,8 @@ uses:
   directly over UDP; a verified link naming a cell outside the catalog fails
   with `qurl.ErrCellNotInCatalog` rather than quietly downgrading to the HTTPS
   relay.
-- **Cells and an allowlist** — native UDP for cataloged cells, HTTPS relay
-  fallback for any other cell, gated by the allowlist.
+- **Cells and an allowlist** — native UDP only. The allowlist is ignored;
+  unknown cells fail with `qurl.ErrCellNotInCatalog`.
 - **Allowlist, no cells** — every open uses the HTTPS relay.
 
 The strict pinned form supplies issuer keys and cells, and no allowlist:
@@ -272,14 +272,13 @@ cells := []qurl.CellEntry{{
 }}
 ```
 
-To keep the relay as a fallback for cells outside the catalog, pass an
-allowlist as well:
+To configure an explicit relay-only provider, supply an allowlist and no cells:
 
 ```go
 provider, err := qurl.NewStaticProvider(
 	trustStore,
 	qurl.NewRelayAllowlist(platformHosts),
-	cells,
+	nil,
 )
 ```
 
@@ -297,7 +296,7 @@ case err == nil:
 case errors.Is(err, qurl.ErrNotConfigured):
 	reportMissingOpenerTrustConfig()
 case errors.Is(err, qurl.ErrCellNotInCatalog):
-	// Native-UDP-only opener; the verified link names a cell outside its catalog.
+	// The verified link names a cell outside the configured native catalog.
 	reject()
 case errors.Is(err, qurl.ErrSignature), errors.Is(err, qurl.ErrUnknownKID):
 	reject()
