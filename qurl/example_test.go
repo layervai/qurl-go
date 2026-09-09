@@ -504,3 +504,22 @@ func ExampleConnectAgentRuntime() {
 		panic(err)
 	}
 }
+
+// ExampleResource_qurlCount distinguishes an unknown count from a real zero.
+func ExampleResource_qurlCount() {
+	for _, payload := range []string{`{}`, `{"qurl_count":0}`, `{"qurl_count":3}`} {
+		var resource qurl.Resource
+		if err := json.Unmarshal([]byte(payload), &resource); err != nil {
+			panic(err)
+		}
+		if resource.QURLCount == nil {
+			fmt.Println("qURLs: unknown")
+		} else {
+			fmt.Println("qURLs:", *resource.QURLCount)
+		}
+	}
+	// Output:
+	// qURLs: unknown
+	// qURLs: 0
+	// qURLs: 3
+}

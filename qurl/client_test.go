@@ -240,7 +240,57 @@ func TestClient_CreatePortalForURL(t *testing.T) {
 	}
 }
 
+func TestClient_ProtectURLPreservesOptionalCount(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		field string
+		known bool
+		want  int
+	}{
+		{name: "omitted"},
+		{name: "zero", field: `,"qurl_count":0`, known: true},
+		{name: "nonzero", field: `,"qurl_count":2`, known: true, want: 2},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				fmt.Fprintf(w, `{"data":{"resource_id":%q,"crid":%q%s}}`, testConnectorID, testConnectorCRID, test.field)
+			}))
+			defer api.Close()
+			client, err := NewClient(BearerToken("lv_test_123"), WithBaseURL(api.URL))
+			if err != nil {
+				t.Fatal(err)
+			}
+			resource, err := client.ProtectURL(t.Context(), "https://example.com")
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw, err := json.Marshal(resource)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var body map[string]any
+			if err := json.Unmarshal(raw, &body); err != nil {
+				t.Fatal(err)
+			}
+			if !test.known {
+				if resource.QURLCount != nil {
+					t.Fatal("omitted count must remain unknown")
+				}
+				if _, present := body["qurl_count"]; present {
+					t.Fatal("unknown count must remain omitted in JSON")
+				}
+			} else {
+				if resource.QURLCount == nil || *resource.QURLCount != test.want {
+					t.Fatalf("count = %v, want %d", resource.QURLCount, test.want)
+				}
+				assertJSONField(t, body, "qurl_count", float64(test.want))
+			}
+		})
+	}
+}
+
 func TestResourceJSONUsesAPINames(t *testing.T) {
+	count := 2
 	alias := "dev-dashboard"
 	resource := &Resource{
 		CRID:      "ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a",
@@ -248,7 +298,7 @@ func TestResourceJSONUsesAPINames(t *testing.T) {
 		Status:    "active",
 		Tags:      []string{"prod"},
 		Alias:     &alias,
-		QURLCount: 2,
+		QURLCount: &count,
 	}
 
 	raw, err := json.Marshal(resource)
@@ -269,7 +319,9 @@ func TestResourceJSONUsesAPINames(t *testing.T) {
 		t.Fatalf("Resource JSON used Go field name ID: %s", raw)
 	}
 
-	resource.QURLCount = 0
+	// omitempty must preserve a known zero.
+	zero := 0
+	resource.QURLCount = &zero
 	raw, err = json.Marshal(resource)
 	if err != nil {
 		t.Fatalf("Marshal zero-count Resource: %v", err)
