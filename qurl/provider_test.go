@@ -107,7 +107,7 @@ func TestNewStaticProvider_ConstructionRules(t *testing.T) {
 // TestNewStaticProvider_InvalidCellEntriesPropagate proves a bad pinned cell is
 // a loud construction failure: NewStaticProvider validates its entries through
 // NewCellCatalog, so the same missing-key/bad-port faults a deployment file
-// would reject surface here rather than degrading that cell to the relay.
+// would reject surface here rather than making that cell's links unusable.
 func TestNewStaticProvider_InvalidCellEntriesPropagate(t *testing.T) {
 	_, ts, _ := generatedAcceptLink(t)
 	allow := relayExampleAllowlist()

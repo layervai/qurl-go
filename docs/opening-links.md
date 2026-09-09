@@ -229,12 +229,11 @@ To pin the trust config in code instead, install a `StaticProvider` during
 startup. What you hand `NewStaticProvider` decides the transport every open
 uses:
 
-- **Cells, no allowlist** — native UDP only. A cell in the catalog is knocked
+- **Cells, with or without an allowlist** — native UDP only. The allowlist is
+  ignored. A cell in the catalog is knocked
   directly over UDP; a verified link naming a cell outside the catalog fails
   with `qurl.ErrCellNotInCatalog` rather than quietly downgrading to the HTTPS
   relay.
-- **Cells and an allowlist** — native UDP only. The allowlist is ignored;
-  unknown cells fail with `qurl.ErrCellNotInCatalog`.
 - **Allowlist, no cells** — every open uses the HTTPS relay.
 
 The strict pinned form supplies issuer keys and cells, and no allowlist:
