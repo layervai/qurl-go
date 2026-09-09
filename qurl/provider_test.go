@@ -100,7 +100,7 @@ func TestNewStaticProvider_ConstructionRules(t *testing.T) {
 		t.Fatalf("valid cells-only static provider: %v", err)
 	}
 	if _, err := NewStaticProvider(ts, allow, cells); err != nil {
-		t.Fatalf("valid cells+relay static provider: %v", err)
+		t.Fatalf("native static provider with an accepted but unused allowlist: %v", err)
 	}
 }
 

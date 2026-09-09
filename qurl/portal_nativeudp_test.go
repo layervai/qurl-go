@@ -443,7 +443,7 @@ func TestEnterPortalWith_NoTrustStoreRefusesBeforeParsing(t *testing.T) {
 
 func TestEnterPortalWith_UnknownCellWithNoRelayAllowlistRefuses(t *testing.T) {
 	// A trust store but no transport at all: no cell catalog to knock directly,
-	// and no relay allowlist to fall back through. Opening anyway would mean
+	// and no relay transport. Opening anyway would mean
 	// acting on a relay URL the build never vetted.
 	// A REAL trust store, so the refusal can only come from the absent
 	// transport. Skipping here instead would leave the guard unexercised.

@@ -114,6 +114,9 @@ func TestEnterPortal_ZeroSetupWithoutCellsUsesRelay(t *testing.T) {
 	}
 }
 
+// TestEnterPortal_DeploymentUnknownCellRefusesRelay checks the operator-facing
+// configuration path. It must stay serial: installCapturingTransport replaces
+// http.DefaultTransport to observe any relay request from EnterPortal.
 func TestEnterPortal_DeploymentUnknownCellRefusesRelay(t *testing.T) {
 	noDefaultProvider(t)
 	link, path := writeGeneratedDeployment(t, true)

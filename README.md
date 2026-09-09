@@ -366,7 +366,7 @@ that raises them:
 | `qurl.ErrCellNotInCatalog` | A verified link names a cell absent from the configured catalog. The opener refuses the open, even when a relay allowlist is configured |
 | `qurl.ErrCellCatalogKeyMismatch` | A compact cell fingerprint selected a catalog entry whose full key differs from the signed link key. The SDK refuses before network I/O |
 | `qurl.ErrQurlUserKeyMismatch` | The fragment private key does not derive the issuer-signed visitor public key. The SDK refuses before network I/O |
-| `qurl.ErrPortalNativeOnly` | `PortalOpener` has no native cell catalog and will not use the relay fallback |
+| `qurl.ErrPortalNativeOnly` | `PortalOpener` has no native cell catalog and will not use HTTPS relay |
 | `qurl.ErrPortalOpenTimeout` | The configured `PortalOpener` NHP open timeout expired. A shorter caller deadline does not wrap this error |
 | `qurl.ErrPortalOpenerNotStarted` | `PortalOpener.Do` ran before the first `Start` attempt completed, or after a caller-canceled or caller-deadlined first attempt |
 | `qurl.ErrPortalOpenerNotReady` | The proactive opener has no unexpired cached handle. `Do` does not wait or open on the request path |

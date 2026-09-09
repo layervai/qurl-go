@@ -186,8 +186,9 @@ fmt.Println(handle.ResourceURL)
 For an already configured explicit opener, copy its `Config` per visit and set
 a fresh `PortalSession` on the copy. The default provider/deployment resolution
 belongs to `EnterPortal`; `EnterPortalWith` requires these inputs explicitly.
-This example uses HTTPS relay only. Supply `Cells` for native UDP as described
-below; retaining a session adds no HTTP request on either transport.
+This example uses HTTPS relay only. For native UDP, supply `Cells` instead of
+`RelayAllowlist`, as described below. Retaining a session adds no HTTP request
+on either transport.
 
 The zero-value session creates a private random capability only after the link
 passes verification. It binds to that link and stays in memory. Reuse the same
@@ -230,8 +231,7 @@ startup. What you hand `NewStaticProvider` decides the transport every open
 uses:
 
 - **Cells, with or without an allowlist** — native UDP only. The allowlist is
-  ignored. A cell in the catalog is knocked
-  directly over UDP; a verified link naming a cell outside the catalog fails
+  ignored. A cell in the catalog is knocked directly over UDP; a verified link naming a cell outside the catalog fails
   with `qurl.ErrCellNotInCatalog` rather than quietly downgrading to the HTTPS
   relay.
 - **Allowlist, no cells** — every open uses the HTTPS relay.
