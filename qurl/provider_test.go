@@ -123,7 +123,7 @@ func TestNewStaticProvider_InvalidCellEntriesPropagate(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := NewStaticProvider(ts, allow, []CellEntry{tc.entry})
 			if err == nil {
-				t.Fatal("invalid cell entry was accepted; its links would degrade to the relay silently")
+				t.Fatal("invalid cell entry was accepted; its links would be unusable")
 			}
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("got %q, want it to contain %q", err, tc.want)

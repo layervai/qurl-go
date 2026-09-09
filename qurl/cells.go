@@ -20,7 +20,7 @@ import (
 //
 // Entries are keyed by the cell's PUBLIC KEY, not by cell id. Two reasons:
 // cell_id is an optional claim that real deployments do not always mint, so a
-// catalog keyed on it silently degrades to the relay; and the relay itself
+// catalog keyed on it refuses valid links without that claim; and the relay itself
 // already routes by a fingerprint of this key, so keying on it means the SDK and
 // the relay agree on cell identity by construction rather than by convention.
 //
@@ -77,9 +77,7 @@ var ErrCellCatalogKeyMismatch = errors.New("qurl: cell catalog fingerprint match
 
 // NewCellCatalog builds a catalog from cell entries. Every entry must carry a
 // valid 32-byte key, a host, and the standard NHP UDP port; one bad entry fails the whole
-// catalog rather than silently dropping a cell, because a silently missing cell
-// degrades to the relay instead of failing — exactly the kind of quiet fallback
-// that hides a misconfiguration.
+// catalog rather than silently dropping a cell and refusing its links later.
 func NewCellCatalog(entries []CellEntry) (*CellCatalog, error) {
 	if len(entries) == 0 {
 		return nil, ErrNoCellEndpoints

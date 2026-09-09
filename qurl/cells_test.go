@@ -15,9 +15,8 @@ import (
 // in portal_nativeudp_test.go and is deliberately not repeated here.
 
 // The catalog decides which cell a verified link is allowed to be knocked at
-// directly, and every rejection path below degrades to the relay rather than to
-// an error if it is skipped. A silent degradation is the failure mode worth
-// testing: it looks like success.
+// directly. Invalid entries must fail at construction so configuration errors
+// cannot hide until a link is opened.
 
 func testCellKey(t *testing.T, seed byte) []byte {
 	t.Helper()
@@ -65,7 +64,7 @@ func TestNewCellCatalogRejectsMalformedEntries(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := NewCellCatalog([]CellEntry{tc.entry})
 			if err == nil {
-				t.Fatalf("entry was accepted; a bad cell would degrade to the relay silently")
+				t.Fatalf("entry was accepted; a bad cell would make its links unusable")
 			}
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("got %q, want it to contain %q", err, tc.want)

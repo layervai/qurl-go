@@ -11,6 +11,7 @@ and are marked **Breaking** with what to change.
 - **Breaking:** A configured native cell catalog no longer falls back to HTTPS
   relay for unknown cells, even with a relay allowlist. Complete the catalog
   or use a separate relay-only opener with a nil catalog and an allowlist.
+  Remove `relay_allowlist` from deployment files that also list `cells`.
   NHP remains version 1.1.
 
 - **Breaking:** `Resource.QURLCount` is now `*int`. Check for nil before

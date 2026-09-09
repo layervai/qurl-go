@@ -556,7 +556,7 @@ func resolveDefaultConfig(ctx context.Context) (Config, error) {
 // every open over the HTTPS relay transport. That is the right shape for
 // relay-based deployments (browsers can only deliver a knock over HTTPS, and
 // the discovery manifest format carries no cells); it is never the right shape
-// for a pinned native-UDP opener, which supplies cells and can omit the relay
+// for a pinned native-UDP opener, which supplies cells and should omit the relay
 // allowlist entirely. An open outside that catalog always fails with
 // ErrCellNotInCatalog instead of quietly using the relay.
 type CellProvider interface {
