@@ -348,9 +348,8 @@ func TestShippedProductionDeployment(t *testing.T) {
 	if err != nil || hub == nil || hub.Host != "hub.nhp.layerv.ai" || hub.Port != standardNHPUDPPort || hub.ServerPublicKeyB64 != "LxWWlFQ18yEgSl0lDX1+cMhCLLEc8LkHTOc1QskRY28=" {
 		t.Fatalf("production Hub: %+v, %v", hub, err)
 	}
-	hubKey, err := base64.StdEncoding.DecodeString(hub.ServerPublicKeyB64)
-	if err != nil || len(hubKey) != 32 {
-		t.Fatalf("production Hub key must decode to 32 bytes: %v", err)
+	if _, err := hub.nativeEndpoint(); err != nil {
+		t.Fatalf("production Hub runtime validation: %v", err)
 	}
 	// The production kid must be present, but a different signing key must fail.
 	signer, err := GenerateLocalSigner("qurl-issuer-prod-2026-08")
