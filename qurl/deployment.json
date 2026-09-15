@@ -1,5 +1,24 @@
 {
-  "issuers": [],
-  "cells": [],
-  "relay_allowlist": []
+  "issuers": [
+    {
+      "kid": "qurl-issuer-prod-2026-08",
+      "spki_der_b64": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEPCQQZPW-vYK6r1CsCsIDNtHtE_BTRkmtPy2UiAyERuDUjGTFHCadXSnG4UaX_alXUcz2SHNDZw-Sfy5Xi-4dqA"
+    }
+  ],
+  "cells": [
+    {
+      "cell_id": "cell0",
+      "host": "cell0.nhp.layerv.ai",
+      "port": 443,
+      "server_public_key_b64": "e4cvt8Il90hResvhyawFqhgXqbi2Qddlqa3Iy0vPniU="
+    }
+  ],
+  "relay_allowlist": [
+    "relay.layerv.ai"
+  ],
+  "hub": {
+    "host": "hub.nhp.layerv.ai",
+    "port": 443,
+    "server_public_key_b64": "LxWWlFQ18yEgSl0lDX1+cMhCLLEc8LkHTOc1QskRY28="
+  }
 }

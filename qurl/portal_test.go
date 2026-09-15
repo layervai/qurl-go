@@ -112,6 +112,7 @@ func relayExampleAllowlist() *RelayAllowlist {
 // --- Bucket A: gates -------------------------------------------------------
 
 func TestEnterPortal_EmptyConfig_FailsClosed(t *testing.T) {
+	withoutShippedDeployment(t)
 	_, err := EnterPortal(context.Background(), "https://qurl.link/#qv2t1.1.1.1.AQ.AQ.AQ")
 	if !errors.Is(err, ErrNotConfigured) {
 		t.Fatalf("empty default config: want ErrNotConfigured, got %v", err)

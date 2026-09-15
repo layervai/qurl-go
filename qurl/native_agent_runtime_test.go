@@ -2855,6 +2855,7 @@ func TestConnectAgentRuntime_FreshEnrollmentRequiresCredentialBeforeMutationOrIO
 // the assignment step, after "save initial native identity" had already made
 // the store dirty.
 func TestConnectAgentRuntime_FreshEnrollmentWithoutHubFailsBeforeMutation(t *testing.T) {
+	withoutShippedDeployment(t)
 	t.Setenv(EnvDeploymentPath, "")
 	stateDir := secureAgentStateTestDir(t)
 	store := &runtimeRecordingStore{inner: testFileAgentState(t, filepath.Join(stateDir, "agent-state.json"))}

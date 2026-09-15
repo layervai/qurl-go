@@ -3,6 +3,7 @@ package qurl
 import (
 	"bytes"
 	"context"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -147,6 +148,7 @@ func TestEnterPortal_DeploymentUnknownCellRefusesRelay(t *testing.T) {
 // TestEnterPortal_NoDeploymentFailsClosed proves a build that ships no issuers
 // refuses to open rather than trusting anything, and says what to set.
 func TestEnterPortal_NoDeploymentFailsClosed(t *testing.T) {
+	withoutShippedDeployment(t)
 	noDefaultProvider(t)
 	link, _, _ := generatedAcceptLink(t)
 	t.Setenv(EnvDeploymentPath, "")
@@ -302,5 +304,65 @@ func TestRefreshAgentRuntimeAcceptsZeroHub(t *testing.T) {
 	_, _, err := RefreshAgentRuntime(context.Background(), HubBootstrap{}, store)
 	if !errors.Is(err, ErrNoDeploymentHub) {
 		t.Fatalf("zero hub with no shipped hub = %v, want ErrNoDeploymentHub", err)
+	}
+}
+
+// withoutShippedDeployment models an unprovisioned build without changing the
+// production default. Tests that change process defaults must not run in parallel.
+func withoutShippedDeployment(t *testing.T) {
+	t.Helper()
+	prior := shippedDeploymentJSON
+	shippedDeploymentJSON = []byte(`{"issuers":[],"cells":[],"relay_allowlist":[]}`)
+	t.Cleanup(func() { shippedDeploymentJSON = prior })
+	t.Setenv(EnvDeploymentPath, "")
+}
+
+func TestShippedProductionDeployment(t *testing.T) {
+	noDefaultProvider(t)
+	t.Setenv(EnvDeploymentPath, "")
+	cfg, err := resolveDefaultConfig(t.Context())
+	if err != nil {
+		t.Fatalf("production defaults: %v", err)
+	}
+	pub, err := cfg.TrustStore.publicKeyForKID("qurl-issuer-prod-2026-08")
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.MarshalPKIXPublicKey(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const issuerDER = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEPCQQZPW-vYK6r1CsCsIDNtHtE_BTRkmtPy2UiAyERuDUjGTFHCadXSnG4UaX_alXUcz2SHNDZw-Sfy5Xi-4dqA"
+	if base64.RawURLEncoding.EncodeToString(der) != issuerDER {
+		t.Fatal("production issuer key changed")
+	}
+	cellKey, err := base64.StdEncoding.DecodeString("e4cvt8Il90hResvhyawFqhgXqbi2Qddlqa3Iy0vPniU=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoint, ok, err := cfg.Cells.lookup(cellKey)
+	if err != nil || !ok || endpoint.Host != "cell0.nhp.layerv.ai" || endpoint.Port != 443 {
+		t.Fatalf("production cell: %+v, %v, %v", endpoint, ok, err)
+	}
+	hub, err := deploymentHub()
+	if err != nil || hub == nil || hub.Host != "hub.nhp.layerv.ai" || hub.Port != 443 || hub.ServerPublicKeyB64 != "LxWWlFQ18yEgSl0lDX1+cMhCLLEc8LkHTOc1QskRY28=" {
+		t.Fatalf("production Hub: %+v, %v", hub, err)
+	}
+	// The production kid must be present, but a different signing key must fail.
+	signer, err := GenerateLocalSigner("qurl-issuer-prod-2026-08")
+	if err != nil {
+		t.Fatal(err)
+	}
+	forged, err := CreatePortalWithParams(t.Context(), signer, validCreateParams(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyLink(forged, cfg.TrustStore); !errors.Is(err, ErrSignature) {
+		t.Fatalf("forged production issuer: %v", err)
+	}
+	// A correctly signed link from an untrusted issuer must still fail closed.
+	link, _, _ := generatedAcceptLink(t)
+	if _, err := VerifyLink(link, cfg.TrustStore); !errors.Is(err, ErrUnknownKID) {
+		t.Fatalf("untrusted issuer: %v", err)
 	}
 }

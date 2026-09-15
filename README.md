@@ -133,6 +133,10 @@ For credentials held in KMS or a secret manager, implement
 
 ## Quickstart
 
+Production issuer keys, native cell endpoints, and the Hub trust root are embedded
+in the SDK. Production needs no deployment file. For sandbox or a custom
+deployment, set `QURL_DEPLOYMENT` to its deployment file.
+
 ```sh
 export QURL_API_KEY="<key from https://layerv.ai/qurl/dashboard/keys>"
 ```
@@ -219,15 +223,10 @@ Your service registers once, then keeps serving. Registration happens over an
 authenticated UDP channel — no inbound ports, no public endpoint, nothing for a
 scanner to find.
 
-Enrollment authenticates against the Hub trust root in your deployment file, so
-point `QURL_DEPLOYMENT` at the file from LayerV setup (or pass
-`WithAgentRuntimeHub`); GA builds will ship the trust root baked into the SDK,
-at which point this step disappears. A completed registration whose lease is
-live reopens without it.
-
-```sh
-export QURL_DEPLOYMENT=/etc/layerv/qurl/deployment.json
-```
+Enrollment uses the production Hub trust root embedded in the SDK. No deployment
+file is needed for production. For sandbox or a custom deployment, set
+`QURL_DEPLOYMENT` to its deployment file or pass `WithAgentRuntimeHub`. A
+completed registration whose lease is live reopens without a Hub exchange.
 
 ```go
 store, err := qurl.OpenFileAgentState("/var/lib/layerv/qurl/agent-state.json")
@@ -247,7 +246,7 @@ if err != nil {
 defer binding.Destroy()
 ```
 
-That — plus the deployment file — is the whole enrollment. Run it on every
+That is the whole enrollment. Run it on every
 start, under a supervisor, and stop thinking about the lifecycle:
 
 - Restarts are safe — it enrolls only when nothing is registered yet.
@@ -334,10 +333,10 @@ the deployment embedded in the build
 registration is not provider-supplied: it comes only from `QURL_DEPLOYMENT`,
 the embedded deployment, or an explicit `WithAgentRuntimeHub`
 (`RefreshAgentRuntime` takes a `HubBootstrap` argument) — an installed
-`Provider` affects opener config only. Current releases embed an empty
-deployment, so native opens and agent registration need a deployment file from
-LayerV setup until a populated one ships in the SDK. The issuer HTTPS endpoint
-is configured separately with `WithBaseURL`. A resolved deployment with no
+`Provider` affects opener config only. Releases embed the production issuer
+keys, native cell endpoints, and Hub trust root. Production needs no deployment
+file. Set `QURL_DEPLOYMENT` only for sandbox or a custom deployment. The issuer
+HTTPS endpoint is configured separately with `WithBaseURL`. A resolved deployment with no
 issuer keys fails closed (`ErrNotConfigured`) rather than open a link it
 cannot verify.
 
@@ -360,7 +359,7 @@ that raises them:
 | Error | Meaning |
 | --- | --- |
 | `qurl.ErrNotConfigured` | A required piece of opener or deployment configuration is absent; the SDK fails closed rather than open a link it cannot verify |
-| `qurl.ErrNoDeployment` | The resolved deployment carries no issuer keys — this build ships none and `QURL_DEPLOYMENT` is unset, or the named deployment file has empty `issuers`. Wraps `ErrNotConfigured` |
+| `qurl.ErrNoDeployment` | The resolved deployment carries no issuer keys — a custom build ships none and `QURL_DEPLOYMENT` is unset, or the named deployment file has empty `issuers`. Wraps `ErrNotConfigured` |
 | `qurl.ErrSignature` | The link's issuer signature does not verify: forged, tampered, or signed by a key that is not the trust store's value for that kid |
 | `qurl.ErrUnknownKID` | The link's kid is not in the trust store |
 | `qurl.ErrCellNotInCatalog` | A verified link names a cell absent from the configured catalog. The opener refuses the open, even when a relay allowlist is configured |

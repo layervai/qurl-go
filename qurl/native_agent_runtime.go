@@ -533,7 +533,7 @@ func newNativeAgentRuntimeConfig(opts []AgentRuntimeRegistrationOption) (*native
 	}
 	if c.hub == nil {
 		// Fall back to the deployment's hub: the file named by QURL_DEPLOYMENT
-		// today, the deployment embedded in GA builds later. An explicit option
+		// when set, otherwise the embedded production deployment. An explicit option
 		// still wins, so nothing that already passes WithAgentRuntimeHub changes
 		// behavior; this only removes the requirement that every integrator
 		// retype the Hub host, port, and X25519 key it had to source out of
@@ -2648,8 +2648,8 @@ func newAgentRuntimeRefreshConfig(ctx context.Context, hub HubBootstrap, store A
 		return nil, hub, fmt.Errorf("%w: state store must not be nil", ErrInvalidRegisterConfig)
 	}
 	cfg := defaultNativeAgentRuntimeConfig()
-	// A zero-value hub means "use the deployment's trust root" — QURL_DEPLOYMENT
-	// today, embedded in GA builds later — matching ConnectAgentRuntime. Refresh
+	// A zero-value hub uses the QURL_DEPLOYMENT file when set, otherwise the
+	// embedded production trust root, matching ConnectAgentRuntime. Refresh
 	// otherwise forced every caller to carry the host, port, and key around
 	// purely to hand them back on renewal.
 	if hub == (HubBootstrap{}) {

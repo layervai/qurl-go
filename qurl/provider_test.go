@@ -179,6 +179,7 @@ func TestEnterPortal_StaticProvider_VerifiesAndRoutes(t *testing.T) {
 // the one-arg verb fails closed. It explicitly clears the default (and restores it),
 // guarding the production posture independently of test ordering.
 func TestEnterPortal_NoProvider_FailsClosed(t *testing.T) {
+	withoutShippedDeployment(t)
 	installDefaultProvider(t, nil)
 	_, err := EnterPortal(context.Background(), "https://qurl.link/#qv2t1.1.1.1.AQ.AQ.AQ")
 	if !errors.Is(err, ErrNotConfigured) {

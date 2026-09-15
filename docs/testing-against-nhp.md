@@ -79,7 +79,8 @@ else should use the loopback suites above.
 
 ### Point the SDK at a deployment
 
-The supported path is `qurl.ConnectAgentRuntime` with a deployment file: set
+The SDK embeds production defaults. Live sandbox tests must override them to
+use sandbox trust roots. Use `qurl.ConnectAgentRuntime` with a deployment file: set
 `QURL_DEPLOYMENT` to the file's path and the SDK reads its trust roots —
 including the hub — from there, so no estate value is hardcoded in your
 program.

@@ -61,7 +61,9 @@ create portals; it only tells the SDK which LayerV-issued qURL links and
 platform access endpoints this process should trust. With no provider installed
 — the common case — `EnterPortal` resolves that config from the JSON deployment
 file named by `QURL_DEPLOYMENT`, falling back to the deployment embedded in the
-build.
+build. Production issuer keys and native cell endpoints are embedded, so
+production needs no deployment file. Set `QURL_DEPLOYMENT` for sandbox or a
+custom deployment.
 
 Before any transport work, every opening path derives the X25519 public key
 from the fragment private key with the standard clamped X25519 basepoint
@@ -111,9 +113,9 @@ bounded by the caller context and the provider's I/O deadline. An SDK open
 deadline returns `ErrPortalOpenTimeout`; a shorter caller deadline returns only
 the caller's context error and does not record a platform failure.
 
-The default provider or `QURL_DEPLOYMENT` must include the link's issuer and
-cell. A missing cell returns `ErrPortalNativeOnly` or `ErrCellNotInCatalog`; the
-opener never falls back to the HTTPS relay. A renewal that authenticates a
+The resolved configuration — embedded production defaults, `QURL_DEPLOYMENT`,
+or an installed provider — must include the link's issuer and cell. A missing
+cell returns `ErrPortalNativeOnly` or `ErrCellNotInCatalog`; the opener never falls back to the HTTPS relay. A renewal that authenticates a
 different target does not replace the active handle. `Health` reports
 `LastFailureClass == PortalOpenerFailureTargetChanged`. A later explicit
 recovery `Start` returns `ErrPortalTargetChanged` if the target is still wrong.
@@ -281,9 +283,9 @@ provider, err := qurl.NewStaticProvider(
 )
 ```
 
-LayerV opener setup gives you the issuer key id, issuer public key, cell
-catalog entries, and allowed platform hosts for the links this process is
-allowed to open.
+Production defaults already supply these values. For sandbox or a custom
+deployment, obtain the issuer key id, issuer public key, cell catalog entries,
+and allowed platform hosts from that deployment operator.
 
 ## Errors
 
