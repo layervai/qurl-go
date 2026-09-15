@@ -309,6 +309,8 @@ func TestRefreshAgentRuntimeAcceptsZeroHub(t *testing.T) {
 
 // withoutShippedDeployment models an unprovisioned build without changing the
 // production default. Tests that change process defaults must not run in parallel.
+// Stop any background runtimes before returning so they cannot read another
+// test's temporary deployment. t.Setenv also prevents parallel use of this helper.
 func withoutShippedDeployment(t *testing.T) {
 	t.Helper()
 	prior := shippedDeploymentJSON
@@ -334,19 +336,23 @@ func TestShippedProductionDeployment(t *testing.T) {
 	}
 	const issuerDER = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEPCQQZPW-vYK6r1CsCsIDNtHtE_BTRkmtPy2UiAyERuDUjGTFHCadXSnG4UaX_alXUcz2SHNDZw-Sfy5Xi-4dqA"
 	if base64.RawURLEncoding.EncodeToString(der) != issuerDER {
-		t.Fatal("production issuer key changed")
+		t.Fatal("production issuer key changed; follow the rotation procedure in docs/opening-links.md")
 	}
 	cellKey, err := base64.StdEncoding.DecodeString("e4cvt8Il90hResvhyawFqhgXqbi2Qddlqa3Iy0vPniU=")
 	if err != nil {
 		t.Fatal(err)
 	}
 	endpoint, ok, err := cfg.Cells.lookup(cellKey)
-	if err != nil || !ok || endpoint.Host != "cell0.nhp.layerv.ai" || endpoint.Port != 443 {
+	if err != nil || !ok || endpoint.Host != "cell0.nhp.layerv.ai" || endpoint.Port != standardNHPUDPPort {
 		t.Fatalf("production cell: %+v, %v, %v", endpoint, ok, err)
 	}
 	hub, err := deploymentHub()
-	if err != nil || hub == nil || hub.Host != "hub.nhp.layerv.ai" || hub.Port != 443 || hub.ServerPublicKeyB64 != "LxWWlFQ18yEgSl0lDX1+cMhCLLEc8LkHTOc1QskRY28=" {
+	if err != nil || hub == nil || hub.Host != "hub.nhp.layerv.ai" || hub.Port != standardNHPUDPPort || hub.ServerPublicKeyB64 != "LxWWlFQ18yEgSl0lDX1+cMhCLLEc8LkHTOc1QskRY28=" {
 		t.Fatalf("production Hub: %+v, %v", hub, err)
+	}
+	hubKey, err := base64.StdEncoding.DecodeString(hub.ServerPublicKeyB64)
+	if err != nil || len(hubKey) != 32 {
+		t.Fatalf("production Hub key must decode to 32 bytes: %v", err)
 	}
 	// The production kid must be present, but a different signing key must fail.
 	signer, err := GenerateLocalSigner("qurl-issuer-prod-2026-08")

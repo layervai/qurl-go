@@ -335,8 +335,8 @@ the embedded deployment, or an explicit `WithAgentRuntimeHub`
 `Provider` affects opener config only. Releases embed the production issuer
 keys, native cell endpoints, and Hub trust root. Production needs no deployment
 file. Set `QURL_DEPLOYMENT` only for sandbox or a custom deployment. The issuer
-HTTPS endpoint is configured separately with `WithBaseURL`. A resolved deployment with no
-issuer keys fails closed (`ErrNotConfigured`) rather than open a link it
+HTTPS endpoint is configured separately with `WithBaseURL`. A resolved deployment
+with no issuer keys fails closed (`ErrNotConfigured`) rather than open a link it
 cannot verify.
 
 ## Error handling
