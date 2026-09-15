@@ -357,5 +357,10 @@ remove the outgoing key only after its links have expired and consumers have
 updated. Older builds reject an unknown issuer with `ErrUnknownKID`. A trusted
 `QURL_DEPLOYMENT` file can supply the updated issuer set while a build is upgraded.
 
+An override replaces the full embedded deployment; it does not merge with it.
+Include every required issuer and cell entry, plus the Hub trust root when
+enrollment uses the deployment Hub. A file containing only the new key or cell
+does not retain any of the other embedded defaults.
+
 The initial production values were verified against the production deployment
 on 2026-09-15.

@@ -145,17 +145,16 @@ func TestEnterPortal_DeploymentUnknownCellRefusesRelay(t *testing.T) {
 	}
 }
 
-// TestEnterPortal_NoDeploymentFailsClosed proves a build that ships no issuers
-// refuses to open rather than trusting anything, and says what to set.
+// TestEnterPortal_NoDeploymentFailsClosed proves an empty deployment override
+// refuses to open rather than trusting embedded defaults, and says what to set.
 func TestEnterPortal_NoDeploymentFailsClosed(t *testing.T) {
-	withoutShippedDeployment(t)
+	useEmptyDeployment(t)
 	noDefaultProvider(t)
 	link, _, _ := generatedAcceptLink(t)
-	t.Setenv(EnvDeploymentPath, "")
 
 	_, err := EnterPortal(context.Background(), link)
 	if !errors.Is(err, ErrNotConfigured) {
-		t.Fatalf("want ErrNotConfigured with no shipped issuers, got %v", err)
+		t.Fatalf("want ErrNotConfigured with no configured issuers, got %v", err)
 	}
 	if !strings.Contains(err.Error(), EnvDeploymentPath) {
 		t.Fatalf("error does not tell the caller what to set: %v", err)
@@ -307,16 +306,15 @@ func TestRefreshAgentRuntimeAcceptsZeroHub(t *testing.T) {
 	}
 }
 
-// withoutShippedDeployment models an unprovisioned build without changing the
-// production default. Tests that change process defaults must not run in parallel.
-// Stop any background runtimes before returning so they cannot read another
-// test's temporary deployment. t.Setenv also prevents parallel use of this helper.
-func withoutShippedDeployment(t *testing.T) {
+// useEmptyDeployment selects an empty override without mutating embedded trust.
+// Both shipped and override deployments use the same parser and config builder.
+func useEmptyDeployment(t *testing.T) {
 	t.Helper()
-	prior := shippedDeploymentJSON
-	shippedDeploymentJSON = []byte(`{"issuers":[],"cells":[],"relay_allowlist":[]}`)
-	t.Cleanup(func() { shippedDeploymentJSON = prior })
-	t.Setenv(EnvDeploymentPath, "")
+	path := filepath.Join(t.TempDir(), "empty-deployment.json")
+	if err := os.WriteFile(path, []byte(`{"issuers":[],"cells":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(EnvDeploymentPath, path)
 }
 
 func TestShippedProductionDeployment(t *testing.T) {

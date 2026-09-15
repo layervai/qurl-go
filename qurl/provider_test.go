@@ -175,11 +175,10 @@ func TestEnterPortal_StaticProvider_VerifiesAndRoutes(t *testing.T) {
 	}
 }
 
-// TestEnterPortal_NoProvider_FailsClosed re-asserts that with NO provider installed,
-// the one-arg verb fails closed. It explicitly clears the default (and restores it),
-// guarding the production posture independently of test ordering.
+// TestEnterPortal_NoProvider_FailsClosed verifies an empty deployment fails
+// closed when no provider is installed to supply a separate trust configuration.
 func TestEnterPortal_NoProvider_FailsClosed(t *testing.T) {
-	withoutShippedDeployment(t)
+	useEmptyDeployment(t)
 	installDefaultProvider(t, nil)
 	_, err := EnterPortal(context.Background(), "https://qurl.link/#qv2t1.1.1.1.AQ.AQ.AQ")
 	if !errors.Is(err, ErrNotConfigured) {
