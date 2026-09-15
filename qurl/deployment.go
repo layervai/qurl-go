@@ -88,9 +88,9 @@ var ErrNoDeploymentHub = fmt.Errorf(
 	ErrNotConfigured, EnvDeploymentPath,
 )
 
-// ErrNoDeployment reports that this build ships no issuer keys and no override
-// was supplied, so there is nothing to verify links against.
-var ErrNoDeployment = fmt.Errorf("%w: no issuer keys are configured (set %s)", ErrNotConfigured, EnvDeploymentPath)
+// ErrNoDeployment reports that the selected deployment has no issuer keys,
+// including an empty override or a custom build with no embedded issuer keys.
+var ErrNoDeployment = fmt.Errorf("%w: selected deployment has no issuer keys (configure issuers in %s or the embedded deployment)", ErrNotConfigured, EnvDeploymentPath)
 
 // LoadDeployment reads and validates a deployment JSON file.
 func LoadDeployment(path string) (*Deployment, error) {

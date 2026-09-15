@@ -32,11 +32,11 @@ import (
 // Enrollment defaults to the one-time code, so a call that may enroll installs
 // WithAgentRuntimeOTPProvider. The OTP leg is skipped only for a runtime that
 // declares it cannot receive a code with WithAgentRuntimeHeadlessEnrollment.
-// The Hub trust root comes from the deployment: the file named by
-// QURL_DEPLOYMENT today, embedded in GA builds later. Callers running their
-// own LayerV deployment pass WithAgentRuntimeHub here (RefreshAgentRuntime
-// takes a HubBootstrap argument instead). A deployment that names no hub can
-// still serve an existing registration whose lease is live, but any start that
+// The production Hub trust root is embedded in the SDK. For sandbox or a
+// custom deployment, set QURL_DEPLOYMENT or pass WithAgentRuntimeHub here
+// (RefreshAgentRuntime takes a HubBootstrap argument instead). A deployment
+// that names no hub can still serve an existing registration whose lease is
+// live, but any start that
 // actually needs a Hub exchange fails with ErrNoDeploymentHub — reliably that
 // sentinel, because a QURL_DEPLOYMENT file that cannot be read or parsed is
 // instead rejected as a config error on every start — until QURL_DEPLOYMENT

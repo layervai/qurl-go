@@ -451,11 +451,10 @@ func ExampleConnectAgentRuntime() {
 	// enrollment, and afterwards returns the existing registration — renewing an
 	// expired lease and following any relocation without being asked.
 	//
-	// Enrollment and lease renewal authenticate against the Hub trust root,
-	// which comes from your deployment file: set QURL_DEPLOYMENT to the file
-	// from LayerV setup, or pass WithAgentRuntimeHub. GA builds will ship the
-	// trust root embedded. A completed registration with a live lease reopens
-	// without one.
+	// Enrollment and lease renewal use the production Hub trust root embedded
+	// in the SDK. For sandbox or a custom deployment, set QURL_DEPLOYMENT or
+	// pass WithAgentRuntimeHub. A completed registration with a live lease
+	// reopens without a Hub exchange.
 	ctx := context.Background()
 	store, err := qurl.OpenFileAgentState("/var/lib/layerv/qurl/agent-state.json")
 	if err != nil {

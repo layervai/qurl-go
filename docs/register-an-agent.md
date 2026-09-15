@@ -3,6 +3,10 @@
 Your software registers with LayerV once, then serves traffic. Nothing listens on
 a public port, so there is no endpoint for a scanner to find.
 
+The SDK embeds the production Hub trust root, so production needs no deployment
+file. For sandbox or a custom deployment, set `QURL_DEPLOYMENT` to its deployment
+file or pass `WithAgentRuntimeHub`.
+
 ## The whole thing
 
 This is a complete service: enroll, publish a resource, accept a connection.
@@ -402,12 +406,10 @@ Rarely needed. The defaults above suit almost every deployment.
 client, binding, err := qurl.RefreshAgentRuntime(ctx, qurl.HubBootstrap{}, store)
 ```
 
-The empty `qurl.HubBootstrap{}` means "use the deployment's trust root" — the
-file named by `QURL_DEPLOYMENT` today, embedded in GA builds later; you only
-fill it in if you run your own LayerV deployment and want to pin the Hub in
-code. Renewal everywhere else resolves the trust root the same way, so a
-self-hosted deployment usually just points `QURL_DEPLOYMENT` at its deployment
-file.
+The empty `qurl.HubBootstrap{}` uses the production Hub trust root embedded in
+the SDK, or the deployment file named by `QURL_DEPLOYMENT` when set. For sandbox
+or a custom deployment, set that file or supply an explicit `HubBootstrap`.
+Automatic renewal uses the same resolved Hub trust root.
 
 **Turn off automatic behavior:**
 

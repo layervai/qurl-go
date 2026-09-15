@@ -61,7 +61,9 @@ create portals; it only tells the SDK which LayerV-issued qURL links and
 platform access endpoints this process should trust. With no provider installed
 — the common case — `EnterPortal` resolves that config from the JSON deployment
 file named by `QURL_DEPLOYMENT`, falling back to the deployment embedded in the
-build.
+build. Production issuer keys and native cell endpoints are embedded, so
+production needs no deployment file. Set `QURL_DEPLOYMENT` for sandbox or a
+custom deployment.
 
 Before any transport work, every opening path derives the X25519 public key
 from the fragment private key with the standard clamped X25519 basepoint
@@ -111,10 +113,11 @@ bounded by the caller context and the provider's I/O deadline. An SDK open
 deadline returns `ErrPortalOpenTimeout`; a shorter caller deadline returns only
 the caller's context error and does not record a platform failure.
 
-The default provider or `QURL_DEPLOYMENT` must include the link's issuer and
-cell. A missing cell returns `ErrPortalNativeOnly` or `ErrCellNotInCatalog`; the
-opener never falls back to the HTTPS relay. A renewal that authenticates a
-different target does not replace the active handle. `Health` reports
+The resolved configuration — embedded production defaults, `QURL_DEPLOYMENT`,
+or an installed provider — must include the link's issuer and cell. A missing
+cell returns `ErrPortalNativeOnly` or `ErrCellNotInCatalog`; the opener never
+falls back to the HTTPS relay. A renewal that authenticates a different target
+does not replace the active handle. `Health` reports
 `LastFailureClass == PortalOpenerFailureTargetChanged`. A later explicit
 recovery `Start` returns `ErrPortalTargetChanged` if the target is still wrong.
 
@@ -281,9 +284,9 @@ provider, err := qurl.NewStaticProvider(
 )
 ```
 
-LayerV opener setup gives you the issuer key id, issuer public key, cell
-catalog entries, and allowed platform hosts for the links this process is
-allowed to open.
+Production defaults already supply these values. For sandbox or a custom
+deployment, obtain the issuer key id, issuer public key, cell catalog entries,
+and allowed platform hosts from that deployment operator.
 
 ## Errors
 
@@ -338,3 +341,26 @@ redirect-policy error in `*url.Error`.
 or installed provider, and equally a `QURL_DEPLOYMENT` file whose `issuers`
 list is empty, returns `qurl.ErrNoDeployment`, which matches
 `errors.Is(err, qurl.ErrNotConfigured)` — and when the link cannot be verified.
+
+### Updating production defaults
+
+This release includes production cell0 at `cell0.nhp.layerv.ai:443`. Default
+opens use native UDP. Before a new cell or cell identity serves links, release
+its catalog entry and update consumers. Older builds reject an unknown cell.
+An operator-supplied `QURL_DEPLOYMENT` file can update the catalog before a
+consumer upgrade. Networks that block outbound UDP need an explicit relay-only
+configuration; the native catalog does not enable relay fallback.
+
+Before changing the issuer signing key, publish the incoming public key alongside
+the outgoing key and update consumers. Keep both keys through the overlap period;
+remove the outgoing key only after its links have expired and consumers have
+updated. Older builds reject an unknown issuer with `ErrUnknownKID`. A trusted
+`QURL_DEPLOYMENT` file can supply the updated issuer set while a build is upgraded.
+
+An override replaces the full embedded deployment; it does not merge with it.
+Include every required issuer and cell entry, plus the Hub trust root when
+enrollment uses the deployment Hub. A file containing only the new key or cell
+does not retain any of the other embedded defaults.
+
+The initial production values were verified against the production deployment
+on 2026-09-15.

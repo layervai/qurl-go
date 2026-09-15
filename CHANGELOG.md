@@ -8,6 +8,11 @@ and are marked **Breaking** with what to change.
 
 ## Unreleased
 
+- **Breaking:** An unset deployment now selects embedded production issuer,
+  cell, and Hub trust instead of returning a missing-configuration error.
+  Set `QURL_DEPLOYMENT` for sandbox or custom deployments. Override files replace
+  the full deployment; include all required issuers, cells, and Hub settings.
+
 - **Breaking:** A configured native cell catalog no longer falls back to HTTPS
   relay for unknown cells, even with a relay allowlist. Complete the catalog
   or use a separate relay-only opener with a nil catalog and an allowlist.

@@ -3,6 +3,7 @@ package qurl
 import (
 	"bytes"
 	"context"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -144,16 +145,16 @@ func TestEnterPortal_DeploymentUnknownCellRefusesRelay(t *testing.T) {
 	}
 }
 
-// TestEnterPortal_NoDeploymentFailsClosed proves a build that ships no issuers
-// refuses to open rather than trusting anything, and says what to set.
+// TestEnterPortal_NoDeploymentFailsClosed proves an empty deployment override
+// refuses to open rather than trusting embedded defaults, and says what to set.
 func TestEnterPortal_NoDeploymentFailsClosed(t *testing.T) {
+	useEmptyDeployment(t)
 	noDefaultProvider(t)
 	link, _, _ := generatedAcceptLink(t)
-	t.Setenv(EnvDeploymentPath, "")
 
 	_, err := EnterPortal(context.Background(), link)
 	if !errors.Is(err, ErrNotConfigured) {
-		t.Fatalf("want ErrNotConfigured with no shipped issuers, got %v", err)
+		t.Fatalf("want ErrNotConfigured with no configured issuers, got %v", err)
 	}
 	if !strings.Contains(err.Error(), EnvDeploymentPath) {
 		t.Fatalf("error does not tell the caller what to set: %v", err)
@@ -296,11 +297,75 @@ func TestRefreshAgentRuntimeAcceptsZeroHub(t *testing.T) {
 	}
 	t.Setenv(EnvDeploymentPath, path)
 
-	// This build ships no hub, so the zero-value path must surface the
+	// The override file names no hub, so the zero-value path must surface the
 	// actionable sentinel rather than a confusing endpoint-validation error.
 	store := testFileAgentState(t, filepath.Join(secureAgentStateTestDir(t), "agent-state.json"))
 	_, _, err := RefreshAgentRuntime(context.Background(), HubBootstrap{}, store)
 	if !errors.Is(err, ErrNoDeploymentHub) {
 		t.Fatalf("zero hub with no shipped hub = %v, want ErrNoDeploymentHub", err)
+	}
+}
+
+// useEmptyDeployment selects an empty override without mutating embedded trust.
+// Both shipped and override deployments use the same parser and config builder.
+func useEmptyDeployment(t *testing.T) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "empty-deployment.json")
+	if err := os.WriteFile(path, []byte(`{"issuers":[],"cells":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(EnvDeploymentPath, path)
+}
+
+func TestShippedProductionDeployment(t *testing.T) {
+	noDefaultProvider(t)
+	t.Setenv(EnvDeploymentPath, "")
+	cfg, err := resolveDefaultConfig(t.Context())
+	if err != nil {
+		t.Fatalf("production defaults: %v", err)
+	}
+	pub, err := cfg.TrustStore.publicKeyForKID("qurl-issuer-prod-2026-08")
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.MarshalPKIXPublicKey(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const issuerDER = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEPCQQZPW-vYK6r1CsCsIDNtHtE_BTRkmtPy2UiAyERuDUjGTFHCadXSnG4UaX_alXUcz2SHNDZw-Sfy5Xi-4dqA"
+	if base64.RawURLEncoding.EncodeToString(der) != issuerDER {
+		t.Fatal("production issuer key changed; follow the rotation procedure in docs/opening-links.md")
+	}
+	cellKey, err := base64.StdEncoding.DecodeString("e4cvt8Il90hResvhyawFqhgXqbi2Qddlqa3Iy0vPniU=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoint, ok, err := cfg.Cells.lookup(cellKey)
+	if err != nil || !ok || endpoint.Host != "cell0.nhp.layerv.ai" || endpoint.Port != standardNHPUDPPort {
+		t.Fatalf("production cell: %+v, %v, %v", endpoint, ok, err)
+	}
+	hub, err := deploymentHub()
+	if err != nil || hub == nil || hub.Host != "hub.nhp.layerv.ai" || hub.Port != standardNHPUDPPort || hub.ServerPublicKeyB64 != "LxWWlFQ18yEgSl0lDX1+cMhCLLEc8LkHTOc1QskRY28=" {
+		t.Fatalf("production Hub: %+v, %v", hub, err)
+	}
+	if _, err := hub.nativeEndpoint(); err != nil {
+		t.Fatalf("production Hub runtime validation: %v", err)
+	}
+	// The production kid must be present, but a different signing key must fail.
+	signer, err := GenerateLocalSigner("qurl-issuer-prod-2026-08")
+	if err != nil {
+		t.Fatal(err)
+	}
+	forged, err := CreatePortalWithParams(t.Context(), signer, validCreateParams(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyLink(forged, cfg.TrustStore); !errors.Is(err, ErrSignature) {
+		t.Fatalf("forged production issuer: %v", err)
+	}
+	// A correctly signed link from an untrusted issuer must still fail closed.
+	link, _, _ := generatedAcceptLink(t)
+	if _, err := VerifyLink(link, cfg.TrustStore); !errors.Is(err, ErrUnknownKID) {
+		t.Fatalf("untrusted issuer: %v", err)
 	}
 }
