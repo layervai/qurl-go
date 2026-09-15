@@ -298,7 +298,7 @@ func TestRefreshAgentRuntimeAcceptsZeroHub(t *testing.T) {
 	}
 	t.Setenv(EnvDeploymentPath, path)
 
-	// This build ships no hub, so the zero-value path must surface the
+	// The override file names no hub, so the zero-value path must surface the
 	// actionable sentinel rather than a confusing endpoint-validation error.
 	store := testFileAgentState(t, filepath.Join(secureAgentStateTestDir(t), "agent-state.json"))
 	_, _, err := RefreshAgentRuntime(context.Background(), HubBootstrap{}, store)

@@ -13,9 +13,6 @@
       "server_public_key_b64": "e4cvt8Il90hResvhyawFqhgXqbi2Qddlqa3Iy0vPniU="
     }
   ],
-  "relay_allowlist": [
-    "relay.layerv.ai"
-  ],
   "hub": {
     "host": "hub.nhp.layerv.ai",
     "port": 443,

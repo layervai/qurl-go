@@ -246,8 +246,7 @@ if err != nil {
 defer binding.Destroy()
 ```
 
-That is the whole enrollment. Run it on every
-start, under a supervisor, and stop thinking about the lifecycle:
+That is the whole enrollment. Run it on every start, under a supervisor:
 
 - Restarts are safe — it enrolls only when nothing is registered yet.
 - Crashes and dropped replies resume the same registration, for up to 90 days.

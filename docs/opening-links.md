@@ -115,8 +115,8 @@ the caller's context error and does not record a platform failure.
 
 The resolved configuration — embedded production defaults, `QURL_DEPLOYMENT`,
 or an installed provider — must include the link's issuer and cell. A missing
-cell returns `ErrPortalNativeOnly` or `ErrCellNotInCatalog`; the opener never falls back to the HTTPS relay. A renewal that authenticates a
-different target does not replace the active handle. `Health` reports
+cell returns `ErrPortalNativeOnly` or `ErrCellNotInCatalog`; the opener never
+falls back to the HTTPS relay. A renewal that authenticates a different target does not replace the active handle. `Health` reports
 `LastFailureClass == PortalOpenerFailureTargetChanged`. A later explicit
 recovery `Start` returns `ErrPortalTargetChanged` if the target is still wrong.
 
@@ -340,3 +340,23 @@ redirect-policy error in `*url.Error`.
 or installed provider, and equally a `QURL_DEPLOYMENT` file whose `issuers`
 list is empty, returns `qurl.ErrNoDeployment`, which matches
 `errors.Is(err, qurl.ErrNotConfigured)` — and when the link cannot be verified.
+
+### Updating production defaults
+
+This release includes production cell0 at `cell0.nhp.layerv.ai:443`. Default
+opens use native UDP. Before a new cell or cell identity serves links, release
+its catalog entry and update consumers. Older builds reject an unknown cell.
+An operator-supplied `QURL_DEPLOYMENT` file can update the catalog before a
+consumer upgrade. Networks that block outbound UDP need an explicit relay-only
+configuration; the native catalog does not enable relay fallback.
+
+Before changing the issuer signing key, publish the incoming public key alongside
+the outgoing key and update consumers. Keep both keys through the overlap period;
+remove the outgoing key only after its links have expired and consumers have
+updated. Older builds reject an unknown issuer with `ErrUnknownKID`. A trusted
+`QURL_DEPLOYMENT` file can supply the updated issuer set while a build is upgraded.
+
+The initial production values were checked on 2026-09-15 against AWS account
+235500187906 in us-east-2: KMS alias `layerv-nhp-prod-qurl-v2-issuer`, SSM
+`/prod/nhp/qurl/qv2-issuer-key` and `/prod/nhp/control/hub/identity/public-key`,
+and the `REGISTRY` / `CELL#cell0` row in the Control connector-authority table.

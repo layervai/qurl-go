@@ -42,19 +42,19 @@ func TestEmbeddedDeploymentProvidesProductionDefaults(t *testing.T) {
 		t.Fatalf("qurl/deployment.json is not a JSON object: %v", err)
 	}
 
-	want := []string{"cells", "hub", "issuers", "relay_allowlist"}
+	want := []string{"cells", "hub", "issuers"}
 	if got := slices.Sorted(maps.Keys(dep)); !slices.Equal(got, want) {
 		t.Fatalf("qurl/deployment.json keys are %v, want exactly %v.\n\n%s",
 			got, want, revisitDocsMessage)
 	}
-	for _, key := range []string{"cells", "issuers", "relay_allowlist"} {
+	for _, key := range []string{"cells", "issuers"} {
 		var arr []json.RawMessage
 		if err := json.Unmarshal(dep[key], &arr); err != nil {
 			t.Fatalf("qurl/deployment.json %q is not a JSON array: %v\n\n%s", key, err, revisitDocsMessage)
 		}
 		if len(arr) == 0 {
-			t.Fatalf("qurl/deployment.json %q has %d entry(ies); production defaults require a nonempty array.\n\n%s",
-				key, len(arr), revisitDocsMessage)
+			t.Fatalf("qurl/deployment.json %q is empty; production defaults require a nonempty array.\n\n%s",
+				key, revisitDocsMessage)
 		}
 	}
 	var hub struct {
