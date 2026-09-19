@@ -932,6 +932,7 @@ func (c *nativeAgentRuntimeConfig) registerLocked(ctx context.Context, store Age
 	if c.enrollCredentialProvider != nil {
 		request := AgentEnrollmentCredentialRequest{
 			AgentID:                   state.AgentID,
+			PublicKeyB64:              state.PublicKeyB64,
 			PendingActivationRecovery: state.PendingActivation != nil,
 		}
 		enrollmentCredential, err = c.enrollCredentialProvider(ctx, request)

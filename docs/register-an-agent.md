@@ -476,3 +476,17 @@ Automatic does not mean unchecked. The guarantees behind the behavior above:
 - [Secure a private service](secure-a-private-service.md)
 - [Issue links](issuing-links.md)
 - [Manage connector resources](connector-resources.md)
+
+### Publish without an account
+
+Use `WithAgentRuntimeEnrollmentCredentialProvider(qurl.AnonymousEnrollmentCredential)`
+with `WithAgentRuntimeHeadlessEnrollment()` to enroll a device-owned identity.
+The authority must support anonymous enrollment. The provider receives the durable
+public key and agent ID; an interrupted enrollment derives the same request again.
+The enrollment value is public and grants no REST access. NHP must authenticate
+the matching device key before the authority accepts it. Normal requests use the
+restricted device credential issued after registration.
+
+`POST /v1/account/link` is the only account operation permitted through the
+registered transport. It requires a separate, verified account access token and
+keeps the existing resource owner unchanged.

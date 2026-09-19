@@ -110,6 +110,8 @@ func validateRegisteredAgentResourceRequest(base *url.URL, req *http.Request) er
 
 func registeredAgentResourceRouteAllowed(method, path string) bool {
 	switch path {
+	case "/v1/account/link":
+		return method == http.MethodPost
 	case "/v1/resources":
 		return method == http.MethodGet || method == http.MethodPost
 	case "/v1/api-keys":

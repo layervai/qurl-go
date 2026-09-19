@@ -80,6 +80,8 @@ func WithAgentRuntimeEnrollmentCredential(credential string) AgentRuntimeRegistr
 // stable target of an idempotent enrollment-token mint.
 type AgentEnrollmentCredentialRequest struct {
 	AgentID string
+	// PublicKeyB64 is the durable X25519 device identity. It contains no secret.
+	PublicKeyB64 string
 	// PendingActivationRecovery is true when an earlier assigned-cell REG has
 	// an ambiguous outcome. The provider must recover the exact credential used
 	// for that activation, for example by replaying the original idempotent mint;
