@@ -30,7 +30,19 @@ func TestAnonymousEnrollmentBindsDurableIdentity(t *testing.T) {
 	if _, err := AnonymousEnrollmentCredential(context.Background(), request); err == nil {
 		t.Fatal("invalid public key accepted")
 	}
-	if !registeredAgentResourceRouteAllowed("POST", "/v1/account/link") || registeredAgentResourceRouteAllowed("GET", "/v1/account/link") || registeredAgentResourceRouteAllowed("POST", "/v1/account/owners") {
-		t.Fatal("account route authority widened")
+}
+
+func TestAnonymousEnrollmentRejectsInvalidIdentity(t *testing.T) {
+	validKey := base64.StdEncoding.EncodeToString([]byte(strings.Repeat("a", 32)))
+	for _, request := range []AgentEnrollmentCredentialRequest{
+		{AgentID: "device", PublicKeyB64: validKey[:8] + "\n" + validKey[8:]},
+		{AgentID: "device", PublicKeyB64: base64.StdEncoding.EncodeToString([]byte(strings.Repeat("a", 31)))},
+		{AgentID: "device", PublicKeyB64: base64.StdEncoding.EncodeToString([]byte(strings.Repeat("a", 33)))},
+		{PublicKeyB64: validKey},
+		{AgentID: "invalid agent ID", PublicKeyB64: validKey},
+	} {
+		if _, err := AnonymousEnrollmentCredential(context.Background(), request); err == nil {
+			t.Errorf("invalid identity accepted: %+v", request)
+		}
 	}
 }

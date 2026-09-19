@@ -524,10 +524,15 @@ func ExampleResource_qurlCount() {
 }
 
 func ExampleAnonymousEnrollmentCredential() {
-	options := []qurl.AgentRuntimeRegistrationOption{
-		qurl.WithAgentRuntimeEnrollmentCredentialProvider(qurl.AnonymousEnrollmentCredential),
-		qurl.WithAgentRuntimeHeadlessEnrollment(),
+	credential, err := qurl.AnonymousEnrollmentCredential(context.Background(), qurl.AgentEnrollmentCredentialRequest{
+		AgentID:      "anonymous-device",
+		PublicKeyB64: "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE=",
+	})
+	if err != nil {
+		panic(err)
 	}
-	fmt.Println(len(options))
-	// Output: 2
+	fmt.Println(credential)
+	// Supply this provider to ConnectAgentRuntime with
+	// WithAgentRuntimeEnrollmentCredentialProvider and WithAgentRuntimeHeadlessEnrollment.
+	// Output: lv_live_NEQgOQ806WZu0yxqK0jVSCmdwi4QyJb1w2hC38wJGao
 }
