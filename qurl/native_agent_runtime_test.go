@@ -1271,6 +1271,9 @@ func TestConnectAgentRuntime_EnrollmentCredentialProviderFreshIdentityAndLock(t 
 		if persisted.AgentID == "" || persisted.AgentID != got.AgentID {
 			return "", fmt.Errorf("provider observed request agent id %q but persisted id %q", got.AgentID, persisted.AgentID)
 		}
+		if got.PublicKeyB64 == "" || got.PublicKeyB64 != persisted.PublicKeyB64 {
+			return "", errors.New("provider did not receive the durable public key")
+		}
 		// The callback runs inside the lifecycle setup lock. A reentrant public
 		// save must fail rather than deadlock or escape serialization.
 		reentrantSaveErr = f.store.SaveAgentState(ctx, persisted)

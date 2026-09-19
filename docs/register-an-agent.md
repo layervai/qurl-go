@@ -471,12 +471,6 @@ Automatic does not mean unchecked. The guarantees behind the behavior above:
 - **Links and services are separate trust paths.** A link opened in a browser and
   a service connected this way do not stand in for each other.
 
-## See also
-
-- [Secure a private service](secure-a-private-service.md)
-- [Issue links](issuing-links.md)
-- [Manage connector resources](connector-resources.md)
-
 ### Publish without an account
 
 Use `WithAgentRuntimeEnrollmentCredentialProvider(qurl.AnonymousEnrollmentCredential)`
@@ -488,5 +482,11 @@ the matching device key before the authority accepts it. Normal requests use the
 restricted device credential issued after registration.
 
 `POST /v1/account/link` is the only account operation permitted through the
-registered transport. It requires a separate, verified account access token and
+registered transport. It requires a separate, verified account access token in the JSON body field `account_token` and
 keeps the existing resource owner unchanged.
+
+## See also
+
+- [Secure a private service](secure-a-private-service.md)
+- [Issue links](issuing-links.md)
+- [Manage connector resources](connector-resources.md)

@@ -522,3 +522,12 @@ func ExampleResource_qurlCount() {
 	// qURLs: 0
 	// qURLs: 3
 }
+
+func ExampleAnonymousEnrollmentCredential() {
+	options := []qurl.AgentRuntimeRegistrationOption{
+		qurl.WithAgentRuntimeEnrollmentCredentialProvider(qurl.AnonymousEnrollmentCredential),
+		qurl.WithAgentRuntimeHeadlessEnrollment(),
+	}
+	fmt.Println(len(options))
+	// Output: 2
+}
