@@ -16,6 +16,12 @@ func TestAnonymousEnrollmentBindsDurableIdentity(t *testing.T) {
 	if credential != "lv_live_NEQgOQ806WZu0yxqK0jVSCmdwi4QyJb1w2hC38wJGao" {
 		t.Fatalf("wire vector changed: %s", credential)
 	}
+	urlAlphabetRequest := request
+	urlAlphabetRequest.AgentID = "anonymous-device-0"
+	urlAlphabet, err := AnonymousEnrollmentCredential(context.Background(), urlAlphabetRequest)
+	if err != nil || urlAlphabet != "lv_live_eppwweaMNn_pXSsO06rZ_bsd29TmtBlhjK-bDXSOEA4" {
+		t.Fatalf("base64url vector changed: %v", err)
+	}
 	request.PendingActivationRecovery = true
 	replay, err := AnonymousEnrollmentCredential(context.Background(), request)
 	if err != nil || replay != credential {

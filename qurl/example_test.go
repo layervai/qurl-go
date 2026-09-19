@@ -534,5 +534,6 @@ func ExampleAnonymousEnrollmentCredential() {
 	fmt.Println(credential)
 	// Supply this provider to ConnectAgentRuntime with
 	// WithAgentRuntimeEnrollmentCredentialProvider and WithAgentRuntimeHeadlessEnrollment.
+
 	// Output: lv_live_NEQgOQ806WZu0yxqK0jVSCmdwi4QyJb1w2hC38wJGao
 }

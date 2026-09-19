@@ -6732,3 +6732,25 @@ func TestGenerateDeviceID_IsCanonicalAndUnique(t *testing.T) {
 		seen[id] = true
 	}
 }
+
+func TestConnectAgentRuntimeAnonymousEnrollment(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	f := newRuntimeFixture(t,
+		[]runtimeUDPStep{{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: contract.InitialAssignment.Result.BodyJSON}},
+		[]runtimeUDPStep{
+			{requestType: relayknock.TypeRegister, replyType: relayknock.TypeRegisterAck, replyBody: contract.AssignedCellRegistration.Result.BodyJSON},
+			{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: contract.RegistrationCompletion.Result.BodyJSON},
+		})
+	client, binding, err := ConnectAgentRuntime(context.Background(), f.store, f.options(WithAgentRuntimeEnrollmentCredentialProvider(AnonymousEnrollmentCredential))...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer binding.Destroy()
+	if client == nil {
+		t.Fatal("anonymous enrollment returned no client")
+	}
+	state, err := f.store.LoadAgentState(context.Background())
+	if err != nil || state.RegisteredAt == nil || state.DeviceAPIKey == "" {
+		t.Fatalf("anonymous enrollment did not complete: %v", err)
+	}
+}
