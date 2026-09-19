@@ -6733,6 +6733,7 @@ func TestGenerateDeviceID_IsCanonicalAndUnique(t *testing.T) {
 	}
 }
 
+// The fixture seeds the fixed conformance X25519 keypair before enrollment.
 func TestConnectAgentRuntimeAnonymousEnrollment(t *testing.T) {
 	contract := loadAssignmentFixture(t)
 	f := newRuntimeFixture(t,

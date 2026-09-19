@@ -3,6 +3,7 @@ package qurl
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -20,17 +21,25 @@ func TestAnonymousEnrollmentBindsDurableIdentity(t *testing.T) {
 	urlAlphabetRequest.AgentID = "anonymous-device-0"
 	urlAlphabet, err := AnonymousEnrollmentCredential(context.Background(), urlAlphabetRequest)
 	if err != nil || urlAlphabet != "lv_live_eppwweaMNn_pXSsO06rZ_bsd29TmtBlhjK-bDXSOEA4" {
-		t.Fatalf("base64url vector changed: %v", err)
+		t.Fatalf("base64url vector = %q: %v", urlAlphabet, err)
+	}
+	if err := validateRecoverableEnrollmentCredential(urlAlphabet); err != nil {
+		t.Fatal(err)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := AnonymousEnrollmentCredential(canceled, request); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled provider = %v", err)
 	}
 	request.PendingActivationRecovery = true
 	replay, err := AnonymousEnrollmentCredential(context.Background(), request)
 	if err != nil || replay != credential {
-		t.Fatalf("retry changed enrollment: %v", err)
+		t.Fatalf("retry enrollment = %q: %v", replay, err)
 	}
 	request.AgentID = "another-device"
 	other, err := AnonymousEnrollmentCredential(context.Background(), request)
 	if err != nil || other == credential {
-		t.Fatal("agent identity is not bound")
+		t.Fatalf("other identity enrollment = %q: %v", other, err)
 	}
 	request.PublicKeyB64 = "invalid"
 	if _, err := AnonymousEnrollmentCredential(context.Background(), request); err == nil {
