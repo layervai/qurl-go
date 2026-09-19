@@ -1271,6 +1271,9 @@ func TestConnectAgentRuntime_EnrollmentCredentialProviderFreshIdentityAndLock(t 
 		if persisted.AgentID == "" || persisted.AgentID != got.AgentID {
 			return "", fmt.Errorf("provider observed request agent id %q but persisted id %q", got.AgentID, persisted.AgentID)
 		}
+		if got.PublicKeyB64 == "" || got.PublicKeyB64 != persisted.PublicKeyB64 {
+			return "", errors.New("provider did not receive the durable public key")
+		}
 		// The callback runs inside the lifecycle setup lock. A reentrant public
 		// save must fail rather than deadlock or escape serialization.
 		reentrantSaveErr = f.store.SaveAgentState(ctx, persisted)
@@ -6727,5 +6730,28 @@ func TestGenerateDeviceID_IsCanonicalAndUnique(t *testing.T) {
 			t.Fatalf("generated id %q repeated", id)
 		}
 		seen[id] = true
+	}
+}
+
+// The fixture seeds the fixed conformance X25519 keypair before enrollment.
+func TestConnectAgentRuntimeAnonymousEnrollment(t *testing.T) {
+	contract := loadAssignmentFixture(t)
+	f := newRuntimeFixture(t,
+		[]runtimeUDPStep{{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: contract.InitialAssignment.Result.BodyJSON}},
+		[]runtimeUDPStep{
+			{requestType: relayknock.TypeRegister, replyType: relayknock.TypeRegisterAck, replyBody: contract.AssignedCellRegistration.Result.BodyJSON},
+			{requestType: relayknock.TypeListRequest, replyType: relayknock.TypeListResult, replyBody: contract.RegistrationCompletion.Result.BodyJSON},
+		})
+	client, binding, err := ConnectAgentRuntime(context.Background(), f.store, f.options(WithAgentRuntimeEnrollmentCredentialProvider(AnonymousEnrollmentCredential))...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer binding.Destroy()
+	if client == nil {
+		t.Fatal("anonymous enrollment returned no client")
+	}
+	state, err := f.store.LoadAgentState(context.Background())
+	if err != nil || state.RegisteredAt == nil || state.DeviceAPIKey == "" {
+		t.Fatalf("anonymous enrollment did not complete: %v", err)
 	}
 }

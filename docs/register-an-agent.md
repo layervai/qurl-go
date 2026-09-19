@@ -471,6 +471,20 @@ Automatic does not mean unchecked. The guarantees behind the behavior above:
 - **Links and services are separate trust paths.** A link opened in a browser and
   a service connected this way do not stand in for each other.
 
+### Publish without an account
+
+Use `WithAgentRuntimeEnrollmentCredentialProvider(qurl.AnonymousEnrollmentCredential)`
+with `WithAgentRuntimeHeadlessEnrollment()` to enroll a device-owned identity.
+The authority must support anonymous enrollment. The provider receives the durable
+public key and agent ID; an interrupted enrollment derives the same request again.
+The enrollment value is public and grants no REST access. NHP must authenticate
+the matching device key before the authority accepts it. Normal requests use the
+restricted device credential issued after registration.
+
+`POST /v1/account/link` is the only account operation permitted through the
+registered transport. It requires a separate, verified account access token in the JSON body field `account_token` and
+keeps the existing resource owner unchanged.
+
 ## See also
 
 - [Secure a private service](secure-a-private-service.md)

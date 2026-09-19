@@ -522,3 +522,18 @@ func ExampleResource_qurlCount() {
 	// qURLs: 0
 	// qURLs: 3
 }
+
+func ExampleAnonymousEnrollmentCredential() {
+	credential, err := qurl.AnonymousEnrollmentCredential(context.Background(), qurl.AgentEnrollmentCredentialRequest{
+		AgentID:      "anonymous-device",
+		PublicKeyB64: "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE=",
+	})
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(credential)
+	// Supply this provider to ConnectAgentRuntime with
+	// WithAgentRuntimeEnrollmentCredentialProvider and WithAgentRuntimeHeadlessEnrollment.
+
+	// Output: lv_live_NEQgOQ806WZu0yxqK0jVSCmdwi4QyJb1w2hC38wJGao
+}

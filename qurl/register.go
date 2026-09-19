@@ -65,7 +65,8 @@ func ConnectAgentRuntime(ctx context.Context, store AgentStateStore, opts ...Age
 // requires a server-minted encoded token whose total string length, including
 // any prefix, is at least 32 bytes. User-chosen passwords are not valid
 // enrollment credentials; the SDK enforces syntax and this length floor, while
-// the minting authority must guarantee cryptographic randomness.
+// secret minting authorities must guarantee cryptographic randomness. Anonymous
+// enrollment uses a public selector bound to the authenticated device peer.
 func WithAgentRuntimeEnrollmentCredential(credential string) AgentRuntimeRegistrationOption {
 	return nativeRuntimeOptionFunc(func(c *nativeAgentRuntimeConfig) error {
 		c.enrollCredential = credential
@@ -80,6 +81,8 @@ func WithAgentRuntimeEnrollmentCredential(credential string) AgentRuntimeRegistr
 // stable target of an idempotent enrollment-token mint.
 type AgentEnrollmentCredentialRequest struct {
 	AgentID string
+	// PublicKeyB64 is the durable X25519 device identity. It contains no secret.
+	PublicKeyB64 string
 	// PendingActivationRecovery is true when an earlier assigned-cell REG has
 	// an ambiguous outcome. The provider must recover the exact credential used
 	// for that activation, for example by replaying the original idempotent mint;

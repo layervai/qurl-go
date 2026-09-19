@@ -183,13 +183,12 @@ type PendingAgentCompletion struct {
 // AgentPublicKeyB64 likewise duplicates AgentState.PublicKeyB64 so loading can
 // reject keypair/state desynchronization before replaying the authority-bound
 // ticket.
-// EnrollmentCredentialFingerprintB64 is a domain-separated SHA-256 identity of
-// the high-entropy caller-supplied enrollment credential. It permits only that
-// same credential to resume the record without retaining the bearer value.
-// ConnectAgentRuntime enforces an encoded-token total-length floor; the
-// producer remains responsible for cryptographically random minting. This
-// fingerprint is an equality tag for a server-minted secret, never a password
-// verifier.
+// EnrollmentCredentialFingerprintB64 is a domain-separated SHA-256 equality
+// tag for the caller-supplied enrollment value. It permits only that same value
+// to resume the record without retaining it. Secret credential producers must
+// mint cryptographically random values. Anonymous enrollment instead uses a
+// public selector: its authority comes solely from the matching authenticated
+// Noise peer, and its fingerprint is only a replay tag, never a password verifier.
 // The REG credential itself is never persisted: unattended kinds re-derive it
 // from the corroborated enrollment credential, while account recovery asks the
 // explicit OTP provider for the original code and never dispatches another OTP.
