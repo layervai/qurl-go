@@ -8,6 +8,11 @@ and are marked **Breaking** with what to change.
 
 ## Unreleased
 
+- `RegisteredAgentResourceHTTPDoer` now permits owner-scoped resource qURL
+  listing, individual qURL updates and revocation, and session listing and
+  termination. Resource qURL lists support pagination; session lists remain
+  unpaginated. Matching service-side device authorization is required.
+
 - **Breaking:** An unset deployment now selects embedded production issuer,
   cell, and Hub trust instead of returning a missing-configuration error.
   Set `QURL_DEPLOYMENT` for sandbox or custom deployments. Override files replace
