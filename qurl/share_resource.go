@@ -42,6 +42,10 @@ type ShareResourceOptions struct {
 	// must be whole seconds — sub-second remainders are rejected rather
 	// than rounded.
 	TTL time.Duration
+	// SessionDuration limits each admitted session independently of link TTL.
+	// Zero preserves the server default; nonzero values must be whole seconds.
+	// The API enforces its duration limits and the resource's session cap.
+	SessionDuration time.Duration
 }
 
 // ShareLink is a freshly minted share link — a short-lived qURL access link
@@ -72,6 +76,8 @@ type ShareLink struct {
 
 type shareResourceRequest struct {
 	TTLSeconds int64 `json:"ttl_seconds,omitempty"`
+	// The share API uses the same duration-string contract as mint_link.
+	SessionDuration string `json:"session_duration,omitempty"`
 }
 
 type shareResourceResponse struct {
@@ -110,8 +116,9 @@ func (r shareResourceResponse) shareLink() (*ShareLink, error) {
 // sharing is what turns the identifier into access. Each link expires on its
 // own — share again whenever you need a fresh one.
 //
-// opts may be nil. If TTL is omitted (zero), the API applies its default
-// lifetime; the LayerV API remains the source of truth for account limits.
+// opts may be nil. Zero TTL and SessionDuration use the server defaults.
+// SessionDuration bounds admitted sessions independently of the link lifetime.
+// The API enforces account and resource limits.
 //
 // The returned link is not opened, parsed, or verified here. When
 // ShareLink.Link is qv2-shaped, the composition is ShareResource →
@@ -145,6 +152,13 @@ func (c *Client) ShareResource(ctx context.Context, resourceCRID string, opts *S
 			return nil, fmt.Errorf("%w: ttl duration must be whole seconds", ErrInvalidResourceRequest)
 		}
 		reqBody.TTLSeconds = int64(opts.TTL / time.Second)
+		if opts.SessionDuration != 0 {
+			duration, err := formatAPIDuration(opts.SessionDuration, time.Second)
+			if err != nil {
+				return nil, fmt.Errorf("%w: session duration: %w", ErrInvalidResourceRequest, err)
+			}
+			reqBody.SessionDuration = duration
+		}
 	}
 
 	path := "/v1/resources/" + url.PathEscape(resourceCRID) + "/share"

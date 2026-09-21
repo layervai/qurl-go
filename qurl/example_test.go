@@ -254,7 +254,8 @@ func ExampleClient_ShareResource() {
 
 	// Address the resource by its CRID. The CRID is safe to paste anywhere; the share link is
 	// the secret. Open it with EnterPortalForCRID and the same expected CRID.
-	share, err := client.ShareResource(context.Background(), exampleCRID, nil)
+	// Keep the default link lifetime, but limit each admitted session to five minutes.
+	share, err := client.ShareResource(context.Background(), exampleCRID, &qurl.ShareResourceOptions{SessionDuration: 5 * time.Minute})
 	if err != nil {
 		panic(err)
 	}
