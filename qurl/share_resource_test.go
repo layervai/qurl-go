@@ -68,6 +68,7 @@ func TestClient_ShareResource(t *testing.T) {
 			t.Fatalf("decode share body: %v", err)
 		}
 		assertJSONField(t, body, "ttl_seconds", float64(90))
+		assertJSONField(t, body, "session_duration", "5m")
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"data":{"qurl":"https://qurl.link/at_demo123#qv2t1.1.1.1.AQ.AQ.AQ","qurl_id":"q_a1b2c3d4e5f","crid":%q,"type":"qv2","expires_at":"2026-08-13T20:10:00Z","expires_in_seconds":600,"single_use":true}}`, heldCRID)
 	}))
@@ -77,7 +78,7 @@ func TestClient_ShareResource(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
-	share, err := client.ShareResource(context.Background(), "ae4jqpd7eaoslq7jinmjv4yikgzmcxgpjfsuobiniqnko32lpw743ivbeyha", &ShareResourceOptions{TTL: 90 * time.Second})
+	share, err := client.ShareResource(context.Background(), "ae4jqpd7eaoslq7jinmjv4yikgzmcxgpjfsuobiniqnko32lpw743ivbeyha", &ShareResourceOptions{TTL: 90 * time.Second, SessionDuration: 5 * time.Minute})
 	if err != nil {
 		t.Fatalf("ShareResource: %v", err)
 	}
@@ -215,8 +216,8 @@ func TestClient_ShareResourceZeroTTLOmitsField(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatalf("decode share body: %v", err)
 		}
-		if _, ok := body["ttl_seconds"]; ok {
-			t.Fatalf("share body = %#v, want ttl_seconds omitted so the server default applies", body)
+		if len(body) != 0 {
+			t.Fatalf("share body = %#v, want both duration fields omitted", body)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{"data":{"crid":"ae4jqpd7eaoslq7jinmjv4yikgzmcxgpjfsuobiniqnko32lpw743ivbeyha","qurl":"https://qurl.link/at_default","type":"qv2","expires_in_seconds":300,"single_use":false}}`)
@@ -322,6 +323,11 @@ func TestClient_ShareResourceValidation(t *testing.T) {
 	}
 	if _, err := client.ShareResource(context.Background(), "ae4jqpd7eaoslq7jinmjv4yikgzmcxgpjfsuobiniqnko32lpw743ivbeyha", &ShareResourceOptions{TTL: 90*time.Second + 500*time.Millisecond}); !errors.Is(err, ErrInvalidResourceRequest) || !strings.Contains(err.Error(), "whole seconds") {
 		t.Fatalf("fractional-second ttl: want whole-seconds ErrInvalidResourceRequest, got %v", err)
+	}
+	for _, duration := range []time.Duration{-time.Second, 500 * time.Millisecond, 1500 * time.Millisecond} {
+		if _, err := client.ShareResource(context.Background(), "ae4jqpd7eaoslq7jinmjv4yikgzmcxgpjfsuobiniqnko32lpw743ivbeyha", &ShareResourceOptions{SessionDuration: duration}); !errors.Is(err, ErrInvalidResourceRequest) {
+			t.Fatalf("session duration %s: want ErrInvalidResourceRequest, got %v", duration, err)
+		}
 	}
 	var nilClient *Client
 	if _, err := nilClient.ShareResource(context.Background(), "ae4jqpd7eaoslq7jinmjv4yikgzmcxgpjfsuobiniqnko32lpw743ivbeyha", nil); !errors.Is(err, ErrInvalidClientConfig) {
@@ -444,5 +450,29 @@ func TestClientShareResourceIdentityErrors(t *testing.T) {
 				t.Fatalf("link=%v error=%v, want invalid response and %v", link, err, tc.want)
 			}
 		})
+	}
+}
+
+func TestClient_ShareResourceSessionDurationWithoutTTL(t *testing.T) {
+	heldCRID, _, _ := cridKeyMatchFixture(t)
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode share body: %v", err)
+			return
+		}
+		if len(body) != 1 || body["session_duration"] != "5m" {
+			t.Errorf("share body = %#v, want only session_duration=5m", body)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"data":{"qurl":"https://qurl.link/at_session","crid":%q}}`, heldCRID)
+	}))
+	defer api.Close()
+	client, err := NewClient(BearerToken("lv_test"), WithBaseURL(api.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.ShareResource(context.Background(), heldCRID, &ShareResourceOptions{SessionDuration: 5 * time.Minute}); err != nil {
+		t.Fatal(err)
 	}
 }
