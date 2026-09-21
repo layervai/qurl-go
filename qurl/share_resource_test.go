@@ -216,8 +216,8 @@ func TestClient_ShareResourceZeroTTLOmitsField(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatalf("decode share body: %v", err)
 		}
-		if _, ok := body["ttl_seconds"]; ok {
-			t.Fatalf("share body = %#v, want ttl_seconds omitted so the server default applies", body)
+		if len(body) != 0 {
+			t.Fatalf("share body = %#v, want both duration fields omitted", body)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{"data":{"crid":"ae4jqpd7eaoslq7jinmjv4yikgzmcxgpjfsuobiniqnko32lpw743ivbeyha","qurl":"https://qurl.link/at_default","type":"qv2","expires_in_seconds":300,"single_use":false}}`)
@@ -450,5 +450,27 @@ func TestClientShareResourceIdentityErrors(t *testing.T) {
 				t.Fatalf("link=%v error=%v, want invalid response and %v", link, err, tc.want)
 			}
 		})
+	}
+}
+
+func TestClient_ShareResourceSessionDurationWithoutTTL(t *testing.T) {
+	heldCRID, _, _ := cridKeyMatchFixture(t)
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if len(body) != 1 || body["session_duration"] != "5m" {
+			t.Errorf("share body = %#v, want only session_duration=5m", body)
+		}
+		fmt.Fprintf(w, `{"data":{"qurl":"https://qurl.link/at_session","crid":%q}}`, heldCRID)
+	}))
+	defer api.Close()
+	client, err := NewClient(BearerToken("lv_test"), WithBaseURL(api.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.ShareResource(context.Background(), heldCRID, &ShareResourceOptions{SessionDuration: 5 * time.Minute}); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -75,7 +75,8 @@ type ShareLink struct {
 }
 
 type shareResourceRequest struct {
-	TTLSeconds      int64  `json:"ttl_seconds,omitempty"`
+	TTLSeconds int64 `json:"ttl_seconds,omitempty"`
+	// The share API uses the same duration-string contract as mint_link.
 	SessionDuration string `json:"session_duration,omitempty"`
 }
 
@@ -115,8 +116,9 @@ func (r shareResourceResponse) shareLink() (*ShareLink, error) {
 // sharing is what turns the identifier into access. Each link expires on its
 // own — share again whenever you need a fresh one.
 //
-// opts may be nil. If TTL is omitted (zero), the API applies its default
-// lifetime; the LayerV API remains the source of truth for account limits.
+// opts may be nil. Zero TTL and SessionDuration use the server defaults.
+// SessionDuration bounds admitted sessions independently of the link lifetime.
+// The API enforces account and resource limits.
 //
 // The returned link is not opened, parsed, or verified here. When
 // ShareLink.Link is qv2-shaped, the composition is ShareResource →
