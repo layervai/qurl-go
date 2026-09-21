@@ -68,6 +68,7 @@ func TestClient_ShareResource(t *testing.T) {
 			t.Fatalf("decode share body: %v", err)
 		}
 		assertJSONField(t, body, "ttl_seconds", float64(90))
+		assertJSONField(t, body, "session_duration", "5m")
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"data":{"qurl":"https://qurl.link/at_demo123#qv2t1.1.1.1.AQ.AQ.AQ","qurl_id":"q_a1b2c3d4e5f","crid":%q,"type":"qv2","expires_at":"2026-08-13T20:10:00Z","expires_in_seconds":600,"single_use":true}}`, heldCRID)
 	}))
@@ -77,7 +78,7 @@ func TestClient_ShareResource(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
-	share, err := client.ShareResource(context.Background(), "ae4jqpd7eaoslq7jinmjv4yikgzmcxgpjfsuobiniqnko32lpw743ivbeyha", &ShareResourceOptions{TTL: 90 * time.Second})
+	share, err := client.ShareResource(context.Background(), "ae4jqpd7eaoslq7jinmjv4yikgzmcxgpjfsuobiniqnko32lpw743ivbeyha", &ShareResourceOptions{TTL: 90 * time.Second, SessionDuration: 5 * time.Minute})
 	if err != nil {
 		t.Fatalf("ShareResource: %v", err)
 	}
@@ -322,6 +323,11 @@ func TestClient_ShareResourceValidation(t *testing.T) {
 	}
 	if _, err := client.ShareResource(context.Background(), "ae4jqpd7eaoslq7jinmjv4yikgzmcxgpjfsuobiniqnko32lpw743ivbeyha", &ShareResourceOptions{TTL: 90*time.Second + 500*time.Millisecond}); !errors.Is(err, ErrInvalidResourceRequest) || !strings.Contains(err.Error(), "whole seconds") {
 		t.Fatalf("fractional-second ttl: want whole-seconds ErrInvalidResourceRequest, got %v", err)
+	}
+	for _, duration := range []time.Duration{-time.Second, 500 * time.Millisecond, 1500 * time.Millisecond} {
+		if _, err := client.ShareResource(context.Background(), "ae4jqpd7eaoslq7jinmjv4yikgzmcxgpjfsuobiniqnko32lpw743ivbeyha", &ShareResourceOptions{SessionDuration: duration}); !errors.Is(err, ErrInvalidResourceRequest) {
+			t.Fatalf("session duration %s: want ErrInvalidResourceRequest, got %v", duration, err)
+		}
 	}
 	var nilClient *Client
 	if _, err := nilClient.ShareResource(context.Background(), "ae4jqpd7eaoslq7jinmjv4yikgzmcxgpjfsuobiniqnko32lpw743ivbeyha", nil); !errors.Is(err, ErrInvalidClientConfig) {

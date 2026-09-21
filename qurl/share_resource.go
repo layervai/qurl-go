@@ -42,6 +42,10 @@ type ShareResourceOptions struct {
 	// must be whole seconds — sub-second remainders are rejected rather
 	// than rounded.
 	TTL time.Duration
+	// SessionDuration limits each admitted session independently of link TTL.
+	// Zero preserves the server default; nonzero values must be whole seconds.
+	// The API enforces its duration limits and the resource's session cap.
+	SessionDuration time.Duration
 }
 
 // ShareLink is a freshly minted share link — a short-lived qURL access link
@@ -71,7 +75,8 @@ type ShareLink struct {
 }
 
 type shareResourceRequest struct {
-	TTLSeconds int64 `json:"ttl_seconds,omitempty"`
+	TTLSeconds      int64  `json:"ttl_seconds,omitempty"`
+	SessionDuration string `json:"session_duration,omitempty"`
 }
 
 type shareResourceResponse struct {
@@ -145,6 +150,13 @@ func (c *Client) ShareResource(ctx context.Context, resourceCRID string, opts *S
 			return nil, fmt.Errorf("%w: ttl duration must be whole seconds", ErrInvalidResourceRequest)
 		}
 		reqBody.TTLSeconds = int64(opts.TTL / time.Second)
+		if opts.SessionDuration != 0 {
+			duration, err := formatAPIDuration(opts.SessionDuration, time.Second)
+			if err != nil {
+				return nil, fmt.Errorf("%w: session duration: %w", ErrInvalidResourceRequest, err)
+			}
+			reqBody.SessionDuration = duration
+		}
 	}
 
 	path := "/v1/resources/" + url.PathEscape(resourceCRID) + "/share"
