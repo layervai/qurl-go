@@ -458,11 +458,13 @@ func TestClient_ShareResourceSessionDurationWithoutTTL(t *testing.T) {
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			t.Fatal(err)
+			t.Errorf("decode share body: %v", err)
+			return
 		}
 		if len(body) != 1 || body["session_duration"] != "5m" {
 			t.Errorf("share body = %#v, want only session_duration=5m", body)
 		}
+		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"data":{"qurl":"https://qurl.link/at_session","crid":%q}}`, heldCRID)
 	}))
 	defer api.Close()

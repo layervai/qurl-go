@@ -936,7 +936,8 @@ func seedPendingActivation(t *testing.T, contract *conformance.AgentAssignmentFi
 	if optionSet != nil {
 		opts = optionSet(f)
 	}
-	// Only the cell is silent; do not give the responding Hub a 100ms deadline.
+	// The seed always makes one attempt with only the cell silent. Caller options
+	// customize metadata; pin normal reply patience for the answering Hub.
 	opts = append(opts, f.instantCellSilence(t, f.dialer)...)
 	opts = append(opts, WithAgentRuntimeAssignmentRetryBudget(1, runtimeReplyBudget))
 	_, _, err := connectWithEnrollment(context.Background(), conformance.AgentAssignmentBootstrapCredentialFixture, f.store, opts...)
