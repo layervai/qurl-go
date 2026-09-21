@@ -938,6 +938,7 @@ func seedPendingActivation(t *testing.T, contract *conformance.AgentAssignmentFi
 	}
 	// Only the cell is silent; do not give the responding Hub a 100ms deadline.
 	opts = append(opts, f.instantCellSilence(t, f.dialer)...)
+	opts = append(opts, WithAgentRuntimeAssignmentRetryBudget(1, runtimeReplyBudget))
 	_, _, err := connectWithEnrollment(context.Background(), conformance.AgentAssignmentBootstrapCredentialFixture, f.store, opts...)
 	if !errors.Is(err, ErrRegistrationRecoveryRequired) {
 		t.Fatalf("seed pending activation: %v", err)
