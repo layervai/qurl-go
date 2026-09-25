@@ -3838,6 +3838,10 @@ func TestConnectAgentRuntime_AccountOTPProviderFailuresSendOneOTPNoREGAndPersist
 					WithAgentRuntimeOTPProvider(provider),
 					WithAgentRuntimeUDPDialer(dialer),
 					WithAgentClientHTTPClient(refusingHTTP),
+					// OTP dispatch never reads a reply, so the cell's scripted
+					// silence is never waited on; without this the fixture would
+					// hold the answering Hub exchange to the silence timeout.
+					WithAgentRuntimeUDPBounds(runtimeReplyTimeout, 1),
 				)...)
 			if test.want != nil && !errors.Is(err, test.want) {
 				t.Fatalf("provider failure = %v, want %v", err, test.want)
@@ -3947,6 +3951,9 @@ func TestConnectAgentRuntime_AccountPendingSaveFailureSendsOneOTPNoREG(t *testin
 			WithAgentRuntimeAllowedRegistrationKeyKinds(RegistrationKeyKindAccount),
 			WithAgentRuntimeOTPProvider(func(context.Context, AgentOTPChallenge) (string, error) { return "12345678", nil }),
 			WithAgentRuntimeUDPDialer(dialer),
+			// See the provider-failure test: OTP dispatch reads no reply, so the
+			// Hub keeps reply patience instead of the silence timeout.
+			WithAgentRuntimeUDPBounds(runtimeReplyTimeout, 1),
 		)...)
 	if !errors.Is(err, ErrAgentBindingPersistence) {
 		t.Fatalf("account pending save failure = %v, want ErrAgentBindingPersistence", err)
