@@ -18,16 +18,16 @@ var ErrRegisteredAgentResourceRequestDenied = errors.New("qurl: registered-agent
 // available only on a Client opened or returned by the registered-agent
 // lifecycle APIs.
 //
-// The bridge accepts only the owner-scoped resource, Connector sharing-state,
-// share-link mint (POST /v1/resources/{id}/share), portal creation,
-// Connector-enrollment-token mint, account linking (POST /v1/account/link),
-// and identity-echo routes used by a
-// registered qURL client. The service independently restricts a device key's
-// POST /v1/api-keys authority to a Connector-target one-shot token. Other account,
-// billing, other key-management, and session-control routes fail closed. It
-// also requires the Client's exact API origin and path prefix. The caller's
-// request is never mutated, and the device Authorization header is removed
-// from the returned response metadata.
+// The bridge accepts only owner-scoped resource and nested qURL/session
+// management, Connector sharing-state, share-link mint
+// (POST /v1/resources/{id}/share), portal creation, Connector-enrollment-token
+// mint, account linking (POST /v1/account/link), and identity-echo routes used
+// by a registered qURL client. The service independently restricts a device
+// key's POST /v1/api-keys authority to a Connector-target one-shot token.
+// Other account, billing, usage, and key-management routes fail closed. The
+// bridge also requires the Client's exact API origin and path prefix. The
+// caller's request is never mutated, and the device Authorization header is
+// removed from the returned response metadata.
 func (c *Client) RegisteredAgentResourceHTTPDoer() (HTTPDoer, error) {
 	if c == nil || !c.registered || c.credentials == nil || c.httpClient == nil {
 		return nil, fmt.Errorf("%w: client is not a registered agent resource client", ErrInvalidClientConfig)
@@ -103,7 +103,12 @@ func validateRegisteredAgentResourceRequest(base *url.URL, req *http.Request) er
 	if !registeredAgentResourceRouteAllowed(req.Method, path) {
 		return fmt.Errorf("%w: %s %s", ErrRegisteredAgentResourceRequestDenied, req.Method, path)
 	}
-	if (req.URL.RawQuery != "" || req.URL.ForceQuery) && (req.Method != http.MethodGet || path != "/v1/resources") {
+	// Resource and nested qURL lists accept pagination; the service's session
+	// list is unpaginated. A resource named "qurls" remains a single-resource
+	// route and must not gain query authority.
+	listQuery := req.Method == http.MethodGet && (path == "/v1/resources" ||
+		(strings.Count(path, "/") == 4 && strings.HasSuffix(path, "/qurls")))
+	if (req.URL.RawQuery != "" || req.URL.ForceQuery) && !listQuery {
 		return fmt.Errorf("%w: query is not allowed on %s %s", ErrRegisteredAgentResourceRequestDenied, req.Method, path)
 	}
 	return nil
@@ -137,11 +142,22 @@ func registeredAgentResourceRouteAllowed(method, path string) bool {
 		switch segments[1] {
 		case "sharing":
 			return method == http.MethodGet || method == http.MethodPut
-		case "share", "qurls":
+		case "share":
 			return method == http.MethodPost
+		case "qurls":
+			return method == http.MethodGet || method == http.MethodPost
+		case "sessions":
+			return method == http.MethodGet || method == http.MethodDelete
 		}
 	case 3:
-		return segments[1] == "sharing" && segments[2] == "restart" && method == http.MethodPost
+		switch segments[1] {
+		case "sharing":
+			return segments[2] == "restart" && method == http.MethodPost
+		case "qurls":
+			return registeredAgentResourceIDAllowed(segments[2]) && (method == http.MethodPatch || method == http.MethodDelete)
+		case "sessions":
+			return registeredAgentResourceIDAllowed(segments[2]) && method == http.MethodDelete
+		}
 	}
 	return false
 }
