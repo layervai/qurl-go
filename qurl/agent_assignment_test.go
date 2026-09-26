@@ -325,7 +325,7 @@ func zeroAssignmentJitter() AssignmentOption {
 
 func conformanceAssignmentNonceSource(t *testing.T, encoded string) AssignmentOption {
 	t.Helper()
-	nonce, err := conformance.DecodeConnectorHubRequestNonce(encoded)
+	nonce, err := conformance.DecodeRequestNonce(encoded)
 	if err != nil {
 		t.Fatalf("decode conformance request nonce: %v", err)
 	}

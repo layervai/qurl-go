@@ -960,7 +960,7 @@ func withTestAgentRuntimeAssignmentSleep(sleep func(context.Context, time.Durati
 
 func withTestAgentRuntimeAssignmentNonce(encoded string) AgentRuntimeLifecycleOption {
 	return nativeRuntimeLifecycleOptionFunc(func(c *nativeAgentRuntimeConfig) error {
-		nonce, err := conformance.DecodeConnectorHubRequestNonce(encoded)
+		nonce, err := conformance.DecodeRequestNonce(encoded)
 		if err != nil {
 			return err
 		}
