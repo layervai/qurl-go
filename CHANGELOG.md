@@ -15,6 +15,10 @@ and are marked **Breaking** with what to change.
   GO-2026-5026). Builders pinned to a 1.25 toolchain (`GOTOOLCHAIN=local`) must
   update. `awsstore` moves to the same floor.
 
+- Conformance vectors are pinned at `qurl-conformance` v0.17.1, up from v0.14.0.
+  The native Connector CRID artifact is byte-identical to v0.17.0; v0.17.1
+  restores the public credential-recovery vectors this SDK tests against.
+
 - `RegisteredAgentResourceHTTPDoer` now permits owner-scoped resource qURL
   listing, individual qURL updates and revocation, and session listing and
   termination. Resource qURL lists support pagination; session lists remain
