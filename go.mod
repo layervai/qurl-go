@@ -24,8 +24,11 @@ module github.com/layervai/qurl-go
 // fourth is reached through HTTP. 1.26.5 still reports all four, and 1.26.4
 // additionally reports GO-2026-5856 and GO-2026-4970.
 //
-// Anything below 1.26.6 reintroduces a reachable vulnerability. Before
-// changing this line, run `make vuln` at the candidate version.
+// Anything below 1.26.6 on the 1.26 line reintroduces a reachable
+// vulnerability. The 1.25 line is excluded because it is out of support and
+// below the go 1.26.0 that x/crypto and x/sys declare, not because 1.25.13 is
+// itself vulnerable. Before changing this line, run `make vuln` at the
+// candidate version.
 //
 // ./awsstore and go.work sit at this same floor, but do not read that as
 // permanent. awsstore requires the PUBLISHED parent module, so a future floor
