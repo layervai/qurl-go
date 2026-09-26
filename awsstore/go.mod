@@ -1,6 +1,6 @@
 module github.com/layervai/qurl-go/awsstore
 
-go 1.25.13
+go 1.26.6
 
 // Keeping awsstore a SEPARATE module is deliberate: it isolates the AWS SDK v2
 // dependency here so the root qurl module stays AWS-SDK-free.
@@ -44,6 +44,6 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.40.1 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sts v1.47.1 // indirect
 	github.com/layervai/qurl-conformance v0.13.0 // indirect
-	golang.org/x/crypto v0.55.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
+	golang.org/x/crypto v0.57.0 // indirect
+	golang.org/x/sys v0.48.0 // indirect
 )

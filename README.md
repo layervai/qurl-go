@@ -12,7 +12,7 @@ URLs or creates portals.
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/layervai/qurl-go/qurl.svg)](https://pkg.go.dev/github.com/layervai/qurl-go/qurl)
 [![CI](https://github.com/layervai/qurl-go/actions/workflows/ci.yml/badge.svg)](https://github.com/layervai/qurl-go/actions/workflows/ci.yml)
-[![Go 1.25.13+](https://img.shields.io/badge/go-1.25.13%2B-00ADD8)](go.mod)
+[![Go 1.26.6+](https://img.shields.io/badge/go-1.26.6%2B-00ADD8)](go.mod)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 ## Why qURL
@@ -91,11 +91,12 @@ module:
 go get github.com/layervai/qurl-go/qurl@latest
 ```
 
-Requires Go 1.25.13+ — a security floor, not a preference for the newest
-toolchain. It is the earliest patch release without the currently known
-standard-library vulnerabilities this SDK's code paths reach; CI runs
-`govulncheck` at exactly this version. Anything older reintroduces at least one
-reachable vulnerability. See the comment above the `go` directive in
+Requires Go 1.26.6+ — a security floor, not a preference for the newest
+toolchain. The floor is on the Go 1.26 line because `golang.org/x/crypto` and
+`golang.org/x/sys` require it (and Go 1.25 is out of support); 1.26.6 is the
+earliest 1.26 patch release without the currently known standard-library
+vulnerabilities this SDK's code paths reach. CI runs `govulncheck` at exactly
+this version. See the comment above the `go` directive in
 [go.mod](go.mod) for the advisory list and full rationale.
 
 Not in a module yet? Run `go mod init example.com/myapp` first: `go get`

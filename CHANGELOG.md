@@ -8,6 +8,13 @@ and are marked **Breaking** with what to change.
 
 ## Unreleased
 
+- **The minimum Go version is now 1.26.6, up from 1.25.13.** `golang.org/x/crypto`
+  v0.57.0 and `golang.org/x/sys` v0.48.0 declare `go 1.26.0`, and Go 1.25 is
+  out of support. 1.26.6 is the oldest 1.26 release free of the reachable
+  standard-library vulnerabilities (GO-2026-6218, GO-2026-6090, GO-2026-5972,
+  GO-2026-5026). Builders pinned to a 1.25 toolchain (`GOTOOLCHAIN=local`) must
+  update. `awsstore` moves to the same floor.
+
 - `RegisteredAgentResourceHTTPDoer` now permits owner-scoped resource qURL
   listing, individual qURL updates and revocation, and session listing and
   termination. Resource qURL lists support pagination; session lists remain
