@@ -90,12 +90,16 @@ func FuzzParse(f *testing.F) {
 		if c.String() != s {
 			t.Fatalf("String() = %q, want the verbatim input %q", c.String(), s)
 		}
+		// Active is a narrowing of Known, never an independent answer.
+		if c.Active() && !c.Known() {
+			t.Fatalf("Active() without Known() for %q", s)
+		}
 		// Re-parse is a fixed point over every reported field.
 		again, err := Parse(c.String())
 		if err != nil {
 			t.Fatalf("re-parse of accepted value failed: %v", err)
 		}
-		if again.Version() != c.Version() || again.Known() != c.Known() ||
+		if again.Version() != c.Version() || again.Known() != c.Known() || again.Active() != c.Active() ||
 			again.Environment() != c.Environment() || again.DigestLength() != c.DigestLength() {
 			t.Fatalf("re-parse not a fixed point for %q", s)
 		}
