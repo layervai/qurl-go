@@ -7,10 +7,15 @@
 // operations. Like net/http/httptest, this is a test-support package that sits
 // beside the package it supports.
 //
-// Both helpers speak the same role-symmetric transcript relayknock uses, so a
+// The helpers speak the same role-symmetric transcript relayknock uses, so a
 // reply built here opens under relayknock.DecryptReply and an initiator packet
 // built by relayknock opens here — the wire bytes are fenced by the same golden
 // vectors.
+//
+// An initiator packet opens two ways. OpenInitiatorMessage is for a device the
+// double already knows, and refuses any other. OpenUnknownInitiatorMessage is
+// for a request sent under a key minted for that one message: it learns the
+// key from the packet, which is how the double addresses its reply.
 package relayknocktest
 
 import (
@@ -97,6 +102,40 @@ func OpenInitiatorMessage(serverPriv, expectedDevicePub, packet []byte) (*relayk
 	if err != nil {
 		return nil, err
 	}
+	return initiatorMessage(msg)
+}
+
+// OpenUnknownInitiatorMessage decrypts and authenticates an initiator packet
+// from a device the responder has not met, and returns the device static
+// public key the handshake carried. It is OpenInitiatorMessage for the case
+// where there is no expected key to pass: a request the initiator sends under
+// a key it minted for that one message, which a server learns from the packet
+// itself. The same initiator header types are admitted.
+//
+// devicePub is the key to address the reply to: pass it as
+// KnockInputs.ServerStaticPub to BuildReply. It is authenticated in the sense
+// that the sender provably holds its private half — a reply sealed to it can
+// be opened only by whoever sent this packet. It is NOT an identity the
+// responder recognizes. A test double that must model a server's access
+// decision makes that decision itself, from the message body or from the key.
+//
+// On any failure both results are nil, so a key from a packet that did not
+// authenticate cannot be used by mistake.
+func OpenUnknownInitiatorMessage(serverPriv, packet []byte) (message *relayknock.Reply, devicePub []byte, err error) {
+	msg, devicePub, err := nhpwire.DecryptMessageFromUnknownSender(serverPriv, packet)
+	if err != nil {
+		return nil, nil, err
+	}
+	message, err = initiatorMessage(msg)
+	if err != nil {
+		return nil, nil, err
+	}
+	return message, devicePub, nil
+}
+
+// initiatorMessage is the one initiator header-type gate both opens share, so
+// the known-device and unknown-device paths cannot admit different types.
+func initiatorMessage(msg *nhpwire.Message) (*relayknock.Reply, error) {
 	switch msg.Type {
 	case relayknock.TypeKnock, relayknock.TypeListRequest, relayknock.TypeOTP, relayknock.TypeRegister, relayknock.TypeExit:
 		return &relayknock.Reply{

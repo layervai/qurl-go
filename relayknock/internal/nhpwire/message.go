@@ -254,6 +254,38 @@ func DecryptMessage(devicePriv, expectedServerStaticPub, packet []byte) (*Messag
 	return decryptMessage(devicePriv, expectedServerStaticPub, nil, packet)
 }
 
+// DecryptMessageFromUnknownSender decrypts and authenticates a message whose
+// sender the recipient does not know in advance, and returns the sender static
+// public key the handshake carried. It is the responder-role open: a server
+// meets a new initiator this way, learning the key from the sealed static
+// field instead of comparing it with one it already holds.
+//
+// The returned key is authenticated exactly as far as DecryptMessage
+// authenticates a pinned one. The ss-keyed timestamp open succeeds only if the
+// sender holds the private half of the static key it presented, so the key is
+// returned only when the whole open has succeeded. What this function does NOT
+// establish is that the sender is anyone in particular: deciding whether that
+// key may do what its message asks is the caller's job.
+//
+// The initiator API never calls this. A client always knows which server it
+// sealed its request to, and opening a reply from "whoever answers" would
+// discard the only thing that authenticates a reply. The function exists for
+// relayknocktest, whose test double has to answer a knock from an initiator
+// that minted a fresh key for that one request.
+func DecryptMessageFromUnknownSender(recipientPriv, packet []byte) (msg *Message, senderStaticPub []byte, err error) {
+	msg, err = decryptMessageFrom(recipientPriv, nil, packet, func(carried []byte) bool {
+		// Copied, not aliased: the caller keeps this after the open returns.
+		senderStaticPub = bytes.Clone(carried)
+		return true
+	})
+	if err != nil {
+		// The callback runs before authentication completes, so a key captured
+		// on a failed open is unauthenticated and must not escape.
+		return nil, nil, err
+	}
+	return msg, senderStaticPub, nil
+}
+
 // DecryptReplyMessage decrypts and authenticates a message and admits only the
 // four server reply types. It intentionally returns the internal Message so
 // transports with a narrower profile can inspect authenticated header metadata
@@ -344,7 +376,21 @@ func acceptHubLSTCookieProofMessage(msg *Message) (*Message, error) {
 	return msg, nil
 }
 
+// decryptMessage opens a message from the one sender the caller expects. Every
+// initiator-side open goes through here, so the static-key pin below is the
+// single place a reply is tied to the server the request was sealed to.
 func decryptMessage(devicePriv, expectedServerStaticPub, cookie, packet []byte) (*Message, error) {
+	return decryptMessageFrom(devicePriv, cookie, packet, func(carried []byte) bool {
+		return bytes.Equal(carried, expectedServerStaticPub)
+	})
+}
+
+// decryptMessageFrom is the one open transcript. acceptSender is shown the
+// static key the handshake carries and decides whether the open may continue.
+// It is consulted BEFORE the ss-keyed opens that authenticate the sender, so
+// it must treat that key as a claim, not as a fact: it may refuse on it, but
+// anything it keeps is only meaningful if this function then returns nil.
+func decryptMessageFrom(devicePriv, cookie, packet []byte, acceptSender func(carriedStaticPub []byte) bool) (*Message, error) {
 	if len(packet) < HeaderSize {
 		return nil, fmt.Errorf("reply too short: %d bytes < %d-byte header", len(packet), HeaderSize)
 	}
@@ -399,7 +445,7 @@ func decryptMessage(devicePriv, expectedServerStaticPub, cookie, packet []byte) 
 	if err != nil {
 		return nil, fmt.Errorf("open server static: %w", err)
 	}
-	if !bytes.Equal(serverStaticPub, expectedServerStaticPub) {
+	if !acceptSender(serverStaticPub) {
 		return nil, errors.New("reply from an unexpected server (static key mismatch)")
 	}
 	chainHash.Write(staticField)
