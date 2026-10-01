@@ -1,6 +1,7 @@
 package qurl
 
 import (
+	"bytes"
 	"crypto/subtle"
 	"encoding/base64"
 	"errors"
@@ -143,6 +144,26 @@ func (c *CellCatalog) lookup(cellPub []byte) (CellEndpoint, bool, error) {
 		return CellEndpoint{}, false, ErrCellCatalogKeyMismatch
 	}
 	return cell.endpoint, true, nil
+}
+
+// soleServerPublicKey returns a copy of the server public key of the catalog's
+// only cell, and how many cells the catalog names. The key is nil unless that
+// count is exactly one. A nil catalog names none.
+//
+// It serves the one request that has no link to select a cell with. Every
+// other use of the catalog goes through lookup, keyed by a verified link's
+// cell key, and that stays the only way a link selects a cell.
+func (c *CellCatalog) soleServerPublicKey() (key []byte, cells int) {
+	if c == nil {
+		return nil, 0
+	}
+	if len(c.byFingerprint) != 1 {
+		return nil, len(c.byFingerprint)
+	}
+	for _, cell := range c.byFingerprint {
+		key = bytes.Clone(cell.serverPublicKey[:])
+	}
+	return key, 1
 }
 
 // decodeCellPublicKey accepts a raw 32-byte X25519 key in any common base64

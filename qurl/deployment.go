@@ -50,7 +50,10 @@ type Deployment struct {
 	Issuers []ManifestIssuer `json:"issuers"`
 	// Cells are the native UDP endpoints openers may knock directly.
 	Cells []DeploymentCell `json:"cells"`
-	// RelayAllowlist gates relay-only operation when Cells is absent.
+	// RelayAllowlist gates relay-only operation when Cells is absent. It also
+	// gates CRIDLink.RelayURL, and a deployment that names a CRIDLink lists it
+	// next to Cells: with Cells present it gates that one request and nothing
+	// else.
 	RelayAllowlist []string `json:"relay_allowlist"`
 	// Hub is the single pinned Hub trust root an agent registers against. It is
 	// the same class of fact as Cells -- where a LayerV-operated endpoint lives
@@ -59,6 +62,20 @@ type Deployment struct {
 	// only opens links needs no hub, and an explicit WithAgentRuntimeHub still
 	// wins over whatever is shipped here.
 	Hub *HubBootstrap `json:"hub,omitempty"`
+	// CRIDLink is where a client that holds only a CRID asks for a link.
+	// Optional: a deployment without it opens links exactly as before, and a
+	// CRID link request against it fails with ErrCRIDLinkNotConfigured. Its
+	// values are carried into the opener Config unchecked and validated when a
+	// request is made, so a wrong relay URL or link origin fails that request
+	// and cannot stop a link from opening.
+	//
+	// Deployment decoding is strict, here as everywhere in the file. An object
+	// with an unknown or misspelled member, or a member of the wrong type, is a
+	// malformed deployment file, and a malformed file opens nothing. For the
+	// same reason a file that sets "crid_link" is rejected by an SDK release
+	// that predates this field: add it only to files read by releases that
+	// know it.
+	CRIDLink *DeploymentCRIDLink `json:"crid_link,omitempty"`
 }
 
 // deploymentHub returns the resolved deployment's Hub trust root, if it has
@@ -170,6 +187,17 @@ func (d *Deployment) config() (Config, error) {
 	}
 	if cfg.Cells == nil && cfg.RelayAllowlist == nil {
 		return Config{}, fmt.Errorf("%w: deployment has neither cells nor a relay allowlist", ErrNotConfigured)
+	}
+	// Copied through, not validated: resolveCRIDLinkEndpoint checks the values
+	// against this same Config on every CRID link request. Checking them here as
+	// well would let a wrong value in an optional object fail every link open in
+	// the process. (The object's shape is another matter: the strict decoder has
+	// already refused a file whose crid_link has an unknown member.)
+	if d.CRIDLink != nil {
+		cfg.CRIDLink = &CRIDLinkConfig{
+			RelayURL:   d.CRIDLink.RelayURL,
+			LinkOrigin: d.CRIDLink.LinkOrigin,
+		}
 	}
 	return cfg, nil
 }
