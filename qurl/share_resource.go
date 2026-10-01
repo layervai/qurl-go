@@ -72,10 +72,12 @@ type ShareLink struct {
 	ExpiresInSeconds int
 	// SingleUse reports whether the link expires on first successful use.
 	SingleUse bool
-	// CreatedAt is when the resource behind the CRID was created, as reported
-	// by the service. Nil when the service did not report it — a service
-	// predating the field.
-	CreatedAt *time.Time
+	// ResourceCreatedAt is when the resource behind the CRID was created, as
+	// reported by the service. It is the resource's age, not the link's: the
+	// link was minted by this call. Unlike ExpiresAt, absence is nil rather
+	// than the zero time — nil when the service did not report it, which
+	// includes a service predating the field.
+	ResourceCreatedAt *time.Time
 	// Publisher is the service's description of who published the resource.
 	// It is service-asserted metadata, not covered by VerifyCRID or by link
 	// verification, and its Name is untrusted text: read the Publisher type
@@ -99,9 +101,11 @@ type shareResourceResponse struct {
 	ExpiresInSeconds int        `json:"expires_in_seconds"`
 	SingleUse        bool       `json:"single_use"`
 	// Both are additive: a service predating them omits them, and ordinary
-	// lenient decoding leaves the fail-closed zero values in place.
-	CreatedAt *time.Time    `json:"created_at"`
-	Publisher publisherWire `json:"publisher"`
+	// lenient decoding leaves the fail-closed zero values in place. The wire
+	// name says resource_ because every neighbouring field describes the
+	// minted link; this one describes the resource the link opens.
+	ResourceCreatedAt *time.Time    `json:"resource_created_at"`
+	Publisher         publisherWire `json:"publisher"`
 }
 
 func (r shareResourceResponse) shareLink() (*ShareLink, error) {
@@ -122,9 +126,9 @@ func (r shareResourceResponse) shareLink() (*ShareLink, error) {
 	}
 	// A zero time is an unset value on the wire, not a creation date: report
 	// it as absent rather than as year 1.
-	if r.CreatedAt != nil && !r.CreatedAt.IsZero() {
-		createdAt := *r.CreatedAt
-		link.CreatedAt = &createdAt
+	if r.ResourceCreatedAt != nil && !r.ResourceCreatedAt.IsZero() {
+		createdAt := *r.ResourceCreatedAt
+		link.ResourceCreatedAt = &createdAt
 	}
 	return link, nil
 }
@@ -149,7 +153,7 @@ func (r shareResourceResponse) shareLink() (*ShareLink, error) {
 // delivered key. To bind the link itself, use EnterPortalForCRID or
 // VerifyLinkForCRID with the independently held CRID.
 //
-// ShareLink.CreatedAt and ShareLink.Publisher describe the resource and its
+// ShareLink.ResourceCreatedAt and ShareLink.Publisher describe the resource and its
 // owner as the service reports them. They are display metadata, outside every
 // verification above: a CRID or link that verifies says nothing about them.
 // See Publisher before showing them to anyone.

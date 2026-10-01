@@ -8,11 +8,12 @@ and are marked **Breaking** with what to change.
 
 ## Unreleased
 
-- `ShareLink` now carries publisher metadata: `CreatedAt` (nil when the service
-  does not report it) and `Publisher`, a new `Publisher` type with the owner's
-  self-declared `Name` and a `Verified` flag. `Client.Publisher` reads the
-  authenticated owner's profile and `Client.SetPublisherName` sets or, with an
-  empty name, removes its name; a name the service refuses matches the new
+- `ShareLink` now carries publisher metadata: `ResourceCreatedAt` (when the
+  resource behind the CRID was created; nil when the service does not report
+  it) and `Publisher`, a new `Publisher` type with the owner's self-declared
+  `Name` and a `Verified` flag. `Client.Publisher` reads the authenticated
+  owner's profile and `Client.SetPublisherName` sets or, with an empty name,
+  removes its name; a name the service refuses matches the new
   `ErrInvalidPublisherName`. `RegisteredAgentResourceHTTPDoer` permits `GET`
   and `PATCH /v1/me/publisher`. Every publisher is unverified today, and a
   service that omits the fields decodes to unverified. The metadata is asserted

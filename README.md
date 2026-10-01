@@ -205,7 +205,7 @@ against a key you already hold (`VerifyCRID`). Both leave the link lifetime to
 the server default unless you ask (`ValidFor` on a portal,
 `ShareResourceOptions.TTL` on a share).
 
-**Publisher metadata.** A `ShareLink` also carries `CreatedAt` (when the
+**Publisher metadata.** A `ShareLink` also carries `ResourceCreatedAt` (when the
 resource was created; `nil` if the service did not report it) and `Publisher`,
 a `qurl.Publisher` with the owner's self-declared `Name` and a `Verified` flag.
 Every publisher is unverified today, and anything missing decodes to

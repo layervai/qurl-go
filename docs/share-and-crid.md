@@ -144,14 +144,14 @@ if share.Publisher.Verified {
 	status = "verified"
 }
 fmt.Printf("Publisher: %q - %s\n", share.Publisher.Name, status)
-if share.CreatedAt != nil {
-	fmt.Println("Created:", share.CreatedAt.Format(time.DateOnly))
+if share.ResourceCreatedAt != nil {
+	fmt.Println("Created:", share.ResourceCreatedAt.Format(time.DateOnly))
 }
 ```
 
 | Field | Meaning |
 | --- | --- |
-| `ShareLink.CreatedAt` | When the resource behind the CRID was created. `nil` when the service did not report it. |
+| `ShareLink.ResourceCreatedAt` | When the resource behind the CRID was created. `nil` when the service did not report it. |
 | `ShareLink.Publisher.Name` | The name the owner chose for itself. Empty when the owner has not set one. |
 | `ShareLink.Publisher.Verified` | Whether LayerV has verified that owner. `false` for every publisher today. |
 

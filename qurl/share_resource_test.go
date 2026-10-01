@@ -487,26 +487,26 @@ func TestClient_ShareResourcePublisherMetadata(t *testing.T) {
 	heldCRID, _, _ := cridKeyMatchFixture(t)
 	created := time.Date(2026, 3, 1, 12, 30, 0, 0, time.UTC)
 	for _, tc := range []struct {
-		name          string
-		extra         string
-		wantCreatedAt *time.Time
-		wantPublisher Publisher
+		name                  string
+		extra                 string
+		wantResourceCreatedAt *time.Time
+		wantPublisher         Publisher
 	}{
 		{
-			name:          "fields present",
-			extra:         `,"created_at":"2026-03-01T12:30:00Z","publisher":{"name":"Acme Docs","verified":false}`,
-			wantCreatedAt: &created,
-			wantPublisher: Publisher{Name: "Acme Docs"},
+			name:                  "fields present",
+			extra:                 `,"resource_created_at":"2026-03-01T12:30:00Z","publisher":{"name":"Acme Docs","verified":false}`,
+			wantResourceCreatedAt: &created,
+			wantPublisher:         Publisher{Name: "Acme Docs"},
 		},
 		{
-			name:          "created_at with an offset",
-			extra:         `,"created_at":"2026-03-01T07:30:00-05:00","publisher":{"verified":false}`,
-			wantCreatedAt: &created,
+			name:                  "resource_created_at with an offset",
+			extra:                 `,"resource_created_at":"2026-03-01T07:30:00-05:00","publisher":{"verified":false}`,
+			wantResourceCreatedAt: &created,
 		},
 		{name: "older service omits both"},
-		{name: "null publisher and created_at", extra: `,"created_at":null,"publisher":null`},
+		{name: "null publisher and resource_created_at", extra: `,"resource_created_at":null,"publisher":null`},
 		{name: "empty publisher object", extra: `,"publisher":{}`},
-		{name: "zero created_at is not a date", extra: `,"created_at":"0001-01-01T00:00:00Z"`},
+		{name: "zero resource_created_at is not a date", extra: `,"resource_created_at":"0001-01-01T00:00:00Z"`},
 		{
 			name:          "verified missing",
 			extra:         `,"publisher":{"name":"Acme Docs"}`,
@@ -518,9 +518,9 @@ func TestClient_ShareResourcePublisherMetadata(t *testing.T) {
 			wantPublisher: Publisher{Name: "Acme Docs"},
 		},
 		{
-			name:          "unnamed publisher",
-			extra:         `,"created_at":"2026-03-01T12:30:00Z","publisher":{"verified":false}`,
-			wantCreatedAt: &created,
+			name:                  "unnamed publisher",
+			extra:                 `,"resource_created_at":"2026-03-01T12:30:00Z","publisher":{"verified":false}`,
+			wantResourceCreatedAt: &created,
 		},
 		{
 			// The SDK reports what the service says; it does not second-guess a
@@ -530,10 +530,10 @@ func TestClient_ShareResourcePublisherMetadata(t *testing.T) {
 			wantPublisher: Publisher{Name: "Acme Docs", Verified: true},
 		},
 		{
-			name:          "unknown members tolerated",
-			extra:         `,"created_at":"2026-03-01T12:30:00Z","publisher":{"name":"Acme Docs","verified":false,"verified_at":null,"badge":{"kind":"none"}},"updated_at":"2026-04-01T00:00:00Z","labels":["x"]`,
-			wantCreatedAt: &created,
-			wantPublisher: Publisher{Name: "Acme Docs"},
+			name:                  "unknown members tolerated",
+			extra:                 `,"resource_created_at":"2026-03-01T12:30:00Z","publisher":{"name":"Acme Docs","verified":false,"verified_at":null,"badge":{"kind":"none"}},"updated_at":"2026-04-01T00:00:00Z","labels":["x"]`,
+			wantResourceCreatedAt: &created,
+			wantPublisher:         Publisher{Name: "Acme Docs"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -555,10 +555,10 @@ func TestClient_ShareResourcePublisherMetadata(t *testing.T) {
 				t.Fatalf("share = %#v, want the link to survive the metadata", share)
 			}
 			switch {
-			case tc.wantCreatedAt == nil && share.CreatedAt != nil:
-				t.Fatalf("CreatedAt = %s, want nil", share.CreatedAt)
-			case tc.wantCreatedAt != nil && (share.CreatedAt == nil || !share.CreatedAt.Equal(*tc.wantCreatedAt)):
-				t.Fatalf("CreatedAt = %v, want %s", share.CreatedAt, tc.wantCreatedAt)
+			case tc.wantResourceCreatedAt == nil && share.ResourceCreatedAt != nil:
+				t.Fatalf("ResourceCreatedAt = %s, want nil", share.ResourceCreatedAt)
+			case tc.wantResourceCreatedAt != nil && (share.ResourceCreatedAt == nil || !share.ResourceCreatedAt.Equal(*tc.wantResourceCreatedAt)):
+				t.Fatalf("ResourceCreatedAt = %v, want %s", share.ResourceCreatedAt, tc.wantResourceCreatedAt)
 			}
 			if share.Publisher != tc.wantPublisher {
 				t.Fatalf("Publisher = %#v, want %#v", share.Publisher, tc.wantPublisher)
