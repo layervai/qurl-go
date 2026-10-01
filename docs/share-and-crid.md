@@ -128,6 +128,75 @@ a trusted frontend. See [Open links](opening-links.md) for deployment settings.
 not inspect the link or bind its signed resource key; use the APIs above for
 that purpose.
 
+## Publisher metadata
+
+A share response also reports when the resource was created and who published
+it — the resource's owner:
+
+```go
+share, err := client.ShareResource(ctx, resourceCRID, nil)
+if err != nil {
+	return err
+}
+
+status := "UNVERIFIED (self-declared name)"
+if share.Publisher.Verified {
+	status = "verified"
+}
+fmt.Printf("Publisher: %q - %s\n", share.Publisher.Name, status)
+if share.ResourceCreatedAt != nil {
+	fmt.Println("Created:", share.ResourceCreatedAt.Format(time.DateOnly))
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `ShareLink.ResourceCreatedAt` | When the resource behind the CRID was created. `nil` when the service did not report it. |
+| `ShareLink.Publisher.Name` | The name the owner chose for itself. Empty when the owner has not set one. |
+| `ShareLink.Publisher.Verified` | Whether LayerV has verified that owner. `false` for every publisher today. |
+
+Read these fields with three rules in mind:
+
+- **Every publisher is unverified today.** No verification mechanism exists
+  yet, so `Verified` is always `false`. It also fails closed: a service that
+  predates the fields, a missing `publisher` object, and a missing or null
+  `verified` flag all decode to the zero `qurl.Publisher` — no name,
+  unverified. Only an explicit `true` from the service reports `true`.
+- **It is not part of CRID verification.** Publisher metadata is asserted by
+  the service and rides beside the CRID, not inside it. `VerifyCRID`,
+  `VerifyLinkForCRID`, `VerifyPortalLink`, and `EnterPortalForCRID` bind the
+  resource key and the signed link — nothing else. A CRID or link that verifies
+  says nothing about the publisher or the creation date.
+- **The name is untrusted text.** It is self-declared: whoever owns the
+  resource picked it. Display it quoted with control and other non-printing
+  characters escaped — `%q` and `strconv.Quote` both do this — and never
+  interpolate it raw into a terminal, a log line, or markup. Always show the
+  verification status next to it, and make "unverified" obvious: a
+  self-declared name must never read as a confirmed identity.
+
+The owner reads and changes its own profile with `Publisher` and
+`SetPublisherName`:
+
+```go
+publisher, err := client.Publisher(ctx)
+if err != nil {
+	return err
+}
+fmt.Printf("%q verified=%t\n", publisher.Name, publisher.Verified)
+
+// Set the name; pass "" to remove it.
+if _, err := client.SetPublisherName(ctx, "Acme Docs"); err != nil {
+	return err
+}
+```
+
+`Publisher` needs the `qurl:read` scope and `SetPublisherName` needs
+`qurl:write`; a registered agent's device credential can call both. Setting a
+name does not verify the publisher, and nothing in the request can. The service
+decides which names are acceptable: a name it refuses fails with
+`qurl.ErrInvalidPublisherName`, with the reason on the underlying
+`*qurl.APIError`.
+
 ## Errors
 
 ```go
@@ -162,6 +231,7 @@ default:
 | `qurl.ErrNoCRID` | The mint/share response or manually constructed link has no CRID. Fails closed. |
 | `qurl.ErrCRIDMismatch` | The mint/share response changed the requested CRID, or the supplied key does not derive the held CRID. Do not use the returned link or mismatched key. |
 | `qurl.ErrPortalRevoked` | `RevokePortal` found the qURL no longer active: this link was already revoked, so a repeat revoke had nothing to do. The underlying `*qurl.APIError` stays matchable. |
+| `qurl.ErrInvalidPublisherName` | `SetPublisherName` was given a name that is not valid UTF-8 or is far too long (rejected before any request), or the service answered 400 because the name breaks its naming rules. A service rejection keeps its `*qurl.APIError`. |
 
 Other API failures surface as `*qurl.APIError` exactly like the rest of the
 client. When the held CRID itself fails the local validation gate,

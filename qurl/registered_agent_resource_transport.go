@@ -21,11 +21,20 @@ var ErrRegisteredAgentResourceRequestDenied = errors.New("qurl: registered-agent
 // The bridge accepts only owner-scoped resource and nested qURL/session
 // management, Connector sharing-state, share-link mint
 // (POST /v1/resources/{id}/share), portal creation, Connector-enrollment-token
-// mint, account linking (POST /v1/account/link), and identity-echo routes used
-// by a registered qURL client. The service independently restricts a device
-// key's POST /v1/api-keys authority to a Connector-target one-shot token.
-// Other account, billing, usage, and key-management routes fail closed. The
-// bridge also requires the Client's exact API origin and path prefix. The
+// mint, account linking (POST /v1/account/link), identity-echo, and
+// publisher-profile (GET and PATCH /v1/me/publisher, exactly, with no query)
+// routes used by a registered qURL client. The service independently restricts
+// a device key's POST /v1/api-keys authority to a Connector-target one-shot
+// token. Other account, billing, usage, and key-management routes fail closed.
+//
+// The publisher-profile write is the one owner-profile route in scope, and it
+// is deliberate: a device that publishes without an account holds no other
+// credential, so without it that owner could never set the name shown beside
+// its own resources. The write changes a self-declared display name only. It
+// cannot change the verification status, which the service computes and no
+// request can set.
+//
+// The bridge also requires the Client's exact API origin and path prefix. The
 // caller's request is never mutated, and the device Authorization header is
 // removed from the returned response metadata.
 func (c *Client) RegisteredAgentResourceHTTPDoer() (HTTPDoer, error) {
@@ -126,6 +135,8 @@ func registeredAgentResourceRouteAllowed(method, path string) bool {
 		return method == http.MethodPost
 	case "/v1/me":
 		return method == http.MethodGet
+	case "/v1/me/publisher":
+		return method == http.MethodGet || method == http.MethodPatch
 	}
 	const prefix = "/v1/resources/"
 	if !strings.HasPrefix(path, prefix) {

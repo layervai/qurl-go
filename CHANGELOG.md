@@ -8,6 +8,19 @@ and are marked **Breaking** with what to change.
 
 ## Unreleased
 
+- `ShareLink` now carries publisher metadata: `ResourceCreatedAt` (when the
+  resource behind the CRID was created; nil when the service does not report
+  it) and `Publisher`, a new `Publisher` type with the owner's self-declared
+  `Name` and a `Verified` flag. `Client.Publisher` reads the authenticated
+  owner's profile and `Client.SetPublisherName` sets or, with an empty name,
+  removes its name; a name the service refuses matches the new
+  `ErrInvalidPublisherName`. `RegisteredAgentResourceHTTPDoer` permits `GET`
+  and `PATCH /v1/me/publisher`. Every publisher is unverified today, and a
+  service that omits the fields decodes to unverified. The metadata is asserted
+  by the service and is not covered by `VerifyCRID` or link verification;
+  treat `Name` as untrusted text when displaying it. Matching service support
+  is required for the fields and routes to be present.
+
 - **The minimum Go version is now 1.26.6, up from 1.25.13.** `golang.org/x/crypto`
   v0.57.0 and `golang.org/x/sys` v0.48.0 declare `go 1.26.0`, and Go 1.25 is
   out of support. 1.26.6 is the oldest 1.26 release free of the reachable

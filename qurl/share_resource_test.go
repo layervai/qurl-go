@@ -476,3 +476,133 @@ func TestClient_ShareResourceSessionDurationWithoutTTL(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// TestClient_ShareResourcePublisherMetadata pins how the additive share fields
+// decode. They are display metadata asserted by the service, so every gap fails
+// closed without failing the share: a service predating the fields, a missing
+// or null publisher object, and a missing or null verified flag all report an
+// unverified publisher; Verified is true only for the JSON literal true; and
+// unknown members at either level are ignored so a newer service keeps working.
+func TestClient_ShareResourcePublisherMetadata(t *testing.T) {
+	heldCRID, _, _ := cridKeyMatchFixture(t)
+	created := time.Date(2026, 3, 1, 12, 30, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name                  string
+		extra                 string
+		wantResourceCreatedAt *time.Time
+		wantPublisher         Publisher
+	}{
+		{
+			name:                  "fields present",
+			extra:                 `,"resource_created_at":"2026-03-01T12:30:00Z","publisher":{"name":"Acme Docs","verified":false}`,
+			wantResourceCreatedAt: &created,
+			wantPublisher:         Publisher{Name: "Acme Docs"},
+		},
+		{
+			name:                  "resource_created_at with an offset",
+			extra:                 `,"resource_created_at":"2026-03-01T07:30:00-05:00","publisher":{"verified":false}`,
+			wantResourceCreatedAt: &created,
+		},
+		{name: "older service omits both"},
+		{name: "null publisher and resource_created_at", extra: `,"resource_created_at":null,"publisher":null`},
+		{name: "empty publisher object", extra: `,"publisher":{}`},
+		{name: "zero resource_created_at is not a date", extra: `,"resource_created_at":"0001-01-01T00:00:00Z"`},
+		{
+			name:          "verified missing",
+			extra:         `,"publisher":{"name":"Acme Docs"}`,
+			wantPublisher: Publisher{Name: "Acme Docs"},
+		},
+		{
+			name:          "verified null",
+			extra:         `,"publisher":{"name":"Acme Docs","verified":null}`,
+			wantPublisher: Publisher{Name: "Acme Docs"},
+		},
+		{
+			name:                  "unnamed publisher",
+			extra:                 `,"resource_created_at":"2026-03-01T12:30:00Z","publisher":{"verified":false}`,
+			wantResourceCreatedAt: &created,
+		},
+		{
+			// The SDK reports what the service says; it does not second-guess a
+			// verified publisher, and it never invents one.
+			name:          "verified true is reported",
+			extra:         `,"publisher":{"name":"Acme Docs","verified":true}`,
+			wantPublisher: Publisher{Name: "Acme Docs", Verified: true},
+		},
+		{
+			name:                  "unknown members tolerated",
+			extra:                 `,"resource_created_at":"2026-03-01T12:30:00Z","publisher":{"name":"Acme Docs","verified":false,"verified_at":null,"badge":{"kind":"none"}},"updated_at":"2026-04-01T00:00:00Z","labels":["x"]`,
+			wantResourceCreatedAt: &created,
+			wantPublisher:         Publisher{Name: "Acme Docs"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprintf(w, `{"data":{"qurl":"https://qurl.link/at_meta","crid":%q,"type":"qv2","expires_in_seconds":300,"single_use":false%s},"meta":{"request_id":"req_1"}}`, heldCRID, tc.extra)
+			}))
+			defer api.Close()
+
+			client, err := NewClient(BearerToken("lv_test"), WithBaseURL(api.URL))
+			if err != nil {
+				t.Fatalf("NewClient: %v", err)
+			}
+			share, err := client.ShareResource(context.Background(), heldCRID, nil)
+			if err != nil {
+				t.Fatalf("ShareResource: %v", err)
+			}
+			if share.Link != "https://qurl.link/at_meta" || share.CRID != heldCRID {
+				t.Fatalf("share = %#v, want the link to survive the metadata", share)
+			}
+			switch {
+			case tc.wantResourceCreatedAt == nil && share.ResourceCreatedAt != nil:
+				t.Fatalf("ResourceCreatedAt = %s, want nil", share.ResourceCreatedAt)
+			case tc.wantResourceCreatedAt != nil && (share.ResourceCreatedAt == nil || !share.ResourceCreatedAt.Equal(*tc.wantResourceCreatedAt)):
+				t.Fatalf("ResourceCreatedAt = %v, want %s", share.ResourceCreatedAt, tc.wantResourceCreatedAt)
+			}
+			if share.Publisher != tc.wantPublisher {
+				t.Fatalf("Publisher = %#v, want %#v", share.Publisher, tc.wantPublisher)
+			}
+		})
+	}
+}
+
+// A verified flag that is not a JSON boolean is a contract breach, and the one
+// thing it must never do is decode as verified. The response is rejected whole,
+// like any other mistyped share field.
+func TestClient_ShareResourceMistypedVerifiedNeverVerifies(t *testing.T) {
+	heldCRID, _, _ := cridKeyMatchFixture(t)
+	for _, verified := range []string{`"true"`, `1`, `{"value":true}`} {
+		t.Run(verified, func(t *testing.T) {
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprintf(w, `{"data":{"qurl":"https://qurl.link/at_meta","crid":%q,"publisher":{"name":"Acme Docs","verified":%s}}}`, heldCRID, verified)
+			}))
+			defer api.Close()
+
+			client, err := NewClient(BearerToken("lv_test"), WithBaseURL(api.URL))
+			if err != nil {
+				t.Fatalf("NewClient: %v", err)
+			}
+			share, err := client.ShareResource(context.Background(), heldCRID, nil)
+			if share != nil || !errors.Is(err, ErrInvalidAPIResponse) {
+				t.Fatalf("share = %#v, err = %v; want nil and ErrInvalidAPIResponse", share, err)
+			}
+		})
+	}
+}
+
+// Publisher metadata rides beside the CRID, not inside it: VerifyCRID passes or
+// fails on the key alone, whatever the publisher fields say.
+func TestShareLinkVerifyCRIDIgnoresPublisher(t *testing.T) {
+	heldCRID, matchingDER, foreignDER := cridKeyMatchFixture(t)
+	for _, publisher := range []Publisher{{}, {Name: "Acme Docs"}, {Name: "Acme Docs", Verified: true}} {
+		share := &ShareLink{CRID: heldCRID, Publisher: publisher}
+		if err := share.VerifyCRID(matchingDER); err != nil {
+			t.Fatalf("publisher %#v: committed key must verify: %v", publisher, err)
+		}
+		if err := share.VerifyCRID(foreignDER); !errors.Is(err, ErrCRIDMismatch) {
+			t.Fatalf("publisher %#v: foreign key: want ErrCRIDMismatch, got %v", publisher, err)
+		}
+	}
+}

@@ -50,7 +50,11 @@ var frictionBudget = map[string]int{
 	// share, print. The CRID trust story stays one optional call
 	// (ShareLink.VerifyCRID), not setup.
 	"ExampleClient_ShareResource": 3,
-	"ExampleNewClient":            5,
+	// Read or set the name this owner publishes under: open client, call,
+	// print. Showing the name safely is one %q verb, not setup.
+	"ExampleClient_Publisher":        3,
+	"ExampleClient_SetPublisherName": 3,
+	"ExampleNewClient":               5,
 	// Resolve a Connector binding through its already-registered assigned-cell
 	// session: open state, reopen the binding, create one replayable request,
 	// resolve, and print. The two defers are deterministic key/store cleanup.

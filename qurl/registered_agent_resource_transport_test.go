@@ -66,6 +66,8 @@ func TestRegisteredAgentResourceHTTPDoer_ExactSurfaceAndCredentialCustody(t *tes
 		{http.MethodDelete, "/v1/resources/qcrid/sessions/session_1"},
 		{http.MethodPost, "/v1/qurls"},
 		{http.MethodGet, "/v1/me"},
+		{http.MethodGet, "/v1/me/publisher"},
+		{http.MethodPatch, "/v1/me/publisher"},
 	}
 	for _, test := range allowed {
 		req, requestErr := http.NewRequestWithContext(context.Background(), test.method,
@@ -145,6 +147,19 @@ func TestRegisteredAgentResourceHTTPDoer_DeniesBeforeCredentialOrNetwork(t *test
 		{http.MethodGet, "https://api.example.test/prefix/v1/resources/qcrid/resolve"},
 		{http.MethodPost, "https://api.example.test/prefix/v1/resources/qcrid/resolve"},
 		{http.MethodGet, "https://api.example.test/prefix/v1/me?extra=true"},
+		{http.MethodPatch, "https://api.example.test/prefix/v1/me"},
+		{http.MethodPut, "https://api.example.test/prefix/v1/me/publisher"},
+		{http.MethodPost, "https://api.example.test/prefix/v1/me/publisher"},
+		{http.MethodDelete, "https://api.example.test/prefix/v1/me/publisher"},
+		{http.MethodGet, "https://api.example.test/prefix/v1/me/publisher?extra=true"},
+		{http.MethodPatch, "https://api.example.test/prefix/v1/me/publisher?verified=true"},
+		{http.MethodPatch, "https://api.example.test/prefix/v1/me/publisher?"},
+		{http.MethodGet, "https://api.example.test/prefix/v1/me/publisher/"},
+		{http.MethodGet, "https://api.example.test/prefix/v1/me/publisher/x"},
+		{http.MethodPatch, "https://api.example.test/prefix/v1/me/publisher/x"},
+		{http.MethodGet, "https://api.example.test/prefix/v1/me/publishers"},
+		{http.MethodGet, "https://api.example.test/v1/me/publisher"},
+		{http.MethodPatch, "https://other.example.test/prefix/v1/me/publisher"},
 		{http.MethodGet, "https://api.example.test/prefix/v1/resources/bad.id"},
 		{http.MethodGet, "https://api.example.test/prefix/v1/resources/%2e%2e"},
 	}
