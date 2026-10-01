@@ -104,6 +104,13 @@ enable old Connector wire support. The additional CI comparison
 requires raw.githubusercontent.com to be reachable; local checksum validation
 works offline.
 
+The CRID link knock family (`qurl-crid-link-knock-v1-vectors`) is run in
+[`tests/conformance/cridlinkknock`](tests/conformance/cridlinkknock). That suite
+is black-box on purpose: every case goes through the exported `qurl` calls and
+over the real wire path, against a responder built from
+`relayknock/relayknocktest`, so the vectors pin what a caller observes. It runs
+every case the artifact declares and fails if any section runs fewer.
+
 ## Continuous integration
 
 CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs lint, race tests +
