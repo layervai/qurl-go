@@ -128,6 +128,15 @@ a trusted frontend. See [Open links](opening-links.md) for deployment settings.
 not inspect the link or bind its signed resource key; use the APIs above for
 that purpose.
 
+### Without credentials: open by CRID
+
+`ShareResource` needs LayerV credentials. A recipient that holds only the CRID
+does not have them, and does not need them: `qurl.OpenCRID(ctx, resourceCRID)`
+asks the server for a link, applies the same binding to it — the signed
+resource key must derive the held CRID — and opens it. See
+[Open by CRID](opening-links.md#open-by-crid). `RequestCRIDLink` returns the
+same publisher metadata as a share, under the same rules as the next section.
+
 ## Publisher metadata
 
 A share response also reports when the resource was created and who published

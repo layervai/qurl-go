@@ -288,6 +288,251 @@ Production defaults already supply these values. For sandbox or a custom
 deployment, obtain the issuer key id, issuer public key, cell catalog entries,
 and allowed platform hosts from that deployment operator.
 
+## Open by CRID
+
+`EnterPortal` opens a link. A program that holds only a CRID has no link, and a
+link is what turns the identifier into access. `OpenCRID` covers that case in
+one call, and it needs no LayerV credentials:
+
+```go
+handle, err := qurl.OpenCRID(ctx, resourceCRID)
+if err != nil {
+	return err
+}
+// handle is the *ResourceHandle EnterPortal returns. Authorize the content
+// request with it exactly as shown under Programmatic Opening.
+```
+
+It runs two steps:
+
+1. **Request a link.** The SDK sends a request that names the CRID. The server
+   answers with a short-lived qURL link, or with the reason there is none. This
+   step opens nothing.
+2. **Open the link.** The SDK opens the link bound to the CRID, exactly as
+   `EnterPortalForCRID` does.
+
+Whether a CRID can be opened this way is the server's decision. A client that
+may not open it gets `ErrCRIDLinkNotFound`, the same answer as for a CRID that
+does not exist.
+
+### What is checked
+
+The link in step 1 arrives from the network, so the SDK uses it only after
+checking it against things it already holds. The checks run in this order, and
+the first one that fails ends the call with a `*qurl.CRIDLinkRejectedError`
+whose `Class` names it:
+
+| `Class` | Check |
+| --- | --- |
+| `missing_redirect` | The reply carries a link, as a non-empty string |
+| `origin` | The link is on the deployment's link origin: same scheme, host, and port, and no userinfo |
+| `path_or_query` | The link has no path other than `/` and no query |
+| `transport` | The link's fragment is the `qv2t1` transport |
+| `issuer_signature` | The link's signed content parses and verifies under the trust store |
+| `crid_mismatch` | The signed resource key derives the CRID that was requested |
+| `info_crid_mismatch` | If the reply's metadata names a CRID, it is the one that was requested |
+
+The origin check compares text: the link must begin with the configured link
+origin exactly as it is written. Another spelling of the same origin, such as
+an upper-case host or an explicit default port, is rejected as `origin`.
+
+A rejected link is not opened and is not returned, and nothing else from that
+reply is either. The error text names the failed check and never contains the
+link. Where a check corresponds to an existing sentinel, that sentinel matches
+too: `ErrCRIDMismatch` for the two CRID classes, `ErrFragment` for
+`transport`, and `ErrSignature` or `ErrUnknownKID` for `issuer_signature`.
+`ErrUnknownKID` usually means the configured trust does not belong to the
+deployment that issued the link.
+
+Before any of this, the CRID itself must pass the local validation gate and
+carry a version this SDK can verify a link against. A CRID that does not is
+refused before any configuration is resolved or request sent, with
+`ErrInvalidResourceRequest`.
+
+### Show the publisher before opening
+
+`OpenCRID` returns only the handle. To tell a user who published a resource
+before opening it, take the two steps apart:
+
+```go
+issued, err := qurl.RequestCRIDLink(ctx, resourceCRID)
+if err != nil {
+	return err
+}
+
+status := "UNVERIFIED (self-declared name)"
+if issued.Publisher.Verified {
+	status = "verified"
+}
+fmt.Printf("Publisher: %q - %s\n", issued.Publisher.Name, status)
+if issued.ResourceCreatedAt != nil {
+	fmt.Println("Created:", issued.ResourceCreatedAt.Format(time.DateOnly))
+}
+
+handle, err := qurl.EnterPortalForCRID(ctx, issued.Link, resourceCRID)
+if err != nil {
+	return err
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `CRIDLink.Link` | The access link. It is a credential: use it, do not log it. Printing a `CRIDLink` with `%v`, `%+v`, `%#v`, or `%s` redacts it. Encoding one as JSON does not, and some structured loggers encode what they are given as JSON |
+| `CRIDLink.Publisher` | The publisher's self-declared `Name` and its `Verified` flag. `false` for every publisher today |
+| `CRIDLink.ResourceCreatedAt` | When the resource was created. `nil` when the server did not report a time the SDK can read |
+| `CRIDLink.ExpiresAt` | When the server says the link stops working. Zero when not reported. The server enforces the expiry inside the signed link |
+| `CRIDLink.QURLID` | Identifies this one issued link. Empty when not reported |
+
+The fields have the names and the absence rules of the same fields on
+`ShareLink`, so `ResourceCreatedAt` is a pointer and `ExpiresAt` is not.
+
+Everything except `Link` is **display-only and unverified**. It is reported by
+the server next to the link and is covered by neither the link's signature nor
+the CRID: a link that verifies says nothing about the publisher or the dates.
+The three rules under
+[Publisher metadata](share-and-crid.md#publisher-metadata) apply unchanged —
+every publisher is unverified, the metadata is not part of CRID verification,
+and the name is untrusted text to quote with `%q`. Malformed metadata never
+fails the call; what the SDK cannot use is simply absent. A text value longer
+than 128 Unicode code points is dropped, not shortened.
+
+### Transport
+
+In this version the link request always goes through the deployment's HTTPS
+relay, under a key minted for that one request, also when the configuration
+opens links over native UDP. The relay is not trusted with the answer: the
+reply is authenticated to the cell's key, so a relay can delay or drop a
+request but cannot forge a link. An answer that does not authenticate is an
+error and is never read. The open in step 2 uses native UDP to the
+deployment's cell.
+
+A busy server answers with a cookie instead of a link. The SDK reports that as
+`ErrServerOverloaded` and does not answer the cookie; try again later.
+
+### Configuration
+
+The request needs three facts: the relay to send through, the server key to
+seal the request to, and the origin issued links are on, which the answer is
+checked against. An ordinary open reads the relay and the key from the link's
+signed claims; a client that holds only a CRID has no claims yet. A deployment
+supplies the relay and the origin in one optional object, `crid_link`. The key
+is the key of the deployment's one cell:
+
+```json
+{
+  "issuers": [
+    { "kid": "issuer-key-id", "spki_der_b64": "BASE64_P256_SPKI_DER" }
+  ],
+  "cells": [
+    {
+      "cell_id": "cell0",
+      "host": "cell0.example.com",
+      "port": 443,
+      "server_public_key_b64": "BASE64_X25519_CELL_KEY"
+    }
+  ],
+  "relay_allowlist": ["relay.example.com"],
+  "crid_link": {
+    "relay_url": "https://relay.example.com",
+    "link_origin": "https://links.example.com"
+  }
+}
+```
+
+Every value above is a placeholder.
+
+- `relay_url` must be HTTPS and its host must be in `relay_allowlist`. With
+  `cells` present the allowlist gates only this request; links still open over
+  native UDP and never fall back to the relay.
+- `link_origin` must be a bare HTTPS origin in its one canonical spelling:
+  `https://`, a lowercase host, a port only when it is not 443, and no path,
+  query, fragment, userinfo, or trailing slash. The SDK compares it with an
+  issued link as text.
+- `cells` must name exactly one cell. With none or several, the request is
+  refused: the SDK does not choose a cell for a CRID.
+
+A deployment that cannot carry the request fails with
+`ErrCRIDLinkNotConfigured`, which matches `ErrNotConfigured`, before anything
+is sent. A wrong value inside `crid_link`, such as a relay that is not on the
+allowlist or an origin with a trailing slash, affects only this request; links
+keep opening.
+
+**The deployment embedded in this release names no `crid_link`.** Against it,
+`OpenCRID` and `RequestCRIDLink` return `ErrCRIDLinkNotConfigured` until
+`QURL_DEPLOYMENT` names a file that has one.
+
+**Deployment decoding is strict.** A release that predates `crid_link` rejects
+the whole file as carrying an unknown field, and then opens nothing. Add
+`crid_link` only to deployment files read by releases that know it. The same
+strictness applies inside the object: a misspelled or unknown member, or a
+member of the wrong type, makes the file malformed, and a malformed file opens
+nothing either.
+
+An installed `Provider` supplies trust and transport, not the CRID link
+endpoint. With one installed, pass the endpoint explicitly:
+
+```go
+cfg := qurl.Config{
+	TrustStore:     trustStore,
+	Cells:          cells, // exactly one cell
+	RelayAllowlist: qurl.NewRelayAllowlist([]string{relayHost}),
+	CRIDLink: &qurl.CRIDLinkConfig{
+		RelayURL:   "https://" + relayHost,
+		LinkOrigin: linkOrigin,
+		UserAgent:  "example-tool/1.2", // optional; names your program to the server
+	},
+}
+handle, err := qurl.OpenCRIDWith(ctx, resourceCRID, cfg)
+```
+
+`UserAgent` is optional and travels inside the encrypted request. A value
+longer than 256 bytes of UTF-8 is cut at a character boundary. `OpenCRID` and
+`RequestCRIDLink` send none.
+
+Each `OpenCRID` call requests a fresh link and starts an independent visit, so
+a `Config.PortalSession` cannot carry a visit across two `OpenCRIDWith` calls.
+To retry one visit, request the link once with `RequestCRIDLinkWith` and retry
+`EnterPortalWith` with that link and the retained session, as described under
+[Retry a Visit](#retry-a-visit).
+
+### Errors from an open by CRID
+
+```go
+handle, err := qurl.OpenCRID(ctx, resourceCRID)
+var rejected *qurl.CRIDLinkRejectedError
+switch {
+case err == nil:
+	use(handle.ResourceURL)
+case errors.Is(err, qurl.ErrCRIDLinkNotFound):
+	// Unknown CRID, or this client may not open it. Do not retry.
+	reject()
+case errors.Is(err, qurl.ErrCRIDResourceOffline):
+	// The publisher is offline. It may come back.
+	retryLater()
+case errors.Is(err, qurl.ErrCRIDLinkUnavailable),
+	errors.Is(err, qurl.ErrCRIDLinkRateLimited),
+	errors.Is(err, qurl.ErrServerOverloaded):
+	retryLater()
+case errors.Is(err, qurl.ErrCRIDResourceClosed):
+	reject()
+case errors.As(err, &rejected):
+	// The server issued a link that failed a check. rejected.Class says which.
+	reject()
+case errors.Is(err, qurl.ErrCRIDLinkNotConfigured):
+	reportMissingCRIDLinkEndpoint()
+case errors.Is(err, qurl.ErrInvalidResourceRequest):
+	// Not a CRID this SDK can request a link for. Nothing was sent.
+	reject()
+default:
+	report(err)
+}
+```
+
+The full table is in the
+[README](../README.md#error-handling). Every refusal in it is also a
+`*qurl.ServerDenyError` carrying the server's code, so code that already
+handles an authenticated deny from `EnterPortal` handles these without change.
+
 ## Errors
 
 ```go
