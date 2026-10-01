@@ -205,6 +205,17 @@ against a key you already hold (`VerifyCRID`). Both leave the link lifetime to
 the server default unless you ask (`ValidFor` on a portal,
 `ShareResourceOptions.TTL` on a share).
 
+**Publisher metadata.** A `ShareLink` also carries `CreatedAt` (when the
+resource was created; `nil` if the service did not report it) and `Publisher`,
+a `qurl.Publisher` with the owner's self-declared `Name` and a `Verified` flag.
+Every publisher is unverified today, and anything missing decodes to
+unverified. This metadata is asserted by the service and is not part of CRID
+verification — `VerifyCRID` and `VerifyLinkForCRID` cover only the key and the
+link. Treat `Name` as untrusted text: print it with `%q` so control characters
+are escaped, and always show "unverified" clearly beside it. An owner manages
+its own name with `Client.Publisher` and `Client.SetPublisherName`; see
+[Publisher metadata](docs/share-and-crid.md#publisher-metadata).
+
 Minted links use the share-safe `#qv2t1...` fragment transport. It keeps every
 dot-separated component at 240 characters or fewer so messaging clients retain
 the full click target, while preserving the exact signed qv2 bytes and keeping
@@ -398,6 +409,7 @@ that raises them:
 | `qurl.ErrTemporaryAccessLinksDisabled` | `ShareResource` got a 503: the environment is not serving temporary access links. The underlying `*APIError` stays matchable |
 | `qurl.ErrNoCRID` | The mint/share response or manually constructed link has no CRID. Fails closed. |
 | `qurl.ErrCRIDMismatch` | The mint/share response changed the requested CRID, or the supplied key does not derive the held CRID. Do not use the returned link or mismatched key. |
+| `qurl.ErrInvalidPublisherName` | `SetPublisherName` was given a name that can never be valid, or the service rejected it with a 400. A service rejection keeps its `*APIError` |
 
 ## Security notes
 

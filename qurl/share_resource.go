@@ -72,6 +72,16 @@ type ShareLink struct {
 	ExpiresInSeconds int
 	// SingleUse reports whether the link expires on first successful use.
 	SingleUse bool
+	// CreatedAt is when the resource behind the CRID was created, as reported
+	// by the service. Nil when the service did not report it — a service
+	// predating the field.
+	CreatedAt *time.Time
+	// Publisher is the service's description of who published the resource.
+	// It is service-asserted metadata, not covered by VerifyCRID or by link
+	// verification, and its Name is untrusted text: read the Publisher type
+	// before displaying it. A service predating the field yields the zero
+	// value, which means no name and unverified.
+	Publisher Publisher
 }
 
 type shareResourceRequest struct {
@@ -88,6 +98,10 @@ type shareResourceResponse struct {
 	ExpiresAt        *time.Time `json:"expires_at"`
 	ExpiresInSeconds int        `json:"expires_in_seconds"`
 	SingleUse        bool       `json:"single_use"`
+	// Both are additive: a service predating them omits them, and ordinary
+	// lenient decoding leaves the fail-closed zero values in place.
+	CreatedAt *time.Time    `json:"created_at"`
+	Publisher publisherWire `json:"publisher"`
 }
 
 func (r shareResourceResponse) shareLink() (*ShareLink, error) {
@@ -101,9 +115,16 @@ func (r shareResourceResponse) shareLink() (*ShareLink, error) {
 		Type:             r.Type,
 		ExpiresInSeconds: r.ExpiresInSeconds,
 		SingleUse:        r.SingleUse,
+		Publisher:        r.Publisher.publisher(),
 	}
 	if r.ExpiresAt != nil {
 		link.ExpiresAt = *r.ExpiresAt
+	}
+	// A zero time is an unset value on the wire, not a creation date: report
+	// it as absent rather than as year 1.
+	if r.CreatedAt != nil && !r.CreatedAt.IsZero() {
+		createdAt := *r.CreatedAt
+		link.CreatedAt = &createdAt
 	}
 	return link, nil
 }
@@ -127,6 +148,11 @@ func (r shareResourceResponse) shareLink() (*ShareLink, error) {
 // key you already hold, call ShareLink.VerifyCRID before trusting a
 // delivered key. To bind the link itself, use EnterPortalForCRID or
 // VerifyLinkForCRID with the independently held CRID.
+//
+// ShareLink.CreatedAt and ShareLink.Publisher describe the resource and its
+// owner as the service reports them. They are display metadata, outside every
+// verification above: a CRID or link that verifies says nothing about them.
+// See Publisher before showing them to anyone.
 //
 // The minted link is revocable on its own: keep ShareLink.QURLID and pass it
 // to RevokePortal with the same resourceCRID to kill that one link without

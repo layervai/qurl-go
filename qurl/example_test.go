@@ -270,6 +270,53 @@ func ExampleClient_ShareResource() {
 	fmt.Println(share.Link, share.QURLID)
 }
 
+func ExampleClient_Publisher() {
+	client, err := qurl.OpenClient()
+	if err != nil {
+		panic(err)
+	}
+
+	// The profile the service attaches to this owner's shared resources.
+	publisher, err := client.Publisher(context.Background())
+	if err != nil {
+		panic(err)
+	}
+
+	// The name is self-declared text: %q quotes it and escapes control
+	// characters. Always show the verification status beside it.
+	fmt.Printf("%q verified=%t\n", publisher.Name, publisher.Verified)
+}
+
+func ExampleClient_SetPublisherName() {
+	client, err := qurl.OpenClient()
+	if err != nil {
+		panic(err)
+	}
+
+	// Setting a name does not verify the publisher. An empty name removes it.
+	publisher, err := client.SetPublisherName(context.Background(), "Acme Docs")
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Printf("%q verified=%t\n", publisher.Name, publisher.Verified)
+}
+
+// A publisher name is chosen by whoever owns the resource, so display it as
+// untrusted text and never without its verification status.
+func ExamplePublisher() {
+	// As it might arrive on a ShareLink: a name carrying a terminal escape.
+	publisher := qurl.Publisher{Name: "Acme Docs\x1b[2K"}
+
+	status := "UNVERIFIED (self-declared name)"
+	if publisher.Verified {
+		status = "verified"
+	}
+	// %q quotes the name and escapes control and other non-printing characters.
+	fmt.Printf("Publisher: %q - %s\n", publisher.Name, status)
+	// Output: Publisher: "Acme Docs\x1b[2K" - UNVERIFIED (self-declared name)
+}
+
 func ExampleOpenClient() {
 	client, err := qurl.OpenClient()
 	if err != nil {
