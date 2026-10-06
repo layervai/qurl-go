@@ -277,8 +277,11 @@ func (s *CRIDLinkServer) Issue() {
 	s.refusal = ""
 }
 
-// Requests returns the CRID link requests the server has answered so far,
-// oldest first. A request the server could not open is not one of them.
+// Requests returns the CRID link requests the server has read so far, oldest
+// first. A request is recorded when the server has opened it and read it as
+// a CRID link request. So two kinds are not in the list: a request the
+// server could not open, and one it opened and refused as not a CRID link
+// request (it answers that one with 52606).
 func (s *CRIDLinkServer) Requests() []CRIDLinkRequest {
 	s.mu.Lock()
 	defer s.mu.Unlock()

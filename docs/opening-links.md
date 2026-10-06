@@ -506,7 +506,8 @@ and `RequestCRIDLink` send none. Two rules decide what is sent, in this order:
    boundary.
 
 The first rule looks at the whole value, so a control character past the 256th
-byte leaves the user agent out too.
+byte leaves the user agent out too. Bytes that are not valid UTF-8 are sent as
+U+FFFD, the replacement character.
 
 Each `OpenCRID` call requests a fresh link and starts an independent visit, so
 a `Config.PortalSession` cannot carry a visit across two `OpenCRIDWith` calls.
@@ -628,7 +629,7 @@ would stand.
 | `Config` | The `qurl.Config` for `RequestCRIDLinkWith`. Its HTTP client is the server |
 | `Refuse` | Answers every request with one refusal code: one of the six in the [error table](../README.md#error-handling), or any other decimal code |
 | `Issue` | Returns to the default after `Refuse` |
-| `Requests` | The requests the server answered: the CRID and the user agent of each |
+| `Requests` | The requests the server read as CRID link requests: the CRID and the user agent of each. A request it could not open, or refused with `52606` as not a CRID link request, is not in the list |
 | `Deployment` | The same configuration as a `qurl.Deployment`, for code that reads `QURL_DEPLOYMENT`. Give that code `Client` as its HTTP client |
 
 Three limits:

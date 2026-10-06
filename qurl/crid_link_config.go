@@ -62,7 +62,8 @@ type CRIDLinkConfig struct {
 	// U+001F, or U+007F), U+2028 or U+2029 anywhere sends none either: it is
 	// left out, and the request is still made. Otherwise a value longer than
 	// 256 bytes of UTF-8 is cut to the longest prefix that fits and ends on a
-	// character boundary.
+	// character boundary. Bytes that are not valid UTF-8 are sent as U+FFFD,
+	// the replacement character, as a JSON encoder writes them.
 	UserAgent string
 }
 
@@ -112,7 +113,10 @@ var ErrCRIDLinkMisconfigured = fmt.Errorf("%w: the configuration names one that 
 //
 // With a Provider installed the answer is always the first one. A Provider
 // supplies no CRID link endpoint, so it is not asked: asking could be network
-// I/O.
+// I/O. This is the one case in which the two calls can differ: RequestCRIDLink
+// does ask the Provider, so when the Provider itself fails it returns the
+// error of the Provider, and CheckCRIDLinkConfig still returns
+// ErrCRIDLinkNotConfigured. Neither sends a request.
 //
 // RequestCRIDLink checks the CRID before it looks at the configuration, so a
 // CRID it cannot request hides this answer. Call CheckCRIDLinkConfig to learn
