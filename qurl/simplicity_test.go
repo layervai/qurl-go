@@ -42,6 +42,9 @@ var frictionBudget = map[string]int{
 	// opening: name the CRID, request, print the publisher, open, print. The
 	// extra statements are the display step, not setup.
 	"ExampleRequestCRIDLink": 5,
+	// Ask whether a CRID link request can be sent at all, before there is a
+	// CRID: one call and one switch over its answer.
+	"ExampleCheckCRIDLinkConfig": 2,
 	// The explicit retry path reads a public issuer key, builds trust, retains
 	// relay/session config, opens, and prints. Count this setup honestly; unlike
 	// EnterPortal, EnterPortalWith does not resolve deployment config for us.

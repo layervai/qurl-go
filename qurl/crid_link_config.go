@@ -47,7 +47,7 @@ type DeploymentCRIDLink struct {
 //
 // The server public key is deliberately not a field. A request is sealed to
 // the one cell in Config.Cells, and a config that names no cell or several
-// cannot make the request (ErrCRIDLinkNotConfigured): the SDK does not choose
+// cannot make the request (ErrCRIDLinkMisconfigured): the SDK does not choose
 // a cell for a CRID.
 type CRIDLinkConfig struct {
 	// RelayURL is the HTTPS base URL of the relay that carries the request. It
@@ -64,15 +64,85 @@ type CRIDLinkConfig struct {
 }
 
 // ErrCRIDLinkNotConfigured reports that the resolved configuration cannot make
-// a CRID link request: it names no CRID link endpoint, the endpoint is not
-// usable, or it does not name exactly one cell to seal the request to. It
-// wraps ErrNotConfigured, and the message says which. No request is sent.
+// a CRID link request. Either it names no CRID link endpoint, or it names one
+// that cannot be used. It wraps ErrNotConfigured, and the message says which.
+// No request is sent.
+//
+// The second case also matches ErrCRIDLinkMisconfigured. An error that matches
+// this one and not that one means there is no endpoint at all: the request is
+// not offered by this configuration.
 //
 // The deployment embedded in this build names no CRID link endpoint, so
 // RequestCRIDLink and OpenCRID return this error until a deployment file named
 // by QURL_DEPLOYMENT supplies one. RequestCRIDLinkWith and OpenCRIDWith read it
 // from Config.CRIDLink.
 var ErrCRIDLinkNotConfigured = fmt.Errorf("%w: no usable CRID link endpoint", ErrNotConfigured)
+
+// ErrCRIDLinkMisconfigured reports that the configuration names a CRID link
+// endpoint and the endpoint cannot be used. Its relay URL or its link origin
+// is missing or wrong, or the configuration does not name exactly one usable
+// cell to seal the request to. The message says which. No request is sent.
+//
+// It wraps ErrCRIDLinkNotConfigured, so it matches ErrNotConfigured too. Code
+// that tells the two cases apart tests for this error first.
+//
+// A deployment file whose "crid_link" object has an unknown member, or a
+// member of the wrong type, is neither of the two. That file does not decode,
+// and the error is the one LoadDeployment returns.
+var ErrCRIDLinkMisconfigured = fmt.Errorf("%w: the configuration names one that cannot be used", ErrCRIDLinkNotConfigured)
+
+// CheckCRIDLinkConfig reports whether RequestCRIDLink and OpenCRID could send
+// a request at all with the configuration this process resolves. It needs no
+// CRID. It sends nothing and creates nothing: it reads the deployment, the
+// file named by QURL_DEPLOYMENT or the one embedded in the build, and checks
+// it.
+//
+// nil means a request can be sent. It does not mean the server will issue a
+// link. Otherwise the error is the one RequestCRIDLink returns for the same
+// configuration before it sends anything:
+//
+//   - ErrCRIDLinkNotConfigured, and not ErrCRIDLinkMisconfigured, when the
+//     deployment names no CRID link endpoint.
+//   - ErrCRIDLinkMisconfigured when it names one that cannot be used.
+//   - The error from the deployment itself when the file cannot be read or
+//     decoded, or carries no issuer keys.
+//
+// With a Provider installed the answer is always the first one. A Provider
+// supplies no CRID link endpoint, so it is not asked: asking could be network
+// I/O.
+//
+// RequestCRIDLink checks the CRID before it looks at the configuration, so a
+// CRID it cannot request hides this answer. Call CheckCRIDLinkConfig to learn
+// whether the request is offered, whatever the CRID.
+func CheckCRIDLinkConfig() error {
+	if DefaultProvider() != nil {
+		return errNoCRIDLinkEndpoint()
+	}
+	cfg, err := defaultDeploymentConfig()
+	if err != nil {
+		return err
+	}
+	return CheckCRIDLinkConfigWith(cfg)
+}
+
+// CheckCRIDLinkConfigWith is CheckCRIDLinkConfig for an explicit Config. It
+// reports whether RequestCRIDLinkWith and OpenCRIDWith could send a request
+// with cfg, and it runs the same checks they run before they send one. A cfg
+// with no TrustStore is ErrNotConfigured, as it is for those calls.
+func CheckCRIDLinkConfigWith(cfg Config) error {
+	_, err := resolveCRIDLinkEndpoint(cfg)
+	return err
+}
+
+// errNoCRIDLinkEndpoint is the one error for a configuration that names no
+// CRID link endpoint. It has one message for every source of a Config, so it
+// names each remedy and says which source has none: with a Provider installed
+// the deployment file is not read, and editing it would change nothing.
+func errNoCRIDLinkEndpoint() error {
+	return fmt.Errorf(
+		"%w: the configuration names none (set Config.CRIDLink, or add \"crid_link\" to the deployment file named by %s; an installed Provider supplies none)",
+		ErrCRIDLinkNotConfigured, EnvDeploymentPath)
+}
 
 // cridLinkEndpoint is a validated CRID link endpoint: everything the first
 // packet needs, resolved before any network I/O.
@@ -94,18 +164,16 @@ func resolveCRIDLinkEndpoint(cfg Config) (*cridLinkEndpoint, error) {
 		return nil, fmt.Errorf("%w: a CRID link request requires qURL opener config", ErrNotConfigured)
 	}
 	if cfg.CRIDLink == nil {
-		// One message for every source of a Config, so it names each remedy and
-		// says which source has none: with a Provider installed the deployment
-		// file is not read, and editing it would change nothing.
-		return nil, fmt.Errorf(
-			"%w: the configuration names none (set Config.CRIDLink, or add \"crid_link\" to the deployment file named by %s; an installed Provider supplies none)",
-			ErrCRIDLinkNotConfigured, EnvDeploymentPath)
+		return nil, errNoCRIDLinkEndpoint()
 	}
+	// From here on the configuration names an endpoint, so every fault is a
+	// misconfigured one. A caller can tell it from a configuration that does
+	// not offer the request at all.
 	if err := validateCRIDLinkRelayURL(cfg.CRIDLink.RelayURL, cfg.RelayAllowlist); err != nil {
-		return nil, fmt.Errorf("%w: relay URL: %w", ErrCRIDLinkNotConfigured, err)
+		return nil, fmt.Errorf("%w: relay URL: %w", ErrCRIDLinkMisconfigured, err)
 	}
 	if err := validateCRIDLinkOrigin(cfg.CRIDLink.LinkOrigin); err != nil {
-		return nil, fmt.Errorf("%w: link origin %w", ErrCRIDLinkNotConfigured, err)
+		return nil, fmt.Errorf("%w: link origin %w", ErrCRIDLinkMisconfigured, err)
 	}
 
 	// The request is sealed to the deployment's cell. With no cell there is no
@@ -116,17 +184,17 @@ func resolveCRIDLinkEndpoint(cfg Config) (*cridLinkEndpoint, error) {
 	case cells == 0:
 		return nil, fmt.Errorf(
 			"%w: the request is sealed to the deployment's cell, and the configuration names no cell",
-			ErrCRIDLinkNotConfigured)
+			ErrCRIDLinkMisconfigured)
 	case cells > 1:
 		return nil, fmt.Errorf(
 			"%w: the configuration names %d cells, and a CRID link request does not choose between cells",
-			ErrCRIDLinkNotConfigured, cells)
+			ErrCRIDLinkMisconfigured, cells)
 	}
 	// A catalog entry is length-checked only. Refuse a key that cannot carry a
 	// key agreement here, as a configuration fault, rather than as an untyped
 	// transport error after the request was assembled.
 	if err := x25519key.ValidatePublic(serverPublicKey); err != nil {
-		return nil, fmt.Errorf("%w: the cell's server public key is unusable: %w", ErrCRIDLinkNotConfigured, err)
+		return nil, fmt.Errorf("%w: the cell's server public key is unusable: %w", ErrCRIDLinkMisconfigured, err)
 	}
 	return &cridLinkEndpoint{
 		relayURL:        cfg.CRIDLink.RelayURL,

@@ -2,6 +2,7 @@ package qurl_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 
@@ -57,6 +58,25 @@ func ExampleRequestCRIDLink() {
 		return
 	}
 	fmt.Println(handle.ResourceURL)
+
+	// Output:
+}
+
+// ExampleCheckCRIDLinkConfig asks, before there is a CRID to open, whether a
+// link can be requested at all. It reads the deployment and sends nothing. A
+// program with another way to open a resource uses the answer to choose.
+func ExampleCheckCRIDLinkConfig() {
+	err := qurl.CheckCRIDLinkConfig()
+	switch {
+	case err == nil:
+		// A request can be sent. Whether a link is issued is the server's answer.
+	case errors.Is(err, qurl.ErrCRIDLinkMisconfigured):
+		// The deployment names an endpoint that cannot be used. Report err.
+	case errors.Is(err, qurl.ErrCRIDLinkNotConfigured):
+		// The deployment names no endpoint. Opening by CRID is not offered here.
+	default:
+		// The deployment itself could not be read. Report err.
+	}
 
 	// Output:
 }

@@ -387,7 +387,8 @@ check is never opened, returned, logged, or quoted in an error.
   deployment names in its `crid_link` object. The deployment embedded in this
   release does not name one, so `OpenCRID` returns `ErrCRIDLinkNotConfigured`
   until `QURL_DEPLOYMENT` names a deployment file that does, or you pass the
-  endpoint with `OpenCRIDWith`. See
+  endpoint with `OpenCRIDWith`. `CheckCRIDLinkConfig` gives the same answer
+  without a CRID and without sending anything. See
   [Open by CRID](docs/opening-links.md#open-by-crid) for the file format.
 
 ## Error handling
@@ -441,7 +442,8 @@ the table above.
 | `qurl.ErrServerOverloaded` | — | The server is busy and sent no answer. Try again later |
 | `qurl.ErrCRIDLinkProtocol` | — | The reply is not a usable answer: no outcome code, a success code, or a code that is not a decimal number. A link request opens nothing, so a reply that claims success is not trusted with a link. Wraps `ErrMalformedReply` |
 | `*qurl.CRIDLinkRejectedError` | — | The server issued a link and the link failed a client check; `Class` names the check (`missing_redirect`, `origin`, `path_or_query`, `transport`, `issuer_signature`, `crid_mismatch`, `info_crid_mismatch`). Matches `qurl.ErrCRIDLinkRejected`. The link is not returned |
-| `qurl.ErrCRIDLinkNotConfigured` | — | The configuration names no usable CRID link endpoint, or does not name exactly one cell. Nothing was sent. Wraps `ErrNotConfigured` |
+| `qurl.ErrCRIDLinkNotConfigured` | — | The configuration cannot make the request: it names no CRID link endpoint, or it names one that cannot be used. Nothing was sent. Wraps `ErrNotConfigured` |
+| `qurl.ErrCRIDLinkMisconfigured` | — | The configuration names a CRID link endpoint that cannot be used: a relay URL or link origin that is missing or wrong, or not exactly one usable cell. Nothing was sent. Wraps `ErrCRIDLinkNotConfigured`, so test for it first |
 | `qurl.ErrInvalidResourceRequest` | — | The CRID failed the local validation gate — the `crid` package's sentinel matches too — or, with `qurl.ErrUnsupportedCRIDVersion`, has a version this SDK cannot verify a link against. Nothing was sent |
 | `*qurl.RelayError` | — | The relay could not be reached, answered with an HTTP error instead of a reply, or began a reply that could not be read to the end (`Status` is then 200). When the caller's context ended the request before a reply was read, the error also matches the context's error |
 

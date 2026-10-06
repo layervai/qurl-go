@@ -592,7 +592,7 @@ func TestCRIDLinkVerifySentinelsDropTheMessage(t *testing.T) {
 }
 
 // The outcomes of a request are separate errors. A caller's switch over them
-// must never match two, apart from the two documented containments.
+// must never match two, apart from the documented containments.
 func TestCRIDLinkErrorsAreDistinct(t *testing.T) {
 	outcomes := map[string]error{
 		"ErrCRIDLinkUnavailable":    ErrCRIDLinkUnavailable,
@@ -618,16 +618,31 @@ func TestCRIDLinkErrorsAreDistinct(t *testing.T) {
 			t.Errorf("%s text %q does not carry the package prefix", name, err.Error())
 		}
 	}
-	// The two containments a caller can rely on.
+	// The containments a caller can rely on.
 	if !errors.Is(ErrCRIDLinkProtocol, ErrMalformedReply) {
 		t.Error("ErrCRIDLinkProtocol must match ErrMalformedReply")
 	}
 	if !errors.Is(ErrCRIDLinkNotConfigured, ErrNotConfigured) {
 		t.Error("ErrCRIDLinkNotConfigured must match ErrNotConfigured")
 	}
+	// An endpoint that cannot be used is one kind of "not configured", so code
+	// written before the narrower error existed keeps matching it.
+	if !errors.Is(ErrCRIDLinkMisconfigured, ErrCRIDLinkNotConfigured) || !errors.Is(ErrCRIDLinkMisconfigured, ErrNotConfigured) {
+		t.Error("ErrCRIDLinkMisconfigured must match ErrCRIDLinkNotConfigured and ErrNotConfigured")
+	}
 	// And they are containments, not equalities.
-	if errors.Is(ErrMalformedReply, ErrCRIDLinkProtocol) || errors.Is(ErrNotConfigured, ErrCRIDLinkNotConfigured) {
+	if errors.Is(ErrMalformedReply, ErrCRIDLinkProtocol) || errors.Is(ErrNotConfigured, ErrCRIDLinkNotConfigured) ||
+		errors.Is(ErrCRIDLinkNotConfigured, ErrCRIDLinkMisconfigured) {
 		t.Error("a broader sentinel matches its narrower one")
+	}
+	// The narrower error matches no other outcome.
+	for name, other := range outcomes {
+		if name != "ErrCRIDLinkNotConfigured" && (errors.Is(ErrCRIDLinkMisconfigured, other) || errors.Is(other, ErrCRIDLinkMisconfigured)) {
+			t.Errorf("ErrCRIDLinkMisconfigured and %s match", name)
+		}
+	}
+	if !strings.HasPrefix(ErrCRIDLinkMisconfigured.Error(), "qurl: ") {
+		t.Errorf("ErrCRIDLinkMisconfigured text %q does not carry the package prefix", ErrCRIDLinkMisconfigured.Error())
 	}
 }
 

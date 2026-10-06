@@ -453,9 +453,19 @@ Every value above is a placeholder.
 
 A deployment that cannot carry the request fails with
 `ErrCRIDLinkNotConfigured`, which matches `ErrNotConfigured`, before anything
-is sent. A wrong value inside `crid_link`, such as a relay that is not on the
-allowlist or an origin with a trailing slash, affects only this request; links
-keep opening.
+is sent. There are two cases, and the error says which:
+
+| The deployment | `ErrCRIDLinkNotConfigured` | `ErrCRIDLinkMisconfigured` |
+| --- | --- | --- |
+| names no `crid_link` | matches | does not match |
+| names a `crid_link` that cannot be used | matches | matches |
+
+The first case means this deployment does not offer the request. The second is
+a fault to report: a relay that is not on the allowlist, an origin with a
+trailing slash, a missing value, or `cells` that does not name exactly one
+usable cell. `ErrCRIDLinkMisconfigured` matches both sentinels, so test for it
+first. A wrong value inside `crid_link` affects only this request; links keep
+opening.
 
 **The deployment embedded in this release names no `crid_link`.** Against it,
 `OpenCRID` and `RequestCRIDLink` return `ErrCRIDLinkNotConfigured` until
@@ -466,7 +476,8 @@ the whole file as carrying an unknown field, and then opens nothing. Add
 `crid_link` only to deployment files read by releases that know it. The same
 strictness applies inside the object: a misspelled or unknown member, or a
 member of the wrong type, makes the file malformed, and a malformed file opens
-nothing either.
+nothing either. Its error is the one for a file that does not decode, and it
+matches neither of the two sentinels above.
 
 An installed `Provider` supplies trust and transport, not the CRID link
 endpoint. With one installed, pass the endpoint explicitly:
@@ -495,6 +506,38 @@ To retry one visit, request the link once with `RequestCRIDLinkWith` and retry
 `EnterPortalWith` with that link and the retained session, as described under
 [Retry a Visit](#retry-a-visit).
 
+### Ask whether the request is offered
+
+`CheckCRIDLinkConfig` answers that question before there is a CRID to open:
+
+```go
+err := qurl.CheckCRIDLinkConfig()
+switch {
+case err == nil:
+	// A request can be sent. Whether a link is issued is the server's answer.
+case errors.Is(err, qurl.ErrCRIDLinkMisconfigured):
+	// The deployment names an endpoint that cannot be used.
+	report(err)
+case errors.Is(err, qurl.ErrCRIDLinkNotConfigured):
+	// The deployment names no endpoint. Opening by CRID is not offered here.
+default:
+	// The deployment itself could not be read.
+	report(err)
+}
+```
+
+It reads the deployment and checks it. It sends nothing and creates nothing.
+The error is the one `RequestCRIDLink` returns for the same deployment before
+it sends anything.
+
+Use it when the answer must not depend on the CRID. `RequestCRIDLink` checks
+the CRID first, so for a CRID it cannot request it returns
+`ErrInvalidResourceRequest` and says nothing about the deployment.
+
+With a `Provider` installed the answer is always `ErrCRIDLinkNotConfigured`,
+and the `Provider` is not asked. `CheckCRIDLinkConfigWith` checks an explicit
+`Config`.
+
 ### Errors from an open by CRID
 
 ```go
@@ -518,6 +561,9 @@ case errors.Is(err, qurl.ErrCRIDResourceClosed):
 case errors.As(err, &rejected):
 	// The server issued a link that failed a check. rejected.Class says which.
 	reject()
+case errors.Is(err, qurl.ErrCRIDLinkMisconfigured):
+	// Tested before ErrCRIDLinkNotConfigured, which it also matches.
+	reportUnusableCRIDLinkEndpoint(err)
 case errors.Is(err, qurl.ErrCRIDLinkNotConfigured):
 	reportMissingCRIDLinkEndpoint()
 case errors.Is(err, qurl.ErrInvalidResourceRequest):

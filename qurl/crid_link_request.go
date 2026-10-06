@@ -211,13 +211,16 @@ func (e *CRIDLinkRejectedError) Unwrap() []error {
 // build — with one difference: the CRID link endpoint comes only from a
 // deployment's "crid_link" object. A Provider supplies trust, not that
 // endpoint, so with one installed, and with a deployment that names none, this
-// returns ErrCRIDLinkNotConfigured. Use RequestCRIDLinkWith to pass the
+// returns ErrCRIDLinkNotConfigured. A deployment that names one that cannot be
+// used is ErrCRIDLinkMisconfigured. Use RequestCRIDLinkWith to pass the
 // endpoint explicitly.
 //
 // A CRID that fails the local validation gate, or whose version this SDK
 // cannot verify a link against, is refused before any configuration is
 // resolved or request sent: the error matches ErrInvalidResourceRequest and
-// the crid package's sentinel, or ErrUnsupportedCRIDVersion.
+// the crid package's sentinel, or ErrUnsupportedCRIDVersion. That refusal
+// says nothing about the configuration. CheckCRIDLinkConfig reports whether a
+// request can be sent at all, without a CRID.
 //
 // The reply decides the rest. A link is returned as *CRIDLink. Each refusal is
 // a typed error: ErrCRIDLinkNotFound, ErrCRIDLinkUnavailable,

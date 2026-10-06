@@ -48,6 +48,13 @@ and are marked **Breaking** with what to change.
     name a `crid_link` yet**, so these calls return that error until
     `QURL_DEPLOYMENT` names a file that does. Deployment decoding is strict: an
     SDK release older than this one rejects a file that contains `crid_link`.
+  - `CheckCRIDLinkConfig` reports whether a CRID link request can be sent at
+    all with the resolved deployment. It needs no CRID, sends nothing, and
+    does not ask an installed `Provider`. `CheckCRIDLinkConfigWith` checks an
+    explicit `Config`. The error tells two cases apart: a configuration that
+    names no CRID link endpoint matches `ErrCRIDLinkNotConfigured` only, and
+    one that names an endpoint that cannot be used also matches the new
+    `ErrCRIDLinkMisconfigured`, which wraps `ErrCRIDLinkNotConfigured`.
   - The client rules are the public `qurl-crid-link-knock-v1-vectors`
     conformance artifact, run case by case through the exported calls.
   - `crid.CRID` gains `Active`, which reports whether a version is one
