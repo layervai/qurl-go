@@ -58,8 +58,11 @@ type CRIDLinkConfig struct {
 	LinkOrigin string
 	// UserAgent optionally names the calling program to the server, for
 	// example "example-tool/1.2". It travels inside the encrypted request.
-	// Empty sends none. A value longer than 256 bytes of UTF-8 is cut to the
-	// longest prefix that fits and ends on a character boundary.
+	// Empty sends none. A value that holds a control character (U+0000 to
+	// U+001F, or U+007F), U+2028 or U+2029 anywhere sends none either: it is
+	// left out, and the request is still made. Otherwise a value longer than
+	// 256 bytes of UTF-8 is cut to the longest prefix that fits and ends on a
+	// character boundary.
 	UserAgent string
 }
 

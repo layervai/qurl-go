@@ -1221,41 +1221,34 @@ func TestBuildCRIDLinkKnockBody_CanonicalForm(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		userAgent string
-		want      string
+		// sent is the user agent the body carries. It is empty when the member
+		// is left out.
+		sent string
+		want string
 	}{
-		{"no user agent", "", prefix + `}}`},
-		{"plain", "example-tool/1.2", prefix + `,"qurl_user_agent":"example-tool/1.2"}}`},
+		{"no user agent", "", "", prefix + `}}`},
+		{"plain", "example-tool/1.2", "example-tool/1.2", prefix + `,"qurl_user_agent":"example-tool/1.2"}}`},
 		// Only the quote and the backslash are escaped. The solidus and the
 		// HTML characters are written as they are.
 		{
-			"escaping", `tool/1.0 "quoted" back\slash <tag> a&b /path`,
+			"escaping", `tool/1.0 "quoted" back\slash <tag> a&b /path`, `tool/1.0 "quoted" back\slash <tag> a&b /path`,
 			prefix + `,"qurl_user_agent":"tool/1.0 \"quoted\" back\\slash <tag> a&b /path"}}`,
 		},
 		// Non-ASCII text is emitted as UTF-8, never as \u escapes.
-		{"non-ASCII", "tool/1.0 (Zürich) 😀", prefix + `,"qurl_user_agent":"tool/1.0 (Zürich) 😀"}}`},
-		// Control characters are the only escapes besides the quote and the
-		// backslash: the five short forms, and \u00xx for the rest. DEL is not
-		// a control character to JSON and is written as it is.
-		{"control characters", "a\tb\nc", prefix + `,"qurl_user_agent":"a\tb\nc"}}`},
-		{
-			"every kind of control character", "\b\f\r\x00\x01\x1f\x7f",
-			prefix + `,"qurl_user_agent":"\b\f\r\u0000\u0001\u001f` + "\x7f" + `"}}`,
-		},
-		// The two line separators are non-ASCII characters like any other and
-		// are written as UTF-8. encoding/json escapes them unless it is undone.
-		{
-			"line separators", "a\u2028b\u2029c",
-			prefix + `,"qurl_user_agent":"a` + "\u2028" + `b` + "\u2029" + `c"}}`,
-		},
-		// The same six characters as text are a backslash and five letters:
-		// the backslash is escaped and nothing turns into a separator.
-		{"a line separator escape as text", `a\u2028b\u2029c`, prefix + `,"qurl_user_agent":"a\\u2028b\\u2029c"}}`},
-		{
-			"a backslash in front of a line separator", `a\` + "\u2028" + `\\` + "\u2029",
-			prefix + `,"qurl_user_agent":"a\\` + "\u2028" + `\\\\` + "\u2029" + `"}}`,
-		},
-		// Their neighbours in the same block never were escaped.
-		{"neighbours of the line separators", "\u2027\u202a", prefix + `,"qurl_user_agent":"` + "\u2027\u202a" + `"}}`},
+		{"non-ASCII", "tool/1.0 (Zürich) 😀", "tool/1.0 (Zürich) 😀", prefix + `,"qurl_user_agent":"tool/1.0 (Zürich) 😀"}}`},
+		// A user agent that holds a control character, U+2028 or U+2029 is
+		// left out whole. Encoders write those characters in different ways,
+		// so the body would not have one canonical form.
+		{"control characters", "a\tb\nc", "", prefix + `}}`},
+		{"every kind of control character", "\b\f\r\x00\x01\x1f\x7f", "", prefix + `}}`},
+		{"line separators", "a\u2028b\u2029c", "", prefix + `}}`},
+		{"a backslash in front of a line separator", `a\` + "\u2028" + `\\` + "\u2029", "", prefix + `}}`},
+		// The six characters of a line separator escape, as text, are a
+		// backslash and five letters. The value is sent, with the backslash
+		// escaped, and nothing turns into a separator.
+		{"a line separator escape as text", `a\u2028b\u2029c`, `a\u2028b\u2029c`, prefix + `,"qurl_user_agent":"a\\u2028b\\u2029c"}}`},
+		// Their neighbours in the same block are ordinary characters.
+		{"neighbours of the line separators", "\u2027\u202a", "\u2027\u202a", prefix + `,"qurl_user_agent":"` + "\u2027\u202a" + `"}}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			body, err := buildCRIDLinkKnockBody(value, tc.userAgent)
@@ -1268,15 +1261,15 @@ func TestBuildCRIDLinkKnockBody_CanonicalForm(t *testing.T) {
 			// The expectation above was written by hand. The independent
 			// serializer agrees with it, which is what lets the fuzz target
 			// use that serializer as its oracle.
-			if reference := canonicalCRIDLinkKnockBody(value, tc.userAgent); reference != tc.want {
+			if reference := canonicalCRIDLinkKnockBody(value, tc.sent); reference != tc.want {
 				t.Fatalf("the reference serializer disagrees with the pinned bytes\n got %s\nwant %s", reference, tc.want)
 			}
-			// And it is JSON that reads back as the input.
+			// And it is JSON that reads back as what was sent.
 			var decoded cridLinkKnockMsg
 			if err := json.Unmarshal(body, &decoded); err != nil {
 				t.Fatalf("the body is not JSON: %v", err)
 			}
-			if decoded.UsrData.CRID != value || decoded.UsrData.UserAgent != tc.userAgent ||
+			if decoded.UsrData.CRID != value || decoded.UsrData.UserAgent != tc.sent ||
 				decoded.HeaderType != relayknock.TypeKnock || decoded.AspID != "qurl" || decoded.ResID != "qurl-crid" {
 				t.Fatalf("decoded body = %+v", decoded)
 			}
@@ -1329,7 +1322,9 @@ func canonicalCRIDLinkKnockBody(resourceCRID, sentUserAgent string) string {
 // form calls for, which is what JavaScript's JSON.stringify produces: the quote
 // and the backslash are escaped, a control character is one of the five short
 // escapes or \u00xx in lower-case hex, and everything else — DEL, the line
-// separators, every non-ASCII character — is written as it is.
+// separators, every non-ASCII character — is written as it is. A request never
+// carries a control character, DEL or a line separator, so for a body the
+// builder made only the first rule and the last are used.
 func canonicalJSONString(text string) string {
 	var out strings.Builder
 	out.WriteByte('"')
@@ -1361,39 +1356,130 @@ func canonicalJSONString(text string) string {
 	return out.String()
 }
 
-// The rewrite that restores the two line separators works on encoded JSON, so
-// it is pinned on its own as well: it touches those two escapes and nothing
-// else, however the backslashes around them fall.
-func TestUnescapeJSONLineSeparators(t *testing.T) {
-	const ls, ps = "\u2028", "\u2029"
-	for encoded, want := range map[string]string{
-		``:                        ``,
-		`{"a":"plain"}`:           `{"a":"plain"}`,
-		`{"a":"x\u2028y\u2029z"}`: `{"a":"x` + ls + `y` + ps + `z"}`,
-		`"\u2028"`:                `"` + ls + `"`,
-		`"\u2028\u2028\u2029"`:    `"` + ls + ls + ps + `"`,
-		`"\\u2028"`:               `"\\u2028"`,            // an escaped backslash, then text
-		`"\\\u2028"`:              `"\\` + ls + `"`,       // an escaped backslash, then the escape
-		`"\\\\u2028"`:             `"\\\\u2028"`,          // two escaped backslashes, then text
-		`"\\\\\u2029"`:            `"\\\\` + ps + `"`,     // two escaped backslashes, then the escape
-		`"\"\u2028\""`:            `"\"` + ls + `\""`,     // escaped quotes around the escape
-		`"\u2027\u202a\u202A"`:    `"\u2027\u202a\u202A"`, // other escapes in the block are not this rule's
-		`"\u00e9\n\t\u0001"`:      `"\u00e9\n\t\u0001"`,   // nor is any other escape
-		`"\u202"`:                 `"\u202"`,              // cut short: left as it was
-		`"tail\`:                  `"tail\`,               // nothing to rewrite: returned as it is
-		`"\u2028tail\`:            `"` + ls + `tail\`,     // a lone trailing backslash is copied, not read past
-	} {
-		if got := string(unescapeJSONLineSeparators([]byte(encoded))); got != want {
-			t.Errorf("unescapeJSONLineSeparators(%s) = %s, want %s", encoded, got, want)
+// TestSentCRIDLinkUserAgent holds the user agent rule of the public vectors,
+// which no vector case pins yet. A user agent that holds a control character
+// (U+0000 to U+001F, or U+007F), U+2028 or U+2029 is left out whole. The whole
+// value is looked at first, and only a value that may be sent is cut to the
+// limit.
+func TestSentCRIDLinkUserAgent(t *testing.T) {
+	const limit = 256
+
+	// Every character of the closed set, wherever it stands in the value.
+	notSent := []rune{0x7f, 0x2028, 0x2029}
+	for r := rune(0); r <= 0x1f; r++ {
+		notSent = append(notSent, r)
+	}
+	if len(notSent) != 35 {
+		t.Fatalf("the closed set has %d characters, want 35", len(notSent))
+	}
+	for _, r := range notSent {
+		for position, userAgent := range map[string]string{
+			"alone":  string(r),
+			"first":  string(r) + "example-tool/1.2",
+			"inside": "example-tool" + string(r) + "/1.2",
+			"last":   "example-tool/1.2" + string(r),
+		} {
+			if got := sentCRIDLinkUserAgent(userAgent); got != "" {
+				t.Errorf("U+%04X %s: sent %q, want the member left out", r, position, got)
+			}
 		}
 	}
 
-	// The input is not modified: the result is a new slice whenever it differs.
-	input := []byte(`"x\u2028y"`)
-	before := string(input)
-	_ = unescapeJSONLineSeparators(input)
-	if string(input) != before {
-		t.Fatal("the rewrite changed its input")
+	for _, tc := range []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"empty", "", ""},
+		{"plain", "example-tool/1.2", "example-tool/1.2"},
+		// The characters on each side of the closed set are sent as they are.
+		// The set is the contract's: it has no other control character in it.
+		{"space, the first character after the controls", "a b", "a b"},
+		{"tilde, the character before DEL", "a~b", "a~b"},
+		{"U+0080, the character after DEL", "a\u0080b", "a\u0080b"},
+		{"U+009F, the last C1 control", "a\u009fb", "a\u009fb"},
+		{"no-break space", "a\u00a0b", "a\u00a0b"},
+		{"U+2027 and U+202A, around the separators", "\u2027\u202a", "\u2027\u202a"},
+		// Text that only spells an escape holds none of the characters.
+		{"escapes as text", `a\u2028b\tc\u0000`, `a\u2028b\tc\u0000`},
+
+		// The order of the two rules. The whole value is looked at before it
+		// is cut, so a character past the limit leaves the member out. Cutting
+		// first would send the first 256 bytes of each of these.
+		{"a tab just past the limit", strings.Repeat("a", limit) + "\t", ""},
+		{"a line separator far past the limit", strings.Repeat("a", 280) + "\u2028" + strings.Repeat("a", 20), ""},
+		{"DEL as the last of 300 bytes", strings.Repeat("a", 299) + "\x7f", ""},
+		// The cut would fall inside this character and drop it whole. It is
+		// still seen first.
+		{"a paragraph separator across the limit", strings.Repeat("a", limit-1) + "\u2029", ""},
+		// And a long value with none of the characters is cut, as before.
+		{"long and clean", strings.Repeat("b", 300), strings.Repeat("b", limit)},
+		{"long and clean, cut at a character boundary", strings.Repeat("c", 253) + "😀c", strings.Repeat("c", 253)},
+
+		// Bytes that are not UTF-8 are replaced, as before, and are not one of
+		// the characters. A control character next to them still is.
+		{"invalid bytes", "ab\xffcd", "ab\ufffdcd"},
+		{"invalid bytes and a control character", "ab\xff\x1fcd", ""},
+		{"a control byte where a continuation byte belongs", "ab\xc3\x1fcd", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := sentCRIDLinkUserAgent(tc.in)
+			if got != tc.want {
+				t.Fatalf("sent %d bytes %q\nwant %d bytes %q", len(got), got, len(tc.want), tc.want)
+			}
+			if len(got) > limit || !utf8.ValidString(got) || strings.ContainsFunc(got, cridLinkUserAgentRuneNotSent) {
+				t.Fatalf("the sent user agent %q breaks the rules for what is sent", got)
+			}
+		})
+	}
+}
+
+// TestRequestCRIDLinkWith_LeavesOutAUserAgentItMustNotSend is the user agent
+// rule through the exported call. The user agent comes from the caller, in
+// CRIDLinkConfig.UserAgent, so that is where the rule has to hold. A value that
+// must not be sent costs the member, not the request: the request is still
+// made, and it is byte for byte the request of a caller that set no user agent.
+func TestRequestCRIDLinkWith_LeavesOutAUserAgentItMustNotSend(t *testing.T) {
+	fixture := newCRIDLinkFixture(t)
+	fixture.peer.respond(cridLinkIssued(t, fixture.link, nil))
+	without := `{"headerType":1,"aspId":"qurl","resId":"qurl-crid","usrData":{"qurl_crid":"` + fixture.crid + `"}}`
+	with := func(sent string) string {
+		return `{"headerType":1,"aspId":"qurl","resId":"qurl-crid","usrData":{"qurl_crid":"` + fixture.crid +
+			`","qurl_user_agent":"` + sent + `"}}`
+	}
+
+	for _, tc := range []struct {
+		name      string
+		userAgent string
+		want      string
+	}{
+		{"a tab", "example-tool/1.2\t(linux)", without},
+		{"a line feed", "example-tool/1.2\n", without},
+		{"NUL", "example-tool\x00", without},
+		{"DEL", "example-tool\x7f", without},
+		{"U+2028", "example\u2028tool", without},
+		{"U+2029", "example\u2029tool", without},
+		// Past the limit: the value is not cut and sent, it is left out.
+		{"a tab past the limit", strings.Repeat("a", 280) + "\t", without},
+		// The neighbouring cases are still sent, so the rule is not "send none".
+		{"clean", "example-tool/1.2", with("example-tool/1.2")},
+		{"clean and long", strings.Repeat("b", 300), with(strings.Repeat("b", 256))},
+		{"U+0080 is not in the set", "a\u0080b", with("a\u0080b")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture.cfg.CRIDLink.UserAgent = tc.userAgent
+			before := len(fixture.peer.seen())
+			if _, err := RequestCRIDLinkWith(t.Context(), fixture.crid, fixture.cfg); err != nil {
+				t.Fatalf("RequestCRIDLinkWith: %v", err)
+			}
+			knocks := fixture.peer.seen()
+			if len(knocks) != before+1 {
+				t.Fatalf("the cell saw %d requests for one call", len(knocks)-before)
+			}
+			if got := string(knocks[len(knocks)-1].body); got != tc.want {
+				t.Fatalf("request body = %s\nwant           %s", got, tc.want)
+			}
+		})
 	}
 }
 

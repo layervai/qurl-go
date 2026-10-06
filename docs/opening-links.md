@@ -496,9 +496,17 @@ cfg := qurl.Config{
 handle, err := qurl.OpenCRIDWith(ctx, resourceCRID, cfg)
 ```
 
-`UserAgent` is optional and travels inside the encrypted request. A value
-longer than 256 bytes of UTF-8 is cut at a character boundary. `OpenCRID` and
-`RequestCRIDLink` send none.
+`UserAgent` is optional and travels inside the encrypted request. `OpenCRID`
+and `RequestCRIDLink` send none. Two rules decide what is sent, in this order:
+
+1. A value that holds a control character (U+0000 to U+001F, or U+007F),
+   U+2028 or U+2029 anywhere is left out. The request is still made, without a
+   user agent.
+2. Any other value longer than 256 bytes of UTF-8 is cut at a character
+   boundary.
+
+The first rule looks at the whole value, so a control character past the 256th
+byte leaves the user agent out too.
 
 Each `OpenCRID` call requests a fresh link and starts an independent visit, so
 a `Config.PortalSession` cannot carry a visit across two `OpenCRIDWith` calls.

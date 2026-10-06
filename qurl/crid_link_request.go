@@ -406,10 +406,13 @@ type cridLinkKnockUserData struct {
 // JSON, members in declared order, strings escaped only where JSON requires it
 // and every non-ASCII character written as UTF-8.
 //
-// Two encoder defaults stand between encoding/json and that form. HTML
+// One encoder default stands between encoding/json and that form. HTML
 // escaping is switched off, because the canonical form writes '<', '>' and '&'
-// as they are. And the encoder escapes U+2028 and U+2029 whatever it is told,
-// so those two escapes are written back as the characters afterwards.
+// as they are. The encoder differs from other encoders in two more places: it
+// has its own way to write a control character, and it always escapes U+2028
+// and U+2029. Neither is reached here. A user agent that holds one of those
+// characters is not sent at all (see sentCRIDLinkUserAgent), and a CRID never
+// holds one.
 func buildCRIDLinkKnockBody(resourceCRID, userAgent string) ([]byte, error) {
 	var encoded bytes.Buffer
 	encoder := json.NewEncoder(&encoded)
@@ -420,54 +423,45 @@ func buildCRIDLinkKnockBody(resourceCRID, userAgent string) ([]byte, error) {
 		ResID:      cridLinkResourceID,
 		UsrData: cridLinkKnockUserData{
 			CRID:      resourceCRID,
-			UserAgent: truncateCRIDLinkUserAgent(userAgent),
+			UserAgent: sentCRIDLinkUserAgent(userAgent),
 		},
 	}); err != nil {
 		return nil, fmt.Errorf("qurl: build CRID link request: %w", err)
 	}
 	// Encode appends a newline, which is not part of the body.
-	return unescapeJSONLineSeparators(bytes.TrimSuffix(encoded.Bytes(), []byte("\n"))), nil
+	return bytes.TrimSuffix(encoded.Bytes(), []byte("\n")), nil
 }
 
-// unescapeJSONLineSeparators rewrites the escapes \u2028 and \u2029 in JSON
-// that encoding/json produced as the characters they stand for. The encoder
-// always writes those two code points as escapes, and the canonical form of a
-// request body writes them, like every other non-ASCII character, as UTF-8.
+// sentCRIDLinkUserAgent returns the user agent a request carries, or "" when
+// the request carries none.
 //
-// Escapes are consumed whole, one at a time. That is what keeps the six
-// characters `\u2028` that follow an escaped backslash — a backslash and the
-// text "u2028" in the original string — from being mistaken for the escape.
-func unescapeJSONLineSeparators(encoded []byte) []byte {
-	if !bytes.Contains(encoded, []byte(`\u202`)) {
-		return encoded
+// A user agent that holds a control character (U+0000 to U+001F, or U+007F),
+// U+2028 or U+2029 is left out whole. JSON encoders do not agree on how to
+// write those characters, so two correct clients would send different bytes
+// for the same value. The member is optional and only for display, so a
+// request without it loses nothing.
+//
+// The whole value is looked at, and only then is a long one cut. A character
+// past the limit leaves the member out too. Cutting first would send the start
+// of a value that must not be sent.
+func sentCRIDLinkUserAgent(userAgent string) string {
+	if strings.ContainsFunc(userAgent, cridLinkUserAgentRuneNotSent) {
+		return ""
 	}
-	rewritten := make([]byte, 0, len(encoded))
-	for i := 0; i < len(encoded); {
-		rest := encoded[i:]
-		switch {
-		case rest[0] != '\\' || len(rest) == 1:
-			rewritten = append(rewritten, rest[0])
-			i++
-		case bytes.HasPrefix(rest, []byte(`\u2028`)):
-			rewritten = utf8.AppendRune(rewritten, '\u2028')
-			i += 6
-		case bytes.HasPrefix(rest, []byte(`\u2029`)):
-			rewritten = utf8.AppendRune(rewritten, '\u2029')
-			i += 6
-		default:
-			// Any other escape: the backslash and the character it introduces.
-			// What follows a \u escape's "u" is plain hex and needs no care.
-			rewritten = append(rewritten, rest[0], rest[1])
-			i += 2
-		}
-	}
-	return rewritten
+	return truncateCRIDLinkUserAgent(userAgent)
 }
 
-// truncateCRIDLinkUserAgent returns the user agent a request sends: the longest
-// prefix of at most cridLinkUserAgentMaxBytes bytes that ends on a character
-// boundary. A long value is cut, never refused, and what is sent is always
-// valid UTF-8.
+// cridLinkUserAgentRuneNotSent reports whether r is one of the characters a
+// user agent must not hold if it is to be sent. The set is the contract's and
+// is closed. Other control characters, such as U+0080 to U+009F, are not in it.
+func cridLinkUserAgentRuneNotSent(r rune) bool {
+	return r <= 0x1f || r == 0x7f || r == '\u2028' || r == '\u2029'
+}
+
+// truncateCRIDLinkUserAgent cuts a user agent that may be sent to the length a
+// request carries: the longest prefix of at most cridLinkUserAgentMaxBytes
+// bytes that ends on a character boundary. A long value is cut, never refused,
+// and what is sent is always valid UTF-8.
 //
 // Invalid input is replaced first, not after: a replacement character is three
 // bytes, so replacing after the cut could push the value back over the limit.

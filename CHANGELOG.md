@@ -55,6 +55,10 @@ and are marked **Breaking** with what to change.
     names no CRID link endpoint matches `ErrCRIDLinkNotConfigured` only, and
     one that names an endpoint that cannot be used also matches the new
     `ErrCRIDLinkMisconfigured`, which wraps `ErrCRIDLinkNotConfigured`.
+  - `CRIDLinkConfig.UserAgent` is left out of the request when it holds a
+    control character (U+0000 to U+001F, or U+007F), U+2028 or U+2029
+    anywhere in the value. The request is still made. Any other value longer
+    than 256 bytes of UTF-8 is cut at a character boundary.
   - The client rules are the public `qurl-crid-link-knock-v1-vectors`
     conformance artifact, run case by case through the exported calls.
   - `crid.CRID` gains `Active`, which reports whether a version is one

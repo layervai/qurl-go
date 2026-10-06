@@ -95,10 +95,12 @@ func FuzzSplitIssuedCRIDLink(f *testing.F) {
 
 // FuzzBuildCRIDLinkKnockBody holds the request body to its contract for any
 // user agent a caller might pass: the body is JSON that reads back as the
-// request; what is sent for the user agent is valid UTF-8 within the limit;
-// it is a prefix of the (repaired) input; it is the LONGEST such prefix — the
-// next character would not have fit; and the bytes are the canonical ones,
-// compared with a serializer that does not share the builder's encoder.
+// request; no control character, U+2028 or U+2029 is in it; a user agent that
+// holds one of those anywhere is left out whole; any other user agent is sent
+// as valid UTF-8 within the limit; what is sent is a prefix of the (repaired)
+// input; it is the LONGEST such prefix — the next character would not have
+// fit; and the bytes are the canonical ones, compared with a serializer that
+// does not share the builder's encoder.
 func FuzzBuildCRIDLinkKnockBody(f *testing.F) {
 	const value = "ae4jqpd7eaoslq7jinmjv4yikgzmcxgpjfsuobiniqnko32lpw743ivbeyha"
 	for _, seed := range []string{
@@ -107,6 +109,7 @@ func FuzzBuildCRIDLinkKnockBody(f *testing.F) {
 		strings.Repeat("c", 255) + "ü", "ab\xffcd", "a\u2028b\u2029c", "a\x00b\x1fc\x7f",
 		strings.Repeat("\xff", 300), `a\u2028b`, `a\` + "\u2028", `\\` + "\u2029" + `\`, "\b\f\n\r\t",
 		strings.Repeat("d", 253) + "\u2028" + "tail", strings.Repeat("d", 254) + "\u2028",
+		strings.Repeat("e", 280) + "\t", strings.Repeat("e", 256) + "\x7f", "ab\xc3\x1fcd", "a\u0080b\u009fc",
 	} {
 		f.Add(seed)
 	}
@@ -129,6 +132,20 @@ func FuzzBuildCRIDLinkKnockBody(f *testing.F) {
 		// user agent is omitted, not sent as an empty member.
 		if want := canonicalCRIDLinkKnockBody(value, sent); string(body) != want {
 			t.Fatalf("the body is not in canonical form\n got %s\nwant %s", body, want)
+		}
+
+		// The characters that keep a user agent from being sent, written out
+		// here and not taken from the builder.
+		notSent := func(r rune) bool { return r < 0x20 || r == 0x7f || r == 0x2028 || r == 0x2029 }
+		if strings.ContainsFunc(string(body), notSent) {
+			t.Fatalf("the body holds a control character, U+2028 or U+2029\n%q", body)
+		}
+		// The whole input decides, also the part past the limit.
+		if strings.ContainsFunc(userAgent, notSent) {
+			if sent != "" {
+				t.Fatalf("sent %q for a user agent that must be left out: %q", sent, userAgent)
+			}
+			return
 		}
 
 		repaired := strings.ToValidUTF8(userAgent, string(utf8.RuneError))

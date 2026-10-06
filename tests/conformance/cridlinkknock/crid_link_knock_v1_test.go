@@ -414,7 +414,10 @@ func runVocabularies(t *testing.T, h *harness) {
 }
 
 // runRequestCases builds each request with the real request builder and
-// compares the body that reached the cell with the canonical bytes.
+// compares the body that reached the cell with the canonical bytes. The body is
+// never taken from the case: only the CRID and the user agent of its input go
+// in, through the exported call, so a case that pins what the builder does with
+// a user agent — sends it, cuts it, or leaves it out — runs the SDK's own rule.
 func runRequestCases(t *testing.T, h *harness) int {
 	issued := h.ackCase("link_issued")
 	constants := h.vectors.Constants
@@ -464,7 +467,8 @@ func runRequestCases(t *testing.T, h *harness) int {
 				}
 			}
 			// What was sent for the user agent is within the limit and is the
-			// input, or a prefix of it.
+			// input, a prefix of it, or nothing at all: a user agent that holds
+			// a control character, U+2028 or U+2029 is left out.
 			var sentUserAgent string
 			if raw, present := body.UsrData[constants.UserDataKeys.UserAgent]; present {
 				if err := json.Unmarshal(raw, &sentUserAgent); err != nil {
