@@ -43,6 +43,13 @@
 // breaking change for deployed clients. Treat findings about unknown
 // versions as warnings at most; the server is authoritative.
 //
+// The registry also reserves version bytes ahead of use. A reserved version
+// is Known but [CRID.Active] reports false for it: the gate forwards the
+// value like any other, yet no resource carries that version today. A caller
+// about to do work that only makes sense for a resource that can exist —
+// asking for something it must then verify against the identifier — checks
+// Active rather than Known.
+//
 // The first character of a CRID encodes the top five bits of its version
 // byte, so production full CRIDs start with 'a' and test ones with 'q'.
 // That property is for humans scanning logs; programs should use

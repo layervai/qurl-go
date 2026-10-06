@@ -99,21 +99,24 @@ const (
 	EnvironmentUnknown Environment = "unknown"
 )
 
-// versionRegistry pins the version bytes this release knows and the digest
-// length each one registers. 0x02/0x82 are registered but reserved (not yet
-// minted); they still classify here so a future activation is not an error
-// for deployed clients. A version byte observed at a digest length other
-// than its registered one is reported unknown rather than rejected: the
-// local gate's reject vocabulary is closed, and unknown-but-forwardable is
-// the contract's stance on everything the gate does not permanently forbid.
+// versionRegistry pins the version bytes this release knows, the digest
+// length each one registers, and whether the registration is active. 0x02
+// and 0x82 are registered but reserved (not yet minted); they still classify
+// here so a future activation is not an error for deployed clients, and they
+// report [CRID.Active] false until then. A version byte observed at a digest
+// length other than its registered one is reported unknown rather than
+// rejected: the local gate's reject vocabulary is closed, and
+// unknown-but-forwardable is the contract's stance on everything the gate
+// does not permanently forbid.
 var versionRegistry = map[byte]struct {
 	digestLength int
 	environment  Environment
+	active       bool
 }{
-	0x01: {fullDigestLength, EnvironmentProduction},
-	0x81: {fullDigestLength, EnvironmentTest},
-	0x02: {truncatedDigestLength, EnvironmentProduction},
-	0x82: {truncatedDigestLength, EnvironmentTest},
+	0x01: {fullDigestLength, EnvironmentProduction, true},
+	0x81: {fullDigestLength, EnvironmentTest, true},
+	0x02: {truncatedDigestLength, EnvironmentProduction, false},
+	0x82: {truncatedDigestLength, EnvironmentTest, false},
 }
 
 // CRID is one parsed, locally valid Cryptographic Resource ID. The zero
@@ -124,6 +127,7 @@ type CRID struct {
 	value       string
 	version     byte
 	known       bool
+	active      bool
 	environment Environment
 	digest      []byte
 }
@@ -140,6 +144,15 @@ func (c CRID) Version() byte { return c.version }
 // gate and must be forwarded to the authoritative validator, which decides
 // whether the version is real.
 func (c CRID) Known() bool { return c.known }
+
+// Active reports whether the version byte is registered as active — a
+// version resources carry today — at this value's digest length. Active
+// implies [CRID.Known]. A reserved registration is Known but not Active: the
+// value still passes the local gate and may be forwarded, but no resource
+// carries that version yet, so a consumer must not act on it as if one did.
+// Like every registry answer, this describes the release that was compiled
+// in; a later release may activate a version this one reports as reserved.
+func (c CRID) Active() bool { return c.active }
 
 // Environment reports the registered environment of the version byte, or
 // EnvironmentUnknown when Known is false.
@@ -195,6 +208,7 @@ func Parse(s string) (*CRID, error) {
 	}
 	if row, ok := versionRegistry[version]; ok && row.digestLength == len(c.digest) {
 		c.known = true
+		c.active = row.active
 		c.environment = row.environment
 	}
 	return c, nil

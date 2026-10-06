@@ -77,8 +77,9 @@ func runCRIDContractPins(t *testing.T, contract conformance.CRIDV1Contract) {
 
 // runCRIDVersionRegistryPins keeps versionRegistry in lockstep with the
 // artifact's registry: every artifact row must be represented with the same
-// digest length and environment, and this package must register nothing the
-// artifact does not.
+// digest length, environment, and status, and this package must register
+// nothing the artifact does not. Each row is then driven through Parse, so
+// what a caller reads off a parsed value is pinned and not only the table.
 func runCRIDVersionRegistryPins(t *testing.T, rows []conformance.CRIDV1Version) {
 	if len(rows) == 0 {
 		t.Fatal("artifact version registry is empty")
@@ -86,10 +87,22 @@ func runCRIDVersionRegistryPins(t *testing.T, rows []conformance.CRIDV1Version) 
 	if len(rows) != len(versionRegistry) {
 		t.Fatalf("package registers %d versions, artifact registers %d", len(versionRegistry), len(rows))
 	}
+	sawActive, sawReserved := false, false
 	for _, row := range rows {
 		raw, err := hex.DecodeString(row.VersionHex)
 		if err != nil || len(raw) != 1 {
 			t.Fatalf("artifact version_hex %q is not one byte (%v)", row.VersionHex, err)
+		}
+		// The status vocabulary is closed. A status this package does not know
+		// must fail here rather than be read as "not active" by default.
+		var wantActive bool
+		switch row.Status {
+		case conformance.CRIDV1StatusActive:
+			wantActive, sawActive = true, true
+		case conformance.CRIDV1StatusReserved:
+			sawReserved = true
+		default:
+			t.Fatalf("artifact version %q has status %q, which this package does not know", row.VersionHex, row.Status)
 		}
 		got, ok := versionRegistry[raw[0]]
 		if !ok {
@@ -100,6 +113,26 @@ func runCRIDVersionRegistryPins(t *testing.T, rows []conformance.CRIDV1Version) 
 			t.Errorf("version %q: package registers %d/%s, artifact pins %d/%s",
 				row.VersionHex, got.digestLength, got.environment, row.DigestLength, row.Environment)
 		}
+		if got.active != wantActive {
+			t.Errorf("version %q: package registers active=%t, artifact pins status %q",
+				row.VersionHex, got.active, row.Status)
+		}
+
+		c, err := Parse(reencode(raw[0], bytes.Repeat([]byte{0x5a}, row.DigestLength)))
+		if err != nil {
+			t.Fatalf("version %q at its registered digest length failed the local gate: %v", row.VersionHex, err)
+		}
+		if !c.Known() {
+			t.Errorf("version %q at its registered digest length: Known() = false", row.VersionHex)
+		}
+		if c.Active() != wantActive {
+			t.Errorf("version %q: Active() = %t, artifact pins status %q", row.VersionHex, c.Active(), row.Status)
+		}
+	}
+	// Active is only meaningful if the registry holds both kinds: with one
+	// status missing, the accessor could be a constant and still pass.
+	if !sawActive || !sawReserved {
+		t.Fatalf("version registry must pin both statuses (active=%t reserved=%t)", sawActive, sawReserved)
 	}
 }
 
@@ -243,6 +276,11 @@ func runCRIDVersionCases(t *testing.T, cases []conformance.CRIDV1VersionCase) {
 			if c.Known() != vc.Known {
 				t.Fatalf("Known() = %v, want %v", c.Known(), vc.Known)
 			}
+			// Active implies Known, so an unregistered version is never
+			// active. The registry pins cover the registered rows.
+			if c.Active() && !c.Known() {
+				t.Fatal("Active() = true for a version that is not Known")
+			}
 			if string(c.Environment()) != vc.Environment {
 				t.Fatalf("environment = %q, want %q", c.Environment(), vc.Environment)
 			}
@@ -322,11 +360,63 @@ func TestParseRegisteredVersionAtForeignDigestLengthIsUnknown(t *testing.T) {
 	if c.Known() {
 		t.Fatal("version 0x01 at a 24-byte digest must not be Known; its registry row pins 32")
 	}
+	if c.Active() {
+		t.Fatal("version 0x01 at a 24-byte digest must not be Active; only its registered form is")
+	}
 	if c.Environment() != EnvironmentUnknown {
 		t.Fatalf("environment = %q, want %q", c.Environment(), EnvironmentUnknown)
 	}
 	if c.DigestLength() != truncatedDigestLength {
 		t.Fatalf("DigestLength() = %d, want %d", c.DigestLength(), truncatedDigestLength)
+	}
+}
+
+// TestParseReservedVersionIsKnownButNotActive pins the split Active exists
+// for. A reserved version classifies — it is Known and reports its
+// environment, so a future activation is not an error for deployed clients —
+// but it is not Active, because no resource carries it yet. An active version
+// in its registered form reports both.
+func TestParseReservedVersionIsKnownButNotActive(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name         string
+		version      byte
+		digestLength int
+		environment  Environment
+		active       bool
+	}{
+		{"active production", 0x01, fullDigestLength, EnvironmentProduction, true},
+		{"active test", 0x81, fullDigestLength, EnvironmentTest, true},
+		{"reserved production", 0x02, truncatedDigestLength, EnvironmentProduction, false},
+		{"reserved test", 0x82, truncatedDigestLength, EnvironmentTest, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			c, err := Parse(reencode(tc.version, bytes.Repeat([]byte{0x3c}, tc.digestLength)))
+			if err != nil {
+				t.Fatalf("registered version failed the local gate: %v", err)
+			}
+			if !c.Known() {
+				t.Fatal("a registered version in its registered form must be Known")
+			}
+			if c.Environment() != tc.environment {
+				t.Fatalf("environment = %q, want %q", c.Environment(), tc.environment)
+			}
+			if c.Active() != tc.active {
+				t.Fatalf("Active() = %t, want %t", c.Active(), tc.active)
+			}
+		})
+	}
+
+	// An unregistered version is neither.
+	c, err := Parse(reencode(0x7f, bytes.Repeat([]byte{0x3c}, fullDigestLength)))
+	if err != nil {
+		t.Fatalf("unregistered version failed the local gate: %v", err)
+	}
+	if c.Known() || c.Active() {
+		t.Fatalf("unregistered version: Known() = %t, Active() = %t, want both false", c.Known(), c.Active())
 	}
 }
 

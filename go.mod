@@ -39,7 +39,7 @@ module github.com/layervai/qurl-go
 go 1.26.6
 
 require (
-	github.com/layervai/qurl-conformance v0.17.1
+	github.com/layervai/qurl-conformance v0.17.2
 	golang.org/x/crypto v0.57.0
 )
 

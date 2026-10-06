@@ -50,9 +50,10 @@ func ensureQurlPrefix(msg string) string {
 	return "qurl: " + msg
 }
 
-// Config carries opener configuration for EnterPortalWith. Most applications
-// install a Provider once and call EnterPortal; Config is the explicit seam for
-// tests and advanced clients.
+// Config carries opener configuration for EnterPortalWith and, with CRIDLink
+// set, for RequestCRIDLinkWith and OpenCRIDWith. Most applications install a
+// Provider once and call EnterPortal; Config is the explicit seam for tests and
+// advanced clients.
 type Config struct {
 	// ExpectedCRID pins an independently obtained resource identity. When set,
 	// a mismatched signed resource key is rejected before any access request.
@@ -65,12 +66,20 @@ type Config struct {
 	// Leave Cells nil and configure RelayAllowlist for relay-only operation.
 	Cells *CellCatalog
 	// RelayAllowlist gates relay-only operation. It never enables fallback
-	// from a configured native cell catalog.
+	// from a configured native cell catalog. It also gates CRIDLink.RelayURL:
+	// a CRID link request goes through the relay although the Cells it needs
+	// select native UDP for opening links.
 	RelayAllowlist *RelayAllowlist
 	// HTTPClient is the client used for the relay request. Optional; nil uses the
 	// default client. Advanced callers with fixed-egress requirements can supply
-	// their own client. Unused on the native UDP path.
+	// their own client. Unused on the native UDP path. A CRID link request is a
+	// relay request and uses it.
 	HTTPClient HTTPDoer
+	// CRIDLink is where RequestCRIDLinkWith and OpenCRIDWith send a CRID link
+	// request. Optional, and unused by EnterPortalWith. With it nil those two
+	// calls fail with ErrCRIDLinkNotConfigured before any request is sent. The
+	// request is sealed to the single cell in Cells; see CRIDLinkConfig.
+	CRIDLink *CRIDLinkConfig
 	// PortalSession retains this visitor's private capability across retries or
 	// renewals of one verified link, including an initial knock whose reply was
 	// lost. Optional; nil makes each EnterPortalWith call an independent visit.

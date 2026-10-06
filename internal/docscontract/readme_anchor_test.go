@@ -18,7 +18,7 @@ import (
 var (
 	reConnectAgentRuntime = regexp.MustCompile(`\bqurl\.ConnectAgentRuntime\s*\(`)
 	reDeploymentEnv       = regexp.MustCompile(`\bQURL_DEPLOYMENT\b`)
-	reModuleSymbol        = regexp.MustCompile(`\b(qurl|crid|awsstore|relayknock|nativeudp)\.([A-Z][A-Za-z0-9_]*)\b`)
+	reModuleSymbol        = regexp.MustCompile(`\b(qurl|qurltest|crid|awsstore|relayknock|nativeudp)\.([A-Z][A-Za-z0-9_]*)\b`)
 	readmeBannedSymbols   = []struct {
 		name string
 		re   *regexp.Regexp
@@ -30,6 +30,7 @@ var (
 
 var modulePackageDirs = map[string]string{
 	"qurl":       "qurl",
+	"qurltest":   "qurl/qurltest",
 	"crid":       "crid",
 	"awsstore":   "awsstore",
 	"relayknock": "relayknock",

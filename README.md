@@ -80,6 +80,7 @@ And every entry point in one place:
 | `RecoverAgentRuntime` | Operator-driven replacement of a revoked or lost device credential | `*Client`, `*AgentRuntimeBinding` |
 | `RecoverAgentRuntimeWithCredentialProvider` | The same recovery with account authority resolved only after durable state and expiry validation | `*Client`, `*AgentRuntimeBinding` |
 | `EnterPortal` | Open a received qURL link programmatically; needs no LayerV credentials | `*ResourceHandle` |
+| `OpenCRID` | Open a resource from its CRID alone: asks for a link, checks it against the CRID, and opens it; needs no LayerV credentials ([Open by CRID](#open-by-crid)) | `*ResourceHandle` |
 | `NewPortalOpener` | Keep one native-only received qURL ready for repeated service calls with proactive renewal and no request-path open | `*PortalOpener` |
 
 ## Install
@@ -107,6 +108,7 @@ here builds a command.
 | Module | Purpose |
 | --- | --- |
 | `github.com/layervai/qurl-go/qurl` | The SDK. Zero AWS dependencies. |
+| `github.com/layervai/qurl-go/qurl/qurltest` | Test doubles for code that calls `qurl`. For tests only. |
 | `github.com/layervai/qurl-go/crid` | The Cryptographic Resource ID codec: strict local validation, environment reporting (`production`, `test`, or `unknown`), and the delivered-key match rule. No dependencies beyond the standard library. |
 | `github.com/layervai/qurl-go/awsstore` | AWS-backed agent state (Secrets Manager, SSM, KMS sealing). A [separate module](awsstore/README.md) so the AWS SDK never leaks into `qurl`. |
 
@@ -351,6 +353,49 @@ HTTPS endpoint is configured separately with `WithBaseURL`. A resolved deploymen
 with no issuer keys fails closed (`ErrNotConfigured`) rather than open a link it
 cannot verify.
 
+### Open by CRID
+
+A program that holds only a CRID — no link — calls `OpenCRID`:
+
+```go
+handle, err := qurl.OpenCRID(ctx, resourceCRID)
+if err != nil {
+	return err
+}
+// handle is the same *ResourceHandle EnterPortal returns; use it the same way.
+```
+
+`OpenCRID` asks the server for a short-lived qURL link for that CRID, checks
+the link, and opens it. It needs no LayerV credentials. The link comes from the
+network, so it is used only after it passes every client check: it is on the
+deployment's link origin, its issuer signature verifies under the trust store,
+and its signed resource key derives the CRID you asked for. A link that fails a
+check is never opened, returned, logged, or quoted in an error.
+
+- **The request goes through the relay.** In this version the link request is
+  always sent through the deployment's HTTPS relay, under a key minted for that
+  one request — also when links themselves open over native UDP. The open that
+  follows uses native UDP to the deployment's cell.
+- **Publisher data is display-only and unverified.** `RequestCRIDLink` returns
+  the link together with what the server reports about it: a publisher name,
+  when the resource was created, when the link expires. None of that is covered
+  by the link's signature or by the CRID. The name is self-declared, and every
+  publisher is unverified today. Show it quoted (`%q`), always next to
+  "unverified", and never as a confirmed identity. To show it before opening,
+  call `RequestCRIDLink`, then `EnterPortalForCRID` with the link and the same
+  CRID.
+- **It has to be configured.** The request needs a CRID link endpoint, which a
+  deployment names in its `crid_link` object. The deployment embedded in this
+  release does not name one, so `OpenCRID` returns `ErrCRIDLinkNotConfigured`
+  until `QURL_DEPLOYMENT` names a deployment file that does, or you pass the
+  endpoint with `OpenCRIDWith`. `CheckCRIDLinkConfig` gives the same answer
+  without a CRID and without sending anything. See
+  [Open by CRID](docs/opening-links.md#open-by-crid) for the file format.
+- **It can be tested without a server.** `qurltest.NewCRIDLinkServer` answers
+  the link request in process, so a test runs the production call and the SDK
+  still checks the link. See
+  [Test without a server](docs/opening-links.md#test-without-a-server).
+
 ## Error handling
 
 Match errors by type or sentinel, not message text. Grouped by the scenario
@@ -384,6 +429,32 @@ that raises them:
 | `qurl.ErrPortalTargetChanged` | A proactive renewal authenticated a different target, so the opener kept the prior handle and failed closed |
 | `qurl.ErrPortalRedirect` | A request configured with `RejectPortalRedirects` received a redirect, or a default-policy redirect changed origin |
 | `*qurl.ServerDenyError` | An authenticated platform deny: the reply verified, but access was refused — an expired, revoked, or consumed qURL, or a server-side access check. Also raised by the registered-agent knock path (`KnockRegisteredAgent`) when the assigned cell denies an admission |
+
+**Opening by CRID — `OpenCRID`, `RequestCRIDLink`**
+
+The open that follows a successful link request can also return any error from
+the table above.
+
+| Error | Code | Meaning |
+| --- | --- | --- |
+| `qurl.ErrCRIDLinkNotFound` | `52602` | The CRID is unknown, retired, or malformed, or this client may not open it. The server gives one answer for all of these. Do not retry; check the CRID and your access |
+| `qurl.ErrCRIDLinkUnavailable` | `52601` | A link cannot be issued right now. Try again later |
+| `qurl.ErrCRIDLinkRateLimited` | `52603` | Too many requests from this client or for this CRID. Try again later |
+| `qurl.ErrCRIDResourceOffline` | `52604` | The resource exists and this client may open it, but its publisher is offline. It may come back |
+| `qurl.ErrCRIDResourceClosed` | `52605` | The resource exists and this client may open it, but it has been closed. Do not retry |
+| `qurl.ErrInvalidCRIDLinkRequest` | `52606` | The server refused the request itself: malformed, not sent through the relay, or carrying something it does not support. Do not retry |
+| `*qurl.ServerDenyError` | any other | The server answered with a decimal code outside this table: a server error, with the code in `ErrCode`. It matches none of the refusals above, `ErrCRIDLinkUnavailable` included, and it says nothing about the client's version. Each refusal above is also a `*ServerDenyError` carrying its code |
+| `qurl.ErrServerOverloaded` | — | The server is busy and sent no answer. Try again later |
+| `qurl.ErrCRIDLinkProtocol` | — | The reply is not a usable answer: its body is not one JSON object with unique member names, or it has no outcome code, a success code, or a code that is not a decimal number. A link request opens nothing, so a reply that claims success is not trusted with a link. Wraps `ErrMalformedReply` |
+| `*qurl.CRIDLinkRejectedError` | — | The server issued a link and the link failed a client check; `Class` names the check (`missing_redirect`, `origin`, `path_or_query`, `transport`, `issuer_signature`, `crid_mismatch`, `info_crid_mismatch`). Matches `qurl.ErrCRIDLinkRejected`. The link is not returned |
+| `qurl.ErrCRIDLinkNotConfigured` | — | The configuration cannot make the request: it names no CRID link endpoint, or it names one that cannot be used. Nothing was sent. Wraps `ErrNotConfigured` |
+| `qurl.ErrCRIDLinkMisconfigured` | — | The configuration names a CRID link endpoint that cannot be used: a relay URL or link origin that is missing or wrong, or not exactly one usable cell. Nothing was sent. Wraps `ErrCRIDLinkNotConfigured`, so test for it first |
+| `qurl.ErrInvalidResourceRequest` | — | The CRID failed the local validation gate — the `crid` package's sentinel matches too — or, with `qurl.ErrUnsupportedCRIDVersion`, has a version this SDK cannot verify a link against. Nothing was sent |
+| `*qurl.RelayError` | — | The relay could not be reached, answered with an HTTP error instead of a reply, or began a reply that could not be read to the end (`Status` is then 200). When the caller's context ended the request before a reply was read, the error also matches the context's error |
+
+A relay answer that does not authenticate as the server's reply is an error
+that matches none of these rows, as it is for `EnterPortal`. It is never read
+as an answer.
 
 **Agent lifecycle — `ConnectAgentRuntime`, refresh, recovery, knock**
 

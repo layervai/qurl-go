@@ -8,6 +8,74 @@ and are marked **Breaking** with what to change.
 
 ## Unreleased
 
+- `OpenCRID` opens a resource from its CRID alone, with no link and no LayerV
+  credentials: it asks the server for a short-lived qURL link, checks the link,
+  and opens it bound to the CRID. `RequestCRIDLink` does the first step only
+  and returns a `CRIDLink`: the link plus the display metadata the server
+  reports (`QURLID`, `ExpiresAt`, `ResourceCreatedAt`, `Publisher`), under the
+  names and absence rules of the same fields on `ShareLink`.
+  `OpenCRIDWith` and `RequestCRIDLinkWith` take an explicit `Config`.
+  - An issued link is used only after it passes every client check: on the
+    deployment's link origin with no path or query, `qv2t1` transport, issuer
+    signature under the trust store, signed resource key deriving the
+    requested CRID, and an echoed CRID, if any, equal to the requested one. A
+    failed check is a `*CRIDLinkRejectedError` whose `Class` names it; it
+    matches the new `ErrCRIDLinkRejected`. The link is never returned, logged,
+    or quoted in an error.
+  - Refusals are typed: `ErrCRIDLinkNotFound`, `ErrCRIDLinkUnavailable`,
+    `ErrCRIDLinkRateLimited`, `ErrCRIDResourceOffline`, `ErrCRIDResourceClosed`,
+    and `ErrInvalidCRIDLinkRequest`. Each is also a `*ServerDenyError` carrying
+    its code, as is any other decimal code the server answers with. A code
+    outside those six is a server error: it matches none of the six sentinels
+    and says nothing about the client's version. A busy server is
+    `ErrServerOverloaded`. A reply whose body is not one JSON object with
+    unique member names, or that has no outcome code, a success code, or a
+    code that is not a decimal number, is `ErrCRIDLinkProtocol`, which wraps
+    `ErrMalformedReply`.
+  - A CRID that fails the local gate, or whose version is not active, is
+    refused before any request with `ErrInvalidResourceRequest`.
+  - Publisher metadata is display-only and unverified, exactly as on
+    `ShareLink`: it is covered by neither the link signature nor the CRID.
+  - In this version the link request always goes through the deployment's
+    HTTPS relay, under a key minted per request. The open that follows uses
+    native UDP.
+  - Deployment files gain one optional object, `crid_link`, with `relay_url`
+    (HTTPS, and listed in `relay_allowlist`) and `link_origin` (a bare HTTPS
+    origin); `Config` gains `CRIDLink`. The request is sealed to the
+    deployment's one cell, so `cells` must name exactly one. A deployment that
+    names a `crid_link` therefore lists `relay_allowlist` next to `cells`:
+    there the allowlist gates this one request, and links still open over
+    native UDP with no fallback to the relay. A configuration that cannot
+    carry the request fails with the new `ErrCRIDLinkNotConfigured`, which
+    wraps `ErrNotConfigured`. **The embedded production deployment does not
+    name a `crid_link` yet**, so these calls return that error until
+    `QURL_DEPLOYMENT` names a file that does. Deployment decoding is strict: an
+    SDK release older than this one rejects a file that contains `crid_link`.
+  - `CheckCRIDLinkConfig` reports whether a CRID link request can be sent at
+    all with the resolved deployment. It needs no CRID, sends nothing, and
+    does not ask an installed `Provider`. `CheckCRIDLinkConfigWith` checks an
+    explicit `Config`. The error tells two cases apart: a configuration that
+    names no CRID link endpoint matches `ErrCRIDLinkNotConfigured` only, and
+    one that names an endpoint that cannot be used also matches the new
+    `ErrCRIDLinkMisconfigured`, which wraps `ErrCRIDLinkNotConfigured`.
+  - `CRIDLinkConfig.UserAgent` is left out of the request when it holds a
+    control character (U+0000 to U+001F, or U+007F), U+2028 or U+2029
+    anywhere in the value. The request is still made. Any other value longer
+    than 256 bytes of UTF-8 is cut at a character boundary.
+  - New package `qurl/qurltest`, for tests of code that asks for a link by
+    CRID. `qurltest.NewCRIDLinkServer` answers the request in process, with no
+    socket: a link the SDK's own checks accept, built from the public
+    conformance vectors, or any refusal code a test chooses. It has no option
+    that turns a check off. Its `Config` and `Deployment` trust the public
+    vector issuer key and are for tests only.
+  - The client rules are the public `qurl-crid-link-knock-v1-vectors`
+    conformance artifact, run case by case through the exported calls.
+  - `crid.CRID` gains `Active`, which reports whether a version is one
+    resources carry today rather than a reserved registration.
+    `relayknocktest` gains `OpenUnknownInitiatorMessage` for test doubles that
+    answer a request sent under a per-request key.
+  - Matching server support is required.
+
 - `ShareLink` now carries publisher metadata: `ResourceCreatedAt` (when the
   resource behind the CRID was created; nil when the service does not report
   it) and `Publisher`, a new `Publisher` type with the owner's self-declared
@@ -45,7 +113,8 @@ and are marked **Breaking** with what to change.
 - **Breaking:** A configured native cell catalog no longer falls back to HTTPS
   relay for unknown cells, even with a relay allowlist. Complete the catalog
   or use a separate relay-only opener with a nil catalog and an allowlist.
-  Remove `relay_allowlist` from deployment files that also list `cells`.
+  Remove `relay_allowlist` from deployment files that also list `cells`,
+  unless the file names a `crid_link` (above), whose relay it gates.
   NHP remains version 1.1.
 
 - **Breaking:** `Resource.QURLCount` is now `*int`. Check for nil before

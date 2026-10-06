@@ -34,6 +34,17 @@ var frictionBudget = map[string]int{
 	// wiring, no transport selection — the SDK ships what it knows about the
 	// deployment it talks to.
 	"ExampleEnterPortal": 2,
+	// Open a resource from its CRID alone. Still one call: asking for the link,
+	// checking it against the CRID, and opening it are the SDK's work, so the
+	// budget is the same as opening a link someone handed you.
+	"ExampleOpenCRID": 2,
+	// The same open taken apart, for a caller that shows the publisher before
+	// opening: name the CRID, request, print the publisher, open, print. The
+	// extra statements are the display step, not setup.
+	"ExampleRequestCRIDLink": 5,
+	// Ask whether a CRID link request can be sent at all, before there is a
+	// CRID: one call and one switch over its answer.
+	"ExampleCheckCRIDLinkConfig": 2,
 	// The explicit retry path reads a public issuer key, builds trust, retains
 	// relay/session config, opens, and prints. Count this setup honestly; unlike
 	// EnterPortal, EnterPortalWith does not resolve deployment config for us.
