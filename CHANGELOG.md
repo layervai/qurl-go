@@ -25,10 +25,12 @@ and are marked **Breaking** with what to change.
   - Refusals are typed: `ErrCRIDLinkNotFound`, `ErrCRIDLinkUnavailable`,
     `ErrCRIDLinkRateLimited`, `ErrCRIDResourceOffline`, `ErrCRIDResourceClosed`,
     and `ErrInvalidCRIDLinkRequest`. Each is also a `*ServerDenyError` carrying
-    its code, as is any other decimal code the server answers with. A busy
-    server is `ErrServerOverloaded`. A reply with no outcome code, with a
-    success code, or with a code that is not a decimal number is
-    `ErrCRIDLinkProtocol`, which wraps `ErrMalformedReply`.
+    its code, as is any other decimal code the server answers with. A code
+    outside those six is a server error: it matches none of the six sentinels
+    and says nothing about the client's version. A busy server is
+    `ErrServerOverloaded`. A reply with no outcome code, with a success code,
+    or with a code that is not a decimal number is `ErrCRIDLinkProtocol`,
+    which wraps `ErrMalformedReply`.
   - A CRID that fails the local gate, or whose version is not active, is
     refused before any request with `ErrInvalidResourceRequest`.
   - Publisher metadata is display-only and unverified, exactly as on

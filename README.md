@@ -438,7 +438,7 @@ the table above.
 | `qurl.ErrCRIDResourceOffline` | `52604` | The resource exists and this client may open it, but its publisher is offline. It may come back |
 | `qurl.ErrCRIDResourceClosed` | `52605` | The resource exists and this client may open it, but it has been closed. Do not retry |
 | `qurl.ErrInvalidCRIDLinkRequest` | `52606` | The server refused the request itself: malformed, not sent through the relay, or carrying something it does not support. Do not retry |
-| `*qurl.ServerDenyError` | any other | The server answered with a decimal code outside this table. Each refusal above is also a `*ServerDenyError` carrying its code |
+| `*qurl.ServerDenyError` | any other | The server answered with a decimal code outside this table: a server error, with the code in `ErrCode`. It matches none of the refusals above, `ErrCRIDLinkUnavailable` included, and it says nothing about the client's version. Each refusal above is also a `*ServerDenyError` carrying its code |
 | `qurl.ErrServerOverloaded` | — | The server is busy and sent no answer. Try again later |
 | `qurl.ErrCRIDLinkProtocol` | — | The reply is not a usable answer: no outcome code, a success code, or a code that is not a decimal number. A link request opens nothing, so a reply that claims success is not trusted with a link. Wraps `ErrMalformedReply` |
 | `*qurl.CRIDLinkRejectedError` | — | The server issued a link and the link failed a client check; `Class` names the check (`missing_redirect`, `origin`, `path_or_query`, `transport`, `issuer_signature`, `crid_mismatch`, `info_crid_mismatch`). Matches `qurl.ErrCRIDLinkRejected`. The link is not returned |

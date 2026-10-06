@@ -368,9 +368,17 @@ func TestRequestCRIDLinkWith_ARefusalThatCarriesALinkIsTheRefusal(t *testing.T) 
 	}
 }
 
+// The six refusals are a closed set. Every other decimal code is the contract's
+// server error: a generic deny that carries the code and matches no refusal.
+//
+// 51002 is here on purpose. It is a general platform code, the kind a server
+// that does not know this request answers with, and its cause can be
+// temporary. It is still a code outside the set, so it is a server error and
+// not ErrCRIDLinkUnavailable. Mapping it would give it the outcome of 52601,
+// which the contract gives to that one code only.
 func TestRequestCRIDLinkWith_UnknownCodesAreAGenericDeny(t *testing.T) {
 	fixture := newCRIDLinkFixture(t)
-	for _, code := range []string{"52607", "52004", "52599", "1"} {
+	for _, code := range []string{"52607", "52004", "52599", "51002", "1"} {
 		t.Run(code, func(t *testing.T) {
 			// With a valid link attached: an unknown code never yields one.
 			fixture.peer.respond(cridLinkAnswer{replyType: relayknock.TypeACK, body: cridLinkACK(t, code, map[string]any{

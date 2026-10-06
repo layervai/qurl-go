@@ -32,6 +32,12 @@ const cridLinkCodeIssued = "52600"
 // cridLinkDenials is the closed set of refusals a CRID link request defines.
 // Any other decimal code the server may answer with is a generic
 // *ServerDenyError.
+//
+// The set is the contract's, and it is not widened here. A general platform
+// code is one of the "other" codes, also when its cause is temporary. The
+// contract gives every code outside the set one outcome, a server error, which
+// is not the outcome of any refusal in the set. So such a code is not mapped to
+// ErrCRIDLinkUnavailable or to any other sentinel below.
 var cridLinkDenials = map[string]error{
 	"52601": ErrCRIDLinkUnavailable,
 	"52602": ErrCRIDLinkNotFound,
@@ -84,10 +90,10 @@ func interpretCRIDLinkReply(reply *relayknock.Reply, requestedCRID, linkOrigin s
 	if denial, known := cridLinkDenials[code]; known {
 		return nil, fmt.Errorf("%w: %w", denial, &ServerDenyError{ErrCode: code})
 	}
-	// An unassigned code, or the denial code of another kind of knock, is a
-	// generic deny that carries the code. Only a decimal code is carried: the
-	// code is echoed in the error text, and a string outside the code grammar
-	// could be anything, including a link.
+	// An unassigned code, the denial code of another kind of knock, or a
+	// general platform code is a generic deny that carries the code. Only a
+	// decimal code is carried: the code is echoed in the error text, and a
+	// string outside the code grammar could be anything, including a link.
 	if !isCanonicalKnockDenyCode(code) {
 		return nil, fmt.Errorf("%w: the reply's outcome code is not a decimal code", ErrCRIDLinkProtocol)
 	}

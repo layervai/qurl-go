@@ -587,6 +587,20 @@ The full table is in the
 `*qurl.ServerDenyError` carrying the server's code, so code that already
 handles an authenticated deny from `EnterPortal` handles these without change.
 
+The six refusal codes are a closed set. When the link request is answered with
+any other decimal code, the error is a `*qurl.ServerDenyError` that matches
+none of the six sentinels. Treat it as a server error:
+
+- It is not `ErrCRIDLinkUnavailable`. Only the server's own "unavailable"
+  answer is.
+- It does not say that the client is out of date. A server that does not know
+  this request cannot answer with one of the six codes, so it answers with a
+  general one.
+- `ErrCode` carries the code for a caller that wants it.
+
+`RequestCRIDLink` returns such an error only for the link request. From
+`OpenCRID` it can also come from the open that follows.
+
 ## Errors
 
 ```go

@@ -230,6 +230,12 @@ func (e *CRIDLinkRejectedError) Unwrap() []error {
 // ErrCRIDLinkProtocol. An issued link that fails a check is
 // *CRIDLinkRejectedError.
 //
+// A *ServerDenyError that matches none of the six refusals is a server error.
+// Its ErrCode carries the code. It is not ErrCRIDLinkUnavailable, and it says
+// nothing about this client or its version: a server that does not know this
+// request cannot answer with one of the six codes, so it answers with a
+// general one.
+//
 // A relay that cannot be reached, that answers with an HTTP error, or whose
 // reply could not be read to the end is a *RelayError; in the last case its
 // Status is 200. A relay answer that does not authenticate as the cell's
