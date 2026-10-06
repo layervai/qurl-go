@@ -98,8 +98,9 @@ The native Connector CRID suite checks a pinned SHA-256 digest locally for
 a byte-identical copy of the public
 `qurl-conformance v0.17.0` artifact. Required CI compares it with that release commit
 (`11f62700972e196751b8ae6e8b7588e2c2d59499`), so the reference cannot move.
-The module dependency is v0.17.1, which carries that artifact unchanged plus
-the SDK-facing credential-recovery contract this SDK's tests load. It does not
+The module dependency is v0.17.2, which carries that artifact unchanged plus
+the SDK-facing credential-recovery contract and the CRID link knock vectors
+this SDK's tests load. It does not
 enable old Connector wire support. The additional CI comparison
 requires raw.githubusercontent.com to be reachable; local checksum validation
 works offline.

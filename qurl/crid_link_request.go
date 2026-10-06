@@ -125,9 +125,12 @@ var (
 	// ErrCRIDLinkProtocol reports an authenticated reply that is not a usable
 	// answer to a CRID link request: its outcome code is missing, is not a
 	// string, is empty, is a success code, or is not a decimal code, or its
-	// body is not one JSON object. A CRID link request opens nothing, so it
-	// never succeeds the way an ordinary knock does, and a reply that says it
-	// did is not trusted with a link. It wraps ErrMalformedReply.
+	// body is not one JSON object with unique member names. A body that the
+	// reader refuses whole for its bounds (nested too deep, or a number outside
+	// the range of a float64) is reported the same way. A CRID link request
+	// opens nothing, so it never succeeds the way an ordinary knock does, and
+	// a reply that says it did is not trusted with a link. It wraps
+	// ErrMalformedReply.
 	ErrCRIDLinkProtocol = fmt.Errorf("%w: not a usable answer to a CRID link request", ErrMalformedReply)
 
 	// ErrCRIDLinkRejected reports that the server issued a link and the link
