@@ -1364,11 +1364,15 @@ func canonicalJSONString(text string) string {
 	return out.String()
 }
 
-// TestSentCRIDLinkUserAgent holds the user agent rule of the public vectors,
-// which no vector case pins yet. A user agent that holds a control character
-// (U+0000 to U+001F, or U+007F), U+2028 or U+2029 is left out whole. The whole
-// value is looked at first, and only a value that may be sent is cut to the
-// limit.
+// TestSentCRIDLinkUserAgent holds the user agent rule of the public vectors.
+// A user agent that holds a control character (U+0000 to U+001F, or U+007F),
+// U+2028 or U+2029 is left out whole. The whole value is looked at first, and
+// only a value that may be sent is cut to the limit.
+//
+// The vectors pin the rule with two cases, one for U+2028 and one for the
+// order of the two rules, and the vector-driven suite runs them through the
+// exported call. This test holds what two cases cannot: every character of the
+// closed set, and the characters on each side of it.
 func TestSentCRIDLinkUserAgent(t *testing.T) {
 	const limit = 256
 
