@@ -601,6 +601,49 @@ none of the six sentinels. Treat it as a server error:
 `RequestCRIDLink` returns such an error only for the link request. From
 `OpenCRID` it can also come from the open that follows.
 
+### Test without a server
+
+Package `qurl/qurltest` answers CRID link requests in process, so a test can
+run the production call with no server and no network:
+
+```go
+server := qurltest.NewCRIDLinkServer()
+
+issued, err := qurl.RequestCRIDLinkWith(ctx, server.CRID(), server.Config())
+// issued is a *qurl.CRIDLink. The SDK checked its link as it does in service.
+
+server.Refuse("52602")
+_, err = qurl.RequestCRIDLinkWith(ctx, server.CRID(), server.Config())
+// errors.Is(err, qurl.ErrCRIDLinkNotFound) is true.
+```
+
+Nothing is switched off for the test. The SDK builds and seals the request,
+authenticates the reply, and runs every check on the link. The server has no
+option that skips a check. It only stands where the relay and the server
+would stand.
+
+| Method | What it does |
+| --- | --- |
+| `CRID` | The CRID the server issues a link for. A request for any other CRID gets `ErrCRIDLinkNotFound` |
+| `Config` | The `qurl.Config` for `RequestCRIDLinkWith`. Its HTTP client is the server |
+| `Refuse` | Answers every request with one refusal code: one of the six in the [error table](../README.md#error-handling), or any other decimal code |
+| `Issue` | Returns to the default after `Refuse` |
+| `Requests` | The requests the server answered: the CRID and the user agent of each |
+| `Deployment` | The same configuration as a `qurl.Deployment`, for code that reads `QURL_DEPLOYMENT`. Give that code `Client` as its HTTP client |
+
+Three limits:
+
+- **Tests only.** The link and the issuer key come from the public conformance
+  vectors, and anyone can read them. Never use a `Config` or a `Deployment`
+  from `qurltest` outside a test.
+- **The link request only.** The server does not open the link. `OpenCRIDWith`
+  gets the link and then stops with `ErrCellNotInCatalog`, before it sends
+  anything else.
+- **A fixed link.** Its expiry is a fixed time in the past. The SDK does not
+  look at the expiry when it requests a link; the server enforces it when the
+  link is opened. Code under test that checks the expiry itself needs a clock
+  it can set.
+
 ## Errors
 
 ```go

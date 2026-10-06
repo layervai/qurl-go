@@ -61,6 +61,12 @@ and are marked **Breaking** with what to change.
     control character (U+0000 to U+001F, or U+007F), U+2028 or U+2029
     anywhere in the value. The request is still made. Any other value longer
     than 256 bytes of UTF-8 is cut at a character boundary.
+  - New package `qurl/qurltest`, for tests of code that asks for a link by
+    CRID. `qurltest.NewCRIDLinkServer` answers the request in process, with no
+    socket: a link the SDK's own checks accept, built from the public
+    conformance vectors, or any refusal code a test chooses. It has no option
+    that turns a check off. Its `Config` and `Deployment` trust the public
+    vector issuer key and are for tests only.
   - The client rules are the public `qurl-crid-link-knock-v1-vectors`
     conformance artifact, run case by case through the exported calls.
   - `crid.CRID` gains `Active`, which reports whether a version is one

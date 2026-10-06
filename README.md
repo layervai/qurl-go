@@ -108,6 +108,7 @@ here builds a command.
 | Module | Purpose |
 | --- | --- |
 | `github.com/layervai/qurl-go/qurl` | The SDK. Zero AWS dependencies. |
+| `github.com/layervai/qurl-go/qurl/qurltest` | Test doubles for code that calls `qurl`. For tests only. |
 | `github.com/layervai/qurl-go/crid` | The Cryptographic Resource ID codec: strict local validation, environment reporting (`production`, `test`, or `unknown`), and the delivered-key match rule. No dependencies beyond the standard library. |
 | `github.com/layervai/qurl-go/awsstore` | AWS-backed agent state (Secrets Manager, SSM, KMS sealing). A [separate module](awsstore/README.md) so the AWS SDK never leaks into `qurl`. |
 
@@ -390,6 +391,10 @@ check is never opened, returned, logged, or quoted in an error.
   endpoint with `OpenCRIDWith`. `CheckCRIDLinkConfig` gives the same answer
   without a CRID and without sending anything. See
   [Open by CRID](docs/opening-links.md#open-by-crid) for the file format.
+- **It can be tested without a server.** `qurltest.NewCRIDLinkServer` answers
+  the link request in process, so a test runs the production call and the SDK
+  still checks the link. See
+  [Test without a server](docs/opening-links.md#test-without-a-server).
 
 ## Error handling
 

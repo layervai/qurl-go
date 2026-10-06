@@ -67,6 +67,10 @@ Two things bite people here:
 `relayknock/relayknocktest` has helpers for building authenticated replies if
 your test needs a responder rather than a blackhole.
 
+To test code that asks for a link by CRID, use `qurl/qurltest`. It answers the
+request in process, with no socket; see
+[Test without a server](opening-links.md#test-without-a-server).
+
 ## Live sandbox
 
 Sandbox is LayerV's shared, best-effort pre-production estate: it carries no
