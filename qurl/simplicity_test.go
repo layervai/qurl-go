@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/layervai/qurl-go/qurl"
 )
@@ -55,6 +56,9 @@ var frictionBudget = map[string]int{
 	"ExampleOpenClient":          3,
 	"ExampleClient_ProtectURL":   3,
 	"ExampleClient_CreatePortal": 4,
+	// Ask for a public resource and read back what the service made: the same
+	// three statements as protecting a URL, with one more option.
+	"ExampleWithPrivate": 3,
 	// Kill one minted link before it expires: open client, mint, revoke.
 	"ExampleClient_RevokePortal": 3,
 	// Mint a share link for a stored identifier (either form): open client,
@@ -211,6 +215,16 @@ var (
 	_ qurl.AgentRuntimeLifecycleOption    = qurl.WithAgentClientHTTPClient(nil)
 )
 
+// The same positive rule for the one option every resource-creating call
+// accepts: the direct create, the one-call create that also mints a link, and
+// the Connector find-or-create. Losing an acceptance would leave one of them
+// with no way to state a new resource's privacy.
+var (
+	_ qurl.ResourceOption          = qurl.WithPrivate(true)
+	_ qurl.PortalOption            = qurl.WithPrivate(true)
+	_ qurl.ConnectorResourceOption = qurl.WithPrivate(true)
+)
+
 // Option sets in this SDK are closed on purpose: each entry point accepts only
 // the options that mean something to it, and the compiler is what enforces that.
 // The rule is easy to erode one convenient interface embed at a time, so assert
@@ -254,6 +268,37 @@ func TestOptionSetsStayClosed(t *testing.T) {
 	} {
 		if _, ok := opt.(qurl.AgentRuntimeRegistrationOption); ok {
 			t.Errorf("%s must not satisfy AgentRuntimeRegistrationOption", name)
+		}
+	}
+
+	// Privacy is the only thing a caller may say about a resource on every
+	// creating call. It configures no Client, and the options that describe one
+	// resource or one link must not ride along to the calls it reaches.
+	if _, isClient := any(qurl.WithPrivate(true)).(qurl.ClientOption); isClient {
+		t.Error("WithPrivate must not satisfy ClientOption")
+	}
+	for name, opt := range map[string]any{
+		"WithAlias":       qurl.WithAlias("dev-dashboard"),
+		"WithDescription": qurl.WithDescription("Admin dashboard"),
+		"WithTags":        qurl.WithTags("prod"),
+	} {
+		if _, ok := opt.(qurl.PortalOption); ok {
+			t.Errorf("%s must not satisfy PortalOption", name)
+		}
+		if _, ok := opt.(qurl.ConnectorResourceOption); ok {
+			t.Errorf("%s must not satisfy ConnectorResourceOption", name)
+		}
+	}
+	for name, opt := range map[string]any{
+		"ValidFor":   qurl.ValidFor(time.Hour),
+		"OneTimeUse": qurl.OneTimeUse(),
+		"WithLabel":  qurl.WithLabel("Alice"),
+	} {
+		if _, ok := opt.(qurl.ResourceOption); ok {
+			t.Errorf("%s must not satisfy ResourceOption", name)
+		}
+		if _, ok := opt.(qurl.ConnectorResourceOption); ok {
+			t.Errorf("%s must not satisfy ConnectorResourceOption", name)
 		}
 	}
 

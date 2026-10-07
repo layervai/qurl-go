@@ -114,6 +114,15 @@ type ConnectorResource struct {
 	Slug string `json:"slug"`
 	// Alias is optional mutable display metadata and is never used as identity.
 	Alias *string `json:"alias,omitempty"`
+	// Private reports the resource's privacy: true when only the owner and those
+	// the owner allowed can create links for it, false when it is public. Nil
+	// means the service did not say, which is not false, and must never be read
+	// as private. ResolveRegisteredAgentConnectorResource does not report
+	// privacy, so it is nil there. See WithPrivate.
+	Private *bool `json:"private,omitempty"`
+	// AccessRequests reports whether people may ask the publisher for access to
+	// this resource. Nil means the service did not say.
+	AccessRequests *bool `json:"access_requests,omitempty"`
 }
 
 // EnsureConnectorResourceResult reports the active qURL Connector resource
@@ -144,6 +153,19 @@ type ensureConnectorResourceRequest struct {
 	Slug string `json:"slug"`
 	// FindOrCreate is fixed true by the Connector ensure wire contract.
 	FindOrCreate bool `json:"find_or_create"`
+	// Private is nil when the caller did not state privacy and is then left out
+	// of the request, so the service default applies. It is a pointer because a
+	// stated false must reach the service; a plain bool would drop it.
+	Private *bool `json:"private,omitempty"`
+}
+
+// ConnectorResourceOption customizes EnsureConnectorResourceWithOptions.
+type ConnectorResourceOption interface {
+	applyConnectorResourceOption(*connectorResourceOptions) error
+}
+
+type connectorResourceOptions struct {
+	private *bool
 }
 
 // connectorResourceWire mirrors the producer's generic resource payload. Type
@@ -157,6 +179,8 @@ type connectorResourceWire struct {
 	Status             string  `json:"status"`
 	Slug               string  `json:"slug"`
 	Alias              *string `json:"alias,omitempty"`
+	Private            *bool   `json:"private,omitempty"`
+	AccessRequests     *bool   `json:"access_requests,omitempty"`
 }
 
 // connectorResourceResponse is the create envelope. The producer intentionally
@@ -187,18 +211,45 @@ type connectorResourceExpectation struct {
 // ErrInvalidConnectorResourceResponse without ErrConnectorResourceOutcomeUnknown
 // and without a partial result: the row proves the outcome, but required
 // ensure-only metadata is unavailable.
+//
+// A resource this call creates takes the service's default privacy. Use
+// EnsureConnectorResourceWithOptions to state it.
 func (c *Client) EnsureConnectorResource(ctx context.Context, slug string) (*EnsureConnectorResourceResult, error) {
+	return c.EnsureConnectorResourceWithOptions(ctx, slug)
+}
+
+// EnsureConnectorResourceWithOptions is EnsureConnectorResource with options
+// for the resource the call may create. With no options it sends the same
+// request and behaves identically.
+//
+// WithPrivate states the privacy of a resource this call creates. When the call
+// finds an existing resource for slug, that resource keeps the privacy it has,
+// and the service refuses a stated value that differs from it; leave the option
+// out to reuse the resource as it is. Either way the result reports what the
+// service says in ConnectorResource.Private. An option is checked before any
+// request is sent, and a rejected option matches ErrInvalidResourceRequest.
+func (c *Client) EnsureConnectorResourceWithOptions(ctx context.Context, slug string, opts ...ConnectorResourceOption) (*EnsureConnectorResourceResult, error) {
 	if c == nil {
 		return nil, fmt.Errorf("%w: nil client", ErrInvalidClientConfig)
 	}
 	if err := validateConnectorSlug(slug); err != nil {
 		return nil, err
 	}
+	var cfg connectorResourceOptions
+	for _, opt := range opts {
+		if opt == nil {
+			return nil, fmt.Errorf("%w: nil ConnectorResourceOption", ErrInvalidResourceRequest)
+		}
+		if err := opt.applyConnectorResourceOption(&cfg); err != nil {
+			return nil, err
+		}
+	}
 
 	req := ensureConnectorResourceRequest{
 		Type:         producerConnectorResourceType,
 		Slug:         slug,
 		FindOrCreate: true,
+		Private:      cfg.private,
 	}
 	var response connectorResourceResponse
 	// The producer returns 201 for both newly-created and found-existing rows.
@@ -395,6 +446,8 @@ func (r connectorResourceWire) connectorResource(client *Client, expect connecto
 		KnockResourceID:    r.KnockResourceID,
 		Slug:               r.Slug,
 		Alias:              r.Alias,
+		Private:            r.Private,
+		AccessRequests:     r.AccessRequests,
 	}, nil
 }
 

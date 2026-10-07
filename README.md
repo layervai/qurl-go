@@ -181,6 +181,10 @@ func main() {
 `ProtectURL` is idempotent: it returns the existing resource when the same URL
 is already registered for your account.
 
+A new resource is private or public. State which with `qurl.WithPrivate` when
+the default must not decide, and read `Resource.Private` back; see
+[Private and public resources](docs/issuing-links.md#private-and-public-resources).
+
 If qURL Connector already protects the service, use its immutable connector
 slug:
 

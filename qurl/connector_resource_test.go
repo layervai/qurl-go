@@ -66,7 +66,7 @@ func TestConnectorResourcePublicShape(t *testing.T) {
 			got = append(got, field.Name)
 		}
 	}
-	want := []string{"ResourcePublicKey", "CRID", "ConnectorRoutingID", "KnockResourceID", "Slug", "Alias"}
+	want := []string{"ResourcePublicKey", "CRID", "ConnectorRoutingID", "KnockResourceID", "Slug", "Alias", "Private", "AccessRequests"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("ConnectorResource exported fields = %v, want %v; cycle RunID and producer type/status are not resource fields", got, want)
 	}
