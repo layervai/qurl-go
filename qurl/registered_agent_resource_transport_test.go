@@ -68,6 +68,11 @@ func TestRegisteredAgentResourceHTTPDoer_ExactSurfaceAndCredentialCustody(t *tes
 		{http.MethodGet, "/v1/me"},
 		{http.MethodGet, "/v1/me/publisher"},
 		{http.MethodPatch, "/v1/me/publisher"},
+		{http.MethodGet, "/v1/access-requests"},
+		{http.MethodGet, "/v1/resources/qcrid/access-requests"},
+		{http.MethodPost, "/v1/resources/qcrid/access-requests/012345/approve"},
+		{http.MethodDelete, "/v1/resources/qcrid/access-requests/012345"},
+		{http.MethodDelete, "/v1/resources/qcrid/allowed-passkeys/abcd-efgh-ijkl-mnop"},
 	}
 	for _, test := range allowed {
 		req, requestErr := http.NewRequestWithContext(context.Background(), test.method,
@@ -241,5 +246,365 @@ func TestRegisteredAgentResourceHTTPDoer_AllowsNilHeader(t *testing.T) {
 	if req.Header != nil || resp.Request == nil || resp.Request.Header == nil ||
 		resp.Request.Header.Get("Authorization") != "" {
 		t.Fatalf("nil caller header changed or credential leaked: caller=%v response=%v", req.Header, resp.Request)
+	}
+}
+
+const registeredAgentResourceTestBase = "https://api.example.test/prefix"
+
+// newRegisteredAgentResourceTestDoer opens a registered device client under a
+// path prefix and returns its bridge with the transport that counts what
+// reached the wire.
+func newRegisteredAgentResourceTestDoer(t *testing.T) (HTTPDoer, *registeredAgentResourceCapture) {
+	t.Helper()
+	state := completedNativeTestState(t)
+	capture := &registeredAgentResourceCapture{want: state.DeviceAPIKey}
+	client, err := OpenRegisteredAgent(context.Background(), &memoryAgentStateStore{state: state},
+		WithAgentClientBaseURL(registeredAgentResourceTestBase),
+		WithAgentClientHTTPClient(capture),
+	)
+	if err != nil {
+		t.Fatalf("OpenRegisteredAgent: %v", err)
+	}
+	doer, err := client.RegisteredAgentResourceHTTPDoer()
+	if err != nil {
+		t.Fatalf("RegisteredAgentResourceHTTPDoer: %v", err)
+	}
+	return doer, capture
+}
+
+// Every access route answers exactly one method. Each accepted spelling of
+// each route is tried with every method a caller could send, so a route that
+// gains a second method, or loses its own, fails here.
+func TestRegisteredAgentResourceHTTPDoer_AccessRoutesAllowOneMethodEach(t *testing.T) {
+	doer, capture := newRegisteredAgentResourceTestDoer(t)
+
+	routes := []struct {
+		name   string
+		method string
+		paths  []string
+	}{
+		{
+			name: "list for every resource", method: http.MethodGet,
+			paths: []string{"/v1/access-requests"},
+		},
+		{
+			name: "list for one resource", method: http.MethodGet,
+			paths: []string{
+				"/v1/resources/qcrid/access-requests",
+				"/v1/resources/Resource_ID-9/access-requests",
+			},
+		},
+		{
+			name: "approve", method: http.MethodPost,
+			paths: []string{
+				"/v1/resources/qcrid/access-requests/000000/approve",
+				"/v1/resources/qcrid/access-requests/999999/approve",
+				"/v1/resources/Resource_ID-9/access-requests/012345/approve",
+			},
+		},
+		{
+			name: "deny", method: http.MethodDelete,
+			paths: []string{
+				"/v1/resources/qcrid/access-requests/000000",
+				"/v1/resources/qcrid/access-requests/999999",
+				"/v1/resources/Resource_ID-9/access-requests/012345",
+			},
+		},
+		{
+			name: "remove an approved device", method: http.MethodDelete,
+			paths: []string{
+				"/v1/resources/qcrid/allowed-passkeys/abcd-efgh-ijkl-mnop",
+				"/v1/resources/qcrid/allowed-passkeys/aaaa-zzzz-2222-7777",
+				"/v1/resources/Resource_ID-9/allowed-passkeys/2345-67qr-s2t3-u4v5",
+			},
+		},
+	}
+	methods := []string{
+		http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch,
+		http.MethodDelete, http.MethodOptions, http.MethodTrace, http.MethodConnect,
+		"get", "post", "delete",
+	}
+
+	wantCalls := 0
+	for _, route := range routes {
+		for _, path := range route.paths {
+			for _, method := range methods {
+				req, err := http.NewRequestWithContext(context.Background(), method,
+					registeredAgentResourceTestBase+path, http.NoBody)
+				if err != nil {
+					t.Fatal(err)
+				}
+				resp, err := doer.Do(req)
+				if resp != nil {
+					_ = resp.Body.Close()
+				}
+				if method == route.method {
+					wantCalls++
+					if err != nil {
+						t.Errorf("%s: %s %s = %v, want allowed", route.name, method, path, err)
+					}
+					continue
+				}
+				if !errors.Is(err, ErrRegisteredAgentResourceRequestDenied) {
+					t.Errorf("%s: %s %s = %v, want request denied", route.name, method, path, err)
+				}
+			}
+		}
+	}
+	if capture.calls != wantCalls {
+		t.Fatalf("wire calls = %d, want %d: a refused method reached the network or an allowed one did not", capture.calls, wantCalls)
+	}
+}
+
+// Each request below is one edit away from an access route. Every one is
+// refused before the device credential is attached and before any network I/O.
+func TestRegisteredAgentResourceHTTPDoer_AccessRouteNearMissesAreRefused(t *testing.T) {
+	doer, capture := newRegisteredAgentResourceTestDoer(t)
+
+	const (
+		base     = registeredAgentResourceTestBase
+		requests = base + "/v1/resources/qcrid/access-requests"
+		passkeys = base + "/v1/resources/qcrid/allowed-passkeys"
+	)
+	nearMisses := []struct{ name, method, target string }{
+		// The list for every resource.
+		{"all: trailing slash", http.MethodGet, base + "/v1/access-requests/"},
+		{"all: extra segment", http.MethodGet, base + "/v1/access-requests/012345"},
+		{"all: query", http.MethodGet, base + "/v1/access-requests?limit=20"},
+		{"all: empty query", http.MethodGet, base + "/v1/access-requests?"},
+		{"all: singular", http.MethodGet, base + "/v1/access-request"},
+		{"all: longer name", http.MethodGet, base + "/v1/access-requestsx"},
+		{"all: other case", http.MethodGet, base + "/v1/Access-Requests"},
+		{"all: underscore", http.MethodGet, base + "/v1/access_requests"},
+		{"all: doubled slash", http.MethodGet, base + "/v1//access-requests"},
+		{"all: outside the client's path prefix", http.MethodGet, "https://api.example.test/v1/access-requests"},
+		{"all: other host", http.MethodGet, "https://other.example.test/prefix/v1/access-requests"},
+		{"all: approve with no resource", http.MethodPost, base + "/v1/access-requests/012345/approve"},
+		{"all: deny with no resource", http.MethodDelete, base + "/v1/access-requests/012345"},
+
+		// The list for one resource.
+		{"one: trailing slash", http.MethodGet, requests + "/"},
+		{"one: page size", http.MethodGet, requests + "?limit=20"},
+		{"one: cursor", http.MethodGet, requests + "?cursor=next"},
+		{"one: empty query", http.MethodGet, requests + "?"},
+		{"one: read a single request", http.MethodGet, requests + "/012345"},
+		{"one: singular", http.MethodGet, base + "/v1/resources/qcrid/access-request"},
+		{"one: other case", http.MethodGet, base + "/v1/resources/qcrid/Access-Requests"},
+		{"one: underscore", http.MethodGet, base + "/v1/resources/qcrid/access_requests"},
+		{"one: resource id with a dot", http.MethodGet, base + "/v1/resources/bad.id/access-requests"},
+		{"one: empty resource id", http.MethodGet, base + "/v1/resources//access-requests"},
+		{"one: nested one level deeper", http.MethodGet, base + "/v1/resources/qcrid/x/access-requests"},
+		{"one: clear every request", http.MethodDelete, requests},
+		{"one: create a request", http.MethodPost, requests},
+		{"one: a resource with this name gains no query", http.MethodGet, base + "/v1/resources/access-requests?limit=20"},
+
+		// Approve.
+		{"approve: trailing slash", http.MethodPost, requests + "/012345/approve/"},
+		{"approve: extra segment", http.MethodPost, requests + "/012345/approve/extra"},
+		{"approve: query", http.MethodPost, requests + "/012345/approve?x=1"},
+		{"approve: empty query", http.MethodPost, requests + "/012345/approve?"},
+		{"approve: five digits", http.MethodPost, requests + "/01234/approve"},
+		{"approve: seven digits", http.MethodPost, requests + "/0123456/approve"},
+		{"approve: letter in the code", http.MethodPost, requests + "/01234a/approve"},
+		{"approve: signed code", http.MethodPost, requests + "/-12345/approve"},
+		{"approve: plus sign", http.MethodPost, requests + "/+12345/approve"},
+		{"approve: hexadecimal", http.MethodPost, requests + "/0x1234/approve"},
+		{"approve: exponent", http.MethodPost, requests + "/1e5000/approve"},
+		{"approve: escaped digit", http.MethodPost, requests + "/01234%35/approve"},
+		{"approve: empty code", http.MethodPost, requests + "//approve"},
+		{"approve: no code", http.MethodPost, requests + "/approve"},
+		{"approve: device id for a code", http.MethodPost, requests + "/abcd-efgh-ijkl-mnop/approve"},
+		{"approve: other verb", http.MethodPost, requests + "/012345/deny"},
+		{"approve: longer verb", http.MethodPost, requests + "/012345/approved"},
+		{"approve: other case", http.MethodPost, requests + "/012345/Approve"},
+		{"approve: post to the code", http.MethodPost, requests + "/012345"},
+		{"approve: resource id with a dot", http.MethodPost, base + "/v1/resources/bad.id/access-requests/012345/approve"},
+		{"approve: under approved devices", http.MethodPost, passkeys + "/abcd-efgh-ijkl-mnop/approve"},
+		{"approve: under sessions", http.MethodPost, base + "/v1/resources/qcrid/sessions/012345/approve"},
+		{"approve: under links", http.MethodPost, base + "/v1/resources/qcrid/qurls/012345/approve"},
+
+		// Deny.
+		{"deny: trailing slash", http.MethodDelete, requests + "/012345/"},
+		{"deny: extra segment", http.MethodDelete, requests + "/012345/extra"},
+		{"deny: delete the approval", http.MethodDelete, requests + "/012345/approve"},
+		{"deny: query", http.MethodDelete, requests + "/012345?x=1"},
+		{"deny: empty query", http.MethodDelete, requests + "/012345?"},
+		{"deny: five digits", http.MethodDelete, requests + "/01234"},
+		{"deny: seven digits", http.MethodDelete, requests + "/0123456"},
+		{"deny: letters", http.MethodDelete, requests + "/abcdef"},
+		{"deny: trailing letter", http.MethodDelete, requests + "/01234x"},
+		{"deny: escaped digit", http.MethodDelete, requests + "/01234%35"},
+		{"deny: empty code", http.MethodDelete, requests + "/"},
+		{"deny: id shape of sibling routes", http.MethodDelete, requests + "/at_link-1"},
+		{"deny: device id for a code", http.MethodDelete, requests + "/abcd-efgh-ijkl-mnop"},
+		{"deny: resource id with a dot", http.MethodDelete, base + "/v1/resources/bad.id/access-requests/012345"},
+
+		// Remove an approved device.
+		{"device: list", http.MethodGet, passkeys},
+		{"device: clear every device", http.MethodDelete, passkeys},
+		{"device: add", http.MethodPost, passkeys},
+		{"device: empty id", http.MethodDelete, passkeys + "/"},
+		{"device: trailing slash", http.MethodDelete, passkeys + "/abcd-efgh-ijkl-mnop/"},
+		{"device: extra segment", http.MethodDelete, passkeys + "/abcd-efgh-ijkl-mnop/extra"},
+		{"device: query", http.MethodDelete, passkeys + "/abcd-efgh-ijkl-mnop?x=1"},
+		{"device: empty query", http.MethodDelete, passkeys + "/abcd-efgh-ijkl-mnop?"},
+		{"device: upper case", http.MethodDelete, passkeys + "/ABCD-EFGH-IJKL-MNOP"},
+		{"device: one upper case letter", http.MethodDelete, passkeys + "/abcd-efgh-ijkl-mnoP"},
+		{"device: digit 0", http.MethodDelete, passkeys + "/abcd-efgh-ijkl-mno0"},
+		{"device: digit 1", http.MethodDelete, passkeys + "/abcd-efgh-ijkl-mno1"},
+		{"device: digit 8", http.MethodDelete, passkeys + "/abcd-efgh-ijkl-mno8"},
+		{"device: digit 9", http.MethodDelete, passkeys + "/abcd-efgh-ijkl-mno9"},
+		{"device: short last group", http.MethodDelete, passkeys + "/abcd-efgh-ijkl-mno"},
+		{"device: long last group", http.MethodDelete, passkeys + "/abcd-efgh-ijkl-mnopq"},
+		{"device: three groups", http.MethodDelete, passkeys + "/abcd-efgh-ijkl"},
+		{"device: five groups", http.MethodDelete, passkeys + "/abcd-efgh-ijkl-mnop-qrst"},
+		{"device: no hyphens", http.MethodDelete, passkeys + "/abcdefghijklmnop"},
+		{"device: no hyphens, padded to length", http.MethodDelete, passkeys + "/abcdefghijklmnopqrs"},
+		{"device: underscores", http.MethodDelete, passkeys + "/abcd_efgh_ijkl_mnop"},
+		{"device: hyphen one place early", http.MethodDelete, passkeys + "/abc-defgh-ijkl-mnop"},
+		{"device: hyphen in a group", http.MethodDelete, passkeys + "/abcd-efgh-ijkl-mn-p"},
+		{"device: doubled hyphen", http.MethodDelete, passkeys + "/abcd--fgh-ijkl-mnop"},
+		{"device: padding", http.MethodDelete, passkeys + "/abcd-efgh-ijkl-mno="},
+		{"device: escaped letter", http.MethodDelete, passkeys + "/abcd-efgh-ijkl-mno%70"},
+		{"device: code for a device id", http.MethodDelete, passkeys + "/012345"},
+		{"device: id shape of sibling routes", http.MethodDelete, passkeys + "/at_link-1"},
+		{"device: singular", http.MethodDelete, base + "/v1/resources/qcrid/allowed-passkey/abcd-efgh-ijkl-mnop"},
+		{"device: underscore", http.MethodDelete, base + "/v1/resources/qcrid/allowed_passkeys/abcd-efgh-ijkl-mnop"},
+		{"device: with no resource", http.MethodDelete, base + "/v1/allowed-passkeys/abcd-efgh-ijkl-mnop"},
+		{"device: resource id with a dot", http.MethodDelete, base + "/v1/resources/bad.id/allowed-passkeys/abcd-efgh-ijkl-mnop"},
+	}
+	for _, test := range nearMisses {
+		req, err := http.NewRequestWithContext(context.Background(), test.method, test.target, http.NoBody)
+		if err != nil {
+			t.Fatalf("%s: %v", test.name, err)
+		}
+		resp, err := doer.Do(req)
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+		if !errors.Is(err, ErrRegisteredAgentResourceRequestDenied) {
+			t.Errorf("%s: %s %s = %v, want request denied", test.name, test.method, test.target, err)
+		}
+		if req.Header.Get("Authorization") != "" {
+			t.Errorf("%s: refused request gained Authorization", test.name)
+		}
+	}
+
+	// A URL built by hand can carry characters that a parsed URL would have
+	// reported as an escaped path and been refused for. These reach the route
+	// check itself: digits and letters that are not ASCII, in segments of
+	// exactly the accepted byte length.
+	unparsed := []struct{ name, method, path string }{
+		{"approve: fullwidth digits, six bytes", http.MethodPost, "/v1/resources/qcrid/access-requests/１２/approve"},
+		{"approve: Arabic-Indic digits, six bytes", http.MethodPost, "/v1/resources/qcrid/access-requests/٠١٢/approve"},
+		{"approve: space around the code", http.MethodPost, "/v1/resources/qcrid/access-requests/ 1234 /approve"},
+		{"approve: newline in the code", http.MethodPost, "/v1/resources/qcrid/access-requests/12345\n/approve"},
+		{"deny: fullwidth digits, six bytes", http.MethodDelete, "/v1/resources/qcrid/access-requests/１２"},
+		{"deny: NUL in the code", http.MethodDelete, "/v1/resources/qcrid/access-requests/12345\x00"},
+		{"device: accented letter, nineteen bytes", http.MethodDelete, "/v1/resources/qcrid/allowed-passkeys/abcd-efgh-ijkl-mnö"},
+		{"device: non-breaking hyphens", http.MethodDelete, "/v1/resources/qcrid/allowed-passkeys/abcd‑efgh‑ijkl‑mnop"},
+		{"device: space for a letter", http.MethodDelete, "/v1/resources/qcrid/allowed-passkeys/abcd-efgh-ijkl-mno "},
+	}
+	for _, test := range unparsed {
+		req := &http.Request{
+			Method: test.method,
+			URL:    &url.URL{Scheme: "https", Host: "api.example.test", Path: "/prefix" + test.path},
+			Header: make(http.Header),
+		}
+		resp, err := doer.Do(req.WithContext(context.Background()))
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+		if !errors.Is(err, ErrRegisteredAgentResourceRequestDenied) {
+			t.Errorf("%s: %s %q = %v, want request denied", test.name, test.method, test.path, err)
+		}
+	}
+
+	if capture.calls != 0 {
+		t.Fatalf("refused requests reached the network %d times", capture.calls)
+	}
+}
+
+// The request code is exactly six ASCII digits. Every length around six and
+// every single-byte change to a valid code is tried, so the accepted set is
+// pinned from both sides.
+func TestRegisteredAgentAccessRequestCodeIsExactlySixASCIIDigits(t *testing.T) {
+	t.Parallel()
+
+	for _, code := range []string{"000000", "012345", "999999", "480213"} {
+		if !registeredAgentAccessRequestCodeAllowed(code) {
+			t.Errorf("code %q refused, want allowed", code)
+		}
+	}
+	for length := range 13 {
+		code := strings.Repeat("7", length)
+		if got, want := registeredAgentAccessRequestCodeAllowed(code), length == 6; got != want {
+			t.Errorf("%d digits allowed = %t, want %t", length, got, want)
+		}
+	}
+	const valid = "012345"
+	for position := range len(valid) {
+		for b := range 256 {
+			mutated := []byte(valid)
+			mutated[position] = byte(b)
+			want := b >= '0' && b <= '9'
+			if got := registeredAgentAccessRequestCodeAllowed(string(mutated)); got != want {
+				t.Errorf("byte 0x%02x at position %d allowed = %t, want %t", b, position, got, want)
+			}
+		}
+	}
+}
+
+// The device identifier is four groups of four lowercase base32 characters
+// joined by hyphens, and nothing else of the same length or a nearby one.
+func TestRegisteredAgentPasskeyDeviceIDIsExactlyTheDisplayedForm(t *testing.T) {
+	t.Parallel()
+
+	for _, id := range []string{
+		"abcd-efgh-ijkl-mnop",
+		"qrst-uvwx-yz23-4567",
+		"aaaa-aaaa-aaaa-aaaa",
+		"7777-7777-7777-7777",
+		"a2z7-7z2a-2a7z-z7a2",
+	} {
+		if !registeredAgentPasskeyDeviceIDAllowed(id) {
+			t.Errorf("device id %q refused, want allowed", id)
+		}
+	}
+
+	const valid = "abcd-efgh-ijkl-mnop"
+	for length := range len(valid) + 6 {
+		if length == len(valid) {
+			continue
+		}
+		// Extend or cut the valid form, keeping its grouping where it has one.
+		id := (valid + "-qrst-")[:length]
+		if registeredAgentPasskeyDeviceIDAllowed(id) {
+			t.Errorf("device id %q of length %d allowed, want refused", id, length)
+		}
+	}
+	for position := range len(valid) {
+		for b := range 256 {
+			mutated := []byte(valid)
+			mutated[position] = byte(b)
+			var want bool
+			if valid[position] == '-' {
+				want = b == '-'
+			} else {
+				want = (b >= 'a' && b <= 'z') || (b >= '2' && b <= '7')
+			}
+			if got := registeredAgentPasskeyDeviceIDAllowed(string(mutated)); got != want {
+				t.Errorf("byte 0x%02x at position %d allowed = %t, want %t", b, position, got, want)
+			}
+		}
+	}
+	// A hyphen is a separator only: it is refused in every character position.
+	for _, id := range []string{
+		"-bcd-efgh-ijkl-mnop", "abc--efgh-ijkl-mnop", "abcd-efgh-ijkl-mno-",
+		"abcde-fgh-ijkl-mnop", "abcdefgh-ijkl-mnop-", "-------------------",
+	} {
+		if registeredAgentPasskeyDeviceIDAllowed(id) {
+			t.Errorf("device id %q allowed, want refused", id)
+		}
 	}
 }

@@ -8,6 +8,17 @@ and are marked **Breaking** with what to change.
 
 ## Unreleased
 
+- `RegisteredAgentResourceHTTPDoer` now permits the five routes an owner uses
+  to answer people who ask for access to a private resource:
+  `GET /v1/access-requests`, `GET /v1/resources/{id}/access-requests`,
+  `POST /v1/resources/{id}/access-requests/{code}/approve`,
+  `DELETE /v1/resources/{id}/access-requests/{code}`, and
+  `DELETE /v1/resources/{id}/allowed-passkeys/{device_id}`. Each is accepted
+  with that one method and no query. `{code}` must be exactly six ASCII digits
+  and `{device_id}` four groups of four lowercase base32 characters joined by
+  hyphens; any other shape is refused before the request is authorized.
+  Matching service support is required.
+
 - `OpenCRID` opens a resource from its CRID alone, with no link and no LayerV
   credentials: it asks the server for a short-lived qURL link, checks the link,
   and opens it bound to the CRID. `RequestCRIDLink` does the first step only

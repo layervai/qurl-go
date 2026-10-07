@@ -34,6 +34,23 @@ var ErrRegisteredAgentResourceRequestDenied = errors.New("qurl: registered-agent
 // cannot change the verification status, which the service computes and no
 // request can set.
 //
+// The bridge also accepts the five routes an owner uses to answer people who
+// ask for access to a private resource, for the same reason: a device that
+// publishes without an account is the only credential that owner holds. Each is
+// accepted exactly, with no query:
+//
+//   - GET /v1/access-requests lists the waiting requests for all of the owner's
+//     resources, and GET /v1/resources/{id}/access-requests for one resource.
+//   - POST /v1/resources/{id}/access-requests/{code}/approve approves one
+//     request, and DELETE /v1/resources/{id}/access-requests/{code} denies it.
+//   - DELETE /v1/resources/{id}/allowed-passkeys/{device_id} removes a device
+//     that was approved earlier.
+//
+// {code} is the request's code, exactly six ASCII digits. {device_id} is the
+// approved device's identifier as it is shown: four groups of four lowercase
+// base32 characters (a to z, 2 to 7) joined by hyphens. A segment of any other
+// shape is refused like any other route outside this list.
+//
 // The bridge also requires the Client's exact API origin and path prefix. The
 // caller's request is never mutated, and the device Authorization header is
 // removed from the returned response metadata.
@@ -113,8 +130,9 @@ func validateRegisteredAgentResourceRequest(base *url.URL, req *http.Request) er
 		return fmt.Errorf("%w: %s %s", ErrRegisteredAgentResourceRequestDenied, req.Method, path)
 	}
 	// Resource and nested qURL lists accept pagination; the service's session
-	// list is unpaginated. A resource named "qurls" remains a single-resource
-	// route and must not gain query authority.
+	// list is unpaginated, and so are both access-request lists. A resource
+	// named "qurls" remains a single-resource route and must not gain query
+	// authority.
 	listQuery := req.Method == http.MethodGet && (path == "/v1/resources" ||
 		(strings.Count(path, "/") == 4 && strings.HasSuffix(path, "/qurls")))
 	if (req.URL.RawQuery != "" || req.URL.ForceQuery) && !listQuery {
@@ -137,6 +155,8 @@ func registeredAgentResourceRouteAllowed(method, path string) bool {
 		return method == http.MethodGet
 	case "/v1/me/publisher":
 		return method == http.MethodGet || method == http.MethodPatch
+	case "/v1/access-requests":
+		return method == http.MethodGet
 	}
 	const prefix = "/v1/resources/"
 	if !strings.HasPrefix(path, prefix) {
@@ -159,6 +179,8 @@ func registeredAgentResourceRouteAllowed(method, path string) bool {
 			return method == http.MethodGet || method == http.MethodPost
 		case "sessions":
 			return method == http.MethodGet || method == http.MethodDelete
+		case "access-requests":
+			return method == http.MethodGet
 		}
 	case 3:
 		switch segments[1] {
@@ -168,9 +190,63 @@ func registeredAgentResourceRouteAllowed(method, path string) bool {
 			return registeredAgentResourceIDAllowed(segments[2]) && (method == http.MethodPatch || method == http.MethodDelete)
 		case "sessions":
 			return registeredAgentResourceIDAllowed(segments[2]) && method == http.MethodDelete
+		case "access-requests":
+			return registeredAgentAccessRequestCodeAllowed(segments[2]) && method == http.MethodDelete
+		case "allowed-passkeys":
+			return registeredAgentPasskeyDeviceIDAllowed(segments[2]) && method == http.MethodDelete
 		}
+	case 4:
+		// The only four-segment route. Approval is a POST on the request's own
+		// code; nothing else nests this deep.
+		return segments[1] == "access-requests" && registeredAgentAccessRequestCodeAllowed(segments[2]) &&
+			segments[3] == "approve" && method == http.MethodPost
 	}
 	return false
+}
+
+const (
+	registeredAgentAccessRequestCodeLength = 6
+	// Four groups of four characters and the three hyphens between them.
+	registeredAgentPasskeyDeviceIDGroup  = 4
+	registeredAgentPasskeyDeviceIDLength = 4*registeredAgentPasskeyDeviceIDGroup + 3
+)
+
+// registeredAgentAccessRequestCodeAllowed reports whether value is exactly six
+// ASCII digits. It compares bytes, so a digit from any other script, a sign, and
+// surrounding space are all refused.
+func registeredAgentAccessRequestCodeAllowed(value string) bool {
+	if len(value) != registeredAgentAccessRequestCodeLength {
+		return false
+	}
+	for i := range len(value) {
+		if value[i] < '0' || value[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// registeredAgentPasskeyDeviceIDAllowed reports whether value is a device
+// identifier in its one displayed form, xxxx-xxxx-xxxx-xxxx, where each x is a
+// lowercase base32 character (a to z, 2 to 7). Upper case, the digits outside
+// that alphabet, padding, and any other grouping are refused.
+func registeredAgentPasskeyDeviceIDAllowed(value string) bool {
+	if len(value) != registeredAgentPasskeyDeviceIDLength {
+		return false
+	}
+	for i := range len(value) {
+		c := value[i]
+		if i%(registeredAgentPasskeyDeviceIDGroup+1) == registeredAgentPasskeyDeviceIDGroup {
+			if c != '-' {
+				return false
+			}
+			continue
+		}
+		if (c < 'a' || c > 'z') && (c < '2' || c > '7') {
+			return false
+		}
+	}
+	return true
 }
 
 func registeredAgentResourceIDAllowed(value string) bool {
