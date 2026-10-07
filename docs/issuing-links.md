@@ -39,6 +39,55 @@ resource, err := client.ProtectURL(ctx,
 )
 ```
 
+## Private and public resources
+
+A resource is private or public. Only the owner, and those the owner allowed,
+can create links for a private resource. A resource that is not private is
+public. Privacy is chosen when the resource is created and does not change
+afterward.
+
+State it with `qurl.WithPrivate` on the call that creates the resource:
+
+```go
+resource, err := client.ProtectURL(ctx,
+	"https://status.example.com/",
+	qurl.WithPrivate(false), // a public resource
+)
+```
+
+Leaving the option out sends nothing, and the service's default applies. That
+default is not the same on every service version: an older service treated
+"not stated" as public, and the service now creates a private resource. If the
+resource must be private whichever version answers, state
+`qurl.WithPrivate(true)`; if it must be public, state `qurl.WithPrivate(false)`.
+
+The same option is accepted by every call that can create a resource:
+`ProtectURL` and `CreateResource`, `CreatePortalForURL`, and
+`EnsureConnectorResourceWithOptions`. These calls return your existing resource
+when there is one, with the privacy it already has, and the service refuses a
+stated value that differs from it. Leave the option out to reuse a resource as
+it is. `CreatePortal` mints a link for a resource that already exists and
+rejects the option with `qurl.ErrInvalidPortalRequest`.
+
+Read privacy back from the resource the service returned:
+
+```go
+switch {
+case resource.Private == nil:
+	// The service did not say. Do not read this as private.
+case *resource.Private:
+	// Private.
+default:
+	// Public.
+}
+```
+
+`Resource.AccessRequests` is reported the same way: whether people may ask the
+publisher for access to the resource, or `nil` when the service did not say.
+`ConnectorResource` carries both fields too. `CreatePortalForURL` does not
+report privacy back, so the resource it returns leaves both `nil`; use
+`ProtectURL` when your code must read them.
+
 ## Create a Portal
 
 ```go
@@ -146,6 +195,9 @@ fmt.Println(resource.CRID, portal.Link)
 That asks LayerV to protect the URL and mint the portal in one API call. Use the
 explicit `ProtectURL` then `resource.CreatePortal` flow when the resource
 identity matters to your application.
+
+Add `qurl.WithPrivate(...)` to state the privacy of a resource this call
+creates; see [Private and public resources](#private-and-public-resources).
 
 ## Connect to LayerV
 

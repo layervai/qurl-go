@@ -88,6 +88,17 @@ id:
 resource, err := client.GetConnectorResourceBySlug(ctx, "prod-dashboard")
 ```
 
+Both lookups, and the HTTPS find-or-create, report `ConnectorResource.Private`
+and `ConnectorResource.AccessRequests`. Each is `nil` when the service did not
+say, which is not `false`. A resource resolved over the native path leaves both
+`nil`: that exchange does not report them.
+
+`EnsureConnectorResourceWithOptions` is the HTTPS find-or-create with options
+for the resource it may create. `qurl.WithPrivate` states that resource's
+privacy; without it the service's default applies, as it does for
+`EnsureConnectorResource`. See
+[Private and public resources](issuing-links.md#private-and-public-resources).
+
 The id lookup accepts the resource-detail envelope
 `data.resource`; the slug lookup accepts the resource-list envelope `data[]`.
 Keeping the id and slug response shapes separate prevents a valid HTTP response

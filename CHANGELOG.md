@@ -8,6 +8,32 @@ and are marked **Breaking** with what to change.
 
 ## Unreleased
 
+- `WithPrivate` states the privacy of a resource a call creates. It is accepted
+  by every call that can create one: `ProtectURL` and `CreateResource`,
+  `CreatePortalForURL`, and the new `EnsureConnectorResourceWithOptions`
+  (`EnsureConnectorResource` with options; the existing call is unchanged).
+  `WithPrivate(true)` sends `private: true` and `WithPrivate(false)` sends
+  `private: false`. A call that does not use the option sends exactly what it
+  sent before, and the service's default applies. **That default is not the
+  same on every service version:** an older service treated "not stated" as
+  public, and the service now creates a private resource. State
+  `WithPrivate(true)` when the resource must be private whichever version
+  answers, and `WithPrivate(false)` when it must be public.
+  - Privacy is chosen at creation. The creating calls return an existing
+    resource with the privacy it already has, and the service refuses a stated
+    value that differs. `CreatePortal` mints a link for an existing resource
+    and rejects the option with `ErrInvalidPortalRequest`. Stating both values
+    in one call is rejected before any request.
+  - `Resource` and `ConnectorResource` gain `Private` and `AccessRequests`
+    (whether people may ask the publisher for access), both `*bool`. `nil`
+    means the service did not say, which is not `false`; it is `nil` for a
+    handle that was not read from the service (`CreatePortalForURL`,
+    `ResourceByCRID`, and a Connector resource resolved over the native path).
+    Marshaled resource JSON writes `private` and `access_requests` when
+    reported, a reported `false` included, and omits them otherwise.
+  - New option types `ResourceCreateOption` (what `WithPrivate` returns) and
+    `ConnectorResourceOption`.
+
 - `RegisteredAgentResourceHTTPDoer` now permits the five routes an owner uses
   to answer people who ask for access to a private resource:
   `GET /v1/access-requests`, `GET /v1/resources/{id}/access-requests`,

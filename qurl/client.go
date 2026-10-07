@@ -627,6 +627,16 @@ type Resource struct {
 	CustomDomain *string `json:"custom_domain,omitempty"`
 	// Alias is an optional owner-scoped handle for the resource.
 	Alias *string `json:"alias,omitempty"`
+	// Private reports the resource's privacy: true when only the owner and those
+	// the owner allowed can create links for it, false when it is public. Nil
+	// means the service did not say, which is not false: the SDK does not guess,
+	// and nil must never be read as private. CreatePortalForURL and
+	// ResourceByCRID return a handle that was not read from the service, so it
+	// is nil there. See WithPrivate.
+	Private *bool `json:"private,omitempty"`
+	// AccessRequests reports whether people may ask the publisher for access to
+	// this resource. Nil means the service did not say.
+	AccessRequests *bool `json:"access_requests,omitempty"`
 	// QURLCount is the reported token-row count, including rows awaiting TTL cleanup.
 	// Nil means unknown: the service can omit a count when its read budget is exceeded.
 	QURLCount *int `json:"qurl_count,omitempty"`
@@ -658,6 +668,7 @@ type resourceOptions struct {
 	tags         []string
 	customDomain string
 	alias        string
+	private      *bool
 }
 
 // WithDescription attaches resource-level metadata.
@@ -710,9 +721,73 @@ func WithAlias(alias string) ResourceOption {
 	})
 }
 
+// ResourceCreateOption sets something a resource is given when it is created.
+// It is accepted by every call that can create a resource: ProtectURL and
+// CreateResource, CreatePortalForURL, and EnsureConnectorResourceWithOptions.
+//
+// It is also a PortalOption so that CreatePortalForURL can take it. CreatePortal
+// mints a link for a resource that already exists and rejects it with
+// ErrInvalidPortalRequest.
+type ResourceCreateOption interface {
+	ResourceOption
+	PortalOption
+	ConnectorResourceOption
+}
+
+// WithPrivate states the privacy of the resource a call creates: true for a
+// private resource, which only its owner and those the owner allowed can create
+// links for, and false for a public one.
+//
+// Leaving the option out sends nothing, and the service's default applies. That
+// default is not the same on every service version: an older service treated
+// "not stated" as public, and the service now creates a private resource. A
+// caller that needs a private resource whichever version answers should state
+// WithPrivate(true), and a caller that needs a public one must state
+// WithPrivate(false).
+//
+// Privacy is chosen when a resource is created and does not change afterward.
+// These calls return the caller's existing resource when there is one, with the
+// privacy it already has; the service refuses a stated value that differs from
+// it, and the refusal is an *APIError. Leave the option out to reuse a resource
+// as it is, and read Resource.Private or ConnectorResource.Private to learn
+// what it has. CreatePortalForURL does not report privacy back; use ProtectURL
+// when the caller must read it.
+//
+// Stating both values in one call is rejected before any request is sent.
+func WithPrivate(private bool) ResourceCreateOption {
+	return resourcePrivacyOption(private)
+}
+
+type resourcePrivacyOption bool
+
+// statePrivacy records a stated privacy and refuses a contradiction, so a
+// composed option list cannot silently turn a private resource public.
+func statePrivacy(current **bool, private bool, errKind error) error {
+	if *current != nil && **current != private {
+		return fmt.Errorf("%w: privacy is stated as both private and public", errKind)
+	}
+	*current = &private
+	return nil
+}
+
+func (o resourcePrivacyOption) applyResourceOption(cfg *resourceOptions) error {
+	return statePrivacy(&cfg.private, bool(o), ErrInvalidResourceRequest)
+}
+
+func (o resourcePrivacyOption) applyPortalOption(cfg *portalOptions) error {
+	return statePrivacy(&cfg.private, bool(o), ErrInvalidPortalRequest)
+}
+
+func (o resourcePrivacyOption) applyConnectorResourceOption(cfg *connectorResourceOptions) error {
+	return statePrivacy(&cfg.private, bool(o), ErrInvalidResourceRequest)
+}
+
 // ProtectURL creates or reuses a LayerV resource for targetURL. The SDK rejects
 // malformed URLs and embedded credentials; LayerV validates and registers the
 // target when the request reaches the platform.
+//
+// A new resource takes the service's default privacy unless WithPrivate states
+// it; the returned Resource reports what the service says the resource has.
 func (c *Client) ProtectURL(ctx context.Context, targetURL string, opts ...ResourceOption) (*Resource, error) {
 	if c == nil {
 		return nil, fmt.Errorf("%w: nil client", ErrInvalidClientConfig)
@@ -737,6 +812,7 @@ func (c *Client) ProtectURL(ctx context.Context, targetURL string, opts ...Resou
 		Tags:         cfg.tags,
 		CustomDomain: cfg.customDomain,
 		Alias:        cfg.alias,
+		Private:      cfg.private,
 	}
 
 	var env apiEnvelope[createResourceResponse]
@@ -792,6 +868,9 @@ type portalOptions struct {
 	maxSessions     *int
 	sessionDuration string
 	targetPath      string
+	// private belongs to the resource CreatePortalForURL may create, not to the
+	// link. It is never part of a request for an existing resource.
+	private *bool
 }
 
 const maxTargetPathLength = 2048
@@ -884,7 +963,8 @@ func WithTargetPath(targetPath string) PortalOption {
 	})
 }
 
-// CreatePortal asks LayerV to mint a qURL link for an existing resource.
+// CreatePortal asks LayerV to mint a qURL link for an existing resource. It
+// rejects WithPrivate: privacy is chosen when a resource is created.
 func (c *Client) CreatePortal(ctx context.Context, resource *Resource, opts ...PortalOption) (*Portal, error) {
 	if c == nil {
 		return nil, fmt.Errorf("%w: nil client", ErrInvalidClientConfig)
@@ -933,6 +1013,10 @@ func (r *Resource) CreatePortal(ctx context.Context, opts ...PortalOption) (*Por
 // be stored or reused to mint more portals; only its ID and caller-supplied
 // TargetURL are populated. Use ProtectURL when you need the full
 // server-populated resource metadata.
+//
+// A resource this call creates takes the service's default privacy unless
+// WithPrivate states it. The answer to this call does not report privacy, so
+// the returned Resource leaves Private nil either way.
 func (c *Client) CreatePortalForURL(ctx context.Context, targetURL string, opts ...PortalOption) (*Portal, *Resource, error) {
 	if c == nil {
 		return nil, nil, fmt.Errorf("%w: nil client", ErrInvalidClientConfig)
@@ -1008,20 +1092,26 @@ type createResourceRequest struct {
 	Tags         []string `json:"tags,omitempty"`
 	CustomDomain string   `json:"custom_domain,omitempty"`
 	Alias        string   `json:"alias,omitempty"`
+	// Private is nil when the caller did not state privacy and is then left out
+	// of the request, so the service default applies. It is a pointer because a
+	// stated false must reach the service; a plain bool would drop it.
+	Private *bool `json:"private,omitempty"`
 }
 
 type createResourceResponse struct {
-	ID           string     `json:"resource_id"`
-	CRID         string     `json:"crid"`
-	TargetURL    string     `json:"target_url"`
-	Status       string     `json:"status"`
-	Description  string     `json:"description"`
-	Tags         []string   `json:"tags"`
-	CustomDomain *string    `json:"custom_domain"`
-	Alias        *string    `json:"alias"`
-	QURLCount    *int       `json:"qurl_count"`
-	CreatedAt    *time.Time `json:"created_at"`
-	ExpiresAt    *time.Time `json:"expires_at"`
+	ID             string     `json:"resource_id"`
+	CRID           string     `json:"crid"`
+	TargetURL      string     `json:"target_url"`
+	Status         string     `json:"status"`
+	Description    string     `json:"description"`
+	Tags           []string   `json:"tags"`
+	CustomDomain   *string    `json:"custom_domain"`
+	Alias          *string    `json:"alias"`
+	Private        *bool      `json:"private"`
+	AccessRequests *bool      `json:"access_requests"`
+	QURLCount      *int       `json:"qurl_count"`
+	CreatedAt      *time.Time `json:"created_at"`
+	ExpiresAt      *time.Time `json:"expires_at"`
 }
 
 func (r createResourceResponse) resource() (*Resource, error) {
@@ -1040,6 +1130,8 @@ func (r createResourceResponse) resource() (*Resource, error) {
 		Tags:              slices.Clone(r.Tags),
 		CustomDomain:      r.CustomDomain,
 		Alias:             r.Alias,
+		Private:           r.Private,
+		AccessRequests:    r.AccessRequests,
 		QURLCount:         r.QURLCount,
 		CreatedAt:         r.CreatedAt,
 		ExpiresAt:         r.ExpiresAt,
@@ -1058,6 +1150,9 @@ type createPortalRequest struct {
 type createPortalForURLRequest struct {
 	TargetURL string `json:"target_url"`
 	createPortalRequest
+	// Private follows createResourceRequest.Private: nil is left out, and a
+	// stated false is sent.
+	Private *bool `json:"private,omitempty"`
 }
 
 type createPortalResponse struct {
@@ -1095,11 +1190,9 @@ type apiEnvelope[T any] struct {
 	Data T `json:"data"`
 }
 
-func buildCreatePortalRequest(opts []PortalOption) (createPortalRequest, error) {
-	cfg, err := applyPortalOptions(opts)
-	if err != nil {
-		return createPortalRequest{}, err
-	}
+// request returns the link fields of a mint request. Privacy is not one of
+// them; each caller decides what a stated privacy means for its endpoint.
+func (cfg portalOptions) request() createPortalRequest {
 	return createPortalRequest{
 		ExpiresIn:       cfg.expiresIn,
 		Label:           cfg.label,
@@ -1107,20 +1200,32 @@ func buildCreatePortalRequest(opts []PortalOption) (createPortalRequest, error) 
 		MaxSessions:     cfg.maxSessions,
 		SessionDuration: cfg.sessionDuration,
 		TargetPath:      cfg.targetPath,
-	}, nil
+	}
+}
+
+func buildCreatePortalRequest(opts []PortalOption) (createPortalRequest, error) {
+	cfg, err := applyPortalOptions(opts)
+	if err != nil {
+		return createPortalRequest{}, err
+	}
+	if cfg.private != nil {
+		return createPortalRequest{}, fmt.Errorf("%w: privacy is chosen when a resource is created, and this resource already exists", ErrInvalidPortalRequest)
+	}
+	return cfg.request(), nil
 }
 
 func buildCreatePortalForURLRequest(targetURL string, opts []PortalOption) (createPortalForURLRequest, error) {
-	req, err := buildCreatePortalRequest(opts)
+	cfg, err := applyPortalOptions(opts)
 	if err != nil {
 		return createPortalForURLRequest{}, err
 	}
-	if req.TargetPath != "" {
+	if cfg.targetPath != "" {
 		return createPortalForURLRequest{}, fmt.Errorf("%w: target path requires an existing resource", ErrInvalidPortalRequest)
 	}
 	return createPortalForURLRequest{
 		TargetURL:           targetURL,
-		createPortalRequest: req,
+		createPortalRequest: cfg.request(),
+		Private:             cfg.private,
 	}, nil
 }
 

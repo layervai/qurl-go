@@ -99,6 +99,26 @@ func ExampleClient_ProtectURL() {
 	fmt.Println(resource.CRID)
 }
 
+func ExampleWithPrivate() {
+	client, err := qurl.OpenClient()
+	if err != nil {
+		panic(err)
+	}
+
+	// State privacy instead of relying on the default, which is not the same
+	// on every service version.
+	resource, err := client.ProtectURL(context.Background(),
+		"https://status.example.com/",
+		qurl.WithPrivate(false),
+	)
+	if err != nil {
+		panic(err)
+	}
+
+	// Private is nil when the service did not say; nil is not false.
+	fmt.Println(resource.CRID, resource.Private != nil && !*resource.Private)
+}
+
 func ExampleClient_CreatePortal() {
 	client, err := qurl.OpenClient()
 	if err != nil {
