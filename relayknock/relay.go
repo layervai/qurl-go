@@ -108,8 +108,14 @@ func browserRelayTypeAllowed(headerType int) bool {
 // connection, body read) come back as *RelayError; url is returned so callers
 // compose errors around the one URL actually posted.
 //
-// Security boundary: this transport is only for browser/qv2 portal traffic.
-// Registered-agent control traffic must use native UDP and must not reach it.
+// Security boundary: this transport is for browser/qv2 portal traffic and for
+// CRID link requests. Registered-agent control traffic (registration,
+// assignment, and session knocks) must use native UDP and must not reach it.
+//
+// One knock under a registered device's static key is allowed here, and only
+// this one: a CRID link request that the qurl package sends after the server
+// has answered the same request, sent under a random key, with "not found".
+// See qurl.RequestCRIDLinkAsDeviceWith.
 func relayDo(ctx context.Context, httpClient HTTPDoer, relayBaseURL, serverID string, packet []byte) (status int, body []byte, url string, err error) {
 	if httpClient == nil {
 		httpClient = http.DefaultClient
@@ -141,9 +147,21 @@ func relayDo(ctx context.Context, httpClient HTTPDoer, relayBaseURL, serverID st
 // suitable for a message where the server authenticates by the body rather than a
 // pre-registered device key.
 //
-// The qURL path sets DeviceStaticPriv to the per-link private key from the link's
-// secret block, so the server can match the authenticated Noise initiator key to the
-// signed public key. The remaining fields stay zero (random) there.
+// The qurl package sets DeviceStaticPriv in two cases. The remaining fields stay
+// zero (random) in both.
+//
+//   - A link open sets it to the per-link private key from the link's secret
+//     block, so the server can match the authenticated Noise initiator key to the
+//     signed public key.
+//   - A CRID link request made as a registered device sets it to the device's
+//     static private key, for the one request that follows a "not found" answer
+//     to the same request under a random key. Every other CRID link request
+//     leaves it empty.
+//
+// A reply to a knock under a random key and a reply to a knock under a key whose
+// public half is known outside the client are not protected to the same degree
+// against the relay. qurl.RequestCRIDLinkAsDeviceWith says what the relay can and
+// cannot do in the second case.
 type KnockOptions struct {
 	// HTTPClient is the client used for the relay POST. nil ⇒ http.DefaultClient.
 	HTTPClient HTTPDoer

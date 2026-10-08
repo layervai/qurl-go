@@ -412,11 +412,14 @@ deployment's cell.
 
 The calls made as a device, `OpenCRIDAsDevice` and `RequestCRIDLinkAsDevice`
 and their `With` forms, may send a second request, under the device key. It
-goes through the same relay and is authenticated the same way. See
-[Open a private resource](#open-a-private-resource).
+goes through the same relay. The relay still cannot forge a link or a refusal
+there, but it can do more with that request than with the first one. See
+[What the relay can and cannot do with a request under the device key](#what-the-relay-can-and-cannot-do-with-a-request-under-the-device-key).
 
 A busy server answers with a cookie instead of a link. The SDK reports that as
-`ErrServerOverloaded` and does not answer the cookie; try again later.
+`ErrServerOverloaded` and does not answer the cookie; try again later. For a
+call made as a device this error is not proof that the server is busy: see the
+same section.
 
 ### Configuration
 
@@ -541,17 +544,28 @@ is the device's 32-byte X25519 static private key, the key
 `KnockRegisteredAgent` takes:
 
 ```go
-// binding is the *qurl.AgentRuntimeBinding of the registered device.
+// Once, when the device starts. binding is its *qurl.AgentRuntimeBinding.
+// TakeDeviceStaticPrivateKey hands the key over one time only: a second call
+// returns nil. Keep the key for as long as the device makes these calls, and
+// wipe it when the device is done.
 devicePrivateKey := binding.TakeDeviceStaticPrivateKey()
 defer clear(devicePrivateKey)
 
+// As often as needed, with the same key.
 handle, err := qurl.OpenCRIDAsDevice(ctx, devicePrivateKey, resourceCRID)
 ```
+
+Do not call `TakeDeviceStaticPrivateKey` once per open. The second call returns
+nil, and a call made as a device with no key fails with `ErrInvalidDeviceKey`.
 
 `OpenCRIDAsDevice` resolves its configuration as `OpenCRID` does, so it needs
 a deployment that names a `crid_link`; see [Configuration](#configuration).
 The device key is an argument of the call and is never part of the
 configuration.
+
+The call presents the device's identity to the cell that the configuration
+names, or that the file named by `QURL_DEPLOYMENT` names. It does not check
+that this is the cell the device is registered with.
 
 There are four calls, in the same pairs as the calls that take no device key:
 
@@ -582,8 +596,9 @@ All four follow one rule: a random key first, the device key only after
 "not found".
 
 1. **The first request never carries the device key.** It is the request
-   `OpenCRIDWith` sends, under a random key. A device that opens a public
-   resource is answered here, so the request cannot be linked to the device.
+   `OpenCRIDWith` sends, under a random key. It is not sent under the device
+   key and carries nothing that is derived from it. A device that opens a
+   public resource is answered here.
 2. **The device key is used only after "not found".** Only when the server
    answers the first request with "not found" does the SDK send one second
    request, under the device key. The answer to the second request is the
@@ -597,20 +612,36 @@ All four follow one rule: a random key first, the device key only after
 `OpenCRID`, `OpenCRIDWith`, `RequestCRIDLink` and `RequestCRIDLinkWith` take no
 device key. They send exactly one request, as before.
 
+The rule keeps the device key out of every request that does not need it. It
+does not make the first request anonymous. The server learns the source
+address of every request, and a request carries the user agent when one is
+configured. The server sees the same source address when the device uses its
+key, in the second request or in any other knock. So the source address can
+still connect a request under a random key to the device.
+
 What the second request costs:
 
 - It is a real request to the server. It counts against the server's
   per-source request limit, and it can be answered with
   `ErrCRIDLinkRateLimited`. For a device call, every "not found" answer costs
   two requests, not one.
-- It tells the server which device asked for that CRID.
+- It presents the device's identity to the server, for that CRID. A relay
+  that holds the device's public key can recognise the request too; see
+  [the next section](#what-the-relay-can-and-cannot-do-with-a-request-under-the-device-key).
 
-One context covers both requests. When the context has ended by the time the
-first request is answered "not found", the second request is not sent. The
-error then matches the context's error (`context.DeadlineExceeded` or
-`context.Canceled`). It does **not** match `ErrCRIDLinkNotFound`: the device
-never asked, so it is not known whether the device may open the CRID. Try
-again with more time.
+One context covers both requests, and the open that follows:
+
+- When the context has ended by the time the first request is answered
+  "not found", the second request is not sent. The error then matches the
+  context's error (`context.DeadlineExceeded` or `context.Canceled`). It does
+  **not** match `ErrCRIDLinkNotFound`: the device never asked, so it is not
+  known whether the device may open the CRID. Try again with more time.
+- When the context ends after a link was issued and before the open, the
+  error is the context's error too.
+- When the context ends while a request is waiting for its answer, the error
+  has the same form for the first request and for the second.
+
+So a context error does not say whether the device key was sent.
 
 A link from the second request goes through every check under
 [What is checked](#what-is-checked). The open that follows uses the link's own
@@ -623,9 +654,53 @@ The device key stays yours:
 - The SDK uses it as the static key of that one request and for nothing else.
   It is never logged and never part of an error.
 - A key that is not 32 bytes, or that holds only zero bytes as a wiped key
-  does, is refused with `ErrInvalidResourceRequest` before the CRID or the
+  does, is refused with `ErrInvalidDeviceKey` before the CRID or the
   configuration is looked at, and before anything is sent. The calls that
   resolve their configuration refuse it before they resolve anything.
+  `ErrInvalidDeviceKey` does not match `ErrInvalidResourceRequest`, which says
+  that the CRID cannot be requested.
+
+### What the relay can and cannot do with a request under the device key
+
+The relay carries both requests of a call made as a device, and it is not
+trusted.
+
+With the first request, under a random key, the relay can drop or delay the
+request, or hand back something that does not authenticate. It cannot change
+what the server said.
+
+With the second request it can do more, for one reason. A part of what
+protects a reply depends on the public key the reply is sealed to. Nobody but
+the client knows a random key. A device's public key is long-lived and is
+known outside the device: an owner needs it to allow the device.
+
+The relay **cannot** do any of the following, also when it holds the device's
+public key:
+
+- Forge a link or a refusal, "not found" included, or change one.
+- Read the request or the reply. It learns neither the CRID nor the link.
+- Cause the second request. Only the server's own "not found" to the first
+  request does.
+
+A relay that holds the device's public key **can**:
+
+- Recognise the reply to the second request, and so that request, as this
+  device's.
+- See from the size of that reply whether a link was issued. It sees the size
+  of every reply, and a reply with a link is larger than a refusal.
+- Hand back the server's reply with its content removed. The call then fails
+  with `ErrServerOverloaded`, `ErrCRIDLinkProtocol`, or `ErrMalformedReply`,
+  whatever the server answered.
+
+A relay that does not hold the public key can still hand back, at any later
+time, a reply that the server once sent to the same device. An old "busy"
+reply gives `ErrServerOverloaded`. Any other old reply gives
+`ErrMalformedReply`.
+
+What to conclude: on a call made as a device, read `ErrServerOverloaded`,
+`ErrCRIDLinkProtocol` and `ErrMalformedReply` as "no usable answer". They are
+not proof that the server is busy, or of anything else the server said. A link
+and a refusal are proof: the relay cannot make either.
 
 ### Ask whether the request is offered
 

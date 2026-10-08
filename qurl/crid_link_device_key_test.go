@@ -144,6 +144,7 @@ func cridLinkErrorShape(err error) string {
 		{"overloaded", ErrServerOverloaded},
 		{"not configured", ErrCRIDLinkNotConfigured},
 		{"invalid input", ErrInvalidResourceRequest},
+		{"invalid device key", ErrInvalidDeviceKey},
 		{"CRID mismatch", ErrCRIDMismatch},
 		{"signature", ErrSignature},
 		{"canceled", context.Canceled},
@@ -173,8 +174,9 @@ func cridLinkErrorShape(err error) string {
 
 // Rule 1 for a public resource. A device asks for a public CRID: the answer
 // comes from the first request, which is the only one, and the device key is
-// never on the wire. That is what keeps a device unlinkable across the public
-// resources it opens.
+// never on the wire. So no request for a public resource is sent under the
+// device key or carries anything derived from it. (That is all the rule gives.
+// The source address of the request can still connect it to the device.)
 func TestRequestCRIDLinkAsDeviceWith_PublicResourceIsOneRequestUnderARandomKey(t *testing.T) {
 	fixture := newCRIDLinkFixture(t)
 	device := newCRIDLinkDevice(t)
@@ -502,6 +504,13 @@ func TestRequestCRIDLinkAsDeviceWith_OtherFirstOutcomesTakeOneRequest(t *testing
 			var relayErr *RelayError
 			if !errors.As(err, &relayErr) || relayErr.Status != 0 || errors.Is(err, ErrCRIDLinkNotFound) {
 				t.Fatalf("error = %v, want the transport fault of a request that got no answer", err)
+			}
+			// This is the form the error also has when the context ends while
+			// the SECOND request waits (see the context test). A caller
+			// cannot tell the two apart, so a context error does not say
+			// whether the device key was sent.
+			if want := map[error]string{context.Canceled: "canceled, relay 0", context.DeadlineExceeded: "deadline, relay 0"}[end]; cridLinkErrorShape(err) != want {
+				t.Fatalf("error = %v (%s), want %s", err, cridLinkErrorShape(err), want)
 			}
 			knocks := fixture.peer.requestsSince(before)
 			if len(knocks) != 1 {
@@ -952,16 +961,25 @@ func TestRequestCRIDLinkAsDeviceWith_RefusesAnUnusableDeviceKey(t *testing.T) {
 					t.Fatalf("%s: a call with an unusable device key returned a result", with.name)
 				}
 				for call, err := range map[string]error{"RequestCRIDLinkAsDeviceWith": requestErr, "OpenCRIDAsDeviceWith": openErr} {
-					// Only the invalid-input error: the same sentinel as for a
-					// CRID that fails the local gate, and none of the errors
-					// the CRID or the configuration would have caused.
-					if got := cridLinkErrorShape(err); got != "invalid input" {
-						t.Fatalf("%s, %s: error = %v (%s), want only ErrInvalidResourceRequest", with.name, call, err, got)
+					// The error of a bad device key, and only that one.
+					if !errors.Is(err, ErrInvalidDeviceKey) {
+						t.Fatalf("%s, %s: error = %v, want ErrInvalidDeviceKey", with.name, call, err)
+					}
+					// It is not the error of a CRID that cannot be requested. A
+					// caller that reads ErrInvalidResourceRequest tells its user
+					// that the CRID is wrong, and here the CRID was not looked at.
+					if errors.Is(err, ErrInvalidResourceRequest) {
+						t.Fatalf("%s, %s: error = %v: a bad device key must not match ErrInvalidResourceRequest", with.name, call, err)
+					}
+					// And none of the errors the CRID or the configuration
+					// would have caused.
+					if got := cridLinkErrorShape(err); got != "invalid device key" {
+						t.Fatalf("%s, %s: error = %v (%s), want only ErrInvalidDeviceKey", with.name, call, err, got)
 					}
 					if errors.Is(err, ErrNotConfigured) || errors.Is(err, ErrUnsupportedCRIDVersion) {
 						t.Fatalf("%s, %s: error = %v, want the device key refused first", with.name, call, err)
 					}
-					if want := "qurl: invalid resource request: the device static private key " + tc.says; err.Error() != want {
+					if want := "qurl: invalid device static private key: it " + tc.says; err.Error() != want {
 						t.Fatalf("%s, %s: error text = %q, want %q", with.name, call, err.Error(), want)
 					}
 					assertNoDeviceKey(t, call+" error", fmt.Sprintf("%v %+v %#v", err, err, err), device)
@@ -1247,6 +1265,104 @@ func TestCRIDLinkAsDevice_NeverPutsTheDeviceKeyInAnErrorOrALog(t *testing.T) {
 	assertNoDeviceKey(t, "the log output", logged.String(), device)
 }
 
+// A context error on its own does not say how far a call made as a device got.
+// The three calls below each end with an error that matches the context's
+// error and nothing else:
+//
+//   - The context ends after "not found" and before the request under the
+//     device key. The device key was NOT sent.
+//   - The context ends after the link, which the server issued to the device
+//     key, and before the open. The device key WAS sent.
+//   - The context ends after the link to a public resource and before the
+//     open. The device key was not needed.
+//
+// So a caller cannot read from such an error whether the device identified
+// itself. The context covers the open as well: in none of the three is an open
+// knock sent.
+func TestOpenCRIDAsDeviceWith_ContextEndsBetweenTheLinkAndTheOpen(t *testing.T) {
+	fixture := newCRIDLinkFixture(t)
+	device := newCRIDLinkDevice(t)
+	udp, admittedKeys := startCRIDLinkCellUDP(t, fixture.peer, fixture.cfg.TrustStore, fixture.link, "https://resource.example.com/")
+	fixture.cfg.nativeUDPOptions = udp
+
+	for _, tc := range []struct {
+		name string
+		// private says that the resource is private and the device may open it.
+		private bool
+		// cancelAfter is the answer after which the caller cancels.
+		cancelAfter   int32
+		wantRequests  int
+		deviceKeySent bool
+	}{
+		{"a private resource, after \"not found\" and before the request under the device key", true, 1, 1, false},
+		{"a private resource, after the link and before the open", true, 2, 2, true},
+		{"a public resource, after the link and before the open", false, 1, 1, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			issued := cridLinkIssued(t, fixture.link, fixture.info())
+			if tc.private {
+				fixture.servePrivateResource(t, device, issued)
+			} else {
+				fixture.peer.respond(issued)
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			var answers atomic.Int32
+			cfg := fixture.cfg
+			cfg.HTTPClient = fixture.peer.clientThatRunsAfterEachAnswer(func() {
+				if answers.Add(1) == tc.cancelAfter {
+					cancel()
+				}
+			})
+
+			before, opensBefore := len(fixture.peer.seen()), len(admittedKeys())
+			handle, err := OpenCRIDAsDeviceWith(ctx, device.private, fixture.crid, cfg)
+			if handle != nil {
+				t.Fatal("the resource was opened although the context had ended before the open")
+			}
+			// The context's error and nothing else a caller can match: the
+			// same for all three cases.
+			if got := cridLinkErrorShape(err); got != "canceled" {
+				t.Fatalf("error = %v (%s), want only the context's error", err, got)
+			}
+
+			knocks := fixture.peer.requestsSince(before)
+			if len(knocks) != tc.wantRequests {
+				t.Fatalf("the cell saw %d link requests, want exactly %d", len(knocks), tc.wantRequests)
+			}
+			sent := false
+			for _, knock := range knocks {
+				sent = sent || bytes.Equal(knock.devicePub, device.public)
+			}
+			if sent != tc.deviceKeySent {
+				t.Fatalf("a request under the device key was sent = %t, want %t", sent, tc.deviceKeySent)
+			}
+			if got := len(admittedKeys()) - opensBefore; got != 0 {
+				t.Fatalf("%d open knocks were sent after the context had ended", got)
+			}
+		})
+	}
+
+	// The call that takes no device key ends the same way when its context
+	// ends between the link and the open. The error is not special to the
+	// device calls.
+	t.Run("OpenCRIDWith, after the link and before the open", func(t *testing.T) {
+		fixture.peer.respond(cridLinkIssued(t, fixture.link, fixture.info()))
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		cfg := fixture.cfg
+		cfg.HTTPClient = fixture.peer.clientThatRunsAfterEachAnswer(cancel)
+		opensBefore := len(admittedKeys())
+		handle, err := OpenCRIDWith(ctx, fixture.crid, cfg)
+		if handle != nil || cridLinkErrorShape(err) != "canceled" {
+			t.Fatalf("OpenCRIDWith = %v, %v (%s); want no handle and only the context's error", handle, err, cridLinkErrorShape(err))
+		}
+		if got := len(admittedKeys()) - opensBefore; got != 0 {
+			t.Fatalf("%d open knocks were sent after the context had ended", got)
+		}
+	})
+}
+
 // The forms that take no configuration.
 //
 // RequestCRIDLinkAsDevice and OpenCRIDAsDevice resolve the default
@@ -1454,11 +1570,14 @@ func TestCRIDLinkAsDevice_RefusesBeforeTheDefaultConfigurationIsResolved(t *test
 						if errors.Is(err, whenAsked) {
 							t.Fatalf("%s: error = %v: the call got as far as the default configuration", what, err)
 						}
-						if want := "qurl: invalid resource request: the device static private key " + bad.says; err == nil || err.Error() != want {
+						if want := "qurl: invalid device static private key: it " + bad.says; err == nil || err.Error() != want {
 							t.Fatalf("%s: error = %v, want %q", what, err, want)
 						}
-						if got := cridLinkErrorShape(err); got != "invalid input" {
-							t.Fatalf("%s: error = %v (%s), want only ErrInvalidResourceRequest", what, err, got)
+						if !errors.Is(err, ErrInvalidDeviceKey) || errors.Is(err, ErrInvalidResourceRequest) {
+							t.Fatalf("%s: error = %v, want ErrInvalidDeviceKey and not ErrInvalidResourceRequest", what, err)
+						}
+						if got := cridLinkErrorShape(err); got != "invalid device key" {
+							t.Fatalf("%s: error = %v (%s), want only ErrInvalidDeviceKey", what, err, got)
 						}
 						assertNoDeviceKey(t, what, fmt.Sprintf("%v %+v %#v", err, err, err), device)
 					}
@@ -1481,7 +1600,7 @@ func TestCRIDLinkAsDevice_RefusesBeforeTheDefaultConfigurationIsResolved(t *test
 					if errors.Is(err, whenAsked) {
 						t.Fatalf("%s: error = %v: the call got as far as the default configuration", what, err)
 					}
-					if !errors.Is(err, ErrInvalidResourceRequest) || errors.Is(err, ErrNotConfigured) {
+					if !errors.Is(err, ErrInvalidResourceRequest) || errors.Is(err, ErrNotConfigured) || errors.Is(err, ErrInvalidDeviceKey) {
 						t.Fatalf("%s: error = %v, want the CRID refused with ErrInvalidResourceRequest", what, err)
 					}
 					if err.Error() != want[name].Error() || cridLinkErrorShape(err) != cridLinkErrorShape(want[name]) {

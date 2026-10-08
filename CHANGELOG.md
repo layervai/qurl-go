@@ -18,21 +18,31 @@ and are marked **Breaking** with what to change.
   by a registered device that the owner allowed, or by the owner's own
   device. Every other client still gets `ErrCRIDLinkNotFound`.
   - The first request never carries the device key. It is the request
-    `RequestCRIDLinkWith` sends, under a random key, so a request for a public
-    resource cannot be linked to the device. Only when it is answered
+    `RequestCRIDLinkWith` sends, under a random key, and it carries nothing
+    derived from the device key. Only when it is answered
     "not found" does the SDK send one second request, under the device key,
     and that answer is the result. Every other outcome of the first request is
-    returned as it is.
+    returned as it is. The source address of a request can still connect it
+    to the device.
   - The second request is a real request to the server and counts against its
     per-source request limit.
+  - The relay cannot forge a link or a refusal on either request, cannot
+    read them, and cannot cause the second request. On the request under the
+    device key, a relay that holds the device's public key can recognise the
+    request, can see from the reply size whether a link was issued, and can
+    make the call fail with `ErrServerOverloaded`, `ErrCRIDLinkProtocol` or
+    `ErrMalformedReply`. On a call made as a device, read those three as "no
+    usable answer". `docs/opening-links.md` has the full statement.
   - One context covers both requests. When it has ended by the time the first
     request is answered "not found", the second request is not sent. The
     error then matches the context's error and does not match
-    `ErrCRIDLinkNotFound`.
+    `ErrCRIDLinkNotFound`. A context error does not say whether the device
+    key was sent.
   - The key stays owned by the caller. The SDK does not keep or wipe it, and
     never logs it or puts it in an error. A key that is not 32 bytes, or that
-    holds only zero bytes, is `ErrInvalidResourceRequest` before anything is
-    sent and before any configuration is resolved.
+    holds only zero bytes, is the new `ErrInvalidDeviceKey`, before anything
+    is sent and before any configuration is resolved. It does not match
+    `ErrInvalidResourceRequest`.
   - `OpenCRID`, `OpenCRIDWith`, `RequestCRIDLink` and `RequestCRIDLinkWith`
     are unchanged. They take no device key and send exactly one request.
   - `qurltest.CRIDLinkServer` gains `PrivateFor`, which makes its resource
