@@ -122,7 +122,10 @@ for origin_candidate in "${origin_fetch_url}" "${origin_push_url}"; do
   origin_dest="$(lowercase "${origin_dest}")"
   if [[ "${origin_dest}" != "${repository_origin}.git" &&
         "${origin_dest}" != "${repository_origin}" ]]; then
-    echo "::error::Origin moved off this repository: got '${origin_dest}', want '${repository_origin}' (with or without .git) or the local snapshot."
+    # Print only scheme and host: the path of a hostile URL can carry anything,
+    # including the token.
+    origin_host="${origin_dest#*://}"
+    echo "::error::Origin moved off this repository: got host '${origin_dest%%://*}://${origin_host%%/*}', want '${repository_origin}' (with or without .git) or the local snapshot."
     exit 1
   fi
 done

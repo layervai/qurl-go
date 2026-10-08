@@ -606,7 +606,8 @@ func TestTerminalVerifierAssertsOriginDestination(t *testing.T) {
 					if test.wantError != "" && !strings.Contains(output, test.wantError) {
 						t.Errorf("verifier failed for another reason:\n%s\nwant %q", output, test.wantError)
 					}
-					if strings.Contains(output, originToken) {
+					// Case-insensitive: the verifier folds case before it prints.
+					if strings.Contains(strings.ToLower(output), strings.ToLower(originToken)) {
 						t.Errorf("verifier printed the origin credential:\n%s", output)
 					}
 				})
