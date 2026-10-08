@@ -494,12 +494,14 @@ routes for that, each with the one method shown and no query:
 | `GET /v1/access-requests` | List the waiting requests for all of the owner's resources |
 | `GET /v1/resources/{id}/access-requests` | List the waiting requests for one resource |
 | `POST /v1/resources/{id}/access-requests/{code}/approve` | Approve the request with that code |
-| `DELETE /v1/resources/{id}/access-requests/{code}` | Deny the request with that code |
+| `DELETE /v1/resources/{id}/access-requests/{code}` | Refuse the request with that code |
+| `DELETE /v1/resources/{id}/access-requests/{device_id}` | Refuse the request made from that device, as the listing shows it |
 | `DELETE /v1/resources/{id}/allowed-passkeys/{device_id}` | Remove a device that was approved earlier |
 
-`{code}` is the request's six-digit code. `{device_id}` is the approved device's
-identifier as it is shown, such as `abcd-efgh-ijkl-mnop`. A code or identifier
-of any other shape is refused before the request leaves the process.
+`{code}` is the request's six-digit code. `{device_id}` is a device's
+identifier as it is shown, such as `abcd-efgh-ijkl-mnop`. Approval takes a code
+only; a request is refused by either. A code or identifier of any other shape
+is refused before the request leaves the process.
 
 ## See also
 

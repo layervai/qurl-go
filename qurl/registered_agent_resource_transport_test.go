@@ -72,6 +72,7 @@ func TestRegisteredAgentResourceHTTPDoer_ExactSurfaceAndCredentialCustody(t *tes
 		{http.MethodGet, "/v1/resources/qcrid/access-requests"},
 		{http.MethodPost, "/v1/resources/qcrid/access-requests/012345/approve"},
 		{http.MethodDelete, "/v1/resources/qcrid/access-requests/012345"},
+		{http.MethodDelete, "/v1/resources/qcrid/access-requests/abcd-efgh-ijkl-mnop"},
 		{http.MethodDelete, "/v1/resources/qcrid/allowed-passkeys/abcd-efgh-ijkl-mnop"},
 	}
 	for _, test := range allowed {
@@ -303,11 +304,21 @@ func TestRegisteredAgentResourceHTTPDoer_AccessRoutesAllowOneMethodEach(t *testi
 			},
 		},
 		{
-			name: "deny", method: http.MethodDelete,
+			name: "deny by code", method: http.MethodDelete,
 			paths: []string{
 				"/v1/resources/qcrid/access-requests/000000",
 				"/v1/resources/qcrid/access-requests/999999",
 				"/v1/resources/Resource_ID-9/access-requests/012345",
+			},
+		},
+		{
+			name: "deny by device id", method: http.MethodDelete,
+			paths: []string{
+				"/v1/resources/qcrid/access-requests/abcd-efgh-ijkl-mnop",
+				"/v1/resources/qcrid/access-requests/aaaa-zzzz-2222-7777",
+				"/v1/resources/Resource_ID-9/access-requests/2345-67qr-s2t3-u4v5",
+				// Every character is a digit, and it is still a device id.
+				"/v1/resources/qcrid/access-requests/2345-6723-4567-2345",
 			},
 		},
 		{
@@ -414,6 +425,7 @@ func TestRegisteredAgentResourceHTTPDoer_AccessRouteNearMissesAreRefused(t *test
 		{"approve: empty code", http.MethodPost, requests + "//approve"},
 		{"approve: no code", http.MethodPost, requests + "/approve"},
 		{"approve: device id for a code", http.MethodPost, requests + "/abcd-efgh-ijkl-mnop/approve"},
+		{"approve: device id made of digits for a code", http.MethodPost, requests + "/2345-6723-4567-2345/approve"},
 		{"approve: other verb", http.MethodPost, requests + "/012345/deny"},
 		{"approve: longer verb", http.MethodPost, requests + "/012345/approved"},
 		{"approve: other case", http.MethodPost, requests + "/012345/Approve"},
@@ -436,8 +448,37 @@ func TestRegisteredAgentResourceHTTPDoer_AccessRouteNearMissesAreRefused(t *test
 		{"deny: escaped digit", http.MethodDelete, requests + "/01234%35"},
 		{"deny: empty code", http.MethodDelete, requests + "/"},
 		{"deny: id shape of sibling routes", http.MethodDelete, requests + "/at_link-1"},
-		{"deny: device id for a code", http.MethodDelete, requests + "/abcd-efgh-ijkl-mnop"},
 		{"deny: resource id with a dot", http.MethodDelete, base + "/v1/resources/bad.id/access-requests/012345"},
+
+		// Deny by the device id a listing shows.
+		{"deny by device: trailing slash", http.MethodDelete, requests + "/abcd-efgh-ijkl-mnop/"},
+		{"deny by device: extra segment", http.MethodDelete, requests + "/abcd-efgh-ijkl-mnop/extra"},
+		{"deny by device: delete the approval", http.MethodDelete, requests + "/abcd-efgh-ijkl-mnop/approve"},
+		{"deny by device: query", http.MethodDelete, requests + "/abcd-efgh-ijkl-mnop?x=1"},
+		{"deny by device: empty query", http.MethodDelete, requests + "/abcd-efgh-ijkl-mnop?"},
+		{"deny by device: upper case", http.MethodDelete, requests + "/ABCD-EFGH-IJKL-MNOP"},
+		{"deny by device: one upper case letter", http.MethodDelete, requests + "/abcd-efgh-ijkl-mnoP"},
+		{"deny by device: digit 0", http.MethodDelete, requests + "/abcd-efgh-ijkl-mno0"},
+		{"deny by device: digit 1", http.MethodDelete, requests + "/abcd-efgh-ijkl-mno1"},
+		{"deny by device: digit 8", http.MethodDelete, requests + "/abcd-efgh-ijkl-mno8"},
+		{"deny by device: digit 9", http.MethodDelete, requests + "/abcd-efgh-ijkl-mno9"},
+		{"deny by device: short last group", http.MethodDelete, requests + "/abcd-efgh-ijkl-mno"},
+		{"deny by device: long last group", http.MethodDelete, requests + "/abcd-efgh-ijkl-mnopq"},
+		{"deny by device: short first group, long second", http.MethodDelete, requests + "/abc-defgh-ijkl-mnop"},
+		{"deny by device: three groups", http.MethodDelete, requests + "/abcd-efgh-ijkl"},
+		{"deny by device: five groups", http.MethodDelete, requests + "/abcd-efgh-ijkl-mnop-qrst"},
+		{"deny by device: no hyphens", http.MethodDelete, requests + "/abcdefghijklmnop"},
+		{"deny by device: nineteen letters", http.MethodDelete, requests + "/abcdefghijklmnopqrs"},
+		{"deny by device: nineteen digits", http.MethodDelete, requests + "/2345672345672345672"},
+		{"deny by device: nineteen characters of the sibling id shape", http.MethodDelete, requests + "/at_link-1_at_link-1"},
+		{"deny by device: a code joined to groups, nineteen characters", http.MethodDelete, requests + "/234567-abcd-efgh-ij"},
+		{"deny by device: underscores", http.MethodDelete, requests + "/abcd_efgh_ijkl_mnop"},
+		{"deny by device: hyphen in a group", http.MethodDelete, requests + "/abcd-efgh-ijkl-mn-p"},
+		{"deny by device: doubled hyphen", http.MethodDelete, requests + "/abcd--fgh-ijkl-mnop"},
+		{"deny by device: padding", http.MethodDelete, requests + "/abcd-efgh-ijkl-mno="},
+		{"deny by device: escaped letter", http.MethodDelete, requests + "/abcd-efgh-ijkl-mno%70"},
+		{"deny by device: with no resource", http.MethodDelete, base + "/v1/access-requests/abcd-efgh-ijkl-mnop"},
+		{"deny by device: resource id with a dot", http.MethodDelete, base + "/v1/resources/bad.id/access-requests/abcd-efgh-ijkl-mnop"},
 
 		// Remove an approved device.
 		{"device: list", http.MethodGet, passkeys},
@@ -501,6 +542,10 @@ func TestRegisteredAgentResourceHTTPDoer_AccessRouteNearMissesAreRefused(t *test
 		{"approve: newline in the code", http.MethodPost, "/v1/resources/qcrid/access-requests/12345\n/approve"},
 		{"deny: fullwidth digits, six bytes", http.MethodDelete, "/v1/resources/qcrid/access-requests/１２"},
 		{"deny: NUL in the code", http.MethodDelete, "/v1/resources/qcrid/access-requests/12345\x00"},
+		{"deny by device: accented letter, nineteen bytes", http.MethodDelete, "/v1/resources/qcrid/access-requests/abcd-efgh-ijkl-mn\u00f6"},
+		{"deny by device: non-breaking hyphens", http.MethodDelete, "/v1/resources/qcrid/access-requests/abcd\u2011efgh\u2011ijkl\u2011mnop"},
+		{"deny by device: space for a letter", http.MethodDelete, "/v1/resources/qcrid/access-requests/abcd-efgh-ijkl-mno "},
+		{"approve: device id with a space for a letter", http.MethodPost, "/v1/resources/qcrid/access-requests/abcd-efgh-ijkl-mno /approve"},
 		{"device: accented letter, nineteen bytes", http.MethodDelete, "/v1/resources/qcrid/allowed-passkeys/abcd-efgh-ijkl-mnö"},
 		{"device: non-breaking hyphens", http.MethodDelete, "/v1/resources/qcrid/allowed-passkeys/abcd‑efgh‑ijkl‑mnop"},
 		{"device: space for a letter", http.MethodDelete, "/v1/resources/qcrid/allowed-passkeys/abcd-efgh-ijkl-mno "},
@@ -605,6 +650,100 @@ func TestRegisteredAgentPasskeyDeviceIDIsExactlyTheDisplayedForm(t *testing.T) {
 	} {
 		if registeredAgentPasskeyDeviceIDAllowed(id) {
 			t.Errorf("device id %q allowed, want refused", id)
+		}
+	}
+}
+
+// A waiting request is refused by its code or by the device id a listing
+// shows; it is approved by its code only. The route check is asked directly,
+// with every single-byte change to each accepted shape and every nearby
+// length, so the accepted set of each route is pinned from both sides.
+func TestRegisteredAgentAccessRequestRoutesTakeTheirOwnShapesOnly(t *testing.T) {
+	t.Parallel()
+
+	const (
+		prefix   = "/v1/resources/qcrid/access-requests/"
+		code     = "012345"
+		deviceID = "abcd-efgh-ijkl-mnop"
+	)
+	deny := func(segment string) bool {
+		return registeredAgentResourceRouteAllowed(http.MethodDelete, prefix+segment)
+	}
+	approve := func(segment string) bool {
+		return registeredAgentResourceRouteAllowed(http.MethodPost, prefix+segment+"/approve")
+	}
+
+	if !deny(code) || !deny(deviceID) {
+		t.Fatalf("deny by code = %t, by device id = %t; want both allowed", deny(code), deny(deviceID))
+	}
+	if !approve(code) {
+		t.Fatal("approve by code refused, want allowed")
+	}
+	if approve(deviceID) {
+		t.Fatal("approve accepted a device id; approval takes a code only")
+	}
+
+	for position := range len(code) {
+		for b := range 256 {
+			mutated := []byte(code)
+			mutated[position] = byte(b)
+			want := b >= '0' && b <= '9'
+			if got := deny(string(mutated)); got != want {
+				t.Errorf("deny: code with byte 0x%02x at position %d allowed = %t, want %t", b, position, got, want)
+			}
+			if got := approve(string(mutated)); got != want {
+				t.Errorf("approve: code with byte 0x%02x at position %d allowed = %t, want %t", b, position, got, want)
+			}
+		}
+	}
+	for position := range len(deviceID) {
+		for b := range 256 {
+			mutated := []byte(deviceID)
+			mutated[position] = byte(b)
+			var want bool
+			if deviceID[position] == '-' {
+				want = b == '-'
+			} else {
+				want = (b >= 'a' && b <= 'z') || (b >= '2' && b <= '7')
+			}
+			if got := deny(string(mutated)); got != want {
+				t.Errorf("deny: device id with byte 0x%02x at position %d allowed = %t, want %t", b, position, got, want)
+			}
+			if approve(string(mutated)) {
+				t.Errorf("approve accepted a device id with byte 0x%02x at position %d", b, position)
+			}
+		}
+	}
+
+	// Length alone never qualifies a segment. "7" is both a digit and a base32
+	// character, so a run of them is the hardest case for either shape.
+	for length := range 26 {
+		sevens := strings.Repeat("7", length)
+		if got, want := deny(sevens), length == len(code); got != want {
+			t.Errorf("deny: %d sevens allowed = %t, want %t", length, got, want)
+		}
+		if got, want := approve(sevens), length == len(code); got != want {
+			t.Errorf("approve: %d sevens allowed = %t, want %t", length, got, want)
+		}
+		letters := strings.Repeat("a", length)
+		if deny(letters) || approve(letters) {
+			t.Errorf("%d letters allowed: deny = %t, approve = %t", length, deny(letters), approve(letters))
+		}
+		grouped := (deviceID + "-qrst-")[:length]
+		if got, want := deny(grouped), len(grouped) == len(deviceID); got != want {
+			t.Errorf("deny: %q allowed = %t, want %t", grouped, got, want)
+		}
+		if approve(grouped) {
+			t.Errorf("approve accepted %q", grouped)
+		}
+	}
+
+	// Neither shape is accepted with another method on the refusal route.
+	for _, method := range []string{http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch} {
+		for _, segment := range []string{code, deviceID} {
+			if registeredAgentResourceRouteAllowed(method, prefix+segment) {
+				t.Errorf("%s %s%s allowed, want refused", method, prefix, segment)
+			}
 		}
 	}
 }

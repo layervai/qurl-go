@@ -42,14 +42,17 @@ var ErrRegisteredAgentResourceRequestDenied = errors.New("qurl: registered-agent
 //   - GET /v1/access-requests lists the waiting requests for all of the owner's
 //     resources, and GET /v1/resources/{id}/access-requests for one resource.
 //   - POST /v1/resources/{id}/access-requests/{code}/approve approves one
-//     request, and DELETE /v1/resources/{id}/access-requests/{code} denies it.
+//     request. Approval takes the request's code and nothing else.
+//   - DELETE /v1/resources/{id}/access-requests/{code} refuses one request, and
+//     so does DELETE /v1/resources/{id}/access-requests/{device_id}, which
+//     names the request by the device that made it, as a listing shows it.
 //   - DELETE /v1/resources/{id}/allowed-passkeys/{device_id} removes a device
 //     that was approved earlier.
 //
-// {code} is the request's code, exactly six ASCII digits. {device_id} is the
-// approved device's identifier as it is shown: four groups of four lowercase
-// base32 characters (a to z, 2 to 7) joined by hyphens. A segment of any other
-// shape is refused like any other route outside this list.
+// {code} is the request's code, exactly six ASCII digits. {device_id} is a
+// device's identifier as it is shown: four groups of four lowercase base32
+// characters (a to z, 2 to 7) joined by hyphens. A segment of any other shape
+// is refused like any other route outside this list.
 //
 // The bridge also requires the Client's exact API origin and path prefix. The
 // caller's request is never mutated, and the device Authorization header is
@@ -191,13 +194,17 @@ func registeredAgentResourceRouteAllowed(method, path string) bool {
 		case "sessions":
 			return registeredAgentResourceIDAllowed(segments[2]) && method == http.MethodDelete
 		case "access-requests":
-			return registeredAgentAccessRequestCodeAllowed(segments[2]) && method == http.MethodDelete
+			// A waiting request is refused by its code or by the identifier of
+			// the device that made it. The two shapes share no string: one is
+			// six bytes and the other nineteen.
+			return (registeredAgentAccessRequestCodeAllowed(segments[2]) ||
+				registeredAgentPasskeyDeviceIDAllowed(segments[2])) && method == http.MethodDelete
 		case "allowed-passkeys":
 			return registeredAgentPasskeyDeviceIDAllowed(segments[2]) && method == http.MethodDelete
 		}
 	case 4:
 		// The only four-segment route. Approval is a POST on the request's own
-		// code; nothing else nests this deep.
+		// code, never on a device identifier; nothing else nests this deep.
 		return segments[1] == "access-requests" && registeredAgentAccessRequestCodeAllowed(segments[2]) &&
 			segments[3] == "approve" && method == http.MethodPost
 	}
