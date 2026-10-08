@@ -14,9 +14,11 @@ validate_ref() {
 case "${CLAUDE_REVIEW_MODE}" in
   automatic)
     marker="${EXPECTED_REVIEW_MARKER}"
+    snapshot_namespace="refs/automatic-review"
     ;;
   interactive)
     marker="${EXPECTED_RESULT_MARKER}"
+    snapshot_namespace="refs/claude-command"
     if [[ -z "${EXPECTED_TRIGGER_ACTOR}" ]]; then
       echo "::error::Claude command has no trigger actor."
       exit 1
@@ -40,22 +42,110 @@ if [[ -z "${CLAUDE_EXECUTION_FILE}" || ! -f "${CLAUDE_EXECUTION_FILE}" || ! -s "
   exit 1
 fi
 
+if [[ -z "${GITHUB_SERVER_URL:-}" || -z "${GITHUB_REPOSITORY:-}" ]]; then
+  echo "::error::Runner-provided origin comparison targets are unavailable."
+  exit 1
+fi
+
+if git config --local --get-regexp '^http\..*\.extraheader$' >/dev/null 2>&1 ||
+   git config --local --get-regexp '^credential(\..*)?\.helper$' >/dev/null 2>&1; then
+  echo "::error::The Claude run left a Git credential header or helper in the workspace."
+  exit 1
+fi
+
+# The remote SET stays pinned: exactly one remote, named origin, with exactly
+# one URL key and no pushurl. The URL itself is checked by destination below.
 remote_keys="$(git config --local --name-only --get-regexp '^remote\..*\.(url|pushurl)$' || true)"
-if [[ "$(git remote)" != "origin" ||
-      "${remote_keys}" != "remote.origin.url" ||
-      "$(git remote get-url --all origin 2>/dev/null)" != "${EXPECTED_ORIGIN}" ||
-      "$(git remote get-url --push --all origin 2>/dev/null)" != "${EXPECTED_ORIGIN}" ||
-      "$(git config --local --get-all fetch.recurseSubmodules 2>/dev/null)" != "false" ||
-      "$(git rev-parse --verify HEAD 2>/dev/null)" != "${EXPECTED_LOCAL_SHA}" ||
+if [[ "$(git remote)" != "origin" || "${remote_keys}" != "remote.origin.url" ]]; then
+  echo "::error::The Claude run added, removed, or reshaped a Git remote."
+  exit 1
+fi
+
+# From v1.0.187 the action replaces origin, before the model's first token,
+# with https://x-access-token:<token>@<server>/<owner>/<repo>.git, so the local
+# pin no longer survives a run and asserting it would test the action's
+# version, not what happened in the run. The property the pin carried is that
+# origin addresses nothing but this repository; that is what is asserted here.
+#
+# origin_destination prints <scheme>://<host><path> with userinfo removed, or
+# fails. The authority is everything up to the first "/", and userinfo is
+# everything in it through the LAST "@": stripping to the first "@" of the
+# whole URL would turn https://evil.example/@github.com/o/r.git into the
+# allowed destination. Host and userinfo are then held to allowlists, because
+# a URL client ends the host at "#", "?" or "\" as well: without that,
+# https://evil.example#@github.com/o/r.git parses here as host github.com
+# while git connects to evil.example. A shape outside the allowlists (an IPv6
+# literal host, userinfo with other punctuation) fails closed.
+origin_destination() {
+  local url="$1" scheme rest authority host userinfo
+  [[ "${url}" == *://* ]] || return 1
+  scheme="${url%%://*}"
+  rest="${url#*://}"
+  authority="${rest%%/*}"
+  host="${authority##*@}"
+  if [[ "${authority}" == *@* ]]; then
+    userinfo="${authority%@*}"
+    [[ "${userinfo}" =~ ^[A-Za-z0-9._~%:_-]+$ ]] || return 1
+  fi
+  [[ "${scheme}" =~ ^[A-Za-z][A-Za-z0-9+.-]*$ &&
+     "${host}" =~ ^[A-Za-z0-9.-]+(:[0-9]+)?$ ]] || return 1
+  printf '%s://%s%s' "${scheme}" "${host}" "${rest#"${authority}"}"
+}
+
+lowercase() {
+  printf '%s' "$1" | LC_ALL=C tr '[:upper:]' '[:lower:]'
+}
+
+# With or without ".git": both address the same repository. Owner, repository,
+# and host names are case-insensitive on GitHub, so folding case cannot admit
+# a different repository. `git remote get-url` applies url.*.insteadOf, so the
+# value compared is the one Git would connect to.
+repository_origin="$(lowercase "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}")"
+if ! origin_fetch_url="$(git remote get-url --all origin 2>/dev/null)" ||
+   ! origin_push_url="$(git remote get-url --push --all origin 2>/dev/null)"; then
+  echo "::error::Unable to read the origin after the Claude run."
+  exit 1
+fi
+for origin_candidate in "${origin_fetch_url}" "${origin_push_url}"; do
+  # Never print origin_candidate: it may carry the token.
+  if [[ -z "${origin_candidate}" || "${origin_candidate}" == *$'\n'* ]]; then
+    echo "::error::Origin does not have exactly one fetch and one push URL."
+    exit 1
+  fi
+  if [[ "${origin_candidate}" == "${EXPECTED_ORIGIN}" ]]; then
+    continue
+  fi
+  if ! origin_dest="$(origin_destination "${origin_candidate}")"; then
+    echo "::error::Origin is neither the local snapshot nor a recognizable URL of this repository."
+    exit 1
+  fi
+  origin_dest="$(lowercase "${origin_dest}")"
+  if [[ "${origin_dest}" != "${repository_origin}.git" &&
+        "${origin_dest}" != "${repository_origin}" ]]; then
+    echo "::error::Origin moved off this repository: got '${origin_dest}', want '${repository_origin}' (with or without .git) or the local snapshot."
+    exit 1
+  fi
+done
+
+if [[ "$(git config --local --get-all fetch.recurseSubmodules 2>/dev/null)" != "false" ]]; then
+  echo "::error::The Claude run changed the submodule-safe fetch configuration."
+  exit 1
+fi
+
+# refs/remotes/origin/* is deliberately absent: the action's own base-branch
+# fetch may advance it when the base branch moves during a run. The snapshots
+# are held by the local bare origin (which the action never addresses once it
+# has re-pointed origin), the workspace branches, and the workflow-owned refs
+# written by prepare-claude-origin.sh. A base branch that did move is caught
+# by the live pull request comparison below.
+if [[ "$(git rev-parse --verify HEAD 2>/dev/null)" != "${EXPECTED_LOCAL_SHA}" ||
       "$(git --git-dir="${EXPECTED_ORIGIN}" rev-parse --verify "refs/heads/${EXPECTED_HEAD_REF}" 2>/dev/null)" != "${EXPECTED_HEAD_SHA}" ||
       "$(git --git-dir="${EXPECTED_ORIGIN}" rev-parse --verify "refs/heads/${EXPECTED_BASE_REF}" 2>/dev/null)" != "${EXPECTED_BASE_SHA}" ||
       "$(git rev-parse --verify "refs/heads/${EXPECTED_HEAD_REF}" 2>/dev/null)" != "${EXPECTED_HEAD_SHA}" ||
       "$(git rev-parse --verify "refs/heads/${EXPECTED_BASE_REF}" 2>/dev/null)" != "${EXPECTED_BASE_SHA}" ||
-      "$(git rev-parse --verify "refs/remotes/origin/${EXPECTED_HEAD_REF}" 2>/dev/null)" != "${EXPECTED_HEAD_SHA}" ||
-      "$(git rev-parse --verify "refs/remotes/origin/${EXPECTED_BASE_REF}" 2>/dev/null)" != "${EXPECTED_BASE_SHA}" ]] ||
-   git config --local --get-regexp '^http\..*\.extraheader$' >/dev/null 2>&1 ||
-   git config --local --get-regexp '^credential(\..*)?\.helper$' >/dev/null 2>&1; then
-  echo "::error::Claude changed the credential-free origin."
+      "$(git rev-parse --verify "${snapshot_namespace}/head" 2>/dev/null)" != "${EXPECTED_HEAD_SHA}" ||
+      "$(git rev-parse --verify "${snapshot_namespace}/base" 2>/dev/null)" != "${EXPECTED_BASE_SHA}" ]]; then
+  echo "::error::The Claude run changed the authorized local snapshots."
   exit 1
 fi
 

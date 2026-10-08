@@ -62,7 +62,7 @@ jobs:
           EXPECTED_TRUSTED_SHA: ${{ github.sha }}
         run: bash .github/scripts/resolve-claude-pr.sh
 
-      - name: Prepare credential-free review origin
+      - name: Prepare local snapshot review origin
         id: review_origin
         if: steps.checkout.outcome == 'success'
         env:
@@ -84,19 +84,28 @@ jobs:
       - name: Run Claude Code Review
         id: claude_review
         if: steps.review_origin.outputs.ready == 'true'
-        # v1.0.183 fails when the SDK returns `is_error: true` and is the last
-        # audited release whose API-signing path leaves origin credential-free.
+        # Hand-audited pin; .github/dependabot.yml holds it. Opus 5.5 needs the
+        # Claude Code release this version bundles. From v1.0.187 the action
+        # replaces the local snapshot origin, before the model's first token,
+        # with a token-bearing URL of this repository and fetches the base
+        # branch through it, so origin is not credential-free during the run.
+        # The verify step asserts origin's destination and the workflow-owned
+        # refs/automatic-review/* snapshots instead of an exact origin URL.
+        # The action fails this step when the SDK returns `is_error: true`.
         # Under the job cap on purpose: an overrun fails this step and leaves
         # the job alive to report it. A kill at the JOB cap cancels every later
         # step, so the verify step never runs and the PR gets a bare
         # `cancelled` check with no comment and nothing saying why.
         timeout-minutes: 10
-        uses: anthropics/claude-code-action@be7b93b1907a4abad570368f3c74b6fe3807510b # v1.0.183
+        uses: anthropics/claude-code-action@12dd8d74c712f5f3669365b2369b558c495b1104 # v1.0.238
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ github.token }}
-          # Agent mode otherwise rewrites origin with this token. At the audited
-          # pin, API-signing skips that path; repository-write tools remain denied.
+          # From v1.0.187 the action writes this token into the workspace's
+          # .git/config as the origin URL on the API-signing path too. The model
+          # has no shell, file, or network tool to read or use it (deny list
+          # below), the job token is contents:read, and the verify step proves
+          # origin addresses only this repository.
           use_commit_signing: true
           classify_inline_comments: false
           prompt: |
@@ -144,8 +153,12 @@ jobs:
           # Reads go only through the action's GitHub MCP subprocess, which holds
           # the repository token but not the Anthropic key. Local, network,
           # delegation, and GitHub file-write tools stay denied.
+          #
+          # Review model setting: Opus 5.5 at medium effort. Keep the model and
+          # effort identical in claude.yml; change both together.
           claude_args: >-
-            --model claude-opus-5
+            --model claude-opus-5-5
+            --effort medium
             --disallowed-tools
             "Bash,Read,Glob,Grep,LS,Task,Edit,Write,MultiEdit,NotebookEdit,WebFetch,WebSearch,mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files,mcp__github__create_or_update_file,mcp__github__push_files,mcp__github__delete_file"
             --allowed-tools
