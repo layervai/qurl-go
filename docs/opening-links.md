@@ -315,6 +315,10 @@ Whether a CRID can be opened this way is the server's decision. A client that
 may not open it gets `ErrCRIDLinkNotFound`, the same answer as for a CRID that
 does not exist.
 
+A public resource can be opened by any client that holds its CRID. A private
+resource can be opened by a registered device, with `OpenCRIDAsDevice`; see
+[Open a private resource](#open-a-private-resource).
+
 ### What is checked
 
 The link in step 1 arrives from the network, so the SDK uses it only after
@@ -405,6 +409,11 @@ reply is authenticated to the cell's key, so a relay can delay or drop a
 request but cannot forge a link. An answer that does not authenticate is an
 error and is never read. The open in step 2 uses native UDP to the
 deployment's cell.
+
+The calls made as a device, `OpenCRIDAsDevice` and `RequestCRIDLinkAsDevice`
+and their `With` forms, may send a second request, under the device key. It
+goes through the same relay and is authenticated the same way. See
+[Open a private resource](#open-a-private-resource).
 
 A busy server answers with a cookie instead of a link. The SDK reports that as
 `ErrServerOverloaded` and does not answer the cookie; try again later.
@@ -514,6 +523,109 @@ a `Config.PortalSession` cannot carry a visit across two `OpenCRIDWith` calls.
 To retry one visit, request the link once with `RequestCRIDLinkWith` and retry
 `EnterPortalWith` with that link and the retained session, as described under
 [Retry a Visit](#retry-a-visit).
+
+### Open a private resource
+
+A resource is private or public; see
+[Private and public resources](issuing-links.md#private-and-public-resources).
+A private resource can be opened by CRID only by:
+
+- a registered device that the owner of the resource allowed, or
+- the owner's own registered device.
+
+Every other client gets `ErrCRIDLinkNotFound`, the same answer as for a CRID
+that does not exist. That includes every call that is not made as a device.
+
+A registered device calls `OpenCRIDAsDevice` and passes its device key. The key
+is the device's 32-byte X25519 static private key, the key
+`KnockRegisteredAgent` takes:
+
+```go
+// binding is the *qurl.AgentRuntimeBinding of the registered device.
+devicePrivateKey := binding.TakeDeviceStaticPrivateKey()
+defer clear(devicePrivateKey)
+
+handle, err := qurl.OpenCRIDAsDevice(ctx, devicePrivateKey, resourceCRID)
+```
+
+`OpenCRIDAsDevice` resolves its configuration as `OpenCRID` does, so it needs
+a deployment that names a `crid_link`; see [Configuration](#configuration).
+The device key is an argument of the call and is never part of the
+configuration.
+
+There are four calls, in the same pairs as the calls that take no device key:
+
+| Call | Like | Configuration |
+| --- | --- | --- |
+| `OpenCRIDAsDevice` | `OpenCRID` | Resolved by the SDK |
+| `OpenCRIDAsDeviceWith` | `OpenCRIDWith` | An explicit `qurl.Config` |
+| `RequestCRIDLinkAsDevice` | `RequestCRIDLink` | Resolved by the SDK |
+| `RequestCRIDLinkAsDeviceWith` | `RequestCRIDLinkWith` | An explicit `qurl.Config` |
+
+The `RequestCRIDLink` calls do the first step only and return the link. A
+`With` call takes the configuration as its last argument:
+
+```go
+cfg := qurl.Config{
+	TrustStore:     trustStore,
+	Cells:          cells, // exactly one cell
+	RelayAllowlist: qurl.NewRelayAllowlist([]string{relayHost}),
+	CRIDLink: &qurl.CRIDLinkConfig{
+		RelayURL:   "https://" + relayHost,
+		LinkOrigin: linkOrigin,
+	},
+}
+handle, err := qurl.OpenCRIDAsDeviceWith(ctx, devicePrivateKey, resourceCRID, cfg)
+```
+
+All four follow one rule: a random key first, the device key only after
+"not found".
+
+1. **The first request never carries the device key.** It is the request
+   `OpenCRIDWith` sends, under a random key. A device that opens a public
+   resource is answered here, so the request cannot be linked to the device.
+2. **The device key is used only after "not found".** Only when the server
+   answers the first request with "not found" does the SDK send one second
+   request, under the device key. The answer to the second request is the
+   result. There is no third request.
+3. **Nothing else leads to a second request.** Any other outcome of the first
+   request is returned as it is: a link, another refusal, a busy server, a
+   reply that is not usable, a link that fails a check, a relay error, or no
+   answer. The device key is then not used, so a temporary fault never makes
+   the device identify itself.
+
+`OpenCRID`, `OpenCRIDWith`, `RequestCRIDLink` and `RequestCRIDLinkWith` take no
+device key. They send exactly one request, as before.
+
+What the second request costs:
+
+- It is a real request to the server. It counts against the server's
+  per-source request limit, and it can be answered with
+  `ErrCRIDLinkRateLimited`. For a device call, every "not found" answer costs
+  two requests, not one.
+- It tells the server which device asked for that CRID.
+
+One context covers both requests. When the context has ended by the time the
+first request is answered "not found", the second request is not sent. The
+error then matches the context's error (`context.DeadlineExceeded` or
+`context.Canceled`). It does **not** match `ErrCRIDLinkNotFound`: the device
+never asked, so it is not known whether the device may open the CRID. Try
+again with more time.
+
+A link from the second request goes through every check under
+[What is checked](#what-is-checked). The open that follows uses the link's own
+key, not the device key.
+
+The device key stays yours:
+
+- The SDK does not keep it and does not wipe it. Do not change or wipe it
+  while a call is running. Wipe it when you no longer need it.
+- The SDK uses it as the static key of that one request and for nothing else.
+  It is never logged and never part of an error.
+- A key that is not 32 bytes, or that holds only zero bytes as a wiped key
+  does, is refused with `ErrInvalidResourceRequest` before the CRID or the
+  configuration is looked at, and before anything is sent. The calls that
+  resolve their configuration refuse it before they resolve anything.
 
 ### Ask whether the request is offered
 
@@ -629,7 +741,8 @@ would stand.
 | `Config` | The `qurl.Config` for `RequestCRIDLinkWith`. Its HTTP client is the server |
 | `Refuse` | Answers every request with one refusal code: one of the six in the [error table](../README.md#error-handling), or any other decimal code |
 | `Issue` | Returns to the default after `Refuse` |
-| `Requests` | The requests the server read as CRID link requests: the CRID and the user agent of each. A request it could not open, or refused with `52606` as not a CRID link request, is not in the list |
+| `PrivateFor` | Makes the resource private: the server issues the link only to a request sent under the device key whose public key it is given, and answers every other request with `ErrCRIDLinkNotFound`. For tests of the calls made as a device |
+| `Requests` | The requests the server read as CRID link requests: the CRID and the user agent of each, and whether it was sent under the device key `PrivateFor` allowed. A request it could not open, or refused with `52606` as not a CRID link request, is not in the list |
 | `Deployment` | The same configuration as a `qurl.Deployment`, for code that reads `QURL_DEPLOYMENT`. Give that code `Client` as its HTTP client |
 
 Three limits:

@@ -8,6 +8,38 @@ and are marked **Breaking** with what to change.
 
 ## Unreleased
 
+- A registered device can open a private resource by CRID, with four new
+  calls: `OpenCRIDAsDevice` and `RequestCRIDLinkAsDevice`, which resolve their
+  configuration as `OpenCRID` and `RequestCRIDLink` do, and
+  `OpenCRIDAsDeviceWith` and `RequestCRIDLinkAsDeviceWith`, which take an
+  explicit `Config`. Each is the call it is named after with one more
+  argument, the device's 32-byte X25519 static private key, the key
+  `KnockRegisteredAgent` takes. A private resource can be opened by CRID only
+  by a registered device that the owner allowed, or by the owner's own
+  device. Every other client still gets `ErrCRIDLinkNotFound`.
+  - The first request never carries the device key. It is the request
+    `RequestCRIDLinkWith` sends, under a random key, so a request for a public
+    resource cannot be linked to the device. Only when it is answered
+    "not found" does the SDK send one second request, under the device key,
+    and that answer is the result. Every other outcome of the first request is
+    returned as it is.
+  - The second request is a real request to the server and counts against its
+    per-source request limit.
+  - One context covers both requests. When it has ended by the time the first
+    request is answered "not found", the second request is not sent. The
+    error then matches the context's error and does not match
+    `ErrCRIDLinkNotFound`.
+  - The key stays owned by the caller. The SDK does not keep or wipe it, and
+    never logs it or puts it in an error. A key that is not 32 bytes, or that
+    holds only zero bytes, is `ErrInvalidResourceRequest` before anything is
+    sent and before any configuration is resolved.
+  - `OpenCRID`, `OpenCRIDWith`, `RequestCRIDLink` and `RequestCRIDLinkWith`
+    are unchanged. They take no device key and send exactly one request.
+  - `qurltest.CRIDLinkServer` gains `PrivateFor`, which makes its resource
+    private for one device key, and `CRIDLinkRequest` gains `AsDevice`. With
+    them a test can drive the new calls in process.
+  - Matching server support is required.
+
 - `WithPrivate` states the privacy of a resource a call creates. It is accepted
   by every call that can create one: `ProtectURL` and `CreateResource`,
   `CreatePortalForURL`, and the new `EnsureConnectorResourceWithOptions`

@@ -43,6 +43,18 @@ var frictionBudget = map[string]int{
 	// opening: name the CRID, request, print the publisher, open, print. The
 	// extra statements are the display step, not setup.
 	"ExampleRequestCRIDLink": 5,
+	// Open a resource by CRID as a registered device: take the device key,
+	// clear it afterwards, open, print. The key and its cleanup are the two
+	// statements this adds to ExampleOpenCRID, and they are the caller's on
+	// purpose: the SDK does not keep or wipe a key it was lent. Everything
+	// else is the SDK's work, the configuration included.
+	"ExampleOpenCRIDAsDevice": 4,
+	// The same open with explicit configuration. The four statements it adds
+	// are the configuration: read the issuer's public key, build trust, name
+	// the one cell, and put them together with the relay and the link origin.
+	// That is twice the default form, which is why the default form exists.
+	// Do not lower this number by hiding the configuration in a helper.
+	"ExampleOpenCRIDAsDeviceWith": 8,
 	// Ask whether a CRID link request can be sent at all, before there is a
 	// CRID: one call and one switch over its answer.
 	"ExampleCheckCRIDLinkConfig": 2,

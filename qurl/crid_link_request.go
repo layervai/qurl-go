@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/layervai/qurl-go/crid"
+	"github.com/layervai/qurl-go/internal/x25519key"
 	"github.com/layervai/qurl-go/relayknock"
 )
 
@@ -36,6 +37,12 @@ import (
 // Step 1 always goes through the relay, also when the configuration opens
 // links over native UDP. That is the v1 contract: direct UDP is not a
 // transport for this request.
+//
+// Step 1 is one request. Only the calls made as a device can make it two:
+// RequestCRIDLinkAsDevice, OpenCRIDAsDevice, and their With forms. They do so
+// only when the server answers the first request with "not found": the second
+// request is the same request, sent under the caller's device key. See
+// RequestCRIDLinkAsDeviceWith.
 
 // CRIDLink is a qURL link the server issued for a CRID, returned only after
 // every client check on it has passed: it is on the deployment's link origin,
@@ -269,7 +276,140 @@ func RequestCRIDLink(ctx context.Context, resourceCRID string) (*CRIDLink, error
 // Config.ExpectedCRID, when set, must be the CRID being requested. The
 // requested CRID is what an issued link is bound to, so a different pin is a
 // contradiction and fails with ErrCRIDMismatch rather than being overridden.
+//
+// It sends one request, under a key minted for that request. To request a
+// link as a registered device, which can open a private resource too, use
+// RequestCRIDLinkAsDeviceWith.
 func RequestCRIDLinkWith(ctx context.Context, resourceCRID string, cfg Config) (*CRIDLink, error) {
+	return requestCRIDLink(ctx, resourceCRID, cfg, nil)
+}
+
+// RequestCRIDLinkAsDevice is RequestCRIDLink for a registered device. It can
+// return a link for a private resource too, when the owner of the resource
+// allowed the device or the device is the owner's own.
+// deviceStaticPrivateKey is the device's 32-byte X25519 static private key,
+// the key KnockRegisteredAgent takes.
+//
+// It resolves configuration as RequestCRIDLink does, and what RequestCRIDLink
+// says about that holds here: the CRID link endpoint comes only from a
+// deployment's "crid_link" object, and a configuration without one is
+// ErrCRIDLinkNotConfigured. Then it calls RequestCRIDLinkAsDeviceWith. Read
+// RequestCRIDLinkAsDeviceWith for the rule the call follows: a random key
+// first, the device key only after "not found". It also says what the second
+// request costs, how the context covers both requests, and who owns the key.
+//
+// A key that cannot be used is refused first, and a CRID that cannot be
+// requested second. Both are refused before any configuration is resolved, so
+// neither costs any I/O.
+func RequestCRIDLinkAsDevice(ctx context.Context, deviceStaticPrivateKey []byte, resourceCRID string) (*CRIDLink, error) {
+	// The key gate comes before everything else, as in the With form: a bad
+	// key gets the same error whatever the CRID and the configuration are.
+	if err := validateCRIDLinkDeviceKey(deviceStaticPrivateKey); err != nil {
+		return nil, err
+	}
+	// Before resolveDefaultConfig: a Provider may do network I/O, and a CRID
+	// that can never be requested must not cost a round trip to find that out.
+	if err := validateCRIDForLinkRequest(resourceCRID); err != nil {
+		return nil, err
+	}
+	cfg, err := resolveDefaultConfig(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return RequestCRIDLinkAsDeviceWith(ctx, deviceStaticPrivateKey, resourceCRID, cfg)
+}
+
+// RequestCRIDLinkAsDeviceWith is RequestCRIDLinkAsDevice with explicit
+// configuration: RequestCRIDLinkWith for a registered device. It can return a
+// link for a private resource too. deviceStaticPrivateKey is the device's
+// 32-byte X25519 static private key, the key KnockRegisteredAgent takes. cfg
+// is what RequestCRIDLinkWith needs.
+//
+// A private resource can be opened by CRID only by a registered device that
+// the owner of the resource allowed, or by the owner's own device. Every other
+// client gets ErrCRIDLinkNotFound, the same answer as for a CRID that does not
+// exist.
+//
+// The call follows one rule: a random key first, the device key only after
+// "not found".
+//
+//  1. The first request is the request RequestCRIDLinkWith sends. It is sent
+//     under a random key and never carries the device key. A public resource
+//     is answered here, so a request for a public resource cannot be linked to
+//     the device.
+//  2. Only when the server answers the first request with "not found" does the
+//     call send one second request, with the device key as the static key of
+//     the knock. The answer to the second request is the result of the call: a
+//     link, checked exactly as any issued link, or an error. "Not found" there
+//     is ErrCRIDLinkNotFound. There is no third request.
+//  3. Any other outcome of the first request is returned as it is: a link,
+//     another refusal, a busy server, a reply that is not usable, a link that
+//     fails a check, a relay fault, or a request that got no answer. None of
+//     these leads to a second request, so a temporary fault never makes the
+//     device identify itself.
+//
+// The second request is a real request to the server. It counts against the
+// server's per-source request limit like the first one, and it can itself be
+// answered with ErrCRIDLinkRateLimited. It also tells the server which device
+// asked for this CRID.
+//
+// The caller's context covers both requests. When it has ended by the time
+// the first request is answered "not found", the second request is not sent.
+// The error then matches the context's error and does not match
+// ErrCRIDLinkNotFound: the device never asked, so it is not known whether the
+// device may open the CRID.
+//
+// The key stays owned by the caller. The SDK does not keep it and does not
+// wipe it. It uses the key only as the static key of that one knock, never
+// logs it, and never puts it in an error. Do not change or wipe the key while
+// the call is running. A key that is not 32 bytes, or that holds only zero
+// bytes as a wiped key does, is refused before the CRID or the configuration
+// is looked at and before anything is sent. That error matches
+// ErrInvalidResourceRequest, as the error for a CRID that fails the local
+// gate does.
+func RequestCRIDLinkAsDeviceWith(ctx context.Context, deviceStaticPrivateKey []byte, resourceCRID string, cfg Config) (*CRIDLink, error) {
+	if err := validateCRIDLinkDeviceKey(deviceStaticPrivateKey); err != nil {
+		return nil, err
+	}
+	return requestCRIDLink(ctx, resourceCRID, cfg, deviceStaticPrivateKey)
+}
+
+// validateCRIDLinkDeviceKey is the gate a device key passes before a link is
+// requested as that device. It needs no I/O.
+//
+// The gate is here, in front of everything, and not where the key is first
+// used. The key is used only after the server has answered "not found", so a
+// bad key found at that point would be an error that depends on the server's
+// answer. A caller with a bad key gets the same error for every CRID.
+//
+// A key of only zero bytes is refused. It is what a wiped buffer holds, and it
+// is not a secret, so it cannot be the key of a registered device.
+//
+// The error is ErrInvalidResourceRequest, the error this call already returns
+// for its other input that is refused before anything is sent, the CRID. The
+// messages say what is wrong and never hold any byte of the key.
+func validateCRIDLinkDeviceKey(deviceStaticPrivateKey []byte) error {
+	if len(deviceStaticPrivateKey) != x25519key.Size {
+		return fmt.Errorf("%w: the device static private key must be %d bytes", ErrInvalidResourceRequest, x25519key.Size)
+	}
+	var seen byte
+	for _, b := range deviceStaticPrivateKey {
+		seen |= b
+	}
+	if seen == 0 {
+		return fmt.Errorf("%w: the device static private key holds only zero bytes", ErrInvalidResourceRequest)
+	}
+	return nil
+}
+
+// requestCRIDLink is the one code path behind RequestCRIDLinkWith and
+// RequestCRIDLinkAsDeviceWith.
+//
+// With an empty deviceStaticPrivateKey it sends one request and returns its
+// answer, whatever the answer is. With a key, which the caller has passed
+// through validateCRIDLinkDeviceKey, it follows the rule documented on
+// RequestCRIDLinkAsDeviceWith.
+func requestCRIDLink(ctx context.Context, resourceCRID string, cfg Config, deviceStaticPrivateKey []byte) (*CRIDLink, error) {
 	if err := validateCRIDForLinkRequest(resourceCRID); err != nil {
 		return nil, err
 	}
@@ -285,15 +425,48 @@ func RequestCRIDLinkWith(ctx context.Context, resourceCRID string, cfg Config) (
 		return nil, err
 	}
 
-	// No device key: relayknock mints a random identity for this one request
-	// and wipes it afterwards. The server decides on the CRID in the body, so a
-	// key that outlived the call would only make two requests linkable.
+	// The first request never carries a device key, also when the caller has
+	// one: relayknock mints a random identity for this one request and wipes it
+	// afterwards. The server decides a public resource on the CRID in the body,
+	// so a key that outlived the call would only make two requests linkable.
+	issued, err := requestCRIDLinkOnce(ctx, resourceCRID, endpoint, body, cfg, nil)
+	if len(deviceStaticPrivateKey) == 0 || !errors.Is(err, ErrCRIDLinkNotFound) {
+		return issued, err
+	}
+
+	// The caller is a device and the server said "not found". That answer is
+	// authenticated to the cell, so a relay cannot forge it to make the device
+	// identify itself. It is also the only answer that leads here: every other
+	// outcome was returned above, and the device key was not used.
 	//
-	// The reply is authenticated to the cell key from configuration. That is
-	// what makes the relay untrusted here, as on a link open: it can drop or
-	// delay the request, but it cannot forge an answer or substitute a link.
+	// One context covers both requests. If it has already ended, a second
+	// request could not finish, so none is started and the device key is never
+	// used. The first answer is not returned in that case. For a device,
+	// "not found" is established only by the answer to the device's own
+	// request, and that request was never sent. So the error is the context's
+	// error, and it does not match ErrCRIDLinkNotFound.
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, fmt.Errorf("qurl: the CRID link request with the device key was not sent because the context ended first: %w", ctxErr)
+	}
+	// The same body, under the device key. The key is the static key of this
+	// one knock and goes nowhere else. Whatever comes back is the result.
+	return requestCRIDLinkOnce(ctx, resourceCRID, endpoint, body, cfg, deviceStaticPrivateKey)
+}
+
+// requestCRIDLinkOnce sends one CRID link request and reads its answer. With
+// an empty deviceStaticPrivateKey the request is sent under a random key that
+// relayknock mints for it and wipes afterwards. A key that is passed in stays
+// the caller's: it is not kept and not wiped.
+//
+// The reply is authenticated to the cell key from configuration. That is what
+// makes the relay untrusted here, as on a link open: it can drop or delay the
+// request, but it cannot forge an answer or substitute a link.
+func requestCRIDLinkOnce(
+	ctx context.Context, resourceCRID string, endpoint *cridLinkEndpoint, body []byte, cfg Config, deviceStaticPrivateKey []byte,
+) (*CRIDLink, error) {
 	reply, err := relayknock.Knock(ctx, endpoint.relayURL, endpoint.serverPublicKey, body, relayknock.KnockOptions{
-		HTTPClient: cfg.HTTPClient,
+		HTTPClient:       cfg.HTTPClient,
+		DeviceStaticPriv: deviceStaticPrivateKey,
 	})
 	if err != nil {
 		return nil, cridLinkTransportError(ctx, err)
@@ -342,6 +515,64 @@ func OpenCRID(ctx context.Context, resourceCRID string) (*ResourceHandle, error)
 // and retry EnterPortalWith with that link and the retained session.
 func OpenCRIDWith(ctx context.Context, resourceCRID string, cfg Config) (*ResourceHandle, error) {
 	issued, err := RequestCRIDLinkWith(ctx, resourceCRID, cfg)
+	if err != nil {
+		return nil, err
+	}
+	return openIssuedCRIDLink(ctx, issued.Link, resourceCRID, cfg)
+}
+
+// OpenCRIDAsDevice is OpenCRID for a registered device: it requests a link
+// with RequestCRIDLinkAsDevice, then opens that link bound to the same CRID.
+// It can open a private resource too, when the owner of the resource allowed
+// the device or the device is the owner's own. deviceStaticPrivateKey is the
+// device's 32-byte X25519 static private key, the key KnockRegisteredAgent
+// takes.
+//
+// It resolves configuration as OpenCRID does, and what RequestCRIDLink says
+// about that holds here. Then it calls OpenCRIDAsDeviceWith. Read
+// RequestCRIDLinkAsDeviceWith for the rule the link request follows: a random
+// key first, the device key only after "not found". It also says what the
+// second request costs, how the context covers both requests, and who owns
+// the key.
+//
+// A key that cannot be used is refused first, and a CRID that cannot be
+// requested second. Both are refused before any configuration is resolved, so
+// neither costs any I/O.
+func OpenCRIDAsDevice(ctx context.Context, deviceStaticPrivateKey []byte, resourceCRID string) (*ResourceHandle, error) {
+	// The key gate comes before everything else, as in the With form: a bad
+	// key gets the same error whatever the CRID and the configuration are.
+	if err := validateCRIDLinkDeviceKey(deviceStaticPrivateKey); err != nil {
+		return nil, err
+	}
+	// Before resolveDefaultConfig, for the reason RequestCRIDLinkAsDevice
+	// gives: a Provider may do network I/O.
+	if err := validateCRIDForLinkRequest(resourceCRID); err != nil {
+		return nil, err
+	}
+	cfg, err := resolveDefaultConfig(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return OpenCRIDAsDeviceWith(ctx, deviceStaticPrivateKey, resourceCRID, cfg)
+}
+
+// OpenCRIDAsDeviceWith is OpenCRIDAsDevice with explicit configuration:
+// RequestCRIDLinkAsDeviceWith, then EnterPortalWith with Config.ExpectedCRID
+// set to resourceCRID. cfg is what OpenCRIDWith needs.
+//
+// The device key is used for the link request only, under the rule of
+// RequestCRIDLinkAsDeviceWith: a random key first, the device key only after
+// "not found". So this call can send two link requests where OpenCRIDWith
+// sends one. Read RequestCRIDLinkAsDeviceWith for the rule, the cost of the
+// second request, the context rule, and who owns the key. The context covers
+// the open as well. The open uses the issued link's own key, never the device
+// key.
+//
+// Every error either step can return comes back unchanged, and the link never
+// leaves this call. What OpenCRIDWith says about transports and about
+// Config.PortalSession holds here too.
+func OpenCRIDAsDeviceWith(ctx context.Context, deviceStaticPrivateKey []byte, resourceCRID string, cfg Config) (*ResourceHandle, error) {
+	issued, err := RequestCRIDLinkAsDeviceWith(ctx, deviceStaticPrivateKey, resourceCRID, cfg)
 	if err != nil {
 		return nil, err
 	}
