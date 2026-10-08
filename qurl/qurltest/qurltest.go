@@ -13,6 +13,9 @@
 // every check the SDK runs on an issued link. The double has no way to turn a
 // check off. It only stands where the relay and the server would stand.
 //
+// CRIDLinkServer.PrivateFor makes the resource private, so a test can drive
+// qurl.RequestCRIDLinkAsDeviceWith the same way.
+//
 // The link and the keys come from the public conformance vectors
 // (github.com/layervai/qurl-conformance). They are test material that anyone
 // can read. A Config or a Deployment from this package trusts the vector
@@ -61,6 +64,9 @@ const (
 // far smaller.
 const maxPacketBytes = 64 << 10
 
+// devicePublicKeyBytes is the length of an X25519 public key.
+const devicePublicKeyBytes = 32
+
 // CRIDLinkServer stands in for the relay and the server that answer a CRID
 // link request. It listens on no socket. Hand it to the SDK as the HTTP client
 // of a Config, which is what Config does, and the SDK's request reaches it in
@@ -75,6 +81,9 @@ const maxPacketBytes = 64 << 10
 //
 // Refuse makes it answer every request with one refusal code instead, and
 // Issue returns it to the default.
+//
+// PrivateFor makes the resource private: the server then issues the link only
+// to a request sent under one device key.
 //
 // It answers the link request only. It does not open the link: the link names
 // a cell of the vectors, not this server, so qurl.OpenCRIDWith gets the link
@@ -91,8 +100,11 @@ type CRIDLinkServer struct {
 	trust    *qurl.TrustStore
 	cells    *qurl.CellCatalog
 
-	mu       sync.Mutex
-	refusal  string
+	mu      sync.Mutex
+	refusal string
+	// device is the public key of the one device that may open the resource.
+	// It is nil while the resource is public.
+	device   []byte
 	requests []CRIDLinkRequest
 }
 
@@ -104,6 +116,10 @@ type CRIDLinkRequest struct {
 	// UserAgent is the user agent the request carried, or empty when it
 	// carried none.
 	UserAgent string
+	// AsDevice reports whether the request was sent under the device key that
+	// PrivateFor allowed. It is false for a request sent under any other key,
+	// and for every request to a server whose resource is public.
+	AsDevice bool
 }
 
 // cridLinkFixtures is what a CRIDLinkServer takes from the public vectors.
@@ -270,11 +286,39 @@ func (s *CRIDLinkServer) Refuse(code string) {
 }
 
 // Issue returns the server to its default: a link for CRID, and "not found"
-// for any other CRID.
+// for any other CRID. It ends a Refuse. It does not undo PrivateFor.
 func (s *CRIDLinkServer) Issue() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.refusal = ""
+}
+
+// PrivateFor makes the server's resource private. From then on the server
+// issues the link only to a request for CRID that was sent under the device
+// key whose public key is devicePublicKey. Every other request gets
+// "not found", the answer a server gives to a client that may not open a
+// private resource. Refuse still comes first: while it is in effect, every
+// request gets the refusal code.
+//
+// With it a test can drive qurl.RequestCRIDLinkAsDeviceWith. That call sends its
+// first request under a random key, is answered "not found", and sends one
+// second request under the device key. Requests lists both, and
+// CRIDLinkRequest.AsDevice says which is which. qurl.RequestCRIDLinkWith
+// sends one request and gets "not found".
+//
+// devicePublicKey is the 32-byte X25519 public key of the device, the public
+// half of the key the test passes to qurl.RequestCRIDLinkAsDeviceWith. The server
+// keeps its own copy. PrivateFor panics for a key of any other length.
+//
+// The resource stays private for the life of the server. A test that needs a
+// public resource makes a new server.
+func (s *CRIDLinkServer) PrivateFor(devicePublicKey []byte) {
+	if len(devicePublicKey) != devicePublicKeyBytes {
+		panic(fmt.Sprintf("qurltest: a device public key is %d bytes, got %d", devicePublicKeyBytes, len(devicePublicKey)))
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.device = bytes.Clone(devicePublicKey)
 }
 
 // Requests returns the CRID link requests the server has read so far, oldest
@@ -340,7 +384,7 @@ func (s *CRIDLinkServer) RoundTrip(req *http.Request) (*http.Response, error) {
 		EphemeralPriv:    ephemeral.Bytes(),
 		Counter:          message.Counter,
 		TimestampNanos:   uint64(time.Now().UnixNano()),
-		Body:             s.answer(message.Body),
+		Body:             s.answer(message.Body, devicePub),
 		// A server compresses its replies, so the SDK inflates this one as it
 		// will in service.
 		Compress: true,
@@ -351,8 +395,9 @@ func (s *CRIDLinkServer) RoundTrip(req *http.Request) (*http.Response, error) {
 	return httpResponse(req, http.StatusOK, reply), nil
 }
 
-// answer records one request and returns the reply body for it.
-func (s *CRIDLinkServer) answer(body []byte) []byte {
+// answer records one request and returns the reply body for it. requestKey is
+// the static public key the request was sent under.
+func (s *CRIDLinkServer) answer(body, requestKey []byte) []byte {
 	var knock struct {
 		AspID   string                     `json:"aspId"`
 		ResID   string                     `json:"resId"`
@@ -373,6 +418,8 @@ func (s *CRIDLinkServer) answer(body []byte) []byte {
 	request := CRIDLinkRequest{CRID: requested, UserAgent: userAgent}
 
 	s.mu.Lock()
+	private := s.device != nil
+	request.AsDevice = private && bytes.Equal(requestKey, s.device)
 	s.requests = append(s.requests, request)
 	refusal := s.refusal
 	s.mu.Unlock()
@@ -380,10 +427,14 @@ func (s *CRIDLinkServer) answer(body []byte) []byte {
 	switch {
 	case refusal != "":
 		return refusalBody(refusal)
-	case request.CRID == s.fixtures.crid:
-		return s.fixtures.issued
-	default:
+	case request.CRID != s.fixtures.crid:
 		return refusalBody(codeNotFound)
+	case private && !request.AsDevice:
+		// A private resource and a client that may not open it. The answer is
+		// the one for a CRID that does not exist.
+		return refusalBody(codeNotFound)
+	default:
+		return s.fixtures.issued
 	}
 }
 

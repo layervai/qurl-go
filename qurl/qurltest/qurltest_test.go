@@ -2,6 +2,8 @@ package qurltest_test
 
 import (
 	"context"
+	"crypto/ecdh"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -228,7 +230,7 @@ func TestCRIDLinkServer_DoesNotWeakenVerification(t *testing.T) {
 	for i := range surface.NumMethod() {
 		methods = append(methods, surface.Method(i).Name)
 	}
-	if want := []string{"CRID", "Client", "Config", "Deployment", "Issue", "Refuse", "Requests", "RoundTrip"}; !slices.Equal(methods, want) {
+	if want := []string{"CRID", "Client", "Config", "Deployment", "Issue", "PrivateFor", "Refuse", "Requests", "RoundTrip"}; !slices.Equal(methods, want) {
 		t.Fatalf("CRIDLinkServer methods = %v, want %v", methods, want)
 	}
 }
@@ -396,5 +398,125 @@ func TestCRIDLinkServer_ConcurrentUse(t *testing.T) {
 	}
 	if got := len(server.Requests()); got != callers {
 		t.Fatalf("the server recorded %d requests, want %d", got, callers)
+	}
+}
+
+// newDeviceKey returns the private and the public key of a device.
+func newDeviceKey(t *testing.T) (private, public []byte) {
+	t.Helper()
+	key, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return key.Bytes(), key.PublicKey().Bytes()
+}
+
+// PrivateFor lets a test drive the device calls. The server answers by the key
+// a request was sent under, as a server that holds a private resource does, so
+// what the test sees is the SDK's own rule: a random key first, the device key
+// only after "not found".
+func TestCRIDLinkServer_PrivateFor(t *testing.T) {
+	vectors := loadVectors(t)
+	server := qurltest.NewCRIDLinkServer()
+	devicePrivate, devicePublic := newDeviceKey(t)
+	server.PrivateFor(devicePublic)
+	crid := server.CRID()
+	plain, asDevice := qurltest.CRIDLinkRequest{CRID: crid}, qurltest.CRIDLinkRequest{CRID: crid, AsDevice: true}
+
+	// A client that is not a device: one request, "not found".
+	issued, err := qurl.RequestCRIDLinkWith(t.Context(), crid, server.Config())
+	if issued != nil || !errors.Is(err, qurl.ErrCRIDLinkNotFound) {
+		t.Fatalf("RequestCRIDLinkWith = %v, %v; want ErrCRIDLinkNotFound", issued, err)
+	}
+	if got, want := server.Requests(), []qurltest.CRIDLinkRequest{plain}; !slices.Equal(got, want) {
+		t.Fatalf("Requests() = %+v\nwant         %+v", got, want)
+	}
+
+	// The allowed device: "not found" under a random key, then the link under
+	// the device key. The link is the fixture link, checked by the SDK.
+	issued, err = qurl.RequestCRIDLinkAsDeviceWith(t.Context(), devicePrivate, crid, server.Config())
+	if err != nil {
+		t.Fatalf("RequestCRIDLinkAsDeviceWith: %v", err)
+	}
+	if issued.Link != vectors.Fixtures.Link {
+		t.Fatal("the issued link is not the artifact's fixture link")
+	}
+	if got, want := server.Requests(), []qurltest.CRIDLinkRequest{plain, plain, asDevice}; !slices.Equal(got, want) {
+		t.Fatalf("Requests() = %+v\nwant         %+v", got, want)
+	}
+
+	// Another device is not the allowed one. It asks twice and is answered
+	// "not found" twice.
+	strangerPrivate, _ := newDeviceKey(t)
+	issued, err = qurl.RequestCRIDLinkAsDeviceWith(t.Context(), strangerPrivate, crid, server.Config())
+	if issued != nil || !errors.Is(err, qurl.ErrCRIDLinkNotFound) {
+		t.Fatalf("RequestCRIDLinkAsDeviceWith as another device = %v, %v; want ErrCRIDLinkNotFound", issued, err)
+	}
+	if got, want := server.Requests(), []qurltest.CRIDLinkRequest{plain, plain, asDevice, plain, plain}; !slices.Equal(got, want) {
+		t.Fatalf("Requests() = %+v\nwant         %+v", got, want)
+	}
+
+	// Refuse comes first, also for the allowed device. A refusal that is not
+	// "not found" ends the call after the first request.
+	server.Refuse("52603")
+	issued, err = qurl.RequestCRIDLinkAsDeviceWith(t.Context(), devicePrivate, crid, server.Config())
+	if issued != nil || !errors.Is(err, qurl.ErrCRIDLinkRateLimited) {
+		t.Fatalf("RequestCRIDLinkAsDeviceWith while refusing = %v, %v; want ErrCRIDLinkRateLimited", issued, err)
+	}
+	if got := len(server.Requests()); got != 6 {
+		t.Fatalf("the server saw %d requests, want 6: a refusal other than not found takes one request", got)
+	}
+
+	// Issue ends the refusal. The resource is still private.
+	server.Issue()
+	if _, err := qurl.RequestCRIDLinkWith(t.Context(), crid, server.Config()); !errors.Is(err, qurl.ErrCRIDLinkNotFound) {
+		t.Fatalf("after Issue, RequestCRIDLinkWith error = %v; want ErrCRIDLinkNotFound from a resource that is still private", err)
+	}
+	if _, err := qurl.RequestCRIDLinkAsDeviceWith(t.Context(), devicePrivate, crid, server.Config()); err != nil {
+		t.Fatalf("after Issue, RequestCRIDLinkAsDeviceWith: %v", err)
+	}
+
+	// A request for another CRID is "not found" for the device too.
+	other := vectors.Fixtures.UnrelatedCRID
+	if _, err := qurl.RequestCRIDLinkAsDeviceWith(t.Context(), devicePrivate, other, server.Config()); !errors.Is(err, qurl.ErrCRIDLinkNotFound) {
+		t.Fatalf("RequestCRIDLinkAsDeviceWith for another CRID: error = %v; want ErrCRIDLinkNotFound", err)
+	}
+
+	// PrivateFor changes who gets the link, not what the SDK checks. The link
+	// the device gets on its second request is rejected like any other when
+	// the configuration is not the one it verifies under.
+	wrongOrigin := server.Config()
+	wrongOrigin.CRIDLink.LinkOrigin = "https://links.example.com"
+	issued, err = qurl.RequestCRIDLinkAsDeviceWith(t.Context(), devicePrivate, crid, wrongOrigin)
+	var rejected *qurl.CRIDLinkRejectedError
+	if issued != nil || !errors.As(err, &rejected) || rejected.Class != qurl.CRIDLinkRejectOrigin {
+		t.Fatalf("RequestCRIDLinkAsDeviceWith with another link origin = %v, %v; want the link rejected by the origin check", issued, err)
+	}
+
+	// The server keeps its own copy of the key it was given.
+	clear(devicePublic)
+	if _, err := qurl.RequestCRIDLinkAsDeviceWith(t.Context(), devicePrivate, crid, server.Config()); err != nil {
+		t.Fatalf("after the caller cleared its copy of the public key: %v", err)
+	}
+}
+
+func TestCRIDLinkServer_PrivateForPanicsOnWhatIsNotAKey(t *testing.T) {
+	server := qurltest.NewCRIDLinkServer()
+	for _, key := range [][]byte{nil, {}, make([]byte, 31), make([]byte, 33)} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("PrivateFor(a key of %d bytes) did not panic", len(key))
+				}
+			}()
+			server.PrivateFor(key)
+		}()
+	}
+	// None of them took effect: the resource is still public.
+	if _, err := qurl.RequestCRIDLinkWith(t.Context(), server.CRID(), server.Config()); err != nil {
+		t.Fatalf("a refused PrivateFor changed the answer: %v", err)
+	}
+	if got, want := server.Requests(), []qurltest.CRIDLinkRequest{{CRID: server.CRID()}}; !slices.Equal(got, want) {
+		t.Fatalf("Requests() = %+v\nwant         %+v", got, want)
 	}
 }
