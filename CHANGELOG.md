@@ -8,6 +8,15 @@ and are marked **Breaking** with what to change.
 
 ## Unreleased
 
+- `RegisteredAgentResourceHTTPDoer` now also permits
+  `DELETE /v1/resources/{id}/access-requests/{device_id}`: an owner refuses a
+  waiting access request by the device identifier its listing shows, as well as
+  by the request's six-digit code. `{device_id}` has the form the
+  `allowed-passkeys` route already requires, four groups of four lowercase
+  base32 characters joined by hyphens. Approval still takes a code only, and a
+  segment of any other shape is still refused before the request is
+  authorized. Matching service support is required.
+
 - `WithPrivate` states the privacy of a resource a call creates. It is accepted
   by every call that can create one: `ProtectURL` and `CreateResource`,
   `CreatePortalForURL`, and the new `EnsureConnectorResourceWithOptions`
