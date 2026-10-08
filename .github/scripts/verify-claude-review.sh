@@ -47,7 +47,7 @@ if [[ -z "${GITHUB_SERVER_URL:-}" || -z "${GITHUB_REPOSITORY:-}" ]]; then
   exit 1
 fi
 
-if git config --local --get-regexp '^http\..*\.extraheader$' >/dev/null 2>&1 ||
+if git config --local --get-regexp '^http\.(.*\.)?extraheader$' >/dev/null 2>&1 ||
    git config --local --get-regexp '^credential(\..*)?\.helper$' >/dev/null 2>&1; then
   echo "::error::The Claude run left a Git credential header or helper in the workspace."
   exit 1
