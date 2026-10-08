@@ -38,8 +38,11 @@ case "${CLAUDE_REVIEW_MODE}" in
       echo "::error::Claude review received unauthorized PR metadata."
       exit 1
     fi
+    snapshot_namespace="refs/automatic-review"
     ;;
-  interactive) ;;
+  interactive)
+    snapshot_namespace="refs/claude-command"
+    ;;
   *)
     echo "::error::Unknown Claude review mode."
     exit 1
@@ -70,6 +73,15 @@ git branch --force "${EXPECTED_BASE_REF}" "${EXPECTED_BASE_SHA}"
 git update-ref "refs/remotes/origin/${EXPECTED_HEAD_REF}" "${EXPECTED_HEAD_SHA}"
 git update-ref "refs/remotes/origin/${EXPECTED_BASE_REF}" "${EXPECTED_BASE_SHA}"
 git config --local fetch.recurseSubmodules false
+# Tamper evidence the workflow owns. From v1.0.187 the action re-points origin
+# at this repository on the network and fetches the base branch through it, so
+# refs/remotes/origin/* can move legitimately during a run and the terminal
+# verifier cannot hold them to the snapshot. These refs sit in a namespace the
+# action never writes; the verifier requires them unchanged. They are a canary
+# for ref rewriting, not independent evidence: the local bare origin and the
+# workspace branches carry the snapshot comparison alongside them.
+git update-ref "${snapshot_namespace}/head" "${EXPECTED_HEAD_SHA}"
+git update-ref "${snapshot_namespace}/base" "${EXPECTED_BASE_SHA}"
 
 check_origin() {
   remote_keys="$(git config --local --name-only --get-regexp '^remote\..*\.(url|pushurl)$' || true)"
@@ -94,6 +106,8 @@ if ! check_origin ||
       "$(git rev-parse --verify "refs/heads/${EXPECTED_BASE_REF}" 2>/dev/null)" != "${EXPECTED_BASE_SHA}" ||
       "$(git rev-parse --verify "refs/remotes/origin/${EXPECTED_HEAD_REF}" 2>/dev/null)" != "${EXPECTED_HEAD_SHA}" ||
       "$(git rev-parse --verify "refs/remotes/origin/${EXPECTED_BASE_REF}" 2>/dev/null)" != "${EXPECTED_BASE_SHA}" ||
+      "$(git rev-parse --verify "${snapshot_namespace}/head" 2>/dev/null)" != "${EXPECTED_HEAD_SHA}" ||
+      "$(git rev-parse --verify "${snapshot_namespace}/base" 2>/dev/null)" != "${EXPECTED_BASE_SHA}" ||
       "$(git --git-dir="${local_origin}" rev-parse --verify "refs/heads/${EXPECTED_HEAD_REF}" 2>/dev/null)" != "${EXPECTED_HEAD_SHA}" ||
       "$(git --git-dir="${local_origin}" rev-parse --verify "refs/heads/${EXPECTED_BASE_REF}" 2>/dev/null)" != "${EXPECTED_BASE_SHA}" ]]; then
   echo "::error::Claude origin did not preserve the authorized snapshots."

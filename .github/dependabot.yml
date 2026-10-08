@@ -26,21 +26,23 @@ updates:
     labels: [dependencies, ci]
     commit-message:
       prefix: "chore(ci)"
-    # anthropics/claude-code-action is pinned by audit, not by version.
-    # Upstream v1.0.187 began calling replaceCheckoutCredentials() on the
-    # use_commit_signing path, rewriting origin to a token-bearing network
-    # URL; both Claude workflows deliberately point origin at a local bare
-    # repo holding an exact PR snapshot, so that rewrite destroys the
-    # credential-free and the exact-snapshot guarantees at once. It is still
-    # present upstream at v1.0.193, and
-    # TestClaudeWorkflowsUseAuditedCredentialFreeAction fails any unaudited
-    # pin, so every bump Dependabot proposes is red on arrival (#182).
+    # anthropics/claude-code-action is pinned by audit, not by version, and
+    # was hand-bumped to v1.0.238. Since upstream v1.0.187 the action calls
+    # replaceCheckoutCredentials() on the use_commit_signing path: it
+    # rewrites origin from the local bare snapshot repo both Claude workflows
+    # prepare to a token-bearing URL of this repository, then fetches the
+    # base branch through it. The workflows now tolerate exactly that: the
+    # verify script asserts origin's destination and workflow-owned snapshot
+    # refs rather than an exact origin URL. Those guards still depend on what
+    # the action does to Git config and refs, which a version number does
+    # not describe, so TestClaudeWorkflowsUseAuditedAction fails any other
+    # pin and every bump Dependabot proposes would be red on arrival (#182).
     #
     # Ignore conditions filter security updates too, so an advisory against
     # this action opens no PR either — watch the Dependabot alert, which is
-    # configured separately and still fires. Moving the pin means auditing
-    # the action's Git behavior by hand in any case; drop this entry once
-    # upstream leaves origin alone again.
+    # configured separately and still fires. Bump by hand: re-read the
+    # action's Git behavior at the new version, re-validate both workflows,
+    # then move the pin and the test constant together.
     #
     # TestDependabotIgnoresTheAuditedClaudeAction asserts this entry.
     ignore:

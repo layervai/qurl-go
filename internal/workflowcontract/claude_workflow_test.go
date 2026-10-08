@@ -1,6 +1,7 @@
 // Package workflowcontract locks the repository's secret-bearing workflow
-// boundary. The fixture tests execute the credential-free origin preparation;
-// the hosted action itself remains covered by its immutable pin and actionlint.
+// boundary. The fixture tests execute the local snapshot origin preparation
+// and the terminal verifier; the hosted action itself remains covered by its
+// immutable, hand-audited pin and actionlint.
 package workflowcontract
 
 import (
@@ -8,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -15,24 +17,52 @@ import (
 )
 
 const (
-	credentialFreeClaudeActionRef     = "anthropics/claude-code-action@be7b93b1907a4abad570368f3c74b6fe3807510b"
-	credentialFreeClaudeActionVersion = "v1.0.183"
+	auditedClaudeActionRef     = "anthropics/claude-code-action@12dd8d74c712f5f3669365b2369b558c495b1104"
+	auditedClaudeActionVersion = "v1.0.238"
+
+	claudeModel  = "claude-opus-5-5"
+	claudeEffort = "medium"
 )
 
-// TestClaudeWorkflowsUseAuditedCredentialFreeAction makes the action's Git
-// behavior part of the secret-bearing workflow contract. Upstream v1.0.187
-// began replacing origin with a token-bearing network URL even when
-// use_commit_signing is true. An immutable, consistent pin is not sufficient:
-// every new pin must be audited to leave the exact-snapshot local origin alone.
-func TestClaudeWorkflowsUseAuditedCredentialFreeAction(t *testing.T) {
+// TestClaudeWorkflowsUseAuditedAction makes the action's Git behavior part of
+// the secret-bearing workflow contract. Since upstream v1.0.187 the action
+// replaces origin with a token-bearing URL of this repository even when
+// use_commit_signing is true, and fetches the base branch through it. The
+// terminal verifier tolerates exactly that and nothing wider, so an immutable,
+// consistent pin is not sufficient: every new pin must be audited for what it
+// does to Git configuration and refs before this constant moves.
+func TestClaudeWorkflowsUseAuditedAction(t *testing.T) {
 	for _, name := range []string{"claude-code-review.yml", "claude.yml"} {
 		t.Run(name, func(t *testing.T) {
 			pin, err := solePin(readWorkflow(t, name), claudeAction)
 			if err != nil {
 				t.Fatalf("resolve Claude action pin: %v", err)
 			}
-			if pin.reference != credentialFreeClaudeActionRef || pin.version != credentialFreeClaudeActionVersion {
-				t.Errorf("Claude action pin %q # %s is not audited for a credential-free origin", pin.reference, pin.version)
+			if pin.reference != auditedClaudeActionRef || pin.version != auditedClaudeActionVersion {
+				t.Errorf("Claude action pin %q # %s is not the audited pin %q # %s",
+					pin.reference, pin.version, auditedClaudeActionRef, auditedClaudeActionVersion)
+			}
+		})
+	}
+}
+
+var claudeArgFlag = regexp.MustCompile(`(?m)^[ \t]*--(model|effort)[ \t]+(\S+)[ \t]*$`)
+
+// TestClaudeWorkflowsBindModelAndEffort holds both lanes to one model and one
+// effort. The two are a pair with the action pin: the bundled Claude Code
+// release decides which models the API accepts, so a lane left on another
+// model or effort is a lane reviewing under settings nobody chose.
+func TestClaudeWorkflowsBindModelAndEffort(t *testing.T) {
+	for _, name := range []string{"claude-code-review.yml", "claude.yml"} {
+		t.Run(name, func(t *testing.T) {
+			got := map[string][]string{}
+			for _, match := range claudeArgFlag.FindAllStringSubmatch(readWorkflow(t, name), -1) {
+				got[match[1]] = append(got[match[1]], match[2])
+			}
+			for flag, want := range map[string]string{"model": claudeModel, "effort": claudeEffort} {
+				if values := got[flag]; len(values) != 1 || values[0] != want {
+					t.Errorf("--%s = %v, want exactly one, %q", flag, values, want)
+				}
 			}
 		})
 	}
@@ -54,7 +84,7 @@ func TestAutomaticClaudeWorkflowUsesTrustedReadOnlySnapshots(t *testing.T) {
 		"ref: ${{ github.sha }}",
 		"fetch-depth: 0",
 		"persist-credentials: false",
-		"Prepare credential-free review origin",
+		"Prepare local snapshot review origin",
 		"bash .github/scripts/resolve-claude-pr.sh",
 		"bash .github/scripts/prepare-claude-origin.sh",
 		"bash .github/scripts/verify-claude-review.sh",
@@ -86,7 +116,7 @@ func TestAutomaticClaudeWorkflowUsesTrustedReadOnlySnapshots(t *testing.T) {
 	requireBefore(t, workflow,
 		requirePin(t, workflow, checkoutAction),
 		"Resolve live review context",
-		"Prepare credential-free review origin",
+		"Prepare local snapshot review origin",
 		requirePin(t, workflow, claudeAction),
 		"Verify reviewed pull request snapshots",
 	)
@@ -105,7 +135,7 @@ func TestInteractiveClaudeWorkflowUsesDefaultBranchCommentPath(t *testing.T) {
 		"collaborators/${TRIGGER_ACTOR}/permission",
 		"admin|maintain|write",
 		"ref: ${{ github.sha }}",
-		"Prepare credential-free Claude origin",
+		"Prepare local snapshot Claude origin",
 		"bash .github/scripts/resolve-claude-pr.sh",
 		"bash .github/scripts/prepare-claude-origin.sh",
 		"bash .github/scripts/verify-claude-review.sh",
@@ -138,13 +168,13 @@ func TestInteractiveClaudeWorkflowUsesDefaultBranchCommentPath(t *testing.T) {
 		"Validate Claude trigger actor permission",
 		requirePin(t, workflow, checkoutAction),
 		"Resolve Claude pull request context",
-		"Prepare credential-free Claude origin",
+		"Prepare local snapshot Claude origin",
 		requirePin(t, workflow, claudeAction),
 		"Verify reviewed pull request snapshots",
 	)
 }
 
-func TestCredentialFreeOriginPreparationExecutes(t *testing.T) {
+func TestLocalSnapshotOriginPreparationExecutes(t *testing.T) {
 	tests := []struct {
 		name  string
 		mode  string
@@ -191,6 +221,18 @@ func TestCredentialFreeOriginPreparationExecutes(t *testing.T) {
 			}
 			if !strings.Contains(string(outputs), "ready=true") {
 				t.Fatalf("workflow outputs = %q, want ready=true", outputs)
+			}
+			// Prepare leaves origin as the local pin, with no credential, and
+			// records the snapshots in the lane's workflow-owned namespace.
+			if got, want := runGit(t, fixture.repository, "remote", "get-url", "--all", "origin"), readStepOutputs(t, env["GITHUB_OUTPUT"])["path"]; got != want {
+				t.Errorf("origin after prepare = %q, want the local snapshot %q", got, want)
+			}
+			namespace := snapshotNamespace(test.mode)
+			if got := runGit(t, fixture.repository, "rev-parse", namespace+"/head"); got != fixture.headSHA {
+				t.Errorf("%s/head = %s, want %s", namespace, got, fixture.headSHA)
+			}
+			if got := runGit(t, fixture.repository, "rev-parse", namespace+"/base"); got != fixture.baseSHA {
+				t.Errorf("%s/base = %s, want %s", namespace, got, fixture.baseSHA)
 			}
 		})
 	}
@@ -299,90 +341,103 @@ func TestLivePRResolversRejectUnsafeCurrentState(t *testing.T) {
 	}
 }
 
+// verifierModes are the two lanes that share the prepare and verify scripts.
+var verifierModes = []struct {
+	name  string
+	extra map[string]string
+}{
+	{
+		name: "automatic",
+		extra: map[string]string{
+			"EXPECTED_STATE": "open", "EXPECTED_DRAFT": "false",
+			"EXPECTED_HEAD_REPO": "layervai/qurl-go", "EXPECTED_BASE_REPO": "layervai/qurl-go",
+			"PR_NUMBER": "100", "RUN_ID": "123", "RUN_ATTEMPT": "1",
+		},
+	},
+	{name: "interactive"},
+}
+
+func snapshotNamespace(mode string) string {
+	if mode == "automatic" {
+		return "refs/automatic-review"
+	}
+	return "refs/claude-command"
+}
+
+// newVerifierFixture runs the real prepare script against a fresh fixture and
+// returns it with an environment under which the real verify script passes.
+func newVerifierFixture(t *testing.T, mode string, extra map[string]string) (gitFixture, map[string]string) {
+	t.Helper()
+	fixture := newGitFixture(t)
+	outputFile := filepath.Join(t.TempDir(), "outputs")
+	prepareEnv := map[string]string{
+		"CLAUDE_REVIEW_MODE":   mode,
+		"GITHUB_REPOSITORY":    "layervai/qurl-go",
+		"GITHUB_OUTPUT":        outputFile,
+		"RUNNER_TEMP":          t.TempDir(),
+		"EXPECTED_HEAD_SHA":    fixture.headSHA,
+		"EXPECTED_HEAD_REF":    fixture.headRef,
+		"EXPECTED_BASE_SHA":    fixture.baseSHA,
+		"EXPECTED_BASE_REF":    fixture.baseRef,
+		"TRUSTED_DEFAULT_REF":  fixture.baseRef,
+		"EXPECTED_TRUSTED_SHA": fixture.baseSHA,
+	}
+	for key, value := range extra {
+		prepareEnv[key] = value
+	}
+	runScript(t, fixture.repository, readWorkflowScript(t, "prepare-claude-origin.sh"), prepareEnv, true)
+	outputs := readStepOutputs(t, outputFile)
+
+	executionFile := filepath.Join(t.TempDir(), "execution.json")
+	if err := os.WriteFile(executionFile, []byte("{\"subtype\":\"success\"}\n"), 0o600); err != nil {
+		t.Fatalf("write execution fixture: %v", err)
+	}
+	marker := outputs["review_marker"]
+	if marker == "" {
+		marker = "<!-- claude-command:layervai/qurl-go:pr-100:run-123:attempt-1:head-" + fixture.headSHA + " -->"
+	}
+	comments, err := json.Marshal([][]map[string]any{{{
+		"user": map[string]string{"login": "github-actions[bot]"},
+		"body": "No findings.\n" + marker,
+	}}})
+	if err != nil {
+		t.Fatalf("marshal comment fixture: %v", err)
+	}
+
+	verifyEnv := map[string]string{
+		"CLAUDE_REVIEW_MODE":    mode,
+		"PATH":                  writeGHMock(t) + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"GH_TOKEN":              "test-token",
+		"GITHUB_REPOSITORY":     "layervai/qurl-go",
+		"GITHUB_SERVER_URL":     "https://github.com",
+		"PR_NUMBER":             "100",
+		"EXPECTED_HEAD_SHA":     fixture.headSHA,
+		"EXPECTED_HEAD_REF":     fixture.headRef,
+		"EXPECTED_BASE_SHA":     fixture.baseSHA,
+		"EXPECTED_BASE_REF":     fixture.baseRef,
+		"TRUSTED_DEFAULT_REF":   fixture.baseRef,
+		"EXPECTED_ORIGIN":       outputs["path"],
+		"EXPECTED_LOCAL_SHA":    outputs["trusted_sha"],
+		"CLAUDE_EXECUTION_FILE": executionFile,
+		"MOCK_PR_JSON":          mockPullRequestJSON(t, fixture, "open", false, fixture.baseRef),
+		"MOCK_COMMENTS_JSON":    string(comments),
+	}
+	if mode == "automatic" {
+		verifyEnv["EXPECTED_REVIEW_MARKER"] = marker
+	} else {
+		verifyEnv["EXPECTED_TRIGGER_ACTOR"] = "maintainer"
+		verifyEnv["EXPECTED_RESULT_MARKER"] = marker
+	}
+	return fixture, verifyEnv
+}
+
 func TestTerminalVerifiersRejectUnsafeCurrentState(t *testing.T) {
 	skipWithoutGNUTimeout(t)
-	tests := []struct {
-		name  string
-		mode  string
-		extra map[string]string
-	}{
-		{
-			name: "automatic", mode: "automatic",
-			extra: map[string]string{
-				"EXPECTED_STATE": "open", "EXPECTED_DRAFT": "false",
-				"EXPECTED_HEAD_REPO": "layervai/qurl-go", "EXPECTED_BASE_REPO": "layervai/qurl-go",
-				"PR_NUMBER": "100", "RUN_ID": "123", "RUN_ATTEMPT": "1",
-			},
-		},
-		{
-			name: "interactive", mode: "interactive",
-		},
-	}
-	prepareScript := readWorkflowScript(t, "prepare-claude-origin.sh")
 	verifyScript := readWorkflowScript(t, "verify-claude-review.sh")
 
-	for _, test := range tests {
+	for _, test := range verifierModes {
 		t.Run(test.name, func(t *testing.T) {
-			fixture := newGitFixture(t)
-			outputFile := filepath.Join(t.TempDir(), "outputs")
-			prepareEnv := map[string]string{
-				"CLAUDE_REVIEW_MODE":   test.mode,
-				"GITHUB_REPOSITORY":    "layervai/qurl-go",
-				"GITHUB_OUTPUT":        outputFile,
-				"RUNNER_TEMP":          t.TempDir(),
-				"EXPECTED_HEAD_SHA":    fixture.headSHA,
-				"EXPECTED_HEAD_REF":    fixture.headRef,
-				"EXPECTED_BASE_SHA":    fixture.baseSHA,
-				"EXPECTED_BASE_REF":    fixture.baseRef,
-				"TRUSTED_DEFAULT_REF":  fixture.baseRef,
-				"EXPECTED_TRUSTED_SHA": fixture.baseSHA,
-			}
-			for key, value := range test.extra {
-				prepareEnv[key] = value
-			}
-			runScript(t, fixture.repository, prepareScript, prepareEnv, true)
-			outputs := readStepOutputs(t, outputFile)
-
-			executionFile := filepath.Join(t.TempDir(), "execution.json")
-			if err := os.WriteFile(executionFile, []byte("{\"subtype\":\"success\"}\n"), 0o600); err != nil {
-				t.Fatalf("write execution fixture: %v", err)
-			}
-			marker := outputs["review_marker"]
-			if marker == "" {
-				marker = "<!-- claude-command:layervai/qurl-go:pr-100:run-123:attempt-1:head-" + fixture.headSHA + " -->"
-			}
-			comments, err := json.Marshal([][]map[string]any{{{
-				"user": map[string]string{"login": "github-actions[bot]"},
-				"body": "No findings.\n" + marker,
-			}}})
-			if err != nil {
-				t.Fatalf("marshal comment fixture: %v", err)
-			}
-
-			mockBin := writeGHMock(t)
-			verifyEnv := map[string]string{
-				"CLAUDE_REVIEW_MODE":    test.mode,
-				"PATH":                  mockBin + string(os.PathListSeparator) + os.Getenv("PATH"),
-				"GH_TOKEN":              "test-token",
-				"GITHUB_REPOSITORY":     "layervai/qurl-go",
-				"PR_NUMBER":             "100",
-				"EXPECTED_HEAD_SHA":     fixture.headSHA,
-				"EXPECTED_HEAD_REF":     fixture.headRef,
-				"EXPECTED_BASE_SHA":     fixture.baseSHA,
-				"EXPECTED_BASE_REF":     fixture.baseRef,
-				"TRUSTED_DEFAULT_REF":   fixture.baseRef,
-				"EXPECTED_ORIGIN":       outputs["path"],
-				"EXPECTED_LOCAL_SHA":    outputs["trusted_sha"],
-				"CLAUDE_EXECUTION_FILE": executionFile,
-				"MOCK_PR_JSON":          mockPullRequestJSON(t, fixture, "open", false, fixture.baseRef),
-				"MOCK_COMMENTS_JSON":    string(comments),
-			}
-			if test.name == "automatic" {
-				verifyEnv["EXPECTED_REVIEW_MARKER"] = marker
-			} else {
-				verifyEnv["EXPECTED_TRIGGER_ACTOR"] = "maintainer"
-				verifyEnv["EXPECTED_RESULT_MARKER"] = marker
-			}
+			fixture, verifyEnv := newVerifierFixture(t, test.name, test.extra)
 			runScript(t, fixture.repository, verifyScript, verifyEnv, true)
 
 			unsafePRs := []struct {
@@ -406,6 +461,183 @@ func TestTerminalVerifiersRejectUnsafeCurrentState(t *testing.T) {
 				runGit(t, fixture.repository, "checkout", "--detach", "--quiet", fixture.headSHA)
 				runScript(t, fixture.repository, verifyScript, verifyEnv, false)
 			})
+		})
+	}
+}
+
+// originToken stands in for the installation token the action writes into the
+// origin URL, in the real token's shape. No verifier output may ever contain
+// it. It is assembled at run time so the source holds nothing token-shaped.
+var originToken = "ghs_" + strings.Repeat("t0K", 12)
+
+const (
+	errRemoteSet        = "::error::The Claude run added, removed, or reshaped a Git remote."
+	errOriginURLCount   = "::error::Origin does not have exactly one fetch and one push URL."
+	errOriginShape      = "::error::Origin is neither the local snapshot nor a recognizable URL of this repository."
+	errOriginMoved      = "::error::Origin moved off this repository:"
+	errSnapshots        = "::error::The Claude run changed the authorized local snapshots."
+	errCredentialConfig = "::error::The Claude run left a Git credential header or helper in the workspace."
+	errNoOriginTargets  = "::error::Runner-provided origin comparison targets are unavailable."
+)
+
+// TestTerminalVerifierAssertsOriginDestination is the contract that replaced
+// "origin is still exactly the local pin". The audited action re-points origin
+// at this repository with a token in the URL and fetches the base branch
+// through it, so the verifier has to accept that and nothing else: any origin
+// that could carry the token, or the snapshots, to another destination fails.
+func TestTerminalVerifierAssertsOriginDestination(t *testing.T) {
+	skipWithoutGNUTimeout(t)
+	verifyScript := readWorkflowScript(t, "verify-claude-review.sh")
+	credentialed := func(rest string) string { return "https://x-access-token:" + originToken + "@" + rest }
+	setOrigin := func(url string) func(*testing.T, gitFixture, string) {
+		return func(t *testing.T, fixture gitFixture, _ string) {
+			runGit(t, fixture.repository, "remote", "set-url", "origin", url)
+		}
+	}
+
+	tests := []struct {
+		name string
+		// mutate stands in for what happened to the workspace between the
+		// prepare and verify steps; namespace is the lane's snapshot refs.
+		mutate func(t *testing.T, fixture gitFixture, namespace string)
+		env    map[string]string
+		// wantError is empty when the verifier must pass.
+		wantError string
+	}{
+		{name: "local pin untouched", mutate: func(*testing.T, gitFixture, string) {}},
+		{name: "token-bearing URL of this repository", mutate: setOrigin(credentialed("github.com/layervai/qurl-go.git"))},
+		{name: "token-bearing URL without .git", mutate: setOrigin(credentialed("github.com/layervai/qurl-go"))},
+		{name: "this repository without userinfo", mutate: setOrigin("https://github.com/layervai/qurl-go.git")},
+		{name: "this repository in another letter case", mutate: setOrigin(credentialed("GitHub.com/LayerVAI/Qurl-Go.git"))},
+		{
+			// What the audited action really does: re-point origin, then
+			// fetch a base branch that has moved since the snapshot.
+			name: "action rewrite with an advanced origin-tracking base",
+			mutate: func(t *testing.T, fixture gitFixture, _ string) {
+				runGit(t, fixture.repository, "remote", "set-url", "origin", credentialed("github.com/layervai/qurl-go.git"))
+				runGit(t, fixture.repository, "update-ref", "refs/remotes/origin/"+fixture.baseRef, fixture.headSHA)
+			},
+		},
+
+		{name: "another host", mutate: setOrigin(credentialed("evil.example/layervai/qurl-go.git")), wantError: errOriginMoved},
+		{name: "host with this host as a prefix", mutate: setOrigin(credentialed("github.com.evil.example/layervai/qurl-go.git")), wantError: errOriginMoved},
+		{name: "another port", mutate: setOrigin(credentialed("github.com:8443/layervai/qurl-go.git")), wantError: errOriginMoved},
+		{name: "another scheme", mutate: setOrigin("http://x-access-token:" + originToken + "@github.com/layervai/qurl-go.git"), wantError: errOriginMoved},
+		{name: "another owner", mutate: setOrigin(credentialed("github.com/attacker/qurl-go.git")), wantError: errOriginMoved},
+		{name: "another repository", mutate: setOrigin(credentialed("github.com/layervai/other.git")), wantError: errOriginMoved},
+		{name: "longer path", mutate: setOrigin(credentialed("github.com/layervai/qurl-go.git/extra")), wantError: errOriginMoved},
+		{name: "allowed destination only in the path", mutate: setOrigin("https://evil.example/@github.com/layervai/qurl-go.git"), wantError: errOriginMoved},
+		{name: "token then allowed destination in the path", mutate: setOrigin("https://evil.example/" + originToken + "@github.com/layervai/qurl-go.git"), wantError: errOriginMoved},
+		// A URL client ends the host at these characters; a parser that only
+		// strips through the last "@" reads the host as github.com.
+		{name: "fragment before the at sign", mutate: setOrigin("https://evil.example#" + originToken + "@github.com/layervai/qurl-go.git"), wantError: errOriginShape},
+		{name: "query before the at sign", mutate: setOrigin("https://evil.example?" + originToken + "@github.com/layervai/qurl-go.git"), wantError: errOriginShape},
+		{name: "backslash before the at sign", mutate: setOrigin(`https://evil.example\` + originToken + "@github.com/layervai/qurl-go.git"), wantError: errOriginShape},
+		{name: "second at sign in the authority", mutate: setOrigin("https://" + originToken + "@evil.example@github.com/layervai/qurl-go.git"), wantError: errOriginShape},
+		{name: "scp-style remote", mutate: setOrigin("git@github.com:layervai/qurl-go.git"), wantError: errOriginShape},
+		{name: "another local path", mutate: func(t *testing.T, fixture gitFixture, _ string) {
+			runGit(t, fixture.repository, "remote", "set-url", "origin", filepath.Join(fixture.repository, ".git"))
+		}, wantError: errOriginShape},
+
+		{name: "extra remote", mutate: func(t *testing.T, fixture gitFixture, _ string) {
+			runGit(t, fixture.repository, "remote", "add", "exfil", credentialed("evil.example/layervai/qurl-go.git"))
+		}, wantError: errRemoteSet},
+		{name: "extra remote addressing this repository", mutate: func(t *testing.T, fixture gitFixture, _ string) {
+			runGit(t, fixture.repository, "remote", "add", "upstream", "https://github.com/layervai/qurl-go.git")
+		}, wantError: errRemoteSet},
+		{name: "push URL to another host", mutate: func(t *testing.T, fixture gitFixture, _ string) {
+			runGit(t, fixture.repository, "remote", "set-url", "origin", credentialed("github.com/layervai/qurl-go.git"))
+			runGit(t, fixture.repository, "remote", "set-url", "--push", "origin", credentialed("evil.example/layervai/qurl-go.git"))
+		}, wantError: errRemoteSet},
+		{name: "second fetch URL", mutate: func(t *testing.T, fixture gitFixture, _ string) {
+			runGit(t, fixture.repository, "remote", "set-url", "--add", "origin", credentialed("evil.example/layervai/qurl-go.git"))
+		}, wantError: errRemoteSet},
+		{name: "fetch redirected by insteadOf", mutate: func(t *testing.T, fixture gitFixture, _ string) {
+			runGit(t, fixture.repository, "remote", "set-url", "origin", credentialed("github.com/layervai/qurl-go.git"))
+			runGit(t, fixture.repository, "config", "--local", "url.https://evil.example/.insteadOf", credentialed("github.com/"))
+		}, wantError: errOriginMoved},
+		{name: "push redirected by pushInsteadOf", mutate: func(t *testing.T, fixture gitFixture, _ string) {
+			runGit(t, fixture.repository, "remote", "set-url", "origin", credentialed("github.com/layervai/qurl-go.git"))
+			runGit(t, fixture.repository, "config", "--local", "url.https://evil.example/.pushInsteadOf", credentialed("github.com/"))
+		}, wantError: errOriginMoved},
+		{name: "credential helper installed", mutate: func(t *testing.T, fixture gitFixture, _ string) {
+			runGit(t, fixture.repository, "config", "--local", "credential.helper", "store")
+		}, wantError: errCredentialConfig},
+		{name: "authorization header installed", mutate: func(t *testing.T, fixture gitFixture, _ string) {
+			runGit(t, fixture.repository, "config", "--local", "http.https://github.com/.extraheader", "AUTHORIZATION: basic "+originToken)
+		}, wantError: errCredentialConfig},
+
+		{name: "workflow-owned head snapshot moved", mutate: func(t *testing.T, fixture gitFixture, namespace string) {
+			runGit(t, fixture.repository, "update-ref", namespace+"/head", fixture.baseSHA)
+		}, wantError: errSnapshots},
+		{name: "workflow-owned base snapshot deleted", mutate: func(t *testing.T, fixture gitFixture, namespace string) {
+			runGit(t, fixture.repository, "update-ref", "-d", namespace+"/base")
+		}, wantError: errSnapshots},
+		{name: "workspace head branch moved", mutate: func(t *testing.T, fixture gitFixture, _ string) {
+			runGit(t, fixture.repository, "update-ref", "refs/heads/"+fixture.headRef, fixture.baseSHA)
+		}, wantError: errSnapshots},
+		{name: "local snapshot origin branch moved", mutate: func(t *testing.T, fixture gitFixture, _ string) {
+			runGit(t, fixture.repository, "push", "--quiet", "--force", "origin", fixture.baseSHA+":refs/heads/"+fixture.headRef)
+			runGit(t, fixture.repository, "update-ref", "refs/remotes/origin/"+fixture.headRef, fixture.headSHA)
+		}, wantError: errSnapshots},
+
+		{
+			name: "no server URL from the runner", mutate: setOrigin(credentialed("github.com/layervai/qurl-go.git")),
+			env: map[string]string{"GITHUB_SERVER_URL": ""}, wantError: errNoOriginTargets,
+		},
+		{
+			name: "another server URL from the runner", mutate: setOrigin(credentialed("github.com/layervai/qurl-go.git")),
+			env: map[string]string{"GITHUB_SERVER_URL": "https://ghes.example"}, wantError: errOriginMoved,
+		},
+	}
+
+	for _, mode := range verifierModes {
+		t.Run(mode.name, func(t *testing.T) {
+			for _, test := range tests {
+				t.Run(test.name, func(t *testing.T) {
+					// Every case owns its fixture and temp directories.
+					t.Parallel()
+					fixture, verifyEnv := newVerifierFixture(t, mode.name, mode.extra)
+					test.mutate(t, fixture, snapshotNamespace(mode.name))
+					for key, value := range test.env {
+						verifyEnv[key] = value
+					}
+					output := runScriptOutput(t, fixture.repository, verifyScript, verifyEnv, test.wantError == "")
+					if test.wantError != "" && !strings.Contains(output, test.wantError) {
+						t.Errorf("verifier failed for another reason:\n%s\nwant %q", output, test.wantError)
+					}
+					// Case-insensitive: the verifier folds case before it prints.
+					if strings.Contains(strings.ToLower(output), strings.ToLower(originToken)) {
+						t.Errorf("verifier printed the origin credential:\n%s", output)
+					}
+				})
+			}
+		})
+	}
+}
+
+// The two lanes must not share a snapshot namespace: a ref written for one
+// lane is not evidence for the other.
+func TestTerminalVerifierSnapshotNamespaceIsPerLane(t *testing.T) {
+	skipWithoutGNUTimeout(t)
+	verifyScript := readWorkflowScript(t, "verify-claude-review.sh")
+	for _, mode := range verifierModes {
+		t.Run(mode.name, func(t *testing.T) {
+			fixture, verifyEnv := newVerifierFixture(t, mode.name, mode.extra)
+			own := snapshotNamespace(mode.name)
+			other := "refs/claude-command"
+			if own == other {
+				other = "refs/automatic-review"
+			}
+			for _, side := range []string{"head", "base"} {
+				sha := runGit(t, fixture.repository, "rev-parse", own+"/"+side)
+				runGit(t, fixture.repository, "update-ref", other+"/"+side, sha)
+				runGit(t, fixture.repository, "update-ref", "-d", own+"/"+side)
+			}
+			output := runScriptOutput(t, fixture.repository, verifyScript, verifyEnv, false)
+			if !strings.Contains(output, errSnapshots) {
+				t.Errorf("verifier failed for another reason:\n%s\nwant %q", output, errSnapshots)
+			}
 		})
 	}
 }

@@ -1,11 +1,12 @@
 package workflowcontract
 
 // The Claude action is pinned here by audit rather than by version:
-// TestClaudeWorkflowsUseAuditedCredentialFreeAction rejects every pin but the
-// one whose Git behavior was reviewed, because upstream v1.0.187 began
-// rewriting origin to a token-bearing network URL on the use_commit_signing
-// path while both Claude workflows deliberately point origin at a local bare
-// repo holding an exact pull request snapshot.
+// TestClaudeWorkflowsUseAuditedAction rejects every pin but the one whose Git
+// behavior was reviewed. Since upstream v1.0.187 the action rewrites origin to
+// a token-bearing URL of this repository on the use_commit_signing path, while
+// both Claude workflows prepare origin as a local bare repo holding an exact
+// pull request snapshot; the terminal verifier tolerates exactly the rewrite
+// that was audited, so a new version has to be read before it is trusted.
 //
 // That makes each bump Dependabot opens red on arrival, so .github/dependabot.yml
 // ignores the dependency instead of reopening one weekly (#182 was the last one
@@ -23,7 +24,7 @@ package workflowcontract
 // such a dependency `anthropics/claude-code-action/<path>`, which this
 // exact-string ignore would no longer match -- but pinsFor compares the action
 // name for equality, so solePin(workflow, claudeAction) stops resolving and
-// TestClaudeWorkflowsUseAuditedCredentialFreeAction goes red first.
+// TestClaudeWorkflowsUseAuditedAction goes red first.
 
 import (
 	"fmt"
