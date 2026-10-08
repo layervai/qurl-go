@@ -581,10 +581,14 @@ func TestTerminalVerifierAssertsOriginDestination(t *testing.T) {
 			runGit(t, fixture.repository, "update-ref", "refs/remotes/origin/"+fixture.headRef, fixture.headSHA)
 		}, wantError: errSnapshots},
 
-		{name: "no server URL from the runner", mutate: setOrigin(credentialed("github.com/layervai/qurl-go.git")),
-			env: map[string]string{"GITHUB_SERVER_URL": ""}, wantError: errNoOriginTargets},
-		{name: "another server URL from the runner", mutate: setOrigin(credentialed("github.com/layervai/qurl-go.git")),
-			env: map[string]string{"GITHUB_SERVER_URL": "https://ghes.example"}, wantError: errOriginMoved},
+		{
+			name: "no server URL from the runner", mutate: setOrigin(credentialed("github.com/layervai/qurl-go.git")),
+			env: map[string]string{"GITHUB_SERVER_URL": ""}, wantError: errNoOriginTargets,
+		},
+		{
+			name: "another server URL from the runner", mutate: setOrigin(credentialed("github.com/layervai/qurl-go.git")),
+			env: map[string]string{"GITHUB_SERVER_URL": "https://ghes.example"}, wantError: errOriginMoved,
+		},
 	}
 
 	for _, mode := range verifierModes {
