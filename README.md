@@ -187,6 +187,11 @@ A new resource is private or public. State which with `qurl.WithPrivate` when
 the default must not decide, and read `Resource.Private` back; see
 [Private and public resources](docs/issuing-links.md#private-and-public-resources).
 
+Private consumer policies also support credential lists, publisher invitations,
+verified email capture, reviewed requests and contract entitlements. See
+[Consumer access](docs/consumer-access.md). These operations require a service
+and NHP cell with consumer access enabled.
+
 If qURL Connector already protects the service, use its immutable connector
 slug:
 
