@@ -199,8 +199,16 @@ var (
 // call, and a source should return when that context ends. The call does not
 // wait for a source that does not: when the context ends, the call returns
 // the context's error at once. A key that such a source returns later is
-// overwritten with zeros and is not used. The SDK does not recover a panic of
-// the source.
+// overwritten with zeros and is not used.
+//
+// A panic of the source is passed on to the caller. The call panics with the
+// same value on the goroutine of the caller, as if the call had run the source
+// itself, so a recover of the caller catches it. It does not end the process
+// from a goroutine that the caller cannot reach. When the context has ended
+// before the source panics, the call returns the context's error and the
+// panic is dropped: nobody waits for that source any more. A source that
+// ends its goroutine without returning (runtime.Goexit) gives no key: the
+// call fails with a *DeviceKeySourceError.
 //
 // A source that cannot give the key returns an error. The call then fails
 // with a *DeviceKeySourceError, and no request is sent under the device key.
@@ -214,8 +222,11 @@ type DeviceKeySource func(ctx context.Context) ([]byte, error)
 //
 // The source is called only after the first request, under a random key, was
 // answered "not found". So this error also says that the first request was
-// sent and answered. It does not match ErrCRIDLinkNotFound. Nobody asked as
-// the device, so it is not known whether the device may open the CRID.
+// sent and answered. The SDK puts nothing into its chain that matches
+// ErrCRIDLinkNotFound: nobody asked as the device, so it is not known whether
+// the device may open the CRID. The chain holds the error of the source, so a
+// source that itself returns an error which matches ErrCRIDLinkNotFound makes
+// this error match it too. A source should not return such an error.
 //
 // The message is fixed text. It never holds the text of Err: the SDK cannot
 // know what a source puts into its error. Read the cause from Err, or with
@@ -229,10 +240,10 @@ type DeviceKeySourceError struct {
 	// RequestCRIDLinkWith returns for the same request, and it matches
 	// ErrCRIDLinkNotFound.
 	//
-	// It is a field and not part of the error chain, so that this error does
-	// not match ErrCRIDLinkNotFound. A caller that has no device key after
-	// all, and goes on as a client without one, takes its answer from here.
-	// It does not need a second call for it.
+	// It is a field and not part of the error chain, so that the SDK's own
+	// part of this error does not match ErrCRIDLinkNotFound. A caller that
+	// has no device key after all, and goes on as a client without one, takes
+	// its answer from here. It does not need a second call for it.
 	FirstAnswer error
 }
 
@@ -751,6 +762,11 @@ func keyFromDeviceKeySource(ctx context.Context, source DeviceKeySource, firstAn
 // to the caller of wait: when the context has ended, when the source returned
 // an error beside it, when the key cannot be used, and when the source returns
 // after wait gave up.
+//
+// A panic of the source is caught on that goroutine and handed to wait like
+// an answer. wait panics with the same value on the goroutine of the caller.
+// A panic on the goroutine of the source would end the process, and no
+// recover of the caller could stop that.
 type deviceKeyAsk struct {
 	// handed carries what the source returned to wait. It has no buffer on
 	// purpose: a result is either taken by wait, or it is still with the
@@ -763,11 +779,22 @@ type deviceKeyAsk struct {
 	finished chan struct{}
 }
 
-// deviceKeyAnswer is what a DeviceKeySource returned.
+// deviceKeyAnswer is what a DeviceKeySource returned, or the value it
+// panicked with.
 type deviceKeyAnswer struct {
 	key []byte
 	err error
+	// panicked says that the source did not return: it panicked with
+	// panicValue. A flag and not a nil check, so that the meaning does not
+	// rest on what a panic value can be.
+	panicked   bool
+	panicValue any
 }
+
+// errDeviceKeySourceGaveNoAnswer is the cause in the error of a call whose
+// source ended its goroutine without returning and without a panic
+// (runtime.Goexit, which also testing.T.FailNow calls).
+var errDeviceKeySourceGaveNoAnswer = errors.New("qurl: the device key source ended without returning")
 
 // askDeviceKeySource calls source on a new goroutine and returns at once.
 func askDeviceKeySource(ctx context.Context, source DeviceKeySource) *deviceKeyAsk {
@@ -778,15 +805,29 @@ func askDeviceKeySource(ctx context.Context, source DeviceKeySource) *deviceKeyA
 	}
 	go func() {
 		defer close(ask.finished)
-		key, err := source(ctx)
+		answer := callDeviceKeySource(ctx, source)
 		select {
-		case ask.handed <- deviceKeyAnswer{key: key, err: err}:
+		case ask.handed <- answer:
 		case <-ask.gaveUp:
-			// Nobody waits any more, so nobody uses this key.
-			wipeBytes(key)
+			// Nobody waits any more, so nobody uses this key, and nobody is
+			// there to take a panic.
+			wipeBytes(answer.key)
 		}
 	}()
 	return ask
+}
+
+// callDeviceKeySource calls source and catches its panic. A source that
+// calls runtime.Goexit does not come back here: the goroutine ends, and wait
+// sees that through finished.
+func callDeviceKeySource(ctx context.Context, source DeviceKeySource) (answer deviceKeyAnswer) {
+	defer func() {
+		if value := recover(); value != nil {
+			answer = deviceKeyAnswer{panicked: true, panicValue: value}
+		}
+	}()
+	answer.key, answer.err = source(ctx)
+	return answer
 }
 
 // wait returns the key the source gave, or the reason there is none. It
@@ -799,13 +840,27 @@ func (a *deviceKeyAsk) wait(ctx context.Context, firstAnswer error) ([]byte, err
 		close(a.gaveUp)
 		return nil, errCRIDLinkDeviceRequestNotSent(ctx.Err())
 	case got = <-a.handed:
+	case <-a.finished:
+		// The goroutine ended and handed nothing over. It hands an answer
+		// over before it ends, and handed has no buffer, so this is a source
+		// that ended the goroutine itself.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, errCRIDLinkDeviceRequestNotSent(ctxErr)
+		}
+		return nil, &DeviceKeySourceError{Err: errDeviceKeySourceGaveNoAnswer, FirstAnswer: firstAnswer}
 	}
 	// The source can return at the moment the context ends, and then either
 	// case above may run. The context decides, so the outcome is the same:
-	// the key is not used, and the error is the context's.
+	// the key is not used, and the error is the context's. A panic of the
+	// source is dropped then too, as when wait had already given up.
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		wipeBytes(got.key)
 		return nil, errCRIDLinkDeviceRequestNotSent(ctxErr)
+	}
+	if got.panicked {
+		// The panic of the source goes on here, on the goroutine of the
+		// caller, with the value of the source.
+		panic(got.panicValue)
 	}
 	if got.err != nil {
 		// A source that failed may still have returned bytes.

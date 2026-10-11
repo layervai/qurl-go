@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/netip"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -895,6 +896,140 @@ func TestDeviceKeyAsk_WipesAKeyThatArrivesAfterTheWaitGaveUp(t *testing.T) {
 	}
 	if !bytes.Equal(lateKey, make([]byte, len(lateKey))) {
 		t.Fatal("a key that arrived after the call gave up was not wiped")
+	}
+}
+
+// A panic of the source reaches the caller: the call panics with the value of
+// the source, on the goroutine that made the call. So a recover of the caller
+// catches it, as if the call had run the source itself.
+//
+// The source runs on a goroutine of the SDK. A panic that stayed there would
+// end the process, and this test binary with it.
+func TestCRIDLinkAsDeviceFromKeySource_APanicOfTheSourceReachesTheCaller(t *testing.T) {
+	type sourcePanic struct{ why string }
+	for _, form := range keySourceForms() {
+		t.Run(form.name, func(t *testing.T) {
+			fixture, device := newKeySourceFixture(t)
+			// The device may open the resource: a second request would get a link.
+			fixture.servePrivateResource(t, device, cridLinkIssued(t, fixture.link, fixture.info()))
+			value := &sourcePanic{why: "the sealed state is gone"}
+			calls := 0
+			source := func(context.Context) ([]byte, error) {
+				calls++
+				panic(value)
+			}
+
+			var recovered any
+			returned, ok := false, false
+			var err error
+			func() {
+				defer func() { recovered = recover() }()
+				ok, err = form.call(t.Context(), source, fixture.crid, fixture.cfg)
+				returned = true
+			}()
+			if returned {
+				t.Fatalf("the call returned (result %t, error %v); want the panic of the source", ok, err)
+			}
+			if got, isSourcePanic := recovered.(*sourcePanic); !isSourcePanic || got != value {
+				t.Fatalf("the call panicked with %v (%T); want the value of the source", recovered, recovered)
+			}
+			if calls != 1 {
+				t.Fatalf("the source was called %d times, want 1", calls)
+			}
+		})
+	}
+}
+
+// A source that panics after the call gave up panics for nobody. The call
+// has returned the context's error, the panic is dropped, and the goroutine
+// of the source ends. The process goes on.
+func TestDeviceKeyAsk_DropsAPanicThatComesAfterTheWaitGaveUp(t *testing.T) {
+	firstAnswer := fmt.Errorf("%w: %w", ErrCRIDLinkNotFound, &ServerDenyError{ErrCode: "52602"})
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	started, release := make(chan struct{}), make(chan struct{})
+	ask := askDeviceKeySource(ctx, func(context.Context) ([]byte, error) {
+		close(started)
+		<-release
+		panic("the source panics after its context ended")
+	})
+	<-started
+	cancel()
+	key, err := ask.wait(ctx, firstAnswer)
+	if key != nil || err == nil || err.Error() != errDeviceRequestNotSentText(context.Canceled) {
+		t.Fatalf("wait = %d bytes, %v; want no key and the context's error", len(key), err)
+	}
+	close(release)
+	select {
+	case <-ask.finished:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the goroutine of the source did not end after the source panicked")
+	}
+}
+
+// The source can panic at the moment the context ends. Then wait can take
+// either case of its select. The context decides in both: the error is the
+// context's, and wait does not panic.
+//
+// The test first lets the goroutine of the source reach the point where it
+// hands the panic over, and only then ends the context. So both cases of the
+// select are ready when wait starts, and Go takes one of them at random. Over
+// the rounds both are taken.
+func TestDeviceKeyAsk_TheContextDecidesAlsoOverAPanic(t *testing.T) {
+	firstAnswer := fmt.Errorf("%w: %w", ErrCRIDLinkNotFound, &ServerDenyError{ErrCode: "52602"})
+	for range 100 {
+		ctx, cancel := context.WithCancel(t.Context())
+		entered := make(chan struct{})
+		ask := askDeviceKeySource(ctx, func(context.Context) ([]byte, error) {
+			close(entered)
+			panic("the source panics while its context ends")
+		})
+		<-entered
+		// Time for the goroutine to catch the panic and to wait at the
+		// hand-over. A round where it is slower still passes: it takes the
+		// other case.
+		time.Sleep(time.Millisecond)
+		cancel()
+		key, err := ask.wait(ctx, firstAnswer)
+		if key != nil || err == nil || err.Error() != errDeviceRequestNotSentText(context.Canceled) {
+			t.Fatalf("wait = %d bytes, %v; want no key and the context's error", len(key), err)
+		}
+		select {
+		case <-ask.finished:
+		case <-time.After(30 * time.Second):
+			t.Fatal("the goroutine of the source did not end")
+		}
+	}
+}
+
+// A source that ends its goroutine without returning (runtime.Goexit, which
+// testing.T.FailNow also calls) gives no key. The call does not wait for the
+// context to end: it fails at once with a *DeviceKeySourceError, and the
+// request under the device key is not sent.
+func TestCRIDLinkAsDeviceFromKeySource_ASourceThatEndsItsGoroutineGivesNoKey(t *testing.T) {
+	for _, form := range keySourceForms() {
+		t.Run(form.name, func(t *testing.T) {
+			fixture, device := newKeySourceFixture(t)
+			fixture.servePrivateResource(t, device, cridLinkIssued(t, fixture.link, fixture.info()))
+			source := func(context.Context) ([]byte, error) {
+				runtime.Goexit()
+				return nil, nil
+			}
+			// A context with no deadline: a call that waited for it would
+			// hang until the test binary timed out.
+			ok, err := form.call(t.Context(), source, fixture.crid, fixture.cfg)
+			if ok {
+				t.Fatal("a call whose source gave nothing returned a result")
+			}
+			var sourceErr *DeviceKeySourceError
+			if !errors.As(err, &sourceErr) || !errors.Is(err, errDeviceKeySourceGaveNoAnswer) {
+				t.Fatalf("error = %v (%T), want a *DeviceKeySourceError for a source that gave no answer", err, err)
+			}
+			if !errors.Is(sourceErr.FirstAnswer, ErrCRIDLinkNotFound) || err.Error() != deviceKeySourceErrorText {
+				t.Fatalf("error text %q, first answer %v", err.Error(), sourceErr.FirstAnswer)
+			}
+		})
 	}
 }
 

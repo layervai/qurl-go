@@ -30,13 +30,17 @@ and are marked **Breaking** with what to change.
     `*DeviceKeySourceError`, and the request under the device key is not sent.
     `Err` holds the source's error. It matches `ErrInvalidDeviceKey` when the
     source returned a key that is not 32 bytes or holds only zero bytes.
-    `FirstAnswer` holds the "not found" answer to the first request. The error
-    does not match `ErrCRIDLinkNotFound`, and its message never holds the text
-    of the source's error.
+    `FirstAnswer` holds the "not found" answer to the first request. The SDK
+    puts nothing into the error that matches `ErrCRIDLinkNotFound` (it matches
+    only when the source's own error does), and its message never holds the
+    text of the source's error.
   - The context of the call covers the source. The source runs on a goroutine
     of its own, and the call does not wait for it when the context ends. The
     error is then the one for a context that ended between the two requests.
     A key that the source returns later is overwritten with zeros.
+  - A panic of the source is passed on: the call panics with the same value
+    on the goroutine of the caller, where a `recover` of the caller catches
+    it. It is dropped when the context has ended first.
   - A nil source is `ErrInvalidDeviceKey`, before anything is sent and before
     any configuration is resolved.
   - `OpenCRIDAsDevice`, `RequestCRIDLinkAsDevice` and their `With` forms are

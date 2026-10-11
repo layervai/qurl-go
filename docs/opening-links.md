@@ -722,8 +722,11 @@ if errors.As(err, &noKey) {
 }
 ```
 
-- The error does **not** match `ErrCRIDLinkNotFound`. Nobody asked as the
-  device, so it is not known whether the device may open the CRID.
+- The SDK puts nothing into the error that matches `ErrCRIDLinkNotFound`.
+  Nobody asked as the device, so it is not known whether the device may open
+  the CRID. The error holds the error of your source, so it matches
+  `ErrCRIDLinkNotFound` only when your source returns an error that does. A
+  source should not return such an error.
 - Its message is fixed text. It never holds the text of the source's error,
   because the SDK cannot know what a source puts into its error. Read the
   cause from `Err`, or with `errors.Is` and `errors.As`.
@@ -739,6 +742,13 @@ The context of the call covers the source:
   the source. The error is the one for a context that ended between the two
   requests. A key that the source returns later is overwritten with zeros and
   is not used.
+- A panic of the source is passed on to you. The call panics with the same
+  value on the goroutine that made the call, so your own `recover` catches it,
+  as if the call had run the source itself. When the context has ended before
+  the source panics, the call returns the context's error and the panic is
+  dropped. A source that ends its goroutine without returning
+  (`runtime.Goexit`) gives no key: the call fails with a
+  `*DeviceKeySourceError`.
 - When the context has already ended after the first answer, the source is not
   called.
 
