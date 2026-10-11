@@ -410,8 +410,9 @@ request but cannot forge a link. An answer that does not authenticate is an
 error and is never read. The open in step 2 uses native UDP to the
 deployment's cell.
 
-The calls made as a device, `OpenCRIDAsDevice` and `RequestCRIDLinkAsDevice`
-and their `With` forms, may send a second request, under the device key. It
+The calls made as a device, `OpenCRIDAsDevice` and `RequestCRIDLinkAsDevice`,
+their `With` forms and their `FromKeySource` forms, may send a second request,
+under the device key. It
 goes through the same relay. The relay still cannot forge a link or a refusal
 there, but it can do more with that request than with the first one. See
 [What the relay can and cannot do with a request under the device key](#what-the-relay-can-and-cannot-do-with-a-request-under-the-device-key).
@@ -659,6 +660,101 @@ The device key stays yours:
   resolve their configuration refuse it before they resolve anything.
   `ErrInvalidDeviceKey` does not match `ErrInvalidResourceRequest`, which says
   that the CRID cannot be requested.
+
+### Read the device key only when it is needed
+
+The four calls above take the device key as an argument, so the caller must
+hold the key before it calls. For some programs that costs something every
+time: the key is sealed and must be unsealed, or another process holds it. And
+the cost is often for nothing, because a public resource is answered by the
+first request and the device key is never used.
+
+For such a program there are four more calls. Each is one of the calls above
+with a `DeviceKeySource` in place of the key:
+
+| Call | Like |
+| --- | --- |
+| `OpenCRIDAsDeviceFromKeySource` | `OpenCRIDAsDevice` |
+| `OpenCRIDAsDeviceFromKeySourceWith` | `OpenCRIDAsDeviceWith` |
+| `RequestCRIDLinkAsDeviceFromKeySource` | `RequestCRIDLinkAsDevice` |
+| `RequestCRIDLinkAsDeviceFromKeySourceWith` | `RequestCRIDLinkAsDeviceWith` |
+
+A `DeviceKeySource` is a function that returns the device key:
+
+```go
+// unseal returns a new copy of the device key on every call.
+func unseal(ctx context.Context) ([]byte, error) { ... }
+
+handle, err := qurl.OpenCRIDAsDeviceFromKeySource(ctx, unseal, resourceCRID)
+```
+
+These calls send the same requests under the same rule: a random key first,
+the device key only after "not found". Everything this page says about the
+two requests, about the relay and about the context holds for them. What they
+add is when the key is read:
+
+1. **The source is not called for the first request.** A public resource is
+   answered there. So is every call whose first request gets another refusal,
+   a fault, or no answer. A call that is refused before it sends anything does
+   not call the source either.
+2. **The source is called once, and only after "not found".** That is the
+   moment the second request needs the key. There is never a second call in
+   one call of the SDK.
+3. **The SDK owns the key the source returns.** It uses the key as the static
+   key of the second request and overwrites it with zeros before the call
+   returns. Return a slice that nothing else uses, for example a new copy. Do
+   not return a slice you read again later.
+
+This is the one difference in ownership to the calls that take the key. There
+the key stays yours. Here the SDK clears what the source returned, because
+only the SDK knows when the key is no longer needed.
+
+When the source gives no key that can be used, the second request is not sent
+and the call fails with a `*qurl.DeviceKeySourceError`:
+
+```go
+var noKey *qurl.DeviceKeySourceError
+if errors.As(err, &noKey) {
+	// noKey.Err is the error the source returned. It matches
+	// qurl.ErrInvalidDeviceKey when the source returned a key that is not 32
+	// bytes or holds only zero bytes.
+	// noKey.FirstAnswer is the "not found" answer to the first request.
+}
+```
+
+- The SDK puts nothing into the error that matches `ErrCRIDLinkNotFound`.
+  Nobody asked as the device, so it is not known whether the device may open
+  the CRID. The error holds the error of your source, so it matches
+  `ErrCRIDLinkNotFound` only when your source returns an error that does. A
+  source should not return such an error.
+- Its message is fixed text. It never holds the text of the source's error,
+  because the SDK cannot know what a source puts into its error. Read the
+  cause from `Err`, or with `errors.Is` and `errors.As`.
+- `FirstAnswer` is for a program that has no device key after all and goes on
+  as a client without one. The answer for that client is already there, and no
+  second call is needed.
+
+The context of the call covers the source:
+
+- The source gets that context and should return when it ends.
+- The SDK calls the source on a goroutine of its own. When the context ends
+  while the source is running, the call returns at once and does not wait for
+  the source. The error is the one for a context that ended between the two
+  requests. A key that the source returns later is overwritten with zeros and
+  is not used.
+- A panic of the source is passed on to you. The call panics with the same
+  value on the goroutine that made the call, so your own `recover` catches it,
+  as if the call had run the source itself. The stack of that panic starts at
+  the call, not inside your source. When the context has ended before
+  the source panics, the call returns the context's error and the panic is
+  dropped. A source that ends its goroutine without returning
+  (`runtime.Goexit`) gives no key: the call fails with a
+  `*DeviceKeySourceError`.
+- When the context has already ended after the first answer, the source is not
+  called.
+
+A nil source is refused with `ErrInvalidDeviceKey` before the CRID or the
+configuration is looked at, and before anything is sent.
 
 ### What the relay can and cannot do with a request under the device key
 

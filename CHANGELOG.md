@@ -8,6 +8,44 @@ and are marked **Breaking** with what to change.
 
 ## Unreleased
 
+- A call made as a device can read the device key only when it sends it. Four
+  new calls take a `DeviceKeySource`, a function that returns the key, in
+  place of the key: `OpenCRIDAsDeviceFromKeySource` and
+  `RequestCRIDLinkAsDeviceFromKeySource`, which resolve their configuration,
+  and `OpenCRIDAsDeviceFromKeySourceWith` and
+  `RequestCRIDLinkAsDeviceFromKeySourceWith`, which take an explicit `Config`.
+  Use them when reading the key costs something, for example when the key is
+  sealed. They send the same requests as the calls that take the key, under
+  the same rule: a random key first, the device key only after "not found".
+  - The source is called at most once in one call, and only when the first
+    request was answered "not found". A public resource is answered by the
+    first request, so the source is never called for it. It is not called
+    either when the first request gets another answer or no answer, or when
+    the call is refused before it sends anything.
+  - The SDK owns the key the source returns. It uses the key for the second
+    request and overwrites it with zeros before the call returns. Return a
+    slice that nothing else uses. This differs from the calls that take the
+    key, where the key stays the caller's.
+  - A source that gives no usable key ends the call with the new
+    `*DeviceKeySourceError`, and the request under the device key is not sent.
+    `Err` holds the source's error. It matches `ErrInvalidDeviceKey` when the
+    source returned a key that is not 32 bytes or holds only zero bytes.
+    `FirstAnswer` holds the "not found" answer to the first request. The SDK
+    puts nothing into the error that matches `ErrCRIDLinkNotFound` (it matches
+    only when the source's own error does), and its message never holds the
+    text of the source's error.
+  - The context of the call covers the source. The source runs on a goroutine
+    of its own, and the call does not wait for it when the context ends. The
+    error is then the one for a context that ended between the two requests.
+    A key that the source returns later is overwritten with zeros.
+  - A panic of the source is passed on: the call panics with the same value
+    on the goroutine of the caller, where a `recover` of the caller catches
+    it. It is dropped when the context has ended first.
+  - A nil source is `ErrInvalidDeviceKey`, before anything is sent and before
+    any configuration is resolved.
+  - `OpenCRIDAsDevice`, `RequestCRIDLinkAsDevice` and their `With` forms are
+    unchanged, and so are the four calls that take no device key. There is no
+    wire change.
 - A registered device can open a private resource by CRID, with four new
   calls: `OpenCRIDAsDevice` and `RequestCRIDLinkAsDevice`, which resolve their
   configuration as `OpenCRID` and `RequestCRIDLink` do, and

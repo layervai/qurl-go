@@ -82,6 +82,7 @@ And every entry point in one place:
 | `EnterPortal` | Open a received qURL link programmatically; needs no LayerV credentials | `*ResourceHandle` |
 | `OpenCRID` | Open a resource from its CRID alone: asks for a link, checks it against the CRID, and opens it; needs no LayerV credentials ([Open by CRID](#open-by-crid)) | `*ResourceHandle` |
 | `OpenCRIDAsDevice` | Open a resource by CRID as a registered device, which can open a private resource the owner allowed the device to open; takes the device key ([Open by CRID](#open-by-crid)) | `*ResourceHandle` |
+| `OpenCRIDAsDeviceFromKeySource` | The same open for a device that does not hold its key in memory: takes a function that returns the key, and calls it only when the device key is needed ([Open by CRID](#open-by-crid)) | `*ResourceHandle` |
 | `NewPortalOpener` | Keep one native-only received qURL ready for repeated service calls with proactive renewal and no request-path open | `*PortalOpener` |
 
 ## Install
@@ -393,6 +394,13 @@ check is never opened, returned, logged, or quoted in an error.
   connect a request to the device, and the relay can do more with the second
   request than with the first. See
   [Open a private resource](docs/opening-links.md#open-a-private-resource).
+- **The device key can be read only when it is needed.** A device whose key
+  costs something to read, for example a sealed key, calls
+  `OpenCRIDAsDeviceFromKeySource` and passes a function that returns the key.
+  The SDK calls the function once, and only when the first request was
+  answered "not found". A public resource is opened without that call. The SDK
+  overwrites the key the function returned before the call returns. See
+  [Read the device key only when it is needed](docs/opening-links.md#read-the-device-key-only-when-it-is-needed).
 - **Publisher data is display-only and unverified.** `RequestCRIDLink` returns
   the link together with what the server reports about it: a publisher name,
   when the resource was created, when the link expires. None of that is covered
@@ -447,7 +455,7 @@ that raises them:
 | `qurl.ErrPortalRedirect` | A request configured with `RejectPortalRedirects` received a redirect, or a default-policy redirect changed origin |
 | `*qurl.ServerDenyError` | An authenticated platform deny: the reply verified, but access was refused — an expired, revoked, or consumed qURL, or a server-side access check. Also raised by the registered-agent knock path (`KnockRegisteredAgent`) when the assigned cell denies an admission |
 
-**Opening by CRID — `OpenCRID`, `RequestCRIDLink`, `OpenCRIDAsDevice`, `RequestCRIDLinkAsDevice`, and their `With` forms**
+**Opening by CRID — `OpenCRID`, `RequestCRIDLink`, `OpenCRIDAsDevice`, `RequestCRIDLinkAsDevice`, their `With` forms, and the `FromKeySource` forms of the device calls**
 
 The open that follows a successful link request can also return any error from
 the table above.
@@ -467,7 +475,8 @@ the table above.
 | `qurl.ErrCRIDLinkNotConfigured` | — | The configuration cannot make the request: it names no CRID link endpoint, or it names one that cannot be used. Nothing was sent. Wraps `ErrNotConfigured` |
 | `qurl.ErrCRIDLinkMisconfigured` | — | The configuration names a CRID link endpoint that cannot be used: a relay URL or link origin that is missing or wrong, or not exactly one usable cell. Nothing was sent. Wraps `ErrCRIDLinkNotConfigured`, so test for it first |
 | `qurl.ErrInvalidResourceRequest` | — | The CRID failed the local validation gate — the `crid` package's sentinel matches too — or, with `qurl.ErrUnsupportedCRIDVersion`, has a version this SDK cannot verify a link against. Nothing was sent |
-| `qurl.ErrInvalidDeviceKey` | — | A call made as a device was given a device key that is not 32 bytes, or that holds only zero bytes as a wiped key does. Nothing was sent, no configuration was resolved, and the CRID was not looked at. It does not match `ErrInvalidResourceRequest` |
+| `qurl.ErrInvalidDeviceKey` | — | A call made as a device was given a device key that is not 32 bytes, or that holds only zero bytes as a wiped key does, or was given a nil `DeviceKeySource`. Nothing was sent, no configuration was resolved, and the CRID was not looked at. It does not match `ErrInvalidResourceRequest`. A key that a `DeviceKeySource` returns is checked later; see the next row |
+| `*qurl.DeviceKeySourceError` | — | A call that takes a `DeviceKeySource` needed the device key, and the source gave none that can be used. `Err` holds the error the source returned; it matches `ErrInvalidDeviceKey` when the source returned a key that is not 32 bytes or holds only zero bytes. The first request was sent and answered "not found", and `FirstAnswer` holds that answer. The request under the device key was not sent. The SDK puts nothing into it that matches `ErrCRIDLinkNotFound`; it matches only when the source's own error does. Its message never holds the text of `Err` |
 | `*qurl.RelayError` | — | The relay could not be reached, answered with an HTTP error instead of a reply, or began a reply that could not be read to the end (`Status` is then 200). When the caller's context ended the request before a reply was read, the error also matches the context's error |
 | `context.DeadlineExceeded` / `context.Canceled` | — | On its own, matching no other row: the caller's context ended between two steps of the call. For any open by CRID that is after the link was issued and before the open. For a call made as a device it can also be after "not found" and before the request with the device key. The error does not say which, so it does not say whether the device key was sent. Try again with more time |
 
