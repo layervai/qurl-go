@@ -1,0 +1,65 @@
+[
+  {
+    "name": "info",
+    "proof": {
+      "purpose": "info",
+      "crid": "qe4jqpd7eaoslq7jinmjv4yikgzmcxgpjfsuobiniqnko32lpw742pueoujq",
+      "credential_kind": "device",
+      "credential_id": "agent-consumer01",
+      "credential_public_key_b64": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=",
+      "authenticated_peer_key_b64": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=",
+      "admission_public_key_b64": "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVpbXF1eX2A=",
+      "email": "",
+      "disclose_email": false,
+      "invitation_id": "",
+      "nonce": "YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXp7fH1-f4A",
+      "policy_version": 0,
+      "invitation_version": 0,
+      "grant_version": 0,
+      "issued_at": 1791689400
+    },
+    "challenge_b64": "cLBKxwl6YcdchqoNQ2uPO1AqOXacRh5acAMSv5CKp5k"
+  },
+  {
+    "name": "enroll",
+    "proof": {
+      "purpose": "enroll",
+      "crid": "qe4jqpd7eaoslq7jinmjv4yikgzmcxgpjfsuobiniqnko32lpw742pueoujq",
+      "credential_kind": "device",
+      "credential_id": "agent-consumer01",
+      "credential_public_key_b64": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=",
+      "authenticated_peer_key_b64": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=",
+      "admission_public_key_b64": "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVpbXF1eX2A=",
+      "email": "Ana+app@example.com",
+      "disclose_email": true,
+      "invitation_id": "invite_example",
+      "nonce": "YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXp7fH1-f4A",
+      "policy_version": 3,
+      "invitation_version": 2,
+      "grant_version": 0,
+      "issued_at": 1791689400
+    },
+    "challenge_b64": "KEvjlXz4pKqgJvi68XUdOIINt1TgmOQWAGfDwD2UjKA"
+  },
+  {
+    "name": "admit",
+    "proof": {
+      "purpose": "admit",
+      "crid": "qe4jqpd7eaoslq7jinmjv4yikgzmcxgpjfsuobiniqnko32lpw742pueoujq",
+      "credential_kind": "device",
+      "credential_id": "agent-consumer01",
+      "credential_public_key_b64": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=",
+      "authenticated_peer_key_b64": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=",
+      "admission_public_key_b64": "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVpbXF1eX2A=",
+      "email": "Ana+app@example.com",
+      "disclose_email": true,
+      "invitation_id": "invite_example",
+      "nonce": "YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXp7fH1-f4A",
+      "policy_version": 3,
+      "invitation_version": 2,
+      "grant_version": 5,
+      "issued_at": 1791689400
+    },
+    "challenge_b64": "LC3PmK0wTc7QPiAJNsdsLrV_nUiyPHyykxmdO_A8-ts"
+  }
+]
