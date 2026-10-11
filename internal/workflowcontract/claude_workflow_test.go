@@ -566,6 +566,9 @@ func TestTerminalVerifierAssertsOriginDestination(t *testing.T) {
 		{name: "authorization header installed", mutate: func(t *testing.T, fixture gitFixture, _ string) {
 			runGit(t, fixture.repository, "config", "--local", "http.https://github.com/.extraheader", "AUTHORIZATION: basic "+originToken)
 		}, wantError: errCredentialConfig},
+		{name: "credential header for every URL", mutate: func(t *testing.T, fixture gitFixture, _ string) {
+			runGit(t, fixture.repository, "config", "--local", "http.extraheader", "AUTHORIZATION: basic "+originToken)
+		}, wantError: errCredentialConfig},
 
 		{name: "workflow-owned head snapshot moved", mutate: func(t *testing.T, fixture gitFixture, namespace string) {
 			runGit(t, fixture.repository, "update-ref", namespace+"/head", fixture.baseSHA)

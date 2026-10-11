@@ -183,6 +183,14 @@ and are marked **Breaking** with what to change.
   GO-2026-5026). Builders pinned to a 1.25 toolchain (`GOTOOLCHAIN=local`) must
   update. `awsstore` moves to the same floor.
 
+- **The minimum Go version is now 1.26.9, up from 1.26.6.** Advisories published
+  on 2026-10-08 are reachable from this SDK on 1.26.6 through 1.26.8
+  (GO-2026-6603, GO-2026-6604, GO-2026-6605, GO-2026-6607, GO-2026-6608,
+  GO-2026-6610, GO-2026-6611, GO-2026-6612, GO-2026-6613, GO-2026-6617), and
+  1.26.9 is the first 1.26 release that fixes them. Builders pinned to
+  1.26.0 through 1.26.8 (`GOTOOLCHAIN=local`) must update. `awsstore` moves to
+  the same floor.
+
 - Conformance vectors are pinned at `qurl-conformance` v0.17.1, up from v0.14.0.
   The native Connector CRID artifact is byte-identical to v0.17.0; v0.17.1
   restores the public credential-recovery vectors this SDK tests against.

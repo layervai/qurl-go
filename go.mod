@@ -12,23 +12,23 @@ module github.com/layervai/qurl-go
 // golang.org/x/sys v0.48.0 declare go 1.26.0, and Go 1.25 is out of support
 // since Go 1.27 shipped.
 //
-// 1.26.6 is the oldest 1.26 release that qualifies. It fixes the
-// standard-library vulnerabilities govulncheck reports as reachable from here:
+// 1.26.9 is the oldest 1.26 release that qualifies. It fixes the
+// standard-library vulnerabilities govulncheck reports as reachable from here
+// at 1.26.6 through 1.26.8:
 //
-//   - GO-2026-6218, quadratic path resolution in net/url
-//   - GO-2026-6090, unbounded post-handshake messages in crypto/tls
-//   - GO-2026-5972, unbounded recursion in encoding/asn1
-//   - GO-2026-5026, invalid Punycode-label acceptance through net/http
+//   - GO-2026-6603, 6610, 6611, 6612, 6617: HTTP/2 handling in net/http
+//   - GO-2026-6605, 6613: HTTP/1 CONNECT connection desynchronization in net/http
+//   - GO-2026-6608: MIME header memory limit bypass in net/textproto
+//   - GO-2026-6607: malformed ECH extension references in crypto/tls
+//   - GO-2026-6604: os.Root escape through junctions on Windows
 //
-// The first three are reached through HTTP/TLS and certificate parsing; the
-// fourth is reached through HTTP. 1.26.5 still reports all four, and 1.26.4
-// additionally reports GO-2026-5856 and GO-2026-4970.
+// All are reached through HTTP/TLS, except the last, which is reached through
+// file handling. 1.26.6 already fixed GO-2026-6218, 6090, 5972 and 5026.
 //
-// Anything below 1.26.6 on the 1.26 line reintroduces a reachable
+// Anything below 1.26.9 on the 1.26 line reintroduces a reachable
 // vulnerability. The 1.25 line is excluded because it is out of support and
-// below the go 1.26.0 that x/crypto and x/sys declare, not because 1.25.13 is
-// itself vulnerable. Before changing this line, run `make vuln` at the
-// candidate version.
+// below the go 1.26.0 that x/crypto and x/sys declare. Before changing this
+// line, run `make vuln` at the candidate version.
 //
 // ./awsstore and go.work sit at this same floor, but do not read that as
 // permanent. awsstore requires the PUBLISHED parent module, so a future floor
@@ -36,7 +36,7 @@ module github.com/layervai/qurl-go
 // follow. That window is why the root CI jobs set GOWORK=off — see
 // .github/workflows/ci.yml. Keep it even while the floors agree; it makes a
 // future reduction possible without breaking every root job.
-go 1.26.6
+go 1.26.9
 
 require (
 	github.com/layervai/qurl-conformance v0.17.2

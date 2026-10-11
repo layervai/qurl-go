@@ -90,7 +90,7 @@ check_origin() {
      "$(git remote get-url --all origin 2>/dev/null)" == "${local_origin}" &&
      "$(git remote get-url --push --all origin 2>/dev/null)" == "${local_origin}" &&
      "$(git config --local --get-all fetch.recurseSubmodules 2>/dev/null)" == "false" ]] &&
-    ! git config --local --get-regexp '^http\..*\.extraheader$' >/dev/null 2>&1 &&
+    ! git config --local --get-regexp '^http\.(.*\.)?extraheader$' >/dev/null 2>&1 &&
     ! git config --local --get-regexp '^credential(\..*)?\.helper$' >/dev/null 2>&1
 }
 
