@@ -1,9 +1,11 @@
 package qurl
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -86,6 +88,81 @@ func TestUpdateConsumerPolicyAcceptsFlatResourceAndRejectsMismatch(t *testing.T)
 		}
 		if mode != "review" && !errors.Is(err, ErrInvalidAPIResponse) {
 			t.Fatalf("mismatched policy accepted: %v", err)
+		}
+	}
+}
+
+func TestConsumerCreationConfirmsPrivatePolicyAndKeepsExistingRevision(t *testing.T) {
+	for _, connector := range []bool{false, true} {
+		for _, tc := range []struct {
+			name     string
+			policy   *ConsumerAccessPolicy
+			private  bool
+			existing bool
+			ok       bool
+		}{
+			{"new", &ConsumerAccessPolicy{Mode: "review", Version: 1}, true, false, true},
+			{"unsupported", nil, true, false, false},
+			{"existing", &ConsumerAccessPolicy{Mode: "review", Version: 3}, true, true, true},
+			{"new_wrong_revision", &ConsumerAccessPolicy{Mode: "review", Version: 3}, true, false, false},
+			{"changed_mode", &ConsumerAccessPolicy{Mode: "keys", Version: 3}, true, true, false},
+			{"public", &ConsumerAccessPolicy{Mode: "review", Version: 1}, false, false, false},
+		} {
+			t.Run(fmt.Sprintf("connector=%t/%s", connector, tc.name), func(t *testing.T) {
+				calls := 0
+				api := doerFunc(func(req *http.Request) (*http.Response, error) {
+					calls++
+					var sent struct {
+						ConsumerAccess *ConsumerAccessPolicy `json:"consumer_access"`
+						Private        *bool                 `json:"private"`
+					}
+					if err := json.NewDecoder(req.Body).Decode(&sent); err != nil {
+						t.Fatal(err)
+					}
+					if sent.Private == nil || !*sent.Private || sent.ConsumerAccess == nil || sent.ConsumerAccess.Version != 1 {
+						t.Fatal("private creation request changed")
+					}
+					data := map[string]any{"resource_id": testConnectorID, "crid": testConnectorCRID, "private": tc.private, "consumer_access": tc.policy, "status": "active", "target_url": privacyTestTargetURL}
+					if connector {
+						data["type"] = "tunnel"
+						data["slug"] = testConnectorSlug
+						data["connector_routing_id"] = testConnectorRoutingID
+						data["knock_resource_id"] = testKnockID
+					}
+					body, err := json.Marshal(map[string]any{"data": data, "meta": map[string]any{"found_existing": tc.existing}})
+					if err != nil {
+						t.Fatal(err)
+					}
+					return &http.Response{StatusCode: http.StatusCreated, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(body))}, nil
+				})
+				client, err := NewClient(BearerToken("lv_test_policy"), WithBaseURL("https://api.example.test"), WithHTTPClient(api))
+				if err != nil {
+					t.Fatal(err)
+				}
+				expected := ConsumerAccessPolicy{Mode: "review", Version: 1}
+				if connector {
+					var result *EnsureConnectorResourceResult
+					result, err = client.EnsureConnectorResourceWithOptions(t.Context(), testConnectorSlug, WithConsumerAccess(expected))
+					if tc.ok && (result == nil || result.Resource.ConsumerAccess.Version != tc.policy.Version) {
+						t.Fatal("lost current Connector policy")
+					}
+				} else {
+					var result *Resource
+					result, err = client.ProtectURL(t.Context(), privacyTestTargetURL, WithConsumerAccess(expected))
+					if tc.ok && (result == nil || result.ConsumerAccess.Version != tc.policy.Version) {
+						t.Fatal("lost current URL policy")
+					}
+				}
+				if tc.ok && err != nil {
+					t.Fatal(err)
+				}
+				if !tc.ok && !errors.Is(err, ErrInvalidAPIResponse) {
+					t.Fatalf("unconfirmed policy accepted: %v", err)
+				}
+				if calls != 1 {
+					t.Fatal("creation performed a second mutation")
+				}
+			})
 		}
 	}
 }

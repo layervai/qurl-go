@@ -818,13 +818,21 @@ func (c *Client) ProtectURL(ctx context.Context, targetURL string, opts ...Resou
 		ConsumerAccess: cfg.consumerAccess,
 	}
 
-	var env apiEnvelope[createResourceResponse]
+	var env struct {
+		Data createResourceResponse `json:"data"`
+		Meta struct {
+			FoundExisting *bool `json:"found_existing"`
+		} `json:"meta"`
+	}
 	if err := c.postJSON(ctx, "/v1/resources", reqBody, &env); err != nil {
 		return nil, err
 	}
 	resource, err := env.Data.resource()
 	if err != nil {
 		return nil, err
+	}
+	if !consumerCreationPolicyConfirmed(resource.Private, resource.ConsumerAccess, cfg.consumerAccess, env.Meta.FoundExisting != nil && *env.Meta.FoundExisting) {
+		return nil, fmt.Errorf("%w: private consumer policy was not confirmed", ErrInvalidAPIResponse)
 	}
 	resource.client = c
 	return resource, nil

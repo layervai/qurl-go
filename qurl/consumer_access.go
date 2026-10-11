@@ -105,3 +105,13 @@ func (c *Client) UpdateConsumerAccess(ctx context.Context, resourceCRID string, 
 	}
 	return nil
 }
+
+func consumerCreationPolicyConfirmed(private *bool, actual, expected *ConsumerAccessPolicy, foundExisting bool) bool {
+	if expected == nil {
+		return true
+	}
+	if private == nil || !*private || actual == nil || actual.validate() != nil || actual.Mode != expected.Mode || actual.ContractID != expected.ContractID {
+		return false
+	}
+	return actual.Version == expected.Version || (foundExisting && actual.Version > expected.Version)
+}

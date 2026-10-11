@@ -275,6 +275,9 @@ func (c *Client) EnsureConnectorResourceWithOptions(ctx context.Context, slug st
 		// drift, but it does not make that mutation outcome itself unknown.
 		return nil, invalidConnectorResourceResponse("missing meta.found_existing")
 	}
+	if !consumerCreationPolicyConfirmed(resource.Private, resource.ConsumerAccess, cfg.consumerAccess, *response.Meta.FoundExisting) {
+		return nil, invalidConnectorResourceResponse("private consumer policy was not confirmed")
+	}
 	return &EnsureConnectorResourceResult{
 		Resource:      resource,
 		FoundExisting: *response.Meta.FoundExisting,
