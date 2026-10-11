@@ -174,6 +174,8 @@ func registeredAgentResourceRouteAllowed(method, path string) bool {
 		return method == http.MethodGet || method == http.MethodPatch || method == http.MethodDelete
 	case 2:
 		switch segments[1] {
+		case "preview":
+			return method == http.MethodGet || method == http.MethodPatch
 		case "sharing":
 			return method == http.MethodGet || method == http.MethodPut
 		case "share":
@@ -187,6 +189,8 @@ func registeredAgentResourceRouteAllowed(method, path string) bool {
 		}
 	case 3:
 		switch segments[1] {
+		case "preview":
+			return segments[2] == "uploads" && method == http.MethodPost
 		case "sharing":
 			return segments[2] == "restart" && method == http.MethodPost
 		case "qurls":
