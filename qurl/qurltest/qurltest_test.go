@@ -500,6 +500,61 @@ func TestCRIDLinkServer_PrivateFor(t *testing.T) {
 	}
 }
 
+// The server also drives the device calls that take a key source. They send
+// what the calls with a key send, so the server needs nothing new for them.
+// What a test sees through it is when the SDK reads the key: never for a
+// public resource, and once for a private one.
+func TestCRIDLinkServer_DrivesTheCallsThatTakeAKeySource(t *testing.T) {
+	devicePrivate, devicePublic := newDeviceKey(t)
+	calls := 0
+	source := func(context.Context) ([]byte, error) {
+		calls++
+		// A new copy on every call: the SDK overwrites what it is given.
+		return slices.Clone(devicePrivate), nil
+	}
+
+	// A public resource: one request under a random key, and no call.
+	public := qurltest.NewCRIDLinkServer()
+	crid := public.CRID()
+	plain, asDevice := qurltest.CRIDLinkRequest{CRID: crid}, qurltest.CRIDLinkRequest{CRID: crid, AsDevice: true}
+	issued, err := qurl.RequestCRIDLinkAsDeviceFromKeySourceWith(t.Context(), source, crid, public.Config())
+	if err != nil || issued == nil {
+		t.Fatalf("RequestCRIDLinkAsDeviceFromKeySourceWith for a public resource = %v, %v; want the link", issued, err)
+	}
+	if got, want := public.Requests(), []qurltest.CRIDLinkRequest{plain}; !slices.Equal(got, want) || calls != 0 {
+		t.Fatalf("a public resource: Requests() = %+v and %d calls of the source\nwant %+v and no call", got, calls, want)
+	}
+
+	// A private resource the device may open: the second request, under the
+	// key the source returned, and one call.
+	private := qurltest.NewCRIDLinkServer()
+	private.PrivateFor(devicePublic)
+	issued, err = qurl.RequestCRIDLinkAsDeviceFromKeySourceWith(t.Context(), source, crid, private.Config())
+	if err != nil || issued == nil {
+		t.Fatalf("RequestCRIDLinkAsDeviceFromKeySourceWith for a private resource = %v, %v; want the link", issued, err)
+	}
+	if got, want := private.Requests(), []qurltest.CRIDLinkRequest{plain, asDevice}; !slices.Equal(got, want) || calls != 1 {
+		t.Fatalf("a private resource: Requests() = %+v and %d calls of the source\nwant %+v and one call", got, calls, want)
+	}
+
+	// A source that has no key: the call ends after the first request, and
+	// the error keeps the answer to it.
+	errNoKey := errors.New("this device holds no key")
+	issued, err = qurl.RequestCRIDLinkAsDeviceFromKeySourceWith(t.Context(), func(context.Context) ([]byte, error) {
+		return nil, errNoKey
+	}, crid, private.Config())
+	var sourceErr *qurl.DeviceKeySourceError
+	if issued != nil || !errors.As(err, &sourceErr) || !errors.Is(err, errNoKey) || errors.Is(err, qurl.ErrCRIDLinkNotFound) {
+		t.Fatalf("with a source that fails = %v, %v; want a *qurl.DeviceKeySourceError that holds the error of the source and is not ErrCRIDLinkNotFound", issued, err)
+	}
+	if !errors.Is(sourceErr.FirstAnswer, qurl.ErrCRIDLinkNotFound) {
+		t.Fatalf("FirstAnswer = %v, want the not-found answer to the first request", sourceErr.FirstAnswer)
+	}
+	if got, want := private.Requests(), []qurltest.CRIDLinkRequest{plain, asDevice, plain}; !slices.Equal(got, want) {
+		t.Fatalf("after a source that fails: Requests() = %+v\nwant %+v", got, want)
+	}
+}
+
 func TestCRIDLinkServer_PrivateForPanicsOnWhatIsNotAKey(t *testing.T) {
 	server := qurltest.NewCRIDLinkServer()
 	for _, key := range [][]byte{nil, {}, make([]byte, 31), make([]byte, 33)} {

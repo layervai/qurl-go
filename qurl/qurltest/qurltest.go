@@ -14,7 +14,8 @@
 // check off. It only stands where the relay and the server would stand.
 //
 // CRIDLinkServer.PrivateFor makes the resource private, so a test can drive
-// qurl.RequestCRIDLinkAsDeviceWith the same way.
+// qurl.RequestCRIDLinkAsDeviceWith the same way, and
+// qurl.RequestCRIDLinkAsDeviceFromKeySourceWith, which sends the same requests.
 //
 // The link and the keys come from the public conformance vectors
 // (github.com/layervai/qurl-conformance). They are test material that anyone
