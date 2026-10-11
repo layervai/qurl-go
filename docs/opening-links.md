@@ -744,7 +744,8 @@ The context of the call covers the source:
   is not used.
 - A panic of the source is passed on to you. The call panics with the same
   value on the goroutine that made the call, so your own `recover` catches it,
-  as if the call had run the source itself. When the context has ended before
+  as if the call had run the source itself. The stack of that panic starts at
+  the call, not inside your source. When the context has ended before
   the source panics, the call returns the context's error and the panic is
   dropped. A source that ends its goroutine without returning
   (`runtime.Goexit`) gives no key: the call fails with a

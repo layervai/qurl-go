@@ -204,7 +204,9 @@ var (
 // A panic of the source is passed on to the caller. The call panics with the
 // same value on the goroutine of the caller, as if the call had run the source
 // itself, so a recover of the caller catches it. It does not end the process
-// from a goroutine that the caller cannot reach. When the context has ended
+// from a goroutine that the caller cannot reach. The stack of that panic
+// starts at the call, not inside the source: a source that wants the place of
+// its own fault in a log must record it itself. When the context has ended
 // before the source panics, the call returns the context's error and the
 // panic is dropped: nobody waits for that source any more. A source that
 // ends its goroutine without returning (runtime.Goexit) gives no key: the
