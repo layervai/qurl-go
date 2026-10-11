@@ -50,6 +50,11 @@ import (
 // only when the server answers the first request with "not found": the second
 // request is the same request, sent under the caller's device key. See
 // RequestCRIDLinkAsDeviceWith.
+//
+// A call made as a device takes the device key in one of two ways. The calls
+// above take the key itself. The FromKeySource calls take a DeviceKeySource, a
+// function that the SDK calls only when the second request is needed. Both
+// follow the same rule and send the same requests.
 
 // CRIDLink is a qURL link the server issued for a CRID, returned only after
 // every client check on it has passed: it is on the deployment's link origin,
@@ -161,8 +166,83 @@ var (
 	//
 	// It does not match ErrInvalidResourceRequest. That error says that the
 	// CRID cannot be requested, and here the CRID was not looked at.
+	//
+	// The calls that take a DeviceKeySource report two more faults with it. A
+	// nil source is refused in the same way, before anything is sent. A key
+	// that the source returns is checked when the source returns it. That is
+	// after the first request was sent and answered, so the error is then a
+	// *DeviceKeySourceError that also matches ErrInvalidDeviceKey.
 	ErrInvalidDeviceKey = errors.New("qurl: invalid device static private key")
 )
+
+// DeviceKeySource gives a call made as a device the device key at the moment
+// the call needs it, and not before. Use it when getting the key costs
+// something: the key is sealed, or another process holds it. The calls that
+// take one are RequestCRIDLinkAsDeviceFromKeySource,
+// OpenCRIDAsDeviceFromKeySource, and their With forms.
+//
+// The SDK calls the source at most once in one call. It calls it only when
+// the first request, under a random key, was answered "not found", so that a
+// second request under the device key is needed. A call that ends in any
+// other way never calls the source. That is every call for a public resource,
+// every call whose first request gets another answer or no answer, and every
+// call that is refused before it sends anything.
+//
+// The source returns the device's 32-byte X25519 static private key, the key
+// KnockRegisteredAgent takes. The slice it returns belongs to the SDK from
+// then on. The SDK uses it as the static key of one knock and overwrites it
+// with zeros before the call returns. So return a slice that nothing else
+// uses, for example a new copy of the key. Do not return a slice you read
+// again later.
+//
+// The source runs on a goroutine of its own. Its context is the context of the
+// call, and a source should return when that context ends. The call does not
+// wait for a source that does not: when the context ends, the call returns
+// the context's error at once. A key that such a source returns later is
+// overwritten with zeros and is not used. The SDK does not recover a panic of
+// the source.
+//
+// A source that cannot give the key returns an error. The call then fails
+// with a *DeviceKeySourceError, and no request is sent under the device key.
+// The SDK never logs what a source returns, and it never puts a key or the
+// text of the source's error into an error message.
+type DeviceKeySource func(ctx context.Context) ([]byte, error)
+
+// DeviceKeySourceError reports that a call made as a device needed the device
+// key, and its DeviceKeySource gave no key that can be used. The request under
+// the device key was not sent.
+//
+// The source is called only after the first request, under a random key, was
+// answered "not found". So this error also says that the first request was
+// sent and answered. It does not match ErrCRIDLinkNotFound. Nobody asked as
+// the device, so it is not known whether the device may open the CRID.
+//
+// The message is fixed text. It never holds the text of Err: the SDK cannot
+// know what a source puts into its error. Read the cause from Err, or with
+// errors.Is and errors.As.
+type DeviceKeySourceError struct {
+	// Err is the error the source returned. When the source returned a key
+	// that cannot be used, Err matches ErrInvalidDeviceKey and its message
+	// says what is wrong with the key.
+	Err error
+	// FirstAnswer is the error of the first request. It is what
+	// RequestCRIDLinkWith returns for the same request, and it matches
+	// ErrCRIDLinkNotFound.
+	//
+	// It is a field and not part of the error chain, so that this error does
+	// not match ErrCRIDLinkNotFound. A caller that has no device key after
+	// all, and goes on as a client without one, takes its answer from here.
+	// It does not need a second call for it.
+	FirstAnswer error
+}
+
+func (e *DeviceKeySourceError) Error() string {
+	return "qurl: the CRID link request with the device key was not sent because the device key source gave no usable key"
+}
+
+// Unwrap returns Err, so errors.Is and errors.As find the cause. It does not
+// return FirstAnswer.
+func (e *DeviceKeySourceError) Unwrap() error { return e.Err }
 
 // CRIDLinkRejectClass names the client check an issued link failed. The set is
 // closed and matches the reject_classes of the public CRID link knock vectors.
@@ -298,7 +378,7 @@ func RequestCRIDLink(ctx context.Context, resourceCRID string) (*CRIDLink, error
 // link as a registered device, which can open a private resource too, use
 // RequestCRIDLinkAsDeviceWith.
 func RequestCRIDLinkWith(ctx context.Context, resourceCRID string, cfg Config) (*CRIDLink, error) {
-	return requestCRIDLink(ctx, resourceCRID, cfg, nil)
+	return requestCRIDLink(ctx, resourceCRID, cfg, cridLinkDeviceKey{})
 }
 
 // RequestCRIDLinkAsDevice is RequestCRIDLink for a registered device. It can
@@ -438,7 +518,93 @@ func RequestCRIDLinkAsDeviceWith(ctx context.Context, deviceStaticPrivateKey []b
 	if err := validateCRIDLinkDeviceKey(deviceStaticPrivateKey); err != nil {
 		return nil, err
 	}
-	return requestCRIDLink(ctx, resourceCRID, cfg, deviceStaticPrivateKey)
+	return requestCRIDLink(ctx, resourceCRID, cfg, cridLinkDeviceKey{lent: deviceStaticPrivateKey})
+}
+
+// RequestCRIDLinkAsDeviceFromKeySource is RequestCRIDLinkAsDevice for a
+// caller that does not hold the device key yet. It takes a DeviceKeySource in
+// place of the key, and calls it only when the device key is needed.
+//
+// It resolves configuration as RequestCRIDLink does, and then calls
+// RequestCRIDLinkAsDeviceFromKeySourceWith. Read that call for when the source
+// is called and what happens to the key. Read RequestCRIDLinkAsDeviceWith for
+// the rule both calls follow: a random key first, the device key only after
+// "not found".
+//
+// A nil source is refused first, with ErrInvalidDeviceKey, and a CRID that
+// cannot be requested second, with ErrInvalidResourceRequest. Both are refused
+// before any configuration is resolved, so neither costs any I/O.
+func RequestCRIDLinkAsDeviceFromKeySource(ctx context.Context, deviceKeySource DeviceKeySource, resourceCRID string) (*CRIDLink, error) {
+	// The source gate comes before everything else, as in the With form.
+	if err := validateDeviceKeySource(deviceKeySource); err != nil {
+		return nil, err
+	}
+	// Before resolveDefaultConfig, for the reason RequestCRIDLinkAsDevice
+	// gives: a Provider may do network I/O.
+	if err := validateCRIDForLinkRequest(resourceCRID); err != nil {
+		return nil, err
+	}
+	cfg, err := resolveDefaultConfig(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return RequestCRIDLinkAsDeviceFromKeySourceWith(ctx, deviceKeySource, resourceCRID, cfg)
+}
+
+// RequestCRIDLinkAsDeviceFromKeySourceWith is RequestCRIDLinkAsDeviceWith for
+// a caller that does not hold the device key yet. It takes a DeviceKeySource
+// in place of the key. cfg is what RequestCRIDLinkWith needs.
+//
+// It sends the same requests as RequestCRIDLinkAsDeviceWith, under the same
+// rule: a random key first, the device key only after "not found". Everything
+// RequestCRIDLinkAsDeviceWith says about the two requests, about the relay and
+// about the context holds here. The difference is when the key is read:
+//
+//  1. The first request is sent under a random key. The source is not called
+//     for it. A public resource is answered here, and so is every call whose
+//     first request gets another refusal, a fault, or no answer. In all of
+//     these the source is never called.
+//  2. Only when the server answers the first request with "not found" does
+//     the call ask the source for the key. It asks once.
+//  3. With the key, the call sends the second request, and the answer to it
+//     is the result. The call overwrites the key with zeros before it
+//     returns, whatever the answer was.
+//
+// When the source gives no key that can be used, the second request is not
+// sent, and the error is a *DeviceKeySourceError. That is the case for a
+// source that returns an error, and for one that returns a key that is not 32
+// bytes or holds only zero bytes. The error does not match
+// ErrCRIDLinkNotFound. Its FirstAnswer field holds the answer to the first
+// request.
+//
+// The context covers the source too. When the context ends while the source is
+// running, the call returns at once, without waiting for the source. The error
+// is the one for a context that ended between the two requests: it matches the
+// context's error and does not match ErrCRIDLinkNotFound. A key that the
+// source returns after that is overwritten with zeros and is not used. So a
+// context error still does not say whether the device key was sent.
+//
+// A nil source is refused before the CRID or the configuration is looked at
+// and before anything is sent. That error is ErrInvalidDeviceKey.
+func RequestCRIDLinkAsDeviceFromKeySourceWith(
+	ctx context.Context, deviceKeySource DeviceKeySource, resourceCRID string, cfg Config,
+) (*CRIDLink, error) {
+	if err := validateDeviceKeySource(deviceKeySource); err != nil {
+		return nil, err
+	}
+	return requestCRIDLink(ctx, resourceCRID, cfg, cridLinkDeviceKey{source: deviceKeySource})
+}
+
+// validateDeviceKeySource is the gate a DeviceKeySource passes before a link
+// is requested with it. A call made "as a device" with no source must not
+// turn into the call that takes no key, so a nil source is refused. It is
+// refused here, in front of everything, as a missing key is: the error does
+// not depend on the CRID, on the configuration, or on the server's answer.
+func validateDeviceKeySource(deviceKeySource DeviceKeySource) error {
+	if deviceKeySource == nil {
+		return fmt.Errorf("%w: no device key source was given", ErrInvalidDeviceKey)
+	}
+	return nil
 }
 
 // validateCRIDLinkDeviceKey is the gate a device key passes before a link is
@@ -448,6 +614,11 @@ func RequestCRIDLinkAsDeviceWith(ctx context.Context, deviceStaticPrivateKey []b
 // used. The key is used only after the server has answered "not found", so a
 // bad key found at that point would be an error that depends on the server's
 // answer. A caller with a bad key gets the same error for every CRID.
+//
+// A key from a DeviceKeySource cannot pass the gate that early: the key does
+// not exist for the call until the source returns it. keyFromDeviceKeySource
+// applies the same gate at that point, and reports a key that fails it as a
+// *DeviceKeySourceError.
 //
 // A key of only zero bytes is refused. It is what a wiped buffer holds, and it
 // is not a secret, so it cannot be the key of a registered device.
@@ -470,14 +641,32 @@ func validateCRIDLinkDeviceKey(deviceStaticPrivateKey []byte) error {
 	return nil
 }
 
-// requestCRIDLink is the one code path behind RequestCRIDLinkWith and
-// RequestCRIDLinkAsDeviceWith.
+// cridLinkDeviceKey says where a link request made as a device takes the
+// device key from. The zero value is a request that is not made as a device.
+// At most one of the two fields is set.
+type cridLinkDeviceKey struct {
+	// lent is a key the caller passed to the call. The caller has passed it
+	// through validateCRIDLinkDeviceKey. It stays the caller's: it is not kept
+	// and not wiped.
+	lent []byte
+	// source gives the key when the second request needs it. The caller has
+	// passed it through validateDeviceKeySource. A key it returns is the
+	// SDK's, and is wiped when the second request has ended.
+	source DeviceKeySource
+}
+
+// asDevice reports whether the request is made as a device.
+func (k cridLinkDeviceKey) asDevice() bool {
+	return len(k.lent) != 0 || k.source != nil
+}
+
+// requestCRIDLink is the one code path behind RequestCRIDLinkWith,
+// RequestCRIDLinkAsDeviceWith and RequestCRIDLinkAsDeviceFromKeySourceWith.
 //
-// With an empty deviceStaticPrivateKey it sends one request and returns its
-// answer, whatever the answer is. With a key, which the caller has passed
-// through validateCRIDLinkDeviceKey, it follows the rule documented on
-// RequestCRIDLinkAsDeviceWith.
-func requestCRIDLink(ctx context.Context, resourceCRID string, cfg Config, deviceStaticPrivateKey []byte) (*CRIDLink, error) {
+// With the zero device it sends one request and returns its answer, whatever
+// the answer is. With a device key, or a source for one, it follows the rule
+// documented on RequestCRIDLinkAsDeviceWith.
+func requestCRIDLink(ctx context.Context, resourceCRID string, cfg Config, device cridLinkDeviceKey) (*CRIDLink, error) {
 	if err := validateCRIDForLinkRequest(resourceCRID); err != nil {
 		return nil, err
 	}
@@ -498,7 +687,9 @@ func requestCRIDLink(ctx context.Context, resourceCRID string, cfg Config, devic
 	// afterwards. The server decides a public resource on the CRID in the body,
 	// so a key that outlived the call would only make two requests linkable.
 	issued, err := requestCRIDLinkOnce(ctx, resourceCRID, endpoint, body, cfg, nil)
-	if len(deviceStaticPrivateKey) == 0 || !errors.Is(err, ErrCRIDLinkNotFound) {
+	if !device.asDevice() || !errors.Is(err, ErrCRIDLinkNotFound) {
+		// Also for a device this is the end of every call but one. A source of
+		// the device key was not called, so nothing was read to get here.
 		return issued, err
 	}
 
@@ -509,16 +700,123 @@ func requestCRIDLink(ctx context.Context, resourceCRID string, cfg Config, devic
 	//
 	// One context covers both requests. If it has already ended, a second
 	// request could not finish, so none is started and the device key is never
-	// used. The first answer is not returned in that case. For a device,
-	// "not found" is established only by the answer to the device's own
-	// request, and that request was never sent. So the error is the context's
-	// error, and it does not match ErrCRIDLinkNotFound.
+	// used. A source is not asked for it either. The first answer is not
+	// returned in that case. For a device, "not found" is established only by
+	// the answer to the device's own request, and that request was never
+	// sent. So the error is the context's error, and it does not match
+	// ErrCRIDLinkNotFound.
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		return nil, fmt.Errorf("qurl: the CRID link request with the device key was not sent because the context ended first: %w", ctxErr)
+		return nil, errCRIDLinkDeviceRequestNotSent(ctxErr)
+	}
+	deviceStaticPrivateKey := device.lent
+	if device.source != nil {
+		// This is the only place a source is called, and a call comes here at
+		// most once.
+		notFound := err
+		deviceStaticPrivateKey, err = keyFromDeviceKeySource(ctx, device.source, notFound)
+		if err != nil {
+			return nil, err
+		}
+		// A key from a source is the SDK's. It is used for the request below
+		// and is gone when this function returns.
+		defer wipeBytes(deviceStaticPrivateKey)
 	}
 	// The same body, under the device key. The key is the static key of this
 	// one knock and goes nowhere else. Whatever comes back is the result.
 	return requestCRIDLinkOnce(ctx, resourceCRID, endpoint, body, cfg, deviceStaticPrivateKey)
+}
+
+// errCRIDLinkDeviceRequestNotSent is the error of a call made as a device
+// whose context ended after the first request was answered "not found" and
+// before the request under the device key was sent. It has one form, whether
+// the context ended between the two requests or while a source was asked for
+// the key.
+func errCRIDLinkDeviceRequestNotSent(ctxErr error) error {
+	return fmt.Errorf("qurl: the CRID link request with the device key was not sent because the context ended first: %w", ctxErr)
+}
+
+// keyFromDeviceKeySource asks source for the device key, once, and returns a
+// key that has passed validateCRIDLinkDeviceKey. The caller wipes that key.
+// firstAnswer is the "not found" error of the first request. It is not
+// returned. It is only stored in the error for a source that gave no key.
+func keyFromDeviceKeySource(ctx context.Context, source DeviceKeySource, firstAnswer error) ([]byte, error) {
+	return askDeviceKeySource(ctx, source).wait(ctx, firstAnswer)
+}
+
+// deviceKeyAsk is one call of a DeviceKeySource. The source runs on a
+// goroutine of its own, so that the context ends the wait for it also when the
+// source does not look at the context.
+//
+// Every key the source returns is wiped on every path that does not hand it
+// to the caller of wait: when the context has ended, when the source returned
+// an error beside it, when the key cannot be used, and when the source returns
+// after wait gave up.
+type deviceKeyAsk struct {
+	// handed carries what the source returned to wait. It has no buffer on
+	// purpose: a result is either taken by wait, or it is still with the
+	// goroutine, which then wipes the key.
+	handed chan deviceKeyAnswer
+	// gaveUp is closed by wait when it stops waiting for the source.
+	gaveUp chan struct{}
+	// finished is closed when the goroutine has ended: wait took the result,
+	// or the goroutine wiped the key.
+	finished chan struct{}
+}
+
+// deviceKeyAnswer is what a DeviceKeySource returned.
+type deviceKeyAnswer struct {
+	key []byte
+	err error
+}
+
+// askDeviceKeySource calls source on a new goroutine and returns at once.
+func askDeviceKeySource(ctx context.Context, source DeviceKeySource) *deviceKeyAsk {
+	ask := &deviceKeyAsk{
+		handed:   make(chan deviceKeyAnswer),
+		gaveUp:   make(chan struct{}),
+		finished: make(chan struct{}),
+	}
+	go func() {
+		defer close(ask.finished)
+		key, err := source(ctx)
+		select {
+		case ask.handed <- deviceKeyAnswer{key: key, err: err}:
+		case <-ask.gaveUp:
+			// Nobody waits any more, so nobody uses this key.
+			wipeBytes(key)
+		}
+	}()
+	return ask
+}
+
+// wait returns the key the source gave, or the reason there is none. It
+// returns when the source has returned or when ctx has ended, whichever comes
+// first. It is called once.
+func (a *deviceKeyAsk) wait(ctx context.Context, firstAnswer error) ([]byte, error) {
+	var got deviceKeyAnswer
+	select {
+	case <-ctx.Done():
+		close(a.gaveUp)
+		return nil, errCRIDLinkDeviceRequestNotSent(ctx.Err())
+	case got = <-a.handed:
+	}
+	// The source can return at the moment the context ends, and then either
+	// case above may run. The context decides, so the outcome is the same:
+	// the key is not used, and the error is the context's.
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		wipeBytes(got.key)
+		return nil, errCRIDLinkDeviceRequestNotSent(ctxErr)
+	}
+	if got.err != nil {
+		// A source that failed may still have returned bytes.
+		wipeBytes(got.key)
+		return nil, &DeviceKeySourceError{Err: got.err, FirstAnswer: firstAnswer}
+	}
+	if err := validateCRIDLinkDeviceKey(got.key); err != nil {
+		wipeBytes(got.key)
+		return nil, &DeviceKeySourceError{Err: err, FirstAnswer: firstAnswer}
+	}
+	return got.key, nil
 }
 
 // requestCRIDLinkOnce sends one CRID link request and reads its answer. With
@@ -649,6 +947,59 @@ func OpenCRIDAsDevice(ctx context.Context, deviceStaticPrivateKey []byte, resour
 // Config.PortalSession holds here too.
 func OpenCRIDAsDeviceWith(ctx context.Context, deviceStaticPrivateKey []byte, resourceCRID string, cfg Config) (*ResourceHandle, error) {
 	issued, err := RequestCRIDLinkAsDeviceWith(ctx, deviceStaticPrivateKey, resourceCRID, cfg)
+	if err != nil {
+		return nil, err
+	}
+	return openIssuedCRIDLink(ctx, issued.Link, resourceCRID, cfg)
+}
+
+// OpenCRIDAsDeviceFromKeySource is OpenCRIDAsDevice for a caller that does not
+// hold the device key yet: it requests a link with
+// RequestCRIDLinkAsDeviceFromKeySource, then opens that link bound to the same
+// CRID. It takes a DeviceKeySource in place of the key, and calls it only
+// when the device key is needed. A public resource is opened without it.
+//
+// It resolves configuration as OpenCRID does, and then calls
+// OpenCRIDAsDeviceFromKeySourceWith. Read
+// RequestCRIDLinkAsDeviceFromKeySourceWith for when the source is called and
+// what happens to the key.
+//
+// A nil source is refused first, with ErrInvalidDeviceKey, and a CRID that
+// cannot be requested second, with ErrInvalidResourceRequest. Both are refused
+// before any configuration is resolved, so neither costs any I/O.
+func OpenCRIDAsDeviceFromKeySource(ctx context.Context, deviceKeySource DeviceKeySource, resourceCRID string) (*ResourceHandle, error) {
+	// The source gate comes before everything else, as in the With form.
+	if err := validateDeviceKeySource(deviceKeySource); err != nil {
+		return nil, err
+	}
+	// Before resolveDefaultConfig, for the reason RequestCRIDLinkAsDevice
+	// gives: a Provider may do network I/O.
+	if err := validateCRIDForLinkRequest(resourceCRID); err != nil {
+		return nil, err
+	}
+	cfg, err := resolveDefaultConfig(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return OpenCRIDAsDeviceFromKeySourceWith(ctx, deviceKeySource, resourceCRID, cfg)
+}
+
+// OpenCRIDAsDeviceFromKeySourceWith is OpenCRIDAsDeviceFromKeySource with
+// explicit configuration: RequestCRIDLinkAsDeviceFromKeySourceWith, then
+// EnterPortalWith with Config.ExpectedCRID set to resourceCRID. cfg is what
+// OpenCRIDWith needs.
+//
+// The source is called for the link request only, at most once, and only
+// after "not found". The key it returns is overwritten with zeros when the
+// link request has ended, which is before the open. The open uses the issued
+// link's own key, never the device key.
+//
+// Everything OpenCRIDAsDeviceWith says about the two requests, the context,
+// transports and Config.PortalSession holds here too.
+func OpenCRIDAsDeviceFromKeySourceWith(
+	ctx context.Context, deviceKeySource DeviceKeySource, resourceCRID string, cfg Config,
+) (*ResourceHandle, error) {
+	issued, err := RequestCRIDLinkAsDeviceFromKeySourceWith(ctx, deviceKeySource, resourceCRID, cfg)
 	if err != nil {
 		return nil, err
 	}

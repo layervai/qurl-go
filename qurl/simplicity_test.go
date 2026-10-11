@@ -55,6 +55,12 @@ var frictionBudget = map[string]int{
 	// That is twice the default form, which is why the default form exists.
 	// Do not lower this number by hiding the configuration in a helper.
 	"ExampleOpenCRIDAsDeviceWith": 8,
+	// Open a resource by CRID as a registered device whose key is read only
+	// when it is needed: one call, like ExampleOpenCRID. The function that
+	// reads the key is the program's own and is passed by name. The SDK owns
+	// the key that function returns and clears it, so the two statements of
+	// ExampleOpenCRIDAsDevice for the key and its cleanup are not needed here.
+	"ExampleOpenCRIDAsDeviceFromKeySource": 2,
 	// Ask whether a CRID link request can be sent at all, before there is a
 	// CRID: one call and one switch over its answer.
 	"ExampleCheckCRIDLinkConfig": 2,

@@ -129,6 +129,36 @@ func ExampleOpenCRIDAsDeviceWith() {
 // where it keeps that key. The bytes here are a placeholder, not a key.
 func registeredDevicePrivateKey() []byte { return bytes.Repeat([]byte{0x01}, 32) }
 
+// ExampleOpenCRIDAsDeviceFromKeySource opens a resource by CRID as a
+// registered device that does not hold its key in memory, for example because
+// the key is sealed. The program passes a function in place of the key. The
+// SDK calls the function only when it needs the device key: after the first
+// link request was answered "not found". A public resource is opened without
+// that call.
+//
+// This is the whole integration. There is no key to clear: the SDK overwrites
+// the key the function returned before the call returns.
+func ExampleOpenCRIDAsDeviceFromKeySource() {
+	handle, err := qurl.OpenCRIDAsDeviceFromKeySource(context.Background(), unsealDevicePrivateKey, "ae4jqpd7eaoslq7j…")
+	if err != nil {
+		return
+	}
+	// The placeholder is not a CRID, so the call refuses it above, before it
+	// resolves any configuration, sends anything, or calls the function, and
+	// this never prints.
+	fmt.Println(handle.ResourceURL)
+
+	// Output:
+}
+
+// unsealDevicePrivateKey stands in for the way a program gets at a device key
+// that it does not keep in memory. It is a qurl.DeviceKeySource. It returns a
+// new slice on every call, because the SDK overwrites what it returns. The
+// bytes here are a placeholder, not a key.
+func unsealDevicePrivateKey(context.Context) ([]byte, error) {
+	return bytes.Repeat([]byte{0x01}, 32), nil
+}
+
 // ExampleCheckCRIDLinkConfig asks, before there is a CRID to open, whether a
 // link can be requested at all. It reads the deployment and sends nothing. A
 // program with another way to open a resource uses the answer to choose.
