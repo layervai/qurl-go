@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -144,5 +145,52 @@ func TestConsumerAdmissionRejectsClaimsForAnotherLeafBeforeOpening(t *testing.T)
 	}
 	if strings.Contains(admission.String(), fragment.Secret.QurlUserPrivateKeyB64) {
 		t.Fatal("admission log exposes key")
+	}
+}
+
+func TestConsumerDiscoverablePasskeyCapabilityFence(t *testing.T) {
+	for _, capability := range []any{nil, false, true, "true"} {
+		t.Run(fmt.Sprint(capability), func(t *testing.T) {
+			fixture := newCRIDLinkFixture(t)
+			key, err := ecdh.X25519().GenerateKey(rand.Reader)
+			if err != nil {
+				t.Fatal(err)
+			}
+			client, err := NewConsumerEnrollmentClient(fixture.crid, key.Bytes(), fixture.cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			calls := 0
+			fixture.peer.respondWith(func(_ cridLinkKnock) cridLinkAnswer {
+				calls++
+				action := "info"
+				data := map[string]any{"crid": fixture.crid, "policy": ConsumerAccessPolicy{Mode: "keys", Version: 1}, "origin": fixture.cfg.CRIDLink.LinkOrigin, "relying_party_id": "qurl.link", "server_time": int64(1791689400)}
+				if capability != nil {
+					data["discoverable_passkeys"] = capability
+				}
+				if calls > 1 {
+					action = "prove"
+					data = map[string]any{"status": "active"}
+				}
+				raw, marshalErr := json.Marshal(map[string]any{"errCode": "52609", "redirectInfo": map[string]any{"version": 1, "action": action, "data": data}})
+				if marshalErr != nil {
+					t.Fatal(marshalErr)
+				}
+				return cridLinkAnswer{replyType: relayknock.TypeACK, body: raw}
+			})
+			_, err = client.Exchange(t.Context(), ConsumerEnrollmentOperation{Action: "prove", Input: &ConsumerEnrollmentInput{AssertionCredentialID: "selected-credential"}})
+			if capability == true {
+				if err != nil || len(fixture.peer.seen()) != 2 {
+					t.Fatalf("supported discovery failed: %v", err)
+				}
+			} else {
+				if err == nil || len(fixture.peer.seen()) != 1 {
+					t.Fatal("selected credential sent without support")
+				}
+				if bytes.Contains(fixture.peer.seen()[0].body, []byte("selected-credential")) {
+					t.Fatal("credential leaked during discovery")
+				}
+			}
+		})
 	}
 }

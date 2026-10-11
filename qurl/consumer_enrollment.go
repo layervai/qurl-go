@@ -13,11 +13,12 @@ import (
 // ConsumerEnrollmentClient sends private operations under one consumer-owned peer key.
 // It discovers support before sending mailbox, invitation or continuation secrets.
 type ConsumerEnrollmentClient struct {
-	resourceCRID string
-	cfg          Config
-	peerKey      []byte
-	mu           sync.Mutex
-	supported    bool
+	resourceCRID         string
+	cfg                  Config
+	peerKey              []byte
+	mu                   sync.Mutex
+	supported            bool
+	discoverablePasskeys bool
 }
 
 // NewConsumerEnrollmentClient copies an existing peer key; it never replaces local identity.
@@ -49,9 +50,10 @@ type ConsumerEnrollmentOperation struct {
 
 // ConsumerEnrollmentInput carries the credential proof and optional invitation.
 type ConsumerEnrollmentInput struct {
-	Proof           ConsumerProof             `json:"proof"`
-	Assertion       *ConsumerPasskeyAssertion `json:"assertion,omitempty"`
-	InvitationToken string                    `json:"invitation_token,omitempty"`
+	AssertionCredentialID string                    `json:"assertion_credential_id,omitempty"`
+	Proof                 ConsumerProof             `json:"proof"`
+	Assertion             *ConsumerPasskeyAssertion `json:"assertion,omitempty"`
+	InvitationToken       string                    `json:"invitation_token,omitempty"`
 }
 
 // ConsumerPasskeyAssertion uses standard padded base64 for WebAuthn buffers.
@@ -86,6 +88,14 @@ func (c *ConsumerEnrollmentClient) Exchange(ctx context.Context, operation Consu
 		}
 		if operation.Action == "info" && operation.InvitationToken == "" {
 			return info, nil
+		}
+	}
+	if operation.Input != nil && operation.Input.AssertionCredentialID != "" {
+		c.mu.Lock()
+		discoverable := c.discoverablePasskeys
+		c.mu.Unlock()
+		if !discoverable {
+			return nil, ErrCRIDLinkUnavailable
 		}
 	}
 	return c.exchange(ctx, operation)
@@ -164,10 +174,11 @@ func (c *ConsumerEnrollmentClient) exchange(ctx context.Context, operation Consu
 	}
 	if action == "info" {
 		var info struct {
-			Policy     ConsumerAccessPolicy `json:"policy"`
-			Origin     string               `json:"origin"`
-			RPID       string               `json:"relying_party_id"`
-			ServerTime int64                `json:"server_time"`
+			Policy               ConsumerAccessPolicy `json:"policy"`
+			Origin               string               `json:"origin"`
+			RPID                 string               `json:"relying_party_id"`
+			DiscoverablePasskeys bool                 `json:"discoverable_passkeys"`
+			ServerTime           int64                `json:"server_time"`
 		}
 		if json.Unmarshal(metadata["data"], &info) != nil || info.Policy.validate() != nil || info.Origin == "" || info.RPID == "" || info.ServerTime < 1 || info.ServerTime >= 1<<53 {
 			return nil, ErrCRIDLinkProtocol
@@ -178,6 +189,7 @@ func (c *ConsumerEnrollmentClient) exchange(ctx context.Context, operation Consu
 		}
 		c.mu.Lock()
 		c.supported = true
+		c.discoverablePasskeys = info.DiscoverablePasskeys
 		c.mu.Unlock()
 	}
 	return append(json.RawMessage(nil), metadata["data"]...), nil
