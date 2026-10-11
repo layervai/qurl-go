@@ -1,10 +1,22 @@
-# qurl-go
+# qURL Go SDK for private service access
 
-**Use the LayerV qURL Platform from Go: protect a private URL once, then mint
-short-lived access links for it.**
+Use the [LayerV qURL™ Go SDK](https://layerv.ai/sdk/) to create expiring access
+links, connect a private service or agent, and open received links from Go
+applications. The `github.com/layervai/qurl-go/qurl` package supports the issuer,
+service, and recipient roles described below.
 
-LayerV hosts qURL. Your Go app keeps a tiny surface area: protect the URL,
-create a portal link for the returned resource, and share the link.
+LayerV hosts qURL. To issue a link, your Go app protects a URL, creates a portal
+for the returned resource, and shares the link. Serving a local app also needs
+a running Connector or agent runtime; issuing the link does not start the app
+or close an existing public route. The app's own sign-in requirements still apply.
+
+For a ready-made command to publish localhost, use the
+[qURL CLI](https://github.com/layervai/qurl-integrations/tree/main/apps/cli).
+This repository supplies the Go library for building that behavior into software.
+
+Start with [installation](#install), the [link quickstart](#quickstart),
+[connecting a service or agent](#connect-a-service-or-agent),
+[opening links](#opening-links), or the [guides](#guides).
 
 Portal recipients do not need LayerV credentials, API keys, keypairs, or SDK
 state. They open the qURL link. Credentials are only for software that protects
