@@ -70,6 +70,13 @@ type PreviewUploadForm struct {
 	Headers  map[string]string `json:"headers"`
 }
 
+// Preview endpoints return bare JSON with HTTP 200, unlike envelope-based owner
+// routes. Revision zero is valid before the first edit.
+type previewResponse struct {
+	ResourcePreview
+	RevisionValue *int64 `json:"revision"`
+}
+
 func previewPath(c *Client, crid string) (string, error) {
 	if c == nil {
 		return "", fmt.Errorf("%w: nil client", ErrInvalidClientConfig)
@@ -86,11 +93,15 @@ func (c *Client) Preview(ctx context.Context, crid string) (*ResourcePreview, er
 	if err != nil {
 		return nil, err
 	}
-	var result ResourcePreview
+	var result previewResponse
 	if err = c.doJSONStatus(ctx, http.MethodGet, path, nil, &result, http.StatusOK); err != nil {
 		return nil, err
 	}
-	return &result, nil
+	if result.RevisionValue == nil || *result.RevisionValue < 0 {
+		return nil, fmt.Errorf("%w: missing preview revision", ErrInvalidAPIResponse)
+	}
+	result.Revision = *result.RevisionValue
+	return &result.ResourcePreview, nil
 }
 
 // UpdatePreview edits public card metadata. A stale revision returns 409.
@@ -103,11 +114,18 @@ func (c *Client) UpdatePreview(ctx context.Context, crid string, patch PreviewPa
 		ids := []string{}
 		patch.MediaIDs = &ids
 	}
-	var result ResourcePreview
+	var result previewResponse
 	if err = c.doJSONStatus(ctx, http.MethodPatch, path, patch, &result, http.StatusOK); err != nil {
 		return nil, err
 	}
-	return &result, nil
+	if result.RevisionValue == nil || *result.RevisionValue < 0 {
+		return nil, fmt.Errorf("%w: missing preview revision", ErrInvalidAPIResponse)
+	}
+	if *result.RevisionValue <= patch.Revision {
+		return nil, fmt.Errorf("%w: preview revision did not advance", ErrInvalidAPIResponse)
+	}
+	result.Revision = *result.RevisionValue
+	return &result.ResourcePreview, nil
 }
 
 // CreatePreviewUpload returns a form only for a currently verified publisher.

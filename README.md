@@ -595,4 +595,3 @@ move the wire protocol say so loudly and name the flag day.
 ## License
 
 [MIT](LICENSE) © LayerV AI
-

@@ -38,7 +38,11 @@ func TestPreviewOwnerAPIAndBoundedDeviceSurface(t *testing.T) {
 		if strings.HasSuffix(r.URL.Path, "/uploads") {
 			fmt.Fprint(w, `{"preview":{"revision":2},"upload_id":"asset","url":"https://s3.example.test","headers":{"If-None-Match":"*","Content-Type":"image/png"}}`)
 		} else {
-			fmt.Fprint(w, `{"revision":1,"description":"Public preview"}`)
+			revision := 1
+			if r.Method == http.MethodPatch {
+				revision = 2
+			}
+			fmt.Fprintf(w, `{"revision":%d,"description":"Public preview"}`, revision)
 		}
 	}))
 	defer server.Close()
@@ -145,5 +149,20 @@ func TestPreviewPatchMediaPresence(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+func TestPreviewRejectsMissingRevision(t *testing.T) {
+	for _, body := range []string{`{}`, `{"data":{"revision":1}}`, `{"revision":-1}`} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, body) }))
+		client, err := NewClient(BearerToken("owner"), WithBaseURL(server.URL))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = client.Preview(context.Background(), "qe4jqpd7eaoslq7jinmjv4yikgzmcxgpjfsuobiniqnko32lpw742pueoujq")
+		server.Close()
+		if !errors.Is(err, ErrInvalidAPIResponse) {
+			t.Fatal(err)
+		}
 	}
 }
