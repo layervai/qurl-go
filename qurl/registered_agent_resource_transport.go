@@ -54,6 +54,11 @@ var ErrRegisteredAgentResourceRequestDenied = errors.New("qurl: registered-agent
 // characters (a to z, 2 to 7) joined by hyphens. A segment of any other shape
 // is refused like any other route outside this list.
 //
+// CRID preview metadata is owner-scoped for the same device-only publishers:
+// GET and PATCH /v1/resources/{id}/preview, and POST
+// /v1/resources/{id}/preview/uploads, exactly, with no query. PUT and GET
+// uploads are refused. These routes cannot set publisher verification.
+//
 // The bridge also requires the Client's exact API origin and path prefix. The
 // caller's request is never mutated, and the device Authorization header is
 // removed from the returned response metadata.

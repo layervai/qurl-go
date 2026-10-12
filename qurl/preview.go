@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 )
 
 // PreviewMedia is one processed image or silent clip. The first item is the cover.
@@ -25,7 +26,7 @@ type PreviewUpload struct {
 	ID        string `json:"id"`
 	Status    string `json:"status"`
 	Alt       string `json:"alt"`
-	ExpiresAt int64  `json:"expires_at"`
+	ExpiresAt int64  `json:"expires_at"` // Unix seconds.
 }
 
 // PreviewCard carries public display text and short-lived media URLs.
@@ -60,7 +61,8 @@ type PreviewUploadRequest struct {
 	ReplaceID   string `json:"replace_id,omitempty"`
 }
 
-// PreviewUploadForm expires after five minutes. Upload the file with Headers directly to URL, without the API credential. Processing is asynchronous.
+// PreviewUploadForm expires after five minutes. Upload the file with Headers
+// directly to URL, without the API credential. Processing is asynchronous.
 type PreviewUploadForm struct {
 	Preview  ResourcePreview   `json:"preview"`
 	UploadID string            `json:"upload_id"`
@@ -97,6 +99,10 @@ func (c *Client) UpdatePreview(ctx context.Context, crid string, patch PreviewPa
 	if err != nil {
 		return nil, err
 	}
+	if patch.MediaIDs != nil && *patch.MediaIDs == nil {
+		ids := []string{}
+		patch.MediaIDs = &ids
+	}
 	var result ResourcePreview
 	if err = c.doJSONStatus(ctx, http.MethodPatch, path, patch, &result, http.StatusOK); err != nil {
 		return nil, err
@@ -118,6 +124,12 @@ func (c *Client) CreatePreviewUpload(ctx context.Context, crid string, input Pre
 	parsed, err := url.Parse(result.URL)
 	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" || len(result.Headers) == 0 || result.UploadID == "" {
 		return nil, fmt.Errorf("%w: invalid preview upload form", ErrInvalidAPIResponse)
+	}
+	for name := range result.Headers {
+		switch strings.ToLower(name) {
+		case "authorization", "cookie", "host", "proxy-authorization":
+			return nil, fmt.Errorf("%w: credential header in preview upload form", ErrInvalidAPIResponse)
+		}
 	}
 	return &result, nil
 }
