@@ -139,6 +139,9 @@ func (c *Client) CreatePreviewUpload(ctx context.Context, crid string, input Pre
 	if err = c.doJSONStatus(ctx, http.MethodPost, path+"/uploads", input, &result, http.StatusOK); err != nil {
 		return nil, err
 	}
+	if result.Preview.Revision <= input.Revision {
+		return nil, fmt.Errorf("%w: upload preview revision did not advance", ErrInvalidAPIResponse)
+	}
 	parsed, err := url.Parse(result.URL)
 	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" || len(result.Headers) == 0 || result.UploadID == "" {
 		return nil, fmt.Errorf("%w: invalid preview upload form", ErrInvalidAPIResponse)

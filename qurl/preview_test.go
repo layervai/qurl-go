@@ -98,7 +98,7 @@ func TestPreviewUploadRejectsInvalidForms(t *testing.T) {
 				if tc.header != "" {
 					headers[tc.header] = "*"
 				}
-				if err := json.NewEncoder(w).Encode(PreviewUploadForm{URL: tc.url, UploadID: tc.id, Headers: headers}); err != nil {
+				if err := json.NewEncoder(w).Encode(PreviewUploadForm{Preview: ResourcePreview{Revision: 1}, URL: tc.url, UploadID: tc.id, Headers: headers}); err != nil {
 					t.Error(err)
 				}
 			}))
