@@ -609,7 +609,8 @@ func OpenClientContext(ctx context.Context, opts ...ClientOption) (*Client, erro
 // ResourceByCRID for a new handle instead of mutating or round-tripping a bound
 // one.
 type Resource struct {
-	client *Client
+	ConsumerAccess *ConsumerAccessPolicy `json:"consumer_access,omitempty"`
+	client         *Client
 
 	// CRID is the public resource locator. Public keys are verification data.
 	CRID string `json:"crid"`
@@ -664,11 +665,12 @@ func (f resourceOptionFunc) applyResourceOption(o *resourceOptions) error {
 }
 
 type resourceOptions struct {
-	description  string
-	tags         []string
-	customDomain string
-	alias        string
-	private      *bool
+	consumerAccess *ConsumerAccessPolicy
+	description    string
+	tags           []string
+	customDomain   string
+	alias          string
+	private        *bool
 }
 
 // WithDescription attaches resource-level metadata.
@@ -807,21 +809,30 @@ func (c *Client) ProtectURL(ctx context.Context, targetURL string, opts ...Resou
 	}
 
 	reqBody := createResourceRequest{
-		TargetURL:    targetURL,
-		Description:  cfg.description,
-		Tags:         cfg.tags,
-		CustomDomain: cfg.customDomain,
-		Alias:        cfg.alias,
-		Private:      cfg.private,
+		TargetURL:      targetURL,
+		Description:    cfg.description,
+		Tags:           cfg.tags,
+		CustomDomain:   cfg.customDomain,
+		Alias:          cfg.alias,
+		Private:        cfg.private,
+		ConsumerAccess: cfg.consumerAccess,
 	}
 
-	var env apiEnvelope[createResourceResponse]
+	var env struct {
+		Data createResourceResponse `json:"data"`
+		Meta struct {
+			FoundExisting *bool `json:"found_existing"`
+		} `json:"meta"`
+	}
 	if err := c.postJSON(ctx, "/v1/resources", reqBody, &env); err != nil {
 		return nil, err
 	}
 	resource, err := env.Data.resource()
 	if err != nil {
 		return nil, err
+	}
+	if !consumerCreationPolicyConfirmed(resource.Private, resource.ConsumerAccess, cfg.consumerAccess, env.Meta.FoundExisting != nil && *env.Meta.FoundExisting) {
+		return nil, fmt.Errorf("%w: private consumer policy was not confirmed", ErrInvalidAPIResponse)
 	}
 	resource.client = c
 	return resource, nil
@@ -1087,11 +1098,12 @@ func (c *Client) RevokePortal(ctx context.Context, resourceCRID, qurlID string) 
 }
 
 type createResourceRequest struct {
-	TargetURL    string   `json:"target_url"`
-	Description  string   `json:"description,omitempty"`
-	Tags         []string `json:"tags,omitempty"`
-	CustomDomain string   `json:"custom_domain,omitempty"`
-	Alias        string   `json:"alias,omitempty"`
+	ConsumerAccess *ConsumerAccessPolicy `json:"consumer_access,omitempty"`
+	TargetURL      string                `json:"target_url"`
+	Description    string                `json:"description,omitempty"`
+	Tags           []string              `json:"tags,omitempty"`
+	CustomDomain   string                `json:"custom_domain,omitempty"`
+	Alias          string                `json:"alias,omitempty"`
 	// Private is nil when the caller did not state privacy and is then left out
 	// of the request, so the service default applies. It is a pointer because a
 	// stated false must reach the service; a plain bool would drop it.
@@ -1099,19 +1111,20 @@ type createResourceRequest struct {
 }
 
 type createResourceResponse struct {
-	ID             string     `json:"resource_id"`
-	CRID           string     `json:"crid"`
-	TargetURL      string     `json:"target_url"`
-	Status         string     `json:"status"`
-	Description    string     `json:"description"`
-	Tags           []string   `json:"tags"`
-	CustomDomain   *string    `json:"custom_domain"`
-	Alias          *string    `json:"alias"`
-	Private        *bool      `json:"private"`
-	AccessRequests *bool      `json:"access_requests"`
-	QURLCount      *int       `json:"qurl_count"`
-	CreatedAt      *time.Time `json:"created_at"`
-	ExpiresAt      *time.Time `json:"expires_at"`
+	ConsumerAccess *ConsumerAccessPolicy `json:"consumer_access,omitempty"`
+	ID             string                `json:"resource_id"`
+	CRID           string                `json:"crid"`
+	TargetURL      string                `json:"target_url"`
+	Status         string                `json:"status"`
+	Description    string                `json:"description"`
+	Tags           []string              `json:"tags"`
+	CustomDomain   *string               `json:"custom_domain"`
+	Alias          *string               `json:"alias"`
+	Private        *bool                 `json:"private"`
+	AccessRequests *bool                 `json:"access_requests"`
+	QURLCount      *int                  `json:"qurl_count"`
+	CreatedAt      *time.Time            `json:"created_at"`
+	ExpiresAt      *time.Time            `json:"expires_at"`
 }
 
 func (r createResourceResponse) resource() (*Resource, error) {
@@ -1123,6 +1136,7 @@ func (r createResourceResponse) resource() (*Resource, error) {
 	}
 	return &Resource{
 		ResourcePublicKey: r.ID,
+		ConsumerAccess:    r.ConsumerAccess,
 		CRID:              r.CRID,
 		TargetURL:         r.TargetURL,
 		Status:            r.Status,

@@ -199,6 +199,11 @@ A new resource is private or public. State which with `qurl.WithPrivate` when
 the default must not decide, and read `Resource.Private` back; see
 [Private and public resources](docs/issuing-links.md#private-and-public-resources).
 
+Private consumer policies also support credential lists, publisher invitations,
+verified email capture, reviewed requests and contract entitlements. See
+[Consumer access](docs/consumer-access.md). These operations require a service
+and NHP cell with consumer access enabled.
+
 If qURL Connector already protects the service, use its immutable connector
 slug:
 
@@ -549,6 +554,33 @@ is not retrievable afterwards, and a server predating the field omits it. A
 short `ShareResourceOptions.TTL` remains the complementary control at mint
 time. `DeleteConnectorResource` revokes an entire connector resource (see
 [Resolve and manage qURL Connector resources](docs/connector-resources.md)).
+
+### Per-CRID preview metadata
+
+Use `client.Preview(ctx, crid)` to read the public app name, preview text, media IDs and processing
+state for a resource you own. To set optional text, pass the latest revision:
+
+```go
+name := "API guide"
+text := "A guide to our API"
+current, err := client.Preview(ctx, resourceCRID)
+if err != nil {
+    return err
+}
+_, err = client.UpdatePreview(ctx, resourceCRID, qurl.PreviewPatch{
+    Revision: current.Revision, Name: &name, Description: &text,
+})
+```
+
+`CreatePreviewUpload` returns an exact-size, five-minute HTTPS PUT request for
+verified publishers. Upload the file bytes with the returned headers and exact Content-Length directly to
+`URL`, without API credentials or redirects. Poll `Preview` until processing is
+ready or failed. A replacement retains old media until ready. Send an empty
+`MediaIDs` slice to remove all media and cancel pending work. A stale revision
+returns 409; read current state before retrying. Descriptions are plain text, not
+HTML, and are separate from private owner notes. Media URLs expire after five
+minutes; load video only after explicit playback. The publisher cannot set its
+verification status through these methods.
 
 ## Guides
 

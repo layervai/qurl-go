@@ -605,3 +605,20 @@ func ExampleAnonymousEnrollmentCredential() {
 
 	// Output: lv_live_NEQgOQ806WZu0yxqK0jVSCmdwi4QyJb1w2hC38wJGao
 }
+
+func ExampleClient_UpdatePreview() {
+	client, err := qurl.OpenClient()
+	if err != nil {
+		panic(err)
+	}
+	ctx := context.Background()
+	current, err := client.Preview(ctx, exampleCRID)
+	if err != nil {
+		panic(err)
+	}
+	text := "A guide to our API"
+	_, err = client.UpdatePreview(ctx, exampleCRID, qurl.PreviewPatch{Revision: current.Revision, Description: &text})
+	if err != nil {
+		panic(err)
+	}
+}
