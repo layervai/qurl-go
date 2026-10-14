@@ -47,7 +47,8 @@ type ResourcePreview struct {
 }
 
 // PreviewPatch uses the last revision. Nil fields are unchanged; an empty media
-// list removes all ready media and cancels pending jobs.
+// list removes all ready media and cancels pending jobs. An empty name or
+// description removes that text.
 type PreviewPatch struct {
 	Revision    int64     `json:"revision"`
 	Name        *string   `json:"name,omitempty"`

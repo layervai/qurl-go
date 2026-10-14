@@ -42,7 +42,7 @@ func TestPreviewOwnerAPIAndBoundedDeviceSurface(t *testing.T) {
 			if r.Method == http.MethodPatch {
 				revision = 2
 			}
-			fmt.Fprintf(w, `{"revision":%d,"name":"TipSplit","description":"Public preview"}`, revision)
+			fmt.Fprintf(w, `{"revision":%d,"name":"TipSplit","description":"Public preview","card":{"name":"TipSplit"}}`, revision)
 		}
 	}))
 	defer server.Close()
@@ -50,7 +50,7 @@ func TestPreviewOwnerAPIAndBoundedDeviceSurface(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if preview, err := client.Preview(context.Background(), crid); err != nil || preview.Name != "TipSplit" {
+	if preview, err := client.Preview(context.Background(), crid); err != nil || preview.Name != "TipSplit" || preview.Card == nil || preview.Card.Name != "TipSplit" {
 		t.Fatalf("preview=%+v err=%v", preview, err)
 	}
 	text := "Public preview"
