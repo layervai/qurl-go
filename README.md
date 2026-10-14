@@ -545,17 +545,18 @@ time. `DeleteConnectorResource` revokes an entire connector resource (see
 
 ### Per-CRID preview metadata
 
-Use `client.Preview(ctx, crid)` to read public preview text, media IDs and processing
+Use `client.Preview(ctx, crid)` to read the public app name, preview text, media IDs and processing
 state for a resource you own. To set optional text, pass the latest revision:
 
 ```go
+name := "API guide"
 text := "A guide to our API"
 current, err := client.Preview(ctx, resourceCRID)
 if err != nil {
     return err
 }
 _, err = client.UpdatePreview(ctx, resourceCRID, qurl.PreviewPatch{
-    Revision: current.Revision, Description: &text,
+    Revision: current.Revision, Name: &name, Description: &text,
 })
 ```
 
