@@ -31,7 +31,7 @@ func TestPreviewOwnerAPIAndBoundedDeviceSurface(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
 				t.Error(err)
 			}
-			if patch.Revision != 1 || patch.Description == nil || *patch.Description != "Public preview" || patch.MediaIDs != nil {
+			if patch.Revision != 1 || patch.Name == nil || *patch.Name != "TipSplit" || patch.Description == nil || *patch.Description != "Public preview" || patch.MediaIDs != nil {
 				t.Errorf("patch = %+v", patch)
 			}
 		}
@@ -42,7 +42,7 @@ func TestPreviewOwnerAPIAndBoundedDeviceSurface(t *testing.T) {
 			if r.Method == http.MethodPatch {
 				revision = 2
 			}
-			fmt.Fprintf(w, `{"revision":%d,"description":"Public preview"}`, revision)
+			fmt.Fprintf(w, `{"revision":%d,"name":"TipSplit","description":"Public preview"}`, revision)
 		}
 	}))
 	defer server.Close()
@@ -50,11 +50,12 @@ func TestPreviewOwnerAPIAndBoundedDeviceSurface(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = client.Preview(context.Background(), crid); err != nil {
-		t.Fatal(err)
+	if preview, err := client.Preview(context.Background(), crid); err != nil || preview.Name != "TipSplit" {
+		t.Fatalf("preview=%+v err=%v", preview, err)
 	}
 	text := "Public preview"
-	if _, err = client.UpdatePreview(context.Background(), crid, PreviewPatch{Revision: 1, Description: &text}); err != nil {
+	name := "TipSplit"
+	if _, err = client.UpdatePreview(context.Background(), crid, PreviewPatch{Revision: 1, Name: &name, Description: &text}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = client.CreatePreviewUpload(context.Background(), crid, PreviewUploadRequest{Revision: 1, ContentType: "image/png", Size: 4, Alt: "Guide"}); err != nil {
@@ -163,6 +164,27 @@ func TestPreviewRejectsMissingRevision(t *testing.T) {
 		server.Close()
 		if !errors.Is(err, ErrInvalidAPIResponse) {
 			t.Fatal(err)
+		}
+	}
+}
+
+func TestPreviewNamePatchPresence(t *testing.T) {
+	name := "TipSplit"
+	empty := ""
+	for _, tc := range []struct {
+		name *string
+		want string
+	}{{nil, ""}, {&empty, `""`}, {&name, `"TipSplit"`}} {
+		data, err := json.Marshal(PreviewPatch{Name: tc.name})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(data, &fields); err != nil {
+			t.Fatal(err)
+		}
+		if string(fields["name"]) != tc.want || fields["description"] != nil || fields["media_ids"] != nil {
+			t.Fatalf("patch=%s", data)
 		}
 	}
 }
