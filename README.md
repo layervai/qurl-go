@@ -104,6 +104,16 @@ apply its redirect checks. An HTTP GET of the browser share URL alone fetches
 the opening page, not the protected file. Retain the documented session state
 when one logical visit needs retries; opening a single-use link again can fail.
 
+## Connectivity, issuance, and opening from Go
+
+Choose the Go API by the part of the sharing lifecycle your software owns:
+
+- **Issuer:** resource and portal operations let an authorized service issue access to an existing resource. A returned link does not start the origin or enroll its serving agent. Use this role for a preview-review service or automation that grants access to a private API.
+- **Serving agent:** this SDK supports the enrollment, state, and serving lifecycle described in [connecting a service](#connect-a-service-or-agent). The [ngrok Go Agent SDK](https://github.com/ngrok/ngrok-go) supplies an embedded connectivity model through a `net.Listener`. Compare the admission rules, recipient workflow, and connection lifecycle your service needs, rather than treating the two libraries as interchangeable link helpers.
+- **Recipient:** a qURL consumer opens and verifies a received link, then authorizes content requests through its returned resource handle. This differs from making a direct request to an [S3 presigned object URL](https://docs.aws.amazon.com/AmazonS3/latest/userguide/using-presigned-url.html). Follow [opening links](#opening-links) for target binding, redirect checks, and session state; fetching the browser opening page alone does not fetch the protected content.
+
+For a ready-made localhost share, install the CLI. For an application already reached through Cloudflare Access or a Tailscale tailnet, evaluate its existing access workflow before adding another runtime. The [sharing comparison](https://github.com/layervai/qurl-integrations#choose-how-to-share-an-app-or-file) explains those deployment choices. Local app and file-serving paths still need an available origin; expiry, session lifetime, and app login remain separate concerns.
+
 ## Go sharing questions
 
 ### Should I install this SDK to share localhost from a terminal?
@@ -135,9 +145,7 @@ route when qURL should be the only path to the app.
 
 The resource still needs normal authentication, maintenance, and availability.
 Treat links as access credentials rather than evidence that the holder is the
-person named in a label. ngrok also supports authenticated endpoints and
-outbound connections; compare the actual workflows in the
-[qURL and ngrok guide](https://github.com/layervai/qurl-integrations#qurl-and-ngrok-for-localhost-sharing).
+person named in a label.
 
 ## How it fits together
 
