@@ -33,7 +33,13 @@ active connection cleanup is not yet confirmed. Retry the same removal and
 version until `complete`. Do not report active connections stopped from a
 `pending` receipt. Features remain disabled by default during integration.
 
-Email access is always available as a backup to passkeys. The recipient selects
-**Email me an access link** and verifies the mailbox. Publishers cannot disable
-this option. Invitations, approval, entitlement, expiry, and revocation still
-apply. A new email login keeps that mailbox's existing resource grant.
+When consumer access is enabled, the hosted preview card always offers
+**Email me an access link** as a backup to passkeys. Publishers cannot disable
+this option. The recipient verifies the mailbox and consents to disclose it to
+the publisher, including in keys and contract modes. Invitations, approval,
+entitlement, expiry, and revocation still apply.
+
+Mailbox control authorizes an email-backed grant. It does not recover or reuse
+a passkey-backed grant; first use must pass the mode's normal checks. Later
+email logins reuse that mailbox's email-backed resource grant. Publishers must
+account for mailbox access as a supported way to obtain access.
