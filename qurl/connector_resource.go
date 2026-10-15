@@ -93,7 +93,8 @@ var (
 // CreatePortal; call GetConnectorResource or GetConnectorResourceBySlug to
 // obtain a newly bound handle.
 type ConnectorResource struct {
-	client *Client
+	ConsumerAccess *ConsumerAccessPolicy `json:"consumer_access,omitempty"`
+	client         *Client
 
 	// ResourcePublicKey is the producer-issued protected-resource P-256 public key in
 	// canonical unpadded-base64url DER SPKI form. The SDK validates its wire
@@ -149,8 +150,9 @@ func (r *ConnectorResource) CreatePortal(ctx context.Context, opts ...PortalOpti
 }
 
 type ensureConnectorResourceRequest struct {
-	Type string `json:"type"`
-	Slug string `json:"slug"`
+	ConsumerAccess *ConsumerAccessPolicy `json:"consumer_access,omitempty"`
+	Type           string                `json:"type"`
+	Slug           string                `json:"slug"`
 	// FindOrCreate is fixed true by the Connector ensure wire contract.
 	FindOrCreate bool `json:"find_or_create"`
 	// Private is nil when the caller did not state privacy and is then left out
@@ -165,22 +167,24 @@ type ConnectorResourceOption interface {
 }
 
 type connectorResourceOptions struct {
-	private *bool
+	consumerAccess *ConsumerAccessPolicy
+	private        *bool
 }
 
 // connectorResourceWire mirrors the producer's generic resource payload. Type
 // is validated here and intentionally omitted from the exported SDK entity.
 type connectorResourceWire struct {
-	ResourcePublicKey  string  `json:"resource_id"`
-	CRID               string  `json:"crid"`
-	ConnectorRoutingID string  `json:"connector_routing_id"`
-	KnockResourceID    string  `json:"knock_resource_id"`
-	Type               string  `json:"type"`
-	Status             string  `json:"status"`
-	Slug               string  `json:"slug"`
-	Alias              *string `json:"alias,omitempty"`
-	Private            *bool   `json:"private,omitempty"`
-	AccessRequests     *bool   `json:"access_requests,omitempty"`
+	ConsumerAccess     *ConsumerAccessPolicy `json:"consumer_access,omitempty"`
+	ResourcePublicKey  string                `json:"resource_id"`
+	CRID               string                `json:"crid"`
+	ConnectorRoutingID string                `json:"connector_routing_id"`
+	KnockResourceID    string                `json:"knock_resource_id"`
+	Type               string                `json:"type"`
+	Status             string                `json:"status"`
+	Slug               string                `json:"slug"`
+	Alias              *string               `json:"alias,omitempty"`
+	Private            *bool                 `json:"private,omitempty"`
+	AccessRequests     *bool                 `json:"access_requests,omitempty"`
 }
 
 // connectorResourceResponse is the create envelope. The producer intentionally
@@ -246,10 +250,11 @@ func (c *Client) EnsureConnectorResourceWithOptions(ctx context.Context, slug st
 	}
 
 	req := ensureConnectorResourceRequest{
-		Type:         producerConnectorResourceType,
-		Slug:         slug,
-		FindOrCreate: true,
-		Private:      cfg.private,
+		Type:           producerConnectorResourceType,
+		Slug:           slug,
+		FindOrCreate:   true,
+		Private:        cfg.private,
+		ConsumerAccess: cfg.consumerAccess,
 	}
 	var response connectorResourceResponse
 	// The producer returns 201 for both newly-created and found-existing rows.
@@ -269,6 +274,9 @@ func (c *Client) EnsureConnectorResourceWithOptions(ctx context.Context, slug st
 		// committed or selected. Missing ensure-only metadata is still contract
 		// drift, but it does not make that mutation outcome itself unknown.
 		return nil, invalidConnectorResourceResponse("missing meta.found_existing")
+	}
+	if !consumerCreationPolicyConfirmed(resource.Private, resource.ConsumerAccess, cfg.consumerAccess, *response.Meta.FoundExisting) {
+		return nil, invalidConnectorResourceResponse("private consumer policy was not confirmed")
 	}
 	return &EnsureConnectorResourceResult{
 		Resource:      resource,
@@ -441,6 +449,7 @@ func (r connectorResourceWire) connectorResource(client *Client, expect connecto
 	return &ConnectorResource{
 		client:             client,
 		ResourcePublicKey:  r.ResourcePublicKey,
+		ConsumerAccess:     r.ConsumerAccess,
 		CRID:               r.CRID,
 		ConnectorRoutingID: r.ConnectorRoutingID,
 		KnockResourceID:    r.KnockResourceID,
