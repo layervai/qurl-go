@@ -10,9 +10,10 @@ import (
 
 // ConsumerAccessPolicy selects the publisher's private access flow.
 type ConsumerAccessPolicy struct {
-	Mode       string `json:"mode"`
-	Version    int64  `json:"version"`
-	ContractID string `json:"contract_id,omitempty"`
+	EmailFallback bool   `json:"email_fallback,omitempty"`
+	Mode          string `json:"mode"`
+	Version       int64  `json:"version"`
+	ContractID    string `json:"contract_id,omitempty"`
 }
 
 func (p ConsumerAccessPolicy) validate() error {
@@ -110,7 +111,7 @@ func consumerCreationPolicyConfirmed(private *bool, actual, expected *ConsumerAc
 	if expected == nil {
 		return true
 	}
-	if private == nil || !*private || actual == nil || actual.validate() != nil || actual.Mode != expected.Mode || actual.ContractID != expected.ContractID {
+	if private == nil || !*private || actual == nil || actual.validate() != nil || actual.Mode != expected.Mode || actual.ContractID != expected.ContractID || actual.EmailFallback != expected.EmailFallback {
 		return false
 	}
 	return actual.Version == expected.Version || (foundExisting && actual.Version > expected.Version)

@@ -32,3 +32,10 @@ A removal reply can report `session_cleanup: pending`. Access is revoked, but
 active connection cleanup is not yet confirmed. Retry the same removal and
 version until `complete`. Do not report active connections stopped from a
 `pending` receipt. Features remain disabled by default during integration.
+
+Publishers can permit email access without a passkey with
+`ConsumerAccessPolicy{Mode: "review", Version: 1, EmailFallback: true}`.
+The default is false. Mailbox access has lower assurance than a passkey.
+The recipient selects **Email me an access link**, verifies the mailbox with a
+single-use link, and still needs the approval or entitlement required by the
+policy. A new email login keeps that mailbox's existing resource grant.

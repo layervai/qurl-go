@@ -166,3 +166,20 @@ func TestConsumerCreationConfirmsPrivatePolicyAndKeepsExistingRevision(t *testin
 		}
 	}
 }
+
+func TestConsumerEmailFallbackRequiresExactServerConfirmation(t *testing.T) {
+	private := true
+	expected := ConsumerAccessPolicy{Mode: "review", Version: 1, EmailFallback: true}
+	actual := expected
+	if !consumerCreationPolicyConfirmed(&private, &actual, &expected, false) {
+		t.Fatal("matching fallback refused")
+	}
+	actual.EmailFallback = false
+	if consumerCreationPolicyConfirmed(&private, &actual, &expected, false) {
+		t.Fatal("server dropped fallback but SDK reported success")
+	}
+	body, err := json.Marshal(expected)
+	if err != nil || !strings.Contains(string(body), `"email_fallback":true`) {
+		t.Fatalf("fallback missing on wire: %s %v", body, err)
+	}
+}
