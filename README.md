@@ -1,44 +1,22 @@
 # qURL Go SDK for private service access
 
-Use [qURL™ by LayerV](https://layerv.ai/qurl/) to share localhost web apps,
-private APIs, and files through expiring access links. This
-[Go SDK](https://layerv.ai/sdk/) creates access links, connects private services
-and agents, and opens received links from Go
-applications. The `github.com/layervai/qurl-go/qurl` package supports the issuer,
-service, and recipient roles described below.
+Use [qURL™ by LayerV](https://layerv.ai/qurl/) to share localhost web apps, private APIs, and files through expiring access links. This [Go SDK](https://layerv.ai/sdk/) creates access links, connects private services and agents, and opens received links from Go applications. The `github.com/layervai/qurl-go/qurl` package supports the issuer, service, and recipient roles described below.
 
-LayerV hosts qURL. To issue a link, your Go app protects a URL, creates a portal
-for the returned resource, and shares the link. Serving a local app also needs
-a running Connector or agent runtime; issuing the link does not start the app
-or close an existing public route. The app's own sign-in requirements still apply.
+LayerV hosts qURL. To issue a link, your Go app protects a URL, creates a portal for the returned resource, and shares the link. Serving a local app also needs a running Connector or agent runtime; issuing the link does not start the app or close an existing public route. The app's own sign-in requirements still apply.
 
-For a ready-made command to publish localhost, use the
-[qURL CLI](https://github.com/layervai/qurl-integrations/tree/main/apps/cli).
-This repository supplies the Go library for building that behavior into software.
+For a ready-made command to publish localhost, use the [qURL CLI](https://github.com/layervai/qurl-integrations/tree/main/apps/cli). This repository supplies the Go library for building that behavior into software.
 
-Start with [installation](#install), the [link quickstart](#quickstart),
-[connecting a service or agent](#connect-a-service-or-agent),
-[opening links](#opening-links), or the [guides](#guides).
+Start with [installation](#install), the [link quickstart](#quickstart), [connecting a service or agent](#connect-a-service-or-agent), [opening links](#opening-links), or the [guides](#guides).
 
-Portal recipients do not need LayerV credentials, API keys, keypairs, or SDK
-state. They open the qURL link. Credentials are only for software that protects
-URLs or creates portals.
+Portal recipients do not need LayerV credentials, API keys, keypairs, or SDK state. They open the qURL link. Credentials are only for software that protects URLs or creates portals.
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/layervai/qurl-go/qurl.svg)](https://pkg.go.dev/github.com/layervai/qurl-go/qurl)
-[![CI](https://github.com/layervai/qurl-go/actions/workflows/ci.yml/badge.svg)](https://github.com/layervai/qurl-go/actions/workflows/ci.yml)
-[![Go 1.26.9+](https://img.shields.io/badge/go-1.26.9%2B-00ADD8)](go.mod)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Go Reference](https://pkg.go.dev/badge/github.com/layervai/qurl-go/qurl.svg)](https://pkg.go.dev/github.com/layervai/qurl-go/qurl) [![CI](https://github.com/layervai/qurl-go/actions/workflows/ci.yml/badge.svg)](https://github.com/layervai/qurl-go/actions/workflows/ci.yml) [![Go 1.26.9+](https://img.shields.io/badge/go-1.26.9%2B-00ADD8)](go.mod) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-[Local preview workflow](#share-a-localhost-preview-from-go) ·
-[File access](#share-or-open-files-from-go) ·
-[Sharing questions](#go-sharing-questions) · [Private links](https://qurl.link/)
+[Local preview workflow](#share-a-localhost-preview-from-go) · [File access](#share-or-open-files-from-go) · [Sharing questions](#go-sharing-questions) · [Private links](https://qurl.link/)
 
 ## Share a localhost preview from Go
 
-For a ready-made preview, publish the running app with the
-[qURL CLI quickstart](https://github.com/layervai/qurl-integrations#share-a-localhost-web-app).
-Use the Go SDK when you want your service to issue links, host its own agent
-runtime, or consume access programmatically:
+For a ready-made preview, publish the running app with the [qURL CLI quickstart](https://github.com/layervai/qurl-integrations#share-a-localhost-web-app). Use the Go SDK when you want your service to issue links, host its own agent runtime, or consume access programmatically:
 
 | Use case | Go SDK role | Start here |
 | --- | --- | --- |
@@ -46,9 +24,7 @@ runtime, or consume access programmatically:
 | Connect a private HTTP service from its host | Serving agent | Configure durable state and enroll or resume the [agent runtime](#connect-a-service-or-agent). |
 | Let automation read a private API or download from a private file service | Recipient | Open and verify the received link, then authorize content requests as in [opening links](#opening-links). |
 
-For an SDK-managed Connector resource that already exists, this helper looks
-up its immutable slug and requests a five-minute access link. The caller
-supplies an issuer client and context configured for its deployment:
+For an SDK-managed Connector resource that already exists, this helper looks up its immutable slug and requests a five-minute access link. The caller supplies an issuer client and context configured for its deployment:
 
 ```go
 package preview
@@ -73,71 +49,37 @@ func LinkForPreview(ctx context.Context, client *qurl.Client, connectorSlug stri
 }
 ```
 
-The slug and credential must identify a compatible, authorized Connector
-resource. A CLI CRID is not a Connector slug and does not grant issuer
-authority. For a resource published solely through the CLI, `qurl share` is
-the direct link-issuing path; configure compatible SDK resource management
-before using the helper above.
+The slug and credential must identify a compatible, authorized Connector resource. A CLI CRID is not a Connector slug and does not grant issuer authority. For a resource published solely through the CLI, `qurl share` is the direct link-issuing path; configure compatible SDK resource management before using the helper above.
 
-Keep the returned link private and keep the local service and runtime running.
-Creating a portal does not start a server, enroll an agent, or close another
-public route. See [quickstart](#quickstart) for client credentials and
-[connecting a service](#connect-a-service-or-agent) for the serving lifecycle.
+Keep the returned link private and keep the local service and runtime running. Creating a portal does not start a server, enroll an agent, or close another public route. See [quickstart](#quickstart) for client credentials and [connecting a service](#connect-a-service-or-agent) for the serving lifecycle.
 
 ## Share or open files from Go
 
-To share files hosted on your machine, serve a dedicated directory through a
-local HTTP app and publish its root address with the
-[CLI file-sharing workflow](https://github.com/layervai/qurl-integrations#share-files-and-documents).
-To upload supported documents or images, use the
-[MCP upload tools](https://github.com/layervai/qurl-mcp#let-an-ai-agent-share-a-pdf-or-image)
-or the [Gmail integration](https://github.com/layervai/qurl-integrations/tree/main/apps/chrome-extension).
+To share files hosted on your machine, serve a dedicated directory through a local HTTP app and publish its root address with the [CLI file-sharing workflow](https://github.com/layervai/qurl-integrations#share-files-and-documents). To upload supported documents or images, use the [MCP upload tools](https://github.com/layervai/qurl-mcp#let-an-ai-agent-share-a-pdf-or-image) or the [Gmail integration](https://github.com/layervai/qurl-integrations/tree/main/apps/chrome-extension).
 
-This SDK can issue access for a compatible registered file-serving resource
-and open received links. Its portal APIs do not upload a local file. An upload
-service's identifiers and link-minting contract are not automatically the same
-as a Connector resource's.
+This SDK can issue access for a compatible registered file-serving resource and open received links. Its portal APIs do not upload a local file. An upload service's identifiers and link-minting contract are not automatically the same as a Connector resource's.
 
-For a programmatic download, follow [opening links](#opening-links): verify the
-qURL, authorize the HTTP request through the returned resource handle, and
-apply its redirect checks. An HTTP GET of the browser share URL alone fetches
-the opening page, not the protected file. Retain the documented session state
-when one logical visit needs retries; opening a single-use link again can fail.
+For a programmatic download, follow [opening links](#opening-links): verify the qURL, authorize the HTTP request through the returned resource handle, and apply its redirect checks. An HTTP GET of the browser share URL alone fetches the opening page, not the protected file. Retain the documented session state when one logical visit needs retries; opening a single-use link again can fail.
 
 ## Go sharing questions
 
 ### Should I install this SDK to share localhost from a terminal?
 
-Install the [CLI](https://github.com/layervai/qurl-integrations/tree/main/apps/cli)
-for that task. `qurl-go` is a Go library with issuer, serving-agent, and opener
-APIs; it is not a replacement CLI binary.
+Install the [CLI](https://github.com/layervai/qurl-integrations/tree/main/apps/cli) for that task. `qurl-go` is a Go library with issuer, serving-agent, and opener APIs; it is not a replacement CLI binary.
 
 ### Does an opener need my issuer API key?
 
-`EnterPortal` verifies a received link using configured deployment trust and
-the supported opening transport. It does not need the issuer's account key.
-Do not hand out issuer credentials. Your private app's own authentication
-still applies, and custom deployments need the appropriate opener settings.
+`EnterPortal` verifies a received link using configured deployment trust and the supported opening transport. It does not need the issuer's account key. Do not hand out issuer credentials. Your private app's own authentication still applies, and custom deployments need the appropriate opener settings.
 
 ### Does a link's expiry close an existing session?
 
-Expiry limits new redemption. An admitted session has its own lifetime and
-renewal rules. Choose the portal and session options for your resource; do not
-assume that a five-minute link forces every session to end at the same deadline.
+Expiry limits new redemption. An admitted session has its own lifetime and renewal rules. Choose the portal and session options for your resource; do not assume that a five-minute link forces every session to end at the same deadline.
 
 ## Why qURL
 
-qURL lets you issue temporary access to an individual resource while a
-properly configured local origin remains on localhost or a private network.
-The serving runtime provides the access path and the SDK lets your software
-participate as an issuer, agent, or recipient. Restrict any independent public
-route when qURL should be the only path to the app.
+qURL lets you issue temporary access to an individual resource while a properly configured local origin remains on localhost or a private network. The serving runtime provides the access path and the SDK lets your software participate as an issuer, agent, or recipient. Restrict any independent public route when qURL should be the only path to the app.
 
-The resource still needs normal authentication, maintenance, and availability.
-Treat links as access credentials rather than evidence that the holder is the
-person named in a label. ngrok also supports authenticated endpoints and
-outbound connections; compare the actual workflows in the
-[qURL and ngrok guide](https://github.com/layervai/qurl-integrations#qurl-and-ngrok-for-localhost-sharing).
+The resource still needs normal authentication, maintenance, and availability. Treat links as access credentials rather than evidence that the holder is the person named in a label. ngrok also supports authenticated endpoints and outbound connections; compare the actual workflows in the [qURL and ngrok guide](https://github.com/layervai/qurl-integrations#qurl-and-ngrok-for-localhost-sharing).
 
 ## How it fits together
 
@@ -161,15 +103,9 @@ outbound connections; compare the actual workflows in the
 
 Three roles, three sections of this README:
 
-1. **Issue** — your app calls `ProtectURL` and `CreatePortal` over HTTPS and
-   gets back a link. ([Quickstart](#quickstart))
-2. **Serve** — the private service sits behind
-   [qURL Connector](https://github.com/layervai/qurl-connector) or your own
-   agent built with this SDK. Either way it dials *out* to LayerV and holds
-   that connection while the origin can remain private. ([Connect a service or agent](#connect-a-service-or-agent))
-3. **Open** — the recipient opens the link in a browser, or a program calls
-   `EnterPortal`. LayerV verifies the portal and stitches recipient ↔ agent ↔
-   service for the admitted session under the resource's policy. ([Opening links](#opening-links))
+1. **Issue** — your app calls `ProtectURL` and `CreatePortal` over HTTPS and gets back a link. ([Quickstart](#quickstart))
+2. **Serve** — the private service sits behind [qURL Connector](https://github.com/layervai/qurl-connector) or your own agent built with this SDK. Either way it dials *out* to LayerV and holds that connection while the origin can remain private. ([Connect a service or agent](#connect-a-service-or-agent))
+3. **Open** — the recipient opens the link in a browser, or a program calls `EnterPortal`. LayerV verifies the portal and stitches recipient ↔ agent ↔ service for the admitted session under the resource's policy. ([Opening links](#opening-links))
 
 | Term | Meaning |
 | --- | --- |
@@ -198,25 +134,15 @@ And every entry point in one place:
 
 ## Install
 
-qurl-go is a library — there is no binary to `go install`. From inside your
-module:
+qurl-go is a library — there is no binary to `go install`. From inside your module:
 
 ```sh
 go get github.com/layervai/qurl-go/qurl@latest
 ```
 
-Requires Go 1.26.9+ — a security floor, not a preference for the newest
-toolchain. The floor is on the Go 1.26 line because `golang.org/x/crypto` and
-`golang.org/x/sys` require it (and Go 1.25 is out of support); 1.26.9 is the
-earliest 1.26 patch release without the currently known standard-library
-vulnerabilities this SDK's code paths reach. CI runs `govulncheck` at exactly
-this version. See the comment above the `go` directive in
-[go.mod](go.mod) for the advisory list and full rationale.
+Requires Go 1.26.9+ — a security floor, not a preference for the newest toolchain. The floor is on the Go 1.26 line because `golang.org/x/crypto` and `golang.org/x/sys` require it (and Go 1.25 is out of support); 1.26.9 is the earliest 1.26 patch release without the currently known standard-library vulnerabilities this SDK's code paths reach. CI runs `govulncheck` at exactly this version. See the comment above the `go` directive in [go.mod](go.mod) for the advisory list and full rationale.
 
-Not in a module yet? Run `go mod init example.com/myapp` first: `go get`
-outside a module fails with `go.mod file not found`, and
-`go install .../qurl@latest` fails with `is not a main package` because nothing
-here builds a command.
+Not in a module yet? Run `go mod init example.com/myapp` first: `go get` outside a module fails with `go.mod file not found`, and `go install .../qurl@latest` fails with `is not a main package` because nothing here builds a command.
 
 | Module | Purpose |
 | --- | --- |
@@ -227,9 +153,7 @@ here builds a command.
 
 ## Get a credential
 
-Create an API key in the [LayerV dashboard](https://layerv.ai/qurl/dashboard/keys)
-with the `qurl:write` scope. Check the [current plans](https://layerv.ai/pricing/)
-for service limits.
+Create an API key in the [LayerV dashboard](https://layerv.ai/qurl/dashboard/keys) with the `qurl:write` scope. Check the [current plans](https://layerv.ai/pricing/) for service limits.
 
 `OpenClient` resolves credentials in this order, most specific first:
 
@@ -239,19 +163,13 @@ for service limits.
 4. `~/.config/qurl/token` — what the qURL Connector installer already wrote
 5. `/var/lib/layerv/qurl/issuer-state.json` — the machine-wide default
 
-A credential file — whichever source names it — holds either the raw bearer
-token itself (the form the Connector installer writes) or a JSON object with a
-`"bearer_token"` or `"authorization"` field; both are accepted everywhere a
-file is read.
+A credential file — whichever source names it — holds either the raw bearer token itself (the form the Connector installer writes) or a JSON object with a `"bearer_token"` or `"authorization"` field; both are accepted everywhere a file is read.
 
-For credentials held in KMS or a secret manager, implement
-`qurl.CredentialProvider` and pass it to `qurl.NewClient` instead.
+For credentials held in KMS or a secret manager, implement `qurl.CredentialProvider` and pass it to `qurl.NewClient` instead.
 
 ## Quickstart
 
-Production issuer keys, native cell endpoints, and the Hub trust root are embedded
-in the SDK. Production needs no deployment file. For sandbox or a custom
-deployment, set `QURL_DEPLOYMENT` to its deployment file.
+Production issuer keys, native cell endpoints, and the Hub trust root are embedded in the SDK. Production needs no deployment file. For sandbox or a custom deployment, set `QURL_DEPLOYMENT` to its deployment file.
 
 ```sh
 export QURL_API_KEY="<key from https://layerv.ai/qurl/dashboard/keys>"
@@ -291,20 +209,13 @@ func main() {
 }
 ```
 
-`ProtectURL` is idempotent: it returns the existing resource when the same URL
-is already registered for your account.
+`ProtectURL` is idempotent: it returns the existing resource when the same URL is already registered for your account.
 
-A new resource is private or public. State which with `qurl.WithPrivate` when
-the default must not decide, and read `Resource.Private` back; see
-[Private and public resources](docs/issuing-links.md#private-and-public-resources).
+A new resource is private or public. State which with `qurl.WithPrivate` when the default must not decide, and read `Resource.Private` back; see [Private and public resources](docs/issuing-links.md#private-and-public-resources).
 
-Private consumer policies also support credential lists, publisher invitations,
-verified email capture, reviewed requests and contract entitlements. See
-[Consumer access](docs/consumer-access.md). These operations require a service
-and NHP cell with consumer access enabled.
+Private consumer policies also support credential lists, publisher invitations, verified email capture, reviewed requests and contract entitlements. See [Consumer access](docs/consumer-access.md). These operations require a service and NHP cell with consumer access enabled.
 
-If qURL Connector already protects the service, use its immutable connector
-slug:
+If qURL Connector already protects the service, use its immutable connector slug:
 
 ```go
 resource, err := client.GetConnectorResourceBySlug(ctx, "prod-dashboard")
@@ -314,56 +225,28 @@ if err != nil {
 portal, err := resource.CreatePortal(ctx, qurl.ValidFor(5*time.Minute))
 ```
 
-If you persist the CRID, future calls can reconstruct the handle without
-another lookup:
+If you persist the CRID, future calls can reconstruct the handle without another lookup:
 
 ```go
 resource := client.ResourceByCRID(resourceCRID)
 portal, err := resource.CreatePortal(ctx, qurl.ValidFor(time.Hour))
 ```
 
-`CreatePortal` and `Client.ShareResource` both mint an access link.
-`CreatePortal` is the portal-options path on a resource handle;
-`ShareResource` is the stored-identifier path — it accepts the resource's CRID and returns a `ShareLink` whose CRID you can verify
-against a key you already hold (`VerifyCRID`). Both leave the link lifetime to
-the server default unless you ask (`ValidFor` on a portal,
-`ShareResourceOptions.TTL` on a share).
+`CreatePortal` and `Client.ShareResource` both mint an access link. `CreatePortal` is the portal-options path on a resource handle; `ShareResource` is the stored-identifier path — it accepts the resource's CRID and returns a `ShareLink` whose CRID you can verify against a key you already hold (`VerifyCRID`). Both leave the link lifetime to the server default unless you ask (`ValidFor` on a portal, `ShareResourceOptions.TTL` on a share).
 
-**Publisher metadata.** A `ShareLink` also carries `ResourceCreatedAt` (when the
-resource was created; `nil` if the service did not report it) and `Publisher`,
-a `qurl.Publisher` with the owner's self-declared `Name` and a `Verified` flag.
-Every publisher is unverified today, and anything missing decodes to
-unverified. This metadata is asserted by the service and is not part of CRID
-verification — `VerifyCRID` and `VerifyLinkForCRID` cover only the key and the
-link. Treat `Name` as untrusted text: print it with `%q` so control characters
-are escaped, and always show "unverified" clearly beside it. An owner manages
-its own name with `Client.Publisher` and `Client.SetPublisherName`; see
-[Publisher metadata](docs/share-and-crid.md#publisher-metadata).
+**Publisher metadata.** A `ShareLink` also carries `ResourceCreatedAt` (when the resource was created; `nil` if the service did not report it) and `Publisher`, a `qurl.Publisher` with the owner's self-declared `Name` and a `Verified` flag. Every publisher is unverified today, and anything missing decodes to unverified. This metadata is asserted by the service and is not part of CRID verification — `VerifyCRID` and `VerifyLinkForCRID` cover only the key and the link. Treat `Name` as untrusted text: print it with `%q` so control characters are escaped, and always show "unverified" clearly beside it. An owner manages its own name with `Client.Publisher` and `Client.SetPublisherName`; see [Publisher metadata](docs/share-and-crid.md#publisher-metadata).
 
-Minted links use the share-safe `#qv2t1...` fragment transport. It keeps every
-dot-separated component at 240 characters or fewer so messaging clients retain
-the full click target, while preserving the exact signed qv2 bytes and keeping
-the per-link private credential out of HTTP requests.
+Minted links use the share-safe `#qv2t1...` fragment transport. It keeps every dot-separated component at 240 characters or fewer so messaging clients retain the full click target, while preserving the exact signed qv2 bytes and keeping the per-link private credential out of HTTP requests.
 
-Next: [Protect a private service](docs/secure-a-private-service.md) ·
-[Issue links](docs/issuing-links.md)
+Next: [Protect a private service](docs/secure-a-private-service.md) · [Issue links](docs/issuing-links.md)
 
 ## Connect a service or agent
 
-The ready-made local publishing path is the
-[qURL CLI](https://github.com/layervai/qurl-integrations/tree/main/apps/cli),
-which embeds [qURL Connector](https://github.com/layervai/qurl-connector)
-beside the service. Use this SDK's agent runtime when you
-want the service itself to hold the connection, with no sidecar.
+The ready-made local publishing path is the [qURL CLI](https://github.com/layervai/qurl-integrations/tree/main/apps/cli), which embeds [qURL Connector](https://github.com/layervai/qurl-connector) beside the service. Use this SDK's agent runtime when you want the service itself to hold the connection, with no sidecar.
 
-Your service registers once, then keeps serving. Registration happens over an
-authenticated UDP channel — no inbound ports, no public endpoint, nothing for a
-scanner to find.
+Your service registers once, then keeps serving. Registration happens over an authenticated UDP channel — no inbound ports, no public endpoint, nothing for a scanner to find.
 
-Enrollment uses the production Hub trust root embedded in the SDK. No deployment
-file is needed for production. For sandbox or a custom deployment, set
-`QURL_DEPLOYMENT` to its deployment file or pass `WithAgentRuntimeHub`. A
-completed registration whose lease is live reopens without a Hub exchange.
+Enrollment uses the production Hub trust root embedded in the SDK. No deployment file is needed for production. For sandbox or a custom deployment, set `QURL_DEPLOYMENT` to its deployment file or pass `WithAgentRuntimeHub`. A completed registration whose lease is live reopens without a Hub exchange.
 
 ```go
 store, err := qurl.OpenFileAgentState("/var/lib/layerv/qurl/agent-state.json")
@@ -388,47 +271,19 @@ That is the whole enrollment. Run it on every start, under a supervisor:
 - Restarts are safe — it enrolls only when nothing is registered yet.
 - Crashes and dropped replies resume the same registration, for up to 90 days.
 - Leases renew themselves, at startup and mid-run.
-- Relocations are followed automatically, and only ever to a placement named in
-  an authenticated LayerV reply — never a guessed or config-supplied address.
+- Relocations are followed automatically, and only ever to a placement named in an authenticated LayerV reply — never a guessed or config-supplied address.
 
-Keep the state file across restarts, and keep the metadata stable: the file is
-what makes a resume possible, and the hostname and version become part of the
-saved registration.
+Keep the state file across restarts, and keep the metadata stable: the file is what makes a resume possible, and the hostname and version become part of the saved registration.
 
-**The one-time code.** Enrollment defaults to emailing a code to the address on
-your credential; `readOneTimeCode` is the callback you write to return it —
-poll a mailbox, page an operator, your call. It should return exactly 8 decimal
-digits and honor its context. Runtimes with no mailbox in reach (sealed
-appliances, air-gapped builders) enroll with a pre-issued credential and swap
-`WithAgentRuntimeOTPProvider` — that line only — for
-`WithAgentRuntimeHeadlessEnrollment()`: an explicit opt-out, mutually exclusive
-with an OTP provider, and not a shorter form of the call. Every other option
-stays, `WithAgentRuntimeMetadata` included. Not sure which credential kind you
-hold? Run the default and read the error; a wrong first guess costs nothing and
-the retry reuses the same agent identity. The
-[Connect a service or agent](docs/register-an-agent.md) guide has every path,
-including renewing without holding an enrollment credential at runtime and
-[taking manual control](docs/register-an-agent.md#taking-manual-control) of
-renewal.
+**The one-time code.** Enrollment defaults to emailing a code to the address on your credential; `readOneTimeCode` is the callback you write to return it — poll a mailbox, page an operator, your call. It should return exactly 8 decimal digits and honor its context. Runtimes with no mailbox in reach (sealed appliances, air-gapped builders) enroll with a pre-issued credential and swap `WithAgentRuntimeOTPProvider` — that line only — for `WithAgentRuntimeHeadlessEnrollment()`: an explicit opt-out, mutually exclusive with an OTP provider, and not a shorter form of the call. Every other option stays, `WithAgentRuntimeMetadata` included. Not sure which credential kind you hold? Run the default and read the error; a wrong first guess costs nothing and the retry reuses the same agent identity. The [Connect a service or agent](docs/register-an-agent.md) guide has every path, including renewing without holding an enrollment credential at runtime and [taking manual control](docs/register-an-agent.md#taking-manual-control) of renewal.
 
-**Credentials are LayerV-minted tokens** of at least 32 characters. Passwords
-and hand-picked strings are rejected before anything is saved or sent.
+**Credentials are LayerV-minted tokens** of at least 32 characters. Passwords and hand-picked strings are rejected before anything is saved or sent.
 
-> **Network requirements.** Everything the SDK dials is outbound: HTTPS to
-> `api.layerv.ai` for issuing, and NHP over **UDP 443** to LayerV hosts under
-> `layerv.ai` for registration and native opens. No inbound ports, no
-> listeners. If registration fails with `ErrEndpointNoReply`, the usual cause
-> is an egress firewall silently dropping UDP 443 — the error names the exact
-> host to allow. Two LayerV-internal names appear in those errors and in
-> deployment files, and rarely in code you write — pinned openers
-> (`CellEntry`) and self-hosted deployments (`HubBootstrap`) are the
-> exceptions: the **hub** is where an agent registers, and it assigns the
-> agent a **cell**, which carries its portal traffic from then on.
+> **Network requirements.** Everything the SDK dials is outbound: HTTPS to `api.layerv.ai` for issuing, and NHP over **UDP 443** to LayerV hosts under `layerv.ai` for registration and native opens. No inbound ports, no listeners. If registration fails with `ErrEndpointNoReply`, the usual cause is an egress firewall silently dropping UDP 443 — the error names the exact host to allow. Two LayerV-internal names appear in those errors and in deployment files, and rarely in code you write — pinned openers (`CellEntry`) and self-hosted deployments (`HubBootstrap`) are the exceptions: the **hub** is where an agent registers, and it assigns the agent a **cell**, which carries its portal traffic from then on.
 
 ## Opening links
 
-Most recipients open qURL links directly in a browser and do not use this SDK.
-Programmatic recipients call:
+Most recipients open qURL links directly in a browser and do not use this SDK. Programmatic recipients call:
 
 ```go
 handle, err := qurl.EnterPortal(ctx, link)
@@ -450,31 +305,9 @@ httpClient := &http.Client{
 resp, err := httpClient.Do(req)
 ```
 
-That is the whole integration, and it needs no LayerV credentials. `EnterPortal`
-checks that the link was really issued by LayerV, then opens it over a direct
-UDP connection. Browsers cannot send UDP, so links opened in a browser go
-through an HTTPS path instead. In this SDK the resolved config decides the
-transport: a configured cell catalog selects native UDP. Unknown cells fail with
-`ErrCellNotInCatalog`, even when a relay allowlist is configured. Relay-only
-operation requires a nil cell catalog and a relay allowlist (see
-[docs/opening-links.md](docs/opening-links.md#pinning-the-opener-trust-config)).
-Use an HTTP client without a cookie jar, or ensure its jar does not add the
-reserved `qurl_vsession` cookie after `AuthorizeContentRequest` runs.
+That is the whole integration, and it needs no LayerV credentials. `EnterPortal` checks that the link was really issued by LayerV, then opens it over a direct UDP connection. Browsers cannot send UDP, so links opened in a browser go through an HTTPS path instead. In this SDK the resolved config decides the transport: a configured cell catalog selects native UDP. Unknown cells fail with `ErrCellNotInCatalog`, even when a relay allowlist is configured. Relay-only operation requires a nil cell catalog and a relay allowlist (see [docs/opening-links.md](docs/opening-links.md#pinning-the-opener-trust-config)). Use an HTTP client without a cookie jar, or ensure its jar does not add the reserved `qurl_vsession` cookie after `AuthorizeContentRequest` runs.
 
-The opener trust configuration — which issuer keys to verify links against and
-which cells to reach — resolves most specific first: a `Provider` installed
-with `SetDefaultProvider`, then a JSON file named by `QURL_DEPLOYMENT`, then
-the deployment embedded in the build
-([qurl/deployment.json](qurl/deployment.json)). The Hub trust root for agent
-registration is not provider-supplied: it comes only from `QURL_DEPLOYMENT`,
-the embedded deployment, or an explicit `WithAgentRuntimeHub`
-(`RefreshAgentRuntime` takes a `HubBootstrap` argument) — an installed
-`Provider` affects opener config only. Releases embed the production issuer
-keys, native cell endpoints, and Hub trust root. Production needs no deployment
-file. Set `QURL_DEPLOYMENT` only for sandbox or a custom deployment. The issuer
-HTTPS endpoint is configured separately with `WithBaseURL`. A resolved deployment
-with no issuer keys fails closed (`ErrNotConfigured`) rather than open a link it
-cannot verify.
+The opener trust configuration — which issuer keys to verify links against and which cells to reach — resolves most specific first: a `Provider` installed with `SetDefaultProvider`, then a JSON file named by `QURL_DEPLOYMENT`, then the deployment embedded in the build ([qurl/deployment.json](qurl/deployment.json)). The Hub trust root for agent registration is not provider-supplied: it comes only from `QURL_DEPLOYMENT`, the embedded deployment, or an explicit `WithAgentRuntimeHub` (`RefreshAgentRuntime` takes a `HubBootstrap` argument) — an installed `Provider` affects opener config only. Releases embed the production issuer keys, native cell endpoints, and Hub trust root. Production needs no deployment file. Set `QURL_DEPLOYMENT` only for sandbox or a custom deployment. The issuer HTTPS endpoint is configured separately with `WithBaseURL`. A resolved deployment with no issuer keys fails closed (`ErrNotConfigured`) rather than open a link it cannot verify.
 
 ### Open by CRID
 
@@ -488,60 +321,18 @@ if err != nil {
 // handle is the same *ResourceHandle EnterPortal returns; use it the same way.
 ```
 
-`OpenCRID` asks the server for a short-lived qURL link for that CRID, checks
-the link, and opens it. It needs no LayerV credentials. The link comes from the
-network, so it is used only after it passes every client check: it is on the
-deployment's link origin, its issuer signature verifies under the trust store,
-and its signed resource key derives the CRID you asked for. A link that fails a
-check is never opened, returned, logged, or quoted in an error.
+`OpenCRID` asks the server for a short-lived qURL link for that CRID, checks the link, and opens it. It needs no LayerV credentials. The link comes from the network, so it is used only after it passes every client check: it is on the deployment's link origin, its issuer signature verifies under the trust store, and its signed resource key derives the CRID you asked for. A link that fails a check is never opened, returned, logged, or quoted in an error.
 
-- **The request goes through the relay.** In this version the link request is
-  always sent through the deployment's HTTPS relay, under a key minted for that
-  one request — also when links themselves open over native UDP. The open that
-  follows uses native UDP to the deployment's cell.
-- **A registered device can open a private resource.** A private resource can
-  be opened by CRID only by a registered device that the owner allowed, or by
-  the owner's own device. Call `OpenCRIDAsDevice` with the device key, or
-  `OpenCRIDAsDeviceWith` to pass the configuration yourself. The
-  first request never carries the device key: it is sent under a random key
-  and carries nothing derived from the device key. Only when
-  that request is answered "not found" does the SDK send one second request,
-  under the device key. The second request is a real request and counts
-  against the server's per-source request limit. The source address can still
-  connect a request to the device, and the relay can do more with the second
-  request than with the first. See
-  [Open a private resource](docs/opening-links.md#open-a-private-resource).
-- **The device key can be read only when it is needed.** A device whose key
-  costs something to read, for example a sealed key, calls
-  `OpenCRIDAsDeviceFromKeySource` and passes a function that returns the key.
-  The SDK calls the function once, and only when the first request was
-  answered "not found". A public resource is opened without that call. The SDK
-  overwrites the key the function returned before the call returns. See
-  [Read the device key only when it is needed](docs/opening-links.md#read-the-device-key-only-when-it-is-needed).
-- **Publisher data is display-only and unverified.** `RequestCRIDLink` returns
-  the link together with what the server reports about it: a publisher name,
-  when the resource was created, when the link expires. None of that is covered
-  by the link's signature or by the CRID. The name is self-declared, and every
-  publisher is unverified today. Show it quoted (`%q`), always next to
-  "unverified", and never as a confirmed identity. To show it before opening,
-  call `RequestCRIDLink`, then `EnterPortalForCRID` with the link and the same
-  CRID.
-- **It has to be configured.** The request needs a CRID link endpoint, which a
-  deployment names in its `crid_link` object. The deployment embedded in this
-  release does not name one, so `OpenCRID` returns `ErrCRIDLinkNotConfigured`
-  until `QURL_DEPLOYMENT` names a deployment file that does, or you pass the
-  endpoint with `OpenCRIDWith`. `CheckCRIDLinkConfig` gives the same answer
-  without a CRID and without sending anything. See
-  [Open by CRID](docs/opening-links.md#open-by-crid) for the file format.
-- **It can be tested without a server.** `qurltest.NewCRIDLinkServer` answers
-  the link request in process, so a test runs the production call and the SDK
-  still checks the link. See
-  [Test without a server](docs/opening-links.md#test-without-a-server).
+- **The request goes through the relay.** In this version the link request is always sent through the deployment's HTTPS relay, under a key minted for that one request — also when links themselves open over native UDP. The open that follows uses native UDP to the deployment's cell.
+- **A registered device can open a private resource.** A private resource can be opened by CRID only by a registered device that the owner allowed, or by the owner's own device. Call `OpenCRIDAsDevice` with the device key, or `OpenCRIDAsDeviceWith` to pass the configuration yourself. The first request never carries the device key: it is sent under a random key and carries nothing derived from the device key. Only when that request is answered "not found" does the SDK send one second request, under the device key. The second request is a real request and counts against the server's per-source request limit. The source address can still connect a request to the device, and the relay can do more with the second request than with the first. See [Open a private resource](docs/opening-links.md#open-a-private-resource).
+- **The device key can be read only when it is needed.** A device whose key costs something to read, for example a sealed key, calls `OpenCRIDAsDeviceFromKeySource` and passes a function that returns the key. The SDK calls the function once, and only when the first request was answered "not found". A public resource is opened without that call. The SDK overwrites the key the function returned before the call returns. See [Read the device key only when it is needed](docs/opening-links.md#read-the-device-key-only-when-it-is-needed).
+- **Publisher data is display-only and unverified.** `RequestCRIDLink` returns the link together with what the server reports about it: a publisher name, when the resource was created, when the link expires. None of that is covered by the link's signature or by the CRID. The name is self-declared, and every publisher is unverified today. Show it quoted (`%q`), always next to "unverified", and never as a confirmed identity. To show it before opening, call `RequestCRIDLink`, then `EnterPortalForCRID` with the link and the same CRID.
+- **It has to be configured.** The request needs a CRID link endpoint, which a deployment names in its `crid_link` object. The deployment embedded in this release does not name one, so `OpenCRID` returns `ErrCRIDLinkNotConfigured` until `QURL_DEPLOYMENT` names a deployment file that does, or you pass the endpoint with `OpenCRIDWith`. `CheckCRIDLinkConfig` gives the same answer without a CRID and without sending anything. See [Open by CRID](docs/opening-links.md#open-by-crid) for the file format.
+- **It can be tested without a server.** `qurltest.NewCRIDLinkServer` answers the link request in process, so a test runs the production call and the SDK still checks the link. See [Test without a server](docs/opening-links.md#test-without-a-server).
 
 ## Error handling
 
-Match errors by type or sentinel, not message text. Grouped by the scenario
-that raises them:
+Match errors by type or sentinel, not message text. Grouped by the scenario that raises them:
 
 **Issuing — credentials and the HTTPS resource API**
 
@@ -574,8 +365,7 @@ that raises them:
 
 **Opening by CRID — `OpenCRID`, `RequestCRIDLink`, `OpenCRIDAsDevice`, `RequestCRIDLinkAsDevice`, their `With` forms, and the `FromKeySource` forms of the device calls**
 
-The open that follows a successful link request can also return any error from
-the table above.
+The open that follows a successful link request can also return any error from the table above.
 
 | Error | Code | Meaning |
 | --- | --- | --- |
@@ -597,9 +387,7 @@ the table above.
 | `*qurl.RelayError` | — | The relay could not be reached, answered with an HTTP error instead of a reply, or began a reply that could not be read to the end (`Status` is then 200). When the caller's context ended the request before a reply was read, the error also matches the context's error |
 | `context.DeadlineExceeded` / `context.Canceled` | — | On its own, matching no other row: the caller's context ended between two steps of the call. For any open by CRID that is after the link was issued and before the open. For a call made as a device it can also be after "not found" and before the request with the device key. The error does not say which, so it does not say whether the device key was sent. Try again with more time |
 
-A relay answer that does not authenticate as the server's reply is an error
-that matches none of these rows, as it is for `EnterPortal`. It is never read
-as an answer.
+A relay answer that does not authenticate as the server's reply is an error that matches none of these rows, as it is for `EnterPortal`. It is never read as an answer.
 
 **Agent lifecycle — `ConnectAgentRuntime`, refresh, recovery, knock**
 
@@ -629,36 +417,18 @@ as an answer.
 
 ## Security notes
 
-- Treat LayerV credentials, agent state, and qURL links like credentials. Do
-  not log them.
-- Never guess or construct LayerV addresses yourself; use what the SDK
-  resolves from your deployment and from authenticated LayerV replies.
-- Keep saved registration state across an unclear reply, and keep the exact
-  pending completion candidate across ambiguous completion delivery.
-- Call `binding.Destroy()` when done. If you took key ownership with
-  `binding.TakeDeviceStaticPrivateKey()`, zero the returned slice yourself once
-  the knocker no longer needs it.
-- Keep issuer credentials in protected state, KMS, a secret manager, or another
-  protected store — see [awsstore](awsstore/README.md) for AWS-backed options.
-- Links opened in a browser (HTTPS) and services connected natively (UDP) are
-  separate trust paths; neither configures the other.
+- Treat LayerV credentials, agent state, and qURL links like credentials. Do not log them.
+- Never guess or construct LayerV addresses yourself; use what the SDK resolves from your deployment and from authenticated LayerV replies.
+- Keep saved registration state across an unclear reply, and keep the exact pending completion candidate across ambiguous completion delivery.
+- Call `binding.Destroy()` when done. If you took key ownership with `binding.TakeDeviceStaticPrivateKey()`, zero the returned slice yourself once the knocker no longer needs it.
+- Keep issuer credentials in protected state, KMS, a secret manager, or another protected store — see [awsstore](awsstore/README.md) for AWS-backed options.
+- Links opened in a browser (HTTPS) and services connected natively (UDP) are separate trust paths; neither configures the other.
 
-Revocation covers every minted link. `RevokePortal` revokes a single link
-immediately, whichever call minted it: pass `Portal.CRID` and
-`Portal.QURLID` from a create, or the CRID you shared and
-`ShareLink.QURLID` from a `ShareResource`. Only that link dies — the
-resource and its other live links keep working — and revoking a link that is
-no longer active fails with `ErrPortalRevoked` rather than reporting success
-it did not cause. Capture the qurl id when you mint: like the link itself, it
-is not retrievable afterwards, and a server predating the field omits it. A
-short `ShareResourceOptions.TTL` remains the complementary control at mint
-time. `DeleteConnectorResource` revokes an entire connector resource (see
-[Resolve and manage qURL Connector resources](docs/connector-resources.md)).
+Revocation covers every minted link. `RevokePortal` revokes a single link immediately, whichever call minted it: pass `Portal.CRID` and `Portal.QURLID` from a create, or the CRID you shared and `ShareLink.QURLID` from a `ShareResource`. Only that link dies — the resource and its other live links keep working — and revoking a link that is no longer active fails with `ErrPortalRevoked` rather than reporting success it did not cause. Capture the qurl id when you mint: like the link itself, it is not retrievable afterwards, and a server predating the field omits it. A short `ShareResourceOptions.TTL` remains the complementary control at mint time. `DeleteConnectorResource` revokes an entire connector resource (see [Resolve and manage qURL Connector resources](docs/connector-resources.md)).
 
 ### Per-CRID preview metadata
 
-Use `client.Preview(ctx, crid)` to read the public app name, preview text, media IDs and processing
-state for a resource you own. To set optional text, pass the latest revision:
+Use `client.Preview(ctx, crid)` to read the public app name, preview text, media IDs and processing state for a resource you own. To set optional text, pass the latest revision:
 
 ```go
 name := "API guide"
@@ -672,15 +442,7 @@ _, err = client.UpdatePreview(ctx, resourceCRID, qurl.PreviewPatch{
 })
 ```
 
-`CreatePreviewUpload` returns an exact-size, five-minute HTTPS PUT request for
-verified publishers. Upload the file bytes with the returned headers and exact Content-Length directly to
-`URL`, without API credentials or redirects. Poll `Preview` until processing is
-ready or failed. A replacement retains old media until ready. Send an empty
-`MediaIDs` slice to remove all media and cancel pending work. A stale revision
-returns 409; read current state before retrying. Descriptions are plain text, not
-HTML, and are separate from private owner notes. Media URLs expire after five
-minutes; load video only after explicit playback. The publisher cannot set its
-verification status through these methods.
+`CreatePreviewUpload` returns an exact-size, five-minute HTTPS PUT request for verified publishers. Upload the file bytes with the returned headers and exact Content-Length directly to `URL`, without API credentials or redirects. Poll `Preview` until processing is ready or failed. A replacement retains old media until ready. Send an empty `MediaIDs` slice to remove all media and cancel pending work. A stale revision returns 409; read current state before retrying. Descriptions are plain text, not HTML, and are separate from private owner notes. Media URLs expire after five minutes; load video only after explicit playback. The publisher cannot set its verification status through these methods.
 
 ## Guides
 
@@ -690,20 +452,13 @@ verification status through these methods.
 - [Issue links](docs/issuing-links.md)
 - [Share a resource and verify its CRID](docs/share-and-crid.md)
 - [Open links](docs/opening-links.md)
-- [Testing against NHP](docs/testing-against-nhp.md) — loopback suites for most
-  work, live sandbox for interop
-  ([ADR 0001](docs/decisions/0001-sandbox-nhp-access.md))
+- [Testing against NHP](docs/testing-against-nhp.md) — loopback suites for most work, live sandbox for interop ([ADR 0001](docs/decisions/0001-sandbox-nhp-access.md))
 
-Platform docs, the API reference, and the playground live at
-[layerv.ai/start](https://layerv.ai/start).
+Platform docs, the API reference, and the playground live at [layerv.ai/start](https://layerv.ai/start).
 
 ## Versioning
 
-Pre-1.0 semantic versioning: breaking changes land in minor versions (v0.N.0)
-and are flagged in the [changelog](CHANGELOG.md) with what to change. Wire
-compatibility is pinned by authenticated golden vectors from
-[qurl-conformance](https://github.com/layervai/qurl-conformance); releases that
-move the wire protocol say so loudly and name the flag day.
+Pre-1.0 semantic versioning: breaking changes land in minor versions (v0.N.0) and are flagged in the [changelog](CHANGELOG.md) with what to change. Wire compatibility is pinned by authenticated golden vectors from [qurl-conformance](https://github.com/layervai/qurl-conformance); releases that move the wire protocol say so loudly and name the flag day.
 
 ## License
 
