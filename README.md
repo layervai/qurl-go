@@ -38,7 +38,7 @@ URLs or creates portals.
 ## Share a localhost preview from Go
 
 For a ready-made preview, publish the running app with the
-[qURL CLI quickstart](https://github.com/layervai/qurl-integrations/tree/main/apps/cli#publish-localhost-in-60-seconds).
+[qURL CLI quickstart](https://github.com/layervai/qurl-integrations#share-a-localhost-web-app).
 Use the Go SDK when you want your service to issue links, manage agent
 enrollment and admission, or consume access programmatically:
 
@@ -90,9 +90,9 @@ public route. See [quickstart](#quickstart) for client credentials and
 
 To share files hosted on your machine, serve a dedicated directory through a
 local HTTP app and publish its root address with the
-[CLI file-sharing workflow](https://github.com/layervai/qurl-integrations/tree/main/apps/cli#local-apps).
+[CLI file-sharing workflow](https://github.com/layervai/qurl-integrations#share-files-and-documents).
 To upload supported documents or images, use the
-[MCP upload tools](https://github.com/layervai/qurl-mcp#upload-tools)
+[MCP upload tools](https://github.com/layervai/qurl-mcp#let-an-ai-agent-share-a-pdf-or-image)
 or the [Gmail integration](https://github.com/layervai/qurl-integrations/tree/main/apps/chrome-extension).
 
 This SDK can issue access for a compatible registered file-serving resource
@@ -114,7 +114,7 @@ Choose the Go API by the part of the sharing lifecycle your software owns:
 - **Agent:** this SDK manages enrollment, durable state, and NHP admission: permission to serve a resource. HTTP forwarding requires [qURL Connector](https://github.com/layervai/qurl-connector), embedded in the CLI; `ConnectAgentRuntime` alone does not carry application traffic. The [ngrok Go Agent SDK](https://github.com/ngrok/ngrok-go) provides a `net.Listener` that a Go HTTP server can serve directly. Choose based on the runtime and access workflow your application needs.
 - **Recipient:** a qURL consumer opens and verifies a received link, then authorizes content requests through its returned resource handle. This differs from making a direct request to an [S3 presigned object URL](https://docs.aws.amazon.com/AmazonS3/latest/userguide/using-presigned-url.html). Follow [opening links](#opening-links) for target binding, redirect checks, and session state; fetching the browser opening page alone does not fetch the protected content.
 
-For a ready-made localhost share, install the CLI. For an application already reached through Cloudflare Access or a Tailscale tailnet, evaluate its existing access workflow before adding another runtime. The [CLI publishing guide](https://github.com/layervai/qurl-integrations/tree/main/apps/cli#qurl-publish) explains the qURL deployment options. Local app and file-serving paths still need an available origin; expiry, session lifetime, and app login remain separate concerns.
+For a ready-made localhost share, install the CLI. For an application already reached through Cloudflare Access or a Tailscale tailnet, evaluate its existing access workflow before adding another runtime. The [sharing comparison](https://github.com/layervai/qurl-integrations#choose-how-to-share-an-app-or-file) explains those deployment choices. Local app and file-serving paths still need an available origin; expiry, session lifetime, and app login remain separate concerns.
 
 ## Go sharing questions
 
