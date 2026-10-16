@@ -1,10 +1,26 @@
-# qurl-go
+# qURL Go SDK for private service access
 
-**Use the LayerV qURL Platform from Go: protect a private URL once, then mint
-short-lived access links for it.**
+Use [qURL™ by LayerV](https://layerv.ai/qurl/) to share localhost web apps,
+private APIs, and files through expiring access links. This
+[Go SDK](https://layerv.ai/sdk/) creates access links, enrolls agents,
+authorizes access, and opens received links from Go
+applications. The `github.com/layervai/qurl-go/qurl` package supports the issuer,
+agent, and recipient roles described below.
 
-LayerV hosts qURL. Your Go app keeps a tiny surface area: protect the URL,
-create a portal link for the returned resource, and share the link.
+LayerV hosts qURL. To issue a link, your Go app protects a URL, creates a portal
+for the returned resource, and shares the link. Serving a local app also needs
+a running Connector to forward HTTP traffic; issuing the link does not start
+the app or close an existing public route. The app's own sign-in requirements
+still apply.
+
+For a ready-made command to publish localhost, use the
+[qURL CLI](https://github.com/layervai/qurl-integrations/tree/main/apps/cli).
+The CLI embeds [qURL Connector](https://github.com/layervai/qurl-connector).
+This SDK supplies link operations and agent enrollment and admission for Go software.
+
+Start with [installation](#install), the [link quickstart](#quickstart),
+[connecting a service or agent](#connect-a-service-or-agent),
+[opening links](#opening-links), or the [guides](#guides).
 
 Portal recipients do not need LayerV credentials, API keys, keypairs, or SDK
 state. They open the qURL link. Credentials are only for software that protects
@@ -15,18 +31,123 @@ URLs or creates portals.
 [![Go 1.26.9+](https://img.shields.io/badge/go-1.26.9%2B-00ADD8)](go.mod)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
+[Local preview workflow](#share-a-localhost-preview-from-go) ·
+[File access](#share-or-open-files-from-go) ·
+[Sharing questions](#go-sharing-questions) · [Private links](https://qurl.link/)
+
+## Share a localhost preview from Go
+
+For a ready-made preview, publish the running app with the
+[qURL CLI quickstart](https://github.com/layervai/qurl-integrations#share-a-localhost-web-app).
+Use the Go SDK when you want your service to issue links, manage agent
+enrollment and admission, or consume access programmatically:
+
+| Use case | Go SDK role | Start here |
+| --- | --- | --- |
+| Issue a reviewer a short-lived link to a configured local preview | Issuer | Use a resource the issuer credential can manage, then create a portal. |
+| Enroll an agent and request permission to serve a resource | Agent | Configure durable state and enroll or resume the [agent runtime](#connect-a-service-or-agent). HTTP forwarding requires the Connector runtime. |
+| Let automation read a private API or download from a private file service | Recipient | Open and verify the received link, then authorize content requests as in [opening links](#opening-links). |
+
+For an SDK-managed Connector resource that already exists, this helper looks
+up its immutable slug and requests a five-minute access link. The caller
+supplies an issuer client and context configured for its deployment:
+
+```go
+package preview
+
+import (
+	"context"
+	"time"
+
+	"github.com/layervai/qurl-go/qurl"
+)
+
+func LinkForPreview(ctx context.Context, client *qurl.Client, connectorSlug string) (string, error) {
+	resource, err := client.GetConnectorResourceBySlug(ctx, connectorSlug)
+	if err != nil {
+		return "", err
+	}
+	portal, err := resource.CreatePortal(ctx, qurl.ValidFor(5*time.Minute))
+	if err != nil {
+		return "", err
+	}
+	return portal.Link, nil
+}
+```
+
+The slug and credential must identify a compatible, authorized Connector
+resource. A CLI CRID is not a Connector slug and does not grant issuer
+authority. For a resource published solely through the CLI, `qurl share` is
+the direct link-issuing path; configure compatible SDK resource management
+before using the helper above.
+
+Keep the returned link private and keep the local service and runtime running.
+Creating a portal does not start a server, enroll an agent, or close another
+public route. See [quickstart](#quickstart) for client credentials and
+[connecting a service](#connect-a-service-or-agent) for the required runtime.
+
+## Share or open files from Go
+
+To share files hosted on your machine, serve a dedicated directory through a
+local HTTP app and publish its root address with the
+[CLI file-sharing workflow](https://github.com/layervai/qurl-integrations#share-files-and-documents).
+To upload supported documents or images, use the
+[MCP upload tools](https://github.com/layervai/qurl-mcp#let-an-ai-agent-share-a-pdf-or-image)
+or the [Gmail integration](https://github.com/layervai/qurl-integrations/tree/main/apps/chrome-extension).
+
+This SDK can issue access for a compatible registered file-serving resource
+and open received links. Its portal APIs do not upload a local file. An upload
+service's identifiers and link-minting contract are not automatically the same
+as a Connector resource's.
+
+For a programmatic download, follow [opening links](#opening-links): verify the
+qURL, authorize the HTTP request through the returned resource handle, and
+apply its redirect checks. An HTTP GET of the browser share URL alone fetches
+the opening page, not the protected file. Retain the documented session state
+when one logical visit needs retries; opening a single-use link again can fail.
+
+## Connectivity, issuance, and opening from Go
+
+Choose the Go API by the part of the sharing lifecycle your software owns:
+
+- **Issuer:** resource and portal operations let an authorized service issue access to an existing resource. A returned link does not start the origin or enroll its serving agent. Use this role for a preview-review service or automation that grants access to a private API.
+- **Agent:** this SDK manages enrollment, durable state, and NHP admission: permission to serve a resource. HTTP forwarding requires [qURL Connector](https://github.com/layervai/qurl-connector), embedded in the CLI; `ConnectAgentRuntime` alone does not carry application traffic. The [ngrok Go Agent SDK](https://github.com/ngrok/ngrok-go) provides a `net.Listener` that a Go HTTP server can serve directly. Choose based on the runtime and access workflow your application needs.
+- **Recipient:** a qURL consumer opens and verifies a received link, then authorizes content requests through its returned resource handle. This differs from making a direct request to an [S3 presigned object URL](https://docs.aws.amazon.com/AmazonS3/latest/userguide/using-presigned-url.html). Follow [opening links](#opening-links) for target binding, redirect checks, and session state; fetching the browser opening page alone does not fetch the protected content.
+
+For a ready-made localhost share, install the CLI. For an application already reached through Cloudflare Access or a Tailscale tailnet, evaluate its existing access workflow before adding another runtime. The [sharing comparison](https://github.com/layervai/qurl-integrations#choose-how-to-share-an-app-or-file) explains those deployment choices. Local app and file-serving paths still need an available origin; expiry, session lifetime, and app login remain separate concerns.
+
+## Go sharing questions
+
+### Should I install this SDK to share localhost from a terminal?
+
+Install the [CLI](https://github.com/layervai/qurl-integrations/tree/main/apps/cli)
+for that task. `qurl-go` is a Go library with issuer, agent, and opener
+APIs; it is not a replacement CLI binary.
+
+### Does an opener need my issuer API key?
+
+`EnterPortal` verifies a received link using configured deployment trust and
+the supported opening transport. It does not need the issuer's account key.
+Do not hand out issuer credentials. Your private app's own authentication
+still applies, and custom deployments need the appropriate opener settings.
+
+### Does a link's expiry close an existing session?
+
+Expiry limits new redemption. An admitted session has its own lifetime and
+renewal rules. Choose the portal and session options for your resource; do not
+assume that a five-minute link forces every session to end at the same deadline.
+
 ## Why qURL
 
-Agents and services increasingly need to reach private MCP servers, APIs, and
-internal tools. Every standing public endpoint becomes inventory for scanners,
-fingerprinting, and credential attacks before a legitimate user or agent ever
-arrives. VPNs and identity-aware proxies authenticate that inventory; they do
-not remove it — the listener is still there to find, probe, and exploit.
+qURL lets you issue temporary access to an individual resource while a
+properly configured local origin remains on localhost or a private network.
+The serving runtime provides the access path and the SDK lets your software
+participate as an issuer, agent, or recipient. Restrict any independent public
+route when qURL should be the only path to the app.
 
-qURL removes the inventory. A protected service holds only an outbound
-connection, so there is no open port, no public DNS, and nothing for a scanner
-to enumerate. A portal is cryptographic, just-in-time permission for one actor
-to reach one private resource, and it expires on the schedule you set.
+The resource still needs normal authentication, maintenance, and availability.
+Treat links as access credentials rather than evidence that the holder is the
+person named in a label.
 
 ## How it fits together
 
@@ -40,11 +161,11 @@ to reach one private resource, and it expires on the schedule you set.
 └─────────────┘  browser: HTTPS (qurl.link)            └────────▲─────────┘
                  program: EnterPortal (native UDP)              │
                                                                 │ 2. outbound-only
-                                                                │    NHP, UDP 443
+                                                                │    access traffic
 ┌───────────────────────────────────────────────┐               │
 │ your private network                          │               │
-│   private service ◀─── qURL Connector or ─────┼───────────────┘
-│                        your own agent runtime │
+│   private service ◀─── qURL Connector ────────┼───────────────┘
+│                        (embedded in the CLI)  │
 └───────────────────────────────────────────────┘
 ```
 
@@ -53,20 +174,21 @@ Three roles, three sections of this README:
 1. **Issue** — your app calls `ProtectURL` and `CreatePortal` over HTTPS and
    gets back a link. ([Quickstart](#quickstart))
 2. **Serve** — the private service sits behind
-   [qURL Connector](https://github.com/layervai/qurl-connector) or your own
-   agent built with this SDK. Either way it dials *out* to LayerV and holds
-   that connection; nothing listens. ([Connect a service or agent](#connect-a-service-or-agent))
+   [qURL Connector](https://github.com/layervai/qurl-connector), embedded in
+   the CLI. The Connector connects outward and forwards HTTP traffic to the
+   service. This SDK handles agent enrollment and admission; it does not
+   provide that forwarding connection. ([Connect a service or agent](#connect-a-service-or-agent))
 3. **Open** — the recipient opens the link in a browser, or a program calls
    `EnterPortal`. LayerV verifies the portal and stitches recipient ↔ agent ↔
-   service for the portal's lifetime. ([Opening links](#opening-links))
+   service for the admitted session under the resource's policy. ([Opening links](#opening-links))
 
 | Term | Meaning |
 | --- | --- |
-| **Resource** | A private URL LayerV protects. Identified by a stable CRID, never by a public address. |
-| **Portal** | A short-lived signed link granting one actor access to one resource. |
+| **Resource** | A URL or service registered for qURL access and identified by a stable CRID. Its origin must be private or restricted when qURL should be the only access path. |
+| **Portal** | A short-lived signed access link for one resource, subject to its use and session rules. Treat the link as a credential. |
 | **Issuer** | Software holding LayerV credentials that protects URLs and creates portals. |
 | **Connector** | LayerV's ready-made agent that publishes services from inside your network. |
-| **Agent runtime** | Your own service enrolled directly with `ConnectAgentRuntime`. |
+| **Agent runtime** | SDK support for agent enrollment, durable state, and admission. HTTP forwarding runs separately through the Connector. |
 
 And every entry point in one place:
 
@@ -74,7 +196,7 @@ And every entry point in one place:
 | --- | --- | --- |
 | `OpenClient` / `OpenClientContext` | Issue links with the default credential chain ([Get a credential](#get-a-credential)); the context form bounds the eager startup check | `*Client` |
 | `NewClient` | Issue links with your own `CredentialProvider` (KMS, a secret manager) | `*Client` |
-| `ConnectAgentRuntime` | Run your own agent: one call on every start that enrolls, resumes, or reopens as needed | `*Client`, `*AgentRuntimeBinding` |
+| `ConnectAgentRuntime` | Enroll, resume, or reopen an agent registration; does not start HTTP forwarding | `*Client`, `*AgentRuntimeBinding` |
 | `OpenRegisteredAgent` / `OpenRegisteredAgentWithIdentity` | Resource-only client from completed agent state — one store load, no lifecycle network I/O, no knockable binding | `*Client` (`WithIdentity` adds the agent id) |
 | `RefreshAgentRuntime` | Renew a completed assignment through the Hub at a moment you choose | `*Client`, `*AgentRuntimeBinding` |
 | `RecoverAgentRuntime` | Operator-driven replacement of a revoked or lost device credential | `*Client`, `*AgentRuntimeBinding` |
@@ -117,8 +239,8 @@ here builds a command.
 ## Get a credential
 
 Create an API key in the [LayerV dashboard](https://layerv.ai/qurl/dashboard/keys)
-with the `qurl:write` scope. No credit card — the free tier includes 500 qURLs
-a month.
+with the `qurl:write` scope. Check the [current plans](https://layerv.ai/pricing/)
+for service limits.
 
 `OpenClient` resolves credentials in this order, most specific first:
 
@@ -239,14 +361,17 @@ Next: [Protect a private service](docs/secure-a-private-service.md) ·
 
 ## Connect a service or agent
 
-The easiest way to put a service behind qURL is
-[qURL Connector](https://github.com/layervai/qurl-connector) — install it next
-to the service and skip this section. Use this SDK's agent runtime when you
-want the service itself to hold the connection, with no sidecar.
+The ready-made local publishing path is the
+[qURL CLI](https://github.com/layervai/qurl-integrations/tree/main/apps/cli),
+which embeds [qURL Connector](https://github.com/layervai/qurl-connector)
+to forward HTTP traffic to your running service. Keep the CLI's serving
+runtime and the service available while recipients use it.
 
-Your service registers once, then keeps serving. Registration happens over an
-authenticated UDP channel — no inbound ports, no public endpoint, nothing for a
-scanner to find.
+Use this SDK's agent APIs when building software that manages its own
+enrollment, durable state, and NHP admission. Registration authenticates the
+agent over outbound UDP. `ConnectAgentRuntime` returns its registration and
+client; it does not start a listener or forward HTTP requests. Embedded HTTP
+serving also needs the Connector runtime.
 
 Enrollment uses the production Hub trust root embedded in the SDK. No deployment
 file is needed for production. For sandbox or a custom deployment, set
