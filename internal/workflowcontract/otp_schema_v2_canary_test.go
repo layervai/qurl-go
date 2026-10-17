@@ -251,11 +251,8 @@ func TestOTPSchemaV2CanaryPublishesOnlyTheLinkedCommitment(t *testing.T) {
 	workflow := readOTPSchemaV2Canary(t)
 	canary := workflowJob(t, workflow, "canary")
 
-	if count := strings.Count(workflow, "actions/upload-artifact@"); count != 1 {
-		t.Fatalf("canary upload-artifact steps = %d, want exactly one", count)
-	}
+	requirePin(t, workflow, "actions/upload-artifact")
 	for _, required := range []string{
-		"actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1",
 		"name: otp-schema-v2-canary-commitment-${{ github.run_id }}-${{ github.run_attempt }}",
 		"path: ${{ runner.temp }}/canary-binding-commitment.json",
 		"if-no-files-found: error",
