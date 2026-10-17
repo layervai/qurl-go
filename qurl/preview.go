@@ -31,6 +31,7 @@ type PreviewUpload struct {
 
 // PreviewCard carries public display text and short-lived media URLs.
 type PreviewCard struct {
+	Name        string         `json:"name,omitempty"`
 	Description string         `json:"description,omitempty"`
 	Media       []PreviewMedia `json:"media,omitempty"`
 }
@@ -38,6 +39,7 @@ type PreviewCard struct {
 // ResourcePreview belongs to one CRID, separately from private owner notes.
 type ResourcePreview struct {
 	Revision    int64           `json:"revision"`
+	Name        string          `json:"name,omitempty"`
 	Description string          `json:"description,omitempty"`
 	Media       []PreviewMedia  `json:"media,omitempty"`
 	Uploads     []PreviewUpload `json:"uploads,omitempty"`
@@ -45,9 +47,11 @@ type ResourcePreview struct {
 }
 
 // PreviewPatch uses the last revision. Nil fields are unchanged; an empty media
-// list removes all ready media and cancels pending jobs.
+// list removes all ready media and cancels pending jobs. An empty name or
+// description removes that text.
 type PreviewPatch struct {
 	Revision    int64     `json:"revision"`
+	Name        *string   `json:"name,omitempty"`
 	Description *string   `json:"description,omitempty"`
 	MediaIDs    *[]string `json:"media_ids,omitempty"`
 }
