@@ -32,3 +32,16 @@ A removal reply can report `session_cleanup: pending`. Access is revoked, but
 active connection cleanup is not yet confirmed. Retry the same removal and
 version until `complete`. Do not report active connections stopped from a
 `pending` receipt. Features remain disabled by default during integration.
+
+When consumer access is enabled, the hosted preview card always offers
+**Email me an access link** as a backup to passkeys. Publishers cannot disable
+this option. The recipient verifies the mailbox and consents to disclose it to
+the publisher, including in keys and contract modes. Contract grant replies still omit email.
+Invitations, approval,
+entitlement, expiry, and revocation still apply.
+
+Mailbox control authorizes an email-backed grant. It does not recover or reuse
+a passkey-backed grant; first use must pass the invitation, approval, or
+entitlement checks for that mode. Revoke each grant separately. Later
+email logins reuse that mailbox's email-backed resource grant. Publishers must
+account for mailbox access as a supported way to obtain access.
