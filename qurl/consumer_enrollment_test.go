@@ -56,6 +56,70 @@ func TestConsumerEnrollmentUnsupportedCellReceivesNoPrivateContinuation(t *testi
 	}
 }
 
+func TestConsumerEmailCapabilityFence(t *testing.T) {
+	for _, action := range []string{"enroll", "email_verify"} {
+		for _, capability := range []any{nil, false, true, "true"} {
+			t.Run(action+"/"+fmt.Sprint(capability), func(t *testing.T) {
+				fixture := newCRIDLinkFixture(t)
+				key, err := ecdh.X25519().GenerateKey(rand.Reader)
+				if err != nil {
+					t.Fatal(err)
+				}
+				client, err := NewConsumerEnrollmentClient(fixture.crid, key.Bytes(), fixture.cfg)
+				if err != nil {
+					t.Fatal(err)
+				}
+				calls := 0
+				fixture.peer.respondWith(func(_ cridLinkKnock) cridLinkAnswer {
+					calls++
+					replyAction := "info"
+					data := map[string]any{"crid": fixture.crid, "policy": ConsumerAccessPolicy{Mode: "email_capture", Version: 1}, "origin": fixture.cfg.CRIDLink.LinkOrigin, "relying_party_id": "qurl.link", "server_time": int64(1791689400)}
+					if capability != nil {
+						data["email_access_supported"] = capability
+					}
+					if calls > 1 {
+						replyAction = action
+						data = map[string]any{"status": "active"}
+					}
+					raw, err := json.Marshal(map[string]any{"errCode": "52609", "redirectInfo": map[string]any{"version": 1, "action": replyAction, "data": data}})
+					if err != nil {
+						t.Fatal(err)
+					}
+					return cridLinkAnswer{replyType: relayknock.TypeACK, body: raw}
+				})
+				operation := ConsumerEnrollmentOperation{Action: action, EnrollmentReference: "private-email-reference", VerificationCode: "12345678", AdmissionPublicKey: "private-admission-key"}
+				if action == "enroll" {
+					operation.Input = &ConsumerEnrollmentInput{Proof: ConsumerProof{CredentialKind: "email", Email: "private@example.test", DiscloseEmail: true}}
+				}
+				_, err = client.Exchange(t.Context(), operation)
+				knocks := fixture.peer.seen()
+				if capability == true {
+					if err != nil || len(knocks) != 2 {
+						t.Fatalf("supported email operation failed: %v", err)
+					}
+					if !bytes.Equal(knocks[0].devicePub, key.PublicKey().Bytes()) || !bytes.Equal(knocks[0].devicePub, knocks[1].devicePub) {
+						t.Fatal("email claim changed the consumer peer")
+					}
+				} else {
+					if err == nil || len(knocks) != 1 {
+						t.Fatal("email operation was sent without support")
+					}
+					if capability == nil || capability == false {
+						if !errors.Is(err, ErrCRIDLinkUnavailable) {
+							t.Fatalf("wrong unsupported error: %v", err)
+						}
+					}
+				}
+				for _, secret := range []string{"private-email-reference", "12345678", "private-admission-key", "private@example.test"} {
+					if bytes.Contains(knocks[0].body, []byte(secret)) {
+						t.Fatal("email secret reached discovery")
+					}
+				}
+			})
+		}
+	}
+}
+
 func TestConsumerEnrollmentKeepsPeerAndRejectsMismatchedAction(t *testing.T) {
 	fixture := newCRIDLinkFixture(t)
 	key, err := ecdh.X25519().GenerateKey(rand.Reader)

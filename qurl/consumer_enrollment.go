@@ -19,6 +19,7 @@ type ConsumerEnrollmentClient struct {
 	mu                   sync.Mutex
 	supported            bool
 	discoverablePasskeys bool
+	emailAccessSupported bool
 }
 
 // NewConsumerEnrollmentClient copies an existing peer key; it never replaces local identity.
@@ -98,12 +99,20 @@ func (c *ConsumerEnrollmentClient) Exchange(ctx context.Context, operation Consu
 			return nil, ErrCRIDLinkUnavailable
 		}
 	}
+	if operation.Action == "email_verify" || (operation.Input != nil && operation.Input.Proof.CredentialKind == "email") {
+		c.mu.Lock()
+		emailSupported := c.emailAccessSupported
+		c.mu.Unlock()
+		if !emailSupported {
+			return nil, ErrCRIDLinkUnavailable
+		}
+	}
 	return c.exchange(ctx, operation)
 }
 
 func (c *ConsumerEnrollmentClient) exchange(ctx context.Context, operation ConsumerEnrollmentOperation) (json.RawMessage, error) {
 	switch operation.Action {
-	case "info", "enroll", "prove", "contract", "verify", "status", "mint":
+	case "info", "enroll", "prove", "contract", "verify", "email_verify", "status", "mint":
 	default:
 		return nil, fmt.Errorf("%w: unknown consumer operation", ErrInvalidResourceRequest)
 	}
@@ -178,6 +187,7 @@ func (c *ConsumerEnrollmentClient) exchange(ctx context.Context, operation Consu
 			Origin               string               `json:"origin"`
 			RPID                 string               `json:"relying_party_id"`
 			DiscoverablePasskeys bool                 `json:"discoverable_passkeys"`
+			EmailAccessSupported bool                 `json:"email_access_supported"`
 			ServerTime           int64                `json:"server_time"`
 		}
 		if json.Unmarshal(metadata["data"], &info) != nil || info.Policy.validate() != nil || info.Origin == "" || info.RPID == "" || info.ServerTime < 1 || info.ServerTime >= 1<<53 {
@@ -190,6 +200,7 @@ func (c *ConsumerEnrollmentClient) exchange(ctx context.Context, operation Consu
 		c.mu.Lock()
 		c.supported = true
 		c.discoverablePasskeys = info.DiscoverablePasskeys
+		c.emailAccessSupported = info.EmailAccessSupported
 		c.mu.Unlock()
 	}
 	return append(json.RawMessage(nil), metadata["data"]...), nil
