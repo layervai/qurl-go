@@ -108,6 +108,8 @@ func TestConsumerEmailCapabilityFence(t *testing.T) {
 						if !errors.Is(err, ErrCRIDLinkUnavailable) {
 							t.Fatalf("wrong unsupported error: %v", err)
 						}
+					} else if !errors.Is(err, ErrCRIDLinkProtocol) {
+						t.Fatalf("malformed capability did not fail the protocol check: %v", err)
 					}
 				}
 				for _, secret := range []string{"private-email-reference", "12345678", "private-admission-key", "private@example.test"} {

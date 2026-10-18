@@ -11,7 +11,8 @@ and are marked **Breaking** with what to change.
 - Private consumer email-link enrollment and `email_verify` use the existing
   advertised `email_access_supported` capability. The client refuses email
   enrollment or continuation before sending private data if support is absent
-  or false, and rejects malformed capability data. Email claims keep the same
+  or false. Malformed capability data refuses discovery for all consumer
+  operations, including passkeys. Email claims keep the same
   consumer peer key and do not open a resource; admission still requires the
   existing issuer, CRID, and leaf-key checks.
 
