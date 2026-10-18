@@ -8,6 +8,14 @@ and are marked **Breaking** with what to change.
 
 ## Unreleased
 
+- Private consumer email-link enrollment and `email_verify` use the existing
+  advertised `email_access_supported` capability. The client refuses email
+  enrollment or continuation before sending private data if support is absent
+  or false. Malformed capability data refuses discovery for all consumer
+  operations, including passkeys. Email claims keep the same
+  consumer peer key and do not open a resource; admission still requires the
+  existing issuer, CRID, and leaf-key checks.
+
 - A call made as a device can read the device key only when it sends it. Four
   new calls take a `DeviceKeySource`, a function that returns the key, in
   place of the key: `OpenCRIDAsDeviceFromKeySource` and
