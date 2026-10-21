@@ -12,7 +12,8 @@ module github.com/layervai/qurl-go
 // golang.org/x/sys v0.48.0 declare go 1.26.0, and Go 1.25 is out of support
 // since Go 1.27 shipped.
 //
-// 1.26.9 is the oldest 1.26 release that qualifies. It fixes the
+// 1.26.10 is the oldest 1.26 release that qualifies. It also fixes
+// GO-2026-6809 in crypto/x509. Go 1.26.9 fixed the
 // standard-library vulnerabilities govulncheck reports as reachable from here
 // at 1.26.6 through 1.26.8:
 //
@@ -25,7 +26,7 @@ module github.com/layervai/qurl-go
 // All are reached through HTTP/TLS, except the last, which is reached through
 // file handling. 1.26.6 already fixed GO-2026-6218, 6090, 5972 and 5026.
 //
-// Anything below 1.26.9 on the 1.26 line reintroduces a reachable
+// Anything below 1.26.10 on the 1.26 line reintroduces a reachable
 // vulnerability. The 1.25 line is excluded because it is out of support and
 // below the go 1.26.0 that x/crypto and x/sys declare. Before changing this
 // line, run `make vuln` at the candidate version.
@@ -36,7 +37,7 @@ module github.com/layervai/qurl-go
 // follow. That window is why the root CI jobs set GOWORK=off — see
 // .github/workflows/ci.yml. Keep it even while the floors agree; it makes a
 // future reduction possible without breaking every root job.
-go 1.26.9
+go 1.26.10
 
 require (
 	github.com/layervai/qurl-conformance v0.17.2

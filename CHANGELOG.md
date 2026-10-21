@@ -8,6 +8,11 @@ and are marked **Breaking** with what to change.
 
 ## Unreleased
 
+- **The minimum Go version is now 1.26.10, up from 1.26.9.** This fixes
+  GO-2026-6809 in `crypto/x509` certificate verification. Builders pinned to
+  Go 1.26.0 through 1.26.9 with `GOTOOLCHAIN=local` must update. The `awsstore`
+  module and workspace use the same floor.
+
 - Private consumer email-link enrollment and `email_verify` use the existing
   advertised `email_access_supported` capability. The client refuses email
   enrollment or continuation before sending private data if support is absent

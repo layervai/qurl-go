@@ -119,6 +119,7 @@ func checkDecrypted(t *testing.T, packet []byte, msg *Message) {
 	t.Helper()
 	if msg == nil {
 		t.Fatal("accepted packet returned a nil message")
+		return
 	}
 	if len(packet) < HeaderSize || len(packet) > PacketBufferSize {
 		t.Fatalf("accepted a %d-byte packet outside [%d, %d]", len(packet), HeaderSize, PacketBufferSize)
