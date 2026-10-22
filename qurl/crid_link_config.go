@@ -76,10 +76,8 @@ type CRIDLinkConfig struct {
 // this one and not that one means there is no endpoint at all: the request is
 // not offered by this configuration.
 //
-// The deployment embedded in this build names no CRID link endpoint, so
-// RequestCRIDLink and OpenCRID return this error until a deployment file named
-// by QURL_DEPLOYMENT supplies one. RequestCRIDLinkWith and OpenCRIDWith read it
-// from Config.CRIDLink.
+// The embedded deployment supplies the production endpoint. A custom deployment
+// must supply its own. RequestCRIDLinkWith and OpenCRIDWith read Config.CRIDLink.
 var ErrCRIDLinkNotConfigured = fmt.Errorf("%w: no usable CRID link endpoint", ErrNotConfigured)
 
 // ErrCRIDLinkMisconfigured reports that the configuration names a CRID link
@@ -122,14 +120,26 @@ var ErrCRIDLinkMisconfigured = fmt.Errorf("%w: the configuration names one that 
 // CRID it cannot request hides this answer. Call CheckCRIDLinkConfig to learn
 // whether the request is offered, whatever the CRID.
 func CheckCRIDLinkConfig() error {
+	_, err := CRIDLinkOrigin()
+	return err
+}
+
+// CRIDLinkOrigin returns the link origin from the validated deployment used by
+// RequestCRIDLink. It performs no network I/O. An installed Provider supplies
+// no endpoint and returns ErrCRIDLinkNotConfigured.
+func CRIDLinkOrigin() (string, error) {
 	if DefaultProvider() != nil {
-		return errNoCRIDLinkEndpoint()
+		return "", errNoCRIDLinkEndpoint()
 	}
 	cfg, err := defaultDeploymentConfig()
 	if err != nil {
-		return err
+		return "", err
 	}
-	return CheckCRIDLinkConfigWith(cfg)
+	endpoint, err := resolveCRIDLinkEndpoint(cfg)
+	if err != nil {
+		return "", err
+	}
+	return endpoint.linkOrigin, nil
 }
 
 // CheckCRIDLinkConfigWith is CheckCRIDLinkConfig for an explicit Config. It

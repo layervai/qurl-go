@@ -483,8 +483,10 @@ registration is not provider-supplied: it comes only from `QURL_DEPLOYMENT`,
 the embedded deployment, or an explicit `WithAgentRuntimeHub`
 (`RefreshAgentRuntime` takes a `HubBootstrap` argument) — an installed
 `Provider` affects opener config only. Releases embed the production issuer
-keys, native cell endpoints, and Hub trust root. Production needs no deployment
-file. Set `QURL_DEPLOYMENT` only for sandbox or a custom deployment. The issuer
+keys, native cell endpoints, Hub trust root, and the production CRID link
+endpoint (`https://relay.layerv.ai`, with link origin `https://qurl.link`).
+`CRIDLinkOrigin()` reads the validated link origin without network I/O.
+Production needs no deployment file. Set `QURL_DEPLOYMENT` only for sandbox or a custom deployment. The issuer
 HTTPS endpoint is configured separately with `WithBaseURL`. A resolved deployment
 with no issuer keys fails closed (`ErrNotConfigured`) rather than open a link it
 cannot verify.
@@ -540,10 +542,11 @@ check is never opened, returned, logged, or quoted in an error.
   call `RequestCRIDLink`, then `EnterPortalForCRID` with the link and the same
   CRID.
 - **It has to be configured.** The request needs a CRID link endpoint, which a
-  deployment names in its `crid_link` object. The deployment embedded in this
-  release does not name one, so `OpenCRID` returns `ErrCRIDLinkNotConfigured`
-  until `QURL_DEPLOYMENT` names a deployment file that does, or you pass the
-  endpoint with `OpenCRIDWith`. `CheckCRIDLinkConfig` gives the same answer
+  deployment names in its `crid_link` object. The embedded deployment names
+  the production endpoint. Custom
+  deployments must name their endpoint in `QURL_DEPLOYMENT`, or pass it with
+  `OpenCRIDWith`; an absent endpoint returns `ErrCRIDLinkNotConfigured`.
+  `CheckCRIDLinkConfig` gives the same answer
   without a CRID and without sending anything. See
   [Open by CRID](docs/opening-links.md#open-by-crid) for the file format.
 - **It can be tested without a server.** `qurltest.NewCRIDLinkServer` answers
