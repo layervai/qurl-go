@@ -17,5 +17,12 @@
     "host": "hub.nhp.layerv.ai",
     "port": 443,
     "server_public_key_b64": "LxWWlFQ18yEgSl0lDX1+cMhCLLEc8LkHTOc1QskRY28="
+  },
+  "relay_allowlist": [
+    "relay.layerv.ai"
+  ],
+  "crid_link": {
+    "relay_url": "https://relay.layerv.ai",
+    "link_origin": "https://qurl.link"
   }
 }

@@ -480,9 +480,12 @@ usable cell. `ErrCRIDLinkMisconfigured` matches both sentinels, so test for it
 first. A wrong value inside `crid_link` affects only this request; links keep
 opening.
 
-**The deployment embedded in this release names no `crid_link`.** Against it,
-`OpenCRID` and `RequestCRIDLink` return `ErrCRIDLinkNotConfigured` until
-`QURL_DEPLOYMENT` names a file that has one.
+The embedded deployment supplies the production CRID endpoint at
+`https://relay.layerv.ai` and link origin `https://qurl.link`. `OpenCRID` and
+`RequestCRIDLink` need no deployment file in production. `CRIDLinkOrigin()`
+returns the validated origin without contacting the server; it does not prove
+that the server will issue a link. A custom `QURL_DEPLOYMENT` file replaces
+these defaults and must supply its own `crid_link` to offer these calls.
 
 **Deployment decoding is strict.** A release that predates `crid_link` rejects
 the whole file as carrying an unknown field, and then opens nothing. Add
