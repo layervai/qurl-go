@@ -250,8 +250,11 @@ func TestClient_ShareResourceAPIErrorPassthrough(t *testing.T) {
 	if !errors.As(err, &apiErr) {
 		t.Fatalf("want *APIError, got %T: %v", err, err)
 	}
-	if apiErr.StatusCode != http.StatusNotFound || apiErr.Code != "resource_not_found" {
+	if apiErr.StatusCode != http.StatusNotFound || apiErr.Code != "resource_not_found" || apiErr.Detail != "no resource for that identifier" {
 		t.Fatalf("api error = %#v", apiErr)
+	}
+	if !strings.Contains(err.Error(), "not found, or you do not have access") {
+		t.Fatalf("share 404 must not distinguish absence from hidden access: %v", err)
 	}
 	if errors.Is(err, ErrTemporaryAccessLinksDisabled) {
 		t.Fatalf("404 must not read as the dark-environment sentinel: %v", err)

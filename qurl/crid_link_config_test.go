@@ -485,7 +485,7 @@ func TestCheckCRIDLinkConfig(t *testing.T) {
 		// matches none of the sentinels, and it is still not nil.
 		unreadable bool
 	}{
-		{"the embedded deployment", "", notOffered, false},
+		{"the embedded deployment", "", usable, false},
 		{"a file with no crid_link", file(""), notOffered, false},
 		{"a null crid_link", file("null"), notOffered, false},
 		{"a usable crid_link", file(endpoint), usable, false},
@@ -505,6 +505,14 @@ func TestCheckCRIDLinkConfig(t *testing.T) {
 			transport := installCapturingTransport(t)
 
 			checkErr := CheckCRIDLinkConfig()
+			origin, originErr := CRIDLinkOrigin()
+			if (originErr == nil) != (checkErr == nil) || (originErr == nil && origin == "") || (originErr != nil && origin != "") {
+				t.Fatalf("origin = %q, %v; check = %v", origin, originErr, checkErr)
+			}
+			if originErr != nil && originErr.Error() != checkErr.Error() {
+				t.Fatalf("origin and check errors differ: %v; %v", originErr, checkErr)
+			}
+
 			if transport.gotURL != "" {
 				t.Fatalf("checking the configuration contacted %q", transport.gotURL)
 			}
@@ -547,8 +555,8 @@ func TestCheckCRIDLinkConfig(t *testing.T) {
 		if !errors.Is(requestErr, ErrUnsupportedCRIDVersion) || errors.Is(requestErr, ErrCRIDLinkNotConfigured) {
 			t.Fatalf("RequestCRIDLink(reserved version) = %v, want the CRID refusal and no configuration answer", requestErr)
 		}
-		if err := CheckCRIDLinkConfig(); !errors.Is(err, ErrCRIDLinkNotConfigured) || errors.Is(err, ErrCRIDLinkMisconfigured) {
-			t.Fatalf("CheckCRIDLinkConfig() = %v, want ErrCRIDLinkNotConfigured for the embedded deployment", err)
+		if err := CheckCRIDLinkConfig(); err != nil {
+			t.Fatalf("CheckCRIDLinkConfig() = %v, want usable production defaults", err)
 		}
 	})
 
@@ -564,6 +572,10 @@ func TestCheckCRIDLinkConfig(t *testing.T) {
 		}))
 		transport := installCapturingTransport(t)
 
+		origin, originErr := CRIDLinkOrigin()
+		if origin != "" || !errors.Is(originErr, ErrCRIDLinkNotConfigured) {
+			t.Fatalf("provider origin = %q, %v", origin, originErr)
+		}
 		err := CheckCRIDLinkConfig()
 		if !errors.Is(err, ErrCRIDLinkNotConfigured) || errors.Is(err, ErrCRIDLinkMisconfigured) {
 			t.Fatalf("CheckCRIDLinkConfig() = %v, want ErrCRIDLinkNotConfigured and not ErrCRIDLinkMisconfigured", err)
@@ -664,45 +676,27 @@ func TestCRIDLink_ZeroSetupFromADeploymentFile(t *testing.T) {
 	}
 }
 
-// TestShippedDeploymentNamesNoCRIDLinkEndpoint pins what this build does out of
-// the box: the embedded deployment carries no CRID link endpoint, so a CRID
-// link request is refused as not configured, with nothing sent. Adding the
-// endpoint to qurl/deployment.json is a deliberate release step; this test and
-// the documentation that describes the behavior change with it.
-func TestShippedDeploymentNamesNoCRIDLinkEndpoint(t *testing.T) {
-	shipped, err := parseDeployment(shippedDeploymentJSON, "(shipped)")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if shipped.CRIDLink != nil {
-		t.Fatalf("the embedded deployment names a CRID link endpoint (%+v); update the documented behavior with it", shipped.CRIDLink)
-	}
-
+func TestShippedDeploymentCRIDLinkOrigin(t *testing.T) {
 	noDefaultProvider(t)
 	t.Setenv(EnvDeploymentPath, "")
 	transport := installCapturingTransport(t)
-	held, _, _ := cridKeyMatchFixture(t)
-
-	for name, call := range map[string]func() error{
-		"RequestCRIDLink": func() error { _, err := RequestCRIDLink(t.Context(), held); return err },
-		"OpenCRID":        func() error { _, err := OpenCRID(t.Context(), held); return err },
-	} {
-		err := call()
-		if !errors.Is(err, ErrCRIDLinkNotConfigured) || !errors.Is(err, ErrNotConfigured) {
-			t.Fatalf("%s error = %v, want ErrCRIDLinkNotConfigured", name, err)
-		}
-		// The message says what to set, and where.
-		if !strings.Contains(err.Error(), "crid_link") || !strings.Contains(err.Error(), EnvDeploymentPath) {
-			t.Fatalf("%s error does not tell the caller what to configure: %v", name, err)
-		}
+	origin, err := CRIDLinkOrigin()
+	if err != nil || origin != "https://qurl.link" {
+		t.Fatalf("CRIDLinkOrigin() = %q, %v", origin, err)
+	}
+	cfg, err := defaultDeploymentConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoint, err := resolveCRIDLinkEndpoint(cfg)
+	if err != nil || endpoint.relayURL != "https://relay.layerv.ai" {
+		t.Fatalf("production endpoint = %+v, %v", endpoint, err)
 	}
 	if transport.gotURL != "" {
-		t.Fatalf("an unconfigured request contacted %q", transport.gotURL)
+		t.Fatalf("configuration check contacted %q", transport.gotURL)
 	}
-
-	// Link opening against the embedded deployment is unaffected.
 	if _, err := resolveDefaultConfig(t.Context()); err != nil {
-		t.Fatalf("the embedded deployment no longer resolves for link opens: %v", err)
+		t.Fatal(err)
 	}
 }
 

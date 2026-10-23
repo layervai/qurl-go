@@ -42,7 +42,7 @@ func TestEmbeddedDeploymentProvidesProductionDefaults(t *testing.T) {
 		t.Fatalf("qurl/deployment.json is not a JSON object: %v", err)
 	}
 
-	want := []string{"cells", "hub", "issuers"}
+	want := []string{"cells", "crid_link", "hub", "issuers", "relay_allowlist"}
 	if got := slices.Sorted(maps.Keys(dep)); !slices.Equal(got, want) {
 		t.Fatalf("qurl/deployment.json keys are %v, want exactly %v.\n\n%s",
 			got, want, revisitDocsMessage)
@@ -56,6 +56,21 @@ func TestEmbeddedDeploymentProvidesProductionDefaults(t *testing.T) {
 			t.Fatalf("qurl/deployment.json %q is empty; production defaults require a nonempty array.\n\n%s",
 				key, revisitDocsMessage)
 		}
+	}
+
+	var endpoint struct {
+		RelayURL   string `json:"relay_url"`
+		LinkOrigin string `json:"link_origin"`
+	}
+	if err := json.Unmarshal(dep["crid_link"], &endpoint); err != nil {
+		t.Fatal(err)
+	}
+	var allowlist []string
+	if err := json.Unmarshal(dep["relay_allowlist"], &allowlist); err != nil {
+		t.Fatal(err)
+	}
+	if endpoint.RelayURL != "https://relay.layerv.ai" || endpoint.LinkOrigin != "https://qurl.link" || !slices.Equal(allowlist, []string{"relay.layerv.ai"}) {
+		t.Fatalf("embedded CRID configuration must use production endpoints\n\n%s", revisitDocsMessage)
 	}
 	var hub struct {
 		Host string `json:"host"`

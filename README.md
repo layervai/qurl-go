@@ -28,7 +28,7 @@ URLs or creates portals.
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/layervai/qurl-go/qurl.svg)](https://pkg.go.dev/github.com/layervai/qurl-go/qurl)
 [![CI](https://github.com/layervai/qurl-go/actions/workflows/ci.yml/badge.svg)](https://github.com/layervai/qurl-go/actions/workflows/ci.yml)
-[![Go 1.26.9+](https://img.shields.io/badge/go-1.26.9%2B-00ADD8)](go.mod)
+[![Go 1.26.10+](https://img.shields.io/badge/go-1.26.10%2B-00ADD8)](go.mod)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 [Local preview workflow](#share-a-localhost-preview-from-go) ·
@@ -216,9 +216,9 @@ module:
 go get github.com/layervai/qurl-go/qurl@latest
 ```
 
-Requires Go 1.26.9+ — a security floor, not a preference for the newest
+Requires Go 1.26.10+ — a security floor, not a preference for the newest
 toolchain. The floor is on the Go 1.26 line because `golang.org/x/crypto` and
-`golang.org/x/sys` require it (and Go 1.25 is out of support); 1.26.9 is the
+`golang.org/x/sys` require it (and Go 1.25 is out of support); 1.26.10 is the
 earliest 1.26 patch release without the currently known standard-library
 vulnerabilities this SDK's code paths reach. CI runs `govulncheck` at exactly
 this version. See the comment above the `go` directive in
@@ -483,8 +483,10 @@ registration is not provider-supplied: it comes only from `QURL_DEPLOYMENT`,
 the embedded deployment, or an explicit `WithAgentRuntimeHub`
 (`RefreshAgentRuntime` takes a `HubBootstrap` argument) — an installed
 `Provider` affects opener config only. Releases embed the production issuer
-keys, native cell endpoints, and Hub trust root. Production needs no deployment
-file. Set `QURL_DEPLOYMENT` only for sandbox or a custom deployment. The issuer
+keys, native cell endpoints, Hub trust root, and the production CRID link
+endpoint (`https://relay.layerv.ai`, with link origin `https://qurl.link`).
+`CRIDLinkOrigin()` reads the validated link origin without network I/O.
+Production needs no deployment file. Set `QURL_DEPLOYMENT` only for sandbox or a custom deployment. The issuer
 HTTPS endpoint is configured separately with `WithBaseURL`. A resolved deployment
 with no issuer keys fails closed (`ErrNotConfigured`) rather than open a link it
 cannot verify.
@@ -540,10 +542,11 @@ check is never opened, returned, logged, or quoted in an error.
   call `RequestCRIDLink`, then `EnterPortalForCRID` with the link and the same
   CRID.
 - **It has to be configured.** The request needs a CRID link endpoint, which a
-  deployment names in its `crid_link` object. The deployment embedded in this
-  release does not name one, so `OpenCRID` returns `ErrCRIDLinkNotConfigured`
-  until `QURL_DEPLOYMENT` names a deployment file that does, or you pass the
-  endpoint with `OpenCRIDWith`. `CheckCRIDLinkConfig` gives the same answer
+  deployment names in its `crid_link` object. The embedded deployment names
+  the production endpoint. Custom
+  deployments must name their endpoint in `QURL_DEPLOYMENT`, or pass it with
+  `OpenCRIDWith`; an absent endpoint returns `ErrCRIDLinkNotConfigured`.
+  `CheckCRIDLinkConfig` gives the same answer
   without a CRID and without sending anything. See
   [Open by CRID](docs/opening-links.md#open-by-crid) for the file format.
 - **It can be tested without a server.** `qurltest.NewCRIDLinkServer` answers
