@@ -165,7 +165,7 @@ func (r shareResourceResponse) shareLink() (*ShareLink, error) {
 //
 // A 503 from this endpoint means the environment is not serving temporary
 // access links and surfaces as ErrTemporaryAccessLinksDisabled; other API
-// failures surface as *APIError exactly like the rest of the client.
+// failures retain *APIError, reachable with errors.As. A 404 means the resource is missing or not visible to the caller.
 func (c *Client) ShareResource(ctx context.Context, resourceCRID string, opts *ShareResourceOptions) (*ShareLink, error) {
 	if c == nil {
 		return nil, fmt.Errorf("%w: nil client", ErrInvalidClientConfig)
