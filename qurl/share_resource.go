@@ -195,8 +195,13 @@ func (c *Client) ShareResource(ctx context.Context, resourceCRID string, opts *S
 	var env apiEnvelope[shareResourceResponse]
 	if err := c.postJSON(ctx, path, reqBody, &env); err != nil {
 		var apiErr *APIError
-		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusServiceUnavailable {
-			return nil, fmt.Errorf("%w: %w", ErrTemporaryAccessLinksDisabled, err)
+		if errors.As(err, &apiErr) {
+			if apiErr.StatusCode == http.StatusNotFound {
+				return nil, fmt.Errorf("qurl: resource not found, or you do not have access: %w", err)
+			}
+			if apiErr.StatusCode == http.StatusServiceUnavailable {
+				return nil, fmt.Errorf("%w: %w", ErrTemporaryAccessLinksDisabled, err)
+			}
 		}
 		return nil, err
 	}
