@@ -228,7 +228,7 @@ func TestDiscoveryProvider_ConfigDefensivelyCopied(t *testing.T) {
 
 // TestDiscoveryProvider_PinnedManifest_Resolves proves the success path: a pinned,
 // in-window, well-formed manifest resolves to a usable trust store + allowlist that
-// EnterPortalWith accepts (verify a vendored link routed to the manifest's relay).
+// EnterPortalWith accepts (verify a generated link routed to the manifest's relay).
 func TestDiscoveryProvider_PinnedManifest_Resolves(t *testing.T) {
 	raw, pin := envelopeBytes(t, validManifest(t))
 	p := pinnedProvider(t, raw, pin, nil)
@@ -739,14 +739,14 @@ func TestDiscoveryProvider_ProfileMismatch_FailsClosed(t *testing.T) {
 // TestEnterPortal_DiscoveryProvider_RelayOffAllowlist_Rejected wires a DiscoveryProvider
 // into the one-arg EnterPortal and proves the PROOF's "unallowlisted relay_url rejected
 // (after sig verify)" through the full path: the discovery manifest is authenticated and
-// supplies a VALID trust store (the vendored issuer kid, so the link's signature
+// supplies a VALID trust store (the generated issuer kid, so the link's signature
 // verifies) but an allowlist that does NOT contain the link's relay_url. The result is
 // ErrRelayURL — reached only after the signature verified, since an unverified link
 // would have failed on the kid first.
 func TestEnterPortal_DiscoveryProvider_RelayOffAllowlist_Rejected(t *testing.T) {
 	link, ts, _ := generatedAcceptLink(t)
 
-	// A discovery provider whose Resolve returns the vendored trust store (so the
+	// A discovery provider whose Resolve returns the generated trust store (so the
 	// signature verifies) and an allowlist missing the link's relay host. Using a
 	// providerFunc keeps the focus on the post-verify ordering; the manifest
 	// authentication itself is covered by the pin/sig tests above.
