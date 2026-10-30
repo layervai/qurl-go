@@ -8,6 +8,16 @@ and are marked **Breaking** with what to change.
 
 ## Unreleased
 
+- **Breaking:** `ConsumerAccessPolicy` gains `EmailDomain` and
+  `AllowedEmails` for the new `email_domain` mode. The `[]string` field makes
+  the struct no longer comparable, so `==` and map keys stop compiling. Use
+  `Equal` to compare every field, or `SameDefinition` to ignore `Version`.
+  `Validate` checks a policy before you send it. Release this as a minor
+  version.
+
+- Registered-device calls may `GET` and `PUT` `/v1/me/access-rules`, the
+  linked account's saved access rules, with no query.
+
 - **The minimum Go version is now 1.26.10, up from 1.26.9.** This fixes
   GO-2026-6809 in `crypto/x509` certificate verification. Builders pinned to
   Go 1.26.0 through 1.26.9 with `GOTOOLCHAIN=local` must update. The `awsstore`

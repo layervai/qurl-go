@@ -1,9 +1,12 @@
 package qurl
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"testing"
@@ -54,6 +57,28 @@ func TestEmailDomainPolicyValidationAndSnapshotFence(t *testing.T) {
 	} {
 		if err := decode(raw).validate(); err == nil {
 			t.Errorf("unsafe policy accepted: %s", raw)
+		}
+	}
+}
+
+func TestUpdateConsumerAccessRejectsDifferentMailboxExceptions(t *testing.T) {
+	policy := ConsumerAccessPolicy{Mode: "email_domain", Version: 2, EmailDomain: "example.com", AllowedEmails: []string{"Partner@other.com"}}
+	for _, emails := range [][]string{{"Partner@other.com"}, {"Other@other.com"}, nil} {
+		echoed := policy
+		echoed.AllowedEmails = emails
+		client := &Client{baseURL: "https://api.example.test", credentials: BearerToken("test"), httpClient: doerFunc(func(*http.Request) (*http.Response, error) {
+			raw, err := json.Marshal(map[string]any{"data": map[string]any{"resource_id": testConnectorID, "crid": testConnectorCRID, "consumer_access": echoed}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(raw))}, nil
+		})}
+		err := client.UpdateConsumerAccess(context.Background(), testConnectorCRID, 1, policy)
+		if same := len(emails) == 1 && emails[0] == "Partner@other.com"; same != (err == nil) {
+			t.Fatalf("allowed_emails %v: %v", emails, err)
+		}
+		if err != nil && !errors.Is(err, ErrInvalidAPIResponse) {
+			t.Fatalf("allowed_emails %v: %v", emails, err)
 		}
 	}
 }

@@ -39,9 +39,7 @@ func (p ConsumerAccessPolicy) validate() error {
 		}
 		seen := make(map[string]bool, len(p.AllowedEmails))
 		for _, email := range p.AllowedEmails {
-			address, err := mail.ParseAddress(email)
-			at := strings.LastIndexByte(email, '@')
-			if err != nil || address.Name != "" || address.Address != email || len(email) > 254 || at < 1 || email[at+1:] != strings.ToLower(email[at+1:]) || strings.IndexFunc(email, func(r rune) bool { return unicode.IsControl(r) || unicode.Is(unicode.Cf, r) }) >= 0 || seen[email] {
+			if !validMailbox(email) || seen[email] {
 				return fmt.Errorf("%w: invalid mailbox exception", ErrInvalidResourceRequest)
 			}
 			seen[email] = true
@@ -62,6 +60,16 @@ func (p ConsumerAccessPolicy) validate() error {
 		return fmt.Errorf("%w: unknown consumer access mode", ErrInvalidResourceRequest)
 	}
 	return nil
+}
+
+// validMailbox accepts one bare address with a lowercase domain; the local
+// part keeps its case.
+func validMailbox(email string) bool {
+	address, err := mail.ParseAddress(email)
+	at := strings.LastIndexByte(email, '@')
+	return err == nil && address.Name == "" && address.Address == email && len(email) <= 254 && at >= 1 &&
+		email[at+1:] == strings.ToLower(email[at+1:]) &&
+		!strings.ContainsFunc(email, func(r rune) bool { return unicode.IsControl(r) || unicode.Is(unicode.Cf, r) })
 }
 
 // WithConsumerAccess creates a private resource with a consumer policy.
@@ -140,7 +148,7 @@ func consumerCreationPolicyConfirmed(private *bool, actual, expected *ConsumerAc
 	if expected == nil {
 		return true
 	}
-	if private == nil || !*private || actual == nil || actual.validate() != nil || !actual.sameDefinition(*expected) {
+	if private == nil || !*private || actual == nil || actual.validate() != nil || !actual.SameDefinition(*expected) {
 		return false
 	}
 	return actual.Version == expected.Version || (foundExisting && actual.Version > expected.Version)
@@ -148,9 +156,10 @@ func consumerCreationPolicyConfirmed(private *bool, actual, expected *ConsumerAc
 
 // Equal includes every policy field, including owner-only mailbox exceptions.
 func (p ConsumerAccessPolicy) Equal(other ConsumerAccessPolicy) bool {
-	return p.Version == other.Version && p.sameDefinition(other)
+	return p.Version == other.Version && p.SameDefinition(other)
 }
 
-func (p ConsumerAccessPolicy) sameDefinition(other ConsumerAccessPolicy) bool {
+// SameDefinition compares every field except Version.
+func (p ConsumerAccessPolicy) SameDefinition(other ConsumerAccessPolicy) bool {
 	return p.Mode == other.Mode && p.ContractID == other.ContractID && p.EmailDomain == other.EmailDomain && slices.Equal(p.AllowedEmails, other.AllowedEmails)
 }
