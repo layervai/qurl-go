@@ -66,6 +66,8 @@ func TestRegisteredAgentResourceHTTPDoer_ExactSurfaceAndCredentialCustody(t *tes
 		{http.MethodDelete, "/v1/resources/qcrid/sessions/session_1"},
 		{http.MethodPost, "/v1/qurls"},
 		{http.MethodGet, "/v1/me"},
+		{http.MethodGet, "/v1/me/access-rules"},
+		{http.MethodPut, "/v1/me/access-rules"},
 		{http.MethodGet, "/v1/me/publisher"},
 		{http.MethodPatch, "/v1/me/publisher"},
 		{http.MethodGet, "/v1/access-requests"},
