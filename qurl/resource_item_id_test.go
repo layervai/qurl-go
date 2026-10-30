@@ -49,8 +49,12 @@ func TestResourceItemIDsRejectCredentialsAndNavigationBeforeAuthorization(t *tes
 			}
 			for name, call := range calls {
 				err := call()
-				if !errors.Is(err, ErrInvalidPortalRequest) && !errors.Is(err, ErrInvalidResourceRequest) {
-					t.Fatalf("%s: want validation error, got %v", name, err)
+				want := ErrInvalidResourceRequest
+				if name == "revoke portal" {
+					want = ErrInvalidPortalRequest
+				}
+				if !errors.Is(err, want) {
+					t.Fatalf("%s: want %v, got %v", name, want, err)
 				}
 				if strings.Contains(err.Error(), "synthetic_secret") {
 					t.Fatalf("%s leaked credential", name)

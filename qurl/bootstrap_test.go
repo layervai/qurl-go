@@ -3,6 +3,7 @@ package qurl
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -36,7 +37,7 @@ func TestFileAgentState_RejectsUnknownOrTrailingJSON(t *testing.T) {
 	for name, raw := range map[string]string{
 		"null":                    `null`,
 		"empty object":            `{}`,
-		"missing public key":      `{"private_key_b64":"x"}`,
+		"missing private key":     `{"public_key_b64":"x"}`,
 		"unknown field":           `{"private_key_b64":"x","public_key_b64":"y","` + untrustedField + `":true}`,
 		"trailing value":          `{"private_key_b64":"x","public_key_b64":"y"} {}`,
 		"duplicate top-level key": `{"private_key_b64":"x","private_key_b64":"y","public_key_b64":"z"}`,
@@ -166,5 +167,29 @@ func TestFileAgentState_RespectsCanceledContext(t *testing.T) {
 	}
 	if err := store.SaveAgentState(ctx, completedNativeTestState(t)); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled save = %v", err)
+	}
+}
+
+func TestFileAgentStatePreservesPrivateOnlyIdentity(t *testing.T) {
+	state := completedNativeTestState(t)
+	wantPublic := state.PublicKeyB64
+	raw, err := json.Marshal(map[string]string{"private_key_b64": state.PrivateKeyB64})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(secureAgentStateTestDir(t), "agent-state.json")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	securePrivateStateFilePlatform(t, path)
+	loaded, err := testFileAgentState(t, path).LoadAgentState(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareLoadedAgentState(loaded, ErrInvalidRegisterConfig); err != nil {
+		t.Fatal(err)
+	}
+	if loaded.PrivateKeyB64 != state.PrivateKeyB64 || loaded.PublicKeyB64 != wantPublic {
+		t.Fatal("private-only identity changed during public-key derivation")
 	}
 }
