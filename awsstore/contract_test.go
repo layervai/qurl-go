@@ -144,6 +144,9 @@ func TestStoreContract(t *testing.T) {
 
 			t.Run("NativeSchemaOnly", func(t *testing.T) {
 				for name, raw := range map[string]string{
+					"null":                             `null`,
+					"empty object":                     `{}`,
+					"missing public key":               `{"private_key_b64":"x"}`,
 					"unknown field":                    `{"private_key_b64":"x","public_key_b64":"y","retired_http_field":true}`,
 					"trailing value":                   `{"private_key_b64":"x","public_key_b64":"y"} {}`,
 					"duplicate top-level key":          `{"private_key_b64":"x","private_key_b64":"y","public_key_b64":"z"}`,

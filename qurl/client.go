@@ -1083,8 +1083,8 @@ func (c *Client) RevokePortal(ctx context.Context, resourceCRID, qurlID string) 
 	if err := crid.Validate(resourceCRID); err != nil {
 		return fmt.Errorf("%w: resource CRID must be valid: %w", ErrInvalidPortalRequest, err)
 	}
-	if strings.TrimSpace(qurlID) == "" {
-		return fmt.Errorf("%w: qurl id must not be empty", ErrInvalidPortalRequest)
+	if err := validateResourceItemID(qurlID, ErrInvalidPortalRequest); err != nil {
+		return err
 	}
 	path := "/v1/resources/" + url.PathEscape(resourceCRID) + "/qurls/" + url.PathEscape(qurlID)
 	if err := c.doNoContent(ctx, http.MethodDelete, path, http.StatusNoContent); err != nil {
@@ -1093,6 +1093,15 @@ func (c *Client) RevokePortal(ctx context.Context, resourceCRID, qurlID string) 
 			return fmt.Errorf("%w: %w", ErrPortalRevoked, err)
 		}
 		return err
+	}
+	return nil
+}
+
+// Keep opaque IDs server-authoritative while excluding credentials and path navigation.
+func validateResourceItemID(id string, kind error) error {
+	value := strings.TrimSpace(id)
+	if value == "" || value == "." || value == ".." || strings.HasPrefix(value, "at_") {
+		return fmt.Errorf("%w: item id must be nonempty, must not be an access token, and must not be a dot segment", kind)
 	}
 	return nil
 }
