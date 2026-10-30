@@ -70,7 +70,7 @@ func unreachableCellCatalog(t *testing.T, cellKeyB64 string) *CellCatalog {
 }
 
 // vectorCellKeyB64 is the accept vector's cell key (32 bytes of 0x44), the key
-// the vendored link's claims carry.
+// the generated link's claims carry.
 func vectorCellKeyB64(t *testing.T) string {
 	t.Helper()
 	key := make([]byte, 32)
