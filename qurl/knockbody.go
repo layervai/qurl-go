@@ -39,6 +39,8 @@ const qurlAspID = "qurl"
 // usrData map keys sort alphabetically in encoding/json.
 type agentKnockMsg struct {
 	HeaderType int               `json:"headerType"`
+	RunID      string            `json:"runId,omitempty"`
+	RunAttempt uint64            `json:"runAttempt,omitempty"`
 	AspID      string            `json:"aspId"`
 	ResID      string            `json:"resId"`
 	UsrData    map[string]string `json:"usrData,omitempty"`
@@ -63,14 +65,19 @@ const (
 // buildKnockBody serializes the provisional qURL knock body for a verified fragment:
 // resId = resource_public_key_b64, usrData = the signed claims + issuer signature,
 // taken verbatim from the wire so the server verifies the exact signed bytes.
-func buildKnockBody(frag *qv2.Fragment) ([]byte, error) {
+func buildKnockBody(frag *qv2.Fragment, runID string) ([]byte, error) {
 	if frag == nil || frag.Claims == nil {
 		return nil, fmt.Errorf("qurl: build knock body: fragment not parsed")
 	}
 	if frag.Claims.ResourcePublicKeyB64 == "" {
 		return nil, fmt.Errorf("qurl: build knock body: missing resource_public_key_b64")
 	}
+	attempt := uint64(0)
+	if runID != "" {
+		attempt = 1
+	}
 	return json.Marshal(agentKnockMsg{
+		RunID: runID, RunAttempt: attempt,
 		HeaderType: nhpKNKHeaderType,
 		AspID:      qurlAspID,
 		ResID:      frag.Claims.ResourcePublicKeyB64,
