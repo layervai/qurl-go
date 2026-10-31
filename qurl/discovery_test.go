@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -786,15 +787,21 @@ func TestDiscoveryProvider_MatchingPinDoesNotRescueBadSignature(t *testing.T) {
 		t.Fatal(err)
 	}
 	pin := ManifestDigest(embeddedJSON)
-	provider, err := NewDiscoveryProvider(DiscoveryConfig{
-		Fetcher:   FetcherFunc(func(context.Context) ([]byte, error) { return raw, nil }),
-		PinSHA256: pin[:], ManifestKeys: map[string]*ecdsa.PublicKey{signer.KID(): pub}, RequireSignature: true,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := provider.Resolve(context.Background()); !errors.Is(err, ErrManifestUnverified) || !errors.Is(err, ErrSignature) {
-		t.Fatalf("matching pin must not rescue invalid signature: %v", err)
+	for _, requireSignature := range []bool{false, true} {
+		t.Run(fmt.Sprintf("require-signature-%t", requireSignature), func(t *testing.T) {
+			provider, err := NewDiscoveryProvider(DiscoveryConfig{
+				Fetcher:          FetcherFunc(func(context.Context) ([]byte, error) { return raw, nil }),
+				PinSHA256:        pin[:],
+				ManifestKeys:     map[string]*ecdsa.PublicKey{signer.KID(): pub},
+				RequireSignature: requireSignature,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := provider.Resolve(context.Background()); !errors.Is(err, ErrManifestUnverified) || !errors.Is(err, ErrSignature) {
+				t.Fatalf("matching pin must not rescue invalid signature: %v", err)
+			}
+		})
 	}
 }
 

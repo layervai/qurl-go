@@ -193,9 +193,7 @@ func TestEnterPortal_CellProviderRoutesOverNativeUDP(t *testing.T) {
 		allow: NewRelayAllowlist([]string{"relay.example.com"}),
 		cells: unreachableCellCatalog(t, vectorCellKeyB64(t)),
 	}
-	prior := DefaultProvider()
-	SetDefaultProvider(provider)
-	t.Cleanup(func() { SetDefaultProvider(prior) })
+	installDefaultProvider(t, provider)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -219,9 +217,7 @@ func TestEnterPortal_CellProviderErrorFailsClosed(t *testing.T) {
 		allow:    NewRelayAllowlist([]string{"relay.example.com"}),
 		cellsErr: errors.New("catalog unavailable"),
 	}
-	prior := DefaultProvider()
-	SetDefaultProvider(provider)
-	t.Cleanup(func() { SetDefaultProvider(prior) })
+	installDefaultProvider(t, provider)
 
 	_, err := EnterPortal(context.Background(), link)
 	if err == nil || !strings.Contains(err.Error(), "catalog unavailable") {

@@ -130,8 +130,8 @@ type DiscoveryConfig struct {
 	// The advanced floor is IN-MEMORY only: a process restart resets it to MinVersion, so
 	// rollback protection across restarts is bounded by MinVersion and the manifest's
 	// not_after, not by the highest version a previous process accepted. Durable
-	// rollback state is a deployment choice; pin a high MinVersion when
-	// cross-restart anti-rollback matters.
+	// rollback state belongs to deployment configuration; set its approved floor
+	// again after restart. See docs/discovery-trust.md.
 	MinVersion int64
 
 	// ExpectedProfile, when non-empty, requires the manifest's Profile to equal it. A
@@ -354,8 +354,8 @@ func (p *DiscoveryProvider) Resolve(ctx context.Context) (*TrustStore, *RelayAll
 //
 // So a manifest that is unpinned-or-pin-mismatched, or that carries a signature that
 // does not verify, or that satisfies no anchor at all, is rejected. This is the
-// safe-default MECHANISM; whether production uses pin-only, signed-only, or
-// pin-AND-signed (and the exact precedence between them) is a deployment choice.
+// anchor mechanism. The production policy uses required signatures and trusted
+// deployment keys; see docs/discovery-trust.md for deliberate pin freezes.
 // SigB64/Kid ride OUTSIDE the pinned/signed preimage, so an
 // attacker who cannot alter the manifest bytes also cannot forge acceptance; corrupting
 // a present signature only makes an otherwise-good manifest fail closed (deny), never
