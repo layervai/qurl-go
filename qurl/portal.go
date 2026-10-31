@@ -298,7 +298,14 @@ func EnterPortalWith(ctx context.Context, qurlLink string, cfg Config) (*Resourc
 	if err != nil {
 		return nil, fmt.Errorf("qurl: decode per-qURL private key: %w", err)
 	}
-	body, err := buildKnockBody(frag)
+	var cleanupRunID string
+	if cfg.RetainNativeSessionForCleanup {
+		cleanupRunID, err = NewCycleRunID()
+		if err != nil {
+			return nil, err
+		}
+	}
+	body, err := buildKnockBody(frag, cleanupRunID)
 	if err != nil {
 		return nil, err
 	}
@@ -335,6 +342,9 @@ func EnterPortalWith(ctx context.Context, qurlLink string, cfg Config) (*Resourc
 	ack, err := parseAck(reply.Body)
 	if err != nil {
 		return nil, err
+	}
+	if ack.RunID != cleanupRunID || string(ack.RunAttempt) != "1" {
+		return nil, fmt.Errorf("%w: native cleanup run binding mismatch", ErrMalformedReply)
 	}
 	r, err := newPortalRetirement(ack, devicePriv, cellPub, claims.RelayURL, cfg.HTTPClient)
 	if err != nil {
