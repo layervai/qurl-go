@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"math"
 	"net"
 	"strconv"
@@ -1217,91 +1216,45 @@ func exactObjectFields(raw []byte) (map[string]json.RawMessage, error) {
 	if !utf8.Valid(raw) {
 		return nil, errors.New("JSON is not valid UTF-8")
 	}
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.UseNumber()
-	token, err := decoder.Token()
-	if err != nil {
-		return nil, err
-	}
-	if delim, ok := token.(json.Delim); !ok || delim != '{' {
-		return nil, errors.New("top-level value must be an object")
-	}
-	if err := walkJSONObject(decoder, 1); err != nil {
-		return nil, err
-	}
-	if _, err := decoder.Token(); err != io.EOF {
-		return nil, errors.New("trailing JSON value")
+	_, problem := walkJSONStructure(raw, jsonStructurePolicy{
+		requireObject: true, numbersAsText: true, deepDuplicates: true,
+		maxContainerDepth: maxAssignmentJSONDepth - 1, maxValueDepth: -1,
+	})
+	if problem != nil {
+		return nil, assignmentJSONStructureError(problem)
 	}
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &fields); err != nil {
 		return nil, err
 	}
-	if fields == nil {
-		return nil, errors.New("top-level value must be an object")
-	}
 	return fields, nil
 }
 
-func walkJSONObject(decoder *json.Decoder, depth int) error {
-	seen := make(map[string]struct{})
-	for decoder.More() {
-		token, err := decoder.Token()
-		if err != nil {
-			return err
-		}
-		key, ok := token.(string)
-		if !ok {
-			return errors.New("object key is not a string")
-		}
-		if _, duplicate := seen[key]; duplicate {
-			return fmt.Errorf("duplicate field %q", key)
-		}
-		seen[key] = struct{}{}
-		if err := walkJSONValue(decoder, depth); err != nil {
-			return err
-		}
-	}
-	token, err := decoder.Token()
-	if err != nil {
-		return err
-	}
-	if delim, ok := token.(json.Delim); !ok || delim != '}' {
-		return errors.New("unterminated JSON object")
-	}
-	return nil
-}
-
-func walkJSONValue(decoder *json.Decoder, parentDepth int) error {
-	token, err := decoder.Token()
-	if err != nil {
-		return err
-	}
-	delim, ok := token.(json.Delim)
-	if !ok {
-		return nil
-	}
-	depth := parentDepth + 1
-	if depth > maxAssignmentJSONDepth {
+func assignmentJSONStructureError(problem *jsonStructureError) error {
+	switch problem.kind {
+	case jsonStructureNotObject:
+		return errors.New("top-level value must be an object")
+	case jsonStructureDuplicate:
+		return fmt.Errorf("duplicate field %q", problem.key)
+	case jsonStructureDepth:
 		return fmt.Errorf("JSON nesting exceeds %d levels", maxAssignmentJSONDepth)
-	}
-	switch delim {
-	case '{':
-		return walkJSONObject(decoder, depth)
-	case '[':
-		for decoder.More() {
-			if err := walkJSONValue(decoder, depth); err != nil {
-				return err
-			}
+	case jsonStructureKey:
+		return errors.New("object key is not a string")
+	case jsonStructureObjectEnd:
+		if problem.cause == nil {
+			return errors.New("unterminated JSON object")
 		}
-		closing, err := decoder.Token()
-		if err != nil {
-			return err
-		}
-		if closeDelim, ok := closing.(json.Delim); !ok || closeDelim != ']' {
+	case jsonStructureArrayEnd:
+		if problem.cause == nil {
 			return errors.New("unterminated JSON array")
 		}
-		return nil
-	default:
+	case jsonStructureDelimiter:
 		return errors.New("unexpected closing JSON delimiter")
+	case jsonStructureTrailing:
+		return errors.New("trailing JSON value")
 	}
+	if problem.cause != nil {
+		return problem.cause
+	}
+	return problem
 }
