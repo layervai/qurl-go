@@ -760,3 +760,94 @@ func TestEnterPortal_DiscoveryProvider_RelayOffAllowlist_Rejected(t *testing.T) 
 		t.Fatalf("off-allowlist relay after sig verify: want ErrRelayURL, got %v", err)
 	}
 }
+
+func TestDiscoveryProvider_MatchingPinDoesNotRescueBadSignature(t *testing.T) {
+	signer, err := GenerateLocalSigner("manifest-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := validManifest(t)
+	signedJSON, err := json.Marshal(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original.Version++
+	embeddedJSON, err := json.Marshal(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := signedEnvelopeBytes(t, signer, signedJSON, embeddedJSON)
+	der, err := signer.PublicKeyDER()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, err := ParseP256PublicKeyDER(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pin := ManifestDigest(embeddedJSON)
+	provider, err := NewDiscoveryProvider(DiscoveryConfig{
+		Fetcher:   FetcherFunc(func(context.Context) ([]byte, error) { return raw, nil }),
+		PinSHA256: pin[:], ManifestKeys: map[string]*ecdsa.PublicKey{signer.KID(): pub}, RequireSignature: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := provider.Resolve(context.Background()); !errors.Is(err, ErrManifestUnverified) || !errors.Is(err, ErrSignature) {
+		t.Fatalf("matching pin must not rescue invalid signature: %v", err)
+	}
+}
+
+func TestDiscoveryProvider_ManifestSigningKeyOverlapAndRetirement(t *testing.T) {
+	keys := make(map[string]*ecdsa.PublicKey)
+	envelopes := make(map[string][]byte)
+	manifestJSON, err := json.Marshal(validManifest(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, kid := range []string{"old", "new"} {
+		signer, err := GenerateLocalSigner(kid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		der, err := signer.PublicKeyDER()
+		if err != nil {
+			t.Fatal(err)
+		}
+		pub, err := ParseP256PublicKeyDER(der)
+		if err != nil {
+			t.Fatal(err)
+		}
+		keys[kid] = pub
+		envelopes[kid] = signedEnvelopeBytes(t, signer, manifestJSON, manifestJSON)
+	}
+	var served []byte
+	makeProvider := func() *DiscoveryProvider {
+		t.Helper()
+		provider, err := NewDiscoveryProvider(DiscoveryConfig{
+			Fetcher:      FetcherFunc(func(context.Context) ([]byte, error) { return served, nil }),
+			ManifestKeys: keys, RequireSignature: true,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return provider
+	}
+	overlap := makeProvider()
+	for _, kid := range []string{"old", "new"} {
+		served = envelopes[kid]
+		if _, _, err := overlap.Resolve(context.Background()); err != nil {
+			t.Fatalf("overlap %s: %v", kid, err)
+		}
+	}
+	delete(keys, "old")
+	retired := makeProvider()
+	served = envelopes["old"]
+	if _, _, err := retired.Resolve(context.Background()); !errors.Is(err, ErrManifestUnverified) || !errors.Is(err, ErrUnknownKID) {
+		t.Fatalf("retired manifest key must fail closed: %v", err)
+	}
+	served = envelopes["new"]
+	if _, _, err := retired.Resolve(context.Background()); err != nil {
+		t.Fatalf("new manifest key after retirement: %v", err)
+	}
+}
