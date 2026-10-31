@@ -1147,6 +1147,15 @@ func TestClient_Validation(t *testing.T) {
 	if req.SessionDuration != "48h" {
 		t.Fatalf("WithSessionDuration 48h = %q, want 48h", req.SessionDuration)
 	}
+	for _, test := range []struct {
+		opts []PortalOption
+		want bool
+	}{{[]PortalOption{Reusable()}, false}, {[]PortalOption{OneTimeUse(), Reusable()}, false}, {[]PortalOption{Reusable(), OneTimeUse()}, true}} {
+		req, err = buildCreatePortalRequest(test.opts)
+		if err != nil || req.OneTimeUse == nil || *req.OneTimeUse != test.want {
+			t.Fatalf("one_time_use = %v (%v), want explicit %v", req.OneTimeUse, err, test.want)
+		}
+	}
 	if _, err := client.CreatePortal(context.Background(), &Resource{CRID: "ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a"}, MaxSessions(-1)); !errors.Is(err, ErrInvalidPortalRequest) {
 		t.Fatalf("negative max sessions: want ErrInvalidPortalRequest, got %v", err)
 	}

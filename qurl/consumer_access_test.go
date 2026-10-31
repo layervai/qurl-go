@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestConsumerPolicyRejectsUnknownModesAndPrivacyConflicts(t *testing.T) {
@@ -66,6 +67,29 @@ func TestConsumerManagementUsesScopeVersionAndRejectsEmptyDecision(t *testing.T)
 	grant, err = client.ApproveConsumerGrant(context.Background(), testConnectorCRID, strings.Repeat("a", 64), ConsumerGrantApproval{ExpectedVersion: 3})
 	if grant != nil || !errors.Is(err, ErrInvalidAPIResponse) {
 		t.Fatalf("empty decision accepted: %+v %v", grant, err)
+	}
+}
+
+func TestApproveConsumerGrantSendsApprovalExpiry(t *testing.T) {
+	expiresAt := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	for _, test := range []struct {
+		expiry *time.Time
+		want   string
+	}{{&expiresAt, `"expires_at":"2026-11-06T12:00:00Z"`}, {nil, ""}} {
+		client := &Client{baseURL: "https://api.example.test", credentials: BearerToken("test"), httpClient: doerFunc(func(req *http.Request) (*http.Response, error) {
+			raw, err := io.ReadAll(req.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.want != "" && !strings.Contains(string(raw), test.want) || test.want == "" && strings.Contains(string(raw), "expires_at") {
+				t.Fatalf("approval body %s, want expiry %q", raw, test.want)
+			}
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"data":{"id":"new-grant","status":"active","version":1,"expires_at":"2026-11-06T12:00:00Z"}}`))}, nil
+		})}
+		grant, err := client.ApproveConsumerGrant(context.Background(), testConnectorCRID, "new", ConsumerGrantApproval{CredentialKind: "device", CredentialID: "d", CredentialPublicKey: "k", ExpiresAt: test.expiry})
+		if err != nil || grant.ExpiresAt == nil || !grant.ExpiresAt.Equal(expiresAt) {
+			t.Fatalf("approval: %+v %v", grant, err)
+		}
 	}
 }
 

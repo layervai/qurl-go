@@ -8,6 +8,13 @@ and are marked **Breaking** with what to change.
 
 ## Unreleased
 
+- `Reusable` is a new `PortalOption` that sends an explicit
+  `one_time_use: false`. A qURL Connector link is single-use when that field
+  is omitted, so a caller that mints a reusable link for an access rule with
+  link limits states it. `ConsumerGrantApproval.ExpiresAt` is also sent for a
+  review approval or a key opt-in, so an approval can lapse; the service
+  checks the time. Release this with the minor version above.
+
 - **Breaking:** `ConsumerAccessPolicy` gains `EmailDomain` and
   `AllowedEmails` for the new `email_domain` mode. The `[]string` field makes
   the struct no longer comparable, so `==` and map keys stop compiling. Use
