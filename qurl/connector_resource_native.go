@@ -112,6 +112,9 @@ func (e *ConnectorResourceDiscoveryError) Error() string {
 	if e == nil {
 		return "qurl: Connector resource discovery error"
 	}
+	if e.kind != nil {
+		return fmt.Sprintf("%s (code %s)", e.kind, e.Code)
+	}
 	return fmt.Sprintf("qurl: Connector resource discovery error %s", e.Code)
 }
 
