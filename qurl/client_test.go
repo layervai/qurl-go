@@ -1570,3 +1570,46 @@ func TestClientCreatePortalRequiresRequestedCRID(t *testing.T) {
 		})
 	}
 }
+
+func TestCachedCredentialsCanceledWaiterDoesNotStartAnotherRefresh(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	provider := CredentialProviderFunc(func(ctx context.Context, req *http.Request) error {
+		calls.Add(1)
+		close(started)
+		select {
+		case <-release:
+			req.Header.Set("Authorization", "Bearer refreshed")
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	})
+	cached := CachedCredentials(provider, time.Minute)
+	first := newCredentialTestRequest(t)
+	done := make(chan error, 1)
+	go func() { done <- cached.Authorize(ctx, first) }()
+	select {
+	case <-started:
+	case <-ctx.Done():
+		t.Fatal("credential refresh did not start")
+	}
+	waiter, cancelWaiter := context.WithCancel(ctx)
+	cancelWaiter()
+	if err := cached.Authorize(waiter, newCredentialTestRequest(t)); !errors.Is(err, context.Canceled) {
+		t.Fatalf("waiting Authorize = %v, want context.Canceled", err)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("refresh = %v", err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("provider calls = %d, want 1", calls.Load())
+	}
+	if first.Header.Get("Authorization") != "Bearer refreshed" {
+		t.Fatal("refresh did not authorize the first caller")
+	}
+}

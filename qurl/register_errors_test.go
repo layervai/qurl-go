@@ -186,3 +186,25 @@ func TestEnrollmentPolicyMatrix_UnknownKindIsNotAPolicyRefusal(t *testing.T) {
 		t.Fatalf("unknown kind err = %v, want ErrAssignmentInvalidResponse", err)
 	}
 }
+
+func TestNativeRegisterSharedErrorsAreKeyKindIndependent(t *testing.T) {
+	for _, tc := range []struct {
+		code string
+		want error
+	}{
+		{rakAttemptsExceeded, ErrRegistrationRateLimited},
+		{rakRateLimited, ErrRegistrationRateLimited},
+		{rakEmailUnavailable, ErrNoAccountEmail},
+		{rakRegistrationOff, ErrRegistrationDisabled},
+		{rakInvalidInput, ErrRegistrationInvalidInput},
+	} {
+		for _, kind := range []string{keyKindAccount, keyKindBootstrap} {
+			t.Run(tc.code+"/"+kind, func(t *testing.T) {
+				err := classifyNativeRegisterError(&registerAckBody{ErrCode: tc.code}, kind)
+				if !errors.Is(err, tc.want) {
+					t.Fatalf("RAK error = %v, want %v", err, tc.want)
+				}
+			})
+		}
+	}
+}
