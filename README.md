@@ -788,7 +788,6 @@ by native agent lifecycle calls. Invalid values fail before I/O. Smaller pages
 keep the memory cost lower. See the [shared Go/TypeScript decision](https://github.com/layervai/qurl-typescript/blob/main/docs/api-response-limits.md)
 for error classes, decompression, cursor recovery and memory bounds.
 
-
 ## License
 
 [MIT](LICENSE) © LayerV AI

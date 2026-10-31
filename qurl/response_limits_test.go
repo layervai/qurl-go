@@ -269,7 +269,7 @@ func TestResponseLimitHeaderHints(t *testing.T) {
 			err = client.doJSONStatus(context.Background(), http.MethodGet, "/v1/test", nil, &out, 200)
 			if tc.tooLarge {
 				var capError *inputExceedsCapError
-				if !errors.As(err, &capError) || body.reads != 0 {
+				if !errors.As(err, &capError) || !errors.Is(err, ErrInvalidAPIResponse) || body.reads != 0 {
 					t.Fatalf("hint error=%v reads=%d", err, body.reads)
 				}
 			} else if err != nil {
