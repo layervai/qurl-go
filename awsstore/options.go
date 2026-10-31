@@ -24,7 +24,8 @@ type Option func(*storeConfig)
 type storeConfig struct {
 	// kmsKeyID is the customer-managed KMS key id/ARN/alias used to encrypt the
 	// stored credential. Empty means the service default (AWS-managed) key.
-	kmsKeyID     string
+	kmsKeyID string
+	// verifyKMSKey opts into Secrets Manager key checks before writes.
 	verifyKMSKey bool
 	// tier is the SSM parameter tier applied by [ParameterStore] on every
 	// PutParameter. The zero value leaves Tier unset (the account's default tier

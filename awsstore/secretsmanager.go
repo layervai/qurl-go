@@ -37,7 +37,8 @@ var _ SecretsManagerAPI = (*secretsmanager.Client)(nil)
 //
 // SECURITY: the stored value is a credential. Prefer a customer-managed KMS key
 // via [WithKMSKeyID] and least-privilege IAM (GetSecretValue, PutSecretValue,
-// CreateSecret on the one secret ARN). See the package doc.
+// CreateSecret on the one secret ARN; DescribeSecret with WithVerifyKMSKey).
+// See the package doc.
 //
 // KMS key-binding caveat: [WithKMSKeyID] takes effect only at CreateSecret (the
 // first save). Secrets Manager's PutSecretValue carries no KmsKeyId field, so a
