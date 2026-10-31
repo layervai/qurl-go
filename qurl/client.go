@@ -1087,7 +1087,7 @@ func (c *Client) RevokePortal(ctx context.Context, resourceCRID, qurlID string) 
 		return err
 	}
 	path := "/v1/resources/" + url.PathEscape(resourceCRID) + "/qurls/" + url.PathEscape(qurlID)
-	if err := c.doNoContent(ctx, http.MethodDelete, path, http.StatusNoContent); err != nil {
+	if err := c.deleteNoContent(ctx, path); err != nil {
 		var apiErr *APIError
 		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusConflict && apiErr.Code == "revoked" {
 			return fmt.Errorf("%w: %w", ErrPortalRevoked, err)
@@ -1346,11 +1346,11 @@ func (c *Client) doJSONStatus(ctx context.Context, method, path string, body, ou
 	})
 }
 
-// doNoContent requires one exact successful status and a byte-empty body.
+// deleteNoContent requires HTTP 204 and a byte-empty body.
 // Whitespace is still protocol content and deliberately fails this contract.
-func (c *Client) doNoContent(ctx context.Context, method, path string, expectedStatus int) error {
-	return c.doRequest(ctx, method, path, nil, apiResponseContract{
-		expectedStatus: expectedStatus,
+func (c *Client) deleteNoContent(ctx context.Context, path string) error {
+	return c.doRequest(ctx, http.MethodDelete, path, nil, apiResponseContract{
+		expectedStatus: http.StatusNoContent,
 		bodyMode:       apiResponseBodyEmpty,
 	})
 }
@@ -1496,7 +1496,7 @@ func doAuthorizedRequest(ctx context.Context, httpClient HTTPDoer, baseURL strin
 			return invalidAPIResponseOutcome("API response body is not valid UTF-8", nil)
 		}
 		if err := json.Unmarshal(respBody, contract.out); err != nil {
-			return invalidAPIResponseOutcome("decode API response after successful status", err)
+			return invalidAPIResponseOutcome("decode API response after successful status", &apiResponseDecodeError{cause: err})
 		}
 		return nil
 	case apiResponseBodyEmpty:
@@ -1508,6 +1508,13 @@ func doAuthorizedRequest(ctx context.Context, httpClient HTTPDoer, baseURL strin
 		return invalidAPIResponseOutcome("unknown API response body contract", nil)
 	}
 }
+
+// Decoder errors (notably time.ParseError) can repeat private response values.
+// Keep the cause available to errors.As without printing its contents in logs.
+type apiResponseDecodeError struct{ cause error }
+
+func (e *apiResponseDecodeError) Error() string { return "response JSON does not match the API shape" }
+func (e *apiResponseDecodeError) Unwrap() error { return e.cause }
 
 func invalidAPIResponseOutcome(detail string, cause error) error {
 	if cause != nil {
