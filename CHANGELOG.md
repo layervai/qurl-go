@@ -8,6 +8,12 @@ and are marked **Breaking** with what to change.
 
 ## Unreleased
 
+- `ConsumerAccessPolicy` gains `ApprovalExpiresIn` (`approval_expires_in`),
+  how long each review approval or key opt-in lasts, from `1h` to `365d`.
+  Only review and keys policies accept it. The service sets each grant's
+  expiry from it and rejects a later explicit `expires_at`, so every
+  approver gets the same bound. `Equal` and `SameDefinition` compare it.
+
 - `Reusable` is a new `PortalOption` that sends an explicit
   `one_time_use: false`. A qURL Connector link is single-use when that field
   is omitted, so a caller that mints a reusable link for an access rule with

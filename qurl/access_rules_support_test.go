@@ -101,3 +101,31 @@ func ExampleConsumerAccessPolicy_Validate() {
 	fmt.Println(policy.Validate())
 	// Output: <nil>
 }
+
+func TestApprovalExpiresInTravelsWithReviewAndKeysPolicies(t *testing.T) {
+	var sent ConsumerAccessPolicy
+	client := &Client{baseURL: "https://api.example.test", credentials: BearerToken("test"), httpClient: doerFunc(func(r *http.Request) (*http.Response, error) {
+		var body struct {
+			Policy ConsumerAccessPolicy `json:"consumer_access"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		sent = body.Policy
+		raw, err := json.Marshal(map[string]any{"data": map[string]any{"resource_id": testConnectorID, "crid": testConnectorCRID, "consumer_access": body.Policy}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(raw))}, nil
+	})}
+	policy := ConsumerAccessPolicy{Mode: "review", Version: 2, ApprovalExpiresIn: "7d"}
+	if err := client.UpdateConsumerAccess(context.Background(), testConnectorCRID, 1, policy); err != nil || sent.ApprovalExpiresIn != "7d" {
+		t.Fatalf("approval_expires_in not sent: %v %+v", err, sent)
+	}
+	if other := (ConsumerAccessPolicy{Mode: "review", Version: 2, ApprovalExpiresIn: "30d"}); policy.SameDefinition(other) {
+		t.Fatal("different approval lifetimes compared equal")
+	}
+	if err := (ConsumerAccessPolicy{Mode: "email_capture", Version: 1, ApprovalExpiresIn: "7d"}).validate(); !errors.Is(err, ErrInvalidResourceRequest) {
+		t.Fatalf("approval_expires_in accepted outside review and keys: %v", err)
+	}
+}

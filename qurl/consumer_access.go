@@ -19,6 +19,9 @@ type ConsumerAccessPolicy struct {
 	ContractID    string   `json:"contract_id,omitempty"`
 	EmailDomain   string   `json:"email_domain,omitempty"`
 	AllowedEmails []string `json:"allowed_emails,omitempty"`
+	// ApprovalExpiresIn bounds each review approval or key opt-in, such as
+	// "7d" (1h to 365d). The service sets and enforces each grant's expiry.
+	ApprovalExpiresIn string `json:"approval_expires_in,omitempty"`
 }
 
 // Validate checks the supported admission modes and their parameters.
@@ -46,6 +49,9 @@ func (p ConsumerAccessPolicy) validate() error {
 		}
 	} else if p.EmailDomain != "" || len(p.AllowedEmails) != 0 {
 		return fmt.Errorf("%w: email fields require email_domain mode", ErrInvalidResourceRequest)
+	}
+	if p.ApprovalExpiresIn != "" && p.Mode != "review" && p.Mode != "keys" {
+		return fmt.Errorf("%w: approval_expires_in requires review or keys mode", ErrInvalidResourceRequest)
 	}
 	switch p.Mode {
 	case "keys", "invite_only", "email_capture", "email_domain", "review":
@@ -161,5 +167,5 @@ func (p ConsumerAccessPolicy) Equal(other ConsumerAccessPolicy) bool {
 
 // SameDefinition compares every field except Version.
 func (p ConsumerAccessPolicy) SameDefinition(other ConsumerAccessPolicy) bool {
-	return p.Mode == other.Mode && p.ContractID == other.ContractID && p.EmailDomain == other.EmailDomain && slices.Equal(p.AllowedEmails, other.AllowedEmails)
+	return p.Mode == other.Mode && p.ContractID == other.ContractID && p.EmailDomain == other.EmailDomain && p.ApprovalExpiresIn == other.ApprovalExpiresIn && slices.Equal(p.AllowedEmails, other.AllowedEmails)
 }
