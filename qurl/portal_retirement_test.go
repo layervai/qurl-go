@@ -46,7 +46,7 @@ func TestPortalRetirementExactIdentityAndTerminalKeyWipe(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewReader(packet))}, nil
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(packet))}, nil
 	})
 	retirement, err := newPortalRetirement(ack, agent.Bytes(), server.PublicKey().Bytes(), "https://relay.example", doer)
 	if err != nil {
@@ -83,6 +83,7 @@ func TestPortalRetirementExactIdentityAndTerminalKeyWipe(t *testing.T) {
 		t.Fatal("private retirement state exposed")
 	}
 }
+
 func TestPortalRetirementRejectsMissingAndMalformedReceipt(t *testing.T) {
 	for _, body := range []string{`{}`, `{"sessId":1,"cellId":"cell0","sessIssuedAtMillis":"1234","runId":"0123456789abcdef","runAttempt":1}`, `{"sessId":1,"cellId":"cell0","sessIssuedAtMillis":1234,"runId":"bad","runAttempt":1}`} {
 		ack, err := parseAck([]byte(body))
@@ -135,7 +136,7 @@ func TestPortalRetirementRejectsUnboundRepliesWithoutWipingKey(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewReader(packet))}, nil
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(packet))}, nil
 			})
 			r, err := newPortalRetirement(ack, agent.Bytes(), server.PublicKey().Bytes(), "https://relay.example", doer)
 			if err != nil {
