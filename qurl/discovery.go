@@ -26,9 +26,10 @@ import (
 // expired, downgraded, missing a trust mode, or carrying empty/invalid config all
 // return an error, never a partial result.
 //
-// Discovery trust configuration is intentionally flexible: signed vs pinned
-// manifests, key rotation, and durable downgrade state are deployment choices.
-// This implementation provides the fail-closed mechanism behind those choices.
+// Native opens use the shipped deployment by default; this optional provider is
+// relay-only. For signed discovery use ManifestKeys and RequireSignature without
+// a pin, and deploy an approved MinVersion. docs/discovery-trust.md records the
+// production choice, rotation procedure, and deliberate no-cache policy.
 
 // ManifestEnvelope is the fetched discovery document. The signed/pinned MANIFEST
 // itself is carried as opaque base64url (ManifestB64) — exactly like a qURL link fragment
@@ -207,9 +208,10 @@ var (
 // authenticate, EnterPortal pays a network round-trip to the manifest endpoint on
 // EVERY link open, and a down/slow manifest endpoint fails every open even while a
 // recently-authenticated, still-in-window manifest exists. This is a deliberate
-// fail-closed-over-availability stance for the mechanism. An application expecting high
-// open volume should wrap this in a TTL cache that itself fails closed once not_after
-// (or the TTL) elapses; cache windows are a deployment choice.
+// fail-closed-over-availability policy for this optional relay-only mechanism.
+// The native production path uses the shipped deployment or explicit static cell
+// config instead. No SDK cache window or stale-on-error mode is provided; see
+// docs/discovery-trust.md before choosing discovery for a high-volume application.
 type DiscoveryProvider struct {
 	cfg DiscoveryConfig
 
