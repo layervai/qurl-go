@@ -57,13 +57,13 @@ func TestPortalTargetPathReleasedConformance(t *testing.T) {
 				opts = append(opts, WithTargetPath(*tc.Value))
 			}
 			resource := client.ResourceByCRID(testConnectorCRID)
-			for _, helper := range []bool{false, true} {
-				var portal *Portal
-				if helper {
-					portal, err = resource.CreatePortal(context.Background(), opts...)
-				} else {
-					portal, err = client.CreatePortal(context.Background(), resource, opts...)
-				}
+			connector := &ConnectorResource{client: client, CRID: testConnectorCRID}
+			for _, mint := range []func() (*Portal, error){
+				func() (*Portal, error) { return client.CreatePortal(context.Background(), resource, opts...) },
+				func() (*Portal, error) { return resource.CreatePortal(context.Background(), opts...) },
+				func() (*Portal, error) { return connector.CreatePortal(context.Background(), opts...) },
+			} {
+				portal, err := mint()
 				if tc.Outcome == conformance.ExpectReject {
 					if !errors.Is(err, ErrInvalidPortalRequest) || portal != nil || attempts.Load() != 0 {
 						t.Fatalf("rejected input: portal=%v error=%v requests=%d", portal, err, attempts.Load())
@@ -77,8 +77,8 @@ func TestPortalTargetPathReleasedConformance(t *testing.T) {
 					t.Fatal("recorded target path differs from the wire response")
 				}
 			}
-			if tc.Outcome == conformance.ExpectAccept && attempts.Load() != 2 {
-				t.Fatalf("accepted input requests = %d, want 2", attempts.Load())
+			if tc.Outcome == conformance.ExpectAccept && attempts.Load() != 3 {
+				t.Fatalf("accepted input requests = %d, want 3", attempts.Load())
 			}
 		})
 	}
