@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1597,9 +1598,18 @@ func TestCachedCredentialsCanceledWaiterDoesNotStartAnotherRefresh(t *testing.T)
 	case <-ctx.Done():
 		t.Fatal("credential refresh did not start")
 	}
-	waiter, cancelWaiter := context.WithCancel(ctx)
+	waitCtx, cancelWaiter := context.WithCancel(ctx)
+	defer cancelWaiter()
+	waiter := &observedCredentialWaitContext{Context: waitCtx, observed: make(chan struct{})}
+	waitResult := make(chan error, 1)
+	go func() { waitResult <- cached.Authorize(waiter, newCredentialTestRequest(t)) }()
+	select {
+	case <-waiter.observed:
+	case <-ctx.Done():
+		t.Fatal("second caller did not wait for the in-flight refresh")
+	}
 	cancelWaiter()
-	if err := cached.Authorize(waiter, newCredentialTestRequest(t)); !errors.Is(err, context.Canceled) {
+	if err := <-waitResult; !errors.Is(err, context.Canceled) {
 		t.Fatalf("waiting Authorize = %v, want context.Canceled", err)
 	}
 	close(release)
@@ -1612,4 +1622,16 @@ func TestCachedCredentialsCanceledWaiterDoesNotStartAnotherRefresh(t *testing.T)
 	if first.Header.Get("Authorization") != "Bearer refreshed" {
 		t.Fatal("refresh did not authorize the first caller")
 	}
+}
+
+// Done is evaluated only after Authorize joins the in-flight refresh select.
+type observedCredentialWaitContext struct {
+	context.Context
+	observed chan struct{}
+	once     sync.Once
+}
+
+func (c *observedCredentialWaitContext) Done() <-chan struct{} {
+	c.once.Do(func() { close(c.observed) })
+	return c.Context.Done()
 }
