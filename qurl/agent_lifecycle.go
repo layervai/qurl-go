@@ -68,7 +68,7 @@ func openRegisteredAgentWithIdentity(ctx context.Context, store AgentStateStore,
 		}
 		defer clearOwnedAgentState(state)
 		return &openResult{
-			client:  newPrimedStoreBackedClient(store, cfg.baseURL, cfg.httpClient, state.DeviceAPIKey, state.AgentID, now),
+			client:  newPrimedStoreBackedClient(store, cfg.baseURL, cfg.httpClient, cfg.maxResponseBodyBytes, state.DeviceAPIKey, state.AgentID, now),
 			agentID: state.AgentID,
 		}, nil
 	})

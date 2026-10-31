@@ -170,7 +170,8 @@ type AgentRuntimeUDPOption interface {
 }
 
 type nativeAgentRuntimeConfig struct {
-	hub *HubBootstrap
+	maxResponseBodyBytes int
+	hub                  *HubBootstrap
 	// hubErr records why no Hub trust root is available when hub is nil. It is
 	// surfaced only by requireHub, so a call that needs no Hub exchange — a warm
 	// or offline open of completed state — still succeeds without one.
@@ -729,7 +730,7 @@ func finishNativeRuntime(store AgentStateStore, state *AgentState, cfg *nativeAg
 	if err != nil {
 		return nil, nil, err
 	}
-	client := newPrimedStoreBackedClient(store, cfg.baseURL, cfg.httpClient, state.DeviceAPIKey, state.AgentID, cfg.clock)
+	client := newPrimedStoreBackedClient(store, cfg.baseURL, cfg.httpClient, cfg.maxResponseBodyBytes, state.DeviceAPIKey, state.AgentID, cfg.clock)
 	binding := newAgentRuntimeBinding(state, privateKey)
 	return client, binding, nil
 }
