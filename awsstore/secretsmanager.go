@@ -23,6 +23,12 @@ type SecretsManagerAPI interface {
 	CreateSecret(ctx context.Context, params *secretsmanager.CreateSecretInput, optFns ...func(*secretsmanager.Options)) (*secretsmanager.CreateSecretOutput, error)
 }
 
+type secretsManagerDescriber interface {
+	DescribeSecret(context.Context, *secretsmanager.DescribeSecretInput, ...func(*secretsmanager.Options)) (*secretsmanager.DescribeSecretOutput, error)
+}
+
+var _ secretsManagerDescriber = (*secretsmanager.Client)(nil)
+
 // Compile-time proof the real client satisfies the narrow interface.
 var _ SecretsManagerAPI = (*secretsmanager.Client)(nil)
 
@@ -200,9 +206,7 @@ func (s *SecretsManagerStore) checkKMSKey(ctx context.Context) error {
 	if _, err := canonicalKMSKeyARN(s.kmsKeyID); err != nil {
 		return fmt.Errorf("%w: key verification requires an exact KMS key ARN", qurl.ErrInvalidBootstrapConfig)
 	}
-	client, ok := s.client.(interface {
-		DescribeSecret(context.Context, *secretsmanager.DescribeSecretInput, ...func(*secretsmanager.Options)) (*secretsmanager.DescribeSecretOutput, error)
-	})
+	client, ok := s.client.(secretsManagerDescriber)
 	if !ok {
 		return fmt.Errorf("%w: key verification requires DescribeSecret support", qurl.ErrInvalidBootstrapConfig)
 	}

@@ -120,7 +120,11 @@ and set `WithKMSKeyID` to the exact key ARN (not an alias or key ID). Grant
 `secretsmanager:DescribeSecret` on the same secret. Custom clients must implement
 `DescribeSecret`; the existing `SecretsManagerAPI` interface stays unchanged.
 A different or missing key, denied lookup, or malformed response prevents the
-write. A new secret is created with the configured key; a concurrent create
+write. The returned identifier must match the exact configured key ARN; an alias
+or bare key identifier is not resolved. Precreate or update the secret with the
+exact key ARN before enabling this option. See the
+[AWS DescribeSecret key identifier contract](https://docs.aws.amazon.com/secretsmanager/latest/apireference/API_DescribeSecret.html).
+A new secret is created with the configured key; a concurrent create
 winner is checked before any fallback write. Loads do not perform this check.
 
 This is a point-in-time check. Secrets Manager has no conditional key match on
