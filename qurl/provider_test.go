@@ -3,6 +3,7 @@ package qurl
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -14,15 +15,22 @@ import (
 // TestEnterPortal_EmptyConfig_FailsClosed). All provider-swapping tests MUST go
 // through this helper.
 //
-// CONCURRENCY: this mutates a package-level global, so a test using it (or any test in
-// the same package while it runs) MUST NOT call t.Parallel() — doing so turns the
-// swap+restore into a data race that -race would correctly flag. The whole package
-// relies on Go's default sequential execution within a package; keep it that way.
+// The calling test and its ancestors must be non-parallel. guardProcessGlobals
+// enforces that at runtime. Other tests can use t.Parallel: Go pauses them while
+// a sequential test group owns these process-wide fixtures.
 func installDefaultProvider(t *testing.T, p Provider) {
 	t.Helper()
+	guardProcessGlobals(t)
 	prev := DefaultProvider()
 	SetDefaultProvider(p)
 	t.Cleanup(func() { SetDefaultProvider(prev) })
+}
+
+// Setenv supplies testing's ancestor-aware parallel guard and cleanup; the SDK
+// never reads this sentinel. It also rejects a later t.Parallel on the same test.
+func guardProcessGlobals(t *testing.T) {
+	t.Helper()
+	t.Setenv("QURL_GO_TEST_PROCESS_GLOBALS", "reserved")
 }
 
 // capturingTransport is an http.RoundTripper that records the request URL and then
@@ -45,13 +53,11 @@ func (c *capturingTransport) RoundTrip(req *http.Request) (*http.Response, error
 // only offline seam for the one-arg EnterPortal, whose nil HTTPClient routes through
 // http.DefaultClient → http.DefaultTransport.
 //
-// CONCURRENCY: like installDefaultProvider, this mutates a process-wide global, so a
-// test using it MUST NOT call t.Parallel() (nor may any concurrently-running test in
-// the package). The scoped swap is only safe under Go's default sequential execution;
-// adding t.Parallel() anywhere in this package would make this a -race-flagged data
-// race on http.DefaultTransport.
+// Like installDefaultProvider, this requires a non-parallel test ancestry;
+// guardProcessGlobals rejects parallel use before the transport changes.
 func installCapturingTransport(t *testing.T) *capturingTransport {
 	t.Helper()
+	guardProcessGlobals(t)
 	ct := &capturingTransport{}
 	prev := http.DefaultTransport
 	http.DefaultTransport = ct
@@ -234,4 +240,33 @@ type providerFunc func(context.Context) (*TrustStore, *RelayAllowlist, error)
 
 func (f providerFunc) Resolve(ctx context.Context) (*TrustStore, *RelayAllowlist, error) {
 	return f(ctx)
+}
+
+func TestGlobalFixtureHelpersRejectParallel(t *testing.T) {
+	helpers := []struct {
+		name string
+		call func(*testing.T)
+	}{
+		{"provider", func(t *testing.T) { installDefaultProvider(t, nil) }},
+		{"transport", func(t *testing.T) { installCapturingTransport(t) }},
+	}
+	for _, helper := range helpers {
+		for _, order := range []string{"before", "after"} {
+			t.Run(helper.name+"/"+order, func(t *testing.T) {
+				defer func() {
+					result := recover()
+					if result == nil || !strings.Contains(strings.ToLower(fmt.Sprint(result)), "parallel") {
+						t.Errorf("global fixture must reject parallel use, got %v", result)
+					}
+				}()
+				if order == "before" {
+					helper.call(t)
+					t.Parallel()
+				} else {
+					t.Parallel()
+					helper.call(t)
+				}
+			})
+		}
+	}
 }

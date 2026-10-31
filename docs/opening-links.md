@@ -1008,3 +1008,10 @@ does not retain any of the other embedded defaults.
 
 The initial production values were verified against the production deployment
 on 2026-09-15.
+
+## Discovery trust policy
+
+Use the shipped deployment or explicit cell configuration for native opens.
+If your application needs the optional relay-only discovery provider, follow
+the [discovery trust policy](discovery-trust.md) for anchors, rotation, revision
+floors, and its deliberate per-open fetch behavior.
