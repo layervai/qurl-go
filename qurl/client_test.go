@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -34,7 +35,7 @@ func TestDoAuthorizedJSON_EarlyResponseDoesNotCorruptInFlightRequestBody(t *test
 	}{DeviceID: "agent-early-response"}
 	err := doAuthorizedJSON(context.Background(), httpClient, "https://api.example.test", func(context.Context, *http.Request) error {
 		return nil
-	}, http.MethodPost, "/v1/test", body, nil)
+	}, http.MethodPost, "/v1/test", body, nil, 0)
 	if err != nil {
 		t.Fatalf("doAuthorizedJSON: %v", err)
 	}
@@ -66,7 +67,7 @@ func TestDoAuthorizedJSON_NilOutputPreservesLegacyIgnoreContract(t *testing.T) {
 			})
 			err := doAuthorizedJSON(context.Background(), httpClient, "https://api.example.test", func(context.Context, *http.Request) error {
 				return nil
-			}, http.MethodPost, "/v1/test", nil, nil)
+			}, http.MethodPost, "/v1/test", nil, nil, 0)
 			if err != nil {
 				t.Fatalf("doAuthorizedJSON status %d with nil output: %v", status, err)
 			}
@@ -89,7 +90,7 @@ func TestDoAuthorizedJSON_OversizedSuccessIsDrainedAndClosed(t *testing.T) {
 	var out map[string]any
 	err := doAuthorizedJSON(context.Background(), httpClient, "https://api.example.test", func(context.Context, *http.Request) error {
 		return nil
-	}, http.MethodGet, "/v1/test", nil, &out)
+	}, http.MethodGet, "/v1/test", nil, &out, 0)
 	if !errors.Is(err, ErrInvalidAPIResponse) {
 		t.Fatalf("error = %v, want ErrInvalidAPIResponse", err)
 	}
@@ -343,7 +344,7 @@ func TestClient_ResourceByCRIDCreatePortal(t *testing.T) {
 		}
 		assertJSONField(t, body, "target_path", "/api/detect")
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"data":{"resource_id":"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE2cTVv5_3eeYCcLLq5ROYCqcmY50HiKZ9ATglIkPnCji1E_S63UMtXba1moR8-Q6EV7oM6zwwh9_j2CDujzXvLA","crid":"ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a","qurl_link":"https://qurl.link/at_stored"}}`)
+		fmt.Fprint(w, `{"data":{"resource_id":"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE2cTVv5_3eeYCcLLq5ROYCqcmY50HiKZ9ATglIkPnCji1E_S63UMtXba1moR8-Q6EV7oM6zwwh9_j2CDujzXvLA","crid":"ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a","qurl_link":"https://qurl.link/at_stored","target_path":"/api/detect"}}`)
 	}))
 	defer api.Close()
 
@@ -1539,10 +1540,10 @@ func TestClientCreateResponsesRejectMismatchedCRID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result, err := client.ProtectURL(context.Background(), "https://example.com"); result != nil || !errors.Is(err, ErrInvalidAPIResponse) {
+	if result, err := client.ProtectURL(context.Background(), "https://example.com"); result != nil || !errors.Is(err, ErrInvalidAPIResponse) || !errors.Is(err, ErrAPIRequestOutcomeUnknown) {
 		t.Fatalf("mismatched resource accepted: %v", err)
 	}
-	if portal, resource, err := client.CreatePortalForURL(context.Background(), "https://example.com"); resource != nil || portal != nil || !errors.Is(err, ErrInvalidAPIResponse) {
+	if portal, resource, err := client.CreatePortalForURL(context.Background(), "https://example.com"); resource != nil || portal != nil || !errors.Is(err, ErrInvalidAPIResponse) || !errors.Is(err, ErrAPIRequestOutcomeUnknown) {
 		t.Fatalf("mismatched portal accepted: %v", err)
 	}
 }
@@ -1564,9 +1565,75 @@ func TestClientCreatePortalRequiresRequestedCRID(t *testing.T) {
 			if responseCRID == "" {
 				want = ErrNoCRID
 			}
-			if portal, err := client.CreatePortal(context.Background(), resource); portal != nil || !errors.Is(err, ErrInvalidAPIResponse) || !errors.Is(err, want) {
+			if portal, err := client.CreatePortal(context.Background(), resource); portal != nil || !errors.Is(err, ErrInvalidAPIResponse) || !errors.Is(err, ErrAPIRequestOutcomeUnknown) || !errors.Is(err, want) {
 				t.Fatalf("unbound portal accepted: %v", err)
 			}
 		})
 	}
+}
+
+func TestCachedCredentialsCanceledWaiterDoesNotStartAnotherRefresh(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	provider := CredentialProviderFunc(func(ctx context.Context, req *http.Request) error {
+		if calls.Add(1) == 1 {
+			close(started)
+		}
+		select {
+		case <-release:
+			req.Header.Set("Authorization", "Bearer refreshed")
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	})
+	cached := CachedCredentials(provider, time.Minute)
+	first := newCredentialTestRequest(t)
+	done := make(chan error, 1)
+	go func() { done <- cached.Authorize(ctx, first) }()
+	select {
+	case <-started:
+	case <-ctx.Done():
+		t.Fatal("credential refresh did not start")
+	}
+	waitCtx, cancelWaiter := context.WithCancel(ctx)
+	defer cancelWaiter()
+	waiter := &observedCredentialWaitContext{Context: waitCtx, observed: make(chan struct{})}
+	waitResult := make(chan error, 1)
+	second := newCredentialTestRequest(t)
+	go func() { waitResult <- cached.Authorize(waiter, second) }()
+	select {
+	case <-waiter.observed:
+	case <-ctx.Done():
+		t.Fatal("second caller did not wait for the in-flight refresh")
+	}
+	cancelWaiter()
+	if err := <-waitResult; !errors.Is(err, context.Canceled) {
+		t.Fatalf("waiting Authorize = %v, want context.Canceled", err)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("refresh = %v", err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("provider calls = %d, want 1", calls.Load())
+	}
+	if first.Header.Get("Authorization") != "Bearer refreshed" {
+		t.Fatal("refresh did not authorize the first caller")
+	}
+}
+
+// Done is evaluated only after Authorize joins the in-flight refresh select.
+type observedCredentialWaitContext struct {
+	context.Context
+	observed chan struct{}
+	once     sync.Once
+}
+
+func (c *observedCredentialWaitContext) Done() <-chan struct{} {
+	c.once.Do(func() { close(c.observed) })
+	return c.Context.Done()
 }

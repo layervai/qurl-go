@@ -25,6 +25,8 @@ type storeConfig struct {
 	// kmsKeyID is the customer-managed KMS key id/ARN/alias used to encrypt the
 	// stored credential. Empty means the service default (AWS-managed) key.
 	kmsKeyID string
+	// verifyKMSKey opts into Secrets Manager key checks before writes.
+	verifyKMSKey bool
 	// tier is the SSM parameter tier applied by [ParameterStore] on every
 	// PutParameter. The zero value leaves Tier unset (the account's default tier
 	// configuration). Ignored by [SecretsManagerStore].
@@ -60,6 +62,16 @@ func WithKMSKeyID(keyID string) Option {
 	return func(c *storeConfig) {
 		c.kmsKeyID = strings.TrimSpace(keyID)
 	}
+}
+
+// WithVerifyKMSKey checks the live Secrets Manager key before each credential
+// write. It requires WithKMSKeyID with an exact key ARN (not an alias or key ID)
+// and a client implementing DescribeSecret, plus secretsmanager:DescribeSecret.
+// A mismatch, missing key, or failed check prevents the write. ParameterStore
+// ignores this option. This is a point-in-time check; enforce the intended key
+// with IAM/KMS policies against concurrent out-of-band key changes.
+func WithVerifyKMSKey() Option {
+	return func(c *storeConfig) { c.verifyKMSKey = true }
 }
 
 // WithParameterTier sets the SSM parameter tier [ParameterStore] applies on every

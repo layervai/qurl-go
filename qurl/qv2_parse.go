@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 )
 
 // Strict JSON parsing for qURL v2.
@@ -86,95 +85,37 @@ func parseSecret(raw []byte) (*Secret, error) {
 // caller can enforce required-field presence. It deliberately does not interpret
 // value types beyond null — type enforcement is the typed-unmarshal pass's job.
 func strictObjectWalk(raw []byte, allowed map[string]struct{}) (map[string]struct{}, error) {
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.UseNumber() // keep numbers exact during the walk; no float coercion
-
-	tok, err := dec.Token()
-	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrStrictParse, err)
+	if allowed == nil {
+		allowed = map[string]struct{}{}
 	}
-	if delim, ok := tok.(json.Delim); !ok || delim != '{' {
+	present, problem := walkJSONStructure(raw, jsonStructurePolicy{
+		requireObject: true, numbersAsText: true, rejectRootNull: true, allowedRootFields: allowed,
+		maxContainerDepth: -1, maxValueDepth: -1,
+	})
+	if problem == nil {
+		return present, nil
+	}
+	switch problem.kind {
+	case jsonStructureNotObject:
 		return nil, fmt.Errorf("%w: top-level value must be a JSON object", ErrStrictParse)
-	}
-
-	present := make(map[string]struct{})
-	for dec.More() {
-		keyTok, err := dec.Token()
-		if err != nil {
-			return nil, fmt.Errorf("%w: %w", ErrStrictParse, err)
+	case jsonStructureKey:
+		return nil, fmt.Errorf("%w: non-string object key", ErrStrictParse)
+	case jsonStructureUnknown:
+		return nil, fmt.Errorf("%w: unknown field %q", ErrStrictParse, problem.key)
+	case jsonStructureDuplicate:
+		return nil, fmt.Errorf("%w: duplicate key %q", ErrStrictParse, problem.key)
+	case jsonStructureNull:
+		return nil, fmt.Errorf("%w: field %q is null", ErrStrictParse, problem.key)
+	case jsonStructureTrailing:
+		if problem.more {
+			return nil, fmt.Errorf("%w: trailing data after JSON object", ErrStrictParse)
 		}
-		key, ok := keyTok.(string)
-		if !ok {
-			// json guarantees object keys are strings; defensive only.
-			return nil, fmt.Errorf("%w: non-string object key", ErrStrictParse)
-		}
-		if _, allow := allowed[key]; !allow {
-			return nil, fmt.Errorf("%w: unknown field %q", ErrStrictParse, key)
-		}
-		if _, dup := present[key]; dup {
-			return nil, fmt.Errorf("%w: duplicate key %q", ErrStrictParse, key)
-		}
-		present[key] = struct{}{}
-
-		if err := rejectNullValue(dec, key); err != nil {
-			return nil, err
-		}
-	}
-
-	// Consume the closing '}' and assert there is no trailing data (e.g. a second
-	// concatenated JSON value), which a lenient parser would ignore.
-	if _, err := dec.Token(); err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrStrictParse, err)
-	}
-	if dec.More() {
-		return nil, fmt.Errorf("%w: trailing data after JSON object", ErrStrictParse)
-	}
-	if _, err := dec.Token(); err != io.EOF {
 		return nil, fmt.Errorf("%w: unexpected trailing content", ErrStrictParse)
 	}
-
-	return present, nil
-}
-
-// rejectNullValue reads the next value for a key and rejects an explicit JSON
-// null, fully consuming nested arrays/objects so the decoder stays aligned for
-// the next key. Non-null values are accepted here and type-checked later.
-func rejectNullValue(dec *json.Decoder, key string) error {
-	valTok, err := dec.Token()
-	if err != nil {
-		return fmt.Errorf("%w: %w", ErrStrictParse, err)
+	if problem.cause != nil {
+		return nil, fmt.Errorf("%w: %w", ErrStrictParse, problem.cause)
 	}
-	if delim, ok := valTok.(json.Delim); ok && (delim == '[' || delim == '{') {
-		// Drain the nested container so the cursor lands on this key's sibling.
-		// A scalar-typed field carrying an array/object is rejected later by the
-		// typed unmarshal; the drain only keeps the walk well-formed.
-		return drainContainer(dec)
-	}
-	if valTok == nil {
-		return fmt.Errorf("%w: field %q is null", ErrStrictParse, key)
-	}
-	return nil
-}
-
-// drainContainer consumes tokens until the currently-open array/object is
-// balanced. The opening delimiter has already been read by the caller.
-func drainContainer(dec *json.Decoder) error {
-	depth := 1
-	for depth > 0 {
-		tok, err := dec.Token()
-		if err != nil {
-			return fmt.Errorf("%w: %w", ErrStrictParse, err)
-		}
-		if delim, ok := tok.(json.Delim); ok {
-			switch delim {
-			case '[', '{':
-				depth++
-			case ']', '}':
-				depth--
-			}
-		}
-	}
-	return nil
+	return nil, fmt.Errorf("%w: invalid JSON delimiter", ErrStrictParse)
 }
 
 // requireKeys returns ErrStrictParse if any required key is missing from present.

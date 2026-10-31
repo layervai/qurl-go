@@ -180,6 +180,31 @@ resource := client.ResourceByCRID(resourceCRID)
 portal, err := resource.CreatePortal(ctx, qurl.ValidFor(time.Hour))
 ```
 
+## Scope a Connector portal
+
+For an existing Connector resource, use `qurl.WithTargetPath("/view/report?mode=read")`
+with `Client.CreatePortal` or `resource.CreatePortal`. Omission means the bare
+origin. `CreatePortalForURL` rejects this option. LayerV enforces the tunnel-only
+resource boundary.
+
+The value must be a canonical ASCII path with an optional query, at most 2,048
+bytes. The SDK rejects authority changes, fragments, backslashes, controls, dot
+segments, interior empty segments, path percent escapes, and path `!()*;`.
+Well-formed query escapes remain byte-for-byte data; they are never decoded or
+normalized. The returned `Portal.TargetPath` reports the recorded scope, with
+nil for the bare origin. A missing or different requested scope fails with
+`ErrInvalidAPIResponse` and `ErrAPIRequestOutcomeUnknown`: the mint may already
+have committed, so do not blindly repeat it.
+
+The input contract is pinned by the 119 shared cases in
+[qurl-conformance v0.17.2](https://github.com/layervai/qurl-conformance/blob/v0.17.2/vectors/target_path_v1_vectors.json),
+SHA-256 `898e5bf24c825bbd57426fe799d71893951c5735b6cd15e9b95d436981b09a97`.
+The merged qurl-service OpenAPI baseline is commit
+`376752482f42b43630b9d0d5734ff3be1048e341`, file SHA-256
+`06e1a25319d0f696de40213b7578ccb9c93440f03fad5dbf7e37a32cbc295b35`.
+A complete Sandbox Connector journey must still prove that the scoped path
+opens after NHP admission while a sibling path and the direct origin fail.
+
 ## One-Call Convenience
 
 For a script or prototype where you want one API call, use:

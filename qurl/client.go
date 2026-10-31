@@ -125,6 +125,12 @@ var ErrInvalidResourceRequest = errors.New("qurl: invalid resource request")
 // sentinel.
 var ErrInvalidAPIResponse = errors.New("qurl: invalid API response")
 
+// ErrAPIRequestOutcomeUnknown means the API result could not be confirmed.
+// For a mutation, reconcile before retrying: a transport/body failure or a
+// surfaced 1xx, 3xx, or 5xx does not prove that the server rejected the write.
+// The underlying APIError or transport cause remains available through errors.As.
+var ErrAPIRequestOutcomeUnknown = errors.New("qurl: API request outcome unknown")
+
 // ErrInvalidPortalRequest is returned before an API request when a portal input
 // is invalid.
 var ErrInvalidPortalRequest = errors.New("qurl: invalid portal request")
@@ -427,10 +433,11 @@ func validateHeaderValueWithKind(value, label string, errKind error) error {
 // Client calls the LayerV qURL API. Protect a URL once with ProtectURL, then
 // mint portals for that resource with Resource.CreatePortal.
 type Client struct {
-	credentials CredentialProvider
-	baseURL     string
-	httpClient  HTTPDoer
-	registered  bool
+	maxResponseBodyBytes int
+	credentials          CredentialProvider
+	baseURL              string
+	httpClient           HTTPDoer
+	registered           bool
 }
 
 // ClientOption customizes a Client.
@@ -445,11 +452,12 @@ func (f clientOptionFunc) applyClientOption(o *clientOptions) error {
 }
 
 type clientOptions struct {
-	baseURL          string
-	httpClient       HTTPDoer
-	issuerStatePath  string
-	baseURLSource    clientOptionSource
-	httpClientSource clientOptionSource
+	maxResponseBodyBytes int
+	baseURL              string
+	httpClient           HTTPDoer
+	issuerStatePath      string
+	baseURLSource        clientOptionSource
+	httpClientSource     clientOptionSource
 }
 
 type clientOptionSource uint8
@@ -556,9 +564,10 @@ func NewClient(provider CredentialProvider, opts ...ClientOption) (*Client, erro
 		return nil, err
 	}
 	return &Client{
-		credentials: provider,
-		baseURL:     cfg.baseURL,
-		httpClient:  cfg.httpClient,
+		credentials:          provider,
+		baseURL:              cfg.baseURL,
+		httpClient:           cfg.httpClient,
+		maxResponseBodyBytes: cfg.maxResponseBodyBytes,
 	}, nil
 }
 
@@ -593,9 +602,10 @@ func OpenClientContext(ctx context.Context, opts ...ClientOption) (*Client, erro
 		return nil, err
 	}
 	client := &Client{
-		credentials: provider,
-		baseURL:     cfg.baseURL,
-		httpClient:  cfg.httpClient,
+		credentials:          provider,
+		baseURL:              cfg.baseURL,
+		httpClient:           cfg.httpClient,
+		maxResponseBodyBytes: cfg.maxResponseBodyBytes,
 	}
 	if err := validateCredentials(ctx, provider, client.baseURL); err != nil {
 		return nil, err
@@ -859,6 +869,8 @@ type Portal struct {
 	QURLID string
 	// Label is the token label, when returned by the API.
 	Label string
+	// TargetPath is the recorded Connector path scope; nil means bare origin.
+	TargetPath *string
 }
 
 // PortalOption customizes CreatePortal.
@@ -958,16 +970,13 @@ func WithSessionDuration(d time.Duration) PortalOption {
 }
 
 // WithTargetPath scopes a qURL for an existing tunnel resource to one path and
-// its descendants. The SDK rejects only empty and overlong values; LayerV owns
-// the path grammar and the tunnel-only resource gate. CreatePortalForURL
+// its descendants. The SDK requires a canonical ASCII path with optional query;
+// LayerV owns the tunnel-only resource gate. CreatePortalForURL
 // rejects this option because that API does not address an existing resource.
 func WithTargetPath(targetPath string) PortalOption {
 	return portalOptionFunc(func(o *portalOptions) error {
-		if targetPath == "" {
-			return fmt.Errorf("%w: target path must not be empty", ErrInvalidPortalRequest)
-		}
-		if len(targetPath) > maxTargetPathLength {
-			return fmt.Errorf("%w: target path must be %d bytes or fewer", ErrInvalidPortalRequest, maxTargetPathLength)
+		if !validPortalTargetPath(targetPath) {
+			return fmt.Errorf("%w: target path must be a canonical ASCII path with optional query and at most %d bytes", ErrInvalidPortalRequest, maxTargetPathLength)
 		}
 		o.targetPath = targetPath
 		return nil
@@ -1000,12 +1009,12 @@ func (c *Client) CreatePortal(ctx context.Context, resource *Resource, opts ...P
 		return nil, err
 	}
 	if env.Data.CRID == "" {
-		return nil, fmt.Errorf("%w: %w", ErrInvalidAPIResponse, ErrNoCRID)
+		return nil, invalidAPIResponseOutcome("portal response is missing CRID", ErrNoCRID)
 	}
 	if env.Data.CRID != resource.CRID {
-		return nil, fmt.Errorf("%w: %w: portal response CRID differs from request", ErrInvalidAPIResponse, ErrCRIDMismatch)
+		return nil, invalidAPIResponseOutcome("portal response CRID differs from request", ErrCRIDMismatch)
 	}
-	return env.Data.portal()
+	return env.Data.portal(reqBody.TargetPath)
 }
 
 // CreatePortal asks LayerV to mint a qURL link for this resource.
@@ -1044,7 +1053,7 @@ func (c *Client) CreatePortalForURL(ctx context.Context, targetURL string, opts 
 	if err := c.postJSON(ctx, "/v1/qurls", reqBody, &env); err != nil {
 		return nil, nil, err
 	}
-	portal, err := env.Data.portal()
+	portal, err := env.Data.portal("")
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1083,16 +1092,25 @@ func (c *Client) RevokePortal(ctx context.Context, resourceCRID, qurlID string) 
 	if err := crid.Validate(resourceCRID); err != nil {
 		return fmt.Errorf("%w: resource CRID must be valid: %w", ErrInvalidPortalRequest, err)
 	}
-	if strings.TrimSpace(qurlID) == "" {
-		return fmt.Errorf("%w: qurl id must not be empty", ErrInvalidPortalRequest)
+	if err := validateResourceItemID(qurlID, ErrInvalidPortalRequest); err != nil {
+		return err
 	}
 	path := "/v1/resources/" + url.PathEscape(resourceCRID) + "/qurls/" + url.PathEscape(qurlID)
-	if err := c.doNoContent(ctx, http.MethodDelete, path, http.StatusNoContent); err != nil {
+	if err := c.deleteNoContent(ctx, path); err != nil {
 		var apiErr *APIError
 		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusConflict && apiErr.Code == "revoked" {
 			return fmt.Errorf("%w: %w", ErrPortalRevoked, err)
 		}
 		return err
+	}
+	return nil
+}
+
+// Keep opaque IDs server-authoritative while excluding credentials and path navigation.
+func validateResourceItemID(id string, kind error) error {
+	value := strings.TrimSpace(id)
+	if value == "" || value == "." || value == ".." || strings.HasPrefix(value, "at_") {
+		return fmt.Errorf("%w: item id must be nonempty, must not be an access token, and must not be a dot segment", kind)
 	}
 	return nil
 }
@@ -1129,10 +1147,10 @@ type createResourceResponse struct {
 
 func (r createResourceResponse) resource() (*Resource, error) {
 	if !isValidConnectorResourceID(r.ID) {
-		return nil, fmt.Errorf("%w: missing or invalid resource public key", ErrInvalidAPIResponse)
+		return nil, invalidAPIResponseOutcome("missing or invalid resource public key", nil)
 	}
 	if !nativeConnectorCRIDMatches(r.CRID, r.ID) {
-		return nil, fmt.Errorf("%w: missing or invalid key-bound CRID", ErrInvalidAPIResponse)
+		return nil, invalidAPIResponseOutcome("missing or invalid key-bound CRID", nil)
 	}
 	return &Resource{
 		ResourcePublicKey: r.ID,
@@ -1170,24 +1188,37 @@ type createPortalForURLRequest struct {
 }
 
 type createPortalResponse struct {
-	ResourcePublicKey string     `json:"resource_id"`
-	CRID              string     `json:"crid"`
-	QURLLink          string     `json:"qurl_link"`
-	QURLSite          string     `json:"qurl_site"`
-	ExpiresAt         *time.Time `json:"expires_at"`
-	QURLID            string     `json:"qurl_id"`
-	Label             string     `json:"label"`
+	ResourcePublicKey string          `json:"resource_id"`
+	CRID              string          `json:"crid"`
+	QURLLink          string          `json:"qurl_link"`
+	QURLSite          string          `json:"qurl_site"`
+	ExpiresAt         *time.Time      `json:"expires_at"`
+	QURLID            string          `json:"qurl_id"`
+	Label             string          `json:"label"`
+	TargetPath        json.RawMessage `json:"target_path"`
 }
 
-func (r createPortalResponse) portal() (*Portal, error) {
+func (r createPortalResponse) portal(expectedTargetPath string) (*Portal, error) {
+	var recordedTargetPath *string
+	if len(r.TargetPath) == 0 {
+		if expectedTargetPath != "" {
+			return nil, invalidAPIResponseOutcome("mint response omitted the requested target path", nil)
+		}
+	} else {
+		var value string
+		if json.Unmarshal(r.TargetPath, &value) != nil || !validPortalTargetPath(value) || value != expectedTargetPath {
+			return nil, invalidAPIResponseOutcome("mint response target path differs from request", nil)
+		}
+		recordedTargetPath = &value
+	}
 	if !isValidConnectorResourceID(r.ResourcePublicKey) {
-		return nil, fmt.Errorf("%w: missing or invalid resource public key", ErrInvalidAPIResponse)
+		return nil, invalidAPIResponseOutcome("missing or invalid resource public key", nil)
 	}
 	if !nativeConnectorCRIDMatches(r.CRID, r.ResourcePublicKey) {
-		return nil, fmt.Errorf("%w: missing or invalid key-bound CRID", ErrInvalidAPIResponse)
+		return nil, invalidAPIResponseOutcome("missing or invalid key-bound CRID", nil)
 	}
 	if strings.TrimSpace(r.QURLLink) == "" {
-		return nil, fmt.Errorf("%w: missing qurl_link", ErrInvalidAPIResponse)
+		return nil, invalidAPIResponseOutcome("missing qurl_link", nil)
 	}
 	return &Portal{
 		ResourcePublicKey: r.ResourcePublicKey,
@@ -1197,6 +1228,7 @@ func (r createPortalResponse) portal() (*Portal, error) {
 		ExpiresAt:         r.ExpiresAt,
 		QURLID:            r.QURLID,
 		Label:             r.Label,
+		TargetPath:        recordedTargetPath,
 	}, nil
 }
 
@@ -1320,10 +1352,11 @@ func isLoopbackHost(host string) bool {
 // Every generic-surface endpoint is a POST; endpoints whose documented status
 // or empty body is part of their contract use doRequest instead.
 func (c *Client) postJSON(ctx context.Context, path string, body, out any) error {
-	return doAuthorizedJSON(ctx, c.httpClient, c.baseURL, c.credentials.Authorize, http.MethodPost, path, body, out)
+	return doAuthorizedJSON(ctx, c.httpClient, c.baseURL, c.credentials.Authorize, http.MethodPost, path, body, out, c.maxResponseBodyBytes)
 }
 
 func (c *Client) doRequest(ctx context.Context, method, path string, body any, contract apiResponseContract) error {
+	contract.maxResponseBodyBytes = c.maxResponseBodyBytes
 	return doAuthorizedRequest(ctx, c.httpClient, c.baseURL, c.credentials.Authorize, method, path, body, contract)
 }
 
@@ -1337,11 +1370,11 @@ func (c *Client) doJSONStatus(ctx context.Context, method, path string, body, ou
 	})
 }
 
-// doNoContent requires one exact successful status and a byte-empty body.
+// deleteNoContent requires HTTP 204 and a byte-empty body.
 // Whitespace is still protocol content and deliberately fails this contract.
-func (c *Client) doNoContent(ctx context.Context, method, path string, expectedStatus int) error {
-	return c.doRequest(ctx, method, path, nil, apiResponseContract{
-		expectedStatus: expectedStatus,
+func (c *Client) deleteNoContent(ctx context.Context, path string) error {
+	return c.doRequest(ctx, http.MethodDelete, path, nil, apiResponseContract{
+		expectedStatus: http.StatusNoContent,
 		bodyMode:       apiResponseBodyEmpty,
 	})
 }
@@ -1388,14 +1421,15 @@ type requestAuthorizer func(context.Context, *http.Request) error
 // 2xx status and body are accepted and ignored. Endpoint-specific callers that
 // require an exact JSON or no-content response use doAuthorizedRequest with an
 // explicit apiResponseContract instead.
-func doAuthorizedJSON(ctx context.Context, httpClient HTTPDoer, baseURL string, authorize requestAuthorizer, method, path string, body, out any) error {
+func doAuthorizedJSON(ctx context.Context, httpClient HTTPDoer, baseURL string, authorize requestAuthorizer, method, path string, body, out any, maxResponseBodyBytes int) error {
 	bodyMode := apiResponseBodyIgnored
 	if out != nil {
 		bodyMode = apiResponseBodyJSON
 	}
 	return doAuthorizedRequest(ctx, httpClient, baseURL, authorize, method, path, body, apiResponseContract{
-		bodyMode: bodyMode,
-		out:      out,
+		bodyMode:             bodyMode,
+		out:                  out,
+		maxResponseBodyBytes: maxResponseBodyBytes,
 	})
 }
 
@@ -1408,9 +1442,10 @@ const (
 )
 
 type apiResponseContract struct {
-	expectedStatus int
-	bodyMode       apiResponseBodyMode
-	out            any
+	maxResponseBodyBytes int
+	expectedStatus       int
+	bodyMode             apiResponseBodyMode
+	out                  any
 }
 
 func doAuthorizedRequest(ctx context.Context, httpClient HTTPDoer, baseURL string, authorize requestAuthorizer, method, path string, body any, contract apiResponseContract) error {
@@ -1452,9 +1487,17 @@ func doAuthorizedRequest(ctx context.Context, httpClient HTTPDoer, baseURL strin
 	defer func() {
 		_ = resp.Body.Close()
 	}()
-	defer drainResponseBody(resp.Body)
-
-	respBody, err := readCappedBody(resp.Body, maxAPIResponseBodyBytes, "API response body")
+	limit := contract.maxResponseBodyBytes
+	if limit == 0 {
+		limit = maxAPIResponseBodyBytes
+	}
+	var respBody []byte
+	if apiContentLengthExceedsLimit(resp, limit) {
+		err = &inputExceedsCapError{what: "API response body", limit: limit}
+	} else {
+		defer drainResponseBody(resp.Body)
+		respBody, err = readCappedBody(resp.Body, limit, "API response body")
+	}
 	if err != nil {
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			return &APIError{
@@ -1487,7 +1530,7 @@ func doAuthorizedRequest(ctx context.Context, httpClient HTTPDoer, baseURL strin
 			return invalidAPIResponseOutcome("API response body is not valid UTF-8", nil)
 		}
 		if err := json.Unmarshal(respBody, contract.out); err != nil {
-			return invalidAPIResponseOutcome("decode API response after successful status", err)
+			return invalidAPIResponseOutcome("decode API response after successful status", &apiResponseDecodeError{cause: err})
 		}
 		return nil
 	case apiResponseBodyEmpty:
@@ -1499,6 +1542,13 @@ func doAuthorizedRequest(ctx context.Context, httpClient HTTPDoer, baseURL strin
 		return invalidAPIResponseOutcome("unknown API response body contract", nil)
 	}
 }
+
+// Decoder errors (notably time.ParseError) can repeat private response values.
+// Keep the cause available to errors.As without printing its contents in logs.
+type apiResponseDecodeError struct{ cause error }
+
+func (e *apiResponseDecodeError) Error() string { return "response JSON does not match the API shape" }
+func (e *apiResponseDecodeError) Unwrap() error { return e.cause }
 
 func invalidAPIResponseOutcome(detail string, cause error) error {
 	if cause != nil {
@@ -1520,6 +1570,9 @@ type apiRequestOutcomeUnknownError struct {
 
 func (e *apiRequestOutcomeUnknownError) Error() string { return e.err.Error() }
 func (e *apiRequestOutcomeUnknownError) Unwrap() error { return e.err }
+func (e *apiRequestOutcomeUnknownError) Is(target error) bool {
+	return target == ErrAPIRequestOutcomeUnknown
+}
 
 // sdkUserAgent returns the cached SDK User-Agent header. The value is derived
 // from build info, which is fixed for the process lifetime, so it is computed
@@ -1608,6 +1661,13 @@ func (e *APIError) Unwrap() error {
 		return nil
 	}
 	return e.err
+}
+
+// Is exposes status-level ambiguity without changing the concrete APIError type.
+// Read callers may retry normally; mutation callers must reconcile first.
+func (e *APIError) Is(target error) bool {
+	return e != nil && target == ErrAPIRequestOutcomeUnknown &&
+		(e.StatusCode < http.StatusBadRequest || e.StatusCode >= http.StatusInternalServerError)
 }
 
 func apiErrorFromResponse(status int, body []byte) error {

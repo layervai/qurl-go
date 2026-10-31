@@ -8,14 +8,8 @@ import (
 	"testing"
 )
 
-// Trust-anchor overlap (kid rotation) is verified HERE, in qv2, because the
-// verify path and the local test signer both live in this package — the
-// qurl-layer provider only passes a *TrustStore through, so the rotation
-// PROPERTY is a qv2 concern. qURL v2 issuer-key rotation is overlap-publish: the
-// trust store carries BOTH the outgoing and incoming kid for a window, so a link
-// signed under EITHER kid keeps verifying until the old kid is retired. This
-// re-mints under two distinct kids rather than reusing the single-kid vendored
-// vector, which cannot exercise an overlap.
+// Issuer-key rotation overlaps the old and new trust anchors. Re-mint under
+// distinct kids: the shared single-kid conformance vector cannot test overlap.
 
 // newTestSignerWithKID generates a fresh local P-256 issuer key under an explicit
 // kid, so a test can build a multi-kid (overlap) trust store. It mirrors

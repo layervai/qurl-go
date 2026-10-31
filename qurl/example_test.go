@@ -135,7 +135,8 @@ func ExampleClient_CreatePortal() {
 		panic(err)
 	}
 
-	fmt.Println(portal.Link)
+	// A scoped mint returns this exact recorded path.
+	fmt.Println(portal.Link, *portal.TargetPath)
 }
 
 func ExampleClient_RevokePortal() {
@@ -621,4 +622,13 @@ func ExampleClient_UpdatePreview() {
 	if err != nil {
 		panic(err)
 	}
+}
+
+func ExampleWithMaxResponseBodyBytes() {
+	client, err := qurl.NewClient(qurl.BearerToken("lv_example"), qurl.WithMaxResponseBodyBytes(16<<20))
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(client != nil)
+	// Output: true
 }

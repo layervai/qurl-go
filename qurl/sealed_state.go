@@ -589,63 +589,32 @@ func decodeSealedAgentStateEnvelope(raw []byte, envelope *sealedAgentStateEnvelo
 }
 
 func rejectDuplicateJSONFields(raw []byte) error {
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	if err := consumeUniqueJSONValue(decoder, 0); err != nil {
-		return err
-	}
-	return requireJSONEOF(decoder)
-}
-
-func consumeUniqueJSONValue(decoder *json.Decoder, depth int) error {
-	if depth > maxSealedEnvelopeJSONDepth {
-		return errSealedJSONNesting
-	}
-	token, err := decoder.Token()
-	if err != nil {
-		return err
-	}
-	delim, ok := token.(json.Delim)
-	if !ok {
+	_, problem := walkJSONStructure(raw, jsonStructurePolicy{
+		maxContainerDepth: -1, maxValueDepth: maxSealedEnvelopeJSONDepth,
+	})
+	if problem == nil {
 		return nil
 	}
-	switch delim {
-	case '{':
-		seen := make(map[string]struct{})
-		for decoder.More() {
-			keyToken, err := decoder.Token()
-			if err != nil {
-				return err
-			}
-			key, ok := keyToken.(string)
-			if !ok {
-				return errors.New("JSON object key is not a string")
-			}
-			if _, exists := seen[key]; exists {
-				return fmt.Errorf("%w %q", errDuplicateSealedJSONField, key)
-			}
-			seen[key] = struct{}{}
-			if err := consumeUniqueJSONValue(decoder, depth+1); err != nil {
-				return err
-			}
-		}
-		end, err := decoder.Token()
-		if err != nil || end != json.Delim('}') {
-			return errors.New("unterminated JSON object")
-		}
-	case '[':
-		for decoder.More() {
-			if err := consumeUniqueJSONValue(decoder, depth+1); err != nil {
-				return err
-			}
-		}
-		end, err := decoder.Token()
-		if err != nil || end != json.Delim(']') {
-			return errors.New("unterminated JSON array")
-		}
-	default:
+	switch problem.kind {
+	case jsonStructureDepth:
+		return errSealedJSONNesting
+	case jsonStructureDuplicate:
+		return fmt.Errorf("%w %q", errDuplicateSealedJSONField, problem.key)
+	case jsonStructureKey:
+		return errors.New("JSON object key is not a string")
+	case jsonStructureObjectEnd:
+		return errors.New("unterminated JSON object")
+	case jsonStructureArrayEnd:
+		return errors.New("unterminated JSON array")
+	case jsonStructureDelimiter:
 		return errors.New("invalid JSON delimiter")
+	case jsonStructureTrailing:
+		return errors.New("expected end of JSON input")
 	}
-	return nil
+	if problem.cause != nil {
+		return problem.cause
+	}
+	return problem
 }
 
 func validateWrappedAgentStateKey(wrapped WrappedAgentStateKey) error {
@@ -696,14 +665,6 @@ func canonicalizeRawJSON(raw json.RawMessage) (json.RawMessage, error) {
 		return nil, err
 	}
 	return canonical, nil
-}
-
-func requireJSONEOF(decoder *json.Decoder) error {
-	var extra any
-	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
-		return errors.New("expected end of JSON input")
-	}
-	return nil
 }
 
 func invalidSealedState(reason string) error {
