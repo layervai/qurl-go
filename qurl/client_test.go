@@ -1579,8 +1579,9 @@ func TestCachedCredentialsCanceledWaiterDoesNotStartAnotherRefresh(t *testing.T)
 	release := make(chan struct{})
 	var calls atomic.Int32
 	provider := CredentialProviderFunc(func(ctx context.Context, req *http.Request) error {
-		calls.Add(1)
-		close(started)
+		if calls.Add(1) == 1 {
+			close(started)
+		}
 		select {
 		case <-release:
 			req.Header.Set("Authorization", "Bearer refreshed")
@@ -1602,7 +1603,8 @@ func TestCachedCredentialsCanceledWaiterDoesNotStartAnotherRefresh(t *testing.T)
 	defer cancelWaiter()
 	waiter := &observedCredentialWaitContext{Context: waitCtx, observed: make(chan struct{})}
 	waitResult := make(chan error, 1)
-	go func() { waitResult <- cached.Authorize(waiter, newCredentialTestRequest(t)) }()
+	second := newCredentialTestRequest(t)
+	go func() { waitResult <- cached.Authorize(waiter, second) }()
 	select {
 	case <-waiter.observed:
 	case <-ctx.Done():

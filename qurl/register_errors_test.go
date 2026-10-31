@@ -198,7 +198,7 @@ func TestNativeRegisterSharedErrorsAreKeyKindIndependent(t *testing.T) {
 		{rakRegistrationOff, ErrRegistrationDisabled},
 		{rakInvalidInput, ErrRegistrationInvalidInput},
 	} {
-		for _, kind := range []string{keyKindAccount, keyKindBootstrap} {
+		for _, kind := range []string{keyKindAccount, keyKindBootstrap, string(RegistrationKeyKindConnectorBootstrap)} {
 			t.Run(tc.code+"/"+kind, func(t *testing.T) {
 				err := classifyNativeRegisterError(&registerAckBody{ErrCode: tc.code}, kind)
 				if !errors.Is(err, tc.want) {
