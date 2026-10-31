@@ -38,6 +38,10 @@ func (e *ServerDenyError) Error() string {
 
 // serverKnockAckMsg is the subset of the qURL platform reply the resolve path reads.
 type serverKnockAckMsg struct {
+	CellID            string           `json:"cellId"`
+	IssuedAt          json.RawMessage  `json:"sessIssuedAtMillis"`
+	RunID             string           `json:"runId"`
+	RunAttempt        json.RawMessage  `json:"runAttempt"`
 	ErrCode           string           `json:"errCode"`
 	SessionID         nhpSessionIDJSON `json:"sessId"`
 	OpenTime          nhpOpenTimeJSON  `json:"opnTime"`

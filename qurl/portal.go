@@ -31,6 +31,10 @@ import (
 // install a Provider once and call EnterPortal; Config is the explicit seam for
 // tests and advanced clients.
 type Config struct {
+	// RetainNativeSessionForCleanup keeps the original key in the returned handle
+	// for explicit RetireSession calls. Leave false unless the caller owns cleanup.
+	RetainNativeSessionForCleanup bool
+
 	// TrustStore resolves trusted issuer keys. REQUIRED.
 	TrustStore *TrustStore
 	// Cells maps cell id to native NHP UDP endpoint. When the verified link names
@@ -71,6 +75,7 @@ type ResourceHandle struct {
 	// authProviderToken is the signed qurl_vsession value from the authenticated
 	// NHP ACK. Keep it private so ordinary formatting and JSON cannot expose it.
 	authProviderToken string
+	retirement        *portalRetirement
 }
 
 const qurlVsessionCookieName = "qurl_vsession"
@@ -323,7 +328,23 @@ func EnterPortalWith(ctx context.Context, qurlLink string, cfg Config) (*Resourc
 		return nil, normalizeRelayError(err, ErrMalformedReply)
 	}
 
-	return interpretReply(reply)
+	handle, err := interpretReply(reply)
+	if err != nil || !cfg.RetainNativeSessionForCleanup {
+		return handle, err
+	}
+	ack, err := parseAck(reply.Body)
+	if err != nil {
+		return nil, err
+	}
+	r, err := newPortalRetirement(ack, devicePriv, cellPub, claims.RelayURL, cfg.HTTPClient)
+	if err != nil {
+		return nil, err
+	}
+	if useNativeUDP {
+		r.endpoint = &nativeudp.Endpoint{Host: cellEndpoint.Host, Port: cellEndpoint.Port, ServerStaticPub: append([]byte(nil), cellPub...)}
+	}
+	handle.retirement = r
+	return handle, nil
 }
 
 // Compile-time guard: the public platform error wrapper must stay
