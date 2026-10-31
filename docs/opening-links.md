@@ -1009,7 +1009,6 @@ does not retain any of the other embedded defaults.
 The initial production values were verified against the production deployment
 on 2026-09-15.
 
-
 ## Discovery trust policy
 
 Use the shipped deployment or explicit cell configuration for native opens.

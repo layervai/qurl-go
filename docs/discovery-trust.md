@@ -74,7 +74,8 @@ and the authenticated manifest's `not_after`; it must not turn a fetch failure
 into permission to use expired trust material.
 
 The signed accept path, configured-anchor precedence, unknown keys, expiry,
-rotation/downgrade behavior, and concurrent floor updates have executable
+signing-key overlap/retirement, downgrade rejection, and race-clean concurrent
+resolves have executable
 coverage in `qurl/discovery_test.go`. Global-mutating test fixtures reject
 parallel use through Go testing's own guard. The rest of the package can keep
 parallel tests; a package-wide ban is not needed.
