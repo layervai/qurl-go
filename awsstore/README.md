@@ -115,6 +115,19 @@ client, binding, err := qurl.ConnectAgentRuntime(ctx, store,
 > save, or precreate the secret with the desired key, to guarantee the credential
 > is CMK-encrypted.
 
+To check an existing secret before each write, also pass `WithVerifyKMSKey()`
+and set `WithKMSKeyID` to the exact key ARN (not an alias or key ID). Grant
+`secretsmanager:DescribeSecret` on the same secret. Custom clients must implement
+`DescribeSecret`; the existing `SecretsManagerAPI` interface stays unchanged.
+A different or missing key, denied lookup, or malformed response prevents the
+write. A new secret is created with the configured key; a concurrent create
+winner is checked before any fallback write. Loads do not perform this check.
+
+This is a point-in-time check. Secrets Manager has no conditional key match on
+`PutSecretValue`. Use IAM/KMS policies to enforce the key against concurrent
+out-of-band changes; this option does not re-key a secret. Without the option,
+there is no added request or IAM requirement.
+
 > **CloudTrail note:** the first-ever Save is *put-first*, so it emits one benign
 > `ResourceNotFoundException` on `PutSecretValue` in CloudTrail immediately before
 > the `CreateSecret` that materializes the secret — harmless and one-time per
