@@ -373,7 +373,7 @@ func (c *Client) DeleteConnectorResource(ctx context.Context, resourceCRID strin
 		return err
 	}
 	path := "/v1/resources/" + url.PathEscape(resourceCRID)
-	if err := c.doNoContent(ctx, http.MethodDelete, path, http.StatusNoContent); err != nil {
+	if err := c.deleteNoContent(ctx, path); err != nil {
 		return classifyConnectorResourceError(connectorResourceOperationDelete, err)
 	}
 	return nil
