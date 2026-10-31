@@ -865,6 +865,8 @@ type Portal struct {
 	QURLID string
 	// Label is the token label, when returned by the API.
 	Label string
+	// TargetPath is the recorded Connector path scope; nil means bare origin.
+	TargetPath *string
 }
 
 // PortalOption customizes CreatePortal.
@@ -964,16 +966,13 @@ func WithSessionDuration(d time.Duration) PortalOption {
 }
 
 // WithTargetPath scopes a qURL for an existing tunnel resource to one path and
-// its descendants. The SDK rejects only empty and overlong values; LayerV owns
-// the path grammar and the tunnel-only resource gate. CreatePortalForURL
+// its descendants. The SDK requires a canonical ASCII path with optional query;
+// LayerV owns the tunnel-only resource gate. CreatePortalForURL
 // rejects this option because that API does not address an existing resource.
 func WithTargetPath(targetPath string) PortalOption {
 	return portalOptionFunc(func(o *portalOptions) error {
-		if targetPath == "" {
-			return fmt.Errorf("%w: target path must not be empty", ErrInvalidPortalRequest)
-		}
-		if len(targetPath) > maxTargetPathLength {
-			return fmt.Errorf("%w: target path must be %d bytes or fewer", ErrInvalidPortalRequest, maxTargetPathLength)
+		if !validPortalTargetPath(targetPath) {
+			return fmt.Errorf("%w: target path must be a canonical ASCII path with optional query and at most %d bytes", ErrInvalidPortalRequest, maxTargetPathLength)
 		}
 		o.targetPath = targetPath
 		return nil
@@ -1011,7 +1010,7 @@ func (c *Client) CreatePortal(ctx context.Context, resource *Resource, opts ...P
 	if env.Data.CRID != resource.CRID {
 		return nil, fmt.Errorf("%w: %w: portal response CRID differs from request", ErrInvalidAPIResponse, ErrCRIDMismatch)
 	}
-	return env.Data.portal()
+	return env.Data.portal(reqBody.TargetPath)
 }
 
 // CreatePortal asks LayerV to mint a qURL link for this resource.
@@ -1050,7 +1049,7 @@ func (c *Client) CreatePortalForURL(ctx context.Context, targetURL string, opts 
 	if err := c.postJSON(ctx, "/v1/qurls", reqBody, &env); err != nil {
 		return nil, nil, err
 	}
-	portal, err := env.Data.portal()
+	portal, err := env.Data.portal("")
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1192,9 +1191,17 @@ type createPortalResponse struct {
 	ExpiresAt         *time.Time `json:"expires_at"`
 	QURLID            string     `json:"qurl_id"`
 	Label             string     `json:"label"`
+	TargetPath        *string    `json:"target_path"`
 }
 
-func (r createPortalResponse) portal() (*Portal, error) {
+func (r createPortalResponse) portal(expectedTargetPath string) (*Portal, error) {
+	if r.TargetPath == nil {
+		if expectedTargetPath != "" {
+			return nil, invalidAPIResponseOutcome("mint response omitted the requested target path", nil)
+		}
+	} else if !validPortalTargetPath(*r.TargetPath) || *r.TargetPath != expectedTargetPath {
+		return nil, invalidAPIResponseOutcome("mint response target path differs from request", nil)
+	}
 	if !isValidConnectorResourceID(r.ResourcePublicKey) {
 		return nil, fmt.Errorf("%w: missing or invalid resource public key", ErrInvalidAPIResponse)
 	}
@@ -1212,6 +1219,7 @@ func (r createPortalResponse) portal() (*Portal, error) {
 		ExpiresAt:         r.ExpiresAt,
 		QURLID:            r.QURLID,
 		Label:             r.Label,
+		TargetPath:        r.TargetPath,
 	}, nil
 }
 
