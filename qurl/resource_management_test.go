@@ -190,8 +190,7 @@ type managementCall struct {
 	call func(*Client) error
 }
 
-func managementCalls() []managementCall {
-	ctx := context.Background()
+func managementCalls(ctx context.Context) []managementCall {
 	description := "updated"
 	return []managementCall{
 		{"list resources", func(c *Client) error { _, err := c.ListResources(ctx, ResourceListOptions{}); return err }},
@@ -210,7 +209,7 @@ func managementCalls() []managementCall {
 
 func TestManagementRejectsNilClientsAndWrongSuccessStatuses(t *testing.T) {
 	t.Parallel()
-	for _, tc := range managementCalls() {
+	for _, tc := range managementCalls(context.Background()) {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := tc.call(nil); !errors.Is(err, ErrInvalidClientConfig) {
 				t.Fatalf("nil client = %v", err)
@@ -382,5 +381,63 @@ func TestManagedResourceJSONDoesNotGainFields(t *testing.T) {
 	}
 	if !reflect.DeepEqual(before, after) {
 		t.Fatalf("round trip changed redacted shape: %s", encoded)
+	}
+}
+
+func TestManagementMutationsKeepOutcomeUnknown(t *testing.T) {
+	t.Parallel()
+	description := "updated"
+	for _, tc := range []struct {
+		name, body string
+		update     bool
+	}{
+		{"update missing", `{}`, true},
+		{"update wrong identity", fmt.Sprintf(`{"data":{"resource_id":%q}}`, testOtherConnectorID), true},
+		{"termination missing count", `{"data":{}}`, false},
+		{"termination broken pagination", `{"data":{"terminated":1},"meta":{"has_more":true}}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls int
+			client, err := NewClient(BearerToken("lv_fixture"), WithHTTPClient(doerFunc(func(*http.Request) (*http.Response, error) {
+				calls++
+				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(tc.body))}, nil
+			})))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.update {
+				_, err = client.UpdateResource(context.Background(), testConnectorCRID, ResourceUpdate{Description: &description})
+			} else {
+				_, err = client.TerminateSessions(context.Background(), testConnectorCRID, "")
+			}
+			var unknown *apiRequestOutcomeUnknownError
+			if !errors.Is(err, ErrInvalidAPIResponse) || !errors.As(err, &unknown) || calls != 1 {
+				t.Fatalf("post-commit error = %v, calls = %d; want outcome unknown without replay", err, calls)
+			}
+		})
+	}
+}
+
+func TestManagementHonorsCancelledContext(t *testing.T) {
+	t.Parallel()
+	var calls atomic.Int32
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer api.Close()
+	client, err := NewClient(BearerToken("lv_fixture"), WithBaseURL(api.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	for _, tc := range managementCalls(ctx) {
+		if err := tc.call(client); !errors.Is(err, context.Canceled) {
+			t.Errorf("%s = %v", tc.name, err)
+		}
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("cancelled calls reached server: %d", calls.Load())
 	}
 }
