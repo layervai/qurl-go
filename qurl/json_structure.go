@@ -3,7 +3,6 @@ package qurl
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"io"
 )
 
@@ -13,7 +12,6 @@ type jsonStructurePolicy struct {
 	numbersAsText     bool
 	maxContainerDepth int
 	maxValueDepth     int
-	deepDuplicates    bool
 	rejectRootNull    bool
 	allowedRootFields map[string]struct{}
 }
@@ -52,9 +50,6 @@ type jsonStructureWalker struct {
 // walkJSONStructure owns token traversal only. Callers retain typed decoding,
 // required-field checks, and their existing error vocabularies.
 func walkJSONStructure(raw []byte, policy jsonStructurePolicy) (map[string]struct{}, *jsonStructureError) {
-	if policy.deepDuplicates && policy.maxContainerDepth < 0 && policy.maxValueDepth < 0 {
-		return nil, &jsonStructureError{kind: jsonStructureSyntax, cause: errors.New("duplicate JSON traversal requires a depth limit")}
-	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	if policy.numbersAsText {
 		decoder.UseNumber()
@@ -92,9 +87,8 @@ func (w *jsonStructureWalker) value(depth int, key string) (map[string]struct{},
 	if w.policy.maxContainerDepth >= 0 && depth > w.policy.maxContainerDepth {
 		return nil, &jsonStructureError{kind: jsonStructureDepth}
 	}
-	// qv2 fields are scalar-typed. Drain nested values without recursive maps;
-	// the later typed decode rejects them, as in the original qv2 parser.
-	if depth > 0 && (delimiter == '{' || delimiter == '[') && !w.policy.deepDuplicates && w.policy.maxContainerDepth < 0 && w.policy.maxValueDepth < 0 {
+	// Unbounded profiles drain nested values iteratively; recursion always has a limit.
+	if depth > 0 && (delimiter == '{' || delimiter == '[') && w.policy.maxContainerDepth < 0 && w.policy.maxValueDepth < 0 {
 		return nil, w.drainContainer()
 	}
 	switch delimiter {
@@ -117,10 +111,7 @@ func (w *jsonStructureWalker) value(depth int, key string) (map[string]struct{},
 }
 
 func (w *jsonStructureWalker) object(depth int) (map[string]struct{}, *jsonStructureError) {
-	var seen map[string]struct{}
-	if depth == 0 || w.policy.deepDuplicates {
-		seen = make(map[string]struct{})
-	}
+	seen := make(map[string]struct{})
 	for w.decoder.More() {
 		token, err := w.decoder.Token()
 		if err != nil {
@@ -135,12 +126,10 @@ func (w *jsonStructureWalker) object(depth int) (map[string]struct{}, *jsonStruc
 				return nil, &jsonStructureError{kind: jsonStructureUnknown, key: key}
 			}
 		}
-		if seen != nil {
-			if _, duplicate := seen[key]; duplicate {
-				return nil, &jsonStructureError{kind: jsonStructureDuplicate, key: key}
-			}
-			seen[key] = struct{}{}
+		if _, duplicate := seen[key]; duplicate {
+			return nil, &jsonStructureError{kind: jsonStructureDuplicate, key: key}
 		}
+		seen[key] = struct{}{}
 		if _, err := w.value(depth+1, key); err != nil {
 			return nil, err
 		}

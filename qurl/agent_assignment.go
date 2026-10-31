@@ -1217,7 +1217,7 @@ func exactObjectFields(raw []byte) (map[string]json.RawMessage, error) {
 		return nil, errors.New("JSON is not valid UTF-8")
 	}
 	_, problem := walkJSONStructure(raw, jsonStructurePolicy{
-		requireObject: true, numbersAsText: true, deepDuplicates: true,
+		requireObject: true, numbersAsText: true,
 		maxContainerDepth: maxAssignmentJSONDepth - 1, maxValueDepth: -1,
 	})
 	if problem != nil {

@@ -590,7 +590,7 @@ func decodeSealedAgentStateEnvelope(raw []byte, envelope *sealedAgentStateEnvelo
 
 func rejectDuplicateJSONFields(raw []byte) error {
 	_, problem := walkJSONStructure(raw, jsonStructurePolicy{
-		deepDuplicates: true, maxContainerDepth: -1, maxValueDepth: maxSealedEnvelopeJSONDepth,
+		maxContainerDepth: -1, maxValueDepth: maxSealedEnvelopeJSONDepth,
 	})
 	if problem == nil {
 		return nil

@@ -1,7 +1,6 @@
 package qurl
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -20,56 +19,56 @@ func TestStrictJSONProfiles(t *testing.T) {
 		raw             string
 		accept          [3]bool // assignment, sealed state, qv2 structural pass
 		sealedDuplicate bool
+		wantErrors      [3]string
 		sealedDepth     bool
 	}{
-		{name: "empty"},
-		{name: "whitespace", raw: " \n\t"},
+		{name: "empty", wantErrors: [3]string{"EOF", "EOF", "qurl: strict parse failed: EOF"}},
+		{name: "whitespace", raw: " \n\t", wantErrors: [3]string{"EOF", "EOF", "qurl: strict parse failed: EOF"}},
 		{name: "empty object", raw: `{}`, accept: [3]bool{true, true, true}},
-		{name: "scalar", raw: `1`, accept: [3]bool{false, true, false}},
-		{name: "array", raw: `[]`, accept: [3]bool{false, true, false}},
-		{name: "top null", raw: `null`, accept: [3]bool{false, true, false}},
+		{name: "scalar", raw: `1`, accept: [3]bool{false, true, false}, wantErrors: [3]string{"top-level value must be an object", "", "qurl: strict parse failed: top-level value must be a JSON object"}},
+		{name: "array", raw: `[]`, accept: [3]bool{false, true, false}, wantErrors: [3]string{"top-level value must be an object", "", "qurl: strict parse failed: top-level value must be a JSON object"}},
+		{name: "top null", raw: `null`, accept: [3]bool{false, true, false}, wantErrors: [3]string{"top-level value must be an object", "", "qurl: strict parse failed: top-level value must be a JSON object"}},
 		{name: "known field", raw: `{"a":1}`, accept: [3]bool{true, true, true}},
 		{name: "raw lexemes", raw: `{ "a": 1e02, "b": [ 1 , 2 ] }`, accept: [3]bool{true, true, true}},
-		{name: "unknown root field", raw: `{"c":1}`, accept: [3]bool{true, true, false}},
-		{name: "top duplicate", raw: `{"a":1,"a":2}`, sealedDuplicate: true},
-		{name: "escaped duplicate", raw: `{"a":1,"\u0061":2}`, sealedDuplicate: true},
-		{name: "nested duplicate", raw: `{"a":{"b":1,"b":2}}`, accept: [3]bool{false, false, true}, sealedDuplicate: true},
-		{name: "array duplicate", raw: `{"a":[{"b":1,"b":2}]}`, accept: [3]bool{false, false, true}, sealedDuplicate: true},
-		{name: "root field null", raw: `{"a":null}`, accept: [3]bool{true, true, false}},
+		{name: "unknown root field", raw: `{"c":1}`, accept: [3]bool{true, true, false}, wantErrors: [3]string{"", "", "qurl: strict parse failed: unknown field \"c\""}},
+		{name: "top duplicate", raw: `{"a":1,"a":2}`, sealedDuplicate: true, wantErrors: [3]string{"duplicate field \"a\"", "duplicate sealed envelope JSON field \"a\"", "qurl: strict parse failed: duplicate key \"a\""}},
+		{name: "escaped duplicate", raw: `{"a":1,"\u0061":2}`, sealedDuplicate: true, wantErrors: [3]string{"duplicate field \"a\"", "duplicate sealed envelope JSON field \"a\"", "qurl: strict parse failed: duplicate key \"a\""}},
+		{name: "nested duplicate", raw: `{"a":{"b":1,"b":2}}`, accept: [3]bool{false, false, true}, sealedDuplicate: true, wantErrors: [3]string{"duplicate field \"b\"", "duplicate sealed envelope JSON field \"b\"", ""}},
+		{name: "array duplicate", raw: `{"a":[{"b":1,"b":2}]}`, accept: [3]bool{false, false, true}, sealedDuplicate: true, wantErrors: [3]string{"duplicate field \"b\"", "duplicate sealed envelope JSON field \"b\"", ""}},
+		{name: "root field null", raw: `{"a":null}`, accept: [3]bool{true, true, false}, wantErrors: [3]string{"", "", "qurl: strict parse failed: field \"a\" is null"}},
 		{name: "nested null", raw: `{"a":{"b":null}}`, accept: [3]bool{true, true, true}},
-		{name: "truncated object", raw: `{"a":`},
-		{name: "missing object close", raw: `{"a":1`},
-		{name: "missing array close", raw: `{"a":[1`},
-		{name: "truncated array", raw: `{"a":[`},
-		{name: "wrong closing token", raw: `{"a":[1,}`},
-		{name: "trailing object", raw: `{} {}`},
-		{name: "trailing scalar", raw: `{} true`},
-		{name: "trailing closing token", raw: `{} }`},
-		{name: "trailing malformed token", raw: `{} ?`},
-		{name: "exact large number", raw: `{"a":1e9999}`, accept: [3]bool{true, false, true}},
-		{name: "invalid UTF8 value", raw: "{\"a\":\"\xff\"}", accept: [3]bool{false, true, true}},
+		{name: "truncated object", raw: `{"a":`, wantErrors: [3]string{"EOF", "EOF", "qurl: strict parse failed: EOF"}},
+		{name: "missing object close", raw: `{"a":1`, wantErrors: [3]string{"EOF", "unterminated JSON object", "qurl: strict parse failed: EOF"}},
+		{name: "missing array close", raw: `{"a":[1`, wantErrors: [3]string{"EOF", "unterminated JSON array", "qurl: strict parse failed: EOF"}},
+		{name: "truncated array", raw: `{"a":[`, wantErrors: [3]string{"EOF", "unterminated JSON array", "qurl: strict parse failed: EOF"}},
+		{name: "wrong closing token", raw: `{"a":[1,}`, wantErrors: [3]string{"invalid character '}' looking for beginning of value", "invalid character '}' looking for beginning of value", "qurl: strict parse failed: invalid character '}' looking for beginning of value"}},
+		{name: "trailing object", raw: `{} {}`, wantErrors: [3]string{"trailing JSON value", "expected end of JSON input", "qurl: strict parse failed: trailing data after JSON object"}},
+		{name: "trailing scalar", raw: `{} true`, wantErrors: [3]string{"trailing JSON value", "expected end of JSON input", "qurl: strict parse failed: trailing data after JSON object"}},
+		{name: "trailing closing token", raw: `{} }`, wantErrors: [3]string{"trailing JSON value", "expected end of JSON input", "qurl: strict parse failed: unexpected trailing content"}},
+		{name: "trailing malformed token", raw: `{} ?`, wantErrors: [3]string{"trailing JSON value", "expected end of JSON input", "qurl: strict parse failed: trailing data after JSON object"}},
+		{name: "exact large number", raw: `{"a":1e9999}`, accept: [3]bool{true, false, true}, wantErrors: [3]string{"", "json: cannot unmarshal number 1e9999 into Go value of type float64", ""}},
+		{name: "invalid UTF8 value", raw: "{\"a\":\"\xff\"}", accept: [3]bool{false, true, true}, wantErrors: [3]string{"JSON is not valid UTF-8", "", ""}},
 		{name: "sealed last empty container", raw: nested(`{}`, 32), accept: [3]bool{true, true, true}},
-		{name: "sealed container too deep", raw: nested(`{}`, 33), accept: [3]bool{true, false, true}, sealedDepth: true},
+		{name: "sealed container too deep", raw: nested(`{}`, 33), accept: [3]bool{true, false, true}, sealedDepth: true, wantErrors: [3]string{"", "sealed envelope JSON nesting exceeds limit", ""}},
 		{name: "sealed last scalar", raw: nested(`0`, 32), accept: [3]bool{true, true, true}},
-		{name: "sealed scalar too deep", raw: nested(`0`, 33), accept: [3]bool{true, false, true}, sealedDepth: true},
-		{name: "assignment last container", raw: nested(`{}`, 63), accept: [3]bool{true, false, true}, sealedDepth: true},
-		{name: "assignment container too deep", raw: nested(`{}`, 64), accept: [3]bool{false, false, true}, sealedDepth: true},
-		{name: "assignment last scalar", raw: nested(`0`, 64), accept: [3]bool{true, false, true}, sealedDepth: true},
-		{name: "assignment scalar parent too deep", raw: nested(`0`, 65), accept: [3]bool{false, false, true}, sealedDepth: true},
+		{name: "sealed scalar too deep", raw: nested(`0`, 33), accept: [3]bool{true, false, true}, sealedDepth: true, wantErrors: [3]string{"", "sealed envelope JSON nesting exceeds limit", ""}},
+		{name: "assignment last container", raw: nested(`{}`, 63), accept: [3]bool{true, false, true}, sealedDepth: true, wantErrors: [3]string{"", "sealed envelope JSON nesting exceeds limit", ""}},
+		{name: "assignment container too deep", raw: nested(`{}`, 64), accept: [3]bool{false, false, true}, sealedDepth: true, wantErrors: [3]string{"JSON nesting exceeds 64 levels", "sealed envelope JSON nesting exceeds limit", ""}},
+		{name: "assignment last scalar", raw: nested(`0`, 64), accept: [3]bool{true, false, true}, sealedDepth: true, wantErrors: [3]string{"", "sealed envelope JSON nesting exceeds limit", ""}},
+		{name: "assignment scalar parent too deep", raw: nested(`0`, 65), accept: [3]bool{false, false, true}, sealedDepth: true, wantErrors: [3]string{"JSON nesting exceeds 64 levels", "sealed envelope JSON nesting exceeds limit", ""}},
 		{name: "sealed array last scalar", raw: arrays(31), accept: [3]bool{true, true, true}},
-		{name: "sealed array scalar too deep", raw: arrays(32), accept: [3]bool{true, false, true}, sealedDepth: true},
-		{name: "assignment last array", raw: arrays(63), accept: [3]bool{true, false, true}, sealedDepth: true},
-		{name: "assignment array too deep", raw: arrays(64), accept: [3]bool{false, false, true}, sealedDepth: true},
-		{name: "qv2 iterative nested drain", raw: arrays(2048), accept: [3]bool{false, false, true}, sealedDepth: true},
+		{name: "sealed array scalar too deep", raw: arrays(32), accept: [3]bool{true, false, true}, sealedDepth: true, wantErrors: [3]string{"", "sealed envelope JSON nesting exceeds limit", ""}},
+		{name: "assignment last array", raw: arrays(63), accept: [3]bool{true, false, true}, sealedDepth: true, wantErrors: [3]string{"", "sealed envelope JSON nesting exceeds limit", ""}},
+		{name: "assignment array too deep", raw: arrays(64), accept: [3]bool{false, false, true}, sealedDepth: true, wantErrors: [3]string{"JSON nesting exceeds 64 levels", "sealed envelope JSON nesting exceeds limit", ""}},
+		{name: "qv2 iterative nested drain", raw: arrays(2048), accept: [3]bool{false, false, true}, sealedDepth: true, wantErrors: [3]string{"JSON nesting exceeds 64 levels", "sealed envelope JSON nesting exceeds limit", ""}},
 	}
 	for _, tc := range tests {
 		for index, profile := range []string{"assignment", "sealed", "qv2"} {
 			t.Run(tc.name+"/"+profile, func(t *testing.T) {
-				var fields map[string]json.RawMessage
 				var err error
 				switch profile {
 				case "assignment":
-					fields, err = exactObjectFields([]byte(tc.raw))
+					_, err = exactObjectFields([]byte(tc.raw))
 				case "sealed":
 					err = rejectDuplicateJSONFields([]byte(tc.raw))
 				case "qv2":
@@ -88,16 +87,9 @@ func TestStrictJSONProfiles(t *testing.T) {
 				if err != nil {
 					message = err.Error()
 				}
-				record := struct {
-					Name, Profile, Error     string
-					Fields                   map[string]json.RawMessage
-					Duplicate, Depth, Strict bool
-				}{tc.name, profile, message, fields, duplicate, depth, strict}
-				encoded, encodeErr := json.Marshal(record)
-				if encodeErr != nil {
-					t.Fatal(encodeErr)
+				if message != tc.wantErrors[index] {
+					t.Fatalf("error text = %q, want %q", message, tc.wantErrors[index])
 				}
-				t.Logf("STRICT_JSON_PROFILE %s", encoded)
 			})
 		}
 	}
@@ -121,11 +113,12 @@ func TestStrictObjectWalkNilAllowlist(t *testing.T) {
 	}
 }
 
-func TestJSONStructureRejectsUnboundedDuplicateWalk(t *testing.T) {
-	_, problem := walkJSONStructure([]byte(`{}`), jsonStructurePolicy{
-		deepDuplicates: true, maxContainerDepth: -1, maxValueDepth: -1,
-	})
-	if problem == nil || problem.kind != jsonStructureSyntax || problem.cause == nil {
-		t.Fatalf("unbounded duplicate walk = %v, want policy error", problem)
+func TestAssignmentRawJSONLexemes(t *testing.T) {
+	fields, err := exactObjectFields([]byte(`{ "a": 1e02, "b": [ 1 , 2 ] }`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fields) != 2 || string(fields["a"]) != "1e02" || string(fields["b"]) != "[ 1 , 2 ]" {
+		t.Fatalf("raw field lexemes changed: %s / %s", fields["a"], fields["b"])
 	}
 }
