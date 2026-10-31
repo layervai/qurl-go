@@ -1540,10 +1540,10 @@ func TestClientCreateResponsesRejectMismatchedCRID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result, err := client.ProtectURL(context.Background(), "https://example.com"); result != nil || !errors.Is(err, ErrInvalidAPIResponse) {
+	if result, err := client.ProtectURL(context.Background(), "https://example.com"); result != nil || !errors.Is(err, ErrInvalidAPIResponse) || !errors.Is(err, ErrAPIRequestOutcomeUnknown) {
 		t.Fatalf("mismatched resource accepted: %v", err)
 	}
-	if portal, resource, err := client.CreatePortalForURL(context.Background(), "https://example.com"); resource != nil || portal != nil || !errors.Is(err, ErrInvalidAPIResponse) {
+	if portal, resource, err := client.CreatePortalForURL(context.Background(), "https://example.com"); resource != nil || portal != nil || !errors.Is(err, ErrInvalidAPIResponse) || !errors.Is(err, ErrAPIRequestOutcomeUnknown) {
 		t.Fatalf("mismatched portal accepted: %v", err)
 	}
 }
@@ -1565,7 +1565,7 @@ func TestClientCreatePortalRequiresRequestedCRID(t *testing.T) {
 			if responseCRID == "" {
 				want = ErrNoCRID
 			}
-			if portal, err := client.CreatePortal(context.Background(), resource); portal != nil || !errors.Is(err, ErrInvalidAPIResponse) || !errors.Is(err, want) {
+			if portal, err := client.CreatePortal(context.Background(), resource); portal != nil || !errors.Is(err, ErrInvalidAPIResponse) || !errors.Is(err, ErrAPIRequestOutcomeUnknown) || !errors.Is(err, want) {
 				t.Fatalf("unbound portal accepted: %v", err)
 			}
 		})

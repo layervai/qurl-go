@@ -98,6 +98,8 @@ func TestPortalTargetPathResponseMustMatchRequest(t *testing.T) {
 		{name: "different", field: `,"target_path":"/sibling"`, withPath: true},
 		{name: "noncanonical", field: `,"target_path":"/view/../file"`, withPath: true},
 		{name: "unexpected scope", field: `,"target_path":"/view/file"`},
+		{name: "unscoped null", field: `,"target_path":null`},
+		{name: "URL resource null", field: `,"target_path":null`, forURL: true},
 		{name: "URL resource scope", field: `,"target_path":"/view/file"`, forURL: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

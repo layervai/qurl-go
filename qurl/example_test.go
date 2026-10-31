@@ -135,7 +135,8 @@ func ExampleClient_CreatePortal() {
 		panic(err)
 	}
 
-	fmt.Println(portal.Link)
+	// A scoped mint returns this exact recorded path.
+	fmt.Println(portal.Link, *portal.TargetPath)
 }
 
 func ExampleClient_RevokePortal() {

@@ -1005,10 +1005,10 @@ func (c *Client) CreatePortal(ctx context.Context, resource *Resource, opts ...P
 		return nil, err
 	}
 	if env.Data.CRID == "" {
-		return nil, fmt.Errorf("%w: %w", ErrInvalidAPIResponse, ErrNoCRID)
+		return nil, invalidAPIResponseOutcome("portal response is missing CRID", ErrNoCRID)
 	}
 	if env.Data.CRID != resource.CRID {
-		return nil, fmt.Errorf("%w: %w: portal response CRID differs from request", ErrInvalidAPIResponse, ErrCRIDMismatch)
+		return nil, invalidAPIResponseOutcome("portal response CRID differs from request", ErrCRIDMismatch)
 	}
 	return env.Data.portal(reqBody.TargetPath)
 }
@@ -1143,10 +1143,10 @@ type createResourceResponse struct {
 
 func (r createResourceResponse) resource() (*Resource, error) {
 	if !isValidConnectorResourceID(r.ID) {
-		return nil, fmt.Errorf("%w: missing or invalid resource public key", ErrInvalidAPIResponse)
+		return nil, invalidAPIResponseOutcome("missing or invalid resource public key", nil)
 	}
 	if !nativeConnectorCRIDMatches(r.CRID, r.ID) {
-		return nil, fmt.Errorf("%w: missing or invalid key-bound CRID", ErrInvalidAPIResponse)
+		return nil, invalidAPIResponseOutcome("missing or invalid key-bound CRID", nil)
 	}
 	return &Resource{
 		ResourcePublicKey: r.ID,
@@ -1184,32 +1184,37 @@ type createPortalForURLRequest struct {
 }
 
 type createPortalResponse struct {
-	ResourcePublicKey string     `json:"resource_id"`
-	CRID              string     `json:"crid"`
-	QURLLink          string     `json:"qurl_link"`
-	QURLSite          string     `json:"qurl_site"`
-	ExpiresAt         *time.Time `json:"expires_at"`
-	QURLID            string     `json:"qurl_id"`
-	Label             string     `json:"label"`
-	TargetPath        *string    `json:"target_path"`
+	ResourcePublicKey string          `json:"resource_id"`
+	CRID              string          `json:"crid"`
+	QURLLink          string          `json:"qurl_link"`
+	QURLSite          string          `json:"qurl_site"`
+	ExpiresAt         *time.Time      `json:"expires_at"`
+	QURLID            string          `json:"qurl_id"`
+	Label             string          `json:"label"`
+	TargetPath        json.RawMessage `json:"target_path"`
 }
 
 func (r createPortalResponse) portal(expectedTargetPath string) (*Portal, error) {
-	if r.TargetPath == nil {
+	var recordedTargetPath *string
+	if len(r.TargetPath) == 0 {
 		if expectedTargetPath != "" {
 			return nil, invalidAPIResponseOutcome("mint response omitted the requested target path", nil)
 		}
-	} else if !validPortalTargetPath(*r.TargetPath) || *r.TargetPath != expectedTargetPath {
-		return nil, invalidAPIResponseOutcome("mint response target path differs from request", nil)
+	} else {
+		var value string
+		if json.Unmarshal(r.TargetPath, &value) != nil || !validPortalTargetPath(value) || value != expectedTargetPath {
+			return nil, invalidAPIResponseOutcome("mint response target path differs from request", nil)
+		}
+		recordedTargetPath = &value
 	}
 	if !isValidConnectorResourceID(r.ResourcePublicKey) {
-		return nil, fmt.Errorf("%w: missing or invalid resource public key", ErrInvalidAPIResponse)
+		return nil, invalidAPIResponseOutcome("missing or invalid resource public key", nil)
 	}
 	if !nativeConnectorCRIDMatches(r.CRID, r.ResourcePublicKey) {
-		return nil, fmt.Errorf("%w: missing or invalid key-bound CRID", ErrInvalidAPIResponse)
+		return nil, invalidAPIResponseOutcome("missing or invalid key-bound CRID", nil)
 	}
 	if strings.TrimSpace(r.QURLLink) == "" {
-		return nil, fmt.Errorf("%w: missing qurl_link", ErrInvalidAPIResponse)
+		return nil, invalidAPIResponseOutcome("missing qurl_link", nil)
 	}
 	return &Portal{
 		ResourcePublicKey: r.ResourcePublicKey,
@@ -1219,7 +1224,7 @@ func (r createPortalResponse) portal(expectedTargetPath string) (*Portal, error)
 		ExpiresAt:         r.ExpiresAt,
 		QURLID:            r.QURLID,
 		Label:             r.Label,
-		TargetPath:        r.TargetPath,
+		TargetPath:        recordedTargetPath,
 	}, nil
 }
 
