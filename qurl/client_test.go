@@ -344,7 +344,7 @@ func TestClient_ResourceByCRIDCreatePortal(t *testing.T) {
 		}
 		assertJSONField(t, body, "target_path", "/api/detect")
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"data":{"resource_id":"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE2cTVv5_3eeYCcLLq5ROYCqcmY50HiKZ9ATglIkPnCji1E_S63UMtXba1moR8-Q6EV7oM6zwwh9_j2CDujzXvLA","crid":"ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a","qurl_link":"https://qurl.link/at_stored"}}`)
+		fmt.Fprint(w, `{"data":{"resource_id":"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE2cTVv5_3eeYCcLLq5ROYCqcmY50HiKZ9ATglIkPnCji1E_S63UMtXba1moR8-Q6EV7oM6zwwh9_j2CDujzXvLA","crid":"ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a","qurl_link":"https://qurl.link/at_stored","target_path":"/api/detect"}}`)
 	}))
 	defer api.Close()
 
@@ -1540,10 +1540,10 @@ func TestClientCreateResponsesRejectMismatchedCRID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result, err := client.ProtectURL(context.Background(), "https://example.com"); result != nil || !errors.Is(err, ErrInvalidAPIResponse) {
+	if result, err := client.ProtectURL(context.Background(), "https://example.com"); result != nil || !errors.Is(err, ErrInvalidAPIResponse) || !errors.Is(err, ErrAPIRequestOutcomeUnknown) {
 		t.Fatalf("mismatched resource accepted: %v", err)
 	}
-	if portal, resource, err := client.CreatePortalForURL(context.Background(), "https://example.com"); resource != nil || portal != nil || !errors.Is(err, ErrInvalidAPIResponse) {
+	if portal, resource, err := client.CreatePortalForURL(context.Background(), "https://example.com"); resource != nil || portal != nil || !errors.Is(err, ErrInvalidAPIResponse) || !errors.Is(err, ErrAPIRequestOutcomeUnknown) {
 		t.Fatalf("mismatched portal accepted: %v", err)
 	}
 }
@@ -1565,7 +1565,7 @@ func TestClientCreatePortalRequiresRequestedCRID(t *testing.T) {
 			if responseCRID == "" {
 				want = ErrNoCRID
 			}
-			if portal, err := client.CreatePortal(context.Background(), resource); portal != nil || !errors.Is(err, ErrInvalidAPIResponse) || !errors.Is(err, want) {
+			if portal, err := client.CreatePortal(context.Background(), resource); portal != nil || !errors.Is(err, ErrInvalidAPIResponse) || !errors.Is(err, ErrAPIRequestOutcomeUnknown) || !errors.Is(err, want) {
 				t.Fatalf("unbound portal accepted: %v", err)
 			}
 		})
