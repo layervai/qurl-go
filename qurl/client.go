@@ -926,6 +926,18 @@ func OneTimeUse() PortalOption {
 	})
 }
 
+// Reusable sends an explicit one_time_use:false so the qURL link keeps working
+// after its first use. qURL Connector links are single-use when one_time_use
+// is omitted, unless max_sessions is greater than 1. Of OneTimeUse and
+// Reusable, the last one given applies.
+func Reusable() PortalOption {
+	return portalOptionFunc(func(o *portalOptions) error {
+		v := false
+		o.oneTimeUse = &v
+		return nil
+	})
+}
+
 // MaxSessions limits concurrent sessions for this qURL link. Use 0 for
 // unlimited sessions; the SDK sends an explicit max_sessions:0, while omitting
 // this option leaves the server default in effect. The LayerV API remains the

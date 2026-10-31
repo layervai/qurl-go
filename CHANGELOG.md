@@ -8,6 +8,29 @@ and are marked **Breaking** with what to change.
 
 ## Unreleased
 
+- `ConsumerAccessPolicy` gains `ApprovalExpiresIn` (`approval_expires_in`),
+  how long each review approval or key opt-in lasts, from `1h` to `365d`.
+  Only review and keys policies accept it. The service sets each grant's
+  expiry from it and rejects a later explicit `expires_at`, so every
+  approver gets the same bound. `Equal` and `SameDefinition` compare it.
+
+- `Reusable` is a new `PortalOption` that sends an explicit
+  `one_time_use: false`. A qURL Connector link is single-use when that field
+  is omitted, so a caller that mints a reusable link for an access rule with
+  link limits states it. `ConsumerGrantApproval.ExpiresAt` is also sent for a
+  review approval or a key opt-in, so an approval can lapse; the service
+  checks the time. Release this with the minor version above.
+
+- **Breaking:** `ConsumerAccessPolicy` gains `EmailDomain` and
+  `AllowedEmails` for the new `email_domain` mode. The `[]string` field makes
+  the struct no longer comparable, so `==` and map keys stop compiling. Use
+  `Equal` to compare every field, or `SameDefinition` to ignore `Version`.
+  `Validate` checks a policy before you send it. Release this as a minor
+  version.
+
+- Registered-device calls may `GET` and `PUT` `/v1/me/access-rules`, the
+  linked account's saved access rules, with no query.
+
 - **The minimum Go version is now 1.26.10, up from 1.26.9.** This fixes
   GO-2026-6809 in `crypto/x509` certificate verification. Builders pinned to
   Go 1.26.0 through 1.26.9 with `GOTOOLCHAIN=local` must update. The `awsstore`

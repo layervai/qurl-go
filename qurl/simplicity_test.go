@@ -310,6 +310,7 @@ func TestOptionSetsStayClosed(t *testing.T) {
 	for name, opt := range map[string]any{
 		"ValidFor":   qurl.ValidFor(time.Hour),
 		"OneTimeUse": qurl.OneTimeUse(),
+		"Reusable":   qurl.Reusable(),
 		"WithLabel":  qurl.WithLabel("Alice"),
 	} {
 		if _, ok := opt.(qurl.ResourceOption); ok {

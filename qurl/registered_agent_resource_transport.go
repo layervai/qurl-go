@@ -59,6 +59,10 @@ var ErrRegisteredAgentResourceRequestDenied = errors.New("qurl: registered-agent
 // /v1/resources/{id}/preview/uploads, exactly, with no query. PUT and GET
 // uploads are refused. These routes cannot set publisher verification.
 //
+// GET and PUT /v1/me/access-rules manage the linked account's named presets,
+// with no query and no caller-selected account namespace. The service verifies
+// live account membership independently for every request.
+//
 // The bridge also requires the Client's exact API origin and path prefix. The
 // caller's request is never mutated, and the device Authorization header is
 // removed from the returned response metadata.
@@ -161,6 +165,8 @@ func registeredAgentResourceRouteAllowed(method, path string) bool {
 		return method == http.MethodPost
 	case "/v1/me":
 		return method == http.MethodGet
+	case "/v1/me/access-rules":
+		return method == http.MethodGet || method == http.MethodPut
 	case "/v1/me/publisher":
 		return method == http.MethodGet || method == http.MethodPatch
 	case "/v1/access-requests":
