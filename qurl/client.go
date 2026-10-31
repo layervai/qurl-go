@@ -433,10 +433,11 @@ func validateHeaderValueWithKind(value, label string, errKind error) error {
 // Client calls the LayerV qURL API. Protect a URL once with ProtectURL, then
 // mint portals for that resource with Resource.CreatePortal.
 type Client struct {
-	credentials CredentialProvider
-	baseURL     string
-	httpClient  HTTPDoer
-	registered  bool
+	maxResponseBodyBytes int
+	credentials          CredentialProvider
+	baseURL              string
+	httpClient           HTTPDoer
+	registered           bool
 }
 
 // ClientOption customizes a Client.
@@ -451,11 +452,12 @@ func (f clientOptionFunc) applyClientOption(o *clientOptions) error {
 }
 
 type clientOptions struct {
-	baseURL          string
-	httpClient       HTTPDoer
-	issuerStatePath  string
-	baseURLSource    clientOptionSource
-	httpClientSource clientOptionSource
+	maxResponseBodyBytes int
+	baseURL              string
+	httpClient           HTTPDoer
+	issuerStatePath      string
+	baseURLSource        clientOptionSource
+	httpClientSource     clientOptionSource
 }
 
 type clientOptionSource uint8
@@ -562,9 +564,10 @@ func NewClient(provider CredentialProvider, opts ...ClientOption) (*Client, erro
 		return nil, err
 	}
 	return &Client{
-		credentials: provider,
-		baseURL:     cfg.baseURL,
-		httpClient:  cfg.httpClient,
+		credentials:          provider,
+		baseURL:              cfg.baseURL,
+		httpClient:           cfg.httpClient,
+		maxResponseBodyBytes: cfg.maxResponseBodyBytes,
 	}, nil
 }
 
@@ -599,9 +602,10 @@ func OpenClientContext(ctx context.Context, opts ...ClientOption) (*Client, erro
 		return nil, err
 	}
 	client := &Client{
-		credentials: provider,
-		baseURL:     cfg.baseURL,
-		httpClient:  cfg.httpClient,
+		credentials:          provider,
+		baseURL:              cfg.baseURL,
+		httpClient:           cfg.httpClient,
+		maxResponseBodyBytes: cfg.maxResponseBodyBytes,
 	}
 	if err := validateCredentials(ctx, provider, client.baseURL); err != nil {
 		return nil, err
@@ -1348,10 +1352,11 @@ func isLoopbackHost(host string) bool {
 // Every generic-surface endpoint is a POST; endpoints whose documented status
 // or empty body is part of their contract use doRequest instead.
 func (c *Client) postJSON(ctx context.Context, path string, body, out any) error {
-	return doAuthorizedJSON(ctx, c.httpClient, c.baseURL, c.credentials.Authorize, http.MethodPost, path, body, out)
+	return doAuthorizedJSON(ctx, c.httpClient, c.baseURL, c.credentials.Authorize, http.MethodPost, path, body, out, c.maxResponseBodyBytes)
 }
 
 func (c *Client) doRequest(ctx context.Context, method, path string, body any, contract apiResponseContract) error {
+	contract.maxResponseBodyBytes = c.maxResponseBodyBytes
 	return doAuthorizedRequest(ctx, c.httpClient, c.baseURL, c.credentials.Authorize, method, path, body, contract)
 }
 
@@ -1416,14 +1421,15 @@ type requestAuthorizer func(context.Context, *http.Request) error
 // 2xx status and body are accepted and ignored. Endpoint-specific callers that
 // require an exact JSON or no-content response use doAuthorizedRequest with an
 // explicit apiResponseContract instead.
-func doAuthorizedJSON(ctx context.Context, httpClient HTTPDoer, baseURL string, authorize requestAuthorizer, method, path string, body, out any) error {
+func doAuthorizedJSON(ctx context.Context, httpClient HTTPDoer, baseURL string, authorize requestAuthorizer, method, path string, body, out any, maxResponseBodyBytes int) error {
 	bodyMode := apiResponseBodyIgnored
 	if out != nil {
 		bodyMode = apiResponseBodyJSON
 	}
 	return doAuthorizedRequest(ctx, httpClient, baseURL, authorize, method, path, body, apiResponseContract{
-		bodyMode: bodyMode,
-		out:      out,
+		bodyMode:             bodyMode,
+		out:                  out,
+		maxResponseBodyBytes: maxResponseBodyBytes,
 	})
 }
 
@@ -1436,9 +1442,10 @@ const (
 )
 
 type apiResponseContract struct {
-	expectedStatus int
-	bodyMode       apiResponseBodyMode
-	out            any
+	maxResponseBodyBytes int
+	expectedStatus       int
+	bodyMode             apiResponseBodyMode
+	out                  any
 }
 
 func doAuthorizedRequest(ctx context.Context, httpClient HTTPDoer, baseURL string, authorize requestAuthorizer, method, path string, body any, contract apiResponseContract) error {
@@ -1480,9 +1487,17 @@ func doAuthorizedRequest(ctx context.Context, httpClient HTTPDoer, baseURL strin
 	defer func() {
 		_ = resp.Body.Close()
 	}()
-	defer drainResponseBody(resp.Body)
-
-	respBody, err := readCappedBody(resp.Body, maxAPIResponseBodyBytes, "API response body")
+	limit := contract.maxResponseBodyBytes
+	if limit == 0 {
+		limit = maxAPIResponseBodyBytes
+	}
+	var respBody []byte
+	if apiContentLengthExceedsLimit(resp, limit) {
+		err = &inputExceedsCapError{what: "API response body", limit: limit}
+	} else {
+		defer drainResponseBody(resp.Body)
+		respBody, err = readCappedBody(resp.Body, limit, "API response body")
+	}
 	if err != nil {
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			return &APIError{

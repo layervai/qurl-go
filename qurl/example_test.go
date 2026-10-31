@@ -623,3 +623,12 @@ func ExampleClient_UpdatePreview() {
 		panic(err)
 	}
 }
+
+func ExampleWithMaxResponseBodyBytes() {
+	client, err := qurl.NewClient(qurl.BearerToken("lv_example"), qurl.WithMaxResponseBodyBytes(16<<20))
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(client != nil)
+	// Output: true
+}

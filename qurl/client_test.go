@@ -35,7 +35,7 @@ func TestDoAuthorizedJSON_EarlyResponseDoesNotCorruptInFlightRequestBody(t *test
 	}{DeviceID: "agent-early-response"}
 	err := doAuthorizedJSON(context.Background(), httpClient, "https://api.example.test", func(context.Context, *http.Request) error {
 		return nil
-	}, http.MethodPost, "/v1/test", body, nil)
+	}, http.MethodPost, "/v1/test", body, nil, 0)
 	if err != nil {
 		t.Fatalf("doAuthorizedJSON: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestDoAuthorizedJSON_NilOutputPreservesLegacyIgnoreContract(t *testing.T) {
 			})
 			err := doAuthorizedJSON(context.Background(), httpClient, "https://api.example.test", func(context.Context, *http.Request) error {
 				return nil
-			}, http.MethodPost, "/v1/test", nil, nil)
+			}, http.MethodPost, "/v1/test", nil, nil, 0)
 			if err != nil {
 				t.Fatalf("doAuthorizedJSON status %d with nil output: %v", status, err)
 			}
@@ -90,7 +90,7 @@ func TestDoAuthorizedJSON_OversizedSuccessIsDrainedAndClosed(t *testing.T) {
 	var out map[string]any
 	err := doAuthorizedJSON(context.Background(), httpClient, "https://api.example.test", func(context.Context, *http.Request) error {
 		return nil
-	}, http.MethodGet, "/v1/test", nil, &out)
+	}, http.MethodGet, "/v1/test", nil, &out, 0)
 	if !errors.Is(err, ErrInvalidAPIResponse) {
 		t.Fatalf("error = %v, want ErrInvalidAPIResponse", err)
 	}
