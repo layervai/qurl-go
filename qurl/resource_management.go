@@ -146,13 +146,16 @@ type ResourceSession struct {
 	LastSeenAt *time.Time `json:"last_seen_at,omitempty"`
 }
 
+// SessionTermination reports the service's confirmed termination count.
+type SessionTermination struct {
+	Terminated *int64 `json:"terminated"`
+}
+
 // SessionTerminationPage reports one bounded bulk-termination request.
 // Continue with Meta.NextCursor; a single page does not mean every session closed.
 type SessionTerminationPage struct {
-	Data *struct {
-		Terminated *int64 `json:"terminated"`
-	} `json:"data"`
-	Meta ManagementMeta `json:"meta"`
+	Data *SessionTermination `json:"data"`
+	Meta ManagementMeta      `json:"meta"`
 }
 
 func managementPath(c *Client, id string) (string, error) {
@@ -187,6 +190,11 @@ func validateManagedResource(r *ManagedResource) error {
 		return fmt.Errorf("%w: missing or invalid resource identity", ErrInvalidAPIResponse)
 	}
 	return nil
+}
+
+func managedResourceMatches(r *ManagedResource, id string) bool {
+	return r.CRID == id || r.ResourceID == id ||
+		(isValidConnectorResourceID(id) && nativeConnectorCRIDMatches(r.CRID, id))
 }
 
 func validateManagementMeta(meta ManagementMeta) error {
@@ -255,7 +263,7 @@ func (c *Client) GetResource(ctx context.Context, id string) (*ManagementRespons
 		return nil, err
 	}
 	r := response.Data.Resource
-	if r.CRID != id && r.ResourceID != id {
+	if !managedResourceMatches(r, id) {
 		return nil, fmt.Errorf("%w: resource identity differs from request", ErrInvalidAPIResponse)
 	}
 	for _, portal := range response.Data.QURLs {
@@ -282,7 +290,7 @@ func (c *Client) UpdateResource(ctx context.Context, id string, update ResourceU
 	if err := validateManagedResource(response.Data); err != nil {
 		return nil, invalidAPIResponseOutcome("invalid resource update response", err)
 	}
-	if response.Data.CRID != id && response.Data.ResourceID != id {
+	if !managedResourceMatches(response.Data, id) {
 		return nil, invalidAPIResponseOutcome("resource update identity differs from request", nil)
 	}
 	return &response, nil

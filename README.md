@@ -156,6 +156,15 @@ Session reads and bulk terminations always request bounded pagination.
 pages or retry mutations for you. A successful management request is not
 independent evidence that a native connection has reached CLOSED.
 
+If `errors.Is(err, qurl.ErrAPIRequestOutcomeUnknown)` is true, reconcile a
+mutation before retrying it. A transport/body failure or a surfaced 1xx, 3xx,
+or 5xx does not prove the write was rejected. `errors.As` still exposes the
+underlying `APIError`. Read callers can keep their normal retry policy.
+
+Read-model slices retain nil versus empty in Go, but JSON re-marshaling omits
+empty optional slices. Use `ResourceUpdate` for writes; its pointer fields
+preserve explicit clears.
+
 ## Connectivity, issuance, and opening from Go
 
 Choose the Go API by the part of the sharing lifecycle your software owns:

@@ -125,6 +125,12 @@ var ErrInvalidResourceRequest = errors.New("qurl: invalid resource request")
 // sentinel.
 var ErrInvalidAPIResponse = errors.New("qurl: invalid API response")
 
+// ErrAPIRequestOutcomeUnknown means the API result could not be confirmed.
+// For a mutation, reconcile before retrying: a transport/body failure or a
+// surfaced 1xx, 3xx, or 5xx does not prove that the server rejected the write.
+// The underlying APIError or transport cause remains available through errors.As.
+var ErrAPIRequestOutcomeUnknown = errors.New("qurl: API request outcome unknown")
+
 // ErrInvalidPortalRequest is returned before an API request when a portal input
 // is invalid.
 var ErrInvalidPortalRequest = errors.New("qurl: invalid portal request")
@@ -1536,6 +1542,9 @@ type apiRequestOutcomeUnknownError struct {
 
 func (e *apiRequestOutcomeUnknownError) Error() string { return e.err.Error() }
 func (e *apiRequestOutcomeUnknownError) Unwrap() error { return e.err }
+func (e *apiRequestOutcomeUnknownError) Is(target error) bool {
+	return target == ErrAPIRequestOutcomeUnknown
+}
 
 // sdkUserAgent returns the cached SDK User-Agent header. The value is derived
 // from build info, which is fixed for the process lifetime, so it is computed
@@ -1624,6 +1633,13 @@ func (e *APIError) Unwrap() error {
 		return nil
 	}
 	return e.err
+}
+
+// Is exposes status-level ambiguity without changing the concrete APIError type.
+// Read callers may retry normally; mutation callers must reconcile first.
+func (e *APIError) Is(target error) bool {
+	return e != nil && target == ErrAPIRequestOutcomeUnknown &&
+		(e.StatusCode < http.StatusBadRequest || e.StatusCode >= http.StatusInternalServerError)
 }
 
 func apiErrorFromResponse(status int, body []byte) error {

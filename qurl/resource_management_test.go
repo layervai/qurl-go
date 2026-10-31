@@ -411,7 +411,7 @@ func TestManagementMutationsKeepOutcomeUnknown(t *testing.T) {
 				_, err = client.TerminateSessions(context.Background(), testConnectorCRID, "")
 			}
 			var unknown *apiRequestOutcomeUnknownError
-			if !errors.Is(err, ErrInvalidAPIResponse) || !errors.As(err, &unknown) || calls != 1 {
+			if !errors.Is(err, ErrInvalidAPIResponse) || !errors.As(err, &unknown) || !errors.Is(err, ErrAPIRequestOutcomeUnknown) || calls != 1 {
 				t.Fatalf("post-commit error = %v, calls = %d; want outcome unknown without replay", err, calls)
 			}
 		})
@@ -439,5 +439,71 @@ func TestManagementHonorsCancelledContext(t *testing.T) {
 	}
 	if calls.Load() != 0 {
 		t.Fatalf("cancelled calls reached server: %d", calls.Load())
+	}
+}
+
+func TestManagementMutationStatusAmbiguity(t *testing.T) {
+	t.Parallel()
+	for _, method := range managementCalls(context.Background()) {
+		if method.name != "update resource" && method.name != "revoke resource" && method.name != "terminate session" && method.name != "terminate page" {
+			continue
+		}
+		for _, status := range []int{http.StatusFound, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusTooManyRequests} {
+			t.Run(fmt.Sprintf("%s/%d", method.name, status), func(t *testing.T) {
+				var calls int
+				client, err := NewClient(BearerToken("lv_fixture"), WithHTTPClient(doerFunc(func(*http.Request) (*http.Response, error) {
+					calls++
+					return &http.Response{StatusCode: status, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"error":{"code":"fixture"}}`))}, nil
+				})))
+				if err != nil {
+					t.Fatal(err)
+				}
+				err = method.call(client)
+				var apiErr *APIError
+				unknown := status < http.StatusBadRequest || status >= http.StatusInternalServerError
+				if !errors.As(err, &apiErr) || apiErr.StatusCode != status || errors.Is(err, ErrAPIRequestOutcomeUnknown) != unknown || calls != 1 {
+					t.Fatalf("status=%d error=%v unknown=%v calls=%d", status, err, errors.Is(err, ErrAPIRequestOutcomeUnknown), calls)
+				}
+				// errors.Is classification must not replace the existing concrete APIError.
+				if reflect.TypeOf(err) != reflect.TypeFor[*APIError]() {
+					t.Fatalf("status error lost its concrete APIError type: %T", err)
+				}
+			})
+		}
+	}
+}
+
+func TestManagementLegacyLocatorAcceptsKeyBoundCRIDOnlyResponse(t *testing.T) {
+	t.Parallel()
+	description := "updated"
+	for _, update := range []bool{false, true} {
+		t.Run(fmt.Sprint(update), func(t *testing.T) {
+			client, err := NewClient(BearerToken("lv_fixture"), WithHTTPClient(doerFunc(func(req *http.Request) (*http.Response, error) {
+				if req.URL.Path != "/v1/resources/"+testConnectorID {
+					t.Errorf("legacy path=%s", req.URL.Path)
+				}
+				resource := map[string]any{"crid": testConnectorCRID, "type": "url"}
+				var data any = map[string]any{"resource": resource}
+				if update {
+					data = resource
+				}
+				body, e := json.Marshal(map[string]any{"data": data})
+				if e != nil {
+					t.Fatal(e)
+				}
+				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(string(body)))}, nil
+			})))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if update {
+				_, err = client.UpdateResource(context.Background(), testConnectorID, ResourceUpdate{Description: &description})
+			} else {
+				_, err = client.GetResource(context.Background(), testConnectorID)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
