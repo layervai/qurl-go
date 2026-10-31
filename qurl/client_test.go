@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1569,4 +1570,70 @@ func TestClientCreatePortalRequiresRequestedCRID(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCachedCredentialsCanceledWaiterDoesNotStartAnotherRefresh(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	provider := CredentialProviderFunc(func(ctx context.Context, req *http.Request) error {
+		if calls.Add(1) == 1 {
+			close(started)
+		}
+		select {
+		case <-release:
+			req.Header.Set("Authorization", "Bearer refreshed")
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	})
+	cached := CachedCredentials(provider, time.Minute)
+	first := newCredentialTestRequest(t)
+	done := make(chan error, 1)
+	go func() { done <- cached.Authorize(ctx, first) }()
+	select {
+	case <-started:
+	case <-ctx.Done():
+		t.Fatal("credential refresh did not start")
+	}
+	waitCtx, cancelWaiter := context.WithCancel(ctx)
+	defer cancelWaiter()
+	waiter := &observedCredentialWaitContext{Context: waitCtx, observed: make(chan struct{})}
+	waitResult := make(chan error, 1)
+	second := newCredentialTestRequest(t)
+	go func() { waitResult <- cached.Authorize(waiter, second) }()
+	select {
+	case <-waiter.observed:
+	case <-ctx.Done():
+		t.Fatal("second caller did not wait for the in-flight refresh")
+	}
+	cancelWaiter()
+	if err := <-waitResult; !errors.Is(err, context.Canceled) {
+		t.Fatalf("waiting Authorize = %v, want context.Canceled", err)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("refresh = %v", err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("provider calls = %d, want 1", calls.Load())
+	}
+	if first.Header.Get("Authorization") != "Bearer refreshed" {
+		t.Fatal("refresh did not authorize the first caller")
+	}
+}
+
+// Done is evaluated only after Authorize joins the in-flight refresh select.
+type observedCredentialWaitContext struct {
+	context.Context
+	observed chan struct{}
+	once     sync.Once
+}
+
+func (c *observedCredentialWaitContext) Done() <-chan struct{} {
+	c.once.Do(func() { close(c.observed) })
+	return c.Context.Done()
 }
