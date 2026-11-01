@@ -10,9 +10,19 @@ Publisher methods are `InviteConsumer`, `ListConsumerInvitations`,
 `ResendConsumerInvitation`, `RevokeConsumerInvitation`, `ListConsumerGrants`,
 `ApproveConsumerGrant`, `DenyConsumerGrant` and `RevokeConsumerGrant`. Lists return
 `NextCursor`. Decisions require the version read from the grant or invitation.
-Contract approval requires a trusted publisher backend entitlement receipt and
-expiry. The SDK does not verify payment. Contract grant replies omit consumer
+Without a Stripe payment policy, contract approval requires a trusted publisher
+backend entitlement receipt and expiry; the SDK does not verify payment.
+Contract grant replies omit consumer
 email and global credentials.
+
+For paid contracts, call `ConnectPublisherStripe`, open the returned consent URL,
+then read `PublisherStripeAccount`. Set `ConsumerAccessPolicy.Payment` to a
+`CRIDPaymentPolicy` with that `AccountID` and an active fixed `PriceID` from the
+connected account. Use `WithConsumerAccess` for a new resource or
+`UpdateConsumerAccess` for an existing CRID. The service makes paid access private
+and verifies payment; manual approval is unavailable. LayerV collects 3%, including
+renewals. A one-time price accepts `AccessSeconds`; zero lasts for the resource
+lifetime. A recurring price requires zero and grants only the paid invoice period.
 
 Consumers use `NewConsumerEnrollmentClient` with an independently obtained CRID,
 a locally held Noise peer key, and trusted deployment configuration. `Info`
@@ -33,9 +43,10 @@ active connection cleanup is not yet confirmed. Retry the same removal and
 version until `complete`. Do not report active connections stopped from a
 `pending` receipt. Features remain disabled by default during integration.
 
-When consumer access is enabled, the hosted preview card always offers
-**Email me an access link** as a backup to passkeys. Publishers cannot disable
-this option. The recipient verifies the mailbox and consents to disclose it to
+When consumer access is enabled, the hosted preview card offers
+**Email me an access link** as a backup to passkeys, except for Stripe paid
+contracts, which require a passkey. Publishers cannot disable the backup for
+other policies. The recipient verifies the mailbox and consents to disclose it to
 the publisher, including in keys and contract modes. Contract grant replies still omit email.
 Invitations, approval,
 entitlement, expiry, and revocation still apply.
