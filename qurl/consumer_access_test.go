@@ -166,3 +166,66 @@ func TestConsumerCreationConfirmsPrivatePolicyAndKeepsExistingRevision(t *testin
 		}
 	}
 }
+
+func TestPaidConsumerPolicyConfirmsPriceAndAccountByValue(t *testing.T) {
+	policy := ConsumerAccessPolicy{Mode: "contract", Version: 1, ContractID: "sale", Payment: &CRIDPaymentPolicy{AccountID: "acct_publisher", PriceID: "price_product", AccessSeconds: 3600}}
+	if err := policy.validate(); err != nil {
+		t.Fatal(err)
+	}
+	copyPayment := *policy.Payment
+	actual := policy
+	actual.Payment = &copyPayment
+	private := true
+	if !consumerCreationPolicyConfirmed(&private, &actual, &policy, false) {
+		t.Fatal("equal payment policies rejected")
+	}
+	actual.Payment.PriceID = "price_other"
+	if consumerCreationPolicyConfirmed(&private, &actual, &policy, false) {
+		t.Fatal("changed payment price accepted")
+	}
+	for _, p := range []ConsumerAccessPolicy{{Mode: "review", Version: 1, Payment: policy.Payment}, {Mode: "contract", Version: 1, ContractID: "sale", Payment: &CRIDPaymentPolicy{AccountID: "acct_wrong/route", PriceID: "price_product"}}} {
+		if err := p.validate(); err == nil {
+			t.Fatal("invalid payment policy accepted")
+		}
+	}
+}
+
+func TestPublisherStripeEndpointsValidateAccountFeeAndRedirect(t *testing.T) {
+	for _, tc := range []struct {
+		name, path, body string
+		connect, valid   bool
+	}{
+		{"connect", "/v1/payments/connect", `{"data":{"url":"https://connect.stripe.com/oauth/authorize?state=fixture"}}`, true, true},
+		{"wrong redirect", "/v1/payments/connect", `{"data":{"url":"https://connect.stripe.com.attacker.test/oauth"}}`, true, false},
+		{"account", "/v1/payments/account", `{"data":{"account_id":"acct_publisher","layerv_fee_percent":3}}`, false, true},
+		{"fee changed", "/v1/payments/account", `{"data":{"account_id":"acct_publisher","layerv_fee_percent":4}}`, false, false},
+		{"missing account", "/v1/payments/account", `{"data":{}}`, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			transport := doerFunc(func(req *http.Request) (*http.Response, error) {
+				if req.URL.Path != tc.path {
+					t.Fatalf("unexpected path %s", req.URL.Path)
+				}
+				if tc.connect && req.Method != http.MethodPost || !tc.connect && req.Method != http.MethodGet {
+					t.Fatal("wrong payment method")
+				}
+				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(tc.body))}, nil
+			})
+			client, err := NewClient(BearerToken("lv_test_policy"), WithBaseURL("https://api.example.test"), WithHTTPClient(transport))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.connect {
+				_, err = client.ConnectPublisherStripe(t.Context())
+			} else {
+				_, err = client.PublisherStripeAccount(t.Context())
+			}
+			if tc.valid && err != nil {
+				t.Fatal(err)
+			}
+			if !tc.valid && !errors.Is(err, ErrInvalidAPIResponse) {
+				t.Fatalf("invalid response accepted: %v", err)
+			}
+		})
+	}
+}
