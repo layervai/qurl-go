@@ -22,7 +22,8 @@ var ErrRegisteredAgentResourceRequestDenied = errors.New("qurl: registered-agent
 // management, Connector sharing-state, share-link mint
 // (POST /v1/resources/{id}/share), portal creation, Connector-enrollment-token
 // mint, account linking (POST /v1/account/link), identity-echo, and
-// publisher-profile (GET and PATCH /v1/me/publisher, exactly, with no query)
+// publisher-profile (GET and PATCH /v1/me/publisher, exactly, with no query),
+// and saved access-rule (GET and PUT /v1/me/access-rules, described below)
 // routes used by a registered qURL client. The service independently restricts
 // a device key's POST /v1/api-keys authority to a Connector-target one-shot
 // token. Other account, billing, usage, and key-management routes fail closed.

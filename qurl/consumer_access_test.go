@@ -276,6 +276,15 @@ func TestEmailDomainPolicyValidationAndSnapshotFence(t *testing.T) {
 	if newer := decode(`{"mode":"email_domain","version":3,"email_domain":"example.com","allowed_emails":["Person@other.com"]}`); !consumerCreationPolicyConfirmed(&private, &newer, &p, true) {
 		t.Fatal("existing resource with a newer revision of the same policy not confirmed")
 	}
+	for _, valid := range []ConsumerAccessPolicy{
+		{Mode: "contract", Version: 1, ContractID: strings.Repeat("a", 128)},
+		{Mode: "email_domain", Version: 1, EmailDomain: strings.Repeat("a", 63) + "." + strings.Repeat("b", 63) + "." + strings.Repeat("c", 63) + "." + strings.Repeat("d", 61)},
+		decode(`{"mode":"email_domain","version":1,"email_domain":"example.com","allowed_emails":[` + manyMailboxes(256) + `]}`),
+	} {
+		if err := valid.validate(); err != nil {
+			t.Errorf("boundary policy rejected: %v", err)
+		}
+	}
 	// Public enrollment info carries the policy without owner-only exceptions; it must still validate.
 	for _, raw := range []string{`{"mode":"email_domain","version":1,"email_domain":"example.com"}`, `{"mode":"review","version":1,"approval_expires_in":"7d"}`} {
 		if err := decode(raw).validate(); err != nil {
@@ -296,6 +305,10 @@ func TestEmailDomainPolicyValidationAndSnapshotFence(t *testing.T) {
 		`{"mode":"email_domain","version":1,"email_domain":"example.com","allowed_emails":[" a@other.com"]}`,
 		`{"mode":"review","version":1,"email_domain":"example.com"}`,
 		`{"mode":"contract","version":1,"contract_id":"contains spaces"}`,
+		`{"mode":"contract","version":1,"contract_id":"`+strings.Repeat("a", 129)+`"}`,
+		`{"mode":"contract","version":1,"contract_id":"sale","approval_expires_in":"7d"}`,
+		`{"mode":"email_domain","version":1,"email_domain":"`+strings.Repeat("a", 63)+`.`+strings.Repeat("b", 63)+`.`+strings.Repeat("c", 63)+`.`+strings.Repeat("d", 62)+`"}`,
+		`{"mode":"email_domain","version":1,"email_domain":"example.com","allowed_emails":[`+manyMailboxes(257)+`]}`,
 	} {
 		if err := decode(raw).validate(); err == nil {
 			t.Errorf("unsafe policy accepted: %s", raw)
@@ -369,4 +382,13 @@ func TestApprovalExpiresInTravelsWithReviewAndKeysPolicies(t *testing.T) {
 			t.Errorf("approval_expires_in %q: %v", value, err)
 		}
 	}
+}
+
+// manyMailboxes is n distinct quoted mailbox exceptions for a JSON array.
+func manyMailboxes(n int) string {
+	emails := make([]string, n)
+	for i := range emails {
+		emails[i] = fmt.Sprintf("%q", fmt.Sprintf("p%d@other.com", i))
+	}
+	return strings.Join(emails, ",")
 }
