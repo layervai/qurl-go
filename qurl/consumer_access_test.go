@@ -305,10 +305,10 @@ func TestEmailDomainPolicyValidationAndSnapshotFence(t *testing.T) {
 		`{"mode":"email_domain","version":1,"email_domain":"example.com","allowed_emails":[" a@other.com"]}`,
 		`{"mode":"review","version":1,"email_domain":"example.com"}`,
 		`{"mode":"contract","version":1,"contract_id":"contains spaces"}`,
-		`{"mode":"contract","version":1,"contract_id":"`+strings.Repeat("a", 129)+`"}`,
+		`{"mode":"contract","version":1,"contract_id":"` + strings.Repeat("a", 129) + `"}`,
 		`{"mode":"contract","version":1,"contract_id":"sale","approval_expires_in":"7d"}`,
-		`{"mode":"email_domain","version":1,"email_domain":"`+strings.Repeat("a", 63)+`.`+strings.Repeat("b", 63)+`.`+strings.Repeat("c", 63)+`.`+strings.Repeat("d", 62)+`"}`,
-		`{"mode":"email_domain","version":1,"email_domain":"example.com","allowed_emails":[`+manyMailboxes(257)+`]}`,
+		`{"mode":"email_domain","version":1,"email_domain":"` + strings.Repeat("a", 63) + `.` + strings.Repeat("b", 63) + `.` + strings.Repeat("c", 63) + `.` + strings.Repeat("d", 62) + `"}`,
+		`{"mode":"email_domain","version":1,"email_domain":"example.com","allowed_emails":[` + manyMailboxes(257) + `]}`,
 	} {
 		if err := decode(raw).validate(); err == nil {
 			t.Errorf("unsafe policy accepted: %s", raw)
