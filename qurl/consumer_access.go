@@ -88,8 +88,12 @@ func parseApprovalExpiresIn(s string) (time.Duration, bool) {
 	}
 	unit := map[byte]time.Duration{'d': day, 'w': 7 * day}[s[len(s)-1]]
 	if n, err := strconv.Atoi(s[:len(s)-1]); unit != 0 && err == nil {
-		// Bounded before multiplying so a huge count cannot overflow into range.
-		return time.Duration(n) * unit, n >= 0 && n <= int(maximum/unit) && time.Duration(n)*unit >= time.Hour
+		// Checked before multiplying, so a huge count cannot overflow into range.
+		if n < 0 || n > int(maximum/unit) {
+			return 0, false
+		}
+		d := time.Duration(n) * unit
+		return d, d >= time.Hour
 	}
 	d, err := time.ParseDuration(s)
 	return d, err == nil && d >= time.Hour && d <= maximum
@@ -123,6 +127,8 @@ func validMailbox(email string) bool {
 // WithConsumerAccess creates a private resource with a consumer policy.
 // Change an existing policy through UpdateConsumerAccess instead.
 func WithConsumerAccess(policy ConsumerAccessPolicy) ConsumerAccessOption {
+	// A private copy, so a caller's later slice edit cannot change what was validated.
+	policy.AllowedEmails = slices.Clone(policy.AllowedEmails)
 	return ConsumerAccessOption{policy: policy}
 }
 
@@ -165,6 +171,7 @@ func (c *Client) UpdateConsumerAccess(ctx context.Context, resourceCRID string, 
 	if err := validateConnectorCRID(resourceCRID); err != nil {
 		return err
 	}
+	policy.AllowedEmails = slices.Clone(policy.AllowedEmails)
 	if err := policy.validate(); err != nil {
 		return err
 	}
