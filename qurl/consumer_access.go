@@ -86,7 +86,13 @@ func parseApprovalExpiresIn(s string) (time.Duration, bool) {
 	if len(s) < 2 {
 		return 0, false
 	}
-	unit := map[byte]time.Duration{'d': day, 'w': 7 * day}[s[len(s)-1]]
+	var unit time.Duration
+	switch s[len(s)-1] {
+	case 'd':
+		unit = day
+	case 'w':
+		unit = 7 * day
+	}
 	if n, err := strconv.Atoi(s[:len(s)-1]); unit != 0 && err == nil {
 		// Checked before multiplying, so a huge count cannot overflow into range.
 		if n < 0 || n > int(maximum/unit) {

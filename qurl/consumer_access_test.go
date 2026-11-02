@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -298,45 +297,55 @@ func TestEmailDomainPolicyValidationAndSnapshotFence(t *testing.T) {
 	}
 }
 
-func TestUpdateConsumerAccessRejectsDifferentMailboxExceptions(t *testing.T) {
-	// The service echoes mailbox exceptions verbatim and in order, so a reorder is a different answer.
-	policy := ConsumerAccessPolicy{Mode: "email_domain", Version: 2, EmailDomain: "example.com", AllowedEmails: []string{"z@other.com", "Partner@other.com"}}
-	for _, emails := range [][]string{{"z@other.com", "Partner@other.com"}, {"Partner@other.com", "z@other.com"}, {"z@other.com", "Other@other.com"}, nil} {
-		echoed := policy
-		echoed.AllowedEmails = emails
-		client := &Client{baseURL: "https://api.example.test", credentials: BearerToken("test"), httpClient: doerFunc(func(*http.Request) (*http.Response, error) {
-			raw, err := json.Marshal(map[string]any{"data": map[string]any{"resource_id": testConnectorID, "crid": testConnectorCRID, "consumer_access": echoed}})
-			if err != nil {
-				t.Fatal(err)
-			}
-			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(raw))}, nil
-		})}
-		err := client.UpdateConsumerAccess(context.Background(), testConnectorCRID, 1, policy)
-		if same := slices.Equal(emails, policy.AllowedEmails); same != (err == nil) {
-			t.Fatalf("allowed_emails %v: %v", emails, err)
-		}
-		if err != nil && !errors.Is(err, ErrInvalidAPIResponse) {
-			t.Fatalf("allowed_emails %v: %v", emails, err)
-		}
-	}
-}
-
-func TestApprovalExpiresInTravelsWithReviewAndKeysPolicies(t *testing.T) {
-	var sent ConsumerAccessPolicy
-	client := &Client{baseURL: "https://api.example.test", credentials: BearerToken("test"), httpClient: doerFunc(func(r *http.Request) (*http.Response, error) {
+// echoConsumerAccessClient answers a policy PATCH with the policy that echo
+// returns for the one the SDK sent.
+func echoConsumerAccessClient(t *testing.T, echo func(sent ConsumerAccessPolicy) ConsumerAccessPolicy) *Client {
+	t.Helper()
+	return &Client{baseURL: "https://api.example.test", credentials: BearerToken("test"), httpClient: doerFunc(func(r *http.Request) (*http.Response, error) {
 		var body struct {
 			Policy ConsumerAccessPolicy `json:"consumer_access"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatal(err)
 		}
-		sent = body.Policy
-		raw, err := json.Marshal(map[string]any{"data": map[string]any{"resource_id": testConnectorID, "crid": testConnectorCRID, "consumer_access": body.Policy}})
+		raw, err := json.Marshal(map[string]any{"data": map[string]any{"resource_id": testConnectorID, "crid": testConnectorCRID, "consumer_access": echo(body.Policy)}})
 		if err != nil {
 			t.Fatal(err)
 		}
 		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(raw))}, nil
 	})}
+}
+
+// The service echoes mailbox exceptions verbatim and in order, and stores an
+// approval lifetime in whole days or hours: only those answers confirm.
+func TestUpdateConsumerAccessConfirmsOnlyTheStoredPolicy(t *testing.T) {
+	emails := ConsumerAccessPolicy{Mode: "email_domain", Version: 2, EmailDomain: "example.com", AllowedEmails: []string{"z@other.com", "Partner@other.com"}}
+	week := ConsumerAccessPolicy{Mode: "review", Version: 2, ApprovalExpiresIn: "1w"}
+	for _, tc := range []struct {
+		sent   ConsumerAccessPolicy
+		change func(*ConsumerAccessPolicy)
+		same   bool
+	}{
+		{emails, func(*ConsumerAccessPolicy) {}, true},
+		{emails, func(p *ConsumerAccessPolicy) { p.AllowedEmails = []string{"Partner@other.com", "z@other.com"} }, false},
+		{emails, func(p *ConsumerAccessPolicy) { p.AllowedEmails = []string{"z@other.com", "Other@other.com"} }, false},
+		{emails, func(p *ConsumerAccessPolicy) { p.AllowedEmails = nil }, false},
+		{week, func(p *ConsumerAccessPolicy) { p.ApprovalExpiresIn = "7d" }, true},
+		{week, func(p *ConsumerAccessPolicy) { p.ApprovalExpiresIn = "168h" }, true},
+		{week, func(p *ConsumerAccessPolicy) { p.ApprovalExpiresIn = "30d" }, false},
+		{week, func(p *ConsumerAccessPolicy) { p.ApprovalExpiresIn = "" }, false},
+	} {
+		client := echoConsumerAccessClient(t, func(sent ConsumerAccessPolicy) ConsumerAccessPolicy { tc.change(&sent); return sent })
+		err := client.UpdateConsumerAccess(context.Background(), testConnectorCRID, 1, tc.sent)
+		if (err == nil) != tc.same || err != nil && !errors.Is(err, ErrInvalidAPIResponse) {
+			t.Errorf("%+v: %v", tc.sent, err)
+		}
+	}
+}
+
+func TestApprovalExpiresInTravelsWithReviewAndKeysPolicies(t *testing.T) {
+	var sent ConsumerAccessPolicy
+	client := echoConsumerAccessClient(t, func(p ConsumerAccessPolicy) ConsumerAccessPolicy { sent = p; return p })
 	policy := ConsumerAccessPolicy{Mode: "review", Version: 2, ApprovalExpiresIn: "7d"}
 	if err := client.UpdateConsumerAccess(context.Background(), testConnectorCRID, 1, policy); err != nil || sent.ApprovalExpiresIn != "7d" {
 		t.Fatalf("approval_expires_in not sent: %v %+v", err, sent)
@@ -350,24 +359,6 @@ func TestApprovalExpiresInTravelsWithReviewAndKeysPolicies(t *testing.T) {
 	for value, valid := range map[string]bool{"1h": true, "90m": true, "365d": true, "1w": true, "8760h": true, "59m": false, "0d": false, "366d": false, "53w": false, "forever": false, "-1d": false, "d": false, "9223372036854775807d": false} {
 		if err := (ConsumerAccessPolicy{Mode: "keys", Version: 1, ApprovalExpiresIn: value}).validate(); (err == nil) != valid {
 			t.Errorf("approval_expires_in %q: %v", value, err)
-		}
-	}
-}
-
-func TestApprovalExpiresInComparesInStoredForm(t *testing.T) {
-	sent := ConsumerAccessPolicy{Mode: "review", Version: 2, ApprovalExpiresIn: "1w"}
-	for stored, same := range map[string]bool{"7d": true, "168h": true, "30d": false, "": false} {
-		client := &Client{baseURL: "https://api.example.test", credentials: BearerToken("test"), httpClient: doerFunc(func(*http.Request) (*http.Response, error) {
-			echoed := sent
-			echoed.ApprovalExpiresIn = stored
-			raw, err := json.Marshal(map[string]any{"data": map[string]any{"resource_id": testConnectorID, "crid": testConnectorCRID, "consumer_access": echoed}})
-			if err != nil {
-				t.Fatal(err)
-			}
-			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(raw))}, nil
-		})}
-		if err := client.UpdateConsumerAccess(context.Background(), testConnectorCRID, 1, sent); (err == nil) != same || err != nil && !errors.Is(err, ErrInvalidAPIResponse) {
-			t.Errorf("stored %q: %v", stored, err)
 		}
 	}
 }
