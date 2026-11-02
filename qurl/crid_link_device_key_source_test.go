@@ -1041,6 +1041,7 @@ func TestCRIDLinkAsDeviceFromKeySource_NeverPutsTheKeyInAnErrorOrALog(t *testing
 	fixture, device := newKeySourceFixture(t)
 
 	logged := new(lockedBuffer)
+	guardProcessGlobals(t)
 	priorWriter, priorFlags, priorSlog := log.Writer(), log.Flags(), slog.Default()
 	log.SetOutput(logged)
 	slog.SetDefault(slog.New(slog.NewTextHandler(logged, &slog.HandlerOptions{Level: slog.LevelDebug})))

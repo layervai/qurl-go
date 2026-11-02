@@ -23,6 +23,12 @@ type SecretsManagerAPI interface {
 	CreateSecret(ctx context.Context, params *secretsmanager.CreateSecretInput, optFns ...func(*secretsmanager.Options)) (*secretsmanager.CreateSecretOutput, error)
 }
 
+type secretsManagerDescriber interface {
+	DescribeSecret(context.Context, *secretsmanager.DescribeSecretInput, ...func(*secretsmanager.Options)) (*secretsmanager.DescribeSecretOutput, error)
+}
+
+var _ secretsManagerDescriber = (*secretsmanager.Client)(nil)
+
 // Compile-time proof the real client satisfies the narrow interface.
 var _ SecretsManagerAPI = (*secretsmanager.Client)(nil)
 
@@ -31,19 +37,20 @@ var _ SecretsManagerAPI = (*secretsmanager.Client)(nil)
 //
 // SECURITY: the stored value is a credential. Prefer a customer-managed KMS key
 // via [WithKMSKeyID] and least-privilege IAM (GetSecretValue, PutSecretValue,
-// CreateSecret on the one secret ARN). See the package doc.
+// CreateSecret on the one secret ARN; DescribeSecret with WithVerifyKMSKey).
+// See the package doc.
 //
 // KMS key-binding caveat: [WithKMSKeyID] takes effect only at CreateSecret (the
 // first save). Secrets Manager's PutSecretValue carries no KmsKeyId field, so a
 // secret that already exists stays encrypted under whatever key it was born with;
 // pointing the store at a different key does NOT re-key a pre-existing secret. Set
-// the key before the first save, or precreate the secret with the intended CMK. A
-// follow-up (issue #56) tracks optional live verification of the secret's actual
-// key on load (via DescribeSecret); it is deliberately not done here.
+// the key before the first save, or precreate the secret with the intended CMK.
+// Pass WithVerifyKMSKey with an exact key ARN to check the live key before writes.
 type SecretsManagerStore struct {
-	client   SecretsManagerAPI
-	secretID string
-	kmsKeyID string
+	client       SecretsManagerAPI
+	secretID     string
+	kmsKeyID     string
+	verifyKMSKey bool
 }
 
 var _ qurl.AgentStateStore = (*SecretsManagerStore)(nil)
@@ -60,9 +67,10 @@ var _ qurl.AgentStateStore = (*SecretsManagerStore)(nil)
 func NewSecretsManagerStore(client SecretsManagerAPI, secretID string, opts ...Option) *SecretsManagerStore {
 	cfg := newStoreConfig(opts...)
 	return &SecretsManagerStore{
-		client:   client,
-		secretID: strings.TrimSpace(secretID),
-		kmsKeyID: cfg.kmsKeyID,
+		client:       client,
+		secretID:     strings.TrimSpace(secretID),
+		kmsKeyID:     cfg.kmsKeyID,
+		verifyKMSKey: cfg.verifyKMSKey,
 	}
 }
 
@@ -104,6 +112,8 @@ func (s *SecretsManagerStore) LoadAgentState(ctx context.Context) (*qurl.AgentSt
 // SaveAgentState marshals state to JSON and upserts it into the secret: it tries
 // PutSecretValue first, and on ResourceNotFoundException creates the secret
 // (CreateSecret) with the configured KMS key, then is idempotent thereafter.
+// WithVerifyKMSKey checks the key before each write; a missing secret goes
+// directly to CreateSecret so an unchecked concurrent creator cannot be overwritten.
 func (s *SecretsManagerStore) SaveAgentState(ctx context.Context, state *qurl.AgentState) error {
 	// Guard order matches this store's own LoadAgentState (context, then nil-client,
 	// then the id/state marshal guard) so a given misconfiguration yields the same
@@ -119,11 +129,26 @@ func (s *SecretsManagerStore) SaveAgentState(ctx context.Context, state *qurl.Ag
 		return err
 	}
 
+	secretMissing := false
+	if s.verifyKMSKey {
+		if err := s.checkKMSKey(ctx); err != nil {
+			var notFound *smtypes.ResourceNotFoundException
+			if !errors.As(err, &notFound) {
+				return err
+			}
+			secretMissing = true
+		}
+	}
+
 	secretString := string(raw)
-	_, err = s.client.PutSecretValue(ctx, &secretsmanager.PutSecretValueInput{
-		SecretId:     aws.String(s.secretID),
-		SecretString: aws.String(secretString),
-	})
+	if secretMissing {
+		err = &smtypes.ResourceNotFoundException{}
+	} else {
+		_, err = s.client.PutSecretValue(ctx, &secretsmanager.PutSecretValueInput{
+			SecretId:     aws.String(s.secretID),
+			SecretString: aws.String(secretString),
+		})
+	}
 	if err == nil {
 		return nil
 	}
@@ -159,6 +184,11 @@ func (s *SecretsManagerStore) SaveAgentState(ctx context.Context, state *qurl.Ag
 		// a property of the secret, bound at create; see WithKMSKeyID's doc).
 		var exists *smtypes.ResourceExistsException
 		if errors.As(err, &exists) {
+			if s.verifyKMSKey {
+				if err := s.checkKMSKey(ctx); err != nil {
+					return err
+				}
+			}
 			if _, perr := s.client.PutSecretValue(ctx, &secretsmanager.PutSecretValueInput{
 				SecretId:     aws.String(s.secretID),
 				SecretString: aws.String(secretString),
@@ -168,6 +198,25 @@ func (s *SecretsManagerStore) SaveAgentState(ctx context.Context, state *qurl.Ag
 			return nil
 		}
 		return fmt.Errorf("qurl: create secret: %w", err)
+	}
+	return nil
+}
+
+// checkKMSKey never loads or includes the credential in diagnostics.
+func (s *SecretsManagerStore) checkKMSKey(ctx context.Context) error {
+	if _, err := canonicalKMSKeyARN(s.kmsKeyID); err != nil {
+		return fmt.Errorf("%w: key verification requires an exact KMS key ARN", qurl.ErrInvalidBootstrapConfig)
+	}
+	client, ok := s.client.(secretsManagerDescriber)
+	if !ok {
+		return fmt.Errorf("%w: key verification requires DescribeSecret support", qurl.ErrInvalidBootstrapConfig)
+	}
+	out, err := client.DescribeSecret(ctx, &secretsmanager.DescribeSecretInput{SecretId: aws.String(s.secretID)})
+	if err != nil {
+		return fmt.Errorf("qurl: verify secret KMS key: %w", err)
+	}
+	if out == nil || aws.ToString(out.KmsKeyId) != s.kmsKeyID {
+		return fmt.Errorf("%w: secret KMS key does not match configured key", qurl.ErrInvalidBootstrapConfig)
 	}
 	return nil
 }

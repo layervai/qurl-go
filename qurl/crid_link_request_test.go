@@ -679,6 +679,7 @@ func TestCRIDLinkRequest_NeverPutsTheLinkInAnErrorOrALog(t *testing.T) {
 	// Every sink the standard library offers a careless Printf. The buffer is
 	// locked because the test servers may log from their own goroutines.
 	logged := new(lockedBuffer)
+	guardProcessGlobals(t)
 	priorWriter, priorFlags, priorSlog := log.Writer(), log.Flags(), slog.Default()
 	log.SetOutput(logged)
 	slog.SetDefault(slog.New(slog.NewTextHandler(logged, &slog.HandlerOptions{Level: slog.LevelDebug})))

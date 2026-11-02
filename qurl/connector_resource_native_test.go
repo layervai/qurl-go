@@ -403,6 +403,9 @@ func TestParseNativeConnectorResourceErrors(t *testing.T) {
 			if result != nil || !errors.Is(err, tc.want) {
 				t.Fatalf("result, error = %#v, %v; want nil and %v", result, err, tc.want)
 			}
+			if !strings.Contains(err.Error(), tc.want.Error()) || !strings.Contains(err.Error(), tc.wantCode) {
+				t.Fatalf("discovery error lacks its safe category or code: %v", err)
+			}
 			var discovery *ConnectorResourceDiscoveryError
 			if !errors.As(err, &discovery) || discovery.Code != tc.wantCode || discovery.RetryAfter != tc.wantRetry {
 				t.Fatalf("typed error = %#v, want code %s retry %v", discovery, tc.wantCode, tc.wantRetry)

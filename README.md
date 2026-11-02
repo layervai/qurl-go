@@ -106,6 +106,65 @@ apply its redirect checks. An HTTP GET of the browser share URL alone fetches
 the opening page, not the protected file. Retain the documented session state
 when one logical visit needs retries; opening a single-use link again can fail.
 
+## Manage resources, links, and sessions
+
+Use the same authenticated `Client` for management. `ProtectURL` creates or
+reuses a URL resource, and `CreatePortal` mints a link. These additional methods
+read or change resources you can manage:
+
+| Task | Method |
+| --- | --- |
+| List resource metadata | `ListResources` |
+| Read one resource and its bounded link preview | `GetResource` |
+| Update metadata, tags, or alias | `UpdateResource` |
+| Revoke the entire resource | `RevokeResource` |
+| List all link summaries in pages | `ListPortals` |
+| Read one page of sessions | `ListSessions` |
+| Terminate one session | `TerminateSession` |
+| Terminate one page of sessions | `TerminateSessions` |
+
+Pass the response's `crid` as the resource identifier. Management methods also
+accept a legacy resource public key. Page results keep the API's `meta`,
+including `request_id` and the opaque `next_cursor`:
+
+```go
+page, err := client.ListPortals(ctx, resourceCRID, qurl.PageOptions{
+    Limit: 20,
+    Cursor: previousCursor,
+})
+if err != nil {
+    return err
+}
+for _, link := range page.Data {
+    fmt.Println(link.QURLID, link.Status)
+}
+```
+
+Follow `NextCursor` even when a filtered page has no items. A nil `HasMore` or
+`QURLCount` means the service did not report that value. `GetResource` returns
+a bounded, unordered link preview; a missing link in that preview does not
+prove revocation. Use `ListPortals` for complete paginated reads.
+
+`ManagedResource` preserves omitted fields. Connector-owned upload responses
+do not contain private content metadata; the SDK does not fill it with empty
+or zero values. `ResourceUpdate` uses pointers to distinguish omitted fields
+from explicit empty values. Set `ClearAlias: true` to send JSON null; do not
+also set `Alias`. The service validates field bounds and policy combinations.
+
+Session reads and bulk terminations always request bounded pagination.
+`TerminateSessions` reports one page's count and cursor. It does not drain all
+pages or retry mutations for you. A successful management request is not
+independent evidence that a native connection has reached CLOSED.
+
+If `errors.Is(err, qurl.ErrAPIRequestOutcomeUnknown)` is true, reconcile a
+mutation before retrying it. A transport/body failure or a surfaced 1xx, 3xx,
+or 5xx does not prove the write was rejected. `errors.As` still exposes the
+underlying `APIError`. Read callers can keep their normal retry policy.
+
+Read-model slices retain nil versus empty in Go, but JSON re-marshaling omits
+empty optional slices. Use `ResourceUpdate` for writes; its pointer fields
+preserve explicit clears.
+
 ## Connectivity, issuance, and opening from Go
 
 Choose the Go API by the part of the sharing lifecycle your software owns:
@@ -720,6 +779,14 @@ and are flagged in the [changelog](CHANGELOG.md) with what to change. Wire
 compatibility is pinned by authenticated golden vectors from
 [qurl-conformance](https://github.com/layervai/qurl-conformance); releases that
 move the wire protocol say so loudly and name the flag day.
+
+### Bounded API responses
+
+API responses default to a 1 MiB decoded-byte cap. `WithMaxResponseBodyBytes`
+accepts a positive integer through 16 MiB, including resource Clients returned
+by native agent lifecycle calls. Invalid values fail before I/O. Smaller pages
+keep the memory cost lower. See the [shared Go/TypeScript decision](https://github.com/layervai/qurl-typescript/blob/main/docs/api-response-limits.md)
+for error classes, decompression, cursor recovery and memory bounds.
 
 ## License
 

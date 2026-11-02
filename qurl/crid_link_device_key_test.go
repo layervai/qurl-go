@@ -1148,6 +1148,7 @@ func TestCRIDLinkAsDevice_NeverPutsTheDeviceKeyInAnErrorOrALog(t *testing.T) {
 	}
 
 	logged := new(lockedBuffer)
+	guardProcessGlobals(t)
 	priorWriter, priorFlags, priorSlog := log.Writer(), log.Flags(), slog.Default()
 	log.SetOutput(logged)
 	slog.SetDefault(slog.New(slog.NewTextHandler(logged, &slog.HandlerOptions{Level: slog.LevelDebug})))

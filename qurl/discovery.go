@@ -26,9 +26,10 @@ import (
 // expired, downgraded, missing a trust mode, or carrying empty/invalid config all
 // return an error, never a partial result.
 //
-// Discovery trust configuration is intentionally flexible: signed vs pinned
-// manifests, key rotation, and durable downgrade state are deployment choices.
-// This implementation provides the fail-closed mechanism behind those choices.
+// Native opens use the shipped deployment by default; this optional provider is
+// relay-only. For signed discovery use ManifestKeys and RequireSignature without
+// a pin, and deploy an approved MinVersion. docs/discovery-trust.md records the
+// production choice, rotation procedure, and deliberate no-cache policy.
 
 // ManifestEnvelope is the fetched discovery document. The signed/pinned MANIFEST
 // itself is carried as opaque base64url (ManifestB64) — exactly like a qURL link fragment
@@ -129,8 +130,8 @@ type DiscoveryConfig struct {
 	// The advanced floor is IN-MEMORY only: a process restart resets it to MinVersion, so
 	// rollback protection across restarts is bounded by MinVersion and the manifest's
 	// not_after, not by the highest version a previous process accepted. Durable
-	// rollback state is a deployment choice; pin a high MinVersion when
-	// cross-restart anti-rollback matters.
+	// rollback state belongs to deployment configuration; set its approved floor
+	// again after restart. See docs/discovery-trust.md.
 	MinVersion int64
 
 	// ExpectedProfile, when non-empty, requires the manifest's Profile to equal it. A
@@ -207,9 +208,10 @@ var (
 // authenticate, EnterPortal pays a network round-trip to the manifest endpoint on
 // EVERY link open, and a down/slow manifest endpoint fails every open even while a
 // recently-authenticated, still-in-window manifest exists. This is a deliberate
-// fail-closed-over-availability stance for the mechanism. An application expecting high
-// open volume should wrap this in a TTL cache that itself fails closed once not_after
-// (or the TTL) elapses; cache windows are a deployment choice.
+// fail-closed-over-availability policy for this optional relay-only mechanism.
+// The native production path uses the shipped deployment or explicit static cell
+// config instead. No SDK cache window or stale-on-error mode is provided; see
+// docs/discovery-trust.md before choosing discovery for a high-volume application.
 type DiscoveryProvider struct {
 	cfg DiscoveryConfig
 
@@ -352,8 +354,8 @@ func (p *DiscoveryProvider) Resolve(ctx context.Context) (*TrustStore, *RelayAll
 //
 // So a manifest that is unpinned-or-pin-mismatched, or that carries a signature that
 // does not verify, or that satisfies no anchor at all, is rejected. This is the
-// safe-default MECHANISM; whether production uses pin-only, signed-only, or
-// pin-AND-signed (and the exact precedence between them) is a deployment choice.
+// anchor mechanism. The production policy uses required signatures and trusted
+// deployment keys; see docs/discovery-trust.md for deliberate pin freezes.
 // SigB64/Kid ride OUTSIDE the pinned/signed preimage, so an
 // attacker who cannot alter the manifest bytes also cannot forge acceptance; corrupting
 // a present signature only makes an otherwise-good manifest fail closed (deny), never

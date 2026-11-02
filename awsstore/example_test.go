@@ -45,6 +45,16 @@ func ExampleNewSecretsManagerStore() {
 	}
 }
 
+func ExampleWithVerifyKMSKey() {
+	client := secretsmanager.NewFromConfig(aws.Config{})
+	_ = awsstore.NewSecretsManagerStore(
+		client,
+		"qurl/agent-state",
+		awsstore.WithKMSKeyID("arn:aws:kms:us-east-1:123456789012:key/12345678-1234-1234-1234-123456789012"),
+		awsstore.WithVerifyKMSKey(), // requires secretsmanager:DescribeSecret on this secret
+	)
+}
+
 func ExampleNewParameterStore() {
 	client := ssm.NewFromConfig(aws.Config{})
 	store := awsstore.NewParameterStore(

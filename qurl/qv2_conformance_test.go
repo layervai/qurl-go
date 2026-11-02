@@ -254,6 +254,8 @@ func assertConformanceSignatureReject(t *testing.T, rejectClass string, err erro
 		want = errSignatureHighS
 	case conformance.RejectClassWrongLength:
 		want = errSignatureLength
+	case "scalar_range":
+		want = errSignatureScalarRange
 	default:
 		t.Fatalf("unexpected signature reject_class %q; conformance.ParseVectorFile should reject unknown classes before verification", rejectClass)
 	}

@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -228,7 +229,7 @@ func TestDiscoveryProvider_ConfigDefensivelyCopied(t *testing.T) {
 
 // TestDiscoveryProvider_PinnedManifest_Resolves proves the success path: a pinned,
 // in-window, well-formed manifest resolves to a usable trust store + allowlist that
-// EnterPortalWith accepts (verify a vendored link routed to the manifest's relay).
+// EnterPortalWith accepts (verify a generated link routed to the manifest's relay).
 func TestDiscoveryProvider_PinnedManifest_Resolves(t *testing.T) {
 	raw, pin := envelopeBytes(t, validManifest(t))
 	p := pinnedProvider(t, raw, pin, nil)
@@ -739,14 +740,14 @@ func TestDiscoveryProvider_ProfileMismatch_FailsClosed(t *testing.T) {
 // TestEnterPortal_DiscoveryProvider_RelayOffAllowlist_Rejected wires a DiscoveryProvider
 // into the one-arg EnterPortal and proves the PROOF's "unallowlisted relay_url rejected
 // (after sig verify)" through the full path: the discovery manifest is authenticated and
-// supplies a VALID trust store (the vendored issuer kid, so the link's signature
+// supplies a VALID trust store (the generated issuer kid, so the link's signature
 // verifies) but an allowlist that does NOT contain the link's relay_url. The result is
 // ErrRelayURL — reached only after the signature verified, since an unverified link
 // would have failed on the kid first.
 func TestEnterPortal_DiscoveryProvider_RelayOffAllowlist_Rejected(t *testing.T) {
 	link, ts, _ := generatedAcceptLink(t)
 
-	// A discovery provider whose Resolve returns the vendored trust store (so the
+	// A discovery provider whose Resolve returns the generated trust store (so the
 	// signature verifies) and an allowlist missing the link's relay host. Using a
 	// providerFunc keeps the focus on the post-verify ordering; the manifest
 	// authentication itself is covered by the pin/sig tests above.
@@ -758,5 +759,102 @@ func TestEnterPortal_DiscoveryProvider_RelayOffAllowlist_Rejected(t *testing.T) 
 	_, err := EnterPortal(context.Background(), link)
 	if !errors.Is(err, ErrRelayURL) {
 		t.Fatalf("off-allowlist relay after sig verify: want ErrRelayURL, got %v", err)
+	}
+}
+
+func TestDiscoveryProvider_MatchingPinDoesNotRescueBadSignature(t *testing.T) {
+	signer, err := GenerateLocalSigner("manifest-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := validManifest(t)
+	signedJSON, err := json.Marshal(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original.Version++
+	embeddedJSON, err := json.Marshal(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := signedEnvelopeBytes(t, signer, signedJSON, embeddedJSON)
+	der, err := signer.PublicKeyDER()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, err := ParseP256PublicKeyDER(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pin := ManifestDigest(embeddedJSON)
+	for _, requireSignature := range []bool{false, true} {
+		t.Run(fmt.Sprintf("require-signature-%t", requireSignature), func(t *testing.T) {
+			provider, err := NewDiscoveryProvider(DiscoveryConfig{
+				Fetcher:          FetcherFunc(func(context.Context) ([]byte, error) { return raw, nil }),
+				PinSHA256:        pin[:],
+				ManifestKeys:     map[string]*ecdsa.PublicKey{signer.KID(): pub},
+				RequireSignature: requireSignature,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := provider.Resolve(context.Background()); !errors.Is(err, ErrManifestUnverified) || !errors.Is(err, ErrSignature) {
+				t.Fatalf("matching pin must not rescue invalid signature: %v", err)
+			}
+		})
+	}
+}
+
+func TestDiscoveryProvider_ManifestSigningKeyOverlapAndRetirement(t *testing.T) {
+	keys := make(map[string]*ecdsa.PublicKey)
+	envelopes := make(map[string][]byte)
+	manifestJSON, err := json.Marshal(validManifest(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, kid := range []string{"old", "new"} {
+		signer, err := GenerateLocalSigner(kid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		der, err := signer.PublicKeyDER()
+		if err != nil {
+			t.Fatal(err)
+		}
+		pub, err := ParseP256PublicKeyDER(der)
+		if err != nil {
+			t.Fatal(err)
+		}
+		keys[kid] = pub
+		envelopes[kid] = signedEnvelopeBytes(t, signer, manifestJSON, manifestJSON)
+	}
+	var served []byte
+	makeProvider := func() *DiscoveryProvider {
+		t.Helper()
+		provider, err := NewDiscoveryProvider(DiscoveryConfig{
+			Fetcher:      FetcherFunc(func(context.Context) ([]byte, error) { return served, nil }),
+			ManifestKeys: keys, RequireSignature: true,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return provider
+	}
+	overlap := makeProvider()
+	for _, kid := range []string{"old", "new"} {
+		served = envelopes[kid]
+		if _, _, err := overlap.Resolve(context.Background()); err != nil {
+			t.Fatalf("overlap %s: %v", kid, err)
+		}
+	}
+	delete(keys, "old")
+	retired := makeProvider()
+	served = envelopes["old"]
+	if _, _, err := retired.Resolve(context.Background()); !errors.Is(err, ErrManifestUnverified) || !errors.Is(err, ErrUnknownKID) {
+		t.Fatalf("retired manifest key must fail closed: %v", err)
+	}
+	served = envelopes["new"]
+	if _, _, err := retired.Resolve(context.Background()); err != nil {
+		t.Fatalf("new manifest key after retirement: %v", err)
 	}
 }

@@ -154,6 +154,9 @@ func (s *AgentState) UnmarshalJSON(raw []byte) error {
 	if err := strictDecodeJSON(raw, &decoded); err != nil {
 		return errors.New("qurl: invalid agent state JSON")
 	}
+	if decoded.PrivateKeyB64 == "" {
+		return fmt.Errorf("%w: persisted agent state must contain its private identity key", ErrInvalidAgentState)
+	}
 	*s = AgentState(decoded)
 	return nil
 }

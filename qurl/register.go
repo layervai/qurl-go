@@ -145,15 +145,15 @@ func validateAgentRuntimeMetadata(state *AgentState, now time.Time, errKind erro
 // the exact credential as part of their pre-commit state/completion contract.
 // Keeping construction infallible prevents a committed lifecycle mutation from
 // acquiring a new post-commit error tail merely while materializing its Client.
-func newPrimedStoreBackedClient(store AgentStateStore, baseURL string, httpClient HTTPDoer, validatedDeviceAPIKey, expectedAgentID string, now func() time.Time) *Client {
-	return newStoreBackedClientWithCredential(store, baseURL, httpClient, validatedDeviceAPIKey, expectedAgentID, now)
+func newPrimedStoreBackedClient(store AgentStateStore, baseURL string, httpClient HTTPDoer, maxResponseBodyBytes int, validatedDeviceAPIKey, expectedAgentID string, now func() time.Time) *Client {
+	return newStoreBackedClientWithCredential(store, baseURL, httpClient, maxResponseBodyBytes, validatedDeviceAPIKey, expectedAgentID, now)
 }
 
 // newStoreBackedClientWithCredential optionally primes the one-minute cache from
 // an already validated AgentState so a combined runtime open does not unseal or
 // reload the same store on its first resource request. The wrapped store provider
 // remains authoritative after the cache expires.
-func newStoreBackedClientWithCredential(store AgentStateStore, baseURL string, httpClient HTTPDoer, deviceAPIKey, expectedAgentID string, now func() time.Time) *Client {
+func newStoreBackedClientWithCredential(store AgentStateStore, baseURL string, httpClient HTTPDoer, maxResponseBodyBytes int, deviceAPIKey, expectedAgentID string, now func() time.Time) *Client {
 	if now == nil {
 		now = time.Now
 	}
@@ -167,10 +167,11 @@ func newStoreBackedClientWithCredential(store AgentStateStore, baseURL string, h
 		provider.expiresAt = provider.now().Add(provider.ttl)
 	}
 	return &Client{
-		credentials: provider,
-		baseURL:     baseURL,
-		httpClient:  httpClient,
-		registered:  true,
+		credentials:          provider,
+		baseURL:              baseURL,
+		httpClient:           httpClient,
+		maxResponseBodyBytes: maxResponseBodyBytes,
+		registered:           true,
 	}
 }
 

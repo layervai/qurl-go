@@ -62,9 +62,7 @@ func writeGeneratedDeployment(t *testing.T, withCells bool) (string, string) {
 // rather than a provider another test installed in the same process.
 func noDefaultProvider(t *testing.T) {
 	t.Helper()
-	prior := DefaultProvider()
-	SetDefaultProvider(nil)
-	t.Cleanup(func() { SetDefaultProvider(prior) })
+	installDefaultProvider(t, nil)
 }
 
 // TestEnterPortal_ZeroSetupOpensOverNativeUDP is the whole point of shipping a

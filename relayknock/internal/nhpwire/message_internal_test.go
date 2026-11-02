@@ -88,3 +88,26 @@ func TestInflateZlibReturnsNoPartialPlaintextOnChecksumFailure(t *testing.T) {
 		t.Fatalf("inflateZlib checksum failure = %q, %v; want nil body and error", body, err)
 	}
 }
+
+func TestInflateZlibRejectsCorruptAndTruncatedStreams(t *testing.T) {
+	var buf bytes.Buffer
+	w := zlib.NewWriter(&buf)
+	if _, err := w.Write([]byte("authenticated plaintext")); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for name, input := range map[string][]byte{
+		"invalid header":     []byte("not a zlib stream"),
+		"truncated header":   bytes.Clone(buf.Bytes()[:1]),
+		"truncated checksum": bytes.Clone(buf.Bytes()[:buf.Len()-1]),
+		"truncated payload":  bytes.Clone(buf.Bytes()[:buf.Len()/2]),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if body, err := inflateZlib(input); err == nil || body != nil {
+				t.Fatalf("inflateZlib = %q, %v; want nil body and error", body, err)
+			}
+		})
+	}
+}

@@ -352,6 +352,10 @@ func TestRelayPost_NonOKStatusIsRelayError(t *testing.T) {
 		body    string
 		wantSub string
 	}{
+		{name: "invalid request", status: http.StatusBadRequest, body: "", wantSub: "-> 400"},
+		{name: "unauthorized", status: http.StatusUnauthorized, body: "", wantSub: "-> 401"},
+		{name: "forbidden", status: http.StatusForbidden, body: "", wantSub: "-> 403"},
+		{name: "rate limited", status: http.StatusTooManyRequests, body: "", wantSub: "-> 429"},
 		{name: "unknown server", status: http.StatusNotFound, body: "unknown server id", wantSub: "unknown server id"},
 		{name: "forward failure", status: http.StatusBadGateway, body: "forward failed", wantSub: "forward failed"},
 		{name: "shutting down", status: http.StatusServiceUnavailable, body: "", wantSub: "-> 503"},

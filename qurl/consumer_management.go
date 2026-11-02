@@ -76,6 +76,9 @@ func (c *Client) InviteConsumer(ctx context.Context, crid, email string) (*Consu
 
 // ResendConsumerInvitation rotates the invitation link using its current version.
 func (c *Client) ResendConsumerInvitation(ctx context.Context, crid, id string, version int64) (*ConsumerInvitation, error) {
+	if err := validateResourceItemID(id, ErrInvalidResourceRequest); err != nil {
+		return nil, err
+	}
 	var response apiEnvelope[*ConsumerInvitation]
 	err := c.consumerManagement(ctx, crid, http.MethodPost, "/invitations/"+url.PathEscape(id)+"/resend", consumerVersionRequest{version}, &response)
 	if err != nil {
@@ -89,6 +92,9 @@ func (c *Client) ResendConsumerInvitation(ctx context.Context, crid, id string, 
 
 // RevokeConsumerInvitation removes the invitation and any grant it created.
 func (c *Client) RevokeConsumerInvitation(ctx context.Context, crid, id string, version int64) (*ConsumerInvitation, error) {
+	if err := validateResourceItemID(id, ErrInvalidResourceRequest); err != nil {
+		return nil, err
+	}
 	var response apiEnvelope[*ConsumerInvitation]
 	suffix := "/invitations/" + url.PathEscape(id) + "?expected_version=" + fmt.Sprint(version)
 	err := c.consumerManagement(ctx, crid, http.MethodDelete, suffix, nil, &response)
@@ -103,6 +109,9 @@ func (c *Client) RevokeConsumerInvitation(ctx context.Context, crid, id string, 
 
 // ApproveConsumerGrant approves a review, opts in a key with id new, or fulfills a contract.
 func (c *Client) ApproveConsumerGrant(ctx context.Context, crid, id string, approval ConsumerGrantApproval) (*ConsumerGrant, error) {
+	if err := validateResourceItemID(id, ErrInvalidResourceRequest); err != nil {
+		return nil, err
+	}
 	var response apiEnvelope[*ConsumerGrant]
 	err := c.consumerManagement(ctx, crid, http.MethodPost, "/consumer-grants/"+url.PathEscape(id)+"/approve", approval, &response)
 	if err != nil {
@@ -116,6 +125,9 @@ func (c *Client) ApproveConsumerGrant(ctx context.Context, crid, id string, appr
 
 // DenyConsumerGrant refuses a pending review with a version guard.
 func (c *Client) DenyConsumerGrant(ctx context.Context, crid, id string, version int64) (*ConsumerGrant, error) {
+	if err := validateResourceItemID(id, ErrInvalidResourceRequest); err != nil {
+		return nil, err
+	}
 	var response apiEnvelope[*ConsumerGrant]
 	err := c.consumerManagement(ctx, crid, http.MethodPost, "/consumer-grants/"+url.PathEscape(id)+"/deny", consumerVersionRequest{version}, &response)
 	if err != nil {
@@ -129,6 +141,9 @@ func (c *Client) DenyConsumerGrant(ctx context.Context, crid, id string, version
 
 // RevokeConsumerGrant removes access; inspect SessionCleanup before reporting stream removal.
 func (c *Client) RevokeConsumerGrant(ctx context.Context, crid, id string, version int64) (*ConsumerGrant, error) {
+	if err := validateResourceItemID(id, ErrInvalidResourceRequest); err != nil {
+		return nil, err
+	}
 	var response apiEnvelope[*ConsumerGrant]
 	suffix := "/consumer-grants/" + url.PathEscape(id) + "?expected_version=" + fmt.Sprint(version)
 	err := c.consumerManagement(ctx, crid, http.MethodDelete, suffix, nil, &response)

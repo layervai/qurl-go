@@ -237,7 +237,7 @@ jobs:
         # Keep it free of `@`: the shared age-check workflow in
         # layervai/ops-routines-workflows takes the pinned SHA from this
         # line's last `@`, and a second one becomes what it validates.
-        uses: aws-actions/configure-aws-credentials@557591d3fb8057929645fd3c7147240c3ec8e690 # main-2026-08-12
+        uses: aws-actions/configure-aws-credentials@ce2ec50a23cfb8aacf5544bea7a651d803d626f6 # main-2026-08-12
         with:
           role-to-assume: ${{ secrets.OTP_E2E_ROLE_ARN }}
           aws-region: ${{ secrets.OTP_E2E_MAILBOX_REGION }}

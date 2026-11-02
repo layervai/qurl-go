@@ -70,7 +70,7 @@ func unreachableCellCatalog(t *testing.T, cellKeyB64 string) *CellCatalog {
 }
 
 // vectorCellKeyB64 is the accept vector's cell key (32 bytes of 0x44), the key
-// the vendored link's claims carry.
+// the generated link's claims carry.
 func vectorCellKeyB64(t *testing.T) string {
 	t.Helper()
 	key := make([]byte, 32)
@@ -193,9 +193,7 @@ func TestEnterPortal_CellProviderRoutesOverNativeUDP(t *testing.T) {
 		allow: NewRelayAllowlist([]string{"relay.example.com"}),
 		cells: unreachableCellCatalog(t, vectorCellKeyB64(t)),
 	}
-	prior := DefaultProvider()
-	SetDefaultProvider(provider)
-	t.Cleanup(func() { SetDefaultProvider(prior) })
+	installDefaultProvider(t, provider)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -219,9 +217,7 @@ func TestEnterPortal_CellProviderErrorFailsClosed(t *testing.T) {
 		allow:    NewRelayAllowlist([]string{"relay.example.com"}),
 		cellsErr: errors.New("catalog unavailable"),
 	}
-	prior := DefaultProvider()
-	SetDefaultProvider(provider)
-	t.Cleanup(func() { SetDefaultProvider(prior) })
+	installDefaultProvider(t, provider)
 
 	_, err := EnterPortal(context.Background(), link)
 	if err == nil || !strings.Contains(err.Error(), "catalog unavailable") {

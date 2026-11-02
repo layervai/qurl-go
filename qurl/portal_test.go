@@ -92,7 +92,7 @@ func freshP256SPKIDER(t *testing.T) []byte {
 }
 
 // freshTrustStore mints an unrelated issuer key under a kid that is NOT the
-// vendored vector's kid, so a vector-signed link resolves to ErrUnknownKID against
+// generated vector's kid, so a vector-signed link resolves to ErrUnknownKID against
 // it.
 func freshTrustStore(t *testing.T) *TrustStore {
 	t.Helper()
@@ -103,7 +103,7 @@ func freshTrustStore(t *testing.T) *TrustStore {
 	return ts
 }
 
-// allowAll is the relay allowlist for the vendored vector's relay_url
+// allowAll is the relay allowlist for the generated vector's relay_url
 // (https://relay.example.com).
 func relayExampleAllowlist() *RelayAllowlist {
 	return NewRelayAllowlist([]string{"relay.example.com"})
