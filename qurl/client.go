@@ -865,7 +865,8 @@ type Portal struct {
 	Site string
 	// ExpiresAt is the link expiration time, when returned by the API.
 	ExpiresAt *time.Time
-	// ExpiresInSeconds is the server-reported remaining lifetime; nil means unknown.
+	// ExpiresInSeconds is the server-granted issuance lifetime; nil means unknown.
+	// Idempotent replays retain this value; ExpiresAt is the absolute expiry.
 	ExpiresInSeconds *int
 	// QURLID identifies the specific access token, when returned by the API.
 	QURLID string
