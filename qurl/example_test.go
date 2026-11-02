@@ -638,3 +638,10 @@ func ExampleConsumerAccessPolicy_Validate() {
 	fmt.Println(policy.Validate())
 	// Output: <nil>
 }
+
+func ExampleConsumerAccessPolicy_SameDefinition() {
+	sent := qurl.ConsumerAccessPolicy{Mode: "review", Version: 1, ApprovalExpiresIn: "1w"}
+	stored := qurl.ConsumerAccessPolicy{Mode: "review", Version: 2, ApprovalExpiresIn: "7d"}
+	fmt.Println(sent.SameDefinition(stored), sent.Equal(stored))
+	// Output: true false
+}

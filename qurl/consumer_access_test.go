@@ -276,6 +276,12 @@ func TestEmailDomainPolicyValidationAndSnapshotFence(t *testing.T) {
 	if newer := decode(`{"mode":"email_domain","version":3,"email_domain":"example.com","allowed_emails":["Person@other.com"]}`); !consumerCreationPolicyConfirmed(&private, &newer, &p, true) {
 		t.Fatal("existing resource with a newer revision of the same policy not confirmed")
 	}
+	// Public enrollment info carries the policy without owner-only exceptions; it must still validate.
+	for _, raw := range []string{`{"mode":"email_domain","version":1,"email_domain":"example.com"}`, `{"mode":"review","version":1,"approval_expires_in":"7d"}`} {
+		if err := decode(raw).validate(); err != nil {
+			t.Errorf("public policy %s: %v", raw, err)
+		}
+	}
 	if !(ConsumerAccessPolicy{Mode: "keys", Version: 1}).SameDefinition(ConsumerAccessPolicy{Mode: "keys", Version: 2, AllowedEmails: []string{}}) {
 		t.Fatal("nil and empty mailbox exceptions differ")
 	}
@@ -334,6 +340,8 @@ func TestUpdateConsumerAccessConfirmsOnlyTheStoredPolicy(t *testing.T) {
 		{week, func(p *ConsumerAccessPolicy) { p.ApprovalExpiresIn = "168h" }, true},
 		{week, func(p *ConsumerAccessPolicy) { p.ApprovalExpiresIn = "30d" }, false},
 		{week, func(p *ConsumerAccessPolicy) { p.ApprovalExpiresIn = "" }, false},
+		// The service stores a lifetime that is not whole hours in Go's form.
+		{ConsumerAccessPolicy{Mode: "keys", Version: 2, ApprovalExpiresIn: "90m"}, func(p *ConsumerAccessPolicy) { p.ApprovalExpiresIn = "1h30m0s" }, true},
 	} {
 		client := echoConsumerAccessClient(t, func(sent ConsumerAccessPolicy) ConsumerAccessPolicy { tc.change(&sent); return sent })
 		err := client.UpdateConsumerAccess(context.Background(), testConnectorCRID, 1, tc.sent)
@@ -356,7 +364,7 @@ func TestApprovalExpiresInTravelsWithReviewAndKeysPolicies(t *testing.T) {
 	if err := (ConsumerAccessPolicy{Mode: "email_capture", Version: 1, ApprovalExpiresIn: "7d"}).validate(); !errors.Is(err, ErrInvalidResourceRequest) {
 		t.Fatalf("approval_expires_in accepted outside review and keys: %v", err)
 	}
-	for value, valid := range map[string]bool{"1h": true, "90m": true, "365d": true, "1w": true, "8760h": true, "59m": false, "0d": false, "366d": false, "53w": false, "forever": false, "-1d": false, "d": false, "9223372036854775807d": false} {
+	for value, valid := range map[string]bool{"1h": true, "90m": true, "365d": true, "1w": true, "8760h": true, "+7d": true, "007d": true, "59m": false, "0d": false, "366d": false, "53w": false, "forever": false, "-1d": false, "d": false, "9223372036854775807d": false} {
 		if err := (ConsumerAccessPolicy{Mode: "keys", Version: 1, ApprovalExpiresIn: value}).validate(); (err == nil) != valid {
 			t.Errorf("approval_expires_in %q: %v", value, err)
 		}
