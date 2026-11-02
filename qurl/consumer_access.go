@@ -8,7 +8,9 @@ import (
 	"net/url"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
+	"time"
 	"unicode"
 )
 
@@ -21,7 +23,8 @@ type ConsumerAccessPolicy struct {
 	EmailDomain   string             `json:"email_domain,omitempty"`
 	AllowedEmails []string           `json:"allowed_emails,omitempty"`
 	// ApprovalExpiresIn bounds each review approval or key opt-in, such as
-	// "7d" (1h to 365d). The service sets and enforces each grant's expiry.
+	// "7d" (1h to 365d). The service stores it as whole days or hours ("1w"
+	// and "168h" become "7d") and sets and enforces each grant's expiry.
 	ApprovalExpiresIn string `json:"approval_expires_in,omitempty"`
 }
 
@@ -54,6 +57,9 @@ func (p ConsumerAccessPolicy) validate() error {
 	if p.ApprovalExpiresIn != "" && p.Mode != "review" && p.Mode != "keys" {
 		return fmt.Errorf("%w: approval_expires_in requires review or keys mode", ErrInvalidResourceRequest)
 	}
+	if _, ok := parseApprovalExpiresIn(p.ApprovalExpiresIn); p.ApprovalExpiresIn != "" && !ok {
+		return fmt.Errorf("%w: approval_expires_in must be from 1h to 365d", ErrInvalidResourceRequest)
+	}
 	if p.Payment != nil && (p.Mode != "contract" || !stripeAccountID.MatchString(p.Payment.AccountID) || !stripePriceID.MatchString(p.Payment.PriceID) || p.Payment.AccessSeconds < 0 || p.Payment.AccessSeconds > 315360000) {
 		return fmt.Errorf("%w: invalid Stripe payment policy", ErrInvalidResourceRequest)
 	}
@@ -70,6 +76,37 @@ func (p ConsumerAccessPolicy) validate() error {
 		return fmt.Errorf("%w: unknown consumer access mode", ErrInvalidResourceRequest)
 	}
 	return nil
+}
+
+// parseApprovalExpiresIn applies the service's grammar (Go durations plus
+// whole days "d" and weeks "w") and its 1h to 365d bounds.
+func parseApprovalExpiresIn(s string) (time.Duration, bool) {
+	const day, maximum = 24 * time.Hour, 365 * 24 * time.Hour
+	if len(s) < 2 {
+		return 0, false
+	}
+	unit := map[byte]time.Duration{'d': day, 'w': 7 * day}[s[len(s)-1]]
+	if n, err := strconv.Atoi(s[:len(s)-1]); unit != 0 && err == nil {
+		// Bounded before multiplying so a huge count cannot overflow into range.
+		return time.Duration(n) * unit, n >= 0 && n <= int(maximum/unit) && time.Duration(n)*unit >= time.Hour
+	}
+	d, err := time.ParseDuration(s)
+	return d, err == nil && d >= time.Hour && d <= maximum
+}
+
+// canonicalApprovalExpiresIn is the form the service stores, so "1w", "7d"
+// and "168h" compare as one policy.
+func canonicalApprovalExpiresIn(s string) string {
+	d, ok := parseApprovalExpiresIn(s)
+	switch {
+	case !ok:
+		return s
+	case d%(24*time.Hour) == 0:
+		return strconv.FormatInt(int64(d/(24*time.Hour)), 10) + "d"
+	case d%time.Hour == 0:
+		return strconv.FormatInt(int64(d/time.Hour), 10) + "h"
+	}
+	return d.String()
 }
 
 // validMailbox accepts one bare address with a lowercase domain; the local
@@ -169,9 +206,11 @@ func (p ConsumerAccessPolicy) Equal(other ConsumerAccessPolicy) bool {
 	return p.Version == other.Version && p.SameDefinition(other)
 }
 
-// SameDefinition compares every field except Version.
+// SameDefinition compares every field except Version; approval lifetimes
+// compare in the service's stored form.
 func (p ConsumerAccessPolicy) SameDefinition(other ConsumerAccessPolicy) bool {
-	return p.Mode == other.Mode && p.ContractID == other.ContractID && sameCRIDPayment(p.Payment, other.Payment) && p.EmailDomain == other.EmailDomain && p.ApprovalExpiresIn == other.ApprovalExpiresIn && slices.Equal(p.AllowedEmails, other.AllowedEmails)
+	return p.Mode == other.Mode && p.ContractID == other.ContractID && sameCRIDPayment(p.Payment, other.Payment) && p.EmailDomain == other.EmailDomain &&
+		canonicalApprovalExpiresIn(p.ApprovalExpiresIn) == canonicalApprovalExpiresIn(other.ApprovalExpiresIn) && slices.Equal(p.AllowedEmails, other.AllowedEmails)
 }
 
 // CRIDPaymentPolicy attaches a Stripe price to new or existing contract access.

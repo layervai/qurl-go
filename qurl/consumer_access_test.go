@@ -265,6 +265,10 @@ func TestEmailDomainPolicyValidationAndSnapshotFence(t *testing.T) {
 	}
 	p := decode(`{"mode":"email_domain","version":1,"email_domain":"example.com","allowed_emails":["Person@other.com"]}`)
 	private := true
+	var cfg resourceOptions
+	if err := WithConsumerAccess(p).applyResourceOption(&cfg); err != nil || !consumerCreationPolicyConfirmed(&private, &p, &p, false) {
+		t.Fatalf("email domain creation not confirmed: %v", err)
+	}
 	different := decode(`{"mode":"email_domain","version":1,"email_domain":"example.com","allowed_emails":["Other@other.com"]}`)
 	if consumerCreationPolicyConfirmed(&private, &different, &p, true) {
 		t.Fatal("different mailbox exception confirmed")
@@ -329,6 +333,29 @@ func TestApprovalExpiresInTravelsWithReviewAndKeysPolicies(t *testing.T) {
 	}
 	if err := (ConsumerAccessPolicy{Mode: "email_capture", Version: 1, ApprovalExpiresIn: "7d"}).validate(); !errors.Is(err, ErrInvalidResourceRequest) {
 		t.Fatalf("approval_expires_in accepted outside review and keys: %v", err)
+	}
+	for value, valid := range map[string]bool{"1h": true, "90m": true, "365d": true, "1w": true, "8760h": true, "59m": false, "0d": false, "366d": false, "53w": false, "forever": false, "-1d": false, "d": false, "9223372036854775807d": false} {
+		if err := (ConsumerAccessPolicy{Mode: "keys", Version: 1, ApprovalExpiresIn: value}).validate(); (err == nil) != valid {
+			t.Errorf("approval_expires_in %q: %v", value, err)
+		}
+	}
+}
+
+func TestApprovalExpiresInComparesInStoredForm(t *testing.T) {
+	sent := ConsumerAccessPolicy{Mode: "review", Version: 2, ApprovalExpiresIn: "1w"}
+	for stored, same := range map[string]bool{"7d": true, "168h": true, "30d": false, "": false} {
+		client := &Client{baseURL: "https://api.example.test", credentials: BearerToken("test"), httpClient: doerFunc(func(*http.Request) (*http.Response, error) {
+			echoed := sent
+			echoed.ApprovalExpiresIn = stored
+			raw, err := json.Marshal(map[string]any{"data": map[string]any{"resource_id": testConnectorID, "crid": testConnectorCRID, "consumer_access": echoed}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(raw))}, nil
+		})}
+		if err := client.UpdateConsumerAccess(context.Background(), testConnectorCRID, 1, sent); (err == nil) != same || err != nil && !errors.Is(err, ErrInvalidAPIResponse) {
+			t.Errorf("stored %q: %v", stored, err)
+		}
 	}
 }
 

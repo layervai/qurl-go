@@ -14,7 +14,8 @@ and are marked **Breaking** with what to change.
   `SameDefinition` to ignore `Version`. `Validate` checks a policy locally.
 
 - `ConsumerAccessPolicy.ApprovalExpiresIn` (`approval_expires_in`, `1h` to
-  `365d`, review and keys only) bounds each approval or key opt-in.
+  `365d`, review and keys only) bounds each approval or key opt-in. `Validate`
+  checks it, and comparisons accept the service's stored form (`1w` as `7d`).
 
 - `Reusable` is a `PortalOption` that sends an explicit `one_time_use: false`;
   qURL Connector links are single-use when the field is omitted.
