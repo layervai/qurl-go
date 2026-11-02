@@ -229,3 +229,69 @@ func TestPublisherStripeEndpointsValidateAccountFeeAndRedirect(t *testing.T) {
 		})
 	}
 }
+
+func TestConsumerEmailDomainPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		mode, domain string
+		valid        bool
+	}{
+		{"email_domain", "layerv.ai", true},
+		{"email_domain", "", false},
+		{"email_domain", "LayerV.ai", false},
+		{"email_domain", "*.layerv.ai", false},
+		{"email_domain", "https://layerv.ai", false},
+		{"email_domain", "layerv.ai.", false},
+		{"email_domain", "-invalid.ai", false},
+		{"keys", "layerv.ai", false},
+	} {
+		t.Run(tc.mode+"/"+tc.domain, func(t *testing.T) {
+			var policy ConsumerAccessPolicy
+			raw, _ := json.Marshal(map[string]any{"mode": tc.mode, "version": 1, "email_domain": tc.domain})
+			if err := json.Unmarshal(raw, &policy); err != nil {
+				t.Fatal(err)
+			}
+			if err := policy.validate(); (err == nil) != tc.valid {
+				t.Fatalf("valid=%v: %v", tc.valid, err)
+			}
+		})
+	}
+	var expected, changed ConsumerAccessPolicy
+	json.Unmarshal([]byte(`{"mode":"email_domain","version":1,"email_domain":"layerv.ai"}`), &expected)
+	json.Unmarshal([]byte(`{"mode":"email_domain","version":1,"email_domain":"outside.test"}`), &changed)
+	private := true
+	if !consumerCreationPolicyConfirmed(&private, &expected, &expected, false) || consumerCreationPolicyConfirmed(&private, &changed, &expected, true) || expected.equal(changed) {
+		t.Fatal("email-domain creation or policy comparison lost its exact domain")
+	}
+}
+
+func TestUpdateConsumerEmailDomainPolicyChecksReadback(t *testing.T) {
+	policy := ConsumerAccessPolicy{Mode: "email_domain", Version: 2, EmailDomain: "layerv.ai"}
+	for _, domain := range []string{"layerv.ai", "outside.test"} {
+		client := &Client{baseURL: "https://api.example.test", credentials: BearerToken("test"), httpClient: doerFunc(func(req *http.Request) (*http.Response, error) {
+			var body struct {
+				Policy   ConsumerAccessPolicy `json:"consumer_access"`
+				Expected int64                `json:"expected_consumer_access_version"`
+			}
+			if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if body.Expected != 1 || !body.Policy.equal(policy) {
+				t.Fatal("policy write lost its domain or revision")
+			}
+			actual := policy
+			actual.EmailDomain = domain
+			raw, err := json.Marshal(map[string]any{"data": map[string]any{"resource_id": testConnectorID, "crid": testConnectorCRID, "consumer_access": actual}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(raw))}, nil
+		})}
+		err := client.UpdateConsumerAccess(t.Context(), testConnectorCRID, 1, policy)
+		if domain == "layerv.ai" && err != nil {
+			t.Fatal(err)
+		}
+		if domain != "layerv.ai" && !errors.Is(err, ErrInvalidAPIResponse) {
+			t.Fatal("changed email domain accepted")
+		}
+	}
+}

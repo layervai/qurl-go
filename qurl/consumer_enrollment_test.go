@@ -260,3 +260,27 @@ func TestConsumerDiscoverablePasskeyCapabilityFence(t *testing.T) {
 		})
 	}
 }
+
+func TestConsumerEmailDomainDiscovery(t *testing.T) {
+	fixture := newCRIDLinkFixture(t)
+	key, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := NewConsumerEnrollmentClient(fixture.crid, key.Bytes(), fixture.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := map[string]any{"crid": fixture.crid, "policy": ConsumerAccessPolicy{Mode: "email_domain", Version: 1, EmailDomain: "layerv.ai"}, "origin": fixture.cfg.CRIDLink.LinkOrigin, "relying_party_id": "qurl.link", "server_time": int64(1791689400), "email_access_supported": true}
+	raw, err := json.Marshal(map[string]any{"errCode": "52609", "redirectInfo": map[string]any{"version": 1, "action": "info", "data": data}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.peer.respond(cridLinkAnswer{replyType: relayknock.TypeACK, body: raw})
+	if _, err := client.Exchange(t.Context(), ConsumerEnrollmentOperation{Action: "info"}); err != nil {
+		t.Fatalf("email-domain discovery failed: %v", err)
+	}
+	if len(fixture.peer.seen()) != 1 {
+		t.Fatal("discovery made an unexpected private request")
+	}
+}
