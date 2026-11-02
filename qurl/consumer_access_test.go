@@ -274,10 +274,21 @@ func TestEmailDomainPolicyValidationAndSnapshotFence(t *testing.T) {
 	if consumerCreationPolicyConfirmed(&private, &different, &p, true) {
 		t.Fatal("different mailbox exception confirmed")
 	}
+	if newer := decode(`{"mode":"email_domain","version":3,"email_domain":"example.com","allowed_emails":["Person@other.com"]}`); !consumerCreationPolicyConfirmed(&private, &newer, &p, true) {
+		t.Fatal("existing resource with a newer revision of the same policy not confirmed")
+	}
+	if !(ConsumerAccessPolicy{Mode: "keys", Version: 1}).SameDefinition(ConsumerAccessPolicy{Mode: "keys", Version: 2, AllowedEmails: []string{}}) {
+		t.Fatal("nil and empty mailbox exceptions differ")
+	}
 	for _, raw := range []string{
 		`{"mode":"email_domain","version":1,"email_domain":"Example.com"}`,
 		`{"mode":"email_domain","version":1,"email_domain":"example.com","allowed_emails":["a@OTHER.com"]}`,
 		`{"mode":"email_domain","version":1,"email_domain":"example.com","allowed_emails":["a@other.com","a@other.com"]}`,
+		`{"mode":"email_domain","version":1,"email_domain":"example.com","allowed_emails":["Name <a@other.com>"]}`,
+		`{"mode":"email_domain","version":1,"email_domain":"example.com","allowed_emails":["a@other.com (comment)"]}`,
+		`{"mode":"email_domain","version":1,"email_domain":"example.com","allowed_emails":["a\u202e@other.com"]}`,
+		`{"mode":"email_domain","version":1,"email_domain":"example.com","allowed_emails":["a\u0007@other.com"]}`,
+		`{"mode":"email_domain","version":1,"email_domain":"example.com","allowed_emails":[" a@other.com"]}`,
 		`{"mode":"review","version":1,"email_domain":"example.com"}`,
 		`{"mode":"contract","version":1,"contract_id":"contains spaces"}`,
 	} {

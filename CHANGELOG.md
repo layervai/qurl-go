@@ -11,7 +11,8 @@ and are marked **Breaking** with what to change.
 - **Breaking:** `ConsumerAccessPolicy` gains `EmailDomain` and
   `AllowedEmails` for the new `email_domain` mode, so the struct is no longer
   comparable, and neither is `ConsumerAccessOption` or any struct holding
-  one: `==` and map keys stop compiling. Use `Equal`, or
+  one: `==` and map keys stop compiling, and comparing them inside an
+  interface such as `ResourceOption` panics at run time. Use `Equal`, or
   `SameDefinition` to ignore `Version`. `Validate` checks a policy locally.
   A contract ID must now be 1-128 letters, digits, `_` or `-`, matching the
   service, which already refused anything else.
