@@ -158,7 +158,7 @@ func consumerCreationPolicyConfirmed(private *bool, actual, expected *ConsumerAc
 	if expected == nil {
 		return true
 	}
-	if private == nil || !*private || actual == nil || actual.validate() != nil || !actual.SameDefinition(*expected) {
+	if private == nil || !*private || actual == nil || !actual.SameDefinition(*expected) || actual.validate() != nil {
 		return false
 	}
 	return actual.Version == expected.Version || (foundExisting && actual.Version > expected.Version)
