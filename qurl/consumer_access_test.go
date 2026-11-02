@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -287,8 +288,9 @@ func TestEmailDomainPolicyValidationAndSnapshotFence(t *testing.T) {
 }
 
 func TestUpdateConsumerAccessRejectsDifferentMailboxExceptions(t *testing.T) {
-	policy := ConsumerAccessPolicy{Mode: "email_domain", Version: 2, EmailDomain: "example.com", AllowedEmails: []string{"Partner@other.com"}}
-	for _, emails := range [][]string{{"Partner@other.com"}, {"Other@other.com"}, nil} {
+	// The service echoes mailbox exceptions verbatim and in order, so a reorder is a different answer.
+	policy := ConsumerAccessPolicy{Mode: "email_domain", Version: 2, EmailDomain: "example.com", AllowedEmails: []string{"z@other.com", "Partner@other.com"}}
+	for _, emails := range [][]string{{"z@other.com", "Partner@other.com"}, {"Partner@other.com", "z@other.com"}, {"z@other.com", "Other@other.com"}, nil} {
 		echoed := policy
 		echoed.AllowedEmails = emails
 		client := &Client{baseURL: "https://api.example.test", credentials: BearerToken("test"), httpClient: doerFunc(func(*http.Request) (*http.Response, error) {
@@ -299,7 +301,7 @@ func TestUpdateConsumerAccessRejectsDifferentMailboxExceptions(t *testing.T) {
 			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(raw))}, nil
 		})}
 		err := client.UpdateConsumerAccess(context.Background(), testConnectorCRID, 1, policy)
-		if same := len(emails) == 1 && emails[0] == "Partner@other.com"; same != (err == nil) {
+		if same := slices.Equal(emails, policy.AllowedEmails); same != (err == nil) {
 			t.Fatalf("allowed_emails %v: %v", emails, err)
 		}
 		if err != nil && !errors.Is(err, ErrInvalidAPIResponse) {
@@ -357,10 +359,4 @@ func TestApprovalExpiresInComparesInStoredForm(t *testing.T) {
 			t.Errorf("stored %q: %v", stored, err)
 		}
 	}
-}
-
-func ExampleConsumerAccessPolicy_Validate() {
-	policy := ConsumerAccessPolicy{Mode: "email_domain", Version: 1, EmailDomain: "example.com", AllowedEmails: []string{"Partner@outside.example"}}
-	fmt.Println(policy.Validate())
-	// Output: <nil>
 }

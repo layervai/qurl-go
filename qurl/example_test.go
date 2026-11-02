@@ -632,3 +632,9 @@ func ExampleWithMaxResponseBodyBytes() {
 	fmt.Println(client != nil)
 	// Output: true
 }
+
+func ExampleConsumerAccessPolicy_Validate() {
+	policy := qurl.ConsumerAccessPolicy{Mode: "email_domain", Version: 1, EmailDomain: "example.com", AllowedEmails: []string{"Partner@outside.example"}}
+	fmt.Println(policy.Validate())
+	// Output: <nil>
+}

@@ -23,8 +23,9 @@ type ConsumerAccessPolicy struct {
 	EmailDomain   string             `json:"email_domain,omitempty"`
 	AllowedEmails []string           `json:"allowed_emails,omitempty"`
 	// ApprovalExpiresIn bounds each review approval or key opt-in, such as
-	// "7d" (1h to 365d). The service stores it as whole days or hours ("1w"
-	// and "168h" become "7d") and sets and enforces each grant's expiry.
+	// "7d" (1h to 365d, in qurl-service's duration grammar). The service
+	// stores whole days or hours in that unit ("1w" and "168h" become "7d")
+	// and sets and enforces each grant's expiry.
 	ApprovalExpiresIn string `json:"approval_expires_in,omitempty"`
 }
 

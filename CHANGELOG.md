@@ -12,6 +12,8 @@ and are marked **Breaking** with what to change.
   `AllowedEmails` for the new `email_domain` mode, so the struct is no longer
   comparable: `==` and map keys stop compiling. Use `Equal`, or
   `SameDefinition` to ignore `Version`. `Validate` checks a policy locally.
+  A contract ID must now be 1-128 letters, digits, `_` or `-`, matching the
+  service, which already refused anything else.
 
 - `ConsumerAccessPolicy.ApprovalExpiresIn` (`approval_expires_in`, `1h` to
   `365d`, review and keys only) bounds each approval or key opt-in. `Validate`
