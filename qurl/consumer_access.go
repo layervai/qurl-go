@@ -11,21 +11,29 @@ import (
 
 // ConsumerAccessPolicy selects the publisher's private access flow.
 type ConsumerAccessPolicy struct {
-	Mode       string             `json:"mode"`
-	Version    int64              `json:"version"`
-	ContractID string             `json:"contract_id,omitempty"`
-	Payment    *CRIDPaymentPolicy `json:"payment,omitempty"`
+	Mode        string             `json:"mode"`
+	Version     int64              `json:"version"`
+	ContractID  string             `json:"contract_id,omitempty"`
+	Payment     *CRIDPaymentPolicy `json:"payment,omitempty"`
+	EmailDomain string             `json:"email_domain,omitempty"`
 }
 
 func (p ConsumerAccessPolicy) validate() error {
 	if p.Version < 1 || p.Version > 9007199254740991 {
 		return fmt.Errorf("%w: invalid consumer policy version", ErrInvalidResourceRequest)
 	}
+	if p.Mode == "email_domain" {
+		if len(p.EmailDomain) > 253 || !consumerEmailDomain.MatchString(p.EmailDomain) {
+			return fmt.Errorf("%w: email_domain requires one lowercase DNS domain", ErrInvalidResourceRequest)
+		}
+	} else if p.EmailDomain != "" {
+		return fmt.Errorf("%w: email_domain field requires email_domain mode", ErrInvalidResourceRequest)
+	}
 	if p.Payment != nil && (p.Mode != "contract" || !stripeAccountID.MatchString(p.Payment.AccountID) || !stripePriceID.MatchString(p.Payment.PriceID) || p.Payment.AccessSeconds < 0 || p.Payment.AccessSeconds > 315360000) {
 		return fmt.Errorf("%w: invalid Stripe payment policy", ErrInvalidResourceRequest)
 	}
 	switch p.Mode {
-	case "keys", "invite_only", "email_capture", "review":
+	case "keys", "invite_only", "email_capture", "email_domain", "review":
 		if p.ContractID != "" {
 			return fmt.Errorf("%w: contract_id requires contract mode", ErrInvalidResourceRequest)
 		}
@@ -115,7 +123,7 @@ func consumerCreationPolicyConfirmed(private *bool, actual, expected *ConsumerAc
 	if expected == nil {
 		return true
 	}
-	if private == nil || !*private || actual == nil || actual.validate() != nil || actual.Mode != expected.Mode || actual.ContractID != expected.ContractID || !sameCRIDPayment(actual.Payment, expected.Payment) {
+	if private == nil || !*private || actual == nil || actual.validate() != nil || actual.Mode != expected.Mode || actual.ContractID != expected.ContractID || actual.EmailDomain != expected.EmailDomain || !sameCRIDPayment(actual.Payment, expected.Payment) {
 		return false
 	}
 	return actual.Version == expected.Version || (foundExisting && actual.Version > expected.Version)
@@ -130,8 +138,9 @@ type CRIDPaymentPolicy struct {
 }
 
 var (
-	stripeAccountID = regexp.MustCompile(`^acct_[A-Za-z0-9]{1,128}$`)
-	stripePriceID   = regexp.MustCompile(`^price_[A-Za-z0-9]{1,128}$`)
+	consumerEmailDomain = regexp.MustCompile(`^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$`)
+	stripeAccountID     = regexp.MustCompile(`^acct_[A-Za-z0-9]{1,128}$`)
+	stripePriceID       = regexp.MustCompile(`^price_[A-Za-z0-9]{1,128}$`)
 )
 
 func sameCRIDPayment(a, b *CRIDPaymentPolicy) bool {
@@ -142,7 +151,7 @@ func sameCRIDPayment(a, b *CRIDPaymentPolicy) bool {
 }
 
 func (p ConsumerAccessPolicy) equal(other ConsumerAccessPolicy) bool {
-	return p.Mode == other.Mode && p.Version == other.Version && p.ContractID == other.ContractID && sameCRIDPayment(p.Payment, other.Payment)
+	return p.Mode == other.Mode && p.Version == other.Version && p.ContractID == other.ContractID && p.EmailDomain == other.EmailDomain && sameCRIDPayment(p.Payment, other.Payment)
 }
 
 // ConnectPublisherStripe returns the Stripe-hosted publisher consent URL.
