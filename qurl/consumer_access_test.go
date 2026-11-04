@@ -377,7 +377,7 @@ func TestApprovalExpiresInTravelsWithReviewAndKeysPolicies(t *testing.T) {
 	if err := (ConsumerAccessPolicy{Mode: "email_capture", Version: 1, ApprovalExpiresIn: "7d"}).validate(); !errors.Is(err, ErrInvalidResourceRequest) {
 		t.Fatalf("approval_expires_in accepted outside review and keys: %v", err)
 	}
-	for value, valid := range map[string]bool{"1h": true, "90m": true, "365d": true, "1w": true, "8760h": true, "+7d": true, "007d": true, "59m": false, "0d": false, "366d": false, "53w": false, "forever": false, "-1d": false, "d": false, "9223372036854775807d": false} {
+	for value, valid := range map[string]bool{"1h": true, "90m": true, "61m": true, "000000000000001h": true, "365d": true, "1w": true, "8760h": true, "+7d": true, "007d": true, "1h30s": false, "1h0.5s": false, "0000000000000001h": false, "59m": false, "0d": false, "366d": false, "53w": false, "forever": false, "-1d": false, "d": false, "9223372036854775807d": false} {
 		if err := (ConsumerAccessPolicy{Mode: "keys", Version: 1, ApprovalExpiresIn: value}).validate(); (err == nil) != valid {
 			t.Errorf("approval_expires_in %q: %v", value, err)
 		}

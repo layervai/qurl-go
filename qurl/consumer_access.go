@@ -83,7 +83,7 @@ func (p ConsumerAccessPolicy) validate() error {
 // whole days "d" and weeks "w") and its 1h to 365d bounds.
 func parseApprovalExpiresIn(s string) (time.Duration, bool) {
 	const day, maximum = 24 * time.Hour, 365 * 24 * time.Hour
-	if len(s) < 2 {
+	if len(s) < 2 || len(s) > 16 {
 		return 0, false
 	}
 	var unit time.Duration
@@ -102,7 +102,7 @@ func parseApprovalExpiresIn(s string) (time.Duration, bool) {
 		return d, d >= time.Hour
 	}
 	d, err := time.ParseDuration(s)
-	return d, err == nil && d >= time.Hour && d <= maximum
+	return d, err == nil && d%time.Minute == 0 && d >= time.Hour && d <= maximum
 }
 
 // canonicalApprovalExpiresIn is the form the service stores, so "1w", "7d"
