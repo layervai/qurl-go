@@ -2,7 +2,7 @@
 
 Use `WithConsumerAccess(ConsumerAccessPolicy{Mode: "invite_only", Version: 1})`
 when creating a resource with `ProtectURL` or qURL Connector. Modes are `keys`,
-`invite_only`, `email_capture`, `review` and `contract`. Public resources continue
+`invite_only`, `email_capture`, `email_domain`, `review` and `contract`. Public resources continue
 to use their existing flow. Change an existing private policy with
 `UpdateConsumerAccess`, the current version, and the next policy version.
 
@@ -56,3 +56,5 @@ a passkey-backed grant; first use must pass the invitation, approval, or
 entitlement checks for that mode. Revoke each grant separately. Later
 email logins reuse that mailbox's email-backed resource grant. Publishers must
 account for mailbox access as a supported way to obtain access.
+
+To allow verified mailboxes from one exact domain, use `ConsumerAccessPolicy{Mode: "email_domain", Version: 1, EmailDomain: "layerv.ai"}`. The domain must be lowercase and must not include a wildcard, URL, or trailing dot. Mailboxes on subdomains do not match. The SDK checks the domain again when it confirms resource creation or a policy update.
