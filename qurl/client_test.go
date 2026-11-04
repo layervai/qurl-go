@@ -1637,3 +1637,33 @@ func (c *observedCredentialWaitContext) Done() <-chan struct{} {
 	c.once.Do(func() { close(c.observed) })
 	return c.Context.Done()
 }
+
+func TestClient_CreatePortalLifetimeReceipt(t *testing.T) {
+	for _, field := range []string{``, `,"expires_in_seconds":0`, `,"expires_in_seconds":60`} {
+		t.Run(field, func(t *testing.T) {
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprintf(w, `{"data":{"resource_id":%q,"crid":%q,"qurl_link":"https://qurl.link/at_test","expires_at":"2020-01-01T00:00:00Z"%s}}`, testConnectorID, testConnectorCRID, field)
+			}))
+			defer api.Close()
+			client := newConnectorTestClient(t, api.URL)
+			portal, err := client.ResourceByCRID(testConnectorCRID).CreatePortal(context.Background(), ValidFor(time.Hour))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if field == "" {
+				if portal.ExpiresInSeconds != nil {
+					t.Fatal("old server lifetime must remain unknown")
+				}
+			} else {
+				want := 60
+				if strings.Contains(field, ":0") {
+					want = 0
+				}
+				if portal.ExpiresInSeconds == nil || *portal.ExpiresInSeconds != want {
+					t.Fatalf("lifetime = %v, want %d", portal.ExpiresInSeconds, want)
+				}
+			}
+		})
+	}
+}
