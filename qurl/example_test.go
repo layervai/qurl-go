@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"time"
 
@@ -120,23 +121,31 @@ func ExampleWithPrivate() {
 }
 
 func ExampleClient_CreatePortal() {
-	client, err := qurl.OpenClient()
-	if err != nil {
-		panic(err)
+	for _, lifetime := range []string{`,"expires_in_seconds":60`, ``} {
+		api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(w, `{"data":{"resource_id":%q,"crid":%q,"qurl_link":"https://qurl.link/at_example","target_path":"/api/detect"%s}}`, exampleResourcePublicKey, exampleCRID, lifetime)
+		}))
+		client, err := qurl.NewClient(qurl.BearerToken("lv_example_only"), qurl.WithBaseURL(api.URL))
+		if err != nil {
+			panic(err)
+		}
+		portal, err := client.ResourceByCRID(exampleCRID).CreatePortal(context.Background(),
+			qurl.ValidFor(time.Hour), qurl.WithLabel("Alice"), qurl.WithTargetPath("/api/detect"))
+		api.Close()
+		if err != nil {
+			panic(err)
+		}
+		// A scoped mint returns the recorded path. Older servers leave lifetime unknown.
+		if portal.ExpiresInSeconds == nil {
+			fmt.Println(*portal.TargetPath, "lifetime unknown")
+		} else {
+			fmt.Println(*portal.TargetPath, "lifetime seconds:", *portal.ExpiresInSeconds)
+		}
 	}
-
-	resource := client.ResourceByCRID(exampleCRID)
-	portal, err := resource.CreatePortal(context.Background(),
-		qurl.ValidFor(time.Hour),
-		qurl.WithLabel("Alice"),
-		qurl.WithTargetPath("/api/detect"), // Existing tunnel resources only.
-	)
-	if err != nil {
-		panic(err)
-	}
-
-	// A scoped mint returns this exact recorded path.
-	fmt.Println(portal.Link, *portal.TargetPath)
+	// Output:
+	// /api/detect lifetime seconds: 60
+	// /api/detect lifetime unknown
 }
 
 func ExampleClient_RevokePortal() {
