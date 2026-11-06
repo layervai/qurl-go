@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestConsumerPolicyRejectsUnknownModesAndPrivacyConflicts(t *testing.T) {
@@ -66,6 +67,29 @@ func TestConsumerManagementUsesScopeVersionAndRejectsEmptyDecision(t *testing.T)
 	grant, err = client.ApproveConsumerGrant(context.Background(), testConnectorCRID, strings.Repeat("a", 64), ConsumerGrantApproval{ExpectedVersion: 3})
 	if grant != nil || !errors.Is(err, ErrInvalidAPIResponse) {
 		t.Fatalf("empty decision accepted: %+v %v", grant, err)
+	}
+}
+
+func TestApproveConsumerGrantSendsApprovalExpiry(t *testing.T) {
+	expiresAt := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	for _, test := range []struct {
+		expiry *time.Time
+		want   string
+	}{{&expiresAt, `"expires_at":"2026-11-06T12:00:00Z"`}, {nil, ""}} {
+		client := &Client{baseURL: "https://api.example.test", credentials: BearerToken("test"), httpClient: doerFunc(func(req *http.Request) (*http.Response, error) {
+			raw, err := io.ReadAll(req.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.want != "" && !strings.Contains(string(raw), test.want) || test.want == "" && strings.Contains(string(raw), "expires_at") {
+				t.Fatalf("approval body %s, want expiry %q", raw, test.want)
+			}
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"data":{"id":"new-grant","status":"active","version":1,"expires_at":"2026-11-06T12:00:00Z"}}`))}, nil
+		})}
+		grant, err := client.ApproveConsumerGrant(context.Background(), testConnectorCRID, "new", ConsumerGrantApproval{CredentialKind: "device", CredentialID: "d", CredentialPublicKey: "k", ExpiresAt: test.expiry})
+		if err != nil || grant.ExpiresAt == nil || !grant.ExpiresAt.Equal(expiresAt) {
+			t.Fatalf("approval: %+v %v", grant, err)
+		}
 	}
 }
 
@@ -230,6 +254,145 @@ func TestPublisherStripeEndpointsValidateAccountFeeAndRedirect(t *testing.T) {
 	}
 }
 
+func TestEmailDomainPolicyValidationAndSnapshotFence(t *testing.T) {
+	decode := func(raw string) ConsumerAccessPolicy {
+		t.Helper()
+		var p ConsumerAccessPolicy
+		if err := json.Unmarshal([]byte(raw), &p); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	p := decode(`{"mode":"email_domain","version":1,"email_domain":"example.com","allowed_emails":["Person@other.com"]}`)
+	private := true
+	var cfg resourceOptions
+	if err := WithConsumerAccess(p).applyResourceOption(&cfg); err != nil || !consumerCreationPolicyConfirmed(&private, &p, &p, false) {
+		t.Fatalf("email domain creation not confirmed: %v", err)
+	}
+	different := decode(`{"mode":"email_domain","version":1,"email_domain":"example.com","allowed_emails":["Other@other.com"]}`)
+	if consumerCreationPolicyConfirmed(&private, &different, &p, true) {
+		t.Fatal("different mailbox exception confirmed")
+	}
+	if newer := decode(`{"mode":"email_domain","version":3,"email_domain":"example.com","allowed_emails":["Person@other.com"]}`); !consumerCreationPolicyConfirmed(&private, &newer, &p, true) {
+		t.Fatal("existing resource with a newer revision of the same policy not confirmed")
+	}
+	for _, valid := range []ConsumerAccessPolicy{
+		{Mode: "contract", Version: 1, ContractID: strings.Repeat("a", 128)},
+		{Mode: "email_domain", Version: 1, EmailDomain: strings.Repeat("a", 63) + "." + strings.Repeat("b", 63) + "." + strings.Repeat("c", 63) + "." + strings.Repeat("d", 61)},
+		decode(`{"mode":"email_domain","version":1,"email_domain":"example.com","allowed_emails":[` + manyMailboxes(256) + `]}`),
+	} {
+		if err := valid.validate(); err != nil {
+			t.Errorf("boundary policy rejected: %v", err)
+		}
+	}
+	// Public enrollment info carries the policy without owner-only exceptions; it must still validate.
+	for _, raw := range []string{`{"mode":"email_domain","version":1,"email_domain":"example.com"}`, `{"mode":"review","version":1,"approval_expires_in":"7d"}`} {
+		if err := decode(raw).validate(); err != nil {
+			t.Errorf("public policy %s: %v", raw, err)
+		}
+	}
+	if !(ConsumerAccessPolicy{Mode: "keys", Version: 1}).SameDefinition(ConsumerAccessPolicy{Mode: "keys", Version: 2, AllowedEmails: []string{}}) {
+		t.Fatal("nil and empty mailbox exceptions differ")
+	}
+	for _, raw := range []string{
+		`{"mode":"email_domain","version":1,"email_domain":"Example.com"}`,
+		`{"mode":"email_domain","version":1,"email_domain":"example.com","allowed_emails":["a@OTHER.com"]}`,
+		`{"mode":"email_domain","version":1,"email_domain":"example.com","allowed_emails":["a@other.com","a@other.com"]}`,
+		`{"mode":"email_domain","version":1,"email_domain":"example.com","allowed_emails":["Name <a@other.com>"]}`,
+		`{"mode":"email_domain","version":1,"email_domain":"example.com","allowed_emails":["a@other.com (comment)"]}`,
+		`{"mode":"email_domain","version":1,"email_domain":"example.com","allowed_emails":["a\u202e@other.com"]}`,
+		`{"mode":"email_domain","version":1,"email_domain":"example.com","allowed_emails":["a\u0007@other.com"]}`,
+		`{"mode":"email_domain","version":1,"email_domain":"example.com","allowed_emails":[" a@other.com"]}`,
+		`{"mode":"review","version":1,"email_domain":"example.com"}`,
+		`{"mode":"contract","version":1,"contract_id":"contains spaces"}`,
+		`{"mode":"contract","version":1,"contract_id":"` + strings.Repeat("a", 129) + `"}`,
+		`{"mode":"contract","version":1,"contract_id":"sale","approval_expires_in":"7d"}`,
+		`{"mode":"email_domain","version":1,"email_domain":"` + strings.Repeat("a", 63) + `.` + strings.Repeat("b", 63) + `.` + strings.Repeat("c", 63) + `.` + strings.Repeat("d", 62) + `"}`,
+		`{"mode":"email_domain","version":1,"email_domain":"example.com","allowed_emails":[` + manyMailboxes(257) + `]}`,
+	} {
+		if err := decode(raw).validate(); err == nil {
+			t.Errorf("unsafe policy accepted: %s", raw)
+		}
+	}
+}
+
+// echoConsumerAccessClient answers a policy PATCH with the policy that echo
+// returns for the one the SDK sent.
+func echoConsumerAccessClient(t *testing.T, echo func(sent ConsumerAccessPolicy) ConsumerAccessPolicy) *Client {
+	t.Helper()
+	return &Client{baseURL: "https://api.example.test", credentials: BearerToken("test"), httpClient: doerFunc(func(r *http.Request) (*http.Response, error) {
+		var body struct {
+			Policy ConsumerAccessPolicy `json:"consumer_access"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		raw, err := json.Marshal(map[string]any{"data": map[string]any{"resource_id": testConnectorID, "crid": testConnectorCRID, "consumer_access": echo(body.Policy)}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(raw))}, nil
+	})}
+}
+
+// The service echoes mailbox exceptions verbatim and in order, and stores an
+// approval lifetime in whole days or hours: only those answers confirm.
+func TestUpdateConsumerAccessConfirmsOnlyTheStoredPolicy(t *testing.T) {
+	emails := ConsumerAccessPolicy{Mode: "email_domain", Version: 2, EmailDomain: "example.com", AllowedEmails: []string{"z@other.com", "Partner@other.com"}}
+	week := ConsumerAccessPolicy{Mode: "review", Version: 2, ApprovalExpiresIn: "1w"}
+	for _, tc := range []struct {
+		sent   ConsumerAccessPolicy
+		change func(*ConsumerAccessPolicy)
+		same   bool
+	}{
+		{emails, func(*ConsumerAccessPolicy) {}, true},
+		{emails, func(p *ConsumerAccessPolicy) { p.AllowedEmails = []string{"Partner@other.com", "z@other.com"} }, false},
+		{emails, func(p *ConsumerAccessPolicy) { p.AllowedEmails = []string{"z@other.com", "Other@other.com"} }, false},
+		{emails, func(p *ConsumerAccessPolicy) { p.AllowedEmails = nil }, false},
+		{week, func(p *ConsumerAccessPolicy) { p.ApprovalExpiresIn = "7d" }, true},
+		{week, func(p *ConsumerAccessPolicy) { p.ApprovalExpiresIn = "168h" }, true},
+		{week, func(p *ConsumerAccessPolicy) { p.ApprovalExpiresIn = "30d" }, false},
+		{week, func(p *ConsumerAccessPolicy) { p.ApprovalExpiresIn = "" }, false},
+		// The service stores a lifetime that is not whole hours in Go's form.
+		{ConsumerAccessPolicy{Mode: "keys", Version: 2, ApprovalExpiresIn: "90m"}, func(p *ConsumerAccessPolicy) { p.ApprovalExpiresIn = "1h30m0s" }, true},
+	} {
+		client := echoConsumerAccessClient(t, func(sent ConsumerAccessPolicy) ConsumerAccessPolicy { tc.change(&sent); return sent })
+		err := client.UpdateConsumerAccess(context.Background(), testConnectorCRID, 1, tc.sent)
+		if (err == nil) != tc.same || err != nil && !errors.Is(err, ErrInvalidAPIResponse) {
+			t.Errorf("%+v: %v", tc.sent, err)
+		}
+	}
+}
+
+func TestApprovalExpiresInTravelsWithReviewAndKeysPolicies(t *testing.T) {
+	var sent ConsumerAccessPolicy
+	client := echoConsumerAccessClient(t, func(p ConsumerAccessPolicy) ConsumerAccessPolicy { sent = p; return p })
+	policy := ConsumerAccessPolicy{Mode: "review", Version: 2, ApprovalExpiresIn: "7d"}
+	if err := client.UpdateConsumerAccess(context.Background(), testConnectorCRID, 1, policy); err != nil || sent.ApprovalExpiresIn != "7d" {
+		t.Fatalf("approval_expires_in not sent: %v %+v", err, sent)
+	}
+	if other := (ConsumerAccessPolicy{Mode: "review", Version: 2, ApprovalExpiresIn: "30d"}); policy.SameDefinition(other) {
+		t.Fatal("different approval lifetimes compared equal")
+	}
+	if err := (ConsumerAccessPolicy{Mode: "email_capture", Version: 1, ApprovalExpiresIn: "7d"}).validate(); !errors.Is(err, ErrInvalidResourceRequest) {
+		t.Fatalf("approval_expires_in accepted outside review and keys: %v", err)
+	}
+	for value, valid := range map[string]bool{"1h": true, "90m": true, "61m": true, "000000000000001h": true, "365d": true, "1w": true, "8760h": true, "+7d": true, "007d": true, "1h30s": false, "1h0.5s": false, "0000000000000001h": false, "59m": false, "0d": false, "366d": false, "53w": false, "forever": false, "-1d": false, "d": false, "9223372036854775807d": false} {
+		if err := (ConsumerAccessPolicy{Mode: "keys", Version: 1, ApprovalExpiresIn: value}).validate(); (err == nil) != valid {
+			t.Errorf("approval_expires_in %q: %v", value, err)
+		}
+	}
+}
+
+// manyMailboxes is n distinct quoted mailbox exceptions for a JSON array.
+func manyMailboxes(n int) string {
+	emails := make([]string, n)
+	for i := range emails {
+		emails[i] = fmt.Sprintf("%q", fmt.Sprintf("p%d@other.com", i))
+	}
+	return strings.Join(emails, ",")
+}
+
 func TestConsumerEmailDomainPolicy(t *testing.T) {
 	for _, tc := range []struct {
 		mode, domain string
@@ -259,7 +422,7 @@ func TestConsumerEmailDomainPolicy(t *testing.T) {
 	json.Unmarshal([]byte(`{"mode":"email_domain","version":1,"email_domain":"layerv.ai"}`), &expected)
 	json.Unmarshal([]byte(`{"mode":"email_domain","version":1,"email_domain":"outside.test"}`), &changed)
 	private := true
-	if !consumerCreationPolicyConfirmed(&private, &expected, &expected, false) || consumerCreationPolicyConfirmed(&private, &changed, &expected, true) || expected.equal(changed) {
+	if !consumerCreationPolicyConfirmed(&private, &expected, &expected, false) || consumerCreationPolicyConfirmed(&private, &changed, &expected, true) || expected.Equal(changed) {
 		t.Fatal("email-domain creation or policy comparison lost its exact domain")
 	}
 }
@@ -275,7 +438,7 @@ func TestUpdateConsumerEmailDomainPolicyChecksReadback(t *testing.T) {
 			if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
 				t.Fatal(err)
 			}
-			if body.Expected != 1 || !body.Policy.equal(policy) {
+			if body.Expected != 1 || !body.Policy.Equal(policy) {
 				t.Fatal("policy write lost its domain or revision")
 			}
 			actual := policy

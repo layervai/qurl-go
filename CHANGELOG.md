@@ -8,6 +8,38 @@ and are marked **Breaking** with what to change.
 
 ## Unreleased
 
+- **Breaking:** `ConsumerAccessPolicy` gains `EmailDomain` and
+  `AllowedEmails` for the new `email_domain` mode, so the struct is no longer
+  comparable, and neither is `ConsumerAccessOption` or any struct holding
+  one: `==` and map keys stop compiling, and comparing them inside an
+  interface such as `ResourceOption` panics at run time. Use `Equal`, or
+  `SameDefinition` to ignore `Version`. `Validate` checks a policy locally.
+  A contract ID must now be 1-128 letters, digits, `_` or `-`, matching the
+  service, which already refused anything else.
+
+- `ConsumerAccessPolicy.ApprovalExpiresIn` (`approval_expires_in`, `1h` to
+  `365d`, review and keys only) bounds each approval or key opt-in. `Validate`
+  checks it, and comparisons accept the service's stored form (`1w` as `7d`).
+
+- `Reusable` is a `PortalOption` that sends an explicit `one_time_use: false`;
+  qURL Connector links are single-use when the field is omitted.
+
+- `Client.AccessRules` and `Client.SaveAccessRules` read and replace the
+  account's saved access rules at `/v1/me/access-rules` (`AccessRule`, with
+  `AccessRuleLinkLimits` and a contract rule's `AccessRulePayment`). A save is
+  conditional on the version read: a 409 matches `ErrAccessRulesConflict` and
+  a 400 matches `ErrInvalidAccessRules`. Registered-device clients may call
+  both, and `RegisteredAgentResourceHTTPDoer` allows `GET` and `PUT` on the
+  route with no query. An empty `QuickShareRuleID` is omitted and keeps the
+  saved quick-share rule; send `"once"` to reset it.
+  Rule fields the SDK does not model are kept in `Unknown` (on the rule, its
+  link limits and its payment) and saved back unchanged; check
+  `AccessRule.HasUnknownFields` before editing or applying a rule.
+
+- `ManagedResource.LinkDefaults` reports a resource's saved `link_defaults`,
+  and `ResourceUpdate.LinkDefaults` replaces them (`ClearLinkDefaults` removes
+  them). The service stores them for clients and never applies them.
+
 - **The minimum Go version is now 1.26.10, up from 1.26.9.** This fixes
   GO-2026-6809 in `crypto/x509` certificate verification. Builders pinned to
   Go 1.26.0 through 1.26.9 with `GOTOOLCHAIN=local` must update. The `awsstore`
