@@ -8,9 +8,10 @@ and are marked **Breaking** with what to change.
 
 ## Unreleased
 
-- **Breaking: creating a resource now needs a public name.** LayerV refuses a
-  call that creates a URL or Connector resource without one (400
-  `name_required`, nothing written). Pass the new `qurl.WithName` to
+- **Breaking: creating a resource needs a public name.** Once the service
+  enforces it, LayerV refuses a call that creates a URL or Connector resource
+  without one (400 `name_required`, nothing written). `name` is sent only when
+  set and needs a service version that accepts it. Pass the new `qurl.WithName` to
   `ProtectURL`, `CreateResource`, `CreatePortalForURL`, and
   `EnsureConnectorResourceWithOptions`; it is the name recipients see on the
   qURL page, in link previews, and on their saved passkey. It is ignored when

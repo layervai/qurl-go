@@ -756,17 +756,13 @@ type ResourceCreateOption interface {
 
 // WithName sets the public name of the resource a call creates: the name
 // recipients see on the qURL page, in link previews, and on the passkey they
-// save. It is not WithDescription, which stays a private owner note.
+// save. It is not WithDescription, which stays a private owner note. It is sent
+// only when set and needs a LayerV service version that accepts it.
 //
-// LayerV requires it whenever the call creates a resource, and refuses a
-// create without it with an error matching ErrResourceNameRequired. When the
-// call reuses an existing resource the name is optional and ignored; rename a
-// resource with UpdatePreview. LayerV checks the name: at most 100
-// characters, one line, no control characters, no surrounding whitespace.
-// The SDK refuses a blank, padded, or multi-line name before sending.
-//
-// CreatePortal mints a link for a resource that already exists and rejects it
-// with ErrInvalidPortalRequest.
+// LayerV requires it whenever the call creates a resource (a refusal matches
+// ErrResourceNameRequired) and ignores it on reuse. The SDK refuses a blank,
+// padded, or multi-line name before sending, and CreatePortal rejects it. See
+// docs/issuing-links.md#resource-name.
 func WithName(name string) ResourceCreateOption {
 	return resourceNameOption(name)
 }
