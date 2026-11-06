@@ -24,8 +24,18 @@ and are marked **Breaking** with what to change.
 - `Reusable` is a `PortalOption` that sends an explicit `one_time_use: false`;
   qURL Connector links are single-use when the field is omitted.
 
-- Registered-device calls may `GET` and `PUT` `/v1/me/access-rules`, the
-  linked account's saved access rules, with no query.
+- `Client.AccessRules` and `Client.SaveAccessRules` read and replace the
+  account's saved access rules at `/v1/me/access-rules` (`AccessRule`, with
+  `AccessRuleLinkLimits` and a contract rule's `AccessRulePayment`). A save is
+  conditional on the version read: a 409 matches `ErrAccessRulesConflict` and
+  a 400 matches `ErrInvalidAccessRules`. Registered-device clients may call
+  both, and `RegisteredAgentResourceHTTPDoer` allows `GET` and `PUT` on the
+  route with no query. An empty `QuickShareRuleID` is omitted and keeps the
+  saved quick-share rule; send `"once"` to reset it.
+
+- `ManagedResource.LinkDefaults` reports a resource's saved `link_defaults`,
+  and `ResourceUpdate.LinkDefaults` replaces them (`ClearLinkDefaults` removes
+  them). The service stores them for clients and never applies them.
 
 - **The minimum Go version is now 1.26.10, up from 1.26.9.** This fixes
   GO-2026-6809 in `crypto/x509` certificate verification. Builders pinned to

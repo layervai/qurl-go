@@ -161,7 +161,7 @@ func TestManagementRESTJourney(t *testing.T) {
 	}
 }
 
-func TestResourceUpdateAliasPresence(t *testing.T) {
+func TestResourceUpdateNullableFields(t *testing.T) {
 	t.Parallel()
 	alias := "docs"
 	for _, tc := range []struct {
@@ -172,6 +172,9 @@ func TestResourceUpdateAliasPresence(t *testing.T) {
 		{"omitted", ResourceUpdate{}, "{}"},
 		{"set", ResourceUpdate{Alias: &alias}, `{"alias":"docs"}`},
 		{"clear", ResourceUpdate{ClearAlias: true}, `{"alias":null}`},
+		{"set link defaults", ResourceUpdate{LinkDefaults: &LinkDefaults{ExpiresIn: "1h"}}, `{"link_defaults":{"expires_in":"1h","one_time_use":false}}`},
+		{"clear link defaults", ResourceUpdate{ClearLinkDefaults: true}, `{"link_defaults":null}`},
+		{"set alias, clear link defaults", ResourceUpdate{Alias: &alias, ClearLinkDefaults: true}, `{"alias":"docs","link_defaults":null}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := json.Marshal(tc.update)
@@ -182,6 +185,16 @@ func TestResourceUpdateAliasPresence(t *testing.T) {
 	}
 	if _, err := json.Marshal(ResourceUpdate{Alias: &alias, ClearAlias: true}); !errors.Is(err, ErrInvalidResourceRequest) {
 		t.Fatalf("alias conflict = %v", err)
+	}
+	if _, err := json.Marshal(ResourceUpdate{LinkDefaults: &LinkDefaults{ExpiresIn: "1h"}, ClearLinkDefaults: true}); !errors.Is(err, ErrInvalidResourceRequest) {
+		t.Fatalf("link defaults conflict = %v", err)
+	}
+	var resource ManagedResource
+	if err := json.Unmarshal([]byte(`{"link_defaults":{"expires_in":"60m","one_time_use":true,"session_duration":"1h","rule_name":"Quick look"}}`), &resource); err != nil {
+		t.Fatal(err)
+	}
+	if want := (LinkDefaults{ExpiresIn: "60m", OneTimeUse: true, SessionDuration: "1h", RuleName: "Quick look"}); resource.LinkDefaults == nil || *resource.LinkDefaults != want {
+		t.Fatalf("link defaults = %+v", resource.LinkDefaults)
 	}
 }
 

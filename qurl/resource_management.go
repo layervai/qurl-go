@@ -51,6 +51,7 @@ type ManagedResource struct {
 	AccessRequests        *bool                 `json:"access_requests,omitempty"`
 	ConsumerAccess        *ConsumerAccessPolicy `json:"consumer_access,omitempty"`
 	ConsumerAccessVersion *int64                `json:"consumer_access_version,omitempty"`
+	LinkDefaults          *LinkDefaults         `json:"link_defaults,omitempty"`
 	AllowedDeviceKeys     []string              `json:"allowed_device_keys,omitempty"`
 	SessionDurationCap    *int64                `json:"session_duration_cap,omitempty"`
 	QURLCount             *int64                `json:"qurl_count,omitempty"`
@@ -103,9 +104,25 @@ type PageOptions struct {
 	Limit  int
 }
 
+// LinkDefaults are the limits a client applies when it creates a new link for a
+// resource, saved with the resource so every device reads the same values. The
+// service stores and returns them but never applies them: send them with each
+// link-create request. Durations keep the form they were saved in ("1h" and
+// "60m" differ). RuleName is display text; escape it before showing it.
+// Fields this SDK does not model are not preserved when read values are
+// written back.
+type LinkDefaults struct {
+	ExpiresIn       string `json:"expires_in"`
+	OneTimeUse      bool   `json:"one_time_use"`
+	SessionDuration string `json:"session_duration,omitempty"`
+	RuleName        string `json:"rule_name,omitempty"`
+}
+
 // ResourceUpdate uses pointers so omitted fields differ from explicit empty values.
-// Set ClearAlias to send JSON null; Alias and ClearAlias are mutually exclusive.
-// The service validates field bounds and consumer-policy update combinations.
+// Set ClearAlias or ClearLinkDefaults to send JSON null; each is mutually
+// exclusive with its value field. LinkDefaults replaces the saved defaults whole.
+// The service validates field bounds and update combinations, and refuses
+// CustomDomain and link defaults in the same request.
 type ResourceUpdate struct {
 	Description                   *string               `json:"description,omitempty"`
 	Tags                          *[]string             `json:"tags,omitempty"`
@@ -119,21 +136,35 @@ type ResourceUpdate struct {
 	AllowedDeviceKeys             *[]string             `json:"allowed_device_keys,omitempty"`
 	AllowedDeviceKeysAdd          *[]string             `json:"allowed_device_keys_add,omitempty"`
 	AllowedDeviceKeysRemove       *[]string             `json:"allowed_device_keys_remove,omitempty"`
+	LinkDefaults                  *LinkDefaults         `json:"link_defaults,omitempty"`
+	ClearLinkDefaults             bool                  `json:"-"`
 }
 
-// MarshalJSON preserves the API's omitted/string/null alias update semantics.
+// MarshalJSON preserves the API's omitted/value/null semantics for alias and
+// link_defaults.
 func (u ResourceUpdate) MarshalJSON() ([]byte, error) {
 	type plain ResourceUpdate
-	if u.ClearAlias {
-		if u.Alias != nil {
-			return nil, fmt.Errorf("%w: Alias and ClearAlias conflict", ErrInvalidResourceRequest)
-		}
-		return json.Marshal(struct {
-			plain
-			Alias any `json:"alias"`
-		}{plain: plain(u)})
+	if u.ClearAlias && u.Alias != nil {
+		return nil, fmt.Errorf("%w: Alias and ClearAlias conflict", ErrInvalidResourceRequest)
 	}
-	return json.Marshal(plain(u))
+	if u.ClearLinkDefaults && u.LinkDefaults != nil {
+		return nil, fmt.Errorf("%w: LinkDefaults and ClearLinkDefaults conflict", ErrInvalidResourceRequest)
+	}
+	data, err := json.Marshal(plain(u))
+	if err != nil || (!u.ClearAlias && !u.ClearLinkDefaults) {
+		return data, err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return nil, err
+	}
+	if u.ClearAlias {
+		fields["alias"] = json.RawMessage("null")
+	}
+	if u.ClearLinkDefaults {
+		fields["link_defaults"] = json.RawMessage("null")
+	}
+	return json.Marshal(fields)
 }
 
 // ResourceSession is an observed management-API session, not native CLOSED evidence.

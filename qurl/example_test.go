@@ -323,6 +323,31 @@ func ExampleClient_SetPublisherName() {
 	fmt.Printf("%q verified=%t\n", publisher.Name, publisher.Verified)
 }
 
+func ExampleClient_SaveAccessRules() {
+	client, err := qurl.OpenClient()
+	if err != nil {
+		panic(err)
+	}
+
+	// Save against the version just read; a concurrent edit returns
+	// ErrAccessRulesConflict, so read again and merge.
+	rules, err := client.AccessRules(context.Background())
+	if err != nil {
+		panic(err)
+	}
+	// A new rule needs a fresh lowercase UUID of its own.
+	rules.Items = append(rules.Items, qurl.AccessRule{
+		ID: "0b7e1c2a-4f5d-4e6a-9b8c-1d2e3f4a5b6c", Name: "People who pay", Mode: "contract", ContractID: "docs",
+		Payment: &qurl.AccessRulePayment{PriceID: "price_1PqA2b3C4d5E6f7G", AccessSeconds: 30 * 24 * 3600},
+	})
+	saved, err := client.SaveAccessRules(context.Background(), qurl.AccessRulesUpdate{Version: rules.Version, Items: rules.Items})
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Println(saved.Version)
+}
+
 // A publisher name is chosen by whoever owns the resource, so display it as
 // untrusted text and never without its verification status.
 func ExamplePublisher() {
