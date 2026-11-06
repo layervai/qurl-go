@@ -19,7 +19,8 @@ if err != nil {
 	return err
 }
 
-resource, err := client.ProtectURL(ctx, "https://internal.example.com/dashboard")
+resource, err := client.ProtectURL(ctx, "https://internal.example.com/dashboard",
+	qurl.WithName("Team dashboard"))
 if err != nil {
 	return err
 }
@@ -34,10 +35,25 @@ protected service:
 ```go
 resource, err := client.ProtectURL(ctx,
 	"https://internal.example.com/dashboard",
+	qurl.WithName("Admin dashboard"),
 	qurl.WithAlias("dev-dashboard"),
 	qurl.WithDescription("Admin dashboard"),
 )
 ```
+
+## Resource name
+
+`qurl.WithName` is the public name recipients see: on the qURL page, in link
+previews, and on the passkey they save for the resource. `WithDescription`
+stays a private owner note. LayerV requires a name whenever a call creates a
+resource and refuses a create without one with a 400 that matches
+`qurl.ErrResourceNameRequired`; nothing is written. When the call reuses an
+existing resource the name is optional and ignored. Rename a resource with
+`UpdatePreview`; it refuses an empty name the same way.
+
+`WithName` is accepted by every call that can create a resource, like
+`WithPrivate` below, and `CreatePortal` rejects it with
+`qurl.ErrInvalidPortalRequest`.
 
 ## Private and public resources
 
@@ -51,6 +67,7 @@ State it with `qurl.WithPrivate` on the call that creates the resource:
 ```go
 resource, err := client.ProtectURL(ctx,
 	"https://status.example.com/",
+	qurl.WithName("Status page"),
 	qurl.WithPrivate(false), // a public resource
 )
 ```
@@ -212,6 +229,7 @@ For a script or prototype where you want one API call, use:
 ```go
 portal, resource, err := client.CreatePortalForURL(ctx,
 	"https://internal.example.com/dashboard",
+	qurl.WithName("Team dashboard"),
 	qurl.ValidFor(5*time.Minute),
 )
 fmt.Println(resource.CRID, portal.Link)

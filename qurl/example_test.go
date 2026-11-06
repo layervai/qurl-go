@@ -23,7 +23,8 @@ func Example() {
 		panic(err)
 	}
 
-	resource, err := client.ProtectURL(context.Background(), "https://internal.example.com/dashboard")
+	resource, err := client.ProtectURL(context.Background(), "https://internal.example.com/dashboard",
+		qurl.WithName("Team dashboard"))
 	if err != nil {
 		panic(err)
 	}
@@ -91,6 +92,7 @@ func ExampleClient_ProtectURL() {
 
 	resource, err := client.ProtectURL(context.Background(),
 		"https://internal.example.com/dashboard",
+		qurl.WithName("Admin dashboard"),
 		qurl.WithAlias("dev-dashboard"),
 	)
 	if err != nil {
@@ -110,6 +112,7 @@ func ExampleWithPrivate() {
 	// on every service version.
 	resource, err := client.ProtectURL(context.Background(),
 		"https://status.example.com/",
+		qurl.WithName("Status page"),
 		qurl.WithPrivate(false),
 	)
 	if err != nil {
@@ -353,7 +356,8 @@ func ExampleOpenClient() {
 		panic(err)
 	}
 
-	resource, err := client.ProtectURL(context.Background(), "https://internal.example.com/dashboard")
+	resource, err := client.ProtectURL(context.Background(), "https://internal.example.com/dashboard",
+		qurl.WithName("Team dashboard"))
 	if err != nil {
 		panic(err)
 	}
@@ -374,7 +378,8 @@ func ExampleNewClient() {
 		panic(err)
 	}
 
-	resource, err := client.ProtectURL(context.Background(), "https://internal.example.com/dashboard")
+	resource, err := client.ProtectURL(context.Background(), "https://internal.example.com/dashboard",
+		qurl.WithName("Team dashboard"))
 	if err != nil {
 		panic(err)
 	}
