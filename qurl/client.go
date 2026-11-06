@@ -143,6 +143,12 @@ var ErrInvalidPortalRequest = errors.New("qurl: invalid portal request")
 // underlying *APIError remains matchable with errors.As.
 var ErrPortalRevoked = errors.New("qurl: portal already revoked")
 
+// ErrResourceNameRequired matches, with errors.Is, the *APIError LayerV
+// returns (400 "name_required") when a call that creates a resource has no
+// WithName, or when UpdatePreview sets an empty name. Add WithName
+// and retry; nothing was written. The *APIError stays matchable with errors.As.
+var ErrResourceNameRequired = errors.New("qurl: resource name required")
+
 // ErrCredentialStateNotFound is returned when FileCredentials cannot find the
 // LayerV credential file.
 var ErrCredentialStateNotFound = errors.New("qurl: credential state not found")
@@ -676,6 +682,7 @@ func (f resourceOptionFunc) applyResourceOption(o *resourceOptions) error {
 
 type resourceOptions struct {
 	consumerAccess *ConsumerAccessPolicy
+	name           string
 	description    string
 	tags           []string
 	customDomain   string
@@ -744,6 +751,46 @@ type ResourceCreateOption interface {
 	ResourceOption
 	PortalOption
 	ConnectorResourceOption
+}
+
+// WithName sets the public name of the resource a call creates: the name
+// recipients see on the qURL page, in link previews, and on the passkey they
+// save. It is not WithDescription, which stays a private owner note.
+//
+// LayerV requires it whenever the call creates a resource, and refuses a
+// create without it with an error matching ErrResourceNameRequired. When the
+// call reuses an existing resource the name is optional and ignored; rename a
+// resource with UpdatePreview. LayerV checks the name: at most 100
+// characters, one line, no control characters, no surrounding whitespace.
+//
+// CreatePortal mints a link for a resource that already exists and rejects it
+// with ErrInvalidPortalRequest.
+func WithName(name string) ResourceCreateOption {
+	return resourceNameOption(name)
+}
+
+type resourceNameOption string
+
+func validateResourceName(name string, errKind error) error {
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("%w: name must not be empty", errKind)
+	}
+	return nil
+}
+
+func (o resourceNameOption) applyResourceOption(cfg *resourceOptions) error {
+	cfg.name = string(o)
+	return validateResourceName(cfg.name, ErrInvalidResourceRequest)
+}
+
+func (o resourceNameOption) applyPortalOption(cfg *portalOptions) error {
+	cfg.name = string(o)
+	return validateResourceName(cfg.name, ErrInvalidPortalRequest)
+}
+
+func (o resourceNameOption) applyConnectorResourceOption(cfg *connectorResourceOptions) error {
+	cfg.name = string(o)
+	return validateResourceName(cfg.name, ErrInvalidResourceRequest)
 }
 
 // WithPrivate states the privacy of the resource a call creates: true for a
@@ -820,6 +867,7 @@ func (c *Client) ProtectURL(ctx context.Context, targetURL string, opts ...Resou
 
 	reqBody := createResourceRequest{
 		TargetURL:      targetURL,
+		Name:           cfg.name,
 		Description:    cfg.description,
 		Tags:           cfg.tags,
 		CustomDomain:   cfg.customDomain,
@@ -894,9 +942,10 @@ type portalOptions struct {
 	maxSessions     *int
 	sessionDuration string
 	targetPath      string
-	// private belongs to the resource CreatePortalForURL may create, not to the
-	// link. It is never part of a request for an existing resource.
+	// private and name belong to the resource CreatePortalForURL may create,
+	// not to the link. They are never part of a request for an existing resource.
 	private *bool
+	name    string
 }
 
 const maxTargetPathLength = 2048
@@ -1121,6 +1170,7 @@ func validateResourceItemID(id string, kind error) error {
 type createResourceRequest struct {
 	ConsumerAccess *ConsumerAccessPolicy `json:"consumer_access,omitempty"`
 	TargetURL      string                `json:"target_url"`
+	Name           string                `json:"name,omitempty"`
 	Description    string                `json:"description,omitempty"`
 	Tags           []string              `json:"tags,omitempty"`
 	CustomDomain   string                `json:"custom_domain,omitempty"`
@@ -1187,7 +1237,8 @@ type createPortalForURLRequest struct {
 	createPortalRequest
 	// Private follows createResourceRequest.Private: nil is left out, and a
 	// stated false is sent.
-	Private *bool `json:"private,omitempty"`
+	Private *bool  `json:"private,omitempty"`
+	Name    string `json:"name,omitempty"`
 }
 
 type createPortalResponse struct {
@@ -1262,6 +1313,9 @@ func buildCreatePortalRequest(opts []PortalOption) (createPortalRequest, error) 
 	if cfg.private != nil {
 		return createPortalRequest{}, fmt.Errorf("%w: privacy is chosen when a resource is created, and this resource already exists", ErrInvalidPortalRequest)
 	}
+	if cfg.name != "" {
+		return createPortalRequest{}, fmt.Errorf("%w: name is set when a resource is created, and this resource already exists; rename it with UpdatePreview", ErrInvalidPortalRequest)
+	}
 	return cfg.request(), nil
 }
 
@@ -1277,6 +1331,7 @@ func buildCreatePortalForURLRequest(targetURL string, opts []PortalOption) (crea
 		TargetURL:           targetURL,
 		createPortalRequest: cfg.request(),
 		Private:             cfg.private,
+		Name:                cfg.name,
 	}, nil
 }
 
@@ -1671,6 +1726,9 @@ func (e *APIError) Unwrap() error {
 // Is exposes status-level ambiguity without changing the concrete APIError type.
 // Read callers may retry normally; mutation callers must reconcile first.
 func (e *APIError) Is(target error) bool {
+	if e != nil && target == ErrResourceNameRequired {
+		return e.StatusCode == http.StatusBadRequest && e.Code == "name_required"
+	}
 	return e != nil && target == ErrAPIRequestOutcomeUnknown &&
 		(e.StatusCode < http.StatusBadRequest || e.StatusCode >= http.StatusInternalServerError)
 }

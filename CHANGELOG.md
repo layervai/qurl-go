@@ -8,6 +8,18 @@ and are marked **Breaking** with what to change.
 
 ## Unreleased
 
+- **Breaking: creating a resource now needs a public name.** LayerV refuses a
+  call that creates a URL or Connector resource without one (400
+  `name_required`, nothing written). Pass the new `qurl.WithName` to
+  `ProtectURL`, `CreateResource`, `CreatePortalForURL`, and
+  `EnsureConnectorResourceWithOptions`; it is the name recipients see on the
+  qURL page, in link previews, and on their saved passkey. It is ignored when
+  the call reuses an existing resource, and `CreatePortal` rejects it. Match
+  the refusal with `errors.Is(err, qurl.ErrResourceNameRequired)`.
+  `EnsureConnectorResource` sends no name, so it can no longer create a
+  resource. `UpdatePreview` can no longer clear a name: an empty
+  `PreviewPatch.Name` is refused the same way.
+
 - **The minimum Go version is now 1.26.10, up from 1.26.9.** This fixes
   GO-2026-6809 in `crypto/x509` certificate verification. Builders pinned to
   Go 1.26.0 through 1.26.9 with `GOTOOLCHAIN=local` must update. The `awsstore`
