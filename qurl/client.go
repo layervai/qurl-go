@@ -865,6 +865,9 @@ type Portal struct {
 	Site string
 	// ExpiresAt is the link expiration time, when returned by the API.
 	ExpiresAt *time.Time
+	// ExpiresInSeconds is the server-granted issuance lifetime; nil means unknown.
+	// Idempotent replays retain this value; ExpiresAt is the absolute expiry.
+	ExpiresInSeconds *int
 	// QURLID identifies the specific access token, when returned by the API.
 	QURLID string
 	// Label is the token label, when returned by the API.
@@ -1205,6 +1208,7 @@ type createPortalResponse struct {
 	QURLLink          string          `json:"qurl_link"`
 	QURLSite          string          `json:"qurl_site"`
 	ExpiresAt         *time.Time      `json:"expires_at"`
+	ExpiresInSeconds  *int            `json:"expires_in_seconds"`
 	QURLID            string          `json:"qurl_id"`
 	Label             string          `json:"label"`
 	TargetPath        json.RawMessage `json:"target_path"`
@@ -1238,6 +1242,7 @@ func (r createPortalResponse) portal(expectedTargetPath string) (*Portal, error)
 		Link:              r.QURLLink,
 		Site:              r.QURLSite,
 		ExpiresAt:         r.ExpiresAt,
+		ExpiresInSeconds:  r.ExpiresInSeconds,
 		QURLID:            r.QURLID,
 		Label:             r.Label,
 		TargetPath:        recordedTargetPath,
