@@ -25,13 +25,19 @@ func TestCreateCallsSendName(t *testing.T) {
 }
 
 func TestWithNameRejectedBeforeSending(t *testing.T) {
+	wantKind := map[string]error{
+		"ProtectURL":                         ErrInvalidResourceRequest,
+		"CreateResource":                     ErrInvalidResourceRequest,
+		"CreatePortalForURL":                 ErrInvalidPortalRequest,
+		"EnsureConnectorResourceWithOptions": ErrInvalidResourceRequest,
+	}
 	for _, create := range privacyCreateCalls {
 		t.Run(create.name, func(t *testing.T) {
 			client, api := newPrivacyTestClient(t, "")
-			for _, name := range []string{"  ", " Team", "Team\ndashboard", "Team\x00"} {
+			for _, name := range []string{"  ", " Team", "Team\ndashboard", "Team\x00", "Team\u2028x", "Team\u202ex"} {
 				err := create.call(client, []ResourceCreateOption{WithName(name)})
-				if !errors.Is(err, ErrInvalidResourceRequest) && !errors.Is(err, ErrInvalidPortalRequest) {
-					t.Fatalf("WithName(%q) err = %v, want an invalid request error", name, err)
+				if !errors.Is(err, wantKind[create.name]) {
+					t.Fatalf("WithName(%q) err = %v, want %v", name, err, wantKind[create.name])
 				}
 			}
 			if len(api.bodies) != 0 {
@@ -61,6 +67,14 @@ func TestNameRequiredErrorMatchesSentinel(t *testing.T) {
 		})))
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
+	}
+	_, _, err = client.CreatePortalForURL(context.Background(), privacyTestTargetURL)
+	if !errors.Is(err, ErrResourceNameRequired) {
+		t.Fatalf("CreatePortalForURL err = %v, want ErrResourceNameRequired", err)
+	}
+	_, err = client.EnsureConnectorResource(context.Background(), testConnectorSlug)
+	if !errors.Is(err, ErrResourceNameRequired) || errors.Is(err, ErrConnectorResourceOutcomeUnknown) {
+		t.Fatalf("EnsureConnectorResource err = %v, want ErrResourceNameRequired", err)
 	}
 	_, err = client.ProtectURL(context.Background(), privacyTestTargetURL)
 	var apiErr *APIError

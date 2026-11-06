@@ -761,7 +761,8 @@ type ResourceCreateOption interface {
 //
 // LayerV requires it whenever the call creates a resource (a refusal matches
 // ErrResourceNameRequired) and ignores it on reuse. The SDK refuses a blank,
-// padded, or multi-line name before sending, and CreatePortal rejects it. See
+// padded, multi-line, or hidden-character name before sending, and
+// CreatePortal rejects it. When WithName is given twice, the last wins. See
 // docs/issuing-links.md#resource-name.
 func WithName(name string) ResourceCreateOption {
 	return resourceNameOption(name)
@@ -775,10 +776,15 @@ func validateResourceName(name string, errKind error) error {
 	if strings.TrimSpace(name) == "" {
 		return fmt.Errorf("%w: name must not be empty", errKind)
 	}
-	if strings.TrimSpace(name) != name || strings.ContainsFunc(name, unicode.IsControl) {
+	if strings.TrimSpace(name) != name || strings.ContainsFunc(name, hiddenOrLineBreak) {
 		return fmt.Errorf("%w: name must be one line without control characters or surrounding whitespace", errKind)
 	}
 	return nil
+}
+
+// hiddenOrLineBreak matches what the service refuses in a preview name.
+func hiddenOrLineBreak(r rune) bool {
+	return unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || r == '\u2028' || r == '\u2029'
 }
 
 func (o resourceNameOption) applyResourceOption(cfg *resourceOptions) error {
