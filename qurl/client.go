@@ -762,8 +762,8 @@ type ResourceCreateOption interface {
 // LayerV requires it whenever the call creates a resource (a refusal matches
 // ErrResourceNameRequired) and ignores it on reuse. The SDK refuses a blank,
 // padded, multi-line, hidden-character, or over-100-character name before
-// sending, and
-// CreatePortal rejects it. When WithName is given twice, the last wins. See
+// sending, and CreatePortal rejects it. When WithName is given twice, the last
+// wins. See
 // docs/issuing-links.md#resource-name.
 func WithName(name string) ResourceCreateOption {
 	return resourceNameOption(name)
