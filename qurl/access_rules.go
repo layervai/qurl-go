@@ -229,6 +229,9 @@ func (c *Client) SaveAccessRules(ctx context.Context, update AccessRulesUpdate) 
 		if !utf8.ValidString(rule.Name) {
 			return nil, fmt.Errorf("%w: rule name is not valid UTF-8", ErrInvalidAccessRules)
 		}
+		if _, err := json.Marshal(rule); err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrInvalidAccessRules, err)
+		}
 	}
 	if update.Items == nil {
 		update.Items = []AccessRule{} // the service requires an array, not null

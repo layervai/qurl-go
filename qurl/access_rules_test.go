@@ -106,6 +106,10 @@ func TestAccessRuleRefusesUnknownNamingAModeledField(t *testing.T) {
 		if out, err := json.Marshal(rule); err == nil {
 			t.Errorf("%s: wrote %s", name, out)
 		}
+		client := newAccessRulesTestClient(t, func(http.ResponseWriter, *http.Request) { t.Error("a refused rule reached the service") })
+		if _, err := client.SaveAccessRules(context.Background(), AccessRulesUpdate{Items: []AccessRule{rule}}); !errors.Is(err, ErrInvalidAccessRules) {
+			t.Errorf("%s: SaveAccessRules err = %v, want ErrInvalidAccessRules", name, err)
+		}
 	}
 }
 
