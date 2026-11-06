@@ -2,6 +2,7 @@ package qurl
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -91,6 +92,17 @@ func TestClient_AccessRulesKeepUnknownFields(t *testing.T) {
 	}
 	if got, want := <-saved, `{"version":2,"items":`+items+`}`; got != want {
 		t.Fatalf("PUT body =\n%s\nwant\n%s", got, want)
+	}
+}
+
+// A member that differs from a modeled field only in case would be read as
+// that field and written back under its name, so it is refused.
+func TestAccessRuleRefusesCaseVariantFields(t *testing.T) {
+	for _, raw := range []string{`{"id":"r","name":"x","mode":"review","Mode":"public"}`, `{"id":"r","name":"x","mode":"public","link_limits":{"expires_in":"1h","Expires_In":"30d"}}`} {
+		var rule AccessRule
+		if err := json.Unmarshal([]byte(raw), &rule); err == nil {
+			t.Errorf("%s: accepted as %+v", raw, rule)
+		}
 	}
 }
 

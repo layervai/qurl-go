@@ -138,7 +138,8 @@ func marshalKeepingUnknown(v any, unknown map[string]json.RawMessage) ([]byte, e
 
 // unmarshalKeepingUnknown decodes data into the struct v points to and puts
 // every member that names none of its fields in *unknown (nil when none).
-// encoding/json matches names ignoring case, so this does too.
+// encoding/json matches names ignoring case, so a member that differs from a
+// field's name only in case is refused rather than read as that field.
 func unmarshalKeepingUnknown(data []byte, v any, unknown *map[string]json.RawMessage) error {
 	if err := json.Unmarshal(data, v); err != nil {
 		return err
@@ -150,9 +151,16 @@ func unmarshalKeepingUnknown(data []byte, v any, unknown *map[string]json.RawMes
 	t := reflect.TypeOf(v).Elem()
 	for name := range fields {
 		for i := range t.NumField() {
-			if tag, _, _ := strings.Cut(t.Field(i).Tag.Get("json"), ","); tag != "-" && strings.EqualFold(tag, name) {
+			tag, _, _ := strings.Cut(t.Field(i).Tag.Get("json"), ",")
+			if tag == "-" {
+				continue
+			}
+			if tag == name {
 				delete(fields, name)
 				break
+			}
+			if strings.EqualFold(tag, name) {
+				return fmt.Errorf("qurl: access rule field %q differs from %q only in case", name, tag)
 			}
 		}
 	}
