@@ -50,7 +50,7 @@ type AccessRule struct {
 	ApprovalExpiresIn string                `json:"approval_expires_in,omitempty"`
 	Payment           *AccessRulePayment    `json:"payment,omitempty"`
 	// Unknown holds the rule fields this SDK does not model, by JSON name.
-	// Its names must not be ones the SDK models.
+	// A name the SDK models, in any case, is refused when the rule is written.
 	Unknown map[string]json.RawMessage `json:"-"`
 }
 
@@ -121,10 +121,17 @@ func (p *AccessRulePayment) UnmarshalJSON(data []byte) error {
 }
 
 // marshalKeepingUnknown writes v's JSON object with unknown's members appended.
+// A member named like one of v's fields, in any case, is refused: the service
+// would read it as that field.
 func marshalKeepingUnknown(v any, unknown map[string]json.RawMessage) ([]byte, error) {
 	data, err := json.Marshal(v)
 	if err != nil || len(unknown) == 0 {
 		return data, err
+	}
+	for name := range unknown {
+		if field := modeledField(reflect.TypeOf(v), name); field != "" {
+			return nil, fmt.Errorf("qurl: unknown access rule field %q names the field %q", name, field)
+		}
 	}
 	extra, err := json.Marshal(unknown)
 	if err != nil {
@@ -134,6 +141,17 @@ func marshalKeepingUnknown(v any, unknown map[string]json.RawMessage) ([]byte, e
 		return extra, nil
 	}
 	return append(append(data[:len(data)-1], ','), extra[1:]...), nil
+}
+
+// modeledField returns the JSON name of struct t's field that name matches
+// ignoring case, as encoding/json matches it, or "" when none does.
+func modeledField(t reflect.Type, name string) string {
+	for i := range t.NumField() {
+		if tag, _, _ := strings.Cut(t.Field(i).Tag.Get("json"), ","); tag != "-" && strings.EqualFold(tag, name) {
+			return tag
+		}
+	}
+	return ""
 }
 
 // unmarshalKeepingUnknown decodes data into the struct v points to and puts
@@ -150,18 +168,12 @@ func unmarshalKeepingUnknown(data []byte, v any, unknown *map[string]json.RawMes
 	}
 	t := reflect.TypeOf(v).Elem()
 	for name := range fields {
-		for i := range t.NumField() {
-			tag, _, _ := strings.Cut(t.Field(i).Tag.Get("json"), ",")
-			if tag == "-" {
-				continue
-			}
-			if tag == name {
-				delete(fields, name)
-				break
-			}
-			if strings.EqualFold(tag, name) {
-				return fmt.Errorf("qurl: access rule field %q differs from %q only in case", name, tag)
-			}
+		switch field := modeledField(t, name); field {
+		case "":
+		case name:
+			delete(fields, name)
+		default:
+			return fmt.Errorf("qurl: access rule field %q differs from %q only in case", name, field)
 		}
 	}
 	*unknown = nil

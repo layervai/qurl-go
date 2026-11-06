@@ -95,6 +95,20 @@ func TestClient_AccessRulesKeepUnknownFields(t *testing.T) {
 	}
 }
 
+// Unknown must not name a modeled field: the service would read it as that field.
+func TestAccessRuleRefusesUnknownNamingAModeledField(t *testing.T) {
+	for _, name := range []string{"mode", "Mode", "Expires_In"} {
+		rule := AccessRule{ID: "r", Name: "x", Mode: "review", Unknown: map[string]json.RawMessage{name: json.RawMessage(`"public"`)}}
+		if name == "Expires_In" {
+			rule.Unknown = nil
+			rule.LinkLimits = &AccessRuleLinkLimits{ExpiresIn: "1h", Unknown: map[string]json.RawMessage{name: json.RawMessage(`"30d"`)}}
+		}
+		if out, err := json.Marshal(rule); err == nil {
+			t.Errorf("%s: wrote %s", name, out)
+		}
+	}
+}
+
 // A member that differs from a modeled field only in case would be read as
 // that field and written back under its name, so it is refused.
 func TestAccessRuleRefusesCaseVariantFields(t *testing.T) {
