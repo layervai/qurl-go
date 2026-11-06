@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/layervai/qurl-go/crid"
@@ -762,6 +763,7 @@ type ResourceCreateOption interface {
 // call reuses an existing resource the name is optional and ignored; rename a
 // resource with UpdatePreview. LayerV checks the name: at most 100
 // characters, one line, no control characters, no surrounding whitespace.
+// The SDK refuses a blank, padded, or multi-line name before sending.
 //
 // CreatePortal mints a link for a resource that already exists and rejects it
 // with ErrInvalidPortalRequest.
@@ -771,9 +773,14 @@ func WithName(name string) ResourceCreateOption {
 
 type resourceNameOption string
 
+// validateResourceName mirrors the service's shape rules; length stays
+// server-authoritative.
 func validateResourceName(name string, errKind error) error {
 	if strings.TrimSpace(name) == "" {
 		return fmt.Errorf("%w: name must not be empty", errKind)
+	}
+	if strings.TrimSpace(name) != name || strings.ContainsFunc(name, unicode.IsControl) {
+		return fmt.Errorf("%w: name must be one line without control characters or surrounding whitespace", errKind)
 	}
 	return nil
 }
@@ -1724,7 +1731,8 @@ func (e *APIError) Unwrap() error {
 }
 
 // Is exposes status-level ambiguity without changing the concrete APIError type.
-// Read callers may retry normally; mutation callers must reconcile first.
+// Read callers may retry normally; mutation callers must reconcile first. It
+// also matches ErrResourceNameRequired for the 400 "name_required" refusal.
 func (e *APIError) Is(target error) bool {
 	if e != nil && target == ErrResourceNameRequired {
 		return e.StatusCode == http.StatusBadRequest && e.Code == "name_required"

@@ -28,9 +28,11 @@ func TestWithNameRejectedBeforeSending(t *testing.T) {
 	for _, create := range privacyCreateCalls {
 		t.Run(create.name, func(t *testing.T) {
 			client, api := newPrivacyTestClient(t, "")
-			err := create.call(client, []ResourceCreateOption{WithName("  ")})
-			if !errors.Is(err, ErrInvalidResourceRequest) && !errors.Is(err, ErrInvalidPortalRequest) {
-				t.Fatalf("err = %v, want an invalid request error", err)
+			for _, name := range []string{"  ", " Team", "Team\ndashboard", "Team\x00"} {
+				err := create.call(client, []ResourceCreateOption{WithName(name)})
+				if !errors.Is(err, ErrInvalidResourceRequest) && !errors.Is(err, ErrInvalidPortalRequest) {
+					t.Fatalf("WithName(%q) err = %v, want an invalid request error", name, err)
+				}
 			}
 			if len(api.bodies) != 0 {
 				t.Fatalf("sent %d requests, want none", len(api.bodies))
@@ -64,6 +66,11 @@ func TestNameRequiredErrorMatchesSentinel(t *testing.T) {
 	var apiErr *APIError
 	if !errors.Is(err, ErrResourceNameRequired) || !errors.As(err, &apiErr) || errors.Is(err, ErrAPIRequestOutcomeUnknown) {
 		t.Fatalf("err = %v, want ErrResourceNameRequired with an *APIError", err)
+	}
+	empty := ""
+	_, err = client.UpdatePreview(context.Background(), testConnectorCRID, PreviewPatch{Revision: 1, Name: &empty})
+	if !errors.Is(err, ErrResourceNameRequired) {
+		t.Fatalf("UpdatePreview err = %v, want ErrResourceNameRequired", err)
 	}
 	if errors.Is(&APIError{StatusCode: http.StatusBadRequest, Code: "invalid_request"}, ErrResourceNameRequired) {
 		t.Fatal("another 400 must not match ErrResourceNameRequired")
