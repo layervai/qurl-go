@@ -2,9 +2,12 @@ package qurl
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"reflect"
+	"strings"
 	"unicode/utf8"
 )
 
@@ -30,6 +33,12 @@ const accessRulesPath = "/v1/me/access-rules"
 // EmailDomain and AllowedEmails are for email_domain, ContractID and Payment for
 // contract, LinkLimits for public, and ApprovalExpiresIn for review and keys.
 // Name is display text; escape it before showing it.
+//
+// Fields this SDK does not model, such as ones a newer service adds, are kept
+// in Unknown (and in the nested settings' Unknown) exactly as read and sent
+// back unchanged. Check HasUnknownFields before editing or applying a rule: a
+// setting dropped because it is not understood could share more openly than
+// the rule says. Listing, saving back unchanged and deleting are safe.
 type AccessRule struct {
 	ID                string                `json:"id"`
 	Name              string                `json:"name"`
@@ -40,6 +49,27 @@ type AccessRule struct {
 	LinkLimits        *AccessRuleLinkLimits `json:"link_limits,omitempty"`
 	ApprovalExpiresIn string                `json:"approval_expires_in,omitempty"`
 	Payment           *AccessRulePayment    `json:"payment,omitempty"`
+	// Unknown holds the rule fields this SDK does not model, by JSON name.
+	// Its names must not be ones the SDK models.
+	Unknown map[string]json.RawMessage `json:"-"`
+}
+
+// HasUnknownFields reports whether the rule, its link limits or its payment
+// holds a field this SDK does not model.
+func (r AccessRule) HasUnknownFields() bool {
+	return len(r.Unknown) > 0 || r.LinkLimits != nil && len(r.LinkLimits.Unknown) > 0 || r.Payment != nil && len(r.Payment.Unknown) > 0
+}
+
+// MarshalJSON writes the rule's fields, then Unknown.
+func (r AccessRule) MarshalJSON() ([]byte, error) {
+	type plain AccessRule
+	return marshalKeepingUnknown(plain(r), r.Unknown)
+}
+
+// UnmarshalJSON reads the rule, keeping fields this SDK does not model in Unknown.
+func (r *AccessRule) UnmarshalJSON(data []byte) error {
+	type plain AccessRule
+	return unmarshalKeepingUnknown(data, (*plain)(r), &r.Unknown)
 }
 
 // AccessRuleLinkLimits makes a public rule share a new temporary link with
@@ -50,6 +80,20 @@ type AccessRuleLinkLimits struct {
 	ExpiresIn       string `json:"expires_in"`
 	OneTimeUse      *bool  `json:"one_time_use,omitempty"`
 	SessionDuration string `json:"session_duration,omitempty"`
+	// Unknown holds the fields this SDK does not model; see AccessRule.
+	Unknown map[string]json.RawMessage `json:"-"`
+}
+
+// MarshalJSON writes the limits, then Unknown.
+func (l AccessRuleLinkLimits) MarshalJSON() ([]byte, error) {
+	type plain AccessRuleLinkLimits
+	return marshalKeepingUnknown(plain(l), l.Unknown)
+}
+
+// UnmarshalJSON reads the limits, keeping fields this SDK does not model in Unknown.
+func (l *AccessRuleLinkLimits) UnmarshalJSON(data []byte) error {
+	type plain AccessRuleLinkLimits
+	return unmarshalKeepingUnknown(data, (*plain)(l), &l.Unknown)
 }
 
 // AccessRulePayment is a contract rule's Stripe price and access duration: a
@@ -60,6 +104,63 @@ type AccessRuleLinkLimits struct {
 type AccessRulePayment struct {
 	PriceID       string `json:"price_id"`
 	AccessSeconds int64  `json:"access_seconds"`
+	// Unknown holds the fields this SDK does not model; see AccessRule.
+	Unknown map[string]json.RawMessage `json:"-"`
+}
+
+// MarshalJSON writes the payment, then Unknown.
+func (p AccessRulePayment) MarshalJSON() ([]byte, error) {
+	type plain AccessRulePayment
+	return marshalKeepingUnknown(plain(p), p.Unknown)
+}
+
+// UnmarshalJSON reads the payment, keeping fields this SDK does not model in Unknown.
+func (p *AccessRulePayment) UnmarshalJSON(data []byte) error {
+	type plain AccessRulePayment
+	return unmarshalKeepingUnknown(data, (*plain)(p), &p.Unknown)
+}
+
+// marshalKeepingUnknown writes v's JSON object with unknown's members appended.
+func marshalKeepingUnknown(v any, unknown map[string]json.RawMessage) ([]byte, error) {
+	data, err := json.Marshal(v)
+	if err != nil || len(unknown) == 0 {
+		return data, err
+	}
+	extra, err := json.Marshal(unknown)
+	if err != nil {
+		return nil, err
+	}
+	if string(data) == "{}" {
+		return extra, nil
+	}
+	return append(append(data[:len(data)-1], ','), extra[1:]...), nil
+}
+
+// unmarshalKeepingUnknown decodes data into the struct v points to and puts
+// every member that names none of its fields in *unknown (nil when none).
+// encoding/json matches names ignoring case, so this does too.
+func unmarshalKeepingUnknown(data []byte, v any, unknown *map[string]json.RawMessage) error {
+	if err := json.Unmarshal(data, v); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	t := reflect.TypeOf(v).Elem()
+	for name := range fields {
+		for i := range t.NumField() {
+			if tag, _, _ := strings.Cut(t.Field(i).Tag.Get("json"), ","); tag != "-" && strings.EqualFold(tag, name) {
+				delete(fields, name)
+				break
+			}
+		}
+	}
+	*unknown = nil
+	if len(fields) > 0 {
+		*unknown = fields
+	}
+	return nil
 }
 
 // AccessRules is the authenticated account's rule library. Items are the
@@ -97,8 +198,8 @@ func (c *Client) AccessRules(ctx context.Context) (*AccessRules, error) {
 // SaveAccessRules replaces the account's custom rules if update.Version still
 // matches, and returns the saved library with its new version. A version
 // mismatch matches ErrAccessRulesConflict, and a rejected library matches
-// ErrInvalidAccessRules. The service validates every rule;
-// rule fields this SDK does not model are not preserved. The credential needs
+// ErrInvalidAccessRules. The service validates every rule; each rule's Unknown
+// fields are sent as they are. The credential needs
 // qurl:write; a registered device linked to the account is accepted.
 func (c *Client) SaveAccessRules(ctx context.Context, update AccessRulesUpdate) (*AccessRules, error) {
 	// encoding/json replaces malformed UTF-8 with U+FFFD, so an invalid name

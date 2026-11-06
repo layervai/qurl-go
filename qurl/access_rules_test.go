@@ -59,6 +59,41 @@ func TestClient_AccessRulesRoundTrip(t *testing.T) {
 	}
 }
 
+// TestClient_AccessRulesKeepUnknownFields saves back rule fields a newer
+// service added, on the rule and inside its settings, exactly as read.
+func TestClient_AccessRulesKeepUnknownFields(t *testing.T) {
+	const items = `[` +
+		`{"id":"0b7e1c2a-4f5d-4e6a-9b8c-1d2e3f4a5b6c","name":"Paid","mode":"contract","contract_id":"c_1","payment":{"price_id":"price_1","access_seconds":0,"trial":{"days":7}},"region":"eu"},` +
+		`{"id":"1c8f2d3b-5a6e-4f7b-8c9d-2e3f4a5b6c7d","name":"Quick look","mode":"public","link_limits":{"expires_in":"1h","max_opens":3}},` +
+		`{"id":"2d9a3e4c-6b7f-4a8c-9d0e-3f4a5b6c7d8e","name":"Reviewed","mode":"review"}]`
+	saved := make(chan string, 1)
+	client := newAccessRulesTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			body, _ := io.ReadAll(r.Body)
+			saved <- string(body)
+		}
+		fmt.Fprintf(w, `{"data":{"account_id":"a","version":2,"items":%s,"built_ins":[]}}`, items)
+	})
+	rules, err := client.AccessRules(context.Background())
+	if err != nil {
+		t.Fatalf("AccessRules: %v", err)
+	}
+	for i, want := range []bool{true, true, false} {
+		if got := rules.Items[i].HasUnknownFields(); got != want {
+			t.Errorf("item %d HasUnknownFields = %v, want %v", i, got, want)
+		}
+	}
+	if p := rules.Items[0].Payment; p == nil || p.PriceID != "price_1" || string(p.Unknown["trial"]) != `{"days":7}` || string(rules.Items[0].Unknown["region"]) != `"eu"` {
+		t.Fatalf("item 0 = %+v, payment %+v", rules.Items[0], p)
+	}
+	if _, err := client.SaveAccessRules(context.Background(), AccessRulesUpdate{Version: rules.Version, Items: rules.Items}); err != nil {
+		t.Fatalf("SaveAccessRules: %v", err)
+	}
+	if got, want := <-saved, `{"version":2,"items":`+items+`}`; got != want {
+		t.Fatalf("PUT body =\n%s\nwant\n%s", got, want)
+	}
+}
+
 func TestAccessRulesUpdateWire(t *testing.T) {
 	for _, tc := range []struct {
 		name   string

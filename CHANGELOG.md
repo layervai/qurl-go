@@ -32,6 +32,9 @@ and are marked **Breaking** with what to change.
   both, and `RegisteredAgentResourceHTTPDoer` allows `GET` and `PUT` on the
   route with no query. An empty `QuickShareRuleID` is omitted and keeps the
   saved quick-share rule; send `"once"` to reset it.
+  Rule fields the SDK does not model are kept in `Unknown` (on the rule, its
+  link limits and its payment) and saved back unchanged; check
+  `AccessRule.HasUnknownFields` before editing or applying a rule.
 
 - `ManagedResource.LinkDefaults` reports a resource's saved `link_defaults`,
   and `ResourceUpdate.LinkDefaults` replaces them (`ClearLinkDefaults` removes
