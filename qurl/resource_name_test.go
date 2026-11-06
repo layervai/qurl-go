@@ -34,7 +34,7 @@ func TestWithNameRejectedBeforeSending(t *testing.T) {
 	for _, create := range privacyCreateCalls {
 		t.Run(create.name, func(t *testing.T) {
 			client, api := newPrivacyTestClient(t, "")
-			for _, name := range []string{"  ", " Team", "Team\ndashboard", "Team\x00", "Team\u2028x", "Team\u202ex"} {
+			for _, name := range []string{"  ", " Team", "Team\ndashboard", "Team\x00", "Team\u2028x", "Team\u202ex", strings.Repeat("x", 101), "\xff"} {
 				err := create.call(client, []ResourceCreateOption{WithName(name)})
 				if !errors.Is(err, wantKind[create.name]) {
 					t.Fatalf("WithName(%q) err = %v, want %v", name, err, wantKind[create.name])
@@ -88,5 +88,16 @@ func TestNameRequiredErrorMatchesSentinel(t *testing.T) {
 	}
 	if errors.Is(&APIError{StatusCode: http.StatusBadRequest, Code: "invalid_request"}, ErrResourceNameRequired) {
 		t.Fatal("another 400 must not match ErrResourceNameRequired")
+	}
+}
+
+// The limit counts characters, not bytes, like the service.
+func TestWithNameAcceptsHundredCharacters(t *testing.T) {
+	client, api := newPrivacyTestClient(t, "")
+	if _, err := client.ProtectURL(context.Background(), privacyTestTargetURL, WithName(strings.Repeat("é", 100))); err != nil {
+		t.Fatalf("ProtectURL: %v", err)
+	}
+	if len(api.bodies) != 1 {
+		t.Fatalf("requests = %d, want 1", len(api.bodies))
 	}
 }
