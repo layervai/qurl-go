@@ -26,7 +26,7 @@ var ErrRegisteredAgentResourceRequestDenied = errors.New("qurl: registered-agent
 // routes used by a registered qURL client, plus the publisher payment routes
 // described below. The service independently restricts a device key's POST
 // /v1/api-keys authority to a Connector-target one-shot token. Other account,
-// billing, usage, and key-management routes fail closed.
+// billing, payment, usage, and key-management routes fail closed.
 //
 // The publisher-profile write is the one owner-profile route in scope, and it
 // is deliberate: a device that publishes without an account holds no other
