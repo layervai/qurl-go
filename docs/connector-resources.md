@@ -98,6 +98,9 @@ for the resource it may create. `qurl.WithPrivate` states that resource's
 privacy; without it the service's default applies, as it does for
 `EnsureConnectorResource`. See
 [Private and public resources](issuing-links.md#private-and-public-resources).
+`qurl.WithName` sets the public name LayerV requires when the slug is new;
+`EnsureConnectorResource` sends none, so it can only reuse an existing
+resource. See [Resource name](issuing-links.md#resource-name).
 
 The id lookup accepts the resource-detail envelope
 `data.resource`; the slug lookup accepts the resource-list envelope `data[]`.
