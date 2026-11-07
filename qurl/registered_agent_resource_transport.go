@@ -172,7 +172,6 @@ func registeredAgentResourceRouteAllowed(method, path string) bool {
 		return method == http.MethodGet || method == http.MethodPatch
 	case "/v1/access-requests":
 		return method == http.MethodGet
-	// Not connect/complete: completing consent needs the signed-in account.
 	case "/v1/payments/connect":
 		return method == http.MethodPost
 	case "/v1/payments/account":

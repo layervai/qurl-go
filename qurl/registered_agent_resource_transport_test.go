@@ -274,30 +274,30 @@ func newRegisteredAgentResourceTestDoer(t *testing.T) (HTTPDoer, *registeredAgen
 	return doer, capture
 }
 
-// Every access route answers exactly one method. Each accepted spelling of
-// each route is tried with every method a caller could send, so a route that
-// gains a second method, or loses its own, fails here.
-func TestRegisteredAgentResourceHTTPDoer_AccessRoutesAllowOneMethodEach(t *testing.T) {
+// Every access and payment route answers only its own methods. Each accepted
+// spelling of each route is tried with every method a caller could send, so a
+// route that gains a method, or loses its own, fails here.
+func TestRegisteredAgentResourceHTTPDoer_AccessAndPaymentRoutesAllowOnlyTheirMethods(t *testing.T) {
 	doer, capture := newRegisteredAgentResourceTestDoer(t)
 
 	routes := []struct {
-		name   string
-		method string
-		paths  []string
+		name    string
+		methods []string
+		paths   []string
 	}{
 		{
-			name: "list for every resource", method: http.MethodGet,
+			name: "list for every resource", methods: []string{http.MethodGet},
 			paths: []string{"/v1/access-requests"},
 		},
 		{
-			name: "list for one resource", method: http.MethodGet,
+			name: "list for one resource", methods: []string{http.MethodGet},
 			paths: []string{
 				"/v1/resources/qcrid/access-requests",
 				"/v1/resources/Resource_ID-9/access-requests",
 			},
 		},
 		{
-			name: "approve", method: http.MethodPost,
+			name: "approve", methods: []string{http.MethodPost},
 			paths: []string{
 				"/v1/resources/qcrid/access-requests/000000/approve",
 				"/v1/resources/qcrid/access-requests/999999/approve",
@@ -305,7 +305,7 @@ func TestRegisteredAgentResourceHTTPDoer_AccessRoutesAllowOneMethodEach(t *testi
 			},
 		},
 		{
-			name: "deny by code", method: http.MethodDelete,
+			name: "deny by code", methods: []string{http.MethodDelete},
 			paths: []string{
 				"/v1/resources/qcrid/access-requests/000000",
 				"/v1/resources/qcrid/access-requests/999999",
@@ -313,7 +313,7 @@ func TestRegisteredAgentResourceHTTPDoer_AccessRoutesAllowOneMethodEach(t *testi
 			},
 		},
 		{
-			name: "deny by device id", method: http.MethodDelete,
+			name: "deny by device id", methods: []string{http.MethodDelete},
 			paths: []string{
 				"/v1/resources/qcrid/access-requests/abcd-efgh-ijkl-mnop",
 				"/v1/resources/qcrid/access-requests/aaaa-zzzz-2222-7777",
@@ -323,11 +323,33 @@ func TestRegisteredAgentResourceHTTPDoer_AccessRoutesAllowOneMethodEach(t *testi
 			},
 		},
 		{
-			name: "remove an approved device", method: http.MethodDelete,
+			name: "remove an approved device", methods: []string{http.MethodDelete},
 			paths: []string{
 				"/v1/resources/qcrid/allowed-passkeys/abcd-efgh-ijkl-mnop",
 				"/v1/resources/qcrid/allowed-passkeys/aaaa-zzzz-2222-7777",
 				"/v1/resources/Resource_ID-9/allowed-passkeys/2345-67qr-s2t3-u4v5",
+			},
+		},
+		{
+			name: "start Stripe consent", methods: []string{http.MethodPost},
+			paths: []string{"/v1/payments/connect"},
+		},
+		{
+			name: "read or disconnect the Stripe account", methods: []string{http.MethodGet, http.MethodDelete},
+			paths: []string{"/v1/payments/account"},
+		},
+		{
+			// Completing consent needs the signed-in account.
+			name: "payment near misses", methods: nil,
+			paths: []string{
+				"/v1/payments/connect/complete",
+				"/v1/payments/connect/",
+				"/v1/payments/account/",
+				"/v1/payments",
+				"/v1/payments/accounts",
+				"/v1/Payments/account",
+				"/v1/payments/account?x=1",
+				"/v1/payments/account?",
 			},
 		},
 	}
@@ -350,7 +372,7 @@ func TestRegisteredAgentResourceHTTPDoer_AccessRoutesAllowOneMethodEach(t *testi
 				if resp != nil {
 					_ = resp.Body.Close()
 				}
-				if method == route.method {
+				if slices.Contains(route.methods, method) {
 					wantCalls++
 					if err != nil {
 						t.Errorf("%s: %s %s = %v, want allowed", route.name, method, path, err)
@@ -568,59 +590,6 @@ func TestRegisteredAgentResourceHTTPDoer_AccessRouteNearMissesAreRefused(t *test
 
 	if capture.calls != 0 {
 		t.Fatalf("refused requests reached the network %d times", capture.calls)
-	}
-}
-
-// A linked publisher device may start Stripe consent, read the connected
-// account and disconnect it, with exactly those methods. Completing consent
-// needs the signed-in account, so it stays refused, as do near misses.
-func TestRegisteredAgentResourceHTTPDoer_PaymentRoutes(t *testing.T) {
-	doer, capture := newRegisteredAgentResourceTestDoer(t)
-
-	routes := map[string][]string{ // target -> methods that pass
-		"/v1/payments/connect": {http.MethodPost},
-		"/v1/payments/account": {http.MethodGet, http.MethodDelete},
-		// Every method is refused on these.
-		"/v1/payments/connect/complete": nil,
-		"/v1/payments/connect/":         nil,
-		"/v1/payments/account/":         nil,
-		"/v1/payments":                  nil,
-		"/v1/payments/accounts":         nil,
-		"/v1/Payments/account":          nil,
-		"/v1/payments/account?x=1":      nil,
-		"/v1/payments/account?":         nil,
-	}
-	methods := []string{
-		http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch,
-		http.MethodDelete, http.MethodOptions, http.MethodTrace, http.MethodConnect,
-		"get", "post", "delete",
-	}
-	wantCalls := 0
-	for target, want := range routes {
-		for _, method := range methods {
-			req, err := http.NewRequestWithContext(context.Background(), method,
-				registeredAgentResourceTestBase+target, http.NoBody)
-			if err != nil {
-				t.Fatal(err)
-			}
-			resp, err := doer.Do(req)
-			if resp != nil {
-				_ = resp.Body.Close()
-			}
-			if slices.Contains(want, method) {
-				wantCalls++
-				if err != nil {
-					t.Errorf("%s %s = %v, want allowed", method, target, err)
-				}
-				continue
-			}
-			if !errors.Is(err, ErrRegisteredAgentResourceRequestDenied) {
-				t.Errorf("%s %s = %v, want request denied", method, target, err)
-			}
-		}
-	}
-	if capture.calls != wantCalls {
-		t.Fatalf("wire calls = %d, want %d: a refused request reached the network or an allowed one did not", capture.calls, wantCalls)
 	}
 }
 
