@@ -10,9 +10,9 @@ and are marked **Breaking** with what to change.
 
 - `RegisteredAgentResourceHTTPDoer` now accepts the publisher payment routes
   a linked device may use: `POST /v1/payments/connect`, and `GET` and
-  `DELETE /v1/payments/account`, exactly, with no query. Before this, `qurl
-  payments connect`, `account` and `disconnect` failed on a linked device
-  with `ErrRegisteredAgentResourceRequestDenied`. `POST
+  `DELETE /v1/payments/account`, exactly, with no query. Before this, the qurl
+  CLI's `payments connect`, `account` and `disconnect` failed on a linked
+  device with `ErrRegisteredAgentResourceRequestDenied`. `POST
   /v1/payments/connect/complete` stays refused. `DELETE` succeeds only where
   the service allows it.
 

@@ -62,8 +62,9 @@ var ErrRegisteredAgentResourceRequestDenied = errors.New("qurl: registered-agent
 // Publisher payments follow the service's device-key rules: POST
 // /v1/payments/connect starts Stripe consent, and GET and DELETE
 // /v1/payments/account read and disconnect the connected account, exactly,
-// with no query. POST /v1/payments/connect/complete is refused: completing
-// consent needs the signed-in account.
+// with no query. DELETE succeeds only on a service that allows it for device
+// keys. POST /v1/payments/connect/complete is refused: completing consent needs
+// the signed-in account.
 //
 // The bridge also requires the Client's exact API origin and path prefix. The
 // caller's request is never mutated, and the device Authorization header is
@@ -171,8 +172,7 @@ func registeredAgentResourceRouteAllowed(method, path string) bool {
 		return method == http.MethodGet || method == http.MethodPatch
 	case "/v1/access-requests":
 		return method == http.MethodGet
-	// Publisher payments, matching the service: completing Stripe consent
-	// (POST /v1/payments/connect/complete) needs the signed-in account.
+	// Not connect/complete: completing consent needs the signed-in account.
 	case "/v1/payments/connect":
 		return method == http.MethodPost
 	case "/v1/payments/account":
