@@ -23,9 +23,10 @@ var ErrRegisteredAgentResourceRequestDenied = errors.New("qurl: registered-agent
 // (POST /v1/resources/{id}/share), portal creation, Connector-enrollment-token
 // mint, account linking (POST /v1/account/link), identity-echo, and
 // publisher-profile (GET and PATCH /v1/me/publisher, exactly, with no query)
-// routes used by a registered qURL client. The service independently restricts
-// a device key's POST /v1/api-keys authority to a Connector-target one-shot
-// token. Other account, billing, usage, and key-management routes fail closed.
+// routes used by a registered qURL client, plus the publisher payment routes
+// described below. The service independently restricts a device key's POST
+// /v1/api-keys authority to a Connector-target one-shot token. Other account,
+// billing, payment, usage, and key-management routes fail closed.
 //
 // The publisher-profile write is the one owner-profile route in scope, and it
 // is deliberate: a device that publishes without an account holds no other
@@ -58,6 +59,13 @@ var ErrRegisteredAgentResourceRequestDenied = errors.New("qurl: registered-agent
 // GET and PATCH /v1/resources/{id}/preview, and POST
 // /v1/resources/{id}/preview/uploads, exactly, with no query. PUT and GET
 // uploads are refused. These routes cannot set publisher verification.
+//
+// Publisher payments follow the service's device-key rules: POST
+// /v1/payments/connect starts Stripe consent, and GET and DELETE
+// /v1/payments/account read and disconnect the connected account, exactly,
+// with no query. DELETE succeeds only on a service that allows it for device
+// keys. POST /v1/payments/connect/complete is refused: completing consent needs
+// the signed-in account.
 //
 // The bridge also requires the Client's exact API origin and path prefix. The
 // caller's request is never mutated, and the device Authorization header is
@@ -165,6 +173,10 @@ func registeredAgentResourceRouteAllowed(method, path string) bool {
 		return method == http.MethodGet || method == http.MethodPatch
 	case "/v1/access-requests":
 		return method == http.MethodGet
+	case "/v1/payments/connect":
+		return method == http.MethodPost
+	case "/v1/payments/account":
+		return method == http.MethodGet || method == http.MethodDelete
 	}
 	const prefix = "/v1/resources/"
 	if !strings.HasPrefix(path, prefix) {

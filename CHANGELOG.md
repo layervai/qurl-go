@@ -8,6 +8,14 @@ and are marked **Breaking** with what to change.
 
 ## Unreleased
 
+- `RegisteredAgentResourceHTTPDoer` now accepts the publisher payment routes
+  a linked device may use: `POST /v1/payments/connect`, and `GET` and
+  `DELETE /v1/payments/account`, exactly, with no query. Before this, the qurl
+  CLI's `payments connect`, `account` and `disconnect` failed on a linked
+  device with `ErrRegisteredAgentResourceRequestDenied`. `POST
+  /v1/payments/connect/complete` stays refused. `DELETE` succeeds only where
+  the service allows it.
+
 - **The minimum Go version is now 1.26.10, up from 1.26.9.** This fixes
   GO-2026-6809 in `crypto/x509` certificate verification. Builders pinned to
   Go 1.26.0 through 1.26.9 with `GOTOOLCHAIN=local` must update. The `awsstore`
