@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -567,6 +568,59 @@ func TestRegisteredAgentResourceHTTPDoer_AccessRouteNearMissesAreRefused(t *test
 
 	if capture.calls != 0 {
 		t.Fatalf("refused requests reached the network %d times", capture.calls)
+	}
+}
+
+// A linked publisher device may start Stripe consent, read the connected
+// account and disconnect it, with exactly those methods. Completing consent
+// needs the signed-in account, so it stays refused, as do near misses.
+func TestRegisteredAgentResourceHTTPDoer_PaymentRoutes(t *testing.T) {
+	doer, capture := newRegisteredAgentResourceTestDoer(t)
+
+	routes := map[string][]string{ // target -> methods that pass
+		"/v1/payments/connect": {http.MethodPost},
+		"/v1/payments/account": {http.MethodGet, http.MethodDelete},
+		// Every method is refused on these.
+		"/v1/payments/connect/complete": nil,
+		"/v1/payments/connect/":         nil,
+		"/v1/payments/account/":         nil,
+		"/v1/payments":                  nil,
+		"/v1/payments/accounts":         nil,
+		"/v1/Payments/account":          nil,
+		"/v1/payments/account?x=1":      nil,
+		"/v1/payments/account?":         nil,
+	}
+	methods := []string{
+		http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch,
+		http.MethodDelete, http.MethodOptions, http.MethodTrace, http.MethodConnect,
+		"get", "post", "delete",
+	}
+	wantCalls := 0
+	for target, want := range routes {
+		for _, method := range methods {
+			req, err := http.NewRequestWithContext(context.Background(), method,
+				registeredAgentResourceTestBase+target, http.NoBody)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := doer.Do(req)
+			if resp != nil {
+				_ = resp.Body.Close()
+			}
+			if slices.Contains(want, method) {
+				wantCalls++
+				if err != nil {
+					t.Errorf("%s %s = %v, want allowed", method, target, err)
+				}
+				continue
+			}
+			if !errors.Is(err, ErrRegisteredAgentResourceRequestDenied) {
+				t.Errorf("%s %s = %v, want request denied", method, target, err)
+			}
+		}
+	}
+	if capture.calls != wantCalls {
+		t.Fatalf("wire calls = %d, want %d: a refused request reached the network or an allowed one did not", capture.calls, wantCalls)
 	}
 }
 
