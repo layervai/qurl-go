@@ -75,6 +75,9 @@ func TestRegisteredAgentResourceHTTPDoer_ExactSurfaceAndCredentialCustody(t *tes
 		{http.MethodDelete, "/v1/resources/qcrid/access-requests/012345"},
 		{http.MethodDelete, "/v1/resources/qcrid/access-requests/abcd-efgh-ijkl-mnop"},
 		{http.MethodDelete, "/v1/resources/qcrid/allowed-passkeys/abcd-efgh-ijkl-mnop"},
+		{http.MethodPost, "/v1/payments/connect"},
+		{http.MethodGet, "/v1/payments/account"},
+		{http.MethodDelete, "/v1/payments/account"},
 	}
 	for _, test := range allowed {
 		req, requestErr := http.NewRequestWithContext(context.Background(), test.method,
@@ -348,6 +351,7 @@ func TestRegisteredAgentResourceHTTPDoer_AccessAndPaymentRoutesAllowOnlyTheirMet
 				"/v1/payments",
 				"/v1/payments/accounts",
 				"/v1/Payments/account",
+				"/v1/payments/connect?x=1",
 				"/v1/payments/account?x=1",
 				"/v1/payments/account?",
 			},
