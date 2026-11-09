@@ -638,6 +638,19 @@ func ExampleClient_UpdatePreview() {
 	}
 }
 
+func ExampleClient_CreatePublisherStripePrice() {
+	client, err := qurl.OpenClient()
+	if err != nil {
+		panic(err)
+	}
+	// The publisher has already connected Stripe. Create a $5 monthly price.
+	price, err := client.CreatePublisherStripePrice(context.Background(), "Reports API", 500, "month")
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(price.PriceID)
+}
+
 func ExampleWithMaxResponseBodyBytes() {
 	client, err := qurl.NewClient(qurl.BearerToken("lv_example"), qurl.WithMaxResponseBodyBytes(16<<20))
 	if err != nil {

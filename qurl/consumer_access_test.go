@@ -230,6 +230,112 @@ func TestPublisherStripeEndpointsValidateAccountFeeAndRedirect(t *testing.T) {
 	}
 }
 
+func TestPublisherStripeDeviceSetup(t *testing.T) {
+	state := strings.Repeat("a", 43) + ".12345"
+	var calls int
+	transport := doerFunc(func(req *http.Request) (*http.Response, error) {
+		calls++
+		if req.Method != http.MethodPost || req.Header.Get("Authorization") != "Bearer lv_test_policy" {
+			t.Fatal("missing authenticated POST")
+		}
+		var response string
+		switch req.URL.Path {
+		case "/v1/payments/connect":
+			if req.URL.Query().Get("loopback_port") != "12345" {
+				t.Fatal("missing loopback port")
+			}
+			response = `{"data":{"url":"https://connect.stripe.com/oauth/authorize?state=` + state + `"}}`
+		case "/v1/payments/connect/complete":
+			var body map[string]string
+			if err := json.NewDecoder(req.Body).Decode(&body); err != nil || body["state"] != state || body["code"] != "code" {
+				t.Fatal("wrong consent proof")
+			}
+			response = `{"data":{"url":"https://example.test/billing"}}`
+		case "/v1/payments/prices":
+			var body struct {
+				Name     string `json:"name"`
+				Amount   int64  `json:"amount"`
+				Interval string `json:"interval"`
+			}
+			if err := json.NewDecoder(req.Body).Decode(&body); err != nil || body.Name != "App" || body.Amount != 500 || body.Interval != "month" {
+				t.Fatal("wrong price input")
+			}
+			response = `{"data":{"account_id":"acct_owner","price_id":"price_new"}}`
+		default:
+			t.Fatalf("unexpected payment route %s", req.URL.Path)
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(response))}, nil
+	})
+	client, err := NewClient(BearerToken("lv_test_policy"), WithBaseURL("https://api.example.test"), WithHTTPClient(transport))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, expected, err := client.ConnectPublisherStripeForDevice(t.Context(), 12345); err != nil || expected != state {
+		t.Fatalf("wrong consent state: %v", err)
+	}
+	if err = client.CompletePublisherStripe(t.Context(), state, "code"); err != nil {
+		t.Fatal(err)
+	}
+	policy, err := client.CreatePublisherStripePrice(t.Context(), "App", 500, "month")
+	if err != nil || policy.AccountID != "acct_owner" || policy.PriceID != "price_new" || calls != 3 {
+		t.Fatalf("price response = %+v, err = %v, calls = %d", policy, err, calls)
+	}
+}
+
+func TestPublisherStripeDeviceRejectsInvalidConsent(t *testing.T) {
+	nonce := strings.Repeat("a", 43)
+	response := ""
+	client, err := NewClient(BearerToken("lv_test_policy"), WithBaseURL("https://api.example.test"), WithHTTPClient(doerFunc(func(_ *http.Request) (*http.Response, error) {
+		if response == "" {
+			t.Fatal("invalid input reached the API")
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(response))}, nil
+	})))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, port := range []int{0, 1023, 65536} {
+		if _, _, err := client.ConnectPublisherStripeForDevice(t.Context(), port); !errors.Is(err, ErrInvalidResourceRequest) {
+			t.Fatalf("port %d: %v", port, err)
+		}
+	}
+	for _, state := range []string{"", nonce + ".012345", "!" + nonce[1:]} {
+		if err := client.CompletePublisherStripe(t.Context(), state, "code"); !errors.Is(err, ErrInvalidResourceRequest) {
+			t.Fatalf("invalid state accepted: %v", err)
+		}
+	}
+	if err := client.CompletePublisherStripe(t.Context(), nonce, ""); !errors.Is(err, ErrInvalidResourceRequest) {
+		t.Fatalf("missing code accepted: %v", err)
+	}
+	if _, err := client.CreatePublisherStripePrice(t.Context(), "App", 49, ""); !errors.Is(err, ErrInvalidResourceRequest) {
+		t.Fatalf("invalid amount accepted: %v", err)
+	}
+	for _, path := range []string{
+		"connect.stripe.com/oauth/authorize?state=" + nonce + ".12346",
+		"connect.stripe.com/oauth/authorize?state=" + nonce + ".12345&state=other",
+		"connect.stripe.com/oauth/authorize?state=" + nonce,
+		"connect.stripe.com/oauth/authorize?state=short.12345",
+		"connect.stripe.com/oauth/authorize?state=!" + nonce[1:] + ".12345",
+		"connect.stripe.com/unexpected?state=" + nonce + ".12345",
+		"stripe.example.test/oauth/authorize?state=" + nonce + ".12345",
+	} {
+		response = `{"data":{"url":"https://` + path + `"}}`
+		if _, _, err := client.ConnectPublisherStripeForDevice(t.Context(), 12345); !errors.Is(err, ErrInvalidAPIResponse) {
+			t.Fatalf("invalid consent URL accepted: %v", err)
+		}
+	}
+	for _, data := range []string{
+		`{"account_id":"other","price_id":"price_new"}`,
+		`{"account_id":"acct_owner","price_id":"other"}`,
+		`{"account_id":"acct_owner","price_id":"price_new","access_seconds":60}`,
+	} {
+		response = `{"data":` + data + `}`
+		if _, err := client.CreatePublisherStripePrice(t.Context(), "App", 500, ""); !errors.Is(err, ErrInvalidAPIResponse) {
+			t.Fatalf("invalid price receipt accepted: %v", err)
+		}
+	}
+}
+
 func TestConsumerEmailDomainPolicy(t *testing.T) {
 	for _, tc := range []struct {
 		mode, domain string

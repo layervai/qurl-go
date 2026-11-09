@@ -6,7 +6,10 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // ConsumerAccessPolicy selects the publisher's private access flow.
@@ -156,17 +159,100 @@ func (p ConsumerAccessPolicy) equal(other ConsumerAccessPolicy) bool {
 
 // ConnectPublisherStripe returns the Stripe-hosted publisher consent URL.
 func (c *Client) ConnectPublisherStripe(ctx context.Context) (string, error) {
+	link, err := c.connectPublisherStripe(ctx, "/v1/payments/connect")
+	if err != nil {
+		return "", err
+	}
+	return link.String(), nil
+}
+
+// ConnectPublisherStripeForDevice returns the Stripe consent URL and the expected
+// state. After consent, the browser opens http://127.0.0.1:<port>/stripe/return.
+// Compare the received state with the expected state in constant time before
+// passing the state and code to CompletePublisherStripe.
+func (c *Client) ConnectPublisherStripeForDevice(ctx context.Context, port int) (consentURL, expectedState string, err error) {
+	if port < 1024 || port > 65535 {
+		return "", "", fmt.Errorf("%w: invalid Stripe return port", ErrInvalidResourceRequest)
+	}
+	link, err := c.connectPublisherStripe(ctx, "/v1/payments/connect?loopback_port="+strconv.Itoa(port))
+	if err != nil {
+		return "", "", err
+	}
+	query, err := url.ParseQuery(link.RawQuery)
+	if err != nil || link.Path != "/oauth/authorize" || len(query["state"]) != 1 {
+		return "", "", ErrInvalidAPIResponse
+	}
+	state := query.Get("state")
+	if statePort, valid := publisherStripeReturnPort(state); !valid || statePort != port {
+		return "", "", ErrInvalidAPIResponse
+	}
+	return link.String(), state, nil
+}
+
+func (c *Client) connectPublisherStripe(ctx context.Context, path string) (*url.URL, error) {
 	var response apiEnvelope[struct {
 		URL string `json:"url"`
 	}]
-	if err := c.doJSONStatus(ctx, http.MethodPost, "/v1/payments/connect", nil, &response, http.StatusOK); err != nil {
-		return "", err
+	if err := c.doJSONStatus(ctx, http.MethodPost, path, nil, &response, http.StatusOK); err != nil {
+		return nil, err
 	}
 	u, err := url.Parse(response.Data.URL)
 	if err != nil || u.Scheme != "https" || u.Host != "connect.stripe.com" || u.User != nil {
-		return "", ErrInvalidAPIResponse
+		return nil, ErrInvalidAPIResponse
 	}
-	return response.Data.URL, nil
+	return u, nil
+}
+
+var publisherStripeNonce = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
+
+func publisherStripeReturnPort(state string) (int, bool) {
+	nonce, suffix, loopback := strings.Cut(state, ".")
+	if !publisherStripeNonce.MatchString(nonce) {
+		return 0, false
+	}
+	if !loopback {
+		return 0, true
+	}
+	port, err := strconv.Atoi(suffix)
+	return port, err == nil && port >= 1024 && port <= 65535 && strconv.Itoa(port) == suffix
+}
+
+// CompletePublisherStripe binds Stripe consent to the authenticated publisher.
+// The state can be from a device or browser setup.
+func (c *Client) CompletePublisherStripe(ctx context.Context, state, code string) error {
+	if _, valid := publisherStripeReturnPort(state); !valid || len(code) < 1 || len(code) > 1024 || !utf8.ValidString(code) {
+		return fmt.Errorf("%w: invalid Stripe consent return", ErrInvalidResourceRequest)
+	}
+	body := struct {
+		State string `json:"state"`
+		Code  string `json:"code"`
+	}{State: state, Code: code}
+	var response apiEnvelope[struct{}]
+	return c.doJSONStatus(ctx, http.MethodPost, "/v1/payments/connect/complete", body, &response, http.StatusOK)
+}
+
+// CreatePublisherStripePrice creates or reuses a price on the caller's connected
+// Stripe account. Amount is in US cents. An empty interval means pay once.
+func (c *Client) CreatePublisherStripePrice(ctx context.Context, name string, amount int64, interval string) (*CRIDPaymentPolicy, error) {
+	name = strings.TrimSpace(name)
+	if name == "" || !utf8.ValidString(name) || utf8.RuneCountInString(name) > 100 || strings.ContainsFunc(name, unicode.IsControl) ||
+		amount < 50 || amount > 99999999 || (interval != "" && interval != "month" && interval != "year") {
+		return nil, fmt.Errorf("%w: invalid Stripe price", ErrInvalidResourceRequest)
+	}
+	body := struct {
+		Name     string `json:"name"`
+		Amount   int64  `json:"amount"`
+		Interval string `json:"interval,omitempty"`
+	}{Name: name, Amount: amount, Interval: interval}
+	var response apiEnvelope[CRIDPaymentPolicy]
+	if err := c.doJSONStatus(ctx, http.MethodPost, "/v1/payments/prices", body, &response, http.StatusOK); err != nil {
+		return nil, err
+	}
+	policy := response.Data
+	if !stripeAccountID.MatchString(policy.AccountID) || !stripePriceID.MatchString(policy.PriceID) || policy.AccessSeconds != 0 {
+		return nil, ErrInvalidAPIResponse
+	}
+	return &policy, nil
 }
 
 // PublisherStripeAccount returns the account connected by this publisher.
