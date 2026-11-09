@@ -166,20 +166,27 @@ func (c *Client) ConnectPublisherStripe(ctx context.Context) (string, error) {
 	return link.String(), nil
 }
 
-// ConnectPublisherStripeForDevice returns Stripe consent with a local browser return.
-func (c *Client) ConnectPublisherStripeForDevice(ctx context.Context, port int) (string, error) {
+// ConnectPublisherStripeForDevice returns the Stripe consent URL and the expected
+// state. After consent, the browser opens http://127.0.0.1:<port>/stripe/return.
+// Compare the received state with the expected state in constant time before
+// passing the state and code to CompletePublisherStripe.
+func (c *Client) ConnectPublisherStripeForDevice(ctx context.Context, port int) (consentURL, expectedState string, err error) {
 	if port < 1024 || port > 65535 {
-		return "", fmt.Errorf("%w: invalid Stripe return port", ErrInvalidResourceRequest)
+		return "", "", fmt.Errorf("%w: invalid Stripe return port", ErrInvalidResourceRequest)
 	}
 	link, err := c.connectPublisherStripe(ctx, "/v1/payments/connect?loopback_port="+strconv.Itoa(port))
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	statePort, valid := publisherStripeReturnPort(link.Query().Get("state"))
-	if link.Path != "/oauth/authorize" || !valid || statePort != port {
-		return "", ErrInvalidAPIResponse
+	query, err := url.ParseQuery(link.RawQuery)
+	if err != nil || link.Path != "/oauth/authorize" || len(query["state"]) != 1 {
+		return "", "", ErrInvalidAPIResponse
 	}
-	return link.String(), nil
+	state := query.Get("state")
+	if statePort, valid := publisherStripeReturnPort(state); !valid || statePort != port {
+		return "", "", ErrInvalidAPIResponse
+	}
+	return link.String(), state, nil
 }
 
 func (c *Client) connectPublisherStripe(ctx context.Context, path string) (*url.URL, error) {
@@ -211,8 +218,9 @@ func publisherStripeReturnPort(state string) (int, bool) {
 }
 
 // CompletePublisherStripe binds Stripe consent to the authenticated publisher.
+// The state can be from a device or browser setup.
 func (c *Client) CompletePublisherStripe(ctx context.Context, state, code string) error {
-	if _, valid := publisherStripeReturnPort(state); !valid || len(code) < 1 || len(code) > 1024 {
+	if _, valid := publisherStripeReturnPort(state); !valid || len(code) < 1 || len(code) > 1024 || !utf8.ValidString(code) {
 		return fmt.Errorf("%w: invalid Stripe consent return", ErrInvalidResourceRequest)
 	}
 	body := struct {

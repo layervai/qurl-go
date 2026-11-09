@@ -270,8 +270,8 @@ func TestPublisherStripeDeviceSetup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = client.ConnectPublisherStripeForDevice(t.Context(), 12345); err != nil {
-		t.Fatal(err)
+	if _, expected, err := client.ConnectPublisherStripeForDevice(t.Context(), 12345); err != nil || expected != state {
+		t.Fatalf("wrong consent state: %v", err)
 	}
 	if err = client.CompletePublisherStripe(t.Context(), state, "code"); err != nil {
 		t.Fatal(err)
@@ -295,7 +295,7 @@ func TestPublisherStripeDeviceRejectsInvalidConsent(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, port := range []int{0, 1023, 65536} {
-		if _, err := client.ConnectPublisherStripeForDevice(t.Context(), port); !errors.Is(err, ErrInvalidResourceRequest) {
+		if _, _, err := client.ConnectPublisherStripeForDevice(t.Context(), port); !errors.Is(err, ErrInvalidResourceRequest) {
 			t.Fatalf("port %d: %v", port, err)
 		}
 	}
@@ -312,6 +312,7 @@ func TestPublisherStripeDeviceRejectsInvalidConsent(t *testing.T) {
 	}
 	for _, path := range []string{
 		"connect.stripe.com/oauth/authorize?state=" + nonce + ".12346",
+		"connect.stripe.com/oauth/authorize?state=" + nonce + ".12345&state=other",
 		"connect.stripe.com/oauth/authorize?state=" + nonce,
 		"connect.stripe.com/oauth/authorize?state=short.12345",
 		"connect.stripe.com/oauth/authorize?state=!" + nonce[1:] + ".12345",
@@ -319,7 +320,7 @@ func TestPublisherStripeDeviceRejectsInvalidConsent(t *testing.T) {
 		"stripe.example.test/oauth/authorize?state=" + nonce + ".12345",
 	} {
 		response = `{"data":{"url":"https://` + path + `"}}`
-		if _, err := client.ConnectPublisherStripeForDevice(t.Context(), 12345); !errors.Is(err, ErrInvalidAPIResponse) {
+		if _, _, err := client.ConnectPublisherStripeForDevice(t.Context(), 12345); !errors.Is(err, ErrInvalidAPIResponse) {
 			t.Fatalf("invalid consent URL accepted: %v", err)
 		}
 	}
