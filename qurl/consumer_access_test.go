@@ -230,6 +230,58 @@ func TestPublisherStripeEndpointsValidateAccountFeeAndRedirect(t *testing.T) {
 	}
 }
 
+func TestPublisherStripeDeviceSetup(t *testing.T) {
+	state := strings.Repeat("a", 43) + ".12345"
+	var calls int
+	transport := doerFunc(func(req *http.Request) (*http.Response, error) {
+		calls++
+		if req.Method != http.MethodPost || req.Header.Get("Authorization") != "Bearer lv_test_policy" {
+			t.Fatal("missing authenticated POST")
+		}
+		var response string
+		switch req.URL.Path {
+		case "/v1/payments/connect":
+			if req.URL.Query().Get("loopback_port") != "12345" {
+				t.Fatal("missing loopback port")
+			}
+			response = `{"data":{"url":"https://connect.stripe.com/oauth/authorize?state=` + state + `"}}`
+		case "/v1/payments/connect/complete":
+			var body map[string]string
+			if err := json.NewDecoder(req.Body).Decode(&body); err != nil || body["state"] != state || body["code"] != "code" {
+				t.Fatal("wrong consent proof")
+			}
+			response = `{"data":{"url":"https://example.test/billing"}}`
+		case "/v1/payments/prices":
+			var body struct {
+				Name     string `json:"name"`
+				Amount   int64  `json:"amount"`
+				Interval string `json:"interval"`
+			}
+			if err := json.NewDecoder(req.Body).Decode(&body); err != nil || body.Name != "App" || body.Amount != 500 || body.Interval != "month" {
+				t.Fatal("wrong price input")
+			}
+			response = `{"data":{"account_id":"acct_owner","price_id":"price_new"}}`
+		default:
+			t.Fatalf("unexpected payment route %s", req.URL.Path)
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(response))}, nil
+	})
+	client, err := NewClient(BearerToken("lv_test_policy"), WithBaseURL("https://api.example.test"), WithHTTPClient(transport))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = client.ConnectPublisherStripeForDevice(t.Context(), 12345); err != nil {
+		t.Fatal(err)
+	}
+	if err = client.CompletePublisherStripe(t.Context(), state, "code"); err != nil {
+		t.Fatal(err)
+	}
+	policy, err := client.CreatePublisherStripePrice(t.Context(), "App", 500, "month")
+	if err != nil || policy.AccountID != "acct_owner" || policy.PriceID != "price_new" || calls != 3 {
+		t.Fatalf("price response = %+v, err = %v, calls = %d", policy, err, calls)
+	}
+}
+
 func TestConsumerEmailDomainPolicy(t *testing.T) {
 	for _, tc := range []struct {
 		mode, domain string
