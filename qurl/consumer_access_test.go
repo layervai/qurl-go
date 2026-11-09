@@ -282,6 +282,59 @@ func TestPublisherStripeDeviceSetup(t *testing.T) {
 	}
 }
 
+func TestPublisherStripeDeviceRejectsInvalidConsent(t *testing.T) {
+	nonce := strings.Repeat("a", 43)
+	response := ""
+	client, err := NewClient(BearerToken("lv_test_policy"), WithBaseURL("https://api.example.test"), WithHTTPClient(doerFunc(func(_ *http.Request) (*http.Response, error) {
+		if response == "" {
+			t.Fatal("invalid input reached the API")
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(response))}, nil
+	})))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, port := range []int{0, 1023, 65536} {
+		if _, err := client.ConnectPublisherStripeForDevice(t.Context(), port); !errors.Is(err, ErrInvalidResourceRequest) {
+			t.Fatalf("port %d: %v", port, err)
+		}
+	}
+	for _, state := range []string{"", nonce + ".012345", "!" + nonce[1:]} {
+		if err := client.CompletePublisherStripe(t.Context(), state, "code"); !errors.Is(err, ErrInvalidResourceRequest) {
+			t.Fatalf("invalid state accepted: %v", err)
+		}
+	}
+	if err := client.CompletePublisherStripe(t.Context(), nonce, ""); !errors.Is(err, ErrInvalidResourceRequest) {
+		t.Fatalf("missing code accepted: %v", err)
+	}
+	if _, err := client.CreatePublisherStripePrice(t.Context(), "App", 49, ""); !errors.Is(err, ErrInvalidResourceRequest) {
+		t.Fatalf("invalid amount accepted: %v", err)
+	}
+	for _, path := range []string{
+		"connect.stripe.com/oauth/authorize?state=" + nonce + ".12346",
+		"connect.stripe.com/oauth/authorize?state=" + nonce,
+		"connect.stripe.com/oauth/authorize?state=short.12345",
+		"connect.stripe.com/oauth/authorize?state=!" + nonce[1:] + ".12345",
+		"connect.stripe.com/unexpected?state=" + nonce + ".12345",
+		"stripe.example.test/oauth/authorize?state=" + nonce + ".12345",
+	} {
+		response = `{"data":{"url":"https://` + path + `"}}`
+		if _, err := client.ConnectPublisherStripeForDevice(t.Context(), 12345); !errors.Is(err, ErrInvalidAPIResponse) {
+			t.Fatalf("invalid consent URL accepted: %v", err)
+		}
+	}
+	for _, data := range []string{
+		`{"account_id":"other","price_id":"price_new"}`,
+		`{"account_id":"acct_owner","price_id":"other"}`,
+		`{"account_id":"acct_owner","price_id":"price_new","access_seconds":60}`,
+	} {
+		response = `{"data":` + data + `}`
+		if _, err := client.CreatePublisherStripePrice(t.Context(), "App", 500, ""); !errors.Is(err, ErrInvalidAPIResponse) {
+			t.Fatalf("invalid price receipt accepted: %v", err)
+		}
+	}
+}
+
 func TestConsumerEmailDomainPolicy(t *testing.T) {
 	for _, tc := range []struct {
 		mode, domain string

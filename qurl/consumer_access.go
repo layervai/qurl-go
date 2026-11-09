@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // ConsumerAccessPolicy selects the publisher's private access flow.
@@ -157,7 +159,11 @@ func (p ConsumerAccessPolicy) equal(other ConsumerAccessPolicy) bool {
 
 // ConnectPublisherStripe returns the Stripe-hosted publisher consent URL.
 func (c *Client) ConnectPublisherStripe(ctx context.Context) (string, error) {
-	return c.connectPublisherStripe(ctx, "/v1/payments/connect")
+	link, err := c.connectPublisherStripe(ctx, "/v1/payments/connect")
+	if err != nil {
+		return "", err
+	}
+	return link.String(), nil
 }
 
 // ConnectPublisherStripeForDevice returns Stripe consent with a local browser return.
@@ -169,43 +175,62 @@ func (c *Client) ConnectPublisherStripeForDevice(ctx context.Context, port int) 
 	if err != nil {
 		return "", err
 	}
-	parsed, _ := url.Parse(link)
-	state := parsed.Query().Get("state")
-	nonce, suffix, ok := strings.Cut(state, ".")
-	if parsed.Path != "/oauth/authorize" || !ok || len(nonce) != 43 || suffix != strconv.Itoa(port) {
+	statePort, valid := publisherStripeReturnPort(link.Query().Get("state"))
+	if link.Path != "/oauth/authorize" || !valid || statePort != port {
 		return "", ErrInvalidAPIResponse
 	}
-	return link, nil
+	return link.String(), nil
 }
 
-func (c *Client) connectPublisherStripe(ctx context.Context, path string) (string, error) {
+func (c *Client) connectPublisherStripe(ctx context.Context, path string) (*url.URL, error) {
 	var response apiEnvelope[struct {
 		URL string `json:"url"`
 	}]
 	if err := c.doJSONStatus(ctx, http.MethodPost, path, nil, &response, http.StatusOK); err != nil {
-		return "", err
+		return nil, err
 	}
 	u, err := url.Parse(response.Data.URL)
 	if err != nil || u.Scheme != "https" || u.Host != "connect.stripe.com" || u.User != nil {
-		return "", ErrInvalidAPIResponse
+		return nil, ErrInvalidAPIResponse
 	}
-	return response.Data.URL, nil
+	return u, nil
+}
+
+var publisherStripeNonce = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
+
+func publisherStripeReturnPort(state string) (int, bool) {
+	nonce, suffix, loopback := strings.Cut(state, ".")
+	if !publisherStripeNonce.MatchString(nonce) {
+		return 0, false
+	}
+	if !loopback {
+		return 0, true
+	}
+	port, err := strconv.Atoi(suffix)
+	return port, err == nil && port >= 1024 && port <= 65535 && strconv.Itoa(port) == suffix
 }
 
 // CompletePublisherStripe binds Stripe consent to the authenticated publisher.
 func (c *Client) CompletePublisherStripe(ctx context.Context, state, code string) error {
+	if _, valid := publisherStripeReturnPort(state); !valid || len(code) < 1 || len(code) > 1024 {
+		return fmt.Errorf("%w: invalid Stripe consent return", ErrInvalidResourceRequest)
+	}
 	body := struct {
 		State string `json:"state"`
 		Code  string `json:"code"`
 	}{State: state, Code: code}
-	var response apiEnvelope[struct {
-		URL string `json:"url"`
-	}]
+	var response apiEnvelope[struct{}]
 	return c.doJSONStatus(ctx, http.MethodPost, "/v1/payments/connect/complete", body, &response, http.StatusOK)
 }
 
-// CreatePublisherStripePrice creates or reuses a USD price without charging a buyer.
+// CreatePublisherStripePrice creates or reuses a price on the caller's connected
+// Stripe account. Amount is in US cents. An empty interval means pay once.
 func (c *Client) CreatePublisherStripePrice(ctx context.Context, name string, amount int64, interval string) (*CRIDPaymentPolicy, error) {
+	name = strings.TrimSpace(name)
+	if name == "" || !utf8.ValidString(name) || utf8.RuneCountInString(name) > 100 || strings.ContainsFunc(name, unicode.IsControl) ||
+		amount < 50 || amount > 99999999 || (interval != "" && interval != "month" && interval != "year") {
+		return nil, fmt.Errorf("%w: invalid Stripe price", ErrInvalidResourceRequest)
+	}
 	body := struct {
 		Name     string `json:"name"`
 		Amount   int64  `json:"amount"`
