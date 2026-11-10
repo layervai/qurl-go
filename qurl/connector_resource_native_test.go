@@ -592,3 +592,34 @@ func TestNativeConnectorRejectsResourceIDCompatibility(t *testing.T) {
 		}
 	}
 }
+
+func TestNativeConnectorResourceOriginProduct(t *testing.T) {
+	for _, input := range []string{"", "desktop", "cli", "qurl_link", "other", "unknown", "unrecognized"} {
+		request := &NativeConnectorResourceRequest{ConnectorID: testConnectorSlug, RequestNonce: testNativeConnectorNonce}
+		request.OriginProduct = input
+		body, err := marshalNativeConnectorResourceRequest("agent-test", request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var envelope struct {
+			UserData map[string]json.RawMessage `json:"usrData"`
+		}
+		if err := json.Unmarshal(body, &envelope); err != nil {
+			t.Fatal(err)
+		}
+		raw, present := envelope.UserData["origin_product"]
+		if input == "" {
+			if present {
+				t.Fatal("absent attribution changed legacy bytes")
+			}
+			continue
+		}
+		want := input
+		if input == "unrecognized" {
+			want = "unknown"
+		}
+		if string(raw) != `"`+want+`"` {
+			t.Fatalf("origin %q encoded as %s", input, raw)
+		}
+	}
+}

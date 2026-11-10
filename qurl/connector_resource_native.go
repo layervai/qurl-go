@@ -64,12 +64,17 @@ var (
 
 // NativeConnectorResourceRequest is one durable logical NHP_LST operation.
 // Persist RequestNonce before the first exchange when exact lost-response
-// replay must survive a process restart. Reusing the nonce with changed fields
-// is a terminal server-side conflict.
+// replay must survive a process restart. Reusing the nonce with changed semantic
+// fields is a terminal server-side conflict; OriginProduct is annotation only.
 type NativeConnectorResourceRequest struct {
 	ConnectorID  string
 	ExpectedCRID string
 	RequestNonce string
+	// OriginProduct is optional, self-reported usage attribution, never authority.
+	// Supported values are desktop, cli, qurl_link, other, and unknown; other
+	// nonempty strings are sent as unknown. Deploy compatible receivers first.
+	// It is excluded from replay identity and does not change an existing receipt.
+	OriginProduct string
 }
 
 // NewNativeConnectorResourceRequest validates the customer Connector ID and
@@ -182,17 +187,24 @@ type nativeConnectorResourceRequestEnvelope struct {
 }
 
 type nativeConnectorResourceRequestUserData struct {
-	Query        string  `json:"query"`
-	Version      int     `json:"version"`
-	RequestNonce string  `json:"request_nonce"`
-	ConnectorID  string  `json:"connector_id"`
-	ExpectedCRID *string `json:"expected_crid,omitempty"`
+	Query         string  `json:"query"`
+	Version       int     `json:"version"`
+	RequestNonce  string  `json:"request_nonce"`
+	ConnectorID   string  `json:"connector_id"`
+	ExpectedCRID  *string `json:"expected_crid,omitempty"`
+	OriginProduct string  `json:"origin_product,omitempty"`
 }
 
 func marshalNativeConnectorResourceRequest(agentID string, request *NativeConnectorResourceRequest) ([]byte, error) {
 	userData := nativeConnectorResourceRequestUserData{
 		Query: connectorResourceLSTQuery, Version: connectorResourceLSTVersion,
 		RequestNonce: request.RequestNonce, ConnectorID: request.ConnectorID,
+		OriginProduct: request.OriginProduct,
+	}
+	switch userData.OriginProduct {
+	case "", "desktop", "cli", "qurl_link", "other", "unknown":
+	default:
+		userData.OriginProduct = "unknown"
 	}
 	if request.ExpectedCRID != "" {
 		expected := request.ExpectedCRID
