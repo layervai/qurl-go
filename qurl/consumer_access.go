@@ -238,7 +238,10 @@ func (c *Client) CreatePublisherStripePrice(ctx context.Context, name string, am
 }
 
 // MatchPublisherStripePrice checks the current price against the requested
-// terms. It does not create a price.
+// terms without creating a price. It requires a qURL API that supports
+// expected_price_id. Older qURL APIs reject the field before processing it.
+// If the price does not match, the method returns an *APIError with HTTP 409
+// and code payment_price_mismatch.
 func (c *Client) MatchPublisherStripePrice(ctx context.Context, name string, amount int64, interval, expectedPriceID string) (*CRIDPaymentPolicy, error) {
 	if !stripePriceID.MatchString(expectedPriceID) {
 		return nil, fmt.Errorf("%w: invalid expected Stripe price ID", ErrInvalidResourceRequest)
