@@ -282,6 +282,33 @@ func TestPublisherStripeDeviceSetup(t *testing.T) {
 	}
 }
 
+func TestMatchPublisherStripePriceRequiresExactResponse(t *testing.T) {
+	responseID := "price_current"
+	client, err := NewClient(BearerToken("lv_test_policy"), WithBaseURL("https://api.example.test"), WithHTTPClient(doerFunc(func(req *http.Request) (*http.Response, error) {
+		var body struct {
+			ExpectedPriceID string `json:"expected_price_id"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&body); err != nil || body.ExpectedPriceID != "price_current" || req.URL.Path != "/v1/payments/prices" {
+			t.Fatal("wrong price match request")
+		}
+		bodyText := `{"data":{"account_id":"acct_owner","price_id":"` + responseID + `"}}`
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(bodyText))}, nil
+	})))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.MatchPublisherStripePrice(t.Context(), "App", 500, "", "price_current"); err != nil {
+		t.Fatal(err)
+	}
+	responseID = "price_other"
+	if _, err := client.MatchPublisherStripePrice(t.Context(), "App", 500, "", "price_current"); !errors.Is(err, ErrInvalidAPIResponse) {
+		t.Fatalf("wrong price response error = %v", err)
+	}
+	if _, err := client.MatchPublisherStripePrice(t.Context(), "App", 500, "", ""); !errors.Is(err, ErrInvalidResourceRequest) {
+		t.Fatalf("missing expected ID error = %v", err)
+	}
+}
+
 func TestPublisherStripeDeviceRejectsInvalidConsent(t *testing.T) {
 	nonce := strings.Repeat("a", 43)
 	response := ""
