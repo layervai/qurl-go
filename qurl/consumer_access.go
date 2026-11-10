@@ -234,22 +234,40 @@ func (c *Client) CompletePublisherStripe(ctx context.Context, state, code string
 // CreatePublisherStripePrice creates or reuses a price on the caller's connected
 // Stripe account. Amount is in US cents. An empty interval means pay once.
 func (c *Client) CreatePublisherStripePrice(ctx context.Context, name string, amount int64, interval string) (*CRIDPaymentPolicy, error) {
+	return c.publisherStripePrice(ctx, name, amount, interval, "")
+}
+
+// MatchPublisherStripePrice checks the current price against the requested
+// terms without creating a price. It requires a qURL API that supports
+// expected_price_id. Older qURL APIs reject the field before processing it.
+// If the price does not match, the method returns an *APIError with HTTP 409
+// and code payment_price_mismatch.
+func (c *Client) MatchPublisherStripePrice(ctx context.Context, name string, amount int64, interval, expectedPriceID string) (*CRIDPaymentPolicy, error) {
+	if !stripePriceID.MatchString(expectedPriceID) {
+		return nil, fmt.Errorf("%w: invalid expected Stripe price ID", ErrInvalidResourceRequest)
+	}
+	return c.publisherStripePrice(ctx, name, amount, interval, expectedPriceID)
+}
+
+func (c *Client) publisherStripePrice(ctx context.Context, name string, amount int64, interval, expectedPriceID string) (*CRIDPaymentPolicy, error) {
 	name = strings.TrimSpace(name)
 	if name == "" || !utf8.ValidString(name) || utf8.RuneCountInString(name) > 100 || strings.ContainsFunc(name, unicode.IsControl) ||
 		amount < 50 || amount > 99999999 || (interval != "" && interval != "month" && interval != "year") {
 		return nil, fmt.Errorf("%w: invalid Stripe price", ErrInvalidResourceRequest)
 	}
 	body := struct {
-		Name     string `json:"name"`
-		Amount   int64  `json:"amount"`
-		Interval string `json:"interval,omitempty"`
-	}{Name: name, Amount: amount, Interval: interval}
+		Name            string `json:"name"`
+		Amount          int64  `json:"amount"`
+		Interval        string `json:"interval,omitempty"`
+		ExpectedPriceID string `json:"expected_price_id,omitempty"`
+	}{Name: name, Amount: amount, Interval: interval, ExpectedPriceID: expectedPriceID}
 	var response apiEnvelope[CRIDPaymentPolicy]
 	if err := c.doJSONStatus(ctx, http.MethodPost, "/v1/payments/prices", body, &response, http.StatusOK); err != nil {
 		return nil, err
 	}
 	policy := response.Data
-	if !stripeAccountID.MatchString(policy.AccountID) || !stripePriceID.MatchString(policy.PriceID) || policy.AccessSeconds != 0 {
+	if !stripeAccountID.MatchString(policy.AccountID) || !stripePriceID.MatchString(policy.PriceID) || policy.AccessSeconds != 0 ||
+		(expectedPriceID != "" && policy.PriceID != expectedPriceID) {
 		return nil, ErrInvalidAPIResponse
 	}
 	return &policy, nil

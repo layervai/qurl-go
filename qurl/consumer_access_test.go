@@ -253,11 +253,12 @@ func TestPublisherStripeDeviceSetup(t *testing.T) {
 			response = `{"data":{"url":"https://example.test/billing"}}`
 		case "/v1/payments/prices":
 			var body struct {
-				Name     string `json:"name"`
-				Amount   int64  `json:"amount"`
-				Interval string `json:"interval"`
+				Name            string          `json:"name"`
+				Amount          int64           `json:"amount"`
+				Interval        string          `json:"interval"`
+				ExpectedPriceID json.RawMessage `json:"expected_price_id"`
 			}
-			if err := json.NewDecoder(req.Body).Decode(&body); err != nil || body.Name != "App" || body.Amount != 500 || body.Interval != "month" {
+			if err := json.NewDecoder(req.Body).Decode(&body); err != nil || body.Name != "App" || body.Amount != 500 || body.Interval != "month" || len(body.ExpectedPriceID) != 0 {
 				t.Fatal("wrong price input")
 			}
 			response = `{"data":{"account_id":"acct_owner","price_id":"price_new"}}`
@@ -279,6 +280,43 @@ func TestPublisherStripeDeviceSetup(t *testing.T) {
 	policy, err := client.CreatePublisherStripePrice(t.Context(), "App", 500, "month")
 	if err != nil || policy.AccountID != "acct_owner" || policy.PriceID != "price_new" || calls != 3 {
 		t.Fatalf("price response = %+v, err = %v, calls = %d", policy, err, calls)
+	}
+}
+
+func TestMatchPublisherStripePriceRequiresExactResponse(t *testing.T) {
+	responseID := "price_current"
+	responseStatus := http.StatusOK
+	client, err := NewClient(BearerToken("lv_test_policy"), WithBaseURL("https://api.example.test"), WithHTTPClient(doerFunc(func(req *http.Request) (*http.Response, error) {
+		var body struct {
+			ExpectedPriceID string `json:"expected_price_id"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&body); err != nil || body.ExpectedPriceID != "price_current" || req.URL.Path != "/v1/payments/prices" {
+			t.Fatal("wrong price match request")
+		}
+		bodyText := `{"data":{"account_id":"acct_owner","price_id":"` + responseID + `"}}`
+		if responseStatus == http.StatusConflict {
+			bodyText = `{"status":409,"code":"payment_price_mismatch","detail":"The current Stripe price does not match the requested terms."}`
+		}
+		return &http.Response{StatusCode: responseStatus, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(bodyText))}, nil
+	})))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.MatchPublisherStripePrice(t.Context(), "App", 500, "", "price_current"); err != nil {
+		t.Fatal(err)
+	}
+	responseID = "price_other"
+	if _, err := client.MatchPublisherStripePrice(t.Context(), "App", 500, "", "price_current"); !errors.Is(err, ErrInvalidAPIResponse) {
+		t.Fatalf("wrong price response error = %v", err)
+	}
+	responseStatus = http.StatusConflict
+	_, err = client.MatchPublisherStripePrice(t.Context(), "App", 600, "", "price_current")
+	var problem *APIError
+	if !errors.As(err, &problem) || problem.StatusCode != http.StatusConflict || problem.Code != "payment_price_mismatch" {
+		t.Fatalf("price conflict error = %v", err)
+	}
+	if _, err := client.MatchPublisherStripePrice(t.Context(), "App", 500, "", ""); !errors.Is(err, ErrInvalidResourceRequest) {
+		t.Fatalf("missing expected ID error = %v", err)
 	}
 }
 

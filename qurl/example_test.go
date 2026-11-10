@@ -651,6 +651,19 @@ func ExampleClient_CreatePublisherStripePrice() {
 	fmt.Println(price.PriceID)
 }
 
+func ExampleClient_MatchPublisherStripePrice() {
+	client, err := qurl.OpenClient()
+	if err != nil {
+		panic(err)
+	}
+	// Check the price that the resource policy already uses.
+	price, err := client.MatchPublisherStripePrice(context.Background(), "Reports API", 500, "month", "price_current")
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(price.PriceID)
+}
+
 func ExampleWithMaxResponseBodyBytes() {
 	client, err := qurl.NewClient(qurl.BearerToken("lv_example"), qurl.WithMaxResponseBodyBytes(16<<20))
 	if err != nil {
