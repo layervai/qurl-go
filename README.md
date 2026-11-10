@@ -347,7 +347,8 @@ func main() {
 		log.Fatal(err)
 	}
 
-	resource, err := client.ProtectURL(ctx, "https://internal.example.com/dashboard")
+	resource, err := client.ProtectURL(ctx, "https://internal.example.com/dashboard",
+		qurl.WithName("Team dashboard"))
 	if err != nil {
 		log.Fatal(err)
 	}

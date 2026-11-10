@@ -35,7 +35,8 @@ field.
 A resource is the private URL LayerV protects:
 
 ```go
-resource, err := client.ProtectURL(ctx, "https://internal.example.com/dashboard")
+resource, err := client.ProtectURL(ctx, "https://internal.example.com/dashboard",
+	qurl.WithName("Team dashboard"))
 if err != nil {
 	return err
 }

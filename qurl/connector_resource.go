@@ -154,7 +154,8 @@ type ensureConnectorResourceRequest struct {
 	Type           string                `json:"type"`
 	Slug           string                `json:"slug"`
 	// FindOrCreate is fixed true by the Connector ensure wire contract.
-	FindOrCreate bool `json:"find_or_create"`
+	FindOrCreate bool   `json:"find_or_create"`
+	Name         string `json:"name,omitempty"`
 	// Private is nil when the caller did not state privacy and is then left out
 	// of the request, so the service default applies. It is a pointer because a
 	// stated false must reach the service; a plain bool would drop it.
@@ -169,6 +170,7 @@ type ConnectorResourceOption interface {
 type connectorResourceOptions struct {
 	consumerAccess *ConsumerAccessPolicy
 	private        *bool
+	name           string
 }
 
 // connectorResourceWire mirrors the producer's generic resource payload. Type
@@ -216,8 +218,10 @@ type connectorResourceExpectation struct {
 // and without a partial result: the row proves the outcome, but required
 // ensure-only metadata is unavailable.
 //
-// A resource this call creates takes the service's default privacy. Use
-// EnsureConnectorResourceWithOptions to state it.
+// A resource this call creates takes the service's default privacy. It sends
+// no name, so LayerV refuses to create a resource with an error matching
+// ErrResourceNameRequired; use EnsureConnectorResourceWithOptions with
+// WithName when the slug may be new.
 func (c *Client) EnsureConnectorResource(ctx context.Context, slug string) (*EnsureConnectorResourceResult, error) {
 	return c.EnsureConnectorResourceWithOptions(ctx, slug)
 }
@@ -225,6 +229,10 @@ func (c *Client) EnsureConnectorResource(ctx context.Context, slug string) (*Ens
 // EnsureConnectorResourceWithOptions is EnsureConnectorResource with options
 // for the resource the call may create. With no options it sends the same
 // request and behaves identically.
+//
+// WithName sets the public name of a resource this call creates; LayerV
+// requires it when the slug is new and ignores it when the call finds an
+// existing resource.
 //
 // WithPrivate states the privacy of a resource this call creates. When the call
 // finds an existing resource for slug, that resource keeps the privacy it has,
@@ -253,6 +261,7 @@ func (c *Client) EnsureConnectorResourceWithOptions(ctx context.Context, slug st
 		Type:           producerConnectorResourceType,
 		Slug:           slug,
 		FindOrCreate:   true,
+		Name:           cfg.name,
 		Private:        cfg.private,
 		ConsumerAccess: cfg.consumerAccess,
 	}

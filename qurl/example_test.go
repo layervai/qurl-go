@@ -23,7 +23,8 @@ func Example() {
 		panic(err)
 	}
 
-	resource, err := client.ProtectURL(context.Background(), "https://internal.example.com/dashboard")
+	resource, err := client.ProtectURL(context.Background(), "https://internal.example.com/dashboard",
+		qurl.WithName("Team dashboard"))
 	if err != nil {
 		panic(err)
 	}
@@ -91,6 +92,7 @@ func ExampleClient_ProtectURL() {
 
 	resource, err := client.ProtectURL(context.Background(),
 		"https://internal.example.com/dashboard",
+		qurl.WithName("Admin dashboard"),
 		qurl.WithAlias("dev-dashboard"),
 	)
 	if err != nil {
@@ -110,6 +112,7 @@ func ExampleWithPrivate() {
 	// on every service version.
 	resource, err := client.ProtectURL(context.Background(),
 		"https://status.example.com/",
+		qurl.WithName("Status page"),
 		qurl.WithPrivate(false),
 	)
 	if err != nil {
@@ -378,7 +381,8 @@ func ExampleOpenClient() {
 		panic(err)
 	}
 
-	resource, err := client.ProtectURL(context.Background(), "https://internal.example.com/dashboard")
+	resource, err := client.ProtectURL(context.Background(), "https://internal.example.com/dashboard",
+		qurl.WithName("Team dashboard"))
 	if err != nil {
 		panic(err)
 	}
@@ -399,7 +403,8 @@ func ExampleNewClient() {
 		panic(err)
 	}
 
-	resource, err := client.ProtectURL(context.Background(), "https://internal.example.com/dashboard")
+	resource, err := client.ProtectURL(context.Background(), "https://internal.example.com/dashboard",
+		qurl.WithName("Team dashboard"))
 	if err != nil {
 		panic(err)
 	}
@@ -656,6 +661,32 @@ func ExampleClient_UpdatePreview() {
 	if err != nil {
 		panic(err)
 	}
+}
+
+func ExampleClient_CreatePublisherStripePrice() {
+	client, err := qurl.OpenClient()
+	if err != nil {
+		panic(err)
+	}
+	// The publisher has already connected Stripe. Create a $5 monthly price.
+	price, err := client.CreatePublisherStripePrice(context.Background(), "Reports API", 500, "month")
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(price.PriceID)
+}
+
+func ExampleClient_MatchPublisherStripePrice() {
+	client, err := qurl.OpenClient()
+	if err != nil {
+		panic(err)
+	}
+	// Check the price that the resource policy already uses.
+	price, err := client.MatchPublisherStripePrice(context.Background(), "Reports API", 500, "month", "price_current")
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(price.PriceID)
 }
 
 func ExampleWithMaxResponseBodyBytes() {
