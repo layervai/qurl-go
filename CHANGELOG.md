@@ -8,6 +8,9 @@ and are marked **Breaking** with what to change.
 
 ## Unreleased
 
+- Raise the root and `awsstore` Go security floor to 1.26.11 for
+  GO-2026-6859 in `net/http`.
+
 - **Breaking:** `ConsumerAccessPolicy` gains `EmailDomain` and
   `AllowedEmails` for the new `email_domain` mode, so the struct is no longer
   comparable, and neither is `ConsumerAccessOption` or any struct holding
