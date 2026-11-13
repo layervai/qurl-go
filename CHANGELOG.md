@@ -56,6 +56,11 @@ and are marked **Breaking** with what to change.
   resource. `UpdatePreview` can no longer clear a name: an empty
   `PreviewPatch.Name` is refused the same way.
 
+- `RegisteredAgentResourceHTTPDoer` now accepts the publisher payment routes
+  a linked device may use: `POST /v1/payments/connect`, and `GET` and
+  `DELETE /v1/payments/account`, exactly, with no query. The service independently
+  authorizes each request.
+
 - **The minimum Go version is now 1.26.10, up from 1.26.9.** This fixes
   GO-2026-6809 in `crypto/x509` certificate verification. Builders pinned to
   Go 1.26.0 through 1.26.9 with `GOTOOLCHAIN=local` must update. The `awsstore`
