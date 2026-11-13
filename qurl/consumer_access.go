@@ -4,30 +4,63 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/mail"
 	"net/url"
 	"regexp"
+	"slices"
+	"strconv"
 	"strings"
+	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // ConsumerAccessPolicy selects the publisher's private access flow.
 type ConsumerAccessPolicy struct {
-	Mode        string             `json:"mode"`
-	Version     int64              `json:"version"`
-	ContractID  string             `json:"contract_id,omitempty"`
-	Payment     *CRIDPaymentPolicy `json:"payment,omitempty"`
-	EmailDomain string             `json:"email_domain,omitempty"`
+	Mode          string             `json:"mode"`
+	Version       int64              `json:"version"`
+	ContractID    string             `json:"contract_id,omitempty"`
+	Payment       *CRIDPaymentPolicy `json:"payment,omitempty"`
+	EmailDomain   string             `json:"email_domain,omitempty"`
+	AllowedEmails []string           `json:"allowed_emails,omitempty"`
+	// ApprovalExpiresIn bounds each review approval or key opt-in, such as
+	// "7d" (1h to 365d, in qurl-service's duration grammar). The service
+	// stores whole days or hours in that unit ("1w" and "168h" become "7d")
+	// and sets and enforces each grant's expiry.
+	ApprovalExpiresIn string `json:"approval_expires_in,omitempty"`
 }
+
+// Validate checks the supported admission modes and their parameters.
+func (p ConsumerAccessPolicy) Validate() error { return p.validate() }
+
+var (
+	consumerDomainPattern    = regexp.MustCompile(`^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$`)
+	consumerReferencePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
+)
 
 func (p ConsumerAccessPolicy) validate() error {
 	if p.Version < 1 || p.Version > 9007199254740991 {
 		return fmt.Errorf("%w: invalid consumer policy version", ErrInvalidResourceRequest)
 	}
 	if p.Mode == "email_domain" {
-		if len(p.EmailDomain) > 253 || !consumerEmailDomain.MatchString(p.EmailDomain) {
-			return fmt.Errorf("%w: email_domain requires one lowercase DNS domain", ErrInvalidResourceRequest)
+		if len(p.EmailDomain) > 253 || !consumerDomainPattern.MatchString(p.EmailDomain) || len(p.AllowedEmails) > 256 {
+			return fmt.Errorf("%w: invalid email domain policy", ErrInvalidResourceRequest)
 		}
-	} else if p.EmailDomain != "" {
-		return fmt.Errorf("%w: email_domain field requires email_domain mode", ErrInvalidResourceRequest)
+		seen := make(map[string]bool, len(p.AllowedEmails))
+		for _, email := range p.AllowedEmails {
+			if !validMailbox(email) || seen[email] {
+				return fmt.Errorf("%w: invalid mailbox exception", ErrInvalidResourceRequest)
+			}
+			seen[email] = true
+		}
+	} else if p.EmailDomain != "" || len(p.AllowedEmails) != 0 {
+		return fmt.Errorf("%w: email fields require email_domain mode", ErrInvalidResourceRequest)
+	}
+	if p.ApprovalExpiresIn != "" && p.Mode != "review" && p.Mode != "keys" {
+		return fmt.Errorf("%w: approval_expires_in requires review or keys mode", ErrInvalidResourceRequest)
+	}
+	if _, ok := parseApprovalExpiresIn(p.ApprovalExpiresIn); p.ApprovalExpiresIn != "" && !ok {
+		return fmt.Errorf("%w: approval_expires_in must be from 1h to 365d", ErrInvalidResourceRequest)
 	}
 	if p.Payment != nil && (p.Mode != "contract" || !stripeAccountID.MatchString(p.Payment.AccountID) || !stripePriceID.MatchString(p.Payment.PriceID) || p.Payment.AccessSeconds < 0 || p.Payment.AccessSeconds > 315360000) {
 		return fmt.Errorf("%w: invalid Stripe payment policy", ErrInvalidResourceRequest)
@@ -38,7 +71,7 @@ func (p ConsumerAccessPolicy) validate() error {
 			return fmt.Errorf("%w: contract_id requires contract mode", ErrInvalidResourceRequest)
 		}
 	case "contract":
-		if strings.TrimSpace(p.ContractID) == "" || len(p.ContractID) > 128 {
+		if !consumerReferencePattern.MatchString(p.ContractID) {
 			return fmt.Errorf("%w: contract mode requires a bounded contract_id", ErrInvalidResourceRequest)
 		}
 	default:
@@ -47,9 +80,62 @@ func (p ConsumerAccessPolicy) validate() error {
 	return nil
 }
 
+// parseApprovalExpiresIn applies the service's grammar (Go durations plus
+// whole days "d" and weeks "w") and its 1h to 365d bounds.
+func parseApprovalExpiresIn(s string) (time.Duration, bool) {
+	const day, maximum = 24 * time.Hour, 365 * 24 * time.Hour
+	if len(s) < 2 || len(s) > 16 {
+		return 0, false
+	}
+	var unit time.Duration
+	switch s[len(s)-1] {
+	case 'd':
+		unit = day
+	case 'w':
+		unit = 7 * day
+	}
+	if n, err := strconv.Atoi(s[:len(s)-1]); unit != 0 && err == nil {
+		// Checked before multiplying, so a huge count cannot overflow into range.
+		if n < 0 || n > int(maximum/unit) {
+			return 0, false
+		}
+		d := time.Duration(n) * unit
+		return d, d >= time.Hour
+	}
+	d, err := time.ParseDuration(s)
+	return d, err == nil && d%time.Minute == 0 && d >= time.Hour && d <= maximum
+}
+
+// canonicalApprovalExpiresIn is the form the service stores, so "1w", "7d"
+// and "168h" compare as one policy.
+func canonicalApprovalExpiresIn(s string) string {
+	d, ok := parseApprovalExpiresIn(s)
+	switch {
+	case !ok:
+		return s
+	case d%(24*time.Hour) == 0:
+		return strconv.FormatInt(int64(d/(24*time.Hour)), 10) + "d"
+	case d%time.Hour == 0:
+		return strconv.FormatInt(int64(d/time.Hour), 10) + "h"
+	}
+	return d.String()
+}
+
+// validMailbox accepts one bare address with a lowercase domain; the local
+// part keeps its case.
+func validMailbox(email string) bool {
+	address, err := mail.ParseAddress(email)
+	at := strings.LastIndexByte(email, '@')
+	return err == nil && address.Name == "" && address.Address == email && len(email) <= 254 && at >= 1 &&
+		email[at+1:] == strings.ToLower(email[at+1:]) &&
+		!strings.ContainsFunc(email, func(r rune) bool { return unicode.IsControl(r) || unicode.Is(unicode.Cf, r) })
+}
+
 // WithConsumerAccess creates a private resource with a consumer policy.
 // Change an existing policy through UpdateConsumerAccess instead.
 func WithConsumerAccess(policy ConsumerAccessPolicy) ConsumerAccessOption {
+	// A private copy, so a caller's later slice edit cannot change what was validated.
+	policy.AllowedEmails = slices.Clone(policy.AllowedEmails)
 	return ConsumerAccessOption{policy: policy}
 }
 
@@ -92,6 +178,7 @@ func (c *Client) UpdateConsumerAccess(ctx context.Context, resourceCRID string, 
 	if err := validateConnectorCRID(resourceCRID); err != nil {
 		return err
 	}
+	policy.AllowedEmails = slices.Clone(policy.AllowedEmails)
 	if err := policy.validate(); err != nil {
 		return err
 	}
@@ -113,7 +200,7 @@ func (c *Client) UpdateConsumerAccess(ctx context.Context, resourceCRID string, 
 	if err != nil {
 		return err
 	}
-	if resource.CRID != resourceCRID || (policy.Payment != nil && (resource.Private == nil || !*resource.Private)) || resource.ConsumerAccess == nil || !resource.ConsumerAccess.equal(policy) {
+	if resource.CRID != resourceCRID || (policy.Payment != nil && (resource.Private == nil || !*resource.Private)) || resource.ConsumerAccess == nil || !resource.ConsumerAccess.Equal(policy) {
 		return fmt.Errorf("%w: consumer policy response mismatch", ErrInvalidAPIResponse)
 	}
 	return nil
@@ -123,10 +210,22 @@ func consumerCreationPolicyConfirmed(private *bool, actual, expected *ConsumerAc
 	if expected == nil {
 		return true
 	}
-	if private == nil || !*private || actual == nil || actual.validate() != nil || actual.Mode != expected.Mode || actual.ContractID != expected.ContractID || actual.EmailDomain != expected.EmailDomain || !sameCRIDPayment(actual.Payment, expected.Payment) {
+	if private == nil || !*private || actual == nil || !actual.SameDefinition(*expected) || actual.validate() != nil {
 		return false
 	}
 	return actual.Version == expected.Version || (foundExisting && actual.Version > expected.Version)
+}
+
+// Equal includes every policy field, including owner-only mailbox exceptions.
+func (p ConsumerAccessPolicy) Equal(other ConsumerAccessPolicy) bool {
+	return p.Version == other.Version && p.SameDefinition(other)
+}
+
+// SameDefinition compares every field except Version; approval lifetimes
+// compare in the service's stored form.
+func (p ConsumerAccessPolicy) SameDefinition(other ConsumerAccessPolicy) bool {
+	return p.Mode == other.Mode && p.ContractID == other.ContractID && sameCRIDPayment(p.Payment, other.Payment) && p.EmailDomain == other.EmailDomain &&
+		canonicalApprovalExpiresIn(p.ApprovalExpiresIn) == canonicalApprovalExpiresIn(other.ApprovalExpiresIn) && slices.Equal(p.AllowedEmails, other.AllowedEmails)
 }
 
 // CRIDPaymentPolicy attaches a Stripe price to new or existing contract access.
@@ -138,9 +237,8 @@ type CRIDPaymentPolicy struct {
 }
 
 var (
-	consumerEmailDomain = regexp.MustCompile(`^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$`)
-	stripeAccountID     = regexp.MustCompile(`^acct_[A-Za-z0-9]{1,128}$`)
-	stripePriceID       = regexp.MustCompile(`^price_[A-Za-z0-9]{1,128}$`)
+	stripeAccountID = regexp.MustCompile(`^acct_[A-Za-z0-9]{1,128}$`)
+	stripePriceID   = regexp.MustCompile(`^price_[A-Za-z0-9]{1,128}$`)
 )
 
 func sameCRIDPayment(a, b *CRIDPaymentPolicy) bool {
@@ -150,23 +248,120 @@ func sameCRIDPayment(a, b *CRIDPaymentPolicy) bool {
 	return *a == *b
 }
 
-func (p ConsumerAccessPolicy) equal(other ConsumerAccessPolicy) bool {
-	return p.Mode == other.Mode && p.Version == other.Version && p.ContractID == other.ContractID && p.EmailDomain == other.EmailDomain && sameCRIDPayment(p.Payment, other.Payment)
-}
-
 // ConnectPublisherStripe returns the Stripe-hosted publisher consent URL.
 func (c *Client) ConnectPublisherStripe(ctx context.Context) (string, error) {
+	link, err := c.connectPublisherStripe(ctx, "/v1/payments/connect")
+	if err != nil {
+		return "", err
+	}
+	return link.String(), nil
+}
+
+// ConnectPublisherStripeForDevice returns the Stripe consent URL and the expected
+// state. After consent, the browser opens http://127.0.0.1:<port>/stripe/return.
+// Compare the received state with the expected state in constant time before
+// passing the state and code to CompletePublisherStripe.
+func (c *Client) ConnectPublisherStripeForDevice(ctx context.Context, port int) (consentURL, expectedState string, err error) {
+	if port < 1024 || port > 65535 {
+		return "", "", fmt.Errorf("%w: invalid Stripe return port", ErrInvalidResourceRequest)
+	}
+	link, err := c.connectPublisherStripe(ctx, "/v1/payments/connect?loopback_port="+strconv.Itoa(port))
+	if err != nil {
+		return "", "", err
+	}
+	query, err := url.ParseQuery(link.RawQuery)
+	if err != nil || link.Path != "/oauth/authorize" || len(query["state"]) != 1 {
+		return "", "", ErrInvalidAPIResponse
+	}
+	state := query.Get("state")
+	if statePort, valid := publisherStripeReturnPort(state); !valid || statePort != port {
+		return "", "", ErrInvalidAPIResponse
+	}
+	return link.String(), state, nil
+}
+
+func (c *Client) connectPublisherStripe(ctx context.Context, path string) (*url.URL, error) {
 	var response apiEnvelope[struct {
 		URL string `json:"url"`
 	}]
-	if err := c.doJSONStatus(ctx, http.MethodPost, "/v1/payments/connect", nil, &response, http.StatusOK); err != nil {
-		return "", err
+	if err := c.doJSONStatus(ctx, http.MethodPost, path, nil, &response, http.StatusOK); err != nil {
+		return nil, err
 	}
 	u, err := url.Parse(response.Data.URL)
 	if err != nil || u.Scheme != "https" || u.Host != "connect.stripe.com" || u.User != nil {
-		return "", ErrInvalidAPIResponse
+		return nil, ErrInvalidAPIResponse
 	}
-	return response.Data.URL, nil
+	return u, nil
+}
+
+var publisherStripeNonce = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
+
+func publisherStripeReturnPort(state string) (int, bool) {
+	nonce, suffix, loopback := strings.Cut(state, ".")
+	if !publisherStripeNonce.MatchString(nonce) {
+		return 0, false
+	}
+	if !loopback {
+		return 0, true
+	}
+	port, err := strconv.Atoi(suffix)
+	return port, err == nil && port >= 1024 && port <= 65535 && strconv.Itoa(port) == suffix
+}
+
+// CompletePublisherStripe binds Stripe consent to the authenticated publisher.
+// The state can be from a device or browser setup.
+func (c *Client) CompletePublisherStripe(ctx context.Context, state, code string) error {
+	if _, valid := publisherStripeReturnPort(state); !valid || len(code) < 1 || len(code) > 1024 || !utf8.ValidString(code) {
+		return fmt.Errorf("%w: invalid Stripe consent return", ErrInvalidResourceRequest)
+	}
+	body := struct {
+		State string `json:"state"`
+		Code  string `json:"code"`
+	}{State: state, Code: code}
+	var response apiEnvelope[struct{}]
+	return c.doJSONStatus(ctx, http.MethodPost, "/v1/payments/connect/complete", body, &response, http.StatusOK)
+}
+
+// CreatePublisherStripePrice creates or reuses a price on the caller's connected
+// Stripe account. Amount is in US cents. An empty interval means pay once.
+func (c *Client) CreatePublisherStripePrice(ctx context.Context, name string, amount int64, interval string) (*CRIDPaymentPolicy, error) {
+	return c.publisherStripePrice(ctx, name, amount, interval, "")
+}
+
+// MatchPublisherStripePrice checks the current price against the requested
+// terms without creating a price. It requires a qURL API that supports
+// expected_price_id. Older qURL APIs reject the field before processing it.
+// If the price does not match, the method returns an *APIError with HTTP 409
+// and code payment_price_mismatch.
+func (c *Client) MatchPublisherStripePrice(ctx context.Context, name string, amount int64, interval, expectedPriceID string) (*CRIDPaymentPolicy, error) {
+	if !stripePriceID.MatchString(expectedPriceID) {
+		return nil, fmt.Errorf("%w: invalid expected Stripe price ID", ErrInvalidResourceRequest)
+	}
+	return c.publisherStripePrice(ctx, name, amount, interval, expectedPriceID)
+}
+
+func (c *Client) publisherStripePrice(ctx context.Context, name string, amount int64, interval, expectedPriceID string) (*CRIDPaymentPolicy, error) {
+	name = strings.TrimSpace(name)
+	if name == "" || !utf8.ValidString(name) || utf8.RuneCountInString(name) > 100 || strings.ContainsFunc(name, unicode.IsControl) ||
+		amount < 50 || amount > 99999999 || (interval != "" && interval != "month" && interval != "year") {
+		return nil, fmt.Errorf("%w: invalid Stripe price", ErrInvalidResourceRequest)
+	}
+	body := struct {
+		Name            string `json:"name"`
+		Amount          int64  `json:"amount"`
+		Interval        string `json:"interval,omitempty"`
+		ExpectedPriceID string `json:"expected_price_id,omitempty"`
+	}{Name: name, Amount: amount, Interval: interval, ExpectedPriceID: expectedPriceID}
+	var response apiEnvelope[CRIDPaymentPolicy]
+	if err := c.doJSONStatus(ctx, http.MethodPost, "/v1/payments/prices", body, &response, http.StatusOK); err != nil {
+		return nil, err
+	}
+	policy := response.Data
+	if !stripeAccountID.MatchString(policy.AccountID) || !stripePriceID.MatchString(policy.PriceID) || policy.AccessSeconds != 0 ||
+		(expectedPriceID != "" && policy.PriceID != expectedPriceID) {
+		return nil, ErrInvalidAPIResponse
+	}
+	return &policy, nil
 }
 
 // PublisherStripeAccount returns the account connected by this publisher.

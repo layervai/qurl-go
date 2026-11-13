@@ -12,7 +12,8 @@ import (
 const maxConfigurableAPIResponseBodyBytes = 16 << 20
 
 // WithMaxResponseBodyBytes sets the resource Client's decoded API response cap.
-// The default is 1 MiB; an explicit cap must be from 1 byte through 16 MiB.
+// The default is 1 MiB (2 MiB for access rules). An explicit cap must be from
+// 1 byte through 16 MiB and applies to all routes.
 // The option also applies to Clients returned by native agent lifecycle calls;
 // it does not change the native UDP protocol's message bounds.
 func WithMaxResponseBodyBytes(limit int) AgentResourceClientOption {

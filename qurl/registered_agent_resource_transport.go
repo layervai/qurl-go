@@ -22,11 +22,11 @@ var ErrRegisteredAgentResourceRequestDenied = errors.New("qurl: registered-agent
 // management, Connector sharing-state, share-link mint
 // (POST /v1/resources/{id}/share), portal creation, Connector-enrollment-token
 // mint, account linking (POST /v1/account/link), identity-echo, and
-// publisher-profile (GET and PATCH /v1/me/publisher, exactly, with no query)
-// routes used by a registered qURL client, plus the publisher payment routes
-// described below. The service independently restricts a device key's POST
-// /v1/api-keys authority to a Connector-target one-shot token. Other account,
-// billing, payment, usage, and key-management routes fail closed.
+// publisher-profile (GET and PATCH /v1/me/publisher, exactly, with no query),
+// saved access-rule (GET and PUT /v1/me/access-rules, described below)
+// and publisher payment routes used by a registered qURL client. The service independently restricts
+// a device key's POST /v1/api-keys authority to a Connector-target one-shot
+// token. Other account, billing, usage, and key-management routes fail closed.
 //
 // The publisher-profile write is the one owner-profile route in scope, and it
 // is deliberate: a device that publishes without an account holds no other
@@ -64,8 +64,11 @@ var ErrRegisteredAgentResourceRequestDenied = errors.New("qurl: registered-agent
 // /v1/payments/connect starts Stripe consent, and GET and DELETE
 // /v1/payments/account read and disconnect the connected account, exactly,
 // with no query. DELETE succeeds only on a service that allows it for device
-// keys. POST /v1/payments/connect/complete is refused: completing consent needs
-// the signed-in account.
+// keys.
+//
+// GET and PUT /v1/me/access-rules manage the linked account's named presets,
+// with no query and no caller-selected account namespace. The service verifies
+// live account membership independently for every request.
 //
 // The bridge also requires the Client's exact API origin and path prefix. The
 // caller's request is never mutated, and the device Authorization header is
@@ -169,6 +172,8 @@ func registeredAgentResourceRouteAllowed(method, path string) bool {
 		return method == http.MethodPost
 	case "/v1/me":
 		return method == http.MethodGet
+	case "/v1/me/access-rules":
+		return method == http.MethodGet || method == http.MethodPut
 	case "/v1/me/publisher":
 		return method == http.MethodGet || method == http.MethodPatch
 	case "/v1/access-requests":

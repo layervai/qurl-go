@@ -47,8 +47,9 @@ type ResourcePreview struct {
 }
 
 // PreviewPatch uses the last revision. Nil fields are unchanged; an empty media
-// list removes all ready media and cancels pending jobs. An empty name or
-// description removes that text.
+// list removes all ready media and cancels pending jobs. An empty description
+// removes that text. The name cannot be removed: LayerV refuses an empty name
+// with an error matching ErrResourceNameRequired; leave Name nil to keep it.
 type PreviewPatch struct {
 	Revision    int64     `json:"revision"`
 	Name        *string   `json:"name,omitempty"`
