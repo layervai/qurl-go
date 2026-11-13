@@ -87,7 +87,9 @@ var frictionBudget = map[string]int{
 	// print. Showing the name safely is one %q verb, not setup.
 	"ExampleClient_Publisher":        3,
 	"ExampleClient_SetPublisherName": 3,
-	"ExampleNewClient":               5,
+	// Read the library, add a rule, save it at the version read, print.
+	"ExampleClient_SaveAccessRules": 5,
+	"ExampleNewClient":              5,
 	// Resolve a Connector binding through its already-registered assigned-cell
 	// session: open state, reopen the binding, create one replayable request,
 	// resolve, and print. The two defers are deterministic key/store cleanup.
@@ -310,6 +312,7 @@ func TestOptionSetsStayClosed(t *testing.T) {
 	for name, opt := range map[string]any{
 		"ValidFor":   qurl.ValidFor(time.Hour),
 		"OneTimeUse": qurl.OneTimeUse(),
+		"Reusable":   qurl.Reusable(),
 		"WithLabel":  qurl.WithLabel("Alice"),
 	} {
 		if _, ok := opt.(qurl.ResourceOption); ok {

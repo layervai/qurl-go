@@ -66,6 +66,8 @@ func TestRegisteredAgentResourceHTTPDoer_ExactSurfaceAndCredentialCustody(t *tes
 		{http.MethodDelete, "/v1/resources/qcrid/sessions/session_1"},
 		{http.MethodPost, "/v1/qurls"},
 		{http.MethodGet, "/v1/me"},
+		{http.MethodGet, "/v1/me/access-rules"},
+		{http.MethodPut, "/v1/me/access-rules"},
 		{http.MethodGet, "/v1/me/publisher"},
 		{http.MethodPatch, "/v1/me/publisher"},
 		{http.MethodGet, "/v1/access-requests"},
@@ -168,6 +170,16 @@ func TestRegisteredAgentResourceHTTPDoer_DeniesBeforeCredentialOrNetwork(t *test
 		{http.MethodPatch, "https://other.example.test/prefix/v1/me/publisher"},
 		{http.MethodGet, "https://api.example.test/prefix/v1/resources/bad.id"},
 		{http.MethodGet, "https://api.example.test/prefix/v1/resources/%2e%2e"},
+		{http.MethodPost, "https://api.example.test/prefix/v1/me/access-rules"},
+		{http.MethodPatch, "https://api.example.test/prefix/v1/me/access-rules"},
+		{http.MethodDelete, "https://api.example.test/prefix/v1/me/access-rules"},
+		{http.MethodGet, "https://api.example.test/prefix/v1/me/access-rules?cursor=x"},
+		{http.MethodPut, "https://api.example.test/prefix/v1/me/access-rules?"},
+		{http.MethodGet, "https://api.example.test/prefix/v1/me/access-rules/"},
+		{http.MethodGet, "https://api.example.test/prefix/v1/me/access-rules/x"},
+		{http.MethodGet, "https://api.example.test/prefix/v1/me/access_rules"},
+		{http.MethodGet, "https://other.example.test/prefix/v1/me/access-rules"},
+		{http.MethodGet, "https://api.example.test/v1/me/access-rules"},
 	}
 	for _, test := range denied {
 		req, requestErr := http.NewRequestWithContext(context.Background(), test.method, test.target, http.NoBody)

@@ -22,7 +22,8 @@ var ErrRegisteredAgentResourceRequestDenied = errors.New("qurl: registered-agent
 // management, Connector sharing-state, share-link mint
 // (POST /v1/resources/{id}/share), portal creation, Connector-enrollment-token
 // mint, account linking (POST /v1/account/link), identity-echo, and
-// publisher-profile (GET and PATCH /v1/me/publisher, exactly, with no query)
+// publisher-profile (GET and PATCH /v1/me/publisher, exactly, with no query),
+// and saved access-rule (GET and PUT /v1/me/access-rules, described below)
 // routes used by a registered qURL client. The service independently restricts
 // a device key's POST /v1/api-keys authority to a Connector-target one-shot
 // token. Other account, billing, usage, and key-management routes fail closed.
@@ -58,6 +59,10 @@ var ErrRegisteredAgentResourceRequestDenied = errors.New("qurl: registered-agent
 // GET and PATCH /v1/resources/{id}/preview, and POST
 // /v1/resources/{id}/preview/uploads, exactly, with no query. PUT and GET
 // uploads are refused. These routes cannot set publisher verification.
+//
+// GET and PUT /v1/me/access-rules manage the linked account's named presets,
+// with no query and no caller-selected account namespace. The service verifies
+// live account membership independently for every request.
 //
 // The bridge also requires the Client's exact API origin and path prefix. The
 // caller's request is never mutated, and the device Authorization header is
@@ -161,6 +166,8 @@ func registeredAgentResourceRouteAllowed(method, path string) bool {
 		return method == http.MethodPost
 	case "/v1/me":
 		return method == http.MethodGet
+	case "/v1/me/access-rules":
+		return method == http.MethodGet || method == http.MethodPut
 	case "/v1/me/publisher":
 		return method == http.MethodGet || method == http.MethodPatch
 	case "/v1/access-requests":
