@@ -1574,6 +1574,10 @@ func doAuthorizedRequest(ctx context.Context, httpClient HTTPDoer, baseURL strin
 	limit := contract.maxResponseBodyBytes
 	if limit == 0 {
 		limit = maxAPIResponseBodyBytes
+		if path == accessRulesPath {
+			// The service JSON-escapes libraries up to 256 KiB.
+			limit = 2 << 20
+		}
 	}
 	var respBody []byte
 	if apiContentLengthExceedsLimit(resp, limit) {

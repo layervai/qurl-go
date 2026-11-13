@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -207,5 +208,41 @@ func TestClient_AccessRulesNilClient(t *testing.T) {
 	}
 	if _, err := client.SaveAccessRules(context.Background(), AccessRulesUpdate{}); !errors.Is(err, ErrInvalidClientConfig) {
 		t.Fatalf("SaveAccessRules err = %v", err)
+	}
+}
+
+func TestAccessRulesResponseCapIncludesJSONEscaping(t *testing.T) {
+	items := make([]AccessRule, 14)
+	for i := range items {
+		items[i] = AccessRule{ID: fmt.Sprintf("%08d-0000-4000-8000-000000000000", i), Name: "Example", Mode: "email_domain", EmailDomain: "example.com"}
+		for j := range 240 {
+			items[i].AllowedEmails = append(items[i].AllowedEmails, fmt.Sprintf("%03d%s@x.co", j, strings.Repeat("&", 60)))
+		}
+		if err := (ConsumerAccessPolicy{Mode: "email_domain", Version: 1, EmailDomain: items[i].EmailDomain, AllowedEmails: items[i].AllowedEmails}).Validate(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	data := AccessRules{AccountID: "owner", Version: 1, Items: items, BuiltIns: []AccessRule{}}
+	wire, err := json.Marshal(map[string]any{"data": data})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(wire) <= maxAPIResponseBodyBytes {
+		t.Fatalf("fixture too small: %d bytes", len(wire))
+	}
+	doer := staticConnectorResponseDoer(http.StatusOK, string(wire))
+	c, err := NewClient(BearerToken(testDeviceToken), WithHTTPClient(doer))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.AccessRules(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	c, err = NewClient(BearerToken(testDeviceToken), WithHTTPClient(doer), WithMaxResponseBodyBytes(maxAPIResponseBodyBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.AccessRules(t.Context()); !errors.Is(err, ErrInvalidAPIResponse) {
+		t.Fatalf("explicit cap: %v", err)
 	}
 }
