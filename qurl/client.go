@@ -948,6 +948,8 @@ func (f portalOptionFunc) applyPortalOption(o *portalOptions) error {
 }
 
 type portalOptions struct {
+	notBefore       string
+	expiresAt       string
 	expiresIn       string
 	label           string
 	oneTimeUse      *bool
@@ -989,6 +991,20 @@ func WithLabel(label string) PortalOption {
 			return fmt.Errorf("%w: label must not be empty", ErrInvalidPortalRequest)
 		}
 		o.label = label
+		return nil
+	})
+}
+
+// WithAccessWindow sets when a hosted link for an existing resource can open
+// and when access ends, including active sessions. Use whole-second times.
+// The service can shorten the window to the resource's own expiry.
+func WithAccessWindow(start, end time.Time) PortalOption {
+	return portalOptionFunc(func(o *portalOptions) error {
+		if start.IsZero() || !end.After(start) || start.Nanosecond() != 0 || end.Nanosecond() != 0 {
+			return fmt.Errorf("%w: access window needs a start and a later end, both at whole seconds", ErrInvalidPortalRequest)
+		}
+		o.notBefore = start.UTC().Format(time.RFC3339)
+		o.expiresAt = end.UTC().Format(time.RFC3339)
 		return nil
 	})
 }
@@ -1248,6 +1264,8 @@ func (r createResourceResponse) resource() (*Resource, error) {
 }
 
 type createPortalRequest struct {
+	NotBefore       string `json:"not_before,omitempty"`
+	ExpiresAt       string `json:"expires_at,omitempty"`
 	ExpiresIn       string `json:"expires_in,omitempty"`
 	Label           string `json:"label,omitempty"`
 	OneTimeUse      *bool  `json:"one_time_use,omitempty"`
@@ -1320,6 +1338,8 @@ type apiEnvelope[T any] struct {
 // them; each caller decides what a stated privacy means for its endpoint.
 func (cfg portalOptions) request() createPortalRequest {
 	return createPortalRequest{
+		NotBefore:       cfg.notBefore,
+		ExpiresAt:       cfg.expiresAt,
 		ExpiresIn:       cfg.expiresIn,
 		Label:           cfg.label,
 		OneTimeUse:      cfg.oneTimeUse,
@@ -1340,6 +1360,9 @@ func buildCreatePortalRequest(opts []PortalOption) (createPortalRequest, error) 
 	if cfg.name != "" {
 		return createPortalRequest{}, fmt.Errorf("%w: name is set when a resource is created, and this resource already exists; rename it with UpdatePreview", ErrInvalidPortalRequest)
 	}
+	if cfg.expiresIn != "" && cfg.expiresAt != "" {
+		return createPortalRequest{}, fmt.Errorf("%w: WithAccessWindow cannot be combined with ValidFor", ErrInvalidPortalRequest)
+	}
 	return cfg.request(), nil
 }
 
@@ -1347,6 +1370,9 @@ func buildCreatePortalForURLRequest(targetURL string, opts []PortalOption) (crea
 	cfg, err := applyPortalOptions(opts)
 	if err != nil {
 		return createPortalForURLRequest{}, err
+	}
+	if cfg.notBefore != "" {
+		return createPortalForURLRequest{}, fmt.Errorf("%w: an access window requires an existing resource", ErrInvalidPortalRequest)
 	}
 	if cfg.targetPath != "" {
 		return createPortalForURLRequest{}, fmt.Errorf("%w: target path requires an existing resource", ErrInvalidPortalRequest)
