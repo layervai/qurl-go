@@ -1680,3 +1680,28 @@ func TestClient_CreatePortalLifetimeReceipt(t *testing.T) {
 		})
 	}
 }
+
+func TestHostedPortalAccessWindow(t *testing.T) {
+	start := time.Date(2030, time.January, 2, 16, 0, 0, 0, time.FixedZone("MST", -7*3600))
+	end := start.Add(time.Hour)
+	window := WithAccessWindow(start, end)
+	req, err := buildCreatePortalRequest([]PortalOption{window, OneTimeUse()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req.NotBefore != "2030-01-02T23:00:00Z" || req.ExpiresAt != "2030-01-03T00:00:00Z" || req.ExpiresIn != "" {
+		t.Fatalf("incorrect access window: %+v", req)
+	}
+	for _, opts := range [][]PortalOption{
+		{window, ValidFor(time.Hour)},
+		{WithAccessWindow(end, start)},
+		{WithAccessWindow(start.Add(time.Millisecond), end)},
+	} {
+		if _, err := buildCreatePortalRequest(opts); !errors.Is(err, ErrInvalidPortalRequest) {
+			t.Fatalf("want ErrInvalidPortalRequest, got %v", err)
+		}
+	}
+	if _, err := buildCreatePortalForURLRequest("https://example.com", []PortalOption{window}); !errors.Is(err, ErrInvalidPortalRequest) {
+		t.Fatalf("want ErrInvalidPortalRequest for a new resource, got %v", err)
+	}
+}
