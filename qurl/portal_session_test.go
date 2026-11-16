@@ -356,7 +356,8 @@ func TestPortalNativeUDPRetriesCookieWithSameVisitor(t *testing.T) {
 			requestType:   relayknock.TypeReknock,
 			replyType:     relayknock.TypeACK,
 			reknockCookie: cookie,
-			replyBody:     `{"errCode":"0","sessId":123,"opnTime":30,"redirectUrl":"https://resource.example.com/report","aspToken":"` + testAuthProviderToken + `"}`},
+			replyBody:     `{"errCode":"0","sessId":123,"opnTime":30,"redirectUrl":"https://resource.example.com/report","aspToken":"` + testAuthProviderToken + `"}`,
+		},
 	)
 	var err error
 	cfg.Cells, err = NewCellCatalog([]CellEntry{{
