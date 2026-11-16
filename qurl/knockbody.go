@@ -65,10 +65,10 @@ const (
 // resId = resource_public_key_b64, usrData = the signed claims + issuer signature,
 // taken verbatim from the wire so the server verifies the exact signed bytes.
 func buildKnockBody(frag *Fragment, sessionSecret string) ([]byte, error) {
-	return buildKnockBodyWithRun(frag, sessionSecret, "")
+	return buildKnockBodyWithRun(frag, sessionSecret, "", nhpKNKHeaderType)
 }
 
-func buildKnockBodyWithRun(frag *Fragment, sessionSecret, runID string) ([]byte, error) {
+func buildKnockBodyWithRun(frag *Fragment, sessionSecret, runID string, headerType int) ([]byte, error) {
 	if frag == nil || frag.Claims == nil {
 		return nil, fmt.Errorf("qurl: build knock body: fragment not parsed")
 	}
@@ -81,7 +81,7 @@ func buildKnockBodyWithRun(frag *Fragment, sessionSecret, runID string) ([]byte,
 	}
 	return json.Marshal(agentKnockMsg{
 		RunID: runID, RunAttempt: attempt,
-		HeaderType: nhpKNKHeaderType,
+		HeaderType: headerType,
 		AspID:      qurlAspID,
 		ResID:      frag.Claims.ResourcePublicKeyB64,
 		UsrData: map[string]string{

@@ -346,3 +346,49 @@ func TestPortalSessionNativeUDPLostReplyAndIsolatedReplay(t *testing.T) {
 		t.Fatalf("isolated UDP visitor recovered another session: %v", err)
 	}
 }
+
+func TestPortalNativeUDPRetriesCookieWithSameVisitor(t *testing.T) {
+	peer, link, cfg := newPortalSessionPeer(t, false)
+	cookie := bytes.Repeat([]byte{0x42}, 32)
+	server := newRuntimeUDPServer(t, peer.serverKey.Bytes(), peer.devicePub,
+		runtimeUDPStep{requestType: relayknock.TypeKnock, replyType: relayknock.TypeCookieChallenge, reknockCookie: cookie},
+		runtimeUDPStep{requestType: relayknock.TypeReknock, replyType: relayknock.TypeACK, reknockCookie: cookie,
+			replyBody: `{"errCode":"0","sessId":123,"opnTime":30,"redirectUrl":"https://resource.example.com/report"}`},
+	)
+	var err error
+	cfg.Cells, err = NewCellCatalog([]CellEntry{{
+		ServerPublicKeyB64: peer.fragment.Claims.CellPublicKeyB64,
+		CellID:             "cell0", Host: "cell.example.com", Port: 443,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.nativeUDPOptions = &nativeudp.Options{
+		Resolver: assignmentTestResolverFunc(func(context.Context, string, string) ([]netip.Addr, error) {
+			return []netip.Addr{netip.MustParseAddr("8.8.8.8")}, nil
+		}),
+		Dialer: assignmentTestDialer{target: server.conn.LocalAddr().String()},
+	}
+	handle, err := EnterPortalWith(t.Context(), link, cfg)
+	if err != nil || handle == nil || handle.SessionID != 123 {
+		t.Fatalf("direct visit did not receive its admission: %v", err)
+	}
+	requests := server.snapshot()
+	if len(requests) != 2 {
+		t.Fatalf("got %d requests, want one knock and one retry", len(requests))
+	}
+	var knock, retry agentKnockMsg
+	if err := json.Unmarshal(requests[0].body, &knock); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(requests[1].body, &retry); err != nil {
+		t.Fatal(err)
+	}
+	if knock.HeaderType != nhpKNKHeaderType || retry.HeaderType != nhpRKNHeaderType ||
+		knock.UsrData[visitorCapabilityUserDataKey] == "" ||
+		knock.UsrData[visitorCapabilityUserDataKey] != retry.UsrData[visitorCapabilityUserDataKey] ||
+		knock.UsrData[claimsUserDataKey] != retry.UsrData[claimsUserDataKey] ||
+		knock.UsrData[sigUserDataKey] != retry.UsrData[sigUserDataKey] {
+		t.Fatal("cookie retry must keep the same visitor and signed invitation and use the retry header")
+	}
+}

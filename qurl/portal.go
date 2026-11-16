@@ -378,7 +378,7 @@ func EnterPortalWith(ctx context.Context, qurlLink string, cfg Config) (*Resourc
 			return nil, err
 		}
 	}
-	body, err := buildKnockBodyWithRun(frag, sessionSecret, cleanupRunID)
+	body, err := buildKnockBodyWithRun(frag, sessionSecret, cleanupRunID, nhpKNKHeaderType)
 	if err != nil {
 		return nil, err
 	}
@@ -393,6 +393,10 @@ func EnterPortalWith(ctx context.Context, qurlLink string, cfg Config) (*Resourc
 	// substitute a resource URL, and neither can anything on the UDP path.
 	var reply *relayknock.Reply
 	if useNativeUDP {
+		reknockBody, buildErr := buildKnockBodyWithRun(frag, sessionSecret, cleanupRunID, nhpRKNHeaderType)
+		if buildErr != nil {
+			return nil, buildErr
+		}
 		options := nativeudp.Options{DeviceStaticPriv: devicePriv}
 		if cfg.nativeUDPOptions != nil {
 			// The per-link private key always comes from the verified qURL. Tests may
@@ -403,11 +407,11 @@ func EnterPortalWith(ctx context.Context, qurlLink string, cfg Config) (*Resourc
 			options.Timeout = cfg.nativeUDPOptions.Timeout
 			options.MaxAddresses = cfg.nativeUDPOptions.MaxAddresses
 		}
-		reply, err = nativeudp.Knock(ctx, nativeudp.Endpoint{
+		reply, err = nativeudp.KnockWithReknock(ctx, nativeudp.Endpoint{
 			Host:            cellEndpoint.Host,
 			Port:            cellEndpoint.Port,
 			ServerStaticPub: cellPub,
-		}, body, options)
+		}, body, reknockBody, options)
 	} else {
 		reply, err = relayknock.Knock(ctx, claims.RelayURL, cellPub, body, relayknock.KnockOptions{
 			HTTPClient:       cfg.HTTPClient,
