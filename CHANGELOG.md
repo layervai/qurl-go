@@ -8,6 +8,9 @@ and are marked **Breaking** with what to change.
 
 ## Unreleased
 
+- Direct UDP visitors answer a server cookie challenge with one authenticated
+  retry. The retry keeps the same visitor session and signed invitation.
+
 - Raise the root and `awsstore` Go security floor to 1.26.11 for
   GO-2026-6859 in `net/http`.
 
