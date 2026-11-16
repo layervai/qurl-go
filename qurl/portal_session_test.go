@@ -352,8 +352,11 @@ func TestPortalNativeUDPRetriesCookieWithSameVisitor(t *testing.T) {
 	cookie := bytes.Repeat([]byte{0x42}, 32)
 	server := newRuntimeUDPServer(t, peer.serverKey.Bytes(), peer.devicePub,
 		runtimeUDPStep{requestType: relayknock.TypeKnock, replyType: relayknock.TypeCookieChallenge, reknockCookie: cookie},
-		runtimeUDPStep{requestType: relayknock.TypeReknock, replyType: relayknock.TypeACK, reknockCookie: cookie,
-			replyBody: `{"errCode":"0","sessId":123,"opnTime":30,"redirectUrl":"https://resource.example.com/report","aspToken":"` + testAuthProviderToken + `"}`},
+		runtimeUDPStep{
+			requestType:   relayknock.TypeReknock,
+			replyType:     relayknock.TypeACK,
+			reknockCookie: cookie,
+			replyBody:     `{"errCode":"0","sessId":123,"opnTime":30,"redirectUrl":"https://resource.example.com/report","aspToken":"` + testAuthProviderToken + `"}`},
 	)
 	var err error
 	cfg.Cells, err = NewCellCatalog([]CellEntry{{
