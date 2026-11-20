@@ -484,8 +484,16 @@ including renewing without holding an enrollment credential at runtime and
 [taking manual control](docs/register-an-agent.md#taking-manual-control) of
 renewal.
 
-**Credentials are LayerV-minted tokens** of at least 32 characters. Passwords
-and hand-picked strings are rejected before anything is saved or sent.
+**No-account enrollment.** Use
+`WithAgentRuntimeEnrollmentCredentialProvider(qurl.AnonymousEnrollmentCredential)`
+with `WithAgentRuntimeHeadlessEnrollment()` instead of the account credential and
+OTP options above. Each device keeps its own durable identity. This needs no
+account, API key, or email code. See [no-account device enrollment](docs/register-an-agent.md#no-account-device-enrollment)
+for the private-resource check required before starting the Connector.
+
+**Account and pre-issued credentials are LayerV-minted tokens** of at least 32
+characters. Passwords and hand-picked strings are rejected before anything is
+saved or sent.
 
 > **Network requirements.** Everything the SDK dials is outbound: HTTPS to
 > `api.layerv.ai` for issuing, and NHP over **UDP 443** to LayerV hosts under
