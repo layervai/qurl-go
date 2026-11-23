@@ -126,7 +126,8 @@ And two rules for the serving loop:
 ## No-account device enrollment
 
 For a device that does not need account enrollment, use the built-in anonymous
-credential provider. This path needs no account, API key, or email code:
+credential provider. The authority must support anonymous enrollment. This path
+needs no account, API key, or email code:
 
 ```go
 client, binding, err := qurl.ConnectAgentRuntime(ctx, store,
@@ -503,10 +504,9 @@ Automatic does not mean unchecked. The guarantees behind the behavior above:
 
 ### Publish without an account
 
-Use `WithAgentRuntimeEnrollmentCredentialProvider(qurl.AnonymousEnrollmentCredential)`
-with `WithAgentRuntimeHeadlessEnrollment()` to enroll a device-owned identity.
-The authority must support anonymous enrollment. The provider receives the durable
-public key and agent ID; an interrupted enrollment derives the same request again.
+Use [no-account device enrollment](#no-account-device-enrollment), including its
+private-resource check. The provider receives the durable public key and agent
+ID; an interrupted enrollment derives the same request again.
 The enrollment value is public and grants no REST access. NHP must authenticate
 the matching device key before the authority accepts it. Normal requests use the
 restricted device credential issued after registration.
