@@ -5,62 +5,49 @@
 [![Go 1.26.10+](https://img.shields.io/badge/go-1.26.10%2B-00ADD8)](go.mod)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**Give someone (or an AI agent) a link to something private, from your Go code.**
-[qURL by LayerV](https://layerv.ai/qurl/) turns a private URL (a dashboard, an
-internal API, a preview running on your laptop) into a link you control. You
-choose how long it lasts and how many times it can be used, and you can revoke
-it at any time. The person you send it to just clicks. They need no account
-and no install. Your Go code can also open qURL links it receives.
+**qURL makes apps invisible by default, with zero public port exposure for
+protected apps. Give people and AI agents access only when you choose.**
 
-## What you can do in two minutes
+[qURL™ by LayerV](https://layerv.ai/qurl/) brings this access model to local
+apps and private APIs. Its core protocol, OpenNHP (Network-invisible Handshake
+Protocol), admits each resource before the Connector carries traffic over a
+resource-bound session. A transport connection alone grants no access. qURL
+then enforces the resource's link and session policy for each visitor.
+
+Use this Go SDK to enroll agents, request resource admission, issue and revoke
+access links, and open received links. The [qURL Connector](https://github.com/layervai/qurl-connector)
+runs beside your app and connects outward to LayerV, so the protected app needs
+no public inbound port. The SDK's registration and link calls do not forward
+HTTP or close an existing public route. Close any independent public route if
+qURL should be the app's only access path.
+
+Access links are one way to grant access: choose their lifetime and use count,
+and revoke them when needed. Browser recipients need no SDK installation;
+visitor access policy and the app's own sign-in still apply. Your Go code can
+also open qURL links it receives.
+
+## Control access from Go
 
 | You want to… | Call |
 | --- | --- |
 | Share a private URL for 5 minutes | `client.ProtectURL(ctx, url, qurl.WithName(name))`, then `resource.CreatePortal(ctx, qurl.ValidFor(5*time.Minute))` |
 | Make a link that works once | `resource.CreatePortal(ctx, qurl.ValidFor(time.Hour), qurl.OneTimeUse())` |
 | Cut off one link and keep the rest | `client.RevokePortal(ctx, portal.CRID, portal.QURLID)` |
-| Open a link you received, from Go | `qurl.EnterPortal(ctx, link)` |
-| Open a resource from its CRID alone | `qurl.OpenCRID(ctx, resourceCRID)` |
+| Open a link you received, from Go | `qurl.EnterPortal(ctx, link)`, then [authorize content requests](#opening-links) |
+| Open a public resource from its CRID | `qurl.OpenCRID(ctx, resourceCRID)`; private resources need an [allowed device](#open-by-crid) |
 
 ```sh
 go get github.com/layervai/qurl-go/qurl@latest
 ```
 
-```go
-package main
+The [quickstart](#quickstart) shows the complete Go example. Issuing links needs
+an API key with the `qurl:write` scope and a resource that key can manage.
 
-import (
-	"context"
-	"fmt"
-	"log"
-	"time"
-
-	"github.com/layervai/qurl-go/qurl"
-)
-
-func main() {
-	ctx := context.Background()
-
-	client, err := qurl.OpenClient() // reads QURL_API_KEY; key: https://layerv.ai/qurl/dashboard/keys
-	if err != nil {
-		log.Fatal(err)
-	}
-	resource, err := client.ProtectURL(ctx, "https://internal.example.com/dashboard",
-		qurl.WithName("Team dashboard")) // the name your recipient sees
-	if err != nil {
-		log.Fatal(err)
-	}
-	portal, err := resource.CreatePortal(ctx, qurl.ValidFor(5*time.Minute))
-	if err != nil {
-		log.Fatal(err)
-	}
-	fmt.Println(portal.Link) // send this link
-}
-```
-
-**App on your laptop?** Publish it first with the
-[qURL CLI](https://github.com/layervai/qurl-integrations/tree/main/apps/cli)
-(`qurl publish http://127.0.0.1:3000`, with no account needed). Then issue links here.
+**App on your laptop?** Use the
+[qURL CLI](https://github.com/layervai/qurl-integrations/tree/main/apps/cli),
+which embeds the Connector. Use `qurl share` for links to a CLI-published
+resource. A CLI CRID alone does not give a Go issuer authority over that resource;
+see [sharing a localhost preview](#share-a-localhost-preview-from-go).
 
 ### For AI agents and tools
 
@@ -69,7 +56,7 @@ func main() {
 - Core flow: `ProtectURL(ctx, url, qurl.WithName(...))` → `resource.CreatePortal(ctx, qurl.ValidFor(...))` → `portal.Link`
 - `ProtectURL` is idempotent per account + URL, so it is safe to call again
 - `qurl.WithName` is required whenever a call creates a resource
-- Three roles: issuer (protect URLs, mint and revoke links), recipient (`EnterPortal`, `OpenCRID`, with no LayerV credentials), and agent (`qurl.ConnectAgentRuntime` enrolls a serving agent; [qURL Connector](https://github.com/layervai/qurl-connector) forwards its HTTP traffic). See [How it fits together](#how-it-fits-together).
+- Three roles: issuer (protect URLs, mint and revoke links), recipient (`EnterPortal`, or `OpenCRID` for public resources; private CRID access needs an allowed device), and agent (`qurl.ConnectAgentRuntime` enrolls a serving agent; [qURL Connector](https://github.com/layervai/qurl-connector) forwards its HTTP traffic). See [How it fits together](#how-it-fits-together).
 - Other languages: [TypeScript](https://github.com/layervai/qurl-typescript) ·
   [Python](https://github.com/layervai/qurl-python) · [MCP server](https://github.com/layervai/qurl-mcp)
 
@@ -732,7 +719,7 @@ as an answer.
 ## Security notes
 
 - Treat LayerV credentials, agent state, and qURL links like credentials. Do
-  not log them.
+  not log them. A link label does not prove the holder's identity.
 - Never guess or construct LayerV addresses yourself; use what the SDK
   resolves from your deployment and from authenticated LayerV replies.
 - Keep saved registration state across an unclear reply, and keep the exact
