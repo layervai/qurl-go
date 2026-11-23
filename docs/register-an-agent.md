@@ -1,15 +1,18 @@
 # Connect a service or agent
 
-Your software registers with LayerV once, then serves traffic. Nothing listens on
-a public port, so there is no endpoint for a scanner to find.
+Register your software with LayerV before connection admission. The protected
+app needs no public inbound port. The public qURL access service remains reachable.
+Registration alone does not start the app or forward HTTP; HTTP serving also
+needs the qURL Connector runtime.
 
 The SDK embeds the production Hub trust root, so production needs no deployment
 file. For sandbox or a custom deployment, set `QURL_DEPLOYMENT` to its deployment
 file or pass `WithAgentRuntimeHub`.
 
-## The whole thing
+## Registration and admission
 
-This is a complete service: enroll, publish a resource, accept a connection.
+This example shows account enrollment, resource resolution, and native session
+admission. It does not implement HTTP forwarding.
 
 ```go
 store, err := qurl.OpenFileAgentState("/var/lib/layerv/qurl/agent-state.json")
@@ -120,10 +123,38 @@ And two rules for the serving loop:
   serialized. Server-side recovery closes sessions left behind by a process
   crash.
 
+## No-account device enrollment
+
+For a device that does not need account enrollment, use the built-in anonymous
+credential provider. The authority must support anonymous enrollment. This path
+needs no account, API key, or email code:
+
+```go
+client, binding, err := qurl.ConnectAgentRuntime(ctx, store,
+	qurl.WithAgentRuntimeEnrollmentCredentialProvider(qurl.AnonymousEnrollmentCredential),
+	qurl.WithAgentRuntimeHeadlessEnrollment(),
+	qurl.WithAgentRuntimeMetadata(hostname, version),
+)
+if err != nil {
+	return err
+}
+defer binding.Destroy()
+```
+
+Use a private, durable state file, as in the example above. Each device must keep
+its own identity; do not copy another publisher's credentials or state. The
+anonymous provider returns a public selector bound to the device's Noise key,
+not a bearer credential. Do not log credential values.
+
+Native resource resolution does not return the resource privacy setting. Before
+starting the Connector for a private app, use `client.GetConnectorResource` with
+the exact resolved CRID, confirm the same CRID and public key, and require
+`Private != nil && *Private`. Stop on an error or a missing privacy value.
+Registration and this readback do not forward app traffic.
+
 ## Which enrollment path?
 
-There are two, and the credential LayerV issued you decides which — not
-anything you configure:
+For account or pre-issued credentials, the credential kind selects the path:
 
 | How you got the credential | Path | What you pass |
 |---|---|---|
@@ -153,14 +184,14 @@ Do this with the provider installed. A call with *no* provider stops earlier
 still, with `qurl.ErrAgentOTPRequired` — that check runs before the Hub is
 contacted, so there is no reported kind for it to name.
 
-Either way, the credential must be a LayerV-minted token of at least 32
+For account and pre-issued enrollment, use a LayerV-minted token of at least 32
 characters. Passwords and hand-picked strings are rejected before anything is
 written to disk or sent over the network.
 
 ## The one-time code
 
 Enrollment sends a one-time code to the address on the credential, and your
-callback returns it. This is the default and it is what you should use.
+callback returns it. This is the default for account enrollment.
 
 Nothing about it assumes a human is at a keyboard. Agents increasingly have
 their own mailboxes, and a service account or a shared operations alias is just
@@ -473,10 +504,9 @@ Automatic does not mean unchecked. The guarantees behind the behavior above:
 
 ### Publish without an account
 
-Use `WithAgentRuntimeEnrollmentCredentialProvider(qurl.AnonymousEnrollmentCredential)`
-with `WithAgentRuntimeHeadlessEnrollment()` to enroll a device-owned identity.
-The authority must support anonymous enrollment. The provider receives the durable
-public key and agent ID; an interrupted enrollment derives the same request again.
+Use [no-account device enrollment](#no-account-device-enrollment), including its
+private-resource check. The provider receives the durable public key and agent
+ID; an interrupted enrollment derives the same request again.
 The enrollment value is public and grants no REST access. NHP must authenticate
 the matching device key before the authority accepts it. Normal requests use the
 restricted device credential issued after registration.
