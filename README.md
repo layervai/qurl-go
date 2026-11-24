@@ -555,6 +555,14 @@ operation requires a nil cell catalog and a relay allowlist (see
 Use an HTTP client without a cookie jar, or ensure its jar does not add the
 reserved `qurl_vsession` cookie after `AuthorizeContentRequest` runs.
 
+For a custom MCP client, the same admission and request authorization can carry
+requests to an existing Streamable HTTP server. See the
+[private localhost MCP workflow](https://layerv.ai/for-agents/private-localhost-access-for-ai-agents/#local-mcp-server)
+for the owner setup and a recorded initialize, tool-list, and echo-call check.
+That check used CLI 4.7.0 with both processes on one Mac. It does not establish
+hosted ChatGPT or Claude compatibility, SSE, or full MCP conformance. qURL does
+not convert a stdio server into an HTTP server.
+
 The opener trust configuration — which issuer keys to verify links against and
 which cells to reach — resolves most specific first: a `Provider` installed
 with `SetDefaultProvider`, then a JSON file named by `QURL_DEPLOYMENT`, then
