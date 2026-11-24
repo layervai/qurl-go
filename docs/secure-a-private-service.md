@@ -73,12 +73,26 @@ if err != nil {
 	return err
 }
 
-resp, err := httpClient.Get(handle.ResourceURL) // httpClient is your own *http.Client
+req, err := http.NewRequestWithContext(ctx, http.MethodGet, handle.ResourceURL, nil)
+if err != nil {
+	return err
+}
+if err := handle.AuthorizeContentRequest(req); err != nil {
+	return err
+}
+httpClient := &http.Client{
+	CheckRedirect: handle.CheckContentRedirect,
+}
+resp, err := httpClient.Do(req)
 if err != nil {
 	return err
 }
 defer resp.Body.Close()
 ```
+
+Use a client without a cookie jar. `AuthorizeContentRequest` adds the app-session
+cookie only for the granted HTTPS origin. `CheckContentRedirect` reauthorizes
+same-origin redirects and refuses other origins.
 
 `handle.OpenSeconds` reports how long access stays open, as reported by qURL
 (0 when not provided). `EnterPortal` verifies the link before asking qURL for
